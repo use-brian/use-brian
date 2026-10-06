@@ -86,7 +86,13 @@ export class NativeComputer {
       if (generation !== this.generation) return EMPTY;
       // A reply begun before observed cleanup cannot restore old status/targets,
       // even if a newer poll has already confirmed that cleanup finished.
-      if ((auxiliary || acknowledgment) && cleanupRevision !== this.cleanupRevision) return EMPTY;
+      if ((auxiliary || acknowledgment) && cleanupRevision !== this.cleanupRevision) {
+        // Permission setup intentionally stops discovery. A poll may observe that
+        // teardown before main confirms the request was delivered. Acknowledge
+        // only delivery; never restore any pre-cleanup status or authority.
+        if (message.type === "permissions" && result.ok && result.cleanupPending === false) return { ok: true };
+        return EMPTY;
+      }
       if (result.cleanupPending) {
         ++this.cleanupRevision;
         this.publish({ ok: result.ok, cleanupPending: true });

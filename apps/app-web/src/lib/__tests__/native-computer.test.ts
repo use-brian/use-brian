@@ -228,6 +228,41 @@ it.each(["status", "targets"] as const)("[COMP:app-web/native-computer] stale %s
   }
 });
 
+it.each([false, true])("[COMP:app-web/native-computer] confirms permission delivery across cleanup without restoring scope (poll finished=%s)", async cleared => {
+  let finish!: (result: DesktopComputerControlResult) => void;
+  const control = vi.fn<ComputerControl>().mockImplementationOnce(() => new Promise(resolve => { finish = resolve; }));
+  const owner = new NativeComputer(() => control);
+  const request = owner.send({ type: "permissions", permission: "accessibility" });
+  control.mockResolvedValueOnce({ ok: true, cleanupPending: true }); await owner.check();
+  if (cleared) { control.mockResolvedValueOnce({ ok: true, cleanupPending: false }); await owner.check(); }
+  const clean = owner.snapshot();
+  finish({ ok: true, cleanupPending: false, targets: [input.target], profileConnected: true,
+    inspection: { id: 'old', capturedAt: 1, completeness: 'complete', nodes: [] } });
+  expect(await request).toEqual({ ok: true });
+  expect(owner.snapshot()).toBe(clean);
+});
+it.each([
+  { ok: false, cleanupPending: false }, { ok: true }, { ok: true, cleanupPending: true },
+])("[COMP:app-web/native-computer] refuses unconfirmed permission delivery across cleanup: %j", async result => {
+  let finish!: (result: DesktopComputerControlResult) => void;
+  const control = vi.fn<ComputerControl>().mockImplementationOnce(() => new Promise(resolve => { finish = resolve; }));
+  const owner = new NativeComputer(() => control);
+  const request = owner.send({ type: "permissions" });
+  control.mockResolvedValueOnce({ ok: true, cleanupPending: true }); await owner.check();
+  const clean = owner.snapshot(); finish(result);
+  expect(await request).toEqual({ ok: false }); expect(owner.snapshot()).toBe(clean);
+});
+it.each(["stop", "workspace"])("[COMP:app-web/native-computer] permission delivery cannot bypass %s invalidation", async boundary => {
+  let finish!: (result: DesktopComputerControlResult) => void;
+  const control = vi.fn<ComputerControl>().mockImplementationOnce(() => new Promise(resolve => { finish = resolve; }));
+  const owner = new NativeComputer(() => control);
+  const request = owner.send({ type: "permissions" });
+  control.mockResolvedValue({ ok: true, cleanupPending: true }); await owner.check();
+  if (boundary === "stop") await owner.stop(); else await owner.enter("other");
+  const clean = owner.snapshot(); finish({ ok: true, cleanupPending: false });
+  expect(await request).toEqual({ ok: false }); expect(owner.snapshot()).toBe(clean);
+});
+
 it("[COMP:app-web/native-computer] acknowledgment is explicit, unsupported fails closed, and native decline never confirms", async () => {
   const control = vi.fn<ComputerControl>().mockResolvedValue({ ok: true });
   const owner = new NativeComputer(() => control);

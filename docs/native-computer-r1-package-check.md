@@ -70,11 +70,13 @@ This is one concrete package regression check, not a general observer/attestatio
      version="$(/usr/libexec/PlistBuddy -c 'Print :CFBundleShortVersionString' "$app/Contents/Info.plist")"
      [ "$version" = "0.0.12" ] || { echo "STOP: expected test package 0.0.12, got $version"; exit 1; }
      echo "Launching test package $version from $app"
-     USEBRIAN_DISABLE_AUTO_UPDATE=1 "$app/Contents/MacOS/Use Brian"
+     open -n -W --env USEBRIAN_DISABLE_AUTO_UPDATE=1 \
+       --stdout "$test_dir/native-computer.stdout.log" \
+       --stderr "$test_dir/native-computer.stderr.log" "$app"
    )
    ```
 
-   The version assertion applies to this recorded 0.0.12 handoff. Keep the terminal open during the check; do not post its entire logs. No installed app, account data or existing build artifact is deleted or overwritten. For a freshly built, unmodified app, the same direct executable launch with that environment option suffices.
+   The version assertion applies to this recorded 0.0.12 handoff. Keep the terminal open during the check; do not post its entire logs. No installed app, account data or existing build artifact is deleted or overwritten. For a freshly built, unmodified app, use the same Launch Services invocation with that environment option; direct terminal execution can change macOS permission attribution.
 3. Confirm **About Use Brian** matches the test version and the existing browser surface opens.
 4. In **This computer**, click **Check Mac helper readiness** once. Expect the packaged-helper admission message while native control remains unavailable.
 

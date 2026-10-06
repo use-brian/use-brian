@@ -6,7 +6,7 @@ import type { NativeControllerOptions, NativeApprovalContext } from '../computer
 import type { NativeCommand, NativeGrant, NativeStatus, NativeCapabilities } from '@use-brian/computer-control/protocol.js'
 
 const mocks = vi.hoisted(() => ({ directory: '', files: new Set<string>(), launches: [] as any[], helperArgs: [] as any[], helpers: [] as any[], leases: [] as any[], controllers: [] as any[], relays: [] as any[], indicators: [] as any[], ready: async (_signal: AbortSignal): Promise<unknown> => undefined,
-  readinessCaps: {} as unknown, readinessDeath: Promise.resolve() as Promise<void> }))
+  readinessCaps: {} as unknown, readinessDeath: Promise.resolve() as Promise<void>, readinessFailure: false }))
 vi.mock('node:fs', async importOriginal => {
   const actual = await importOriginal<typeof import('node:fs')>()
   return { ...actual, statSync: vi.fn((file: string) => { if (!mocks.files.has(file)) throw new Error('missing'); return { isFile: () => true } }),
@@ -55,7 +55,7 @@ vi.mock('../computer-control/index.js', () => ({
   PrivatePipeHelper: class {
     constructor(spec: unknown, onDeath: unknown, timeout: unknown, timing: unknown) { mocks.launches.push(spec); mocks.helperArgs.push([spec, onDeath, timeout, timing]); mocks.helpers.push(this) }
     readinessDiagnostics = vi.fn(() => ({ requestTimedOut: false, exitObserved: true, exitCode: 77, exitSignal: null, spawnFailed: false }))
-    capabilities = vi.fn(async () => mocks.readinessCaps)
+    capabilities = vi.fn(async () => { if (mocks.readinessFailure) throw new Error('PRIVATE_ADMISSION_ERROR'); return mocks.readinessCaps })
     kill = vi.fn(() => mocks.readinessDeath)
   },
   LocalDeviceLease: class {
@@ -91,6 +91,8 @@ beforeEach(() => {
   mocks.controllers.length = 0; mocks.relays.length = 0; mocks.indicators.length = 0; requests.length = 0; pairingBlocked = false
   mocks.ready = async () => {}
   mocks.helpers.length = 0; mocks.leases.length = 0; mocks.readinessDeath = Promise.resolve()
+  mocks.readinessFailure = false
+  vi.mocked(systemPreferences.isTrustedAccessibilityClient).mockReset().mockReturnValue(false)
   mocks.readinessCaps = { protocol: 'native-computer-v1', platform: 'darwin', axRead: false, semanticActions: false, windowCapture: false, input: false,
     accessibilityPermission: 'unknown', capturePermission: 'unknown', limitations: ['Operational acceptance pending.'] }
   auth = { userId: uuid(5), accessToken: 'private-access-token', apiUrl: 'https://api.example', accountKey: 'account-one' }
@@ -119,6 +121,11 @@ async function discover() {
   return integration.handle({ type: 'targets' })
 }
 const controller = () => mocks.controllers.at(-1)!
+function enablePackagedPermissions() {
+  Object.defineProperty(app, 'isPackaged', { value: true, configurable: true })
+  Object.defineProperty(process, 'resourcesPath', { value: '/signed/Use Brian.app/Contents/Resources', configurable: true })
+  mocks.files.add('/signed/Use Brian.app/Contents/Resources/computer-control/brian-native-computer-helper')
+}
 
 describe('task result notices', () => {
   async function runResponse(response: Promise<Response>) {
@@ -188,7 +195,7 @@ describe('task result notices', () => {
   })
 })
 
-describe('trusted main native computer setup', () => {
+describe('[COMP:desktop/native-permissions] trusted main native computer setup', () => {
   async function packagedReadiness() {
     await integration.stop()
     vi.stubEnv('NATIVE_COMPUTER_ENABLED', 'false'); vi.stubEnv('NATIVE_COMPUTER_PILOT_ACCEPTED', 'false')
@@ -335,6 +342,7 @@ describe('trusted main native computer setup', () => {
     expect(mocks.controllers).toHaveLength(count); expect(mocks.relays).toHaveLength(0)
     expect(mocks.helpers).toHaveLength(1)
     expect(mocks.helpers[0].capabilities).toHaveBeenCalledOnce()
+    expect(systemPreferences.isTrustedAccessibilityClient).not.toHaveBeenCalled()
     expect(mocks.leases.at(-1).acquire).toHaveBeenCalledOnce()
     expect(mocks.leases.at(-1).release).toHaveBeenCalledOnce()
     expect(mocks.helpers[0].kill.mock.invocationCallOrder[0]).toBeLessThan(mocks.leases.at(-1).release.mock.invocationCallOrder[0])
@@ -392,14 +400,16 @@ describe('trusted main native computer setup', () => {
     }
   })
 
-  it.each(['accessibility', 'screen-recording'] as const)('%s settings require consent and only open the exact pane without OS prompts', async permission => {
+  it('Screen Recording settings require consent and only open the exact pane without OS prompts', async () => {
+    const permission = 'screen-recording' as const
     await discover()
     vi.mocked(dialog.showMessageBox).mockClear(); vi.mocked(shell.openExternal).mockClear()
     vi.mocked(systemPreferences.isTrustedAccessibilityClient).mockClear()
     expect(await integration.handle({ type: 'permissions', permission })).toMatchObject({ ok: true })
-    expect(dialog.showMessageBox).toHaveBeenCalledWith(expect.objectContaining({ message: `Open ${permission === 'accessibility' ? 'Accessibility' : 'Screen Recording'} settings?`, defaultId: 0, cancelId: 0 }))
+    expect(dialog.showMessageBox).toHaveBeenCalledWith(expect.objectContaining({ message: 'Open Screen Recording settings?', defaultId: 0, cancelId: 0 }))
     expect(shell.openExternal).toHaveBeenCalledOnce()
-    expect(shell.openExternal).toHaveBeenCalledWith(`x-apple.systempreferences:com.apple.preference.security?${permission === 'accessibility' ? 'Privacy_Accessibility' : 'Privacy_ScreenCapture'}`)
+    expect(shell.openExternal).toHaveBeenCalledWith('x-apple.systempreferences:com.apple.preference.security?Privacy_ScreenCapture')
+    expect(mocks.helpers).toHaveLength(0)
     expect(systemPreferences.isTrustedAccessibilityClient).not.toHaveBeenCalled()
     expect(controller().start).not.toHaveBeenCalled()
     expect(fetchMock).not.toHaveBeenCalled()
@@ -407,6 +417,7 @@ describe('trusted main native computer setup', () => {
 
   it.each(['accessibility', 'screen-recording'] as const)('%s cancellation opens nothing and does not start or stop a session', async permission => {
     await discover()
+    enablePackagedPermissions()
     const current = controller()
     vi.mocked(shell.openExternal).mockClear()
     vi.mocked(dialog.showMessageBox).mockResolvedValueOnce({ response: 0, checkboxChecked: false })
@@ -414,6 +425,95 @@ describe('trusted main native computer setup', () => {
     expect(shell.openExternal).not.toHaveBeenCalled()
     expect(current.identityChanged).not.toHaveBeenCalled()
     expect(current.start).not.toHaveBeenCalled()
+    expect(mocks.helpers).toHaveLength(0)
+  })
+
+  it.each([false, true])('[COMP:desktop/native-permissions] requests from persistent main after existing cleanup, without a new helper; current trust=%s', async granted => {
+    await discover(); enablePackagedPermissions()
+    vi.mocked(systemPreferences.isTrustedAccessibilityClient).mockReturnValue(granted)
+    const current = controller(), leaseCount = mocks.leases.length
+    vi.mocked(shell.openExternal).mockClear()
+    expect(await integration.handle({ type: 'permissions', permission: 'accessibility' })).toMatchObject({ ok: true, status: { state: 'stopped' } })
+    expect(systemPreferences.isTrustedAccessibilityClient).toHaveBeenCalledExactlyOnceWith(true)
+    expect(current.identityChanged.mock.invocationCallOrder[0]).toBeLessThan(vi.mocked(systemPreferences.isTrustedAccessibilityClient).mock.invocationCallOrder[0])
+    expect(vi.mocked(systemPreferences.isTrustedAccessibilityClient).mock.invocationCallOrder[0]).toBeLessThan(vi.mocked(shell.openExternal).mock.invocationCallOrder[0])
+    expect(shell.openExternal).toHaveBeenCalledWith('x-apple.systempreferences:com.apple.preference.security?Privacy_Accessibility')
+    expect(mocks.helpers).toHaveLength(0); expect(mocks.leases).toHaveLength(leaseCount)
+    expect(current.start).not.toHaveBeenCalled(); expect(fetchMock).not.toHaveBeenCalled()
+  })
+
+  it('[COMP:desktop/native-permissions] refuses development Electron before local consent or an OS request', async () => {
+    vi.mocked(dialog.showMessageBox).mockClear()
+    expect(await integration.handle({ type: 'permissions' })).toMatchObject({ ok: false })
+    expect(dialog.showMessageBox).not.toHaveBeenCalled()
+    expect(systemPreferences.isTrustedAccessibilityClient).not.toHaveBeenCalled()
+  })
+
+  it.each(['missing-helper', 'rejected-helper', 'rollout-disabled', 'shortcut-unavailable'] as const)('[COMP:desktop/native-permissions] %s cannot prevent requesting the prerequisite Accessibility permission', async failure => {
+    enablePackagedPermissions()
+    if (failure === 'missing-helper') mocks.files.clear()
+    if (failure === 'rejected-helper') mocks.readinessFailure = true
+    if (failure === 'rollout-disabled') {
+      vi.stubEnv('NATIVE_COMPUTER_ENABLED', 'false'); vi.stubEnv('NATIVE_COMPUTER_INSPECTOR_ENABLED', 'false')
+    }
+    if (failure === 'shortcut-unavailable') vi.mocked(globalShortcut.register).mockReturnValueOnce(false)
+    integration = new NativeComputerIntegration({ directory: mocks.directory, getAuth: async () => auth }); integration.install()
+    vi.mocked(shell.openExternal).mockClear()
+    expect(await integration.handle({ type: 'permissions' })).toMatchObject({ ok: true })
+    expect(systemPreferences.isTrustedAccessibilityClient).toHaveBeenCalledExactlyOnceWith(true)
+    expect(shell.openExternal).toHaveBeenCalledOnce()
+    expect(mocks.helpers).toHaveLength(0); expect(fetchMock).not.toHaveBeenCalled()
+    if (failure === 'rollout-disabled' || failure === 'shortcut-unavailable') {
+      expect(await integration.handle({ type: 'targets' })).toMatchObject({ ok: false })
+    }
+  })
+
+  it.each(['account', 'logout', 'workspace', 'stop'] as const)('Accessibility consent cannot survive %s', async change => {
+    await discover(); enablePackagedPermissions()
+    const consent = deferred<{ response: number; checkboxChecked: boolean }>()
+    vi.mocked(dialog.showMessageBox).mockReturnValueOnce(consent.promise)
+    vi.mocked(shell.openExternal).mockClear()
+    const setting = integration.handle({ type: 'permissions' })
+    await vi.waitFor(() => expect(dialog.showMessageBox).toHaveBeenCalled())
+    if (change === 'account') auth = { ...auth!, accountKey: 'replacement' }
+    if (change === 'logout') auth = null
+    if (change === 'workspace') await integration.handle({ type: 'workspace-changed', workspaceId: uuid(99) })
+    if (change === 'stop') await integration.stop()
+    consent.resolve({ response: 1, checkboxChecked: false })
+    expect(await setting).toMatchObject({ ok: false })
+    expect(systemPreferences.isTrustedAccessibilityClient).not.toHaveBeenCalled()
+    expect(shell.openExternal).not.toHaveBeenCalled()
+  })
+
+  it.each(['account', 'logout', 'workspace', 'stop'] as const)('[COMP:desktop/native-permissions] revalidates %s after existing helper shutdown', async change => {
+    await discover(); enablePackagedPermissions()
+    const current = controller(), death = deferred<void>()
+    current.identityChanged.mockImplementation(() => { current.state = 'stopped'; return death.promise })
+    vi.mocked(shell.openExternal).mockClear()
+    const setting = integration.handle({ type: 'permissions' })
+    await vi.waitFor(() => expect(current.identityChanged).toHaveBeenCalled())
+    expect(systemPreferences.isTrustedAccessibilityClient).not.toHaveBeenCalled()
+    if (change === 'account') auth = { ...auth!, accountKey: 'replacement' }
+    if (change === 'logout') auth = null
+    if (change === 'workspace') await integration.handle({ type: 'workspace-changed', workspaceId: uuid(99) })
+    if (change === 'stop') await integration.handle({ type: 'stop' })
+    expect(await integration.handle({ type: 'permissions' })).toMatchObject({ ok: false, cleanupPending: true })
+    death.resolve()
+    expect(await setting).toMatchObject({ ok: false })
+    expect(systemPreferences.isTrustedAccessibilityClient).not.toHaveBeenCalled()
+    expect(shell.openExternal).not.toHaveBeenCalled()
+  })
+
+  it('[COMP:desktop/native-permissions] a failed OS request does not open settings, leak the exception or retry', async () => {
+    enablePackagedPermissions()
+    vi.mocked(systemPreferences.isTrustedAccessibilityClient).mockImplementation(() => { throw new Error('PRIVATE_ERROR') })
+    vi.mocked(shell.openExternal).mockClear()
+    const warning = vi.spyOn(console, 'warn').mockImplementation(() => {})
+    const result = await integration.handle({ type: 'permissions' })
+    expect(result).toMatchObject({ ok: false }); expect(JSON.stringify(result)).not.toContain('PRIVATE_')
+    expect(JSON.stringify(warning.mock.calls)).not.toContain('PRIVATE_')
+    expect(systemPreferences.isTrustedAccessibilityClient).toHaveBeenCalledOnce()
+    expect(shell.openExternal).not.toHaveBeenCalled()
   })
 
   it.each(['account', 'logout', 'workspace', 'stop', 'active'] as const)('rejects stale Screen Recording consent after %s changes', async change => {
@@ -459,6 +559,7 @@ describe('trusted main native computer setup', () => {
 
   it('permission setup clears old selection and waits for helper death before opening settings', async () => {
     await discover()
+    enablePackagedPermissions()
     const current = controller(), death = deferred<void>()
     current.identityChanged.mockImplementationOnce(() => { current.state = 'stopped'; return death.promise })
     vi.mocked(shell.openExternal).mockClear()
@@ -1194,6 +1295,7 @@ describe('durable profile connection and fresh chat leases', () => {
   })
   it('keeps the explicit permission settings path usable after a TCC refusal', async () => {
     const controller = await setupProfile()
+    enablePackagedPermissions()
     controller.caps.accessibilityPermission = 'denied'
     expect(await integration.handle(connect)).toMatchObject({ status: { state: 'permission_required' } })
     expect(await integration.handle({ type: 'permissions', permission: 'accessibility' })).toMatchObject({ ok: true })

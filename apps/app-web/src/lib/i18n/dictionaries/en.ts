@@ -97,7 +97,7 @@ export const en = {
     "intro": "Let Brian work in one selected app on this computer. Nothing starts automatically.",
     "unavailable": "Available only in the desktop app with the native computer pilot enabled and supported local safety controls. Ask your administrator if setup is unavailable.",
     "permissionHelp": "Allow Accessibility in system settings. Screen capture is optional and needs a separate permission.",
-    "permissions": "Open Mac Accessibility settings",
+    "permissions": "Request Mac Accessibility permission",
     screenRecordingSettings: "Open Mac Screen Recording settings",
     supportedScope: "When enabled: TextEdit inspection and non-secret text assignment; supported fixture forms, selection, scrolling and menus. The read-only inspector never runs a model or captures screenshots.",
     "stop": "Stop",

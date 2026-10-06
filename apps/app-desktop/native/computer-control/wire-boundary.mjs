@@ -65,6 +65,7 @@ assert(!capsSource.includes('diagnostics'), 'Never modify public capabilities re
 assert(capsSource.includes('CGPreflightScreenCaptureAccess()'));
 assert(capsSource.includes('"windowCapture": ready && captureReady'));
 assert(!helper.includes('CGRequestScreenCaptureAccess'), 'No permission prompt in any path');
+assert(!helper.includes('AXIsProcessTrustedWithOptions'), 'Accessibility requests belong to persistent Electron main, never the helper');
 const mainSource = helper.slice(helper.indexOf('guard let trust = ProcessTrust()'));
 assert(mainSource.includes('let sourceClock = SourceClock()'));
 assert(mainSource.includes('let dispatcher = ObservationDispatcher { Broker(trust: trust) }'));
@@ -190,6 +191,7 @@ for (const action of actions) {
 }
 function request(name, value, expected) { vectors.push({ kind: 'request', name, value, expected }); }
 const envelope = (method, payload) => ({ id: 'request', method, payload });
+request('permission requests are main-only, never private helper commands', envelope('requestAccessibility', {}), false);
 for (const [method, payload] of [['start', { grant, leaseId: 'lease' }], ['execute', { command, leaseId: 'lease' }],
   ['beginApproval', { command, leaseId: 'lease' }], ['endApproval', { command, leaseId: 'lease', approved: true }],
   ['capabilities', {}], ['listTargets', {}]]) {

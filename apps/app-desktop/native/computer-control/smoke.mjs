@@ -40,6 +40,7 @@ if (process.argv.includes('--portable')) {
   assert(helper.includes('"input": false'))
   const entry = helper.slice(helper.indexOf('guard let trust = ProcessTrust()'))
   assert(entry.includes('let dispatcher = ObservationDispatcher { Broker(trust: trust) }'))
+  assert(!helper.includes('AXIsProcessTrustedWithOptions'), 'Accessibility requests belong to persistent Electron main, never the helper');
   assert(entry.indexOf('guard trust.parentValid()') < entry.indexOf('dispatcher.response('))
   assert(helper.includes('guard supportedGrant(payload), grant == nil'))
   assert(helper.includes('guard supportedExecution(command) else { return result("denied") }'))

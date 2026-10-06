@@ -98,7 +98,7 @@ The Swift commands perform **syntax parsing only**, without AppKit type/API chec
 
 ### Parent trust and smoke limitations
 
-The helper exits **77 before protocol output** unless its inherited pipe parent is the signed `ai.usebrian.desktop` main executable, with the same non-root real/effective/saved UID and the same Apple-issued signing team as the signed helper. Unsigned, ad-hoc, shell/Node and generic Electron parents cannot obtain discovery, grants, AX effects or capture. There is no environment/dev bypass or new permission prompt.
+The helper exits **77 before protocol output** unless its inherited pipe parent is the signed `ai.usebrian.desktop` main executable, with the same non-root real/effective/saved UID and the same Apple-issued signing team as the signed helper. Unsigned, ad-hoc, shell/Node and generic Electron parents cannot obtain discovery, grants, AX effects, capture or permission prompts. There is no environment/dev bypass or automatic permission prompt. Explicit Accessibility setup confirms existing helper teardown, then requests permission from the persistent Electron main process without spawning an admission helper; see [the setup contract](../../../../docs/native-computer-r1-inspector.md#boundary).
 
 Identity comes from kernel `proc_pidinfo`/`proc_pidpath` (credentials, executable and process birth), then Security’s PID guest lookup, **dynamic** `SecCodeCheckValidity`, static seal validation, signed main-executable URL and signing requirements. Canonical executable paths must have this exact relationship (installation directory may vary):
 

@@ -2,7 +2,7 @@ import { createHash, randomBytes, randomUUID } from 'node:crypto'
 import { readFileSync, writeFileSync, accessSync, statSync, constants } from 'node:fs'
 import { join, posix, win32 } from 'node:path'
 import { z } from 'zod'
-import { app, BrowserWindow, dialog, globalShortcut, ipcMain, powerMonitor, screen, shell } from 'electron'
+import { app, BrowserWindow, dialog, globalShortcut, ipcMain, powerMonitor, screen, shell, systemPreferences } from 'electron'
 import { NativeComputerController, NativeRelayClient, PrivatePipeHelper, LocalDeviceLease } from './computer-control/index.js'
 import { CapabilitiesSchema, CommandSchema, TaskIdentitySchema, ProfileIdentitySchema, ProfileGrantSchema, TargetSchema, DiscoveredTargetSchema, NATIVE_PROTOCOL, MAX_SESSION_MS, sameIdentity, sameTarget, type NativeGrant, type NativeCommand, type NativeStatus, type DiscoveredTarget } from '@use-brian/computer-control/protocol.js'
 
@@ -70,7 +70,7 @@ export type NativeIntegrationOptions = {
 /** Owns native authority in main. UI receives neither grants nor PKCE/token material. */
 export class NativeComputerIntegration {
   private controller?: NativeComputerController
-  private readinessHelper?: PrivatePipeHelper
+  private setupHelper?: PrivatePipeHelper
   private relay?: NativeRelayClient
   private indicator?: BrowserWindow
   private activity: NativeActivity | null = null
@@ -197,7 +197,7 @@ export class NativeComputerIntegration {
       if (generation !== this.generation) return { ok: false }
       stage = 'spawn'
       helper = new PrivatePipeHelper(this.helperLaunch(), () => {})
-      this.readinessHelper = helper
+      this.setupHelper = helper
       stage = 'capabilities'
       const advertised = await helper.capabilities()
       stage = 'validation'
@@ -216,7 +216,7 @@ export class NativeComputerIntegration {
       // busy fence. Stop remains able to signal the retained helper independently.
       if (helper) await this.trackCleanup(() => helper!.kill())
       if (acquired) await this.trackCleanup(() => lease.release())
-      if (this.readinessHelper === helper) this.readinessHelper = undefined
+      if (this.setupHelper === helper) this.setupHelper = undefined
       this.busy = false
     }
     return generation === this.generation ? result : { ok: false }
@@ -409,12 +409,12 @@ export class NativeComputerIntegration {
     // Conservatively forget private grant data on every integration-level Stop.
     if (this.controller) this.terminalControllers.add(this.controller)
     const shutdown = this.controller && this.trackCleanup(() => this.controller!.identityChanged())
-    const readinessShutdown = this.readinessHelper && this.trackCleanup(() => this.readinessHelper!.kill())
+    const setupShutdown = this.setupHelper && this.trackCleanup(() => this.setupHelper!.kill())
     const relay = this.relay; this.relay = undefined; relay?.disconnect()
     const active = this.session; this.session = undefined
     // Local Stop never waits for a network revocation.
     if (active) void this.request(active.auth, `/sessions/${active.id}`, 'DELETE', undefined, AbortSignal.timeout(5000)).catch(() => {})
-    await Promise.all([shutdown, readinessShutdown])
+    await Promise.all([shutdown, setupShutdown])
   }
   private profilePermissionsGranted(caps: NativeStatus['capabilities'], requested: { allowControl: boolean; allowCapture: boolean }): boolean {
     return caps.axRead && caps.accessibilityPermission === 'granted' &&
@@ -723,7 +723,7 @@ export class NativeComputerIntegration {
     if (this.teardown.size) return { ok: input.type === 'status' }
     if (this.profile && (input.type === 'check-readiness' || input.type === 'acknowledge-verification')) return { ok: false }
     if (input.type === 'check-readiness') return this.checkReadiness()
-    if (!this.enabled || !this.ready) return { ok: false, error: 'Native control unavailable' }
+    if (input.type !== 'permissions' && (!this.enabled || !this.ready)) return { ok: false, error: 'Native control unavailable' }
     if (!this.controlEnabled && !this.inspectorEnabled && !this.verificationAllowed() &&
       ['start', 'resume'].includes(input.type)) return { ok: false, error: 'Native control unavailable' }
     if ((input.type === 'start' || input.type === 'resume') &&
@@ -782,8 +782,11 @@ export class NativeComputerIntegration {
         }
         if (process.platform !== 'darwin') return { ok: false, error: 'Configure desktop accessibility locally; readiness is checked by the helper.' }
         // Renderer supplies a closed permission name, never a URL. Omitted name
-        // preserves the legacy Accessibility request without triggering an OS prompt.
+        // preserves the legacy Accessibility setup request.
         const permission = input.permission ?? 'accessibility'
+        if (permission === 'accessibility' && !app.isPackaged) {
+          return { ok: false, error: 'Accessibility permission requests require the signed macOS desktop package.' }
+        }
         const destination = permission === 'accessibility'
           ? 'x-apple.systempreferences:com.apple.preference.security?Privacy_Accessibility'
           : 'x-apple.systempreferences:com.apple.preference.security?Privacy_ScreenCapture'
@@ -797,8 +800,10 @@ export class NativeComputerIntegration {
           const fresh = await this.readAuth(AbortSignal.any([this.requests.signal, AbortSignal.timeout(5000)]))
           return current(expectedGeneration) && !!fresh && this.authKey(fresh) === authIdentity
         }
-        const allowed = await this.consent(`Open ${label} settings?`,
-          `Open only the macOS ${label} settings pane. Change permissions there yourself only if intended. Screen Recording is optional and separate from Accessibility. This does not request an OS permission prompt, capture the screen, or start control.`, this.requests.signal)
+        const allowed = await this.consent(permission === 'accessibility' ? 'Request Accessibility permission?' : `Open ${label} settings?`,
+          permission === 'accessibility'
+            ? 'Request macOS Accessibility permission for Use Brian, then open Accessibility settings. Enable Use Brian there to allow computer use. macOS may suppress a repeated permission dialog. This stops any existing connection and does not read windows, capture the screen or start control.'
+            : 'Open only the macOS Screen Recording settings pane. Change permissions there yourself only if intended. Screen Recording is optional and separate from Accessibility. This does not request an OS permission prompt, capture the screen, or start control.', this.requests.signal)
         if (!allowed) return { ok: false }
         if (!current(generation) || !await revalidate(generation) || !current(generation)) return { ok: false }
         // Permission changes require fresh helper/target identities. Revalidate
@@ -807,6 +812,13 @@ export class NativeComputerIntegration {
         completionGeneration = this.generation
         await shutdown
         if (!current(completionGeneration) || !await revalidate(completionGeneration) || !current(completionGeneration)) return { ok: false }
+        if (permission === 'accessibility') {
+          // macOS schedules the prompt asynchronously. Request from the signed
+          // application that remains alive, never from a helper we immediately
+          // kill. Its boolean is current trust, not completion or a control grant.
+          const currentlyTrusted = systemPreferences.isTrustedAccessibilityClient(true)
+          console.info('[native-computer] accessibility request issued', { currentlyTrusted })
+        }
         await shell.openExternal(destination)
         return { ok: true, status: this.controller?.status() }
       }
@@ -917,6 +929,7 @@ export class NativeComputerIntegration {
       ).catch(() => {})
       return { ok: true, status: this.controller.status(), deviceId: this.deviceId }
     } catch (error) {
+      if (input.type === 'permissions') console.warn('[native-computer] permission setup failed')
       const profileErrorCode = input.type === 'connect-profile' && completionGeneration === this.generation &&
         error instanceof NativeBackendRequestError ? error.code : undefined
       // A late failure from an invalidated request must not stop a newer scope.

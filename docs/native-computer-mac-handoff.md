@@ -12,16 +12,20 @@ Continue only after **Done**. Quit the old Use Brian instance. Use the ZIP path 
 zip='/paste/the/printed/path/usebrian.zip'
 check_dir="$(mktemp -d)"
 ditto -x -k "$zip" "$check_dir" && \
-  USEBRIAN_DISABLE_AUTO_UPDATE=1 NATIVE_COMPUTER_ENABLED=true \
-  NATIVE_COMPUTER_INSPECTOR_ENABLED=true "$check_dir/Use Brian.app/Contents/MacOS/Use Brian"
+  open -n --env USEBRIAN_DISABLE_AUTO_UPDATE=1 \
+  --env NATIVE_COMPUTER_ENABLED=true --env NATIVE_COMPUTER_INSPECTOR_ENABLED=true \
+  --stdout "$check_dir/native-computer.stdout.log" \
+  --stderr "$check_dir/native-computer.stderr.log" "$check_dir/Use Brian.app"
 ```
+
+Launch the `.app` through Launch Services (`open`), not its `Contents/MacOS` executable from a terminal. macOS responsibility tracking can attribute directly launched children to the terminal; see [Apple's explanation](https://developer.apple.com/forums/thread/125438) and [Qt's reproduction](https://www.qt.io/blog/the-curious-case-of-the-responsible-process). This is a possible explanation for the operator's missing Use Brian entry, not a verified TCC result for that run. `open --env` preserves the explicit test flags without changing login-session environment. Quit the previous instance first so the single-instance lock does not redirect to it. Read only the `[native-computer]` lines in the two local log files; do not upload full logs.
 
 The connected API must also run this branch with normal migrations, including `622_computer_profiles.sql`. A desktop rebuild does not update a remote API. Profile creation does not require native execution to be enabled. If loading or connecting fails, the page now distinguishes API compatibility, missing schema, sign-in/access, and execution availability; Mac permission changes do not fix those backend failures.
 
 ## Use it
 
 1. Open **This computer** and create a named profile. No assistant/chat/task/goal picker is required.
-2. Grant Accessibility if needed, click **Refresh windows** and select a disposable TextEdit window, enable control and click **Connect computer**. Approve the native dialog. With control off, the button performs a local read-only inspection instead.
+2. Click **Request Mac Accessibility permission** if needed, approve the local setup dialog and grant Accessibility to Use Brian in macOS settings. macOS may suppress a repeated prompt; the settings pane still opens. Refresh windows afterward so a fresh helper checks the actual permission. Return, click **Refresh windows** and select a disposable TextEdit window, enable control and click **Connect computer**. Approve the native dialog. With control off, the button performs a local read-only inspection instead.
 3. In your assistant's **Tools**, enable its computer-use permission and grant it this computer profile.
 4. In a normal chat with that assistant, ask: **Use my computer profile to replace the TextEdit document with Hello team.** Approve the chat's local window grant and each proposed edit. Check the actual document.
 5. Ask it to release the computer. In another chat, request access again: expect fresh local consent, without creating a task or reconnecting the profile.

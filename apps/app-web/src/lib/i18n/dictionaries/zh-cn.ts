@@ -95,7 +95,7 @@ export const zhCN: Dictionary = {
     "intro": "让 Brian 在这台电脑的指定应用中工作。不会自动启动。",
     "unavailable": "仅限已启用原生电脑试用功能及支持本机安全控制的桌面应用。无法设置时请联系管理员。",
     "permissionHelp": "请在系统设置中允许辅助功能。屏幕截图为可选功能，需要单独授权。",
-    "permissions": "打开 Mac 辅助功能设置",
+    "permissions": "请求 Mac 辅助功能权限",
     screenRecordingSettings: "打开 Mac 屏幕录制设置",
     supportedScope: "启用后：TextEdit 检查及非机密文本设置，以及支持的测试程序表单、选择、滚动及菜单操作。只读检查器不执行模型或截图。",
     "stop": "停止",

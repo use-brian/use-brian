@@ -84,7 +84,7 @@ export const zh: Dictionary = {
     "intro": "讓 Brian 在這台電腦的指定應用程式中工作。不會自動啟動。",
     "unavailable": "僅限已啟用原生電腦試用功能及支援本機安全控制的桌面應用程式。無法設定時請聯絡管理員。",
     "permissionHelp": "請在系統設定中允許輔助使用。螢幕擷取為選用功能，需要另外授權。",
-    "permissions": "開啟 Mac 輔助使用設定",
+    "permissions": "請求 Mac 輔助使用權限",
     screenRecordingSettings: "開啟 Mac 螢幕錄製設定",
     supportedScope: "啟用後：TextEdit 檢查及非機密文字設定，以及支援的測試程式表單、選取、捲動及選單操作。唯讀檢查器不執行模型或截圖。",
     "stop": "停止",
