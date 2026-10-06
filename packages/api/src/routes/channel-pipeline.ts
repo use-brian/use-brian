@@ -2562,13 +2562,7 @@ async function processChannelMessageTurn(params: ChannelPipelineParams): Promise
         inputTokenLimit: customLlmRuntime?.inputTokenLimit,
       },
       candidateTools: allTools,
-      bindTools: (candidateTools, execution) => bindToolsToAgentAccess(candidateTools, {
-        clearance: execution.security.access.clearance,
-        compartments: execution.security.access.compartments,
-        mutationCompartments: execution.security.access.mutationCompartments,
-        projectIds: execution.security.access.projectIds,
-        sharedAudience: execution.security.access.sharedAudience,
-      }),
+      bindTools: (candidateTools, execution) => bindToolsToAgentAccess(candidateTools, execution.security.access),
       trustedContributions: [{ name: 'runtime', content: runtimeSystemContext }],
       userVisibleContributions: [{ name: 'turn', content: userVisibleContext }],
     })

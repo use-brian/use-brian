@@ -87,6 +87,7 @@ function boundTurnScope(
     ...scope,
     access: {
       ...scope.access,
+      ...(bounded.departmentRead ? { departmentRead: bounded.departmentRead } : {}),
       clearance: bounded.clearance,
       compartments: bounded.compartments,
       mutationCompartments: bounded.mutationCompartments,

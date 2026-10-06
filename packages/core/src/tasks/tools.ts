@@ -192,7 +192,9 @@ function ctxFor(context: {
   mutationCompartments?: AccessContext['mutationCompartments']
   visibilityAssistantIds?: AccessContext['visibilityAssistantIds']
   projectIds?: AccessContext['projectIds']
+  executionContext?: ToolContext['executionContext']
 }): AccessContext {
+  if (context.executionContext) return context.executionContext.security.access
   return {
     workspaceId: context.workspaceId,
     userId: context.userId,
@@ -560,15 +562,7 @@ export function createTaskTools(
       if (gate) return gate
 
       const task = await store.getById(
-        ctxFor({
-          userId: context.userId,
-          assistantId: context.assistantId,
-          workspaceId: context.workspaceId!,
-          assistantKind: context.assistantKind,
-          clearance: context.clearance,
-          compartments: context.compartments,
-          projectIds: context.projectIds,
-        }),
+        ctxFor({...context, workspaceId: context.workspaceId!}),
         input.id,
       )
       if (!task || task.workspaceId !== context.workspaceId) {
@@ -605,15 +599,7 @@ export function createTaskTools(
       if (gate) return gate
 
       const rows = await store.list(
-        ctxFor({
-          userId: context.userId,
-          assistantId: context.assistantId,
-          workspaceId: context.workspaceId!,
-          assistantKind: context.assistantKind,
-          clearance: context.clearance,
-          compartments: context.compartments,
-          projectIds: context.projectIds,
-        }),
+        ctxFor({...context, workspaceId: context.workspaceId!}),
         {
           assigneeId: input.assignee_id,
           status: input.status,
@@ -915,15 +901,7 @@ export function createTaskTools(
       ? statuses.includes('archived')
       : statuses === 'archived'
     let rows = await store.list(
-      ctxFor({
-        userId: context.userId,
-        assistantId: context.assistantId,
-        workspaceId: context.workspaceId!,
-        assistantKind: context.assistantKind,
-        clearance: context.clearance,
-        compartments: context.compartments,
-        projectIds: context.projectIds,
-      }),
+      ctxFor({...context, workspaceId: context.workspaceId!}),
       {
         assigneeId: filter.assignee_id,
         status: filter.status,

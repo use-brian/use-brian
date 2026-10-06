@@ -50,7 +50,7 @@ export function scopeEvidenceFailureOf(error: unknown): ScopeEvidenceFailure | u
 function visibilityFailure(scope: ResourceScope, ceiling: AccessCeiling): ScopeEvidenceFailure | null {
   if (scope.workspaceId !== ceiling.workspaceId) return 'workspace'
   if (scope.userId !== null && scope.userId !== ceiling.userId) return 'user_visibility'
-  if (scope.assistantId !== null && !scopeGrantContains(ceiling.visibilityAssistantIds, [scope.assistantId])) {
+  if (!ceiling.departmentRead && scope.assistantId !== null && !scopeGrantContains(ceiling.visibilityAssistantIds, [scope.assistantId])) {
     return 'assistant_visibility'
   }
   return null
@@ -60,6 +60,17 @@ function labelFailure(
   labels: Pick<ResourceScope, 'sensitivity' | 'compartments' | 'projectIds'>,
   ceiling: AccessCeiling,
 ): ScopeEvidenceFailure | null {
+  const v2=ceiling.departmentRead
+  if(v2){
+    const departments=labels.compartments.filter(label=>label.startsWith('team:')).map(label=>label.slice(5))
+    if(departments.some(id=>!Object.hasOwn(v2.departments,id)
+      || v2.contextDepartment!==null && v2.contextDepartment!==id
+      || v2.binding!==null && !v2.binding.includes(id)))return 'teams'
+    if(RANK[labels.sensitivity]>RANK[v2.cap??'confidential']
+      || (departments.length===0 ? RANK[labels.sensitivity]>RANK[v2.base]
+        : departments.some(id=>RANK[labels.sensitivity]>RANK[v2.departments[id]])))return 'clearance'
+    return null
+  }
   if (RANK[labels.sensitivity] > RANK[ceiling.clearance]) return 'clearance'
   if (!scopeGrantContains(ceiling.compartments, labels.compartments)) return 'teams'
   if (!scopeGrantContains(ceiling.projectIds, labels.projectIds)) return 'projects'
@@ -92,7 +103,7 @@ async function validateScopeEvidence(
   // same user's rows other assistants own, which no single row can represent
   // (scoped-context.md -> "Reading is not deriving").
   const sources = snapshot.sources ?? []
-  for (const source of sources) failure ??= visibilityFailure(source, ceiling)
+  for (const source of sources) failure ??= visibilityFailure(source, ceiling) ?? labelFailure(source, ceiling)
   failure ??= labelFailure({
     sensitivity: snapshot.sensitivity ?? 'public',
     compartments: snapshot.compartments ?? [],

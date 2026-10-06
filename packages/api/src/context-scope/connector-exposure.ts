@@ -11,7 +11,7 @@
  * [COMP:api/connector-context]
  */
 
-import { intersectScopeGrants, scopeGrantContains, type ScopeGrant } from '@use-brian/core'
+import { intersectScopeGrants, scopeGrantContains, type ScopeGrant, type DepartmentReadGrant } from '@use-brian/core'
 import { currentAgentAccess } from '../db/agent-access-context.js'
 
 export type ConnectorContextBinding = {
@@ -23,7 +23,7 @@ export type ConnectorTurnGrant = {
   effectiveCompartments: ScopeGrant
   effectiveProjectIds: ScopeGrant
   /** Present on the canonical TurnScope. Missing preserves legacy membership reach. */
-  access?: { mutationCompartments?: ScopeGrant }
+  access?: { mutationCompartments?: ScopeGrant; departmentRead?: DepartmentReadGrant }
 }
 
 function axisAudienceAllowed(
@@ -43,6 +43,22 @@ export function connectorExposureAllowed(
   if (!turn && !ambient) return true
   // A clearance-only agent wrapper is not authority to access live connectors.
   if (ambient && ambient.compartments === undefined) return false
+  // V2 membership is an independent floor. Legacy owner/admin universe
+  // reach must not turn a missing human or assistant department edge into access.
+  const grants = [turn?.access?.departmentRead, ambient?.departmentRead].filter(
+    (grant): grant is DepartmentReadGrant => grant !== undefined,
+  )
+  if (grants.length === 2 && (grants[0].workspaceId !== grants[1].workspaceId
+    || grants[0].userId !== grants[1].userId)) return false
+  for (const grant of grants) {
+    if (!binding.compartments.every((label) => {
+      if (!label.startsWith('team:')) return false
+      const department = label.slice(5)
+      return Object.hasOwn(grant.departments, department)
+        && (grant.contextDepartment === null || grant.contextDepartment === department)
+        && (grant.binding === null || grant.binding.includes(department))
+    })) return false
+  }
   const read = intersectScopeGrants(
     turn?.effectiveCompartments ?? null,
     ambient ? ambient.compartments ?? null : null,
