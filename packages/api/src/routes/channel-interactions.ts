@@ -60,10 +60,14 @@ export const channelConfirmations = new ChannelInteractions()
 export type { ChannelInteractionScope }
 
 /** Business content is shared; adapters choose native actions or readable replies. */
-export function confirmationMessage(request: Omit<ToolConfirmationRequest, 'classification'>): OutgoingMessage {
+export function confirmationMessage(request: Omit<ToolConfirmationRequest, 'classification'>,
+  options?: { compactDetails?: boolean }): OutgoingMessage {
   const details = request.displayLines?.join('\n') || formatConfirmationInput(request.input).join('\n') || request.description || ''
+  const title = getToolDisplayName(request.toolName)
+  const question = `Allow this action?\nReply: approve / deny${request.allowPersistentApproval ? ' / always allow / always deny' : ''}`
   return {
-    text: `**${getToolDisplayName(request.toolName)}**\n\n${details}\n\nAllow this action?\nReply: approve / deny${request.allowPersistentApproval ? ' / always allow / always deny' : ''}`,
+    text: options?.compactDetails ? `${title}\n\n${question}` : `**${title}**\n\n${details}\n\n${question}`,
+    ...(options?.compactDetails && details ? { collapsibleDetails: `Watch more\n${details}` } : {}),
     format: 'markdown',
     actions: buildConfirmationActions(request.toolCallId, request.allowPersistentApproval).map(action => ({
       ...action, replyText: action.id === 'always' ? 'always allow' : action.id === 'never' ? 'always deny' : action.id,

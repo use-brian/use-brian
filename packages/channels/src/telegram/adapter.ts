@@ -1,8 +1,8 @@
 import { denormalizeActions } from '../actions.js'
 import type { ChannelAdapter, IncomingFile, IncomingMessage, OutgoingAction, OutgoingMessage } from '../types.js'
-import { chunkText } from '../chunking.js'
 import { createTelegramApi, isTelegramThreadNotFoundError, type TelegramApi } from './api.js'
 import { markdownToTelegramHTML, stripMarkdown } from './markdown.js'
+import { prepareTelegramMessages } from './presentation.js'
 
 // ── Telegram webhook types ─────────────────────────────────────
 
@@ -288,6 +288,8 @@ export type TelegramAdapterOptions = {
 export function createTelegramAdapter(options: TelegramAdapterOptions): ChannelAdapter & {
   handleWebhook(payload: unknown): void
   answerCallbackQuery(id: string, opts?: { text?: string }): Promise<void>
+  /** Change buttons without modifying the message's text or expandable details. */
+  setMessageActions(channelId: string, messageId: string, actions: OutgoingAction[]): Promise<void>
   /**
    * Download a Telegram voice note by `file_id` and return `{ buffer, mime }`.
    *
@@ -961,13 +963,12 @@ export function createTelegramAdapter(options: TelegramAdapterOptions): ChannelA
       const topicId = outboundThreadId(messageThreadId)
       // Telegram rejects empty text with a 400 — a documents-only send
       // skips the text loop entirely and returns the first document's id.
-      const chunks = response.text.trim()
-        ? chunkText(response.text, TELEGRAM_MAX_MESSAGE_LENGTH)
-        : []
+      const chunks = prepareTelegramMessages(response, TELEGRAM_MAX_MESSAGE_LENGTH)
       let lastMessageId = 0
       const replyToId = discussionRootId ?? (opts?.threadTs ? Number(opts.threadTs) : undefined)
 
       for (let i = 0; i < chunks.length; i++) {
+        const chunk = chunks[i]
         const isLast = i === chunks.length - 1
         const replyMarkup = isLast && response.actions?.length
           ? { inline_keyboard: buildInlineKeyboard(response.actions) }
@@ -975,36 +976,45 @@ export function createTelegramAdapter(options: TelegramAdapterOptions): ChannelA
 
         try {
           // Only quote-reply on the first chunk
-          lastMessageId = await sendWithMarkdownFallback(
-            api,
-            chatId,
-            chunks[i],
-            response.format,
-            discussionRootId ?? (i === 0 ? replyToId : undefined),
-            topicId,
-          )
+          if (chunk.html) {
+            try {
+              const result = await sendMessageWithThreadFallback(api, chatId, chunk.html, {
+                parseMode: 'HTML', replyToMessageId: discussionRootId ?? (i === 0 ? replyToId : undefined), messageThreadId: topicId,
+              })
+              lastMessageId = result.message_id
+            } catch {
+              // Older API servers may not support expandable quotes. Unfold safely.
+              const result = await sendMessageWithThreadFallback(api, chatId, chunk.text, {
+                replyToMessageId: discussionRootId ?? (i === 0 ? replyToId : undefined), messageThreadId: topicId,
+              })
+              lastMessageId = result.message_id
+            }
+          } else {
+            lastMessageId = await sendWithMarkdownFallback(
+              api,
+              chatId,
+              chunk.text,
+              response.format,
+              discussionRootId ?? (i === 0 ? replyToId : undefined),
+              topicId,
+            )
+          }
         } catch (err) {
           // Mid-chunk failure: earlier chunks have already landed, so a silent
           // truncation would leave the user with half a reply and no way to
           // tell. Mark the last successful chunk before re-throwing so the
           // caller's error path still runs. See adapter-pattern.md § 7.
           if (i > 0 && lastMessageId > 0) {
-            const truncated = chunks[i - 1] + '\n\n— message cut off, reply to continue'
+            const truncated = chunks[i - 1].text + '\n\n— message cut off, reply to continue'
             await api.editMessageText(chatId, lastMessageId, truncated).catch(() => {})
           }
           throw err
         }
 
         if (replyMarkup) {
-          // Re-send last chunk with buttons (Telegram needs them on the message itself)
+          // Preserve the exact rendered text and entities while attaching buttons.
           try {
-            const body = response.format === 'markdown'
-              ? markdownToTelegramHTML(chunks[i])
-              : chunks[i]
-            await api.editMessageText(chatId, lastMessageId, body, {
-              parseMode: response.format === 'markdown' ? 'HTML' : undefined,
-              replyMarkup,
-            })
+            await api.editMessageReplyMarkup(chatId, lastMessageId, replyMarkup)
           } catch {
             // The text alternative was already delivered; buttons are best-effort.
           }
@@ -1057,12 +1067,16 @@ export function createTelegramAdapter(options: TelegramAdapterOptions): ChannelA
       response = denormalizeActions(response)
       // editMessageText is keyed by (chat_id, message_id) — no message_thread_id.
       const { chatId } = parseTopicChannelId(channelId)
-      const raw = response.text.slice(0, TELEGRAM_MAX_MESSAGE_LENGTH)
+      const prepared = response.collapsibleDetails
+        ? prepareTelegramMessages(response, TELEGRAM_MAX_MESSAGE_LENGTH)[0]
+        : { text: response.text.slice(0, TELEGRAM_MAX_MESSAGE_LENGTH), html: undefined }
+      if (!prepared) return
+      const raw = prepared.text
       const isMarkdown = response.format === 'markdown'
-      const body = isMarkdown ? markdownToTelegramHTML(raw) : raw
+      const body = prepared.html ?? (isMarkdown ? markdownToTelegramHTML(raw) : raw)
       try {
         await api.editMessageText(chatId, Number(messageId), body, {
-          parseMode: isMarkdown ? 'HTML' : undefined,
+          parseMode: prepared.html || isMarkdown ? 'HTML' : undefined,
           ...(response.actions ? { replyMarkup: { inline_keyboard: buildInlineKeyboard(response.actions) } } : {}),
         })
       } catch {
@@ -1075,6 +1089,11 @@ export function createTelegramAdapter(options: TelegramAdapterOptions): ChannelA
           }
         }
       }
+    },
+
+    async setMessageActions(channelId: string, messageId: string, actions: OutgoingAction[]): Promise<void> {
+      const { chatId } = parseTopicChannelId(channelId)
+      await api.editMessageReplyMarkup(chatId, Number(messageId), { inline_keyboard: buildInlineKeyboard(actions) })
     },
 
     async sendTypingIndicator(channelId: string): Promise<void> {

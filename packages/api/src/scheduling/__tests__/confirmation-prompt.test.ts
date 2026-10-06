@@ -38,7 +38,7 @@ const mockCreateCustomAdapter = vi.mocked(createCustomAdapter)
 /** The slice of the channel adapter's `sendMessage` this module exercises. */
 type SendMessage = (
   channelId: string,
-  msg: { text: string; actions?: { id: string; label: string; data: string }[] },
+  msg: { text: string; collapsibleDetails?: string; actions?: { id: string; label: string; data: string }[] },
 ) => Promise<void>
 
 /** Minimal `ChannelIntegrationStore` — only the one method this module reads. */
@@ -149,6 +149,9 @@ describe('[COMP:scheduling/confirmation-prompt] sendConfirmationPrompt', () => {
     expect(sendMessage).toHaveBeenCalledOnce()
     const msg = sendMessage.mock.calls[0][1]
     expect(msg.actions?.map((a) => a.id)).toEqual(['allow', 'deny'])
+    expect(msg.text).toContain('Allow this action?')
+    expect(msg.collapsibleDetails).toContain('Watch more')
+    expect(msg.collapsibleDetails).toContain('a@b.com')
   })
 
   it('adds Always Allow / Always Deny when allowPersistentApproval is set', async () => {
