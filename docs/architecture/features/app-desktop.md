@@ -1,5 +1,9 @@
 # Desktop packaging
 
+## Native computer consent delivery
+
+The profile and chat consent contract is specified in [native computer use](../../native-computer-use.md). Main owns polling, fresh target selection, grant approval and pairing. A stale selected target requires a new explicit window selection. If a healthy, ready helper returns no windows, main offers one locally initiated Refresh windows while retaining the pending request. Cancel disconnects; Stop and scope changes abort the prompt. Refresh performs one fresh discovery, checks account/workspace again, and requires explicit selection followed by separate grant approval. It never substitutes the cached window, retries an unavailable helper, or repeats discovery automatically. If the fresh scan is still empty, normal failure cleanup applies. A request failure before or after grant approval disconnects and presents a fixed local explanation after confirmed cleanup and fresh account/workspace checks. Stop, account/workspace changes and explicit denial suppress that notification. Stage diagnostics contain only fixed stage names, backend error codes and booleans. Neither a queued request nor a diagnostics event grants access.
+
 ## Build, sign, ship (macOS)
 
 `scripts/package-desktop.sh` owns the local release build, renderer/native/Siri compilation, Developer ID signing, verification and optional publication. Each build reserves a fresh `release/runs/mac-*` output directory, leaving old artifacts untouched. The output allocator must work through macOS temporary-directory symlinks as well as canonical paths; an empty output is never a successful reservation. Failure never labels a previous ZIP as this run's result.

@@ -581,13 +581,13 @@ export class NativeComputerIntegration {
       if (generation === this.generation) await this.stop().catch(() => {})
     }
   }
-  /** Opaque window IDs die with the helper. A new chat explicitly selects a new
-   * canonical discovery target, never matches old labels or resurrects old IDs. */
-  private async selectReleasedProfileTarget(targets: DiscoveredTarget[], requester: string, conversationId: string, signal: AbortSignal): Promise<DiscoveredTarget | undefined> {
+  /** Opaque window IDs can disappear during discovery or die with the helper.
+   * Fresh selection never matches old labels or resurrects old IDs. */
+  private async selectProfileTarget(targets: DiscoveredTarget[], requester: string, conversationId: string, signal: AbortSignal): Promise<DiscoveredTarget | undefined> {
     const choices = targets.slice(0, 20)
     if (!choices.length || signal.aborted) return undefined
-    const selected = await dialog.showMessageBox({ type: 'warning', title: 'This computer', message: 'Select a window for this new chat lease',
-      detail: `Requester (data): ${JSON.stringify(requester)}\nConversation (data): ${JSON.stringify(conversationId)}\nThe previous lease ended. Select a current window, then review fresh local permission consent.`,
+    const selected = await dialog.showMessageBox({ type: 'warning', title: 'This computer', message: 'Select a current window for this chat',
+      detail: `Requester (data): ${JSON.stringify(requester)}\nConversation (data): ${JSON.stringify(conversationId)}\nThe previous window selection is no longer current. Select a window, then review fresh local permission consent.`,
       buttons: ['Cancel', ...choices.map((target, i) => `${i + 1}: ${JSON.stringify(target.displayName ?? target.appId)} (PID ${target.processId})`)],
       defaultId: 0, cancelId: 0, noLink: true, signal })
     return !signal.aborted && selected.response > 0 ? choices[selected.response - 1] : undefined
@@ -622,6 +622,8 @@ export class NativeComputerIntegration {
     }
     let acceptedId: string | undefined
     let requestId: string | undefined
+    let stage = 'poll'
+    let localDeclined = false
     try {
       const auth = await current()
       const pending = ProfilePollSchema.parse(
@@ -630,25 +632,56 @@ export class NativeComputerIntegration {
       if (!pending.request) return
       const request = pending.request
       requestId = request.id
+      console.info('[native-computer] chat consent received')
+      stage = 'scope'
       if (request.workspaceId !== profile.workspaceId) throw new Error('Wrong request scope')
       if (this.session) return
       if (!this.controlEnabled && !this.verificationAllowed()) {
+        stage = 'verification'
         if (!this.verificationAvailable || !await this.consent('Allow attended packaged Mac verification?',
-          'This is verification before pilot acceptance, not production rollout. Stay present and review every action. The previous session consent was cleared. Only Accessibility-backed actions are supported; Stop revokes further work best-effort.', signal)) throw new Error('Verification declined')
+          'This is verification before pilot acceptance, not production rollout. Stay present and review every action. The previous session consent was cleared. Only Accessibility-backed actions are supported; Stop revokes further work best-effort.', signal)) {
+          localDeclined = this.verificationAvailable
+          throw new Error('Verification declined')
+        }
         await current()
         this.verificationConsent = { generation, workspaceId: profile.workspaceId, authIdentity: this.authKey(auth) }
       }
       const controller = this.controller!
-      const targets = await controller.listTargets()
+      stage = 'targets'
+      let targets = await controller.listTargets()
       await current()
-      const target = profile.target ? targets.find(t => sameTarget(t, profile.target!)) :
-        await this.selectReleasedProfileTarget(targets, request.requester, request.conversationId, signal)
+      stage = 'selection'
+      let refreshed = false
+      const status = controller.status()
+      if (!targets.length && status.state === 'ready' && status.capabilities.axRead && status.capabilities.accessibilityPermission === 'granted') {
+        const choice = await dialog.showMessageBox({ type: 'warning', title: 'This computer', message: 'No supported window is available for this chat',
+          detail: 'Open or unhide a normal TextEdit document and make it available on this desktop. Refresh windows performs one new scan; you must then select a window and approve chat access separately.',
+          buttons: ['Cancel', 'Refresh windows'], defaultId: 0, cancelId: 0, noLink: true, signal })
+        await current()
+        localDeclined = choice.response !== 1
+        if (localDeclined) throw new Error('Window refresh declined')
+        const refreshedStatus = controller.status()
+        if (this.controller !== controller || refreshedStatus.state !== 'ready' || !refreshedStatus.capabilities.axRead || refreshedStatus.capabilities.accessibilityPermission !== 'granted') throw new Error('Helper unavailable')
+        // This is a new local discovery request, never an automatic retry of
+        // unavailable execution or permission to reuse the cached target.
+        stage = 'targets'
+        targets = await controller.listTargets()
+        await current()
+        stage = 'selection'
+        refreshed = true
+      }
+      let target = !refreshed && profile.target ? targets.find(t => sameTarget(t, profile.target!)) : undefined
+      if (!target && targets.length) {
+        target = await this.selectProfileTarget(targets, request.requester, request.conversationId, signal)
+        localDeclined = !target && !signal.aborted
+      }
       await current()
       if (!target) throw new Error('Target changed or selection declined')
       profile.target = target
       this.selection = targets
       const verifier = randomBytes(32).toString('base64url')
       const challenge = createHash('sha256').update(verifier).digest('base64url')
+      stage = 'accept'
       const accepted = z.object({ protocol: z.literal(NATIVE_PROTOCOL), identity: ProfileIdentitySchema.extend({ sessionId: z.string().uuid() }), expiresAt: z.number().int().positive(), state: z.literal('awaiting_local_consent') }).strict().parse(
         await this.request(auth, `/profiles/${profile.id}/requests/${request.id}/accept`, 'POST', { connectionId: profile.connectionId, challenge }))
       acceptedId = accepted.identity.sessionId
@@ -658,19 +691,49 @@ export class NativeComputerIntegration {
       this.session = { id: identity.sessionId, auth }
       const grant = ProfileGrantSchema.parse({ protocol: NATIVE_PROTOCOL, identity, purpose: 'chat-tools', requester: request.requester,
         epoch: ++this.epoch, grantId: randomUUID(), expiresAt: Math.min(accepted.expiresAt, Date.now() + MAX_SESSION_MS - 1000), targets: [TargetSchema.parse({ appId: target.appId, processId: target.processId, processInstanceId: target.processInstanceId, windowId: target.windowId, windowInstanceId: target.windowInstanceId })], allowControl: profile.allowControl, allowCapture: profile.allowCapture })
+      stage = 'grant'
+      console.info('[native-computer] chat consent requesting approval')
       await controller.start(grant)
       await current()
+      stage = 'exchange'
       const paired = z.object({ token: z.string(), relayUrl: z.string(), expiresAt: z.number() }).strict().parse(await this.request(auth, `/sessions/${identity.sessionId}/exchange`, 'POST', { verifier, grant }))
       await current()
       this.relay = new NativeRelayClient(controller, identity)
+      stage = 'relay'
       this.relay.connect(paired.relayUrl, paired.token)
       await this.relay.waitUntilReady(signal)
       await current()
+      console.info('[native-computer] chat consent completed')
       // Chat tools dispatch separately. Never launch a task or /run here.
-    } catch {
+    } catch (error) {
+      localDeclined ||= stage === 'grant' && error instanceof Error && error.message === 'Local consent denied'
+      console.info('[native-computer] chat consent failed', {
+        stage, requestReceived: !!requestId, localDeclined, cancelled: signal.aborted || generation !== this.generation,
+        failure: error instanceof NativeBackendRequestError ? error.code : 'unavailable',
+      })
       if (acceptedId && acceptedId !== this.retiredSessionId) void this.request(profile.auth, `/sessions/${acceptedId}`, 'DELETE', undefined, AbortSignal.timeout(5000)).catch(() => {})
       if (requestId && (!acceptedId || acceptedId !== this.retiredSessionId)) void this.request(profile.auth, `/profiles/${profile.id}/requests/${requestId}/deny`, 'POST', { connectionId: profile.connectionId }, AbortSignal.timeout(5000)).catch(() => {})
-      if (generation === this.generation) await this.stop().catch(() => {})
+      if (generation === this.generation) {
+        const notify = !!requestId && !signal.aborted && !localDeclined
+        const shutdown = this.stop()
+        const stoppedGeneration = this.generation
+        await shutdown.catch(() => {})
+        if (notify && stoppedGeneration === this.generation && !this.teardown.size && this.workspaceId === profile.workspaceId) {
+          const noticeSignal = AbortSignal.any([this.requests.signal, AbortSignal.timeout(5000)])
+          const fresh = await this.readAuth(noticeSignal).catch(() => null)
+          if (!noticeSignal.aborted && stoppedGeneration === this.generation && fresh && this.authKey(fresh) === this.authKey(profile.auth)) {
+            const detail = stage === 'targets' || stage === 'selection'
+              ? 'The selected window is no longer available. Open a supported TextEdit document, refresh windows, select it and connect the profile again.'
+              : stage === 'accept' || stage === 'scope' || error instanceof NativeBackendRequestError
+                ? 'The backend could not complete this chat access request. Check the connection, sign-in and assistant profile access, then connect the profile again.'
+                : stage === 'relay' || stage === 'exchange'
+                  ? 'The chat connection could not be established. Check that the computer relay is reachable, then connect the profile again.'
+                  : 'The local access request could not complete. Check helper readiness and system permissions, then connect the profile again.'
+            void dialog.showMessageBox({ type: 'error', title: 'This computer', message: 'Computer access request failed', detail,
+              buttons: ['OK'], defaultId: 0, cancelId: 0, noLink: true, signal: this.requests.signal }).catch(() => {})
+          }
+        }
+      }
     } finally { this.pollingProfile = false; this.busy = false }
   }
   private async request(auth: Auth, path: string, method: string, body?: unknown, signal = this.requests.signal): Promise<unknown> {
