@@ -63,6 +63,8 @@ export const zhCN: Dictionary = {
   nativeComputer: {
     refreshWindows: "刷新窗口",
     windowsNotChecked: "尚未检查窗口。请刷新以查找可用窗口。",
+    discoveryFailed: "窗口发现失败。请检查 Mac 辅助程序就绪状态与辅助功能权限，再刷新窗口。",
+    supportedWindows: "支持的窗口：普通 TextEdit 文档与已签名的测试程序。请关闭附加的对话框或表单。",
     verificationAcknowledge: "申请有人监督的 Mac 验证",
     verificationHelp: "此为临时验证，不代表试行验收或正式上线认证。请全程在场。必须由 Mac 原生对话框批准。停止、切换工作区或账号及结束会话会撤销批准；已发出的操作仍可能完成。仍需任务与目标同意。",
     verificationConfirmed: "此上下文的 Mac 验证已获批准。控制与截图仍须分别启用。",
@@ -74,8 +76,15 @@ export const zhCN: Dictionary = {
 
     checkReadiness: "检查 Mac 辅助程序就绪状态",
     cleanupPending: "尚未确认清理完成。清理完成前无法使用原生电脑访问。仍可使用停止。",
+    readinessPending: "正在检查 Mac 辅助程序启动…",
     readinessPassed: "打包辅助程序准入检查已通过。这不会启用控制，也不会验证 AX 任务。",
     readinessFailed: "无法确认打包辅助程序的准入状态。",
+    readinessErrors: {
+      startup_timeout: "Mac 辅助程序启动超时，尚未到达权限请求。",
+      startup_refused: "Mac 辅助程序拒绝启动验证。请检查已签名的应用程序包；更改辅助功能权限无法修复此问题。",
+      spawn_failed: "无法启动 Mac 辅助程序，请检查已安装的应用程序包。",
+      unavailable: "无法确认 Mac 辅助程序的就绪状态，请检查应用程序启动日志。",
+    },
 
     inspectorTitle: "AX 检查器",
     inspectorHelp: "只读 AX 检查器：会话配对并在本机同意后，读取所选窗口一次，然后自动结束会话。不执行模型任务、输入或截图。",

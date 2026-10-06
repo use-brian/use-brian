@@ -111,6 +111,78 @@ it("[COMP:app-web/native-computer] cancels creation dialog on workspace change",
   await act(async () => pending.resolve("Old name"));
   expect(vi.mocked(authFetch).mock.calls.some(([, init]) => init?.method === "POST")).toBe(false);
 });
+it("[COMP:app-web/native-computer] failed background discovery stops focus retries and lets explicit setup proceed", async () => {
+  desktop(); const pending = deferred<DesktopComputerControlResult>();
+  vi.mocked(nativeComputer.send).mockImplementation(message => message.type === 'targets' ? pending.promise : Promise.resolve({ ok: true }));
+  await render();
+  expect(button(en.nativeComputer.permissions).disabled).toBe(true);
+  expect(button(en.nativeComputer.checkReadiness).disabled).toBe(true);
+  await act(async () => pending.resolve({ ok: false }));
+  expect(button(en.nativeComputer.permissions).disabled).toBe(false);
+  await act(async () => { window.dispatchEvent(new Event('focus')); window.dispatchEvent(new Event('focus')); });
+  expect(vi.mocked(nativeComputer.send).mock.calls.filter(([message]) => message.type === 'targets')).toHaveLength(1);
+  await act(async () => button(en.nativeComputer.refreshWindows).click());
+  expect(vi.mocked(nativeComputer.send).mock.calls.filter(([message]) => message.type === 'targets')).toHaveLength(2);
+});
+it.each([
+  { ...status, state: 'permission_required', capabilities: { ...status.capabilities, accessibilityPermission: 'unknown' } },
+  { ...status, capabilities: { ...status.capabilities, accessibilityPermission: 'denied' } },
+  { ...status, capabilities: { ...status.capabilities, axRead: false } },
+] as NativeStatus[])("[COMP:app-web/native-computer] successful but unusable AX discovery pauses automatic retries", async blocked => {
+  desktop(); vi.useFakeTimers();
+  vi.mocked(nativeComputer.send).mockResolvedValue({ ok: true, status: blocked, targets: [] });
+  await render();
+  expect(button(en.nativeComputer.permissions).disabled).toBe(false);
+  await act(async () => { window.dispatchEvent(new Event('focus')); await vi.advanceTimersByTimeAsync(15000); });
+  const discoveries = () => vi.mocked(nativeComputer.send).mock.calls.filter(([message]) => message.type === 'targets');
+  expect(discoveries()).toHaveLength(1);
+  await act(async () => button(en.nativeComputer.permissions).click());
+  expect(nativeComputer.send).toHaveBeenCalledWith({ type: 'permissions', permission: 'accessibility' });
+  vi.mocked(nativeComputer.send).mockResolvedValue({ ok: true, status: { ...status, capabilities: { ...status.capabilities, axRead: true } }, targets: [target] });
+  await act(async () => button(en.nativeComputer.refreshWindows).click());
+  await act(async () => window.dispatchEvent(new Event('focus')));
+  expect(discoveries()).toHaveLength(3);
+});
+it.each([false, true])("[COMP:app-web/native-computer] permission status invalidation discards targets but retains the retry pause, stale ready reply=%s", async stale => {
+  desktop(); const pending = deferred<DesktopComputerControlResult>();
+  vi.mocked(nativeComputer.send).mockReturnValue(pending.promise);
+  await render();
+  const blocked = { ...status, state: 'permission_required' as const, capabilities: { ...status.capabilities, accessibilityPermission: 'denied' as const, axRead: false } };
+  vi.mocked(nativeComputer.snapshot).mockReturnValue({ ok: true, status: blocked });
+  await render();
+  await act(async () => pending.resolve({ ok: true, status: stale ? status : blocked, targets: stale ? [target] : [] }));
+  expect(button(en.nativeComputer.permissions).disabled).toBe(false);
+  expect(el.textContent).toContain(en.nativeComputer.discoveryFailed);
+  expect(el.querySelectorAll("select")[1].options).toHaveLength(1);
+  await act(async () => window.dispatchEvent(new Event('focus')));
+  expect(vi.mocked(nativeComputer.send).mock.calls.filter(([message]) => message.type === 'targets')).toHaveLength(1);
+});
+it("[COMP:app-web/native-computer] publishes windows when discovery changes stopped bootstrap status to ready", async () => {
+  desktop();
+  const bootstrap = { ...status, state: 'stopped' as const, capabilities: { ...status.capabilities, axRead: false, accessibilityPermission: 'unknown' as const, semanticActions: false } };
+  vi.mocked(nativeComputer.snapshot).mockReturnValue({ ok: true, status: bootstrap });
+  const pending = deferred<DesktopComputerControlResult>();
+  vi.mocked(nativeComputer.send).mockReturnValue(pending.promise);
+  await render();
+  // Main publishes capabilities before the discovery IPC reply arrives.
+  const ready = { ...status, capabilities: { ...status.capabilities, axRead: true } };
+  vi.mocked(nativeComputer.snapshot).mockReturnValue({ ok: true, status: ready });
+  await render();
+  await act(async () => pending.resolve({ ok: true, status: ready, targets: [target] }));
+  expect(el.querySelectorAll('select')[1].options).toHaveLength(2);
+  expect(el.textContent).toContain(target.displayName);
+  expect(el.textContent).not.toContain(en.nativeComputer.windowsNotChecked);
+  expect([...el.querySelectorAll('input')].every(input => !input.checked)).toBe(true);
+});
+it.each(['startup_timeout', 'startup_refused', 'spawn_failed', 'unavailable'] as const)("[COMP:app-web/native-computer] displays the specific readiness failure %s", async code => {
+  desktop(); vi.mocked(nativeComputer.snapshot).mockReturnValue({ ok: false, readinessFailed: true, readinessErrorCode: code, status: { ...status, state: 'stopped' } });
+  await render(); expect(el.textContent).toContain(en.nativeComputer.readinessErrors[code]);
+  expect(button(en.nativeComputer.permissions).disabled).toBe(false);
+});
+it("[COMP:app-web/native-computer] displays admitted helper metadata even while control remains unavailable", async () => {
+  desktop(); vi.mocked(nativeComputer.snapshot).mockReturnValue({ ok: true, readiness: { helperAdmitted: true, capabilities: status.capabilities }, status: { ...status, state: 'unavailable' } });
+  await render(); expect(el.textContent).toContain(en.nativeComputer.readinessPassed);
+});
 it("[COMP:app-web/native-computer] blocked readiness is visible and permissions remain available", async () => {
   desktop(); vi.mocked(nativeComputer.snapshot).mockReturnValue({ ok: true, status: { ...status, state: "permission_required" } });
   await render(); expect(el.textContent).toContain(en.computerProfiles.blocked);
@@ -240,7 +312,8 @@ it("[COMP:app-web/native-computer] losing preverification availability during di
 it.each(["permission_required", "ready"] as const)("[COMP:app-web/native-computer] known Accessibility denial stays blocked in %s even with verification available", async phase => {
   desktop();
   vi.mocked(nativeComputer.snapshot).mockReturnValue({ ok: true, verificationAvailable: true, status: { ...status, state: phase, capabilities: { ...status.capabilities, accessibilityPermission: "denied" } } });
-  await render(); await selectConnection();
+  await render(); await choose(0, "p");
+  expect(el.querySelectorAll("select")[1].options).toHaveLength(1);
   expect(primary().disabled).toBe(true);
   expect(el.textContent).toContain(en.nativeComputer.permissionHelp);
   expect(el.textContent).toContain(en.computerProfiles.blocked);
@@ -255,9 +328,10 @@ it.each(["permission_required", "ready"] as const)("[COMP:app-web/native-compute
 it("[COMP:app-web/native-computer] permission_required itself blocks verification even with unknown TCC", async () => {
   desktop();
   vi.mocked(nativeComputer.snapshot).mockReturnValue({ ok: true, verificationAvailable: true, status: { ...status, state: "permission_required", capabilities: { ...status.capabilities, accessibilityPermission: "unknown" } } });
-  await render(); await selectConnection();
+  await render(); await choose(0, "p");
+  expect(el.querySelectorAll("select")[1].options).toHaveLength(1);
   expect(primary().disabled).toBe(true);
-  expect(el.textContent).toContain(en.nativeComputer.permissionHelp);
+  expect(el.textContent).not.toContain(en.nativeComputer.permissionHelp);
   expect(button(en.nativeComputer.permissions).disabled).toBe(false);
 });
 it("[COMP:app-web/native-computer] known Screen Recording denial cannot advertise capture during verification", async () => {
@@ -400,7 +474,7 @@ it("[COMP:app-web/native-computer] stopped with failed discovery is not an empty
   vi.mocked(nativeComputer.snapshot).mockReturnValue({ ok: true, status: { ...status, state: "stopped" } });
   vi.mocked(nativeComputer.send).mockResolvedValue({ ok: false });
   await render();
-  expect(el.textContent).toContain(en.nativeComputer.windowsNotChecked);
+  expect(el.textContent).toContain(en.nativeComputer.discoveryFailed);
   expect(el.textContent).not.toContain(en.nativeComputer.noTargets);
   vi.mocked(nativeComputer.send).mockResolvedValue({ ok: true, targets: [] });
   await act(async () => button(en.nativeComputer.refreshWindows).click());

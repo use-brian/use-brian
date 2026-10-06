@@ -210,7 +210,11 @@ export class NativeComputerIntegration {
     } catch {
       // No raw exception, stderr, paths, account identity or desktop content.
       console.warn('[native-computer] readiness failed', { stage, ...helper?.readinessDiagnostics() })
-      result = { ok: false, error: 'Packaged helper admission could not be verified. No native control was enabled.' }
+      const diagnostics = helper?.readinessDiagnostics()
+      const readinessErrorCode = diagnostics?.requestTimedOut ? 'startup_timeout'
+        : diagnostics?.spawnFailed ? 'spawn_failed'
+        : diagnostics?.exitCode === 77 ? 'startup_refused' : 'unavailable'
+      result = { ok: false, readinessErrorCode, error: 'Packaged helper admission could not be verified. No native control was enabled.' }
     } finally {
       // A failed/unconfirmed kill must not release the device lease or clear the
       // busy fence. Stop remains able to signal the retained helper independently.
@@ -851,8 +855,15 @@ export class NativeComputerIntegration {
         // request deliberately stays a permissionless bootstrap probe.
         if (process.platform === 'darwin') await controller.capabilities()
         if (generation !== this.generation || this.controller !== controller) return { ok: false, status: this.redactedStatus() }
+        const status = controller.status()
+        // Controller failures revoke the helper and return old capability data.
+        // An empty list from that stopped backend is not a successful discovery.
+        if (status.state !== 'ready' || !status.capabilities.axRead || status.capabilities.accessibilityPermission !== 'granted') {
+          this.selection = []
+          return { ok: false, status }
+        }
         this.selection = targets
-        return { ok: true, targets: structuredClone(this.selection), status: controller.status(), deviceId: this.deviceId }
+        return { ok: true, targets: structuredClone(this.selection), status, deviceId: this.deviceId }
       }
       if (!this.controller || input.workspaceId !== this.workspaceId || !this.selection.some(t => sameTarget(t, input.target))) throw new Error('Select a current target first')
       const verifier = randomBytes(32).toString('base64url')

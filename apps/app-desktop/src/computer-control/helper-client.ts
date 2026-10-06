@@ -69,6 +69,7 @@ export class PrivatePipeHelper implements NativeHelper {
   private exitCode: number | null = null
   private exitSignal: 'SIGKILL' | 'SIGTERM' | 'SIGABRT' | 'SIGSEGV' | 'SIGTRAP' | 'other' | null = null
   private spawnFailed = false
+  private firstRequest = true
   /** Lifecycle scalars only, for an explicit main-process readiness failure. */
   readinessDiagnostics() {
     return { requestTimedOut: this.requestTimedOut, exitObserved: this.exitObserved,
@@ -102,7 +103,7 @@ export class PrivatePipeHelper implements NativeHelper {
     this.clickSpent = true
     return { requestId: id, command: execute.command, grant: scope.grant, leaseId: scope.leaseId, descriptor }
   }
-  constructor(launch: string | HelperLaunchSpec, private readonly onDeath: (reason?: 'takeover') => void, private readonly timeoutMs = 4000, timing?: HelperTimingOptions) {
+  constructor(launch: string | HelperLaunchSpec, private readonly onDeath: (reason?: 'takeover') => void, private readonly timeoutMs?: number, timing?: HelperTimingOptions) {
     if (timing?.enabled === true && typeof timing.onMetadata === 'function') this.timingCallback = timing.onMetadata
     // Legacy string form is macOS-only. Specs are created in main, never accepted by IPC.
     const spec: HelperLaunchSpec = typeof launch === 'string' ? { platform: 'darwin', executable: launch, args: [] } : launch
@@ -282,8 +283,16 @@ export class PrivatePipeHelper implements NativeHelper {
     const body = Buffer.from(JSON.stringify({ id, method, payload, ...(timingRequested ? { diagnostics: true } : {}) }))
     if (body.length > MAX_MESSAGE_BYTES) return Promise.reject(new Error('Helper request too large'))
     const header = Buffer.alloc(4); header.writeUInt32BE(body.length)
+    // The Mac collector alone allows five seconds, plus signature validation
+    // before/after collection. Do not cut its first metadata handshake off at
+    // the ordinary four-second action deadline. Stop remains immediate.
+    // Discovery also revalidates the signed parent and lazily initializes AX.
+    // It carries no grant/action authority; action RPC deadlines stay unchanged.
+    const setupRequest = method === 'listTargets' || this.firstRequest && method === 'capabilities'
+    const timeoutMs = this.timeoutMs ?? (this.platform === 'darwin' && setupRequest ? 15_000 : 4000)
+    this.firstRequest = false
     return new Promise((resolve, reject) => {
-      const timer = setTimeout(() => { this.requestTimedOut = true; this.fail() }, this.timeoutMs)
+      const timer = setTimeout(() => { this.requestTimedOut = true; this.fail() }, timeoutMs)
       this.pending = { id, method, timingRequested, correlation, phase, apiPhase, resolve, reject, timer }
       this.executeSnapshot = method === 'execute' && p.command && p.leaseId
         ? { id, command: p.command, leaseId: p.leaseId } : undefined

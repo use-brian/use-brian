@@ -52,6 +52,8 @@ export const zh: Dictionary = {
   nativeComputer: {
     refreshWindows: "重新整理視窗",
     windowsNotChecked: "尚未檢查視窗。請重新整理以尋找可用視窗。",
+    discoveryFailed: "視窗探索失敗。請檢查 Mac 輔助程式就緒狀態與輔助使用權限，再重新整理視窗。",
+    supportedWindows: "支援的視窗：一般 TextEdit 文件與已簽署的測試程式。請關閉附加的對話框或表單。",
     verificationAcknowledge: "申請有人監督的 Mac 驗證",
     verificationHelp: "此為臨時驗證，不代表試行驗收或正式上線認證。請全程在場。必須由 Mac 原生對話框批准。停止、切換工作區或帳號及結束工作階段會撤銷批准；已送出的操作仍可能完成。仍需任務與目標同意。",
     verificationConfirmed: "此情境的 Mac 驗證已獲批准。控制與截圖仍須分別啟用。",
@@ -63,8 +65,15 @@ export const zh: Dictionary = {
 
     checkReadiness: "檢查 Mac 輔助程式就緒狀態",
     cleanupPending: "尚未確認清理完成。清理完成前無法使用原生電腦存取。仍可使用停止。",
+    readinessPending: "正在檢查 Mac 輔助程式啟動…",
     readinessPassed: "封裝輔助程式准入檢查已通過。這不會啟用控制，也不會驗證 AX 任務。",
     readinessFailed: "無法確認封裝輔助程式的准入狀態。",
+    readinessErrors: {
+      startup_timeout: "Mac 輔助程式啟動逾時，尚未到達權限請求。",
+      startup_refused: "Mac 輔助程式拒絕啟動驗證。請檢查已簽署的應用程式套件；更改輔助使用權限無法修正此問題。",
+      spawn_failed: "無法啟動 Mac 輔助程式，請檢查已安裝的應用程式套件。",
+      unavailable: "無法確認 Mac 輔助程式的就緒狀態，請檢查應用程式啟動記錄。",
+    },
 
     inspectorTitle: "AX 檢查器",
     inspectorHelp: "唯讀 AX 檢查器：工作階段配對並在本機同意後，讀取所選視窗一次，然後自動結束工作階段。不執行模型任務、輸入或截圖。",

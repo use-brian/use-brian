@@ -41,7 +41,9 @@ export type NativeInspection = { id: string; capturedAt: number; completeness: "
   nodes: { ref: string; parentRef?: string; role: string; name: string; value?: string; enabled: boolean; sensitive: boolean }[] };
 const profileErrorCodes = ["native_execution_unavailable", "computer_profiles_schema_unavailable", "sign_in_required", "computer_profiles_forbidden", "api_not_supported", "network_unreachable", "computer_profiles_unavailable"] as const;
 export type NativeProfileErrorCode = typeof profileErrorCodes[number];
-export type DesktopComputerControlResult = { ok: boolean; profileId?: string; profileConnected?: boolean; profileErrorCode?: NativeProfileErrorCode; verificationAvailable?: boolean; verificationConsented?: boolean; cleanupPending?: boolean; error?: string; status?: NativeStatus; targets?: DiscoveredTarget[]; deviceId?: string; inspection?: NativeInspection; readiness?: { helperAdmitted: true; capabilities: NativeStatus["capabilities"] } };
+const readinessErrorCodes = ["startup_timeout", "startup_refused", "spawn_failed", "unavailable"] as const;
+export type NativeReadinessErrorCode = typeof readinessErrorCodes[number];
+export type DesktopComputerControlResult = { ok: boolean; profileId?: string; profileConnected?: boolean; profileErrorCode?: NativeProfileErrorCode; readinessErrorCode?: NativeReadinessErrorCode; verificationAvailable?: boolean; verificationConsented?: boolean; cleanupPending?: boolean; error?: string; status?: NativeStatus; targets?: DiscoveredTarget[]; deviceId?: string; inspection?: NativeInspection; readiness?: { helperAdmitted: true; capabilities: NativeStatus["capabilities"] } };
 export type ComputerControl = (message: DesktopComputerControlMessage) => Promise<DesktopComputerControlResult>;
 
 /** A single persistent renderer owner. No automatic start, resume, pairing or API exchange. */
@@ -74,13 +76,14 @@ export class NativeComputer {
     const duringStart = auxiliary && this.starting === generation;
     if (beginsStart) this.starting = generation;
     if (acknowledgment || message.type === "stop") this.publish({ ...this.value, verificationConsented: undefined, ...(message.type === "stop" ? { profileId: undefined, profileConnected: false } : {}) });
-    if (readiness && !duringStart) this.publish({ ...this.value, readiness: undefined, readinessFailed: false, readinessPending: true });
+    if (readiness && !duringStart) this.publish({ ...this.value, readiness: undefined, readinessFailed: false, readinessErrorCode: undefined, readinessPending: true });
     if (["disconnect-profile", "disconnect", "workspace-changed"].includes(message.type)) this.publish({ ok: false, ...(this.value.cleanupPending ? { cleanupPending: true } : {}) });
-    if (["connect-profile", "start", "resume", "disconnect", "workspace-changed", "stop"].includes(message.type)) this.publish({ ...this.value, inspection: undefined, readiness: undefined, readinessFailed: undefined, readinessPending: undefined });
+    if (["connect-profile", "start", "resume", "disconnect", "workspace-changed", "stop"].includes(message.type)) this.publish({ ...this.value, inspection: undefined, readiness: undefined, readinessFailed: undefined, readinessErrorCode: undefined, readinessPending: undefined });
     try {
-      const { profileErrorCode, ...response } = await this.bridge()?.(message) ?? EMPTY;
+      const { profileErrorCode, readinessErrorCode, ...response } = await this.bridge()?.(message) ?? EMPTY;
       // IPC is a runtime boundary: unknown codes must not enter state or return values.
       const result: DesktopComputerControlResult = { ...response,
+        ...(readiness && !response.ok && readinessErrorCodes.includes(readinessErrorCode as NativeReadinessErrorCode) ? { readinessErrorCode } : {}),
         ...(message.type === "connect-profile" && !response.ok && profileErrorCodes.includes(profileErrorCode as NativeProfileErrorCode)
           ? { profileErrorCode } : {}) };
       if (generation !== this.generation) return EMPTY;
@@ -100,7 +103,7 @@ export class NativeComputer {
       }
       if (!this.value.cleanupPending && (duringStart || auxiliary && this.starting === generation)) return result;
       if (readiness) {
-        this.publish({ ...this.value, readiness: result.ok ? result.readiness : undefined, readinessFailed: !result.ok || !result.readiness?.helperAdmitted, readinessPending: false });
+        this.publish({ ...this.value, readiness: result.ok ? result.readiness : undefined, readinessFailed: !result.ok || !result.readiness?.helperAdmitted, readinessErrorCode: result.ok ? undefined : result.readinessErrorCode, readinessPending: false });
         return result;
       }
       const previous = this.value;
@@ -113,10 +116,10 @@ export class NativeComputer {
         result.status.epoch === previous.status.epoch && ["active", "stopped"].includes(result.status.state);
       const verification = !polling && !["stop", "disconnect-profile", "disconnect", "workspace-changed", "connect-profile", "start", "resume"].includes(message.type)
         ? { verificationAvailable: previous.verificationAvailable, verificationConsented: acknowledgment ? result.ok && result.verificationConsented === true : previous.verificationConsented } : {};
-      this.publish({ ...verification, ...result, readiness: previous.readiness, readinessFailed: previous.readinessFailed, readinessPending: previous.readinessPending, ...(polling && sameSession && previous.inspection ? { inspection: previous.inspection } : {}) });
+      this.publish({ ...verification, ...result, readiness: previous.readiness, readinessFailed: previous.readinessFailed, readinessErrorCode: previous.readinessErrorCode, readinessPending: previous.readinessPending, ...(polling && sameSession && previous.inspection ? { inspection: previous.inspection } : {}) });
       return result;
     } catch {
-      if (generation === this.generation && !((auxiliary || acknowledgment) && cleanupRevision !== this.cleanupRevision) && !duringStart && !(auxiliary && this.starting === generation)) this.publish(readiness ? { ...this.value, readiness: undefined, readinessFailed: true, readinessPending: false } : this.value.cleanupPending ? { ok: false, cleanupPending: true } : EMPTY);
+      if (generation === this.generation && !((auxiliary || acknowledgment) && cleanupRevision !== this.cleanupRevision) && !duringStart && !(auxiliary && this.starting === generation)) this.publish(readiness ? { ...this.value, readiness: undefined, readinessFailed: true, readinessErrorCode: "unavailable", readinessPending: false } : this.value.cleanupPending ? { ok: false, cleanupPending: true } : EMPTY);
       return EMPTY;
     } finally { if (beginsStart && this.starting === generation) this.starting = undefined; }
   }
@@ -125,7 +128,7 @@ export class NativeComputer {
     this.publish(this.value.cleanupPending ? { ok: false, cleanupPending: true } : EMPTY);
     return this.send({ type: "workspace-changed", workspaceId });
   }
-  clearInspection = () => { ++this.generation; this.publish({ ...this.value, inspection: undefined, readiness: undefined, readinessFailed: undefined, readinessPending: undefined }); };
+  clearInspection = () => { ++this.generation; this.publish({ ...this.value, inspection: undefined, readiness: undefined, readinessFailed: undefined, readinessErrorCode: undefined, readinessPending: undefined }); };
   check = () => this.send({ type: "status" });
   stop = () => this.send({ type: "stop" });
   leave() { this.workspaceId = ""; return this.send({ type: "disconnect" }); }

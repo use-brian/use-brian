@@ -349,6 +349,24 @@ describe('[COMP:desktop/native-permissions] trusted main native computer setup',
     expect(await integration.handle({ type: 'targets' })).toMatchObject({ ok: false, error: 'Native control unavailable' })
   })
 
+  it.each([
+    ['startup_timeout', { requestTimedOut: true, exitObserved: false, exitCode: null, exitSignal: null, spawnFailed: false }],
+    ['startup_refused', { requestTimedOut: false, exitObserved: true, exitCode: 77, exitSignal: null, spawnFailed: false }],
+    ['spawn_failed', { requestTimedOut: false, exitObserved: false, exitCode: null, exitSignal: null, spawnFailed: true }],
+  ] as const)('[COMP:desktop/native-readiness] returns only the fixed failure reason %s', async (code, diagnostics) => {
+    await packagedReadiness()
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => {})
+    const capabilities = deferred<unknown>()
+    mocks.readinessCaps = capabilities.promise.then(() => { throw new Error('PRIVATE_FAILURE') })
+    const check = integration.handle({ type: 'check-readiness' })
+    await vi.waitFor(() => expect(mocks.helpers[0]?.capabilities).toHaveBeenCalledOnce())
+    mocks.helpers[0].readinessDiagnostics.mockReturnValue(diagnostics)
+    capabilities.resolve(undefined)
+    expect(await check).toMatchObject({ ok: false, readinessErrorCode: code })
+    expect(JSON.stringify(await check)).not.toContain('PRIVATE_')
+    expect(warn).toHaveBeenCalled()
+    expect(systemPreferences.isTrustedAccessibilityClient).not.toHaveBeenCalled()
+  })
   it('readiness refuses a development parent and never starts a helper', async () => {
     expect(await integration.handle({ type: 'check-readiness' })).toMatchObject({ ok: false })
     expect(mocks.helpers).toHaveLength(0)
@@ -727,6 +745,13 @@ describe('[COMP:desktop/native-permissions] trusted main native computer setup',
     expect(mocks.controllers).toHaveLength(count)
     expect(current.dispose).not.toHaveBeenCalled()
     expect(current.listTargets).toHaveBeenCalledTimes(4)
+  })
+  it('reports a revoked discovery backend as failure rather than an empty success without logging target data', async () => {
+    await discover(); const current = controller()
+    current.listTargets.mockImplementationOnce(async () => { current.state = 'stopped'; return [] })
+    const result = await integration.handle({ type: 'targets' })
+    expect(result).toMatchObject({ ok: false, status: { state: 'stopped' } })
+    expect(result).not.toHaveProperty('targets')
   })
   it.each(['awaiting_local_consent', 'awaiting_action_approval', 'active'])('polling targets in %s never disposes or rediscovers', async state => {
     await discover(); const current = controller(); current.state = state

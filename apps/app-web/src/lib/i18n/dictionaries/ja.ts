@@ -52,6 +52,8 @@ export const ja: Dictionary = {
   nativeComputer: {
     refreshWindows: "ウィンドウを更新",
     windowsNotChecked: "ウィンドウは未確認です。更新して利用可能なウィンドウを確認してください。",
+    discoveryFailed: "ウィンドウの検出に失敗しました。Macヘルパーの準備状態とアクセシビリティを確認してから更新してください。",
+    supportedWindows: "対応ウィンドウ：通常のTextEdit文書と署名済みテスト用アプリ。付属するダイアログやシートを閉じてください。",
     verificationAcknowledge: "立ち会いでのMac検証を申請",
     verificationHelp: "これは一時的な検証であり、パイロット受け入れや本番認証ではありません。操作中は立ち会ってください。Macのネイティブダイアログで承認が必要です。停止、ワークスペース・アカウント変更、セッション終了で承認は失効します。送信済みの操作は完了する場合があります。タスクと対象の同意も必要です。",
     verificationConfirmed: "このコンテキストのMac検証が承認されました。制御と撮影は個別に有効化してください。",
@@ -63,8 +65,15 @@ export const ja: Dictionary = {
 
     checkReadiness: "Mac ヘルパーの準備状況を確認",
     cleanupPending: "終了処理はまだ確認されていません。完了するまでコンピューター操作は利用できません。停止は引き続き利用できます。",
+    readinessPending: "Mac ヘルパーの起動を確認中…",
     readinessPassed: "パッケージ内ヘルパーの受け入れ確認に成功しました。操作を有効にするものではなく、AX タスクの検証でもありません。",
     readinessFailed: "パッケージ内ヘルパーの受け入れを確認できませんでした。",
+    readinessErrors: {
+      startup_timeout: "Mac ヘルパーの起動がタイムアウトしました。権限リクエストには到達していません。",
+      startup_refused: "Mac ヘルパーが起動検証を拒否しました。署名済みアプリのパッケージを確認してください。アクセシビリティ権限の変更ではこの問題は解決しません。",
+      spawn_failed: "Mac ヘルパーを起動できませんでした。インストール済みアプリのパッケージを確認してください。",
+      unavailable: "Mac ヘルパーの準備状況を確認できませんでした。アプリの起動ログを確認してください。",
+    },
 
     inspectorTitle: "AX インスペクター",
     inspectorHelp: "読み取り専用 AX インスペクター: セッションのペアリングとローカルでの同意後、選択したウィンドウを一度読み取り、セッションを自動終了します。モデルタスク、入力、スクリーンショットはありません。",

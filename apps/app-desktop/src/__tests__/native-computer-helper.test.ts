@@ -46,7 +46,81 @@ function fakeChild() {
   return { child, side, sideReplies, handoff, respond, lastRequest: () => request }
 }
 afterEach(() => { Object.defineProperty(process, 'platform', { value: platform }); vi.useRealTimers(); vi.clearAllMocks() })
-describe('native private pipe', () => {
+describe('[COMP:desktop/native-readiness] native private pipe', () => {
+  it('lets the first Mac handshake finish beyond four seconds, then restores the normal deadline', async () => {
+    vi.useFakeTimers()
+    const peer = fakeChild(); const helper = new PrivatePipeHelper('/packaged/helper', () => {})
+    const startup = helper.capabilities()
+    await vi.advanceTimersByTimeAsync(6000)
+    expect(peer.child.kill).not.toHaveBeenCalled()
+    peer.respond({ protocol: NATIVE_PROTOCOL, platform: 'darwin', axRead: false, semanticActions: false, windowCapture: false, input: false,
+      accessibilityPermission: 'unknown', capturePermission: 'unknown', limitations: [] })
+    await startup
+    const next = expect(helper.capabilities()).rejects.toThrow('unavailable')
+    await vi.advanceTimersByTimeAsync(4000); await next
+    expect(peer.child.kill).toHaveBeenCalledOnce(); await helper.kill()
+    expect(mocked.spawn).toHaveBeenCalledOnce()
+  })
+  it('bounds the startup handshake at fifteen seconds without retrying', async () => {
+    vi.useFakeTimers()
+    const peer = fakeChild(); const helper = new PrivatePipeHelper('/packaged/helper', () => {})
+    const startup = expect(helper.capabilities()).rejects.toThrow('unavailable')
+    await vi.advanceTimersByTimeAsync(14999)
+    expect(peer.child.kill).not.toHaveBeenCalled()
+    await vi.advanceTimersByTimeAsync(1); await startup; await helper.kill()
+    expect(helper.readinessDiagnostics().requestTimedOut).toBe(true)
+    expect(mocked.spawn).toHaveBeenCalledOnce()
+  })
+  it('allows Mac discovery beyond the action deadline after bootstrap, without extending later RPCs', async () => {
+    vi.useFakeTimers()
+    const peer = fakeChild(); const helper = new PrivatePipeHelper('/packaged/helper', () => {})
+    const startup = helper.capabilities()
+    peer.respond({ protocol: NATIVE_PROTOCOL, platform: 'darwin', axRead: false, semanticActions: false, windowCapture: false, input: false,
+      accessibilityPermission: 'unknown', capturePermission: 'unknown', limitations: [] })
+    await startup
+    const discovery = helper.listTargets()
+    await vi.advanceTimersByTimeAsync(6000)
+    expect(peer.child.kill).not.toHaveBeenCalled()
+    peer.respond([]); expect(await discovery).toEqual([])
+    const next = expect(helper.capabilities()).rejects.toThrow('unavailable')
+    await vi.advanceTimersByTimeAsync(4000); await next; await helper.kill()
+    expect(peer.child.kill).toHaveBeenCalledOnce()
+    expect(mocked.spawn).toHaveBeenCalledOnce()
+  })
+  it('Stop still interrupts the extended Mac discovery deadline immediately', async () => {
+    vi.useFakeTimers()
+    const peer = fakeChild(); const helper = new PrivatePipeHelper('/packaged/helper', () => {})
+    const discovery = expect(helper.listTargets()).rejects.toThrow('unavailable')
+    await vi.advanceTimersByTimeAsync(5000); await helper.kill(); await discovery
+    expect(peer.child.kill).toHaveBeenCalledOnce()
+    expect(helper.readinessDiagnostics().requestTimedOut).toBe(false)
+  })
+  it('keeps explicit discovery timeout overrides', async () => {
+    vi.useFakeTimers()
+    const peer = fakeChild(); const helper = new PrivatePipeHelper('/packaged/helper', () => {}, 20)
+    const discovery = expect(helper.listTargets()).rejects.toThrow('unavailable')
+    await vi.advanceTimersByTimeAsync(20); await discovery; await helper.kill()
+    expect(peer.child.kill).toHaveBeenCalledOnce()
+  })
+  it('Stop kills immediately while Mac bootstrap is still pending', async () => {
+    vi.useFakeTimers()
+    const peer = fakeChild(); const helper = new PrivatePipeHelper('/packaged/helper', () => {})
+    const startup = expect(helper.capabilities()).rejects.toThrow('unavailable')
+    await vi.advanceTimersByTimeAsync(5000)
+    await helper.kill(); await startup
+    expect(peer.child.kill).toHaveBeenCalledOnce()
+    expect(helper.readinessDiagnostics().requestTimedOut).toBe(false)
+  })
+  it.each(['win32', 'linux'] as const)('%s startup retains the four-second deadline', async platform => {
+    vi.useFakeTimers()
+    const peer = fakeChild(); Object.defineProperty(process, 'platform', { value: platform })
+    const spec = platform === 'win32' ? { platform, executable: 'C:\\packaged\\helper.exe', args: [] }
+      : { platform, executable: '/usr/bin/python3', args: ['-Es', '/packaged/helper.py'] }
+    const helper = new PrivatePipeHelper(spec, () => {})
+    const startup = expect(helper.capabilities()).rejects.toThrow('unavailable')
+    await vi.advanceTimersByTimeAsync(4000); await startup; await helper.kill()
+    expect(peer.child.kill).toHaveBeenCalledOnce()
+  })
   it('uses only inherited pipes and parses fragmented framed responses', async () => {
     const { child, respond } = fakeChild(); const death = vi.fn()
     const helper = new PrivatePipeHelper('/packaged/helper', death)

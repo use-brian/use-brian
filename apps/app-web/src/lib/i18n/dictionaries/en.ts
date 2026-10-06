@@ -65,6 +65,8 @@ export const en = {
   nativeComputer: {
     refreshWindows: "Refresh windows",
     windowsNotChecked: "Windows have not been checked. Refresh windows to discover available windows.",
+    discoveryFailed: "Window discovery failed. Check Mac helper readiness and Accessibility, then refresh windows.",
+    supportedWindows: "Supported windows: normal TextEdit documents and the signed test fixture. Close any attached dialog or sheet.",
     verificationAcknowledge: "Request attended Mac verification",
     verificationHelp: "Verification is temporary, not pilot acceptance or production certification. Stay present. A native Mac dialog must approve this request. Stop, workspace/account changes and session end revoke approval; an action already sent may finish. Task and target consent still apply.",
     verificationConfirmed: "Native Mac verification approved for this context. Control and capture remain separate opt-ins.",
@@ -76,8 +78,15 @@ export const en = {
 
     checkReadiness: "Check Mac helper readiness",
     cleanupPending: "Cleanup is not yet confirmed. Native computer access remains unavailable until cleanup completes. Stop remains available.",
+    readinessPending: "Checking Mac helper startup…",
     readinessPassed: "Packaged helper admission passed. This does not enable control or verify AX tasks.",
     readinessFailed: "Packaged helper admission could not be verified.",
+    readinessErrors: {
+      startup_timeout: "Mac helper startup timed out. No permission request was reached.",
+      startup_refused: "Mac helper refused startup validation. Check the signed app package; changing Accessibility permission will not fix this failure.",
+      spawn_failed: "Mac helper could not be launched. Check the installed app package.",
+      unavailable: "Mac helper readiness could not be verified. Check the app launch log.",
+    },
 
     inspectorTitle: "AX inspector",
     inspectorHelp: "Read-only AX inspector: after session pairing and local consent, read the selected window once, then end the session automatically. No model task, input, or screenshots.",

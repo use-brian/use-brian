@@ -47,7 +47,12 @@ function ProfilePage({ workspaceId }: { workspaceId: string }) {
   const profile = profiles?.find(row => row.id === profileId);
   const [mutationError, setMutationError] = useState<ComputerProfileErrorCode | null>(null);
   const [discovered, setDiscovered] = useState(false);
+  const [discoveryFailed, setDiscoveryFailed] = useState(false);
+  const discoveryScope = useRef(0);
   const discoveryRequest = useRef(0);
+  const discoveryInFlight = useRef(false);
+  const automaticDiscoveryPaused = useRef(false);
+  const [discoveryPending, setDiscoveryPending] = useState(false);
   const [targets, setTargets] = useState<DiscoveredTarget[]>([]);
   const [targetKey, setTarget] = useState("");
   const [allowControl, setControl] = useState(false);
@@ -63,15 +68,15 @@ function ProfilePage({ workspaceId }: { workspaceId: string }) {
   const locked = busy || active || !!state.cleanupPending || !!state.readinessPending;
   // Settings explicitly stop local access in main. An idle profile connection
   // must not trap a user behind a newly denied TCC permission.
-  const permissionsLocked = busy || sessionActive || !!state.cleanupPending || !!state.readinessPending;
-  const setupLocked = locked || !!state.inspection;
+  const permissionsLocked = busy || discoveryPending || sessionActive || !!state.cleanupPending || !!state.readinessPending;
+  const setupLocked = locked || discoveryPending || !!state.inspection;
   // These are request preferences, not grants. Packaged verification opens its
   // control ceiling only inside Connect's native dialog, so pre-consent helper
   // capabilities cannot be a prerequisite for expressing the requested scope.
   const { verificationPending, controlSupported, captureSupported, canControl, canCapture, permissionBlocked, captureDenied, ready } = requestedScope(state);
   const inspection = !state.cleanupPending && state.status?.identity?.workspaceId === workspaceId ? state.inspection : undefined;
   const setupRevision = nativeComputer.setupRevision;
-  function reset() { ++revision.current; setControl(false); setCapture(false); setTargets([]); setDiscovered(false); setTarget(""); }
+  function reset() { ++revision.current; ++discoveryScope.current; setControl(false); setCapture(false); setTargets([]); setDiscovered(false); setDiscoveryFailed(false); setTarget(""); }
   useEffect(() => { reset(); }, [profileId, setupRevision, state.cleanupPending]);
   useEffect(() => { ++revision.current; setControl(false); setCapture(false); }, [targetKey, controlSupported, captureSupported, verificationPending, permissionBlocked, captureDenied, phase]);
   useEffect(() => {
@@ -83,24 +88,39 @@ function ProfilePage({ workspaceId }: { workspaceId: string }) {
     if (!profilePresent || !targetPresent) { ++revision.current; setControl(false); setCapture(false); }
   }, [profilePresent, targetPresent]);
   const discover = useCallback(async () => {
-    if (!supported || locked || state.inspection) return;
-    const seq = ++discoveryRequest.current; const rev = revision.current;
+    if (!supported || locked || state.inspection || discoveryInFlight.current) return;
+    discoveryInFlight.current = true; setDiscoveryPending(true);
+    const seq = ++discoveryRequest.current; const scope = discoveryScope.current;
     const generation = nativeComputer.setupRevision;
-    const current = () => alive.current && seq === discoveryRequest.current && rev === revision.current && generation === nativeComputer.setupRevision;
+    const sameScope = () => alive.current && generation === nativeComputer.setupRevision;
+    // Discovery itself updates capabilities/phase. Consent preference revisions
+    // must not discard that reply; selecting/connecting still uses those fences.
+    const current = () => alive.current && seq === discoveryRequest.current && scope === discoveryScope.current && generation === nativeComputer.setupRevision;
     try {
       const result = await nativeComputer.send({ type: "targets" });
+      const latest = nativeComputer.snapshot();
+      const unusable = (value: DesktopComputerControlResult) => value.cleanupPending || value.inspection || value.profileConnected
+        || ["permission_required", "active", "awaiting_local_consent", "awaiting_action_approval"].includes(value.status?.state ?? "")
+        || value.status?.capabilities.accessibilityPermission === "denied" || value.status?.capabilities.axRead === false;
+      const success = result.ok && Array.isArray(result.targets) && !unusable(result) && !unusable(latest);
+      // A successful IPC reply can still report an unusable AX backend. Keep
+      // permission setup reachable even when status changes discard the targets.
+      if (sameScope()) automaticDiscoveryPaused.current = !success || result.status?.state === "permission_required"
+        || result.status?.capabilities.accessibilityPermission === "denied" || result.status?.capabilities.axRead === false;
       if (!current()) return;
-      const success = result.ok && Array.isArray(result.targets);
       setDiscovered(success);
+      setDiscoveryFailed(!success);
       setTargets(success ? result.targets!.filter(isNativeTarget) : []);
     } catch {
-      if (current()) { setDiscovered(false); setTargets([]); }
-    }
+      if (sameScope()) automaticDiscoveryPaused.current = true;
+      if (current()) { setDiscovered(false); setDiscoveryFailed(true); setTargets([]); }
+    } finally { discoveryInFlight.current = false; if (alive.current) setDiscoveryPending(false); }
   }, [supported, locked, state.inspection]);
   useEffect(() => {
-    void discover(); window.addEventListener("focus", discover);
-    const timer = setInterval(discover, 5000);
-    return () => { ++discoveryRequest.current; clearInterval(timer); window.removeEventListener("focus", discover); };
+    const automatic = () => { if (!automaticDiscoveryPaused.current) void discover(); };
+    automatic(); window.addEventListener("focus", automatic);
+    const timer = setInterval(automatic, 5000);
+    return () => { ++discoveryRequest.current; clearInterval(timer); window.removeEventListener("focus", automatic); };
   }, [discover, profileId, setupRevision, state.cleanupPending]);
   const creationBlocked = blocksComputerProfileCreation(errorCode) || blocksComputerProfileCreation(mutationError);
   async function manage(kind: "create" | "rename" | "delete") {
@@ -170,10 +190,11 @@ function ProfilePage({ workspaceId }: { workspaceId: string }) {
     </div></div> : null}
     {!supported ? <p>{p.browserHelp}</p> : <>
       <p role="status">{state.cleanupPending ? t.cleanupPending : t.states[phase]}</p>
-      {!ready || state.readinessFailed ? <p role="alert">{p.blocked} {permissionBlocked ? t.permissionHelp : null}</p> : null}
+      {!ready || state.readinessFailed ? <p role="alert">{p.blocked} {state.status?.capabilities.accessibilityPermission === "denied" ? t.permissionHelp : null}</p> : null}
+      {state.readinessPending ? <p role="status">{t.readinessPending}</p> : state.readinessFailed ? <p role="alert">{t.readinessErrors[state.readinessErrorCode ?? "unavailable"]}</p> : state.readiness?.helperAdmitted ? <p role="status">{t.readinessPassed}</p> : null}
       {captureDenied ? <p role="alert" className="text-sm">{p.captureDenied}</p> : null}
       <div className="flex flex-wrap gap-2">
-        <Button className="min-h-11" variant="outline" disabled={locked} onClick={() => void nativeComputer.send({ type: "check-readiness" })}>{t.checkReadiness}</Button>
+        <Button className="min-h-11" variant="outline" disabled={locked || discoveryPending} onClick={() => void nativeComputer.send({ type: "check-readiness" })}>{t.checkReadiness}</Button>
         <Button className="min-h-11" variant="outline" disabled={permissionsLocked} onClick={() => void openPermissions("accessibility")}>{t.permissions}</Button>
         <Button className="min-h-11" variant="outline" disabled={permissionsLocked} onClick={() => void openPermissions("screen-recording")}>{t.screenRecordingSettings}</Button>
         <Button className="min-h-11" variant="destructive" onClick={() => void disconnect()}>{p.disconnect}</Button>
@@ -194,7 +215,8 @@ function ProfilePage({ workspaceId }: { workspaceId: string }) {
       </section> : null}
       <Picker label={t.target} value={targetKey} disabled={setupLocked} options={targets.map(item => ({ id: nativeTargetKey(item), name: `${item.displayName ? `${item.displayName} · ` : ""}${item.appId} · ${item.windowId}` }))} onChange={setTarget} />
       <Button className="min-h-11" variant="outline" disabled={setupLocked} onClick={() => void discover()}>{t.refreshWindows}</Button>
-      {!targets.length ? <p className="text-sm">{discovered ? t.noTargets : t.windowsNotChecked}</p> : null}
+      <p className="text-sm">{t.supportedWindows}</p>
+      {!targets.length ? <p className="text-sm" role={discoveryFailed ? "alert" : undefined}>{discoveryFailed ? t.discoveryFailed : discovered ? t.noTargets : t.windowsNotChecked}</p> : null}
       <label className="flex min-h-11 items-center gap-3"><Checkbox checked={allowControl} onCheckedChange={value => { setControl(value); if (!value) setCapture(false); }} disabled={setupLocked || !canControl} />{t.control}</label>
       <label className="flex min-h-11 items-center gap-3"><Checkbox checked={allowCapture} onCheckedChange={setCapture} disabled={setupLocked || !allowControl || !canCapture} />{t.capture}</label>
       {!allowControl ? <p className="text-sm text-muted-foreground">{p.inspectHelp}</p> : null}

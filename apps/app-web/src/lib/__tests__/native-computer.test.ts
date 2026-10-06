@@ -133,6 +133,19 @@ it.each(["permissions", "targets", "check-readiness"] as const)("[COMP:app-web/n
   }
 });
 
+it.each(['startup_timeout', 'startup_refused', 'spawn_failed', 'unavailable', 'PRIVATE_REASON'])("[COMP:app-web/native-computer] allowlists readiness failure %s and clears it on success", async code => {
+  const control = vi.fn<ComputerControl>().mockResolvedValue({ ok: true });
+  const owner = new NativeComputer(() => control); await owner.enter("w");
+  control.mockResolvedValueOnce({ ok: false, readinessErrorCode: code as any });
+  await owner.send({ type: "check-readiness" });
+  expect(owner.snapshot().readinessErrorCode).toBe(code === 'PRIVATE_REASON' ? undefined : code);
+  expect(owner.snapshot().readinessFailed).toBe(true);
+  await owner.stop(); expect(owner.snapshot().readinessErrorCode).toBeUndefined();
+  control.mockResolvedValueOnce({ ok: true, readiness });
+  await owner.send({ type: "check-readiness" });
+  expect(owner.snapshot().readinessErrorCode).toBeUndefined();
+  expect(owner.snapshot().readinessFailed).toBe(false);
+});
 const readiness = { helperAdmitted: true as const, capabilities: { platform: "darwin" } as NonNullable<DesktopComputerControlResult["status"]>["capabilities"] };
 it("[COMP:app-web/native-computer] readiness metadata and failures preserve the inspector and status", async () => {
   const inspection = { id: "local", capturedAt: 1, completeness: "complete" as const, nodes: [] };
