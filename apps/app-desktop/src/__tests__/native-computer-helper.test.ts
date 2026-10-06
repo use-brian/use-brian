@@ -47,6 +47,133 @@ function fakeChild() {
 }
 afterEach(() => { Object.defineProperty(process, 'platform', { value: platform }); vi.useRealTimers(); vi.clearAllMocks() })
 describe('[COMP:desktop/native-readiness] native private pipe', () => {
+  function startGrant(remainingMs = 120_000): NativeGrant {
+    return { protocol: NATIVE_PROTOCOL,
+      identity: { deploymentId: 'd', userId: 'u', workspaceId: 'w', deviceId: 'device', sessionId: 's', conversationId: 'c', taskId: 't' },
+      grantId: 'g', epoch: 1, expiresAt: Date.now() + remainingMs,
+      targets: [{ appId: 'com.apple.TextEdit', processId: 12, processInstanceId: 'p', windowId: 'w', windowInstanceId: 'wi' }],
+      allowControl: true, allowCapture: false, requester: 'Brian', goal: 'test' }
+  }
+  function timedCommand(deadlineMs = 29_000) {
+    const command = descriptorFor().command
+    return { ...command, deadlineAt: Date.now() + deadlineMs, action: { kind: 'observe' as const, target: command.action.target } }
+  }
+  it.each(['execute', 'beginApproval', 'endApproval'] as const)('lets Mac %s complete after four seconds within the original command deadline', async method => {
+    vi.useFakeTimers()
+    const peer = fakeChild(); const helper = new PrivatePipeHelper('/packaged/helper', () => {})
+    const command = timedCommand()
+    const pending = method === 'execute' ? helper.execute(command, 'lease') : method === 'beginApproval' ? helper.beginApproval(command, 'lease') : helper.endApproval(command, 'lease', true)
+    await vi.advanceTimersByTimeAsync(8000); expect(peer.child.kill).not.toHaveBeenCalled()
+    peer.respond(method === 'execute' ? { commandId: command.commandId, outcome: 'executed', code: 'ok' } : true)
+    await pending
+    const ordinary = expect(helper.capabilities()).rejects.toThrow('unavailable')
+    await vi.advanceTimersByTimeAsync(4000); await ordinary; await helper.kill()
+    expect(mocked.spawn).toHaveBeenCalledOnce()
+  })
+  it.each([[undefined, 60_000, 30_000], [120_000, 60_000, 30_000], [undefined, 5000, 5000], [1000, 29_000, 1000]])('caps command transport with override %s and deadline %s at %s', async (override, deadline, expected) => {
+    vi.useFakeTimers()
+    const peer = fakeChild(); const helper = new PrivatePipeHelper('/packaged/helper', () => {}, override)
+    const command = timedCommand(deadline)
+    const pending = expect(helper.execute(command, 'lease')).rejects.toThrow('unavailable')
+    command.deadlineAt += 120_000 // Caller mutation cannot extend serialized work.
+    await vi.advanceTimersByTimeAsync(expected - 1); expect(peer.child.kill).not.toHaveBeenCalled()
+    await vi.advanceTimersByTimeAsync(1); await pending; await helper.kill()
+    expect(helper.lifecycleDiagnostics()).toMatchObject({ method: 'execute', requestTimedOut: true, cause: 'timeout' })
+    await expect(helper.execute(command, 'lease')).rejects.toThrow()
+    expect(mocked.spawn).toHaveBeenCalledOnce()
+  })
+  it('clips command transport to the retained grant expiry, detached from the caller', async () => {
+    vi.useFakeTimers()
+    const peer = fakeChild(); const helper = new PrivatePipeHelper('/packaged/helper', () => {})
+    const grant = startGrant(5000); const starting = helper.start(grant, 'lease'); peer.respond(true); await starting
+    grant.expiresAt += 120_000
+    const pending = expect(helper.execute(timedCommand(), 'lease')).rejects.toThrow('unavailable')
+    await vi.advanceTimersByTimeAsync(4999); expect(peer.child.kill).not.toHaveBeenCalled()
+    await vi.advanceTimersByTimeAsync(1); await pending; await helper.kill()
+  })
+  it('Stop interrupts a Mac command beyond four seconds immediately without replay', async () => {
+    vi.useFakeTimers()
+    const peer = fakeChild(); const helper = new PrivatePipeHelper('/packaged/helper', () => {})
+    const pending = expect(helper.execute(timedCommand(), 'lease')).rejects.toThrow('unavailable')
+    await vi.advanceTimersByTimeAsync(5000); expect(peer.child.kill).not.toHaveBeenCalled()
+    const stopped = helper.kill(); expect(peer.child.kill).toHaveBeenCalledOnce(); await pending; await stopped
+    expect(helper.lifecycleDiagnostics()).toMatchObject({ requestTimedOut: false, cause: 'stop' })
+  })
+  it('keeps Linux command transport at four seconds despite a longer command deadline', async () => {
+    vi.useFakeTimers()
+    const peer = fakeChild(); Object.defineProperty(process, 'platform', { value: 'linux' })
+    const helper = new PrivatePipeHelper({ platform: 'linux', executable: '/usr/bin/python3', args: ['-Es', '/package/helper.py'] }, () => {})
+    const pending = expect(helper.execute(timedCommand(), 'lease')).rejects.toThrow('unavailable')
+    await vi.advanceTimersByTimeAsync(3999); expect(peer.child.kill).not.toHaveBeenCalled()
+    await vi.advanceTimersByTimeAsync(1); await pending; await helper.kill()
+    expect(mocked.spawn).toHaveBeenCalledOnce()
+  })
+  it('keeps retired raw click transport at four seconds', async () => {
+    vi.useFakeTimers()
+    const peer = fakeChild(); const helper = new PrivatePipeHelper('/packaged/helper', () => {})
+    const pending = expect(helper.execute(descriptorFor().command, 'lease')).rejects.toThrow('unavailable')
+    await vi.advanceTimersByTimeAsync(4000); await pending; await helper.kill()
+  })
+  it('lets consented Mac Start finish beyond four seconds without extending later RPCs', async () => {
+    vi.useFakeTimers()
+    const peer = fakeChild(); const helper = new PrivatePipeHelper('/packaged/helper', () => {})
+    const starting = helper.start(startGrant(), 'lease')
+    await vi.advanceTimersByTimeAsync(30_000)
+    expect(peer.child.kill).not.toHaveBeenCalled()
+    peer.respond(true); await starting
+    const next = expect(helper.capabilities()).rejects.toThrow('unavailable')
+    await vi.advanceTimersByTimeAsync(4000); await next; await helper.kill()
+    expect(peer.child.kill).toHaveBeenCalledOnce()
+    expect(mocked.spawn).toHaveBeenCalledOnce()
+  })
+  it.each([undefined, 120_000])('bounds Mac Start at sixty seconds with override %s, kills the helper and never retries', async override => {
+    vi.useFakeTimers()
+    const peer = fakeChild(); const helper = new PrivatePipeHelper('/packaged/helper', () => {}, override)
+    const starting = expect(helper.start(startGrant(), 'lease')).rejects.toThrow('unavailable')
+    await vi.advanceTimersByTimeAsync(59_999); expect(peer.child.kill).not.toHaveBeenCalled()
+    await vi.advanceTimersByTimeAsync(1); await starting; await helper.kill()
+    expect(helper.lifecycleDiagnostics()).toMatchObject({ method: 'start', requestTimedOut: true, cause: 'timeout', exitSignal: 'SIGKILL' })
+    expect(peer.child.kill).toHaveBeenCalledOnce()
+    await expect(helper.start(startGrant(), 'lease')).rejects.toThrow('unavailable')
+    expect(mocked.spawn).toHaveBeenCalledOnce()
+  })
+  it('caps Mac Start at the remaining grant lifetime', async () => {
+    vi.useFakeTimers()
+    const peer = fakeChild(); const helper = new PrivatePipeHelper('/packaged/helper', () => {})
+    const grant = startGrant(5000)
+    const starting = expect(helper.start(grant, 'lease')).rejects.toThrow('unavailable')
+    grant.expiresAt += 120_000
+    await vi.advanceTimersByTimeAsync(4999); expect(peer.child.kill).not.toHaveBeenCalled()
+    await vi.advanceTimersByTimeAsync(1); await starting; await helper.kill()
+    expect(helper.readinessDiagnostics().requestTimedOut).toBe(true)
+    expect(peer.child.kill).toHaveBeenCalledOnce()
+  })
+  it('keeps explicit shorter Mac Start timeout overrides', async () => {
+    vi.useFakeTimers()
+    const peer = fakeChild(); const helper = new PrivatePipeHelper('/packaged/helper', () => {}, 1000)
+    const starting = expect(helper.start(startGrant(), 'lease')).rejects.toThrow('unavailable')
+    await vi.advanceTimersByTimeAsync(999); expect(peer.child.kill).not.toHaveBeenCalled()
+    await vi.advanceTimersByTimeAsync(1); await starting; await helper.kill()
+    expect(peer.child.kill).toHaveBeenCalledOnce()
+  })
+  it('Stop interrupts extended Mac Start immediately', async () => {
+    vi.useFakeTimers()
+    const peer = fakeChild(); const helper = new PrivatePipeHelper('/packaged/helper', () => {})
+    const starting = expect(helper.start(startGrant(), 'lease')).rejects.toThrow('unavailable')
+    await vi.advanceTimersByTimeAsync(5000); await helper.kill(); await starting
+    expect(peer.child.kill).toHaveBeenCalledOnce()
+    expect(helper.readinessDiagnostics().requestTimedOut).toBe(false)
+  })
+  it.each(['win32', 'linux'] as const)('%s Start retains the four-second deadline', async platform => {
+    vi.useFakeTimers()
+    const peer = fakeChild(); Object.defineProperty(process, 'platform', { value: platform })
+    const spec = platform === 'win32' ? { platform, executable: 'C:\\packaged\\helper.exe', args: [] }
+      : { platform, executable: '/usr/bin/python3', args: ['-Es', '/packaged/helper.py'] }
+    const helper = new PrivatePipeHelper(spec, () => {})
+    const starting = expect(helper.start(startGrant(), 'lease')).rejects.toThrow('unavailable')
+    await vi.advanceTimersByTimeAsync(4000); await starting; await helper.kill()
+    expect(peer.child.kill).toHaveBeenCalledOnce()
+  })
   it('lets the first Mac handshake finish beyond four seconds, then restores the normal deadline', async () => {
     vi.useFakeTimers()
     const peer = fakeChild(); const helper = new PrivatePipeHelper('/packaged/helper', () => {})

@@ -319,9 +319,20 @@ export class PrivatePipeHelper implements NativeHelper {
     // before/after collection. Do not cut its first metadata handshake off at
     // the ordinary four-second action deadline. Stop remains immediate.
     // Discovery also revalidates the signed parent and lazily initializes AX.
-    // It carries no grant/action authority; action RPC deadlines stay unchanged.
+    // Consented Mac Start repeatedly revalidates the sealed parent/window and
+    // restores only the approved target. Give setup its own bounded budget,
+    // never extending the approved grant or native command deadlines. Supported
+    // Mac command RPCs use their remaining command/grant lifetime, at most 30s;
+    // repeated signed-parent/window checks must not be cut off at four seconds.
+    // Ordinary metadata/raw input/non-Mac budgets and immediate Stop remain.
     const setupRequest = method === 'listTargets' || this.firstRequest && method === 'capabilities'
-    const timeoutMs = this.timeoutMs ?? (this.platform === 'darwin' && setupRequest ? 15_000 : 4000)
+    const macStart = this.platform === 'darwin' && method === 'start'
+    const macCommand = this.platform === 'darwin' && ['execute', 'beginApproval', 'endApproval'].includes(method) &&
+      !!p.command && ['observe', 'capture', 'invoke', 'setValue', 'select', 'scroll', 'visualInvoke'].includes(p.command.action.kind)
+    const requestedTimeout = this.timeoutMs ?? (macStart ? 60_000 : macCommand ? 30_000 : this.platform === 'darwin' && setupRequest ? 15_000 : 4000)
+    const timeoutMs = macStart ? Math.max(1, Math.min(60_000, requestedTimeout, (p.grant?.expiresAt ?? Date.now()) - Date.now()))
+      : macCommand ? Math.max(1, Math.min(30_000, requestedTimeout, p.command!.deadlineAt - Date.now(),
+        (this.grantSnapshot?.grant.expiresAt ?? p.command!.deadlineAt) - Date.now())) : requestedTimeout
     this.firstRequest = false
     this.lastRequestMethod = method
     this.lastRequestStarted = performance.now()
