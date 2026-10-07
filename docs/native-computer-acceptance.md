@@ -1,5 +1,7 @@
 # Native computer acceptance evidence
 
+API flag-removal follow-up (2026-10-07): at the operator’s request, native API bootstrap now initializes from the existing relay URL/secret, JWT secret and deployment ID without consulting `NATIVE_COMPUTER_ENABLED`. The relay/desktop opt-ins and scoped authentication, profile ownership, native consent, policy and accounting checks remain required. Seven bootstrap regressions exercise unset/false/true legacy flags through authenticated profile connections, missing transport settings and denied renderer/unauthenticated requests. The combined bootstrap/readiness/profile/native-route selection passed 57 tests. API typechecking and smoke passed. The complete API package suite passed 9,397 tests with four skips (758 test files passed, one skipped); all 11 workspace tasks in that scoped test run completed successfully. This source change has not been deployed to the Pi and establishes no new native-device acceptance.
+
 ## Chat consent delivery follow-up (2026-10-06)
 
 Read-only inspection of the forwarded development stack confirmed a real `computerObserve` call and a queued `local_consent_required` result at 09:54 UTC. The request subsequently became denied with no session/lease created and its profile disconnected. The existing desktop log did not record the rejection stage. This establishes a failure before grant approval, not its precise cause, and does not establish a successful native prompt or action.
