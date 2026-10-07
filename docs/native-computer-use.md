@@ -78,11 +78,13 @@ Historical removed-emitter boundary: input was unconditionally disabled and macO
 Apply migration `620_native_computer_sessions.sql`. Build workspace dependencies before consumers. Enable **only on a reviewed test deployment**:
 
 ```sh
-# API, relay and Electron (all default disabled)
+# Relay and Electron opt-in (default disabled); the API does not use this flag
 NATIVE_COMPUTER_ENABLED=true
 # API: stable namespace for this deployment
 NATIVE_COMPUTER_DEPLOYMENT_ID=your-reviewed-deployment-id
 ```
+
+The API initializes its native service automatically when the relay URL, relay secret and deployment ID are configured; an absent or false `NATIVE_COMPUTER_ENABLED` on the API no longer suppresses profile connections or native tool registration. Missing transport/deployment configuration still reports unavailable. API authentication, profile ownership, assistant capability/policy, local consent, accounting admission and per-action approval remain required.
 
 Existing `BROWSER_RELAY_URL`, `BROWSER_RELAY_SECRET`, `JWT_SECRET` configure the transport. Desktop requires WSS except loopback WS for local development. API calls require HTTPS except loopback HTTP. API grant/model state is process-local, so use a single API instance or sticky session routing; relay must be single-instance. Restart requires fresh local consent, not serialized credential recovery.
 

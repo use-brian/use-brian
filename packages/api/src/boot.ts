@@ -7,7 +7,7 @@ import type { NativeAccountingCapability } from './computer-use/accounting.js'
 import { createNativeConfiguredGrounderApproval, createNativeComputerBootRuntimeFactory, createNativeAttemptRecorder } from './computer-use/boot-runtime.js'
 import { composeNativeComputerTool, type NativeRuntimeFactory, type NativeRunObserverFactory } from './computer-use/composition.js'
 import { nativeComputerAuth, nativeComputerRoutes } from './routes/native-computer.js'
-import { NativeComputerService } from './computer-use/service.js'
+import { createNativeComputerService } from './computer-use/boot-service.js'
 import { createBrowserFileBridge } from './sandbox/browser-files.js'
 import {createLocalLinkedInCloud} from './content-planning/linkedin-cloud.js'
 import {setFeedLinkedInTargetAuthority,setFeedLinkedInPublisher,setFeedLinkedInRecovery} from './content-planning/linkedin-authority.js'
@@ -942,6 +942,7 @@ export interface OpenApiEnv {
   // Computer-use local mode (docs/architecture/engine/computer-use.md §4):
   // the browser-relay's HTTP base + shared secret. Unset (open default) →
   // the local browser backend reports not_configured.
+  /** Legacy setting accepted for callers; native API bootstrap ignores it. */
   NATIVE_COMPUTER_ENABLED?: string
   NATIVE_COMPUTER_DEPLOYMENT_ID?: string
   BROWSER_RELAY_URL?: string
@@ -5004,8 +5005,12 @@ export async function bootOpenApi(opts: BootOpenApiOptions): Promise<BootResult>
       })
     },
   })
-  const nativeComputerService = (env.NATIVE_COMPUTER_ENABLED ?? process.env.NATIVE_COMPUTER_ENABLED) === 'true' && browserRelayUrl && env.BROWSER_RELAY_SECRET && (env.NATIVE_COMPUTER_DEPLOYMENT_ID ?? process.env.NATIVE_COMPUTER_DEPLOYMENT_ID)
-    ? new NativeComputerService({ relayUrl: browserRelayUrl, relaySecret: env.BROWSER_RELAY_SECRET, jwtSecret: env.JWT_SECRET, deploymentId: (env.NATIVE_COMPUTER_DEPLOYMENT_ID ?? process.env.NATIVE_COMPUTER_DEPLOYMENT_ID)! }) : null
+  const nativeComputerService = createNativeComputerService({
+    relayUrl: browserRelayUrl,
+    relaySecret: env.BROWSER_RELAY_SECRET,
+    jwtSecret: env.JWT_SECRET,
+    deploymentId: env.NATIVE_COMPUTER_DEPLOYMENT_ID ?? process.env.NATIVE_COMPUTER_DEPLOYMENT_ID,
+  })
   let nativeDiagnosticTool: Tool | undefined
   let nativeComputerReadiness: ReadinessOptions | undefined
   if (nativeComputerService) {

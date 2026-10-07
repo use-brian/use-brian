@@ -48,8 +48,8 @@ consent/exchange. Browser `/ext` remains separate and unchanged.
 
 An `allowControl=false` grant is only a one-shot **local AX inspector**. Main pairs after local consent, observes the sole selected window once locally, kills the helper/releases the lease and closes relay authority, then awaits API DELETE before returning a redacted snapshot. API model binding, run claims and dispatch refuse inspector grants; relay-delivered commands are denied by the main controller. No remote read-only model task or capture is enabled. Discovery display labels remain local metadata, never part of the five-field target or API grant; main ignores renderer label substitutions.
 
-Flags: `NATIVE_COMPUTER_ENABLED=true` on **both API and relay**;
-`NATIVE_COMPUTER_DEPLOYMENT_ID` required on API. Existing `BROWSER_RELAY_URL`,
+API bootstrap uses `createNativeComputerService` with the resolved relay URL, existing relay/JWT secrets and `NATIVE_COMPUTER_DEPLOYMENT_ID`; it requires no native feature flag. The API ignores legacy `NATIVE_COMPUTER_ENABLED` values, including false. Incomplete relay/deployment configuration leaves the service unavailable. The relay and desktop still require `NATIVE_COMPUTER_ENABLED=true`; local consent, scoped authentication/ownership/policy and accounting admission remain in force.
+`NATIVE_COMPUTER_DEPLOYMENT_ID` is required on the API. Existing `BROWSER_RELAY_URL`,
 `BROWSER_RELAY_SECRET`, `JWT_SECRET` still configure transport. Migration 620.
 Usage accounting also requires migration 621. Relay deployment must remain single-instance; physical desktop exclusion across
 client-chosen device IDs/instances additionally requires desktop's local lease.

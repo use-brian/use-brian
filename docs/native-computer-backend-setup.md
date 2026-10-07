@@ -33,7 +33,7 @@ HOST=127.0.0.1 PORT=48080 pnpm --filter @use-brian/doc-sync exec tsx src/index.t
 pnpm --filter app-web exec next dev --hostname 127.0.0.1 --port 43003
 ```
 
-Set `USEBRIAN_EDITION=oss`, `USEBRIAN_SINGLE_PROCESS=1`, the two database URLs, local JWT/relay/doc-sync/encryption secrets, `NATIVE_COMPUTER_ENABLED=true`, deployment ID and consistent API/APP/relay/doc-sync URLs. Web uses `API_INTERNAL_URL`, `NEXT_PUBLIC_API_URL` and `NEXT_PUBLIC_USEBRIAN_EDITION=oss`. Configure no provider credentials unless legitimately supplied. API's `API_HOST` and doc-sync's `HOST` are optional explicit bind addresses; absent values preserve existing behavior. Do not expose OSS local-owner onboarding on an unauthenticated public interface. A Mac can later use protected port forwarding; sandbox localhost is not Mac localhost.
+Set `USEBRIAN_EDITION=oss`, `USEBRIAN_SINGLE_PROCESS=1`, the two database URLs, local JWT/relay/doc-sync/encryption secrets, a deployment ID and consistent API/APP/relay/doc-sync URLs; set `NATIVE_COMPUTER_ENABLED=true` for the relay. Web uses `API_INTERNAL_URL`, `NEXT_PUBLIC_API_URL` and `NEXT_PUBLIC_USEBRIAN_EDITION=oss`. Configure no provider credentials unless legitimately supplied. API's `API_HOST` and doc-sync's `HOST` are optional explicit bind addresses; absent values preserve existing behavior. Do not expose OSS local-owner onboarding on an unauthenticated public interface. A Mac can later use protected port forwarding; sandbox localhost is not Mac localhost.
 
 **Actual backend-only report:** `ready:false`, blockers `model_unavailable`, `device_not_checked`. Schema/auth/scope/policy/conversation/accounting-capability/relay checks passed. No model credential or custom endpoint is configured in this fresh installation. Provider setup—not another backend deployment—is the remaining inference prerequisite. No provider was substituted, inference performed, native session/grant created or accounting receipt fabricated.
 
@@ -50,7 +50,7 @@ pnpm --filter @use-brian/api-open start
 pnpm --filter @use-brian/browser-relay start
 ```
 
-API: `NATIVE_COMPUTER_ENABLED=true`, nonempty `NATIVE_COMPUTER_DEPLOYMENT_ID`, stable existing `JWT_SECRET`, `BROWSER_RELAY_SECRET`, `BROWSER_RELAY_URL`, and normal database/auth/provider settings. Relay: native enabled, matching existing JWT/relay secrets and explicit `HOST`/`PORT`. Direct entrypoints need their environment supplied; do not assume the root `.env` is loaded identically by every package.
+API: nonempty `NATIVE_COMPUTER_DEPLOYMENT_ID`, stable existing `JWT_SECRET`, `BROWSER_RELAY_SECRET`, `BROWSER_RELAY_URL`, and normal database/auth/provider settings. The API initializes native service from those settings without a feature flag. Relay: `NATIVE_COMPUTER_ENABLED=true`, matching existing JWT/relay secrets and explicit `HOST`/`PORT`. Direct entrypoints need their environment supplied; do not assume the root `.env` is loaded identically by every package.
 
 Set `BROWSER_RELAY_URL` to the relay's **HTTPS** base (HTTP only for permitted loopback), not a `wss:` URL: API readiness/commands use HTTP fetch. Session exchange converts that same base to the desktop's WebSocket URL. It must be reachable by both API and Mac, using HTTPS/WSS except loopback development. Linux localhost is not Mac localhost. Reverse proxies must preserve the native HTTP and `/native-computer-v1` upgrade paths. Readiness cannot prove topology/affinity or WebSocket/JWT compatibility.
 
