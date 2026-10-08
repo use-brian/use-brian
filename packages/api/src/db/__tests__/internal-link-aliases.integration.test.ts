@@ -61,7 +61,7 @@ describeIf('[COMP:db/internal-link-aliases] migration lifecycle', () => {
       const pageTwo = randomUUID()
       await client.query(
         `INSERT INTO users (id, auth_provider, auth_provider_id)
-         VALUES ($1, 'test', $1::text)`,
+         VALUES ($1::uuid, 'test', $1::text)`,
         [ownerId],
       )
       await client.query(
@@ -104,7 +104,7 @@ describeIf('[COMP:db/internal-link-aliases] migration lifecycle', () => {
       await client.query(await migrationSql())
       await client.query(
         `INSERT INTO users (id, auth_provider, auth_provider_id)
-         VALUES ($1, 'test', $1::text)`,
+         VALUES ($1::uuid, 'test', $1::text)`,
         [ownerId],
       )
       await client.query(
@@ -137,11 +137,20 @@ describeIf('[COMP:db/internal-link-aliases] migration lifecycle', () => {
           WHERE namespace_workspace_id = $1 AND alias_key = $2`,
         [workspaceOne, key('roadmap')],
       )).rows).toEqual([{ page_id: null, alias: null, is_current: false, deleted: true }])
+      // The tombstone is not reassignable, even to a page that really is in
+      // the namespace workspace (the moved page itself is refused earlier,
+      // by the alias/page workspace check).
+      const pageThree = randomUUID()
+      await client.query(
+        `INSERT INTO saved_views (id, workspace_id, created_by, name, entity, view_type)
+         VALUES ($1, $2, $3, 'Page Three', 'tasks', 'table')`,
+        [pageThree, workspaceOne, ownerId],
+      )
       await expect(client.query(
         `INSERT INTO page_link_aliases
            (namespace_workspace_id, page_id, alias, alias_key, created_by)
          VALUES ($1, $2, 'roadmap', $3, $4)`,
-        [workspaceOne, pageOne, key('roadmap'), ownerId],
+        [workspaceOne, pageThree, key('roadmap'), ownerId],
       )).rejects.toMatchObject({ code: '23505' })
     } finally {
       await client.query('ROLLBACK')

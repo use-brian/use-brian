@@ -38,7 +38,7 @@ async function fixture() {
     )
   }
   await pool.query(
-    "INSERT INTO workspaces(id,name,owner_user_id) VALUES($1,'Brain review fixture',$2)",
+    "INSERT INTO workspaces(id,name,owner_user_id,department_read_v2) VALUES($1,'Brain review fixture',$2,false)",
     [workspaceId, ownerId],
   )
   await pool.query(

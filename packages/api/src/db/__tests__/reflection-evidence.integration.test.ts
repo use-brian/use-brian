@@ -171,7 +171,13 @@ describe('[COMP:api/reflection-evidence] [COMP:api/conversation-feedback-evidenc
       await client.query("INSERT INTO memory_verifications(id,workspace_id,memory_id,verified_by,action,reason) VALUES($1,$2,$3,$4,'edit_summary','Unclassified legacy correction')",[legacy,f.workspaceId,f.memory.id,f.userId])
       await client.query("INSERT INTO memory_verifications(id,workspace_id,memory_id,verified_by,action,source_scope) VALUES($1,$2,$3,$4,'edit_summary',$5)",[malformed,f.workspaceId,f.memory.id,f.userId,JSON.stringify({...before,sensitivity:undefined})])
       await client.query('ALTER TABLE memory_verifications ENABLE TRIGGER memory_verification_scope')
+      // Inside this rolled-back transaction: rows other suites wrote with newer
+      // source kinds would fail the predecessor CHECK this replay re-adds.
+      await client.query('DELETE FROM scope_derivation_sources WHERE workspace_id IS DISTINCT FROM $1',[f.workspaceId])
       await client.query("DELETE FROM scope_derivation_sources WHERE source_kind IN('correction_audit','session_message','feedback_event')")
+      // Later migrations renamed these functions' parameters; move the current
+      // definitions aside (rolled back below) so the historical replay can create its own.
+      await client.query('ALTER FUNCTION read_scope_source(uuid,text,uuid) RENAME TO read_scope_source_current; ALTER FUNCTION scope_source_ancestors(uuid,text,uuid) RENAME TO scope_source_ancestors_current')
       await client.query(migration)
       expect((await client.query('SELECT source_scope FROM memory_verifications WHERE id=$1',[id])).rows[0].source_scope).toEqual(before)
       expect((await client.query("SELECT read_scope_source($1,'memory_verification',$2) AS source",[f.workspaceId,id])).rows[0].source).toMatchObject({compartments:['product'],sensitivity:'confidential'})
@@ -251,8 +257,14 @@ describe('[COMP:api/reflection-evidence] [COMP:api/conversation-feedback-evidenc
     try {
       await client.query('BEGIN')
       await client.query('DROP TRIGGER a_correction_scope ON correction_audit; DROP TRIGGER canonical_scope_version ON correction_audit; DROP POLICY correction_scope_read ON correction_audit; DROP FUNCTION capture_correction_scope(); ALTER TABLE correction_audit DROP COLUMN source_scope,DROP COLUMN scope_version,DROP COLUMN scope_held')
+      // Inside this rolled-back transaction: rows other suites wrote with newer
+      // source kinds would fail the predecessor CHECK this replay re-adds.
+      await client.query('DELETE FROM scope_derivation_sources WHERE workspace_id IS DISTINCT FROM $1',[f.workspaceId])
       await client.query("DELETE FROM scope_derivation_sources WHERE source_kind IN('session_message','feedback_event')")
       await client.query("INSERT INTO correction_audit(id,workspace_id,primitive,row_id,action,reason) VALUES($1,$2,'memory',$3,'retract','Legacy reason')",[id,f.workspaceId,f.memory.id])
+      // Later migrations renamed these functions' parameters; move the current
+      // definitions aside (rolled back below) so the historical replay can create its own.
+      await client.query('ALTER FUNCTION read_scope_source(uuid,text,uuid) RENAME TO read_scope_source_current; ALTER FUNCTION scope_source_ancestors(uuid,text,uuid) RENAME TO scope_source_ancestors_current')
       await client.query(migration)
       expect((await client.query("SELECT read_scope_source($1,'correction_audit',$2) AS source",[f.workspaceId,id])).rows[0].source).toBeNull()
       expect((await client.query('SELECT reason,source_scope FROM correction_audit WHERE id=$1',[id])).rows[0]).toEqual({reason:'Legacy reason',source_scope:null})

@@ -18,6 +18,7 @@ import { getAppPool, getPool } from '../client.js'
 import { createDbWorkspaceGroupStore } from '../workspace-group-store.js'
 import { createDbWorkspaceFilesStore } from '../workspace-files-store.js'
 import { admitRecordingIntakeParent, captureRecordingIntakeParent, recordingIntakeTransaction } from '../recording-intake-admission.js'
+import { admitWorkspaceResource } from '../../workspace-access/resource-admission.js'
 const { assertLocalFixture } = await import(new URL('../../../../../scripts/crm/local-fixture.mjs', import.meta.url).href)
 // This suite asserts the legacy (pre-v2) model, which workspaces.department_read_v2=false still
 // serves as the cutover's rollback path (migration 650, decision D22); its workspaces are pinned to it.
@@ -29,13 +30,16 @@ async function fixture() {
   for (const id of [userId, otherId]) await pool.query('INSERT INTO users(id,auth_provider_id) VALUES($1::uuid,$1::text)', [id])
   await pool.query("INSERT INTO workspaces(id,name,owner_user_id,department_read_v2) VALUES($1,'Recording intake',$2,false)", [workspaceId, userId])
   for (const id of [userId, otherId]) await pool.query("INSERT INTO workspace_members(workspace_id,user_id,role,clearance) VALUES($1,$2,'owner','confidential')", [workspaceId, id])
+  // Every workspace has a primary; Pipeline B binds shared recordings to it.
+  const primaryAssistantId = randomUUID()
+  await pool.query("INSERT INTO assistants(id,workspace_id,name,kind,clearance) VALUES($1,$2,'Primary','primary','confidential')", [primaryAssistantId, workspaceId])
   const team = await createDbWorkspaceGroupStore().createTeam(userId, workspaceId, { name: 'Default', key: 'default' })
   await pool.query("UPDATE workspace_access_policies SET access_mode='simple',setup_state='ready',default_department_id=$2 WHERE workspace_id=$1", [workspaceId, team.id])
   const file = await createDbWorkspaceFilesStore().create(userId, { workspaceId, path: '/recording.wav', parentPath: '/', name: 'recording.wav', mime: 'audio/wav', sizeBytes: 3,
     storageUri: 'gs://fixture/recording', createdByUserId: userId, userId, sensitivity: 'confidential', compartments: [], projectIds: [] })
   const authority = { actorUserId: userId }
   const capture = () => captureRecordingIntakeParent(authority, workspaceId, file.id)
-  return { workspaceId, userId, otherId, file, authority, capture }
+  return { workspaceId, userId, otherId, file, authority, capture, primaryAssistantId }
 }
 describe('recording canonical intake parent admission (not publication)', () => {
   it('uses a non-bypass app role and retains private empty inheritance rather than the Simple default', async () => {
@@ -106,9 +110,16 @@ describe('atomic recording and segment publication', () => {
       'SELECT * FROM publish_file_recording($1::jsonb,$2,$3)', [JSON.stringify(parent), randomUUID(), 'invalid'],
     ))).rejects.toThrow('recording_kind_invalid')
     const id = randomUUID()
-    const result = await recordingIntakeTransaction(f.authority, client => client.query(
-      'SELECT id,kind,scope_version::text FROM publish_file_recording($1::jsonb,$2)', [JSON.stringify(parent), id],
-    ))
+    // The two-argument signature still works once the episode is admitted the
+    // way createRecording admits it; a bare call has no creation receipt.
+    const result = await recordingIntakeTransaction(f.authority, async client => {
+      const scope = await admitRecordingIntakeParent(client, f.authority, f.workspaceId, parent)
+      await admitWorkspaceResource(client, f.workspaceId, f.userId, {
+        writerKind: 'episode', rowVisibility: scope, visibility: scope.userId ? 'private' : 'workspace', sensitivity: scope.sensitivity,
+        inherited: { ...scope, visibility: scope.userId ? 'private' : 'workspace' }, inheritedAuthority: 'read',
+      })
+      return client.query('SELECT id,kind,scope_version::text FROM publish_file_recording($1::jsonb,$2)', [JSON.stringify(parent), id])
+    })
     expect(result.rows).toEqual([{ id, kind: 'memo', scope_version: '1' }])
   })
   it('reproduces the old post-adoption kind update without laundering its missing lineage', async () => {
@@ -187,9 +198,8 @@ describe('atomic recording and segment publication', () => {
 
 describe('publication authority and async fences', () => {
   it('retains non-default Teams, Projects and assistant partition under read-only execution authority', async () => {
-    const f = await fixture(), assistantId = randomUUID(), projectId = randomUUID()
+    const f = await fixture(), assistantId = f.primaryAssistantId, projectId = randomUUID()
     const team = await createDbWorkspaceGroupStore().createTeam(f.userId, f.workspaceId, { name: 'Source', key: 'source' })
-    await pool.query("INSERT INTO assistants(id,workspace_id,name,kind,clearance) VALUES($1,$2,'Source','primary','confidential')", [assistantId, f.workspaceId])
     await pool.query("INSERT INTO workspace_projects(id,workspace_id,name,normalized_name,created_by) VALUES($1,$2,'Project','project',$3)", [projectId, f.workspaceId, f.userId])
     await pool.query('UPDATE workspace_files SET user_id=NULL,assistant_id=$2,compartments=$3,project_ids=$4 WHERE id=$1', [f.file.id, assistantId, [team.compartmentKey], [projectId]])
     const { runWithAgentAccess } = await import('../client.js')

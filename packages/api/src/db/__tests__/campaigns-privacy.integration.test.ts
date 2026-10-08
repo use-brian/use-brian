@@ -19,7 +19,9 @@ let fixture: Fixture
 async function seed(): Promise<Fixture> {
   const workspaceId = randomUUID(), userId = randomUUID(), contactId = randomUUID(), assistantId = randomUUID(), sessionId = randomUUID()
   await pool.query(`INSERT INTO users(id,auth_provider,auth_provider_id) VALUES($1::uuid,'test',$1::text)`, [userId])
-  await pool.query(`INSERT INTO workspaces(id,name,purpose,owner_user_id) VALUES($1,'Campaign privacy fixture','test',$2)`, [workspaceId, userId])
+  // Legacy model (flag off): these receipts predate saved floors, which under
+  // v2 fail closed until reviewed recovery (crm-operations.md, privacy export).
+  await pool.query(`INSERT INTO workspaces(id,name,purpose,owner_user_id,department_read_v2) VALUES($1,'Campaign privacy fixture','test',$2,false)`, [workspaceId, userId])
   await pool.query(`INSERT INTO workspace_members(workspace_id,user_id,role) VALUES($1,$2,'owner')`, [workspaceId, userId])
   await pool.query(`INSERT INTO assistants(id,name,workspace_id,kind,owner_user_id) VALUES($1,'Privacy assistant',$2,'primary',$3)`, [assistantId, workspaceId, userId])
   await pool.query(`INSERT INTO sessions(id,user_id,assistant_id,channel_type,channel_id,title) VALUES($1,$2,$3,'web','privacy','[linkedin] Privacy fixture')`, [sessionId, userId, assistantId])

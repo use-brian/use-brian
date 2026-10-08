@@ -17,7 +17,7 @@ afterAll(async () => { await getAppPool().end(); await pool.end() })
 async function fixture() {
   const workspaceId=randomUUID(),owner=randomUUID(),editor=randomUUID(),reader=randomUUID(),assistantId=randomUUID(),projectId=randomUUID()
   for (const id of [owner,editor,reader]) await pool.query('INSERT INTO users(id,auth_provider_id) VALUES($1::uuid,$1::text)',[id])
-  await pool.query("INSERT INTO workspaces(id,name,owner_user_id) VALUES($1,'Successor app fixture',$2)",[workspaceId,owner])
+  await pool.query("INSERT INTO workspaces(id,name,owner_user_id,department_read_v2) VALUES($1,'Successor app fixture',$2,false)",[workspaceId,owner])
   for (const id of [owner,editor,reader]) await pool.query("INSERT INTO workspace_members(workspace_id,user_id,role,clearance,team_scope_mode) VALUES($1,$2,$3,'confidential','assigned')",[workspaceId,id,id===owner?'owner':'member'])
   await pool.query("INSERT INTO assistants(id,workspace_id,owner_user_id,name,kind) VALUES($1,$2,$3,'Fixture','standard')",[assistantId,workspaceId,owner])
   const groups=createDbWorkspaceGroupStore(),team=await groups.createTeam(owner,workspaceId,{name:'Product',key:'product'})

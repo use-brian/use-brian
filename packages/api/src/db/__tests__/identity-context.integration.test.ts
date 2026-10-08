@@ -15,7 +15,7 @@ const pool = getPool()
 async function fixture() {
   const workspaceId = randomUUID(), userId = randomUUID(), assistantId = randomUUID(), projectId = randomUUID()
   await pool.query('INSERT INTO users(id,auth_provider_id) VALUES($1::uuid,$1::text)', [userId])
-  await pool.query("INSERT INTO workspaces(id,name,owner_user_id) VALUES($1,'Identity fixture',$2)", [workspaceId, userId])
+  await pool.query("INSERT INTO workspaces(id,name,owner_user_id,department_read_v2) VALUES($1,'Identity fixture',$2,false)", [workspaceId, userId])
   await pool.query("INSERT INTO workspace_members(workspace_id,user_id,role) VALUES($1,$2,'owner')", [workspaceId, userId])
   await pool.query("INSERT INTO assistants(id,name,workspace_id,owner_user_id,kind) VALUES($1,'Fixture assistant',$2,$3,'standard')", [assistantId, workspaceId, userId])
   await pool.query("INSERT INTO workspace_projects(id,workspace_id,name,normalized_name,created_by) VALUES($1,$2,'Fixture','fixture',$3)", [projectId, workspaceId, userId])
@@ -50,7 +50,9 @@ describe('[COMP:api/identity-context] canonical identity prompt scope', () => {
     const accumulator = new ContextScopeAccumulator()
     noteAutomaticScopeEvidence(accumulator, rows)
     expect(accumulator.evidence).toMatchObject({ sensitivity: 'confidential', compartments: ['finance'], projectIds: f.ctx.projectIds })
-    expect(accumulator.evidence.sources).toHaveLength(2)
+    // Both identity rows come from the one entity; the accumulator keeps one
+    // source per resource (the latest read supersedes), so one lineage entry.
+    expect(accumulator.evidence.sources).toEqual([expect.objectContaining({ resourceKind: 'entity', resourceId: f.entity.id })])
     const derived = await createMemory({ workspaceId: f.ctx.workspaceId, userId: f.ctx.userId,
       assistantId: f.ctx.assistantId, createdByUserId: f.ctx.userId, summary: 'Protected identity note',
       sensitivity: 'public', derivation: { producer: 'identity-context-test', sources: accumulator.evidence.sources! } })

@@ -20,7 +20,7 @@ app.use(((error, _req, res, _next) => { console.error(error); res.status(500).js
 async function fixture() {
   const owner = randomUUID(), user = randomUUID(), w = randomUUID(), assistant = randomUUID()
   for (const id of [owner,user]) await pool.query('INSERT INTO users(id,auth_provider_id) VALUES($1::uuid,$1::text)', [id])
-  await pool.query("INSERT INTO workspaces(id,name,owner_user_id) VALUES($1,'Personal session',$2)", [w,owner])
+  await pool.query("INSERT INTO workspaces(id,name,owner_user_id,department_read_v2) VALUES($1,'Personal session',$2,false)", [w,owner])
   await pool.query("INSERT INTO workspace_members(workspace_id,user_id,role) VALUES($1,$2,'owner'),($1,$3,'member')", [w,owner,user])
   const groups = createDbWorkspaceGroupStore(), team = await groups.createTeam(owner,w,{name:'Common',key:'common'})
   await groups.addMember(owner,team.id,user)
