@@ -48,6 +48,61 @@ import { idbDelete, idbGet, idbSet } from "./idb";
 const CACHE_VERSION = 1;
 const KEY_PREFIX = "surface-content";
 
+/**
+ * Content lease (perceived-performance.md, "Content lease for protected lists").
+ * A disk copy is painted only within this window of the network read that wrote
+ * it (the access-token lifetime, shared with the Feed disk tier).
+ */
+export const OFFLINE_AUTHORITY_MS = 60 * 60_000;
+/** A network value expires this long after its request started. */
+export const SURFACE_CONTENT_LEASE_MS = 30_000;
+const SURFACE_CONTENT_RENEW_MS = 15_000;
+const leaseDeadlines = new WeakMap<object, number>();
+
+function lease<T>(value: T, deadline: number): T {
+  if (value && typeof value === "object") leaseDeadlines.set(value, deadline);
+  return value;
+}
+
+/** Remaining authority of a leased value; an unleased value has none. */
+export function surfaceContentRemaining(value: unknown): number {
+  if (!value || typeof value !== "object") return 0;
+  return Math.max(0, (leaseDeadlines.get(value) ?? 0) - performance.now());
+}
+
+/** Fetch and lease a value from its request start. */
+export async function leaseSurfaceContent<T>(fetch: () => Promise<T>): Promise<T> {
+  const started = performance.now();
+  const value = lease(await fetch(), started + SURFACE_CONTENT_LEASE_MS);
+  if (surfaceContentRemaining(value) <= 0) {
+    throw new SurfaceCacheEvictionError(new Error("surface_content_expired"));
+  }
+  return value;
+}
+
+/**
+ * Renew a mounted surface's lease every 15 seconds while visible and on return to
+ * the foreground. A failed renewal leaves the deadline where it was.
+ */
+export function useSurfaceContentRenewal(refresh: () => Promise<unknown>, active = true): void {
+  const refreshRef = useRef(refresh);
+  refreshRef.current = refresh;
+  useEffect(() => {
+    if (!active) return;
+    const renew = () => {
+      if (document.visibilityState === "visible") void refreshRef.current().catch(() => {});
+    };
+    const timer = setInterval(renew, SURFACE_CONTENT_RENEW_MS);
+    window.addEventListener("focus", renew);
+    document.addEventListener("visibilitychange", renew);
+    return () => {
+      clearInterval(timer);
+      window.removeEventListener("focus", renew);
+      document.removeEventListener("visibilitychange", renew);
+    };
+  }, [active]);
+}
+
 export type SurfaceContentCacheScope = {
   viewerId: string;
   workspaceId: string;
@@ -142,6 +197,9 @@ export async function readSurfaceContentCache<T>(
   if (!isEnvelope(stored) || stored.key !== memoryKey || !isValue(stored.value)) {
     return null;
   }
+  // Outside the authority window, or future-dated: never painted as current.
+  const age = Date.now() - stored.updatedAt;
+  if (age > OFFLINE_AUTHORITY_MS || age < -60_000) return null;
   return { value: stored.value, updatedAt: stored.updatedAt };
 }
 
@@ -204,7 +262,7 @@ export function useSurfaceContentCache<T>(options: {
   const persisting = useCallback(async (): Promise<T> => {
     const scope = surfaceContentCacheScope(workspaceId);
     try {
-      const value = await fetchRef.current();
+      const value = await leaseSurfaceContent(() => fetchRef.current());
       if (scope && key) void writeSurfaceContentCache(scope, resource, key, value);
       return value;
     } catch (error) {
@@ -239,7 +297,7 @@ export function useSurfaceContentCache<T>(options: {
       );
       if (cached) {
         seeded = true;
-        return cached.value;
+        return lease(cached.value, performance.now() + cached.updatedAt + OFFLINE_AUTHORITY_MS - Date.now());
       }
       return persisting();
     };
@@ -247,7 +305,7 @@ export function useSurfaceContentCache<T>(options: {
     // `diskFirst` never runs and nothing is seeded). On a disk hit the entry
     // is marked stale right after it lands, so `useCachedResource` revalidates
     // over the network behind the painted rows.
-    void loadSurfaceCache(key, diskFirst).then(() => {
+    void loadSurfaceCache(key, diskFirst, { expiresInMs: surfaceContentRemaining }).then(() => {
       if (seeded) markSurfaceCacheStale(key);
     });
   }, [key, persisting, resource, workspaceId]);

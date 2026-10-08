@@ -41,6 +41,8 @@ import { use, useEffect, useMemo, useRef, useState } from "react";
 import Link from "next/link";
 import { Pencil } from "lucide-react";
 import { BackButton } from "@/components/ui/back-button";
+import { Button } from "@/components/ui/button";
+import { leaseSurfaceContent, surfaceContentRemaining, useSurfaceContentRenewal } from "@/lib/offline/surface-content-cache";
 import { useRouter } from "next/navigation";
 import { useT } from "@/lib/i18n/client";
 import { format as fmt } from "@/lib/i18n";
@@ -127,9 +129,14 @@ export default function WorkflowDetailPage({
   // page has adopted and `draft` the editable copy; the adopt effect (after
   // the dirty check) is the only bridge from the cache into them.
   const detailKey = workflowDetailCacheKey(workspaceId, id);
+  // Content lease (perceived-performance.md, "Content lease for protected
+  // lists"): a denied (null) or unrenewed definition leaves the cache within
+  // 30 seconds, and the page stops rendering it below.
   const detail = useCachedResource<WorkflowFull | null>(detailKey, () =>
-    getWorkflowFull(id),
+    leaseSurfaceContent(() => getWorkflowFull(id)),
+    { expiresInMs: surfaceContentRemaining },
   );
+  useSurfaceContentRenewal(detail.refresh);
   // The list row the user came from (the rail hover / list page already
   // filled `workflow:<wid>`): seeds the header on a cold entry. A plain read,
   // not a subscription - it is only a seed, and the list is never fetched on
@@ -399,6 +406,24 @@ export default function WorkflowDetailPage({
         backLabel={t.workflowPage.detail.backToList}
         disabledLabel={t.workflowPage.builder.disabledLabel}
       />
+    );
+  }
+
+  // Authority lapsed or was denied after the definition was on screen. Stop
+  // showing it; any unsaved draft stays in state (not rendered) until the user
+  // leaves, and comes back if a retry succeeds while the draft is dirty.
+  if (workflow && detail.data === undefined && detail.error !== undefined) {
+    return (
+      <div className="w-full px-6 py-20 text-center flex flex-col items-center gap-3" role="status">
+        <div className="font-medium">{t.workflowPage.detail.unavailableTitle}</div>
+        <p className="max-w-md text-sm text-muted-foreground">{t.workflowPage.detail.unavailableHint}</p>
+        <div className="flex flex-wrap justify-center gap-2">
+          <Button type="button" variant="outline" className="max-sm:min-h-11" onClick={() => void detail.refresh()}>
+            {t.workflowPage.detail.unavailableRetry}
+          </Button>
+          <BackButton href={listHref} label={t.workflowPage.detail.backToList} />
+        </div>
+      </div>
     );
   }
 

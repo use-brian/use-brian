@@ -5636,6 +5636,9 @@ export const ja: Dictionary = {
     detail: {
       backToList: "すべてのワークフロー",
       notFound: "ワークフローが見つかりません",
+      unavailableTitle: "このワークフローは現在利用できません",
+      unavailableHint: "アクセス権が変更されたか、オフラインの可能性があります。保存していない編集は、このページを離れるまで保持されます。",
+      unavailableRetry: "再試行",
       learnedSkillsTitle: "このワークフローから学習したスキル",
       learnedSkillsHint:
         "このワークフローの実行から抽出されました。ここで使うには、ステップのスキル欄に追加してください。",

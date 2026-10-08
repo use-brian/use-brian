@@ -5611,6 +5611,9 @@ export const zh: Dictionary = {
     detail: {
       backToList: "所有工作流程",
       notFound: "找不到此工作流程",
+      unavailableTitle: "此工作流程目前無法使用",
+      unavailableHint: "你的存取權限可能已變更，或你目前離線。未儲存的編輯會保留在此頁面，直到你離開。",
+      unavailableRetry: "重試",
       learnedSkillsTitle: "從此工作流程學到的技能",
       learnedSkillsHint:
         "由此工作流程的執行紀錄提煉而成。要在這裡使用, 請將它加入步驟的技能欄位。",

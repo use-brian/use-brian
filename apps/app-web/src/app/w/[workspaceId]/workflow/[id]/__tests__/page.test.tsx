@@ -261,6 +261,29 @@ describe("[COMP:app-web/workflow-detail-cache] detail page", () => {
     expect(container.textContent).toContain(en.workflowPage.builder.unsavedChanges);
   });
 
+  it("stops showing a definition whose read is denied, keeping the unsaved draft for a successful retry", async () => {
+    await loadSurfaceCache(workflowDetailCacheKey("w1", "wf-1"), async () => WF);
+    api.getWorkflowFull.mockResolvedValue(null);
+    await render();
+    await typeName("Morning digest (draft)");
+
+    // A renewal answers with a denial (null): the definition leaves the page.
+    await act(async () => { markSurfaceCacheStale("workflow-detail:w1:"); });
+    await settle();
+    expect(container.textContent).toContain(en.workflowPage.detail.unavailableTitle);
+    expect(container.textContent).not.toContain("Morning digest");
+    expect(container.querySelector('input[maxlength="120"]')).toBeNull();
+
+    // Access returns: Retry brings the editor back with the edit as typed.
+    api.getWorkflowFull.mockResolvedValue(WF);
+    const retry = [...container.querySelectorAll("button")].find((node) => node.textContent === en.workflowPage.detail.unavailableRetry);
+    expect(retry).toBeDefined();
+    await act(async () => { retry!.click(); });
+    await settle();
+    expect(container.textContent).not.toContain(en.workflowPage.detail.unavailableTitle);
+    expect(container.textContent).toContain(en.workflowPage.builder.unsavedChanges);
+  });
+
   it("the same mark-stale on a clean draft adopts the revalidated row", async () => {
     await loadSurfaceCache(workflowDetailCacheKey("w1", "wf-1"), async () => WF);
     api.getWorkflowFull.mockResolvedValue({

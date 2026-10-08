@@ -5855,6 +5855,9 @@ export const en = {
     detail: {
       backToList: "All workflows",
       notFound: "Workflow not found",
+      unavailableTitle: "This workflow is unavailable right now",
+      unavailableHint: "Your access may have changed, or you may be offline. Unsaved edits stay on this page until you leave it.",
+      unavailableRetry: "Try again",
       learnedSkillsTitle: "Skills learned from this workflow",
       learnedSkillsHint:
         "Distilled from this workflow's runs. To use one here, add it to a step's Skills field.",

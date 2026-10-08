@@ -43,7 +43,7 @@ import { OperatorTopbar } from "@/components/operator/operator-topbar";
 import { cn } from "@/lib/utils";
 import { mutateSurfaceCache, useCachedResource } from "@/lib/surface-cache";
 import { surfaceDataKey } from "@/lib/surface-prefetch";
-import { useSurfaceContentCache } from "@/lib/offline/surface-content-cache";
+import { surfaceContentRemaining, useSurfaceContentCache, useSurfaceContentRenewal } from "@/lib/offline/surface-content-cache";
 import { PHONE_QUERY, isPhoneViewport } from "@/lib/viewport";
 import {
   OperatorBoardSkeleton,
@@ -180,7 +180,10 @@ export function TasksSurface({ workspaceId }: { workspaceId: string }) {
     isValue: isTaskRowList,
     fetch: () => fetchWorkspaceTasks(workspaceId),
   });
-  const tasks = useCachedResource(tasksKey, fetchTasks);
+  // Content lease: an open list never outlives the viewer's authority by more
+  // than 30 seconds (perceived-performance.md, "Content lease for protected lists").
+  const tasks = useCachedResource(tasksKey, fetchTasks, { expiresInMs: surfaceContentRemaining });
+  useSurfaceContentRenewal(tasks.refresh);
   const rows = tasks.data ?? null;
   // Only an error with NOTHING to show is a load failure; a failed revalidation
   // behind a painted list stays quiet.

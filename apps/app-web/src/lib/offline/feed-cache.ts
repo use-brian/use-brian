@@ -5,6 +5,7 @@ import { getUserInfo } from "@/lib/user";
 import { desktopBridge, isDesktopAuth } from "@/lib/desktop-auth-source";
 import { loadSurfaceCache, readSurfaceCache, SurfaceCacheEvictionError } from "@/lib/surface-cache";
 import { idbDelete, idbGet, idbSet } from "./idb";
+import { OFFLINE_AUTHORITY_MS } from "./surface-content-cache";
 
 export const FEED_API_URL = publicRuntimeConfig().apiUrl ?? "http://localhost:4000";
 export const feedOwner = () => isDesktopAuth()
@@ -26,7 +27,7 @@ const cacheKey = (owner: string, path: string) => `feed:cache:${owner}:${path}`;
  * network read confirmed it: the access-token lifetime of the session that read it. Older,
  * unconfirmed (pre-envelope) or future-dated copies are skipped, never shown as current.
  */
-export const FEED_OFFLINE_AUTHORITY_MS = 60 * 60_000;
+export const FEED_OFFLINE_AUTHORITY_MS = OFFLINE_AUTHORITY_MS;
 type ConfirmedCopy<T> = { feedAuthority: 1; confirmedAt: number; value: T };
 const confirmed = <T>(value: T, confirmedAt = Date.now()): ConfirmedCopy<T> => ({ feedAuthority: 1, confirmedAt, value });
 function currentCopy<T>(entry: unknown): { value: T; confirmedAt: number } | null {

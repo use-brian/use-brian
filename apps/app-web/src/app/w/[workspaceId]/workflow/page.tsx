@@ -40,6 +40,7 @@ import { CreateWorkflowModal } from "@/components/workflow/create-workflow-modal
 import { GridSurfaceSkeleton } from "@/components/chrome/surface-skeleton";
 import { cn } from "@/lib/utils";
 import { useCachedResource } from "@/lib/surface-cache";
+import { leaseSurfaceContent, surfaceContentRemaining, useSurfaceContentRenewal } from "@/lib/offline/surface-content-cache";
 import { surfaceDataKey } from "@/lib/surface-prefetch";
 
 export default function WorkflowPage() {
@@ -51,11 +52,15 @@ export default function WorkflowPage() {
   // `includeArchived` so the collapsed Archived section can render; the grid
   // itself only shows live (active + stale) workflows.
   const workflowsKey = surfaceDataKey("workflow", activeId);
+  // Content lease: the open list never outlives the viewer's authority by more
+  // than 30 seconds (perceived-performance.md, "Content lease for protected lists").
   const workflowList = useCachedResource(workflowsKey, () =>
     activeId
-      ? listWorkflows(activeId, { includeArchived: true })
+      ? leaseSurfaceContent(() => listWorkflows(activeId, { includeArchived: true }))
       : Promise.resolve([] as WorkflowSummary[]),
+    { expiresInMs: activeId ? surfaceContentRemaining : undefined },
   );
+  useSurfaceContentRenewal(workflowList.refresh, Boolean(activeId));
   const workflows = workflowList.data ?? null;
   const [createOpen, setCreateOpen] = useState(false);
   const [archivedOpen, setArchivedOpen] = useState(false);

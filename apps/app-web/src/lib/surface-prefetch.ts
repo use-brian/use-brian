@@ -36,6 +36,7 @@ import { surfaceFromPathname } from "@/lib/doc-page-url";
 import { invalidateSurfaceCache, warmSurfaceCache } from "@/lib/surface-cache";
 import { fetchCrmConfig } from "@/lib/api/crm";
 import { fetchWorkspaceTasks } from "@/lib/api/tasks";
+import { leaseSurfaceContent, surfaceContentRemaining } from "@/lib/offline/surface-content-cache";
 import { getUserInfo } from "@/lib/user";
 import { getView, listWorkspaceAssistants } from "@/lib/api/views";
 import { listWorkflows } from "@/lib/api/workflow";
@@ -832,7 +833,8 @@ export function warmTargetFor(
     case "tasks":
       return {
         key: surfaceDataKey("tasks", workspaceId) as string,
-        fetch: () => fetchWorkspaceTasks(workspaceId),
+        fetch: () => leaseSurfaceContent(() => fetchWorkspaceTasks(workspaceId)),
+        lifecycle: { expiresInMs: surfaceContentRemaining },
       };
     case "association":
       return {
@@ -848,7 +850,8 @@ export function warmTargetFor(
     case "workflow":
       return {
         key: surfaceDataKey("workflow", workspaceId) as string,
-        fetch: () => listWorkflows(workspaceId, { includeArchived: true }),
+        fetch: () => leaseSurfaceContent(() => listWorkflows(workspaceId, { includeArchived: true })),
+        lifecycle: { expiresInMs: surfaceContentRemaining },
       };
     case "studio":
       // The Studio root redirects to Connectors (`studio/page.tsx`), so the
