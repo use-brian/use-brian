@@ -4,6 +4,9 @@ import { query } from '../db/client.js'
 import type { PoolClient } from 'pg'
 import { enqueueRecordingJob } from '../db/recording-jobs-store.js'
 import { createRecording, getRecordingSystem } from '../db/recordings-store.js'
+import { getWorkspaceDefaultRecordingBlueprint } from '../db/workspace-store.js'
+import { createDbPageTemplateStore } from '../db/page-templates-store.js'
+import { resolveRecordingBlueprint } from './resolve-blueprint.js'
 import { captureRecordingIntakeParent } from '../db/recording-intake-admission.js'
 import { validateWatchAudio } from './watch-media.js'
 import { concatAudioWindows } from './ffmpeg.js'
@@ -26,6 +29,21 @@ export async function authorizeWatchDestination(g: Pick<Grant, 'owner_id' | 'wor
   }
 }
 
+/**
+ * The blueprint a watch recording is processed with. A watch has no picker, so,
+ * like a channel recording, it takes the workspace default (null = transcript
+ * only). A stale or inaccessible default must never block the recording.
+ */
+export async function defaultWatchBlueprint(g: Pick<Grant, 'owner_id' | 'workspace_id'>): Promise<string | null> {
+  const selection = await getWorkspaceDefaultRecordingBlueprint(g.workspace_id)
+  if (!selection) return null
+  try {
+    return (await resolveRecordingBlueprint(createDbPageTemplateStore(), { userId: g.owner_id, workspaceId: g.workspace_id, selection })).id
+  } catch {
+    return null
+  }
+}
+
 export function missingSequences(windows: Pick<Window, 'sequence'>[], expected: number): number[] {
   const received = new Set(windows.map(w => w.sequence))
   return Array.from({ length: expected }, (_, i) => i).filter(i => !received.has(i))
@@ -36,8 +54,10 @@ export function createWatchService(deps: {
   files: Pick<FilesApi, 'stat' | 'writeBytes'>
   transcribe?: (audio: Buffer) => Promise<string>
   authorize?: typeof authorizeWatchDestination
+  blueprint?: typeof defaultWatchBlueprint
 }) {
   const authorize = deps.authorize ?? authorizeWatchDestination
+  const blueprint = deps.blueprint ?? defaultWatchBlueprint
   async function ensurePage(g: Grant, c: Capture, db: PoolClient, initial = false) {
     await watchStore.assertLive(c.id, db)
     const existing = await deps.pages.getById(g.owner_id, c.page_id)
@@ -88,6 +108,7 @@ export function createWatchService(deps: {
       await authorize(g)
       if (c.state === 'finalized') {
         // Explicit recovery only: never republish media or alter canonical scope.
+        const blueprintSlug = await blueprint(g)
         await db.query('BEGIN')
         try {
           const failed = await db.query(`SELECT id FROM recordings
@@ -95,7 +116,7 @@ export function createWatchService(deps: {
           [c.recording_id, g.workspace_id])
           if (failed.rows.length) {
             const job = await enqueueRecordingJob({ recordingId: c.recording_id,
-              workspaceId: g.workspace_id, actingUserId: g.owner_id }, db)
+              workspaceId: g.workspace_id, actingUserId: g.owner_id, blueprintSlug, parentPageId: c.page_id }, db)
             // The active-job unique index also protects against non-watch enqueues.
             if (job.enqueued) await db.query("UPDATE recordings SET status='queued' WHERE id=$1 AND status='failed'", [c.recording_id])
           }
@@ -177,10 +198,13 @@ export function createWatchService(deps: {
       await watchStore.assertLive(c.id, db)
       if (!await deps.pages.update(g.owner_id, c.page_id, { linkedRecordingId: recording.id })) throw new WatchError(409, 'page_unavailable')
       await authorize(g)
+      // The brief (when the workspace has a default blueprint) is filed under the capture page.
+      const blueprintId = await blueprint(g)
       // Atomically enqueue into the existing worker and mark finalized; a lost HTTP response cannot enqueue again.
       await db.query('BEGIN')
       try {
-        await db.query(`INSERT INTO recording_jobs(recording_id,workspace_id,acting_user_id) VALUES($1,$2,$3) ON CONFLICT DO NOTHING`, [c.recording_id, g.workspace_id, g.owner_id])
+        await db.query(`INSERT INTO recording_jobs(recording_id,workspace_id,acting_user_id,blueprint_slug,parent_page_id) VALUES($1,$2,$3,$4,$5) ON CONFLICT DO NOTHING`,
+          [c.recording_id, g.workspace_id, g.owner_id, blueprintId, c.page_id])
         await db.query("UPDATE recordings SET status='queued' WHERE id=$1 AND status='awaiting_upload'", [c.recording_id])
         const finalized = await db.query("UPDATE watch_captures SET state='finalized',finalized_at=clock_timestamp() WHERE id=$1 AND state='sealed' AND expires_at>clock_timestamp() RETURNING id", [c.id])
         if (!finalized.rows.length) throw new WatchError(410, 'capture_expired')
