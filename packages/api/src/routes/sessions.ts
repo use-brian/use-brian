@@ -12,7 +12,8 @@ import { query } from '../db/client.js'
 import { getTurnTrace } from '../ledger/turn-trace.js'
 import { getLedgerPayloadStore } from '../ledger/runtime.js'
 import { resolveUser } from './route-helpers.js'
-import { getWorkspaceRoleSystem, getWorkspaceMembershipWithClearanceSystem } from '../db/workspace-store.js'
+import { getWorkspaceRoleSystem, getWorkspaceMembershipWithClearanceSystem, getWorkspaceMembershipWithReadScopeSystem } from '../db/workspace-store.js'
+import { decideSessionRead } from '../session-read-access.js'
 import { canRead, type Sensitivity } from '@use-brian/core'
 import {
   ContextNotAvailableError,
@@ -289,6 +290,8 @@ export function sessionRoutes(opts: SessionRouteOptions = {}): Router {
         lastActiveAt: Date; status: string; appOrigin: string | null
         assistantId: string; channelType: string
         contextGroupId: string | null; contextProjectId: string | null
+        userId: string; visibility: string | null; mode: string | null
+        effectiveClearance: string | null; contextCompartments: string[] | null
       }>(
         `SELECT s.id, s.title, s.channel_id as "channelId",
                 s.last_active_at as "lastActiveAt", s.status,
@@ -296,7 +299,10 @@ export function sessionRoutes(opts: SessionRouteOptions = {}): Router {
                 s.assistant_id as "assistantId",
                 s.channel_type as "channelType",
                 s.context_group_id as "contextGroupId",
-                s.context_project_id as "contextProjectId"
+                s.context_project_id as "contextProjectId",
+                s.user_id as "userId", s.visibility, s.mode,
+                s.effective_clearance as "effectiveClearance",
+                s.context_compartments as "contextCompartments"
          FROM (SELECT * FROM sessions WHERE feed_draft_audience_allowed(id)) s
          WHERE ${workspaceScope
            ? `s.assistant_id IN (SELECT a.id FROM assistants a WHERE a.workspace_id = $1)`
@@ -326,7 +332,34 @@ export function sessionRoutes(opts: SessionRouteOptions = {}): Router {
             : [assistant.id, user.id, appOrigin],
       )
 
-      res.json(result.rows.map((s) => ({
+      // The list never outruns the read gate (session-messages.md): a
+      // department-context chat the caller can no longer read is omitted,
+      // title and all, rather than listed and refused on open.
+      const listWorkspaceId = workspaceScope ? requestedWorkspaceId! : assistant.workspaceId
+      const membership = listWorkspaceId
+        ? await getWorkspaceMembershipWithReadScopeSystem(user.id, listWorkspaceId)
+        : null
+      if (listWorkspaceId && !membership) { res.json([]); return }
+      const now = new Date()
+      const readable = result.rows.filter((s) => !listWorkspaceId || decideSessionRead({
+        callerUserId: user.id,
+        session: {
+          userId: s.userId,
+          visibility: s.visibility,
+          mode: s.mode,
+          effectiveClearance: s.effectiveClearance,
+          contextCompartments: s.contextCompartments ?? [],
+          contextProjectId: s.contextProjectId,
+        },
+        assistantWorkspaceId: listWorkspaceId,
+        membershipClearance: membership!.clearance,
+        membershipCompartments: membership!.compartments,
+        membershipProjectIds: membership!.projectIds,
+        departmentAccess: membership!.departmentAccess,
+        now,
+      }).readable)
+
+      res.json(readable.map((s) => ({
         id: s.id,
         title: s.title ?? 'New Chat',
         channelId: s.channelId,
