@@ -11,6 +11,7 @@ vi.mock('../../db/client.js', () => ({ query: mocks.query, getPool: () => ({
   release: () => {},
   query: (sql: string, values: unknown[]) => {
     if (/^(BEGIN|COMMIT|ROLLBACK|SAVEPOINT|RELEASE SAVEPOINT)/.test(sql) || sql.includes("set_config('app.system_bypass'") || sql.includes('pg_advisory_xact_lock')) return Promise.resolve({ rows: [] })
+    if (sql.startsWith('SELECT 1 FROM workspace_modules WHERE workspace_id=$1 AND module_key=$2 FOR SHARE')) return Promise.resolve({ rows: [] })
     if (sql.startsWith('SELECT id FROM workspaces WHERE id=$1 AND department_read_v2 FOR UPDATE')) return Promise.resolve({ rows: [] })
     if (sql.includes('SELECT role FROM workspace_members')) return Promise.resolve({ rows: [{ role: 'admin' }] })
     return mocks.query(sql, values)

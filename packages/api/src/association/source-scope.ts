@@ -32,6 +32,10 @@ function operationalSourceDenied(): CrmOperationsError {
 
 /** Acquire before operational/source locks; canonical admission uses this lock too. */
 export async function beginAssociationCreation(client: PoolClient, workspaceId: string, nowait = false): Promise<void> {
+  // Module first (association-operations.md, lock order): the module lifecycle
+  // locks its row and then the workspace, so the reverse order here deadlocks
+  // an order against a concurrent shutdown instead of refusing it.
+  await client.query(`SELECT 1 FROM workspace_modules WHERE workspace_id=$1 AND module_key=$2 FOR SHARE${nowait ? ' NOWAIT' : ''}`, [workspaceId, 'association'])
   await client.query(`SELECT id FROM workspaces WHERE id=$1 AND department_read_v2 FOR UPDATE${nowait ? ' NOWAIT' : ''}`, [workspaceId])
 }
 

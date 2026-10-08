@@ -18,21 +18,26 @@ const app = new pg.Pool({ connectionString: process.env.DATABASE_URL_APP, max: 8
 const modules = createAssociationWorkspaceModulesStore(owner, app)
 const commerce = createAssociationStore(owner)
 const actor = { credentialKind: 'api_key' as const, credentialId: 'fixture-key' }
+/** Provider settlement is a verified backend provider path, not a member action. */
+const providerActor = { credentialKind: 'provider' as const, credentialId: 'fixture-provider' }
 const testRegistry = defineWorkspaceModuleRegistry({ test_module: { key: 'test_module', defaultState: 'disabled' } } as const)
 
-async function workspace() {
+async function workspace(v2 = true) {
   const userId = randomUUID()
   const memberId = randomUUID()
   const workspaceId = randomUUID()
   await owner.query(`INSERT INTO users (id,auth_provider_id) VALUES ($1::uuid,$1::text),($2::uuid,$2::text)`, [userId, memberId])
-  await owner.query(`INSERT INTO workspaces (id,name,owner_user_id) VALUES ($1,'Fixture association',$2)`, [workspaceId, userId])
+  await owner.query(`INSERT INTO workspaces (id,name,owner_user_id,department_read_v2) VALUES ($1,'Fixture association',$2,$3)`, [workspaceId, userId, v2])
   await owner.query(`INSERT INTO workspace_members (workspace_id,user_id,role) VALUES ($1,$2,'owner'),($1,$3,'member')`, [workspaceId, userId, memberId])
-  return { workspaceId, userId, memberId }
+  return { workspaceId, userId, memberId, actor: { credentialKind: 'user' as const, credentialId: userId } }
 }
 
-async function enabledCommerce() {
-  const fixture = await workspace()
+async function enabledCommerce(v2 = true) {
+  const fixture = await workspace(v2)
   const { workspaceId, userId } = fixture
+  // Act as the workspace user: under department read v2 an anonymous key has no
+  // department authority (association-operations.md), so the fixture uses a user actor.
+  const userActor = { credentialKind: 'user' as const, credentialId: userId }
   const enabled = await modules.act(workspaceId, userId, 'association', { action: 'enable', expectedVersion: 1 })
   const contactId = randomUUID()
   await owner.query(`INSERT INTO entities (id,workspace_id,kind,display_name,created_by_user_id,source)
@@ -40,14 +45,14 @@ async function enabledCommerce() {
   const event = await commerce.upsertEvent(workspaceId, EventInputSchema.parse({
     slug: 'fixture-event', title: 'Fixture event', startsAt: '2099-01-01T12:00:00Z',
     endsAt: '2099-01-01T14:00:00Z', timezone: 'UTC', mode: 'venue', status: 'published', capacity: 10,
-  }), actor)
+  }), userActor)
   const eventId = String(event.record.id)
   const ticket = await commerce.upsertTicket(workspaceId, eventId, TicketInputSchema.parse({
     key: 'standard', name: 'Standard', currency: 'USD', priceMinor: 100, status: 'on_sale', capacity: 10,
-  }), actor)
+  }), userActor)
   const input = OrderCreateSchema.parse({ contactId, idempotencyKey: randomUUID(),
     lines: [{ ticketId: ticket.record.id, quantity: 1, attendees: [{ name: 'Fixture Attendee' }] }] })
-  return { ...fixture, contactId, eventId, ticketId: String(ticket.record.id), input, enabled }
+  return { ...fixture, contactId, eventId, ticketId: String(ticket.record.id), input, enabled, actor: userActor }
 }
 
 /** Observe PostgreSQL's lock wait rather than assuming a sleep means blocked. */
@@ -93,7 +98,7 @@ describe('[COMP:api/workspace-modules] Actual lifecycle and admission transactio
     expect(initial[0]).toMatchObject({ state: 'disabled', version: 1 })
     await expect(modules.act(f.workspaceId, f.memberId, 'association', { action: 'enable', expectedVersion: 1 })).rejects.toMatchObject({ code: 'not_authorized' })
     await expect(modules.listForMember(f.workspaceId, randomUUID())).rejects.toMatchObject({ code: 'not_authorized' })
-    await commerce.upsertPlan(f.workspaceId, PlanInputSchema.parse({ key: 'general', name: 'General', currency: 'USD', feeMinor: 0, billingPeriod: 'manual' }), actor)
+    await commerce.upsertPlan(f.workspaceId, PlanInputSchema.parse({ key: 'general', name: 'General', currency: 'USD', feeMinor: 0, billingPeriod: 'manual' }), f.actor)
     expect((await commerce.listPlans(f.workspaceId, { limit: 100, cursor: null })).items).toHaveLength(1)
     const enabled = await modules.act(f.workspaceId, f.userId, 'association', { action: 'enable', expectedVersion: 1 })
     expect(enabled).toMatchObject({ changed: true, module: { state: 'enabled', version: 2 } })
@@ -133,7 +138,7 @@ describe('[COMP:api/workspace-modules] Actual lifecycle and admission transactio
     expect(await modules.get(f.workspaceId, 'association')).toMatchObject({ state: 'disabled', version: 0 })
     await expect(commerce.upsertTicket(f.workspaceId, randomUUID(), TicketInputSchema.parse({
       key: 'blocked', name: 'Blocked', currency: 'USD', priceMinor: 0,
-    }), actor)).rejects.toMatchObject({ code: 'module_disabled' })
+    }), f.actor)).rejects.toMatchObject({ code: 'module_disabled' })
     expect(await modules.act(f.workspaceId, f.userId, 'association', { action: 'enable', expectedVersion: 0 }))
       .toMatchObject({ changed: true, module: { state: 'enabled', version: 2 } })
   })
@@ -143,7 +148,7 @@ describe('[COMP:api/workspace-modules] Actual lifecycle and admission transactio
     const held = await owner.connect()
     await held.query('BEGIN')
     await held.query('SELECT id FROM association_events WHERE id=$1 FOR UPDATE', [f.eventId])
-    const order = commerce.createOrder(f.workspaceId, f.input, actor)
+    const order = commerce.createOrder(f.workspaceId, f.input, f.actor)
     // Handle any rejection while observing locks, so a broken assertion is not
     // masked by a later unhandled rejection or a leaked test connection.
     void order.catch(() => undefined)
@@ -156,9 +161,9 @@ describe('[COMP:api/workspace-modules] Actual lifecycle and admission transactio
     } finally { await held.query('ROLLBACK'); held.release() }
     const created = await order
     expect(await shutdown).toMatchObject({ changed: true, pendingOrders: 1, module: { state: 'draining', version: 3 } })
-    await expect(commerce.createOrder(f.workspaceId, { ...f.input, idempotencyKey: randomUUID() }, actor))
+    await expect(commerce.createOrder(f.workspaceId, { ...f.input, idempotencyKey: randomUUID() }, f.actor))
       .rejects.toMatchObject({ code: 'module_draining' })
-    expect((await commerce.createOrder(f.workspaceId, f.input, actor)).record.id).toBe(created.record.id)
+    expect((await commerce.createOrder(f.workspaceId, f.input, f.actor)).record.id).toBe(created.record.id)
     await expect(modules.act(f.workspaceId, f.userId, 'association', { action: 'finish_disable', expectedVersion: 3 }))
       .rejects.toMatchObject({ code: 'module_drain_pending', details: {
         moduleKey: 'association', blockingWork: [{ key: 'pending_orders', count: 1 }],
@@ -189,7 +194,7 @@ describe('[COMP:api/workspace-modules] Actual lifecycle and admission transactio
       'association', { action: 'request_disable', expectedVersion: 2 })
     void shutdown.catch(() => undefined)
     await Promise.race([reached, shutdown.then(() => { throw new Error('Expected an uncommitted transition') })])
-    const order = commerce.createOrder(f.workspaceId, f.input, actor)
+    const order = commerce.createOrder(f.workspaceId, f.input, f.actor)
     const rejected = expect(order).rejects.toMatchObject({ code: 'module_disabled' })
     try {
       await blocked('module_key=$2 FOR SHARE', 'assurance-owner')
@@ -202,22 +207,24 @@ describe('[COMP:api/workspace-modules] Actual lifecycle and admission transactio
   })
 
   it('supports provider recovery, exact replay and check-in/refund after disable (M4)', async () => {
-    const f = await enabledCommerce()
-    const created = await commerce.createOrder(f.workspaceId, f.input, actor)
+    // Legacy model: under v2 provider settlement runs through a bound integration
+    // credential (provider-inbox suite); a bare provider actor has no department authority.
+    const f = await enabledCommerce(false)
+    const created = await commerce.createOrder(f.workspaceId, f.input, f.actor)
     const id = String(created.record.id)
     const paid = { provider: 'fixture', providerReference: randomUUID(), amountMinor: Number(created.record.totalMinor), currency: String(created.record.currency), eventId: randomUUID(), targetStatus: 'paid' as const, occurredAt: new Date().toISOString(), metadata: {} }
-    await commerce.bindOrderProvider(f.workspaceId, id, { provider: paid.provider, providerReference: paid.providerReference, amountMinor: paid.amountMinor, currency: paid.currency }, actor)
+    await commerce.bindOrderProvider(f.workspaceId, id, { provider: paid.provider, providerReference: paid.providerReference, amountMinor: paid.amountMinor, currency: paid.currency }, providerActor)
     await modules.act(f.workspaceId, f.userId, 'association', { action: 'request_disable', expectedVersion: 2 })
-    await commerce.reconcileProviderEvent(f.workspaceId, id, paid, actor)
+    await commerce.reconcileProviderEvent(f.workspaceId, id, paid, providerActor)
     expect(await modules.act(f.workspaceId, f.userId, 'association', { action: 'finish_disable', expectedVersion: 3 }))
       .toMatchObject({ module: { state: 'disabled', version: 4 }, pendingOrders: 0 })
-    const replay = await commerce.createOrder(f.workspaceId, f.input, actor)
+    const replay = await commerce.createOrder(f.workspaceId, f.input, f.actor)
     expect(replay).toMatchObject({ created: false, record: { id, status: 'paid' } })
-    await expect(commerce.createOrder(f.workspaceId, { ...f.input, reservationMinutes: 10 }, actor)).rejects.toMatchObject({ code: 'conflict' })
-    expect(await commerce.reconcileProviderEvent(f.workspaceId, id, paid, actor)).toMatchObject({ created: false })
+    await expect(commerce.createOrder(f.workspaceId, { ...f.input, reservationMinutes: 10 }, f.actor)).rejects.toMatchObject({ code: 'conflict' })
+    expect(await commerce.reconcileProviderEvent(f.workspaceId, id, paid, providerActor)).toMatchObject({ created: false })
     const registration = (await owner.query('SELECT id FROM association_registrations WHERE order_id=$1', [id])).rows[0]
-    expect(await commerce.updateRegistration(f.workspaceId, registration.id, { status: 'checked_in' }, actor)).toMatchObject({ status: 'checked_in' })
-    expect(await commerce.reconcileProviderEvent(f.workspaceId, id, { ...paid, eventId: randomUUID(), targetStatus: 'refunded' }, actor))
+    expect(await commerce.updateRegistration(f.workspaceId, registration.id, { status: 'checked_in' }, f.actor)).toMatchObject({ status: 'checked_in' })
+    expect(await commerce.reconcileProviderEvent(f.workspaceId, id, { ...paid, eventId: randomUUID(), targetStatus: 'refunded' }, providerActor))
       .toMatchObject({ record: { status: 'refunded' } })
     expect(await commerce.getOrder(f.workspaceId, id)).toMatchObject({ id, status: 'refunded' })
   })
