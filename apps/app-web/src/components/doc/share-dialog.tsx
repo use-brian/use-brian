@@ -35,6 +35,7 @@ import { docPublicUrl } from "@/lib/doc-public-url";
 import { bestInternalShareLink } from "@/lib/api/internal-links";
 import { InternalLinkControl } from "@/components/internal-link-control";
 import { confirmDialog } from "@/components/ui/confirm-dialog";
+import { promptDialog } from "@/components/ui/prompt-dialog";
 import { openWorkspaceSettings } from "@/components/settings-modal/settings-modal";
 import {
   checkSlugAvailability,
@@ -43,6 +44,7 @@ import {
   listShareGrants,
   listWorkspaceGroups,
   publishPage,
+  PublishReviewError,
   revokeGrant,
   setPageSlug,
   unpublishPage,
@@ -549,13 +551,49 @@ export function ShareDialog({
     }
   }
 
+  /** Publishing is an explicit declassification: confirm it, and for a
+   *  department page collect the reason the server records (doc.md,
+   *  "Publishing is an explicit declassification"). */
   async function doPublish() {
     setError(null);
     setBusy(true);
     try {
-      const next = await publishPage(pageId, publish.indexable);
-      setPublish(next);
-      onPublishChanged?.();
+      let review: { declassify?: boolean; reason?: string } | undefined;
+      for (let attempt = 0; attempt < 3; attempt += 1) {
+        try {
+          const next = await publishPage(pageId, publish.indexable, undefined, review);
+          setPublish(next);
+          onPublishChanged?.();
+          return;
+        } catch (err) {
+          if (!(err instanceof PublishReviewError)) throw err;
+          if (err.code === "department_widening_forbidden") {
+            setError(t.publishReviewForbidden);
+            return;
+          }
+          if (err.code === "not_public") {
+            const confirmed = await confirmDialog({
+              title: t.publishDeclassifyTitle,
+              description: t.publishDeclassifyBody,
+              confirmLabel: t.publishDeclassifyConfirm,
+              cancelLabel: t.publishCancel,
+            });
+            if (!confirmed) return;
+            review = { ...review, declassify: true };
+            continue;
+          }
+          const reason = await promptDialog({
+            title: t.publishReviewTitle,
+            description: t.publishReviewBody,
+            placeholder: t.publishReviewPlaceholder,
+            confirmLabel: t.publishReviewConfirm,
+            cancelLabel: t.publishCancel,
+            multiline: true,
+          });
+          if (!reason?.trim()) return;
+          review = { declassify: true, reason: reason.trim() };
+        }
+      }
     } catch (err) {
       setError(err instanceof Error ? err.message : String(err));
     } finally {

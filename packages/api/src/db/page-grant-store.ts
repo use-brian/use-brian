@@ -359,6 +359,9 @@ export function createDbPageGrantStore(): PageGrantStore {
             AND r.clearance = 'public'
             AND w.external_sharing_enabled = true
             AND r.id IN (SELECT id FROM chain)
+            -- A link never reaches a descendant in another department (doc.md publishing).
+            AND (SELECT ts.workspace_group_id FROM teamspaces ts WHERE ts.id = r.teamspace_id)
+                IS NOT DISTINCT FROM (SELECT ts.workspace_group_id FROM teamspaces ts WHERE ts.id = t.teamspace_id)
           LIMIT 1`,
         [tokenHash, pageId],
       )
@@ -459,7 +462,10 @@ export function createDbPageGrantStore(): PageGrantStore {
                  AND (pg.expires_at IS NULL OR pg.expires_at > now())
                  AND pg.page_id IN (SELECT id FROM chain)
                  AND EXISTS (SELECT 1 FROM saved_views g
-                              WHERE g.id = pg.page_id AND g.clearance = 'public')
+                              WHERE g.id = pg.page_id AND g.clearance = 'public'
+                                -- Never across a department boundary (doc.md publishing).
+                                AND (SELECT ts.workspace_group_id FROM teamspaces ts WHERE ts.id = g.teamspace_id)
+                                    IS NOT DISTINCT FROM (SELECT ts.workspace_group_id FROM teamspaces ts WHERE ts.id = t.teamspace_id))
           WHERE t.id = $1
             AND w.external_sharing_enabled = true
           GROUP BY t.id, t.workspace_id, t.name, t.icon, t.full_width

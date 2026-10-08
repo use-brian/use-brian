@@ -96,6 +96,7 @@ import type { PageTemplateStore } from '../db/page-templates-store.js'
 import type { BlueprintRecordStore } from '../db/blueprint-records-store.js'
 import { createRecordPageProjector } from '../synthesis/synthesize.js'
 import { getWorkspaceMembershipWithClearanceSystem } from '../db/workspace-store.js'
+import { query } from '../db/client.js'
 import { PUBLISH_ROLES, type PageGrantStore, type PublishRole } from '../db/page-grant-store.js'
 import type { WorkspaceGroupStore } from '../db/workspace-group-store.js'
 import { publishPageShareChange } from '../page-share-fanout.js'
@@ -891,6 +892,8 @@ export function viewsRoutes(opts: ViewsRouteOptions): Router {
     label: z.string().max(120).nullable().optional(),
     indexable: z.boolean().optional(),
     expiresAt: z.string().datetime().nullable().optional(),
+    /** A reviewed reason, required to widen a department page (doc.md). */
+    reason: z.string().trim().min(1).max(1000).optional(),
     declassify: z.boolean().optional(),
   })
 
@@ -899,6 +902,44 @@ export function viewsRoutes(opts: ViewsRouteOptions): Router {
     if (view.createdBy === userId) return true
     const membership = await getWorkspaceMembershipWithClearanceSystem(userId, view.workspaceId)
     return membership?.role === 'owner' || membership?.role === 'admin'
+  }
+
+  /**
+   * Publishing a department page to the web removes its department requirement:
+   * an owner/admin who currently holds the department at the page tier must give
+   * a reason, and the widening is recorded (doc.md, "Publishing is an explicit
+   * declassification"). Neither refusal names the department.
+   */
+  async function reviewDepartmentWidening(userId: string, view: SavedView, reason: string | undefined, res: Response):
+    Promise<{ ok: true; departmentKey: string | null } | { ok: false }> {
+    const department = (await query<{ key: string | null }>(
+      `SELECT g.compartment_key AS key FROM saved_views v
+         JOIN teamspaces ts ON ts.id = v.teamspace_id
+         JOIN workspace_groups g ON g.id = ts.workspace_group_id AND g.workspace_id = v.workspace_id
+        WHERE v.id = $1`, [view.id])).rows[0]?.key ?? null
+    if (!department) return { ok: true, departmentKey: null }
+    const membership = await getWorkspaceMembershipWithClearanceSystem(userId, view.workspaceId)
+    const holds = (await query<{ ok: boolean }>(
+      `SELECT coalesce(department_row_allows(department_read_grants_for($1::uuid), $2, $3, ARRAY[$4::text], NULL), false) AS ok`,
+      [userId, view.workspaceId, view.clearance, department])).rows[0]?.ok === true
+    if (!(membership?.role === 'owner' || membership?.role === 'admin') || !holds) {
+      res.status(403).json({ error: 'Only an owner or admin who belongs to this page\'s department can publish it', code: 'department_widening_forbidden' })
+      return { ok: false }
+    }
+    if (!reason) {
+      res.status(409).json({ error: 'Publishing this page widens a department page; give a reason', code: 'department_widening_review_required' })
+      return { ok: false }
+    }
+    return { ok: true, departmentKey: department }
+  }
+
+  async function recordDepartmentWidening(userId: string, view: SavedView, departmentKey: string, reason: string): Promise<void> {
+    await query(
+      `INSERT INTO context_scope_reclassification_events
+         (workspace_id, primitive, row_id, previous_compartments, next_compartments,
+          previous_project_ids, next_project_ids, actor_user_id, reason, widening)
+       VALUES ($1, 'page_publication', $2, ARRAY[$3::text], '{}', '{}', '{}', $4, $5, true)`,
+      [view.workspaceId, view.id, departmentKey, userId, reason])
   }
 
   // POST /views/:id/share — mint an anonymous "anyone with the link" grant.
@@ -920,10 +961,13 @@ export function viewsRoutes(opts: ViewsRouteOptions): Router {
     }
 
     // Publishing is an explicit declassification — the page must be public.
+    if (view.clearance !== 'public' && !parsed.data.declassify) {
+      return res.status(409).json({ error: 'Page must be public to share externally', code: 'not_public' })
+    }
+    // Every new link to a department page is a reviewed widening.
+    const review = await reviewDepartmentWidening(userId, view, parsed.data.reason, res)
+    if (!review.ok) return
     if (view.clearance !== 'public') {
-      if (!parsed.data.declassify) {
-        return res.status(409).json({ error: 'Page must be public to share externally', code: 'not_public' })
-      }
       await opts.savedViewStore.update(userId, view.id, { clearance: 'public' })
     }
 
@@ -935,6 +979,8 @@ export function viewsRoutes(opts: ViewsRouteOptions): Router {
       indexable: parsed.data.indexable ?? false,
       expiresAt: parsed.data.expiresAt ? new Date(parsed.data.expiresAt) : null,
     })
+
+    if (review.departmentKey) await recordDepartmentWidening(userId, view, review.departmentKey, parsed.data.reason!)
 
     opts.analytics?.logEvent({
       userId,
@@ -984,10 +1030,23 @@ export function viewsRoutes(opts: ViewsRouteOptions): Router {
     if (!(await canManageShare(userId, view))) {
       return res.status(403).json({ error: 'Only the page owner or a workspace admin can publish this page' })
     }
+    // Publishing is an explicit declassification, never a silent one.
+    if (view.clearance !== 'public' && body.declassify !== true) {
+      return res.status(409).json({ error: 'Page must be public to publish', code: 'not_public' })
+    }
+    const reason = typeof body.reason === 'string' && body.reason.trim() ? body.reason.trim().slice(0, 1000) : undefined
+    // A first publish (or any declassification) of a department page is a reviewed
+    // widening; changing the role or indexing of a live publication is not.
+    const live = (await opts.pageGrantStore.getPublishState(userId, view.id)).published
+    const review = !live || view.clearance !== 'public'
+      ? await reviewDepartmentWidening(userId, view, reason, res)
+      : { ok: true as const, departmentKey: null }
+    if (!review.ok) return
     if (view.clearance !== 'public') {
       await opts.savedViewStore.update(userId, view.id, { clearance: 'public' })
     }
     const state = await opts.pageGrantStore.publishPage({ userId, pageId: view.id, indexable, role })
+    if (review.departmentKey) await recordDepartmentWidening(userId, view, review.departmentKey, reason!)
     opts.analytics?.logEvent({
       userId,
       eventName: 'page_published',
