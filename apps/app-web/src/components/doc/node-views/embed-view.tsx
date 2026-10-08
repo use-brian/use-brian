@@ -21,7 +21,7 @@
  * [COMP:app-web/data-embed]
  */
 
-import { useCallback, useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { useRouter } from "next/navigation";
 import { NodeViewWrapper, type NodeViewProps } from "@tiptap/react";
 import { Code2, Database, Film, Music, Share2 } from "lucide-react";
@@ -80,6 +80,7 @@ import { ErrorBoundary } from "../error-states";
 import { isDesktopAuth } from "@/lib/desktop-auth-source";
 import { idbGet, idbSet } from "@/lib/offline/idb";
 import { resolveDataBlockRender } from "@/lib/offline/data-block-policy";
+import { SURFACE_CONTENT_LEASE_MS, useSurfaceContentRenewal } from "@/lib/offline/surface-content-cache";
 
 /** Renderer `column-*` actions that mutate the SCHEMA (custom tables only),
  *  vs the display-only ops folded by `reduceColumnOp`. */
@@ -96,7 +97,7 @@ function isTableRoot(widget: A2UIWidget | undefined | null): widget is TableWidg
   return !!widget && widget.type === "table";
 }
 
-function DataEmbed({
+export function DataEmbed({
   block,
   binding,
   updateBlock,
@@ -186,6 +187,7 @@ function DataEmbed({
       .then((p) => {
         if (cancelled) return;
         setPayload(p);
+        confirmedAtRef.current = performance.now();
         if (isDesktopAuth()) void idbSet(cacheKey, { payload: p, cachedAt: Date.now() });
       })
       .catch(async (e) => {
@@ -213,6 +215,34 @@ function DataEmbed({
     // Keyed on `dataKey` (not `binding`) so display edits don't refetch.
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [ws.workspaceId, dataKey, reloadCount]);
+
+  // Content lease (perceived-performance.md, "Content lease for protected
+  // lists"): bound rows are read as the viewer, so re-resolving every 15
+  // seconds drops rows the viewer can no longer read. The payload is swapped
+  // only when it changed, so an unchanged view never re-renders under an edit.
+  // Online, rows unconfirmed for the lease are dropped and re-resolved.
+  const confirmedAtRef = useRef(performance.now());
+  const bindingRef = useRef(binding);
+  bindingRef.current = binding;
+  const payloadRef = useRef(payload);
+  payloadRef.current = payload;
+  const renewRows = useCallback(async () => {
+    const next = await renderBinding(ws.workspaceId, bindingRef.current);
+    confirmedAtRef.current = performance.now();
+    if (JSON.stringify(next) !== JSON.stringify(payloadRef.current)) setPayload(next);
+  }, [ws.workspaceId]);
+  useSurfaceContentRenewal(renewRows, payload !== null);
+  useEffect(() => {
+    if (payload === null) return;
+    const timer = setInterval(() => {
+      if (typeof navigator !== "undefined" && navigator.onLine === false) return;
+      if (performance.now() - confirmedAtRef.current >= SURFACE_CONTENT_LEASE_MS) {
+        setPayload(null);
+        setReloadCount((n) => n + 1);
+      }
+    }, 5_000);
+    return () => clearInterval(timer);
+  }, [payload]);
 
   // Seed the toolbar value from the block's persisted display once we know the
   // table's columns. Re-seeds only when the column SET changes (a binding
