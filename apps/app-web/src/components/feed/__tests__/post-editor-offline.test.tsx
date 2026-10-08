@@ -117,6 +117,43 @@ describe('[COMP:app-web/feed-post-editor] automatic legacy upgrade', () => {
     });
   }
   const commands = () => vi.mocked(authFetch).mock.calls.filter(([url, init]) => String(url).endsWith('/commands') && init?.method === 'POST');
+  it('hides an open editor when its department access lapses and restores it on retry', async () => {
+    const post=await legacyPost();goOnline(post);await render(post.session.id);
+    expect(container.querySelector('[data-feed-composition]')?.textContent).toContain('Keep the existing copy.');
+    const previous=vi.mocked(authFetch).getMockImplementation()!;
+    // The draft no longer lists for this viewer: its sources left the viewer's departments.
+    vi.mocked(authFetch).mockImplementation((url,init)=>String(url).includes('/draft-sessions?')?Promise.resolve(new Response(JSON.stringify({sessions:[]}))):previous(url,init));
+    await act(async()=>{window.dispatchEvent(new Event('focus'));});
+    await act(async()=>{});
+    expect(container.querySelector('[data-post-editor-unavailable]')?.textContent).toContain(en.feedPage.postEditor.accessLostTitle);
+    expect(container.querySelector('[data-feed-composition],textarea,[contenteditable]')).toBeNull();
+    expect(container.textContent).not.toContain('Keep the existing copy.');
+    // The working copy is untouched while hidden.
+    expect((await readLocalFeedPost('assistant-1',post.session.id))?.content.text).toBe('Keep the existing copy.');
+    vi.mocked(authFetch).mockImplementation(previous);
+    const retry=[...container.querySelectorAll('button')].find(b=>b.textContent===en.feedPage.postEditor.accessLostRetry)!;
+    await act(async()=>retry.click());
+    await act(async()=>{});
+    expect(container.querySelector('[data-post-editor-unavailable]')).toBeNull();
+    expect(container.querySelector('[data-feed-composition]')?.textContent).toContain('Keep the existing copy.');
+  });
+  it('hides after the 30-second lease online but keeps the one-hour window offline', async () => {
+    const post=await legacyPost();goOnline(post);await render(post.session.id);
+    const previous=vi.mocked(authFetch).getMockImplementation()!;
+    vi.mocked(authFetch).mockImplementation((url,init)=>String(url).includes('/draft-sessions?')?Promise.reject(new Error('network')):previous(url,init));
+    const now=performance.now();const clock=vi.spyOn(performance,'now');
+    try {
+      Object.defineProperty(navigator,'onLine',{value:false,configurable:true});
+      clock.mockReturnValue(now+31_000);
+      await act(async()=>{window.dispatchEvent(new Event('focus'));});
+      expect(container.querySelector('[data-post-editor-unavailable]')).toBeNull();
+      Object.defineProperty(navigator,'onLine',{value:true,configurable:true});
+      await act(async()=>{window.dispatchEvent(new Event('focus'));});
+      await act(async()=>{});
+      expect(container.querySelector('[data-post-editor-unavailable]')).toBeTruthy();
+      expect(container.textContent).not.toContain('Keep the existing copy.');
+    } finally { clock.mockRestore(); }
+  });
   it('withholds an open editor after a collaboration read denies access', async () => {
     const post=await legacyPost();goOnline(post);await render(post.session.id);
     expect(container.querySelector('[data-feed-composition]')).toBeTruthy();

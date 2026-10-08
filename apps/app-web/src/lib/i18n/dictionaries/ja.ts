@@ -9304,6 +9304,10 @@ export const ja: Dictionary = {
       dateLabel: "日付",
     },
     postEditor: {
+      accessLostTitle: "この投稿は現在利用できません",
+      accessLostBody: "参照元が現在の部門アクセスの範囲外になったか、投稿が削除されました。未同期の編集はこの端末に保存され、アクセスが戻ると表示されます。",
+      accessLostRetry: "再試行",
+      accessLostBack: "すべての投稿",
       syncPaused: "同期が一時停止中",
       retryingSync: "同期を再試行中...",
       syncReadOnly: "この投稿は読み取り専用です。未同期の編集内容はこの端末に保存されています。編集を続けるには、新しい投稿として保存してください。",

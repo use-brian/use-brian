@@ -107,7 +107,9 @@ import {
 import { useGlobalDockRecorder } from "@/lib/recorder/dock-recorder-bridge";
 
 import { useIsOffline } from "@/lib/offline/use-offline-sync";
-import { feedCachedJson, isAuthoritativeFeedDenial } from "@/lib/offline/feed-cache";
+import { FEED_API_URL, feedCachedJson, isAuthoritativeFeedDenial } from "@/lib/offline/feed-cache";
+import { OFFLINE_AUTHORITY_MS, SURFACE_CONTENT_LEASE_MS, useSurfaceContentRenewal } from "@/lib/offline/surface-content-cache";
+import { authFetch } from "@/lib/auth-fetch";
 import {
   FEED_LOCAL_CHANGED, blankFeedContent, createLocalFeedPost, loadFeedWorkingCopy,
   patchFeedWorkingCopy, readLocalFeedPost, forkLocalFeedPost, ensureFeedComposition, retryFeedWorkingCopy,
@@ -979,6 +981,67 @@ function PostPane({
     ),
     [te],
   );
+
+  // Department authority for the open editor (perceived-performance.md,
+  // "Content lease for protected lists"): a draft is shown only while its
+  // session still lists for this viewer. An authoritative denial hides it at
+  // once; failed renewals hide it after the lease (one hour offline, the disk
+  // tier's window). Edits stay in state and in the local working copy.
+  const [accessLost, setAccessLost] = useState(false);
+  const confirmedAtRef = useRef(performance.now());
+  const renewable = session !== null && !localPost?.newSession;
+  const accessDeadlinePassed = useCallback(() => performance.now() - confirmedAtRef.current
+    >= (typeof navigator !== "undefined" && navigator.onLine === false ? OFFLINE_AUTHORITY_MS : SURFACE_CONTENT_LEASE_MS), []);
+  const renewAccess = useCallback(async () => {
+    try {
+      const response = await authFetch(
+        `${FEED_API_URL}/api/distribution/${assistantId}/draft-sessions?platform=${platform}`,
+        { signal: AbortSignal.timeout(8_000) },
+      );
+      if (response.ok) {
+        const body = await response.json() as { sessions?: Array<{ id: string }> };
+        if (body.sessions?.some((item) => item.id === sessionId)) {
+          confirmedAtRef.current = performance.now();
+          setAccessLost(false);
+          return true;
+        }
+        setAccessLost(true);
+        return false;
+      }
+      if (response.status >= 400 && response.status < 500) {
+        setAccessLost(true);
+        return false;
+      }
+    } catch { /* transient: the deadline decides */ }
+    if (accessDeadlinePassed()) setAccessLost(true);
+    return false;
+  }, [accessDeadlinePassed, assistantId, platform, sessionId]);
+  useEffect(() => { if (session) confirmedAtRef.current = performance.now(); }, [session]);
+  useSurfaceContentRenewal(renewAccess, renewable);
+  useEffect(() => {
+    if (!renewable) return;
+    const timer = setInterval(() => { if (accessDeadlinePassed()) setAccessLost(true); }, 5_000);
+    return () => clearInterval(timer);
+  }, [accessDeadlinePassed, renewable]);
+
+  if (accessLost) {
+    return (
+      <div role="alert" data-post-editor-unavailable className="flex h-full flex-col items-center justify-center gap-3 p-6 text-center">
+        <p className="text-sm font-medium">{te.accessLostTitle}</p>
+        <p className="max-w-md text-sm text-muted-foreground">{te.accessLostBody}</p>
+        <div className="flex flex-wrap items-center justify-center gap-2">
+          <Button type="button" variant="outline" className="max-sm:min-h-11"
+            onClick={() => void renewAccess().then((ok) => { if (ok) void load(); })}>
+            {te.accessLostRetry}
+          </Button>
+          <Button type="button" variant="ghost" className="max-sm:min-h-11"
+            onClick={() => router.push(feedPath(workspaceId, { platform, segment: "posts" }))}>
+            {te.accessLostBack}
+          </Button>
+        </div>
+      </div>
+    );
+  }
 
   if (loading) {
     // The editor's silhouette (header row, status strip, the caption card)

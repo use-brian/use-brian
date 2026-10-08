@@ -9252,6 +9252,10 @@ export const zh: Dictionary = {
       dateLabel: "日期",
     },
     postEditor: {
+      accessLostTitle: "你目前無法存取此貼文",
+      accessLostBody: "其來源已超出你目前的部門存取範圍，或貼文已被移除。尚未同步的編輯會保留在此裝置上，存取恢復後會重新顯示。",
+      accessLostRetry: "重試",
+      accessLostBack: "所有貼文",
       syncPaused: "同步已暫停",
       retryingSync: "正在重試同步...",
       syncReadOnly: "此貼文為唯讀。尚未同步的編輯已儲存在此裝置。請另存為新貼文以繼續編輯。",

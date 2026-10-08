@@ -9545,6 +9545,10 @@ export const en = {
       dateLabel: "Date",
     },
     postEditor: {
+      accessLostTitle: "This post is no longer available to you",
+      accessLostBody: "Its sources are outside your current department access, or it was removed. Your unsynced edits are kept on this device and come back if access returns.",
+      accessLostRetry: "Try again",
+      accessLostBack: "All posts",
       syncPaused: "Sync paused",
       retryingSync: "Retrying sync...",
       syncReadOnly: "This post is read-only. Your unsynced edits are saved on this device. Save them as a new post to keep working.",

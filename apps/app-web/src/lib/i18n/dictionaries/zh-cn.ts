@@ -9382,6 +9382,10 @@ export const zhCN: Dictionary = {
       dateLabel: "日期",
     },
     postEditor: {
+      accessLostTitle: "你目前无法访问此帖子",
+      accessLostBody: "其来源已超出你当前的部门访问范围，或帖子已被移除。尚未同步的编辑会保留在此设备上，访问恢复后会重新显示。",
+      accessLostRetry: "重试",
+      accessLostBack: "所有帖子",
       syncPaused: "同步已暂停",
       retryingSync: "正在重试同步...",
       syncReadOnly: "此帖子为只读。尚未同步的编辑已保存在此设备。请另存为新帖子以继续编辑。",
