@@ -164,9 +164,9 @@ export const ACCOUNT_TEARDOWN_RULES: Readonly<Record<string, AccountTeardownRule
  */
 export const DELETED_USER_NAME = 'Deleted user'
 
-const ident = (name: string) => `"${name.replace(/"/g, '""')}"`
+export const ident = (name: string) => `"${name.replace(/"/g, '""')}"`
 
-type Step = { name: string; sql: string; values: unknown[] }
+export type Step = { name: string; sql: string; values: unknown[] }
 
 // foreign_key_violation, restrict_violation, lock_not_available, deadlock_detected
 const RETRYABLE = new Set(['23503', '23001', '55P03', '40P01'])
@@ -174,7 +174,15 @@ const RETRYABLE = new Set(['23503', '23001', '55P03', '40P01'])
 const LOCK_CODES = new Set(['55P03', '40P01'])
 const pause = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms))
 
-async function fixpoint(client: TeardownClient, steps: Step[]): Promise<void> {
+/**
+ * Runs `steps` to a fixpoint. `blocked` builds the error for a step that
+ * cannot complete; other teardowns (assistant-teardown.ts) pass their own.
+ */
+export async function fixpoint(
+  client: TeardownClient,
+  steps: Step[],
+  blocked: (blockers: Array<{ step: string; error: string }>) => Error = (b) => new AccountTeardownBlockedError(b),
+): Promise<void> {
   let pending = steps
   let lastErrors = new Map<string, string>()
   let lockWait = false
@@ -196,7 +204,7 @@ async function fixpoint(client: TeardownClient, steps: Step[]): Promise<void> {
         await client.query('RELEASE SAVEPOINT account_teardown_step')
         const code = (err as { code?: string }).code
         if (!code || !RETRYABLE.has(code)) {
-          throw new AccountTeardownBlockedError([{ step: step.name, error: (err as Error).message }])
+          throw blocked([{ step: step.name, error: (err as Error).message }])
         }
         next.push(step)
         lastErrors.set(step.name, (err as Error).message)
@@ -207,13 +215,11 @@ async function fixpoint(client: TeardownClient, steps: Step[]): Promise<void> {
     pending = next
   }
   if (pending.length > 0) {
-    throw new AccountTeardownBlockedError(
-      pending.map((s) => ({ step: s.name, error: lastErrors.get(s.name) ?? 'unknown' })),
-    )
+    throw blocked(pending.map((s) => ({ step: s.name, error: lastErrors.get(s.name) ?? 'unknown' })))
   }
 }
 
-interface FkColumn {
+export interface FkColumn {
   table: string // regclass text, already quoted where needed
   column: string
   notNull: boolean
@@ -224,7 +230,7 @@ interface FkColumn {
 }
 
 /** Single-column FKs whose ON DELETE action is in `actions`, optionally to one table. */
-async function loadFks(client: TeardownClient, actions: string[], referenced?: string): Promise<FkColumn[]> {
+export async function loadFks(client: TeardownClient, actions: string[], referenced?: string): Promise<FkColumn[]> {
   const { rows } = await client.query<{
     tbl: string; col: string; nn: boolean; has_ws: boolean; target: string; target_key: string
   }>(
@@ -288,7 +294,7 @@ function ruleSteps(fk: FkColumn, rule: AccountTeardownRule, inbound: FkColumn[])
   return steps
 }
 
-const ruleKey = (fk: FkColumn) => `${fk.table.replace(/^public\./, '').replace(/"/g, '')}.${fk.column}`
+export const ruleKey = (fk: FkColumn) => `${fk.table.replace(/^public\./, '').replace(/"/g, '')}.${fk.column}`
 
 /** Rows the schema would cascade away with the user that must NOT go: workspace rooms. */
 const CASCADE_KEEP: Readonly<Record<string, string>> = {

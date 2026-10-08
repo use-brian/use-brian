@@ -475,6 +475,19 @@ describe('[COMP:recordings/live-page-route]', () => {
     expect(response.body.windows[0]).toMatchObject({ chunkId: 'chunk-1', offsetMs: 0 })
     // The wire shape is the pane's contract — no audio keys leak.
     expect(response.body.windows[0].audioKey).toBeUndefined()
+    expect(response.body.linkedRecordingId).toBeNull()
+  })
+
+  it('reports a recording linked after the page was opened', async () => {
+    const h = harness()
+    const page = await startLive(h)
+    await request(h.app).post('/api/recordings/live/link').send({ pageId: page.pageId, recordingId: 'rec-1' }).expect(200)
+
+    const response = await request(h.app)
+      .get('/api/recordings/live/windows')
+      .query({ workspaceId: WORKSPACE_ID, pageId: page.pageId })
+    expect(response.status).toBe(200)
+    expect(response.body.linkedRecordingId).toBe('rec-1')
   })
 
   it('links a same-workspace recording to a page and rejects a foreign one', async () => {

@@ -674,6 +674,8 @@ export function recordingLiveRoutes(deps: RecordingLiveRouteDeps): Router {
     }
     const rows = await windows.listByPage(workspaceId, pageId)
     res.json({
+      // A recording linked elsewhere (Watch finalize) lets an open page switch to it.
+      linkedRecordingId: view.linkedRecordingId ?? null,
       windows: rows.map((row) => ({
         chunkId: row.chunkId,
         offsetMs: row.offsetMs,

@@ -14,7 +14,9 @@
  * unambiguously; remaining placeholders bind later on the final transcript.
  *
  * Mounted by the doc shell when the page carries the `live:` marker block
- * and the final (processed) transcript has not replaced it yet.
+ * and the final (processed) transcript has not replaced it yet. The same poll
+ * reports a recording linked after the page was opened (a Watch capture links
+ * it server-side at finalize), so the shell can switch to the recording.
  *
  * [COMP:app-web/live-transcript-pane]
  */
@@ -58,12 +60,24 @@ export function mergeLiveWindows(
   return [...byId.values()].sort((a, b) => a.offsetMs - b.offsetMs);
 }
 
+/** Adopt a recording the server linked to this page; never replaces an existing link. */
+export function adoptLinkedRecording<T extends { id: string; linkedRecordingId?: string | null }>(
+  view: T | null,
+  pageId: string,
+  recordingId: string,
+): T | null {
+  if (!view || view.id !== pageId || view.linkedRecordingId) return view;
+  return { ...view, linkedRecordingId: recordingId };
+}
+
 export function LiveTranscriptPane({
   workspaceId,
   pageId,
+  onRecordingLinked,
 }: {
   workspaceId: string;
   pageId: string;
+  onRecordingLinked?: (recordingId: string) => void;
 }) {
   const t = useT();
   const [windows, setWindows] = useState<LiveTranscriptWindowRow[]>([]);
@@ -71,6 +85,8 @@ export function LiveTranscriptPane({
   const [expanded, setExpanded] = useState(true);
   const scrollRef = useRef<HTMLDivElement | null>(null);
   const pinnedToEndRef = useRef(true);
+  const onRecordingLinkedRef = useRef(onRecordingLinked);
+  onRecordingLinkedRef.current = onRecordingLinked;
 
   // Initial fetch + poll. Windows stop arriving once the capture ends, at
   // which point the poll is cheap 304-ish reads until the surface unmounts
@@ -79,10 +95,11 @@ export function LiveTranscriptPane({
     let cancelled = false;
     const load = async () => {
       try {
-        const rows = await listLiveTranscriptWindows(workspaceId, pageId);
+        const { windows: rows, linkedRecordingId } = await listLiveTranscriptWindows(workspaceId, pageId);
         if (!cancelled) {
           setWindows((prev) => mergeLiveWindows(prev, rows));
           setLoaded(true);
+          if (linkedRecordingId) onRecordingLinkedRef.current?.(linkedRecordingId);
         }
       } catch {
         if (!cancelled) setLoaded(true);

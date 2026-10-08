@@ -49,7 +49,7 @@ Device Bearer credentials authorize `/sessions/:clientId` operations. Phone reco
 | `GET /` | Reconcile without side effects. Returns IDs, state, page preparation, received windows, missing ranges, full upload and processing status. |
 | `PUT /windows?sequence=0&offsetMs=0&durationMs=20000&sha256=…` | Raw independently decodable M4A, `Content-Type: audio/mp4`. Maximum 60 seconds/2 MiB. Response `{received:true, sequence, sha256}` means audio persisted, not transcribed. |
 | `POST /retry` | Transcribes up to three pending contiguous windows/call; explicitly invoke during live capture. Provider failure preserves audio. For finalized failed processing, explicitly requeues once; queued/processing/processed jobs are not duplicated. |
-| `POST /finalize` | `{source:"windows", expectedWindows, allowIncomplete:false}` seals the intent, publishes one canonical recording/page and queues processing. |
+| `POST /finalize` | `{source:"windows", expectedWindows, allowIncomplete:false}` seals the intent, publishes one canonical recording/page and queues processing with the workspace's default recording blueprint (none = transcript only). A brief page is filed under the capture page. |
 
 Status includes `{clientId, sessionId, pageId, recordingId, state, pagePrepared, expiresAt, finalization, windows, missingSequences, missingTimeRanges, fullUpload, processing}`. Each window reports sequence, timing, SHA-256, byte count and transcription (`pending`, `failed`, `ready`). Session state is `open`, `sealed` or `finalized`; expiry returns 410. Canonical `processing:"processed"` means ready; `finalized` alone does not. No transcript text/playback URLs are exposed to device credentials; open the page with the phone/web user session.
 

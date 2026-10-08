@@ -3,6 +3,7 @@ import { randomUUID } from 'node:crypto'
 import type { Capture, Grant, Window } from '../watch-store.js'
 const mocks = vi.hoisted(() => ({
   enqueue: vi.fn(), get: vi.fn(), assertLive: vi.fn(), upload: vi.fn(), windows: vi.fn(), seal: vi.fn(), sql: vi.fn(), insert: vi.fn(), createRecording: vi.fn(), captureParent: vi.fn(), getRecording: vi.fn(), concat: vi.fn(), validate: vi.fn(),
+  workspaceDefault: vi.fn(), resolveBlueprint: vi.fn(),
 }))
 vi.mock('../watch-store.js', async importOriginal => {
   const original = await importOriginal<typeof import('../watch-store.js')>()
@@ -16,7 +17,10 @@ vi.mock('../../db/recordings-store.js', () => ({ createRecording: mocks.createRe
 vi.mock('../../db/recording-intake-admission.js', () => ({ captureRecordingIntakeParent: mocks.captureParent }))
 vi.mock('../ffmpeg.js', () => ({ concatAudioWindows: mocks.concat }))
 vi.mock('../watch-media.js', () => ({ validateWatchAudio: mocks.validate }))
-import { createWatchService, authorizeWatchDestination } from '../watch-service.js'
+vi.mock('../../db/workspace-store.js', () => ({ getWorkspaceDefaultRecordingBlueprint: mocks.workspaceDefault }))
+vi.mock('../../db/page-templates-store.js', () => ({ createDbPageTemplateStore: () => ({}) }))
+vi.mock('../resolve-blueprint.js', () => ({ resolveRecordingBlueprint: mocks.resolveBlueprint }))
+import { createWatchService, authorizeWatchDestination, defaultWatchBlueprint } from '../watch-service.js'
 
 let g: Grant, c: Capture, windows: Window[]
 function window(sequence: number): Window {
@@ -26,8 +30,9 @@ function harness() {
   const pages = { getById: vi.fn(async () => ({ id: c.page_id, workspaceId: g.workspace_id })), createDraft: vi.fn(), update: vi.fn(async () => true), findIdByAnchorKey: vi.fn(async () => 'meeting-folder') }
   const files = { stat: vi.fn(async () => ({ ok: false, error: { kind: 'not_found' } })), writeBytes: vi.fn(async () => ({ ok: true, value: { id: 'file', createdByUserId: g.owner_id, assistantId: null, mime: 'audio/mp4' } })) }
   const transcribe = vi.fn(async (buffer: Buffer) => `Speaker 1: window ${buffer}`), authorize = vi.fn(async () => {})
-  const service = createWatchService({ pages: pages as never, files: files as never, transcribe, authorize })
-  return { pages, files, transcribe, authorize, service }
+  const blueprint = vi.fn(async (): Promise<string | null> => null)
+  const service = createWatchService({ pages: pages as never, files: files as never, transcribe, authorize, blueprint })
+  return { pages, files, transcribe, authorize, blueprint, service }
 }
 beforeEach(() => {
   vi.resetAllMocks()
@@ -107,11 +112,19 @@ describe('watch service recovery and ordering', () => {
     expect(mocks.createRecording).toHaveBeenCalledTimes(1)
     expect(mocks.concat).toHaveBeenCalledTimes(1)
   })
+  it.each([['bp-1', 'the workspace default blueprint'], [null, 'no blueprint when the workspace has no default']])('queues %s (%s) with the brief filed under the capture page', async (selected, _case) => {
+    const h = harness(); h.blueprint.mockResolvedValue(selected)
+    await h.service.finalize(g, c.client_id, { expectedWindows: 2, allowIncomplete: false })
+    expect(h.blueprint).toHaveBeenCalledWith(g)
+    const job = mocks.sql.mock.calls.find(([sql]) => String(sql).includes('INSERT INTO recording_jobs'))
+    expect(job?.[1]).toEqual([c.recording_id, g.workspace_id, g.owner_id, selected, c.page_id])
+  })
   it('explicitly queues finalized failed processing without requiring live transcription', async () => {
     const h = harness(); c.state = 'finalized'
-    const service = createWatchService({ pages: h.pages as never, files: h.files as never, authorize: h.authorize })
+    h.blueprint.mockResolvedValue('bp-1')
+    const service = createWatchService({ pages: h.pages as never, files: h.files as never, authorize: h.authorize, blueprint: h.blueprint })
     await service.retry(g, c.client_id)
-    expect(mocks.enqueue).toHaveBeenCalledWith({ recordingId: c.recording_id, workspaceId: g.workspace_id, actingUserId: g.owner_id }, expect.objectContaining({ query: mocks.sql }))
+    expect(mocks.enqueue).toHaveBeenCalledWith({ recordingId: c.recording_id, workspaceId: g.workspace_id, actingUserId: g.owner_id, blueprintSlug: 'bp-1', parentPageId: c.page_id }, expect.objectContaining({ query: mocks.sql }))
     expect(mocks.sql.mock.calls.map(([sql]) => sql)).toEqual(['BEGIN', expect.stringContaining('FOR UPDATE'), expect.stringContaining("SET status='queued'"), 'COMMIT'])
     expect(h.authorize).toHaveBeenCalledTimes(2)
     expect(h.files.writeBytes).not.toHaveBeenCalled()
@@ -271,5 +284,18 @@ describe('watch service recovery and ordering', () => {
     await expect(authorizeWatchDestination(g)).rejects.toMatchObject({ status: 403 })
     mocks.sql.mockResolvedValueOnce({ rows: [{}] }).mockResolvedValueOnce({ rows: [] })
     await expect(authorizeWatchDestination(g)).rejects.toMatchObject({ status: 401 })
+  })
+})
+describe('watch default blueprint', () => {
+  it('uses the workspace default only when it resolves to an accessible blueprint', async () => {
+    mocks.workspaceDefault.mockResolvedValue(null)
+    expect(await defaultWatchBlueprint(g)).toBeNull()
+    expect(mocks.resolveBlueprint).not.toHaveBeenCalled()
+    mocks.workspaceDefault.mockResolvedValue('bp-1')
+    mocks.resolveBlueprint.mockResolvedValue({ id: 'bp-1' })
+    expect(await defaultWatchBlueprint(g)).toBe('bp-1')
+    expect(mocks.resolveBlueprint).toHaveBeenCalledWith({}, { userId: g.owner_id, workspaceId: g.workspace_id, selection: 'bp-1' })
+    mocks.resolveBlueprint.mockRejectedValue(new Error('not accessible'))
+    expect(await defaultWatchBlueprint(g)).toBeNull()
   })
 })
