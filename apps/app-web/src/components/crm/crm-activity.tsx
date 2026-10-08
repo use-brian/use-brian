@@ -150,7 +150,7 @@ function ActivityPanel({ workspaceId, record, data, onOpenContact, onReviewEmail
       {composerOpen && !loading && !activityError && (
         <div className="mb-3 space-y-2 rounded-xl border border-border bg-muted/20 p-3">
           <div className="grid gap-2 sm:grid-cols-2">
-            <Select value={activityType} onValueChange={(value) => setActivityType(value as typeof activityType)}>
+            <Select items={(["note", "call", "meeting", "message"] as const).map((type) => ({ value: type, label: t.activityType[type] }))} value={activityType} onValueChange={(value) => setActivityType(value as typeof activityType)}>
               <SelectTrigger className="w-full"><SelectValue /></SelectTrigger>
               <SelectContent>
                 {(["note", "call", "meeting", "message"] as const).map((type) => (
@@ -158,7 +158,7 @@ function ActivityPanel({ workspaceId, record, data, onOpenContact, onReviewEmail
                 ))}
               </SelectContent>
             </Select>
-            <Select value={direction} onValueChange={(value) => setDirection(value as typeof direction)}>
+            <Select items={(["internal", "inbound", "outbound"] as const).map((value) => ({ value, label: t.activityDirection[value] }))} value={direction} onValueChange={(value) => setDirection(value as typeof direction)}>
               <SelectTrigger className="w-full"><SelectValue /></SelectTrigger>
               <SelectContent>
                 {(["internal", "inbound", "outbound"] as const).map((value) => (

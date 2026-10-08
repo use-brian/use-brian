@@ -91,7 +91,7 @@ function ParticipantPanel({ workspaceId, dealId, contacts, initialParticipants, 
         {!error && available.length > 0 && <Button size="xs" variant="ghost" onClick={() => setAdding(!adding)}><UserPlus aria-hidden />{t.addParticipant}</Button>}
       </div>
       {adding && !error && (
-        <Select onValueChange={(contactId) => {
+        <Select items={available.map((contact) => ({ value: contact.id, label: `${contact.name}${contact.email ? ` · ${contact.email}` : ""}` }))} onValueChange={(contactId) => {
           if (typeof contactId !== "string") return;
           void change(() => addCrmDealParticipant(workspaceId, dealId, contactId, {
             isPrimary: participants.length === 0,

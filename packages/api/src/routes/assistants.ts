@@ -33,6 +33,7 @@ import {
 import { buildConnectorAuthHeaders } from '../mcp/auth-headers.js'
 import { workspacePolicyAsSettingsStore } from '../db/workspace-tool-policy-store.js'
 import type { ConnectorGrantStore } from '../db/connector-grant-store.js'
+import { AssistantTeardownBlockedError, deleteAssistantFootprint, type AssistantTeardownRule } from '../db/assistant-teardown.js'
 import type { McpSettingsStore, JobStore, CapabilityStore } from '@use-brian/core'
 import {
   APP_LEVEL_ASSISTANT_ID,
@@ -113,6 +114,13 @@ type AssistantRouteOptions = {
    * `/api/assistant-connector-grants` mount.
    */
   assistantConnectorGrantsStore?: import('../db/assistant-connector-grants-store.js').AssistantConnectorGrantsStore
+  /**
+   * Assistant-teardown rules for tables an edition adds on top of the open
+   * schema. The delete fails closed on any unclassified foreign key to
+   * `assistants`, so an overlay that references `assistants` without an ON
+   * DELETE action must classify its columns here (db/assistant-teardown.ts).
+   */
+  teardownRules?: Readonly<Record<string, AssistantTeardownRule>>
 }
 
 export function assistantRoutes(options: AssistantRouteOptions): Router {
@@ -661,12 +669,18 @@ export function assistantRoutes(options: AssistantRouteOptions): Router {
       // throwing `invalid input syntax for type uuid: ""` (22P02) platform-wide
       // until that physical connection recycles. See packages/api/CLAUDE.md →
       // "Bypass restore + pool contamination".
+      //
+      // A bare `DELETE FROM assistants` is refused by every brain row anchored
+      // on the assistant (NO ACTION / RESTRICT foreign keys). The teardown
+      // moves those rows to the workspace's primary assistant, clears author
+      // pointers, and removes the assistant's own evidence first.
       const client = await getPool().connect()
       try {
         await client.query('BEGIN')
         await client.query(`SET LOCAL app.current_user_id = '${member.userId.replace(/'/g, "''")}'`)
-        await client.query('DELETE FROM assistants WHERE id = $1', [assistantId])
+        const removed = await deleteAssistantFootprint(client, assistantId, member.userId, options.teardownRules)
         await client.query('COMMIT')
+        console.info(`[assistants] deleted assistant=${assistantId} brain rows moved to=${removed.primaryAssistantId ?? 'none'}`)
         res.status(204).end()
       } catch (err) {
         await client.query('ROLLBACK').catch(() => {})
@@ -675,6 +689,21 @@ export function assistantRoutes(options: AssistantRouteOptions): Router {
         client.release()
       }
     } catch (err) {
+      if (err instanceof AssistantTeardownBlockedError) {
+        // Nothing was changed (the transaction rolled back). Log which tables
+        // refused, names only, so a missing rule shows up.
+        console.error(
+          `[assistants] delete blocked assistant=${assistantId}: ${err.blockers.map((b) => `${b.step}: ${b.error}`).join(' | ')}`,
+        )
+        const skills = err.blockers.find((b) => b.step === 'workspace_skills')
+        res.status(409).json({
+          error: err.code,
+          message: skills
+            ? `Skills learned from this assistant's conversations still depend on it: ${skills.error}. Delete those skills, then try again.`
+            : 'Something still depends on this assistant, so nothing was deleted.',
+        })
+        return
+      }
       console.error('[assistants] delete failed:', err)
       res.status(500).json({ error: 'Failed to delete assistant' })
     }

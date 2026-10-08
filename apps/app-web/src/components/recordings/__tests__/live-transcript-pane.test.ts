@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { isPinnedToEnd, mergeLiveWindows } from "../live-transcript-pane";
+import { adoptLinkedRecording, isPinnedToEnd, mergeLiveWindows } from "../live-transcript-pane";
 import type { LiveTranscriptWindowRow } from "@/lib/api/recordings";
 
 function win(chunkId: string, offsetMs: number, text = "hi"): LiveTranscriptWindowRow {
@@ -53,5 +53,20 @@ describe("[COMP:app-web/live-transcript-pane] isPinnedToEnd", () => {
   it("honours a custom threshold", () => {
     expect(isPinnedToEnd({ scrollHeight: 1000, scrollTop: 600, clientHeight: 300 }, 120)).toBe(true);
     expect(isPinnedToEnd({ scrollHeight: 1000, scrollTop: 600, clientHeight: 300 }, 100)).toBe(false);
+  });
+});
+
+describe("[COMP:app-web/live-transcript-pane] adoptLinkedRecording", () => {
+  const page = { id: "page-1", linkedRecordingId: null as string | null };
+
+  it("switches an open page to a recording linked after it loaded", () => {
+    expect(adoptLinkedRecording(page, "page-1", "rec-1")).toEqual({ id: "page-1", linkedRecordingId: "rec-1" });
+  });
+
+  it("leaves other pages, missing views and existing links untouched", () => {
+    expect(adoptLinkedRecording(page, "page-2", "rec-1")).toBe(page);
+    expect(adoptLinkedRecording(null, "page-1", "rec-1")).toBeNull();
+    const linked = { id: "page-1", linkedRecordingId: "rec-0" };
+    expect(adoptLinkedRecording(linked, "page-1", "rec-1")).toBe(linked);
   });
 });

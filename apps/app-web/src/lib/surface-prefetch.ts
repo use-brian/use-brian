@@ -297,6 +297,15 @@ export function assistantDetailCacheKey(workspaceId: string, assistantId: string
   return `assistant:${workspaceId}${viewerSuffix()}:${assistantId}`;
 }
 
+/**
+ * One assistant's Settings tab read (charter, default tier, playbook). Lives
+ * under the `assistant:<wid>:` family so `ASSISTANT_REFRESH_EVENT` marks it
+ * stale with the header.
+ */
+export function assistantSettingsCacheKey(workspaceId: string, assistantId: string): string {
+  return `${assistantDetailCacheKey(workspaceId, assistantId)}:settings`;
+}
+
 export function workspaceMembershipCacheKey(workspaceId: string): string {
   return `workspace-membership:${workspaceId}${viewerSuffix()}`;
 }

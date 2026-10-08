@@ -144,11 +144,11 @@ function ToolbarContent({ editor, editable, compact = false, onInsertImage, onIn
       <SelectContent>{BLOCK_STYLES.map((value) => <SelectItem key={value} value={value}>{blockStyleLabel(value, t)}</SelectItem>)}</SelectContent>
     </Select>
     {!compact ? <>
-      <Select value={first?.fontFamily ?? null} onValueChange={(value) => value && applyDocumentRunFormatting(editor, { fontFamily: value })} disabled={!canFormat}>
+      <Select items={FONTS.map((font) => ({ value: font, label: font }))} value={first?.fontFamily ?? null} onValueChange={(value) => value && applyDocumentRunFormatting(editor, { fontFamily: value })} disabled={!canFormat}>
         <SelectTrigger size="sm" className="max-md:min-h-11 w-28" aria-label={t.fontFamily}><SelectValue placeholder={t.mixedValue} /></SelectTrigger>
         <SelectContent>{FONTS.map((font) => <SelectItem key={font} value={font}>{font}</SelectItem>)}</SelectContent>
       </Select>
-      <Select value={first?.fontSizePt ? String(first.fontSizePt) : null} onValueChange={(value) => value && applyDocumentRunFormatting(editor, { fontSizePt: Number(value) })} disabled={!canFormat}>
+      <Select items={FONT_SIZES.map((size) => ({ value: String(size), label: String(size) }))} value={first?.fontSizePt ? String(first.fontSizePt) : null} onValueChange={(value) => value && applyDocumentRunFormatting(editor, { fontSizePt: Number(value) })} disabled={!canFormat}>
         <SelectTrigger size="sm" className="max-md:min-h-11 w-16" aria-label={t.fontSize}><SelectValue placeholder={t.mixedValue} /></SelectTrigger>
         <SelectContent>{FONT_SIZES.map((size) => <SelectItem key={size} value={String(size)}>{size}</SelectItem>)}</SelectContent>
       </Select>
@@ -237,12 +237,12 @@ function TextToolsPopover({ editor, editable, canFormat, fontFamily, fontSizePt,
     <PopoverTrigger render={<button type="button" disabled={!editable} className={officeToolbarButtonClassName} data-document-text-tools="true"><Type className="size-4" />{t.compactTextTools}<ChevronDown className="size-3" /></button>} />
     <PopoverContent align="end" className="w-72 max-w-[calc(100vw-1rem)]">
       <label className="text-xs font-medium">{t.fontFamily}</label>
-      <Select value={fontFamily} onValueChange={(value) => value && applyDocumentRunFormatting(editor, { fontFamily: value })} disabled={!canFormat}>
+      <Select items={FONTS.map((font) => ({ value: font, label: font }))} value={fontFamily} onValueChange={(value) => value && applyDocumentRunFormatting(editor, { fontFamily: value })} disabled={!canFormat}>
         <SelectTrigger className="max-md:min-h-11 w-full" aria-label={t.fontFamily}><SelectValue placeholder={t.mixedValue} /></SelectTrigger>
         <SelectContent>{FONTS.map((font) => <SelectItem key={font} value={font}>{font}</SelectItem>)}</SelectContent>
       </Select>
       <label className="text-xs font-medium">{t.fontSize}</label>
-      <Select value={fontSizePt ? String(fontSizePt) : null} onValueChange={(value) => value && applyDocumentRunFormatting(editor, { fontSizePt: Number(value) })} disabled={!canFormat}>
+      <Select items={FONT_SIZES.map((size) => ({ value: String(size), label: String(size) }))} value={fontSizePt ? String(fontSizePt) : null} onValueChange={(value) => value && applyDocumentRunFormatting(editor, { fontSizePt: Number(value) })} disabled={!canFormat}>
         <SelectTrigger className="max-md:min-h-11 w-full" aria-label={t.fontSize}><SelectValue placeholder={t.mixedValue} /></SelectTrigger>
         <SelectContent>{FONT_SIZES.map((size) => <SelectItem key={size} value={String(size)}>{size}</SelectItem>)}</SelectContent>
       </Select>

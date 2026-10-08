@@ -390,7 +390,7 @@ export function BrowseDirectory({ open, onClose, onConnectorAdded, onConnectorCo
                       <input type="text" value={skillForm.description} onChange={(e) => setSkillForm({ ...skillForm, description: e.target.value })} placeholder={t.browseDirectory.shortDescriptionPlaceholder} maxLength={250} className="w-full text-[16px] md:text-sm bg-muted/50 border border-border rounded-lg px-3 py-2 focus:outline-none focus:ring-2 focus:ring-primary/30" />
                       <input type="text" value={skillForm.whenToUse} onChange={(e) => setSkillForm({ ...skillForm, whenToUse: e.target.value })} placeholder={t.browseDirectory.whenToUsePlaceholder} className="w-full text-[16px] md:text-sm bg-muted/50 border border-border rounded-lg px-3 py-2 focus:outline-none focus:ring-2 focus:ring-primary/30" />
                       <div className="flex gap-3">
-                        <Select value={skillForm.category} onValueChange={(v: string | null) => setSkillForm({ ...skillForm, category: v ?? "custom" })}>
+                        <Select items={[{ value: "custom", label: t.browseDirectory.catCustom }, { value: "productivity", label: t.browseDirectory.catProductivity }, { value: "communication", label: t.browseDirectory.catCommunication }, { value: "research", label: t.browseDirectory.catResearch }]} value={skillForm.category} onValueChange={(v: string | null) => setSkillForm({ ...skillForm, category: v ?? "custom" })}>
                           <SelectTrigger className="h-10 bg-muted/50">
                             <SelectValue />
                           </SelectTrigger>

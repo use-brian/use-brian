@@ -119,7 +119,7 @@ function RuleEditor({
           <SelectContent>{field.validValues.map((value) => <SelectItem key={value} value={value}>{value}</SelectItem>)}</SelectContent>
         </Select>
       ) : field?.valueType === "boolean" ? (
-        <Select value={String(rule.value ?? true)} onValueChange={(value) => setValue(value === "true")} disabled={disabled}>
+        <Select items={[{ value: "true", label: t.yes }, { value: "false", label: t.no }]} value={String(rule.value ?? true)} onValueChange={(value) => setValue(value === "true")} disabled={disabled}>
           <SelectTrigger className="w-full"><SelectValue /></SelectTrigger>
           <SelectContent><SelectItem value="true">{t.yes}</SelectItem><SelectItem value="false">{t.no}</SelectItem></SelectContent>
         </Select>
@@ -166,7 +166,7 @@ function GroupEditor({
     <div className={depth > 1 ? "space-y-3 border-l-2 border-border pl-3" : "space-y-3"}>
       <div className="mb-2 flex flex-wrap items-center gap-2">
         <span className="text-xs text-muted-foreground">{t.segmentMatch}</span>
-        <Select value={group.combinator} onValueChange={(value) => value && onChange({ ...group, combinator: value as "and" | "or" })} disabled={disabled}>
+        <Select items={[{ value: "and", label: t.segmentAllRules }, { value: "or", label: t.segmentAnyRule }]} value={group.combinator} onValueChange={(value) => value && onChange({ ...group, combinator: value as "and" | "or" })} disabled={disabled}>
           <SelectTrigger className="h-7 w-32"><SelectValue /></SelectTrigger>
           <SelectContent><SelectItem value="and">{t.segmentAllRules}</SelectItem><SelectItem value="or">{t.segmentAnyRule}</SelectItem></SelectContent>
         </Select>
@@ -264,7 +264,7 @@ export function CrmSegmentsPanel({ workspaceId, selectedId, onSelect }: { worksp
       <aside className="w-80 shrink-0 overflow-y-auto border-r border-border/60 max-md:max-h-[40%] max-md:w-full max-md:border-b max-md:border-r-0">
         <div className="sticky top-0 z-10 space-y-2 border-b border-border/60 bg-background p-3">
           <div className="flex items-center justify-between gap-2"><div className="flex items-center gap-2 text-sm font-semibold"><UsersRound className="size-4" />{t.segments}</div><Button type="button" size="sm" variant="outline" onClick={newSegment}><Plus className="mr-1 size-3.5" />{t.segmentNew}</Button></div>
-          <Select value={entityKind} onValueChange={(value) => value && setEntityKind(value as CrmSegmentEntityKind)} disabled={busy}>
+          <Select items={(["person", "company", "deal"] as const).map((kind) => ({ value: kind, label: t.segmentEntityLabels[kind] }))} value={entityKind} onValueChange={(value) => value && setEntityKind(value as CrmSegmentEntityKind)} disabled={busy}>
             <SelectTrigger className="w-full"><SelectValue /></SelectTrigger>
             <SelectContent>{(["person", "company", "deal"] as const).map((kind) => <SelectItem key={kind} value={kind}>{t.segmentEntityLabels[kind]}</SelectItem>)}</SelectContent>
           </Select>

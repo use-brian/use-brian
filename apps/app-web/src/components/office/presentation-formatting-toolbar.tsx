@@ -44,7 +44,7 @@ export function PresentationFormattingToolbar({ objects, disabled, onTextFormat,
   return <div data-presentation-formatting-toolbar="true" role="toolbar" aria-label={t.presentationFormatting} className="flex flex-wrap items-center gap-x-3 gap-y-1 border-b bg-background px-2 py-1.5 max-md:shrink-0 max-md:flex-nowrap max-md:border-b-0">
     <strong className="shrink-0 text-xs font-semibold">{t.presentationFormatting}</strong>
     {text ? <>
-      <FormattingField label={t.fontFamily}><Select value={typeof text.fontFamily === "string" ? text.fontFamily : null} onValueChange={(value) => value && onTextFormat({ fontFamily: value })} disabled={disabled}>
+      <FormattingField label={t.fontFamily}><Select items={FONTS.map((font) => ({ value: font, label: font }))} value={typeof text.fontFamily === "string" ? text.fontFamily : null} onValueChange={(value) => value && onTextFormat({ fontFamily: value })} disabled={disabled}>
         <SelectTrigger size="sm" className="max-md:min-h-11 w-28" aria-label={t.fontFamily}><SelectValue placeholder={t.mixedValue} /></SelectTrigger>
         <SelectContent>{FONTS.map((font) => <SelectItem key={font} value={font}>{font}</SelectItem>)}</SelectContent>
       </Select></FormattingField>

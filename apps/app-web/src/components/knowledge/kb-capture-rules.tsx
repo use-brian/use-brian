@@ -322,6 +322,7 @@ export function KbCaptureRules({
             <div className="space-y-1 text-xs">
               <span className="font-medium">{copy.destinationLabel}</span>
               <Select
+                items={[{ value: "manual", label: copy.manualDestination }, ...sources.map((source) => ({ value: source.id, label: source.repo }))]}
                 value={draft.targetSourceId ?? "manual"}
                 onValueChange={(value) => setDraft((current) => ({ ...current, targetSourceId: value === "manual" ? null : value }))}
               >
@@ -345,7 +346,7 @@ export function KbCaptureRules({
             </label>
             <div className="space-y-1 text-xs">
               <span className="font-medium">{copy.sensitivityLabel}</span>
-              <Select value={draft.defaultSensitivity} onValueChange={(value) => setDraft((current) => ({ ...current, defaultSensitivity: value as Sensitivity }))}>
+              <Select items={[{ value: "public", label: tiers.public }, { value: "internal", label: tiers.internal }, { value: "confidential", label: tiers.confidential }]} value={draft.defaultSensitivity} onValueChange={(value) => setDraft((current) => ({ ...current, defaultSensitivity: value as Sensitivity }))}>
                 <SelectTrigger className="w-full"><SelectValue /></SelectTrigger>
                 <SelectContent align="start">
                   <SelectItem value="public">{tiers.public}</SelectItem>

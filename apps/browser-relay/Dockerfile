@@ -24,6 +24,11 @@ RUN pnpm install --frozen-lockfile
 # ── Stage 2: Build ─────────────────────────────────────────────
 FROM deps AS build
 
+# A clean compile of the open API package crosses Node's container-aware
+# ~2 GiB default heap. Keep this build-only: the runner stage has its own
+# intentionally smaller Cloud Run heap configured by the deploy scripts.
+ENV NODE_OPTIONS=--max-old-space-size=4096
+
 COPY packages/shared/src ./packages/shared/src
 COPY packages/channels/src ./packages/channels/src
 COPY packages/doc-model/src ./packages/doc-model/src

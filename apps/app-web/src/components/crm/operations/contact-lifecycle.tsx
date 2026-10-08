@@ -138,7 +138,7 @@ export function CrmContactLifecycle({
         <KeyRound className="size-3.5" aria-hidden />{t.entitlements}
       </div>
       <div className="flex gap-2">
-        <Select value={planId} onValueChange={(value) => setPlanId(value ?? "")}>
+        <Select items={plans.map((plan) => ({ value: plan.id, label: plan.name }))} value={planId} onValueChange={(value) => setPlanId(value ?? "")}>
           <SelectTrigger className="min-w-0 flex-1"><SelectValue placeholder={t.pickEntitlementPlan} /></SelectTrigger>
           <SelectContent>{plans.map((plan) => <SelectItem key={plan.id} value={plan.id}>{plan.name}</SelectItem>)}</SelectContent>
         </Select>
@@ -160,7 +160,7 @@ export function CrmContactLifecycle({
         <CalendarCheck className="size-3.5" aria-hidden />{t.participation}
       </div>
       <div className="flex gap-2">
-        <Select value={eventId} onValueChange={(value) => setEventId(value ?? "")}>
+        <Select items={events.map((event) => ({ value: event.id, label: event.title }))} value={eventId} onValueChange={(value) => setEventId(value ?? "")}>
           <SelectTrigger className="min-w-0 flex-1"><SelectValue placeholder={t.pickEvent} /></SelectTrigger>
           <SelectContent>{events.map((event) => <SelectItem key={event.id} value={event.id}>{event.title}</SelectItem>)}</SelectContent>
         </Select>
@@ -171,7 +171,7 @@ export function CrmContactLifecycle({
           <div key={row.id} className="rounded-lg border border-border/60 px-2.5 py-2 text-xs">
             <div className="flex items-center justify-between gap-2">
               <div className="min-w-0"><div className="truncate font-medium">{row.eventTitle}</div><div className="text-[10px] text-muted-foreground">{row.sourceKind}</div></div>
-              <Select value={row.status} disabled={busy || row.commerceManaged} onValueChange={(value) => void changeParticipation(row, value as CrmParticipationStatus)}>
+              <Select items={PARTICIPATION_STATUSES.map((status) => ({ value: status, label: t.participationStatusLabels[status] }))} value={row.status} disabled={busy || row.commerceManaged} onValueChange={(value) => void changeParticipation(row, value as CrmParticipationStatus)}>
                 <SelectTrigger className="h-9 w-28 text-[16px] md:h-7 md:text-xs"><SelectValue /></SelectTrigger>
                 <SelectContent>{PARTICIPATION_STATUSES.map((status) => <SelectItem key={status} value={status}>{t.participationStatusLabels[status]}</SelectItem>)}</SelectContent>
               </Select>

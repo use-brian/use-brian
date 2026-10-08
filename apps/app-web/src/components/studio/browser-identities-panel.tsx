@@ -7,6 +7,7 @@
  *
  * [COMP:app-web/browser-identities]
  */
+import { Skeleton } from "@/components/skeleton";
 import { useCallback, useEffect, useState } from "react";
 import Link from "next/link";
 import { useT } from "@/lib/i18n/client";
@@ -336,9 +337,9 @@ export function BrowserIdentitiesPanel({
       </div>
 
       {state.kind === "loading" ? (
-        <p className="py-8 text-center text-xs text-muted-foreground">
-          {t.assistant.toolsTab.browserIdentitiesLoading}
-        </p>
+        <div role="status" aria-label={t.assistant.toolsTab.browserIdentitiesLoading} className="space-y-2">
+          {[0, 1].map((i) => <Skeleton key={i} className="h-14 w-full rounded-xl" />)}
+        </div>
       ) : state.kind === "unconfigured" ? (
         <p className="rounded-xl border border-dashed border-border px-4 py-8 text-center text-xs text-muted-foreground">
           {t.assistant.toolsTab.browserIdentitiesUnconfigured}

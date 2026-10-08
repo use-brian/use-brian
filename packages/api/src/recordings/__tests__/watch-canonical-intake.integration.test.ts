@@ -155,7 +155,8 @@ describe('watch → canonical file/Episode/recording/page → real queue/process
     if (!fileRead.ok) throw new Error('canonical media not readable')
     expect(sha256(Buffer.from(fileRead.value.bytes))).toBe(sha256(playbackBytes))
     let job = await claimNextRecordingJob()
-    expect(job).toMatchObject({ recordingId: c.recording_id, actingUserId: f.userId, status: 'processing' })
+    // No workspace default blueprint: transcript only, any later brief filed under the capture page.
+    expect(job).toMatchObject({ recordingId: c.recording_id, actingUserId: f.userId, status: 'processing', blueprintSlug: null, parentPageId: c.page_id })
     if (!job) throw new Error('watch queue job missing')
     // Exhausted worker failure: only explicit /retry can start a new job.
     await pool.query('UPDATE recording_jobs SET attempts=3 WHERE id=$1', [job.id])

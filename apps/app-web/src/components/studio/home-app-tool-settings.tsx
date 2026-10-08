@@ -1,5 +1,6 @@
 "use client";
 
+import { Skeleton } from "@/components/skeleton";
 import { publicRuntimeConfig } from "@/lib/runtime-public-config";
 import { useEffect, useState } from "react";
 import { HOME_APP_TOOL_CONFIG, homeAppToolSetCapability } from "@use-brian/shared";
@@ -61,7 +62,9 @@ export function HomeAppToolSettings({ assistantId, workspaceId }: { assistantId:
     <p>{t.load}</p>
     <button type="button" className="text-primary underline" onClick={() => setRetry((n) => n + 1)}>{t.retry}</button>
   </div>;
-  if (!grants) return <p role="status" className="text-sm text-muted-foreground">{t.loading}</p>;
+  if (!grants) return <div role="status" aria-label={t.loading} className="space-y-2">
+    {[0, 1, 2].map((i) => <Skeleton key={i} className="h-12 w-full rounded-xl" />)}
+  </div>;
 
   const enabled = (cap: string) => grants.some((g) => g.capability === cap && g.enabled);
   const exists = (cap: string) => grants.some((g) => g.capability === cap);

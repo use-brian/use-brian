@@ -986,7 +986,7 @@ function ConnectorAuthSection(props: {
     <div className="space-y-3">
       <div className="flex items-center gap-3">
         <span className="text-xs text-muted-foreground shrink-0">{tc.authTypeLabel}</span>
-        <Select value={props.authType} onValueChange={(v) => { if (v) props.onAuthType(v as ConnectorAuthType); }}>
+        <Select items={[{ value: "none", label: tc.authTypeNone }, { value: "bearer", label: tc.authTypeBearer }, { value: "custom_header", label: tc.authTypeCustomHeader }, { value: "oauth", label: tc.authTypeOauth }]} value={props.authType} onValueChange={(v) => { if (v) props.onAuthType(v as ConnectorAuthType); }}>
           <SelectTrigger size="sm" className="text-[16px] md:text-sm">
             <SelectValue />
           </SelectTrigger>
@@ -4195,7 +4195,7 @@ function ConnectorsList() {
                       </div>
                       <div className="space-y-1">
                         <label className="text-[11px] font-medium text-muted-foreground">{tc.editSensitivityLabel}</label>
-                        <Select value={wsEditSensitivity} onValueChange={(v) => { if (v) setWsEditSensitivity(v as SensitivityTier); }}>
+                        <Select items={[{ value: "public", label: tc.sensitivityPublic }, { value: "internal", label: tc.sensitivityInternal }, { value: "confidential", label: tc.sensitivityConfidential }]} value={wsEditSensitivity} onValueChange={(v) => { if (v) setWsEditSensitivity(v as SensitivityTier); }}>
                           <SelectTrigger size="sm" className="text-[16px] md:text-sm">
                             <SelectValue />
                           </SelectTrigger>

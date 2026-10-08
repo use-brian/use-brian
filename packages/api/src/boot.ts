@@ -335,6 +335,7 @@ import {
 import { feedbackRoutes } from './routes/feedback.js'
 import { accountRoutes, accountAvatarPublicRoutes } from './routes/account.js'
 import type { AccountTeardownRule } from './db/account-teardown.js'
+import type { AssistantTeardownRule } from './db/assistant-teardown.js'
 import { memoryRoutes } from './routes/memories.js'
 import { createEntityMergeStore } from './db/entity-merge-store.js'
 import { assistantRoutes } from './routes/assistants.js'
@@ -1258,6 +1259,13 @@ export interface OpenApiPorts {
    * "Teardown order".
    */
   accountTeardownRules?: Readonly<Record<string, AccountTeardownRule>>
+  /**
+   * Assistant-teardown rules for overlay tables. `DELETE /api/assistants/:id`
+   * fails closed on any unclassified foreign key to `assistants` (see
+   * db/assistant-teardown.ts), so an overlay that references `assistants`
+   * without an ON DELETE action must classify its columns here.
+   */
+  assistantTeardownRules?: Readonly<Record<string, AssistantTeardownRule>>
 
   /**
    * BYO-storage signer for the PUBLIC shared-page recording playback URL
@@ -6206,6 +6214,7 @@ export async function bootOpenApi(opts: BootOpenApiOptions): Promise<BootResult>
 
   const connectorRegistry = loadConnectorRegistry()
   app.use('/api/assistants', requireAuth(env.JWT_SECRET), assistantRoutes({
+    teardownRules: ports.assistantTeardownRules,
     assistantConnectorStore,
     connectorStore,
     connectorInstanceStore,

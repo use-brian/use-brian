@@ -250,7 +250,7 @@ export function CrmIntakeSettings({ workspaceId }: { workspaceId: string }) {
             <label className="text-xs"><span className="mb-1 block text-muted-foreground">{t.definitionLabel}</span><input className="h-9 w-full rounded-md border border-input bg-transparent px-3 text-[16px] md:text-xs" value={definitionLabel} onChange={(event) => { setDefinitionLabel(event.target.value); if (!definitionKey) setDefinitionKey(stableKey(event.target.value)); }} /></label>
             <label className="text-xs"><span className="mb-1 block text-muted-foreground">{t.definitionKey}</span><input disabled={!!editingDefinition} className="h-9 w-full rounded-md border border-input bg-transparent px-3 font-mono text-[16px] md:text-xs" value={definitionKey} onChange={(event) => setDefinitionKey(stableKey(event.target.value))} /></label>
             <label className="text-xs sm:col-span-2"><span className="mb-1 block text-muted-foreground">{t.identityPolicy}</span>
-              <Select value={identityPolicy} onValueChange={(value) => setIdentityPolicy(value as typeof identityPolicy)}>
+              <Select items={[{ value: "trusted_verified_email", label: t.identityTrustedEmail }, { value: "new_or_review", label: t.identityNewReview }, { value: "existing_or_new", label: t.identityExistingOrNew }, { value: "external_subject", label: t.identityExternalSubject }]} value={identityPolicy} onValueChange={(value) => setIdentityPolicy(value as typeof identityPolicy)}>
                 <SelectTrigger className="w-full"><SelectValue /></SelectTrigger>
                 <SelectContent>
                   <SelectItem value="trusted_verified_email">{t.identityTrustedEmail}</SelectItem>
@@ -287,7 +287,7 @@ export function CrmIntakeSettings({ workspaceId }: { workspaceId: string }) {
           <div className="mt-3 grid gap-2">
             <label className="text-xs"><span className="mb-1 block text-muted-foreground">{t.credentialLabel}</span><input className="h-9 w-full rounded-md border border-input bg-transparent px-3 text-[16px] md:text-xs" value={credentialLabel} onChange={(event) => setCredentialLabel(event.target.value)} /></label>
             <label className="text-xs"><span className="mb-1 block text-muted-foreground">{t.boundDefinition}</span>
-              <Select value={credentialDefinitionId} onValueChange={(value) => setCredentialDefinitionId(value ?? "")}>
+              <Select items={definitions.filter((item) => item.active).map((definition) => ({ value: definition.id, label: definition.label }))} value={credentialDefinitionId} onValueChange={(value) => setCredentialDefinitionId(value ?? "")}>
                 <SelectTrigger className="w-full"><SelectValue placeholder={t.pickDefinition} /></SelectTrigger>
                 <SelectContent>{definitions.filter((item) => item.active).map((definition) => <SelectItem key={definition.id} value={definition.id}>{definition.label}</SelectItem>)}</SelectContent>
               </Select>
@@ -311,7 +311,7 @@ export function CrmIntakeSettings({ workspaceId }: { workspaceId: string }) {
           <label className="text-xs"><span className="mb-1 block text-muted-foreground">{t.wordingVersion}</span><input className="h-9 w-full rounded-md border border-input bg-transparent px-3 text-[16px] md:text-xs" value={wordingVersion} onChange={(event) => setWordingVersion(event.target.value)} /></label>
           <label className="text-xs sm:col-span-3"><span className="mb-1 block text-muted-foreground">{t.wording}</span><textarea rows={3} className="w-full resize-y rounded-md border border-input bg-transparent px-3 py-2 text-[16px] md:text-xs" value={wording} onChange={(event) => setWording(event.target.value)} /></label>
           <div className="text-xs"><span className="mb-1 block text-muted-foreground">{t.wordingDefaultLocale}</span>
-            <Select value={defaultLocale} onValueChange={(value) => setDefaultLocale((value ?? "default") as typeof defaultLocale)}>
+            <Select items={[{ value: "default", label: t.wordingCombined }, ...LOCALES.map((locale) => ({ value: locale, label: LOCALE_LABELS[locale] }))]} value={defaultLocale} onValueChange={(value) => setDefaultLocale((value ?? "default") as typeof defaultLocale)}>
               <SelectTrigger aria-label={t.wordingDefaultLocale}><SelectValue /></SelectTrigger><SelectContent>
                 <SelectItem value="default">{t.wordingCombined}</SelectItem>
                 {LOCALES.map((locale) => <SelectItem key={locale} value={locale}>{LOCALE_LABELS[locale]}</SelectItem>)}

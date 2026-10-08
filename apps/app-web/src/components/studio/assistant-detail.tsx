@@ -16,8 +16,9 @@ import { useWorkspaces } from "@/contexts/workspace-context";
 import { AssistantAvatar } from "@/components/assistant-avatar";
 import { getCachedAssistants, setCachedAssistants, type Assistant } from "@/lib/sidebar-cache";
 import { Skeleton } from "@/components/skeleton";
-import { mutateSurfaceCache, useCachedResource } from "@/lib/surface-cache";
-import { assistantDetailCacheKey } from "@/lib/surface-prefetch";
+import { cn } from "@/lib/utils";
+import { mutateSurfaceCache, seedSurfaceCache, useCachedResource } from "@/lib/surface-cache";
+import { assistantDetailCacheKey, assistantSettingsCacheKey } from "@/lib/surface-prefetch";
 import { KnowledgeTab } from "@/components/knowledge-tab";
 import { ApiKeysTab } from "@/components/api-keys-tab";
 import { SensitivityBadge, type Sensitivity } from "@/components/sensitivity-badge";
@@ -99,8 +100,18 @@ export type AssistantDetailSnapshot = {
  * narrowed to the one row this pane shows, plus that row's workspace name and
  * the caller's role there - fetched in the SAME fetcher (a data dependency on
  * the row's workspace id, not an effect waterfall; N7).
+ *
+ * The roster read returns every row, so when `cacheWorkspaceId` is given the
+ * siblings in that workspace are seeded into their own detail keys from the
+ * same response. Selecting another rail row then paints the full header
+ * (workspace badge, role-gated clearance picker, Settings edit rights) on the
+ * first frame instead of a role-less seed that re-renders when its own fetch
+ * lands - the flash this pane used to show on every row switch.
  */
-export async function fetchAssistantDetail(id: string): Promise<AssistantDetailSnapshot> {
+export async function fetchAssistantDetail(
+  id: string,
+  cacheWorkspaceId?: string | null,
+): Promise<AssistantDetailSnapshot> {
   const res = await authFetch(`${API_URL}/api/assistants`);
   if (!res.ok) throw new Error(`assistants ${res.status}`);
   const data = (await res.json()) as {
@@ -123,6 +134,15 @@ export async function fetchAssistantDetail(id: string): Promise<AssistantDetailS
     } catch {
       // The header still renders; only the workspace badge and the role
       // gate wait for the next revalidation.
+    }
+  }
+  if (cacheWorkspaceId && match.workspaceId === cacheWorkspaceId) {
+    for (const row of rows) {
+      if (row.id === id || row.workspaceId !== cacheWorkspaceId) continue;
+      seedSurfaceCache<AssistantDetailSnapshot>(
+        assistantDetailCacheKey(cacheWorkspaceId, row.id),
+        { assistant: row, workspaceName, workspaceRole },
+      );
     }
   }
   return { assistant: match, workspaceName, workspaceRole };
@@ -154,15 +174,20 @@ export function AssistantDetail({
   const searchParams = useSearchParams();
 
   const VALID_TABS = ["brain", "tools", "api", "settings"];
-  const TAB_CACHE_KEY = `assistant-tab-${id}`;
+  // One remembered tab for the whole rail, not one per assistant: walking
+  // the rail on Settings stays on Settings. A per-assistant memory made the
+  // pane jump between tabs on every row switch.
+  const TAB_CACHE_KEY = "assistant-detail-tab";
 
   const [tab, setTabRaw] = useState<Tab>(() => {
     // Priority: URL param > localStorage > default
     const t = searchParams.get("tab");
     if (t && VALID_TABS.includes(t)) return t as Tab;
     if (typeof window !== "undefined") {
-      const cached = localStorage.getItem(TAB_CACHE_KEY);
-      if (cached && VALID_TABS.includes(cached)) return cached as Tab;
+      try {
+        const cached = localStorage.getItem(TAB_CACHE_KEY);
+        if (cached && VALID_TABS.includes(cached)) return cached as Tab;
+      } catch {}
     }
     return "brain";
   });
@@ -179,17 +204,22 @@ export function AssistantDetail({
   // there is a cached row to patch.
   const detailKey = workspaceId ? assistantDetailCacheKey(workspaceId, id) : null;
   const detail = useCachedResource<AssistantDetailSnapshot>(detailKey, () =>
-    fetchAssistantDetail(id),
+    fetchAssistantDetail(id, workspaceId),
   );
   const [pending, setPending] = useState<Partial<AssistantHeader>>({});
   const sidebarSeed: AssistantHeader | undefined = getCachedAssistants().find((a) => a.id === id);
   const assistant: AssistantHeader | null = detail.data
     ? detail.data.assistant
     : seed
-      ? { role: "", ...seed, ...pending }
+      ? { role: sidebarSeed?.role ?? "", ...seed, ...pending }
       : sidebarSeed
         ? { ...sidebarSeed, ...pending }
         : null;
+  // The rail seed carries no role. Tab bodies gate edit rights on it, so
+  // mounting them role-less painted a disabled form that re-enabled (and
+  // grew a Save button) a beat later. Hold a skeleton until the role is known.
+  const roleKnown = !!detail.data || !!assistant?.role;
+  const { workspaces } = useWorkspaces();
   const patchAssistant = useCallback(
     (patch: Partial<AssistantHeader>) => {
       setPending((prev) => ({ ...prev, ...patch }));
@@ -203,7 +233,13 @@ export function AssistantDetail({
   // The Settings tab renames the workspace badge (`onTeamChanged`) ahead of
   // the roster read catching up.
   const [localWorkspaceName, setTeamName] = useState<string | null>(null);
-  const workspaceName = localWorkspaceName ?? detail.data?.workspaceName ?? null;
+  // Fall back to the workspace list the shell already holds so the badge is
+  // there on the first frame rather than popping in and shoving the row.
+  const workspaceName =
+    localWorkspaceName ??
+    detail.data?.workspaceName ??
+    workspaces.find((w) => w.id === assistant?.workspaceId)?.name ??
+    null;
   // Caller's role on the assistant's workspace. Mirrors the API auth
   // model: a workspace admin/owner may edit clearance even when they
   // don't own the assistant. See packages/api/src/routes/assistants.ts
@@ -400,24 +436,25 @@ export function AssistantDetail({
 
       {/* Tab content */}
       <div>
-        {tab === "brain" && (
+        {!roleKnown && <TabBodySkeleton />}
+        {roleKnown && tab === "brain" && (
           <BrainTab assistantId={id} workspaceId={assistant.workspaceId ?? null} />
         )}
-        {tab === "tools" && (
+        {roleKnown && tab === "tools" && (
           <ConnectorsTab
             assistantId={id}
             assistantClearance={assistant.clearance}
             workspaceId={assistant.workspaceId ?? null}
           />
         )}
-        {tab === "api" && (
+        {roleKnown && tab === "api" && (
           <ApiKeysTab
             assistantId={id}
             workspaceId={assistant.workspaceId ?? null}
             role={assistant.role}
           />
         )}
-        {tab === "settings" && (
+        {roleKnown && tab === "settings" && (
           <SettingsTab
             assistantId={id}
             role={assistant.role}
@@ -438,6 +475,30 @@ export function AssistantDetail({
 }
 
 const API_URL = publicRuntimeConfig().apiUrl ?? "http://localhost:4000";
+
+/**
+ * Placeholder rows for a tab body whose first read has not landed. Holds the
+ * geometry the real list will take (N4) so the swap-in does not shove the
+ * page, where the old "Loading..." sentence collapsed it to one line.
+ */
+function ListSkeleton({ rows = 3, rowClassName = "h-16" }: { rows?: number; rowClassName?: string }) {
+  return (
+    <div className="space-y-3" aria-busy="true" data-testid="assistant-detail-list-skeleton">
+      {Array.from({ length: rows }, (_, i) => (
+        <Skeleton key={i} className={cn("w-full rounded-xl", rowClassName)} />
+      ))}
+    </div>
+  );
+}
+
+function TabBodySkeleton() {
+  return (
+    <div className="space-y-6" aria-busy="true" data-testid="assistant-detail-tab-skeleton">
+      <Skeleton className="h-8 w-56 rounded-lg" />
+      <ListSkeleton />
+    </div>
+  );
+}
 
 // ─── Channels tab — removed ────────────────────────────────────
 //
@@ -875,9 +936,7 @@ function MemoryTab({ assistantId, workspaceId }: { assistantId: string; workspac
 
       {/* Memory list */}
       {loading && memories.length === 0 ? (
-        <div className="text-[13px] text-muted-foreground py-10 text-center">
-          {t.assistant.brainTab.loadingMemories}
-        </div>
+        <ListSkeleton rows={4} rowClassName="h-14" />
       ) : memories.length === 0 ? (
         <div className="rounded-xl border border-dashed border-border p-10 text-center">
           <div className="text-sm text-foreground font-medium">
@@ -1191,10 +1250,8 @@ function MemoryTab({ assistantId, workspaceId }: { assistantId: string; workspac
           {showTeam && (
             <>
               {teamLoading && teamMemories.length === 0 ? (
-                <div className="text-[13px] text-muted-foreground py-6 text-center">
-                  {t.assistant.brainTab.loadingTeamMemories}
-                </div>
-              ) : teamMemories.length === 0 ? (
+                <ListSkeleton rows={2} rowClassName="h-12" />
+              ) :teamMemories.length === 0 ? (
                 <div className="rounded-xl border border-dashed border-border p-6 text-center">
                   <div className="text-sm text-foreground font-medium">{t.assistant.brainTab.noTeamMemoriesTitle}</div>
                   <div className="text-[13px] text-muted-foreground mt-1">
@@ -1608,14 +1665,6 @@ function ConnectorsTab({
     }
   }
 
-  if (loading) {
-    return (
-      <div className="text-[13px] text-muted-foreground py-10 text-center">
-        {t.assistant.toolsTab.loadingConnectors}
-      </div>
-    );
-  }
-
   function toggleExpand(c: UserConnector) {
     if (expandedTools === c.id) {
       setExpandedTools(null);
@@ -1791,7 +1840,8 @@ function ConnectorsTab({
       </p>
 
       <div className="space-y-2">
-        {allConnectors.map((c) => {
+        {loading && <ListSkeleton rows={4} />}
+        {!loading && allConnectors.map((c) => {
           const isExpanded = expandedTools === c.id;
           const providerId = c.providerId ?? c.id;
 
@@ -2208,6 +2258,65 @@ export function DecisionPlaybookRuleCard({
   );
 }
 
+type Charter = { mission: string; audience: string; success: string; instructions: string };
+const EMPTY_CHARTER: Charter = { mission: "", audience: "", success: "", instructions: "" };
+
+function charterEquals(a: Charter, b: Charter): boolean {
+  return (Object.keys(a) as (keyof Charter)[]).every((f) => a[f].trim() === b[f].trim());
+}
+
+type AssistantSettingsSnapshot = {
+  name: string | null;
+  charter: Charter;
+  workspaceId: string | null;
+  workspaceName: string | null;
+  defaultModelAlias: string | null;
+  playbook: DecisionPlaybookRuleView[];
+};
+
+/** The Settings tab's one read: the assistant row and its playbook in parallel. */
+export async function fetchAssistantSettings(assistantId: string): Promise<AssistantSettingsSnapshot> {
+  const [res, playbookRes] = await Promise.all([
+    authFetch(`${API_URL}/api/assistants/${assistantId}`),
+    authFetch(`${API_URL}/api/assistants/${assistantId}/playbook`).catch(() => null),
+  ]);
+  if (!res.ok) throw new Error(`assistant ${res.status}`);
+  const data = (await res.json()) as {
+    name?: string;
+    charter?: { mission?: string; audience?: string; success?: string; instructions?: string } | null;
+    workspaceId?: string | null;
+    defaultModelAlias?: string;
+  };
+  let playbook: DecisionPlaybookRuleView[] = [];
+  if (playbookRes?.ok) {
+    const pb = (await playbookRes.json().catch(() => null)) as { rules?: DecisionPlaybookRuleView[] } | null;
+    playbook = pb?.rules ?? [];
+  }
+  let workspaceName: string | null = null;
+  if (data.workspaceId) {
+    try {
+      const w = await authFetch(`${API_URL}/api/workspaces/${data.workspaceId}`);
+      if (w.ok) workspaceName = ((await w.json()) as { name?: string } | null)?.name ?? null;
+    } catch {
+      // The workspace row still shows its id-derived state; the name lands
+      // on the next revalidation.
+    }
+  }
+  return {
+    name: data.name ?? null,
+    charter: {
+      mission: data.charter?.mission ?? "",
+      audience: data.charter?.audience ?? "",
+      success: data.charter?.success ?? "",
+      instructions: data.charter?.instructions ?? "",
+    },
+    workspaceId: data.workspaceId ?? null,
+    workspaceName,
+    defaultModelAlias: data.defaultModelAlias ?? null,
+    playbook,
+  };
+}
+
 function SettingsTab({
   assistantId,
   role,
@@ -2229,7 +2338,24 @@ function SettingsTab({
   const router = useRouter();
   const params = useParams<{ workspaceId: string }>();
   const routeWs = params?.workspaceId ?? "";
-  const [name, setName] = useState(assistantName);
+  // The tab's read (charter, default tier, playbook, workspace name) rides a
+  // cached key (instant-navigation N1): a revisit paints the filled form on
+  // the first frame instead of collapsing the Charter card to a loading line
+  // and re-expanding it, which shoved every section below it. Local state
+  // stays the editable draft; a revalidated read is adopted only into clean
+  // drafts (the editable-draft rule), and every save writes through the key.
+  const settingsKey = routeWs ? assistantSettingsCacheKey(routeWs, assistantId) : null;
+  const settings = useCachedResource<AssistantSettingsSnapshot>(settingsKey, () =>
+    fetchAssistantSettings(assistantId),
+  );
+  const initial = settings.data;
+  const patchSettings = useCallback(
+    (patch: Partial<AssistantSettingsSnapshot>) => {
+      mutateSurfaceCache<AssistantSettingsSnapshot>(settingsKey, (prev) => ({ ...prev, ...patch }));
+    },
+    [settingsKey],
+  );
+  const [name, setName] = useState(initial?.name ?? assistantName);
   // Charter: the one identity item (migration 418) that replaced bio +
   // custom instructions. `mission` is shown on the public chat page
   // (/c/<token>) and surfaced to sibling assistants as `purpose` in
@@ -2237,16 +2363,16 @@ function SettingsTab({
   // Mission / audience / success are owner-only; instructions is editable
   // by every member (mirrors the PATCH gate in
   // packages/api/src/routes/assistants.ts).
-  const emptyCharter = { mission: "", audience: "", success: "", instructions: "" };
-  const [charter, setCharter] = useState<typeof emptyCharter>(emptyCharter);
-  const [savedCharter, setSavedCharter] = useState<typeof emptyCharter>(emptyCharter);
-  const [loaded, setLoaded] = useState(false);
+  const emptyCharter: Charter = EMPTY_CHARTER;
+  const [charter, setCharter] = useState<Charter>(initial?.charter ?? emptyCharter);
+  const [savedCharter, setSavedCharter] = useState<Charter>(initial?.charter ?? emptyCharter);
+  const loaded = settings.data !== undefined;
   const [saving, setSaving] = useState<"name" | "charter" | null>(null);
   // Playbook (growth loop Phase 3): rules the weekly reflection learned
   // from the team's feedback. Auto-admitted up to the active cap (badged
   // "Auto"; decidedByUserId NULL marks auto-admission); overflow waits as
   // suggestions. Deciding is owner-only, mirroring the API gate.
-  const [playbook, setPlaybook] = useState<DecisionPlaybookRuleView[]>([]);
+  const [playbook, setPlaybook] = useState<DecisionPlaybookRuleView[]>(initial?.playbook ?? []);
   const [decidingRule, setDecidingRule] = useState<string | null>(null);
   const [feedback, setFeedback] = useState<{ type: "success" | "error"; message: string } | null>(null);
   const [deleteConfirm, setDeleteConfirm] = useState("");
@@ -2257,12 +2383,14 @@ function SettingsTab({
   // hosted official Telegram + WhatsApp bots - and used to seed a newly
   // attached channel. Connected channels are re-tiered in Studio > Channels;
   // the public API and chat link have their own tier on the API tab.
-  const [defaultModel, setDefaultModel] = useState<ModelAlias>("pro");
+  const [defaultModel, setDefaultModel] = useState<ModelAlias>(
+    isModelAlias(initial?.defaultModelAlias) ? initial.defaultModelAlias : "pro",
+  );
   const [savingModel, setSavingModel] = useState(false);
 
   // Team state
-  const [currentTeamId, setCurrentTeamId] = useState<string | null>(workspaceId);
-  const [currentTeamName, setCurrentTeamName] = useState<string | null>(null);
+  const [currentTeamId, setCurrentTeamId] = useState<string | null>(initial?.workspaceId ?? workspaceId);
+  const [currentTeamName, setCurrentTeamName] = useState<string | null>(initial?.workspaceName ?? null);
   const [teams, setTeams] = useState<{ id: string; name: string }[]>([]);
   const [showTeamPicker, setShowTeamPicker] = useState(false);
   const [teamLoading, setTeamLoading] = useState(false);
@@ -2276,48 +2404,28 @@ function SettingsTab({
   const workspacePlan =
     workspaces.find((w) => w.id === currentTeamId)?.plan ?? "free";
 
-  // Fetch current settings + team name
+  // Adopt a newly landed or revalidated read. Drafts the user is editing
+  // keep their text; everything else follows the server.
+  const adoptedRef = useRef<AssistantSettingsSnapshot | undefined>(initial);
   useEffect(() => {
-    authFetch(`${API_URL}/api/assistants/${assistantId}`)
-      .then((r) => (r.ok ? r.json() : null))
-      .then((data: {
-        name?: string;
-        charter?: { mission?: string; audience?: string; success?: string; instructions?: string } | null;
-        workspaceId?: string | null;
-        defaultModelAlias?: string;
-      } | null) => {
-        if (data) {
-          setName(data.name ?? assistantName);
-          const loadedCharter = {
-            mission: data.charter?.mission ?? "",
-            audience: data.charter?.audience ?? "",
-            success: data.charter?.success ?? "",
-            instructions: data.charter?.instructions ?? "",
-          };
-          setCharter(loadedCharter);
-          setSavedCharter(loadedCharter);
-          if (isModelAlias(data.defaultModelAlias)) setDefaultModel(data.defaultModelAlias);
-          setLoaded(true);
-          if (data.workspaceId) {
-            setCurrentTeamId(data.workspaceId);
-            authFetch(`${API_URL}/api/workspaces/${data.workspaceId}`)
-              .then((r) => (r.ok ? r.json() : null))
-              .then((t) => { if (t?.name) setCurrentTeamName(t.name); })
-              .catch(() => {});
-          }
-        }
-      })
-      .catch(() => {});
-  }, [assistantId, assistantName]);
-
-  useEffect(() => {
-    authFetch(`${API_URL}/api/assistants/${assistantId}/playbook`)
-      .then((r) => (r.ok ? r.json() : null))
-      .then((data: { rules?: DecisionPlaybookRuleView[] } | null) => {
-        if (data?.rules) setPlaybook(data.rules);
-      })
-      .catch(() => {});
-  }, [assistantId]);
+    const next = settings.data;
+    if (!next || next === adoptedRef.current) return;
+    const prev = adoptedRef.current;
+    adoptedRef.current = next;
+    const draftClean = charterEquals(charter, savedCharter);
+    setSavedCharter(next.charter);
+    if (draftClean) setCharter(next.charter);
+    if (name === (prev?.name ?? assistantName)) setName(next.name ?? assistantName);
+    if (!savingModel && isModelAlias(next.defaultModelAlias)) setDefaultModel(next.defaultModelAlias);
+    setPlaybook(next.playbook);
+    if (next.workspaceId) {
+      setCurrentTeamId(next.workspaceId);
+      if (next.workspaceName) setCurrentTeamName(next.workspaceName);
+    }
+    // Only a new read should trigger adoption; the draft values are read,
+    // not tracked.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [settings.data]);
 
   function showFeedback(type: "success" | "error", message: string) {
     setFeedback({ type, message });
@@ -2334,7 +2442,9 @@ function SettingsTab({
       });
       if (res.ok) {
         const data = await res.json();
-        setPlaybook((prev) => prev.map((r) => (r.id === ruleId ? { ...r, status: data.rule.status } : r)));
+        const nextPlaybook = playbook.map((r) => (r.id === ruleId ? { ...r, status: data.rule.status } : r));
+        setPlaybook(nextPlaybook);
+        patchSettings({ playbook: nextPlaybook });
       } else {
         const err = await res.json().catch(() => ({}));
         showFeedback("error", err.message ?? err.error ?? t.assistant.settings.playbookDecisionFailed);
@@ -2358,6 +2468,7 @@ function SettingsTab({
       if (res.ok) {
         const data = await res.json();
         onRenamed(data.name);
+        patchSettings({ name: data.name });
         // Broadcast to the sidebar cache so the studio rail + AppSidebar
         // pick up the new name without waiting for a refetch.
         const cached = getCachedAssistants();
@@ -2406,6 +2517,7 @@ function SettingsTab({
         };
         setCharter(updated);
         setSavedCharter(updated);
+        patchSettings({ charter: updated });
         showFeedback("success", t.assistant.settingsTab.feedbackCharterUpdated);
       } else {
         const err = await res.json().catch(() => ({ error: t.assistant.settingsTab.feedbackFailedToUpdate }));
@@ -2429,6 +2541,7 @@ function SettingsTab({
         body: JSON.stringify({ defaultModelAlias: value }),
       });
       if (res.ok) {
+        patchSettings({ defaultModelAlias: value });
         showFeedback("success", t.assistant.settings.defaultModelSaved);
       } else {
         setDefaultModel(prev);
@@ -2494,6 +2607,7 @@ function SettingsTab({
         const team = teams.find((tm) => tm.id === selectedTeamId);
         setCurrentTeamId(selectedTeamId);
         setCurrentTeamName(team?.name ?? null);
+        patchSettings({ workspaceId: selectedTeamId, workspaceName: team?.name ?? null });
         setShowTeamPicker(false);
         onTeamChanged(selectedTeamId, team?.name ?? null);
         showFeedback("success", t.assistant.settingsTab.feedbackAddedToWorkspace);
@@ -2516,6 +2630,7 @@ function SettingsTab({
       if (res.ok) {
         setCurrentTeamId(null);
         setCurrentTeamName(null);
+        patchSettings({ workspaceId: null, workspaceName: null });
         onTeamChanged(null, null);
         showFeedback("success", t.assistant.settingsTab.feedbackRemovedFromWorkspace);
       } else {
@@ -2592,7 +2707,16 @@ function SettingsTab({
       <Section title={t.assistant.settings.charterTitle} description={t.assistant.settings.charterDesc}>
         <div className="px-5 py-4 space-y-3">
           {!loaded ? (
-            <div className="text-[13px] text-muted-foreground">{t.settings.common.loading}</div>
+            // Field-shaped placeholders: the card keeps the height the form
+            // will take, so nothing below it moves when the read lands.
+            <div className="space-y-4" aria-busy="true" data-testid="assistant-charter-skeleton">
+              {["h-10", "h-10", "h-24", "h-32"].map((h, i) => (
+                <div key={i} className="space-y-1.5">
+                  <Skeleton className="h-3 w-24" />
+                  <Skeleton className={cn("w-full rounded-lg", h)} />
+                </div>
+              ))}
+            </div>
           ) : (
             <>
               <div>

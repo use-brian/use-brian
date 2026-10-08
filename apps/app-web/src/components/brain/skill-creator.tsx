@@ -352,6 +352,11 @@ export function SkillCreator({ workspaceId, onBack, onCreated, initialImport }: 
             />
             <span className="min-w-0 flex-1" />
             <Select
+              items={[
+                { value: "public", label: skillsCopy.sensitivity.public },
+                { value: "internal", label: skillsCopy.sensitivity.internal },
+                { value: "confidential", label: skillsCopy.sensitivity.confidential },
+              ]}
               value={sensitivity}
               onValueChange={(v) => {
                 if (v) setSensitivity(v as SkillSensitivity);

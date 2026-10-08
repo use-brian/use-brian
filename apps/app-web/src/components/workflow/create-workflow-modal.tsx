@@ -217,6 +217,10 @@ export function CreateWorkflowModal({ onClose }: Props) {
                     {t.workflowPage.builder.assistantPickerLabel}
                   </label>
                   <Select
+                    items={[
+                      { value: "primary", label: t.workflowPage.builder.assistantPickerPrimary },
+                      ...assistants.map((a) => ({ value: a.id, label: a.name })),
+                    ]}
                     value={assistantId}
                     onValueChange={(v) => {
                       if (v) setAssistantId(v);
