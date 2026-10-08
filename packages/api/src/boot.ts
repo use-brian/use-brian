@@ -702,6 +702,7 @@ import { createDbProvenanceStore } from './db/provenance-store.js'
 import { createDbAggregateStore } from './db/aggregate-store.js'
 import { createDbRowHistoryStore } from './db/row-history-store.js'
 import { createMemoryRetractionStore } from './db/retraction-store.js'
+import { authorizeBrainRowMutation } from './db/brain-inbox-store.js'
 import { createSoftDeleteStore } from './db/soft-delete-store.js'
 import { createSensitivityReclassificationStore } from './db/sensitivity-reclassification-store.js'
 import { createDbMarkUsefulStore } from './db/mark-useful-store.js'
@@ -4050,7 +4051,8 @@ export async function bootOpenApi(opts: BootOpenApiOptions): Promise<BootResult>
 
   for (const correctionTool of createCorrectionTools({
     retraction: createMemoryRetractionStore(),
-    softDelete: createSoftDeleteStore(),
+    // Actor-authorized: the tool deletes only rows its caller may mutate.
+    softDelete: createSoftDeleteStore({ authorize: authorizeBrainRowMutation }),
     reclassify: createSensitivityReclassificationStore(),
     resolveWorkspaceRole: (userId, workspaceId) => workspaceStore.getRole(userId, workspaceId),
   })) {
@@ -6800,7 +6802,8 @@ export async function bootOpenApi(opts: BootOpenApiOptions): Promise<BootResult>
     workflowRunStore,
     workspaceStore,
     workspaceDirectory: workspaceDirectoryStore,
-    softDeleteStore: createSoftDeleteStore(),
+    // Actor-authorized: a data-view row delete is the viewer's own mutation.
+    softDeleteStore: createSoftDeleteStore({ authorize: authorizeBrainRowMutation }),
     provider,
     resolveBackgroundRuntime,
     get backgroundModel() { return backgroundModelFor(configuredProviders) },

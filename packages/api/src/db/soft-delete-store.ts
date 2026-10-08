@@ -107,10 +107,26 @@ async function readSnapshot(
 export type SoftDeleteStoreOptions = {
   prepareHardPurge?:(client:PoolClient,input:SoftDeleteApplyHardPurgeInput)=>Promise<'skip'|void>
   validateHardPurge?:(client:PoolClient,input:SoftDeleteApplyHardPurgeInput)=>Promise<void>
+  /**
+   * Actor authorization for user and agent soft-deletes (Views row delete,
+   * `deleteBrainRow`). Without it the adapter is system-level operator state.
+   * With it, a row the actor may not mutate reads as absent and its delete is
+   * refused while the row is locked.
+   */
+  authorize?:(input:{table:'tasks'|'entities'|'kb_chunks';rowId:string;workspaceId:string;userId:string})=>Promise<boolean>
 }
+function isAuthorizedTable(table: string): table is 'tasks' | 'entities' | 'kb_chunks' {
+  return table === 'tasks' || table === 'entities' || table === 'kb_chunks'
+}
+
 export function createSoftDeleteStore(options:SoftDeleteStoreOptions={}): SoftDeleteRepository {
   return {
-    readForSoftDelete(primitive, workspaceId, rowId) {
+    async readForSoftDelete(primitive, workspaceId, rowId, actorUserId) {
+      if (options.authorize) {
+        const table = tableFor(primitive)
+        if (!actorUserId || !isAuthorizedTable(table)) return null
+        if (!(await options.authorize({ table, rowId, workspaceId, userId: actorUserId }))) return null
+      }
       return readSnapshot(primitive, workspaceId, rowId)
     },
 
@@ -131,6 +147,14 @@ export function createSoftDeleteStore(options:SoftDeleteStoreOptions={}): SoftDe
       const client = await getPool().connect()
       try {
         await client.query('BEGIN')
+        if (options.authorize) {
+          // Hold the row, then re-check the actor's current authority, so a
+          // change between the read and the write cannot be skipped.
+          await client.query(`SELECT 1 FROM ${table} WHERE id = $1 AND workspace_id = $2 FOR UPDATE`, [input.rowId, input.workspaceId])
+          if (!isAuthorizedTable(table) || !(await options.authorize({ table, rowId: input.rowId, workspaceId: input.workspaceId, userId: input.actorUserId }))) {
+            throw new SoftDeleteError('row_not_found', 'The deletion target no longer exists in this workspace.')
+          }
+        }
         const updated = await client.query(
           `UPDATE ${table} SET valid_to = $3 WHERE id = $1 AND workspace_id = $2`,
           [input.rowId, input.workspaceId, input.now],
