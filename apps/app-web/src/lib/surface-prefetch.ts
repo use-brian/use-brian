@@ -858,7 +858,8 @@ export function warmTargetFor(
       // Studio icon warms the connectors list the landing section reads.
       return {
         key: connectorsCacheKey(workspaceId),
-        fetch: () => fetchConnectorsList(workspaceId),
+        fetch: () => leaseSurfaceContent(() => fetchConnectorsList(workspaceId)),
+        lifecycle: { expiresInMs: surfaceContentRemaining },
       };
     case "chat":
       // The roster is the first thing the Chat surface needs (the new-chat
@@ -866,7 +867,8 @@ export function warmTargetFor(
       // lists fetch in parallel with it once the surface mounts.
       return {
         key: chatRosterCacheKey(workspaceId),
-        fetch: () => listWorkspaceAssistants(workspaceId),
+        fetch: () => leaseSurfaceContent(() => listWorkspaceAssistants(workspaceId)),
+        lifecycle: { expiresInMs: surfaceContentRemaining },
       };
     case "feed": {
       // The shell gate's record - the five requests every Feed route mounts

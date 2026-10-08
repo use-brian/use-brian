@@ -113,6 +113,7 @@ import {
   type ContextProject,
   type ContextTeam,
 } from "@/lib/api/context-scopes";
+import { useLeasedResource } from "@/lib/offline/surface-content-cache";
 
 export default function WorkflowDetailPage({
   params,
@@ -155,7 +156,7 @@ export default function WorkflowDetailPage({
   const adoptedRef = useRef<WorkflowFull | null | undefined>(undefined);
   // Assistants for the picker + board node labels: the Studio `assistants:`
   // slot, filtered to this workspace like Studio does.
-  const assistantsRes = useCachedResource<StudioAssistantSummary[]>(
+  const assistantsRes = useLeasedResource<StudioAssistantSummary[]>(
     activeId ? assistantsCacheKey(activeId) : null,
     () => listAssistants(activeId as string),
   );

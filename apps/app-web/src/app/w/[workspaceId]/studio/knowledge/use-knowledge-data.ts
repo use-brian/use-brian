@@ -17,6 +17,7 @@ import type { ConnectorInstanceOption } from "@/components/knowledge/add-source-
 import { authFetch } from "@/lib/auth-fetch";
 import { useCachedResource } from "@/lib/surface-cache";
 import { kbInstancesCacheKey, kbSourcesCacheKey } from "@/lib/surface-prefetch";
+import { useLeasedResource } from "@/lib/offline/surface-content-cache";
 
 const API_URL = publicRuntimeConfig().apiUrl ?? "http://localhost:4000";
 
@@ -69,7 +70,7 @@ async function fetchKbInstances(workspaceId: string): Promise<ConnectorInstanceO
 export function useKnowledgeData(workspaceId: string | null) {
   const sourcesKey = workspaceId ? kbSourcesCacheKey(workspaceId) : null;
   const instancesKey = workspaceId ? kbInstancesCacheKey(workspaceId) : null;
-  const sources = useCachedResource<KbSourcesSnapshot>(sourcesKey, () =>
+  const sources = useLeasedResource<KbSourcesSnapshot>(sourcesKey, () =>
     fetchKbSources(workspaceId as string),
   );
   const instances = useCachedResource<ConnectorInstanceOption[]>(instancesKey, () =>

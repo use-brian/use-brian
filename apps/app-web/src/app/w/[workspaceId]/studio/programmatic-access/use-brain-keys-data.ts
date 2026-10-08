@@ -32,6 +32,7 @@ import { listAssistants, type StudioAssistantSummary } from "@/lib/api/studio";
 import { listCaptureProfiles, type CaptureProfile } from "@/lib/api/programmatic-capture";
 import { mutateSurfaceCache, useCachedResource } from "@/lib/surface-cache";
 import { brainKeysCacheKey } from "@/lib/surface-prefetch";
+import { useLeasedResource } from "@/lib/offline/surface-content-cache";
 
 export type BrainKeysSnapshot = {
   keys: BrainKey[];
@@ -57,7 +58,7 @@ async function fetchBrainKeysSnapshot(workspaceId: string): Promise<BrainKeysSna
 
 export function useBrainKeysData(workspaceId: string | null) {
   const key = workspaceId ? brainKeysCacheKey(workspaceId) : null;
-  const res = useCachedResource<BrainKeysSnapshot>(key, () =>
+  const res = useLeasedResource<BrainKeysSnapshot>(key, () =>
     fetchBrainKeysSnapshot(workspaceId as string),
   );
 

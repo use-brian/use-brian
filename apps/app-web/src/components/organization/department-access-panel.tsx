@@ -31,6 +31,7 @@ import {
   fetchDepartments, removeDepartmentEdge, removeDepartmentOwner, setDepartmentEdge, setHomeDepartment,
   type DepartmentClearance, type DepartmentDirectoryEntry, type DepartmentEdge, type DepartmentHome, type DepartmentPrincipal,
 } from "@/lib/api/departments";
+import { useLeasedResource } from "@/lib/offline/surface-content-cache";
 
 const CLEARANCES: DepartmentClearance[] = ["public", "internal", "confidential"];
 type Names = Map<string, string>;
@@ -42,7 +43,7 @@ const key = (p: DepartmentPrincipal) => `${p.kind}:${p.id}`;
  * while the first read is in flight, and a mount-only read kept that empty
  * answer, so names fell back to "Person" and Add offered nobody. */
 function useNames(workspaceId: string) {
-  const assistants = useCachedResource(assistantsCacheKey(workspaceId), () => listAssistants(workspaceId));
+  const assistants = useLeasedResource(assistantsCacheKey(workspaceId), () => listAssistants(workspaceId));
   const people = useWorkspaceDirectory(workspaceId);
   return useMemo(() => {
     const roster = assistants.data ?? [];

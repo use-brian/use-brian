@@ -78,7 +78,7 @@ import {
 import { idbDelete, idbGet, idbSet } from "@/lib/offline/idb";
 import { getUserInfo } from "@/lib/user";
 import { CHAT_SESSIONS_REFRESH_EVENT } from "@/lib/chat-session-events";
-import { useLeasedResource } from "@/lib/offline/surface-content-cache";
+import { leaseSurfaceContent, surfaceContentRemaining, useLeasedResource } from "@/lib/offline/surface-content-cache";
 
 // ── Disk tier ────────────────────────────────────────────────────────────
 
@@ -205,7 +205,8 @@ async function resolveRoster(
   const entry = readSurfaceCache<WorkspaceAssistantSummary[]>(key);
   if (entry.data !== undefined && !isSurfaceCacheStale(key)) return entry.data;
   const loaded = await loadSurfaceCache(key, () =>
-    listWorkspaceAssistants(workspaceId),
+    leaseSurfaceContent(() => listWorkspaceAssistants(workspaceId)),
+    { expiresInMs: surfaceContentRemaining },
   );
   return loaded ?? entry.data ?? [];
 }
@@ -305,7 +306,7 @@ export function useChatSessionsData(
   const sessionsKey = wid ? chatSessionsCacheKey(wid) : null;
   const sharedKey = wid ? chatSharedSessionsCacheKey(wid) : null;
 
-  const roster = useCachedResource<WorkspaceAssistantSummary[]>(rosterKey, () =>
+  const roster = useLeasedResource<WorkspaceAssistantSummary[]>(rosterKey, () =>
     listWorkspaceAssistants(wid as string),
   );
   const personal = useLeasedResource<DocSession[]>(sessionsKey, () =>

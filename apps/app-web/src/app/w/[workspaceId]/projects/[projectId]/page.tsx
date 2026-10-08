@@ -35,6 +35,7 @@ import {
   updateContextProject,
   type ContextProject,
 } from "@/lib/api/context-scopes";
+import { useLeasedResource } from "@/lib/offline/surface-content-cache";
 
 const API_URL = publicRuntimeConfig().apiUrl ?? "http://localhost:4000";
 type Member = { userId: string; userName?: string | null; email?: string | null };
@@ -65,7 +66,7 @@ export default function ProjectDetailPage({
   // Content lease: protected counts and previews expire with the viewer's authority.
   const bundle = useCachedResource<ProjectBundle>(bundleKey, () => leaseSurfaceContent(() => fetchProjectBundle(workspaceId, projectId)), { expiresInMs: surfaceContentRemaining });
   useSurfaceContentRenewal(bundle.refresh);
-  const assistantList = useCachedResource(assistantsCacheKey(workspaceId), () => listAssistants(workspaceId));
+  const assistantList = useLeasedResource(assistantsCacheKey(workspaceId), () => listAssistants(workspaceId));
   const { refresh: refreshBundle } = bundle;
   const project = bundle.data?.project ?? null;
   const members = bundle.data?.members ?? [];
