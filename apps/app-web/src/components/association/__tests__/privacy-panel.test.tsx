@@ -2,8 +2,8 @@
 import {act,type ReactNode} from "react";
 import {createRoot,type Root} from "react-dom/client";
 import {beforeEach,afterEach,describe,it,expect,vi} from "vitest";
-const api=vi.hoisted(()=>({save:vi.fn(),renew:vi.fn(),preview:vi.fn(),execute:vi.fn(),receipt:vi.fn(),record:vi.fn(),lookup:vi.fn(),confirm:vi.fn()}));
-vi.mock("@/lib/api/crm-administration",()=>({saveCrmFullPrivacyPolicy:api.save,getCrmErasureReview:api.renew,previewCrmPrivacy:api.preview,executeCrmPrivacy:api.execute,getCrmFileCleanupReceipt:api.receipt}));
+const api=vi.hoisted(()=>({renewReview:vi.fn(),save:vi.fn(),renew:vi.fn(),preview:vi.fn(),execute:vi.fn(),receipt:vi.fn(),record:vi.fn(),lookup:vi.fn(),confirm:vi.fn()}));
+vi.mock("@/lib/api/crm-administration",()=>({saveCrmFullPrivacyPolicy:api.save,getCrmErasureReview:api.renew,previewCrmPrivacy:api.preview,executeCrmPrivacy:api.execute,getCrmFileCleanupReceipt:api.receipt,renewCrmPrivacyReview:api.renewReview}));
 vi.mock("@/lib/api/crm",()=>({fetchCrmRecord:api.record,fetchCrmLookup:api.lookup}));
 vi.mock("@/components/ui/confirm-dialog",()=>({confirmDialog:api.confirm}));
 vi.mock("@/lib/surface-prefetch",()=>({associationPageCacheKey:(w:string,r:string,q={})=>`crm:${w}:viewer:${r}:${JSON.stringify(q)}`}));
@@ -24,7 +24,7 @@ async function click(label:string){const b=[...host.querySelectorAll("button")].
 async function field(label:string,value:string){const el=[...host.querySelectorAll("label")].find(l=>l.firstChild?.textContent===label)?.querySelector("input,textarea")!;expect(el,`Missing field ${label}`).toBeTruthy();await act(async()=>{Object.getOwnPropertyDescriptor(el instanceof HTMLTextAreaElement?HTMLTextAreaElement.prototype:HTMLInputElement.prototype,"value")!.set!.call(el,value);el.dispatchEvent(new Event("input",{bubbles:true}));});}
 async function submit(){await act(async()=>{host.querySelector("form")!.dispatchEvent(new Event("submit",{bubbles:true,cancelable:true}));});}
 async function contactPreview(){await render(<AssociationPrivacyReview workspaceId="w" kind="erasure" disabled={false}/>);await click(contact.name+contact.hint);await submit();}
-beforeEach(()=>{resetSurfaceCache();vi.resetAllMocks();api.lookup.mockResolvedValue([contact]);api.record.mockImplementation(async(_w,id)=>({record:{id,kind:"contact",name:contact.name,email:contact.hint,phone:null,archivedAt:null}}));api.confirm.mockResolvedValue(true);api.save.mockResolvedValue({record:snapshot});api.preview.mockResolvedValue(review);api.renew.mockImplementation(async()=>({preview:await api.preview.mock.results.at(-1)!.value,receipt:null}));api.execute.mockImplementation(async()=>{const receipt={previewId:review.id,status:"crm_contact_purged"};api.renew.mockResolvedValue({preview:null,receipt});return receipt;});api.receipt.mockResolvedValue({id:review.id,status:"completed"});host=document.createElement("div");document.body.appendChild(host);root=createRoot(host);});
+beforeEach(()=>{resetSurfaceCache();vi.resetAllMocks();api.lookup.mockResolvedValue([contact]);api.record.mockImplementation(async(_w,id)=>({record:{id,kind:"contact",name:contact.name,email:contact.hint,phone:null,archivedAt:null}}));api.confirm.mockResolvedValue(true);api.save.mockResolvedValue({record:snapshot});api.preview.mockResolvedValue(review);api.renew.mockImplementation(async()=>({preview:await api.preview.mock.results.at(-1)!.value,receipt:null}));api.execute.mockImplementation(async()=>{const receipt={previewId:review.id,status:"crm_contact_purged"};api.renew.mockResolvedValue({preview:null,receipt});return receipt;});api.receipt.mockResolvedValue({id:review.id,status:"completed"});api.renewReview.mockImplementation(async(_w,kind)=>kind==="retention"?{review}:{receipt:{id:review.id,status:"ready"}});host=document.createElement("div");document.body.appendChild(host);root=createRoot(host);});
 afterEach(async()=>{await act(async()=>root.unmount());host.remove();resetSurfaceCache();vi.useRealTimers();});
 describe("[COMP:app-web/association] Full owner privacy policy",()=>{
   it("saves every explicit domain and preserves holds and open-submission fields",async()=>{await render(<AssociationPrivacyPolicyForm workspaceId="w" snapshot={snapshot} disabled={false} onSaved={()=>{}}/>);await field(p.auditSeconds,"100");await submit();expect(api.save).toHaveBeenCalledWith("w",{...snapshot.policy,retention:{...snapshot.policy.retention,auditSeconds:100},expectedVersion:4,confirmed:true});});
@@ -41,6 +41,24 @@ describe("[COMP:app-web/association] Reviewed privacy execution",()=>{
   it("keeps owner denial and preview failures free of execution requests",async()=>{await render(<AssociationPrivacyReview workspaceId="w" kind="retention" disabled/>);await submit();expect(api.preview).not.toHaveBeenCalled();await render(<AssociationPrivacyReview workspaceId="w" kind="retention" disabled={false}/>);await field(p.before,"2026-01-01T00:00");api.preview.mockRejectedValue(new Error("not_authorized"));await submit();expect(host.textContent).toContain(p.previewFailed);expect(api.execute).not.toHaveBeenCalled();});
 });
 
+
+describe("[COMP:app-web/association] Retention and cleanup review lifetime",()=>{
+  it.each(["retention","fileCleanup"] as const)("hides an open %s review when renewal is denied and recovers it on refresh",async kind=>{
+    vi.useFakeTimers({toFake:["setTimeout","clearTimeout","setInterval","clearInterval","performance"]});
+    await render(<AssociationPrivacyReview workspaceId="w" kind={kind} disabled={false}/>);
+    if(kind==="fileCleanup")await field(p.fileId,"10000000-0000-4000-8000-000000000001");
+    await field(p.before,"2026-01-01T00:00");await submit();
+    expect([...host.querySelectorAll("button")].some(b=>b.textContent===p.execute)).toBe(true);
+    api.renewReview.mockRejectedValue({status:403});
+    await act(async()=>{await vi.advanceTimersByTimeAsync(15_001);});
+    expect([...host.querySelectorAll("button")].some(b=>b.textContent===p.execute)).toBe(false);
+    expect(host.textContent).toContain(p.reviewUnavailable);expect(api.execute).not.toHaveBeenCalled();
+    api.renewReview.mockImplementation(async(_w,k)=>k==="retention"?{review}:{receipt:{id:review.id,status:"ready"}});
+    await click(t.refresh);
+    expect([...host.querySelectorAll("button")].some(b=>b.textContent===p.execute)).toBe(true);
+    expect(api.preview).toHaveBeenCalledTimes(1);
+  });
+});
 
 describe("[COMP:app-web/association] Privacy contact revocation",()=>{
   it("removes an existing erasure preview after the selected contact becomes unavailable",async()=>{

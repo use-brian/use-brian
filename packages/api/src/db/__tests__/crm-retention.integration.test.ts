@@ -324,6 +324,17 @@ describe('[COMP:crm/retention] Actual review and policy execution',()=>{
     await pool.query("INSERT INTO department_edges(workspace_id,department_id,principal_kind,user_id,clearance,origin) VALUES($1,$2,'user',$3,'confidential','store')",[f.workspaceId,dept,f.userId])
     expect((await f.preview()).domains).toContainEqual({domain:'crm_import_jobs',action:'retain',count:1})
   })
+  it('renews a saved review read-only and withholds it once its floor leaves the reviewer\'s authority',async()=>{
+    const f=await fixture();await f.policy();const dept=await department(f)
+    await pool.query("INSERT INTO department_edges(workspace_id,department_id,principal_kind,user_id,clearance,origin) VALUES($1,$2,'user',$3,'confidential','store')",[f.workspaceId,dept,f.userId])
+    await pool.query("UPDATE entities SET sensitivity='confidential',compartments=$2 WHERE id=$1",[f.contactId,[`team:${dept}`]])
+    await f.submission()
+    const review=await f.preview()
+    const read=await retention.read!(f.context,review.id)
+    expect(read).toMatchObject({id:review.id,previewHash:review.previewHash,domains:review.domains})
+    await pool.query('DELETE FROM department_edges WHERE workspace_id=$1 AND user_id=$2 AND department_id=$3',[f.workspaceId,f.userId,dept])
+    await expect(retention.read!(f.context,review.id)).rejects.toMatchObject({code:'not_authorized'})
+  })
   it('minimizes eligible delivery envelopes and retains ambiguous sends and failed events',async()=>{
     const f=await fixture();await f.policy({...BASE,deliveryReceiptsSeconds:60})
     const ids:Record<string,string>={}

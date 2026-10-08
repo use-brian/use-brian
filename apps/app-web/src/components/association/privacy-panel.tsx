@@ -3,7 +3,7 @@
 /** Human-reviewed privacy execution and complete, verified exports. [COMP:app-web/association] */
 import {useRef,useState} from "react";
 import {useT} from "@/lib/i18n/client";
-import {getCrmFullPrivacyPolicy,getCrmErasureReview,previewCrmPrivacy,executeCrmPrivacy,getCrmFileCleanupReceipt,downloadCrmFullPrivacy,type CrmPrivacyPreview,type CrmPrivacyPreviewRequest,type CrmPrivacyPolicySnapshot} from "@/lib/api/crm-administration";
+import {getCrmFullPrivacyPolicy,getCrmErasureReview,previewCrmPrivacy,executeCrmPrivacy,getCrmFileCleanupReceipt,renewCrmPrivacyReview,downloadCrmFullPrivacy,type CrmPrivacyPreview,type CrmPrivacyPreviewRequest,type CrmPrivacyPolicySnapshot} from "@/lib/api/crm-administration";
 import {associationPageCacheKey} from "@/lib/surface-prefetch";
 import {useCachedResource,invalidateSurfaceCache} from "@/lib/surface-cache";
 import {ListSurfaceSkeleton} from "@/components/chrome/surface-skeleton";
@@ -20,7 +20,12 @@ export function AssociationPrivacyReview({workspaceId,kind,disabled}:{workspaceI
   const activePreview=preview?.workspaceId===workspaceId&&preview.request.kind===kind?preview:null;
   const reviewKey=kind==="erasure"&&!disabled&&activePreview?associationPageCacheKey(workspaceId,"erasure-review",{id:activePreview.review.id}):null;
   const renewed=useAssociationProjection(reviewKey,()=>getCrmErasureReview(workspaceId,activePreview!.review.id));
-  const visibleReceipt=disabled?null:kind==="erasure"?renewed.data?.receipt:receipt;
+  // Retention and file-cleanup reviews renew on the same 30-second projection: their counts and
+  // receipts stay visible only while the saved floor is still within the viewer's authority.
+  const renewKey=kind!=="erasure"&&!disabled&&activePreview?associationPageCacheKey(workspaceId,`${kind}-review`,{id:activePreview.review.id}):null;
+  const renewal=useAssociationProjection(renewKey,()=>renewCrmPrivacyReview(workspaceId,kind as "retention"|"fileCleanup",activePreview!.review.id));
+  const openKey=reviewKey??renewKey,open=kind==="erasure"?renewed:renewal;
+  const visibleReceipt=disabled?null:kind==="erasure"?renewed.data?.receipt:renewal.data?receipt:null;
   const busy=disabled||reading||action.pending;
   function changed(){setPreview(null);setReceipt(null);setAttempted(false);setReadError(false);setExecuteError(false);}
   async function loadPreview(){
@@ -30,7 +35,7 @@ export function AssociationPrivacyReview({workspaceId,kind,disabled}:{workspaceI
     catch{setReadError(true);}finally{lock.current=false;setReading(false);}
   }
   const currentContact=kind!=="erasure"||!!visibleReceipt||!!contact&&activePreview?.request.kind==="erasure"&&activePreview.request.contactId===contact.id;
-  const review=!disabled&&currentContact?(kind==="erasure"?renewed.data?.preview:activePreview?.review):undefined,expired=review?Date.parse(review.expiresAt)<=Date.now():false;
+  const review=!disabled&&currentContact?(kind==="erasure"?renewed.data?.preview:kind==="retention"?renewal.data?.review:renewal.data?activePreview?.review:undefined):undefined,expired=review?Date.parse(review.expiresAt)<=Date.now():false;
   const canExecute=!!review&&review.status==="ready"&&!review.blockers.length&&(!expired||attempted)&&!busy;
   async function execute(){
     if(!canExecute||!activePreview||!review)return;
@@ -40,7 +45,7 @@ export function AssociationPrivacyReview({workspaceId,kind,disabled}:{workspaceI
       const result=await executeCrmPrivacy(workspaceId,activePreview.request,review);
       if(kind!=="erasure")setReceipt(result);
     }catch(error){setExecuteError(true);throw error;}
-    finally{if(reviewKey){invalidateSurfaceCache(reviewKey);await renewed.refresh();}}
+    finally{if(openKey){invalidateSurfaceCache(openKey);await open.refresh();}}
     },{description:p.executeConfirm});
   }
   async function refreshReceipt(){if(!preview||kind!=="fileCleanup"||busy)return;setReading(true);setReadError(false);try{setReceipt(await getCrmFileCleanupReceipt(workspaceId,preview.review.id));}catch{setReadError(true);}finally{setReading(false);}}
@@ -51,8 +56,8 @@ export function AssociationPrivacyReview({workspaceId,kind,disabled}:{workspaceI
       {kind!=="erasure"?<AssociationField label={p.before} type="datetime-local" required value={before} onChange={value=>{changed();setBefore(value);}}/>:null}
     </fieldset><Button type="submit" className="max-sm:min-h-11" variant="outline" disabled={busy||kind==="erasure"&&!contact}>{p.preview}</Button></form>
     {readError?<p role="alert" className="text-sm text-destructive">{receipt?t.manage.loadFailed:p.previewFailed}</p>:null}
-    {reviewKey&&!renewed.data&&renewed.loading?<ListSurfaceSkeleton rows={3}/>:null}
-    {reviewKey&&!renewed.data&&!renewed.loading?<div className="space-y-2"><p role="status" className="text-sm">{p.reviewUnavailable}</p><Button type="button" className="max-sm:min-h-11" variant="outline" disabled={busy} onClick={()=>void renewed.refresh()}>{t.refresh}</Button></div>:null}
+    {openKey&&!open.data&&open.loading?<ListSurfaceSkeleton rows={3}/>:null}
+    {openKey&&!open.data&&!open.loading?<div className="space-y-2"><p role="status" className="text-sm">{p.reviewUnavailable}</p><Button type="button" className="max-sm:min-h-11" variant="outline" disabled={busy} onClick={()=>void open.refresh()}>{t.refresh}</Button></div>:null}
     {review?<div className="space-y-3"><p className="text-sm">{p[review.status]}</p><p className="text-sm">{t.admin.expiry}: {new Date(review.expiresAt).toLocaleString()}</p><dl className="flex flex-wrap gap-4 text-sm">{(["delete","redact","retire","retain","blocked"] as const).map(action=>{const count=review.domains.filter(row=>row.action===action).reduce((sum,row)=>sum+row.count,0);return count?<div key={action}><dt>{p[action]}</dt><dd className="tabular-nums">{count}</dd></div>:null;})}</dl><TechnicalDetails><p className="text-sm">{t.admin.readVersion}: {review.policyVersion}</p><p className="break-all text-xs text-muted-foreground">{review.id} / {review.previewHash}</p>
       <div className="overflow-x-auto"><table className="w-full text-left text-sm"><thead><tr><th className="p-2">{p.domain}</th><th className="p-2">{p.action}</th><th className="p-2">{p.count}</th></tr></thead><tbody>{review.domains.map(row=><tr key={`${row.domain}:${row.action}`}><td className="p-2">{row.domain}</td><td className="p-2">{p[row.action]}</td><td className="p-2 tabular-nums">{row.count}</td></tr>)}</tbody></table></div>
       {review.blockers.length?<div><h4 className="text-sm font-medium">{p.blockers}</h4><ul className="list-inside list-disc text-sm">{review.blockers.map((row,i)=><li key={i}>{row.domain}: {row.reason} ({row.count})</li>)}</ul></div>:null}

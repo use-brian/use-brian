@@ -61,7 +61,7 @@ import { sendCrmPrivacyExport } from '../crm-operations/privacy-export.js'
 import { readCrmPrivacyPolicy } from '../crm-operations/privacy-policy.js'
 import { readCrmErasureReview } from '../crm-operations/privacy-previews.js'
 import { createCrmImportFileCleanupService } from '../crm-operations/import-file-cleanup-service.js'
-import { listCrmRetentionRuns } from '../crm-operations/retention-service.js'
+import { createCrmRetentionService, listCrmRetentionRuns } from '../crm-operations/retention-service.js'
 import { listCrmAddressSuppression } from '../crm-operations/suppression-tombstones.js'
 import { readCrmManagedMailboxPolicy, readCrmMailboxIntegrationGrant } from '../crm-operations/delivery-policy.js'
 import { query } from '../db/client.js'
@@ -1129,6 +1129,11 @@ export function crmOperationsRoutes(options: Options): Router {
       const result=await options.service.execute(ctx,{kind:'execute_retention',...body})
       res.setHeader('Cache-Control','no-store');res.json({...result.record,duplicate:result.duplicate})
     }catch(error){writeError(res,error)}
+  })
+  router.get('/:workspaceId/operations/retention/reviews/:id',async(req,res)=>{
+    const ctx=await context(req,res);if(!ctx)return
+    try {res.setHeader('Cache-Control','no-store');res.json(await createCrmRetentionService().read!(ctx,CrmOperationsUuidSchema.parse(req.params.id)))}
+    catch(error){writeError(res,error)}
   })
   router.get('/:workspaceId/operations/retention/runs',async(req,res)=>{
     const ctx=await context(req,res);if(!ctx)return

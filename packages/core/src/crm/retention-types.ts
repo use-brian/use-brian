@@ -36,4 +36,6 @@ export type CrmRetentionReview = {
 export interface CrmRetentionServicePort {
   preview(context: CrmOperationsContext, command: z.infer<typeof PreviewCrmRetentionCommandSchema>): Promise<CrmRetentionReview>
   execute(context: CrmOperationsContext, command: z.infer<typeof ExecuteCrmRetentionCommandSchema>): Promise<{receipt: Record<string, unknown>; duplicate: boolean}>
+  /** Read-only renewal of a saved manual review under its saved floor and the caller's current authority. */
+  read?(context: CrmOperationsContext, previewId: string): Promise<CrmRetentionReview>
 }

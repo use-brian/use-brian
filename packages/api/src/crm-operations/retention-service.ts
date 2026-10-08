@@ -59,6 +59,23 @@ export function createCrmRetentionService():CrmRetentionServicePort {
         return {...review,status:review.status as 'ready'|'blocked'}
       }catch(error){await client.query('ROLLBACK').catch(()=>{});return fail(error)}finally{client.release()}
     },
+    async read(rawContext,previewId) {
+      const context=CrmOperationsContextSchema.parse(rawContext)
+      const client=await getPool().connect()
+      try {
+        await client.query('BEGIN')
+        const ownerId=await assertCrmRetentionOwner(client,context)
+        const run=(await client.query<Run & {summary:ReturnType<typeof summary>}>(`SELECT * FROM crm_retention_runs
+          WHERE workspace_id=$1 AND id=$2 AND owner_user_id=$3 AND mode='manual' FOR SHARE`,[context.workspaceId,previewId,ownerId])).rows[0]
+        if(!run)throw new CrmOperationsError('not_found','The retention preview is unavailable.')
+        // The saved review's counts are only shown while its floor is still within the caller's authority.
+        await assertCrmRetentionScope(client,context,run.scope_snapshot)
+        await client.query('COMMIT')
+        return {id:run.id,workspaceId:context.workspaceId,policyVersion:run.policy_version,before:run.before_at.toISOString(),
+          capturedAt:run.captured_at.toISOString(),expiresAt:run.expires_at.toISOString(),previewHash:run.preview_hash,
+          status:run.status==='blocked'?'blocked':'ready',...run.summary}
+      }catch(error){await client.query('ROLLBACK').catch(()=>{});return fail(error)}finally{client.release()}
+    },
     async execute(rawContext,rawCommand) {
       const context=CrmOperationsContextSchema.parse(rawContext),command=ExecuteCrmRetentionCommandSchema.parse(rawCommand)
       assertCrmOperationsAuthority(context,command)

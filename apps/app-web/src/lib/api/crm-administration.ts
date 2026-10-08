@@ -78,6 +78,17 @@ export function executeCrmPrivacy(workspaceId:string,input:CrmPrivacyPreviewRequ
   return request<Record<string,unknown>>(workspaceId,input.kind==="erasure"?"privacy/erase":input.kind==="retention"?"retention/execute":"privacy/file-cleanup-execute",body);
 }
 export function getCrmFileCleanupReceipt(workspaceId:string,previewId:string){return request<Record<string,unknown>>(workspaceId,`privacy/file-cleanups/${encodeURIComponent(previewId)}`);}
+/** Renew an open retention or file-cleanup review under current authority; a denial evicts it. */
+export async function renewCrmPrivacyReview(workspaceId:string,kind:"retention"|"fileCleanup",previewId:string):Promise<{review?:CrmPrivacyPreview;receipt?:Record<string,unknown>}>{
+  try {
+    if(kind==="retention"){
+      const review=await request<CrmPrivacyPreview>(workspaceId,`retention/reviews/${encodeURIComponent(previewId)}`);
+      if(review?.id!==previewId||!/^[a-f0-9]{64}$/.test(review.previewHash)||!["ready","blocked"].includes(review.status)||!Array.isArray(review.domains)||!Array.isArray(review.blockers))throw new AssociationApiError("invalid_response",502);
+      return {review};
+    }
+    return {receipt:await getCrmFileCleanupReceipt(workspaceId,previewId)};
+  }catch(error){if(error instanceof AssociationApiError&&[401,403,404,409].includes(error.status))throw new SurfaceCacheEvictionError(error);throw error;}
+}
 export async function downloadCrmFullPrivacy(workspaceId:string,contactId?:string):Promise<Blob>{
   const path=contactId?`contacts/${encodeURIComponent(contactId)}/privacy-export`:"privacy-export";
   const response=await authFetch(`${API_URL}/api/crm/${encodeURIComponent(workspaceId)}/operations/${path}?format=crm-privacy-v2`);
