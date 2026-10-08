@@ -21,10 +21,12 @@ import {
   type CrmSegmentCatalogField as CatalogEntry,
   type CrmSegmentPredicate,
   type CrmSegmentRule,
+  type AssociationActor,
 } from '@use-brian/core'
 import type { QueryResultRow } from 'pg'
-import { query } from './client.js'
+import { getPool, query } from './client.js'
 import { crmPageInstant, queryCrmPage } from '../crm-operations/pagination.js'
+import { crmSegmentReadScope, type CrmSegmentReadScope } from '../association/source-scope.js'
 
 type EntityKind = 'person' | 'company' | 'deal'
 type QueryFn = <T extends QueryResultRow = QueryResultRow>(sql: string, params?: unknown[]) => Promise<{ rows: T[] }>
@@ -67,7 +69,7 @@ export async function loadCrmSegmentCatalog(
     purposes: purposes.rows, plans: plans.rows, events: events.rows })
 }
 
-type CompileState = { params: unknown[]; next: number; entries: Map<string, CatalogEntry>; pageTime: boolean }
+type CompileState = { params: unknown[]; next: number; entries: Map<string, CatalogEntry>; pageTime: boolean; scope?: Pick<CrmSegmentReadScope, 'entity' | 'record'> }
 
 function param(state: CompileState, value: unknown): string {
   state.params.push(value)
@@ -159,7 +161,60 @@ function expressionFor(rule: CrmSegmentRule, field: CatalogEntry, state: Compile
   throw new CrmOperationsError('catalog_key_invalid', 'Segment field cannot be compiled.')
 }
 
-function compileRule(rule: CrmSegmentRule, field: CatalogEntry, state: CompileState): string {
+/**
+ * A rule may only evaluate a dependency the viewer can read. The guard is false
+ * when the deciding row (the latest consent/suppression/membership/registration,
+ * or any relationship endpoint) is unreadable, so neither a positive nor a
+ * negative operator can reveal hidden evidence; the contact simply does not match.
+ */
+function dependencyGuard(rule: CrmSegmentRule, field: CatalogEntry, state: CompileState): string | null {
+  const scope = state.scope
+  if (!scope) return null
+  const readable = (table: string, alias: string, kind: Parameters<CrmSegmentReadScope['record']>[0]) =>
+    `EXISTS (SELECT 1 FROM ${table} WHERE ${table}.workspace_id=${alias}.workspace_id AND ${table}.id=${alias}.id AND ${scope.record(kind)})`
+  if (rule.family === 'consent') {
+    const purpose = param(state, field.sourceKey)
+    return `COALESCE((SELECT ${readable('association_consent_events', 'ce', 'consent')} FROM association_consent_events ce
+      WHERE ce.workspace_id=e.workspace_id AND ce.contact_id=e.id AND ce.purpose=${purpose}
+      ORDER BY ce.occurred_at DESC,ce.created_at DESC,ce.id DESC LIMIT 1),true)`
+  }
+  if (rule.family === 'suppression') {
+    const channel = param(state, field.sourceKey)
+    return `COALESCE((SELECT ${readable('crm_suppression_events', 'se', 'suppression')} FROM crm_suppression_events se
+      WHERE se.workspace_id=e.workspace_id AND se.contact_id=e.id
+        AND (se.channel=${channel} OR (${channel}<>'all' AND se.channel='all'))
+      ORDER BY se.occurred_at DESC,se.created_at DESC,se.id DESC LIMIT 1),true)`
+  }
+  if (rule.family === 'entitlement') {
+    const plan = param(state, field.sourceKey)
+    const at = state.pageTime ? '(SELECT at FROM crm_page_context)' : 'statement_timestamp()'
+    const effective = `association_membership_is_effective(m.workspace_id,m.id,m.status,m.starts_at,m.ends_at,${at})`
+    return `COALESCE((SELECT ${readable('association_memberships', 'm', 'membership')} FROM association_memberships m
+      JOIN association_membership_plans mp ON mp.workspace_id=m.workspace_id AND mp.id=m.plan_id
+      WHERE m.workspace_id=e.workspace_id AND m.contact_id=e.id AND mp.plan_key=${plan}
+      ORDER BY ${effective} DESC,m.starts_at DESC,m.id DESC LIMIT 1),true)`
+  }
+  if (rule.family === 'participation') {
+    const event = param(state, field.sourceKey)
+    return `COALESCE((SELECT ${readable('association_registrations', 'ar', 'registration')} FROM association_registrations ar
+      JOIN association_events ae ON ae.workspace_id=ar.workspace_id AND ae.id=ar.event_id
+      WHERE ar.workspace_id=e.workspace_id AND ar.attendee_contact_id=e.id AND ae.slug=${event}
+      ORDER BY ae.starts_at DESC,ar.id DESC LIMIT 1),true)`
+  }
+  if (rule.family === 'relationship') {
+    const edge = param(state, rule.field)
+    return `NOT EXISTS (SELECT 1 FROM entity_links el WHERE el.workspace_id=e.workspace_id
+      AND el.edge_type=${edge} AND el.retracted_at IS NULL AND el.valid_to IS NULL
+      AND ((el.source_kind='entity' AND el.source_id=e.id) OR (el.target_kind='entity' AND el.target_id=e.id))
+      AND NOT EXISTS (SELECT 1 FROM entities oe WHERE oe.workspace_id=el.workspace_id
+        AND (CASE WHEN el.source_kind='entity' AND el.source_id=e.id THEN el.target_kind ELSE el.source_kind END)='entity'
+        AND oe.id=(CASE WHEN el.source_kind='entity' AND el.source_id=e.id THEN el.target_id ELSE el.source_id END)
+        AND oe.valid_to IS NULL AND oe.retracted_at IS NULL AND ${scope.entity('oe')}))`
+  }
+  return null
+}
+
+function compileRuleUnguarded(rule: CrmSegmentRule, field: CatalogEntry, state: CompileState): string {
   if (rule.family === 'custom' && field.sqlKind === 'multi_select') {
     const key = param(state, rule.field)
     if (rule.operator === 'is_empty') return `COALESCE(e.attributes->'custom_fields'->${key},'[]'::jsonb) = '[]'::jsonb`
@@ -199,11 +254,18 @@ function compileRule(rule: CrmSegmentRule, field: CatalogEntry, state: CompileSt
   return scalarPredicate(expressionFor(rule, field, state), rule, field, state)
 }
 
+function compileRule(rule: CrmSegmentRule, field: CatalogEntry, state: CompileState): string {
+  const guard = dependencyGuard(rule, field, state)
+  const sql = compileRuleUnguarded(rule, field, state)
+  return guard ? `(${guard} AND (${sql}))` : sql
+}
+
 export function compileCrmSegmentPredicate(
   predicate: CrmSegmentPredicate,
   catalog: CrmSegmentCatalog,
   startIndex = 1,
   pageTime = false,
+  scope?: Pick<CrmSegmentReadScope, 'entity' | 'record'>,
 ): { sql: string; params: unknown[] } {
   const parsed = CrmSegmentPredicateSchema.parse(predicate)
   const issues = validateCrmSegmentCatalog(parsed, catalog)
@@ -213,7 +275,7 @@ export function compileCrmSegmentPredicate(
     })
   }
   const state: CompileState = {
-    params: [], next: startIndex, pageTime,
+    params: [], next: startIndex, pageTime, scope,
     entries: catalog.fields as Map<string, CatalogEntry>,
   }
   const walk = (group: CrmSegmentPredicate): string => {
@@ -225,8 +287,10 @@ export function compileCrmSegmentPredicate(
   return { sql: walk(parsed), params: state.params }
 }
 
-export type CrmSegmentReadStore = Pick<CrmOperationsReadPort,
-  'listSegments' | 'getSegment' | 'previewSegment'> & {
+export type CrmSegmentReadStore = Pick<CrmOperationsReadPort, 'listSegments' | 'getSegment'> & {
+    /** `actor` scopes matching, rows and counts to what that caller may read; omitted only for unscoped legacy callers. */
+    previewSegment(workspaceId: string, segmentId: string, options?: Parameters<CrmOperationsReadPort['previewSegment']>[2],
+      actor?: AssociationActor): ReturnType<CrmOperationsReadPort['previewSegment']>
     listSegmentCatalog(workspaceId: string, entityKind: EntityKind): Promise<CrmSegmentCatalogEntry[]>
     listCrmEventFilterCatalog(workspaceId: string): Promise<{
       eventTypes: string[]
@@ -294,7 +358,7 @@ export function createDbCrmSegmentStore(): CrmSegmentReadStore {
       return { ...segments, catalog: loaded.entries }
     },
     getSegment,
-    async previewSegment(workspaceId, segmentId, options = {}) {
+    async previewSegment(workspaceId, segmentId, options = {}, actor) {
       const segment = await getSegment(workspaceId, segmentId)
       if (!segment || segment.archivedAt) throw new CrmOperationsError('not_found', 'CRM segment was not found.')
       const entityKind = segment.entityKind as EntityKind
@@ -308,7 +372,10 @@ export function createDbCrmSegmentStore(): CrmSegmentReadStore {
         throw new CrmOperationsError('invalid_input', 'Invalid CRM snapshot cursor.')
       }
       const parsed = CrmPageQuerySchema.parse({ ...pageQuery, limit: pageQuery.limit ?? 25 })
-      const compiled = compileCrmSegmentPredicate(predicate, loaded.catalog, 5, true)
+      // Scope is resolved before matching so hidden contacts and dependencies never shape rows or counts.
+      const scope = actor ? await crmSegmentReadScope(getPool(), workspaceId, actor, 5) : null
+      const scopeParams = scope?.params ?? []
+      const compiled = compileCrmSegmentPredicate(predicate, loaded.catalog, 5 + scopeParams.length, true, scope ?? undefined)
       const sql = `SELECT e.id,e.display_name AS name,e.kind,e.attributes,e.created_at AS "createdAt",e.updated_at AS "updatedAt",
                 count(*) OVER()::text AS "totalCount"
            FROM entities e
@@ -316,8 +383,9 @@ export function createDbCrmSegmentStore(): CrmSegmentReadStore {
             AND NOT (e.attributes ? 'crm_archived_at')
             AND ($3::timestamptz IS NULL OR e.created_at >= $3::timestamptz)
             AND ($4::timestamptz IS NULL OR e.created_at < $4::timestamptz)
+            ${scope ? `AND ${scope.entity('e')}` : ''}
             AND (${compiled.sql})`
-      const params = [workspaceId, entityKind, parsed.createdAfter ? crmPageInstant(parsed.createdAfter) : null, parsed.createdBefore ? crmPageInstant(parsed.createdBefore) : null, ...compiled.params]
+      const params = [workspaceId, entityKind, parsed.createdAfter ? crmPageInstant(parsed.createdAfter) : null, parsed.createdBefore ? crmPageInstant(parsed.createdBefore) : null, ...scopeParams, ...compiled.params]
       const resource = `crm.segment-preview:${segmentId}:${segment.version}`
       const page = await queryCrmPage(run, { workspaceId, resource, key: 'rows', sql, params, query: parsed })
       const snapshotIds: string[] = []
@@ -337,6 +405,12 @@ export function createDbCrmSegmentStore(): CrmSegmentReadStore {
         const total = await run<{ count: string }>(`WITH crm_page_context AS (SELECT statement_timestamp() AS at)
           SELECT count(*)::text AS count FROM (${sql}) candidate`, params)
         count = Number(total.rows[0]?.count ?? 0)
+      }
+      if (actor) {
+        const renewed = await crmSegmentReadScope(getPool(), workspaceId, actor, 5)
+        if (JSON.stringify(renewed?.params ?? []) !== JSON.stringify(scopeParams)) {
+          throw new CrmOperationsError('not_authorized', 'Segment access changed.')
+        }
       }
       return {
         rows: page.rows.map(({ totalCount: _totalCount, ...row }) => row), count,

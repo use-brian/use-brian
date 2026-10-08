@@ -552,7 +552,7 @@ export function crmOperationsRoutes(options: Options): Router {
       return
     }
     try {
-      res.json(await options.readStore.previewSegment(ctx.workspaceId, segmentId.data, query.data))
+      res.json(await options.readStore.previewSegment(ctx.workspaceId, segmentId.data, query.data, ctx.actor))
     } catch (error) { writeError(res, error) }
   })
 

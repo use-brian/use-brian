@@ -194,7 +194,7 @@ async function resolveAssociationReadGrant(
 /** Internal SQL fragment over a fixed operational table, applied before LIMIT/counts. */
 export async function associationOrderReadPredicate(
   client: ScopeReader, workspaceId: string, actor: AssociationActor, parameterIndex: number,
-  recordKind: 'order' | 'registration' | 'membership' | 'rescue' | 'allocation' | 'invitation' | 'checkout' | 'submission' | 'consent' | 'suppression' | 'provider_receipt' | 'notification' | 'promotion_usage' = 'order',
+  recordKind: 'order' | 'registration' | 'membership' | 'rescue' | 'allocation' | 'invitation' | 'checkout' | 'submission' | 'consent' | 'suppression' | 'provider_receipt' | 'notification' | 'promotion_usage' | 'campaign_recipient' = 'order',
 ): Promise<{ sql: string; params: unknown[] }> {
   const authority = await resolveAssociationReadGrant(client, workspaceId, actor)
   const grant = authority?.grant
@@ -202,7 +202,40 @@ export async function associationOrderReadPredicate(
   return associationEvidenceReadSql(grant, parameterIndex, recordKind, authority?.executionLimits)
 }
 
-function associationEvidenceReadSql(grant: DepartmentReadGrant, parameterIndex: number, recordKind: 'order' | 'registration' | 'membership' | 'rescue' | 'allocation' | 'invitation' | 'checkout' | 'submission' | 'consent' | 'suppression' | 'provider_receipt' | 'notification' | 'promotion_usage', limits?: CrmIntegrationExecutionLimits): { sql: string; params: unknown[] } {
+export type CrmSegmentReadScope = {
+  params: unknown[]
+  /** The viewer may read this entity row (alias over `entities`). */
+  entity(alias: string): string
+  /** The viewer may read this operational dependency row (unaliased table). */
+  record(kind: 'consent' | 'suppression' | 'membership' | 'registration'): string
+}
+
+/**
+ * Department scope for evaluating a CRM segment: the matched contact and every
+ * dependency a rule reads must be readable before matching, rows or counts.
+ * Null in a legacy (pre-v2) workspace, where department evidence does not apply.
+ */
+export async function crmSegmentReadScope(
+  client: ScopeReader, workspaceId: string, actor: AssociationActor, parameterIndex: number,
+): Promise<CrmSegmentReadScope | null> {
+  const authority = await resolveAssociationReadGrant(client, workspaceId, actor)
+  if (!authority) return null
+  const { grant, executionLimits } = authority
+  const base = associationEvidenceReadSql(grant, parameterIndex, 'consent', executionLimits)
+  const shared = currentAgentAccess()?.sharedAudience === true || executionLimits?.sharedAudience === true
+  const map = `$${parameterIndex}::jsonb`, projects = `$${parameterIndex + 1}::text[]`, assistants = `$${parameterIndex + 2}::text[]`
+  return {
+    params: base.params,
+    entity: alias => `(NOT ${alias}.scope_held
+      AND public.department_row_allows(${map},${alias}.workspace_id,${alias}.sensitivity,${alias}.compartments,${alias}.user_id)
+      AND (${projects} IS NULL OR ${alias}.project_ids::text[] <@ ${projects})
+      AND (${assistants} IS NULL OR ${alias}.assistant_id IS NULL OR ${alias}.assistant_id::text = ANY(${assistants}))
+      ${shared ? `AND ${alias}.user_id IS NULL` : ''})`,
+    record: kind => associationEvidenceReadSql(grant, parameterIndex, kind, executionLimits).sql,
+  }
+}
+
+function associationEvidenceReadSql(grant: DepartmentReadGrant, parameterIndex: number, recordKind: 'order' | 'registration' | 'membership' | 'rescue' | 'allocation' | 'invitation' | 'checkout' | 'submission' | 'consent' | 'suppression' | 'provider_receipt' | 'notification' | 'promotion_usage' | 'campaign_recipient', limits?: CrmIntegrationExecutionLimits): { sql: string; params: unknown[] } {
   const ambient = currentAgentAccess()
   const shared = ambient?.sharedAudience === true || limits?.sharedAudience === true
   const projects = `$${parameterIndex + 1}::text[]`
@@ -211,7 +244,7 @@ function associationEvidenceReadSql(grant: DepartmentReadGrant, parameterIndex: 
     AND (${assistants} IS NULL OR ${assistantId} IS NULL OR ${assistantId} = ANY(${assistants})))`
   const map = `$${parameterIndex}::jsonb`
   // Expressions are fixed SQL identifiers below, never request text.
-  const table = recordKind === 'promotion_usage' ? 'association_promotions' : recordKind === 'notification' ? 'association_notification_outbox' : recordKind === 'provider_receipt' ? 'association_integration_events' : recordKind === 'order' ? 'association_orders' : recordKind === 'registration' ? 'association_registrations' : recordKind === 'membership' ? 'association_memberships' : recordKind === 'rescue' ? 'association_membership_offline_rescues' : recordKind === 'allocation' ? 'association_sponsorship_allocations' : recordKind === 'checkout' ? 'association_membership_checkouts' : recordKind === 'submission' ? 'association_enquiries' : recordKind === 'consent' ? 'association_consent_events' : recordKind === 'suppression' ? 'crm_suppression_events' : 'association_sponsorship_invitations'
+  const table = recordKind === 'campaign_recipient' ? 'campaign_email_recipients' : recordKind === 'promotion_usage' ? 'association_promotions' : recordKind === 'notification' ? 'association_notification_outbox' : recordKind === 'provider_receipt' ? 'association_integration_events' : recordKind === 'order' ? 'association_orders' : recordKind === 'registration' ? 'association_registrations' : recordKind === 'membership' ? 'association_memberships' : recordKind === 'rescue' ? 'association_membership_offline_rescues' : recordKind === 'allocation' ? 'association_sponsorship_allocations' : recordKind === 'checkout' ? 'association_membership_checkouts' : recordKind === 'submission' ? 'association_enquiries' : recordKind === 'consent' ? 'association_consent_events' : recordKind === 'suppression' ? 'crm_suppression_events' : 'association_sponsorship_invitations'
   const allows = (scope: string) => `(${scope}->>'workspaceId' = ${table}.workspace_id::text
     AND public.department_row_allows(${map}, ${table}.workspace_id, ${scope}->>'sensitivity',
       ARRAY(SELECT jsonb_array_elements_text(${scope}->'compartments')), (${scope}->>'userId')::uuid)

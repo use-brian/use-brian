@@ -15,7 +15,10 @@ import {
   type CampaignEmailMetadata,
 } from '@use-brian/shared/campaigns'
 import { getPool, query } from '../db/client.js'
+import { associationOrderReadPredicate, loadAssociationOrderScope } from '../association/source-scope.js'
+import type { AssociationActor } from '@use-brian/core'
 import {
+  campaignReadActor,
   createCampaignEmailService,
   renderCampaignEmail,
   type CampaignEmailService,
@@ -115,7 +118,7 @@ export function createCampaignDispatchService(options: {
       if (JSON.stringify(draft.metadata) !== JSON.stringify(campaignEmailMetadataSchema.parse(input.metadata))) {
         throw new CampaignError('conflict', 'Email metadata does not match the reviewed revision.')
       }
-      const audience = await email.audience(context.workspaceId, input.placementId)
+      const audience = await email.audience(context.workspaceId, input.placementId, campaignReadActor(context.actor))
       const serverRecipients = canonicalRecipients(audience.eligible as Array<{ contactId: string; address: string; personalization: Record<string, string> }>)
       const requestedRecipients = canonicalRecipients(input.recipients)
       if (JSON.stringify(serverRecipients) !== JSON.stringify(requestedRecipients)) {
@@ -170,11 +173,15 @@ export function createCampaignDispatchService(options: {
       ])).rows[0]!
       for (const recipient of serverRecipients) {
         const deliveryId = randomUUID()
+        // The recipient row copies personal data out of the contact, so it keeps the contact's canonical
+        // protection captured now, under the approver's scoped audience; history is never relabeled later.
+        const evidence = await loadAssociationOrderScope(client, context.workspaceId, [recipient.contactId])
         const saved = (await client.query<{ id: string }>(`INSERT INTO campaign_email_recipients
-          (workspace_id,dispatch_id,contact_id,email_address,address_hash,personalization_snapshot,eligibility_snapshot,delivery_id)
-          VALUES($1,$2,$3,$4,$5,$6::jsonb,$7::jsonb,$8) RETURNING id`, [
+          (workspace_id,dispatch_id,contact_id,email_address,address_hash,personalization_snapshot,eligibility_snapshot,delivery_id,scope_snapshot,scope_sources)
+          VALUES($1,$2,$3,$4,$5,$6::jsonb,$7::jsonb,$8,$9::jsonb,$10::jsonb) RETURNING id`, [
           context.workspaceId, dispatch.id, recipient.contactId, recipient.address, sha256(recipient.address),
           JSON.stringify(recipient.personalization), JSON.stringify(input.recipients.find(item => item.contactId === recipient.contactId)?.eligibility ?? {}), deliveryId,
+          JSON.stringify(evidence.scope), JSON.stringify(evidence.sources),
         ])).rows[0]!
         await client.query(`INSERT INTO campaign_email_jobs(workspace_id,dispatch_id,recipient_id,available_at)
           VALUES($1,$2,$3,$4)`, [context.workspaceId, dispatch.id, saved.id, scheduledAt])
@@ -217,7 +224,8 @@ export function createCampaignDispatchService(options: {
       return { dispatchId, state: 'cancelled' }
     },
 
-    async read(workspaceId: string, dispatchId: string) {
+    /** With `actor`, recipient counts are returned only when every recipient is readable; otherwise they are unknown (null). */
+    async read(workspaceId: string, dispatchId: string, actor?: AssociationActor) {
       const dispatch = (await query<Record<string, unknown>>(`SELECT id,campaign_id AS "campaignId",placement_id AS "placementId",
           approved_revision AS "approvedRevision",state,scheduled_at AS "scheduledAt",approved_at AS "approvedAt",
           started_at AS "startedAt",completed_at AS "completedAt"
@@ -228,6 +236,14 @@ export function createCampaignDispatchService(options: {
         count(*) FILTER(WHERE state='suppressed')::int AS suppressed,count(*) FILTER(WHERE state IN('pending','admitted'))::int AS pending,
         count(*) FILTER(WHERE state='uncertain')::int AS uncertain,count(*) FILTER(WHERE state='cancelled')::int AS cancelled
         FROM campaign_email_recipients WHERE workspace_id=$1 AND dispatch_id=$2`, [workspaceId, dispatchId])).rows[0]!
+      if (actor) {
+        const scope = await associationOrderReadPredicate(getPool(), workspaceId, actor, 3, 'campaign_recipient')
+        const hidden = (await query<{ hidden: number }>(`SELECT count(*)::int AS hidden FROM campaign_email_recipients
+          WHERE workspace_id=$1 AND dispatch_id=$2 AND NOT coalesce(${scope.sql},false)`, [workspaceId, dispatchId, ...scope.params])).rows[0]!
+        if (hidden.hidden > 0) {
+          for (const key of Object.keys(counts)) (counts as Record<string, number | null>)[key] = null
+        }
+      }
       return {
         dispatch: Object.fromEntries(Object.entries(dispatch).map(([key, value]) => [key, value instanceof Date ? value.toISOString() : value])),
         counts,

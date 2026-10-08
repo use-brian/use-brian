@@ -63,7 +63,7 @@ export type CrmOperationsReadPort = {
   previewSegment(workspaceId: string, segmentId: string, options?: CrmPageQuery & {
     snapshotLimit?: number
     snapshotCursor?: string
-  }): Promise<{
+  }, actor?: CrmOperationsActor): Promise<{
     rows: Array<Record<string, unknown>>
     count: number
     snapshotIds: string[]
@@ -502,7 +502,7 @@ export function createCrmOperationsTools(options: {
   })
   const previewCrmSegment = buildTool({
     name: 'previewCrmSegment', requiresCapability: 'crm', isReadOnly: true,
-    description: 'Evaluate one saved CRM segment at read time. Returns a row preview, complete current count and stable-id page. Continue rows with nextCursor/cursor and IDs with snapshotNextCursor/snapshot_cursor until null; keep the same segment and filters. A dynamic snapshot is not continuing send permission. Unknown catalog fields fail closed with valid choices.',
+    description: 'Evaluate one saved CRM segment at read time, as you. Returns a row preview, complete current count and stable-id page of the contacts you may read; a contact whose deciding consent, membership or other evidence you cannot read does not match. Continue rows with nextCursor/cursor and IDs with snapshotNextCursor/snapshot_cursor until null; keep the same segment and filters. A dynamic snapshot is not continuing send permission. Unknown catalog fields fail closed with valid choices.',
     inputSchema: z.object({
       ...PageInput,
       segment_id: CrmOperationsUuidSchema,
@@ -518,7 +518,7 @@ export function createCrmOperationsTools(options: {
           ...pageFilters(input),
           snapshotLimit: input.snapshot_limit,
           snapshotCursor: input.snapshot_cursor,
-        }) }
+        }, actorFor(context)) }
       } catch (error) { return failure(error) }
     },
   })

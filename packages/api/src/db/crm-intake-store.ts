@@ -218,7 +218,14 @@ function createReadStore(integration?: CrmIntegrationAuthority & { workspaceId: 
   return {
     listSegments: (workspaceId, filters) => { authorizeSegments(workspaceId); return segmentStore.listSegments(workspaceId, filters) },
     getSegment: (workspaceId, segmentId) => { authorizeSegments(workspaceId); return segmentStore.getSegment(workspaceId, segmentId) },
-    previewSegment: (workspaceId, segmentId, options) => { authorizeSegments(workspaceId); return segmentStore.previewSegment(workspaceId, segmentId, options) },
+    previewSegment: (workspaceId, segmentId, options, actor) => {
+      authorizeSegments(workspaceId)
+      const effectiveActor = actor ?? (integration ? { kind: 'integration_key' as const, credentialId: integration.credentialId } : undefined)
+      const identity = effectiveActor ? actorAuditIdentity(effectiveActor) : null
+      const scopeActor: AssociationActor | undefined = effectiveActor && identity ? { credentialKind: effectiveActor.kind, credentialId: identity.actorCredentialId,
+        ...(identity.actingUserId ? { actingUserId: identity.actingUserId } : {}), ...(integration ? { integration } : {}) } : undefined
+      return segmentStore.previewSegment(workspaceId, segmentId, options, scopeActor)
+    },
     listCrmEventFilterCatalog: (workspaceId) => { authorizeSegments(workspaceId); return segmentStore.listCrmEventFilterCatalog(workspaceId) },
     async authenticate(token, definitionKey) {
       if (integration) throw new CrmOperationsError('not_authorized', 'A scoped integration read store cannot authenticate another credential family.')

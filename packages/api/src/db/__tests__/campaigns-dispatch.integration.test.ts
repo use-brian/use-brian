@@ -97,7 +97,7 @@ function sanitizedMimeEvidence(source: string, recipients: Array<{ email: string
 }
 
 type Fixture = Awaited<ReturnType<typeof fixture>>
-async function fixture(sink: SmtpSink, count = 1) {
+async function fixture(sink: SmtpSink, count = 1, beforeAudience?: (f: { workspaceId: string; userId: string; contacts: Array<{ id: string; email: string }> }) => Promise<void>) {
   const userId = randomUUID(), workspaceId = randomUUID(), assistantId = randomUUID(), sessionId = randomUUID()
   const connectorInstanceId = randomUUID(), campaignId = randomUUID(), placementId = randomUUID(), segmentId = randomUUID()
   await pool.query(`INSERT INTO users(id,auth_provider,auth_provider_id) VALUES($1::uuid,'test',$1::uuid::text)`, [userId])
@@ -156,7 +156,8 @@ async function fixture(sink: SmtpSink, count = 1) {
   const campaigns = createCampaignService(undefined, undefined, email, dispatch)
   const context: CampaignContext = { workspaceId, actor: { kind: 'user', userId },
     authority: { role: 'owner', canRead: true, canWrite: true, canConfigure: true, canSend: true } }
-  const audience = await email.audience(workspaceId, placementId)
+  await beforeAudience?.({ workspaceId, userId, contacts })
+  const audience = await email.audience(workspaceId, placementId, { credentialKind: 'user', credentialId: userId })
   const scheduledAt = new Date(Date.now() - 1_000).toISOString()
   const prepared = await campaigns.execute(context, { idempotencyKey: `prepare-${randomUUID()}`, command: {
     kind: 'prepare_dispatch', campaignId, placementId, approvedRevision: 1, metadata, scheduledAt,
@@ -300,6 +301,44 @@ describe('[COMP:campaigns/dispatch] approved SMTP dispatch and recovery', () => 
       expect(await cancelled.dispatch.tick()).toBe(0)
       expect((await cancelled.dispatch.read(cancelled.workspaceId, cancelled.dispatchId)).counts).toMatchObject({ cancelled: 1 })
       expect(sink.messages).toHaveLength(1)
+    } finally { await sink.close() }
+  })
+
+  it('captures each recipient floor at approval, inherits it on unsubscribe and withholds counts from readers outside it', async () => {
+    const sink = await smtpSink()
+    try {
+      const cedar = randomUUID(), outsider = randomUUID()
+      const f = await fixture(sink, 1, async ({ workspaceId, userId, contacts }) => {
+        await pool.query(`INSERT INTO workspace_groups(id,workspace_id,kind,name,created_by,compartment_key,key)
+          VALUES($1::uuid,$2,'team','Cedar',$3,$4,$1::text)`, [cedar, workspaceId, userId, `team:${cedar}`])
+        await pool.query("INSERT INTO workspace_compartments(workspace_id,key,label,managed_by,managed_ref_id) VALUES($1,$2,'Cedar','team',$3)", [workspaceId, `team:${cedar}`, cedar])
+        await pool.query(`INSERT INTO department_edges(workspace_id,department_id,principal_kind,user_id,clearance,origin)
+          VALUES($1,$2,'user',$3,'confidential','store') ON CONFLICT DO NOTHING`, [workspaceId, cedar, userId])
+        await pool.query('UPDATE entities SET sensitivity=$2,compartments=$3 WHERE id=$1', [contacts[0]!.id, 'confidential', [`team:${cedar}`]])
+        await pool.query('UPDATE workspaces SET department_read_v2=true WHERE id=$1', [workspaceId])
+      })
+      const recipient = (await pool.query<{ id: string; contactId: string; scope: { compartments: string[] } | null; sources: Array<{ resourceId: string }> | null }>(
+        `SELECT id,contact_id AS "contactId",scope_snapshot AS scope,scope_sources AS sources FROM campaign_email_recipients WHERE dispatch_id=$1`, [f.dispatchId])).rows[0]!
+      expect(recipient.scope?.compartments).toEqual([`team:${cedar}`])
+      expect(recipient.sources?.map(source => source.resourceId)).toEqual([recipient.contactId])
+
+      const owner = { credentialKind: 'user' as const, credentialId: f.userId }
+      expect((await f.dispatch.read(f.workspaceId, f.dispatchId, owner)).counts).toMatchObject({ total: 1 })
+      await pool.query('INSERT INTO users(id,auth_provider_id) VALUES($1::uuid,$1::text)', [outsider])
+      await pool.query("INSERT INTO workspace_members(workspace_id,user_id,role) VALUES($1,$2,'member')", [f.workspaceId, outsider])
+      const hidden = await f.dispatch.read(f.workspaceId, f.dispatchId, { credentialKind: 'user', credentialId: outsider })
+      expect(Object.values(hidden.counts).every(value => value === null)).toBe(true)
+
+      const token = `unsubscribe_${randomUUID().replaceAll('-', '')}`
+      await pool.query(`INSERT INTO campaign_unsubscribe_tokens(workspace_id,recipient_id,purpose_key,token_hash,all_marketing,expires_at)
+        VALUES($1,$2,'updates',$3,true,clock_timestamp()+interval '1 day')`, [f.workspaceId, recipient.id, createHash('sha256').update(token).digest('hex')])
+      expect(await createCampaignPublicEmailService().unsubscribe(token, 'purpose')).toMatchObject({ unsubscribed: true })
+      const withdrawal = (await pool.query<{ scope: unknown; sources: unknown }>(`SELECT scope_snapshot AS scope,scope_sources AS sources
+        FROM association_consent_events WHERE workspace_id=$1 AND contact_id=$2 AND action='withdrawn'`, [f.workspaceId, recipient.contactId])).rows[0]!
+      expect(withdrawal.scope).toEqual(recipient.scope)
+      expect(withdrawal.sources).toEqual(recipient.sources)
+      // tick() is workspace-global: leave no scheduled job behind for later cases.
+      await f.campaigns.execute(f.context, { idempotencyKey: `cancel-${randomUUID()}`, command: { kind: 'cancel_dispatch', dispatchId: f.dispatchId } })
     } finally { await sink.close() }
   })
 

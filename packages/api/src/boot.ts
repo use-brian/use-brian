@@ -267,7 +267,7 @@ import { crmIntakeRoutes } from './routes/crm-intake.js'
 import { crmOperationsRoutes } from './routes/crm-operations.js'
 import { createCrmDeliveryService } from './crm-operations/delivery-service.js'
 import { createCrmDeliveryProvider } from './crm-operations/delivery-providers.js'
-import { createCampaignEmailService } from './content-planning/email.js'
+import { campaignReadActor, createCampaignEmailService } from './content-planning/email.js'
 import { getGlobalEmailInboxProvider } from './agentmail/provider.js'
 import { createCrmOperationsService } from './crm-operations/service.js'
 import { createCrmProductionImportService } from './crm-operations/import-service.js'
@@ -2947,7 +2947,7 @@ export async function bootOpenApi(opts: BootOpenApiOptions): Promise<BootResult>
       getTrackingSetup: (workspaceId, siteId) => campaignTrackingStore.trackingSetup(workspaceId, siteId),
       getResults: (workspaceId, campaignId, filters) => campaignTrackingStore.results(workspaceId, campaignId, filters),
       getAttribution: (workspaceId, campaignId, filters) => campaignTrackingStore.attribution(workspaceId, campaignId, filters),
-      previewAudience: (workspaceId, input) => campaignEmailService.audience(workspaceId, String(input.placement_id)),
+      previewAudience: (workspaceId, input, actor) => campaignEmailService.audience(workspaceId, String(input.placement_id), campaignReadActor(actor)),
       previewEmail: (workspaceId, input) => campaignEmailService.preview(workspaceId, String(input.placement_id),
         (input.values ?? {}) as Record<string, string>, Number(input.revision)),
     },

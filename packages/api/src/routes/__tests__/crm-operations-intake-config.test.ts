@@ -224,7 +224,7 @@ describe('[COMP:api/crm-operations-route] intake configuration REST adapter', ()
     expect(list.status).toBe(200)
     expect(preview.status).toBe(200)
     expect(member.readStore.listSegments).toHaveBeenCalledWith(WORKSPACE_ID, { entityKind: 'person', includeArchived: false, limit: 50 })
-    expect(member.readStore.previewSegment).toHaveBeenCalledWith(WORKSPACE_ID, SEGMENT_ID, { limit: 10, snapshotLimit: 100 })
+    expect(member.readStore.previewSegment).toHaveBeenCalledWith(WORKSPACE_ID, SEGMENT_ID, { limit: 10, snapshotLimit: 100 }, expect.objectContaining({ kind: 'user' }))
     expect(saved.status).toBe(201)
     expect(member.service.execute).toHaveBeenCalledWith(expect.objectContaining({
       workspaceId: WORKSPACE_ID, actor: { kind: 'user', userId: USER_ID },
