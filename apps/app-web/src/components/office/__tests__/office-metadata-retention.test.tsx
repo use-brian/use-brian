@@ -48,9 +48,13 @@ describe('[COMP:app-web/office-template-routing] bounded routing drafts',()=>{
     const draft=family==='document'?tokenRouting():presentationRouting();state.fetch.mockImplementation(async()=>response({routing:draft},'800'));
     await renderRouting(family);expect(host.querySelector('[data-template-routing="ready"]')).not.toBeNull();
     if(family==='document') change(field(),'Unsaved protected edit');
-    await expire();expect(host.querySelector('[data-template-routing="ready"]')).toBeNull();expect(host.textContent).not.toContain('Protected');
+    let renew!:(value:Response)=>void;
+    state.fetch.mockImplementation(()=>new Promise(resolve=>{renew=resolve;}));
+    await act(async()=>vi.advanceTimersByTime(801));expect(host.querySelector('[data-template-routing="ready"]')).toBeNull();expect(host.textContent).not.toContain('Protected');
     expect(onState).toHaveBeenLastCalledWith({ready:false,dirty:false,saving:false});
-    state.fetch.mockImplementation(async()=>response({routing:draft},'800'));await act(async()=>window.dispatchEvent(new Event('focus')));
+    const reads=state.fetch.mock.calls.length;await act(async()=>window.dispatchEvent(new Event('focus')));
+    expect(state.fetch).toHaveBeenCalledTimes(reads);
+    await act(async()=>renew(response({routing:draft},'800')));
     expect(host.querySelector('[data-template-routing="ready"]')).not.toBeNull();if(family==='document')expect(field().value).toBe('Protected label');
   });
   it('preserves a dirty draft across identical authorized renewal but replaces it when the server content changes',async()=>{
@@ -70,8 +74,10 @@ describe('[COMP:app-web/office-template-routing] bounded routing drafts',()=>{
     await act(async()=>vi.advanceTimersByTime(3000));expect(host.querySelector('input')).toBeNull();
   });
   it('rejects an unbounded initial prop and clears on authority events, including pending save completion',async()=>{
-    state.fetch.mockImplementation(pending);await renderRouting('document',tokenRouting());expect(host.querySelector('input')).toBeNull();
-    state.fetch.mockImplementation(async()=>response({routing:tokenRouting()}));await act(async()=>window.dispatchEvent(new Event('focus')));change(field(),'Draft before revocation');
+    let read!:(value:Response)=>void;
+    state.fetch.mockImplementation(()=>new Promise(resolve=>{read=resolve;}));await renderRouting('document',tokenRouting());expect(host.querySelector('input')).toBeNull();
+    await act(async()=>window.dispatchEvent(new Event('focus')));expect(state.fetch).toHaveBeenCalledTimes(1);
+    await act(async()=>read(response({routing:tokenRouting()})));change(field(),'Draft before revocation');
     let finish!:(value:Response)=>void;state.fetch.mockImplementation((_url:string,init:RequestInit)=>init?.method==='PUT'?new Promise(resolve=>{finish=resolve;}):pending());
     await act(async()=>saveButton().click());await act(async()=>{applySpineEventToSurfaceCache(WORKSPACE_IDENTITY_REFRESH_EVENT,{workspaceId:state.workspace},state.workspace);});
     expect(host.querySelector('input')).toBeNull();await act(async()=>finish(response({routing:tokenRouting()})));expect(host.querySelector('input')).toBeNull();

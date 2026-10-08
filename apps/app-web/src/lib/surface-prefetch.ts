@@ -899,7 +899,7 @@ export function warmTargetFor(
       return {
         key: officeListCacheKey(workspaceId, "active"),
         fetch: () => listOfficeArtifacts(workspaceId, "active"),
-        lifecycle: {expiresInMs: officeMetadataRemaining},
+        lifecycle: {expiresInMs: officeMetadataRemaining, keepInflightOnExpiry: true},
       };
     case "shopify":
       // The reachability answer gates everything the surface renders (the

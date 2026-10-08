@@ -89,6 +89,8 @@ const disposals = new Map<string, () => void>();
 export type CacheLifecycle<T> = {
   dispose?: (value: T) => void;
   expiresInMs?: (value: T) => number;
+  /** Metadata renewals carry their own deadline; value expiry need not cancel them. */
+  keepInflightOnExpiry?: boolean;
 };
 
 function disposeEntry(key: string): void {
@@ -155,7 +157,7 @@ export function loadSurfaceCache<T>(
         lifecycle?.dispose?.(data);
         throw new SurfaceCacheEvictionError(new Error("cache_resource_expired"));
       }
-      const timer = ttl === undefined ? undefined : setTimeout(() => evictSurfaceCacheKey(key), Math.ceil(ttl));
+      const timer = ttl === undefined ? undefined : setTimeout(() => evictSurfaceCacheKey(key, {keepInflight: lifecycle?.keepInflightOnExpiry}), Math.ceil(ttl));
       if (timer !== undefined || lifecycle?.dispose) {
         disposals.set(key, () => {
           if (timer !== undefined) clearTimeout(timer);
@@ -206,7 +208,7 @@ export function seedSurfaceCache<T>(key: string, data: T, lifecycle?: CacheLifec
   const ttl = lifecycle?.expiresInMs?.(data);
   if (ttl !== undefined && (!Number.isFinite(ttl) || ttl <= 0)) return false;
   disposeEntry(key);
-  const timer = ttl === undefined ? undefined : setTimeout(() => evictSurfaceCacheKey(key), Math.ceil(ttl));
+  const timer = ttl === undefined ? undefined : setTimeout(() => evictSurfaceCacheKey(key, {keepInflight: lifecycle?.keepInflightOnExpiry}), Math.ceil(ttl));
   if (timer !== undefined || lifecycle?.dispose) disposals.set(key, () => {
     if (timer !== undefined) clearTimeout(timer);
     lifecycle?.dispose?.(data);

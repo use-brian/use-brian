@@ -58,6 +58,17 @@ describe('[COMP:app-web/surface-cache] bounded first-paint seeds', () => {
     vi.advanceTimersByTime(401);finish('obsolete');await request;
     expect(readSurfaceCache('seed').data).toBeUndefined();expect(disposal).toHaveBeenCalledExactlyOnceWith('hint');
   });
+  it('hides an opted-in metadata seed at expiry while its independently bounded read completes',async()=>{
+    let finish!:(value:string)=>void;
+    const request=loadSurfaceCache('seed',()=>new Promise<string>(resolve=>{finish=resolve;}),{expiresInMs:()=>1000,keepInflightOnExpiry:true});
+    const disposal=vi.fn();
+    seedSurfaceCache('seed','hint',{expiresInMs:()=>400,keepInflightOnExpiry:true,dispose:disposal});
+    vi.advanceTimersByTime(401);
+    expect(readSurfaceCache('seed')).toMatchObject({data:undefined,revalidating:true});
+    expect(loadSurfaceCache('seed',async()=>'duplicate')).toBe(request);
+    finish('fresh');await request;
+    expect(readSurfaceCache('seed').data).toBe('fresh');expect(disposal).toHaveBeenCalledExactlyOnceWith('hint');
+  });
   it('cannot replace a fetched value or denial, and rejects an expired seed',async()=>{
     await loadSurfaceCache('current',async()=>'current');
     await loadSurfaceCache('denied',async()=>{throw new SurfaceCacheEvictionError(new Error('denied'));});
