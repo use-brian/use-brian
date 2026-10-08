@@ -93,7 +93,7 @@ import { CollabPageEditor } from "./collab-page-editor";
 import { RecordingPlayerProvider } from "@/lib/recordings/recording-player-context";
 import { RecordingChrome } from "@/components/recordings/recording-chrome";
 import { RecordingLinkControl } from "@/components/recordings/recording-link-control";
-import { LiveTranscriptPane } from "@/components/recordings/live-transcript-pane";
+import { LiveTranscriptPane, adoptLinkedRecording } from "@/components/recordings/live-transcript-pane";
 import { recordingIdFromAnchorKey } from "@/lib/recordings/anchor";
 import { hasLiveMarkerBlock } from "@use-brian/shared";
 import { commentGutterWidth } from "./comment-rail";
@@ -1380,6 +1380,9 @@ export function DocShell({ workspaceId, assistantId }: ShellProps) {
                           <LiveTranscriptPane
                             workspaceId={workspaceId}
                             pageId={pageView.id}
+                            onRecordingLinked={(id) =>
+                              setActiveView((v) => adoptLinkedRecording(v, pageView.id, id))
+                            }
                           />
                         ) : null;
                         if (!recId) {

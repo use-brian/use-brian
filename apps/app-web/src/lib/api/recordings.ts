@@ -154,13 +154,16 @@ export async function streamLiveRecordingWindow(params: {
 export async function listLiveTranscriptWindows(
   workspaceId: string,
   pageId: string,
-): Promise<LiveTranscriptWindowRow[]> {
+): Promise<{ windows: LiveTranscriptWindowRow[]; linkedRecordingId: string | null }> {
   const res = await authFetch(
     `${API_URL}/api/recordings/live/windows?workspaceId=${encodeURIComponent(workspaceId)}&pageId=${encodeURIComponent(pageId)}`,
   );
   if (!res.ok) throw await asError(res, "Could not load the live transcript");
-  const body = (await res.json()) as { windows: LiveTranscriptWindowRow[] };
-  return body.windows;
+  const body = (await res.json()) as {
+    windows: LiveTranscriptWindowRow[];
+    linkedRecordingId?: string | null;
+  };
+  return { windows: body.windows, linkedRecordingId: body.linkedRecordingId ?? null };
 }
 
 /**
