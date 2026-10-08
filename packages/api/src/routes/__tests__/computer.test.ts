@@ -371,6 +371,20 @@ describe('[COMP:routes/computer] Take-Over live view + backend toggle + Profile-
     expect((await request(makeApp('user-2')).get('/api/computer/tasks?workspaceId=ws-1')).body.tasks).toEqual([])
   })
 
+  it('qualifies a human-origin task as live and a legacy agent-origin task without source evidence as a discard stub', async () => {
+    const human = (await orchestrator.getActiveTask('sess-1'))!
+    expect(human.executionAuthority ?? null).toBeNull()
+    const legacyAgent = { ...human, taskId: 'task-legacy', sessionId: 'sess-legacy', executionAuthority: { version: 1 }, sourceAuthority: null }
+    vi.spyOn(orchestrator, 'listActiveTasks').mockResolvedValue([human, legacyAgent] as never)
+    const assertTaskAuthority = vi.spyOn(orchestrator, 'assertTaskAuthority')
+      .mockRejectedValue(Object.assign(new Error('unavailable'), { code: 'profile_authority_denied' }))
+    const tasks = (await request(app).get('/api/computer/tasks?workspaceId=ws-1')).body.tasks as Record<string, unknown>[]
+    expect(tasks.find((task) => task.sessionId === 'sess-1')).toMatchObject({ backend: 'cloud', status: 'running' })
+    expect(tasks.find((task) => task.sessionId === 'sess-1')).not.toHaveProperty('unavailable')
+    expectOnlyDiscardStubs(tasks.filter((task) => task.sessionId === 'sess-legacy'), ['sess-legacy'])
+    expect(assertTaskAuthority).toHaveBeenCalledOnce()
+  })
+
   it('lists the CALLER\'s live tasks for the workspace pill; teammates see an empty list', async () => {
     const mine = await request(app).get('/api/computer/tasks?workspaceId=ws-1')
     expect(mine.status).toBe(200)
