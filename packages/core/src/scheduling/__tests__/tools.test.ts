@@ -1,3 +1,4 @@
+import { createExecutionContext, executionToolContext } from '../../security/execution-context.js'
 import { describe, it, expect, vi } from 'vitest'
 import { createSchedulingTools } from '../tools.js'
 import type { JobStore, ScheduledJob } from '../types.js'
@@ -233,6 +234,25 @@ const ctx = {
 }
 
 describe('[COMP:scheduling/tools] createScheduledJob', () => {
+  it('persists the department context, binding and cap from the validated authoring turn', async () => {
+    const departmentRead = { workspaceId: 'w1', userId: 'u1', assistantId: 'a1', base: 'public' as const,
+      departments: { research: 'internal' as const }, contextDepartment: 'research', binding: ['research'], cap: 'internal' as const }
+    const execution = createExecutionContext({
+      identity: { kind: 'attended', principal: { kind: 'workspace_member', userId: 'u1' } },
+      ownership: { kind: 'workspace', workspaceId: 'w1' },
+      access: { ...ctx, departmentRead },
+      writeDefaults: { compartments: [], projectIds: [] },
+      authority: { assertCurrent: async () => {}, execute: async operation => operation() },
+      lifecycle: ctx,
+    })
+    const workflowStore = makeFakeWorkflowStore()
+    const { createScheduledJob } = createSchedulingTools({ jobStore: makeFakeJobStore(), workflowStore })
+    const result = await createScheduledJob.execute({ schedule: { type: 'daily', time: '09:00' },
+      timezone: 'UTC', instructions: 'Review department tasks' }, executionToolContext(execution, { appId: ctx.appId }))
+    expect(result.isError).toBeFalsy()
+    expect(workflowStore.rows[0].authoringAuthority?.ceiling.departmentRead).toEqual(departmentRead)
+  })
+
   it('creates a daily job and returns the id + next run', async () => {
     const store = makeFakeJobStore()
     const workflowStore = makeFakeWorkflowStore()

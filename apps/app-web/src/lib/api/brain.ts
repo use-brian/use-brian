@@ -907,7 +907,7 @@ export function projectInboxRowToBrainRow(row: BrainInboxRow): BrainRow {
       return {
         ...common,
         kind: "people",
-        name: String(b.display_name ?? b.email ?? "(contact)"),
+        name: String(b.name ?? b.display_name ?? b.email ?? "(contact)"),
         summary: typeof b.role === "string" ? b.role : null,
       };
     case "company":

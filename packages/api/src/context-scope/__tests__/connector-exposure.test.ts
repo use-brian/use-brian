@@ -70,3 +70,25 @@ describe('[COMP:api/connector-context] independent connector mutation authority'
     })
   })
 })
+
+describe('[COMP:api/connector-context] v2 department floor', () => {
+  const grant = { workspaceId: 'workspace', userId: 'viewer', assistantId: 'assistant', base: 'internal' as const,
+    departments: { sales: 'internal' as const }, contextDepartment: null, binding: null, cap: null }
+  const turn = { effectiveCompartments: null, effectiveProjectIds: null, access: { mutationCompartments: null, departmentRead: grant } }
+  const audience = { compartments: ['team:sales'], projectIds: [] }
+  it('does not treat legacy universe reach as a department edge', () => {
+    expect(connectorExposureAllowed(turn, audience)).toBe(true)
+    expect(connectorExposureAllowed({ ...turn, access: { departmentRead: { ...grant, departments: {} } } }, audience)).toBe(false)
+    expect(connectorExposureAllowed(turn, { compartments: ['team:sales','team:other'], projectIds: [] })).toBe(false)
+  })
+  it('honors active context and credential binding independently', () => {
+    expect(connectorExposureAllowed({ ...turn, access: { departmentRead: { ...grant, contextDepartment: 'other' } } }, audience)).toBe(false)
+    expect(connectorExposureAllowed({ ...turn, access: { departmentRead: { ...grant, binding: [] } } }, audience)).toBe(false)
+    expect(connectorExposureAllowed(turn, general)).toBe(true)
+  })
+  it('retains the narrower ambient grant even with broad explicit scope', () => {
+    runWithAgentAccess({ clearance: 'internal', compartments: null, departmentRead: { ...grant, departments: {} } }, () => {
+      expect(connectorExposureAllowed(turn, audience)).toBe(false)
+    })
+  })
+})

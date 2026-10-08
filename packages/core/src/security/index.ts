@@ -47,7 +47,7 @@ export type {
   ScopeGrant,
   TurnScope,
 } from './context-scope.js'
-export { deriveContextFloor, deriveResourceScope, deriveWriteScope, DerivedScopeError, resourceScopeKey, sourcesShareVisibility } from './derived-scope.js'
+export { deriveContextFloor, deriveResourceScope, deriveWriteScope, DerivedScopeError, describeScopeRefusal, resourceScopeKey, sourcesShareVisibility } from './derived-scope.js'
 export type { ResourceScope, ScopeSource, DerivedWriteEvidence } from './derived-scope.js'
 export { bindScopeSource, boundScopeSource } from './source-evidence.js'
 
@@ -73,3 +73,5 @@ export type {
   SystemExecutionIdentity,
   SystemExecutionPurpose,
 } from './execution-context.js'
+
+export { AuthoritySourceSchema, type AuthoritySource } from './authority-source.js'

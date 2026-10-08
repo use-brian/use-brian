@@ -53,6 +53,7 @@ import { cn } from "@/lib/utils";
 import { STATUS_BADGE } from "@/components/doc/panels/goal-status-badge";
 import { summariseDoneWhen } from "@/components/doc/panels/goal-done-when";
 import { GoalExecutionActivity } from "@/components/chat-app/goal-execution-activity";
+import { useLeasedResource } from "@/lib/offline/surface-content-cache";
 
 /**
  * The board / triage row for this goal, if any list slot already holds it -
@@ -92,7 +93,7 @@ export default function GoalDetailPage({
   // revisit paints the last-known goal on the first frame. `getGoalDetail`
   // answers `null` on a non-OK response, so a cold `error` is a network
   // failure: not-found, never a skeleton forever.
-  const detail = useCachedResource<GoalDetail | null>(
+  const detail = useLeasedResource<GoalDetail | null>(
     goalDetailCacheKey(workspaceId, goalId),
     () => getGoalDetail(goalId),
   );

@@ -84,10 +84,13 @@ export function buildCurrentMemberSourcePredicate(
   return {
     sql: `(${p}.user_id IS NULL OR ${p}.user_id=$${i})
       AND EXISTS(SELECT 1 FROM workspace_members member_floor
+        JOIN workspaces source_workspace ON source_workspace.id=member_floor.workspace_id
         WHERE member_floor.workspace_id=${p}.workspace_id AND member_floor.user_id=$${i}
-          AND sensitivity_rank(${p}.sensitivity)<=sensitivity_rank(member_floor.clearance))
-      AND (${teamFunction}($${i},${p}.workspace_id) IS NULL
-        OR ${p}.compartments <@ ${teamFunction}($${i},${p}.workspace_id))`,
+          AND CASE WHEN source_workspace.department_read_v2 THEN
+            department_member_source_allows($${i}::uuid,${p}.workspace_id,${p}.sensitivity,${p}.compartments,${p}.user_id)
+          ELSE sensitivity_rank(${p}.sensitivity)<=sensitivity_rank(member_floor.clearance)
+            AND (${teamFunction}($${i},${p}.workspace_id) IS NULL
+              OR ${p}.compartments <@ ${teamFunction}($${i},${p}.workspace_id)) END)`,
     params: [userId], nextIdx: i + 1,
   }
 }

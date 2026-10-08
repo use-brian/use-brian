@@ -3110,6 +3110,13 @@ button.doc-comment-card:hover {
   box-shadow: none !important;
 }
 .office-document-section {
+  /* Paper is artifact content, independent of the surrounding application theme. */
+  color-scheme: light;
+  --background: #ffffff;
+  --foreground: #111111;
+  --muted: #f5f5f5;
+  --muted-foreground: #737373;
+  --border: #d4d4d4;
   box-sizing: border-box;
   position: relative;
   display: block;

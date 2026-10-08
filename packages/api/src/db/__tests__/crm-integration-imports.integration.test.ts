@@ -54,6 +54,30 @@ const csv = 'Name,Email,Purpose,Choice,Source\nFixture Person,fixture@example.co
 
 describe('[COMP:crm/production-import] Actual machine source, job and row authority', () => {
   afterAll(async () => { await Promise.all([pool.end(), appPool.end(), getPool().end()]) })
+  it('renews a bound assistant before direct contact-only import effects and permits authorized recovery', async () => {
+    const f = await fixture(), assistantId = randomUUID()
+    const restore = () => pool.query("INSERT INTO assistants(id,workspace_id,name,kind,clearance) VALUES($1,$2,'Fictional import assistant','primary','internal')", [assistantId, f.workspaceId])
+    await restore()
+    const selected: CrmIntegrationGrant[] = [
+      { operation: 'crm.imports.write', selectors: {} }, { operation: 'crm.records.write', selectors: {} },
+    ]
+    const key = await keys.create(f.workspaceId, f.userId, { label: 'Fictional bound importer', expiresAt: '2099-01-01T00:00:00Z', grants: selected,
+      departmentBinding: { departmentIds: [], cap: 'internal', assistantId } })
+    const context = crmIntegrationContext((await keys.authenticate(key.oneTimeSecret))!)
+    const staged = await sources.stage(context, randomUUID(), Buffer.from('Name,Email\nFictional imported person,imported@example.com\n'))
+    const input = { sourceId: staged.sourceId, entityKind: 'contact' as const, mapping: { columns: { 0: 'name', 1: 'email' } } }
+    const preflight = await imports.dryRun(context, input)
+    const job = await imports.confirm(context, { ...input, confirmed: true, dryRunHash: preflight.dryRunHash })
+    await pool.query('DELETE FROM assistants WHERE id=$1', [assistantId])
+    await expect(imports.resume(context, job.id)).rejects.toMatchObject({ code: 'not_authorized' })
+    expect((await pool.query('SELECT id FROM entities WHERE workspace_id=$1', [f.workspaceId])).rows).toEqual([])
+    expect((await pool.query('SELECT id FROM crm_import_rows WHERE job_id=$1', [job.id])).rows).toEqual([])
+    expect((await pool.query('SELECT id FROM crm_import_chunks WHERE job_id=$1', [job.id])).rows).toEqual([])
+    await restore()
+    expect(await imports.resume(context, job.id)).toMatchObject({ status: 'completed', succeededRows: 1, failedRows: 0 })
+    expect((await pool.query('SELECT id FROM entities WHERE workspace_id=$1', [f.workspaceId])).rowCount).toBe(1)
+  })
+
   it('stages, preflights and resumes after rotation with real commands, preserving machine audit identity and exact receipts', async () => {
     const f = await fixture(), first = await f.issue(), sourceKey = randomUUID()
     const upload = () => f.post('import-sources', first.key.oneTimeSecret).set('Content-Type', 'text/csv').set('Idempotency-Key', sourceKey).send(csv)
@@ -72,7 +96,8 @@ describe('[COMP:crm/production-import] Actual machine source, job and row author
       .toEqual({ created_by_user_id: null, confirmed_by_user_id: null })
     const rotated = await f.issue(undefined, first.principal.credentialId)
     expect(await keys.authenticate(first.key.oneTimeSecret)).toBeNull()
-    await expect(imports.resume(first.context, id)).rejects.toMatchObject({ code: 'not_authorized' })
+    // A rotated key's stored authority is gone: credential_revoked (crm-operations.md).
+    await expect(imports.resume(first.context, id)).rejects.toMatchObject({ code: 'credential_revoked' })
     const completed = await f.post(`imports/${id}/resume`, rotated.key.oneTimeSecret).send({})
     expect(completed.status).toBe(200)
     expect(completed.body).toMatchObject({ status: 'completed', succeededRows: 1, failedRows: 0 })
@@ -191,7 +216,7 @@ describe('[COMP:crm/production-import] Actual machine source, job and row author
     const job = await imports.confirm(writer.context, { ...input, confirmed: true, dryRunHash: checked.dryRunHash })
     expect(await imports.resume(writer.context, job.id)).toMatchObject({ status: 'completed', succeededRows: 1, failedRows: 0 })
     const read = createDbCrmIntakeReadStore()
-    expect(await read.checkSendability(f.workspaceId, contactId, 'email', 'updates')).toMatchObject({
+    expect(await read.checkSendability(f.workspaceId, contactId, 'email', 'updates',f.member.actor)).toMatchObject({
       verdict: 'blocked', reasons: ['channel_suppression', 'consent_withdrawn'],
       effectiveConsentEventId: withdrawal.record.id, effectiveSuppressionEventIds: [suppressed.record.id],
     })

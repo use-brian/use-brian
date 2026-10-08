@@ -43,7 +43,7 @@ import { OperatorTopbar } from "@/components/operator/operator-topbar";
 import { cn } from "@/lib/utils";
 import { mutateSurfaceCache, useCachedResource } from "@/lib/surface-cache";
 import { surfaceDataKey } from "@/lib/surface-prefetch";
-import { useSurfaceContentCache } from "@/lib/offline/surface-content-cache";
+import { surfaceContentRemaining, useSurfaceContentCache, useSurfaceContentRenewal } from "@/lib/offline/surface-content-cache";
 import { PHONE_QUERY, isPhoneViewport } from "@/lib/viewport";
 import {
   OperatorBoardSkeleton,
@@ -59,7 +59,6 @@ import { TaskRulesPanel } from "@/components/tasks/task-rules-panel";
 import { format } from "@/lib/i18n/format";
 import { Checkbox } from "@/components/ui/checkbox";
 import { promptDialog } from "@/components/ui/prompt-dialog";
-import { confirmDialog } from "@/components/ui/confirm-dialog";
 import {
   adjustBrainRow,
   deleteBrainRow,
@@ -96,7 +95,7 @@ import {
   reclassifyContext,
   type ContextProject,
 } from "@/lib/api/context-scopes";
-import { loadWorkspaceRoster } from "@/lib/api/workspace-roster";
+import { useWorkspaceMemberDirectory } from "@/lib/use-workspace-directory";
 import {
   memberDisplayName,
   resolveAssignee,
@@ -181,12 +180,22 @@ export function TasksSurface({ workspaceId }: { workspaceId: string }) {
     isValue: isTaskRowList,
     fetch: () => fetchWorkspaceTasks(workspaceId),
   });
-  const tasks = useCachedResource(tasksKey, fetchTasks);
+  // Content lease: an open list never outlives the viewer's authority by more
+  // than 30 seconds (perceived-performance.md, "Content lease for protected lists").
+  const tasks = useCachedResource(tasksKey, fetchTasks, { expiresInMs: surfaceContentRemaining });
+  useSurfaceContentRenewal(tasks.refresh);
   const rows = tasks.data ?? null;
   // Only an error with NOTHING to show is a load failure; a failed revalidation
   // behind a painted list stays quiet.
   const loadError = rows === null && tasks.error !== undefined;
-  const [roster, setRoster] = useState<AssignableMember[] | null>(null);
+  const directory = useWorkspaceMemberDirectory(workspaceId);
+  const roster = useMemo<AssignableMember[] | null>(() => directory.data
+    ? directory.data.members.map((member) => ({
+        id: member.memberId, userId: member.userId, userName: member.name,
+        email: member.email, avatarUrl: member.avatarUrl, role: member.role,
+        canDraft: member.canDraft,
+      }))
+    : null, [directory.data]);
   const [projects, setProjects] = useState<ContextProject[]>([]);
 
   // Depend on the stable `refresh` callback, NOT the resource object — that
@@ -205,12 +214,6 @@ export function TasksSurface({ workspaceId }: { workspaceId: string }) {
     },
     [tasksKey],
   );
-
-  useEffect(() => {
-    loadWorkspaceRoster(workspaceId)
-      .then(setRoster)
-      .catch(() => setRoster([]));
-  }, [workspaceId]);
 
   useEffect(() => {
     listContextProjects(workspaceId).then(setProjects).catch(() => setProjects([]));
@@ -400,6 +403,9 @@ export function TasksSurface({ workspaceId }: { workspaceId: string }) {
       changes: AdjustMemoryChanges,
       patch: Partial<TaskRow>,
     ): Promise<{ ok: boolean; error?: string }> => {
+      if (changes.assignee_id !== undefined && roster === null) {
+        return { ok: false, error: t.membersUnavailable };
+      }
       const result = await adjustBrainRow(workspaceId, "task", row.id, changes);
       if (!result.ok) return { ok: false, error: result.error };
       patchRow(row.id, result.newId, patch);
@@ -409,22 +415,12 @@ export function TasksSurface({ workspaceId }: { workspaceId: string }) {
       );
       return { ok: true };
     },
-    [workspaceId, patchRow],
+    [workspaceId, patchRow, roster, t.membersUnavailable],
   );
 
   const commitProject = useCallback(
     async (row: TaskRow, projectId: string | null): Promise<{ ok: boolean; error?: string }> => {
       if (taskProject(row) === projectId) return { ok: true };
-      const widening = taskProject(row) !== null && projectId === null;
-      if (widening) {
-        const confirmed = await confirmDialog({
-          title: scopeT.clearProjectTitle,
-          description: scopeT.clearProjectDescription,
-          confirmLabel: scopeT.clearProjectConfirm,
-          cancelLabel: scopeT.cancel,
-        });
-        if (!confirmed) return { ok: false };
-      }
       try {
         await reclassifyContext({
           workspaceId,
@@ -433,7 +429,7 @@ export function TasksSurface({ workspaceId }: { workspaceId: string }) {
           teamIds: row.contextTeamIds ?? [],
           projectIds: projectId ? [projectId] : [],
           reason: "Changed task Project in Tasks",
-          confirmed: widening,
+          confirmed: false,
         });
         patchRow(row.id, null, { projectId });
         requestBrainRefresh(workspaceId);
@@ -450,16 +446,6 @@ export function TasksSurface({ workspaceId }: { workspaceId: string }) {
     const targetRows = selectedVisible
       .map((id) => (rows ?? []).find((row) => row.id === id))
       .filter((row): row is TaskRow => row !== undefined);
-    const widening = projectId === null && targetRows.some((row) => taskProject(row) !== null);
-    if (widening) {
-      const confirmed = await confirmDialog({
-        title: scopeT.clearProjectTitle,
-        description: scopeT.clearProjectDescription,
-        confirmLabel: scopeT.clearProjectConfirm,
-        cancelLabel: scopeT.cancel,
-      });
-      if (!confirmed) return;
-    }
     setBulkBusy(true);
     const failed: string[] = [];
     for (const row of targetRows) {
@@ -471,7 +457,7 @@ export function TasksSurface({ workspaceId }: { workspaceId: string }) {
           teamIds: row.contextTeamIds ?? [],
           projectIds: projectId ? [projectId] : [],
           reason: "Changed task Project in Tasks",
-          confirmed: widening,
+          confirmed: false,
         });
         patchRow(row.id, null, { projectId });
       } catch {
@@ -801,6 +787,14 @@ export function TasksSurface({ workspaceId }: { workspaceId: string }) {
 
   return (
     <div className="flex h-full min-h-0 flex-col">
+      {directory.unavailable && (
+        <div role="alert" className="flex items-center justify-between gap-3 px-4 py-2 text-sm">
+          <span>{t.membersUnavailable}</span>
+          <button type="button" className="min-h-8 max-sm:min-h-11 shrink-0 rounded-md px-3 underline" onClick={() => { void directory.refresh().catch(() => {}); }}>
+            {t.retryMembers}
+          </button>
+        </div>
+      )}
       {/* Chrome — the shared operator top bar names the app; the count
           summary + view toggle ride its right slot, replacing the old
           icon+title header row ([COMP:app-web/operator-topbar]). */}
@@ -951,15 +945,16 @@ export function TasksSurface({ workspaceId }: { workspaceId: string }) {
                 (roster ?? []).map((m) => [m.id, memberDisplayName(m) ?? t.memberUnknown]),
               ),
             }}
-            disabled={bulkBusy}
-            onPick={(id) =>
+            disabled={bulkBusy || roster === null}
+            onPick={(id) => {
+              if (roster === null) return;
               void runBulk({
                 kind: "adjust",
                 changesFor: () => ({ assignee_id: id === NONE ? null : id }),
                 patch: () => ({ assigneeId: id === NONE ? null : id }),
                 serverSet: { assignee_id: id === NONE ? null : id },
-              })
-            }
+              });
+            }}
           />
           <BulkMenu
             label={t.bulkPriority}
@@ -1547,7 +1542,7 @@ function BulkMenu({
       />
       <DropdownMenuContent>
         {Object.entries(items).map(([value, itemLabel]) => (
-          <DropdownMenuItem key={value} onClick={() => onPick(value)}>
+          <DropdownMenuItem key={value} disabled={disabled} onClick={() => { if (!disabled) onPick(value); }}>
             {itemLabel}
           </DropdownMenuItem>
         ))}

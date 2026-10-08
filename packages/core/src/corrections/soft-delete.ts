@@ -215,6 +215,11 @@ export interface SoftDeleteRepository {
     primitive: SoftDeletePrimitive,
     workspaceId: string,
     rowId: string,
+    /**
+     * The acting user. An actor-authorized adapter returns null for a row the
+     * actor may not mutate, so an unauthorized id reads as absent.
+     */
+    actorUserId?: string,
   ): Promise<RowSnapshot | null>
 
   /**
@@ -268,6 +273,7 @@ export async function softDelete(
     args.primitive,
     args.workspaceId,
     args.rowId,
+    args.actorUserId,
   )
   if (!snapshot) {
     throw new SoftDeleteError(

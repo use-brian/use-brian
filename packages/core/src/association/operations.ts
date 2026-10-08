@@ -7,7 +7,7 @@ import { ProviderEntitlementEventSchema, ProviderReceiptStateSchema } from './pr
 import { WORKSPACE_MODULE_ACTIONS, type WorkspaceModuleBlockingWork } from '@use-brian/shared'
 import { CrmOperationsActorSchema, CrmOperationsAuthoritySchema } from '../crm/operations-types.js'
 import {
-  AssociationTicketInputSchema, AssociationOrderCreateSchema, AssociationProviderEventInputSchema, AssociationProviderFinancialEventInputSchema, AssociationProviderBindingInputSchema,
+  AssociationDestinationPreviewSchema, AssociationTicketInputSchema, AssociationOrderCreateSchema, AssociationProviderEventInputSchema, AssociationProviderFinancialEventInputSchema, AssociationProviderBindingInputSchema,
   AssociationMembershipCheckoutCreateSchema, AssociationMembershipCheckoutProviderBindingSchema,
   AssociationRegistrationUpdateSchema, AssociationOrderStatusSchema, AssociationRegistrationStatusSchema,
   AssociationCheckInCorrectionSchema,
@@ -66,6 +66,7 @@ export const AssociationCommandSchema = z.union([
   z.object({ kind: z.literal('save_promotion'), promotion: AssociationPromotionInputSchema }).strict(),
   AssociationListPageSchema.extend({ kind: z.literal('list_waitlist'), eventId: Id.optional(), includeClosed: z.boolean().default(false) }).strict(),
   z.object({ kind: z.literal('offer_waitlist_place'), offer: AssociationWaitlistOfferInputSchema }).strict(),
+  AssociationDestinationPreviewSchema.extend({ kind: z.literal('preview_order_destinations') }),
   z.object({ kind: z.literal('create_order'), order: AssociationOrderCreateSchema }).strict(),
   z.object({ kind: z.literal('reserve_membership_checkout'), checkout: AssociationMembershipCheckoutCreateSchema }).strict(),
   z.object({ kind: z.literal('bind_membership_checkout_provider'), checkoutId: Id, binding: AssociationMembershipCheckoutProviderBindingSchema }).strict(),
@@ -139,4 +140,4 @@ export interface AssociationSourceMembershipImportPort {
     input: AssociationSourceMembershipImportInput,
   ): Promise<{ record: Record<string, unknown>; created: boolean; duplicate: boolean }>
 }
-export const ASSOCIATION_READ_COMMANDS = ['membership_catalogue_draft', 'published_membership_catalogue', 'observe_membership_catalogue', 'programme_catalogue_draft', 'published_programme_catalogue', 'observe_programme_catalogue', 'site_content_draft', 'published_site_content', 'observe_site_content', 'website_status', 'list_website_media', 'module_status', 'list_tickets', 'list_promotions', 'get_order', 'list_orders', 'module_blockers', 'list_registrations', 'list_operational_roster', 'list_waitlist', 'list_provider_receipts', 'list_order_notifications', 'list_membership_rescues', 'list_sponsorship_allocations', 'list_sponsorship_invitations'] as const
+export const ASSOCIATION_READ_COMMANDS = ['preview_order_destinations', 'membership_catalogue_draft', 'published_membership_catalogue', 'observe_membership_catalogue', 'programme_catalogue_draft', 'published_programme_catalogue', 'observe_programme_catalogue', 'site_content_draft', 'published_site_content', 'observe_site_content', 'website_status', 'list_website_media', 'module_status', 'list_tickets', 'list_promotions', 'get_order', 'list_orders', 'module_blockers', 'list_registrations', 'list_operational_roster', 'list_waitlist', 'list_provider_receipts', 'list_order_notifications', 'list_membership_rescues', 'list_sponsorship_allocations', 'list_sponsorship_invitations'] as const

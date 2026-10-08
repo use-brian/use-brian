@@ -4,7 +4,7 @@ import {beforeEach,describe,expect,it,vi} from 'vitest'
 import type {CrmOperationsContext} from '@use-brian/core'
 
 const mocks=vi.hoisted(()=>({query:vi.fn(),release:vi.fn(),connect:vi.fn()}))
-vi.mock('../../db/client.js',()=>({getPool:()=>({connect:mocks.connect})}))
+vi.mock('../../db/client.js',()=>({getPool:()=>({connect:mocks.connect,query:mocks.query})}))
 import {streamCrmPrivacyExport,sendCrmPrivacyExport} from '../privacy-export.js'
 
 const context:CrmOperationsContext={workspaceId:'11111111-1111-4111-8111-111111111111',actor:{kind:'user',userId:'22222222-2222-4222-8222-222222222222'},authority:{role:'owner',canConfigure:true,canWrite:true,trustedIdentitySources:[]}}
@@ -26,6 +26,7 @@ describe('[COMP:crm/privacy-export] Stream resource and failure contract',()=>{
     mocks.connect.mockResolvedValue({query:mocks.query,release:mocks.release})
     mocks.query.mockImplementation(async(sql:string)=>{
       if(sql.includes('SELECT role FROM workspace_members'))return rows([{role:'owner'}])
+      if(sql.includes('SELECT department_read_v2 FROM workspaces'))return rows([{department_read_v2:true}])
       if(sql.includes('transaction_timestamp()'))return rows([{snapshotAt:new Date('2026-01-01T00:00:00Z')}])
       return rows()
     })
@@ -86,6 +87,16 @@ describe('[COMP:crm/privacy-export] Stream resource and failure contract',()=>{
     expect(mocks.query).toHaveBeenLastCalledWith('ROLLBACK')
     expect(mocks.release).toHaveBeenCalledTimes(1)
     expect(res.listenerCount('close')).toBe(0)
+  })
+  it('renews owner authority before the manifest even when the workspace has no subject floor',async()=>{
+    const stream=streamCrmPrivacyExport(context)
+    expect((await stream.next()).value).toContain('"type":"header"')
+    const original=mocks.query.getMockImplementation()!
+    mocks.query.mockImplementation(async(sql:string)=>sql.includes('SELECT role FROM workspace_members')?rows([]):original(sql))
+    await expect(stream.next()).rejects.toMatchObject({code:'not_authorized'})
+    expect(mocks.query).not.toHaveBeenCalledWith('COMMIT')
+    expect(mocks.query).toHaveBeenLastCalledWith('ROLLBACK')
+    expect(mocks.release).toHaveBeenCalledTimes(1)
   })
   it('leaves headers untouched for an authorization failure',async()=>{
     const original=mocks.query.getMockImplementation()!

@@ -13,13 +13,14 @@ const tokenSchema = campaignOpaqueIdSchema
 
 type TokenRow = {
   id: string; workspaceId: string; recipientId: string; contactId: string; purposeKey: string;
-  allMarketing: boolean; expiresAt: Date; usedAt: Date | null; revokedAt: Date | null; purposeLabel: string;
+  allMarketing: boolean; expiresAt: Date; usedAt: Date | null; revokedAt: Date | null; purposeLabel: string; scopeSnapshot: unknown | null; scopeSources: unknown | null;
 }
 
 async function tokenRow(token: string, lock = false, client: Pick<Pool | PoolClient, 'query'> = getPool()) {
   return (await client.query<TokenRow>(`SELECT t.id,t.workspace_id AS "workspaceId",t.recipient_id AS "recipientId",r.contact_id AS "contactId",
       t.purpose_key AS "purposeKey",t.all_marketing AS "allMarketing",t.expires_at AS "expiresAt",t.used_at AS "usedAt",
-      t.revoked_at AS "revokedAt",coalesce(p.label,'Marketing email') AS "purposeLabel"
+      t.revoked_at AS "revokedAt",coalesce(p.label,'Marketing email') AS "purposeLabel",
+      r.scope_snapshot AS "scopeSnapshot",r.scope_sources AS "scopeSources"
     FROM campaign_unsubscribe_tokens t JOIN campaign_email_recipients r ON r.id=t.recipient_id AND r.workspace_id=t.workspace_id
     LEFT JOIN crm_consent_purposes p ON p.workspace_id=t.workspace_id AND p.purpose_key=t.purpose_key
     WHERE t.token_hash=$1 ${lock ? 'FOR UPDATE OF t' : ''}`, [sha256(token)])).rows[0] ?? null
@@ -50,16 +51,18 @@ export function createCampaignPublicEmailService() {
           ])
           await client.query(`INSERT INTO association_consent_events
             (workspace_id,contact_id,purpose,purpose_id,action,wording_version,wording_hash,wording_snapshot,source,occurred_at,
-             provider,provider_event_id,metadata,actor_kind,request_fingerprint,wording_version_id)
+             provider,provider_event_id,metadata,actor_kind,request_fingerprint,wording_version_id,scope_snapshot,scope_sources)
             SELECT p.workspace_id,$2,p.purpose_key,p.id,'withdrawn',p.active_wording_version,p.wording_hash,p.wording_snapshot,
               'native_campaign',clock_timestamp(),'native_campaign',$3,jsonb_build_object('unsubscribeTokenId',$4::text),'provider',
-              $5,v.id
+              $5,v.id,$7::jsonb,$8::jsonb
             FROM crm_consent_purposes p JOIN crm_consent_purpose_versions v
               ON v.workspace_id=p.workspace_id AND v.purpose_id=p.id AND v.version=p.active_wording_version
             WHERE p.workspace_id=$1 AND p.purpose_key=$6
             ON CONFLICT(workspace_id,provider,provider_event_id) WHERE provider IS NOT NULL DO NOTHING`, [
             row.workspaceId, row.contactId, `${row.id}:${purpose.purposeKey}`, row.id,
             sha256(JSON.stringify({ tokenId: row.id, purposeKey: purpose.purposeKey, action: 'withdrawn' })), purpose.purposeKey,
+            // The withdrawal inherits the recipient's saved floor, so authorized staff can see it and it is never unclassified.
+            row.scopeSnapshot ? JSON.stringify(row.scopeSnapshot) : null, row.scopeSources ? JSON.stringify(row.scopeSources) : null,
           ])
         }
         await client.query('UPDATE campaign_unsubscribe_tokens SET used_at=coalesce(used_at,clock_timestamp()) WHERE id=$1', [row.id])

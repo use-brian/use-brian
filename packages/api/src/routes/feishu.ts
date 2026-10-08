@@ -267,8 +267,8 @@ async function fetchFeishuSenderProfile(
     }
   } catch (error) {
     // Existing installations may not have approved the new contact scopes yet.
-    // Keep chat available on the isolated shadow lane until they do.
-    console.warn('[feishu] sender profile lookup unavailable; using anonymous identity:', error)
+    // Keep linked identity intact; unlinked senders can use the shadow lane.
+    console.warn('[feishu] sender profile lookup unavailable; continuing without profile enrichment:', error)
     // Only an app-level permission denial (Feishu names the missing scopes)
     // is a status; a per-sender failure such as a user outside the app's
     // contact range must not flip the whole channel to "off".
@@ -774,6 +774,14 @@ export function feishuRoutes(options: FeishuRouteOptions): Router {
     let channelUserId = ownerId
     let isIdentified = false
     let foundLinked = false
+    // One provider lookup per inbound turn, shared with email resolution.
+    const senderId = incoming.userId
+    const senderName = incoming.senderDisplay?.trim() || null
+    let senderProfile: ReturnType<typeof fetchFeishuSenderProfile> | undefined
+    const getSenderProfile = () => senderProfile ??= fetchFeishuSenderProfile(
+      api, senderId, senderName,
+      { integrationId: channelRowId, userId: ownerId, assistantId: assistant.id, analytics: options.analytics },
+    )
     if (options.linkedAccountStore) {
       try {
         const linked = await options.linkedAccountStore.findByProvider('feishu', incoming.userId)
@@ -805,18 +813,19 @@ export function feishuRoutes(options: FeishuRouteOptions): Router {
           'feishu',
           incoming.userId,
           routing.assistantId,
-          () => fetchFeishuSenderProfile(
-            api,
-            incoming.userId,
-            incoming.senderDisplay ?? null,
-            { integrationId: channelRowId, userId: ownerId, assistantId: assistant.id, analytics: options.analytics },
-          ),
+          getSenderProfile,
         )
         channelUserId = resolved.user.id
         isIdentified = resolved.isIdentified
       } catch (error) {
         console.error('[feishu] channel user resolution failed:', error)
       }
+    }
+
+    // Linking authenticates the account but must not hide its provider label.
+    // This metadata never changes the account, its email, or its authority.
+    if (isIdentified && !senderName) {
+      incoming = { ...incoming, senderDisplay: (await getSenderProfile()).displayName ?? undefined }
     }
 
     await options.integrationStore.touchLastEventAt(integration.id).catch(() => {})
@@ -1166,6 +1175,7 @@ export function feishuRoutes(options: FeishuRouteOptions): Router {
       sessionChannelId,
       connectorAuthority,
       actorChannelId: incoming.userId,
+      actorDisplayName: incoming.senderDisplay,
       messageText: incoming.text || '[Feishu attachment]',
       userContentBlocks,
       rawUserText: incoming.text,

@@ -39,7 +39,7 @@ describe('[COMP:crm/privacy-admission] Actual transaction admission for CRM priv
       await writer.query('BEGIN')
       await writer.query("UPDATE entities SET display_name='Pending private edit' WHERE id=$1",[f.contactId])
       await expect(f.purge()).rejects.toMatchObject({code:'conflict',details:{reason:'privacy_operation_busy'}})
-      await expect(pruneCrmOperationsRetention(f.workspaceId,new Date())).rejects.toMatchObject({code:'conflict',details:{reason:'privacy_operation_busy'}})
+      await expect(pruneCrmOperationsRetention({workspaceId:f.workspaceId,actor:{kind:'user',userId:f.userId},authority:{role:'owner',canWrite:true,canConfigure:true,trustedIdentitySources:[]}},new Date())).rejects.toMatchObject({code:'conflict',details:{reason:'privacy_operation_busy'}})
       expect((await pool.query('SELECT display_name FROM entities WHERE id=$1',[f.contactId])).rows[0].display_name).toBe('Fixture person')
       await writer.query('ROLLBACK')
       await f.purge()

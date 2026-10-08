@@ -331,3 +331,13 @@ it('[COMP:app-web/surface-cache-invalidation] clears project counts on access ch
   expect(readSurfaceCache('projects:w1:u1').data).toBeUndefined();
   expect(readSurfaceCache('project:w2:u1:p1').data).toEqual({ tasks: 3 });
 });
+
+
+it.each(['brian:organization-changed', WORKSPACE_IDENTITY_REFRESH_EVENT])('[COMP:app-web/surface-cache-invalidation] clears every Live viewer on authority change %s', async event => {
+  const keys = ['live:w1:u1', 'live:w1:u2', 'live:w2:u1'];
+  for (const key of keys) await loadSurfaceCache(key, async () => ['protected title']);
+  applySpineEventToSurfaceCache(event, { workspaceId: 'w1' }, 'w1');
+  expect(readSurfaceCache(keys[0]).data).toBeUndefined();
+  expect(readSurfaceCache(keys[1]).data).toBeUndefined();
+  expect(readSurfaceCache(keys[2]).data).toEqual(['protected title']);
+});

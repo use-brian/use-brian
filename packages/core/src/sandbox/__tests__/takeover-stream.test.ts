@@ -1,7 +1,11 @@
-import { describe, it, expect } from 'vitest'
+import { describe, it, expect, vi } from 'vitest'
+import crypto from 'node:crypto'
+import vm from 'node:vm'
+import { EventEmitter } from 'node:events'
 import { createE2bCloudProvider } from '../providers/e2b/index.js'
 import { cli } from '../providers/e2b/agent-browser-cli.js'
 import {
+  mintTakeoverLease,
   TAKEOVER_BRIDGE_PORT,
   TAKEOVER_STREAM_BRIDGE_MJS,
   TAKEOVER_STREAM_BRIDGE_PATH,
@@ -178,14 +182,15 @@ describe('[COMP:sandbox/takeover-stream] Take-Over live stream', () => {
     expect(wsUrl.host).toBe(`${TAKEOVER_BRIDGE_PORT}-${sandboxId}.e2b.test`)
     expect(wsUrl.pathname).toBe('/ws')
     const token = framesUrl.searchParams.get('token')!
-    expect(token).toMatch(/^[0-9a-f]{64}$/)
+    expect(token).toMatch(/^[0-9]+\.[0-9a-f]{64}$/)
+    expect(Number(token.split('.')[0])).toBe(info!.expiresAt)
     expect(inputUrl.searchParams.get('token')).toBe(token)
     expect(wsUrl.searchParams.get('token')).toBe(token)
-    // The token rides the launch command into the bridge.
-    expect(cmds.find((c) => c.includes('setsid nohup node'))).toContain(token)
+    // Only the signing secret rides the launch command; it is never the bearer.
+    expect(cmds.find((c) => c.includes('setsid nohup node'))).not.toContain(token)
   })
 
-  it('re-minting reuses the live bridge: same token, no second launch', async () => {
+  it('re-minting reuses the live bridge without a second launch', async () => {
     const { runtime, commands } = fakeRuntime(respondUp)
     const provider = createE2bCloudProvider(runtime)
     const { sandboxId } = await provider.create({ workspaceId: 'w', taskId: 't' })
@@ -194,7 +199,8 @@ describe('[COMP:sandbox/takeover-stream] Take-Over live stream', () => {
     const second = await provider.browser(sandboxId).openTakeoverStream!()
     const launchesAfterSecond = commands.filter((c) => c.cmd.includes('setsid nohup node')).length
 
-    expect(second).toEqual(first)
+    expect(second!.framesUrl.split('?')[0]).toEqual(first!.framesUrl.split('?')[0])
+    expect(second!.expiresAt).toBeGreaterThanOrEqual(first!.expiresAt!)
     expect(launchesAfterFirst).toBe(1)
     expect(launchesAfterSecond).toBe(1)
   })
@@ -212,5 +218,52 @@ describe('[COMP:sandbox/takeover-stream] Take-Over live stream', () => {
     const provider = createE2bCloudProvider(runtime)
     const { sandboxId } = await provider.create({ workspaceId: 'w', taskId: 't' })
     await expect(provider.browser(sandboxId).openTakeoverStream!()).rejects.toThrow(/did not come up/)
+  })
+})
+
+
+describe('[COMP:sandbox/takeover-stream] generated bridge lease enforcement', () => {
+  it('rejects secret replay/tampering, closes open viewers and denies queued input at expiry', async () => {
+    let now = 1_000_000
+    const timers: Array<{ run: () => void; ms: number }> = []
+    const server = new EventEmitter() as EventEmitter & { listen: () => void }
+    server.listen = () => {}
+    let httpHandler: (req: any, res: any) => void = () => {}
+    const scope: Record<string, any> = {
+      crypto, Buffer, URL, console,
+      http: { createServer: (handler: typeof httpHandler) => { httpHandler = handler; return server } },
+      process: { argv: ['node', 'bridge', '--port', '1234', '--cdp', 'ws://localhost/cdp', '--token', 'fixture-secret'], exit: vi.fn() },
+      Date: class extends Date { static now() { return now } },
+      setInterval: () => 0, clearInterval: () => {},
+      setTimeout: (run: () => void, ms: number) => { timers.push({ run, ms }); return timers.length }, clearTimeout: () => {},
+      WebSocket: class {},
+    }
+    vm.createContext(scope)
+    vm.runInContext(TAKEOVER_STREAM_BRIDGE_MJS.replace(/^import .*$/gm, '') +
+      '\nglobalThis.testApi = { tokenOk, queueInput, broadcast, viewers };', scope)
+    const lease = mintTakeoverLease('fixture-secret', now)
+    expect(scope.testApi.tokenOk(lease.token)).toBe(true)
+    expect(scope.testApi.tokenOk('fixture-secret')).toBe(false)
+    expect(scope.testApi.tokenOk(lease.token.replace(/^1/, '2'))).toBe(false)
+    expect(scope.testApi.tokenOk(mintTakeoverLease('wrong-secret', now).token)).toBe(false)
+    const req = Object.assign(new EventEmitter(), { url: '/frames?token=' + lease.token, method: 'GET' })
+    const res = Object.assign(new EventEmitter(), { setHeader: vi.fn(), writeHead: vi.fn(), write: vi.fn(), end: vi.fn(), writableLength: 0 })
+    httpHandler(req, res)
+    const socket = Object.assign(new EventEmitter(), { write: vi.fn(), destroy: vi.fn(), setNoDelay: vi.fn(), writableLength: 0 })
+    server.emit('upgrade', { url: '/ws?token=' + lease.token, headers: { 'sec-websocket-key': 'key' } }, socket, Buffer.alloc(0))
+    expect(scope.testApi.viewers.size).toBe(2)
+    const pending = scope.testApi.queueInput({ kind: 'key', key: 'Enter' }, lease.token)
+    now = lease.expiresAt
+    await expect(pending).rejects.toThrow('stream_lease_expired')
+    expect(scope.testApi.tokenOk(lease.token)).toBe(false)
+    const writes = socket.write.mock.calls.length
+    scope.testApi.broadcast({ buf: Buffer.from('secret'), b64: 'secret' })
+    expect(socket.write.mock.calls.length).toBe(writes)
+    expect(res.write).not.toHaveBeenCalled()
+    for (const timer of timers.filter(t => t.ms === 30_000)) timer.run()
+    expect(res.end).toHaveBeenCalled()
+    expect(socket.destroy).toHaveBeenCalled()
+    const renewed = mintTakeoverLease('fixture-secret', now)
+    expect(scope.testApi.tokenOk(renewed.token)).toBe(true)
   })
 })

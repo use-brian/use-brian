@@ -1,5 +1,6 @@
 import { describe,expect,it } from 'vitest'
 import { pinAccessCeiling,pinAuthoringAuthority,parseAuthoringAuthority,intersectAccessCeilings,accessCeilingContains } from '../access-ceiling.js'
+import type { DepartmentReadGrant } from '../department-read.js'
 import type { AccessContext } from '../access-context.js'
 
 const context:AccessContext={workspaceId:'workspace',userId:'actor',assistantId:'caller',assistantKind:'standard',clearance:'internal',compartments:['product'],projectIds:null}
@@ -59,4 +60,34 @@ describe('[COMP:security/access-ceiling] delegated authority',()=>{
     expect(parseAuthoringAuthority({...pinned,version:0})).toBeNull()
   })
 
+})
+
+describe('[COMP:security/access-ceiling] department authority',()=>{
+  const departmentRead = {workspaceId:'workspace',userId:'actor',assistantId:'caller',base:'public' as const,
+    departments:{sales:'confidential' as const,finance:'internal' as const},contextDepartment:null,binding:null,cap:null}
+  const pin=()=>pinAccessCeiling({...context,compartments:null,departmentRead})
+  it('round-trips department authority and rejects malformed persisted grants',()=>{
+    const authority=pinAuthoringAuthority({...context,departmentRead})
+    expect(parseAuthoringAuthority(JSON.parse(JSON.stringify(authority)))).toEqual(authority)
+    for(const patch of [{departments:{sales:'unknown'}},{binding:undefined},{userId:'other'},{base:undefined}]) {
+      expect(parseAuthoringAuthority({...authority,ceiling:{...authority.ceiling,departmentRead:{...departmentRead,...patch}}})).toBeNull()
+    }
+  })
+  it('detects department removal, downclearance and credential/context contraction',()=>{
+    const start=pin()
+    const changes: Partial<DepartmentReadGrant>[] = [{departments:{}},{departments:{sales:'internal' as const,finance:'internal' as const}},
+      {binding:['sales']},{contextDepartment:'sales'},{cap:'public' as const}]
+    for(const patch of changes) {
+      expect(accessCeilingContains({...start,departmentRead:{...departmentRead,...patch}},start)).toBe(false)
+    }
+    expect(accessCeilingContains({...start,departmentRead:undefined},start)).toBe(false)
+    expect(accessCeilingContains({...start,departmentRead:{...departmentRead,departments:{...departmentRead.departments,extra:'confidential'}}},start)).toBe(true)
+  })
+  it('intersects delegated departments and detaches snapshots from source objects',()=>{
+    const start=pin(), narrow={...start,departmentRead:{...departmentRead,departments:{sales:'public' as const}}}
+    expect(intersectAccessCeilings(start,narrow).departmentRead?.departments).toEqual({sales:'public'})
+    const copy=pin();(copy.departmentRead!.departments as Record<string,string>).sales='public'
+    expect(departmentRead.departments.sales).toBe('confidential')
+    expect(intersectAccessCeilings(start,{...start,departmentRead:undefined,compartments:[]}).departmentRead?.departments).toEqual({})
+  })
 })

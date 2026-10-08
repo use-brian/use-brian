@@ -1,3 +1,5 @@
+import { canRead } from '../../security/sensitivity.js'
+import { scopeGrantContains } from '../../security/context-scope.js'
 /** Durable-stage Office generation engine. [COMP:office/generation] */
 import {
   assertOfficeArtifactSnapshot,
@@ -12,7 +14,7 @@ import { exportOfficeDocument, reparseOfficeDocument } from '../docx/index.js'
 import { exportOfficePresentation, reparseOfficePresentation } from '../pptx/index.js'
 import { exportOfficeSpreadsheet, reparseOfficeSpreadsheet } from '../xlsx/index.js'
 import { officeSemanticHash, type OfficeResourceResolver } from '../package.js'
-import { OfficeGenerationBriefSchema, OfficeGenerationFailure, type OfficeAuthorityProjection, type OfficeClaimPlanEntry, type OfficeEvidencePacket, type OfficeGenerationBrief, type OfficeGenerationEvent, type OfficeGenerationOutcome, type OfficeGenerationStage } from './contracts.js'
+import { OfficeGenerationBriefSchema, OfficeGenerationFailure, OfficeMaterialFactMissing, type OfficeAuthorityProjection, type OfficeClaimPlanEntry, type OfficeEvidencePacket, type OfficeGenerationBrief, type OfficeGenerationEvent, type OfficeGenerationOutcome, type OfficeGenerationStage } from './contracts.js'
 
 export type OfficeGenerationFitPolicy = OfficeFitRepairOptions
 export type OfficeGenerationRenderReceipt = {
@@ -36,7 +38,7 @@ export type OfficeGenerationCheckpoint = {
 
 export type OfficeGenerationPipelineDeps = {
   resolveAuthority(brief: OfficeGenerationBrief): Promise<OfficeAuthorityProjection | null>
-  selectTemplate(brief: OfficeGenerationBrief, authority: OfficeAuthorityProjection): Promise<{ template?: OfficeTemplateBundle; ambiguous?: string[] }>
+  selectTemplate(brief: OfficeGenerationBrief, authority: OfficeAuthorityProjection): Promise<{ template?: OfficeTemplateBundle; sourceScope?: Pick<OfficeAuthorityProjection, 'sensitivity' | 'compartments' | 'projectIds'>; ambiguous?: string[] }>
   retrieveBrain(brief: OfficeGenerationBrief, authority: OfficeAuthorityProjection): Promise<OfficeEvidencePacket['brain']>
   inspectUrl(url: string): Promise<OfficeEvidencePacket['website']>
   planClaims(brief: OfficeGenerationBrief, evidence: OfficeEvidencePacket, template: OfficeTemplateBundle): Promise<OfficeClaimPlanEntry[]>
@@ -138,6 +140,7 @@ export async function runOfficeGenerationPipeline(input: unknown, deps: OfficeGe
       return { status: 'needs_input', code: 'template_ambiguous', question: selected.ambiguous?.length ? `Which template should I use: ${selected.ambiguous.join(', ')}?` : 'Which admitted template should I use?' }
     }
     const template = selected.template
+    if (!canRead(authority.clearance ?? authority.sensitivity, template.sensitivity) || !canRead(authority.clearance ?? authority.sensitivity, selected.sourceScope?.sensitivity ?? template.sensitivity) || !scopeGrantContains(authority.compartmentGrant, selected.sourceScope?.compartments ?? []) || !scopeGrantContains(authority.projectGrant, selected.sourceScope?.projectIds ?? [])) return { status: 'failed', code: 'template_scope_denied', message: 'The selected template is outside this execution scope.' }
     if (template.status !== 'admitted') return { status: 'failed', code: 'template_not_admitted', message: 'Generation requires an admitted immutable template version.' }
     if (!await stage(deps, { stage: 'template', version: 2, templateVersionId: template.id }, 'office.job.template_selected', { templateId: template.id, templateVersion: template.version })) return { status: 'cancelled' }
 
@@ -149,7 +152,7 @@ export async function runOfficeGenerationPipeline(input: unknown, deps: OfficeGe
     ])
     const website = inspected.flatMap((result) => result.status === 'fulfilled' ? result.value : [])
     const evidence: OfficeEvidencePacket = { brain, website, conflicts: [] }
-    const inheritedAuthority = inheritEvidenceAuthority(authority, brain)
+    const inheritedAuthority = inheritEvidenceAuthority(authority, [...brain, { handle: `template:${template.id}`, excerpt: '', sensitivity: template.sensitivity, compartments: [] }, ...(selected.sourceScope ? [{ handle: `template-source:${template.id}`, excerpt: '', ...selected.sourceScope }] : [])])
     for (const entry of website) await deps.emit({ stage: 'grounding', code: 'office.job.reference_url_inspected', params: { url: entry.url } })
     if (!await stage(deps, { stage: 'grounding', version: 3, templateVersionId: template.id, evidence }, 'office.job.context_grounded', { sources: brain.length + website.length })) return { status: 'cancelled' }
 
@@ -193,6 +196,10 @@ export async function runOfficeGenerationPipeline(input: unknown, deps: OfficeGe
     await deps.emit({ stage: 'completed', code: 'office.job.completed', params: { artifactId: committed.artifactId, version: committed.version } })
     return { status: 'completed', artifactId: committed.artifactId, version: committed.version, exportBytes: exported.bytes, semanticHash: exported.semanticHash }
   } catch (cause) {
+    if (cause instanceof OfficeMaterialFactMissing) {
+      await deps.emit({ stage: 'needs_input', code: 'office.job.needs_input', params: { code: 'material_fact_missing', question: cause.message } })
+      return { status: 'needs_input', code: 'material_fact_missing', question: cause.message }
+    }
     const message = cause instanceof Error ? cause.message : 'Office generation failed'
     const code = cause instanceof OfficeGenerationFailure ? cause.code : 'pipeline_failed'
     await deps.emit({ stage: 'failed', code: 'office.job.failed', params: { code } })

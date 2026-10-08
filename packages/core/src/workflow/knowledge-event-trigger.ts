@@ -20,11 +20,9 @@
  * KB is one corpus even when several repos feed it, so the subscription scope
  * is every KB write in the workspace and `match` carries all the selectivity.
  *
- * **The event is a pointer, not a payload.** It carries the entry's id, path,
- * title, tags, and sensitivity — never its body. A triggered step reads the
- * entry with `readKnowledgeEntry` under its own assistant's clearance, so an
- * event from a confidential entry cannot leak that entry's content into a
- * workflow whose assistant could not have read it.
+ * Titles, paths and tags are protected metadata. The host admits the canonical
+ * event-time source receipt before dispatch effects, and execution renews it.
+ * Missing legacy versions cannot be replaced by current labels.
  *
  * Spec: docs/architecture/features/workflow.md → "Knowledge event source".
  *
@@ -58,6 +56,8 @@ export type KnowledgeLifecycleEvent = {
   workspaceId: string
   /** `knowledge_entries.id`. Feeds `readKnowledgeEntry` from a step. */
   entryId: string
+  /** Canonical event-time source revision; missing legacy receipts fail closed. */
+  sourceVersion?: string
   /** Which lifecycle facet fired. */
   action: KnowledgeLifecycleAction
   /** Entry path (`products/vault`), the natural scoping axis. */
@@ -109,6 +109,7 @@ export function knowledgeLifecycleToDispatchEvent(
     isBot: event.writtenBy === 'system',
     payload: {
       entryId: event.entryId,
+      ...(event.sourceVersion ? { sourceVersion: event.sourceVersion } : {}),
       action: event.action,
       path: event.path,
       title: event.title,

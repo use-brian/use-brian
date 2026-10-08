@@ -27,7 +27,7 @@ function makeApp(overrides?: {
 }) {
   const getPageEventContextSystem = vi.fn().mockResolvedValue(
     overrides?.ctx === undefined
-      ? { workspaceId: WS, parentId: PARENT, title: 'Roadmap' }
+      ? { workspaceId: WS, parentId: PARENT, title: 'Roadmap', sourceVersion: 'receipt-revision' }
       : overrides.ctx,
   )
   const savedViewStore = { getPageEventContextSystem } as unknown as SavedViewStore
@@ -55,6 +55,7 @@ describe('[COMP:api/internal-page-event-route] POST /internal/page-event', () =>
     expect(publish).toHaveBeenCalledTimes(1)
     expect(publish).toHaveBeenCalledWith({
       workspaceId: WS,
+      sourceVersion: 'receipt-revision',
       pageId: PAGE,
       parentId: PARENT,
       title: 'Roadmap',

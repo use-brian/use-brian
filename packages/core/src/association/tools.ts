@@ -11,7 +11,7 @@ import { missingToolCapability } from '../tools/capability-gate.js'
 import { crmOperationsToolContext } from '../crm/operations-tools.js'
 import { CrmOperationsError } from '../crm/operations-types.js'
 import {
-  AssociationError, AssociationListPageSchema, AssociationOrderCreateSchema,
+  AssociationDestinationPreviewSchema, AssociationError, AssociationListPageSchema, AssociationOrderCreateSchema,
   AssociationOrderStatusSchema, AssociationRegistrationStatusSchema,
   AssociationRegistrationUpdateSchema, AssociationTicketInputSchema,
 } from './domain.js'
@@ -179,6 +179,9 @@ export function createAssociationTools(service: AssociationServicePort) {
     getAssociationOrder: command('getAssociationOrder',
       'Read one order with its lines and current state using a returned order id. A pending order is not proof of payment.',
       OrderId, true, true, input => ({ kind: 'get_order', ...input })),
+    previewAssociationOrderDestinations: command('previewAssociationOrderDestinations',
+      'Preview available destinations for a ticket order using the buyer and every linked attendee contact ID. Choices preserve all source protection. An unavailable default requires an explicit returned choice; creation revalidates authority.',
+      AssociationDestinationPreviewSchema, true, true, input => ({ kind: 'preview_order_destinations', ...input })),
     createAssociationOrder: command('createAssociationOrder',
       'Reserve ticket inventory for existing CRM contacts. Enumerate tickets first. Reuse the same idempotencyKey and identical envelope after an uncertain response. Member pricing is checked at reservation time. This never asserts payment.',
       z.object({ order: AssociationOrderCreateSchema }).strict(), false, true, input => ({ kind: 'create_order', ...input })),

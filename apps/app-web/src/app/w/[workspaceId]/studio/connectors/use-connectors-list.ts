@@ -45,6 +45,7 @@ import {
   useCachedResource,
 } from "@/lib/surface-cache";
 import { connectorsCacheKey } from "@/lib/surface-prefetch";
+import { useLeasedResource } from "@/lib/offline/surface-content-cache";
 
 const EMPTY_ROWS: Connector[] = [];
 
@@ -62,7 +63,7 @@ export type ConnectorsListState = {
 
 export function useConnectorsList(workspaceId: string): ConnectorsListState {
   const key = workspaceId ? connectorsCacheKey(workspaceId) : null;
-  const entry = useCachedResource<Connector[]>(key, () => fetchConnectorsList(workspaceId));
+  const entry = useLeasedResource<Connector[]>(key, () => fetchConnectorsList(workspaceId));
 
   const mutate = useCallback(
     (updater: (previous: Connector[]) => Connector[]) => {

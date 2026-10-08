@@ -111,7 +111,8 @@ describe("[COMP:app-web/channel-delivery-audiences] Delivery audience", () => {
     expect(host.textContent).toContain(copy.adminOnly);
     expect(host.textContent).toContain(first.channelId);
     expect(host.textContent).toContain(first.approvedByUserId);
-    expect(host.textContent).toContain(first.approvedAt);
+    expect(host.querySelector("time")?.dateTime).toBe(first.approvedAt);
+    expect(host.querySelector("details")?.open).toBe(false);
     expect(host.querySelector("button")).toBeNull();
     expect(host.querySelector("form")).toBeNull();
     expect(updateChannelConfig).not.toHaveBeenCalled();
@@ -370,5 +371,69 @@ describe("[COMP:app-web/channel-delivery-audiences] Whole company approval", () 
     expect(host.querySelector('[role="switch"]')).toBeNull();
     await click(copy.save);
     expectWrite([input(wide), input(second)]);
+  });
+});
+
+
+describe("[COMP:app-web/channel-delivery-audiences] Conversation access UX", () => {
+  function seen(id: string, title = "Operations room") {
+    return { chatId: id, chatTitle: title, chatType: "group" as const, isForum: true, topics: [{ topicId: 7, name: "Planning", lastSeenAt: "2026-01-01T00:00:00Z" }], lastSeenAt: "2026-01-01T00:00:00Z" };
+  }
+  it("explains unavailable search and approves a discovered group through the canonical confirmation", async () => {
+    const value = channel([]); value.config!.seenChats = [seen("-100333")];
+    await render(value);
+    expect(host.textContent).toContain(copy.conversationOnly);
+    expect(host.textContent).toContain(copy.unapprovedHelp);
+    await click(copy.approve);
+    expect(field("channelId").value).toBe("-100333");
+    expect(host.querySelector("li form")).not.toBeNull();
+    await click(copy.save);
+    expect(confirmDialog).toHaveBeenCalledOnce();
+    expectWrite([{ channelId: "-100333", audienceType: "group", clearance: "public", compartments: [], projectIds: [], recipientUserId: null, expiresAt: null }]);
+  });
+  it("does not offer members a way to approve an unapproved group", async () => {
+    const value = channel([]); value.config!.seenChats = [seen("-100333")];
+    await render(value, false);
+    expect(host.textContent).toContain(copy.unapprovedHelp);
+    expect(host.querySelector("button")).toBeNull();
+    expect(updateChannelConfig).not.toHaveBeenCalled();
+  });
+  it("shows names and keeps same-name groups distinguishable without duplicating approvals", async () => {
+    const value = channel([first, { ...first, channelId: "-100222" }]);
+    value.config!.seenChats = [seen(first.channelId), seen("-100222")];
+    await render(value);
+    expect(host.querySelectorAll("ul > li")).toHaveLength(2);
+    expect(host.textContent).toContain("Operations room");
+    expect(host.querySelector("li > div")?.textContent).toContain(first.channelId);
+    expect(host.textContent).not.toContain(copy.unapprovedHelp);
+    expect(host.querySelector("details")?.open).toBe(false);
+  });
+  it("resolves topic names and never advertises an expired approval as tool-enabled", async () => {
+    const value = channel([{ ...first, channelId: "-100111:topic:7", expiresAt: "2020-01-01T00:00:00Z" }]);
+    value.config!.seenChats = [seen("-100111")];
+    await render(value);
+    expect(host.textContent).toContain("Operations room / Planning");
+    expect(host.textContent).toContain(copy.expiredHelp);
+    expect(host.textContent).not.toContain(copy.searchAvailable);
+    expect(host.textContent).not.toContain(copy.connectedAvailable);
+  });
+  it("keeps cancellation reachable when a live refresh removes the conversation being edited", async () => {
+    await render(channel([first])); await click(copy.edit);
+    await render(channel([]));
+    expect(host.querySelector('[role="alert"]')?.textContent).toBe(copy.changed);
+    expect(button(copy.save).disabled).toBe(true);
+    await click(copy.cancel);
+    expect(host.querySelector("form")).toBeNull();
+    expect(button(copy.add).disabled).toBe(false);
+    expect(updateChannelConfig).not.toHaveBeenCalled();
+  });
+  it("distinguishes scoped search from company-wide connected tools and edits inline", async () => {
+    await render(channel([first, { ...first, channelId: "-100222", companyWide: true, compartments: [], projectIds: [] }]));
+    const cards = host.querySelectorAll("ul > li");
+    expect(cards[0].textContent).toContain(copy.searchAvailable);
+    expect(cards[1].textContent).toContain(copy.connectedAvailable);
+    await click(copy.edit, cards[1]);
+    expect(cards[1].querySelector("form")).not.toBeNull();
+    expect(host.querySelectorAll("form")).toHaveLength(1);
   });
 });

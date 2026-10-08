@@ -174,6 +174,22 @@ describeIf('[COMP:access/predicate-parity] RLS, store predicate and turn resolve
     }
   })
 
+  it('the member mutation floor uses department clearance, context and credential narrowing instead of the legacy base ceiling', async () => {
+    for (const reader of ALL_READERS.map(r => ({ ...r, pageGrants: [] }))) {
+      for (const row of ALL_ROWS.filter(r => r.workspaceId === WORKSPACE && !pageRowIds.has(r.id))) {
+        for (const department of [null, DEPARTMENTS.finance]) {
+          const ctx: Ctx = { workspaceId: WORKSPACE, department, now }
+          // This floor checks membership and labels; separate row policies own the private leg.
+          const expected = read(shifted, reader, { ...row, userId: null }, ctx)
+          const actual = (await viaRls(reader, ctx,
+            'SELECT member_operation_scope_allows($1,$2,$3,true) AS allowed',
+            [WORKSPACE, row.tier, row.departmentIds.map(id => `team:${id}`)])).rows[0].allowed
+          expect(actual, `${reader.principal.id}/${row.id}/${department}`).toBe(expected)
+        }
+      }
+    }
+  })
+
   it('I8 through SQL: a key reads with its issuer\'s edges, and a binding or cap only narrows', async () => {
     const key = (issuer: string, extra: Partial<NonNullable<Reader['credential']>> = {}): Reader =>
       ({ principal: PEOPLE.ava, assistant: ASSISTANTS.brian, credential: { issuerUserId: issuer, scope: 'read', ...extra } })

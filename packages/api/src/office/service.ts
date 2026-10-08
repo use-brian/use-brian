@@ -1,3 +1,4 @@
+import { readOfficeClassification, restrictOfficeClassification, withOfficeClassificationActor } from './classification.js'
 import {
   canRead,
   scopeGrantContains,
@@ -6,6 +7,7 @@ import {
 } from '@use-brian/core'
 import type { OfficeArtifactSnapshot } from '@use-brian/office-model'
 import { isDurableOfficeArtifact, type OfficeArtifactRow } from '../db/office-artifacts.js'
+import { officeImportDiagnostics } from '../db/office-generation.js'
 import type { OfficeGenerationJobRow } from '../db/office-generation.js'
 import type { ResolvedOfficeAccess } from './access.js'
 import { createHumanOfficeGeneration, type OfficeHumanGenerationOptions, type OfficeGenerationRequest } from '../db/office-generation-admission.js'
@@ -119,6 +121,8 @@ export type OfficeService = OfficeToolPort & {
 
 export function createOfficeService(deps: OfficeServiceDeps): OfficeService {
   return {
+    inspectClassification: (actor,id) => withOfficeClassificationActor(actor,()=>readOfficeClassification(actor.userId,id)),
+    restrictClassification: (actor,input) => withOfficeClassificationActor(actor,()=>restrictOfficeClassification(actor.userId,input)),
     async createAuthenticated(input, proof) {
       if (!deps.generationAvailable(input.family)) throw new OfficeGenerationUnavailableError()
       const created = await createHumanOfficeGeneration(input, proof)
@@ -157,7 +161,7 @@ export function createOfficeService(deps: OfficeServiceDeps): OfficeService {
       const [artifact, access] = await Promise.all([deps.getArtifact(params.userId, params.artifactId), deps.resolveAccess(params.userId, params.artifactId)])
       if (!artifact || !access || !artifactWithinTurnScope(artifact, params)) return null
       const [job, live] = await Promise.all([deps.latestJob(params.userId, params.artifactId), deps.getSnapshot(params.userId, params.artifactId)])
-      return { artifactId: artifact.id, family: artifact.family, mode: artifact.mode, title: artifact.title, version: artifact.headVersion, lifecycleState: artifact.lifecycleState === 'purged' ? 'retained' : artifact.lifecycleState, role: access.role, ...(artifact.expiresAt ? { expiresAt: artifact.expiresAt.toISOString() } : {}), scopeEvidence: { sensitivity: artifact.sensitivity, compartments: artifact.compartments, projectIds: artifact.projectIds }, ...(live ? targetOutline(live.snapshot, params.targetOffset) : {}), job: job ? { id: job.id, status: job.status, stage: job.stage, errorCode: job.errorCode } : undefined }
+      return { artifactId: artifact.id, family: artifact.family, mode: artifact.mode, title: artifact.title, version: artifact.headVersion, lifecycleState: artifact.lifecycleState === 'purged' ? 'retained' : artifact.lifecycleState, role: access.role, ...(artifact.expiresAt ? { expiresAt: artifact.expiresAt.toISOString() } : {}), scopeEvidence: { sensitivity: artifact.sensitivity, compartments: artifact.compartments, projectIds: artifact.projectIds }, ...(live ? targetOutline(live.snapshot, params.targetOffset) : {}), job: job ? { id: job.id, status: job.status, stage: job.stage, errorCode: job.errorCode, ...(officeImportDiagnostics(job.checkpoint).length ? { importDiagnostics: officeImportDiagnostics(job.checkpoint) } : {}) } : undefined }
     },
 
     async revise(params) {

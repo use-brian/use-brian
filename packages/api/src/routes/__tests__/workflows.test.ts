@@ -254,9 +254,21 @@ describe('[COMP:api/workflows-route] delete / run', () => {
     workflowStore.getById.mockResolvedValueOnce(wf())
     runStore.createRun.mockResolvedValueOnce({ id: 'run-1' })
     mockAdvance.mockResolvedValueOnce({ kind: 'completed', runId: 'run-1', finalOutput: { ok: 1 } })
+    runStore.getRunById.mockResolvedValueOnce({ id:'run-1',workflowId:'wf-1',workspaceId:WS })
     const res = await request(app('u-1')).post('/api/workflows/wf-1/run').send({})
     expect(res.status).toBe(200)
     expect(res.body).toMatchObject({ runId: 'run-1', status: 'completed' })
+  })
+  it('withholds a completed manual result when its history read is unavailable',async()=>{
+    workflowStore.getById.mockResolvedValueOnce(wf())
+    runStore.createRun.mockResolvedValueOnce({id:'run-1'})
+    mockAdvance.mockResolvedValueOnce({kind:'completed',runId:'run-1',finalOutput:{private:'Fictional protected outcome'}})
+    runStore.listStepRuns.mockResolvedValueOnce([{id:'step-1',output:{private:'Fictional protected step'}}])
+    runStore.getRunById.mockResolvedValueOnce(null)
+    const res=await request(app('u-1')).post('/api/workflows/wf-1/run').send({})
+    expect(res.status).toBe(409)
+    expect(res.body).toEqual({error:'run_result_unavailable',operationMayHaveExecuted:true})
+    expect(mockAdvance).toHaveBeenCalledTimes(1)
   })
 
   it('GET /workflows/:id/runs/:runId 404s when the run is on another workflow', async () => {
@@ -377,6 +389,25 @@ describe('[COMP:api/workflows-route] schedule trigger → backing scheduled_jobs
     // Every REST write carries the authenticated authoring proof.
     expect(workflowStore.update).toHaveBeenCalledWith('u-1', 'wf-1', expect.objectContaining({ enabled: false }),
       expect.objectContaining({ kind: 'authenticated-workflow-rest', userId: 'u-1' }))
+  })
+})
+
+describe('[COMP:api/workflows-route] legacy authority recovery', () => {
+  it('reports a definition without captured authority and recaptures it on confirmAuthority without an edit', async () => {
+    workflowStore.getById.mockResolvedValueOnce(wf({ authoringAuthority: null } as never))
+    workflowStore.update.mockResolvedValueOnce(wf({ authoringAuthority: { version: 1 } } as never))
+    const res = await request(app('u-1')).patch('/api/workflows/wf-1').send({ confirmAuthority: true })
+    expect(res.status).toBe(200)
+    const fields = workflowStore.update.mock.calls.at(-1)![2] as Record<string, unknown>
+    expect(fields.authoringAuthority).toMatchObject({ version: 1, ceiling: { userId: 'u-1' } })
+    expect(Object.keys(fields).filter((key) => !['authoringAuthority'].includes(key))).toEqual([])
+    expect(res.body.authorityReviewRequired).toBe(false)
+  })
+
+  it('flags a legacy definition on read', async () => {
+    workflowStore.getById.mockResolvedValueOnce(wf({ authoringAuthority: null } as never))
+    const res = await request(app('u-1')).get('/api/workflows/wf-1')
+    expect(res.body.authorityReviewRequired).toBe(true)
   })
 })
 

@@ -211,13 +211,13 @@ export function AssigneeCell({
 
   function commit(nextId: string | null) {
     setOpen(false);
-    if (nextId === assigneeId) return;
+    if (!roster || disabled || nextId === assigneeId) return;
     setBusy(true);
     void onCommit(nextId).finally(() => setBusy(false));
   }
 
   return (
-    <Popover open={open} onOpenChange={setOpen}>
+    <Popover open={open && roster !== null && !disabled} onOpenChange={setOpen}>
       <PopoverTrigger
         disabled={disabled || busy || !roster}
         // The name rides the label: a tooltip cannot open on touch (C78).
@@ -240,7 +240,7 @@ export function AssigneeCell({
             )}
           </>
         ) : (
-          <span className="text-muted-foreground/60">{t.unassignedOption}</span>
+          <span className="text-muted-foreground/60">{assigneeId ? t.memberUnavailable : t.unassignedOption}</span>
         )}
       </PopoverTrigger>
       <PopoverContent align="start" className="max-h-72 w-60 overflow-y-auto p-1">
@@ -248,7 +248,7 @@ export function AssigneeCell({
           type="button"
           onClick={() => commit(null)}
           className={cn(
-            "flex w-full items-center gap-2 rounded-md px-2 py-1.5 text-left text-sm transition-colors hover:bg-muted",
+            "flex w-full items-center gap-2 min-h-8 max-sm:min-h-11 rounded-md px-2 py-1.5 text-left text-sm transition-colors hover:bg-muted",
             !assigneeId && "bg-muted/60",
           )}
         >
@@ -260,7 +260,7 @@ export function AssigneeCell({
             type="button"
             onClick={() => commit(m.id)}
             className={cn(
-              "flex w-full items-center gap-2 rounded-md px-2 py-1.5 text-left text-sm transition-colors hover:bg-muted",
+              "flex w-full items-center gap-2 min-h-8 max-sm:min-h-11 rounded-md px-2 py-1.5 text-left text-sm transition-colors hover:bg-muted",
               assigneeId === m.id && "bg-muted/60",
             )}
           >

@@ -24,7 +24,7 @@
  */
 
 import { useEffect } from "react";
-import { fetchLiveRoster, type LiveWorkItem } from "@/lib/api/live";
+import { fetchLiveRoster, liveRosterRemaining, type LiveWorkItem } from "@/lib/api/live";
 import { liveRosterCacheKey } from "@/lib/surface-prefetch";
 import { markSurfaceCacheStale, useCachedResource } from "@/lib/surface-cache";
 
@@ -44,8 +44,8 @@ const EMPTY_ITEMS: LiveWorkItem[] = [];
 
 export function useLiveRoster(workspaceId: string): LiveRosterState {
   const key = workspaceId ? liveRosterCacheKey(workspaceId) : null;
-  const { data, error, refresh } = useCachedResource<LiveWorkItem[]>(key, () =>
-    fetchLiveRoster(workspaceId),
+  const { data, error, refresh } = useCachedResource<LiveWorkItem[]>(key,
+    () => fetchLiveRoster(workspaceId), { expiresInMs: liveRosterRemaining },
   );
 
   // Focus is the one trigger the spine cannot supply: the stream may have been

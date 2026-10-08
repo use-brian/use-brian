@@ -29,7 +29,8 @@ describe('[COMP:api/crm-integration-auth] Real credential lifecycle', () => {
     const created = await store.create(f.workspaceId, f.userId, input)
     expect(created.oneTimeSecret).toMatch(/^sk_crm_/)
     expect(created).not.toHaveProperty('secretHash')
-    expect(await store.authenticate(created.oneTimeSecret)).toEqual({ workspaceId: f.workspaceId, credentialId: created.id, grants: input.grants })
+    expect(await store.authenticate(created.oneTimeSecret)).toEqual({ workspaceId: f.workspaceId, credentialId: created.id, grants: input.grants,
+      departmentRead: { workspaceId: f.workspaceId, userId: f.userId, assistantId: null, base: 'internal', departments: {}, contextDepartment: null, binding: [], cap: 'internal' } })
     const rows = await store.listForMember(f.workspaceId, f.userId)
     expect(rows.credentials).toHaveLength(1)
     expect(rows.credentials[0]).not.toHaveProperty('oneTimeSecret')
@@ -41,6 +42,31 @@ describe('[COMP:api/crm-integration-auth] Real credential lifecycle', () => {
     expect(await store.revoke(f.workspaceId, f.userId, created.id)).toBe(false)
     expect(await store.authenticate(created.oneTimeSecret)).toBeNull()
     expect((await owner.query(`SELECT 1 FROM workspace_audit_log WHERE workspace_id=$1 AND event_type='crm.integration_credential_revoked'`, [f.workspaceId])).rowCount).toBe(1)
+  })
+
+  it('serializes issuance retries and preserves one-time secret and rotation effects', async () => {
+    const f = await workspace(), requestId = randomUUID()
+    const old = await store.create(f.workspaceId, f.userId, input)
+    const request = { ...input, requestId, revokeCredentialId: old.id }
+    const results = await Promise.allSettled([store.create(f.workspaceId, f.userId, request), store.create(f.workspaceId, f.userId, request)])
+    const accepted = results.find(row => row.status === 'fulfilled')!
+    expect(accepted.status).toBe('fulfilled')
+    if (accepted.status !== 'fulfilled') throw new Error('Expected one issuance')
+    expect(results.filter(row => row.status === 'fulfilled')).toHaveLength(1)
+    const rejected = results.find(row => row.status === 'rejected')!
+    if (rejected.status !== 'rejected') throw new Error('Expected replay conflict')
+    expect(rejected.reason).toMatchObject({ code: 'conflict', details: { reason: 'credential_already_issued', credentialId: accepted.value.id } })
+    expect(JSON.stringify(rejected.reason)).not.toContain(accepted.value.oneTimeSecret)
+    await expect(store.create(f.workspaceId, f.userId, { ...request, label: 'Changed request' })).rejects.toMatchObject({ code: 'conflict', details: {} })
+    await owner.query("UPDATE workspace_members SET role='admin' WHERE workspace_id=$1 AND user_id=$2", [f.workspaceId, f.memberId])
+    await expect(store.create(f.workspaceId, f.memberId, request)).rejects.toMatchObject({ code: 'conflict', details: {} })
+    expect((await store.listForMember(f.workspaceId, f.userId)).credentials).toHaveLength(2)
+    expect(await store.authenticate(old.oneTimeSecret)).toBeNull()
+    expect((await owner.query("SELECT id FROM workspace_audit_log WHERE workspace_id=$1 AND event_type='crm.integration_credential_created'", [f.workspaceId])).rowCount).toBe(2)
+    await expect(owner.query('UPDATE crm_integration_credentials SET request_id=NULL,request_fingerprint=NULL WHERE id=$1', [accepted.value.id])).rejects.toThrow(/immutable/)
+    await store.revoke(f.workspaceId, f.userId, accepted.value.id)
+    await expect(store.create(f.workspaceId, f.userId, request)).rejects.toMatchObject({ details: { credentialId: accepted.value.id } })
+    expect((await store.listForMember(f.workspaceId, f.userId)).credentials).toHaveLength(2)
   })
 
   it('requires owner/admin lifecycle and confines selected resources to the key workspace', async () => {

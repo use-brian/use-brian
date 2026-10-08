@@ -7,33 +7,16 @@ import pg from 'pg'
  * `entities` row; updates are IN PLACE (updateEntity) — the id is stable
  * (so inbound + outbound edges stay valid) and CRM field history is not
  * preserved (decision D5). This replaces the old dual-table
- * supersession-on-write suite. Skips silently when the DB is unavailable.
+ * supersession-on-write suite. Requires the maintained disposable PostgreSQL fixture.
  */
 
-let pool: pg.Pool | undefined
-
-async function canConnect(): Promise<boolean> {
-  const p = new pg.Pool({ database: 'sidanclaw', connectionTimeoutMillis: 2000 })
-  try {
-    const client = await p.connect()
-    try {
-      await client.query('SELECT 1 FROM entities LIMIT 1')
-    } finally {
-      client.release()
-    }
-    pool = p
-    return true
-  } catch {
-    await p.end().catch(() => {})
-    return false
-  }
-}
-
-const ok = await canConnect()
-const describeIf = ok ? describe : describe.skip
+const { assertLocalFixture } = await import(new URL('../../../../../scripts/crm/local-fixture.mjs', import.meta.url).href)
+await assertLocalFixture()
+const pool = new pg.Pool({ connectionString: process.env.DATABASE_URL })
 
 afterAll(async () => {
-  if (pool) await pool.end()
+  const { getPool, getAppPool } = await import('../client.js')
+  await Promise.all([pool.end(), getPool().end(), getAppPool().end()])
 })
 
 async function makeUser(client: pg.PoolClient): Promise<string> {
@@ -91,13 +74,12 @@ async function countActive(kind: string, workspaceId: string): Promise<number> {
 
 const NIL = '00000000-0000-0000-0000-000000000000'
 
-describeIf('[COMP:crm/update] updateCompany (in-place)', () => {
+describe('[COMP:crm/update] updateCompany (in-place)', () => {
   let crm: typeof import('../crm.js')
   let userId: string
   let workspaceId: string
 
   beforeAll(async () => {
-    process.env.DATABASE_URL ??= 'postgres:///sidanclaw'
     crm = await import('../crm.js')
   })
 
@@ -149,13 +131,12 @@ describeIf('[COMP:crm/update] updateCompany (in-place)', () => {
   })
 })
 
-describeIf('[COMP:crm/update] updateContact (in-place)', () => {
+describe('[COMP:crm/update] updateContact (in-place)', () => {
   let crm: typeof import('../crm.js')
   let userId: string
   let workspaceId: string
 
   beforeAll(async () => {
-    process.env.DATABASE_URL ??= 'postgres:///sidanclaw'
     crm = await import('../crm.js')
   })
 
@@ -205,13 +186,12 @@ describeIf('[COMP:crm/update] updateContact (in-place)', () => {
   })
 })
 
-describeIf('[COMP:crm/update] updateDeal + setDealStage (in-place)', () => {
+describe('[COMP:crm/update] updateDeal + setDealStage (in-place)', () => {
   let crm: typeof import('../crm.js')
   let userId: string
   let workspaceId: string
 
   beforeAll(async () => {
-    process.env.DATABASE_URL ??= 'postgres:///sidanclaw'
     crm = await import('../crm.js')
   })
 
@@ -278,14 +258,13 @@ describeIf('[COMP:crm/update] updateDeal + setDealStage (in-place)', () => {
   })
 })
 
-describeIf('[COMP:crm/reads] entity-backed CRM reads', () => {
+describe('[COMP:crm/reads] entity-backed CRM reads', () => {
   let crm: typeof import('../crm.js')
   let userId: string
   let workspaceId: string
   const ctx = () => ({ workspaceId, userId, assistantId: userId, assistantKind: 'standard' as const })
 
   beforeAll(async () => {
-    process.env.DATABASE_URL ??= 'postgres:///sidanclaw'
     crm = await import('../crm.js')
   })
 

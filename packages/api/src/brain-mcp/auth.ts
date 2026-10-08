@@ -35,7 +35,8 @@
  */
 
 import type { Request } from 'express'
-import type { Sensitivity } from '@use-brian/core'
+import { isSensitivity, minSensitivity, crmOperationsSha256, type Sensitivity } from '@use-brian/core'
+import type { CrmCredentialParent } from '@use-brian/core'
 import { verifySecret } from '../db/api-key-store.js'
 import {
   parseBrainAuthToken,
@@ -97,6 +98,12 @@ export type BrainAuth = {
 // Proof belongs to this exact successful authentication, not serializable auth
 // metadata. Copying/spreading/parsing BrainAuth cannot manufacture the proof.
 const authenticatedCredentials = new WeakMap<BrainAuth, () => Promise<boolean>>()
+const authenticatedCrmParents = new WeakMap<BrainAuth, CrmCredentialParent>()
+export function getAuthenticatedCrmCredentialParent(auth: BrainAuth): CrmCredentialParent | undefined {
+  const parent = authenticatedCrmParents.get(auth)
+  return parent ? structuredClone(parent) : undefined
+}
+
 
 export function getAuthenticatedBrainCredentialCurrent(auth: BrainAuth): (() => Promise<boolean>) | undefined {
   return authenticatedCredentials.get(auth)
@@ -150,7 +157,7 @@ export async function authenticateBrainRequest(
     if (!stored) return null
     // Keep the very hash scrypt verifies, even if the store row changes while
     // verification awaits. Never adopt a hash fetched during context resolution.
-    const row = { ...stored }
+    const row = structuredClone(stored)
     if (row.status !== 'active') return null
     const ok = await verifySecret(apiKeyParts.secret, row.keyHash)
     if (!ok) return null
@@ -168,12 +175,24 @@ export async function authenticateBrainRequest(
       captureAssistantId: row.captureAssistantId ?? null,
       captureProfileId: row.captureProfileId ?? null,
     }
+    if (row.scope === 'read_write' && row.credentialOwnerUserId) authenticatedCrmParents.set(auth, {
+      version: 1, kind: 'brain_key', credentialId: row.id, workspaceId: row.workspaceId,
+      userId: row.credentialOwnerUserId, tokenFingerprint: crmOperationsSha256(row.keyHash),
+      maxClearance: row.maxClearance, contextGroupId: row.contextGroupId, contextProjectId: row.contextProjectId,
+      configurationSessionId: row.configurationSessionId ?? null,
+      admittedCompartments: row.admittedCompartments ?? null, admittedProjectIds: row.admittedProjectIds ?? null,
+    })
     authenticatedCredentials.set(auth, async () => {
       const current = await opts.brainKeyStore.getByIdSystem(row.id)
       return current !== null && current.status === 'active'
         && current.id === row.id && current.workspaceId === row.workspaceId
         && current.keyHash === row.keyHash && current.scope === row.scope
         && current.maxClearance === row.maxClearance
+        && current.credentialOwnerUserId === row.credentialOwnerUserId
+        && current.contextGroupId === row.contextGroupId && current.contextProjectId === row.contextProjectId
+        && current.configurationSessionId === row.configurationSessionId
+        && crmOperationsSha256(current.admittedCompartments ?? null) === crmOperationsSha256(row.admittedCompartments ?? null)
+        && crmOperationsSha256(current.admittedProjectIds ?? null) === crmOperationsSha256(row.admittedProjectIds ?? null)
     })
     return auth
   }
@@ -192,7 +211,7 @@ export async function authenticateBrainRequest(
       opts.authorizationStore.touchLastUsedAt(row.id).catch((err) => {
         console.error('[brain-mcp] touchLastUsedAt failed:', err)
       })
-      return {
+      const auth: BrainAuth = {
         keyId: row.id,
         workspaceId: row.workspaceId,
         scope: row.scope as BrainKeyScope,
@@ -207,6 +226,20 @@ export async function authenticateBrainRequest(
         captureAssistantId: row.captureAssistantId ?? null,
         captureProfileId: row.captureProfileId ?? null,
       }
+      if (row.scope === 'read_write') authenticatedCrmParents.set(auth, {
+        version: 1, kind: 'oauth_token', credentialId: row.id, workspaceId: row.workspaceId,
+        userId: row.userId, clientId: row.clientId, expiresAt: row.accessTokenExpiresAt.toISOString(),
+        tokenFingerprint: crmOperationsSha256(row.accessTokenHash),
+      })
+      authenticatedCredentials.set(auth, async () => {
+        const current = await opts.authorizationStore!.getByIdSystem(row.id)
+        return current !== null && !current.revokedAt
+          && current.id === row.id && current.workspaceId === row.workspaceId && current.userId === row.userId
+          && current.clientId === row.clientId && current.scope === row.scope
+          && current.accessTokenHash === row.accessTokenHash
+          && current.accessTokenExpiresAt !== null && current.accessTokenExpiresAt.getTime() > Date.now()
+      })
+      return auth
     }
   }
 
@@ -221,6 +254,7 @@ export async function authenticateBrainRequest(
       // next token expiry.
       if (!app || app.status !== 'active' || !app.grantedScopes) return null
       if (app.workspaceId !== parsed.payload.workspaceId) return null
+      if (parsed.payload.maxClearance !== null && !isSensitivity(parsed.payload.maxClearance)) return null
       // The narrower of what was granted and what the token claims: a token
       // minted before a grant was narrowed must not out-rank the new grant.
       const scope: BrainKeyScope =
@@ -234,11 +268,13 @@ export async function authenticateBrainRequest(
         storeScopeRank(parsed.payload.store) < storeScopeRank(app.grantedScopes.store)
           ? (parsed.payload.store ?? 'none')
           : (app.grantedScopes.store ?? 'none')
-      return {
+      const auth: BrainAuth = {
         keyId: app.id,
         workspaceId: app.workspaceId,
         scope,
-        maxClearance: app.maxClearance,
+        maxClearance: parsed.payload.maxClearance === null ? app.maxClearance
+          : app.maxClearance === null ? parsed.payload.maxClearance
+          : minSensitivity(parsed.payload.maxClearance, app.maxClearance),
         authKind: 'home_app',
         storeScope,
         // Same narrowing shape as the others: the grant is the authority and
@@ -249,6 +285,23 @@ export async function authenticateBrainRequest(
         captureAssistantId: null,
         captureProfileId: null,
       }
+      if (scope === 'read_write') authenticatedCrmParents.set(auth, {
+        version: 1, kind: 'home_app', credentialId: app.id, workspaceId: app.workspaceId,
+        userId: parsed.payload.userId, tokenFingerprint: crmOperationsSha256(token),
+        signerFingerprint: crmOperationsSha256(['crm-home-app-signer-v1', opts.homeApps.secret]),
+        expiresAt: new Date(parsed.payload.exp).toISOString(), maxClearance: app.maxClearance,
+        grantedScopes: { data: 'read_write', ...('store' in app.grantedScopes ? { store: app.grantedScopes.store } : {}),
+          ...('agent' in app.grantedScopes ? { agent: app.grantedScopes.agent } : {}) },
+      })
+      const granted = JSON.stringify(app.grantedScopes)
+      authenticatedCredentials.set(auth, async () => {
+        if (!parseBridgeToken({ token, secret: opts.homeApps!.secret }).ok) return false
+        const current = await opts.homeApps!.getApp(app.id)
+        return current !== null && current.id === app.id && current.workspaceId === app.workspaceId
+          && current.status === 'active' && current.maxClearance === app.maxClearance
+          && JSON.stringify(current.grantedScopes) === granted
+      })
+      return auth
     }
   }
 

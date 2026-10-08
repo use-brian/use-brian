@@ -23,6 +23,7 @@ import { listAssistants, type StudioAssistantSummary } from "@/lib/api/studio";
 import { onAssistantsChanged, type Assistant } from "@/lib/sidebar-cache";
 import { mutateSurfaceCache, useCachedResource } from "@/lib/surface-cache";
 import { assistantsCacheKey } from "@/lib/surface-prefetch";
+import { useLeasedResource } from "@/lib/offline/surface-content-cache";
 
 /**
  * Merge sidebar-cache rows into the rail list - only the fields the rail
@@ -53,7 +54,7 @@ export function mergeSidebarAssistants(
 
 export function useAssistantsData(workspaceId: string | null) {
   const key = workspaceId ? assistantsCacheKey(workspaceId) : null;
-  const res = useCachedResource<StudioAssistantSummary[]>(key, () =>
+  const res = useLeasedResource<StudioAssistantSummary[]>(key, () =>
     listAssistants(workspaceId as string),
   );
 

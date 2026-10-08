@@ -68,7 +68,8 @@ export type CampaignReadPort = {
   getTrackingSetup(workspaceId: string, siteId?: string): Promise<Record<string, unknown>>
   getResults(workspaceId: string, campaignId: string, filters?: Record<string, unknown>): Promise<Record<string, unknown>>
   getAttribution(workspaceId: string, campaignId: string, filters?: Record<string, unknown>): Promise<Record<string, unknown>>
-  previewAudience(workspaceId: string, input: Record<string, unknown>): Promise<Record<string, unknown>>
+  /** Scoped to what `actor` may read: hidden contacts and evidence never shape the audience. */
+  previewAudience(workspaceId: string, input: Record<string, unknown>, actor: CampaignActor): Promise<Record<string, unknown>>
   previewEmail(workspaceId: string, input: Record<string, unknown>): Promise<Record<string, unknown>>
 }
 

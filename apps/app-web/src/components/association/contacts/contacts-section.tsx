@@ -9,9 +9,8 @@ import { fetchCrmRecordPage, listCrmIntakeDefinitions, listCrmSegments, listCrmS
 import { crmCollectionHref, crmRecordHref } from "@/lib/crm-view";
 import { format } from "@/lib/i18n/format";
 import { useT } from "@/lib/i18n/client";
-import { useCachedResource } from "@/lib/surface-cache";
 import { associationPageCacheKey } from "@/lib/surface-prefetch";
-import { AssociationChoice, AssociationField, AssociationListState } from "../operator-controls";
+import { AssociationChoice, AssociationField, AssociationListState, useAssociationProjection } from "../operator-controls";
 import { associationHref } from "../navigation";
 import { EmptyState, PageHeader, ResponsiveTable, Segmented, StatusPill, associationDate } from "../ui";
 
@@ -19,11 +18,13 @@ type View = "people" | "forms" | "newsletter";
 const VIEWS: readonly View[] = ["people", "forms", "newsletter"];
 const openLink = (href: string, label: string) => <Link href={href} className="inline-flex min-h-11 items-center gap-1 text-sm font-medium text-primary md:min-h-8">{label}<ArrowUpRight aria-hidden className="size-4" /></Link>;
 
-/** Cursor paging with a back stack: the list shows one page and never claims a total it has not read. */
+/** Cursor paging with a back stack: the list shows one page and never claims a total it has not read.
+ * Every read here is a protected CRM projection: it renews on the shared interval and expires at the
+ * 30-second request-start deadline, so an open list never outlives the viewer's department access. */
 function usePaged<T>(key: string, load: (cursor: string | null) => Promise<{ items: T[]; nextCursor: string | null }>) {
   const [stack, setStack] = useState<(string | null)[]>([null]);
   const cursor = stack[stack.length - 1] ?? null;
-  const page = useCachedResource(`${key}:${cursor ?? ""}`, () => load(cursor));
+  const page = useAssociationProjection(`${key}:${cursor ?? ""}`, () => load(cursor));
   return { ...page,
     next: page.data?.nextCursor ? () => setStack(old => [...old, page.data!.nextCursor]) : undefined,
     previous: stack.length > 1 ? () => setStack(old => old.slice(0, -1)) : undefined };
@@ -55,7 +56,7 @@ function PeopleView({ workspaceId }: { workspaceId: string }) {
 function FormsView({ workspaceId, form }: { workspaceId: string; form: string }) {
   const t = useT().associationPage, u = t.ux, m = t.manage, router = useRouter();
   const [status, setStatus] = useState<CrmSubmission["status"] | "all">("new");
-  const definitions = useCachedResource(associationPageCacheKey(workspaceId, "intake-definitions"), () => listCrmIntakeDefinitions(workspaceId));
+  const definitions = useAssociationProjection(associationPageCacheKey(workspaceId, "intake-definitions"), () => listCrmIntakeDefinitions(workspaceId));
   const page = usePaged(associationPageCacheKey(workspaceId, "submissions", { form, status }), async cursor => {
     const result = await listCrmSubmissionPage(workspaceId, { definitionKey: form || undefined, status: status === "all" ? undefined : status, cursor });
     return { items: result.submissions, nextCursor: result.nextCursor };
@@ -85,7 +86,7 @@ function FormsView({ workspaceId, form }: { workspaceId: string; form: string })
 
 function AudienceCard({ workspaceId, id, name, description }: { workspaceId: string; id: string; name: string; description: string }) {
   const u = useT().associationPage.ux;
-  const preview = useCachedResource(associationPageCacheKey(workspaceId, "segment-preview", { id }), () => previewCrmSegment(workspaceId, id));
+  const preview = useAssociationProjection(associationPageCacheKey(workspaceId, "segment-preview", { id }), () => previewCrmSegment(workspaceId, id));
   const total = preview.data?.snapshotIds.length;
   return <article className="space-y-3 rounded-2xl border border-border bg-background p-5" data-audience={id}>
     <div className="flex flex-wrap items-start justify-between gap-2">
@@ -102,7 +103,7 @@ function AudienceCard({ workspaceId, id, name, description }: { workspaceId: str
 
 function NewsletterView({ workspaceId }: { workspaceId: string }) {
   const u = useT().associationPage.ux;
-  const segments = useCachedResource(associationPageCacheKey(workspaceId, "audiences"), () => listCrmSegments(workspaceId, "person"));
+  const segments = useAssociationProjection(associationPageCacheKey(workspaceId, "audiences"), () => listCrmSegments(workspaceId, "person"));
   const rows = (segments.data?.segments ?? []).filter(segment => !segment.archivedAt);
   return <div className="space-y-4">
     <p className="text-sm text-muted-foreground">{u.audiencesHelp}</p>

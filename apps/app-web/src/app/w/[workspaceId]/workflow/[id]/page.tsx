@@ -41,6 +41,8 @@ import { use, useEffect, useMemo, useRef, useState } from "react";
 import Link from "next/link";
 import { Pencil } from "lucide-react";
 import { BackButton } from "@/components/ui/back-button";
+import { Button } from "@/components/ui/button";
+import { leaseSurfaceContent, surfaceContentRemaining, useSurfaceContentRenewal } from "@/lib/offline/surface-content-cache";
 import { useRouter } from "next/navigation";
 import { useT } from "@/lib/i18n/client";
 import { format as fmt } from "@/lib/i18n";
@@ -111,6 +113,7 @@ import {
   type ContextProject,
   type ContextTeam,
 } from "@/lib/api/context-scopes";
+import { useLeasedResource } from "@/lib/offline/surface-content-cache";
 
 export default function WorkflowDetailPage({
   params,
@@ -127,9 +130,14 @@ export default function WorkflowDetailPage({
   // page has adopted and `draft` the editable copy; the adopt effect (after
   // the dirty check) is the only bridge from the cache into them.
   const detailKey = workflowDetailCacheKey(workspaceId, id);
+  // Content lease (perceived-performance.md, "Content lease for protected
+  // lists"): a denied (null) or unrenewed definition leaves the cache within
+  // 30 seconds, and the page stops rendering it below.
   const detail = useCachedResource<WorkflowFull | null>(detailKey, () =>
-    getWorkflowFull(id),
+    leaseSurfaceContent(() => getWorkflowFull(id)),
+    { expiresInMs: surfaceContentRemaining },
   );
+  useSurfaceContentRenewal(detail.refresh);
   // The list row the user came from (the rail hover / list page already
   // filled `workflow:<wid>`): seeds the header on a cold entry. A plain read,
   // not a subscription - it is only a seed, and the list is never fetched on
@@ -144,11 +152,12 @@ export default function WorkflowDetailPage({
 
   const [workflow, setWorkflow] = useState<WorkflowFull | null | undefined>(undefined);
   const [draft, setDraft] = useState<WorkflowFull | null>(null);
+  const [confirmingAuthority, setConfirmingAuthority] = useState(false);
   /** The cache value most recently adopted into `workflow` / `draft`. */
   const adoptedRef = useRef<WorkflowFull | null | undefined>(undefined);
   // Assistants for the picker + board node labels: the Studio `assistants:`
   // slot, filtered to this workspace like Studio does.
-  const assistantsRes = useCachedResource<StudioAssistantSummary[]>(
+  const assistantsRes = useLeasedResource<StudioAssistantSummary[]>(
     activeId ? assistantsCacheKey(activeId) : null,
     () => listAssistants(activeId as string),
   );
@@ -399,6 +408,24 @@ export default function WorkflowDetailPage({
         backLabel={t.workflowPage.detail.backToList}
         disabledLabel={t.workflowPage.builder.disabledLabel}
       />
+    );
+  }
+
+  // Authority lapsed or was denied after the definition was on screen. Stop
+  // showing it; any unsaved draft stays in state (not rendered) until the user
+  // leaves, and comes back if a retry succeeds while the draft is dirty.
+  if (workflow && detail.data === undefined && detail.error !== undefined) {
+    return (
+      <div className="w-full px-6 py-20 text-center flex flex-col items-center gap-3" role="status">
+        <div className="font-medium">{t.workflowPage.detail.unavailableTitle}</div>
+        <p className="max-w-md text-sm text-muted-foreground">{t.workflowPage.detail.unavailableHint}</p>
+        <div className="flex flex-wrap justify-center gap-2">
+          <Button type="button" variant="outline" className="max-sm:min-h-11" onClick={() => void detail.refresh()}>
+            {t.workflowPage.detail.unavailableRetry}
+          </Button>
+          <BackButton href={listHref} label={t.workflowPage.detail.backToList} />
+        </div>
+      </div>
     );
   }
 
@@ -661,6 +688,27 @@ export default function WorkflowDetailPage({
     void refresh();
   };
 
+  /** Legacy recovery (workflow.md): recapture authority without inventing an edit. */
+  const onConfirmAuthority = async () => {
+    if (!workflow) return;
+    setConfirmingAuthority(true);
+    setError(null);
+    const result = await updateWorkflow(workflow.id, { confirmAuthority: true });
+    setConfirmingAuthority(false);
+    if (!result.ok) {
+      setError(/workflow_schedule_re(view|approval)_required/.test(result.error)
+        ? t.workflowPage.builder.authorityReviewScheduleRequired
+        : result.error || t.workflowPage.builder.saveFail);
+      return;
+    }
+    adoptedRef.current = result.workflow;
+    mutateSurfaceCache<WorkflowFull | null>(detailKey, () => result.workflow);
+    setWorkflow(result.workflow);
+    setDraft(result.workflow);
+    requestWorkflowRefresh(result.workflow.workspaceId);
+    void refresh();
+  };
+
   const onDelete = async () => {
     const ok = await confirmDialog({
       title: t.workflowPage.builder.deleteConfirmTitle,
@@ -681,14 +729,17 @@ export default function WorkflowDetailPage({
     setError(null);
     setRunning(true);
     // Light the live overlay up immediately — the POST holds until the run
-    // terminates, but the run row (and its step statuses) are visible to the
-    // poller right away.
+    // terminates. History appears once canonical source evidence is captured.
     pollNow();
     const result = await runWorkflowNow(workflow.id, {});
     setRunning(false);
     pollNow();
     if (!result) {
       setError(t.workflowPage.builder.runFail);
+      return;
+    }
+    if ("unavailable" in result) {
+      setError(t.workflowPage.builder.runResultUnavailable);
       return;
     }
     setRunMessage(
@@ -949,6 +1000,17 @@ export default function WorkflowDetailPage({
           <div className="text-xs text-green-700 dark:text-green-400">{runMessage}</div>
         )}
         {error && <div className="text-xs text-red-600 dark:text-red-400">{error}</div>}
+        {workflow.authorityReviewRequired && (
+          <div role="status" className="flex flex-col gap-2 rounded-md border border-amber-500/40 bg-amber-500/5 px-3 py-2 text-sm sm:flex-row sm:items-center sm:justify-between">
+            <div>
+              <p className="font-medium">{t.workflowPage.builder.authorityReviewTitle}</p>
+              <p className="text-xs text-muted-foreground">{t.workflowPage.builder.authorityReviewBody}</p>
+            </div>
+            <Button type="button" variant="outline" className="max-sm:min-h-11 shrink-0" disabled={confirmingAuthority || dirty || saving} onClick={() => void onConfirmAuthority()}>
+              {t.workflowPage.builder.authorityReviewConfirm}
+            </Button>
+          </div>
+        )}
         {undoRemove && (
           <div className="flex items-center gap-2 text-xs text-muted-foreground">
             <span>{t.workflowPage.builder.stepRemoved}</span>

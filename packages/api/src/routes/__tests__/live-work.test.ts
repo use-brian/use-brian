@@ -12,12 +12,12 @@ import { describe, it, expect, vi, beforeEach } from 'vitest'
 import express from 'express'
 import request from 'supertest'
 
-vi.mock('../../db/client.js', () => ({ query: vi.fn() }))
+vi.mock('../../db/client.js', () => ({ query: vi.fn(), queryWithRLS: vi.fn() }))
 vi.mock('../../db/workspace-store.js', () => ({
   getWorkspaceMembershipWithReadScopeSystem: vi.fn(),
 }))
 
-import { query } from '../../db/client.js'
+import { query, queryWithRLS } from '../../db/client.js'
 import { getWorkspaceMembershipWithReadScopeSystem } from '../../db/workspace-store.js'
 import {
   liveWorkRoutes,
@@ -98,9 +98,8 @@ function runRow(overrides: Record<string, unknown> = {}) {
 
 /** Wire the two roster queries: first call = sessions, second = runs. */
 function primeRoster(sessions: unknown[], runs: unknown[]) {
-  mockQuery
-    .mockResolvedValueOnce({ rows: sessions } as never)
-    .mockResolvedValueOnce({ rows: runs } as never)
+  mockQuery.mockResolvedValueOnce({ rows: sessions } as never)
+  vi.mocked(queryWithRLS).mockResolvedValueOnce({ rows: runs } as never)
 }
 
 beforeEach(() => {

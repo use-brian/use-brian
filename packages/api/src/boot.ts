@@ -1,3 +1,13 @@
+import { scopeEvidenceFromRows, workspaceFilesCtxFor, type CreateComputerToolsOptions } from '@use-brian/core'
+import { prepareBrowserDownload, type BrowserDownload } from './sandbox/download-publication.js'
+import { resolveBrowserTaskExecutionAuthority } from './sandbox/task-execution-authority.js'
+import { assertLocalTaskExecutionAuthority, createLocalTaskAdmission } from './sandbox/local-task-authority.js'
+import { createBrowserTaskDiscard } from './sandbox/task-discard.js'
+import { resolveBrowserProfileDepartmentRead, resolveHumanBrowserProfileDepartmentRead } from './sandbox/profile-authority.js'
+import { previewCrmDestination, resolveCrmDestination } from './crm-operations/creation-destination.js'
+import { getWorkspaceMembershipWithReadScopeSystem } from './db/workspace-store.js'
+import { resolveDepartmentReadGrant } from './context-scope/department-resolver.js'
+import { createTemplateImportRecovery } from './office/template-import-recovery.js'
 import { triageTaskForGoal } from './db/goal-task-triage.js'
 import { createProgrammaticEpisodeTerminal } from './ingest/programmatic-terminal.js'
 import { checkPromptOnlyAuthority, executePromptOnlyGeneration } from './office/generation-publication.js'
@@ -108,7 +118,7 @@ import {
   createTranscriptionPrefTools,
   createInternalLinkTools,
   createCrmTools,
-  createCrmOperationsTools,
+  createCrmOperationsTools, createCrmCredentialTools, CRM_INTEGRATION_OPERATIONS, CRM_INTEGRATION_RESOURCE_CATALOG,
   createAssociationTools,
   createCrmEmailDraftTools,
   createCampaignTools,
@@ -266,7 +276,7 @@ import { crmIntakeRoutes } from './routes/crm-intake.js'
 import { crmOperationsRoutes } from './routes/crm-operations.js'
 import { createCrmDeliveryService } from './crm-operations/delivery-service.js'
 import { createCrmDeliveryProvider } from './crm-operations/delivery-providers.js'
-import { createCampaignEmailService } from './content-planning/email.js'
+import { campaignReadActor, createCampaignEmailService } from './content-planning/email.js'
 import { getGlobalEmailInboxProvider } from './agentmail/provider.js'
 import { createCrmOperationsService } from './crm-operations/service.js'
 import { createCrmProductionImportService } from './crm-operations/import-service.js'
@@ -316,7 +326,7 @@ import {
   getHomeApp,
   consumeHomeAppBudget,
 } from './db/home-apps-store.js'
-import { browserExtensionRoutes } from './routes/browser-extension.js'
+import { browserExtensionAuthorityRoutes, browserExtensionRoutes } from './routes/browser-extension.js'
 import { computerRoutes, createInMemoryLocalComputerTaskStore } from './routes/computer.js'
 import {
   createRelayCommandTransport,
@@ -539,10 +549,12 @@ import {
   createWorkflowRunQueueStore,
   countRecentRunsForWorkflowSystem,
   pauseWorkflowSystem,
+  pauseWorkflowForPrimitiveEventSystem,
 } from './db/workflow-store.js'
 import { buildWorkflowToolRegistry } from './workflow/mcp-bridge.js'
+import { connectorWorkflowEventAdmissibleSystem } from './workflow/connector-event-admission.js'
 import { callRemoteMcpTool } from './mcp/client.js'
-import { createPendingApprovalsStore } from './db/pending-approvals-store.js'
+import { createPendingApprovalsStore, readBrowserSendApprovalStatus } from './db/pending-approvals-store.js'
 import {
   makeRequestApproval,
   sweepExpiredApprovals,
@@ -617,7 +629,7 @@ import { officeLifecycleRoutes } from './routes/office-lifecycle.js'
 import { officeOfflineContextRevision, officeOfflineRoutes } from './routes/office-offline.js'
 import { officeResourceRoutes } from './routes/office-resources.js'
 import { createOfficeResourceReader } from './office/resource-read.js'
-import { bindOfficeFile, classifyOfficeOutput, fileMatchesOfficeOutput, officeOutputScopeRevision, officeScopePathSegment, sameOfficeFileBinding, type OfficeOutputScope } from './office/file-binding.js'
+import { bindOfficeFile, classifyOfficeOutput, officeFileBindingRevision, fileMatchesOfficeOutput, officeOutputScopeRevision, officeScopePathSegment, sameOfficeFileBinding, type OfficeOutputScope } from './office/file-binding.js'
 import { readOfficeProjection } from './db/office-read-projection.js'
 import { internalOfficeCheckpointRoutes } from './routes/internal-office-checkpoint.js'
 import { assertOfficeArtifactSnapshot, encodeOfficeState, officeStateVector, snapshotToYDoc, type OfficeArtifactSnapshot } from '@use-brian/office-model'
@@ -690,6 +702,7 @@ import { createDbProvenanceStore } from './db/provenance-store.js'
 import { createDbAggregateStore } from './db/aggregate-store.js'
 import { createDbRowHistoryStore } from './db/row-history-store.js'
 import { createMemoryRetractionStore } from './db/retraction-store.js'
+import { authorizeBrainRowMutation } from './db/brain-inbox-store.js'
 import { createSoftDeleteStore } from './db/soft-delete-store.js'
 import { createSensitivityReclassificationStore } from './db/sensitivity-reclassification-store.js'
 import { createDbMarkUsefulStore } from './db/mark-useful-store.js'
@@ -738,6 +751,7 @@ import { createAssociationService, type AssociationWebsiteMediaPort } from './as
 import { promoteCachedFile } from '@use-brian/core'
 import { createAssociationStore } from './db/association-store.js'
 import { createAssociationWorkspaceModulesStore } from './association/workspace-module.js'
+import { configureCrmHomeAppParentSigner } from './crm-operations/integration-department-authority.js'
 import { createCrmIntegrationStore } from './db/crm-integration-store.js'
 import { crmIntegrationRoutes, crmIntegrationCredentialRoutes } from './routes/crm-integration.js'
 import { crmAssociationRoutes, associationMemberContext, workspaceModuleRoutes } from './routes/crm-association.js'
@@ -1520,6 +1534,7 @@ export async function bootOpenApi(opts: BootOpenApiOptions): Promise<BootResult>
   }
   // Bind the media-token signing secret for the channel pipeline's actor
   // media tokens (late-bound seam — see media-token.ts).
+  configureCrmHomeAppParentSigner(env.JWT_SECRET)
   setMediaTokenSecret(env.JWT_SECRET)
 
   const app = express()
@@ -2946,7 +2961,7 @@ export async function bootOpenApi(opts: BootOpenApiOptions): Promise<BootResult>
       getTrackingSetup: (workspaceId, siteId) => campaignTrackingStore.trackingSetup(workspaceId, siteId),
       getResults: (workspaceId, campaignId, filters) => campaignTrackingStore.results(workspaceId, campaignId, filters),
       getAttribution: (workspaceId, campaignId, filters) => campaignTrackingStore.attribution(workspaceId, campaignId, filters),
-      previewAudience: (workspaceId, input) => campaignEmailService.audience(workspaceId, String(input.placement_id)),
+      previewAudience: (workspaceId, input, actor) => campaignEmailService.audience(workspaceId, String(input.placement_id), campaignReadActor(actor)),
       previewEmail: (workspaceId, input) => campaignEmailService.preview(workspaceId, String(input.placement_id),
         (input.values ?? {}) as Record<string, string>, Number(input.revision)),
     },
@@ -3052,6 +3067,7 @@ export async function bootOpenApi(opts: BootOpenApiOptions): Promise<BootResult>
   for (const tool of createOfficeTools({
     port: {
       ...officeService,
+      async retryTemplateImport(input) { return retryOfficeTemplateImport(input) },
       async openPdfSession(params) {
         if (!pdfSessionToolRuntime) throw new Error('PDF editing sessions are unavailable')
         return pdfSessionToolRuntime.create({
@@ -4035,7 +4051,8 @@ export async function bootOpenApi(opts: BootOpenApiOptions): Promise<BootResult>
 
   for (const correctionTool of createCorrectionTools({
     retraction: createMemoryRetractionStore(),
-    softDelete: createSoftDeleteStore(),
+    // Actor-authorized: the tool deletes only rows its caller may mutate.
+    softDelete: createSoftDeleteStore({ authorize: authorizeBrainRowMutation }),
     reclassify: createSensitivityReclassificationStore(),
     resolveWorkspaceRole: (userId, workspaceId) => workspaceStore.getRole(userId, workspaceId),
   })) {
@@ -4399,6 +4416,16 @@ export async function bootOpenApi(opts: BootOpenApiOptions): Promise<BootResult>
     service: crmOperationsService,
   })
   for (const tool of Object.values(crmOperationsTools)) allTools.set(tool.name, tool)
+  const crmCredentialTools = createCrmCredentialTools({
+    preview: async (input, authority, parent) => ({
+      ...await crmIntegrationStore.bindingOptions(authority.ceiling.workspaceId, authority.ceiling.userId, input, authority, parent),
+      operations: CRM_INTEGRATION_OPERATIONS, selectors: CRM_INTEGRATION_RESOURCE_CATALOG,
+    }),
+    list: (input, authority, parent) => crmIntegrationStore.listForMember(authority.ceiling.workspaceId, authority.ceiling.userId, input, authority, parent),
+    create: (input, authority, parent) => crmIntegrationStore.create(authority.ceiling.workspaceId, authority.ceiling.userId, input, authority, parent),
+    revoke: async (input, authority, parent) => ({ revoked: await crmIntegrationStore.revoke(authority.ceiling.workspaceId, authority.ceiling.userId, input.credentialId, authority, parent) }),
+  })
+  for (const tool of Object.values(crmCredentialTools)) allTools.set(tool.name, tool)
   const associationTools = createAssociationTools(associationService)
   for (const tool of Object.values(associationTools)) allTools.set(tool.name, tool)
   const crmEmailDraftTools = createCrmEmailDraftTools(crmEmailDraftStore)
@@ -4704,6 +4731,7 @@ export async function bootOpenApi(opts: BootOpenApiOptions): Promise<BootResult>
   const authorizeProtectedFill = async (scope: ProtectedFillScope) => {
     if (!await authorizeProtectedIdentity(scope) || !await protectedBrowserSupported(scope.userId, scope.browserProfileId)) return false
     const task = localComputerTasks.getActiveBySession(scope.sessionId)
+    if (task) { try { await assertLocalTaskExecutionAuthority(task) } catch { return false } }
     return Boolean(task && task.userId === scope.userId && task.workspaceId === scope.workspaceId &&
       task.taskId === scope.taskId && task.profileId === scope.browserProfileId && task.destinationOrigin === scope.destinationOrigin)
   }
@@ -4797,6 +4825,7 @@ export async function bootOpenApi(opts: BootOpenApiOptions): Promise<BootResult>
     ? createSandboxOrchestrator({
         provider: sandboxProvider,
         taskStore: sandboxTaskStoreImpl,
+        resolveExecutionAuthority: resolveBrowserTaskExecutionAuthority,
         meter: sandboxMeter,
         vault: ports.browserSessionVault ?? null,
         profileStore: ports.browserProfileStore ?? null,
@@ -4827,16 +4856,10 @@ export async function bootOpenApi(opts: BootOpenApiOptions): Promise<BootResult>
         // TASK's workspace, resolved above the provider seam.
         saveDownload: filesApi
           ? async (dlCtx, file) => {
-              const name = file.path.split('/').pop() || 'download'
-              await filesApi!.writeBytes(
-                { userId: dlCtx.userId, workspaceId: dlCtx.workspaceId, assistantId: null, assistantKind: 'standard' },
-                {
-                  path: `computer/downloads/${Date.now()}-${name.replace(/[^\w.-]+/g, '_')}`,
-                  bytes: file.bytes,
-                  mime: 'application/octet-stream',
-                  title: name,
-                },
-              )
+              const publication = await prepareBrowserDownload(filesApi!, dlCtx.task,
+                () => sandboxTaskStoreImpl.getActiveBySession(dlCtx.sessionId), dlCtx.authority!,
+                (expected, operation) => sandboxTaskStoreImpl.withPublication(expected, operation))
+              await publication.writeBytes({ ...file, name: file.path.split('/').pop() || 'download', mime: 'application/octet-stream' })
             }
           : undefined,
       })
@@ -4863,6 +4886,10 @@ export async function bootOpenApi(opts: BootOpenApiOptions): Promise<BootResult>
               const site = registrableSiteOf(navigation.requestedUrl)
               if (!site) return { retry: false }
               const refreshed = await browserAuthBroker.authenticate({
+                authority: browseCtx.authority,
+                executionAuthority: browseCtx.executionAuthority,
+                sourceAuthority: browseCtx.sourceAuthority,
+                inputScope: browseCtx.inputScope,
                 userId: browseCtx.userId,
                 workspaceId: browseCtx.workspaceId,
                 profileId: browseCtx.profileId,
@@ -4873,13 +4900,18 @@ export async function bootOpenApi(opts: BootOpenApiOptions): Promise<BootResult>
               // orchestrator's login-wall probe, so failure teardown cannot
               // overwrite the freshly brokered vault bundle. The cloud
               // adapter now resolves a new task and injects that bundle.
-              await sandboxOrchestrator.completeTask(browseCtx.sessionId, 'failed')
+              await sandboxOrchestrator.completeTask(browseCtx.sessionId, 'failed', browseCtx.authority)
               return {
                 retry: true,
                 afterRetry: async (currentUrl: string) => {
                   if (!looksLikeLoginWall(currentUrl)) return
+                  await browseCtx.authority?.assertCurrent()
                   await ports.browserCredentialStore?.recordResult({
+                    userId: browseCtx.userId,
+                    workspaceId: browseCtx.workspaceId,
+                    profileId: browseCtx.profileId!,
                     credentialId: refreshed.credentialId,
+                    version: refreshed.credentialVersion,
                     result: 'failure',
                     failureCode: 'login_rejected',
                   })
@@ -4930,13 +4962,51 @@ export async function bootOpenApi(opts: BootOpenApiOptions): Promise<BootResult>
   }
   const localBrowserProvider = createLocalBrowserProvider({
     transport: browserRelayTransport,
+    admit: createLocalTaskAdmission({ profiles: ports.browserProfileStore, tasks: localComputerTasks,
+      resolveHumanRead: resolveHumanBrowserProfileDepartmentRead }),
     onDestination: (ctx, origin) => {
       if (!ctx.profileId || protectedFill?.isLocked({ userId: ctx.userId, browserProfileId: ctx.profileId })) return
       localComputerTasks.touch(ctx, origin ? new URL(origin).hostname : undefined, origin)
     },
   })
+  const discardBrowserTask = createBrowserTaskDiscard({ localTasks: localComputerTasks,
+    orchestrator: sandboxOrchestrator, transport: browserRelayTransport,
+    getWorkspaceRole: (userId, workspaceId) => workspaceStore.getRole(userId, workspaceId) })
+  // One publication admission for every sandbox byte write: browser downloads and compute artifacts.
+  // `profileId: undefined` publishes from whichever profile (if any) the active cloud task holds.
+  const prepareSandboxPublication = filesApi ? (async (ctx, selection) => {
+      const current = async () => selection.backend === 'local' ? localComputerTasks.getActiveBySession(ctx.sessionId)
+        : sandboxTaskStoreImpl.getActiveBySession(ctx.sessionId)
+      const task = await current()
+      if (!task || task.userId !== ctx.userId || task.workspaceId !== ctx.workspaceId || (selection.profileId !== undefined && task.profileId !== selection.profileId)
+        || task.executionAuthority?.assistantId !== ctx.assistantId) throw new Error('Browser task is unavailable for this download.')
+      const authority = {
+        async assertCurrent() {
+          await ctx.authority?.assertCurrent()
+          if (selection.backend === 'local') {
+            const local = localComputerTasks.getActiveBySession(ctx.sessionId)
+            if (!local || local.taskId !== task.taskId) throw new Error('Browser task changed.')
+            await assertLocalTaskExecutionAuthority(local)
+          } else {
+            const cloud = await sandboxTaskStoreImpl.getActiveBySession(ctx.sessionId)
+            if (!cloud || cloud.taskId !== task.taskId || !sandboxOrchestrator) throw new Error('Browser task changed.')
+            await sandboxOrchestrator.assertTaskAuthority(cloud)
+          }
+        },
+        async execute<T>(operation: () => Promise<T>) { await this.assertCurrent(); const result = await operation(); await this.assertCurrent(); return result },
+      }
+      const publication = await prepareBrowserDownload(filesApi!, task, current, authority,
+        (expected, operation) => selection.backend === 'local'
+          ? localComputerTasks.withPublication(expected, operation) : sandboxTaskStoreImpl.withPublication(expected, operation))
+      return { taskId: publication.taskId, assertCurrent: publication.assertCurrent, async writeBytes(file: BrowserDownload) {
+        const saved = await publication.writeBytes(file)
+        ctx.scopeAccumulator?.note(scopeEvidenceFromRows([saved]))
+        return { fileId: saved.id, path: saved.path }
+      } }
+    }) satisfies NonNullable<CreateComputerToolsOptions['files']>['prepareWrite'] : null
   const computerTools = createComputerTools({
-    files: filesApi ? createBrowserFileBridge(filesApi, getAssistantClearance) : null,
+    discardTask: (ctx, sessionId) => discardBrowserTask({ userId: ctx.userId, workspaceId: ctx.workspaceId!, sessionId }),
+    files: filesApi && prepareSandboxPublication ? createBrowserFileBridge(filesApi, getAssistantClearance, prepareSandboxPublication) : null,
     protectedFill: protectedFill ? {
       blocked: (ctx, profileId) => protectedFill.isSessionLocked(ctx.userId, ctx.sessionId) ||
         Boolean(profileId && protectedFill.isLocked({ userId: ctx.userId, browserProfileId: profileId })),
@@ -4961,6 +5031,7 @@ export async function bootOpenApi(opts: BootOpenApiOptions): Promise<BootResult>
           store: ports.browserProfileStore,
           vault: ports.browserSessionVault ?? null,
           assistantClearance: (toolCtx) => getAssistantClearance(toolCtx.assistantId),
+          departmentRead: resolveBrowserProfileDepartmentRead,
         }
       : null,
     // Channel escalate-to-web (§4.8): a cloud login wall surfaces a deep link
@@ -5003,7 +5074,9 @@ export async function bootOpenApi(opts: BootOpenApiOptions): Promise<BootResult>
     onEvent: (evt, ctx) => {
       if (evt.backend === 'local' && evt.ok) {
         localComputerTasks.touch({ ...ctx, profileId: evt.profileId ?? null }, evt.host)
-        void sandboxOrchestrator?.completeTask(ctx.sessionId).catch(() => {})
+        void sandboxOrchestrator?.completeTask(
+          ctx.sessionId, 'completed', ctx.executionContext?.security.authority ?? ctx.authority,
+        ).catch(() => {})
       } else if (evt.backend === 'cloud' && evt.ok) {
         localComputerTasks.complete(ctx.sessionId)
       }
@@ -5034,6 +5107,7 @@ export async function bootOpenApi(opts: BootOpenApiOptions): Promise<BootResult>
   allTools.set('browserListTabs', computerTools.browserListTabs)
   allTools.set('browserSwitchTab', computerTools.browserSwitchTab)
   allTools.set('browserCloseTab', computerTools.browserCloseTab)
+  allTools.set('browserDiscardTask', computerTools.browserDiscardTask)
   allTools.set('browserSnapshot', computerTools.browserSnapshot)
   allTools.set('browserClick', computerTools.browserClick)
   allTools.set('browserType', computerTools.browserType)
@@ -5061,24 +5135,24 @@ export async function bootOpenApi(opts: BootOpenApiOptions): Promise<BootResult>
     binding: sandboxOrchestrator?.binding ?? null,
     files: filesApi
       ? {
+          // Loads read as the turn principal and record the file's protection before the sandbox
+          // sees it; saves publish through the sandbox task's retained input envelope.
           readBytes: async (fctx, fileIdOrPath) => {
-            const res = await filesApi!.readBytes(
-              { userId: fctx.userId, workspaceId: fctx.workspaceId, assistantId: null, assistantKind: 'standard' },
-              fileIdOrPath,
-            )
+            const res = await filesApi!.readBytes(workspaceFilesCtxFor({ ...fctx,
+              clearance: minSensitivity(fctx.clearance ?? 'confidential', await getAssistantClearance(fctx.assistantId)) }), fileIdOrPath)
             if (!res.ok) return null
+            fctx.scopeAccumulator?.note(scopeEvidenceFromRows([res.value.file]))
             return {
               bytes: new Uint8Array(res.value.bytes),
               name: res.value.file.path.split('/').pop() || res.value.file.path,
             }
           },
           writeBytes: async (fctx, params) => {
-            const res = await filesApi!.writeBytes(
-              { userId: fctx.userId, workspaceId: fctx.workspaceId, assistantId: null, assistantKind: 'standard' },
-              { path: params.path, bytes: params.bytes, mime: 'application/octet-stream', title: params.title },
-            )
-            if (!res.ok) throw new Error('Could not save the file to the workspace (quota or conflict).')
-            return { fileId: res.value.id, path: res.value.path }
+            if (!prepareSandboxPublication) throw new Error('Workspace file publication is unavailable.')
+            const publication = await prepareSandboxPublication(fctx, { backend: 'cloud', profileId: undefined })
+            const name = params.path.split('/').pop() || 'artifact'
+            return publication.writeBytes({ path: params.path, name: params.title ?? name, mime: 'application/octet-stream',
+              bytes: params.bytes, origin: 'compute-artifact' })
           },
         }
       : null,
@@ -5122,8 +5196,7 @@ export async function bootOpenApi(opts: BootOpenApiOptions): Promise<BootResult>
       return { id: row.id }
     },
     async getStatus(id) {
-      const row = await pendingApprovalsStore.getByIdSystem(id)
-      return row ? row.status : null
+      return readBrowserSendApprovalStatus(pendingApprovalsStore, id)
     },
     async expire(id) {
       await pendingApprovalsStore.expireById(id)
@@ -5150,6 +5223,11 @@ export async function bootOpenApi(opts: BootOpenApiOptions): Promise<BootResult>
           store: ports.browserProfileStore,
           vault: ports.browserSessionVault ?? null,
           assistantClearance: (toolCtx) => getAssistantClearance(toolCtx.assistantId),
+          departmentRead: resolveBrowserProfileDepartmentRead,
+          // Same authority-safe list as the human department picker: only departments this person holds.
+          departmentNames: async (toolCtx) => toolCtx.workspaceId
+            ? new Map((await previewCrmDestination(toolCtx.userId, toolCtx.workspaceId).catch(() => ({ departments: [] }))).departments.map(row => [row.id, row.name] as const))
+            : new Map(),
         }
       : null,
     resolvePolicy: resolveComputerToolPolicy,
@@ -5181,6 +5259,7 @@ export async function bootOpenApi(opts: BootOpenApiOptions): Promise<BootResult>
   allTools.set('saveBrowserSkill', skillRunnerTools.saveBrowserSkill)
   allTools.set('listBrowserSkills', skillRunnerTools.listBrowserSkills)
   allTools.set('listBrowserProfiles', skillRunnerTools.listBrowserProfiles)
+  allTools.set('classifyBrowserProfileDepartment', skillRunnerTools.classifyBrowserProfileDepartment)
 
   // The watched agentic fallback (R2-1/R2-7): browser-use for novel flows,
   // cloud-only, always self-healing into a draft logic-block (R2-5).
@@ -5193,6 +5272,7 @@ export async function bootOpenApi(opts: BootOpenApiOptions): Promise<BootResult>
           store: ports.browserProfileStore,
           vault: ports.browserSessionVault ?? null,
           assistantClearance: (toolCtx) => getAssistantClearance(toolCtx.assistantId),
+          departmentRead: resolveBrowserProfileDepartmentRead,
         }
       : null,
     resolvePolicy: resolveComputerToolPolicy,
@@ -5625,6 +5705,7 @@ export async function bootOpenApi(opts: BootOpenApiOptions): Promise<BootResult>
     memoryTools: brainMemoryTools,
     taskTools,
     crmTools: { ...crmTools, ...crmOperationsTools },
+    credentialTools: crmCredentialTools,
     associationTools,
     retrievalTools: brainRetrievalTools,
     fileTools: brainFileTools ?? undefined,
@@ -6308,6 +6389,7 @@ export async function bootOpenApi(opts: BootOpenApiOptions): Promise<BootResult>
     }))
   }
   app.use('/api/computer', requireAuth(env.JWT_SECRET), computerRoutes({
+    discardTask: discardBrowserTask,
     protectedFillEnabled: Boolean(protectedFill),
     protectedBrowserSupported,
     protectedFillBlocked: (userId, sessionId) => protectedFill?.isSessionLocked(userId, sessionId) ?? false,
@@ -6331,6 +6413,11 @@ export async function bootOpenApi(opts: BootOpenApiOptions): Promise<BootResult>
     authBroker: browserAuthBroker,
     grants: ports.browserSkillGrantStore ?? null,
     skills: browserSkillsStore,
+    getProfileReadGrant: resolveHumanBrowserProfileDepartmentRead,
+    admitProfileDestination: async (userId, workspaceId, destination) => {
+      await resolveCrmDestination(userId, workspaceId, destination)
+    },
+    previewProfileDestination: previewCrmDestination,
     getWorkspaceRole: (userId, workspaceId) => workspaceStore.getRole(userId, workspaceId),
     setSessionBackend: (sessionId, backend) => {
       if (backend !== 'local') localComputerTasks.complete(sessionId)
@@ -6338,10 +6425,17 @@ export async function bootOpenApi(opts: BootOpenApiOptions): Promise<BootResult>
     },
   }))
 
+  app.use('/api/browser-extension', browserExtensionAuthorityRoutes({
+    jwtSecret: env.JWT_SECRET,
+    workspaceStore,
+    profileStore: ports.browserProfileStore ?? null,
+    getProfileReadGrant: resolveHumanBrowserProfileDepartmentRead,
+  }))
   app.use('/api/browser-extension', requireAuth(env.JWT_SECRET), browserExtensionRoutes({
     jwtSecret: env.JWT_SECRET,
     workspaceStore,
     profileStore: ports.browserProfileStore ?? null,
+    getProfileReadGrant: resolveHumanBrowserProfileDepartmentRead,
     relayWsUrl: browserRelayWsUrl,
     extensionStatus:
       browserRelayUrl && env.BROWSER_RELAY_SECRET
@@ -6708,7 +6802,8 @@ export async function bootOpenApi(opts: BootOpenApiOptions): Promise<BootResult>
     workflowRunStore,
     workspaceStore,
     workspaceDirectory: workspaceDirectoryStore,
-    softDeleteStore: createSoftDeleteStore(),
+    // Actor-authorized: a data-view row delete is the viewer's own mutation.
+    softDeleteStore: createSoftDeleteStore({ authorize: authorizeBrainRowMutation }),
     provider,
     resolveBackgroundRuntime,
     get backgroundModel() { return backgroundModelFor(configuredProviders) },
@@ -6896,6 +6991,7 @@ export async function bootOpenApi(opts: BootOpenApiOptions): Promise<BootResult>
     get: officeGenerationStore.get,
     events: officeGenerationStore.listEvents,
     steer: officeGenerationStore.steer,
+    wake: userId => wakeOfficeGeneration?.(userId),
     cancel: officeGenerationStore.cancel,
   }))
   const readBoundOfficeFile = filesApi ? async (params: { userId: string; workspaceId: string; assistantId?: string | null; fileId: string }) => {
@@ -7150,13 +7246,13 @@ export async function bootOpenApi(opts: BootOpenApiOptions): Promise<BootResult>
       (storedAuthority.sensitivity === 'public' || storedAuthority.sensitivity === 'confidential'
         ? storedAuthority.sensitivity
         : 'internal')
-    await officeArtifactStore.raiseScope({
+    if (!await officeArtifactStore.raiseScope({
       userId: params.job.initiatedByUserId,
       artifactId: params.job.artifactId,
       sensitivity,
       compartments,
       projectIds,
-    })
+    })) throw new Error('Office classification could not be persisted')
     const fileContext = {
       workspaceId: params.job.workspaceId,
       userId: params.job.initiatedByUserId,
@@ -7198,12 +7294,18 @@ export async function bootOpenApi(opts: BootOpenApiOptions): Promise<BootResult>
     }
     return committed
   }
-  const readOfficeTemplateBundle = async (userId: string, workspaceId: string, versionId: string) => {
+  const readOfficeTemplateBundle = async (userId: string, workspaceId: string, versionId: string, onSource?: (scope: import('./office/file-binding.js').OfficeOutputScope, revision: string) => void, execution?: { assistantId: string; clearance: Sensitivity; compartments?: string[] | null; projectIds?: string[] | null }) => {
     if (!filesApi) return null
     const version = await officeTemplateStore.getVersion(userId, versionId)
     if (!version || version.workspaceId !== workspaceId || version.status !== 'admitted') return null
-    const read = await filesApi.readBytes({ workspaceId, userId, assistantKind: 'standard', clearance: 'confidential' }, version.bundleFileId)
+    const read = await filesApi.readBytes({ workspaceId, userId, assistantKind: 'standard', clearance: 'confidential', ...execution }, version.bundleFileId)
     if (!read.ok) throw new Error(`Office template bundle unavailable: ${read.error.kind}`)
+    const templateRoot = await officeTemplateStore.get(userId, version.templateId)
+    const root = templateRoot?.draftArtifactId ? await officeArtifactStore.get(userId, templateRoot.draftArtifactId) : null
+    if (!templateRoot || !root || root.workspaceId !== workspaceId) throw new Error('Office template source unavailable')
+    const binding = bindOfficeFile(read.value.file, read.value.bytes)
+    const sourceScope = classifyOfficeOutput(binding, root)
+    onSource?.(sourceScope, JSON.stringify([officeFileBindingRevision(binding), root.id, root.sensitivity, [...root.compartments].sort(), [...root.projectIds].sort(), templateRoot.lifecycleState]))
     const stored = JSON.parse(new TextDecoder().decode(read.value.bytes))
     return materializeOfficeTemplateBundleForGeneration(stored, { id: version.id, version: version.version, status: 'admitted' })
   }
@@ -7218,13 +7320,19 @@ export async function bootOpenApi(opts: BootOpenApiOptions): Promise<BootResult>
         resolver:filesResolver,storageLimitBytes:ports.storageLimitBytesFor ? await ports.storageLimitBytesFor(job.workspaceId) : Number.POSITIVE_INFINITY})
     },
     buildPipelineDeps(job) {
+      let templateSource: { versionId: string; revision: string } | undefined
       let fitPolicy: import('@use-brian/core').OfficeGenerationFitPolicy = { eligibleTargetIds: [], maxAttempts: 1 }
       const onFitPolicy = (policy: import('@use-brian/core').OfficeGenerationFitPolicy) => { fitPolicy = policy }
       return {
         fitRepairPolicy: () => fitPolicy,
         async resolveAuthority() {
+          const membership = await getWorkspaceMembershipWithClearanceSystem(job.initiatedByUserId, job.workspaceId)
+          if (!membership) return null
+          const humanClearance = membership.clearance
+          const clearance = job.assistantId ? minSensitivity(humanClearance, await getAssistantClearance(job.assistantId)) : humanClearance
           const projection = job.authorityProjection as { sensitivity?: unknown; visibilityUserIds?: unknown; compartments?: unknown; projectIds?: unknown; compartmentGrant?: unknown; projectGrant?: unknown; sourceHandles?: unknown }
           return {
+            clearance,
             sensitivity: projection.sensitivity === 'public' || projection.sensitivity === 'confidential' ? projection.sensitivity : 'internal',
             visibilityUserIds: Array.isArray(projection.visibilityUserIds) ? projection.visibilityUserIds.filter((value): value is string => typeof value === 'string') : [],
             compartments: Array.isArray(projection.compartments) ? projection.compartments.filter((value): value is string => typeof value === 'string') : [],
@@ -7242,10 +7350,14 @@ export async function bootOpenApi(opts: BootOpenApiOptions): Promise<BootResult>
             sourceHandles: Array.isArray(projection.sourceHandles) ? projection.sourceHandles.filter((value): value is string => typeof value === 'string') : [],
           }
         },
-        async selectTemplate(brief) {
+        async selectTemplate(brief, authority) {
           if (!brief.templateId) return { ambiguous: [] }
-          const template = await readOfficeTemplateBundle(job.initiatedByUserId, job.workspaceId, brief.templateId)
-          return template ? { template } : { ambiguous: [] }
+          let sourceScope: import('./office/file-binding.js').OfficeOutputScope | undefined
+          const template = await readOfficeTemplateBundle(job.initiatedByUserId, job.workspaceId, brief.templateId, (scope, revision) => {
+            sourceScope = scope
+            templateSource = { versionId: brief.templateId!, revision }
+          }, { assistantId: brief.assistantId, clearance: authority.clearance ?? authority.sensitivity, compartments: authority.compartmentGrant, projectIds: authority.projectGrant })
+          return template ? { template, sourceScope } : { ambiguous: [] }
         },
         async retrieveBrain(brief, authority) {
           const context = {
@@ -7299,7 +7411,7 @@ export async function bootOpenApi(opts: BootOpenApiOptions): Promise<BootResult>
           const generationModel = runtime?.selector ?? BACKGROUND_MODEL
           if (brief.family === 'document') return generateDocumentFromTemplate({ onFitPolicy, provider: generationProvider, model: generationModel, artifactId: job.artifactId, workspaceId: job.workspaceId, templateVersionId: template.id, outcome: brief.outcome, audience: brief.audience, additionalContext: brief.additionalContext, template, brandVoice })
           if (brief.family === 'presentation') return generatePresentationFromTemplate({ onFitPolicy, provider: generationProvider, model: generationModel, artifactId: job.artifactId, workspaceId: job.workspaceId, templateVersionId: template.id, outcome: brief.outcome, audience: brief.audience, additionalContext: brief.additionalContext, evidence, claims, template, brandVoice })
-          return generateSpreadsheetFromTemplate({ provider: generationProvider, model: generationModel, artifactId: job.artifactId, workspaceId: job.workspaceId, templateVersionId: template.id, outcome: brief.outcome, audience: brief.audience, additionalContext: brief.additionalContext, template, brandVoice })
+          return generateSpreadsheetFromTemplate({ provider: generationProvider, model: generationModel, artifactId: job.artifactId, workspaceId: job.workspaceId, templateVersionId: template.id, outcome: brief.outcome, audience: brief.audience, additionalContext: brief.additionalContext, evidence, template, brandVoice })
         },
         async processMedia(snapshot) { return snapshot },
         async resolveResource(resourceId) {
@@ -7310,6 +7422,10 @@ export async function bootOpenApi(opts: BootOpenApiOptions): Promise<BootResult>
         },
         async cancelled() { return Boolean((await officeGenerationStore.get(job.initiatedByUserId, job.id))?.cancelRequestedAt) },
         async commit(snapshot, { authority }) {
+          if (!templateSource) throw new Error('Office template source unavailable')
+          let revision: string | undefined
+          await readOfficeTemplateBundle(job.initiatedByUserId, job.workspaceId, templateSource.versionId, (_scope, value) => { revision = value })
+          if (revision !== templateSource.revision) throw new Error('Office template classification changed; start generation again')
           const committed = await commitGeneratedOfficeSnapshot({ job, snapshot, expectedVersion: 0, kind: 'generation', authority })
           return { artifactId: job.artifactId, version: committed.version }
         },
@@ -7445,8 +7561,17 @@ export async function bootOpenApi(opts: BootOpenApiOptions): Promise<BootResult>
       while (await officeTemplateCompileWorker(userId)) { /* drain eligible template compilations for this member */ }
     })().catch((error) => console.error('[office-template-compile-worker]', error))
   }
+  const retryOfficeTemplateImport = createTemplateImportRecovery({
+    getJob: officeGenerationStore.get,
+    getArtifact: officeArtifactStore.get,
+    canEdit: async (userId, artifactId) => Boolean((await resolveOfficeAccess(userId, artifactId))?.canEdit),
+    readSource: async input => readBoundOfficeFile ? readBoundOfficeFile(input) : null,
+    retry: officeGenerationStore.retryTemplateImport,
+    wake: wakeTemplateCompile,
+  })
   app.use('/api/office', requireAuth(env.JWT_SECRET), officeTemplateRoutes({
     list: officeTemplateStore.list,
+    retryImport: retryOfficeTemplateImport,
     getTemplate: officeTemplateStore.get,
     getArtifact: officeArtifactStore.get,
     getSnapshot: officeLiveStore.get,
@@ -7951,15 +8076,25 @@ export async function bootOpenApi(opts: BootOpenApiOptions): Promise<BootResult>
     findAdditionalConnectorEventWorkspaces: ({ connectorInstanceId }) =>
       connectorGrantStore.listGrantedWorkspaceIdsForInstanceSystem(connectorInstanceId),
     startWorkflowRun: async ({ workflowId, workspaceId, input }) => {
+      // A connector event outside the workflow's department audience is withheld before any
+      // effect (run, storm pause or audit). Channel and brand sources carry no department audience.
+      if (input.trigger.sourceType === 'connector' && (!input.trigger.connectorInstanceId
+        || !await connectorWorkflowEventAdmissibleSystem(workflowId, workspaceId, input.trigger.connectorInstanceId))) {
+        console.warn(`[workflow-event] connector event withheld from workflow ${workflowId}: outside its department audience`)
+        return
+      }
       const recent = await countRecentRunsForWorkflowSystem(
         workflowId,
         RUN_STORM_WINDOW_SECONDS,
       )
       if (recent >= RUN_STORM_THRESHOLD) {
-        await pauseWorkflowSystem(
-          workflowId,
-          `Paused automatically: this workflow's event trigger started ${recent} runs in the last ${Math.round(RUN_STORM_WINDOW_SECONDS / 60)} minutes. Review the trigger's match filter, then re-enable the workflow to resume.`,
-        )
+        const reason = `Paused automatically: this workflow's event trigger started ${recent} runs in the last ${Math.round(RUN_STORM_WINDOW_SECONDS / 60)} minutes. Review the trigger's match filter, then re-enable the workflow to resume.`
+        if (input.trigger.sourceType === 'task' || input.trigger.sourceType === 'knowledge' || input.trigger.sourceType === 'page') {
+          await pauseWorkflowForPrimitiveEventSystem({ workflowId, workspaceId, input, triggerKind:'event',
+            triggeredBy:await getWorkflowCreatorSystem(workflowId) }, reason)
+        } else {
+          await pauseWorkflowSystem(workflowId, reason)
+        }
         void Promise.resolve(
           workflowExecutorDeps.emitAudit?.({
             type: 'workflow.storm_paused',
@@ -9063,13 +9198,11 @@ export async function bootOpenApi(opts: BootOpenApiOptions): Promise<BootResult>
   setGlobalMailboxArchiveDeps({ ...(sharedEmbedder ? { embedder: sharedEmbedder } : {}) })
   const mailboxSyncWorker = createMailboxSyncWorker({
     connectorInstanceStore,
-    resolvePersonalWorkspaceId: async (userId) => {
-      // Ownership, never membership (the ingest pollers' resolve-workspace
-      // rule): an is_personal workspace the owner was merely invited into
-      // can belong to another user.
+    resolveDefaultWorkspaceId: async (userId) => {
+      // A default is only an ingestion target while the account still owns it.
       const r = await query<{ id: string }>(
         `SELECT id FROM workspaces
-          WHERE owner_user_id = $1 AND is_personal = true
+          WHERE owner_user_id = $1 AND id = (SELECT default_workspace_id FROM users WHERE id = $1)
           ORDER BY created_at LIMIT 1`,
         [userId],
       )
@@ -9421,7 +9554,10 @@ export async function bootOpenApi(opts: BootOpenApiOptions): Promise<BootResult>
           })
           const integration = await integrationStore.getByChannelForWebhook(input.channelId, 'whatsapp')
           await processChannelMessage({
-            ...identity,
+            userId: identity.userId,
+            isIdentified: identity.isIdentified,
+            actorChannelId: identity.actorChannelId,
+            interactionScope: identity.interactionScope,
             questionIntegrationId: integration?.id,
             backgroundModel,
             decisionRuntime,

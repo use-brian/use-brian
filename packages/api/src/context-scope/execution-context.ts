@@ -87,6 +87,7 @@ function boundTurnScope(
     ...scope,
     access: {
       ...scope.access,
+      ...(bounded.departmentRead ? { departmentRead: bounded.departmentRead } : {}),
       clearance: bounded.clearance,
       compartments: bounded.compartments,
       mutationCompartments: bounded.mutationCompartments,
@@ -150,6 +151,9 @@ export async function resolveExecutionContextSystem(
   const authority = input.sessionAuthority
     ? (deps.createSessionLease ?? createSessionAuthorityLease)({
         starting,
+        durableSessionSource: input.identity.kind === 'attended'
+          && input.identity.principal.kind === 'workspace_member' && !input.sharedAudience
+          && input.lifecycle.channelType === 'web' && input.sessionAuthority.userId === input.userId,
         session: input.sessionAuthority,
         executingAssistantId: input.assistant.id,
         userId: input.userId,

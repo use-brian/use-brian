@@ -61,8 +61,9 @@ describe("[COMP:app-web/profile-management] Profile surfaces by backend", () => 
     });
   });
 
-  it("keeps pairing and capture owner-only", () => {
+  it("keeps sign-in, credentials, proxy, pairing and capture owner-only", () => {
     expect(profileSurfaces(profile({ defaultBackend: "cloud", canManage: false }))).toMatchObject({
+      signIn: false,
       pairBrowser: false,
       captureFromBrowser: false,
     });

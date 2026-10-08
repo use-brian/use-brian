@@ -1,3 +1,6 @@
+import type { AuthoritySource } from '../security/authority-source.js'
+import type { AuthoringAuthority } from '../security/access-ceiling.js'
+import type { CurrentAuthorityBoundary } from '../tools/types.js'
 /**
  * Host-owned, model-free browser authentication. Plaintext credentials are
  * resolved only inside this module, used in a separate task-ledgered sandbox,
@@ -22,7 +25,7 @@ import { createCloudBrowserProvider } from './cloud-browser-provider.js'
 import { looksLikeCaptcha, looksLikeLoginWall, registrableSiteOf } from './orchestrator.js'
 
 export type BrowserAuthResult =
-  | { kind: 'authenticated'; credentialId: string; site: string }
+  | { kind: 'authenticated'; credentialId: string; credentialVersion: string; site: string }
   | { kind: 'unavailable'; code: 'no_credential' | 'not_configured' }
   | { kind: 'needs_user'; code: 'human_verification' | 'mfa_required' }
   | { kind: 'failed'; code: Exclude<BrowserCredentialFailureCode, 'human_verification' | 'mfa_required'> }
@@ -34,6 +37,10 @@ export interface BrowserAuthBroker {
     profileId: string
     site: string
     credentialId?: string
+    sourceAuthority?: AuthoritySource
+    inputScope?: import('./input-scope.js').BrowserInputScope
+    executionAuthority?: AuthoringAuthority
+    authority?: CurrentAuthorityBoundary
   }): Promise<BrowserAuthResult>
 }
 
@@ -99,25 +106,52 @@ export function createBrowserAuthBroker(deps: {
   return {
     async authenticate(params) {
       const site = params.site.trim().toLowerCase()
-      const resolved = await deps.credentials.resolve({
+      const identity = {
         userId: params.userId,
         workspaceId: params.workspaceId,
         profileId: params.profileId,
         site,
         ...(params.credentialId ? { credentialId: params.credentialId } : {}),
-      })
+      }
+      let authorityUnavailable = false
+      const sourceCurrent = async () => {
+        try { await params.authority?.assertCurrent() }
+        catch { authorityUnavailable = true; throw new Error('Source authority unavailable') }
+      }
+      let resolved: Awaited<ReturnType<BrowserCredentialResolver['resolve']>>
+      try { await sourceCurrent(); resolved = await deps.credentials.resolve(identity); await sourceCurrent() }
+      catch { return { kind: 'failed', code: 'auth_unavailable' } }
       if (!resolved) return { kind: 'unavailable', code: 'no_credential' }
       const { metadata, secret } = resolved
       const credentialId = metadata.id
+      if (metadata.workspaceId !== params.workspaceId || metadata.profileId !== params.profileId
+        || !resolved.version || (params.credentialId && credentialId !== params.credentialId)) {
+        return { kind: 'failed', code: 'auth_unavailable' }
+      }
+      const receipt = { userId: params.userId, workspaceId: params.workspaceId,
+        profileId: params.profileId, credentialId, version: resolved.version }
+      const renew = async () => {
+        try {
+          await sourceCurrent()
+          const current = await deps.credentials.resolve({ ...identity, credentialId })
+          await sourceCurrent()
+          if (!current || current.version !== receipt.version || current.metadata.id !== credentialId
+            || current.metadata.workspaceId !== params.workspaceId || current.metadata.profileId !== params.profileId
+            || current.metadata.site !== site || current.metadata.loginUrl !== metadata.loginUrl) throw new Error('Credential changed')
+        } catch {
+          authorityUnavailable = true
+          throw new Error('Credential authority unavailable')
+        }
+      }
 
       // The saved URL is the user's authority boundary, not a model-provided
       // URL. Refuse stale/corrupt metadata before a sandbox sees plaintext.
       if (metadata.site !== site || !pageAllowed(metadata.loginUrl, site)) {
         await deps.credentials.recordResult({
-          credentialId,
+          ...receipt,
           result: 'failure',
           failureCode: 'cross_site_redirect',
-        })
+        }).catch(() => undefined)
         return { kind: 'failed', code: 'cross_site_redirect' }
       }
 
@@ -137,6 +171,10 @@ export function createBrowserAuthBroker(deps: {
             workspaceId: params.workspaceId,
             sessionId,
             profileId: params.profileId,
+            authority: params.authority,
+            executionAuthority: params.executionAuthority,
+            sourceAuthority: params.sourceAuthority,
+            inputScope: params.inputScope,
           },
           metadata.loginUrl,
         )
@@ -145,7 +183,9 @@ export function createBrowserAuthBroker(deps: {
           result = { kind: 'failed', code: 'auth_unavailable' }
           return result
         }
+        await sourceCurrent()
         await deps.provider.connect(task.sandboxId)
+        await sourceCurrent()
         const browser = deps.provider.browser(task.sandboxId)
         if (!browser.typeSecret) {
           result = { kind: 'failed', code: 'auth_unavailable' }
@@ -155,7 +195,9 @@ export function createBrowserAuthBroker(deps: {
         let submitted = false
         let usernameFilled = false
         for (let step = 0; step < 4; step += 1) {
+          await sourceCurrent()
           const snapshot = await browser.snapshot()
+          await sourceCurrent()
           if (!pageAllowed(snapshot.url, site)) {
             result = failure('cross_site_redirect')
             return result
@@ -186,15 +228,19 @@ export function createBrowserAuthBroker(deps: {
             username.kind === 'none' &&
             !looksLikeLoginWall(snapshot.url)
           ) {
+            await renew()
             const bundle = await browser.captureStorageState(site)
             if (!bundleHasState(bundle)) {
               result = failure('empty_session')
               return result
             }
-            await deps.orchestrator.captureSession(sessionId, site, params.profileId)
-            await deps.credentials.recordResult({ credentialId, result: 'success' })
+            await renew()
+            await deps.orchestrator.captureSession(sessionId, site, params.profileId, params.authority)
+            await sourceCurrent()
+            await deps.credentials.recordResult({ ...receipt, result: 'success' })
+            await renew()
             completed = true
-            result = { kind: 'authenticated', credentialId, site }
+            result = { kind: 'authenticated', credentialId, credentialVersion: resolved.version, site }
             return result
           }
 
@@ -205,12 +251,26 @@ export function createBrowserAuthBroker(deps: {
 
           let filled = false
           if (!usernameFilled && username.kind === 'one') {
+            await renew()
+            if (!pageAllowed((await browser.currentUrl()).url, site)) {
+              result = failure('cross_site_redirect')
+              return result
+            }
+            await sourceCurrent()
             await browser.typeSecret(username.node.ref, secret.username)
+            await sourceCurrent()
             usernameFilled = true
             filled = true
           }
           if (password.kind === 'one') {
+            await renew()
+            if (!pageAllowed((await browser.currentUrl()).url, site)) {
+              result = failure('cross_site_redirect')
+              return result
+            }
+            await sourceCurrent()
             await browser.typeSecret(password.node.ref, secret.password)
+            await sourceCurrent()
             filled = true
           }
           if (!filled) {
@@ -229,25 +289,30 @@ export function createBrowserAuthBroker(deps: {
           }
           // Re-check immediately before the state-changing click. A page can
           // redirect between snapshot and fill; no secret may cross sites.
+          await renew()
           const current = await browser.currentUrl()
           if (!pageAllowed(current.url, site)) {
             result = failure('cross_site_redirect')
             return result
           }
+          await sourceCurrent()
           await browser.click(submit.node.ref)
+          await sourceCurrent()
           submitted = true
         }
 
         result = failure('login_rejected')
         return result
       } catch {
-        result = { kind: 'failed', code: 'backend_error' }
+        await sourceCurrent().catch(() => undefined)
+        result = { kind: 'failed', code: authorityUnavailable ? 'auth_unavailable' : 'backend_error' }
         return result
       } finally {
-        if (result.kind !== 'authenticated') {
+        await sourceCurrent().catch(() => undefined)
+        if (result.kind !== 'authenticated' && !authorityUnavailable) {
           await deps.credentials
             .recordResult({
-              credentialId,
+              ...receipt,
               result: 'failure',
               failureCode: result.code,
             })
@@ -257,8 +322,10 @@ export function createBrowserAuthBroker(deps: {
         // preserving metering/task-ledger behavior. On success capture was
         // completed before teardown; on failure no session is persisted.
         await deps.orchestrator
-          .completeTask(sessionId, completed ? 'completed' : 'failed')
+          .completeTask(sessionId, completed ? 'completed' : 'failed', params.authority)
           .catch(() => undefined)
+        await sourceCurrent().catch(() => undefined)
+        if (authorityUnavailable) return { kind: 'failed', code: 'auth_unavailable' }
       }
     },
   }

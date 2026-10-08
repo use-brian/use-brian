@@ -11,6 +11,7 @@ import { createAssociationStore } from '../association-store.js'
 import { createProviderEntitlementInbox } from '../../association/provider-entitlements.js'
 import { createProviderInboxWorker } from '../../association/provider-inbox-worker.js'
 import { createCrmIntegrationStore } from '../crm-integration-store.js'
+import { assertCrmPrivacySubjectAuthority } from '../../crm-operations/privacy-subject-authority.js'
 import { EventInputSchema, TicketInputSchema, OrderCreateSchema } from '../../association/domain.js'
 import { _resetCoalescerForTests } from '../../brain-stream/notify.js'
 const { assertLocalFixture } = await import(new URL('../../../../../scripts/crm/local-fixture.mjs', import.meta.url).href)
@@ -26,7 +27,18 @@ async function fixture() {
   await pool.query("INSERT INTO workspace_members(workspace_id,user_id,role) VALUES($1,$2,'owner')", [workspaceId, userId])
   await pool.query("INSERT INTO entities(id,workspace_id,kind,display_name,created_by_user_id,source) VALUES($1,$2,'person','Fictional buyer',$3,'manual')", [contactId, workspaceId, userId])
   await modules.act(workspaceId, userId, 'association', { action: 'enable', expectedVersion: 1 })
-  const human: AssociationActor = { credentialKind: 'user', credentialId: userId, actingUserId: userId }, actor: AssociationActor = { credentialKind: 'api_key', credentialId: randomUUID() }
+  const human: AssociationActor = { credentialKind: 'user', credentialId: userId, actingUserId: userId }
+  const issued = await keys.create(workspaceId, userId, {
+    label: 'Provider fixture backend', expiresAt: '2099-01-01T00:00:00Z',
+    departmentBinding: { departmentIds: [], cap: 'internal' },
+    grants: [
+      { operation: 'association.provider_events.write', selectors: { providerKeys: ['fixture'], eventIds: 'all' } },
+      { operation: 'association.orders.write', selectors: { eventIds: 'all' } },
+      { operation: 'crm.entitlements.write', selectors: { planIds: 'all' } },
+    ],
+  })
+  const integration = (await keys.authenticate(issued.oneTimeSecret))!
+  const actor: AssociationActor = { credentialKind: 'integration_key', credentialId: integration.credentialId, integration }
   const eventId = String((await store.upsertEvent(workspaceId, EventInputSchema.parse({ slug: 'fixture', title: 'Provider fixture', startsAt: '2099-01-01T12:00:00Z', endsAt: '2099-01-01T14:00:00Z', timezone: 'UTC', mode: 'venue', status: 'published', capacity: 10 }), human)).record.id)
   const ticketId = String((await store.upsertTicket(workspaceId, eventId, TicketInputSchema.parse({ key: 'standard', name: 'Standard', currency: 'USD', priceMinor: 1000, status: 'on_sale', capacity: 10 }), human)).record.id)
   const order = async () => String((await store.createOrder(workspaceId, OrderCreateSchema.parse({ contactId, idempotencyKey: randomUUID(), lines: [{ ticketId, quantity: 1, attendees: [{ contactId, name: 'Fictional buyer' }] }] }), human)).record.id)
@@ -34,7 +46,7 @@ async function fixture() {
   const bind = (id = orderId, patch = {}, a = actor) => store.bindOrderProvider(workspaceId, id, { ...binding, ...patch }, a)
   const evidence: AssociationProviderEventInput = { ...binding, eventId: randomUUID(), targetStatus: 'paid', occurredAt: '2026-09-01T12:00:00.000001Z', metadata: {} }
   const apply = (patch: Partial<AssociationProviderEventInput> = {}, id = orderId, a = actor) => store.reconcileProviderEvent(workspaceId, id, { ...evidence, ...patch }, a)
-  return { workspaceId, userId, human, actor, eventId, orderId, binding, evidence, order, bind, apply }
+  return { workspaceId, userId, contactId, human, actor, eventId, orderId, binding, evidence, order, bind, apply }
 }
 async function counts(ws: string) {
   return (await pool.query(`SELECT
@@ -82,6 +94,84 @@ async function membership(f: Awaited<ReturnType<typeof fixture>>) {
 }
 describe('[COMP:crm/provider-inbox] Actual durable normalized receipts', () => {
   afterAll(async () => { _resetCoalescerForTests(); await pool.end(); await appPool.end() })
+  it('retains a pending entitlement receipt floor through declassification and replacement recovery', async () => {
+    const f = await fixture(), department = randomUUID(), custodian = randomUUID()
+    await pool.query('INSERT INTO users(id,auth_provider_id) VALUES($1::uuid,$1::text)', [custodian])
+    await pool.query("INSERT INTO workspace_members(workspace_id,user_id,role) VALUES($1,$2,'member')", [f.workspaceId, custodian])
+    await pool.query("INSERT INTO workspace_groups(id,workspace_id,name,created_by,kind,key,compartment_key) VALUES($1::uuid,$2,'Cedar',$3,'team',$1::text,$4)", [department, f.workspaceId, custodian, `team:${department}`])
+    await pool.query("INSERT INTO workspace_compartments(workspace_id,key,label,managed_by,managed_ref_id) VALUES($1,$2,'Cedar','team',$3)", [f.workspaceId, `team:${department}`, department])
+    const grant = () => pool.query("INSERT INTO department_edges(workspace_id,department_id,principal_kind,user_id,clearance,origin) VALUES($1,$2,'user',$3,'internal','store')", [f.workspaceId, department, f.userId])
+    const revoke = () => pool.query('DELETE FROM department_edges WHERE department_id=$1 AND user_id=$2', [department, f.userId])
+    await grant()
+    await pool.query('UPDATE entities SET compartments=$2 WHERE id=$1', [f.contactId, [`team:${department}`]])
+    const m = await membership(f)
+    const issued = await keys.create(f.workspaceId, f.userId, { label: 'Scoped entitlement backend', expiresAt: '2099-01-01T00:00:00Z',
+      departmentBinding: { departmentIds: [department], cap: 'internal' }, grants: [
+        { operation: 'association.provider_events.write', selectors: { providerKeys: ['fixture'] } },
+        { operation: 'crm.entitlements.write', selectors: { planIds: [m.planId] } },
+      ] })
+    const integration = (await keys.authenticate(issued.oneTimeSecret))!
+    const scoped: AssociationActor = { credentialKind: 'integration_key', credentialId: integration.credentialId, integration }
+    await expect(createProviderEntitlementInbox(faultPool('admission_commit')).submit(f.workspaceId, m.event, scoped)).rejects.toThrow()
+    const saved = await receipt(f.workspaceId, m.event.eventId)
+    expect(saved.state).toBe('pending')
+    expect(saved.scope_snapshot.compartments).toEqual([`team:${department}`])
+    await expect(pool.query("UPDATE association_integration_events SET scope_snapshot=jsonb_set(scope_snapshot,'{compartments}','[]') WHERE id=$1", [saved.id])).rejects.toThrow('immutable')
+    await pool.query("UPDATE entities SET compartments='{}' WHERE id=$1", [f.contactId])
+    await expect(m.submit()).rejects.toMatchObject({ code: 'not_authorized' })
+    await revoke()
+    await expect(m.service.submit(f.workspaceId, m.event, scoped)).rejects.toMatchObject({ code: 'not_authorized' })
+    expect(await store.listProviderReceipts(f.workspaceId, { limit: 1, cursor: null }, f.human)).toMatchObject({ items: [], nextCursor: null })
+    await expect(store.resolveProviderReceipt(f.workspaceId, saved.id, f.human)).rejects.toMatchObject({ code: 'not_authorized' })
+    const privacyClient = await pool.connect()
+    try {
+      await privacyClient.query('BEGIN')
+      await expect(assertCrmPrivacySubjectAuthority(privacyClient, {
+        workspaceId: f.workspaceId, actor: { kind: 'user', userId: f.userId },
+        authority: { role: 'owner', canWrite: true, canConfigure: true, trustedIdentitySources: [] },
+      }, f.contactId)).rejects.toMatchObject({ code: 'not_authorized' })
+    } finally { await privacyClient.query('ROLLBACK'); privacyClient.release() }
+    expect((await receipt(f.workspaceId, m.event.eventId))).toMatchObject({ state: 'pending', attempts: 0 })
+    expect((await pool.query('SELECT count(*)::int n FROM association_memberships WHERE workspace_id=$1', [f.workspaceId])).rows[0].n).toBe(0)
+    await grant()
+    expect((await store.listProviderReceipts(f.workspaceId, { limit: 1, cursor: null }, f.human)).items).toMatchObject([{ id: saved.id }])
+    const applied = await m.service.submit(f.workspaceId, m.event, scoped)
+    expect(applied.receipt).toMatchObject({ id: saved.id, state: 'applied', attempts: 1 })
+    expect((await pool.query('SELECT scope_snapshot FROM association_memberships WHERE id=$1', [applied.record.id])).rows[0].scope_snapshot.compartments).toEqual([`team:${department}`])
+    await expect(m.submit()).rejects.toMatchObject({ code: 'not_authorized' })
+    expect((await m.service.submit(f.workspaceId, m.event, scoped)).created).toBe(false)
+    expect((await pool.query("SELECT count(*)::int n FROM association_audit_log WHERE workspace_id=$1 AND action='crm.entitlement.changed'", [f.workspaceId])).rows[0].n).toBe(1)
+  })
+  it('admits saved order and current entitlement sources before retaining provider evidence', async () => {
+    const f = await fixture(), department = randomUUID(), custodian = randomUUID()
+    await pool.query('INSERT INTO users(id,auth_provider_id) VALUES($1::uuid,$1::text)', [custodian])
+    await pool.query("INSERT INTO workspace_members(workspace_id,user_id,role) VALUES($1,$2,'member')", [f.workspaceId, custodian])
+    await pool.query("INSERT INTO workspace_groups(id,workspace_id,name,created_by,kind,key,compartment_key) VALUES($1::uuid,$2,'Cedar',$3,'team',$1::text,$4)", [department, f.workspaceId, custodian, `team:${department}`])
+    await pool.query("INSERT INTO workspace_compartments(workspace_id,key,label,managed_by,managed_ref_id) VALUES($1,$2,'Cedar','team',$3)", [f.workspaceId, `team:${department}`, department])
+    await pool.query("INSERT INTO department_edges(workspace_id,department_id,principal_kind,user_id,clearance,origin) VALUES($1,$2,'user',$3,'internal','store')", [f.workspaceId, department, f.userId])
+    await pool.query('UPDATE entities SET compartments=$2 WHERE id=$1', [f.contactId, [`team:${department}`]])
+    const protectedOrder = await f.order(), m = await membership(f)
+    const before = await counts(f.workspaceId)
+    await expect(f.apply({}, protectedOrder)).rejects.toMatchObject({ code: 'not_authorized' })
+    await expect(m.submit()).rejects.toMatchObject({ code: 'not_authorized' })
+    expect((await pool.query('SELECT count(*)::int n FROM association_integration_events WHERE workspace_id=$1', [f.workspaceId])).rows[0].n).toBe(0)
+    expect(await counts(f.workspaceId)).toEqual(before)
+    // Current declassification cannot erase the order's original floor.
+    await pool.query("UPDATE entities SET compartments='{}' WHERE id=$1", [f.contactId])
+    await expect(f.apply({}, protectedOrder)).rejects.toMatchObject({ code: 'not_authorized' })
+    const issued = await keys.create(f.workspaceId, f.userId, { label: 'Scoped provider backend', expiresAt: '2099-01-01T00:00:00Z',
+      departmentBinding: { departmentIds: [department], cap: 'internal' }, grants: [
+        { operation: 'association.provider_events.write', selectors: { providerKeys: ['fixture'], eventIds: [f.eventId] } },
+        { operation: 'association.orders.write', selectors: { eventIds: [f.eventId] } },
+      ] })
+    const integration = (await keys.authenticate(issued.oneTimeSecret))!
+    const scoped: AssociationActor = { credentialKind: 'integration_key', credentialId: integration.credentialId, integration }
+    await f.bind(protectedOrder, {}, scoped)
+    expect((await f.apply({}, protectedOrder, scoped)).receipt?.state).toBe('applied')
+    await pool.query('DELETE FROM department_edges WHERE department_id=$1 AND user_id=$2', [department, f.userId])
+    await expect(f.apply({}, protectedOrder, scoped)).rejects.toMatchObject({ code: 'not_authorized' })
+    expect(await counts(f.workspaceId)).toEqual({ evidence: 1, transitions: 1, notifications: 2 })
+  })
   it('reconciles missed fake-provider order and membership events through actual canonical transactions', async () => {
     const { ProviderCheckpoint, createFakeProvider, createProviderReconciler } = await import(new URL('../../../../../scripts/crm/provider-reference.mjs', import.meta.url).href)
     const f = await fixture(), m = await membership(f); await f.bind()
@@ -137,13 +227,21 @@ describe('[COMP:crm/provider-inbox] Actual durable normalized receipts', () => {
     expect(persisted.admitted_actor).toEqual(failed.admitted_actor)
     expect(JSON.stringify(persisted)).not.toContain('private database error')
   })
-  it('requires a backend resubmission when the stored identity cannot be revalidated', async () => {
+  it('requires current backend authority when the stored credential expires', async () => {
     const f = await fixture()
     await expect(f.apply()).rejects.toMatchObject({ code: 'conflict' })
     const failed = await receipt(f.workspaceId, f.evidence.eventId)
     await f.bind()
-    await expect(store.resolveProviderReceipt(f.workspaceId, failed.id, f.human)).rejects.toMatchObject({ code: 'not_authorized' })
-    expect((await f.apply()).receipt).toMatchObject({ id: failed.id, state: 'applied' })
+    await pool.query("UPDATE crm_integration_credentials SET expires_at=created_at+interval '1 millisecond' WHERE id=$1", [f.actor.credentialId])
+    await expect(store.resolveProviderReceipt(f.workspaceId, failed.id, f.human)).rejects.toMatchObject({ code: 'credential_revoked' })
+    expect(await counts(f.workspaceId)).toEqual({ evidence: 0, transitions: 0, notifications: 0 })
+    const issued = await keys.create(f.workspaceId, f.userId, { label: 'Replacement provider backend', expiresAt: '2099-01-01T00:00:00Z',
+      departmentBinding: { departmentIds: [], cap: 'internal' },
+      grants: [{ operation: 'association.provider_events.write', selectors: { providerKeys: ['fixture'], eventIds: [f.eventId] } }] })
+    const integration = (await keys.authenticate(issued.oneTimeSecret))!
+    expect((await f.apply({}, undefined, { credentialKind: 'integration_key', credentialId: integration.credentialId, integration })).receipt)
+      .toMatchObject({ id: failed.id, state: 'applied' })
+    expect((await receipt(f.workspaceId, f.evidence.eventId)).admitted_actor.credentialId).toBe(f.actor.credentialId)
   })
   it('rolls back domain effects when receipt acknowledgement fails and retries without duplicating evidence', async () => {
     const f = await fixture(); await f.bind()
@@ -279,8 +377,8 @@ describe('[COMP:crm/provider-inbox] Actual durable normalized receipts', () => {
     ] })
     const integration = (await keys.authenticate(issued.oneTimeSecret))!, actor: AssociationActor = { credentialKind: 'integration_key', credentialId: integration.credentialId, integration }
     const result = await m.service.submit(f.workspaceId, m.event, actor)
-    expect((await store.listProviderReceipts(f.workspaceId, { limit: 100, cursor: null, allowedEventIds: [], allowedPlanIds: [m.planId] })).items).toMatchObject([{ id: result.receipt.id }])
-    expect((await store.listProviderReceipts(f.workspaceId, { limit: 100, cursor: null, allowedEventIds: [], allowedPlanIds: [] })).items).toEqual([])
+    expect((await store.listProviderReceipts(f.workspaceId, { limit: 100, cursor: null, allowedEventIds: [], allowedPlanIds: [m.planId] }, f.human)).items).toMatchObject([{ id: result.receipt.id }])
+    expect((await store.listProviderReceipts(f.workspaceId, { limit: 100, cursor: null, allowedEventIds: [], allowedPlanIds: [] }, f.human)).items).toEqual([])
     await pool.query("DELETE FROM crm_integration_credential_grants WHERE workspace_id=$1 AND credential_id=$2 AND operation='crm.entitlements.write'", [f.workspaceId, actor.credentialId])
     await expect(m.service.submit(f.workspaceId, m.event, actor)).rejects.toMatchObject({ code: 'integration_scope_denied' })
     expect((await receipt(f.workspaceId, m.event.eventId))).toMatchObject({ state: 'applied', attempts: 1 })
@@ -288,15 +386,15 @@ describe('[COMP:crm/provider-inbox] Actual durable normalized receipts', () => {
   it('paginates receipt history under event/plan ceilings and enforces immutable workspace-isolated rows', async () => {
     const f = await fixture(); await f.bind(); await f.apply()
     await pool.query(`INSERT INTO association_integration_events(workspace_id,provider,provider_event_id,provider_reference,occurred_at,target_kind,order_id,contact_id,
-      request_fingerprint,normalized_payload,admitted_actor,execution_actor,state,attempts,cycle_attempts,applied_at)
+      request_fingerprint,normalized_payload,admitted_actor,execution_actor,state,attempts,cycle_attempts,applied_at,scope_snapshot,scope_sources)
       SELECT workspace_id,provider,'fixture-'||n,provider_reference,occurred_at,target_kind,order_id,contact_id,
-      repeat('a',64),normalized_payload,admitted_actor,execution_actor,'applied',1,1,clock_timestamp()
+      repeat('a',64),normalized_payload,admitted_actor,execution_actor,'applied',1,1,clock_timestamp(),scope_snapshot,scope_sources
       FROM association_integration_events CROSS JOIN generate_series(1,104) n WHERE workspace_id=$1`, [f.workspaceId])
-    const first = await store.listProviderReceipts(f.workspaceId, { limit: 100, cursor: null, allowedEventIds: [f.eventId], allowedPlanIds: [] })
-    const second = await store.listProviderReceipts(f.workspaceId, { limit: 100, cursor: first.nextCursor, allowedEventIds: [f.eventId], allowedPlanIds: [] })
+    const first = await store.listProviderReceipts(f.workspaceId, { limit: 100, cursor: null, allowedEventIds: [f.eventId], allowedPlanIds: [] }, f.human)
+    const second = await store.listProviderReceipts(f.workspaceId, { limit: 100, cursor: first.nextCursor, allowedEventIds: [f.eventId], allowedPlanIds: [] }, f.human)
     expect(first.items).toHaveLength(100); expect(second.items).toHaveLength(5); expect(second.nextCursor).toBeNull()
     expect(JSON.stringify(first.items)).not.toContain('normalized_payload')
-    expect((await store.listProviderReceipts(f.workspaceId, { limit: 100, cursor: null, allowedEventIds: [], allowedPlanIds: [] })).items).toEqual([])
+    expect((await store.listProviderReceipts(f.workspaceId, { limit: 100, cursor: null, allowedEventIds: [], allowedPlanIds: [] }, f.human)).items).toEqual([])
     const g = await fixture(), client = await appPool.connect()
     await expect(pool.query("UPDATE association_integration_events SET state='pending' WHERE workspace_id=$1", [f.workspaceId])).rejects.toMatchObject({ code: '23514' })
     try {

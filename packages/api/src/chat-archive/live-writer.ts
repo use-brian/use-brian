@@ -113,7 +113,7 @@ export function createLiveChatArchiveWriter(deps: {
     if (!workspaceId) {
       const workspace = await pool.query<{ id: string }>(
         `SELECT id FROM workspaces
-          WHERE owner_user_id = $1 AND is_personal = true
+          WHERE owner_user_id = $1 AND id = (SELECT default_workspace_id FROM users WHERE id = $1)
           ORDER BY created_at ASC LIMIT 1`,
         [input.ownerUserId],
       )

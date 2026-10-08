@@ -254,7 +254,7 @@ export function createAssociationService(options: {
           if (context.actor.kind !== 'user' || !authority.canConfigure || !['owner', 'admin'].includes(authority.role)) {
             throw new CrmOperationsError('not_authorized', 'A workspace owner or admin must manage promotions.')
           }
-          return { ...output, ...(await store.listPromotions(workspaceId, { ...pagination(), status: command.status })) }
+          return { ...output, ...(await store.listPromotions(workspaceId, { ...pagination(), status: command.status }, dbActor)) }
         }
         case 'save_promotion': {
           if (context.actor.kind !== 'user' || !authority.canConfigure || !['owner', 'admin'].includes(authority.role)) {
@@ -267,7 +267,7 @@ export function createAssociationService(options: {
           if (integration) requireCrmIntegrationOperation(integration, 'crm.submissions.read')
           const definitions = integration ? crmIntegrationResourceSelection(integration, 'crm.submissions.read', 'definitionIds') : 'all'
           return { ...output, ...(await store.listWaitlist(workspaceId, { ...pagination(), eventId: command.eventId, includeClosed: command.includeClosed,
-            ...(events === 'all' ? {} : { allowedEventIds: events }), ...(definitions === 'all' ? {} : { allowedDefinitionIds: definitions }) })) }
+            ...(events === 'all' ? {} : { allowedEventIds: events }), ...(definitions === 'all' ? {} : { allowedDefinitionIds: definitions }) }, dbActor)) }
         }
         case 'offer_waitlist_place': return { ...output, ...(await store.offerWaitlistPlace(workspaceId, command.offer, dbActor)) }
         case 'list_provider_receipts': {
@@ -275,14 +275,14 @@ export function createAssociationService(options: {
           const plans = integration ? (integration.grants.some(grant => grant.operation === 'crm.entitlements.read')
             ? crmIntegrationResourceSelection(integration, 'crm.entitlements.read', 'planIds') : []) : 'all'
           return { ...output, ...(await store.listProviderReceipts(workspaceId, { ...pagination(), orderId: command.orderId, entitlementId: command.entitlementId, state: command.state,
-            ...(events === 'all' ? {} : { allowedEventIds: events }), ...(plans === 'all' ? {} : { allowedPlanIds: plans }) })) }
+            ...(events === 'all' ? {} : { allowedEventIds: events }), ...(plans === 'all' ? {} : { allowedPlanIds: plans }) }, dbActor)) }
         }
         case 'list_order_notifications': {
           const order = await store.getOrder(workspaceId, command.orderId, dbActor)
           if (!order) throw new AssociationError('not_found', 'order not found')
           return { ...output, ...(await store.listNotifications(workspaceId, {
             ...pagination(), sourceKind: 'order', sourceId: command.orderId,
-          })) }
+          }, dbActor)) }
         }
         case 'retry_provider_receipt': {
           if (context.actor.kind !== 'user' || !authority.canConfigure || !['owner', 'admin'].includes(authority.role)) {
@@ -293,7 +293,7 @@ export function createAssociationService(options: {
         case 'list_membership_rescues': {
           requireFinanceReviewer()
           return { ...output, ...(await store.listMembershipRescues(workspaceId, { ...pagination(), contactId: command.contactId,
-            planId: command.planId, status: command.status })) }
+            planId: command.planId, status: command.status }, dbActor)) }
         }
         case 'create_membership_rescue': {
           requireFinanceReviewer()
@@ -313,7 +313,7 @@ export function createAssociationService(options: {
         }
         case 'list_sponsorship_allocations': {
           requireSponsorshipManager()
-          return { ...output, ...(await store.listSponsorshipAllocations(workspaceId, { ...pagination(), sponsorContactId: command.sponsorContactId, status: command.status })) }
+          return { ...output, ...(await store.listSponsorshipAllocations(workspaceId, { ...pagination(), sponsorContactId: command.sponsorContactId, status: command.status }, dbActor)) }
         }
         case 'create_sponsorship_allocation': {
           requireSponsorshipManager()
@@ -326,7 +326,7 @@ export function createAssociationService(options: {
         case 'list_sponsorship_invitations': {
           requireSponsorshipManager()
           return { ...output, ...(await store.listSponsorshipInvitations(workspaceId, { ...pagination(), allocationId: command.allocationId,
-            nomineeContactId: command.nomineeContactId, status: command.status })) }
+            nomineeContactId: command.nomineeContactId, status: command.status }, dbActor)) }
         }
         case 'issue_sponsorship_invitation': {
           requireSponsorshipManager()
@@ -342,7 +342,14 @@ export function createAssociationService(options: {
           }
           return { ...output, ...(await store.redeemSponsorshipInvitation(workspaceId, command.redemption, dbActor)) }
         }
-        case 'create_order': return { ...output, ...(await store.createOrder(workspaceId, command.order, dbActor)) }
+        case 'preview_order_destinations': return { ...output, record: await store.previewOrderDestinations(workspaceId, command.contactIds, dbActor) }
+        case 'create_order': {
+          const human = context.actor.kind === 'user' ? context.actor.userId
+            : 'userId' in context.actor ? context.actor.userId : undefined
+          const role = context.actor.kind === 'user' ? authority.role : human ? await memberRole(human, workspaceId) : null
+          if (human && (!role || !MANAGERS.includes(role))) throw new CrmOperationsError('not_authorized', 'A workspace owner or admin must create staff reservations.')
+          return { ...output, ...(await store.createOrder(workspaceId, command.order, dbActor)) }
+        }
         case 'reserve_membership_checkout': return { ...output, ...(await store.reserveMembershipCheckout(workspaceId, command.checkout, dbActor)) }
         case 'get_order': {
           const record = await store.getOrder(workspaceId, command.orderId, dbActor)
@@ -356,7 +363,7 @@ export function createAssociationService(options: {
             ...(command.kind === 'module_blockers' ? { status: 'pending' as const }
               : { eventId: command.eventId, status: command.status, contactId: command.contactId }),
             ...(selected === 'all' ? {} : { allowedEventIds: selected }),
-          })
+          }, dbActor)
           return { ...output, items: page.items, nextCursor: page.nextCursor,
             ...(command.kind === 'module_blockers' ? { pendingOrders: page.total } : { financialSummary: page.financialSummary }) }
         }
@@ -383,15 +390,15 @@ export function createAssociationService(options: {
             : command.kind === 'reconcile_provider_financial_event' ? await store.reconcileProviderFinancialEvent(workspaceId, command.orderId, command.event, dbActor)
             : await store.reconcileProviderEvent(workspaceId, command.orderId, command.event, dbActor)) }
         }
-        case 'list_registrations': return { ...output, ...(await store.listEventRegistrations(workspaceId, command.eventId, { ...pagination(), status: command.status })) }
+        case 'list_registrations': return { ...output, ...(await store.listEventRegistrations(workspaceId, command.eventId, { ...pagination(), status: command.status }, dbActor)) }
         case 'list_operational_roster': {
           if (context.actor.kind !== 'user' || !authority.canConfigure || !['owner', 'admin'].includes(authority.role)) {
             throw new CrmOperationsError('not_authorized', 'A workspace owner or admin is required to export an operational event roster.')
           }
-          return { ...output, ...(await store.listOperationalRoster(workspaceId, command.eventId, pagination())) }
+          return { ...output, ...(await store.listOperationalRoster(workspaceId, command.eventId, pagination(), dbActor)) }
         }
         case 'update_registration': {
-          const management = await store.getRegistrationManagement(workspaceId, command.registrationId)
+          const management = await store.getRegistrationManagement(workspaceId, command.registrationId, dbActor)
           if (!management) throw new AssociationError('not_found', 'registration not found')
           if (integration) requireCrmIntegrationResources(integration, operation, { eventIds: management.eventId ?? null })
           if (['commerce', 'source_order'].includes(management.sourceKind)) return { ...output, record: await store.updateRegistration(workspaceId, command.registrationId, command.update, dbActor) }
@@ -406,7 +413,7 @@ export function createAssociationService(options: {
           if (context.actor.kind !== 'user' || !authority.canConfigure || !['owner', 'admin'].includes(authority.role)) {
             throw new CrmOperationsError('not_authorized', 'A workspace owner or admin is required to correct a check-in.')
           }
-          const management = await store.getRegistrationManagement(workspaceId, command.registrationId)
+          const management = await store.getRegistrationManagement(workspaceId, command.registrationId, dbActor)
           if (!management) throw new AssociationError('not_found', 'registration not found')
           if (['commerce', 'source_order'].includes(management.sourceKind)) {
             if (command.correction.expectedStatus !== 'checked_in') throw new AssociationError('conflict', 'Commerce check-in correction expects checked_in.')

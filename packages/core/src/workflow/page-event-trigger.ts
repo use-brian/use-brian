@@ -54,6 +54,8 @@ export const PAGE_EVENT_ROOT = 'root'
 export type PageLifecycleEvent = {
   /** Workspace the page — and any workflow it triggers — belongs to. */
   workspaceId: string
+  /** Opaque canonical page-event receipt revision. Legacy events have none. */
+  sourceVersion?: string
   /** The page that was created / updated / moved (`saved_views.id`). */
   pageId: string
   /**
@@ -109,6 +111,7 @@ export function pageLifecycleToDispatchEvent(
     mentions: [],
     isBot: event.isSystem === true,
     payload: {
+      ...(event.sourceVersion ? { sourceVersion: event.sourceVersion } : {}),
       action: event.action,
       pageId: event.pageId,
       parentId: event.parentId,

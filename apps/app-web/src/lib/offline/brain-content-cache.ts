@@ -25,6 +25,7 @@ import type {
   BrainRow,
 } from "@/lib/api/brain";
 import { idbDelete, idbGet, idbSet } from "./idb";
+import { OFFLINE_AUTHORITY_MS } from "./surface-content-cache";
 
 const CACHE_VERSION = 1;
 const KEY_PREFIX = "brain-content";
@@ -122,6 +123,10 @@ export async function readBrainContentCache<T>(
 ): Promise<BrainContentCacheEntry<T> | null> {
   const stored = await idbGet<unknown>(brainContentCacheKey(scope, resource));
   if (!isEnvelope(stored) || !isValue(stored.value)) return null;
+  // Content lease: outside the authority window, or future-dated, a copy is
+  // never painted (perceived-performance.md, "Content lease for protected lists").
+  const age = Date.now() - stored.updatedAt;
+  if (age > OFFLINE_AUTHORITY_MS || age < -60_000) return null;
   return { value: stored.value, updatedAt: stored.updatedAt };
 }
 

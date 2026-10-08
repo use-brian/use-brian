@@ -49,6 +49,7 @@ describe("[COMP:app-web/office-presentation-editor] Presentation presenter", () 
     const html = renderToStaticMarkup(<I18nProvider locale="en" dict={en as unknown as Dictionary}><PresentationPresenter snapshot={presentationFixture()} onClose={vi.fn()} /></I18nProvider>);
     expect(html).toContain('aria-label="Choose slide"');
     expect(html).toContain('aria-label="Auto-advance"');
+    expect(html).toContain(en.office.autoAdvanceOff);
     expect(html).toContain("Laser pointer");
     expect(html).toContain("Fullscreen");
     expect(html).toContain("Speaker notes");

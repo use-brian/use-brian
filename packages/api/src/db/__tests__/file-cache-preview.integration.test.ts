@@ -16,7 +16,7 @@ const DOCX='application/vnd.openxmlformats-officedocument.wordprocessingml.docum
 async function fixture(pdf=false,grantExpiryMs=60_000) {
  const workspaceId=randomUUID(),owner=randomUUID(),viewer=randomUUID(),assistantId=randomUUID(),sessionId=randomUUID()
  for(const id of [owner,viewer])await pool.query('INSERT INTO users(id,auth_provider_id) VALUES($1::uuid,$1::text)',[id])
- await pool.query("INSERT INTO workspaces(id,name,owner_user_id) VALUES($1,'Preview fixture',$2)",[workspaceId,owner])
+ await pool.query("INSERT INTO workspaces(id,name,owner_user_id,department_read_v2) VALUES($1,'Preview fixture',$2,false)",[workspaceId,owner])
  await pool.query("INSERT INTO workspace_members(workspace_id,user_id,role,clearance,team_scope_mode) VALUES($1,$2,'owner','confidential','assigned'),($1,$3,'member','internal','assigned')",[workspaceId,owner,viewer])
  await pool.query("INSERT INTO assistants(id,name,workspace_id,owner_user_id,kind) VALUES($1,'Preview fixture',$2,$3,'standard')",[assistantId,workspaceId,owner])
  await pool.query("INSERT INTO sessions(id,assistant_id,user_id,channel_type,channel_id,status) VALUES($1,$2,$3,'web','web:preview-fixture','idle')",[sessionId,assistantId,viewer])
@@ -103,6 +103,18 @@ describe('[COMP:api/file-cache-preview] cached-file preview current authority (P
  })
  it('adds preview policies to the predecessor schema without rewriting existing bytes',async()=>{
   const f=await fixture()
+  // This replays 595 into the shared database; restore the current policies
+  // afterwards so later suites see the real schema, not the predecessor.
+  const saved=(await pool.query(`SELECT polname,polpermissive,polcmd,pg_get_expr(polqual,polrelid) AS qual,
+      pg_get_expr(polwithcheck,polrelid) AS chk,
+      ARRAY(SELECT CASE WHEN r=0 THEN 'public' ELSE quote_ident(rolname) END FROM unnest(polroles) r LEFT JOIN pg_roles ON pg_roles.oid=r) AS roles
+    FROM pg_policy WHERE polrelid='file_cache'::regclass`)).rows as Array<{polname:string;polpermissive:boolean;polcmd:string;qual:string|null;chk:string|null;roles:string[]}>
+  const restore=async()=>{
+    for(const {polname} of (await pool.query("SELECT polname FROM pg_policy WHERE polrelid='file_cache'::regclass")).rows)await pool.query(`DROP POLICY ${polname} ON file_cache`)
+    const cmd:Record<string,string>={r:'SELECT',a:'INSERT',w:'UPDATE',d:'DELETE','*':'ALL'}
+    for(const p of saved)await pool.query(`CREATE POLICY ${p.polname} ON file_cache AS ${p.polpermissive?'PERMISSIVE':'RESTRICTIVE'} FOR ${cmd[p.polcmd]} TO ${p.roles.join(',')}${p.qual?` USING (${p.qual})`:''}${p.chk?` WITH CHECK (${p.chk})`:''}`)
+  }
+  try {
   const before=(await pool.query('SELECT content,original_content,compartments FROM file_cache WHERE id=$1',[f.file.id])).rows[0]
   for(const policy of ['file_cache_shared_read','file_cache_read_floor','file_cache_execution_visibility','file_cache_insert_floor','file_cache_update_floor','file_cache_delete_floor'])await pool.query('DROP POLICY '+policy+' ON file_cache')
   await pool.query('ALTER TABLE file_cache DROP COLUMN scope_held')
@@ -111,5 +123,6 @@ describe('[COMP:api/file-cache-preview] cached-file preview current authority (P
   expect((await pool.query('SELECT content,original_content,compartments FROM file_cache WHERE id=$1',[f.file.id])).rows[0]).toEqual(before)
   expect((await request(f.app()).get(f.path())).status).toBe(200)
   await f.revoke();expect((await queryWithRLS(f.viewer,'SELECT id FROM file_cache WHERE id=$1',[f.file.id])).rows).toHaveLength(0)
+  } finally { await restore() }
  })
 })

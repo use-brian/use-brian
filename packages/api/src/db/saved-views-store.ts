@@ -42,6 +42,7 @@ import { applyRLSGucs, getAppPool, query, queryWithRLS, rollbackAndRelease } fro
 
 const FULL_SELECT = `
   id,
+  page_event_revision AS "pageEventRevision",
   workspace_id   AS "workspaceId",
   created_by     AS "createdBy",
   name,
@@ -89,6 +90,7 @@ const LIST_SELECT = `
 `
 
 type FullRow = {
+  pageEventRevision: string | null
   id: string
   workspaceId: string
   createdBy: string
@@ -332,6 +334,7 @@ export function createDbSavedViewStore(
       emitLifecycle({
         workspaceId: view.workspaceId,
         pageId: view.id,
+        sourceVersion: result.rows[0].pageEventRevision ?? undefined,
         parentId: view.nestParentId ?? null,
         title: view.name,
         actorId: userId,
@@ -470,6 +473,7 @@ export function createDbSavedViewStore(
       emitLifecycle({
         workspaceId: view.workspaceId,
         pageId: view.id,
+        sourceVersion: result.rows[0].pageEventRevision ?? undefined,
         parentId: view.nestParentId ?? null,
         title: view.name,
         actorId: userId,
@@ -646,6 +650,7 @@ export function createDbSavedViewStore(
         emitLifecycle({
           workspaceId: view.workspaceId,
           pageId: view.id,
+          sourceVersion: result.rows[0].pageEventRevision ?? undefined,
           parentId: view.nestParentId ?? null,
           title: view.name,
           actorId: userId,
@@ -678,6 +683,7 @@ export function createDbSavedViewStore(
       emitLifecycle({
         workspaceId: view.workspaceId,
         pageId: view.id,
+        sourceVersion: result.rows[0].pageEventRevision ?? undefined,
         parentId: view.nestParentId ?? null,
         title: view.name,
         actorId: userId,
@@ -795,6 +801,9 @@ export function createDbSavedViewStore(
         // (+ agent_clearance inside an assistant execution wrap); both are
         // SET LOCAL, reverting at COMMIT/ROLLBACK to the seeded sentinel.
         await applyRLSGucs(client, userId)
+        // The final revision can be written by subtree propagation/reindexing.
+        // Preserve the root operation's action through those same-tx writes.
+        await client.query("SELECT set_config('app.page_event_moved_id',$1,true)", [id])
 
         // Confirm the row is visible to this user before moving it, and
         // capture its workspace so the sibling-set operations stay scoped
@@ -915,6 +924,9 @@ export function createDbSavedViewStore(
           [newNestParentId, workspaceId, destTeamspaceId],
         )
 
+        const eventRow = (await client.query<{ pageEventRevision: string }>(
+          'SELECT page_event_revision AS "pageEventRevision" FROM saved_views WHERE id=$1', [id],
+        )).rows[0]
         await client.query('COMMIT')
         // Emit after the move commits — `newNestParentId` is the destination
         // parent (null = workspace root).
@@ -923,6 +935,7 @@ export function createDbSavedViewStore(
           pageId: id,
           parentId: newNestParentId,
           title: movedName,
+          sourceVersion: eventRow.pageEventRevision,
           actorId: userId,
           action: 'moved',
           isSystem: writtenBy === 'system',
@@ -1057,20 +1070,20 @@ export function createDbSavedViewStore(
     },
 
     async getPageEventContextSystem(id) {
-      // System-bypass read — the content-edit `updated` trigger (doc-sync →
-      // API /internal/page-event) has no member userId; doc-sync already
-      // clearance-gated the writers at connect, and the emit is workspace-scoped
-      // by the resolved `workspaceId`. Returns just what `PageLifecycleEvent`
-      // needs for an `updated` event.
+      // A new body-settle receipt captures current parent/Teamspace metadata
+      // under a page lock without pretending that an earlier write is current.
       const result = await query<{
+        sourceVersion: string
         workspaceId: string
         parentId: string | null
         title: string | null
       }>(
-        `SELECT workspace_id   AS "workspaceId",
-                nest_parent_id AS "parentId",
-                name           AS "title"
-           FROM saved_views WHERE id = $1`,
+        `SELECT context->>'sourceVersion' AS "sourceVersion",
+                context->>'workspaceId' AS "workspaceId",
+                context->>'parentId' AS "parentId",
+                context->>'title' AS "title"
+           FROM (SELECT capture_page_body_event_context($1) AS context) captured
+          WHERE context IS NOT NULL`,
         [id],
       )
       return result.rows[0] ?? null

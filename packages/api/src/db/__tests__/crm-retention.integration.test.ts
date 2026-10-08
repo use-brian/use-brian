@@ -15,6 +15,7 @@ import {crmOperationsRoutes} from '../../routes/crm-operations.js'
 import {flushWorkspaceData} from '../workspace-flush.js'
 import {streamCrmPrivacyExport} from '../../crm-operations/privacy-export.js'
 import {_resetCoalescerForTests} from '../../brain-stream/notify.js'
+import {loadAssociationOrderScope} from '../../association/source-scope.js'
 
 const {assertLocalFixture}=await import(new URL('../../../../../scripts/crm/local-fixture.mjs',import.meta.url).href)
 await assertLocalFixture()
@@ -34,8 +35,9 @@ async function fixture() {
   const preview=()=>retention.preview(context,{kind:'preview_retention',before:new Date().toISOString()})
   const execute=(p:CrmRetentionReview)=>retention.execute(context,{kind:'execute_retention',previewId:p.id,previewHash:p.previewHash,confirmed:true})
   async function submission(status='resolved',id=randomUUID(),contact=contactId) {
-    await pool.query(`INSERT INTO association_enquiries(id,workspace_id,contact_id,source,source_submission_id,request_fingerprint,subject,message,submitted_data,status,updated_at)
-      VALUES($1::uuid,$2,$3,'manual',$1::text,repeat('a',64),'Private subject','Private message','{"sensitive":"Private form value"}',$4,now()-interval '2 days')`,[id,workspaceId,contact,status])
+    const evidence=await loadAssociationOrderScope(pool,workspaceId,[contact])
+    await pool.query(`INSERT INTO association_enquiries(id,workspace_id,contact_id,source,source_submission_id,request_fingerprint,subject,message,submitted_data,status,updated_at,scope_snapshot,scope_sources)
+      VALUES($1::uuid,$2,$3,'manual',$1::text,repeat('a',64),'Private subject','Private message','{"sensitive":"Private form value"}',$4,now()-interval '2 days',$5,$6)`,[id,workspaceId,contact,status,JSON.stringify(evidence.scope),JSON.stringify(evidence.sources)])
     return id
   }
   const note=(id:string)=>pool.query(`INSERT INTO association_enquiry_notes(workspace_id,enquiry_id,body,actor_kind,actor_credential_id)
@@ -49,6 +51,109 @@ async function fixture() {
 async function count(table:string,workspaceId:string) {return Number((await pool.query(`SELECT count(*) count FROM ${table} WHERE workspace_id=$1`,[workspaceId])).rows[0].count)}
 describe('[COMP:crm/retention] Actual review and policy execution',()=>{
   afterAll(async()=>{_resetCoalescerForTests();await pool.end();await appPool.end()})
+  async function department(f:Awaited<ReturnType<typeof fixture>>) {
+    const id=randomUUID(),departmentOwner=randomUUID()
+    await pool.query('INSERT INTO users(id,auth_provider_id) VALUES($1::uuid,$1::text)',[departmentOwner])
+    await pool.query("INSERT INTO workspace_members(workspace_id,user_id,role) VALUES($1,$2,'member')",[f.workspaceId,departmentOwner])
+    await pool.query("INSERT INTO workspace_groups(id,workspace_id,name,created_by,kind,key,compartment_key) VALUES($1::uuid,$2,'Fictional retention department',$3,'team',$1::text,$4)",[id,f.workspaceId,departmentOwner,`team:${id}`])
+    await pool.query("INSERT INTO workspace_compartments(workspace_id,key,label,managed_by,managed_ref_id) VALUES($1,$2,'Fictional retention department','team',$3)",[f.workspaceId,`team:${id}`,id])
+    return id
+  }
+  it('protects current candidate scope and preserves receipt protection after deletion',async()=>{
+    const f=await fixture();await f.policy();await f.submission()
+    const old=await f.preview(),dept=await department(f)
+    await pool.query("UPDATE entities SET sensitivity='confidential',compartments=$2 WHERE id=$1",[f.contactId,[`team:${dept}`]])
+    await expect(f.preview()).rejects.toMatchObject({code:'not_authorized'})
+    await expect(f.execute(old)).rejects.toMatchObject({code:'not_authorized'})
+    await expect(pruneCrmOperationsRetention(f.context,new Date())).rejects.toMatchObject({code:'not_authorized'})
+    const http=express();http.use(express.json());http.use((req,_res,next)=>{req.userId=f.userId;next()})
+    http.use('/crm',crmOperationsRoutes({workspaceStore:createWorkspaceStore(),readStore:createDbCrmIntakeReadStore(),service}))
+    expect((await request(http).post(`/crm/${f.workspaceId}/operations/retention`).send({before:new Date().toISOString(),confirmed:true})).status).toBe(403)
+    expect(await count('association_enquiries',f.workspaceId)).toBe(1)
+    await pool.query("INSERT INTO department_edges(workspace_id,department_id,principal_kind,user_id,clearance,origin) VALUES($1,$2,'user',$3,'confidential','store')",[f.workspaceId,dept,f.userId])
+    await expect(f.execute(old)).rejects.toMatchObject({details:{reason:'retention_preview_stale'}})
+    const review=await f.preview()
+    expect((await pool.query('SELECT scope_snapshot FROM crm_retention_runs WHERE id=$1',[review.id])).rows[0].scope_snapshot.compartments).toEqual([`team:${dept}`])
+    await expect(pool.query("UPDATE crm_retention_runs SET scope_snapshot=jsonb_set(scope_snapshot,'{compartments}','[]') WHERE id=$1",[review.id])).rejects.toMatchObject({code:'23514'})
+    expect((await f.execute(review)).receipt.changed).toMatchObject({submissions:1})
+    await pool.query("UPDATE entities SET sensitivity='internal',compartments='{}' WHERE id=$1",[f.contactId])
+    await pool.query("UPDATE department_edges SET expires_at=clock_timestamp()-interval '1 second' WHERE department_id=$1 AND user_id=$2",[dept,f.userId])
+    await expect(f.execute(review)).rejects.toMatchObject({code:'not_authorized'})
+    expect((await listCrmRetentionRuns(f.context,{})).runs.some(row=>row.id===review.id)).toBe(false)
+    await expect((async()=>{for await(const _line of streamCrmPrivacyExport(f.context)){/* exhaust */}})()).rejects.toMatchObject({code:'not_authorized'})
+    await pool.query('UPDATE department_edges SET expires_at=NULL WHERE department_id=$1 AND user_id=$2',[dept,f.userId])
+    expect((await f.execute(review)).duplicate).toBe(true)
+    expect((await listCrmRetentionRuns(f.context,{})).runs.some(row=>row.id===review.id)).toBe(true)
+  })
+  it('retains saved submission protection after contact declassification and rechecks cleanup authority',async()=>{
+    const f=await fixture();await f.policy()
+    const dept=await department(f)
+    await pool.query("UPDATE entities SET sensitivity='confidential',compartments=$2 WHERE id=$1",[f.contactId,[`team:${dept}`]])
+    await pool.query("INSERT INTO department_edges(workspace_id,department_id,principal_kind,user_id,clearance,origin) VALUES($1,$2,'user',$3,'confidential','store')",[f.workspaceId,dept,f.userId])
+    await f.submission()
+    await pool.query("UPDATE entities SET sensitivity='public',compartments='{}' WHERE id=$1",[f.contactId])
+    await pool.query('DELETE FROM department_edges WHERE department_id=$1 AND user_id=$2',[dept,f.userId])
+    await expect(f.preview()).rejects.toMatchObject({code:'not_authorized'})
+    await expect(pruneCrmOperationsRetention(f.context,new Date())).rejects.toMatchObject({code:'not_authorized'})
+    expect(await count('association_enquiries',f.workspaceId)).toBe(1)
+    await pool.query("INSERT INTO department_edges(workspace_id,department_id,principal_kind,user_id,clearance,origin) VALUES($1,$2,'user',$3,'confidential','store')",[f.workspaceId,dept,f.userId])
+    const review=await f.preview()
+    expect((await pool.query('SELECT scope_snapshot FROM crm_retention_runs WHERE id=$1',[review.id])).rows[0].scope_snapshot)
+      .toMatchObject({sensitivity:'confidential',compartments:[`team:${dept}`]})
+    await f.execute(review)
+    expect(await count('association_enquiries',f.workspaceId)).toBe(0)
+  })
+  it('checks retained candidates beyond the mutation page and scheduled approver department access',async()=>{
+    const f=await fixture();await f.policy({...BASE,scheduled:true})
+    for(let i=0;i<501;i++)await f.submission()
+    const hidden=randomUUID(),dept=await department(f)
+    await pool.query("INSERT INTO entities(id,workspace_id,kind,display_name,created_by_user_id,source,sensitivity,compartments) VALUES($1,$2,'person','Fictional protected contact',$3,'manual','confidential',$4)",[hidden,f.workspaceId,f.userId,[`team:${dept}`]])
+    await f.submission('resolved','ffffffff-ffff-4fff-8fff-ffffffffffff',hidden)
+    await f.policy({...BASE,scheduled:true,holds:[{domain:'contact',id:hidden}]},1)
+    await expect(f.preview()).rejects.toMatchObject({code:'not_authorized'})
+    expect(await runScheduledCrmRetention(f.workspaceId)).toBe('failed')
+    expect(await count('association_enquiries',f.workspaceId)).toBe(502)
+  })
+  it('retains an event audience after the live contact becomes General',async()=>{
+    const f=await fixture(),dept=await department(f)
+    await f.policy({...BASE,deliveryReceiptsSeconds:60})
+    await pool.query("UPDATE entities SET sensitivity='confidential',compartments=$2 WHERE id=$1",[f.contactId,[`team:${dept}`]])
+    const submission=await f.submission(),event=randomUUID()
+    await pool.query("INSERT INTO crm_domain_event_outbox(id,workspace_id,event_type,event_key,subject_kind,subject_id,actor_kind,status,created_at) VALUES($1::uuid,$2,'crm.submission.received',$1::text,'submission',$3,'user','delivered',now()-interval '2 days')",[event,f.workspaceId,submission])
+    await pool.query("UPDATE entities SET sensitivity='internal',compartments='{}' WHERE id=$1",[f.contactId])
+    await expect(f.preview()).rejects.toMatchObject({code:'not_authorized'})
+    await pool.query("INSERT INTO department_edges(workspace_id,department_id,principal_kind,user_id,clearance,origin) VALUES($1,$2,'user',$3,'confidential','store')",[f.workspaceId,dept,f.userId])
+    const review=await f.preview();expect((await f.execute(review)).receipt.changed).toMatchObject({events:1})
+    await pool.query("UPDATE department_edges SET expires_at=clock_timestamp()-interval '1 second' WHERE department_id=$1 AND user_id=$2",[dept,f.userId])
+    await expect(f.execute(review)).rejects.toMatchObject({code:'not_authorized'})
+    expect((await listCrmRetentionRuns(f.context,{})).runs).toEqual([])
+  })
+  it('checks expired cleanup receipt protection before including it in retention counts',async()=>{
+    const f=await fixture(),dept=await department(f);await f.policy()
+    const id=randomUUID(),scope={workspaceId:f.workspaceId,userId:null,assistantId:null,sensitivity:'confidential',compartments:[`team:${dept}`],projectIds:[]}
+    await pool.query(`INSERT INTO crm_import_file_cleanups(id,workspace_id,owner_user_id,file_id,before_at,policy_version,snapshot_hash,preview_hash,summary,status,created_at,expires_at,scope_snapshot)
+      VALUES($1,$2,$3,$4,now()-interval '2 days',1,repeat('a',64),repeat('b',64),'{}','blocked',now()-interval '2 days',now()-interval '1 day',$5::jsonb)`,[id,f.workspaceId,f.userId,randomUUID(),JSON.stringify(scope)])
+    await expect(f.preview()).rejects.toMatchObject({code:'not_authorized'})
+    await pool.query("INSERT INTO department_edges(workspace_id,department_id,principal_kind,user_id,clearance,origin) VALUES($1,$2,'user',$3,'confidential','store')",[f.workspaceId,dept,f.userId])
+    const review=await f.preview();expect((await f.execute(review)).receipt.changed).toMatchObject({fileCleanups:1})
+    await pool.query("UPDATE department_edges SET expires_at=clock_timestamp()-interval '1 second' WHERE department_id=$1 AND user_id=$2",[dept,f.userId])
+    await expect(f.execute(review)).rejects.toMatchObject({code:'not_authorized'})
+  })
+  it('requires current owner authority for legacy retention even with a forged context',async()=>{
+    const f=await fixture();await f.policy();await f.submission()
+    await pool.query("UPDATE workspace_members SET role='member' WHERE workspace_id=$1 AND user_id=$2",[f.workspaceId,f.userId])
+    await expect(pruneCrmOperationsRetention(f.context,new Date())).rejects.toMatchObject({code:'not_authorized'})
+    expect(await count('association_enquiries',f.workspaceId)).toBe(1)
+  })
+  it('withholds unknown legacy review floors after enabling department reads',async()=>{
+    const f=await fixture();await f.policy();await f.submission()
+    await pool.query('UPDATE workspaces SET department_read_v2=false WHERE id=$1',[f.workspaceId])
+    const review=await f.preview()
+    await pool.query('UPDATE workspaces SET department_read_v2=true WHERE id=$1',[f.workspaceId])
+    await expect(f.execute(review)).rejects.toMatchObject({code:'not_authorized'})
+    expect((await listCrmRetentionRuns(f.context,{})).runs).toEqual([])
+    expect(await count('association_enquiries',f.workspaceId)).toBe(1)
+  })
   it('rejects malformed retention policy through the database constraint as well as the command schema',async()=>{
     for(const value of [
       {...BASE,holds:[{domain:null,id:randomUUID()}]},
@@ -179,34 +284,80 @@ describe('[COMP:crm/retention] Actual review and policy execution',()=>{
     expect(await runScheduledCrmRetention(f.workspaceId)).toBe('skipped')
     expect(await count('association_enquiries',f.workspaceId)).toBe(1)
   })
+  it.each(['downgraded','removed'] as const)('refuses scheduled deletion after the approver is %s',async change=>{
+    const f=await fixture();await f.policy({...BASE,scheduled:true});await f.submission()
+    if(change==='downgraded')await pool.query("UPDATE workspace_members SET role='member' WHERE workspace_id=$1 AND user_id=$2",[f.workspaceId,f.userId])
+    else await pool.query('DELETE FROM workspace_members WHERE workspace_id=$1 AND user_id=$2',[f.workspaceId,f.userId])
+    expect(await runScheduledCrmRetention(f.workspaceId)).toBe('failed')
+    expect(await count('association_enquiries',f.workspaceId)).toBe(1)
+    const rows=(await pool.query('SELECT status,error_code,summary,receipt FROM crm_retention_runs WHERE workspace_id=$1',[f.workspaceId])).rows
+    expect(rows).toEqual([{status:'failed',error_code:'retention_failed',summary:{},receipt:null}])
+    const nextApprover=randomUUID()
+    await pool.query('INSERT INTO users(id,auth_provider_id) VALUES($1::uuid,$1::text)',[nextApprover])
+    await pool.query("INSERT INTO workspace_members(workspace_id,user_id,role) VALUES($1,$2,'admin')",[f.workspaceId,nextApprover])
+    const nextContext={...f.context,actor:{kind:'user' as const,userId:nextApprover},authority:{...f.context.authority,role:'admin' as const}}
+    const command={kind:'save_privacy_policy' as const,expectedVersion:1,confirmed:true as const,intakeReplay:{retentionSeconds:3600},retention:{...BASE,scheduled:true}}
+    expect((await service.execute(nextContext,command)).created).toBe(true)
+    expect((await service.execute(nextContext,{...command,expectedVersion:2})).created).toBe(false)
+    expect(await runScheduledCrmRetention(f.workspaceId)).toBe('completed')
+    expect(await count('association_enquiries',f.workspaceId)).toBe(0)
+  })
   it('makes a saved contact hold block canonical contact erasure as well as retention',async()=>{
     const f=await fixture();await f.policy({...BASE,holds:[{domain:'contact',id:f.contactId}]});await f.submission()
     expect((await f.policy({...BASE,holds:[{domain:'contact',id:f.contactId.toUpperCase()}]},1)).created).toBe(false)
-    await pruneCrmOperationsRetention(f.workspaceId,new Date())
+    await pruneCrmOperationsRetention(f.context,new Date())
     expect(await count('association_enquiries',f.workspaceId)).toBe(1)
     const review=await f.preview();expect(review.domains).toContainEqual({domain:'association_enquiries',action:'retain',count:1})
     const erasure=await createCrmPrivacyService().preview(f.context,{kind:'preview_contact_erasure',contactId:f.contactId.toUpperCase()})
     expect(erasure.status).toBe('blocked');expect(erasure.blockers).toContainEqual({domain:'entities',reason:'retention_hold',count:1})
     await expect(createCrmPrivacyService().erase(f.context,{kind:'erase_contact_with_preview',contactId:f.contactId.toUpperCase(),previewId:erasure.id,previewHash:erasure.previewHash,confirmed:true})).rejects.toMatchObject({details:{reason:'privacy_preview_blocked'}})
   })
+  it('refuses a review that would count or remove an import receipt outside the reviewer\'s departments',async()=>{
+    const f=await fixture();await f.policy({...BASE,importReceiptsSeconds:60})
+    const dept=await department(f),file=randomUUID(),job=randomUUID()
+    await pool.query(`INSERT INTO workspace_files(id,workspace_id,path,name,storage_uri,created_by_user_id,sensitivity,compartments)
+      VALUES($1,$2,$3,'fictional.csv','fixture://local',$4,'confidential',$5)`,[file,f.workspaceId,`/fixture/${file}.csv`,f.userId,[`team:${dept}`]])
+    await pool.query(`INSERT INTO crm_import_jobs(id,workspace_id,staged_file_id,entity_kind,status,mapping,mapping_hash,source_hash,total_rows,created_by_user_id,updated_at)
+      VALUES($1,$2,$3,'contact','completed','{"columns":{}}'::jsonb,repeat('a',64),repeat('b',64),1,$4,now()-interval '2 days')`,[job,f.workspaceId,file,f.userId])
+    await expect(f.preview()).rejects.toMatchObject({code:'not_authorized'})
+    expect(await count('crm_import_jobs',f.workspaceId)).toBe(1)
+    await pool.query("INSERT INTO department_edges(workspace_id,department_id,principal_kind,user_id,clearance,origin) VALUES($1,$2,'user',$3,'confidential','store')",[f.workspaceId,dept,f.userId])
+    expect((await f.preview()).domains).toContainEqual({domain:'crm_import_jobs',action:'retain',count:1})
+  })
+  it('renews a saved review read-only and withholds it once its floor leaves the reviewer\'s authority',async()=>{
+    const f=await fixture();await f.policy();const dept=await department(f)
+    await pool.query("INSERT INTO department_edges(workspace_id,department_id,principal_kind,user_id,clearance,origin) VALUES($1,$2,'user',$3,'confidential','store')",[f.workspaceId,dept,f.userId])
+    await pool.query("UPDATE entities SET sensitivity='confidential',compartments=$2 WHERE id=$1",[f.contactId,[`team:${dept}`]])
+    await f.submission()
+    const review=await f.preview()
+    const read=await retention.read!(f.context,review.id)
+    expect(read).toMatchObject({id:review.id,previewHash:review.previewHash,domains:review.domains})
+    await pool.query('DELETE FROM department_edges WHERE workspace_id=$1 AND user_id=$2 AND department_id=$3',[f.workspaceId,f.userId,dept])
+    await expect(retention.read!(f.context,review.id)).rejects.toMatchObject({code:'not_authorized'})
+  })
   it('minimizes eligible delivery envelopes and retains ambiguous sends and failed events',async()=>{
     const f=await fixture();await f.policy({...BASE,deliveryReceiptsSeconds:60})
     const ids:Record<string,string>={}
-    for(const status of ['sent','failed','needs_reconciliation']) {
+    // Post-700 receipts carry the recipient's saved floor; one unclassified historical receipt is only ever retained.
+    const evidence=await loadAssociationOrderScope(pool,f.workspaceId,[f.contactId])
+    for(const status of ['sent','failed','needs_reconciliation','legacy']) {
       const id=randomUUID();ids[status]=id
       await pool.query(`INSERT INTO crm_delivery_receipts(workspace_id,delivery_id,request_hash,connector_instance_id,provider_key,purpose_key,
-        actor_kind,actor_credential_id,envelope,status,claim_token,claim_deadline,provider_receipt,accepted_at,updated_at)
+        actor_kind,actor_credential_id,envelope,status,claim_token,claim_deadline,provider_receipt,accepted_at,updated_at,scope_snapshot,scope_sources)
         VALUES($1,$2,repeat('a',64),$3,'fake','updates','user','fixture','{"body":"Private message"}',$4,$5,now(),
-          '{"private":"Private provider reply"}',CASE WHEN $4='sent' THEN now()-interval '2 days' ELSE NULL END,now()-interval '2 days')`,[f.workspaceId,id,randomUUID(),status,randomUUID()])
+          '{"private":"Private provider reply"}',CASE WHEN $4='sent' THEN now()-interval '2 days' ELSE NULL END,now()-interval '2 days',$6::jsonb,$7::jsonb)`,
+      [f.workspaceId,id,randomUUID(),status==='legacy'?'sent':status,randomUUID(),
+        status==='legacy'?null:JSON.stringify(evidence.scope),status==='legacy'?null:JSON.stringify(evidence.sources)])
     }
     for(const status of ['delivered','failed'])await pool.query(`INSERT INTO crm_domain_event_outbox(workspace_id,event_type,event_key,subject_kind,subject_id,actor_kind,status,created_at)
-      VALUES($1,'crm.submission.received',$2,'submission',$3,'user',$4,now()-interval '2 days')`,[f.workspaceId,randomUUID(),randomUUID(),status])
+      VALUES($1,'crm.submission.received',$2,'submission',$3,'user',$4,now()-interval '2 days')`,[f.workspaceId,randomUUID(),await f.submission(),status])
     const review=await f.preview()
     expect(review.domains).toContainEqual({domain:'crm_delivery_receipts',action:'redact',count:2})
-    expect(review.domains).toContainEqual({domain:'crm_delivery_receipts',action:'retain',count:1})
+    expect(review.domains).toContainEqual({domain:'crm_delivery_receipts',action:'retain',count:2})
     await f.execute(review)
     const rows=(await pool.query('SELECT delivery_id,status,envelope,provider_receipt,redacted_at FROM crm_delivery_receipts WHERE workspace_id=$1',[f.workspaceId])).rows
-    expect(rows.filter(r=>r.status!=='needs_reconciliation').every(r=>r.envelope===null && r.provider_receipt===null && r.redacted_at instanceof Date)).toBe(true)
+    expect(rows.filter(r=>r.status!=='needs_reconciliation'&&r.delivery_id!==ids.legacy).every(r=>r.envelope===null && r.provider_receipt===null && r.redacted_at instanceof Date)).toBe(true)
+    expect(rows.find(r=>r.delivery_id===ids.legacy)).toMatchObject({envelope:{body:'Private message'},redacted_at:null})
     expect(rows.find(r=>r.delivery_id===ids.needs_reconciliation).envelope).toEqual({body:'Private message'})
     expect((await pool.query('SELECT status FROM crm_domain_event_outbox WHERE workspace_id=$1',[f.workspaceId])).rows).toEqual([{status:'failed'}])
   })

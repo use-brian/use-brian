@@ -87,6 +87,7 @@ import {
   SelectTrigger,
   SelectValue,
 } from "@/components/ui/select";
+import { useLeasedResource } from "@/lib/offline/surface-content-cache";
 
 function SkillEditorInner({ skillRowId }: { skillRowId: string }) {
   const t = useT();
@@ -100,7 +101,7 @@ function SkillEditorInner({ skillRowId }: { skillRowId: string }) {
   // (an assistant edit or a curator write arriving over the stream), which
   // replaces the listener this page used to carry. `getWorkspaceSkill`
   // answers `null` when the row is gone; a cold `error` is a network failure.
-  const cached = useCachedResource<WorkspaceSkillSummary | null>(
+  const cached = useLeasedResource<WorkspaceSkillSummary | null>(
     activeId ? brainSkillCacheKey(activeId, skillRowId) : null,
     () => getWorkspaceSkill(activeId ?? "", skillRowId),
   );

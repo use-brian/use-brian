@@ -13,10 +13,12 @@ const {assertLocalFixture}=await import(new URL('../../../../../scripts/crm/loca
 await assertLocalFixture()
 const pool=getPool(),artifacts=createOfficeArtifactStore(),comments=createOfficeCommentStore(),jobs=createOfficeGenerationStore()
 const hash='a'.repeat(64)
-async function fixture(grantLifetimeMs=86_400_000) {
+async function fixture(grantLifetimeMs=86_400_000,v2=false) {
   const workspaceId=randomUUID(),owner=randomUUID(),reader=randomUUID(),editor=randomUUID(),fileId=randomUUID()
   for(const id of [owner,reader,editor])await pool.query('INSERT INTO users(id,auth_provider_id) VALUES($1::uuid,$1::text)',[id])
-  await pool.query("INSERT INTO workspaces(id,name,owner_user_id) VALUES($1,'Office scope fixture',$2)",[workspaceId,owner])
+  // These suites pin the legacy (flag-off) model: read grants are read-only there.
+  // Under v2 an edge is read and write at its clearance (permission-model-v2 A09).
+  await pool.query("INSERT INTO workspaces(id,name,owner_user_id,department_read_v2) VALUES($1,'Office scope fixture',$2,$3)",[workspaceId,owner,v2])
   await pool.query("INSERT INTO workspace_members(workspace_id,user_id,role,clearance,team_scope_mode) VALUES($1,$2,'owner','internal','assigned'),($1,$3,'member','internal','assigned'),($1,$4,'member','internal','assigned')",[workspaceId,owner,reader,editor])
   const groups=createDbWorkspaceGroupStore(),team=await groups.createTeam(owner,workspaceId,{name:'Office department',key:'office-department'})
   await groups.addMember(owner,team.id,editor)
@@ -56,6 +58,13 @@ afterAll(async()=>{await getAppPool().end();await pool.end()})
 const children=['office_artifact_versions','office_artifact_sources','office_artifact_grants','office_audit_events','office_collab_documents','office_comment_threads','office_comment_messages','office_suggestions','office_generation_jobs','office_generation_events','office_generation_steering','office_claims','office_media_uses','office_release_records','office_offline_packages'] as const
 
 describe('[COMP:api/office-access] current Office operation scopes (PG18)',()=>{
+  it('under v2 an approved grant edge is read and write at its clearance until it is revoked (A09)',async()=>{
+    const f=await fixture(86_400_000,true)
+    expect(await resolveOfficeAccess(f.reader,f.artifact.id)).toMatchObject({role:'edit',canView:true,canEdit:true})
+    await f.revoke()
+    expect(await resolveOfficeAccess(f.reader,f.artifact.id)).toBeNull()
+  })
+
   it('admits a current read grant through the canonical resolver and every seeded child without granting mutations',async()=>{
     const f=await fixture()
     expect((await queryWithRLS(f.reader,'SELECT rolsuper,rolbypassrls FROM pg_roles WHERE rolname=current_user')).rows).toEqual([{rolsuper:false,rolbypassrls:false}])

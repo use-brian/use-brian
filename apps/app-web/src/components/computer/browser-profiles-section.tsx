@@ -11,7 +11,7 @@
  * [COMP:app-web/profile-management]
  */
 
-import { useCallback, useState } from "react";
+import { useCallback, useEffect, useState } from "react";
 import Link from "next/link";
 import { useParams, useRouter } from "next/navigation";
 import { Cloud, Laptop, Settings2, Trash2 } from "lucide-react";
@@ -20,11 +20,14 @@ import { confirmDialog } from "@/components/ui/confirm-dialog";
 import { Skeleton } from "@/components/skeleton";
 import { normalizeCaptureSite } from "@/lib/computer-takeover";
 import { useCachedResource } from "@/lib/surface-cache";
-import { browserProfilesCacheKey } from "@/lib/surface-prefetch";
+import { browserProfilesCacheKey, browserProfileDestinationsCacheKey } from "@/lib/surface-prefetch";
+import { SearchableSelect } from "@/components/ui/searchable-select";
 import { ConnectBrowserPanel } from "./connect-browser-panel";
 import {
   captureProfileSession,
+  classifyBrowserProfileDepartment,
   createBrowserProfile,
+  fetchBrowserProfileDestinations,
   deleteBrowserProfile,
   listBrowserProfiles,
   revokeProfileGrant,
@@ -40,6 +43,7 @@ import {
   type BrowserProfileScope,
   type LocalBrowserControlMode,
 } from "@/lib/api/computer";
+import { useLeasedResource } from "@/lib/offline/surface-content-cache";
 
 /** "instagram.com" and "https://instagram.com/x" both work in the sign-in box. */
 function normalizeLoginUrl(raw: string): string | null {
@@ -90,7 +94,7 @@ export function profileSurfaces(profile: BrowserProfile): {
 } {
   const local = profile.defaultBackend === "local";
   return {
-    signIn: !local,
+    signIn: !local && profile.canManage === true,
     vaultSessions: !local,
     pairBrowser: profile.canManage === true,
     captureFromBrowser: !local && profile.canManage === true,
@@ -133,7 +137,7 @@ export function BrowserProfilesSection({
   // never issue a second copy of one request. No spine primitive names a
   // browser profile, so revalidation is mount / visibility plus the
   // `refresh()` every mutation below awaits.
-  const roster = useCachedResource(
+  const roster = useLeasedResource(
     workspaceId ? browserProfilesCacheKey(workspaceId) : null,
     () => listBrowserProfiles(workspaceId),
   );
@@ -156,9 +160,41 @@ export function BrowserProfilesSection({
         ? { kind: "error" }
         : { kind: "loading" };
   const [newName, setNewName] = useState("");
+  const destinations = useCachedResource(
+    workspaceId ? browserProfileDestinationsCacheKey(workspaceId) : null,
+    () => fetchBrowserProfileDestinations(workspaceId),
+    { expiresInMs: () => 30_000 },
+  );
+  const { refresh: refreshDestinations } = destinations;
+  useEffect(() => {
+    if (!workspaceId) return;
+    const renew = () => {
+      if (document.visibilityState === "visible") void refreshDestinations();
+    };
+    const timer = window.setInterval(renew, 15_000);
+    window.addEventListener("focus", renew);
+    document.addEventListener("visibilitychange", renew);
+    return () => {
+      window.clearInterval(timer);
+      window.removeEventListener("focus", renew);
+      document.removeEventListener("visibilitychange", renew);
+    };
+  }, [workspaceId, refreshDestinations]);
+  const [newDepartment, setNewDepartment] = useState<string | null>(null);
+  const [newScope, setNewScope] = useState<BrowserProfileScope>("owner");
+  const [newClearance, setNewClearance] = useState<BrowserProfileClearance>("confidential");
+  const chosenDepartment = destinations.data?.departments.find(row => row.id === newDepartment);
+  const destinationReady = Boolean(destinations.data && (!newDepartment || chosenDepartment)
+    && (newScope === "owner" || chosenDepartment)
+    && (!chosenDepartment || ["public", "internal", "confidential"].indexOf(newClearance)
+      <= ["public", "internal", "confidential"].indexOf(chosenDepartment.clearance)));
   const [newBackend, setNewBackend] = useState<BrowserBackend>("cloud");
   const [busy, setBusy] = useState(false);
   const [actionError, setActionError] = useState<string | null>(null);
+  const [classificationDraft, setClassificationDraft] = useState<{ profileId: string; departmentId: string; reason: string } | null>(null);
+  useEffect(() => {
+    setClassificationDraft(null);
+  }, [workspaceId, selectedProfileId, destinations.error, roster.error]);
   // "Sign in to a site" drafts + in-flight flag, keyed by profile id.
   const [loginDrafts, setLoginDrafts] = useState<Record<string, string>>({});
   const [loginBusyId, setLoginBusyId] = useState<string | null>(null);
@@ -214,13 +250,16 @@ export function BrowserProfilesSection({
 
   const onCreate = useCallback(async () => {
     const name = newName.trim();
-    if (!name || busy) return;
+    if (!name || busy || !destinationReady) return;
     setBusy(true);
     setActionError(null);
     const created = await createBrowserProfile({
       workspaceId,
       name,
       defaultBackend: newBackend,
+      departmentId: newDepartment,
+      scope: newScope,
+      clearance: newClearance,
     }).catch(() => null);
     setBusy(false);
     if (!created) {
@@ -232,7 +271,7 @@ export function BrowserProfilesSection({
     router.replace(
       `/w/${workspaceId}/computer/profiles?profile=${encodeURIComponent(created.id)}`,
     );
-  }, [busy, newBackend, newName, reload, router, t, workspaceId]);
+  }, [busy, newBackend, newName, newDepartment, newScope, newClearance, destinationReady, reload, router, t, workspaceId]);
 
   const mutate = useCallback(
     async (profileId: string, patch: Parameters<typeof updateBrowserProfile>[1]) => {
@@ -264,6 +303,33 @@ export function BrowserProfilesSection({
     },
     [reload, router, t, workspaceId],
   );
+
+  const onClassify = async (profile: BrowserProfile) => {
+    const draft = classificationDraft;
+    if (busy || !destinations.data || draft?.profileId !== profile.id || !draft.reason.trim()) return;
+    const departmentId = draft.departmentId || null;
+    if (departmentId === (profile.departmentId ?? null)) return;
+    setBusy(true);
+    setActionError(null);
+    try {
+      const confirmed = await confirmDialog({
+        title: t.computer.profiles.changeDepartment,
+        description: t.computer.profiles.classificationConfirm,
+        confirmLabel: t.computer.profiles.changeDepartment,
+      });
+      if (!confirmed) return;
+      const result = await classifyBrowserProfileDepartment(profile.id, workspaceId, {
+        departmentId, expectedDepartmentId: profile.departmentId ?? null,
+        reason: draft.reason.trim(), confirmed: true,
+      });
+      setClassificationDraft(null);
+      if (result !== "saved") setActionError(result === "changed"
+        ? t.computer.profiles.classificationChanged
+        : result === "admin_required" ? t.computer.profiles.classificationAdminRequired
+          : t.computer.profiles.classificationUnavailable);
+      await Promise.all([reload(), refreshDestinations()]);
+    } finally { setBusy(false); }
+  };
 
   const onRevoke = useCallback(
     async (profileId: string, site: string) => {
@@ -432,10 +498,10 @@ export function BrowserProfilesSection({
     [reload, t],
   );
 
-  const scopeLabel = (scope: BrowserProfileScope): string =>
+  const scopeLabel = (scope: BrowserProfileScope, departmentId?: string | null): string =>
     scope === "owner"
       ? t.computer.profiles.scopeOwner
-      : t.computer.profiles.scopeWorkspace;
+      : departmentId ? t.computer.profiles.departmentMembers : t.computer.profiles.scopeWorkspace;
 
   const clearanceLabel = (clearance: BrowserProfileClearance): string =>
     clearance === "confidential"
@@ -532,6 +598,36 @@ export function BrowserProfilesSection({
                 );
               })}
             </div>
+            {destinations.data ? <div className="mt-3 grid gap-3 sm:grid-cols-3">
+              <label className="grid gap-1 text-xs">{t.contextScope.team}
+                <SearchableSelect className="max-sm:min-h-11" value={newDepartment ?? "__personal__"}
+                  items={[{ value: "__personal__", label: t.computer.profiles.personalDepartment },
+                    ...destinations.data.departments.map(row => ({ value: row.id, label: row.name }))]}
+                  onValueChange={value => {
+                    const row = destinations.data?.departments.find(item => item.id === value);
+                    setNewDepartment(row?.id ?? null);
+                    setNewClearance(row?.clearance ?? "confidential");
+                    if (!row) setNewScope("owner");
+                  }} />
+              </label>
+              <label className="grid gap-1 text-xs">{t.computer.profiles.scopeLabel}
+                <SearchableSelect className="max-sm:min-h-11" value={newScope}
+                  items={[{ value: "owner", label: t.computer.profiles.scopeOwner },
+                    ...(chosenDepartment ? [{ value: "workspace", label: t.computer.profiles.departmentMembers }] : [])]}
+                  onValueChange={value => setNewScope(value as BrowserProfileScope)} />
+              </label>
+              <label className="grid gap-1 text-xs">{t.computer.profiles.clearanceLabel}
+                <SearchableSelect className="max-sm:min-h-11" value={newClearance}
+                  items={CLEARANCES.filter(value => !chosenDepartment ||
+                    ["public", "internal", "confidential"].indexOf(value) <= ["public", "internal", "confidential"].indexOf(chosenDepartment.clearance))
+                    .map(value => ({ value, label: clearanceLabel(value) }))}
+                  onValueChange={value => setNewClearance(value as BrowserProfileClearance)} />
+              </label>
+              <p className="text-xs text-muted-foreground sm:col-span-3">{t.computer.profiles.departmentCreationHint}</p>
+            </div> : destinations.error ? <div className="mt-3 text-sm" role="alert">
+              <p>{t.computer.profiles.loadFailed}</p>
+              <button type="button" className="min-h-8 max-sm:min-h-11 px-3 underline" onClick={() => void destinations.refresh()}>{t.computer.profiles.retryDestinations}</button>
+            </div> : <Skeleton className="mt-3 h-20 w-full" />}
             <div className="mt-3 flex items-center gap-2">
               <input
                 type="text"
@@ -545,7 +641,7 @@ export function BrowserProfilesSection({
               />
               <button
                 type="button"
-                disabled={busy || newName.trim().length === 0}
+                disabled={busy || !destinationReady || newName.trim().length === 0}
                 onClick={() => void onCreate()}
                 className="h-9 shrink-0 rounded-md bg-action px-3 text-xs font-medium text-action-foreground hover:bg-action/90 disabled:opacity-50"
               >
@@ -568,7 +664,7 @@ export function BrowserProfilesSection({
                         {backendTitle(profile.defaultBackend)}
                       </span>
                     </div>
-                    <button
+                    {profile.canManage === true ? (<button
                       type="button"
                       onClick={() => void onDelete(profile)}
                       aria-label={t.computer.profiles.deleteProfile}
@@ -576,14 +672,56 @@ export function BrowserProfilesSection({
                       className="grid size-8 shrink-0 place-items-center rounded-md text-muted-foreground transition-colors hover:bg-destructive/10 hover:text-destructive"
                     >
                       <Trash2 className="size-4" aria-hidden />
-                    </button>
+                    </button>) : null}
                   </div>
+
+                  <dl className="mt-3 grid gap-1 text-xs">
+                    <dt className="font-medium text-muted-foreground">{t.contextScope.team}</dt>
+                    <dd className="break-words">{profile.departmentId
+                      ? destinations.data?.departments.find(row => row.id === profile.departmentId)?.name ?? t.computer.profiles.departmentUnavailable
+                      : profile.scope === "owner" ? t.computer.profiles.personalDepartment : t.computer.profiles.unassignedDepartment}</dd>
+                  </dl>
+
+                  {profile.canManage === true && destinations.data ? (
+                    <form className="mt-3 grid gap-3 py-3" onSubmit={(event) => { event.preventDefault(); void onClassify(profile); }}>
+                      <label className="grid gap-1 text-xs">
+                        {t.computer.profiles.changeDepartment}
+                        <SearchableSelect
+                          aria-label={t.computer.profiles.changeDepartment}
+                          className="min-h-8 max-sm:min-h-11 text-base sm:text-sm"
+                          disabled={busy}
+                          value={classificationDraft?.profileId === profile.id ? classificationDraft.departmentId : profile.departmentId ?? ""}
+                          placeholder={t.computer.profiles.unassignedDepartment}
+                          items={[
+                            ...(profile.scope === "owner" ? [{ value: "", label: t.computer.profiles.personalDepartment }] : []),
+                            ...destinations.data.departments.filter(row => CLEARANCES.indexOf(row.clearance) <= CLEARANCES.indexOf(profile.clearance))
+                              .map(row => ({ value: row.id, label: row.name })),
+                          ]}
+                          onValueChange={departmentId => setClassificationDraft(current => ({profileId: profile.id, departmentId, reason: current?.profileId === profile.id ? current.reason : ""}))}
+                        />
+                      </label>
+                      <label className="grid gap-1 text-xs">
+                        {t.computer.profiles.classificationReason}
+                        <input className="min-h-8 max-sm:min-h-11 min-w-0 rounded-md border border-border bg-background px-3 text-base" maxLength={1000} required disabled={busy}
+                          value={classificationDraft?.profileId === profile.id ? classificationDraft.reason : ""}
+                          onChange={event => setClassificationDraft(current => ({profileId: profile.id, departmentId: current?.profileId === profile.id ? current.departmentId : profile.departmentId ?? "", reason: event.target.value}))} />
+                      </label>
+                      <p className="text-xs text-muted-foreground">{t.computer.profiles.classificationConfirm}</p>
+                      <button type="submit" className="min-h-8 max-sm:min-h-11 rounded-md border border-border px-3 text-sm disabled:opacity-50"
+                        disabled={busy || classificationDraft?.profileId !== profile.id || !classificationDraft.reason.trim()
+                          || classificationDraft.departmentId === (profile.departmentId ?? "")
+                          || (!classificationDraft.departmentId && profile.scope !== "owner")
+                          || Boolean(classificationDraft.departmentId && !destinations.data.departments.some(row => row.id === classificationDraft.departmentId && CLEARANCES.indexOf(row.clearance) <= CLEARANCES.indexOf(profile.clearance)))}>
+                        {t.computer.profiles.changeDepartment}
+                      </button>
+                    </form>
+                  ) : null}
 
                   <div className="mt-3 flex flex-wrap items-center justify-between gap-2">
                     <span className="text-[11px] font-medium text-muted-foreground">
                       {t.computer.profiles.typeLabel}
                     </span>
-                    <div
+                    {profile.canManage === true ? (<div
                       role="radiogroup"
                       aria-label={t.computer.profiles.typeLabel}
                       className="flex gap-1"
@@ -609,7 +747,7 @@ export function BrowserProfilesSection({
                           </button>
                         );
                       })}
-                    </div>
+                    </div>) : <p className="text-xs">{backendTitle(profile.defaultBackend)}</p>}
                   </div>
 
                   {/* Pairing is profile-scoped. A distinct real Chrome profile
@@ -916,7 +1054,7 @@ export function BrowserProfilesSection({
                     <p className="text-[11px] font-medium text-muted-foreground">
                       {t.computer.profiles.scopeLabel}
                     </p>
-                    <div className="mt-1 flex gap-1">
+                    {profile.canManage === true ? (<div className="mt-1 flex gap-1">
                       {SCOPES.map((scope) => (
                         <button
                           key={scope}
@@ -928,10 +1066,10 @@ export function BrowserProfilesSection({
                               : "rounded-md border border-border px-2 py-2 text-[11px] text-muted-foreground hover:bg-accent sm:py-1"
                           }
                         >
-                          {scopeLabel(scope)}
+                          {scopeLabel(scope, profile.departmentId)}
                         </button>
                       ))}
-                    </div>
+                    </div>) : <p className="text-xs">{scopeLabel(profile.scope, profile.departmentId)}</p>}
                     <p className="mt-1 text-[11px] text-muted-foreground">
                       {profile.scope === "owner"
                         ? t.computer.profiles.scopeHintOwner
@@ -946,7 +1084,7 @@ export function BrowserProfilesSection({
                     <p className="text-[11px] font-medium text-muted-foreground">
                       {t.computer.profiles.clearanceLabel}
                     </p>
-                    <div className="mt-1 flex gap-1">
+                    {profile.canManage === true ? (<div className="mt-1 flex gap-1">
                       {CLEARANCES.map((clearance) => (
                         <button
                           key={clearance}
@@ -961,7 +1099,7 @@ export function BrowserProfilesSection({
                           {clearanceLabel(clearance)}
                         </button>
                       ))}
-                    </div>
+                    </div>) : <p className="text-xs">{clearanceLabel(profile.clearance)}</p>}
                     <p className="mt-1 text-[11px] text-muted-foreground">
                       {t.computer.profiles.clearanceHint}
                     </p>
@@ -1033,7 +1171,7 @@ export function BrowserProfilesSection({
                                 {t.computer.profiles.grantHint}
                               </p>
                             </div>
-                            <button
+                            {profile.canManage === true ? (<button
                               type="button"
                               onClick={() =>
                                 void onRevokeGrant(profile.id, grant.id, grant.skillName)
@@ -1041,7 +1179,7 @@ export function BrowserProfilesSection({
                               className="shrink-0 rounded-md border border-destructive/40 px-2.5 py-2 text-xs font-medium sm:py-1 text-destructive hover:bg-destructive/10"
                             >
                               {t.computer.profiles.revoke}
-                            </button>
+                            </button>) : null}
                           </li>
                         ))}
                       </ul>
@@ -1092,13 +1230,13 @@ export function BrowserProfilesSection({
                                   : t.computer.profiles.never}
                               </p>
                             </div>
-                            <button
+                            {profile.canManage === true ? (<button
                               type="button"
                               onClick={() => void onRevoke(profile.id, session.site)}
                               className="shrink-0 rounded-md border border-destructive/40 px-2.5 py-2 text-xs font-medium sm:py-1 text-destructive hover:bg-destructive/10"
                             >
                               {t.computer.profiles.revoke}
-                            </button>
+                            </button>) : null}
                           </li>
                         ))}
                       </ul>

@@ -207,7 +207,7 @@ describe('[COMP:api/entity-mutation-scope] canonical entity writers', () => {
     if(restriction==='foreign') ctx.workspaceId=(await fixture()).workspaceId
     const before=await f.stored(),counts=await o.counts()
     await expect(o.service.execute(ctx,{...o.command,stageId:randomUUID()})).rejects.toMatchObject({
-      code:restriction==='foreign'?'scope_operation_denied':'catalog_key_invalid',
+      code:restriction==='foreign'?'not_authorized':'catalog_key_invalid',
     })
     expect(await f.stored()).toEqual(before)
     expect(await o.counts()).toEqual(counts)
@@ -223,17 +223,19 @@ describe('[COMP:api/entity-mutation-scope] canonical entity writers', () => {
     for(const key of Object.keys(before)) expect(after[key]).toBe(before[key]+1)
     await o.service.execute(o.context,o.command)
     expect(await o.counts()).toEqual(after)
-    await expect(runWithAgentAccess(f.execution([]),()=>o.service.execute(o.context,o.command))).rejects.toMatchObject({code:'scope_operation_denied'})
+    await expect(runWithAgentAccess(f.execution([]),()=>o.service.execute(o.context,o.command))).rejects.toMatchObject({code:'not_authorized'})
     await pool.query('DELETE FROM workspace_members WHERE workspace_id=$1 AND user_id=$2',[f.workspaceId,f.userId])
-    await expect(o.service.execute(o.context,o.command)).rejects.toMatchObject({code:'scope_operation_denied'})
+    await expect(o.service.execute(o.context,o.command)).rejects.toMatchObject({code:'not_authorized'})
     expect(await o.counts()).toEqual(after)
   })
 
+  // The CRM operations store maps scope denials to the non-disclosing
+  // not_authorized boundary code (R98); state stays unchanged either way.
   it.each(['brain_key','integration_key','oauth_token','home_app'] as const)('refuses stage machine %s without borrowing credential authorship',async kind=>{
     const f=await stageFixture(),o=operations(f),before=await f.stored(),counts=await o.counts()
     const context={...o.context,actor:{kind,credentialId:randomUUID(),userId:f.userId}}
     const store=createDbCrmOperationsStore(pool)
-    await expect(store.transaction(context,tx=>tx.setDealPipelineStage({...o.command,actorUserId:f.userId,actorAssistantId:null}))).rejects.toMatchObject({code:'scope_operation_denied'})
+    await expect(store.transaction(context,tx=>tx.setDealPipelineStage({...o.command,actorUserId:f.userId,actorAssistantId:null}))).rejects.toMatchObject({code:'not_authorized'})
     expect(await f.stored()).toEqual(before)
     expect(await o.counts()).toEqual(counts)
   })
@@ -242,8 +244,8 @@ describe('[COMP:api/entity-mutation-scope] canonical entity writers', () => {
     const f=await stageFixture(),o=operations(f)
     const actor=kind==='assistant'?{kind,assistantId:f.assistantId,userId:f.userId,sessionId:randomUUID()}:{kind,workflowId:randomUUID(),runId:randomUUID(),userId:f.userId}
     const ctx={...o.context,actor}
-    await expect(o.service.execute(ctx,o.command)).rejects.toMatchObject({code:'scope_operation_denied'})
-    await expect(runWithAgentAccess({...f.execution(null),userId:f.member},()=>o.service.execute(ctx,o.command))).rejects.toMatchObject({code:'scope_operation_denied'})
+    await expect(o.service.execute(ctx,o.command)).rejects.toMatchObject({code:'not_authorized'})
+    await expect(runWithAgentAccess({...f.execution(null),userId:f.member},()=>o.service.execute(ctx,o.command))).rejects.toMatchObject({code:'not_authorized'})
     expect(await runWithAgentAccess(f.execution(null),()=>o.service.execute(ctx,o.command))).toBeTruthy()
   })
 

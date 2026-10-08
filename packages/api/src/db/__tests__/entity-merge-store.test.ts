@@ -15,6 +15,7 @@ const clientQueries: { text: string; values?: unknown[] }[] = []
 let poolRows: Record<string, unknown>[] = []
 let poolRowCount = 0
 let clientInsertRow: Record<string, unknown> | null = null
+let rlsEditable = (ids: string[]) => ids.map(id => ({ id }))
 
 const identityProjection = vi.hoisted(() => ({
   prepare: vi.fn(),
@@ -35,6 +36,12 @@ async function runFakeClientQuery(text: string, values?: unknown[]) {
       ],
       rowCount: 2,
     }
+  }
+  if (text.includes('scope_held AS held') && text.includes('FOR UPDATE')) {
+    return { rows: [
+      { id: 'e-survivor', sensitivity: 'internal', compartments: [], projectIds: [], userId: null, held: false },
+      { id: 'e-merged', sensitivity: 'internal', compartments: [], projectIds: [], userId: null, held: false },
+    ], rowCount: 2 }
   }
   if (text.trim().startsWith('INSERT INTO entity_merges')) {
     return { rows: clientInsertRow ? [clientInsertRow] : [], rowCount: 1 }
@@ -58,6 +65,8 @@ const fakePool = {
 vi.mock('../client.js', () => ({
   getPool: () => fakePool,
   query: (text: string, values?: unknown[]) => fakePool.query(text, values),
+  // The actor's RLS edit probe admits both fixture rows unless a test narrows it.
+  queryWithRLS: vi.fn(async (_userId: string, _text: string, values?: unknown[]) => ({ rows: rlsEditable((values?.[1] as string[]) ?? []) })),
 }))
 
 vi.mock('../decision-event-store.js', () => ({
@@ -243,6 +252,37 @@ describe('[COMP:corrections/entity-merge-store] applyMerge', () => {
     expect(fakeClient.release).toHaveBeenCalledOnce()
   })
 
+  it('refuses before opening the transaction when the actor may not edit both records', async () => {
+    rlsEditable = (ids) => ids.filter((id) => id !== 'e-merged').map((id) => ({ id }))
+    try {
+      await expect(repo.applyMerge(input())).rejects.toMatchObject({ code: 'entity_not_found' })
+      expect(fakePool.connect).not.toHaveBeenCalled()
+    } finally { rlsEditable = (ids) => ids.map((id) => ({ id })) }
+  })
+
+  it('raises the survivor to the merged record\'s protection and refuses different private owners', async () => {
+    const labels = (merged: Record<string, unknown>) => fakeClient.query.mockImplementation(async (text: string, values?: unknown[]) => {
+      if (text.includes('scope_held AS held')) {
+        clientQueries.push({ text, values })
+        return { rows: [
+          { id: 'e-survivor', sensitivity: 'internal', compartments: ['team:a'], projectIds: [], userId: null, held: false },
+          { id: 'e-merged', sensitivity: 'confidential', compartments: ['team:b'], projectIds: ['00000000-0000-4000-8000-0000000000aa'], userId: null, held: false, ...merged },
+        ], rowCount: 2 }
+      }
+      return runFakeClientQuery(text, values)
+    })
+    clientInsertRow = mergeRow()
+    labels({})
+    await repo.applyMerge(input())
+    const raise = clientQueries.find((q) => q.text.includes('UPDATE entities SET sensitivity=$3'))
+    expect(raise?.values).toEqual(['e-survivor', 'ws-1', 'confidential', ['team:a', 'team:b'], ['00000000-0000-4000-8000-0000000000aa']])
+    clientQueries.length = 0
+    labels({ userId: 'someone-private' })
+    await expect(repo.applyMerge(input())).rejects.toMatchObject({ code: 'scope_conflict' })
+    expect(clientQueries.some((q) => q.text.includes('UPDATE entities'))).toBe(false)
+    fakeClient.query.mockImplementation(runFakeClientQuery)
+  })
+
   it('ROLLBACKs and rethrows when a statement fails', async () => {
     clientInsertRow = null // INSERT returns no row → rowToMergeRecord throws on undefined
     fakeClient.query.mockImplementationOnce(async (text: string) => {
@@ -258,7 +298,7 @@ describe('[COMP:corrections/entity-merge-store] applyMerge', () => {
       if (text.trim().startsWith('INSERT INTO entity_merges')) {
         throw new Error('insert failed')
       }
-      return { rows: [], rowCount: 0 }
+      return runFakeClientQuery(text, values)
     })
     await expect(repo.applyMerge(input())).rejects.toThrow('insert failed')
     expect(clientQueries.map((q) => q.text)).toContain('ROLLBACK')

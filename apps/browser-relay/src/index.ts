@@ -11,13 +11,13 @@
  */
 
 import { createServer } from 'node:http'
-import express from 'express'
+import express, { type Request, type Response } from 'express'
 import { WebSocketServer, type WebSocket } from 'ws'
 import {
   signBrowserExtSessionToken,
   verifyBrowserExtHelloToken,
 } from '@use-brian/api/auth/browser-ext-pair-token.js'
-import { relaySecretMatches } from './auth.js'
+import { createBrowserAuthorityClient, relaySecretMatches } from './auth.js'
 import { getEnv } from './env.js'
 import { BrowserRelay } from './relay.js'
 import { InternalCommandRequestSchema } from './protocol.js'
@@ -26,6 +26,7 @@ const env = getEnv()
 const app = express()
 
 const relay = new BrowserRelay({
+  authorize: createBrowserAuthorityClient(env.BROWSER_AUTHORITY_API_URL),
   verifyPairingToken: (token) => verifyBrowserExtHelloToken(token, env.JWT_SECRET),
   mintSessionToken: (identity) => signBrowserExtSessionToken(identity, env.JWT_SECRET),
 })
@@ -47,15 +48,18 @@ app.use('/internal', (req, res, next) => {
 // ── Command routing (P1.4) ────────────────────────────────────
 // Parse only after shared-secret authentication. A 4 MiB upload is ~5.34 MiB
 // of base64; leave room for its command envelope while staying below WS's 8 MiB cap.
-app.post('/internal/browser/command', express.json({ limit: '6mb' }), async (req, res) => {
+const commandHandler = (taskBound: boolean) => async (req: Request, res: Response) => {
   const parsed = InternalCommandRequestSchema.safeParse(req.body)
-  if (!parsed.success) {
-    res.status(400).json({ error: 'userId, browserProfileId, and op are required' })
+  if (!parsed.success || (taskBound && !parsed.data.taskId)) {
+    res.status(400).json({ error: taskBound ? 'userId, browserProfileId, taskId, and op are required' : 'userId, browserProfileId, and op are required' })
     return
   }
   const result = await relay.dispatchCommand(parsed.data)
   res.json(result)
-})
+}
+app.post('/internal/browser/command', express.json({ limit: '6mb' }), commandHandler(false))
+// A separate path makes old relays reject bound commands before any effect.
+app.post('/internal/browser/task-command', express.json({ limit: '6mb' }), commandHandler(true))
 
 app.get('/internal/browser/status/:userId', (req, res) => {
   res.json(
@@ -73,12 +77,23 @@ const server = createServer(app)
 const wss = new WebSocketServer({ server, path: '/ext', maxPayload: 8 * 1024 * 1024 })
 
 wss.on('connection', (socket: WebSocket, request) => {
-  socket.on('message', (raw) => relay.handleMessage(socket, raw as Buffer, request.headers.origin))
+  socket.on('message', (raw) => {
+    void relay.handleMessage(socket, raw as Buffer, request.headers.origin).catch(() => {
+      relay.handleDisconnect(socket)
+      socket.close(4401, 'authority unavailable')
+    })
+  })
   socket.on('close', () => relay.handleDisconnect(socket))
   socket.on('error', () => relay.handleDisconnect(socket))
 })
 
-const sweep = setInterval(() => relay.sweepDead(), 30_000)
+let renewing = false
+const sweep = setInterval(() => {
+  relay.sweepDead()
+  if (renewing) return
+  renewing = true
+  void relay.renewAuthority().finally(() => { renewing = false })
+}, 15_000)
 
 server.listen(env.PORT, env.HOST, () => {
   console.log(`browser-relay listening on ${env.HOST}:${env.PORT}`)

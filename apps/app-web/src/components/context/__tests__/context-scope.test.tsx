@@ -68,13 +68,13 @@ describe("[COMP:app-web/context-scope] stable picker and chips", () => {
     expect(html).not.toContain(PROJECT.id);
   });
 
-  it("renders Company-wide when neither axis is bound", () => {
+  it("renders General when neither axis is bound", () => {
     expect(render(
       <ContextScopeChips teamId={null} projectId={null} teams={[TEAM]} projects={[PROJECT]} />,
-    )).toContain("Company-wide");
+    )).toContain("General");
   });
 
-  it("never labels an undisclosed legacy requirement as Company-wide", () => {
+  it("never labels an undisclosed legacy requirement as General", () => {
     const html = render(
       <ContextScopeChips
         teamIds={[]}
@@ -85,7 +85,14 @@ describe("[COMP:app-web/context-scope] stable picker and chips", () => {
       />,
     );
     expect(html).toContain("Additional restricted context");
-    expect(html).not.toContain("Company-wide");
+    expect(html).not.toContain("General");
+  });
+
+  it("keeps General visible beside a project and never treats unresolved departments as General", () => {
+    expect(render(<ContextScopeChips projectId={PROJECT.id} teams={[]} projects={[PROJECT]} />)).toContain("General");
+    const unknown = render(<ContextScopeChips teamIds={["unresolved"]} teams={[]} projects={[]} />);
+    expect(unknown).toContain("Additional restricted context");
+    expect(unknown).not.toContain("General");
   });
 
   it("filters archived registries and can lock each immutable axis independently", () => {

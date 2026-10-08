@@ -44,7 +44,7 @@ describe('protected fill API → tool → relay → direct extension resolve →
         return new Response(JSON.stringify({ ok: true, data }))
       },
     })
-    const local = createLocalBrowserProvider({ transport })
+    const local = createLocalBrowserProvider({ admit: async () => async () => {}, transport })
     const tools = createComputerTools({ local, cloud: { ...local, kind: 'cloud' }, profiles: { store: profiles, assistantClearance: async () => 'confidential' },
       protectedFill: { scope: async () => scope, blocked: () => service.isLocked(scope) },
     })

@@ -107,6 +107,7 @@ import {
   createInMemoryBlockApprovals,
   extractEffectContract,
   RESULT_PATH,
+  AuthoritySourceSchema,
 } from '@use-brian/core'
 import {
   findAssistantById,
@@ -1131,6 +1132,16 @@ describe('[COMP:api/inter-assistant-executor] createCalleeExecutor', () => {
     const call = mockQueryLoop.mock.calls[0][0]
     expect((call.tools as Map<string, unknown>).has('fillBlueprintFromBrain')).toBe(false)
     expect(call.systemPrompt as string).toContain('fillBlueprintFromBrain')
+  })
+
+  it('gives the delegated turn an invocation source so a browser task it starts is not refused', async () => {
+    yieldsText()
+    await executorWithTools(new Map())(baseParams)
+    const authority = mockQueryLoop.mock.calls[0][0].context.executionContext.security.authority
+    const source = authority.snapshotSource()
+    expect(AuthoritySourceSchema.parse(source)).toMatchObject({ version: 1, kind: 'invocation' })
+    // Stable for the whole invocation: a task pinned to it matches later calls.
+    expect(authority.snapshotSource().invocationId).toBe(source.invocationId)
   })
 
   it('keeps the legacy strip on ordinary A2A: ask tools stay callable, no drop note', async () => {
@@ -2799,7 +2810,7 @@ describe('[COMP:sandbox/browser-tools] browser surface on the goal path (workflo
     const unattendedEnabled = () => opts.unattended
     const getWorkspacePlan = async () => 'pro'
     const computer = createComputerTools({
-      local: createLocalBrowserProvider({ transport: null }),
+      local: createLocalBrowserProvider({ admit: async () => async () => {}, transport: null }),
       cloud: createCloudBrowserProvider({ provider, binding: orchestrator.binding }),
       cloudAvailable: () => true,
       profiles,

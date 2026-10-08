@@ -93,3 +93,11 @@ describe("[COMP:app-web/crm-record-route] CRM record route", () => {
       .rejects.toThrow("Owner is not active");
   });
 });
+
+
+describe("[COMP:app-web/crm-record-route] Record denial metadata",()=>{
+  it.each([401,403,500])("preserves HTTP %s for protected consumers",async status=>{
+    authFetch.mockResolvedValue(response({error:"record unavailable"},status));
+    await expect(fetchCrmRecord("workspace","contact")).rejects.toMatchObject({status,message:"record unavailable"});
+  });
+});

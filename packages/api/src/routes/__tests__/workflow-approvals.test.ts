@@ -119,3 +119,11 @@ describe('[COMP:api/approval-routes] POST /approvals/:id/reject', () => {
     expect(mockResume).toHaveBeenCalledWith({}, 'appr-1', 'rejected', 'u-1', 'not safe')
   })
 })
+
+describe('[COMP:api/approval-routes] authority renewal', () => {
+  it.each(['approve','reject'])('returns not found on %s if the bridge loses authority',async action=>{
+    approvalsStore.getById.mockResolvedValueOnce(approvalRow())
+    mockResume.mockResolvedValueOnce({status:'unavailable',runId:null})
+    await request(app('u-1')).post(`/api/approvals/appr-1/${action}`).expect(404,{error:'Approval not found'})
+  })
+})

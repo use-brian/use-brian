@@ -132,7 +132,7 @@ export function createFrameGate(opts: {
   commit: (src: string) => void;
   /** Frees a frame's backing object url. Never called on the on-screen frame. */
   release?: (src: string) => void;
-}): { push: (src: string) => void; dispose: () => void } {
+}): { push: (src: string) => void; clear: () => void; dispose: () => void } {
   let disposed = false;
   let issued = 0;
   let committedSeq = 0;
@@ -163,6 +163,11 @@ export function createFrameGate(opts: {
           // url still has to go back or the socket path leaks one per frame.
           opts.release?.(src);
         });
+    },
+    clear() {
+      committedSeq = ++issued;
+      if (onScreen !== null) opts.release?.(onScreen);
+      onScreen = null;
     },
     dispose() {
       disposed = true;

@@ -13,7 +13,7 @@ const context = (patch: Partial<ToolContext> = {}): ToolContext => ({
   channelType: 'web', channelId: 'fictional-channel', abortSignal: new AbortController().signal,
   activeCapabilities: new Set(capabilities), ...patch,
 })
-const order = { contactId: id(5), idempotencyKey: 'fictional-order-one', lines: [
+const order = { destination: { kind: 'department' as const, departmentId: id(10) }, contactId: id(5), idempotencyKey: 'fictional-order-one', lines: [
   { ticketId: id(6), quantity: 1, attendees: [{ contactId: id(5), name: 'Example Attendee' }] },
 ] }
 function fixture() {
@@ -25,9 +25,15 @@ function fixture() {
 }
 
 describe('[COMP:crm/association-tools] canonical native Association adapters', () => {
+  it('exposes no sponsorship or offline-rescue command: both are documented human-only staff paths', () => {
+    const names = [...fixture().map.keys()]
+    // Sponsorship invitations return a one-time redemption secret that must never enter a model transcript;
+    // offline-payment rescue is the owner/admin finance-review queue.
+    expect(names.filter(name => /sponsor|invitation|allocation|rescue/i.test(name))).toEqual([])
+  })
   it('publishes bounded object schemas without module or provider mutation tools', () => {
     const { tools } = fixture()
-    expect(Object.keys(tools)).toHaveLength(29)
+    expect(Object.keys(tools)).toHaveLength(30)
     for (const tool of Object.values(tools)) expect('shape' in tool.inputSchema).toBe(true)
     expect(Object.keys(tools).filter(name => /enable|disable|reconcile|bind.*provider|mark.*paid/i.test(name))).toEqual([])
     expect(tools.confirmFreeAssociationOrder.requiresConfirmation).toBe(true)
@@ -60,6 +66,12 @@ describe('[COMP:crm/association-tools] canonical native Association adapters', (
     await tools.getAssociationModuleStatus.execute({}, context({ programmaticPrincipal: { kind, credentialId: id(8), userId: id(2) } }))
     expect(execute.mock.calls[0]![0].actor).toMatchObject({ kind, credentialId: id(8) })
     expect(execute.mock.calls[0]![0].authority).toMatchObject({ canWrite: false, canRead: true, canConfigure: false, canReconcileProvider: false })
+  })
+  it('previews destinations with every source and the original actor', async () => {
+    const { tools, execute } = fixture()
+    await tools.previewAssociationOrderDestinations.execute({ contactIds: [id(5), id(6)] }, context())
+    expect(execute.mock.calls[0]![1]).toEqual({ kind: 'preview_order_destinations', contactIds: [id(5), id(6)] })
+    expect(execute.mock.calls[0]![0].actor).toMatchObject({ kind: 'assistant', assistantId: id(3), userId: id(2) })
   })
   it('passes continuation unchanged and leaves disabled history to the service', async () => {
     const { tools, execute } = fixture()

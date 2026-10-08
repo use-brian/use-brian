@@ -31,6 +31,7 @@ export const OfficeGenerationBriefSchema = z.object({
 export type OfficeGenerationBrief = z.infer<typeof OfficeGenerationBriefSchema>
 
 export type OfficeAuthorityProjection = {
+  clearance?: 'public' | 'internal' | 'confidential'
   sensitivity: 'public' | 'internal' | 'confidential'
   visibilityUserIds: string[]
   compartments: string[]
@@ -92,5 +93,13 @@ export class OfficeGenerationFailure extends Error {
   constructor(readonly code: OfficeGenerationFailureCode, message: string) {
     super(message)
     this.name = 'OfficeGenerationFailure'
+  }
+}
+
+/** Missing facts pause construction before a snapshot or export is committed. */
+export class OfficeMaterialFactMissing extends Error {
+  constructor(readonly fields: string[]) {
+    super(`Please provide the required fields: ${fields.join(', ')}`)
+    this.name = 'OfficeMaterialFactMissing'
   }
 }

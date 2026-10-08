@@ -77,9 +77,9 @@ describe('[COMP:crm/intake-verification] Actual backend identity admission', () 
     expect(proof).toMatchObject(f.signed().identityProof)
     expect(proof.requestHash).toMatch(/^[a-f0-9]{64}$/)
     expect(JSON.stringify(proof)).not.toContain('verified@example.com')
-    const exported = await exportCrmOperationsPrivacy(f.workspaceId)
+    const exported = await exportCrmOperationsPrivacy(f.context)
     expect(exported.tables.association_enquiries[0]).toMatchObject({ identity_verification_evidence: proof })
-    expect(await reads.getSubmission(f.workspaceId,accepted.body.submissionId)).toMatchObject({ identityVerificationEvidence: proof })
+    expect(await reads.getSubmission(f.workspaceId,accepted.body.submissionId,f.context.actor)).toMatchObject({ identityVerificationEvidence: proof })
   })
 
   it('rechecks the acknowledging member role inside the version transaction', async () => {

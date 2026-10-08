@@ -72,6 +72,7 @@ import {
 } from "@/components/ui/dropdown-menu";
 import { useSidebarData } from "@/components/doc/doc-sidebar-data";
 import { requestSidebarClose } from "@/lib/sidebar-close";
+import { useLeasedResource } from "@/lib/offline/surface-content-cache";
 
 export function FeedSidebarPanel({ workspaceId }: { workspaceId: string }) {
   const t = useT();
@@ -153,7 +154,7 @@ export function FeedSidebarPanel({ workspaceId }: { workspaceId: string }) {
   // the local "posts changed" signal marks the family stale, so this
   // persistent panel carries no refetch listener of its own (N3).
   const sessionsKey = feedSessionsCacheKey(workspaceId, platform);
-  const sessionsResource = useCachedResource<FeedPlatformSessions>(
+  const sessionsResource = useLeasedResource<FeedPlatformSessions>(
     sessionsKey,
     () =>
       loadFeedPlatformSessions({

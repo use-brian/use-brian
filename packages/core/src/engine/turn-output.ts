@@ -66,6 +66,17 @@ export function createTurnOutputCollector(
   return {
     observe(event) {
       if (event.type === 'assistant_turn') {
+        // A truncated draft can be continued directly with text. Resuming
+        // tools instead starts a new synthesis, which replaces that draft.
+        if (hasToolUse(event.response) && responses.some((response) =>
+          !hasToolUse(response)
+          && (response.stopReason === 'incomplete' || response.stopReason === 'max_tokens')
+          && textBlocks(response).length > 0,
+        )) {
+          responses = []
+          question = undefined
+          retracted = true
+        }
         responses.push(event.response)
       } else if (event.type === 'question') {
         const { type: _, ...validatedQuestion } = event

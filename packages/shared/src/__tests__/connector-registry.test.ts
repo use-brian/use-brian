@@ -78,6 +78,9 @@ describe('[COMP:shared/connector-registry] Official connector registry', () => {
     expect(OFFICIAL_CONNECTOR_TOOLS.office?.map((tool) => tool.name)).toEqual([
       'proposeOfficeEvidenceFill',
       'createOfficeArtifact',
+      'getOfficeClassification',
+      'restrictOfficeClassification',
+      'retryOfficeTemplateImport',
       'getOfficeArtifact',
       'reviseOfficeArtifact',
       'openPdfEditingSession',

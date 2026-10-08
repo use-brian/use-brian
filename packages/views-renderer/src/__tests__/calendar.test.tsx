@@ -188,6 +188,16 @@ describe('[COMP:views/calendar] date coercion', () => {
     expect(coerceIso({ type: 'text', text: 'hi' })).toBeNull()
   })
 
+  it('uses the local day for timestamps and preserves bare calendar days', () => {
+    const rows = [
+      { id: 'day', due: '2026-05-15' },
+      { id: 'instant', due: new Date(2026, 4, 15, 23, 30).toISOString() },
+    ]
+    expect(groupRowsByDay(rows, 'due').get('2026-05-15')).toEqual(rows)
+    expect(currentDayKey(rows, 'due', 'day')).toBe('2026-05-15')
+    expect(currentDayKey(rows, 'due', 'instant')).toBe('2026-05-15')
+  })
+
   it('groupRowsByDay buckets rows by YYYY-MM-DD', () => {
     const map = groupRowsByDay(SAMPLE_CALENDAR.rows, 'due')
     expect(map.get('2026-05-15')?.length).toBe(2)

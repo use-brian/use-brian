@@ -2,7 +2,7 @@
  * [COMP:api/views-routes] Q5 Views routes — auth, validation, payload build.
  */
 
-import { describe, it, expect, vi, beforeEach, type Mocked } from 'vitest'
+import { afterEach, describe, it, expect, vi, beforeEach, type Mocked } from 'vitest'
 import express from 'express'
 import request from 'supertest'
 import { drawingSceneDigest, type DrawingBlock } from '@use-brian/shared/drawing'
@@ -26,6 +26,7 @@ import { viewsRoutes } from '../views.js'
 import { readWorkspacePageDirectory } from '../../db/page-directory.js'
 import type { CrmStore, SavedView, SavedViewStore, SoftDeleteRepository, TaskStore, WorkflowRunStore } from '@use-brian/core'
 import type { WorkspaceStore } from '../../db/workspace-store.js'
+import { query as mockedClientQuery } from '../../db/client.js'
 
 const WORKSPACE_ID = '00000000-0000-0000-0000-000000000010'
 const USER_ID = '00000000-0000-0000-0000-000000000020'
@@ -1388,6 +1389,8 @@ describe('[COMP:api/views-routes] view-page metadata', () => {
   // `comment` role (the indexing toggle re-publishes with indexable only).
   it('POST /views/:id/publish forwards role=comment and echoes the resulting state', async () => {
     const pageGrantStore = {
+      // A live publication: changing its role or indexing is not a new widening.
+      getPublishState: vi.fn().mockResolvedValue({ published: true, indexable: false, role: 'view' }),
       publishPage: vi
         .fn()
         .mockResolvedValue({ published: true, indexable: false, role: 'comment' }),
@@ -1409,6 +1412,8 @@ describe('[COMP:api/views-routes] view-page metadata', () => {
 
   it('POST /views/:id/publish without role leaves role undefined (keeps the stored one)', async () => {
     const pageGrantStore = {
+      // A live publication: changing its role or indexing is not a new widening.
+      getPublishState: vi.fn().mockResolvedValue({ published: true, indexable: false, role: 'view' }),
       publishPage: vi
         .fn()
         .mockResolvedValue({ published: true, indexable: true, role: 'comment' }),
@@ -1421,6 +1426,65 @@ describe('[COMP:api/views-routes] view-page metadata', () => {
     expect(pageGrantStore.publishPage).toHaveBeenCalledWith(
       expect.objectContaining({ indexable: true, role: undefined }),
     )
+  })
+
+  describe('publishing a department page is a reviewed widening (doc.md)', () => {
+    const script = (opts: { department: string | null; role: 'owner' | 'admin' | 'member'; holds: boolean }) => {
+      const calls: string[] = []
+      vi.mocked(mockedClientQuery).mockImplementation((async (sql: string) => {
+        calls.push(sql)
+        if (sql.includes('FROM saved_views v')) return { rows: opts.department ? [{ key: opts.department }] : [] }
+        if (sql.includes('FROM workspace_members')) return { rows: [{ role: opts.role, clearance: 'confidential' }] }
+        if (sql.includes('department_row_allows')) return { rows: [{ ok: opts.holds }] }
+        if (sql.includes('INSERT INTO context_scope_reclassification_events')) return { rows: [], rowCount: 1 }
+        return { rows: [] }
+      }) as never)
+      return calls
+    }
+    const grantStore = () => ({
+      getPublishState: vi.fn().mockResolvedValue({ published: false, indexable: false, role: 'view' }),
+      publishPage: vi.fn().mockResolvedValue({ published: true, indexable: false, role: 'view' }),
+    })
+    afterEach(() => { vi.mocked(mockedClientQuery).mockReset() })
+
+    it('refuses a non-public page without an explicit declassification', async () => {
+      script({ department: null, role: 'owner', holds: true })
+      const pageGrantStore = grantStore()
+      const { app, stores } = makeApp({ userId: USER_ID, pageGrantStore })
+      stores.savedViewStore.getById.mockResolvedValueOnce(savedViewFixture({ clearance: 'internal' }))
+      const res = await request(app).post('/api/views/sv-page-1/publish').send({ indexable: false })
+      expect(res.status).toBe(409)
+      expect(res.body.code).toBe('not_public')
+      expect(pageGrantStore.publishPage).not.toHaveBeenCalled()
+      expect(stores.savedViewStore.update).not.toHaveBeenCalled()
+    })
+
+    it('asks a reviewer for a reason, and refuses a member or a non-holder, without naming the department', async () => {
+      for (const [role, holds, status, code] of [['admin', true, 409, 'department_widening_review_required'], ['member', true, 403, 'department_widening_forbidden'], ['owner', false, 403, 'department_widening_forbidden']] as const) {
+        script({ department: 'team:fictional-cedar', role, holds })
+        const pageGrantStore = grantStore()
+        const { app, stores } = makeApp({ userId: USER_ID, pageGrantStore })
+        stores.savedViewStore.getById.mockResolvedValueOnce(savedViewFixture({ clearance: 'internal' }))
+        const res = await request(app).post('/api/views/sv-page-1/publish').send({ indexable: false, declassify: true })
+        expect(res.status).toBe(status)
+        expect(res.body.code).toBe(code)
+        expect(JSON.stringify(res.body)).not.toContain('fictional-cedar')
+        expect(pageGrantStore.publishPage).not.toHaveBeenCalled()
+        expect(stores.savedViewStore.update).not.toHaveBeenCalled()
+      }
+    })
+
+    it('publishes a reviewed department page and records the widening', async () => {
+      const calls = script({ department: 'team:fictional-cedar', role: 'admin', holds: true })
+      const pageGrantStore = grantStore()
+      const { app, stores } = makeApp({ userId: USER_ID, pageGrantStore })
+      stores.savedViewStore.getById.mockResolvedValueOnce(savedViewFixture({ clearance: 'internal' }))
+      const res = await request(app).post('/api/views/sv-page-1/publish').send({ indexable: false, declassify: true, reason: 'Fictional public launch notes' })
+      expect(res.status).toBe(200)
+      expect(stores.savedViewStore.update).toHaveBeenCalledWith(USER_ID, 'sv-page-1', { clearance: 'public' })
+      expect(pageGrantStore.publishPage).toHaveBeenCalled()
+      expect(calls.some((sql) => sql.includes('INSERT INTO context_scope_reclassification_events'))).toBe(true)
+    })
   })
 
   it('POST /views/:id/publish rejects role=edit (no public write path) with 400', async () => {

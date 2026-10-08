@@ -36,7 +36,7 @@ vi.mock("@/lib/i18n/client", async () => {
 
 import { loadSurfaceCache, resetSurfaceCache } from "@/lib/surface-cache";
 import { workspaceDetailCacheKey } from "@/lib/surface-prefetch";
-import { WorkspaceMembersSection } from "../workspace-sections";
+import { WorkspaceGeneralSection, WorkspaceMembersSection } from "../workspace-sections";
 
 const settle = () => new Promise((resolve) => setTimeout(resolve, 0));
 
@@ -186,13 +186,29 @@ describe("[COMP:app-web/workspace-sections] transfer ownership from the member r
     expect(alert?.textContent).toBe("Casey is at the Free workspace limit.");
   });
 
-  it("is not offered on a Personal workspace", async () => {
+  it("is offered on a formerly personal workspace", async () => {
     routeFetch();
     await mount(detail({ isPersonal: true }));
     await openRowMenu();
 
     expect(menuItem("Demote to member")).toBeDefined();
-    expect(menuItem("Transfer ownership")).toBeUndefined();
+    expect(menuItem("Transfer ownership")).toBeDefined();
+  });
+
+  it("General shows deletion and an invitation hint for a signup workspace with one member", async () => {
+    const row = detail({ isPersonal: true });
+    row.members = row.members.slice(0, 1);
+    authFetchMock.mockResolvedValue({ ok: true, json: async () => ({ ...row, templates: [] }) });
+    await loadSurfaceCache(workspaceDetailCacheKey("w1"), async () => row);
+    await act(async () => { root!.render(<WorkspaceGeneralSection onWorkspaceDeleted={() => {}} />); await settle(); });
+    const advanced = Array.from(document.body.querySelectorAll("button")).find(b => b.textContent?.trim() === "Advanced");
+    expect(advanced).toBeDefined();
+    await act(async () => { advanced!.click(); await settle(); });
+    const transfer = Array.from(document.body.querySelectorAll("button")).find(b => b.textContent === "Transfer ownership");
+    expect(transfer?.disabled).toBe(true);
+    expect(document.body.textContent).toContain("Invite another account through Organization first");
+    expect(Array.from(document.body.querySelectorAll("button")).some(b => b.textContent === "Delete workspace")).toBe(true);
+    expect(document.body.textContent).not.toContain("Your personal workspace");
   });
 
   it("a non-owner gets no row menu at all", async () => {

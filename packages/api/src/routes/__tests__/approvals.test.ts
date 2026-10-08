@@ -55,6 +55,7 @@ function makeApproval(over: Partial<PendingApproval> = {}): PendingApproval {
 type Stores = {
   listPendingForWorkspace: ReturnType<typeof vi.fn>
   getById: ReturnType<typeof vi.fn>
+  respondBrowserSkill: ReturnType<typeof vi.fn>
   respond: ReturnType<typeof vi.fn>
   reviseWorkflowEmailBody: ReturnType<typeof vi.fn>
   getRole: ReturnType<typeof vi.fn>
@@ -86,6 +87,7 @@ function makeApp(stores: Partial<Stores> = {}) {
         listPendingForWorkspace,
         getById,
         respond,
+        respondBrowserSkill: stores.respondBrowserSkill,
         reviseWorkflowEmailBody,
       } as never,
       workspaceStore: { getRole } as never,
@@ -429,6 +431,13 @@ describe('[COMP:api/unified-approvals-route] POST /:id/respond', () => {
     expect(mockResume).not.toHaveBeenCalled()
   })
 
+  it('returns not found when authority changes between the initial lookup and workflow dispatch', async () => {
+    const { app } = makeApp({getById: vi.fn(async () => makeApproval({kind:'workflow_step'}))})
+    mockResume.mockResolvedValueOnce({status:'unavailable',runId:null})
+    await request(app).post('/api/approvals/ap-1/respond').send({decision:'approved'})
+      .expect(404,{error:'Approval not found'})
+  })
+
   it('resolves a workflow_step approval in place via resumeFromApproval', async () => {
     const { app } = makeApp({
       getById: vi.fn(async () => makeApproval({ kind: 'workflow_step' })),
@@ -618,5 +627,38 @@ describe('[COMP:api/unified-approvals-route] email_sender respond (agentmail.md 
       .expect(422)
     expect(res.body.kind).toBe('email_sender')
     expect(res.body.nativeSurface).toBe('web')
+  })
+})
+
+
+describe('[COMP:api/unified-approvals-route] atomic browser standing grant', () => {
+  it('uses atomic settlement without the ordinary response write', async () => {
+    const pending=makeApproval({kind:'browser_skill_send'})
+    const respond=vi.fn()
+    const atomic=vi.fn(async()=>({approval:{...pending,status:'approved'},grantId:'grant-1'}))
+    const {app}=makeApp({getById:vi.fn(async()=>pending),respond,respondBrowserSkill:atomic})
+    const result=await request(app).post('/api/approvals/ap-1/respond').send({decision:'approved',grantAlways:true}).expect(200)
+    expect(result.body.grantId).toBe('grant-1')
+    expect(atomic).toHaveBeenCalledWith('ap-1','u-1','approved',{grantAlways:true,reason:undefined})
+    expect(respond).not.toHaveBeenCalled()
+  })
+  it.each(['approved','rejected'] as const)('uses guarded settlement for %s without a standing grant', async decision => {
+    const pending=makeApproval({kind:'browser_skill_send'})
+    const respond=vi.fn()
+    const atomic=vi.fn(async()=>({approval:{...pending,status:decision},grantId:null}))
+    const {app}=makeApp({getById:vi.fn(async()=>pending),respond,respondBrowserSkill:atomic})
+    await request(app).post('/api/approvals/ap-1/respond').send({decision,reason:'Reviewed'}).expect(200)
+    expect(atomic).toHaveBeenCalledWith('ap-1','u-1',decision,{grantAlways:false,reason:'Reviewed'})
+    expect(respond).not.toHaveBeenCalled()
+  })
+  it('fails closed without atomic wiring and hides authority-denial details', async () => {
+    const pending=makeApproval({kind:'browser_skill_send'})
+    const respond=vi.fn()
+    const missing=makeApp({getById:vi.fn(async()=>pending),respond})
+    await request(missing.app).post('/api/approvals/ap-1/respond').send({decision:'approved',grantAlways:true}).expect(503)
+    const denied=makeApp({getById:vi.fn(async()=>pending),respond,respondBrowserSkill:vi.fn(async()=>{throw Object.assign(new Error('private source'),{code:'profile_authority_denied'})})})
+    const result=await request(denied.app).post('/api/approvals/ap-1/respond').send({decision:'approved',grantAlways:true}).expect(403)
+    expect(result.body).toEqual({error:'approval_authority_denied'})
+    expect(respond).not.toHaveBeenCalled()
   })
 })

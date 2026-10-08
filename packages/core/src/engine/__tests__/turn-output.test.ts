@@ -1,4 +1,5 @@
 import { describe, expect, it } from 'vitest'
+import { z } from 'zod'
 import type {
   AssistantResponse,
   LLMProvider,
@@ -6,10 +7,11 @@ import type {
   ProviderSession,
   SendOptions,
   SessionOptions,
+  StopReason,
   StreamChunk,
 } from '../../providers/types.js'
 import { askQuestionTool } from '../../tools/base/ask-question.js'
-import type { ToolContext } from '../../tools/types.js'
+import { buildTool, type ToolContext } from '../../tools/types.js'
 import { queryLoop, type QueryEvent } from '../query-loop.js'
 import { createTurnOutputCollector } from '../turn-output.js'
 import { NOOP_TURN_LEDGER } from '../turn-ledger.js'
@@ -147,10 +149,10 @@ const context: ToolContext = {
   abortSignal: new AbortController().signal,
 }
 
-const textChunks = (text: string): StreamChunk[] => [
+const textChunks = (text: string, stopReason: StopReason = 'end_turn'): StreamChunk[] => [
   { type: 'message_start', model: 'fixture-model' },
   { type: 'text_delta', text },
-  { type: 'message_end', stopReason: 'end_turn', usage: { inputTokens: 2, outputTokens: 2 } },
+  { type: 'message_end', stopReason, usage: { inputTokens: 2, outputTokens: 2 } },
 ]
 
 const emptyChunks: StreamChunk[] = [
@@ -175,7 +177,7 @@ const rescueChunks: StreamChunk[] = [
   { type: 'message_end', stopReason: 'end_turn', usage: { inputTokens: 2, outputTokens: 2 } },
 ]
 
-async function run(eventsFor: StreamChunk[][], tools = new Map()): Promise<QueryEvent[]> {
+async function run(eventsFor: StreamChunk[][], tools = new Map(), maxTurns = 4): Promise<QueryEvent[]> {
   const events: QueryEvent[] = []
   for await (const event of queryLoop({
     ledger: NOOP_TURN_LEDGER,
@@ -185,7 +187,7 @@ async function run(eventsFor: StreamChunk[][], tools = new Map()): Promise<Query
     messages: [{ role: 'user', content: 'Hello' }],
     tools,
     context,
-    maxTurns: 4,
+    maxTurns,
   })) {
     events.push(event)
   }
@@ -206,6 +208,80 @@ function expectCompleteResponseWasYielded(events: QueryEvent[]): void {
 }
 
 describe('[COMP:engine/turn-output] queryLoop terminal response contract', () => {
+  const lookup = buildTool({
+    name: 'listItems',
+    description: 'List the current items.',
+    inputSchema: z.object({}),
+    async execute() { return { data: { items: ['Alpha', 'Beta', 'Gamma'] } } },
+  })
+  const lookupChunks = (id: string): StreamChunk[] => [
+    { type: 'message_start', model: 'fixture-model' },
+    { type: 'tool_use_start', id, name: 'listItems' },
+    { type: 'tool_use_delta', id, input: '{}' },
+    { type: 'tool_use_end', id },
+    { type: 'message_end', stopReason: 'tool_use', usage: { inputTokens: 2, outputTokens: 2 } },
+  ]
+
+  it.each<StopReason>(['incomplete', 'max_tokens'])(
+    'replaces a %s draft when recovery resumes tools before synthesizing',
+    async (stopReason) => {
+      const draft = 'Three items:\n1. Alpha\n2. Beta\n3. Gamma'
+      const replacement = 'The three current items are Alpha, Beta and Gamma.'
+      const events = await run([
+        lookupChunks('lookup-1'),
+        textChunks(draft, stopReason),
+        lookupChunks('lookup-2'),
+        textChunks(replacement),
+      ], new Map([['listItems', lookup]]))
+
+      // Exercise the canonical selector with actual engine events for both
+      // messaging and delegated/public output, retaining the transcript.
+      for (const format of ['channel', 'compact'] as const) {
+        const collector = createTurnOutputCollector({ format })
+        for (const event of events) collector.observe(event)
+        expect(collector.select()).toEqual({ kind: 'text', text: replacement })
+      }
+      expect(events.filter((event) => event.type === 'tool_result')).toHaveLength(2)
+      expect(events.filter((event) => event.type === 'assistant_turn')).toHaveLength(4)
+      expect(events.some((event) => event.type === 'assistant_turn'
+        && event.response.content.some((block) => block.type === 'text' && block.text === draft))).toBe(true)
+      expectCompleteResponseWasYielded(events)
+    },
+  )
+
+  it.each<StopReason>(['incomplete', 'max_tokens'])(
+    'does not revive a %s draft when tool recovery ends empty',
+    async (stopReason) => {
+      const events = await run([
+        lookupChunks('lookup-1'),
+        textChunks('Three unfinished items: Alpha, Beta, Gamma', stopReason),
+        lookupChunks('lookup-2'),
+        emptyChunks,
+      ], new Map([['listItems', lookup]]), 7)
+      const collector = createTurnOutputCollector({ format: 'channel' })
+      for (const event of events) collector.observe(event)
+      expect(collector.select()).toEqual({ kind: 'empty', reason: 'tools_only' })
+      expectCompleteResponseWasYielded(events)
+    },
+  )
+
+  it.each<StopReason>(['incomplete', 'max_tokens'])(
+    'preserves a %s fragment when recovery continues directly with text',
+    async (stopReason) => {
+      const events = await run([
+        lookupChunks('lookup-1'),
+        textChunks('First item: Alpha.', stopReason),
+        textChunks('Second item: Beta.'),
+      ], new Map([['listItems', lookup]]))
+      for (const format of ['channel', 'compact'] as const) {
+        const collector = createTurnOutputCollector({ format })
+        for (const event of events) collector.observe(event)
+        expect(collector.select()).toEqual({ kind: 'text', text: 'First item: Alpha.\nSecond item: Beta.' })
+      }
+      expectCompleteResponseWasYielded(events)
+    },
+  )
+
   it('yields the normal terminal response through assistant_turn first', async () => {
     expectCompleteResponseWasYielded(await run([textChunks('Done.')]))
   })
@@ -216,6 +292,23 @@ describe('[COMP:engine/turn-output] queryLoop terminal response contract', () =>
       new Map([['askQuestion', askQuestionTool]]),
     ))
   })
+
+  it.each<StopReason>(['incomplete', 'max_tokens'])(
+    'preserves the current question when a %s draft is retracted',
+    async (stopReason) => {
+      const events = await run(
+        [textChunks('An unfinished answer', stopReason), questionChunks],
+        new Map([['askQuestion', askQuestionTool]]),
+      )
+      const collector = createTurnOutputCollector()
+      for (const event of events) collector.observe(event)
+      expect(collector.select()).toMatchObject({
+        kind: 'question',
+        question: { question: 'Which one?', options: ['A', 'B'] },
+      })
+      expectCompleteResponseWasYielded(events)
+    },
+  )
 
   it('yields the exhausted empty response through assistant_turn first', async () => {
     expectCompleteResponseWasYielded(await run([emptyChunks]))

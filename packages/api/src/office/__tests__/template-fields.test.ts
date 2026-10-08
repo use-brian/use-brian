@@ -32,7 +32,7 @@ describe('[COMP:api/office-template-fields] configured template completion', () 
     const { template } = fixture()
     const field = template.fields[0]!
     field.required = true
-    for (const value of ['', '   ']) expect(() => validateTemplateFieldValues(template, { X: value })).toThrow('must not be blank')
+    for (const value of ['', '   ']) expect(() => validateTemplateFieldValues(template, { X: value })).toThrow('required fields: X')
     field.maxLength = 3
     expect(() => validateTemplateFieldValues(template, { X: 'long' })).toThrow('maxLength')
     expect(() => validateTemplateFieldValues(template, { Y: 'hi' })).toThrow('do not match')
@@ -117,7 +117,7 @@ describe('[COMP:api/office-template-fields] configured template completion', () 
     const generate = () => generateDocumentFromTemplate({ template, provider: provider as never, model: 'test', artifactId: snapshot.artifactId, workspaceId: snapshot.workspaceId, templateVersionId: snapshot.templateVersionId!, outcome: 'Fill', audience: 'Team', onFitPolicy })
     await expect(generate()).rejects.toThrow('requires a number')
     value = ''
-    await expect(generate()).rejects.toThrow('must not be blank')
+    await expect(generate()).rejects.toThrow('required fields: X')
     value = '1234'
     await expect(generate()).rejects.toThrow('maxLength')
     expect(onFitPolicy).not.toHaveBeenCalled()
@@ -136,7 +136,7 @@ describe('[COMP:api/office-template-fields] configured template completion', () 
     let value: unknown = { valueType: 'blank', value: null }
     const provider = { async *stream() { yield { type: 'text_delta', text: JSON.stringify({ title: 'Result', values: { AMOUNT: value } }) } } }
     const generate = () => generateSpreadsheetFromTemplate({ template, provider: provider as never, model: 'test', artifactId: snapshot.artifactId, workspaceId: snapshot.workspaceId, templateVersionId: snapshot.templateVersionId!, outcome: 'Fill', audience: 'Team' })
-    await expect(generate()).rejects.toThrow('must not be blank')
+    await expect(generate()).rejects.toThrow('required fields: AMOUNT')
     value = { valueType: 'string', value: '12' }
     await expect(generate()).rejects.toThrow('requires a number')
     value = { valueType: 'number', value: 12 }

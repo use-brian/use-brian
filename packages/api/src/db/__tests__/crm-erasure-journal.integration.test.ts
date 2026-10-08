@@ -16,6 +16,15 @@ async function fixture() {
 }
 describe('[COMP:operations/crm-recovery] Transactional erasure effects',()=>{
   afterAll(async()=>{await pool.end();await app.end()})
+  it('registers durable workflow authority receipts and admission tables in fresh schema recovery', async () => {
+    const tables = ['workspace_file_workflow_admissions','workflow_task_event_receipts','workflow_task_pause_admissions',
+      'workflow_knowledge_event_receipts','workflow_page_event_receipts','workflow_page_event_observations']
+    const rows = (await pool.query(`SELECT t.table_name,cardinality(t.key_columns)>0 AS keyed,
+      EXISTS(SELECT 1 FROM pg_trigger g WHERE g.tgrelid=('public.'||t.table_name)::regclass
+        AND g.tgname='crm_recovery_capture' AND g.tgenabled='O') AS captured
+      FROM crm_erasure_journal_targets t WHERE t.table_name=ANY($1::text[]) ORDER BY t.table_name`,[tables])).rows
+    expect(rows).toEqual(tables.sort().map(table_name=>({table_name,keyed:true,captured:true})))
+  })
   it('captures only changed after-values and keys, with rollback and transaction-local isolation',async()=>{
     const f=await fixture(),client=await pool.connect()
     try {

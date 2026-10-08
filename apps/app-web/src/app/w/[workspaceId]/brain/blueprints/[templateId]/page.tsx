@@ -109,6 +109,7 @@ import {
   SelectTrigger,
   SelectValue,
 } from "@/components/ui/select";
+import { useLeasedResource } from "@/lib/offline/surface-content-cache";
 
 /** Grow a textarea to its content (document feel — the page scrolls, not the
  *  field). Local copy of SkillDocument's module-private hook. */
@@ -143,7 +144,7 @@ function BlueprintEditorInner({ templateId }: { templateId: string }) {
   // BRAIN_REFRESH_EVENT (this page fires `requestBrainRefresh` after its own
   // writes). `getCustomPageTemplate` throws on a non-OK response, so a cold
   // `error` is not-found.
-  const cached = useCachedResource<CustomPageTemplate>(
+  const cached = useLeasedResource<CustomPageTemplate>(
     activeId ? brainBlueprintCacheKey(activeId, templateId) : null,
     () => getCustomPageTemplate(activeId ?? "", templateId),
   );

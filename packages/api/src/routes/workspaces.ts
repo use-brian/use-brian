@@ -9,14 +9,14 @@ import { resolveWorkspaceViewpoint } from '../db/workspace-viewpoint.js'
  *
  * [COMP:api/workspaces-route]
  *
- *   POST   /                                              — create workspace (non-personal; gated by plan)
+ *   POST   /                                              — create workspace (gated by plan)
  *   GET    /                                              — list user's workspaces
  *   PATCH  /:workspaceId/picker-preferences               — update caller's pin/hide/recency
  *   GET    /:workspaceId                                  — get workspace details + members
  *   PATCH  /:workspaceId                                  — update workspace name
- *   DELETE /:workspaceId                                  — delete workspace (owner only, non-personal)
+ *   DELETE /:workspaceId                                  — delete workspace (owner only)
  *   DELETE /:workspaceId/data                             — flush all workspace data, keep the shell (owner only)
- *   POST   /:workspaceId/transfer-ownership               — transfer ownership to another member (owner only, non-personal)
+ *   POST   /:workspaceId/transfer-ownership               — transfer ownership to another member (owner only)
  *   POST   /:workspaceId/members                          — add member by email
  *   DELETE /:workspaceId/members/:userId                  — remove member
  *   PATCH  /:workspaceId/members/:userId                  — update member role
@@ -894,9 +894,7 @@ export function workspaceRoutes({
   // ── POST /:workspaceId/transfer-ownership — transfer to another member ──
   //
   // Owner-only, explicit, audited (workspaces.md → "Ownership transfer").
-  // The new owner must already be a workspace member. Personal workspaces
-  // are never transferable (tied to the owner's account lifecycle; the
-  // partial unique index permits at most one personal workspace per owner).
+  // The new owner must already be a workspace member. All workspaces qualify.
   // On success the target becomes `owner`, the acting owner steps down to
   // `admin`, and billing responsibility (the workspace's plan + Stripe
   // state) rides with the workspace row — future billing actions belong to
@@ -934,12 +932,6 @@ export function workspaceRoutes({
           return
         case 'not_owner':
           res.status(403).json({ error: 'Only the workspace owner can transfer ownership' })
-          return
-        case 'personal_workspace':
-          res.status(400).json({
-            error: 'personal_workspace_not_transferable',
-            message: 'Personal workspaces are tied to your account and cannot be transferred.',
-          })
           return
         case 'already_owner':
           res.status(400).json({ error: 'already_owner', message: 'You already own this workspace.' })

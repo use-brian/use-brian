@@ -5,6 +5,15 @@ import { beforeEach, describe, expect, it, vi } from 'vitest'
 import express from 'express'
 import request from 'supertest'
 
+// The session read gate now loads workspace authority for private sessions too.
+vi.mock('../../db/client.js', () => ({
+  query: vi.fn(async () => ({ rows: [{ workspaceId: 'ws-1' }] })),
+}))
+vi.mock('../../db/workspace-store.js', () => ({
+  getWorkspaceMembershipWithReadScopeSystem: vi.fn(async () => ({
+    clearance: 'internal', compartments: null, projectIds: null,
+  })),
+}))
 vi.mock('../../workflow/approval.js', () => ({
   enqueueToolInvocationResume: vi.fn(async () => ({ kind: 'enqueued', jobId: 'job-1' })),
 }))

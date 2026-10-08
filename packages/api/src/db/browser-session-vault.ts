@@ -3,9 +3,11 @@
  *
  * [COMP:sandbox/session-vault]
  */
-import type { SessionBundle, SessionVault, VaultSessionInfo } from '@use-brian/core'
+import type { BrowserProfileAuthority, SessionBundle, SessionVault, VaultSessionInfo } from '@use-brian/core'
+import type { PoolClient } from 'pg'
 import { query } from './client.js'
 import { decryptCredentials, encryptCredentials } from './credential-crypto.js'
+import { createBrowserProfileStore, withBrowserProfileOwnerMutation } from './browser-profile-store.js'
 
 export type BrowserSessionVault = SessionVault & {
   purgeInactive(): Promise<number>
@@ -16,20 +18,33 @@ export function createBrowserSessionVault(opts: { encryptionKey: Buffer }): Brow
     throw new Error('browser-session-vault: BROWSER_VAULT_ENCRYPTION_KEY must be 32 bytes (aes-256-gcm)')
   }
 
+  async function admit<T>(profileId: string, operation: (client: PoolClient) => Promise<T>, expectedProfile?: BrowserProfileAuthority): Promise<T> {
+    const profile = expectedProfile ?? await createBrowserProfileStore().get(profileId)
+    if (!profile) throw Object.assign(new Error('Profile authority unavailable'), { code: 'profile_authority_denied' })
+    return withBrowserProfileOwnerMutation(profileId, profile, operation)
+  }
+
   return {
-    async get({ profileId, site }) {
-      const res = await query<{ encrypted_bundle: Buffer }>(
-        `SELECT encrypted_bundle FROM browser_sessions
-          WHERE profile_id = $1 AND site = $2 AND status = 'active'`,
-        [profileId, site],
-      )
-      const row = res.rows[0]
-      return row ? decryptCredentials<SessionBundle>(row.encrypted_bundle, opts.encryptionKey) : null
+    async get({ profileId, site }, expectedProfile) {
+      try {
+        return await admit(profileId, async client => {
+          const res = await client.query<{ encrypted_bundle: Buffer }>(
+            `SELECT encrypted_bundle FROM browser_sessions
+              WHERE profile_id = $1 AND site = $2 AND status = 'active'`,
+            [profileId, site],
+          )
+          const row = res.rows[0]
+          return row ? decryptCredentials<SessionBundle>(row.encrypted_bundle, opts.encryptionKey) : null
+        }, expectedProfile)
+      } catch (error) {
+        if ((error as { code?: string })?.code === 'profile_authority_denied') return null
+        throw error
+      }
     },
 
-    async put({ profileId, site, bundle }) {
+    async put({ profileId, site, bundle }, expectedProfile) {
       const blob = encryptCredentials(bundle, opts.encryptionKey)
-      await query(
+      const persist = async (execute: typeof query) => { await execute(
         `INSERT INTO browser_sessions
            (user_id, workspace_id, profile_id, site, encrypted_bundle, status, captured_at, updated_at)
          SELECT bp.owner_user_id, bp.workspace_id, bp.id, $2, $3, 'active', now(), now()
@@ -40,23 +55,24 @@ export function createBrowserSessionVault(opts: { encryptionKey: Buffer }): Brow
                        captured_at = now(),
                        updated_at = now()`,
         [profileId, site, blob],
-      )
+      ) }
+      await admit(profileId, client => persist(client.query.bind(client)), expectedProfile)
     },
 
-    async markDead({ profileId, site }) {
-      await query(
+    async markDead({ profileId, site }, expectedProfile) {
+      await admit(profileId, async client => { await client.query(
         `UPDATE browser_sessions SET status = 'dead', updated_at = now()
           WHERE profile_id = $1 AND site = $2`,
         [profileId, site],
-      )
+      ) }, expectedProfile)
     },
 
-    async touch({ profileId, site }) {
-      await query(
+    async touch({ profileId, site }, expectedProfile) {
+      await admit(profileId, async client => { await client.query(
         `UPDATE browser_sessions SET last_used_at = now(), updated_at = now()
           WHERE profile_id = $1 AND site = $2`,
         [profileId, site],
-      )
+      ) }, expectedProfile)
     },
 
     async list({ profileId }): Promise<VaultSessionInfo[]> {
@@ -79,8 +95,10 @@ export function createBrowserSessionVault(opts: { encryptionKey: Buffer }): Brow
       }))
     },
 
-    async revoke({ profileId, site }) {
-      await query(`DELETE FROM browser_sessions WHERE profile_id = $1 AND site = $2`, [profileId, site])
+    async revoke({ profileId, site }, expectedProfile) {
+      await admit(profileId, async client => {
+        await client.query('DELETE FROM browser_sessions WHERE profile_id=$1 AND site=$2', [profileId, site])
+      }, expectedProfile)
     },
 
     async purgeInactive() {

@@ -1,5 +1,6 @@
 /** Intake-backed, atomic waitlist promotion. [COMP:crm/association-waitlist] */
 import type { Pool, PoolClient } from 'pg'
+import { associationOrderReadPredicate, assertAssociationOrderAuthority, withAssociationWaitlistSubmission } from './source-scope.js'
 import {
   AssociationOrderCreateSchema, AssociationWaitlistOfferInputSchema, associationWaitlistReferences,
   CrmOperationsError, crmOperationsSha256, requireCrmIntegrationResources,
@@ -16,29 +17,39 @@ type Submission = { id: string; contact_id: string; definition_id: string; defin
 export type WaitlistListInput = AssociationListInput & { eventId?: string; includeClosed?: boolean;
   allowedEventIds?: readonly string[]; allowedDefinitionIds?: readonly string[] }
 
-export async function listAssociationWaitlist(pool: Pool, workspaceId: string, input: WaitlistListInput): Promise<AssociationPage> {
-  return queryCrmPage((sql, params) => pool.query(sql, params), {
-    workspaceId, resource: 'association.waitlist', key: 'items', query: { limit: input.limit, cursor: input.cursor ?? undefined, createdAfter: input.createdAfter, createdBefore: input.createdBefore },
-    params: [workspaceId, input.eventId ?? null, input.includeClosed ?? false,
-      input.allowedEventIds ?? null, input.allowedDefinitionIds ?? null],
-    sql: `SELECT q.id,q.contact_id AS "contactId",c.display_name AS "contactName",
-      q.definition_id AS "definitionId",q.definition_version_id AS "definitionVersionId",q.queue_key AS "queueKey",q.status,
-      q.submitted_data->>'association_event_id' AS "eventId",q.submitted_data->>'association_ticket_id' AS "ticketId",
-      q.created_at AS "createdAt",q.updated_at AS "updatedAt",latest.id AS "offerId",latest.promotion_id AS "promotionId",
-      latest.order_id AS "orderId",latest.order_status AS "orderStatus",latest.reservation_expires_at AS "reservationExpiresAt",
-      CASE WHEN q.status IN('resolved','spam') THEN 'closed' WHEN latest.order_status='paid' THEN 'converted'
-        WHEN latest.order_status='pending' THEN 'offered' ELSE 'waiting' END AS "waitlistState"
-      FROM association_enquiries q JOIN entities c ON c.workspace_id=q.workspace_id AND c.id=q.contact_id
-      LEFT JOIN LATERAL(SELECT f.id,f.promotion_id,f.order_id,o.status order_status,o.reservation_expires_at
-        FROM association_waitlist_offers f JOIN association_orders o ON o.workspace_id=f.workspace_id AND o.id=f.order_id
-        WHERE f.workspace_id=q.workspace_id AND f.submission_id=q.id ORDER BY f.created_at DESC,f.id DESC LIMIT 1) latest ON true
-      WHERE q.workspace_id=$1 AND q.definition_version_id IS NOT NULL
-        AND q.definition_schema_snapshot->>'queueKey'='association_waitlist'
-        AND ($2::text IS NULL OR q.submitted_data->>'association_event_id'=$2)
-        AND ($3::boolean OR q.status NOT IN('resolved','spam'))
-        AND ($4::text[] IS NULL OR q.submitted_data->>'association_event_id'=ANY($4::text[]))
-        AND ($5::uuid[] IS NULL OR q.definition_id=ANY($5::uuid[]))`,
-  })
+export async function listAssociationWaitlist(pool: Pool, workspaceId: string, input: WaitlistListInput, actor: AssociationActor): Promise<AssociationPage> {
+  const client = await pool.connect()
+  try {
+    const submissionScope = await associationOrderReadPredicate(client, workspaceId, actor, 6, 'submission')
+    const orderScope = await associationOrderReadPredicate(client, workspaceId, actor, 6 + submissionScope.params.length, 'order')
+    return await queryCrmPage((sql, params) => client.query(sql, params), {
+      workspaceId, resource: 'association.waitlist', key: 'items', query: { limit: input.limit, cursor: input.cursor ?? undefined, createdAfter: input.createdAfter, createdBefore: input.createdBefore },
+      params: [workspaceId, input.eventId ?? null, input.includeClosed ?? false,
+        input.allowedEventIds ?? null, input.allowedDefinitionIds ?? null, ...submissionScope.params, ...orderScope.params],
+      sql: `SELECT q.id,q.contact_id AS "contactId",c.display_name AS "contactName",
+        q.definition_id AS "definitionId",q.definition_version_id AS "definitionVersionId",q.queue_key AS "queueKey",q.status,
+        q.submitted_data->>'association_event_id' AS "eventId",q.submitted_data->>'association_ticket_id' AS "ticketId",
+        q.created_at AS "createdAt",q.updated_at AS "updatedAt",latest.id AS "offerId",latest.promotion_id AS "promotionId",
+        latest.order_id AS "orderId",latest.order_status AS "orderStatus",latest.reservation_expires_at AS "reservationExpiresAt",
+        CASE WHEN q.status IN('resolved','spam') THEN 'closed' WHEN latest.order_status='paid' THEN 'converted'
+          WHEN latest.order_status='pending' THEN 'offered' ELSE 'waiting' END AS "waitlistState"
+        FROM association_enquiries q JOIN entities c ON c.workspace_id=q.workspace_id AND c.id=q.contact_id
+        LEFT JOIN LATERAL(SELECT f.id,f.promotion_id,f.order_id,o.status order_status,o.reservation_expires_at
+          FROM association_waitlist_offers f JOIN association_orders o ON o.workspace_id=f.workspace_id AND o.id=f.order_id
+          WHERE f.workspace_id=q.workspace_id AND f.submission_id=q.id ORDER BY f.created_at DESC,f.id DESC LIMIT 1) latest ON true
+        WHERE q.workspace_id=$1 AND q.definition_version_id IS NOT NULL
+          AND q.definition_schema_snapshot->>'queueKey'='association_waitlist'
+          AND ($2::text IS NULL OR q.submitted_data->>'association_event_id'=$2)
+          AND ($3::boolean OR q.status NOT IN('resolved','spam'))
+          AND ($4::text[] IS NULL OR q.submitted_data->>'association_event_id'=ANY($4::text[]))
+          AND ($5::uuid[] IS NULL OR q.definition_id=ANY($5::uuid[]))
+          AND ${submissionScope.sql.replaceAll('association_enquiries.', 'q.')}
+          AND NOT EXISTS (SELECT 1 FROM association_waitlist_offers f
+            JOIN association_orders o ON o.workspace_id=f.workspace_id AND o.id=f.order_id
+            WHERE f.workspace_id=q.workspace_id AND f.submission_id=q.id
+              AND NOT ${orderScope.sql.replaceAll('association_orders.', 'o.')})`,
+    })
+  } finally { client.release() }
 }
 
 export async function offerAssociationWaitlist(client: PoolClient, workspaceId: string, raw: AssociationWaitlistOfferInput,
@@ -49,6 +60,7 @@ export async function offerAssociationWaitlist(client: PoolClient, workspaceId: 
   if (actor.credentialKind === 'integration_key' && actor.integration?.credentialId !== actor.credentialId) throw new CrmOperationsError('not_authorized', 'Credential-derived integration authority is required.')
   const current = actor.credentialKind === 'integration_key' ? await lockCrmIntegrationCredential(client, workspaceId, actor.credentialId) : undefined
   const module = await lockAssociationModule(client, workspaceId)
+  await assertAssociationOrderAuthority(client, workspaceId, input.submissionId, actor, 'submission')
   await client.query("SELECT pg_advisory_xact_lock(hashtextextended('association-promotion:'||$1::uuid::text||':'||$2::uuid::text,0))", [workspaceId, input.promotionId])
   const select = `SELECT id,contact_id,definition_id,definition_version_id,definition_schema_snapshot,submitted_data,status
     FROM association_enquiries WHERE workspace_id=$1 AND id=$2`
@@ -65,6 +77,7 @@ export async function offerAssociationWaitlist(client: PoolClient, workspaceId: 
     [workspaceId, input.promotionId],
   )).rows[0]
   const resultFor = async (offer: NonNullable<Awaited<ReturnType<typeof replay>>>, created: boolean): Promise<MutationResult> => {
+    await assertAssociationOrderAuthority(client, workspaceId, offer.order_id, actor)
     if (offer.request_fingerprint !== requestHash) throw new CrmOperationsError('idempotency_conflict', 'Promotion identity was already used for a different waitlist offer.')
     return { record: { id: offer.id, submissionId: offer.submission_id, promotionId: offer.promotion_id,
       orderId: offer.order_id, order: await getOrder(offer.order_id) }, created }
@@ -89,14 +102,14 @@ export async function offerAssociationWaitlist(client: PoolClient, workspaceId: 
   const contact = (await client.query<{ display_name: string; attributes: Record<string, unknown> }>(`SELECT display_name,attributes FROM entities
     WHERE workspace_id=$1 AND id=$2 AND kind='person' AND valid_to IS NULL AND retracted_at IS NULL FOR SHARE`, [workspaceId, locked.contact_id])).rows[0]
   if (!contact) throw new CrmOperationsError('not_found', 'The waitlist contact is unavailable.')
-  const order = await createOrder(AssociationOrderCreateSchema.parse({
+  const order = await withAssociationWaitlistSubmission(client, workspaceId, input.submissionId, actor, () => createOrder(AssociationOrderCreateSchema.parse({
     contactId: locked.contact_id, idempotencyKey: `waitlist:${input.promotionId}`, reservationMinutes: input.reservationMinutes,
     lines: [{ ticketId: references.ticketId, quantity: 1, useMemberPrice: input.useMemberPrice,
       attendees: [{ contactId: locked.contact_id, name: contact.display_name,
         ...(typeof contact.attributes.email === 'string' && contact.attributes.email ? { email: contact.attributes.email } : {}),
         metadata: { waitlistSubmissionId: locked.id } }] }],
     metadata: { waitlistSubmissionId: locked.id, waitlistPromotionId: input.promotionId },
-  }))
+  })))
   if (!order.created) throw new CrmOperationsError('conflict', 'The promotion order identity already exists without a waitlist link.')
   const saved = (await client.query<NonNullable<Awaited<ReturnType<typeof replay>>>>(`INSERT INTO association_waitlist_offers
     (workspace_id,submission_id,ticket_id,promotion_id,order_id,request_fingerprint,actor_kind,actor_credential_id)

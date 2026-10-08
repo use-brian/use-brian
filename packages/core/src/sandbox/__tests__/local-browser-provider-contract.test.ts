@@ -15,7 +15,7 @@ describe('local browser provider wire contracts', () => {
     { url: 'https://example.com', title: 'Example', nodes: [{ role: 'button', name: 'Save' }] },
   ])('preserves snapshot identity/state and accepts legacy snapshots: %#', async data => {
     const send = vi.fn(async () => ({ ok: true as const, data }))
-    const provider = createLocalBrowserProvider({ transport: { send } })
+    const provider = createLocalBrowserProvider({ admit: async () => async () => {}, transport: { send } })
     expect(await provider.snapshot(ctx, { mode: 'full' })).toEqual(data)
     expect(send).toHaveBeenCalledExactlyOnceWith({ userId: 'u', browserProfileId: 'p', op: 'snapshot', args: { mode: 'full' } })
   })
@@ -26,14 +26,14 @@ describe('local browser provider wire contracts', () => {
   it('sends one ordered batch and preserves per-field failures', async () => {
     const data = { fields: [{ ref: 'a', status: 'success' }, { ref: 'b', status: 'failed', error: 'replaced' }, { ref: 'c', status: 'skipped' }] }
     const send = vi.fn(async () => ({ ok: true as const, data }))
-    const provider = createLocalBrowserProvider({ transport: { send } })
+    const provider = createLocalBrowserProvider({ admit: async () => async () => {}, transport: { send } })
     const fields = [{ action: 'fill' as const, ref: 'a', value: 'hello' }, { action: 'select' as const, ref: 'b', value: 'x' }, { action: 'check' as const, ref: 'c', checked: false }]
     expect(await provider.fillForm!(ctx, fields)).toEqual(data)
     expect(send).toHaveBeenCalledExactlyOnceWith({ userId: 'u', browserProfileId: 'p', op: 'fillForm', args: { fields } })
   })
   it('rejects oversized batches before transport and propagates unsupported Firefox', async () => {
     const send = vi.fn(async () => ({ ok: false as const, code: 'unsupported_browser', error: 'Not implemented in Firefox' }))
-    const provider = createLocalBrowserProvider({ transport: { send } })
+    const provider = createLocalBrowserProvider({ admit: async () => async () => {}, transport: { send } })
     await expect(provider.fillForm!(ctx, Array(51).fill({ action: 'fill', ref: 'a', value: '' }))).rejects.toThrow()
     await expect(provider.fillForm!(ctx, [{ action: 'fill', ref: 'a', value: 'first' }, { action: 'fill', ref: 'a', value: 'last' }])).rejects.toThrow(/Duplicate/)
     expect(send).not.toHaveBeenCalled()

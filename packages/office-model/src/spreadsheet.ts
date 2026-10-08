@@ -1,5 +1,5 @@
 /** Deterministic spreadsheet calculation and address helpers. [COMP:office/spreadsheet-model] */
-import type { SpreadsheetCell, SpreadsheetSnapshot, SpreadsheetWorksheet } from './model.js'
+import type { SpreadsheetCell, SpreadsheetCellStyle, SpreadsheetSnapshot, SpreadsheetWorksheet } from './model.js'
 
 export type SpreadsheetFormulaError = Exclude<SpreadsheetCell['error'], undefined>
 export type SpreadsheetCalculationIssue = { sheetId: string; address: string; error: SpreadsheetFormulaError; message: string }
@@ -7,6 +7,8 @@ export type SpreadsheetCalculationIssue = { sheetId: string; address: string; er
 type Scalar = string | number | boolean | null
 type Value = Scalar | Scalar[]
 type Token = { kind: 'number' | 'string' | 'ref' | 'identifier' | 'operator' | 'left' | 'right' | 'comma' | 'colon'; value: string }
+
+const SUPPORTED_FORMULAS = new Set(['SUM', 'SUMPRODUCT', 'COUNT', 'ROUND', 'IF', 'IFERROR', 'OR', 'ROW', 'TRUE', 'FALSE', 'LEN', 'TRIM', 'LEFT', 'ISNUMBER', 'MOD'])
 
 const ERROR_VALUES = new Set<SpreadsheetFormulaError>(['#DIV/0!', '#N/A', '#NAME?', '#NULL!', '#NUM!', '#REF!', '#VALUE!', '#CIRCULAR!'])
 
@@ -241,11 +243,28 @@ class Parser {
       if (identifier.value === 'TRUE') return true
       if (identifier.value === 'FALSE') return false
       if (!this.take('left')) throw new FormulaFailure('#NAME?', `Unknown name ${identifier.value}`)
-      const args: Value[] = []
-      if (!this.peek('right')) {
-        do { args.push(this.comparison()) } while (this.take('comma'))
+      // Split arguments before evaluation: Excel IF/IFERROR must not evaluate
+      // an unselected branch (e.g. a missing draft date divided by zero).
+      const groups: Token[][] = []
+      let begin = this.index
+      let depth = 0
+      while (this.index < this.tokens.length) {
+        const token = this.tokens[this.index]!
+        if (token.kind === 'right' && depth === 0) break
+        if (token.kind === 'comma' && depth === 0) { groups.push(this.tokens.slice(begin,this.index)); begin = this.index + 1 }
+        if (token.kind === 'left') depth += 1
+        if (token.kind === 'right') depth -= 1
+        this.index += 1
       }
+      if (this.index > begin) groups.push(this.tokens.slice(begin,this.index))
       if (!this.take('right')) throw new FormulaFailure('#VALUE!', `Function ${identifier.value} is missing a closing parenthesis`)
+      const evaluate = (index: number, fallback: Value): Value => groups[index]?.length ? new Parser(groups[index]!,this.currentRow,this.resolveReference).parse() : fallback
+      if (identifier.value === 'IF') return truthy(scalar(evaluate(0,false))) ? evaluate(1,true) : evaluate(2,false)
+      if (identifier.value === 'IFERROR') {
+        try { const value = evaluate(0,null); return isError(scalar(value)) ? evaluate(1,null) : value }
+        catch (cause) { if (cause instanceof FormulaFailure) return evaluate(1,null); throw cause }
+      }
+      const args = groups.map((_,index) => evaluate(index,null))
       return this.functionValue(identifier.value, args)
     }
     if (this.take('left')) {
@@ -279,6 +298,19 @@ class Parser {
       const digits = Math.trunc(toNumber(scalar(args[1] ?? 0)))
       const factor = 10 ** digits
       return Math.round((toNumber(scalar(args[0] ?? 0)) + Number.EPSILON) * factor) / factor
+    }
+    if (name === 'LEN') return String(scalar(args[0] ?? '') ?? '').length
+    if (name === 'TRIM') return String(scalar(args[0] ?? '') ?? '').replace(/^ +| +$/g,'').replace(/ +/g,' ')
+    if (name === 'LEFT') {
+      const count = Math.trunc(toNumber(scalar(args[1] ?? 1)))
+      if (count < 0) throw new FormulaFailure('#VALUE!', 'LEFT length must not be negative')
+      return String(scalar(args[0] ?? '') ?? '').slice(0,count)
+    }
+    if (name === 'ISNUMBER') return typeof scalar(args[0] ?? null) === 'number'
+    if (name === 'MOD') {
+      const number = toNumber(scalar(args[0] ?? 0)), divisor = toNumber(scalar(args[1] ?? 0))
+      if (divisor === 0) throw new FormulaFailure('#DIV/0!', 'MOD divisor must not be zero')
+      return number - divisor * Math.floor(number / divisor)
     }
     if (name === 'COUNT') return values.filter((value) => typeof value === 'number').length
     if (name === 'SUM') return values.reduce<number>((sum, value) => sum + (typeof value === 'number' ? value : 0), 0)
@@ -317,7 +349,9 @@ export function recalculateSpreadsheet(snapshot: SpreadsheetSnapshot): { snapsho
     visiting.add(key)
     try {
       const address = parseCellAddress(cell.address)
-      const parser = new Parser(tokenize(cell.formula.replace(/^=/, '')), address?.row ?? 1, (reference) => {
+      const tokens = tokenize(cell.formula.replace(/^=/, ''))
+      if (tokens.some(token => token.kind === 'identifier' && !SUPPORTED_FORMULAS.has(token.value))) throw new FormulaFailure('#NAME?', 'Unsupported formula function')
+      const parser = new Parser(tokens, address?.row ?? 1, (reference) => {
         const separator = reference.lastIndexOf('!')
         const targetSheet = separator >= 0 ? sheetsByName.get(reference.slice(0, separator).toLocaleLowerCase()) : sheet
         const targetAddress = normalizeCellAddress(separator >= 0 ? reference.slice(separator + 1) : reference)
@@ -399,8 +433,44 @@ export function translateSpreadsheetFormula(formula: string, rowDelta: number): 
     if (address.column > 16384 || row < 1 || row > 1048576) throw new Error('Translated formula exceeds worksheet bounds')
     edits.push({ start, raw, value: `${match[1]}${match[2]}${match[3]}${row}` })
   }).forEach(token => {
-    if (token.kind === 'identifier' && !['SUM', 'SUMPRODUCT', 'COUNT', 'ROUND', 'IF', 'OR', 'ROW', 'TRUE', 'FALSE'].includes(token.value)) throw new Error('Unsupported formula name')
+    if (token.kind === 'identifier' && !SUPPORTED_FORMULAS.has(token.value)) throw new Error('Unsupported formula name')
   })
   for (const edit of edits.reverse()) formula = formula.slice(0, edit.start) + edit.value + formula.slice(edit.start + edit.raw.length)
   return formula
+}
+
+/** Text operands are distinct from the optional OOXML formula expression. */
+export function spreadsheetTextRuleMatches(rule: SpreadsheetWorksheet['conditionalFormats'][number], display: string): boolean {
+  const operand = rule.text ?? rule.formulas[0]?.replace(/^=/, '').replace(/^"|"$/g, '') ?? ''
+  const value = display.toLowerCase()
+  const text = operand.toLowerCase()
+  return rule.ruleType === 'beginsWith' ? value.startsWith(text) : rule.ruleType === 'containsText' && value.includes(text)
+}
+
+/** Higher-priority rules win conflicting properties; stopIfTrue blocks later rules. */
+export function spreadsheetConditionalStyle(sheet: SpreadsheetWorksheet, address: string, cell: SpreadsheetCell | undefined): SpreadsheetCellStyle | undefined {
+  if (!cell) return undefined
+  const point = parseCellAddress(address)
+  if (!point) return cell.style
+  const display = spreadsheetCellDisplayValue(cell)
+  const numeric = Number(cell.formula ? cell.calculatedValue : cell.value)
+  const rules = sheet.conditionalFormats.filter(rule => rule.range.split(/\s+/).some(range => {
+    const [from,to=from] = range.split(':').map(parseCellAddress)
+    return from && to && point.row >= Math.min(from.row,to.row) && point.row <= Math.max(from.row,to.row) && point.column >= Math.min(from.column,to.column) && point.column <= Math.max(from.column,to.column)
+  })).sort((a,b)=>a.priority-b.priority)
+  const matched: SpreadsheetCellStyle[] = []
+  for (const rule of rules) {
+    const formula = rule.formulas[0]?.replace(/^=/,'').replace(/^"|"$/g,'') ?? ''
+    let matches = spreadsheetTextRuleMatches(rule,display)
+    if (rule.ruleType === 'expression') {
+      const match = /^(?:[A-Z]{1,3}[1-9][0-9]{0,6})?\s*(=|<>)\s*"([^"]*)"$/.exec(formula)
+      matches = Boolean(match && (match[1] === '=' ? display === match[2] : display !== match[2]))
+    }
+    if (rule.ruleType === 'cellIs' && Number.isFinite(numeric)) {
+      const expected = Number(formula),second = Number(rule.formulas[1])
+      matches = rule.operator === 'greaterThan' ? numeric > expected : rule.operator === 'lessThan' ? numeric < expected : rule.operator === 'greaterThanOrEqual' ? numeric >= expected : rule.operator === 'lessThanOrEqual' ? numeric <= expected : rule.operator === 'notEqual' ? numeric !== expected : rule.operator === 'between' ? numeric >= expected && numeric <= second : rule.operator === 'notBetween' ? numeric < expected || numeric > second : numeric === expected
+    }
+    if (matches) { matched.push(rule.style); if (rule.stopIfTrue) break }
+  }
+  return matched.reverse().reduce((base,overlay)=>({ ...base,...overlay, font: overlay.font ?? base.font, border:{...base.border,...overlay.border}, alignment:overlay.alignment ?? base.alignment }),cell.style)
 }

@@ -4,6 +4,7 @@
  *
  * [COMP:sandbox/browser-credentials]
  */
+import { createHash } from 'node:crypto'
 import type {
   BrowserCredentialFailureCode,
   BrowserCredentialMetadata,
@@ -12,6 +13,7 @@ import type {
 } from '@use-brian/core'
 import { query } from './client.js'
 import { decryptCredentials, encryptCredentials } from './credential-crypto.js'
+import { createBrowserProfileStore, withBrowserProfileOwnerMutation } from './browser-profile-store.js'
 
 type Row = {
   id: string
@@ -66,9 +68,9 @@ export function createBrowserCredentialStore(opts: { encryptionKey: Buffer }): B
       return res.rows.map(metadata)
     },
 
-    async upsert(params) {
+    async upsert(params, expectedProfile) {
       const blob = encryptCredentials<BrowserCredentialSecret>(params.secret, opts.encryptionKey)
-      const res = await query<Row>(
+      const persist = async (execute: typeof query) => { const res = await execute<Row>(
         `INSERT INTO browser_credentials
            (workspace_id, profile_id, owner_user_id, site, login_url, account_label, encrypted_secret)
          SELECT bp.workspace_id, bp.id, bp.owner_user_id, $4, $5, $6, $7
@@ -96,55 +98,83 @@ export function createBrowserCredentialStore(opts: { encryptionKey: Buffer }): B
       )
       if (!res.rows[0]) throw new Error('Browser profile is not owned by this user')
       return metadata(res.rows[0])
+      }
+      return expectedProfile
+        ? withBrowserProfileOwnerMutation(params.profileId, expectedProfile, client => persist(client.query.bind(client)))
+        : persist(query)
     },
 
-    async revoke({ profileId, credentialId }) {
-      const res = await query(`DELETE FROM browser_credentials WHERE id = $1 AND profile_id = $2`, [
+    async revoke({ profileId, credentialId }, expectedProfile) {
+      const remove = async (execute: typeof query) => { const res = await execute(`DELETE FROM browser_credentials WHERE id = $1 AND profile_id = $2`, [
         credentialId,
         profileId,
       ])
       return (res.rowCount ?? 0) > 0
+      }
+      return expectedProfile
+        ? withBrowserProfileOwnerMutation(profileId, expectedProfile, client => remove(client.query.bind(client)))
+        : remove(query)
     },
 
     async resolve({ userId, workspaceId, profileId, site, credentialId }) {
-      const res = await query<Row & { encrypted_secret: Buffer }>(
-        `SELECT ${projection}, encrypted_secret
-           FROM browser_credentials
-          WHERE profile_id = $1
-            AND site = $2
-            AND owner_user_id = $3
-            AND workspace_id = $4
-            AND status = 'active'
-            ${credentialId ? 'AND id = $5' : ''}
-          LIMIT 1`,
-        credentialId
-          ? [profileId, site, userId, workspaceId, credentialId]
-          : [profileId, site, userId, workspaceId],
-      )
-      const row = res.rows[0]
-      if (!row) return null
-      return {
-        metadata: metadata(row),
-        secret: decryptCredentials<BrowserCredentialSecret>(row.encrypted_secret, opts.encryptionKey),
+      const profile = await createBrowserProfileStore().get(profileId)
+      if (!profile || profile.workspaceId !== workspaceId || profile.ownerUserId !== userId) return null
+      try {
+        return await withBrowserProfileOwnerMutation(profileId, profile, async client => {
+          const res = await client.query<Row & { encrypted_secret: Buffer }>(
+            `SELECT ${projection}, encrypted_secret
+               FROM browser_credentials
+              WHERE profile_id = $1
+                AND site = $2
+                AND owner_user_id = $3
+                AND workspace_id = $4
+                AND status = 'active'
+                ${credentialId ? 'AND id = $5' : ''}
+              LIMIT 1`,
+            credentialId
+              ? [profileId, site, userId, workspaceId, credentialId]
+              : [profileId, site, userId, workspaceId],
+          )
+          const row = res.rows[0]
+          if (!row) return null
+          return {
+            metadata: metadata(row),
+            secret: decryptCredentials<BrowserCredentialSecret>(row.encrypted_secret, opts.encryptionKey),
+            version: createHash('sha256').update(row.encrypted_secret).digest('hex'),
+          }
+        })
+      } catch (error) {
+        if ((error as { code?: string })?.code === 'profile_authority_denied') return null
+        throw error
       }
     },
 
-    async recordResult({ credentialId, result, failureCode }) {
-      if (result === 'success') {
-        await query(
+    async recordResult({ userId, workspaceId, profileId, credentialId, version, result, failureCode }) {
+      const denied = () => Object.assign(new Error('Credential authority unavailable'), { code: 'profile_authority_denied' })
+      const profile = await createBrowserProfileStore().get(profileId)
+      if (!profile || profile.workspaceId !== workspaceId || profile.ownerUserId !== userId) throw denied()
+      await withBrowserProfileOwnerMutation(profileId, profile, async client => {
+        const saved = await client.query<{ encrypted_secret: Buffer }>(
+          `SELECT encrypted_secret FROM browser_credentials WHERE id=$1 AND profile_id=$2
+            AND workspace_id=$3 AND owner_user_id=$4 FOR UPDATE`, [credentialId, profileId, workspaceId, userId])
+        const envelope = saved.rows[0]?.encrypted_secret
+        if (!envelope || createHash('sha256').update(envelope).digest('hex') !== version) throw denied()
+        if (result === 'success') {
+          await client.query(
+            `UPDATE browser_credentials
+                SET status = 'active', last_used_at = now(), last_failure_code = NULL, updated_at = now()
+              WHERE id = $1`,
+            [credentialId],
+          )
+          return
+        }
+        await client.query(
           `UPDATE browser_credentials
-              SET status = 'active', last_used_at = now(), last_failure_code = NULL, updated_at = now()
+              SET status = 'invalid', last_failure_code = $2, updated_at = now()
             WHERE id = $1`,
-          [credentialId],
+          [credentialId, failureCode ?? 'backend_error'],
         )
-        return
-      }
-      await query(
-        `UPDATE browser_credentials
-            SET status = 'invalid', last_failure_code = $2, updated_at = now()
-          WHERE id = $1`,
-        [credentialId, failureCode ?? 'backend_error'],
-      )
+      })
     },
   }
 }

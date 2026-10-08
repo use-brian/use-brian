@@ -370,6 +370,8 @@ export type WorkflowTriggerJob = {
 
 export type WorkflowFull = {
   id: string;
+  /** Saved before authority capture: cannot run until permissions are confirmed. */
+  authorityReviewRequired?: boolean;
   workspaceId: string;
   createdBy: string;
   name: string;
@@ -672,6 +674,8 @@ export type UpdateWorkflowInput = {
   pinned?: boolean;
   /** Mig 308 — restore only: `'active'` is the single accepted value. */
   lifecycleState?: "active";
+  /** Recapture authoring authority from current access (legacy recovery). */
+  confirmAuthority?: true;
 };
 
 export type UpdateWorkflowResult =
@@ -751,7 +755,7 @@ export type RunWorkflowResult = {
 export async function runWorkflowNow(
   workflowId: string,
   input?: Record<string, unknown>,
-): Promise<RunWorkflowResult | null> {
+): Promise<RunWorkflowResult | { unavailable: true; operationMayHaveExecuted: true } | null> {
   const res = await authFetch(
     `${API_URL}/api/workflows/${encodeURIComponent(workflowId)}/run`,
     {
@@ -760,7 +764,13 @@ export async function runWorkflowNow(
       body: JSON.stringify({ input: input ?? {} }),
     },
   );
-  if (!res.ok) return null;
+  if (!res.ok) {
+    if (res.status === 409) {
+      const body = await res.json().catch(() => null);
+      if (body?.error === "run_result_unavailable") return { unavailable: true, operationMayHaveExecuted: true };
+    }
+    return null;
+  }
   return (await res.json()) as RunWorkflowResult;
 }
 

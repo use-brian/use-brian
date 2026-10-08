@@ -96,6 +96,16 @@ async function anchorParams(f: Awaited<ReturnType<typeof fixture>>) {
 }
 
 describe('[COMP:api/office-store] draft comment anchoring SQL', () => {
+  it('rejects an import that races with a live draft edit', async () => {
+    const f = await fixture()
+    await live.initialize({userId:owner,artifactId:f.artifact.id,snapshot:{...f.snapshot,title:'Edited draft'}})
+    await expect(live.initialize({userId:owner,artifactId:f.artifact.id,snapshot:f.snapshot,expectedSeq:1})).rejects.toThrow('office_import_draft_changed')
+    expect((await live.get(owner,f.artifact.id))?.snapshot.title).toBe('Edited draft')
+    const fresh = await fixture()
+    await live.initialize({userId:owner,artifactId:fresh.artifact.id,snapshot:{...fresh.snapshot,title:'Imported draft'},expectedSeq:1})
+    expect((await live.get(owner,fresh.artifact.id))?.snapshot.title).toBe('Imported draft')
+  })
+
   it('anchors an initialized live draft to a real version/file and atomically creates its discussion without rebasing', async () => {
     const f = await fixture(), before = await live.getOfflineSource(owner, f.artifact.id)
     const versionId = await f.resolve(owner, f.artifact)

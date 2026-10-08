@@ -19,7 +19,14 @@ const OTHER_USER = '88888888-8888-4888-8888-888888888888'
 
 // Current-label revalidation reads the database; these tests exercise the
 // per-source policy, so every source is reported unchanged.
-vi.mock('../../db/client.js', () => ({ getPool: () => ({}) }))
+vi.mock('../../db/client.js', () => ({ getPool: () => ({
+  query: async (sql: string, params: unknown[]) => {
+    if (!sql.includes('read_resource_page_dependencies') || !(params[1] as string[]).every(kind => ['memory', 'session_message'].includes(kind))) {
+      throw new Error('Unexpected delivery fixture source lookup')
+    }
+    return { rows: (params[1] as string[]).map(() => ({ dependencies: [] })) }
+  },
+}) }))
 vi.mock('../../db/derived-scope-store.js', () => ({
   readCurrentScopeSources: async (_client: unknown, _workspaceId: string, sources: ScopeSource[]) =>
     sources.map((source) => ({ state: 'current', source })),

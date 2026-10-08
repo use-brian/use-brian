@@ -1,7 +1,9 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest'
+import { createHash } from 'node:crypto'
 import type { SandboxTaskRecord, SessionBundle } from '@use-brian/core'
 
-vi.mock('../client.js', () => ({ query: vi.fn() }))
+const transaction = vi.hoisted(() => ({ query: vi.fn(), release: vi.fn() }))
+vi.mock('../client.js', () => ({ query: vi.fn(), getPool: () => ({ connect: async () => transaction }) }))
 
 import { query } from '../client.js'
 import { createBrowserCredentialStore } from '../browser-credential-store.js'
@@ -20,14 +22,16 @@ function rows<T>(values: T[]) {
 }
 
 beforeEach(() => {
-  vi.clearAllMocks()
+  vi.resetAllMocks()
   mockQuery.mockResolvedValue(rows([]))
+  transaction.query.mockResolvedValue(rows([]))
 })
 
 describe('[COMP:sandbox/profiles] DB browser profile store', () => {
   const row = {
     id: 'profile-1',
     workspace_id: 'ws-1',
+    department_id: 'department-1',
     owner_user_id: 'user-1',
     name: 'Work',
     scope: 'workspace' as const,
@@ -48,6 +52,7 @@ describe('[COMP:sandbox/profiles] DB browser profile store', () => {
     expect(profile).toEqual({
       id: 'profile-1',
       workspaceId: 'ws-1',
+      departmentId: 'department-1',
       ownerUserId: 'user-1',
       name: 'Work',
       scope: 'workspace',
@@ -67,6 +72,7 @@ describe('[COMP:sandbox/profiles] DB browser profile store', () => {
     const store = createBrowserProfileStore()
     await store.create({
       workspaceId: 'ws-1',
+      departmentId: 'department-1',
       ownerUserId: 'user-1',
       name: 'Work',
       scope: 'workspace',
@@ -82,8 +88,8 @@ describe('[COMP:sandbox/profiles] DB browser profile store', () => {
     expect(createSql).toMatch(/scope,[\s\S]*clearance,[\s\S]*enabled_assistant_ids,[\s\S]*assistant_routing_notes,[\s\S]*local_control_mode/)
     // Column count must match placeholder count: the closed sibling store
     // shipped 10 columns against 9 placeholders, silently dropping proxy_url.
-    const columnCount = createSql.match(/\(([^)]*)\)\s*VALUES/)![1].split(',').length
-    const placeholderCount = createSql.match(/VALUES \(([^)]*)\)/)![1].split(',').length
+    const columnCount = createSql.match(/\(([^)]*)\)\s*SELECT/)![1].split(',').length
+    const placeholderCount = createSql.match(/SELECT\s+([\s\S]*?)\s+WHERE/)![1].split(',').length
     expect(placeholderCount).toBe(columnCount)
     expect(createParams).toEqual([
       'ws-1',
@@ -92,14 +98,17 @@ describe('[COMP:sandbox/profiles] DB browser profile store', () => {
       'workspace',
       'internal',
       ['assistant-1'],
+      'department-1',
       { 'assistant-1': 'Use the company account.' },
       'local',
       'full_browser',
       'http://proxy.example',
+      null, // no supporting-edge deadline for the internal unguarded call
     ])
 
     await store.update('profile-1', {
       name: 'Renamed',
+      departmentId: null,
       scope: 'owner',
       clearance: 'public',
       enabledAssistantIds: [],
@@ -111,6 +120,7 @@ describe('[COMP:sandbox/profiles] DB browser profile store', () => {
     const [updateSql, updateParams] = mockQuery.mock.calls[1] as [string, unknown[]]
     for (const column of [
       'name',
+      'department_id',
       'scope',
       'clearance',
       'default_backend',
@@ -125,6 +135,7 @@ describe('[COMP:sandbox/profiles] DB browser profile store', () => {
     expect(updateParams).toEqual([
       'profile-1',
       'Renamed',
+      null,
       'owner',
       'public',
       'cloud',
@@ -144,17 +155,27 @@ describe('[COMP:sandbox/session-vault] DB browser session vault', () => {
   }
 
   it('requires an exact AES-256 key and round-trips encrypted bundles', async () => {
+    mockQuery.mockResolvedValue(rows([{
+      id:'profile-1',workspace_id:'ws-1',owner_user_id:'user-1',department_id:null,
+      scope:'owner',clearance:'internal',created_at:NOW,updated_at:NOW,
+    }]))
+    transaction.query.mockImplementation(async (sql: string) => {
+      if(sql.includes('SELECT encrypted_bundle'))return rows([{encrypted_bundle:transaction.query.mock.calls.find(([text])=>text.includes('INSERT INTO browser_sessions'))![1][2]}])
+      if(sql.includes('FROM workspaces'))return rows([{department_read_v2:true}])
+      if(sql.includes('FROM workspace_members'))return rows([{user_id:'user-1'}])
+      if(sql.includes('FROM browser_profiles'))return rows([{id:'profile-1'}])
+      return rows([])
+    })
     expect(() => createBrowserSessionVault({ encryptionKey: Buffer.alloc(31) })).toThrow(/32 bytes/)
     const vault = createBrowserSessionVault({ encryptionKey: KEY })
     await vault.put({ profileId: 'profile-1', site: 'example.com', bundle })
 
-    const [sql, params] = mockQuery.mock.calls[0] as [string, unknown[]]
+    const [sql, params] = transaction.query.mock.calls.find(([sql])=>sql.includes('INSERT INTO browser_sessions'))! as [string, unknown[]]
     expect(sql).toContain('FROM browser_profiles bp WHERE bp.id = $1')
     expect(sql).toContain('ON CONFLICT (profile_id, site)')
     const blob = params[2] as Buffer
     expect(blob.toString('latin1')).not.toContain('cookie-secret')
 
-    mockQuery.mockResolvedValueOnce(rows([{ encrypted_bundle: blob }]))
     await expect(vault.get({ profileId: 'profile-1', site: 'example.com' })).resolves.toEqual(bundle)
   })
 
@@ -180,12 +201,16 @@ describe('[COMP:sandbox/session-vault] DB browser session vault', () => {
 describe('[COMP:sandbox/lifecycle] DB sandbox task store', () => {
   const task: SandboxTaskRecord = {
     taskId: 'task-1',
+    executionAuthority: null,
+    sourceAuthority: null,
+    inputScope: null,
     sandboxId: 'sandbox-1',
     userId: 'user-1',
     workspaceId: 'ws-1',
     sessionId: 'session-1',
     status: 'running',
     profileId: 'profile-1',
+    profileAuthority: {id:'profile-1',workspaceId:'ws-1',ownerUserId:'user-1',scope:'owner',clearance:'internal',departmentId:null},
     injectedSite: 'example.com',
     browserStartedAt: NOW.getTime(),
     authorizedBudgetUsd: 2.5,
@@ -202,6 +227,7 @@ describe('[COMP:sandbox/lifecycle] DB sandbox task store', () => {
       session_id: task.sessionId,
       status: task.status,
       profile_id: task.profileId,
+      profile_authority: task.profileAuthority,
       injected_site: task.injectedSite,
       browser_started_at: NOW,
       authorized_budget_usd: '2.5000',
@@ -233,6 +259,10 @@ describe('[COMP:sandbox/lifecycle] DB sandbox task store', () => {
       task.authorizedBudgetUsd,
       task.createdAt,
       task.lastActivityAt,
+      task.profileAuthority,
+      task.executionAuthority,
+      task.sourceAuthority,
+      task.inputScope,
     ])
 
     await store.update('task-1', { browserStartedAt: LATER.getTime(), status: 'paused' })
@@ -243,7 +273,7 @@ describe('[COMP:sandbox/lifecycle] DB sandbox task store', () => {
 })
 
 describe('[COMP:sandbox/approval-grants] DB browser skill grant store', () => {
-  it('maps numeric and timestamp fields and writes the complete grant', async () => {
+  it('maps numeric and timestamp fields when listing grants', async () => {
     const row = {
       id: 'grant-1',
       workspace_id: 'ws-1',
@@ -260,20 +290,9 @@ describe('[COMP:sandbox/approval-grants] DB browser skill grant store', () => {
       created_at: NOW,
       last_used_at: null,
     }
-    mockQuery.mockResolvedValueOnce(rows([])).mockResolvedValueOnce(rows([row]))
-    const grant = await createBrowserSkillGrantStore().create({
-      workspaceId: 'ws-1',
-      skillId: 'skill-1',
-      profileId: 'profile-1',
-      grantedBy: 'user-1',
-      budgetUsd: 4.25,
-      ratePerHour: 3,
-      expiresAt: LATER.toISOString(),
-    })
-
-    const [sql, params] = mockQuery.mock.calls[1] as [string, unknown[]]
-    expect(sql).toContain('(workspace_id, skill_id, profile_id, granted_by, budget_usd, rate_per_hour, expires_at)')
-    expect(params).toEqual(['ws-1', 'skill-1', 'profile-1', 'user-1', 4.25, 3, LATER.toISOString()])
+    mockQuery.mockResolvedValueOnce(rows([row]))
+    const [grant] = await createBrowserSkillGrantStore().list({ workspaceId: 'ws-1', profileId: 'profile-1' })
+    expect(mockQuery.mock.calls[0][1]).toEqual(['ws-1', 'profile-1'])
     expect(grant).toMatchObject({ budgetUsd: 4.25, spentUsd: 1.5, expiresAt: LATER.toISOString() })
   })
 })
@@ -363,7 +382,18 @@ describe('[COMP:sandbox/browser-credentials] DB browser credential store', () =>
       secret,
     })
     const encrypted = (mockQuery.mock.calls[0] as [string, unknown[]])[1][6] as Buffer
-    mockQuery.mockResolvedValueOnce(rows([{ ...row, encrypted_secret: encrypted }]))
+    mockQuery.mockResolvedValueOnce(rows([{
+      id: 'profile-1', workspace_id: 'ws-1', owner_user_id: 'user-1',
+      department_id: null, scope: 'owner', clearance: 'internal',
+      created_at: NOW, updated_at: NOW,
+    }]))
+    transaction.query.mockImplementation(async (sql: string) => {
+      if (sql.includes('FROM workspaces')) return rows([{ department_read_v2: true }])
+      if (sql.includes('FROM workspace_members')) return rows([{ user_id: 'user-1' }])
+      if (sql.includes('FROM browser_profiles')) return rows([{ id: 'profile-1' }])
+      if (sql.includes('FROM browser_credentials')) return rows([{ ...row, encrypted_secret: encrypted }])
+      return rows([])
+    })
 
     const resolved = await store.resolve({
       userId: 'user-1',
@@ -372,24 +402,42 @@ describe('[COMP:sandbox/browser-credentials] DB browser credential store', () =>
       site: 'example.com',
       credentialId: 'cred-1',
     })
-    const [sql, params] = mockQuery.mock.calls[1] as [string, unknown[]]
+    const [sql, params] = transaction.query.mock.calls.find(([sql]) => sql.includes('FROM browser_credentials'))! as [string, unknown[]]
     expect(sql).toMatch(
       /profile_id = \$1[\s\S]*site = \$2[\s\S]*owner_user_id = \$3[\s\S]*workspace_id = \$4[\s\S]*status = 'active'[\s\S]*id = \$5/,
     )
     expect(params).toEqual(['profile-1', 'example.com', 'user-1', 'ws-1', 'cred-1'])
     expect(resolved?.secret).toEqual(secret)
+    expect(transaction.query).toHaveBeenCalledWith('COMMIT')
+    expect(transaction.release).toHaveBeenCalledOnce()
   })
 
   it('records typed success and failure fields', async () => {
+    mockQuery.mockResolvedValue(rows([{
+      id: 'profile-1', workspace_id: 'ws-1', owner_user_id: 'user-1',
+      department_id: null, scope: 'owner', clearance: 'internal', created_at: NOW, updated_at: NOW,
+    }]))
+    const envelope = Buffer.from('fictional-encrypted-envelope')
+    transaction.query.mockImplementation(async (sql: string) => {
+      if (sql.includes('FROM workspaces')) return rows([{ department_read_v2: true }])
+      if (sql.includes('FROM workspace_members')) return rows([{ user_id: 'user-1' }])
+      if (sql.includes('FROM browser_profiles')) return rows([{ id: 'profile-1' }])
+      if (sql.includes('FROM browser_credentials')) return rows([{ encrypted_secret: envelope }])
+      return rows([])
+    })
     const store = createBrowserCredentialStore({ encryptionKey: KEY })
-    await store.recordResult({ credentialId: 'cred-1', result: 'success' })
-    await store.recordResult({ credentialId: 'cred-1', result: 'failure', failureCode: 'mfa_required' })
+    const receipt = {userId:'user-1',workspaceId:'ws-1',profileId:'profile-1',credentialId:'cred-1',version:createHash('sha256').update(envelope).digest('hex')}
+    await store.recordResult({ ...receipt, result: 'success' })
+    await store.recordResult({ ...receipt, result: 'failure', failureCode: 'mfa_required' })
 
-    const [successSql, successParams] = mockQuery.mock.calls[0] as [string, unknown[]]
+    const updates = transaction.query.mock.calls.filter(([sql]) => sql.includes('UPDATE browser_credentials'))
+    const [successSql, successParams] = updates[0] as [string, unknown[]]
     expect(successSql).toMatch(/status = 'active'.*last_used_at = now\(\).*last_failure_code = NULL/s)
     expect(successParams).toEqual(['cred-1'])
-    const [failureSql, failureParams] = mockQuery.mock.calls[1] as [string, unknown[]]
+    const [failureSql, failureParams] = updates[1] as [string, unknown[]]
     expect(failureSql).toMatch(/status = 'invalid'.*last_failure_code = \$2/s)
     expect(failureParams).toEqual(['cred-1', 'mfa_required'])
+    await expect(store.recordResult({...receipt,version:'replaced',result:'failure'})).rejects.toMatchObject({code:'profile_authority_denied'})
+    expect(transaction.query.mock.calls.filter(([sql]) => sql.includes('UPDATE browser_credentials'))).toHaveLength(2)
   })
 })

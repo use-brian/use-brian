@@ -174,6 +174,9 @@ describe('[COMP:crm/privacy-copies] Canonical draft and task copy erasure',()=>{
   it('refuses a cross-workspace cascade caused by a previously moved task',async()=>{
     const f=await fixture(),other=await fixture(),parent=await other.task(),child=await other.task({},parent)
     await pool.query('UPDATE tasks SET workspace_id=$2,attributes=$3 WHERE id=$1',[parent,f.workspaceId,JSON.stringify({crm_contact_id:f.contactId})])
+    // Moving a row does not grant access to another user's private task.
+    await expect(f.preview()).rejects.toMatchObject({code:'not_authorized'})
+    await pool.query('UPDATE tasks SET user_id=$2 WHERE id=$1',[parent,f.userId])
     const review=await f.preview();expect(review.blockers).toContainEqual({domain:'tasks',reason:'cross_workspace_task_dependency',count:1})
     await expect(f.legacy()).rejects.toMatchObject({details:{reason:'crm_copy_resolution_required'}})
     expect((await pool.query('SELECT workspace_id FROM tasks WHERE id=$1',[child])).rows[0].workspace_id).toBe(other.workspaceId)

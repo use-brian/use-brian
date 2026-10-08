@@ -3,8 +3,9 @@
 /** Compact Brian-first iteration rail. [COMP:app-web/office-iteration-panel] */
 
 import { useEffect, useLayoutEffect, useRef, useState } from "react";
-import { CheckCircle2, CircleDashed, Sparkles } from "lucide-react";
+import { ArrowUp, CheckCircle2, ChevronDown, CircleDashed, Sparkles } from "lucide-react";
 import type { OfficeArtifactSnapshot } from "@use-brian/office-model";
+import { Button } from "@/components/ui/button";
 import { useT } from "@/lib/i18n/client";
 import { getOfficeJob, listOfficeJobEvents, officeJobFailureKind, steerOfficeJob, OfficeApiError, type OfficeJob, type OfficeJobEvent } from "@/lib/office/api";
 
@@ -242,34 +243,43 @@ export function OfficeJobActivityView({
     "office.job.steering_applied": t.eventSteering,
   })[code] ?? t.running;
 
-  const statusLabel = job?.status === "completed" ? t.completed : failed ? failureTitle : job?.status === "cancelled" ? t.cancelled : job?.status === "queued" ? t.queued : t.running;
+  const statusLabel = job?.status === "completed" ? t.completed : failed ? failureTitle : job?.status === "cancelled" ? t.cancelled : job?.status === "queued" ? t.queued : job?.status === "needs_input" ? t.eventNeedsInput : t.running;
 
-  return <section className="flex min-h-0 flex-col" aria-label={t.editWithBrian}>
-    <div className="p-3">
-      <div className="flex items-start gap-2">
-        <span className="flex size-8 shrink-0 items-center justify-center rounded-lg bg-blue-50 text-blue-600"><Sparkles className="size-4" aria-hidden /></span>
-        <div><h2 className="text-sm font-semibold">{t.editWithBrian}</h2><p role={failed ? "alert" : undefined} className={failed ? "text-xs text-destructive" : "text-xs text-muted-foreground"}>{failed ? failureBody : active || loading ? revisionActive ? t.brianRevisionQueued : t.iterationActiveHint : t.brianEditHint}</p></div>
+  return <section className="flex min-h-0 flex-1 flex-col" aria-label={t.editWithBrian}>
+    <div className="min-h-0 flex-1 space-y-4 overflow-y-auto p-4">
+      <div className="flex items-start gap-2.5">
+        <span className="flex size-7 shrink-0 items-center justify-center rounded-lg bg-muted text-foreground"><Sparkles className="size-4" aria-hidden /></span>
+        <div className="min-w-0 pt-1"><h2 className="text-sm font-medium">{t.editWithBrian}</h2><p role={failed ? "alert" : undefined} className={failed ? "mt-1 text-sm leading-relaxed text-destructive" : `mt-1 text-sm leading-relaxed text-muted-foreground ${!active && !loading ? "max-lg:hidden" : ""}`}>{failed ? failureBody : active || loading ? revisionActive ? t.brianRevisionQueued : t.iterationActiveHint : t.brianEditHint}</p></div>
       </div>
-      {!steering ? <div className="mt-3 rounded-lg border bg-muted/40 px-2.5 py-2" data-office-brian-scope={scope.kind}>
-        <p className="text-[11px] font-medium uppercase tracking-wide text-muted-foreground">{t.brianScope}</p>
-        <p className="mt-0.5 text-xs font-medium">{scopeLabel}</p>
-      </div> : null}
-      <form onSubmit={onSubmit} className="mt-3">
-        <label className="sr-only" htmlFor="office-brian-instruction">{t.editWithBrian}</label>
-        <textarea id="office-brian-instruction" value={instruction} onChange={(event) => onInstructionChange(event.target.value)} disabled={revisionActive} placeholder={t.iterationPlaceholder} className="min-h-24 w-full resize-y rounded-lg border bg-background p-2.5 text-[16px] disabled:cursor-not-allowed disabled:opacity-60 md:text-sm" />
-        <button type="submit" disabled={disabled} className="mt-2 h-11 rounded-md bg-action px-3 text-xs font-medium text-action-foreground disabled:opacity-50 sm:h-8">{submitting ? t.queued : t.askBrian}</button>
-        {!steering && (revisionActive ? t.brianRevisionInFlight : !canRequestRevision ? requestDisabledReason : undefined) ? <p className="mt-2 text-xs text-muted-foreground">{revisionActive ? t.brianRevisionInFlight : requestDisabledReason}</p> : null}
-        {feedbackLabel && !(failed && feedback === "failed") ? <p role={feedback === "failed" || feedback === "conflict" ? "alert" : "status"} className={feedback === "failed" || feedback === "conflict" ? "mt-2 text-xs text-destructive" : "mt-2 text-xs text-muted-foreground"}>{feedbackLabel}</p> : null}
-      </form>
+      {job?.status === "needs_input" ? <p role="status" className="rounded-xl border p-3 text-sm">{String([...events].reverse().find(event => event.code === "office.job.needs_input" && typeof event.params.question === "string")?.params.question ?? t.eventNeedsInput)}</p> : null}
+      {feedbackLabel && !(failed && feedback === "failed") ? <p role={feedback === "failed" || feedback === "conflict" ? "alert" : "status"} className={feedback === "failed" || feedback === "conflict" ? "text-sm text-destructive" : "rounded-xl bg-muted/50 p-3 text-sm text-muted-foreground"}>{feedbackLabel}</p> : null}
+      {job ? <details className="group rounded-xl border bg-muted/20 px-3 py-2.5">
+        <summary className="flex min-h-6 cursor-pointer items-center justify-between gap-2 text-xs font-medium max-sm:min-h-11">
+          <span className="inline-flex items-center gap-1.5"><ChevronDown className="size-3.5 -rotate-90 transition-transform group-open:rotate-0" aria-hidden />{t.runActivity}</span>
+          <span className="inline-flex items-center gap-1.5 text-muted-foreground">{job.status === "completed" ? <CheckCircle2 className="size-3.5 text-emerald-600" aria-hidden /> : <CircleDashed className="size-3.5" aria-hidden />}{statusLabel}</span>
+        </summary>
+        <ol className="mt-3 space-y-3 pb-1">
+          {events.map((event) => <li key={event.id} className="border-l-2 pl-3 text-xs"><p>{eventLabel(event.code)}</p><time className="text-[11px] text-muted-foreground">{new Date(event.createdAt).toLocaleTimeString()}</time></li>)}
+        </ol>
+      </details> : null}
     </div>
-    {job ? <details className="border-t px-3 py-2">
-      <summary className="flex cursor-pointer list-none items-center justify-between gap-2 text-xs font-medium">
-        <span>{t.runActivity}</span>
-        <span className="inline-flex items-center gap-1 text-muted-foreground">{job.status === "completed" ? <CheckCircle2 className="size-3.5 text-emerald-600" /> : <CircleDashed className="size-3.5" />}{statusLabel}</span>
-      </summary>
-      <ol className="mt-3 space-y-3 pb-1">
-        {events.map((event) => <li key={event.id} className="border-l-2 pl-3 text-xs"><p>{eventLabel(event.code)}</p><time className="text-[11px] text-muted-foreground">{new Date(event.createdAt).toLocaleTimeString()}</time></li>)}
-      </ol>
-    </details> : null}
+    <form onSubmit={onSubmit} className="shrink-0 p-3 pt-2">
+      <div className="overflow-hidden rounded-2xl border bg-background shadow-sm focus-within:border-ring [&_:focus-visible]:shadow-none">
+        {!steering ? <div className="mx-3 mt-3 rounded-lg bg-muted/60 px-2.5 py-2 text-xs" data-office-brian-scope={scope.kind}>
+          <span className="text-muted-foreground">{t.brianScope}: </span><span className="font-medium">{scopeLabel}</span>
+        </div> : null}
+        <label className="sr-only" htmlFor="office-brian-instruction">{t.editWithBrian}</label>
+        <textarea id="office-brian-instruction" value={instruction} onChange={(event) => onInstructionChange(event.target.value)} onKeyDown={(event) => {
+          if (event.key === "Enter" && !event.shiftKey && !event.nativeEvent.isComposing && event.keyCode !== 229) {
+            event.preventDefault();
+            if (!disabled) event.currentTarget.form?.requestSubmit();
+          }
+        }} disabled={revisionActive} placeholder={t.iterationPlaceholder} rows={3} className="block max-h-48 min-h-20 w-full resize-none border-0 bg-transparent px-3 py-3 text-base leading-relaxed outline-none placeholder:text-muted-foreground/70 disabled:cursor-not-allowed disabled:opacity-60 md:text-sm" />
+        <div className="flex justify-end px-2.5 pb-2.5">
+          <Button type="submit" size="icon" disabled={disabled} aria-label={submitting ? t.queued : t.askBrian} title={submitting ? t.queued : t.askBrian} className="rounded-full max-sm:size-11"><ArrowUp className="size-4" aria-hidden /></Button>
+        </div>
+      </div>
+      {!steering && (revisionActive ? t.brianRevisionInFlight : !canRequestRevision ? requestDisabledReason : undefined) ? <p className="mt-2 px-1 text-xs leading-relaxed text-muted-foreground">{revisionActive ? t.brianRevisionInFlight : requestDisabledReason}</p> : null}
+    </form>
   </section>;
 }

@@ -25,6 +25,8 @@ function fixture(bytes: Buffer = Buffer.from('abc'), mime = 'text/plain') {
   }
   const files = {
     readBytes: vi.fn(async () => ({ name: 'test.txt', bytes })),
+    prepareWrite: vi.fn(async (context: ToolContext) => ({ taskId: 'bound-task', assertCurrent: async () => {},
+      writeBytes: (file: { path: string }) => files.writeBytes(context, file) })),
     writeBytes: vi.fn(async (_context: ToolContext, f: { path: string }) => ({ fileId, path: f.path })),
   }
   return { provider, files, tools: createComputerTools({ local: provider, cloud: provider, files }) }
@@ -33,7 +35,7 @@ function fixture(bytes: Buffer = Buffer.from('abc'), mime = 'text/plain') {
 describe('local browser file wire contract', () => {
   it('sends exact operations and validates data without exposing bytes to tools', async () => {
     const send = vi.fn(async ({ op }: { op: string }) => ({ ok: true as const, data: op === 'listDownloads' ? { downloads: [download] } : op === 'readDownload' ? { data: 'YWJj', offset: 0, total: 3 } : {} }))
-    const p = createLocalBrowserProvider({ transport: { send } })
+    const p = createLocalBrowserProvider({ admit: async () => async () => {}, transport: { send } })
     expect(await p.listDownloads!(ctx)).toEqual({ downloads: [download] })
     await p.readDownload!(ctx, download.id, 0)
     await p.uploadFile!(ctx, 'ref', 'a.txt', 'YWJj')
@@ -49,29 +51,46 @@ describe('local browser file wire contract', () => {
     { data: 'YWJj', offset: 0, total: 2 }, { data: '', offset: 0, total: MAX_BROWSER_DOWNLOAD + 1 },
     { data: Buffer.alloc(BROWSER_DOWNLOAD_CHUNK + 1).toString('base64'), offset: 0, total: MAX_BROWSER_DOWNLOAD },
   ])('rejects malformed or oversized chunks %#', async data => {
-    const p = createLocalBrowserProvider({ transport: { send: async () => ({ ok: true, data }) } })
+    const p = createLocalBrowserProvider({ admit: async () => async () => {}, transport: { send: async () => ({ ok: true, data }) } })
     await expect(p.readDownload!(ctx, 'id', 0)).rejects.toThrow()
   })
   it('rejects oversized uploads before transport, and rejects bad inventories', async () => {
     const send = vi.fn(async () => ({ ok: true as const, data: { downloads: [{ ...download, size: MAX_BROWSER_DOWNLOAD + 1 }] } }))
-    const p = createLocalBrowserProvider({ transport: { send } })
+    const p = createLocalBrowserProvider({ admit: async () => async () => {}, transport: { send } })
     await expect(p.uploadFile!(ctx, 'r', 'a', Buffer.alloc(MAX_BROWSER_UPLOAD + 1).toString('base64'))).rejects.toThrow()
     expect(send).not.toHaveBeenCalled()
     await expect(p.listDownloads!(ctx)).rejects.toThrow()
   })
   it('accepts the full 4 MiB upload boundary without regex stack exhaustion', async () => {
     const send = vi.fn(async () => ({ ok: true as const, data: {} }))
-    const provider = createLocalBrowserProvider({ transport: { send } })
+    const provider = createLocalBrowserProvider({ admit: async () => async () => {}, transport: { send } })
     await expect(provider.uploadFile!(ctx, 'ref', 'max.bin', Buffer.alloc(MAX_BROWSER_UPLOAD).toString('base64'))).resolves.toBeUndefined()
     expect(send).toHaveBeenCalledTimes(1)
   })
   it('preserves explicit unsupported-operation errors from old extensions', async () => {
-    const p = createLocalBrowserProvider({ transport: { send: async () => ({ ok: false, error: 'Unsupported operation: listDownloads' }) } })
+    const p = createLocalBrowserProvider({ admit: async () => async () => {}, transport: { send: async () => ({ ok: false, error: 'Unsupported operation: listDownloads' }) } })
     await expect(p.listDownloads!(ctx)).rejects.toThrow('Unsupported operation')
   })
 })
 
 describe('browser file tools', () => {
+  it('binds the selected task before reading and refuses replacement during transfer', async () => {
+    const f = fixture()
+    let replaced = false
+    f.files.prepareWrite.mockImplementationOnce(async () => ({ taskId: 'original',
+      assertCurrent: async () => { if (replaced) throw new Error('Task replaced') },
+      writeBytes: file => f.files.writeBytes(context, file) }))
+    vi.mocked(f.provider.readDownload!).mockImplementationOnce(async ctx => {
+      expect(ctx.taskId).toBe('original')
+      replaced = true
+      return { data: 'YWJj', offset: 0, total: 3 }
+    })
+    const result = await run(f.tools.browserReadDownload, { id: download.id })
+    expect(result.isError).toBe(true)
+    expect(f.files.prepareWrite).toHaveBeenCalledWith(context, { backend: 'local', profileId: null })
+    expect(f.files.writeBytes).not.toHaveBeenCalled()
+  })
+
   it('always asks explicit approval to share downloads under workspace permissions, even with allow policy', async () => {
     const f = fixture()
     const tools = createComputerTools({ local: f.provider, cloud: f.provider, files: f.files,
@@ -79,13 +98,30 @@ describe('browser file tools', () => {
     expect(tools.browserReadDownload.requiresConfirmation).toBe(true)
     expect(await tools.browserReadDownload.resolveConfirmation!(context)).toBe(true)
     const warning = (await tools.browserReadDownload.describeConfirmation!({ id: download.id }, context))!.join(' ')
-    expect(warning).toMatch(/workspace permissions/i)
-    expect(warning).toMatch(/more people.*private browser profile/i)
-    expect(warning).toMatch(/agree to share/i)
+    expect(warning).toMatch(/retains private ownership and department protection/i)
+    expect(warning).toMatch(/does not grant broader access/i)
     const result = await run(tools.browserReadDownload, { id: download.id }, { ...context, channelType: 'heartbeat' })
     expect(result.isError).toBe(true)
     expect(result.data).toMatch(/interactive approval/)
     expect(f.provider.listDownloads).not.toHaveBeenCalled()
+    expect(f.files.writeBytes).not.toHaveBeenCalled()
+  })
+  it('refuses download persistence when source authority expires during the final read', async () => {
+    const f = fixture()
+    let allowed = true
+    const assertCurrent = async () => { if (!allowed) throw new Error('Authority changed') }
+    const authority = { assertCurrent, async execute<T>(operation: () => Promise<T>) {
+      await assertCurrent()
+      const result = await operation()
+      await assertCurrent()
+      return result
+    } }
+    vi.mocked(f.provider.readDownload!).mockImplementationOnce(async () => {
+      allowed = false
+      return { data: 'YWJj', offset: 0, total: 3 }
+    })
+    const result = await run(f.tools.browserReadDownload, { id: download.id }, { ...context, authority })
+    expect(result.isError).toBe(true)
     expect(f.files.writeBytes).not.toHaveBeenCalled()
   })
   it('does not persist when cancelled during the deferred final chunk read', async () => {

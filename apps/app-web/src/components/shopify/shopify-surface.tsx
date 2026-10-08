@@ -45,8 +45,8 @@ import { OperatorTopbar } from "@/components/operator/operator-topbar";
 import { Button, buttonVariants } from "@/components/ui/button";
 import { useT } from "@/lib/i18n/client";
 import { listTools } from "@/lib/api/shopify";
-import { useCachedResource } from "@/lib/surface-cache";
 import { shopifyToolsCacheKey } from "@/lib/surface-prefetch";
+import { useLeasedResource } from "@/lib/offline/surface-content-cache";
 import {
   SHOPIFY_SECTIONS,
   shopifySectionFromParams,
@@ -69,7 +69,10 @@ export function ShopifySurface({ workspaceId }: { workspaceId: string }) {
   // The reachability answer, from the surface cache. `null` key until the
   // route hands over a workspace id, so a half-mounted page never fetches
   // (or caches) under an empty key.
-  const tools = useCachedResource(
+  // Leased (perceived-performance.md, "Content lease for protected lists"):
+  // when the store stops being reachable for this viewer, the tabs and the
+  // store data they hold unmount within 30 seconds.
+  const tools = useLeasedResource(
     workspaceId ? shopifyToolsCacheKey(workspaceId) : null,
     () => listTools(workspaceId),
   );

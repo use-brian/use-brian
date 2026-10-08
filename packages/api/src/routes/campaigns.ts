@@ -24,7 +24,7 @@ import { createCampaignTrackingStore, type CampaignTrackingStore } from '../db/c
 import { canMemberDraftRole, getWorkspaceMembershipSystem } from '../db/workspace-store.js'
 import { resolveWorkspaceViewpoint } from '../db/workspace-viewpoint.js'
 import { getEntityById } from '../db/entities-store.js'
-import { createCampaignEmailService, type CampaignEmailService } from '../content-planning/email.js'
+import { campaignReadActor, createCampaignEmailService, type CampaignEmailService } from '../content-planning/email.js'
 import type { CampaignDispatchService } from '../campaigns/dispatch.js'
 
 const WorkspaceQuery = z.object({ workspaceId: campaignUuidSchema }).strict()
@@ -237,7 +237,7 @@ export function campaignRoutes(options: {
       if (!auth) return
       const current = await emailService.read(input.workspaceId, input.placementId)
       if (current.campaignId !== input.campaignId) throw new CampaignError('not_found', 'Email campaign placement was not found.')
-      res.json(await emailService.audience(input.workspaceId, input.placementId))
+      res.json(await emailService.audience(input.workspaceId, input.placementId, campaignReadActor(campaignContext(auth).actor)))
     } catch (error) { respondError(res, error) }
   })
 
@@ -261,7 +261,7 @@ export function campaignRoutes(options: {
       const auth = await access(req, res, input.workspaceId)
       if (!auth) return
       if (!options.dispatchService) throw new CampaignError('unavailable', 'Campaign dispatch is not configured.')
-      const result = await options.dispatchService.read(input.workspaceId, input.dispatchId)
+      const result = await options.dispatchService.read(input.workspaceId, input.dispatchId, campaignReadActor(campaignContext(auth).actor))
       if ((result.dispatch as { campaignId?: string }).campaignId !== input.campaignId) throw new CampaignError('not_found', 'Campaign dispatch was not found.')
       res.json(result)
     } catch (error) { respondError(res, error) }

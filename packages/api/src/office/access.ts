@@ -139,12 +139,13 @@ export const OFFICE_ACCESS_SQL = `
          a.default_workspace_role     AS "defaultWorkspaceRole",
          a.lifecycle_state            AS "lifecycleState",
          wm.role                      AS "memberRole",
-         CASE WHEN wm.role IN ('owner','admin') THEN 'confidential' ELSE wm.clearance END AS "memberClearance",
-         public.effective_member_read_compartments(wm.user_id, wm.workspace_id)
+         CASE WHEN w.department_read_v2 OR wm.role IN ('owner','admin') THEN 'confidential' ELSE wm.clearance END AS "memberClearance",
+         CASE WHEN w.department_read_v2 THEN NULL ELSE public.effective_member_read_compartments(wm.user_id, wm.workspace_id) END
                                       AS "memberCompartments",
          g.role                       AS "explicitRole",
          g.revoked_at                 AS "grantRevokedAt"
     FROM office_artifacts a
+    JOIN workspaces w ON w.id=a.workspace_id
     JOIN workspace_members wm
       ON wm.workspace_id = a.workspace_id AND wm.user_id = $2
     LEFT JOIN office_artifact_grants g

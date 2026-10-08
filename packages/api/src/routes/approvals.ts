@@ -376,6 +376,7 @@ export function approvalsRoutes(opts: UnifiedApprovalRouteOptions): Router {
 
     if (approval.kind === 'workflow_step') {
       const result = await resumeFromApproval(opts.bridgeDeps, id, decision, userId, reason)
+      if (result.status === 'unavailable') { res.status(404).json({ error: 'Approval not found' }); return }
       res.json({ kind: 'workflow_step', ...result })
       return
     }
@@ -438,35 +439,21 @@ export function approvalsRoutes(opts: UnifiedApprovalRouteOptions): Router {
     // button, Allow always for this block+profile, mints the standing grant
     // (the grant is the review); the verb ceiling never offers it.
     if (approval.kind === 'browser_skill_send') {
-      const updated = await opts.approvalsStore.respond(id, decision, userId, reason)
-      if (!updated) {
-        const settled = await opts.approvalsStore.getById(userId, id)
-        res.json({ kind: 'browser_skill_send', status: settled?.status ?? 'unknown', idempotent: true })
+      if (!opts.approvalsStore.respondBrowserSkill) {
+        res.status(503).json({ error: 'approval_settlement_unavailable' })
         return
       }
-      let grantId: string | null = null
-      const payload = approval.approvalPayload as {
-        skillId?: string
-        profileId?: string
-        ceiling?: string | null
+      try {
+        const result = await opts.approvalsStore.respondBrowserSkill(id, userId, decision, { grantAlways: body.grantAlways === true, reason })
+        if (result) res.json({ kind: 'browser_skill_send', status: result.approval.status, grantId: result.grantId })
+        else {
+          const settled = await opts.approvalsStore.getById(userId, id)
+          res.json({ kind: 'browser_skill_send', status: settled?.status ?? 'unknown', idempotent: true })
+        }
+      } catch (error) {
+        if ((error as { code?: string }).code !== 'profile_authority_denied') throw error
+        res.status(403).json({ error: 'approval_authority_denied' })
       }
-      if (
-        decision === 'approved' &&
-        body.grantAlways === true &&
-        opts.browserSkillGrants &&
-        payload.skillId &&
-        payload.profileId &&
-        !payload.ceiling // ceiling verbs are never grantable (R2-1)
-      ) {
-        const grant = await opts.browserSkillGrants.create({
-          workspaceId: approval.workspaceId,
-          skillId: payload.skillId,
-          profileId: payload.profileId,
-          grantedBy: userId,
-        })
-        grantId = grant.id
-      }
-      res.json({ kind: 'browser_skill_send', status: updated.status, grantId })
       return
     }
 

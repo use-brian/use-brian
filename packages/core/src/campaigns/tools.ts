@@ -61,7 +61,7 @@ export function createCampaignTools(options: {
   const resolveContext = options.resolveContext ?? defaultContext
 
   function read<Input extends z.ZodType>(name: string, description: string, inputSchema: Input,
-    run: (workspaceId: string, input: z.infer<Input>) => Promise<unknown>): Tool<Input> {
+    run: (workspaceId: string, input: z.infer<Input>, context: CampaignContext) => Promise<unknown>): Tool<Input> {
     const tool: Tool<Input> = buildTool({
       name, description, inputSchema, isReadOnly: true, requiresCapability: 'feed', homeAppToolSet: { app: 'feed', set: 'read' },
       async execute(input, toolContext) {
@@ -69,7 +69,7 @@ export function createCampaignTools(options: {
         if (missing) return { isError: true, data: { error: 'not_authorized', requiredCapability: missing } }
         const context = await resolveContext(toolContext)
         if (!context?.authority.canRead) return { isError: true, data: { error: 'not_authorized', message: 'Campaign read authority is required.' } }
-        try { return { data: await run(context.workspaceId, inputSchema.parse(input)) } } catch (error) { return failure(error) }
+        try { return { data: await run(context.workspaceId, inputSchema.parse(input), context) } } catch (error) { return failure(error) }
       },
     })
     return tool
@@ -137,7 +137,7 @@ export function createCampaignTools(options: {
     (workspaceId, input) => options.reads.getAttribution(workspaceId, input.campaign_id, input))
   const previewCampaignAudience = read('previewCampaignAudience', 'Preview the saved authorized CRM audience for campaign Email and explain eligible, excluded, unresolved, and duplicate counts.',
     z.object({ campaign_id: campaignUuidSchema, placement_id: campaignUuidSchema }).strict(),
-    (workspaceId, input) => options.reads.previewAudience(workspaceId, input))
+    (workspaceId, input, context) => options.reads.previewAudience(workspaceId, input, context.actor))
   const previewCampaignEmail = read('previewCampaignEmail', 'Render HTML and plain-text Email previews for one Feed revision and explicitly selected sample contacts.',
     z.object({ campaign_id: campaignUuidSchema, placement_id: campaignUuidSchema, revision: z.number().int().nonnegative(), values: z.record(z.string(), z.string().max(2_000)).default({}) }).strict(),
     (workspaceId, input) => options.reads.previewEmail(workspaceId, input))

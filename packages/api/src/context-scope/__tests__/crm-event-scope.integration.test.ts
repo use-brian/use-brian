@@ -6,8 +6,11 @@ import { createDeal, createContact } from '../../db/crm.js'
 import { createDbWorkspaceGroupStore } from '../../db/workspace-group-store.js'
 import { createDbWorkflowStore, createDbWorkflowRunStore } from '../../db/workflow-store.js'
 import { resolveWorkflowRunScope } from '../workflow-authority.js'
+import { readWorkflowInputEvidence } from '../workflow-input-evidence.js'
 import { readWorkflowOutcomeWithLineage } from '../../crm-operations/workflow-copy-store.js'
 import { listCrmEventDelivery } from '../../crm-operations/privacy.js'
+import { createPendingApprovalsStore } from '../../db/pending-approvals-store.js'
+import { resumeFromApproval, type ApprovalBridgeDeps } from '../../workflow/approval.js'
 
 const { assertLocalFixture } = await import(new URL('../../../../../scripts/crm/local-fixture.mjs', import.meta.url).href)
 await assertLocalFixture()
@@ -35,6 +38,22 @@ async function fixture() {
 
 describe('[COMP:api/crm-event-scope] persisted event audience',()=>{
   afterAll(async()=>{await getAppPool().end();await pool.end()})
+  it('withholds workflow approval projections and decisions when their CRM source becomes inaccessible',async()=>{
+    const f=await fixture(),run=await f.create(),approvals=createPendingApprovalsStore()
+    await runs.updateRun(run.id,{vars:{__contextScopeEvidence:await readWorkflowInputEvidence(run.id,f.workspaceId)}})
+    const step=await runs.createStepRun({runId:run.id,stepId:'consult',stepType:'assistant_call',input:{}})
+    const approval=await approvals.create({workspaceId:f.workspaceId,workflowRunId:run.id,workflowStepRunId:step.id,
+      originatingAssistantId:f.assistantId,toolName:'fixtureMutation',arguments:{protected:'Fictional source value'},approverUserId:f.member,deliveryChannelType:'web'})
+    expect((await approvals.listPendingForWorkspace(f.member,f.workspaceId)).map(row=>row.id)).toContain(approval.id)
+    await f.revoke()
+    expect((await queryWithRLS(f.member,'SELECT id FROM workflow_runs WHERE id=$1',[run.id])).rows).toEqual([])
+    expect(await approvals.listPendingForWorkspace(f.member,f.workspaceId)).toEqual([])
+    expect(await approvals.getById(f.member,approval.id)).toBeNull()
+    expect(await approvals.countPendingForUser(f.member)).toBe(0)
+    const deps={approvalsStore:approvals,runStore:runs} as ApprovalBridgeDeps
+    expect(await resumeFromApproval(deps,approval.id,'approved',f.member)).toEqual({status:'unavailable',runId:null})
+    expect((await approvals.getByIdSystem(approval.id))?.status).toBe('pending')
+  })
   it('refuses before input persistence when the recorded actor cannot read the source',async()=>{
     const f=await fixture();await f.revoke()
     await expect(f.create()).rejects.toMatchObject({code:'42501',message:'workflow_source_scope_unavailable'})
@@ -68,6 +87,7 @@ describe('[COMP:api/crm-event-scope] persisted event audience',()=>{
   })
   it('retains history scope on events, runs and steps after a parent release',async()=>{
     const f=await fixture(),run=await f.create()
+    await runs.updateRun(run.id,{vars:{__contextScopeEvidence:await readWorkflowInputEvidence(run.id,f.workspaceId)}})
     await runs.createStepRun({runId:run.id,stepId:'consult',stepType:'assistant_call',input:{private:'Fixture input'}})
     await pool.query("UPDATE entities SET compartments='{}' WHERE id=$1",[f.deal.id])
     await f.revoke()
@@ -90,6 +110,7 @@ describe('[COMP:api/crm-event-scope] persisted event audience',()=>{
   })
   it('intersects bound assistant clearance and Team access at read time',async()=>{
     const f=await fixture(),run=await f.create()
+    await runs.updateRun(run.id,{vars:{__contextScopeEvidence:await readWorkflowInputEvidence(run.id,f.workspaceId)}})
     const common={workspaceId:f.workspaceId,userId:f.owner,clearance:'confidential',compartments:null,mutationCompartments:null,projectIds:null,visibilityAssistantIds:null}
     for(const change of [{compartments:[]},{clearance:'public'}]) {
       expect((await runWithAgentAccess({...common,...change},()=>queryWithRLS(f.owner,'SELECT id FROM workflow_runs WHERE id=$1',[run.id]))).rows).toEqual([])
@@ -116,12 +137,15 @@ describe('[COMP:api/crm-event-scope] persisted event audience',()=>{
   })
   it('propagates the event floor through outcome copies and refuses a later unauthorized copy',async()=>{
     const f=await fixture(),source=await f.create()
+    await runs.updateRun(source.id,{vars:{__contextScopeEvidence:await readWorkflowInputEvidence(source.id,f.workspaceId)}})
     await pool.query("UPDATE workflow_runs SET status='completed',finished_at=now(),outcome=$2 WHERE id=$1",[source.id,JSON.stringify({summary:'Protected outcome'})])
     const target=await runs.createRun({workflowId:f.workflow.id,workspaceId:f.workspaceId,triggeredBy:f.member,triggerKind:'manual'})
     expect(await readWorkflowOutcomeWithLineage(f.workflow.id,target.id)).toMatchObject({summary:'Protected outcome'})
     await f.revoke()
     expect((await queryWithRLS(f.member,'SELECT id FROM workflow_runs WHERE id=$1',[target.id])).rows).toEqual([])
-    await expect(readWorkflowOutcomeWithLineage(f.workflow.id,target.id)).rejects.toThrow('Workflow outcome copy could not be recorded')
+    // Current evidence admission refuses before reaching the INSERT guard.
+    expect(await readWorkflowOutcomeWithLineage(f.workflow.id,target.id)).toBeNull()
+    expect((await pool.query('SELECT run_id FROM workflow_run_copy_sources WHERE run_id=$1',[target.id])).rows).toEqual([{run_id:target.id}])
   })
   it('captures the real source and rejects attempts to rewrite the saved event audience',async()=>{
     const f=await fixture()

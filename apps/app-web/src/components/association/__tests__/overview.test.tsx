@@ -48,6 +48,6 @@ describe("[COMP:app-web/association] Home overview",()=>{
     api.module.mockResolvedValue({module:{workspaceId:"w",state:"disabled",version:1},canManage:true});
     await render();
     expect(host.textContent).toContain(u.moduleOffRow);
-    expect([...host.querySelectorAll("a")].map(link=>link.getAttribute("href"))).toContain("/w/w/association?section=admin&tab=general");
+    expect([...host.querySelectorAll("a")].find(link=>link.getAttribute("href")==="/w/w/association?section=admin&tab=general")?.textContent).toBe(u.admin);
   });
 });

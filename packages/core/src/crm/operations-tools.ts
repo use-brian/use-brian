@@ -7,8 +7,11 @@
  */
 
 import { z } from 'zod'
+import type { AuthoringAuthority } from '../security/access-ceiling.js'
+import { CrmIntegrationGrantsSchema, CrmCredentialDepartmentSelectionSchema, CrmCredentialParentSchema, type CrmCredentialParent } from './integration-authority.js'
+import { pinToolAuthoringAuthority } from '../security/tool-authority.js'
 import { buildTool, type Tool, type ToolContext } from '../tools/types.js'
-import { missingToolCapability } from '../tools/capability-gate.js'
+import { missingToolCapability, INTERACTIVE_CHANNEL_TYPES } from '../tools/capability-gate.js'
 import { AssociationPlanInputSchema, AssociationEventInputSchema } from '../association/domain.js'
 import {
   CrmDeliveryChannelSchema,
@@ -37,10 +40,10 @@ export type CrmOperationsReadPort = {
     definitionKey?: string
     ownerUserId?: string
     limit?: number
-  }): Promise<CrmPage<'submissions'>>
-  getSubmission(workspaceId: string, submissionId: string): Promise<Record<string, unknown> | null>
+  }, actor?: CrmOperationsActor): Promise<CrmPage<'submissions'>>
+  getSubmission(workspaceId: string, submissionId: string, actor?: CrmOperationsActor): Promise<Record<string, unknown> | null>
   listConsentPurposes(workspaceId: string, includeArchived?: boolean, page?: CrmPageQuery): Promise<CrmPage<'purposes'>>
-  getConsent(workspaceId: string, contactId: string): Promise<{
+  getConsent(workspaceId: string, contactId: string, actor?: CrmOperationsActor): Promise<{
     purposes: Array<Record<string, unknown>>
     events: Array<Record<string, unknown>>
     suppressions: Array<Record<string, unknown>>
@@ -50,6 +53,7 @@ export type CrmOperationsReadPort = {
     contactId: string,
     channel: z.infer<typeof CrmDeliveryChannelSchema>,
     purposeKey: string,
+    actor?: CrmOperationsActor,
   ): Promise<SendabilityVerdict>
   listSegments(workspaceId: string, filters?: CrmPageQuery & {
     entityKind?: 'person' | 'company' | 'deal'
@@ -59,7 +63,7 @@ export type CrmOperationsReadPort = {
   previewSegment(workspaceId: string, segmentId: string, options?: CrmPageQuery & {
     snapshotLimit?: number
     snapshotCursor?: string
-  }): Promise<{
+  }, actor?: CrmOperationsActor): Promise<{
     rows: Array<Record<string, unknown>>
     count: number
     snapshotIds: string[]
@@ -77,7 +81,7 @@ export type CrmOperationsReadPort = {
     planId?: string
     status?: 'pending' | 'active' | 'expired' | 'cancelled'
     limit?: number
-  }): Promise<CrmPage<'entitlements'>>
+  }, actor?: CrmOperationsActor): Promise<CrmPage<'entitlements'>>
   listEvents(workspaceId: string, filters?: CrmPageQuery & {
     status?: 'draft' | 'published' | 'cancelled' | 'completed'
     /** `upcoming`: still running or ahead (ends now or later); `past`: already ended. */
@@ -96,7 +100,7 @@ export type CrmOperationsReadPort = {
     status?: 'registered' | 'attended' | 'cancelled' | 'no_show'
     sourceKind?: 'commerce' | 'source_order' | 'manual' | 'form' | 'workflow' | 'import'
     limit?: number
-  }): Promise<CrmPage<'participation'>>
+  }, actor?: CrmOperationsActor): Promise<CrmPage<'participation'>>
   listPipelines(workspaceId: string, filters?: CrmPageQuery & {
     entityKind?: 'deal'
     includeArchived?: boolean
@@ -365,6 +369,7 @@ export function createCrmOperationsTools(options: {
         caller.authority.nativeDelivery={assistantId:context.assistantId,compartments:context.compartments ?? null,projectIds:context.projectIds ?? null,
           mutationCompartments:context.mutationCompartments === undefined ? context.compartments ?? null : context.mutationCompartments}
         try {
+          if(context.assistantKind)caller.authority.nativeDelivery.authoringAuthority=pinToolAuthoringAuthority(context)
           const parsed=inputSchema.parse(input)
           if(read) {
             if(!options.deliveries) throw new CrmOperationsError('conflict','CRM delivery is unavailable.',{reason:'delivery_unavailable'})
@@ -421,7 +426,7 @@ export function createCrmOperationsTools(options: {
           definitionKey: input.definition_key,
           ownerUserId: input.owner_user_id,
           limit: input.limit,
-        }) }
+        }, actorFor(context)) }
       } catch (error) { return failure(error) }
     },
   })
@@ -433,7 +438,7 @@ export function createCrmOperationsTools(options: {
       const workspace = workspaceId(context)
       if (!workspace) return workspaceError()
       try {
-        const row = await options.reads.getSubmission(workspace, input.submission_id)
+        const row = await options.reads.getSubmission(workspace, input.submission_id, actorFor(context))
         return row ? { data: row } : { data: { error: 'not_found', message: 'CRM submission was not found.' }, isError: true }
       } catch (error) { return failure(error) }
     },
@@ -456,7 +461,7 @@ export function createCrmOperationsTools(options: {
     async execute(input, context) {
       const workspace = workspaceId(context)
       if (!workspace) return workspaceError()
-      try { return { data: await options.reads.getConsent(workspace, input.contact_id) } }
+      try { return { data: await options.reads.getConsent(workspace, input.contact_id, actorFor(context)) } }
       catch (error) { return failure(error) }
     },
   })
@@ -471,7 +476,7 @@ export function createCrmOperationsTools(options: {
     async execute(input, context) {
       const workspace = workspaceId(context)
       if (!workspace) return workspaceError()
-      try { return { data: await options.reads.checkSendability(workspace, input.contact_id, input.channel, input.purpose_key) } }
+      try { return { data: await options.reads.checkSendability(workspace, input.contact_id, input.channel, input.purpose_key, actorFor(context)) } }
       catch (error) { return failure(error) }
     },
   })
@@ -497,7 +502,7 @@ export function createCrmOperationsTools(options: {
   })
   const previewCrmSegment = buildTool({
     name: 'previewCrmSegment', requiresCapability: 'crm', isReadOnly: true,
-    description: 'Evaluate one saved CRM segment at read time. Returns a row preview, complete current count and stable-id page. Continue rows with nextCursor/cursor and IDs with snapshotNextCursor/snapshot_cursor until null; keep the same segment and filters. A dynamic snapshot is not continuing send permission. Unknown catalog fields fail closed with valid choices.',
+    description: 'Evaluate one saved CRM segment at read time, as you. Returns a row preview, complete current count and stable-id page of the contacts you may read; a contact whose deciding consent, membership or other evidence you cannot read does not match. Continue rows with nextCursor/cursor and IDs with snapshotNextCursor/snapshot_cursor until null; keep the same segment and filters. A dynamic snapshot is not continuing send permission. Unknown catalog fields fail closed with valid choices.',
     inputSchema: z.object({
       ...PageInput,
       segment_id: CrmOperationsUuidSchema,
@@ -513,7 +518,7 @@ export function createCrmOperationsTools(options: {
           ...pageFilters(input),
           snapshotLimit: input.snapshot_limit,
           snapshotCursor: input.snapshot_cursor,
-        }) }
+        }, actorFor(context)) }
       } catch (error) { return failure(error) }
     },
   })
@@ -553,7 +558,7 @@ export function createCrmOperationsTools(options: {
           contactId: input.contact_id, planId: input.plan_id,
           status: input.status, limit: input.limit,
           activeOnly: input.active_only, effectiveAt: input.effective_at,
-        }) }
+        }, actorFor(context)) }
       } catch (error) { return failure(error) }
     },
   })
@@ -591,7 +596,7 @@ export function createCrmOperationsTools(options: {
           ...pageFilters(input),
           contactId: input.contact_id, eventId: input.event_id,
           status: input.status, sourceKind: input.source_kind, limit: input.limit,
-        }) }
+        }, actorFor(context)) }
       } catch (error) { return failure(error) }
     },
   })
@@ -749,3 +754,72 @@ export function createCrmOperationsTools(options: {
 }
 
 type TRecordSubmission = Extract<CrmOperationsCommand, { kind: 'record_submission' }>
+
+
+const credentialCreateInput = z.object({
+  requestId: z.string().uuid(), label: z.string().trim().min(1).max(200),
+  expiresAt: z.string().datetime({ offset: true }), grants: CrmIntegrationGrantsSchema,
+  revokeCredentialId: z.string().uuid().optional(),
+  departmentBinding: CrmCredentialDepartmentSelectionSchema.omit({ assistantId: true }),
+}).strict()
+const credentialListInput = z.object({ limit: z.number().int().min(1).max(100).optional(), cursor: z.string().optional() }).strict()
+const credentialPreviewInput = z.object({ cap: z.enum(['public', 'internal', 'confidential']).default('internal') }).strict()
+export type CrmCredentialToolsPort = {
+  preview(input: z.infer<typeof credentialPreviewInput>, authority: AuthoringAuthority, parent?: CrmCredentialParent): Promise<unknown>
+  list(input: z.infer<typeof credentialListInput>, authority: AuthoringAuthority, parent?: CrmCredentialParent): Promise<unknown>
+  create(input: z.infer<typeof credentialCreateInput>, authority: AuthoringAuthority, parent?: CrmCredentialParent): Promise<unknown>
+  revoke(input: { credentialId: string }, authority: AuthoringAuthority, parent?: CrmCredentialParent): Promise<unknown>
+}
+
+/** Native lifecycle uses the same store as member REST; authority is never model input. */
+export function createCrmCredentialTools(port: CrmCredentialToolsPort): Record<string, Tool> {
+  function command<S extends z.ZodType>(name: string, description: string, schema: S,
+    run: (input: z.infer<S>, authority: AuthoringAuthority, parent?: CrmCredentialParent) => Promise<unknown>, readOnly = false): Tool {
+    const tool: Tool<S> = { name, description, inputSchema: schema, isReadOnly: readOnly, isConcurrencySafe: false, requiresConfirmation: false,
+      requiresCapability: 'configure', homeAppToolSet: { app: 'crm', set: 'write' },
+      async execute(raw: z.infer<S>, context: ToolContext) {
+        const missing = missingToolCapability(tool, context.activeCapabilities)
+        if (missing) return { isError: true, data: { error: 'not_authorized', requiredCapability: missing } }
+        let parent: CrmCredentialParent | undefined
+        if (context.programmaticPrincipal) {
+          const parsed = CrmCredentialParentSchema.safeParse(context.crmCredentialParent)
+          const principal = context.programmaticPrincipal
+          if (!parsed.success || principal.kind !== parsed.data.kind || !context.authority
+            || parsed.data.credentialId !== principal.credentialId || parsed.data.workspaceId !== context.workspaceId
+            || parsed.data.userId !== context.userId || (principal.kind !== 'brain_key' && principal.userId !== context.userId)) {
+            return { isError: true, data: { error: 'not_authorized', message: 'Authenticated parent credential evidence is required.' } }
+          }
+          parent = parsed.data
+        } else if (!INTERACTIVE_CHANNEL_TYPES.has(context.channelType)) {
+          const source = context.authority?.snapshotSource?.()
+          const retained = source?.kind === 'workflow' ? CrmCredentialParentSchema.safeParse({
+            version:1,kind:'workflow',credentialId:source.runId,workspaceId:context.workspaceId,userId:context.userId,source,
+          }) : null
+          if (!retained?.success || source?.kind !== 'workflow' || source.workspaceId !== context.workspaceId
+            || source.authorityUserId !== context.userId || source.executingAssistantId !== context.assistantId) {
+            return { isError: true, data: { error: 'not_authorized', message: 'Credential lifecycle requires current attended or retained execution authority.' } }
+          }
+          parent = retained.data
+        }
+        let authority: AuthoringAuthority
+        try { authority = pinToolAuthoringAuthority(context) }
+        catch { return { isError: true, data: { error: 'not_authorized', message: 'Current credential authoring authority is unavailable.' } } }
+        try {
+          const invoke = () => run(schema.parse(raw), authority, parent)
+          return { data: await (parent ? context.authority!.execute(invoke) : invoke()) }
+        }
+        catch (error) {
+          if (error instanceof CrmOperationsError) return failure(error)
+          return { isError: true, data: { error: error instanceof z.ZodError ? 'invalid_input' : 'internal', message: 'Credential operation could not complete. Inspect existing credentials before retrying issuance.' } }
+        }
+      },
+    }
+    return tool
+  }
+  return Object.fromEntries([
+    buildTool({ ...command('previewCrmCredentialBindings', 'Preview currently admitted credential departments and the operation/selector catalog. Choices expire; issuance rechecks authority. Requires current owner/admin membership.', credentialPreviewInput, port.preview, true), name: 'previewCrmCredentialBindings', isReadOnly: true }),
+    buildTool({ ...command('listCrmCredentials', 'List paged integration credential lifecycle metadata without secrets. Inspect after uncertain issuance before rotating a lost secret.', credentialListInput, port.list, true), name: 'listCrmCredentials', isReadOnly: true }),
+    buildTool({ ...command('createCrmCredential', 'Issue or rotate a CRM integration credential with reviewed departments, grants and expiry. Reuse the same requestId for an uncertain retry. The secret is returned once; an already-issued conflict never reissues it. Do not invent a new requestId to bypass uncertainty.', credentialCreateInput, port.create), name: 'createCrmCredential', isReadOnly: false }),
+    buildTool({ ...command('revokeCrmCredential', 'Revoke an integration credential by exact ID after inspecting its metadata. Existing uses cease at renewed admission.', z.object({ credentialId: z.string().uuid() }).strict(), port.revoke), name: 'revokeCrmCredential', isReadOnly: false }),
+  ].map(tool => [tool.name, tool]))
+}

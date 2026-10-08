@@ -22,7 +22,7 @@
  * [COMP:api/live-work-roster]
  */
 import { Router } from 'express'
-import { query } from '../db/client.js'
+import { query, queryWithRLS } from '../db/client.js'
 import { getWorkspaceMembershipWithReadScopeSystem } from '../db/workspace-store.js'
 import { isSharedChatSession, TURN_LEASE_STALE_AFTER_MS } from '../db/sessions.js'
 import { liveSessionTier } from '../session-read-access.js'
@@ -167,6 +167,7 @@ export function projectSessionRow(
   now?: Date,
   membershipCompartments: string[] | null = null,
   membershipProjectIds: string[] | null = null,
+  departmentAccess?: NonNullable<Awaited<ReturnType<typeof getWorkspaceMembershipWithReadScopeSystem>>>['departmentAccess'],
 ): LiveSessionItem | null {
   const tier = liveSessionTier({
     callerUserId,
@@ -182,6 +183,8 @@ export function projectSessionRow(
     membershipClearance,
     membershipCompartments,
     membershipProjectIds,
+    departmentAccess,
+    now,
   })
   if (tier === 'omitted') return null
   const state = deriveSessionState({
@@ -303,8 +306,9 @@ async function fetchSessionRows(workspaceId: string): Promise<SessionRosterRow[]
   return result.rows
 }
 
-async function fetchRunRows(workspaceId: string): Promise<RunRosterRow[]> {
-  const result = await query<RunRosterRow>(
+async function fetchRunRows(workspaceId: string, callerUserId: string): Promise<RunRosterRow[]> {
+  const result = await queryWithRLS<RunRosterRow>(
+    callerUserId,
     `SELECT r.id,
             r.workflow_id     AS "workflowId",
             w.name            AS "workflowName",
@@ -350,7 +354,7 @@ export function liveWorkRoutes(): Router {
 
       const [sessionRows, runRows] = await Promise.all([
         fetchSessionRows(workspaceId),
-        fetchRunRows(workspaceId),
+        fetchRunRows(workspaceId, callerUserId),
       ])
       const now = new Date()
       const items: LiveWorkItem[] = [
@@ -362,6 +366,7 @@ export function liveWorkRoutes(): Router {
             now,
             membership.compartments,
             membership.projectIds,
+            membership.departmentAccess,
           ))
           .filter((item): item is LiveSessionItem => item !== null),
         ...runRows.map((row) => projectRunRow(row, now)),

@@ -19,6 +19,7 @@ vi.mock('@/lib/user',()=>({getUserInfo:()=>({id:state.viewer})}));
 vi.mock('@/lib/auth-fetch',()=>({authFetch:(...args:unknown[])=>state.fetch(...args)}));
 vi.mock('@/lib/workspace-context',()=>({useOptionalWorkspaceContext:()=>({workspaceId:state.workspace,me:{id:state.viewer}})}));
 vi.mock('@/components/ui/searchable-select',()=>({SearchableSelect:(props:{items:Array<{value:string;label:string}>;onValueChange:(value:string)=>void;disabled?:boolean;'aria-label':string})=><div aria-label={props['aria-label']}>{props.items.map(item=><button type="button" key={item.value} disabled={props.disabled} onClick={()=>props.onValueChange(item.value)}>{item.label}</button>)}</div>}));
+vi.mock('../sharing/office-classification',()=>({OfficeClassificationPanel:()=>null}));
 vi.mock('../office-card-preview',()=>({OfficeCardPreviewCanvas:({snapshot}:{snapshot:{title:string}})=><div data-preview>{snapshot.title}</div>}));
 (globalThis as {IS_REACT_ACT_ENVIRONMENT?:boolean}).IS_REACT_ACT_ENVIRONMENT=true;
 const job={id:'job-a',workspaceId:'workspace-a',artifactId:uid(1),status:'completed',stage:'completed',errorCode:null};

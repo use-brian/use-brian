@@ -2,7 +2,7 @@
 
 /** Members: table of memberships, add-member flow and manual date/status edits. [COMP:app-web/association] */
 import Link from "next/link";
-import { useState } from "react";
+import { useEffect, useState } from "react";
 import { UserPlus, Users } from "lucide-react";
 import { useT } from "@/lib/i18n/client";
 import { grantCrmEntitlement,updateCrmEntitlement,type CrmLookupRow } from "@/lib/api/crm";
@@ -10,7 +10,7 @@ import type { AssociationPlan,AssociationMembership } from "@/lib/api/associatio
 import { crmRecordHref } from "@/lib/crm-view";
 import { Button, buttonVariants } from "@/components/ui/button";
 import { useAssociationModule } from "./module-controls";
-import { AssociationField as Field,AssociationToggle,AssociationContactPicker,AssociationIntentNotice,AssociationListState,useAssociationPage,useAssociationAction,useAssociationIntent,associationLocalTime,associationInstant } from "./operator-controls";
+import { AssociationField as Field,AssociationToggle,AssociationContactPicker,AssociationIntentNotice,AssociationListState,useAssociationPage,useAssociationContactSelection,useAssociationAction,useAssociationIntent,associationLocalTime,associationInstant } from "./operator-controls";
 import { AssociationEditor, associationMoney } from "./workspace-ui";
 import { associationHref } from "./navigation";
 import { EmptyState, FormFooter, InlineNotice, PageHeader, ResponsiveTable, Segmented, StatusPill, associationDate } from "./ui";
@@ -46,12 +46,14 @@ export function AssociationMembershipForm({workspaceId,plan,contact,row,disabled
 export function AssociationMembersPanel({workspaceId,initialNew=false}:{workspaceId:string;initialNew?:boolean}) {
   const t=useT().associationPage,u=t.ux,m=t.manage,plans=useAssociationPage(workspaceId,"plans"),module=useAssociationModule(workspaceId);
   const [mode,setMode]=useState<"list"|"add">(initialNew?"add":"list");
-  const [contact,setContact]=useState<CrmLookupRow|null>(null),[effectiveOnly,setEffectiveOnly]=useState(false),[saved,setSaved]=useState(false);
-  const [grant,setGrant]=useState<AssociationPlan|null>(null),[adjust,setAdjust]=useState<AssociationMembership|null>(null);
+  const [contact,setContact]=useAssociationContactSelection(workspaceId),[effectiveOnly,setEffectiveOnly]=useState(false),[saved,setSaved]=useState(false);
+  const [grant,setGrant]=useState<AssociationPlan|null>(null),[adjustId,setAdjustId]=useState<string|null>(null);
   const memberships=useAssociationPage(workspaceId,"memberships",{...(contact&&mode==="list"?{contactId:contact.id}:{}),activeOnly:effectiveOnly});
   const canManage=!!module.data?.canManage&&!module.error;
-  function done(){setGrant(null);setAdjust(null);setMode("list");setSaved(true);void memberships.refresh();}
-  if(adjust)return <AssociationEditor title={u.editMembership} onClose={()=>setAdjust(null)}><AssociationMembershipForm key={adjust.id} workspaceId={workspaceId} row={adjust} disabled={!!memberships.error} onSaved={done}/></AssociationEditor>;
+  const adjust=memberships.data?.items.find(row=>row.id===adjustId);
+  useEffect(()=>{if(adjustId&&!adjust)setAdjustId(null);},[adjustId,adjust]);
+  function done(){setGrant(null);setAdjustId(null);setMode("list");setSaved(true);void memberships.refresh();}
+  if(adjust)return <AssociationEditor title={u.editMembership} onClose={()=>setAdjustId(null)}><AssociationMembershipForm key={adjust.id} workspaceId={workspaceId} row={adjust} disabled={!!memberships.error} onSaved={done}/></AssociationEditor>;
   if(mode==="add")return <AssociationEditor title={u.addMember} onClose={()=>{setMode("list");setGrant(null);}}>
     <div className="space-y-5">
       <section className="space-y-2"><h3 className="text-sm font-semibold">{u.selectPerson}</h3><AssociationContactPicker workspaceId={workspaceId} selected={contact} onSelect={row=>{setContact(row);setGrant(null);}} onClear={()=>{setContact(null);setGrant(null);}}/></section>
@@ -80,7 +82,7 @@ export function AssociationMembersPanel({workspaceId,initialNew=false}:{workspac
           {key:"starts",label:u.starts,hideBelowMd:false,cell:row=>associationDate(row.startsAt,"date")},
           {key:"ends",label:u.ends,cell:row=>row.endsAt?associationDate(row.endsAt,"date"):m.unlimited},
         ]}
-        actions={row=><Button type="button" className="min-h-11 md:min-h-8" size="sm" variant="outline" disabled={!!row.provider||!!memberships.error} title={row.provider?u.providerManagedHint:undefined} onClick={()=>{setSaved(false);setAdjust(row);}}>{u.editMembership}</Button>}/>
+        actions={row=><Button type="button" className="min-h-11 md:min-h-8" size="sm" variant="outline" disabled={!!row.provider||!!memberships.error} title={row.provider?u.providerManagedHint:undefined} onClick={()=>{setSaved(false);setAdjustId(row.id);}}>{u.editMembership}</Button>}/>
     </AssociationListState>
   </section>;
 }

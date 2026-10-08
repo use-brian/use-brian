@@ -6,6 +6,8 @@
 
 import { describe, it, expect } from 'vitest'
 import { describeToolFailure, isTransientToolError, notFoundFailure, notFoundMessage, toolFailure } from '../tool-failure.js'
+import { formatToolError } from '../../engine/tool-executor.js'
+import { DerivedScopeError } from '../../security/derived-scope.js'
 
 describe('[COMP:tools/tool-failure] describeToolFailure', () => {
   it('frames a plain error with tool + target and a no-retry-unchanged verdict', () => {
@@ -43,6 +45,23 @@ describe('[COMP:tools/tool-failure] describeToolFailure', () => {
     expect(r.isError).toBe(true)
     expect(r.data).toContain('`t` failed: string error')
     expect(describeToolFailure(new Error(''), { tool: 't' })).toContain('`t` failed.')
+  })
+})
+
+describe('[COMP:tools/tool-failure] page-derived output refusal', () => {
+  it('explains the typed refusal and names the workspace-file recovery without the raw code', () => {
+    for (const err of [new DerivedScopeError('scope_output_not_integrated'), new Error('page_derivation_output_not_integrated')]) {
+      const copy = describeToolFailure(err, { tool: 'saveMemory', mutating: true })
+      expect(copy).toContain('`saveMemory` did not run.')
+      expect(copy).toContain('Nothing was saved')
+      expect(copy).toContain('workspace file')
+      expect(copy).not.toContain('not_integrated')
+      expect(formatToolError(err)).toContain('workspace file')
+    }
+  })
+
+  it('leaves other derived-scope codes as they were', () => {
+    expect(formatToolError(new DerivedScopeError('scope_source_changed'))).toBe('scope_source_changed')
   })
 })
 

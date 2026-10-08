@@ -77,8 +77,8 @@ vi.mock("@/components/ui/prompt-dialog", () => ({
   promptDialog: dialogs.promptDialog,
 }));
 
-vi.mock("@/lib/api/workspace-roster", () => ({
-  loadWorkspaceRoster: vi.fn().mockResolvedValue([]),
+vi.mock("@/lib/use-workspace-directory", () => ({
+  useWorkspaceMemberDirectory: () => ({ data: { members: [] }, unavailable: false, refresh: vi.fn() }),
 }));
 
 // The suggestions tray ([COMP:app-web/task-suggestions]) mounts alongside the

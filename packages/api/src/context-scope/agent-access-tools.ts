@@ -1,4 +1,4 @@
-import { intersectScopeGrants,type Tool } from '@use-brian/core'
+import { intersectScopeGrants,type DepartmentReadGrant,type Tool } from '@use-brian/core'
 import { runWithAgentAccess, currentAgentAccess } from '../db/client.js'
 import { executeWithCurrentAuthority } from './authority-lease.js'
 
@@ -16,6 +16,7 @@ export function bindToolsToAgentAccess(
     projectIds: string[] | null | undefined
     visibilityAssistantIds?: string[] | null
     sharedAudience?: boolean
+    departmentRead?: DepartmentReadGrant
   },
 ): Map<string, Tool> {
   const scoped = new Map<string, Tool>()
@@ -23,13 +24,29 @@ export function bindToolsToAgentAccess(
     const execute = tool.execute.bind(tool)
     scoped.set(name, {
       ...tool,
-      execute: (input, context) => runWithAgentAccess({
-        ...access,workspaceId:context.workspaceId??undefined,userId:context.userId,
-        visibilityAssistantIds:intersectScopeGrants(
-          access.visibilityAssistantIds??null,context.visibilityAssistantIds??null,
-          context.assistantKind==='primary'?null:[context.assistantId],
-        ),
-      }, () => executeWithCurrentAuthority(() => execute(input, {...context,mutationCompartments:currentAgentAccess()?.mutationCompartments}))),
+      execute: (input, context) => {
+        const canonical = context.executionContext?.security.access
+        if (canonical && (canonical.userId !== context.userId
+          || canonical.workspaceId !== (context.workspaceId ?? '')
+          || canonical.assistantId !== context.assistantId)) throw new Error('access_actor_mismatch')
+        // The canonical execution survives legacy call sites that project only
+        // flat fields. Apply both ceilings so either may only narrow the other.
+        const invoke = () => runWithAgentAccess({
+          ...access,
+          workspaceId: context.workspaceId ?? undefined,
+          userId: context.userId,
+          visibilityAssistantIds: intersectScopeGrants(
+            access.visibilityAssistantIds ?? null, context.visibilityAssistantIds ?? null,
+            context.assistantKind === 'primary' ? null : [context.assistantId],
+          ),
+        }, () => executeWithCurrentAuthority(() => execute(input, {
+          ...context,
+          mutationCompartments: currentAgentAccess()?.mutationCompartments,
+        })))
+        return canonical
+          ? context.executionContext!.security.authority.execute(() => runWithAgentAccess(canonical, invoke))
+          : invoke()
+      },
     })
   }
   return scoped

@@ -121,7 +121,7 @@ describe('[COMP:crm/operations-privacy] Actual retired intake replay and policy'
     await pool.query(`UPDATE association_enquiries SET status='resolved' WHERE id=$1`,[accepted.body.submissionId])
     const before = await counts(f.workspaceId)
     await expect(f.erase(accepted.body.contactId)).rejects.toMatchObject({ details: { reason: 'intake_replay_policy_unconfigured' } })
-    await expect(pruneCrmOperationsRetention(f.workspaceId,new Date('2099-01-01T00:00:00Z'))).rejects.toMatchObject({ details: { reason: 'intake_replay_policy_unconfigured' } })
+    await expect(pruneCrmOperationsRetention(f.context,new Date('2099-01-01T00:00:00Z'))).rejects.toMatchObject({ details: { reason: 'intake_replay_policy_unconfigured' } })
     expect(await counts(f.workspaceId)).toEqual(before)
     await pool.query(`UPDATE crm_intake_idempotency SET created_at=clock_timestamp()-interval '10 minutes' WHERE workspace_id=$1`,[f.workspaceId])
     await f.savePolicy(0,3600); await f.erase(accepted.body.contactId)
@@ -145,7 +145,7 @@ describe('[COMP:crm/operations-privacy] Actual retired intake replay and policy'
     await pool.query(`UPDATE association_enquiries SET status='resolved' WHERE id=$1`,[resolved.body.submissionId])
     await pool.query(`UPDATE crm_domain_event_outbox SET status='failed' WHERE workspace_id=$1`,[f.workspaceId])
     const before = await counts(f.workspaceId)
-    const result = await pruneCrmOperationsRetention(f.workspaceId,new Date('2099-01-01T00:00:00Z'))
+    const result = await pruneCrmOperationsRetention(f.context,new Date('2099-01-01T00:00:00Z'))
     expect(result.deleted.association_enquiries).toBe(1)
     expect(result.deleted.crm_domain_event_outbox).toBe(0)
     expect((await f.submit()).body).toEqual(retired)
@@ -171,7 +171,7 @@ describe('[COMP:crm/operations-privacy] Actual retired intake replay and policy'
     // Expiry does not discard live result replay.
     expect((await f.submit()).body).toEqual({ ...accepted.body,duplicate: true })
     await pool.query(`UPDATE association_enquiries SET status='resolved' WHERE id=$1`,[accepted.body.submissionId])
-    const result = await pruneCrmOperationsRetention(f.workspaceId,new Date('2099-01-01T00:00:00Z'))
+    const result = await pruneCrmOperationsRetention(f.context,new Date('2099-01-01T00:00:00Z'))
     expect(result.deleted.crm_intake_idempotency).toBe(1)
     expect(result.deleted.association_enquiries).toBe(1)
     expect(result.total).toBe(Object.values(result.deleted).reduce((sum,n) => sum+n,0))
@@ -206,7 +206,8 @@ describe('[COMP:crm/operations-privacy] Actual retired intake replay and policy'
       let blocked = false
       for (let attempt = 0; attempt < 100 && !blocked; attempt++) {
         blocked = (await pool.query(`SELECT 1 FROM pg_stat_activity WHERE pid<>pg_backend_pid()
-          AND wait_event_type='Lock' AND query LIKE '%FROM crm_intake_idempotency%' AND query LIKE '%FOR UPDATE%'`)).rowCount! > 0
+          AND wait_event_type='Lock' AND query LIKE '%FOR UPDATE%'
+          AND (query LIKE '%FROM crm_intake_idempotency%' OR query LIKE '%FROM workspaces%')`)).rowCount! > 0
         if (!blocked) await setTimeout(10)
       }
       expect(blocked).toBe(true)
@@ -219,7 +220,7 @@ describe('[COMP:crm/operations-privacy] Actual retired intake replay and policy'
   it('exports safe policy/receipt state, enforces app-role isolation and preserves flush policy classification', async () => {
     const f = await fixture(), other = await fixture(), accepted = await f.submit()
     await f.erase(accepted.body.contactId)
-    const exported = await exportCrmOperationsPrivacy(f.workspaceId)
+    const exported = await exportCrmOperationsPrivacy(f.context)
     expect(exported.tables.crm_privacy_policies).toHaveLength(1)
     expect(exported.tables.crm_intake_idempotency[0]).toMatchObject({ status: 'retired',contact_id: null,submission_id: null })
     const client = await appPool.connect()

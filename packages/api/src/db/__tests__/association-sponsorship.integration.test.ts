@@ -2,6 +2,7 @@ import {randomUUID} from 'node:crypto'
 import {afterAll,describe,expect,it} from 'vitest'
 import {getAppPool,getPool} from '../client.js'
 import {createAssociationStore} from '../association-store.js'
+import {loadAssociationOrderScope} from '../../association/source-scope.js'
 import type {AssociationActor} from '@use-brian/core'
 
 const {assertLocalFixture}=await import(new URL('../../../../../scripts/crm/local-fixture.mjs',import.meta.url).href)
@@ -22,6 +23,8 @@ async function fixture(seatLimit=1){
   await pool.query(`INSERT INTO association_memberships(id,workspace_id,contact_id,plan_id,idempotency_key,request_fingerprint,status,starts_at,ends_at)
     VALUES($1,$2,$3,$4,$5,repeat('a',64),'active',$6,$7)`,[sponsorMembershipId,workspaceId,sponsorId,sponsorPlanId,randomUUID(),
       new Date(now-86_400_000),new Date(now+365*86_400_000)])
+  const scope=await loadAssociationOrderScope(pool,workspaceId,[sponsorId])
+  await pool.query('UPDATE association_memberships SET scope_snapshot=$2::jsonb,scope_sources=$3::jsonb WHERE id=$1',[sponsorMembershipId,JSON.stringify(scope.scope),JSON.stringify(scope.sources)])
   const actor:AssociationActor={credentialKind:'user',credentialId:userId,actingUserId:userId}
   const allocation=await store.createSponsorshipAllocation(workspaceId,{sponsorContactId:sponsorId,sponsorMembershipId,
     beneficiaryPlanId:studentPlanId,idempotencyKey:randomUUID(),seatLimit,startsAt:new Date(now-60_000).toISOString(),
@@ -92,4 +95,46 @@ describe('[COMP:crm/association-sponsorship] Atomic recipient-bound sponsorship'
     expect((await store.listMemberships(f.workspaceId,f.nomineeId))[0]).toMatchObject({status:'active',isEffective:false})
     expect(await store.listMemberships(f.workspaceId,f.nomineeId,{activeOnly:true})).toHaveLength(0)
   })
+  it('inherits both departments, masks hidden seat counts and rejects revoked sponsorship mutations',async()=>{
+    const f=await fixture(3),departmentOwnerId=randomUUID(),sponsorDepartment=randomUUID(),nomineeDepartment=randomUUID()
+    await pool.query('INSERT INTO users(id,auth_provider_id) VALUES($1::uuid,$1::text)',[departmentOwnerId])
+    await pool.query("INSERT INTO workspace_members(workspace_id,user_id,role) VALUES($1,$2,'member')",[f.workspaceId,departmentOwnerId])
+    for(const departmentId of [sponsorDepartment,nomineeDepartment]) {
+      await pool.query("INSERT INTO workspace_groups(id,workspace_id,name,created_by,kind,key,compartment_key) VALUES($1::uuid,$2,'Fictional sponsorship department',$3,'team',$1::text,$4)",[departmentId,f.workspaceId,departmentOwnerId,`team:${departmentId}`])
+      await pool.query("INSERT INTO workspace_compartments(workspace_id,key,label,managed_by,managed_ref_id) VALUES($1,$2,'Fictional sponsorship department','team',$3)",[f.workspaceId,`team:${departmentId}`,departmentId])
+      await pool.query("INSERT INTO department_edges(workspace_id,department_id,principal_kind,user_id,clearance,origin) VALUES($1,$2,'user',$3,'confidential','store')",[f.workspaceId,departmentId,f.userId])
+    }
+    await pool.query("UPDATE entities SET compartments=$2,sensitivity='confidential' WHERE id=$1",[f.sponsorId,[`team:${sponsorDepartment}`]])
+    await pool.query("UPDATE entities SET compartments=$2,sensitivity='confidential' WHERE id=$1",[f.nomineeId,[`team:${nomineeDepartment}`]])
+    const input={sponsorContactId:f.sponsorId,sponsorMembershipId:f.sponsorMembershipId,beneficiaryPlanId:f.studentPlanId,idempotencyKey:randomUUID(),seatLimit:3,startsAt:new Date(f.now-60_000).toISOString(),endsAt:new Date(f.now+180*86400_000).toISOString(),invitationTtlHours:168}
+    const allocation=await store.createSponsorshipAllocation(f.workspaceId,input,f.actor),id=String(allocation.record.id)
+    const invitationInput={allocationId:id,nomineeContactId:f.nomineeId,idempotencyKey:randomUUID()}
+    const issued=await store.issueSponsorshipInvitation(f.workspaceId,invitationInput,f.actor),invitationId=String(issued.record.id),token=String(issued.record.redemptionToken)
+    const expected=[`team:${sponsorDepartment}`,`team:${nomineeDepartment}`].sort()
+    expect((await pool.query('SELECT scope_snapshot FROM association_sponsorship_invitations WHERE id=$1',[invitationId])).rows[0].scope_snapshot.compartments.sort()).toEqual(expected)
+    const list=()=>store.listSponsorshipAllocations(f.workspaceId,{limit:20,cursor:null},f.actor)
+    expect((await list()).items.find(row=>row.id===id)?.allocatedSeats).toBe(1)
+    await pool.query("UPDATE department_edges SET expires_at=clock_timestamp()-interval '1 second' WHERE department_id=$1 AND user_id=$2",[nomineeDepartment,f.userId])
+    expect((await list()).items.find(row=>row.id===id)?.allocatedSeats).toBeNull()
+    expect((await store.createSponsorshipAllocation(f.workspaceId,input,f.actor)).record.allocatedSeats).toBeNull()
+    expect((await store.listSponsorshipInvitations(f.workspaceId,{limit:20,cursor:null},f.actor)).items).toEqual([])
+    const reason={requestId:randomUUID(),reason:'Fictional reviewed cancellation'}
+    await expect(store.cancelSponsorshipAllocation(f.workspaceId,id,reason,f.actor)).rejects.toMatchObject({code:'not_authorized'})
+    await expect(store.revokeSponsorshipInvitation(f.workspaceId,invitationId,reason,f.actor)).rejects.toMatchObject({code:'not_authorized'})
+    await expect(store.issueSponsorshipInvitation(f.workspaceId,invitationInput,f.actor)).rejects.toMatchObject({code:'not_authorized'})
+    await expect(store.redeemSponsorshipInvitation(f.workspaceId,{token,contactId:f.nomineeId},f.actor)).rejects.toMatchObject({code:'not_authorized'})
+    expect((await pool.query('SELECT status FROM association_sponsorship_allocations WHERE id=$1',[id])).rows[0].status).toBe('active')
+    expect((await pool.query('SELECT status FROM association_sponsorship_invitations WHERE id=$1',[invitationId])).rows[0].status).toBe('pending')
+    await pool.query('UPDATE department_edges SET expires_at=NULL WHERE department_id=$1 AND user_id=$2',[nomineeDepartment,f.userId])
+    await pool.query("UPDATE entities SET compartments='{}',sensitivity='internal' WHERE id=$1",[f.nomineeId])
+    const redeemed=await store.redeemSponsorshipInvitation(f.workspaceId,{token,contactId:f.nomineeId},f.actor)
+    expect((await pool.query('SELECT scope_snapshot FROM association_memberships WHERE id=$1',[redeemed.record.id])).rows[0].scope_snapshot.compartments.sort()).toEqual(expected)
+    await pool.query("UPDATE department_edges SET expires_at=clock_timestamp()-interval '1 second' WHERE department_id=$1 AND user_id=$2",[nomineeDepartment,f.userId])
+    await expect(store.redeemSponsorshipInvitation(f.workspaceId,{token,contactId:f.nomineeId},f.actor)).rejects.toMatchObject({code:'not_authorized'})
+    expect(await store.listMemberships(f.workspaceId,f.nomineeId,{},f.actor)).toEqual([])
+    await pool.query("UPDATE department_edges SET expires_at=clock_timestamp()-interval '1 second' WHERE department_id=$1 AND user_id=$2",[sponsorDepartment,f.userId])
+    expect((await list()).items).toEqual([])
+    await expect(store.createSponsorshipAllocation(f.workspaceId,input,f.actor)).rejects.toMatchObject({code:'not_authorized'})
+  })
+
 })

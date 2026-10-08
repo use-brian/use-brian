@@ -24,14 +24,15 @@
  * run itself is fetched. Both fetch in parallel (N7). The spine marks
  * `workflow-run:<wid>:` stale on `WORKFLOW_REFRESH_EVENT` (a `workflow_run`
  * step / status signal), so the page carries no listener of its own; the 5s
- * in-flight poll stays as the degraded-SSE fallback and is `refresh()`.
+ * active/idle poll renews read authority through `refresh()` even after completion.
  *
  * Spec: docs/architecture/features/workflow.md → Run history drill-down.
  * [COMP:app-web/workflow]
  */
 
 import { DeliveryOutcomeFeedback } from "@/components/workflow/delivery-feedback";
-import { use, useEffect } from "react";
+import { use, useEffect, useRef } from "react";
+import Link from "next/link";
 import { BackButton } from "@/components/ui/back-button";
 import { useT } from "@/lib/i18n/client";
 import { openWorkspaceSettings } from "@/lib/workspace-settings-events";
@@ -44,7 +45,7 @@ import {
   type WorkflowRunDetail,
   type WorkflowStepRunDetail,
 } from "@/lib/api/workflow";
-import { useCachedResource } from "@/lib/surface-cache";
+import { evictSurfaceCacheKey, useCachedResource } from "@/lib/surface-cache";
 import {
   workflowDetailCacheKey,
   workflowRunCacheKey,
@@ -52,6 +53,11 @@ import {
 import { Skeleton } from "@/components/skeleton";
 import { cn } from "@/lib/utils";
 import { RunIdCopyButton } from "@/components/workflow/run-id-copy-button";
+
+/** Historical runs that predate the evidence a resume or reuse now requires
+ *  (workflow.md, legacy recovery): the remedy is a fresh run, never a retry. */
+const PAGE_OUTPUT_UNSUPPORTED = ["scope_output_not_integrated", "page_derivation_output_not_integrated"];
+const RUN_EVIDENCE_UNAVAILABLE = ["scope_evidence_missing", "task_event_evidence_missing", "knowledge_event_evidence_missing", "primitive_event_metadata_missing", "page_event_evidence_missing"];
 
 export default function WorkflowRunDetailPage({
   params,
@@ -75,25 +81,39 @@ export default function WorkflowRunDetailPage({
   const workflow = workflowRes.data;
   const refreshRun = runRes.refresh;
 
-  // Auto-refresh while the run is still in flight — these states change
-  // server-side without user action, so polling every 5s keeps the page
-  // honest without overwhelming the API. The spine's `workflow_run` signal
-  // marks the key stale between ticks, so this is the degraded-SSE fallback.
+  // Execution may stop, but read authority can still change afterward.
   const runStatus = run?.status;
   useEffect(() => {
-    if (
-      runStatus !== "pending" &&
-      runStatus !== "running" &&
-      runStatus !== "awaiting_wait" &&
-      runStatus !== "awaiting_input"
-    ) {
-      return;
-    }
-    const tid = window.setInterval(() => {
-      void refreshRun();
-    }, 5000);
-    return () => window.clearInterval(tid);
+    if (!runStatus) return;
+    const active = ["pending", "running", "awaiting_wait", "awaiting_input"].includes(runStatus);
+    const renew = () => { void refreshRun(); };
+    const visible = () => {
+      if (document.visibilityState === "visible") renew();
+    };
+    const tid = window.setInterval(renew, active ? 5000 : 15000);
+    document.addEventListener("visibilitychange", visible);
+    return () => {
+      window.clearInterval(tid);
+      document.removeEventListener("visibilitychange", visible);
+    };
   }, [runStatus, refreshRun]);
+
+  const lastRead = useRef({ key: "", at: 0 });
+  const readKey = workflowRunCacheKey(workspaceId, runId);
+  if (lastRead.current.key !== readKey || runRes.updatedAt > 0) {
+    lastRead.current = { key: readKey, at: runRes.updatedAt };
+  }
+  const readAt = lastRead.current.at;
+
+  // Include warmed entries: failed or hung reads must not renew their lifetime.
+  useEffect(() => {
+    if (!run) return;
+    const tid = window.setTimeout(
+      () => evictSurfaceCacheKey(workflowRunCacheKey(workspaceId, runId)),
+      Math.max(0, readAt + 30000 - Date.now()),
+    );
+    return () => window.clearTimeout(tid);
+  }, [run, readAt, workspaceId, runId]);
 
   // A cold load that failed outright (no row, an error) reads as not found;
   // an in-flight cold load paints the run-shaped frame (N4), with the
@@ -210,6 +230,20 @@ export default function WorkflowRunDetailPage({
                   onClick={() => openWorkspaceSettings("ws-access")}>
                   {t.workflowPage.builder.runDetail.reviewDepartmentAccess}
                 </button>
+              </>
+            ) : PAGE_OUTPUT_UNSUPPORTED.some((code) => [String((run.error as { reason?: unknown }).reason), String((run.error as { message?: unknown }).message)].some((value) => value.includes(code))) ? (
+              <>
+                <p>{t.workflowPage.builder.runDetail.pageOutputUnsupported}</p>
+                <Link href={detailHref} className="mt-2 inline-flex min-h-8 max-sm:min-h-11 items-center rounded-md border border-current px-3 text-sm font-medium">
+                  {t.workflowPage.builder.runDetail.openWorkflow}
+                </Link>
+              </>
+            ) : RUN_EVIDENCE_UNAVAILABLE.some((code) => [String((run.error as { reason?: unknown }).reason), String((run.error as { message?: unknown }).message)].some((value) => value.includes(code))) ? (
+              <>
+                <p>{t.workflowPage.builder.runDetail.evidenceUnavailable}</p>
+                <Link href={detailHref} className="mt-2 inline-flex min-h-8 max-sm:min-h-11 items-center rounded-md border border-current px-3 text-sm font-medium">
+                  {t.workflowPage.builder.runDetail.openWorkflow}
+                </Link>
               </>
             ) : String((run.error as { message?: unknown }).message ?? JSON.stringify(run.error))}
           </div>
@@ -414,7 +448,13 @@ function StepRow({
       )}
       {isAwaitingApproval && (
         <div className="text-xs text-amber-700 dark:text-amber-400">
-          {t.workflowPage.builder.runDetail.stepApprovalActive}
+          <p>{t.workflowPage.builder.runDetail.stepApprovalActive}</p>
+          <Link
+            href={`/w/${workspaceId}/p?panel=approvals`}
+            className="inline-flex min-h-8 max-sm:min-h-11 items-center underline underline-offset-4"
+          >
+            {t.workflowPage.builder.runDetail.openApprovals}
+          </Link>
         </div>
       )}
 

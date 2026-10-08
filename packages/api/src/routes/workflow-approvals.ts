@@ -69,6 +69,7 @@ export function workflowApprovalsRoutes(
     }
 
     const result = await resumeFromApproval(opts.bridgeDeps, id, 'approved', userId)
+    if (result.status === 'unavailable') { res.status(404).json({ error: 'Approval not found' }); return }
     res.json(result)
   })
 
@@ -93,6 +94,7 @@ export function workflowApprovalsRoutes(
     }
 
     const result = await resumeFromApproval(opts.bridgeDeps, id, 'rejected', userId, reason)
+    if (result.status === 'unavailable') { res.status(404).json({ error: 'Approval not found' }); return }
     res.json(result)
   })
 

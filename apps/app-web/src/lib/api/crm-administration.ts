@@ -1,5 +1,6 @@
 /** Native owner administration; never uses a machine credential. [COMP:app-web/association] */
 import { publicRuntimeConfig } from "@/lib/runtime-public-config";
+import { SurfaceCacheEvictionError } from "@/lib/surface-cache";
 import { authFetch } from "@/lib/auth-fetch";
 import { listCrmIntakeDefinitions,listCrmConsentPurposes,listCrmEntitlementPlans,listCrmEvents } from "./crm";
 import { AssociationApiError } from "./association";
@@ -10,7 +11,13 @@ async function request<T>(workspaceId:string,path:string,input?:unknown):Promise
 }
 export type CrmScopeDimension="definitionIds"|"purposeKeys"|"planIds"|"eventIds"|"providerKeys";
 export type CrmCredentialGrant={operation:string;selectors:Partial<Record<CrmScopeDimension,"all"|string[]>>};
-export type CrmManagedCredential={id:string;label:string;prefix:string;expiresAt:string;revokedAt:string|null;createdAt:string;lastUsedAt:string|null;grants:CrmCredentialGrant[]};
+export type CrmManagedCredential={id:string;label:string;prefix:string;expiresAt:string;revokedAt:string|null;createdAt:string;lastUsedAt:string|null;grants:CrmCredentialGrant[];departmentBinding?:{binding:string[];cap:string;assistantId:string|null}|null};
+export type CrmCredentialBindingSelection={departmentIds?:string[];assistantId?:string|null;cap:"public"|"internal"|"confidential"};
+export type CrmCredentialBindingOptions={mode:"legacy"|"department-v2";validForMs:number;assistants:Array<{id:string;name:string}>;choices:Array<{selection:CrmCredentialBindingSelection;binding:string[];departments:Array<{id:string;name:string}>}>};
+export function getCrmCredentialBindingOptions(workspaceId:string,selection:Omit<CrmCredentialBindingSelection,"departmentIds">){
+  const query=new URLSearchParams({cap:selection.cap,...(selection.assistantId?{assistantId:selection.assistantId}:{})});
+  return request<CrmCredentialBindingOptions>(workspaceId,`integration-credentials/binding-options?${query}`);
+}
 export type CrmCredentialCatalog={operations:string[];selectors:Record<string,CrmScopeDimension[]>};
 export async function getCrmCredentialCatalog(workspaceId:string):Promise<CrmCredentialCatalog>{
   const catalog=await request<CrmCredentialCatalog>(workspaceId,"integration-credentials/catalog");
@@ -18,7 +25,7 @@ export async function getCrmCredentialCatalog(workspaceId:string):Promise<CrmCre
   if(!Array.isArray(catalog.operations)||!catalog.operations.length||!catalog.selectors||catalog.operations.some(op=>typeof op!=="string"||!Array.isArray(catalog.selectors[op])||catalog.selectors[op].some(d=>!dimensions.has(d))))throw new AssociationApiError("invalid_response",502);
   return catalog;
 }
-export function createCrmCredential(workspaceId:string,input:{label:string;expiresAt:string;grants:CrmCredentialGrant[];revokeCredentialId?:string}){
+export function createCrmCredential(workspaceId:string,input:{requestId?:string;label:string;expiresAt:string;grants:CrmCredentialGrant[];revokeCredentialId?:string;departmentBinding?:CrmCredentialBindingSelection}){
   return request<CrmManagedCredential&{oneTimeSecret:string}>(workspaceId,"integration-credentials",input);
 }
 export function revokeCrmCredential(workspaceId:string,credentialId:string){return request<{revoked:boolean}>(workspaceId,`integration-credentials/${encodeURIComponent(credentialId)}/revoke`,{});}
@@ -56,11 +63,32 @@ export async function previewCrmPrivacy(workspaceId:string,input:CrmPrivacyPrevi
   if(input.kind==="erasure"&&preview.contactId!==input.contactId || input.kind==="fileCleanup"&&preview.fileId!==input.fileId)throw new AssociationApiError("invalid_response",502);
   return preview;
 }
+export type CrmErasureReviewRead={preview:CrmPrivacyPreview|null;receipt:Record<string,unknown>|null};
+export async function getCrmErasureReview(workspaceId:string,previewId:string):Promise<CrmErasureReviewRead>{
+  try {
+    const value=await request<CrmErasureReviewRead>(workspaceId,`privacy/erasure-previews/${encodeURIComponent(previewId)}`);
+    const review=value?.preview,receipt=value?.receipt;
+    if(review ? receipt!==null||review.id!==previewId||!review.contactId||!/^[a-f0-9]{64}$/.test(review.previewHash)||!Number.isFinite(Date.parse(review.expiresAt))||!["ready","blocked"].includes(review.status)||!Array.isArray(review.domains)||!Array.isArray(review.blockers)
+      : review!==null||!receipt||receipt.previewId!==previewId||receipt.status!=="crm_contact_purged")throw new AssociationApiError("invalid_response",502);
+    return value;
+  }catch(error){if(error instanceof AssociationApiError&&[401,403,404,409].includes(error.status))throw new SurfaceCacheEvictionError(error);throw error;}
+}
 export function executeCrmPrivacy(workspaceId:string,input:CrmPrivacyPreviewRequest,preview:CrmPrivacyPreview){
   const body={previewId:preview.id,previewHash:preview.previewHash,confirmed:true,...(input.kind==="erasure"?{contactId:input.contactId}:{})};
   return request<Record<string,unknown>>(workspaceId,input.kind==="erasure"?"privacy/erase":input.kind==="retention"?"retention/execute":"privacy/file-cleanup-execute",body);
 }
 export function getCrmFileCleanupReceipt(workspaceId:string,previewId:string){return request<Record<string,unknown>>(workspaceId,`privacy/file-cleanups/${encodeURIComponent(previewId)}`);}
+/** Renew an open retention or file-cleanup review under current authority; a denial evicts it. */
+export async function renewCrmPrivacyReview(workspaceId:string,kind:"retention"|"fileCleanup",previewId:string):Promise<{review?:CrmPrivacyPreview;receipt?:Record<string,unknown>}>{
+  try {
+    if(kind==="retention"){
+      const review=await request<CrmPrivacyPreview>(workspaceId,`retention/reviews/${encodeURIComponent(previewId)}`);
+      if(review?.id!==previewId||!/^[a-f0-9]{64}$/.test(review.previewHash)||!["ready","blocked"].includes(review.status)||!Array.isArray(review.domains)||!Array.isArray(review.blockers))throw new AssociationApiError("invalid_response",502);
+      return {review};
+    }
+    return {receipt:await getCrmFileCleanupReceipt(workspaceId,previewId)};
+  }catch(error){if(error instanceof AssociationApiError&&[401,403,404,409].includes(error.status))throw new SurfaceCacheEvictionError(error);throw error;}
+}
 export async function downloadCrmFullPrivacy(workspaceId:string,contactId?:string):Promise<Blob>{
   const path=contactId?`contacts/${encodeURIComponent(contactId)}/privacy-export`:"privacy-export";
   const response=await authFetch(`${API_URL}/api/crm/${encodeURIComponent(workspaceId)}/operations/${path}?format=crm-privacy-v2`);

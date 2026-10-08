@@ -56,6 +56,10 @@ export function runWithAgentAccess<T>(
 ): T {
   const clearance = AGENT_CLEARANCES.find((candidate) => candidate === access.clearance)
   if (!clearance) return fn()
+  if(access.departmentRead && (
+    access.workspaceId!==undefined && access.departmentRead.workspaceId!==access.workspaceId
+    || access.userId!==undefined && access.departmentRead.userId!==access.userId
+  ))throw new Error('access_actor_mismatch')
   const parent=agentAccessStorage.getStore()
   if(parent?.workspaceId!==undefined&&access.workspaceId!==undefined&&parent.workspaceId!==access.workspaceId
     ||parent?.userId!==undefined&&access.userId!==undefined&&parent.userId!==access.userId)throw new Error('access_actor_mismatch')

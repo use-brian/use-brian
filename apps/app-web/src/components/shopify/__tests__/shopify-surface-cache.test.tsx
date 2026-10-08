@@ -161,6 +161,22 @@ describe("[COMP:app-web/shopify-surface-cache] Shopify surface first paint", () 
     expect(host!.querySelector("[data-shopify-sections]")).toBeNull();
   });
 
+  it("unmounts open tabs and their store data when the 15-second renewal finds the store unreachable", async () => {
+    vi.useFakeTimers({ toFake: ["setInterval", "clearInterval"] });
+    try {
+      api.listTools.mockResolvedValue(CONNECTED);
+      await mount();
+      expect(host!.querySelector('[data-testid="inventory-tab"],[data-testid="draft-tab"]')).not.toBeNull();
+      api.listTools.mockResolvedValue({ tools: [], connected: false });
+      // No focus, no stale mark: only the lease's own 15-second renewal runs.
+      await act(async () => { vi.advanceTimersByTime(15_000); });
+      await settle();
+    } finally { vi.useRealTimers(); }
+    expect(text()).toContain(en.shopifyApp.notConnected);
+    expect(host!.querySelector("[data-shopify-sections]")).toBeNull();
+    expect(host!.querySelector('[data-testid="draft-tab"],[data-testid="inventory-tab"]')).toBeNull();
+  });
+
   it("offers Retry after a cold-load failure instead of retrying on its own", async () => {
     api.listTools.mockRejectedValue(new Error("store down"));
     await mount();

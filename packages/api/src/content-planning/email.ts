@@ -21,6 +21,17 @@ import {
   type StructuredFeedContent,
 } from '../db/feed-collaboration-store.js'
 import { createDbCrmSegmentStore } from '../db/crm-segment-store.js'
+import { crmSegmentReadScope, type CrmSegmentReadScope } from '../association/source-scope.js'
+import type { AssociationActor, CampaignActor } from '@use-brian/core'
+
+/** The campaign actor as the Association/CRM read principal; unknown kinds fail closed downstream. */
+export function campaignReadActor(actor: CampaignActor): AssociationActor {
+  return {
+    credentialKind: actor.kind,
+    credentialId: actor.credentialId ?? actor.assistantId ?? actor.userId ?? 'unknown',
+    ...(actor.userId ? { actingUserId: actor.userId } : {}),
+  }
+}
 
 const tokenPattern = /{{\s*([a-z][a-z0-9_]*)\s*}}/g
 const htmlEscape = (value: string) => value.replace(/[&<>"']/g, char => ({
@@ -188,7 +199,7 @@ function contactPersonalization(contact: AudienceContact): Record<string, string
   }
 }
 
-async function verdictFor(workspaceId: string, contact: AudienceContact, purposeKey: string) {
+async function verdictFor(workspaceId: string, contact: AudienceContact, purposeKey: string, scope: CrmSegmentReadScope | null) {
   const purpose = (await query<{ archived: boolean; requiresConsent: boolean; applicableChannels: string[] }>(
     `SELECT archived_at IS NOT NULL AS archived,requires_consent AS "requiresConsent",applicable_channels AS "applicableChannels"
        FROM crm_consent_purposes WHERE workspace_id=$1 AND purpose_key=$2`, [workspaceId, purposeKey],
@@ -196,16 +207,26 @@ async function verdictFor(workspaceId: string, contact: AudienceContact, purpose
   if (!purpose) return { verdict: 'unknown' as const, reasons: ['purpose_unavailable'] }
   const instant = `to_char(occurred_at AT TIME ZONE 'UTC','YYYY-MM-DD"T"HH24:MI:SS.US"Z"') AS "occurredAt",
     to_char(created_at AT TIME ZONE 'UTC','YYYY-MM-DD"T"HH24:MI:SS.US"Z"') AS "createdAt"`
-  const consent = await query<{ id: string; action: 'granted' | 'withdrawn'; occurredAt: string; createdAt: string }>(
-    `SELECT id,action,${instant}
-       FROM association_consent_events WHERE workspace_id=$1 AND contact_id=$2 AND purpose=$3
-      ORDER BY occurred_at DESC,created_at DESC,id DESC LIMIT 1`, [workspaceId, contact.id, purposeKey],
+  // The deciding consent/suppression rows must be readable by the actor; an unreadable
+  // latest row is never replaced by an older readable one (that could resurrect a withdrawn consent).
+  const readable = (table: string) => scope
+    ? `,EXISTS(SELECT 1 FROM ${table} WHERE ${table}.workspace_id=x.workspace_id AND ${table}.id=x.id AND ${scope.record(table === 'crm_suppression_events' ? 'suppression' : 'consent')}) AS readable`
+    : ',true AS readable'
+  const scopeParams = scope?.params ?? []
+  const consent = await query<{ id: string; action: 'granted' | 'withdrawn'; occurredAt: string; createdAt: string; readable: boolean }>(
+    `SELECT id,action,${instant}${readable('association_consent_events')}
+       FROM association_consent_events x WHERE workspace_id=$1 AND contact_id=$2 AND purpose=$3
+      ORDER BY occurred_at DESC,created_at DESC,id DESC LIMIT 1`, [workspaceId, contact.id, purposeKey, ...scopeParams],
   )
-  const suppressions = await query<{ id: string; channel: 'all' | 'email'; action: 'suppressed' | 'released'; occurredAt: string; createdAt: string }>(
-    `SELECT DISTINCT ON(channel) id,channel,action,${instant}
-       FROM crm_suppression_events WHERE workspace_id=$1 AND contact_id=$2 AND channel IN('all','email')
-      ORDER BY channel,occurred_at DESC,created_at DESC,id DESC`, [workspaceId, contact.id],
+  const suppressions = await query<{ id: string; channel: 'all' | 'email'; action: 'suppressed' | 'released'; occurredAt: string; createdAt: string; readable: boolean }>(
+    `SELECT DISTINCT ON(channel) id,channel,action,${instant}${readable('crm_suppression_events')}
+       FROM crm_suppression_events x WHERE workspace_id=$1 AND contact_id=$2 AND channel IN('all','email')
+        ${scope ? 'AND $3::text IS NULL' : ''}
+      ORDER BY channel,occurred_at DESC,created_at DESC,id DESC`, [workspaceId, contact.id, ...(scope ? [null, ...scopeParams] : [])],
   )
+  if ([...consent.rows, ...suppressions.rows].some(row => !row.readable)) {
+    return { verdict: 'unknown' as const, reasons: ['evidence_unavailable'] }
+  }
   return evaluateCrmSendability({
     channel: 'email', hasContactMethod: Boolean(contact.email),
     purpose: { ...purpose, applicableChannels: purpose.applicableChannels as ('email')[] },
@@ -240,7 +261,7 @@ export function createCampaignEmailService(options: { deliveries?: CrmDeliverySe
       return { revision: draft.revision, projection: renderCampaignEmail(draft.content, draft.metadata, values) }
     },
 
-    async audience(workspaceId: string, placementId: string) {
+    async audience(workspaceId: string, placementId: string, actor: AssociationActor) {
       const draft = await loadDraft(workspaceId, placementId)
       if (!draft.metadata) throw new CampaignEmailError('conflict', 'Email metadata must be saved before audience review.')
       const segments = createDbCrmSegmentStore()
@@ -250,7 +271,8 @@ export function createCampaignEmailService(options: { deliveries?: CrmDeliverySe
       }
       const preview = await segments.previewSegment(workspaceId, draft.metadata.audience.segmentId, {
         limit: Math.min(100, CAMPAIGN_LIMITS.broadcastRecipients), snapshotLimit: CAMPAIGN_LIMITS.broadcastRecipients,
-      })
+      }, actor)
+      const evidenceScope = await crmSegmentReadScope(getPool(), workspaceId, actor, 4)
       if (preview.count > CAMPAIGN_LIMITS.broadcastRecipients) {
         throw new CampaignEmailError('rate_limited', `Audience exceeds the ${CAMPAIGN_LIMITS.broadcastRecipients}-recipient broadcast limit.`, { count: preview.count })
       }
@@ -269,7 +291,7 @@ export function createCampaignEmailService(options: { deliveries?: CrmDeliverySe
         const address = contact.email?.toLowerCase() ?? ''
         const values = contactPersonalization(contact)
         const missing = draft.metadata.personalization.filter(spec => spec.required && !values[spec.field]?.trim()).map(spec => spec.field)
-        const verdict = await verdictFor(workspaceId, contact, draft.metadata.purposeKey)
+        const verdict = await verdictFor(workspaceId, contact, draft.metadata.purposeKey, evidenceScope)
         const reasons = [...verdict.reasons]
         if (!address) reasons.push('missing_email')
         if (address && used.has(address)) reasons.push('duplicate_address')

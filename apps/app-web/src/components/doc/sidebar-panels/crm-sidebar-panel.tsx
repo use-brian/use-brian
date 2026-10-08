@@ -36,6 +36,7 @@ import { cn } from "@/lib/utils";
 import { useT } from "@/lib/i18n/client";
 import { Skeleton } from "@/components/skeleton";
 import { useCachedResource } from "@/lib/surface-cache";
+import { useLeasedResource } from "@/lib/offline/surface-content-cache";
 import {
   approvalsCacheKey,
   crmConfigCacheKey,
@@ -101,19 +102,20 @@ export function CrmSidebarPanel({ workspaceId }: { workspaceId: string }) {
     () => fetchCrmConfig(workspaceId),
   );
   const selectedPipeline = resolveSelectedPipeline(configResource.data?.pipelines, view.pipeline);
-  const summaryResource = useCachedResource<CrmSummary>(
+  // Content lease: protected counts and names expire with the viewer's authority.
+  const summaryResource = useLeasedResource<CrmSummary>(
     crmRegionCacheKey(workspaceId, "summary", selectedPipeline?.id ?? "all"),
     () => fetchCrmSummary(workspaceId, selectedPipeline?.id),
   );
-  const directoriesResource = useCachedResource<CrmDirectories>(
+  const directoriesResource = useLeasedResource<CrmDirectories>(
     crmRegionCacheKey(workspaceId, "lookups"),
     () => fetchCrmDirectories(workspaceId),
   );
-  const emailDraftsResource = useCachedResource<CrmEmailDraft[]>(
+  const emailDraftsResource = useLeasedResource<CrmEmailDraft[]>(
     crmRegionCacheKey(workspaceId, "email-drafts"),
     () => fetchCrmEmailDrafts(workspaceId),
   );
-  const approvalsResource = useCachedResource<PendingApprovalRow[]>(
+  const approvalsResource = useLeasedResource<PendingApprovalRow[]>(
     approvalsCacheKey(workspaceId),
     () => listApprovals(workspaceId, { throwOnError: true }),
   );

@@ -374,6 +374,25 @@ async function cancellationFixture() {
   return { ...stores, deps, approvals, approval, run, tool, registry, execute, downstream }
 }
 
+it.each(['wrong_approver','inaccessible','revoked_during_parent_read'] as const)(
+  '[COMP:workflow/approval] refuses %s before claiming or executing',async scenario=>{
+    const f=await cancellationFixture()
+    if(scenario==='inaccessible') f.approvals.getById=async()=>null
+    if(scenario==='revoked_during_parent_read') {
+      const original=f.runStore.getRunSystem.bind(f.runStore)
+      f.runStore.getRunSystem=async id=>{
+        const run=await original(id)
+        f.approvals.getById=async()=>null
+        return run
+      }
+    }
+    const outcome=await resumeFromApproval(f.deps,f.approval.id,'approved',scenario==='wrong_approver'?'other-user':USER_ID)
+    expect(outcome).toEqual({status:'unavailable',runId:null})
+    expect(f.approval.status).toBe('pending')
+    expect(f.execute).not.toHaveBeenCalled()
+    expect(f.downstream).not.toHaveBeenCalled()
+  })
+
 function deferred() {
   let release!: () => void
   const promise = new Promise<void>(resolve => { release = resolve })

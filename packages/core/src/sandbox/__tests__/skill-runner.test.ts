@@ -166,7 +166,26 @@ describe('[COMP:sandbox/skill-runner] runBrowserSkill routes every terminal send
     expect(String(result.data)).toContain('approved by the user')
   })
 
-  it('a denied send stops the block — the click never fires', async () => {
+  it('does not execute an approved send after profile enablement was revoked during the wait', async () => {
+    const { provider, approvals, tools, addSkill, profileStore, profiles } = await build()
+    await addSkill('department-send', SENDING_CODE)
+    provider.scriptSkillRun(oneSendScript({ ref: '@e6', label: 'Send', description: 'Send message' }))
+    const running = run(tools.runBrowserSkill, { skill: 'department-send' })
+    let pendingId: string | null = null
+    for (let i = 0; i < 200 && !pendingId; i++) {
+      await new Promise((resolve) => setTimeout(resolve, 5))
+      for (const [id, row] of approvals.rows) if (row.status === 'pending') pendingId = id
+    }
+    expect(pendingId).toBeTruthy()
+    await profileStore.update(profiles['Personal IG']!.id, { enabledAssistantIds: [] })
+    approvals.respond(pendingId!, 'approved')
+    const result = await running
+    expect(String(result.data)).not.toContain('sent it')
+    expect(result.isError).toBe(true)
+    expect(approvals.rows.get(pendingId!)?.status).toBe('approved')
+  })
+
+  it.each(['rejected', 'unavailable'] as const)('a %s send stops the block before the click fires', async status => {
     const { provider, approvals, tools, addSkill } = await build()
     await addSkill('dm-followers', SENDING_CODE)
     provider.scriptSkillRun(oneSendScript({ ref: '@e6', description: 'Send DM' }))
@@ -177,7 +196,7 @@ describe('[COMP:sandbox/skill-runner] runBrowserSkill routes every terminal send
       await new Promise((r) => setTimeout(r, 5))
       for (const [id, row] of approvals.rows) if (row.status === 'pending') pendingId = id
     }
-    approvals.respond(pendingId!, 'rejected')
+    approvals.rows.get(pendingId!)!.status = status
     const result = await running
     expect(result.isError).toBe(true)
     expect(String(result.data)).toContain('denied')
@@ -209,7 +228,7 @@ describe('[COMP:sandbox/skill-runner] runBrowserSkill routes every terminal send
     // Even WITH a grant in place, rehearsal never consults or spends it.
     await grantStore.create({
       workspaceId: 'ws-1',
-      skillId: skill.id,
+      skillId: skill.id, skillVersion: skill.version,
       profileId: profiles['Personal IG'].id,
       grantedBy: 'user-1',
     })
@@ -246,7 +265,7 @@ describe('[COMP:sandbox/approval-grants] Grants auto-approve with an audit row; 
     const skill = await addSkill('dm-followers', SENDING_CODE)
     const grant = await grantStore.create({
       workspaceId: 'ws-1',
-      skillId: skill.id,
+      skillId: skill.id, skillVersion: skill.version,
       profileId: profiles['Personal IG'].id,
       grantedBy: 'user-1',
     })
@@ -260,12 +279,46 @@ describe('[COMP:sandbox/approval-grants] Grants auto-approve with an audit row; 
     expect(audits[0].payload).toMatchObject({ skillName: 'dm-followers', profileName: 'Personal IG' })
   })
 
+  it('does not send when standing-grant source admission rejects the audit write', async () => {
+    const { provider, approvals, grantStore, tools, addSkill, profiles } = await build()
+    const skill = await addSkill('dm-followers', SENDING_CODE)
+    await grantStore.create({workspaceId:'ws-1',skillId:skill.id,skillVersion:skill.version,profileId:profiles['Personal IG'].id,grantedBy:'user-1'})
+    approvals.recordAutoApproved = async () => { throw new Error('Browser approval source unavailable') }
+    provider.scriptSkillRun(oneSendScript({ref:'@e6',label:'Send',description:'Send fixture message'}))
+    const result = await run(tools.runBrowserSkill,{skill:'dm-followers'})
+    expect(result.isError).toBe(true)
+    expect(String(result.data)).not.toContain('sent it')
+    expect([...approvals.rows.values()].filter(row=>row.status==='auto_approved')).toHaveLength(0)
+  })
+
+  it.each(['revoked','replaced','unavailable'] as const)('does not send when a grant becomes %s during audit persistence', async mode => {
+    const {provider,approvals,grantStore,tools,addSkill,profiles}=await build()
+    const skill=await addSkill('reviewed-dispatch',SENDING_CODE)
+    const params={workspaceId:'ws-1',skillId:skill.id,skillVersion:skill.version,profileId:profiles['Personal IG'].id,grantedBy:'user-1'}
+    const grant=await grantStore.create(params)
+    const audit=approvals.recordAutoApproved.bind(approvals)
+    approvals.recordAutoApproved=async args=>{
+      const result=await audit(args)
+      if(mode==='unavailable') grantStore.findActive=async()=>{throw new Error('Fictional authority outage')}
+      else {
+        await grantStore.revoke(grant.id)
+        if(mode==='replaced') await grantStore.create(params)
+      }
+      return result
+    }
+    provider.scriptSkillRun(oneSendScript({ref:'@e6',label:'Send',description:'Send fixture message'}))
+    const result=await run(tools.runBrowserSkill,{skill:'reviewed-dispatch'})
+    expect(result.isError).toBe(true)
+    expect(String(result.data)).not.toContain('sent it')
+    expect([...approvals.rows.values()].filter(row=>row.status==='auto_approved')).toHaveLength(1)
+  })
+
   it('DRIFT voids the grant and re-gates the send async (R2-2)', async () => {
     const { provider, approvals, grantStore, tools, addSkill, profiles } = await build()
     const skill = await addSkill('dm-followers', SENDING_CODE)
     const grant = await grantStore.create({
       workspaceId: 'ws-1',
-      skillId: skill.id,
+      skillId: skill.id, skillVersion: skill.version,
       profileId: profiles['Personal IG'].id,
       grantedBy: 'user-1',
     })
@@ -285,12 +338,35 @@ describe('[COMP:sandbox/approval-grants] Grants auto-approve with an audit row; 
     expect(result.isError).toBe(true)
   })
 
+  it.each([undefined, 2])('requires review for an unbound or mismatched grant version (%s)', async (skillVersion) => {
+    const { provider, approvals, grantStore, tools, addSkill, profiles } = await build()
+    const skill = await addSkill('reviewed-send', SENDING_CODE)
+    const grant = await grantStore.create({workspaceId:'ws-1',skillId:skill.id,skillVersion,profileId:profiles['Personal IG'].id,grantedBy:'user-1'})
+    // Even a newer grant timestamp cannot substitute for the reviewed version.
+    grant.createdAt = new Date(Date.now()+60000).toISOString()
+    provider.scriptSkillRun(oneSendScript({ref:'@e6',label:'Send',description:'Send message'}))
+    const running=run(tools.runBrowserSkill,{skill:'reviewed-send'})
+    let pendingId: string | null=null
+    for(let i=0;i<200&&!pendingId;i++) {
+      await new Promise(r=>setTimeout(r,5))
+      for(const [id,row] of approvals.rows) if(row.status==='pending') {
+        pendingId=id
+        expect(row.payload.skillVersion).toBe(skill.version)
+      }
+    }
+    expect(pendingId).toBeTruthy()
+    expect(grantStore.grants.get(grant.id)?.status).toBe('voided')
+    approvals.respond(pendingId!,'rejected')
+    expect((await running).isError).toBe(true)
+    expect([...approvals.rows.values()].some(row=>row.status==='auto_approved')).toBe(false)
+  })
+
   it('a skill version update voids the old grant and requires fresh approval', async () => {
     const { provider, approvals, grantStore, skillStore, tools, addSkill, profiles } = await build()
     const skill = await addSkill('dm-followers', SENDING_CODE)
     const grant = await grantStore.create({
       workspaceId: 'ws-1',
-      skillId: skill.id,
+      skillId: skill.id, skillVersion: skill.version,
       profileId: profiles['Personal IG'].id,
       grantedBy: 'user-1',
     })
@@ -314,7 +390,7 @@ describe('[COMP:sandbox/approval-grants] Grants auto-approve with an audit row; 
     const skill = await addSkill('dm-followers', SENDING_CODE)
     await grantStore.create({
       workspaceId: 'ws-1',
-      skillId: skill.id,
+      skillId: skill.id, skillVersion: skill.version,
       profileId: profiles['Personal IG'].id,
       grantedBy: 'user-1',
     })
@@ -430,6 +506,12 @@ describe('[COMP:sandbox/skill-runner] Profile at call time (R2-10) + backends + 
     expect(String(off.data)).toContain('autonomous')
   })
 
+  it('exposes no browser profile creation, sharing or deletion tool (human-only by design)', async () => {
+    const { tools } = await build()
+    const names = Object.values(tools).map((tool) => (tool as { name: string }).name)
+    expect(names.filter((name) => /profile/i.test(name)).sort()).toEqual(['classifyBrowserProfileDepartment', 'listBrowserProfiles'])
+  })
+
   it('listBrowserSkills + listBrowserProfiles give the model its discovery surface', async () => {
     const { tools, addSkill, profileStore, profiles: created } = await build({ profiles: [{ name: 'Personal IG' }] })
     await profileStore.update(created['Personal IG'].id, {
@@ -463,5 +545,91 @@ describe('[COMP:sandbox/skill-runner] Profile at call time (R2-10) + backends + 
     expect(profiles.isError ?? false).toBe(false)
     expect(String(profiles.data)).toContain('does NOT block browsing')
     expect(String(profiles.data)).toContain('browserNavigate')
+  })
+})
+
+describe('[COMP:sandbox/skill-runner] attended profile classification', () => {
+  const id='00000000-0000-4000-8000-000000000001'
+  const department='00000000-0000-4000-8000-000000000002'
+  const input={profileId:id,expectedDepartmentId:null,departmentId:department,reason:'Assign fictional operations'}
+  async function fixture() {
+    const {vi}=await import('vitest')
+    const store=createInMemoryBrowserProfileStore()
+    const created=await store.create({workspaceId:'ws-1',ownerUserId:'user-1',name:'Fictional identity',enabledAssistantIds:['asst-1']})
+    const profile={...created,id}
+    const classifyDepartment=vi.fn(async()=>({...profile,departmentId:department}))
+    const grant={workspaceId:'ws-1',userId:'user-1',assistantId:'asst-1',base:'confidential' as const,departments:{[department]:'confidential' as const},contextDepartment:null,binding:null,cap:null}
+    const departmentRead=vi.fn(async()=>grant)
+    const resolvePolicy=vi.fn(async()=> 'ask' as const)
+    const tool=createSkillRunnerTools({provider:null,binding:null,skills:null,
+      profiles:{store:{...store,get:async()=>profile,classifyDepartment},assistantClearance:async()=> 'confidential',departmentRead,
+        departmentNames:async()=>new Map([[department,'Fictional Cedar']])},resolvePolicy}).classifyBrowserProfileDepartment
+    const context=toolContext({approvedToolInvocation:{approvalId:'approval-1',approverUserId:'user-1',toolName:'classifyBrowserProfileDepartment'}})
+    return {tool,context,profile,grant,classifyDepartment,departmentRead,resolvePolicy}
+  }
+  it('names the profile and visible departments on the approval card and withholds hidden ones',async()=>{
+    const f=await fixture()
+    const lines=await f.tool.describeConfirmation!(input,f.context)
+    expect(lines).toEqual(['Browser profile: Fictional identity','Department: Unassigned -> Fictional Cedar',`Reason: ${input.reason}`,
+      'Existing automatic approvals for this profile will be revoked.'])
+    expect(JSON.stringify(lines)).not.toContain(department)
+    const hidden='00000000-0000-4000-8000-000000000099'
+    expect((await f.tool.describeConfirmation!({...input,departmentId:hidden},f.context))?.[1]).toBe('Department: Unassigned -> Department name unavailable')
+    expect((await f.tool.describeConfirmation!(input,{...f.context,userId:'someone-else'}))?.[0]).toBe('Browser profile: Profile unavailable')
+  })
+  it('requires a non-persistent attended receipt and forwards only trusted authority',async()=>{
+    const f=await fixture()
+    expect(f.tool).toMatchObject({requiresConfirmation:true,confirmationMode:'durable_attended',allowPersistentApproval:false,isReadOnly:false})
+    expect((await f.tool.execute(input,f.context)).isError).not.toBe(true)
+    expect(f.classifyDepartment).toHaveBeenCalledWith(id,{userId:'user-1',departmentId:department,reason:input.reason,confirmed:true,expected:f.profile,agentRead:f.grant})
+  })
+  it.each(['workflow','api','assistant-call'])('refuses %s even with a supplied receipt',async(channelType)=>{
+    const f=await fixture()
+    expect((await f.tool.execute(input,{...f.context,channelType})).isError).toBe(true)
+    expect(f.classifyDepartment).not.toHaveBeenCalled()
+  })
+  it('refuses missing or mismatched receipts and a stale reviewed source',async()=>{
+    const f=await fixture()
+    for(const receipt of [undefined,{approvalId:'approval-1',approverUserId:'other',toolName:'classifyBrowserProfileDepartment'},
+      {approvalId:'approval-1',approverUserId:'user-1',toolName:'other'}]) {
+      expect((await f.tool.execute(input,{...f.context,approvedToolInvocation:receipt})).isError).toBe(true)
+    }
+    expect((await f.tool.execute({...input,expectedDepartmentId:department},f.context)).isError).toBe(true)
+    expect(f.classifyDepartment).not.toHaveBeenCalled()
+  })
+  it('does not use owner authority when renewal or policy lookup fails',async()=>{
+    const f=await fixture()
+    f.resolvePolicy.mockRejectedValueOnce(new Error('Policy unavailable'))
+    expect((await f.tool.execute(input,f.context)).isError).toBe(true)
+    f.departmentRead.mockRejectedValueOnce(new Error('Revoked'))
+    expect((await f.tool.execute(input,f.context)).isError).toBe(true)
+    expect(f.classifyDepartment).not.toHaveBeenCalled()
+  })
+  it('withholds persistence error details and never reports false success',async()=>{
+    const f=await fixture()
+    f.classifyDepartment.mockRejectedValueOnce(new Error('Hidden department details'))
+    const result=await f.tool.execute(input,f.context)
+    expect(result.isError).toBe(true)
+    expect(JSON.stringify(result)).not.toContain('Hidden department details')
+  })
+  it('renews authority after the executor receives the human decision',async()=>{
+    const f=await fixture()
+    const {createToolExecutor}=await import('../../engine/tool-executor.js')
+    const {createLoopDetector}=await import('../../engine/loop-detector.js')
+    const executor=createToolExecutor({
+      tools:new Map([['classifyBrowserProfileDepartment',f.tool]]),
+      context:{...f.context,approvedToolInvocation:undefined,activeCapabilities:new Set(['computer','home_app:browsers:write']),createToolInvocationApproval:async()=> 'persisted-approval'},
+      loopDetector:createLoopDetector(),
+      confirmationResolver:{resolve:()=>{},waitForDecision:async()=>{
+        f.departmentRead.mockRejectedValueOnce(new Error('Authority revoked while waiting'))
+        return {decision:'allow' as const}
+      }},
+    })
+    executor.addTool('classification-call','classifyBrowserProfileDepartment',input)
+    const blocks=[]
+    for await (const batch of executor.getRemainingResults()) blocks.push(...batch.blocks)
+    expect(blocks).toEqual(expect.arrayContaining([expect.objectContaining({type:'tool_result',isError:true,content:expect.stringContaining('Profile classification unavailable')})]))
+    expect(f.departmentRead).toHaveBeenCalledOnce()
+    expect(f.classifyDepartment).not.toHaveBeenCalled()
   })
 })

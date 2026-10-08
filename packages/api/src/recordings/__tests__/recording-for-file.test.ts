@@ -42,7 +42,7 @@ function mediaFile(overrides: Partial<WorkspaceFile> = {}): WorkspaceFile {
   } as WorkspaceFile
 }
 
-describe('canonical file adoption', () => {
+describe('[COMP:recordings/recording-for-file] canonical file adoption', () => {
   const parent = { workspaceId: WS, resourceKind: 'workspace_file' as const, resourceId: 'f-1', version: '1',
     userId: 'u-1', assistantId: null, sensitivity: 'confidential' as const, compartments: ['team:legal'], projectIds: [],
     mime: 'audio/ogg', storageUri: 'gs://bucket/key', name: 'memo.opus', sizeBytes: 10 }

@@ -13,7 +13,8 @@ describe("[COMP:app-web/operator-app-bar] Home mini apps", () => {
   it.each(["p", "p/page-1", "chat", "tasks", "office", "crm", "feed", "computer", "shopify", "association", "apps/custom-1"])("shows mini apps within Home at %s", (path) => {
     route.pathname = `/w/workspace-1/${path}`;
     const html = renderToStaticMarkup(<I18nProvider locale="en" dict={en}><OperatorAppBar workspaceId="workspace-1" active={null} homeApps={["tasks", "page", "chat"]} customApps={[]} /></I18nProvider>);
-    expect(html).toContain(en.operatorBar.workspaceApps);
+    expect(html).toContain(`aria-label="${en.operatorBar.aria}"`);
+    expect(html).not.toContain(en.operatorBar.workspaceApps);
     expect(html).toContain('href="/w/workspace-1/tasks"');
     expect(html).toContain('href="/w/workspace-1/p"');
     expect(html).toContain('href="/w/workspace-1/chat"');

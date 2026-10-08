@@ -34,6 +34,7 @@ function fakeSocket(): FakeSocket {
 
 function relayWithVerifier(commandTimeoutMs?: number): BrowserRelay {
   return new BrowserRelay({
+    authorize: () => true,
     verifyPairingToken: (token) => {
       const payload = verifyBrowserExtPairToken(token, SECRET)
       return payload
@@ -391,6 +392,7 @@ describe('[COMP:ext/relay] Browser extension relay', () => {
 describe('[COMP:ext/relay] Session-token exchange', () => {
   function relayWithMinter(): BrowserRelay {
     return new BrowserRelay({
+    authorize: () => true,
       verifyPairingToken: (token) => verifyBrowserExtHelloToken(token, SECRET),
       mintSessionToken: (identity) => signBrowserExtSessionToken(identity, SECRET),
     })
@@ -604,4 +606,199 @@ describe('Electron compatibility metadata', () => {
     expect(socket.sent[0]).toMatchObject({ type: 'error' })
     expect(relay.isConnected('user-1')).toBe(false)
   })
+})
+
+
+describe('[COMP:ext/relay] current department authority', () => {
+  function fixture() {
+    const authorize = vi.fn<(token: string) => boolean | Promise<boolean>>(() => true)
+    const relay = new BrowserRelay({ authorize,
+      verifyPairingToken: token => verifyBrowserExtHelloToken(token, SECRET),
+      mintSessionToken: identity => signBrowserExtSessionToken(identity, SECRET) })
+    return { relay, authorize }
+  }
+
+  it('denies previously signed tokens after revocation and on lookup failure', async () => {
+    const { relay, authorize } = fixture()
+    authorize.mockReturnValue(false)
+    const denied = pair(relay)
+    expect(denied.closed?.code).toBe(4401)
+    expect(relay.connectionCount()).toBe(0)
+    authorize.mockRejectedValueOnce(new Error('private lookup'))
+    const socket = fakeSocket()
+    await relay.handleMessage(socket, JSON.stringify({ type: 'hello', pairingToken:
+      signBrowserExtPairToken({ userId: 'user-1', workspaceId: 'ws-1', browserProfileId: PROFILE }, SECRET) }))
+    expect(socket.closed?.code).toBe(4401)
+    expect(JSON.stringify(socket.sent)).not.toContain('private lookup')
+  })
+
+  it('checks dispatch and result release, rejecting pending data after revocation', async () => {
+    const { relay, authorize } = fixture()
+    const socket = pair(relay)
+    const pending = relay.dispatchCommand({ userId: 'user-1', browserProfileId: PROFILE, op: 'snapshot' })
+    const command = socket.sent.at(-1)!
+    authorize.mockReturnValue(false)
+    await relay.handleMessage(socket, JSON.stringify({ type: 'result', id: command.id, ok: true, data: 'protected content' }))
+    expect(await pending).toMatchObject({ ok: false, code: 'no_extension' })
+    expect(socket.closed?.code).toBe(4401)
+    authorize.mockReturnValue(true)
+    const next = pair(relay)
+    authorize.mockReturnValue(false)
+    expect(await relay.dispatchCommand({ userId: 'user-1', browserProfileId: PROFILE, op: 'navigate' }))
+      .toMatchObject({ ok: false })
+    expect(next.sent.filter(frame => frame.type === 'command')).toHaveLength(0)
+  })
+
+  it('renews with the exchanged session token and closes idle revoked connections', async () => {
+    const { relay, authorize } = fixture()
+    const socket = pair(relay)
+    const session = socket.sent.find(frame => frame.type === 'ready')!.sessionToken
+    authorize.mockReturnValue(false)
+    await relay.renewAuthority()
+    expect(authorize).toHaveBeenLastCalledWith(session)
+    expect(relay.connectionCount()).toBe(0)
+    expect(socket.closed?.code).toBe(4401)
+  })
+
+  it('does not resurrect a socket disconnected during admission', async () => {
+    const { relay, authorize } = fixture()
+    let admit!: (value: boolean) => void
+    authorize.mockReturnValue(new Promise<boolean>(resolve => { admit = resolve }))
+    const socket = fakeSocket()
+    const hello = relay.handleMessage(socket, JSON.stringify({ type: 'hello', pairingToken:
+      signBrowserExtPairToken({ userId: 'user-1', workspaceId: 'ws-1', browserProfileId: PROFILE }, SECRET) }))
+    relay.handleDisconnect(socket)
+    admit(true)
+    await hello
+    expect(relay.connectionCount()).toBe(0)
+    expect(socket.sent).toEqual([])
+  })
+
+  it('does not dispatch to a replaced socket after an asynchronous approval', async () => {
+    const { relay, authorize } = fixture()
+    const old = pair(relay)
+    let admit!: (value: boolean) => void
+    authorize.mockReturnValueOnce(new Promise<boolean>(resolve => { admit = resolve }))
+    const command = relay.dispatchCommand({ userId: 'user-1', browserProfileId: PROFILE, op: 'snapshot' })
+    const replacement = pair(relay)
+    admit(true)
+    expect(await command).toMatchObject({ ok: false })
+    expect(old.sent.filter(frame => frame.type === 'command')).toHaveLength(0)
+    expect(replacement.closed).toBeNull()
+  })
+
+  it('preserves the safety Stop path when authority is revoked', async () => {
+    const { relay, authorize } = fixture()
+    const socket = pair(relay)
+    authorize.mockReturnValue(false)
+    const stopped = relay.dispatchCommand({ userId: 'user-1', browserProfileId: PROFILE, op: 'stop' })
+    const command = socket.sent.at(-1)!
+    expect(command.op).toBe('stop')
+    await relay.handleMessage(socket, JSON.stringify({ type: 'result', id: command.id, ok: true, data: { privatePage: 'SECRET_SENTINEL' } }))
+    expect(await stopped).toEqual({ ok: true, data: { stopped: true } })
+    expect(socket.closed?.code).toBe(4401)
+    expect(relay.connectionStatus('user-1', { browserProfileId: PROFILE }).terminalEvent).toBe('stopped')
+  })
+
+  it('withholds failed Stop payloads and does not report them as completed', async () => {
+    const { relay, authorize } = fixture()
+    const socket = pair(relay)
+    const stopped = relay.dispatchCommand({ userId: 'user-1', browserProfileId: PROFILE, op: 'stop' })
+    const command = socket.sent.at(-1)!
+    authorize.mockReturnValue(false)
+    await relay.handleMessage(socket, JSON.stringify({ type: 'result', id: command.id, ok: false, error: 'SECRET_SENTINEL', code: 'SECRET_SENTINEL' }))
+    expect(await stopped).toEqual({ ok: false, error: 'Browser Stop could not be confirmed.', code: 'backend_error' })
+    expect(socket.closed?.code).toBe(4401)
+    expect(relay.connectionStatus('user-1', { browserProfileId: PROFILE }).terminalEvent).toBeNull()
+  })
+
+  it('does not treat an unrelated result ID as a safety Stop acknowledgement', async () => {
+    const { relay, authorize } = fixture()
+    const socket = pair(relay)
+    const stopped = relay.dispatchCommand({ userId: 'user-1', browserProfileId: PROFILE, op: 'stop' })
+    authorize.mockReturnValue(false)
+    await relay.handleMessage(socket, JSON.stringify({ type: 'result', id: 'unrelated-id', ok: true, data: { stopped: true } }))
+    expect(await stopped).toMatchObject({ ok: false })
+    expect(socket.closed?.code).toBe(4401)
+  })
+})
+
+
+describe('[COMP:ext/relay] retained task binding', () => {
+  const command = (taskId: string, op = 'navigate') => ({ userId: 'user-1', browserProfileId: PROFILE, taskId, op })
+  async function answer(relay: BrowserRelay, socket: FakeSocket, pending: Promise<unknown>) {
+    const message = socket.sent.at(-1)!
+    expect(message.type).toBe('command')
+    expect(message).not.toHaveProperty('taskId')
+    await relay.handleMessage(socket, JSON.stringify({ type: 'result', id: message.id, ok: true, data: { value: 'fixture' } }))
+    return pending
+  }
+  it('retires a replaced binding and denies its reads, navigation, Stop and unbound commands', async () => {
+    const relay = relayWithVerifier(), socket = pair(relay)
+    await answer(relay, socket, relay.dispatchCommand(command('task-a')))
+    await answer(relay, socket, relay.dispatchCommand(command('task-b')))
+    const before = socket.sent.length
+    for (const op of ['snapshot', 'navigate', 'stop']) expect(await relay.dispatchCommand(command('task-a', op))).toMatchObject({ ok: false, code: 'no_active_browser' })
+    expect(await relay.dispatchCommand({ userId: 'user-1', browserProfileId: PROFILE, op: 'snapshot' })).toMatchObject({ ok: false, code: 'no_active_browser' })
+    expect(socket.sent).toHaveLength(before)
+    await answer(relay, socket, relay.dispatchCommand(command('task-b', 'snapshot')))
+    await answer(relay, socket, relay.dispatchCommand(command('task-b', 'stop')))
+    expect(await relay.dispatchCommand(command('task-b'))).toMatchObject({ ok: false, code: 'no_active_browser' })
+  })
+  it('serializes replacements and checks the queued old Stop only after the newer task binds', async () => {
+    const relay = relayWithVerifier(), socket = pair(relay)
+    const first = relay.dispatchCommand(command('task-a'))
+    const replacement = relay.dispatchCommand(command('task-b'))
+    const staleStop = relay.dispatchCommand(command('task-a', 'stop'))
+    expect(socket.sent.filter(m => m.type === 'command')).toHaveLength(1)
+    await answer(relay, socket, first)
+    await vi.waitFor(() => expect(socket.sent.filter(m => m.type === 'command')).toHaveLength(2))
+    await answer(relay, socket, replacement)
+    expect(await staleStop).toMatchObject({ ok: false, code: 'no_active_browser' })
+    expect(socket.sent.filter(m => m.type === 'command')).toHaveLength(2)
+  })
+  it('does not forward a queued command to a replacement socket', async () => {
+    const relay = relayWithVerifier(), old = pair(relay)
+    const first = relay.dispatchCommand(command('task-a'))
+    const queued = relay.dispatchCommand(command('task-b'))
+    const replacement = pair(relay)
+    expect(await first).toMatchObject({ ok: false })
+    expect(await queued).toMatchObject({ ok: false, code: 'no_extension' })
+    expect(replacement.sent.filter(m => m.type === 'command')).toHaveLength(0)
+    expect(old.closed?.code).toBe(4000)
+  })
+  it('does not defer a task-scoped Stop onto a future pairing', async () => {
+    const relay = relayWithVerifier()
+    expect(await relay.dispatchCommand(command('task-a', 'stop'))).toMatchObject({ ok: false, code: 'no_extension' })
+    const socket = pair(relay)
+    expect(socket.sent.filter(m => m.type === 'command')).toHaveLength(0)
+    expect(await relay.dispatchCommand(command('task-a', 'snapshot'))).toMatchObject({ ok: false, code: 'no_active_browser' })
+  })
+  it('closes an uncertain timed-out binding and refuses its queued replacement', async () => {
+    vi.useFakeTimers()
+    const relay = relayWithVerifier(25), socket = pair(relay)
+    const first = relay.dispatchCommand(command('task-a'))
+    const queued = relay.dispatchCommand(command('task-b'))
+    await vi.advanceTimersByTimeAsync(30)
+    expect(await first).toMatchObject({ ok: false, code: 'timeout' })
+    expect(await queued).toMatchObject({ ok: false, code: 'no_extension' })
+    expect(socket.closed?.code).toBe(4401)
+    expect(socket.sent.filter(m => m.type === 'command')).toHaveLength(1)
+    vi.useRealTimers()
+  })
+  it('refuses first binding until prior unbound work has completed', async () => {
+    const relay = relayWithVerifier(), socket = pair(relay)
+    const legacy = relay.dispatchCommand({ userId: 'user-1', browserProfileId: PROFILE, op: 'snapshot' })
+    expect(await relay.dispatchCommand(command('task-a'))).toMatchObject({ ok: false, code: 'no_active_browser' })
+    await answer(relay, socket, legacy)
+    await answer(relay, socket, relay.dispatchCommand(command('task-a')))
+  })
+  it('retires the connection at the binding-history limit instead of forgetting old task IDs', async () => {
+    const relay = relayWithVerifier(), socket = pair(relay)
+    for (let i = 0; i < 1024; i++) await answer(relay, socket, relay.dispatchCommand(command(`task-${i}`)))
+    expect(await relay.dispatchCommand(command('task-over-limit'))).toMatchObject({ ok: false, code: 'no_extension' })
+    expect(socket.closed?.code).toBe(4401)
+    expect(await relay.dispatchCommand(command('task-0'))).toMatchObject({ ok: false, code: 'no_extension' })
+  })
+
 })

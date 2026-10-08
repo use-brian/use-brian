@@ -3,6 +3,7 @@ import { createComputeTools, type SandboxFilesPort } from '../compute-tools.js'
 import { createSandboxOrchestrator, createInMemorySandboxTaskStore } from '../orchestrator.js'
 import { StubSandboxProvider } from '../providers/stub.js'
 import type { Tool, ToolContext } from '../../tools/types.js'
+import { ContextScopeAccumulator } from '../../security/context-scope.js'
 
 function toolContext(overrides: Partial<ToolContext> = {}): ToolContext {
   return {
@@ -126,6 +127,30 @@ describe('[COMP:sandbox/file-bridge] loadFromWorkspace / saveToWorkspace (§4.12
     expect(files.writes[0].workspaceId).toBe('ws-1')
     expect(files.writes[0].path).toMatch(/^computer\/artifacts\//)
     expect(new TextDecoder().decode(files.writes[0].bytes)).toBe('{"sum":3}')
+  })
+
+  it('loads as the turn principal and retains the file protection in the sandbox task before the bridge effect', async () => {
+    const department = 'team:00000000-0000-4000-8000-00000000c3d4'
+    const seen: Array<{ assistantId?: string; clearance?: string }> = []
+    const files: SandboxFilesPort = {
+      async readBytes(ctx, fileIdOrPath) {
+        seen.push({ assistantId: ctx.assistantId, clearance: ctx.clearance })
+        // Boot's adapter records the read file's protection in the turn before returning bytes.
+        ctx.scopeAccumulator?.note({ sensitivity: 'confidential', compartments: [department], projectIds: [], sources: [] })
+        return { bytes: new TextEncoder().encode('protected'), name: fileIdOrPath }
+      },
+      async writeBytes(_ctx, params) { return { fileId: 'file-1', path: params.path } },
+    }
+    const provider = new StubSandboxProvider()
+    const taskStore = createInMemorySandboxTaskStore()
+    const orchestrator = createSandboxOrchestrator({ provider, taskStore })
+    const tools = createComputeTools({ provider, binding: orchestrator.binding, files, getWorkspacePlan: async () => 'pro' })
+    const loaded = await run(tools.loadFromWorkspace, { file: 'cedar.csv' },
+      toolContext({ clearance: 'internal', scopeAccumulator: new ContextScopeAccumulator() }))
+    expect(loaded.isError).toBeUndefined()
+    expect(seen).toEqual([{ assistantId: 'asst-1', clearance: 'internal' }])
+    const task = await taskStore.getActiveBySession('sess-1')
+    expect(JSON.stringify(task?.inputScope)).toContain(department)
   })
 
   it('is workspace-scoped by construction: a workspace-W task cannot load workspace-V files (§4.12)', async () => {

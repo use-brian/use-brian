@@ -67,6 +67,7 @@ function fakeStore(): AssociationStore {
     bindMembershipCheckoutProvider: vi.fn(),
     listWaitlist: vi.fn(),
     offerWaitlistPlace: vi.fn(),
+    previewOrderDestinations: vi.fn(),
     createOrder: vi.fn(),
     importSourceOrder: vi.fn(),
     getOrder: vi.fn(),
@@ -148,6 +149,16 @@ describe('[COMP:api/association-route] credential and workspace authority', () =
     expect(rejected.status).toBe(400)
     expect(store.reconcileProviderFinancialEvent).toHaveBeenCalledTimes(1)
   })
+  it('routes destination discovery before order identity lookup with the actual credential', async () => {
+    const store = fakeStore()
+    vi.mocked(store.previewOrderDestinations).mockResolvedValue({ choices: [], validForMs: 30_000 })
+    const response = await request(makeApp(store, auth({ scope: 'read' }))).get(`/api/association/orders/destinations?contactIds=${CONTACT_ID}`)
+    expect(response.status).toBe(200)
+    expect(response.body).toEqual({ choices: [], validForMs: 30_000 })
+    expect(store.previewOrderDestinations).toHaveBeenCalledWith(WID, [CONTACT_ID], expect.objectContaining({ credentialId: auth().keyId }))
+    expect(store.getOrder).not.toHaveBeenCalled()
+  })
+
   it('returns canonical financial totals with the filtered order page', async () => {
     const store = fakeStore()
     vi.mocked(store.listOrders).mockResolvedValue({ items: [{ id: RECORD_ID, status: 'paid' }], nextCursor: null, total: 1,
@@ -157,7 +168,7 @@ describe('[COMP:api/association-route] credential and workspace authority', () =
       .query({ eventId: RECORD_ID, status: 'paid', limit: '10' })
     expect(response.status).toBe(200)
     expect(response.body).toMatchObject({ orders: [{ id: RECORD_ID }], financialSummary: [{ currency: 'USD', netMinor: '600' }] })
-    expect(store.listOrders).toHaveBeenCalledWith(WID, expect.objectContaining({ eventId: RECORD_ID, status: 'paid', limit: 10 }))
+    expect(store.listOrders).toHaveBeenCalledWith(WID, expect.objectContaining({ eventId: RECORD_ID, status: 'paid', limit: 10 }), expect.objectContaining({ credentialKind: 'brain_key' }))
   })
   it('adapts paginated waitlist reads and explicit offers through the shared command service', async () => {
     const store = fakeStore()
@@ -167,7 +178,7 @@ describe('[COMP:api/association-route] credential and workspace authority', () =
     const page = await request(app).get('/api/association/waitlist').query({ includeClosed: 'true', limit: '10' })
     expect(page.status).toBe(200)
     expect(page.body).toMatchObject({ submissions: [{ id: RECORD_ID }], nextCursor: null })
-    expect(store.listWaitlist).toHaveBeenCalledWith(WID, expect.objectContaining({ includeClosed: true, limit: 10 }))
+    expect(store.listWaitlist).toHaveBeenCalledWith(WID, expect.objectContaining({ includeClosed: true, limit: 10 }), expect.objectContaining({ credentialKind: 'brain_key' }))
     const offered = await request(app).post(`/api/association/waitlist/${RECORD_ID}/offer`).send({ promotionId: CONTACT_ID })
     expect(offered.status).toBe(201)
     expect(store.offerWaitlistPlace).toHaveBeenCalledWith(WID, expect.objectContaining({ submissionId: RECORD_ID, promotionId: CONTACT_ID, reservationMinutes: 20 }), expect.any(Object))
@@ -179,7 +190,7 @@ describe('[COMP:api/association-route] credential and workspace authority', () =
     const result=await request(makeApp(store,auth({scope:'read'}))).get('/api/association/notifications').query({status:'retired',limit:'10'})
     expect(result.status).toBe(200)
     expect(result.body).toMatchObject({notifications:[{status:'retired',retiredFromStatus:'sending'}],nextCursor:null})
-    expect(store.listNotifications).toHaveBeenCalledWith(WID,expect.objectContaining({status:'retired',limit:10}))
+    expect(store.listNotifications).toHaveBeenCalledWith(WID,expect.objectContaining({status:'retired',limit:10}),expect.objectContaining({credentialKind:'api_key'}))
   })
 
   it('requires a valid Brain credential', async () => {
@@ -289,7 +300,7 @@ describe('[COMP:api/association-route] credential and workspace authority', () =
       limit: 25,
       cursor: null,
       status: 'new',
-    })
+    }, { credentialKind: 'api_key', credentialId: auth().keyId })
   })
 
   it('keeps check-in as an audited registration mutation instead of a browser flag', async () => {

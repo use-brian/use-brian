@@ -43,12 +43,12 @@ export function OrganizationHub() {
         <div className="mx-auto w-full min-w-0 max-w-7xl px-4 pb-28 pt-5 md:px-8">
           {mode.readySimple&&!mode.data?.canAdminister&&(section==='access'||section==='departments')?<WorkspaceModeSummary/>:section === 'structure' ? <OrganizationChartView /> : section === 'access' ? <WorkspaceAccessView selection={{kind:'requests'}} /> :
             section === 'departments' ? <div className="space-y-6"><TeamsContextSection renderAccessSettings={(id,panel)=>panel==='readers'?<DepartmentAccessPanel departmentId={id} />:<WorkspaceAccessView embedded selection={{kind:'department',id}}/>} /><DepartmentAssistantGroups /><HomeDepartmentControls /></div> :
-            <div className={memberId?'grid items-start gap-6 lg:grid-cols-[minmax(18rem,0.8fr)_minmax(0,1.2fr)]':''}><WorkspaceMembersSection
+            <WorkspaceMembersSection
                 memberTarget={memberId ? { workspaceId, memberId } : undefined}
                 clearMember={() => router.push(organizationHref(workspaceId, 'people'))}
                 selectMember={id=>router.push(organizationHref(workspaceId,'people',id))}
-                managementEnabled={deploymentCapabilities().teammateManagement} />
-              {memberId?<WorkspaceAccessView embedded selection={{kind:'person',id:memberId}}/>:null}</div>}
+                managementEnabled={deploymentCapabilities().teammateManagement}
+                renderMemberAccess={member => <WorkspaceAccessView embedded hideIdentity selection={{kind:'person',id:member.userId}}/>} />}
         </div>
       </div>
     </OrganizationTopbarSlotProvider>

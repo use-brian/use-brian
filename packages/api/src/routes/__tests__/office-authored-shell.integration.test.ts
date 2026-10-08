@@ -1,3 +1,4 @@
+import {APP_LEVEL_ASSISTANT_ID} from '@use-brian/shared'
 import { admitWorkspaceResource } from '../../workspace-access/resource-admission.js'
 import { mkdtemp, rm, readdir } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
@@ -147,6 +148,21 @@ describe('authenticated source-free Office shell HTTP admission (PG)', () => {
 
 
 describe('authenticated prompt-only Office generation request admission (PG)', () => {
+  it('admits explicit department and sensitivity, rejects foreign destinations and resolves mini-app attribution',async()=>{
+    const f=await fixture('departments')
+    const primary=randomUUID()
+    await pool.query("INSERT INTO assistants(id,name,workspace_id,owner_user_id,kind) VALUES($1,'Workspace assistant',$2,$3,'primary')",[primary,f.workspaceId,f.owner])
+    const result=await f.generate({assistantId:APP_LEVEL_ASSISTANT_ID,destination:{kind:'department',departmentId:f.team.id},sensitivity:'public'})
+    expect(result.status).toBe(202)
+    const job=await officeGenerationStore.get(f.userId,result.body.jobId)
+    expect(job).toMatchObject({assistantId:primary,authorityProjection:{sensitivity:'public',compartments:[f.team.compartmentKey]}})
+    expect((await f.generate({idempotencyKey:randomUUID(),destination:{kind:'department',departmentId:f.other.id}})).status).toBe(404)
+    expect((await f.generate({idempotencyKey:randomUUID(),destination:{kind:'department',departmentId:f.team.id},sensitivity:'confidential'})).status).toBe(404)
+    const general=await f.generate({idempotencyKey:randomUUID(),destination:{kind:'general'}})
+    expect(general.status).toBe(202)
+    expect((await officeGenerationStore.get(f.userId,general.body.jobId))?.authorityProjection).toMatchObject({compartments:[]})
+  })
+
   it('atomically saves a real generation job with its admitted destination, finite authority and canonical empty source contract', async () => {
     const f = await fixture(), response = await f.generate()
     expect(response.status).toBe(202)

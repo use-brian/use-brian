@@ -19,10 +19,11 @@ import { en } from "@/lib/i18n/dictionaries/en";
 import type { TaskRow } from "@/lib/api/tasks";
 import {
   loadSurfaceCache,
+  evictSurfaceCacheKey,
   markSurfaceCacheStale,
   resetSurfaceCache,
 } from "@/lib/surface-cache";
-import { surfaceDataKey } from "@/lib/surface-prefetch";
+import { surfaceDataKey, workspaceMemberDirectoryCacheKey } from "@/lib/surface-prefetch";
 
 (globalThis as unknown as { IS_REACT_ACT_ENVIRONMENT: boolean })
   .IS_REACT_ACT_ENVIRONMENT = true;
@@ -47,8 +48,16 @@ vi.mock("@/lib/api/brain-inbox", async (importOriginal) => ({
   deleteBrainRow: vi.fn(),
 }));
 vi.mock("@/components/ui/prompt-dialog", () => ({ promptDialog: vi.fn() }));
-vi.mock("@/lib/api/workspace-roster", () => ({
-  loadWorkspaceRoster: vi.fn().mockResolvedValue([]),
+vi.mock("@/lib/api/context-scopes", () => ({
+  listContextProjects: vi.fn().mockResolvedValue([]),
+  reclassifyContext: vi.fn(),
+}));
+const memberApi = vi.hoisted(() => ({ fetch: vi.fn() }));
+vi.mock("@/lib/auth-fetch", () => ({ authFetch: (...args: unknown[]) => memberApi.fetch(...args) }));
+vi.mock("@/lib/user", async (importOriginal) => ({
+  ...(await importOriginal<typeof import("@/lib/user")>()),
+  getUserInfo: () => ({ id: "viewer-a" }),
+  subscribeUserInfo: () => () => {},
 }));
 vi.mock("@/lib/api/task-guardrails", () => ({
   loadTaskCandidates: vi.fn().mockResolvedValue([]),
@@ -70,7 +79,7 @@ vi.mock("@/components/operator/filter-bar", () => ({
   ViewOptionSection: ({ children }: { children?: React.ReactNode }) => <>{children}</>,
 }));
 vi.mock("../task-cells", () => ({
-  AssigneeCell: () => null,
+  AssigneeCell: ({ roster }: { roster: { id: string; userName: string }[] | null }) => <div data-assignee-options>{roster?.map(member => <span key={member.id} data-member-id={member.id}>{member.userName}</span>)}</div>,
   DueCell: () => null,
   PriorityCell: () => null,
   ProjectCell: () => null,
@@ -138,6 +147,9 @@ const originalMatchMedia = window.matchMedia;
 beforeEach(() => {
   resetSurfaceCache();
   taskApi.fetchWorkspaceTasks.mockReset();
+  memberApi.fetch.mockReset().mockResolvedValue(new Response(JSON.stringify({
+    workspaceId: "workspace-1", viewerId: "viewer-a", validForMs: 30_000, members: [],
+  })));
   window.history.replaceState(null, "", "/w/workspace-1/tasks");
 });
 
@@ -227,5 +239,44 @@ describe("[COMP:app-web/tasks-surface] phone row shape", () => {
 
     expect(container!.querySelectorAll("[data-task-card-row]").length).toBe(0);
     expect(container!.querySelector(".group\\/task")).toBeTruthy();
+  });
+});
+
+
+describe("[COMP:app-web/tasks-surface] member directory recovery", () => {
+  it("shows Retry after a failed roster read and populates choices without remounting", async () => {
+    await loadSurfaceCache(key, async () => rows);
+    memberApi.fetch.mockRejectedValueOnce(new Error("offline")).mockResolvedValue(new Response(JSON.stringify({
+      workspaceId: "workspace-1", viewerId: "viewer-a", validForMs: 30_000,
+      members: [{ memberId: "member-a", userId: "person-a", name: "Ari Example", email: "ari@example.com", avatarUrl: null, role: "member", canDraft: true }],
+    })));
+    await renderSurface();
+    await settle();
+    expect(container!.querySelector('[role="alert"]')?.textContent).toContain(en.tasksPage.membersUnavailable);
+    const retry = Array.from(container!.querySelectorAll('button')).find(button => button.textContent === en.tasksPage.retryMembers)!;
+    await act(async () => { retry.click(); await Promise.resolve(); });
+    await settle();
+    expect(container!.querySelector('[role="alert"]')).toBeNull();
+    expect(container!.querySelector('[data-member-id="member-a"]')?.textContent).toBe('Ari Example');
+    expect(memberApi.fetch).toHaveBeenCalledTimes(2);
+  });
+});
+
+
+describe("[COMP:app-web/tasks-surface] bulk assignment directory lifetime", () => {
+  it("disables an already-open bulk menu when its member directory disappears", async () => {
+    await loadSurfaceCache(key, async () => rows);
+    await renderSurface();
+    await settle();
+    const named = (label: string) => Array.from(document.querySelectorAll('button')).find(button => button.textContent?.trim() === label)!;
+    await act(async () => { named('Select all 2 matching').click(); });
+    await act(async () => { named(en.tasksPage.bulkAssign).click(); });
+    await settle();
+    expect(document.querySelector('[role="menuitem"]')).not.toBeNull();
+    memberApi.fetch.mockReturnValue(new Promise<Response>(() => {}));
+    await act(async () => { evictSurfaceCacheKey(workspaceMemberDirectoryCacheKey('workspace-1', 'viewer-a')); });
+    await settle();
+    const option = Array.from(document.querySelectorAll('[role="menuitem"]')).find(item => item.textContent?.trim() === en.tasksPage.unassignedOption);
+    expect(option?.getAttribute('aria-disabled')).toBe('true');
   });
 });

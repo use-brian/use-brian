@@ -40,6 +40,7 @@
 
 import { useCallback, useEffect, useRef, useState } from "react";
 import { listBrain, type BrainPrimitive, type BrainRow } from "@/lib/api/brain";
+import { OFFLINE_AUTHORITY_MS, SURFACE_CONTENT_LEASE_MS, SURFACE_CONTENT_RENEW_MS } from "@/lib/offline/surface-content-cache";
 import {
   BRAIN_ENTRIES_RESOURCE,
   deleteBrainContentCache,
@@ -122,6 +123,10 @@ export function useBrainEntries(
   const inFlightRef = useRef(false);
   const seenRef = useRef<Set<string>>(new Set());
   const rowsRef = useRef<BrainRow[] | null>(null);
+  // Content lease (perceived-performance.md, "Content lease for protected
+  // lists"): how many pages are on screen, and when their authority lapses.
+  const pagesRef = useRef(0);
+  const deadlineRef = useRef(0);
 
   const cacheScope: BrainContentCacheScope | null =
     workspaceId && viewerId
@@ -134,6 +139,7 @@ export function useBrainEntries(
       if (!workspaceId) return;
       inFlightRef.current = true;
       if (pageCursor) setLoadingMore(true);
+      const started = performance.now();
       try {
         const result = await listBrain({
           workspaceId,
@@ -156,6 +162,8 @@ export function useBrainEntries(
           return true;
         });
         const nextRows = [...base, ...fresh];
+        pagesRef.current = pageCursor ? pagesRef.current + 1 : 1;
+        if (!pageCursor || deadlineRef.current === 0) deadlineRef.current = started + SURFACE_CONTENT_LEASE_MS;
         rowsRef.current = nextRows;
         setChunkStart(base.length);
         setRows(nextRows);
@@ -218,6 +226,7 @@ export function useBrainEntries(
         );
         if (cancelled || activeKeyRef.current !== queryKey) return;
         if (cached) {
+          deadlineRef.current = performance.now() + cached.updatedAt + OFFLINE_AUTHORITY_MS - Date.now();
           const projected = projectCachedBrainRows(
             cached.value.rows,
             primitives,
@@ -243,6 +252,80 @@ export function useBrainEntries(
     };
     // `fetchPage` is derived from the same inputs as `queryKey`; depending on
     // both would double-fire the first page on every filter change.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [queryKey, enabled, workspaceId]);
+
+  // Renew every page on screen every 15 seconds and swap them in at once, so
+  // the viewer keeps their depth. A denial empties the list; rows whose
+  // authority lapsed without a successful renewal leave the screen.
+  useEffect(() => {
+    if (!enabled || !workspaceId) return;
+    let cancelled = false;
+    const renew = async () => {
+      if (inFlightRef.current || rowsRef.current === null) return;
+      const key = activeKeyRef.current;
+      const started = performance.now();
+      try {
+        const seen = new Set<string>();
+        const fresh: BrainRow[] = [];
+        let next: string | null = null;
+        for (let page = 0; page < Math.max(1, pagesRef.current); page += 1) {
+          const result = await listBrain({
+            workspaceId,
+            primitives: primitives.length ? primitives : undefined,
+            search: search || undefined,
+            viewpointAssistantId,
+            limit: BRAIN_PAGE_SIZE,
+            cursor: next ?? undefined,
+            failOnError: true,
+          });
+          for (const row of result.rows) {
+            const id = rowKey(row);
+            if (seen.has(id)) continue;
+            seen.add(id);
+            fresh.push(row);
+          }
+          next = result.nextCursor;
+          if (!next) break;
+        }
+        if (cancelled || activeKeyRef.current !== key || inFlightRef.current) return;
+        deadlineRef.current = started + SURFACE_CONTENT_LEASE_MS;
+        if (JSON.stringify(fresh) === JSON.stringify(rowsRef.current)) return;
+        rowsRef.current = fresh;
+        seenRef.current = seen;
+        setChunkStart(fresh.length);
+        setRows(fresh);
+        setCursor(next);
+        setHasMore(next !== null);
+      } catch (error) {
+        if (cancelled || activeKeyRef.current !== key) return;
+        if (isAuthoritativeBrainDenial(error)) {
+          rowsRef.current = [];
+          seenRef.current = new Set();
+          setRows([]);
+          if (cacheScope) void deleteBrainContentCache(cacheScope, BRAIN_ENTRIES_RESOURCE);
+        }
+      }
+    };
+    const renewTimer = setInterval(() => void renew(), SURFACE_CONTENT_RENEW_MS);
+    const expiryTimer = setInterval(() => {
+      const rowsNow = rowsRef.current;
+      if (!rowsNow || rowsNow.length === 0 || deadlineRef.current === 0) return;
+      if (performance.now() < deadlineRef.current) return;
+      rowsRef.current = [];
+      seenRef.current = new Set();
+      setRows([]);
+    }, 1_000);
+    const onVisible = () => { if (document.visibilityState === "visible") void renew(); };
+    window.addEventListener("focus", onVisible);
+    document.addEventListener("visibilitychange", onVisible);
+    return () => {
+      cancelled = true;
+      clearInterval(renewTimer);
+      clearInterval(expiryTimer);
+      window.removeEventListener("focus", onVisible);
+      document.removeEventListener("visibilitychange", onVisible);
+    };
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [queryKey, enabled, workspaceId]);
 

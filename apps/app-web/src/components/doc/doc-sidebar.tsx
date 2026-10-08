@@ -141,6 +141,7 @@ import { LiveSidebarPanel } from "./sidebar-panels/live-sidebar-panel";
 import { LiveActiveBadge } from "@/components/live/live-active-badge";
 import { useLiveRoster } from "@/components/live/use-live-roster";
 import { summarizeRosterItems } from "@/lib/live-roster";
+import { useLeasedResource } from "@/lib/offline/surface-content-cache";
 
 /**
  * Height of the workspace status row: 28px plus the bottom safe-area inset.
@@ -308,7 +309,7 @@ export function DocSidebar(props: Props) {
   // previous payload rather than rejecting, so a stale slot never re-runs
   // against a failing endpoint); a cold failure reads as no badge.
   const inboxKey = inboxCacheKey(workspaceId);
-  const inbox = useCachedResource<InboxPayload>(inboxKey, async () => {
+  const inbox = useLeasedResource<InboxPayload>(inboxKey, async () => {
     try {
       return await fetchInbox(workspaceId);
     } catch (err) {
@@ -639,7 +640,7 @@ export function DocSidebar(props: Props) {
       </div>
 
       {/* Main destinations use compact desktop icons and labelled phone rows. */}
-      <nav data-doc-chrome aria-label={copy.contextScope.workspaceNavigation} className="flex shrink-0 flex-col items-stretch gap-0.5 overflow-x-auto px-2 pt-1 pb-1.5 md:flex-row md:items-center">
+      <nav data-doc-chrome aria-label={copy.contextScope.workspaceNavigation} className="flex shrink-0 flex-col items-stretch gap-0.5 overflow-x-auto px-2 pt-0.5 pb-0.5 md:flex-row md:items-center">
         {/* Home — first of the ⌘/Ctrl+1/2/3/4 surface shortcuts (wired in
             WorkspaceChrome). The chip label is browser-dependent
             (`surfaceShortcutLabel`): ⌘n on mac, ⌃n on mac Firefox (which
@@ -1070,7 +1071,7 @@ function TeamspacesGroupHeader({
 }) {
   const t = useT().docPage;
   return (
-    <div className="group/tsgroup mt-4 mb-1 flex items-center px-1">
+    <div className="group/tsgroup mt-1 mb-1 flex items-center px-1">
       <span className="min-w-0 flex-1 truncate text-[11px] font-semibold uppercase tracking-wide text-sidebar-foreground/45">
         {t.sidebarTeamspacesGroup}
       </span>

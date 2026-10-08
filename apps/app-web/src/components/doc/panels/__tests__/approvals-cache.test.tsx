@@ -49,6 +49,7 @@ vi.mock("../approval-tool-previews", () => ({
 }));
 
 const api = vi.hoisted(() => ({
+  respondByKind: vi.fn(),
   listApprovals: vi.fn(),
   listSkillApprovalDetails: vi.fn(),
 }));
@@ -59,7 +60,7 @@ vi.mock("@/lib/api/approvals", () => ({
     kind === "staged_skill_creation" ||
     kind === "staged_skill_update" ||
     kind === "workflow_refinement",
-  respondByKind: vi.fn(),
+  respondByKind: (...args: unknown[]) => api.respondByKind(...args),
   reviseEmailApproval: vi.fn(),
 }));
 
@@ -114,6 +115,7 @@ async function mount() {
 beforeEach(() => {
   resetSurfaceCache();
   api.listApprovals.mockReset();
+  api.respondByKind.mockReset();
   api.listSkillApprovalDetails.mockReset();
 });
 
@@ -125,6 +127,30 @@ afterEach(() => {
 });
 
 describe("[COMP:app-web/approvals] approvals queue paints from the surface cache", () => {
+  it("shows failed loading instead of an empty queue and retries without deciding an approval", async () => {
+    api.listApprovals.mockRejectedValueOnce(new Error("unavailable")).mockResolvedValueOnce([]);
+    api.listSkillApprovalDetails.mockResolvedValue({});
+    await mount();
+    expect(api.listApprovals).toHaveBeenCalledWith("w1", { throwOnError: true });
+    expect(host!.querySelector('[role="alert"]')?.textContent).toContain(en.approvalsPage.loadFailed);
+    expect(host!.textContent).not.toContain(en.approvalsPage.emptyTitle);
+    const retry = Array.from(host!.querySelectorAll("button")).find(button => button.textContent === en.approvalsPage.retryLoad)!;
+    await act(async () => { retry.click(); await settle(); });
+    expect(api.listApprovals).toHaveBeenCalledTimes(2);
+    expect(host!.querySelector('[role="alert"]')).toBeNull();
+    expect(host!.textContent).toContain(en.approvalsPage.emptyTitle);
+  });
+
+  it("hides cached actionable approvals when a refresh fails", async () => {
+    await loadSurfaceCache(approvalsCacheKey("w1"), async () => [row("a1", "Private reviewer")]);
+    api.listApprovals.mockRejectedValue(new Error("unavailable"));
+    api.listSkillApprovalDetails.mockResolvedValue({});
+    await mount();
+    await act(async () => { markSurfaceCacheStale("approvals:w1"); await settle(); });
+    expect(host!.textContent).toContain(en.approvalsPage.loadFailed);
+    expect(host!.textContent).not.toContain("Private reviewer");
+  });
+
   it("first paint renders the warmed rows while the revalidation is still pending (no skeleton, no Loading text)", async () => {
     await loadSurfaceCache(approvalsCacheKey("w1"), async () => [row("a1", "Ada Example")]);
     await loadSurfaceCache(approvalSkillDetailsCacheKey("w1"), async () => ({}));
@@ -154,6 +180,39 @@ describe("[COMP:app-web/approvals] approvals queue paints from the surface cache
     expect(api.listSkillApprovalDetails).toHaveBeenCalledTimes(1);
     expect(host!.querySelector("[aria-busy]")).not.toBeNull();
     expect(host!.textContent).not.toContain(en.approvalsPage.loading);
+  });
+
+  it.each([401,403,404])("evicts protected cards on decision authority loss (%s)",async status=>{
+    await loadSurfaceCache(approvalsCacheKey("w1"),async()=>[row("a1","Protected Fixture")]);
+    await loadSurfaceCache(approvalSkillDetailsCacheKey("w1"),async()=>({}));
+    api.listApprovals.mockReturnValue(pending());
+    api.listSkillApprovalDetails.mockReturnValue(pending());
+    api.respondByKind.mockResolvedValue({ok:false,error:"Not available",status});
+    await mount();
+    const allow=[...host!.querySelectorAll('button')].find(button=>button.textContent===en.approvalsPage.emailSender.allow)!;
+    await act(async()=>{allow.click();await settle()});
+    expect(api.respondByKind).toHaveBeenCalledTimes(1);
+    expect(host!.textContent).not.toContain("Protected Fixture");
+    expect(host!.textContent).toContain(en.approvalsPage.loadFailed);
+    expect(host!.textContent).toContain(en.approvalsPage.retryLoad);
+  });
+
+  it("stops a batch on authority loss instead of submitting the remaining cached targets",async()=>{
+    await loadSurfaceCache(approvalsCacheKey("w1"),async()=>[
+      {...row("a1","First Fixture"),kind:"tool_invocation" as const},
+      {...row("a2","Second Fixture"),kind:"tool_invocation" as const},
+    ]);
+    await loadSurfaceCache(approvalSkillDetailsCacheKey("w1"),async()=>({}));
+    api.listApprovals.mockReturnValue(pending());
+    api.listSkillApprovalDetails.mockReturnValue(pending());
+    api.respondByKind.mockResolvedValue({ok:false,error:"Not available",status:403});
+    await mount();
+    await act(async()=>{host!.querySelector<HTMLInputElement>('input[type="checkbox"]')!.click();await settle()});
+    const approve=[...host!.querySelectorAll('button')].find(button=>button.textContent===en.approvalsPage.batch.approveSelected)!;
+    await act(async()=>{approve.click();await settle()});
+    expect(api.respondByKind).toHaveBeenCalledTimes(1);
+    expect(host!.textContent).toContain(en.approvalsPage.loadFailed);
+    expect(host!.querySelector('input[type="checkbox"]')).toBeNull();
   });
 
   it("a spine mark-stale repaints behind the paint: rows stay up, then update when the fetch lands", async () => {

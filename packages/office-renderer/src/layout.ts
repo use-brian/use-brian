@@ -9,6 +9,7 @@ import {
   officeTableResolvedColumnWidthsPt,
   parseCellAddress,
   spreadsheetCellDisplayValue,
+  spreadsheetConditionalStyle,
   type OfficeTable,
   type OfficeTableBorder,
   type OfficeTableCell,
@@ -283,39 +284,6 @@ function layoutPresentation(snapshot: PresentationSnapshot): OfficeLayoutResult 
   return { family: 'presentation', pages, issues, serialization }
 }
 
-function addressInRange(address: string, range: string): boolean {
-  const cell = parseCellAddress(address)
-  const [from, to = from] = range.split(':').map(parseCellAddress)
-  return Boolean(cell && from && to && cell.row >= Math.min(from.row, to.row) && cell.row <= Math.max(from.row, to.row) && cell.column >= Math.min(from.column, to.column) && cell.column <= Math.max(from.column, to.column))
-}
-
-function mergeSpreadsheetCellStyles(base: SpreadsheetCellStyle | undefined, overlay: SpreadsheetCellStyle | undefined): SpreadsheetCellStyle | undefined {
-  if (!overlay) return base
-  return { ...base, ...overlay, font: overlay.font ?? base?.font, border: { ...base?.border, ...overlay.border }, alignment: overlay.alignment ?? base?.alignment }
-}
-
-function spreadsheetEffectiveCellStyle(sheet: SpreadsheetWorksheet, address: string, cell: SpreadsheetCell | undefined): SpreadsheetCellStyle | undefined {
-  if (!cell) return undefined
-  const display = spreadsheetCellDisplayValue(cell)
-  const numeric = Number(cell.formula ? cell.calculatedValue : cell.value)
-  const rules = sheet.conditionalFormats.filter((rule) => addressInRange(address, rule.range)).sort((left, right) => left.priority - right.priority)
-  for (const rule of rules) {
-    const formula = rule.formulas[0]?.replace(/^=/, '').replace(/^"|"$/g, '') ?? ''
-    if (rule.ruleType === 'containsText' && display.includes(formula)) return mergeSpreadsheetCellStyles(cell.style, rule.style)
-    if (rule.ruleType === 'expression') {
-      const match = /^(?:[A-Z]{1,3}[1-9][0-9]{0,6})?\s*(=|<>)\s*"([^"]*)"$/.exec(formula)
-      if (match && (match[1] === '=' ? display === match[2] : display !== match[2])) return mergeSpreadsheetCellStyles(cell.style, rule.style)
-    }
-    if (rule.ruleType === 'cellIs' && Number.isFinite(numeric)) {
-      const expected = Number(formula)
-      const second = Number(rule.formulas[1])
-      const matches = rule.operator === 'greaterThan' ? numeric > expected : rule.operator === 'lessThan' ? numeric < expected : rule.operator === 'greaterThanOrEqual' ? numeric >= expected : rule.operator === 'lessThanOrEqual' ? numeric <= expected : rule.operator === 'notEqual' ? numeric !== expected : rule.operator === 'between' ? numeric >= expected && numeric <= second : rule.operator === 'notBetween' ? numeric < expected || numeric > second : numeric === expected
-      if (matches) return mergeSpreadsheetCellStyles(cell.style, rule.style)
-    }
-  }
-  return cell.style
-}
-
 type SpreadsheetMergeRegion = { from: { column: number; row: number }; to: { column: number; row: number } }
 
 function spreadsheetMergeRegions(sheet: SpreadsheetWorksheet): SpreadsheetMergeRegion[] {
@@ -344,7 +312,7 @@ function spreadsheetAxisPosition(positions: readonly number[], coordinate: numbe
 
 function layoutSpreadsheet(snapshot: SpreadsheetSnapshot): OfficeLayoutResult {
   const issues: OfficeLayoutIssue[] = []
-  const pages = snapshot.worksheets.map((sheet) => {
+  const pages = snapshot.worksheets.filter((sheet) => sheet.visibility === 'visible').map((sheet) => {
     const columns = new Map(sheet.columnDimensions.map((dimension) => [dimension.index, dimension]))
     const rows = new Map(sheet.rowDimensions.map((dimension) => [dimension.index, dimension]))
     const positionsX = [0]
@@ -372,7 +340,7 @@ function layoutSpreadsheet(snapshot: SpreadsheetSnapshot): OfficeLayoutResult {
         widthPt: positionsX[right] - positionsX[address.column - 1],
         heightPt: positionsY[bottom] - positionsY[address.row - 1],
         text: spreadsheetCellDisplayValue(cell),
-        spreadsheetStyle: spreadsheetEffectiveCellStyle(sheet, cell.address, cell),
+        spreadsheetStyle: spreadsheetConditionalStyle(sheet, cell.address, cell),
         numberFormat: cell.numberFormat,
         sourceKind: 'cell',
         z,

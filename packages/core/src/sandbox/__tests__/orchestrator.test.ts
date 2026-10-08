@@ -1,4 +1,4 @@
-import { describe, it, expect } from 'vitest'
+import { describe, it, expect, vi } from 'vitest'
 import {
   createSandboxOrchestrator,
   createInMemorySandboxTaskStore,
@@ -6,7 +6,7 @@ import {
   registrableSiteOf,
 } from '../orchestrator.js'
 import { createCloudBrowserProvider } from '../cloud-browser-provider.js'
-import { createInMemorySessionVault } from '../profiles.js'
+import { createInMemorySessionVault, type BrowserProfile } from '../profiles.js'
 import { StubSandboxProvider } from '../providers/stub.js'
 import type { BrowserCallContext } from '../types.js'
 
@@ -24,18 +24,71 @@ function build(opts: { loginWall?: boolean; loginWallAlways?: boolean } = {}) {
   const provider = new StubSandboxProvider(opts)
   const taskStore = createInMemorySandboxTaskStore()
   const vault = createInMemorySessionVault()
+  const profiles = new Map<string, BrowserProfile>(['p1', 'p2', 'p7', 'p9'].map(id => [id, {
+    id, workspaceId: 'ws-1', ownerUserId: 'user-1', name: 'Fictional identity', scope: 'owner',
+    departmentId: 'department-1', clearance: 'internal', enabledAssistantIds: [], defaultBackend: 'cloud',
+    localControlMode: 'task_tabs', proxyUrl: null, createdAt: '', updatedAt: '',
+  }]))
+  const profileStore = { get: async (id: string) => profiles.get(id) ?? null }
   const downloads: Array<{ path: string; workspaceId: string }> = []
   const orchestrator = createSandboxOrchestrator({
     provider,
     taskStore,
     vault,
+    profileStore,
     saveDownload: async (c, file) => void downloads.push({ path: file.path, workspaceId: c.workspaceId }),
   })
   const browser = createCloudBrowserProvider({ provider, binding: orchestrator.binding })
-  return { provider, taskStore, vault, orchestrator, browser, downloads }
+  return { provider, taskStore, vault, orchestrator, browser, downloads, profiles, profileStore }
 }
 
 describe('[COMP:sandbox/orchestrator] Sandbox task orchestration', () => {
+  it('refuses a pinned task ID after the session binding is replaced', async () => {
+    const h = build()
+    await h.browser.navigate(ctx('pinned'), 'https://portal.example')
+    await expect(h.orchestrator.binding.resolve({ ...ctx('pinned'), taskId: 'retired-task' })).rejects.toThrow()
+  })
+  it('kills the sandbox and records failure when download publication is refused', async () => {
+    const h = build()
+    await h.browser.navigate(ctx('publication'), 'https://portal.example')
+    const task = (await h.orchestrator.getActiveTask('publication'))!
+    vi.spyOn(h.provider.bridge, 'pullDownloads').mockResolvedValue([{ path: '/example.txt', bytes: Buffer.from('fictional') }])
+    const finisher = createSandboxOrchestrator({ provider: h.provider, taskStore: h.taskStore, profileStore: h.profileStore,
+      saveDownload: async () => { throw new Error('Publication refused') } })
+    expect((await finisher.completeTask('publication'))?.status).toBe('failed')
+    expect(h.provider.sandboxes.get(task.sandboxId)?.status).toBe('killed')
+    expect(h.taskStore.tasks.get(task.taskId)?.status).toBe('failed')
+  })
+
+  it('discards an exact task without capture or downloads after profile revocation', async () => {
+    const h = build()
+    await h.browser.navigate(ctx('discard-session'), 'https://portal.example/account')
+    const task = (await h.orchestrator.getActiveTask('discard-session'))!
+    const capture = vi.spyOn(h.provider.browser(task.sandboxId), 'captureStorageState')
+    const downloads = vi.spyOn(h.provider.bridge, 'pullDownloads')
+    h.profiles.delete('p1')
+    expect(await h.orchestrator.discardTask('discard-session', 'different-task')).toBe(false)
+    expect(h.provider.sandboxes.get(task.sandboxId)?.status).toBe('running')
+    expect(await h.orchestrator.discardTask('discard-session', task.taskId)).toBe(true)
+    expect(capture).not.toHaveBeenCalled()
+    expect(downloads).not.toHaveBeenCalled()
+    expect(h.downloads).toEqual([])
+    expect(h.vault.bundles.size).toBe(0)
+    expect(h.provider.sandboxes.get(task.sandboxId)?.status).toBe('killed')
+    expect(await h.orchestrator.discardTask('discard-session', task.taskId)).toBe(false)
+  })
+
+  it('keeps failed teardown retryable without attempting publication', async () => {
+    const h = build()
+    await h.browser.navigate(ctx('discard-session'), 'https://portal.example/account')
+    const task = (await h.orchestrator.getActiveTask('discard-session'))!
+    vi.spyOn(h.provider, 'kill').mockRejectedValueOnce(new Error('provider unavailable'))
+    const downloads = vi.spyOn(h.provider.bridge, 'pullDownloads')
+    await expect(h.orchestrator.discardTask('discard-session', task.taskId)).rejects.toThrow()
+    expect(await h.orchestrator.getActiveTask('discard-session')).not.toBeNull()
+    expect(downloads).not.toHaveBeenCalled()
+    expect(await h.orchestrator.discardTask('discard-session', task.taskId)).toBe(true)
+  })
   it('creates one task-scoped sandbox per chat session and reuses it across ops', async () => {
     const { provider, browser } = build()
     await browser.navigate(ctx('s1'), 'https://github.com/login')
@@ -44,6 +97,92 @@ describe('[COMP:sandbox/orchestrator] Sandbox task orchestration', () => {
 
     await browser.navigate(ctx('s2'), 'https://github.com/')
     expect(provider.sandboxes.size).toBe(2) // a different session = a different task
+  })
+
+  it.each([
+    { departmentId: 'department-2' }, { clearance: 'public' as const },
+    { scope: 'workspace' as const }, { ownerUserId: 'user-2' }, { workspaceId: 'ws-2' },
+  ])('denies reuse and capture after the original profile floor changes: %j', async patch => {
+    const h = build()
+    await h.browser.navigate(ctx('s1'), 'https://portal.example/account')
+    const task = await h.orchestrator.getActiveTask('s1')
+    expect(task?.profileAuthority).toEqual({id:'p1',workspaceId:'ws-1',ownerUserId:'user-1',departmentId:'department-1',scope:'owner',clearance:'internal'})
+    await h.orchestrator.pauseForTakeover('s1')
+    h.profiles.set('p1', { ...h.profiles.get('p1')!, ...patch })
+    const browserAccess = vi.spyOn(h.provider, 'browser')
+    await expect(h.orchestrator.binding.resolve(ctx('s1'), {browser:true})).rejects.toMatchObject({code:'profile_authority_denied'})
+    await expect(h.orchestrator.resumeAfterTakeover('s1')).rejects.toMatchObject({code:'profile_authority_denied'})
+    await expect(h.orchestrator.captureSession('s1', 'portal.example')).rejects.toMatchObject({code:'profile_authority_denied'})
+    expect(browserAccess).not.toHaveBeenCalled()
+    expect(h.provider.sandboxes.get(task!.sandboxId)?.status).toBe('paused')
+    expect(h.vault.bundles.size).toBe(0)
+    await h.orchestrator.completeTask('s1', 'failed')
+    expect(h.provider.sandboxes.get(task!.sandboxId)?.status).toBe('killed')
+  })
+
+  it('retains the floor after a cold orchestrator reload and refuses legacy tasks without evidence', async () => {
+    const h = build()
+    await h.browser.navigate(ctx('s1'), 'https://portal.example/account')
+    const saved = JSON.parse(JSON.stringify(await h.orchestrator.getActiveTask('s1')))
+    const coldStore = createInMemorySandboxTaskStore()
+    await coldStore.create(saved)
+    const cold = createSandboxOrchestrator({provider:h.provider,taskStore:coldStore,vault:h.vault,profileStore:h.profileStore})
+    await expect(cold.binding.resolve(ctx('s1'), {browser:true})).resolves.toEqual({sandboxId:saved.sandboxId})
+    h.profiles.set('p1', {...h.profiles.get('p1')!,departmentId:'department-2'})
+    await expect(cold.captureSession('s1', 'portal.example')).rejects.toMatchObject({code:'profile_authority_denied'})
+    // An absent pin is not reconstructed from today's more permissive profile.
+    coldStore.tasks.set(saved.taskId, {...saved,profileAuthority:null})
+    await expect(cold.binding.resolve(ctx('s1'), {browser:true})).rejects.toMatchObject({code:'profile_authority_denied'})
+    await cold.completeTask('s1', 'failed')
+    expect(h.provider.sandboxes.get(saved.sandboxId)?.status).toBe('killed')
+  })
+
+  it('rejects a different caller or profile before resuming the shared sandbox', async () => {
+    const h = build()
+    await h.browser.navigate(ctx('s1'), 'https://portal.example/account')
+    for (const patch of [{userId:'user-2'}, {workspaceId:'ws-2'}, {profileId:'p7'}, {profileId:undefined}]) {
+      await expect(h.orchestrator.binding.resolve({...ctx('s1'),...patch}, {browser:true})).rejects.toMatchObject({code:'profile_authority_denied'})
+    }
+    await expect(h.orchestrator.captureSession('s1', 'portal.example', 'p7')).rejects.toMatchObject({code:'profile_authority_denied'})
+    expect(h.vault.bundles.size).toBe(0)
+  })
+
+  it('binds a compute-only task once before its first browser navigation and injects that profile', async () => {
+    const h = build()
+    await h.vault.put({profileId:'p1',site:'portal.example',bundle:{site:'portal.example',cookies:[],capturedAt:'2026-01-01T00:00:00Z'}})
+    await h.orchestrator.binding.resolve(ctx('s1', null))
+    const original = await h.orchestrator.getActiveTask('s1')
+    await h.browser.navigate(ctx('s1'), 'https://portal.example/account')
+    const bound = await h.orchestrator.getActiveTask('s1')
+    expect(bound?.taskId).toBe(original?.taskId)
+    expect(bound?.profileAuthority?.departmentId).toBe('department-1')
+    expect(bound?.injectedSite).toBe('portal.example')
+    expect(h.provider.sandboxes.size).toBe(1)
+    await expect(h.browser.navigate(ctx('s1','p2'), 'https://portal.example/account')).rejects.toMatchObject({code:'profile_authority_denied'})
+  })
+
+  it('requires the profile store before allocating a profile-bound sandbox', async () => {
+    const provider = new StubSandboxProvider()
+    const orchestrator = createSandboxOrchestrator({provider,taskStore:createInMemorySandboxTaskStore()})
+    await expect(orchestrator.binding.resolve(ctx('s1'), {browser:true,url:'https://portal.example'})).rejects.toMatchObject({code:'profile_authority_denied'})
+    expect(provider.sandboxes.size).toBe(0)
+  })
+
+  it('passes the original floor to vault capture even when classification changes during capture', async () => {
+    const h = build()
+    await h.browser.navigate(ctx('s1'), 'https://portal.example/account')
+    const access = h.provider.browser.bind(h.provider)
+    vi.spyOn(h.provider, 'browser').mockImplementation(id => {
+      const remote = access(id)
+      return {...remote,captureStorageState:async site => {
+        h.profiles.set('p1', {...h.profiles.get('p1')!,departmentId:'department-2'})
+        return remote.captureStorageState(site)
+      }}
+    })
+    const put = vi.spyOn(h.vault, 'put').mockRejectedValue(Object.assign(new Error('Profile authority unavailable'),{code:'profile_authority_denied'}))
+    await expect(h.orchestrator.captureSession('s1', 'portal.example')).rejects.toMatchObject({code:'profile_authority_denied'})
+    expect(put).toHaveBeenCalledWith(expect.objectContaining({profileId:'p1'}), expect.objectContaining({departmentId:'department-1'}))
+    expect(h.vault.bundles.size).toBe(0)
   })
 
   it('kills the sandbox when the task row cannot be persisted (never orphans a micro-VM)', async () => {
@@ -212,7 +351,7 @@ describe('[COMP:sandbox/orchestrator] Sandbox task orchestration', () => {
     let t = 1_000_000
     const orchestrator = createSandboxOrchestrator({ provider, taskStore, now: () => t })
     const browser = createCloudBrowserProvider({ provider, binding: orchestrator.binding })
-    await browser.navigate(ctx('s1'), 'https://example.com/')
+    await browser.navigate(ctx('s1', null), 'https://example.com/')
     const task = await orchestrator.getActiveTask('s1')
 
     t += 21 * 60 * 1000 // past the ~20 min default abandonment window

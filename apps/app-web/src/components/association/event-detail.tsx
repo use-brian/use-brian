@@ -17,6 +17,7 @@ import { DropdownMenu, DropdownMenuContent, DropdownMenuItem, DropdownMenuTrigge
 import { AssociationField,useAssociationPage,AssociationListState,useAssociationAction } from "./operator-controls";
 import { AssociationEventForm, AssociationTicketForm } from "./catalog-forms";
 import { AssociationEditor, associationMoney } from "./workspace-ui";
+import { ReadOnlyNotice } from "./access";
 import { AssociationReservationForm } from "./reservation-form";
 import { associationHref } from "./navigation";
 import { eventWhere } from "./events-panel";
@@ -74,10 +75,11 @@ function Tickets({workspaceId,event,enabled,currencies,canManage=true,onDirtyCha
   const t=useT().associationPage,u=t.ux,m=t.manage,rows=useAssociationPage(workspaceId,"tickets",{eventId:event.id});
   const [saved,setSaved]=useState(false),[editing,setEditing]=useState<AssociationTicket|"new"|null>(null),[reserving,setReserving]=useState<AssociationTicket|null>(null);
   const known=[...new Set([...(rows.data?.items.map(row=>row.currency) ?? []),...currencies])];
-  if(editing)return <AssociationEditor title={editing==="new"?m.newTicket:editing.name} onClose={()=>{setEditing(null);onDirtyChange?.(false);}}><AssociationTicketForm key={editing==="new"?"new":editing.id} workspaceId={workspaceId} eventId={event.id} ticket={editing==="new"?undefined:editing} currencies={known} onDirtyChange={onDirtyChange} disabled={!enabled||!!rows.error} onSaved={()=>{onDirtyChange?.(false);setEditing(null);setSaved(true);void rows.refresh();}}/></AssociationEditor>;
-  if(reserving)return <AssociationEditor title={`${u.reserveFor}: ${reserving.name}`} onClose={()=>setReserving(null)}><AssociationReservationForm key={reserving.id} workspaceId={workspaceId} ticket={rows.data?.items.find(row=>row.id===reserving.id) ?? reserving} disabled={!enabled||!!rows.error}/></AssociationEditor>;
+  if(editing&&canManage)return <AssociationEditor title={editing==="new"?m.newTicket:editing.name} onClose={()=>{setEditing(null);onDirtyChange?.(false);}}><AssociationTicketForm key={editing==="new"?"new":editing.id} workspaceId={workspaceId} eventId={event.id} ticket={editing==="new"?undefined:editing} currencies={known} onDirtyChange={onDirtyChange} disabled={!enabled||!!rows.error} onSaved={()=>{onDirtyChange?.(false);setEditing(null);setSaved(true);void rows.refresh();}}/></AssociationEditor>;
+  if(reserving&&canManage)return <AssociationEditor title={`${u.reserveFor}: ${reserving.name}`} onClose={()=>setReserving(null)}><AssociationReservationForm key={reserving.id} workspaceId={workspaceId} ticket={rows.data?.items.find(row=>row.id===reserving.id) ?? reserving} disabled={!enabled||!!rows.error}/></AssociationEditor>;
   return <section className="space-y-4" data-event-tickets>
     <div className="flex flex-wrap items-center justify-between gap-2"><h3 className="text-lg font-semibold">{m.tickets}</h3>{canManage?<Button type="button" className="min-h-11 md:min-h-9" disabled={!enabled||!!rows.error} onClick={()=>{setSaved(false);setEditing("new");}}><Ticket aria-hidden className="size-4"/>{m.newTicket}</Button>:null}</div>
+    {!canManage?<ReadOnlyNotice/>:null}
     {saved?<InlineNotice tone="success">{u.saved}</InlineNotice>:null}
     <AssociationListState {...rows}>
       <ResponsiveTable rows={rows.data?.items ?? []} rowKey={row=>row.id} rowData={row=>({"data-ticket-row":row.id})} empty={<EmptyState icon={Ticket} title={u.emptyTickets}/>}
@@ -87,7 +89,7 @@ function Tickets({workspaceId,event,enabled,currencies,canManage=true,onDirtyCha
           {key:"availability",label:m.available,cell:row=><span>{row.available ?? m.unlimited}<span className="block text-xs text-muted-foreground">{m.reserved}: {row.reservedCount}</span></span>},
           {key:"status",label:m.status,cell:row=><StatusPill status={row.status}/>},
         ]}
-        actions={row=><><Button type="button" size="sm" variant="outline" className="min-h-11 md:min-h-8" disabled={!enabled||!!rows.error||row.status!=="on_sale"} onClick={()=>setReserving(row)}>{u.reserveFor}</Button>{canManage?<Button type="button" size="sm" variant="ghost" className="min-h-11 md:min-h-8" disabled={!enabled||!!rows.error} onClick={()=>setEditing(row)}>{m.edit}</Button>:null}</>}/>
+        actions={canManage?row=><><Button type="button" size="sm" variant="outline" className="min-h-11 md:min-h-8" disabled={!enabled||!!rows.error||row.status!=="on_sale"} onClick={()=>setReserving(row)}>{u.reserveFor}</Button>{canManage?<Button type="button" size="sm" variant="ghost" className="min-h-11 md:min-h-8" disabled={!enabled||!!rows.error} onClick={()=>setEditing(row)}>{m.edit}</Button>:null}</>:undefined}/>
     </AssociationListState>
   </section>;
 }
@@ -117,19 +119,19 @@ export function AssociationEventDetail({workspaceId,event,enabled,canManage,load
             {event.status==="published"?<DropdownMenuItem className="min-h-11 sm:min-h-0" onClick={()=>void changeStatus("completed")}>{u.markCompleted}</DropdownMenuItem>:null}
             {event.status!=="cancelled"&&event.status!=="completed"?<DropdownMenuItem className="min-h-11 sm:min-h-0" variant="destructive" onClick={()=>void changeStatus("cancelled")}>{u.cancelEvent}</DropdownMenuItem>:null}
             <DropdownMenuItem className="min-h-11 sm:min-h-0" render={<Link href={associationHref(workspaceId,"orders",{eventId:event.id})}/>}>{t.eventOrders}</DropdownMenuItem>
-          </DropdownMenuContent></DropdownMenu>:<Link href={associationHref(workspaceId,"orders",{eventId:event.id})} className={buttonVariants({variant:"ghost",className:"min-h-11"})}>{t.eventOrders}</Link>}</>}>
+          </DropdownMenuContent></DropdownMenu>:<Link href={associationHref(workspaceId,"orders",{eventId:event.id})} className={buttonVariants({variant:"ghost",className:"max-sm:min-h-11"})}>{t.eventOrders}</Link>}</>}>
       <Segmented label={u.goTo} value={tab} onChange={next=>void leave(()=>setTab(next))} options={[{value:"event" as const,label:canManage?e.editEvent:m.tickets},{value:"guests" as const,label:u.guests}]}/>
     </PageHeader>
     {action.feedback}
     {detailsDirty||feesDirty?<InlineNotice tone="warning">{e.finishDetails}</InlineNotice>:null}
     {tab==="event"&&canManage?<EventPageEditor workspaceId={workspaceId} event={event} tickets={tickets.data?.items} onDirtyChange={setDirty} disabled={loadFailed||action.pending||detailsDirty||feesDirty} canPublishEvent={enabled} onPublishEvent={()=>changeStatus("published")} details={<>
       <details className="rounded-2xl border border-border bg-background" data-event-basics>
-        <summary className="min-h-11 cursor-pointer rounded-2xl p-4 font-semibold focus-visible:outline-2 focus-visible:outline-ring">{e.nameDetails}<span className="mt-1 block text-sm font-normal text-muted-foreground">{event.title} · {eventWhere(event,m.options)}</span></summary>
+        <summary className="min-h-8 max-sm:min-h-11 cursor-pointer rounded-2xl p-4 font-semibold focus-visible:outline-2 focus-visible:outline-ring">{e.nameDetails}<span className="mt-1 block text-sm font-normal text-muted-foreground">{event.title} · {eventWhere(event,m.options)}</span></summary>
         <div className="space-y-3 border-t border-border p-4"><InlineNotice tone="neutral">{event.status==="draft"?e.detailsDraftHelp:e.detailsLiveHelp}</InlineNotice>
           <AssociationEventForm key={`${event.id}:${event.title}:${event.startsAt}:${event.endsAt}`} workspaceId={workspaceId} event={event} disabled={loadFailed} onDirtyChange={setDetailsDirty} onSaved={()=>{setDetailsDirty(false);onChanged();}}/></div>
       </details>
       <details className="rounded-2xl border border-border bg-background" data-event-fees>
-        <summary className="min-h-11 cursor-pointer rounded-2xl p-4 font-semibold focus-visible:outline-2 focus-visible:outline-ring">{e.feesTitle}<span className="mt-1 block text-sm font-normal text-muted-foreground">{tickets.data?.items.length?tickets.data.items.map(ticket=>`${ticket.name}: ${associationMoney(ticket.priceMinor,ticket.currency)}`).join(" · "):u.emptyTickets}</span></summary>
+        <summary className="min-h-8 max-sm:min-h-11 cursor-pointer rounded-2xl p-4 font-semibold focus-visible:outline-2 focus-visible:outline-ring">{e.feesTitle}<span className="mt-1 block text-sm font-normal text-muted-foreground">{tickets.data?.items.length?tickets.data.items.map(ticket=>`${ticket.name}: ${associationMoney(ticket.priceMinor,ticket.currency)}`).join(" · "):u.emptyTickets}</span></summary>
         <div className="space-y-3 border-t border-border p-4"><InlineNotice tone="neutral">{e.feesHelp}</InlineNotice><Tickets workspaceId={workspaceId} event={event} enabled={enabled&&!loadFailed} currencies={currencies} onDirtyChange={setFeesDirty}/></div>
       </details>
     </>}/>:null}

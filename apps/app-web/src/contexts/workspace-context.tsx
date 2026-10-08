@@ -43,9 +43,6 @@ export type Workspace = {
   iconSeed?: number | null;
   /** Versioned public proxy URL for an uploaded workspace picture. */
   iconUrl?: string | null;
-  /** `true` for the auto-created default workspace (`is_personal`) — a label
-   *  only; it gates no connector/sharing behavior (that keys on `memberCount`). */
-  isPersonal?: boolean;
   // Picker preferences (`GET /api/workspaces` carries them per row). The
   // switcher's scalable list (`lib/workspace-picker.ts`) groups on these, so
   // they ride the shared cache instead of a private copy of the same fetch.

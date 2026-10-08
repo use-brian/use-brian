@@ -65,7 +65,7 @@ describe('[COMP:api/home-app-bridge] bundle token', () => {
   it('expires', () => {
     const token = mintBundleToken({ appId: APP, secret: SECRET, ttlMs: 1_000, now: () => 0 })
     expect(verifyBundleToken({ token, appId: APP, secret: SECRET, now: () => 500 }).ok).toBe(true)
-    expect(verifyBundleToken({ token, appId: APP, secret: SECRET, now: () => 2_000 })).toEqual({
+    expect(verifyBundleToken({ token, appId: APP, secret: SECRET, now: () => 1_000 })).toEqual({
       ok: false,
       reason: 'expired',
     })
@@ -110,6 +110,12 @@ describe('[COMP:api/home-app-bridge] bridge token', () => {
       scope: 'read_write',
       maxClearance: 'internal',
     })
+  })
+
+  it.each([0, 0.5, 8.65e15, 1e20, Infinity, NaN])('denies expired or invalid signed expiry %s before parent capture', (ttlMs) => {
+    const token = mintBridgeToken({ appId: APP, workspaceId: 'ws-1', userId: 'u-1',
+      scope: 'read_write', maxClearance: 'internal', secret: SECRET, ttlMs, now: () => 0 })
+    expect(parseBridgeToken({ token, secret: SECRET, now: () => 0 })).toEqual({ ok: false, reason: 'expired' })
   })
 
   it('parses without a pre-known app id, still signature-checked', () => {

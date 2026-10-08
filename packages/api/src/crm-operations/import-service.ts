@@ -1,3 +1,4 @@
+import { beginAssociationCreation, crmSegmentReadScope } from '../association/source-scope.js'
 /**
  * Server-owned CRM import preflight and resumable commit.
  *
@@ -26,11 +27,13 @@ import type {
   CrmPage,
   CrmPageQuery,
 } from '@use-brian/core'
-import { AssociationPromotionImportSchema, AssociationSourceMembershipImportSchema, AssociationSourceOrderImportSchema, CrmIntegrationGrantsSchema, CrmOperationsError } from '@use-brian/core'
+import { AssociationPromotionImportSchema, AssociationSourceMembershipImportSchema, AssociationSourceOrderImportSchema, CrmOperationsError, actorAuditIdentity, type AssociationActor } from '@use-brian/core'
 import { createCompany, createContact, createDeal, updateContact, type CrmWriteTransaction } from '../db/crm.js'
 import { updateCrmCustomFields } from '../db/crm-r2.js'
 import { getEntityById, updateEntity } from '../db/entities-store.js'
 import { getPool, query } from '../db/client.js'
+import { lockCrmIntegrationCredential, type CrmIntegrationPrincipal } from '../db/crm-integration-store.js'
+import { runWithAgentAccess } from '../db/agent-access-context.js'
 import { parseCsv } from '../linkedin-import/csv.js'
 import { createCrmImportSources, type CrmImportSources } from '../db/crm-import-sources.js'
 import { importGrantSnapshot, requireImportCeiling, requireImportOperation, requireImportRowAuthority } from './import-authority.js'
@@ -696,12 +699,15 @@ export function createCrmProductionImportService(deps: {
   }
   async function importTransaction<T>(context: ImportServiceContext,
     run: (current: ImportServiceContext, client: PoolClient, effects: Array<() => void>) => Promise<T>,
+    waitForWorkspace = false,
   ): Promise<T> {
     const client = await (deps.pool ?? getPool()).connect()
     const effects: Array<() => void> = []
     let result: T
+    let integration: CrmIntegrationPrincipal | undefined
     try {
       await client.query('BEGIN')
+      await beginAssociationCreation(client, context.workspaceId, !waitForWorkspace)
       await client.query(`SELECT set_config('app.system_bypass','true',true)`)
       if (context.actor.kind === 'user') {
         const member = await client.query<{ role: string }>(`SELECT role FROM workspace_members
@@ -709,17 +715,26 @@ export function createCrmProductionImportService(deps: {
         if (!member.rows[0]) throw new CrmOperationsError('not_authorized', 'Current workspace membership is required for imports.')
         context = { ...context, authority: { ...context.authority, role: member.rows[0].role as CrmOperationsContext['authority']['role'] } }
       } else if (context.actor.kind === 'integration_key') {
-        const credential = await client.query(`SELECT id FROM crm_integration_credentials
-          WHERE workspace_id=$1 AND id=$2 AND revoked_at IS NULL AND expires_at>clock_timestamp() FOR SHARE`,
-        [context.workspaceId, context.actor.credentialId])
-        if (!credential.rowCount) throw new CrmOperationsError('not_authorized', 'The import credential is no longer active.')
-        const rows = await client.query(`SELECT operation,selectors FROM crm_integration_credential_grants
-          WHERE workspace_id=$1 AND credential_id=$2 ORDER BY operation FOR SHARE`, [context.workspaceId, context.actor.credentialId])
-        const grants = CrmIntegrationGrantsSchema.parse(rows.rows)
-        requireImportCeiling({ credentialId: context.actor.credentialId, grants },
+        try { integration = await lockCrmIntegrationCredential(client, context.workspaceId, context.actor.credentialId) }
+        catch (error) {
+          if (error instanceof CrmOperationsError && error.code === 'credential_revoked') {
+            throw new CrmOperationsError('not_authorized', 'The import credential is no longer active.')
+          }
+          throw error
+        }
+        requireImportCeiling(integration,
           context.authority.integration ? importGrantSnapshot(context.authority.integration) : undefined)
       }
-      result = await run(context, client, effects)
+      const execute = () => run(context, client, effects)
+      result = integration?.departmentRead ? await runWithAgentAccess({ workspaceId: context.workspaceId,
+        userId: integration.departmentRead.userId, departmentRead: integration.departmentRead,
+        clearance: 'confidential', compartments: null, ...integration.executionLimits }, execute) : await execute()
+      if (integration) {
+        const renewed = await lockCrmIntegrationCredential(client, context.workspaceId, integration.credentialId)
+        if (JSON.stringify(renewed) !== JSON.stringify(integration)) {
+          throw new CrmOperationsError('not_authorized', 'Import authority changed before commit.')
+        }
+      }
       await client.query('COMMIT')
     } catch (error) {
       await client.query('ROLLBACK').catch(() => undefined)
@@ -1210,7 +1225,7 @@ export function createCrmProductionImportService(deps: {
     requireImportOperation(context, 'crm.imports.write')
     // Files can use the same bounded pool. Finish their I/O before holding a
     // connection; source/mapping immutability and hashes are rechecked below.
-    const initial = await loadJob(context.workspaceId, jobId)
+    const initial = await readableJob(context, jobId)
     if (!initial) throw new CrmOperationsError('not_found', 'Import job was not found.')
     const sourceAuthorityContext = jobContext(context, initial, 'write')
     const parsed = ['completed', 'cancelled'].includes(initial.status) ? null : await parseStaged(sourceAuthorityContext, {
@@ -1334,6 +1349,7 @@ export function createCrmProductionImportService(deps: {
 
   async function cancel(context: ImportServiceContext, jobId: string): Promise<CrmImportJob> {
     requireImportOperation(context, 'crm.imports.write')
+    if (!await readableJob(context, jobId)) throw new CrmOperationsError('not_found', 'Import job was not found.')
     return importTransaction(context, async (current, client) => {
       context = current
       const original = await loadJob(context.workspaceId, jobId, client)
@@ -1347,7 +1363,44 @@ export function createCrmProductionImportService(deps: {
       const job = await loadJob(context.workspaceId, jobId, client)
       if (!job) throw new Error('Import job was not found.')
       return jobProjection(job)
-    })
+    }, true)
+  }
+
+  /**
+   * Department floor for reading an import job. The raw source decides, never job metadata:
+   * the staged file must be readable by the caller; an integration-sourced job needs the
+   * credential's bound departments at its cap; a job with no surviving source evidence is
+   * readable only by its creator. Legacy (pre-v2) workspaces keep the existing behavior.
+   */
+  async function importJobReadScope(context: ImportServiceContext, parameterIndex: number): Promise<{ sql: string; params: unknown[] }> {
+    const identity = actorAuditIdentity(context.actor)
+    const actor: AssociationActor = { credentialKind: context.actor.kind, credentialId: identity.actorCredentialId,
+      ...(identity.actingUserId ? { actingUserId: identity.actingUserId } : {}),
+      ...(context.authority.integration ? { integration: context.authority.integration } : {}) }
+    const scope = await crmSegmentReadScope(getPool(), context.workspaceId, actor, parameterIndex)
+    if (!scope) return { sql: 'TRUE', params: [] }
+    const map = `$${parameterIndex}::jsonb`, creator = `$${parameterIndex + 3}::uuid`
+    const creatorOnly = `j.created_by_user_id=${creator}`
+    return { params: [...scope.params, identity.actingUserId ?? null], sql: `(
+      (j.staged_file_id IS NOT NULL AND (
+        EXISTS (SELECT 1 FROM workspace_files f WHERE f.workspace_id=j.workspace_id AND f.id=j.staged_file_id AND ${scope.entity('f')})
+        OR (NOT EXISTS (SELECT 1 FROM workspace_files f WHERE f.workspace_id=j.workspace_id AND f.id=j.staged_file_id) AND j.integration_credential_id IS NULL AND ${creatorOnly})))
+      OR (j.staged_file_id IS NULL AND j.integration_credential_id IS NOT NULL AND EXISTS (SELECT 1 FROM crm_integration_credentials c
+        WHERE c.workspace_id=j.workspace_id AND c.id=j.integration_credential_id AND c.department_binding IS NOT NULL
+          AND public.department_row_allows(${map},c.workspace_id,c.department_binding->>'cap',
+            ARRAY(SELECT 'team:'||b FROM jsonb_array_elements_text(c.department_binding->'binding') b),NULL)))
+      OR (j.staged_file_id IS NULL AND j.integration_credential_id IS NULL AND ${creatorOnly}))` }
+  }
+
+  /** Non-disclosing: an unreadable job is reported exactly like a missing one. */
+  async function readableJob(context: ImportServiceContext, jobId: string): Promise<ImportJobRow | null> {
+    const job = await loadJob(context.workspaceId, jobId)
+    if (!job) return null
+    const scope = await importJobReadScope(context, 3)
+    if (scope.sql === 'TRUE') return job
+    const visible = await query(`SELECT 1 FROM crm_import_jobs j WHERE j.workspace_id=$1 AND j.id=$2 AND ${scope.sql}`,
+      [context.workspaceId, jobId, ...scope.params])
+    return visible.rows.length ? job : null
   }
 
   async function list(context: ImportServiceContext, filters: CrmPageQuery = {}): Promise<CrmPage<'jobs', CrmImportJob>> {
@@ -1356,6 +1409,7 @@ export function createCrmProductionImportService(deps: {
       selectors: Object.fromEntries(Object.entries(grant.selectors).sort(([a], [b]) => a.localeCompare(b))
         .map(([key, selected]) => [key, Array.isArray(selected) ? [...selected].sort() : selected])),
     })).sort((a, b) => a.operation.localeCompare(b.operation))
+    const readScope = await importJobReadScope(context, 4)
     const result = await queryCrmPage<'jobs', ImportJobRow>(query, {
       workspaceId: context.workspaceId, resource: 'crm.imports', key: 'jobs', query: filters,
       sql: `SELECT id,workspace_id AS "workspaceId",staged_file_id AS "stagedFileId",
@@ -1379,22 +1433,23 @@ export function createCrmProductionImportService(deps: {
                         OR (allowed->'selectors'->dimension.key) @> dimension.value,false)
                    )
               )
-           )))`,
-      params: [context.workspaceId, grants ? JSON.stringify(grants) : null, context.authority.integration?.credentialId ?? null],
+           )))
+         AND ${readScope.sql}`,
+      params: [context.workspaceId, grants ? JSON.stringify(grants) : null, context.authority.integration?.credentialId ?? null, ...readScope.params],
     })
     return { ...result, jobs: result.jobs.map((row) => { jobContext(context, row, 'read'); return jobProjection(row) }) }
   }
 
   async function get(context: ImportServiceContext, jobId: string): Promise<CrmImportJob | null> {
     requireImportOperation(context, 'crm.imports.read')
-    const job = await loadJob(context.workspaceId, jobId)
+    const job = await readableJob(context, jobId)
     if (job) jobContext(context, job, 'read')
     return job ? jobProjection(job) : null
   }
 
   async function errorsCsv(context: ImportServiceContext, jobId: string): Promise<string | null> {
     requireImportOperation(context, 'crm.imports.read')
-    const job = await loadJob(context.workspaceId, jobId)
+    const job = await readableJob(context, jobId)
     if (!job) return null
     jobContext(context, job, 'read')
     const result = await query<{ rowNumber: number; errorCode: string; fieldKey: string | null; message: string; rowSnapshot: Record<string, unknown> }>(
@@ -1411,7 +1466,7 @@ export function createCrmProductionImportService(deps: {
 
   async function resultsCsv(context: ImportServiceContext, jobId: string): Promise<string | null> {
     requireImportOperation(context, 'crm.imports.read')
-    const job = await loadJob(context.workspaceId, jobId)
+    const job = await readableJob(context, jobId)
     if (!job) return null
     jobContext(context, job, 'read')
     const result = await query<{ rowNumber: number; status: string; inputHash: string; resultRefs: ImportResultRef[] }>(

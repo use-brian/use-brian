@@ -36,6 +36,7 @@ import { surfaceFromPathname } from "@/lib/doc-page-url";
 import { invalidateSurfaceCache, warmSurfaceCache } from "@/lib/surface-cache";
 import { fetchCrmConfig } from "@/lib/api/crm";
 import { fetchWorkspaceTasks } from "@/lib/api/tasks";
+import { leaseSurfaceContent, surfaceContentRemaining } from "@/lib/offline/surface-content-cache";
 import { getUserInfo } from "@/lib/user";
 import { getView, listWorkspaceAssistants } from "@/lib/api/views";
 import { listWorkflows } from "@/lib/api/workflow";
@@ -44,7 +45,8 @@ import { officeMetadataRemaining } from "@/lib/office/metadata";
 import type { CacheLifecycle } from "@/lib/surface-cache";
 import { listOfficeArtifacts } from "@/lib/office/api";
 import { listTools as listShopifyTools } from "@/lib/api/shopify";
-import { fetchLiveRoster } from "@/lib/api/live";
+import { associationModuleRemaining } from "@/lib/api/association";
+import { fetchLiveRoster, liveRosterRemaining } from "@/lib/api/live";
 
 /**
  * Surfaces whose landing data is a single workspace-scoped list. `studio`
@@ -229,8 +231,8 @@ export function feedSessionsCacheKey(workspaceId: string, platform: string): str
  * inside the post editor with no workspace id in hand. Marking every
  * workspace's list stale is harmless: only a mounted reader refetches.
  */
-export function feedSessionsCacheFamily(): string {
-  return "feed-sessions:";
+export function feedSessionsCacheFamily(workspaceId?: string): string {
+  return workspaceId ? `feed-sessions:${workspaceId}${viewerSuffix()}:` : "feed-sessions:";
 }
 
 export function feedPlanCacheKey(
@@ -755,6 +757,10 @@ export function browserProfilesCacheKey(workspaceId: string): string {
   return `browser-profiles:${workspaceId}${viewerSuffix()}`;
 }
 
+export function browserProfileDestinationsCacheKey(workspaceId: string): string {
+  return `workspace-access:${workspaceId}:browser-destinations${viewerSuffix()}`;
+}
+
 export function computerTasksCacheKey(workspaceId: string): string {
   return `computer-tasks:${workspaceId}${viewerSuffix()}`;
 }
@@ -827,12 +833,14 @@ export function warmTargetFor(
     case "tasks":
       return {
         key: surfaceDataKey("tasks", workspaceId) as string,
-        fetch: () => fetchWorkspaceTasks(workspaceId),
+        fetch: () => leaseSurfaceContent(() => fetchWorkspaceTasks(workspaceId)),
+        lifecycle: { expiresInMs: surfaceContentRemaining },
       };
     case "association":
       return {
         key: associationModuleCacheKey(workspaceId),
         fetch: () => import("@/lib/api/association").then(m => m.getAssociationModuleSnapshot(workspaceId)),
+        lifecycle: { expiresInMs: associationModuleRemaining },
       };
     case "crm":
       return {
@@ -842,14 +850,16 @@ export function warmTargetFor(
     case "workflow":
       return {
         key: surfaceDataKey("workflow", workspaceId) as string,
-        fetch: () => listWorkflows(workspaceId, { includeArchived: true }),
+        fetch: () => leaseSurfaceContent(() => listWorkflows(workspaceId, { includeArchived: true })),
+        lifecycle: { expiresInMs: surfaceContentRemaining },
       };
     case "studio":
       // The Studio root redirects to Connectors (`studio/page.tsx`), so the
       // Studio icon warms the connectors list the landing section reads.
       return {
         key: connectorsCacheKey(workspaceId),
-        fetch: () => fetchConnectorsList(workspaceId),
+        fetch: () => leaseSurfaceContent(() => fetchConnectorsList(workspaceId)),
+        lifecycle: { expiresInMs: surfaceContentRemaining },
       };
     case "chat":
       // The roster is the first thing the Chat surface needs (the new-chat
@@ -857,7 +867,8 @@ export function warmTargetFor(
       // lists fetch in parallel with it once the surface mounts.
       return {
         key: chatRosterCacheKey(workspaceId),
-        fetch: () => listWorkspaceAssistants(workspaceId),
+        fetch: () => leaseSurfaceContent(() => listWorkspaceAssistants(workspaceId)),
+        lifecycle: { expiresInMs: surfaceContentRemaining },
       };
     case "feed": {
       // The shell gate's record - the five requests every Feed route mounts
@@ -887,7 +898,8 @@ export function warmTargetFor(
       // request worth starting on hover.
       return {
         key: shopifyToolsCacheKey(workspaceId),
-        fetch: () => listShopifyTools(workspaceId),
+        fetch: () => leaseSurfaceContent(() => listShopifyTools(workspaceId)),
+        lifecycle: { expiresInMs: surfaceContentRemaining },
       };
     case "live":
       // The roster is the whole surface (overview zones, the focused row,
@@ -896,6 +908,7 @@ export function warmTargetFor(
       return {
         key: liveRosterCacheKey(workspaceId),
         fetch: () => fetchLiveRoster(workspaceId),
+        lifecycle: { expiresInMs: liveRosterRemaining },
       };
   }
 }
@@ -1028,7 +1041,7 @@ export function officePanelCachePrefix(workspaceId: string, viewerId: string): s
   return `office-panel:${workspaceId}:${viewerId}:`;
 }
 
-export function officePanelCacheKey(prefix: string | null, kind: "job" | "job-events" | "versions" | "version-preview" | "sharing" | "comments" | "suggestions", id: string | undefined): string | null {
+export function officePanelCacheKey(prefix: string | null, kind: "job" | "job-events" | "versions" | "version-preview" | "classification" | "sharing" | "comments" | "suggestions", id: string | undefined): string | null {
   return prefix && id ? `${prefix}${kind}:${id}` : null;
 }
 

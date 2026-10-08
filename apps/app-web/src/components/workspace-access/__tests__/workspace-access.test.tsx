@@ -47,6 +47,20 @@ describe('[COMP:app-web/workspace-access] request and administration paths',()=>
     await render({selection:{kind:'person',id:'other'}});expect(host.querySelector('form')).toBeNull();expect(host.textContent).toContain('Casey');expect(host.textContent).not.toContain('Riley');
     await render({selection:{kind:'person',id:'unavailable'}});expect(host.textContent).not.toContain('Casey');expect(host.textContent).not.toContain(t.editPerson);
   });
+  it('summarizes effective access without duplicating the directory identity or removing readiness gates', async () => {
+    const data=fixture();data.canAdminister=true;data.readiness!.ready=false;
+    data.people=[{id:'member-fixture',name:'Riley',role:'admin',access:{clearance:'confidential',effectiveClearance:'confidential',teamScopeMode:'legacy',readTeamIds:null,membershipTeamIds:null,hasUnlistedReadScope:false,hasUnlistedMembershipScope:false}}];
+    mocks.fetch.mockResolvedValue(data);
+    await render({selection:{kind:'person',id:'member-fixture'},embedded:true,hideIdentity:true});
+    expect(host.textContent).not.toContain('Riley');
+    expect(host.textContent).toContain(t.canReadAllDepartments);
+    expect(host.textContent).toContain(t.noMemberships);
+    expect(host.querySelector('[role="status"]')?.textContent).toBe(t.personAccessLimited);
+    const details=host.querySelector('details')!;
+    expect(details.open).toBe(false);
+    expect(details.textContent).toContain(t.scopeMode);
+    expect([...host.querySelectorAll('button')].some(button=>button.textContent===t.editPerson)).toBe(false);
+  });
   it('offers configuration only for the selected department while requests retain their workflow',async()=>{
     const data=fixture();data.canAdminister=true;data.teams.push({...data.teams[0],id:'operations',name:'Operations'});mocks.fetch.mockResolvedValue(data);
     await render({selection:{kind:'department',id:'research'},embedded:true});expect(host.textContent).toContain('Research');expect(host.textContent).not.toContain('Operations');

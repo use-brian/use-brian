@@ -23,6 +23,7 @@ import type { Tool, ToolContext } from '../tools/types.js'
 import { ContextScopeAccumulator, type ScopeEvidence, type TurnScope } from '../security/context-scope.js'
 import { executionToolContext, type ExecutionContext } from '../security/execution-context.js'
 import { pinAccessCeiling } from '../security/access-ceiling.js'
+import { crmOperationsSha256 } from '../crm/operations-types.js'
 import type { Sensitivity } from '../security/sensitivity.js'
 import type {
   AssistantCallStep,
@@ -786,6 +787,20 @@ export async function advanceWorkflowRun(
   // client-bound workflow's one reviewed reply instead uses the assistant
   // whose API-key boundary and mailbox grants authored the draft.
   const toolAssistantId = workflow.definition.principal?.assistantId ?? primaryAssistantId
+  // Capture copy lineage before resolving authority so its evidence is in
+  // the initial execution scope, including on wait/approval resumes.
+  // Cross-run loop: the distilled outcome of the workflow's most recent
+  // TERMINAL run, surfaced to every step as `{{lastRun.*}}`. Auxiliary
+  // context — a lookup failure degrades to "no prior run" rather than killing
+  // this run. Undefined on the first run (or pre-mig-279 prior runs).
+  const priorOutcome = await deps.runStore
+    .getLatestOutcomeForWorkflowSystem(run.workflowId, runId)
+    .catch((err) => {
+      console.warn('[workflow] lastRun outcome lookup failed:', err)
+      return null
+    })
+  const lastRun: Record<string, unknown> | undefined = priorOutcome ?? undefined
+
   let runtimeScope: Awaited<ReturnType<NonNullable<ExecutorDeps['resolveRunScope']>>> | undefined
   if (deps.resolveRunScope) {
     try {
@@ -825,6 +840,12 @@ export async function advanceWorkflowRun(
   scopeAccumulator.note(runtimeScope?.inputScopeEvidence)
   if (persistedScopeEvidence && typeof persistedScopeEvidence === 'object') {
     scopeAccumulator.note(persistedScopeEvidence as import('../security/context-scope.js').ScopeEvidence)
+  }
+  const sourceAuthority = runtimeScope?.executionContext?.security.authority
+  const originalSource = sourceAuthority?.snapshotSource?.()
+  let persistedSourceFingerprint = originalSource?.kind === 'workflow' ? originalSource.persistedFingerprint : null
+  if (sourceAuthority && originalSource?.kind === 'workflow') {
+    sourceAuthority.snapshotSource = () => ({ ...originalSource, persistedFingerprint: persistedSourceFingerprint! })
   }
 
   let toolRegistry: WorkflowToolRegistry
@@ -877,18 +898,6 @@ export async function advanceWorkflowRun(
   // Variables — start from persisted state (re-entry from wait) or empty.
   let vars: Record<string, unknown> = { ...run.vars }
   const input = run.input
-
-  // Cross-run loop: the distilled outcome of the workflow's most recent
-  // TERMINAL run, surfaced to every step as `{{lastRun.*}}`. Auxiliary
-  // context — a lookup failure degrades to "no prior run" rather than killing
-  // this run. Undefined on the first run (or pre-mig-279 prior runs).
-  const priorOutcome = await deps.runStore
-    .getLatestOutcomeForWorkflowSystem(run.workflowId, runId)
-    .catch((err) => {
-      console.warn('[workflow] lastRun outcome lookup failed:', err)
-      return null
-    })
-  const lastRun: Record<string, unknown> | undefined = priorOutcome ?? undefined
 
   // Per-step trace accumulated across the run; distilled into the terminal
   // `outcome.logs` so the NEXT run can read what this one did.
@@ -1092,9 +1101,11 @@ export async function advanceWorkflowRun(
       return false
     }
     executed.add(id)
+    let launch!: () => void
+    const persisted = new Promise<void>((resolve) => { launch = resolve })
     inFlight.set(
       id,
-      executeStep(step).catch((err): SettledStep => ({
+      persisted.then(() => executeStep(step)).catch((err): SettledStep => ({
         // executeStep never throws by contract; this is the belt-and-braces
         // path so one rejected promise cannot wedge the whole scheduler.
         step,
@@ -1109,12 +1120,26 @@ export async function advanceWorkflowRun(
         },
       })),
     )
-    // Persist AFTER the inFlight insert so the crash-recovery frontier
-    // includes the step that is now executing.
-    await deps.runStore.updateRun(runId, {
-      currentStepId: id,
-      vars: frontierVars(),
-    })
+    // Reserve the slot for recovery, but do not start side effects until its
+    // frontier and scope evidence have been saved successfully.
+    try {
+      const savedVars = frontierVars()
+      await deps.runStore.updateRun(runId, {
+        currentStepId: id,
+        vars: savedVars,
+      })
+      if (originalSource?.kind === 'workflow') {
+        persistedSourceFingerprint = crmOperationsSha256(savedVars[WORKFLOW_SCOPE_EVIDENCE_VAR])
+      }
+    } catch (error) {
+      inFlight.delete(id)
+      throw error
+    }
+    if (deps.abortSignal?.aborted) {
+      inFlight.delete(id)
+      return false
+    }
+    launch()
     return true
   }
 
@@ -1299,6 +1324,9 @@ export async function advanceWorkflowRun(
     }
     const settled = await Promise.race(inFlight.values())
     inFlight.delete(settled.step.id)
+    if (deps.abortSignal?.aborted) {
+      firstFailure ??= { stepId: settled.step.id, error: workflowCancellationError(), isTimeout: false }
+    }
     await handleSettled(settled)
   }
 

@@ -2,15 +2,14 @@
 
 /** Offline payments: owner/admin table of cases and the record / mark-paid / undo / cancel flows. [COMP:app-web/association] */
 import Link from "next/link";
-import { useState } from "react";
+import { useEffect, useState } from "react";
 import { Banknote } from "lucide-react";
 import { useT } from "@/lib/i18n/client";
-import type { AssociationMembershipRescue, AssociationPlan } from "@/lib/api/association";
-import type { CrmLookupRow } from "@/lib/api/crm";
+import type { AssociationPlan } from "@/lib/api/association";
 import { crmRecordHref } from "@/lib/crm-view";
 import { Button } from "@/components/ui/button";
 import { useAssociationModule } from "./module-controls";
-import { AssociationContactPicker, AssociationListState, useAssociationPage } from "./operator-controls";
+import { AssociationContactPicker, AssociationListState, useAssociationContactSelection, useAssociationPage } from "./operator-controls";
 import { AssociationMembershipRescueActionForm, AssociationMembershipRescueForm, type AssociationRescueIntent } from "./membership-rescue";
 import { AssociationEditor, associationMoney } from "./workspace-ui";
 import { EmptyState, InlineNotice, PageHeader, ResponsiveTable, StatusPill, associationDate } from "./ui";
@@ -19,11 +18,14 @@ export function AssociationPaymentsPanel({workspaceId,initialNew=false}:{workspa
   const t=useT().associationPage,u=t.ux,m=t.manage,module=useAssociationModule(workspaceId);
   const canManage=!!module.data?.canManage&&!module.error;
   const rescues=useAssociationPage(workspaceId,"rescues",{},canManage),plans=useAssociationPage(workspaceId,"plans",{},canManage);
-  const [mode,setMode]=useState<"list"|"new">(initialNew?"new":"list"),[contact,setContact]=useState<CrmLookupRow|null>(null),[plan,setPlan]=useState<AssociationPlan|null>(null);
-  const [selected,setSelected]=useState<{row:AssociationMembershipRescue;intent:AssociationRescueIntent}|null>(null),[saved,setSaved]=useState(false);
+  const [mode,setMode]=useState<"list"|"new">(initialNew?"new":"list"),[contact,setContact]=useAssociationContactSelection(workspaceId),[plan,setPlan]=useState<AssociationPlan|null>(null);
+  const [selected,setSelected]=useState<{id:string;intent:AssociationRescueIntent}|null>(null),[saved,setSaved]=useState(false);
+  const selectedRow=canManage?rescues.data?.items.find(row=>row.id===selected?.id):undefined;
+  useEffect(()=>{if(selected&&!selectedRow)setSelected(null);},[selected,selectedRow]);
   function done(){setSelected(null);setMode("list");setPlan(null);setSaved(true);void rescues.refresh();}
   if(module.data&&!module.data.canManage)return <section className="space-y-5"><PageHeader title={u.offlinePayments} description={u.offlinePaymentsHelp}/><InlineNotice tone="neutral">{t.ownerOnly}</InlineNotice></section>;
-  if(selected)return <AssociationEditor title={selected.intent==="settle"?u.markPaid:selected.intent==="cancel"?u.cancelCase:u.undoPayment} onClose={()=>setSelected(null)}><AssociationMembershipRescueActionForm key={`${selected.row.id}:${selected.intent}`} workspaceId={workspaceId} row={selected.row} intent={selected.intent} onSaved={done}/></AssociationEditor>;
+  if(selected&&selectedRow)return <AssociationEditor title={selected.intent==="settle"?u.markPaid:selected.intent==="cancel"?u.cancelCase:u.undoPayment} onClose={()=>setSelected(null)}><AssociationMembershipRescueActionForm key={`${selected.id}:${selected.intent}`} workspaceId={workspaceId} row={selectedRow} intent={selected.intent} onSaved={done}/></AssociationEditor>;
+  if(!canManage)return <section className="space-y-5"><PageHeader title={u.offlinePayments} description={u.offlinePaymentsHelp}/><AssociationListState {...module}>{null}</AssociationListState></section>;
   if(mode==="new")return <AssociationEditor title={u.recordOfflinePayment} onClose={()=>{setMode("list");setPlan(null);}}>
     <div className="space-y-5">
       <section className="space-y-2"><h3 className="text-sm font-semibold">{u.selectPerson}</h3><AssociationContactPicker workspaceId={workspaceId} selected={contact} onSelect={row=>{setContact(row);setPlan(null);}} onClear={()=>{setContact(null);setPlan(null);}}/></section>
@@ -45,8 +47,8 @@ export function AssociationPaymentsPanel({workspaceId,initialNew=false}:{workspa
           {key:"status",label:m.status,cell:row=><StatusPill status={row.status}/>},
           {key:"period",label:u.starts,hideBelowMd:true,cell:row=>`${associationDate(row.startsAt,"date")} / ${associationDate(row.endsAt,"date")}`},
         ]}
-        actions={row=>row.status==="outstanding"?<><Button type="button" size="sm" className="min-h-11 md:min-h-8" disabled={!!rescues.error} onClick={()=>setSelected({row,intent:"settle"})}>{u.markPaid}</Button><Button type="button" size="sm" variant="ghost" className="min-h-11 md:min-h-8" disabled={!!rescues.error} onClick={()=>setSelected({row,intent:"cancel"})}>{u.cancelCase}</Button></>
-          :row.status==="settled"?<Button type="button" size="sm" variant="outline" className="min-h-11 md:min-h-8" disabled={!!rescues.error} onClick={()=>setSelected({row,intent:"reverse"})}>{u.undoPayment}</Button>:null}/>
+        actions={row=>row.status==="outstanding"?<><Button type="button" size="sm" className="min-h-11 md:min-h-8" disabled={!!rescues.error} onClick={()=>setSelected({id:row.id,intent:"settle"})}>{u.markPaid}</Button><Button type="button" size="sm" variant="ghost" className="min-h-11 md:min-h-8" disabled={!!rescues.error} onClick={()=>setSelected({id:row.id,intent:"cancel"})}>{u.cancelCase}</Button></>
+          :row.status==="settled"?<Button type="button" size="sm" variant="outline" className="min-h-11 md:min-h-8" disabled={!!rescues.error} onClick={()=>setSelected({id:row.id,intent:"reverse"})}>{u.undoPayment}</Button>:null}/>
     </AssociationListState>
   </section>;
 }

@@ -38,6 +38,7 @@ vi.mock("@/lib/user", () => ({
 
 const fetchLiveRoster = vi.fn<(workspaceId: string) => Promise<LiveWorkItem[]>>();
 vi.mock("@/lib/api/live", () => ({
+  liveRosterRemaining: () => 30_000,
   fetchLiveRoster: (...a: [string]) => fetchLiveRoster(...a),
 }));
 

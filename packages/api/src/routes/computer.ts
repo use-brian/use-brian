@@ -1,9 +1,20 @@
+import { assertBrowserTaskPublication, browserPublicationBusy, type BrowserTaskPublication } from '@use-brian/core'
+import { assertLocalTaskExecutionAuthority } from '../sandbox/local-task-authority.js'
+import { parseBrowserInputScope, mergeBrowserInputScope, type BrowserInputScope } from '@use-brian/core'
+import type { BrowserTaskDiscard } from '../sandbox/task-discard.js'
+import { humanCanReadBrowserProfile } from '../sandbox/profile-authority.js'
 import { randomUUID } from 'node:crypto'
 import { Router } from 'express'
 import { z } from 'zod'
-import { BrowserBackendError, createCloudBrowserProvider, registrableSiteOf } from '@use-brian/core'
+import { AuthoritySourceSchema, parseAuthoringAuthority, BrowserBackendError, BrowserProfileAuthoritySchema, createCloudBrowserProvider, registrableSiteOf } from '@use-brian/core'
 import type {
+  AuthoringAuthority,
+  AuthoritySource,
+  CurrentAuthorityBoundary,
   BrowserBackendErrorCode,
+  BrowserProfile,
+  BrowserProfileAuthority,
+  DepartmentReadGrant,
   BrowserAuthBroker,
   BrowserCredentialAdminStore,
   BrowserProfileStore,
@@ -27,8 +38,8 @@ import type {
  *    default-backend / per-site session revoke over `browser_profiles`.
  *
  * Mounted behind `requireAuth` in boot. Every task route checks the task
- * belongs to the caller; profile mutations are owner-only, reads are
- * workspace-member (existence is always governance-visible, R2-4).
+ * belongs to the caller; profile mutations are owner-only and all profile reads/mutations retain
+ * current membership and department authority.
  */
 
 const InputEventSchema = z.union([
@@ -105,6 +116,9 @@ const CAPTURE_ERROR_STATUS: Partial<Record<BrowserBackendErrorCode, number>> = {
 }
 
 function captureErrorResponse(err: unknown): { status: number; error: string; code?: string } {
+  if (err && typeof err === 'object' && (('code' in err && err.code === 'profile_authority_denied') || ('reason' in err && err.reason === 'authority_changed'))) {
+    return { status: 403, error: 'Profile authority unavailable.', code: 'not_authorized' }
+  }
   if (err instanceof BrowserBackendError) {
     return { status: CAPTURE_ERROR_STATUS[err.code] ?? 502, error: err.message, code: err.code }
   }
@@ -118,6 +132,12 @@ export type LocalComputerTaskRecord = {
   sessionId: string
   status: 'running'
   profileId: string | null
+  profileAuthority?: BrowserProfileAuthority | null
+  executionAuthority?: AuthoringAuthority | null
+  sourceAuthority?: AuthoritySource | null
+  inputScope?: BrowserInputScope | null
+  /** Original host-owned lease; never serialized onto the wire. */
+  authority?: CurrentAuthorityBoundary
   injectedSite: string | null
   destinationOrigin?: string | null
   createdAt: number
@@ -125,19 +145,26 @@ export type LocalComputerTaskRecord = {
 }
 
 export type LocalComputerTaskStore = {
+  withPublication<T>(expected: BrowserTaskPublication, operation: () => Promise<T>): Promise<T>
+  noteInputScope(sessionId: string, expectedTaskId: string, input: BrowserInputScope): void
   touch(
     context: {
       userId: string
       workspaceId?: string | null
       sessionId: string
       profileId?: string | null
+      profileAuthority?: BrowserProfileAuthority | null
+      executionAuthority?: AuthoringAuthority | null
+      sourceAuthority?: AuthoritySource | null
+      inputScope?: BrowserInputScope | null
+      authority?: CurrentAuthorityBoundary
     },
     site?: string | null,
     destinationOrigin?: string | null,
   ): void
   getActiveBySession(sessionId: string): LocalComputerTaskRecord | null
   listActiveByWorkspace(workspaceId: string): LocalComputerTaskRecord[]
-  complete(sessionId: string): void
+  complete(sessionId: string, expectedTaskId?: string): void
 }
 
 const LOCAL_TASK_TTL_MS = 20 * 60 * 1000
@@ -145,15 +172,47 @@ const LOCAL_TASK_TTL_MS = 20 * 60 * 1000
 /** Process-local by design: the extension/tab binding is itself ephemeral. */
 export function createInMemoryLocalComputerTaskStore(now: () => number = Date.now): LocalComputerTaskStore {
   const tasks = new Map<string, LocalComputerTaskRecord>()
+  const publishing = new Set<string>()
+  const mutable = (task: LocalComputerTaskRecord | undefined) => { if (task && publishing.has(task.taskId)) throw browserPublicationBusy() }
   const active = (task: LocalComputerTaskRecord) => now() - task.lastActivityAt < LOCAL_TASK_TTL_MS
   const prune = () => {
-    for (const [sessionId, task] of tasks) if (!active(task)) tasks.delete(sessionId)
+    for (const [sessionId, task] of tasks) if (!active(task) && !publishing.has(task.taskId)) tasks.delete(sessionId)
   }
   return {
+    async withPublication(expected, operation) {
+      prune()
+      const task = tasks.get(expected.sessionId)
+      mutable(task)
+      assertBrowserTaskPublication(expected, task ?? null)
+      publishing.add(expected.taskId)
+      try { return await operation() } finally { publishing.delete(expected.taskId) }
+    },
+    noteInputScope(sessionId, expectedTaskId, input) {
+      prune()
+      const task = tasks.get(sessionId)
+      mutable(task)
+      if (!task || task.taskId !== expectedTaskId) throw Object.assign(new Error('Task unavailable'), { code: 'profile_authority_denied' })
+      task.inputScope = mergeBrowserInputScope(task.inputScope, input, task.workspaceId)
+    },
     touch(context, site, destinationOrigin) {
       if (!context.workspaceId) return
       prune()
       const profileId = context.profileId ?? null
+      const previous = tasks.get(context.sessionId)
+      mutable(previous)
+      for (const task of tasks.values()) {
+        if (task.userId === context.userId && task.profileId === profileId) mutable(task)
+      }
+      if (previous && (previous.profileId !== profileId || previous.userId !== context.userId
+        || previous.workspaceId !== context.workspaceId)) return
+      const existing = previous
+      const executionAuthority = existing ? existing.executionAuthority ?? null : parseAuthoringAuthority(context.executionAuthority)
+      if (!existing && ((context.executionAuthority && (!executionAuthority || !context.authority))
+        || (context.sourceAuthority && !executionAuthority))) throw Object.assign(new Error('Task authority unavailable'), { code: 'profile_authority_denied' })
+      const sourceAuthority = existing ? existing.sourceAuthority ?? null
+        : context.sourceAuthority ? AuthoritySourceSchema.parse(context.sourceAuthority) : null
+      const inputScope = existing ? mergeBrowserInputScope(existing.inputScope, context.inputScope, context.workspaceId)
+        : context.inputScope ? parseBrowserInputScope(context.inputScope, context.workspaceId) : null
       // One extension connection controls one consented tab per PROFILE. A
       // newer task adopts that profile's tab; other paired profiles stay live.
       for (const [sessionId, task] of tasks) {
@@ -165,9 +224,6 @@ export function createInMemoryLocalComputerTaskStore(now: () => number = Date.no
           tasks.delete(sessionId)
         }
       }
-      const previous = tasks.get(context.sessionId)
-      const existing = previous?.profileId === profileId && previous.userId === context.userId &&
-        previous.workspaceId === context.workspaceId ? previous : undefined
       tasks.set(context.sessionId, {
         taskId: existing?.taskId ?? `local-${randomUUID()}`,
         userId: context.userId,
@@ -175,6 +231,12 @@ export function createInMemoryLocalComputerTaskStore(now: () => number = Date.no
         sessionId: context.sessionId,
         status: 'running',
         profileId,
+        profileAuthority: existing ? existing.profileAuthority ?? null
+          : BrowserProfileAuthoritySchema.safeParse(context.profileAuthority).data ?? null,
+        executionAuthority,
+        sourceAuthority,
+        inputScope,
+        authority: existing ? existing.authority : context.authority,
         injectedSite: site ?? existing?.injectedSite ?? null,
         destinationOrigin: destinationOrigin === undefined ? existing?.destinationOrigin ?? null : destinationOrigin,
         createdAt: existing?.createdAt ?? now(),
@@ -189,7 +251,9 @@ export function createInMemoryLocalComputerTaskStore(now: () => number = Date.no
       prune()
       return [...tasks.values()].filter((task) => task.workspaceId === workspaceId)
     },
-    complete(sessionId) {
+    complete(sessionId, expectedTaskId) {
+      mutable(tasks.get(sessionId))
+      if (expectedTaskId && tasks.get(sessionId)?.taskId !== expectedTaskId) return
       tasks.delete(sessionId)
     },
   }
@@ -197,6 +261,7 @@ export function createInMemoryLocalComputerTaskStore(now: () => number = Date.no
 
 const CreateProfileSchema = z.object({
   workspaceId: z.string().min(1).max(64),
+  departmentId: z.string().uuid().nullable().optional(),
   name: z.string().min(1).max(120),
   scope: ScopeSchema.optional(),
   clearance: ClearanceSchema.optional(),
@@ -214,7 +279,7 @@ const UpdateProfileSchema = z.object({
   proxyUrl: z.string().url().max(1024).nullish().optional(),
   enabledAssistantIds: z.array(z.string().min(1).max(64)).max(200).optional(),
   assistantRoutingNotes: AssistantRoutingNotesSchema.optional(),
-})
+}).strict()
 
 const SaveCredentialSchema = z.object({
   loginUrl: z.string().url().max(2048).refine((url) => url.startsWith('https://')),
@@ -247,12 +312,30 @@ export function computerRoutes(deps: {
   grants?: BrowserSkillGrantStore | null
   /** Skill lookups so a grant row can show its block's name. */
   skills?: BrowserSkillStore | null
-  /** Workspace-membership check (existence reads are member-visible). */
+  /** Current human authority; null is a legacy workspace. Failures must throw. */
+  getProfileReadGrant?: (userId: string, workspaceId: string) => Promise<DepartmentReadGrant | null>
+  admitProfileDestination?: (userId: string, workspaceId: string, destination: {
+    departmentId: string; sensitivity: 'public' | 'internal' | 'confidential'
+  }) => Promise<void>
+  previewProfileDestination?: (userId: string, workspaceId: string) => Promise<{
+    departments: { id: string; name: string; clearance: 'public' | 'internal' | 'confidential' }[]
+  }>
+  /** Current workspace-membership check. */
   getWorkspaceRole: (userId: string, workspaceId: string) => Promise<string | null>
+  discardTask?: BrowserTaskDiscard
   /** The live backend toggle (R2-3) — flips the session's browse backend. */
   setSessionBackend?: (sessionId: string, backend: 'local' | 'cloud' | null) => void
 }): Router {
   const router = Router()
+  router.post('/tasks/:sessionId/discard', async (req, res) => {
+    const body = z.object({ workspaceId: z.string().min(1).max(64) }).strict().safeParse(req.body)
+    if (!body.success) { res.status(400).json({ error: 'workspaceId is required' }); return }
+    if (!deps.discardTask) { res.status(503).json({ error: 'Browser discard unavailable.', code: 'discard_failed' }); return }
+    try {
+      const status = await deps.discardTask({ userId: req.userId as string, workspaceId: body.data.workspaceId, sessionId: String(req.params.sessionId) })
+      res.json({ ok: true, status })
+    } catch { res.status(502).json({ error: 'Browser discard could not be confirmed.', code: 'discard_failed' }) }
+  })
   // Task lifecycle/backend toggles are not an escape hatch from disclosure.
   router.use(['/tasks/:sessionId', '/sessions/:sessionId'], (req, res, next) => {
     if (req.method !== 'GET' && deps.protectedFillBlocked?.(req.userId as string, String(req.params.sessionId))) {
@@ -262,15 +345,46 @@ export function computerRoutes(deps: {
     next()
   })
 
+  async function readableTask(task: SandboxTaskRecord | LocalComputerTaskRecord, userId: string): Promise<boolean> {
+    if (task.userId !== userId || !(await requireMember(userId, task.workspaceId))) return false
+    if (!('sandboxId' in task)) {
+      try { await assertLocalTaskExecutionAuthority(task) } catch { return false }
+    }
+    if ('sandboxId' in task && task.executionAuthority) {
+      try {
+        if (!deps.orchestrator?.assertTaskAuthority) return false
+        await deps.orchestrator.assertTaskAuthority(task)
+      } catch { return false }
+    }
+    // ON DELETE SET NULL must not relabel a formerly bound task as
+    // identity-less work. Legacy bound tasks cannot reconstruct their floor.
+    if (!task.profileId) return !task.profileAuthority
+    try {
+      const profile = await deps.profileStore?.get(task.profileId)
+      if (!profile || profile.id !== task.profileId || profile.workspaceId !== task.workspaceId) return false
+      {
+        const retained = BrowserProfileAuthoritySchema.safeParse(task.profileAuthority)
+        if (!retained.success) return false
+        const floor = retained.data
+        if (floor.id !== profile.id || floor.workspaceId !== profile.workspaceId
+          || floor.ownerUserId !== profile.ownerUserId || floor.scope !== profile.scope
+          || floor.clearance !== profile.clearance || (floor.departmentId ?? null) !== (profile.departmentId ?? null)) return false
+      }
+      return await readableProfile(profile, userId)
+    } catch {
+      return false
+    }
+  }
+
   async function ownedTask(
     sessionId: string,
     userId: string,
   ): Promise<{ backend: 'local'; task: LocalComputerTaskRecord } | { backend: 'cloud'; task: SandboxTaskRecord } | null> {
     const local = deps.localTasks?.getActiveBySession(sessionId)
-    if (local?.userId === userId) return { backend: 'local', task: local }
+    if (local?.userId === userId) return await readableTask(local, userId) ? { backend: 'local', task: local } : null
     if (!deps.orchestrator) return null
     const cloud = await deps.orchestrator.getActiveTask(sessionId)
-    if (!cloud || cloud.userId !== userId) return null
+    if (!cloud || !(await readableTask(cloud, userId))) return null
     return { backend: 'cloud', task: cloud }
   }
 
@@ -295,8 +409,20 @@ export function computerRoutes(deps: {
       res.status(404).json({ error: 'Workspace not found' })
       return
     }
-    const cloudTasks = deps.orchestrator ? await deps.orchestrator.listActiveTasks(workspaceId) : []
-    let localTasks = deps.localTasks?.listActiveByWorkspace(workspaceId) ?? []
+    const cloudCandidates = deps.orchestrator ? await deps.orchestrator.listActiveTasks(workspaceId) : []
+    const cloudReadable = await Promise.all(cloudCandidates.map(task => readableTask(task, req.userId as string)))
+    const cloudTasks = cloudCandidates.filter((_, index) => cloudReadable[index])
+    const localCandidates = deps.localTasks?.listActiveByWorkspace(workspaceId) ?? []
+    const localReadable = await Promise.all(localCandidates.map(task => readableTask(task, req.userId as string)))
+    let localTasks = localCandidates.filter((_, index) => localReadable[index])
+    // The caller's OWN tasks whose source or profile authority no longer holds
+    // stay listed, stripped to lifecycle metadata, so the task-bound Discard
+    // on the live-view page is reachable. Nothing about the profile or site
+    // is returned, and a teammate's task is never listed.
+    const unavailable = [
+      ...localCandidates.filter((task, index) => !localReadable[index]).map(task => ({ task, backend: 'local' as const })),
+      ...cloudCandidates.filter((task, index) => !cloudReadable[index]).map(task => ({ task, backend: 'cloud' as const })),
+    ].filter(({ task }) => task.userId === (req.userId as string))
     const callerLocalTasks = localTasks.filter((task) => task.userId === (req.userId as string))
     if (callerLocalTasks.length > 0 && deps.localStatus) {
       for (const task of callerLocalTasks) {
@@ -312,24 +438,45 @@ export function computerRoutes(deps: {
       }
     }
     const localSessions = new Set(localTasks.map((task) => task.sessionId))
+    // One stub per session, and never one for a session that is still live
+    // on the other backend.
+    const listedSessions = new Set([...localSessions, ...cloudTasks.map((task) => task.sessionId)])
+    const discardStubs = unavailable.filter(({ task }) => {
+      if (listedSessions.has(task.sessionId)) return false
+      listedSessions.add(task.sessionId)
+      return true
+    })
     res.json({
       tasks: [
-        ...localTasks.map((task) => ({ ...task, backend: 'local' as const })),
-        ...cloudTasks
-          .filter((task) => !localSessions.has(task.sessionId))
-          .map((task) => ({ ...task, backend: 'cloud' as const })),
-      ]
-        .filter((task) => task.userId === (req.userId as string))
-        .map((task) => ({
+        ...[
+          ...localTasks.map((task) => ({ ...task, backend: 'local' as const })),
+          ...cloudTasks
+            .filter((task) => !localSessions.has(task.sessionId))
+            .map((task) => ({ ...task, backend: 'cloud' as const })),
+        ]
+          .filter((task) => task.userId === (req.userId as string))
+          .map((task) => ({
+            taskId: task.taskId,
+            sessionId: task.sessionId,
+            status: task.status,
+            profileId: task.profileId,
+            injectedSite: task.injectedSite,
+            createdAt: task.createdAt,
+            lastActivityAt: task.lastActivityAt,
+            backend: task.backend,
+          })),
+        ...discardStubs.map(({ task, backend }) => ({
           taskId: task.taskId,
           sessionId: task.sessionId,
           status: task.status,
-          profileId: task.profileId,
-          injectedSite: task.injectedSite,
+          profileId: null,
+          injectedSite: null,
           createdAt: task.createdAt,
           lastActivityAt: task.lastActivityAt,
-          backend: task.backend,
+          backend,
+          unavailable: true as const,
         })),
+      ],
     })
   })
 
@@ -373,8 +520,13 @@ export function computerRoutes(deps: {
       res.status(404).json({ error: 'No active computer task for this session' })
       return
     }
-    if (task.backend === 'cloud') await deps.orchestrator?.resumeAfterTakeover(req.params.sessionId)
-    res.json({ ok: true })
+    try {
+      if (task.backend === 'cloud') await deps.orchestrator?.resumeAfterTakeover(req.params.sessionId)
+      res.json({ ok: true })
+    } catch (err) {
+      const failure = captureErrorResponse(err)
+      res.status(failure.status).json({error:failure.error,...(failure.code ? {code:failure.code} : {})})
+    }
   })
 
   // Frame poll (~1 fps from the client): cloud fallback or the local relay's
@@ -411,6 +563,10 @@ export function computerRoutes(deps: {
         } finally {
           await takeover.close()
         }
+      }
+      if (!(await readableTask(task.task, req.userId as string))) {
+        res.status(404).json({ error: 'No active computer task for this session' })
+        return
       }
       if (!frame) {
         res.status(204).end()
@@ -452,6 +608,10 @@ export function computerRoutes(deps: {
       const info = await browser.openTakeoverStream()
       if (!info) {
         res.status(501).json({ error: 'Live streaming is not available for this task' })
+        return
+      }
+      if (!(await readableTask(task.task, req.userId as string))) {
+        res.status(404).json({ error: 'No active computer task for this session' })
         return
       }
       res.json(info)
@@ -543,11 +703,19 @@ export function computerRoutes(deps: {
       })
       return
     }
+    const destinationId = body.data.profileId ?? task.task.profileId!
+    const destination = await ownedProfile(destinationId, req.userId as string)
+    if (!destination || destination.workspaceId !== task.task.workspaceId ||
+      (task.task.profileId && task.task.profileId !== destinationId)) {
+      res.status(404).json({ error: 'Browser profile unavailable' })
+      return
+    }
     try {
-      await deps.orchestrator.captureSession(req.params.sessionId, body.data.site, body.data.profileId)
+      await deps.orchestrator.captureSession(req.params.sessionId, body.data.site, destinationId)
       res.json({ ok: true, site: body.data.site })
     } catch (err) {
-      res.status(502).json({ error: err instanceof Error ? err.message : 'session capture failed' })
+      const failure = captureErrorResponse(err)
+      res.status(failure.status).json({error:failure.error,...(failure.code ? {code:failure.code} : {})})
     }
   })
 
@@ -556,6 +724,12 @@ export function computerRoutes(deps: {
     const outcome = req.body?.outcome === 'failed' ? 'failed' : 'completed'
     const task = await ownedTask(req.params.sessionId, req.userId as string)
     if (!task) {
+      const active = deps.localTasks?.getActiveBySession(req.params.sessionId)
+        ?? await deps.orchestrator?.getActiveTask(req.params.sessionId)
+      if (active?.userId === req.userId) {
+        res.status(404).json({ error: 'No active computer task for this session' })
+        return
+      }
       // Idempotent close: a crashed browser may already have been retired by
       // frame/list liveness cleanup before the user presses Stop.
       res.json({ ok: true, status: outcome })
@@ -645,6 +819,19 @@ export function computerRoutes(deps: {
     }
   }
 
+  // Every metadata and owner-management operation crosses the same read floor.
+  // Unassigned shared identities stay owner-visible for classification recovery.
+  async function readableProfile(profile: BrowserProfile, userId: string): Promise<boolean> {
+    if (!(await requireMember(userId, profile.workspaceId))) return false
+    if (profile.scope === 'owner' && profile.ownerUserId !== userId) return false
+    try {
+      const grant = await deps.getProfileReadGrant?.(userId, profile.workspaceId)
+      return humanCanReadBrowserProfile(profile, userId, grant)
+    } catch {
+      return false
+    }
+  }
+
   router.get('/profiles', async (req, res) => {
     const workspaceId = String(req.query.workspaceId ?? '')
     if (!workspaceId) {
@@ -659,7 +846,10 @@ export function computerRoutes(deps: {
       res.status(403).json({ error: 'Not a member of this workspace' })
       return
     }
-    const profiles = await deps.profileStore.list({ workspaceId })
+    const candidates = await deps.profileStore.list({ workspaceId })
+    const admitted = await Promise.all(candidates.map(async (profile) =>
+      await readableProfile(profile, req.userId as string) ? profile : null))
+    const profiles = admitted.filter((profile): profile is BrowserProfile => profile !== null)
     const withSessions = await Promise.all(
       profiles.map(async (p) => {
         const canManage = p.ownerUserId === (req.userId as string)
@@ -683,6 +873,9 @@ export function computerRoutes(deps: {
           // members may discover a shared profile's existence, but do not
           // receive notes belonging to its owner's assistant configuration.
           assistantRoutingNotes: canManage ? (p.assistantRoutingNotes ?? {}) : {},
+          // Proxy URLs may contain credentials; sharing an identity does not
+          // disclose its owner's infrastructure secrets.
+          proxyUrl: canManage ? p.proxyUrl : null,
           canManage,
           sessions: deps.vault ? await deps.vault.list({ profileId: p.id }).catch(() => []) : [],
           credentials:
@@ -693,11 +886,35 @@ export function computerRoutes(deps: {
         }
       }),
     )
+    // Metadata joins can outlive a department grant or profile classification.
+    // Revalidate only after every join has settled, immediately before disclosure.
+    const renewed = await Promise.all(withSessions.map(async (projection) => {
+      const current = await deps.profileStore!.get(projection.id).catch(() => null)
+      if (!current || current.workspaceId !== projection.workspaceId
+        || current.ownerUserId !== projection.ownerUserId
+        || current.departmentId !== projection.departmentId
+        || current.scope !== projection.scope || current.clearance !== projection.clearance
+        || current.updatedAt !== projection.updatedAt
+        || !(await readableProfile(current, req.userId as string))) return null
+      return projection
+    }))
     res.json({
       configured: true,
       credentialAuthConfigured: Boolean(deps.credentials && deps.authBroker),
-      profiles: withSessions,
+      profiles: renewed.filter((profile) => profile !== null),
     })
+  })
+
+  router.get('/profile-destinations', async (req, res) => {
+    res.setHeader('Cache-Control', 'no-store')
+    const workspaceId = typeof req.query.workspaceId === 'string' ? req.query.workspaceId : ''
+    try {
+      if (!workspaceId || !(await requireMember(req.userId as string, workspaceId)) || !deps.previewProfileDestination) {
+        res.status(403).json({ code: 'not_authorized' }); return
+      }
+      const preview = await deps.previewProfileDestination(req.userId as string, workspaceId)
+      res.json({ departments: preview.departments })
+    } catch { res.status(403).json({ code: 'not_authorized' }) }
   })
 
   router.post('/profiles', async (req, res) => {
@@ -715,18 +932,39 @@ export function computerRoutes(deps: {
       return
     }
     try {
+      const grant = await deps.getProfileReadGrant?.(req.userId as string, body.data.workspaceId)
+      if (grant && body.data.scope === 'workspace' && !body.data.departmentId) {
+        res.status(400).json({ error: 'Choose an owning department for this shared profile.', code: 'department_required' })
+        return
+      }
+      if (body.data.departmentId) {
+        if (!deps.admitProfileDestination) throw new Error('admission unavailable')
+        await deps.admitProfileDestination(req.userId as string, body.data.workspaceId, {
+          departmentId: body.data.departmentId, sensitivity: body.data.clearance ?? 'confidential',
+        })
+      }
+    } catch {
+      res.status(403).json({ error: 'Profile destination unavailable.', code: 'not_authorized' })
+      return
+    }
+    try {
       const profile = await deps.profileStore.create({
         workspaceId: body.data.workspaceId,
         ownerUserId: req.userId as string,
+        departmentId: body.data.departmentId,
         name: body.data.name,
         scope: body.data.scope,
         clearance: body.data.clearance,
         defaultBackend: body.data.defaultBackend,
         localControlMode: body.data.localControlMode,
         proxyUrl: body.data.proxyUrl ?? null,
-      })
+      }, { userId: req.userId as string })
       res.json({ profile })
     } catch (err) {
+      if (err && typeof err === 'object' && 'code' in err && err.code === 'profile_authority_denied') {
+        res.status(403).json({ error: 'Profile destination unavailable.', code: 'not_authorized' })
+        return
+      }
       const message = err instanceof Error ? err.message : 'create failed'
       if (/unique|duplicate/i.test(message)) {
         res.status(409).json({ error: 'A profile with this name already exists' })
@@ -740,9 +978,32 @@ export function computerRoutes(deps: {
   async function ownedProfile(profileId: string, userId: string) {
     if (!deps.profileStore) return null
     const profile = await deps.profileStore.get(profileId)
-    if (!profile || profile.ownerUserId !== userId) return null
+    if (!profile || profile.ownerUserId !== userId || !(await readableProfile(profile, userId))) return null
     return profile
   }
+
+  router.post('/profiles/:id/department', async (req, res) => {
+    const profile = await ownedProfile(req.params.id, req.userId as string)
+    if (!profile) { res.status(404).json({error:'Profile unavailable'}); return }
+    const body = z.object({departmentId:z.string().uuid().nullable(),expectedDepartmentId:z.string().uuid().nullable(),reason:z.string().trim().min(1).max(1000),confirmed:z.literal(true)}).strict().safeParse(req.body)
+    if (!body.success) { res.status(400).json({error:'Invalid profile classification'}); return }
+    if ((profile.departmentId ?? null) !== body.data.expectedDepartmentId) {
+      res.status(409).json({error:'Profile changed. Refresh and retry.',code:'profile_changed'}); return
+    }
+    if (!deps.profileStore?.classifyDepartment) { res.status(503).json({error:'Profile classification unavailable'}); return }
+    try {
+      const { expectedDepartmentId: _reviewedDepartment, ...command } = body.data
+      const updated = await deps.profileStore.classifyDepartment(profile.id,{...command,userId:req.userId as string,expected:profile})
+      res.json({profile:updated})
+    } catch (error) {
+      const code = (error as {code?:string}).code
+      if (code === 'profile_changed' || code === 'unchanged') { res.status(409).json({error:'Profile changed. Refresh and retry.',code}); return }
+      if (['profile_authority_denied','admin_confirmation_required','department_required','confirmation_required','reason_required'].includes(code ?? '')) {
+        res.status(403).json({error:'Profile classification unavailable',code}); return
+      }
+      res.status(500).json({error:'Profile classification failed'})
+    }
+  })
 
   router.patch('/profiles/:id', async (req, res) => {
     const profile = await ownedProfile(req.params.id, req.userId as string)
@@ -755,7 +1016,34 @@ export function computerRoutes(deps: {
       res.status(400).json({ error: 'Invalid profile update' })
       return
     }
-    const updated = await deps.profileStore.update(req.params.id, body.data)
+    try {
+      const grant = await deps.getProfileReadGrant?.(req.userId as string, profile.workspaceId)
+      if (grant && body.data.scope === 'workspace' && !profile.departmentId) {
+        res.status(400).json({ error: 'Choose an owning department for this shared profile.', code: 'department_required' })
+        return
+      }
+      if (profile.departmentId) {
+        const clearance = body.data.clearance ?? profile.clearance
+        const tiers = ['public', 'internal', 'confidential']
+        // Metadata mutation cannot release the protection of saved browser state.
+        if (tiers.indexOf(clearance) < tiers.indexOf(profile.clearance)) {
+          res.status(409).json({ error: 'Protected profile clearance requires a reviewed change.', code: 'source_scope_required' })
+          return
+        }
+        if (!deps.admitProfileDestination) throw new Error('admission unavailable')
+        await deps.admitProfileDestination(req.userId as string, profile.workspaceId, {
+          departmentId: profile.departmentId, sensitivity: clearance,
+        })
+      }
+    } catch {
+      res.status(403).json({ error: 'Profile destination unavailable.', code: 'not_authorized' })
+      return
+    }
+    const updated = await deps.profileStore.update(req.params.id, body.data, profile)
+    if (!updated) {
+      res.status(409).json({ error: 'Profile authority changed. Reload before editing.', code: 'profile_changed' })
+      return
+    }
     res.json({ profile: updated })
   })
 
@@ -765,7 +1053,11 @@ export function computerRoutes(deps: {
       res.status(404).json({ error: 'No such profile (or not yours to delete)' })
       return
     }
-    await deps.profileStore.delete(req.params.id)
+    const deleted = await deps.profileStore.delete(req.params.id, profile)
+    if (!deleted) {
+      res.status(409).json({ error: 'Profile authority changed. Reload before deleting.', code: 'profile_changed' })
+      return
+    }
     res.json({ ok: true })
   })
 
@@ -808,9 +1100,14 @@ export function computerRoutes(deps: {
         loginUrl: body.data.loginUrl,
         accountLabel: body.data.accountLabel ?? null,
         secret: { username: body.data.username, password: body.data.password },
-      })
+      }, profile)
       res.json({ credential })
-    } catch {
+    } catch (err) {
+      const mapped = captureErrorResponse(err)
+      if (mapped.status === 403) {
+        res.status(403).json({ error: mapped.error, code: mapped.code })
+        return
+      }
       // Never reflect a database/crypto/provider message from a secret write.
       res.status(500).json({ error: 'Could not save the encrypted browser credential' })
     }
@@ -822,10 +1119,18 @@ export function computerRoutes(deps: {
       res.status(404).json({ error: 'No such profile or credential' })
       return
     }
-    const removed = await deps.credentials.revoke({
-      profileId: profile.id,
-      credentialId: req.params.credentialId,
-    })
+    let removed: boolean
+    try {
+      removed = await deps.credentials.revoke({
+        profileId: profile.id,
+        credentialId: req.params.credentialId,
+      }, profile)
+    } catch (err) {
+      const mapped = captureErrorResponse(err)
+      if (mapped.status !== 403) throw err
+      res.status(403).json({ error: mapped.error, code: mapped.code })
+      return
+    }
     if (!removed) {
       res.status(404).json({ error: 'No such credential on this profile' })
       return
@@ -971,7 +1276,7 @@ export function computerRoutes(deps: {
         { userId: req.userId as string, workspaceId: profile.workspaceId, sessionId, profileId: profile.id },
         body.data.site,
       )
-      await deps.vault.put({ profileId: profile.id, site: body.data.site, bundle })
+      await deps.vault.put({ profileId: profile.id, site: body.data.site, bundle }, profile)
       res.json({ ok: true, site: body.data.site, capturedAt: bundle.capturedAt })
     } catch (err) {
       const mapped = captureErrorResponse(err)
@@ -986,7 +1291,14 @@ export function computerRoutes(deps: {
       res.status(404).json({ error: 'No such profile (or not yours to change)' })
       return
     }
-    await deps.vault.revoke({ profileId: req.params.id, site: req.params.site })
+    try {
+      await deps.vault.revoke({ profileId: req.params.id, site: req.params.site }, profile)
+    } catch (err) {
+      const mapped = captureErrorResponse(err)
+      if (mapped.status !== 403) throw err
+      res.status(403).json({ error: mapped.error, code: mapped.code })
+      return
+    }
     res.json({ ok: true })
   })
 
@@ -1005,7 +1317,14 @@ export function computerRoutes(deps: {
       res.status(404).json({ error: 'No such grant on this profile' })
       return
     }
-    await deps.grants.revoke(req.params.grantId)
+    try {
+      await deps.grants.revoke(req.params.grantId, profile)
+    } catch (err) {
+      const mapped = captureErrorResponse(err)
+      if (mapped.status !== 403) throw err
+      res.status(403).json({ error: mapped.error, code: mapped.code })
+      return
+    }
     res.json({ ok: true })
   })
 

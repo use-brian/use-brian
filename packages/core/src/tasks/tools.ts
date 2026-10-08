@@ -192,7 +192,9 @@ function ctxFor(context: {
   mutationCompartments?: AccessContext['mutationCompartments']
   visibilityAssistantIds?: AccessContext['visibilityAssistantIds']
   projectIds?: AccessContext['projectIds']
+  executionContext?: ToolContext['executionContext']
 }): AccessContext {
+  if (context.executionContext) return context.executionContext.security.access
   return {
     workspaceId: context.workspaceId,
     userId: context.userId,
@@ -240,6 +242,9 @@ function fullRow(row: TaskRecord): {
   parent_id: string | null
   external_ref: Record<string, unknown>
   attributes: Record<string, unknown>
+  sensitivity: TaskRecord['sensitivity'] | null
+  compartments: string[] | null
+  project_ids: string[] | null
   created_at: string
   updated_at: string
 } {
@@ -253,6 +258,9 @@ function fullRow(row: TaskRecord): {
     parent_id: row.parentId,
     external_ref: row.externalRef,
     attributes: row.attributes,
+    sensitivity: row.sensitivity ?? null,
+    compartments: row.compartments ?? null,
+    project_ids: row.projectIds ?? null,
     created_at: row.createdAt.toISOString(),
     updated_at: row.updatedAt.toISOString(),
   }
@@ -380,7 +388,7 @@ export function createTaskTools(
     name: 'saveTask',
     requiresCapability: 'tasks',
     description:
-      'Create a new task in the current workspace. Tasks are visible to every workspace member — use them for shared work items, not personal reminders (use scheduleJob / trackCommitment for those) and not durable facts (use saveMemory). ' +
+      'Create a new task in the current workspace. Task visibility follows current department access, sensitivity, and private scope. Creation preserves inherited protection; inspect the saved protection with getTask. Use tasks for work items, not personal reminders (use scheduleJob / trackCommitment for those) and not durable facts (use saveMemory). ' +
       'Returns the new task id (shown in `[brackets]` in the result). To build a parent/child tree, create the parent FIRST, then pass its returned id as `parent_id` on each child — prefer this over creating tasks flat and re-parenting them afterward, because re-parenting via updateTask mutates task ids (see updateTask). Omit `parent_id` (or pass null) for a top-level task. Deleting a parent cascades to its sub-tasks. ' +
       'Status defaults to `todo` if omitted. Use `updateTask` to change a task later, or the `closeTask` / `reopenTask` shortcuts for the common state transition.',
     inputSchema: z.object({
@@ -394,7 +402,7 @@ export function createTaskTools(
       parent_id: idShape.nullable().optional().describe('UUID of an existing same-workspace task to nest this one under. Omit or pass null for a top-level task. The DB rejects cross-workspace parents.'),
       status: statusEnum.optional().describe('Defaults to `todo`. Use `archived` instead of deleting.'),
       external_ref: z.record(z.unknown()).optional().describe('Reserved for sync-engine round-tripping ({provider, id, url}). Leave empty unless the user is asking you to mirror an existing Linear/Asana task.'),
-      projectId: idShape.nullable().optional().describe('Stable Project id for this task. Omit or pass null for Workspace General. This associates the task only; it never changes the current chat context.'),
+      projectId: idShape.nullable().optional().describe('Stable Project id for this task. It organizes work and does not choose a department, grant access, or change the current chat context. Omit to keep inherited project context.'),
       attributes: z.record(z.unknown()).optional().describe('Free-form JSONB for user-defined per-task keys — typically sprint estimation / ordering / velocity (e.g. `estimate_days`, `estimate_points`, `order`). Schema is unvalidated; whatever keys the workspace converges on. Use the `description` field rather than a `description` key here. Whole object overwrites on `updateTask` — read with `getTask` first if you only want to change one key.'),
       depends_on: z.array(idShape).max(50).optional().describe('Task ids this task depends on. Each becomes a task→task `depends_on` graph edge — the daily turn topologically reasons over the dependency graph (A depends_on B means "do B before A"). Same-workspace ids only. v1 limitation: append-only — emits new edges but does not remove existing ones. To restructure a dependency graph, soft-delete (`status: archived`) and re-create.'),
       links: explicitLinksField,
@@ -549,7 +557,7 @@ export function createTaskTools(
     name: 'getTask',
     requiresCapability: 'tasks',
     description:
-      'Fetch the full task record by id, including external_ref and created_at. Use this when you need details `listTasks` omits — `listTasks` returns a compact projection.',
+      'Fetch the full task record by id, including external_ref, created_at, and saved sensitivity, compartments, and project_ids. Null protection fields mean unknown; empty compartments means General department scope, not unrestricted visibility. Use this when you need details `listTasks` omits — `listTasks` returns a compact projection.',
     inputSchema: z.object({
       id: idShape.describe('Full UUID of the task.'),
     }),
@@ -560,15 +568,7 @@ export function createTaskTools(
       if (gate) return gate
 
       const task = await store.getById(
-        ctxFor({
-          userId: context.userId,
-          assistantId: context.assistantId,
-          workspaceId: context.workspaceId!,
-          assistantKind: context.assistantKind,
-          clearance: context.clearance,
-          compartments: context.compartments,
-          projectIds: context.projectIds,
-        }),
+        ctxFor({...context, workspaceId: context.workspaceId!}),
         input.id,
       )
       if (!task || task.workspaceId !== context.workspaceId) {
@@ -593,7 +593,7 @@ export function createTaskTools(
       due_before: isoDateOrDateTime.optional(),
       due_after: isoDateOrDateTime.optional(),
       tag: z.string().min(1).max(64).optional(),
-      projectId: idShape.nullable().optional().describe('Filter by stable Project id, or null for Workspace General.'),
+      projectId: idShape.nullable().optional().describe('Filter by stable Project id, or null for tasks with no Project. This filter does not change department access.'),
       parent_id: idShape.optional().describe('Pass a parent task id to fetch its sub-tasks.'),
       include_archived: tolerantBoolean().optional().default(false),
       limit: tolerantInt({ min: 1, max: 100 }).optional().default(25),
@@ -605,15 +605,7 @@ export function createTaskTools(
       if (gate) return gate
 
       const rows = await store.list(
-        ctxFor({
-          userId: context.userId,
-          assistantId: context.assistantId,
-          workspaceId: context.workspaceId!,
-          assistantKind: context.assistantKind,
-          clearance: context.clearance,
-          compartments: context.compartments,
-          projectIds: context.projectIds,
-        }),
+        ctxFor({...context, workspaceId: context.workspaceId!}),
         {
           assigneeId: input.assignee_id,
           status: input.status,
@@ -915,15 +907,7 @@ export function createTaskTools(
       ? statuses.includes('archived')
       : statuses === 'archived'
     let rows = await store.list(
-      ctxFor({
-        userId: context.userId,
-        assistantId: context.assistantId,
-        workspaceId: context.workspaceId!,
-        assistantKind: context.assistantKind,
-        clearance: context.clearance,
-        compartments: context.compartments,
-        projectIds: context.projectIds,
-      }),
+      ctxFor({...context, workspaceId: context.workspaceId!}),
       {
         assigneeId: filter.assignee_id,
         status: filter.status,

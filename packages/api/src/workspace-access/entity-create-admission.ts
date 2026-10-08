@@ -32,9 +32,10 @@ export async function admitEntityCreate(client: PoolClient, params: EntityCreate
     }, floor, true, 'entity') : scope
     return { ...params, ...scope, ...admitted }
   }
-  if (!ready) return params
+  if (!ready && !params.explicitGeneral) return params
   if (params.sourceEpisodeId || params.sourceSessionId || params.source !== 'user') throw new Error('scope_evidence_missing')
   const admitted = await admitBrainCreate(client, params.workspaceId, params.createdByUserId, {
+    explicitGeneral: params.explicitGeneral,
     userId: params.userId ?? null, assistantId: params.assistantId ?? null, sensitivity: params.sensitivity ?? 'internal',
     compartments: params.compartments, projectIds: params.projectIds,
   }, undefined, false, 'entity')

@@ -3,35 +3,16 @@ import pg from 'pg'
 
 /**
  * Integration test for createDbCrmStore + the CRM RLS / trigger surface
- * defined in migration 114. Requires a local PostgreSQL database named
- * `Use Brian` with that migration applied. Skips silently when the DB is
- * unavailable.
+ * defined in migration 114. Runs only through the maintained disposable PostgreSQL fixture.
  */
 
-let pool: pg.Pool | undefined
-
-async function canConnect(): Promise<boolean> {
-  const p = new pg.Pool({ database: 'sidanclaw', connectionTimeoutMillis: 2000 })
-  try {
-    const client = await p.connect()
-    try {
-      await client.query('SELECT 1 FROM entities LIMIT 1')
-    } finally {
-      client.release()
-    }
-    pool = p
-    return true
-  } catch {
-    await p.end().catch(() => {})
-    return false
-  }
-}
-
-const ok = await canConnect()
-const describeIf = ok ? describe : describe.skip
+const { assertLocalFixture } = await import(new URL('../../../../../scripts/crm/local-fixture.mjs', import.meta.url).href)
+await assertLocalFixture()
+const pool = new pg.Pool({ connectionString: process.env.DATABASE_URL })
 
 afterAll(async () => {
-  if (pool) await pool.end()
+  const { getPool, getAppPool } = await import('../client.js')
+  await Promise.all([pool.end(), getPool().end(), getAppPool().end()])
 })
 
 async function makeUser(client: pg.PoolClient): Promise<string> {
@@ -63,13 +44,12 @@ async function addMember(client: pg.PoolClient, workspaceId: string, userId: str
   return r.rows[0].id
 }
 
-describeIf('[COMP:api/crm-store] CRM store + RLS (integration)', () => {
+describe('[COMP:api/crm-store] CRM store + RLS (integration)', () => {
   let store: typeof import('../crm-store.js') extends { createDbCrmStore: infer T }
     ? T extends () => infer R ? R : never
     : never
 
   beforeAll(async () => {
-    process.env.DATABASE_URL ??= 'postgres:///sidanclaw'
     const mod = await import('../crm-store.js')
     store = mod.createDbCrmStore()
   })
@@ -200,7 +180,7 @@ describeIf('[COMP:api/crm-store] CRM store + RLS (integration)', () => {
       ).rejects.toThrow(/check constraint|deals_amount_check/)
     })
 
-    it('cross-workspace company_id rejected by trigger on contacts', async () => {
+    it('cross-workspace company reference is refused before contact creation', async () => {
       // Build a second workspace + put a company there
       const client = await pool!.connect()
       let otherWorkspace: string
@@ -221,10 +201,10 @@ describeIf('[COMP:api/crm-store] CRM store + RLS (integration)', () => {
         store.createContact({
           userId, workspaceId, name: 'X', companyId: otherCompanyId,
         }),
-      ).rejects.toThrow(/same workspace/)
+      ).rejects.toMatchObject({ code: 'scope_operation_denied' })
     })
 
-    it('cross-workspace contact_id rejected by trigger on deals', async () => {
+    it('cross-workspace contact reference is refused before deal creation', async () => {
       const client = await pool!.connect()
       let otherContactId: string
       try {
@@ -239,32 +219,18 @@ describeIf('[COMP:api/crm-store] CRM store + RLS (integration)', () => {
 
       await expect(
         store.createDeal({ userId, workspaceId, contactId: otherContactId }),
-      ).rejects.toThrow(/same workspace/)
+      ).rejects.toMatchObject({ code: 'scope_operation_denied' })
     })
 
-    it('createContact dedupes by email — same address upserts into the existing row', async () => {
+    it('shared email is retrieval evidence and does not merge distinct people', async () => {
       const a = await store.createContact({ userId, workspaceId, name: 'A', email: 'team@acme.example' })
-      // Second call with same email + different name should land on the
-      // existing row (email is the higher-priority dedupe key) via the
-      // supersession path. The returned id is the newest live id, not
-      // necessarily `a.id` — but the chain head is `a`.
       const b = await store.createContact({ userId, workspaceId, name: 'B', email: 'team@acme.example' })
-      // No new (entity, contact) pair: assert by counting active rows
-      // with that email.
-      const client = await pool!.connect()
-      try {
-        const result = await client.query<{ n: string }>(
-          `SELECT count(*)::text AS n FROM entities
-            WHERE workspace_id = $1 AND kind = 'person'
-              AND lower(canonical_id) = lower($2) AND valid_to IS NULL`,
-          [workspaceId, 'team@acme.example'],
-        )
-        expect(Number(result.rows[0]?.n)).toBe(1)
-      } finally {
-        client.release()
-      }
-      // The live row's id matches the supersession-merge return value.
-      expect(b.email).toBe('team@acme.example')
+      expect(b.id).not.toBe(a.id)
+      const rows = await pool.query(`SELECT id,display_name FROM entities
+        WHERE workspace_id=$1 AND kind='person' AND lower(canonical_id)=$2 AND valid_to IS NULL`,
+        [workspaceId,'team@acme.example'])
+      expect(rows.rows).toEqual(expect.arrayContaining([{id:a.id,display_name:'A'},{id:b.id,display_name:'B'}]))
+      expect(rows.rows).toHaveLength(2)
     })
   })
 
@@ -327,13 +293,8 @@ describeIf('[COMP:api/crm-store] CRM store + RLS (integration)', () => {
   })
 
   describe('RLS isolation', () => {
-    // RLS isolation cannot be exercised when the test connects as a Postgres
-    // SUPERUSER (the typical local-dev role). Superusers bypass RLS even with
-    // FORCE ROW LEVEL SECURITY enabled. Production runs as a non-superuser, so
-    // the policy does enforce — verified manually with `SET ROLE` in psql. The
-    // tasks-store integration suite has the same limitation. To run this test
-    // against a real RLS gate, connect as a role without rolsuper or rolbypassrls.
-    it.skip('member of workspace A cannot see workspace B rows (skipped under superuser)', async () => {
+    // The maintained fixture supplies the non-superuser application pool.
+    it('member of workspace A cannot see workspace B rows', async () => {
       const client = await pool!.connect()
       let aUser: string, aWs: string, bUser: string, bWs: string
       try {
@@ -386,6 +347,7 @@ describeIf('[COMP:api/crm-store] CRM store + RLS (integration)', () => {
 
     it('contact upsert does not merge into another user\'s private same-name row', async () => {
       const theirs = await store.createContact({ userId: bUser, workspaceId, name: 'Ken Lau' })
+      await pool.query('UPDATE entities SET user_id=$2 WHERE id=$1', [theirs.id,bUser])
       const mine = await store.createContact({
         userId: aUser, workspaceId, name: 'Ken Lau', tags: ['engineer'],
         access: { workspaceId, userId: aUser, assistantId: aUser, assistantKind: 'primary' },
@@ -410,7 +372,7 @@ describeIf('[COMP:api/crm-store] CRM store + RLS (integration)', () => {
       expect(theirsAfter?.tags).toEqual([])
     })
 
-    it('contact upsert still dedupes into the caller\'s own same-name row', async () => {
+    it('same-name person creation preserves separate identities and attributes', async () => {
       const first = await store.createContact({
         userId: aUser, workspaceId, name: 'Ken Lau', tags: ['engineer'],
         access: { workspaceId, userId: aUser, assistantId: aUser, assistantKind: 'primary' },
@@ -419,18 +381,21 @@ describeIf('[COMP:api/crm-store] CRM store + RLS (integration)', () => {
         userId: aUser, workspaceId, name: 'ken lau', tags: ['oss'],
         access: { workspaceId, userId: aUser, assistantId: aUser, assistantKind: 'primary' },
       })
-      expect(second.id).toBe(first.id)
-      expect(second.tags.sort()).toEqual(['engineer', 'oss'])
+      expect(second.id).not.toBe(first.id)
+      expect(second.tags).toEqual(['oss'])
+      expect((await store.getContactById({ workspaceId, userId: aUser, assistantId: aUser, assistantKind: 'primary' }, first.id))?.tags).toEqual(['engineer'])
     })
 
     it('contact upsert without access falls back to the user axis (no cross-user merge)', async () => {
       const theirs = await store.createContact({ userId: bUser, workspaceId, name: 'Ken Lau' })
+      await pool.query('UPDATE entities SET user_id=$2 WHERE id=$1', [theirs.id,bUser])
       const mine = await store.createContact({ userId: aUser, workspaceId, name: 'Ken Lau' })
       expect(mine.id).not.toBe(theirs.id)
     })
 
     it('company upsert does not merge into another user\'s private same-name row', async () => {
       const theirs = await store.createCompany({ userId: bUser, workspaceId, name: 'Acme' })
+      await pool.query('UPDATE entities SET user_id=$2 WHERE id=$1', [theirs.id,bUser])
       const mine = await store.createCompany({
         userId: aUser, workspaceId, name: 'Acme', tags: ['vendor'],
         access: { workspaceId, userId: aUser, assistantId: aUser, assistantKind: 'primary' },
@@ -446,13 +411,12 @@ describeIf('[COMP:api/crm-store] CRM store + RLS (integration)', () => {
   })
 })
 
-describeIf('[COMP:brain/crm-write-wrapper] CRM write wrapper (Q24)', () => {
+describe('[COMP:brain/crm-write-wrapper] CRM write wrapper (Q24)', () => {
   let store: typeof import('../crm-store.js') extends { createDbCrmStore: infer T }
     ? T extends () => infer R ? R : never
     : never
 
   beforeAll(async () => {
-    process.env.DATABASE_URL ??= 'postgres:///sidanclaw'
     const mod = await import('../crm-store.js')
     store = mod.createDbCrmStore()
   })
@@ -559,8 +523,7 @@ describeIf('[COMP:brain/crm-write-wrapper] CRM write wrapper (Q24)', () => {
   })
 
   it('rollback: failing CRM insert leaves no orphan entity', async () => {
-    // Stage a company in a *different* workspace so the same-workspace
-    // trigger on contacts will fire after the entity insert succeeds.
+    // A foreign relationship is refused before any contact or graph effect.
     const client = await pool!.connect()
     let foreignCompanyId: string
     try {
@@ -584,7 +547,7 @@ describeIf('[COMP:brain/crm-write-wrapper] CRM write wrapper (Q24)', () => {
       store.createContact({
         userId, workspaceId, name: 'Will-Fail', companyId: foreignCompanyId,
       }),
-    ).rejects.toThrow(/same workspace/)
+    ).rejects.toMatchObject({ code: 'scope_operation_denied' })
 
     const after = await pool!.query<{ n: number }>(
       `SELECT count(*)::int AS n FROM entities WHERE workspace_id = $1`,

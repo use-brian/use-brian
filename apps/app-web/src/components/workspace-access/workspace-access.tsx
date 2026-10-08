@@ -30,11 +30,11 @@ function Picker({label,value,onChange,items,disabled=false}:{label:string;value:
   return <label className="grid gap-1 text-sm"><span>{label}</span><SearchableSelect aria-label={label} value={value} onValueChange={onChange} items={items} disabled={disabled} className="max-sm:min-h-11" searchPlaceholder={t.search} emptyMessage={t.noResults}/></label>;
 }
 type AccessSelection = {kind:'person';id:string}|{kind:'department';id:string}|{kind:'requests'};
-export function WorkspaceAccessView({selection,embedded=false}:{selection?:AccessSelection;embedded?:boolean}={}) {
+export function WorkspaceAccessView({selection,embedded=false,hideIdentity=false}:{selection?:AccessSelection;embedded?:boolean;hideIdentity?:boolean}={}) {
   const {workspaceId,me}=useWorkspaceContext();
-  return <WorkspaceAccessPanel key={`${workspaceId}:${me.id}:${selection?.kind??'all'}:${selection&&'id' in selection?selection.id:''}`} selection={selection} embedded={embedded}/>;
+  return <WorkspaceAccessPanel key={`${workspaceId}:${me.id}:${selection?.kind??'all'}:${selection&&'id' in selection?selection.id:''}`} selection={selection} embedded={embedded} hideIdentity={hideIdentity}/>;
 }
-function WorkspaceAccessPanel({selection,embedded}:{selection?:AccessSelection;embedded:boolean}) {
+function WorkspaceAccessPanel({selection,embedded,hideIdentity}:{selection?:AccessSelection;embedded:boolean;hideIdentity:boolean}) {
   const peopleVisible=!selection||selection.kind==='person';
   const departmentsVisible=!selection||selection.kind!=='person';
   const historyVisible=!selection||selection.kind==='requests';
@@ -71,19 +71,20 @@ function WorkspaceAccessPanel({selection,embedded}:{selection?:AccessSelection;e
   // The Access section's own actions ride the Organization top bar; embedded
   // person/department panels keep their Refresh beside the data it reloads.
   const notReady=data.readiness?.ready!==true;
+  const personDetail = selection?.kind === 'person';
   const memberLabel=(role:string)=>role==='member'?t.memberRole:t[role as 'owner'|'admin'];
   const fact=(label:string,value:ReactNode)=><div className="min-w-0 space-y-1"><dt className="text-xs text-muted-foreground">{label}<span className="sr-only">: </span></dt><dd className="flex min-w-0 flex-wrap gap-1">{value}</dd></div>;
   const chips=(labels:string[])=>labels.map((label,index)=><Chip key={`${label}:${index}`}>{index?<span className="sr-only">, </span>:null}{label}</Chip>);
-  return <main className={historyVisible?'min-w-0 space-y-5':embedded?'min-w-0 space-y-4':'min-w-0 space-y-4 pt-6'}>
-    <header><h2 className={embedded?'font-semibold':'text-lg font-semibold'}>{pageTitle}</h2><p className="mt-1 text-sm text-muted-foreground">{pageDescription}</p></header>
+  return <main className={historyVisible?'min-w-0 space-y-5':embedded?'flex min-w-0 flex-col gap-4':'min-w-0 space-y-4 pt-6'}>
+    {!personDetail ? <header><h2 className={embedded?'font-semibold':'text-lg font-semibold'}>{pageTitle}</h2><p className="mt-1 text-sm text-muted-foreground">{pageDescription}</p></header> : null}
     {historyVisible?<StatStrip label={t.overviewLabel}>
       <StatTile icon={Building2} tone="purple" label={t.statDepartments} value={data.teams.length}/>
       <StatTile icon={Inbox} tone={data.requests.some(r=>r.status==='pending')?'orange':'gray'} label={t.statPendingRequests} value={data.requests.filter(r=>r.status==='pending').length}/>
       <StatTile icon={KeyRound} tone="blue" label={t.statActiveGrants} value={data.grants.filter(g=>g.status==='active').length}/>
       <StatTile icon={notReady?ShieldAlert:ShieldCheck} tone={notReady?'orange':'green'} label={t.statIsolation} value={notReady?t.isolationIncomplete:t.isolationPassed}/>
     </StatStrip>:null}
-    {notReady?<p role="status" style={toneFill('orange')} className="flex items-start gap-2 rounded-lg px-3 py-2 text-[13px] leading-relaxed"><ShieldAlert aria-hidden className="mt-0.5 size-4 shrink-0"/>{t.notReady}</p>:null}
-    <HowItWorks summary={t.notesSummary}><p>{t.boundaryHint}{data.canAdminister?` ${t.adminHint}`:''}</p>{peopleVisible&&!selection?<p>{t.peopleHint}</p>:null}</HowItWorks>
+    {notReady?<p role="status" style={toneFill('orange')} className="flex items-start gap-2 rounded-lg px-3 py-2 text-[13px] leading-relaxed"><ShieldAlert aria-hidden className="mt-0.5 size-4 shrink-0"/>{personDetail?t.personAccessLimited:t.notReady}</p>:null}
+    {!personDetail ? <HowItWorks summary={t.notesSummary}><p>{t.boundaryHint}{data.canAdminister?` ${t.adminHint}`:''}</p>{peopleVisible&&!selection?<p>{t.peopleHint}</p>:null}</HowItWorks> : null}
     {historyVisible&&data.canAdminister?<MigrationProgressPanel/>:null}
     {historyVisible?<OrganizationTopbarActions>
       {data.canAdminister?<button type="button" aria-label={t.reviewData} title={t.reviewData} onClick={()=>setReviewOpen(true)} className={organizationTopbarActionCls}><ScanSearch aria-hidden className="size-3.5 shrink-0"/><span className="max-lg:hidden">{t.reviewData}</span></button>:null}
@@ -96,23 +97,27 @@ function WorkspaceAccessPanel({selection,embedded}:{selection?:AccessSelection;e
     {inspection==='events'?<AccessEventsPanel key={data.policyRevision} data={data} close={()=>setInspection(null)}/>:inspection?<AccessExplanationPanel key={`${inspection.memberId}:${data.policyRevision}`} data={data} memberId={inspection.memberId} close={()=>setInspection(null)}/>:null}
     {error||resource.error?<p role="alert" className="text-sm text-destructive">{error||t.loadError}</p>:null}
     {retryAvailable?<Button variant="outline" className="max-sm:min-h-11" disabled={busy} onClick={()=>void change.retry()}>{t.retryChange}</Button>:null}
-    {peopleVisible?<section className="space-y-3">{!selection?<h2 className="font-semibold">{t.people}</h2>:null}
+    {peopleVisible?<section className={personDetail ? "order-first space-y-3" : "space-y-3"}>{!selection?<h2 className="font-semibold">{t.people}</h2>:null}
       {data.people.filter(person=>person.access&&(selection?.kind!=='person'||person.id===selection.id)).map(person=>{
         const access=person.access!;
-        return <article key={person.id} className="min-w-0 space-y-4 rounded-xl border border-border p-4">
-          <div className="flex min-w-0 items-center gap-3">
+        return <article key={person.id} className={hideIdentity ? "min-w-0 space-y-4" : "min-w-0 space-y-4 rounded-xl border border-border p-4"}>
+          {!hideIdentity ? <div className="flex min-w-0 items-center gap-3">
             <OrgAvatar name={person.name||t.unnamed} seed={person.id} size={36}/>
             <div className="min-w-0 flex-1"><h3 className="break-words font-semibold">{person.name||t.unnamed}</h3><p className="text-xs text-muted-foreground">{memberLabel(person.role)}</p></div>
-          </div>
-          <dl className="grid gap-x-6 gap-y-3 sm:grid-cols-2 lg:grid-cols-3">
-            {fact(t.workspaceRole,<Chip>{memberLabel(person.role)}</Chip>)}
+          </div> : null}
+          {personDetail ? <div className="rounded-lg bg-muted/40 p-4"><p className="text-xs font-medium text-muted-foreground">{t.personAccessTitle}</p><p className="mt-1 text-base font-semibold">{access.readTeamIds === null ? t.canReadAllDepartments : reachLabels(access.readTeamIds,access.hasUnlistedReadScope,data,t).join(', ')}</p>
+            <p className="mt-2 text-xs leading-relaxed text-muted-foreground">{person.role !== 'member' ? t.adminHint : access.teamScopeMode === 'legacy' ? t.legacyHint : t.membershipAccessHint}</p></div> : null}
+          <dl className="grid gap-x-6 gap-y-4 sm:grid-cols-2">
+            {!hideIdentity ? fact(t.workspaceRole,<Chip>{memberLabel(person.role)}</Chip>) : null}
             {fact(t.clearance,<ClearancePill clearance={access.effectiveClearance} label={t[access.effectiveClearance]}/>)}
-            {fact(t.scopeMode,<Chip>{access.teamScopeMode==='legacy'?t.legacyMode:t.assignedMode}</Chip>)}
             {fact(t.memberships,(()=>{const names=data.teams.filter(team=>team.memberIds.includes(person.id)).map(team=>team.name);return names.length?chips(names):<span className="text-sm text-muted-foreground">{t.noMemberships}</span>;})())}
-            {fact(t.readReach,chips(reachLabels(access.readTeamIds,access.hasUnlistedReadScope,data,t)))}
-            {fact(t.membershipReach,chips(reachLabels(access.membershipTeamIds,access.hasUnlistedMembershipScope,data,t)))}
+            {!personDetail ? fact(t.readReach,chips(reachLabels(access.readTeamIds,access.hasUnlistedReadScope,data,t))) : null}
           </dl>
-          {person.role!=='member'?<InfoNote>{t.adminHint}</InfoNote>:access.teamScopeMode==='legacy'?<InfoNote>{t.legacyHint}</InfoNote>:null}
+          <HowItWorks summary={t.accessDetails}>
+            <dl className="grid gap-3">{fact(t.scopeMode,<Chip>{access.teamScopeMode==='legacy'?t.legacyMode:t.assignedMode}</Chip>)}{fact(t.membershipReach,chips(reachLabels(access.membershipTeamIds,access.hasUnlistedMembershipScope,data,t)))}</dl>
+            <p>{t.boundaryHint}</p>
+          </HowItWorks>
+          {!personDetail && person.role!=='member'?<InfoNote>{t.adminHint}</InfoNote>:!personDetail && access.teamScopeMode==='legacy'?<InfoNote>{t.legacyHint}</InfoNote>:null}
           <div className="flex flex-wrap gap-2">
             <Button variant="outline" size="sm" className="max-sm:min-h-11" onClick={()=>setInspection({memberId:person.id})}>{t.explainAccess}</Button>
             {data.canAdminister&&person.role==='member'?<Button variant="outline" size="sm" className="max-sm:min-h-11" disabled={busy} onClick={()=>setEditPerson(person.id)}>{t.editPerson}</Button>:null}

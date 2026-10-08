@@ -1,12 +1,9 @@
 /**
  * Workspace store — workspace CRUD and member management.
  *
- * A workspace groups users who share assistants. Every user has at least
- * one default workspace, named "Personal" (auto-created at signup,
- * `is_personal=true`). `is_personal` is **only a label/anchor**: it names the
- * default workspace and anchors ingest routing, primary-assistant lookup, the
- * free-tier workspace cap, and deletion-protection. It gates **no** connector
- * or sharing behavior — every workspace is treated identically there.
+ * Every workspace has the same lifecycle and permissions. Signup creates an
+ * ordinary workspace; the account default is a nullable routing preference.
+ * Owners can transfer or delete every workspace, including their last one.
  *
  * **Connector scoping (security):** a workspace assistant's tool access comes
  * only from team-native (`scope='workspace'`) instances + member-exposure
@@ -22,6 +19,7 @@
  */
 
 import type { PoolClient } from 'pg'
+import { loadDepartmentSnapshot } from '../context-scope/department-resolver.js'
 import { transferAssistant } from './assistant-transfer-admission.js'
 import { seedBuiltinPrimitiveCapabilities } from './capability-seed.js'
 import {
@@ -62,16 +60,8 @@ export type Workspace = {
    * Migration 437; see workspaces.md -> "Workspace icon".
    */
   iconUrl: string | null
-  /**
-   * True for the auto-created default workspace each user gets at signup
-   * (named "Personal"). A pure **label/anchor**: it enforces the free-tier
-   * "only paid users can create more workspaces" cap, anchors default-assistant
-   * lookup + ingest routing, and protects the workspace from deletion. It gates
-   * **no** connector/sharing behavior — connector access is exposure-driven
-   * (`connector_grant`) in every workspace, so all are treated identically.
-   * See migration 110 §7.
-   */
-  isPersonal: boolean
+  /** Account routing preference only; grants no workspace privileges. */
+  isOwnerDefault?: boolean
   /**
    * Live count of `workspace_members` rows. Computed by `list()` / `get()` via
    * `memberCountsSystem` (the OWNER pool) — NOT as a subquery inside the
@@ -201,7 +191,7 @@ const WORKSPACE_COLUMNS = `
   owner_user_id AS "ownerUserId",
   icon_seed AS "iconSeed",
   icon_url AS "iconUrl",
-  is_personal AS "isPersonal",
+  COALESCE(id = (SELECT default_workspace_id FROM users WHERE users.id = workspaces.owner_user_id), false) AS "isOwnerDefault",
   plan,
   default_recording_blueprint_id AS "defaultRecordingBlueprintId",
   transcription_prefs AS "transcriptionPrefs",
@@ -254,12 +244,6 @@ async function memberCountsSystem(
  *                              its owner (indistinguishable on purpose — the
  *                              in-transaction re-check mirrors the flush's
  *                              defense-in-depth posture).
- *   - `personal_workspace`   — Personal workspaces are never transferable:
- *                              they are tied to the owner's account lifecycle
- *                              (deleted via `ON DELETE CASCADE` on
- *                              `owner_user_id`), and the partial unique index
- *                              `workspaces_owner_personal_unique` permits at
- *                              most one personal workspace per owner.
  *   - `already_owner`        — the target user is the current owner.
  *   - `not_a_member`         — the target user has no `workspace_members` row
  *                              (the spec requires the new owner to already be
@@ -272,7 +256,6 @@ async function memberCountsSystem(
 export type TransferOwnershipResult =
   | 'transferred'
   | 'not_owner'
-  | 'personal_workspace'
   | 'already_owner'
   | 'not_a_member'
   | 'recipient_free_cap'
@@ -485,15 +468,18 @@ export async function getWorkspaceMembershipWithReadScopeSystem(
   clearance: 'public' | 'internal' | 'confidential'
   compartments: string[] | null
   projectIds: string[] | null
+  departmentAccess?: Awaited<ReturnType<typeof loadDepartmentSnapshot>>
 } | null> {
   try {
     const result = await query<{
+      departmentReadV2: boolean
       role: 'owner' | 'admin' | 'member'
       clearance: 'public' | 'internal' | 'confidential'
       compartments: string[] | null
       projectIds: string[] | null
     }>(
       `SELECT wm.role, wm.clearance,
+              w.department_read_v2 AS "departmentReadV2",
               effective_member_read_compartments(wm.user_id, wm.workspace_id) AS compartments,
               CASE WHEN wm.role IN ('owner','admin') THEN NULL
                    ELSE COALESCE((
@@ -503,10 +489,16 @@ export async function getWorkspaceMembershipWithReadScopeSystem(
                       WHERE pm.user_id = wm.user_id AND p.workspace_id = wm.workspace_id
                    ), '{}') END AS "projectIds"
          FROM workspace_members wm
+         JOIN workspaces w ON w.id = wm.workspace_id
         WHERE wm.workspace_id = $1 AND wm.user_id = $2`,
       [workspaceId, userId],
     )
-    return result.rows[0] ?? null
+    const membership = result.rows[0]
+    if (!membership) return null
+    const departmentAccess = membership.departmentReadV2
+      ? await loadDepartmentSnapshot(<R>(sql: string, values: unknown[]) => query<R & Record<string, unknown>>(sql, values), { workspaceId, userId, assistantId: null })
+      : undefined
+    return { ...membership, departmentAccess }
   } catch (err) {
     console.error('[workspace-store] scoped membership lookup failed:', err)
     return null
@@ -1170,7 +1162,7 @@ export async function getWorkspaceBillingByStripeCustomerId(
   const result = await query<WorkspaceBilling>(
     `SELECT ${BILLING_COLUMNS} FROM workspaces
      WHERE stripe_customer_id = $1
-     ORDER BY is_personal DESC, created_at ASC
+     ORDER BY created_at ASC, id ASC
      LIMIT 1`,
     [stripeCustomerId],
   )
@@ -1411,7 +1403,7 @@ export function createWorkspaceStore(cascades: WorkspaceStoreCascades = {}): Wor
         // 110 §6b ownership-XOR rule).
         const assistantResult = await client.query<{ id: string; clearance: string | null }>(
           `INSERT INTO assistants (name, owner_user_id, workspace_id, kind)
-           VALUES ($1, NULL, $2, 'primary')
+           VALUES (workspace_primary_name($1), NULL, $2, 'primary')
            RETURNING id, clearance`,
           [name, workspace.id],
         )
@@ -1493,7 +1485,7 @@ export function createWorkspaceStore(cascades: WorkspaceStoreCascades = {}): Wor
            JOIN workspace_members wm
              ON wm.workspace_id = ws.id
             AND wm.user_id = $1
-          ORDER BY ws."isPersonal" DESC, ws."createdAt" DESC`,
+          ORDER BY ws."createdAt" ASC, ws.id ASC`,
         [userId],
       )
       // memberCount is filled from the owner pool: under RLS the count would
@@ -1610,15 +1602,10 @@ export function createWorkspaceStore(cascades: WorkspaceStoreCascades = {}): Wor
     },
 
     async delete(userId, workspaceId) {
-      // The default ("Personal") workspace is not user-deletable — it's the
-      // permanent anchor for ingest routing + primary-assistant lookup, tied to
-      // the user's lifecycle (deleted only when the user is deleted, via
-      // ON DELETE CASCADE on workspaces.owner_user_id). This deletion guard is
-      // now the ONLY behavior keyed on `is_personal`; connector/sharing
-      // behavior all keys on member count (solo vs shared) instead.
+      // Every workspace follows the same owner-only deletion contract.
       const result = await queryWithRLS(
         userId,
-        `DELETE FROM workspaces WHERE id = $1 AND owner_user_id = $2 AND is_personal = false`,
+        `DELETE FROM workspaces WHERE id = $1 AND owner_user_id = $2`,
         [workspaceId, userId],
       )
       return (result.rowCount ?? 0) > 0
@@ -1788,10 +1775,9 @@ export function createWorkspaceStore(cascades: WorkspaceStoreCascades = {}): Wor
         // ownership inside the transaction (route-gate TOCTOU defense).
         const ws = await client.query<{
           ownerUserId: string
-          isPersonal: boolean
           plan: WorkspacePlan
         }>(
-          `SELECT owner_user_id AS "ownerUserId", is_personal AS "isPersonal", plan
+          `SELECT owner_user_id AS "ownerUserId", plan
              FROM workspaces WHERE id = $1 FOR UPDATE`,
           [workspaceId],
         )
@@ -1799,10 +1785,6 @@ export function createWorkspaceStore(cascades: WorkspaceStoreCascades = {}): Wor
         if (!row || row.ownerUserId !== actingUserId) {
           await client.query('ROLLBACK')
           return 'not_owner'
-        }
-        if (row.isPersonal) {
-          await client.query('ROLLBACK')
-          return 'personal_workspace'
         }
         if (newOwnerUserId === actingUserId) {
           await client.query('ROLLBACK')

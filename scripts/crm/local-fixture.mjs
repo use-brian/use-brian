@@ -122,13 +122,17 @@ export async function createLocalFixture({ pgBin, migrationDirs = [], env = proc
     started = true
     const admin = new pg.Client({ connectionString: makeUrl('assurance_owner', password, 'postgres') })
     await admin.connect()
-    try { await admin.query('CREATE DATABASE brian_assurance') } finally { await admin.end() }
+    try {
+      await admin.query('CREATE DATABASE brian_assurance')
+      await admin.query('CREATE ROLE app_user NOLOGIN NOSUPERUSER NOCREATEDB NOCREATEROLE NOBYPASSRLS')
+    } finally { await admin.end() }
     await runCommand(process.execPath, ['--import', import.meta.resolve('tsx'), 'packages/api/scripts/migrate.ts'], { env: fixtureEnv, logPath: join(directory, 'migrations.log') })
     const connection = new pg.Client({ connectionString: adminUrl })
     await connection.connect()
     try {
       // Passwords are generated hex, never user input or command arguments.
       await connection.query(`CREATE ROLE assurance_app LOGIN PASSWORD '${appPassword}' NOSUPERUSER NOCREATEDB NOCREATEROLE NOBYPASSRLS`)
+      await connection.query('GRANT app_user TO assurance_app')
       await connection.query(`GRANT USAGE ON SCHEMA public TO assurance_app;
         GRANT SELECT, INSERT, UPDATE, DELETE ON ALL TABLES IN SCHEMA public TO assurance_app;
         GRANT USAGE, SELECT ON ALL SEQUENCES IN SCHEMA public TO assurance_app;

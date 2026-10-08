@@ -236,7 +236,7 @@ async function admitDepartmentWrite(
     `SELECT coalesce((SELECT a.home_department_id FROM assistants a WHERE a.id=$3 AND a.workspace_id=$1),
                      (SELECT m.home_department_id FROM workspace_members m WHERE m.workspace_id=$1 AND m.user_id=$2)) AS home`,
     [workspaceId, userId, grant?.assistantId ?? null])).rows[0]?.home ?? null
-  if (explicitGeneral) await client.query("SELECT set_config('app.explicit_general','true',true)")
+  await client.query("SELECT set_config('app.explicit_general',$1,true)", [explicitGeneral ? 'true' : 'false'])
   const result = referenceWrite(snapshot, {
     principal,
     assistant: grant?.assistantId ? { kind: 'assistant', id: grant.assistantId } : null,

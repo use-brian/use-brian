@@ -155,6 +155,8 @@ export type EntityListRow = Pick<
 >
 
 export type EntityCreateParams = {
+  /** Explicit human General destination; empty labels alone still use the home department. */
+  explicitGeneral?: boolean
   /** Exact canonical inputs captured by a trusted producer, never body labels. */
   derivation?: import('../security/derived-scope.js').DerivedWriteEvidence
   kind: EntityKind

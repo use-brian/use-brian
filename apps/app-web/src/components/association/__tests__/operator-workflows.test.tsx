@@ -2,9 +2,9 @@
 import { act,type ReactNode } from "react";
 import { createRoot,type Root } from "react-dom/client";
 import { beforeEach,afterEach,describe,it,expect,vi } from "vitest";
-const api=vi.hoisted(()=>({module:vi.fn(),list:vi.fn(),plan:vi.fn(),event:vi.fn(),ticket:vi.fn(),promotion:vi.fn(),reserve:vi.fn(),offer:vi.fn(),checkIn:vi.fn(),correctCheckIn:vi.fn(),retryReceipt:vi.fn(),createRescue:vi.fn(),settleRescue:vi.fn(),reverseRescue:vi.fn(),cancelRescue:vi.fn(),grant:vi.fn(),adjust:vi.fn(),lookup:vi.fn(),confirm:vi.fn(),purposes:vi.fn(),download:vi.fn(),roster:vi.fn()}));
-vi.mock("@/lib/api/association",async original=>({...await original<typeof import("@/lib/api/association")>(),getAssociationModuleSnapshot:api.module,listAssociationPage:api.list,saveAssociationPlan:api.plan,saveAssociationEvent:api.event,saveAssociationTicket:api.ticket,saveAssociationPromotion:api.promotion,reserveAssociationOrder:api.reserve,offerAssociationPlace:api.offer,checkInAssociationAttendee:api.checkIn,correctAssociationCheckIn:api.correctCheckIn,retryAssociationProviderReceipt:api.retryReceipt,createAssociationMembershipRescue:api.createRescue,settleAssociationMembershipRescue:api.settleRescue,reverseAssociationMembershipRescue:api.reverseRescue,cancelAssociationMembershipRescue:api.cancelRescue,exportAssociationAttendees:api.download,exportAssociationOperationalRoster:api.roster}));
-vi.mock("@/lib/api/crm",()=>({grantCrmEntitlement:api.grant,updateCrmEntitlement:api.adjust,fetchCrmLookup:api.lookup,listCrmConsentPurposes:api.purposes}));
+const api=vi.hoisted(()=>({order:vi.fn(),preview:vi.fn(),module:vi.fn(),list:vi.fn(),plan:vi.fn(),event:vi.fn(),ticket:vi.fn(),promotion:vi.fn(),reserve:vi.fn(),offer:vi.fn(),checkIn:vi.fn(),correctCheckIn:vi.fn(),retryReceipt:vi.fn(),createRescue:vi.fn(),settleRescue:vi.fn(),reverseRescue:vi.fn(),cancelRescue:vi.fn(),grant:vi.fn(),adjust:vi.fn(),issueInvitation:vi.fn(),record:vi.fn(),lookup:vi.fn(),confirm:vi.fn(),purposes:vi.fn(),download:vi.fn(),roster:vi.fn()}));
+vi.mock("@/lib/api/association",async original=>({...await original<typeof import("@/lib/api/association")>(),getAssociationOrder:api.order,previewAssociationOrderDestinations:api.preview,issueAssociationSponsorshipInvitation:api.issueInvitation,getAssociationModuleSnapshot:api.module,listAssociationPage:api.list,saveAssociationPlan:api.plan,saveAssociationEvent:api.event,saveAssociationTicket:api.ticket,saveAssociationPromotion:api.promotion,reserveAssociationOrder:api.reserve,offerAssociationPlace:api.offer,checkInAssociationAttendee:api.checkIn,correctAssociationCheckIn:api.correctCheckIn,retryAssociationProviderReceipt:api.retryReceipt,createAssociationMembershipRescue:api.createRescue,settleAssociationMembershipRescue:api.settleRescue,reverseAssociationMembershipRescue:api.reverseRescue,cancelAssociationMembershipRescue:api.cancelRescue,exportAssociationAttendees:api.download,exportAssociationOperationalRoster:api.roster}));
+vi.mock("@/lib/api/crm",()=>({grantCrmEntitlement:api.grant,updateCrmEntitlement:api.adjust,fetchCrmRecord:api.record,fetchCrmLookup:api.lookup,listCrmConsentPurposes:api.purposes}));
 vi.mock("@/lib/surface-prefetch",()=>({associationModuleCacheKey:(w:string)=>`association-module:${w}:viewer`,associationPageCacheKey:(w:string,r:string,q={})=>`crm:${w}:viewer:${r}:${JSON.stringify(q)}`,associationIntentKey:(w:string,op:string,target:string)=>`request:${w}:viewer:${op}:${target}`}));
 vi.mock("@/components/ui/confirm-dialog",()=>({confirmDialog:api.confirm}));
 vi.mock("next/navigation",()=>({useRouter:()=>({replace:vi.fn(),push:vi.fn()}),useSearchParams:()=>new URLSearchParams()}));
@@ -12,10 +12,14 @@ import { I18nProvider } from "@/lib/i18n/client";
 import { en } from "@/lib/i18n/dictionaries/en";
 import { AssociationPlanForm,AssociationEventForm,AssociationTicketForm,AssociationPromotionForm } from "../catalog-forms";
 import { AssociationMembershipForm,AssociationMembersPanel } from "../members-panel";
+import { AssociationSponsorshipsSection } from "../sponsorships";
+import { AssociationPaymentsPanel } from "../payments-panel";
 import { AssociationPlansPanel } from "../plans-panel";
+import { AssociationPromotionsPanel } from "../promotions-panel";
 import { AssociationMembershipRescueActionForm,AssociationMembershipRescueForm } from "../membership-rescue";
 import { AssociationReservationForm } from "../reservation-form";
 import { AssociationWaitlistOffer,AssociationWaitlistPanel } from "../waitlist-panel";
+import { AssociationEventDetail } from "../event-detail";
 import { AssociationEventsPanel } from "../events-panel";
 import { AssociationAdminPanel } from "../admin-panel";
 import { useAssociationPage,AssociationListState } from "../operator-controls";
@@ -37,9 +41,22 @@ async function render(children:ReactNode){await act(async()=>root.render(<I18nPr
 async function click(label:string,index=0){const target=[...host.querySelectorAll("button")].filter(b=>b.textContent===label)[index];expect(target,`Missing button ${label}`).toBeDefined();await act(async()=>target!.click());}
 async function field(label:string,value:string){const target=[...host.querySelectorAll("label")].find(l=>l.firstChild?.textContent===label)?.querySelector("input,textarea") as HTMLInputElement|HTMLTextAreaElement;expect(target,`Missing field ${label}`).toBeTruthy();await act(async()=>{Object.getOwnPropertyDescriptor(target instanceof HTMLTextAreaElement?HTMLTextAreaElement.prototype:HTMLInputElement.prototype,"value")!.set!.call(target,value);target.dispatchEvent(new Event("input",{bubbles:true}));});}
 async function submit(){await act(async()=>{host.querySelector("form")!.dispatchEvent(new Event("submit",{bubbles:true,cancelable:true}));});}
-beforeEach(()=>{resetSurfaceCache();sessionStorage.clear();vi.resetAllMocks();api.confirm.mockResolvedValue(true);api.module.mockResolvedValue({module:{workspaceId:"w",state:"enabled",version:1},canManage:true});api.list.mockResolvedValue({items:[],nextCursor:null});api.lookup.mockResolvedValue([contact]);api.purposes.mockResolvedValue([]);api.plan.mockResolvedValue({record:plan});api.event.mockResolvedValue({record:event});api.ticket.mockResolvedValue({ticket});api.promotion.mockResolvedValue({promotion});api.reserve.mockResolvedValue({order:{id:"order-one"}});api.offer.mockResolvedValue({offer:{orderId:"offer-order"}});api.retryReceipt.mockResolvedValue({result:{id:"order-one"},receipt:{id:"receipt",state:"applied"}});api.createRescue.mockResolvedValue({rescue,created:true});api.settleRescue.mockResolvedValue({rescue:{...rescue,status:"settled"},created:true});api.reverseRescue.mockResolvedValue({rescue:{...rescue,status:"reversed"},created:true});api.cancelRescue.mockResolvedValue({rescue:{...rescue,status:"cancelled"},created:true});api.grant.mockResolvedValue({record:membership});api.adjust.mockResolvedValue({record:membership});api.checkIn.mockResolvedValue({});host=document.createElement("div");document.body.appendChild(host);root=createRoot(host);});
-afterEach(async()=>{await act(async()=>root.unmount());host.remove();resetSurfaceCache();});
+beforeEach(()=>{resetSurfaceCache();sessionStorage.clear();vi.resetAllMocks();api.order.mockResolvedValue({id:"order-one"});api.preview.mockResolvedValue({validForMs:30000,choices:[{destination:null,scope:{sensitivity:"internal",compartments:[]},departments:[]}]});api.confirm.mockResolvedValue(true);api.module.mockResolvedValue({module:{workspaceId:"w",state:"enabled",version:1},canManage:true});api.list.mockResolvedValue({items:[],nextCursor:null});api.lookup.mockResolvedValue([contact]);api.record.mockImplementation(async(_w,id)=>({record:{id,kind:"contact",name:contact.name,email:contact.hint,phone:null,archivedAt:null}}));api.purposes.mockResolvedValue([]);api.plan.mockResolvedValue({record:plan});api.event.mockResolvedValue({record:event});api.ticket.mockResolvedValue({ticket});api.promotion.mockResolvedValue({promotion});api.reserve.mockResolvedValue({order:{id:"order-one"}});api.offer.mockResolvedValue({offer:{orderId:"offer-order"}});api.retryReceipt.mockResolvedValue({result:{id:"order-one"},receipt:{id:"receipt",state:"applied"}});api.createRescue.mockResolvedValue({rescue,created:true});api.settleRescue.mockResolvedValue({rescue:{...rescue,status:"settled"},created:true});api.reverseRescue.mockResolvedValue({rescue:{...rescue,status:"reversed"},created:true});api.cancelRescue.mockResolvedValue({rescue:{...rescue,status:"cancelled"},created:true});api.grant.mockResolvedValue({record:membership});api.adjust.mockResolvedValue({record:membership});api.checkIn.mockResolvedValue({});host=document.createElement("div");document.body.appendChild(host);root=createRoot(host);});
+afterEach(async()=>{await act(async()=>root.unmount());host.remove();resetSurfaceCache();vi.useRealTimers();});
 describe("[COMP:app-web/association] Catalog configuration",()=>{
+  it("keeps promotion editing available while protected usage is unavailable",async()=>{
+    api.list.mockImplementation(async(_w,kind)=>({items:kind==="promotions"?[{...promotion,reservedUses:null,redeemedUses:null}]:[],nextCursor:null}));
+    await render(<AssociationPromotionsPanel workspaceId="w"/>);
+    expect(host.textContent).toContain(u.usageUnavailable);
+    expect(host.textContent).not.toContain("0 of 100");
+    await click(m.edit);expect(host.querySelector("form")).toBeTruthy();
+  });
+  it("keeps the member promotion view owner-only without loading usage",async()=>{
+    api.module.mockResolvedValue({module:{workspaceId:"w",state:"enabled",version:1},canManage:false});
+    await render(<AssociationPromotionsPanel workspaceId="w"/>);
+    expect(host.textContent).toContain(t.ownerOnly);
+    expect(api.list).not.toHaveBeenCalled();
+  });
   it("preserves plan fields and date precision while editing a name",async()=>{await render(<AssociationPlanForm workspaceId="w" plan={plan} disabled={false} onSaved={()=>{}}/>);await field(m.name,"New community name");await submit();expect(api.plan).toHaveBeenCalledWith("w",expect.objectContaining({key:"community",name:"New community name",benefits:["Workshops"],eligibilityNote:plan.eligibilityNote,activeFrom:plan.activeFrom,currency:"USD"}));});
   it("keeps event metadata, timezone and provider-independent catalog values",async()=>{await render(<AssociationEventForm workspaceId="w" event={event} disabled={false} onSaved={()=>{}}/>);await field(u.title,"Updated workshop");await submit();expect(api.event).toHaveBeenCalledWith("w",expect.objectContaining({slug:event.slug,title:"Updated workshop",metadata:event.metadata,timezone:event.timezone,startsAt:"2027-01-05T12:00:00.000Z",canonicalUrl:event.canonicalUrl}));});
   it("saves member-price inventory without copying derived counters into the command",async()=>{await render(<AssociationTicketForm workspaceId="w" eventId={event.id} ticket={ticket} disabled={false} onSaved={()=>{}}/>);await field(m.memberPrice,"0");await submit();const value=api.ticket.mock.calls[0][2];expect(value).toMatchObject({key:"standard",capacity:12,memberPriceMinor:0,priceMinor:0});expect(value).not.toHaveProperty("available");expect(value).not.toHaveProperty("reservedCount");});
@@ -61,6 +78,57 @@ describe("[COMP:app-web/association] Offline payment rescue",()=>{
   it("keeps provider-bound paid plans outside the manual rescue form",async()=>{await render(<AssociationMembershipRescueForm workspaceId="w" plan={{...paidPlan,provider:"stripe",providerPlanId:"price-fixture"}} contact={contact} disabled={false} onSaved={()=>{}}/>);await field(u.membershipFrom,"2027-01-01T00:00");await field(u.membershipTo,"2028-01-01T00:00");await field(m.paymentDue,"2026-12-01T00:00");await field(u.reason,"Should use provider evidence");await submit();expect(api.createRescue).not.toHaveBeenCalled();});
 });
 describe("[COMP:app-web/association] Reservations and waitlist",()=>{
+  it("keeps member ticket history read-only without exposing the reservation action",async()=>{
+    api.list.mockImplementation(async(_w,resource)=>({items:resource==="tickets"?[ticket]:[],nextCursor:null}));
+    await render(<AssociationEventDetail workspaceId="w" event={event} enabled canManage={false} loadFailed={false} onBack={()=>{}} onChanged={()=>{}}/>);
+    expect(host.textContent).toContain(ticket.name);expect(host.textContent).toContain(u.readOnly);
+    expect(host.textContent).not.toContain(u.reserveFor);expect(host.textContent).not.toContain(m.newTicket);expect(host.querySelector("form")).toBeNull();
+  });
+
+  it("requires an explicit available destination when the default is absent",async()=>{
+    api.preview.mockResolvedValue({validForMs:30000,choices:[{destination:{kind:"department",departmentId:"cedar"},scope:{sensitivity:"internal",compartments:["team:cedar"]},departments:[{id:"cedar",name:"Cedar"}]}]});
+    await render(<AssociationReservationForm workspaceId="w" ticket={ticket} disabled={false}/>);await click(contact.name+contact.hint);
+    expect(api.preview).toHaveBeenCalledWith("w",[contact.id]);expect(host.textContent).toContain(u.destinationUnavailable);
+    await submit();expect(api.reserve).not.toHaveBeenCalled();
+    const choice=host.querySelector<HTMLButtonElement>('[role="radio"]')!;expect(choice.tabIndex).toBe(0);
+    await act(async()=>choice.click());await field(m.attendeeName,"Fictional guest");await submit();
+    expect(api.reserve).toHaveBeenCalledWith("w",expect.objectContaining({destination:{kind:"department",departmentId:"cedar"}}));
+  });
+  it("expires destination choices offline and prevents a silent default fallback after revocation",async()=>{
+    vi.useFakeTimers({toFake:["setTimeout","clearTimeout","setInterval","clearInterval","performance"]});
+    const chosen={destination:{kind:"department",departmentId:"cedar"},scope:{sensitivity:"internal",compartments:["team:cedar"]},departments:[{id:"cedar",name:"Cedar"}]};
+    api.preview.mockResolvedValue({validForMs:30000,choices:[chosen]});
+    await render(<AssociationReservationForm workspaceId="w" ticket={ticket} disabled={false}/>);await click(contact.name+contact.hint);
+    await act(async()=>host.querySelector<HTMLButtonElement>('[role="radio"]')!.click());
+    api.preview.mockRejectedValue(new Error("offline"));await act(async()=>{await vi.advanceTimersByTimeAsync(30001);});
+    expect(host.textContent).not.toContain("Cedar");expect(host.querySelector<HTMLButtonElement>('button[type="submit"]')!.disabled).toBe(true);
+    api.preview.mockResolvedValue({validForMs:30000,choices:[{destination:null,scope:{sensitivity:"internal",compartments:[]},departments:[]}]});
+    await act(async()=>{window.dispatchEvent(new Event("focus"));});
+    expect(host.textContent).toContain(u.destinationUnavailable);await submit();expect(api.reserve).not.toHaveBeenCalled();
+  });
+  it("rejects a destination preview arriving after its request-start lifetime",async()=>{
+    vi.useFakeTimers({toFake:["setTimeout","clearTimeout","setInterval","clearInterval","performance"]});
+    let finish!:(value:unknown)=>void;api.preview.mockImplementation(()=>new Promise(resolve=>{finish=resolve;}));
+    await render(<AssociationReservationForm workspaceId="w" ticket={ticket} disabled={false}/>);await click(contact.name+contact.hint);
+    await act(async()=>{await vi.advanceTimersByTimeAsync(30001);finish({validForMs:30000,choices:[{destination:null,scope:{sensitivity:"internal",compartments:["team:cedar"]},departments:[{id:"cedar",name:"Cedar"}]}]});});
+    expect(host.textContent).not.toContain("Cedar");await submit();expect(api.reserve).not.toHaveBeenCalled();
+  });
+  it("removes a saved order link after its own authority is revoked",async()=>{
+    vi.useFakeTimers({toFake:["setTimeout","clearTimeout","setInterval","clearInterval","performance"]});
+    await render(<AssociationReservationForm workspaceId="w" ticket={ticket} disabled={false}/>);await click(contact.name+contact.hint);await field(m.attendeeName,"Fictional guest");await submit();
+    expect(api.order).toHaveBeenCalledWith("w","order-one");expect(host.textContent).toContain("order-one");
+    api.order.mockRejectedValue({status:403});await act(async()=>{await vi.advanceTimersByTimeAsync(15001);});
+    expect(host.textContent).not.toContain("order-one");
+  });
+  it("evicts denied destination names immediately",async()=>{
+    vi.useFakeTimers({toFake:["setTimeout","clearTimeout","setInterval","clearInterval","performance"]});
+    api.preview.mockResolvedValue({validForMs:30000,choices:[{destination:null,scope:{sensitivity:"internal",compartments:["team:cedar"]},departments:[{id:"cedar",name:"Cedar"}]}]});
+    await render(<AssociationReservationForm workspaceId="w" ticket={ticket} disabled={false}/>);await click(contact.name+contact.hint);
+    expect(host.textContent).toContain("Cedar");api.preview.mockRejectedValue({status:403});
+    await act(async()=>{await vi.advanceTimersByTimeAsync(15001);});
+    expect(host.textContent).not.toContain("Cedar");await submit();expect(api.reserve).not.toHaveBeenCalled();
+  });
+
   it("reserves for a selected CRM buyer and keeps the request on retry and remount",async()=>{api.reserve.mockRejectedValueOnce(new Error("response lost"));await render(<AssociationReservationForm workspaceId="w" ticket={ticket} disabled={false}/>);await click(contact.name+contact.hint);await field(m.attendeeName,"Fictional Attendee");await field(m.attendeeEmail,"attendee@example.com");await submit();await submit();expect(api.reserve.mock.calls[1][1]).toEqual(api.reserve.mock.calls[0][1]);expect(api.reserve.mock.calls[1][1]).toMatchObject({contactId:contact.id,lines:[{ticketId:ticket.id,quantity:1,attendees:[{name:"Fictional Attendee",email:"attendee@example.com"}]}]});const id=api.reserve.mock.calls[0][1].idempotencyKey;await render(null);await render(<AssociationReservationForm workspaceId="w" ticket={ticket} disabled/>);expect(host.textContent).toContain(id);expect(Object.values(sessionStorage)).toEqual([id]);});
   it("does not reserve with no buyer or while the module is disabled",async()=>{await render(<AssociationReservationForm workspaceId="w" ticket={ticket} disabled={false}/>);await submit();expect(api.reserve).not.toHaveBeenCalled();await render(<AssociationReservationForm workspaceId="w" ticket={ticket} disabled/>);await submit();expect(api.reserve).not.toHaveBeenCalled();});
   it("keeps an uncertain promotion identity when disabled and replaces it only after explicit review",async()=>{api.offer.mockRejectedValueOnce(new Error("response lost"));await render(<AssociationWaitlistOffer workspaceId="w" row={waitlist} enabled/>);await submit();const first=api.offer.mock.calls[0][2];await render(<AssociationWaitlistOffer workspaceId="w" row={waitlist} enabled={false}/>);await submit();expect(api.offer.mock.calls[1][2]).toEqual(first);api.confirm.mockResolvedValueOnce(false);await click(m.newRequest);expect(host.textContent).toContain(first.promotionId);await click(m.newRequest);expect(host.textContent).not.toContain(first.promotionId);await submit();expect(api.offer).toHaveBeenCalledTimes(2);});
@@ -114,5 +182,195 @@ describe("[COMP:app-web/association] Task-focused staff workspace",()=>{
     expect(host.querySelector("form")).not.toBeNull();expect(host.textContent).not.toContain(t.ux.planChangeHelp);
     api.confirm.mockResolvedValueOnce(false);await click(t.cancel);expect(host.querySelector("form")).not.toBeNull();
     await click(t.cancel);expect(host.querySelector("form")).toBeNull();expect(api.plan).not.toHaveBeenCalled();
+  });
+});
+
+
+describe("[COMP:app-web/association] Protected list lifetime",()=>{
+  function List(){const page=useAssociationPage("w","rescues");return <AssociationListState {...page}>{page.data?.items.map(row=><p key={row.id}>{row.contactName}</p>)}</AssociationListState>;}
+  it("removes protected rows immediately on denied refresh and allows an explicit retry",async()=>{
+    api.list.mockResolvedValueOnce({items:[rescue],nextCursor:null});
+    await render(<List/>);expect(host.textContent).toContain(rescue.contactName);
+    api.list.mockRejectedValue({status:403});await click(t.refresh);
+    expect(host.textContent).not.toContain(rescue.contactName);expect(host.textContent).toContain(m.loadFailed);
+    api.list.mockResolvedValue({items:[rescue],nextCursor:null});await click(t.refresh);
+    expect(host.textContent).toContain(rescue.contactName);
+  });
+  it("expires previously authorized rows while offline without renewing them on failed refresh",async()=>{
+    vi.useFakeTimers({toFake:["setTimeout","clearTimeout","setInterval","clearInterval","performance"]});
+    api.list.mockResolvedValueOnce({items:[rescue],nextCursor:"next"});await render(<List/>);
+    api.list.mockRejectedValue(new Error("offline"));
+    await act(async()=>{await vi.advanceTimersByTimeAsync(20_000);});await click(t.refresh);
+    expect(host.textContent).toContain(rescue.contactName);
+    await act(async()=>{await vi.advanceTimersByTimeAsync(10_001);});
+    expect(host.textContent).not.toContain(rescue.contactName);expect(host.textContent).toContain(m.loadFailed);
+    expect([...host.querySelectorAll("button")].some(b=>b.textContent===t.next)).toBe(false);
+  });
+  it("does not install a response that arrives after its authorization lifetime",async()=>{
+    vi.useFakeTimers({toFake:["setTimeout","clearTimeout","setInterval","clearInterval","performance"]});
+    let finish!:(value:unknown)=>void;api.list.mockImplementation(()=>new Promise(resolve=>{finish=resolve;}));
+    await render(<List/>);await act(async()=>{await vi.advanceTimersByTimeAsync(30_001);finish({items:[rescue],nextCursor:null});});
+    expect(host.textContent).not.toContain(rescue.contactName);expect(host.textContent).toContain(m.loadFailed);expect(api.list).toHaveBeenCalledTimes(1);
+  });
+});
+
+
+describe("[COMP:app-web/association] Payment editor authority",()=>{
+  it("discards selected payment content when its authorized page expires",async()=>{
+    vi.useFakeTimers({toFake:["setTimeout","clearTimeout","setInterval","clearInterval","performance"]});
+    api.list.mockImplementation(async(_w,r)=>({items:r==="rescues"?[rescue]:[],nextCursor:null}));
+    await render(<AssociationPaymentsPanel workspaceId="w"/>);await click(u.markPaid);
+    expect(host.textContent).toContain(rescue.contactName);expect(host.querySelector("input")).not.toBeNull();
+    api.list.mockRejectedValue(new Error("offline"));
+    await act(async()=>{await vi.advanceTimersByTimeAsync(30_001);});
+    expect(host.textContent).not.toContain(rescue.contactName);expect(host.querySelector("input")).toBeNull();expect(host.textContent).toContain(m.loadFailed);
+  });
+  it("preserves an open payment form across timely authorized renewals",async()=>{
+    vi.useFakeTimers({toFake:["setTimeout","clearTimeout","setInterval","clearInterval","performance"]});
+    api.list.mockImplementation(async(_w,r)=>({items:r==="rescues"?[{...rescue}]:[],nextCursor:null}));
+    await render(<AssociationPaymentsPanel workspaceId="w"/>);await click(u.markPaid);
+    await act(async()=>{await vi.advanceTimersByTimeAsync(45_001);});
+    expect(host.textContent).toContain(rescue.contactName);expect(host.querySelector("input")).not.toBeNull();
+  });
+  it.each(["member","denied","offline"])("closes a payment editor when management authority becomes %s",async(mode)=>{
+    vi.useFakeTimers({toFake:["setTimeout","clearTimeout","setInterval","clearInterval","performance"]});
+    api.list.mockImplementation(async(_w,r)=>({items:r==="rescues"?[rescue]:[],nextCursor:null}));
+    await render(<AssociationPaymentsPanel workspaceId="w"/>);await click(u.markPaid);
+    expect(host.querySelector("input")).not.toBeNull();
+    if(mode==="member")api.module.mockResolvedValue({module:{workspaceId:"w",state:"enabled",version:1},canManage:false});
+    else api.module.mockRejectedValue(mode==="denied"?{status:403}:new Error("offline"));
+    await act(async()=>{await vi.advanceTimersByTimeAsync(mode==="offline"?30_001:15_001);});
+    expect(host.querySelector("input")).toBeNull();expect(host.textContent).not.toContain(rescue.contactName);
+    expect(api.settleRescue).not.toHaveBeenCalled();
+  });
+  it("keeps the payment queue unavailable to a member without management rights",async()=>{
+    api.module.mockResolvedValue({module:{workspaceId:"w",state:"enabled",version:1},canManage:false});
+    await render(<AssociationPaymentsPanel workspaceId="w"/>);
+    expect(host.textContent).toContain(t.ownerOnly);expect(api.list).not.toHaveBeenCalled();
+  });
+});
+
+
+describe("[COMP:app-web/association] Selected contact authority",()=>{
+  const clock=()=>vi.useFakeTimers({toFake:["setTimeout","clearTimeout","setInterval","clearInterval","performance"]});
+  it("removes the selected buyer and disables reservation on a denied contact renewal",async()=>{
+    clock();await render(<AssociationReservationForm workspaceId="w" ticket={ticket} disabled={false}/>);await click(contact.name+contact.hint);
+    expect(api.record).toHaveBeenCalledWith("w",contact.id);expect(host.querySelector("[data-selected-contact]")).not.toBeNull();
+    api.record.mockRejectedValue({status:403});api.lookup.mockRejectedValue({status:403});
+    await act(async()=>{await vi.advanceTimersByTimeAsync(15_001);});
+    expect(host.textContent).not.toContain(contact.name);expect(host.querySelector<HTMLButtonElement>('button[type="submit"]')!.disabled).toBe(true);
+    await submit();expect(api.reserve).not.toHaveBeenCalled();
+  });
+  it("expires a selected contact and search results while offline",async()=>{
+    clock();await render(<AssociationReservationForm workspaceId="w" ticket={ticket} disabled={false}/>);await click(contact.name+contact.hint);
+    api.record.mockRejectedValue(new Error("offline"));api.lookup.mockRejectedValue(new Error("offline"));
+    await act(async()=>{await vi.advanceTimersByTimeAsync(30_001);});
+    expect(host.textContent).not.toContain(contact.name);expect(host.textContent).not.toContain(contact.hint);expect(host.querySelector<HTMLButtonElement>('button[type="submit"]')!.disabled).toBe(true);
+  });
+  it("does not use the lookup snapshot when the canonical contact disappears",async()=>{
+    api.record.mockResolvedValue(null);await render(<AssociationReservationForm workspaceId="w" ticket={ticket} disabled={false}/>);await click(contact.name+contact.hint);
+    expect(host.querySelector("[data-selected-contact]")).toBeNull();expect(host.querySelector<HTMLButtonElement>('button[type="submit"]')!.disabled).toBe(true);
+  });
+  it.each(["denied","offline"])("hides linked guest fields and blocks submission after %s authority loss",async(mode)=>{
+    clock();
+    const guest={id:"guest-contact",name:"Fictional Guest",hint:"guest@example.com"};
+    let unavailable=false;
+    api.record.mockImplementation(async(_w,id)=>{
+      if(id===guest.id&&unavailable)throw mode==="denied"?{status:403}:new Error("offline");
+      const row=id===guest.id?guest:contact;
+      return {record:{...row,kind:"contact",email:row.hint,archivedAt:null}};
+    });
+    await render(<AssociationReservationForm workspaceId="w" ticket={ticket} disabled={false}/>);
+    await click(contact.name+contact.hint);
+    api.lookup.mockResolvedValue([guest]);await act(async()=>{markSurfaceCacheStale("crm:w:");});
+    await click(u.linkContact);await click(guest.name+guest.hint);
+    expect(host.querySelector<HTMLInputElement>("[data-association-attendee] input")!.value).toBe(guest.name);
+    await field(m.attendeeName,"Edited protected guest");await field(m.attendeeEmail,"edited@example.com");
+    await submit();expect(api.reserve.mock.calls[0][1].lines[0].attendees[0]).toEqual({name:"Edited protected guest",email:"edited@example.com",contactId:guest.id});
+    api.reserve.mockClear();unavailable=true;
+    await act(async()=>{await vi.advanceTimersByTimeAsync(mode==="denied"?15_001:30_001);});
+    expect(host.querySelector("[data-association-attendee] input")).toBeNull();
+    expect(host.querySelector(`a[href$="/${guest.id}"]`)).toBeNull();
+    expect(host.querySelector<HTMLButtonElement>('button[type="submit"]')!.disabled).toBe(true);
+    await submit();expect(api.reserve).not.toHaveBeenCalled();
+    const guestClear=[...host.querySelectorAll<HTMLButtonElement>("[data-association-attendee] button")].find(button=>button.textContent===u.clear)!;
+    await act(async()=>guestClear.click());
+    expect([...host.querySelectorAll<HTMLInputElement>("[data-association-attendee] input")].map(input=>input.value)).toEqual(["",""]);
+  });
+  it("removes an open membership editor when its protected page expires",async()=>{
+    clock();api.list.mockImplementation(async(_w,r)=>({items:r==="memberships"?[membership]:[],nextCursor:null}));
+    await render(<AssociationMembersPanel workspaceId="w"/>);await click(u.editMembership);
+    expect(host.querySelector("form")).not.toBeNull();
+    api.list.mockRejectedValue(new Error("offline"));api.lookup.mockRejectedValue(new Error("offline"));await act(async()=>{await vi.advanceTimersByTimeAsync(30_001);});
+    expect(host.querySelector("form")).toBeNull();expect(host.textContent).not.toContain(membership.contactName);
+  });
+});
+
+
+describe("[COMP:app-web/association] Sponsorship token authority",()=>{
+  it("shows unknown seat totals and clears an issued token when its invitation disappears",async()=>{
+    vi.useFakeTimers({toFake:["setTimeout","clearTimeout","setInterval","clearInterval","performance"]});
+    const st=en.associationPage.sponsorship;
+    const allocation={id:"allocation-one",sponsorContactId:contact.id,sponsorContactName:contact.name,beneficiaryPlanName:"Fictional sponsored plan",allocatedSeats:null,seatLimit:2,status:"active",endsAt:"2099-01-01"};
+    const invitation={id:"invitation-one",allocationId:allocation.id,nomineeContactId:contact.id,nomineeContactName:contact.name,status:"pending",expired:false,expiresAt:"2099-01-01"};
+    let issued=false,revoked=false;
+    api.list.mockImplementation(async(_w,r)=>({items:r==="allocations"?[allocation]:r==="invitations"&&issued&&!revoked?[invitation]:[],nextCursor:null}));
+    api.issueInvitation.mockImplementation(async()=>{issued=true;return {invitation:{...invitation,redemptionToken:"fictional-once-only-token"}};});
+    await render(<AssociationSponsorshipsSection workspaceId="w"/>);
+    expect(host.textContent).toContain(`${m.unknown}/2`);
+    await act(async()=>{host.querySelector<HTMLButtonElement>(`button[aria-label="${st.allocation}"]`)!.click();});
+    await act(async()=>{document.querySelector<HTMLElement>('[role="option"]')!.click();});
+    await click(contact.name+contact.hint,1);await click(st.issueInvitation);
+    expect(host.textContent).toContain("fictional-once-only-token");
+    revoked=true;await act(async()=>{await vi.advanceTimersByTimeAsync(15_001);});
+    expect(host.textContent).not.toContain("fictional-once-only-token");expect(host.textContent).not.toContain(st.copyToken);
+  });
+  it("labels the selected allocation readably, localizes statuses, and drops a selection whose allocation is no longer authorized",async()=>{
+    vi.useFakeTimers({toFake:["setTimeout","clearTimeout","setInterval","clearInterval","performance"]});
+    const st=en.associationPage.sponsorship;
+    const allocation={id:"allocation-readable",sponsorContactId:contact.id,sponsorContactName:contact.name,beneficiaryPlanName:"Fictional sponsored plan",allocatedSeats:1,seatLimit:2,status:"active",endsAt:"2099-01-01"};
+    const cancelled={...allocation,id:"allocation-closed",status:"cancelled"};
+    const invitations=[{id:"inv-r",allocationId:allocation.id,nomineeContactId:contact.id,nomineeContactName:"Fictional redeemed nominee",status:"redeemed",expired:true,expiresAt:"2000-01-01"},
+      {id:"inv-x",allocationId:allocation.id,nomineeContactId:contact.id,nomineeContactName:"Fictional lapsed nominee",status:"pending",expired:true,expiresAt:"2000-01-01"}];
+    let authorized=true;
+    api.list.mockImplementation(async(_w,r)=>({items:r==="allocations"?(authorized?[allocation,cancelled]:[cancelled]):r==="invitations"?invitations:[],nextCursor:null}));
+    await render(<AssociationSponsorshipsSection workspaceId="w"/>);
+    for(const label of [st.statuses.active,st.statuses.cancelled,st.statuses.redeemed,m.options.expired])expect(host.textContent).toContain(label);
+    const pills=[...host.querySelectorAll("span.rounded-full")].map(node=>node.textContent);
+    expect(pills).toEqual([st.statuses.active,st.statuses.cancelled,st.statuses.redeemed,m.options.expired]);
+    const trigger=()=>host.querySelector<HTMLButtonElement>(`button[aria-label="${st.allocation}"]`)!;
+    await act(async()=>{trigger().click();});
+    expect(document.querySelectorAll('[role="option"]').length).toBe(1);
+    await act(async()=>{document.querySelector<HTMLElement>('[role="option"]')!.click();});
+    expect(trigger().textContent).toContain(`${contact.name} · Fictional sponsored plan · 1/2`);
+    expect(trigger().textContent).not.toContain(allocation.id);
+    authorized=false;await act(async()=>{await vi.advanceTimersByTimeAsync(15_001);});
+    expect(trigger().textContent).not.toContain(allocation.id);expect(trigger().textContent).toContain(st.choose);
+    expect(host.querySelector<HTMLButtonElement>(`button[type="submit"]:not([disabled])`)?.textContent ?? "").not.toBe(st.issueInvitation);
+  });
+  it("disables every sponsorship write for a viewer without the management role and never shows a token",async()=>{
+    const st=en.associationPage.sponsorship;
+    api.module.mockResolvedValue({module:{workspaceId:"w",state:"enabled",version:1},canManage:false});
+    const allocation={id:"allocation-viewer",sponsorContactId:contact.id,sponsorContactName:contact.name,beneficiaryPlanName:"Fictional sponsored plan",allocatedSeats:0,seatLimit:1,status:"active",endsAt:"2099-01-01"};
+    api.list.mockImplementation(async(_w,r)=>({items:r==="allocations"?[allocation]:[],nextCursor:null}));
+    await render(<AssociationSponsorshipsSection workspaceId="w"/>);
+    const byText=(text:string)=>[...host.querySelectorAll("button")].filter(b=>b.textContent===text);
+    for(const label of [st.createAllocation,st.issueInvitation,st.cancelAllocation])for(const button of byText(label))expect(button.disabled).toBe(true);
+    expect(host.querySelector<HTMLButtonElement>(`button[aria-label="${st.allocation}"]`)!.disabled).toBe(true);
+    expect(api.issueInvitation).not.toHaveBeenCalled();expect(host.textContent).not.toContain(st.copyToken);
+  });
+  it("expires an open selection within the 30-second projection bound when renewal fails",async()=>{
+    vi.useFakeTimers({toFake:["setTimeout","clearTimeout","setInterval","clearInterval","performance"]});
+    const st=en.associationPage.sponsorship;
+    const allocation={id:"allocation-offline",sponsorContactId:contact.id,sponsorContactName:contact.name,beneficiaryPlanName:"Fictional sponsored plan",allocatedSeats:0,seatLimit:3,status:"active",endsAt:"2099-01-01"};
+    api.list.mockImplementation(async(_w,r)=>({items:r==="allocations"?[allocation]:[],nextCursor:null}));
+    await render(<AssociationSponsorshipsSection workspaceId="w"/>);
+    const trigger=()=>host.querySelector<HTMLButtonElement>(`button[aria-label="${st.allocation}"]`)!;
+    await act(async()=>{trigger().click();});await act(async()=>{document.querySelector<HTMLElement>('[role="option"]')!.click();});
+    expect(trigger().textContent).toContain("Fictional sponsored plan");
+    api.list.mockRejectedValue(new Error("offline"));
+    await act(async()=>{await vi.advanceTimersByTimeAsync(30_001);});
+    expect(host.textContent).not.toContain(contact.name+" → ");expect(trigger().textContent).not.toContain("Fictional sponsored plan");
+    expect(trigger().textContent).not.toContain(allocation.id);
   });
 });

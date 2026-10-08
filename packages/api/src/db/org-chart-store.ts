@@ -19,14 +19,20 @@ async function authority(client: PoolClient, workspaceId: string, userId: string
 }
 
 async function chart(client: PoolClient, workspaceId: string, userId: string, canManage: boolean): Promise<OrganizationChart> {
+  // A restricted linked unit needs the reader's current department edge in a
+  // v2 workspace (`department_row_allows` passes when the flag is off), not
+  // only the legacy Team compartment, which is unrestricted for most members.
   const units = await client.query<DirectoryUnit>(
     `SELECT u.id,u.parent_id AS "parentId",u.name,u.position,u.team_id AS "teamId",g.name AS "teamName",
       u.directory_visibility AS "directoryVisibility",u.version::text,
-      (g.directory_visibility='workspace' OR effective_member_read_compartments($2,$1) IS NULL
-       OR g.compartment_key=ANY(effective_member_read_compartments($2,$1))
+      (g.directory_visibility='workspace'
+       OR ((effective_member_read_compartments($2,$1) IS NULL
+            OR g.compartment_key=ANY(effective_member_read_compartments($2,$1)))
+           AND department_row_allows(department_read_grants_for($2),$1,'public',ARRAY[g.compartment_key],NULL))
        OR EXISTS(SELECT 1 FROM workspace_team_managers m WHERE m.workspace_id=$1 AND m.team_id=u.team_id AND m.user_id=$2 AND m.revoked_at IS NULL)) IS TRUE AS "teamVisible",
       (g.status='active' AND (effective_member_read_compartments($2,$1) IS NULL
          OR g.compartment_key=ANY(effective_member_read_compartments($2,$1)))
+         AND department_row_allows(department_read_grants_for($2),$1,'public',ARRAY[g.compartment_key],NULL)
        OR EXISTS(SELECT 1 FROM workspace_team_managers m WHERE m.workspace_id=$1 AND m.team_id=u.team_id AND m.user_id=$2 AND m.revoked_at IS NULL)) IS TRUE AS entitled
      FROM workspace_org_units u LEFT JOIN workspace_groups g ON g.id=u.team_id AND g.workspace_id=u.workspace_id
      WHERE u.workspace_id=$1 AND u.archived_at IS NULL ORDER BY u.position,u.name,u.id`,[workspaceId,userId])

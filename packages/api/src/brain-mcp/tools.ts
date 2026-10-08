@@ -1,3 +1,4 @@
+import type { CrmCredentialParent } from '@use-brian/core'
 /**
  * Brain MCP server — tool surface.
  *
@@ -317,6 +318,8 @@ type BuildOpts = {
   authKind?: 'api_key' | 'oauth_token' | 'home_app'
   /** Internal proof pinned by successful bearer authentication, never JSON. */
   credentialCurrent?: () => Promise<boolean>
+  crmCredentialParent?: CrmCredentialParent
+  credentialTools?: Record<string, Tool>
   actingUserId?: string
   /**
    * Per-credential clearance cap from auth (`brain_keys.max_clearance`, or
@@ -1210,7 +1213,7 @@ export function buildBrainTools(opts: BuildOpts): BrainTool[] {
     opts.maxClearance,
     'programmatic',
     { kind: principalKind, credentialId: opts.keyId, userId: opts.actingUserId },
-    opts.credentialCurrent,
+    opts.credentialCurrent, opts.crmCredentialParent,
   )
   const workspaceId = opts.workspaceId
 
@@ -1600,6 +1603,9 @@ export function buildBrainTools(opts: BuildOpts): BrainTool[] {
 
   // ── CRM bridges
   const crmBridges = [
+    ...(opts.scope === 'read_write' && opts.crmCredentialParent
+      ? [...filterToolsByCapabilities(new Map(Object.entries(opts.credentialTools ?? {})), opts.agentActiveCapabilities ?? new Set()).values()]
+        .map(tool => bridgeCoreTool(tool, resolveCtx, workspaceId)) : []),
     ...[...filterToolsByCapabilities(new Map([
       [opts.crmTools.saveCrmEntitlementPlan.name, opts.crmTools.saveCrmEntitlementPlan],
       [opts.crmTools.saveCrmEvent.name, opts.crmTools.saveCrmEvent],
@@ -1863,6 +1869,7 @@ export function buildBrainTools(opts: BuildOpts): BrainTool[] {
       t.name === 'listCrmEntitlementPlans' || t.name === 'listCrmEntitlements' ||
       t.name === 'listCrmEvents' || t.name === 'listCrmParticipation' ||
       t.name === 'getCrmDelivery' ||
+      t.name === 'previewCrmCredentialBindings' || t.name === 'listCrmCredentials' ||
       t.name === 'listCrmPipelines'
     ),
     ...fileBridges.filter((t) => t.name === 'fileRead' || t.name === 'fileSearch'),
@@ -1891,7 +1898,8 @@ export function buildBrainTools(opts: BuildOpts): BrainTool[] {
       t.name === 'grantCrmEntitlement' || t.name === 'updateCrmEntitlement' ||
       t.name === 'recordCrmParticipation' || t.name === 'updateCrmParticipation' ||
       t.name === 'setDealPipelineStage' || t.name === 'sendCrmMessage' ||
-      t.name === 'saveCrmEntitlementPlan' || t.name === 'saveCrmEvent'
+      t.name === 'saveCrmEntitlementPlan' || t.name === 'saveCrmEvent' ||
+      t.name === 'createCrmCredential' || t.name === 'revokeCrmCredential'
     ),
     ...fileBridges.filter((t) =>
       t.name === 'fileWrite' || t.name === 'fileAppend' ||
@@ -2226,6 +2234,7 @@ export function makeBrainContextResolver(
   channelType = 'programmatic',
   programmaticPrincipal?: ToolContext['programmaticPrincipal'],
   authenticatedCredentialCurrent?: () => Promise<boolean>,
+  crmCredentialParent?: CrmCredentialParent,
 ): () => Promise<ToolContext | { error: string }> {
   let cached: ToolContext | { error: string } | undefined
   return async () => {
@@ -2235,6 +2244,10 @@ export function makeBrainContextResolver(
       cached = { error: 'This workspace has no assistant to bind the call to.' }
       return cached
     }
+    // User-linked credentials act as their authenticated user; ownership is attribution only.
+    const actingUserId = programmaticPrincipal?.kind === 'home_app' || programmaticPrincipal?.kind === 'oauth_token'
+      ? programmaticPrincipal.userId : target.ownerUserId
+    if (!actingUserId) return { error: 'Authenticated credential user required' }
     const clearance = effectiveBrainClearance(target.clearance, maxClearance)
     const activeCapabilities = await loadActiveCapabilities(target.assistantId)
     const binding = await query<{
@@ -2265,9 +2278,9 @@ export function makeBrainContextResolver(
     const abortController = new AbortController()
     try {
       const resolved = await resolveExecutionContextSystem({
+        credentialCurrent,
         ...(admitted ? {
           sharedAudience: true,
-          credentialCurrent,
           maximumAccess: {
             workspaceId, userId: target.ownerUserId, clearance,
             compartments: admitted.admittedCompartments ?? [],
@@ -2276,7 +2289,7 @@ export function makeBrainContextResolver(
             visibilityAssistantIds: [target.assistantId],
           },
         } : {}),
-        userId: target.ownerUserId,
+        userId: actingUserId,
         workspaceId,
         assistant: {
           id: target.assistantId,
@@ -2343,6 +2356,7 @@ export function makeBrainContextResolver(
     cached = {
       ...executionToolContext(executionContext, { appId: target.assistantId }),
       programmaticPrincipal,
+      ...(crmCredentialParent ? { crmCredentialParent: structuredClone(crmCredentialParent) } : {}),
       activeCapabilities,
       activeGroupId: turnScope.activeGroupId,
       activeProjectId: turnScope.activeProjectId,

@@ -10,10 +10,87 @@
  * [COMP:api/pending-approvals-store]
  */
 
+import type { PoolClient } from 'pg'
+import { createBrowserProfileStore, withBrowserProfileOwnerMutation } from './browser-profile-store.js'
+import { createBrowserSkillGrantInTransaction } from './browser-skill-grant-store.js'
 import { getPool, query, queryWithRLS } from './client.js'
 import { notifyWorkspaceChange } from '../brain-stream/notify.js'
 import { appendDecisionEvent } from './decision-event-store.js'
 import type { DerivedWriteEvidence } from '@use-brian/core'
+import { readSessionById } from './sessions.js'
+import { gateSessionRead } from '../session-read-authority.js'
+
+/** Approval projections retain the current authority of every persisted parent. */
+async function canReadApprovalSource(userId: string, approval: PendingApproval): Promise<boolean> {
+  if (approval.workflowRunId) {
+    if (!approval.workflowStepRunId) return false
+    const parent = await queryWithRLS(userId,
+      `SELECT r.id FROM workflow_runs r
+       JOIN workflow_step_runs s ON s.run_id = r.id
+       WHERE r.id = $1 AND r.workspace_id = $2 AND s.id = $3`,
+      [approval.workflowRunId, approval.workspaceId, approval.workflowStepRunId])
+    if (!parent.rows.length) return false
+  } else if (approval.kind === 'workflow_step') return false
+  if (!approval.blockingSessionId) {
+    // These producers require a source; ON DELETE SET NULL must not publish it.
+    if (approval.sourceSessionRequired || approval.kind === 'tool_invocation' || approval.kind === 'question') return false
+    // A sessionless card (staged write, skill proposal, workflow refinement, sender setup) carries no
+    // department evidence of its own, so only its designated approver may read it; it is never
+    // published to the workspace queue. Workflow-step cards were checked against their run above.
+    return Boolean(approval.workflowRunId) || approval.approverUserId === userId
+  }
+  return canReadApprovalSession(userId, approval.workspaceId, approval.blockingSessionId)
+}
+
+/** Hold ordinary session and department support through a browser write, then recheck expiry. */
+export async function lockBrowserApprovalSource(client: PoolClient, userId: string, approval: PendingApproval): Promise<() => Promise<void>> {
+  const denied = () => Object.assign(new Error('Approval source unavailable'), { code: 'profile_authority_denied' })
+  let expiresAt: Date | null = null
+  if (approval.blockingSessionId) {
+    const session = (await client.query<{ assistant_id: string; context_compartments: string[] }>(
+      'SELECT assistant_id, context_compartments FROM sessions WHERE id=$1 AND workspace_id=$2 FOR SHARE',
+      [approval.blockingSessionId, approval.workspaceId])).rows[0]
+    if (!session) throw denied()
+    const assistant = (await client.query<{ placement_department_id: string | null }>(
+      'SELECT placement_department_id FROM assistants WHERE id=$1 AND workspace_id=$2 FOR SHARE',
+      [session.assistant_id, approval.workspaceId])).rows[0]
+    if (!assistant) throw denied()
+    const departments = [...new Set([
+      ...(session.context_compartments ?? []).filter(key => key.startsWith('team:')).map(key => key.slice(5)),
+      ...(assistant.placement_department_id ? [assistant.placement_department_id] : []),
+    ])].sort()
+    await client.query('SELECT id FROM workspace_groups WHERE workspace_id=$1 AND id=ANY($2::uuid[]) ORDER BY id FOR SHARE', [approval.workspaceId, departments])
+    const edges = await client.query<{ expires_at: Date | null }>(
+      'SELECT expires_at FROM department_edges WHERE workspace_id=$1 AND user_id=$2 AND department_id=ANY($3::uuid[]) ORDER BY id FOR SHARE',
+      [approval.workspaceId,userId,departments])
+    const deadlines = edges.rows.flatMap(row => row.expires_at ? [row.expires_at.getTime()] : []).filter(time => time > Date.now())
+    if (deadlines.length) expiresAt = new Date(Math.min(...deadlines))
+  }
+  const assertFresh = async () => {
+    if (expiresAt && !(await client.query('SELECT clock_timestamp() < $1::timestamptz AS fresh',[expiresAt])).rows[0]?.fresh) throw denied()
+    if (!await canReadApprovalSource(userId, approval)) throw denied()
+  }
+  await assertFresh()
+  return assertFresh
+}
+
+/** Shared current-source check for reviewed reads and standing-grant execution. */
+async function canReadApprovalSession(userId: string, workspaceId: string, sessionId: string): Promise<boolean> {
+  const session = await readSessionById(sessionId)
+  if (!session) return false
+  const source = await query('SELECT 1 FROM sessions WHERE id = $1 AND workspace_id = $2', [sessionId, workspaceId])
+  if (!source.rows.length) return false
+  return await gateSessionRead(userId, session) === null
+}
+
+async function readableApprovalRows(userId: string, rows: Record<string, unknown>[]): Promise<PendingApproval[]> {
+  const admitted: PendingApproval[] = []
+  for (const row of rows) {
+    const approval = rowToApproval(row)
+    if (await canReadApprovalSource(userId, approval)) admitted.push(approval)
+  }
+  return admitted
+}
 
 export type PendingApprovalStatus =
   | 'pending'
@@ -82,6 +159,8 @@ export type PendingApproval = {
   kind: ApprovalKind
   /** Set when a chat-session is suspended awaiting this row (kind='tool_invocation'). Powers Path B resume (WU-6.4). */
   blockingSessionId: string | null
+  /** Internal monotonic provenance; optional only for legacy in-memory adapters. */
+  sourceSessionRequired?: boolean
   /** Per-kind payload (description/displayLines for tool_invocation; richer shapes for other kinds). */
   approvalPayload: Record<string, unknown>
   /** Originating assistant for cross-assistant per-workspace queue filtering. */
@@ -205,6 +284,7 @@ const COLS = `
   created_at                AS "createdAt",
   kind,
   blocking_session_id       AS "blockingSessionId",
+  source_session_required   AS "sourceSessionRequired",
   approval_payload          AS "approvalPayload",
   originating_assistant_id  AS "originatingAssistantId",
   answer_text               AS "answerText"
@@ -542,6 +622,9 @@ export type PendingApprovalsStore = {
    * already non-pending (idempotency: double-click on Approve/Reject is a
    * no-op the second time).
    */
+  /** Atomic browser standing grant, approval status and decision event. */
+  respondBrowserSkill?(id: string, responderUserId: string, decision: 'approved' | 'rejected', options?: { grantAlways?: boolean; reason?: string }): Promise<{ approval: PendingApproval; grantId: string | null } | null>
+
   respond(
     id: string,
     decision: 'approved' | 'rejected',
@@ -683,10 +766,24 @@ function rowToApproval(row: Record<string, unknown>): PendingApproval {
     createdAt: row.createdAt as Date,
     kind: (row.kind as ApprovalKind) ?? 'workflow_step',
     blockingSessionId: (row.blockingSessionId as string | null) ?? null,
+    sourceSessionRequired: row.sourceSessionRequired === true,
     approvalPayload: (row.approvalPayload as Record<string, unknown>) ?? {},
     originatingAssistantId: (row.originatingAssistantId as string | null) ?? null,
     answerText: (row.answerText as string | null) ?? null,
   }
+}
+
+/** The browser runner renews the assigned human's source authority at each poll. */
+export async function readBrowserSendApprovalStatus(
+  store: Pick<PendingApprovalsStore, 'getByIdSystem' | 'getById'>,
+  id: string,
+): Promise<PendingApprovalStatus | 'unavailable' | null> {
+  const binding = await store.getByIdSystem(id)
+  if (!binding) return null
+  if (binding.kind !== 'browser_skill_send') return 'unavailable'
+  const current = await store.getById(binding.approverUserId, id)
+  if (!current || current.kind !== 'browser_skill_send' || current.approverUserId !== binding.approverUserId) return 'unavailable'
+  return current.status
 }
 
 function canonicalApprovalToolName(toolName: string): string {
@@ -1078,6 +1175,9 @@ export function createPendingApprovalsStore(): PendingApprovalsStore {
     },
 
     async createBrowserSkillAudit(params) {
+      if (params.sessionId && !await canReadApprovalSession(params.approverUserId, params.workspaceId, params.sessionId)) {
+        throw new Error('Browser approval source unavailable')
+      }
       // Born auto_approved (R2-2): history, never work. responded_by is the
       // grant's beneficiary — the human whose standing grant fired.
       const result = await query(
@@ -1180,17 +1280,17 @@ export function createPendingApprovalsStore(): PendingApprovalsStore {
          ORDER BY created_at DESC`,
         [workspaceId],
       )
-      return result.rows.map((r) => rowToApproval(r as Record<string, unknown>))
+      return readableApprovalRows(userId, result.rows)
     },
 
     async countPendingForUser(userId) {
-      const result = await queryWithRLS<{ count: string }>(
+      const result = await queryWithRLS(
         userId,
-        `SELECT COUNT(*)::text AS count FROM pending_approvals
+        `SELECT ${COLS} FROM pending_approvals
          WHERE approver_user_id = $1 AND status = 'pending'`,
         [userId],
       )
-      return parseInt(result.rows[0]?.count ?? '0', 10)
+      return (await readableApprovalRows(userId, result.rows)).length
     },
 
     async getById(userId, id) {
@@ -1199,7 +1299,7 @@ export function createPendingApprovalsStore(): PendingApprovalsStore {
         `SELECT ${COLS} FROM pending_approvals WHERE id = $1`,
         [id],
       )
-      return result.rows[0] ? rowToApproval(result.rows[0] as Record<string, unknown>) : null
+      return (await readableApprovalRows(userId, result.rows))[0] ?? null
     },
 
     async getByIdSystem(id) {
@@ -1298,6 +1398,59 @@ export function createPendingApprovalsStore(): PendingApprovalsStore {
       }
     },
 
+    async respondBrowserSkill(id, responderUserId, decision, options = {}) {
+      const grantAlways = decision === 'approved' && options.grantAlways === true
+      const resolution = decision === 'rejected' ? 'deny' : grantAlways ? 'always_allow' : 'allow'
+      const denied = () => Object.assign(new Error('Approval authority unavailable'), { code: 'profile_authority_denied' })
+      const initial = await this.getById(responderUserId, id)
+      if (!initial || initial.kind !== 'browser_skill_send' || initial.approverUserId !== responderUserId) throw denied()
+      if (initial.status !== 'pending') return null
+      const payload = initial.approvalPayload
+      if (typeof payload.profileId !== 'string' || typeof payload.skillId !== 'string') throw denied()
+      if (decision === 'approved' && (!Number.isSafeInteger(payload.skillVersion) || Number(payload.skillVersion) < 1)) throw denied()
+      if (grantAlways && payload.ceiling) throw denied()
+      const profile = await createBrowserProfileStore().get(payload.profileId)
+      if (!profile || profile.workspaceId !== initial.workspaceId || profile.ownerUserId !== responderUserId) throw denied()
+      const result = await withBrowserProfileOwnerMutation(profile.id, profile, async client => {
+        const locked = await client.query(`SELECT ${COLS} FROM pending_approvals WHERE id=$1 FOR UPDATE`, [id])
+        if (!locked.rows[0]) throw denied()
+        const current = rowToApproval(locked.rows[0])
+        if (current.kind !== 'browser_skill_send' || current.approverUserId !== responderUserId
+          || current.workspaceId !== profile.workspaceId || current.approvalPayload.profileId !== profile.id
+          || current.approvalPayload.skillId !== payload.skillId || current.approvalPayload.skillVersion !== payload.skillVersion || (grantAlways && current.approvalPayload.ceiling)
+          || !await canReadApprovalSource(responderUserId, current)) throw denied()
+        if (current.status !== 'pending') return null
+        const assertSourceFresh = await lockBrowserApprovalSource(client, responderUserId, current)
+        if (decision === 'approved') {
+          const skill = await client.query("SELECT version FROM browser_skills WHERE id=$1 AND workspace_id=$2 AND status='active' FOR SHARE", [payload.skillId, profile.workspaceId])
+          if (!skill.rows[0] || skill.rows[0].version !== payload.skillVersion) throw denied()
+        }
+        const grant = grantAlways ? await createBrowserSkillGrantInTransaction(client, {
+          workspaceId: profile.workspaceId, profileId: profile.id,
+          skillId: payload.skillId as string, skillVersion: payload.skillVersion as number, grantedBy: responderUserId,
+        }, id) : null
+        const changed = await client.query(`UPDATE pending_approvals SET status=$3,
+          responded_at=clock_timestamp(), responded_by=$2, reject_reason=$4
+          WHERE id=$1 AND status='pending' AND (expires_at IS NULL OR expires_at>clock_timestamp()) RETURNING ${COLS}`,
+          [id, responderUserId, decision, decision === 'rejected' ? options.reason ?? null : null])
+        if (!changed.rows[0]) throw denied()
+        const approval = rowToApproval(changed.rows[0])
+        await appendDecisionEvent({
+          idempotencyKey: `approval:${id}:${resolution}`, workspaceId: approval.workspaceId,
+          actorUserId: responderUserId, assistantId: approval.originatingAssistantId,
+          sessionId: approval.blockingSessionId, eventKind: 'approval.decided', schemaVersion: 1,
+          sourceKind: 'pending_approval', sourceId: id, declaredScope: approvalScope(approval),
+          visibility: 'owner', sensitivity: approvalSensitivity(approval), reason: decision === 'rejected' ? options.reason ?? null : null,
+          causedByApplicationId: decisionApplicationId(approval),
+          payload: { approvalId: id, approvalKind: approval.kind, toolName: 'runBrowserSkill', resolution },
+        }, client)
+        await assertSourceFresh()
+        return { approval, grantId: grant?.id ?? null }
+      })
+      if (result) notifyWorkspaceChange(result.approval.workspaceId, 'approval', 'update', id)
+      return result
+    },
+
     async respond(id, decision, responderUserId, rejectReason, resolution) {
       // Atomic: only flip if currently pending. Returns null on second
       // call (idempotent under double-click) or expired/superseded rows.
@@ -1310,7 +1463,7 @@ export function createPendingApprovalsStore(): PendingApprovalsStore {
                responded_at = now(),
                responded_by = $3,
                reject_reason = $4
-           WHERE id = $1 AND status = 'pending' AND kind <> 'department_access'
+           WHERE id = $1 AND status = 'pending' AND kind NOT IN ('department_access', 'browser_skill_send')
            RETURNING ${COLS}`,
           [id, decision, responderUserId, rejectReason ?? null],
         )
@@ -1439,6 +1592,7 @@ export function createPendingApprovalsStore(): PendingApprovalsStore {
            workflow_run_id           AS "workflowRunId",
            workflow_step_run_id      AS "workflowStepRunId",
            blocking_session_id       AS "blockingSessionId",
+  source_session_required   AS "sourceSessionRequired",
            originating_assistant_id  AS "originatingAssistantId",
            approver_user_id          AS "approverUserId",
            delivery_channel_type     AS "deliveryChannelType",
@@ -1505,6 +1659,7 @@ export function createPendingApprovalsStore(): PendingApprovalsStore {
            workflow_run_id           AS "workflowRunId",
            workflow_step_run_id      AS "workflowStepRunId",
            blocking_session_id       AS "blockingSessionId",
+  source_session_required   AS "sourceSessionRequired",
            originating_assistant_id  AS "originatingAssistantId",
            approver_user_id          AS "approverUserId",
            delivery_channel_type     AS "deliveryChannelType",

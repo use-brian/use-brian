@@ -2,7 +2,7 @@
 
 import { useEffect, useId, useRef, useState } from "react";
 import { X } from "lucide-react";
-import { useT } from "@/lib/i18n/client";
+import { useT, useLocale } from "@/lib/i18n/client";
 import { confirmDialog } from "@/components/ui/confirm-dialog";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
 import { Switch } from "@/components/ui/switch";
@@ -53,6 +53,7 @@ export function DeliveryAudienceSection({ workspaceId, channel, canManage, onUpd
   onUpdated: (channel: Channel) => void;
 }) {
   const t = useT();
+  const locale = useLocale();
   const copy = t.studioPage.channels.deliveryAudience;
   const id = useId();
   const bindings = channel.config?.deliveryAudienceBindings ?? [];
@@ -116,9 +117,9 @@ export function DeliveryAudienceSection({ workspaceId, channel, canManage, onUpd
   const latest = useRef({ fingerprint, canManage, identity });
   latest.current = { fingerprint, canManage, identity };
 
-  function open(index: number | null) {
+  function open(index: number | null, channelId = "") {
     const binding = index === null ? null : bindings[index];
-    setDraft({ identity, session: ++session.current, index, baseline: fingerprint, channelId: binding?.channelId ?? "",
+    setDraft({ identity, session: ++session.current, index, baseline: fingerprint, channelId: binding?.channelId ?? channelId,
       audienceType: binding?.audienceType ?? "group", clearance: binding?.clearance ?? "public",
       // Only department keys are honoured since the v2 cutover; any other
       // label on an older approval is dropped when it is next saved.
@@ -232,34 +233,13 @@ export function DeliveryAudienceSection({ workspaceId, channel, canManage, onUpd
       emptyMessage={copy.noOptions} value={value} items={items} onValueChange={onValueChange} disabled={busy || stale} />;
   }
 
-  return <section aria-labelledby={`${id}-title`} className="space-y-4 rounded-lg border border-border p-4">
-    <div className="space-y-2">
-      <h3 id={`${id}-title`} className="text-sm font-medium">{copy.title}</h3>
-      <p className="text-sm text-muted-foreground">{copy.description}</p>
-      <p className="text-sm text-muted-foreground">{copy.privateWarning}</p>
-      {!canManage && <p className="text-sm text-muted-foreground">{copy.adminOnly}</p>}
-    </div>
-    {bindings.length === 0 && <p className="text-sm text-muted-foreground">{copy.empty}</p>}
-    <ul className="divide-y divide-border">
-      {bindings.map((binding, index) => <li key={`${binding.channelId}-${index}`} className="space-y-2 py-3 first:pt-0 last:pb-0">
-        <p className="break-all font-mono text-sm">{binding.channelId}</p>
-        <p className="text-sm">{binding.audienceType === "group" ? copy.group : copy.individual} · {t.studioPage.channels.clearance[binding.clearance]}</p>
-        <dl className="space-y-1 break-words text-xs text-muted-foreground">
-          <div><dt>{copy.compartments}</dt><dd>{binding.companyWide ? copy.wholeCompany : binding.compartments.some((value) => value.startsWith("team:")) ? binding.compartments.filter((value) => value.startsWith("team:")).map(departmentName).join(", ") : copy.generalOnly}</dd></div>
-          {binding.projectIds.length > 0 && <div><dt>{copy.projects}</dt><dd>{binding.projectIds.join(", ")}</dd></div>}
-          {binding.recipientUserId && <div><dt>{copy.recipient}</dt><dd>{binding.recipientUserId}</dd></div>}
-          <div><dt>{copy.expires}</dt><dd>{binding.expiresAt ?? copy.noExpiry}{binding.expiresAt && Date.parse(binding.expiresAt) <= Date.now() ? ` (${copy.expired})` : ""}</dd></div>
-          <div><dt>{copy.approvedBy}</dt><dd>{binding.approvedByUserId}</dd></div>
-          <div><dt>{copy.approvedAt}</dt><dd>{binding.approvedAt}</dd></div>
-        </dl>
-        {canManage && <div className="flex flex-wrap gap-2">
-          <button type="button" className={buttonClass} disabled={busy || draft !== null} onClick={() => open(index)}>{copy.edit}</button>
-          <button type="button" className={buttonClass} disabled={busy || draft !== null}
-            onClick={() => void persist(bindings.filter((_, i) => i !== index).map(toInput), fingerprint, true)}>{copy.remove}</button>
-        </div>}
-      </li>)}
-    </ul>
-    {canManage && (draft ? <form className="space-y-4" onSubmit={(event) => { event.preventDefault(); save(); }}>
+  const unapproved = channel.channelType === "telegram" ? (channel.config?.seenChats ?? []).filter((chat) =>
+    (chat.chatType === "group" || chat.chatId.startsWith("-")) && !bindings.some((binding) => binding.channelId.split(":")[0] === chat.chatId)) : [];
+  const names = [...bindings.map((binding) => destinations.get(binding.channelId)?.label ?? binding.channelId), ...unapproved.map((chat) => chat.chatTitle || chat.chatId)];
+  const duplicateNames = new Set(names.filter((name, index) => names.indexOf(name) !== index));
+  const dateLabel = (value: string) => Number.isFinite(Date.parse(value))
+    ? new Intl.DateTimeFormat(locale, { dateStyle: "medium", timeStyle: "short" }).format(new Date(value)) : value;
+  const editor = canManage && draft ? <form className="space-y-4 rounded-lg bg-muted/30 p-4" onSubmit={(event) => { event.preventDefault(); save(); }}>
       {options.failed && <p role="status" className="text-sm text-muted-foreground">{copy.optionsError}</p>}
       {picker(copy.chooseDestination, draft.channelId, [...destinations.values()], (value) => {
         if (!value) return;
@@ -269,7 +249,9 @@ export function DeliveryAudienceSection({ workspaceId, channel, canManage, onUpd
           : channel.channelType === "whatsapp" ? (value.endsWith("@g.us") ? "group" : "individual") : draft.audienceType;
         setDraft({ ...draft, channelId: value, audienceType, recipient: audienceType === "group" ? "" : draft.recipient, companyWide: audienceType === "group" && draft.companyWide });
       })}
-      {field("channelId", copy.destination, copy.destinationHint)}
+      <details className="text-sm"><summary className="min-h-8 max-sm:min-h-11 cursor-pointer py-2 text-muted-foreground">{copy.advanced}</summary>
+        {field("channelId", copy.destination, copy.destinationHint)}
+      </details>
       <div className="grid gap-4 sm:grid-cols-2">
         <div className="space-y-1">
           <label id={`${id}-type`} className="text-sm font-medium">{copy.audienceType}</label>
@@ -290,6 +272,7 @@ export function DeliveryAudienceSection({ workspaceId, channel, canManage, onUpd
           </Select>
         </div>
       </div>
+      <p className="text-sm text-muted-foreground">{copy.sensitivityHelp}</p>
       {draft.audienceType === "group" && <div className="flex items-start gap-3">
         <Switch id={`${id}-company-wide`} aria-describedby={`${id}-company-wide-hint`} checked={draft.companyWide}
           disabled={busy || stale} className="mt-0.5"
@@ -299,7 +282,8 @@ export function DeliveryAudienceSection({ workspaceId, channel, canManage, onUpd
           <p id={`${id}-company-wide-hint`} className="text-xs text-muted-foreground">{copy.wholeCompanyHint}</p>
         </div>
       </div>}
-      {!(draft.companyWide && draft.audienceType === "group") && <>
+      {!(draft.companyWide && draft.audienceType === "group") && <details open={draft.compartments.length > 0 || Boolean(draft.projects)} className="space-y-3 text-sm">
+      <summary className="min-h-8 max-sm:min-h-11 cursor-pointer py-2">{copy.scopedLimits}</summary>
       <div className="space-y-2">
         <p id={`${id}-departments`} className="text-sm font-medium">{copy.compartments}</p>
         {draft.compartments.length > 0 ? <ul aria-labelledby={`${id}-departments`} className="flex flex-wrap gap-2">
@@ -324,17 +308,78 @@ export function DeliveryAudienceSection({ workspaceId, channel, canManage, onUpd
         if (value) setDraft({ ...draft, projects: [...new Set([...list(draft.projects), value])].join(", ") });
       })}
       {field("projects", copy.projects, copy.projectsHint)}
-      </>}
+      </details>}
       {draft.audienceType === "individual" && picker(copy.chooseMember, draft.recipient, options.members, (value) => {
         if (value) setDraft({ ...draft, recipient: value });
       })}
       {draft.audienceType === "individual" && field("recipient", copy.recipient, copy.recipientHint)}
-      {field("expires", copy.expires, copy.expiresHint)}
+      <details className="text-sm"><summary className="min-h-8 max-sm:min-h-11 cursor-pointer py-2 text-muted-foreground">{copy.expirySettings}</summary>
+        {field("expires", copy.expires, copy.expiresHint)}
+      </details>
       <div className="flex flex-wrap gap-2">
         <button type="submit" className={buttonClass} disabled={busy || stale}>{busy ? copy.saving : copy.save}</button>
         <button type="button" className={buttonClass} disabled={busy} onClick={() => { setDraft(null); setError(null); }}>{copy.cancel}</button>
       </div>
-    </form> : <button type="button" className={buttonClass} disabled={busy || bindings.length >= 500} onClick={() => open(null)}>{copy.add}</button>)}
+    </form> : null;
+
+  return <section aria-labelledby={`${id}-title`} className="space-y-4">
+    <div className="space-y-2">
+      <h3 id={`${id}-title`} className="text-sm font-medium">{copy.title}</h3>
+      <p className="text-sm text-muted-foreground">{copy.description}</p>
+      <p className="text-xs text-muted-foreground">{copy.privateWarning}</p>
+      {!canManage && <p className="text-sm text-muted-foreground">{copy.adminOnly}</p>}
+    </div>
+    {bindings.length === 0 && unapproved.length === 0 && <p className="text-sm text-muted-foreground">{copy.empty}</p>}
+    <ul className="grid gap-3">
+      {bindings.map((binding, index) => {
+        const expired = Boolean(binding.expiresAt && Date.parse(binding.expiresAt) <= Date.now());
+        const name = destinations.get(binding.channelId)?.label ?? binding.channelId;
+        return <li key={`${binding.channelId}-${index}`} className="min-w-0 space-y-3 rounded-lg border border-border p-4">
+          <div className="flex flex-wrap items-start gap-3">
+            <div className="min-w-0 flex-1">
+              <p className="break-words text-sm font-semibold">{name}</p>
+              {duplicateNames.has(name) && <p className="break-all text-xs text-muted-foreground">{binding.channelId}</p>}
+              <p className="mt-1 text-xs text-muted-foreground">{binding.companyWide ? copy.wholeCompany : binding.compartments.some((value) => value.startsWith("team:")) ? binding.compartments.filter((value) => value.startsWith("team:")).map(departmentName).join(", ") : copy.generalOnly}</p>
+            </div>
+            <span className={`rounded-full px-2.5 py-1 text-xs font-medium ${expired ? "bg-amber-500/10 text-amber-700 dark:text-amber-300" : "bg-muted text-foreground"}`}>
+              {expired ? copy.expired : t.studioPage.channels.clearance[binding.clearance]}
+            </span>
+          </div>
+          <p className="text-sm text-muted-foreground">{expired ? copy.expiredHelp : binding.audienceType === "individual" ? copy.individualHelp : binding.companyWide ? copy.connectedAvailable : copy.searchAvailable}</p>
+          {canManage && <div className="flex flex-wrap gap-2">
+            <button type="button" className={buttonClass} disabled={busy || draft !== null} onClick={() => open(index)}>{copy.edit}</button>
+            <button type="button" className={buttonClass} disabled={busy || draft !== null}
+              onClick={() => void persist(bindings.filter((_, i) => i !== index).map(toInput), fingerprint, true)}>{copy.remove}</button>
+          </div>}
+          <details className="text-xs text-muted-foreground">
+            <summary className="min-h-8 max-sm:min-h-11 cursor-pointer py-2">{copy.details}</summary>
+            <dl className="grid gap-2 break-words sm:grid-cols-2">
+              <div><dt>{copy.destination}</dt><dd className="break-all">{binding.channelId}</dd></div>
+              <div><dt>{copy.audienceType}</dt><dd>{binding.audienceType === "group" ? copy.group : copy.individual}</dd></div>
+              {binding.projectIds.length > 0 && <div><dt>{copy.projects}</dt><dd>{binding.projectIds.join(", ")}</dd></div>}
+              {binding.recipientUserId && <div><dt>{copy.recipient}</dt><dd>{binding.recipientUserId}</dd></div>}
+              <div><dt>{copy.expires}</dt><dd>{binding.expiresAt ? dateLabel(binding.expiresAt) : copy.noExpiry}</dd></div>
+              <div><dt>{copy.approvedBy}</dt><dd>{options.members.find((member) => member.value === binding.approvedByUserId)?.label ?? binding.approvedByUserId}</dd></div>
+              <div><dt>{copy.approvedAt}</dt><dd><time dateTime={binding.approvedAt}>{dateLabel(binding.approvedAt)}</time></dd></div>
+            </dl>
+          </details>
+          {!stale && draft?.index === index && editor}
+        </li>;
+      })}
+      {unapproved.map((chat) => <li key={chat.chatId} className="min-w-0 space-y-3 rounded-lg border border-dashed border-border p-4">
+        <div className="flex flex-wrap items-start gap-3">
+          <div className="min-w-0 flex-1"><p className="break-words text-sm font-semibold">{chat.chatTitle || chat.chatId}</p>
+            {duplicateNames.has(chat.chatTitle || chat.chatId) && <p className="break-all text-xs text-muted-foreground">{chat.chatId}</p>}
+          </div>
+          <span className="rounded-full bg-muted px-2.5 py-1 text-xs font-medium">{copy.conversationOnly}</span>
+        </div>
+        <p className="text-sm text-muted-foreground">{copy.unapprovedHelp}</p>
+        {canManage && <button type="button" className={buttonClass} disabled={busy || draft !== null} onClick={() => open(null, chat.chatId)}>{copy.approve}</button>}
+        {!stale && draft?.index === null && draft.channelId === chat.chatId && editor}
+      </li>)}
+    </ul>
+    {canManage && <button type="button" className={buttonClass} disabled={busy || draft !== null || bindings.length >= 500} onClick={() => open(null)}>{copy.add}</button>}
+    {(stale || (draft?.index === null && !unapproved.some((chat) => chat.chatId === draft.channelId))) && editor}
     {(error || stale) && <p role="alert" className="text-sm text-destructive">{copy[stale ? "changed" : error!]}{!stale && invalidFields.length > 0 ? ` (${invalidFields.join(", ")})` : ""}</p>}
     {saved && <p role="status" className="text-sm text-muted-foreground">{copy.saved}</p>}
   </section>;

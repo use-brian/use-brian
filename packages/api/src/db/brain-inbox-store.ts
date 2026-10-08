@@ -460,7 +460,7 @@ export async function listBrainInbox(params: {
              updated_at,
              created_by_assistant_id,
              jsonb_build_object(
-               'entity_id', id,
+               'entity_id', id, 'name', display_name,
                'stage', attributes->>'stage',
                'amount', attributes->>'amount',
                'close_date', attributes->>'close_date',
@@ -750,7 +750,7 @@ const SINGLE_ROW_SELECT: Record<BrainInboxPrimitive, string> = {
            verified_by_user_id AS "verifiedByUserId",
            verified_at AS "verifiedAt",
            jsonb_build_object(
-             'entity_id', id,
+             'entity_id', id, 'name', display_name,
              'stage', attributes->>'stage', 'amount', attributes->>'amount',
              'close_date', attributes->>'close_date',
              'sensitivity', sensitivity,
@@ -990,6 +990,41 @@ export type DeleteBrainInboxRowResult =
   | { status: 'deleted' }
   | { status: 'not_found' }
   | { status: 'wrong_workspace' }
+
+/**
+ * Whether the actor may mutate one Brain row, by the same app-role predicate
+ * `deleteBrainInboxRow` locks with (current membership, department RLS, the
+ * mutation access predicate and the principal's context scope). Liveness is
+ * left to the caller so an already deleted row keeps its own answer.
+ */
+export async function authorizeBrainRowMutation(params: {
+  table: 'tasks' | 'entities' | 'kb_chunks'
+  rowId: string
+  workspaceId: string
+  userId: string
+}): Promise<boolean> {
+  const access = mutationActorAccess(params.userId, params.workspaceId)
+  const ap = buildAccessPredicate(access, { startIdx: 3, operation: 'mutation' })
+  const client = await getAppPool().connect()
+  try {
+    await client.query('BEGIN')
+    await applyRLSGucs(client, params.userId)
+    const found = await client.query(
+      `SELECT 1 FROM ${params.table}
+        WHERE id = $1 AND workspace_id = $2 AND NOT scope_held
+          AND ${ap.sql}
+          AND context_scope_allows_current_principal(workspace_id,sensitivity,compartments,project_ids)`,
+      [params.rowId, params.workspaceId, ...ap.params],
+    )
+    await client.query('COMMIT')
+    return (found.rowCount ?? 0) === 1
+  } catch (err) {
+    await client.query('ROLLBACK').catch(() => {})
+    throw err
+  } finally {
+    client.release()
+  }
+}
 
 /** Atomic plain soft-delete path, including retrieval/goal cascades and evidence. */
 export async function deleteBrainInboxRow(params: {

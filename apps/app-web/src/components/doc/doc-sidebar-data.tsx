@@ -113,6 +113,7 @@ import { idbGet, idbSet } from "@/lib/offline/idb";
 import { dropPageFromDocTabsSession } from "@/lib/doc-tabs-session";
 import { offlineWrite, getOnline } from "@/lib/offline/offline-writes";
 import type { SidebarMove } from "./doc-sidebar";
+import { leaseSurfaceContent, surfaceContentRemaining, useLeasedResource } from "@/lib/offline/surface-content-cache";
 
 /** localStorage key for the per-workspace recently-opened page list. */
 function recentsKey(workspaceId: string): string {
@@ -516,7 +517,7 @@ export function DocSidebarDataProvider({
   const router = useRouter();
   const reloadSidebar = useCallback(() => setReloadTick((n) => n + 1), []);
   const treeKey = workspaceId ? sidebarTreeCacheKey(workspaceId) : null;
-  const tree = useCachedResource<CachedSidebarTree>(treeKey, async () => {
+  const tree = useLeasedResource<CachedSidebarTree>(treeKey, async () => {
     const teamspacesKey = sidebarCacheKey("teamspaces", workspaceId);
     try {
       const [saved, drafts, teamspaces] = await Promise.all([
@@ -585,7 +586,7 @@ export function DocSidebarDataProvider({
   // deleted / saved) move the dock's pickUp list, so `reloadSidebar` refreshes
   // it alongside the lists.
   const dockKey = workspaceId ? homeDockCacheKey(workspaceId) : null;
-  const dockRes = useCachedResource<ResolvedDock | null>(dockKey, async () => {
+  const dockRes = useLeasedResource<ResolvedDock | null>(dockKey, async () => {
     const next = await fetchHomeDock(workspaceId);
     if (next) return next;
     return dockKey
@@ -607,7 +608,7 @@ export function DocSidebarDataProvider({
       if (readSurfaceCache<ResolvedDock | null>(dockKey).data !== undefined) {
         mutateSurfaceCache<ResolvedDock | null>(dockKey, () => next);
       } else {
-        void loadSurfaceCache(dockKey, async () => next);
+        void loadSurfaceCache(dockKey, () => leaseSurfaceContent(async () => next), { expiresInMs: surfaceContentRemaining });
       }
     },
     [dockKey],

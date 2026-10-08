@@ -1,4 +1,5 @@
 import type { PoolClient } from 'pg'
+import type { ResourceDestination } from '@use-brian/shared'
 import { readAdmissionPolicy } from './admission-policy-read.js'
 import { admitWorkspaceResource } from './resource-admission.js'
 import { WorkspaceAccessError } from './policy.js'
@@ -12,6 +13,7 @@ import { WorkspaceAccessError } from './policy.js'
 export type OfficeCreateOptions = {
   provenance?: { kind: 'human_authored_root'; actorUserId: string; workspaceId: string }
   expectedPolicyRevision?: string
+  destination?: ResourceDestination
 }
 export type OfficeShellAdmissionInput = {
   userId: string
@@ -41,7 +43,10 @@ export async function admitOfficeShell<T extends OfficeShellAdmissionInput>(
   if (options?.expectedPolicyRevision !== undefined && options.expectedPolicyRevision !== policy?.revision) {
     throw new WorkspaceAccessError('access_policy_conflict', 409)
   }
-  if (!policy || policy.setupState === 'legacy') return input
+  if (!policy || policy.setupState === 'legacy') {
+    if(options?.destination) throw new WorkspaceAccessError('access_mode_setup_required',409)
+    return input
+  }
   const proof = options?.provenance
   if (!proof || proof.kind !== 'human_authored_root' || proof.actorUserId !== input.userId
     || proof.workspaceId !== input.workspaceId || input.templateVersionId !== null
@@ -53,6 +58,7 @@ export async function admitOfficeShell<T extends OfficeShellAdmissionInput>(
     expectedPolicyRevision: options?.expectedPolicyRevision,
     visibility: input.visibilityUserIds?.length ? 'private' : 'workspace',
     sensitivity: input.sensitivity,
+    destination: options?.destination,
     requestedLabels: { compartments: input.requiredCompartments, projectIds: input.projectIds },
   })
   const envelope = admitted.envelope

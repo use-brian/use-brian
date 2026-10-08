@@ -67,7 +67,7 @@ describe("[COMP:app-web/recording-chrome] processing tracker", () => {
   it("polls queued work until the server reports a terminal status", async () => {
     mocks.getRecording
       .mockResolvedValueOnce(summary("queued"))
-      .mockResolvedValueOnce(summary("processed"));
+      .mockResolvedValue(summary("processed"));
 
     await act(async () => root.render(<Harness />));
     expect(current.summary?.status).toBe("queued");
@@ -76,8 +76,12 @@ describe("[COMP:app-web/recording-chrome] processing tracker", () => {
     expect(mocks.getRecording).toHaveBeenCalledTimes(2);
     expect(current.summary?.status).toBe("processed");
 
+    // Processing polling (every 10s) has stopped. Only the content lease's
+    // authority renewal (every 15s: at 15s and 30s) still reads; a hook still
+    // polling would have made six calls by now.
     await act(async () => vi.advanceTimersByTimeAsync(20_000));
-    expect(mocks.getRecording).toHaveBeenCalledTimes(2);
+    expect(mocks.getRecording).toHaveBeenCalledTimes(4);
+    expect(current.summary?.status).toBe("processed");
   });
 
   it("retries a transient cold-read failure while tracking processing", async () => {

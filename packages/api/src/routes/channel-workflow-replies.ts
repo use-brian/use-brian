@@ -49,7 +49,7 @@ export async function maybeHandleChannelWorkflowReply(params: {
       })
       if (result?.status === 'cancelled') return 'Stopped. No approval was submitted.'
       return result?.status === 'unavailable'
-        ? 'This approval is unavailable or ambiguous. Use the full ID from the approvals page.'
+        ? 'This approval is unavailable or ambiguous. Open the approvals page to check its current status and your access.'
         : `Approval reply processed (${result?.status ?? 'unavailable'}).`
     } catch { return 'The approval reply could not be processed. Check the approvals page before retrying.' }
   }

@@ -22,7 +22,7 @@ import Link from "next/link";
 import { usePathname } from "next/navigation";
 import { Eye } from "lucide-react";
 import { useT } from "@/lib/i18n/client";
-import { listActiveComputerTasks, type ComputerTaskSummary } from "@/lib/api/computer";
+import { listActiveComputerTasks, liveComputerTasks, type ComputerTaskSummary } from "@/lib/api/computer";
 
 const POLL_MS = 20_000;
 
@@ -108,7 +108,7 @@ export function ComputerLivePill({ workspaceId }: { workspaceId: string }) {
     const probe = async () => {
       const found = await listActiveComputerTasks(workspaceId);
       if (cancelled) return;
-      setTasks(found);
+      setTasks(liveComputerTasks(found));
       timer = setTimeout(() => void probe(), POLL_MS);
     };
     void probe();

@@ -1,9 +1,36 @@
 import { describe, expect, it } from 'vitest'
 import { applyOfficeCommand } from '../commands.js'
-import { recalculateSpreadsheet, spreadsheetCellDisplayValue } from '../spreadsheet.js'
+import { recalculateSpreadsheet, spreadsheetCellDisplayValue, spreadsheetConditionalStyle } from '../spreadsheet.js'
 import { id, spreadsheetFixture } from './fixtures.js'
 
 describe('[COMP:office/spreadsheet-model] Spreadsheet model and calculation', () => {
+  it.each([
+    ['IF(FALSE,1/0,7)',7], ['IFERROR(1/0,"draft")','draft'],
+    ['LEN(TRIM("  draft   value  "))',11], ['LEFT("Draft",2)','Dr'],
+    ['ISNUMBER(0)',true], ['MOD(-3,2)',1],
+    ['IFERROR(MOD(3,0),"draft")','draft'], ['IF(TRUE,"",1/0)',''],
+  ])('calculates readiness formula %s with Excel branch semantics', (formula,expected) => {
+    const source=spreadsheetFixture();source.worksheets[0].cells[2].formula=formula
+    const calculated=recalculateSpreadsheet(source)
+    expect(calculated.issues).toEqual([])
+    expect(calculated.snapshot.worksheets[0].cells[2].calculatedValue).toBe(expected)
+  })
+  it('rejects unsupported formula functions even in an unselected branch',()=>{
+    const source=spreadsheetFixture();source.worksheets[0].cells[2].formula='IF(TRUE,1,UNKNOWN(1))'
+    expect(recalculateSpreadsheet(source).issues).toContainEqual(expect.objectContaining({error:'#NAME?'}))
+  })
+  it('merges text-prefix rules by priority and honors stopIfTrue',()=>{
+    const sheet=spreadsheetFixture().worksheets[0],cell=sheet.cells[0]
+    cell.valueType='string';cell.value='Draft invoice';cell.formula=undefined
+    sheet.conditionalFormats=[
+      {id:id(100),range:'A1 B2',ruleType:'beginsWith',text:'draft',formulas:[],style:{fill:'#FF0000'},priority:1,stopIfTrue:false},
+      {id:id(101),range:'A1',ruleType:'beginsWith',text:'DRAFT',formulas:[],style:{fill:'#00FF00',border:{bottom:{style:'thin',color:'#000000'}}},priority:2},
+    ]
+    expect(spreadsheetConditionalStyle(sheet,'A1',cell)).toMatchObject({fill:'#FF0000',border:{bottom:{style:'thin',color:'#000000'}}})
+    sheet.conditionalFormats[0].stopIfTrue=true
+    expect(spreadsheetConditionalStyle(sheet,'A1',cell)?.border?.bottom).toBeUndefined()
+  })
+
   it('recalculates invoice arithmetic and deterministic supported functions', () => {
     const source = spreadsheetFixture()
     const sheet = source.worksheets[0]

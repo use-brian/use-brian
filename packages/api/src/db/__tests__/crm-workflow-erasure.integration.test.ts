@@ -5,9 +5,11 @@ import type {CrmOperationsContext} from '@use-brian/core'
 import {getPool,getAppPool} from '../client.js'
 import {createDbWorkflowRunStore} from '../workflow-store.js'
 import {_resetCoalescerForTests} from '../../brain-stream/notify.js'
-import {createCrmPrivacyService} from '../../crm-operations/privacy-previews.js'
+import {createCrmPrivacyService,readCrmErasureReview} from '../../crm-operations/privacy-previews.js'
 import {streamCrmPrivacyExport} from '../../crm-operations/privacy-export.js'
 import {acquireCrmPrivacyAdmission} from '../../crm-operations/privacy-admission.js'
+import {readWorkflowInputEvidence} from '../../context-scope/workflow-input-evidence.js'
+import {ContextScopeAccumulator} from '@use-brian/core'
 const {assertLocalFixture}=await import(new URL('../../../../../scripts/crm/local-fixture.mjs',import.meta.url).href)
 await assertLocalFixture()
 const pool=getPool(),appPool=getAppPool(),runs=createDbWorkflowRunStore(),privacy=createCrmPrivacyService()
@@ -30,12 +32,19 @@ async function fixture() {
   }
   const create=async(eventId?:string,input:Record<string,unknown>={})=>{
     const body=eventId?{trigger:{sourceType:'crm'},event:{domainEventId:eventId,subjectKind:'contact',subjectId:contactId,contactId}}:input
-    return (await runs.createRun({workflowId,workspaceId,triggeredBy:userId,triggerKind:eventId?'event':'manual',input:body})).id
+    const run=await runs.createRun({workflowId,workspaceId,triggeredBy:userId,triggerKind:eventId?'event':'manual',input:body})
+    const scope=new ContextScopeAccumulator({compartments:run.contextCompartments??[],projectIds:run.contextProjectIds??[]})
+    scope.note(await readWorkflowInputEvidence(run.id,workspaceId))
+    await runs.updateRun(run.id,{vars:{__contextScopeEvidence:scope.evidence}})
+    return run.id
   }
   const finish=async(id:string,value='subject@example.com')=>{
     const step=await runs.createStepRun({runId:id,stepId:'local',stepType:'branch',input:{value}})
     await runs.updateStepRun(step.id,{status:'completed',output:{value},finishedAt:new Date()})
-    await runs.updateRun(id,{status:'completed',vars:{value},outcome:{status:'completed',summary:value,logs:[],todo:[],blockers:[],state:{value},finishedAt:new Date().toISOString()},finishedAt:new Date()})
+    const scope=new ContextScopeAccumulator()
+    scope.note((await runs.getRunSystem(id))!.vars.__contextScopeEvidence as import('@use-brian/core').ScopeEvidence)
+    scope.note(await readWorkflowInputEvidence(id,workspaceId))
+    await runs.updateRun(id,{status:'completed',vars:{value,__contextScopeEvidence:scope.evidence},outcome:{status:'completed',summary:value,logs:[],todo:[],blockers:[],state:{value},finishedAt:new Date().toISOString()},finishedAt:new Date()})
   }
   const blueprint=async(id:string)=>pool.query(`INSERT INTO blueprint_records(workspace_id,spec_snapshot,subject,anchor_key,fields,source_kind,source_id,created_by)
     VALUES($1,'{}','Fixture',$2,$3,'workflow',$2,$4)`,[workspaceId,id,JSON.stringify({private:'subject@example.com'}),userId])
@@ -49,6 +58,67 @@ async function rowsFor(context:CrmOperationsContext,contactId:string,domain:stri
 describe('[COMP:crm/privacy-copies] Workflow outcome copies and retirement',()=>{
   afterEach(async()=>{_resetCoalescerForTests();await pool.query('DELETE FROM workspaces WHERE id=ANY($1::uuid[])',[workspaces.splice(0)]);await pool.query('DELETE FROM users WHERE id=ANY($1::uuid[])',[users.splice(0)])})
   afterAll(async()=>{_resetCoalescerForTests();await pool.end();await appPool.end()})
+  it('checks protected events inherited through multiple workflow copy ancestors before privacy disclosure',async()=>{
+    const f=await fixture(),other=randomUUID(),department=randomUUID(),departmentOwner=randomUUID()
+    users.push(departmentOwner)
+    await pool.query('INSERT INTO users(id,auth_provider_id) VALUES($1::uuid,$1::text)',[departmentOwner])
+    await pool.query("INSERT INTO workspace_members(workspace_id,user_id,role) VALUES($1,$2,'member')",[f.workspaceId,departmentOwner])
+    await pool.query("INSERT INTO workspace_groups(id,workspace_id,name,created_by,kind,key,compartment_key) VALUES($1::uuid,$2,'Fictional ancestry department',$3,'team',$1::text,$4)",[department,f.workspaceId,departmentOwner,`team:${department}`])
+    await pool.query("INSERT INTO workspace_compartments(workspace_id,key,label,managed_by,managed_ref_id) VALUES($1,$2,'Fictional ancestry department','team',$3)",[f.workspaceId,`team:${department}`,department])
+    await pool.query("INSERT INTO department_edges(workspace_id,department_id,principal_kind,user_id,clearance,origin) VALUES($1,$2,'user',$3,'confidential','store')",[f.workspaceId,department,f.userId])
+    const root=await f.create(await f.event()),earlier=await f.preview()
+    await pool.query("INSERT INTO entities(id,workspace_id,kind,display_name,created_by_user_id,source,sensitivity,compartments) VALUES($1,$2,'person','Fictional protected source',$3,'manual','confidential',$4)",[other,f.workspaceId,departmentOwner,[`team:${department}`]])
+    const event=await f.event(other)
+    const source=(await runs.createRun({workflowId:f.workflowId,workspaceId:f.workspaceId,triggeredBy:f.userId,triggerKind:'event',input:{trigger:{sourceType:'crm'},event:{domainEventId:event,subjectKind:'contact',subjectId:other,contactId:other}}})).id
+    const intermediate=await f.create(),consumer=await f.create()
+    for(const [run,from] of [[intermediate,source],[consumer,intermediate],[consumer,root]])await pool.query('INSERT INTO workflow_run_copy_sources(workspace_id,run_id,source_run_id) VALUES($1,$2,$3)',[f.workspaceId,run,from])
+    await pool.query("UPDATE department_edges SET expires_at=clock_timestamp()-interval '1 second' WHERE department_id=$1 AND user_id=$2",[department,f.userId])
+    await expect(streamCrmPrivacyExport(f.context,{contactId:f.contactId}).next()).rejects.toMatchObject({code:'not_authorized'})
+    await expect(f.preview()).rejects.toMatchObject({code:'not_authorized'})
+    await pool.query('UPDATE department_edges SET expires_at=NULL WHERE department_id=$1 AND user_id=$2',[department,f.userId])
+    await expect(readCrmErasureReview(f.context,earlier.id)).rejects.toMatchObject({code:'conflict',details:{reason:'privacy_preview_stale'}})
+    const preview=await f.preview()
+    expect((await pool.query('SELECT scope_snapshot FROM crm_privacy_previews WHERE id=$1',[preview.id])).rows[0].scope_snapshot.compartments).toEqual([`team:${department}`])
+    expect((await rowsFor(f.context,f.contactId,'workflow_runs')).some(row=>row.id===consumer)).toBe(true)
+    const stream=streamCrmPrivacyExport(f.context,{contactId:f.contactId})
+    expect(JSON.parse((await stream.next()).value!).type).toBe('header')
+    await pool.query("UPDATE department_edges SET expires_at=clock_timestamp()-interval '1 second' WHERE department_id=$1 AND user_id=$2",[department,f.userId])
+    await expect(stream.next()).rejects.toMatchObject({code:'not_authorized'})
+  },60_000)
+  it.each(['run-context','blueprint','saved-blueprint','blueprint-page'] as const)('preserves independent %s floors through export and erasure review',async kind=>{
+    const f=await fixture(),department=randomUUID(),departmentOwner=randomUUID()
+    users.push(departmentOwner)
+    await pool.query('INSERT INTO users(id,auth_provider_id) VALUES($1::uuid,$1::text)',[departmentOwner])
+    await pool.query("INSERT INTO workspace_members(workspace_id,user_id,role) VALUES($1,$2,'member')",[f.workspaceId,departmentOwner])
+    await pool.query("INSERT INTO workspace_groups(id,workspace_id,name,created_by,kind,key,compartment_key) VALUES($1::uuid,$2,'Fictional artifact department',$3,'team',$1::text,$4)",[department,f.workspaceId,departmentOwner,`team:${department}`])
+    await pool.query("INSERT INTO workspace_compartments(workspace_id,key,label,managed_by,managed_ref_id) VALUES($1,$2,'Fictional artifact department','team',$3)",[f.workspaceId,`team:${department}`,department])
+    await pool.query("INSERT INTO department_edges(workspace_id,department_id,principal_kind,user_id,clearance,origin) VALUES($1,$2,'user',$3,'confidential','store')",[f.workspaceId,department,f.userId])
+    const root=await f.create(await f.event()),earlier=await f.preview()
+    if(kind==='run-context')await pool.query('UPDATE workflows SET context_group_id=$2 WHERE id=$1',[f.workflowId,department])
+    const source=await f.create()
+    await pool.query('UPDATE workflows SET context_group_id=NULL WHERE id=$1',[f.workflowId])
+    const record=kind==='blueprint-page'?'ffffffff'+randomUUID().slice(8):randomUUID()
+    if(kind!=='run-context')await pool.query(`INSERT INTO blueprint_records(id,workspace_id,spec_snapshot,subject,anchor_key,fields,source_kind,source_id,created_by,sensitivity,compartments)
+      VALUES($1::uuid,$2,'{}','Fictional protected blueprint',$1::text,'{"protected":true}','workflow',$3,$4,'confidential',$5)`,[record,f.workspaceId,source,f.userId,[`team:${department}`]])
+    if(kind==='blueprint-page')await pool.query(`INSERT INTO blueprint_records(id,workspace_id,spec_snapshot,subject,anchor_key,fields,source_kind,source_id,created_by,sensitivity)
+      SELECT ('00000000'||substr(md5($1::text||n::text),9))::uuid,$1::uuid,'{}','Fictional General blueprint',n::text,'{}','workflow',$2,$3,'public'
+      FROM generate_series(1,256) n`,[f.workspaceId,source,f.userId])
+    const intermediate=await f.create(),consumer=await f.create()
+    for(const [run,from] of [[intermediate,source],[consumer,intermediate],[consumer,root]])await pool.query('INSERT INTO workflow_run_copy_sources(workspace_id,run_id,source_run_id) VALUES($1,$2,$3)',[f.workspaceId,run,from])
+    if(kind==='saved-blueprint')await pool.query("UPDATE blueprint_records SET compartments='{}',sensitivity='public' WHERE id=$1",[record])
+    await expect(readCrmErasureReview(f.context,earlier.id)).rejects.toMatchObject({code:'conflict',details:{reason:'privacy_preview_stale'}})
+    const preview=await f.preview()
+    expect((await pool.query('SELECT scope_snapshot FROM crm_privacy_previews WHERE id=$1',[preview.id])).rows[0].scope_snapshot.compartments).toEqual([`team:${department}`])
+    expect((await rowsFor(f.context,f.contactId,'workflow_runs')).some(row=>row.id===consumer)).toBe(true)
+    const stream=streamCrmPrivacyExport(f.context,{contactId:f.contactId})
+    expect(JSON.parse((await stream.next()).value!).type).toBe('header')
+    await pool.query("UPDATE department_edges SET expires_at=clock_timestamp()-interval '1 second' WHERE department_id=$1 AND user_id=$2",[department,f.userId])
+    await expect(stream.next()).rejects.toMatchObject({code:'not_authorized'})
+    await expect(streamCrmPrivacyExport(f.context,{contactId:f.contactId}).next()).rejects.toMatchObject({code:'not_authorized'})
+    await expect(streamCrmPrivacyExport(f.context,{}).next()).rejects.toMatchObject({code:'not_authorized'})
+    await expect(f.preview()).rejects.toMatchObject({code:'not_authorized'})
+    expect((await pool.query('SELECT id FROM entities WHERE id=$1',[f.contactId])).rowCount).toBe(1)
+  },60_000)
   it('retires a never-started run and refuses stale run and step writers',async()=>{
     const f=await fixture(),event=await f.event(),run=await f.create(event)
     await f.erase()
@@ -179,7 +249,9 @@ describe('[COMP:crm/privacy-copies] Workflow outcome copies and retirement',()=>
   it('keeps every resumed outcome source and blocks a consumer with another subject',async()=>{
     const f=await fixture(),root=await f.create(await f.event());await f.finish(root);const child=await f.create()
     await runs.getLatestOutcomeForWorkflowSystem(f.workflowId,child)
-    const otherContact=randomUUID(),otherEvent=await f.event(otherContact)
+    const otherContact=randomUUID()
+    await pool.query("INSERT INTO entities(id,workspace_id,kind,display_name,created_by_user_id,source) VALUES($1,$2,'person','Other fictional subject',$3,'manual')",[otherContact,f.workspaceId,f.userId])
+    const otherEvent=await f.event(otherContact)
     const other=(await runs.createRun({workflowId:f.workflowId,workspaceId:f.workspaceId,triggeredBy:f.userId,triggerKind:'event',input:{trigger:{sourceType:'crm'},event:{domainEventId:otherEvent,subjectKind:'contact',subjectId:otherContact,contactId:otherContact}}})).id
     await f.finish(other,'other@example.com')
     expect(await runs.getLatestOutcomeForWorkflowSystem(f.workflowId,child)).toMatchObject({summary:'other@example.com'})

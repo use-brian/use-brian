@@ -92,7 +92,6 @@ import {
   reclassifyContext,
   type ContextProject,
 } from "@/lib/api/context-scopes";
-import { taskProject } from "@/lib/tasks-view";
 import { loadWorkspaceRoster } from "@/lib/api/workspace-roster";
 import type { AssignableMember } from "@/components/brain/property-edit";
 
@@ -446,16 +445,6 @@ export function BlockData({
   );
   const commitPeekProject = useCallback(
     async (row: TaskRow, projectId: string | null): Promise<{ ok: boolean; error?: string }> => {
-      const widening = taskProject(row) !== null && projectId === null;
-      if (widening) {
-        const confirmed = await confirmDialog({
-          title: scopeT.clearProjectTitle,
-          description: scopeT.clearProjectDescription,
-          confirmLabel: scopeT.clearProjectConfirm,
-          cancelLabel: scopeT.cancel,
-        });
-        if (!confirmed) return { ok: false };
-      }
       try {
         await reclassifyContext({
           workspaceId: workspace.workspaceId,
@@ -464,7 +453,7 @@ export function BlockData({
           teamIds: row.contextTeamIds ?? [],
           projectIds: projectId ? [projectId] : [],
           reason: "Changed task Project in document peek",
-          confirmed: widening,
+          confirmed: false,
         });
         setPeekTasks((previous) => previous?.map((item) =>
           item.id === row.id ? { ...item, projectId } : item,

@@ -59,8 +59,9 @@ import {
 } from '../crm-operations/privacy.js'
 import { sendCrmPrivacyExport } from '../crm-operations/privacy-export.js'
 import { readCrmPrivacyPolicy } from '../crm-operations/privacy-policy.js'
+import { readCrmErasureReview } from '../crm-operations/privacy-previews.js'
 import { createCrmImportFileCleanupService } from '../crm-operations/import-file-cleanup-service.js'
-import { listCrmRetentionRuns } from '../crm-operations/retention-service.js'
+import { createCrmRetentionService, listCrmRetentionRuns } from '../crm-operations/retention-service.js'
 import { listCrmAddressSuppression } from '../crm-operations/suppression-tombstones.js'
 import { readCrmManagedMailboxPolicy, readCrmMailboxIntegrationGrant } from '../crm-operations/delivery-policy.js'
 import { query } from '../db/client.js'
@@ -339,7 +340,7 @@ export function crmOperationsRoutes(options: Options): Router {
       return
     }
     try {
-      res.json(await options.readStore.listSubmissions(ctx.workspaceId, filters.data))
+      res.json(await options.readStore.listSubmissions(ctx.workspaceId, filters.data, ctx.actor))
     } catch (error) { writeError(res, error) }
   })
 
@@ -352,7 +353,7 @@ export function crmOperationsRoutes(options: Options): Router {
       return
     }
     try {
-      const submission = await options.readStore.getSubmission(ctx.workspaceId, submissionId.data)
+      const submission = await options.readStore.getSubmission(ctx.workspaceId, submissionId.data, ctx.actor)
       if (!submission) res.status(404).json({ error: 'not_found' })
       else res.json({ submission })
     } catch (error) { writeError(res, error) }
@@ -371,7 +372,7 @@ export function crmOperationsRoutes(options: Options): Router {
     }
     try {
       const attachment = await options.readStore.getSubmissionAttachment(
-        ctx.workspaceId, ids.data.submissionId, ids.data.attachmentId,
+        ctx.workspaceId, ids.data.submissionId, ids.data.attachmentId, ctx.actor,
       )
       if (!attachment) {
         res.status(404).json({ error: 'not_found' })
@@ -436,7 +437,7 @@ export function crmOperationsRoutes(options: Options): Router {
       res.status(400).json({ error: 'invalid_input', issues: contactId.error.issues })
       return
     }
-    try { res.json(await options.readStore.getConsent(ctx.workspaceId, contactId.data)) }
+    try { res.json(await options.readStore.getConsent(ctx.workspaceId, contactId.data, ctx.actor)) }
     catch (error) { writeError(res, error) }
   })
 
@@ -483,7 +484,7 @@ export function crmOperationsRoutes(options: Options): Router {
     }
     try {
       res.json(await options.readStore.checkSendability(
-        ctx.workspaceId, contactId.data, query.data.channel, query.data.purposeKey,
+        ctx.workspaceId, contactId.data, query.data.channel, query.data.purposeKey, ctx.actor,
       ))
     } catch (error) { writeError(res, error) }
   })
@@ -551,7 +552,7 @@ export function crmOperationsRoutes(options: Options): Router {
       return
     }
     try {
-      res.json(await options.readStore.previewSegment(ctx.workspaceId, segmentId.data, query.data))
+      res.json(await options.readStore.previewSegment(ctx.workspaceId, segmentId.data, query.data, ctx.actor))
     } catch (error) { writeError(res, error) }
   })
 
@@ -621,7 +622,7 @@ export function crmOperationsRoutes(options: Options): Router {
       return
     }
     try {
-      res.json(await options.readStore.listEntitlements(ctx.workspaceId, filters.data))
+      res.json(await options.readStore.listEntitlements(ctx.workspaceId, filters.data, ctx.actor))
     } catch (error) { writeError(res, error) }
   })
 
@@ -689,7 +690,7 @@ export function crmOperationsRoutes(options: Options): Router {
       return
     }
     try {
-      res.json(await options.readStore.listParticipation(ctx.workspaceId, filters.data))
+      res.json(await options.readStore.listParticipation(ctx.workspaceId, filters.data, ctx.actor))
     } catch (error) { writeError(res, error) }
   })
 
@@ -1046,7 +1047,8 @@ export function crmOperationsRoutes(options: Options): Router {
       const query=z.object({format:z.enum(['crm-operations-privacy-v1','crm-privacy-v2']).default('crm-operations-privacy-v1')}).strict().parse(req.query)
       if(query.format==='crm-privacy-v2') {await sendCrmPrivacyExport(res,ctx);return}
       res.setHeader('Content-Disposition','attachment; filename="crm-operations-'+ctx.workspaceId+'.json"')
-      res.json(await exportCrmOperationsPrivacy(ctx.workspaceId))
+      res.setHeader('Cache-Control','no-store')
+      res.json(await exportCrmOperationsPrivacy(ctx))
     } catch (error) { writeError(res, error) }
   })
   router.get('/:workspaceId/operations/contacts/:contactId/privacy-export',async(req,res)=>{
@@ -1059,6 +1061,16 @@ export function crmOperationsRoutes(options: Options): Router {
     } catch(error) {writeError(res,error)}
   })
 
+  router.get('/:workspaceId/operations/privacy/erasure-previews/:previewId',async(req,res)=>{
+    const ctx=await context(req,res)
+    if(!ctx)return
+    try {
+      z.object({}).strict().parse(req.query)
+      const review=await readCrmErasureReview(ctx,CrmOperationsUuidSchema.parse(req.params.previewId))
+      res.setHeader('Cache-Control','no-store')
+      res.json(review)
+    }catch(error){writeError(res,error)}
+  })
   router.post('/:workspaceId/operations/privacy/erasure-preview',async(req,res)=>{
     const ctx=await context(req,res)
     if(!ctx)return
@@ -1118,6 +1130,11 @@ export function crmOperationsRoutes(options: Options): Router {
       res.setHeader('Cache-Control','no-store');res.json({...result.record,duplicate:result.duplicate})
     }catch(error){writeError(res,error)}
   })
+  router.get('/:workspaceId/operations/retention/reviews/:id',async(req,res)=>{
+    const ctx=await context(req,res);if(!ctx)return
+    try {res.setHeader('Cache-Control','no-store');res.json(await createCrmRetentionService().read!(ctx,CrmOperationsUuidSchema.parse(req.params.id)))}
+    catch(error){writeError(res,error)}
+  })
   router.get('/:workspaceId/operations/retention/runs',async(req,res)=>{
     const ctx=await context(req,res);if(!ctx)return
     try {res.setHeader('Cache-Control','no-store');res.json(await listCrmRetentionRuns(ctx,CrmPageQuerySchema.parse(req.query)))}
@@ -1137,7 +1154,7 @@ export function crmOperationsRoutes(options: Options): Router {
       return
     }
     try {
-      res.json(await pruneCrmOperationsRetention(ctx.workspaceId, new Date(body.data.before)))
+      res.json(await pruneCrmOperationsRetention(ctx, new Date(body.data.before)))
     } catch (error) { writeError(res, error) }
   })
 

@@ -206,6 +206,7 @@ function withinExecutingCaller(scope:ResolvedTurnScope):ResolvedTurnScope {
   const bounded=intersectAccessCeilings(own,{
     ...own,
     workspaceId:parent.workspaceId??own.workspaceId,userId:parent.userId??own.userId,
+    departmentRead:parent.departmentRead,
     clearance:parent.clearance,
     compartments:parent.compartments===undefined?own.compartments:parent.compartments,
     mutationCompartments:parent.mutationCompartments===undefined?own.mutationCompartments:parent.mutationCompartments,

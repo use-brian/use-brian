@@ -1,11 +1,14 @@
 import { createHmac, randomUUID } from 'node:crypto'
 import { afterAll, describe, expect, it } from 'vitest'
 import { getAppPool, getPool } from '../client.js'
+import { runWithAgentAccess } from '../agent-access-context.js'
 import { createAssociationStore } from '../association-store.js'
 import { createAssociationWorkspaceModulesStore } from '../../association/workspace-module.js'
 import { EventInputSchema, MembershipCheckoutCreateSchema, MembershipCheckoutProviderBindingSchema, MembershipInputSchema, OrderCreateSchema, PlanInputSchema, PromotionImportSchema, PromotionInputSchema, TicketInputSchema } from '../../association/domain.js'
-import { ProviderEntitlementEventSchema } from '@use-brian/core'
+import { ProviderEntitlementEventSchema, type CrmOperationsContext } from '@use-brian/core'
 import { createProviderEntitlementInbox } from '../../association/provider-entitlements.js'
+import { assertCrmPrivacySubjectAuthority } from '../../crm-operations/privacy-subject-authority.js'
+import { createCrmPrivacyService } from '../../crm-operations/privacy-previews.js'
 
 const { assertLocalFixture } = await import(new URL('../../../../../scripts/crm/local-fixture.mjs', import.meta.url).href)
 await assertLocalFixture()
@@ -53,6 +56,83 @@ async function fixture() {
 
 describe('[COMP:crm/association-promotions] canonical discount authority', () => {
   afterAll(async () => { await pool.end(); await appPool.end() })
+  it('captures complete imported usage without letting contact declassification lower its floor', async () => {
+    const f = await fixture(), department = randomUUID(), custodian = randomUUID()
+    await pool.query('INSERT INTO users(id,auth_provider_id) VALUES($1::uuid,$1::text)', [custodian])
+    await pool.query("INSERT INTO workspace_members(workspace_id,user_id,role) VALUES($1,$2,'member')", [f.workspaceId, custodian])
+    await pool.query("INSERT INTO workspace_groups(id,workspace_id,name,created_by,kind,key,compartment_key) VALUES($1::uuid,$2,'Cedar',$3,'team',$1::text,$4)", [department, f.workspaceId, custodian, `team:${department}`])
+    await pool.query("INSERT INTO workspace_compartments(workspace_id,key,label,managed_by,managed_ref_id) VALUES($1,$2,'Cedar','team',$3)", [f.workspaceId, `team:${department}`, department])
+    await pool.query('UPDATE entities SET compartments=$2 WHERE id=$1', [f.buyerId, [`team:${department}`]])
+    const input = PromotionImportSchema.parse({ importJobId: randomUUID(), importRow: 1, source: 'fixture', sourceSite: 'events.example', sourcePromotionId: 'archive-offer',
+      codeDigest: createHmac('sha256', promotionHmacKey).update('ARCHIVE').digest('hex'),
+      promotion: { key: 'archive', name: 'Archived offer', discountType: 'percentage', percentageBasisPoints: 1000, targetKind: 'event', targetIds: [f.eventId], status: 'active' },
+      sourceRedeemedUses: 2, sourceContactUses: [{ contactId: f.buyerId, uses: 2 }],
+    })
+    const actor = { credentialKind: 'import' as const, credentialId: input.importJobId, actingUserId: f.userId }
+    await expect(commerce.importPromotion(f.workspaceId, input, actor)).rejects.toMatchObject({ code: 'not_authorized' })
+    expect((await pool.query('SELECT count(*)::int n FROM association_promotions WHERE workspace_id=$1', [f.workspaceId])).rows[0].n).toBe(0)
+    const grant = () => pool.query("INSERT INTO department_edges(workspace_id,department_id,principal_kind,user_id,clearance,origin) VALUES($1,$2,'user',$3,'internal','store')", [f.workspaceId, department, f.userId])
+    await grant()
+    const saved = await commerce.importPromotion(f.workspaceId, input, actor)
+    expect(saved.record).toMatchObject({ sourceRedeemedUses: 2, redeemedUses: 2 })
+    await expect(pool.query("UPDATE association_promotions SET scope_snapshot=jsonb_set(scope_snapshot,'{compartments}','[]') WHERE id=$1", [saved.record.id])).rejects.toThrow('immutable')
+    await pool.query("UPDATE entities SET compartments='{}' WHERE id=$1", [f.buyerId])
+    await pool.query('DELETE FROM department_edges WHERE department_id=$1 AND user_id=$2', [department, f.userId])
+    expect((await commerce.importPromotion(f.workspaceId, input, actor)).record).toMatchObject({ id: saved.record.id, sourceRedeemedUses: null, redeemedUses: null })
+    const privacyClient = await pool.connect()
+    try {
+      await privacyClient.query('BEGIN')
+      await expect(assertCrmPrivacySubjectAuthority(privacyClient, {
+        workspaceId: f.workspaceId, actor: { kind: 'user', userId: f.userId },
+        authority: { role: 'owner', canWrite: true, canConfigure: true, trustedIdentitySources: [] },
+      }, f.buyerId)).rejects.toMatchObject({ code: 'not_authorized' })
+    } finally { await privacyClient.query('ROLLBACK'); privacyClient.release() }
+    await grant()
+    expect((await commerce.importPromotion(f.workspaceId, input, actor)).record).toMatchObject({ id: saved.record.id, sourceRedeemedUses: 2, redeemedUses: 2 })
+    expect((await pool.query('SELECT count(*)::int n FROM association_promotion_source_contact_uses WHERE workspace_id=$1', [f.workspaceId])).rows[0].n).toBe(1)
+    await expect(pool.query("UPDATE association_promotions SET scope_sources='[]',scope_sources_minimized=true WHERE id=$1", [saved.record.id])).rejects.toThrow('attribution erasure')
+    const privacy = createCrmPrivacyService(), context: CrmOperationsContext = {
+      workspaceId: f.workspaceId, actor: { kind: 'user', userId: f.userId },
+      authority: { role: 'owner', canWrite: true, canConfigure: true, trustedIdentitySources: [] },
+    }
+    const review = await privacy.preview(context, { kind: 'preview_contact_erasure', contactId: f.buyerId })
+    await privacy.erase(context, { kind: 'erase_contact_with_preview', contactId: f.buyerId, previewId: review.id, previewHash: review.previewHash, confirmed: true })
+    const minimized = (await pool.query('SELECT scope_snapshot,scope_sources,scope_sources_minimized FROM association_promotions WHERE id=$1', [saved.record.id])).rows[0]
+    expect(minimized).toMatchObject({ scope_snapshot: { compartments: [`team:${department}`] }, scope_sources: [], scope_sources_minimized: true })
+    expect(JSON.stringify(minimized)).not.toContain(f.buyerId)
+    expect((await commerce.importPromotion(f.workspaceId, input, actor)).record).toMatchObject({ sourceRedeemedUses: 2, redeemedUses: 2 })
+    expect((await pool.query('SELECT contact_id FROM association_promotion_source_contact_uses WHERE promotion_id=$1', [saved.record.id])).rows).toEqual([{ contact_id: null }])
+    await pool.query('DELETE FROM department_edges WHERE department_id=$1 AND user_id=$2', [department, f.userId])
+    expect((await commerce.importPromotion(f.workspaceId, input, actor)).record).toMatchObject({ sourceRedeemedUses: null, redeemedUses: null })
+    await grant()
+    expect((await commerce.importPromotion(f.workspaceId, input, actor)).record).toMatchObject({ sourceRedeemedUses: 2, redeemedUses: 2 })
+    const partialJobId = randomUUID()
+    const partial = await commerce.importPromotion(f.workspaceId, PromotionImportSchema.parse({
+      ...input, importJobId: partialJobId, sourcePromotionId: 'partial-offer',
+      codeDigest: createHmac('sha256', promotionHmacKey).update('PARTIAL').digest('hex'),
+      promotion: { ...input.promotion, key: 'partial' }, sourceContactUses: [{ contactId: f.secondBuyerId, uses: 1 }],
+    }), { ...actor, credentialId: partialJobId })
+    expect(partial.record).toMatchObject({ sourceRedeemedUses: null, redeemedUses: null })
+    expect((await pool.query('SELECT scope_snapshot,scope_sources FROM association_promotions WHERE id=$1', [partial.record.id])).rows[0])
+      .toEqual({ scope_snapshot: null, scope_sources: null })
+  })
+  it('withholds totals without hiding promotion settings when a contributing order becomes inaccessible', async () => {
+    const f = await fixture(), promotion = await f.savePromotion(), order = await f.order(), department = randomUUID(), custodian = randomUUID()
+    await pool.query('INSERT INTO users(id,auth_provider_id) VALUES($1::uuid,$1::text)', [custodian])
+    await pool.query("INSERT INTO workspace_members(workspace_id,user_id,role) VALUES($1,$2,'member')", [f.workspaceId, custodian])
+    await pool.query("INSERT INTO workspace_groups(id,workspace_id,name,created_by,kind,key,compartment_key) VALUES($1::uuid,$2,'Cedar',$3,'team',$1::text,$4)", [department, f.workspaceId, custodian, `team:${department}`])
+    await pool.query("INSERT INTO workspace_compartments(workspace_id,key,label,managed_by,managed_ref_id) VALUES($1,$2,'Cedar','team',$3)", [f.workspaceId, `team:${department}`, department])
+    const list = () => commerce.listPromotions(f.workspaceId, { limit: 100, cursor: null }, f.actor)
+    expect((await list()).items).toMatchObject([{ id: promotion.record.id, reservedUses: 1, redeemedUses: 0 }])
+    await pool.query('UPDATE entities SET compartments=$2 WHERE id=$1', [f.buyerId, [`team:${department}`]])
+    expect((await list()).items).toMatchObject([{ id: promotion.record.id, name: 'Example promotion', reservedUses: null, redeemedUses: null, sourceRedeemedUses: null }])
+    expect((await f.savePromotion({ name: 'Updated promotion' })).record).toMatchObject({ id: promotion.record.id, name: 'Updated promotion', reservedUses: null, redeemedUses: null })
+    await expect(f.savePromotion({ maxUses: 1 })).rejects.toMatchObject({ code: 'not_authorized' })
+    await pool.query("INSERT INTO department_edges(workspace_id,department_id,principal_kind,user_id,clearance,origin) VALUES($1,$2,'user',$3,'internal','store')", [f.workspaceId, department, f.userId])
+    expect((await list()).items).toMatchObject([{ id: promotion.record.id, reservedUses: 1, redeemedUses: 0 }])
+    expect((await f.savePromotion({ maxUses: 1 })).record).toMatchObject({ maxUses: 1, reservedUses: 1 })
+    expect((await pool.query('SELECT state FROM association_promotion_uses WHERE order_id=$1', [order.record.id])).rows[0].state).toBe('reserved')
+  })
 
   it('prices a percentage code once, stores no plaintext and replays by normalized code identity', async () => {
     const f = await fixture(), promotion = await f.savePromotion(), key = randomUUID()
@@ -81,8 +161,9 @@ describe('[COMP:crm/association-promotions] canonical discount authority', () =>
     await expect(f.order()).rejects.toMatchObject({ code: 'promotion_exhausted' })
   })
 
-  it('reserves a recurring plan discount, binds exact provider evidence and redeems it with the entitlement grant', async () => {
+  it('reserves a legacy recurring plan discount, binds exact provider evidence and redeems it with the entitlement grant', async () => {
     const f = await fixture()
+    await pool.query('UPDATE workspaces SET department_read_v2=false WHERE id=$1', [f.workspaceId])
     const plan = await commerce.upsertPlan(f.workspaceId, PlanInputSchema.parse({
       key: 'student-recurring', name: 'Student recurring', currency: 'HKD', feeMinor: 78_000,
       billingPeriod: 'annual', published: true, provider: 'stripe', providerPlanId: 'price_fixture_student',
@@ -131,6 +212,64 @@ describe('[COMP:crm/association-promotions] canonical discount authority', () =>
     expect(granted.record).toMatchObject({ contactId: f.buyerId, planId: plan.record.id, status: 'active' })
     expect((await pool.query('SELECT status FROM association_membership_checkouts WHERE id=$1', [checkoutId])).rows[0].status).toBe('paid')
     expect((await pool.query('SELECT state FROM association_promotion_uses WHERE membership_checkout_id=$1', [checkoutId])).rows[0].state).toBe('redeemed')
+  })
+
+  it('[COMP:crm/association-source-scope] protects checkout creation, replay, binding and the settled membership floor under v2', async () => {
+    const f = await fixture(), departmentId = randomUUID()
+    await pool.query('UPDATE workspaces SET department_read_v2=true WHERE id=$1', [f.workspaceId])
+    await pool.query("INSERT INTO workspace_members(workspace_id,user_id,role) VALUES($1,$2,'member')", [f.workspaceId, f.secondBuyerId])
+    await pool.query("INSERT INTO workspace_groups(id,workspace_id,name,created_by,kind,key,compartment_key) VALUES($1::uuid,$2,'Fictional checkout department',$3,'team',$1::text,$4)", [departmentId, f.workspaceId, f.secondBuyerId, `team:${departmentId}`])
+    await pool.query("INSERT INTO workspace_compartments(workspace_id,key,label,managed_by,managed_ref_id) VALUES($1,$2,'Fictional checkout department','team',$3)", [f.workspaceId, `team:${departmentId}`, departmentId])
+    await pool.query("UPDATE entities SET sensitivity='confidential',compartments=$2 WHERE id=$1", [f.buyerId, [`team:${departmentId}`]])
+    const plan = await commerce.upsertPlan(f.workspaceId, PlanInputSchema.parse({ key: 'protected-recurring', name: 'Fictional recurring', currency: 'USD', feeMinor: 1000,
+      billingPeriod: 'annual', published: true, provider: 'stripe', providerPlanId: 'price_fictional_scope' }), f.actor)
+    await commerce.upsertPromotion(f.workspaceId, PromotionInputSchema.parse({ key: 'protected-discount', name: 'Fictional discount', code: 'FICTIONAL-SCOPE',
+      discountType: 'fixed_amount', amountMinor: 100, currency: 'USD', targetKind: 'plan', targetIds: [String(plan.record.id)], status: 'active' }), f.actor)
+    const input = MembershipCheckoutCreateSchema.parse({ contactId: f.buyerId, planId: plan.record.id, idempotencyKey: randomUUID(), promotionCode: 'FICTIONAL-SCOPE' })
+    const reserve = () => commerce.reserveMembershipCheckout(f.workspaceId, input, f.actor)
+    await expect(reserve()).rejects.toMatchObject({ code: 'not_authorized' })
+    expect((await pool.query('SELECT count(*)::int n FROM association_membership_checkouts WHERE workspace_id=$1', [f.workspaceId])).rows[0].n).toBe(0)
+    expect((await pool.query('SELECT count(*)::int n FROM association_promotion_uses WHERE workspace_id=$1', [f.workspaceId])).rows[0].n).toBe(0)
+    await pool.query("INSERT INTO department_edges(workspace_id,department_id,principal_kind,user_id,clearance,origin) VALUES($1,$2,'user',$3,'confidential','store')", [f.workspaceId, departmentId, f.userId])
+    const reserved = await reserve(), checkoutId = String(reserved.record.id)
+    expect((await reserve()).created).toBe(false)
+    await pool.query("UPDATE entities SET sensitivity='internal',compartments='{}' WHERE id=$1", [f.buyerId])
+    const backend = { credentialKind: 'brain_key' as const, credentialId: randomUUID(), actingUserId: f.userId }
+    const run = <T>(operation: () => T) => runWithAgentAccess({ workspaceId: f.workspaceId, userId: f.userId, clearance: 'confidential', compartments: null, projectIds: null, visibilityAssistantIds: null,
+      departmentRead: { workspaceId: f.workspaceId, userId: f.userId, assistantId: null, base: 'confidential', departments: { [departmentId]: 'confidential' }, contextDepartment: null, binding: null, cap: null } }, operation)
+    const binding = MembershipCheckoutProviderBindingSchema.parse({ provider: 'stripe', providerReference: 'cs_fictional_scope', providerCouponReference: 'coupon_fictional_scope', amountMinor: 900, currency: 'USD' })
+    await expect(commerce.bindMembershipCheckoutProvider(f.workspaceId, checkoutId, binding, backend)).rejects.toMatchObject({ code: 'not_authorized' })
+    await run(() => commerce.bindMembershipCheckoutProvider(f.workspaceId, checkoutId, binding, backend))
+    const now = new Date(), event = ProviderEntitlementEventSchema.parse({ provider: 'stripe', eventId: randomUUID(), providerReference: 'sub_fictional_scope',
+      providerPeriodId: 'checkout:cs_fictional_scope', occurredAt: now.toISOString(),
+      membershipCheckout: { id: checkoutId, providerCheckoutReference: binding.providerReference, providerCouponReference: binding.providerCouponReference, amountMinor: 900, currency: 'USD' },
+      command: { kind: 'grant_entitlement', contactId: f.buyerId, planId: plan.record.id, idempotencyKey: randomUUID(), status: 'active', startsAt: now.toISOString(),
+        endsAt: new Date(now.getTime() + 86400000).toISOString(), renewalMode: 'auto', provider: 'stripe', providerEntitlementId: 'sub_fictional_scope', providerPeriodId: 'checkout:cs_fictional_scope' } })
+    const granted = await run(() => commerce.reconcileProviderEntitlement(f.workspaceId, event, backend))
+    const membership = (await pool.query('SELECT scope_snapshot,membership_checkout_id FROM association_memberships WHERE id=$1', [granted.record.id])).rows[0]
+    expect(membership).toMatchObject({ membership_checkout_id: checkoutId, scope_snapshot: { sensitivity: 'confidential', compartments: [`team:${departmentId}`] } })
+    expect(await run(() => commerce.reconcileProviderEntitlement(f.workspaceId, event, backend))).toMatchObject({ created: false })
+    const another = await commerce.reserveMembershipCheckout(f.workspaceId, { ...input, idempotencyKey: randomUUID() }, f.actor)
+    const secondBinding = { ...binding, providerReference: 'cs_fictional_other', providerCouponReference: 'coupon_fictional_other' }
+    await run(() => commerce.bindMembershipCheckoutProvider(f.workspaceId, String(another.record.id), secondBinding, backend))
+    const rebound = ProviderEntitlementEventSchema.parse({ ...event, eventId: randomUUID(), membershipCheckout: {
+      ...event.membershipCheckout, id: another.record.id, providerCheckoutReference: secondBinding.providerReference, providerCouponReference: secondBinding.providerCouponReference } })
+    await expect(run(() => commerce.reconcileProviderEntitlement(f.workspaceId, rebound, backend))).rejects.toMatchObject({ code: 'idempotency_conflict' })
+    expect((await pool.query('SELECT status FROM association_membership_checkouts WHERE id=$1', [another.record.id])).rows[0].status).toBe('provider_bound')
+    await pool.query('DELETE FROM department_edges WHERE workspace_id=$1 AND department_id=$2 AND user_id=$3', [f.workspaceId, departmentId, f.userId])
+    await expect(reserve()).rejects.toMatchObject({ code: 'not_authorized' })
+    await expect(run(() => commerce.bindMembershipCheckoutProvider(f.workspaceId, checkoutId, binding, backend))).rejects.toMatchObject({ code: 'not_authorized' })
+    await expect(run(() => commerce.reconcileProviderEntitlement(f.workspaceId, event, backend))).rejects.toMatchObject({ code: 'not_authorized' })
+    expect(await commerce.listMemberships(f.workspaceId, f.buyerId, {}, f.actor)).toEqual([])
+    expect((await pool.query('SELECT count(*)::int n FROM association_memberships WHERE workspace_id=$1', [f.workspaceId])).rows[0].n).toBe(1)
+    // Even an independently weaker child envelope cannot bypass its saved parent.
+    await pool.query(`UPDATE association_memberships SET scope_snapshot=scope_snapshot || '{"sensitivity":"internal","compartments":[]}'::jsonb,
+      scope_sources=(SELECT jsonb_agg(s || '{"sensitivity":"internal","compartments":[]}'::jsonb) FROM jsonb_array_elements(scope_sources) s) WHERE id=$1`, [granted.record.id])
+    expect(await commerce.listMemberships(f.workspaceId, f.buyerId, {}, f.actor)).toEqual([])
+    await pool.query("INSERT INTO department_edges(workspace_id,department_id,principal_kind,user_id,clearance,origin) VALUES($1,$2,'user',$3,'confidential','store')", [f.workspaceId, departmentId, f.userId])
+    await pool.query('UPDATE association_membership_checkouts SET scope_snapshot=NULL,scope_sources=NULL WHERE id=$1', [checkoutId])
+    await expect(reserve()).rejects.toMatchObject({ code: 'not_authorized' })
+    expect(await commerce.listMemberships(f.workspaceId, f.buyerId, {}, f.actor)).toEqual([])
   })
 
   it('applies approved buy-one-get-one terms only when quantity qualifies', async () => {

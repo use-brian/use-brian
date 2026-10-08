@@ -16,8 +16,8 @@ type Team = { id: string; name: string };
  * The membership fetch carries the user's access_token so the backend
  * applies RLS. A fetch error leaves the list empty and falls through to
  * /teams, which re-fetches and renders real workspaces (or bounces to
- * /login). A genuinely empty list is effectively unreachable — every
- * user has a Personal workspace auto-created at signup.
+ * /login). An empty list is valid after workspace deletion or leaving; the picker
+ * offers workspace creation.
  *
  * Signed out, the destination depends on the edition — see
  * `lib/oss-entry.ts`. The hosted edition goes to /login for Google OAuth;

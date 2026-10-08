@@ -49,6 +49,7 @@ import { cn } from "@/lib/utils";
 import type { ProvenanceRow, ProvenanceSourceKind } from "@/lib/api/provenance";
 import { useWorkspaceContext } from "@/lib/workspace-context";
 import { ReclassifyContextButton } from "@/components/context/reclassify-context-dialog";
+import { useLeasedResource } from "@/lib/offline/surface-content-cache";
 
 function BrainEntityInner({
   workspaceId,
@@ -76,7 +77,7 @@ function BrainEntityInner({
   // change. `getEntity` answers `null` on a non-OK response (and evicts the
   // IDB copy on 401 / 403 / 404), so a cold `error` is a network failure
   // with no cache scope: not-found, never a skeleton forever.
-  const cached = useCachedResource<EntityRollup | null>(
+  const cached = useLeasedResource<EntityRollup | null>(
     activeId ? brainEntityCacheKey(activeId, entityId) : null,
     () => getEntity(entityId, activeId ?? "", null, cacheScope),
   );

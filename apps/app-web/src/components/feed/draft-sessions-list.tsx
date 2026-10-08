@@ -68,6 +68,7 @@ import {
   type FeedPlatformSessions,
 } from "@/lib/feed-surface-cache";
 import { notifyFeedPostsChanged } from "@/lib/feed-posts-events";
+import { useLeasedResource } from "@/lib/offline/surface-content-cache";
 
 type FeedPageDict = ReturnType<typeof useT>["feedPage"];
 
@@ -281,7 +282,7 @@ export function DraftSessionsList(props: { platform?: FeedPlatform } = {}) {
   const sessionsKey = assistantId
     ? feedSessionsCacheKey(team.workspaceId, platform)
     : null;
-  const sessionsResource = useCachedResource<FeedPlatformSessions>(
+  const sessionsResource = useLeasedResource<FeedPlatformSessions>(
     sessionsKey,
     () =>
       loadFeedPlatformSessions({

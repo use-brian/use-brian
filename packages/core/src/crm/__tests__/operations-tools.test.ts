@@ -1,6 +1,6 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest'
 import {
-  createCrmOperationsTools,
+  createCrmOperationsTools, createCrmCredentialTools, createExecutionContext, executionToolContext,
   type CrmOperationsContext,
   type CrmOperationsReadPort,
   type CrmOperationsServicePort,
@@ -104,13 +104,13 @@ describe('[COMP:crm/operations-tools] canonical CRM operation tools', () => {
     expect(reads.listSubmissions).toHaveBeenCalledWith(WORKSPACE_ID, {
       status: 'new', definitionKey: 'website_contact', ownerUserId: undefined, limit: 20,
       cursor: undefined, createdAfter: undefined, createdBefore: undefined,
-    })
+    }, { kind: 'assistant', assistantId: ASSISTANT_ID, userId: USER_ID, sessionId: SESSION_ID })
   })
 
   it('forwards effective access filters while keeping the returned raw lifecycle status', async () => {
     vi.mocked(reads.listEntitlements).mockResolvedValueOnce({ entitlements: [{ status: 'active', isEffective: false }], nextCursor: null })
     const result = await tools.listCrmEntitlements.execute({ active_only: true, effective_at: '2026-01-01T00:00:00Z' }, context())
-    expect(reads.listEntitlements).toHaveBeenCalledWith(WORKSPACE_ID, expect.objectContaining({ activeOnly: true, effectiveAt: '2026-01-01T00:00:00Z' }))
+    expect(reads.listEntitlements).toHaveBeenCalledWith(WORKSPACE_ID, expect.objectContaining({ activeOnly: true, effectiveAt: '2026-01-01T00:00:00Z' }), { kind: 'assistant', assistantId: ASSISTANT_ID, userId: USER_ID, sessionId: SESSION_ID })
     expect(result.data).toEqual({ entitlements: [{ status: 'active', isEffective: false }], nextCursor: null })
   })
 
@@ -173,6 +173,16 @@ describe('[COMP:crm/operations-tools] canonical CRM operation tools', () => {
     await expect(tools.updateCrmEntitlement.resolveConfirmation!(context(), {
       entitlement_id: CONTACT_ID, status: 'cancelled',
     })).resolves.toBe(true)
+  })
+
+  it('preserves assistant and programmatic principals for participation discovery', async () => {
+    const input = { limit: 10 }
+    await tools.listCrmParticipation.execute(input, context())
+    expect(reads.listParticipation).toHaveBeenLastCalledWith(WORKSPACE_ID, expect.objectContaining({ limit: 10 }),
+      { kind: 'assistant', assistantId: ASSISTANT_ID, userId: USER_ID, sessionId: SESSION_ID })
+    await tools.listCrmParticipation.execute(input, context({ programmaticPrincipal: { kind: 'brain_key', credentialId: CREDENTIAL_ID } }))
+    expect(reads.listParticipation).toHaveBeenLastCalledWith(WORKSPACE_ID, expect.any(Object),
+      { kind: 'brain_key', credentialId: CREDENTIAL_ID })
   })
 
   it('uses stable generic ids and excludes commerce fields from participation writes', async () => {
@@ -238,6 +248,26 @@ describe('[COMP:crm/operations-tools] Managed delivery adapters',()=>{
     await tools.sendCrmMessage.execute(input,ctx)
     expect(execute).toHaveBeenLastCalledWith(expect.objectContaining({actor:{kind:'brain_key',credentialId:CONTACT_ID},authority:expect.objectContaining({nativeDelivery:{assistantId:ctx.assistantId,compartments:['team:product'],mutationCompartments:[],projectIds:[]}})}),expect.objectContaining({...input,kind:'send_message',cc:[],bcc:[]}))
   })
+  it('pins the trusted execution department and visibility ceiling into native delivery context',async()=>{
+    const department='00000000-0000-4000-8000-000000000007'
+    const execution=createExecutionContext({
+      identity:{kind:'attended',principal:{kind:'workspace_member',userId:USER_ID}},
+      ownership:{kind:'workspace',workspaceId:WORKSPACE_ID},
+      access:{workspaceId:WORKSPACE_ID,userId:USER_ID,assistantId:ASSISTANT_ID,assistantKind:'standard',
+        clearance:'internal',compartments:null,mutationCompartments:null,projectIds:[],visibilityAssistantIds:[ASSISTANT_ID],
+        departmentRead:{workspaceId:WORKSPACE_ID,userId:USER_ID,assistantId:ASSISTANT_ID,base:'public',
+          departments:{[department]:'internal'},contextDepartment:department,binding:[department],cap:'internal'}},
+      writeDefaults:{compartments:[],projectIds:[]},
+      authority:{assertCurrent:async()=>{},execute:async operation=>operation()},
+      lifecycle:{sessionId:SESSION_ID,channelType:'web',channelId:'fixture',abortSignal:new AbortController().signal},
+    })
+    const ctx=context({...executionToolContext(execution,{appId:'fixture'}),activeCapabilities:new Set(['crm','home_app:crm:write'])})
+    await tools.sendCrmMessage.execute(input,ctx)
+    const saved=execute.mock.calls[0][0].authority.nativeDelivery!.authoringAuthority!
+    expect(saved.ceiling.departmentRead).toEqual(execution.security.ceiling.departmentRead)
+    expect(saved.ceiling.projectIds).toEqual([])
+    expect(saved.ceiling.visibilityAssistantIds).toEqual([ASSISTANT_ID])
+  })
   it('refuses a revoked CRM child grant on direct invocation before the command',async()=>{
     expect(await tools.sendCrmMessage.execute(input,context({activeCapabilities:new Set(['crm'])}))).toMatchObject({isError:true,data:{error:'not_authorized'}})
     expect(execute).not.toHaveBeenCalled()
@@ -248,5 +278,42 @@ describe('[COMP:crm/operations-tools] Managed delivery adapters',()=>{
     expect(await receiptTools.getCrmDelivery.execute({deliveryId:input.deliveryId},context({activeCapabilities:new Set(['crm','home_app:crm:read'])}))).toMatchObject({data:{receipt:null}})
     expect(get).toHaveBeenCalledWith(expect.anything(),input.deliveryId)
     expect(execute).not.toHaveBeenCalled()
+  })
+})
+
+
+describe('[COMP:crm/operations-tools] credential lifecycle tools', () => {
+  const preview = vi.fn(async () => ({ choices: [], validForMs: 30000 }))
+  const create = vi.fn(async () => ({ id: CREDENTIAL_ID, oneTimeSecret: 'fictional-once-only' }))
+  const list = vi.fn(async () => ({ credentials: [], nextCursor: null }))
+  const revoke = vi.fn(async () => ({ revoked: true }))
+  const native = createCrmCredentialTools({ preview, create, list, revoke })
+  const capabilities = ['configure', 'crm', 'home_app:crm:write']
+  const attended = () => context({ assistantKind: 'primary', clearance: 'internal', compartments: null,
+    mutationCompartments: null, projectIds: [], visibilityAssistantIds: null, activeCapabilities: new Set(capabilities) })
+  const request = { requestId: CONTACT_ID, label: 'Fictional reader', expiresAt: '2099-01-01T00:00:00Z',
+    grants: [{ operation: 'crm.records.read', selectors: {} }], departmentBinding: { departmentIds: [], cap: 'internal' } }
+  it('requires every capability and trusted attended authoring before calling the port', async () => {
+    for (const missing of capabilities) {
+      expect(await native.createCrmCredential.execute(request, { ...attended(), activeCapabilities: new Set(capabilities.filter(cap => cap !== missing)) }))
+        .toMatchObject({ isError: true, data: { error: 'not_authorized' } })
+    }
+    for (const ctx of [context({ activeCapabilities: new Set(capabilities) }),
+      { ...attended(), channelType: 'workflow' as const },
+      { ...attended(), programmaticPrincipal: { kind: 'brain_key' as const, credentialId: CREDENTIAL_ID } }]) {
+      expect(await native.createCrmCredential.execute(request, ctx)).toMatchObject({ isError: true, data: { error: 'not_authorized' } })
+    }
+    expect(create).not.toHaveBeenCalled()
+  })
+  it('keeps model input separate from pinned authority and requires a stable issuance identity', async () => {
+    expect(await native.createCrmCredential.execute({ ...request, requestId: undefined }, attended())).toMatchObject({ isError: true, data: { error: 'invalid_input' } })
+    expect(await native.createCrmCredential.execute({ ...request, authoringAuthority: {} }, attended())).toMatchObject({ isError: true, data: { error: 'invalid_input' } })
+    expect(await native.createCrmCredential.execute(request, attended())).toMatchObject({ data: { id: CREDENTIAL_ID, oneTimeSecret: 'fictional-once-only' } })
+    expect(create).toHaveBeenCalledWith(request, expect.objectContaining({ assistantId: ASSISTANT_ID,
+      ceiling: expect.objectContaining({ workspaceId: WORKSPACE_ID, userId: USER_ID, projectIds: [] }) }), undefined)
+    await native.previewCrmCredentialBindings.execute({}, attended())
+    await native.listCrmCredentials.execute({}, attended())
+    await native.revokeCrmCredential.execute({ credentialId: CREDENTIAL_ID }, attended())
+    expect(preview).toHaveBeenCalledOnce(); expect(list).toHaveBeenCalledOnce(); expect(revoke).toHaveBeenCalledOnce()
   })
 })

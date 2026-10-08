@@ -1,7 +1,7 @@
 import { randomUUID } from 'node:crypto'
 import { readFile } from 'node:fs/promises'
 import { afterAll, describe, expect, it } from 'vitest'
-import type { AccessContext } from '@use-brian/core'
+import type { AccessContext, DepartmentReadGrant } from '@use-brian/core'
 import { getPool, getAppPool, queryWithRLS } from '../client.js'
 import { runWithAgentAccess } from '../agent-access-context.js'
 import { createDeal } from '../crm.js'
@@ -15,7 +15,7 @@ const floorColumns = ['user_id','assistant_id','sensitivity','compartments','pro
 async function fixture() {
   const workspaceId=randomUUID(),userId=randomUUID(),memberId=randomUUID(),assistantId=randomUUID(),projectId=randomUUID()
   for(const id of [userId,memberId]) await pool.query('INSERT INTO users(id,auth_provider_id) VALUES($1::uuid,$1::text)',[id])
-  await pool.query("INSERT INTO workspaces(id,name,owner_user_id) VALUES($1,'Activity scope fixture',$2)",[workspaceId,userId])
+  await pool.query("INSERT INTO workspaces(id,name,owner_user_id,department_read_v2) VALUES($1,'Activity scope fixture',$2,false)",[workspaceId,userId])
   await pool.query("INSERT INTO workspace_members(workspace_id,user_id,role,clearance,team_scope_mode) VALUES($1,$2,'owner','confidential','assigned'),($1,$3,'member','internal','assigned')",[workspaceId,userId,memberId])
   await pool.query("INSERT INTO assistants(id,name,workspace_id,owner_user_id,kind) VALUES($1,'Fixture assistant',$2,$3,'standard')",[assistantId,workspaceId,userId])
   await pool.query("INSERT INTO workspace_projects(id,workspace_id,name,normalized_name,created_by) VALUES($1,$2,'Fixture','fixture',$3)",[projectId,workspaceId,userId])
@@ -28,6 +28,34 @@ async function fixture() {
 
 describe('[COMP:crm/activity-scope] retained history audience',()=>{
   afterAll(async()=>{await getAppPool().end();await pool.end()})
+
+  it('uses current departmental clearance for timeline and direct RLS history instead of the base tier',async()=>{
+    const f=await fixture()
+    await pool.query('UPDATE workspaces SET department_read_v2=true WHERE id=$1',[f.workspaceId])
+    await pool.query("INSERT INTO department_edges(workspace_id,department_id,principal_kind,user_id,clearance,origin) VALUES($1,$2,'user',$3,'confidential','store') ON CONFLICT DO NOTHING",[f.workspaceId,f.team.id,f.memberId])
+    await pool.query("UPDATE entities SET sensitivity='confidential',compartments=$2,project_ids=$3 WHERE id=$1",[f.deal.id,[f.team.compartmentKey],[f.projectId]])
+    const row=(await pool.query("INSERT INTO crm_activities(workspace_id,entity_id,activity_type,summary) VALUES($1,$2,'note','Fictional department history') RETURNING id",[f.workspaceId,f.deal.id])).rows[0]
+    const grant:DepartmentReadGrant={workspaceId:f.workspaceId,userId:f.memberId,assistantId:null,base:'internal',departments:{[f.team.id]:'confidential'},contextDepartment:null,binding:null,cap:null}
+    const ctx={...f.ctx,userId:f.memberId,assistantId:'',clearance:'confidential' as const,compartments:null,projectIds:null,departmentRead:grant}
+    const raw=()=>runWithAgentAccess(ctx,()=>queryWithRLS(f.memberId,'SELECT id FROM crm_activities WHERE id=$1',[row.id]))
+    expect((await raw()).rows).toEqual([{id:row.id}])
+    expect((await runWithAgentAccess(ctx,()=>listCrmTimeline({ctx,entityId:f.deal.id})))?.map(item=>item.id)).toEqual([row.id])
+    await pool.query("UPDATE entities SET sensitivity='internal',compartments='{}',project_ids='{}' WHERE id=$1",[f.deal.id])
+    await pool.query("UPDATE department_edges SET expires_at=clock_timestamp()-interval '1 second' WHERE department_id=$1 AND user_id=$2",[f.team.id,f.memberId])
+    expect((await raw()).rows).toEqual([])
+    expect(await runWithAgentAccess(ctx,()=>listCrmTimeline({ctx,entityId:f.deal.id}))).toEqual([])
+    await pool.query("UPDATE workspace_members SET clearance='confidential' WHERE workspace_id=$1 AND user_id=$2",[f.workspaceId,f.memberId])
+    await pool.query("UPDATE department_edges SET clearance='internal',expires_at=NULL WHERE department_id=$1 AND user_id=$2",[f.team.id,f.memberId])
+    expect((await raw()).rows).toEqual([])
+    await pool.query("UPDATE department_edges SET clearance='confidential' WHERE department_id=$1 AND user_id=$2",[f.team.id,f.memberId])
+    expect((await raw()).rows).toEqual([{id:row.id}])
+    expect((await runWithAgentAccess({...ctx,departmentRead:{...grant,binding:[]}},()=>queryWithRLS(f.memberId,'SELECT id FROM crm_activities WHERE id=$1',[row.id]))).rows).toEqual([])
+    await pool.query("INSERT INTO department_edges(workspace_id,department_id,principal_kind,assistant_id,clearance,origin) VALUES($1,$2,'assistant',$3,'internal','store') ON CONFLICT DO NOTHING",[f.workspaceId,f.team.id,f.assistantId])
+    await pool.query("UPDATE department_edges SET clearance='internal' WHERE department_id=$1 AND assistant_id=$2",[f.team.id,f.assistantId])
+    expect((await runWithAgentAccess({...ctx,departmentRead:{...grant,assistantId:f.assistantId}},()=>queryWithRLS(f.memberId,'SELECT id FROM crm_activities WHERE id=$1',[row.id]))).rows).toEqual([])
+    await pool.query('DELETE FROM workspace_members WHERE workspace_id=$1 AND user_id=$2',[f.workspaceId,f.memberId])
+    expect((await raw()).rows).toEqual([])
+  })
 
   it.each(['department','sensitivity','private_user','private_assistant','project'] as const)('preserves %s protection after the parent audience broadens',async axis=>{
     const f=await fixture(),reader={...f.ctx}

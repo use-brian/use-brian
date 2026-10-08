@@ -1,5 +1,13 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest'
 import type { AccessCeiling, ScopeEvidence, WorkflowRecord, WorkflowRunRecord } from '@use-brian/core'
+vi.mock('../../db/client.js', () => ({ getPool: () => ({
+  query: async (sql: string, params: unknown[]) => {
+    if (!sql.includes('read_resource_page_dependencies') || !(params[1] as string[]).every(kind => kind === 'memory')) {
+      throw new Error('Unexpected publication fixture source lookup')
+    }
+    return { rows: (params[1] as string[]).map(() => ({ dependencies: [] })) }
+  },
+}) }))
 vi.mock('../../db/derived-scope-store.js', async original => ({
   ...await original<typeof import('../../db/derived-scope-store.js')>(),
   readCurrentScopeSources: vi.fn(async () => []),

@@ -1,3 +1,5 @@
+import { captureCrmDeliveryScope } from '../../crm-operations/delivery-source-authority.js'
+import { loadDepartmentSnapshot, resolveDepartmentReadGrant } from '../../context-scope/department-resolver.js'
 import { randomUUID } from 'node:crypto'
 import express from 'express'
 import request from 'supertest'
@@ -78,6 +80,41 @@ afterAll(async()=>{await pool.end();await appPool.end()})
 describe('[COMP:crm/delivery-receipts] Durable email acceptance and replay',()=>{
   afterEach(()=>{vi.unstubAllGlobals();vi.clearAllMocks();smtp.sendMail.mockResolvedValue({rejected:[]})})
 
+  it('retains receipt floors through declassification, redaction and exact replay without redispatch',async()=>{
+    const f=await fixture(),department=randomUUID(),custodian=randomUUID(),{deliveries}=make(),send=transport()
+    await pool.query('INSERT INTO users(id,auth_provider_id) VALUES($1::uuid,$1::text)',[custodian])
+    await pool.query("INSERT INTO workspace_members(workspace_id,user_id,role) VALUES($1,$2,'member')",[f.workspaceId,custodian])
+    await pool.query("INSERT INTO workspace_groups(id,workspace_id,name,created_by,kind,key,compartment_key) VALUES($1::uuid,$2,'Cedar',$3,'team',$1::text,$4)",[department,f.workspaceId,custodian,`team:${department}`])
+    await pool.query("INSERT INTO workspace_compartments(workspace_id,key,label,managed_by,managed_ref_id) VALUES($1,$2,'Cedar','team',$3)",[f.workspaceId,`team:${department}`,department])
+    const edge=()=>pool.query("INSERT INTO department_edges(workspace_id,department_id,principal_kind,user_id,clearance,origin) VALUES($1,$2,'user',$3,'internal','store')",[f.workspaceId,department,f.userId])
+    const revoke=()=>pool.query('DELETE FROM department_edges WHERE department_id=$1 AND user_id=$2',[department,f.userId])
+    await edge()
+    await pool.query('UPDATE entities SET compartments=$2 WHERE id=$1',[f.contactId,[`team:${department}`]])
+    await f.consent()
+    await pool.query("UPDATE entities SET compartments='{}' WHERE id=$1",[f.contactId])
+    expect((await deliveries.send(f.context,f.command)).receipt.status).toBe('sent')
+    const saved=(await pool.query('SELECT scope_snapshot,scope_sources FROM crm_delivery_receipts WHERE workspace_id=$1',[f.workspaceId])).rows[0]
+    expect(saved.scope_snapshot.compartments).toEqual([`team:${department}`])
+    expect(saved.scope_sources.some((source:{resourceKind:string})=>source.resourceKind==='consent')).toBe(true)
+    await expect(pool.query('UPDATE crm_delivery_receipts SET scope_snapshot=NULL,scope_sources=NULL WHERE workspace_id=$1',[f.workspaceId])).rejects.toThrow(/immutable/)
+    const accepted=await auditCount(f.workspaceId)
+    await revoke()
+    await expect(deliveries.get(f.context,f.command.deliveryId)).rejects.toMatchObject({code:'not_authorized'})
+    await expect(deliveries.send(f.context,f.command)).rejects.toMatchObject({code:'not_authorized'})
+    expect(await auditCount(f.workspaceId)).toBe(accepted)
+    expect(send).toHaveBeenCalledTimes(1)
+    await edge();await f.erase()
+    expect((await pool.query('SELECT scope_snapshot,scope_sources FROM crm_delivery_receipts WHERE workspace_id=$1',[f.workspaceId])).rows)
+      .toEqual([{scope_snapshot:saved.scope_snapshot,scope_sources:[]}])
+    await revoke()
+    await expect(deliveries.get(f.context,f.command.deliveryId)).rejects.toMatchObject({code:'not_authorized'})
+    await expect(deliveries.send(f.context,f.command)).rejects.toMatchObject({code:'not_authorized'})
+    await edge()
+    expect(await deliveries.get(f.context,f.command.deliveryId)).toMatchObject({status:'sent',providerReceipt:null})
+    expect(await deliveries.send(f.context,f.command)).toMatchObject({duplicate:true,receipt:{status:'sent',providerReceipt:null}})
+    expect(send).toHaveBeenCalledTimes(1)
+  })
+
   it.each(['gmail','imap','agentmail'] as const)('uses the actual %s gate, records acceptance once and returns a content-free replay',async provider=>{
     const f=await fixture(provider),{deliveries,service}=make(),send=transport()
     const result=await service.execute(f.context,f.command)
@@ -153,7 +190,7 @@ describe('[COMP:crm/delivery-receipts] Durable email acceptance and replay',()=>
   it('redacts accepted envelope and links through erasure and data reset without reopening delivery ids',async()=>{
     const f=await fixture(),{deliveries}=make(),send=transport()
     await deliveries.send(f.context,f.command)
-    const exported=await exportCrmOperationsPrivacy(f.workspaceId)
+    const exported=await exportCrmOperationsPrivacy(f.context)
     expect(exported.tables.crm_delivery_receipts).toHaveLength(1)
     expect(exported.tables.crm_delivery_receipts![0]).not.toHaveProperty('claim_token')
     await f.erase()
@@ -165,8 +202,10 @@ describe('[COMP:crm/delivery-receipts] Durable email acceptance and replay',()=>
   })
   it('preserves an abandoned claim, expires it to uncertainty, and forbids resetting immutable state',async()=>{
     const f=await fixture(),{deliveries}=make(),send=transport()
-    await pool.query("INSERT INTO crm_delivery_receipts(workspace_id,delivery_id,request_hash,connector_instance_id,provider_key,purpose_key,actor_kind,actor_credential_id,acting_user_id,envelope,status,claim_token,claim_deadline) VALUES($1,$2,$3,$4,'outreach','updates','user',$5::text,$5::uuid,$6::jsonb,'dispatching',$7,clock_timestamp()-interval '1 second')",
-      [f.workspaceId,f.command.deliveryId,crmOperationsSha256(f.command),f.connectorInstanceId,f.userId,JSON.stringify(f.command),randomUUID()])
+    const sourceClient=await pool.connect()
+    const evidence=await captureCrmDeliveryScope(sourceClient,f.context,[f.contactId],'updates').finally(()=>sourceClient.release())
+    await pool.query("INSERT INTO crm_delivery_receipts(workspace_id,delivery_id,request_hash,connector_instance_id,provider_key,purpose_key,actor_kind,actor_credential_id,acting_user_id,envelope,status,claim_token,claim_deadline,scope_snapshot,scope_sources) VALUES($1,$2,$3,$4,'outreach','updates','user',$5::text,$5::uuid,$6::jsonb,'dispatching',$7,clock_timestamp()-interval '1 second',$8::jsonb,$9::jsonb)",
+      [f.workspaceId,f.command.deliveryId,crmOperationsSha256(f.command),f.connectorInstanceId,f.userId,JSON.stringify(f.command),randomUUID(),JSON.stringify(evidence!.scope),JSON.stringify(evidence!.sources)])
     expect(await deliveries.get(f.context,f.command.deliveryId)).toMatchObject({status:'needs_reconciliation',errorCode:'delivery_claim_expired'})
     expect((await deliveries.send(f.context,f.command)).duplicate).toBe(true)
     expect(send).not.toHaveBeenCalled()
@@ -212,6 +251,29 @@ describe('[COMP:crm/delivery-receipts] Durable email acceptance and replay',()=>
     expect(send).not.toHaveBeenCalled()
     expect((await pool.query('SELECT * FROM crm_delivery_receipts WHERE workspace_id=$1',[f.workspaceId])).rowCount).toBe(0)
   })
+  it('renews bound assistant Project limits for direct delivery dispatch and saved receipt reads', async () => {
+    const f = await fixture(), { deliveries } = make(), send = transport(), project = randomUUID(), assistantId = randomUUID()
+    await pool.query('INSERT INTO workspace_projects(id,workspace_id,name,normalized_name,created_by) VALUES($1,$2,$3,lower($3),$4)', [project, f.workspaceId, 'Fictional delivery project', f.userId])
+    await pool.query('UPDATE entities SET project_ids=ARRAY[$2::uuid] WHERE id=$1', [f.contactId, project])
+    await pool.query("INSERT INTO assistants(id,workspace_id,name,kind,clearance,project_scope_mode) VALUES($1,$2,'Fictional delivery assistant','primary','internal','all')", [assistantId, f.workspaceId])
+    const credential = await keys.create(f.workspaceId, f.userId, { label: 'Fictional bound sender', expiresAt: '2099-01-01T00:00:00Z',
+      departmentBinding: { departmentIds: [], cap: 'internal', assistantId },
+      grants: ['crm.delivery.dispatch', 'crm.delivery.read'].map(operation => ({ operation: operation as 'crm.delivery.dispatch' | 'crm.delivery.read', selectors: { purposeKeys: ['updates'], providerKeys: ['outreach'] } })) })
+    await f.grant(credential.id)
+    const context = crmIntegrationContext((await keys.authenticate(credential.oneTimeSecret))!)
+    expect((await deliveries.send(context, f.command)).receipt.status).toBe('sent')
+    await pool.query("UPDATE assistants SET project_scope_mode='assigned' WHERE id=$1", [assistantId])
+    await expect(deliveries.get(context, f.command.deliveryId)).rejects.toMatchObject({ code: 'not_authorized' })
+    const second = { ...f.command, deliveryId: randomUUID() }
+    await expect(deliveries.send(context, second)).rejects.toMatchObject({ code: 'not_authorized' })
+    expect(send).toHaveBeenCalledTimes(1)
+    expect((await pool.query('SELECT delivery_id FROM crm_delivery_receipts WHERE workspace_id=$1', [f.workspaceId])).rowCount).toBe(1)
+    await pool.query('INSERT INTO assistant_project_grants(assistant_id,project_id,added_by_user_id) VALUES($1,$2,$3)', [assistantId, project, f.userId])
+    expect((await deliveries.get(context, f.command.deliveryId))?.status).toBe('sent')
+    expect((await deliveries.send(context, second)).receipt.status).toBe('sent')
+    expect(send).toHaveBeenCalledTimes(2)
+  })
+
   it('requires a separate exact mailbox grant and independent receipt-read authority for integrations',async()=>{
     const f=await fixture(),{deliveries,service}=make(),send=transport()
     const credential=await keys.create(f.workspaceId,f.userId,{label:'Delivery fixture',expiresAt:'2099-01-01T00:00:00Z',
@@ -241,7 +303,9 @@ describe('[COMP:crm/delivery-receipts] Durable email acceptance and replay',()=>
       else await pool.query("UPDATE crm_integration_credentials SET created_at=clock_timestamp()-interval '2 days',expires_at=clock_timestamp()-interval '1 second' WHERE id=$1",[credential.id])
       return prepared
     })
-    expect((await deliveries.send(ctx,f.command)).receipt.status).toBe('blocked')
+    if(change==='expire_credential')await expect(deliveries.send(ctx,f.command)).rejects.toMatchObject({code:'credential_revoked'})
+    else expect((await deliveries.send(ctx,f.command)).receipt.status).toBe('blocked')
+    expect((await pool.query('SELECT status FROM crm_delivery_receipts WHERE workspace_id=$1',[f.workspaceId])).rows).toEqual([{status:'blocked'}])
     expect(send).not.toHaveBeenCalled()
   })
   it('isolates receipt reads under app RLS and actual member/integration routes',async()=>{
@@ -293,11 +357,57 @@ async function nativeFixture(provider:'gmail'|'imap'|'agentmail'='gmail') {
     await pool.query('INSERT INTO channel_assistants(channel_id,assistant_id) VALUES($1,$2)',[channelId,assistantId])
   }
   const context:CrmOperationsContext={workspaceId:f.workspaceId,actor:{kind:'assistant',assistantId,userId:f.userId,sessionId:randomUUID()},authority:{role:'member',canWrite:true,canConfigure:false,trustedIdentitySources:[],nativeDelivery:{assistantId,compartments:null,mutationCompartments:null,projectIds:null}}}
-  return {...f,assistantId,governance,nativeContext:context}
+  const refreshAuthority=async()=>{
+  const input={workspaceId:f.workspaceId,userId:f.userId,assistantId}
+  const {snapshot,principal}=await loadDepartmentSnapshot(<R>(sql:string,values:unknown[])=>pool.query(sql,values) as unknown as Promise<{rows:R[]}>,input)
+  context.authority.nativeDelivery!.authoringAuthority={version:1,assistantId,ceiling:{workspaceId:f.workspaceId,userId:f.userId,
+    clearance:'confidential',compartments:null,mutationCompartments:null,projectIds:null,visibilityAssistantIds:null,
+    departmentRead:resolveDepartmentReadGrant(snapshot,principal,input,new Date())}}
+  }
+  await refreshAuthority()
+  return {...f,assistantId,governance,nativeContext:context,refreshAuthority}
 }
 
 describe('[COMP:crm/delivery-policy] Native dispatch authority at the real provider boundary',()=>{
   afterEach(()=>{vi.unstubAllGlobals();vi.clearAllMocks();smtp.sendMail.mockResolvedValue({rejected:[]})})
+  it('requires frozen and current recipient evidence authority before preparation and final handoff',async()=>{
+    const f=await nativeFixture(),department=randomUUID(),custodian=randomUUID()
+    await pool.query('INSERT INTO users(id,auth_provider_id) VALUES($1::uuid,$1::text)',[custodian])
+    await pool.query("INSERT INTO workspace_members(workspace_id,user_id,role) VALUES($1,$2,'member')",[f.workspaceId,custodian])
+    await pool.query("INSERT INTO workspace_groups(id,workspace_id,name,created_by,kind,key,compartment_key) VALUES($1::uuid,$2,'Cedar',$3,'team',$1::text,$4)",[department,f.workspaceId,custodian,`team:${department}`])
+    await pool.query("INSERT INTO workspace_compartments(workspace_id,key,label,managed_by,managed_ref_id) VALUES($1,$2,'Cedar','team',$3)",[f.workspaceId,`team:${department}`,department])
+    const edge=()=>pool.query("INSERT INTO department_edges(workspace_id,department_id,principal_kind,assistant_id,clearance,origin) VALUES($1,$2,'assistant',$3,'internal','store') ON CONFLICT DO NOTHING",[f.workspaceId,department,f.assistantId])
+    await pool.query("INSERT INTO department_edges(workspace_id,department_id,principal_kind,user_id,clearance,origin) VALUES($1,$2,'user',$3,'internal','store')",[f.workspaceId,department,f.userId])
+    await edge()
+    await pool.query('UPDATE entities SET compartments=$2 WHERE id=$1',[f.contactId,[`team:${department}`]])
+    await f.consent()
+    await pool.query("UPDATE entities SET compartments='{}' WHERE id=$1",[f.contactId])
+    const prepare=vi.fn(production),{deliveries}=make(prepare),send=transport()
+    // A later edge cannot widen the earlier frozen General execution ceiling.
+    await expect(deliveries.send(f.nativeContext,f.command)).rejects.toMatchObject({code:'not_authorized'})
+    await f.refreshAuthority()
+    const authority=f.nativeContext.authority.nativeDelivery!.authoringAuthority
+    delete f.nativeContext.authority.nativeDelivery!.authoringAuthority
+    await expect(deliveries.send(f.nativeContext,f.command)).rejects.toMatchObject({code:'not_authorized'})
+    f.nativeContext.authority.nativeDelivery!.authoringAuthority=authority
+    await pool.query('DELETE FROM department_edges WHERE department_id=$1 AND assistant_id=$2',[department,f.assistantId])
+    await expect(deliveries.send(f.nativeContext,f.command)).rejects.toMatchObject({code:'not_authorized'})
+    expect(prepare).not.toHaveBeenCalled()
+    expect((await pool.query('SELECT delivery_id FROM crm_delivery_receipts WHERE workspace_id=$1',[f.workspaceId])).rows).toEqual([])
+    await edge()
+    const finalLoss=make(async(admission,command)=>{
+      const ready=await production(admission,command)
+      await pool.query('DELETE FROM department_edges WHERE department_id=$1 AND assistant_id=$2',[department,f.assistantId])
+      return ready
+    }).deliveries
+    await expect(finalLoss.send(f.nativeContext,f.command)).rejects.toMatchObject({code:'not_authorized'})
+    expect((await pool.query('SELECT status,error_code FROM crm_delivery_receipts WHERE workspace_id=$1',[f.workspaceId])).rows).toEqual([{status:'blocked',error_code:'not_authorized'}])
+    expect(send).not.toHaveBeenCalled()
+    await edge()
+    // Explicit fresh delivery identity is safe because the first receipt proves no handoff.
+    expect(await deliveries.send(f.nativeContext,{...f.command,deliveryId:randomUUID()})).toMatchObject({receipt:{status:'sent'}})
+    expect(send).toHaveBeenCalledTimes(1)
+  })
   it.each(['gmail','imap','agentmail'] as const)('sends through %s once with the actual assistant audit identity',async provider=>{
     const f=await nativeFixture(provider),{deliveries}=make(),send=transport()
     expect(await deliveries.send(f.nativeContext,f.command)).toMatchObject({receipt:{status:'sent'},duplicate:false})
@@ -324,12 +434,16 @@ describe('[COMP:crm/delivery-policy] Native dispatch authority at the real provi
   it.each(['capability','action','setting','membership','exposure','policy','context'] as const)('refuses changed %s authority before any provider preparation',async changed=>{
     const f=await nativeFixture(),prepare=vi.fn(production),{deliveries}=make(prepare)
     if(changed==='capability') await pool.query("UPDATE assistant_capabilities SET revoked_at=now() WHERE assistant_id=$1 AND capability='home_app:crm:write'",[f.assistantId])
-    if(changed==='action') await pool.query('DELETE FROM assistant_connector_grants WHERE assistant_id=$1',[f.assistantId])
+    if(changed==='action') await pool.query("UPDATE assistant_connector_grants SET allowed_actions='{}' WHERE assistant_id=$1",[f.assistantId])
     if(changed==='setting') await pool.query('INSERT INTO assistant_connector_settings(assistant_id,connector_id,enabled) VALUES($1,$2,false)',[f.assistantId,`gmail:${f.connectorInstanceId}`])
     if(changed==='membership') await pool.query('DELETE FROM workspace_members WHERE workspace_id=$1 AND user_id=$2',[f.workspaceId,f.userId])
     if(changed==='exposure') await pool.query("UPDATE connector_instance SET scope='user',workspace_id=NULL,user_id=$2 WHERE id=$1",[f.connectorInstanceId,f.userId])
     if(changed==='policy') await pool.query("INSERT INTO workspace_tool_policy(workspace_id,server_name,tool_name,policy) VALUES($1,'gmail','gmailSendMessage','block')",[f.workspaceId])
-    if(changed==='context') f.nativeContext.authority.nativeDelivery!.compartments=[]
+    if(changed==='context') {
+      const team=await createDbWorkspaceGroupStore().createTeam(f.userId,f.workspaceId,{name:'Restricted delivery fixture',key:'restricted-delivery-fixture'})
+      await pool.query('UPDATE connector_instance SET compartments=$2 WHERE id=$1',[f.connectorInstanceId,[team.compartmentKey!]])
+      f.nativeContext.authority.nativeDelivery!.compartments=[]
+    }
     await expect(deliveries.send(f.nativeContext,f.command)).rejects.toMatchObject({code:'not_authorized'})
     expect(prepare).not.toHaveBeenCalled()
   })
@@ -337,7 +451,7 @@ describe('[COMP:crm/delivery-policy] Native dispatch authority at the real provi
     const f=await nativeFixture(),send=transport()
     const prepare:PrepareCrmDelivery=async(admission,command)=>{
       const ready=await production(admission,command)
-      await pool.query('DELETE FROM assistant_connector_grants WHERE assistant_id=$1',[f.assistantId])
+      await pool.query("UPDATE assistant_connector_grants SET allowed_actions='{}' WHERE assistant_id=$1",[f.assistantId])
       return ready
     }
     const {deliveries}=make(prepare)
@@ -345,15 +459,16 @@ describe('[COMP:crm/delivery-policy] Native dispatch authority at the real provi
     expect(send).not.toHaveBeenCalled()
     expect(await deliveries.get(f.nativeContext,f.command.deliveryId)).toMatchObject({status:'blocked'})
   })
-  it('does not extend a primary Gmail grant to another account',async()=>{
+  it('does not override an explicit account denial with a primary Gmail grant',async()=>{
     const f=await nativeFixture(),extra=randomUUID()
     await pool.query(`INSERT INTO connector_instance(id,scope,workspace_id,provider,label,connected,connected_email,credentials,created_at)
       SELECT $2,scope,workspace_id,provider,'Extra mailbox',connected,'extra@example.com',credentials,created_at+interval '1 hour' FROM connector_instance WHERE id=$1`,[f.connectorInstanceId,extra])
     await f.run({kind:'save_managed_mailbox_policy',connectorInstanceId:extra,providerKey:'outreach_extra',expectedVersion:0,confirmed:true,managed:true,purposeKeys:['updates']})
+    await pool.query("INSERT INTO assistant_connector_grants(assistant_id,connector_id,allowed_actions,granted_by_user_id) VALUES($1,$2,'{}',$3)",[f.assistantId,`gmail:${extra}`,f.userId])
     const prepare=vi.fn(production),{deliveries}=make(prepare)
     await expect(deliveries.send(f.nativeContext,{...f.command,connectorInstanceId:extra})).rejects.toMatchObject({code:'not_authorized'})
     expect(prepare).not.toHaveBeenCalled()
-    await pool.query('INSERT INTO assistant_connector_grants(assistant_id,connector_id,allowed_actions,granted_by_user_id) VALUES($1,$2,$3,$4)',[f.assistantId,`gmail:${extra}`,['gmailSendMessage'],f.userId])
+    await pool.query('INSERT INTO assistant_connector_grants(assistant_id,connector_id,allowed_actions,granted_by_user_id) VALUES($1,$2,$3,$4) ON CONFLICT(assistant_id,connector_id) DO UPDATE SET allowed_actions=EXCLUDED.allowed_actions',[f.assistantId,`gmail:${extra}`,['gmailSendMessage'],f.userId])
     const send=transport()
     expect(await deliveries.send(f.nativeContext,{...f.command,connectorInstanceId:extra})).toMatchObject({receipt:{status:'sent'}})
     expect(send).toHaveBeenCalledTimes(1)

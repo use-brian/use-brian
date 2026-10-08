@@ -25,12 +25,15 @@ export function ContextScopeChips({
   const t = useT().contextScope;
   const selectedTeams = teams.filter((item) => (teamIds ?? (teamId ? [teamId] : [])).includes(item.id));
   const selectedProjects = projects.filter((item) => (projectIds ?? (projectId ? [projectId] : [])).includes(item.id));
-  if (selectedTeams.length === 0 && selectedProjects.length === 0 && !hasRestrictedContext) {
+  const unknownDepartment = (teamIds ?? (teamId ? [teamId] : [])).some((id) => !teams.some((team) => team.id === id));
+  const restricted = hasRestrictedContext || unknownDepartment;
+  if (selectedTeams.length === 0 && selectedProjects.length === 0 && !restricted) {
     return <span className="text-xs text-muted-foreground">{t.general}</span>;
   }
   return (
     <div className="flex flex-wrap items-center gap-1.5">
-      {hasRestrictedContext ? (
+      {selectedTeams.length === 0 && !restricted ? <span className="text-xs text-muted-foreground">{t.general}</span> : null}
+      {restricted ? (
         <span className="inline-flex items-center gap-1 rounded-full border border-border bg-muted/50 px-2 py-0.5 text-xs">
           <Users className="size-3" aria-hidden />{t.restricted}
         </span>

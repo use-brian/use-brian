@@ -13,6 +13,7 @@
  *    write an `auto_approved` AUDIT row (auto ≠ invisible).
  */
 import type { BrowserSkillContract } from './effect-contract.js'
+import type { BrowserProfile } from './profiles.js'
 
 // ── The block artifact ─────────────────────────────────────────
 
@@ -139,6 +140,8 @@ export function createInMemoryBrowserSkillStore(): BrowserSkillStore & {
 // ── Block-scoped grants (R2-2) ─────────────────────────────────
 
 export type BrowserSkillGrant = {
+  /** NULL for legacy grants without an exact reviewed version. */
+  skillVersion?: number | null
   id: string
   workspaceId: string
   skillId: string
@@ -171,6 +174,7 @@ export interface BrowserSkillGrantStore {
   /** Drift voids the grant (R2-2): the block deviated, the review is stale. */
   void(id: string, reason: string): Promise<void>
   create(params: {
+    skillVersion?: number
     workspaceId: string
     skillId: string
     profileId: string
@@ -180,7 +184,7 @@ export interface BrowserSkillGrantStore {
     expiresAt?: string | null
   }): Promise<BrowserSkillGrant>
   list(params: { workspaceId: string; profileId?: string }): Promise<BrowserSkillGrant[]>
-  revoke(id: string): Promise<void>
+  revoke(id: string, expectedProfile?: BrowserProfile): Promise<void>
 }
 
 /** In-memory grants for tests; production uses `browser_skill_grants`. */
@@ -226,6 +230,7 @@ export function createInMemoryBrowserSkillGrantStore(opts?: {
     async create(params) {
       const grant: BrowserSkillGrant & { usesLastHour: number[] } = {
         id: `grant-${++counter}`,
+        skillVersion: params.skillVersion ?? null,
         workspaceId: params.workspaceId,
         skillId: params.skillId,
         profileId: params.profileId,
@@ -257,6 +262,8 @@ export function createInMemoryBrowserSkillGrantStore(opts?: {
 // ── The async approvals bridge ─────────────────────────────────
 
 export type BlockApprovalStatus =
+  /** Effective gate result only: current authority is unavailable. Never persisted. */
+  | 'unavailable'
   | 'pending'
   | 'approved'
   | 'rejected'
@@ -265,6 +272,8 @@ export type BlockApprovalStatus =
   | 'auto_approved'
 
 export type BlockSendApprovalPayload = {
+  /** Absent on legacy approval rows; those cannot create a standing grant. */
+  skillVersion?: number
   skillId: string
   skillName: string
   profileId: string

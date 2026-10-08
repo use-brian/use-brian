@@ -1,5 +1,7 @@
 "use client";
 
+import { buttonVariants } from "@/components/ui/button";
+
 /** Canonical PDF session editor. The immutable source paints through PDF.js;
  * every editable surface is a DOM projection of the Office PDF snapshot.
  * [COMP:app-web/office-pdf-editor] */
@@ -41,7 +43,7 @@ type PdfEditorProps = {
 type Tool = "text" | "date" | "checkmark" | "image" | "signature";
 type Drag = { overlay: PdfOverlay; x: number; y: number; mode: "move" | "resize" };
 
-const button = "inline-flex min-h-11 items-center justify-center gap-1.5 rounded-md border bg-background px-3 text-xs font-medium hover:bg-muted disabled:cursor-not-allowed disabled:opacity-50 sm:min-h-9";
+const button = buttonVariants({ variant: "outline", size: "sm", className: "max-md:min-h-11" });
 
 function safePdfName(title: string): string {
   const stem = title.replace(/[\\/:*?"<>|\u0000-\u001f]/g, "-").trim().slice(0, 120) || "edited-pdf";
@@ -262,7 +264,7 @@ export function PdfEditor(props: PdfEditorProps) {
       <ToolButton label={t.addCheckmark} icon={<Check />} disabled={!canEdit || busy} onClick={() => addOverlay("checkmark")} />
       <ToolButton label={t.addImage} icon={<FileImage />} disabled={!canEdit || busy} onClick={() => { pendingImageKind.current = "image"; imageInput.current?.click(); }} />
       <ToolButton label={t.addSignature} icon={<PenLine />} disabled={!canEdit || busy} onClick={() => void addSignature()} />
-      <span className={cn("ml-auto rounded-full px-2 py-1 text-xs", seconds <= 300 ? "bg-amber-100 text-amber-950" : "bg-muted text-muted-foreground")}>{expiry}</span>
+      <span className={cn("ml-auto rounded-full px-2 py-1 text-xs", seconds <= 300 ? "bg-amber-500/10 text-amber-800 dark:text-amber-200" : "bg-muted text-muted-foreground")}>{expiry}</span>
       <button type="button" className={button} disabled={!canEdit || busy} onClick={() => void release(true)}><Download className="size-4" />{t.download}</button>
       <button type="button" className={button} disabled={!canEdit || busy} onClick={() => void release(false)}><Save className="size-4" />{t.saveToFiles}</button>
     </div>
@@ -298,7 +300,7 @@ export function PdfEditor(props: PdfEditorProps) {
       </main>
       <aside className="hidden w-56 shrink-0 overflow-y-auto border-l bg-background p-3 xl:block" aria-label={t.fields}>
         <p className="mb-2 text-xs font-semibold">{t.fields}</p>
-        {allFields.length ? allFields.map(({ field, page: fieldPage, index }) => <button type="button" key={field.id} className="mb-1 flex min-h-8 max-sm:min-h-11 w-full items-center rounded px-2 text-left text-xs hover:bg-muted" onClick={() => { setPageId(fieldPage.id); onSelectTargets([field.id]); }}>{index + 1}. {field.label}</button>) : <p className="text-xs text-muted-foreground">{t.noFields}</p>}
+        {allFields.length ? allFields.map(({ field, page: fieldPage, index }) => <button type="button" key={field.id} className={buttonVariants({ variant: "ghost", size: "sm", className: "w-full text-left justify-start" })} onClick={() => { setPageId(fieldPage.id); onSelectTargets([field.id]); }}>{index + 1}. {field.label}</button>) : <p className="text-xs text-muted-foreground">{t.noFields}</p>}
       </aside>
     </div>
     <div className="fixed inset-x-2 bottom-[calc(.5rem+env(safe-area-inset-bottom))] z-30 grid grid-cols-5 gap-1 rounded-xl border bg-background/95 p-1 shadow-lg backdrop-blur md:hidden" aria-label={t.mobileActions}>
@@ -309,7 +311,7 @@ export function PdfEditor(props: PdfEditorProps) {
       <button type="button" className={button} onClick={() => setPageId(snapshot.pages[Math.min(snapshot.pages.length - 1, pageIndex + 1)].id)} disabled={pageIndex === snapshot.pages.length - 1}><ChevronRight className="size-4" /><span className="sr-only">{t.nextPage}</span></button>
     </div>
     {phoneSheet ? <div className="fixed inset-x-2 bottom-[calc(4rem+env(safe-area-inset-bottom))] z-20 max-h-[45dvh] overflow-y-auto rounded-xl border bg-background p-3 shadow-lg md:hidden" data-pdf-phone-sheet={phoneSheet}>
-      {phoneSheet === "pages" ? snapshot.pages.map((candidate, index) => <button type="button" key={candidate.id} className="flex min-h-8 max-sm:min-h-11 w-full items-center rounded px-3 text-left hover:bg-muted" onClick={() => { setPageId(candidate.id); setPhoneSheet(null); }}>{t.page.replace("{page}", String(index + 1))}</button>) : allFields.length ? allFields.map(({ field, page: fieldPage, index }) => <button type="button" key={field.id} className="flex min-h-8 max-sm:min-h-11 w-full items-center rounded px-3 text-left hover:bg-muted" onClick={() => { setPageId(fieldPage.id); onSelectTargets([field.id]); setPhoneSheet(null); }}>{index + 1}. {field.label}</button>) : <p className="text-sm text-muted-foreground">{t.noFields}</p>}
+      {phoneSheet === "pages" ? snapshot.pages.map((candidate, index) => <button type="button" key={candidate.id} className={buttonVariants({ variant: "ghost", size: "sm", className: "w-full text-left justify-start" })} onClick={() => { setPageId(candidate.id); setPhoneSheet(null); }}>{t.page.replace("{page}", String(index + 1))}</button>) : allFields.length ? allFields.map(({ field, page: fieldPage, index }) => <button type="button" key={field.id} className={buttonVariants({ variant: "ghost", size: "sm", className: "w-full text-left justify-start" })} onClick={() => { setPageId(fieldPage.id); onSelectTargets([field.id]); setPhoneSheet(null); }}>{index + 1}. {field.label}</button>) : <p className="text-sm text-muted-foreground">{t.noFields}</p>}
       <div className="mt-2 grid grid-cols-2 gap-2 border-t pt-2"><button type="button" className={button} disabled={!canEdit || busy} onClick={() => void release(true)}>{t.download}</button><button type="button" className={button} disabled={!canEdit || busy} onClick={() => void release(false)}>{t.saveToFiles}</button></div>
       <div className="mt-2 grid grid-cols-2 gap-2"><button type="button" className={button} disabled={!canEdit || busy} onClick={() => { pendingImageKind.current = "image"; imageInput.current?.click(); }}>{t.addImage}</button><button type="button" className={button} disabled={!canEdit || busy} onClick={() => void addSignature()}>{t.addSignature}</button></div>
     </div> : null}
@@ -328,7 +330,7 @@ function ToolButton({ label, icon, disabled, onClick }: { label: string; icon: R
 
 function FieldControl({ field, disabled, onChange, onFocus, t }: { field: PdfField; disabled: boolean; onChange(value: PdfField["value"]): void; onFocus(): void; t: ReturnType<typeof useT>["office"]["pdf"] }) {
   if (field.kind === "signature") return <button type="button" disabled className="size-full border border-dashed border-violet-500 bg-violet-50/70 px-1 text-[10px] text-violet-950">{field.label}</button>;
-  if (field.kind === "checkbox") return <label className="flex size-full min-h-8 max-sm:min-h-11 items-center justify-center gap-1 bg-white/85 text-[10px]"><Checkbox checked={field.value === true} disabled={disabled || field.readOnly} aria-label={field.label} onCheckedChange={(checked) => onChange(checked)} /><span className="sr-only">{field.label}</span></label>;
+  if (field.kind === "checkbox") return <label className="flex size-full min-h-8 max-sm:min-h-11 items-center justify-center gap-1 bg-white/85 text-[10px] max-md:min-h-11 cursor-pointer"><Checkbox checked={field.value === true} disabled={disabled || field.readOnly} aria-label={field.label} onCheckedChange={(checked) => onChange(checked)} /><span className="sr-only">{field.label}</span></label>;
   if (field.kind === "radio" || field.kind === "dropdown") return <Select value={typeof field.value === "string" ? field.value : ""} onValueChange={(value) => onChange(value)} disabled={disabled || field.readOnly}>
     <SelectTrigger className="h-full max-sm:min-h-11 w-full rounded-none bg-white/90 px-1 text-[16px] md:text-sm" aria-label={field.label} onFocus={onFocus}><SelectValue placeholder={field.label} /></SelectTrigger>
     <SelectContent>{(field.allowedOptions ?? []).map((option) => <SelectItem value={option} key={option}>{option}</SelectItem>)}</SelectContent>

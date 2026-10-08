@@ -33,9 +33,10 @@ export function ContextScopePicker({
   const t = useT().contextScope;
   return (
     <div className="grid gap-3 sm:grid-cols-2">
-      {!hideTeam?<label className="grid gap-1.5 text-xs font-medium text-muted-foreground">
+      {!hideTeam?<label className="grid content-start gap-1.5 text-xs font-medium text-muted-foreground">
         {t.team}
         <SearchableSelect
+          className="max-sm:min-h-11"
           value={teamId ?? GENERAL}
           onValueChange={(value) => onTeamChange(value === GENERAL ? null : value)}
           items={[
@@ -48,13 +49,14 @@ export function ContextScopePicker({
           disabled={disabled || teamDisabled}
         />
       </label>:null}
-      <label className="grid gap-1.5 text-xs font-medium text-muted-foreground">
+      <label className="grid content-start gap-1.5 text-xs font-medium text-muted-foreground">
         {t.project}
         <SearchableSelect
+          className="max-sm:min-h-11"
           value={projectId ?? GENERAL}
           onValueChange={(value) => onProjectChange(value === GENERAL ? null : value)}
           items={[
-            { value: GENERAL, label: t.general },
+            { value: GENERAL, label: t.noProject },
             ...projects.filter((project) => project.status === "active").map((project) => ({ value: project.id, label: project.name })),
           ]}
           searchPlaceholder={t.searchProjects}
@@ -62,6 +64,7 @@ export function ContextScopePicker({
           aria-label={t.project}
           disabled={disabled || projectDisabled}
         />
+        <span className="text-xs font-normal">{t.projectAccessHint}</span>
       </label>
     </div>
   );

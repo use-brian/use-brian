@@ -332,6 +332,7 @@ export async function createCompany(
     tags?: string[]
     externalRef?: CrmExternalRef
     sensitivity?: Sensitivity
+    explicitGeneral?: boolean
     compartments?: string[]
     projectIds?: string[]
     source?: 'user' | 'extracted'
@@ -391,6 +392,7 @@ export async function createCompany(
     source: params.source ?? 'user',
     sourceEpisodeId: params.sourceEpisodeId ?? null,
     sourceSessionId: params.sourceSessionId ?? null,
+    explicitGeneral: params.explicitGeneral,
     compartments: params.compartments ?? [],
     projectIds: params.projectIds ?? [],
   }, transaction?.client)
@@ -548,6 +550,7 @@ export async function createContact(
     externalRef?: CrmExternalRef
     stableIdentity?: StableExternalIdentity
     sensitivity?: Sensitivity
+    explicitGeneral?: boolean
     compartments?: string[]
     projectIds?: string[]
     source?: 'user' | 'extracted'
@@ -622,6 +625,7 @@ export async function createContact(
     source: params.source ?? 'user',
     sourceEpisodeId: params.sourceEpisodeId ?? null,
     sourceSessionId: params.sourceSessionId ?? null,
+    explicitGeneral: params.explicitGeneral,
     compartments: params.compartments ?? [],
     projectIds: params.projectIds ?? [],
   }, transaction?.client)
@@ -836,6 +840,7 @@ export async function createDeal(
     closeDate?: Date | null
     externalRef?: CrmExternalRef
     sensitivity?: Sensitivity
+    explicitGeneral?: boolean
     compartments?: string[]
     projectIds?: string[]
     source?: 'user' | 'extracted'
@@ -877,6 +882,7 @@ export async function createDeal(
     source: params.source ?? 'user',
     sourceEpisodeId: params.sourceEpisodeId ?? null,
     sourceSessionId: params.sourceSessionId ?? null,
+    explicitGeneral: params.explicitGeneral,
     compartments: params.compartments ?? [],
     projectIds: params.projectIds ?? [],
   }, transaction?.client)

@@ -129,7 +129,7 @@ export async function findOrCreateUser(params: {
     return { user: existing.rows[0], isNew: false }
   }
 
-  // Create new user + Personal workspace + primary assistant in one txn.
+  // Create new user + signup workspace + primary assistant in one txn.
   // Generate a unique handle with retry on collision (the handle UNIQUE
   // constraint is the only thing that needs retry; everything else is
   // deterministic per-row inside the transaction).
@@ -165,11 +165,11 @@ export async function findOrCreateUser(params: {
 
   // Channel shadows (auth_provider='channel' — public-API visitors like
   // `api:<keyId>:<externalUserId>` AND Telegram/Slack DM end-users) never get
-  // a Personal workspace. They can't log in; their turns run entirely inside
+  // a signup workspace. They can't log in; their turns run entirely inside
   // the bot/assistant's workspace (memory + brain are scoped to
   // `assistant.workspaceId` by the channel + public-API routes, never the
   // shadow's own workspace), and a shadow merge (link-code flows) reassigns
-  // sessions/memories by `user_id` — so a per-shadow personal workspace +
+  // sessions/memories by `user_id` — so a per-shadow signup workspace +
   // primary is dead weight that only pollutes the workspace table (admin list,
   // free-plan cap counts). Excluding them here keeps each customer's API/DM
   // end-users contained in the customer's single workspace.
@@ -180,7 +180,7 @@ export async function findOrCreateUser(params: {
   }
 
   // §9 collapse: every new platform user (Google, email, dev, web-guest) gets a
-  // Personal workspace + a primary assistant inside it. Done in a single
+  // signup workspace + a primary assistant inside it. Done in a single
   // transaction so a partial signup can't leave the user without a workspace
   // home.
   // These values are prefilled in the first onboarding form, so keep them
@@ -197,8 +197,8 @@ export async function findOrCreateUser(params: {
     await client.query('BEGIN')
 
     const wsResult = await client.query<{ id: string }>(
-      `INSERT INTO workspaces (name, purpose, owner_user_id, is_personal)
-       VALUES ($1, $2, $3, true)
+      `INSERT INTO workspaces (name, purpose, owner_user_id)
+       VALUES ($1, $2, $3)
        RETURNING id`,
       [workspaceName, workspacePurpose, user.id],
     )
@@ -227,20 +227,12 @@ export async function findOrCreateUser(params: {
       [workspaceId, user.id],
     )
 
-    // The primary assistant is workspace-bound. owner_user_id stays set so
-    // the legacy assistant_members fan-out still resolves; the workspace
-    // is the canonical owner for new code paths.
+    // Signup uses the same workspace-owned primary as manual creation.
     const assistant = await client.query<{ id: string; clearance: string | null }>(
       `INSERT INTO assistants (name, owner_user_id, workspace_id, kind)
-       VALUES ($1, $2, $3, 'primary')
+       VALUES (workspace_primary_name($1), NULL, $2, 'primary')
        RETURNING id, clearance`,
-      [workspaceName, user.id, workspaceId],
-    )
-
-    await client.query(
-      `INSERT INTO assistant_members (assistant_id, user_id, role)
-       VALUES ($1, $2, 'owner')`,
-      [assistant.rows[0].id, user.id],
+      [workspaceName, workspaceId],
     )
 
     // §17 — primary assistants default-on for the Tasks (Q1) and CRM (Q2)
@@ -621,11 +613,9 @@ export async function setUserStripeCustomerId(
 }
 
 /**
- * Get the user's default assistant. After the §9 collapse, this is the
- * `kind='primary'` assistant of the user's Personal workspace. Falls
- * back to "first owned assistant" for legacy rows that pre-date §9 and
- * haven't been promoted yet — that fallback is defensive and should not
- * fire after migration 110 has run.
+ * Resolve an accessible primary, preferring the account default and then
+ * the oldest workspace membership. A legacy directly owned assistant is a
+ * final fallback. Accounts with no accessible assistants return null.
  */
 export type UserAssistantView = {
   id: string
@@ -649,7 +639,7 @@ export type UserAssistantView = {
 }
 
 export async function getDefaultAssistant(userId: string): Promise<UserAssistantView | null> {
-  // Preferred path: the primary assistant of the user's Personal workspace.
+  // A default is a preference; workspace membership remains the access gate.
   const primary = await query<UserAssistantView>(
     `SELECT a.id, a.name,
             a.workspace_id as "workspaceId",
@@ -664,7 +654,10 @@ export async function getDefaultAssistant(userId: string): Promise<UserAssistant
             a.default_compartments as "defaultCompartments"
      FROM assistants a
      JOIN workspaces w ON w.id = a.workspace_id
-     WHERE w.owner_user_id = $1 AND w.is_personal = true AND a.kind = 'primary'
+     JOIN workspace_members wm ON wm.workspace_id = w.id AND wm.user_id = $1
+     JOIN users u ON u.id = $1
+     WHERE a.kind = 'primary' AND public.assistant_placement_visible($1, a.id)
+     ORDER BY (w.id = u.default_workspace_id) DESC NULLS LAST, w.created_at ASC, w.id ASC
      LIMIT 1`,
     [userId],
   )

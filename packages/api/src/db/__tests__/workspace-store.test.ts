@@ -631,13 +631,14 @@ describe('[COMP:api/workspace-store] createWorkspaceStore', () => {
       expect(await store.transferOwnership('u_owner', 't_missing', 'u_new')).toBe('not_owner')
     })
 
-    it('refuses to transfer a Personal workspace', async () => {
+    it('transfers a formerly personal workspace with the ordinary rules', async () => {
       const { client } = makeTxClient([
         { rows: [{ ...WS_ROW, isPersonal: true }] },
+        { rows: [{ role: 'member' }] },
       ])
-      const result = await store.transferOwnership('u_owner', 't_personal', 'u_new')
-      expect(result).toBe('personal_workspace')
-      expect(client.query.mock.calls.map((c) => c[0])).toContain('ROLLBACK')
+      const result = await store.transferOwnership('u_owner', 't_signup', 'u_new')
+      expect(result).toBe('transferred')
+      expect(client.query.mock.calls.map((c) => c[0])).toContain('COMMIT')
     })
 
     it('returns already_owner when the target is the current owner', async () => {

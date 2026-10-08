@@ -17,6 +17,7 @@
 
 import type { AccessContext, Sensitivity } from '@use-brian/core'
 import { query } from './client.js'
+import { loadDepartmentSnapshot, resolveDepartmentReadGrant } from '../context-scope/department-resolver.js'
 import { effectiveReadClearance, effectiveReadCompartments } from './workspace-store.js'
 
 /**
@@ -49,12 +50,14 @@ export async function resolveWorkspaceViewpoint(
   selectedAssistantId?: string | null,
 ): Promise<AccessContext | null> {
   const membership = await query<{
+    departmentReadV2?: boolean
     role: 'owner' | 'admin' | 'member'
     clearance: Sensitivity
     compartments: string[] | null
     mutationCompartments: string[] | null
   }>(
     `SELECT role, clearance,
+       (SELECT (to_jsonb(w)->>'department_read_v2')::boolean FROM workspaces w WHERE id=$1) AS "departmentReadV2",
        effective_member_read_compartments(user_id,workspace_id) AS compartments,
        effective_member_team_compartments(user_id,workspace_id) AS "mutationCompartments"
      FROM workspace_members WHERE workspace_id = $1 AND user_id = $2`,
@@ -125,7 +128,14 @@ export async function resolveWorkspaceViewpoint(
   // (`member ∩ universe`). A compartment-restricted member browsing the brain
   // is bounded to their compartments; an owner/admin is universe.
   const readCompartments = effectiveReadCompartments(member.role, member.compartments, null)
+  let departmentRead: AccessContext['departmentRead']
+  if (member.departmentReadV2) {
+    const input = { workspaceId, userId, assistantId: selectedAssistantId && viewpointId === selectedAssistantId ? selectedAssistantId : null }
+    const { snapshot, principal } = await loadDepartmentSnapshot(<R>(sql: string, values: unknown[]) => query<R & Record<string, unknown>>(sql, values), input)
+    departmentRead = resolveDepartmentReadGrant(snapshot, principal, input, new Date())
+  }
   return {
+    ...(departmentRead ? { departmentRead } : {}),
     workspaceId,
     userId,
     assistantId: viewpointId ?? '00000000-0000-0000-0000-000000000000',

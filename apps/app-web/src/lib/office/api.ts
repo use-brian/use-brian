@@ -20,6 +20,7 @@ export type OfficeTemplate = {
   draftArtifactId: string | null;
   sensitivity: "public" | "internal" | "confidential";
   updatedAt: string;
+  importState?: { jobId: string; status: OfficeJob["status"]; fileId: string; diagnostics: OfficeImportDiagnostic[] } | null;
 };
 export type OfficeArtifact = {
   artifactId: string;
@@ -40,6 +41,7 @@ export function isOfficeStartFailed(artifact: OfficeArtifact): boolean {
     && !artifact.job;
 }
 
+export type OfficeImportDiagnostic = { reason: "conditional_format" | "workbook_protection" | "worksheet_protection" | "unsupported_content" | "invalid_file"; part?: string };
 export type OfficeJob = {
   id: string;
   workspaceId: string;
@@ -47,6 +49,7 @@ export type OfficeJob = {
   status: "queued" | "running" | "needs_input" | "completed" | "failed" | "cancelled";
   stage: string;
   errorCode: string | null;
+  importDiagnostics?: OfficeImportDiagnostic[];
 };
 
 export type OfficeJobFailureKind = "presentation_fit" | "presentation_plan" | "fit" | "unexpected";
@@ -138,6 +141,8 @@ export async function createOfficeArtifact(input: {
   outcome: string;
   audience: string;
   additionalContext?: string;
+  sensitivity?: "public" | "internal" | "confidential";
+  destination?: {kind: "department"; departmentId: string} | {kind: "general"};
   sourceHandles?: string[];
   templateId?: string;
   idempotencyKey: string;
@@ -357,6 +362,11 @@ export async function importOfficeTemplateDraft(input: { templateId: string; wor
   }), "office_template_import_failed");
 }
 
+export async function retryOfficeTemplateImport(input: { templateId: string; workspaceId: string; artifactId: string; failedJobId: string; fileId?: string }): Promise<{ jobId: string }> {
+  const { templateId, ...body } = input;
+  return json(await authFetch(`${API_URL}/api/office/templates/${encodeURIComponent(templateId)}/import/retry`, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(body) }), "office_template_recovery_failed");
+}
+
 export async function transitionOfficeTemplateLifecycle(templateId: string, action: "deprecate" | "restore" | "trash" | "purge", reason: string): Promise<Record<string, unknown>> {
   const body = await json<{ template: Record<string, unknown> }>(await authFetch(`${API_URL}/api/office/templates/${encodeURIComponent(templateId)}/lifecycle`, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ action, reason }) }), "office_template_lifecycle_failed");
   return body.template;
@@ -468,4 +478,16 @@ export async function requestOfficeOfflinePackage(artifactId: string, deviceId: 
   const started = performance.now(), viewerId = getUserInfo()?.id;
   const response = await authFetch(`${API_URL}/api/office/artifacts/${encodeURIComponent(artifactId)}/offline-packages`, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ deviceId, pinned: true, expectedVersion }) });
   return protectedMediaJson(response, "office_offline_package_failed", started, viewerId);
+}
+
+export type OfficeClassification = {
+  departments?:Array<{id:string;name:string}>;
+  workspaceId:string; revision:string; sensitivity:"public"|"internal"|"confidential"; compartments:string[]; canManage:boolean;
+  history:Array<{id:string;createdAt:string;metadata:{before:{sensitivity:string;compartments:string[]};after:{sensitivity:string;compartments:string[]}}}>;
+};
+export function getOfficeClassification(artifactId:string):Promise<OfficeClassification> {
+  return metadata<OfficeClassification>(`artifacts/${encodeURIComponent(artifactId)}/classification`,"office_classification_failed");
+}
+export function restrictOfficeClassification(artifactId:string,input:{expectedRevision:string;departmentId?:string;sensitivity:OfficeClassification["sensitivity"]}):Promise<OfficeClassification> {
+  return metadata<OfficeClassification>(`artifacts/${encodeURIComponent(artifactId)}/classification`,"office_classification_failed",value=>value,{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify(input)});
 }

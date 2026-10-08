@@ -17,6 +17,7 @@
  *
  * [COMP:api/live-work-roster]
  */
+import { read, type AccessSnapshot, type Principal, type Tier } from './context-scope/reference-predicate.js'
 import { canRead, scopeGrantContains, type ScopeGrant } from '@use-brian/core'
 
 /** The session fields the read decision consumes. */
@@ -43,6 +44,8 @@ export type SessionReadFacts = {
   /** Null is an owner/admin universe grant; [] grants no named Team/Project. */
   membershipCompartments?: ScopeGrant
   membershipProjectIds?: ScopeGrant
+  departmentAccess?: { snapshot: AccessSnapshot; principal: Principal }
+  now?: Date
 }
 
 export type SessionReadDecision =
@@ -51,8 +54,7 @@ export type SessionReadDecision =
 
 /**
  * Decide whether the caller may READ this session (messages, stream,
- * resume). Pure — no I/O. Behavior-identical to the pre-extraction
- * `gateSessionRead` body.
+ * resume). Pure, with the canonical department READ for v2 workspace facts.
  */
 export function decideSessionRead(facts: SessionReadFacts): SessionReadDecision {
   const {
@@ -63,6 +65,21 @@ export function decideSessionRead(facts: SessionReadFacts): SessionReadDecision 
     membershipCompartments,
     membershipProjectIds,
   } = facts
+  if (facts.departmentAccess && assistantWorkspaceId) {
+    const { snapshot, principal } = facts.departmentAccess
+    const compartments = session.contextCompartments ?? []
+    const tier = session.effectiveClearance ?? 'public'
+    if (!['public', 'internal', 'confidential'].includes(tier)
+      || compartments.some(key => !key.startsWith('team:'))) {
+      return { readable: false, status: 403, error: 'Session context unavailable' }
+    }
+    const allowed = read(snapshot, { principal, assistant: null }, {
+      id: 'session', workspaceId: assistantWorkspaceId, tier: tier as Tier,
+      departmentIds: compartments.map(key => key.slice(5)),
+      userId: session.visibility === 'workspace' || session.mode === 'draft' ? null : session.userId,
+    }, { workspaceId: assistantWorkspaceId, department: null, now: facts.now ?? new Date() })
+    return allowed ? { readable: true } : { readable: false, status: 403, error: 'Session context unavailable' }
+  }
   if (session.visibility === 'workspace' || session.mode === 'draft') {
     if (!assistantWorkspaceId) {
       return { readable: false, status: 403, error: 'Draft session is not team-owned' }
@@ -70,6 +87,7 @@ export function decideSessionRead(facts: SessionReadFacts): SessionReadDecision 
     if (!membershipClearance) {
       return { readable: false, status: 403, error: 'Not a member of this team' }
     }
+
     if (
       session.effectiveClearance &&
       !canRead(membershipClearance, session.effectiveClearance as 'public' | 'internal' | 'confidential')
@@ -95,7 +113,7 @@ export function decideSessionRead(facts: SessionReadFacts): SessionReadDecision 
  * The Live roster's per-row tier (§3.3). Precedence is the spec's table,
  * top to bottom:
  *
- *  1. the caller's own session → `full`;
+ *  1. the caller's own session → `full` only while readable;
  *  2. workspace-visible / draft → the read decision above: readable →
  *     `full`, otherwise `omitted` (D5 — the existence of an
  *     above-clearance workstream is itself confidential, so a
@@ -113,6 +131,12 @@ export function liveSessionTier(facts: SessionReadFacts): LiveSessionTier {
   if (facts.session.visibility === 'workspace' || facts.session.mode === 'draft') {
     return decideSessionRead(facts).readable ? 'full' : 'omitted'
   }
-  if (facts.session.userId === facts.callerUserId) return 'full'
+  if (facts.session.userId === facts.callerUserId) return decideSessionRead(facts).readable ? 'full' : 'omitted'
+  // Presence discloses identity and activity. In v2 it must pass the same
+  // department/tier floor, but deliberately does not grant the private body.
+  if (facts.departmentAccess && !decideSessionRead({
+    ...facts,
+    session: { ...facts.session, visibility: 'workspace', mode: null },
+  }).readable) return 'omitted'
   return 'presence'
 }

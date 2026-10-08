@@ -11,6 +11,7 @@ import {
   RECORDING_PARTICIPANTS_UPDATED_EVENT,
   type RecordingParticipantsUpdatedDetail,
 } from "./recording-events";
+import { useLeasedResource } from "@/lib/offline/surface-content-cache";
 
 const STATUS_POLL_MS = 10_000;
 
@@ -20,7 +21,7 @@ export function useRecordingSummary(
   options?: { trackProcessing?: boolean },
 ) {
   const key = recordingDetailCacheKey(workspaceId, recordingId);
-  const resource = useCachedResource<RecordingSummary>(
+  const resource = useLeasedResource<RecordingSummary>(
     key,
     () => getRecording(recordingId),
   );

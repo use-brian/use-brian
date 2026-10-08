@@ -1,3 +1,4 @@
+import type { DepartmentReadGrant } from '../security/department-read.js'
 /**
  * The governed logic-block runner + its tool surface (R2-5/R2-9/R2-10).
  *
@@ -96,6 +97,9 @@ export type CreateSkillRunnerToolsOptions = {
     store: BrowserProfileStore
     vault?: SessionVault | null
     assistantClearance: (context: ToolContext) => Promise<Sensitivity>
+    departmentRead?: (context: ToolContext) => Promise<DepartmentReadGrant | undefined>
+    /** Names of the departments this person may choose; never includes a hidden department. */
+    departmentNames?: (context: ToolContext) => Promise<ReadonlyMap<string, string>>
   } | null
   resolvePolicy?: ResolveComputerToolPolicy
   unattendedEnabled?: () => boolean
@@ -127,6 +131,7 @@ export function createSkillRunnerTools(opts: CreateSkillRunnerToolsOptions): {
   saveBrowserSkill: Tool
   listBrowserSkills: Tool
   listBrowserProfiles: Tool
+  classifyBrowserProfileDepartment: Tool
 } {
   const unattendedEnabled = opts.unattendedEnabled ?? (() => false)
   const approvalWaitMs = opts.approvalWaitMs ?? DEFAULT_APPROVAL_WAIT_MS
@@ -202,6 +207,18 @@ export function createSkillRunnerTools(opts: CreateSkillRunnerToolsOptions): {
     await opts.provider!.bridge.load(sandboxId, { path, bytes: new TextEncoder().encode(text) })
   }
 
+  async function authorizeProfile(context: ToolContext, profileId: string): Promise<boolean> {
+    try {
+      if (!opts.profiles) return false
+      const profile = await opts.profiles.store.get(profileId)
+      return Boolean(profile && canUseProfile(profile, {
+        userId: context.userId, workspaceId: context.workspaceId ?? '', assistantId: context.assistantId,
+        assistantClearance: await opts.profiles.assistantClearance(context),
+        departmentRead: await opts.profiles.departmentRead?.(context),
+      }).ok)
+    } catch { return false }
+  }
+
   async function decideSend(params: {
     context: ToolContext
     skill: BrowserSkill
@@ -211,6 +228,7 @@ export function createSkillRunnerTools(opts: CreateSkillRunnerToolsOptions): {
   }): Promise<{ decision: BlockSendDecision; outcome: SendGateOutcome }> {
     return decideTerminalSend({
       ...params,
+      authorizeProfile: () => authorizeProfile(params.context, params.profile.id),
       grants: opts.grants,
       approvals: opts.approvals,
       approvalWaitMs,
@@ -361,6 +379,7 @@ export function createSkillRunnerTools(opts: CreateSkillRunnerToolsOptions): {
           workspaceId: context.workspaceId,
           assistantId: context.assistantId,
           assistantClearance: actorClearance,
+          departmentRead: await opts.profiles.departmentRead?.(context),
         },
         site: skill.site,
         profileName: input.profile,
@@ -382,6 +401,7 @@ export function createSkillRunnerTools(opts: CreateSkillRunnerToolsOptions): {
             profile,
             rehearsal,
             input: input.params ?? {},
+            authorizeProfile: () => authorizeProfile(context, profile.id),
             grants: opts.grants,
             approvals: opts.approvals,
             approvalWaitMs,
@@ -682,6 +702,7 @@ export function createSkillRunnerTools(opts: CreateSkillRunnerToolsOptions): {
         workspaceId: context.workspaceId,
         assistantId: context.assistantId,
         assistantClearance: clearance,
+        departmentRead: await opts.profiles.departmentRead?.(context),
       }
       const profiles = allProfiles.filter((profile) => canUseProfile(profile, actor).ok)
       if (profiles.length === 0) {
@@ -720,11 +741,58 @@ export function createSkillRunnerTools(opts: CreateSkillRunnerToolsOptions): {
           }
         }
         const guidance = routingNoteFor(profile, context.assistantId)
-        lines.push(`- ${profile.name} (${profile.defaultBackend} browser${sites})${guidance ? `; when to use: ${guidance}` : ''}`)
+        lines.push(`- ${profile.name} [profileId=${profile.id}; departmentId=${profile.departmentId ?? 'null'}] (${profile.defaultBackend} browser${sites})${guidance ? `; when to use: ${guidance}` : ''}`)
       }
       return { data: `Browser profiles:\n${lines.join('\n')}` }
     },
   })
 
-  return { runBrowserSkill, saveBrowserSkill, listBrowserSkills, listBrowserProfiles }
+  const classifyBrowserProfileDepartment = buildTool({
+    name: 'classifyBrowserProfileDepartment',
+    requiresCapability: 'computer',
+    description: 'Assign, transfer or remove the owning department of your browser profile. Use current admitted profile and department IDs. Always requires a fresh one-time attended approval and a reason. Transfers/removal require the profile owner to be a workspace owner/admin. Preserves sharing and clearance, revokes automatic approvals, and audits the change. Shared profiles cannot become unassigned.',
+    inputSchema: z.object({profileId:z.string().uuid(),expectedDepartmentId:z.string().uuid().nullable(),departmentId:z.string().uuid().nullable(),reason:z.string().trim().min(1).max(1000)}).strict(),
+    requiresConfirmation: true,
+    confirmationMode: 'durable_attended',
+    allowPersistentApproval: false,
+    isReadOnly: false,
+    isConcurrencySafe: false,
+    // The approval card names the profile and departments; a name the approver cannot see stays withheld.
+    async describeConfirmation(raw, context) {
+      const parsed = z.object({profileId:z.string().uuid(),expectedDepartmentId:z.string().uuid().nullable(),departmentId:z.string().uuid().nullable(),reason:z.string()}).safeParse(raw)
+      if (!parsed.success || !context.workspaceId || !opts.profiles) return null
+      const profile = await opts.profiles.store.get(parsed.data.profileId).catch(() => null)
+      const owned = profile && profile.workspaceId === context.workspaceId && profile.ownerUserId === context.userId
+      const names = await opts.profiles.departmentNames?.(context).catch(() => undefined)
+      const label = (id: string | null) => id === null ? 'Unassigned' : names?.get(id) ?? 'Department name unavailable'
+      return [
+        `Browser profile: ${owned ? profile.name : 'Profile unavailable'}`,
+        `Department: ${label(parsed.data.expectedDepartmentId)} -> ${label(parsed.data.departmentId)}`,
+        `Reason: ${parsed.data.reason}`,
+        'Existing automatic approvals for this profile will be revoked.',
+      ]
+    },
+    async execute(input, context) {
+      const unavailable = {data:'Profile classification unavailable. Review current access and classification in Browsers, then request a new one-time approval.',isError:true}
+      const approval = context.approvedToolInvocation
+      if (isAutonomousToolContext(context) || !context.workspaceId || !approval
+        || approval.toolName !== 'classifyBrowserProfileDepartment' || approval.approverUserId !== context.userId
+        || !opts.profiles?.store.classifyDepartment || !opts.profiles.departmentRead) return unavailable
+      try {
+        if (opts.resolvePolicy && await opts.resolvePolicy('classifyBrowserProfileDepartment', {userId:context.userId,assistantId:context.assistantId}) === 'block') return unavailable
+        await context.executionContext?.security.authority.assertCurrent()
+        const agentRead = await opts.profiles.departmentRead(context)
+        if (!agentRead) return unavailable
+        const profile = await opts.profiles.store.get(input.profileId)
+        if (!profile || profile.workspaceId !== context.workspaceId || profile.ownerUserId !== context.userId) return unavailable
+        if ((profile.departmentId ?? null) !== input.expectedDepartmentId) return {data:'Profile classification changed. Review the current department before requesting a new approval.',isError:true}
+        await opts.profiles.store.classifyDepartment(profile.id, {
+          userId:context.userId,departmentId:input.departmentId,reason:input.reason,confirmed:true,expected:profile,agentRead,
+        })
+        return {data:'Browser profile department updated. Existing automatic approvals were revoked.'}
+      } catch { return unavailable }
+    },
+  })
+
+  return { runBrowserSkill, saveBrowserSkill, listBrowserSkills, listBrowserProfiles, classifyBrowserProfileDepartment }
 }

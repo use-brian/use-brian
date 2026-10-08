@@ -7,16 +7,25 @@
  */
 
 import {
-  CrmOperationsError, CrmEffectiveEntitlementQuerySchema,
+  CrmOperationsError, CrmEffectiveEntitlementQuerySchema, actorAuditIdentity, type AssociationActor,
   type CrmPage, type CrmPageQuery,
   CrmIntegrationScopeError,
   crmIntegrationResourceSelection, requireCrmIntegrationOperation, requireCrmIntegrationResources,
+  intersectCrmIntegrationAuthorities,
+  intersectDepartmentReadGrants, CrmIntegrationAuthoritySchema,
   type CrmIntegrationAuthority, type CrmIntegrationOperation, type CrmIntegrationSelector,
+  type DepartmentReadGrant,
+  type CrmOperationsActor,
   evaluateCrmSendability,
   type CrmDeliveryChannel,
   type CrmOperationsReadPort,
 } from '@use-brian/core'
-import { query } from './client.js'
+import { getPool, query } from './client.js'
+import { readCrmIntegrationCredential, type CrmIntegrationPrincipal } from './crm-integration-store.js'
+import { intersectCrmIntegrationExecutionLimits, type CrmIntegrationExecutionLimits } from '../crm-operations/integration-department-authority.js'
+import { runWithAgentAccess } from './agent-access-context.js'
+import { readCrmIntakeAuthority } from '../crm-operations/intake-department-authority.js'
+import { assertAssociationConsentAuthority, associationOrderReadPredicate } from '../association/source-scope.js'
 import { readCrmAddressSuppressions } from '../crm-operations/suppression-tombstones.js'
 import { crmPageInstant, queryCrmPage } from '../crm-operations/pagination.js'
 import { verifySecret } from './api-key-store.js'
@@ -42,6 +51,8 @@ export type CrmIntakePrincipal = {
   credentialId: string
   definitionId: string
   definitionKey: string
+  departmentRead?: DepartmentReadGrant
+  executionLimits?: CrmIntegrationExecutionLimits
 }
 
 type AuthRow = CrmIntakePrincipal & {
@@ -56,7 +67,7 @@ export type CrmIntakeReadStore = {
 }
 
 export type DbCrmOperationsReadStore = CrmIntakeReadStore & CrmOperationsReadPort & {
-  getSubmissionAttachment(workspaceId: string, submissionId: string, attachmentId: string): Promise<{
+  getSubmissionAttachment(workspaceId: string, submissionId: string, attachmentId: string, actor?: CrmOperationsActor): Promise<{
     name: string
     mimeType: string
     contentBytes: Buffer
@@ -72,7 +83,66 @@ export type DbCrmOperationsReadStore = CrmIntakeReadStore & CrmOperationsReadPor
   }>
 }
 
-export function createDbCrmIntakeReadStore(integration?: CrmIntegrationAuthority & { workspaceId: string }): DbCrmOperationsReadStore {
+export function createDbCrmIntakeReadStore(integration?: CrmIntegrationPrincipal): DbCrmOperationsReadStore {
+  if (!integration) return createReadStore()
+  const retained = { workspaceId: integration.workspaceId,
+    executionLimits: integration.executionLimits ? structuredClone(integration.executionLimits) : undefined,
+    ...CrmIntegrationAuthoritySchema.parse({ credentialId: integration.credentialId, grants: integration.grants }),
+    ...(integration.departmentRead ? { departmentRead: structuredClone(integration.departmentRead) } : {}) }
+  const initial = createReadStore(retained)
+  return Object.fromEntries(Object.keys(initial).map(name => [name, async (...args: unknown[]) => {
+    const method = name as keyof DbCrmOperationsReadStore
+    if (method === 'authenticate') return Reflect.apply(initial[method], initial, args)
+    if (args[0] !== retained.workspaceId) throw new CrmIntegrationScopeError('credential_workspace')
+    const renew = async () => {
+      const current = await readCrmIntegrationCredential(getPool(), retained.workspaceId, retained.credentialId)
+      const departmentRead = current.departmentRead && retained.departmentRead
+        ? intersectDepartmentReadGrants(retained.departmentRead, current.departmentRead) : current.departmentRead
+      return { ...intersectCrmIntegrationAuthorities(retained, current), workspaceId: retained.workspaceId,
+        executionLimits: intersectCrmIntegrationExecutionLimits(retained.executionLimits, current.executionLimits),
+        ...(departmentRead ? { departmentRead } : {}) }
+    }
+    const admitted = await renew()
+    const invoke = async () => {
+      const store = createReadStore(admitted)
+      const result = await Reflect.apply(store[method], store, args)
+      const renewed = await renew()
+      if (JSON.stringify(renewed) !== JSON.stringify(admitted)) {
+        throw new CrmOperationsError('not_authorized', 'Integration read authority changed. Retry with current access.')
+      }
+      return result
+    }
+    return admitted.departmentRead ? runWithAgentAccess({ workspaceId: admitted.workspaceId,
+      userId: admitted.departmentRead.userId, departmentRead: admitted.departmentRead,
+      clearance: 'confidential', compartments: null, ...admitted.executionLimits }, invoke) : invoke()
+  }])) as DbCrmOperationsReadStore
+}
+
+/** Each invocation receives its own ceiling, never a mutable store-wide grant. */
+function createReadStore(integration?: CrmIntegrationAuthority & { workspaceId: string }): DbCrmOperationsReadStore {
+  const consentAuthority = (workspaceId: string, contactId: string, actor: CrmOperationsActor | undefined,
+    options: {purposeKeys?:readonly string[]|null;channel?:string} = {}) => {
+    const effective=actor ?? (integration ? {kind:'integration_key' as const,credentialId:integration.credentialId} : undefined)
+    const identity=effective ? actorAuditIdentity(effective) : null
+    const scoped: AssociationActor | undefined=effective && identity ? {credentialKind:effective.kind,credentialId:identity.actorCredentialId,
+      ...(identity.actingUserId?{actingUserId:identity.actingUserId}:{}),...(integration?{integration}:{})} : undefined
+    return assertAssociationConsentAuthority(getPool(),workspaceId,contactId,scoped,options)
+  }
+  const submissionScope = async (workspaceId: string, actor: CrmOperationsActor | undefined, index: number) => {
+    const effectiveActor = actor ?? (integration ? { kind: 'integration_key' as const, credentialId: integration.credentialId } : undefined)
+    if (!effectiveActor) {
+      const workspace = (await query('SELECT department_read_v2 FROM workspaces WHERE id=$1', [workspaceId])).rows[0]
+      if (workspace?.department_read_v2 !== false) throw new CrmOperationsError('not_authorized', 'Submission reads require current actor scope.')
+      return { sql: 'TRUE', params: [] as unknown[] }
+    }
+    const identity = actorAuditIdentity(effectiveActor)
+    return associationOrderReadPredicate(getPool(), workspaceId, { credentialKind: effectiveActor.kind, credentialId: identity.actorCredentialId,
+      ...(identity.actingUserId ? { actingUserId: identity.actingUserId } : {}), ...(integration ? { integration } : {}) }, index, 'submission')
+  }
+  const renewSubmissionScope = async (workspaceId: string, actor: CrmOperationsActor | undefined, index: number, prior: { params: unknown[] }) => {
+    const current = await submissionScope(workspaceId, actor, index)
+    if (JSON.stringify(current.params) !== JSON.stringify(prior.params)) throw new CrmOperationsError('not_authorized', 'Submission access changed.')
+  }
   const authorize = (workspaceId: string, operation: CrmIntegrationOperation) => {
     if (!integration) return
     if (workspaceId !== integration.workspaceId) throw new CrmIntegrationScopeError(operation)
@@ -148,7 +218,14 @@ export function createDbCrmIntakeReadStore(integration?: CrmIntegrationAuthority
   return {
     listSegments: (workspaceId, filters) => { authorizeSegments(workspaceId); return segmentStore.listSegments(workspaceId, filters) },
     getSegment: (workspaceId, segmentId) => { authorizeSegments(workspaceId); return segmentStore.getSegment(workspaceId, segmentId) },
-    previewSegment: (workspaceId, segmentId, options) => { authorizeSegments(workspaceId); return segmentStore.previewSegment(workspaceId, segmentId, options) },
+    previewSegment: (workspaceId, segmentId, options, actor) => {
+      authorizeSegments(workspaceId)
+      const effectiveActor = actor ?? (integration ? { kind: 'integration_key' as const, credentialId: integration.credentialId } : undefined)
+      const identity = effectiveActor ? actorAuditIdentity(effectiveActor) : null
+      const scopeActor: AssociationActor | undefined = effectiveActor && identity ? { credentialKind: effectiveActor.kind, credentialId: identity.actorCredentialId,
+        ...(identity.actingUserId ? { actingUserId: identity.actingUserId } : {}), ...(integration ? { integration } : {}) } : undefined
+      return segmentStore.previewSegment(workspaceId, segmentId, options, scopeActor)
+    },
     listCrmEventFilterCatalog: (workspaceId) => { authorizeSegments(workspaceId); return segmentStore.listCrmEventFilterCatalog(workspaceId) },
     async authenticate(token, definitionKey) {
       if (integration) throw new CrmOperationsError('not_authorized', 'A scoped integration read store cannot authenticate another credential family.')
@@ -168,16 +245,34 @@ export function createDbCrmIntakeReadStore(integration?: CrmIntegrationAuthority
       )
       const row = found.rows[0]
       if (!row || row.revokedAt || !await verifySecret(parsed.secret, row.secretHash)) return null
-      await query(
-        `UPDATE crm_intake_credentials SET last_used_at = now()
-          WHERE workspace_id = $1 AND id = $2 AND revoked_at IS NULL`,
-        [row.workspaceId, row.credentialId],
-      )
+      let admitted: Awaited<ReturnType<typeof readCrmIntakeAuthority>>
+      const client = await getPool().connect()
+      try {
+        await client.query('BEGIN')
+        await client.query('SELECT id FROM workspaces WHERE id=$1 FOR UPDATE', [row.workspaceId])
+        await client.query('SELECT id FROM crm_intake_credentials WHERE workspace_id=$1 AND id=$2 FOR UPDATE',
+          [row.workspaceId, row.credentialId])
+        admitted = await readCrmIntakeAuthority(client, row.workspaceId, row.credentialId, row.definitionId, true)
+        const updated = await client.query(
+          `UPDATE crm_intake_credentials SET last_used_at = clock_timestamp()
+            WHERE workspace_id = $1 AND id = $2 AND revoked_at IS NULL RETURNING id`,
+          [row.workspaceId, row.credentialId],
+        )
+        if (!updated.rowCount) throw new CrmOperationsError('credential_revoked', 'The intake credential is unavailable.')
+        await client.query('COMMIT')
+      } catch (error) {
+        await client.query('ROLLBACK')
+        if (error instanceof CrmOperationsError && ['credential_revoked', 'not_authorized'].includes(error.code)) return null
+        throw error
+      } finally {
+        client.release()
+      }
       return {
         workspaceId: row.workspaceId,
         credentialId: row.credentialId,
         definitionId: row.definitionId,
         definitionKey: row.definitionKey,
+        ...(admitted.departmentRead ? { departmentRead: admitted.departmentRead, executionLimits: admitted.executionLimits } : {}),
       }
     },
 
@@ -204,6 +299,7 @@ export function createDbCrmIntakeReadStore(integration?: CrmIntegrationAuthority
       if (integration) throw new CrmOperationsError('not_authorized', 'Integration credentials cannot administer intake credentials.')
       return page('credentials', workspaceId, filters,
         `SELECT c.id, c.label, c.secret_prefix AS prefix,
+                c.department_binding AS "departmentBinding",
                 c.rotated_from_credential_id AS "rotatedFromCredentialId",
                 c.revoked_at AS "revokedAt", c.last_used_at AS "lastUsedAt",
                 c.created_at AS "createdAt",
@@ -218,8 +314,9 @@ export function createDbCrmIntakeReadStore(integration?: CrmIntegrationAuthority
       )
     },
 
-    async listSubmissions(workspaceId, filters = {}) {
-      return page('submissions', workspaceId, filters,
+    async listSubmissions(workspaceId, filters = {}, actor) {
+      const scope = await submissionScope(workspaceId, actor, 6)
+      const result = await page('submissions', workspaceId, filters,
         `SELECT e.id, e.contact_id AS "contactId", c.display_name AS "contactName",
                 e.definition_id AS "definitionId", d.definition_key AS "definitionKey",
                 d.label AS "definitionLabel", e.status, e.queue_key AS "queueKey",
@@ -236,13 +333,17 @@ export function createDbCrmIntakeReadStore(integration?: CrmIntegrationAuthority
             AND ($2::text IS NULL OR e.status=$2)
             AND ($3::text IS NULL OR d.definition_key=$3)
             AND ($4::uuid IS NULL OR e.owner_user_id=$4)
-            AND ($5::uuid[] IS NULL OR e.definition_id=ANY($5::uuid[]))`,
+            AND ($5::uuid[] IS NULL OR e.definition_id=ANY($5::uuid[]))
+            AND EXISTS(SELECT 1 FROM association_enquiries WHERE association_enquiries.workspace_id=e.workspace_id AND association_enquiries.id=e.id AND ${scope.sql})`,
         [workspaceId, filters.status ?? null, filters.definitionKey ?? null,
-          filters.ownerUserId ?? null, select(workspaceId, 'crm.submissions.read', 'definitionIds')],
+          filters.ownerUserId ?? null, select(workspaceId, 'crm.submissions.read', 'definitionIds'), ...scope.params],
       )
+      await renewSubmissionScope(workspaceId, actor, 6, scope)
+      return result
     },
 
-    async getSubmission(workspaceId, submissionId) {
+    async getSubmission(workspaceId, submissionId, actor) {
+      const scope = await submissionScope(workspaceId, actor, 4)
       const result = await query<Record<string, unknown>>(
         `SELECT e.id, e.contact_id AS "contactId", c.display_name AS "contactName",
                 e.definition_id AS "definitionId", d.definition_key AS "definitionKey",
@@ -271,31 +372,37 @@ export function createDbCrmIntakeReadStore(integration?: CrmIntegrationAuthority
            JOIN entities c ON c.workspace_id=e.workspace_id AND c.id=e.contact_id
            LEFT JOIN crm_intake_definitions d
              ON d.workspace_id=e.workspace_id AND d.id=e.definition_id
-          WHERE e.workspace_id=$1 AND e.id=$2 AND ($3::uuid[] IS NULL OR e.definition_id=ANY($3::uuid[]))`,
-        [workspaceId, submissionId, select(workspaceId, 'crm.submissions.read', 'definitionIds')],
+          WHERE e.workspace_id=$1 AND e.id=$2 AND ($3::uuid[] IS NULL OR e.definition_id=ANY($3::uuid[]))
+            AND EXISTS(SELECT 1 FROM association_enquiries WHERE association_enquiries.workspace_id=e.workspace_id AND association_enquiries.id=e.id AND ${scope.sql})`,
+        [workspaceId, submissionId, select(workspaceId, 'crm.submissions.read', 'definitionIds'), ...scope.params],
       )
+      await renewSubmissionScope(workspaceId, actor, 4, scope)
       return result.rows[0] ?? null
     },
 
-    async getSubmissionAttachment(workspaceId, submissionId, attachmentId) {
+    async getSubmissionAttachment(workspaceId, submissionId, attachmentId, actor) {
+      const scope = await submissionScope(workspaceId, actor, 5)
       const result = await query<{ name: string; mimeType: string; contentBytes: Buffer }>(
         `SELECT a.original_name AS name,a.mime_type AS "mimeType",a.content_bytes AS "contentBytes"
            FROM association_submission_attachments a
            JOIN association_enquiries e
              ON e.workspace_id=a.workspace_id AND e.id=a.submission_id
           WHERE a.workspace_id=$1 AND a.submission_id=$2 AND a.id=$3
-            AND ($4::uuid[] IS NULL OR e.definition_id=ANY($4::uuid[]))`,
+            AND ($4::uuid[] IS NULL OR e.definition_id=ANY($4::uuid[]))
+            AND EXISTS(SELECT 1 FROM association_enquiries WHERE association_enquiries.workspace_id=e.workspace_id AND association_enquiries.id=e.id AND ${scope.sql})`,
         [workspaceId, submissionId, attachmentId,
-          select(workspaceId, 'crm.submissions.read', 'definitionIds')],
+          select(workspaceId, 'crm.submissions.read', 'definitionIds'), ...scope.params],
       )
+      await renewSubmissionScope(workspaceId, actor, 5, scope)
       return result.rows[0] ?? null
     },
 
     listConsentPurposes,
 
-    async getConsent(workspaceId, contactId) {
+    async getConsent(workspaceId, contactId, actor) {
       const purposesAllowed = select(workspaceId, 'crm.consent.read', 'purposeKeys')
       if (purposesAllowed?.length === 0) throw new CrmIntegrationScopeError('crm.consent.read', 'purposeKeys')
+      const scope = await consentAuthority(workspaceId,contactId,actor,{purposeKeys:purposesAllowed})
       const contact = await query(`SELECT 1 FROM entities WHERE workspace_id=$1 AND id=$2 AND kind='person'`, [workspaceId, contactId])
       if (contact.rowCount !== 1) throw new CrmOperationsError('not_found', 'CRM contact was not found.')
       const evidence = async (resource: string, sql: string, params: unknown[]) => {
@@ -348,6 +455,7 @@ export function createDbCrmIntakeReadStore(integration?: CrmIntegrationAuthority
           [workspaceId, contactId],
         ),
       ])
+      if(scope!==await consentAuthority(workspaceId,contactId,actor,{purposeKeys:purposesAllowed}))throw new CrmOperationsError('not_authorized','Consent access changed.')
       return { purposes, events, suppressions }
     },
 
@@ -367,10 +475,15 @@ export function createDbCrmIntakeReadStore(integration?: CrmIntegrationAuthority
       )
     },
 
-    async listEntitlements(workspaceId, filters = {}) {
+    async listEntitlements(workspaceId, filters = {}, actor) {
+      const effectiveActor = actor ?? (integration ? { kind: 'integration_key' as const, credentialId: integration.credentialId } : undefined)
+      const identity = effectiveActor ? actorAuditIdentity(effectiveActor) : null
+      const scopeActor: AssociationActor | null = effectiveActor && identity ? { credentialKind: effectiveActor.kind, credentialId: identity.actorCredentialId,
+        ...(identity.actingUserId ? { actingUserId: identity.actingUserId } : {}), ...(integration ? { integration } : {}) } : null
+      const scope = scopeActor ? await associationOrderReadPredicate(getPool(), workspaceId, scopeActor, 8, 'membership') : { sql: 'TRUE', params: [] }
       const effective = CrmEffectiveEntitlementQuerySchema.parse({ activeOnly: filters.activeOnly, effectiveAt: filters.effectiveAt })
       const at = 'coalesce($7::timestamptz,(SELECT at FROM crm_page_context))'
-      return page('entitlements', workspaceId, filters,
+      const result = await page('entitlements', workspaceId, filters,
         `SELECT m.id, m.contact_id AS "contactId", c.display_name AS "contactName",
                 m.plan_id AS "planId", p.plan_key AS "planKey", p.name AS "planName",
                 m.status, m.starts_at AS "startsAt", m.ends_at AS "endsAt",
@@ -398,6 +511,7 @@ export function createDbCrmIntakeReadStore(integration?: CrmIntegrationAuthority
            LEFT JOIN association_membership_source_imports s
              ON s.workspace_id=m.workspace_id AND s.membership_id=m.id
           WHERE m.workspace_id=$1
+            AND EXISTS(SELECT 1 FROM association_memberships WHERE association_memberships.workspace_id=m.workspace_id AND association_memberships.id=m.id AND ${scope.sql})
             AND ($2::uuid IS NULL OR m.contact_id=$2)
             AND ($3::uuid IS NULL OR m.plan_id=$3)
             AND ($4::text IS NULL OR m.status=$4) AND ($5::uuid[] IS NULL OR m.plan_id=ANY($5::uuid[]))
@@ -405,8 +519,13 @@ export function createDbCrmIntakeReadStore(integration?: CrmIntegrationAuthority
             AND (NOT $6::boolean OR association_membership_is_effective(m.workspace_id,m.id,m.status,m.starts_at,m.ends_at,${at}))`,
         [workspaceId, filters.contactId ?? null, filters.planId ?? null,
           filters.status ?? null, select(workspaceId, 'crm.entitlements.read', 'planIds'),
-          effective.activeOnly ?? false, effective.effectiveAt ? crmPageInstant(effective.effectiveAt) : null],
+          effective.activeOnly ?? false, effective.effectiveAt ? crmPageInstant(effective.effectiveAt) : null, ...scope.params],
       )
+      if (scopeActor) {
+        const renewed = await associationOrderReadPredicate(getPool(), workspaceId, scopeActor, 8, 'membership')
+        if (JSON.stringify(renewed.params) !== JSON.stringify(scope.params)) throw new CrmOperationsError('not_authorized', 'Entitlement access changed.')
+      }
+      return result
     },
 
     async listEvents(workspaceId, filters = {}) {
@@ -429,38 +548,48 @@ export function createDbCrmIntakeReadStore(integration?: CrmIntegrationAuthority
       )
     },
 
-    async listParticipation(workspaceId, filters = {}) {
-      return page('participation', workspaceId, filters,
+    async listParticipation(workspaceId, filters = {}, actor) {
+      const effectiveActor = actor ?? (integration ? { kind: 'integration_key' as const, credentialId: integration.credentialId } : undefined)
+      const identity = effectiveActor ? actorAuditIdentity(effectiveActor) : null
+      const scopeActor: AssociationActor | null = effectiveActor && identity ? { credentialKind: effectiveActor.kind, credentialId: identity.actorCredentialId,
+        ...(identity.actingUserId ? { actingUserId: identity.actingUserId } : {}), ...(integration ? { integration } : {}) } : null
+      const scope = scopeActor ? await associationOrderReadPredicate(getPool(), workspaceId, scopeActor, 7, 'registration') : { sql: 'TRUE', params: [] }
+      const result = await page('participation', workspaceId, filters,
         `SELECT p.* FROM (
-           SELECT r.id, r.event_id AS "eventId", e.slug AS "eventKey",
-                  e.title AS "eventTitle", r.attendee_contact_id AS "contactId",
-                  c.display_name AS "contactName", r.attendee_name AS "attendeeName",
-                  r.attendee_email AS "attendeeEmail", r.attendee_metadata AS metadata,
-                  CASE r.status
+           SELECT association_registrations.id, association_registrations.event_id AS "eventId", e.slug AS "eventKey",
+                  e.title AS "eventTitle", association_registrations.attendee_contact_id AS "contactId",
+                  c.display_name AS "contactName", association_registrations.attendee_name AS "attendeeName",
+                  association_registrations.attendee_email AS "attendeeEmail", association_registrations.attendee_metadata AS metadata,
+                  CASE association_registrations.status
                     WHEN 'reserved' THEN 'registered'
                     WHEN 'confirmed' THEN 'registered'
                     WHEN 'checked_in' THEN 'attended'
                     WHEN 'refunded' THEN 'cancelled'
-                    ELSE r.status
+                    ELSE association_registrations.status
                   END AS status,
-                  r.status AS "sourceStatus", r.source_kind AS "sourceKind",
-                  r.source_id AS "sourceId",r.historical_import AS "historicalImport", (r.source_kind IN('commerce','source_order')) AS "commerceManaged",
-                  r.created_at AS "createdAt", r.updated_at AS "updatedAt"
-             FROM association_registrations r
+                  association_registrations.status AS "sourceStatus", association_registrations.source_kind AS "sourceKind",
+                  association_registrations.source_id AS "sourceId",association_registrations.historical_import AS "historicalImport", (association_registrations.source_kind IN('commerce','source_order')) AS "commerceManaged",
+                  association_registrations.created_at AS "createdAt", association_registrations.updated_at AS "updatedAt"
+             FROM association_registrations
              JOIN association_events e
-               ON e.workspace_id=r.workspace_id AND e.id=r.event_id
+               ON e.workspace_id=association_registrations.workspace_id AND e.id=association_registrations.event_id
              LEFT JOIN entities c
-               ON c.workspace_id=r.workspace_id AND c.id=r.attendee_contact_id
+               ON c.workspace_id=association_registrations.workspace_id AND c.id=association_registrations.attendee_contact_id
               AND c.valid_to IS NULL AND c.retracted_at IS NULL
-            WHERE r.workspace_id=$1
-              AND ($2::uuid IS NULL OR r.attendee_contact_id=$2)
-              AND ($3::uuid IS NULL OR r.event_id=$3)
-              AND ($4::text IS NULL OR r.source_kind=$4) AND ($6::uuid[] IS NULL OR r.event_id=ANY($6::uuid[]))
+            WHERE association_registrations.workspace_id=$1 AND ${scope.sql}
+              AND ($2::uuid IS NULL OR association_registrations.attendee_contact_id=$2)
+              AND ($3::uuid IS NULL OR association_registrations.event_id=$3)
+              AND ($4::text IS NULL OR association_registrations.source_kind=$4) AND ($6::uuid[] IS NULL OR association_registrations.event_id=ANY($6::uuid[]))
          ) p
          WHERE ($5::text IS NULL OR p.status=$5)`,
         [workspaceId, filters.contactId ?? null, filters.eventId ?? null,
-          filters.sourceKind ?? null, filters.status ?? null, select(workspaceId, 'crm.participation.read', 'eventIds')],
+          filters.sourceKind ?? null, filters.status ?? null, select(workspaceId, 'crm.participation.read', 'eventIds'), ...scope.params],
       )
+      if (scopeActor) {
+        const renewed = await associationOrderReadPredicate(getPool(), workspaceId, scopeActor, 7, 'registration')
+        if (JSON.stringify(renewed.params) !== JSON.stringify(scope.params)) throw new CrmOperationsError('not_authorized', 'Participation access changed.')
+      }
+      return result
     },
 
     async listRecordFields(workspaceId, filters = {}) {
@@ -493,9 +622,10 @@ export function createDbCrmIntakeReadStore(integration?: CrmIntegrationAuthority
       )
     },
 
-    async checkSendability(workspaceId, contactId, channel, purposeKey) {
+    async checkSendability(workspaceId, contactId, channel, purposeKey, actor) {
       authorize(workspaceId, 'crm.consent.read')
       if (integration) requireCrmIntegrationResources(integration, 'crm.consent.read', { purposeKeys: purposeKey })
+      const scope=await consentAuthority(workspaceId,contactId,actor,{purposeKeys:[purposeKey],channel})
       const purpose = await query<{
         id: string
         archivedAt: Date | null
@@ -579,6 +709,7 @@ export function createDbCrmIntakeReadStore(integration?: CrmIntegrationAuthority
       const retained = (await Promise.all(destinations.filter((value): value is string => Boolean(value))
         .map((address) => readCrmAddressSuppressions({ query },workspaceId,channel,address,purposeKey)))).flat()
       if (retained.length) { verdict.verdict = 'blocked'; verdict.reasons.push('address_suppression'); verdict.effectiveSuppressionEventIds.push(...retained.map((row) => row.id)) }
+      if(scope!==await consentAuthority(workspaceId,contactId,actor,{purposeKeys:[purposeKey],channel}))throw new CrmOperationsError('not_authorized','Consent access changed.')
       return verdict
     },
   }

@@ -7,7 +7,7 @@ import { useT } from "@/lib/i18n/client";
 import { format } from "@/lib/i18n/format";
 import { listAssociationOrders } from "@/lib/api/association";
 import { associationOrdersCacheKey } from "@/lib/surface-prefetch";
-import { useCachedResource } from "@/lib/surface-cache";
+import { useAssociationProjection } from "./operator-controls";
 import { buttonVariants } from "@/components/ui/button";
 import { useAssociationModule } from "./module-controls";
 import { useAssociationPage } from "./operator-controls";
@@ -28,7 +28,7 @@ export function AssociationOverview({ workspaceId }: { workspaceId: string }) {
   const events = useAssociationPage(workspaceId, "events", { status: "published", when: "upcoming" }), waitlist = useAssociationPage(workspaceId, "waitlist");
   const rescues = useAssociationPage(workspaceId, "rescues", {}, canManage), receipts = useAssociationPage(workspaceId, "receipts", {}, canManage);
   const pendingScope = JSON.stringify({ status: "pending" });
-  const pending = useCachedResource(associationOrdersCacheKey(workspaceId, null, pendingScope), () => listAssociationOrders(workspaceId, undefined, { status: "pending" }));
+  const pending = useAssociationProjection(associationOrdersCacheKey(workspaceId, null, pendingScope), () => listAssociationOrders(workspaceId, undefined, { status: "pending" }));
   const pendingPage = pending.data ? { data: { items: pending.data.orders, nextCursor: pending.data.nextCursor } } : { error: pending.error };
   const upcoming = tally(events, row => row.status === "published" && Date.parse(row.endsAt || row.startsAt) >= now);
   const pendingOrders = tally(pendingPage, () => true);
@@ -61,7 +61,7 @@ export function AssociationOverview({ workspaceId }: { workspaceId: string }) {
     </div>
     <section className="space-y-3" aria-labelledby="association-attention">
       <h2 id="association-attention" className="text-lg font-semibold">{u.attention}</h2>
-      {attention.length === 0 ? (settled ? <EmptyState title={u.nothingAttention} /> : null) : attention.map(row => <InlineNotice key={row.key} tone={row.tone} action={<Link href={row.href} className="inline-flex min-h-11 items-center gap-1 text-sm font-medium md:min-h-8">{u.viewAll}<ArrowUpRight aria-hidden className="size-4" /></Link>}>{row.text}</InlineNotice>)}
+      {attention.length === 0 ? (settled ? <EmptyState title={u.nothingAttention} /> : null) : attention.map(row => <InlineNotice key={row.key} tone={row.tone} action={<Link href={row.href} className="inline-flex min-h-11 items-center gap-1 text-sm font-medium md:min-h-8">{row.key === "module" ? u.admin : u.viewAll}<ArrowUpRight aria-hidden className="size-4" /></Link>}>{row.text}</InlineNotice>)}
     </section>
     <WebsiteStatusCard workspaceId={workspaceId} canManage={canManage} />
     <section className="space-y-3" aria-labelledby="association-quick">

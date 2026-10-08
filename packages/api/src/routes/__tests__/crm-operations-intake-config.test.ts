@@ -135,8 +135,8 @@ describe('[COMP:api/crm-operations-route] intake configuration REST adapter', ()
     expect(detail.status).toBe(200)
     expect(member.readStore.listSubmissions).toHaveBeenCalledWith(WORKSPACE_ID, {
       status: 'new', limit: 20,
-    })
-    expect(member.readStore.getSubmission).toHaveBeenCalledWith(WORKSPACE_ID, SUBMISSION_ID)
+    }, { kind: 'user', userId: USER_ID })
+    expect(member.readStore.getSubmission).toHaveBeenCalledWith(WORKSPACE_ID, SUBMISSION_ID, { kind: 'user', userId: USER_ID })
   })
 
   it('downloads a submission attachment through the workspace-qualified read port', async () => {
@@ -150,7 +150,7 @@ describe('[COMP:api/crm-operations-route] intake configuration REST adapter', ()
     expect(response.headers['x-content-type-options']).toBe('nosniff')
     expect(response.headers['content-security-policy']).toBe("sandbox; default-src 'none'")
     expect(member.readStore.getSubmissionAttachment).toHaveBeenCalledWith(
-      WORKSPACE_ID, SUBMISSION_ID, ATTACHMENT_ID,
+      WORKSPACE_ID, SUBMISSION_ID, ATTACHMENT_ID, { kind: 'user', userId: USER_ID },
     )
   })
 
@@ -224,7 +224,7 @@ describe('[COMP:api/crm-operations-route] intake configuration REST adapter', ()
     expect(list.status).toBe(200)
     expect(preview.status).toBe(200)
     expect(member.readStore.listSegments).toHaveBeenCalledWith(WORKSPACE_ID, { entityKind: 'person', includeArchived: false, limit: 50 })
-    expect(member.readStore.previewSegment).toHaveBeenCalledWith(WORKSPACE_ID, SEGMENT_ID, { limit: 10, snapshotLimit: 100 })
+    expect(member.readStore.previewSegment).toHaveBeenCalledWith(WORKSPACE_ID, SEGMENT_ID, { limit: 10, snapshotLimit: 100 }, expect.objectContaining({ kind: 'user' }))
     expect(saved.status).toBe(201)
     expect(member.service.execute).toHaveBeenCalledWith(expect.objectContaining({
       workspaceId: WORKSPACE_ID, actor: { kind: 'user', userId: USER_ID },
@@ -251,10 +251,10 @@ describe('[COMP:api/crm-operations-route] intake configuration REST adapter', ()
     expect(participation.status).toBe(200)
     expect(member.readStore.listEntitlements).toHaveBeenCalledWith(WORKSPACE_ID, {
       contactId: CONTACT_ID, status: 'active', limit: 25, activeOnly: true, effectiveAt: '2026-01-01T00:00:00Z',
-    })
+    }, { kind: 'user', userId: USER_ID })
     expect(member.readStore.listParticipation).toHaveBeenCalledWith(WORKSPACE_ID, {
       eventId: EVENT_ID, sourceKind: 'commerce', limit: 50,
-    })
+    }, { kind: 'user', userId: USER_ID })
   })
 
   it('lists custom pipeline catalogs and moves a deal through the canonical service', async () => {

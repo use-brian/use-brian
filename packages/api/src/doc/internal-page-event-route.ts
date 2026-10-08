@@ -100,8 +100,8 @@ export function internalPageEventRoutes(
     }
     const isSystem = body.isSystem === true
 
-    // System-side read — doc-sync has no member context; resolve the page's
-    // workspace / parent / title.
+    // System-side capture: doc-sync has no single member context. The store
+    // saves current protection and returns the receipt's exact event fields.
     const ctx = await opts.savedViewStore.getPageEventContextSystem(pageId)
     if (!ctx) {
       // Page gone — ack so doc-sync never retries a dead page.
@@ -114,6 +114,7 @@ export function internalPageEventRoutes(
     // acting user — the honest value for an out-of-band content-edit event.
     opts.publish({
       workspaceId: ctx.workspaceId,
+      sourceVersion: ctx.sourceVersion,
       pageId,
       parentId: ctx.parentId,
       title: ctx.title,

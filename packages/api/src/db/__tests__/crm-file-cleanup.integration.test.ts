@@ -7,7 +7,7 @@ import express from 'express'
 import request from 'supertest'
 import {afterAll,describe,expect,it,vi} from 'vitest'
 import type {CrmOperationsContext,CrmImportFileCleanupPreview} from '@use-brian/core'
-import {getPool,getAppPool} from '../client.js'
+import {getPool,getAppPool,queryWithRLS} from '../client.js'
 import {createCrmOperationsService} from '../../crm-operations/service.js'
 import {createDbCrmOperationsStore} from '../crm-operations-store.js'
 import {createCrmImportFileCleanupService} from '../../crm-operations/import-file-cleanup-service.js'
@@ -49,11 +49,50 @@ const count=async(table:string,ws:string)=>Number((await pool.query(`SELECT coun
 const worker=(deleteBlob:(key:string)=>Promise<void>)=>createCrmImportFileCleanupWorker({resolver:{forUri:async()=>({deleteBlob})} as unknown as Pick<FilesClientResolver,'forUri'>})
 describe('[COMP:crm/file-cleanup] Actual reviewed source and storage lifecycle',()=>{
   afterAll(async()=>{_resetCoalescerForTests();await pool.end();await appPool.end()})
+  it.each(['file','consumer'] as const)('protects %s scope before review, deletion and saved receipt recovery',async kind=>{
+    const f=await fixture(),department=randomUUID(),departmentOwner=randomUUID(),old=await f.preview()
+    await pool.query('INSERT INTO users(id,auth_provider_id) VALUES($1::uuid,$1::text)',[departmentOwner])
+    await pool.query("INSERT INTO workspace_members(workspace_id,user_id,role) VALUES($1,$2,'member')",[f.workspaceId,departmentOwner])
+    await pool.query("INSERT INTO workspace_groups(id,workspace_id,name,created_by,kind,key,compartment_key) VALUES($1::uuid,$2,'Fictional cleanup department',$3,'team',$1::text,$4)",[department,f.workspaceId,departmentOwner,`team:${department}`])
+    await pool.query("INSERT INTO workspace_compartments(workspace_id,key,label,managed_by,managed_ref_id) VALUES($1,$2,'Fictional cleanup department','team',$3)",[f.workspaceId,`team:${department}`,department])
+    await pool.query(`UPDATE ${kind==='file'?'workspace_files':'entities'} SET sensitivity='confidential',compartments=$2 WHERE id=$1`,[kind==='file'?f.fileId:f.contactId,[`team:${department}`]])
+    await expect(f.preview()).rejects.toMatchObject({code:'not_authorized'})
+    await expect(f.execute(old)).rejects.toMatchObject({code:'not_authorized'})
+    expect(await count('workspace_files',f.workspaceId)).toBe(1)
+    await pool.query("INSERT INTO department_edges(workspace_id,department_id,principal_kind,user_id,clearance,origin) VALUES($1,$2,'user',$3,'confidential','store')",[f.workspaceId,department,f.userId])
+    await expect(f.execute(old)).rejects.toMatchObject({details:{reason:'file_cleanup_preview_stale'}})
+    const review=await f.preview();expect(review.status).toBe('ready')
+    expect((await pool.query('SELECT scope_snapshot FROM crm_import_file_cleanups WHERE id=$1',[review.id])).rows[0].scope_snapshot.compartments).toEqual([`team:${department}`])
+    await expect(pool.query("UPDATE crm_import_file_cleanups SET scope_snapshot=jsonb_set(scope_snapshot,'{compartments}','[]') WHERE id=$1",[review.id])).rejects.toMatchObject({code:'23514'})
+    await pool.query("UPDATE department_edges SET expires_at=clock_timestamp()-interval '1 second' WHERE department_id=$1 AND user_id=$2",[department,f.userId])
+    await expect(cleanup.read(f.context,review.id)).rejects.toMatchObject({code:'not_authorized'})
+    await expect(f.execute(review)).rejects.toMatchObject({code:'not_authorized'})
+    expect((await queryWithRLS(f.userId,'SELECT id FROM crm_import_file_cleanups WHERE id=$1',[review.id])).rows).toEqual([])
+    expect(await count('workspace_files',f.workspaceId)).toBe(1)
+    await pool.query('UPDATE department_edges SET expires_at=NULL WHERE department_id=$1 AND user_id=$2',[department,f.userId])
+    expect((await f.execute(review)).receipt.status).toBe('queued')
+    await pool.query("UPDATE department_edges SET expires_at=clock_timestamp()-interval '1 second' WHERE department_id=$1 AND user_id=$2",[department,f.userId])
+    await expect(cleanup.read(f.context,review.id)).rejects.toMatchObject({code:'not_authorized'})
+    await expect(f.execute(review)).rejects.toMatchObject({code:'not_authorized'})
+    const remove=vi.fn(async()=>{});await worker(remove).tick()
+    expect(remove).toHaveBeenCalledWith(`${f.workspaceId}/${f.fileId}`)
+    await pool.query('UPDATE department_edges SET expires_at=NULL WHERE department_id=$1 AND user_id=$2',[department,f.userId])
+    expect(await cleanup.read(f.context,review.id)).toMatchObject({status:'completed'})
+  },60_000)
+  it('refuses unknown historical receipt scope after department-v2 activation',async()=>{
+    const f=await fixture()
+    await pool.query('UPDATE workspaces SET department_read_v2=false WHERE id=$1',[f.workspaceId])
+    const review=await f.preview()
+    await pool.query('UPDATE workspaces SET department_read_v2=true WHERE id=$1',[f.workspaceId])
+    await expect(cleanup.read(f.context,review.id)).rejects.toMatchObject({code:'not_authorized'})
+    await expect(f.execute(review)).rejects.toMatchObject({code:'not_authorized'})
+    expect(await count('workspace_files',f.workspaceId)).toBe(1)
+  })
   it('requires a current owner, policy, same-workspace file and nonfuture cutoff',async()=>{
     const f=await fixture(false),other=await fixture()
     expect((await f.preview()).blockers).toContainEqual({domain:'crm_privacy_policies',reason:'import_source_erasure_policy_unconfigured',count:1})
     await expect(cleanup.preview({...f.context,actor:{kind:'brain_key',credentialId:randomUUID()}},{kind:'preview_import_file_cleanup',fileId:f.fileId,before:new Date().toISOString()})).rejects.toMatchObject({code:'not_authorized'})
-    expect((await cleanup.preview(f.context,{kind:'preview_import_file_cleanup',fileId:other.fileId,before:new Date().toISOString()})).status).toBe('blocked')
+    await expect(cleanup.preview(f.context,{kind:'preview_import_file_cleanup',fileId:other.fileId,before:new Date().toISOString()})).rejects.toMatchObject({code:'not_authorized'})
     await expect(cleanup.preview(f.context,{kind:'preview_import_file_cleanup',fileId:f.fileId,before:new Date(Date.now()+60000).toISOString()})).rejects.toMatchObject({code:'invalid_input'})
     await f.policy();const p=await f.preview()
     await expect(other.execute(p)).rejects.toMatchObject({code:'not_found'})

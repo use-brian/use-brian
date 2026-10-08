@@ -14,6 +14,7 @@ import type { AssociationStore } from '../../db/association-store.js'
 import { authenticateBrainRequest } from '../../brain-mcp/auth.js'
 import type { BrainKeyStore } from '../../db/brain-keys-store.js'
 import { parseCrmIntakeToken } from '../../db/crm-intake-store.js'
+import { currentAgentAccess } from '../../db/agent-access-context.js'
 
 const workspaceId = randomUUID(), credentialId = randomUUID(), userId = randomUUID(), eventId = randomUUID()
 const token = `sk_crm_${credentialId}_${'A'.repeat(43)}`
@@ -37,6 +38,26 @@ function fixture(auth: CrmIntegrationPrincipal | null = principal) {
 }
 
 describe('[COMP:api/crm-integration-auth] Route isolation and shared adapters', () => {
+  it('carries only the authenticated departmental issuer and ceiling into canonical commands', async () => {
+    const departmentId = randomUUID(), assistantId = randomUUID()
+    const departmentRead = { workspaceId, userId, assistantId, base: 'public' as const,
+      departments: { [departmentId]: 'confidential' as const }, contextDepartment: null,
+      binding: [departmentId], cap: 'confidential' as const }
+    const executionLimits = { clearance: 'public' as const, compartments: null, mutationCompartments: [],
+      projectIds: [randomUUID()], visibilityAssistantIds: [assistantId], sharedAudience: true }
+    const f = fixture({ ...principal, departmentRead, executionLimits })
+    f.service.execute.mockImplementationOnce(async () => {
+      await Promise.resolve()
+      expect(currentAgentAccess()).toMatchObject({ workspaceId, userId, departmentRead, ...executionLimits })
+      return { command: 'save_event', record: { id: eventId }, created: true }
+    })
+    const response = await request(f.app).post('/api/crm/integration/operations/commands')
+      .set('Authorization', `Bearer ${token}`).send({ kind: 'save_event', slug: 'fictional-event', title: 'Fictional event',
+        startsAt: '2099-01-01T12:00:00Z', endsAt: '2099-01-01T14:00:00Z', timezone: 'UTC', mode: 'venue', status: 'published', capacity: 10 })
+    expect(response.status).toBe(201)
+    expect(f.service.execute).toHaveBeenCalledTimes(1)
+    expect(currentAgentAccess()).toBeUndefined()
+  })
   it('returns scoped recovery for stage commands without exposing source details', async () => {
     const f = fixture({ ...principal, grants: [{ operation: 'crm.records.write', selectors: {} }] })
     f.service.execute.mockRejectedValueOnce(Object.assign(new Error('Hidden source details'), { code: 'scope_operation_denied' }))
@@ -239,6 +260,18 @@ describe('[COMP:api/crm-integration-auth] Route isolation and shared adapters', 
     expect(workspaceStore.getRole).not.toHaveBeenCalled()
     expect(service.execute).not.toHaveBeenCalled()
   })
+  it('maps member destination preview with all contacts before order detail matching', async () => {
+    const workspaceStore = { getRole: vi.fn().mockResolvedValue('owner') } as unknown as WorkspaceStore
+    const preview = { choices: [], validForMs: 30_000 }
+    const service = { execute: vi.fn().mockResolvedValue({ command: 'preview_order_destinations', record: preview }) } as unknown as AssociationServicePort
+    const app = express()
+    app.use((req, _res, next) => { req.userId = userId; next() })
+    app.use('/api/crm/:workspaceId/association', crmAssociationRoutes({ service, context: associationMemberContext(workspaceStore) }))
+    const response = await request(app).get(`/api/crm/${workspaceId}/association/orders/destinations?contactIds=${eventId},${credentialId}`)
+    expect(response.status).toBe(200)
+    expect(response.body).toEqual({ preview })
+    expect(service.execute).toHaveBeenCalledWith(expect.objectContaining({ workspaceId, actor: { kind: 'user', userId } }), { kind: 'preview_order_destinations', contactIds: [eventId, credentialId] })
+  })
   it('maps the authenticated member receipt retry route to the closed canonical command', async () => {
     const workspaceStore = { getRole: vi.fn().mockResolvedValue('owner') } as unknown as WorkspaceStore
     const service = { execute: vi.fn().mockResolvedValue({ command: 'retry_provider_receipt', record: { id: eventId }, created: false,
@@ -303,6 +336,24 @@ describe('[COMP:api/crm-integration-auth] Route isolation and shared adapters', 
     expect(service.execute).toHaveBeenCalledWith(expect.objectContaining({ actor: { kind: 'user', userId } }), {
       kind: 'correct_check_in', registrationId: eventId, correction: { expectedStatus: 'checked_in', reason: 'Scanned the wrong badge' },
     })
+  })
+  it('previews credential bindings only for authenticated managers with validated assistant and cap', async () => {
+    const role = vi.fn().mockResolvedValue('owner')
+    const workspaceStore = { getRole: role } as unknown as WorkspaceStore
+    const bindingOptions = vi.fn().mockResolvedValue({ mode: 'department-v2', choices: [], assistants: [], validForMs: 30000 })
+    const credentials = { bindingOptions } as unknown as CrmIntegrationStore
+    const app = express()
+    app.use(express.json(), (req, _res, next) => { req.userId = userId; next() })
+    app.use('/api/crm', crmIntegrationCredentialRoutes({ workspaceStore, credentials }))
+    const path = `/api/crm/${workspaceId}/operations/integration-credentials/binding-options`
+    const response = await request(app).get(path).query({ assistantId: eventId, cap: 'confidential' })
+    expect(response.status).toBe(200)
+    expect(response.headers['cache-control']).toBe('no-store')
+    expect(bindingOptions).toHaveBeenCalledExactlyOnceWith(workspaceId, userId, { assistantId: eventId, cap: 'confidential' })
+    expect((await request(app).get(path).query({ cap: 'unknown' })).status).toBe(400)
+    role.mockResolvedValue('member')
+    expect((await request(app).get(path)).status).toBe(403)
+    expect(bindingOptions).toHaveBeenCalledTimes(1)
   })
   it('keeps member module reads separate from owner/admin actions and credential issuance', async () => {
     const workspaceStore = { getRole: vi.fn().mockResolvedValue('member') } as unknown as WorkspaceStore

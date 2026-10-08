@@ -245,22 +245,18 @@ describe('[COMP:api/workflow-store] createDbWorkflowRunStore', () => {
     expect(mockQuery.mock.calls[0][0]).toContain('INSERT INTO workflow_runs')
   })
 
-  it('createRun stamps trigger_page_id from a page-source run input (mig 282)', async () => {
-    mockQuery.mockResolvedValueOnce({ rows: [runRow()], rowCount: 1 } as never)
-    await runs.createRun({
-      workflowId: 'wf-1',
-      workspaceId: 'ws-1',
-      triggeredBy: null,
-      triggerKind: 'manual',
-      input: {
-        trigger: { sourceType: 'page', pageId: 'watched-page', channelId: 'created', actorId: 'u-1' },
-        event: { pageId: 'changed-page', action: 'created' },
-      },
-    } as Parameters<typeof runs.createRun>[0])
-    const [sql, values] = mockQuery.mock.calls[0]
-    expect(sql).toContain('trigger_page_id')
-    // The CHANGED page (input.event.pageId), not the watched page.
-    expect((values as unknown[])[5]).toBe('changed-page')
+  it('refuses an unbound page event before the generic system insert', async () => {
+    const client = { query: vi.fn(async () => ({ rows: [] })), release: vi.fn() }
+    vi.mocked(getPool).mockReturnValue({ connect: async () => client } as never)
+    await expect(runs.createRun({
+      workflowId: 'wf-1', workspaceId: 'ws-1', triggeredBy: null, triggerKind: 'manual',
+      input: { trigger: { sourceType: 'page', pageId: 'watched-page' }, event: { pageId: 'changed-page' } },
+    })).rejects.toThrow('workflow_authority_unavailable')
+    expect(mockQuery).not.toHaveBeenCalled()
+    expect(client.query).toHaveBeenCalledWith('ROLLBACK')
+    expect(client.release).toHaveBeenCalled()
+    // Canonical page stamping and authorized execution are exercised against
+    // real PostgreSQL in workflow-page-receipt.integration.test.ts.
   })
 
   it('createRun leaves trigger_page_id null for a non-page run input', async () => {
@@ -471,10 +467,14 @@ describe('[COMP:api/workflow-store] createDbWorkflowRunStore', () => {
     const clientQuery=vi.fn(async(sql:string)=>{
       commands.push(sql)
       if(sql.includes('AS acquired'))return {rows:[{acquired:true}],rowCount:1}
+      if(sql.includes('effective_member_read_compartments'))return {rows:[{role:'member',clearance:'internal',readCompartments:null,mutationCompartments:null,departmentReadV2:'false'}],rowCount:1}
       if(sql.startsWith('SELECT r.workspace_id'))return {rows:[{workspace_id:'workspace-1',actor}],rowCount:1}
       if(sql.startsWith('SELECT id FROM workflow_runs'))return {rows:[{id:'run-current'}],rowCount:1}
-      if(sql.includes('SELECT id,outcome,privacy_erased'))return {rows:outcome?[{id:'run-prior',outcome,privacy_erased:false}]:[],rowCount:outcome?1:0}
-      if(sql.includes('SELECT fields,status'))return {rows:record?[record]:[],rowCount:record?1:0}
+      if(sql.includes('SELECT id,outcome,privacy_erased'))return {rows:outcome?[{id:'run-prior',outcome,privacy_erased:false,scopeEvidence:{sensitivity:'public',compartments:[],projectIds:[]}}]:[],rowCount:outcome?1:0}
+      if(sql.includes('workflow_run_department_visible'))return {rows:[{allowed:true}],rowCount:1}
+      if(sql.includes('workflow_crm_scope_visible'))return {rows:[{allowed:true}],rowCount:1}
+      if(sql.includes('AS matches'))return {rows:[{matches:true}],rowCount:1}
+      if(sql.includes('FROM blueprint_records'))return {rows:record?[{id:'record-1',allowed:true,...record}]:[],rowCount:record?1:0}
       return {rows:[],rowCount:0}
     })
     vi.mocked(getPool).mockReturnValue({connect:async()=>({query:clientQuery,release})} as never)
@@ -488,6 +488,47 @@ describe('[COMP:api/workflow-store] createDbWorkflowRunStore', () => {
     expect(mockRls).not.toHaveBeenCalled()
     expect(applyRLSGucs).toHaveBeenCalledWith(expect.objectContaining({query:client.clientQuery}),'u-1')
   })
+  it('omits unverifiable historical outcome context without recording a new copy',async()=>{
+    const client=outcomeClient({summary:'Historical result'}),original=client.clientQuery.getMockImplementation()!
+    client.clientQuery.mockImplementation(async(sql:string)=>sql.includes('SELECT id,outcome,privacy_erased')
+      ?{rows:[{id:'run-prior',outcome:{summary:'Historical result'},privacy_erased:false}],rowCount:1}:original(sql))
+    expect(await runs.getLatestOutcomeForWorkflowSystem('wf-1','run-current')).toBeNull()
+    expect(client.commands.some(sql=>sql.includes('INSERT INTO workflow_run_copy_sources'))).toBe(false)
+    expect(client.commands.at(-1)).toBe('COMMIT')
+  })
+  it('withholds denied department content before recording an edge or fetching enrichment',async()=>{
+    const client=outcomeClient({status:'completed',summary:'protected result'}),original=client.clientQuery.getMockImplementation()!
+    client.clientQuery.mockImplementation(async(sql:string)=>sql.includes('workflow_run_department_visible')?{rows:[{allowed:false}],rowCount:1}:original(sql))
+    expect(await runs.getLatestOutcomeForWorkflowSystem('wf-1','run-current')).toBeNull()
+    expect(client.commands.some(sql=>sql.includes('INSERT INTO workflow_run_copy_sources')||sql.includes('FROM blueprint_records'))).toBe(false)
+    expect(client.commands.at(-1)).toBe('COMMIT')
+  })
+  it('rolls back lineage and withholds enrichment when department admission expires before commit',async()=>{
+    const client=outcomeClient({status:'completed',summary:'protected result'},{fields:{protected:true},status:'complete'}),original=client.clientQuery.getMockImplementation()!
+    let checks=0
+    client.clientQuery.mockImplementation(async(sql:string)=>sql.includes('workflow_run_department_visible')?{rows:[{allowed:++checks===1}],rowCount:1}:original(sql))
+    expect(await runs.getLatestOutcomeForWorkflowSystem('wf-1','run-current')).toBeNull()
+    expect(checks).toBe(2)
+    expect(client.commands.some(sql=>sql.includes('INSERT INTO workflow_run_copy_sources'))).toBe(true)
+    expect(client.commands.at(-1)).toBe('ROLLBACK')
+  })
+  it('rolls back and withholds a blueprint whose independent audience is unavailable',async()=>{
+    const client=outcomeClient({summary:'prior'},{fields:{protected:true},status:'complete',allowed:false})
+    expect(await runs.getLatestOutcomeForWorkflowSystem('wf-1','run-current')).toBeNull()
+    expect(client.commands.at(-1)).toBe('ROLLBACK')
+  })
+  it('withholds the result when CRM or blueprint source authority changes before commit',async()=>{
+    const client=outcomeClient({summary:'prior'},{fields:{protected:true},status:'complete'}),original=client.clientQuery.getMockImplementation()!
+    client.clientQuery.mockImplementation(async(sql:string)=>sql.includes('workflow_crm_scope_visible')?{rows:[{allowed:false}],rowCount:1}:original(sql))
+    expect(await runs.getLatestOutcomeForWorkflowSystem('wf-1','run-current')).toBeNull()
+    expect(client.commands.at(-1)).toBe('ROLLBACK')
+  })
+  it('withholds enrichment when the immutable receipt has a different or unknown source',async()=>{
+    const client=outcomeClient({summary:'prior'},{fields:{protected:true},status:'complete'}),original=client.clientQuery.getMockImplementation()!
+    client.clientQuery.mockImplementation(async(sql:string)=>sql.includes('AS matches')?{rows:[{matches:false}],rowCount:1}:original(sql))
+    expect(await runs.getLatestOutcomeForWorkflowSystem('wf-1','run-current')).toBeNull()
+    expect(client.commands.at(-1)).toBe('ROLLBACK')
+  })
   it('withholds a prior outcome when the destination has no recorded actor',async()=>{
     const client=outcomeClient({status:'completed',summary:'private copy'},null,null)
     await expect(runs.getLatestOutcomeForWorkflowSystem('wf-1','run-current')).rejects.toThrow('Workflow outcome copy could not be recorded')
@@ -497,8 +538,8 @@ describe('[COMP:api/workflow-store] createDbWorkflowRunStore', () => {
   it('enriches the copied result from a workspace-bound blueprint output',async()=>{
     const client=outcomeClient({status:'completed',summary:'prior'},{fields:{budget:12},status:'complete'})
     expect(await runs.getLatestOutcomeForWorkflowSystem('wf-1','run-current')).toMatchObject({summary:'prior',output:{budget:12},outputStatus:'complete'})
-    const i=client.commands.findIndex(sql=>sql.includes('SELECT fields,status'))
-    expect(client.clientQuery.mock.calls[i]).toEqual([expect.stringContaining('workspace_id=$1'),['workspace-1','run-prior']])
+    const i=client.commands.findIndex(sql=>sql.includes('FROM blueprint_records'))
+    expect(client.clientQuery.mock.calls[i]).toEqual([expect.stringContaining('workspace_id=$1'),['workspace-1','run-prior','u-1']])
   })
   it('returns no outcome without a prior result and does not invent a source edge',async()=>{
     const client=outcomeClient(null)

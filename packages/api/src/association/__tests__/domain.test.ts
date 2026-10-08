@@ -56,6 +56,17 @@ describe('[COMP:crm/association-domain] bounded domain contracts', () => {
     }).success).toBe(false)
   })
 
+  it('distinguishes an explicit order destination from omission and rejects ambiguous choices', () => {
+    const order = { contactId: CONTACT_ID, idempotencyKey: 'destination-choice', lines: [{ ticketId: TICKET_ID, quantity: 1, attendees: [{ name: 'Fictional attendee' }] }] }
+    expect(OrderCreateSchema.parse(order).destination).toBeUndefined()
+    for (const destination of [{ kind: 'general' }, { kind: 'department', departmentId: CONTACT_ID }]) {
+      expect(OrderCreateSchema.parse({ ...order, destination }).destination).toEqual(destination)
+    }
+    for (const destination of [null, { kind: 'department' }, { kind: 'general', departmentId: CONTACT_ID }, { kind: 'department', departmentId: 'unavailable' }]) {
+      expect(OrderCreateSchema.safeParse({ ...order, destination }).success).toBe(false)
+    }
+  })
+
   it('requires one attendee per reserved place', () => {
     const result = OrderCreateSchema.safeParse({
       contactId: CONTACT_ID,

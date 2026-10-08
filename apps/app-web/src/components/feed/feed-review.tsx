@@ -13,6 +13,7 @@ import { goalsCacheKey } from '@/lib/surface-prefetch';
 import { feedCachedJson, feedPaintFirst, readFeedCachedJson } from '@/lib/offline/feed-cache';
 import type { GoalRow } from '@/lib/api/goals';
 import { SearchableSelect } from '@/components/ui/searchable-select';
+import { useLeasedResource } from "@/lib/offline/surface-content-cache";
 export function useFeedReviewActions(assistantId: string, sessionId: string, revision: number, onRefresh: () => void) {
   const locale = useLocale(); const [model, setModel] = useState<FeedReviewRequest['model']>('standard'); const [busy, setBusy] = useState(false); const [error, setError] = useState(false);
   const retained = useRef<{ key: string; mutationId: string } | null>(null);
@@ -39,7 +40,7 @@ export function FeedReview(props: {
   const t = useT().feedReview; const tc = useT().feedCollaboration;
   const goalsPath = `/api/goals?workspaceId=${encodeURIComponent(props.workspaceId)}&includeTerminal=true`;
   const key = goalsCacheKey(props.workspaceId, 'all');
-  const goals = useCachedResource<GoalRow[]>(key, () => feedPaintFirst(key, async () => (await readFeedCachedJson<{ goals: GoalRow[] }>(goalsPath))?.goals ?? null, async () => (await feedCachedJson<{ goals: GoalRow[] }>(goalsPath)).goals));
+  const goals = useLeasedResource<GoalRow[]>(key, () => feedPaintFirst(key, async () => (await readFeedCachedJson<{ goals: GoalRow[] }>(goalsPath))?.goals ?? null, async () => (await feedCachedJson<{ goals: GoalRow[] }>(goalsPath)).goals));
   const runs = props.snapshot?.runs?.filter(run => run.kind === 'review') ?? []; const active = runs.some(run => run.status === 'pending' || run.status === 'running');
   const disabled = props.disabled || props.actions.busy; const remoteDisabled = disabled || props.offline;
   return <section className="space-y-3 rounded-lg border p-3" aria-label={t.checks}>

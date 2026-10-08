@@ -71,11 +71,15 @@ vi.mock("@/components/context/context-scope-picker", () => ({
 
 const api = vi.hoisted(() => ({
   getWorkflowFull: vi.fn<() => Promise<WorkflowFull | null>>(),
+  runWorkflowNow: vi.fn(),
+  updateWorkflow: vi.fn(),
 }));
 
 vi.mock("@/lib/api/workflow", async (importOriginal) => ({
   ...(await importOriginal<typeof import("@/lib/api/workflow")>()),
   getWorkflowFull: api.getWorkflowFull,
+  runWorkflowNow: api.runWorkflowNow,
+  updateWorkflow: api.updateWorkflow,
   listChannelDestinations: async () => [],
   listWorkspaceChannelOptions: async () => [],
   listWorkspaceSlackChannels: async () => [],
@@ -179,6 +183,8 @@ async function typeName(next: string) {
 beforeEach(() => {
   resetSurfaceCache();
   api.getWorkflowFull.mockReset();
+  api.runWorkflowNow.mockReset();
+  api.updateWorkflow.mockReset();
   container = document.createElement("div");
   document.body.appendChild(container);
   root = createRoot(container);
@@ -190,6 +196,19 @@ afterEach(() => {
 });
 
 describe("[COMP:app-web/workflow-detail-cache] detail page", () => {
+  it("warns to check history without retrying when a completed result loses access", async () => {
+    await loadSurfaceCache(workflowDetailCacheKey("w1", "wf-1"), async () => WF);
+    api.getWorkflowFull.mockImplementation(pending);
+    api.runWorkflowNow.mockResolvedValue({ unavailable: true, operationMayHaveExecuted: true });
+    await render();
+    const button = [...container.querySelectorAll("button")].find(node => node.textContent === en.workflowPage.builder.runNowBtn);
+    expect(button).toBeDefined();
+    await act(async () => { button!.click(); });
+    await settle();
+    expect(container.textContent).toContain(en.workflowPage.builder.runResultUnavailable);
+    expect(container.textContent).not.toContain(en.workflowPage.builder.runFail);
+    expect(api.runWorkflowNow).toHaveBeenCalledTimes(1);
+  });
   it("renders the board from a warmed key while the fetch is still pending (no fetch of its own)", async () => {
     await loadSurfaceCache(workflowDetailCacheKey("w1", "wf-1"), async () => WF);
     api.getWorkflowFull.mockImplementation(pending);
@@ -243,6 +262,54 @@ describe("[COMP:app-web/workflow-detail-cache] detail page", () => {
     expect(input.value).toBe("Morning digest (draft)");
     expect(container.textContent).not.toContain("Renamed elsewhere");
     expect(container.textContent).toContain(en.workflowPage.builder.unsavedChanges);
+  });
+
+  it("stops showing a definition whose read is denied, keeping the unsaved draft for a successful retry", async () => {
+    await loadSurfaceCache(workflowDetailCacheKey("w1", "wf-1"), async () => WF);
+    api.getWorkflowFull.mockResolvedValue(null);
+    await render();
+    await typeName("Morning digest (draft)");
+
+    // A renewal answers with a denial (null): the definition leaves the page.
+    await act(async () => { markSurfaceCacheStale("workflow-detail:w1:"); });
+    await settle();
+    expect(container.textContent).toContain(en.workflowPage.detail.unavailableTitle);
+    expect(container.textContent).not.toContain("Morning digest");
+    expect(container.querySelector('input[maxlength="120"]')).toBeNull();
+
+    // Access returns: Retry brings the editor back with the edit as typed.
+    api.getWorkflowFull.mockResolvedValue(WF);
+    const retry = [...container.querySelectorAll("button")].find((node) => node.textContent === en.workflowPage.detail.unavailableRetry);
+    expect(retry).toBeDefined();
+    await act(async () => { retry!.click(); });
+    await settle();
+    expect(container.textContent).not.toContain(en.workflowPage.detail.unavailableTitle);
+    expect(container.textContent).toContain(en.workflowPage.builder.unsavedChanges);
+  });
+
+  it("confirms a legacy definition's permissions without an edit and clears the banner", async () => {
+    await loadSurfaceCache(workflowDetailCacheKey("w1", "wf-1"), async () => ({ ...WF, authorityReviewRequired: true }));
+    api.getWorkflowFull.mockImplementation(pending);
+    api.updateWorkflow.mockResolvedValue({ ok: true, workflow: { ...WF, authorityReviewRequired: false, updatedAt: "2026-09-03T00:00:00.000Z" } });
+    await render();
+    expect(container.textContent).toContain(en.workflowPage.builder.authorityReviewTitle);
+    const confirm = [...container.querySelectorAll("button")].find((node) => node.textContent === en.workflowPage.builder.authorityReviewConfirm);
+    await act(async () => { confirm!.click(); });
+    await settle();
+    expect(api.updateWorkflow).toHaveBeenCalledWith("wf-1", { confirmAuthority: true });
+    expect(container.textContent).not.toContain(en.workflowPage.builder.authorityReviewTitle);
+  });
+
+  it("explains a schedule review instead of showing the raw refusal", async () => {
+    await loadSurfaceCache(workflowDetailCacheKey("w1", "wf-1"), async () => ({ ...WF, authorityReviewRequired: true }));
+    api.getWorkflowFull.mockImplementation(pending);
+    api.updateWorkflow.mockResolvedValue({ ok: false, error: "workflow_schedule_review_required" });
+    await render();
+    const confirm = [...container.querySelectorAll("button")].find((node) => node.textContent === en.workflowPage.builder.authorityReviewConfirm);
+    await act(async () => { confirm!.click(); });
+    await settle();
+    expect(container.textContent).toContain(en.workflowPage.builder.authorityReviewScheduleRequired);
+    expect(container.textContent).not.toContain("workflow_schedule_review_required");
   });
 
   it("the same mark-stale on a clean draft adopts the revalidated row", async () => {

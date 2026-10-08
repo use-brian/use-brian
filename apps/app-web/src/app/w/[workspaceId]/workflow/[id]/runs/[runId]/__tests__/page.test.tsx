@@ -141,9 +141,67 @@ beforeEach(() => {
 afterEach(() => {
   act(() => root.unmount());
   container.remove();
+  vi.useRealTimers();
 });
 
 describe("[COMP:app-web/workflow-detail-cache] run page", () => {
+  it("revalidates completed history and removes details after access loss", async () => {
+    vi.useFakeTimers();
+    await loadSurfaceCache(workflowRunCacheKey("w1", RUN.id), async () => RUN);
+    await loadSurfaceCache(workflowDetailCacheKey("w1", WF.id), async () => WF);
+    api.getWorkflowRun.mockResolvedValue(null);
+    await render();
+    expect(container.textContent).toContain("step_1");
+    await act(async () => { await vi.advanceTimersByTimeAsync(15_000); });
+    expect(api.getWorkflowRun).toHaveBeenCalledOnce();
+    expect(container.textContent).toContain(en.workflowPage.builder.runDetail.notFound);
+    expect(container.textContent).not.toContain("step_1");
+    expect(container.querySelector('a[href="/w/w1/workflow/wf-1"]')?.textContent).toContain(en.workflowPage.builder.runDetail.backLink);
+    expect(container.textContent).not.toContain(en.workflowPage.builder.runNowBtn);
+  });
+
+  it("expires warmed history during a hung refresh and ignores its late response", async () => {
+    vi.useFakeTimers();
+    await loadSurfaceCache(workflowRunCacheKey("w1", RUN.id), async () => RUN);
+    await loadSurfaceCache(workflowDetailCacheKey("w1", WF.id), async () => WF);
+    let resolve!: (value: WorkflowRunDetail) => void;
+    api.getWorkflowRun.mockImplementationOnce(() => new Promise(r => { resolve = r; })).mockImplementation(pending);
+    await render();
+    await act(async () => { await vi.advanceTimersByTimeAsync(30_001); });
+    expect(container.textContent).not.toContain("step_1");
+    await act(async () => { resolve(RUN); });
+    expect(container.textContent).not.toContain("step_1");
+  });
+
+  it("does not extend the display lifetime when refreshes fail", async () => {
+    vi.useFakeTimers();
+    await loadSurfaceCache(workflowRunCacheKey("w1", RUN.id), async () => RUN);
+    await loadSurfaceCache(workflowDetailCacheKey("w1", WF.id), async () => WF);
+    api.getWorkflowRun.mockRejectedValue(new Error("offline"));
+    await render();
+    await act(async () => { await vi.advanceTimersByTimeAsync(15_001); });
+    expect(container.textContent).toContain("step_1");
+    await act(async () => { await vi.advanceTimersByTimeAsync(15_000); });
+    expect(container.textContent).not.toContain("step_1");
+  });
+
+  it("renews completed history when the tab becomes visible", async () => {
+    await loadSurfaceCache(workflowRunCacheKey("w1", RUN.id), async () => RUN);
+    await loadSurfaceCache(workflowDetailCacheKey("w1", WF.id), async () => WF);
+    api.getWorkflowRun.mockResolvedValue(null);
+    await render();
+    await act(async () => { document.dispatchEvent(new Event("visibilitychange")); });
+    expect(api.getWorkflowRun).toHaveBeenCalledOnce();
+    expect(container.textContent).not.toContain("step_1");
+  });
+
+  it("links a waiting tool step to the workspace approval queue", async () => {
+    await loadSurfaceCache(workflowRunCacheKey("w1", RUN.id), async () => ({ ...RUN, status: "awaiting_input", steps: [{ ...RUN.steps[0], type: "tool_call", status: "running" }] }));
+    await loadSurfaceCache(workflowDetailCacheKey("w1", WF.id), async () => WF);
+    await render();
+    expect(container.querySelector('a[href="/w/w1/p?panel=approvals"]')?.textContent).toBe(en.workflowPage.builder.runDetail.openApprovals);
+  });
+
   it.each(["authority_changed", "workflow_authority_unavailable", "caller_authority_changed", "caller_evidence_unavailable"])("opens department access for %s without retrying the run", async (reason) => {
     await loadSurfaceCache(workflowRunCacheKey("w1", RUN.id), async () => ({ ...RUN, status: "failed", error: { reason, message: "Internal diagnostic" } }));
     await loadSurfaceCache(workflowDetailCacheKey("w1", WF.id), async () => WF);
@@ -158,6 +216,30 @@ describe("[COMP:app-web/workflow-detail-cache] run page", () => {
     expect(openWorkspaceSettings).toHaveBeenCalledExactlyOnceWith("ws-access");
     expect(api.getWorkflowRun).not.toHaveBeenCalled();
   });
+  it.each(["scope_evidence_missing", "page_event_evidence_missing"])("offers a fresh run, not a retry, for a historical run without %s evidence", async (code) => {
+    await loadSurfaceCache(workflowRunCacheKey("w1", RUN.id), async () => ({ ...RUN, status: "failed", error: { message: code } }));
+    await loadSurfaceCache(workflowDetailCacheKey("w1", WF.id), async () => WF);
+    api.getWorkflowRun.mockImplementation(pending);
+    api.getWorkflowFull.mockImplementation(pending);
+    await render();
+    expect(container.textContent).toContain(en.workflowPage.builder.runDetail.evidenceUnavailable);
+    expect(container.textContent).not.toContain(code);
+    const link = [...container.querySelectorAll("a")].find(anchor => anchor.textContent === en.workflowPage.builder.runDetail.openWorkflow);
+    expect(link?.getAttribute("href")).toBe(`/w/w1/workflow/${WF.id}`);
+  });
+
+  it.each(["scope_output_not_integrated", "page_derivation_output_not_integrated"])("explains a page-derived output refused with %s and points at the workflow", async (code) => {
+    await loadSurfaceCache(workflowRunCacheKey("w1", RUN.id), async () => ({ ...RUN, status: "failed", error: { message: code } }));
+    await loadSurfaceCache(workflowDetailCacheKey("w1", WF.id), async () => WF);
+    api.getWorkflowRun.mockImplementation(pending);
+    api.getWorkflowFull.mockImplementation(pending);
+    await render();
+    expect(container.textContent).toContain(en.workflowPage.builder.runDetail.pageOutputUnsupported);
+    expect(container.textContent).not.toContain(code);
+    const link = [...container.querySelectorAll("a")].find(anchor => anchor.textContent === en.workflowPage.builder.runDetail.openWorkflow);
+    expect(link?.getAttribute("href")).toBe(`/w/w1/workflow/${WF.id}`);
+  });
+
   it("paints the run and the workflow header from warmed keys while both fetches are still pending", async () => {
     await loadSurfaceCache(workflowRunCacheKey("w1", "run-1234567890"), async () => RUN);
     await loadSurfaceCache(workflowDetailCacheKey("w1", "wf-1"), async () => WF);

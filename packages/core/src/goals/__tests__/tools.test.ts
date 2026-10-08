@@ -1,3 +1,4 @@
+import { createExecutionContext, executionToolContext } from '../../security/execution-context.js'
 import { describe, it, expect, vi } from 'vitest'
 import { createGoalTools } from '../tools.js'
 import type { GoalRecord, GoalStore } from '../types.js'
@@ -67,6 +68,27 @@ const AUTHORING_AUTHORITY = {
 type Ctx = Parameters<ReturnType<typeof createGoalTools>['setGoal']['execute']>[1]
 
 describe('[COMP:goals/tools] goal chat tools', () => {
+  it('persists the department context, binding and cap from the validated authoring turn', async () => {
+    const departmentRead = { workspaceId: 'w1', userId: 'u1', assistantId: 'a1', base: 'public' as const,
+      departments: { research: 'internal' as const }, contextDepartment: 'research', binding: ['research'], cap: 'internal' as const }
+    const execution = createExecutionContext({
+      identity: { kind: 'attended', principal: { kind: 'workspace_member', userId: 'u1' } },
+      ownership: { kind: 'workspace', workspaceId: 'w1' },
+      access: { ...CTX, departmentRead },
+      writeDefaults: { compartments: [], projectIds: [] },
+      authority: { assertCurrent: async () => {}, execute: async operation => operation() },
+      lifecycle: CTX,
+    })
+    const create = vi.fn(fakeStore().create)
+    const { setGoal } = createGoalTools(fakeStore({ create }))
+    const result = await setGoal.execute({ outcome: 'Department-scoped follow-up', done_when: { kind: 'subtasks' } },
+      executionToolContext(execution, { appId: CTX.appId }))
+    expect(result.isError).toBeFalsy()
+    expect(create).toHaveBeenCalledWith(expect.objectContaining({ authoringAuthority: expect.objectContaining({
+      ceiling: expect.objectContaining({ departmentRead }),
+    }) }))
+  })
+
   it('setGoal creates a self-hosted goal and emits goal_created', async () => {
     const create = vi.fn(fakeStore().create)
     const onEvent = vi.fn()

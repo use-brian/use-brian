@@ -1,3 +1,4 @@
+import type { CurrentAuthorityBoundary } from '../tools/types.js'
 /**
  * Cloud browsing backend (§4.11): the E2B sandbox's agent-browser, reached
  * through the `SandboxProvider` seam. Stateless-orchestrator discipline:
@@ -21,7 +22,7 @@ import { BrowserBackendError } from './types.js'
  * `onNavigated` feeds the silent-death probe (§6).
  */
 export type SandboxTaskBinding = {
-  resolve(ctx: BrowserCallContext, hint?: { url?: string; browser?: boolean }): Promise<{ sandboxId: string }>
+  resolve(ctx: BrowserCallContext, hint?: { url?: string; browser?: boolean }): Promise<{ sandboxId: string; authority?: CurrentAuthorityBoundary }>
   onNavigated?(ctx: BrowserCallContext, url: string): Promise<void>
   /**
    * Host-owned one-shot recovery hook. It may retire the current task and
@@ -44,52 +45,72 @@ export function createCloudBrowserProvider(deps: {
   provider: SandboxProvider | null
   binding: SandboxTaskBinding | null
 }): BrowserProvider {
-  async function browserFor(ctx: BrowserCallContext, hint?: { url?: string }): Promise<SandboxBrowser> {
+  async function browserFor(ctx: BrowserCallContext, hint?: { url?: string }): Promise<{ browser: SandboxBrowser; authority?: CurrentAuthorityBoundary }> {
     if (!deps.provider || !deps.binding) {
       throw new BrowserBackendError(
         'Cloud browsing is not configured on this deployment (no sandbox provider).',
         'not_configured',
       )
     }
-    const { sandboxId } = await deps.binding.resolve(ctx, { ...hint, browser: true })
+    const { sandboxId, authority } = await deps.binding.resolve(ctx, { ...hint, browser: true })
+    await ctx.authority?.assertCurrent()
+    await authority?.assertCurrent()
     await deps.provider.connect(sandboxId)
-    return deps.provider.browser(sandboxId)
+    await ctx.authority?.assertCurrent()
+    await authority?.assertCurrent()
+    return { browser: deps.provider.browser(sandboxId), authority }
+  }
+
+  async function withBrowser<T>(ctx: BrowserCallContext, hint: { url?: string } | undefined, operation: (browser: SandboxBrowser) => Promise<T>): Promise<T> {
+    const resolved = await browserFor(ctx, hint)
+    return resolved.authority ? resolved.authority.execute(() => operation(resolved.browser)) : operation(resolved.browser)
+  }
+
+  async function run<T>(ctx: BrowserCallContext, operation: () => Promise<T>): Promise<T> {
+    return ctx.authority ? ctx.authority.execute(operation) : operation()
   }
 
   return {
     kind: 'cloud',
     async navigate(ctx, url) {
-      let result = await (await browserFor(ctx, { url })).navigate(url)
-      await deps.binding?.onNavigated?.(ctx, result.url)
-      // One bounded retry only. The recovery hook runs host-side, and when it
-      // succeeds it has retired this login-walled task and vaulted a session
-      // from a separate auth sandbox. Resolving again therefore creates a
-      // fresh assistant sandbox that receives the session bundle, never the
-      // credential.
-      const recovery = deps.binding?.recoverLogin
-        ? await deps.binding.recoverLogin(ctx, { requestedUrl: url, currentUrl: result.url })
-        : null
-      if (recovery?.retry) {
-        result = await (await browserFor(ctx, { url })).navigate(url)
+      return run(ctx, async () => {
+        let result = await withBrowser(ctx, { url }, browser => browser.navigate(url))
+        await ctx.authority?.assertCurrent()
         await deps.binding?.onNavigated?.(ctx, result.url)
-        await recovery.afterRetry?.(result.url)
-      }
-      return result
+        await ctx.authority?.assertCurrent()
+        // One bounded retry only. The recovery hook runs host-side, and when it
+        // succeeds it has retired this login-walled task and vaulted a session
+        // from a separate auth sandbox. Resolving again therefore creates a
+        // fresh assistant sandbox that receives the session bundle, never the
+        // credential.
+        const recovery = deps.binding?.recoverLogin
+          ? await deps.binding.recoverLogin(ctx, { requestedUrl: url, currentUrl: result.url })
+          : null
+        await ctx.authority?.assertCurrent()
+        if (recovery?.retry) {
+          result = await withBrowser(ctx, { url }, browser => browser.navigate(url))
+          await ctx.authority?.assertCurrent()
+          await deps.binding?.onNavigated?.(ctx, result.url)
+          await ctx.authority?.assertCurrent()
+          await recovery.afterRetry?.(result.url)
+        }
+        return result
+      })
     },
     async snapshot(ctx, options) {
-      return (await browserFor(ctx)).snapshot(options)
+      return run(ctx, async () => withBrowser(ctx, undefined, browser => browser.snapshot(options)))
     },
     async click(ctx, ref) {
-      await (await browserFor(ctx)).click(ref)
+      await run(ctx, async () => withBrowser(ctx, undefined, browser => browser.click(ref)))
     },
     async type(ctx, ref, text) {
-      await (await browserFor(ctx)).type(ref, text)
+      await run(ctx, async () => withBrowser(ctx, undefined, browser => browser.type(ref, text)))
     },
     async currentUrl(ctx) {
-      return (await browserFor(ctx)).currentUrl()
+      return run(ctx, async () => withBrowser(ctx, undefined, browser => browser.currentUrl()))
     },
     async captureState(ctx, site) {
-      return (await browserFor(ctx)).captureStorageState(site)
+      return run(ctx, async () => withBrowser(ctx, undefined, browser => browser.captureStorageState(site)))
     },
     async stop() {
       // Task teardown (pause/kill) is the lifecycle module's job, not the

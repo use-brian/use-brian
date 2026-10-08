@@ -1,30 +1,32 @@
 /** Snapshot-consistent streamed CRM exports. [COMP:crm/privacy-export] */
 import {createHash,randomUUID} from 'node:crypto'
-import type {PoolClient} from 'pg'
+import type {Pool,PoolClient} from 'pg'
 import type {Response} from 'express'
 import {once} from 'node:events'
-import {CrmOperationsContextSchema,CrmOperationsUuidSchema,CrmOperationsError,requireCrmIntegrationOperation,type CrmOperationsContext} from '@use-brian/core'
+import {CrmOperationsContextSchema,CrmOperationsUuidSchema,CrmOperationsError,requireCrmIntegrationOperation,type CrmOperationsContext,type ResourceScope} from '@use-brian/core'
 import {getPool} from '../db/client.js'
-import {lockCrmIntegrationCredential} from '../db/crm-integration-store.js'
+import {readCrmIntegrationCredential} from '../db/crm-integration-store.js'
 import {prepareCrmSuppressionPrivacy} from './suppression-tombstones.js'
 import {prepareCrmPrivacyCopies} from './privacy-copy-resolver.js'
 import {CRM_PRIVACY_COVERAGE,crmPrivacyClassification,crmPrivacyDomainSql,type CrmPrivacyScope} from './privacy-coverage.js'
+import {assertCrmPrivacySubjectAuthority,assertCrmPrivacyWorkspaceAuthority,crmPrivacySourceActor} from './privacy-subject-authority.js'
+import {assertAssociationSourceAuthority} from '../association/source-scope.js'
 
 export type CrmPrivacyExportOptions = {contactId?:string;signal?:AbortSignal}
 const failure=(reason:string,domain?:string)=>new CrmOperationsError('conflict','CRM privacy export could not be completed.',{reason,...(domain?{domain}:{})})
 function checkAbort(signal?:AbortSignal):void {
   if(signal?.aborted)throw failure('privacy_export_cancelled')
 }
-async function authorize(client:PoolClient,context:CrmOperationsContext):Promise<void> {
+async function authorize(client:Pool|PoolClient,context:CrmOperationsContext):Promise<void> {
   if(context.actor.kind==='user') {
     if(!context.authority.canConfigure || !['owner','admin'].includes(context.authority.role))throw new CrmOperationsError('not_authorized','Privacy export requires owner/admin session authority.')
-    const row=await client.query("SELECT role FROM workspace_members WHERE workspace_id=$1 AND user_id=$2 FOR SHARE",[context.workspaceId,context.actor.userId])
+    const row=await client.query("SELECT role FROM workspace_members WHERE workspace_id=$1 AND user_id=$2",[context.workspaceId,context.actor.userId])
     if(!['owner','admin'].includes(row.rows[0]?.role))throw new CrmOperationsError('not_authorized','A current workspace owner or admin is required for CRM privacy export.')
     return
   }
   if(context.actor.kind==='integration_key' && context.authority.integration?.credentialId===context.actor.credentialId) {
     requireCrmIntegrationOperation(context.authority.integration,'crm.privacy.export')
-    const current=await lockCrmIntegrationCredential(client,context.workspaceId,context.actor.credentialId)
+    const current=await readCrmIntegrationCredential(client,context.workspaceId,context.actor.credentialId)
     requireCrmIntegrationOperation(current,'crm.privacy.export')
     return
   }
@@ -39,20 +41,29 @@ export async function* streamCrmPrivacyExport(rawContext:CrmOperationsContext,op
   checkAbort(options.signal)
   const client=await getPool().connect()
   let domain:string|undefined,transactionOpen=false
+  let subjectScope:ResourceScope|null=null
+  const renewSubject=async()=>{
+    await authorize(getPool(),context)
+    if(subjectScope)await assertAssociationSourceAuthority(getPool(),context.workspaceId,
+      crmPrivacySourceActor(context),{scope:subjectScope,sources:[]})
+  }
   try {
     await client.query('BEGIN ISOLATION LEVEL REPEATABLE READ')
     transactionOpen=true
     await client.query("SET LOCAL statement_timeout='30s'")
-    await authorize(client,context)
+    await authorize(getPool(),context)
     if(contactId) {
       const person=await client.query("SELECT id FROM entities WHERE workspace_id=$1 AND id=$2 AND kind='person'",[context.workspaceId,contactId])
       if(!person.rowCount)throw new CrmOperationsError('not_found','The CRM contact is unavailable.')
+      const v2=(await client.query('SELECT department_read_v2 FROM workspaces WHERE id=$1',[context.workspaceId])).rows[0]?.department_read_v2
+      if(context.actor.kind==='user'||v2!==false)subjectScope=await assertCrmPrivacySubjectAuthority(client,context,contactId)
       await prepareCrmSuppressionPrivacy(client,context.workspaceId,contactId)
-    }
+    }else subjectScope=await assertCrmPrivacyWorkspaceAuthority(client,context)
     await prepareCrmPrivacyCopies(client,context.workspaceId,contactId)
     const stamp=(await client.query<{snapshotAt:Date}>('SELECT transaction_timestamp() AS "snapshotAt"')).rows[0]!
     const exportId=randomUUID(),aggregate=createHash('sha256'),coverage=[]
     let total=0
+    await renewSubject()
     yield JSON.stringify({type:'header',schema:'crm-privacy-v2',exportId,workspaceId:context.workspaceId,scope,contactId,
       snapshotAt:stamp.snapshotAt.toISOString(),checksum:'sha256-utf8-record-lines-with-newline'})+'\n'
     for(const entry of CRM_PRIVACY_COVERAGE) {
@@ -67,6 +78,7 @@ export async function* streamCrmPrivacyExport(rawContext:CrmOperationsContext,op
           const row=(await client.query<{payload:string|null;bytes:number}>('FETCH FORWARD 1 FROM privacy_export_rows')).rows[0]
           if(!row)break
           if(row.payload===null)throw failure('privacy_export_row_too_large',domain)
+          await renewSubject()
           // Preserve PostgreSQL numeric precision and JSON without parsing and
           // reserializing record values through JavaScript.
           const line='{"type":"record","domain":'+JSON.stringify(domain)+',"record":'+row.payload+'}\n'
@@ -79,6 +91,7 @@ export async function* streamCrmPrivacyExport(rawContext:CrmOperationsContext,op
         excludedColumns:entry.excludedColumns,redactedColumns:scope==='contact'?Object.keys(entry.subjectRedactions):[]})
     }
     checkAbort(options.signal)
+    await renewSubject()
     // Commit before emitting success. A failed snapshot transaction must never
     // leave a complete manifest that asserts the export was valid.
     await client.query('COMMIT')

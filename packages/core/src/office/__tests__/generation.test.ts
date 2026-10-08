@@ -1,6 +1,6 @@
 import { createHash } from 'node:crypto'
 import { describe, expect, it, vi } from 'vitest'
-import { OfficeGenerationFailure } from '../generation/contracts.js'
+import { OfficeGenerationFailure, OfficeMaterialFactMissing } from '../generation/contracts.js'
 import { runOfficeGenerationPipeline, type OfficeGenerationPipelineDeps } from '../generation/pipeline.js'
 import { runOfficeEdit } from '../generation/edit-runner.js'
 import { documentSnapshot, id, templateBundle } from './fixtures.js'
@@ -32,6 +32,31 @@ function deps() {
 }
 
 describe('[COMP:office/generation] Office generation pipeline', () => {
+  it('inherits template department/project restrictions without broadening caller grants', async () => {
+    const test = deps()
+    test.value.resolveAuthority = vi.fn(async () => ({ sensitivity: 'internal' as const, clearance: 'confidential' as const, visibilityUserIds: [], compartments: ['request'], projectIds: [], compartmentGrant: ['finance'], projectGrant: ['project-a'], sourceHandles: [] }))
+    test.value.selectTemplate = vi.fn(async () => ({ template: { ...templateBundle(), status: 'admitted' as const }, sourceScope: { sensitivity: 'confidential' as const, compartments: ['finance'], projectIds: ['project-a'] } }))
+    expect((await runOfficeGenerationPipeline(brief(),test.value)).status).toBe('completed')
+    expect(vi.mocked(test.value.commit).mock.calls[0][1].authority).toMatchObject({ sensitivity: 'confidential', compartments: ['finance','request'], projectIds: ['project-a'], compartmentGrant: ['finance'], projectGrant: ['project-a'] })
+  })
+
+  it.each(['clearance','department','project'])('rejects template requirements outside the %s grant before construction', async kind => {
+    const test=deps()
+    test.value.resolveAuthority=vi.fn(async()=>({sensitivity:'internal' as const,clearance:'internal' as const,visibilityUserIds:[],compartments:[],compartmentGrant:[],projectGrant:[],sourceHandles:[]}))
+    test.value.selectTemplate=vi.fn(async()=>({template:{...templateBundle(),status:'admitted' as const},sourceScope:{sensitivity:kind==='clearance'?'confidential' as const:'internal' as const,compartments:kind==='department'?['finance']:[],projectIds:kind==='project'?['project-a']:[]}}))
+    expect(await runOfficeGenerationPipeline(brief(),test.value)).toMatchObject({status:'failed',code:'template_scope_denied'})
+    expect(test.value.construct).not.toHaveBeenCalled()
+  })
+
+  it('asks for missing required facts without committing an invoice or inventing terms', async () => {
+    const test = deps()
+    test.value.construct = vi.fn(async () => { throw new OfficeMaterialFactMissing(['PAYMENT_TERMS','SELLER_ADDRESS']) })
+    const result = await runOfficeGenerationPipeline(brief(),test.value)
+    expect(result).toMatchObject({ status: 'needs_input', code: 'material_fact_missing', question: expect.stringContaining('PAYMENT_TERMS') })
+    expect(test.value.commit).not.toHaveBeenCalled()
+    expect(test.events).toContain('office.job.needs_input')
+  })
+
   it('runs the ten durable stages and completes only after export/reopen', async () => {
     const test = deps()
     const result = await runOfficeGenerationPipeline(brief(), test.value)

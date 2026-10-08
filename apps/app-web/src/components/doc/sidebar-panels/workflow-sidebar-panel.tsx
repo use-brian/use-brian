@@ -36,6 +36,7 @@ import type { WorkflowSummary } from "@/lib/api/workflow";
 import { workflowNextRun, compareByNextRun } from "@/lib/workflow-next-run";
 import { Skeleton } from "@/components/skeleton";
 import { useCachedResource } from "@/lib/surface-cache";
+import { surfaceContentRemaining, useSurfaceContentRenewal } from "@/lib/offline/surface-content-cache";
 import { surfaceDataKey, warmTargetFor } from "@/lib/surface-prefetch";
 
 /** Largest-unit relative time ("in 3 hours", "tomorrow"), locale-aware. */
@@ -61,7 +62,9 @@ export function WorkflowSidebarPanel({ workspaceId }: { workspaceId: string }) {
   const listKey = surfaceDataKey("workflow", workspaceId);
   const list = useCachedResource<WorkflowSummary[]>(listKey, () =>
     warmTargetFor("workflow", workspaceId).fetch() as Promise<WorkflowSummary[]>,
+    { expiresInMs: surfaceContentRemaining },
   );
+  useSurfaceContentRenewal(list.refresh);
   const rows = list.data;
   const workflows = useMemo(
     () => (rows ? rows.filter((w) => w.lifecycleState !== "archived") : null),

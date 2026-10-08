@@ -481,7 +481,7 @@ describe("[COMP:app-web/surface-prefetch] shell keys (home dock, sidebar tree)",
       "utf8",
     );
     expect(text).toContain("inboxCacheKey(workspaceId)");
-    expect(text).toContain("useCachedResource<InboxPayload>");
+    expect(text).toContain("useLeasedResource<InboxPayload>");
     // One request for the badge and the flyout: no private badge fetch, and
     // the spine's `INBOX_REFRESH_EVENT` reaches it through the map only.
     expect(text).not.toContain("fetchInboxBadgeCount");
@@ -506,7 +506,8 @@ describe("[COMP:app-web/surface-prefetch] shell keys (home dock, sidebar tree)",
 // The Live roster and Inbox flyout keys (Phase 3 step 2, report E "Live" and
 // "Inbox (flyout)" rows). A separate import keeps this block independent of
 // the lists above.
-vi.mock("@/lib/api/live", () => ({ fetchLiveRoster: vi.fn() }));
+vi.mock("@/lib/api/live", () => ({
+  liveRosterRemaining: () => 30_000, fetchLiveRoster: vi.fn() }));
 import {
   inboxCacheKey,
   liveRosterCacheKey,

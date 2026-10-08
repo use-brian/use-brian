@@ -16,6 +16,7 @@ import { createCrmDeliveryService } from '../../crm-operations/delivery-service.
 import { withCrmMailAdmission } from '../../crm-operations/delivery-policy.js'
 import { makeRequestApproval, resumeFromApproval, type ApprovalBridgeDeps } from '../../workflow/approval.js'
 import { _resetCoalescerForTests } from '../../brain-stream/notify.js'
+import { captureAuthoringAuthoritySystem, resolveWorkflowRunScope } from '../../context-scope/workflow-authority.js'
 
 const { assertLocalFixture } = await import(new URL('../../../../../scripts/crm/local-fixture.mjs', import.meta.url).href)
 await assertLocalFixture()
@@ -56,7 +57,7 @@ async function fixture() {
   const context: ToolContext = { workspaceId, userId, assistantId, sessionId: randomUUID(), appId: 'fixture', channelType: 'workflow', channelId: 'fixture', abortSignal: new AbortController().signal, activeCapabilities: new Set(capabilities) }
   const consult = vi.fn<ExecutorDeps['consultTransport']['send']>(async () => { throw new Error('Unexpected model call') })
   const channel = vi.fn<NonNullable<ExecutorDeps['deliverToChannel']>>(async p => ({ status: 'delivered', channelType: p.channelType, channelId: p.channelId, messageId: 'fixture-message' }))
-  const deps: ExecutorDeps = { workflowStore, runStore, resolvePrimary: async () => assistantId, buildToolRegistry: async () => registry, consultTransport: { send: consult }, deliverToChannel: channel }
+  const deps: ExecutorDeps = { workflowStore, runStore, resolvePrimary: async () => assistantId, resolveRunScope: resolveWorkflowRunScope, buildToolRegistry: async () => registry, consultTransport: { send: consult }, deliverToChannel: channel }
   const bridge: ApprovalBridgeDeps = { approvalsStore: createPendingApprovalsStore(), auditStore: createWorkspaceAuditStore(), workflowStore, runStore,
     resolvePrimary: deps.resolvePrimary, buildToolRegistry: deps.buildToolRegistry, executorDeps: deps, deliveries: async () => {} }
   deps.requestApproval = makeRequestApproval(bridge)
@@ -67,7 +68,8 @@ async function fixture() {
       if (key === 'submission_notification') step.arguments.to = ['member@example.com']
     }
     edit?.(recipe)
-    const workflow = await workflowStore.create({ userId, workspaceId, name: recipe.name, definition: WorkflowDefinitionSchema.parse(recipe.definition) })
+    const authoringAuthority = await captureAuthoringAuthoritySystem({userId,workspaceId,assistantId})
+    const workflow = await workflowStore.create({ userId, workspaceId, name: recipe.name, definition: WorkflowDefinitionSchema.parse(recipe.definition),authoringAuthority })
     const run = await runStore.createRun({ workflowId: workflow.id, workspaceId, triggeredBy: userId, triggerKind: 'manual', input: input ?? recipe.sampleInput })
     const outcome = await advanceWorkflowRun(deps, run.id)
     expect(outcome.kind, JSON.stringify(outcome)).not.toBe('failed')

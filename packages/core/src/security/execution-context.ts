@@ -191,6 +191,7 @@ export function createExecutionContext(input: CreateExecutionContextInput): Exec
 
   const access: ResolvedExecutionAccess = {
     ...input.access,
+    ...(ceiling.departmentRead ? { departmentRead: ceiling.departmentRead } : {}),
     clearance: ceiling.clearance,
     compartments: ceiling.compartments,
     mutationCompartments: ceiling.mutationCompartments,

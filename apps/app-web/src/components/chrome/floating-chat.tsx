@@ -87,6 +87,8 @@ import {
   docPagePath,
   pageIdFromInAppHref,
   pageIdFromPathname,
+  surfaceFromPathname,
+  panelFromSearch,
 } from "@/lib/doc-page-url";
 import { DOC_COMMENTS_CHANGED_EVENT } from "@/lib/comment-events";
 import {
@@ -555,6 +557,7 @@ export function FloatingChat({
   const router = useRouter();
   const pathname = usePathname();
   const searchParams = useSearchParams();
+  const showPageTarget = isDocOrigin && surfaceFromPathname(pathname) === "p" && !panelFromSearch(searchParams);
   const [expanded, setExpanded] = useState(false);
   const [input, setInput] = useState("");
   const [acceptedGoal, setAcceptedGoal] =
@@ -3363,7 +3366,7 @@ export function FloatingChat({
   // Idle copy stays generic: the dock can answer, research, create, and edit;
   // page or surface context is carried by the target chip instead of implying
   // that every prompt must request a view.
-  const idlePlaceholder = isDocOrigin ? t.placeholder : t.surfacePlaceholder;
+  const idlePlaceholder = showPageTarget ? t.placeholder : t.surfacePlaceholder;
 
   // Pill activity label — mirrors apps/web's collapsed-pill behaviour
   // (running tool description, else streaming preview, else "Thinking…").
@@ -3604,7 +3607,7 @@ export function FloatingChat({
                   {t.emptyTitle}
                 </p>
                 <p className="mx-auto max-w-xs text-xs leading-relaxed text-muted-foreground">
-                  {isDocOrigin ? t.emptyDesc : t.surfaceEmptyDesc}
+                  {showPageTarget ? t.emptyDesc : t.surfaceEmptyDesc}
                 </p>
               </div>
             </div>
@@ -3831,7 +3834,7 @@ export function FloatingChat({
           {/* Context chip — names the page this chat will edit, or signals
               that the next message mints a new draft. */}
           {isDocOrigin ? (
-            <ChatTargetIndicator target={chatTarget} dict={t.target} />
+            showPageTarget ? <ChatTargetIndicator target={chatTarget} dict={t.target} /> : null
           ) : (
             <SurfaceContextChip surface={origin} dict={t.surfaceTarget} />
           )}

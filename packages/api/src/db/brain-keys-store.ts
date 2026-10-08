@@ -60,7 +60,13 @@ export type BrainKeyRow = {
 }
 
 /** Internal — includes the hash. Never returned from public store methods. */
-type BrainKeyRowWithHash = BrainKeyRow & { keyHash: string }
+type BrainKeyRowWithHash = BrainKeyRow & {
+  keyHash: string
+  credentialOwnerUserId?: string
+  configurationSessionId?: string | null
+  admittedCompartments?: string[] | null
+  admittedProjectIds?: string[] | null
+}
 
 export type CreatedBrainKey = BrainKeyRow & {
   /** The plaintext key. Returned ONCE at creation; never retrievable again. */
@@ -241,7 +247,11 @@ export function createDbBrainKeyStore(): BrainKeyStore {
 
     async getByIdSystem(id) {
       const result = await query<BrainKeyRowWithHash>(
-        `SELECT ${COLS_PUBLIC}, key_hash as "keyHash"
+        `SELECT ${COLS_PUBLIC}, key_hash as "keyHash",
+                configuration_session_id AS "configurationSessionId",
+                admitted_compartments AS "admittedCompartments",
+                admitted_project_ids AS "admittedProjectIds",
+                (SELECT owner_user_id FROM workspaces WHERE id=brain_keys.workspace_id) AS "credentialOwnerUserId"
          FROM brain_keys
          WHERE id = $1 AND external_brain_key_current(id)
          LIMIT 1`,

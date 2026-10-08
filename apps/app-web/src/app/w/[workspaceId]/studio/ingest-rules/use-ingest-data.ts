@@ -66,13 +66,8 @@ export type AvailableProvider = {
 export type IngestSourcesSnapshot = {
   sources: IngestSource[];
   available: AvailableProvider[];
-  /**
-   * Whether the active workspace is the caller's OWNED personal workspace -
-   * the API's `ownedPersonal`, the only placement truth the notices may use.
-   * Never derive this from the workspace's bare `isPersonal` flag: a legacy
-   * personal-flagged team workspace is not the viewer's personal workspace.
-   */
-  ownedPersonal: boolean | undefined;
+  /** Whether this workspace is the caller’s owned account default. */
+  ownedDefault: boolean | undefined;
 };
 
 async function fetchIngestSources(workspaceId: string): Promise<IngestSourcesSnapshot> {
@@ -83,12 +78,12 @@ async function fetchIngestSources(workspaceId: string): Promise<IngestSourcesSna
   const data = (await res.json()) as {
     sources: IngestSource[];
     available?: AvailableProvider[];
-    ownedPersonal?: boolean;
+    ownedDefault?: boolean;
   };
   return {
     sources: data.sources ?? [],
     available: data.available ?? [],
-    ownedPersonal: typeof data.ownedPersonal === "boolean" ? data.ownedPersonal : undefined,
+    ownedDefault: typeof data.ownedDefault === "boolean" ? data.ownedDefault : undefined,
   };
 }
 
@@ -125,7 +120,7 @@ export function useIngestData(workspaceId: string | null) {
     /** null until the first list lands (cold) - the skeleton state. */
     sources: sources.data?.sources ?? null,
     available: sources.data?.available ?? [],
-    ownedPersonal: sources.data?.ownedPersonal,
+    ownedDefault: sources.data?.ownedDefault,
     loading: sources.loading,
     revalidating: sources.revalidating,
     error: sources.data === undefined ? sources.error : undefined,

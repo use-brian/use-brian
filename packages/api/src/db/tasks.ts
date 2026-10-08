@@ -1,3 +1,4 @@
+import { isDeepStrictEqual } from 'node:util'
 import { admitTaskCreate } from '../workspace-access/task-create-admission.js'
 import { bindScopeSource, maxSensitivity, unionScopeRequirements } from '@use-brian/core'
 import type { AccessContext, EntityLinksStore, Sensitivity, TaskListFilters, TaskListRow, TaskRecord, TaskRecordStatus, TaskUpdateFields, TaskWriteActor, TaskStore } from '@use-brian/core'
@@ -547,13 +548,13 @@ function diffChangedFields(
   if (fields.parentId !== undefined && next.parentId !== old.parent_id) changed.push('parentId')
   if (
     fields.externalRef !== undefined &&
-    JSON.stringify(next.externalRef) !== JSON.stringify(old.external_ref ?? {})
+    !isDeepStrictEqual(next.externalRef, old.external_ref ?? {})
   ) {
     changed.push('externalRef')
   }
   if (
     fields.attributes !== undefined &&
-    JSON.stringify(next.attributes) !== JSON.stringify(old.attributes ?? {})
+    !isDeepStrictEqual(next.attributes, old.attributes ?? {})
   ) {
     changed.push('attributes')
   }

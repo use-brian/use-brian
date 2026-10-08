@@ -67,6 +67,7 @@ import { mutateSurfaceCache, useCachedResource } from "@/lib/surface-cache";
 import { inboxCacheKey } from "@/lib/surface-prefetch";
 import { Avatar } from "@/components/doc/comment-thread-body";
 import { PreviewMarkdown } from "@/components/doc/preview-markdown";
+import { useLeasedResource } from "@/lib/offline/surface-content-cache";
 
 const EMPTY_PENDING: InboxPendingReply[] = [];
 const EMPTY_MENTIONS: InboxMention[] = [];
@@ -102,7 +103,7 @@ export function InboxPanel({
     if (open) setArmed(true);
   }, [open]);
   const key = armed ? inboxCacheKey(workspaceId) : null;
-  const inbox = useCachedResource<InboxPayload>(key, () => fetchInbox(workspaceId));
+  const inbox = useLeasedResource<InboxPayload>(key, () => fetchInbox(workspaceId));
   const refresh = inbox.refresh;
 
   // Revalidate on every OPEN (the store dedupes it into the cold load when

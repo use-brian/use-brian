@@ -235,6 +235,9 @@ describe('[COMP:office/layout] Deterministic Office layout', () => {
       }],
     }
 
+    snapshot.worksheets.push({ ...structuredClone(snapshot.worksheets[0]), id: id(120), name: 'Setup', visibility: 'veryHidden' })
+    expect(layoutOfficeArtifact(snapshot).pages).toHaveLength(1)
+    snapshot.worksheets[0].conditionalFormats.push({ id: id(121), range: 'A1', ruleType: 'beginsWith', text: 'use', formulas: ['LEFT(A1,3)="use"'], style: { fill: '#10202C' }, priority: 2, stopIfTrue: true })
     const page = layoutOfficeArtifact(snapshot).pages[0]
     expect(page.primitives.filter((primitive) => primitive.sourceKind === 'cell')).toHaveLength(2)
     expect(page.primitives.find((primitive) => primitive.id === id(105))).toMatchObject({ widthPt: 207, heightPt: 26, spreadsheetStyle: { fill: '#10202C' } })

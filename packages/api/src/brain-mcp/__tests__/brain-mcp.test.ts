@@ -12,10 +12,11 @@ import express from 'express'
 import request from 'supertest'
 import type { Request } from 'express'
 import { z } from 'zod'
-import { buildTool, createAssociationTools, type PipelineBResult, type Tool, type ToolContext } from '@use-brian/core'
+import { buildTool, createAssociationTools, createCrmCredentialTools, type PipelineBResult, type Tool, type ToolContext } from '@use-brian/core'
 import { hashSecret } from '../../db/api-key-store.js'
 import { mintBrainPlaintext, type BrainKeyStore } from '../../db/brain-keys-store.js'
-import { authenticateBrainRequest } from '../auth.js'
+import { mintBridgeToken } from '../../home-apps/tokens.js'
+import { authenticateBrainRequest, getAuthenticatedBrainCredentialCurrent } from '../auth.js'
 import { brainMcpRoutes } from '../server.js'
 import { queryWithRLS } from '../../db/client.js'
 import {
@@ -374,6 +375,20 @@ describe('[COMP:api/brain-mcp] buildBrainTools — scope gating', () => {
     }
   })
 
+  it('discovers credential lifecycle only with authenticated parent evidence and all write grants', () => {
+    const port = { preview: vi.fn(), list: vi.fn(), create: vi.fn(), revoke: vi.fn() }
+    const credentialTools = createCrmCredentialTools(port)
+    const parent = { version: 1 as const, kind: 'oauth_token' as const, credentialId: randomUUID(), workspaceId: randomUUID(),
+      userId: randomUUID(), clientId: 'fixture-client', expiresAt: '2099-01-01T00:00:00.000Z', tokenFingerprint: 'a'.repeat(64) }
+    for (const scope of ['read', 'read_write'] as const) for (const hasParent of [false, true]) for (const configure of [false, true]) {
+      const names = buildBrainTools({ workspaceId: parent.workspaceId, keyId: parent.credentialId, maxClearance: 'internal', scope,
+        ...ALL_STUBS, credentialTools, ...(hasParent ? { crmCredentialParent: parent } : {}),
+        agentActiveCapabilities: new Set(['crm', 'home_app:crm:write', ...(configure ? ['configure'] : [])]),
+      }).map(tool => tool.name)
+      for (const name of Object.keys(credentialTools)) expect(names.includes(name)).toBe(scope === 'read_write' && hasParent && configure)
+    }
+  })
+
   it('keeps generic plan/event configuration behind configure plus CRM write and write scope', () => {
     for (const scope of ['read', 'read_write'] as const) {
       for (const configure of [false, true]) {
@@ -560,6 +575,25 @@ describe('[COMP:api/brain-mcp] authenticateBrainRequest', () => {
     expect(await authenticateBrainRequest(reqWith(), { brainKeyStore: store })).toBeNull()
   })
 
+  it('rejects changed Brain-key context and admission evidence on retained authentication', async () => {
+    const { id, plaintext, store } = await fakeKeyStore()
+    const original = { ...(await store.getByIdSystem(id))!, credentialOwnerUserId: randomUUID(), configurationSessionId: randomUUID(),
+      admittedCompartments: ['team:fictional'], admittedProjectIds: [randomUUID()] }
+    const lookup = vi.spyOn(store, 'getByIdSystem').mockResolvedValue(original)
+    const auth = await authenticateBrainRequest(reqWith(`Bearer ${plaintext}`), { brainKeyStore: store })
+    const proof = getAuthenticatedBrainCredentialCurrent(auth!)!
+    expect(await proof()).toBe(true)
+    expect(getAuthenticatedBrainCredentialCurrent({ ...auth! })).toBeUndefined()
+    for (const change of [{ credentialOwnerUserId: randomUUID() }, { contextGroupId: randomUUID() }, { contextProjectId: randomUUID() },
+      { configurationSessionId: randomUUID() }, { admittedCompartments: [] }, { admittedProjectIds: [] }]) {
+      lookup.mockResolvedValue({ ...original, ...change })
+      expect(await proof()).toBe(false)
+    }
+    lookup.mockResolvedValue(original)
+    original.admittedCompartments.push('team:replacement')
+    expect(await proof()).toBe(false)
+  })
+
   it('rejects a header without the Bearer scheme', async () => {
     const { plaintext, store } = await fakeKeyStore()
     expect(
@@ -642,6 +676,48 @@ describe('[COMP:api/brain-mcp] authenticateBrainRequest', () => {
       captureAssistantId: null,
       captureProfileId: null,
     })
+    const proof = getAuthenticatedBrainCredentialCurrent(auth!)!
+    expect(await proof()).toBe(true)
+    expect(getAuthenticatedBrainCredentialCurrent({ ...auth! })).toBeUndefined()
+    const original = await authorizationStore.getByIdSystem()
+    for (const change of [{ accessTokenHash: 'rotated' }, { revokedAt: new Date() },
+      { accessTokenExpiresAt: new Date(0) }, { scope: 'read' }, { userId: 'different-user' }]) {
+      authorizationStore.getByIdSystem.mockResolvedValue({ ...original, ...change })
+      expect(await proof()).toBe(false)
+    }
+    authorizationStore.getByIdSystem.mockResolvedValue(null)
+    expect(await proof()).toBe(false)
+  })
+
+  it.each([
+    ['public', 'confidential', 'public'], ['confidential', 'public', 'public'],
+    [null, 'internal', 'internal'], ['internal', null, 'internal'], [null, null, null],
+  ] as const)('intersects Home-app token cap %s and current cap %s', async (tokenCap, currentCap, expected) => {
+    const { store: brainKeyStore } = await fakeKeyStore(), secret = 'fictional-cap-secret'
+    const token = mintBridgeToken({ appId: 'cap-app', workspaceId: 'cap-workspace', userId: 'cap-viewer', scope: 'read', maxClearance: tokenCap, secret })
+    const auth = await authenticateBrainRequest(reqWith(`Bearer ${token}`), { brainKeyStore, homeApps: { secret,
+      getApp: async () => ({ id: 'cap-app', workspaceId: 'cap-workspace', status: 'active', grantedScopes: { data: 'read_write' }, maxClearance: currentCap }) } })
+    expect(auth?.maxClearance).toBe(expected)
+  })
+
+  it('retains exact Home-app token and live-grant proof without trusting copied auth metadata', async () => {
+    const { store: brainKeyStore } = await fakeKeyStore()
+    const secret = 'fictional-home-app-signing-secret'
+    const token = mintBridgeToken({ appId: 'fixture-app', workspaceId: 'fixture-workspace', userId: 'fixture-viewer', scope: 'read_write', maxClearance: 'internal', secret })
+    const original = { id: 'fixture-app', workspaceId: 'fixture-workspace', status: 'active', grantedScopes: { data: 'read_write' as const }, maxClearance: 'internal' as const }
+    const getApp = vi.fn().mockResolvedValue(original)
+    const auth = await authenticateBrainRequest(reqWith(`Bearer ${token}`), { brainKeyStore, homeApps: { secret, getApp } })
+    expect(auth?.actingUserId).toBe('fixture-viewer')
+    const proof = getAuthenticatedBrainCredentialCurrent(auth!)!
+    expect(await proof()).toBe(true)
+    expect(getAuthenticatedBrainCredentialCurrent({ ...auth! })).toBeUndefined()
+    for (const change of [{ status: 'revoked' }, { grantedScopes: { data: 'read' } }, { maxClearance: 'public' }, { workspaceId: 'other-workspace' }]) {
+      getApp.mockResolvedValue({ ...original, ...change })
+      expect(await proof()).toBe(false)
+    }
+    getApp.mockResolvedValue(original)
+    const now = vi.spyOn(Date, 'now').mockReturnValue(Date.now() + 24 * 60 * 60 * 1000)
+    try { expect(await proof()).toBe(false) } finally { now.mockRestore() }
   })
 })
 

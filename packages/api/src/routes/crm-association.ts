@@ -82,6 +82,7 @@ export function crmAssociationRoutes(options: { service: AssociationServicePort;
     includeClosed: req.query.includeClosed === undefined ? false : z.enum(['true', 'false']).parse(req.query.includeClosed) === 'true' }), 'submissions')
   route('post', '/waitlist/:id/offer', req => ({ kind: 'offer_waitlist_place', offer: { ...req.body, submissionId: req.params.id } }), 'offer')
   route('get', '/orders', (req) => ({ ...req.query, kind: 'list_orders' }), 'orders')
+  route('get', '/orders/destinations', req => ({ kind: 'preview_order_destinations', contactIds: typeof req.query.contactIds === 'string' ? req.query.contactIds.split(',') : req.query.contactIds }), 'preview')
   route('post', '/orders', (req) => ({ kind: 'create_order', order: req.body }), 'order')
   route('post', '/membership-checkouts', (req) => ({ kind: 'reserve_membership_checkout', checkout: req.body }), 'checkout')
   route('post', '/membership-checkouts/:id/provider-binding', (req) => ({ kind: 'bind_membership_checkout_provider', checkoutId: req.params.id, binding: req.body }), 'checkout')

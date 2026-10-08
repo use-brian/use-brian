@@ -7,6 +7,8 @@
  * [COMP:sandbox/browser-credentials]
  */
 
+import type { BrowserProfile } from './profiles.js'
+
 export type BrowserCredentialStatus = 'active' | 'invalid'
 
 export type BrowserCredentialFailureCode =
@@ -44,6 +46,8 @@ export type BrowserCredentialSecret = {
 export type BrowserCredentialResolved = {
   metadata: BrowserCredentialMetadata
   secret: BrowserCredentialSecret
+  /** Opaque encrypted-envelope version, retained only by the trusted broker. */
+  version: string
 }
 
 export interface BrowserCredentialAdminStore {
@@ -56,8 +60,8 @@ export interface BrowserCredentialAdminStore {
     loginUrl: string
     accountLabel?: string | null
     secret: BrowserCredentialSecret
-  }): Promise<BrowserCredentialMetadata>
-  revoke(params: { profileId: string; credentialId: string }): Promise<boolean>
+  }, expectedProfile?: BrowserProfile): Promise<BrowserCredentialMetadata>
+  revoke(params: { profileId: string; credentialId: string }, expectedProfile?: BrowserProfile): Promise<boolean>
 }
 
 export interface BrowserCredentialResolver {
@@ -69,7 +73,11 @@ export interface BrowserCredentialResolver {
     credentialId?: string
   }): Promise<BrowserCredentialResolved | null>
   recordResult(params: {
+    userId: string
+    workspaceId: string
+    profileId: string
     credentialId: string
+    version: string
     result: 'success' | 'failure'
     failureCode?: BrowserCredentialFailureCode
   }): Promise<void>

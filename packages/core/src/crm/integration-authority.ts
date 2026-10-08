@@ -3,6 +3,7 @@
  * [COMP:crm/integration-authority]
  */
 import { z } from 'zod'
+import { WorkflowAuthoritySourceSchema } from '../security/authority-source.js'
 
 export const CRM_INTEGRATION_OPERATIONS = [
   'crm.records.read', 'crm.records.write', 'crm.catalog.read', 'crm.catalog.configure',
@@ -16,6 +17,11 @@ export const CrmIntegrationOperationSchema = z.enum(CRM_INTEGRATION_OPERATIONS)
 export type CrmIntegrationOperation = z.infer<typeof CrmIntegrationOperationSchema>
 
 const Id = z.string().uuid()
+export const CrmCredentialDepartmentSelectionSchema = z.object({
+  departmentIds: z.array(Id).max(100).optional(),
+  assistantId: Id.nullable().optional(),
+  cap: z.enum(['public', 'internal', 'confidential']).default('internal'),
+}).strict()
 const Key = z.string().regex(/^[a-z][a-z0-9_-]{0,62}$/)
 function selector<T extends z.ZodTypeAny>(item: T) {
   return z.union([z.literal('all'), z.array(item).min(1).max(200).refine((values) => new Set(values).size === values.length, 'Selectors must be unique')])
@@ -70,6 +76,28 @@ export class CrmIntegrationScopeError extends Error {
   }
 }
 
+/** Retained request authority can shrink, but a current grant cannot expand it. */
+export function intersectCrmIntegrationAuthorities(left: CrmIntegrationAuthority, right: CrmIntegrationAuthority): CrmIntegrationAuthority {
+  if (left.credentialId !== right.credentialId) throw new CrmIntegrationScopeError('credential_identity')
+  const grants: CrmIntegrationGrant[] = []
+  for (const original of left.grants) {
+    const current = right.grants.find(grant => grant.operation === original.operation)
+    if (!current) continue
+    const selectors: CrmIntegrationSelectors = {}
+    for (const dimension of CRM_INTEGRATION_RESOURCE_CATALOG[original.operation]) {
+      const a = original.selectors[dimension] ?? [], b = current.selectors[dimension] ?? []
+      const allowed = a === 'all' ? b : b === 'all' ? a : a.filter(value => b.includes(value))
+      if (allowed === 'all') selectors[dimension] = 'all'
+      else if (allowed.length) selectors[dimension] = [...new Set(allowed)].sort()
+      // An omitted selector means none; [] is intentionally not serialized as
+      // a grant selector because the persisted schema requires nonempty lists.
+    }
+    grants.push({ operation: original.operation, selectors })
+  }
+  if (!grants.length) throw new CrmIntegrationScopeError('credential_operations')
+  return { credentialId: left.credentialId, grants: grants.sort((a, b) => a.operation.localeCompare(b.operation)) }
+}
+
 /** The existence of an operation grant never implies all its resources. */
 export function requireCrmIntegrationOperation(authority: CrmIntegrationAuthority, operation: CrmIntegrationOperation): CrmIntegrationGrant {
   if (!CRM_INTEGRATION_OPERATIONS.includes(operation)) throw new CrmIntegrationScopeError(operation)
@@ -100,3 +128,35 @@ export function requireCrmIntegrationResources(authority: CrmIntegrationAuthorit
     if (!requested?.length || requested.some((item) => !allowed.includes(item))) throw new CrmIntegrationScopeError(operation, dimension)
   }
 }
+
+/** Host-owned exact OAuth parent evidence; never a model input. */
+export const CrmOAuthCredentialParentSchema = z.object({
+  version: z.literal(1), kind: z.literal('oauth_token'), credentialId: z.string().uuid(),
+  workspaceId: z.string().uuid(), userId: z.string().uuid(), clientId: z.string().min(1),
+  expiresAt: z.string().datetime(), tokenFingerprint: z.string().regex(/^[a-f0-9]{64}$/),
+}).strict()
+export type CrmOAuthCredentialParent = z.infer<typeof CrmOAuthCredentialParentSchema>
+
+/** Exact host-owned Brain-key parent evidence, including its original admission. */
+export const CrmBrainCredentialParentSchema = z.object({
+  version: z.literal(1), kind: z.literal('brain_key'), credentialId: z.string().uuid(),
+  workspaceId: z.string().uuid(), userId: z.string().uuid(), tokenFingerprint: z.string().regex(/^[a-f0-9]{64}$/),
+  maxClearance: z.enum(['public', 'internal', 'confidential']).nullable(),
+  contextGroupId: z.string().uuid().nullable(), contextProjectId: z.string().uuid().nullable(),
+  configurationSessionId: z.string().uuid().nullable(),
+  admittedCompartments: z.array(z.string()).nullable(), admittedProjectIds: z.array(z.string().uuid()).nullable(),
+}).strict()
+export const CrmHomeAppCredentialParentSchema = z.object({
+  version: z.literal(1), kind: z.literal('home_app'), credentialId: z.string().uuid(),
+  workspaceId: z.string().uuid(), userId: z.string().uuid(), tokenFingerprint: z.string().regex(/^[a-f0-9]{64}$/),
+  signerFingerprint: z.string().regex(/^[a-f0-9]{64}$/),
+  expiresAt: z.string().datetime(), maxClearance: z.enum(['public', 'internal', 'confidential']).nullable(),
+  grantedScopes: z.object({ data: z.literal('read_write'), store: z.enum(['none', 'read', 'write']).optional(),
+    agent: z.enum(['none', 'ask']).optional() }).strict(),
+}).strict()
+const workflowParentSchema = z.object({
+  version: z.literal(1), kind: z.literal('workflow'), credentialId: z.string().uuid(),
+  workspaceId: z.string().uuid(), userId: z.string().uuid(), source: WorkflowAuthoritySourceSchema,
+}).strict()
+export const CrmCredentialParentSchema = z.discriminatedUnion('kind', [CrmOAuthCredentialParentSchema, CrmBrainCredentialParentSchema, CrmHomeAppCredentialParentSchema, workflowParentSchema])
+export type CrmCredentialParent = z.infer<typeof CrmCredentialParentSchema>

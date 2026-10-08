@@ -3,16 +3,16 @@
 /** Current human person choices, shared by mentions and Office assignments.
  * [COMP:app-web/mention-fetchers] */
 import {useCallback,useLayoutEffect,useMemo,useRef,useSyncExternalStore} from 'react';
-import {getUserInfo,subscribeUserInfo} from './user';
+import {subscribeUserInfo} from './user';
 import {invalidateSurfaceCache,useCachedResource} from './surface-cache';
 import {pageDirectoryCacheKey,workspaceMemberDirectoryCacheKey} from './surface-prefetch';
 import {projectionRemainingMs,useProtectedProjection} from './use-protected-projection';
-import {directoryPages,directoryPeople,readWorkspaceMemberDirectory,readWorkspacePageDirectory} from './api/mentions';
+import {getDirectoryViewerId,directoryPages,directoryPeople,readWorkspaceMemberDirectory,readWorkspacePageDirectory} from './api/mentions';
 
-const viewer=()=>getUserInfo()?.id??'';
+const viewer=getDirectoryViewerId;
 const emptyViewer=()=>'';
 
-export function useWorkspaceDirectory(workspaceId:string|null,query?:string) {
+export function useWorkspaceMemberDirectory(workspaceId:string|null) {
   const subscribe=useCallback((listener:()=>void)=>workspaceId?subscribeUserInfo(listener):()=>{},[workspaceId]);
   const viewerId=useSyncExternalStore(subscribe,viewer,emptyViewer);
   const key=workspaceId&&viewerId?workspaceMemberDirectoryCacheKey(workspaceId,viewerId):null;
@@ -25,6 +25,11 @@ export function useWorkspaceDirectory(workspaceId:string|null,query?:string) {
   const data=read.data?.viewerId===viewerId&&read.data.workspaceId===workspaceId?read.data:undefined;
   const onPurge=useCallback(()=>{},[]);
   const current=useProtectedProjection(key,data,onPurge,read.refresh);
+  return {data:current, error:read.error, unavailable:!viewerId || read.error !== undefined, refresh:read.refresh};
+}
+
+export function useWorkspaceDirectory(workspaceId:string|null,query?:string) {
+  const {data:current}=useWorkspaceMemberDirectory(workspaceId);
   return useMemo(()=>directoryPeople(current,query),[current,query]);
 }
 

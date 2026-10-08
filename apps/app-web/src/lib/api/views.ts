@@ -862,13 +862,30 @@ export async function publishPage(
   viewId: string,
   indexable: boolean,
   role?: PublishRole,
+  review?: { declassify?: boolean; reason?: string },
 ): Promise<PublishState> {
   const res = await authFetch(`${API_URL}/api/views/${viewId}/publish`, {
     method: "POST",
     headers: { "content-type": "application/json" },
-    body: JSON.stringify(role ? { indexable, role } : { indexable }),
+    body: JSON.stringify({ indexable, ...(role ? { role } : {}), ...(review ?? {}) }),
   });
+  if (res.status === 409 || res.status === 403) {
+    const body = await res.json().catch(() => ({})) as { code?: string };
+    if (body.code === "not_public" || body.code === "department_widening_review_required" || body.code === "department_widening_forbidden") {
+      throw new PublishReviewError(body.code);
+    }
+  }
   return json<PublishState>(res);
+}
+
+/** A publish the server will not perform without a declassification
+ *  confirmation, a reviewed reason, or a reviewer of record (doc.md,
+ *  "Publishing is an explicit declassification"). */
+export class PublishReviewError extends Error {
+  constructor(readonly code: "not_public" | "department_widening_review_required" | "department_widening_forbidden") {
+    super(code);
+    this.name = "PublishReviewError";
+  }
 }
 
 /** Unpublish: revoke the page's universal web URL. */

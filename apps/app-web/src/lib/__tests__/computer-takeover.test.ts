@@ -110,6 +110,21 @@ describe("[COMP:app-web/sandbox-takeover] Take-Over click mapping", () => {
 });
 
 describe("[COMP:app-web/sandbox-takeover] Frame commit gate", () => {
+  it("clearing authority discards an in-flight decode while allowing later authorized frames", async () => {
+    const committed: string[] = [];
+    const pending: Array<() => void> = [];
+    const gate = createFrameGate({ decode: () => new Promise<void>(resolve => pending.push(resolve)), commit: src => committed.push(src) });
+    gate.push("revoked");
+    gate.clear();
+    pending.shift()!();
+    await Promise.resolve();
+    expect(committed).toEqual([]);
+    gate.push("renewed");
+    pending.shift()!();
+    await Promise.resolve();
+    expect(committed).toEqual(["renewed"]);
+  });
+
   it("holds a frame back until it decodes, so the <img> never swaps to an undecoded src", async () => {
     const committed: string[] = [];
     let finishDecode!: () => void;

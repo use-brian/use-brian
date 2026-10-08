@@ -71,10 +71,10 @@ describe('[COMP:crm/operations-store] Actual immutable localized consent wording
     await service.execute(f.context,save({ purposeId: f.purpose.id, wordingVersion: '2', localeWordings: { ja: '新しい同意文' } }))
     expect(await service.execute(f.context,input)).toMatchObject({ duplicate: true, record: recorded })
     await expect(service.execute(f.context,consent(f.contactId,{ locale: 'en', provider: 'fixture', providerEventId: 'localized' }))).rejects.toMatchObject({ code: 'idempotency_conflict' })
-    const compliance = await reads.getConsent(f.workspaceId,f.contactId)
+    const compliance = await reads.getConsent(f.workspaceId,f.contactId,f.context.actor)
     expect(compliance.events).toContainEqual(expect.objectContaining({ id: recorded.id, wording: '同意します', wordingLocale: 'ja', wordingVersionId: f.purpose.wordingVersionId }))
     expect((await reads.listConsentPurposes(f.workspaceId)).purposes[0]).toMatchObject({ wordingVersion: '2', localeWordings: { ja: '新しい同意文' } })
-    const exported = await exportCrmOperationsPrivacy(f.workspaceId)
+    const exported = await exportCrmOperationsPrivacy(f.context)
     expect(exported.tables.crm_consent_purpose_versions).toHaveLength(2)
     // Exercise this migration's flush ordering independently of older unrelated
     // hosted-only tables in the full workspace flush registry. Consent events
@@ -104,7 +104,7 @@ describe('[COMP:crm/operations-store] Actual immutable localized consent wording
       } }))
       const request = { kind: 'record_submission',definitionKey,idempotencyKey: 'submission',fields: { name: 'Fixture person',agree: true,language: 'zh-CN' } }
       const submission = await service.execute(f.context,CrmOperationsCommandSchema.parse(request))
-      expect((await reads.getConsent(f.workspaceId,String(submission.record.contactId))).events[0]).toMatchObject({ wordingLocale: fixed ? 'ja' : 'zh-CN', wording: fixed ? '同意します' : '我同意' })
+      expect((await reads.getConsent(f.workspaceId,String(submission.record.contactId),f.context.actor)).events[0]).toMatchObject({ wordingLocale: fixed ? 'ja' : 'zh-CN', wording: fixed ? '同意します' : '我同意' })
       const before = (await pool.query('SELECT count(*)::int AS count FROM entities WHERE workspace_id=$1',[f.workspaceId])).rows[0]
       await expect(service.execute(f.context,CrmOperationsCommandSchema.parse({ ...request, idempotencyKey: 'bad',fields: { ...request.fields,language: 'xx' } }))).rejects.toMatchObject({ code: 'invalid_input' })
       expect((await pool.query('SELECT count(*)::int AS count FROM entities WHERE workspace_id=$1',[f.workspaceId])).rows[0]).toEqual(before)
@@ -114,7 +114,7 @@ describe('[COMP:crm/operations-store] Actual immutable localized consent wording
   it('preserves catalogued legacy versions and keeps uncatalogued historical claims explicitly unlinked', async () => {
     const f = await fixture(), legacy = createAssociationStore(pool)
     await service.execute(f.context,save({ purposeId: f.purpose.id,wordingVersion: '2',wording: 'Current text' }))
-    const actor = { credentialKind: 'api_key' as const,credentialId: 'fixture' }
+    const actor = { credentialKind: 'user' as const,credentialId: f.userId,actingUserId: f.userId }
     const old = await legacy.appendConsent(f.workspaceId,ConsentInputSchema.parse({ contactId: f.contactId,purpose: 'updates',wordingVersion: '1',action: 'granted',source: 'fixture',locale: 'ja' }),actor)
     expect(old.record).toMatchObject({ wordingVersionId: f.purpose.wordingVersionId,wording: '同意します',wordingHash: crmOperationsSha256('同意します'),wordingLocale: 'ja' })
     const input = ConsentInputSchema.parse({ contactId: f.contactId,purpose: 'legacy',wordingVersion: 'old',action: 'granted',source: 'fixture' })

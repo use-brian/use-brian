@@ -32,6 +32,7 @@ export type OfficeTemplatesRouteDeps = {
   deleteEmptyDraft(userId: string, templateId: string): Promise<boolean>
   deleteEmptyShell(userId: string, artifactId: string): Promise<boolean>
   createCompileJob(params: { userId: string; workspaceId: string; artifactId: string; assistantId: string | null; jobKind: 'template_compile'; brief: unknown; authorityProjection: unknown; idempotencyKey: string }): Promise<{ id: string }>
+  retryImport?(input: { userId: string; workspaceId: string; artifactId: string; failedJobId: string; fileId?: string }): Promise<{ jobId: string } | null>
   wakeCompile?(userId: string): void
   transitionLifecycle(params: { userId: string; templateId: string; action: 'deprecate' | 'restore' | 'trash' | 'purge'; reason: string }): Promise<unknown | null>
 }
@@ -149,6 +150,17 @@ export function officeTemplateRoutes(deps: OfficeTemplatesRouteDeps): Router {
     const job = await deps.createCompileJob({ userId, workspaceId: body.data.workspaceId, artifactId: body.data.draftArtifactId, assistantId: body.data.assistantId, jobKind: 'template_compile', brief: { templateId: String(req.params.templateId), source: body.data.source }, authorityProjection: { sensitivity: 'internal' }, idempotencyKey: body.data.idempotencyKey })
     deps.wakeCompile?.(userId)
     res.status(202).json({ jobId: job.id })
+  })
+  router.post('/templates/:templateId/import/retry', async (req, res) => {
+    const userId = (req as { userId?: string }).userId
+    if (!userId) return void res.status(401).json({ error: 'Unauthorized' })
+    const body = z.object({ workspaceId: z.string().uuid(), artifactId: z.string().uuid(), failedJobId: z.string().uuid(), fileId: z.string().uuid().optional() }).strict().safeParse(req.body)
+    if (!body.success) return void res.status(400).json({ error: 'Invalid import recovery request' })
+    const template = await deps.getTemplate(userId, String(req.params.templateId))
+    if (!template || template.workspaceId !== body.data.workspaceId || template.draftArtifactId !== body.data.artifactId) return void res.status(404).json({ error: 'Template not found' })
+    const result = await deps.retryImport?.({ userId, ...body.data })
+    if (!result) return void res.status(409).json({ error: 'template_import_recovery_blocked' })
+    res.status(202).json(result)
   })
   router.post('/templates/:templateId/lifecycle', async (req, res) => {
     const userId = (req as { userId?: string }).userId

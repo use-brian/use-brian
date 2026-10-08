@@ -6,7 +6,7 @@ const state = vi.hoisted(() => ({
   read: [] as ScopeSource[][],
   next: null as null | ((sources: ScopeSource[]) => CurrentSourceState[]),
 }))
-vi.mock('../../db/client.js', () => ({ getPool: () => ({}) }))
+vi.mock('../../db/client.js', () => ({ getPool: () => ({ query: async (_sql: string, values: unknown[]) => ({ rows: (values[1] as string[]).map(()=>({dependencies:[]})) }) }) }))
 vi.mock('../../db/derived-scope-store.js', () => ({
   readCurrentScopeSources: async (_client: unknown, _workspaceId: string, sources: ScopeSource[]) => {
     state.read.push(sources)
@@ -122,5 +122,39 @@ describe('[COMP:api/caller-scope-evidence] causal inputs stay exact-version', ()
     state.next = sources => sources.map(s => ({ state: 'stale_input', source: s }))
     await expect(validateCallerScopeEvidence({ sources: [source('event', { resourceKind: 'crm_event' })] }, ceiling))
       .rejects.toMatchObject({ reason: 'caller_evidence_unavailable', diagnostic: 'source_changed' })
+  })
+})
+
+describe('[COMP:api/caller-scope-evidence] department delivery boundary',()=>{
+  const v2:AccessCeiling={...ceiling,departmentRead:{workspaceId,userId,assistantId:primary,
+    base:'public',departments:{sales:'confidential'},binding:null,contextDepartment:null,cap:null}}
+  it('uses department clearance independently of General and refuses missing departments',async()=>{
+    await expect(validateAudienceScopeEvidence({sensitivity:'confidential',compartments:['team:sales']},v2)).resolves.toMatchObject({sensitivity:'confidential'})
+    await expect(validateAudienceScopeEvidence({sensitivity:'internal'},v2)).rejects.toMatchObject({diagnostic:'clearance'})
+    await expect(validateAudienceScopeEvidence({sensitivity:'public',compartments:['team:finance']},v2)).rejects.toMatchObject({diagnostic:'teams'})
+    await expect(validateAudienceScopeEvidence({sensitivity:'public',compartments:['team:sales']},
+      {...v2,departmentRead:{...v2.departmentRead!,binding:[]}})).rejects.toMatchObject({diagnostic:'teams'})
+  })
+  it.each(['caller','audience'])('retains explicit Project and assistant limits for v2 %s evidence',async kind=>{
+    const validate=kind==='caller'?validateCallerScopeEvidence:validateAudienceScopeEvidence
+    const bounded={...v2,projectIds:['allowed'],visibilityAssistantIds:[primary]}
+    const evidence=source('bounded',{sensitivity:'confidential',compartments:['team:sales'],projectIds:['allowed']})
+    await expect(validate({sources:[evidence]},bounded)).resolves.toMatchObject({sensitivity:'confidential'})
+    await expect(validate({sources:[{...evidence,assistantId:other}]},bounded)).rejects.toMatchObject({diagnostic:'assistant_visibility'})
+    await expect(validate({sources:[{...evidence,projectIds:['forbidden']}]},bounded)).rejects.toMatchObject({diagnostic:'projects'})
+    await expect(validate({sensitivity:'public',projectIds:['forbidden']},bounded)).rejects.toMatchObject({diagnostic:'projects'})
+    state.next=sources=>sources.map(s=>({state:'changed',source:s,current:{...s,projectIds:['forbidden']}}))
+    await expect(validate({sources:[evidence]},bounded)).rejects.toMatchObject({diagnostic:'source_reclassified'})
+  })
+  it('checks each source independently so department evidence cannot authorize General secrets',async()=>{
+    await expect(validateAudienceScopeEvidence({sources:[
+      source('general',{sensitivity:'confidential',compartments:[]}),
+      source('sales',{sensitivity:'confidential',compartments:['team:sales']}),
+    ]},v2)).rejects.toMatchObject({diagnostic:'clearance'})
+  })
+  it('blocks a source reclassified into an inaccessible department before delivery',async()=>{
+    state.next=sources=>sources.map(s=>({state:'changed',source:s,current:{...s,compartments:['team:finance']}}))
+    await expect(validateAudienceScopeEvidence({sources:[source('task',{compartments:['team:sales']})]},v2))
+      .rejects.toMatchObject({diagnostic:'source_reclassified'})
   })
 })

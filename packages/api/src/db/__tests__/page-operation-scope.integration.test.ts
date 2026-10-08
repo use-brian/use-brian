@@ -13,7 +13,7 @@ async function fixture() {
   for (const id of [owner, reader, editor]) {
     await pool.query('INSERT INTO users(id,auth_provider_id) VALUES($1::uuid,$1::text)', [id])
   }
-  await pool.query("INSERT INTO workspaces(id,name,owner_user_id) VALUES($1,'Page scope fixture',$2)", [workspaceId, owner])
+  await pool.query("INSERT INTO workspaces(id,name,owner_user_id,department_read_v2) VALUES($1,'Page scope fixture',$2,false)", [workspaceId, owner])
   await pool.query(`INSERT INTO workspace_members(workspace_id,user_id,role,clearance,team_scope_mode)
     VALUES($1,$2,'owner','confidential','assigned'),($1,$3,'member','confidential','assigned'),($1,$4,'member','confidential','assigned')`,
   [workspaceId, owner, reader, editor])

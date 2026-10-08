@@ -3,8 +3,10 @@
  */
 import type { Pool, PoolClient } from 'pg'
 import { z } from 'zod'
-import { CrmOperationsError, CrmPageQuerySchema, requireCrmIntegrationOperation } from '@use-brian/core'
+import { CrmOperationsError, CrmPageQuerySchema, requireCrmIntegrationOperation, departmentReadGrantJson, intersectDepartmentReadGrants, intersectScopeGrants } from '@use-brian/core'
 import { getPool } from './client.js'
+import { intersectCrmIntegrationExecutionLimits, type CrmIntegrationExecutionLimits } from '../crm-operations/integration-department-authority.js'
+import { currentAgentAccess } from './agent-access-context.js'
 import { lockCrmIntegrationCredential, type CrmIntegrationPrincipal } from './crm-integration-store.js'
 import { queryCrmPage } from '../crm-operations/pagination.js'
 import { readCrmFieldCatalog } from './crm-config-catalog.js'
@@ -79,56 +81,114 @@ function memberProfile(row: MemberProfileRow): CrmIntegrationMemberProfile {
   }
 }
 
+/** Frozen execution axes remain independent of the credential department grant. */
+type RecordAuthority = { department: string | null; executionLimits?: CrmIntegrationExecutionLimits }
+function executionPredicate(index: number, limits?: CrmIntegrationExecutionLimits, mutation = false) {
+  const access = currentAgentAccess()
+  return { sql: `($${index}::text[] IS NULL OR e.project_ids::text[] <@ $${index}::text[])
+    AND ($${index + 1}::text[] IS NULL OR e.assistant_id IS NULL OR e.assistant_id::text=ANY($${index + 1}::text[]))
+    AND (NOT $${index + 2}::boolean OR e.user_id IS NULL)
+    AND ($${index + 3}::text[] IS NULL OR e.compartments <@ $${index + 3}::text[])`,
+    params: [intersectScopeGrants(access?.projectIds ?? null, limits?.projectIds ?? null),
+      intersectScopeGrants(access?.visibilityAssistantIds ?? null, limits?.visibilityAssistantIds ?? null),
+      access?.sharedAudience === true || limits?.sharedAudience === true,
+      mutation ? intersectScopeGrants(access?.mutationCompartments ?? null, limits?.mutationCompartments ?? null) : null] }
+}
+
 async function readMemberProfile(
   client: Pick<PoolClient, 'query'> | Pool,
   workspaceId: string,
   id: string,
   lock = false,
+  authority: RecordAuthority = { department: null },
 ): Promise<MemberProfileRow | null> {
+  const execution = executionPredicate(4, authority.executionLimits, lock)
   const result = await client.query<MemberProfileRow>(
     `SELECT e.id,e.display_name AS name,e.canonical_id AS "canonicalId",e.attributes,e.updated_at AS "updatedAt"
        FROM entities e
       WHERE e.workspace_id=$1 AND e.id=$2 AND e.kind='person'
         AND e.valid_to IS NULL AND e.retracted_at IS NULL
+        AND NOT e.scope_held
+        AND ($3::jsonb IS NULL OR public.department_row_allows($3::jsonb,e.workspace_id,e.sensitivity,e.compartments,e.user_id))
+        AND ${execution.sql}
         AND NOT (e.attributes ? 'crm_archived_at')
       ${lock ? 'FOR UPDATE' : ''}`,
-    [workspaceId, id],
+    [workspaceId, id, authority.department, ...execution.params],
   )
   return result.rows[0] ?? null
 }
 
 export function createCrmIntegrationRecordReadStore(principal: CrmIntegrationPrincipal, pool: Pool = getPool()) {
   const authorize = () => requireCrmIntegrationOperation(principal, 'crm.records.read')
+  // Credential and membership changes serialize before protected row locks.
+  const admission = async (client: PoolClient, write = false) => {
+    await client.query('SELECT id FROM workspaces WHERE id=$1 FOR SHARE', [principal.workspaceId])
+    const current = await lockCrmIntegrationCredential(client, principal.workspaceId, principal.credentialId)
+    requireCrmIntegrationOperation(current, 'crm.records.read')
+    if (write) requireCrmIntegrationOperation(current, 'crm.records.write')
+    const grant = current.departmentRead && principal.departmentRead
+      ? intersectDepartmentReadGrants(current.departmentRead, principal.departmentRead) : current.departmentRead
+    return { department: grant ? departmentReadGrantJson(grant) : null,
+      executionLimits: intersectCrmIntegrationExecutionLimits(current.executionLimits, principal.executionLimits) }
+  }
+  const renew = async (client: PoolClient, before: RecordAuthority, write = false) => {
+    if (JSON.stringify(await admission(client, write)) !== JSON.stringify(before)) {
+      throw new CrmOperationsError('not_authorized', 'The integration authority changed. Reload before retrying.')
+    }
+  }
+  const readTransaction = async <T>(read: (client: PoolClient, authority: RecordAuthority) => Promise<T>): Promise<T> => {
+    const client = await pool.connect()
+    try {
+      await client.query('BEGIN')
+      const authority = await admission(client)
+      const result = await read(client, authority)
+      await renew(client, authority)
+      await client.query('COMMIT')
+      return result
+    } catch (error) {
+      await client.query('ROLLBACK').catch(() => undefined)
+      throw error
+    } finally { client.release() }
+  }
   return {
     async list(raw: unknown) {
       authorize()
       const input = CrmIntegrationRecordsQuerySchema.parse(raw)
-      return queryCrmPage(pool.query.bind(pool), { workspaceId: principal.workspaceId, resource: 'crm.records', key: 'records',
+      return readTransaction((client, authority) => { const execution = executionPredicate(6, authority.executionLimits); return queryCrmPage(client.query.bind(client), { workspaceId: principal.workspaceId, resource: 'crm.records', key: 'records',
         query: { limit: input.limit, cursor: input.cursor, createdAfter: input.createdAfter, createdBefore: input.createdBefore },
         sql: `SELECT ${COLUMNS}
          FROM entities e WHERE e.workspace_id=$1 AND e.kind=$2 AND e.valid_to IS NULL AND e.retracted_at IS NULL
            AND ($3::boolean OR NOT (e.attributes ? 'crm_archived_at'))
-           AND ($4::text IS NULL OR e.display_name ILIKE '%' || $4 || '%' OR e.canonical_id ILIKE '%' || $4 || '%')`,
-        params: [principal.workspaceId, input.kind, input.includeArchived === 'true', input.query || null] })
+           AND ($4::text IS NULL OR e.display_name ILIKE '%' || $4 || '%' OR e.canonical_id ILIKE '%' || $4 || '%')
+           AND NOT e.scope_held
+           AND ($5::jsonb IS NULL OR public.department_row_allows($5::jsonb,e.workspace_id,e.sensitivity,e.compartments,e.user_id)) AND ${execution.sql}`,
+        params: [principal.workspaceId, input.kind, input.includeArchived === 'true', input.query || null, authority.department, ...execution.params] }) })
     },
     async get(rawId: unknown, rawQuery: unknown = {}) {
       authorize()
       const id = z.string().uuid().parse(rawId)
       const input = CrmIntegrationRecordsQuerySchema.pick({ includeArchived: true }).parse(rawQuery)
-      const result = await pool.query<Record<string, unknown>>(`SELECT ${COLUMNS} FROM entities e WHERE e.workspace_id=$1 AND e.id=$2
-        AND e.kind IN ('person','company','deal') AND e.valid_to IS NULL AND e.retracted_at IS NULL
-        AND ($3::boolean OR NOT (e.attributes ? 'crm_archived_at'))`, [principal.workspaceId, id, input.includeArchived === 'true'])
-      return result.rows[0] ?? null
+      return readTransaction(async (client, authority) => {
+        const execution = executionPredicate(5, authority.executionLimits)
+        const result = await client.query<Record<string, unknown>>(`SELECT ${COLUMNS} FROM entities e WHERE e.workspace_id=$1 AND e.id=$2
+          AND e.kind IN ('person','company','deal') AND e.valid_to IS NULL AND e.retracted_at IS NULL
+          AND ($3::boolean OR NOT (e.attributes ? 'crm_archived_at')) AND NOT e.scope_held
+          AND ($4::jsonb IS NULL OR public.department_row_allows($4::jsonb,e.workspace_id,e.sensitivity,e.compartments,e.user_id)) AND ${execution.sql}`,
+          [principal.workspaceId, id, input.includeArchived === 'true', authority.department, ...execution.params])
+        return result.rows[0] ?? null
+      })
     },
     async fields(raw: unknown = {}) {
       authorize()
-      return readCrmFieldCatalog(principal.workspaceId, raw, pool.query.bind(pool))
+      return readTransaction(client => readCrmFieldCatalog(principal.workspaceId, raw, client.query.bind(client)))
     },
     async getMemberProfile(rawId: unknown): Promise<CrmIntegrationMemberProfile | null> {
       authorize()
       const id = z.string().uuid().parse(rawId)
-      const row = await readMemberProfile(pool, principal.workspaceId, id)
-      return row ? memberProfile(row) : null
+      return readTransaction(async (client, authority) => {
+        const row = await readMemberProfile(client, principal.workspaceId, id, false, authority)
+        return row ? memberProfile(row) : null
+      })
     },
     async updateMemberProfile(rawId: unknown, rawUpdate: unknown): Promise<CrmIntegrationMemberProfile | null> {
       authorize()
@@ -138,10 +198,8 @@ export function createCrmIntegrationRecordReadStore(principal: CrmIntegrationPri
       const client = await pool.connect()
       try {
         await client.query('BEGIN')
-        const current = await lockCrmIntegrationCredential(client, principal.workspaceId, principal.credentialId)
-        requireCrmIntegrationOperation(current, 'crm.records.read')
-        requireCrmIntegrationOperation(current, 'crm.records.write')
-        const before = await readMemberProfile(client, principal.workspaceId, id, true)
+        const authority = await admission(client, true)
+        const before = await readMemberProfile(client, principal.workspaceId, id, true, authority)
         if (!before) {
           await client.query('ROLLBACK')
           return null
@@ -175,6 +233,7 @@ export function createCrmIntegrationRecordReadStore(principal: CrmIntegrationPri
           changed.push(inputKey)
         }
         if (changed.length === 0) {
+          await renew(client, authority, true)
           await client.query('COMMIT')
           return memberProfile(before)
         }
@@ -195,6 +254,7 @@ export function createCrmIntegrationRecordReadStore(principal: CrmIntegrationPri
            VALUES($1,'crm.member_profile.updated','contact',$2,'integration_key',$3,$4::jsonb)`,
           [principal.workspaceId, id, principal.credentialId, JSON.stringify({ fields: changed.sort() })],
         )
+        await renew(client, authority, true)
         await client.query('COMMIT')
         return memberProfile(result.rows[0])
       } catch (error) {
@@ -212,16 +272,15 @@ export function createCrmIntegrationRecordReadStore(principal: CrmIntegrationPri
       const client = await pool.connect()
       try {
         await client.query('BEGIN')
-        const current = await lockCrmIntegrationCredential(client, principal.workspaceId, principal.credentialId)
-        requireCrmIntegrationOperation(current, 'crm.records.read')
-        requireCrmIntegrationOperation(current, 'crm.records.write')
-        const before = await readMemberProfile(client, principal.workspaceId, id, true)
+        const authority = await admission(client, true)
+        const before = await readMemberProfile(client, principal.workspaceId, id, true, authority)
         if (!before) {
           await client.query('ROLLBACK')
           return null
         }
         const oldEmail = text(object(before.attributes).email) ?? before.canonicalId
         if (oldEmail?.trim().toLowerCase() === update.email) {
+          await renew(client, authority, true)
           await client.query('COMMIT')
           return memberProfile(before)
         }
@@ -272,6 +331,7 @@ export function createCrmIntegrationRecordReadStore(principal: CrmIntegrationPri
             fields: ['email'], verificationId: update.verificationId,
           })],
         )
+        await renew(client, authority, true)
         await client.query('COMMIT')
         return memberProfile(result.rows[0])
       } catch (error) {

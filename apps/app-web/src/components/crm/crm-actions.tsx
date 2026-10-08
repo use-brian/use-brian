@@ -22,6 +22,9 @@ import {
 } from "@/components/ui/select";
 import {
   createCrmRecord,
+  fetchCrmCreationDestination,
+  type CrmCreationDestination,
+  type CrmCreationPreview,
   createCrmField,
   downloadCrmCsv,
   fetchCrmDuplicates,
@@ -48,6 +51,7 @@ import {
   type CsvPreview,
 } from "@/lib/crm-r2";
 import { useT } from "@/lib/i18n/client";
+import { WORKSPACE_IDENTITY_REFRESH_EVENT } from "@/lib/workspace-identity-events";
 import { isPhoneViewport } from "@/lib/viewport";
 import { SearchableSelect } from "@/components/ui/searchable-select";
 import { CrmProductionImportPanel } from "@/components/crm/operations/import-panel";
@@ -203,7 +207,38 @@ function CreateDialog({ workspaceId, data, config, open, initialKind, onOpenChan
   onOpenChange: (open: boolean) => void;
   onCreated: (created: { id: string; kind: "deal" | "contact" | "company" }) => void;
 }) {
-  const t = useT().crmPage.r2;
+  const copy = useT();
+  const t = copy.crmPage.r2;
+  const [destination, setDestination] = useState<CrmCreationDestination | null>(null);
+  const [preview, setPreview] = useState<CrmCreationPreview | null>(null);
+  const [previewError, setPreviewError] = useState(false);
+  const [previewAttempt, setPreviewAttempt] = useState(0);
+  useEffect(() => {
+    let current = true;
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    const started = performance.now();
+    const invalidate = () => { current = false; setDestination(null); setPreview(null); setPreviewError(true); };
+    setDestination(null); setPreview(null); setPreviewError(false);
+    if (open) void fetchCrmCreationDestination(workspaceId).then(value => {
+      if (!current) return;
+      const remaining = 30_000 - (performance.now() - started);
+      if (remaining <= 0) { invalidate(); return; }
+      setPreview(value); setDestination(value.defaultDestination);
+      timer = setTimeout(invalidate, remaining);
+    }).catch(() => { if (current) setPreviewError(true); });
+    window.addEventListener(WORKSPACE_IDENTITY_REFRESH_EVENT, invalidate);
+    window.addEventListener("brian:organization-changed", invalidate);
+    return () => {
+      current = false; clearTimeout(timer);
+      window.removeEventListener(WORKSPACE_IDENTITY_REFRESH_EVENT, invalidate);
+      window.removeEventListener("brian:organization-changed", invalidate);
+    };
+  }, [open, workspaceId, previewAttempt]);
+  const tiers = ["public", "internal", "confidential"] as const;
+  const ceiling = destination?.departmentId
+    ? preview?.departments.find(row => row.id === destination.departmentId)?.clearance
+    : preview?.generalClearance;
+
   const [kind, setKind] = useState<CrmImportKind>(initialKind);
   const [name, setName] = useState("");
   const [primary, setPrimary] = useState("");
@@ -242,10 +277,10 @@ function CreateDialog({ workspaceId, data, config, open, initialKind, onOpenChan
   );
 
   async function submit() {
-    if (!name.trim()) return;
+    if (!name.trim() || !destination || !preview) return;
     setBusy(true);
     setError(null);
-    const record: Record<string, unknown> = { kind, name: name.trim() };
+    const record: Record<string, unknown> = { kind, name: name.trim(), destination };
     if (kind === "contact") {
       record.email = primary.trim() || null;
       record.phone = secondary.trim() || null;
@@ -294,13 +329,31 @@ function CreateDialog({ workspaceId, data, config, open, initialKind, onOpenChan
           setTags("");
           setCustomFields({});
         }}>
-          <SelectTrigger className="w-full"><SelectValue /></SelectTrigger>
+          <SelectTrigger className="w-full max-sm:min-h-11"><SelectValue>{kind === "contact" ? t.kindContact : kind === "company" ? t.kindCompany : t.kindDeal}</SelectValue></SelectTrigger>
           <SelectContent>
             <SelectItem value="contact">{t.kindContact}</SelectItem>
             <SelectItem value="company">{t.kindCompany}</SelectItem>
             <SelectItem value="deal">{t.kindDeal}</SelectItem>
           </SelectContent>
         </Select>
+        {preview && destination ? <div className="space-y-2">
+          <div className="grid gap-3 sm:grid-cols-2">
+            <label className="grid gap-1.5 text-xs">{copy.contextScope.team}
+              <SearchableSelect className="max-sm:min-h-11" value={destination.departmentId ?? "__general__"}
+                items={[{ value: "__general__", label: copy.contextScope.general }, ...preview.departments.map(row => ({ value: row.id, label: row.name }))]}
+                onValueChange={value => { const departmentId = value === "__general__" ? null : value;
+                  const cap = departmentId ? preview.departments.find(row => row.id === departmentId)!.clearance : preview.generalClearance;
+                  setDestination({ departmentId, sensitivity: tiers[Math.min(tiers.indexOf(destination.sensitivity), tiers.indexOf(cap))] }); }} />
+            </label>
+            <label className="grid gap-1.5 text-xs">{copy.manage.sensitivity.titlePrefix}
+              <SearchableSelect className="max-sm:min-h-11" value={destination.sensitivity}
+                items={tiers.slice(0, tiers.indexOf(ceiling ?? "public") + 1).map(tier => ({ value: tier, label: copy.manage.sensitivity[tier] }))}
+                onValueChange={value => setDestination({ ...destination, sensitivity: value as CrmCreationDestination["sensitivity"] })} />
+            </label>
+          </div>
+          <p className="text-xs text-muted-foreground">{t.creationDestinationHint}</p>
+        </div> : previewError ? <div role="alert" className="space-y-2"><p>{copy.contextScope.loadFailed}</p><Button variant="outline" onClick={() => setPreviewAttempt(value => value + 1)}>{copy.contextScope.retryProjects}</Button></div>
+          : <p role="status">{copy.contextScope.loading}</p>}
         <Input label={t.name} value={name} onChange={setName} autoFocus />
         {kind === "contact" && <><Input label={t.email} value={primary} onChange={setPrimary} /><Input label={t.phone} value={secondary} onChange={setSecondary} /><RelationshipSelect allowClear label={t.company} value={companyId} placeholder={t.noCompany} items={(data?.companies ?? []).map((row) => ({ value: row.id, label: row.name }))} onChange={setCompanyId} /><Input label={t.tags} value={tags} onChange={setTags} placeholder={t.tagsPlaceholder} /></>}
         {kind === "company" && <><Input label={t.domain} value={primary} onChange={setPrimary} /><Input label={t.tags} value={tags} onChange={setTags} placeholder={t.tagsPlaceholder} /></>}
@@ -319,7 +372,7 @@ function CreateDialog({ workspaceId, data, config, open, initialKind, onOpenChan
           </div>
         )}
         {error && <div className="text-xs text-destructive">{error}</div>}
-        <div className="flex justify-end gap-2"><Button variant="outline" onClick={() => onOpenChange(false)}>{t.cancel}</Button><Button disabled={busy || !name.trim()} onClick={() => void submit()}>{busy ? t.saving : t.create}</Button></div>
+        <div className="flex justify-end gap-2"><Button variant="outline" onClick={() => onOpenChange(false)}>{t.cancel}</Button><Button disabled={busy || !name.trim() || !destination || !preview} onClick={() => void submit()}>{busy ? t.saving : t.create}</Button></div>
       </div>
     </Shell>
   );
@@ -410,7 +463,7 @@ function ImportDialog({ workspaceId, config, canCreateField, open, initialKind, 
     <Shell open={open} onOpenChange={onOpenChange} title={t.importCsv} description={t.importDescription}>
       <div className="space-y-4">
         <Select value={kind} onValueChange={(value) => { const nextKind = value as CrmImportKind; setKind(nextKind); setCreateColumn(null); if (preview) setMapping(suggestedCrmCsvMapping(preview.headers, nextKind, fields)); }}>
-          <SelectTrigger><SelectValue /></SelectTrigger>
+          <SelectTrigger className="max-sm:min-h-11"><SelectValue /></SelectTrigger>
           <SelectContent><SelectItem value="contact">{t.kindContact}</SelectItem><SelectItem value="company">{t.kindCompany}</SelectItem><SelectItem value="deal">{t.kindDeal}</SelectItem></SelectContent>
         </Select>
         <input
@@ -447,7 +500,7 @@ function ImportDialog({ workspaceId, config, canCreateField, open, initialKind, 
                       setCreateColumn(null);
                       setMapping((current) => ({ ...current, [index]: value === "__skip__" ? null : value }));
                     }}>
-                      <SelectTrigger className="w-full"><SelectValue /></SelectTrigger>
+                      <SelectTrigger className="w-full max-sm:min-h-11"><SelectValue /></SelectTrigger>
                       <SelectContent>
                         <SelectItem value="__skip__">{t.skipColumn}</SelectItem>
                         {CRM_IMPORT_FIELDS[kind].map((field) => <SelectItem key={field} value={field}>{importLabels[field] ?? field}</SelectItem>)}
@@ -465,7 +518,7 @@ function ImportDialog({ workspaceId, config, canCreateField, open, initialKind, 
                     <Input label={t.fieldLabel} value={newFieldLabel} onChange={setNewFieldLabel} />
                     <label className="text-xs"><span className="mb-1 block text-muted-foreground">{t.fieldType}</span>
                       <Select value={newFieldType} onValueChange={(value) => setNewFieldType(value as CrmFieldType)}>
-                        <SelectTrigger className="w-full"><SelectValue /></SelectTrigger>
+                        <SelectTrigger className="w-full max-sm:min-h-11"><SelectValue /></SelectTrigger>
                         <SelectContent>{(["text", "number", "date", "boolean", "single_select", "multi_select", "entity_reference"] as CrmFieldType[]).map((type) => <SelectItem key={type} value={type}>{t.fieldTypes[type]}</SelectItem>)}</SelectContent>
                       </Select>
                     </label>
@@ -824,7 +877,7 @@ function RelationshipSelect({ label, value, placeholder, items, onChange, allowC
     <label className="block text-xs">
       <span className="mb-1 block text-muted-foreground">{label}</span>
       <Select value={value || undefined} onValueChange={(next) => typeof next === "string" && onChange(next === "__none__" ? "" : next)}>
-        <SelectTrigger className="w-full"><SelectValue placeholder={placeholder} /></SelectTrigger>
+        <SelectTrigger className="w-full max-sm:min-h-11"><SelectValue placeholder={placeholder}>{items.find(item => item.value === value)?.label ?? placeholder}</SelectValue></SelectTrigger>
         <SelectContent>{allowClear && <SelectItem value="__none__">{placeholder}</SelectItem>}{items.map((item) => <SelectItem key={item.value} value={item.value}>{item.label}</SelectItem>)}</SelectContent>
       </Select>
     </label>
@@ -870,5 +923,5 @@ function Input({ label, value, onChange, placeholder, autoFocus, type = "text" }
   // 16px below `md` (M4) and no auto-focus on a phone: an auto-focused 14px
   // Name field opened the dialog already zoomed, with the kind select and
   // Cancel / Create scrolled off-screen (D4).
-  return <label className="block text-xs"><span className="mb-1 block text-muted-foreground">{label}</span><input type={type} autoFocus={autoFocus && !isPhoneViewport()} value={value} onChange={(event) => onChange(event.target.value)} placeholder={placeholder} className="h-9 w-full rounded-lg border border-border bg-background px-3 text-[16px] outline-none md:text-sm" /></label>;
+  return <label className="block text-xs"><span className="mb-1 block text-muted-foreground">{label}</span><input type={type} autoFocus={autoFocus && !isPhoneViewport()} value={value} onChange={(event) => onChange(event.target.value)} placeholder={placeholder} className="h-9 max-sm:min-h-11 w-full rounded-lg border border-border bg-background px-3 text-[16px] outline-none md:text-sm" /></label>;
 }
