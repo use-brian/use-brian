@@ -9,8 +9,28 @@ import {getPool} from '../db/client.js'
 const unavailable=()=>new CrmOperationsError('not_authorized','The retention source scope is unavailable.')
 type Binding={binding?:string[];cap?:ResourceScope['sensitivity']}
 /** A key's durable department binding as a floor; no binding is General. */
-const bindingScope=(workspaceId:string,binding:Binding|null):ResourceScope=>({workspaceId,userId:null,assistantId:null,
+export const crmKeyBindingScope=(workspaceId:string,binding:Binding|null):ResourceScope=>({workspaceId,userId:null,assistantId:null,
   sensitivity:binding?.cap ?? 'public',compartments:[...(binding?.binding ?? [])].map(id=>`team:${id}`).sort(),projectIds:[]})
+const bindingScope=crmKeyBindingScope
+
+/**
+ * The floor of an import job's raw data (rows, errors, chunks): the staged file's labels, else the
+ * saved floor of that file's reviewed cleanup, else the issuing key's binding. Null when no
+ * evidence survives; callers refuse rather than fabricate a floor.
+ */
+export async function crmImportJobFloor(client:Pool|PoolClient,workspaceId:string,jobId:string):Promise<ResourceScope|null> {
+  const row=(await client.query<{file:ResourceScope|null;cleanup:ResourceScope|null;binding:Binding|null;keyed:boolean}>(`SELECT
+      (SELECT jsonb_build_object('workspaceId',f.workspace_id,'userId',f.user_id,'assistantId',f.assistant_id,'sensitivity',f.sensitivity,
+        'compartments',to_jsonb(f.compartments),'projectIds',to_jsonb(f.project_ids::text[])) FROM workspace_files f
+        WHERE f.workspace_id=j.workspace_id AND f.id=j.staged_file_id) AS file,
+      (SELECT c.scope_snapshot FROM crm_import_file_cleanups c WHERE c.workspace_id=j.workspace_id AND c.file_id=j.staged_file_id
+        AND c.scope_snapshot IS NOT NULL ORDER BY c.created_at DESC,c.id DESC LIMIT 1) AS cleanup,
+      (SELECT k.department_binding FROM crm_integration_credentials k WHERE k.workspace_id=j.workspace_id AND k.id=j.integration_credential_id) AS binding,
+      j.integration_credential_id IS NOT NULL AS keyed
+    FROM crm_import_jobs j WHERE j.workspace_id=$1 AND j.id=$2 FOR SHARE OF j`,[workspaceId,jobId])).rows[0]
+  if(!row)return null
+  return row.file ?? row.cleanup ?? (row.keyed ? bindingScope(workspaceId,row.binding) : null)
+}
 export const emptyCrmRetentionScope=(workspaceId:string):ResourceScope=>({workspaceId,userId:null,assistantId:null,sensitivity:'public',compartments:[],projectIds:[]})
 export async function assertCrmRetentionScope(client:Pool|PoolClient,context:CrmOperationsContext,scope:ResourceScope|null) {
   const workspace=(await client.query('SELECT department_read_v2 FROM workspaces WHERE id=$1',[context.workspaceId])).rows[0]
@@ -60,15 +80,9 @@ export async function createCrmRetentionAuthority(client:PoolClient,context:CrmO
         const evidence=await assertCrmDeliveryScope(client,context.workspaceId,id,actor)
         if(evidence)await add(evidence.scope,evidence.sources)
       }else if(domain==='crm_import_jobs') {
-        // The raw source decides: the staged file's labels, else the issuing key's binding.
-        const row=(await client.query<{file:ResourceScope|null;binding:Binding|null;found:boolean}>(`SELECT true AS found,
-            (SELECT jsonb_build_object('workspaceId',f.workspace_id,'userId',f.user_id,'assistantId',f.assistant_id,'sensitivity',f.sensitivity,
-              'compartments',to_jsonb(f.compartments),'projectIds',to_jsonb(f.project_ids::text[])) FROM workspace_files f
-              WHERE f.workspace_id=j.workspace_id AND f.id=j.staged_file_id) AS file,
-            (SELECT c.department_binding FROM crm_integration_credentials c WHERE c.workspace_id=j.workspace_id AND c.id=j.integration_credential_id) AS binding
-          FROM crm_import_jobs j WHERE j.workspace_id=$1 AND j.id=$2 FOR SHARE OF j`,[context.workspaceId,id])).rows[0]
-        if(!row?.found)throw unavailable()
-        await add(row.file ?? bindingScope(context.workspaceId,row.binding))
+        const floor=await crmImportJobFloor(client,context.workspaceId,id)
+        if(!floor)throw unavailable()
+        await add(floor)
       }else if(domain==='crm_import_sources') {
         const row=(await client.query<{binding:Binding|null}>(`SELECT (SELECT c.department_binding FROM crm_integration_credentials c
             WHERE c.workspace_id=s.workspace_id AND c.id=s.credential_id) AS binding

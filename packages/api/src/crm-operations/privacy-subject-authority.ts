@@ -1,3 +1,4 @@
+import {crmImportJobFloor,crmKeyBindingScope} from './retention-authority.js'
 import { assertCrmDeliveryScope } from './delivery-source-authority.js'
 /** Shared contact and Association privacy authority. [COMP:crm/privacy-previews] */
 import type {PoolClient} from 'pg'
@@ -215,8 +216,72 @@ export async function assertCrmPrivacyWorkspaceAuthority(client:PoolClient,conte
   for await(const evidence of promotionUsageAuthorities(client,context,null))accumulate(evidence.scope,evidence.sources)
   for await(const evidence of deliveryAuthorities(client,context,null))accumulate(evidence.scope,evidence.sources)
   for await(const evidence of copyAuthorities(client,context,null))accumulate(evidence.scope,evidence.sources)
+  // Families that carry personal content without a CRM root of their own: each needs its own floor.
+  const unavailable=()=>new CrmOperationsError('not_authorized','The export source scope is unavailable.')
+  const families:Array<[string,(id:string)=>Promise<{scope:ResourceScope;sources:ScopeSource[]}|null>]>=[
+    ['crm_import_jobs',async id=>{const scope=await crmImportJobFloor(client,context.workspaceId,id);if(!scope)throw unavailable();return {scope,sources:[]}}],
+    ['crm_import_sources',async id=>{
+      const row=(await client.query<{binding:unknown;keyed:boolean}>(`SELECT k.department_binding AS binding,s.credential_id IS NOT NULL AS keyed
+        FROM crm_import_sources s LEFT JOIN crm_integration_credentials k ON k.workspace_id=s.workspace_id AND k.id=s.credential_id
+        WHERE s.workspace_id=$1 AND s.id=$2 FOR SHARE OF s`,[context.workspaceId,id])).rows[0]
+      if(!row?.keyed)throw unavailable()
+      return {scope:crmKeyBindingScope(context.workspaceId,row.binding as never),sources:[]}
+    }],
+    ['crm_intake_idempotency',async id=>{
+      const row=(await client.query<{submission:string|null;binding:unknown;keyed:boolean}>(`SELECT
+          (SELECT q.id FROM association_enquiries q WHERE q.workspace_id=i.workspace_id AND q.id=i.submission_id) AS submission,
+          k.department_binding AS binding,i.credential_id IS NOT NULL AS keyed
+        FROM crm_intake_idempotency i LEFT JOIN crm_intake_credentials k ON k.workspace_id=i.workspace_id AND k.id=i.credential_id
+        WHERE i.workspace_id=$1 AND i.id=$2 FOR SHARE OF i`,[context.workspaceId,id])).rows[0]
+      if(!row)throw unavailable()
+      if(row.submission)return assertAssociationOrderAuthority(client,context.workspaceId,row.submission,actor,'submission')
+      if(!row.keyed)throw unavailable()
+      return {scope:crmKeyBindingScope(context.workspaceId,row.binding as never),sources:[]}
+    }],
+    // Audit rows use the canonical audit visibility predicate (captured, legacy, erased and strict-mode rules).
+    ...(['association_audit_log','workspace_audit_log'] as const).map(table=>[table,async (id:string)=>{
+      // A key is evaluated as its issuer narrowed by the key's department binding and cap.
+      const principal=actor.actingUserId ? {user:actor.actingUserId,binding:'',cap:''}
+        : (await client.query<{user:string;binding:string;cap:string}>(`SELECT created_by_user_id::text AS user,
+            coalesce(department_binding->'binding','[]'::jsonb)::text AS binding,coalesce(department_binding->>'cap','') AS cap
+            FROM crm_integration_credentials WHERE workspace_id=$1 AND id=$2 AND department_binding IS NOT NULL`,
+          [context.workspaceId,actor.integration?.credentialId ?? null])).rows[0]
+      if(!principal?.user)throw unavailable()
+      await client.query(`SELECT set_config('app.current_user_id',$1,true),set_config('app.v2_binding',$2,true),set_config('app.v2_cap',$3,true)`,
+        [principal.user,principal.binding,principal.cap])
+      const row=(await client.query<{visible:boolean}>(`SELECT audit_scope_visible(to_jsonb(t)) AS visible FROM ${table} t
+        WHERE t.workspace_id=$1 AND t.id=$2`,[context.workspaceId,id])).rows[0]
+      if(!row?.visible)throw unavailable()
+      return null
+    }] as [string,(id:string)=>Promise<{scope:ResourceScope;sources:ScopeSource[]}|null>]),
+    ['campaign_email_recipients',async id=>{
+      const row=(await client.query<{scope:ResourceScope|null;sources:ScopeSource[]|null;live:boolean}>(`SELECT r.scope_snapshot AS scope,r.scope_sources AS sources,
+          EXISTS(SELECT 1 FROM entities e WHERE e.workspace_id=r.workspace_id AND e.id=r.contact_id) AS live
+        FROM campaign_email_recipients r WHERE r.workspace_id=$1 AND r.id=$2 FOR SHARE OF r`,[context.workspaceId,id])).rows[0]
+      if(!row)throw unavailable()
+      if(row.scope)return {scope:row.scope,sources:row.sources ?? []}
+      // A historical recipient is covered by its live contact's root check above; without one it refuses.
+      if(!row.live)throw unavailable()
+      return null
+    }],
+  ]
+  for(const [table,authority] of families) {
+    let after:string|null=null
+    for(;;) {
+      const page:{rows:Array<{id:string}>}=await client.query(`SELECT t.id::text AS id FROM ${table} t WHERE t.workspace_id=$1 AND ($2::text IS NULL OR t.id::text>$2::text) ORDER BY t.id::text LIMIT 256`,[context.workspaceId,after])
+      for(const {id} of page.rows) {
+        const evidence=await authority(id)
+        if(!evidence)continue
+        await assertAssociationSourceAuthority(client,context.workspaceId,actor,evidence)
+        accumulate(evidence.scope,evidence.sources)
+      }
+      if(page.rows.length<256)break
+      after=page.rows.at(-1)!.id
+    }
+  }
   return floor
 }
+
 /** The saved subject floor survives erasure; a live source may only restrict it further. */
 export async function assertCrmPrivacySubjectAuthority(client:PoolClient,context:CrmOperationsContext,contactId:string,saved?:ResourceScope|null,consumed=false):Promise<ResourceScope|null> {
   const actor=crmPrivacySourceActor(context)

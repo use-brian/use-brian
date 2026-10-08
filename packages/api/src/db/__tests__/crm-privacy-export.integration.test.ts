@@ -181,6 +181,24 @@ describe('[COMP:crm/privacy-export] Actual privacy projection coverage',()=>{
     expect(output.text).not.toContain('Unrelated private task')
     expect(output.text).not.toContain(f.otherId)
   })
+  it('refuses a workspace bundle containing a key-sourced raw import bound to a department the exporter lacks',async()=>{
+    const f=await fixture(),dept=randomUUID(),custodian=randomUUID(),sourceId=randomUUID()
+    await pool.query('INSERT INTO users(id,auth_provider_id) VALUES($1::uuid,$1::text)',[custodian])
+    await pool.query("INSERT INTO workspace_members(workspace_id,user_id,role) VALUES($1,$2,'member')",[f.workspaceId,custodian])
+    await pool.query("INSERT INTO workspace_groups(id,workspace_id,name,created_by,kind,key,compartment_key) VALUES($1::uuid,$2,'Fictional export department',$3,'team',$1::text,$4)",[dept,f.workspaceId,custodian,`team:${dept}`])
+    await pool.query("INSERT INTO workspace_compartments(workspace_id,key,label,managed_by,managed_ref_id) VALUES($1,$2,'Fictional export department','team',$3)",[f.workspaceId,`team:${dept}`,dept])
+    const edge=()=>pool.query("INSERT INTO department_edges(workspace_id,department_id,principal_kind,user_id,clearance,origin) VALUES($1,$2,'user',$3,'confidential','store') ON CONFLICT DO NOTHING",[f.workspaceId,dept,f.userId])
+    // The key is issued bound to the department; its raw source bytes inherit that binding.
+    await edge()
+    const key=await keys.create(f.workspaceId,f.userId,{label:'Fictional bound importer',expiresAt:'2099-01-01T00:00:00Z',requestId:randomUUID(),
+      grants:[{operation:'crm.imports.write',selectors:{}}],departmentBinding:{departmentIds:[dept],cap:'confidential'}})
+    await pool.query("INSERT INTO crm_import_sources(id,workspace_id,source_key,content_bytes,source_hash,credential_id,integration_grants) VALUES($1,$2,$3,$4,repeat('c',64),$5,'[]')",
+      [sourceId,f.workspaceId,randomUUID(),Buffer.from('Name\nFictional departmental person\n'),key.id])
+    await pool.query('DELETE FROM department_edges WHERE workspace_id=$1 AND user_id=$2 AND department_id=$3',[f.workspaceId,f.userId,dept])
+    await expect(collect(f.context)).rejects.toMatchObject({code:'not_authorized'})
+    await edge()
+    expect(records(await collect(f.context),'crm_import_sources').map(row=>row.id)).toContain(sourceId)
+  })
   it('exports attributed import lineage with shared raw source redaction and explicitly excludes unattributed failed rows',async()=>{
     const f=await fixture(),{key}=await f.issue(),sourceId=randomUUID(),jobId=randomUUID(),confirmationKey=randomUUID(),bytes=Buffer.from('Name,Email\nSubject person,subject@example.com\nUnrelated person,unrelated@example.com\n')
     await pool.query("INSERT INTO crm_import_sources(id,workspace_id,source_key,content_bytes,source_hash,credential_id,integration_grants) VALUES($1,$2,$3,$4,$5,$6,'[]')",[sourceId,f.workspaceId,randomUUID(),bytes,hash([bytes.toString()]),key.id])
