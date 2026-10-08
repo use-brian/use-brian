@@ -506,6 +506,12 @@ describe('[COMP:sandbox/skill-runner] Profile at call time (R2-10) + backends + 
     expect(String(off.data)).toContain('autonomous')
   })
 
+  it('exposes no browser profile creation, sharing or deletion tool (human-only by design)', async () => {
+    const { tools } = await build()
+    const names = Object.values(tools).map((tool) => (tool as { name: string }).name)
+    expect(names.filter((name) => /profile/i.test(name)).sort()).toEqual(['classifyBrowserProfileDepartment', 'listBrowserProfiles'])
+  })
+
   it('listBrowserSkills + listBrowserProfiles give the model its discovery surface', async () => {
     const { tools, addSkill, profileStore, profiles: created } = await build({ profiles: [{ name: 'Personal IG' }] })
     await profileStore.update(created['Personal IG'].id, {
