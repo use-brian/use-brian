@@ -8,7 +8,7 @@ const { assertLocalFixture } = await import(new URL('../../../../../scripts/crm/
 await assertLocalFixture()
 afterAll(async () => { await getAppPool().end(); await getPool().end() })
 
-describe('[COMP:api/page-grant-store] Publication cascade and department boundaries', () => {
+describe('[COMP:doc/page-grants] Publication cascade and department boundaries', () => {
   it('cascades within the published root department and stops at another department', async () => {
     const workspace = randomUUID(), owner = randomUUID(), cedar = randomUUID()
     await query("INSERT INTO users(id,auth_provider,auth_provider_id) VALUES($1::uuid,'test',$1::text)", [owner])
