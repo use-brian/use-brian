@@ -12,6 +12,7 @@ import { feedCollaborationCacheKey } from '@/lib/surface-prefetch';
 import { feedCachedJson, feedPaintFirst, readFeedCachedJson } from '@/lib/offline/feed-cache';
 import { feedCollaborationPath, type FeedCollaborationSnapshot, type FeedCommentThread, type FeedDraftSuggestion } from '@/lib/feed-collaboration';
 import { Skeleton } from '@/components/skeleton';
+import { useLeasedResource } from "@/lib/offline/surface-content-cache";
 export type FeedCommentComposer = { kind: 'comment' | 'suggest'; anchor: FeedAnchor; parentId?: string; threadId?: string };
 export type FeedCommentPanelProps = {
   workspaceId: string; assistantId: string; assistantName: string; sessionId: string;
@@ -96,7 +97,7 @@ function ThreadMessages(props: FeedCommentPanelProps & { thread: FeedCommentThre
   const t = useT().feedCollaboration; const [reply, setReply] = useState(''); const [older, setOlder] = useState<ThreadMessage[]>([]);
   const path = feedCollaborationPath(props.assistantId, props.sessionId) + `/threads/${props.thread.id}/messages`;
   const key = feedCollaborationCacheKey(props.workspaceId, props.assistantId, props.sessionId, props.thread.id);
-  const resource = useCachedResource<{ messages: ThreadMessage[] }>(key, () => feedPaintFirst(key, () => readFeedCachedJson(path), () => feedCachedJson(path)));
+  const resource = useLeasedResource<{ messages: ThreadMessage[] }>(key, () => feedPaintFirst(key, () => readFeedCachedJson(path), () => feedCachedJson(path)));
   useEffect(() => { void resource.refresh(); }, [props.snapshot?.copy?.sequence, resource.refresh]);
   const messages = [...new Map([...older, ...(resource.data?.messages ?? [])].map(message => [message.id, message])).values()].sort((a, b) => a.sequence - b.sequence);
   return <div className="space-y-3">

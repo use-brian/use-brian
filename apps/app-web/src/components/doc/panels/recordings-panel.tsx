@@ -49,6 +49,7 @@ import {
   type StatusFilter,
 } from "@/lib/recordings/recordings-board";
 import { SearchableSelect } from "@/components/ui/searchable-select";
+import { useLeasedResource } from "@/lib/offline/surface-content-cache";
 
 /** Re-poll while anything is still transcribing. */
 const POLL_MS = 10_000;
@@ -137,7 +138,7 @@ export function RecordingsPanel() {
   // old `setLoading(true)` on every mount is what used to blank it. No spine
   // primitive covers recordings today, so liveness stays the in-flight poll
   // below - now a `refresh()` on this key instead of a private row copy.
-  const board = useCachedResource<RecordingSummary[]>(
+  const board = useLeasedResource<RecordingSummary[]>(
     workspaceId ? recordingsCacheKey(workspaceId, status, query) : null,
     () =>
       listRecordings(workspaceId ?? "", {

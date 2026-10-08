@@ -51,6 +51,7 @@ import {
   type QuickFilter,
   type SavedTaskView,
 } from "@/lib/tasks-view";
+import { useLeasedResource } from "@/lib/offline/surface-content-cache";
 
 /** The Brain panel's nav-row recipe — active is the `.doc-nav-active` pill. */
 const rowCls = (active: boolean) =>
@@ -81,7 +82,7 @@ export function TasksSidebarPanel({ workspaceId }: { workspaceId: string }) {
   const searchParams = useSearchParams();
 
   // ── Live counts from the surface's own cache slot ──────────────────────
-  const tasks = useCachedResource(surfaceDataKey("tasks", workspaceId), () =>
+  const tasks = useLeasedResource(surfaceDataKey("tasks", workspaceId), () =>
     fetchWorkspaceTasks(workspaceId),
   );
   const rows = tasks.data ?? null;

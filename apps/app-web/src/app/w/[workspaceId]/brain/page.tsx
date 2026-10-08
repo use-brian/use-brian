@@ -158,6 +158,7 @@ import {
   writeBrainContentCache,
   type BrainContentCacheScope,
 } from "@/lib/offline/brain-content-cache";
+import { useLeasedResource } from "@/lib/offline/surface-content-cache";
 
 /**
  * Once per full page load: the first Brain mount on a phone lands on the List
@@ -524,7 +525,7 @@ function BrainPageInner() {
   const graphKey = activeId
     ? brainGraphCacheKey(activeId, viewpointAssistantId)
     : null;
-  const graphResource = useCachedResource(graphKey, () =>
+  const graphResource = useLeasedResource(graphKey, () =>
     getBrainGraph({
       workspaceId: activeId!,
       viewpointAssistantId,

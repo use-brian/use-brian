@@ -78,6 +78,7 @@ import {
 import { idbDelete, idbGet, idbSet } from "@/lib/offline/idb";
 import { getUserInfo } from "@/lib/user";
 import { CHAT_SESSIONS_REFRESH_EVENT } from "@/lib/chat-session-events";
+import { useLeasedResource } from "@/lib/offline/surface-content-cache";
 
 // ── Disk tier ────────────────────────────────────────────────────────────
 
@@ -307,10 +308,10 @@ export function useChatSessionsData(
   const roster = useCachedResource<WorkspaceAssistantSummary[]>(rosterKey, () =>
     listWorkspaceAssistants(wid as string),
   );
-  const personal = useCachedResource<DocSession[]>(sessionsKey, () =>
+  const personal = useLeasedResource<DocSession[]>(sessionsKey, () =>
     fetchPersonalChatSessions(wid as string),
   );
-  const shared = useCachedResource<WorkspaceSession[]>(sharedKey, () =>
+  const shared = useLeasedResource<WorkspaceSession[]>(sharedKey, () =>
     fetchSharedChatSessions(wid as string),
   );
 

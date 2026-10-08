@@ -43,6 +43,7 @@ import {
   type BrowserProfileScope,
   type LocalBrowserControlMode,
 } from "@/lib/api/computer";
+import { useLeasedResource } from "@/lib/offline/surface-content-cache";
 
 /** "instagram.com" and "https://instagram.com/x" both work in the sign-in box. */
 function normalizeLoginUrl(raw: string): string | null {
@@ -136,7 +137,7 @@ export function BrowserProfilesSection({
   // never issue a second copy of one request. No spine primitive names a
   // browser profile, so revalidation is mount / visibility plus the
   // `refresh()` every mutation below awaits.
-  const roster = useCachedResource(
+  const roster = useLeasedResource(
     workspaceId ? browserProfilesCacheKey(workspaceId) : null,
     () => listBrowserProfiles(workspaceId),
   );

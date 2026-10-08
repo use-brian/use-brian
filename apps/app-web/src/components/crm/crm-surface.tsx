@@ -385,7 +385,7 @@ export function CrmSurface({ workspaceId, routeRecord = null }: {
   const data: CrmData | null = collection || emailContextResource.data ? mergedData : null;
 
   const recordKey = crmRegionCacheKey(workspaceId, "record", routeRecord?.id ?? "none");
-  const recordResource = useCachedResource(
+  const recordResource = useLeasedResource(
     recordKey,
     () => routeRecord ? fetchCrmRecord(workspaceId, routeRecord.id) : Promise.resolve(null),
   );
@@ -404,7 +404,7 @@ export function CrmSurface({ workspaceId, routeRecord = null }: {
   // panel and the Approvals surface read the same key, and the spine map marks
   // it stale on APPROVALS_REFRESH_EVENT, so no listener of its own is needed.
   const approvalsKey = approvalsCacheKey(workspaceId);
-  const approvalsResource = useCachedResource<PendingApprovalRow[]>(
+  const approvalsResource = useLeasedResource<PendingApprovalRow[]>(
     approvalsKey,
     () => listApprovals(workspaceId, { throwOnError: true }),
   );

@@ -481,7 +481,7 @@ describe("[COMP:app-web/surface-prefetch] shell keys (home dock, sidebar tree)",
       "utf8",
     );
     expect(text).toContain("inboxCacheKey(workspaceId)");
-    expect(text).toContain("useCachedResource<InboxPayload>");
+    expect(text).toContain("useLeasedResource<InboxPayload>");
     // One request for the badge and the flyout: no private badge fetch, and
     // the spine's `INBOX_REFRESH_EVENT` reaches it through the map only.
     expect(text).not.toContain("fetchInboxBadgeCount");

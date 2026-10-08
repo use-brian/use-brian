@@ -121,6 +121,7 @@ import {
   SelectTrigger,
   SelectValue,
 } from "@/components/ui/select";
+import { useLeasedResource } from "@/lib/offline/surface-content-cache";
 
 export function ApprovalsPanel() {
   const t = useT();
@@ -140,7 +141,7 @@ export function ApprovalsPanel() {
   const authorityLost = !!activeId && deniedWorkspace === activeId;
   const approvalsKey = activeId ? approvalsCacheKey(activeId) : null;
   const skillDetailsKey = activeId ? approvalSkillDetailsCacheKey(activeId) : null;
-  const queue = useCachedResource<PendingApprovalRow[]>(approvalsKey, () =>
+  const queue = useLeasedResource<PendingApprovalRow[]>(approvalsKey, () =>
     listApprovals(activeId ?? "", { throwOnError: true }),
   );
   const snapshots = useCachedResource<Record<string, SkillApprovalDetail>>(

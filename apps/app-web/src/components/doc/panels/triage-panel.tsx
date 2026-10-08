@@ -40,6 +40,7 @@ import { Skeleton } from "@/components/skeleton";
 import { cn } from "@/lib/utils";
 import { confirmDialog } from "@/components/ui/confirm-dialog";
 import { BackButton } from "@/components/ui/back-button";
+import { useLeasedResource } from "@/lib/offline/surface-content-cache";
 
 export function TriagePanel() {
   const t = useT();
@@ -58,7 +59,7 @@ export function TriagePanel() {
   // the §8 triage population, non-terminal by default, so a dismissed
   // (abandoned) draft leaves the queue. `listGoals` answers `[]` on a non-OK
   // response; the catch covers a network failure as `setRows([])` did.
-  const queue = useCachedResource<GoalRow[]>(
+  const queue = useLeasedResource<GoalRow[]>(
     activeId ? triageCacheKey(activeId) : null,
     () => listGoals(activeId ?? "", { confirmed: false }).catch(() => [] as GoalRow[]),
   );
@@ -266,7 +267,7 @@ function TriageDetailPane({
   // the spine map (`goal:<wid>:`) on every goal change. `getGoalDetail`
   // answers `null` on a non-OK response, so a cold `error` is a network
   // failure: not-found, never a skeleton forever.
-  const detail = useCachedResource<GoalDetail | null>(
+  const detail = useLeasedResource<GoalDetail | null>(
     goalDetailCacheKey(workspaceId, goalId),
     () => getGoalDetail(goalId),
   );

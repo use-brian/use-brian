@@ -79,6 +79,7 @@ import {
 import { ConnectionsGraph } from "@/components/brain/connections-graph";
 import { BrainTopbar } from "@/components/brain/brain-topbar";
 import { Button } from "@/components/ui/button";
+import { useLeasedResource } from "@/lib/offline/surface-content-cache";
 
 type ReaderKind = "knowledge" | "memories";
 
@@ -239,7 +240,7 @@ function KnowledgeReader({
   // answers `null` on a non-OK response (evicting the IDB copy on a denial),
   // so a cold `error` is a network failure with no cache scope: not-found.
   const entryKey = activeId ? brainEntryCacheKey(activeId, "knowledge", entryId) : null;
-  const cached = useCachedResource<KnowledgeEntryDetail | null>(entryKey, () =>
+  const cached = useLeasedResource<KnowledgeEntryDetail | null>(entryKey, () =>
     getKnowledgeEntry(entryId, activeId ?? "", viewpointAssistantId, cacheScope),
   );
   const loaded =
@@ -714,7 +715,7 @@ function MemoryReader({
 
   // Same cache slot + crossfade contract as the knowledge reader — the
   // previous row stays rendered (dimmed) while the next one's slot is cold.
-  const cached = useCachedResource<BrainInboxRowDetail | null>(
+  const cached = useLeasedResource<BrainInboxRowDetail | null>(
     activeId ? brainEntryCacheKey(activeId, "memories", rowId) : null,
     () => fetchBrainRow(activeId ?? "", "memory", rowId, cacheScope),
   );

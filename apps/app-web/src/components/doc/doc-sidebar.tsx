@@ -141,6 +141,7 @@ import { LiveSidebarPanel } from "./sidebar-panels/live-sidebar-panel";
 import { LiveActiveBadge } from "@/components/live/live-active-badge";
 import { useLiveRoster } from "@/components/live/use-live-roster";
 import { summarizeRosterItems } from "@/lib/live-roster";
+import { useLeasedResource } from "@/lib/offline/surface-content-cache";
 
 /**
  * Height of the workspace status row: 28px plus the bottom safe-area inset.
@@ -308,7 +309,7 @@ export function DocSidebar(props: Props) {
   // previous payload rather than rejecting, so a stale slot never re-runs
   // against a failing endpoint); a cold failure reads as no badge.
   const inboxKey = inboxCacheKey(workspaceId);
-  const inbox = useCachedResource<InboxPayload>(inboxKey, async () => {
+  const inbox = useLeasedResource<InboxPayload>(inboxKey, async () => {
     try {
       return await fetchInbox(workspaceId);
     } catch (err) {

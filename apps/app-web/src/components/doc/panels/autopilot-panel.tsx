@@ -63,6 +63,7 @@ import { confirmDialog } from "@/components/ui/confirm-dialog";
 import { BackButton } from "@/components/ui/back-button";
 import { STATUS_BADGE } from "./goal-status-badge";
 import { summariseDoneWhen } from "./goal-done-when";
+import { useLeasedResource } from "@/lib/offline/surface-content-cache";
 
 const STATUS_FILTERS = [
   "all",
@@ -106,7 +107,7 @@ export function AutopilotPanel() {
   // the Triage panel, never listed here. `listGoals` answers `[]` on a
   // non-OK response, so the catch covers a network failure the way the
   // pre-cache `setRows([])` did.
-  const board = useCachedResource<GoalRow[]>(
+  const board = useLeasedResource<GoalRow[]>(
     activeId ? goalsCacheKey(activeId, statusFilter) : null,
     () => {
       const status = statusFilter === "all" ? undefined : statusFilter;
@@ -385,7 +386,7 @@ function GoalDetailPane({
   // via `onActed` -> `requestGoalRefresh`. `getGoalDetail` answers `null` on
   // a non-OK response, so a cold `error` is a network failure: render it as
   // not-found rather than a skeleton forever.
-  const detail = useCachedResource<GoalDetail | null>(
+  const detail = useLeasedResource<GoalDetail | null>(
     goalDetailCacheKey(workspaceId, goalId),
     () => getGoalDetail(goalId),
   );

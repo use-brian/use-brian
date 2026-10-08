@@ -115,7 +115,7 @@ export function CrmSidebarPanel({ workspaceId }: { workspaceId: string }) {
     crmRegionCacheKey(workspaceId, "email-drafts"),
     () => fetchCrmEmailDrafts(workspaceId),
   );
-  const approvalsResource = useCachedResource<PendingApprovalRow[]>(
+  const approvalsResource = useLeasedResource<PendingApprovalRow[]>(
     approvalsCacheKey(workspaceId),
     () => listApprovals(workspaceId, { throwOnError: true }),
   );

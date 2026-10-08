@@ -48,6 +48,7 @@ import {
   type BrowserProfile,
   type ComputerTaskSummary,
 } from "@/lib/api/computer";
+import { useLeasedResource } from "@/lib/offline/surface-content-cache";
 
 // This panel exists only while the Browsers surface is open. Poll quickly so a
 // crashed local browser disappears within one UI beat rather than 20 seconds.
@@ -290,11 +291,11 @@ export function BrowsersSidebarPanel({ workspaceId }: { workspaceId: string }) {
 
   // One key per list; `null` disables the one the current mode does not
   // show, so a mode switch never fetches the other rail's rows.
-  const taskList = useCachedResource(
+  const taskList = useLeasedResource(
     !profilesMode && workspaceId ? computerTasksCacheKey(workspaceId) : null,
     () => listActiveComputerTasks(workspaceId),
   );
-  const profileList = useCachedResource(
+  const profileList = useLeasedResource(
     profilesMode && workspaceId ? browserProfilesCacheKey(workspaceId) : null,
     () => listBrowserProfiles(workspaceId),
   );

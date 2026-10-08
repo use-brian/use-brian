@@ -88,6 +88,7 @@ import {
 } from "@/lib/feed-plan-proposal";
 import { useT } from "@/lib/i18n/client";
 import { format } from "@/lib/i18n/format";
+import { useLeasedResource } from "@/lib/offline/surface-content-cache";
 
 export function FeedPlan() {
   const team = useFeedWorkspace();
@@ -232,7 +233,7 @@ function PlanBoard({ assistantId }: { assistantId: string }) {
   // so the row the next visit paints is the row the operator last saw, and
   // a month switch is a key switch.
   const planKey = feedPlanCacheKey(team.workspaceId, assistantId, month);
-  const plan = useCachedResource<FeedPlanMonth>(planKey, () =>
+  const plan = useLeasedResource<FeedPlanMonth>(planKey, () =>
     loadFeedPlanMonth({ assistantId, month, key: planKey }),
   );
   const slots = plan.data?.slots ?? NO_SLOTS;

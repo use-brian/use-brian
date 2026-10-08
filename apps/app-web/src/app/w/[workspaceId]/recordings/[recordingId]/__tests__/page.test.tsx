@@ -146,7 +146,10 @@ describe("[COMP:app-web/recording-detail] recording detail route", () => {
     expect(container.querySelector('[data-testid="actions"]')).toBeTruthy();
     expect(container.querySelector('[data-testid="transcript"]')).toBeTruthy();
     await poll();
-    expect(getRecording).toHaveBeenCalledTimes(2);
+    // Processing polling stopped after the complete view; the third read is the
+    // content lease's 15-second authority renewal, not another status poll.
+    expect(getRecording).toHaveBeenCalledTimes(3);
+    expect(container.querySelector('[data-testid="transcript"]')).toBeTruthy();
   });
 
   it("waits for uploaded media before offering playback", async () => {
