@@ -32,7 +32,7 @@ describe.skipIf(!url)('[COMP:api/office-store] template lifecycle SQL', () => {
         capability_version int DEFAULT 1, sensitivity text DEFAULT 'internal', compartments text[], project_ids uuid[],
         default_workspace_role text DEFAULT 'edit', lifecycle_state text DEFAULT 'active',
         legal_hold boolean DEFAULT false, archived_at timestamptz, trashed_at timestamptz,
-        retain_at timestamptz, purge_at timestamptz, updated_at timestamptz DEFAULT now()
+        retain_at timestamptz, purge_at timestamptz, expires_at timestamptz, updated_at timestamptz DEFAULT now()
       ) ON COMMIT DROP;
       CREATE TEMP TABLE office_templates (
         id text PRIMARY KEY, workspace_id text DEFAULT 'workspace', owner_user_id uuid,

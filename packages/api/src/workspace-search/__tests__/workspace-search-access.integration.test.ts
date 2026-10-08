@@ -17,6 +17,12 @@ const sources = createSearchAdapters()
 const search = createWorkspaceSearchService(sources)
 afterAll(async () => { await getAppPool().end(); await pool.end() })
 
+/** Drain the shared projection queue: suites that ran earlier in the same
+ * database may have queued artifacts ahead of this fixture's. */
+async function projectAll() {
+  for (let round = 0; round < 50 && await projectOfficeSearchBatch(async () => null, 100) > 0; round += 1) { /* drain */ }
+}
+
 async function fixture() {
   const userId=randomUUID(),other=randomUUID(),workspaceId=randomUUID(),foreign=randomUUID(),assistant=randomUUID()
   for (const id of [userId,other]) await q('INSERT INTO users(id,auth_provider_id) VALUES($1::uuid,$1::text)',[id])
@@ -112,7 +118,7 @@ describe('[COMP:search/workspace-service] Real PostgreSQL search authority and s
     const f=await fixture()
     await q("INSERT INTO office_artifacts(workspace_id,family,title,creator_user_id,owner_user_id,capability_version,sensitivity) VALUES($1,'document','needle Office',$2,$2,1,'internal')",[f.workspaceId,f.userId])
     expect(await search(f,{q:'needle',kind:'office'})).toMatchObject({items:[],completeness:'partial',unavailableFamilies:['office']})
-    await projectOfficeSearchBatch(async()=>null)
+    await projectAll()
     expect(await run(f,'office')).toHaveLength(1)
   })
 
@@ -159,7 +165,7 @@ describe('[COMP:search/workspace-service] Real PostgreSQL search authority and s
     await q(`INSERT INTO office_collab_documents(artifact_id,workspace_id,ydoc,state_vector,canonical_hash,base_version)
       VALUES($1,$2,$3,$4,$5,0)`,[id,f.workspaceId,Buffer.from(encodeOfficeState(doc)),Buffer.from(officeStateVector(doc)),'a'.repeat(64)])
     doc.destroy()
-    await projectOfficeSearchBatch(async()=>null)
+    await projectAll()
     expect(await run(f,'office')).toMatchObject([{id,snippet:expect.stringContaining('needle Office body'),target:{type:'office',id,family}}])
     const file=(await q("INSERT INTO workspace_files(workspace_id,name,path,storage_uri,created_by_user_id) VALUES($1,'snapshot.json',$2,'fixture://snapshot',$3) RETURNING id",[f.workspaceId,`/snapshot-${id}.json`,f.userId])).rows[0].id
     const version=(await q(`INSERT INTO office_artifact_versions(artifact_id,workspace_id,version,snapshot_file_id,snapshot_hash,operation_clock,schema_version,capability_version,author_type,origin)

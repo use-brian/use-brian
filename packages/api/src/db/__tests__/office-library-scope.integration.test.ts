@@ -36,7 +36,9 @@ const tables=['office_templates','office_template_versions','office_resources','
 async function fixture(grantLifetimeMs=86_400_000) {
   const workspaceId=randomUUID(),owner=randomUUID(),reader=randomUUID(),editor=randomUUID()
   for(const id of [owner,reader,editor])await pool.query('INSERT INTO users(id,auth_provider_id) VALUES($1::uuid,$1::text)',[id])
-  await pool.query("INSERT INTO workspaces(id,name,owner_user_id) VALUES($1,'Library scope fixture',$2)",[workspaceId,owner])
+  // These suites pin the legacy (flag-off) model: read grants are read-only there.
+  // Under v2 an edge is read and write at its clearance (permission-model-v2 A09).
+  await pool.query("INSERT INTO workspaces(id,name,owner_user_id,department_read_v2) VALUES($1,'Library scope fixture',$2,false)",[workspaceId,owner])
   await pool.query("INSERT INTO workspace_members(workspace_id,user_id,role,clearance,team_scope_mode) VALUES($1,$2,'owner','internal','assigned'),($1,$3,'member','internal','assigned'),($1,$4,'member','internal','assigned')",[workspaceId,owner,reader,editor])
   const team=await groups.createTeam(owner,workspaceId,{name:'Library department',key:'library-department'})
   await groups.addMember(owner,team.id,editor)
