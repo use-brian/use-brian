@@ -542,6 +542,7 @@ import {
   pauseWorkflowSystem,
 } from './db/workflow-store.js'
 import { buildWorkflowToolRegistry } from './workflow/mcp-bridge.js'
+import { connectorWorkflowEventAdmissibleSystem } from './workflow/connector-event-admission.js'
 import { callRemoteMcpTool } from './mcp/client.js'
 import { createPendingApprovalsStore } from './db/pending-approvals-store.js'
 import {
@@ -7983,6 +7984,13 @@ export async function bootOpenApi(opts: BootOpenApiOptions): Promise<BootResult>
     findAdditionalConnectorEventWorkspaces: ({ connectorInstanceId }) =>
       connectorGrantStore.listGrantedWorkspaceIdsForInstanceSystem(connectorInstanceId),
     startWorkflowRun: async ({ workflowId, workspaceId, input }) => {
+      // A connector event outside the workflow's department audience is withheld before any
+      // effect (run, storm pause or audit). Channel and brand sources carry no department audience.
+      if (input.trigger.sourceType === 'connector' && (!input.trigger.connectorInstanceId
+        || !await connectorWorkflowEventAdmissibleSystem(workflowId, workspaceId, input.trigger.connectorInstanceId))) {
+        console.warn(`[workflow-event] connector event withheld from workflow ${workflowId}: outside its department audience`)
+        return
+      }
       const recent = await countRecentRunsForWorkflowSystem(
         workflowId,
         RUN_STORM_WINDOW_SECONDS,
