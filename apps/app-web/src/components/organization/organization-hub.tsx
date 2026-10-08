@@ -15,7 +15,7 @@ import { OrganizationChartView } from './organization-chart';
 import { OrganizationTopbar } from './organization-topbar';
 import { OrganizationTopbarSlotProvider } from './organization-chrome';
 import { TeamsContextSection } from '@/components/settings-modal/sections/context-scopes-section';
-import { DepartmentAccessPanel, HomeDepartmentControls, warmDepartmentsSection } from '@/components/organization/department-access-panel';
+import { DepartmentAccessPanel, HomeDepartmentControls, HomeDepartmentSummary, warmDepartmentsSection } from '@/components/organization/department-access-panel';
 import { WorkspaceMembersSection } from '@/components/settings-modal/workspace-sections';
 import { WorkspaceAccessView } from '@/components/workspace-access/workspace-access';
 
@@ -42,7 +42,7 @@ export function OrganizationHub() {
       <div key={`${workspaceId}:${me.id}:${section}`} className="min-h-0 min-w-0 flex-1 overflow-y-auto">
         <div className="mx-auto w-full min-w-0 max-w-7xl px-4 pb-28 pt-5 md:px-8">
           {mode.readySimple&&!mode.data?.canAdminister&&(section==='access'||section==='departments')?<WorkspaceModeSummary/>:section === 'structure' ? <OrganizationChartView /> : section === 'access' ? <WorkspaceAccessView selection={{kind:'requests'}} /> :
-            section === 'departments' ? <div className="space-y-6"><TeamsContextSection renderAccessSettings={(id,panel)=>panel==='readers'?<DepartmentAccessPanel departmentId={id} />:<WorkspaceAccessView embedded selection={{kind:'department',id}}/>} /><DepartmentAssistantGroups /><HomeDepartmentControls /></div> :
+            section === 'departments' ? <div className="space-y-6"><TeamsContextSection home={{summary:<HomeDepartmentSummary />,panel:<HomeDepartmentControls embedded />}} renderAccessSettings={(id,panel)=>panel==='readers'?<DepartmentAccessPanel departmentId={id} />:<WorkspaceAccessView embedded selection={{kind:'department',id}}/>} /><DepartmentAssistantGroups /></div> :
             <WorkspaceMembersSection
                 memberTarget={memberId ? { workspaceId, memberId } : undefined}
                 clearMember={() => router.push(organizationHref(workspaceId, 'people'))}

@@ -1112,6 +1112,7 @@ export function ChannelDetail({
             {t.studioPage.channels.clearanceLabel}
           </span>
           <Select
+            items={CLEARANCES.map((c) => ({ value: c, label: t.studioPage.channels.clearance[c] }))}
             value={channel.clearance}
             disabled={saving}
             onValueChange={(v) => {
@@ -1621,6 +1622,11 @@ function RoutingModelPicker({
   const tr = t.studioPage.channels;
   return (
     <Select
+      items={[
+        { value: "standard", label: tr.routingModelStandard },
+        { value: "pro", label: tr.routingModelPro },
+        { value: "max", label: tr.routingModelMax },
+      ]}
       value={value}
       disabled={saving}
       onValueChange={(v) => {
@@ -4473,6 +4479,12 @@ function WhatsappAccessControl({
       <div className="flex flex-wrap items-center justify-between gap-3">
         <span className="text-sm">{acc.label}</span>
         <Select
+          items={[
+            { value: "allow_all", label: acc.everyone },
+            { value: "allowlist", label: acc.numbers },
+            { value: "blocklist", label: acc.block },
+            { value: "group_members", label: acc.groupMembers },
+          ]}
           value={mode}
           disabled={busy}
           onValueChange={(v) => {
@@ -4776,6 +4788,10 @@ function WhatsappRepliesSection({ workspaceId }: { workspaceId: string }) {
           <div className="flex flex-wrap items-center justify-between gap-3 text-sm">
             <span className="text-muted-foreground">{bot.scopeLabel}</span>
             <Select
+              items={[
+                { value: "dm", label: bot.scopeDm },
+                { value: "dm_and_groups", label: bot.scopeGroups },
+              ]}
               value={config.sendScope}
               disabled={busy}
               onValueChange={(v) => {
@@ -4850,7 +4866,7 @@ function WhatsappRepliesSection({ workspaceId }: { workspaceId: string }) {
             )}
 
             <div className="flex flex-wrap items-center gap-2">
-              <Select value={newType} onValueChange={(v) => v && setNewType(v)}>
+              <Select items={[{ value: "is_dm", label: bot.triggerIsDm }, { value: "is_mention", label: bot.triggerIsMention }, { value: "keyword_match", label: bot.triggerKeyword }, { value: "always", label: bot.triggerAlways }]} value={newType} onValueChange={(v) => v && setNewType(v)}>
                 <SelectTrigger size="sm" className="w-full text-[16px] sm:w-auto sm:min-w-[11rem] md:text-xs">
                   <SelectValue />
                 </SelectTrigger>

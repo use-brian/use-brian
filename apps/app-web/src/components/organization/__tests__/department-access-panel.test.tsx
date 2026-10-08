@@ -2,7 +2,7 @@
 import { act } from 'react';
 import { createRoot, type Root } from 'react-dom/client';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
-import { DepartmentAccessPanel, HomeDepartmentControls } from '../department-access-panel';
+import { DepartmentAccessPanel, HomeDepartmentControls, HomeDepartmentSummary } from '../department-access-panel';
 import { invalidateSurfaceCache, resetSurfaceCache } from '@/lib/surface-cache';
 import { protectProjection } from '@/lib/use-protected-projection';
 import { I18nProvider } from '@/lib/i18n/client';
@@ -223,6 +223,15 @@ describe('[COMP:app-web/department-access] Organization > Departments: who reads
     await render(<HomeDepartmentControls />);
     expect(host.textContent).toContain(en.homeDepartment.title);
     expect(host.textContent).toContain(en.homeDepartment.none);
+  });
+
+  it('the home department card names your current home, and the embedded panel drops its own title', async () => {
+    mocks.departments.mockResolvedValue({ departments: [entry()], homes: [{ principal: { kind: 'user', id: 'owner-fixture' }, departmentId: D }] });
+    await render(<HomeDepartmentSummary />);
+    expect(host.textContent).toContain(en.homeDepartment.cardMine.replace('{name}', entry().name));
+    await render(<HomeDepartmentControls embedded />);
+    expect(host.querySelector('h3')).toBeNull();
+    expect(host.textContent).toContain(en.homeDepartment.summary);
   });
 
   it('home department stays painted through the stream catch-up and purges on a real identity change', async () => {

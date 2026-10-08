@@ -1273,6 +1273,7 @@ export function CrmSurface({ workspaceId, routeRecord = null }: {
               <>
               {selectedPipeline && config && config.pipelines.length > 1 && (
                 <Select
+                  items={config.pipelines.map((pipeline) => ({ value: pipeline.id, label: pipeline.name }))}
                   value={selectedPipeline.id}
                   onValueChange={(pipeline) => {
                     if (typeof pipeline === "string") {

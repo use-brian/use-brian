@@ -392,8 +392,34 @@ function useHomePicker() {
   return { data, error, picker };
 }
 
-/** Your home department, and those of assistants you may configure. */
-export function HomeDepartmentControls() {
+/** Card body for the Home department tile in the department grid: your
+ * current home and how many assistants have one set. */
+export function HomeDepartmentSummary() {
+  const { workspaceId, me } = useWorkspaceContext();
+  const t = useT().homeDepartment;
+  const { names } = useNames(workspaceId);
+  const { data } = useDirectory(workspaceId);
+  if (!data) return <span aria-hidden className="block h-[38px] w-full animate-pulse rounded-md bg-muted/50" />;
+  const mine = data.homes.find(h => h.principal.kind === "user" && h.principal.id === me.id);
+  const homeName = (home?: DepartmentHome) => data.departments.find(d => d.departmentId === home?.departmentId)?.name ?? t.none;
+  const assistants = data.homes.filter(h => h.principal.kind === "assistant");
+  const myName = names.get(`user:${me.id}`);
+  return (
+    <span className="flex w-full min-w-0 items-center justify-between gap-2 text-xs">
+      <span className="flex min-w-0 items-center gap-1.5">
+        {myName ? <OrgAvatar name={myName} seed={me.id} size={22} /> : null}
+        <span className="truncate">{format(t.cardMine, { name: homeName(mine) })}</span>
+      </span>
+      {assistants.length ? <span className="shrink-0 tabular-nums text-muted-foreground">
+        {format(t.cardAssistants, { count: assistants.filter(h => h.departmentId).length, total: assistants.length })}
+      </span> : null}
+    </span>
+  );
+}
+
+/** Your home department, and those of assistants you may configure.
+ * `embedded` drops the card chrome and title, for the department detail panel. */
+export function HomeDepartmentControls({ embedded = false }: { embedded?: boolean } = {}) {
   const { workspaceId, me } = useWorkspaceContext();
   const dictionary = useT(), t = dictionary.homeDepartment;
   const { names } = useNames(workspaceId);
@@ -402,11 +428,11 @@ export function HomeDepartmentControls() {
   const mine = data.homes.find(h => h.principal.kind === "user" && h.principal.id === me.id);
   const assistants = data.homes.filter(h => h.principal.kind === "assistant");
   return (
-    <section className="space-y-3 rounded-xl border border-border bg-background p-4 md:p-5">
-      <div className="space-y-1">
+    <section className={embedded ? "space-y-3" : "space-y-3 rounded-xl border border-border bg-background p-4 md:p-5"}>
+      {embedded ? <InfoNote>{t.summary}</InfoNote> : <div className="space-y-1">
         <h3 className="font-semibold">{t.title}</h3>
         <InfoNote>{t.summary}</InfoNote>
-      </div>
+      </div>}
       {error ? <p role="alert" className="text-sm text-destructive">{error}</p> : null}
       {mine ? picker(mine, t.mine, names.get(`user:${me.id}`)
         ? <OrgAvatar name={names.get(`user:${me.id}`)!} seed={me.id} size={24} />

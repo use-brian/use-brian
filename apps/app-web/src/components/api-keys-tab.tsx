@@ -1,6 +1,6 @@
 "use client";
 
-
+import { Skeleton } from "@/components/skeleton";
 import { publicRuntimeConfig } from "@/lib/runtime-public-config";
 /**
  * API keys tab for the assistant detail page (app-web).
@@ -197,7 +197,9 @@ export function ApiKeysTab({
       )}
 
       {keys === null ? (
-        <div className="text-[13px] text-muted-foreground">{t.apiKeys.loading}</div>
+        <div role="status" aria-label={t.apiKeys.loading} className="space-y-2">
+          {[0, 1].map((i) => <Skeleton key={i} className="h-12 w-full rounded-lg" />)}
+        </div>
       ) : activeKeys.length === 0 ? (
         <div className="text-[13px] text-muted-foreground border border-dashed border-border rounded-lg px-4 py-8 text-center">
           {t.apiKeys.noActive}

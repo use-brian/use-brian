@@ -57,7 +57,7 @@ function setup(artifactTtl='6000',snapshotTtl=artifactTtl){state.fetch.mockImple
 });}
 async function render(){await act(async()=>root.render(<I18nProvider locale="en" dict={en}><OfficeEditorShell workspaceId={state.workspace} artifactId={uid(1)}/></I18nProvider>));}
 async function advance(ms:number){await act(async()=>vi.advanceTimersByTime(ms));}
-async function click(label:string){await act(async()=>{const button=[...host.querySelectorAll('button')].find(row=>row.textContent===label);expect(button).toBeDefined();button!.click();});}
+async function click(label:string){await act(async()=>{const button=[...host.querySelectorAll('button')].find(row=>row.textContent===label||row.getAttribute('aria-label')===label);expect(button).toBeDefined();button!.click();});}
 
 describe('[COMP:app-web/office-editor-shell] bounded online editor reads',()=>{
   it.each(['focus','visibilitychange'])('retains the mounted editor and selection during %s revalidation',async event=>{

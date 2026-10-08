@@ -23,7 +23,7 @@ function window(sequence: number): Window {
   return { capture_id: c.id, sequence, chunk_id: randomUUID(), offset_ms: sequence * 1000, duration_ms: 1000, checksum: 'a'.repeat(64), audio: Buffer.from(`${sequence}`), bytes: 1, transcript: null, attempts: 0 }
 }
 function harness() {
-  const pages = { getById: vi.fn(async () => ({ id: c.page_id, workspaceId: g.workspace_id })), createDraft: vi.fn(), update: vi.fn(async () => true) }
+  const pages = { getById: vi.fn(async () => ({ id: c.page_id, workspaceId: g.workspace_id })), createDraft: vi.fn(), update: vi.fn(async () => true), findIdByAnchorKey: vi.fn(async () => 'meeting-folder') }
   const files = { stat: vi.fn(async () => ({ ok: false, error: { kind: 'not_found' } })), writeBytes: vi.fn(async () => ({ ok: true, value: { id: 'file', createdByUserId: g.owner_id, assistantId: null, mime: 'audio/mp4' } })) }
   const transcribe = vi.fn(async (buffer: Buffer) => `Speaker 1: window ${buffer}`), authorize = vi.fn(async () => {})
   const service = createWatchService({ pages: pages as never, files: files as never, transcribe, authorize })
@@ -192,6 +192,25 @@ describe('watch service recovery and ordering', () => {
     await expect(h.service.prepare(g, c)).rejects.toMatchObject({ message: 'page_unavailable' })
     await h.service.status(g, c.client_id) // reads never prepare/mutate pages
     expect(h.pages.createDraft).toHaveBeenCalledTimes(1)
+  })
+  it('files a new watch page under the Meeting notes folder, creating the folder when absent', async () => {
+    const h = harness()
+    c.page_prepared = false; c.page_prepare_started = false
+    h.pages.getById.mockResolvedValue(null as never)
+    h.pages.findIdByAnchorKey.mockResolvedValue(null as never)
+    h.pages.createDraft.mockImplementation(async (input: { anchorKey?: string }) => (input.anchorKey ? { id: 'new-folder' } : { id: c.page_id }) as never)
+    await h.service.prepare(g, c)
+    expect(h.pages.findIdByAnchorKey).toHaveBeenCalledWith(g.owner_id, g.workspace_id, 'meeting-notes-folder')
+    expect(h.pages.createDraft).toHaveBeenNthCalledWith(1, expect.objectContaining({ anchorKey: 'meeting-notes-folder', name: 'Meeting notes', userId: g.owner_id }))
+    expect(h.pages.createDraft).toHaveBeenNthCalledWith(2, expect.objectContaining({ id: c.page_id, nestParentId: 'new-folder' }), expect.anything())
+  })
+  it('reuses an existing Meeting notes folder for a new watch page', async () => {
+    const h = harness()
+    c.page_prepared = false; c.page_prepare_started = false
+    h.pages.getById.mockResolvedValue(null as never)
+    await h.service.prepare(g, c)
+    expect(h.pages.createDraft).toHaveBeenCalledTimes(1)
+    expect(h.pages.createDraft).toHaveBeenCalledWith(expect.objectContaining({ id: c.page_id, nestParentId: 'meeting-folder' }), expect.anything())
   })
   it('does not recreate a page after ambiguous initial publication', async () => {
     const h = harness()

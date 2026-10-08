@@ -455,6 +455,7 @@ export function FeedFloatingChat() {
         {assistants.length > 1 ? (
           <div className="shrink-0 mb-2 flex justify-end">
             <Select
+              items={assistants.map((a) => ({ value: a.id, label: a.name }))}
               value={activeAssistant.id}
               onValueChange={(v) => { if (v) setActiveAssistantId(v); }}
             >

@@ -267,6 +267,10 @@ function WebhookMatchEditor({
           {rules.length > 1 && (
             <div className="flex items-center gap-2">
               <Select
+                items={[
+                  { value: "and", label: t.workflowPage.builder.webhookFilterCombineAll },
+                  { value: "or", label: t.workflowPage.builder.webhookFilterCombineAny },
+                ]}
                 value={combine}
                 onValueChange={(v) => commit(rules, v as WebhookCombine)}
                 disabled={disabled}
@@ -336,6 +340,7 @@ function RuleRow({
         className="flex-1 min-w-[8rem] min-h-11 sm:min-h-0 px-2 py-1.5 bg-background border border-border rounded text-[16px] md:text-xs font-mono outline-none focus:ring-2 focus:ring-ring disabled:opacity-60"
       />
       <Select
+        items={WEBHOOK_OPS.map((op) => ({ value: op, label: opLabels[op] }))}
         value={rule.op}
         onValueChange={(v) => onChange({ op: v as WebhookOp })}
         disabled={disabled}

@@ -119,7 +119,7 @@ function SensitivitySelect({
       disabled={disabled}
     >
       <SelectTrigger className="w-44 bg-muted/50" aria-label={t.teamspaceSensitivityLabel}>
-        <SelectValue />
+        <SelectValue>{sensitivityLabel(value, t)}</SelectValue>
       </SelectTrigger>
       <SelectContent>
         {SENSITIVITIES.map((s) => (
@@ -540,7 +540,11 @@ function GeneralTab({
               disabled={saving}
             >
               <SelectTrigger className="w-full bg-muted/50" aria-label={t.teamspaceLinkedTeamLabel}>
-                <SelectValue />
+                <SelectValue>
+                  {workspaceGroupId
+                    ? (teams.find((team) => team.id === workspaceGroupId)?.name ?? "")
+                    : t.teamspaceLinkedTeamNone}
+                </SelectValue>
               </SelectTrigger>
               <SelectContent>
                 <SelectItem value="__unlinked__">{t.teamspaceLinkedTeamNone}</SelectItem>

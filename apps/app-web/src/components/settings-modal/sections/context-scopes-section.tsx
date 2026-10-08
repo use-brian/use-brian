@@ -6,7 +6,7 @@ import type { DepartmentAccessCommand } from "@use-brian/shared";
 import { useEffect, useRef, useState, type ReactNode } from "react";
 import { isPhoneViewport } from "@/lib/viewport";
 import Link from "next/link";
-import { Archive, Building2, Check, Crown, Lock, Network, Plus, ShieldCheck, SlidersHorizontal, UsersRound } from "lucide-react";
+import { Archive, Building2, Check, Crown, Home, Lock, Network, Plus, ShieldCheck, SlidersHorizontal, UsersRound } from "lucide-react";
 import { AvatarStack, Chip, ClearanceBar, ClearancePill, InfoNote, ORG_TONES, SegmentedTabs, departmentTone, tabPanelProps, toneFill, toneSolid, type OrgTone } from "@/components/organization/org-visuals";
 import { clearanceCounts, useDepartmentReaders } from "@/components/organization/department-access-panel";
 import { Button } from "@/components/ui/button";
@@ -29,8 +29,11 @@ function stableKey(name: string): string {
   return name.trim().toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-|-$/g, "").slice(0, 39);
 }
 
-/** `panel` names the department panel being filled; a caller without panels may ignore it. */
-export function TeamsContextSection({renderAccessSettings}:{renderAccessSettings?:(teamId:string,panel?:'readers'|'policy')=>ReactNode}={}) {
+const HOME_CARD_ID="__home__";
+
+/** `panel` names the department panel being filled; a caller without panels may ignore it.
+ * `home` adds a Home department tile to the grid, whose detail is `home.panel`. */
+export function TeamsContextSection({renderAccessSettings,home}:{renderAccessSettings?:(teamId:string,panel?:'readers'|'policy')=>ReactNode;home?:{summary:ReactNode;panel:ReactNode}}={}) {
   const { workspaceId, me } = useWorkspaceContext();
   const dictionary = useT(), t = dictionary.contextScope, accessCopy = dictionary.workspaceAccess;
   const [name, setName] = useState("");
@@ -48,6 +51,7 @@ export function TeamsContextSection({renderAccessSettings}:{renderAccessSettings
   },resource.refresh);
   const teams=data?.teams??[];
   const selected=teams.find(team=>team.id===selectedId)??null;
+  const homeSelected=home!==undefined&&selectedId===HOME_CARD_ID;
   const canManage=data?.canAdminister===true;
   const [panel,setPanel]=useState<'readers'|'policy'|'details'>('readers');
   const detailRef=useRef<HTMLElement>(null);
@@ -144,6 +148,16 @@ export function TeamsContextSection({renderAccessSettings}:{renderAccessSettings
       </span>:<span aria-hidden className={`block h-[38px] w-full rounded-md ${readerEdges?'':'animate-pulse bg-muted/50'}`}/>}
     </button></li>;
   };
+  const homeCopy=dictionary.homeDepartment;
+  const homeCard=home?<li className="min-w-0"><button type="button" aria-pressed={homeSelected} onClick={()=>choose(HOME_CARD_ID)}
+      className="flex h-full w-full min-w-0 flex-col gap-3 rounded-xl border border-border bg-card p-3.5 text-left transition-colors hover:border-foreground/25 focus-visible:outline focus-visible:outline-ring aria-pressed:border-foreground/50 aria-pressed:bg-muted/40 aria-pressed:shadow-sm">
+      <span className="flex w-full min-w-0 items-start gap-2.5">
+        <span aria-hidden className="grid size-8 shrink-0 place-items-center rounded-lg bg-muted text-muted-foreground"><Home className="size-4"/></span>
+        <span className="min-w-0 flex-1"><span className="block truncate text-sm font-semibold">{homeCopy.title}</span>
+          <span className="block truncate text-xs text-muted-foreground">{homeCopy.cardSubtitle}</span></span>
+      </span>
+      <span className="mt-auto block w-full">{home.summary}</span>
+    </button></li>:null;
   // Collapsed, the whole card is the "add" target; expanded, it is a
   // labelled form with the name field on its own row.
   const createDepartment=canManage?<li className="min-w-0">{adding
@@ -206,9 +220,15 @@ export function TeamsContextSection({renderAccessSettings}:{renderAccessSettings
       </div>
       <DepartmentChangeFeedback change={change}/>
       {error ? <p role="alert" className="text-sm text-destructive">{error}</p> : null}
-      <ul aria-label={t.departmentPickerLabel} className="grid gap-3 sm:grid-cols-2 xl:grid-cols-3">{teams.map(departmentCard)}{createDepartment}</ul>
+      <ul aria-label={t.departmentPickerLabel} className="grid gap-3 sm:grid-cols-2 xl:grid-cols-3">{teams.map(departmentCard)}{homeCard}{createDepartment}</ul>
       {teams.length === 0 ? <p className="text-sm text-muted-foreground">{t.noTeams}</p> : null}
-      {selected ? <section ref={detailRef} aria-label={selected.name} className="min-w-0 scroll-mt-4 rounded-xl border border-border bg-background">
+      {homeSelected ? <section ref={detailRef} aria-label={homeCopy.title} className="min-w-0 scroll-mt-4 rounded-xl border border-border bg-background">
+        <header className="flex min-w-0 items-center gap-3 border-b border-border px-4 py-3 md:px-5">
+          <span aria-hidden className="grid size-9 shrink-0 place-items-center rounded-lg bg-muted text-muted-foreground"><Home className="size-4"/></span>
+          <h3 className="truncate text-base font-semibold">{homeCopy.title}</h3>
+        </header>
+        <div className="p-4 md:p-5">{home.panel}</div>
+      </section> : selected ? <section ref={detailRef} aria-label={selected.name} className="min-w-0 scroll-mt-4 rounded-xl border border-border bg-background">
         <header className="flex flex-wrap items-center justify-between gap-3 border-b border-border px-4 py-3 md:px-5">
           <div className="flex min-w-0 items-center gap-3">
             <span aria-hidden style={toneFill(selectedTone)} className="grid size-9 shrink-0 place-items-center rounded-lg"><Building2 className="size-4"/></span>

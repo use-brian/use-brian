@@ -8,6 +8,7 @@ import { captureRecordingIntakeParent } from '../db/recording-intake-admission.j
 import { validateWatchAudio } from './watch-media.js'
 import { concatAudioWindows } from './ffmpeg.js'
 import { parseTranscriptLines } from '../routes/recording-live.js'
+import { ensureMeetingNotesFolder } from './meeting-notes-folder.js'
 import { watchStore, WatchError, withCaptureLock, missingTimeRanges, type Grant, type Capture, type Window } from './watch-store.js'
 
 export async function authorizeWatchDestination(g: Pick<Grant, 'owner_id' | 'workspace_id' | 'assistant_id'> & { id?: string; authMode?: 'relay' }) {
@@ -32,7 +33,7 @@ export function missingSequences(windows: Pick<Window, 'sequence'>[], expected: 
 }
 export type WatchService = ReturnType<typeof createWatchService>
 export function createWatchService(deps: {
-  pages: Pick<SavedViewStore, 'createDraft' | 'getById' | 'update'>
+  pages: Pick<SavedViewStore, 'createDraft' | 'getById' | 'update' | 'findIdByAnchorKey'>
   files: Pick<FilesApi, 'stat' | 'writeBytes'>
   transcribe?: (audio: Buffer) => Promise<string>
   authorize?: typeof authorizeWatchDestination
@@ -55,8 +56,10 @@ export function createWatchService(deps: {
       if (!claimed.rows.length) throw new WatchError(410, 'capture_expired')
       // The owner-approved device grant authors a new, source-free capture page.
       // Pass the real owner to canonical placement admission, never a client-supplied actor.
+      // Filed under the default Meeting notes folder, like a live capture's default.
+      const parentId = await ensureMeetingNotesFolder(deps.pages, g.owner_id, g.workspace_id)
       await deps.pages.createDraft({ id: c.page_id, userId: g.owner_id, workspaceId: g.workspace_id,
-        name: c.metadata.title, nameOrigin: 'user', entity: 'tasks', viewType: 'table', binding: { entity: 'tasks', viewType: 'table' },
+        name: c.metadata.title, nestParentId: parentId, nameOrigin: 'user', entity: 'tasks', viewType: 'table', binding: { entity: 'tasks', viewType: 'table' },
         state: 'saved', writtenBy: 'user', page: { blocks: [{ id: `${LIVE_MARKER_ID_PREFIX}${c.id}`, kind: 'text', text: 'Watch recording — provisional transcript. Final audio processing starts after upload completes.' }] } },
       { provenance: { kind: 'human-authored', actorId: g.owner_id } })
     }

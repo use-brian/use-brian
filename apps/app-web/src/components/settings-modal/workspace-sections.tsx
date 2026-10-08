@@ -924,6 +924,11 @@ export function WorkspaceGeneralSection({ onWorkspaceDeleted }: { onWorkspaceDel
           <div className="pt-1">
             <Select
               value={scriptPref}
+              items={[
+                { value: SCRIPT_AUTO, label: t.transcriptionScript.auto },
+                { value: "traditional", label: t.transcriptionScript.traditional },
+                { value: "simplified", label: t.transcriptionScript.simplified },
+              ]}
               onValueChange={(v) => void changeScriptPref(v ?? SCRIPT_AUTO)}
               disabled={scriptSaving}
             >
@@ -958,6 +963,13 @@ export function WorkspaceGeneralSection({ onWorkspaceDeleted }: { onWorkspaceDel
           <div className="pt-1">
             <Select
               value={retention}
+              items={[
+                ...RETENTION_PRESETS.map((days) => ({
+                  value: String(days),
+                  label: t.inboxRetention.days.replace("{count}", String(days)),
+                })),
+                { value: RETENTION_NEVER, label: t.inboxRetention.never },
+              ]}
               onValueChange={(v) =>
                 void changeRetention(v ?? String(DEFAULT_INBOX_RETENTION_DAYS))
               }
@@ -1037,6 +1049,12 @@ export function WorkspaceGeneralSection({ onWorkspaceDeleted }: { onWorkspaceDel
                     <div className="flex flex-wrap items-center gap-2">
                       <Select
                         value={transferTarget}
+                        items={data.members
+                          .filter((m) => m.userId !== data.ownerUserId)
+                          .map((m) => ({
+                            value: m.userId,
+                            label: m.userName ?? m.email ?? m.userId,
+                          }))}
                         onValueChange={(v) => {
                           setTransferTarget(v ?? "");
                           setTransferError(null);

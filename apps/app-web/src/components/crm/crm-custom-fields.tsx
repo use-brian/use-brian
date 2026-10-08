@@ -132,6 +132,13 @@ function FieldEditor({
       <label className="grid grid-cols-[120px_minmax(0,1fr)] items-center gap-2 text-xs">
         <span className="text-muted-foreground">{label}</span>
         <Select
+          items={[
+            { value: "__empty__", label: t.emptyValue },
+            ...optionsForSelect.map((option) => ({
+              value: option,
+              label: type === "boolean" ? (option === "true" ? t.yes : t.no) : option,
+            })),
+          ]}
           value={value == null ? undefined : String(value)}
           onValueChange={(next) => onCommit(
             next === "__empty__" ? null : type === "boolean" ? next === "true" : next,

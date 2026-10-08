@@ -14,6 +14,7 @@
  */
 
 import { createMeetingTagsService } from '../recordings/meeting-tags-service.js'
+import { ensureMeetingNotesFolder } from '../recordings/meeting-notes-folder.js'
 import { meetingTagRoutes } from './meeting-tags.js'
 import { randomUUID } from 'node:crypto'
 import { Router, type NextFunction, type Request, type Response } from 'express'
@@ -391,27 +392,7 @@ export function recordingLiveRoutes(deps: RecordingLiveRouteDeps): Router {
       } else {
         let resolvedParentId = parentPageId ?? null
         if (destination === 'meeting-notes') {
-          const anchorKey = 'meeting-notes-folder'
-          resolvedParentId = await deps.savedViewStore.findIdByAnchorKey(userId, workspaceId, anchorKey)
-          if (!resolvedParentId) {
-            try {
-              const folder = await deps.savedViewStore.createDraft({
-                userId, workspaceId, anchorKey,
-                name: typeof folderName === 'string' && folderName.trim()
-                  ? folderName.trim().slice(0, 120) : 'Meeting notes',
-                nameOrigin: 'user', icon: '📁',
-                entity: 'tasks', viewType: 'table',
-                binding: { entity: 'tasks', viewType: 'table' },
-                page: { blocks: [] }, state: 'saved', writtenBy: 'user',
-              })
-              resolvedParentId = folder.id
-            } catch (error) {
-              // The workspace anchor's unique index arbitrates concurrent starts.
-              if ((error as { code?: string } | null)?.code !== '23505') throw error
-              resolvedParentId = await deps.savedViewStore.findIdByAnchorKey(userId, workspaceId, anchorKey)
-              if (!resolvedParentId) throw error
-            }
-          }
+          resolvedParentId = await ensureMeetingNotesFolder(deps.savedViewStore, userId, workspaceId, folderName)
         }
         if (resolvedParentId) {
           const parent = await deps.savedViewStore.getById(userId, resolvedParentId)

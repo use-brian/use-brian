@@ -283,7 +283,7 @@ export function FeedCampaigns(props: {
                   </label>
                   <label className="text-sm">
                     <span className="mb-1 block text-muted-foreground">{tc.channelLabel}</span>
-                    <Select value={channel} onValueChange={(value) => { if (value) setChannel(value as CampaignChannel); }}>
+                    <Select items={CAMPAIGN_CHANNELS.map((item) => ({ value: item, label: t.platformLabels[item] }))} value={channel} onValueChange={(value) => { if (value) setChannel(value as CampaignChannel); }}>
                       <SelectTrigger className="w-full"><SelectValue /></SelectTrigger>
                       <SelectContent>{CAMPAIGN_CHANNELS.map((item) => <SelectItem key={item} value={item}>{t.platformLabels[item]}</SelectItem>)}</SelectContent>
                     </Select>
@@ -296,7 +296,7 @@ export function FeedCampaigns(props: {
               <div className="space-y-2 border-t border-border pt-4">
                 <h3 className="font-medium">{tc.placementsTitle}</h3>
                 {placements.length === 0 ? <p className="text-sm text-muted-foreground">{tc.noPlacements}</p> : (
-                  <Select value={activePlacementId} onValueChange={(value) => setPlacementId(value ?? "")}>
+                  <Select items={placements.map((item) => ({ value: item.id, label: `${item.channel === "email" ? tc.emailChannel : t.platformLabels[item.channel]}: ${item.placementKey}` }))} value={activePlacementId} onValueChange={(value) => setPlacementId(value ?? "")}>
                     <SelectTrigger className="w-full"><SelectValue /></SelectTrigger>
                     <SelectContent>{placements.map((item) => <SelectItem key={item.id} value={item.id}>{item.channel === "email" ? tc.emailChannel : t.platformLabels[item.channel]}: {item.placementKey}</SelectItem>)}</SelectContent>
                   </Select>

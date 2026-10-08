@@ -1,7 +1,7 @@
 "use client";
 
 import { buttonVariants } from "@/components/ui/button";
-import { officeIconButtonClassName, officeToolbarButtonClassName, officeWarningClassName } from "@/components/office/office-chrome";
+import { officeIconButtonClassName, officeWarningClassName } from "@/components/office/office-chrome";
 
 /**
  * Office artifact editor shell. Paints from the surface cache first
@@ -41,6 +41,7 @@ import { appendOfflineCommand, classifyOfficeReconnect, listOfflineJournal, load
 import { handleOfficeHistoryShortcut, observeOfficeHistory, observeOfficeHistoryReadiness } from "@/lib/office/editor-history";
 import { OfficeTopbar } from "./office-topbar";
 import { cn } from "@/lib/utils";
+import { PeekResizeHandle, usePeekResize } from "@/components/operator/resizable-peek";
 import { TemplateRoutingInspector, type TemplateRoutingInspectorState } from "./template-routing-inspector";
 import { chatDockSuppression } from "@/lib/chat-dock-suppress";
 import { DockRecorderFallback } from "@/components/chrome/dock-recorder";
@@ -59,6 +60,10 @@ const EMPTY_COMMENTS: OfficeCommentThread[] = [];
 const EMPTY_SUGGESTIONS: OfficeSuggestion[] = [];
 
 type Panel = "activity" | "comments" | "suggestions" | "history" | "sharing" | "review" | "routing";
+/** Panel width (rail included) at `lg+`; the user drags the left edge to
+ *  resize and the choice persists per browser (`usePeekResize`). */
+const OFFICE_PANEL_DEFAULT_WIDTH = 400;
+const OFFICE_PANEL_MIN_WIDTH = 320;
 
 function packageLive(pkg: LoadedOfficeOfflinePackage): OfficeLiveSnapshot {
   return { snapshot: pkg.payload.snapshot, seq: pkg.payload.seq, baseVersion: pkg.payload.baseVersion };
@@ -114,6 +119,7 @@ function OfficeArtifactShell({ workspaceId, artifactId, viewerId }: { workspaceI
   // Closed by default on a phone (report B row 13): open, the stacked panel
   // took the editor's height; the collapsed strip reopens it in one tap.
   const [panelOpen, setPanelOpen] = useState(() => !isPhoneViewport());
+  const { width: panelWidth, resizing: panelResizing, handleProps: panelResizeHandleProps } = usePeekResize("office:panel-width", { minWidth: OFFICE_PANEL_MIN_WIDTH });
   const [presentOpen, setPresentOpen] = useState(false);
   const [suggestMode, setSuggestMode] = useState(false);
   const [templateCompileState, setTemplateCompileState] = useState<"idle" | "queued" | "failed">("idle");
@@ -543,6 +549,17 @@ function OfficeArtifactShell({ workspaceId, artifactId, viewerId }: { workspaceI
   const editor = live?.snapshot.family === "document" ? <DocumentEditor snapshot={live.snapshot} baseVersion={live.baseVersion} role={editorRole} suggestMode={suggestMode} doc={collab.doc} provider={collab.provider} currentUser={currentUser} synced={collab.synced || Boolean(offlineCopyAt)} onCommand={(command) => void apply(command)} onSelectTargets={setTargets} onSelectCommentAnchor={setCommentAnchor} onSelectSuggestionRange={setSuggestionRange} commentThreads={commentThreads} suggestions={suggestions} /> : live?.snapshot.family === "presentation" ? <PresentationEditor snapshot={live.snapshot} baseVersion={live.baseVersion} role={editorRole} suggestMode={suggestMode} onCommand={(command) => void apply(command)} onSelectTargets={setTargets} /> : live?.snapshot.family === "spreadsheet" ? <SpreadsheetEditor snapshot={live.snapshot} baseVersion={live.baseVersion} role={editorRole} suggestMode={suggestMode} onCommand={(command) => void apply(command)} onSelectTargets={setTargets} onEditImageWithBrian={artifact.role !== "view" && artifact.lifecycleState === "active" && !offlineCopyAt && collab.status !== "disconnected" ? editSpreadsheetImageWithBrian : undefined} /> : live?.snapshot.family === "pdf" && artifact.mode === "session" && artifact.expiresAt ? <PdfEditor workspaceId={workspaceId} snapshot={live.snapshot} seq={live.seq} baseVersion={live.baseVersion} artifactVersion={artifact.version} expiresAt={artifact.expiresAt} role={editorRole} onCommand={apply} onReadback={refreshArtifact} onSelectTargets={setTargets} /> : snapshotPending ? <OfficeEditorSkeleton family={artifact.family} /> : <p className="m-auto text-sm text-muted-foreground">{t.running}</p>;
   const isPdfSession = artifact.family === "pdf" && artifact.mode === "session";
   const showTemplateRouting = artifact.mode === "template" && Boolean(live) && Boolean(templateId);
+  const panelTabs: { id: Panel; label: string; icon: React.ReactNode }[] = [
+    ...(showTemplateRouting ? [{ id: "routing" as const, label: t.routing, icon: <Route className="size-4" /> }] : []),
+    { id: "activity", label: t.brian, icon: <Sparkles className="size-4" /> },
+    ...(isPdfSession ? [] : [
+      { id: "comments" as const, label: t.comments, icon: <MessageSquare className="size-4" /> },
+      { id: "suggestions" as const, label: t.suggestions, icon: <ListChecks className="size-4" /> },
+      { id: "history" as const, label: t.history, icon: <History className="size-4" /> },
+      { id: "sharing" as const, label: t.sharing, icon: <Share2 className="size-4" /> },
+      { id: "review" as const, label: t.fileActions, icon: <FileCheck2 className="size-4" /> },
+    ]),
+  ];
   const templateRoutingBlocked = showTemplateRouting && (!templateRoutingState.ready || templateRoutingState.dirty || templateRoutingState.saving);
   const brianRevisionDisabledReason = targets.length === 0 ? t.brianSelectionRequired
     : artifact.role === "view" ? t.brianViewUnavailable
@@ -585,34 +602,34 @@ function OfficeArtifactShell({ workspaceId, artifactId, viewerId }: { workspaceI
             The stacked panel is also capped at 60dvh with its own scroll
             (report B row 13): open, its content used to take the whole
             column and `main` collapsed to nothing. */}
-        <aside className={cn("flex shrink-0 flex-col overflow-y-auto border-t bg-background transition-[width] max-sm:pb-[calc(4rem+env(safe-area-inset-bottom))] max-lg:max-h-[60dvh] max-lg:min-h-0 lg:border-l lg:border-t-0", panelOpen ? showTemplateRouting && panel === "routing" ? "w-full lg:w-80" : "w-full lg:w-80" : "w-full lg:w-12")} data-office-panel={panelOpen ? "open" : "collapsed"}>
-          {panelOpen ? <>
-            <div className="flex shrink-0 items-center justify-between gap-2 border-b px-3 py-3">
-              <div className="flex min-w-0 items-center gap-2"><span className="flex size-7 shrink-0 items-center justify-center rounded-lg bg-muted text-foreground"><Sparkles className="size-3.5" aria-hidden /></span><div className="min-w-0"><p className="truncate text-xs font-semibold">{t.brian}</p><p className="truncate text-[11px] text-muted-foreground">{t.workspaceAssistant}</p></div></div>
-              <button type="button" onClick={() => setPanelOpen(false)} aria-label={t.collapseAssistantPanel} title={t.collapseAssistantPanel} className={officeIconButtonClassName}><PanelRightClose className="size-4" /></button>
+        <aside className={cn("relative flex shrink-0 flex-col border-t bg-background max-sm:pb-[calc(4rem+env(safe-area-inset-bottom))] max-lg:max-h-[60dvh] max-lg:min-h-0 lg:flex-row-reverse lg:border-l lg:border-t-0", panelOpen ? "w-full lg:w-[var(--office-panel-width)]" : "w-full lg:w-12", panelResizing ? "select-none" : "transition-[width]")} style={{ "--office-panel-width": `${panelWidth ?? OFFICE_PANEL_DEFAULT_WIDTH}px` } as React.CSSProperties} data-office-panel={panelOpen ? "open" : "collapsed"}>
+          {/* One icon rail for both states: open and collapsed share the same
+              buttons in the same place, so the panel never grows a wrapping
+              tab strip (every panel already carries its own heading). Below
+              `lg` the rail lies flat above the stacked content. */}
+          <nav aria-label={t.panelNavigation} className="flex shrink-0 items-center gap-1 border-b p-1.5 max-lg:overflow-x-auto lg:w-12 lg:flex-col lg:border-b-0 lg:px-1.5">
+            {panelOpen
+              ? <button type="button" onClick={() => setPanelOpen(false)} aria-label={t.collapseAssistantPanel} title={t.collapseAssistantPanel} className={officeIconButtonClassName}><PanelRightClose className="size-4" /></button>
+              : <button type="button" onClick={() => setPanelOpen(true)} aria-label={t.expandAssistantPanel} title={t.expandAssistantPanel} className={officeIconButtonClassName}><PanelRightOpen className="size-4" /></button>}
+            <span aria-hidden className="mx-0.5 h-5 w-px shrink-0 bg-border lg:mx-0 lg:my-0.5 lg:h-px lg:w-5" />
+            {panelTabs.map((tab) => <RailPanelButton key={tab.id} active={panelOpen && panel === tab.id} label={tab.label} icon={tab.icon} onClick={() => { setPanel(tab.id); setPanelOpen(true); }} />)}
+          </nav>
+          {/* Keep the content column mounted when collapsed: routing keeps its
+              pending edits and live binding reconciliation across hiding. */}
+          <div className={cn("relative flex min-h-0 min-w-0 flex-1 flex-col", !panelOpen && "hidden")}>
+            {panelOpen ? <div className="max-lg:hidden"><PeekResizeHandle resizing={panelResizing} {...panelResizeHandleProps} /></div> : null}
+            <div className="min-h-0 flex-1 overflow-y-auto">
+            {showTemplateRouting && live && templateId ? <div className={panel === "routing" ? "block" : "hidden"}><TemplateRoutingInspector templateId={templateId} snapshot={live.snapshot} selectedTargetIds={targets} onStateChange={setTemplateRoutingState} /></div> : null}
+              {panelOpen ? <>
+                {panel === "activity" ? <OfficeJobActivity jobId={artifact.job?.id} snapshot={live?.snapshot} targetIds={targets} canRequestRevision={canRequestBrianRevision} requestDisabledReason={brianRevisionDisabledReason} onRequestRevision={requestBrianRevision} onRevisionCompleted={refreshArtifact} /> : null}
+                {panel === "comments" ? <div className="p-3"><OfficeComments artifactId={artifactId} workspaceId={workspaceId} version={artifact.version} targetIds={targets} selectionAnchor={artifact.family === "document" ? commentAnchor : null} anchorKind={artifact.family === "document" ? "block" : artifact.family === "spreadsheet" ? "table_cell" : "object"} canComment={artifact.role !== "view"} offline={collab.status === "disconnected" || Boolean(offlineCopyAt)} initialThreads={serverComments} initialQueuedThreads={queuedCommentThreads} onQueuedThreadsChange={receiveQueuedComments} onRevisionCompleted={refreshArtifact} /></div> : null}
+                {panel === "suggestions" ? <div className="p-3"><OfficeSuggestions workspaceId={workspaceId} artifactId={artifactId} canDecide={artifact.role === "edit" && artifact.lifecycleState === "active" && !offlineCopyAt} canSuggest={artifact.family === "document" && artifact.role !== "view" && artifact.lifecycleState === "active" && suggestMode} actorId={currentUser?.id} baseVersion={live?.baseVersion} expectedSeq={live?.seq} proposal={suggestionRange} offline={collab.status === "disconnected" || Boolean(offlineCopyAt)} onApplied={refreshArtifact} /></div> : null}
+                {panel === "history" ? <div className="p-3"><OfficeHistory artifactId={artifactId} artifactTitle={artifact.title} currentVersion={artifact.version} canEdit={artifact.role === "edit" && artifact.lifecycleState === "active" && !offlineCopyAt} onRestored={refreshArtifact} onCopied={(copiedId) => { invalidateOfficeList(workspaceId); router.push(`/w/${workspaceId}/office/${copiedId}`); }} /></div> : null}
+                {panel === "sharing" ? <div className="p-3"><OfficeSharing artifactId={artifactId} /></div> : null}
+                {panel === "review" ? <OfficeReview artifact={artifact} artifactId={artifactId} workspaceId={workspaceId} snapshot={live?.snapshot ?? undefined} selectedObjectIds={targets} onLifecycle={onLifecycle} onPresent={() => setPresentOpen(true)} offlineCopy={Boolean(offlineCopyAt)} /> : null}
+              </> : null}
             </div>
-            <div className={cn("grid shrink-0 gap-0.5 border-b p-1.5 max-lg:flex max-lg:overflow-x-auto", isPdfSession ? "grid-cols-1" : showTemplateRouting ? "grid-cols-4" : "grid-cols-3")}>
-              {showTemplateRouting ? <PanelButton active={panel === "routing"} label={t.routing} icon={<Route className="size-3" />} onClick={() => setPanel("routing")} /> : null}
-              <PanelButton active={panel === "activity"} label={t.brian} icon={<Sparkles className="size-3" />} onClick={() => setPanel("activity")} />
-              {!isPdfSession ? <><PanelButton active={panel === "comments"} label={t.comments} icon={<MessageSquare className="size-3" />} onClick={() => setPanel("comments")} /><PanelButton active={panel === "suggestions"} label={t.suggestions} icon={<ListChecks className="size-3" />} onClick={() => setPanel("suggestions")} /><PanelButton active={panel === "history"} label={t.history} icon={<History className="size-3" />} onClick={() => setPanel("history")} /><PanelButton active={panel === "sharing"} label={t.sharing} icon={<Share2 className="size-3" />} onClick={() => setPanel("sharing")} /><PanelButton active={panel === "review"} label={t.fileActions} icon={<FileCheck2 className="size-3" />} onClick={() => setPanel("review")} /></> : null}
-            </div>
-          </> : null}
-          {/* Keep routing mounted when collapsed: pending edits and live binding
-              reconciliation must survive hiding the panel. */}
-          {showTemplateRouting && live && templateId ? <div className={panelOpen && panel === "routing" ? "block" : "hidden"}><TemplateRoutingInspector templateId={templateId} snapshot={live.snapshot} selectedTargetIds={targets} onStateChange={setTemplateRoutingState} /></div> : null}
-          {panelOpen ? <>
-            {panel === "activity" ? <OfficeJobActivity jobId={artifact.job?.id} snapshot={live?.snapshot} targetIds={targets} canRequestRevision={canRequestBrianRevision} requestDisabledReason={brianRevisionDisabledReason} onRequestRevision={requestBrianRevision} onRevisionCompleted={refreshArtifact} /> : null}
-            {panel === "comments" ? <div className="p-3"><OfficeComments artifactId={artifactId} workspaceId={workspaceId} version={artifact.version} targetIds={targets} selectionAnchor={artifact.family === "document" ? commentAnchor : null} anchorKind={artifact.family === "document" ? "block" : artifact.family === "spreadsheet" ? "table_cell" : "object"} canComment={artifact.role !== "view"} offline={collab.status === "disconnected" || Boolean(offlineCopyAt)} initialThreads={serverComments} initialQueuedThreads={queuedCommentThreads} onQueuedThreadsChange={receiveQueuedComments} onRevisionCompleted={refreshArtifact} /></div> : null}
-            {panel === "suggestions" ? <div className="p-3"><OfficeSuggestions workspaceId={workspaceId} artifactId={artifactId} canDecide={artifact.role === "edit" && artifact.lifecycleState === "active" && !offlineCopyAt} canSuggest={artifact.family === "document" && artifact.role !== "view" && artifact.lifecycleState === "active" && suggestMode} actorId={currentUser?.id} baseVersion={live?.baseVersion} expectedSeq={live?.seq} proposal={suggestionRange} offline={collab.status === "disconnected" || Boolean(offlineCopyAt)} onApplied={refreshArtifact} /></div> : null}
-            {panel === "history" ? <div className="p-3"><OfficeHistory artifactId={artifactId} artifactTitle={artifact.title} currentVersion={artifact.version} canEdit={artifact.role === "edit" && artifact.lifecycleState === "active" && !offlineCopyAt} onRestored={refreshArtifact} onCopied={(copiedId) => { invalidateOfficeList(workspaceId); router.push(`/w/${workspaceId}/office/${copiedId}`); }} /></div> : null}
-            {panel === "sharing" ? <div className="p-3"><OfficeSharing artifactId={artifactId} /></div> : null}
-            {panel === "review" ? <OfficeReview artifact={artifact} artifactId={artifactId} workspaceId={workspaceId} snapshot={live?.snapshot ?? undefined} selectedObjectIds={targets} onLifecycle={onLifecycle} onPresent={() => setPresentOpen(true)} offlineCopy={Boolean(offlineCopyAt)} /> : null}
-          </> : <div className="flex items-center gap-1 p-1 lg:flex-col">
-            <button type="button" onClick={() => setPanelOpen(true)} aria-label={t.expandAssistantPanel} title={t.expandAssistantPanel} className={officeIconButtonClassName}><PanelRightOpen className="size-4" /></button>
-            {showTemplateRouting ? <CompactPanelButton active={panel === "routing"} label={t.routing} icon={<Route className="size-4" />} onClick={() => { setPanel("routing"); setPanelOpen(true); }} /> : null}
-            <CompactPanelButton active={panel === "activity"} label={t.brian} icon={<Sparkles className="size-4" />} onClick={() => { setPanel("activity"); setPanelOpen(true); }} />
-            {!isPdfSession ? <><CompactPanelButton active={panel === "comments"} label={t.comments} icon={<MessageSquare className="size-4" />} onClick={() => { setPanel("comments"); setPanelOpen(true); }} /><CompactPanelButton active={panel === "suggestions"} label={t.suggestions} icon={<ListChecks className="size-4" />} onClick={() => { setPanel("suggestions"); setPanelOpen(true); }} /><CompactPanelButton active={panel === "history"} label={t.history} icon={<History className="size-4" />} onClick={() => { setPanel("history"); setPanelOpen(true); }} /><CompactPanelButton active={panel === "sharing"} label={t.sharing} icon={<Share2 className="size-4" />} onClick={() => { setPanel("sharing"); setPanelOpen(true); }} /><CompactPanelButton active={panel === "review"} label={t.fileActions} icon={<FileCheck2 className="size-4" />} onClick={() => { setPanel("review"); setPanelOpen(true); }} /></> : null}
-          </div>}
+          </div>
         </aside>
       </div>
       {presentOpen && live?.snapshot.family === "presentation" ? <PresentationPresenter snapshot={live.snapshot} onClose={() => setPresentOpen(false)} /> : null}
@@ -637,5 +654,4 @@ function OfficeEditorSkeleton({ family }: { family?: OfficeFamily }) {
   </div>;
 }
 
-function PanelButton({ active, label, icon, onClick }: { active: boolean; label: string; icon: React.ReactNode; onClick(): void }) { return <button type="button" onClick={onClick} aria-pressed={active} className={cn(officeToolbarButtonClassName, "min-w-0 flex-1 px-1 max-lg:flex-none max-lg:px-3", active && "bg-muted text-foreground")}>{icon}{label}</button>; }
-function CompactPanelButton({ active, label, icon, onClick }: { active: boolean; label: string; icon: React.ReactNode; onClick(): void }) { return <button type="button" onClick={onClick} aria-label={label} title={label} aria-pressed={active} className={cn(officeIconButtonClassName, active && "bg-muted text-foreground")}>{icon}</button>; }
+function RailPanelButton({ active, label, icon, onClick }: { active: boolean; label: string; icon: React.ReactNode; onClick(): void }) { return <button type="button" onClick={onClick} aria-label={label} title={label} aria-pressed={active} className={cn(officeIconButtonClassName, "shrink-0", active && "bg-muted text-foreground")}>{icon}</button>; }

@@ -85,11 +85,11 @@ export function CrmContactCompliance({ workspaceId, contactId }: { workspaceId: 
       {error && <div className="mb-2 text-xs text-destructive">{error}</div>}
       {!compliance ? <div className="text-xs text-muted-foreground">{t.loading}</div> : compliance.purposes.length === 0 ? <div className="text-xs text-muted-foreground">{t.noPurposesForContact}</div> : <>
         <div className="grid gap-2 sm:grid-cols-2">
-          <Select value={purposeKey} onValueChange={(value) => { setPurposeKey(value ?? ""); setWordingLocale("default"); }}>
+          <Select items={compliance.purposes.map((purpose) => ({ value: purpose.purposeKey, label: purpose.label }))} value={purposeKey} onValueChange={(value) => { setPurposeKey(value ?? ""); setWordingLocale("default"); }}>
             <SelectTrigger><SelectValue placeholder={t.pickPurpose} /></SelectTrigger>
             <SelectContent>{compliance.purposes.map((purpose) => <SelectItem key={purpose.id} value={purpose.purposeKey}>{purpose.label}</SelectItem>)}</SelectContent>
           </Select>
-          <Select value={channel} onValueChange={(value) => setChannel((value ?? "email") as CrmDeliveryChannel)}>
+          <Select items={(["email", "sms", "phone", "whatsapp", "telegram", "slack"] as const).map((item) => ({ value: item, label: t.channelLabels[item] }))} value={channel} onValueChange={(value) => setChannel((value ?? "email") as CrmDeliveryChannel)}>
             <SelectTrigger><SelectValue /></SelectTrigger>
             <SelectContent>{(["email", "sms", "phone", "whatsapp", "telegram", "slack"] as const).map((item) => <SelectItem key={item} value={item}>{t.channelLabels[item]}</SelectItem>)}</SelectContent>
           </Select>
@@ -99,7 +99,7 @@ export function CrmContactCompliance({ workspaceId, contactId }: { workspaceId: 
           {verdict?.reasons.length ? <div className="mt-1">{verdict.reasons.map((reason) => t.reasonLabels[reason]).join(", ")}</div> : null}
         </div>
         <div className="mt-2">
-          <Select value={wordingLocale} onValueChange={(value) => setWordingLocale((value ?? "default") as typeof wordingLocale)}>
+          <Select items={[{ value: "default", label: t.wordingStoredDefault }, ...LOCALES.map((locale) => ({ value: locale, label: LOCALE_LABELS[locale] }))]} value={wordingLocale} onValueChange={(value) => setWordingLocale((value ?? "default") as typeof wordingLocale)}>
             <SelectTrigger aria-label={t.wordingLocale}><SelectValue /></SelectTrigger><SelectContent>
               <SelectItem value="default">{t.wordingStoredDefault}</SelectItem>
               {LOCALES.filter((locale) => compliance.purposes.find((purpose) => purpose.purposeKey === purposeKey)?.localeWordings?.[locale]).map((locale) => <SelectItem key={locale} value={locale}>{LOCALE_LABELS[locale]}</SelectItem>)}

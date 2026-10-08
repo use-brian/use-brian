@@ -229,7 +229,7 @@ export function CrmConfigDialog({
                       <div className="mt-3 grid gap-2 rounded-lg border border-border bg-muted/20 p-3 sm:grid-cols-[minmax(0,1fr)_140px_100px_auto]">
                         <ConfigInput label={t.stageName} value={stageName} onChange={setStageName} />
                         <label className="text-xs"><span className="mb-1 block text-muted-foreground">{t.stageCategory}</span>
-                          <Select value={stageCategory} onValueChange={(value) => {
+                          <Select items={(["open", "won", "lost"] as const).map((category) => ({ value: category, label: t.stageCategories[category] }))} value={stageCategory} onValueChange={(value) => {
                             const category = value as CrmStageCategory;
                             setStageCategory(category);
                             setStageProbability(category === "won" ? "100" : category === "lost" ? "0" : "50");
@@ -266,7 +266,7 @@ export function CrmConfigDialog({
               </div>
               <div className="mb-3"><h3 className="text-sm font-semibold">{t.customFields}</h3><p className="text-xs text-muted-foreground">{t.fieldsHelp}</p></div>
               <div className="mb-3 grid gap-2 rounded-xl border border-border bg-muted/20 p-3 sm:grid-cols-2 lg:grid-cols-[150px_150px_minmax(0,1fr)_auto]">
-                <Select value={fieldKind} onValueChange={(value) => setFieldKind(value as typeof fieldKind)}>
+                <Select items={[{ value: "person", label: t.kindContact }, { value: "company", label: t.kindCompany }, { value: "deal", label: t.kindDeal }]} value={fieldKind} onValueChange={(value) => setFieldKind(value as typeof fieldKind)}>
                   <SelectTrigger><SelectValue /></SelectTrigger>
                   <SelectContent>
                     <SelectItem value="person">{t.kindContact}</SelectItem>
@@ -274,7 +274,7 @@ export function CrmConfigDialog({
                     <SelectItem value="deal">{t.kindDeal}</SelectItem>
                   </SelectContent>
                 </Select>
-                <Select value={fieldType} onValueChange={(value) => setFieldType(value as CrmFieldType)}>
+                <Select items={(["text", "number", "date", "boolean", "single_select", "multi_select", "entity_reference"] as CrmFieldType[]).map((type) => ({ value: type, label: t.fieldTypes[type] }))} value={fieldType} onValueChange={(value) => setFieldType(value as CrmFieldType)}>
                   <SelectTrigger><SelectValue /></SelectTrigger>
                   <SelectContent>
                     {(["text", "number", "date", "boolean", "single_select", "multi_select", "entity_reference"] as CrmFieldType[]).map((type) => (
@@ -425,7 +425,7 @@ function StageConfigRow({ workspaceId, pipelineId, stage, liveStages, busy, onMu
   return (
     <div className={stage.archivedAt ? "grid gap-2 py-2 opacity-75 sm:grid-cols-[minmax(0,1fr)_120px_80px_minmax(0,1fr)_auto]" : "grid gap-2 py-2 sm:grid-cols-[minmax(0,1fr)_120px_80px_minmax(0,1fr)_auto]"}>
       <input value={name} disabled={busy || Boolean(stage.archivedAt)} aria-label={t.stageName} onChange={(event) => setName(event.target.value)} className="h-9 rounded-md border border-border bg-background px-2 text-[16px] md:h-8 md:text-xs" />
-      <Select value={category} disabled={busy || Boolean(stage.archivedAt)} onValueChange={(value) => setCategory(value as CrmStageCategory)}><SelectTrigger className="h-8"><SelectValue /></SelectTrigger><SelectContent>{(["open", "won", "lost"] as const).map((value) => <SelectItem key={value} value={value}>{t.stageCategories[value]}</SelectItem>)}</SelectContent></Select>
+      <Select items={(["open", "won", "lost"] as const).map((value) => ({ value, label: t.stageCategories[value] }))} value={category} disabled={busy || Boolean(stage.archivedAt)} onValueChange={(value) => setCategory(value as CrmStageCategory)}><SelectTrigger className="h-8"><SelectValue /></SelectTrigger><SelectContent>{(["open", "won", "lost"] as const).map((value) => <SelectItem key={value} value={value}>{t.stageCategories[value]}</SelectItem>)}</SelectContent></Select>
       <input type="number" min={0} max={100} value={probability} disabled={busy || Boolean(stage.archivedAt)} aria-label={t.stageProbability} onChange={(event) => setProbability(event.target.value)} className="h-9 rounded-md border border-border bg-background px-2 text-[16px] md:h-8 md:text-xs" />
       <input value={requiredFields} disabled={busy || Boolean(stage.archivedAt)} aria-label={t.requiredFields} placeholder={t.requiredFieldsPlaceholder} onChange={(event) => setRequiredFields(event.target.value)} className="h-9 rounded-md border border-border bg-background px-2 text-[16px] md:h-8 md:text-xs" />
       <div className="flex items-center justify-end gap-1">

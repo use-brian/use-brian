@@ -114,7 +114,11 @@ export function GeneralSection() {
 
       <Section title={t.settings.general.regional}>
         <Row label={t.settings.general.timezone}>
-          <Select value={timezone} onValueChange={handleTimezoneChange}>
+          <Select
+            items={timezones.map((tz) => ({ value: tz, label: tz }))}
+            value={timezone}
+            onValueChange={handleTimezoneChange}
+          >
             <SelectTrigger className="min-w-0 w-full md:min-w-56 md:max-w-xs">
               <SelectValue />
             </SelectTrigger>

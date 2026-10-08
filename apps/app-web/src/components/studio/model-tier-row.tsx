@@ -68,6 +68,11 @@ export function ModelTierRow({
           </span>
         )}
         <Select
+          items={[
+            { value: "standard", label: t.assistant.modelSelector.standard },
+            { value: "pro", label: t.assistant.modelSelector.pro },
+            { value: "max", label: t.assistant.modelSelector.max },
+          ]}
           value={value}
           onValueChange={(v) => {
             if (isModelAlias(v) && v !== value) onChange(v);

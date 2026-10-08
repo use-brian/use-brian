@@ -937,6 +937,7 @@ function VoiceForm({
         <div className="space-y-1">
           <label className="text-xs text-muted-foreground">{t.typeLabel}</label>
           <Select
+            items={MEMORY_TYPES.map((ty) => ({ value: ty, label: typeLabel(t, ty) }))}
             value={form.type}
             onValueChange={(v) => { if (v) onChange({ ...form, type: v }); }}
           >
@@ -954,6 +955,7 @@ function VoiceForm({
         <div className="space-y-1">
           <label className="text-xs text-muted-foreground">{t.sensitivityLabel}</label>
           <Select
+            items={SENSITIVITIES.map((s) => ({ value: s, label: sensitivityLabel(t, s) }))}
             value={form.sensitivity}
             onValueChange={(v) => { if (v) onChange({ ...form, sensitivity: v as Sensitivity }); }}
           >

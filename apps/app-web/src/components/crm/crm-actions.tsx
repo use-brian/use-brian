@@ -462,7 +462,7 @@ function ImportDialog({ workspaceId, config, canCreateField, open, initialKind, 
   return (
     <Shell open={open} onOpenChange={onOpenChange} title={t.importCsv} description={t.importDescription}>
       <div className="space-y-4">
-        <Select value={kind} onValueChange={(value) => { const nextKind = value as CrmImportKind; setKind(nextKind); setCreateColumn(null); if (preview) setMapping(suggestedCrmCsvMapping(preview.headers, nextKind, fields)); }}>
+        <Select items={[{ value: "contact", label: t.kindContact }, { value: "company", label: t.kindCompany }, { value: "deal", label: t.kindDeal }]} value={kind} onValueChange={(value) => { const nextKind = value as CrmImportKind; setKind(nextKind); setCreateColumn(null); if (preview) setMapping(suggestedCrmCsvMapping(preview.headers, nextKind, fields)); }}>
           <SelectTrigger className="max-sm:min-h-11"><SelectValue /></SelectTrigger>
           <SelectContent><SelectItem value="contact">{t.kindContact}</SelectItem><SelectItem value="company">{t.kindCompany}</SelectItem><SelectItem value="deal">{t.kindDeal}</SelectItem></SelectContent>
         </Select>
@@ -491,7 +491,7 @@ function ImportDialog({ workspaceId, config, canCreateField, open, initialKind, 
                 {preview.headers.map((header, index) => (
                   <div key={`${header}-${index}`} className="grid grid-cols-2 items-center gap-2 text-xs">
                     <span className="truncate text-muted-foreground">{header}</span>
-                    <Select value={mapping[index] ?? "__skip__"} onValueChange={(value) => {
+                    <Select items={[{ value: "__skip__", label: t.skipColumn }, ...CRM_IMPORT_FIELDS[kind].map((field) => ({ value: field, label: importLabels[field] ?? field })), ...availableFields.map((field) => ({ value: `custom:${field.fieldKey}`, label: field.label })), ...(canCreateField ? [{ value: "__create__", label: t.createFieldFromColumn }] : [])]} value={mapping[index] ?? "__skip__"} onValueChange={(value) => {
                       if (value === "__create__") {
                         setCreateColumn(index);
                         setNewFieldLabel(header);
@@ -517,7 +517,7 @@ function ImportDialog({ workspaceId, config, canCreateField, open, initialKind, 
                   <div className="grid gap-2 sm:grid-cols-2">
                     <Input label={t.fieldLabel} value={newFieldLabel} onChange={setNewFieldLabel} />
                     <label className="text-xs"><span className="mb-1 block text-muted-foreground">{t.fieldType}</span>
-                      <Select value={newFieldType} onValueChange={(value) => setNewFieldType(value as CrmFieldType)}>
+                      <Select items={(["text", "number", "date", "boolean", "single_select", "multi_select", "entity_reference"] as CrmFieldType[]).map((type) => ({ value: type, label: t.fieldTypes[type] }))} value={newFieldType} onValueChange={(value) => setNewFieldType(value as CrmFieldType)}>
                         <SelectTrigger className="w-full max-sm:min-h-11"><SelectValue /></SelectTrigger>
                         <SelectContent>{(["text", "number", "date", "boolean", "single_select", "multi_select", "entity_reference"] as CrmFieldType[]).map((type) => <SelectItem key={type} value={type}>{t.fieldTypes[type]}</SelectItem>)}</SelectContent>
                       </Select>
