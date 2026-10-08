@@ -56,7 +56,7 @@ const KEY_PREFIX = "surface-content";
 export const OFFLINE_AUTHORITY_MS = 60 * 60_000;
 /** A network value expires this long after its request started. */
 export const SURFACE_CONTENT_LEASE_MS = 30_000;
-const SURFACE_CONTENT_RENEW_MS = 15_000;
+export const SURFACE_CONTENT_RENEW_MS = 15_000;
 const leaseDeadlines = new WeakMap<object, number>();
 
 function lease<T>(value: T, deadline: number): T {

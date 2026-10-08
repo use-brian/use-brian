@@ -116,6 +116,24 @@ export type BrainInboxRowDetail = BrainInboxRow & {
 /** Fetch a single brain row for the per-primitive detail page. Returns
  *  null on 404 (row missing, soft-deleted, or wrong workspace) so the
  *  caller can render a graceful "already actioned" empty state. */
+/**
+ * Re-confirm the viewer may still read one open row. Only 401, 403 and 404 are
+ * a denial; a network failure or 5xx rejects and leaves the caller's deadline
+ * where it was. Never reads or writes the disk tier.
+ */
+export async function confirmBrainRowAccess(
+  workspaceId: string,
+  primitive: BrainPrimitive,
+  rowId: string,
+): Promise<boolean> {
+  const res = await authFetch(
+    `${API_URL}/api/brain-inbox/${encodeURIComponent(workspaceId)}/${primitive}/${encodeURIComponent(rowId)}`,
+  );
+  if ([401, 403, 404].includes(res.status)) return false;
+  if (!res.ok) throw new Error(`HTTP ${res.status}`);
+  return true;
+}
+
 export async function fetchBrainRow(
   workspaceId: string,
   primitive: BrainPrimitive,

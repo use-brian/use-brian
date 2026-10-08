@@ -281,3 +281,65 @@ describe("[COMP:app-web/brain-entries] Chunked Brain entries", () => {
     );
   });
 });
+
+describe("[COMP:app-web/brain-entries] Content lease for the open list", () => {
+  const flush = async () => { for (let i = 0; i < 6; i += 1) await Promise.resolve(); };
+  async function mount() {
+    await act(async () => { root.render(<Probe search="" />); await flush(); });
+  }
+  async function advance(ms: number) {
+    await act(async () => { vi.advanceTimersByTime(ms); await flush(); });
+  }
+
+  beforeEach(() => {
+    vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout", "setInterval", "clearInterval", "Date", "performance"] });
+    api.listBrain.mockReset();
+    offlineCache.read.mockReset().mockResolvedValue(null);
+    offlineCache.write.mockReset().mockResolvedValue(undefined);
+    offlineCache.remove.mockReset().mockResolvedValue(undefined);
+    container = document.createElement("div");
+    document.body.appendChild(container);
+    root = createRoot(container);
+  });
+
+  afterEach(() => {
+    act(() => root.unmount());
+    container.remove();
+    vi.useRealTimers();
+  });
+
+  it("re-reads every loaded page and drops a row the viewer can no longer read, keeping depth", async () => {
+    api.listBrain
+      .mockResolvedValueOnce(page(["a", "b"], "C2"))
+      .mockResolvedValueOnce(page(["c", "d"], null));
+    await mount();
+    await act(async () => { latest.loadMore(); await flush(); });
+    expect(container.textContent).toBe("a,b,c,d");
+
+    api.listBrain
+      .mockResolvedValueOnce(page(["a"], "C2"))
+      .mockResolvedValueOnce(page(["c", "d"], null));
+    await advance(15_000);
+    expect(container.textContent).toBe("a,c,d");
+    expect(api.listBrain.mock.calls.at(-1)?.[0]).toMatchObject({ cursor: "C2" });
+  });
+
+  it("empties the list on an authoritative denial", async () => {
+    api.listBrain.mockResolvedValueOnce(page(["a"], null));
+    await mount();
+    api.listBrain.mockRejectedValueOnce(new BrainContentHttpError(403, "brain list"));
+    await advance(15_000);
+    expect(container.textContent).toBe("");
+    expect(offlineCache.remove).toHaveBeenCalled();
+  });
+
+  it("drops rows whose authority lapsed after renewals kept failing", async () => {
+    api.listBrain.mockResolvedValueOnce(page(["a"], null));
+    await mount();
+    api.listBrain.mockRejectedValue(new TypeError("network down"));
+    await advance(29_000);
+    expect(container.textContent).toBe("a");
+    await advance(2_000);
+    expect(container.textContent).toBe("");
+  });
+});

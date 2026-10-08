@@ -93,6 +93,7 @@ import { ChunkSentinel } from "@/components/chrome/chunk-sentinel";
 import { useCachedResource } from "@/lib/surface-cache";
 import { brainGraphCacheKey } from "@/lib/surface-prefetch";
 import { useBrainRowDeepLink } from "@/lib/use-brain-row-deep-link";
+import { useBrainSelectionLease } from "@/lib/use-brain-selection-lease";
 import { parseAuditDeepLink, type AuditTurn } from "@/lib/turn-audit";
 import {
   listWorkspaceSkills,
@@ -284,6 +285,8 @@ function BrainPageInner() {
   // digest pointing at a shipped task) hits most. A miss (deleted row, wrong
   // workspace, revoked clearance) leaves the plain list standing.
   useBrainRowDeepLink(searchParams.toString(), cacheScope, setSelected);
+  // The open drawer row expires with the viewer's authority (content lease).
+  useBrainSelectionLease(activeId ?? null, selected, setSelected);
   // Completed (done / archived) tasks — fetched separately from the main list
   // (which hides them) so the grouped view can tuck them behind a "Show
   // completed" disclosure that leads with live work. Only fetched when tasks
