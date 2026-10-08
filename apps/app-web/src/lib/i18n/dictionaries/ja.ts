@@ -12239,6 +12239,7 @@ export const ja: Dictionary = {
       connectAction: "ブラウザプロフィールでペアリング",
       statusRunning: "実行中",
       statusPaused: "一時停止",
+      statusUnavailable: "利用不可 - 開いて破棄",
       unnamed: "ブラウザセッション",
     },
     connectBrowser: {

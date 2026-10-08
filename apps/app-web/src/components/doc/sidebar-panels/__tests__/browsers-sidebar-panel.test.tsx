@@ -91,6 +91,16 @@ describe("[COMP:app-web/browsers-surface] Live-session sidebar panel", () => {
     expect(html).toContain(en.computer.sessions.railEmpty);
   });
 
+  it("lists an unavailable task with a discard hint that opens its live view", () => {
+    const html = wrap(
+      <BrowsersSessionList workspaceId="ws-1" activeSessionId={null}
+        tasks={[task({ taskId: "t9", sessionId: "s9", injectedSite: null, unavailable: true })]} />,
+    );
+    expect(html).toContain("/w/ws-1/computer/s9");
+    expect(html).toContain(en.computer.sessions.statusUnavailable);
+    expect(html).not.toContain(en.computer.sessions.statusRunning);
+  });
+
   it("lists each live session, labelled by site with a status line", () => {
     const tasks = [
       task({ taskId: "t1", sessionId: "s1", injectedSite: "github.com" }),

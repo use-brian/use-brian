@@ -12497,6 +12497,7 @@ export const en = {
       connectAction: "Pair in Browser profiles",
       statusRunning: "Running",
       statusPaused: "Paused",
+      statusUnavailable: "Unavailable - open to discard",
       unnamed: "Browser session",
     },
     connectBrowser: {

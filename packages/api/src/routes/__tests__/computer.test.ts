@@ -24,6 +24,18 @@ import type {
 
 const MEMBER_ROLE = async (_userId: string, _workspaceId: string) => 'member'
 
+/**
+ * The owner's task whose authority no longer holds is listed only as a
+ * discard stub: lifecycle metadata, no profile, no site, nothing live.
+ */
+function expectOnlyDiscardStubs(tasks: Record<string, unknown>[], sessionIds: string[]) {
+  expect(tasks.map((task) => task.sessionId).sort()).toEqual([...sessionIds].sort())
+  for (const task of tasks) {
+    expect(Object.keys(task).sort()).toEqual(['backend', 'createdAt', 'injectedSite', 'lastActivityAt', 'profileId', 'sessionId', 'status', 'taskId', 'unavailable'])
+    expect(task).toMatchObject({ unavailable: true, profileId: null, injectedSite: null })
+  }
+}
+
 describe('[COMP:routes/computer] Take-Over live view + backend toggle + Profile-Management routes', () => {
   it('requires current membership for the browser destination directory and denies lookup failures', async () => {
     const preview = vi.fn(async () => ({ departments: [{ id: 'dept', name: 'Visible', clearance: 'internal' as const }] }))
@@ -234,7 +246,7 @@ describe('[COMP:routes/computer] Take-Over live view + backend toggle + Profile-
     expect((await request(app).get('/api/computer/tasks/sess-1')).status).toBe(200)
     allowed = false
     const providerCalls = localOps.length
-    expect((await request(app).get('/api/computer/tasks?workspaceId=ws-1')).body.tasks).toEqual([])
+    expectOnlyDiscardStubs((await request(app).get('/api/computer/tasks?workspaceId=ws-1')).body.tasks, ['sess-1'])
     for (const suffix of ['', '/frame']) {
       expect((await request(app).get(`/api/computer/tasks/sess-1${suffix}`)).status).toBe(404)
     }
@@ -261,7 +273,7 @@ describe('[COMP:routes/computer] Take-Over live view + backend toggle + Profile-
     // The current profile is readable, but it cannot relabel an old task's source.
     expect((await request(app).get('/api/computer/profiles?workspaceId=ws-1')).body.profiles.map((p:{id:string})=>p.id)).toContain(profileId)
     const providerAccess = vi.spyOn(provider,'browser')
-    expect((await request(app).get('/api/computer/tasks?workspaceId=ws-1')).body.tasks).toEqual([])
+    expectOnlyDiscardStubs((await request(app).get('/api/computer/tasks?workspaceId=ws-1')).body.tasks, ['sess-1'])
     for (const suffix of ['', '/frame']) expect((await request(app).get(`/api/computer/tasks/sess-1${suffix}`)).status).toBe(404)
     for (const suffix of ['/resume','/input','/stream-session','/captured','/complete']) {
       expect((await request(app).post(`/api/computer/tasks/sess-1${suffix}`).send({site:'portal.example',kind:'key',text:'fictional'})).status).toBe(404)
@@ -299,7 +311,7 @@ describe('[COMP:routes/computer] Take-Over live view + backend toggle + Profile-
     vi.spyOn(orchestrator,'getActiveTask').mockResolvedValue(unavailable)
     vi.spyOn(orchestrator,'listActiveTasks').mockResolvedValue([unavailable])
     const providerAccess = vi.spyOn(provider,'browser')
-    expect((await request(app).get('/api/computer/tasks?workspaceId=ws-1')).body.tasks).toEqual([])
+    expectOnlyDiscardStubs((await request(app).get('/api/computer/tasks?workspaceId=ws-1')).body.tasks, ['sess-1'])
     expect((await request(app).get('/api/computer/tasks/sess-1/frame')).status).toBe(404)
     expect(providerAccess).not.toHaveBeenCalled()
   })
@@ -348,6 +360,15 @@ describe('[COMP:routes/computer] Take-Over live view + backend toggle + Profile-
     expect((await request(app).post('/api/computer/tasks/sess-1/captured')
       .send({ site: 'example.com', profileId: ownOther.id })).status).toBe(404)
     expect(vault.bundles.size).toBe(0)
+  })
+
+  it('lists the owner\'s unavailable task as a discard stub, never a teammate\'s', async () => {
+    const task = (await orchestrator.getActiveTask('sess-1'))!
+    const unavailable = { ...task, profileAuthority: null }
+    vi.spyOn(orchestrator, 'getActiveTask').mockResolvedValue(unavailable)
+    vi.spyOn(orchestrator, 'listActiveTasks').mockResolvedValue([unavailable])
+    expectOnlyDiscardStubs((await request(app).get('/api/computer/tasks?workspaceId=ws-1')).body.tasks, ['sess-1'])
+    expect((await request(makeApp('user-2')).get('/api/computer/tasks?workspaceId=ws-1')).body.tasks).toEqual([])
   })
 
   it('lists the CALLER\'s live tasks for the workspace pill; teammates see an empty list', async () => {
@@ -454,7 +475,7 @@ describe('[COMP:routes/computer] Take-Over live view + backend toggle + Profile-
     for (const suffix of ['/input', '/resume', '/complete']) {
       expect((await request(app).post(`/api/computer/tasks/sess-local${suffix}`).send({ kind: 'click', x: 1, y: 1 })).status).toBe(404)
     }
-    expect((await request(app).get('/api/computer/tasks?workspaceId=ws-1')).body.tasks.some((task: { sessionId: string }) => task.sessionId === 'sess-local')).toBe(false)
+    expectOnlyDiscardStubs((await request(app).get('/api/computer/tasks?workspaceId=ws-1')).body.tasks.filter((task: { sessionId: string }) => task.sessionId === 'sess-local'), ['sess-local'])
     expect(localOps).toEqual([])
     expect(localTasks.getActiveBySession('sess-local')?.profileAuthority?.departmentId).toBe('department-1')
   })
@@ -476,7 +497,7 @@ describe('[COMP:routes/computer] Take-Over live view + backend toggle + Profile-
     for (const suffix of ['/input', '/resume', '/complete']) {
       expect((await request(app).post(`/api/computer/tasks/sess-local${suffix}`).send({ kind: 'click', x: 1, y: 1 })).status).toBe(404)
     }
-    expect((await request(app).get('/api/computer/tasks?workspaceId=ws-1')).body.tasks).not.toEqual(expect.arrayContaining([expect.objectContaining({ sessionId: 'sess-local' })]))
+    expectOnlyDiscardStubs((await request(app).get('/api/computer/tasks?workspaceId=ws-1')).body.tasks.filter((task: { sessionId: string }) => task.sessionId === 'sess-local'), ['sess-local'])
     expect(localOps).toEqual([])
   })
 

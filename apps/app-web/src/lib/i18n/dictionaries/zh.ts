@@ -12164,6 +12164,7 @@ export const zh: Dictionary = {
       connectAction: "在瀏覽器身分中配對",
       statusRunning: "執行中",
       statusPaused: "已暫停",
+      statusUnavailable: "無法使用 - 開啟以捨棄",
       unnamed: "瀏覽器工作階段",
     },
     connectBrowser: {

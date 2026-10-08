@@ -26,6 +26,7 @@ import {
   getBrowserExtensionStatus,
   listBrowserProfiles,
   mostRecentComputerTask,
+  liveComputerTasks,
   pairBrowserExtension,
   markComputerSessionCaptured,
   resumeComputerTask,
@@ -68,6 +69,18 @@ describe('[COMP:app-web/browsers-surface] Browsers index task selection', () => 
       ])?.sessionId,
     ).toBe('s2')
     expect(mostRecentComputerTask([])).toBeNull()
+    // An unavailable task is never auto-opened, however recent.
+    expect(
+      mostRecentComputerTask([
+        { ...base, taskId: 't1', sessionId: 's1', status: 'running', lastActivityAt: 10 },
+        { ...base, taskId: 't3', sessionId: 's3', status: 'running', lastActivityAt: 30, unavailable: true },
+      ])?.sessionId,
+    ).toBe('s1')
+    // The live pill never counts an unavailable task.
+    expect(liveComputerTasks([
+      { ...base, taskId: 't1', sessionId: 's1', status: 'running', lastActivityAt: 10 },
+      { ...base, taskId: 't3', sessionId: 's3', status: 'running', lastActivityAt: 30, unavailable: true },
+    ]).map((task) => task.sessionId)).toEqual(['s1'])
   })
 })
 

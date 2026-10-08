@@ -12272,6 +12272,7 @@ export const zhCN: Dictionary = {
       connectAction: "在浏览器身分中配对",
       statusRunning: "运行中",
       statusPaused: "已暂停",
+      statusUnavailable: "不可用 - 打开以丢弃",
       unnamed: "浏览器会话",
     },
     connectBrowser: {

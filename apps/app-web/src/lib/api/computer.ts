@@ -7,7 +7,7 @@ import { browserProfilesCacheKey, browserProfileDestinationsCacheKey } from "@/l
  * Wraps `authFetch` over the routes mounted at `/api/computer` in
  * `packages/api/src/boot.ts`:
  *
- *   GET    /api/computer/tasks?workspaceId=            caller's live tasks (shell pill)
+ *   GET    /api/computer/tasks?workspaceId=            caller's live tasks (shell pill) + own unavailable stubs
  *   GET    /api/computer/tasks/:sessionId              active task summary
  *   POST   /api/computer/tasks/:sessionId/resume       resume for Take-Over
  *   GET    /api/computer/tasks/:sessionId/frame        one screencast frame
@@ -143,7 +143,17 @@ export type ComputerTaskSummary = {
   createdAt: number;
   lastActivityAt: number;
   backend: "local" | "cloud";
+  /**
+   * The caller's own task whose source or profile authority no longer holds.
+   * Listed (without profile or site) only so its Discard is reachable.
+   */
+  unavailable?: true;
 };
+
+/** Tasks that are actually live; an unavailable task is reached from the Browsers rail. */
+export function liveComputerTasks(tasks: ComputerTaskSummary[]): ComputerTaskSummary[] {
+  return tasks.filter((task) => !task.unavailable);
+}
 
 /** Task the Browsers index should open when no session was selected explicitly. */
 export function mostRecentComputerTask(
@@ -151,7 +161,9 @@ export function mostRecentComputerTask(
 ): ComputerTaskSummary | null {
   return tasks.reduce<ComputerTaskSummary | null>(
     (latest, task) =>
-      !latest || task.lastActivityAt > latest.lastActivityAt ? task : latest,
+      task.unavailable
+        ? latest
+        : !latest || task.lastActivityAt > latest.lastActivityAt ? task : latest,
     null,
   );
 }

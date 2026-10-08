@@ -150,9 +150,11 @@ export function BrowsersSessionList({
                     aria-hidden
                     className={cn(
                       "size-1.5 shrink-0 rounded-full",
-                      task.status === "running"
-                        ? "claw-blink bg-emerald-500"
-                        : "bg-amber-500",
+                      task.unavailable
+                        ? "bg-sidebar-foreground/30"
+                        : task.status === "running"
+                          ? "claw-blink bg-emerald-500"
+                          : "bg-amber-500",
                     )}
                   />
                   <span className="flex min-w-0 flex-1 flex-col">
@@ -160,9 +162,11 @@ export function BrowsersSessionList({
                       {task.injectedSite ?? t.unnamed}
                     </span>
                     <span className="truncate text-[11px] text-sidebar-foreground/50">
-                      {task.status === "running"
-                        ? t.statusRunning
-                        : t.statusPaused}
+                      {task.unavailable
+                        ? t.statusUnavailable
+                        : task.status === "running"
+                          ? t.statusRunning
+                          : t.statusPaused}
                     </span>
                   </span>
                   {isActive ? (

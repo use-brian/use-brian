@@ -410,9 +410,19 @@ export function computerRoutes(deps: {
       return
     }
     const cloudCandidates = deps.orchestrator ? await deps.orchestrator.listActiveTasks(workspaceId) : []
-    const cloudTasks = (await Promise.all(cloudCandidates.map(async task => await readableTask(task, req.userId as string) ? task : null))).filter((task): task is SandboxTaskRecord => task !== null)
+    const cloudReadable = await Promise.all(cloudCandidates.map(task => readableTask(task, req.userId as string)))
+    const cloudTasks = cloudCandidates.filter((_, index) => cloudReadable[index])
     const localCandidates = deps.localTasks?.listActiveByWorkspace(workspaceId) ?? []
-    let localTasks = (await Promise.all(localCandidates.map(async task => await readableTask(task, req.userId as string) ? task : null))).filter((task): task is LocalComputerTaskRecord => task !== null)
+    const localReadable = await Promise.all(localCandidates.map(task => readableTask(task, req.userId as string)))
+    let localTasks = localCandidates.filter((_, index) => localReadable[index])
+    // The caller's OWN tasks whose source or profile authority no longer holds
+    // stay listed, stripped to lifecycle metadata, so the task-bound Discard
+    // on the live-view page is reachable. Nothing about the profile or site
+    // is returned, and a teammate's task is never listed.
+    const unavailable = [
+      ...localCandidates.filter((task, index) => !localReadable[index]).map(task => ({ task, backend: 'local' as const })),
+      ...cloudCandidates.filter((task, index) => !cloudReadable[index]).map(task => ({ task, backend: 'cloud' as const })),
+    ].filter(({ task }) => task.userId === (req.userId as string))
     const callerLocalTasks = localTasks.filter((task) => task.userId === (req.userId as string))
     if (callerLocalTasks.length > 0 && deps.localStatus) {
       for (const task of callerLocalTasks) {
@@ -428,24 +438,45 @@ export function computerRoutes(deps: {
       }
     }
     const localSessions = new Set(localTasks.map((task) => task.sessionId))
+    // One stub per session, and never one for a session that is still live
+    // on the other backend.
+    const listedSessions = new Set([...localSessions, ...cloudTasks.map((task) => task.sessionId)])
+    const discardStubs = unavailable.filter(({ task }) => {
+      if (listedSessions.has(task.sessionId)) return false
+      listedSessions.add(task.sessionId)
+      return true
+    })
     res.json({
       tasks: [
-        ...localTasks.map((task) => ({ ...task, backend: 'local' as const })),
-        ...cloudTasks
-          .filter((task) => !localSessions.has(task.sessionId))
-          .map((task) => ({ ...task, backend: 'cloud' as const })),
-      ]
-        .filter((task) => task.userId === (req.userId as string))
-        .map((task) => ({
+        ...[
+          ...localTasks.map((task) => ({ ...task, backend: 'local' as const })),
+          ...cloudTasks
+            .filter((task) => !localSessions.has(task.sessionId))
+            .map((task) => ({ ...task, backend: 'cloud' as const })),
+        ]
+          .filter((task) => task.userId === (req.userId as string))
+          .map((task) => ({
+            taskId: task.taskId,
+            sessionId: task.sessionId,
+            status: task.status,
+            profileId: task.profileId,
+            injectedSite: task.injectedSite,
+            createdAt: task.createdAt,
+            lastActivityAt: task.lastActivityAt,
+            backend: task.backend,
+          })),
+        ...discardStubs.map(({ task, backend }) => ({
           taskId: task.taskId,
           sessionId: task.sessionId,
           status: task.status,
-          profileId: task.profileId,
-          injectedSite: task.injectedSite,
+          profileId: null,
+          injectedSite: null,
           createdAt: task.createdAt,
           lastActivityAt: task.lastActivityAt,
-          backend: task.backend,
+          backend,
+          unavailable: true as const,
         })),
+      ],
     })
   })
 
