@@ -36,3 +36,10 @@ home-apps/*.zip
 .gstack/
 apps/app-web/public/excalidraw/
 apps/app-web/desktop/public/excalidraw/
+
+# Local agent scratch at the repo root.
+/.tmp/
+/oss.png
+/oss-m.png
+/touched.txt
+/ungated.json
