@@ -176,6 +176,8 @@ function mergeErrorMessage(err: EntityMergeError, survivorId: string, mergedId: 
       return `mergeEntities did not run: survivor_id ${survivorId} and merged_id ${mergedId} belong to different workspaces, and identity is never merged across that boundary. Nothing was changed. Re-resolve both ids inside this workspace with searchBrain / getEntity. Retrying this pair will keep failing.`
     case 'conflict_requires_resolution':
       return `mergeEntities did not merge ${mergedId} into ${survivorId}: some fields hold different values on the two records, and the default mode refuses to silently drop one. Nothing was changed. Re-run the SAME two ids with on_conflict="keep_survivor" or on_conflict="keep_merged" (ask the user which if it matters). Retrying unchanged will keep failing.`
+    case 'scope_conflict':
+      return `mergeEntities did not merge ${mergedId} into ${survivorId}: the records have different private owners, or one is under protection review, so merging would move data across that boundary. Nothing was changed. Tell the user; one record must be reclassified by someone with access before they can be merged. Retrying this pair will keep failing.`
   }
 }
 

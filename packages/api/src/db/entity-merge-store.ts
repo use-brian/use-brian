@@ -42,8 +42,8 @@ import type {
   SpecializationCascadeRepository,
   SpecializationPointer,
 } from '@use-brian/core'
-import { EntityMergeError, UndoMergeError } from '@use-brian/core'
-import { getPool, query } from './client.js'
+import { EntityMergeError, UndoMergeError, maxSensitivity, type Sensitivity } from '@use-brian/core'
+import { getPool, query, queryWithRLS } from './client.js'
 import {
   appendDecisionEvent,
   findDecisionEventByIdempotencyKey,
@@ -140,6 +140,17 @@ function rowToMergeRecord(row: Record<string, unknown>): EntityMergeRecord {
 
 // ── EntityMergeRepository ────────────────────────────────────────────
 
+/**
+ * Merge and undo edit both records, so the actor's RLS UPDATE policies (department member
+ * operation floor, plus any ambient assistant ceiling) must admit each row. `FOR UPDATE`
+ * applies those policies. Runs before the owner transaction locks the rows.
+ */
+async function actorMayEdit(userId: string, workspaceId: string, ids: string[]): Promise<boolean> {
+  const rows = await queryWithRLS<{ id: string }>(userId,
+    'SELECT id FROM entities WHERE workspace_id=$1 AND id=ANY($2::uuid[]) FOR UPDATE', [workspaceId, ids])
+  return new Set(rows.rows.map(row => row.id)).size === new Set(ids).size
+}
+
 export function createEntityMergeStore(): EntityMergeRepository {
   return {
     async readEntityForMerge(workspaceId, entityId) {
@@ -159,6 +170,10 @@ export function createEntityMergeStore(): EntityMergeRepository {
     },
 
     async applyMerge(input: ApplyMergeInput): Promise<EntityMergeRecord> {
+      if (!await actorMayEdit(input.mergedBy, input.workspaceId, [input.survivingId, input.mergedId])) {
+        // Non-disclosing: indistinguishable from a record that is not available.
+        throw new EntityMergeError('entity_not_found', 'One of the records is not available to edit.')
+      }
       const client = await getPool().connect()
       try {
         await client.query('BEGIN')
@@ -177,6 +192,30 @@ export function createEntityMergeStore(): EntityMergeRepository {
             'entity_inactive',
             'The records changed while the merge was being reviewed. Refresh and try again.',
           )
+        }
+
+        // 0. The survivor absorbs the merged record's fields, so it must carry the
+        //    merged record's protection too: never land merged data below its floor.
+        const labels = (await client.query<{ id: string; sensitivity: Sensitivity; compartments: string[]; projectIds: string[]; userId: string | null; held: boolean }>(
+          `SELECT id,sensitivity,compartments,project_ids::text[] AS "projectIds",user_id AS "userId",scope_held AS held
+             FROM entities WHERE workspace_id=$1 AND id=ANY($2::uuid[]) FOR UPDATE`,
+          [input.workspaceId, [input.survivingId, input.mergedId]])).rows
+        const survivorLabels = labels.find(row => row.id === input.survivingId)
+        const mergedLabels = labels.find(row => row.id === input.mergedId)
+        if (!survivorLabels || !mergedLabels) throw new EntityMergeError('entity_not_found', 'One of the records is no longer available.')
+        if (survivorLabels.held || mergedLabels.held || (survivorLabels.userId ?? null) !== (mergedLabels.userId ?? null)) {
+          throw new EntityMergeError('scope_conflict',
+            'These records have different private owners or protection under review, so they cannot be merged. Reclassify one record first.')
+        }
+        const sensitivity = maxSensitivity(survivorLabels.sensitivity, mergedLabels.sensitivity)
+        const compartments = [...new Set([...survivorLabels.compartments, ...mergedLabels.compartments])].sort()
+        const projectIds = [...new Set([...survivorLabels.projectIds, ...mergedLabels.projectIds])].sort()
+        if (sensitivity !== survivorLabels.sensitivity || compartments.length !== survivorLabels.compartments.length
+          || projectIds.length !== survivorLabels.projectIds.length) {
+          await client.query(
+            `UPDATE entities SET sensitivity=$3,compartments=$4::text[],project_ids=$5::uuid[],updated_at=now()
+              WHERE id=$1 AND workspace_id=$2`,
+            [input.survivingId, input.workspaceId, sensitivity, compartments, projectIds])
         }
 
         // 1. Supersede the merged entity → points at the survivor.
@@ -271,6 +310,9 @@ export function createEntityMergeStore(): EntityMergeRepository {
 
     async applyUndoMerge(input: ApplyUndoMergeInput): Promise<void> {
       const { mergeRecord } = input
+      if (!await actorMayEdit(input.actorUserId, mergeRecord.workspaceId, [mergeRecord.survivingId, mergeRecord.mergedId])) {
+        throw new UndoMergeError('merge_not_found', 'Merge not found.')
+      }
       const client = await getPool().connect()
       try {
         await client.query('BEGIN')

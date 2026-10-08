@@ -97,6 +97,8 @@ export type MergeFailureCode =
   | 'entity_inactive'
   | 'self_merge'
   | 'conflict_requires_resolution'
+  /** Different private owners, or protection under review: merging would move data across a boundary. */
+  | 'scope_conflict'
 
 export type UndoFailureCode =
   | 'merge_not_found'

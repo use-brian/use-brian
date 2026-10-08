@@ -9,7 +9,7 @@ import { getPool } from '../client.js'
 const { assertLocalFixture } = await import(new URL('../../../../../scripts/crm/local-fixture.mjs', import.meta.url).href)
 await assertLocalFixture()
 const pool = new pg.Pool({ connectionString: process.env.DATABASE_URL })
-const imports = createCrmProductionImportService({ pool, filesApi: {} as FilesApi })
+const imports = createCrmProductionImportService({ pool, filesApi: {} as FilesApi, operationsForTransaction: () => { throw new Error('Read-only fixture') } })
 
 async function fixture() {
   const workspaceId = randomUUID(), custodian = randomUUID(), cedarMember = randomUUID(), harborMember = randomUUID()

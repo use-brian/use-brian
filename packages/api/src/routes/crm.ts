@@ -34,6 +34,7 @@ import {
 } from '../db/crm.js'
 import { getEntityById, updateEntity } from '../db/entities-store.js'
 import { createEntityMergeStore } from '../db/entity-merge-store.js'
+import { query, queryWithRLS } from '../db/client.js'
 import {
   keepCrmEntitiesSeparate,
   listActiveCrmEntitySeparations,
@@ -251,6 +252,13 @@ export function crmRoutes({
 }: RouteOptions): Router {
   const router = Router()
   const mergeRepo = createEntityMergeStore()
+
+  /** RLS `FOR UPDATE` applies the UPDATE policies' USING, i.e. the caller's mutation floor, to every row. */
+  async function canMutateEntities(userId: string, workspaceId: string, ids: string[]): Promise<boolean> {
+    const rows = await queryWithRLS<{ id: string }>(userId,
+      'SELECT id FROM entities WHERE workspace_id=$1 AND id=ANY($2::uuid[]) FOR UPDATE', [workspaceId, ids])
+    return new Set(rows.rows.map(row => row.id)).size === new Set(ids).size
+  }
 
   async function memberContext(
     req: { userId?: string; params: { workspaceId: string } },
@@ -1333,6 +1341,12 @@ export function crmRoutes({
       res.status(404).json({ error: 'Visible CRM records of the same kind are required' })
       return
     }
+    // Merging edits both records: RLS UPDATE policies (the department member operation
+    // floor) must admit the caller on each, not just read visibility.
+    if (!await canMutateEntities(member.ctx.userId, member.ctx.workspaceId, [survivingId, mergedId])) {
+      res.status(403).json({ error: 'You need edit access to both records to merge them.' })
+      return
+    }
     try {
       const record = await mergeEntities({
         workspaceId: member.ctx.workspaceId,
@@ -1358,6 +1372,14 @@ export function crmRoutes({
   router.post('/:workspaceId/merges/:mergeId/undo', async (req, res) => {
     const member = await memberContext(req as never, res)
     if (!member) return
+    const merge = (await query<{ survivingId: string; mergedId: string }>(
+      'SELECT surviving_id AS "survivingId",merged_id AS "mergedId" FROM entity_merges WHERE workspace_id=$1 AND id=$2',
+      [member.ctx.workspaceId, req.params.mergeId])).rows[0]
+    // Undo edits both records, so it needs the same authority as the merge; unreadable reads as missing.
+    if (!merge || !await canMutateEntities(member.ctx.userId, member.ctx.workspaceId, [merge.survivingId, merge.mergedId])) {
+      res.status(404).json({ error: 'Merge not found' })
+      return
+    }
     try {
       await undoMerge({
         workspaceId: member.ctx.workspaceId,
