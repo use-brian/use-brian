@@ -7,14 +7,14 @@ import { CreditCard, SlidersHorizontal } from "lucide-react";
 import { useT } from "@/lib/i18n/client";
 import { changeAssociationOrder, getAssociationOrder, listAssociationOrders,
   type AssociationOrderDetail, type AssociationOrderFilters } from "@/lib/api/association";
-import { associationOrdersCacheKey } from "@/lib/surface-prefetch";
-import { markSurfaceCacheStale, useCachedResource } from "@/lib/surface-cache";
+import { associationOrdersCacheKey, associationPageCacheKey } from "@/lib/surface-prefetch";
+import { markSurfaceCacheStale, invalidateSurfaceCache } from "@/lib/surface-cache";
 import { crmRecordHref } from "@/lib/crm-view";
 import { Button } from "@/components/ui/button";
 import { confirmDialog } from "@/components/ui/confirm-dialog";
 import { ListSurfaceSkeleton } from "@/components/chrome/surface-skeleton";
 import { AssociationCatalogPicker, associationMoney as formatMinor } from "./workspace-ui";
-import { AssociationContactPicker, AssociationField } from "./operator-controls";
+import { AssociationContactPicker, AssociationField, useAssociationContactSelection, useAssociationProjection } from "./operator-controls";
 import { EmptyState, InlineNotice, PageHeader, Segmented, StatusPill, TechnicalDetails, associationDate } from "./ui";
 
 const UUID=/^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
@@ -28,19 +28,19 @@ export function AssociationOrdersPanel({ workspaceId,initialEventId="" }: { work
   const [draft,setDraft]=useState<FilterDraft>(()=>initialFilterDraft(initialEventId));
   const [status,setStatus]=useState<Status>("");
   const [filters,setFilters]=useState<AssociationOrderFilters>(()=>UUID.test(initialEventId)?{eventId:initialEventId}:{});
-  const [buyerName,setBuyerName]=useState(""),[showFilters,setShowFilters]=useState(!!initialEventId),[filterError,setFilterError]=useState(false);
+  const [buyer,setBuyer]=useAssociationContactSelection(workspaceId),[showFilters,setShowFilters]=useState(!!initialEventId),[filterError,setFilterError]=useState(false);
   const [cursors, setCursors] = useState<(string | null)[]>([null]);
   const cursor = cursors[cursors.length - 1]!;
   const effective:AssociationOrderFilters={...filters,...(status?{status}:{})};
   const filterScope=JSON.stringify(effective);
-  const { data, error, refresh } = useCachedResource(associationOrdersCacheKey(workspaceId, cursor,filterScope),
+  const { data, error, refresh } = useAssociationProjection(associationOrdersCacheKey(workspaceId, cursor,filterScope),
     () => listAssociationOrders(workspaceId, cursor ?? undefined,effective));
   const [pending, setPending] = useState<string | null>(null);
   const [saveError, setSaveError] = useState(false);
   const [expanded,setExpanded]=useState<string|null>(null);
-  const [details,setDetails]=useState<Record<string,AssociationOrderDetail>>({});
-  const [detailPending,setDetailPending]=useState<string|null>(null);
-  const [detailErrors,setDetailErrors]=useState<Record<string,boolean>>({});
+  const detailId=data?.orders.some(order=>order.id===expanded)?expanded:null;
+  const detail=useAssociationProjection(detailId?associationPageCacheKey(workspaceId,"order-detail",{id:detailId}):null,
+    ()=>getAssociationOrder(workspaceId,detailId!));
   function applyFilters() {
     const after=instant(draft.createdAfter),before=instant(draft.createdBefore);
     if((draft.eventId&&!UUID.test(draft.eventId))||(draft.contactId&&!UUID.test(draft.contactId))
@@ -49,15 +49,8 @@ export function AssociationOrdersPanel({ workspaceId,initialEventId="" }: { work
     setFilters({...(draft.eventId?{eventId:draft.eventId}:{}),...(draft.contactId?{contactId:draft.contactId}:{}),
       ...(after?{createdAfter:after}:{}),...(before?{createdBefore:before}:{})});
   }
-  function clearFilters(){setBuyerName("");setDraft(initialFilterDraft(""));setFilters({});setStatus("");setCursors([null]);setFilterError(false);}
-  async function toggleDetails(orderId:string){
-    if(expanded===orderId){setExpanded(null);return;}
-    setExpanded(orderId);if(details[orderId])return;
-    setDetailPending(orderId);setDetailErrors(previous=>({...previous,[orderId]:false}));
-    try{const order=await getAssociationOrder(workspaceId,orderId);setDetails(previous=>({...previous,[orderId]:order}));}
-    catch{setDetailErrors(previous=>({...previous,[orderId]:true}));}
-    finally{setDetailPending(null);}
-  }
+  function clearFilters(){setBuyer(null);setDraft(initialFilterDraft(""));setFilters({});setStatus("");setCursors([null]);setFilterError(false);}
+  function toggleDetails(orderId:string){setExpanded(previous=>previous===orderId?null:orderId);}
   async function act(orderId: string, action: "cancel" | "confirm-free") {
     if (pending || error) return;
     setPending(orderId);
@@ -69,9 +62,13 @@ export function AssociationOrdersPanel({ workspaceId,initialEventId="" }: { work
       markSurfaceCacheStale(`crm:${workspaceId}:`);
       markSurfaceCacheStale(`association-orders:${workspaceId}`);
       markSurfaceCacheStale(`association-module:${workspaceId}`);
-      setDetails(previous=>{const next={...previous};delete next[orderId];return next;});setExpanded(null);
+      invalidateSurfaceCache(associationPageCacheKey(workspaceId,"order-detail",{id:orderId}));setExpanded(null);
       await refresh();
-    } catch { setSaveError(true); await refresh(); }
+    } catch {
+      invalidateSurfaceCache(`association-orders:${workspaceId}`);
+      invalidateSurfaceCache(`crm:${workspaceId}:`);
+      setExpanded(null);setSaveError(true);await refresh();
+    }
     finally { setPending(null); }
   }
   const activeFilters=Object.keys(filters).length;
@@ -81,10 +78,10 @@ export function AssociationOrdersPanel({ workspaceId,initialEventId="" }: { work
     </PageHeader>
     {showFilters?<form className="grid gap-4 rounded-2xl border border-border bg-background p-4 md:grid-cols-2" onSubmit={event=>{event.preventDefault();applyFilters();}}>
       <details className="min-w-0 md:col-span-2"><summary className="min-h-11 cursor-pointer content-center text-sm font-medium md:min-h-8">{u.chooseEvent}{draft.eventId?` · ${u.selected}`:` · ${u.allEvents}`}</summary><AssociationCatalogPicker workspaceId={workspaceId} resource="events" single selected={draft.eventId?[draft.eventId]:[]} onChange={ids=>setDraft(previous=>({...previous,eventId:ids[0] ?? ""}))}/></details>
-      <details className="min-w-0 md:col-span-2"><summary className="min-h-11 cursor-pointer content-center text-sm font-medium md:min-h-8">{u.filterBuyer}{buyerName?` · ${buyerName}`:""}</summary><AssociationContactPicker workspaceId={workspaceId} onSelect={row=>{setBuyerName(row.name);setDraft(previous=>({...previous,contactId:row.id}));}}/>{draft.contactId?<Button type="button" variant="ghost" size="sm" className="min-h-11 md:min-h-8" onClick={()=>{setBuyerName("");setDraft(previous=>({...previous,contactId:""}));}}>{t.manage.contactClear}</Button>:null}</details>
+      <details className="min-w-0 md:col-span-2"><summary className="min-h-11 cursor-pointer content-center text-sm font-medium md:min-h-8">{u.filterBuyer}{buyer?` · ${buyer.name}`:""}</summary><AssociationContactPicker workspaceId={workspaceId} onSelect={row=>{setBuyer(row);setDraft(previous=>({...previous,contactId:row.id}));}}/>{draft.contactId?<Button type="button" variant="ghost" size="sm" className="min-h-11 md:min-h-8" onClick={()=>{setBuyer(null);setDraft(previous=>({...previous,contactId:""}));}}>{t.manage.contactClear}</Button>:null}</details>
       <AssociationField type="datetime-local" label={t.orderCreatedAfter} value={draft.createdAfter} onChange={createdAfter=>setDraft(previous=>({...previous,createdAfter}))}/>
       <AssociationField type="datetime-local" label={t.orderCreatedBefore} value={draft.createdBefore} onChange={createdBefore=>setDraft(previous=>({...previous,createdBefore}))}/>
-      <details className="md:col-span-2"><summary className="min-h-11 cursor-pointer content-center text-sm text-muted-foreground md:min-h-8">{u.technical}</summary><div className="grid gap-3 pt-2 md:grid-cols-2"><AssociationField label={t.orderEventId} value={draft.eventId} onChange={eventId=>setDraft(previous=>({...previous,eventId}))}/><AssociationField label={t.orderContactId} value={draft.contactId} onChange={contactId=>{setBuyerName("");setDraft(previous=>({...previous,contactId}));}}/></div></details>
+      <details className="md:col-span-2"><summary className="min-h-11 cursor-pointer content-center text-sm text-muted-foreground md:min-h-8">{u.technical}</summary><div className="grid gap-3 pt-2 md:grid-cols-2"><AssociationField label={t.orderEventId} value={draft.eventId} onChange={eventId=>setDraft(previous=>({...previous,eventId}))}/><AssociationField label={t.orderContactId} value={draft.contactId} onChange={contactId=>{setBuyer(null);setDraft(previous=>({...previous,contactId}));}}/></div></details>
       <div className="flex flex-wrap gap-2 md:col-span-2"><Button type="submit" className="min-h-11 md:min-h-9">{t.applyOrderFilters}</Button><Button type="button" variant="outline" className="min-h-11 md:min-h-9" onClick={clearFilters}>{t.clearOrderFilters}</Button></div>
       {filterError?<p role="alert" className="text-sm text-destructive md:col-span-2">{t.orderFilterInvalid}</p>:null}
     </form>:null}
@@ -110,17 +107,17 @@ export function AssociationOrdersPanel({ workspaceId,initialEventId="" }: { work
             {order.disputeState !== "none" && <span className="text-xs text-muted-foreground" data-order-dispute>{t.dispute}: {t.disputeStates[order.disputeState]}</span>}
             {order.reservationExpiresAt && order.status === "pending" && <span className="text-xs text-muted-foreground">{t.reservedUntil} {associationDate(order.reservationExpiresAt)}</span>}</div>
           <div className="flex flex-wrap items-center gap-2 pt-1 md:justify-end md:pt-0">
-            <Button type="button" variant="ghost" size="sm" className="min-h-11 md:min-h-8" aria-expanded={expanded===order.id} disabled={detailPending===order.id} onClick={()=>void toggleDetails(order.id)}>{expanded===order.id?t.hideOrderDetails:t.orderDetails}</Button>
+            <Button type="button" variant="ghost" size="sm" className="min-h-11 md:min-h-8" aria-expanded={expanded===order.id} disabled={detail.loading&&detailId===order.id} onClick={()=>void toggleDetails(order.id)}>{expanded===order.id?t.hideOrderDetails:t.orderDetails}</Button>
             {order.status === "pending" && <><Button size="sm" className="min-h-11 md:min-h-8" variant="outline" disabled={!!pending || !!error} onClick={() => void act(order.id, "cancel")}>{t.cancelOrder}</Button>
               {order.totalMinor === "0" && <Button size="sm" className="min-h-11 md:min-h-8" disabled={!!pending || !!error} onClick={() => void act(order.id, "confirm-free")}>{t.confirmFree}</Button>}</>}
           </div>
         </div>
         {expanded===order.id?<div className="mt-3 space-y-3 border-l-2 border-border pl-3" data-order-details>
-          {detailPending===order.id?<ListSurfaceSkeleton rows={2}/>:null}
-          {detailErrors[order.id]?<p role="alert" className="text-sm text-destructive">{t.orderDetailsFailed}</p>:null}
-          {details[order.id]?.lines.map(line=><div key={line.id} className="text-sm"><p className="font-medium">{line.ticketName} · {t.quantity}: {line.quantity}</p>
+          {detail.loading?<ListSurfaceSkeleton rows={2}/>:null}
+          {detail.error?<div><p role="alert" className="text-sm text-destructive">{t.orderDetailsFailed}</p><Button type="button" variant="ghost" className="min-h-11 md:min-h-9" onClick={()=>void detail.refresh()}>{t.refresh}</Button></div>:null}
+          {detail.data?.lines.map(line=><div key={line.id} className="text-sm"><p className="font-medium">{line.ticketName} · {t.quantity}: {line.quantity}</p>
             <p className="text-muted-foreground">{t.unitPrice}: {formatMinor(line.unitPriceMinor,order.currency)} · {t.lineTotal}: {formatMinor(line.lineTotalMinor,order.currency)}{line.discountMinor!=="0"?` · ${t.discount}: ${formatMinor(line.discountMinor,order.currency)}`:""}</p></div>)}
-          {details[order.id]?.registrations.length?<div><h4 className="text-sm font-semibold">{t.attendees}</h4>{details[order.id].registrations.map(registration=><p key={registration.id} className="flex items-center gap-2 text-sm">{registration.attendeeName}<StatusPill status={registration.status}/></p>)}</div>:null}
+          {detail.data?.registrations.length?<div><h4 className="text-sm font-semibold">{t.attendees}</h4>{detail.data.registrations.map(registration=><p key={registration.id} className="flex items-center gap-2 text-sm">{registration.attendeeName}<StatusPill status={registration.status}/></p>)}</div>:null}
           <TechnicalDetails rows={[[t.order,order.id],...(order.providerReference?[[t.providerReference,`${order.provider} / ${order.providerReference}`] as [string,string]]:[])]}/>
         </div>:null}
       </article>)}

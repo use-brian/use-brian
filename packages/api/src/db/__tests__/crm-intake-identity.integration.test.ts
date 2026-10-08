@@ -29,7 +29,8 @@ async function observedIdentityWait() {
   while (Date.now() < deadline) {
     const result = await pool.query(`SELECT 1 FROM pg_stat_activity WHERE datname=current_database()
       AND application_name='assurance_identity_contender' AND wait_event_type='Lock'
-      AND position('pg_advisory_xact_lock' IN query)>0`)
+      AND (position('pg_advisory_xact_lock' IN query)>0
+        OR (position('FROM workspaces' IN query)>0 AND position('FOR UPDATE' IN query)>0))`)
     if (result.rowCount) return
     await setTimeout(10)
   }

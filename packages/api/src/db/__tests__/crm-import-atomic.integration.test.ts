@@ -523,7 +523,8 @@ describe('[COMP:crm/production-import] Atomic rows and serialized chunk recovery
       const until = Date.now() + 5000
       while (Date.now() < until) {
         const r = await pool.query(`SELECT 1 FROM pg_stat_activity WHERE application_name='crm_atomic_import_fixture'
-          AND wait_event_type='Lock' AND query LIKE '%UPDATE crm_import_jobs SET status=%'`)
+          AND wait_event_type='Lock' AND (query LIKE '%UPDATE crm_import_jobs SET status=%'
+            OR query='SELECT id FROM workspaces WHERE id=$1 AND department_read_v2 FOR UPDATE')`)
         if (r.rowCount) { locked = true; break }
         await setTimeout(10)
       }

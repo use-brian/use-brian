@@ -90,4 +90,19 @@ describe('[COMP:app-web/association] Contacts & forms',()=>{
     expect(api.records).toHaveBeenCalledWith('w',expect.objectContaining({kind:'contact',limit:25}));
     expect(host.textContent).toContain(u.noEmail);expect(hrefs()).toContain('/w/w/crm/contact/c1');
   });
+  it('renews open contact, submission and audience lists so revoked department records disappear within the 30-second bound',async()=>{
+    vi.useFakeTimers({toFake:['setTimeout','clearTimeout','setInterval','clearInterval','performance']});
+    try{
+      let authorized=true;
+      api.records.mockImplementation(async()=>({items:authorized?[{kind:'contact',id:'c1',name:'Fictional Departmental Person',email:null,phone:null,companyId:null,tags:[]}]:[],nextCursor:null,hasMore:false}));
+      await render(<AssociationContactsSection workspaceId="w"/>);
+      expect(host.textContent).toContain('Fictional Departmental Person');
+      authorized=false;await act(async()=>{await vi.advanceTimersByTimeAsync(15_001);});
+      expect(host.textContent).not.toContain('Fictional Departmental Person');
+      authorized=true;await act(async()=>{await vi.advanceTimersByTimeAsync(15_001);});
+      expect(host.textContent).toContain('Fictional Departmental Person');
+      api.records.mockRejectedValue(new Error('offline'));await act(async()=>{await vi.advanceTimersByTimeAsync(30_001);});
+      expect(host.textContent).not.toContain('Fictional Departmental Person');
+    }finally{vi.useRealTimers();}
+  });
 });

@@ -17,17 +17,17 @@ const service = createCrmOperationsService(store)
 const competing = createCrmOperationsService(createDbCrmOperationsStore(contender))
 type Kind = 'consent' | 'suppression'
 async function fixture() {
-  const workspaceId = randomUUID(), userId = randomUUID(), contactId = randomUUID()
+  const workspaceId = randomUUID(), userId = randomUUID(), contactId = randomUUID(), otherContactId = randomUUID()
   await pool.query('INSERT INTO users (id,auth_provider_id) VALUES ($1::uuid,$1::text)', [userId])
   await pool.query(`INSERT INTO workspaces (id,name,owner_user_id) VALUES ($1,'Evidence replay fixture',$2)`, [workspaceId, userId])
   await pool.query(`INSERT INTO workspace_members (workspace_id,user_id,role) VALUES ($1,$2,'owner')`, [workspaceId, userId])
   await pool.query(`INSERT INTO entities (id,workspace_id,kind,display_name,created_by_user_id,source)
-    VALUES ($1,$2,'person','Fixture person',$3,'manual')`, [contactId, workspaceId, userId])
+    VALUES ($1,$2,'person','Fixture person',$3,'manual'),($4,$2,'person','Other fixture person',$3,'manual')`, [contactId, workspaceId, userId, otherContactId])
   const context: CrmOperationsContext = { workspaceId, actor: { kind: 'user', userId },
     authority: { role: 'owner', canWrite: true, canConfigure: true, trustedIdentitySources: [] } }
   await service.execute(context, CrmOperationsCommandSchema.parse({ kind: 'save_consent_purpose',
     purposeKey: 'updates', label: 'Updates', wordingVersion: '1', wording: 'Original fixture wording' }))
-  return { workspaceId, contactId, context }
+  return { workspaceId, userId, contactId, otherContactId, context }
 }
 function command(kind: Kind, contactId: string, change: Record<string, unknown> = {}) {
   return CrmOperationsCommandSchema.parse({
@@ -57,7 +57,7 @@ describe('[COMP:crm/operations-store] Actual provider evidence replay', () => {
     expect(duplicate).toMatchObject({ duplicate: true, record: { id: first.record.id }, emittedEventIds: [] })
     expect(duplicate.record).not.toHaveProperty('__requestHash')
     expect(duplicate.record).not.toHaveProperty('__occurredAt')
-    for (const change of [{ metadata: { status: 'changed' } }, { source: 'other' }, { contactId: randomUUID() }, { occurredAt: '2026-01-01T00:00:00Z' },
+    for (const change of [{ metadata: { status: 'changed' } }, { source: 'other' }, { contactId: f.otherContactId }, { occurredAt: '2026-01-01T00:00:00Z' },
       kind === 'consent' ? { action: 'withdrawn' } : { reasonCode: 'complaint' },
       kind === 'consent' ? { purposeKey: 'other' } : { channel: 'all', action: 'released' }]) {
       await expect(service.execute(f.context, command(kind, f.contactId, change))).rejects.toMatchObject({ code: 'idempotency_conflict' })
@@ -96,7 +96,8 @@ describe('[COMP:crm/operations-store] Actual provider evidence replay', () => {
       while (Date.now() < deadline) {
         const result = await pool.query(`SELECT count(*)::int AS count FROM pg_stat_activity
           WHERE application_name='assurance_evidence_contender' AND datname=current_database()
-            AND wait_event_type='Lock' AND position('INSERT INTO' IN query)>0`)
+            AND wait_event_type='Lock' AND (position('INSERT INTO' IN query)>0
+              OR (position('workspaces' IN query)>0 AND position('FOR UPDATE' IN query)>0))`)
         if (result.rows[0].count === 2) { locked = true; break }
         await setTimeout(10)
       }
@@ -126,7 +127,7 @@ describe('[COMP:crm/operations-store] Actual provider evidence replay', () => {
 
   it('uses the same full-payload comparison for the legacy consent adapter', async () => {
     const f = await fixture(), legacy = createAssociationStore(pool)
-    const actor = { credentialKind: 'api_key' as const, credentialId: 'fixture' }
+    const actor = { credentialKind: 'user' as const, credentialId: f.userId, actingUserId: f.userId }
     const input = ConsentInputSchema.parse({ contactId: f.contactId, purpose: 'updates', action: 'granted', wordingVersion: '1', source: 'fixture', provider: 'fixture', providerEventId: 'legacy_1', metadata: { original: true } })
     const first = await legacy.appendConsent(f.workspaceId, input, actor)
     const before = await counts(f.workspaceId)

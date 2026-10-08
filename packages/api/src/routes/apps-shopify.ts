@@ -79,6 +79,7 @@ export type AppsShopifyRouteOptions = {
   /** The shared resolver. Same instance the brain-MCP bridge is given. */
   storeTools: (params: {
     workspaceId: string
+    actingUserId: string
     storeScope: AppStoreScope
     alsoAllow?: readonly string[]
   }) => Promise<Tool[]>
@@ -138,11 +139,13 @@ export function appsShopifyRoutes(opts: AppsShopifyRouteOptions): Router {
       res.status(400).json({ error: 'workspaceId must be a uuid' })
       return
     }
-    if (!(await guard(req as { userId?: string }, res, workspaceId))) return
+    const userId = await guard(req as { userId?: string }, res, workspaceId)
+    if (!userId) return
 
     try {
       const tools = await opts.storeTools({
         workspaceId,
+        actingUserId: userId,
         storeScope: STORE_SCOPE,
         alsoAllow: NATIVE_EXTRA_TOOLS,
       })
@@ -162,12 +165,14 @@ export function appsShopifyRoutes(opts: AppsShopifyRouteOptions): Router {
       return
     }
     const { workspaceId, tool, args } = parsed.data
-    if (!(await guard(req as { userId?: string }, res, workspaceId))) return
+    const userId = await guard(req as { userId?: string }, res, workspaceId)
+    if (!userId) return
 
     let tools: Tool[]
     try {
       tools = await opts.storeTools({
         workspaceId,
+        actingUserId: userId,
         storeScope: STORE_SCOPE,
         alsoAllow: NATIVE_EXTRA_TOOLS,
       })
@@ -200,7 +205,7 @@ export function appsShopifyRoutes(opts: AppsShopifyRouteOptions): Router {
       return
     }
 
-    const ctx = await makeBrainContextResolver(workspaceId, `app:shopify`, null, 'app_shopify')()
+    const ctx = await makeBrainContextResolver(workspaceId, `app:shopify`, null, 'app_shopify', { kind: 'home_app', credentialId: 'app:shopify', userId })()
     if ('error' in ctx) {
       res.status(409).json({ error: 'no_assistant', detail: ctx.error })
       return
@@ -235,7 +240,8 @@ export function appsShopifyRoutes(opts: AppsShopifyRouteOptions): Router {
       return
     }
     const { workspaceId, task } = parsed.data
-    if (!(await guard(req as { userId?: string }, res, workspaceId))) return
+    const userId = await guard(req as { userId?: string }, res, workspaceId)
+    if (!userId) return
 
     try {
       // Capped at this surface's OWN tool ceiling by the caller's wiring, so

@@ -187,7 +187,7 @@ describe('[COMP:crm/privacy-copies] Real CRM source erasure and consumer admissi
   })
   it('preserves live source history during housekeeping and blocks erasure after attribution is lost', async () => {
     const f = await fixture(); await f.finish(); await f.approve()
-    await pruneCrmOperationsRetention(f.workspaceId, new Date('2099-01-01'))
+    await pruneCrmOperationsRetention(f.context, new Date('2099-01-01'))
     expect((await pool.query('SELECT id FROM crm_import_jobs WHERE id=$1', [f.job.id])).rowCount).toBe(1)
     const member = await app.connect()
     try { await member.query('BEGIN'); await member.query("SELECT set_config('app.current_user_id',$1,true)", [f.userId])
@@ -198,16 +198,16 @@ describe('[COMP:crm/privacy-copies] Real CRM source erasure and consumer admissi
   })
   it('holds jobs during retention and deletes expired source receipts only after hold release', async () => {
     const f = await fixture(); await f.finish(); await f.approve([f.sourceId])
-    await pruneCrmOperationsRetention(f.workspaceId, new Date('2099-01-01'))
+    await pruneCrmOperationsRetention(f.context, new Date('2099-01-01'))
     expect((await pool.query('SELECT id FROM crm_import_jobs WHERE id=$1', [f.job.id])).rowCount).toBe(1)
     await f.approve(); await f.erase()
     const expired = randomUUID(), replayKey = randomUUID()
     await pool.query(`INSERT INTO crm_import_sources(id,workspace_id,source_key,content_bytes,source_hash,credential_id,integration_grants,privacy_erased,retired_at,replay_expires_at,replay_policy_version)
       SELECT $2,workspace_id,$3,content_bytes,source_hash,credential_id,integration_grants,true,clock_timestamp()-interval '2 seconds',clock_timestamp()-interval '1 second',replay_policy_version
       FROM crm_import_sources WHERE id=$1`, [f.sourceId, expired, replayKey])
-    await f.approve([expired]); await pruneCrmOperationsRetention(f.workspaceId, new Date('2099-01-01'))
+    await f.approve([expired]); await pruneCrmOperationsRetention(f.context, new Date('2099-01-01'))
     expect((await pool.query('SELECT id FROM crm_import_sources WHERE id=$1', [expired])).rowCount).toBe(1)
-    await f.approve(); await pruneCrmOperationsRetention(f.workspaceId, new Date('2099-01-01'))
+    await f.approve(); await pruneCrmOperationsRetention(f.context, new Date('2099-01-01'))
     expect((await pool.query('SELECT id FROM crm_import_sources WHERE id=$1', [expired])).rowCount).toBe(0)
     expect(await sources.stage(f.machine, replayKey, f.bytes)).toMatchObject({ created: true })
   })
@@ -254,7 +254,7 @@ describe('[COMP:crm/privacy-copies] Real CRM source erasure and consumer admissi
   })
   it('keeps the source replay receipt beyond job housekeeping until its explicit expiry', async () => {
     const f = await fixture(); await f.finish(); await f.approve(); await f.erase()
-    await pruneCrmOperationsRetention(f.workspaceId, new Date('2099-01-01'))
+    await pruneCrmOperationsRetention(f.context, new Date('2099-01-01'))
     expect((await pool.query('SELECT id FROM crm_import_jobs WHERE id=$1', [f.job.id])).rowCount).toBe(0)
     expect((await pool.query('SELECT id FROM crm_import_sources WHERE id=$1', [f.sourceId])).rowCount).toBe(1)
     await expect(sources.stage(f.machine, f.sourceKey, f.bytes)).rejects.toMatchObject({ details: { reason: 'import_source_retired' } })

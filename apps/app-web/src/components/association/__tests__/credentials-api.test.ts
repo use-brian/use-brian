@@ -2,7 +2,7 @@ import {beforeEach,describe,it,expect,vi} from "vitest";
 const api=vi.hoisted(()=>({fetch:vi.fn(),definitions:vi.fn(),purposes:vi.fn(),plans:vi.fn(),events:vi.fn()}));
 vi.mock("@/lib/auth-fetch",()=>({authFetch:api.fetch}));
 vi.mock("@/lib/api/crm",()=>({listCrmIntakeDefinitions:api.definitions,listCrmConsentPurposes:api.purposes,listCrmEntitlementPlans:api.plans,listCrmEvents:api.events}));
-import {createCrmCredential,revokeCrmCredential,getCrmCredentialCatalog,getCrmScopeResources} from "@/lib/api/crm-administration";
+import {createCrmCredential,getCrmCredentialBindingOptions,revokeCrmCredential,getCrmCredentialCatalog,getCrmScopeResources} from "@/lib/api/crm-administration";
 const response=(body:unknown,status=200)=>new Response(JSON.stringify(body),{status,headers:{"Content-Type":"application/json"}});
 beforeEach(()=>vi.resetAllMocks());
 describe("[COMP:app-web/association] Credential catalog and member API",()=>{
@@ -19,6 +19,13 @@ describe("[COMP:app-web/association] Credential catalog and member API",()=>{
     expect(await createCrmCredential("w",input)).toEqual({oneTimeSecret:"fictional-secret"});await revokeCrmCredential("w","credential/id");
     expect(new URL(api.fetch.mock.calls[0][0], "https://app.example").pathname).toBe("/api/crm/w/operations/integration-credentials");expect(JSON.parse(api.fetch.mock.calls[0][1].body)).toEqual(input);
     expect(new URL(api.fetch.mock.calls[1][0], "https://app.example").pathname).toBe("/api/crm/w/operations/integration-credentials/credential%2Fid/revoke");expect(api.fetch.mock.calls[0][1].headers).toEqual({"Content-Type":"application/json"});
+  });
+  it("requests the selected assistant and cap through the authenticated preview adapter",async()=>{
+    const result={mode:"department-v2",choices:[],assistants:[],validForMs:30000};api.fetch.mockResolvedValue(response(result));
+    expect(await getCrmCredentialBindingOptions("w",{assistantId:"assistant/id",cap:"confidential"})).toEqual(result);
+    const url=new URL(api.fetch.mock.calls[0][0],"https://app.example");
+    expect(url.pathname).toBe("/api/crm/w/operations/integration-credentials/binding-options");
+    expect(url.searchParams.get("assistantId")).toBe("assistant/id");expect(url.searchParams.get("cap")).toBe("confidential");
   });
   it("uses complete CRM catalog readers and exposes no definition or consent payloads",async()=>{
     api.definitions.mockResolvedValue(Array.from({length:103},(_,i)=>({id:`definition-${i}`,label:`Definition ${i}`,fields:["private-schema"]})));

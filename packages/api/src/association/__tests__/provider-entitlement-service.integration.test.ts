@@ -15,13 +15,14 @@ const appPool = getAppPool()
 
 type Fixture = Awaited<ReturnType<typeof fixture>>
 
-async function fixture() {
+async function fixture(v2 = false) {
   const workspaceId = randomUUID()
   const userId = randomUUID()
   const contactId = randomUUID()
   const planId = randomUUID()
   await pool.query('INSERT INTO users(id,auth_provider_id) VALUES($1::uuid,$1::text)', [userId])
-  await pool.query("INSERT INTO workspaces(id,name,owner_user_id) VALUES($1,'Provider entitlement fixture',$2)", [workspaceId, userId])
+  // These unbound API-key transaction cases exercise the legacy credential lane.
+  await pool.query("INSERT INTO workspaces(id,name,owner_user_id,department_read_v2) VALUES($1,'Provider entitlement fixture',$2,$3)", [workspaceId, userId, v2])
   await pool.query("INSERT INTO workspace_members(workspace_id,user_id,role) VALUES($1,$2,'owner')", [workspaceId, userId])
   await pool.query("INSERT INTO entities(id,workspace_id,kind,display_name,created_by_user_id,source) VALUES($1,$2,'person','Fictional member',$3,'manual')", [contactId, workspaceId, userId])
   await pool.query(`INSERT INTO association_membership_plans(id,workspace_id,plan_key,name,currency,fee_minor,billing_period)
@@ -118,6 +119,12 @@ describe('[COMP:crm/provider-entitlement-service] PostgreSQL transaction ownersh
     _resetCoalescerForTests()
     await pool.end()
     await appPool.end()
+  })
+
+  it('refuses an unbound provider credential in v2 without creating entitlement effects', async () => {
+    const input = await fixture(true)
+    await expect(serviceFor(pool).submit(input.workspaceId, input.event, input.actor)).rejects.toMatchObject({ code: 'not_authorized' })
+    expect(await counts(input)).toEqual({ entitlements: 0, audits: 0, events: 0, receipts: 0 })
   })
 
   it('uses one application client for entitlement, audit, outbox, and receipt acknowledgement', async () => {

@@ -1,7 +1,10 @@
 import { prepareScheduleEdit, applyScheduleEdit, scheduleEditRow } from '../workspace-access/workflow-schedule-edit.js'
 import { insertWorkflowScheduleJob } from './job-store.js'
 import { isDeepStrictEqual } from 'node:util'
-import { captureScheduledWorkflowRunAuthoritySystem, captureAuthoringAuthoritySystem } from '../context-scope/workflow-authority.js'
+import { captureScheduledWorkflowRunAuthoritySystem, captureAuthoringAuthoritySystem, resolveWorkflowAuthoringScope } from '../context-scope/workflow-authority.js'
+import { parseAuthoringAuthority, pinAccessCeiling, taskLifecycleToDispatchEvent, type TaskLifecycleEvent } from '@use-brian/core'
+import { parseWorkflowCopyEvidence } from '../context-scope/workflow-input-evidence.js'
+import { validateCallerScopeEvidence } from '../context-scope/caller-evidence.js'
 import type { PoolClient } from 'pg'
 import { WorkspaceAccessError } from '../workspace-access/policy.js'
 import { admitOperationalAuthoring, lockOperationalPolicy, readWorkflowScheduleAuthority, type OperationalHumanAuthor } from '../workspace-access/operational-admission.js'
@@ -680,11 +683,150 @@ async function createScheduledRun(params: Parameters<WorkflowRunStore['createRun
   return run
 }
 
+/** Canonical row mapping on a caller-owned authority transaction. */
+export async function readWorkflowRunInTransaction(client: PoolClient, workspaceId: string, runId: string): Promise<WorkflowRunRecord | null> {
+  const result = await client.query<RunRow>(`SELECT ${RUN_SELECT} FROM workflow_runs WHERE workspace_id=$1 AND id=$2 FOR SHARE`, [workspaceId,runId])
+  return result.rows[0] ? rowToRun(result.rows[0]) : null
+}
+
+/** Validate only against write-time metadata, never today's relabeled row. */
+function validatePrimitiveEventMetadata(input: Record<string, unknown> | undefined, sourceType: unknown, metadata: unknown, workspaceId: string): void {
+  const fail = () => new WorkspaceAccessError('primitive_event_metadata_conflict', 409)
+  if (!input || Object.keys(input).some(key => !['trigger','event'].includes(key))
+    || !metadata || typeof metadata !== 'object' || Array.isArray(metadata)) throw fail()
+  const event = input.event as Record<string, unknown>, trigger = input.trigger as Record<string, unknown>
+  if (!event || typeof event !== 'object' || Array.isArray(event) || !trigger || typeof trigger !== 'object' || Array.isArray(trigger)) throw fail()
+  const saved = metadata as Record<string, unknown>
+  let canonical: Record<string, unknown>
+  if (sourceType === 'task') {
+    type State = Pick<TaskLifecycleEvent,'taskId'|'title'|'status'|'tags'|'assigneeId'|'parentId'|'actorId'> & {due:string|null;externalRefDigest:string;attributesDigest:string}
+    const current = saved.current as State, previous = saved.previous as State | null
+    if (!current || !Array.isArray(current.tags)) throw fail()
+    canonical = taskLifecycleToDispatchEvent({ ...current,workspaceId,kind:previous?'updated':'created',
+      due:current.due ? new Date(current.due) : null,previousStatus:previous?.status ?? null,
+      previousTags:previous?.tags ?? null,previousAssigneeId:previous?.assigneeId ?? null,changedFields:[] }).payload
+    canonical.changedFields = previous ? [
+      ...(['title','status','assigneeId','due'] as const).filter(key => !isDeepStrictEqual(current[key],previous[key])),
+      ...(current.tags.length !== previous.tags.length || current.tags.some(tag => !previous.tags.includes(tag)) ? ['tags'] : []),
+      ...(!isDeepStrictEqual(current.parentId,previous.parentId) ? ['parentId'] : []),
+      ...(current.externalRefDigest !== previous.externalRefDigest ? ['externalRef'] : []),
+      ...(current.attributesDigest !== previous.attributesDigest ? ['attributes'] : []),
+    ] : []
+  } else if (sourceType === 'knowledge') {
+    const observations = saved.observations as Array<{action:string;actorId:string|null}>
+    if (!Array.isArray(observations)) throw fail()
+    const observed = observations.find(row => (event.action === undefined || event.action === row.action)
+      && (event.actorId === undefined || event.actorId === null || event.actorId === row.actorId))
+    if (!observed) throw fail()
+    const { observations: _observations, ...content } = saved
+    canonical = {...content,action:observed.action,actorId:event.actorId === null ? null : observed.actorId}
+  } else if (sourceType === 'page') {
+    canonical = Object.fromEntries(['pageId','title','parentId','action','actorId','sourceVersion'].map(key=>[key,saved[key]]))
+  } else throw fail()
+  for (const [key,value] of Object.entries(event)) {
+    if (!Object.hasOwn(canonical,key) || !isDeepStrictEqual(value,canonical[key])) throw fail()
+  }
+  const expectedTrigger: Record<string, unknown> = {sourceType,provider:sourceType,channelId:canonical.action,actorId:canonical.actorId}
+  if (sourceType === 'page') expectedTrigger.pageId = canonical.action === 'updated' ? canonical.pageId : canonical.parentId ?? 'root'
+  for (const [key,value] of Object.entries(trigger)) {
+    if (!Object.hasOwn(expectedTrigger,key) || !isDeepStrictEqual(value,expectedTrigger[key])) throw fail()
+  }
+}
+
+/** Primitive event metadata is protected input: admit every persistent dispatch effect. */
+async function withPrimitiveEventAdmission<T>(params: Parameters<WorkflowRunStore['createRun']>[0], operation: (client: PoolClient, boundary: Date | null) => Promise<T>): Promise<T> {
+  const client = await getPool().connect()
+  let result: T
+  try {
+    await client.query('BEGIN')
+    await lockOperationalPolicy(client, params.workspaceId)
+    const row = (await client.query<WorkflowRow>(`SELECT ${WORKFLOW_SELECT} FROM workflows
+      WHERE id=$1 AND workspace_id=$2 FOR SHARE`, [params.workflowId,params.workspaceId])).rows[0]
+    const authority = parseAuthoringAuthority(row?.authoringAuthority)
+    if (!row || !authority || params.triggeredBy !== row.createdBy || authority.ceiling.userId !== row.createdBy) {
+      throw new WorkspaceAccessError('workflow_authority_unavailable', 409)
+    }
+    // This owner transaction represents the verified saved workflow author.
+    // Admitted metadata facades require that actor even on the system pool;
+    // the resolved saved/executing ceiling is independently checked below.
+    await client.query("SELECT set_config('app.current_user_id',$1,true)",[row.createdBy])
+    const boundary = (await client.query<{ until: Date | null }>('SELECT lock_task_workflow_dispatch_inputs($1,$2,$3) AS until',
+      [params.workspaceId,row.createdBy,authority.assistantId])).rows[0].until
+    const event = params.input?.event as { taskId?: unknown; entryId?: unknown; pageId?: unknown; sourceVersion?: unknown } | undefined
+    const sourceType = (params.input?.trigger as { sourceType?: unknown } | undefined)?.sourceType
+    let sources: unknown
+    let metadata: unknown
+    if (sourceType === 'task' && typeof event?.taskId === 'string') {
+      const receipt = (await client.query<{ sources: unknown; metadata: unknown }>(`SELECT sources,metadata FROM workflow_task_event_receipts
+        WHERE workspace_id=$1 AND task_id=$2 FOR SHARE`, [params.workspaceId,event.taskId])).rows[0]
+      sources = receipt?.sources; metadata = receipt?.metadata
+    } else if (sourceType === 'knowledge' && typeof event?.entryId === 'string' && typeof event.sourceVersion === 'string') {
+      const receipt = (await client.query<{ sources: unknown; metadata: unknown }>(`SELECT jsonb_build_array(source) AS sources,metadata FROM workflow_knowledge_event_receipts
+        WHERE workspace_id=$1 AND entry_id=$2 AND source_version=$3 AND NOT held FOR SHARE`,
+      [params.workspaceId,event.entryId,event.sourceVersion])).rows[0]
+      sources = receipt?.sources; metadata = receipt?.metadata
+    }
+    if (sourceType === 'page' && typeof event?.pageId === 'string' && typeof event.sourceVersion === 'string') {
+      const receipt = (await client.query<{ evidence: {sources:unknown} | null; metadata: unknown }>(
+        `SELECT page_event_input_evidence($1,$2,$3,$4) AS evidence,
+           metadata||jsonb_build_object('sourceVersion',revision::text) AS metadata
+         FROM workflow_page_event_receipts WHERE workspace_id=$1 AND revision=$2 AND page_id=$3 FOR SHARE`,
+        [params.workspaceId,event.sourceVersion,event.pageId,row.createdBy])).rows[0]
+      sources = receipt?.evidence?.sources; metadata = receipt?.metadata
+    }
+    const evidence = parseWorkflowCopyEvidence({ sensitivity:'public',compartments:[],projectIds:[],sources })
+    if (!evidence?.sources?.length) throw new WorkspaceAccessError(sourceType === 'page' ? 'page_event_evidence_missing' : sourceType === 'knowledge' ? 'knowledge_event_evidence_missing' : 'task_event_evidence_missing', 409)
+    const admit = async () => {
+      const scope = await resolveWorkflowAuthoringScope({ userId:row.createdBy, workspaceId:params.workspaceId,
+        assistantId:authority.assistantId,authoringAuthority:authority,
+        contextGroupId:row.contextGroupId,contextProjectId:row.contextProjectId },client)
+      await validateCallerScopeEvidence(evidence,pinAccessCeiling(scope.access),client)
+    }
+    await admit()
+    validatePrimitiveEventMetadata(params.input,sourceType,metadata,params.workspaceId)
+    result = await operation(client, boundary)
+    await admit()
+    await client.query('COMMIT')
+  } catch (error) {
+    await client.query('ROLLBACK')
+    throw error
+  } finally { client.release() }
+  return result
+}
+
+async function createPrimitiveEventRun(params: Parameters<WorkflowRunStore['createRun']>[0]): Promise<WorkflowRunRecord> {
+  const run = await withPrimitiveEventAdmission(params, async (client, boundary) => {
+    const result = await client.query<RunRow>(`INSERT INTO workflow_runs(workflow_id,workspace_id,triggered_by,trigger_kind,input,
+      context_group_id,context_project_id,context_compartments,context_project_ids,task_event_valid_until,primitive_event_metadata_verified,trigger_page_id)
+      SELECT w.id,w.workspace_id,$3,$4,$5::jsonb,w.context_group_id,w.context_project_id,
+        CASE WHEN g.compartment_key IS NULL THEN ARRAY[]::text[] ELSE ARRAY[g.compartment_key] END,
+        CASE WHEN w.context_project_id IS NULL THEN ARRAY[]::uuid[] ELSE ARRAY[w.context_project_id] END,$6,true,$7::uuid
+      FROM workflows w LEFT JOIN workspace_groups g ON g.id=w.context_group_id WHERE w.id=$1 AND w.workspace_id=$2
+      RETURNING ${RUN_SELECT}`, [params.workflowId,params.workspaceId,params.triggeredBy,params.triggerKind,JSON.stringify(params.input),boundary,extractTriggerPageId(params.input)])
+    return rowToRun(result.rows[0])
+  })
+  notifyWorkspaceChange(params.workspaceId,'workflow_run','create',run.id)
+  return run
+}
+
+/** Storm protection is a persistent source-triggered effect, not an authority bypass. */
+export async function pauseWorkflowForPrimitiveEventSystem(params: Parameters<WorkflowRunStore['createRun']>[0], reason: string): Promise<void> {
+  await withPrimitiveEventAdmission({ ...params, input: structuredClone(params.input) }, async (client, boundary) => {
+    await client.query('INSERT INTO workflow_task_pause_admissions(workflow_id,valid_until) VALUES($1,$2)', [params.workflowId,boundary])
+    await client.query('UPDATE workflows SET enabled=false,paused_reason=$2,updated_at=now() WHERE id=$1', [params.workflowId,reason])
+  })
+  notifyWorkspaceChange(params.workspaceId,'workflow','update',params.workflowId)
+}
+
 export function createDbWorkflowRunStore(): WorkflowRunStore {
   return {
     async createRun({ workflowId, workspaceId, triggeredBy, triggerKind, input, scheduledJob }) {
       if (triggerKind === 'schedule') return createScheduledRun({ workflowId, workspaceId, triggeredBy, triggerKind, input, scheduledJob })
       if (scheduledJob) throw new WorkspaceAccessError('workflow_schedule_binding_conflict', 409)
+      if (input && typeof input.trigger === 'object' && input.trigger !== null
+        && ['task','knowledge','page'].includes(String((input.trigger as { sourceType?: unknown }).sourceType))) {
+        return createPrimitiveEventRun({ workflowId, workspaceId, triggeredBy, triggerKind, input: structuredClone(input) })
+      }
       // System-level write: the route handler authorized the run by
       // resolving the workflow via the user's RLS view; the run record
       // itself is system-owned.
@@ -732,6 +874,10 @@ export function createDbWorkflowRunStore(): WorkflowRunStore {
       idempotencyKey,
       bodySha256,
     }) {
+      if (input && typeof input.trigger === 'object' && input.trigger !== null
+        && ['task','knowledge','page'].includes(String((input.trigger as {sourceType?:unknown}).sourceType))) {
+        throw new WorkspaceAccessError('primitive_event_webhook_binding_conflict', 409)
+      }
       const triggerPageId = extractTriggerPageId(input)
       const inserted = await query<RunRow>(
         `INSERT INTO workflow_runs (

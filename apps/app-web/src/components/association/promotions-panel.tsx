@@ -33,7 +33,7 @@ export function AssociationPromotionsPanel({workspaceId,initialNew=false}:{works
           {key:"name",label:m.name,primary:true,cell:row=><span>{row.name}<span className="block text-xs font-normal text-muted-foreground">{m.codeProtected}</span></span>},
           {key:"discount",label:t.discount,cell:row=>discount(row)},
           {key:"target",label:m.promotionTarget,cell:row=>format(u.targetsCount,{count:row.targetIds.length,kind:m.options[row.targetKind]})},
-          {key:"used",label:u.used,cell:row=>row.maxUses===null?String(row.redeemedUses):format(u.usesSummary,{used:row.redeemedUses,limit:row.maxUses})},
+          {key:"used",label:u.used,cell:row=>row.redeemedUses===null?u.usageUnavailable:row.maxUses===null?String(row.redeemedUses):format(u.usesSummary,{used:row.redeemedUses,limit:row.maxUses})},
           {key:"valid",label:u.validUntil,hideBelowMd:true,cell:row=>row.validTo?associationDate(row.validTo,"date"):m.unlimited},
           {key:"status",label:m.status,cell:row=><StatusPill status={row.status}/>},
         ]}

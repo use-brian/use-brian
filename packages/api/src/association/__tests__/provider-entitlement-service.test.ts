@@ -54,6 +54,12 @@ describe('[COMP:crm/provider-entitlement-service] transaction-bound provider com
         updatedAt: null,
         updatedByUserId: null,
       }], rowCount: 1 }
+      if (sql.includes('SELECT department_read_v2 AS v2')) return { rows: [{ v2: false }], rowCount: 1 }
+      if (sql.includes('read_scope_source')) return { rows: [{ snapshot: {
+        workspaceId, resourceKind: 'entity', resourceId: contactId, version: '1',
+        userId: null, assistantId: null, projectIds: [], compartments: [], sensitivity: 'internal',
+        held: false, validTo: null, retractedAt: null,
+      } }], rowCount: 1 }
       if (sql.includes('FROM entities c')) return { rows: [{}], rowCount: 1 }
       if (sql.includes("target_kind='entitlement'")) return { rows: [], rowCount: 0 }
       if (sql.includes('FROM association_memberships WHERE workspace_id=$1 AND id=$2')) {

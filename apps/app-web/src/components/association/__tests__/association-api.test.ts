@@ -2,11 +2,24 @@ import { beforeEach,describe,expect,it,vi } from "vitest";
 const api=vi.hoisted(()=>({fetch:vi.fn(),contact:vi.fn(),sendability:vi.fn()}));
 vi.mock("@/lib/auth-fetch",()=>({authFetch:api.fetch}));
 vi.mock("@/lib/api/crm",()=>({fetchCrmRecord:api.contact,checkCrmSendability:api.sendability}));
-import { listAssociationPage,exportAssociationAttendees,exportAssociationOperationalRoster,reserveAssociationOrder,offerAssociationPlace,retryAssociationProviderReceipt,saveAssociationEvent,saveAssociationPlan,saveAssociationPromotion,saveAssociationTicket,checkInAssociationAttendee,correctAssociationCheckIn } from "@/lib/api/association";
+import { associationModuleRemaining,getAssociationModuleSnapshot,listAssociationPage,exportAssociationAttendees,exportAssociationOperationalRoster,reserveAssociationOrder,offerAssociationPlace,retryAssociationProviderReceipt,saveAssociationEvent,saveAssociationPlan,saveAssociationPromotion,saveAssociationTicket,checkInAssociationAttendee,correctAssociationCheckIn } from "@/lib/api/association";
 const response=(body:unknown,status=200)=>new Response(JSON.stringify(body),{status,headers:{"Content-Type":"application/json"}});
 const registration=(id:string,changes={})=>({id,attendeeContactId:`contact-${id}`,attendeeName:`Person ${id}`,attendeeEmail:`person-${id}@example.com`,status:"confirmed",...changes});
 beforeEach(()=>{vi.resetAllMocks();api.sendability.mockResolvedValue({verdict:"allowed"});api.contact.mockImplementation(async(_ws,id)=>({record:{kind:"contact",archivedAt:null,email:`person-${id.replace("contact-","")}@example.com`}}));});
 describe("[COMP:app-web/association] Native member wire contracts",()=>{
+  it("bounds prefetched module authority from request start rather than response arrival",async()=>{
+    const now=vi.spyOn(performance,"now").mockReturnValue(1000);
+    try {
+      api.fetch.mockImplementation(async(url)=>{
+        now.mockReturnValue(11_000);
+        return response(String(url).endsWith("/module")?{module:{workspaceId:"w",state:"enabled",version:1}}:{role:"admin"});
+      });
+      const snapshot=await getAssociationModuleSnapshot("w");
+      expect(snapshot.canManage).toBe(true);expect(associationModuleRemaining(snapshot)).toBe(20_000);
+      now.mockReturnValue(31_001);expect(associationModuleRemaining(snapshot)).toBe(0);
+      expect(associationModuleRemaining({...snapshot})).toBe(0);
+    } finally {now.mockRestore();}
+  });
   it.each([
     ["plans","operations/entitlement-plans","plans"], ["events","operations/events","events"], ["memberships","operations/entitlements","entitlements"],
     ["promotions","association/promotions","promotions"],

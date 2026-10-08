@@ -41,16 +41,43 @@ async function effects(ws: string) {
 }
 describe('[COMP:crm/association-waitlist] Actual intake-backed offers', () => {
   afterAll(async () => { _resetCoalescerForTests(); await pool.end(); await appPool.end() })
+  it('filters protected waitlist sources before paging and restores the existing offer state after reauthorization', async () => {
+    const f = await fixture(), offered = await f.offer(), department = randomUUID(), custodian = randomUUID()
+    await pool.query('INSERT INTO users(id,auth_provider_id) VALUES($1::uuid,$1::text)', [custodian])
+    await pool.query("INSERT INTO workspace_members(workspace_id,user_id,role) VALUES($1,$2,'member')", [f.workspaceId, custodian])
+    await pool.query("INSERT INTO workspace_groups(id,workspace_id,name,created_by,kind,key,compartment_key) VALUES($1::uuid,$2,'Cedar',$3,'team',$1::text,$4)", [department, f.workspaceId, custodian, `team:${department}`])
+    await pool.query("INSERT INTO workspace_compartments(workspace_id,key,label,managed_by,managed_ref_id) VALUES($1,$2,'Cedar','team',$3)", [f.workspaceId, `team:${department}`, department])
+    await pool.query('UPDATE entities SET compartments=$2 WHERE id=$1', [f.contactId, [`team:${department}`]])
+    expect(await commerce.listWaitlist(f.workspaceId, { limit: 1, cursor: null }, f.actor)).toMatchObject({ items: [], nextCursor: null })
+    await pool.query("INSERT INTO department_edges(workspace_id,department_id,principal_kind,user_id,clearance,origin) VALUES($1,$2,'user',$3,'internal','store')", [f.workspaceId, department, f.userId])
+    expect((await commerce.listWaitlist(f.workspaceId, { limit: 1, cursor: null }, f.actor)).items).toMatchObject([
+      { id: f.submissionId, waitlistState: 'offered', orderId: offered.record.orderId },
+    ])
+    expect(await effects(f.workspaceId)).toEqual({ people: 1, orders: 1, registrations: 1, offers: 1, audit: 1 })
+    await pool.query('UPDATE workspace_members SET home_department_id=$3 WHERE workspace_id=$1 AND user_id=$2', [f.workspaceId, f.userId, department])
+    const protectedSubmission = await f.submit()
+    await pool.query('UPDATE workspace_members SET home_department_id=NULL WHERE workspace_id=$1 AND user_id=$2', [f.workspaceId, f.userId])
+    await commerce.cancelOrder(f.workspaceId, String(offered.record.orderId), f.actor)
+    await pool.query("UPDATE entities SET compartments='{}' WHERE id=$1", [protectedSubmission.contactId])
+    await pool.query('DELETE FROM department_edges WHERE department_id=$1 AND user_id=$2', [department, f.userId])
+    const promotionId = randomUUID(), submissionId = String(protectedSubmission.submissionId)
+    await expect(f.offer(promotionId, submissionId)).rejects.toMatchObject({ code: 'not_authorized' })
+    expect((await commerce.listWaitlist(f.workspaceId, { limit: 100, cursor: null }, f.actor)).items.map(row => row.id)).not.toContain(submissionId)
+    await pool.query("INSERT INTO department_edges(workspace_id,department_id,principal_kind,user_id,clearance,origin) VALUES($1,$2,'user',$3,'internal','store')", [f.workspaceId, department, f.userId])
+    const restored = await f.offer(promotionId, submissionId)
+    expect((await pool.query('SELECT scope_snapshot FROM association_orders WHERE id=$1', [restored.record.orderId])).rows[0].scope_snapshot.compartments).toEqual([`team:${department}`])
+    expect((await f.offer(promotionId, submissionId)).created).toBe(false)
+  })
   it('preserves the intake person and atomically links one ordinary order through concurrent retries', async () => {
     const f = await fixture(), promotionId = randomUUID(), result = await Promise.all([f.offer(promotionId), f.offer(promotionId)])
     expect(result.filter(r => r.created)).toHaveLength(1)
     expect(result[0].record.id).toBe(result[1].record.id)
     expect(result[0].record.order).toMatchObject({ contactId: f.contactId, status: 'pending', totalMinor: '0' })
     expect(await effects(f.workspaceId)).toEqual({ people: 1, orders: 1, registrations: 1, offers: 1, audit: 1 })
-    expect((await commerce.listWaitlist(f.workspaceId, { limit: 100, cursor: null })).items).toMatchObject([{ id: f.submissionId, waitlistState: 'offered', orderId: result[0].record.orderId }])
+    expect((await commerce.listWaitlist(f.workspaceId, { limit: 100, cursor: null }, f.actor)).items).toMatchObject([{ id: f.submissionId, waitlistState: 'offered', orderId: result[0].record.orderId }])
     await expect(f.offer(promotionId, f.submissionId, f.actor, { reservationMinutes: 30 })).rejects.toMatchObject({ code: 'idempotency_conflict' })
     await commerce.confirmFreeOrder(f.workspaceId, String(result[0].record.orderId), f.actor)
-    expect((await commerce.listWaitlist(f.workspaceId, { limit: 100, cursor: null })).items).toMatchObject([{ waitlistState: 'converted' }])
+    expect((await commerce.listWaitlist(f.workspaceId, { limit: 100, cursor: null }, f.actor)).items).toMatchObject([{ waitlistState: 'converted' }])
     expect((await pool.query('SELECT id FROM association_provider_events WHERE workspace_id=$1', [f.workspaceId])).rows).toEqual([])
   })
   it('serializes different promotion identities for one submission and different submissions for the last place', async () => {
@@ -86,8 +113,8 @@ describe('[COMP:crm/association-waitlist] Actual intake-backed offers', () => {
     const f = await fixture()
     await pool.query("UPDATE association_enquiries SET status='resolved' WHERE id=$1", [f.submissionId])
     await expect(f.offer()).rejects.toMatchObject({ details: { reason: 'waitlist_source_changed' } })
-    expect((await commerce.listWaitlist(f.workspaceId, { limit: 100, cursor: null })).items).toEqual([])
-    expect((await commerce.listWaitlist(f.workspaceId, { limit: 100, cursor: null, includeClosed: true })).items).toMatchObject([{ waitlistState: 'closed' }])
+    expect((await commerce.listWaitlist(f.workspaceId, { limit: 100, cursor: null }, f.actor)).items).toEqual([])
+    expect((await commerce.listWaitlist(f.workspaceId, { limit: 100, cursor: null, includeClosed: true }, f.actor)).items).toMatchObject([{ waitlistState: 'closed' }])
     const g = await fixture()
     await operations.execute(g.context, CrmOperationsCommandSchema.parse({ kind: 'save_intake_definition', definitionId: g.definitionId, definitionKey: 'waitlist', label: 'Updated fixture', expectedVersion: 1, definition: { ...g.definition, queueKey: 'other' } }))
     expect((await g.offer()).created).toBe(true)
@@ -95,8 +122,10 @@ describe('[COMP:crm/association-waitlist] Actual intake-backed offers', () => {
     await pool.query("UPDATE association_enquiries SET submitted_data=jsonb_set(submitted_data,'{association_ticket_id}',to_jsonb($2::text)) WHERE id=$1", [h.submissionId, randomUUID()])
     await expect(h.offer()).rejects.toMatchObject({ details: { reason: 'waitlist_definition_required' } })
   })
-  it('rechecks current credential grants before fresh or replayed offers and requires both event and definition authority', async () => {
+  it('rechecks legacy credential grants before fresh or replayed offers and requires both event and definition authority', async () => {
     const f = await fixture()
+    // Unbound integration credentials are intentionally unavailable under v2.
+    await pool.query('UPDATE workspaces SET department_read_v2=false WHERE id=$1', [f.workspaceId])
     const create = async (definitionId = f.definitionId) => {
       const credential = await keys.create(f.workspaceId, f.userId, { label: 'Waitlist backend', expiresAt: '2099-01-01T00:00:00Z', grants: [
         { operation: 'association.orders.write', selectors: { eventIds: [f.eventId] } },
@@ -115,15 +144,15 @@ describe('[COMP:crm/association-waitlist] Actual intake-backed offers', () => {
   })
   it('traverses more than 100 submissions with scoped filters before the limit and rejects changed cursor filters', async () => {
     const f = await fixture()
-    await pool.query(`INSERT INTO association_enquiries(workspace_id,contact_id,source,source_submission_id,request_fingerprint,subject,message,queue_key,status,submitted_data,definition_id,definition_version_id,definition_schema_snapshot)
-      SELECT workspace_id,contact_id,source,gen_random_uuid()::text,request_fingerprint,subject,message,queue_key,status,submitted_data,definition_id,definition_version_id,definition_schema_snapshot
+    await pool.query(`INSERT INTO association_enquiries(workspace_id,contact_id,source,source_submission_id,request_fingerprint,subject,message,queue_key,status,submitted_data,definition_id,definition_version_id,definition_schema_snapshot,scope_snapshot,scope_sources)
+      SELECT workspace_id,contact_id,source,gen_random_uuid()::text,request_fingerprint,subject,message,queue_key,status,submitted_data,definition_id,definition_version_id,definition_schema_snapshot,scope_snapshot,scope_sources
       FROM association_enquiries CROSS JOIN generate_series(1,104) WHERE id=$1`, [f.submissionId])
-    const first = await commerce.listWaitlist(f.workspaceId, { limit: 100, cursor: null, allowedEventIds: [f.eventId], allowedDefinitionIds: [f.definitionId] })
-    const next = await commerce.listWaitlist(f.workspaceId, { limit: 100, cursor: first.nextCursor, allowedEventIds: [f.eventId], allowedDefinitionIds: [f.definitionId] })
+    const first = await commerce.listWaitlist(f.workspaceId, { limit: 100, cursor: null, allowedEventIds: [f.eventId], allowedDefinitionIds: [f.definitionId] }, f.actor)
+    const next = await commerce.listWaitlist(f.workspaceId, { limit: 100, cursor: first.nextCursor, allowedEventIds: [f.eventId], allowedDefinitionIds: [f.definitionId] }, f.actor)
     expect(first.items).toHaveLength(100); expect(next.items).toHaveLength(5); expect(next.nextCursor).toBeNull()
     expect(new Set([...first.items, ...next.items].map(r => r.id)).size).toBe(105)
-    expect((await commerce.listWaitlist(f.workspaceId, { limit: 100, cursor: null, allowedDefinitionIds: [randomUUID()] })).items).toEqual([])
-    await expect(commerce.listWaitlist(f.workspaceId, { limit: 100, cursor: first.nextCursor, eventId: f.eventId })).rejects.toMatchObject({ code: 'invalid_input' })
+    expect((await commerce.listWaitlist(f.workspaceId, { limit: 100, cursor: null, allowedDefinitionIds: [randomUUID()] }, f.actor)).items).toEqual([])
+    await expect(commerce.listWaitlist(f.workspaceId, { limit: 100, cursor: first.nextCursor, eventId: f.eventId }, f.actor)).rejects.toMatchObject({ code: 'invalid_input' })
   })
   it('enforces immutable links, workspace foreign keys and member read-only RLS', async () => {
     const f = await fixture(), g = await fixture(), offer = await f.offer(), other = await g.offer(), client = await appPool.connect()

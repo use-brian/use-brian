@@ -1,3 +1,4 @@
+import { assertCrmDeliveryScope, captureCrmDeliveryScope, withCrmDeliverySourceActor } from './delivery-source-authority.js'
 /** Durable single-attempt CRM sends. [COMP:crm/delivery-receipts] */
 import { randomUUID } from 'node:crypto'
 import type { PoolClient } from 'pg'
@@ -62,6 +63,7 @@ async function authorize(client:PoolClient,context:CrmOperationsContext,operatio
     await lockNativeDeliveryPrincipal(client,context.workspaceId,{actor:context.actor,ceiling:context.authority.nativeDelivery},operation==='crm.delivery.dispatch')
   } else throw new CrmOperationsError('not_authorized','This principal has no CRM delivery authority.')
   if(operation==='crm.delivery.dispatch' && !context.authority.canWrite) throw new CrmOperationsError('not_authorized','CRM delivery write authority is required.')
+  if(row)await withCrmDeliverySourceActor(client,context,actor=>assertCrmDeliveryScope(client,context.workspaceId,row.deliveryId,actor))
 }
 async function readRow(client:PoolClient,workspaceId:string,deliveryId:string) {
   return (await client.query<Row>(`SELECT ${projection},request_hash AS "requestHash",actor_kind AS "actorKind",actor_credential_id AS "actorCredentialId"
@@ -120,14 +122,16 @@ export function createCrmDeliveryService(prepare:PrepareCrmDelivery):CrmDelivery
       const claimed=await inspectCrmMailAdmission(scope,{
         to:command.to,cc:command.cc,bcc:command.bcc,crmPurposeKey:command.purposeKey,crmTemplateKey:command.templateKey,
       },async(admission,client)=>{
+        const evidence=await captureCrmDeliveryScope(client,context,admission.contactIds,command.purposeKey)
         const inserted=await client.query<Row>(`INSERT INTO crm_delivery_receipts(workspace_id,delivery_id,request_hash,connector_instance_id,provider_key,purpose_key,
-          actor_kind,actor_credential_id,acting_user_id,envelope,status,claim_token,claim_deadline)
-          VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10::jsonb,'dispatching',$11,clock_timestamp()+interval '5 minutes')
+          actor_kind,actor_credential_id,acting_user_id,envelope,status,claim_token,claim_deadline,scope_snapshot,scope_sources)
+          VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10::jsonb,'dispatching',$11,clock_timestamp()+interval '5 minutes',$12::jsonb,$13::jsonb)
           ON CONFLICT(workspace_id,delivery_id) DO NOTHING RETURNING ${projection}`,
           [context.workspaceId,command.deliveryId,hash,command.connectorInstanceId,admission.providerKey,command.purposeKey,
-            actor.actorKind,actor.actorCredentialId,actor.actingUserId,JSON.stringify(command),claimToken])
+            actor.actorKind,actor.actorCredentialId,actor.actingUserId,JSON.stringify(command),claimToken,evidence?JSON.stringify(evidence.scope):null,evidence?JSON.stringify(evidence.sources):null])
         if(!inserted.rowCount) {
           const row=(await readRow(client,context.workspaceId,command.deliveryId))!
+          await authorize(client,context,'crm.delivery.dispatch',row)
           sameRequest(row,context,hash)
           return {receipt:project(row),admission,duplicate:true}
         }
@@ -145,6 +149,7 @@ export function createCrmDeliveryService(prepare:PrepareCrmDelivery):CrmDelivery
               AND request_hash=$3 AND claim_token=$4 AND status='dispatching' AND envelope IS NOT NULL AND redacted_at IS NULL
               AND claim_deadline>clock_timestamp() FOR UPDATE`,[context.workspaceId,command.deliveryId,hash,claimToken])
             if(!row.rowCount)throw unavailable('delivery_claim_unavailable')
+            await authorize(client,context,'crm.delivery.dispatch',(await readRow(client,context.workspaceId,command.deliveryId))!)
             await contacts(client,context.workspaceId,command.deliveryId,admission.contactIds)
           },
           async afterInvoke(client,admission,result) {
@@ -160,7 +165,11 @@ export function createCrmDeliveryService(prepare:PrepareCrmDelivery):CrmDelivery
         })
         invoking=true
         await prepared.send(dispatchScope)
-        const row=await transaction(client=>readRow(client,context.workspaceId,command.deliveryId))
+        const row=await transaction(async client=>{
+          const saved=await readRow(client,context.workspaceId,command.deliveryId)
+          if(saved)await authorize(client,context,'crm.delivery.dispatch',saved)
+          return saved
+        })
         if(row?.status!=='sent')throw unavailable('delivery_transport_receipt_missing')
         return {receipt:project(row),duplicate:false}
       } catch(error) {
@@ -175,6 +184,7 @@ export function createCrmDeliveryService(prepare:PrepareCrmDelivery):CrmDelivery
           return readRow(client,context.workspaceId,command.deliveryId)
         }).catch(()=>null)
         if(!row)throw unavailable('delivery_outcome_unavailable')
+        await transaction(client=>authorize(client,context,'crm.delivery.dispatch',row))
         return {receipt:project(row),duplicate:false}
       }
     },

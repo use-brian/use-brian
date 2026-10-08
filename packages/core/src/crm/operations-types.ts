@@ -10,9 +10,10 @@
 
 import { createHash } from 'node:crypto'
 import { z } from 'zod'
+import { parseAuthoringAuthority, type AuthoringAuthority } from '../security/access-ceiling.js'
 import { APP_LOCALES } from '@use-brian/shared'
 import { campaignAttributionContextSchema } from '@use-brian/shared/campaigns'
-import { CrmIntegrationAuthoritySchema, requireCrmIntegrationOperation, type CrmIntegrationOperation } from './integration-authority.js'
+import { CrmCredentialDepartmentSelectionSchema, CrmIntegrationAuthoritySchema, requireCrmIntegrationOperation, type CrmIntegrationOperation } from './integration-authority.js'
 import { AssociationPlanInputSchema, AssociationEventInputSchema } from '../association/domain.js'
 import { CrmConfigCommandSchema, isCrmConfigCommand } from './config-commands.js'
 import { PreviewCrmImportFileCleanupCommandSchema, ExecuteCrmImportFileCleanupCommandSchema } from './file-cleanup-types.js'
@@ -97,6 +98,8 @@ export type CrmOperationsActor = z.infer<typeof CrmOperationsActorSchema>
 /** Trusted native adapter ceiling, never command input. */
 export const CrmNativeDeliveryAuthoritySchema = z.object({
   assistantId: CrmOperationsUuidSchema,
+  authoringAuthority: z.custom<AuthoringAuthority>(value => parseAuthoringAuthority(value) !== null)
+    .transform(value => parseAuthoringAuthority(value)!).optional(),
   mutationCompartments: z.array(z.string()).max(1000).nullable().default([]),
   compartments: z.array(z.string()).max(1000).nullable(),
   projectIds: z.array(CrmOperationsUuidSchema).max(1000).nullable(),
@@ -294,6 +297,7 @@ export const CreateCrmIntakeCredentialCommandSchema = z.object({
   rotateFromCredentialId: CrmOperationsUuidSchema.optional(),
   label: z.string().trim().min(1).max(200),
   definitionIds: z.array(CrmOperationsUuidSchema).min(1).max(50),
+  departmentBinding: CrmCredentialDepartmentSelectionSchema.optional(),
 })
 
 export const RevokeCrmIntakeCredentialCommandSchema = z.object({

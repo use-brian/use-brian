@@ -19,6 +19,7 @@
  */
 
 import type { PoolClient } from 'pg'
+import { loadDepartmentSnapshot } from '../context-scope/department-resolver.js'
 import { transferAssistant } from './assistant-transfer-admission.js'
 import { seedBuiltinPrimitiveCapabilities } from './capability-seed.js'
 import {
@@ -467,15 +468,18 @@ export async function getWorkspaceMembershipWithReadScopeSystem(
   clearance: 'public' | 'internal' | 'confidential'
   compartments: string[] | null
   projectIds: string[] | null
+  departmentAccess?: Awaited<ReturnType<typeof loadDepartmentSnapshot>>
 } | null> {
   try {
     const result = await query<{
+      departmentReadV2: boolean
       role: 'owner' | 'admin' | 'member'
       clearance: 'public' | 'internal' | 'confidential'
       compartments: string[] | null
       projectIds: string[] | null
     }>(
       `SELECT wm.role, wm.clearance,
+              w.department_read_v2 AS "departmentReadV2",
               effective_member_read_compartments(wm.user_id, wm.workspace_id) AS compartments,
               CASE WHEN wm.role IN ('owner','admin') THEN NULL
                    ELSE COALESCE((
@@ -485,10 +489,16 @@ export async function getWorkspaceMembershipWithReadScopeSystem(
                       WHERE pm.user_id = wm.user_id AND p.workspace_id = wm.workspace_id
                    ), '{}') END AS "projectIds"
          FROM workspace_members wm
+         JOIN workspaces w ON w.id = wm.workspace_id
         WHERE wm.workspace_id = $1 AND wm.user_id = $2`,
       [workspaceId, userId],
     )
-    return result.rows[0] ?? null
+    const membership = result.rows[0]
+    if (!membership) return null
+    const departmentAccess = membership.departmentReadV2
+      ? await loadDepartmentSnapshot(<R>(sql: string, values: unknown[]) => query<R & Record<string, unknown>>(sql, values), { workspaceId, userId, assistantId: null })
+      : undefined
+    return { ...membership, departmentAccess }
   } catch (err) {
     console.error('[workspace-store] scoped membership lookup failed:', err)
     return null

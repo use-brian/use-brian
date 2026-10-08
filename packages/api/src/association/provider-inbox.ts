@@ -1,8 +1,9 @@
+import { beginAssociationCreation, assertAssociationOrderAuthority, assertAssociationSourceAuthority, loadAssociationOrderScope, withAssociationProviderReceipt } from './source-scope.js'
 /** Durable provider admission, leases and atomic application. [COMP:crm/provider-inbox] */
 import { randomUUID } from 'node:crypto'
 import type { Pool, PoolClient } from 'pg'
 import {
-  AssociationActorSchema, AssociationError, CrmOperationsError, CrmIntegrationScopeError, ProviderInboxEnvelopeSchema, crmOperationsSha256,
+  AssociationActorSchema, AssociationError, CrmOperationsError, CrmIntegrationScopeError, ProviderInboxEnvelopeSchema, crmOperationsSha256, deriveResourceScope,
   type AssociationActor, type ProviderInboxEnvelope, type ProviderReceiptState,
 } from '@use-brian/core'
 import { crmPageInstant } from '../crm-operations/pagination.js'
@@ -21,7 +22,7 @@ export type ProviderInboxHandlers = {
     record: Record<string, unknown>; created: boolean;
     reviewReason?: 'membership_refund_policy_pending' | 'membership_dispute_policy_pending';
   }>
-  read(client: PoolClient, row: ProviderInboxRow): Promise<Record<string, unknown>>
+  read(client: PoolClient, row: ProviderInboxRow, actor: AssociationActor): Promise<Record<string, unknown>>
 }
 async function transaction<T>(pool: Pool, fn: (client: PoolClient) => Promise<T>): Promise<T> {
   const client = await pool.connect()
@@ -77,19 +78,35 @@ export async function receiveProviderInbox(pool: Pool, raw: ProviderInboxEnvelop
   let admitted: ProviderInboxRow
   try {
     admitted = await transaction(pool, async client => {
+      await beginAssociationCreation(client, workspaceId)
       const target = await handlers.authorize(client, envelope, actor)
+      let evidence = await loadAssociationOrderScope(client, workspaceId, [target.contactId])
+      const parents = envelope.target === 'order'
+        ? [[envelope.orderId, 'order'] as const]
+        : [target.entitlementId ? [target.entitlementId, 'membership'] as const : null,
+          envelope.event.membershipCheckout ? [envelope.event.membershipCheckout.id, 'checkout'] as const : null]
+      for (const parent of parents) {
+        if (!parent) continue
+        const inherited = await assertAssociationOrderAuthority(client, workspaceId, parent[0], actor, parent[1])
+        if (inherited) evidence = { sources: [...evidence.sources, ...inherited.sources],
+          scope: deriveResourceScope({ producer: 'association.provider-receipt', sources: [
+            ...evidence.sources, { ...inherited.scope, resourceKind: parent[1], resourceId: parent[0], version: 'saved' },
+          ] }, evidence.scope) }
+      }
+      await assertAssociationSourceAuthority(client, workspaceId, actor, evidence)
       if (mode === 'explicit') await client.query(`INSERT INTO association_integration_events
         (workspace_id,provider,provider_event_id,provider_reference,occurred_at,target_kind,order_id,entitlement_id,contact_id,plan_id,
-         request_fingerprint,normalized_payload,admitted_actor,execution_actor)
-        VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$13) ON CONFLICT(workspace_id,provider,provider_event_id) DO NOTHING`,
+         request_fingerprint,normalized_payload,admitted_actor,execution_actor,scope_snapshot,scope_sources)
+        VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$13,$14::jsonb,$15::jsonb) ON CONFLICT(workspace_id,provider,provider_event_id) DO NOTHING`,
         [workspaceId, event.provider, event.eventId, event.providerReference, event.occurredAt, envelope.target,
           envelope.target === 'order' ? envelope.orderId : null, target.entitlementId, target.contactId, target.planId,
-          hash, envelope, actor])
+          hash, envelope, actor, JSON.stringify(evidence.scope), JSON.stringify(evidence.sources)])
       const row = (await client.query<ProviderInboxRow>(`SELECT * FROM association_integration_events
         WHERE workspace_id=$1 AND provider=$2 AND provider_event_id=$3 FOR UPDATE`, [workspaceId, event.provider, event.eventId])).rows[0]
       if (!row) throw new CrmOperationsError('not_found', 'Provider receipt is unavailable.')
       if (row.request_fingerprint !== hash) throw new CrmOperationsError('idempotency_conflict', 'Provider event identity already records different normalized input.')
       await handlers.authorize(client, envelope, actor, row.admitted_actor)
+      await assertAssociationOrderAuthority(client, workspaceId, row.id, actor, 'provider_receipt')
       if (mode === 'worker' && crmOperationsSha256(row.execution_actor) !== crmOperationsSha256(actor)) unavailable(row)
       if (mode === 'explicit' && row.state !== 'applied') {
         const live = row.state === 'processing' && (await client.query<{ live: boolean }>('SELECT $1::timestamptz>clock_timestamp() live', [row.lease_expires_at])).rows[0]?.live
@@ -110,10 +127,12 @@ export async function receiveProviderInbox(pool: Pool, raw: ProviderInboxEnvelop
     throw error
   }
   const claim = await transaction(pool, async client => {
+      await beginAssociationCreation(client, workspaceId)
     await handlers.authorize(client, envelope, actor, admitted.admitted_actor)
     const row = (await client.query<ProviderInboxRow>('SELECT * FROM association_integration_events WHERE workspace_id=$1 AND id=$2 FOR UPDATE', [workspaceId, admitted.id])).rows[0]
     if (!row) throw new CrmOperationsError('not_found', 'Provider receipt is unavailable.')
-    if (row.state === 'applied') return { row, completed: { record: await handlers.read(client, row), created: false, receipt: publicReceipt(row) } }
+    await assertAssociationOrderAuthority(client, workspaceId, row.id, actor, 'provider_receipt')
+    if (row.state === 'applied') return { row, completed: { record: await handlers.read(client, row, actor), created: false, receipt: publicReceipt(row) } }
     const due = (await client.query<{ due: boolean }>(`SELECT (state IN('pending','retry') AND next_attempt_at<=clock_timestamp())
       OR (state='processing' AND lease_expires_at<=clock_timestamp()) due FROM association_integration_events WHERE id=$1`, [row.id])).rows[0]?.due
     if (!due) unavailable(row)
@@ -131,10 +150,12 @@ export async function receiveProviderInbox(pool: Pool, raw: ProviderInboxEnvelop
   const lease = claim.row.lease_token!
   try {
     return await transaction(pool, async client => {
+      await beginAssociationCreation(client, workspaceId)
       await handlers.authorize(client, envelope, actor, admitted.admitted_actor)
       const row = (await client.query<ProviderInboxRow>('SELECT * FROM association_integration_events WHERE workspace_id=$1 AND id=$2 FOR UPDATE', [workspaceId, admitted.id])).rows[0]
       if (!row || row.state !== 'processing' || row.lease_token !== lease) throw new CrmOperationsError('conflict', 'Provider receipt lease changed.', { reason: 'lease_lost' })
-      const applied = await handlers.apply(client, envelope, actor)
+      const applied = await withAssociationProviderReceipt(client, workspaceId, row.id, actor,
+        () => handlers.apply(client, envelope, actor))
       const saved = applied.reviewReason
         ? (await client.query<ProviderInboxRow>(`UPDATE association_integration_events SET state='needs_reconciliation',applied_at=NULL,
           updated_at=clock_timestamp(),entitlement_id=CASE WHEN target_kind='entitlement' THEN $3::uuid ELSE entitlement_id END,

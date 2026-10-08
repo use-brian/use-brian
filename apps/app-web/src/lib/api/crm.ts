@@ -264,7 +264,7 @@ export async function fetchCrmRecord(
   );
   if (res.status === 404) return null;
   const body = (await res.json().catch(() => ({}))) as CrmRecordBundle & { error?: string };
-  if (!res.ok) throw new Error(body.error ?? `Failed to load CRM record (${res.status})`);
+  if (!res.ok) throw Object.assign(new Error(body.error ?? `Failed to load CRM record (${res.status})`), { status: res.status });
   return body;
 }
 
@@ -956,6 +956,16 @@ export function updateCrmParticipation(
 
 export function fetchCrmConfig(workspaceId: string, includeArchived = false): Promise<CrmConfig> {
   return jsonRequest(`/api/crm/${encodeURIComponent(workspaceId)}/config${includeArchived ? "?archived=true" : ""}`);
+}
+
+export type CrmCreationDestination = { departmentId: string | null; sensitivity: "public" | "internal" | "confidential" };
+export type CrmCreationPreview = {
+  departments: { id: string; name: string; clearance: CrmCreationDestination["sensitivity"] }[];
+  generalClearance: CrmCreationDestination["sensitivity"];
+  defaultDestination: CrmCreationDestination;
+};
+export function fetchCrmCreationDestination(workspaceId: string): Promise<CrmCreationPreview> {
+  return jsonRequest(`/api/crm/${encodeURIComponent(workspaceId)}/creation-destination`);
 }
 
 export async function createCrmRecord(

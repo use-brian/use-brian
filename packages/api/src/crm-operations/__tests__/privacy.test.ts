@@ -27,19 +27,22 @@ describe('[COMP:crm/operations-privacy] CRM operations privacy lifecycle', () =>
     mocks.query.mockImplementation(async () => ({ rows: [], rowCount: 0 }))
     mocks.clientQuery.mockImplementation(async () => ({ rows: [], rowCount: 0 }))
     mocks.getPool.mockReturnValue({
+      query: mocks.clientQuery,
       connect: async () => ({ query: mocks.clientQuery, release: mocks.release }),
     })
   })
 
   it('exports every operations table without credential secret hashes', async () => {
-    const exported = await exportCrmOperationsPrivacy(workspaceId)
+    mocks.clientQuery.mockImplementation(async (sql: string) => ({ rows: sql.includes('SELECT role FROM workspace_members') ? [{role:'owner'}] : sql.includes('SELECT department_read_v2') ? [{department_read_v2:false}] : [], rowCount: 0 }))
+    const exported = await exportCrmOperationsPrivacy({workspaceId,actor:{kind:'user',userId:contactId},authority:{role:'owner',canWrite:true,canConfigure:true,trustedIdentitySources:[]}})
     expect(Object.keys(exported.tables)).toEqual([...CRM_OPERATIONS_PRIVACY_TABLES])
-    expect(mocks.query).toHaveBeenCalledTimes(CRM_OPERATIONS_PRIVACY_TABLES.length)
-    const credentialSql = mocks.query.mock.calls.map(([sql]) => String(sql))
+    expect(mocks.clientQuery.mock.calls.filter(([sql]) => String(sql).startsWith('SELECT ') && !String(sql).includes('SELECT role ') && !String(sql).includes('SELECT department_read_v2'))).toHaveLength(CRM_OPERATIONS_PRIVACY_TABLES.length)
+    const credentialSql = mocks.clientQuery.mock.calls.map(([sql]) => String(sql))
       .find((sql) => sql.includes('FROM crm_intake_credentials '))
     expect(credentialSql).toContain('secret_prefix')
     expect(credentialSql).not.toContain('secret_hash')
-    expect(mocks.query.mock.calls.every(([, params]) => (params as unknown[])[0] === workspaceId)).toBe(true)
+    expect(mocks.clientQuery).toHaveBeenCalledWith('COMMIT')
+    expect(mocks.release).toHaveBeenCalled()
   })
 
   it('redacts personal operation payloads before the entity hard delete', async () => {
@@ -60,10 +63,10 @@ describe('[COMP:crm/operations-privacy] CRM operations privacy lifecycle', () =>
 
   it('retains append-only evidence while pruning only configured terminal data', async () => {
     mocks.clientQuery.mockImplementation(async (statement: string) => ({
-      rows: [],
+      rows: statement.includes('SELECT role FROM workspace_members') ? [{role:'owner'}] : statement.includes('SELECT department_read_v2') ? [{department_read_v2:false}] : [],
       rowCount: String(statement).startsWith('DELETE') ? 2 : 0,
     }))
-    const result = await pruneCrmOperationsRetention(workspaceId, new Date('2026-01-01T00:00:00Z'))
+    const result = await pruneCrmOperationsRetention({workspaceId,actor:{kind:'user',userId:contactId},authority:{role:'owner',canWrite:true,canConfigure:true,trustedIdentitySources:[]}}, new Date('2026-01-01T00:00:00Z'))
     const sql = mocks.clientQuery.mock.calls.map(([statement]) => String(statement)).join('\n')
 
     expect(result.total).toBe(12)

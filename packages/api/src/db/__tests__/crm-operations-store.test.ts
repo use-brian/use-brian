@@ -49,14 +49,16 @@ describe('[COMP:crm/operations-store] CRM operations PostgreSQL transaction stor
     expect(query.mock.calls.map((call) => call[0])).toEqual([
       'BEGIN',
       expect.stringContaining("set_config('app.system_bypass', 'true', true)"),
+      'SELECT id FROM workspaces WHERE id=$1 AND department_read_v2 FOR UPDATE',
       'ROLLBACK',
     ])
     expect(query).not.toHaveBeenCalledWith('COMMIT')
     expect(release).toHaveBeenCalledOnce()
   })
 
-  it('refuses generic lifecycle updates for commerce-managed participation', async () => {
+  it('refuses generic lifecycle updates for commerce-managed participation in legacy workspaces', async () => {
     const query = vi.fn().mockImplementation(async (sql: string) => {
+      if (sql.includes('SELECT department_read_v2')) return { rows: [{ v2: false }], rowCount: 1 }
       if (sql.includes('SELECT status, source_kind')) {
         return { rows: [{ status: 'confirmed', sourceKind: 'commerce' }], rowCount: 1 }
       }
@@ -74,8 +76,9 @@ describe('[COMP:crm/operations-store] CRM operations PostgreSQL transaction stor
     expect(query).toHaveBeenCalledWith('ROLLBACK')
   })
 
-  it('rejects invalid entitlement lifecycle reversal inside the transaction', async () => {
+  it('rejects invalid entitlement lifecycle reversal inside a legacy transaction', async () => {
     const query = vi.fn().mockImplementation(async (sql: string) => {
+      if (sql.includes('SELECT department_read_v2')) return { rows: [{ v2: false }], rowCount: 1 }
       if (sql.includes('SELECT status, starts_at')) {
         return { rows: [{ status: 'cancelled', startsAt: new Date('2026-08-30T00:00:00Z') }], rowCount: 1 }
       }

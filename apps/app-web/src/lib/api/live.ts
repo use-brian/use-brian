@@ -12,6 +12,7 @@ import { publicRuntimeConfig } from "@/lib/runtime-public-config";
  * [COMP:app-web/live-app]
  */
 
+import { SurfaceCacheEvictionError } from "@/lib/surface-cache";
 import { authFetch } from "@/lib/auth-fetch";
 
 const API_URL = publicRuntimeConfig().apiUrl ?? "http://localhost:4000";
@@ -55,13 +56,29 @@ export type LiveWorkflowRunItem = {
 
 export type LiveWorkItem = LiveSessionItem | LiveWorkflowRunItem;
 
+const deadlines = new WeakMap<LiveWorkItem[], number>();
+const MAX_AGE_MS = 30_000;
+
+/** Expiry metadata stays local to each authorized response, including prefetch. */
+export function liveRosterRemaining(value: unknown): number {
+  return Math.max(0, (deadlines.get(value as LiveWorkItem[]) ?? 0) - performance.now());
+}
+
 export async function fetchLiveRoster(
   workspaceId: string,
 ): Promise<LiveWorkItem[]> {
+  const started = performance.now();
   const res = await authFetch(
     `${API_URL}/api/workspaces/${encodeURIComponent(workspaceId)}/live`,
   );
-  if (!res.ok) throw new Error(`live roster failed: ${res.status}`);
+  if (!res.ok) {
+    const error = new Error(`live roster failed: ${res.status}`);
+    if ([401, 403, 404].includes(res.status)) throw new SurfaceCacheEvictionError(error);
+    throw error;
+  }
   const body = (await res.json()) as { items?: LiveWorkItem[] };
-  return body.items ?? [];
+  const items = body.items ?? [];
+  deadlines.set(items, started + MAX_AGE_MS);
+  if (liveRosterRemaining(items) <= 0) throw new SurfaceCacheEvictionError(new Error('live_roster_expired'));
+  return items;
 }

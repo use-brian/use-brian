@@ -132,6 +132,7 @@ describe('[COMP:api/apps-shopify-route] the resolver decides, the route executes
     await request(a).post('/api/apps/shopify/call').send({ workspaceId: WS, tool: 'shopifyGetShop' })
     expect(storeTools).toHaveBeenCalledWith({
       workspaceId: WS,
+      actingUserId: 'u1',
       storeScope: 'write',
       alsoAllow: ['shopifyCreateProductTemplate'],
     })

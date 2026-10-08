@@ -67,7 +67,12 @@ export async function saveCrmPrivacyPolicy(
     && current.policy.addressSuppression?.retentionSeconds === addressSuppression?.retentionSeconds
     && canonicalCrmRequest(current.policy.retention ?? null) === canonicalCrmRequest(retention)
     && canonicalCrmRequest(current.policy.importSourceErasure ?? null) === canonicalCrmRequest(importSourceErasure)) {
-    return { record: current, created: false }
+    // Explicitly reapprove a scheduled policy whose original approver lost
+    // authority. Unrelated edits and still-authorized approvals remain no-ops.
+    const reapprove = command.retention?.scheduled === true && !(await client.query(
+      "SELECT 1 FROM workspace_members WHERE workspace_id=$1 AND user_id=$2 AND role IN('owner','admin') FOR SHARE",
+      [context.workspaceId,current.approvedByUserId])).rowCount
+    if (!reapprove) return { record: current, created: false }
   }
   const saved = await client.query<PolicyRecord>(
     `INSERT INTO crm_privacy_policies(workspace_id,version,policy,approved_by_user_id)

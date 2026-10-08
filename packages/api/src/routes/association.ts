@@ -12,7 +12,7 @@ import { Router, type Request, type RequestHandler, type Response } from 'expres
 import { z } from 'zod'
 import { WorkspaceModuleError } from '../db/workspace-modules-store.js'
 import {
-  CrmOperationsError,
+  AssociationDestinationPreviewSchema, CrmOperationsError,
   CrmIntegrationScopeError,
   AssociationWaitlistOfferInputSchema,
   AssociationProviderBindingInputSchema,
@@ -294,7 +294,7 @@ export function associationRoutes(opts: Options): Router {
       ...(query.status ? { status: query.status } : {}),
       ...(query.queueKey ? { queueKey: query.queueKey } : {}),
       ...(query.ownerUserId ? { ownerUserId: query.ownerUserId } : {}),
-    })
+    }, actorFor(res.locals.associationAuth))
     res.json({ enquiries: result.items, nextCursor: result.nextCursor })
   }))
 
@@ -327,7 +327,7 @@ export function associationRoutes(opts: Options): Router {
   router.get('/enquiries/:id/notes', endpoint(async (req, res) => {
     const id = parsed(UUID, req.params.id, res)
     if (!id) return
-    const notes = await store.listEnquiryNotes(res.locals.associationAuth.workspaceId, id)
+    const notes = await store.listEnquiryNotes(res.locals.associationAuth.workspaceId, id, actorFor(res.locals.associationAuth))
     res.json({ notes })
   }))
 
@@ -345,7 +345,7 @@ export function associationRoutes(opts: Options): Router {
   router.get('/contacts/:contactId/consents', endpoint(async (req, res) => {
     const contactId = parsed(UUID, req.params.contactId, res)
     if (!contactId) return
-    const result = await store.listConsents(res.locals.associationAuth.workspaceId, contactId)
+    const result = await store.listConsents(res.locals.associationAuth.workspaceId, contactId, actorFor(res.locals.associationAuth))
     res.json(result)
   }))
 
@@ -406,7 +406,7 @@ export function associationRoutes(opts: Options): Router {
       effectiveAt: z.string().datetime({ offset: true }).optional(),
     }).strict(), req.query, res)
     if (!filters) return
-    const memberships = await store.listMemberships(res.locals.associationAuth.workspaceId, contactId, filters)
+    const memberships = await store.listMemberships(res.locals.associationAuth.workspaceId, contactId, filters, actorFor(res.locals.associationAuth))
     res.json({ memberships })
   }))
 
@@ -494,6 +494,13 @@ export function associationRoutes(opts: Options): Router {
     res.status(result.created ? 201 : 200).json({ offer: result.record, created: result.created })
   }))
 
+  router.get('/orders/destinations', endpoint(async (req, res) => {
+    const input = parsed(AssociationDestinationPreviewSchema, { contactIds: typeof req.query.contactIds === 'string' ? req.query.contactIds.split(',') : req.query.contactIds }, res)
+    if (!input) return
+    const result = await associationService.execute(associationContextFor(res.locals.associationAuth), { kind: 'preview_order_destinations', ...input })
+    res.json(result.record)
+  }))
+
   router.post('/orders', endpoint(async (req, res) => {
     const order = parsed(OrderCreateSchema, req.body, res)
     if (!order) return
@@ -575,7 +582,7 @@ export function associationRoutes(opts: Options): Router {
     const result = await store.listNotifications(res.locals.associationAuth.workspaceId, {
       ...pagination,
       ...(query.status ? { status: query.status } : {}),
-    })
+    }, actorFor(res.locals.associationAuth))
     res.json({ notifications: result.items, nextCursor: result.nextCursor })
   }))
 

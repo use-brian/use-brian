@@ -11,6 +11,7 @@
  */
 
 import { Router } from 'express'
+import { resolveCrmDestination, previewCrmDestination } from '../crm-operations/creation-destination.js'
 import type { Request, Response } from 'express'
 import { z } from 'zod'
 import type {
@@ -315,6 +316,7 @@ export function crmRoutes({
     ctx: AccessContext,
     body: Record<string, unknown>,
   ): Promise<{ id: string; kind: CrmEntityKind }> {
+    const destination = await resolveCrmDestination(ctx.userId, ctx.workspaceId, body.destination)
     const rawKind = body.kind
     const kind: CrmEntityKind | null = rawKind === 'contact'
       ? 'person'
@@ -337,6 +339,7 @@ export function crmRoutes({
     if (kind === 'person') {
       const record = await createContact(ctx.userId, {
         workspaceId: ctx.workspaceId,
+        ...destination,
         name,
         email: nullableText(body.email, 320),
         phone: nullableText(body.phone, 100),
@@ -348,6 +351,7 @@ export function crmRoutes({
     } else if (kind === 'company') {
       const record = await createCompany(ctx.userId, {
         workspaceId: ctx.workspaceId,
+        ...destination,
         name,
         domain: nullableText(body.domain, 320),
         tags: stringArray(body.tags, 20),
@@ -374,6 +378,7 @@ export function crmRoutes({
       const close = nullableText(body.closeDate, 10)
       const record = await createDeal(ctx.userId, {
         workspaceId: ctx.workspaceId,
+        ...destination,
         access: ctx,
         contactId: nullableText(body.contactId, 100),
         companyId: nullableText(body.companyId, 100),
@@ -594,6 +599,13 @@ export function crmRoutes({
       console.error('[crm] lookup failed:', err)
       res.status(500).json({ error: 'Failed to load CRM lookup' })
     }
+  })
+
+  router.get('/:workspaceId/creation-destination', async (req, res) => {
+    const member = await memberContext(req as never, res)
+    if (!member) return
+    try { res.json(await previewCrmDestination(member.ctx.userId, member.ctx.workspaceId)) }
+    catch (error) { if (!respondToScopeRefusal(error, res)) res.status(400).json({ error: 'Creation destination unavailable' }) }
   })
 
   router.post('/:workspaceId/records', async (req, res) => {

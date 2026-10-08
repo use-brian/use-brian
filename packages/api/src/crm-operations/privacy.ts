@@ -9,7 +9,11 @@
  */
 
 import type pg from 'pg'
-import { CrmOperationsError, type CrmPageQuery, type CrmOperationsContext } from '@use-brian/core'
+import { CrmOperationsContextSchema, CrmOperationsError, type CrmPageQuery, type CrmOperationsContext } from '@use-brian/core'
+import { assertCrmPrivacyWorkspaceAuthority } from './privacy-subject-authority.js'
+import { assertAssociationSourceAuthority } from '../association/source-scope.js'
+import {assertCrmRetentionOwner} from './retention-service.js'
+import {createCrmRetentionAuthority,renewCrmRetentionScope} from './retention-authority.js'
 import { queryCrmPage } from './pagination.js'
 import { getPool, query, queryWithRLS } from '../db/client.js'
 import { currentAgentAccess } from '../db/agent-access-context.js'
@@ -93,6 +97,11 @@ const EXPORT_PROJECTIONS: Record<PrivacyTable, string> = Object.fromEntries(
   CRM_OPERATIONS_PRIVACY_TABLES.map((table) => [table, '*']),
 ) as Record<PrivacyTable, string>
 
+for (const table of ['association_enquiries','association_consent_events','crm_suppression_events'] as const) {
+  const projection = CRM_PRIVACY_COVERAGE.find(entry => entry.domain === table)!
+  EXPORT_PROJECTIONS[table] = projection.columns.filter(column => !projection.excludedColumns.includes(column)).join(',')
+}
+
 // A credential secret hash is authentication material, not exportable
 // workspace content. Its non-secret lifecycle metadata remains visible.
 EXPORT_PROJECTIONS.crm_intake_credentials = [
@@ -125,6 +134,8 @@ EXPORT_PROJECTIONS.crm_import_file_cleanups='id,workspace_id,owner_user_id,file_
 EXPORT_PROJECTIONS.crm_erasure_journal='id,workspace_id,table_name,operation,captured_at'
 EXPORT_PROJECTIONS.crm_retention_runs='id,workspace_id,owner_user_id,policy_version,mode,before_at,captured_at,expires_at,summary,status,receipt,error_code,completed_at,created_at'
 
+EXPORT_PROJECTIONS.crm_domain_event_outbox = CRM_PRIVACY_COVERAGE.find(entry=>entry.domain==='crm_domain_event_outbox')!.columns.filter(column=>!['lease_owner','leased_until','last_error','scope_source','scope_origin','scope_held','scope_version','privacy_scope'].includes(column)).join(',')
+
 EXPORT_PROJECTIONS.crm_privacy_previews='id,workspace_id,owner_user_id,subject_id,policy_version,domain_summary,blockers,status,created_at,expires_at,consumed_at,receipt'
 
 // Claim tokens and raw request fingerprints are private replay machinery.
@@ -147,18 +158,38 @@ export type CrmOperationsPrivacyExport = {
 }
 
 export async function exportCrmOperationsPrivacy(
-  workspaceId: string,
+  rawContext: CrmOperationsContext,
 ): Promise<CrmOperationsPrivacyExport> {
-  const tables: Record<string, unknown[]> = {}
-  for (const table of CRM_OPERATIONS_PRIVACY_TABLES) {
-    const result = await query(`SELECT ${EXPORT_PROJECTIONS[table]} FROM ${table} WHERE workspace_id=$1`, [workspaceId])
-    tables[table] = result.rows
+  const context = CrmOperationsContextSchema.parse(rawContext)
+  const { workspaceId } = context
+  if (context.actor.kind !== 'user' || !context.authority.canConfigure ||
+      !['owner', 'admin'].includes(context.authority.role)) {
+    throw new CrmOperationsError('not_authorized', 'A current workspace owner or admin is required for CRM privacy export.')
   }
-  return {
-    schema: 'crm-operations-privacy-v1',
-    workspaceId,
-    exportedAt: new Date().toISOString(),
-    tables,
+  const actor = { credentialKind: 'user' as const, credentialId: context.actor.userId, actingUserId: context.actor.userId }
+  const client = await getPool().connect()
+  let open = false
+  try {
+    await client.query('BEGIN ISOLATION LEVEL REPEATABLE READ')
+    open = true
+    await client.query("SET LOCAL statement_timeout='30s'")
+    const membership = await client.query('SELECT role FROM workspace_members WHERE workspace_id=$1 AND user_id=$2 FOR SHARE', [workspaceId, context.actor.userId])
+    if (!['owner', 'admin'].includes(membership.rows[0]?.role)) {
+      throw new CrmOperationsError('not_authorized', 'A current workspace owner or admin is required for CRM privacy export.')
+    }
+    const floor = await assertCrmPrivacyWorkspaceAuthority(client, context)
+    const tables: Record<string, unknown[]> = {}
+    for (const table of CRM_OPERATIONS_PRIVACY_TABLES) {
+      const result = await client.query(`SELECT ${EXPORT_PROJECTIONS[table]} FROM ${table} WHERE workspace_id=$1`, [workspaceId])
+      tables[table] = result.rows
+    }
+    if (floor) await assertAssociationSourceAuthority(getPool(), workspaceId, actor, { scope: floor, sources: [] })
+    await client.query('COMMIT')
+    open = false
+    return { schema: 'crm-operations-privacy-v1', workspaceId, exportedAt: new Date().toISOString(), tables }
+  } finally {
+    if (open) await client.query('ROLLBACK').catch(() => {})
+    client.release()
   }
 }
 
@@ -298,15 +329,18 @@ export type CrmOperationsRetentionResult = {
  * operators must configure real retention/legal policy before scheduling it.
  */
 export async function pruneCrmOperationsRetention(
-  workspaceId: string,
+  rawContext: CrmOperationsContext,
   before: Date,
 ): Promise<CrmOperationsRetentionResult> {
+  const context=CrmOperationsContextSchema.parse(rawContext),{workspaceId}=context
   if (!Number.isFinite(before.getTime())) throw new Error('Retention cutoff must be a valid instant.')
   const client = await getPool().connect()
   const deleted: Record<string, number> = {}
   try {
     await client.query('BEGIN')
     await acquireCrmPrivacyAdmission(client,workspaceId)
+    await assertCrmRetentionOwner(client,context)
+    const authority=await createCrmRetentionAuthority(client,context)
     const retentionPolicy = (await readCrmPrivacyPolicy(workspaceId, client)).policy
     const heldContacts = retentionPolicy.retention?.holds.filter(h => h.domain==='contact').map(h => h.id) ?? []
     const heldSubmissions = retentionPolicy.retention?.holds.filter(h => h.domain==='submission').map(h => h.id) ?? []
@@ -317,6 +351,19 @@ export async function pruneCrmOperationsRetention(
         AND NOT(id=ANY($3::uuid[])) AND NOT(contact_id=ANY($4::uuid[]))
         ORDER BY id FOR UPDATE`, [workspaceId, before, heldSubmissions, heldContacts])
     const submissionIds = enquiries.rows.map((row) => row.id)
+    for(const {id} of enquiries.rows)await authority.capture('association_enquiries',id)
+    const events=await client.query<{id:string}>(
+      `SELECT e.id FROM crm_domain_event_outbox e WHERE workspace_id=$1
+        AND status='delivered' AND created_at < $2
+        AND NOT(e.subject_id=ANY($3::uuid[])) AND NOT(e.subject_id=ANY($4::uuid[]))
+        AND NOT(COALESCE(e.payload->>'contactId','')=ANY($3::text[]))
+        AND NOT EXISTS(SELECT 1 FROM association_enquiries q WHERE q.workspace_id=e.workspace_id AND q.id=e.subject_id AND q.contact_id=ANY($3::uuid[]))
+        AND NOT EXISTS(SELECT 1 FROM workflow_runs r
+          WHERE r.workspace_id=e.workspace_id AND r.crm_event_id=e.id)
+        AND NOT EXISTS(SELECT 1 FROM goal_crm_event_sources g WHERE g.workspace_id=e.workspace_id AND g.event_id=e.id) ORDER BY e.id FOR UPDATE`,
+      [workspaceId, before, heldContacts, heldSubmissions])
+    for(const {id} of events.rows)await authority.capture('crm_domain_event_outbox',id)
+    await renewCrmRetentionScope(context,authority.scope())
     const retiredReceiptsDeleted = await retireCrmIntakeReceipts(client, workspaceId, { submissionIds })
     const remove = async (name: string, sql: string, values: unknown[]) => {
       const result = await client.query(sql, values)
@@ -338,16 +385,7 @@ export async function pruneCrmOperationsRetention(
         AND replay_expires_at<=clock_timestamp() AND NOT(id=ANY($2::uuid[]))
         AND NOT EXISTS(SELECT 1 FROM crm_import_jobs j WHERE j.workspace_id=s.workspace_id AND j.source_id=s.id)`,
       [workspaceId, heldSources])
-    await remove('crm_domain_event_outbox',
-      `DELETE FROM crm_domain_event_outbox e WHERE workspace_id=$1
-        AND status='delivered' AND created_at < $2
-        AND NOT(e.subject_id=ANY($3::uuid[])) AND NOT(e.subject_id=ANY($4::uuid[]))
-        AND NOT(COALESCE(e.payload->>'contactId','')=ANY($3::text[]))
-        AND NOT EXISTS(SELECT 1 FROM association_enquiries q WHERE q.workspace_id=e.workspace_id AND q.id=e.subject_id AND q.contact_id=ANY($3::uuid[]))
-        AND NOT EXISTS(SELECT 1 FROM workflow_runs r
-          WHERE r.workspace_id=e.workspace_id AND r.crm_event_id=e.id)
-        AND NOT EXISTS(SELECT 1 FROM goal_crm_event_sources g WHERE g.workspace_id=e.workspace_id AND g.event_id=e.id)`,
-      [workspaceId, before, heldContacts, heldSubmissions])
+    await remove('crm_domain_event_outbox','DELETE FROM crm_domain_event_outbox WHERE workspace_id=$1 AND id=ANY($2::uuid[])',[workspaceId,events.rows.map(row=>row.id)])
     await remove('crm_intake_idempotency',
       `DELETE FROM crm_intake_idempotency WHERE workspace_id=$1 AND status='retired'
         AND replay_expires_at<=clock_timestamp()`, [workspaceId])
@@ -358,6 +396,7 @@ export async function pruneCrmOperationsRetention(
     await remove('association_enquiries',
       `DELETE FROM association_enquiries WHERE workspace_id=$1
         AND id=ANY($2::uuid[])`, [workspaceId, submissionIds])
+    await renewCrmRetentionScope(context,authority.scope())
     await client.query('COMMIT')
   } catch (error) {
     await client.query('ROLLBACK').catch(() => {})

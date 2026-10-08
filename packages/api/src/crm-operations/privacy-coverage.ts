@@ -61,6 +61,12 @@ const CAMPAIGN_PRIVACY_COVERAGE: readonly CrmPrivacyCoverageEntry[] = [
 ]
 
 export const CRM_PRIVACY_COVERAGE: readonly CrmPrivacyCoverageEntry[] = [
+  {"domain": "association_membership_catalogues", "columns": ["workspace_id", "draft_version", "draft", "published_revision", "observations", "updated_at"], "excludedColumns": ["workspace_id", "draft_version", "draft", "published_revision", "observations", "updated_at"], "workspaceWhere": "false", "subjectWhere": null, "subjectRedactions": {}, "transforms": {}, "orderBy": "t.workspace_id", "reason": "Website draft and publication documents have no canonical CRM subject attribution; use the separate website content facility."},
+  {"domain": "association_membership_catalogue_revisions", "columns": ["workspace_id", "revision", "document", "actor", "published_at"], "excludedColumns": ["workspace_id", "revision", "document", "actor", "published_at"], "workspaceWhere": "false", "subjectWhere": null, "subjectRedactions": {}, "transforms": {}, "orderBy": "t.workspace_id,t.revision", "reason": "Website draft and publication documents have no canonical CRM subject attribution; use the separate website content facility."},
+  {"domain": "association_programme_catalogues", "columns": ["workspace_id", "draft_version", "draft", "published_revision", "observations", "updated_at"], "excludedColumns": ["workspace_id", "draft_version", "draft", "published_revision", "observations", "updated_at"], "workspaceWhere": "false", "subjectWhere": null, "subjectRedactions": {}, "transforms": {}, "orderBy": "t.workspace_id", "reason": "Website draft and publication documents have no canonical CRM subject attribution; use the separate website content facility."},
+  {"domain": "association_programme_catalogue_revisions", "columns": ["workspace_id", "revision", "document", "actor", "published_at"], "excludedColumns": ["workspace_id", "revision", "document", "actor", "published_at"], "workspaceWhere": "false", "subjectWhere": null, "subjectRedactions": {}, "transforms": {}, "orderBy": "t.workspace_id,t.revision", "reason": "Website draft and publication documents have no canonical CRM subject attribution; use the separate website content facility."},
+  {"domain": "association_site_content", "columns": ["workspace_id", "collection", "draft_version", "draft", "published_revision", "observations", "updated_at"], "excludedColumns": ["workspace_id", "collection", "draft_version", "draft", "published_revision", "observations", "updated_at"], "workspaceWhere": "false", "subjectWhere": null, "subjectRedactions": {}, "transforms": {}, "orderBy": "t.workspace_id,t.collection", "reason": "Website draft and publication documents have no canonical CRM subject attribution; use the separate website content facility."},
+  {"domain": "association_site_content_revisions", "columns": ["workspace_id", "collection", "revision", "document", "actor", "published_at"], "excludedColumns": ["workspace_id", "collection", "revision", "document", "actor", "published_at"], "workspaceWhere": "false", "subjectWhere": null, "subjectRedactions": {}, "transforms": {}, "orderBy": "t.workspace_id,t.collection,t.revision", "reason": "Website draft and publication documents have no canonical CRM subject attribution; use the separate website content facility."},
   ...CAMPAIGN_PRIVACY_COVERAGE,
   {
     domain:'goal_crm_event_sources',columns:['workspace_id','goal_id','event_id','event_binding','created_at'],
@@ -84,8 +90,8 @@ export const CRM_PRIVACY_COVERAGE: readonly CrmPrivacyCoverageEntry[] = [
   {
     domain: 'association_integration_events',
     columns: ['id','workspace_id','provider','provider_event_id','provider_reference','occurred_at','target_kind','order_id','entitlement_id','contact_id','plan_id',
-      'request_fingerprint','normalized_payload','admitted_actor','execution_actor','state','attempts','cycle_attempts','lease_token','lease_expires_at','next_attempt_at','last_error_code','created_at','updated_at','applied_at'],
-    excludedColumns: ['admitted_actor','execution_actor','lease_token'], workspaceWhere: 'true',
+      'request_fingerprint','normalized_payload','admitted_actor','execution_actor','state','attempts','cycle_attempts','lease_token','lease_expires_at','next_attempt_at','last_error_code','created_at','updated_at','applied_at','scope_snapshot','scope_sources'],
+    excludedColumns: ['scope_snapshot','scope_sources','admitted_actor','execution_actor','lease_token'], workspaceWhere: 'true',
     subjectWhere: 't.contact_id=$2 OR EXISTS(SELECT 1 FROM association_registrations r WHERE r.workspace_id=$1 AND r.order_id=t.order_id AND r.attendee_contact_id=$2)',
     subjectRedactions: { request_fingerprint: 'NULL', normalized_payload: 'NULL', provider_reference: 'NULL', provider_event_id: 'NULL', contact_id: 'CASE WHEN t.contact_id=$2 THEN t.contact_id ELSE NULL END' },
     transforms: {}, orderBy: 't.id', reason: 'Durable normalized status and target attribution remain; execution authority and shared provider payloads are excluded or redacted.',
@@ -111,8 +117,8 @@ export const CRM_PRIVACY_COVERAGE: readonly CrmPrivacyCoverageEntry[] = [
       'amount_minor','currency','buy_quantity','get_quantity','target_kind','target_ids','recurrence_mode','recurrence_cycles','apply_mode',
       'valid_from','valid_to','max_uses','max_uses_per_contact',
       'combines_with_member_price','release_on_full_refund','status','created_at','updated_at',
-      'source_system','source_site','source_promotion_id','source_redeemed_uses','source_import'],
-    excludedColumns: ['code_digest','source_import'], workspaceWhere: 'true', subjectWhere: null,
+      'source_system','source_site','source_promotion_id','source_redeemed_uses','source_import','scope_snapshot','scope_sources','scope_sources_minimized'],
+    excludedColumns: ['code_digest','source_import','scope_snapshot','scope_sources','scope_sources_minimized'], workspaceWhere: 'true', subjectWhere: null,
     subjectRedactions: {}, transforms: {}, orderBy: 't.id',
     reason: 'Promotion rules are workspace configuration; the redeemable code digest is excluded from exports.',
   },
@@ -120,8 +126,8 @@ export const CRM_PRIVACY_COVERAGE: readonly CrmPrivacyCoverageEntry[] = [
     domain: 'association_membership_checkouts',
     columns: ['id','workspace_id','contact_id','plan_id','idempotency_key','request_fingerprint','status','currency',
       'subtotal_minor','discount_minor','total_minor','promotion_id','promotion_snapshot','reservation_expires_at',
-      'provider','provider_reference','provider_coupon_reference','created_at','updated_at'],
-    excludedColumns: ['idempotency_key','request_fingerprint'], workspaceWhere: 'true', subjectWhere: 't.contact_id=$2',
+      'provider','provider_reference','provider_coupon_reference','created_at','updated_at','scope_snapshot','scope_sources'],
+    excludedColumns: ['idempotency_key','request_fingerprint','scope_snapshot','scope_sources'], workspaceWhere: 'true', subjectWhere: 't.contact_id=$2',
     subjectRedactions: { idempotency_key: 'NULL', request_fingerprint: 'NULL' }, transforms: {}, orderBy: 't.id',
     reason: 'The subject receives their checkout and discount evidence without private replay identifiers.',
   },
@@ -192,8 +198,9 @@ export const CRM_PRIVACY_COVERAGE: readonly CrmPrivacyCoverageEntry[] = [
       "request_fingerprint",
       "wording_version_id",
       "wording_locale"
+      ,"scope_snapshot", "scope_sources"
     ],
-    "excludedColumns": [],
+    "excludedColumns": ["scope_snapshot", "scope_sources"],
     "orderBy": "t.id",
     "subjectWhere": "t.contact_id=$2",
     "workspaceWhere": "true",
@@ -227,9 +234,9 @@ export const CRM_PRIVACY_COVERAGE: readonly CrmPrivacyCoverageEntry[] = [
       "definition_schema_hash",
       "definition_schema_snapshot",
       "identity_verification_evidence",
-      "historical_import"
+      "historical_import", "scope_snapshot", "scope_sources"
     ],
-    "excludedColumns": [],
+    "excludedColumns": ["scope_snapshot", "scope_sources"],
     "orderBy": "t.id",
     "subjectWhere": "t.contact_id=$2",
     "workspaceWhere": "true",
@@ -365,10 +372,10 @@ export const CRM_PRIVACY_COVERAGE: readonly CrmPrivacyCoverageEntry[] = [
       "provider_period_id",
       "predecessor_id",
       "sponsorship_allocation_id",
+      "membership_checkout_id",
       "created_at",
-      "updated_at"
-    ],
-    "excludedColumns": [],
+      "updated_at", "scope_snapshot","scope_sources"],
+    "excludedColumns": [ "scope_snapshot","scope_sources"],
     "orderBy": "t.id",
     "subjectWhere": "t.contact_id=$2",
     "workspaceWhere": "true",
@@ -398,9 +405,8 @@ export const CRM_PRIVACY_COVERAGE: readonly CrmPrivacyCoverageEntry[] = [
     "columns": [
       "id","workspace_id","sponsor_contact_id","sponsor_membership_id","beneficiary_plan_id",
       "idempotency_key","request_fingerprint","seat_limit","starts_at","ends_at","invitation_ttl_hours",
-      "status","cancellation_reason","cancelled_at","created_at","updated_at"
-    ],
-    "excludedColumns": ["idempotency_key","request_fingerprint"],
+      "status","cancellation_reason","cancelled_at","created_at","updated_at", "scope_snapshot","scope_sources"],
+    "excludedColumns": ["idempotency_key","request_fingerprint", "scope_snapshot","scope_sources"],
     "orderBy": "t.id",
     "subjectWhere": "t.sponsor_contact_id=$2 OR EXISTS(SELECT 1 FROM association_sponsorship_invitations i WHERE i.workspace_id=$1 AND i.allocation_id=t.id AND (i.nominee_contact_id=$2 OR i.redeemed_contact_id=$2))",
     "workspaceWhere": "true",
@@ -416,9 +422,8 @@ export const CRM_PRIVACY_COVERAGE: readonly CrmPrivacyCoverageEntry[] = [
     "domain": "association_sponsorship_invitations",
     "columns": [
       "id","workspace_id","allocation_id","nominee_contact_id","token_hash","idempotency_key","request_fingerprint",
-      "status","expires_at","redeemed_contact_id","membership_id","redeemed_at","revocation_reason","revoked_at","created_at","updated_at"
-    ],
-    "excludedColumns": ["token_hash","idempotency_key","request_fingerprint"],
+      "status","expires_at","redeemed_contact_id","membership_id","redeemed_at","revocation_reason","revoked_at","created_at","updated_at", "scope_snapshot","scope_sources"],
+    "excludedColumns": ["token_hash","idempotency_key","request_fingerprint", "scope_snapshot","scope_sources"],
     "orderBy": "t.id",
     "subjectWhere": "t.nominee_contact_id=$2 OR t.redeemed_contact_id=$2",
     "workspaceWhere": "true",
@@ -465,9 +470,8 @@ export const CRM_PRIVACY_COVERAGE: readonly CrmPrivacyCoverageEntry[] = [
       "cancelled_by_user_id",
       "created_by_user_id",
       "created_at",
-      "updated_at"
-    ],
-    "excludedColumns": [],
+      "updated_at", "scope_snapshot","scope_sources"],
+    "excludedColumns": [ "scope_snapshot","scope_sources"],
     "orderBy": "t.id",
     "subjectWhere": "t.contact_id=$2",
     "workspaceWhere": "true",
@@ -513,10 +517,10 @@ export const CRM_PRIVACY_COVERAGE: readonly CrmPrivacyCoverageEntry[] = [
       "created_at",
       "updated_at",
       "retired_at",
-      "retired_from_status"
+      "retired_from_status", "scope_snapshot", "scope_sources"
     ],
     "excludedColumns": [
-      "last_error"
+      "last_error", "scope_snapshot", "scope_sources"
     ],
     "orderBy": "t.id",
     "subjectWhere": "(t.recipient_kind='contact' AND t.recipient_ref=$2::text) OR ((t.source_kind IN('person','contact','entity') AND t.source_id::text=$2::text) OR (t.source_kind IN('submission','enquiry') AND EXISTS(SELECT 1 FROM association_enquiries q WHERE q.workspace_id=$1 AND (q.id::text=t.source_id::text AND q.contact_id=$2))) OR (t.source_kind IN('membership','entitlement') AND EXISTS(SELECT 1 FROM association_memberships m WHERE m.workspace_id=$1 AND (m.id::text=t.source_id::text AND m.contact_id=$2))) OR (t.source_kind IN('participation','registration') AND EXISTS(SELECT 1 FROM association_registrations r WHERE r.workspace_id=$1 AND (r.id::text=t.source_id::text AND r.attendee_contact_id=$2))) OR (t.source_kind='order' AND EXISTS(SELECT 1 FROM association_orders o WHERE o.workspace_id=$1 AND (o.id::text=t.source_id::text AND (o.contact_id=$2 OR EXISTS(SELECT 1 FROM association_registrations r WHERE r.workspace_id=$1 AND (r.order_id=o.id AND r.attendee_contact_id=$2)))))))",
@@ -587,9 +591,8 @@ export const CRM_PRIVACY_COVERAGE: readonly CrmPrivacyCoverageEntry[] = [
       "promotion_snapshot",
       "metadata",
       "created_at",
-      "updated_at"
-    ],
-    "excludedColumns": [],
+      "updated_at", "scope_snapshot","scope_sources"],
+    "excludedColumns": [ "scope_snapshot","scope_sources"],
     "orderBy": "t.id",
     "subjectWhere": "EXISTS(SELECT 1 FROM association_orders o WHERE o.workspace_id=$1 AND (o.id::text=t.id::text AND (o.contact_id=$2 OR EXISTS(SELECT 1 FROM association_registrations r WHERE r.workspace_id=$1 AND (r.order_id=o.id AND r.attendee_contact_id=$2)))))",
     "workspaceWhere": "true",
@@ -660,9 +663,8 @@ export const CRM_PRIVACY_COVERAGE: readonly CrmPrivacyCoverageEntry[] = [
       "source_kind",
       "source_id",
       "request_fingerprint",
-      "historical_import"
-    ],
-    "excludedColumns": [],
+      "historical_import", "scope_snapshot","scope_sources"],
+    "excludedColumns": [ "scope_snapshot","scope_sources"],
     "orderBy": "t.id",
     "subjectWhere": "t.attendee_contact_id=$2 OR EXISTS(SELECT 1 FROM association_orders o WHERE o.workspace_id=$1 AND (o.id::text=t.order_id::text AND (o.contact_id=$2 OR EXISTS(SELECT 1 FROM association_registrations r WHERE r.workspace_id=$1 AND (r.order_id=o.id AND r.attendee_contact_id=$2)))))",
     "workspaceWhere": "true",
@@ -936,8 +938,9 @@ export const CRM_PRIVACY_COVERAGE: readonly CrmPrivacyCoverageEntry[] = [
       "redacted_at",
       "created_at",
       "updated_at"
+      ,"scope_snapshot", "scope_sources"
     ],
-    "excludedColumns": [
+    "excludedColumns": ["scope_snapshot", "scope_sources",
       "request_hash",
       "claim_token",
       "claim_deadline"
@@ -974,14 +977,12 @@ export const CRM_PRIVACY_COVERAGE: readonly CrmPrivacyCoverageEntry[] = [
       "delivered_at",
       "retired_at",
       "retired_from_status",
-      "scope_source", "scope_origin", "scope_held"
-    ],
+      "scope_source", "scope_origin", "scope_held", "scope_version", "privacy_scope"],
     "excludedColumns": [
       "lease_owner",
       "leased_until",
       "last_error",
-      "scope_source", "scope_origin", "scope_held"
-    ],
+      "scope_source", "scope_origin", "scope_held", "scope_version", "privacy_scope"],
     "orderBy": "t.id",
     "subjectWhere": "((t.subject_kind IN('person','contact','entity') AND t.subject_id::text=$2::text) OR (t.subject_kind IN('submission','enquiry') AND EXISTS(SELECT 1 FROM association_enquiries q WHERE q.workspace_id=$1 AND (q.id::text=t.subject_id::text AND q.contact_id=$2))) OR (t.subject_kind IN('membership','entitlement') AND EXISTS(SELECT 1 FROM association_memberships m WHERE m.workspace_id=$1 AND (m.id::text=t.subject_id::text AND m.contact_id=$2))) OR (t.subject_kind IN('participation','registration') AND EXISTS(SELECT 1 FROM association_registrations r WHERE r.workspace_id=$1 AND (r.id::text=t.subject_id::text AND r.attendee_contact_id=$2))) OR (t.subject_kind='order' AND EXISTS(SELECT 1 FROM association_orders o WHERE o.workspace_id=$1 AND (o.id::text=t.subject_id::text AND (o.contact_id=$2 OR EXISTS(SELECT 1 FROM association_registrations r WHERE r.workspace_id=$1 AND (r.order_id=o.id AND r.attendee_contact_id=$2))))))) OR t.payload->>'contactId'=$2::text",
     "workspaceWhere": "true",
@@ -1321,10 +1322,11 @@ export const CRM_PRIVACY_COVERAGE: readonly CrmPrivacyCoverageEntry[] = [
       "last_used_at",
       "created_at",
       "replay_scope_id",
-      "rotated_from_credential_id"
+      "rotated_from_credential_id",
+      "department_binding"
     ],
     "excludedColumns": [
-      "secret_hash"
+      "secret_hash", "department_binding"
     ],
     "orderBy": "t.id",
     "subjectWhere": null,
@@ -1445,10 +1447,16 @@ export const CRM_PRIVACY_COVERAGE: readonly CrmPrivacyCoverageEntry[] = [
       "revoked_at",
       "created_by_user_id",
       "created_at",
-      "last_used_at"
+      "last_used_at",
+      "department_binding",
+      "request_id",
+      "request_fingerprint"
     ],
     "excludedColumns": [
-      "secret_hash"
+      "secret_hash",
+      "department_binding",
+      "request_id",
+      "request_fingerprint"
     ],
     "orderBy": "t.id",
     "subjectWhere": null,
@@ -1567,15 +1575,15 @@ export const CRM_PRIVACY_COVERAGE: readonly CrmPrivacyCoverageEntry[] = [
   {
     domain:'crm_import_file_cleanups',
     columns:['id','workspace_id','owner_user_id','file_id','before_at','policy_version','snapshot_hash','preview_hash','summary','status',
-      'storage_uri','attempts','next_attempt_at','lease_token','leased_until','error_code','created_at','expires_at','queued_at','completed_at','replay_expires_at'],
-    excludedColumns:['snapshot_hash','preview_hash','storage_uri','lease_token'],workspaceWhere:'true',subjectWhere:null,
+      'storage_uri','attempts','next_attempt_at','lease_token','leased_until','error_code','created_at','expires_at','queued_at','completed_at','replay_expires_at','scope_snapshot'],
+    excludedColumns:['scope_snapshot','snapshot_hash','preview_hash','storage_uri','lease_token'],workspaceWhere:'true',subjectWhere:null,
     subjectRedactions:{},transforms:{},orderBy:'t.id',reason:'Workspace source cleanup receipts; private locators and approval/lease tokens are excluded.'
   },
   {
     domain:'crm_retention_runs',
     columns:['id','workspace_id','owner_user_id','policy_version','mode','before_at','captured_at','expires_at',
-      'snapshot_hash','preview_hash','summary','status','receipt','error_code','completed_at','created_at'],
-    excludedColumns:['snapshot_hash','preview_hash'],workspaceWhere:'true',subjectWhere:null,
+      'snapshot_hash','preview_hash','summary','status','receipt','error_code','completed_at','created_at','scope_snapshot'],
+    excludedColumns:['scope_snapshot','snapshot_hash','preview_hash'],workspaceWhere:'true',subjectWhere:null,
     subjectRedactions:{},transforms:{},orderBy:'t.id',
     reason:'Content-free workspace retention reports; approval hashes are private.'
   },
@@ -1596,13 +1604,11 @@ export const CRM_PRIVACY_COVERAGE: readonly CrmPrivacyCoverageEntry[] = [
       "created_at",
       "expires_at",
       "consumed_at",
-      "receipt"
-    ],
+      "receipt", "scope_snapshot"],
     "excludedColumns": [
       "request_hash",
       "snapshot_hash",
-      "preview_hash"
-    ],
+      "preview_hash", "scope_snapshot"],
     "workspaceWhere": "true",
     "subjectWhere": "t.subject_id=$2",
     "subjectRedactions": {},
@@ -1680,8 +1686,9 @@ export const CRM_PRIVACY_COVERAGE: readonly CrmPrivacyCoverageEntry[] = [
       "metadata",
       "created_at",
       "request_fingerprint"
+      ,"scope_snapshot", "scope_sources"
     ],
-    "excludedColumns": [],
+    "excludedColumns": ["scope_snapshot", "scope_sources"],
     "orderBy": "t.id",
     "subjectWhere": "t.contact_id=$2",
     "workspaceWhere": "true",
@@ -2002,11 +2009,13 @@ export const CRM_PRIVACY_COVERAGE: readonly CrmPrivacyCoverageEntry[] = [
       "source_goal_id",
       "privacy_lineage_version",
       "privacy_erased",
-      "privacy_erased_at"
-    ],
+      "privacy_erased_at", "execution_authority","scheduled_job_id","scheduled_job_claim_id","scheduled_job_snapshot",
+      "derivation_source_version","derivation_lineage_revision","task_event_evidence","task_event_valid_until",
+      "knowledge_event_evidence","page_event_evidence","primitive_event_metadata_verified"],
     "excludedColumns": [
-      "webhook_body_sha256", "source_goal_id"
-    ],
+      "webhook_body_sha256", "source_goal_id", "execution_authority","scheduled_job_id","scheduled_job_claim_id","scheduled_job_snapshot",
+      "derivation_source_version","derivation_lineage_revision","task_event_evidence","task_event_valid_until",
+      "knowledge_event_evidence","page_event_evidence","primitive_event_metadata_verified"],
     "workspaceWhere": "t.id IN(SELECT id FROM pg_temp.crm_privacy_copy_workflows)",
     "subjectWhere": "t.id IN(SELECT id FROM pg_temp.crm_privacy_copy_workflows)",
     "subjectRedactions": {
@@ -2050,8 +2059,8 @@ export const CRM_PRIVACY_COVERAGE: readonly CrmPrivacyCoverageEntry[] = [
   },
   {
     "domain": "workflow_run_copy_sources",
-    "columns": ["workspace_id","run_id","source_run_id","created_at"],
-    "excludedColumns": [],
+    "columns": ["workspace_id","run_id","source_run_id","created_at","blueprint_source","run_scope_evidence","run_source_version"],
+    "excludedColumns": ["blueprint_source","run_scope_evidence","run_source_version"],
     "orderBy": "t.run_id,t.source_run_id",
     "workspaceWhere": "t.run_id IN(SELECT id FROM pg_temp.crm_privacy_copy_workflows) OR t.source_run_id IN(SELECT id FROM pg_temp.crm_privacy_copy_workflows)",
     "subjectWhere": "t.run_id IN(SELECT id FROM pg_temp.crm_privacy_copy_workflows) OR t.source_run_id IN(SELECT id FROM pg_temp.crm_privacy_copy_workflows)",

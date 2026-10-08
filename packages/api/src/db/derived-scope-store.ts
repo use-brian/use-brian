@@ -113,15 +113,16 @@ export async function readCurrentScopeSources(
   client: Pick<pg.ClientBase, 'query'>,
   workspaceId: string,
   sources: readonly ScopeSource[],
+  workflowRunId?: string,
 ): Promise<CurrentSourceState[]> {
   const unique = new Map(sources.map(source=>[`${source.resourceKind}:${source.resourceId}`,source]))
   const list = [...unique.values()]
   if (list.length === 0) return []
   if (list.some(source=>source.workspaceId!==workspaceId)) throw new DerivedScopeError('scope_workspace_mismatch')
   const { rows } = await client.query<{ ord: number; snapshot: CanonicalEvidenceRow | null }>(
-    `SELECT t.ord::int AS ord, read_scope_source($1, t.kind, t.id) AS snapshot
+    `SELECT t.ord::int AS ord, ${workflowRunId ? 'read_workflow_validation_source($1,$4,t.kind,t.id)' : 'read_scope_source($1,t.kind,t.id)'} AS snapshot
        FROM unnest($2::text[], $3::uuid[]) WITH ORDINALITY AS t(kind, id, ord)`,
-    [workspaceId, list.map(source=>source.resourceKind), list.map(source=>source.resourceId)],
+    [workspaceId, list.map(source=>source.resourceKind), list.map(source=>source.resourceId), ...(workflowRunId ? [workflowRunId] : [])],
   )
   const byOrd = new Map(rows.map(row=>[row.ord, row.snapshot]))
   return list.map((source, index): CurrentSourceState => {

@@ -157,16 +157,16 @@ describe('[COMP:crm/delivery-policy] Final managed mailbox admission',()=>{
   })
   it('serializes a later withdrawal through the actual provider invocation',async()=>{
     const f=await fixture();await f.policy();await f.consent()
-    let release!:()=>void, started!:()=>void
+    let release!:()=>void, started!:()=>void, providerPid=0
     const hold=new Promise<void>(r=>{release=r}),entered=new Promise<void>(r=>{started=r})
-    const sending=withCrmMailAdmission(f.scope,'gmail',{to:recipient,...intent},async()=>{started();await hold})
+    const sending=withCrmMailAdmission(f.scope,'gmail',{to:recipient,...intent},async(_admission,client)=>{providerPid=Number((await client.query('SELECT pg_backend_pid() AS pid')).rows[0].pid);started();await hold})
     await entered
     let withdrawn=false
     const withdrawal=f.consent('withdrawn').then(()=>{withdrawn=true})
     try {
       const deadline=Date.now()+5000;let waiting=false
       while(Date.now()<deadline) {
-        const result=await pool.query(`SELECT 1 FROM pg_stat_activity WHERE datname=current_database() AND wait_event_type='Lock' AND query LIKE 'INSERT INTO association_consent_events%'`)
+        const result=await pool.query(`SELECT 1 FROM pg_stat_activity WHERE datname=current_database() AND wait_event_type='Lock' AND $1=ANY(pg_blocking_pids(pid))`,[providerPid])
         if(result.rowCount){waiting=true;break}
       }
       expect(waiting).toBe(true);expect(withdrawn).toBe(false)

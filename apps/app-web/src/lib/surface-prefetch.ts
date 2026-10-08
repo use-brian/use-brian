@@ -44,7 +44,8 @@ import { officeMetadataRemaining } from "@/lib/office/metadata";
 import type { CacheLifecycle } from "@/lib/surface-cache";
 import { listOfficeArtifacts } from "@/lib/office/api";
 import { listTools as listShopifyTools } from "@/lib/api/shopify";
-import { fetchLiveRoster } from "@/lib/api/live";
+import { associationModuleRemaining } from "@/lib/api/association";
+import { fetchLiveRoster, liveRosterRemaining } from "@/lib/api/live";
 
 /**
  * Surfaces whose landing data is a single workspace-scoped list. `studio`
@@ -229,8 +230,8 @@ export function feedSessionsCacheKey(workspaceId: string, platform: string): str
  * inside the post editor with no workspace id in hand. Marking every
  * workspace's list stale is harmless: only a mounted reader refetches.
  */
-export function feedSessionsCacheFamily(): string {
-  return "feed-sessions:";
+export function feedSessionsCacheFamily(workspaceId?: string): string {
+  return workspaceId ? `feed-sessions:${workspaceId}${viewerSuffix()}:` : "feed-sessions:";
 }
 
 export function feedPlanCacheKey(
@@ -755,6 +756,10 @@ export function browserProfilesCacheKey(workspaceId: string): string {
   return `browser-profiles:${workspaceId}${viewerSuffix()}`;
 }
 
+export function browserProfileDestinationsCacheKey(workspaceId: string): string {
+  return `workspace-access:${workspaceId}:browser-destinations${viewerSuffix()}`;
+}
+
 export function computerTasksCacheKey(workspaceId: string): string {
   return `computer-tasks:${workspaceId}${viewerSuffix()}`;
 }
@@ -833,6 +838,7 @@ export function warmTargetFor(
       return {
         key: associationModuleCacheKey(workspaceId),
         fetch: () => import("@/lib/api/association").then(m => m.getAssociationModuleSnapshot(workspaceId)),
+        lifecycle: { expiresInMs: associationModuleRemaining },
       };
     case "crm":
       return {
@@ -896,6 +902,7 @@ export function warmTargetFor(
       return {
         key: liveRosterCacheKey(workspaceId),
         fetch: () => fetchLiveRoster(workspaceId),
+        lifecycle: { expiresInMs: liveRosterRemaining },
       };
   }
 }

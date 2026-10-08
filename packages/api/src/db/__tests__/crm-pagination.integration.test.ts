@@ -6,6 +6,7 @@ import { listCrmOperationsAudit, listCrmEventDelivery } from '../../crm-operatio
 import { createAssociationStore } from '../association-store.js'
 import { createDbCrmSegmentStore } from '../crm-segment-store.js'
 import { getPool, getAppPool } from '../client.js'
+import { loadAssociationOrderScope } from '../../association/source-scope.js'
 
 const { assertLocalFixture } = await import(new URL('../../../../../scripts/crm/local-fixture.mjs', import.meta.url).href)
 await assertLocalFixture()
@@ -34,8 +35,10 @@ describe('[COMP:crm/operations-pagination] Complete collections in real PostgreS
       SELECT workspace_id,$2,id,id::text,repeat('a',64),'2026-01-01T00:00:00Z' FROM association_membership_plans WHERE workspace_id=$1`, [workspaceId, contactId])
     await pool.query(`INSERT INTO association_registrations (workspace_id,event_id,attendee_contact_id,attendee_name,status,source_kind,source_id,request_fingerprint)
       SELECT workspace_id,id,$2,'Fixture person','registered','manual',id::text,repeat('a',64) FROM association_events WHERE workspace_id=$1`, [workspaceId, contactId])
-    await pool.query(`INSERT INTO association_enquiries (workspace_id,contact_id,source,source_submission_id,request_fingerprint,subject,message,definition_id)
-      SELECT workspace_id,$2,'fixture',id::text,repeat('a',64),'Fixture subject','Fixture message',id FROM crm_intake_definitions WHERE workspace_id=$1`, [workspaceId, contactId])
+    const submissionEvidence=await loadAssociationOrderScope(pool,workspaceId,[contactId])
+    await pool.query(`INSERT INTO association_enquiries (workspace_id,contact_id,source,source_submission_id,request_fingerprint,subject,message,definition_id,scope_snapshot,scope_sources)
+      SELECT workspace_id,$2,'fixture',id::text,repeat('a',64),'Fixture subject','Fixture message',id,$3::jsonb,$4::jsonb FROM crm_intake_definitions WHERE workspace_id=$1`,
+      [workspaceId, contactId,JSON.stringify(submissionEvidence.scope),JSON.stringify(submissionEvidence.sources)])
     await pool.query(`INSERT INTO crm_pipelines (workspace_id,name,position) SELECT $1,'Fixture '||n,n FROM generate_series(1,105) n`, [workspaceId])
     await pool.query(`INSERT INTO crm_intake_credentials (workspace_id,label,secret_prefix,secret_hash)
       SELECT $1,'Fixture '||n,'sk_intake_'||gen_random_uuid()::text,'scrypt$fixture' FROM generate_series(1,105) n`, [workspaceId])
@@ -47,7 +50,7 @@ describe('[COMP:crm/operations-pagination] Complete collections in real PostgreS
     const cases: Array<[string, (cursor?: string) => Promise<{ nextCursor: string | null } & Record<string, unknown>>]> = [
       ['definitions', (cursor) => reads.listDefinitions(workspaceId, { limit: 17, cursor })],
       ['purposes', (cursor) => reads.listConsentPurposes(workspaceId, false, { limit: 17, cursor })],
-      ['submissions', (cursor) => reads.listSubmissions(workspaceId, { limit: 17, cursor })],
+      ['submissions', (cursor) => reads.listSubmissions(workspaceId, { limit: 17, cursor }, {kind:'user',userId})],
       ['plans', (cursor) => reads.listEntitlementPlans(workspaceId, { limit: 17, cursor })],
       ['entitlements', (cursor) => reads.listEntitlements(workspaceId, { limit: 17, cursor })],
       ['events', (cursor) => reads.listEvents(workspaceId, { limit: 17, cursor })],
@@ -68,20 +71,20 @@ describe('[COMP:crm/operations-pagination] Complete collections in real PostgreS
       expect(ids, key).toHaveLength(105)
       expect(new Set(ids).size, key).toBe(105)
     }
-    await pool.query(`INSERT INTO association_consent_events (workspace_id,contact_id,purpose,action,wording_version,source,occurred_at)
-      SELECT $1,$2,'fixture_1','granted','1','fixture','2026-01-01T00:00:00Z'::timestamptz + n * interval '1 microsecond'
-      FROM generate_series(1,505) n`, [workspaceId, contactId])
-    await pool.query(`INSERT INTO crm_suppression_events (workspace_id,contact_id,channel,action,reason_code,source,actor_kind,occurred_at)
-      SELECT $1,$2,'email','suppressed','manual_do_not_contact','fixture','user','2026-01-01T00:00:00Z'::timestamptz + n * interval '1 microsecond'
-      FROM generate_series(1,505) n`, [workspaceId, contactId])
-    const consent = await reads.getConsent(workspaceId, contactId)
+    await pool.query(`INSERT INTO association_consent_events (workspace_id,contact_id,purpose,action,wording_version,source,occurred_at,scope_snapshot,scope_sources)
+      SELECT $1,$2,'fixture_1','granted','1','fixture','2026-01-01T00:00:00Z'::timestamptz + n * interval '1 microsecond',$3::jsonb,$4::jsonb
+      FROM generate_series(1,505) n`, [workspaceId, contactId,JSON.stringify(submissionEvidence.scope),JSON.stringify(submissionEvidence.sources)])
+    await pool.query(`INSERT INTO crm_suppression_events (workspace_id,contact_id,channel,action,reason_code,source,actor_kind,occurred_at,scope_snapshot,scope_sources)
+      SELECT $1,$2,'email','suppressed','manual_do_not_contact','fixture','user','2026-01-01T00:00:00Z'::timestamptz + n * interval '1 microsecond',$3::jsonb,$4::jsonb
+      FROM generate_series(1,505) n`, [workspaceId, contactId,JSON.stringify(submissionEvidence.scope),JSON.stringify(submissionEvidence.sources)])
+    const consent = await reads.getConsent(workspaceId, contactId,{kind:'user',userId})
     expect(consent.purposes).toHaveLength(105)
     expect(consent.events).toHaveLength(505)
     expect(consent.suppressions).toHaveLength(505)
     expect(consent.events[0].occurredAt).toBe('2026-01-01T00:00:00.000505Z')
     expect(consent.suppressions[504].occurredAt).toBe('2026-01-01T00:00:00.000001Z')
     expect(consent.events[0]).not.toHaveProperty('__recordedAt')
-    await expect(reads.checkSendability(workspaceId, contactId, 'email', 'unknown_fixture')).rejects.toMatchObject({
+    await expect(reads.checkSendability(workspaceId, contactId, 'email', 'unknown_fixture',{kind:'user',userId})).rejects.toMatchObject({
       code: 'catalog_key_invalid', details: { validValues: expect.arrayContaining(['fixture_105']) },
     })
     await pool.query(`INSERT INTO crm_field_definitions (workspace_id,entity_kind,field_key,label,field_type,options)
@@ -145,12 +148,12 @@ describe('[COMP:crm/operations-pagination] Complete collections in real PostgreS
     await pool.query(`INSERT INTO association_notification_outbox (workspace_id,source_kind,source_id,template_key,recipient_kind,recipient_ref)
       SELECT workspace_id,'enquiry',id,'fixture','contact',contact_id::text FROM association_enquiries WHERE workspace_id=$1`, [workspaceId])
     const legacyCases = [
-      (cursor: string | null) => legacy.listEnquiries(workspaceId, { limit: 17, cursor }),
+      (cursor: string | null) => legacy.listEnquiries(workspaceId, { limit: 17, cursor }, {credentialKind:'user',credentialId:userId,actingUserId:userId}),
       (cursor: string | null) => legacy.listPlans(workspaceId, { limit: 17, cursor }),
       (cursor: string | null) => legacy.listEvents(workspaceId, { limit: 17, cursor }),
       (cursor: string | null) => legacy.listOrders(workspaceId, { limit: 17, cursor }),
       (cursor: string | null) => legacy.listEventRegistrations(workspaceId, eventId, { limit: 17, cursor }),
-      (cursor: string | null) => legacy.listNotifications(workspaceId, { limit: 17, cursor }),
+      (cursor: string | null) => legacy.listNotifications(workspaceId, { limit: 17, cursor }, { credentialKind: 'user', credentialId: userId, actingUserId: userId }),
     ]
     for (const read of legacyCases) {
       const ids: unknown[] = []

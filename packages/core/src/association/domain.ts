@@ -479,7 +479,15 @@ export const AssociationOrderLineInputSchema = z.object({
   path: ['attendees'],
 })
 
+export const AssociationDestinationPreviewSchema = z.object({
+  contactIds: z.array(UUID).min(1).max(501),
+}).strict()
+
 export const AssociationOrderCreateSchema = z.object({
+  destination: z.discriminatedUnion('kind', [
+    z.object({ kind: z.literal('department'), departmentId: UUID }).strict(),
+    z.object({ kind: z.literal('general') }).strict(),
+  ]).optional().describe('Optional explicit destination. Omission uses the current context/home. Source protection is always retained.'),
   contactId: UUID,
   idempotencyKey: z.string().trim().min(1).max(200),
   reservationMinutes: z.number().int().min(1).max(120).default(20),

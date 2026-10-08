@@ -29,6 +29,8 @@ import { associationErrorResponse } from './association.js'
 import { associationMemberContext, crmAssociationRoutes } from './crm-association.js'
 import { sendWebsiteMedia, type WebsiteMediaDeps } from './association-media.js'
 import { SubmissionQuery, SendabilityQuery, EntitlementPlansQuery, EntitlementsQuery, EventsQuery, ParticipationQuery, SegmentListQuery } from './crm-operations.js'
+import { runWithAgentAccess } from '../db/agent-access-context.js'
+import { CrmIntegrationBindingOptionsSchema } from '../crm-operations/integration-department-authority.js'
 
 const UUID = z.string().uuid()
 export function crmIntegrationContext(principal: CrmIntegrationPrincipal): CrmOperationsContext {
@@ -62,7 +64,10 @@ export function crmIntegrationRoutes(options: {
       const principal = token ? await options.credentials.authenticate(token) : null
       if (!principal) { res.status(401).json({ error: 'invalid_crm_integration_credential' }); return }
       res.locals.crmIntegration = principal
-      next()
+      if (principal.departmentRead) {
+        runWithAgentAccess({ workspaceId: principal.workspaceId, userId: principal.departmentRead.userId,
+          clearance: 'confidential', compartments: null, ...principal.executionLimits, departmentRead: principal.departmentRead }, next)
+      } else next()
     } catch (error) { associationErrorResponse(error, res) }
   })
   const principal = (res: Response): CrmIntegrationPrincipal => res.locals.crmIntegration as CrmIntegrationPrincipal
@@ -237,13 +242,13 @@ export function crmIntegrationRoutes(options: {
     res.json(await reads(res).listEntitlementPlans(principal(res).workspaceId, EntitlementPlansQuery.parse(req.query)))
   }))
   router.get('/operations/entitlements', endpoint(async (req, res) => {
-    res.json(await reads(res).listEntitlements(principal(res).workspaceId, EntitlementsQuery.parse(req.query)))
+    res.json(await reads(res).listEntitlements(principal(res).workspaceId, EntitlementsQuery.parse(req.query), crmIntegrationContext(principal(res)).actor))
   }))
   router.get('/operations/events', endpoint(async (req, res) => {
     res.json(await reads(res).listEvents(principal(res).workspaceId, EventsQuery.parse(req.query)))
   }))
   router.get('/operations/participation', endpoint(async (req, res) => {
-    res.json(await reads(res).listParticipation(principal(res).workspaceId, ParticipationQuery.parse(req.query)))
+    res.json(await reads(res).listParticipation(principal(res).workspaceId, ParticipationQuery.parse(req.query), crmIntegrationContext(principal(res)).actor))
   }))
   router.get('/operations/contacts/:id/consent', endpoint(async (req, res) => {
     res.json(await reads(res).getConsent(principal(res).workspaceId, UUID.parse(req.params.id)))
@@ -282,6 +287,9 @@ export function crmIntegrationCredentialRoutes(options: { workspaceStore: Worksp
     } catch (error) { associationErrorResponse(error, res) }
   }
   const path = '/:workspaceId/operations/integration-credentials'
+  router.get(`${path}/binding-options`, endpoint(async (req, res, workspaceId, userId) => {
+    res.json(await options.credentials.bindingOptions(workspaceId, userId, CrmIntegrationBindingOptionsSchema.parse(req.query)))
+  }))
   router.get(`${path}/catalog`, endpoint(async (_req, res) => { res.json({ operations: CRM_INTEGRATION_OPERATIONS, selectors: CRM_INTEGRATION_RESOURCE_CATALOG }) }))
   router.get(path, endpoint(async (req, res, workspaceId, userId) => { res.json(await options.credentials.listForMember(workspaceId, userId, CrmPageQuerySchema.parse(req.query))) }))
   router.post(path, endpoint(async (req, res, workspaceId, userId) => {

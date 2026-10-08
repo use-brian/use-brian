@@ -1,12 +1,10 @@
 /**
  * Resolve the commerce-store tools a granted custom Home app may reach.
  *
- * Binds to the **workspace owner + primary assistant** — the same principal
- * every other workspace-scoped credential on the brain MCP acts as
- * (`resolveWriteTarget`). That binding is what makes the authorization
- * compose instead of fork: `injectMcpTools` already applies the primary
- * assistant's per-connector action grants through `gateToolsOnActionGrants`,
- * so a store tool the owner never granted that assistant is absent here too.
+ * Credential storage belongs to the workspace owner; read authority belongs
+ * to the authenticated viewer plus primary assistant. Their canonical turn
+ * scope gates connector discovery on every request.
+ *
  * The app's `storeScope` then narrows further, and destructive tools are
  * dropped outright.
  *
@@ -28,6 +26,8 @@ import type { Tool } from '@use-brian/core'
 import type { AppStoreScope } from '@use-brian/brian-app'
 import { injectMcpTools } from '../mcp/inject.js'
 import { filterStoreTools } from '../brain-mcp/store-tools.js'
+import { findAssistantById } from '../db/users.js'
+import { resolveTurnScopeSystem } from '../context-scope/resolve-turn-scope.js'
 import { resolveWriteTarget } from '../brain-mcp/tools.js'
 
 /** Connectors whose tools a Home app may reach under `scopes.store`. */
@@ -45,8 +45,9 @@ export type StoreToolResolverDeps = Pick<
 >
 
 export function createStoreToolResolver(deps: StoreToolResolverDeps) {
-  return async function resolveStoreTools(params: {
+  async function loadStoreTools(params: {
     workspaceId: string
+    actingUserId?: string
     storeScope: AppStoreScope
     /**
      * Extra tools admitted by NAME, past the tier. Reserved for first-party
@@ -56,14 +57,20 @@ export function createStoreToolResolver(deps: StoreToolResolverDeps) {
      */
     alsoAllow?: readonly string[]
   }): Promise<Tool[]> {
-    if (params.storeScope === 'none') return []
+    if (params.storeScope === 'none' || !params.actingUserId) return []
 
     const target = await resolveWriteTarget(params.workspaceId)
     if (!target) return []
 
+    const assistant = await findAssistantById(target.assistantId)
+    if (!assistant) return []
+    const contextScope = await resolveTurnScopeSystem({
+      userId: params.actingUserId, assistant, workspaceId: params.workspaceId,
+    })
     const tools = new Map<string, Tool>()
     await injectMcpTools({
       ...deps,
+      contextScope,
       userId: target.ownerUserId,
       assistantId: target.assistantId,
       tools,
@@ -117,5 +124,24 @@ export function createStoreToolResolver(deps: StoreToolResolverDeps) {
       )
     }
     return collected
+  }
+
+  return async function resolveStoreTools(params: Parameters<typeof loadStoreTools>[0]): Promise<Tool[]> {
+    const tools = await loadStoreTools(params)
+    return tools.map((tool) => ({
+      ...tool,
+      async execute(input, ctx) {
+        let current: Tool | undefined
+        try {
+          // Discovery is not a durable grant. Reload current authority and
+          // exact instance before invoking any provider-backed closure.
+          current = (await loadStoreTools(params)).find((candidate) => candidate.name === tool.name)
+        } catch {
+          return { isError: true, data: 'Store access could not be verified. Refresh and try again.' }
+        }
+        if (!current) return { isError: true, data: 'This store tool is no longer available. Refresh to see your current access.' }
+        return current.execute(current.inputSchema.parse(input), ctx)
+      },
+    }))
   }
 }

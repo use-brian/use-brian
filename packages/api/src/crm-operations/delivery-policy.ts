@@ -6,7 +6,8 @@ import { CrmOperationsError, evaluateCrmSendability, type CrmOperationsCommand, 
 import { getPool, query } from '../db/client.js'
 import { lockCrmIntegrationCredential } from '../db/crm-integration-store.js'
 import { crmDeliveryHooks, crmMailboxAccountHash, type CrmMailAdmission } from './delivery-scope.js'
-import { lockNativeDeliveryPrincipal, lockNativeDeliveryMailbox, type NativeDeliveryPrincipal } from './delivery-native-authority.js'
+import { lockNativeDeliveryPrincipal, lockNativeDeliveryMailbox, withNativeDeliverySourceAuthority, type NativeDeliveryPrincipal } from './delivery-native-authority.js'
+import { beginAssociationCreation, assertAssociationConsentAuthority } from '../association/source-scope.js'
 import { readCrmAddressSuppressions } from './suppression-tombstones.js'
 
 type MemberMailContext = { userId: string; workspaceId?: string; connectorInstanceId?: string; expectedAccountHash?: string }
@@ -119,6 +120,9 @@ async function runCrmMailAdmission<T>(rawScope: CrmMailContext | undefined, prov
   let invoking = false, accepted = false
   try {
     await client.query('BEGIN')
+    const candidateWorkspace=scope.data.workspaceId ?? ('userId' in scope.data ? (await client.query<{id:string}>('SELECT id FROM workspaces WHERE owner_user_id=$1 AND id=(SELECT default_workspace_id FROM users WHERE id=$1)',[scope.data.userId])).rows[0]?.id : undefined)
+    if(!candidateWorkspace)throw denied('delivery_workspace_unavailable')
+    await beginAssociationCreation(client,candidateWorkspace)
     const integration = 'integration' in scope.data ? scope.data.integration : undefined
     const current = integration ? await lockCrmIntegrationCredential(client,scope.data.workspaceId!,integration.credentialId) : undefined
     if(integration && current) for(const authority of [integration,current]) requireCrmIntegrationOperation(authority,'crm.delivery.dispatch')
@@ -171,12 +175,20 @@ async function runCrmMailAdmission<T>(rawScope: CrmMailContext | undefined, prov
         await client.query('SELECT pg_advisory_xact_lock_shared(hashtextextended($1,0))',[
           `crm-consent:${workspaceId}:${contactId}:${crmPurposeKey}`,
         ])
+        const admitEvidence=()=>native ? withNativeDeliverySourceAuthority(client,workspaceId,native,actor=>
+          assertAssociationConsentAuthority(client,workspaceId,contactId,actor,{purposeKeys:[crmPurposeKey],channel:'email'}))
+          : assertAssociationConsentAuthority(client,workspaceId,contactId,
+            integration ? {credentialKind:'integration_key',credentialId:integration.credentialId,integration}
+              : {credentialKind:'user',credentialId:('userId' in scope.data?scope.data.userId:''),actingUserId:('userId' in scope.data?scope.data.userId:'')},
+            {purposeKeys:[crmPurposeKey],channel:'email'})
+        const evidenceScope=await admitEvidence()
         const stamp = `to_char(occurred_at AT TIME ZONE 'UTC','YYYY-MM-DD"T"HH24:MI:SS.US"Z"') AS "occurredAt",to_char(created_at AT TIME ZONE 'UTC','YYYY-MM-DD"T"HH24:MI:SS.US"Z"') AS "createdAt"`
         const consent = await client.query<{ id: string; action:'granted'|'withdrawn'; occurredAt:string; createdAt:string }>(`SELECT id,action,${stamp} FROM association_consent_events
           WHERE workspace_id=$1 AND contact_id=$2 AND purpose=$3 ORDER BY occurred_at DESC,created_at DESC,id DESC LIMIT 1`,[workspaceId,contactId,crmPurposeKey])
         const suppression = await client.query<{ id:string; channel:'all'|'email'; action:'suppressed'|'released'; occurredAt:string; createdAt:string }>(`SELECT DISTINCT ON(channel) id,channel,action,${stamp} FROM crm_suppression_events
           WHERE workspace_id=$1 AND contact_id=$2 AND channel IN('all','email') ORDER BY channel,occurred_at DESC,created_at DESC,id DESC`,[workspaceId,contactId])
         const verdict = evaluateCrmSendability({ channel:'email',hasContactMethod:true,purpose,consentEvents:consent.rows,suppressionEvents:suppression.rows })
+        if(evidenceScope!==await admitEvidence())throw new CrmOperationsError('not_authorized','Recipient evidence access changed.')
         if (verdict.verdict!=='allowed') throw denied('delivery_recipient_not_allowed',{ recipientIndex:index,verdict:verdict.verdict,reasonCodes:verdict.reasons })
       }
     }

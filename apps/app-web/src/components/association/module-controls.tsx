@@ -5,16 +5,16 @@ import Link from "next/link";
 import { useState } from "react";
 import type { WorkspaceModuleAction } from "@use-brian/shared";
 import { useT } from "@/lib/i18n/client";
-import { AssociationApiError, changeAssociationModule, getAssociationModuleSnapshot, type AssociationModuleSnapshot } from "@/lib/api/association";
+import { AssociationApiError, changeAssociationModule, getAssociationModuleSnapshot } from "@/lib/api/association";
 import { associationModuleCacheKey } from "@/lib/surface-prefetch";
-import { mutateSurfaceCache, useCachedResource } from "@/lib/surface-cache";
+import { useAssociationProjection } from "./operator-controls";
 import { requestHomeAppsRefresh } from "@/lib/home-apps-events";
 import { Button } from "@/components/ui/button";
 import { confirmDialog } from "@/components/ui/confirm-dialog";
 import { ListSurfaceSkeleton } from "@/components/chrome/surface-skeleton";
 
 export function useAssociationModule(workspaceId: string) {
-  return useCachedResource(workspaceId ? associationModuleCacheKey(workspaceId) : null,
+  return useAssociationProjection(workspaceId ? associationModuleCacheKey(workspaceId) : null,
     () => getAssociationModuleSnapshot(workspaceId));
 }
 
@@ -44,7 +44,7 @@ export function AssociationModuleControls({ workspaceId }: { workspaceId: string
       setSaveError(null);
       const changed = await changeAssociationModule(workspaceId, action, expectedVersion);
       if (changed.module.workspaceId !== workspaceId) throw new AssociationApiError("invalid_response", 502);
-      mutateSurfaceCache<AssociationModuleSnapshot>(associationModuleCacheKey(workspaceId), previous => ({ ...previous, module: changed.module }));
+      await refresh();
       requestHomeAppsRefresh(workspaceId);
     } catch (failure) {
       setSaveError(failure instanceof AssociationApiError && failure.code === "module_drain_pending" ? t.pendingOrders

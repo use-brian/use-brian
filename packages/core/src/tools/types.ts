@@ -1,3 +1,5 @@
+import type { CrmCredentialParent } from '../crm/integration-authority.js'
+import type { AuthoritySource } from '../security/authority-source.js'
 import type { HomeAppToolSet } from '@use-brian/shared'
 import type { ProgressClock } from '../engine/stall-watchdog.js'
 import type { TurnLedger } from '../engine/turn-ledger.js'
@@ -27,6 +29,8 @@ type TaskAuthorityContext = {
 
 /** Host-owned live authorization boundary for a running model/tool turn. */
 export type CurrentAuthorityBoundary = {
+  /** Detached, host-owned source evidence; never model-supplied. */
+  snapshotSource?(): AuthoritySource
   assertCurrent(): Promise<void>
   /** Check both sides of an operation; post-check failure may be ambiguous. */
   execute<T>(operation: () => Promise<T>): Promise<T>
@@ -61,6 +65,8 @@ export type ToolContext = {
    * domain services can audit API keys, OAuth grants, and Home apps without
    * guessing from the channel label or accepting actor data from tool input.
    */
+  /** Captured by successful authentication; never supplied by tool JSON. */
+  crmCredentialParent?: CrmCredentialParent
   programmaticPrincipal?: {
     kind: 'brain_key' | 'oauth_token' | 'home_app'
     credentialId: string

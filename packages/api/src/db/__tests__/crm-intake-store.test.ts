@@ -1,10 +1,12 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest'
 
-const { query, verifySecret } = vi.hoisted(() => ({
+const { query, transactionQuery, release, verifySecret } = vi.hoisted(() => ({
   query: vi.fn(),
+  transactionQuery: vi.fn(),
+  release: vi.fn(),
   verifySecret: vi.fn(),
 }))
-vi.mock('../client.js', () => ({ query }))
+vi.mock('../client.js', () => ({ query, getPool: () => ({ query, connect: async () => ({ query: transactionQuery, release }) }) }))
 vi.mock('../api-key-store.js', () => ({ verifySecret }))
 
 import { createDbCrmIntakeReadStore, parseCrmIntakeToken } from '../crm-intake-store.js'
@@ -35,7 +37,9 @@ describe('[COMP:api/crm-intake-route] CRM intake credential authentication', () 
         definitionId: DEFINITION_ID,
         definitionKey: 'contact_form',
       }] })
-      .mockResolvedValueOnce({ rows: [], rowCount: 1 })
+    transactionQuery.mockImplementation(async (sql: string) => sql.includes('AS "replayScopeId"')
+      ? { rows: [{ replayScopeId: CREDENTIAL_ID, v2: false }], rowCount: 1 }
+      : { rows: [], rowCount: 1 })
     verifySecret.mockResolvedValue(true)
     const principal = await createDbCrmIntakeReadStore().authenticate(
       `sk_intake_${CREDENTIAL_ID}_secret`,
@@ -48,10 +52,14 @@ describe('[COMP:api/crm-intake-route] CRM intake credential authentication', () 
       definitionKey: 'contact_form',
     })
     expect(query.mock.calls[0]![0]).toContain('d.definition_key = $2 AND d.active')
-    expect(query.mock.calls[1]).toEqual([
+    expect(transactionQuery).toHaveBeenCalledWith(expect.stringContaining('c.revoked_at IS NULL AND d.active'),
+      [WORKSPACE_ID, CREDENTIAL_ID, DEFINITION_ID])
+    expect(transactionQuery).toHaveBeenCalledWith(
       expect.stringContaining('WHERE workspace_id = $1 AND id = $2'),
       [WORKSPACE_ID, CREDENTIAL_ID],
-    ])
+    )
+    expect(transactionQuery).toHaveBeenLastCalledWith('COMMIT')
+    expect(release).toHaveBeenCalledOnce()
   })
 
   it('returns one uniform null for a revoked or mismatched secret', async () => {
@@ -85,7 +93,8 @@ describe('[COMP:crm/operations-store] CRM operations read model', () => {
   beforeEach(() => vi.clearAllMocks())
 
   it('workspace-qualifies bounded submission queue reads', async () => {
-    query.mockResolvedValue({ rows: [{ id: 'submission-1' }] })
+    query.mockImplementation(async (sql: string) => sql.includes('FROM workspaces')
+      ? { rows: [{ department_read_v2: false }] } : { rows: [{ id: 'submission-1' }] })
     const rows = await createDbCrmIntakeReadStore().listSubmissions(WORKSPACE_ID, {
       status: 'new', definitionKey: 'contact_form', limit: 25,
     })
@@ -98,6 +107,7 @@ describe('[COMP:crm/operations-store] CRM operations read model', () => {
 
   it('derives a fail-closed sendability verdict from catalog and evidence rows', async () => {
     query
+      .mockResolvedValueOnce({ rows: [{ v2: false }] }) // Explicit legacy fixture; department evidence is covered by PostgreSQL tests.
       .mockResolvedValueOnce({ rows: [{ id: 'purpose-1', archivedAt: null, requiresConsent: true }] })
       .mockResolvedValueOnce({ rows: [{ email: 'person@example.com', phone: null, providerIdentity: false }] })
       .mockResolvedValueOnce({ rows: [] })
@@ -106,6 +116,7 @@ describe('[COMP:crm/operations-store] CRM operations read model', () => {
         occurredAt: new Date('2026-08-30T00:00:00Z'), createdAt: new Date('2026-08-30T00:00:00Z'),
       }] })
       .mockResolvedValueOnce({ rows: [] }) // No retained address suppression.
+      .mockResolvedValueOnce({ rows: [{ v2: false }] })
     const verdict = await createDbCrmIntakeReadStore().checkSendability(
       WORKSPACE_ID, DEFINITION_ID, 'email', 'marketing',
     )

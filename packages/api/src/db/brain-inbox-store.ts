@@ -460,7 +460,7 @@ export async function listBrainInbox(params: {
              updated_at,
              created_by_assistant_id,
              jsonb_build_object(
-               'entity_id', id,
+               'entity_id', id, 'name', display_name,
                'stage', attributes->>'stage',
                'amount', attributes->>'amount',
                'close_date', attributes->>'close_date',
@@ -750,7 +750,7 @@ const SINGLE_ROW_SELECT: Record<BrainInboxPrimitive, string> = {
            verified_by_user_id AS "verifiedByUserId",
            verified_at AS "verifiedAt",
            jsonb_build_object(
-             'entity_id', id,
+             'entity_id', id, 'name', display_name,
              'stage', attributes->>'stage', 'amount', attributes->>'amount',
              'close_date', attributes->>'close_date',
              'sensitivity', sensitivity,

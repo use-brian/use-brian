@@ -10,6 +10,7 @@
 
 import express, { Router, type NextFunction, type Request, type Response } from 'express'
 import { z } from 'zod'
+import { runWithAgentAccess } from '../db/agent-access-context.js'
 import { campaignAttributionContextSchema } from '@use-brian/shared/campaigns'
 import {
   CrmOperationsError,
@@ -114,7 +115,7 @@ export function crmIntakeRoutes(options: CrmIntakeRouteOptions): Router {
           res.status(401).json({ error: 'unauthorized' })
           return
         }
-        const output = await options.service.execute({
+        const submit = () => options.service.execute({
           workspaceId: principal.workspaceId,
           actor: {
             kind: 'intake_key',
@@ -131,6 +132,9 @@ export function crmIntakeRoutes(options: CrmIntakeRouteOptions): Router {
           idempotencyKey,
           ...body.data,
         })
+        const output = principal.departmentRead ? await runWithAgentAccess({ workspaceId: principal.workspaceId,
+          userId: principal.departmentRead.userId, departmentRead: principal.departmentRead,
+          clearance: 'confidential', compartments: null, ...principal.executionLimits }, submit) : await submit()
         if (output.record.outcome === 'submission_retired') {
           res.status(200).json({ duplicate: true, outcome: 'submission_retired' })
           return

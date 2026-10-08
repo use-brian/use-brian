@@ -1,13 +1,13 @@
 "use client";
 
 /** Shared native forms, cursor lists and durable request references. [COMP:app-web/association] */
-import { useEffect, useRef, useState, type InputHTMLAttributes, type ReactNode } from "react";
+import { useCallback, useEffect, useRef, useState, type InputHTMLAttributes, type ReactNode } from "react";
 import { Search, X } from "lucide-react";
 import { useT } from "@/lib/i18n/client";
 import { associationPageCacheKey, associationIntentKey } from "@/lib/surface-prefetch";
-import { useCachedResource, markSurfaceCacheStale } from "@/lib/surface-cache";
+import { useCachedResource, markSurfaceCacheStale, invalidateSurfaceCache, SurfaceCacheEvictionError } from "@/lib/surface-cache";
 import { listAssociationPage, type AssociationResource, type AssociationListQuery } from "@/lib/api/association";
-import { fetchCrmLookup, type CrmLookupRow } from "@/lib/api/crm";
+import { fetchCrmLookup, fetchCrmRecord, type CrmLookupRow } from "@/lib/api/crm";
 import { requestBrainRefresh } from "@/lib/brain-events";
 import { Button } from "@/components/ui/button";
 import { Checkbox } from "@/components/ui/checkbox";
@@ -40,12 +40,41 @@ export function AssociationChoice({label,value,onChange,values,disabled=false,la
 export function AssociationToggle({label,checked,onChange,disabled=false}:{label:string;checked:boolean;onChange:(checked:boolean)=>void;disabled?:boolean}) {
   return <label className="flex min-h-8 max-sm:min-h-11 items-center gap-2 text-sm"><Checkbox checked={checked} disabled={disabled} onCheckedChange={v=>onChange(v===true)} />{label}</label>;
 }
+const associationPageDeadlines = new WeakMap<object, number>();
+function deniedAssociationRead(error: unknown): boolean {
+  return error instanceof SurfaceCacheEvictionError || (typeof error === "object" && error !== null
+    && "status" in error && [401, 403, 404].includes(Number(error.status)));
+}
+/** Keep expiry tied to the request that authorized this exact projection. */
+async function readAssociationProjection<T extends object>(fetcher: () => Promise<T>) {
+  const deadline = performance.now() + 30_000;
+  try {
+    const page = await fetcher();
+    associationPageDeadlines.set(page, deadline);
+    return page;
+  } catch (error) {
+    if (deniedAssociationRead(error)) throw new SurfaceCacheEvictionError(error);
+    throw error;
+  }
+}
+/** Shared bounded projection for operational lists, summaries and details. */
+export function useAssociationProjection<T extends object>(key: string | null, fetcher: () => Promise<T>) {
+  const read=useCachedResource(key,()=>readAssociationProjection(fetcher), {expiresInMs: page => Math.max(0, (associationPageDeadlines.get(page) ?? 0) - performance.now())});
+  useEffect(()=>{
+    if(!key)return;
+    const renew=()=>{void read.refresh();};
+    const timer=setInterval(renew,15_000);
+    window.addEventListener("focus",renew);
+    return ()=>{clearInterval(timer);window.removeEventListener("focus",renew);};
+  },[key,read.refresh]);
+  return read;
+}
 export function useAssociationPage<K extends AssociationResource>(workspaceId:string,resource:K,query:AssociationListQuery={},enabled=true) {
   const scope=JSON.stringify(query);
   const [position,setPosition]=useState({scope,stack:[undefined] as (string|undefined)[]});
   const stack=position.scope===scope?position.stack:[undefined];
   const cursor=stack.at(-1);
-  const read=useCachedResource(enabled?associationPageCacheKey(workspaceId,resource,{...query,cursor}):null,()=>listAssociationPage(workspaceId,resource,{...query,cursor}));
+  const read=useAssociationProjection(enabled?associationPageCacheKey(workspaceId,resource,{...query,cursor}):null,()=>listAssociationPage(workspaceId,resource,{...query,cursor}));
   return {...read,previous:stack.length>1?()=>setPosition({scope,stack:stack.slice(0,-1)}):undefined,
     next:read.data?.nextCursor && !stack.includes(read.data.nextCursor)?()=>setPosition({scope,stack:[...stack,read.data!.nextCursor!]}):undefined};
 }
@@ -71,7 +100,14 @@ export function useAssociationAction(workspaceId:string) {
       await job();setOutcome("saved");requestBrainRefresh(workspaceId);
       markSurfaceCacheStale(`crm:${workspaceId}:`);markSurfaceCacheStale(`association-orders:${workspaceId}`);markSurfaceCacheStale(`association-module:${workspaceId}`);
       return true;
-    } catch {setOutcome("failed");return false;}
+    } catch (error) {
+      if (deniedAssociationRead(error)) {
+        invalidateSurfaceCache(`crm:${workspaceId}:`);
+        invalidateSurfaceCache(`association-orders:${workspaceId}`);
+        invalidateSurfaceCache(`association-module:${workspaceId}`);
+      }
+      setOutcome("failed");return false;
+    }
     finally {lock.current=false;setPending(false);}
   }
   return {pending,run,outcome,feedback:outcome?<p role={outcome==="failed"?"alert":"status"} className={`rounded-xl px-4 py-3 text-sm ${outcome==="failed"?"bg-destructive/10 text-destructive":"bg-emerald-500/10 text-emerald-700 dark:text-emerald-300"}`}>{t.manage[outcome]}</p>:null};
@@ -93,12 +129,40 @@ export function useAssociationIntent(workspaceId:string,operation:string,target:
   }
   return {identity,reference:stored?.key===key?stored.id:"",hasReference:()=>sessionStorage.getItem(key)!==null,reset};
 }
+/** Canonical record read shared by single selections and linked guest sets. */
+async function readAssociationContact(workspaceId: string, id: string): Promise<CrmLookupRow> {
+  const record=(await fetchCrmRecord(workspaceId,id))?.record;
+  if(!record||record.id!==id||record.kind!=="contact"||record.archivedAt) {
+    throw new SurfaceCacheEvictionError(Object.assign(new Error("contact_unavailable"),{status:404}));
+  }
+  return {id:record.id,name:record.name,hint:record.email ?? record.phone ?? null};
+}
+/** A reservation requires every linked source, so its contact projection is atomic. */
+export function useAssociationContactSources(workspaceId: string, ids: string[]) {
+  const sources=[...new Set(ids)].sort();
+  return useAssociationProjection(sources.length?associationPageCacheKey(workspaceId,"linked-contacts",{ids:sources}):null,
+    ()=>Promise.all(sources.map(id=>readAssociationContact(workspaceId,id))));
+}
+/** Store only identity; every display/mutation consumes the currently readable contact. */
+export function useAssociationContactSelection(workspaceId: string) {
+  const [id,setId]=useState<string|null>(null);
+  const read=useAssociationProjection(id?associationPageCacheKey(workspaceId,"selected-contact",{id}):null,
+    ()=>readAssociationContact(workspaceId,id!));
+  useEffect(()=>{
+    if(id&&deniedAssociationRead(read.error)) {
+      setId(null);
+      invalidateSurfaceCache(`crm:${workspaceId}:`);
+    }
+  },[id,read.error,workspaceId]);
+  const select=useCallback((row:CrmLookupRow|null)=>setId(row?.id ?? null),[]);
+  return [read.data ?? null,select] as const;
+}
 /** Debounced person search over CRM contacts; the chosen person renders as a removable chip. */
 export function AssociationContactPicker({workspaceId,onSelect,selected,onClear,label}:{workspaceId:string;onSelect:(row:CrmLookupRow)=>void;selected?:CrmLookupRow|null;onClear?:()=>void;label?:string}) {
   const t=useT().associationPage,m=t.manage;
   const [draft,setDraft]=useState(""),[query,setQuery]=useState("");
   useEffect(()=>{const handle=setTimeout(()=>setQuery(draft.trim()),300);return ()=>clearTimeout(handle);},[draft]);
-  const data=useCachedResource(selected?null:associationPageCacheKey(workspaceId,"contact-lookup",{query}),()=>fetchCrmLookup(workspaceId,"contact",query,50));
+  const data=useAssociationProjection(selected?null:associationPageCacheKey(workspaceId,"contact-lookup",{query}),()=>fetchCrmLookup(workspaceId,"contact",query,50));
   if(selected)return <div className="flex max-sm:min-h-11 flex-wrap items-center justify-between gap-2 rounded-xl bg-primary/5 px-3 py-2 text-sm" data-selected-contact>
     <span className="min-w-0"><span className="block font-medium">{selected.name}</span>{selected.hint?<span className="block text-xs text-muted-foreground">{selected.hint}</span>:null}</span>
     {onClear?<Button type="button" variant="ghost" size="sm" className="min-h-11 md:min-h-8" onClick={onClear}><X aria-hidden className="size-4"/>{t.ux.clear}</Button>:null}

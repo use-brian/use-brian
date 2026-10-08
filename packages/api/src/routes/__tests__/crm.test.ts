@@ -7,6 +7,10 @@ import { beforeEach, describe, expect, it, vi } from 'vitest'
 import request from 'supertest'
 import { createTestApp } from './helpers.js'
 
+vi.mock('../../crm-operations/creation-destination.js', () => ({
+  resolveCrmDestination: vi.fn(async () => ({ sensitivity: 'internal', compartments: [] })),
+  previewCrmDestination: vi.fn(),
+}))
 vi.mock('../../db/workspace-viewpoint.js', () => ({
   resolveWorkspaceViewpoint: vi.fn(),
 }))

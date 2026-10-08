@@ -9,8 +9,9 @@ const workspaceId = randomUUID(), userId = randomUUID(), credentialId = randomUU
 const member: AssociationContext = { workspaceId, actor: { kind: 'user', userId },
   authority: { role: 'member', canRead: true, canWrite: true, canConfigure: false, canReconcileProvider: false, trustedIdentitySources: [] } }
 const command = (raw: unknown) => AssociationCommandSchema.parse(raw)
-function fixture() {
+function fixture(role = "member") {
   const store = {
+    createOrder: vi.fn().mockResolvedValue({ record: { id: orderId }, created: true }),
     listOrders: vi.fn().mockResolvedValue({ items: [], nextCursor: null, total: 7,
       financialSummary: [{ currency: 'USD', orderCount: 7, settledOrderCount: 2, subtotalMinor: '2100', discountMinor: '100', grossMinor: '2000', refundedMinor: '400', netMinor: '1600', pendingMinor: '500' }] }),
     listTickets: vi.fn().mockResolvedValue([]), getOrder: vi.fn().mockResolvedValue({ id: orderId }),
@@ -48,7 +49,7 @@ function fixture() {
     blockingWork: [{ key: 'pending_orders', count: 0 }] }),
     get: vi.fn().mockResolvedValue({ state: 'disabled', version: 3 }) }
   return { store, crm, modules, service: createAssociationService({ store: store as unknown as AssociationStore,
-    crmService: crm as CrmOperationsServicePort, modules: modules as unknown as WorkspaceModulesStore }) }
+    memberRole: async () => role, crmService: crm as CrmOperationsServicePort, modules: modules as unknown as WorkspaceModulesStore }) }
 }
 function integration(): AssociationContext {
   return { ...member, actor: { kind: 'integration_key', credentialId }, authority: { ...member.authority, role: 'system',
@@ -56,6 +57,18 @@ function integration(): AssociationContext {
 }
 
 describe('[COMP:crm/association-service] Canonical authority and adapters', () => {
+  it('requires current human management role for direct and delegated staff reservation creation', async () => {
+    const order = { contactId: userId, idempotencyKey: 'fictional-reservation', lines: [{ ticketId: eventId, quantity: 1, attendees: [{ name: 'Fictional guest' }] }] }
+    const input = command({ kind: 'create_order', order })
+    const delegated = { ...member, actor: { kind: 'assistant' as const, userId, assistantId: credentialId, sessionId: randomUUID() } }
+    const denied = fixture()
+    for (const actor of [member, delegated]) await expect(denied.service.execute(actor, input)).rejects.toMatchObject({ code: 'not_authorized' })
+    expect(denied.store.createOrder).not.toHaveBeenCalled()
+    const allowed = fixture('owner')
+    await allowed.service.execute({ ...member, authority: { ...member.authority, role: 'owner' } }, input)
+    await allowed.service.execute(delegated, input)
+    expect(allowed.store.createOrder).toHaveBeenCalledTimes(2)
+  })
   it('keeps the website status summary a workspace member read', async () => {
     const f=fixture();
     await expect(f.service.execute(integration(),command({kind:'website_status'}))).rejects.toMatchObject({code:'not_authorized'});
@@ -187,10 +200,10 @@ describe('[COMP:crm/association-service] Canonical authority and adapters', () =
   it('intersects receipt read scope with entitlement plan ceilings and never upgrades members to payment authority', async () => {
     const f = fixture(), context = integration(), planId = randomUUID()
     await f.service.execute(context, command({ kind: 'list_provider_receipts' }))
-    expect(f.store.listProviderReceipts).toHaveBeenLastCalledWith(workspaceId, expect.objectContaining({ allowedEventIds: [eventId], allowedPlanIds: [] }))
+    expect(f.store.listProviderReceipts).toHaveBeenLastCalledWith(workspaceId, expect.objectContaining({ allowedEventIds: [eventId], allowedPlanIds: [] }), expect.objectContaining({ credentialKind: 'integration_key', credentialId: context.authority.integration!.credentialId, integration: context.authority.integration }))
     context.authority.integration!.grants.push({ operation: 'crm.entitlements.read', selectors: { planIds: [planId] } })
     await f.service.execute(context, command({ kind: 'list_provider_receipts', state: 'needs_reconciliation' }))
-    expect(f.store.listProviderReceipts).toHaveBeenLastCalledWith(workspaceId, expect.objectContaining({ state: 'needs_reconciliation', allowedEventIds: [eventId], allowedPlanIds: [planId] }))
+    expect(f.store.listProviderReceipts).toHaveBeenLastCalledWith(workspaceId, expect.objectContaining({ state: 'needs_reconciliation', allowedEventIds: [eventId], allowedPlanIds: [planId] }), expect.objectContaining({ credentialKind: 'integration_key', credentialId: context.authority.integration!.credentialId, integration: context.authority.integration }))
     const event = { provider: 'fixture', providerReference: 'fictional-subscription', providerPeriodId: 'period-1', eventId: 'event-1', occurredAt: '2026-09-09T00:00:00Z', command: { kind: 'update_entitlement', entitlementId: orderId, status: 'cancelled' } }
     await expect(f.service.execute({ ...member, authority: { ...member.authority, canReconcileProvider: true } }, command({ kind: 'reconcile_provider_entitlement', event }))).rejects.toMatchObject({ code: 'not_authorized' })
     expect(f.store.reconcileProviderEntitlement).not.toHaveBeenCalled()
@@ -211,7 +224,7 @@ describe('[COMP:crm/association-service] Canonical authority and adapters', () =
     await expect(f.service.execute(context, command({ kind: 'list_waitlist' }))).rejects.toMatchObject({ code: 'integration_scope_denied' })
     context.authority.integration!.grants.push({ operation: 'crm.submissions.read', selectors: { definitionIds: [definitionId] } })
     await f.service.execute(context, command({ kind: 'list_waitlist', limit: 10 }))
-    expect(f.store.listWaitlist).toHaveBeenCalledWith(workspaceId, expect.objectContaining({ limit: 10, allowedEventIds: [eventId], allowedDefinitionIds: [definitionId] }))
+    expect(f.store.listWaitlist).toHaveBeenCalledWith(workspaceId, expect.objectContaining({ limit: 10, allowedEventIds: [eventId], allowedDefinitionIds: [definitionId] }), expect.objectContaining({ credentialKind: 'integration_key' }))
   })
   it('keeps history/recovery usable without an admission precheck that could hide disabled history', async () => {
     const f = fixture()
@@ -239,7 +252,7 @@ describe('[COMP:crm/association-service] Canonical authority and adapters', () =
   it('passes the event ceiling into SQL list inputs before pagination and scopes blocker counts', async () => {
     const f = fixture()
     const result = await f.service.execute(integration(), command({ kind: 'module_blockers', limit: 2 }))
-    expect(f.store.listOrders).toHaveBeenCalledWith(workspaceId, { limit: 2, cursor: null, status: 'pending', allowedEventIds: [eventId] })
+    expect(f.store.listOrders).toHaveBeenCalledWith(workspaceId, { limit: 2, cursor: null, status: 'pending', allowedEventIds: [eventId] }, expect.objectContaining({ credentialKind: 'integration_key', credentialId }))
     expect(result.pendingOrders).toBe(7)
     await expect(f.service.execute(integration(), command({ kind: 'list_orders', eventId: randomUUID() }))).rejects.toMatchObject({ code: 'integration_scope_denied' })
     expect(f.store.listOrders).toHaveBeenCalledTimes(1)
@@ -248,7 +261,7 @@ describe('[COMP:crm/association-service] Canonical authority and adapters', () =
     const f = fixture()
     const result = await f.service.execute(member, command({ kind: 'list_orders', eventId, status: 'paid' }))
     expect(result.financialSummary).toEqual([expect.objectContaining({ currency: 'USD', grossMinor: '2000', refundedMinor: '400' })])
-    expect(f.store.listOrders).toHaveBeenCalledWith(workspaceId, expect.objectContaining({ eventId, status: 'paid' }))
+    expect(f.store.listOrders).toHaveBeenCalledWith(workspaceId, expect.objectContaining({ eventId, status: 'paid' }), { credentialKind: 'user', credentialId: userId, actingUserId: userId })
   })
   it('confines the complete operational roster to owner/admin user sessions', async () => {
     const f = fixture(), roster = command({ kind: 'list_operational_roster', eventId, limit: 25 })
@@ -258,7 +271,7 @@ describe('[COMP:crm/association-service] Canonical authority and adapters', () =
     expect(f.store.listOperationalRoster).not.toHaveBeenCalled()
     const result = await f.service.execute({ ...member, authority: { ...member.authority, role: 'owner', canConfigure: true } }, roster)
     expect(result.items).toEqual([{ id: orderId }])
-    expect(f.store.listOperationalRoster).toHaveBeenCalledWith(workspaceId, eventId, expect.objectContaining({ limit: 25, cursor: null }))
+    expect(f.store.listOperationalRoster).toHaveBeenCalledWith(workspaceId, eventId, expect.objectContaining({ limit: 25, cursor: null }), expect.objectContaining({ credentialKind: 'user' }))
   })
   it('carries the original grant ceiling to by-id reads and refuses mismatched credentials', async () => {
     const f = fixture(), context = integration()
@@ -272,9 +285,9 @@ describe('[COMP:crm/association-service] Canonical authority and adapters', () =
     expect(result.items).toEqual([])
     expect(f.store.getOrder).toHaveBeenCalledWith(workspaceId, orderId,
       expect.objectContaining({ integration: context.authority.integration }))
-    expect(f.store.listNotifications).toHaveBeenCalledWith(workspaceId, {
+    expect(f.store.listNotifications).toHaveBeenCalledWith(workspaceId, expect.objectContaining({
       limit: 10, cursor: null, sourceKind: 'order', sourceId: orderId,
-    })
+    }), expect.objectContaining({ credentialKind: 'integration_key', integration: context.authority.integration }))
     f.store.getOrder.mockResolvedValueOnce(null)
     await expect(f.service.execute(context, command({ kind: 'list_order_notifications', orderId })))
       .rejects.toMatchObject({ code: 'not_found' })
@@ -323,7 +336,7 @@ describe('[COMP:crm/association-service] Canonical authority and adapters', () =
     expect(f.store.createMembershipRescue).not.toHaveBeenCalled()
     expect((await f.service.execute(owner,command({kind:'create_membership_rescue',rescue}))).record).toMatchObject({status:'outstanding'})
     await f.service.execute(owner,command({kind:'list_membership_rescues',limit:10,status:'outstanding'}))
-    expect(f.store.listMembershipRescues).toHaveBeenCalledWith(workspaceId,expect.objectContaining({limit:10,status:'outstanding'}))
+    expect(f.store.listMembershipRescues).toHaveBeenCalledWith(workspaceId,expect.objectContaining({limit:10,status:'outstanding'}),expect.objectContaining({credentialKind:'user'}))
     const settlement={requestId:randomUUID(),method:'bank_transfer' as const,evidenceReference:'bank-fixture-1',amountMinor:100,
       currency:'USD',occurredAt:'2026-09-08T00:00:00Z'}
     expect((await f.service.execute(owner,command({kind:'settle_membership_rescue',rescueId:orderId,settlement}))).record).toMatchObject({status:'settled'})
@@ -337,6 +350,7 @@ describe('[COMP:crm/association-service] Canonical authority and adapters', () =
     await f.service.execute(owner,command({kind:'create_sponsorship_allocation',allocation}))
     expect(f.store.createSponsorshipAllocation).toHaveBeenCalledWith(workspaceId,allocation,expect.objectContaining({credentialKind:'user'}))
     await f.service.execute(owner,command({kind:'list_sponsorship_allocations',limit:10,sponsorContactId:userId}))
+    expect(f.store.listSponsorshipAllocations).toHaveBeenCalledWith(workspaceId,expect.objectContaining({limit:10,sponsorContactId:userId}),expect.objectContaining({credentialKind:'user'}))
     const redemption={token:'x'.repeat(43),contactId:userId}
     await expect(f.service.execute(owner,command({kind:'redeem_sponsorship_invitation',redemption}))).rejects.toMatchObject({code:'not_authorized'})
     const backend=integration();backend.authority.integration!.grants.push({operation:'crm.entitlements.write',selectors:{planIds:[eventId]}})

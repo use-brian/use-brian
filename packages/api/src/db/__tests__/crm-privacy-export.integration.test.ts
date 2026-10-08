@@ -1,12 +1,16 @@
 import {createHash,randomUUID} from 'node:crypto'
 import {afterAll,describe,expect,it} from 'vitest'
-import {getPool,getAppPool} from '../client.js'
+import {getPool,getAppPool,queryWithRLS} from '../client.js'
+import {runWithAgentAccess} from '../agent-access-context.js'
 import {CRM_PRIVACY_COVERAGE,crmPrivacyDomainSql} from '../../crm-operations/privacy-coverage.js'
 import {prepareCrmPrivacyCopies} from '../../crm-operations/privacy-copy-resolver.js'
 
 import express from 'express'
 import request from 'supertest'
 import {CrmOperationsCommandSchema,type CrmOperationsContext,type AssociationServicePort} from '@use-brian/core'
+import {loadAssociationOrderScope} from '../../association/source-scope.js'
+import {createCrmPrivacyService,readCrmErasureReview} from '../../crm-operations/privacy-previews.js'
+import {exportCrmOperationsPrivacy} from '../../crm-operations/privacy.js'
 import {streamCrmPrivacyExport} from '../../crm-operations/privacy-export.js'
 import {createCrmIntegrationStore} from '../crm-integration-store.js'
 import {createCrmOperationsService} from '../../crm-operations/service.js'
@@ -49,7 +53,8 @@ async function activity(f:Awaited<ReturnType<typeof fixture>>,count=1) {
 }
 async function receipt(f:Awaited<ReturnType<typeof fixture>>,shared:boolean) {
   const id=randomUUID(),envelope={kind:'send_message',deliveryId:id,connectorInstanceId:randomUUID(),purposeKey:'updates',to:[ownEmail],cc:[],bcc:shared?[otherEmail]:[],subject:shared?'Shared private subject':'Subject message',body:shared?'Unrelated private payload':'Subject private payload',attachments:[]}
-  await pool.query(`INSERT INTO crm_delivery_receipts(workspace_id,delivery_id,request_hash,connector_instance_id,provider_key,purpose_key,actor_kind,actor_credential_id,envelope,status,claim_token,claim_deadline,accepted_at,provider_receipt) VALUES($1,$2,$3,$4,'fixture','updates','user',$5,$6,'sent',$7,now(),now(),'{"evidence":"provider_accepted","messageId":"fixture-message"}')`,[f.workspaceId,id,'a'.repeat(64),envelope.connectorInstanceId,f.userId,JSON.stringify(envelope),randomUUID()])
+  const evidence=await loadAssociationOrderScope(pool,f.workspaceId,shared?[f.contactId,f.otherId]:[f.contactId])
+  await pool.query(`INSERT INTO crm_delivery_receipts(workspace_id,delivery_id,request_hash,connector_instance_id,provider_key,purpose_key,actor_kind,actor_credential_id,envelope,status,claim_token,claim_deadline,accepted_at,provider_receipt,scope_snapshot,scope_sources) VALUES($1,$2,$3,$4,'fixture','updates','user',$5,$6,'sent',$7,now(),now(),'{"evidence":"provider_accepted","messageId":"fixture-message"}',$8::jsonb,$9::jsonb)`,[f.workspaceId,id,'a'.repeat(64),envelope.connectorInstanceId,f.userId,JSON.stringify(envelope),randomUUID(),JSON.stringify(evidence.scope),JSON.stringify(evidence.sources)])
   for(const contact of shared?[f.contactId,f.otherId]:[f.contactId])await pool.query('INSERT INTO crm_delivery_receipt_contacts(workspace_id,delivery_id,contact_id) VALUES($1,$2,$3)',[f.workspaceId,id,contact])
   return id
 }
@@ -103,8 +108,10 @@ describe('[COMP:crm/privacy-export] Actual privacy projection coverage',()=>{
   })
   it('exports submission attachment metadata and digest without bulk-exporting image bytes',async()=>{
     const f=await fixture(),submissionId=randomUUID(),attachmentId=randomUUID()
-    await pool.query(`INSERT INTO association_enquiries(id,workspace_id,contact_id,source,source_submission_id,request_fingerprint,subject,message,submitted_data)
-      VALUES($1::uuid,$2,$3,'fixture',$1::uuid::text,repeat('a',64),'Fixture submission','Fixture message','{}')`,[submissionId,f.workspaceId,f.contactId])
+    const evidence=await loadAssociationOrderScope(pool,f.workspaceId,[f.contactId])
+    await pool.query(`INSERT INTO association_enquiries(id,workspace_id,contact_id,source,source_submission_id,request_fingerprint,subject,message,submitted_data,scope_snapshot,scope_sources)
+      VALUES($1::uuid,$2,$3,'fixture',$1::uuid::text,repeat('a',64),'Fixture submission','Fixture message','{}',$4::jsonb,$5::jsonb)`,
+      [submissionId,f.workspaceId,f.contactId,JSON.stringify(evidence.scope),JSON.stringify(evidence.sources)])
     const bytes=Buffer.from('normalized private image bytes')
     await pool.query(`INSERT INTO association_submission_attachments(
       id,workspace_id,submission_id,attachment_key,original_name,mime_type,content_bytes,size_bytes,sha256)
@@ -121,9 +128,10 @@ describe('[COMP:crm/privacy-export] Actual privacy projection coverage',()=>{
   it('pins the snapshot before the first byte, including domains fetched after concurrent updates',async()=>{
     const f=await fixture();await activity(f)
     const stream=streamCrmPrivacyExport(f.context,{contactId:f.contactId}),first=await stream.next(),lines=[first.value!]
-    await pool.query("UPDATE entities SET display_name='Changed after snapshot' WHERE id=$1",[f.contactId])
+    const changed=pool.query("UPDATE entities SET display_name='Changed after snapshot' WHERE id=$1",[f.contactId])
     await activity(f,2)
     for await(const line of stream)lines.push(line)
+    await changed
     const result={values:lines.map(line=>JSON.parse(line))}
     expect(records(result,'entities')[0]?.display_name).toBe('Subject person')
     expect(records(result,'crm_activities')).toHaveLength(1)
@@ -137,6 +145,8 @@ describe('[COMP:crm/privacy-export] Actual privacy projection coverage',()=>{
     await pool.query("INSERT INTO association_order_lines(id,workspace_id,order_id,ticket_id,quantity,unit_price_minor,line_total_minor,pricing_basis) VALUES($1,$2,$3,$4,2,10,20,'public')",[lineId,f.workspaceId,orderId,ticketId])
     for(const [contactId,name,email] of [[f.contactId,'Subject person',ownEmail],[f.otherId,'Unrelated person',otherEmail]])
       await pool.query("INSERT INTO association_registrations(workspace_id,order_id,order_line_id,event_id,ticket_id,attendee_contact_id,attendee_name,attendee_email,source_kind,source_id,request_fingerprint) VALUES($1,$2,$3,$4,$5,$6,$7,$8,'commerce',$3::uuid::text,repeat('a',64))",[f.workspaceId,orderId,lineId,eventId,ticketId,contactId,name,email])
+    const evidence=await loadAssociationOrderScope(pool,f.workspaceId,[f.contactId,f.otherId])
+    for(const table of ['association_orders','association_registrations'])await pool.query(`UPDATE ${table} SET scope_snapshot=$2::jsonb,scope_sources=$3::jsonb WHERE workspace_id=$1`,[f.workspaceId,JSON.stringify(evidence.scope),JSON.stringify(evidence.sources)])
     const output=await collect(f.context,f.contactId)
     expect(records(output,'association_orders')).toMatchObject([{id:orderId,contact_id:null,metadata:{}}])
     expect(records(output,'association_registrations')).toHaveLength(2)
@@ -192,17 +202,299 @@ describe('[COMP:crm/privacy-export] Actual privacy projection coverage',()=>{
   })
   it('requires live owner/admin membership and never honors a forged workspace or session role',async()=>{
     const f=await fixture(),other=await fixture()
+    await expect(exportCrmOperationsPrivacy({...f.context,workspaceId:other.workspaceId})).rejects.toMatchObject({code:'not_authorized'})
     await expect(collect({...f.context,workspaceId:other.workspaceId})).rejects.toMatchObject({code:'not_authorized'})
     await expect(collect(f.context,other.contactId)).rejects.toMatchObject({code:'not_found'})
     await pool.query("UPDATE workspace_members SET role='member' WHERE workspace_id=$1 AND user_id=$2",[f.workspaceId,f.userId])
     await expect(collect(f.context)).rejects.toMatchObject({code:'not_authorized'})
   })
+  it('checks CRM company roots past the first page before emitting a workspace header',async()=>{
+    const f=await fixture(),other=await fixture(),hidden='ffffffff-'+randomUUID().slice(9)
+    await pool.query("INSERT INTO entities(id,workspace_id,kind,display_name,created_by_user_id,source) SELECT ('00000000-'||substring(gen_random_uuid()::text,10))::uuid,$1,'company','Fictional paged company',$2,'manual' FROM generate_series(1,256)",[f.workspaceId,f.userId])
+    await pool.query("INSERT INTO entities(id,workspace_id,kind,display_name,user_id,created_by_user_id,source) VALUES($1,$2,'company','Fictional private company',$3,$3,'manual')",[hidden,f.workspaceId,other.userId])
+    await expect(streamCrmPrivacyExport(f.context).next()).rejects.toMatchObject({code:'not_authorized'})
+    await expect(exportCrmOperationsPrivacy(f.context)).rejects.toMatchObject({code:'not_authorized'})
+  },60_000)
+  it('preserves historical CRM root protection and refuses unresolved held scope',async()=>{
+    const f=await fixture(),historical=randomUUID()
+    await pool.query("INSERT INTO entities(id,workspace_id,kind,display_name,created_by_user_id,source,valid_to) VALUES($1,$2,'company','Fictional historical company',$3,'manual',now())",[historical,f.workspaceId,f.userId])
+    expect(records(await collect(f.context),'entities').some(row=>row.id===historical)).toBe(true)
+    await pool.query('UPDATE entities SET scope_held=true WHERE id=$1',[historical])
+    await expect(streamCrmPrivacyExport(f.context).next()).rejects.toMatchObject({code:'not_authorized'})
+    await expect(exportCrmOperationsPrivacy(f.context)).rejects.toMatchObject({code:'not_authorized'})
+  })
+  it('denies a hidden contact before emitting any export header',async()=>{
+    const f=await fixture(),departmentId=randomUUID(),departmentOwner=randomUUID()
+    await pool.query('INSERT INTO users(id,auth_provider_id) VALUES($1::uuid,$1::text)',[departmentOwner])
+    await pool.query("INSERT INTO workspace_members(workspace_id,user_id,role) VALUES($1,$2,'member')",[f.workspaceId,departmentOwner])
+    await pool.query("INSERT INTO workspace_groups(id,workspace_id,name,created_by,kind,key,compartment_key) VALUES($1::uuid,$2,'Fictional export department',$3,'team',$1::text,$4)",[departmentId,f.workspaceId,departmentOwner,`team:${departmentId}`])
+    await pool.query("INSERT INTO workspace_compartments(workspace_id,key,label,managed_by,managed_ref_id) VALUES($1,$2,'Fictional export department','team',$3)",[f.workspaceId,`team:${departmentId}`,departmentId])
+    await pool.query("UPDATE entities SET sensitivity='confidential',compartments=$2 WHERE id=$1",[f.contactId,[`team:${departmentId}`]])
+    await expect(exportCrmOperationsPrivacy(f.context)).rejects.toMatchObject({code:'not_authorized'})
+    for(const contactId of [f.contactId,undefined]) {
+      const stream=streamCrmPrivacyExport(f.context,{contactId})
+      await expect(stream.next()).rejects.toMatchObject({code:'not_authorized'})
+      expect(await stream.next()).toMatchObject({done:true})
+    }
+  })
+  it.each(['workspace_files','entity_links','tasks'] as const)('requires independent %s scope for redacted inventory and erasure review',async table=>{
+    const f=await fixture(),departmentId=randomUUID(),departmentOwner=randomUUID(),file=randomUUID(),link=randomUUID(),task=randomUUID()
+    await pool.query('INSERT INTO users(id,auth_provider_id) VALUES($1::uuid,$1::text)',[departmentOwner])
+    await pool.query("INSERT INTO workspace_members(workspace_id,user_id,role) VALUES($1,$2,'member')",[f.workspaceId,departmentOwner])
+    await pool.query("INSERT INTO workspace_groups(id,workspace_id,name,created_by,kind,key,compartment_key) VALUES($1::uuid,$2,'Fictional inventory department',$3,'team',$1::text,$4)",[departmentId,f.workspaceId,departmentOwner,`team:${departmentId}`])
+    await pool.query("INSERT INTO workspace_compartments(workspace_id,key,label,managed_by,managed_ref_id) VALUES($1,$2,'Fictional inventory department','team',$3)",[f.workspaceId,`team:${departmentId}`,departmentId])
+    await pool.query("INSERT INTO workspace_files(id,workspace_id,path,name,storage_uri,created_by_user_id) VALUES($1,$2,'/fixture.txt','fixture.txt','fixture://inventory',$3)",[file,f.workspaceId,f.userId])
+    await pool.query("INSERT INTO entity_link_types(edge_type,description) VALUES('privacy_fixture','Privacy fixture relationship') ON CONFLICT DO NOTHING")
+    await pool.query("INSERT INTO entity_links(id,workspace_id,source_kind,source_id,target_kind,target_id,edge_type,source,user_id) VALUES($1,$2,'file',$3,'entity',$4,'privacy_fixture','manual',$5)",[link,f.workspaceId,file,f.contactId,f.userId])
+    await pool.query("INSERT INTO tasks(id,workspace_id,title,user_id,attributes) VALUES($1,$2,'Fictional inventory task',$3,$4)",[task,f.workspaceId,f.userId,{crm_contact_id:f.contactId}])
+    const id=table==='workspace_files'?file:table==='entity_links'?link:task,privacy=createCrmPrivacyService()
+    const earlier=await privacy.preview(f.context,{kind:'preview_contact_erasure',contactId:f.contactId})
+    await pool.query(`UPDATE ${table} SET sensitivity='confidential',compartments=$2 WHERE id=$1`,[id,[`team:${departmentId}`]])
+    for(const contactId of [f.contactId,undefined])await expect(collect(f.context,contactId)).rejects.toMatchObject({code:'not_authorized'})
+    await expect(exportCrmOperationsPrivacy(f.context)).rejects.toMatchObject({code:'not_authorized'})
+    await expect(privacy.preview(f.context,{kind:'preview_contact_erasure',contactId:f.contactId})).rejects.toMatchObject({code:'not_authorized'})
+    await pool.query("INSERT INTO department_edges(workspace_id,department_id,principal_kind,user_id,clearance,origin) VALUES($1,$2,'user',$3,'confidential','store')",[f.workspaceId,departmentId,f.userId])
+    await expect(readCrmErasureReview(f.context,earlier.id)).rejects.toMatchObject({code:'conflict',details:{reason:'privacy_preview_stale'}})
+    const preview=await privacy.preview(f.context,{kind:'preview_contact_erasure',contactId:f.contactId})
+    expect((await pool.query('SELECT scope_snapshot FROM crm_privacy_previews WHERE id=$1',[preview.id])).rows[0].scope_snapshot.compartments).toEqual([`team:${departmentId}`])
+    expect(records(await collect(f.context,f.contactId),table).some(row=>row.id===id)).toBe(true)
+    const stream=streamCrmPrivacyExport(f.context,{contactId:f.contactId})
+    expect(JSON.parse((await stream.next()).value!).type).toBe('header')
+    await pool.query("UPDATE department_edges SET expires_at=clock_timestamp()-interval '1 second' WHERE department_id=$1 AND user_id=$2",[departmentId,f.userId])
+    await expect(stream.next()).rejects.toMatchObject({code:'not_authorized'})
+    await expect(readCrmErasureReview(f.context,preview.id)).rejects.toMatchObject({code:'not_authorized'})
+    await pool.query('UPDATE department_edges SET expires_at=NULL WHERE department_id=$1 AND user_id=$2',[departmentId,f.userId])
+    await pool.query(`UPDATE ${table} SET scope_held=true WHERE id=$1`,[id])
+    await expect(collect(f.context,f.contactId)).rejects.toMatchObject({code:'not_authorized'})
+    expect((await pool.query('SELECT id FROM entities WHERE id=$1',[f.contactId])).rowCount).toBe(1)
+  },60_000)
+  it('preserves a linked membership floor and stops streaming after its department grant expires',async()=>{
+    const f=await fixture(),departmentId=randomUUID(),departmentOwner=randomUUID(),plan=randomUUID()
+    await pool.query('INSERT INTO users(id,auth_provider_id) VALUES($1::uuid,$1::text)',[departmentOwner])
+    await pool.query("INSERT INTO workspace_members(workspace_id,user_id,role) VALUES($1,$2,'member')",[f.workspaceId,departmentOwner])
+    await pool.query("INSERT INTO workspace_groups(id,workspace_id,name,created_by,kind,key,compartment_key) VALUES($1::uuid,$2,'Fictional saved export department',$3,'team',$1::text,$4)",[departmentId,f.workspaceId,departmentOwner,`team:${departmentId}`])
+    await pool.query("INSERT INTO workspace_compartments(workspace_id,key,label,managed_by,managed_ref_id) VALUES($1,$2,'Fictional saved export department','team',$3)",[f.workspaceId,`team:${departmentId}`,departmentId])
+    await pool.query("UPDATE entities SET sensitivity='confidential',compartments=$2 WHERE id=$1",[f.contactId,[`team:${departmentId}`]])
+    const evidence=await loadAssociationOrderScope(pool,f.workspaceId,[f.contactId])
+    await pool.query("INSERT INTO association_membership_plans(id,workspace_id,plan_key,name,currency,fee_minor,billing_period) VALUES($1,$2,'export','Fictional export plan','USD',0,'manual')",[plan,f.workspaceId])
+    await pool.query("INSERT INTO association_memberships(workspace_id,contact_id,plan_id,idempotency_key,request_fingerprint,starts_at,scope_snapshot,scope_sources) VALUES($1,$2,$3,'export',repeat('a',64),now(),$4::jsonb,$5::jsonb)",[f.workspaceId,f.contactId,plan,JSON.stringify(evidence.scope),JSON.stringify(evidence.sources)])
+    await pool.query("UPDATE entities SET sensitivity='internal',compartments='{}' WHERE id=$1",[f.contactId])
+    await expect(collect(f.context,f.contactId)).rejects.toMatchObject({code:'not_authorized'})
+    await expect(collect(f.context)).rejects.toMatchObject({code:'not_authorized'})
+    await expect(exportCrmOperationsPrivacy(f.context)).rejects.toMatchObject({code:'not_authorized'})
+    await pool.query("INSERT INTO department_edges(workspace_id,department_id,principal_kind,user_id,clearance,origin) VALUES($1,$2,'user',$3,'confidential','store')",[f.workspaceId,departmentId,f.userId])
+    expect((await exportCrmOperationsPrivacy(f.context)).tables.association_memberships).toHaveLength(1)
+    for(const contactId of [f.contactId,undefined]) {
+      await pool.query('UPDATE department_edges SET expires_at=NULL WHERE department_id=$1 AND user_id=$2',[departmentId,f.userId])
+      expect((await collect(f.context,contactId)).values.at(-1)?.complete).toBe(true)
+      const stream=streamCrmPrivacyExport(f.context,{contactId})
+      expect(JSON.parse((await stream.next()).value!).type).toBe('header')
+      await pool.query("UPDATE department_edges SET expires_at=clock_timestamp()-interval '1 second' WHERE department_id=$1 AND user_id=$2",[departmentId,f.userId])
+      await expect(stream.next()).rejects.toMatchObject({code:'not_authorized'})
+      expect(await stream.next()).toMatchObject({done:true})
+    }
+    expect((await pool.query('SELECT id FROM entities WHERE id=$1',[f.contactId])).rowCount).toBe(1)
+  },60_000)
+  it('renews bound assistant Project scope before privacy export and between stream records', async () => {
+    const f = await fixture(), project = randomUUID(), assistantId = randomUUID()
+    await pool.query('INSERT INTO workspace_projects(id,workspace_id,name,normalized_name,created_by) VALUES($1,$2,$3,lower($3),$4)', [project, f.workspaceId, 'Fictional export project', f.userId])
+    await pool.query('UPDATE entities SET project_ids=ARRAY[$2::uuid] WHERE id=$1', [f.contactId, project])
+    await pool.query("INSERT INTO assistants(id,workspace_id,name,kind,clearance,project_scope_mode) VALUES($1,$2,'Fictional export assistant','primary','internal','all')", [assistantId, f.workspaceId])
+    const key = await keys.create(f.workspaceId, f.userId, { label: 'Fictional bound export', expiresAt: '2099-01-01T00:00:00Z',
+      grants: [{ operation: 'crm.privacy.export', selectors: {} }], departmentBinding: { departmentIds: [], cap: 'internal', assistantId } })
+    const context = crmIntegrationContext((await keys.authenticate(key.oneTimeSecret))!)
+    expect(records(await collect(context, f.contactId), 'entities')).toMatchObject([{ id: f.contactId }])
+    const stream = streamCrmPrivacyExport(context, { contactId: f.contactId })
+    try {
+      expect(JSON.parse((await stream.next()).value!).type).toBe('header')
+      await pool.query("UPDATE assistants SET project_scope_mode='assigned' WHERE id=$1", [assistantId])
+      await expect(stream.next()).rejects.toMatchObject({ code: 'not_authorized' })
+      expect((await stream.next()).done).toBe(true)
+    } finally { await stream.return(undefined) }
+    await expect(collect(context, f.contactId)).rejects.toMatchObject({ code: 'not_authorized' })
+    await pool.query('INSERT INTO assistant_project_grants(assistant_id,project_id,added_by_user_id) VALUES($1,$2,$3)', [assistantId, project, f.userId])
+    expect(records(await collect(context, f.contactId), 'entities')).toMatchObject([{ id: f.contactId }])
+  })
+
+  it('preserves checkout floors for bound integration exports and renews issuer edges during streaming',async()=>{
+    const f=await fixture(),departmentId=randomUUID(),custodian=randomUUID(),plan=randomUUID(),promotion=randomUUID(),checkout=randomUUID()
+    await pool.query('INSERT INTO users(id,auth_provider_id) VALUES($1::uuid,$1::text)',[custodian])
+    await pool.query("INSERT INTO workspace_members(workspace_id,user_id,role) VALUES($1,$2,'member')",[f.workspaceId,custodian])
+    await pool.query("INSERT INTO workspace_groups(id,workspace_id,name,created_by,kind,key,compartment_key) VALUES($1::uuid,$2,'Cedar',$3,'team',$1::text,$4)",[departmentId,f.workspaceId,custodian,`team:${departmentId}`])
+    await pool.query("INSERT INTO workspace_compartments(workspace_id,key,label,managed_by,managed_ref_id) VALUES($1,$2,'Cedar','team',$3)",[f.workspaceId,`team:${departmentId}`,departmentId])
+    await pool.query("UPDATE entities SET sensitivity='confidential',compartments=$2 WHERE id=$1",[f.contactId,[`team:${departmentId}`]])
+    const evidence=await loadAssociationOrderScope(pool,f.workspaceId,[f.contactId])
+    await pool.query("INSERT INTO association_membership_plans(id,workspace_id,plan_key,name,currency,fee_minor,billing_period) VALUES($1,$2,'export','Fictional export plan','USD',100,'manual')",[plan,f.workspaceId])
+    await pool.query("INSERT INTO association_promotions(id,workspace_id,promotion_key,name,code_digest,discount_type,target_kind,target_ids) VALUES($1,$2,'export','Fictional export promotion',repeat('a',64),'full','plan',$3)",[promotion,f.workspaceId,[plan]])
+    await pool.query(`INSERT INTO association_membership_checkouts(id,workspace_id,contact_id,plan_id,idempotency_key,request_fingerprint,
+      currency,subtotal_minor,discount_minor,total_minor,promotion_id,promotion_snapshot,reservation_expires_at,scope_snapshot,scope_sources)
+      VALUES($1,$2,$3,$4,'export',repeat('a',64),'USD',100,100,0,$5,'{}',now()+interval '1 hour',$6::jsonb,$7::jsonb)`,
+      [checkout,f.workspaceId,f.contactId,plan,promotion,JSON.stringify(evidence.scope),JSON.stringify(evidence.sources)])
+    await pool.query("UPDATE entities SET sensitivity='internal',compartments='{}' WHERE id=$1",[f.contactId])
+    const general=await f.issue()
+    for(const contactId of [f.contactId,undefined]) {
+      await expect(collect(f.context,contactId)).rejects.toMatchObject({code:'not_authorized'})
+      await expect(collect(general.context,contactId)).rejects.toMatchObject({code:'not_authorized'})
+    }
+    await pool.query("INSERT INTO department_edges(workspace_id,department_id,principal_kind,user_id,clearance,origin) VALUES($1,$2,'user',$3,'confidential','store')",[f.workspaceId,departmentId,f.userId])
+    const key=await keys.create(f.workspaceId,f.userId,{label:'Cedar privacy reader',expiresAt:'2099-01-01T00:00:00Z',
+      grants:[{operation:'crm.privacy.export',selectors:{}}],departmentBinding:{departmentIds:[departmentId],cap:'confidential'}})
+    const context=crmIntegrationContext((await keys.authenticate(key.oneTimeSecret))!)
+    await expect(collect(general.context,f.contactId)).rejects.toMatchObject({code:'not_authorized'})
+    for(const contactId of [f.contactId,undefined]) {
+      await pool.query('UPDATE department_edges SET expires_at=NULL WHERE department_id=$1 AND user_id=$2',[departmentId,f.userId])
+      const output=await collect(context,contactId)
+      expect(records(output,'association_membership_checkouts')).toMatchObject([{id:checkout}])
+      expect(records(output,'association_membership_checkouts')[0]).not.toHaveProperty('scope_snapshot')
+      expect(records(output,'association_membership_checkouts')[0]).not.toHaveProperty('scope_sources')
+      for(const row of records(output,'crm_integration_credentials'))expect(row).not.toHaveProperty('department_binding')
+      const stream=streamCrmPrivacyExport(context,{contactId})
+      try {
+        expect(JSON.parse((await stream.next()).value!).type).toBe('header')
+        await pool.query("UPDATE department_edges SET expires_at=clock_timestamp()-interval '1 second' WHERE department_id=$1 AND user_id=$2",[departmentId,f.userId])
+        await expect(stream.next()).rejects.toMatchObject({code:'not_authorized'})
+        expect((await stream.next()).done).toBe(true)
+      }finally{await stream.return(undefined)}
+    }
+    await expect(createCrmPrivacyService().preview(context,{kind:'preview_contact_erasure',contactId:f.contactId})).rejects.toMatchObject({code:'not_authorized'})
+  })
+  it('preserves activity protection across contact reclassification, export revocation and consumed erasure receipts',async()=>{
+    const f=await fixture(),departmentId=randomUUID(),departmentOwner=randomUUID(),activityId='ffffffff-'+randomUUID().slice(9)
+    await pool.query('INSERT INTO users(id,auth_provider_id) VALUES($1::uuid,$1::text)',[departmentOwner])
+    await pool.query("INSERT INTO workspace_members(workspace_id,user_id,role) VALUES($1,$2,'member')",[f.workspaceId,departmentOwner])
+    await pool.query("INSERT INTO workspace_groups(id,workspace_id,name,created_by,kind,key,compartment_key) VALUES($1::uuid,$2,'Fictional saved export department',$3,'team',$1::text,$4)",[departmentId,f.workspaceId,departmentOwner,`team:${departmentId}`])
+    await pool.query("INSERT INTO workspace_compartments(workspace_id,key,label,managed_by,managed_ref_id) VALUES($1,$2,'Fictional saved export department','team',$3)",[f.workspaceId,`team:${departmentId}`,departmentId])
+    const privacy=createCrmPrivacyService()
+    const earlier=await privacy.preview(f.context,{kind:'preview_contact_erasure',contactId:f.contactId})
+    await pool.query("INSERT INTO crm_activities(id,workspace_id,entity_id,activity_type,summary) SELECT ('00000000-'||substring(gen_random_uuid()::text,10))::uuid,$1,$2,'note','Fictional General history' FROM generate_series(1,256)",[f.workspaceId,f.contactId])
+    await pool.query("UPDATE entities SET sensitivity='confidential',compartments=$2 WHERE id=$1",[f.contactId,[`team:${departmentId}`]])
+    await pool.query("INSERT INTO crm_activities(id,workspace_id,entity_id,activity_type,summary) VALUES($1,$2,$3,'note','Fictional protected history')",[activityId,f.workspaceId,f.contactId])
+    await pool.query("UPDATE entities SET sensitivity='internal',compartments='{}' WHERE id=$1",[f.contactId])
+    await expect(privacy.preview(f.context,{kind:'preview_contact_erasure',contactId:f.contactId})).rejects.toMatchObject({code:'not_authorized'})
+    await expect(collect(f.context,f.contactId)).rejects.toMatchObject({code:'not_authorized'})
+    await expect(collect(f.context)).rejects.toMatchObject({code:'not_authorized'})
+    await expect(exportCrmOperationsPrivacy(f.context)).rejects.toMatchObject({code:'not_authorized'})
+    await pool.query("INSERT INTO department_edges(workspace_id,department_id,principal_kind,user_id,clearance,origin) VALUES($1,$2,'user',$3,'confidential','store')",[f.workspaceId,departmentId,f.userId])
+    await expect(readCrmErasureReview(f.context,earlier.id)).rejects.toMatchObject({code:'conflict',details:{reason:'privacy_preview_stale'}})
+    expect((await exportCrmOperationsPrivacy(f.context)).schema).toBe('crm-operations-privacy-v1')
+    for(const contactId of [f.contactId,undefined]) {
+      await pool.query('UPDATE department_edges SET expires_at=NULL WHERE department_id=$1 AND user_id=$2',[departmentId,f.userId])
+      expect((await collect(f.context,contactId)).values.at(-1)?.complete).toBe(true)
+      const stream=streamCrmPrivacyExport(f.context,{contactId})
+      expect(JSON.parse((await stream.next()).value!).type).toBe('header')
+      await pool.query("UPDATE department_edges SET expires_at=clock_timestamp()-interval '1 second' WHERE department_id=$1 AND user_id=$2",[departmentId,f.userId])
+      await expect(stream.next()).rejects.toMatchObject({code:'not_authorized'})
+      expect(await stream.next()).toMatchObject({done:true})
+    }
+    await pool.query('UPDATE department_edges SET expires_at=NULL WHERE department_id=$1 AND user_id=$2',[departmentId,f.userId])
+    const preview=await privacy.preview(f.context,{kind:'preview_contact_erasure',contactId:f.contactId})
+    expect((await pool.query('SELECT scope_snapshot FROM crm_privacy_previews WHERE id=$1',[preview.id])).rows[0].scope_snapshot.compartments).toEqual([`team:${departmentId}`])
+    await privacy.erase(f.context,{kind:'erase_contact_with_preview',contactId:f.contactId,previewId:preview.id,previewHash:preview.previewHash,confirmed:true})
+    await pool.query("UPDATE department_edges SET expires_at=clock_timestamp()-interval '1 second' WHERE department_id=$1 AND user_id=$2",[departmentId,f.userId])
+    await expect(readCrmErasureReview(f.context,preview.id)).rejects.toMatchObject({code:'not_authorized'})
+    expect((await pool.query('SELECT id FROM entities WHERE id=$1',[f.contactId])).rowCount).toBe(0)
+
+  },60_000)
+  it('preserves event audience through reclassification and retirement without retaining source identity',async()=>{
+    const f=await fixture(),departmentId=randomUUID(),departmentOwner=randomUUID(),eventId='ffffffff-'+randomUUID().slice(9)
+    await pool.query('INSERT INTO users(id,auth_provider_id) VALUES($1::uuid,$1::text)',[departmentOwner])
+    await pool.query("INSERT INTO workspace_members(workspace_id,user_id,role) VALUES($1,$2,'member')",[f.workspaceId,departmentOwner])
+    await pool.query("INSERT INTO workspace_groups(id,workspace_id,name,created_by,kind,key,compartment_key) VALUES($1::uuid,$2,'Fictional saved export department',$3,'team',$1::text,$4)",[departmentId,f.workspaceId,departmentOwner,`team:${departmentId}`])
+    await pool.query("INSERT INTO workspace_compartments(workspace_id,key,label,managed_by,managed_ref_id) VALUES($1,$2,'Fictional saved export department','team',$3)",[f.workspaceId,`team:${departmentId}`,departmentId])
+    const privacy=createCrmPrivacyService()
+    const earlier=await privacy.preview(f.context,{kind:'preview_contact_erasure',contactId:f.contactId})
+    await pool.query("INSERT INTO crm_domain_event_outbox(id,workspace_id,subject_id,event_type,event_key,subject_kind,payload,actor_kind) SELECT ('00000000-'||substring(gen_random_uuid()::text,10))::uuid,$1,$2,'crm.consent.changed','general-'||n,'contact','{}','user' FROM generate_series(1,256) n",[f.workspaceId,f.contactId])
+    await pool.query("UPDATE entities SET sensitivity='confidential',compartments=$2 WHERE id=$1",[f.contactId,[`team:${departmentId}`]])
+    await pool.query("INSERT INTO crm_domain_event_outbox(id,workspace_id,subject_id,event_type,event_key,subject_kind,payload,actor_kind) VALUES($1,$2,$3,'crm.consent.changed','protected-event','contact','{}','user')",[eventId,f.workspaceId,f.contactId])
+    await pool.query("UPDATE entities SET sensitivity='internal',compartments='{}' WHERE id=$1",[f.contactId])
+    await expect(privacy.preview(f.context,{kind:'preview_contact_erasure',contactId:f.contactId})).rejects.toMatchObject({code:'not_authorized'})
+    await expect(collect(f.context,f.contactId)).rejects.toMatchObject({code:'not_authorized'})
+    await expect(collect(f.context)).rejects.toMatchObject({code:'not_authorized'})
+    await expect(exportCrmOperationsPrivacy(f.context)).rejects.toMatchObject({code:'not_authorized'})
+    await pool.query("INSERT INTO department_edges(workspace_id,department_id,principal_kind,user_id,clearance,origin) VALUES($1,$2,'user',$3,'confidential','store')",[f.workspaceId,departmentId,f.userId])
+    await expect(readCrmErasureReview(f.context,earlier.id)).rejects.toMatchObject({code:'conflict',details:{reason:'privacy_preview_stale'}})
+    expect((await exportCrmOperationsPrivacy(f.context)).schema).toBe('crm-operations-privacy-v1')
+    for(const contactId of [f.contactId,undefined]) {
+      await pool.query('UPDATE department_edges SET expires_at=NULL WHERE department_id=$1 AND user_id=$2',[departmentId,f.userId])
+      expect((await collect(f.context,contactId)).values.at(-1)?.complete).toBe(true)
+      const stream=streamCrmPrivacyExport(f.context,{contactId})
+      expect(JSON.parse((await stream.next()).value!).type).toBe('header')
+      await pool.query("UPDATE department_edges SET expires_at=clock_timestamp()-interval '1 second' WHERE department_id=$1 AND user_id=$2",[departmentId,f.userId])
+      await expect(stream.next()).rejects.toMatchObject({code:'not_authorized'})
+      expect(await stream.next()).toMatchObject({done:true})
+    }
+    await pool.query('UPDATE department_edges SET expires_at=NULL WHERE department_id=$1 AND user_id=$2',[departmentId,f.userId])
+    const preview=await privacy.preview(f.context,{kind:'preview_contact_erasure',contactId:f.contactId})
+    expect((await pool.query('SELECT scope_snapshot FROM crm_privacy_previews WHERE id=$1',[preview.id])).rows[0].scope_snapshot.compartments).toEqual([`team:${departmentId}`])
+    await expect(pool.query('UPDATE crm_domain_event_outbox SET privacy_scope=NULL WHERE id=$1',[eventId])).rejects.toThrow('event_scope_release_required')
+    await privacy.erase(f.context,{kind:'erase_contact_with_preview',contactId:f.contactId,previewId:preview.id,previewHash:preview.previewHash,confirmed:true})
+    const retired=(await pool.query('SELECT privacy_scope,scope_source,subject_id,status FROM crm_domain_event_outbox WHERE id=$1',[eventId])).rows[0]
+    expect(retired).toMatchObject({scope_source:null,subject_id:'00000000-0000-0000-0000-000000000000',status:'retired',privacy_scope:{compartments:[`team:${departmentId}`]}})
+    expect(retired.privacy_scope).not.toHaveProperty('resourceId')
+    expect(JSON.stringify(retired.privacy_scope)).not.toContain(f.contactId)
+    expect((await queryWithRLS(f.userId,'SELECT id FROM crm_domain_event_outbox WHERE id=$1',[eventId])).rows).toHaveLength(1)
+    const grant={workspaceId:f.workspaceId,userId:f.userId,assistantId:null,base:'confidential' as const,departments:{[departmentId]:'confidential' as const},contextDepartment:null,binding:null,cap:null}
+    const access={userId:f.userId,clearance:'confidential' as const,compartments:null,projectIds:null,departmentRead:grant}
+    expect((await runWithAgentAccess({...access,departmentRead:{...grant,binding:[]}},()=>queryWithRLS(f.userId,'SELECT id FROM crm_domain_event_outbox WHERE id=$1',[eventId]))).rows).toEqual([])
+    expect((await runWithAgentAccess({...access,departmentRead:{...grant,cap:'internal'}},()=>queryWithRLS(f.userId,'SELECT id FROM crm_domain_event_outbox WHERE id=$1',[eventId]))).rows).toEqual([])
+
+    await pool.query("UPDATE department_edges SET expires_at=clock_timestamp()-interval '1 second' WHERE department_id=$1 AND user_id=$2",[departmentId,f.userId])
+    await expect(readCrmErasureReview(f.context,preview.id)).rejects.toMatchObject({code:'not_authorized'})
+    expect((await queryWithRLS(f.userId,'SELECT id FROM crm_domain_event_outbox WHERE id=$1',[eventId])).rows).toEqual([])
+    await expect(exportCrmOperationsPrivacy(f.context)).rejects.toMatchObject({code:'not_authorized'})
+    expect((await pool.query('SELECT id FROM entities WHERE id=$1',[f.contactId])).rowCount).toBe(0)
+
+  },60_000)
+  it.each(['held','unresolved','retired-unresolved'] as const)('refuses %s event evidence without creating an erasure review',async state=>{
+    const f=await fixture(),eventId=randomUUID()
+    const payload=state==='held'?{}:{batchId:'fictional-unresolved-batch'}
+    await pool.query("INSERT INTO crm_domain_event_outbox(id,workspace_id,subject_id,event_type,event_key,subject_kind,payload,actor_kind,privacy_scope) VALUES($1::uuid,$2,$3,'crm.consent.changed',$1::text,'contact',$4,'user',$5)",[eventId,f.workspaceId,f.contactId,payload,{workspaceId:f.workspaceId,userId:null,assistantId:null,sensitivity:'public',compartments:[],projectIds:[]}])
+    if(state==='held')await pool.query('UPDATE crm_domain_event_outbox SET scope_held=true WHERE id=$1',[eventId])
+    else expect((await pool.query('SELECT privacy_scope FROM crm_domain_event_outbox WHERE id=$1',[eventId])).rows[0].privacy_scope).toBeNull()
+    if(state==='retired-unresolved') {
+      await pool.query("UPDATE crm_domain_event_outbox SET status='retired',retired_at=now(),retired_from_status='pending',subject_id='00000000-0000-0000-0000-000000000000',payload=jsonb_build_object('erased',true,'eventType',event_type) WHERE id=$1",[eventId])
+      expect((await queryWithRLS(f.userId,'SELECT id FROM crm_domain_event_outbox WHERE id=$1',[eventId])).rows).toEqual([])
+      await pool.query('UPDATE workspaces SET department_read_v2=false WHERE id=$1',[f.workspaceId])
+      expect((await queryWithRLS(f.userId,'SELECT id FROM crm_domain_event_outbox WHERE id=$1',[eventId])).rows).toHaveLength(1)
+      await pool.query('UPDATE workspaces SET department_read_v2=true WHERE id=$1',[f.workspaceId])
+    }else {
+      await expect(streamCrmPrivacyExport(f.context,{contactId:f.contactId}).next()).rejects.toMatchObject({code:'not_authorized'})
+      await expect(createCrmPrivacyService().preview(f.context,{kind:'preview_contact_erasure',contactId:f.contactId})).rejects.toMatchObject({code:'not_authorized'})
+    }
+    await expect(streamCrmPrivacyExport(f.context).next()).rejects.toMatchObject({code:'not_authorized'})
+    await expect(exportCrmOperationsPrivacy(f.context)).rejects.toMatchObject({code:'not_authorized'})
+    expect((await pool.query('SELECT id FROM crm_privacy_previews WHERE workspace_id=$1',[f.workspaceId])).rowCount).toBe(0)
+  })
+  it('refuses held activity evidence before export or erasure counts',async()=>{
+    const f=await fixture()
+    await activity(f)
+    await pool.query('UPDATE crm_activities SET scope_held=true WHERE workspace_id=$1',[f.workspaceId])
+    await expect(streamCrmPrivacyExport(f.context).next()).rejects.toMatchObject({code:'not_authorized'})
+    await expect(streamCrmPrivacyExport(f.context,{contactId:f.contactId}).next()).rejects.toMatchObject({code:'not_authorized'})
+    await expect(exportCrmOperationsPrivacy(f.context)).rejects.toMatchObject({code:'not_authorized'})
+    await expect(createCrmPrivacyService().preview(f.context,{kind:'preview_contact_erasure',contactId:f.contactId})).rejects.toMatchObject({code:'not_authorized'})
+    expect((await pool.query('SELECT id FROM crm_privacy_previews WHERE workspace_id=$1',[f.workspaceId])).rowCount).toBe(0)
+  })
   it('revalidates the integration grant and revocation at snapshot admission',async()=>{
     const f=await fixture(),reader=await f.issue(),narrow=await f.issue(false)
+    expect((await collect(reader.context)).values.at(-1)?.complete).toBe(true)
     expect((await collect(reader.context,f.contactId)).values.at(-1)?.complete).toBe(true)
     await expect(collect(narrow.context,f.contactId)).rejects.toMatchObject({code:'integration_scope_denied'})
     await keys.revoke(f.workspaceId,f.userId,reader.key.id)
     await expect(collect(reader.context)).rejects.toMatchObject({code:'credential_revoked'})
+  })
+  it('allows revocation while an integration stream is paused and withholds the next record',async()=>{
+    const f=await fixture(),reader=await f.issue()
+    await activity(f)
+    const stream=streamCrmPrivacyExport(reader.context,{contactId:f.contactId})
+    try {
+      expect(JSON.parse((await stream.next()).value!)).toMatchObject({type:'header'})
+      // Revocation must complete while the snapshot remains open, not wait for
+      // stream consumption to release a credential or membership row lock.
+      expect(await keys.revoke(f.workspaceId,f.userId,reader.key.id)).toBe(true)
+      await expect(stream.next()).rejects.toMatchObject({code:'credential_revoked'})
+      expect((await stream.next()).done).toBe(true)
+    }finally{await stream.return(undefined)}
   })
   it('serves actual member and integration v2 routes while preserving the legacy v1 response',async()=>{
     const f=await fixture(),app=express()
@@ -211,6 +503,7 @@ describe('[COMP:crm/privacy-export] Actual privacy projection coverage',()=>{
     app.use('/api/crm',crmOperationsRoutes({service:operations,workspaceStore:createWorkspaceStore(),readStore:createDbCrmIntakeReadStore()}))
     const path='/api/crm/'+f.workspaceId+'/operations/privacy-export'
     const legacy=await request(app).get(path)
+    expect(legacy.headers['cache-control']).toBe('no-store')
     expect(legacy.status).toBe(200);expect(legacy.body).toHaveProperty('tables')
     const exported=await request(app).get(path+'?format=crm-privacy-v2')
     expect(exported.status).toBe(200);expect(exported.headers['content-type']).toContain('application/x-ndjson')
@@ -296,7 +589,10 @@ describe('[COMP:crm/privacy-export] Actual privacy projection coverage',()=>{
     await pool.query("INSERT INTO association_audit_log(workspace_id,action,subject_kind,subject_id,actor_kind,actor_credential_id,metadata) VALUES($1,'crm.fixture','contact',$2,'user',$3,$4)",[f.workspaceId,f.otherId,f.userId,metadata])
     await pool.query("INSERT INTO crm_domain_event_outbox(workspace_id,event_type,event_key,subject_kind,subject_id,actor_kind,payload) VALUES($1,'crm.consent.changed','fixture','contact',$2,'user',$3)",[f.workspaceId,f.otherId,metadata])
     await pool.query("INSERT INTO workspace_audit_log(workspace_id,event_type,subject_id,details) VALUES($1,'crm.fixture',$2,$3)",[f.workspaceId,f.otherId,metadata])
-    await pool.query("INSERT INTO association_notification_outbox(workspace_id,source_kind,source_id,template_key,recipient_kind,recipient_ref,payload) VALUES($1,'order',$2,'fixture','contact',$3,$4)",[f.workspaceId,randomUUID(),f.contactId,metadata])
+    const orderScope=await loadAssociationOrderScope(pool,f.workspaceId,[f.contactId])
+    const order=(await pool.query(`INSERT INTO association_orders(workspace_id,contact_id,idempotency_key,request_fingerprint,currency,subtotal_minor,total_minor,scope_snapshot,scope_sources)
+      VALUES($1,$2,'notification-fixture',repeat('a',64),'USD',0,0,$3::jsonb,$4::jsonb) RETURNING id`,[f.workspaceId,f.contactId,JSON.stringify(orderScope.scope),JSON.stringify(orderScope.sources)])).rows[0]
+    await pool.query("INSERT INTO association_notification_outbox(workspace_id,source_kind,source_id,template_key,recipient_kind,recipient_ref,payload) VALUES($1,'order',$2,'fixture','contact',$3,$4)",[f.workspaceId,order.id,f.contactId,metadata])
     const output=await collect(f.context,f.contactId)
     for(const domain of ['association_audit_log','crm_domain_event_outbox','workspace_audit_log'])
       expect(records(output,domain)).toMatchObject([{subject_id:null}])

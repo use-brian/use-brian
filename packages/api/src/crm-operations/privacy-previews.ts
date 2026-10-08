@@ -2,10 +2,11 @@
 import {createHash,randomUUID} from 'node:crypto'
 import type {PoolClient} from 'pg'
 import {
-  CrmOperationsContextSchema,CrmOperationsError,PreviewCrmContactErasureCommandSchema,
+  CrmOperationsContextSchema,CrmOperationsUuidSchema,CrmOperationsError,PreviewCrmContactErasureCommandSchema,
   EraseCrmContactWithPreviewCommandSchema,assertCrmOperationsAuthority,canonicalCrmRequest,
-  type CrmOperationsContext,type CrmPrivacyServicePort,type CrmPrivacyDomainReview,type CrmPrivacyBlocker,
+  type ResourceScope,type CrmOperationsContext,type CrmErasurePreview,type CrmPrivacyServicePort,type CrmPrivacyDomainReview,type CrmPrivacyBlocker,
 } from '@use-brian/core'
+import {assertCrmPrivacySubjectAuthority} from './privacy-subject-authority.js'
 import {getPool} from '../db/client.js'
 import {createSoftDeleteStore} from '../db/soft-delete-store.js'
 import {CRM_PRIVACY_COVERAGE} from './privacy-coverage.js'
@@ -17,7 +18,7 @@ const scopeLimits=['unattributed_free_text','other_brain_and_chat','external_sto
 const hash=(value:unknown)=>createHash('sha256').update(canonicalCrmRequest(value)).digest('hex')
 const conflict=(reason:string)=>new CrmOperationsError('conflict','Review a current CRM erasure preview before proceeding.',{reason})
 type PreviewRow={
-  id:string;owner_user_id:string;subject_id:string|null;request_hash:string;snapshot_hash:string;preview_hash:string;
+  scope_snapshot:ResourceScope|null;id:string;owner_user_id:string;subject_id:string|null;request_hash:string;snapshot_hash:string;preview_hash:string;
   policy_version:number;domain_summary:CrmPrivacyDomainReview[];blockers:CrmPrivacyBlocker[];
   status:'ready'|'blocked'|'consumed';expires_at:Date;valid:boolean;receipt:Record<string,unknown>|null
 }
@@ -111,6 +112,29 @@ function sanitizeFailure(error:unknown):never {
   if(error && typeof error==='object' && 'code' in error && error.code==='55P03')throw conflict('privacy_operation_busy')
   throw conflict('privacy_review_failed')
 }
+/** Renew disclosure authority without creating a review or repeating its mutation. */
+export async function readCrmErasureReview(rawContext:CrmOperationsContext,rawPreviewId:string):Promise<{preview:CrmErasurePreview|null;receipt:Record<string,unknown>|null}> {
+  const context=CrmOperationsContextSchema.parse(rawContext),previewId=CrmOperationsUuidSchema.parse(rawPreviewId)
+  const client=await getPool().connect()
+  try {
+    await client.query('BEGIN ISOLATION LEVEL REPEATABLE READ')
+    await client.query("SET LOCAL statement_timeout='30s'")
+    const owner=await authorize(client,context)
+    const row=(await client.query<PreviewRow>(`SELECT scope_snapshot,id,owner_user_id,subject_id,request_hash,snapshot_hash,preview_hash,policy_version,domain_summary,blockers,status,expires_at,expires_at>clock_timestamp() AS valid,receipt
+      FROM crm_privacy_previews WHERE workspace_id=$1 AND id=$2 AND owner_user_id=$3`,[context.workspaceId,previewId,owner])).rows[0]
+    if(!row)throw new CrmOperationsError('not_found','The erasure preview is unavailable.')
+    if(row.status!=='consumed'&&!row.subject_id)throw conflict('privacy_preview_stale')
+    await assertCrmPrivacySubjectAuthority(client,context,row.subject_id ?? '',row.scope_snapshot,row.status==='consumed')
+    const preview:CrmErasurePreview|null=row.status==='consumed'?null:{
+      id:row.id,workspaceId:context.workspaceId,contactId:row.subject_id!,previewHash:row.preview_hash,
+      expiresAt:row.expires_at.toISOString(),policyVersion:row.policy_version,domains:row.domain_summary,
+      blockers:row.blockers,scopeLimits:[...scopeLimits],status:row.status,
+    }
+    await client.query('COMMIT')
+    return {preview,receipt:row.status==='consumed'?row.receipt:null}
+  }catch(error){await client.query('ROLLBACK').catch(()=>{});return sanitizeFailure(error)}
+  finally{client.release()}
+}
 export function createCrmPrivacyService():CrmPrivacyServicePort {
   return {
     async preview(rawContext,rawCommand) {
@@ -120,13 +144,16 @@ export function createCrmPrivacyService():CrmPrivacyServicePort {
       try {
         await client.query('BEGIN ISOLATION LEVEL REPEATABLE READ')
         await client.query("SET LOCAL statement_timeout='30s'")
-        const owner=await authorize(client,context),review=await inspect(client,context.workspaceId,command.contactId)
+        const owner=await authorize(client,context)
+        const scope=await assertCrmPrivacySubjectAuthority(client,context,command.contactId)
+        const review=await inspect(client,context.workspaceId,command.contactId)
         const stamp=(await client.query<{createdAt:Date;expiresAt:Date}>("SELECT t AS \"createdAt\",t+interval '15 minutes' AS \"expiresAt\" FROM (SELECT clock_timestamp() t) s")).rows[0]!
         const id=randomUUID(),requestHash=hash({contactId:command.contactId}),status=review.blockers.length?'blocked':'ready'
         const previewHash=hash({id,workspaceId:context.workspaceId,owner,requestHash,snapshotHash:review.snapshotHash,expiresAt:stamp.expiresAt.toISOString()})
-        await client.query(`INSERT INTO crm_privacy_previews(id,workspace_id,owner_user_id,subject_id,request_hash,snapshot_hash,preview_hash,policy_version,domain_summary,blockers,status,created_at,expires_at)
-          VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9::jsonb,$10::jsonb,$11,$12,$13)`,
-          [id,context.workspaceId,owner,command.contactId,requestHash,review.snapshotHash,previewHash,review.policyVersion,JSON.stringify(review.domains),JSON.stringify(review.blockers),status,stamp.createdAt,stamp.expiresAt])
+        await client.query(`INSERT INTO crm_privacy_previews(id,workspace_id,owner_user_id,subject_id,request_hash,snapshot_hash,preview_hash,policy_version,domain_summary,blockers,status,created_at,expires_at,scope_snapshot)
+          VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9::jsonb,$10::jsonb,$11,$12,$13,$14::jsonb)`,
+          [id,context.workspaceId,owner,command.contactId,requestHash,review.snapshotHash,previewHash,review.policyVersion,JSON.stringify(review.domains),JSON.stringify(review.blockers),status,stamp.createdAt,stamp.expiresAt,JSON.stringify(scope)])
+        await assertCrmPrivacySubjectAuthority(client,context,command.contactId,scope)
         await client.query('COMMIT')
         return {id,workspaceId:context.workspaceId,contactId:command.contactId,previewHash,expiresAt:stamp.expiresAt.toISOString(),policyVersion:review.policyVersion,domains:review.domains,blockers:review.blockers,scopeLimits:[...scopeLimits],status}
       }catch(error){await client.query('ROLLBACK').catch(()=>{});return sanitizeFailure(error)}
@@ -140,18 +167,21 @@ export function createCrmPrivacyService():CrmPrivacyServicePort {
         async prepareHardPurge(client) {
           await client.query("SET LOCAL statement_timeout='30s'")
           const owner=await authorize(client,context)
-          preview=(await client.query<PreviewRow>(`SELECT id,owner_user_id,subject_id,request_hash,snapshot_hash,preview_hash,policy_version,domain_summary,blockers,status,expires_at,expires_at>clock_timestamp() AS valid,receipt
+          preview=(await client.query<PreviewRow>(`SELECT scope_snapshot,id,owner_user_id,subject_id,request_hash,snapshot_hash,preview_hash,policy_version,domain_summary,blockers,status,expires_at,expires_at>clock_timestamp() AS valid,receipt
             FROM crm_privacy_previews WHERE workspace_id=$1 AND id=$2 AND owner_user_id=$3 FOR UPDATE`,[context.workspaceId,command.previewId,owner])).rows[0]
           if(!preview)throw new CrmOperationsError('not_found','The erasure preview is unavailable.')
           if(preview.preview_hash!==command.previewHash || preview.request_hash!==hash({contactId:command.contactId}))throw conflict('privacy_preview_mismatch')
+          await assertCrmPrivacySubjectAuthority(client,context,command.contactId,preview.scope_snapshot,preview.status==='consumed')
           if(preview.status==='consumed'){receipt=preview.receipt!;duplicate=true;return 'skip'}
           if(!preview.valid)throw conflict('privacy_preview_expired')
           if(preview.status==='blocked')throw conflict('privacy_preview_blocked')
         },
         async validateHardPurge(client) {
+          await assertCrmPrivacySubjectAuthority(client,context,command.contactId,preview!.scope_snapshot)
           const review=await inspect(client,context.workspaceId,command.contactId)
           if(review.snapshotHash!==preview!.snapshot_hash || review.policyVersion!==preview!.policy_version)throw conflict('privacy_preview_stale')
           if(review.blockers.length)throw conflict('privacy_preview_blocked')
+          await assertCrmPrivacySubjectAuthority(client,context,command.contactId,preview!.scope_snapshot)
           const result=await client.query<{receipt:Record<string,unknown>}>(`UPDATE crm_privacy_previews
             SET status='consumed',subject_id=NULL,consumed_at=clock_timestamp(),
               receipt=jsonb_build_object('previewId',id,'status','crm_contact_purged','scope','crm_contact','scopeLimits',$3::jsonb,'completedAt',clock_timestamp())

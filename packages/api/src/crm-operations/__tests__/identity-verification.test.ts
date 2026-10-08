@@ -14,7 +14,7 @@ const request: RecordCrmSubmissionCommand = {
 }
 const hash = (command: RecordCrmSubmissionCommand) => crmOperationsSha256({ definitionKey: command.definitionKey, fields: command.fields,
   ...(command.attachments?.length ? { attachments: command.attachments } : {}),
-  externalIdentity: command.externalIdentity ?? null, submittedAt: command.submittedAt ?? null })
+  externalIdentity: command.externalIdentity ?? null, submittedAt: command.submittedAt ?? null, campaignAttribution: command.campaignAttribution ?? null })
 function setup() {
   const signer = intakeProofFixture()
   const definition: Parameters<typeof verifyIntakeIdentity>[1] = { identityPolicy: 'trusted_verified_email', currentVersion: 1, definitionKey: 'fixture',

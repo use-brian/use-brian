@@ -2,7 +2,8 @@
 import {createHash,randomUUID} from 'node:crypto'
 import type {PoolClient} from 'pg'
 import {CrmOperationsContextSchema,CrmOperationsError,PreviewCrmImportFileCleanupCommandSchema,ExecuteCrmImportFileCleanupCommandSchema,
-  assertCrmOperationsAuthority,canonicalCrmRequest,type CrmOperationsContext,type CrmImportFileCleanupPort} from '@use-brian/core'
+  assertCrmOperationsAuthority,canonicalCrmRequest,type CrmOperationsContext,type CrmImportFileCleanupPort,type ResourceScope} from '@use-brian/core'
+import {readCrmFileCleanupAuthority,renewCrmFileCleanupAuthority} from './import-file-cleanup-authority.js'
 import {getPool} from '../db/client.js'
 import {acquireCrmPrivacyAdmission} from './privacy-admission.js'
 import {inspectCrmImportFileCleanup,deleteCrmStagedFileIndex} from './import-file-cleanup-store.js'
@@ -15,7 +16,7 @@ async function owner(client:PoolClient,context:CrmOperationsContext):Promise<str
   if(!['owner','admin'].includes(role))throw new CrmOperationsError('not_authorized','Current owner/admin membership is required.')
   return context.actor.userId
 }
-type Cleanup={id:string;file_id:string;policy_version:number;before_at:Date;expires_at:Date;snapshot_hash:string;preview_hash:string;
+type Cleanup={scope_snapshot:ResourceScope|null;id:string;file_id:string;policy_version:number;before_at:Date;expires_at:Date;snapshot_hash:string;preview_hash:string;
   summary:Record<string,unknown>;status:string;valid:boolean;attempts:number;error_code:string|null;queued_at:Date|null;completed_at:Date|null;replay_expires_at:Date|null}
 function receipt(row:Cleanup) {return {id:row.id,fileId:row.file_id,policyVersion:row.policy_version,status:row.status,attempts:row.attempts,
   errorCode:row.error_code,queuedAt:row.queued_at?.toISOString() ?? null,completedAt:row.completed_at?.toISOString() ?? null,
@@ -36,12 +37,14 @@ export function createCrmImportFileCleanupService():CrmImportFileCleanupPort {
         const ownerId=await owner(client,context),before=new Date(command.before)
         const now=(await client.query<{now:Date}>('SELECT clock_timestamp() now')).rows[0]!.now
         if(before>now)throw new CrmOperationsError('invalid_input','The cleanup cutoff cannot be in the future.')
+        const scope=await readCrmFileCleanupAuthority(client,context,command.fileId)
         const plan=await inspectCrmImportFileCleanup(client,context.workspaceId,command.fileId,before)
         const id=randomUUID(),expiresAt=new Date(now.getTime()+15*60_000).toISOString(),status=plan.blockers.length?'blocked' as const:'ready' as const
         const summary={domains:plan.domains,blockers:plan.blockers,scope:'crm_import_source_file' as const}
-        const previewHash=createHash('sha256').update(canonicalCrmRequest({id,workspaceId:context.workspaceId,ownerId,snapshotHash:plan.snapshotHash,expiresAt})).digest('hex')
-        await client.query(`INSERT INTO crm_import_file_cleanups(id,workspace_id,owner_user_id,file_id,before_at,policy_version,snapshot_hash,preview_hash,summary,status,expires_at)
-          VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9::jsonb,$10,$11)`,[id,context.workspaceId,ownerId,command.fileId,before,plan.policyVersion,plan.snapshotHash,previewHash,JSON.stringify(summary),status,expiresAt])
+        const previewHash=createHash('sha256').update(canonicalCrmRequest({id,workspaceId:context.workspaceId,ownerId,snapshotHash:plan.snapshotHash,expiresAt,scope})).digest('hex')
+        await renewCrmFileCleanupAuthority(context,scope)
+        await client.query(`INSERT INTO crm_import_file_cleanups(id,workspace_id,owner_user_id,file_id,before_at,policy_version,snapshot_hash,preview_hash,summary,status,expires_at,scope_snapshot)
+          VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9::jsonb,$10,$11,$12::jsonb)`,[id,context.workspaceId,ownerId,command.fileId,before,plan.policyVersion,plan.snapshotHash,previewHash,JSON.stringify(summary),status,expiresAt,scope?JSON.stringify(scope):null])
         return {id,fileId:command.fileId,previewHash,expiresAt,policyVersion:plan.policyVersion,status,...summary}
       },true)
     },
@@ -54,6 +57,8 @@ export function createCrmImportFileCleanupService():CrmImportFileCleanupPort {
         const row=(await client.query<Cleanup>(`SELECT *,expires_at>clock_timestamp() valid FROM crm_import_file_cleanups
           WHERE workspace_id=$1 AND id=$2 AND owner_user_id=$3 FOR UPDATE`,[context.workspaceId,command.previewId,ownerId])).rows[0]
         if(!row)throw new CrmOperationsError('not_found','The file cleanup preview is unavailable.')
+        const scope=await readCrmFileCleanupAuthority(client,context,row.file_id,row.scope_snapshot,!!row.queued_at)
+        await renewCrmFileCleanupAuthority(context,scope)
         if(row.preview_hash!==command.previewHash)throw conflict('file_cleanup_preview_mismatch')
         if(row.queued_at)return {receipt:receipt(row),duplicate:true}
         if(!row.valid)throw conflict('file_cleanup_preview_expired')
@@ -61,6 +66,7 @@ export function createCrmImportFileCleanupService():CrmImportFileCleanupPort {
         const plan=await inspectCrmImportFileCleanup(client,context.workspaceId,row.file_id,row.before_at)
         if(plan.snapshotHash!==row.snapshot_hash || plan.policyVersion!==row.policy_version)throw conflict('file_cleanup_preview_stale')
         if(plan.blockers.length || !plan.file || !plan.retentionSeconds)throw conflict('file_cleanup_preview_blocked')
+        await renewCrmFileCleanupAuthority(context,scope)
         await deleteCrmStagedFileIndex(client,context.workspaceId,plan)
         const queued=(await client.query<Cleanup>(`UPDATE crm_import_file_cleanups SET status='queued',storage_uri=$3,
           queued_at=statement_timestamp(),replay_expires_at=statement_timestamp()+$4::integer*interval '1 second'
@@ -75,6 +81,8 @@ export function createCrmImportFileCleanupService():CrmImportFileCleanupPort {
         await owner(client,context)
         const row=(await client.query<Cleanup>('SELECT * FROM crm_import_file_cleanups WHERE workspace_id=$1 AND id=$2',[context.workspaceId,id])).rows[0]
         if(!row)throw new CrmOperationsError('not_found','The file cleanup receipt is unavailable.')
+        const scope=await readCrmFileCleanupAuthority(client,context,row.file_id,row.scope_snapshot,!!row.queued_at)
+        await renewCrmFileCleanupAuthority(context,scope)
         return receipt(row)
       })
     },

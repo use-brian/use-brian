@@ -350,6 +350,7 @@ export function createDbOAuthAuthorizationStore(): OAuthAuthorizationStore {
         `SELECT ${COLS_WITH_SECRETS}
          FROM oauth_authorizations
          WHERE id = $1
+           AND EXISTS (SELECT 1 FROM oauth_clients c WHERE c.client_id=oauth_authorizations.client_id AND c.revoked_at IS NULL)
          LIMIT 1`,
         [id],
       )

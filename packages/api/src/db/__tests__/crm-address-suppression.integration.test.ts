@@ -53,7 +53,7 @@ describe('[COMP:crm/suppression-tombstones] Actual suppression erasure and relea
     expect(rows[0].address_hmac).toMatch(/^[a-f0-9]{64}$/)
     expect(await matching(f)).toHaveLength(1); expect(await matching(f,'person@example.com')).toHaveLength(0)
     const replacement=randomUUID(); await f.person(replacement); await f.consent(replacement,'granted')
-    expect(await createDbCrmIntakeReadStore().checkSendability(f.workspaceId,replacement,'email','updates')).toMatchObject({verdict:'blocked',reasons:['address_suppression']})
+    expect(await createDbCrmIntakeReadStore().checkSendability(f.workspaceId,replacement,'email','updates',{kind:'user',userId:f.userId})).toMatchObject({verdict:'blocked',reasons:['address_suppression']})
     const review=await listCrmAddressSuppression(pool,f.workspaceId)
     expect(review.tombstones).toHaveLength(1); expect(JSON.stringify(review)).not.toContain(rows[0].address_hmac)
   })

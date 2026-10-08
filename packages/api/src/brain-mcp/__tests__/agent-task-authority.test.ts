@@ -13,6 +13,7 @@ vi.mock('../auth.js', () => ({
   authenticateBrainRequest: state.authenticate,
   // These fixtures authenticate Home apps, not rotatable Brain credentials.
   getAuthenticatedBrainCredentialCurrent: () => undefined,
+  getAuthenticatedCrmCredentialParent: () => undefined,
 }))
 vi.mock('../tools.js', () => ({
   buildBrainTools: state.buildTools,

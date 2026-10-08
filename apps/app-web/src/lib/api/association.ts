@@ -2,6 +2,7 @@
 import { publicRuntimeConfig } from "@/lib/runtime-public-config";
 import type { WorkspaceModule, WorkspaceModuleAction, WorkspaceModuleActionResult } from "@use-brian/shared";
 import { authFetch } from "@/lib/auth-fetch";
+import { SurfaceCacheEvictionError } from "@/lib/surface-cache";
 import { getWorkspaceRole } from "@/lib/api/workspaces";
 
 const API_URL = publicRuntimeConfig().apiUrl ?? "http://localhost:4000";
@@ -17,14 +18,27 @@ async function request<T>(path: string, input?: unknown): Promise<T> {
   return body as T;
 }
 export type AssociationModuleSnapshot = { module: WorkspaceModule; canManage: boolean };
+const moduleDeadlines = new WeakMap<object, number>();
+/** Shared request-start expiry for navigation prefetch and mounted module readers. */
+export function associationModuleRemaining(value: unknown): number {
+  return Math.max(0, (moduleDeadlines.get(value as object) ?? 0) - performance.now());
+}
 export async function getAssociationModuleSnapshot(workspaceId: string): Promise<AssociationModuleSnapshot> {
-  const [{ module }, role] = await Promise.all([
-    request<{ module: WorkspaceModule }>(`/api/crm/${encodeURIComponent(workspaceId)}/association/module`),
-    getWorkspaceRole(workspaceId),
-  ]);
-  if (module?.workspaceId !== workspaceId || !["enabled", "draining", "disabled"].includes(module.state)
-    || !Number.isInteger(module.version)) throw new AssociationApiError("invalid_response", 502);
-  return { module, canManage: role === "owner" || role === "admin" };
+  const deadline = performance.now() + 30_000;
+  try {
+    const [{ module }, role] = await Promise.all([
+      request<{ module: WorkspaceModule }>(`/api/crm/${encodeURIComponent(workspaceId)}/association/module`),
+      getWorkspaceRole(workspaceId),
+    ]);
+    if (module?.workspaceId !== workspaceId || !["enabled", "draining", "disabled"].includes(module.state)
+      || !Number.isInteger(module.version)) throw new AssociationApiError("invalid_response", 502);
+    const snapshot = { module, canManage: role === "owner" || role === "admin" };
+    moduleDeadlines.set(snapshot, deadline);
+    return snapshot;
+  } catch (error) {
+    if (error instanceof AssociationApiError && [401, 403, 404].includes(error.status)) throw new SurfaceCacheEvictionError(error);
+    throw error;
+  }
 }
 export function changeAssociationModule(workspaceId: string, action: WorkspaceModuleAction, expectedVersion: number): Promise<WorkspaceModuleActionResult> {
   return request(`/api/workspaces/${encodeURIComponent(workspaceId)}/modules/association/actions`, { action, expectedVersion });
@@ -72,7 +86,7 @@ export type AssociationPromotion = {id:string;key:string;name:string;discountTyp
   percentageBasisPoints:number|null;amountMinor:string|null;currency:string|null;buyQuantity:number|null;getQuantity:number|null;targetKind:"event"|"ticket"|"plan";targetIds:string[];
   recurrenceMode:"once"|"forever"|"repeating";recurrenceCycles:number|null;applyMode:"once_per_order"|"each_eligible_item";
   validFrom:string|null;validTo:string|null;maxUses:number|null;maxUsesPerContact:number|null;combinesWithMemberPrice:boolean;
-  releaseOnFullRefund:boolean;status:"draft"|"active"|"disabled";hasCode:boolean;reservedUses:number;redeemedUses:number;
+  releaseOnFullRefund:boolean;status:"draft"|"active"|"disabled";hasCode:boolean;reservedUses:number|null;redeemedUses:number|null;
   createdAt:string;updatedAt:string};
 export type AssociationRegistration = {id:string;eventId:string;ticketId:string|null;orderId:string|null;attendeeContactId:string|null;eligibleMembershipId:string|null;attendeeName:string;attendeeEmail:string|null;status:"reserved"|"confirmed"|"checked_in"|"cancelled"|"refunded"|"registered"|"attended"|"no_show";sourceKind:string;checkedInAt:string|null};
 export type AssociationOperationalRosterRow = {id:string;eventId:string;orderId:string|null;orderLineId:string|null;ticketId:string|null;ticketKey:string|null;ticketName:string|null;buyerContactId:string|null;attendeeContactId:string|null;attendeeName:string;attendeeEmail:string|null;phone:string|null;organisation:string|null;jobTitle:string|null;status:AssociationRegistration["status"];checkedInAt:string|null;sourceKind:string;sourceId:string|null;historicalImport:boolean;marketingConsent:boolean|null;ticketingConsent:boolean|null;policyVersion:string|null;policyAcceptedAt:string|null;questionResponses:unknown;createdAt:string;updatedAt:string};
@@ -86,7 +100,7 @@ export type AssociationMembershipRescue = {id:string;contactId:string;contactNam
   settlementNote:string|null;reversalReference:string|null;reversalOccurredAt:string|null;reversalReason:string|null;cancellationReason:string|null;
   createdAt:string;updatedAt:string};
 export type AssociationSponsorshipAllocation={id:string;sponsorContactId:string;sponsorContactName:string;sponsorMembershipId:string;
-  beneficiaryPlanId:string;beneficiaryPlanKey:string;beneficiaryPlanName:string;seatLimit:number;allocatedSeats:number;startsAt:string;endsAt:string;
+  beneficiaryPlanId:string;beneficiaryPlanKey:string;beneficiaryPlanName:string;seatLimit:number;allocatedSeats:number|null;startsAt:string;endsAt:string;
   invitationTtlHours:number;status:"active"|"cancelled";cancellationReason:string|null;cancelledAt:string|null;createdAt:string;updatedAt:string};
 export type AssociationSponsorshipInvitation={id:string;allocationId:string;nomineeContactId:string;nomineeContactName:string;
   status:"pending"|"redeemed"|"revoked";expired:boolean;expiresAt:string;redeemedContactId:string|null;membershipId:string|null;
@@ -151,7 +165,12 @@ export type AssociationPromotionSave = Omit<AssociationPromotion,"id"|"hasCode"|
 export function saveAssociationPromotion(workspaceId:string,input:AssociationPromotionSave) {
   return request<{promotion:AssociationPromotion}>(`/api/crm/${encodeURIComponent(workspaceId)}/association/promotions`,input);
 }
-export type AssociationReservation = {contactId:string;idempotencyKey:string;reservationMinutes:number;lines:Array<{ticketId:string;quantity:number;useMemberPrice:boolean;attendees:Array<{contactId?:string;name:string;email?:string}>}>};
+export type AssociationDestination = {kind:"general"}|{kind:"department";departmentId:string};
+export type AssociationDestinationPreview = {validForMs:number;choices:Array<{destination:AssociationDestination|null;scope:{sensitivity:string;compartments:string[]};departments:Array<{id:string;name:string}>}>};
+export async function previewAssociationOrderDestinations(workspaceId:string,contactIds:string[]) {
+  return (await request<{preview:AssociationDestinationPreview}>(`/api/crm/${encodeURIComponent(workspaceId)}/association/orders/destinations?contactIds=${encodeURIComponent(contactIds.join(","))}`)).preview;
+}
+export type AssociationReservation = {destination?:AssociationDestination;contactId:string;idempotencyKey:string;reservationMinutes:number;lines:Array<{ticketId:string;quantity:number;useMemberPrice:boolean;attendees:Array<{contactId?:string;name:string;email?:string}>}>};
 export function reserveAssociationOrder(workspaceId:string,input:AssociationReservation) {
   return request<{order:AssociationOrder}>(`/api/crm/${encodeURIComponent(workspaceId)}/association/orders`,input);
 }

@@ -1,5 +1,7 @@
+import { randomUUID } from 'node:crypto'
 import { AsyncLocalStorage } from 'node:async_hooks'
 import {
+  AuthoritySourceSchema,
   accessCeilingContains,
   intersectAccessCeilings,
   type AccessCeiling,
@@ -31,10 +33,12 @@ export function createAuthorityLease(
   starting: AccessCeiling,
   resolveCurrent: () => Promise<AccessCeiling | null>,
 ): AuthorityLease {
+  const invocationId = randomUUID()
   const pinned = intersectAccessCeilings(starting, starting)
   let invalid = false
   let operationMayHaveExecuted = false
   const lease: AuthorityLease = {
+    snapshotSource: () => ({ version: 1, kind: 'invocation', invocationId }),
     markOperationMayHaveExecuted() { operationMayHaveExecuted = true },
     async assertCurrent() {
       if (invalid) throw new AuthorityChangedError(operationMayHaveExecuted)
@@ -68,11 +72,13 @@ export function createAuthorityLease(
 
 export type SessionAuthoritySnapshot = Pick<Session,
   'id' | 'assistantId' | 'userId' | 'contextGroupId' | 'contextProjectId' | 'contextLockedAt'
->
+> & Partial<Pick<Session, 'visibility' | 'mode' | 'effectiveClearance' | 'contextCompartments'>>
 
 /** Build the live lease used by web, public/API and messaging turns. */
 export function createSessionAuthorityLease(input: {
   starting: AccessCeiling
+  /** Only ordinary authenticated private web sessions qualify for cold source reconstruction. */
+  durableSessionSource?: boolean
   session: SessionAuthoritySnapshot
   /**
    * The assistant actually running this turn. On a doc-dock switch or a room
@@ -90,6 +96,9 @@ export function createSessionAuthorityLease(input: {
   /** Re-resolve a recipient/surface ceiling at every authority boundary. */
   maximumAccessCurrent?: () => Promise<AccessCeiling | null>
 }): AuthorityLease {
+  const sourceRead = { visibility: input.session.visibility, mode: input.session.mode,
+    effectiveClearance: input.session.effectiveClearance,
+    contextCompartments: input.session.contextCompartments ? [...input.session.contextCompartments] : undefined }
   const expected = {
     id: input.session.id,
     assistantId: input.session.assistantId,
@@ -101,7 +110,7 @@ export function createSessionAuthorityLease(input: {
     contextLockedAt: input.session.contextLockedAt?.toISOString() ?? null,
     workspaceId: input.starting.workspaceId,
   }
-  return createAuthorityLease(input.starting, async () => {
+  const lease = createAuthorityLease(input.starting, async () => {
     const [session, assistant, credentialCurrent] = await Promise.all([
       findSessionAuthorityById(expected.id),
       findAssistantById(expected.executingAssistantId),
@@ -138,6 +147,16 @@ export function createSessionAuthorityLease(input: {
       ? intersectAccessCeilings(current, { ...maximum, userId: current.userId })
       : null
   })
+  const invocation = lease.snapshotSource!()
+  lease.snapshotSource = () => {
+    if (!input.durableSessionSource || expected.contextLockedAt === null || input.credentialCurrent || input.maximumAccessCurrent) return { ...invocation }
+    const snapshot = AuthoritySourceSchema.safeParse({ version: 1, kind: 'session', invocationId: invocation.invocationId, ...expected,
+      contextLockedAt: expected.contextLockedAt, memberMode: input.memberMode ?? 'enforce',
+      ignoreSessionBinding: input.ignoreSessionBinding ?? false, systemRead: input.systemRead ?? false,
+      ...sourceRead })
+    return snapshot.success ? snapshot.data : { ...invocation }
+  }
+  return lease
 }
 
 /**

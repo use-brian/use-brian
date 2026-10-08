@@ -1,3 +1,4 @@
+import { assertAssociationOrderAuthority, assertAssociationSourceAuthority, loadAssociationOrderScope, withAssociationCheckout } from './source-scope.js'
 /**
  * Provider entitlement coordination over one caller-owned application transaction.
  *
@@ -72,7 +73,9 @@ async function readMembership(
   client: PoolClient,
   workspaceId: string,
   id: string,
+  actor: AssociationActor,
 ): Promise<Record<string, unknown>> {
+  await assertAssociationOrderAuthority(client, workspaceId, id, actor, 'membership')
   const row = (await client.query(`SELECT id,contact_id AS "contactId",plan_id AS "planId",status,starts_at AS "startsAt",ends_at AS "endsAt",
     renewal_mode AS "renewalMode",provider,provider_membership_id AS "providerEntitlementId",provider_period_id AS "providerPeriodId",predecessor_id AS "predecessorId"
     FROM association_memberships WHERE workspace_id=$1 AND id=$2`, [workspaceId, id])).rows[0]
@@ -113,8 +116,14 @@ export function createProviderEntitlementService(
       [workspaceId, target.contactId, target.planId])).rowCount) {
         throw new CrmOperationsError('not_found', 'Entitlement contact or plan is unavailable.')
       }
+      await assertAssociationSourceAuthority(client, workspaceId, actor,
+        await loadAssociationOrderScope(client, workspaceId, [target.contactId]))
+      if (target.entitlementId) {
+        await assertAssociationOrderAuthority(client, workspaceId, target.entitlementId, actor, 'membership')
+      }
       if (event.membershipCheckout) {
         const evidence = event.membershipCheckout
+        await assertAssociationOrderAuthority(client, workspaceId, evidence.id, actor, 'checkout')
         const checkout = await client.query(`SELECT 1 FROM association_membership_checkouts
           WHERE workspace_id=$1 AND id=$2 AND contact_id=$3 AND plan_id=$4
             AND provider=$5 AND provider_reference=$6 AND provider_coupon_reference=$7
@@ -155,17 +164,18 @@ export function createProviderEntitlementService(
         }
         if (command.kind === 'review_entitlement_financial_event') {
           return {
-            record: await readMembership(client, workspaceId, command.entitlementId),
+            record: await readMembership(client, workspaceId, command.entitlementId, actor),
             created: false,
             reviewReason: command.adjustmentKind === 'refund'
               ? 'membership_refund_policy_pending' as const
               : 'membership_dispute_policy_pending' as const,
           }
         }
-        if (row.same) return { record: await readMembership(client, workspaceId, command.entitlementId), created: false }
+        if (row.same) return { record: await readMembership(client, workspaceId, command.entitlementId, actor), created: false }
       }
       if (event.membershipCheckout && command.kind === 'grant_entitlement') {
         const evidence = event.membershipCheckout
+        await assertAssociationOrderAuthority(client, workspaceId, evidence.id, actor, 'checkout')
         const checkout = await client.query(`SELECT 1 FROM association_membership_checkouts
           WHERE workspace_id=$1 AND id=$2 AND contact_id=$3 AND plan_id=$4
             AND provider=$5 AND provider_reference=$6 AND provider_coupon_reference=$7
@@ -179,7 +189,10 @@ export function createProviderEntitlementService(
             { reason: 'membership_checkout_evidence_mismatch' })
         }
       }
-      const result = await options.operationsForTransaction(client).execute(contextFor(workspaceId, actor, event), command)
+      const execute = () => options.operationsForTransaction(client).execute(contextFor(workspaceId, actor, event), command)
+      const result = event.membershipCheckout && command.kind === 'grant_entitlement'
+        ? await withAssociationCheckout(client, workspaceId, event.membershipCheckout.id, actor, execute)
+        : await execute()
       if (event.membershipCheckout) {
         await client.query("UPDATE association_membership_checkouts SET status='paid',updated_at=clock_timestamp() WHERE workspace_id=$1 AND id=$2 AND status='provider_bound'", [workspaceId, event.membershipCheckout.id])
         await client.query(`UPDATE association_promotion_uses SET state='redeemed',reservation_expires_at=NULL,
@@ -187,9 +200,9 @@ export function createProviderEntitlementService(
           WHERE workspace_id=$1 AND membership_checkout_id=$2 AND state='reserved'`,
         [workspaceId, event.membershipCheckout.id])
       }
-      return { record: await readMembership(client, workspaceId, String(result.record.id)), created: result.duplicate !== true }
+      return { record: await readMembership(client, workspaceId, String(result.record.id), actor), created: result.duplicate !== true }
     },
-    read: (client, row) => readMembership(client, workspaceId, row.entitlement_id!),
+    read: (client, row, actor) => readMembership(client, workspaceId, row.entitlement_id!, actor),
   })
 
   return {

@@ -2,14 +2,14 @@
 import { act } from "react";
 import { createRoot, type Root } from "react-dom/client";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-const api = vi.hoisted(() => ({ get: vi.fn(), change: vi.fn(), confirm: vi.fn(), orders: vi.fn(), order: vi.fn(), orderChange: vi.fn(), list: vi.fn(), lookup: vi.fn() }));
+const api = vi.hoisted(() => ({ get: vi.fn(), change: vi.fn(), confirm: vi.fn(), orders: vi.fn(), order: vi.fn(), orderChange: vi.fn(), list: vi.fn(), lookup: vi.fn(), record: vi.fn() }));
 vi.mock("@/lib/api/association", async importOriginal => ({
   ...await importOriginal<typeof import("@/lib/api/association")>(), getAssociationModuleSnapshot: api.get, changeAssociationModule: api.change,
   listAssociationPage: api.list, listAssociationOrders: api.orders, getAssociationOrder: api.order, changeAssociationOrder: api.orderChange,
 }));
 vi.mock("@/lib/surface-prefetch", () => ({ associationPageCacheKey: (w: string, r: string, q = {}) => `crm:${w}:viewer:${r}:${JSON.stringify(q)}`, associationModuleCacheKey: (workspaceId: string) => `association-module:${workspaceId}:viewer`,
   associationOrdersCacheKey: (workspaceId: string, cursor: string | null) => `association-orders:${workspaceId}:viewer:${cursor ?? "first"}` }));
-vi.mock("@/lib/api/crm", () => ({ fetchCrmLookup: api.lookup }));
+vi.mock("@/lib/api/crm", () => ({ fetchCrmRecord: api.record, fetchCrmLookup: api.lookup }));
 vi.mock("@/components/ui/confirm-dialog", () => ({ confirmDialog: api.confirm }));
 import { AssociationApiError, type AssociationOrder } from "@/lib/api/association";
 import { AssociationModuleControls, AssociationModuleNote } from "../module-controls";
@@ -36,11 +36,11 @@ beforeEach(() => {
   api.change.mockResolvedValue({ module: moduleRow("enabled", 2), changed: true, pendingOrders: 0 });
   host = document.createElement("div"); document.body.appendChild(host); root = createRoot(host);
 });
-afterEach(async () => { await act(async () => root.unmount()); host.remove(); resetSurfaceCache(); });
+afterEach(async () => { await act(async () => root.unmount()); host.remove(); resetSurfaceCache(); vi.useRealTimers(); });
 
 describe("[COMP:app-web/association] Independent module controls", () => {
   it("confirms the observed version and never changes Home or assistant grants", async () => {
-    await render(); await click(t.enable);
+    await render(); api.get.mockResolvedValue({ module: moduleRow("enabled",2), canManage:true }); await click(t.enable);
     expect(api.confirm).toHaveBeenCalledWith(expect.objectContaining({ description: t.enableConfirm }));
     expect(api.change).toHaveBeenCalledExactlyOnceWith("w1", "enable", 1);
     expect(host.textContent).toContain(t.states.enabled);
@@ -86,6 +86,29 @@ describe("[COMP:app-web/association] Independent module controls", () => {
     const enable = [...host.querySelectorAll("button")].find(button => button.textContent === t.enable)!;
     expect(enable.disabled).toBe(true);
     expect(api.change).not.toHaveBeenCalled();
+  });
+  it.each([401,403,404])("evicts module controls immediately on a %s renewal",async(status)=>{
+    vi.useFakeTimers({toFake:["setTimeout","clearTimeout","setInterval","clearInterval","performance"]});
+    await render();api.get.mockRejectedValue(new AssociationApiError("unavailable",status));
+    await act(async()=>{await vi.advanceTimersByTimeAsync(15_001);});
+    expect(host.textContent).not.toContain(t.states.disabled);
+    expect([...host.querySelectorAll("button")].some(button=>button.textContent===t.enable)).toBe(false);
+    expect(host.textContent).toContain(t.loadFailed);
+    api.get.mockResolvedValue({module:moduleRow(),canManage:false});await click(t.refresh);
+    expect(host.textContent).toContain(t.ownerOnly);expect(api.change).not.toHaveBeenCalled();
+  });
+  it("expires a module snapshot even while its renewal is stuck",async()=>{
+    vi.useFakeTimers({toFake:["setTimeout","clearTimeout","setInterval","clearInterval","performance"]});
+    await render();let finish!:(value:unknown)=>void;api.get.mockImplementation(()=>new Promise(resolve=>{finish=resolve;}));
+    await act(async()=>{await vi.advanceTimersByTimeAsync(30_001);});
+    expect(host.textContent).not.toContain(t.states.disabled);
+    await act(async()=>{await vi.advanceTimersByTimeAsync(30_001);finish({module:moduleRow(),canManage:true});});
+    expect([...host.querySelectorAll("button")].some(button=>button.textContent===t.enable)).toBe(false);
+  });
+  it("does not carry an old management grant into a successful module response",async()=>{
+    await render();api.get.mockResolvedValue({module:moduleRow("enabled",2),canManage:false});await click(t.enable);
+    expect(host.textContent).toContain(t.states.enabled);expect(host.textContent).toContain(t.ownerOnly);
+    expect([...host.querySelectorAll("button")].some(button=>button.textContent===t.disable)).toBe(false);
   });
   it("revalidates the shared module cache on a workspace-config stale mark", async () => {
     await render(); api.get.mockResolvedValue({ module: moduleRow("draining", 5), canManage: true });
@@ -165,5 +188,38 @@ describe("[COMP:app-web/association] Order history and recovery", () => {
     await click(t.confirmFree);
     expect(api.orderChange).toHaveBeenCalledExactlyOnceWith("w1", "order-one", "confirm-free");
     expect(host.textContent).toContain(t.orderSaveFailed);
+  });
+});
+
+
+describe("[COMP:app-web/association] Protected order projections",()=>{
+  const page=()=>({orders:[orderRow()],nextCursor:null,financialSummary:[{currency:"USD",orderCount:1,settledOrderCount:1,subtotalMinor:"1000",discountMinor:"0",grossMinor:"1000",refundedMinor:"0",netMinor:"1000",pendingMinor:"0"}]});
+  const detail=()=>({...orderRow(),lines:[],registrations:[{id:"guest-one",attendeeName:"Protected fictional attendee",status:"confirmed"}]});
+  const fakeClock=()=>vi.useFakeTimers({toFake:["setTimeout","clearTimeout","setInterval","clearInterval","performance"]});
+  it("evicts attendee details on denial while the parent remains visible and supports retry",async()=>{
+    fakeClock();api.orders.mockImplementation(async()=>page());api.order.mockImplementation(async()=>detail());
+    await renderOrders();await click(t.orderDetails);expect(host.textContent).toContain("Protected fictional attendee");
+    api.order.mockRejectedValue(new AssociationApiError("forbidden",403));
+    await act(async()=>{await vi.advanceTimersByTimeAsync(15_001);});
+    expect(host.textContent).not.toContain("Protected fictional attendee");expect(host.textContent).toContain(t.orderDetailsFailed);
+    api.order.mockImplementation(async()=>detail());
+    await act(async()=>{host.querySelector<HTMLButtonElement>("[data-order-details] button")!.click();});
+    expect(host.textContent).toContain("Protected fictional attendee");
+  });
+  it("removes rows, totals and expanded details when offline renewals outlive their authority",async()=>{
+    fakeClock();api.orders.mockImplementation(async()=>page());api.order.mockImplementation(async()=>detail());
+    await renderOrders();await click(t.orderDetails);
+    api.orders.mockRejectedValue(new Error("offline"));api.order.mockRejectedValue(new Error("offline"));
+    await act(async()=>{await vi.advanceTimersByTimeAsync(30_001);});
+    expect(host.querySelector("[data-order-row]")).toBeNull();expect(host.querySelector("[data-order-financial-summary]")).toBeNull();
+    expect(host.textContent).not.toContain("Protected fictional attendee");expect(host.textContent).toContain(t.ordersLoadFailed);
+  });
+  it("does not show a late detail response after its parent is removed",async()=>{
+    api.orders.mockImplementation(async()=>page());let finish!:(value:unknown)=>void;
+    api.order.mockImplementation(()=>new Promise(resolve=>{finish=resolve;}));
+    await renderOrders();await click(t.orderDetails);
+    api.orders.mockResolvedValue({orders:[],nextCursor:null});await click(t.refresh);
+    await act(async()=>finish(detail()));
+    expect(host.textContent).not.toContain("Protected fictional attendee");expect(host.querySelector("[data-order-details]")).toBeNull();
   });
 });

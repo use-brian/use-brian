@@ -17,7 +17,17 @@ async function fixture() {
   await pool.query("INSERT INTO workspace_members(workspace_id,user_id,role) VALUES($1,$2,'owner')", [workspaceId, userId])
   await pool.query("INSERT INTO entities(id,workspace_id,kind,display_name,created_by_user_id,source) VALUES($1,$2,'person','Fictional buyer',$3,'manual')", [contactId, workspaceId, userId])
   await modules.act(workspaceId, userId, 'association', { action: 'enable', expectedVersion: 1 })
-  const human: AssociationActor = { credentialKind: 'user', credentialId: userId, actingUserId: userId }, actor: AssociationActor = { credentialKind: 'api_key', credentialId: 'fixture-backend' }
+  const human: AssociationActor = { credentialKind: 'user', credentialId: userId, actingUserId: userId }
+  const issued = await keys.create(workspaceId,userId,{label:'Fictional provider backend',expiresAt:'2099-01-01T00:00:00Z',
+    departmentBinding:{departmentIds:[],cap:'internal'},grants:[
+      {operation:'association.read',selectors:{eventIds:'all'}},
+      {operation:'association.orders.write',selectors:{eventIds:'all'}},
+      // This fixture exercises object/money/replay identity across providers;
+      // the dedicated scoped-credential case below tests provider restrictions.
+      {operation:'association.provider_events.write',selectors:{eventIds:'all',providerKeys:'all'}},
+    ]})
+  const integration = (await keys.authenticate(issued.oneTimeSecret))!
+  const actor: AssociationActor = {credentialKind:'integration_key',credentialId:integration.credentialId,integration}
   const eventId = String((await store.upsertEvent(workspaceId, EventInputSchema.parse({ slug: 'fixture', title: 'Provider fixture', startsAt: '2099-01-01T12:00:00Z', endsAt: '2099-01-01T14:00:00Z', timezone: 'UTC', mode: 'venue', status: 'published', capacity: 10 }), human)).record.id)
   const ticketId = String((await store.upsertTicket(workspaceId, eventId, TicketInputSchema.parse({ key: 'standard', name: 'Standard', currency: 'USD', priceMinor: 1000, status: 'on_sale', capacity: 10 }), human)).record.id)
   const order = async (attendee: Record<string, unknown> = {}) => String((await store.createOrder(workspaceId, OrderCreateSchema.parse({ contactId, idempotencyKey: randomUUID(), metadata: { ticketingConsent: true, policyVersion: 'ticketing-v1', policyAcceptedAt: '2026-09-01T10:00:00Z' }, lines: [{ ticketId, quantity: 1, attendees: [{ contactId, name: 'Fictional buyer', email: 'buyer@example.com', metadata: { marketingConsent: false, phone: '+852 0000 0000', organisation: 'Fictional Org', jobTitle: 'Tester', questionResponses: { accessibility: 'None' }, ...attendee } }] }] }), human)).record.id)

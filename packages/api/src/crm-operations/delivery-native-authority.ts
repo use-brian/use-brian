@@ -1,8 +1,10 @@
 /** Transactional native sender identity and mailbox grants. [COMP:crm/delivery-policy] */
 import type { PoolClient } from 'pg'
-import { CrmOperationsError, type CrmOperationsActor, type CrmNativeDeliveryAuthority } from '@use-brian/core'
+import { actorAuditIdentity, parseAuthoringAuthority, intersectScopeGrants, intersectDepartmentReadGrants, type AssociationActor, CrmOperationsError, type CrmOperationsActor, type CrmNativeDeliveryAuthority } from '@use-brian/core'
 import { defaultGrantedConnectorActions } from '@use-brian/shared'
 import { connectorExposureAllowed } from '../context-scope/connector-exposure.js'
+import { loadDepartmentSnapshot, resolveDepartmentReadGrant } from '../context-scope/department-resolver.js'
+import { runWithAgentAccess } from '../db/agent-access-context.js'
 import { connectorInstanceGovernanceId } from '../db/connector-instance-store.js'
 
 export type NativeDeliveryPrincipal = { actor: CrmOperationsActor; ceiling: CrmNativeDeliveryAuthority }
@@ -82,4 +84,28 @@ export async function lockNativeDeliveryMailbox(client:PoolClient,workspaceId:st
     ? await client.query(`SELECT policy FROM workspace_tool_policy WHERE workspace_id=$1 AND server_name IN($2,$3) AND tool_name=$4 FOR SHARE`,[workspaceId,selected.provider,exact,sendAction])
     : await client.query(`SELECT policy FROM mcp_tool_settings WHERE user_id=$1 AND assistant_id=$2 AND server_name IN($3,$4) AND tool_name=$5 FOR SHARE`,[selected.userId,native.ceiling.assistantId,selected.provider,exact,sendAction])
   if(policy.rows.some(row=>row.policy==='block')) throw denied()
+}
+
+
+/** Saved native authority is an execution ceiling, never a replacement user identity. */
+export async function withNativeDeliverySourceAuthority<T>(client:PoolClient,workspaceId:string,native:NativeDeliveryPrincipal,
+  run:(actor:AssociationActor)=>Promise<T>):Promise<T> {
+  const identity=actorAuditIdentity(native.actor)
+  const actor:AssociationActor={credentialKind:native.actor.kind,credentialId:identity.actorCredentialId,
+    ...(identity.actingUserId?{actingUserId:identity.actingUserId}:{})}
+  const workspace=(await client.query('SELECT department_read_v2 FROM workspaces WHERE id=$1',[workspaceId])).rows[0]
+  if(workspace?.department_read_v2===false)return run(actor)
+  const authority=parseAuthoringAuthority(native.ceiling.authoringAuthority)
+  if(!workspace || !authority || !authority.ceiling.departmentRead || authority.assistantId!==native.ceiling.assistantId
+    || authority.ceiling.workspaceId!==workspaceId || authority.ceiling.departmentRead.assistantId!==authority.assistantId
+    || identity.actingUserId && identity.actingUserId!==authority.ceiling.userId)throw denied()
+  const input={workspaceId,userId:authority.ceiling.userId,assistantId:authority.assistantId}
+  const {snapshot,principal}=await loadDepartmentSnapshot(<R>(sql:string,values:unknown[])=>client.query(sql,values) as unknown as Promise<{rows:R[]}>,input)
+  if(principal.kind!=='user')throw denied()
+  const current=resolveDepartmentReadGrant(snapshot,principal,input,new Date())
+  const departmentRead=intersectDepartmentReadGrants(authority.ceiling.departmentRead,current)
+  return runWithAgentAccess({...authority.ceiling,departmentRead,
+    compartments:intersectScopeGrants(authority.ceiling.compartments,native.ceiling.compartments),
+    mutationCompartments:intersectScopeGrants(authority.ceiling.mutationCompartments,native.ceiling.mutationCompartments),
+    projectIds:intersectScopeGrants(authority.ceiling.projectIds,native.ceiling.projectIds)},()=>run(actor))
 }

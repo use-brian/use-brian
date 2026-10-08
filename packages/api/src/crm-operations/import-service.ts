@@ -1,3 +1,4 @@
+import { beginAssociationCreation } from '../association/source-scope.js'
 /**
  * Server-owned CRM import preflight and resumable commit.
  *
@@ -26,11 +27,13 @@ import type {
   CrmPage,
   CrmPageQuery,
 } from '@use-brian/core'
-import { AssociationPromotionImportSchema, AssociationSourceMembershipImportSchema, AssociationSourceOrderImportSchema, CrmIntegrationGrantsSchema, CrmOperationsError } from '@use-brian/core'
+import { AssociationPromotionImportSchema, AssociationSourceMembershipImportSchema, AssociationSourceOrderImportSchema, CrmOperationsError } from '@use-brian/core'
 import { createCompany, createContact, createDeal, updateContact, type CrmWriteTransaction } from '../db/crm.js'
 import { updateCrmCustomFields } from '../db/crm-r2.js'
 import { getEntityById, updateEntity } from '../db/entities-store.js'
 import { getPool, query } from '../db/client.js'
+import { lockCrmIntegrationCredential, type CrmIntegrationPrincipal } from '../db/crm-integration-store.js'
+import { runWithAgentAccess } from '../db/agent-access-context.js'
 import { parseCsv } from '../linkedin-import/csv.js'
 import { createCrmImportSources, type CrmImportSources } from '../db/crm-import-sources.js'
 import { importGrantSnapshot, requireImportCeiling, requireImportOperation, requireImportRowAuthority } from './import-authority.js'
@@ -696,12 +699,15 @@ export function createCrmProductionImportService(deps: {
   }
   async function importTransaction<T>(context: ImportServiceContext,
     run: (current: ImportServiceContext, client: PoolClient, effects: Array<() => void>) => Promise<T>,
+    waitForWorkspace = false,
   ): Promise<T> {
     const client = await (deps.pool ?? getPool()).connect()
     const effects: Array<() => void> = []
     let result: T
+    let integration: CrmIntegrationPrincipal | undefined
     try {
       await client.query('BEGIN')
+      await beginAssociationCreation(client, context.workspaceId, !waitForWorkspace)
       await client.query(`SELECT set_config('app.system_bypass','true',true)`)
       if (context.actor.kind === 'user') {
         const member = await client.query<{ role: string }>(`SELECT role FROM workspace_members
@@ -709,17 +715,26 @@ export function createCrmProductionImportService(deps: {
         if (!member.rows[0]) throw new CrmOperationsError('not_authorized', 'Current workspace membership is required for imports.')
         context = { ...context, authority: { ...context.authority, role: member.rows[0].role as CrmOperationsContext['authority']['role'] } }
       } else if (context.actor.kind === 'integration_key') {
-        const credential = await client.query(`SELECT id FROM crm_integration_credentials
-          WHERE workspace_id=$1 AND id=$2 AND revoked_at IS NULL AND expires_at>clock_timestamp() FOR SHARE`,
-        [context.workspaceId, context.actor.credentialId])
-        if (!credential.rowCount) throw new CrmOperationsError('not_authorized', 'The import credential is no longer active.')
-        const rows = await client.query(`SELECT operation,selectors FROM crm_integration_credential_grants
-          WHERE workspace_id=$1 AND credential_id=$2 ORDER BY operation FOR SHARE`, [context.workspaceId, context.actor.credentialId])
-        const grants = CrmIntegrationGrantsSchema.parse(rows.rows)
-        requireImportCeiling({ credentialId: context.actor.credentialId, grants },
+        try { integration = await lockCrmIntegrationCredential(client, context.workspaceId, context.actor.credentialId) }
+        catch (error) {
+          if (error instanceof CrmOperationsError && error.code === 'credential_revoked') {
+            throw new CrmOperationsError('not_authorized', 'The import credential is no longer active.')
+          }
+          throw error
+        }
+        requireImportCeiling(integration,
           context.authority.integration ? importGrantSnapshot(context.authority.integration) : undefined)
       }
-      result = await run(context, client, effects)
+      const execute = () => run(context, client, effects)
+      result = integration?.departmentRead ? await runWithAgentAccess({ workspaceId: context.workspaceId,
+        userId: integration.departmentRead.userId, departmentRead: integration.departmentRead,
+        clearance: 'confidential', compartments: null, ...integration.executionLimits }, execute) : await execute()
+      if (integration) {
+        const renewed = await lockCrmIntegrationCredential(client, context.workspaceId, integration.credentialId)
+        if (JSON.stringify(renewed) !== JSON.stringify(integration)) {
+          throw new CrmOperationsError('not_authorized', 'Import authority changed before commit.')
+        }
+      }
       await client.query('COMMIT')
     } catch (error) {
       await client.query('ROLLBACK').catch(() => undefined)
@@ -1347,7 +1362,7 @@ export function createCrmProductionImportService(deps: {
       const job = await loadJob(context.workspaceId, jobId, client)
       if (!job) throw new Error('Import job was not found.')
       return jobProjection(job)
-    })
+    }, true)
   }
 
   async function list(context: ImportServiceContext, filters: CrmPageQuery = {}): Promise<CrmPage<'jobs', CrmImportJob>> {

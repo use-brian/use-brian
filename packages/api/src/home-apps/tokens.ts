@@ -179,7 +179,8 @@ function verify<T extends AnyPayload>(opts: {
   // and vice versa.
   if (payload.aud !== opts.aud) return { ok: false, reason: 'wrong-audience' }
   if (payload.appId !== opts.appId) return { ok: false, reason: 'wrong-app' }
-  if (typeof payload.exp !== 'number' || payload.exp < now) {
+  if (typeof payload.exp !== 'number' || !Number.isSafeInteger(payload.exp)
+    || !Number.isFinite(new Date(payload.exp).getTime()) || payload.exp <= now) {
     return { ok: false, reason: 'expired' }
   }
   return { ok: true, payload }

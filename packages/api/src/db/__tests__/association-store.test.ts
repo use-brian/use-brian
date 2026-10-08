@@ -27,6 +27,13 @@ function fakePool(
   const query = vi.fn(async (sql: string, params?: unknown[]) => {
     const normalized = sql.replace(/\s+/g, ' ').trim()
     statements.push(normalized)
+    if (normalized.includes('SELECT department_read_v2 AS v2')) return { rows: [{ v2: false }], rowCount: 1 }
+    if (normalized.includes('read_scope_source')) return { rows: [{ snapshot: {
+      workspaceId: WID, resourceKind: 'entity', resourceId: CONTACT_ID, version: '1',
+      userId: null, assistantId: null, projectIds: [], compartments: [], sensitivity: 'internal',
+      held: false, validTo: null, retractedAt: null,
+    } }], rowCount: 1 }
+    if (normalized === 'SELECT id FROM workspaces WHERE id=$1 AND department_read_v2 FOR UPDATE') return { rows: [], rowCount: 0 }
     if (normalized === 'BEGIN' || normalized === 'COMMIT' || normalized === 'ROLLBACK') {
       return { rows: [], rowCount: 0 }
     }
@@ -144,7 +151,7 @@ describe('[COMP:crm/association-store] transactional evidence', () => {
     expect(fake.statements.at(-1)).toBe('COMMIT')
   })
 
-  it('refuses reuse of an order idempotency key with a changed request', async () => {
+  it('refuses reuse of an order idempotency key with a changed request in a legacy workspace', async () => {
     const original = {
       contactId: CONTACT_ID,
       idempotencyKey: 'checkout-1',
@@ -158,6 +165,7 @@ describe('[COMP:crm/association-store] transactional evidence', () => {
       metadata: {},
     }
     const fake = fakePool(async (sql) => {
+      if (sql.includes('department_read_v2 AS v2')) return { rows: [{ v2: false }], rowCount: 1 }
       if (sql.includes('FROM association_orders') && sql.includes('FOR UPDATE')) {
         return { rows: [{ id: ORDER_ID, requestFingerprint: associationFingerprint(original) }], rowCount: 1 }
       }

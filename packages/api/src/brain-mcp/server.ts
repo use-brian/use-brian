@@ -24,7 +24,7 @@ import type { Tool, Embedder, AssociationTools } from '@use-brian/core'
 import type { BrainKeyStore } from '../db/brain-keys-store.js'
 import type { OAuthAuthorizationStore } from '../db/oauth-authorization-store.js'
 import type { BrainEpisodeIngestor } from '../ingest-port.js'
-import { authenticateBrainRequest, getAuthenticatedBrainCredentialCurrent } from './auth.js'
+import { authenticateBrainRequest, getAuthenticatedBrainCredentialCurrent, getAuthenticatedCrmCredentialParent } from './auth.js'
 import type { BrainAuth } from './auth.js'
 import type {
   ProgrammaticCaptureInput,
@@ -61,6 +61,7 @@ type Options = {
    */
   memoryTools: BrainMemoryTools
   taskTools: BrainTaskTools
+  credentialTools?: Record<string, Tool>
   crmTools: BrainCrmTools
   associationTools?: AssociationTools
   retrievalTools: BrainRetrievalTools
@@ -250,6 +251,8 @@ export function brainMcpRoutes(opts: Options): Router {
       keyId: auth.keyId,
       authKind: auth.authKind,
       credentialCurrent: getAuthenticatedBrainCredentialCurrent(auth),
+      crmCredentialParent: getAuthenticatedCrmCredentialParent(auth),
+      credentialTools: opts.credentialTools,
       actingUserId: auth.actingUserId,
       maxClearance: auth.maxClearance,
       memoryTools: opts.memoryTools,

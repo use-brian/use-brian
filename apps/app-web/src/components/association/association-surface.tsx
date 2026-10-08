@@ -9,6 +9,7 @@ import { useT } from "@/lib/i18n/client";
 import { OperatorTopbar } from "@/components/operator/operator-topbar";
 import { DropdownMenu, DropdownMenuContent, DropdownMenuItem, DropdownMenuSeparator, DropdownMenuTrigger } from "@/components/ui/dropdown-menu";
 import { AssociationOverview } from "./overview";
+import { AssociationRecoveryGuide } from "./recovery-guide";
 import { AssociationEventsPanel } from "./events-panel";
 import { AssociationMembersPanel } from "./members-panel";
 import { AssociationPlansPanel } from "./plans-panel";
@@ -68,6 +69,7 @@ export function AssociationSurface({ workspaceId }: { workspaceId: string }) {
       </nav>
       <div className="min-h-0 min-w-0 flex-1 overflow-y-auto bg-muted/10 px-4 py-5 md:px-8 md:py-7">
         <div className="mx-auto max-w-6xl space-y-6">
+          <AssociationRecoveryGuide workspaceId={workspaceId} canManage={access.canManage} />
           {locked ? <AdminOnlyPage workspaceId={workspaceId} title={labels[section]} /> : waiting ? <div className="h-24 animate-pulse rounded-2xl bg-muted/40" aria-busy /> : <>
             {section === "overview" && <AssociationOverview workspaceId={workspaceId} />}
             {section === "website" && <AssociationWebsiteSection key={workspaceId} workspaceId={workspaceId} />}

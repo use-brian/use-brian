@@ -2,6 +2,8 @@ import { randomUUID } from 'node:crypto'
 import { afterAll, describe, expect, it } from 'vitest'
 import { type CrmOperationsContext, type CrmOperationsCommand, CrmOperationsCommandSchema } from '@use-brian/core'
 import { getPool, getAppPool } from '../client.js'
+import { runWithAgentAccess } from '../agent-access-context.js'
+import { loadDepartmentSnapshot, resolveDepartmentReadGrant } from '../../context-scope/department-resolver.js'
 import { createCrmOperationsService } from '../../crm-operations/service.js'
 import { createDbCrmOperationsStore } from '../crm-operations-store.js'
 import { createCrmIntegrationStore } from '../crm-integration-store.js'
@@ -21,9 +23,18 @@ async function fixture() {
   await pool.query("INSERT INTO entities(id,workspace_id,kind,display_name,created_by_user_id,source) VALUES($1,$2,'person','Fictional member',$3,'manual')", [contactId, workspaceId, userId])
   await pool.query("INSERT INTO association_membership_plans(id,workspace_id,plan_key,name,currency,fee_minor,billing_period) VALUES($1,$2,'standard','Standard','USD',0,'annual')", [planId, workspaceId])
   const context: CrmOperationsContext = { workspaceId, actor: { kind: 'system_job', job: 'entitlement_reconciliation', runId: randomUUID() }, authority: { role: 'system', canConfigure: false, canWrite: true, trustedIdentitySources: [] } }
+  // Capture a real host execution ceiling; the system-job label alone grants nothing.
+  const scopeInput = { workspaceId, userId, assistantId: null }
+  const { snapshot, principal } = await loadDepartmentSnapshot(
+    async <R>(sql: string, values: unknown[]) => ({ rows: (await pool.query(sql, values)).rows as R[] }), scopeInput)
+  const departmentRead = resolveDepartmentReadGrant(snapshot, principal, scopeInput, new Date())
+  const withAuthority = <T>(run: () => T): T => runWithAgentAccess({ workspaceId, userId,
+    clearance: 'internal', compartments: null, departmentRead }, run)
+  const execute = (ctx: CrmOperationsContext, command: CrmOperationsCommand) => withAuthority(() => service.execute(ctx, command))
+  const actor = { credentialKind: 'system_job' as const, credentialId: `entitlement_reconciliation:${context.actor.kind === 'system_job' ? context.actor.runId : ''}` }
   const input: Grant = { kind: 'grant_entitlement', contactId, planId, idempotencyKey: randomUUID(), status: 'active', startsAt: '2000-01-01T00:00:00Z', endsAt: '2099-01-01T00:00:00Z', renewalMode: 'auto', provider: 'fixture', providerEntitlementId: 'fixture-subscription', providerPeriodId: 'period-1' }
-  const grant = (patch: Partial<Grant> = {}, ctx = context) => service.execute(ctx, { ...input, ...patch })
-  return { workspaceId, userId, context, input, grant }
+  const grant = (patch: Partial<Grant> = {}, ctx = context) => execute(ctx, { ...input, ...patch })
+  return { workspaceId, userId, context, input, grant, execute, withAuthority, actor }
 }
 describe('[COMP:crm/entitlement-periods] Actual provider renewal lineage', () => {
   afterAll(async () => { _resetCoalescerForTests(); await pool.end(); await appPool.end() })
@@ -37,12 +48,12 @@ describe('[COMP:crm/entitlement-periods] Actual provider renewal lineage', () =>
   })
   it('extends active grants in place and preserves cancel-at-period-end access separately from immediate cancellation', async () => {
     const f = await fixture(), id = String((await f.grant()).record.id)
-    await service.execute(f.context, { kind: 'update_entitlement', entitlementId: id, endsAt: '2100-01-01T00:00:00Z', renewalMode: 'none' })
+    await f.execute(f.context, { kind: 'update_entitlement', entitlementId: id, endsAt: '2100-01-01T00:00:00Z', renewalMode: 'none' })
     expect((await legacy.listMemberships(f.workspaceId, f.input.contactId, { activeOnly: true }))).toMatchObject([{ id, renewalMode: 'none', isEffective: true }])
     await expect(f.grant({ providerPeriodId: 'period-2', predecessorId: id, startsAt: '2001-01-01T00:00:00Z', idempotencyKey: randomUUID() })).rejects.toMatchObject({ code: 'conflict', details: { reason: 'provider_period_predecessor_invalid' } })
-    await service.execute(f.context, { kind: 'update_entitlement', entitlementId: id, status: 'cancelled' })
+    await f.execute(f.context, { kind: 'update_entitlement', entitlementId: id, status: 'cancelled' })
     expect(await legacy.listMemberships(f.workspaceId, f.input.contactId, { activeOnly: true })).toEqual([])
-    await expect(service.execute(f.context, { kind: 'update_entitlement', entitlementId: id, status: 'active' })).rejects.toMatchObject({ code: 'conflict' })
+    await expect(f.execute(f.context, { kind: 'update_entitlement', entitlementId: id, status: 'active' })).rejects.toMatchObject({ code: 'conflict' })
   })
   it('renews a terminal period into one successor under concurrent delivery without reviving the predecessor', async () => {
     const f = await fixture(), id = String((await f.grant({ status: 'expired', endsAt: '2001-01-01T00:00:00Z' })).record.id)
@@ -65,24 +76,24 @@ describe('[COMP:crm/entitlement-periods] Actual provider renewal lineage', () =>
     await expect(f.grant({}, human)).rejects.toMatchObject({ code: 'not_authorized' })
     await expect(f.grant({}, { ...f.context, actor: { kind: 'provider', provider: 'foreign', eventId: 'fixture-event' } })).rejects.toMatchObject({ code: 'not_authorized' })
     const id = String((await f.grant()).record.id)
-    await expect(service.execute(human, { kind: 'update_entitlement', entitlementId: id, status: 'cancelled' })).rejects.toMatchObject({ code: 'not_authorized' })
+    await expect(f.execute(human, { kind: 'update_entitlement', entitlementId: id, status: 'cancelled' })).rejects.toMatchObject({ code: 'not_authorized' })
     await expect(legacy.updateMembership(f.workspaceId, id, { status: 'cancelled' }, { credentialKind: 'user', credentialId: f.userId })).rejects.toMatchObject({ code: 'not_authorized' })
     const manual = await f.grant({ provider: undefined, providerEntitlementId: undefined, providerPeriodId: undefined, idempotencyKey: randomUUID() }, human)
     expect(manual.record.provider).toBe(null)
   })
   it('shares replay and lineage with the direct compatibility membership store and keeps legacy rows valid', async () => {
-    const f = await fixture(), actor = { credentialKind: 'api_key' as const, credentialId: 'fixture-backend' }
+    const f = await fixture(), actor = f.actor
     const input = MembershipInputSchema.parse({ ...f.input, providerMembershipId: f.input.providerEntitlementId })
-    const first = await legacy.createMembership(f.workspaceId, input, actor)
+    const first = await f.withAuthority(() => legacy.createMembership(f.workspaceId, input, actor))
     const replay = await f.grant({ idempotencyKey: randomUUID() })
     expect(replay).toMatchObject({ duplicate: true, record: { id: first.record.id } })
-    await legacy.updateMembership(f.workspaceId, String(first.record.id), { status: 'expired' }, actor)
-    await expect(legacy.updateMembership(f.workspaceId, String(first.record.id), { status: 'active' }, actor)).rejects.toMatchObject({ code: 'invalid_transition' })
-    const next = await legacy.createMembership(f.workspaceId, { ...input, idempotencyKey: randomUUID(), providerPeriodId: 'period-2', predecessorId: String(first.record.id), startsAt: '2001-01-01T00:00:00Z' }, actor)
+    await f.withAuthority(() => legacy.updateMembership(f.workspaceId, String(first.record.id), { status: 'expired' }, actor))
+    await expect(f.withAuthority(() => legacy.updateMembership(f.workspaceId, String(first.record.id), { status: 'active' }, actor))).rejects.toMatchObject({ code: 'invalid_transition' })
+    const next = await f.withAuthority(() => legacy.createMembership(f.workspaceId, { ...input, idempotencyKey: randomUUID(), providerPeriodId: 'period-2', predecessorId: String(first.record.id), startsAt: '2001-01-01T00:00:00Z' }, actor))
     expect(next.record).toMatchObject({ predecessorId: first.record.id, providerPeriodId: 'period-2' })
     const g = await fixture(), old = MembershipInputSchema.parse({ ...g.input, providerPeriodId: undefined, providerMembershipId: 'legacy-subscription' })
-    const legacyGrant = await legacy.createMembership(g.workspaceId, old, actor)
-    expect((await legacy.createMembership(g.workspaceId, old, actor)).created).toBe(false)
+    const legacyGrant = await g.withAuthority(() => legacy.createMembership(g.workspaceId, old, g.actor))
+    expect((await g.withAuthority(() => legacy.createMembership(g.workspaceId, old, g.actor))).created).toBe(false)
     expect(legacyGrant.record.providerPeriodId).toBe(null)
   })
   it('rolls back a successor and its evidence if audit fails, and retries the same period safely', async () => {
@@ -116,6 +127,14 @@ describe('[COMP:crm/entitlement-periods] Actual provider renewal lineage', () =>
     expect(next.created).toBe(true)
     await pool.query('DELETE FROM entities WHERE workspace_id=$1 AND id=$2', [f.workspaceId, f.input.contactId])
     expect((await pool.query('SELECT id FROM association_memberships WHERE workspace_id=$1', [f.workspaceId])).rows).toEqual([])
+  })
+  it('denies an unbound job and renews the captured host membership before replay', async () => {
+    const f = await fixture()
+    await expect(service.execute(f.context, f.input)).rejects.toMatchObject({ code: 'not_authorized' })
+    const first = await f.grant()
+    await pool.query('DELETE FROM workspace_members WHERE workspace_id=$1 AND user_id=$2', [f.workspaceId,f.userId])
+    await expect(f.grant()).rejects.toMatchObject({ code: 'not_authorized' })
+    expect((await pool.query('SELECT id FROM association_memberships WHERE workspace_id=$1', [f.workspaceId])).rows).toEqual([{id:first.record.id}])
   })
   it('rejects malformed period requests at the canonical contract boundary', () => {
     const base = { kind: 'grant_entitlement', contactId: randomUUID(), planId: randomUUID(), idempotencyKey: 'fixture', startsAt: '2000-01-01T00:00:00Z' }

@@ -6,6 +6,7 @@ import {getPool} from '../client.js'
 import {createSoftDeleteStore} from '../soft-delete-store.js'
 import {createDbWorkflowRunStore} from '../workflow-store.js'
 import {_resetCoalescerForTests} from '../../brain-stream/notify.js'
+import {loadAssociationOrderScope} from '../../association/source-scope.js'
 import {createAssociationStore} from '../association-store.js'
 import {createCrmPrivacyService} from '../../crm-operations/privacy-previews.js'
 import {streamCrmPrivacyExport} from '../../crm-operations/privacy-export.js'
@@ -26,8 +27,9 @@ async function fixture() {
   await pool.query("INSERT INTO workspace_members(workspace_id,user_id,role) VALUES($1,$2,'owner')",[workspaceId,userId])
   await pool.query(`INSERT INTO entities(id,workspace_id,kind,display_name,canonical_id,created_by_user_id,source)
     VALUES($1,$3,'person','Subject fixture','subject@example.com',$4,'manual'),($2,$3,'person','Other fixture','other@example.com',$4,'manual')`,[contactId,otherId,workspaceId,userId])
-  await pool.query(`INSERT INTO association_enquiries(id,workspace_id,contact_id,source,source_submission_id,request_fingerprint,subject,message)
-    VALUES($1,$2,$3,'fixture',$1::uuid::text,repeat('a',64),'Fixture','Private submission copy')`,[submissionId,workspaceId,contactId])
+  const evidence=await loadAssociationOrderScope(pool,workspaceId,[contactId])
+  await pool.query(`INSERT INTO association_enquiries(id,workspace_id,contact_id,source,source_submission_id,request_fingerprint,subject,message,scope_snapshot,scope_sources)
+    VALUES($1,$2,$3,'fixture',$1::uuid::text,repeat('a',64),'Fixture','Private submission copy',$4::jsonb,$5::jsonb)`,[submissionId,workspaceId,contactId,JSON.stringify(evidence.scope),JSON.stringify(evidence.sources)])
   await pool.query("INSERT INTO workflows(id,workspace_id,created_by,name,definition,enabled) VALUES($1,$2,$3,'Fixture','{}',false)",[workflowId,workspaceId,userId])
   const context:CrmOperationsContext={workspaceId,actor:{kind:'user',userId},authority:{role:'owner',canWrite:true,canConfigure:true,trustedIdentitySources:[]}}
   const preview=()=>privacy.preview(context,{kind:'preview_contact_erasure',contactId})
@@ -39,9 +41,9 @@ async function fixture() {
     const id=randomUUID();await pool.query(`INSERT INTO crm_domain_event_outbox(id,workspace_id,event_type,event_key,subject_kind,subject_id,actor_kind,payload,status,delivered_at,last_error,next_attempt_at)
       VALUES($1,$2,'crm.submission.received',$1::uuid::text,$3,$4,'user','{"status":"original","unsafe":"subject@example.com"}',$5,CASE WHEN $5='delivered' THEN now() END,'subject@example.com','1970-01-01T00:00:00Z')`,[id,workspaceId,subjectKind,subjectId,status]);return id
   }
-  const notification=async(status='pending',recipient=contactId)=>{
+  const notification=async(status='pending',recipient=contactId,sourceId=submissionId)=>{
     const id=randomUUID();await pool.query(`INSERT INTO association_notification_outbox(id,workspace_id,source_kind,source_id,template_key,recipient_kind,recipient_ref,payload,status,provider_message_id,last_error)
-      VALUES($1,$2,'enquiry',$3,'fixture_'||$1::uuid::text,'contact',$4,'{"message":"subject@example.com"}',$5,'private-provider-ref','subject@example.com')`,[id,workspaceId,submissionId,recipient,status]);return id
+      VALUES($1,$2,'enquiry',$3,'fixture_'||$1::uuid::text,'contact',$4,'{"message":"subject@example.com"}',$5,'private-provider-ref','subject@example.com')`,[id,workspaceId,sourceId,recipient,status]);return id
   }
   const lease=async(id:string,worker='fixture_worker')=>{const row=(await outbox.leaseBatch(worker,50,60_000)).find(e=>e.id===id);expect(row).toBeDefined();return row!}
   const input=(id:string)=>({trigger:{sourceType:'crm',provider:'crm',channelId:'crm.submission.received',actorId:null},event:{domainEventId:id,subjectKind:'submission',subjectId:submissionId,contactId}})
@@ -64,6 +66,37 @@ describe('[COMP:crm/privacy-copies] Notification retirement and workflow depende
     await pool.query('DELETE FROM users WHERE id=ANY($1::uuid[])',[users.splice(0)])
   })
   afterAll(async()=>{_resetCoalescerForTests();await pool.end()})
+  it('retains notification source floors through declassification and minimized retirement',async()=>{
+    const f=await fixture(),department=randomUUID(),custodian=randomUUID(),sourceId=randomUUID()
+    users.push(custodian)
+    await pool.query('INSERT INTO users(id,auth_provider_id) VALUES($1::uuid,$1::text)',[custodian])
+    await pool.query("INSERT INTO workspace_members(workspace_id,user_id,role) VALUES($1,$2,'member')",[f.workspaceId,custodian])
+    await pool.query("INSERT INTO workspace_groups(id,workspace_id,name,created_by,kind,key,compartment_key) VALUES($1::uuid,$2,'Cedar',$3,'team',$1::text,$4)",[department,f.workspaceId,custodian,`team:${department}`])
+    await pool.query("INSERT INTO workspace_compartments(workspace_id,key,label,managed_by,managed_ref_id) VALUES($1,$2,'Cedar','team',$3)",[f.workspaceId,`team:${department}`,department])
+    const grant=()=>pool.query("INSERT INTO department_edges(workspace_id,department_id,principal_kind,user_id,clearance,origin) VALUES($1,$2,'user',$3,'internal','store')",[f.workspaceId,department,f.userId])
+    const revoke=()=>pool.query('DELETE FROM department_edges WHERE department_id=$1 AND user_id=$2',[department,f.userId])
+    await grant()
+    await pool.query('UPDATE entities SET compartments=$2 WHERE id=$1',[f.contactId,[`team:${department}`]])
+    const evidence=await loadAssociationOrderScope(pool,f.workspaceId,[f.contactId])
+    await pool.query(`INSERT INTO association_enquiries(id,workspace_id,contact_id,source,source_submission_id,request_fingerprint,subject,message,scope_snapshot,scope_sources)
+      VALUES($1,$2,$3,'fixture',$1::uuid::text,repeat('b',64),'Protected fixture','Saved source',$4::jsonb,$5::jsonb)`,[sourceId,f.workspaceId,f.contactId,JSON.stringify(evidence.scope),JSON.stringify(evidence.sources)])
+    const id=await f.notification('sent',f.contactId,sourceId)
+    const actor={credentialKind:'user' as const,credentialId:f.userId,actingUserId:f.userId}
+    const list=()=>createAssociationStore(pool).listNotifications(f.workspaceId,{limit:100,cursor:null},actor)
+    await expect(pool.query("UPDATE association_notification_outbox SET scope_snapshot=jsonb_set(scope_snapshot,'{compartments}','[]') WHERE id=$1",[id])).rejects.toThrow('immutable')
+    await pool.query("UPDATE entities SET compartments='{}' WHERE id=$1",[f.contactId])
+    await revoke()
+    expect(await list()).toMatchObject({items:[],nextCursor:null})
+    await expect(f.preview()).rejects.toMatchObject({code:'not_authorized'})
+    await grant()
+    expect((await list()).items).toMatchObject([{id,status:'sent'}])
+    await f.erase(await f.preview())
+    expect((await pool.query('SELECT scope_snapshot,scope_sources FROM association_notification_outbox WHERE id=$1',[id])).rows[0])
+      .toMatchObject({scope_snapshot:{compartments:[`team:${department}`]},scope_sources:[]})
+    expect((await list()).items).toMatchObject([{id,status:'retired',retiredFromStatus:'sent',payload:{erased:true}}])
+    await revoke()
+    expect(await list()).toMatchObject({items:[],nextCursor:null})
+  })
   it('retires more than one page of indirect copies without inventing delivered status',async()=>{
     const f=await fixture(),eventStates=['pending','leased','delivered','failed'],notificationStates=['pending','sending','sent','failed','suppressed']
     for(let i=0;i<108;i++)await f.event(eventStates[i%4])
@@ -81,18 +114,18 @@ describe('[COMP:crm/privacy-copies] Notification retirement and workflow depende
     expect(notifications).toHaveLength(105)
     for(const row of notifications){expect(notificationStates).toContain(row.retired_from_status);expect(row).toMatchObject({status:'retired',source_id:nil,recipient_ref:'erased:'+row.id,payload:{erased:true},provider_message_id:null,last_error:null,next_attempt_at:null})}
     expect((await pool.query('SELECT status,payload FROM crm_domain_event_outbox WHERE id=$1',[unrelated])).rows[0]).toMatchObject({status:'pending',payload:{status:'original'}})
-    const listed=await createAssociationStore(pool).listNotifications(f.workspaceId,{limit:100,cursor:null,status:'retired'})
+    const listed=await createAssociationStore(pool).listNotifications(f.workspaceId,{limit:100,cursor:null,status:'retired'},{credentialKind:'user',credentialId:f.userId,actingUserId:f.userId})
     expect(listed.items).toHaveLength(100);expect(listed.nextCursor).toBeTruthy();expect(listed.items[0]).toMatchObject({status:'retired',retiredFromStatus:expect.any(String),retiredAt:expect.any(Date)})
     const delivery=await listCrmEventDelivery(f.context,{limit:100})
     const retiredDelivery=delivery.events.filter((row:Record<string,unknown>)=>row.status==='retired')
     expect(retiredDelivery.length).toBeGreaterThan(0)
     for(const row of retiredDelivery)expect(row).toMatchObject({retiredAt:expect.any(Date),retiredFromStatus:expect.any(String)})
-    await pruneCrmOperationsRetention(f.workspaceId,new Date(Date.now()+86400_000))
+    await pruneCrmOperationsRetention(f.context,new Date(Date.now()+86400_000))
     expect((await pool.query("SELECT id FROM crm_domain_event_outbox WHERE workspace_id=$1 AND status='retired'",[f.workspaceId])).rowCount).toBe(108)
   })
   it('prunes eligible delivery receipts while keeping workflow-bound sources',async()=>{
     const f=await fixture(),bound=await f.event('delivered'),eligible=await f.event('delivered'),run=await f.run(bound)
-    const result=await pruneCrmOperationsRetention(f.workspaceId,new Date(Date.now()+86400_000))
+    const result=await pruneCrmOperationsRetention(f.context,new Date(Date.now()+86400_000))
     expect(result.deleted.crm_domain_event_outbox).toBe(1)
     expect((await pool.query('SELECT id FROM crm_domain_event_outbox WHERE id=$1',[eligible])).rowCount).toBe(0)
     expect((await pool.query('SELECT id,event_key,status FROM crm_domain_event_outbox WHERE id=$1',[bound])).rows[0]).toEqual({id:bound,event_key:bound,status:'delivered'})

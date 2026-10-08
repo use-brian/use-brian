@@ -7,34 +7,17 @@ import pg from 'pg'
  * contact/company/deal IS an `entities` row: kind ∈ {person,company,deal},
  * name → display_name, email/domain → canonical_id + attributes, remaining
  * typed fields + relationship FKs in `attributes`. (Replaces the old
- * migration-127 entity_id-FK schema test — that column is gone.) Skips
- * silently when the DB is unavailable.
+ * migration-127 entity_id-FK schema test — that column is gone.) Requires
+ * the maintained disposable PostgreSQL fixture.
  */
 
-let pool: pg.Pool | undefined
-
-async function canConnect(): Promise<boolean> {
-  const p = new pg.Pool({ database: 'sidanclaw', connectionTimeoutMillis: 2000 })
-  try {
-    const client = await p.connect()
-    try {
-      await client.query('SELECT 1 FROM entities LIMIT 1')
-    } finally {
-      client.release()
-    }
-    pool = p
-    return true
-  } catch {
-    await p.end().catch(() => {})
-    return false
-  }
-}
-
-const ok = await canConnect()
-const describeIf = ok ? describe : describe.skip
+const { assertLocalFixture } = await import(new URL('../../../../../scripts/crm/local-fixture.mjs', import.meta.url).href)
+await assertLocalFixture()
+const pool = new pg.Pool({ connectionString: process.env.DATABASE_URL })
 
 afterAll(async () => {
-  if (pool) await pool.end()
+  const { getPool, getAppPool } = await import('../client.js')
+  await Promise.all([pool.end(), getPool().end(), getAppPool().end()])
 })
 
 async function makeUser(client: pg.PoolClient): Promise<string> {
@@ -74,13 +57,12 @@ async function readEntity(id: string): Promise<RawEntity | null> {
   return r.rows[0] ?? null
 }
 
-describeIf('[COMP:crm/entity-invariants] CRM records are entities', () => {
+describe('[COMP:crm/entity-invariants] CRM records are entities', () => {
   let crm: typeof import('../crm.js')
   let userId: string
   let workspaceId: string
 
   beforeAll(async () => {
-    process.env.DATABASE_URL ??= 'postgres:///sidanclaw'
     crm = await import('../crm.js')
   })
 
@@ -145,7 +127,7 @@ describeIf('[COMP:crm/entity-invariants] CRM records are entities', () => {
     expect(contact.companyId).toBe(company.id)
   })
 
-  it('createContact dedupes by email into one entity', async () => {
+  it('shared email does not collapse distinct person identities', async () => {
     await crm.createContact(userId, { workspaceId, name: 'A', email: 'team@acme.example' })
     await crm.createContact(userId, { workspaceId, name: 'B', email: 'team@acme.example' })
     const r = await pool!.query<{ n: string }>(
@@ -153,6 +135,6 @@ describeIf('[COMP:crm/entity-invariants] CRM records are entities', () => {
         WHERE workspace_id = $1 AND kind = 'person' AND lower(canonical_id) = 'team@acme.example' AND valid_to IS NULL`,
       [workspaceId],
     )
-    expect(Number(r.rows[0].n)).toBe(1)
+    expect(Number(r.rows[0].n)).toBe(2)
   })
 })

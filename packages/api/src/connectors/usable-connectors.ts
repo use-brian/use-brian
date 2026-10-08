@@ -14,8 +14,8 @@
  *                                                  connector_grant targeting W — any tier)
  *     ∪ workspace-shared instances               (team-native scope='workspace'
  *                                                  + teammate-granted personal)
- *         filtered to sensitivity ≤ U's effective read clearance
- *         and to U's department reach (see below)
+ *         filtered by canonical human READ in v2, or legacy clearance
+ *         plus department reach otherwise (see below)
  *
  * Exposure is the workspace boundary for EVERYONE, owner included: a personal
  * connector connected in workspace A must never surface in workspace B's
@@ -34,7 +34,8 @@
  * audience: a shared connector labelled with a department is listed only to
  * members holding an unexpired edge in EVERY labelled department at a
  * clearance that reads its tier. General (no label) is listed to every member.
- * This mirrors the runtime gate (`connectorExposureAllowed`).
+ * Department membership mirrors the runtime gate (`connectorExposureAllowed`);
+ * v2 metadata visibility uses per-department tiers without a base-tier cap.
  *
  * The workspace-shared reads are SYSTEM reads (`listForTargetSystem` /
  * `listByWorkspace`) returning the public column set only (never credentials),
@@ -47,12 +48,13 @@
  * Component tag: [COMP:connectors/usable-resolver].
  */
 
+import { read } from '../context-scope/reference-predicate.js'
 import { canRead, type Sensitivity } from '@use-brian/core'
 import type { ConnectorInstance, ConnectorInstanceStore } from '../db/connector-instance-store.js'
 import type { ConnectorGrantStore } from '../db/connector-grant-store.js'
 import { departmentClearancesForUserSystem } from '../db/department-store.js'
 import {
-  getWorkspaceMembershipWithClearanceSystem,
+  getWorkspaceMembershipWithReadScopeSystem,
   effectiveReadClearance,
 } from '../db/workspace-store.js'
 
@@ -101,7 +103,7 @@ export async function listUsableWorkspaceConnectors(
     // System read: every connector granted to this workspace (incl. teammates'
     // personal instances). Public columns only — never credentials.
     connectorGrantStore.listForTargetSystem('workspace', workspaceId),
-    getWorkspaceMembershipWithClearanceSystem(userId, workspaceId),
+    getWorkspaceMembershipWithReadScopeSystem(userId, workspaceId),
     departmentClearancesForUserSystem(userId, workspaceId),
   ])
   const inAudience = (labels: readonly string[], sensitivity: Sensitivity): boolean =>
@@ -116,6 +118,19 @@ export async function listUsableWorkspaceConnectors(
   const ceiling: Sensitivity | null = membership
     ? effectiveReadClearance(membership.role, membership.clearance, 'confidential')
     : null
+
+  const sharedReadable = (labels: readonly string[], sensitivity: Sensitivity): boolean => {
+    if (!membership) return false
+    if (membership.departmentAccess) {
+      if (labels.some(label => !label.startsWith('team:'))) return false
+      const { snapshot, principal } = membership.departmentAccess
+      return read(snapshot, { principal, assistant: null }, {
+        id: 'connector', workspaceId, tier: sensitivity, userId: null,
+        departmentIds: labels.map(label => label.slice(5)),
+      }, { workspaceId, department: null, now: new Date() })
+    }
+    return ceiling !== null && canRead(ceiling, sensitivity) && inAudience(labels, sensitivity)
+  }
 
   const byId = new Map<string, UsableConnector>()
 
@@ -132,8 +147,7 @@ export async function listUsableWorkspaceConnectors(
     // 2. Legacy team-native, within clearance.
     for (const inst of teamNative) {
       if (byId.has(inst.id)) continue
-      if (!canRead(ceiling, inst.sensitivity)) continue
-      if (!inAudience(inst.compartments ?? [], inst.sensitivity)) continue
+      if (!sharedReadable(inst.compartments ?? [], inst.sensitivity)) continue
       byId.set(inst.id, { instance: inst, source: 'team_native' })
     }
     // 3. Teammate-granted personal instances, within clearance. The member's
@@ -141,8 +155,7 @@ export async function listUsableWorkspaceConnectors(
     for (const g of granted) {
       if (byId.has(g.instance.id)) continue
       if (g.grantedByUserId === userId) continue
-      if (!canRead(ceiling, g.instance.sensitivity)) continue
-      if (!inAudience(g.compartments ?? [], g.instance.sensitivity)) continue
+      if (!sharedReadable(g.compartments ?? [], g.instance.sensitivity)) continue
       byId.set(g.instance.id, {
         instance: g.instance,
         source: 'granted',

@@ -138,7 +138,7 @@ function assertFieldValue(field: CrmIntakeFieldDefinition, value: unknown): void
       if (typeof value !== 'string') invalid()
       break
     case 'email':
-      if (typeof value !== 'string' || !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(value)) invalid()
+      if (typeof value !== 'string' || !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(value.trim())) invalid()
       break
     case 'phone':
       if (typeof value !== 'string') invalid()
@@ -388,6 +388,7 @@ async function executeSubmission(
       ? 'granted' as const
       : 'withdrawn' as const
     const consent = await tx.appendConsent({
+      submissionId,
       contactId: resolvedContactId,
       purpose,
       purposeKey: mapping.purposeKey,
@@ -646,6 +647,7 @@ export function createCrmOperationsService(
             rotateFromCredentialId: command.rotateFromCredentialId,
             label: command.label,
             definitionIds: command.definitionIds,
+            departmentBinding: command.departmentBinding,
             secretPrefix: prefix,
             secretHash: await hashCredentialSecret(secret),
             createdByUserId: actorUserId(context.actor),

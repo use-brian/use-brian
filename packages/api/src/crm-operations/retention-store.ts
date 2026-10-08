@@ -2,19 +2,22 @@
 import {captureCrmErasure} from './erasure-journal.js'
 import {createHash} from 'node:crypto'
 import type {PoolClient} from 'pg'
-import {canonicalCrmRequest,type CrmPrivacyDomainReview,type CrmPrivacyBlocker,type CrmRetentionPolicy} from '@use-brian/core'
+import {canonicalCrmRequest,type CrmPrivacyDomainReview,type CrmPrivacyBlocker,type CrmRetentionPolicy,type CrmOperationsContext,type ResourceScope} from '@use-brian/core'
 import {readCrmPrivacyPolicy,retireCrmIntakeReceipts} from './privacy-policy.js'
+
+import {createCrmRetentionAuthority} from './retention-authority.js'
 
 const LIMIT=500
 const REDACTED='Removed by retention policy'
 export type CrmRetentionPlan={
-  evaluatedAt:Date;policyVersion:number;domains:CrmPrivacyDomainReview[];blockers:CrmPrivacyBlocker[];hasMore:boolean;
+  scope:ResourceScope|null;evaluatedAt:Date;policyVersion:number;domains:CrmPrivacyDomainReview[];blockers:CrmPrivacyBlocker[];hasMore:boolean;
   cutoffs:Record<string,string|null>;snapshotHash:string;retainedCopies:string[];
   targets:Record<string,string[]>;policy:CrmRetentionPolicy|null
 }
-export async function inspectCrmRetention(client:PoolClient,workspaceId:string,before:Date,capturedAt:Date):Promise<CrmRetentionPlan> {
+export async function inspectCrmRetention(client:PoolClient,workspaceId:string,before:Date,capturedAt:Date,context:CrmOperationsContext):Promise<CrmRetentionPlan> {
+  const authority=await createCrmRetentionAuthority(client,context)
   const approved=await readCrmPrivacyPolicy(workspaceId,client),policy=approved.policy.retention ?? null
-  const plan:CrmRetentionPlan={evaluatedAt:capturedAt,policyVersion:approved.version,domains:[],blockers:[],hasMore:false,cutoffs:{},snapshotHash:'',targets:{},policy,
+  const plan:CrmRetentionPlan={scope:null,evaluatedAt:capturedAt,policyVersion:approved.version,domains:[],blockers:[],hasMore:false,cutoffs:{},snapshotHash:'',targets:{},policy,
     retainedCopies:['canonical_contacts','unattributed_free_text','independent_task_import_delivery_copies','external_storage_and_backups']}
   const digest=createHash('sha256')
   function cutoff(name:string,seconds:number|null|undefined) {
@@ -29,12 +32,23 @@ export async function inspectCrmRetention(client:PoolClient,workspaceId:string,b
   // but only eligible identities enter the mutation set. All SQL is internal.
   async function select(key:string,domain:string,action:CrmPrivacyDomainReview['action'],sql:string,params:unknown[]) {
     const unbounded=sql.replace(/ORDER BY [\s\S]*$/, '')
-    const counts=(await client.query<{retained:number;eligible:number}>(`SELECT count(*) FILTER(WHERE retained)::int retained, count(*) FILTER(WHERE NOT retained)::int eligible FROM (${unbounded}) candidates`,params)).rows[0]!
-    const ordered=sql.replace('ORDER BY ', 'ORDER BY retained, ')
-    const raw=(await client.query<{id:string;version:string;retained:boolean}>(ordered,params)).rows
+    // One cursor snapshot supplies authority, counts and selected identities.
+    // A second query could count or select a newly inserted, unchecked row.
+    type Candidate={id:string;version:string;retained:boolean}
+    const rows:Candidate[]=[],counts={retained:0,eligible:0}
+    await client.query('DECLARE retention_authority NO SCROLL CURSOR FOR SELECT * FROM ('+unbounded+') candidates ORDER BY retained,id',params)
+    for(;;) {
+      const page=(await client.query<Candidate>('FETCH FORWARD 256 FROM retention_authority')).rows
+      if(!page.length)break
+      for(const row of page) {
+        await authority.capture(domain,row.id)
+        counts[row.retained?'retained':'eligible']++
+        if(rows.length<LIMIT)rows.push(row)
+      }
+    }
+    await client.query('CLOSE retention_authority')
     if(counts.eligible>LIMIT)plan.hasMore=true
     digest.update(canonicalCrmRequest({key,counts}))
-    const rows=raw.slice(0,LIMIT)
     digest.update(canonicalCrmRequest({key,rows}))
     plan.targets[key]=rows.filter(r=>!r.retained).map(r=>r.id)
     const retained=counts.retained
@@ -143,7 +157,8 @@ export async function inspectCrmRetention(client:PoolClient,workspaceId:string,b
       WHERE workspace_id=$1 AND status='committed' AND submission_id=ANY($2::uuid[]) AND replay_policy_version IS NULL`,[workspaceId,plan.targets.submissions])
     if(missing.rows[0]?.count)plan.blockers.push({domain:'crm_intake_idempotency',reason:'intake_replay_policy_unconfigured',count:missing.rows[0].count})
   }
-  digest.update(canonicalCrmRequest({policy:approved.policy,version:approved.version,domains:plan.domains,blockers:plan.blockers,
+  plan.scope=authority.scope()
+  digest.update(canonicalCrmRequest({scope:plan.scope,policy:approved.policy,version:approved.version,domains:plan.domains,blockers:plan.blockers,
     before:before.toISOString(),capturedAt:capturedAt.toISOString(),cutoffs:plan.cutoffs,hasMore:plan.hasMore}))
   plan.snapshotHash=digest.digest('hex')
   return plan
