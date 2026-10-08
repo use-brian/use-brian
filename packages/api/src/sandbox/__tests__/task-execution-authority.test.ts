@@ -70,6 +70,23 @@ describe('[COMP:sandbox/task-execution-authority] persisted acting-assistant cei
     const replacement = createAuthorityLease(frozen.ceiling, async () => frozen.ceiling)
     await expect((await resolveBrowserTaskExecutionAuthority(held, replacement)).assertCurrent()).rejects.toMatchObject({ reason: 'authority_changed' })
   })
+  it('accepts a delegated sub-agent invocation and stops when the delegating leases stop holding', async () => {
+    state.assistant = { id: 'assistant', workspaceId: 'workspace' }
+    state.current = structuredClone(frozen.ceiling)
+    // The inter-assistant callee's ambient boundary: it renews through the
+    // delegating leases and names its own invocation as the task source.
+    let delegating = true
+    const delegated = {
+      assertCurrent: async () => { if (!delegating) throw Object.assign(new Error('changed'), { reason: 'authority_changed' }) },
+      execute: async <T,>(operation: () => Promise<T>) => operation(),
+      snapshotSource: () => ({ version: 1 as const, kind: 'invocation' as const, invocationId: '22222222-2222-4222-8222-222222222222' }),
+    }
+    const held = JSON.parse(JSON.stringify({ ...task, sourceAuthority: delegated.snapshotSource() }))
+    const authority = await resolveBrowserTaskExecutionAuthority(held, delegated)
+    await expect(authority.execute(async () => 'delegated')).resolves.toBe('delegated')
+    delegating = false
+    await expect(authority.assertCurrent()).rejects.toMatchObject({ reason: 'authority_changed' })
+  })
   it.each(['deleted', 'rebound', 'lock', 'read', 'audience', 'held'])('refuses a cold session whose source is %s', async changed => {
     state.assistant = { id: 'assistant', workspaceId: 'workspace' }
     state.current = structuredClone(frozen.ceiling)

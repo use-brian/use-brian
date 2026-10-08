@@ -23,6 +23,7 @@
  * See docs/architecture/channels/inter-assistant.md.
  */
 
+import { randomUUID } from 'node:crypto'
 import { createTurnLedger } from '../ledger/recorder.js'
 import { getLedgerPayloadStore } from '../ledger/runtime.js'
 import type {
@@ -1781,9 +1782,15 @@ export function createCalleeExecutor(options: CalleeExecutorOptions): CalleeExec
     let responseText = ''
     const turnOutput = createTurnOutputCollector({ format: 'compact' })
     const abortController = new AbortController()
+    // The delegated turn's own invocation is the source a browser task (or
+    // any other source-bound child) is pinned to. Without it the task has no
+    // source and is refused outright (`profile_authority_denied`); with it the
+    // child renews only while this invocation's leases still hold.
+    const ambientInvocationId = randomUUID()
     const ambientAuthority = {
       assertCurrent: assertCurrentAuthority,
       execute: executeWithCurrentAuthority,
+      snapshotSource: () => ({ version: 1 as const, kind: 'invocation' as const, invocationId: ambientInvocationId }),
     }
     const { executionContext } = await resolveExecutionContextSystem({
       userId: calleeActorUserId,
