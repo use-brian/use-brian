@@ -106,8 +106,7 @@ export function OperatorAppBar({
         });
   if (apps.length === 0) return null;
   return (
-    <div className="shrink-0 border-t border-sidebar-border/60 px-2 pt-2 pb-1.5">
-      <p className="mb-1 px-1 text-[10px] font-medium uppercase tracking-wide text-sidebar-foreground/55">{t.workspaceApps}</p>
+    <div className="shrink-0 px-2 pt-0.5 pb-2">
     <nav
       aria-label={t.aria}
       className="flex flex-row flex-wrap items-center gap-0.5"

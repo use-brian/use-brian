@@ -123,10 +123,10 @@ describe('[COMP:views/timeline] Bar placement math', () => {
   const rangeStart = new Date(2026, 4, 1) // 2026-05-01
   const rangeEnd = new Date(2026, 4, 28) // 2026-05-28 (28-day window)
 
-  it('places a bar starting on rangeStart at left=0', () => {
+  it.each(['date-only', 'timestamp'])('places a %s bar starting on rangeStart at left=0', (kind) => {
     const placement = getBarPlacement({
-      startIso: '2026-05-01T00:00:00.000Z',
-      endIso: '2026-05-03T00:00:00.000Z',
+      startIso: kind === 'date-only' ? '2026-05-01' : new Date(2026, 4, 1).toISOString(),
+      endIso: kind === 'date-only' ? '2026-05-03' : new Date(2026, 4, 3).toISOString(),
       rangeStart,
       rangeEnd,
       pxPerDay: 16,
@@ -137,10 +137,10 @@ describe('[COMP:views/timeline] Bar placement math', () => {
     expect(placement.widthPx).toBe(48)
   })
 
-  it('places a bar starting 5 days into the range at left = 5 * pxPerDay', () => {
+  it.each(['date-only', 'timestamp'])('places a %s bar starting 5 days into the range at left = 5 * pxPerDay', (kind) => {
     const placement = getBarPlacement({
-      startIso: '2026-05-06T00:00:00.000Z',
-      endIso: '2026-05-08T00:00:00.000Z',
+      startIso: kind === 'date-only' ? '2026-05-06' : new Date(2026, 4, 6).toISOString(),
+      endIso: kind === 'date-only' ? '2026-05-08' : new Date(2026, 4, 8).toISOString(),
       rangeStart,
       rangeEnd,
       pxPerDay: 16,

@@ -184,7 +184,7 @@ function SitePreview({ url, device, payload }: { url: string; device: "desktop" 
     return () => clearTimeout(timer);
   }, [ready, origin, payload]);
   return <div className="space-y-3" aria-busy={!ready && !failed}>
-    {failed || !origin ? <InlineNotice tone="warning" action={<Button type="button" variant="outline" className="min-h-11" onClick={() => { setReady(false); setFailed(false); setAttempt(value => value + 1); }}>{e.retryPreview}</Button>}>{e.previewUnavailable}</InlineNotice> : !ready ? <p role="status" className="text-sm text-muted-foreground">{e.connectingPreview}</p> : null}
+    {failed || !origin ? <InlineNotice tone="warning" action={<Button type="button" variant="outline" className="max-sm:min-h-11" onClick={() => { setReady(false); setFailed(false); setAttempt(value => value + 1); }}>{e.retryPreview}</Button>}>{e.previewUnavailable}</InlineNotice> : !ready ? <p role="status" className="text-sm text-muted-foreground">{e.connectingPreview}</p> : null}
     {origin ? <div className={cn("mx-auto overflow-hidden rounded-2xl border border-border bg-background shadow-sm", device === "phone" ? "w-[390px] max-w-full" : "w-full")}>
       <iframe key={`${url}:${attempt}`} ref={frame} title={e.previewTitle} src={`${url.replace(/\/$/, "")}/preview/event/`} onError={() => setFailed(true)} className="block h-[60dvh] min-h-[360px] w-full" />
     </div> : null}
@@ -296,8 +296,8 @@ export function EventPageEditor({ workspaceId, event, tickets = [], details, onD
           <section className={cn("space-y-4 rounded-2xl border bg-background p-4", focus.target !== "section" ? "border-primary ring-1 ring-primary/20" : "border-border")}>
             <h3 className="font-semibold">{e.coverTitle}</h3>
             <div className="grid grid-cols-2 gap-3 rounded-xl bg-muted/40 p-3" data-event-placement>
-              <div className="space-y-2"><div aria-hidden className="flex h-14 gap-2 rounded-lg border border-border bg-background p-2"><span className="w-10 shrink-0 rounded bg-primary/15" /><span className="flex flex-1 flex-col justify-center gap-1.5"><span className="h-2 w-3/4 rounded bg-primary/30" /><span className="h-1.5 rounded bg-primary/15" /><span className="h-1.5 w-2/3 rounded bg-primary/15" /></span></div><p className="text-xs font-medium">{e.cardLocation}</p></div>
-              <div className="space-y-2"><div aria-hidden className="flex h-14 flex-col gap-1.5 rounded-lg border border-border bg-background p-2"><span className="h-2 w-2/3 rounded bg-primary/30" /><span className="h-1.5 w-5/6 rounded bg-primary/15" /><span className="flex-1 rounded bg-primary/15" /></div><p className="text-xs font-medium">{e.introLocation}</p></div>
+              <div className="space-y-2"><div aria-hidden className="flex h-14 gap-2 rounded-lg bg-muted/40 p-2"><span className="w-10 shrink-0 rounded bg-primary/15" /><span className="flex flex-1 flex-col justify-center gap-1.5"><span className="h-2 w-3/4 rounded bg-primary/30" /><span className="h-1.5 rounded bg-primary/15" /><span className="h-1.5 w-2/3 rounded bg-primary/15" /></span></div><p className="text-xs font-medium">{e.cardLocation}</p></div>
+              <div className="space-y-2"><div aria-hidden className="flex h-14 flex-col gap-1.5 rounded-lg bg-muted/40 p-2"><span className="h-2 w-2/3 rounded bg-primary/30" /><span className="h-1.5 w-5/6 rounded bg-primary/15" /><span className="flex-1 rounded bg-primary/15" /></div><p className="text-xs font-medium">{e.introLocation}</p></div>
             </div>
             <p className="text-xs text-muted-foreground">{e.placementHelp}</p>
             <div onFocusCapture={() => setFocus({ target: "cover" })} onClick={() => setFocus({ target: "cover" })}><ImagePicker workspaceId={workspaceId} label={e.cover} value={page.cover} onChange={cover => set({ ...page, cover })} media={ctx.media} onUploaded={ctx.onUploaded} locale={locale} /></div>

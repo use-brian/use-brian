@@ -21,6 +21,7 @@ import { getUserInfo, type UserInfo } from "@/lib/user";
 import { admitOfficeImageResource, type OfficeCommentThread, type OfficeSuggestion } from "@/lib/office/api";
 import { officeMetadataRemaining } from "@/lib/office/metadata";
 import { officeDocumentEditorExtensions } from "./document/editor-schema";
+import { officeWarningClassName } from "./office-chrome";
 import { DocumentToolbar, type DocumentToolbarController } from "./document/document-toolbar";
 import { changeDocumentListLevel, convertDocumentList, insertDocumentImage, moveDocumentTableCell, toggleDocumentRunStyle, updateSelectedDocumentNode } from "./document/editor-actions";
 import { captureDocumentCommentAnchor, captureDocumentSuggestionRange, type DocumentCommentAnchor, type DocumentSuggestionRange } from "./document/comment-anchor";
@@ -241,7 +242,7 @@ export function DocumentEditor({ snapshot, baseVersion, role, suggestMode, doc, 
 
   return <div className="relative flex min-h-0 min-w-0 flex-1 flex-col" data-office-editor="document" data-office-artifact-id={snapshot.artifactId} data-office-structured-editor="true">
     <DocumentToolbar editor={editor} editable={editable} onInsertImage={addImage} controllerRef={toolbarRef} />
-    {suggestMode ? <div className="border-b bg-amber-50 px-3 py-1 text-xs font-medium text-amber-950" role="status">{t.suggesting}</div> : null}
+    {suggestMode ? <div className={`${officeWarningClassName} border-b px-3 py-1 text-xs font-medium`} role="status">{t.suggesting}</div> : null}
     {status ? <div className="absolute bottom-16 left-1/2 z-50 max-w-sm -translate-x-1/2 rounded-lg bg-foreground px-3 py-2 text-xs text-background shadow-lg sm:bottom-4" role="status">{status}</div> : null}
     <div data-office-document-scroll="true" className="min-h-0 flex-1 overflow-auto bg-muted/55 px-2 pb-20 pt-4 sm:px-4 sm:pb-6 sm:pt-6">
       <div data-office-document-stage="true" className="office-document-stage">

@@ -29,7 +29,7 @@ export function whatsappByonSender(input: Pick<WhatsappBotInput, 'senderJid' | '
   return { senderId, providerUserId: digits }
 }
 
-/** Boot spreads this result into processChannelMessage. Only a current verified
+/** Boot passes these fields explicitly to processChannelMessage. Only a current verified
  * provider link plus a live user record grants identified status. A cached
  * shadow/email resolution alone is not evidence for workflow approval authority.
  * No owner identity is accepted as a fallback argument.

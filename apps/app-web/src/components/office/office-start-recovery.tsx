@@ -1,5 +1,7 @@
 "use client";
 
+import { buttonVariants } from "@/components/ui/button";
+
 /** Recovery surface for an empty Office shell whose job was never admitted. [COMP:app-web/office-start-recovery] */
 import Link from "next/link";
 import { FileSpreadsheet, FileText, Presentation, TriangleAlert } from "lucide-react";
@@ -34,8 +36,8 @@ export function OfficeStartRecovery({
           <p className="mt-2 text-sm text-muted-foreground">{t.startFailedBody}</p>
           {state === "failed" ? <p role="alert" className="mt-3 text-sm text-destructive">{t.recoveryFailed}</p> : null}
           <div className="mt-6 flex flex-wrap gap-2">
-            <Link href={`/w/${workspaceId}/office`} className="inline-flex h-9 items-center rounded-md border px-3 text-sm font-medium">{t.backToOffice}</Link>
-            {canTrash ? <button type="button" disabled={state === "moving"} className="h-9 rounded-md bg-destructive px-3 text-sm font-medium text-destructive-foreground disabled:opacity-50" onClick={onTrash}>{state === "moving" ? t.movingToTrash : t.moveToTrash}</button> : null}
+            <Link href={`/w/${workspaceId}/office`} className={buttonVariants({ variant: "outline" })}>{t.backToOffice}</Link>
+            {canTrash ? <button type="button" disabled={state === "moving"} className={buttonVariants({ variant: "destructive", size: "sm" })} onClick={onTrash}>{state === "moving" ? t.movingToTrash : t.moveToTrash}</button> : null}
           </div>
         </div>
       </main>

@@ -61,6 +61,17 @@ describe("[COMP:app-web/doc-shell] mobile workspace menu", () => {
     );
   });
 
+  it("hides only the healthy phone label when the drawer is closed", () => {
+    const status = source.slice(source.indexOf("data-workspace-sync-status"));
+    expect(status).toContain('!sidebarOpen && !hasSyncNotice && "max-md:hidden"');
+    // Attention states remain visible, including paused writes without a pending count.
+    expect(source).toContain(
+      "offlineState.offline || offlineState.pending > 0 || offlineState.paused > 0 || offlineState.reconnecting",
+    );
+    // Only the label is gated: uploading and updating remain independently reachable.
+    expect(status).toMatch(/<\/div>\s*<DesktopUpdateChip \/>\s*<BrainIntakeTray/);
+  });
+
   it("uses an emerald dot for the healthy Online sync state", () => {
     expect(source).toContain(
       'hasSyncNotice ? "bg-amber-500" : "bg-emerald-500"',

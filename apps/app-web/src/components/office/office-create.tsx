@@ -1,5 +1,8 @@
 "use client";
 
+import { buttonVariants } from "@/components/ui/button";
+import { officeInputClassName, officeTextareaClassName, officeIconButtonClassName, officeDialogBackdropClassName, officeDialogClassName, officeFamilyBadgeClassName } from "@/components/office/office-chrome";
+
 import { useEffect, useLayoutEffect, useRef, useState } from "react";
 import Link from "next/link";
 import { useRouter, useSearchParams } from "next/navigation";
@@ -43,14 +46,14 @@ export function OfficeTemplatePicker({
   const t = useT().office;
   return (
     <div>
-      <h1 className="text-2xl font-semibold">{t.chooseTemplateTitle}</h1>
-      <Link href={`/w/${workspaceId}/office/new?mode=prompt`} className="mt-4 inline-flex min-h-8 max-sm:min-h-11 items-center rounded-md border px-4 text-sm font-medium">{t.promptDocument}</Link>
+      <h1 className="pr-10 text-xl font-semibold tracking-tight sm:text-2xl">{t.chooseTemplateTitle}</h1>
+      <Link href={`/w/${workspaceId}/office/new?mode=prompt`} className={buttonVariants({ variant: "outline", className: "mt-4" })}>{t.promptDocument}</Link>
       <p className="mt-2 text-sm text-muted-foreground">{t.chooseTemplateDescription}</p>
       {failed ? <p role="alert" className="py-16 text-center text-sm text-destructive">{t.loadFailed}</p> : templates === null ? <p className="py-16 text-center text-sm text-muted-foreground">{t.loading}</p> : templates.length === 0 ? (
         <section className="mt-6 rounded-2xl border border-dashed px-6 py-12 text-center">
           <h2 className="font-medium">{t.noTemplates}</h2>
           <p className="mx-auto mt-1 max-w-lg text-sm text-muted-foreground">{t.templateEmptyBody}</p>
-          <Link href={`/w/${workspaceId}/office/templates`} className="mt-5 inline-flex h-9 items-center rounded-md bg-action px-4 text-sm font-medium text-action-foreground">{t.templates}</Link>
+          <Link href={`/w/${workspaceId}/office/templates`} className={buttonVariants({ className: "mt-5" })}>{t.templates}</Link>
         </section>
       ) : (
         <div className="mt-6 grid gap-4 sm:grid-cols-2">
@@ -60,11 +63,11 @@ export function OfficeTemplatePicker({
             const Icon = document ? FileText : presentation ? Presentation : FileSpreadsheet;
             const previewArtifact: OfficeArtifact = { artifactId: template.draftArtifactId ?? "", family: template.family, mode: "template", title: template.name, version: 1, lifecycleState: "active", role: "edit" };
             return (
-              <button key={template.id} type="button" data-office-template-choice={template.family} onClick={() => onSelect(template)} className="group overflow-hidden rounded-xl border bg-card text-left transition-all hover:-translate-y-0.5 hover:border-foreground/30 hover:shadow-md focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring">
-                <div className="relative pointer-events-none"><OfficeCardPreview workspaceId={workspaceId} artifact={previewArtifact} /><span className={document ? "absolute left-3 top-3 inline-flex items-center gap-1.5 rounded-md bg-blue-600 px-2 py-1 text-xs font-semibold text-white shadow-sm" : presentation ? "absolute left-3 top-3 inline-flex items-center gap-1.5 rounded-md bg-amber-500 px-2 py-1 text-xs font-semibold text-amber-950 shadow-sm" : "absolute left-3 top-3 inline-flex items-center gap-1.5 rounded-md bg-emerald-600 px-2 py-1 text-xs font-semibold text-white shadow-sm"}><Icon className="size-3.5" aria-hidden /><span>{document ? t.document : presentation ? t.presentation : t.spreadsheet}</span></span></div>
+              <button key={template.id} type="button" data-office-template-choice={template.family} onClick={() => onSelect(template)} className="group min-w-0 overflow-hidden rounded-xl border bg-card text-left transition-colors hover:border-foreground/25 hover:bg-muted/20 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring">
+                <div className="relative pointer-events-none"><OfficeCardPreview workspaceId={workspaceId} artifact={previewArtifact} /><span className={officeFamilyBadgeClassName}><Icon className="size-3.5" aria-hidden /><span>{document ? t.document : presentation ? t.presentation : t.spreadsheet}</span></span></div>
                 <span className="block px-4 pt-4 font-medium group-hover:underline">{template.name}</span>
                 <span className="block min-h-10 px-4 pt-2 text-sm text-muted-foreground">{template.description}</span>
-                <span className="m-4 mt-3 inline-flex h-9 items-center justify-center rounded-md bg-action px-3 text-sm font-medium text-action-foreground">{t.useTemplate}</span>
+                <span className={buttonVariants({ variant: "outline", className: "m-4 mt-3" })}>{t.useTemplate}</span>
               </button>
             );
           })}
@@ -163,9 +166,9 @@ function OfficeCreateForm({
   }
 
   return <div>
-    <h1 className="text-2xl font-semibold">{template ? format(t.createFromTemplate, { template: template.name }) : t.promptDocument}</h1>
+    <h1 className="pr-10 text-xl font-semibold tracking-tight sm:text-2xl">{template ? format(t.createFromTemplate, { template: template.name }) : t.promptDocument}</h1>
     <p className="mt-2 text-sm text-muted-foreground">{template ? t.templateFirstCreateDescription : t.promptDocumentDescription}</p>
-    {template ? <div className="mt-5 flex items-center gap-3 rounded-lg border bg-muted/30 p-3 text-sm"><span className="font-medium">{template.name}</span><span className="text-muted-foreground">{template.family === "document" ? t.document : template.family === "presentation" ? t.presentation : t.spreadsheet}</span><button type="button" onClick={onChangeTemplate} className="ml-auto rounded-md px-2 py-1 font-medium text-primary hover:bg-background">{t.browseTemplates}</button></div> : null}
+    {template ? <div className="mt-5 flex flex-wrap items-center gap-3 rounded-lg border bg-muted/30 p-3 text-sm"><span className="font-medium">{template.name}</span><span className="text-muted-foreground">{template.family === "document" ? t.document : template.family === "presentation" ? t.presentation : t.spreadsheet}</span><button type="button" onClick={onChangeTemplate} className={buttonVariants({ variant: "ghost", size: "sm", className: "ml-auto" })}>{t.browseTemplates}</button></div> : null}
     <form onSubmit={submit} className="mt-8 space-y-6">
       <OfficeScopePicker workspaceId={workspaceId} onChange={setScope} />
       {fields.filter(field => template || field.id !== "office-create-context").map((field) => {
@@ -174,8 +177,8 @@ function OfficeCreateForm({
         return <div key={field.id}>
           <label htmlFor={field.id} className="block text-sm font-medium">{field.label}</label>
           {field.id === "office-create-audience"
-            ? <input {...props} className="mt-2 h-10 w-full rounded-md border bg-background px-3 text-[16px] font-normal md:text-sm" />
-            : <textarea {...props} className="mt-2 min-h-32 w-full rounded-md border bg-background p-3 text-[16px] font-normal md:text-sm" />}
+            ? <input {...props} className={`${officeInputClassName} mt-2 w-full`} />
+            : <textarea {...props} className={`${officeTextareaClassName} mt-2 min-h-32 w-full`} />}
           <p id={`${field.id}-help`} role={tooLong ? "alert" : undefined} className={tooLong ? "mt-1 text-sm text-destructive" : "mt-1 text-xs text-muted-foreground"}>
             {format(tooLong ? t.createFieldTooLong : t.createCharacterCount, { field: field.label, count: field.value.length, limit: field.limit })}
           </p>
@@ -183,8 +186,8 @@ function OfficeCreateForm({
       })}
           {error ? <p role="alert" className="text-sm text-destructive">{error === "unavailable" ? t.createUnavailable : error === "provenance" ? t.departmentGenerationUnavailable : t.createFailed}</p> : null}
       <div className="flex justify-end gap-2 border-t pt-5">
-        <button type="button" onClick={onCancel} className="h-10 rounded-md border px-4 text-sm font-medium">{copy.common.cancel}</button>
-        <button type="submit" disabled={generationAvailable !== true || busy || invalidFields || !scope} className="h-10 rounded-md bg-action px-5 text-sm font-medium text-action-foreground disabled:opacity-50">{busy ? t.generating : t.generate}</button>
+        <button type="button" onClick={onCancel} className={buttonVariants({ variant: "outline", size: "sm" })}>{copy.common.cancel}</button>
+        <button type="submit" disabled={generationAvailable !== true || busy || invalidFields || !scope} className={buttonVariants({ variant: "default", size: "sm" })}>{busy ? t.generating : t.generate}</button>
       </div>
     </form>
   </div>;
@@ -285,9 +288,9 @@ function OfficeCreateSurface({ workspaceId }: { workspaceId: string }) {
       <OfficeTopbar
         workspaceId={workspaceId}
         breadcrumbs={[{ label: t.files, href: base }, { label: t.newArtifact }]}
-        right={<button type="button" onClick={() => void close()} className="inline-flex h-8 items-center rounded-md border px-2.5 text-sm font-medium">{t.files}</button>}
+        right={<button type="button" onClick={() => void close()} className={buttonVariants({ variant: "outline", size: "sm" })}>{t.files}</button>}
       />
-      <main className={template || prompt ? "mx-auto w-full max-w-2xl p-4 sm:p-8" : "mx-auto w-full max-w-5xl p-4 sm:p-8"}>
+      <main className={template || prompt ? "mx-auto w-full max-w-2xl overflow-y-auto p-4 sm:p-8" : "mx-auto w-full max-w-5xl overflow-y-auto p-4 sm:p-8"}>
         {template || prompt ? <OfficeCreateForm key={JSON.stringify(template)} workspaceId={workspaceId} template={template} canUseTemplate={canUseTemplate} onCancel={() => void close()} onChangeTemplate={() => void changeTemplate()} onDirtyChange={setDirty} /> : <OfficeTemplatePicker workspaceId={workspaceId} templates={templates} failed={failed} onSelect={selectTemplate} />}
       </main>
     </div>
@@ -348,11 +351,11 @@ function OfficeCreateDialogSurface({ workspaceId }: { workspaceId: string }) {
   return (
     <Dialog.Root open onOpenChange={(open) => { if (!open) void close(); }}>
       <Dialog.Portal>
-        <Dialog.Backdrop className="fixed inset-0 z-50 bg-background/80 backdrop-blur-sm" />
-        <Dialog.Popup className={template || prompt ? "fixed inset-0 z-50 h-dvh w-full overflow-y-auto bg-background p-5 outline-none sm:inset-auto sm:left-1/2 sm:top-1/2 sm:h-auto sm:max-h-[calc(100dvh-2rem)] sm:w-[calc(100%-2rem)] sm:max-w-2xl sm:-translate-x-1/2 sm:-translate-y-1/2 sm:rounded-2xl sm:border sm:p-8 sm:shadow-xl" : "fixed inset-0 z-50 h-dvh w-full overflow-y-auto bg-background p-5 outline-none sm:inset-auto sm:left-1/2 sm:top-1/2 sm:h-auto sm:max-h-[calc(100dvh-2rem)] sm:w-[calc(100%-2rem)] sm:max-w-5xl sm:-translate-x-1/2 sm:-translate-y-1/2 sm:rounded-2xl sm:border sm:p-8 sm:shadow-xl"}>
+        <Dialog.Backdrop className={officeDialogBackdropClassName} />
+        <Dialog.Popup className={`${officeDialogClassName} ${template || prompt ? "sm:max-w-2xl" : "sm:max-w-5xl"}`}>
           <Dialog.Title className="sr-only">{template ? format(t.createFromTemplate, { template: template.name }) : prompt ? t.promptDocument : t.chooseTemplateTitle}</Dialog.Title>
           <Dialog.Description className="sr-only">{template ? t.templateFirstCreateDescription : prompt ? t.promptDocumentDescription : t.chooseTemplateDescription}</Dialog.Description>
-          <button type="button" onClick={() => void close()} aria-label={t.closeCreateAria} title={t.closeCreateAria} className="absolute right-4 top-4 inline-flex size-11 items-center justify-center rounded-md text-muted-foreground hover:bg-muted hover:text-foreground sm:size-8">
+          <button type="button" onClick={() => void close()} aria-label={t.closeCreateAria} title={t.closeCreateAria} className={`${officeIconButtonClassName} absolute right-4 top-4`}>
             <X className="size-4" aria-hidden />
           </button>
           {template || prompt ? <OfficeCreateForm key={JSON.stringify(template)} workspaceId={workspaceId} template={template} canUseTemplate={canUseTemplate} onCancel={() => void close()} onChangeTemplate={() => void changeTemplate()} onDirtyChange={setDirty} /> : <OfficeTemplatePicker workspaceId={workspaceId} templates={templates} failed={failed} onSelect={selectTemplate} />}

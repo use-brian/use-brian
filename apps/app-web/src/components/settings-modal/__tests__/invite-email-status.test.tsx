@@ -88,7 +88,10 @@ describe("[COMP:app-web/workspace-sections] invite email status", () => {
       root!.render(<WorkspaceMembersSection />);
       await settle();
     });
-    const textarea = container!.querySelector<HTMLTextAreaElement>(
+    expect(document.querySelector('[role="dialog"]')).toBeNull();
+    const open = Array.from(container!.querySelectorAll('button')).find(b => b.textContent === en.workspaceDetailInline.inviteHeading)!;
+    await act(async () => { open.click(); await settle(); });
+    const textarea = document.querySelector<HTMLTextAreaElement>(
       `textarea[placeholder="${en.workspaceDetailInline.inviteEmailsPlaceholder}"]`,
     )!;
     const setValue = Object.getOwnPropertyDescriptor(HTMLTextAreaElement.prototype, "value")!.set!;
@@ -96,7 +99,7 @@ describe("[COMP:app-web/workspace-sections] invite email status", () => {
       setValue.call(textarea, emails);
       textarea.dispatchEvent(new Event("input", { bubbles: true }));
     });
-    const send = Array.from(container!.querySelectorAll("button")).find(
+    const send = Array.from(document.querySelectorAll("button")).find(
       (b) => b.textContent === en.workspaceDetailInline.sendInvite,
     )!;
     await act(async () => {
@@ -117,7 +120,7 @@ describe("[COMP:app-web/workspace-sections] invite email status", () => {
 
     await invite("invitee@example.com");
 
-    const text = container!.textContent ?? "";
+    const text = document.body.textContent ?? "";
     expect(text).toContain(en.workspaceDetailInline.inviteEmailFailed);
     expect(text).not.toContain(en.workspaceDetailInline.inviteEmailSent);
     expect(text).toContain(en.workspaceDetailInline.copyLink);
@@ -132,7 +135,7 @@ describe("[COMP:app-web/workspace-sections] invite email status", () => {
 
     await invite("sent@example.com, off@example.com, member@example.com");
 
-    const text = container!.textContent ?? "";
+    const text = document.body.textContent ?? "";
     expect(text).toContain(en.workspaceDetailInline.inviteEmailSent);
     expect(text).toContain(en.workspaceDetailInline.inviteEmailNotConfigured);
     expect(text).toContain(en.workspaceDetailInline.statusAlreadyMember);
@@ -144,7 +147,7 @@ describe("[COMP:app-web/workspace-sections] invite email status", () => {
 
     await invite("invitee@example.com");
 
-    const text = container!.textContent ?? "";
+    const text = document.body.textContent ?? "";
     expect(text).toContain(en.workspaceDetailInline.copyLink);
     expect(text).not.toContain(en.workspaceDetailInline.inviteEmailSent);
     expect(text).not.toContain(en.workspaceDetailInline.inviteEmailFailed);

@@ -35,7 +35,7 @@ export function HomeDock({ workspaceId }: { workspaceId: string }) {
   return (
     <Link
       href={suggestedPath(workspaceId)}
-      className="group mb-1.5 min-h-9 max-md:min-h-11 flex items-center gap-2.5 rounded-md px-2 py-1.5 hover:bg-sidebar-accent"
+      className="group min-h-7 max-md:min-h-11 flex items-center gap-2.5 rounded-md px-2 py-0.5 hover:bg-sidebar-accent"
     >
       <Sparkles className="size-4 shrink-0 text-primary" aria-hidden />
       <span className="flex-1 truncate text-[14px] font-medium text-sidebar-foreground">

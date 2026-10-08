@@ -19,6 +19,9 @@ vi.mock('@/lib/user',()=>({getUserInfo:()=>({id:state.viewer})}));
 vi.mock('@/lib/auth-fetch',()=>({authFetch:(...args:unknown[])=>state.fetch(...args)}));
 vi.mock('@/lib/workspace-context',()=>({useOptionalWorkspaceContext:()=>({workspaceId:state.workspace,me:{id:state.viewer}})}));
 vi.mock('next/navigation',()=>({useRouter:()=>({push:state.push,replace:vi.fn(),back:vi.fn()}),useSearchParams:()=>new URLSearchParams(state.params)}));
+// Creation now requires an admitted department choice; retain that independent
+// fixture while these tests exercise the template projection's lifetime.
+vi.mock('@/lib/api/departments',()=>({DEPARTMENTS_CHANGED_EVENT:'brian:departments-changed',fetchDepartments:async()=>({departments:[{departmentId:'team',name:'Operations',status:'active',myClearance:'internal'}],homes:[{principal:{kind:'user',id:state.viewer},departmentId:'team'}]})}));
 vi.mock('../office-topbar',()=>({OfficeTopbar:()=>null}));
 vi.mock('../office-card-preview',()=>({OfficeCardPreview:()=>null}));
 (globalThis as unknown as {IS_REACT_ACT_ENVIRONMENT:boolean}).IS_REACT_ACT_ENVIRONMENT=true;

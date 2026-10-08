@@ -166,13 +166,13 @@ describe('[COMP:app-web/office-surface-cache] bounded Office metadata',()=>{
     const template={id:'template-a',name:'Department template',family:'document',description:'Restricted guidance',lifecycleState:'trash',draftArtifactId:null,currentVersionId:null};
     state.fetch.mockResolvedValue(response({templates:[template]},'800'));
     await act(async()=>root.render(<I18nProvider locale="en" dict={en}><OfficeTemplateLibrary workspaceId="workspace-a" templateId="template-a"/></I18nProvider>));await flush();
-    const input=host.querySelector('input')!;expect(input).not.toBeNull();
+    const input=document.body.querySelector<HTMLInputElement>('#office-template-purge')!;expect(input).not.toBeNull();
     await act(async()=>{Object.getOwnPropertyDescriptor(HTMLInputElement.prototype,'value')!.set!.call(input,template.name);input.dispatchEvent(new Event('input',{bubbles:true}));});
     state.fetch.mockImplementation(()=>new Promise(()=>{}));await act(async()=>vi.advanceTimersByTime(801));
-    expect(host.textContent).not.toContain(template.name);expect(host.querySelector('input')).toBeNull();
+    expect(document.body.textContent).not.toContain(template.name);expect(document.body.querySelector<HTMLInputElement>('#office-template-purge')).toBeNull();
     state.fetch.mockResolvedValue(response({templates:[template]},'800'));
     await act(async()=>invalidateSurfaceCache(`office-templates:workspace-a:${state.viewer}`));await flush();
-    expect(host.querySelector('input')?.value).toBe('');
+    expect(document.body.querySelector<HTMLInputElement>('#office-template-purge')?.value).toBe('');
   });
   it('does not resurrect an initial seed after an authority event while a new read is pending',async()=>{
     state.fetch.mockImplementation(()=>new Promise(()=>{}));

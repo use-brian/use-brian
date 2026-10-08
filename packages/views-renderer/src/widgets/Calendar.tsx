@@ -184,12 +184,14 @@ export function coerceIso(value: A2UIRowValue): string | null {
   return null
 }
 
-/**
- * Bucket rows by `YYYY-MM-DD` key resolved through `coerceIso`. Rows
- * whose date cell is null/unparseable are dropped. Used by both the
- * month grid (per-cell lookup) and the empty-state check (visible
- * range produced zero placements).
- */
+/** Date-only labels stay fixed; timestamps use the viewer's local day. */
+function calendarDayKey(iso: string): string | null {
+  const parsed = Date.parse(iso)
+  if (!Number.isFinite(parsed)) return null
+  return /^\d{4}-\d{2}-\d{2}$/.test(iso) ? iso : toIsoDate(new Date(parsed))
+}
+
+/** Bucket rows by calendar day, omitting null or unparseable dates. */
 export function groupRowsByDay(
   rows: A2UIRow[],
   dateColumnId: string,
@@ -198,11 +200,8 @@ export function groupRowsByDay(
   for (const row of rows) {
     const iso = coerceIso(row[dateColumnId] ?? null)
     if (!iso) continue
-    // Normalise to a local YYYY-MM-DD key so server-emitted Z-suffixed
-    // timestamps land on the right calendar day for the viewer.
-    const parsed = Date.parse(iso)
-    if (!Number.isFinite(parsed)) continue
-    const key = toIsoDate(new Date(parsed))
+    const key = calendarDayKey(iso)
+    if (!key) continue
     const bucket = map.get(key)
     if (bucket) {
       bucket.push(row)
@@ -776,9 +775,7 @@ export function currentDayKey(
     if (resolveRowId(row, idx) !== rowId) continue
     const iso = coerceIso(row[dateColumnId] ?? null)
     if (!iso) return null
-    const parsed = Date.parse(iso)
-    if (!Number.isFinite(parsed)) return null
-    return toIsoDate(new Date(parsed))
+    return calendarDayKey(iso)
   }
   return null
 }

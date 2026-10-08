@@ -74,7 +74,7 @@ describe('[COMP:app-web/organization-chart] unified organization home', () => {
   });
   it('opens a roster person and embeds only their scoped access controls',async()=>{
     await render();
-    const person=[...host.querySelectorAll<HTMLButtonElement>('button')].find(b=>b.textContent==='Casey')!;
+    const person=[...host.querySelectorAll<HTMLButtonElement>('button')].find(b=>b.textContent?.includes('casey@example.com'))!;
     expect(person).toBeDefined();await act(async()=>person.click());
     expect(navigation.push).toHaveBeenCalledWith('/w/workspace-1/organization?section=people&member=user-2');
     await render('user-2');expect(host.querySelector('[data-access-kind="person"]')?.getAttribute('data-access-id')).toBe('user-2');
@@ -108,23 +108,57 @@ describe('[COMP:app-web/organization-chart] unified organization home', () => {
     navigation.query = 'section=unknown'; await redraw(); expect(host.textContent).toContain('Structure fixture');
   });
   it('opens the exact selected person and returns to the full roster', async () => {
-    await render('user-2'); expect(host.textContent).toContain('Casey'); expect(host.textContent).not.toContain('Riley');
+    await render('user-2'); expect(host.textContent).toContain('Casey'); expect(host.querySelector('button[aria-current="true"]')?.textContent).toContain('Casey');
     expect(host.querySelector('textarea')).toBeNull();
     const all = [...host.querySelectorAll<HTMLButtonElement>('button')].find(b => b.textContent === en.organization.showAllMembers)!;
     await act(async () => all.click()); expect(navigation.push).toHaveBeenCalledWith('/w/workspace-1/organization?section=people');
-    await render(); expect(host.textContent).toContain('Riley'); expect(host.querySelector('textarea')).not.toBeNull();
+    await render(); expect(host.textContent).toContain('Riley'); expect(host.querySelector('textarea')).toBeNull();
   });
   it('keeps read-only people available without invitation or role controls', async () => {
     edition.teammateManagement = false; await render('user-2');
-    expect(host.textContent).toContain('Casey'); expect(host.textContent).not.toContain('Riley'); expect(host.querySelector('textarea')).toBeNull();
+    expect(host.textContent).toContain('Casey'); expect(host.querySelector('button[aria-current="true"]')?.textContent).toContain('Casey'); expect(host.querySelector('textarea')).toBeNull();
     await render(); expect(host.textContent).toContain('Riley'); expect(host.querySelector('textarea')).toBeNull();
   });
   it('never substitutes another person for an unavailable target', async () => {
     await render('missing'); expect(host.textContent).toContain(en.organization.memberUnavailable);
-    expect(host.textContent).not.toContain('Casey'); expect(host.textContent).not.toContain('Riley');
+    expect(host.querySelector('[data-access-kind="person"]')).toBeNull(); expect(host.querySelector('button[aria-current="true"]')).toBeNull();
   });
   it('updates person selection when the URL changes', async () => {
     await render('user-2'); expect(host.textContent).toContain('Casey');
-    await render('user-1'); expect(host.textContent).toContain('Riley'); expect(host.textContent).not.toContain('Casey');
+    await render('user-1'); expect(host.textContent).toContain('Riley'); expect(host.querySelector('button[aria-current="true"]')?.textContent).toContain('Riley');
   });
+  it('searches by email, shows an empty state and preserves selected-person details', async () => {
+    await render('user-2');
+    const input = host.querySelector<HTMLInputElement>('input[type="search"]')!;
+    const setValue = Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, 'value')!.set!;
+    await act(async () => { setValue.call(input, 'riley@example.com'); input.dispatchEvent(new Event('input', {bubbles:true})); });
+    expect(host.querySelector('ul')?.textContent).toContain('Riley');
+    expect(host.querySelector('ul')?.textContent).not.toContain('Casey');
+    expect(host.querySelector('[data-access-kind="person"]')?.getAttribute('data-access-id')).toBe('user-2');
+    await act(async () => { setValue.call(input, 'nobody@example.com'); input.dispatchEvent(new Event('input', {bubbles:true})); });
+    expect(host.textContent).toContain(en.organization.noPeopleMatch);
+    expect(host.querySelector('[data-access-kind="person"]')?.getAttribute('data-access-id')).toBe('user-2');
+  });
+  it('keeps role management in the selected-person panel and filters the roster by role', async () => {
+    await render('user-2');
+    const detail=host.querySelector(`section[aria-label="${en.organization.memberDetails}"]`)!;
+    expect(detail.querySelector(`button[aria-label="Actions for Casey"]`)).not.toBeNull();
+    const filter=host.querySelector<HTMLButtonElement>(`button[aria-label="${en.workspaceAccess.workspaceRole}"]`)!;
+    await act(async () => filter.click());
+    const owner=[...document.querySelectorAll<HTMLElement>('[role="option"]')].find(o=>o.textContent===en.workspaceAccess.owner)!;
+    await act(async () => owner.click());
+    expect(host.querySelector('ul')?.textContent).toContain('Riley');
+    expect(host.querySelector('ul')?.textContent).not.toContain('Casey');
+    expect(detail.textContent).toContain('Casey');
+  });
+  it('opens invitations explicitly and closes the dialog on person navigation', async () => {
+    await render();
+    const invite = [...host.querySelectorAll<HTMLButtonElement>('button')].find(b => b.textContent === en.workspaceDetailInline.inviteHeading)!;
+    expect(document.querySelector('[role="dialog"]')).toBeNull();
+    await act(async () => invite.click());
+    expect(document.querySelector('[role="dialog"]')).not.toBeNull();
+    await render('user-2');
+    expect(document.querySelector('[role="dialog"]')).toBeNull();
+  });
+
 });

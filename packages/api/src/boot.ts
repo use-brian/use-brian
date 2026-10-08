@@ -9554,7 +9554,10 @@ export async function bootOpenApi(opts: BootOpenApiOptions): Promise<BootResult>
           })
           const integration = await integrationStore.getByChannelForWebhook(input.channelId, 'whatsapp')
           await processChannelMessage({
-            ...identity,
+            userId: identity.userId,
+            isIdentified: identity.isIdentified,
+            actorChannelId: identity.actorChannelId,
+            interactionScope: identity.interactionScope,
             questionIntegrationId: integration?.id,
             backgroundModel,
             decisionRuntime,

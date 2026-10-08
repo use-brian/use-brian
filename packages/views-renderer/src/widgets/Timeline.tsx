@@ -578,9 +578,8 @@ function daysBetween(a: Date, b: Date): number {
 }
 
 function dayDelta(rangeStart: Date, iso: string): number | null {
-  const t = Date.parse(iso)
-  if (!Number.isFinite(t)) return null
-  return daysBetween(rangeStart, new Date(t))
+  const day = parseToLocalDay(iso)
+  return day ? daysBetween(rangeStart, day) : null
 }
 
 function startOfQuarter(d: Date): Date {

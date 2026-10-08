@@ -1,5 +1,7 @@
 "use client";
 
+import { officeTextareaClassName, officeInputClassName, officeDialogBackdropClassName, officeDialogClassName } from "@/components/office/office-chrome";
+
 /** Bounded Presentation table/chart data editors. [COMP:app-web/office-presentation-editor] */
 import { useEffect, useState } from "react";
 import { Dialog } from "@base-ui/react/dialog";
@@ -67,18 +69,18 @@ export function PresentationDataDialog({ mode, open, object, onClose, onApply }:
     } catch (cause) { setError(cause instanceof Error ? cause.message : t.chartDataInvalid); }
   }
 
-  return <Dialog.Root open={open} onOpenChange={(next) => !next && onClose()}><Dialog.Portal><Dialog.Backdrop className="fixed inset-0 z-50 bg-background/80 backdrop-blur-sm" /><Dialog.Popup className="fixed left-1/2 top-1/2 z-50 max-h-[calc(100dvh-2rem)] w-[calc(100%-2rem)] max-w-xl -translate-x-1/2 -translate-y-1/2 overflow-y-auto rounded-2xl border bg-background p-6 shadow-xl">
+  return <Dialog.Root open={open} onOpenChange={(next) => !next && onClose()}><Dialog.Portal><Dialog.Backdrop className={officeDialogBackdropClassName} /><Dialog.Popup className={`${officeDialogClassName} sm:max-w-xl`}>
     <Dialog.Title className="text-base font-semibold">{mode === "table" ? table ? t.editTable : t.insertTable : chart ? t.editChart : t.insertChart}</Dialog.Title>
     <Dialog.Description className="mt-1 text-sm text-muted-foreground">{mode === "table" ? t.tableDataDescription : t.chartDataDescription}</Dialog.Description>
-    {mode === "table" ? <div className="mt-4 grid grid-cols-2 gap-3"><NumberField label={t.rows} value={rows} onValue={setRows} /><NumberField label={t.columns} value={columns} onValue={setColumns} /><label className="col-span-2 text-xs font-medium">{t.tableData}<textarea value={tableData} onInput={(event) => setTableData(event.currentTarget.value)} onChange={() => undefined} rows={8} className="mt-1 w-full rounded border p-2 font-mono text-[16px] font-normal md:text-sm" /></label></div> : <div className="mt-4 grid gap-3">
-      <Select value={chartType} onValueChange={(value) => value && setChartType(value as typeof chartType)}><SelectTrigger className="w-full" aria-label={t.chartType}><SelectValue /></SelectTrigger><SelectContent>{(["bar", "line", "pie", "doughnut", "scatter"] as const).map((value) => <SelectItem key={value} value={value}>{t[value]}</SelectItem>)}</SelectContent></Select>
-      <label className="text-xs font-medium">{t.chartTitle}<input value={title} onInput={(event) => setTitle(event.currentTarget.value)} onChange={() => undefined} className="mt-1 h-10 w-full rounded border px-3 text-[16px] font-normal md:h-9 md:text-sm" /></label>
-      <label className="text-xs font-medium">{t.altText}<input value={altText} onInput={(event) => setAltText(event.currentTarget.value)} onChange={() => undefined} className="mt-1 h-10 w-full rounded border px-3 text-[16px] font-normal md:h-9 md:text-sm" /></label>
-      <label className="text-xs font-medium">{t.chartData}<textarea value={chartData} onInput={(event) => setChartData(event.currentTarget.value)} onChange={() => undefined} rows={8} className="mt-1 w-full rounded border p-2 font-mono text-[16px] font-normal md:text-sm" /></label>
+    {mode === "table" ? <div className="mt-4 grid grid-cols-2 gap-3"><NumberField label={t.rows} value={rows} onValue={setRows} /><NumberField label={t.columns} value={columns} onValue={setColumns} /><label className="col-span-2 text-xs font-medium">{t.tableData}<textarea value={tableData} onInput={(event) => setTableData(event.currentTarget.value)} onChange={() => undefined} rows={8} className={`${officeTextareaClassName} mt-1 w-full font-mono`} /></label></div> : <div className="mt-4 grid gap-3">
+      <Select value={chartType} onValueChange={(value) => value && setChartType(value as typeof chartType)}><SelectTrigger className="max-md:min-h-11 w-full" aria-label={t.chartType}><SelectValue>{t[chartType]}</SelectValue></SelectTrigger><SelectContent>{(["bar", "line", "pie", "doughnut", "scatter"] as const).map((value) => <SelectItem key={value} value={value}>{t[value]}</SelectItem>)}</SelectContent></Select>
+      <label className="text-xs font-medium">{t.chartTitle}<input value={title} onInput={(event) => setTitle(event.currentTarget.value)} onChange={() => undefined} className={`${officeInputClassName} mt-1 w-full`} /></label>
+      <label className="text-xs font-medium">{t.altText}<input value={altText} onInput={(event) => setAltText(event.currentTarget.value)} onChange={() => undefined} className={`${officeInputClassName} mt-1 w-full`} /></label>
+      <label className="text-xs font-medium">{t.chartData}<textarea value={chartData} onInput={(event) => setChartData(event.currentTarget.value)} onChange={() => undefined} rows={8} className={`${officeTextareaClassName} mt-1 w-full font-mono`} /></label>
     </div>}
     {error ? <p role="alert" className="mt-3 text-sm text-destructive">{error}</p> : null}
     <div className="mt-5 flex justify-end gap-2"><Button variant="outline" size="sm" onClick={onClose}>{t.cancelWorksheetAction}</Button><Button size="sm" onClick={apply}>{t.apply}</Button></div>
   </Dialog.Popup></Dialog.Portal></Dialog.Root>;
 }
 
-function NumberField({ label, value, onValue }: { label: string; value: number; onValue(value: number): void }) { return <label className="text-xs font-medium">{label}<input type="number" min={1} max={20} value={value} onInput={(event) => onValue(Math.max(1, Math.min(20, Number(event.currentTarget.value))))} onChange={() => undefined} className="mt-1 h-10 w-full rounded border px-3 text-[16px] font-normal md:h-9 md:text-sm" /></label>; }
+function NumberField({ label, value, onValue }: { label: string; value: number; onValue(value: number): void }) { return <label className="text-xs font-medium">{label}<input type="number" min={1} max={20} value={value} onInput={(event) => onValue(Math.max(1, Math.min(20, Number(event.currentTarget.value))))} onChange={() => undefined} className={`${officeInputClassName} mt-1 w-full`} /></label>; }

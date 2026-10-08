@@ -357,10 +357,24 @@ describe("[COMP:app-web/office-surface-cache] helpers", () => {
 
 describe("[COMP:app-web/office-surface-cache] template lifecycle", () => {
   const template = { id: "template-1", name: "Sample template", family: "document", description: "Example", lifecycleState: "draft", draftArtifactId: ARTIFACT, currentVersionId: null };
-  const button = (label: string) => Array.from(container.querySelectorAll("button")).find((node) => node.textContent === label)!;
+  const button = (label: string) => Array.from(document.querySelectorAll("button")).find((node) => node.textContent === label)!;
   beforeEach(() => {
     api.listOfficeTemplates.mockReset().mockResolvedValue([template]);
     api.transitionOfficeTemplateLifecycle.mockReset();
+  });
+
+  it("opens template details in a labelled dialog and closes back to the library without mutation", async () => {
+    render(<OfficeTemplateLibrary workspaceId={WORKSPACE} templateId={template.id} />);
+    await act(async () => { await settle(); });
+    const dialog = document.querySelector('[role="dialog"]')!;
+    expect(dialog).not.toBeNull();
+    expect(dialog.textContent).toContain(template.name);
+    expect(container.querySelector("main h1")?.textContent).toBe(en.office.templateTitle);
+    expect(container.querySelector("main [role=dialog]")).toBeNull();
+    expect(container.querySelector("[data-office-template-card]")).not.toBeNull();
+    await act(async () => { (dialog.querySelector(`button[aria-label="${en.office.closeTemplateAria}"]`) as HTMLButtonElement).click(); });
+    expect(navigation.replace).toHaveBeenCalledWith(`/w/${WORKSPACE}/office/templates`, { scroll: false });
+    expect(api.transitionOfficeTemplateLifecycle).not.toHaveBeenCalled();
   });
 
   it("opens failed-import recovery without navigating away and losing its state", async () => {
@@ -382,15 +396,15 @@ describe("[COMP:app-web/office-surface-cache] template lifecycle", () => {
     await act(async () => { button(en.office.moveToTrash).click(); await settle(); });
     expect(button(en.office.moveToTrash)).toBeUndefined();
     expect(button(en.office.restore)).toBeDefined();
-    const input = container.querySelector("input")!;
+    const input = document.querySelector("input")!;
     act(() => {
       Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, "value")!.set!.call(input, template.name);
       input.dispatchEvent(new Event("input", { bubbles: true }));
     });
     api.listOfficeTemplates.mockResolvedValue([]);
     await act(async () => { button(en.office.deletePermanently).click(); await settle(); });
-    expect(container.querySelector("[data-office-template-card]")).toBeNull();
-    expect(container.textContent).toContain(en.office.noTemplates);
+    expect(document.querySelector("[data-office-template-card]")).toBeNull();
+    expect(document.body.textContent).toContain(en.office.noTemplates);
     expect(navigation.replace).toHaveBeenCalledWith(`/w/${WORKSPACE}/office/templates`);
   });
 
@@ -417,8 +431,8 @@ describe("[COMP:app-web/office-surface-cache] template lifecycle", () => {
     expect(button(en.office.moveToTrash).disabled).toBe(true);
     expect(api.transitionOfficeTemplateLifecycle).toHaveBeenCalledTimes(1);
     await act(async () => { reject(new Error("blocked")); await settle(); });
-    expect(container.querySelector("[role=alert]")?.textContent).toBe(en.office.lifecycleFailed);
-    expect(container.querySelector("[data-office-template-card]")).not.toBeNull();
+    expect(document.querySelector("[role=alert]")?.textContent).toBe(en.office.lifecycleFailed);
+    expect(document.querySelector("[data-office-template-card]")).not.toBeNull();
     expect(button(en.office.moveToTrash).disabled).toBe(false);
   });
 
@@ -441,7 +455,7 @@ describe("[COMP:app-web/office-surface-cache] template lifecycle", () => {
     await act(async () => { await settle(); });
     let complete!: (row: unknown) => void;
     api.transitionOfficeTemplateLifecycle.mockImplementation(() => new Promise((resolve) => { complete = resolve; }));
-    const input = container.querySelector("input")!;
+    const input = document.querySelector("input")!;
     act(() => {
       Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, "value")!.set!.call(input, template.name);
       input.dispatchEvent(new Event("input", { bubbles: true }));
@@ -485,7 +499,7 @@ describe("[COMP:app-web/office-surface-cache] template lifecycle", () => {
     act(() => { button(en.office.moveToTrash).click(); });
     expect(api.transitionOfficeTemplateLifecycle).toHaveBeenCalledTimes(2);
     await act(async () => { rejectOld(new Error("old failure")); await settle(); });
-    expect(container.querySelector("[role=alert]")).toBeNull();
+    expect(document.querySelector("[role=alert]")).toBeNull();
     expect(button(en.office.moveToTrash).disabled).toBe(true);
   });
 
@@ -498,16 +512,16 @@ describe("[COMP:app-web/office-surface-cache] template lifecycle", () => {
       api.listOfficeTemplates.mockRejectedValue(new Error("offline"));
       await act(async () => { button(en.office.moveToTrash).click(); await settle(); });
     }
-    expect(container.querySelector("[role=alert]")?.textContent).toBe(en.office.loadFailed);
+    expect(document.querySelector("[role=alert]")?.textContent).toBe(en.office.loadFailed);
     let complete!: (rows: unknown[]) => void;
     api.listOfficeTemplates.mockImplementation(() => new Promise((resolve) => { complete = resolve; }));
     act(() => { button(en.chat.retry).click(); });
     expect(button(en.chat.retry).disabled).toBe(true);
     await act(async () => { complete([{ ...template, lifecycleState: "trash" }]); await settle(); });
-    expect(container.querySelector("[role=alert]")).toBeNull();
+    expect(document.querySelector("[role=alert]")).toBeNull();
     expect(button(en.chat.retry)).toBeUndefined();
     expect(button(en.office.restore)).toBeDefined();
-    expect(container.querySelector("[data-office-template-card]")).not.toBeNull();
+    expect(document.querySelector("[data-office-template-card]")).not.toBeNull();
   });
 
   it("an obsolete request cannot clear the replacement's in-flight lock", async () => {

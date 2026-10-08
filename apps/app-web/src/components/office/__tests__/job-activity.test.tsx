@@ -84,14 +84,36 @@ describe("[COMP:app-web/office-iteration-panel] Office iteration panel", () => {
     expect(html).toContain(en.office.brianRevisionFailed);
     expect(html).not.toContain(en.office.generationFailedBody);
   });
-  it("puts the plain-language Brian composer before collapsed run telemetry", () => {
+  it("anchors the Brian composer after collapsed run activity", () => {
     const html = render(job("running"), { events: [{ id: "event-1", seq: 1, code: "office.job.objects_constructed", params: {}, safeNarration: null, createdAt: "2026-08-05T00:00:00.000Z" }] });
     expect(html).toContain(en.office.editWithBrian);
     expect(html).toContain(en.office.iterationPlaceholder);
     expect(html).toContain(en.office.askBrian);
     expect(html).toContain(`<summary`);
-    expect(html.indexOf(en.office.askBrian)).toBeLessThan(html.indexOf(en.office.runActivity));
+    expect(html.indexOf(en.office.askBrian)).toBeGreaterThan(html.indexOf(en.office.runActivity));
+    expect(html).not.toContain("<details open");
     expect(html).not.toContain(en.office.steer);
+  });
+
+  it("sends on Enter, preserves Shift+Enter and IME composition, and respects disabled submission", async () => {
+    const host = document.createElement("div");
+    document.body.append(host);
+    const root = createRoot(host);
+    const onSubmit = vi.fn((event: React.FormEvent) => event.preventDefault());
+    const paint = (canRequestRevision: boolean) => act(() => root.render(<I18nProvider locale="en" dict={en as unknown as Dictionary}><OfficeJobActivityView job={null} events={[]} instruction="Clarify this" scope={{ kind: "targets", count: 1 }} canRequestRevision={canRequestRevision} onInstructionChange={vi.fn()} onSubmit={onSubmit} /></I18nProvider>));
+    try {
+      paint(true);
+      const input = host.querySelector("textarea")!;
+      const press = (options: KeyboardEventInit) => act(() => { input.dispatchEvent(new KeyboardEvent("keydown", { key: "Enter", bubbles: true, cancelable: true, ...options })); });
+      press({ shiftKey: true });
+      press({ isComposing: true });
+      expect(onSubmit).not.toHaveBeenCalled();
+      press({});
+      expect(onSubmit).toHaveBeenCalledTimes(1);
+      paint(false);
+      press({});
+      expect(onSubmit).toHaveBeenCalledTimes(1);
+    } finally { act(() => root.unmount()); host.remove(); }
   });
 
   it("keeps Brian as the primary edit path after generation and names the exact scope", () => {

@@ -613,7 +613,7 @@ export function WorkspaceChrome({
     return () => window.removeEventListener("keydown", onKey);
   }, [router, workspaceId, homeHref]);
 
-  const hasSyncNotice = offlineState.offline || offlineState.pending > 0 || offlineState.reconnecting;
+  const hasSyncNotice = offlineState.offline || offlineState.pending > 0 || offlineState.paused > 0 || offlineState.reconnecting;
   const syncTitle = offlineState.paused > 0 ? t.offlineSyncPausedTitle
     : offlineState.offline ? t.offlineBannerTitle
     : offlineState.reconnecting ? t.errors.collabReconnecting
@@ -860,7 +860,9 @@ export function WorkspaceChrome({
           width and paints nothing of its own, so over the slot the sidebar
           reserves (`data-doc-sidebar-status-slot`) it reads as the sidebar's
           last row, and once the sidebar collapses (or the phone drawer closes)
-          the same label floats over the surface with no background. One node
+          the label floats over the surface with no background. On phones the
+          healthy label is hidden while the drawer is closed; notices and the
+          independent intake/update chips stay available. One node
           for every sidebar state: it never moves or remounts, so the intake
           tray keeps its state and the live region is not re-announced. Only
           its children take pointer events. The brain-intake chip + tray share
@@ -888,6 +890,7 @@ export function WorkspaceChrome({
           title={syncDescription || syncTitle}
           className={cn(
             "relative z-10 flex min-w-0 shrink items-center gap-2",
+            !sidebarOpen && !hasSyncNotice && "max-md:hidden",
             hasSyncNotice ? "text-amber-700 dark:text-amber-300" : "text-muted-foreground",
           )}
         >

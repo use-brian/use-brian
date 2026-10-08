@@ -1,5 +1,7 @@
 "use client";
 
+import { buttonVariants } from "@/components/ui/button";
+
 import {useLayoutEffect,useRef,useState} from "react";
 import {useT} from "@/lib/i18n/client";
 import {confirmDialog} from "@/components/ui/confirm-dialog";
@@ -52,7 +54,7 @@ function ClassificationContent({cacheKey,viewerId,artifactId,classification}:{ca
     {classification.canManage ? <>
       <OfficeScopePicker workspaceId={classification.workspaceId} minimumSensitivity={classification.sensitivity} restricting onChange={setScope}/>
       <p className="text-xs text-muted-foreground">{t.classificationConfirmation}</p>
-      <button type="button" disabled={!scope||busy} onClick={()=>void apply()} className="min-h-8 max-sm:min-h-11 rounded-md border px-3 text-sm font-medium disabled:opacity-50">{t.restrictClassification}</button>
+      <button type="button" disabled={!scope||busy} onClick={()=>void apply()} className={buttonVariants({ variant: "outline", size: "sm" })}>{t.restrictClassification}</button>
     </> : null}
     {classification.history.length ? <details><summary className="min-h-8 max-sm:min-h-11 cursor-pointer py-3 text-sm">{t.classificationHistory}</summary><ul className="space-y-2 text-xs">{classification.history.map(event=><li key={event.id} className="break-words">{new Date(event.createdAt).toLocaleString()} · {sensitivityLabel(event.metadata.before.sensitivity)} → {sensitivityLabel(event.metadata.after.sensitivity)} · {event.metadata.after.compartments.map(departmentLabel).join(", ") || t.generalDepartment}</li>)}</ul></details> : null}
     {failed?<p role="alert" className="text-sm text-destructive">{t.classificationFailed}</p>:null}

@@ -1,5 +1,9 @@
 "use client";
 
+import { buttonVariants } from "@/components/ui/button";
+import { Checkbox } from "@/components/ui/checkbox";
+import { officeIconButtonClassName, officeToolbarButtonClassName, officeInputClassName } from "@/components/office/office-chrome";
+
 /** Adaptive Document formatting, structure, and productivity controls. [COMP:app-web/office-document-editor] */
 import { useEffect, useRef, useState } from "react";
 import type { Editor } from "@tiptap/react";
@@ -136,16 +140,16 @@ function ToolbarContent({ editor, editable, compact = false, onInsertImage, onIn
     <ToolbarButton label={t.redo} disabled={!editable || !editor?.can().redo()} pressed={false} onClick={() => editor?.chain().focus().redo().run()} icon={<Redo2 />} />
     <Divider />
     <Select value={blockStyle} onValueChange={(value) => value && setDocumentBlockStyle(editor, value as DocumentBlockStyle)} disabled={!editable}>
-      <SelectTrigger size="sm" className="w-28" aria-label={t.paragraphStyle}><SelectValue /></SelectTrigger>
+      <SelectTrigger size="sm" className="max-md:min-h-11 w-28" aria-label={t.paragraphStyle}><SelectValue>{blockStyleLabel(blockStyle, t)}</SelectValue></SelectTrigger>
       <SelectContent>{BLOCK_STYLES.map((value) => <SelectItem key={value} value={value}>{blockStyleLabel(value, t)}</SelectItem>)}</SelectContent>
     </Select>
     {!compact ? <>
       <Select value={first?.fontFamily ?? null} onValueChange={(value) => value && applyDocumentRunFormatting(editor, { fontFamily: value })} disabled={!canFormat}>
-        <SelectTrigger size="sm" className="w-28" aria-label={t.fontFamily}><SelectValue placeholder={t.mixedValue} /></SelectTrigger>
+        <SelectTrigger size="sm" className="max-md:min-h-11 w-28" aria-label={t.fontFamily}><SelectValue placeholder={t.mixedValue} /></SelectTrigger>
         <SelectContent>{FONTS.map((font) => <SelectItem key={font} value={font}>{font}</SelectItem>)}</SelectContent>
       </Select>
       <Select value={first?.fontSizePt ? String(first.fontSizePt) : null} onValueChange={(value) => value && applyDocumentRunFormatting(editor, { fontSizePt: Number(value) })} disabled={!canFormat}>
-        <SelectTrigger size="sm" className="w-16" aria-label={t.fontSize}><SelectValue placeholder={t.mixedValue} /></SelectTrigger>
+        <SelectTrigger size="sm" className="max-md:min-h-11 w-16" aria-label={t.fontSize}><SelectValue placeholder={t.mixedValue} /></SelectTrigger>
         <SelectContent>{FONT_SIZES.map((size) => <SelectItem key={size} value={String(size)}>{size}</SelectItem>)}</SelectContent>
       </Select>
     </> : null}
@@ -175,7 +179,7 @@ function ToolbarContent({ editor, editable, compact = false, onInsertImage, onIn
     {image ? <ImageMenu editor={editor} editable={editable} image={image.node} onReplace={onInsertImage} /> : null}
     {compact ? <TextToolsPopover editor={editor} editable={editable} canFormat={canFormat} fontFamily={first?.fontFamily ?? null} fontSizePt={first?.fontSizePt ?? null} color={first?.color ?? null} highlight={first?.highlight ?? null} /> : null}
     <DropdownMenu>
-      <DropdownMenuTrigger render={<button type="button" className="rounded p-2 hover:bg-muted" aria-label={t.documentTools}><MoreHorizontal className="size-4" /></button>} />
+      <DropdownMenuTrigger render={<button type="button" className={officeIconButtonClassName} aria-label={t.documentTools}><MoreHorizontal className="size-4" /></button>} />
       <DropdownMenuContent align="end">
         {compact ? <>
           <DropdownMenuItem onClick={() => void editLink()} disabled={!canFormat}><Link />{t.hyperlink}</DropdownMenuItem>
@@ -198,7 +202,7 @@ function ToolbarContent({ editor, editable, compact = false, onInsertImage, onIn
 function InsertMenu({ editor, editable, onInsertImage, editLink }: { editor: Editor | null; editable: boolean; onInsertImage(): void; editLink(): void }) {
   const t = useT().office;
   return <DropdownMenu>
-    <DropdownMenuTrigger render={<button type="button" disabled={!editable} className="flex h-8 items-center gap-1 rounded px-2 text-xs hover:bg-muted disabled:opacity-40"><span>{t.insert}</span><ChevronDown className="size-3" /></button>} />
+    <DropdownMenuTrigger render={<button type="button" disabled={!editable} className={officeToolbarButtonClassName}><span>{t.insert}</span><ChevronDown className="size-3" /></button>} />
     <DropdownMenuContent align="start">
       <DropdownMenuItem onClick={() => void editLink()} disabled={!editor || editor.state.selection.empty}><Link />{t.hyperlink}</DropdownMenuItem>
       <DropdownMenuItem onClick={() => insertDocumentTable(editor)}><Table2 />{t.addTable}</DropdownMenuItem>
@@ -213,7 +217,7 @@ function InsertMenu({ editor, editable, onInsertImage, editLink }: { editor: Edi
 function SpacingMenu({ editor, editable }: { editor: Editor | null; editable: boolean }) {
   const t = useT().office;
   return <DropdownMenu>
-    <DropdownMenuTrigger render={<button type="button" disabled={!editable} className="flex h-8 items-center gap-1 rounded px-2 text-xs hover:bg-muted disabled:opacity-40">{t.spacing}<ChevronDown className="size-3" /></button>} />
+    <DropdownMenuTrigger render={<button type="button" disabled={!editable} className={officeToolbarButtonClassName}>{t.spacing}<ChevronDown className="size-3" /></button>} />
     <DropdownMenuContent align="start">
       {[12, 15, 18, 24].map((value) => <DropdownMenuItem key={value} onClick={() => setDocumentBlockAttributes(editor, { lineSpacingPt: value })}>{t.lineSpacingValue.replace("{value}", String(value))}</DropdownMenuItem>)}
       <DropdownMenuSeparator />
@@ -230,16 +234,16 @@ function SpacingMenu({ editor, editable }: { editor: Editor | null; editable: bo
 function TextToolsPopover({ editor, editable, canFormat, fontFamily, fontSizePt, color, highlight }: { editor: Editor | null; editable: boolean; canFormat: boolean; fontFamily: string | null; fontSizePt: number | null; color: string | null; highlight: string | null }) {
   const t = useT().office;
   return <Popover>
-    <PopoverTrigger render={<button type="button" disabled={!editable} className="flex h-11 md:h-8 items-center gap-1 rounded px-2 text-xs hover:bg-muted disabled:opacity-40" data-document-text-tools="true"><Type className="size-4" />{t.compactTextTools}<ChevronDown className="size-3" /></button>} />
+    <PopoverTrigger render={<button type="button" disabled={!editable} className={officeToolbarButtonClassName} data-document-text-tools="true"><Type className="size-4" />{t.compactTextTools}<ChevronDown className="size-3" /></button>} />
     <PopoverContent align="end" className="w-72 max-w-[calc(100vw-1rem)]">
       <label className="text-xs font-medium">{t.fontFamily}</label>
       <Select value={fontFamily} onValueChange={(value) => value && applyDocumentRunFormatting(editor, { fontFamily: value })} disabled={!canFormat}>
-        <SelectTrigger className="w-full" aria-label={t.fontFamily}><SelectValue placeholder={t.mixedValue} /></SelectTrigger>
+        <SelectTrigger className="max-md:min-h-11 w-full" aria-label={t.fontFamily}><SelectValue placeholder={t.mixedValue} /></SelectTrigger>
         <SelectContent>{FONTS.map((font) => <SelectItem key={font} value={font}>{font}</SelectItem>)}</SelectContent>
       </Select>
       <label className="text-xs font-medium">{t.fontSize}</label>
       <Select value={fontSizePt ? String(fontSizePt) : null} onValueChange={(value) => value && applyDocumentRunFormatting(editor, { fontSizePt: Number(value) })} disabled={!canFormat}>
-        <SelectTrigger className="w-full" aria-label={t.fontSize}><SelectValue placeholder={t.mixedValue} /></SelectTrigger>
+        <SelectTrigger className="max-md:min-h-11 w-full" aria-label={t.fontSize}><SelectValue placeholder={t.mixedValue} /></SelectTrigger>
         <SelectContent>{FONT_SIZES.map((size) => <SelectItem key={size} value={String(size)}>{size}</SelectItem>)}</SelectContent>
       </Select>
       <div className="flex items-center gap-2">
@@ -257,7 +261,7 @@ function PageSetupMenu({ editor, editable, section, onInsertHeaderImage }: { edi
   const showPageNumber = section?.showPageNumber === true;
   function patchPage(patch: Record<string, number | string>) { setDocumentSectionAttributes(editor, { page: { ...page, ...patch } }); }
   return <Popover>
-    <PopoverTrigger render={<button type="button" disabled={!editable} className="flex h-8 items-center gap-1 rounded px-2 text-xs hover:bg-muted disabled:opacity-40">{t.pageSetup}<ChevronDown className="size-3" /></button>} />
+    <PopoverTrigger render={<button type="button" disabled={!editable} className={officeToolbarButtonClassName}>{t.pageSetup}<ChevronDown className="size-3" /></button>} />
     <PopoverContent align="start" className="w-72">
       <label className="text-xs font-medium">{t.pageSize}</label>
       <Select value={pageSizeKey(page)} onValueChange={(value) => {
@@ -265,28 +269,28 @@ function PageSetupMenu({ editor, editable, section, onInsertHeaderImage }: { edi
         if (!size) return;
         const landscape = page?.orientation === "landscape";
         patchPage({ widthPt: landscape ? size.heightPt : size.widthPt, heightPt: landscape ? size.widthPt : size.heightPt });
-      }}><SelectTrigger className="w-full"><SelectValue /></SelectTrigger><SelectContent><SelectItem value="letter">{t.pageLetter}</SelectItem><SelectItem value="a4">{t.pageA4}</SelectItem><SelectItem value="legal">{t.pageLegal}</SelectItem></SelectContent></Select>
+      }}><SelectTrigger className="max-md:min-h-11 w-full"><SelectValue>{({ letter: t.pageLetter, a4: t.pageA4, legal: t.pageLegal })[pageSizeKey(page)]}</SelectValue></SelectTrigger><SelectContent><SelectItem value="letter">{t.pageLetter}</SelectItem><SelectItem value="a4">{t.pageA4}</SelectItem><SelectItem value="legal">{t.pageLegal}</SelectItem></SelectContent></Select>
       <label className="text-xs font-medium">{t.orientation}</label>
       <Select value={String(page?.orientation ?? "portrait")} onValueChange={(value) => {
         if (!value || value === page?.orientation) return;
         patchPage({ orientation: value, widthPt: Number(page?.heightPt), heightPt: Number(page?.widthPt) });
-      }}><SelectTrigger className="w-full"><SelectValue /></SelectTrigger><SelectContent><SelectItem value="portrait">{t.portrait}</SelectItem><SelectItem value="landscape">{t.landscape}</SelectItem></SelectContent></Select>
+      }}><SelectTrigger className="max-md:min-h-11 w-full"><SelectValue>{page?.orientation === "landscape" ? t.landscape : t.portrait}</SelectValue></SelectTrigger><SelectContent><SelectItem value="portrait">{t.portrait}</SelectItem><SelectItem value="landscape">{t.landscape}</SelectItem></SelectContent></Select>
       <div className="grid grid-cols-2 gap-2">
-        {(["marginTopPt", "marginRightPt", "marginBottomPt", "marginLeftPt"] as const).map((key) => <label key={key} className="text-xs">{t[key]}<input type="number" min={0} max={500} value={Number(page?.[key] ?? 72)} onChange={(event) => patchPage({ [key]: Number(event.target.value) })} className="mt-1 h-8 w-full rounded border bg-background px-2" /></label>)}
+        {(["marginTopPt", "marginRightPt", "marginBottomPt", "marginLeftPt"] as const).map((key) => <label key={key} className="text-xs">{t[key]}<input type="number" min={0} max={500} value={Number(page?.[key] ?? 72)} onChange={(event) => patchPage({ [key]: Number(event.target.value) })} className={`${officeInputClassName} mt-1 w-full`} /></label>)}
       </div>
       <div className="flex gap-2">
-        <button type="button" className="rounded border px-2 py-1.5 text-xs hover:bg-muted" onClick={onInsertHeaderImage}>{section?.headerImage ? t.replaceHeaderImage : t.headerImage}</button>
-        {section?.headerImage ? <button type="button" className="rounded border px-2 py-1.5 text-xs hover:bg-muted" onClick={() => setDocumentSectionAttributes(editor, { headerImage: undefined })}>{t.removeHeaderImage}</button> : null}
+        <button type="button" className={buttonVariants({ variant: "outline", size: "sm" })} onClick={onInsertHeaderImage}>{section?.headerImage ? t.replaceHeaderImage : t.headerImage}</button>
+        {section?.headerImage ? <button type="button" className={buttonVariants({ variant: "outline", size: "sm" })} onClick={() => setDocumentSectionAttributes(editor, { headerImage: undefined })}>{t.removeHeaderImage}</button> : null}
       </div>
-      <label className="flex items-center gap-2 text-xs"><input type="checkbox" checked={showPageNumber} onChange={(event) => setDocumentSectionAttributes(editor, { showPageNumber: event.target.checked })} />{t.showPageNumbers}</label>
+      <label className="flex items-center gap-2 text-xs max-md:min-h-11 cursor-pointer"><Checkbox checked={showPageNumber} onCheckedChange={(checked) => setDocumentSectionAttributes(editor, { showPageNumber: checked })} />{t.showPageNumbers}</label>
       <label className="text-xs font-medium">{t.headerFooterAlignment}</label>
       <div className="grid grid-cols-2 gap-2">
         <AlignmentSelect label={t.header} value={String(section?.headerAlignment ?? "start") as DocumentAlignment} onValue={(value) => setDocumentSectionAttributes(editor, { headerAlignment: value })} />
         <AlignmentSelect label={t.footer} value={String(section?.footerAlignment ?? "start") as DocumentAlignment} onValue={(value) => setDocumentSectionAttributes(editor, { footerAlignment: value })} />
       </div>
       <div className="grid grid-cols-2 gap-2">
-        <label className="flex items-center gap-2 text-xs"><input type="checkbox" checked={Boolean(section?.headerBorderBottom)} onChange={(event) => setDocumentSectionAttributes(editor, { headerBorderBottom: event.target.checked ? { color: BORDER.color, widthPt: BORDER.widthPt } : undefined })} />{t.headerBorder}</label>
-        <label className="flex items-center gap-2 text-xs"><input type="checkbox" checked={Boolean(section?.footerBorderTop)} onChange={(event) => setDocumentSectionAttributes(editor, { footerBorderTop: event.target.checked ? { color: BORDER.color, widthPt: BORDER.widthPt } : undefined })} />{t.footerBorder}</label>
+        <label className="flex items-center gap-2 text-xs max-md:min-h-11 cursor-pointer"><Checkbox checked={Boolean(section?.headerBorderBottom)} onCheckedChange={(checked) => setDocumentSectionAttributes(editor, { headerBorderBottom: checked ? { color: BORDER.color, widthPt: BORDER.widthPt } : undefined })} />{t.headerBorder}</label>
+        <label className="flex items-center gap-2 text-xs max-md:min-h-11 cursor-pointer"><Checkbox checked={Boolean(section?.footerBorderTop)} onCheckedChange={(checked) => setDocumentSectionAttributes(editor, { footerBorderTop: checked ? { color: BORDER.color, widthPt: BORDER.widthPt } : undefined })} />{t.footerBorder}</label>
       </div>
     </PopoverContent>
   </Popover>;
@@ -295,7 +299,7 @@ function PageSetupMenu({ editor, editable, section, onInsertHeaderImage }: { edi
 function TableMenu({ editor, editable, table }: { editor: Editor | null; editable: boolean; table: import("@tiptap/pm/model").Node }) {
   const t = useT().office;
   return <DropdownMenu>
-    <DropdownMenuTrigger render={<button type="button" disabled={!editable} className="flex h-8 items-center gap-1 rounded bg-muted px-2 text-xs disabled:opacity-40"><Table2 className="size-3.5" />{t.tableActions}</button>} />
+    <DropdownMenuTrigger render={<button type="button" disabled={!editable} className={`${officeToolbarButtonClassName} bg-muted`}><Table2 className="size-3.5" />{t.tableActions}</button>} />
     <DropdownMenuContent align="start">
       <DropdownMenuItem onClick={() => runDocumentTableAction(editor, "addRow")}>{t.addRow}</DropdownMenuItem>
       <DropdownMenuItem onClick={() => runDocumentTableAction(editor, "deleteRow")}>{t.deleteRow}</DropdownMenuItem>
@@ -322,23 +326,23 @@ function ImageMenu({ editor, editable, image, onReplace }: { editor: Editor | nu
     if (value !== null) updateSelectedDocumentNode(editor, "officeImage", { altText: value });
   }
   return <Popover>
-    <PopoverTrigger render={<button type="button" disabled={!editable} className="flex h-8 items-center gap-1 rounded bg-muted px-2 text-xs disabled:opacity-40"><ImageIcon className="size-3.5" />{t.imageActions}</button>} />
+    <PopoverTrigger render={<button type="button" disabled={!editable} className={`${officeToolbarButtonClassName} bg-muted`}><ImageIcon className="size-3.5" />{t.imageActions}</button>} />
     <PopoverContent align="start" className="w-64">
-      <button type="button" className="rounded border px-2 py-1.5 text-left text-xs hover:bg-muted" onClick={onReplace}>{t.replaceImage}</button>
+      <button type="button" className={buttonVariants({ variant: "outline", size: "sm", className: "text-left justify-start" })} onClick={onReplace}>{t.replaceImage}</button>
       <div className="grid grid-cols-2 gap-2">
         <label className="text-xs">{t.imageWidth}<input type="number" min={1} max={10000} value={Number(image.attrs.widthPt ?? 240)} onChange={(event) => {
           const widthPt = Number(event.target.value); const ratio = Number(image.attrs.heightPt ?? 160) / Math.max(1, Number(image.attrs.widthPt ?? 240));
           updateSelectedDocumentNode(editor, "officeImage", { widthPt, ...(lockAspectRatio ? { heightPt: Math.max(1, widthPt * ratio) } : {}) });
-        }} className="mt-1 h-8 w-full rounded border px-2" /></label>
+        }} className={`${officeInputClassName} mt-1 w-full`} /></label>
         <label className="text-xs">{t.imageHeight}<input type="number" min={1} max={10000} value={Number(image.attrs.heightPt ?? 160)} onChange={(event) => {
           const heightPt = Number(event.target.value); const ratio = Number(image.attrs.widthPt ?? 240) / Math.max(1, Number(image.attrs.heightPt ?? 160));
           updateSelectedDocumentNode(editor, "officeImage", { heightPt, ...(lockAspectRatio ? { widthPt: Math.max(1, heightPt * ratio) } : {}) });
-        }} className="mt-1 h-8 w-full rounded border px-2" /></label>
+        }} className={`${officeInputClassName} mt-1 w-full`} /></label>
       </div>
-      <label className="flex items-center gap-2 text-xs"><input type="checkbox" checked={lockAspectRatio} onChange={(event) => setLockAspectRatio(event.target.checked)} />{t.lockAspectRatio}</label>
-      <button type="button" className="rounded border px-2 py-1.5 text-left text-xs hover:bg-muted" onClick={() => void editAlt()}>{t.editAltText}</button>
-      <label className="flex items-center gap-2 text-xs"><input type="checkbox" checked={image.attrs.decorative === true} onChange={(event) => updateSelectedDocumentNode(editor, "officeImage", { decorative: event.target.checked, ...(event.target.checked ? { altText: "" } : {}) })} />{t.decorativeImage}</label>
-      <button type="button" className="rounded border border-destructive/30 px-2 py-1.5 text-left text-xs text-destructive hover:bg-destructive/10" onClick={() => deleteSelectedDocumentNode(editor, "officeImage")}>{t.deleteObject}</button>
+      <label className="flex items-center gap-2 text-xs max-md:min-h-11 cursor-pointer"><Checkbox checked={lockAspectRatio} onCheckedChange={(checked) => setLockAspectRatio(checked)} />{t.lockAspectRatio}</label>
+      <button type="button" className={buttonVariants({ variant: "outline", size: "sm", className: "text-left justify-start" })} onClick={() => void editAlt()}>{t.editAltText}</button>
+      <label className="flex items-center gap-2 text-xs max-md:min-h-11 cursor-pointer"><Checkbox checked={image.attrs.decorative === true} onCheckedChange={(checked) => updateSelectedDocumentNode(editor, "officeImage", { decorative: checked, ...(checked ? { altText: "" } : {}) })} />{t.decorativeImage}</label>
+      <button type="button" className={buttonVariants({ variant: "destructive", size: "sm", className: "text-left justify-start" })} onClick={() => deleteSelectedDocumentNode(editor, "officeImage")}>{t.deleteObject}</button>
     </PopoverContent>
   </Popover>;
 }
@@ -352,14 +356,14 @@ function FindReplacePanel({ editor, editable, onClose }: { editor: Editor | null
   const queryRef = useRef<HTMLInputElement>(null);
   useEffect(() => { queryRef.current?.focus(); }, []);
   return <section className="absolute right-3 top-12 z-40 w-[min(26rem,calc(100%-1.5rem))] rounded-xl border bg-background p-3 shadow-xl" aria-label={t.findReplace} data-document-find-replace="true">
-    <div className="flex items-center gap-2"><input ref={queryRef} value={query} onChange={(event) => setQuery(event.target.value)} placeholder={t.findPlaceholder} aria-label={t.find} className="h-10 min-w-0 flex-1 rounded border px-2 text-[16px] md:h-8 md:text-sm" onKeyDown={(event) => { if (event.key === "Enter") setMatches(findDocumentText(editor, query, event.shiftKey ? -1 : 1, matchCase)); if (event.key === "Escape") onClose(); }} />
+    <div className="flex items-center gap-2"><input ref={queryRef} value={query} onChange={(event) => setQuery(event.target.value)} placeholder={t.findPlaceholder} aria-label={t.find} className={`${officeInputClassName} flex-1`} onKeyDown={(event) => { if (event.key === "Enter") setMatches(findDocumentText(editor, query, event.shiftKey ? -1 : 1, matchCase)); if (event.key === "Escape") onClose(); }} />
       <ToolbarButton label={t.previousMatch} disabled={!query} pressed={false} onClick={() => setMatches(findDocumentText(editor, query, -1, matchCase))} icon={<ChevronLeft />} />
       <ToolbarButton label={t.nextMatch} disabled={!query} pressed={false} onClick={() => setMatches(findDocumentText(editor, query, 1, matchCase))} icon={<ChevronRight />} />
-      <button type="button" onClick={onClose} aria-label={t.close} className="flex size-11 items-center justify-center rounded hover:bg-muted sm:size-8">×</button></div>
-    <div className="mt-2 flex items-center gap-2"><input value={replacement} onChange={(event) => setReplacement(event.target.value)} placeholder={t.replacePlaceholder} aria-label={t.replace} disabled={!editable} className="h-10 min-w-0 flex-1 rounded border px-2 text-[16px] disabled:opacity-40 md:h-8 md:text-sm" />
-      <button type="button" disabled={!editable || !query} onClick={() => setMatches(replaceDocumentText(editor, query, replacement, false, matchCase))} className="rounded border px-2 py-1.5 text-xs disabled:opacity-40">{t.replace}</button>
-      <button type="button" disabled={!editable || !query} onClick={() => setMatches(replaceDocumentText(editor, query, replacement, true, matchCase))} className="rounded border px-2 py-1.5 text-xs disabled:opacity-40">{t.replaceAll}</button></div>
-    <div className="mt-2 flex items-center justify-between text-xs text-muted-foreground"><label className="flex items-center gap-2"><input type="checkbox" checked={matchCase} onChange={(event) => setMatchCase(event.target.checked)} />{t.matchCase}</label><span aria-live="polite">{t.matchesFound.replace("{count}", String(matches))}</span></div>
+      <button type="button" onClick={onClose} aria-label={t.close} className={officeIconButtonClassName}>×</button></div>
+    <div className="mt-2 flex items-center gap-2"><input value={replacement} onChange={(event) => setReplacement(event.target.value)} placeholder={t.replacePlaceholder} aria-label={t.replace} disabled={!editable} className={`${officeInputClassName} flex-1`} />
+      <button type="button" disabled={!editable || !query} onClick={() => setMatches(replaceDocumentText(editor, query, replacement, false, matchCase))} className={buttonVariants({ variant: "outline", size: "sm" })}>{t.replace}</button>
+      <button type="button" disabled={!editable || !query} onClick={() => setMatches(replaceDocumentText(editor, query, replacement, true, matchCase))} className={buttonVariants({ variant: "outline", size: "sm" })}>{t.replaceAll}</button></div>
+    <div className="mt-2 flex items-center justify-between text-xs text-muted-foreground"><label className="flex items-center gap-2 max-md:min-h-11 cursor-pointer"><Checkbox checked={matchCase} onCheckedChange={(checked) => setMatchCase(checked)} />{t.matchCase}</label><span aria-live="polite">{t.matchesFound.replace("{count}", String(matches))}</span></div>
   </section>;
 }
 
@@ -367,8 +371,8 @@ function OutlinePanel({ editor, onClose }: { editor: Editor | null; onClose(): v
   const t = useT().office;
   const { headings } = documentProductivity(editor);
   return <section className="absolute left-3 top-12 z-40 max-h-[70vh] w-72 overflow-y-auto rounded-xl border bg-background p-3 shadow-xl" aria-label={t.documentOutline} data-document-outline="true">
-    <div className="mb-2 flex items-center justify-between"><h2 className="text-sm font-semibold">{t.documentOutline}</h2><button type="button" onClick={onClose} aria-label={t.close} className="flex size-11 items-center justify-center rounded hover:bg-muted sm:size-8">×</button></div>
-    {headings.length ? <ol className="space-y-1">{headings.map((heading) => <li key={heading.id}><button type="button" onClick={() => focusDocumentHeading(editor, heading)} className="w-full truncate rounded px-2 py-1.5 text-left text-xs hover:bg-muted" style={{ paddingInlineStart: `${Math.max(0, heading.level - 1) * 12 + 8}px` }}>{heading.text || t.untitledHeading}</button></li>)}</ol> : <p className="text-xs text-muted-foreground">{t.noHeadings}</p>}
+    <div className="mb-2 flex items-center justify-between"><h2 className="text-sm font-semibold">{t.documentOutline}</h2><button type="button" onClick={onClose} aria-label={t.close} className={officeIconButtonClassName}>×</button></div>
+    {headings.length ? <ol className="space-y-1">{headings.map((heading) => <li key={heading.id}><button type="button" onClick={() => focusDocumentHeading(editor, heading)} className={`${officeToolbarButtonClassName} w-full truncate text-left justify-start`} style={{ paddingInlineStart: `${Math.max(0, heading.level - 1) * 12 + 8}px` }}>{heading.text || t.untitledHeading}</button></li>)}</ol> : <p className="text-xs text-muted-foreground">{t.noHeadings}</p>}
   </section>;
 }
 
@@ -377,22 +381,22 @@ function WordCountPanel({ editor, onClose }: { editor: Editor | null; onClose():
   const { counts } = documentProductivity(editor);
   const rows = [[t.words, counts.words], [t.characters, counts.characters], [t.charactersNoSpaces, counts.charactersNoSpaces], [t.selectionWords, counts.selectionWords], [t.selectionCharacters, counts.selectionCharacters]] as const;
   return <section className="absolute left-1/2 top-16 z-40 w-72 -translate-x-1/2 rounded-xl border bg-background p-3 shadow-xl" aria-label={t.wordCount} data-document-word-count="true">
-    <div className="mb-2 flex items-center justify-between"><h2 className="text-sm font-semibold">{t.wordCount}</h2><button type="button" onClick={onClose} aria-label={t.close} className="flex size-11 items-center justify-center rounded hover:bg-muted sm:size-8">×</button></div>
+    <div className="mb-2 flex items-center justify-between"><h2 className="text-sm font-semibold">{t.wordCount}</h2><button type="button" onClick={onClose} aria-label={t.close} className={officeIconButtonClassName}>×</button></div>
     <dl className="space-y-1 text-xs">{rows.map(([label, value]) => <div key={label} className="flex justify-between gap-4"><dt>{label}</dt><dd>{value}</dd></div>)}</dl>
   </section>;
 }
 
 function ColorInput({ label, value, disabled, onValue, icon }: { label: string; value: string; disabled: boolean; onValue(value: string): void; icon?: React.ReactNode }) {
-  return <label className="relative flex h-8 items-center gap-1 rounded px-1 hover:bg-muted" title={label}>{icon ?? <span className="size-3 rounded-full border" style={{ backgroundColor: value }} />}<input aria-label={label} disabled={disabled} type="color" value={/^#[0-9A-Fa-f]{6}$/.test(value) ? value : "#111111"} onChange={(event) => onValue(event.target.value.toUpperCase())} className="absolute inset-0 cursor-pointer opacity-0 disabled:cursor-default" /></label>;
+  return <label className={`${officeToolbarButtonClassName} relative max-md:min-w-11`} title={label}>{icon ?? <span className="size-3 rounded-full border" style={{ backgroundColor: value }} />}<input aria-label={label} disabled={disabled} type="color" value={/^#[0-9A-Fa-f]{6}$/.test(value) ? value : "#111111"} onChange={(event) => onValue(event.target.value.toUpperCase())} className="absolute inset-0 cursor-pointer opacity-0 disabled:cursor-default" /></label>;
 }
 
 function AlignmentSelect({ label, value, onValue }: { label: string; value: DocumentAlignment; onValue(value: DocumentAlignment): void }) {
   const t = useT().office;
-  return <Select value={value} onValueChange={(next) => next && onValue(next as DocumentAlignment)}><SelectTrigger className="w-full" aria-label={label}><SelectValue /></SelectTrigger><SelectContent><SelectItem value="start">{t.alignLeft}</SelectItem><SelectItem value="center">{t.alignCenter}</SelectItem><SelectItem value="end">{t.alignRight}</SelectItem></SelectContent></Select>;
+  return <Select value={value} onValueChange={(next) => next && onValue(next as DocumentAlignment)}><SelectTrigger className="max-md:min-h-11 w-full" aria-label={label}><SelectValue>{value === "center" ? t.alignCenter : value === "end" ? t.alignRight : t.alignLeft}</SelectValue></SelectTrigger><SelectContent><SelectItem value="start">{t.alignLeft}</SelectItem><SelectItem value="center">{t.alignCenter}</SelectItem><SelectItem value="end">{t.alignRight}</SelectItem></SelectContent></Select>;
 }
 
 function ToolbarButton({ label, icon, disabled, pressed, onClick }: { label: string; icon: React.ReactNode; disabled: boolean; pressed: boolean; onClick(): void }) {
-  return <button type="button" aria-label={label} aria-pressed={pressed} disabled={disabled} onClick={onClick} className={cn("rounded p-2 hover:bg-muted disabled:opacity-40 [&_svg]:size-4", pressed && "bg-muted text-primary")}>{icon}</button>;
+  return <button type="button" aria-label={label} aria-pressed={pressed} disabled={disabled} onClick={onClick} className={cn(officeIconButtonClassName, "[&_svg]:size-4", pressed && "bg-muted text-foreground")}>{icon}</button>;
 }
 function Divider() { return <span className="mx-0.5 h-5 border-l" aria-hidden />; }
 
