@@ -312,24 +312,41 @@ describe('[COMP:crm/retention] Actual review and policy execution',()=>{
     expect(erasure.status).toBe('blocked');expect(erasure.blockers).toContainEqual({domain:'entities',reason:'retention_hold',count:1})
     await expect(createCrmPrivacyService().erase(f.context,{kind:'erase_contact_with_preview',contactId:f.contactId.toUpperCase(),previewId:erasure.id,previewHash:erasure.previewHash,confirmed:true})).rejects.toMatchObject({details:{reason:'privacy_preview_blocked'}})
   })
+  it('refuses a review that would count or remove an import receipt outside the reviewer\'s departments',async()=>{
+    const f=await fixture();await f.policy({...BASE,importReceiptsSeconds:60})
+    const dept=await department(f),file=randomUUID(),job=randomUUID()
+    await pool.query(`INSERT INTO workspace_files(id,workspace_id,path,name,storage_uri,created_by_user_id,sensitivity,compartments)
+      VALUES($1,$2,$3,'fictional.csv','fixture://local',$4,'confidential',$5)`,[file,f.workspaceId,`/fixture/${file}.csv`,f.userId,[`team:${dept}`]])
+    await pool.query(`INSERT INTO crm_import_jobs(id,workspace_id,staged_file_id,entity_kind,status,mapping,mapping_hash,source_hash,total_rows,created_by_user_id,updated_at)
+      VALUES($1,$2,$3,'contact','completed','{"columns":{}}'::jsonb,repeat('a',64),repeat('b',64),1,$4,now()-interval '2 days')`,[job,f.workspaceId,file,f.userId])
+    await expect(f.preview()).rejects.toMatchObject({code:'not_authorized'})
+    expect(await count('crm_import_jobs',f.workspaceId)).toBe(1)
+    await pool.query("INSERT INTO department_edges(workspace_id,department_id,principal_kind,user_id,clearance,origin) VALUES($1,$2,'user',$3,'confidential','store')",[f.workspaceId,dept,f.userId])
+    expect((await f.preview()).domains).toContainEqual({domain:'crm_import_jobs',action:'retain',count:1})
+  })
   it('minimizes eligible delivery envelopes and retains ambiguous sends and failed events',async()=>{
     const f=await fixture();await f.policy({...BASE,deliveryReceiptsSeconds:60})
     const ids:Record<string,string>={}
-    for(const status of ['sent','failed','needs_reconciliation']) {
+    // Post-700 receipts carry the recipient's saved floor; one unclassified historical receipt is only ever retained.
+    const evidence=await loadAssociationOrderScope(pool,f.workspaceId,[f.contactId])
+    for(const status of ['sent','failed','needs_reconciliation','legacy']) {
       const id=randomUUID();ids[status]=id
       await pool.query(`INSERT INTO crm_delivery_receipts(workspace_id,delivery_id,request_hash,connector_instance_id,provider_key,purpose_key,
-        actor_kind,actor_credential_id,envelope,status,claim_token,claim_deadline,provider_receipt,accepted_at,updated_at)
+        actor_kind,actor_credential_id,envelope,status,claim_token,claim_deadline,provider_receipt,accepted_at,updated_at,scope_snapshot,scope_sources)
         VALUES($1,$2,repeat('a',64),$3,'fake','updates','user','fixture','{"body":"Private message"}',$4,$5,now(),
-          '{"private":"Private provider reply"}',CASE WHEN $4='sent' THEN now()-interval '2 days' ELSE NULL END,now()-interval '2 days')`,[f.workspaceId,id,randomUUID(),status,randomUUID()])
+          '{"private":"Private provider reply"}',CASE WHEN $4='sent' THEN now()-interval '2 days' ELSE NULL END,now()-interval '2 days',$6::jsonb,$7::jsonb)`,
+      [f.workspaceId,id,randomUUID(),status==='legacy'?'sent':status,randomUUID(),
+        status==='legacy'?null:JSON.stringify(evidence.scope),status==='legacy'?null:JSON.stringify(evidence.sources)])
     }
     for(const status of ['delivered','failed'])await pool.query(`INSERT INTO crm_domain_event_outbox(workspace_id,event_type,event_key,subject_kind,subject_id,actor_kind,status,created_at)
       VALUES($1,'crm.submission.received',$2,'submission',$3,'user',$4,now()-interval '2 days')`,[f.workspaceId,randomUUID(),await f.submission(),status])
     const review=await f.preview()
     expect(review.domains).toContainEqual({domain:'crm_delivery_receipts',action:'redact',count:2})
-    expect(review.domains).toContainEqual({domain:'crm_delivery_receipts',action:'retain',count:1})
+    expect(review.domains).toContainEqual({domain:'crm_delivery_receipts',action:'retain',count:2})
     await f.execute(review)
     const rows=(await pool.query('SELECT delivery_id,status,envelope,provider_receipt,redacted_at FROM crm_delivery_receipts WHERE workspace_id=$1',[f.workspaceId])).rows
-    expect(rows.filter(r=>r.status!=='needs_reconciliation').every(r=>r.envelope===null && r.provider_receipt===null && r.redacted_at instanceof Date)).toBe(true)
+    expect(rows.filter(r=>r.status!=='needs_reconciliation'&&r.delivery_id!==ids.legacy).every(r=>r.envelope===null && r.provider_receipt===null && r.redacted_at instanceof Date)).toBe(true)
+    expect(rows.find(r=>r.delivery_id===ids.legacy)).toMatchObject({envelope:{body:'Private message'},redacted_at:null})
     expect(rows.find(r=>r.delivery_id===ids.needs_reconciliation).envelope).toEqual({body:'Private message'})
     expect((await pool.query('SELECT status FROM crm_domain_event_outbox WHERE workspace_id=$1',[f.workspaceId])).rows).toEqual([{status:'failed'}])
   })

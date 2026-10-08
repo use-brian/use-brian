@@ -96,7 +96,7 @@ export async function inspectCrmRetention(client:PoolClient,workspaceId:string,b
   const delivery=cutoff('deliveryReceipts',policy?.deliveryReceiptsSeconds)
   if(delivery) {
     await select('deliveries','crm_delivery_receipts','redact',`SELECT r.delivery_id id,r.xmin::text version,
-      (r.status NOT IN('sent','blocked','failed') OR EXISTS(SELECT 1 FROM crm_delivery_receipt_contacts c
+      (r.status NOT IN('sent','blocked','failed') OR r.scope_snapshot IS NULL OR EXISTS(SELECT 1 FROM crm_delivery_receipt_contacts c
         WHERE c.workspace_id=r.workspace_id AND c.delivery_id=r.delivery_id AND c.contact_id=ANY($3::uuid[]))) retained
       FROM crm_delivery_receipts r WHERE r.workspace_id=$1 AND r.updated_at<$2 AND r.redacted_at IS NULL
       ORDER BY r.delivery_id LIMIT 501`,[workspaceId,delivery,contactHolds])
