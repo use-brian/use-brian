@@ -27,12 +27,28 @@ export class DerivedScopeError extends Error {
     | 'scope_evidence_missing'
     | 'scope_workspace_mismatch'
     | 'scope_visibility_incompatible'
-    | 'scope_source_changed',
+    | 'scope_source_changed'
+    | 'scope_output_not_integrated',
   ) {
     // Do not put inaccessible source identities or labels in a caller-visible error.
     super(code)
     this.name = 'DerivedScopeError'
   }
+}
+
+/**
+ * Caller-facing explanation for a refusal the caller can act on, or null when
+ * the bare code is the whole story. `scope_output_not_integrated` is raised
+ * when a result derived from a page would be saved into a family whose
+ * readers cannot yet enforce page ancestry (everything except workspace files
+ * and their segments, migration 730): the write is refused whole, and saving
+ * the result as a workspace file is the supported path.
+ */
+export function describeScopeRefusal(message: string): string | null {
+  if (message === 'scope_output_not_integrated' || message === 'page_derivation_output_not_integrated') {
+    return 'Nothing was saved: this result was derived from a page, and page lineage can currently be kept only on workspace files. Save the result as a workspace file instead, or ask the user. Retrying the same write will fail the same way.'
+  }
+  return null
 }
 
 function labels(value: unknown): value is string[] {

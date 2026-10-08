@@ -6093,6 +6093,7 @@ export const zh: Dictionary = {
       runDetail: {
         sourceAccessChanged: "來源存取權限或內容已變更，因此執行已停止。開始新的執行前，請檢查部門存取權限及已完成的步驟。",
         reviewDepartmentAccess: "檢查部門存取權限",
+        pageOutputUnsupported: "某個步驟嘗試將衍生自頁面的結果儲存到尚無法保留頁面來源脈絡的位置，因此沒有儲存任何內容。請編輯工作流程，改為將該結果儲存為工作區檔案。",
         evidenceUnavailable: "此執行開始於 Brian 記錄目前所需的來源證據之前，因此其結果無法重複使用或繼續。請從工作流程重新執行一次；新的執行會以目前的存取權限讀取來源。",
         openWorkflow: "開啟工作流程",
         backLink: "返回工作流程",

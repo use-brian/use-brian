@@ -16,6 +16,7 @@
  */
 
 import { formatToolError } from '../engine/tool-executor.js'
+import { describeScopeRefusal } from '../security/derived-scope.js'
 
 export type ToolFailureContext = {
   /** The tool that was running. */
@@ -69,6 +70,8 @@ export function describeToolFailure(err: unknown, ctx: ToolFailureContext): stri
     return `${doing} did not run: the input failed validation. ${formatToolError(err)}${ctx.mutating ? ' Nothing was saved.' : ''}${next} Fix the named field(s) and retry — the same input will fail the same way.`
   }
   const message = err instanceof Error ? err.message : String(err)
+  const refusal = describeScopeRefusal(message)
+  if (refusal) return `${doing} did not run. ${refusal}`
   const flat = message.replace(/\s+/g, ' ').trim()
   const said = flat ? `: ${flat.length > 400 ? `${flat.slice(0, 399)}…` : flat}` : ''
   if (isTransientToolError(err)) {

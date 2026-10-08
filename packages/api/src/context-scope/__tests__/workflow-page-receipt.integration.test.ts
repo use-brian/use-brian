@@ -9,6 +9,8 @@ import { captureAuthoringAuthoritySystem, resolveWorkflowRunScope } from '../wor
 import { readWorkflowInputEvidence } from '../workflow-input-evidence.js'
 import { readWorkflowOutcomeWithLineage } from '../../crm-operations/workflow-copy-store.js'
 import { createWorkspaceFile, updateWorkspaceFileMeta } from '../../db/workspace-files.js'
+import { createMemory } from '../../db/memories.js'
+import { describeScopeRefusal, DerivedScopeError } from '@use-brian/core'
 import { captureRecordingIntakeParent } from '../../db/recording-intake-admission.js'
 import { insertFileSegments } from '../../db/file-segments-store.js'
 import { readFileSegmentRange } from '../../db/retrieval-store.js'
@@ -123,6 +125,23 @@ describe('[COMP:api/workflow-input-evidence] canonical page event capture',()=>{
     expect(await rows(member)).toHaveLength(1)
     expect(await copyRows(member)).toHaveLength(1)
     expect(await readFileSegmentRange(actor,{fileId:file.id,fromIndex:0,toIndex:0})).toHaveLength(1)
+  })
+  it('refuses a page-derived memory as a typed error, saves nothing, and names the file path as recovery',async()=>{
+    const f=await fixture(),assistantId=randomUUID()
+    await pool.query("INSERT INTO assistants(id,workspace_id,owner_user_id,name,kind,clearance) VALUES($1,$2,$3,'Memory assistant','primary','confidential')",[assistantId,f.workspaceId,f.owner])
+    const page=await f.page()
+    const source=(await pool.query('SELECT read_scope_source($1,$2,$3) AS source',[f.workspaceId,'page_event_changed',page.page_event_revision])).rows[0].source
+    const summary=`Page-derived note ${randomUUID()}`
+    const error=await createMemory({workspaceId:f.workspaceId,userId:f.owner,assistantId,createdByUserId:f.owner,summary,sensitivity:'internal',
+      derivation:{producer:'page-memory-fixture',sources:[source]}}).catch(e=>e)
+    expect(error).toBeInstanceOf(DerivedScopeError)
+    expect(error.code).toBe('scope_output_not_integrated')
+    expect(describeScopeRefusal(error.message)).toContain('workspace file')
+    expect((await pool.query('SELECT id FROM memories WHERE summary=$1',[summary])).rows).toEqual([])
+    // The same evidence publishes as a file: the refusal names a path that works.
+    const file=await createWorkspaceFile(f.owner,{workspaceId:f.workspaceId,path:`/${randomUUID()}.txt`,parentPath:'/',name:'page-note.txt',mime:'text/plain',sizeBytes:1,storageUri:'fixture://page-note',createdByUserId:f.owner,source:'extracted'},
+      {derivation:{producer:'page-memory-fixture',sources:[source]}})
+    expect(file.id).toBeTruthy()
   })
   it('requires coherent transaction authority and all page dependencies at the SQL derivation reader',async()=>{
     const f=await fixture(),page=await f.page(),other=randomUUID()

@@ -5992,6 +5992,7 @@ export const zhCN: Dictionary = {
       runDetail: {
         sourceAccessChanged: "来源访问权限或内容已变更，因此执行已停止。开始新的执行前，请检查部门访问权限及已完成的步骤。",
         reviewDepartmentAccess: "检查部门访问权限",
+        pageOutputUnsupported: "某个步骤尝试将派生自页面的结果保存到尚无法保留页面来源脉络的位置，因此没有保存任何内容。请编辑工作流，改为将该结果保存为工作区文件。",
         evidenceUnavailable: "此运行开始于 Brian 记录目前所需的来源证据之前，因此其结果无法重复使用或继续。请从工作流重新运行一次；新的运行会以当前的访问权限读取来源。",
         openWorkflow: "打开工作流",
         backLink: "返回工作流程",

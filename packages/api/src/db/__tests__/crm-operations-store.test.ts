@@ -49,6 +49,8 @@ describe('[COMP:crm/operations-store] CRM operations PostgreSQL transaction stor
     expect(query.mock.calls.map((call) => call[0])).toEqual([
       'BEGIN',
       expect.stringContaining("set_config('app.system_bypass', 'true', true)"),
+      // Lock order: the module share lock precedes the workspace lock.
+      'SELECT 1 FROM workspace_modules WHERE workspace_id=$1 AND module_key=$2 FOR SHARE',
       'SELECT id FROM workspaces WHERE id=$1 AND department_read_v2 FOR UPDATE',
       'ROLLBACK',
     ])

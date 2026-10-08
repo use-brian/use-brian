@@ -6346,6 +6346,7 @@ export const en = {
       runDetail: {
         sourceAccessChanged: "Execution stopped because source access or content changed. Review department access and completed steps before starting a new run.",
         reviewDepartmentAccess: "Review department access",
+        pageOutputUnsupported: "A step tried to save a result derived from a page somewhere that cannot keep page lineage yet, so nothing was saved. Edit the workflow to save that result as a workspace file instead.",
         evidenceUnavailable: "This run started before Brian recorded the source evidence it now requires, so its results cannot be reused or resumed. Start a fresh run from the workflow; it reads its sources with current access.",
         openWorkflow: "Open workflow",
         backLink: "Back to workflow",

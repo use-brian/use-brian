@@ -8,6 +8,7 @@ import type { AwaitingApprovalEvent, ConfirmationResolver, ToolConfirmationReque
 import type { PermissionGrantEvaluator } from '../workflow/permission-grants.js'
 import { alreadyDeclinedToolResult, declinedToolResult, timedOutToolResult } from './decline-copy.js'
 import { canRead, isSensitivity } from '../security/sensitivity.js'
+import { describeScopeRefusal } from '../security/derived-scope.js'
 import { subsetCompartments } from '../security/compartments.js'
 import { scopeGrantContains } from '../security/context-scope.js'
 import { capToolResultTokens } from '../providers/context-budget.js'
@@ -234,7 +235,8 @@ export function formatToolError(err: unknown): string {
     const more = issues.length > 20 ? `\n…and ${issues.length - 20} more issue(s)` : ''
     return `Validation failed:\n${lines.join('\n')}${more}`
   }
-  return err instanceof Error ? err.message : String(err)
+  const message = err instanceof Error ? err.message : String(err)
+  return describeScopeRefusal(message) ?? message
 }
 
 /**

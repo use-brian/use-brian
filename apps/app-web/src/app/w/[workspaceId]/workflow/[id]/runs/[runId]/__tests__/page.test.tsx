@@ -228,6 +228,18 @@ describe("[COMP:app-web/workflow-detail-cache] run page", () => {
     expect(link?.getAttribute("href")).toBe(`/w/w1/workflow/${WF.id}`);
   });
 
+  it.each(["scope_output_not_integrated", "page_derivation_output_not_integrated"])("explains a page-derived output refused with %s and points at the workflow", async (code) => {
+    await loadSurfaceCache(workflowRunCacheKey("w1", RUN.id), async () => ({ ...RUN, status: "failed", error: { message: code } }));
+    await loadSurfaceCache(workflowDetailCacheKey("w1", WF.id), async () => WF);
+    api.getWorkflowRun.mockImplementation(pending);
+    api.getWorkflowFull.mockImplementation(pending);
+    await render();
+    expect(container.textContent).toContain(en.workflowPage.builder.runDetail.pageOutputUnsupported);
+    expect(container.textContent).not.toContain(code);
+    const link = [...container.querySelectorAll("a")].find(anchor => anchor.textContent === en.workflowPage.builder.runDetail.openWorkflow);
+    expect(link?.getAttribute("href")).toBe(`/w/w1/workflow/${WF.id}`);
+  });
+
   it("paints the run and the workflow header from warmed keys while both fetches are still pending", async () => {
     await loadSurfaceCache(workflowRunCacheKey("w1", "run-1234567890"), async () => RUN);
     await loadSurfaceCache(workflowDetailCacheKey("w1", "wf-1"), async () => WF);

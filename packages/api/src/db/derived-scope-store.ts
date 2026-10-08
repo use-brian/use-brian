@@ -188,4 +188,22 @@ export async function recordDerivedResource(
      SELECT $1,$2,t.kind,t.id,t.version FROM unnest($3::text[],$4::uuid[],$5::text[]) AS t(kind,id,version)`,
     [output.workspaceId, rows[0].id, list.map(s=>s.resourceKind), list.map(s=>s.resourceId), list.map(s=>s.version)],
   )
+  // Page lineage is enforced only on files and their segments (migration
+  // 730). For every other family, run the deferred dependency check now, so a
+  // page-derived write is refused here as a typed error with a recovery path
+  // instead of failing at COMMIT with a raw code.
+  if (!PAGE_LINEAGE_OUTPUT_KINDS.has(output.resourceKind)) {
+    try {
+      await client.query('SET CONSTRAINTS page_derivation_dependencies IMMEDIATE')
+    } catch (error) {
+      if (error instanceof Error && error.message === 'page_derivation_output_not_integrated') {
+        throw new DerivedScopeError('scope_output_not_integrated')
+      }
+      throw error
+    }
+    await client.query('SET CONSTRAINTS page_derivation_dependencies DEFERRED')
+  }
 }
+
+/** Output families whose readers enforce page ancestry. */
+const PAGE_LINEAGE_OUTPUT_KINDS = new Set(['workspace_file', 'file_segment'])
