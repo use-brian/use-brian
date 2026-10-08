@@ -8,7 +8,7 @@
 
 import { useEffect, useLayoutEffect, useRef } from "react";
 import { OfficeApiError, type OfficeArtifact } from "@/lib/office/api";
-import { invalidateSurfaceCache, seedSurfaceCache, useCachedResource, SurfaceCacheEvictionError, markSurfaceCacheStale, readSurfaceCache } from "@/lib/surface-cache";
+import { invalidateSurfaceCache, evictSurfaceCacheKey, seedSurfaceCache, useCachedResource, SurfaceCacheEvictionError, markSurfaceCacheStale, readSurfaceCache } from "@/lib/surface-cache";
 import { officePanelCachePrefix, officeListCacheKey, type OfficeListView } from "@/lib/surface-prefetch";
 
 /** Every lifecycle view the home lists, in the order a tap most likely came from. */
@@ -26,7 +26,7 @@ export function useOfficeMetadataResource<T>(key: string | null, viewerId: strin
     if (seedOwner.current.key !== key || !seedOwner.current.unused) return;
     seedOwner.current.unused = false;
     if (key && initialSeed && readSurfaceCache(key).data === undefined && readSurfaceCache(key).error === undefined)
-      seedSurfaceCache(key, initialSeed, {expiresInMs: value => officeMetadataRemaining(value, viewerId)}, seedIsHint);
+      seedSurfaceCache(key, initialSeed, {expiresInMs: value => officeMetadataRemaining(value, viewerId), keepInflightOnExpiry: true}, seedIsHint);
   }, [key, initialSeed, viewerId, seedIsHint]);
   const previous = useRef(key);
   useLayoutEffect(() => {
@@ -40,17 +40,16 @@ export function useOfficeMetadataResource<T>(key: string | null, viewerId: strin
         throw new SurfaceCacheEvictionError(error);
       throw error;
     }
-  }, {expiresInMs: value => officeMetadataRemaining(value, viewerId)});
+  }, {expiresInMs: value => officeMetadataRemaining(value, viewerId), keepInflightOnExpiry: true});
   const retained = cache.data ?? (cache.error === undefined ? initialSeed : undefined);
   useEffect(() => {
     if (!key) return;
-    // Keep a valid projection (and its in-flight refresh) only until its original
-    // deadline. Without one, detach a possibly stalled cold/recovery read so
-    // foreground entry can retry. Read the live slot, not a render-time closure:
-    // expiry or authority invalidation may have cleared it since the last render.
+    // Expire the value at its deadline, but join a pending read whose own
+    // request-start deadline is checked before publication. Multiple consumers
+    // must not cancel each other's cold reads on the same foreground event.
     const revalidate = () => {
       if (officeMetadataRemaining(readSurfaceCache(key).data, viewerId) <= 0)
-        invalidateSurfaceCache(key);
+        evictSurfaceCacheKey(key, {keepInflight: true});
       void cache.refresh();
     };
     const visible = () => {if (document.visibilityState === 'visible') revalidate();};
@@ -61,9 +60,9 @@ export function useOfficeMetadataResource<T>(key: string | null, viewerId: strin
   useEffect(() => {
     if (!key || !retained) return;
     const ttl = officeMetadataRemaining(retained, viewerId);
-    if (ttl <= 0) {invalidateSurfaceCache(key);return;}
+    if (ttl <= 0) {evictSurfaceCacheKey(key, {keepInflight: true});return;}
     // Also owns expiry for an already warm entry. A refresh failure cannot extend it.
-    const expiry = setTimeout(() => invalidateSurfaceCache(key), Math.ceil(ttl));
+    const expiry = setTimeout(() => evictSurfaceCacheKey(key, {keepInflight: true}), Math.ceil(ttl));
     const renew = ttl > 1000 ? setTimeout(() => {void cache.refresh();}, Math.max(500, ttl - Math.min(5000, ttl / 2))) : undefined;
     return () => {clearTimeout(expiry);clearTimeout(renew);};
   }, [key, viewerId, retained, cache.refresh]);
@@ -74,7 +73,7 @@ export function useOfficeMetadataResource<T>(key: string | null, viewerId: strin
 export function publishOfficeMetadataResource<T>(key:string|null,value:T,viewerId:string):boolean{
   if(!key||officeMetadataRemaining(value,viewerId)<=0)return false
   invalidateSurfaceCache(key)
-  return seedSurfaceCache(key,value,{expiresInMs:data=>officeMetadataRemaining(data,viewerId)})
+  return seedSurfaceCache(key,value,{expiresInMs:data=>officeMetadataRemaining(data,viewerId),keepInflightOnExpiry:true})
 }
 
 const OFFICE_LIST_VIEWS: readonly OfficeListView[] = ["active", "archived", "trash", "retained"];
