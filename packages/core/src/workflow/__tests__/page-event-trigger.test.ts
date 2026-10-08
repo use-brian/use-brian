@@ -38,6 +38,11 @@ const watch = (
 // ── Normalizer ──────────────────────────────────────────────────────────
 
 describe('[COMP:workflow/page-event-trigger] pageLifecycleToDispatchEvent', () => {
+  it('preserves the canonical receipt revision without changing the watched source', () => {
+    const event = pageLifecycleToDispatchEvent({ ...created, sourceVersion: 'canonical-revision' })
+    expect(event.payload.sourceVersion).toBe('canonical-revision')
+    expect(event.source).toEqual({ type: 'page', pageId: PARENT })
+  })
   it('targets the destination parent for a created page', () => {
     const ev = pageLifecycleToDispatchEvent(created)
     // Watched page = the parent (you watch a parent to hear about new children).

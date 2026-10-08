@@ -29,7 +29,7 @@ export function feedCollaborationRoutes(options: { generation?: FeedGenerationSe
       const kind = z.enum(['file', 'memory']).parse(req.query.kind)
       const actor: FeedActor = { userId: req.userId!, assistantId: req.params.assistantId, sessionId: req.params.sessionId, kind: 'user' }
       const sources = await withFeedTransaction(actor, (client, scope) => readFeedSelectedSources(client, actor, scope, kind, null), false)
-      res.json({ sources: sources.map(({ id, name, sensitivity }) => ({ id, name, sensitivity })) })
+      res.json({ sources: sources.map(({ id, name, sensitivity, compartments, departmentNames }) => ({ id, name, sensitivity, departmentNames: departmentNames ?? [], departmentCount: compartments?.length ?? 0 })) })
     } catch (error) { replyError(res, error) }
   })
   router.get(`${base}/collaboration`, async (req, res) => {

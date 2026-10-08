@@ -6,7 +6,7 @@ const state = vi.hoisted(() => ({
   read: [] as ScopeSource[][],
   next: null as null | ((sources: ScopeSource[]) => CurrentSourceState[]),
 }))
-vi.mock('../../db/client.js', () => ({ getPool: () => ({}) }))
+vi.mock('../../db/client.js', () => ({ getPool: () => ({ query: async (_sql: string, values: unknown[]) => ({ rows: (values[1] as string[]).map(()=>({dependencies:[]})) }) }) }))
 vi.mock('../../db/derived-scope-store.js', () => ({
   readCurrentScopeSources: async (_client: unknown, _workspaceId: string, sources: ScopeSource[]) => {
     state.read.push(sources)
@@ -134,6 +134,17 @@ describe('[COMP:api/caller-scope-evidence] department delivery boundary',()=>{
     await expect(validateAudienceScopeEvidence({sensitivity:'public',compartments:['team:finance']},v2)).rejects.toMatchObject({diagnostic:'teams'})
     await expect(validateAudienceScopeEvidence({sensitivity:'public',compartments:['team:sales']},
       {...v2,departmentRead:{...v2.departmentRead!,binding:[]}})).rejects.toMatchObject({diagnostic:'teams'})
+  })
+  it.each(['caller','audience'])('retains explicit Project and assistant limits for v2 %s evidence',async kind=>{
+    const validate=kind==='caller'?validateCallerScopeEvidence:validateAudienceScopeEvidence
+    const bounded={...v2,projectIds:['allowed'],visibilityAssistantIds:[primary]}
+    const evidence=source('bounded',{sensitivity:'confidential',compartments:['team:sales'],projectIds:['allowed']})
+    await expect(validate({sources:[evidence]},bounded)).resolves.toMatchObject({sensitivity:'confidential'})
+    await expect(validate({sources:[{...evidence,assistantId:other}]},bounded)).rejects.toMatchObject({diagnostic:'assistant_visibility'})
+    await expect(validate({sources:[{...evidence,projectIds:['forbidden']}]},bounded)).rejects.toMatchObject({diagnostic:'projects'})
+    await expect(validate({sensitivity:'public',projectIds:['forbidden']},bounded)).rejects.toMatchObject({diagnostic:'projects'})
+    state.next=sources=>sources.map(s=>({state:'changed',source:s,current:{...s,projectIds:['forbidden']}}))
+    await expect(validate({sources:[evidence]},bounded)).rejects.toMatchObject({diagnostic:'source_reclassified'})
   })
   it('checks each source independently so department evidence cannot authorize General secrets',async()=>{
     await expect(validateAudienceScopeEvidence({sources:[

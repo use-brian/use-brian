@@ -84,17 +84,15 @@ import {
   getBrainGraph,
   listBrain,
   primitivesToGraphKinds,
-  projectInboxRowToBrainRow,
   type BrainFacets,
   type BrainGraph,
   type BrainRow,
 } from "@/lib/api/brain";
-import { fetchBrainRow } from "@/lib/api/brain-inbox";
 import { useBrainEntries } from "@/lib/use-brain-entries";
 import { ChunkSentinel } from "@/components/chrome/chunk-sentinel";
 import { useCachedResource } from "@/lib/surface-cache";
 import { brainGraphCacheKey } from "@/lib/surface-prefetch";
-import { parseBrainDeepLink } from "@/lib/brain-deep-link";
+import { useBrainRowDeepLink } from "@/lib/use-brain-row-deep-link";
 import { parseAuditDeepLink, type AuditTurn } from "@/lib/turn-audit";
 import {
   listWorkspaceSkills,
@@ -285,36 +283,7 @@ function BrainPageInner() {
   // behind the "completed" fold — the two cases an inbound link (a Slack
   // digest pointing at a shipped task) hits most. A miss (deleted row, wrong
   // workspace, revoked clearance) leaves the plain list standing.
-  const deepLinkedRef = useRef<string | null>(null);
-  useEffect(() => {
-    if (!activeId) return;
-    const link = parseBrainDeepLink(
-      new URLSearchParams(searchParams.toString()),
-    );
-    if (!link) return;
-    if (deepLinkedRef.current === link.rowId) return;
-    deepLinkedRef.current = link.rowId;
-
-    let cancelled = false;
-    void fetchBrainRow(
-      activeId,
-      link.primitive,
-      link.rowId,
-      cacheScope,
-    ).then((detail) => {
-      if (cancelled || !detail) return;
-      setSelected({
-        ...projectInboxRowToBrainRow(detail),
-        // The projection hardcodes `hasPending` — it exists for the inbox,
-        // which by definition holds unverified rows. A deep link addresses ANY
-        // live row, so the real verified state decides.
-        hasPending: detail.verifiedAt == null,
-      });
-    });
-    return () => {
-      cancelled = true;
-    };
-  }, [activeId, searchParams, cacheScope]);
+  useBrainRowDeepLink(searchParams.toString(), cacheScope, setSelected);
   // Completed (done / archived) tasks — fetched separately from the main list
   // (which hides them) so the grouped view can tuck them behind a "Show
   // completed" disclosure that leads with live work. Only fetched when tasks

@@ -1,6 +1,6 @@
 "use client";
 
-/** Audited Team/Project scope editor shared by detail surfaces. [COMP:app-web/context-scope] */
+/** Audited department/project scope editor shared by detail surfaces. [COMP:app-web/context-scope] */
 import { useEffect, useState } from "react";
 import { Dialog } from "@base-ui/react/dialog";
 import { Button } from "@/components/ui/button";
@@ -41,6 +41,8 @@ export function ReclassifyContextButton({
   const [reason, setReason] = useState("");
   const [loading, setLoading] = useState(false);
   const [saving, setSaving] = useState(false);
+  const [ready, setReady] = useState(false);
+  const [reload, setReload] = useState(0);
   const [error, setError] = useState<string | null>(null);
   const [displayTeams, setDisplayTeams] = useState<ContextTeam[]>([]);
   const [displayProjects, setDisplayProjects] = useState<ContextProject[]>([]);
@@ -72,6 +74,12 @@ export function ReclassifyContextButton({
     if (!open) return;
     let cancelled = false;
     setLoading(true);
+    setReady(false);
+    setTeamIds([]);
+    setProjectIds([]);
+    setTeams([]);
+    setProjects([]);
+    setReason("");
     setError(null);
     void Promise.all([
       listContextTeams(workspaceId),
@@ -83,6 +91,8 @@ export function ReclassifyContextButton({
       setProjects(nextProjects);
       setTeamIds(context.teamIds);
       setProjectIds(context.projectIds);
+      setHasRestrictedContext(context.hasOtherCompartments);
+      setReady(true);
       setInitialTeams(context.teamIds);
       setInitialProjects(context.projectIds);
       setReason("");
@@ -90,7 +100,7 @@ export function ReclassifyContextButton({
       if (!cancelled) setError(cause instanceof Error ? cause.message : t.loadFailed);
     }).finally(() => { if (!cancelled) setLoading(false); });
     return () => { cancelled = true; };
-  }, [open, workspaceId, primitive, rowId, t.loadFailed]);
+  }, [open, workspaceId, primitive, rowId, t.loadFailed, reload]);
 
   function toggleTeam(id: string, enabled: boolean) {
     setTeamIds((current) => enabled ? [...new Set([...current, id])] : current.filter((value) => value !== id));
@@ -104,9 +114,8 @@ export function ReclassifyContextButton({
   }
 
   async function save() {
-    if (!reason.trim() || saving) return;
-    const widening = initialTeams.some((id) => !teamIds.includes(id))
-      || (initialProjects.length > 0 && projectIds.length === 0);
+    if (!ready || loading || !reason.trim() || saving) return;
+    const widening = initialTeams.some((id) => !teamIds.includes(id));
     let confirmed = false;
     if (widening) {
       confirmed = await confirmDialog({
@@ -158,24 +167,25 @@ export function ReclassifyContextButton({
       <Dialog.Root open={open} onOpenChange={(next) => { if (!saving) setOpen(next); }}>
         <Dialog.Portal>
           <Dialog.Backdrop className="fixed inset-0 z-50 bg-background/80 backdrop-blur-sm" />
-          <Dialog.Popup className="fixed left-1/2 top-1/2 z-50 max-h-[85vh] w-[calc(100%-2rem)] max-w-xl -translate-x-1/2 -translate-y-1/2 overflow-y-auto rounded-2xl border border-border bg-background p-6 shadow-xl">
+          <Dialog.Popup className="fixed left-1/2 top-1/2 z-50 max-h-[85dvh] w-[calc(100%-2rem)] max-w-xl -translate-x-1/2 -translate-y-1/2 overflow-y-auto rounded-2xl border border-border bg-background p-6 shadow-xl">
             <Dialog.Title className="text-base font-semibold">{t.reclassifyTitle}</Dialog.Title>
-            <Dialog.Description className="mt-1 text-sm text-muted-foreground">{t.reclassifyDescription}</Dialog.Description>
+            <Dialog.Description className="mt-1 text-sm text-muted-foreground">{t.reclassifyDescription} {t.projectAccessHint}</Dialog.Description>
             {loading ? <p className="mt-4 text-sm text-muted-foreground">{t.loading}</p> : (
               <div className="mt-5 space-y-5">
+                {ready ? <ContextScopeChips teamIds={teamIds} projectIds={projectIds} teams={teams} projects={projects} hasRestrictedContext={hasRestrictedContext} /> : null}
                 <fieldset>
-                  <legend className="text-xs font-medium uppercase tracking-wide text-muted-foreground">{t.teamGrants}</legend>
+                  <legend className="text-xs font-medium uppercase tracking-wide text-muted-foreground">{t.team}</legend>
                   <div className="mt-2 grid gap-2 sm:grid-cols-2">
                     {teams.filter((team) => team.status === "active").map((team) => (
-                      <label key={team.id} className="flex items-center gap-2 rounded-lg border border-border px-3 py-2 text-sm"><Checkbox checked={teamIds.includes(team.id)} onCheckedChange={(value) => toggleTeam(team.id, Boolean(value))} />{team.name}</label>
+                      <label key={team.id} className="flex min-h-8 max-sm:min-h-11 items-center gap-2 rounded-lg border border-border px-3 py-2 text-sm"><Checkbox checked={teamIds.includes(team.id)} onCheckedChange={(value) => toggleTeam(team.id, Boolean(value))} />{team.name}</label>
                     ))}
                   </div>
                 </fieldset>
                 <fieldset>
-                  <legend className="text-xs font-medium uppercase tracking-wide text-muted-foreground">{t.projectGrants}</legend>
+                  <legend className="text-xs font-medium uppercase tracking-wide text-muted-foreground">{t.project}</legend>
                   <div className="mt-2 grid gap-2 sm:grid-cols-2">
                     {projects.filter((project) => project.status === "active").map((project) => (
-                      <label key={project.id} className="flex items-center gap-2 rounded-lg border border-border px-3 py-2 text-sm"><Checkbox checked={projectIds.includes(project.id)} onCheckedChange={(value) => toggleProject(project.id, Boolean(value))} />{project.name}</label>
+                      <label key={project.id} className="flex min-h-8 max-sm:min-h-11 items-center gap-2 rounded-lg border border-border px-3 py-2 text-sm"><Checkbox checked={projectIds.includes(project.id)} onCheckedChange={(value) => toggleProject(project.id, Boolean(value))} />{project.name}</label>
                     ))}
                   </div>
                 </fieldset>
@@ -185,8 +195,8 @@ export function ReclassifyContextButton({
                 </label>
               </div>
             )}
-            {error ? <p role="alert" className="mt-3 text-xs text-destructive">{error}</p> : null}
-            <div className="mt-5 flex justify-end gap-2"><Button variant="outline" onClick={() => setOpen(false)} disabled={saving}>{t.cancel}</Button><Button onClick={() => void save()} disabled={loading || saving || !reason.trim()}>{saving ? t.saving : t.saveContext}</Button></div>
+            {error ? <div className="mt-3"><p role="alert" className="text-xs text-destructive">{error}</p>{!ready && !loading ? <Button variant="outline" onClick={() => setReload((value) => value + 1)}>{t.reclassifyRetry}</Button> : null}</div> : null}
+            <div className="mt-5 flex justify-end gap-2"><Button variant="outline" onClick={() => setOpen(false)} disabled={saving}>{t.cancel}</Button><Button onClick={() => void save()} disabled={!ready || loading || saving || !reason.trim()}>{saving ? t.saving : t.saveContext}</Button></div>
           </Dialog.Popup>
         </Dialog.Portal>
       </Dialog.Root>

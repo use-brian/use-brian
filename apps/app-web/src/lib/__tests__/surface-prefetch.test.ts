@@ -506,7 +506,8 @@ describe("[COMP:app-web/surface-prefetch] shell keys (home dock, sidebar tree)",
 // The Live roster and Inbox flyout keys (Phase 3 step 2, report E "Live" and
 // "Inbox (flyout)" rows). A separate import keeps this block independent of
 // the lists above.
-vi.mock("@/lib/api/live", () => ({ fetchLiveRoster: vi.fn() }));
+vi.mock("@/lib/api/live", () => ({
+  liveRosterRemaining: () => 30_000, fetchLiveRoster: vi.fn() }));
 import {
   inboxCacheKey,
   liveRosterCacheKey,

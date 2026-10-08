@@ -436,6 +436,42 @@ describe("[COMP:app-web/feed-surface-cache] the disk tier", () => {
     expect(await readFeedCachedJson("record:feed-workspace:ws-1")).toBeNull();
   });
 
+  it("does not restore a slow disk seed after the network denies the read", async () => {
+    const key="feed-collaboration:revoked";
+    let diskDone!: (value:string) => void;
+    const denied=new Error("access_denied");
+    const request=loadSurfaceCache(key,()=>feedPaintFirst(key,
+      ()=>new Promise<string>(resolve=>{diskDone=resolve;}),
+      async()=>{throw denied;},
+    ));
+    await Promise.resolve(); await Promise.resolve();
+    diskDone("protected stale draft");
+    await request;
+    expect(readSurfaceCache(key).data).toBeUndefined();
+    expect(readSurfaceCache(key).error).toBe(denied);
+  });
+
+  it("prefers an already completed network read to a late disk seed", async () => {
+    const key="feed-collaboration:fresh";
+    let diskDone!: (value:string) => void;
+    const request=loadSurfaceCache(key,()=>feedPaintFirst(key,
+      ()=>new Promise<string>(resolve=>{diskDone=resolve;}),async()=>"current draft"));
+    await Promise.resolve(); await Promise.resolve();
+    diskDone("old draft");
+    await request;
+    expect(readSurfaceCache(key).data).toBe("current draft");
+  });
+
+  it("does not let an obsolete background response replace a newer cache entry", async () => {
+    const key="feed-collaboration:newer";
+    let reply!: (value:string)=>void;
+    await loadSurfaceCache(key,()=>feedPaintFirst(key,async()=>"old disk",()=>new Promise<string>(resolve=>{reply=resolve;})));
+    await loadSurfaceCache(key,async()=>"newer read");
+    reply("obsolete response");
+    await new Promise(resolve=>setTimeout(resolve,10));
+    expect(readSurfaceCache(key).data).toBe("newer read");
+  });
+
   it("answers a cold key from disk first and lands the network value behind it", async () => {
     const key = "feed-workspace:ws-1:u1";
     let resolveNetwork: (value: string) => void = () => {};
@@ -452,7 +488,7 @@ describe("[COMP:app-web/feed-surface-cache] the disk tier", () => {
 
     resolveNetwork("from-network");
     await settle();
-    expect(readSurfaceCache<string>(key).data).toBe("from-network");
+    await vi.waitFor(() => expect(readSurfaceCache<string>(key).data).toBe("from-network"));
 
     // A WARM key is network-only: disk is never consulted again.
     const disk = vi.fn(async () => "stale-disk");

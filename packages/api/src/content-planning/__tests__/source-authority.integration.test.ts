@@ -37,6 +37,41 @@ async function attach(actor: FeedActor, fileId: string, kind: 'user' | 'assistan
 }
 
 describe('[COMP:feed/source-authority] exact selection, isolation, provenance and release', () => {
+  it('does not let a v2 workspace owner select department sources without an edge', async () => {
+    const f = await fixture(), custodian=randomUUID(), department=randomUUID()
+    await query('UPDATE workspaces SET department_read_v2=true WHERE id=$1',[f.workspaceId])
+    await query("INSERT INTO users(id,auth_provider,auth_provider_id) VALUES($1::uuid,'test',$1::text)",[custodian])
+    await query("INSERT INTO workspace_members(workspace_id,user_id,role,clearance) VALUES($1,$2,'admin','confidential')",[f.workspaceId,custodian])
+    await query("INSERT INTO workspace_groups(id,workspace_id,name,created_by,kind,key,compartment_key) VALUES($1::uuid,$2,'Research',$3,'team',$1::text,$4)",[department,f.workspaceId,custodian,`team:${department}`])
+    await query("INSERT INTO workspace_compartments(workspace_id,key,label,managed_by,managed_ref_id) VALUES($1,$2,'Research','team',$3)",[f.workspaceId,`team:${department}`,department])
+    const id=await f.file('confidential',[`team:${department}`])
+    expect((await query('SELECT compartments FROM workspace_files WHERE id=$1',[id])).rows[0].compartments).toEqual([`team:${department}`])
+    expect((await query("SELECT feed_member_source_allows($1,$2,'confidential',$3,NULL) AS allowed",[f.workspaceId,f.actor.userId,[`team:${department}`]])).rows[0].allowed).toBe(false)
+    await expect(attach(f.actor,id)).rejects.toMatchObject({code:'file_not_available_to_draft'})
+    await query("INSERT INTO department_edges(workspace_id,department_id,principal_kind,user_id,clearance,origin) VALUES($1,$2,'user',$3,'confidential','store')",[f.workspaceId,department,f.actor.userId])
+    const member=randomUUID()
+    await query("INSERT INTO users(id,auth_provider,auth_provider_id) VALUES($1::uuid,'test',$1::text)",[member])
+    await query("INSERT INTO workspace_members(workspace_id,user_id,role,clearance) VALUES($1,$2,'member','public')",[f.workspaceId,member])
+    await query("INSERT INTO department_edges(workspace_id,department_id,principal_kind,user_id,clearance,origin) VALUES($1,$2,'user',$3,'confidential','store')",[f.workspaceId,department,member])
+    await attach(f.actor,id)
+    const copy=(await getFeedCollaboration(f.actor)).copy!
+    expect(copy.content.sourceSensitivity).toBe('confidential')
+    expect(copy.content.sourceCompartments).toContain(`team:${department}`)
+    await executeFeedCommands(f.actor,{mutationId:randomUUID(),expectedRevision:copy.revision,commands:[{kind:'release',audience:'public'}]})
+    expect((await query('SELECT sensitivity FROM workspace_files WHERE id=$1',[id])).rows[0].sensitivity).toBe('confidential')
+    await query("UPDATE department_edges SET clearance='internal' WHERE workspace_id=$1 AND user_id=$2",[f.workspaceId,member])
+    await expect(getFeedCollaboration(f.actor)).rejects.toMatchObject({code:'draft_source_access_required'})
+    await query("UPDATE department_edges SET clearance='confidential',expires_at=now()-interval '1 second' WHERE workspace_id=$1 AND user_id=$2",[f.workspaceId,member])
+    expect((await query('SELECT feed_draft_audience_allowed($1) AS allowed',[f.actor.sessionId])).rows[0].allowed).toBe(false)
+    await query("UPDATE department_edges SET expires_at=NULL WHERE workspace_id=$1 AND user_id=$2",[f.workspaceId,member])
+    expect((await getFeedCollaboration(f.actor)).copy?.revision).toBe(copy.revision)
+    // A source's later release to General cannot erase the draft's saved floor.
+    await query("UPDATE workspace_files SET sensitivity='public',compartments='{}' WHERE id=$1",[id])
+    await query('DELETE FROM department_edges WHERE workspace_id=$1 AND user_id=$2',[f.workspaceId,member])
+    await expect(getFeedCollaboration(f.actor)).rejects.toMatchObject({code:'draft_source_access_required'})
+    expect((await app.query('SELECT feed_draft_audience_allowed($1) AS allowed',[f.actor.sessionId])).rows[0].allowed).toBe(false)
+    await expect(app.query("SELECT feed_member_source_allows($1,$2,'public','{}',NULL)",[f.workspaceId,member])).rejects.toMatchObject({code:'42501'})
+  })
   it('syncs a member-selected Internal image with a Public assistant without declassifying either', async () => {
     const f = await fixture(), id = await f.file()
     await attach(f.actor, id)

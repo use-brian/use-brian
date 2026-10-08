@@ -302,6 +302,45 @@ async function seedWorkflowAndRun(
 // ── Tests ────────────────────────────────────────────────────────────────
 
 describe('[COMP:workflow/executor] advanceWorkflowRun', () => {
+  it.each([false, true])('waits for durable evidence before dispatch (save fails: %s)', async failSave => {
+    const capture = vi.fn()
+    const tool = makeFakeTool('publishFixture', { capture })
+    const deps = makeDeps({ buildToolRegistry: async () => new Map([[tool.name, tool]]) })
+    const { run } = await seedWorkflowAndRun(deps, {
+      startStepId: 'publish',
+      steps: [{ id: 'publish', type: 'tool_call', toolName: tool.name, arguments: {} }],
+    })
+    let release!: () => void
+    let entered!: () => void
+    const gate = new Promise<void>(resolve => { release = resolve })
+    const saving = new Promise<void>(resolve => { entered = resolve })
+    const updateRun = deps.runStore.updateRun.bind(deps.runStore)
+    deps.runStore.updateRun = async (id, patch) => {
+      if (patch.vars?.__frontier) {
+        expect(patch.vars.__contextScopeEvidence).toBeDefined()
+        entered()
+        await gate
+        if (failSave) throw new Error('fixture persistence unavailable')
+      }
+      return updateRun(id, patch)
+    }
+    const execution = advanceWorkflowRun(deps, run.id)
+    // Attach the rejection handler immediately; the assertion follows below.
+    const settled = execution.then(value => ({ value }), error => ({ error }))
+    await saving
+    await new Promise(resolve => setTimeout(resolve, 0))
+    expect(capture).not.toHaveBeenCalled()
+    expect(await deps.runStore.listStepRuns(USER_ID, run.id)).toEqual([])
+    release()
+    const result = await settled
+    if (failSave) {
+      expect(result).toHaveProperty('error.message', 'fixture persistence unavailable')
+      expect(capture).not.toHaveBeenCalled()
+    } else {
+      expect(result).toHaveProperty('value.kind', 'completed')
+      expect(capture).toHaveBeenCalledTimes(1)
+    }
+  })
   it('withholds delivery and step output if authority changes during generation', async () => {
     let revoked=false
     const deliverToChannel=vi.fn(async()=>({status:'delivered' as const,channelType:'slack' as const,channelId:'fixture-channel'}))
@@ -327,18 +366,22 @@ describe('[COMP:workflow/executor] advanceWorkflowRun', () => {
     expect(steps[0].status).toBe('failed')
     expect(JSON.stringify(steps[0].output)).not.toContain('private result')
   })
-  it('threads the server-resolved run ceiling into an unattended consult', async () => {
+  it.each(['crm_event','blueprint_record'])('captures copied %s evidence before resolving the unattended consult ceiling', async kind => {
+    let captured=false
     const requests: ConsultRequest[] = []
-    const source = { resourceKind:'crm_event',resourceId:'event-fixture',version:'1',
+    const source = { resourceKind:kind,resourceId:'source-fixture',version:'1',
       workspaceId:WORKSPACE_ID,userId:null,assistantId:null,sensitivity:'internal' as const,
       compartments:['product'],projectIds:[] }
-    const resolveRunScope = vi.fn(async () => ({ assistantClearance:'internal' as const, turnScope:{
+    const resolveRunScope = vi.fn(async () => {
+      if(!captured)throw new Error('Copy evidence was not captured before scope resolution')
+      return { assistantClearance:'internal' as const, turnScope:{
       access:{workspaceId:WORKSPACE_ID,userId:USER_ID,assistantId:PRIMARY_ASSISTANT_ID,assistantKind:'primary' as const,
         clearance:'internal' as const,compartments:['product'],projectIds:[],visibilityAssistantIds:[]},
       activeGroupId:null,activeProjectId:null,effectiveCompartments:['product'],effectiveProjectIds:[],
       writeCompartments:['product'],writeProjectIds:[],
-    },inputScopeEvidence:{sources:[source]} }))
+    },inputScopeEvidence:{sources:[source]} }})
     const deps = makeDeps({resolveRunScope,consultTransport:{async send(request){requests.push(request);return makeConsultTransport().send(request)}}})
+    vi.spyOn(deps.runStore,'getLatestOutcomeForWorkflowSystem').mockImplementation(async()=>{captured=true;return {status:'completed',summary:'Copied source',logs:[],blockers:[],todo:[],state:{},finishedAt:'2026-01-01T00:00:00Z'}})
     const {run}=await seedWorkflowAndRun(deps,{startStepId:'consult',steps:[{
       id:'consult',type:'assistant_call',target:{assistantId:'primary'},prompt:'Read the authorized material',
     }]},'schedule')
@@ -3070,7 +3113,7 @@ describe('[COMP:workflow/executor] deliver.thread — reply-in-thread delivery',
 
 
 describe('executor cancellation', () => {
-  it.each(['before', 'scope', 'scope_reject', 'registry', 'registry_reject', 'tool', 'tool_reject'] as const)(
+  it.each(['before', 'scope', 'scope_reject', 'registry', 'registry_reject', 'frontier', 'tool', 'tool_reject'] as const)(
     'persists terminal cancellation during %s without running successors', async stage => {
       const stores = makeFakeStores()
       const controller = new AbortController()
@@ -3104,6 +3147,13 @@ describe('executor cancellation', () => {
           return registry
         },
       })
+      if (stage === 'frontier') {
+        const updateRun = deps.runStore.updateRun.bind(deps.runStore)
+        deps.runStore.updateRun = async (id, patch) => {
+          if (patch.vars?.__frontier) await pause()
+          return updateRun(id, patch)
+        }
+      }
       if (stage.startsWith('scope')) deps.resolveRunScope = async () => {
         await pause()
         if (stage === 'scope_reject') throw new Error('aborted scope')

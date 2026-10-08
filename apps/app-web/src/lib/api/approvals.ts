@@ -1,3 +1,4 @@
+import { SurfaceCacheEvictionError } from "@/lib/surface-cache";
 import { publicRuntimeConfig } from "@/lib/runtime-public-config";
 /**
  * SDK for the unified approval queue (app-web).
@@ -108,7 +109,7 @@ export type PendingApprovalRow = {
 export type RespondResult =
   | { ok: true; status: string }
   | { ok: false; nativeSurface: string; blockingSessionId: string | null }
-  | { ok: false; error: string };
+  | { ok: false; error: string; status?: number };
 
 /** List every pending approval for the workspace. */
 export async function listApprovals(
@@ -118,7 +119,11 @@ export async function listApprovals(
   const q = new URLSearchParams({ workspaceId });
   const res = await authFetch(`${API_URL}/api/approvals?${q.toString()}`);
   if (!res.ok) {
-    if (options?.throwOnError) throw new Error(`Could not load approvals (${res.status}).`);
+    if (options?.throwOnError) {
+      const error = new Error(`Could not load approvals (${res.status}).`);
+      if ([401, 403, 404].includes(res.status)) throw new SurfaceCacheEvictionError(error);
+      throw error;
+    }
     return [];
   }
   const data = (await res.json()) as { approvals?: PendingApprovalRow[] };
@@ -242,7 +247,7 @@ async function respondToApproval(
       blockingSessionId: data.blockingSessionId ?? null,
     };
   }
-  return { ok: false, error: data.error ?? "Request failed" };
+  return { ok: false, error: data.error ?? "Request failed", status: res.status };
 }
 
 // ── Curator approvals (staged_skill_* / workflow_refinement) ──────────
@@ -351,7 +356,7 @@ export async function respondToSkillApproval(
   if (res.ok) {
     return { ok: true, status: data.status ?? "resolved" };
   }
-  return { ok: false, error: data.detail ?? data.error ?? "Request failed" };
+  return { ok: false, error: data.detail ?? data.error ?? "Request failed", status: res.status };
 }
 
 /** Kind-aware respond dispatch — the queue's single action entry point.

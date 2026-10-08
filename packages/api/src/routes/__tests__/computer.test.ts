@@ -1,18 +1,21 @@
-import { describe, it, expect, beforeEach } from 'vitest'
+import { describe, it, expect, beforeEach, vi } from 'vitest'
 import request from 'supertest'
 import { createTestApp } from './helpers.js'
 import { computerRoutes, createInMemoryLocalComputerTaskStore } from '../computer.js'
 import {
   BrowserBackendError,
+  BrowserProfileAuthoritySchema,
   StubSandboxProvider,
   createCloudBrowserProvider,
   createInMemoryBrowserProfileStore,
+  createInMemoryBrowserSkillGrantStore,
   createInMemorySandboxTaskStore,
   createInMemorySessionVault,
   createLocalBrowserProvider,
   createSandboxOrchestrator,
 } from '@use-brian/core'
 import type {
+  DepartmentReadGrant,
   BrowserAuthBroker,
   BrowserCredentialAdminStore,
   BrowserCredentialMetadata,
@@ -22,6 +25,56 @@ import type {
 const MEMBER_ROLE = async (_userId: string, _workspaceId: string) => 'member'
 
 describe('[COMP:routes/computer] Take-Over live view + backend toggle + Profile-Management routes', () => {
+  it('requires current membership for the browser destination directory and denies lookup failures', async () => {
+    const preview = vi.fn(async () => ({ departments: [{ id: 'dept', name: 'Visible', clearance: 'internal' as const }] }))
+    const role = vi.fn(async () => 'member' as string | null)
+    const app = createTestApp('/api/computer', computerRoutes({
+      orchestrator: null, provider: null, vault: null, profileStore: null, getWorkspaceRole: role,
+      previewProfileDestination: preview, setSessionBackend: () => {},
+    }), { userId: 'user-1' })
+    const get = () => request(app).get('/api/computer/profile-destinations?workspaceId=ws-1')
+    const allowed = await get()
+    expect(allowed.status).toBe(200)
+    expect(allowed.headers['cache-control']).toBe('no-store')
+    expect(preview).toHaveBeenCalledWith('user-1', 'ws-1')
+    role.mockResolvedValueOnce(null)
+    expect((await get()).status).toBe(403)
+    expect(preview).toHaveBeenCalledTimes(1)
+    preview.mockRejectedValueOnce(new Error('hidden department details'))
+    expect((await get()).body).toEqual({ code: 'not_authorized' })
+  })
+
+  it('requires and persists admitted department ownership for shared v2 creation', async () => {
+    const departmentId = '00000000-0000-4000-8000-000000000123'
+    const store = createInMemoryBrowserProfileStore()
+    const admit = vi.fn(async () => {})
+    const grant: DepartmentReadGrant = { workspaceId: 'ws-1', userId: 'user-1', assistantId: null,
+      base: 'public', departments: { [departmentId]: 'confidential' }, contextDepartment: null, binding: null, cap: null }
+    const build = (admission = true) => createTestApp('/api/computer', computerRoutes({
+      orchestrator: null, provider: null, vault: null, profileStore: store,
+      getWorkspaceRole: MEMBER_ROLE, getProfileReadGrant: async () => grant,
+      ...(admission ? { admitProfileDestination: admit } : {}), setSessionBackend: () => {},
+    }), { userId: 'user-1' })
+    const body = { workspaceId: 'ws-1', name: 'Department identity', scope: 'workspace', clearance: 'confidential' }
+    expect((await request(build()).post('/api/computer/profiles').send(body)).body.code).toBe('department_required')
+    expect((await request(build(false)).post('/api/computer/profiles').send({ ...body, departmentId })).status).toBe(403)
+    admit.mockRejectedValueOnce(new Error('unavailable private department'))
+    const denied = await request(build()).post('/api/computer/profiles').send({ ...body, departmentId })
+    expect(denied.status).toBe(403)
+    expect(JSON.stringify(denied.body)).not.toContain('private department')
+    expect(await store.list({ workspaceId: 'ws-1' })).toHaveLength(0)
+    const allowed = await request(build()).post('/api/computer/profiles').send({ ...body, departmentId })
+    expect(allowed.status).toBe(200)
+    expect(allowed.body.profile.departmentId).toBe(departmentId)
+    expect(admit).toHaveBeenLastCalledWith('user-1', 'ws-1', { departmentId, sensitivity: 'confidential' })
+    const create = vi.spyOn(store, 'create').mockRejectedValueOnce(Object.assign(new Error('private persistence detail'), { code: 'profile_authority_denied' }))
+    const raced = await request(build()).post('/api/computer/profiles').send({ ...body, departmentId })
+    expect(raced.status).toBe(403)
+    expect(raced.body.code).toBe('not_authorized')
+    expect(JSON.stringify(raced.body)).not.toContain('private persistence detail')
+    expect(create).toHaveBeenLastCalledWith(expect.objectContaining({ ownerUserId: 'user-1', departmentId }), { userId: 'user-1' })
+  })
+
   let provider: StubSandboxProvider
   let orchestrator: ReturnType<typeof createSandboxOrchestrator>
   let vault: ReturnType<typeof createInMemorySessionVault>
@@ -38,7 +91,24 @@ describe('[COMP:routes/computer] Take-Over live view + backend toggle + Profile-
   let authBroker: BrowserAuthBroker
   let app: ReturnType<typeof createTestApp>
 
-  function makeApp(userId: string) {
+  it('passes admitted profiles into credential writes and hides persistence authority errors', async () => {
+    const denied=Object.assign(new Error('private credential authority detail'),{code:'profile_authority_denied'})
+    const save=vi.spyOn(credentials,'upsert').mockRejectedValueOnce(denied)
+    const response=await request(app).post(`/api/computer/profiles/${profileId}/credentials`)
+      .send({loginUrl:'https://portal.example/login',username:'fictional@example.com',password:'fictional-secret'})
+    expect(response.status).toBe(403)
+    expect(response.body.code).toBe('not_authorized')
+    expect(JSON.stringify(response.body)).not.toContain('private credential authority detail')
+    expect(response.body.credential).toBeUndefined()
+    expect(save).toHaveBeenCalledWith(expect.objectContaining({profileId}),expect.objectContaining({id:profileId}))
+    const revoke=vi.spyOn(credentials,'revoke').mockRejectedValueOnce(denied)
+    const removed=await request(app).delete(`/api/computer/profiles/${profileId}/credentials/fictional-credential`)
+    expect(removed.status).toBe(403)
+    expect(removed.body.ok).toBeUndefined()
+    expect(revoke).toHaveBeenCalledWith({profileId,credentialId:'fictional-credential'},expect.objectContaining({id:profileId}))
+  })
+
+  function makeApp(userId: string, getProfileReadGrant?: (userId: string, workspaceId: string) => Promise<DepartmentReadGrant | null>) {
     return createTestApp(
       '/api/computer',
       computerRoutes({
@@ -52,6 +122,7 @@ describe('[COMP:routes/computer] Take-Over live view + backend toggle + Profile-
         credentials,
         authBroker,
         getWorkspaceRole: MEMBER_ROLE,
+        getProfileReadGrant,
         setSessionBackend: (sessionId, backend) => void backendFlips.push({ sessionId, backend }),
       }),
       { userId },
@@ -100,10 +171,10 @@ describe('[COMP:routes/computer] Take-Over live view + backend toggle + Profile-
     }
     authBroker = {
       async authenticate(params) {
-        return { kind: 'authenticated', credentialId: params.credentialId ?? 'cred-1', site: params.site }
+        return { kind: 'authenticated', credentialId: params.credentialId ?? 'cred-1', credentialVersion: 'fixture-version', site: params.site }
       },
     }
-    localProvider = createLocalBrowserProvider({
+    localProvider = createLocalBrowserProvider({ admit: async () => async () => {},
       transport: {
         async send({ op, args }) {
           localOps.push({ op, args })
@@ -144,6 +215,139 @@ describe('[COMP:routes/computer] Take-Over live view + backend toggle + Profile-
       'https://github.com/notifications',
     )
     app = makeApp('user-1')
+  })
+
+  async function restartCloudTaskWithCurrentProfile() {
+    await orchestrator.completeTask('sess-1', 'failed')
+    await createCloudBrowserProvider({provider,binding:orchestrator.binding}).navigate(
+      {userId:'user-1',workspaceId:'ws-1',sessionId:'sess-1',profileId}, 'https://portal.example/account')
+  }
+
+  it.each(['cloud', 'local'] as const)('renews department access for %s live task disclosure and control', async (backend) => {
+    await profileStore.update(profileId, { scope: 'workspace', departmentId: 'department-1' })
+    if (backend === 'cloud') await restartCloudTaskWithCurrentProfile()
+    if (backend === 'local') localTasks.touch({ profileAuthority: BrowserProfileAuthoritySchema.parse(await profileStore.get(profileId)), userId: 'user-1', workspaceId: 'ws-1', sessionId: 'sess-1', profileId })
+    let allowed = true
+    app = makeApp('user-1', async (): Promise<DepartmentReadGrant> => ({ workspaceId: 'ws-1', userId: 'user-1', assistantId: null,
+      base: 'public', departments: allowed ? { 'department-1': 'confidential' } : {},
+      contextDepartment: null, binding: null, cap: null }))
+    expect((await request(app).get('/api/computer/tasks/sess-1')).status).toBe(200)
+    allowed = false
+    const providerCalls = localOps.length
+    expect((await request(app).get('/api/computer/tasks?workspaceId=ws-1')).body.tasks).toEqual([])
+    for (const suffix of ['', '/frame']) {
+      expect((await request(app).get(`/api/computer/tasks/sess-1${suffix}`)).status).toBe(404)
+    }
+    for (const suffix of ['/resume', '/input', '/stream-session', '/captured', '/complete']) {
+      expect((await request(app).post(`/api/computer/tasks/sess-1${suffix}`).send({ site: 'example.com' })).status).toBe(404)
+    }
+    expect((await request(app).post('/api/computer/sessions/sess-1/backend').send({ backend: 'cloud' })).status).toBe(404)
+    expect(localOps.length).toBe(providerCalls)
+    expect(backendFlips).toEqual([])
+    expect(vault.bundles.size).toBe(0)
+    allowed = true
+    expect((await request(app).get('/api/computer/tasks/sess-1')).status).toBe(200)
+  })
+
+  it('does not expose or control an old cloud task through its newly readable profile department', async () => {
+    await profileStore.update(profileId,{scope:'workspace',departmentId:'department-1'})
+    await restartCloudTaskWithCurrentProfile()
+    let allowedDepartment = 'department-1'
+    app = makeApp('user-1', async () => ({workspaceId:'ws-1',userId:'user-1',assistantId:null,
+      base:'public',departments:{[allowedDepartment]:'confidential'},contextDepartment:null,binding:null,cap:null}))
+    expect((await request(app).get('/api/computer/tasks/sess-1/frame')).status).toBe(200)
+    await profileStore.update(profileId,{departmentId:'department-2'})
+    allowedDepartment = 'department-2'
+    // The current profile is readable, but it cannot relabel an old task's source.
+    expect((await request(app).get('/api/computer/profiles?workspaceId=ws-1')).body.profiles.map((p:{id:string})=>p.id)).toContain(profileId)
+    const providerAccess = vi.spyOn(provider,'browser')
+    expect((await request(app).get('/api/computer/tasks?workspaceId=ws-1')).body.tasks).toEqual([])
+    for (const suffix of ['', '/frame']) expect((await request(app).get(`/api/computer/tasks/sess-1${suffix}`)).status).toBe(404)
+    for (const suffix of ['/resume','/input','/stream-session','/captured','/complete']) {
+      expect((await request(app).post(`/api/computer/tasks/sess-1${suffix}`).send({site:'portal.example',kind:'key',text:'fictional'})).status).toBe(404)
+    }
+    expect((await request(app).post('/api/computer/sessions/sess-1/backend').send({backend:'local'})).status).toBe(404)
+    expect(providerAccess).not.toHaveBeenCalled()
+    expect(backendFlips).toEqual([])
+    expect(vault.bundles.size).toBe(0)
+  })
+
+  it.each(['frame','stream-session'] as const)('withholds %s when classification changes during the provider operation', async surface => {
+    await profileStore.update(profileId,{scope:'workspace',departmentId:'department-1'})
+    await restartCloudTaskWithCurrentProfile()
+    app = makeApp('user-1', async () => ({workspaceId:'ws-1',userId:'user-1',assistantId:null,
+      base:'public',departments:{'department-1':'confidential','department-2':'confidential'},contextDepartment:null,binding:null,cap:null}))
+    const remote = provider.browser.bind(provider)
+    const operation = vi.fn(async () => {await profileStore.update(profileId,{departmentId:'department-2'})})
+    const close = vi.fn(async () => {})
+    vi.spyOn(provider,'browser').mockImplementation(id => ({...remote(id),
+      takeover:() => ({nextFrame:async()=>{await operation();return {data:'fixture-secret-frame',mimeType:'image/png' as const}},input:async()=>{},close}),
+      openTakeoverStream:async()=>{await operation();return {framesUrl:'https://browser.example/fixture-secret',inputUrl:'https://browser.example/fixture-secret-input'}},
+    }))
+    const response = surface === 'frame'
+      ? await request(app).get('/api/computer/tasks/sess-1/frame')
+      : await request(app).post('/api/computer/tasks/sess-1/stream-session')
+    expect(operation).toHaveBeenCalledTimes(1)
+    expect(response.status).toBe(404)
+    expect(JSON.stringify(response.body)).not.toContain('fixture-secret')
+    if(surface==='frame')expect(close).toHaveBeenCalledTimes(1)
+  })
+
+  it.each(['legacy','deleted-profile'] as const)('withholds %s cloud tasks instead of inferring a new source floor', async kind => {
+    const task = (await orchestrator.getActiveTask('sess-1'))!
+    const unavailable = kind === 'legacy' ? {...task,profileAuthority:null} : {...task,profileId:null}
+    vi.spyOn(orchestrator,'getActiveTask').mockResolvedValue(unavailable)
+    vi.spyOn(orchestrator,'listActiveTasks').mockResolvedValue([unavailable])
+    const providerAccess = vi.spyOn(provider,'browser')
+    expect((await request(app).get('/api/computer/tasks?workspaceId=ws-1')).body.tasks).toEqual([])
+    expect((await request(app).get('/api/computer/tasks/sess-1/frame')).status).toBe(404)
+    expect(providerAccess).not.toHaveBeenCalled()
+  })
+
+  it('keeps live task access after a metadata-only profile rename', async () => {
+    await profileStore.update(profileId,{name:'Renamed fictional browser'})
+    expect((await request(app).get('/api/computer/tasks/sess-1/frame')).status).toBe(200)
+  })
+
+  it('withholds stream capabilities if authority changes during minting', async () => {
+    const originalBrowser = provider.browser.bind(provider)
+    vi.spyOn(provider, 'browser').mockImplementation(id => ({ ...originalBrowser(id),
+      openTakeoverStream: async () => ({ framesUrl: 'https://browser.example/frames', inputUrl: 'https://browser.example/input' }) }))
+    await profileStore.update(profileId, { scope: 'workspace', departmentId: 'department-1' })
+    await restartCloudTaskWithCurrentProfile()
+    let reads = 0
+    app = makeApp('user-1', async (): Promise<DepartmentReadGrant> => ({ workspaceId: 'ws-1', userId: 'user-1', assistantId: null,
+      base: 'public', departments: ++reads === 1 ? { 'department-1': 'confidential' } : {},
+      contextDepartment: null, binding: null, cap: null }))
+    const result = await request(app).post('/api/computer/tasks/sess-1/stream-session')
+    expect(result.status).toBe(404)
+    expect(result.body.framesUrl).toBeUndefined()
+  })
+
+  it('withholds a frame when the department grant expires during provider capture', async () => {
+    await profileStore.update(profileId, { scope: 'workspace', departmentId: 'department-1' })
+    localTasks.touch({ profileAuthority: BrowserProfileAuthoritySchema.parse(await profileStore.get(profileId)), userId: 'user-1', workspaceId: 'ws-1', sessionId: 'sess-1', profileId })
+    let allowed = true
+    localProvider = { ...localProvider, nextTakeoverFrame: async () => {
+      allowed = false
+      return { data: 'protected-frame', mimeType: 'image/jpeg' }
+    } }
+    app = makeApp('user-1', async (): Promise<DepartmentReadGrant> => ({ workspaceId: 'ws-1', userId: 'user-1', assistantId: null,
+      base: 'public', departments: allowed ? { 'department-1': 'confidential' } : {},
+      contextDepartment: null, binding: null, cap: null }))
+    const result = await request(app).get('/api/computer/tasks/sess-1/frame')
+    expect(result.status).toBe(404)
+    expect(JSON.stringify(result.body)).not.toContain('protected-frame')
+  })
+
+  it('cannot capture a bound task into another profile, including a readable shared identity', async () => {
+    const other = await profileStore.create({ workspaceId: 'ws-1', ownerUserId: 'user-2', name: 'Shared', scope: 'workspace' })
+    expect((await request(app).post('/api/computer/tasks/sess-1/captured')
+      .send({ site: 'example.com', profileId: other.id })).status).toBe(404)
+    const ownOther = await profileStore.create({ workspaceId: 'ws-1', ownerUserId: 'user-1', name: 'Other identity' })
+    expect((await request(app).post('/api/computer/tasks/sess-1/captured')
+      .send({ site: 'example.com', profileId: ownOther.id })).status).toBe(404)
+    expect(vault.bundles.size).toBe(0)
   })
 
   it('lists the CALLER\'s live tasks for the workspace pill; teammates see an empty list', async () => {
@@ -236,8 +440,55 @@ describe('[COMP:routes/computer] Take-Over live view + backend toggle + Profile-
     expect(ops).toContain('takeoverInput')
   })
 
+  it('hides a transferred local task and refuses provider operations without rewriting its original department', async () => {
+    await profileStore.update(profileId, { scope: 'workspace', departmentId: 'department-1' })
+    localTasks.touch({ userId: 'user-1', workspaceId: 'ws-1', sessionId: 'sess-local', profileId,
+      profileAuthority: BrowserProfileAuthoritySchema.parse(await profileStore.get(profileId)) })
+    await profileStore.update(profileId, { departmentId: 'department-2' })
+    app = makeApp('user-1', async (): Promise<DepartmentReadGrant> => ({ workspaceId: 'ws-1', userId: 'user-1', assistantId: null,
+      base: 'public', departments: { 'department-2': 'confidential' }, contextDepartment: null, binding: null, cap: null }))
+    expect((await request(app).get('/api/computer/profiles?workspaceId=ws-1')).body.profiles).toEqual(expect.arrayContaining([expect.objectContaining({ id: profileId })]))
+    for (const suffix of ['', '/frame']) {
+      expect((await request(app).get(`/api/computer/tasks/sess-local${suffix}`)).status).toBe(404)
+    }
+    for (const suffix of ['/input', '/resume', '/complete']) {
+      expect((await request(app).post(`/api/computer/tasks/sess-local${suffix}`).send({ kind: 'click', x: 1, y: 1 })).status).toBe(404)
+    }
+    expect((await request(app).get('/api/computer/tasks?workspaceId=ws-1')).body.tasks.some((task: { sessionId: string }) => task.sessionId === 'sess-local')).toBe(false)
+    expect(localOps).toEqual([])
+    expect(localTasks.getActiveBySession('sess-local')?.profileAuthority?.departmentId).toBe('department-1')
+  })
+
+  it('hides an agent-origin local task from human controls after the original source is revoked', async () => {
+    let current = true
+    localTasks.touch({ userId: 'user-1', workspaceId: 'ws-1', sessionId: 'sess-local', profileId,
+      profileAuthority: BrowserProfileAuthoritySchema.parse(await profileStore.get(profileId)),
+      authority: { async assertCurrent() { if (!current) throw new Error('private source') },
+        async execute(operation) { await this.assertCurrent(); const result = await operation(); await this.assertCurrent(); return result } },
+    })
+    const before = await request(app).get('/api/computer/tasks/sess-local')
+    expect(before.status).toBe(200)
+    expect(before.body).not.toHaveProperty('authority')
+    expect(before.body).not.toHaveProperty('executionAuthority')
+    expect(before.body).not.toHaveProperty('sourceAuthority')
+    current = false
+    for (const suffix of ['', '/frame']) expect((await request(app).get(`/api/computer/tasks/sess-local${suffix}`)).status).toBe(404)
+    for (const suffix of ['/input', '/resume', '/complete']) {
+      expect((await request(app).post(`/api/computer/tasks/sess-local${suffix}`).send({ kind: 'click', x: 1, y: 1 })).status).toBe(404)
+    }
+    expect((await request(app).get('/api/computer/tasks?workspaceId=ws-1')).body.tasks).not.toEqual(expect.arrayContaining([expect.objectContaining({ sessionId: 'sess-local' })]))
+    expect(localOps).toEqual([])
+  })
+
+  it('does not expose a legacy local task without original classification evidence', async () => {
+    localTasks.touch({ userId: 'user-1', workspaceId: 'ws-1', sessionId: 'sess-local', profileId })
+    expect((await request(app).get('/api/computer/tasks/sess-local')).status).toBe(404)
+    expect((await request(app).get('/api/computer/tasks/sess-local/frame')).status).toBe(404)
+    expect(localOps).toEqual([])
+  })
+
   it('discovers and controls an owned local-browser task through the same Take-Over routes', async () => {
-    localTasks.touch({ userId: 'user-1', workspaceId: 'ws-1', sessionId: 'sess-local', profileId }, 'skyscanner.com')
+    localTasks.touch({ profileAuthority: BrowserProfileAuthoritySchema.parse(await profileStore.get(profileId)), userId: 'user-1', workspaceId: 'ws-1', sessionId: 'sess-local', profileId }, 'skyscanner.com')
 
     const list = await request(app).get('/api/computer/tasks?workspaceId=ws-1')
     expect(list.body.tasks).toEqual(expect.arrayContaining([
@@ -299,7 +550,7 @@ describe('[COMP:routes/computer] Take-Over live view + backend toggle + Profile-
   })
 
   it('keeps a local task discoverable when Stop cannot reach the extension', async () => {
-    localTasks.touch({ userId: 'user-1', workspaceId: 'ws-1', sessionId: 'sess-local', profileId })
+    localTasks.touch({ profileAuthority: BrowserProfileAuthoritySchema.parse(await profileStore.get(profileId)), userId: 'user-1', workspaceId: 'ws-1', sessionId: 'sess-local', profileId })
     localProvider = { ...localProvider, stop: async () => { throw new Error('relay unavailable') } }
     app = makeApp('user-1')
 
@@ -309,7 +560,7 @@ describe('[COMP:routes/computer] Take-Over live view + backend toggle + Profile-
   })
 
   it('retires local tasks from discovery when the extension disconnects', async () => {
-    localTasks.touch({ userId: 'user-1', workspaceId: 'ws-1', sessionId: 'sess-local', profileId })
+    localTasks.touch({ profileAuthority: BrowserProfileAuthoritySchema.parse(await profileStore.get(profileId)), userId: 'user-1', workspaceId: 'ws-1', sessionId: 'sess-local', profileId })
     localStatus = { connected: false, terminalEvent: null }
 
     const list = await request(app).get('/api/computer/tasks?workspaceId=ws-1')
@@ -328,7 +579,7 @@ describe('[COMP:routes/computer] Take-Over live view + backend toggle + Profile-
   })
 
   it('keeps local tasks when relay liveness is temporarily unavailable', async () => {
-    localTasks.touch({ userId: 'user-1', workspaceId: 'ws-1', sessionId: 'sess-local', profileId })
+    localTasks.touch({ profileAuthority: BrowserProfileAuthoritySchema.parse(await profileStore.get(profileId)), userId: 'user-1', workspaceId: 'ws-1', sessionId: 'sess-local', profileId })
     localStatus = null
 
     const list = await request(app).get('/api/computer/tasks?workspaceId=ws-1')
@@ -339,7 +590,7 @@ describe('[COMP:routes/computer] Take-Over live view + backend toggle + Profile-
   })
 
   it('retires local tasks after the relay observes the controlled tab closing', async () => {
-    localTasks.touch({ userId: 'user-1', workspaceId: 'ws-1', sessionId: 'sess-local', profileId })
+    localTasks.touch({ profileAuthority: BrowserProfileAuthoritySchema.parse(await profileStore.get(profileId)), userId: 'user-1', workspaceId: 'ws-1', sessionId: 'sess-local', profileId })
     localStatus = { connected: true, terminalEvent: 'tab_closed' }
 
     const list = await request(app).get('/api/computer/tasks?workspaceId=ws-1')
@@ -348,7 +599,7 @@ describe('[COMP:routes/computer] Take-Over live view + backend toggle + Profile-
   })
 
   it('keeps the task when an old relay cannot durably queue Stop during disconnect', async () => {
-    localTasks.touch({ userId: 'user-1', workspaceId: 'ws-1', sessionId: 'sess-local', profileId })
+    localTasks.touch({ profileAuthority: BrowserProfileAuthoritySchema.parse(await profileStore.get(profileId)), userId: 'user-1', workspaceId: 'ws-1', sessionId: 'sess-local', profileId })
     localProvider = {
       ...localProvider,
       stop: async () => { throw new BrowserBackendError('extension disconnected', 'no_extension') },
@@ -361,7 +612,7 @@ describe('[COMP:routes/computer] Take-Over live view + backend toggle + Profile-
   })
 
   it('retires a local task when frame polling reports that its tab closed', async () => {
-    localTasks.touch({ userId: 'user-1', workspaceId: 'ws-1', sessionId: 'sess-local', profileId })
+    localTasks.touch({ profileAuthority: BrowserProfileAuthoritySchema.parse(await profileStore.get(profileId)), userId: 'user-1', workspaceId: 'ws-1', sessionId: 'sess-local', profileId })
     localProvider = {
       ...localProvider,
       nextTakeoverFrame: async () => { throw new BrowserBackendError('tab closed', 'tab_closed') },
@@ -374,7 +625,7 @@ describe('[COMP:routes/computer] Take-Over live view + backend toggle + Profile-
   })
 
   it('keeps a local task retryable after a command timeout', async () => {
-    localTasks.touch({ userId: 'user-1', workspaceId: 'ws-1', sessionId: 'sess-local', profileId })
+    localTasks.touch({ profileAuthority: BrowserProfileAuthoritySchema.parse(await profileStore.get(profileId)), userId: 'user-1', workspaceId: 'ws-1', sessionId: 'sess-local', profileId })
     localProvider = {
       ...localProvider,
       nextTakeoverFrame: async () => { throw new BrowserBackendError('relay timeout', 'timeout') },
@@ -387,7 +638,7 @@ describe('[COMP:routes/computer] Take-Over live view + backend toggle + Profile-
   })
 
   it('keeps a local task retryable while the Firefox companion restarts', async () => {
-    localTasks.touch({ userId: 'user-1', workspaceId: 'ws-1', sessionId: 'sess-local', profileId })
+    localTasks.touch({ profileAuthority: BrowserProfileAuthoritySchema.parse(await profileStore.get(profileId)), userId: 'user-1', workspaceId: 'ws-1', sessionId: 'sess-local', profileId })
     localProvider = {
       ...localProvider,
       nextTakeoverFrame: async () => {
@@ -401,7 +652,7 @@ describe('[COMP:routes/computer] Take-Over live view + backend toggle + Profile-
   })
 
   it('releases a stale local binding when the session switches to cloud', async () => {
-    localTasks.touch({ userId: 'user-1', workspaceId: 'ws-1', sessionId: 'sess-1', profileId })
+    localTasks.touch({ profileAuthority: BrowserProfileAuthoritySchema.parse(await profileStore.get(profileId)), userId: 'user-1', workspaceId: 'ws-1', sessionId: 'sess-1', profileId })
     const flip = await request(app)
       .post('/api/computer/sessions/sess-1/backend')
       .send({ backend: 'cloud' })
@@ -412,7 +663,7 @@ describe('[COMP:routes/computer] Take-Over live view + backend toggle + Profile-
   })
 
   it('does not let another user change or retire an owned local task', async () => {
-    localTasks.touch({ userId: 'user-1', workspaceId: 'ws-1', sessionId: 'sess-local', profileId })
+    localTasks.touch({ profileAuthority: BrowserProfileAuthoritySchema.parse(await profileStore.get(profileId)), userId: 'user-1', workspaceId: 'ws-1', sessionId: 'sess-local', profileId })
     const stranger = makeApp('user-2')
     const flip = await request(stranger)
       .post('/api/computer/sessions/sess-local/backend')
@@ -465,6 +716,23 @@ describe('[COMP:routes/computer] Take-Over live view + backend toggle + Profile-
     expect(vault.bundles.get(`${profileId}:github.com`)).toBeTruthy()
   })
 
+  it('returns non-disclosing authority errors when a task profile changes after route admission', async () => {
+    await orchestrator.pauseForTakeover('sess-1')
+    const original = (await profileStore.get(profileId))!
+    app = makeApp('user-1', async () => {
+      await profileStore.update(profileId,{clearance:'public'})
+      return null
+    })
+    for (const suffix of ['/captured','/resume']) {
+      await profileStore.update(profileId,{clearance:original.clearance})
+      const response = await request(app).post(`/api/computer/tasks/sess-1${suffix}`).send({site:'github.com'})
+      expect(response.status).toBe(403)
+      expect(response.body).toEqual({error:'Profile authority unavailable.',code:'not_authorized'})
+    }
+    expect((await orchestrator.getActiveTask('sess-1'))?.status).toBe('paused')
+    expect(vault.bundles.size).toBe(0)
+  })
+
   it('capture on an identity-less task demands a profile (409 profile_required)', async () => {
     const browser = createCloudBrowserProvider({ provider, binding: orchestrator.binding })
     await browser.navigate(
@@ -485,6 +753,22 @@ describe('[COMP:routes/computer] Take-Over live view + backend toggle + Profile-
   })
 
   describe('[COMP:sandbox/session-capture] "Save this login from my browser" (D5, browser-session-portability.md)', () => {
+    it('passes source authority into capture/revoke and withholds success on persistence denial', async () => {
+      const denied = Object.assign(new Error('private vault authority detail'), { code: 'profile_authority_denied' })
+      const save = vi.spyOn(vault, 'put').mockRejectedValueOnce(denied)
+      const captured = await request(app).post(`/api/computer/profiles/${profileId}/capture`).send({ site: 'portal.example' })
+      expect(captured.status).toBe(403)
+      expect(captured.body).toMatchObject({ code: 'not_authorized' })
+      expect(captured.body.capturedAt).toBeUndefined()
+      expect(JSON.stringify(captured.body)).not.toContain('private vault authority detail')
+      expect(save).toHaveBeenCalledWith(expect.objectContaining({ profileId }), expect.objectContaining({ id: profileId, ownerUserId: 'user-1' }))
+      const revoke = vi.spyOn(vault, 'revoke').mockRejectedValueOnce(denied)
+      const revoked = await request(app).delete(`/api/computer/profiles/${profileId}/sessions/portal.example`)
+      expect(revoked.status).toBe(403)
+      expect(revoked.body.ok).toBeUndefined()
+      expect(revoke).toHaveBeenCalledWith({ profileId, site: 'portal.example' }, expect.objectContaining({ id: profileId }))
+    })
+
     it('captures through the local provider with no task at all, and echoes site + capturedAt', async () => {
       const res = await request(app)
         .post(`/api/computer/profiles/${profileId}/capture`)
@@ -513,7 +797,7 @@ describe('[COMP:routes/computer] Take-Over live view + backend toggle + Profile-
       // A task whose backend is local still refuses on the task-scoped route
       // (unchanged) — the new profile-scoped route above is the only path
       // for a My Browser capture.
-      localTasks.touch({ userId: 'user-1', workspaceId: 'ws-1', sessionId: 'sess-local', profileId })
+      localTasks.touch({ profileAuthority: BrowserProfileAuthoritySchema.parse(await profileStore.get(profileId)), userId: 'user-1', workspaceId: 'ws-1', sessionId: 'sess-local', profileId })
       const refused = await request(app)
         .post('/api/computer/tasks/sess-local/captured')
         .send({ site: 'skyscanner.com' })
@@ -706,10 +990,7 @@ describe('[COMP:routes/computer] Take-Over live view + backend toggle + Profile-
 
       const stranger = makeApp('intruder')
       const strangerList = await request(stranger).get('/api/computer/profiles?workspaceId=ws-1')
-      expect(strangerList.body.profiles[0]).toMatchObject({
-        canManage: false,
-        assistantRoutingNotes: {},
-      })
+      expect(strangerList.body.profiles).toEqual([])
       expect(
         (await request(stranger).patch(`/api/computer/profiles/${profileId}`).send({ name: 'Mine now' })).status,
       ).toBe(404)
@@ -868,12 +1149,15 @@ describe('[COMP:routes/computer] Take-Over live view + backend toggle + Profile-
 describe('protected destination task linkage', () => {
   it('exposes only browser-observed exact origin, and denies ordinary completion/backend changes while locked', async () => {
     const tasks = createInMemoryLocalComputerTaskStore()
-    const ctx = { userId: 'user-1', workspaceId: 'ws-1', sessionId: 'sess-1', profileId: 'profile-1' }
+    const profiles = createInMemoryBrowserProfileStore()
+    const profile = await profiles.create({ workspaceId: 'ws-1', ownerUserId: 'user-1', name: 'Protected identity' })
+    const ctx = { userId: 'user-1', workspaceId: 'ws-1', sessionId: 'sess-1', profileId: profile.id,
+      profileAuthority: BrowserProfileAuthoritySchema.parse(profile) }
     tasks.touch(ctx, 'example.com')
     let blocked = false
     let supported = true
     const app = createTestApp('/api/computer', computerRoutes({
-      orchestrator: null, provider: null, vault: null, profileStore: null,
+      orchestrator: null, provider: null, vault: null, profileStore: profiles,
       localTasks: tasks, getWorkspaceRole: MEMBER_ROLE, protectedFillEnabled: true,
       protectedBrowserSupported: async () => supported,
       protectedFillBlocked: () => blocked,
@@ -892,7 +1176,7 @@ describe('protected destination task linkage', () => {
 })
 
 describe('local protected-task identity lifetime', () => {
-  it('assigns a fresh identity after retirement, expiry or profile change', () => {
+  it('assigns a fresh identity after retirement or expiry and refuses silent profile changes', () => {
     let now = 0
     const tasks = createInMemoryLocalComputerTaskStore(() => now)
     const ctx = { userId: 'user', workspaceId: 'workspace', sessionId: 'session', profileId: 'profile' }
@@ -909,7 +1193,227 @@ describe('local protected-task identity lifetime', () => {
     expect(tasks.getActiveBySession('session')!.taskId).not.toBe(second)
     const third = tasks.getActiveBySession('session')!.taskId
     tasks.touch({ ...ctx, profileId: 'another-profile' })
+    expect(tasks.getActiveBySession('session')!.taskId).toBe(third)
+    expect(tasks.getActiveBySession('session')!.profileId).toBe('profile')
+    tasks.complete('session')
+    tasks.touch({ ...ctx, profileId: 'another-profile' })
     expect(tasks.getActiveBySession('session')!.taskId).not.toBe(third)
     expect(tasks.getActiveBySession('session')!.destinationOrigin).toBeNull()
   })
+})
+
+describe('[COMP:routes/computer] current profile department authority', () => {
+  it('passes admitted identity into grant revocation and refuses persistence authority loss', async () => {
+    const store=createInMemoryBrowserProfileStore()
+    const profile=await store.create({workspaceId:'workspace-1',ownerUserId:'owner',name:'Grant identity'})
+    const grants=createInMemoryBrowserSkillGrantStore()
+    const grant=await grants.create({workspaceId:'workspace-1',profileId:profile.id,skillId:'skill-1',grantedBy:'owner'})
+    const revoke=vi.spyOn(grants,'revoke').mockRejectedValueOnce(Object.assign(new Error('private grant detail'),{code:'profile_authority_denied'}))
+    const app=createTestApp('/api/computer',computerRoutes({orchestrator:null,provider:null,vault:null,
+      profileStore:store,grants,getWorkspaceRole:MEMBER_ROLE}),{userId:'owner'})
+    const response=await request(app).delete(`/api/computer/profiles/${profile.id}/grants/${grant.id}`)
+    expect(response.status).toBe(403)
+    expect(response.body.code).toBe('not_authorized')
+    expect(JSON.stringify(response.body)).not.toContain('private grant detail')
+    expect(revoke).toHaveBeenCalledWith(grant.id,expect.objectContaining({id:profile.id,ownerUserId:'owner'}))
+    expect((await grants.list({workspaceId:'workspace-1'}))[0].status).toBe('active')
+  })
+
+  it('does not report deletion when persistence refuses a stale authority snapshot', async () => {
+    const store = createInMemoryBrowserProfileStore()
+    const profile = await store.create({ workspaceId: 'workspace-1', ownerUserId: 'owner', name: 'Protected browser' })
+    const remove = store.delete.bind(store)
+    vi.spyOn(store, 'delete').mockImplementation(async (id, expected) => {
+      await store.update(id, { departmentId: 'new-department' })
+      return remove(id, expected)
+    })
+    const app = createTestApp('/api/computer', computerRoutes({
+      orchestrator: null, provider: null, vault: null, profileStore: store, getWorkspaceRole: MEMBER_ROLE,
+    }), { userId: 'owner' })
+    const response = await request(app).delete(`/api/computer/profiles/${profile.id}`)
+    expect(response.status).toBe(409)
+    expect(response.body.code).toBe('profile_changed')
+    expect(JSON.stringify(response.body)).not.toContain('new-department')
+    expect(await store.get(profile.id)).not.toBeNull()
+  })
+
+  it('rejects a stale admitted patch if profile authority changes during destination admission', async () => {
+    const store = createInMemoryBrowserProfileStore()
+    const profile = await store.create({ workspaceId: 'workspace-1', ownerUserId: 'owner', name: 'Protected browser',
+      departmentId: 'department-1', scope: 'workspace', clearance: 'internal' })
+    const app = createTestApp('/api/computer', computerRoutes({
+      orchestrator: null, provider: null, vault: null, profileStore: store, getWorkspaceRole: MEMBER_ROLE,
+      getProfileReadGrant: async (): Promise<DepartmentReadGrant> => ({ workspaceId: 'workspace-1', userId: 'owner',
+        assistantId: null, base: 'public', departments: { 'department-1': 'confidential' },
+        contextDepartment: null, binding: null, cap: null }),
+      admitProfileDestination: async () => { await store.update(profile.id, { departmentId: 'department-2' }) },
+    }), { userId: 'owner' })
+    const response = await request(app).patch(`/api/computer/profiles/${profile.id}`).send({ name: 'Stale edit' })
+    expect(response.status).toBe(409)
+    expect(response.body.code).toBe('profile_changed')
+    expect(JSON.stringify(response.body)).not.toContain('department-2')
+    expect(await store.get(profile.id)).toMatchObject({ name: 'Protected browser', departmentId: 'department-2' })
+  })
+
+  it('requires destination write admission for protected profile edits and preserves its source floor', async () => {
+    const store = createInMemoryBrowserProfileStore()
+    const profile = await store.create({ workspaceId: 'workspace-1', ownerUserId: 'owner', name: 'Protected browser',
+      departmentId: 'department-1', scope: 'workspace', clearance: 'internal' })
+    const admit = vi.fn(async () => {})
+    const appFor = (wired = true) => createTestApp('/api/computer', computerRoutes({
+      orchestrator: null, provider: null, vault: null, profileStore: store, getWorkspaceRole: MEMBER_ROLE,
+      getProfileReadGrant: async (): Promise<DepartmentReadGrant> => ({ workspaceId: 'workspace-1', userId: 'owner',
+        assistantId: null, base: 'public', departments: { 'department-1': 'confidential' },
+        contextDepartment: null, binding: null, cap: null }),
+      ...(wired ? { admitProfileDestination: admit } : {}),
+    }), { userId: 'owner' })
+    const patch = (body: object, wired = true) => request(appFor(wired)).patch(`/api/computer/profiles/${profile.id}`).send(body)
+    expect((await patch({ name: 'Denied' }, false)).status).toBe(403)
+    admit.mockRejectedValueOnce(new Error('private authority detail'))
+    const denied = await patch({ enabledAssistantIds: ['assistant-1'] })
+    expect(denied.status).toBe(403)
+    expect(JSON.stringify(denied.body)).not.toContain('private authority detail')
+    expect((await patch({ clearance: 'public' })).body.code).toBe('source_scope_required')
+    expect((await patch({ departmentId: null, name: 'Discarded field' })).status).toBe(400)
+    expect(await store.get(profile.id)).toMatchObject({ name: 'Protected browser', clearance: 'internal', enabledAssistantIds: [] })
+    const allowed = await patch({ name: 'Updated browser', clearance: 'confidential' })
+    expect(allowed.status).toBe(200)
+    expect(allowed.body.profile).toMatchObject({ name: 'Updated browser', clearance: 'confidential', departmentId: 'department-1' })
+    expect(admit).toHaveBeenLastCalledWith('owner', 'workspace-1', { departmentId: 'department-1', sensitivity: 'confidential' })
+  })
+
+  it('does not turn an unassigned v2 personal profile into an unclassified shared profile', async () => {
+    const store = createInMemoryBrowserProfileStore()
+    const profile = await store.create({ workspaceId: 'workspace-1', ownerUserId: 'owner', name: 'Personal browser' })
+    const app = createTestApp('/api/computer', computerRoutes({
+      orchestrator: null, provider: null, vault: null, profileStore: store, getWorkspaceRole: MEMBER_ROLE,
+      getProfileReadGrant: async (): Promise<DepartmentReadGrant> => ({ workspaceId: 'workspace-1', userId: 'owner',
+        assistantId: null, base: 'confidential', departments: {}, contextDepartment: null, binding: null, cap: null }),
+    }), { userId: 'owner' })
+    const denied = await request(app).patch(`/api/computer/profiles/${profile.id}`).send({ scope: 'workspace' })
+    expect(denied.status).toBe(400)
+    expect(denied.body.code).toBe('department_required')
+    expect((await store.get(profile.id))?.scope).toBe('owner')
+    expect((await request(app).patch(`/api/computer/profiles/${profile.id}`).send({ name: 'Renamed personal browser' })).status).toBe(200)
+  })
+
+  it('withholds proxy secrets from department readers while preserving owner management', async () => {
+    const store = createInMemoryBrowserProfileStore()
+    const proxyUrl = 'http://fictional-user:fictional-secret@proxy.example:8080'
+    await store.create({ workspaceId: 'workspace-1', ownerUserId: 'owner', name: 'Shared account',
+      departmentId: 'department-1', scope: 'workspace', proxyUrl })
+    const appFor = (userId: string) => createTestApp('/api/computer', computerRoutes({
+      orchestrator: null, provider: null, vault: null, profileStore: store,
+      getWorkspaceRole: MEMBER_ROLE,
+      getProfileReadGrant: async (): Promise<DepartmentReadGrant> => ({ workspaceId: 'workspace-1', userId,
+        assistantId: null, base: 'public', departments: { 'department-1': 'confidential' },
+        contextDepartment: null, binding: null, cap: null }),
+    }), { userId })
+    const reader = await request(appFor('reader')).get('/api/computer/profiles?workspaceId=workspace-1')
+    expect(reader.body.profiles).toEqual([expect.objectContaining({ proxyUrl: null, canManage: false })])
+    expect(JSON.stringify(reader.body)).not.toContain('fictional-secret')
+    const owner = await request(appFor('owner')).get('/api/computer/profiles?workspaceId=workspace-1')
+    expect(owner.body.profiles).toEqual([expect.objectContaining({ proxyUrl, canManage: true })])
+  })
+
+  it.each(['revoked', 'reclassified', 'deleted', 'lookup_failed'] as const)(
+    'withholds joined metadata when authority becomes %s during its load', async (change) => {
+      const store = createInMemoryBrowserProfileStore()
+      const profile = await store.create({ workspaceId: 'workspace-1', ownerUserId: 'owner', name: 'Shared account',
+        departmentId: 'department-1', scope: 'workspace' })
+      let admitted = true
+      const vault = createInMemorySessionVault()
+      await vault.put({ profileId: profile.id, site: 'private.example',
+        bundle: { site: 'private.example', cookies: [], capturedAt: new Date().toISOString() } })
+      const originalList = vault.list.bind(vault)
+      vi.spyOn(vault, 'list').mockImplementation(async (params) => {
+        const result = await originalList(params)
+        if (change === 'revoked') admitted = false
+        if (change === 'reclassified') await store.update(profile.id, { departmentId: 'department-2' })
+        if (change === 'deleted') await store.delete(profile.id)
+        if (change === 'lookup_failed') vi.spyOn(store, 'get').mockRejectedValue(new Error('unavailable'))
+        return result
+      })
+      const app = createTestApp('/api/computer', computerRoutes({
+        orchestrator: null, provider: null, vault, profileStore: store,
+        getWorkspaceRole: MEMBER_ROLE,
+        getProfileReadGrant: async (): Promise<DepartmentReadGrant> => ({ workspaceId: 'workspace-1', userId: 'reader',
+          assistantId: null, base: 'public', departments: admitted ? { 'department-1': 'confidential' } : {},
+          contextDepartment: null, binding: null, cap: null }),
+      }), { userId: 'reader' })
+      const response = await request(app).get('/api/computer/profiles?workspaceId=workspace-1')
+      expect(response.status).toBe(200)
+      expect(response.body.profiles).toEqual([])
+      expect(JSON.stringify(response.body)).not.toContain('private.example')
+    })
+
+  it('withholds metadata and owner credential operations after department revocation', async () => {
+    const store = createInMemoryBrowserProfileStore()
+    const profile = await store.create({ workspaceId: 'workspace-1', ownerUserId: 'user-1', name: 'Protected account',
+      departmentId: 'department-1', scope: 'workspace', clearance: 'confidential' })
+    let admitted = true
+    let member = true
+    const app = createTestApp('/api/computer', computerRoutes({
+      orchestrator: null, provider: null, vault: null, profileStore: store,
+      getWorkspaceRole: async () => member ? 'owner' : null,
+      getProfileReadGrant: async (): Promise<DepartmentReadGrant> => ({ workspaceId: 'workspace-1', userId: 'user-1', assistantId: null,
+        base: 'public', departments: admitted ? { 'department-1': 'confidential' } : {},
+        contextDepartment: null, binding: null, cap: null }),
+    }), { userId: 'user-1' })
+    const list = () => request(app).get('/api/computer/profiles?workspaceId=workspace-1')
+    expect((await list()).body.profiles.map((p: { id: string }) => p.id)).toEqual([profile.id])
+    admitted = false
+    expect((await list()).body.profiles).toEqual([])
+    expect((await request(app).patch(`/api/computer/profiles/${profile.id}`).send({ name: 'Changed' })).status).toBe(404)
+    expect((await request(app).post(`/api/computer/profiles/${profile.id}/credentials`).send({})).status).toBe(404)
+    expect((await request(app).delete(`/api/computer/profiles/${profile.id}`)).status).toBe(404)
+    expect((await store.get(profile.id))?.name).toBe('Protected account')
+    admitted = true
+    expect((await list()).body.profiles).toHaveLength(1)
+    member = false
+    expect((await request(app).delete(`/api/computer/profiles/${profile.id}`)).status).toBe(404)
+  })
+
+  it('keeps unassigned recovery owner-only and fails closed on authority lookup errors', async () => {
+    const store = createInMemoryBrowserProfileStore()
+    const own = await store.create({ workspaceId: 'workspace-1', ownerUserId: 'user-1', name: 'Needs classification', scope: 'workspace' })
+    await store.create({ workspaceId: 'workspace-1', ownerUserId: 'user-2', name: 'Other unassigned', scope: 'workspace' })
+    await store.create({ workspaceId: 'workspace-1', ownerUserId: 'user-2', name: 'Other private', scope: 'owner' })
+    let fail = false
+    const app = createTestApp('/api/computer', computerRoutes({
+      orchestrator: null, provider: null, vault: null, profileStore: store,
+      getWorkspaceRole: MEMBER_ROLE,
+      getProfileReadGrant: async () => {
+        if (fail) throw new Error('lookup unavailable')
+        return { workspaceId: 'workspace-1', userId: 'user-1', assistantId: null,
+          base: 'confidential', departments: {}, contextDepartment: null, binding: null, cap: null }
+      },
+    }), { userId: 'user-1' })
+    expect((await request(app).get('/api/computer/profiles?workspaceId=workspace-1')).body.profiles.map((p: { id: string }) => p.id)).toEqual([own.id])
+    fail = true
+    expect((await request(app).get('/api/computer/profiles?workspaceId=workspace-1')).body.profiles).toEqual([])
+    expect((await request(app).patch(`/api/computer/profiles/${own.id}`).send({ name: 'Changed' })).status).toBe(404)
+  })
+})
+
+
+describe('[COMP:routes/computer] audited profile department command',()=>{
+ it('requires explicit confirmation and forwards the authenticated owner snapshot',async()=>{
+  const profiles=createInMemoryBrowserProfileStore()
+  const profile=await profiles.create({workspaceId:'ws-1',ownerUserId:'user-1',name:'Recovery fixture'})
+  const classifyDepartment=vi.fn(async()=>({...profile,departmentId:'00000000-0000-4000-8000-000000000001'}))
+  const app=createTestApp('/api/computer',computerRoutes({orchestrator:null,provider:null,vault:null,profileStore:{...profiles,classifyDepartment},getWorkspaceRole:MEMBER_ROLE}),{userId:'user-1'})
+  const body={departmentId:'00000000-0000-4000-8000-000000000001',expectedDepartmentId:null,reason:'Assign fictional operations',confirmed:true}
+  await request(app).post(`/api/computer/profiles/${profile.id}/department`).send({...body,confirmed:false}).expect(400)
+  await request(app).post(`/api/computer/profiles/${profile.id}/department`).send({...body,expectedDepartmentId:undefined}).expect(400)
+  const stale=await request(app).post(`/api/computer/profiles/${profile.id}/department`).send({...body,expectedDepartmentId:body.departmentId}).expect(409)
+  expect(stale.body).toEqual({error:'Profile changed. Refresh and retry.',code:'profile_changed'})
+  expect(classifyDepartment).not.toHaveBeenCalled()
+  await request(app).post(`/api/computer/profiles/${profile.id}/department`).send(body).expect(200)
+  const {expectedDepartmentId: _reviewedDepartment,...command}=body
+  expect(classifyDepartment).toHaveBeenCalledWith(profile.id,{...command,userId:'user-1',expected:profile})
+  classifyDepartment.mockRejectedValueOnce(Object.assign(new Error('private source'),{code:'profile_authority_denied'}))
+  const denied=await request(app).post(`/api/computer/profiles/${profile.id}/department`).send(body).expect(403)
+  expect(denied.body.error).toBe('Profile classification unavailable')
+ })
 })

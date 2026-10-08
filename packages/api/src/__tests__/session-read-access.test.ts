@@ -157,3 +157,58 @@ describe('[COMP:api/live-work-roster] liveSessionTier (§3.3 precedence)', () =>
     expect(liveSessionTier(facts({ session: { mode: 'draft' } }))).toBe('full')
   })
 })
+
+
+describe('[COMP:api/live-work-roster] department READ parity', () => {
+  function departmentFacts(base: 'internal' | 'confidential', edge: 'internal' | 'confidential' | null): SessionReadFacts {
+    return {
+      ...facts({ membershipClearance: base, session: {
+        visibility: 'workspace', effectiveClearance: 'confidential',
+        contextCompartments: ['team:department-a'], contextProjectId: 'unjoined-project',
+      } }),
+      membershipCompartments: null, membershipProjectIds: [],
+      departmentAccess: {
+        principal: { kind: 'user', id: CALLER },
+        snapshot: { workspaceId: WS, base: { [`user:${CALLER}`]: base },
+          edges: edge ? [{ principal: { kind: 'user', id: CALLER }, departmentId: 'department-a',
+            clearance: edge, expiresAt: null }] : [] },
+      },
+    }
+  }
+  it('department clearance admits above base, regardless of project membership', () => {
+    expect(decideSessionRead(departmentFacts('internal', 'confidential')).readable).toBe(true)
+  })
+  it('a high base cannot override a lower department edge', () => {
+    expect(decideSessionRead(departmentFacts('confidential', 'internal')).readable).toBe(false)
+  })
+  it('no department edge omits even a confidential-base viewer from Live', () => {
+    expect(liveSessionTier(departmentFacts('confidential', null))).toBe('omitted')
+  })
+  it('an expired department edge denies the same session', () => {
+    const input = departmentFacts('confidential', 'confidential')
+    input.departmentAccess!.snapshot.edges[0].expiresAt = new Date(0)
+    expect(decideSessionRead(input).readable).toBe(false)
+  })
+  it('ownership of a private workspace session cannot bypass a removed department edge', () => {
+    const input = departmentFacts('confidential', null)
+    input.session = { ...input.session, userId: CALLER, visibility: 'owner' }
+    expect(decideSessionRead(input).readable).toBe(false)
+    expect(liveSessionTier(input)).toBe('omitted')
+  })
+  it('private presence requires department access without granting another owner content', () => {
+    const input = departmentFacts('internal', 'confidential')
+    input.session = { ...input.session, userId: OTHER, visibility: 'owner' }
+    expect(liveSessionTier(input)).toBe('presence')
+    expect(decideSessionRead(input).readable).toBe(false)
+    input.departmentAccess!.snapshot.edges = []
+    expect(liveSessionTier(input)).toBe('omitted')
+  })
+  it('private workspace reads require both ownership and the department clearance', () => {
+    const input = departmentFacts('internal', 'confidential')
+    input.session = { ...input.session, userId: CALLER, visibility: 'owner' }
+    expect(decideSessionRead(input).readable).toBe(true)
+    input.session.userId = OTHER
+    expect(decideSessionRead(input).readable).toBe(false)
+  })
+
+})

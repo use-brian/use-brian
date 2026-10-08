@@ -17,7 +17,7 @@ export async function beginBrainAdmission(client: PoolClient, workspaceId: strin
  * work, not personal data. Never manufacture inherited evidence from labels. */
 export async function admitBrainCreate(
   client: PoolClient, workspaceId: string, actor: string,
-  input: { userId: string | null; assistantId?: string | null; sensitivity: Sensitivity; compartments?: string[]; projectIds?: string[] },
+  input: { explicitGeneral?: boolean; userId: string | null; assistantId?: string | null; sensitivity: Sensitivity; compartments?: string[]; projectIds?: string[] },
   inherited?: ResourceScope,
   /** Only after canonical exact-version derivation validation, never for an
    * authored root or an unvalidated parent/source identifier. */
@@ -37,7 +37,8 @@ export async function admitBrainCreate(
     // In the canonical derivation contract these are additional requirements,
     // not a request to erase the source floor or select General. An empty set
     // must retain the verified inherited floor without applying a new default.
-    requestedLabels: { compartments: readOnlyInherited && input.compartments?.length === 0 ? undefined : input.compartments, projectIds: input.projectIds },
+    destination: input.explicitGeneral && !input.compartments?.length ? { kind: 'general' } : undefined,
+    requestedLabels: { compartments: input.explicitGeneral && !input.compartments?.length ? undefined : readOnlyInherited && input.compartments?.length === 0 ? undefined : input.compartments, projectIds: input.projectIds },
     inherited: inherited ? { ...inherited, visibility: inherited.userId ? 'private' : 'workspace' } : undefined,
     inheritedAuthority: readOnlyInherited ? 'read' : 'mutation',
   })).envelope

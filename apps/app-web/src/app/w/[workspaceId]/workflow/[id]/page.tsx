@@ -681,14 +681,17 @@ export default function WorkflowDetailPage({
     setError(null);
     setRunning(true);
     // Light the live overlay up immediately — the POST holds until the run
-    // terminates, but the run row (and its step statuses) are visible to the
-    // poller right away.
+    // terminates. History appears once canonical source evidence is captured.
     pollNow();
     const result = await runWorkflowNow(workflow.id, {});
     setRunning(false);
     pollNow();
     if (!result) {
       setError(t.workflowPage.builder.runFail);
+      return;
+    }
+    if ("unavailable" in result) {
+      setError(t.workflowPage.builder.runResultUnavailable);
       return;
     }
     setRunMessage(

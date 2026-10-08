@@ -9,7 +9,7 @@ import { createMemory,getMemoryById,updateMemory,deleteMemory,listUnverifiedByWo
 import { randomUUID } from 'node:crypto'
 import { afterAll,describe,expect,it } from 'vitest'
 import { projectionLifetime } from '../projection-lifetime.js'
-import { getPool,getAppPool,runWithAgentAccess,queryWithRLS } from '../../db/client.js'
+import { applyRLSGucs,getPool,getAppPool,runWithAgentAccess,queryWithRLS } from '../../db/client.js'
 import { resolveWorkspaceViewpoint } from '../../db/workspace-viewpoint.js'
 import { createDbContextScopeStore } from '../../db/context-scope-store.js'
 import { createEntity,updateEntity } from '../../db/entities-store.js'
@@ -59,6 +59,19 @@ describe('[COMP:api/workspace-access] database read grants and immutable authori
     await pool.query(`UPDATE workspace_access_grants SET revoked_at=now(),revoked_by=$2 WHERE id=$1`,[grant.id,f.owner])
     expect((await f.reach()).read).toEqual([])
     await expect(pool.query('UPDATE workspace_access_grants SET revoked_at=NULL,revoked_by=NULL WHERE id=$1',[grant.id])).rejects.toThrow('access_revocation_immutable')
+  })
+  it('expires a read grant inside an already-open app transaction',async()=>{
+    const f=await fixture();await f.grant({expiresIn:'2 seconds'})
+    const client=await getAppPool().connect()
+    try{
+      await client.query('BEGIN');await applyRLSGucs(client,f.member)
+      const reach=async()=>(await client.query('SELECT effective_member_read_compartments($1,$2) AS read',[f.member,f.workspaceId])).rows[0].read
+      expect(await reach()).toEqual([f.finance.compartmentKey])
+      const started=(await client.query('SELECT now() AS started')).rows[0].started
+      await client.query('SELECT pg_sleep(2.05)')
+      expect((await client.query('SELECT now() AS started')).rows[0].started).toEqual(started)
+      expect(await reach()).toEqual([])
+    }finally{await client.query('ROLLBACK');client.release()}
   })
   it('covers current and future direct Team members without transitive beneficiary reach',async()=>{
     const f=await fixture()

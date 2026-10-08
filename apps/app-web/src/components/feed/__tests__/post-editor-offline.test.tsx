@@ -28,10 +28,11 @@ vi.mock("@/lib/offline/idb", () => ({
 }));
 import { EditorView } from '@tiptap/pm/view';
 import { TextSelection } from '@tiptap/pm/state';
+import { feedCollaborationCacheKey } from '@/lib/surface-prefetch';
 import { PostEditor } from "../post-editor";
 import { blankFeedContent, createLocalFeedPost, readLocalFeedPost, readFeedNewPostForm } from "@/lib/offline/feed-offline";
 import { authFetch } from "@/lib/auth-fetch";
-import { resetSurfaceCache } from '@/lib/surface-cache';
+import { resetSurfaceCache, markSurfaceCacheStale } from '@/lib/surface-cache';
 
 let root: Root;
 let container: HTMLDivElement;
@@ -64,6 +65,28 @@ beforeEach(() => {
   container = document.createElement("div"); document.body.appendChild(container); root = createRoot(container);
 });
 
+describe('[COMP:app-web/feed-post-editor] unavailable history', () => {
+  it('withholds the editor and chat and offers a read-only retry and posts route', async () => {
+    state.offline=false; state.chatProps=null;
+    Object.defineProperty(navigator,'onLine',{value:true,configurable:true});
+    vi.mocked(authFetch).mockImplementation(async url => new Response(JSON.stringify(String(url).includes('draft-sessions?') ? {sessions:[]} : [])));
+    await render('unavailable-post');
+    expect(container.querySelector('[role="alert"]')?.textContent).toContain(en.feedPage.postEditor.loadFailed);
+    expect(container.querySelector('textarea,[contenteditable]')).toBeNull();
+    expect(container.textContent).not.toContain(en.feedPage.postEditor.synced);
+    expect(state.chatProps).toBeNull();
+    const retry=[...container.querySelectorAll('button')].find(b=>b.textContent===en.feedPage.postEditor.retryLoad)!;
+    expect(retry).toBeTruthy();
+    vi.mocked(authFetch).mockClear();
+    await act(async()=>retry.click());
+    expect(vi.mocked(authFetch).mock.calls.length).toBeGreaterThan(0);
+    expect(vi.mocked(authFetch).mock.calls.every(([,init])=>!init?.method||init.method==='GET')).toBe(true);
+    const back=[...container.querySelectorAll('button')].find(b=>b.textContent===en.feedPage.postEditor.backToPosts)!;
+    await act(async()=>back.click());
+    expect(state.push).toHaveBeenCalledWith('/w/workspace-1/feed/threads/posts');
+  });
+});
+
 describe('[COMP:app-web/feed-post-editor] automatic legacy upgrade', () => {
   async function legacyPost() {
     const post = await createLocalFeedPost('assistant-1', 'threads', { ...blankFeedContent(), text: 'Keep the existing copy.' });
@@ -94,6 +117,16 @@ describe('[COMP:app-web/feed-post-editor] automatic legacy upgrade', () => {
     });
   }
   const commands = () => vi.mocked(authFetch).mock.calls.filter(([url, init]) => String(url).endsWith('/commands') && init?.method === 'POST');
+  it('withholds an open editor after a collaboration read denies access', async () => {
+    const post=await legacyPost();goOnline(post);await render(post.session.id);
+    expect(container.querySelector('[data-feed-composition]')).toBeTruthy();
+    const previous=vi.mocked(authFetch).getMockImplementation()!;
+    vi.mocked(authFetch).mockImplementation((url,init)=>String(url).endsWith('/collaboration')?Promise.resolve(new Response('{}',{status:403})):previous(url,init));
+    await act(async()=>{markSurfaceCacheStale(feedCollaborationCacheKey('workspace-1','assistant-1',post.session.id));});
+    expect(container.querySelector('[role="alert"]')?.textContent).toContain(en.feedPage.postEditor.loadFailed);
+    expect(container.querySelector('[data-feed-composition],textarea,[contenteditable]')).toBeNull();
+    expect(container.textContent).not.toContain('Keep the existing copy.');
+  });
   it('opens Review directly from the workflow without starting a model request or submitting the draft', async () => {
     const post = await legacyPost(); goOnline(post); await render(post.session.id);
     const workflow = container.querySelector('[data-feed-post-workflow]')!;
@@ -255,9 +288,9 @@ describe("[COMP:app-web/feed-offline] offline editor lifecycle", () => {
     const post = await createLocalFeedPost("assistant-1", "threads", blankFeedContent());
     const records = state.data.get("feed:working:viewer-a") as Record<string, typeof post>;
     records[`assistant-1:${post.session.id}`].newSession = false;
-    state.data.set(`feed:cache:viewer-a:/api/sessions/${post.session.id}/messages`, [{
+    state.data.set(`feed:cache:viewer-a:/api/sessions/${post.session.id}/messages`, { feedAuthority: 1, confirmedAt: Date.now(), value: [{
       role: "assistant", content: [{ type: "tool_use", name: "proposeDrafts", input: { drafts: [{ index: 1, text: "An AI suggestion" }] } }],
-    }]);
+    }] });
     await render(post.session.id);
     expect(container.querySelector("textarea")?.value).toBe("An AI suggestion");
   });
@@ -265,9 +298,9 @@ describe("[COMP:app-web/feed-offline] offline editor lifecycle", () => {
     const post = await createLocalFeedPost("assistant-1", "threads", { ...blankFeedContent(), text: "My original caption" });
     const records = state.data.get("feed:working:viewer-a") as Record<string, typeof post>;
     records[`assistant-1:${post.session.id}`].newSession = false;
-    state.data.set(`feed:cache:viewer-a:/api/sessions/${post.session.id}/messages`, [{
+    state.data.set(`feed:cache:viewer-a:/api/sessions/${post.session.id}/messages`, { feedAuthority: 1, confirmedAt: Date.now(), value: [{
       role: "assistant", content: [{ type: "tool_use", name: "proposeDrafts", input: { drafts: [{ index: 1, text: "An AI suggestion" }] } }],
-    }]);
+    }] });
     await render(post.session.id);
     await type(container.querySelector("textarea")!, "");
     expect(container.querySelector("textarea")?.value).toBe("");

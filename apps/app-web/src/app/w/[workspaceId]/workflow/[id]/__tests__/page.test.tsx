@@ -71,11 +71,13 @@ vi.mock("@/components/context/context-scope-picker", () => ({
 
 const api = vi.hoisted(() => ({
   getWorkflowFull: vi.fn<() => Promise<WorkflowFull | null>>(),
+  runWorkflowNow: vi.fn(),
 }));
 
 vi.mock("@/lib/api/workflow", async (importOriginal) => ({
   ...(await importOriginal<typeof import("@/lib/api/workflow")>()),
   getWorkflowFull: api.getWorkflowFull,
+  runWorkflowNow: api.runWorkflowNow,
   listChannelDestinations: async () => [],
   listWorkspaceChannelOptions: async () => [],
   listWorkspaceSlackChannels: async () => [],
@@ -179,6 +181,7 @@ async function typeName(next: string) {
 beforeEach(() => {
   resetSurfaceCache();
   api.getWorkflowFull.mockReset();
+  api.runWorkflowNow.mockReset();
   container = document.createElement("div");
   document.body.appendChild(container);
   root = createRoot(container);
@@ -190,6 +193,19 @@ afterEach(() => {
 });
 
 describe("[COMP:app-web/workflow-detail-cache] detail page", () => {
+  it("warns to check history without retrying when a completed result loses access", async () => {
+    await loadSurfaceCache(workflowDetailCacheKey("w1", "wf-1"), async () => WF);
+    api.getWorkflowFull.mockImplementation(pending);
+    api.runWorkflowNow.mockResolvedValue({ unavailable: true, operationMayHaveExecuted: true });
+    await render();
+    const button = [...container.querySelectorAll("button")].find(node => node.textContent === en.workflowPage.builder.runNowBtn);
+    expect(button).toBeDefined();
+    await act(async () => { button!.click(); });
+    await settle();
+    expect(container.textContent).toContain(en.workflowPage.builder.runResultUnavailable);
+    expect(container.textContent).not.toContain(en.workflowPage.builder.runFail);
+    expect(api.runWorkflowNow).toHaveBeenCalledTimes(1);
+  });
   it("renders the board from a warmed key while the fetch is still pending (no fetch of its own)", async () => {
     await loadSurfaceCache(workflowDetailCacheKey("w1", "wf-1"), async () => WF);
     api.getWorkflowFull.mockImplementation(pending);

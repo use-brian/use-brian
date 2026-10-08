@@ -159,4 +159,26 @@ describe('[COMP:api/authority-lease] current authority at execution boundaries',
       await expect(lease.assertCurrent()).rejects.toMatchObject({ reason: 'authority_changed' })
     })
   })
+  it('snapshots a detached locked session only when durable reconstruction is explicitly eligible', async () => {
+    const session = { id: 'source-session', assistantId: 'assistant', userId: 'actor', contextGroupId: null,
+      visibility: 'owner', mode: null, effectiveClearance: null, contextCompartments: [],
+      contextProjectId: null, contextLockedAt: null as Date | null }
+    liveSession.row = { ...session }
+    const lease = createSessionAuthorityLease({ starting: initial, session, durableSessionSource: true })
+    const first = lease.snapshotSource!()
+    expect(first.kind).toBe('invocation')
+    liveSession.row.contextLockedAt = new Date('2026-10-07T00:00:00Z')
+    await lease.assertCurrent()
+    const snapshot = lease.snapshotSource!()
+    expect(snapshot).toMatchObject({ kind: 'session', id: 'source-session', invocationId: first.invocationId,
+      contextLockedAt: '2026-10-07T00:00:00.000Z', executingAssistantId: 'assistant', authorityUserId: 'actor' })
+    if (snapshot.kind === 'session') snapshot.id = 'changed-copy'
+    expect(lease.snapshotSource!()).toMatchObject({ id: 'source-session' })
+    for (const options of [{}, { durableSessionSource: true, credentialCurrent: async () => true },
+      { durableSessionSource: true, maximumAccessCurrent: async () => initial }]) {
+      const limited = createSessionAuthorityLease({ starting: initial, session: { ...session, contextLockedAt: new Date() }, ...options })
+      expect(limited.snapshotSource!().kind).toBe('invocation')
+    }
+  })
+
 })

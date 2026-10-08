@@ -762,8 +762,9 @@ export type WorkflowRunOutcome = {
    * typed fields of the record the run saved under its bound blueprint.
    * Enriched at READ time by the run store (join on
    * `blueprint_records.source_id = runId`), never composed by the executor,
-   * so historical runs gain it retroactively. Absent when the run saved no
-   * record. See structural-synthesis.md → "The record".
+   * with its exact source captured in the consumer copy receipt. An existing
+   * receipt cannot silently switch to newer enrichment. Absent when the run
+   * saved no record. See workflow.md → "Durable blueprint copy evidence".
    */
   output?: Record<string, unknown>
   /** The record's completeness (`complete` | `incomplete`) — gate handoffs on it. */

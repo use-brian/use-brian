@@ -73,3 +73,5 @@ export type {
   SystemExecutionIdentity,
   SystemExecutionPurpose,
 } from './execution-context.js'
+
+export { AuthoritySourceSchema, type AuthoritySource } from './authority-source.js'

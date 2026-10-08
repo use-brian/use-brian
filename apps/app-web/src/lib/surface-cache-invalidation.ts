@@ -231,6 +231,7 @@ export function applySpineEventToSurfaceCache(
   }
   if (event === WORKSPACE_IDENTITY_REFRESH_EVENT || event === "brian:organization-changed") {
     // Authority changes purge even an unmounted directory/access surface.
+    drop(`live:${workspaceId}:`);
     drop(`projects:${workspaceId}`);
     drop(`project:${workspaceId}:`);
     drop(`assistants:${workspaceId}`);

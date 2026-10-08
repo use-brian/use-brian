@@ -1023,6 +1023,10 @@ export function workflowsRoutes(opts: WorkflowsRouteOptions): Router {
 
     const outcome = await advanceWorkflowRun(opts.executorDeps, run.id)
     const steps = await opts.runStore.listStepRuns(userId, run.id)
+    const readable = await opts.runStore.getRunById(userId, run.id)
+    if (!readable || readable.workflowId !== workflow.id || readable.workspaceId !== workflow.workspaceId) {
+      return res.status(409).json({ error: 'run_result_unavailable', operationMayHaveExecuted: true })
+    }
 
     res.json({
       runId: outcome.runId,

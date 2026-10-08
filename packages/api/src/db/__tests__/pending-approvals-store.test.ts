@@ -71,6 +71,9 @@ function makeRow(over: Record<string, unknown> = {}): Record<string, unknown> {
 beforeEach(() => {
   mockQuery.mockReset()
   mockQueryWithRLS.mockReset()
+  mockQueryWithRLS.mockImplementation(async (_user, sql) => ({
+    rows: sql.includes('FROM workflow_runs r') ? [{id:'run-1'}] : [], rowCount: 1,
+  }) as never)
   mockAppendDecisionEvent.mockClear()
   tx.query.mockReset()
   tx.release.mockReset()
@@ -160,14 +163,13 @@ describe('[COMP:api/pending-approvals-store] createToolInvocation', () => {
 })
 
 describe('[COMP:api/pending-approvals-store] listPendingForWorkspace', () => {
-  it('reads through RLS, filtering to status=pending for the workspace', async () => {
+  it('reads through RLS and hides tool approvals whose required source is missing', async () => {
     mockQueryWithRLS.mockResolvedValueOnce({
       rows: [makeRow(), makeRow({ id: 'ap-2', kind: 'tool_invocation' })],
       rowCount: 2,
     } as never)
     const rows = await store.listPendingForWorkspace('u-1', 'ws-1')
-    expect(rows).toHaveLength(2)
-    expect(rows[1].kind).toBe('tool_invocation')
+    expect(rows.map(row => row.id)).toEqual(['ap-1'])
     const [userId, sql, params] = mockQueryWithRLS.mock.calls[0]
     expect(userId).toBe('u-1')
     expect(sql).toContain("status = 'pending'")
@@ -177,7 +179,7 @@ describe('[COMP:api/pending-approvals-store] listPendingForWorkspace', () => {
 
 describe('[COMP:api/pending-approvals-store] countPendingForUser', () => {
   it('returns the pending count for the approver', async () => {
-    mockQueryWithRLS.mockResolvedValueOnce({ rows: [{ count: '3' }], rowCount: 1 } as never)
+    mockQueryWithRLS.mockResolvedValueOnce({ rows: [makeRow(), makeRow({id:'ap-2'}), makeRow({id:'ap-3'})], rowCount: 3 } as never)
     expect(await store.countPendingForUser('u-1')).toBe(3)
   })
 

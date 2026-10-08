@@ -8,7 +8,7 @@ import { getGoalById, getGoalByIdSystem } from '../../db/goals.js'
 import { createDbWorkspaceGroupStore } from '../../db/workspace-group-store.js'
 import { createDbWorkflowStore, createDbWorkflowRunStore } from '../../db/workflow-store.js'
 import { claimCrmGoalEventResume, assertGoalCrmSourceAuthority } from '../crm-event-resume.js'
-import { resolveWorkflowRunScope } from '../../context-scope/workflow-authority.js'
+import { resolveWorkflowRunScope,captureAuthoringAuthoritySystem } from '../../context-scope/workflow-authority.js'
 import { prepareCrmPrivacyCopies, retireCrmNotificationCopies } from '../../crm-operations/privacy-copy-resolver.js'
 import { CRM_PRIVACY_COVERAGE, crmPrivacyDomainSql } from '../../crm-operations/privacy-coverage.js'
 import { pruneCrmOperationsRetention } from '../../crm-operations/privacy.js'
@@ -27,10 +27,11 @@ async function fixture(){
   const contact=await createContact(owner,{workspaceId,name:'Fixture contact',compartments:[team.compartmentKey!]})
   await pool.query(`INSERT INTO crm_domain_event_outbox(id,workspace_id,event_type,event_key,subject_kind,subject_id,payload,actor_kind)
     VALUES($1::uuid,$2,'crm.consent.changed',$1::text,'contact',$3,'{}','user')`,[eventId,workspaceId,contact.id])
-  const workflow=await createDbWorkflowStore().create({userId:member,workspaceId,name:'Goal source fixture',definition:{startStepId:'consult',steps:[{id:'consult',type:'assistant_call',target:{assistantId:'primary'},prompt:'Fixture question'}]}})
+  const authoringAuthority=await captureAuthoringAuthoritySystem({userId:member,assistantId,workspaceId,contextGroupId:null,contextProjectId:null})
+  const workflow=await createDbWorkflowStore().create({userId:member,workspaceId,authoringAuthority,name:'Goal source fixture',definition:{startStepId:'consult',steps:[{id:'consult',type:'assistant_call',target:{assistantId:'primary'},prompt:'Fixture question'}]}})
   let marker:GoalAwaitingEvent={subscriptions:[{source:{type:'crm'}}],state:{iteration:3,spend:2,noProgressStreak:0,runId:null}}
-  await pool.query(`INSERT INTO goals(id,workspace_id,outcome,done_when,means,created_by_user_id,confirmed_at,awaiting_event)
-    VALUES($1,$2,'Fixture outcome','{"kind":"subtasks"}',jsonb_build_object('workflowId',$3::text),$4,now(),$5)`,[goalId,workspaceId,workflow.id,member,JSON.stringify(marker)])
+  await pool.query(`INSERT INTO goals(id,workspace_id,outcome,done_when,means,created_by_user_id,confirmed_at,awaiting_event,authoring_authority)
+    VALUES($1,$2,'Fixture outcome','{"kind":"subtasks"}',jsonb_build_object('workflowId',$3::text),$4,now(),$5,$6::jsonb)`,[goalId,workspaceId,workflow.id,member,JSON.stringify(marker),JSON.stringify(authoringAuthority)])
   marker=(await pool.query('SELECT awaiting_event FROM goals WHERE id=$1',[goalId])).rows[0].awaiting_event
   const event=crmDomainEventToDispatchEvent({id:eventId,workspaceId,eventType:'crm.consent.changed',subjectKind:'contact',subjectId:contact.id,payload:{},actorKind:'user',occurredAt:new Date()})
   const create=()=>runs.createRun({workflowId:workflow.id,workspaceId,triggeredBy:member,triggerKind:'manual',input:{goalId}})
@@ -135,7 +136,8 @@ describe('[COMP:api/goal-crm-scope] durable goal wake-up sources',()=>{
     const f=await fixture(),projectId=randomUUID(),foreignProjectId=randomUUID()
     for(const id of [projectId,foreignProjectId])await pool.query("INSERT INTO workspace_projects(id,workspace_id,name,normalized_name,created_by) VALUES($1::uuid,$2,$1::text,$1::text,$3)",[id,f.workspaceId,f.owner])
     const foreign=await createContact(f.owner,{workspaceId:f.workspaceId,name:'Other project contact',projectIds:[foreignProjectId]})
-    await pool.query('UPDATE goals SET context_project_id=$2 WHERE id=$1',[f.goalId,projectId])
+    const projectAuthority=await captureAuthoringAuthoritySystem({userId:f.member,assistantId:f.assistantId,workspaceId:f.workspaceId,contextGroupId:null,contextProjectId:projectId})
+    await pool.query('UPDATE goals SET context_project_id=$2,authoring_authority=$3::jsonb WHERE id=$1',[f.goalId,projectId,JSON.stringify(projectAuthority)])
     await claimCrmGoalEventResume(f.goalId,f.event,f.marker)
     const run=await f.create(),execution=await resolveWorkflowRunScope({userId:f.member,assistantId:f.assistantId,workspaceId:f.workspaceId,run})
     expect(execution.turnScope).toMatchObject({activeProjectId:projectId,writeProjectIds:[projectId],access:{projectIds:[projectId]}})
@@ -215,7 +217,7 @@ describe('[COMP:api/goal-crm-scope] durable goal wake-up sources',()=>{
     const f=await fixture()
     await pool.query("UPDATE crm_domain_event_outbox SET status='delivered',created_at=now()-interval '2 days' WHERE id=$1",[f.eventId])
     await claimCrmGoalEventResume(f.goalId,f.event,f.marker)
-    await pruneCrmOperationsRetention(f.workspaceId,new Date())
+    await pruneCrmOperationsRetention({workspaceId:f.workspaceId,actor:{kind:'user',userId:f.owner},authority:{role:'owner',canWrite:true,canConfigure:true,trustedIdentitySources:[]}},new Date())
     expect((await pool.query('SELECT id FROM crm_domain_event_outbox WHERE id=$1',[f.eventId])).rows).toHaveLength(1)
   })
   it('minimizes terminal privacy receipts and cannot revive their original source binding',async()=>{

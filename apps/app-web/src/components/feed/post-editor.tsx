@@ -107,7 +107,7 @@ import {
 import { useGlobalDockRecorder } from "@/lib/recorder/dock-recorder-bridge";
 
 import { useIsOffline } from "@/lib/offline/use-offline-sync";
-import { feedCachedJson } from "@/lib/offline/feed-cache";
+import { feedCachedJson, isAuthoritativeFeedDenial } from "@/lib/offline/feed-cache";
 import {
   FEED_LOCAL_CHANGED, blankFeedContent, createLocalFeedPost, loadFeedWorkingCopy,
   patchFeedWorkingCopy, readLocalFeedPost, forkLocalFeedPost, ensureFeedComposition, retryFeedWorkingCopy,
@@ -580,7 +580,7 @@ function PostPane({
           }
         } catch { setLocalSaveError(true); }
       }
-      compositionLoadedRef.current = true;
+      if (found) compositionLoadedRef.current = true;
     }
     setLoading(false);
   }, [assistantId, platform, sessionId, te.loadFailed]);
@@ -997,6 +997,21 @@ function PostPane({
           </div>
           <Skeleton className="h-11 w-full rounded-xl" />
           <Skeleton className="h-52 w-full rounded-xl" />
+        </div>
+      </div>
+    );
+  }
+
+  if ((!session && !localPost?.newSession) || isAuthoritativeFeedDenial(collaboration.error)) {
+    return (
+      <div className="flex flex-col items-start gap-4 p-4 sm:p-6">
+        <p role="alert" className="text-sm text-muted-foreground">{te.loadFailed}</p>
+        <div className="flex flex-wrap gap-2">
+          <Button variant="outline" className="max-sm:min-h-11" onClick={() => {
+            setLoading(true);
+            void Promise.all([load(), collaboration.refresh()]).catch(() => { setError(te.loadFailed); setLoading(false); });
+          }}>{te.retryLoad}</Button>
+          <Button variant="ghost" className="max-sm:min-h-11" onClick={() => router.push(feedPath(workspaceId, { platform, segment: "posts" }))}>{te.backToPosts}</Button>
         </div>
       </div>
     );

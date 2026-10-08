@@ -46,23 +46,9 @@ export function classifyScopeChange(
     && setEquals(previous.projectIds, next.projectIds)
   ) return 'unchanged'
 
-  const teamWidened = removedAny(previous.compartments, next.compartments)
-  const projectWidened = previous.projectIds.length > 0 && (
-    next.projectIds.length === 0
-    || (
-      next.projectIds.every((id) => previous.projectIds.includes(id))
-      && removedAny(previous.projectIds, next.projectIds)
-    )
-  )
-  if (teamWidened || projectWidened) return 'widening'
-
-  const teamNarrowed = addedAny(previous.compartments, next.compartments)
-  const projectNarrowed = previous.projectIds.length === 0 && next.projectIds.length > 0
-    || (
-      previous.projectIds.every((id) => next.projectIds.includes(id))
-      && addedAny(previous.projectIds, next.projectIds)
-    )
-  if (teamNarrowed || projectNarrowed) return 'narrowing'
+  if (removedAny(previous.compartments, next.compartments)) return 'widening'
+  if (addedAny(previous.compartments, next.compartments)) return 'narrowing'
+  // Projects organize already-authorized content; they never declassify it.
   return 'lateral'
 }
 

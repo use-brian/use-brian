@@ -21,7 +21,7 @@ const { membershipMock, departmentsMock } = vi.hoisted(() => ({
 vi.mock('../../db/department-store.js', () => ({ departmentClearancesForUserSystem: departmentsMock }))
 vi.mock('../../db/workspace-store.js', async (importOriginal) => {
   const actual = await importOriginal<typeof import('../../db/workspace-store.js')>()
-  return { ...actual, getWorkspaceMembershipWithClearanceSystem: membershipMock }
+  return { ...actual, getWorkspaceMembershipWithReadScopeSystem: membershipMock }
 })
 
 import { listUsableWorkspaceConnectors } from '../usable-connectors.js'

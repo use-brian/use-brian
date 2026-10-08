@@ -8,14 +8,18 @@
 import { describe, it, expect, vi, beforeEach } from 'vitest'
 
 vi.mock('@/lib/auth-fetch', () => ({ authFetch: vi.fn() }))
-vi.mock('@/lib/surface-cache', () => ({ markSurfaceCacheStale: vi.fn() }))
-import { markSurfaceCacheStale } from '@/lib/surface-cache'
+vi.mock('@/lib/surface-cache', async (original) => ({ ...await original<typeof import('@/lib/surface-cache')>(), markSurfaceCacheStale: vi.fn(), invalidateSurfaceCache: vi.fn() }))
+import { markSurfaceCacheStale, invalidateSurfaceCache } from '@/lib/surface-cache'
+import { browserProfilesCacheKey, browserProfileDestinationsCacheKey } from '@/lib/surface-prefetch'
 
 import { authFetch } from '@/lib/auth-fetch'
 import {
   captureProfileSession,
+  classifyBrowserProfileDepartment,
   completeComputerTask,
+  discardComputerTask,
   createBrowserProfile,
+  fetchBrowserProfileDestinations,
   deleteBrowserProfile,
   getComputerFrame,
   getComputerTask,
@@ -155,6 +159,22 @@ describe('[COMP:app-web/sandbox-takeover] Take-Over live view SDK', () => {
 // profile and the site. Echoes site + capturedAt on success (story 3) and
 // surfaces the server's message verbatim on failure (story 20), so distinct
 // refusals like a wrong tab's site never collapse into one flattened error.
+describe('[COMP:app-web/task-discard] discard request contract', () => {
+  it('posts only workspace scope and accepts only explicit terminal acknowledgements', async () => {
+    mockFetch.mockResolvedValueOnce(respond(200, { ok: true, status: 'discarded' }))
+    expect(await discardComputerTask('session/1', 'workspace-1')).toBe(true)
+    const call = mockFetch.mock.calls.at(-1)!
+    expect(String(call[0])).toContain('/tasks/session%2F1/discard')
+    expect(JSON.parse(call[1]!.body as string)).toEqual({ workspaceId: 'workspace-1' })
+    for (const body of [{ ok: true }, { ok: true, status: 'running' }, { ok: false, status: 'discarded' }]) {
+      mockFetch.mockResolvedValueOnce(respond(200, body))
+      expect(await discardComputerTask('session-1', 'workspace-1')).toBe(false)
+    }
+    mockFetch.mockResolvedValueOnce(respond(502, { error: 'unconfirmed' }))
+    expect(await discardComputerTask('session-1', 'workspace-1')).toBe(false)
+  })
+})
+
 describe('[COMP:app-web/profile-management] captureProfileSession ("Save this login from my browser")', () => {
   it('posts to the profile-scoped capture route and echoes site + capturedAt on success', async () => {
     mockFetch.mockResolvedValueOnce(
@@ -374,5 +394,42 @@ describe('[COMP:app-web/automatic-desktop-browser] profile mutation signals', ()
     const abort = new AbortController()
     await pairBrowserExtension('w', 'p', abort.signal)
     expect(mockFetch).toHaveBeenCalledWith(expect.any(String), expect.objectContaining({ signal: abort.signal }))
+  })
+})
+
+describe('[COMP:app-web/profile-management] department creation contract', () => {
+  it('loads the authorized browser directory and evicts failed projections', async () => {
+    mockFetch.mockResolvedValueOnce(respond(200, { departments: [{ id: 'dept-1', name: 'Operations', clearance: 'internal' }] }))
+    expect((await fetchBrowserProfileDestinations('ws-1')).departments).toHaveLength(1)
+    expect(mockFetch.mock.calls.at(-1)?.[0]).toContain('/api/computer/profile-destinations?workspaceId=ws-1')
+    mockFetch.mockResolvedValueOnce(respond(403))
+    await expect(fetchBrowserProfileDestinations('ws-1')).rejects.toMatchObject({ name: 'SurfaceCacheEvictionError' })
+  })
+
+  it('sends department, sharing and clearance together to creation admission', async () => {
+    mockFetch.mockResolvedValueOnce(respond(200, { profile: { id: 'p1', departmentId: 'dept-1' } }))
+    await createBrowserProfile({ workspaceId: 'ws-1', name: 'Department identity', departmentId: 'dept-1', scope: 'workspace', clearance: 'internal' })
+    expect(JSON.parse(mockFetch.mock.calls.at(-1)?.[1]?.body as string)).toMatchObject({ departmentId: 'dept-1', scope: 'workspace', clearance: 'internal' })
+  })
+})
+
+describe('[COMP:app-web/profile-management] classification command', () => {
+  const command = { departmentId: 'department-2', expectedDepartmentId: 'department-1', reason: 'Move fictional operations', confirmed: true as const }
+  it.each([
+    [200, undefined, 'saved'],
+    [409, 'profile_changed', 'changed'],
+    [403, 'admin_confirmation_required', 'admin_required'],
+    [403, 'profile_authority_denied', 'unavailable'],
+  ] as const)('maps status %s and evicts both protected projections', async (status, code, expected) => {
+    mockFetch.mockResolvedValueOnce(respond(status, { code }))
+    expect(await classifyBrowserProfileDepartment('profile/1', 'ws-1', command)).toBe(expected)
+    expect(mockFetch).toHaveBeenCalledWith(expect.stringContaining('/profiles/profile%2F1/department'), expect.objectContaining({ method: 'POST', body: JSON.stringify(command) }))
+    expect(invalidateSurfaceCache).toHaveBeenCalledWith(browserProfilesCacheKey('ws-1'))
+    expect(invalidateSurfaceCache).toHaveBeenCalledWith(browserProfileDestinationsCacheKey('ws-1'))
+  })
+  it('evicts after an ambiguous network failure without reporting success', async () => {
+    mockFetch.mockRejectedValueOnce(new Error('Disconnected'))
+    expect(await classifyBrowserProfileDepartment('profile-1', 'ws-1', command)).toBe('unavailable')
+    expect(invalidateSurfaceCache).toHaveBeenCalledTimes(2)
   })
 })

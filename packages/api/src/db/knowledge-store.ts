@@ -45,6 +45,7 @@ import { publishKnowledgeLifecycle } from '../knowledge-event-fanout.js'
 // ── Types ──────────────────────────────────────────────────────
 
 export type KnowledgeEntry = {
+  scopeVersion?: string
   id: string
   workspaceId: string
   path: string
@@ -112,7 +113,7 @@ export type KnowledgeSource = {
 function emitLifecycle(
   row: Pick<
     KnowledgeEntry,
-    'id' | 'workspaceId' | 'path' | 'title' | 'tags' | 'sensitivity' | 'sourceId'
+    'id' | 'workspaceId' | 'path' | 'title' | 'tags' | 'sensitivity' | 'sourceId' | 'scopeVersion'
   >,
   action: KnowledgeLifecycleAction,
   writtenBy: KnowledgeWriteActor | undefined,
@@ -121,6 +122,7 @@ function emitLifecycle(
   publishKnowledgeLifecycle({
     workspaceId: row.workspaceId,
     entryId: row.id,
+    ...(row.scopeVersion ? { sourceVersion: row.scopeVersion } : {}),
     action,
     path: row.path,
     title: row.title,
@@ -133,7 +135,7 @@ function emitLifecycle(
 }
 
 const ENTRY_COLUMNS = `
-  id, workspace_id AS "workspaceId",
+  id, workspace_id AS "workspaceId", scope_version::text AS "scopeVersion",
   path, title, summary, content, tags, related_ids AS "relatedIds",
   sensitivity, compartments, project_ids AS "projectIds",
   metadata, source_id AS "sourceId", source_sha AS "sourceSha",
@@ -415,6 +417,7 @@ async function knowledgeWrite<T>(workspaceId: string, actorId: string | null | u
   try {
     await client.query('BEGIN')
     if (readyConnection || requireActor) await applyRLSGucs(client, actor!)
+    await client.query("SELECT set_config('app.knowledge_event_actor',$1,true)", [actor ?? ''])
     await client.query('SELECT id FROM workspaces WHERE id=$1 FOR UPDATE', [workspaceId])
     const policy = await readAdmissionPolicy(client, workspaceId)
     const ready = policy?.setupState === 'ready'
@@ -651,12 +654,15 @@ export function createDbKnowledgeStore(): KnowledgeStore {
     async upsertByPath(params, syncAuthority) {
       if (syncAuthority) {
         const source = knowledgeSyncCapture(syncAuthority)
-        const result = await knowledgeWrite(params.workspaceId, source.configuredByUserId, async client => {
+        const outcome = await knowledgeWrite(params.workspaceId, source.configuredByUserId, async client => {
           const admitted = await admitKnowledgeSync(client, syncAuthority, params)
-          return client.query<KnowledgeEntry>(`SELECT ${ENTRY_COLUMNS} FROM ${source.configuredByUserId ? 'apply_knowledge_source_sync' : 'apply_knowledge_source_sync_worker'}($1::jsonb,$2::jsonb)`,
+          const existed = (await client.query('SELECT id FROM knowledge_entries WHERE workspace_id=$1 AND path=$2', [params.workspaceId,params.path])).rows.length > 0
+          const result = await client.query<KnowledgeEntry>(`SELECT ${ENTRY_COLUMNS} FROM ${source.configuredByUserId ? 'apply_knowledge_source_sync' : 'apply_knowledge_source_sync_worker'}($1::jsonb,$2::jsonb)`,
             [JSON.stringify(admitted), JSON.stringify(source)])
+          return { row:result.rows[0], existed }
         }, undefined, !!source.configuredByUserId)
-        return result.rows[0]
+        emitLifecycle(outcome.row, outcome.existed ? 'updated' : 'created', params.writtenBy, params.actorId ?? source.configuredByUserId)
+        return outcome.row
       }
       if (params.sourceId != null) throw new Error('knowledge_sync_authority_required')
       // `xmax = 0` is the standard upsert discriminator: a row inserted by
@@ -721,7 +727,7 @@ export function createDbKnowledgeStore(): KnowledgeStore {
           scope = { ...scope, ...await admitKnowledgeWrite(client, actor, { ...scope, workspaceId, sensitivity: prior.sensitivity }, prior) }
         }
         return client.query<
-          Pick<KnowledgeEntry, 'id' | 'path' | 'title' | 'tags' | 'sensitivity' | 'sourceId'>
+          Pick<KnowledgeEntry, 'id' | 'path' | 'title' | 'tags' | 'sensitivity' | 'sourceId' | 'scopeVersion'>
         >(
           `UPDATE knowledge_entries
            SET content = $1,
@@ -729,7 +735,7 @@ export function createDbKnowledgeStore(): KnowledgeStore {
                project_ids = ARRAY(SELECT DISTINCT unnest(project_ids || $5::uuid[]) ORDER BY 1),
                updated_at = now()
            WHERE id = $2 AND workspace_id = $3 AND source_id IS NULL
-           RETURNING id, path, title, tags, sensitivity, source_id AS "sourceId"`,
+           RETURNING id, path, title, tags, sensitivity, source_id AS "sourceId", scope_version::text AS "scopeVersion"`,
           [content, id, workspaceId, scope.compartments ?? [], scope.projectIds ?? []],
         )
       })
@@ -738,6 +744,7 @@ export function createDbKnowledgeStore(): KnowledgeStore {
       publishKnowledgeLifecycle({
         workspaceId,
         entryId: row.id,
+        ...(row.scopeVersion ? { sourceVersion: row.scopeVersion } : {}),
         action: 'updated',
         path: row.path,
         title: row.title,

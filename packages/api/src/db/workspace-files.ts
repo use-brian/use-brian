@@ -1,3 +1,4 @@
+import { admitFileTransaction } from '../workspace-access/file-transaction-admission.js'
 import { admitSessionFile, admitUploadedFile, readFileSessionBinding, type FileSessionBinding } from '../workspace-access/file-publication-admission.js'
 import { randomUUID } from 'node:crypto'
 import type {
@@ -18,7 +19,7 @@ import { assertAuthorshipPresent } from './authorship-guard.js'
 import { currentAgentAccess } from './agent-access-context.js'
 import { applyRLSGucs, getAppPool, query, queryWithRLS, rollbackAndRelease } from './client.js'
 import { emitDocumentedByEdges } from './edge-hooks.js'
-import { admitDerivedFile } from '../workspace-access/file-derived-admission.js'
+import { admitDerivedFile, expandDerivedFileEvidence } from '../workspace-access/file-derived-admission.js'
 import { admitFileCreate } from '../workspace-access/file-create-admission.js'
 import { readAdmissionPolicy } from '../workspace-access/admission-policy-read.js'
 import { admitWorkspaceResource } from '../workspace-access/resource-admission.js'
@@ -233,14 +234,17 @@ export async function createWorkspaceFile(
   assertAuthorshipPresent('createWorkspaceFile', input.createdByUserId)
   const client = await getAppPool().connect()
   let file: WorkspaceFile
+  let derivation=opts.derivation
   try {
     await client.query('BEGIN')
     await applyRLSGucs(client, userId)
+    const renewAdmission = await admitFileTransaction(client, userId, input)
     await client.query('SELECT id FROM workspaces WHERE id=$1 FOR UPDATE',[input.workspaceId])
+    if(derivation&&!opts.sessionBinding&&!opts.uploadId)derivation=await expandDerivedFileEvidence(client,derivation)
     input = opts.sessionBinding ? await admitSessionFile(client,userId,input,opts.sessionBinding,access)
       : opts.uploadId ? await admitUploadedFile(client,userId,input,opts.uploadId,access)
       : opts.derivation
-      ? await admitDerivedFile(client, userId, input, opts.derivation, access, opts.expectedPolicyRevision)
+      ? await admitDerivedFile(client, userId, input, derivation!, access, opts.expectedPolicyRevision)
       : await admitFileCreate(client, userId, input, opts.expectedPolicyRevision)
     // Recheck the resolved destination, not only the caller's pre-default labels.
     if (!opts.derivation) assertExecutionResourceScope({ workspaceId: input.workspaceId,
@@ -291,7 +295,7 @@ export async function createWorkspaceFile(
     const actorParam = values.length
     const result = opts.derivation
       ? await client.query<FileRow>(`SELECT ${FULL_SELECT} FROM create_source_derived_file($1::jsonb,$2::jsonb)`,
-        [JSON.stringify(input), JSON.stringify(opts.derivation)])
+        [JSON.stringify(input), JSON.stringify(derivation)])
       : await client.query<FileRow>(
       `INSERT INTO workspace_files (${cols.join(', ')})
        SELECT ${placeholders}
@@ -313,6 +317,7 @@ export async function createWorkspaceFile(
         VALUES($1,$2,$3,$4,$5,$6)`,[opts.sessionBinding.artifactId,input.workspaceId,userId,file.id,role,input.metadata.contentSha256])
     }
     if (opts.uploadId) await client.query("UPDATE workspace_file_uploads SET status='completed',completed_at=now(),updated_at=now() WHERE id=$1",[opts.uploadId])
+    await renewAdmission(file.id)
     await client.query('COMMIT')
   } catch (error) {
     await client.query('ROLLBACK').catch(() => {})

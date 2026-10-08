@@ -2,9 +2,8 @@ import { z } from 'zod'
 import { WorkspaceAccessError } from '../workspace-access/policy.js'
 import { webChatSourcesHandler, WEB_CHAT_SOURCE_SQL, type WebChatSourceSession } from './_web-chat-sources.js'
 import { dispatchPersistedWebInput } from './_incoming-chat-event.js'
+import { createSessionStreamAuthority } from '../session-stream-authority.js'
 import { guardFeedStream } from '../content-planning/source-authority.js'
-import { findFeedThreadDraft } from '../content-planning/collaboration-service.js'
-import { getFeedCollaboration } from '../db/feed-collaboration-store.js'
 import { Router } from 'express'
 import { findOrCreateUser, getDefaultAssistant, getUserAssistant, getUserProfilesByIds, getWorkspacePrimaryAssistant } from '../db/users.js'
 import { addSessionMessage, createPersonalWebSession, createWorkspaceChatSession, findSessionByChannel, findSessionById, getSessionMessageById, getSessionMessages, isSharedChatSession, rebindSessionAssistant, renameSession, updateSessionMessageText } from '../db/sessions.js'
@@ -13,7 +12,7 @@ import { query } from '../db/client.js'
 import { getTurnTrace } from '../ledger/turn-trace.js'
 import { getLedgerPayloadStore } from '../ledger/runtime.js'
 import { resolveUser } from './route-helpers.js'
-import { getWorkspaceRoleSystem, getWorkspaceMembershipWithClearanceSystem, getWorkspaceMembershipWithReadScopeSystem } from '../db/workspace-store.js'
+import { getWorkspaceRoleSystem, getWorkspaceMembershipWithClearanceSystem } from '../db/workspace-store.js'
 import { canRead, type Sensitivity } from '@use-brian/core'
 import {
   ContextNotAvailableError,
@@ -46,78 +45,10 @@ import {
 } from '../db/session-pins-store.js'
 import { resolveSessionPinLabels } from '../resolve-session-pins.js'
 import { guestAuthorNameForSession, guestSenderProfile } from '../db/guest-comment-store.js'
-import { decideSessionRead } from '../session-read-access.js'
+import { gateSessionRead } from '../session-read-authority.js'
 import { COMMENT_THREAD_CHANNEL_TYPE } from '../db/comment-thread-store.js'
 
-/** A session whose read-access we gate (the subset of fields the gate reads). */
-type GatedSession = {
-  id?: string
-  channelType?: string
-  userId: string
-  assistantId: string
-  visibility: string | null
-  mode: string | null
-  effectiveClearance: string | null
-  contextCompartments?: string[]
-  contextProjectId?: string | null
-}
-
-/**
- * Authorize a per-session read for the caller. Shared by `GET /:id/messages`,
- * the reconnect stream `GET /:id/stream`, and the `POST /api/chat` resume path
- * (`routes/chat.ts`) so they can't drift: a `visibility='workspace'` session
- * (doc comment threads, migration 223) or a `mode='draft'` session is readable
- * by any workspace member at/above the session's `effective_clearance`
- * (migration 224); every other session is owner-only. Returns `null` on
- * success, or `{ status, error }` to reject. Exported so the chat write/resume
- * path enforces the same rule as the reads (WS3: `findSessionById` did no
- * per-user check, so a member of a shared primary assistant could resume
- * another member's private session by id).
- *
- * The decision itself is the pure `decideSessionRead`
- * (`../session-read-access.ts`), shared with the Live roster's tiering so
- * the gate and the roster cannot drift; this wrapper only resolves the
- * async facts (assistant → workspace, caller → membership clearance).
- */
-export async function gateSessionRead(
-  jwtUserId: string,
-  session: GatedSession,
-): Promise<{ status: number; error: string } | null> {
-  if (!(await getUserAssistant(jwtUserId, session.assistantId))) return { status: 403, error: 'Session not available' }
-  if (session.mode === 'draft' && session.id && !(await query('SELECT feed_draft_audience_allowed($1) AS allowed', [session.id])).rows[0]?.allowed) return { status: 403, error: 'Draft source access required' }
-  if (session.channelType === 'feed_thread') {
-    const parent = session.id ? await findFeedThreadDraft(session.id) : null
-    if (!parent || parent.assistantId !== session.assistantId) return { status: 404, error: 'Draft discussion not found' }
-    try { await getFeedCollaboration({ userId: jwtUserId, assistantId: parent.assistantId, sessionId: parent.sessionId, kind: 'user' }); return null }
-    catch { return { status: 403, error: 'Draft access required' } }
-  }
-  let assistantWorkspaceId: string | null = null
-  let membershipClearance: 'public' | 'internal' | 'confidential' | null = null
-  let membershipCompartments: string[] | null | undefined
-  let membershipProjectIds: string[] | null | undefined
-  if (session.visibility === 'workspace' || session.mode === 'draft') {
-    const teamRow = await query<{ workspaceId: string | null }>(
-      `SELECT workspace_id AS "workspaceId" FROM assistants WHERE id = $1`,
-      [session.assistantId],
-    )
-    assistantWorkspaceId = teamRow.rows[0]?.workspaceId ?? null
-    if (assistantWorkspaceId) {
-      const membership = await getWorkspaceMembershipWithReadScopeSystem(jwtUserId, assistantWorkspaceId)
-      membershipClearance = membership?.clearance ?? null
-      membershipCompartments = membership?.compartments
-      membershipProjectIds = membership?.projectIds
-    }
-  }
-  const decision = decideSessionRead({
-    callerUserId: jwtUserId,
-    session,
-    assistantWorkspaceId,
-    membershipClearance,
-    membershipCompartments,
-    membershipProjectIds,
-  })
-  return decision.readable ? null : { status: decision.status, error: decision.error }
-}
+export { gateSessionRead } from '../session-read-authority.js'
 
 /**
  * Session API routes for web UI.
@@ -1858,6 +1789,14 @@ export function sessionRoutes(opts: SessionRouteOptions = {}): Router {
     }
 
     send('status', { status: session.status })
+    let closeForAuthority = () => { res.end() }
+    const authority = createSessionStreamAuthority(async () => {
+      const current = await findSessionById(req.params.id)
+      return !!current && !(await gateSessionRead(jwtUserId, current))
+    }, () => closeForAuthority())
+    const authorityPoll = setInterval(() => authority.run(() => {}), 5_000)
+    authorityPoll.unref?.()
+    res.on('close', () => { authority.dispose(); clearInterval(authorityPoll) })
 
     // Workspace-shared chat sessions get FOLLOW mode (multiplayer chat T13):
     // the stream stays open regardless of turn state and relays the room's
@@ -1867,8 +1806,8 @@ export function sessionRoutes(opts: SessionRouteOptions = {}): Router {
     // the discrete activity mirror (`activity`: tool steps, research status,
     // pending tool confirmations). Events
     // are signals + capped data — the client refetches the persisted
-    // transcript at settle. Clearance is already enforced by the
-    // `gateSessionRead` above. A 25s comment ping defeats proxy idle
+    // transcript at settle. Current authority is rechecked before each relay
+    // and while idle by the guard below. A 25s comment ping defeats proxy idle
     // timeouts.
     if (isSharedChatSession(session)) {
       let closed = false
@@ -1877,15 +1816,16 @@ export function sessionRoutes(opts: SessionRouteOptions = {}): Router {
       const viewerName = await getUserProfilesByIds([jwtUserId])
         .then((profiles) => profiles.get(jwtUserId)?.name ?? null)
         .catch(() => null)
+      if (res.destroyed || res.writableEnded) return
       // Who is already here (and possibly mid-typing) before the first
       // transition arrives. Sent before subscribing; the join emit that
       // follows updates every viewer, this one included.
-      send('presence', { viewers: getSessionPresence(req.params.id) })
+      authority.run(() => send('presence', { viewers: getSessionPresence(req.params.id) }))
       const unsubscribeRoom = subscribeSessionEvents({
         sessionId: req.params.id,
         userId: jwtUserId,
         name: viewerName,
-        cb: (event: SessionEvent) => {
+        cb: (event: SessionEvent) => authority.run(() => {
           switch (event.kind) {
             case 'user_message_saved':
               send('user_message_saved', event.payload)
@@ -1917,18 +1857,22 @@ export function sessionRoutes(opts: SessionRouteOptions = {}): Router {
             default:
               break
           }
-        },
+        }),
       })
       const ping = setInterval(() => {
         if (!res.writableEnded) res.write(': ping\n\n')
       }, 25_000)
       ping.unref?.()
-      req.on('close', () => {
+      const closeRoom = () => {
         if (closed) return
         closed = true
+        authority.dispose()
+        clearInterval(authorityPoll)
         clearInterval(ping)
         unsubscribeRoom()
-      })
+      }
+      closeForAuthority = () => { closeRoom(); res.end() }
+      req.on('close', closeRoom)
       return
     }
 
@@ -1947,6 +1891,8 @@ export function sessionRoutes(opts: SessionRouteOptions = {}): Router {
     const finalize = (frames: readonly ReconnectRelayFrame[]) => {
       if (closed) return
       closed = true
+      authority.dispose()
+      clearInterval(authorityPoll)
       if (poll) clearInterval(poll)
       if (keepalive) clearInterval(keepalive)
       unsubscribe?.()
@@ -1954,12 +1900,13 @@ export function sessionRoutes(opts: SessionRouteOptions = {}): Router {
       res.end()
     }
 
-    const relayEvent = (event: SessionEvent) => {
+    closeForAuthority = () => finalize([])
+    const relayEvent = (event: SessionEvent) => authority.run(() => {
       if (closed) return
       const relay = reconnectRelayFrames(event)
       if (relay.finalize) { finalize(relay.frames); return }
       for (const frame of relay.frames) send(frame.event, frame.data)
-    }
+    })
     unsubscribe = subscribeSessionEvents({
       sessionId: req.params.id,
       userId: jwtUserId,
@@ -1977,7 +1924,7 @@ export function sessionRoutes(opts: SessionRouteOptions = {}): Router {
     poll = setInterval(() => {
       void findSessionById(req.params.id)
         .then((s) => {
-          if (!s || s.status !== 'running') finalize(RECONNECT_BACKSTOP_FRAMES)
+          if (!s || s.status !== 'running') authority.run(() => finalize(RECONNECT_BACKSTOP_FRAMES))
         })
         .catch(() => {})
     }, 5_000)
@@ -1995,6 +1942,8 @@ export function sessionRoutes(opts: SessionRouteOptions = {}): Router {
     req.on('close', () => {
       if (closed) return
       closed = true
+      authority.dispose()
+      clearInterval(authorityPoll)
       if (poll) clearInterval(poll)
       if (keepalive) clearInterval(keepalive)
       unsubscribe?.()

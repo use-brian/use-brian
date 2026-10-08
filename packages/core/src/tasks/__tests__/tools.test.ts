@@ -394,6 +394,24 @@ describe('[COMP:tasks/tools] getTask', () => {
     expect(data).toHaveProperty('created_at')
   })
 
+  it('reports stored protection and distinguishes unknown from explicit General', async () => {
+    const store = makeFakeStore()
+    const { saveTask, getTask } = createTaskTools(store)
+    await saveTask.execute({ title: 'Protected fixture' }, ctx)
+    const row = store.rows[0]
+    expect((await getTask.execute({ id: row.id }, ctx)).data).toMatchObject({
+      sensitivity: null, compartments: null, project_ids: null,
+    })
+    Object.assign(row, { sensitivity: 'confidential', compartments: ['team:fixture'], projectIds: ['project-fixture'] })
+    expect((await getTask.execute({ id: row.id }, ctx)).data).toMatchObject({
+      sensitivity: 'confidential', compartments: ['team:fixture'], project_ids: ['project-fixture'],
+    })
+    row.compartments = []
+    expect((await getTask.execute({ id: row.id }, ctx)).data).toMatchObject({
+      sensitivity: 'confidential', compartments: [], project_ids: ['project-fixture'],
+    })
+  })
+
   it('returns isError when the task is not found', async () => {
     const store = makeFakeStore()
     const { getTask } = createTaskTools(store)

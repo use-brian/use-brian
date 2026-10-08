@@ -59,7 +59,6 @@ import { TaskRulesPanel } from "@/components/tasks/task-rules-panel";
 import { format } from "@/lib/i18n/format";
 import { Checkbox } from "@/components/ui/checkbox";
 import { promptDialog } from "@/components/ui/prompt-dialog";
-import { confirmDialog } from "@/components/ui/confirm-dialog";
 import {
   adjustBrainRow,
   deleteBrainRow,
@@ -419,16 +418,6 @@ export function TasksSurface({ workspaceId }: { workspaceId: string }) {
   const commitProject = useCallback(
     async (row: TaskRow, projectId: string | null): Promise<{ ok: boolean; error?: string }> => {
       if (taskProject(row) === projectId) return { ok: true };
-      const widening = taskProject(row) !== null && projectId === null;
-      if (widening) {
-        const confirmed = await confirmDialog({
-          title: scopeT.clearProjectTitle,
-          description: scopeT.clearProjectDescription,
-          confirmLabel: scopeT.clearProjectConfirm,
-          cancelLabel: scopeT.cancel,
-        });
-        if (!confirmed) return { ok: false };
-      }
       try {
         await reclassifyContext({
           workspaceId,
@@ -437,7 +426,7 @@ export function TasksSurface({ workspaceId }: { workspaceId: string }) {
           teamIds: row.contextTeamIds ?? [],
           projectIds: projectId ? [projectId] : [],
           reason: "Changed task Project in Tasks",
-          confirmed: widening,
+          confirmed: false,
         });
         patchRow(row.id, null, { projectId });
         requestBrainRefresh(workspaceId);
@@ -454,16 +443,6 @@ export function TasksSurface({ workspaceId }: { workspaceId: string }) {
     const targetRows = selectedVisible
       .map((id) => (rows ?? []).find((row) => row.id === id))
       .filter((row): row is TaskRow => row !== undefined);
-    const widening = projectId === null && targetRows.some((row) => taskProject(row) !== null);
-    if (widening) {
-      const confirmed = await confirmDialog({
-        title: scopeT.clearProjectTitle,
-        description: scopeT.clearProjectDescription,
-        confirmLabel: scopeT.clearProjectConfirm,
-        cancelLabel: scopeT.cancel,
-      });
-      if (!confirmed) return;
-    }
     setBulkBusy(true);
     const failed: string[] = [];
     for (const row of targetRows) {
@@ -475,7 +454,7 @@ export function TasksSurface({ workspaceId }: { workspaceId: string }) {
           teamIds: row.contextTeamIds ?? [],
           projectIds: projectId ? [projectId] : [],
           reason: "Changed task Project in Tasks",
-          confirmed: widening,
+          confirmed: false,
         });
         patchRow(row.id, null, { projectId });
       } catch {

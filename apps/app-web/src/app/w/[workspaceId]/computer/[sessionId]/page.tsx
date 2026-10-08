@@ -44,7 +44,7 @@ import { use as usePromise, useCallback, useEffect, useRef, useState } from "rea
 import { useRouter } from "next/navigation";
 import { Keyboard } from "lucide-react";
 import { useT } from "@/lib/i18n/client";
-import { confirmDialog } from "@/components/ui/confirm-dialog";
+import { TaskDiscardButton } from "@/components/computer/task-discard-button";
 import {
   canSwitchSessionBackend,
   createFrameGate,
@@ -237,24 +237,47 @@ export default function ComputerTakeoverPage(props: {
     };
   }, [sessionId, loginFlow.site, taskKey]);
 
-  // Mint the live stream once the task is resolved. Any failure lands on
-  // the polled fallback below - nothing breaks.
+  // Renew direct stream leases through the current API authority. A lost
+  // renewal removes cached pixels and falls back to authorized polling.
   useEffect(() => {
     if (!task || task === "loading" || takeoverStartsPolled(task.backend)) return;
     let cancelled = false;
-    void mintComputerStreamSession(sessionId)
-      .then((info) => {
+    let renewal: ReturnType<typeof setTimeout> | undefined;
+    let expiry: ReturnType<typeof setTimeout> | undefined;
+    const clearStream = () => {
+      streamRef.current = null;
+      wsRef.current?.close();
+      wsRef.current = null;
+      setStream(null);
+      gateRef.current?.clear();
+      setFrameSrc(null);
+      setMode("poll");
+    };
+    const renew = async () => {
+      try {
+        const info = await mintComputerStreamSession(sessionId);
         if (cancelled) return;
-        setStream(info);
-        setMode(info ? (info.wsUrl ? "ws" : "sse") : "poll");
-      })
-      .catch(() => {
-        if (!cancelled) setMode("poll");
-      });
+        clearTimeout(expiry);
+        if (!info || (info.expiresAt !== undefined && info.expiresAt <= Date.now())) {
+          clearStream();
+        } else {
+          setStream(info);
+          setMode(info.wsUrl ? "ws" : "sse");
+          if (info.expiresAt !== undefined) expiry = setTimeout(clearStream, Math.max(0, info.expiresAt - Date.now()));
+        }
+      } catch {
+        if (!cancelled) clearStream();
+      } finally {
+        if (!cancelled) renewal = setTimeout(renew, 15_000);
+      }
+    };
+    void renew();
     return () => {
       cancelled = true;
+      clearTimeout(renewal);
+      clearTimeout(expiry);
     };
-  }, [task, sessionId]);
+  }, [polledTaskId, polledBackend, sessionId]);
 
   // Rung 1 - duplex WebSocket: binary JPEG frames in, input out on the same
   // socket. Frames render via short-lived object URLs (no base64 inflation);
@@ -274,7 +297,7 @@ export default function ComputerTakeoverPage(props: {
         wsRef.current = ws;
       };
       ws.onmessage = (ev) => {
-        if (!(ev.data instanceof Blob)) return;
+        if (cancelled || streamRef.current?.wsUrl !== stream.wsUrl || !(ev.data instanceof Blob)) return;
         setStalled(false);
         gateRef.current?.push(URL.createObjectURL(ev.data));
       };
@@ -312,6 +335,7 @@ export default function ComputerTakeoverPage(props: {
     let errors = 0;
     const es = new EventSource(stream.framesUrl);
     const onFrame = (ev: MessageEvent) => {
+      if (streamRef.current?.framesUrl !== stream.framesUrl) return;
       errors = 0;
       setStalled(false);
       try {
@@ -364,6 +388,9 @@ export default function ComputerTakeoverPage(props: {
         if (active === null) {
           frames.dispose();
           metadata.dispose();
+          gateRef.current?.clear();
+          setFrameSrc(null);
+          invalidateSurfaceCache(taskKey);
           setTask(null);
         } else if (active) {
           setTask((current) =>
@@ -807,23 +834,6 @@ export default function ComputerTakeoverPage(props: {
     router.push(`/w/${workspaceId}`);
   }, [router, sessionId, workspaceId]);
 
-  const onStop = useCallback(async () => {
-    const confirmed = await confirmDialog({
-      title: t.computer.stopConfirmTitle,
-      description:
-        isLocalTask
-          ? t.computer.localStopConfirmBody
-          : t.computer.stopConfirmBody,
-      confirmLabel: t.computer.stopConfirmAction,
-    });
-    if (!confirmed) return;
-    const stopped = await completeComputerTask(sessionId, "failed").catch(() => false);
-    if (!stopped) return;
-    // Return to the Browsers surface index — the session rail keeps any other
-    // live sessions in view, rather than dropping to the workspace root.
-    router.push(`/w/${workspaceId}/computer`);
-  }, [isLocalTask, router, sessionId, t, workspaceId]);
-
   // What the chrome renders: the resolved task, or the cached header while
   // the resolve is in flight (class B: the frame connects, the chrome does
   // not blank). Handlers above keep reading `task` (the live state).
@@ -839,8 +849,9 @@ export default function ComputerTakeoverPage(props: {
       );
     }
     return (
-      <div className="flex h-full items-center justify-center p-8">
-        <p className="max-w-md text-center text-sm text-muted-foreground">{t.computer.noTask}</p>
+      <div className="flex h-full flex-col items-center justify-center gap-4 p-8">
+        <p className="max-w-md text-center text-sm text-muted-foreground">{t.computer.taskUnavailable}</p>
+        <TaskDiscardButton sessionId={sessionId} workspaceId={workspaceId} onDiscarded={() => router.push(`/w/${workspaceId}/computer`)} />
       </div>
     );
   }
@@ -874,13 +885,7 @@ export default function ComputerTakeoverPage(props: {
               : t.computer.liveViewSubtitle}
           </p>
         </div>
-        <button
-          type="button"
-          onClick={() => void onStop()}
-          className="shrink-0 rounded-md border border-destructive/40 px-3 py-1.5 text-xs font-medium text-destructive hover:bg-destructive/10 max-sm:min-h-11"
-        >
-          {t.computer.stopTask}
-        </button>
+        <TaskDiscardButton sessionId={sessionId} workspaceId={workspaceId} onDiscarded={() => router.push(`/w/${workspaceId}/computer`)} />
       </div>
 
       {view.backend === "local" && <ProtectedFillPanel task={view} workspaceId={workspaceId} sessionId={sessionId} />}

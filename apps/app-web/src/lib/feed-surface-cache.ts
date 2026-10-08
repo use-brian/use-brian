@@ -9,9 +9,8 @@
  * `feedCachedJson` had every one of those responses on disk and refused to
  * return them while online. Now each loader answers from IndexedDB on a cold
  * memory key and lets the network land behind the paint; a warm key is
- * network-only. Keys are passed IN (never rebuilt here) so this module has no
- * edge back to `surface-prefetch.ts`, which reaches it through a dynamic
- * import for the rail's hover warm.
+ * network-only. Surface keys come from `surface-prefetch.ts`, whose rail
+ * hover warm reaches these loaders through a dynamic import.
  *
  * Contract held in every loader:
  *  - the record written to disk is the record the network returned, under
@@ -43,6 +42,7 @@ import {
 } from "@/lib/api/feed";
 import { deploymentCapabilities } from "@/lib/edition";
 import type { FeedPlatform } from "@/lib/feed-nav";
+import { feedCollaborationCacheKey } from "@/lib/surface-prefetch";
 import type { FeedIdea, PlanBrief, PlanSlot } from "@/lib/feed-plan";
 import {
   deleteFeedCachedJson,
@@ -55,7 +55,7 @@ import {
 } from "@/lib/offline/feed-cache";
 import { mergeLocalFeedSessions } from "@/lib/offline/feed-offline";
 import {
-  invalidateSurfaceCache,
+  SurfaceCacheEvictionError,
   loadSurfaceCache,
   mutateSurfaceCache,
   readSurfaceCache,
@@ -173,7 +173,7 @@ async function fetchFeedWorkspaceRecord(
       // "Not yours" evicts both tiers: the disk copy would otherwise paint a
       // workspace this viewer no longer has on the next cold load.
       await deleteFeedCachedJson(feedWorkspaceRecordPath(workspaceId));
-      invalidateSurfaceCache(key);
+      throw new SurfaceCacheEvictionError(error);
     }
     throw error;
   }
@@ -231,7 +231,7 @@ export async function forgetFeedProfile(params: {
   mutateSurfaceCache<FeedWorkspaceRecord>(params.key, drop);
   const path = feedWorkspaceRecordPath(params.workspaceId);
   const disk = await readFeedCachedJson<FeedWorkspaceRecord>(path).catch(() => null);
-  if (disk) await writeFeedCachedJson(path, drop(disk));
+  if (disk) await writeFeedCachedJson(path, drop(disk), true);
 }
 
 /**
@@ -275,6 +275,16 @@ export function feedSessionsRecordPath(workspaceId: string, platform: FeedPlatfo
   return `record:feed-sessions:${workspaceId}:${platform}`;
 }
 
+/** Apply known detail denials after local overlays, including late list reads. */
+function withoutDeniedFeedSessions(workspaceId: string, lists: FeedPlatformSessions): FeedPlatformSessions {
+  return lists.map(({ assistantId, sessions }) => ({
+    assistantId,
+    sessions: sessions.filter(session => !isAuthoritativeFeedDenial(
+      readSurfaceCache(feedCollaborationCacheKey(workspaceId, assistantId, session.id)).error,
+    )),
+  }));
+}
+
 async function fetchFeedPlatformSessions(args: {
   workspaceId: string;
   platform: FeedPlatform;
@@ -298,8 +308,9 @@ async function fetchFeedPlatformSessions(args: {
       ),
     })),
   );
-  await writeFeedCachedJson(feedSessionsRecordPath(workspaceId, platform), perAssistant);
-  return perAssistant;
+  const permitted = withoutDeniedFeedSessions(workspaceId, perAssistant);
+  await writeFeedCachedJson(feedSessionsRecordPath(workspaceId, platform), permitted);
+  return withoutDeniedFeedSessions(workspaceId, permitted);
 }
 
 /**
@@ -323,12 +334,12 @@ export function loadFeedPlatformSessions(args: {
         feedSessionsRecordPath(workspaceId, platform),
       );
       if (!disk) return null;
-      return Promise.all(
+      return withoutDeniedFeedSessions(workspaceId, await Promise.all(
         disk.map(async ({ assistantId, sessions }) => ({
           assistantId,
           sessions: await mergeLocalFeedSessions(assistantId, sessions, platform),
         })),
-      );
+      ));
     },
     () => fetchFeedPlatformSessions(args),
   );

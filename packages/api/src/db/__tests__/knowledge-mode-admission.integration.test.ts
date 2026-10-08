@@ -2,7 +2,8 @@ import { randomUUID } from 'node:crypto'
 import { mkdtemp, writeFile, rm } from 'node:fs/promises'
 import { join } from 'node:path'
 import { tmpdir } from 'node:os'
-import { createKnowledgeSyncWorker } from '@use-brian/core'
+import { createKnowledgeSyncWorker, type DispatchEvent } from '@use-brian/core'
+import { setKnowledgeEventDispatcher } from '../../knowledge-event-fanout.js'
 import { afterAll, describe, expect, it, vi } from 'vitest'
 import * as github from '../../github/client.js'
 import { getPool, getAppPool, queryWithRLS } from '../client.js'
@@ -31,7 +32,28 @@ async function fixture(mode = 'simple', ready = true) {
   const input = (patch: Record<string,unknown> = {}) => ({workspaceId,path:randomUUID(),title:'Entry',content:'Body',sensitivity:'internal' as const,actorId:userId,...patch})
   return {userId,workspaceId,team,other,input}
 }
-describe('canonical knowledge ready-mode admission (production app pool)', () => {
+describe('[COMP:api/knowledge-store] canonical knowledge ready-mode admission (production app pool)', () => {
+  it('[COMP:api/workflow-input-evidence] emits exact source versions for synced create, update and deletion',async()=>{
+    const f=await fixture('departments'),events:DispatchEvent[]=[]
+    const source=await store.createSource({workspaceId:f.workspaceId,sourceType:'github',repo:'fixture/source',
+      binding:{sensitivity:'internal',compartments:[],projectIds:[]}},{actorUserId:f.userId})
+    const authority=(await store.captureSourceSync(source))!
+    setKnowledgeEventDispatcher({dispatch:async event=>{events.push(event)}})
+    try {
+      const original=await store.upsertByPath(f.input({path:'event-source',sourceId:source.id,sourceSha:'first',compartments:[]}),authority)
+      const updated=await store.upsertByPath(f.input({path:'event-source',title:'Updated fixture',sourceId:source.id,sourceSha:'second',compartments:[]}),authority)
+      expect(await store.deleteByTeamAndPath(f.workspaceId,updated.path,authority)).toBe(true)
+      expect(events.map(event=>event.payload)).toEqual([
+        expect.objectContaining({entryId:original.id,sourceVersion:original.scopeVersion,action:'created'}),
+        expect.objectContaining({entryId:updated.id,sourceVersion:updated.scopeVersion,action:'updated'}),
+        expect.objectContaining({entryId:updated.id,sourceVersion:updated.scopeVersion,action:'deleted'}),
+      ])
+      expect(updated.scopeVersion).not.toBe(original.scopeVersion)
+      for (const entry of [original,updated]) {
+        expect((await pool.query('SELECT source FROM workflow_knowledge_event_receipts WHERE entry_id=$1 AND source_version=$2',[entry.id,entry.scopeVersion])).rows[0].source).toMatchObject({resourceId:entry.id,version:entry.scopeVersion,sensitivity:'internal'})
+      }
+    } finally {setKnowledgeEventDispatcher(null);await store.releaseSourceSync(authority)}
+  })
   it('syncs through the real producer with frozen binding authority and canonical lineage', async () => {
     const f = await fixture('departments'), directory = await mkdtemp(join(tmpdir(), 'knowledge-binding-'))
     try {

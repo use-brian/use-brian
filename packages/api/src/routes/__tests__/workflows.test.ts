@@ -254,9 +254,21 @@ describe('[COMP:api/workflows-route] delete / run', () => {
     workflowStore.getById.mockResolvedValueOnce(wf())
     runStore.createRun.mockResolvedValueOnce({ id: 'run-1' })
     mockAdvance.mockResolvedValueOnce({ kind: 'completed', runId: 'run-1', finalOutput: { ok: 1 } })
+    runStore.getRunById.mockResolvedValueOnce({ id:'run-1',workflowId:'wf-1',workspaceId:WS })
     const res = await request(app('u-1')).post('/api/workflows/wf-1/run').send({})
     expect(res.status).toBe(200)
     expect(res.body).toMatchObject({ runId: 'run-1', status: 'completed' })
+  })
+  it('withholds a completed manual result when its history read is unavailable',async()=>{
+    workflowStore.getById.mockResolvedValueOnce(wf())
+    runStore.createRun.mockResolvedValueOnce({id:'run-1'})
+    mockAdvance.mockResolvedValueOnce({kind:'completed',runId:'run-1',finalOutput:{private:'Fictional protected outcome'}})
+    runStore.listStepRuns.mockResolvedValueOnce([{id:'step-1',output:{private:'Fictional protected step'}}])
+    runStore.getRunById.mockResolvedValueOnce(null)
+    const res=await request(app('u-1')).post('/api/workflows/wf-1/run').send({})
+    expect(res.status).toBe(409)
+    expect(res.body).toEqual({error:'run_result_unavailable',operationMayHaveExecuted:true})
+    expect(mockAdvance).toHaveBeenCalledTimes(1)
   })
 
   it('GET /workflows/:id/runs/:runId 404s when the run is on another workflow', async () => {

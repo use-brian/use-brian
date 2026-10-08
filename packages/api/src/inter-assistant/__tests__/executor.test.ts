@@ -2799,7 +2799,7 @@ describe('[COMP:sandbox/browser-tools] browser surface on the goal path (workflo
     const unattendedEnabled = () => opts.unattended
     const getWorkspacePlan = async () => 'pro'
     const computer = createComputerTools({
-      local: createLocalBrowserProvider({ transport: null }),
+      local: createLocalBrowserProvider({ admit: async () => async () => {}, transport: null }),
       cloud: createCloudBrowserProvider({ provider, binding: orchestrator.binding }),
       cloudAvailable: () => true,
       profiles,

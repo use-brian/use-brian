@@ -28,7 +28,7 @@ describe('[COMP:brain/context-reclassification] scope change audit', () => {
     db.connect.mockResolvedValue({ query: db.clientQuery })
   })
 
-  it('classifies Team removal and Project-to-General as widening', () => {
+  it('classifies department removal as widening and Project removal as lateral', () => {
     expect(classifyScopeChange(
       { compartments: ['sales', 'finance'], projectIds: [] },
       { compartments: ['sales'], projectIds: [] },
@@ -36,10 +36,10 @@ describe('[COMP:brain/context-reclassification] scope change audit', () => {
     expect(classifyScopeChange(
       { compartments: [], projectIds: ['p-1'] },
       { compartments: [], projectIds: [] },
-    )).toBe('widening')
+    )).toBe('lateral')
   })
 
-  it('classifies Project A to B as lateral and General to A as narrowing', () => {
+  it('classifies both moving and adding Projects as lateral', () => {
     expect(classifyScopeChange(
       { compartments: [], projectIds: ['p-1'] },
       { compartments: [], projectIds: ['p-2'] },
@@ -47,7 +47,7 @@ describe('[COMP:brain/context-reclassification] scope change audit', () => {
     expect(classifyScopeChange(
       { compartments: [], projectIds: [] },
       { compartments: [], projectIds: ['p-1'] },
-    )).toBe('narrowing')
+    )).toBe('lateral')
   })
 
   it('requires a real change and a reason', async () => {

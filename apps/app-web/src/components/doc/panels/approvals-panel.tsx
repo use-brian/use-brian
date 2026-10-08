@@ -76,7 +76,7 @@ import {
 } from "@/lib/api/approvals";
 import { listAssistants } from "@/lib/api/studio";
 import { requestApprovalsRefresh } from "@/lib/approvals-events";
-import { mutateSurfaceCache, useCachedResource } from "@/lib/surface-cache";
+import { invalidateSurfaceCache, mutateSurfaceCache, useCachedResource } from "@/lib/surface-cache";
 import {
   approvalSkillDetailsCacheKey,
   approvalsCacheKey,
@@ -136,20 +136,21 @@ export function ApprovalsPanel() {
   // responds - so it carries no refetch listener of its own. Re-opening the
   // panel paints the last-known queue on the first frame and revalidates
   // behind it; `setRows(null)` on mount is what used to blank it (N1).
+  const [deniedWorkspace, setDeniedWorkspace] = useState<string | null>(null);
+  const authorityLost = !!activeId && deniedWorkspace === activeId;
   const approvalsKey = activeId ? approvalsCacheKey(activeId) : null;
   const skillDetailsKey = activeId ? approvalSkillDetailsCacheKey(activeId) : null;
   const queue = useCachedResource<PendingApprovalRow[]>(approvalsKey, () =>
-    listApprovals(activeId ?? ""),
+    listApprovals(activeId ?? "", { throwOnError: true }),
   );
   const snapshots = useCachedResource<Record<string, SkillApprovalDetail>>(
     skillDetailsKey,
     () => listSkillApprovalDetails(activeId ?? ""),
   );
-  // `listApprovals` answers `[]` on a non-OK response, so a cold `error` here
-  // is a network failure; the queue then renders its empty state the way the
-  // pre-cache code did, rather than a skeleton forever.
-  const rows: PendingApprovalRow[] | null =
-    queue.data ?? (queue.loading ? null : []);
+  // Failed loads are unavailable, never a successful empty queue. Hide stale
+  // actionable rows until the queue is authoritative again.
+  const rows: PendingApprovalRow[] | null = authorityLost || queue.error
+    ? null : queue.data ?? (queue.loading ? null : []);
   // Target-skill snapshots for staged_skill_* cards, keyed by approval id.
   // null = not answered yet (cards degrade); {} = answered (possibly failed).
   const skillDetails = snapshots.data ?? null;
@@ -209,6 +210,14 @@ export function ApprovalsPanel() {
   const patchRows = (
     updater: (prev: PendingApprovalRow[]) => PendingApprovalRow[],
   ) => mutateSurfaceCache<PendingApprovalRow[]>(approvalsKey, updater);
+
+  function handleUnavailable() {
+    setDeniedWorkspace(activeId);
+    setSelected(new Set());
+    setBatchBusy(false);
+    if (approvalsKey) invalidateSurfaceCache(approvalsKey);
+    if (skillDetailsKey) invalidateSurfaceCache(skillDetailsKey);
+  }
 
   const filtered = useMemo(
     () => filterApprovals(rows ?? [], filter, now),
@@ -318,6 +327,10 @@ export function ApprovalsPanel() {
         decision,
         batchReason.trim() || undefined,
       );
+      if (!result.ok && "status" in result && [401, 403, 404].includes(result.status ?? 0)) {
+        handleUnavailable();
+        return;
+      }
       if (result.ok) {
         patchRows((prev) => prev.filter((r) => r.id !== row.id));
       } else {
@@ -386,7 +399,14 @@ export function ApprovalsPanel() {
         />
       )}
 
-      {rows === null ? (
+      {authorityLost || queue.error ? (
+        <div role="alert" className="flex flex-col items-start gap-3 p-4">
+          <p>{t.approvalsPage.loadFailed}</p>
+          <Button variant="outline" className="max-sm:min-h-11" disabled={queue.revalidating} onClick={() => { setDeniedWorkspace(null); void queue.refresh(); }}>
+            {t.approvalsPage.retryLoad}
+          </Button>
+        </div>
+      ) : rows === null ? (
         // Cold cache only (nothing known for this workspace + viewer yet): a
         // geometry-matched skeleton, never a "Loading..." sentence (N4). A
         // revisit never reaches this branch - the cached queue paints.
@@ -450,6 +470,7 @@ export function ApprovalsPanel() {
               batchBusy={batchBusy}
               onToggleSelect={toggleSelect}
               onResolved={handleResolved}
+              onUnavailable={handleUnavailable}
               onRevised={handleRevised}
             />
           ))}
@@ -669,6 +690,7 @@ function ApprovalCard({
   batchBusy,
   onToggleSelect,
   onResolved,
+  onUnavailable,
   onRevised,
 }: {
   row: PendingApprovalRow;
@@ -680,6 +702,7 @@ function ApprovalCard({
   batchBusy: boolean;
   onToggleSelect: (id: string) => void;
   onResolved: (id: string) => void;
+  onUnavailable: () => void;
   onRevised: (previousId: string, replacement: PendingApprovalRow) => void;
 }) {
   const t = useT();
@@ -829,6 +852,10 @@ function ApprovalCard({
       onResolved(row.id);
       return;
     }
+    if ("status" in result && [401, 403, 404].includes(result.status ?? 0)) {
+      onUnavailable();
+      return;
+    }
     setBusy(false);
     setError("error" in result ? result.error : t.approvalsPage.respondError);
   }
@@ -841,6 +868,7 @@ function ApprovalCard({
     const result = await reviseEmailApproval(row.id, emailBody);
     setRevisionBusy(false);
     if (!result.ok) {
+      if ([401, 403, 404].includes(result.status)) { onUnavailable(); return; }
       setRevisionError(result.error);
       return;
     }

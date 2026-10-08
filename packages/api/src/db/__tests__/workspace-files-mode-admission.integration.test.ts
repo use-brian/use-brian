@@ -9,6 +9,7 @@ import { runWithAgentAccess } from '../agent-access-context.js'
 import { createWorkspaceFile, supersedeWorkspaceFile, updateWorkspaceFileMeta, getWorkspaceFileById } from '../workspace-files.js'
 import { createDbWorkspaceFilesStore } from '../workspace-files-store.js'
 import { insertFileSegments } from '../file-segments-store.js'
+import { searchFileSegments, readFileSegmentRange } from '../retrieval-store.js'
 import { captureRecordingIntakeParent } from '../recording-intake-admission.js'
 import { createDbWorkspaceGroupStore } from '../workspace-group-store.js'
 import { createEntity } from '../entities-store.js'
@@ -197,6 +198,40 @@ describe('canonical root workspace-file mode admission', () => {
       compartments:[f.otherKey],projectIds:[f.projectId],sensitivity:'confidential'})
     expect(next).toMatchObject({compartments:[f.key,f.otherKey].sort(),projectIds:[f.projectId],sensitivity:'confidential'})
     expect((await pool.query('SELECT valid_to FROM file_segments WHERE file_id=$1',[prior.id])).rows[0].valid_to).toBeInstanceOf(Date)
+  })
+
+  it('[COMP:retrieval/file-segments] rechecks parent visibility for canonical segment search and ranged reads', async () => {
+    const f=await fixture('legacy'),file=await f.create({compartments:[],sensitivity:'internal'})
+    const parent=await captureRecordingIntakeParent({actorUserId:f.userId},f.workspaceId,file.id)
+    await insertFileSegments({workspaceId:f.workspaceId,fileId:file.id,createdByUserId:f.userId,
+      visibility:{userId:parent.userId,assistantId:parent.assistantId},sensitivity:parent.sensitivity,
+      compartments:parent.compartments,tags:null,source:file.source,
+      segments:[{segmentIndex:0,charStart:0,charEnd:17,headingPath:[],content:'Fixture paragraph'}],
+    },{actorUserId:f.userId,parent})
+    const actor:AccessContext={workspaceId:f.workspaceId,userId:f.member,assistantId:'',assistantKind:'primary',clearance:'internal'}
+    const search=()=>searchFileSegments(actor,{fileId:file.id,query:'Fixture'})
+    const range=()=>readFileSegmentRange(actor,{fileId:file.id,fromIndex:0,toIndex:0})
+    expect(await search()).toMatchObject([{content:'Fixture paragraph'}])
+    expect(await range()).toMatchObject([{content:'Fixture paragraph'}])
+    // The parent changes independently of the old segment labels. Both reads
+    // must consult the parent, not trust the still-shared extracted row.
+    await pool.query('UPDATE workspace_files SET user_id=$2 WHERE id=$1',[file.id,f.userId])
+    expect((await pool.query('SELECT user_id FROM file_segments WHERE file_id=$1',[file.id])).rows).toEqual([{user_id:null}])
+    expect(await search()).toEqual([])
+    expect(await range()).toEqual([])
+    // Reclassification holds the old extraction as well. Re-index through the
+    // current canonical parent receipt to restore the owner's readable copy.
+    expect((await pool.query('SELECT scope_held FROM file_segments WHERE file_id=$1',[file.id])).rows).toEqual([{scope_held:true}])
+    const renewed=await captureRecordingIntakeParent({actorUserId:f.userId},f.workspaceId,file.id)
+    await insertFileSegments({workspaceId:f.workspaceId,fileId:file.id,createdByUserId:f.userId,
+      visibility:{userId:renewed.userId,assistantId:renewed.assistantId},sensitivity:renewed.sensitivity,
+      compartments:renewed.compartments,tags:null,source:file.source,replace:true,
+      segments:[{segmentIndex:0,charStart:0,charEnd:17,headingPath:[],content:'Fixture paragraph'}],
+    },{actorUserId:f.userId,parent:renewed})
+    expect(await readFileSegmentRange({...actor,userId:f.userId,clearance:'confidential'},
+      {fileId:file.id,fromIndex:0,toIndex:0})).toMatchObject([{content:'Fixture paragraph'}])
+    expect(await search()).toEqual([])
+    expect(await range()).toEqual([])
   })
 
   it.each(['stale','held','foreign','execution'] as const)('denies %s successors without closing the prior', async kind => {

@@ -185,7 +185,13 @@ export async function resumeFromApproval(
   // Stop can race a downstream requestApproval delivery. Its row may remain
   // pending after the executor has failed the run; a later click (without the
   // old in-memory signal) must never restart that cancelled continuation.
-  const pending = await deps.approvalsStore.getByIdSystem(approvalId)
+  const readAvailable = async () => {
+    const row = await deps.approvalsStore.getById(responderUserId, approvalId)
+    return row?.kind === 'workflow_step' && row.approverUserId === responderUserId ? row : null
+  }
+  const unavailable = { status: 'unavailable', runId: null }
+  const pending = await readAvailable()
+  if (!pending) return unavailable
   if (pending?.workflowRunId) {
     const priorRun = await deps.runStore.getRunSystem(pending.workflowRunId)
     if (priorRun && isCancelledRun(priorRun)) {
@@ -194,6 +200,8 @@ export async function resumeFromApproval(
     }
   }
   if (abortSignal?.aborted) return { status: 'cancelled', runId: null }
+  // Parent lookup is asynchronous: renew caller authority before claiming.
+  if (!await readAvailable()) return unavailable
   const updated = await deps.approvalsStore.respond(
     approvalId,
     decision,

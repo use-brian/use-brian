@@ -118,7 +118,7 @@ import {
   createTranscriptionPrefTools,
   createInternalLinkTools,
   createCrmTools,
-  createCrmOperationsTools,
+  createCrmOperationsTools, createCrmCredentialTools, CRM_INTEGRATION_OPERATIONS, CRM_INTEGRATION_RESOURCE_CATALOG,
   createAssociationTools,
   createCrmEmailDraftTools,
   createCampaignTools,
@@ -549,11 +549,12 @@ import {
   createWorkflowRunQueueStore,
   countRecentRunsForWorkflowSystem,
   pauseWorkflowSystem,
+  pauseWorkflowForPrimitiveEventSystem,
 } from './db/workflow-store.js'
 import { buildWorkflowToolRegistry } from './workflow/mcp-bridge.js'
 import { connectorWorkflowEventAdmissibleSystem } from './workflow/connector-event-admission.js'
 import { callRemoteMcpTool } from './mcp/client.js'
-import { createPendingApprovalsStore } from './db/pending-approvals-store.js'
+import { createPendingApprovalsStore, readBrowserSendApprovalStatus } from './db/pending-approvals-store.js'
 import {
   makeRequestApproval,
   sweepExpiredApprovals,
@@ -749,6 +750,7 @@ import { createAssociationService, type AssociationWebsiteMediaPort } from './as
 import { promoteCachedFile } from '@use-brian/core'
 import { createAssociationStore } from './db/association-store.js'
 import { createAssociationWorkspaceModulesStore } from './association/workspace-module.js'
+import { configureCrmHomeAppParentSigner } from './crm-operations/integration-department-authority.js'
 import { createCrmIntegrationStore } from './db/crm-integration-store.js'
 import { crmIntegrationRoutes, crmIntegrationCredentialRoutes } from './routes/crm-integration.js'
 import { crmAssociationRoutes, associationMemberContext, workspaceModuleRoutes } from './routes/crm-association.js'
@@ -1531,6 +1533,7 @@ export async function bootOpenApi(opts: BootOpenApiOptions): Promise<BootResult>
   }
   // Bind the media-token signing secret for the channel pipeline's actor
   // media tokens (late-bound seam — see media-token.ts).
+  configureCrmHomeAppParentSigner(env.JWT_SECRET)
   setMediaTokenSecret(env.JWT_SECRET)
 
   const app = express()
@@ -4411,6 +4414,16 @@ export async function bootOpenApi(opts: BootOpenApiOptions): Promise<BootResult>
     service: crmOperationsService,
   })
   for (const tool of Object.values(crmOperationsTools)) allTools.set(tool.name, tool)
+  const crmCredentialTools = createCrmCredentialTools({
+    preview: async (input, authority, parent) => ({
+      ...await crmIntegrationStore.bindingOptions(authority.ceiling.workspaceId, authority.ceiling.userId, input, authority, parent),
+      operations: CRM_INTEGRATION_OPERATIONS, selectors: CRM_INTEGRATION_RESOURCE_CATALOG,
+    }),
+    list: (input, authority, parent) => crmIntegrationStore.listForMember(authority.ceiling.workspaceId, authority.ceiling.userId, input, authority, parent),
+    create: (input, authority, parent) => crmIntegrationStore.create(authority.ceiling.workspaceId, authority.ceiling.userId, input, authority, parent),
+    revoke: async (input, authority, parent) => ({ revoked: await crmIntegrationStore.revoke(authority.ceiling.workspaceId, authority.ceiling.userId, input.credentialId, authority, parent) }),
+  })
+  for (const tool of Object.values(crmCredentialTools)) allTools.set(tool.name, tool)
   const associationTools = createAssociationTools(associationService)
   for (const tool of Object.values(associationTools)) allTools.set(tool.name, tool)
   const crmEmailDraftTools = createCrmEmailDraftTools(crmEmailDraftStore)
@@ -5181,8 +5194,7 @@ export async function bootOpenApi(opts: BootOpenApiOptions): Promise<BootResult>
       return { id: row.id }
     },
     async getStatus(id) {
-      const row = await pendingApprovalsStore.getByIdSystem(id)
-      return row ? row.status : null
+      return readBrowserSendApprovalStatus(pendingApprovalsStore, id)
     },
     async expire(id) {
       await pendingApprovalsStore.expireById(id)
@@ -5691,6 +5703,7 @@ export async function bootOpenApi(opts: BootOpenApiOptions): Promise<BootResult>
     memoryTools: brainMemoryTools,
     taskTools,
     crmTools: { ...crmTools, ...crmOperationsTools },
+    credentialTools: crmCredentialTools,
     associationTools,
     retrievalTools: brainRetrievalTools,
     fileTools: brainFileTools ?? undefined,
@@ -8072,10 +8085,13 @@ export async function bootOpenApi(opts: BootOpenApiOptions): Promise<BootResult>
         RUN_STORM_WINDOW_SECONDS,
       )
       if (recent >= RUN_STORM_THRESHOLD) {
-        await pauseWorkflowSystem(
-          workflowId,
-          `Paused automatically: this workflow's event trigger started ${recent} runs in the last ${Math.round(RUN_STORM_WINDOW_SECONDS / 60)} minutes. Review the trigger's match filter, then re-enable the workflow to resume.`,
-        )
+        const reason = `Paused automatically: this workflow's event trigger started ${recent} runs in the last ${Math.round(RUN_STORM_WINDOW_SECONDS / 60)} minutes. Review the trigger's match filter, then re-enable the workflow to resume.`
+        if (input.trigger.sourceType === 'task' || input.trigger.sourceType === 'knowledge' || input.trigger.sourceType === 'page') {
+          await pauseWorkflowForPrimitiveEventSystem({ workflowId, workspaceId, input, triggerKind:'event',
+            triggeredBy:await getWorkflowCreatorSystem(workflowId) }, reason)
+        } else {
+          await pauseWorkflowSystem(workflowId, reason)
+        }
         void Promise.resolve(
           workflowExecutorDeps.emitAudit?.({
             type: 'workflow.storm_paused',
