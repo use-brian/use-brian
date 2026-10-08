@@ -898,7 +898,8 @@ export function warmTargetFor(
       // request worth starting on hover.
       return {
         key: shopifyToolsCacheKey(workspaceId),
-        fetch: () => listShopifyTools(workspaceId),
+        fetch: () => leaseSurfaceContent(() => listShopifyTools(workspaceId)),
+        lifecycle: { expiresInMs: surfaceContentRemaining },
       };
     case "live":
       // The roster is the whole surface (overview zones, the focused row,

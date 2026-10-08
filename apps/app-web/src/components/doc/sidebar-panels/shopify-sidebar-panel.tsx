@@ -48,8 +48,8 @@ import type { LucideIcon } from "lucide-react";
 import { Skeleton } from "@/components/skeleton";
 import { useT } from "@/lib/i18n/client";
 import { callTool, listTools } from "@/lib/api/shopify";
-import { useCachedResource } from "@/lib/surface-cache";
 import { shopifyDraftsCacheKey, shopifyToolsCacheKey } from "@/lib/surface-prefetch";
+import { useLeasedResource } from "@/lib/offline/surface-content-cache";
 import { readRuns, runHref, type ShopifyRun } from "@/lib/shopify-history";
 import {
   SHOPIFY_SECTIONS,
@@ -130,7 +130,7 @@ export function ShopifySidebarPanel({ workspaceId }: { workspaceId: string }) {
   const active = shopifySectionFromParams(searchParams);
   const onSurface = pathname.startsWith(`/w/${workspaceId}/shopify`);
 
-  const tools = useCachedResource(shopifyToolsCacheKey(workspaceId), () => listTools(workspaceId));
+  const tools = useLeasedResource(shopifyToolsCacheKey(workspaceId), () => listTools(workspaceId));
   // `null` while nothing is known. A store we cannot reach reads as "not
   // connected" here, as before: the panel is navigation first, and the
   // section rows must render whatever the store says.
@@ -139,7 +139,7 @@ export function ShopifySidebarPanel({ workspaceId }: { workspaceId: string }) {
     : tools.error !== undefined
       ? false
       : null;
-  const draftsResource = useCachedResource(
+  const draftsResource = useLeasedResource(
     connected ? shopifyDraftsCacheKey(workspaceId) : null,
     () => loadDrafts(workspaceId),
   );
