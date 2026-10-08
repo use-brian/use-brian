@@ -10,6 +10,8 @@ import request from 'supertest'
 import { createTestApp } from './helpers.js'
 import { TelegramApiError } from '@use-brian/channels'
 import { CUSTOM_MODEL_IMAGE_REJECTION } from '../_channel-error-text.js'
+import type { OutgoingMessage } from '@use-brian/channels'
+import type { ToolConfirmationRequest, ConfirmationResolver } from '@use-brian/core'
 
 /**
  * [COMP:api/telegram-byo-route]
@@ -105,14 +107,15 @@ vi.mock('@use-brian/channels', async () => {
     createTelegramAdapter: (opts: Parameters<typeof actual.createTelegramAdapter>[0]) => {
       const real = actual.createTelegramAdapter(opts)
       return Object.assign(real, {
-        sendMessage: vi.fn(async (channelId: string, message: { text: string; documents?: OutgoingTestDocument[]; actions?: Array<{ data: string; label: string }> }) => {
-          adapterSendCalls.push({ channelId, text: message.text, documents: message.documents, actions: message.actions })
+        sendMessage: vi.fn(async (channelId: string, message: OutgoingMessage) => {
+          adapterSendCalls.push({ channelId, ...message })
           return 'msg_stub'
         }),
         answerCallbackQuery: vi.fn(async () => { confirmationOrder.push('ack') }),
         sendStatus: vi.fn(async () => 'status_stub'),
         sendTypingIndicator: vi.fn(async () => {}),
-        editMessage: vi.fn(async () => {}),
+        editMessage: vi.fn(async (...args: unknown[]) => { adapterEditCalls.push(args) }),
+        setMessageActions: vi.fn(async (...args: unknown[]) => { adapterActionCalls.push(args) }),
         deleteMessage: vi.fn(async () => {}),
         reactToMessage: vi.fn(async () => {}),
         leaveChat: vi.fn(async (chatId: string) => { leaveChatCalls.push(chatId) }),
@@ -223,6 +226,8 @@ vi.mock('../channel-pipeline.js', () => ({
     hooks: {
       sendResponse: (text: string, documents?: OutgoingTestDocument[], question?: { question: string; options?: string[] }, actions?: OutgoingAction[]) => Promise<void>
       sendError?: (err: Error) => Promise<void>
+      onConfirmationRequired: (req: ToolConfirmationRequest) => Promise<void>
+      onToolStart: (id: string, name: string) => Promise<void>
     }
   }) => {
     const binding = params.interactionScope && params.incomingMessage ? {
@@ -252,7 +257,11 @@ vi.mock('../channel-pipeline.js', () => ({
       messageText: params.messageText,
       userContentBlocks: params.userContentBlocks,
     })
-    if (pipelineError) {
+    if (pipelineConfirmation) {
+      await params.hooks.onToolStart(pipelineConfirmation.toolCallId, pipelineConfirmation.toolName)
+      pipelineConfirmationDispose = channelConfirmations.register(params.interactionScope!, pipelineConfirmation, pipelineResolver as unknown as ConfirmationResolver)
+      await params.hooks.onConfirmationRequired(pipelineConfirmation)
+    } else if (pipelineError) {
       await params.hooks.sendError?.(pipelineError)
     } else {
       await deliverChannelResponse({ ...params.hooks, sendResponse: (text, documents, question) =>
@@ -335,7 +344,12 @@ vi.mock('../../db/channel-user-store.js', async () => {
 
 // Capture outbound sendMessage invocations so we can assert the channel id.
 type OutgoingTestDocument = { filename: string; mime: string; data: Uint8Array; caption?: string }
-const adapterSendCalls: Array<{ channelId: string; text: string; documents?: OutgoingTestDocument[]; actions?: Array<{ data: string; label: string }> }> = []
+const adapterSendCalls: Array<OutgoingMessage & { channelId: string }> = []
+const adapterEditCalls: unknown[][] = []
+const adapterActionCalls: unknown[][] = []
+let pipelineConfirmation: ToolConfirmationRequest | undefined
+const pipelineResolver = { resolve: vi.fn() }
+let pipelineConfirmationDispose: (() => void) | undefined
 // Set by a test to make the mocked pipeline hand documents to `sendResponse`
 // (the second argument the real pipeline passes at turn_complete).
 let pipelineQuestion: { question: string; options?: string[] } | undefined
@@ -433,6 +447,12 @@ beforeEach(() => {
   pipelineCalls.length = 0
   adapterSendCalls.length = 0
   pipelineQuestion = undefined
+  adapterEditCalls.length = 0
+  adapterActionCalls.length = 0
+  pipelineConfirmation = undefined
+  pipelineResolver.resolve.mockClear()
+  pipelineConfirmationDispose?.()
+  pipelineConfirmationDispose = undefined
   pipelineDocuments = undefined
   pipelineError = undefined
   leaveChatCalls.length = 0
@@ -443,6 +463,72 @@ beforeEach(() => {
   setWebhookCalls.length = 0
   downloadVoiceImpl = DEFAULT_DOWNLOAD_VOICE
   mergeShadowUser.mockClear()
+})
+
+describe('[COMP:api/telegram-byo-route] compact action details', () => {
+  function makeApp() {
+    return createTestApp('/webhook/telegram-byo', telegramByoRoutes({
+      provider: {} as never, systemPrompt: '', tools: new Map(), memoryStore: {} as never,
+      integrationStore: makeIntegrationStore() as never, capabilityStore: {} as never, apiUrl: 'http://test',
+    }))
+  }
+
+  it.each(['allow', 'deny', 'always_allow', 'always_deny'] as const)('preserves the email when the user chooses %s', async (decision) => {
+    const app = makeApp()
+    pipelineConfirmation = {
+      toolCallId: 'email_1', toolName: 'ImapSendMessage', serverName: 'imap',
+      description: 'Send an email', classification: null, allowPersistentApproval: true,
+      input: {}, displayLines: ['From: sender@example.com', 'To: recipient@example.com', 'Subject: Receipt', 'Body: Thank you.\nBest regards, Sender', 'Attachment: receipt.pdf'],
+    }
+    await postUpdate(app, { update_id: 1, message: {
+      message_id: 1, from: { id: 42, first_name: 'Alice' }, chat: { id: 42, type: 'private' }, date: 1700000000, text: 'send',
+    } })
+    await flushMicrotasks()
+    const prompt = adapterSendCalls.find((msg) => msg.actions?.some((action) => 'data' in action && action.data === 'mcp_confirm:email_1:allow'))
+    expect(prompt?.collapsibleDetails).toContain('Body: Thank you.\nBest regards, Sender')
+    expect(prompt?.collapsibleDetails).toContain('Attachment: receipt.pdf')
+    const status = adapterSendCalls.find((msg) => msg.collapsibleDetails?.includes('⏳'))
+    expect(status?.text).toContain('Imap')
+    await postUpdate(app, { update_id: 2, callback_query: {
+      id: 'click_1', from: { id: 42, first_name: 'Alice' }, data: `mcp_confirm:email_1:${decision}`,
+      message: { message_id: 10, chat: { id: 42, type: 'private' }, date: 1700000000, text: 'original email' },
+    } })
+    await flushMicrotasks()
+    expect(pipelineResolver.resolve).toHaveBeenCalledWith('email_1', decision, undefined)
+    expect(adapterEditCalls).toHaveLength(0)
+    expect(adapterActionCalls).toHaveLength(1)
+    expect(adapterActionCalls[0].slice(0, 2)).toEqual(['42', '10'])
+    const labels = { allow: 'Allowed', deny: 'Denied', always_allow: 'Always allowed', always_deny: 'Always denied' }
+    expect(adapterActionCalls[0][2]).toEqual([{ id: 'decision', label: labels[decision], data: `mcp_decision:${decision}` }])
+  })
+
+  it('preserves approval previews inside a forum topic', async () => {
+    const app = makeApp()
+    const dispose = channelConfirmations.register({ channelType: 'telegram', integrationId: 'channel_1',
+      conversationId: '-100:topic:42', senderId: '42',
+    }, { toolCallId: 'scheduled_email', toolName: 'tool', serverName: 'server', input: {}, classification: null, description: '' }, pipelineResolver as unknown as ConfirmationResolver)
+    try {
+      await postUpdate(app, { update_id: 3, callback_query: {
+        id: 'scheduled_click', from: { id: 42, first_name: 'Alice' }, data: 'mcp_confirm:scheduled_email:allow',
+        message: { message_id: 11, chat: { id: -100, type: 'supergroup', is_forum: true }, message_thread_id: 42, date: 1700000000 },
+      } })
+      await flushMicrotasks()
+      expect(pipelineResolver.resolve).toHaveBeenCalledWith('scheduled_email', 'allow', undefined)
+      expect(adapterEditCalls).toHaveLength(0)
+      expect(adapterActionCalls[0]?.slice(0, 2)).toEqual(['-100:topic:42', '11'])
+    } finally { dispose() }
+  })
+
+  it.each(['mcp_confirm:expired_email:allow', 'mcp_decision:allow'])('leaves the preview intact for %s', async (data) => {
+    await postUpdate(makeApp(), { update_id: 4, callback_query: {
+      id: 'click', from: { id: 42, first_name: 'Alice' }, data,
+      message: { message_id: 12, chat: { id: 42, type: 'private' }, date: 1700000000, text: 'email preview' },
+    } })
+    await flushMicrotasks()
+    expect(pipelineResolver.resolve).not.toHaveBeenCalled()
+    expect(adapterEditCalls).toHaveLength(0)
+    expect(adapterActionCalls).toHaveLength(0)
+  })
 })
 
 describe('[COMP:api/telegram-byo-route] safe error delivery', () => {
@@ -2873,7 +2959,9 @@ describe('[COMP:api/telegram-byo-route] question buttons', () => {
     pipelineQuestion = { question: 'Which?', options: ['A', '/connect'] }
     await postUpdate(app, message())
     await settle()
-    const actions = adapterSendCalls.at(-1)?.actions
+    const actions = adapterSendCalls.at(-1)?.actions?.filter(
+      (action): action is Exclude<OutgoingAction, { kind: 'web_app' }> => 'data' in action,
+    )
     expect(actions?.map((a) => a.label)).toEqual(['A', '/connect'])
     expect(adapterSendCalls.at(-1)?.text).toBe('Which?\n1. A\n2. /connect')
     pipelineQuestion = undefined
@@ -2934,6 +3022,7 @@ describe('[COMP:api/telegram-byo-route] question buttons', () => {
     await postUpdate(app, message())
     await settle()
     const action = adapterSendCalls.at(-1)!.actions![0]!
+    if (!('data' in action)) throw new Error('Expected a conversational callback action')
     pipelineQuestion = undefined
     await postUpdate(app, callback(action.data))
     await settle()

@@ -207,7 +207,8 @@ export async function sendConfirmationPrompt(
         const adapter = createTelegramAdapter({ token: telegram.token, strictTopic: true })
         const actions = buildConfirmationActions(req.toolCallId, allowPersist)
         await push(adapter, target.channelId, {
-          text: `${displayName}${inputSummary}\n\nAllow this action?`,
+          text: `${displayName}\n\nAllow this action?`,
+          collapsibleDetails: inputSummary ? `Watch more${inputSummary}` : undefined,
           actions,
         }, telegram.integrationId)
       }

@@ -63,4 +63,15 @@ describe('shared channel controls', () => {
   it('preserves prompt input fallback', () => {
     expect(confirmationMessage(prompt).text).toContain('input fallback')
   })
+
+  it('puts complete input behind Watch more only when compact details are requested', () => {
+    const request = { ...prompt, displayLines: ['To: recipient@example.com', 'Body: Hello.\nBest regards, Sender', 'Attachment: receipt.pdf'] }
+    const compact = confirmationMessage(request, { compactDetails: true })
+    expect(compact.text).toContain('Allow this action?')
+    expect(compact.text).not.toContain('Body:')
+    expect(compact.collapsibleDetails).toBe(`Watch more\n${request.displayLines.join('\n')}`)
+    expect(compact.actions).toEqual(confirmationMessage(request).actions)
+    expect(confirmationMessage(request).collapsibleDetails).toBeUndefined()
+    expect(confirmationMessage(request).text).toContain('Body: Hello.\nBest regards, Sender')
+  })
 })

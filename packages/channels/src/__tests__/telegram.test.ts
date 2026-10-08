@@ -701,7 +701,7 @@ describe('[COMP:channels/telegram] sendMessage actions', () => {
         actions: [{ kind: 'web_app', label: 'Sign in', url: 'https://app.example/tg-link' }],
       })
 
-      const editCall = calls.find((c) => c.method === 'editMessageText')
+      const editCall = calls.find((c) => c.method === 'editMessageReplyMarkup')
       expect(editCall, 'button-bearing edit call').toBeDefined()
       const replyMarkup = editCall!.body.reply_markup as {
         inline_keyboard: Array<Array<Record<string, unknown>>>
@@ -725,7 +725,7 @@ describe('[COMP:channels/telegram] sendMessage actions', () => {
         actions: [{ id: 'yes', label: 'Yes', data: 'confirm:yes' }],
       })
 
-      const editCall = calls.find((c) => c.method === 'editMessageText')
+      const editCall = calls.find((c) => c.method === 'editMessageReplyMarkup')
       expect(editCall).toBeDefined()
       const replyMarkup = editCall!.body.reply_markup as {
         inline_keyboard: Array<Array<Record<string, unknown>>>
@@ -755,7 +755,7 @@ describe('[COMP:channels/telegram] sendMessage actions', () => {
         ],
       })
 
-      const editCall = calls.find((c) => c.method === 'editMessageText')
+      const editCall = calls.find((c) => c.method === 'editMessageReplyMarkup')
       const replyMarkup = editCall!.body.reply_markup as {
         inline_keyboard: Array<Array<Record<string, unknown>>>
       }
@@ -783,7 +783,7 @@ describe('[COMP:channels/telegram] sendMessage actions', () => {
         ],
       })
 
-      const editCall = calls.find((c) => c.method === 'editMessageText')
+      const editCall = calls.find((c) => c.method === 'editMessageReplyMarkup')
       const replyMarkup = editCall!.body.reply_markup as {
         inline_keyboard: Array<Array<Record<string, unknown>>>
       }
@@ -796,6 +796,87 @@ describe('[COMP:channels/telegram] sendMessage actions', () => {
 })
 
 // ── Outbound documents ────────────────────────────────────────
+
+describe('[COMP:channels/telegram] expandable action details', () => {
+  function mockApi(rejectExpandable = false) {
+    const calls: Array<{ method: string; body: Record<string, unknown> }> = []
+    vi.stubGlobal('fetch', vi.fn(async (url: string, init: { body: string }) => {
+      const method = url.split('/').pop()!
+      const body = JSON.parse(init.body)
+      calls.push({ method, body })
+      const rejected = rejectExpandable && body.parse_mode === 'HTML'
+      return { json: async () => rejected
+        ? { ok: false, error_code: 400, description: 'unsupported quote' }
+        : { ok: true, result: { message_id: calls.length } } }
+    }))
+    return calls
+  }
+
+  it('collapses email details, escapes literal HTML, and preserves them when replacing approval buttons', async () => {
+    const calls = mockApi()
+    try {
+      const adapter = createTelegramAdapter({ token: 'test-token' })
+      const id = await adapter.sendMessage('-100:topic:42', {
+        text: 'Send email\nAllow this action?',
+        collapsibleDetails: 'Watch more\nTo: recipient@example.com\nBody: Hello <team> & friends.\nAttachment: receipt.pdf',
+        actions: [{ id: 'allow', label: 'Allow', data: 'mcp_confirm:mail:allow' }],
+      })
+      const sent = calls[0].body
+      expect(sent.parse_mode).toBe('HTML')
+      expect(sent.text).toContain('<blockquote expandable>Watch more')
+      expect(sent.text).toContain('Hello &lt;team&gt; &amp; friends.')
+      expect(sent.text).toContain('Attachment: receipt.pdf</blockquote>')
+      expect(sent.message_thread_id).toBe(42)
+      await adapter.setMessageActions('-100:topic:42', id, [{ id: 'decision', label: 'Allowed', data: 'mcp_decision:allow' }])
+      expect(calls.slice(1).map((c) => c.method)).toEqual(['editMessageReplyMarkup', 'editMessageReplyMarkup'])
+      expect(calls[2].body).toEqual({ chat_id: '-100', message_id: Number(id), reply_markup: {
+        inline_keyboard: [[{ text: 'Allowed', callback_data: 'mcp_decision:allow' }]],
+      } })
+    } finally { vi.unstubAllGlobals() }
+  })
+
+  it('unfolds all details and still attaches buttons if expandable quotes are rejected', async () => {
+    const calls = mockApi(true)
+    try {
+      await createTelegramAdapter({ token: 'test-token' }).sendMessage('42', {
+        text: 'Send email', collapsibleDetails: 'Watch more\nBody: Hello <team>.',
+        actions: [{ id: 'allow', label: 'Allow', data: 'mcp_confirm:mail:allow' }],
+      })
+      expect(calls[1].body.text).toContain('Watch more\nBody: Hello <team>.')
+      expect(String(calls[1].body.text).startsWith('Send email\n\n')).toBe(true)
+      expect(calls[1].body.parse_mode).toBeUndefined()
+      expect(calls[2].method).toBe('editMessageReplyMarkup')
+    } finally { vi.unstubAllGlobals() }
+  })
+
+  it('keeps the entire long email across expandable chunks with approval on the last chunk', async () => {
+    const calls = mockApi()
+    const details = 'Watch more\n' + 'a'.repeat(9000) + '\nAttachment: receipt.pdf'
+    try {
+      await createTelegramAdapter({ token: 'test-token' }).sendMessage('42', {
+        text: 'Send email', collapsibleDetails: details,
+        actions: [{ id: 'allow', label: 'Allow', data: 'mcp_confirm:mail:allow' }],
+      })
+      const sends = calls.filter((call) => call.method === 'sendMessage')
+      const parts = sends.map((call) => String(call.body.text).match(/<blockquote expandable>([\s\S]*)<\/blockquote>/)![1])
+      expect(parts.join('')).toBe(details)
+      expect(parts.every((part) => part.length + 'Send email\n\n'.length <= 4000)).toBe(true)
+      expect(calls.at(-1)?.method).toBe('editMessageReplyMarkup')
+      expect(calls.at(-1)?.body.message_id).toBe(sends.length)
+    } finally { vi.unstubAllGlobals() }
+  })
+
+  it('keeps the timeline expandable when editing a status message', async () => {
+    const calls = mockApi()
+    try {
+      await createTelegramAdapter({ token: 'test-token' }).editMessage('42', '10', {
+        text: '⏳ Sending email', collapsibleDetails: 'Watch more\n✓ Search\n⏳ Send email',
+      })
+      expect(calls[0].body.parse_mode).toBe('HTML')
+      expect(calls[0].body.text).toContain('<blockquote expandable>Watch more\n✓ Search\n⏳ Send email</blockquote>')
+    } finally { vi.unstubAllGlobals() }
+  })
+})
 
 describe('[COMP:channels/telegram] sendMessage documents', () => {
   type RecordedCall = { method: string; json?: Record<string, unknown>; form?: FormData }
