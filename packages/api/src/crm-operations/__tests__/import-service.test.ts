@@ -4,7 +4,10 @@ import type { CrmOperationsContext, FilesApi } from '@use-brian/core'
 
 const mocks = vi.hoisted(() => ({ query: vi.fn(), createContact: vi.fn(), updateContact: vi.fn() }))
 
-vi.mock('../../db/client.js', () => ({ query: mocks.query, getPool: () => ({ connect: async () => ({
+vi.mock('../../db/client.js', () => ({ query: mocks.query, getPool: () => ({
+  // Department scope probes see a legacy workspace; v2 import floors are proven against real PostgreSQL.
+  query: async (sql: string) => sql.includes('department_read_v2 AS v2') ? { rows: [{ v2: false }] } : { rows: [] },
+  connect: async () => ({
   release: () => {},
   query: (sql: string, values: unknown[]) => {
     if (/^(BEGIN|COMMIT|ROLLBACK|SAVEPOINT|RELEASE SAVEPOINT)/.test(sql) || sql.includes("set_config('app.system_bypass'") || sql.includes('pg_advisory_xact_lock')) return Promise.resolve({ rows: [] })
