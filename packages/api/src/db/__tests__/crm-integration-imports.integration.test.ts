@@ -96,7 +96,8 @@ describe('[COMP:crm/production-import] Actual machine source, job and row author
       .toEqual({ created_by_user_id: null, confirmed_by_user_id: null })
     const rotated = await f.issue(undefined, first.principal.credentialId)
     expect(await keys.authenticate(first.key.oneTimeSecret)).toBeNull()
-    await expect(imports.resume(first.context, id)).rejects.toMatchObject({ code: 'not_authorized' })
+    // A rotated key's stored authority is gone: credential_revoked (crm-operations.md).
+    await expect(imports.resume(first.context, id)).rejects.toMatchObject({ code: 'credential_revoked' })
     const completed = await f.post(`imports/${id}/resume`, rotated.key.oneTimeSecret).send({})
     expect(completed.status).toBe(200)
     expect(completed.body).toMatchObject({ status: 'completed', succeededRows: 1, failedRows: 0 })

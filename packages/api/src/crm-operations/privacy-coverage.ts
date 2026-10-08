@@ -2082,7 +2082,7 @@ export const CRM_PRIVACY_COVERAGE: readonly CrmPrivacyCoverageEntry[] = [
     ],
     "excludedColumns": ["scope_subject_kind", "scope_sources", "scope_origin", "scope_held", "scope_erased"],
     "orderBy": "t.id",
-    "subjectWhere": "(t.subject_id=$2 OR t.details->>'contactId'=$2::text) OR (t.subject_id IN(SELECT id FROM pg_temp.crm_privacy_copy_tasks) AND (t.event_type LIKE 'crm.%' OR t.event_type LIKE 'association.%' OR t.event_type LIKE 'task.%')) OR (t.event_type LIKE 'workflow.%' AND t.subject_id IN(SELECT id FROM pg_temp.crm_privacy_copy_workflows))",
+    "subjectWhere": "(t.subject_id=$2 OR t.details->>'contactId'=$2::text) OR (t.scope_origin='captured' AND t.scope_sources @> jsonb_build_array(jsonb_build_object('resourceKind','entity','resourceId',$2::text))) OR (t.subject_id IN(SELECT id FROM pg_temp.crm_privacy_copy_tasks) AND (t.event_type LIKE 'crm.%' OR t.event_type LIKE 'association.%' OR t.event_type LIKE 'task.%')) OR (t.event_type LIKE 'workflow.%' AND t.subject_id IN(SELECT id FROM pg_temp.crm_privacy_copy_workflows))",
     "workspaceWhere": "t.event_type LIKE 'crm.%' OR t.event_type LIKE 'association.%' OR t.event_type LIKE 'workspace.module_%' OR (t.event_type LIKE 'workflow.%' AND t.subject_id IN(SELECT id FROM pg_temp.crm_privacy_copy_workflows))",
     "subjectRedactions": {
       "details": "'{}'::jsonb",

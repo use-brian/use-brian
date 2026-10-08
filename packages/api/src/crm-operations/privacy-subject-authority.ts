@@ -228,13 +228,16 @@ export async function assertCrmPrivacyWorkspaceAuthority(client:PoolClient,conte
       return {scope:crmKeyBindingScope(context.workspaceId,row.binding as never),sources:[]}
     }],
     ['crm_intake_idempotency',async id=>{
-      const row=(await client.query<{submission:string|null;binding:unknown;keyed:boolean}>(`SELECT
+      const row=(await client.query<{submission:string|null;binding:unknown;keyed:boolean;minimized:boolean}>(`SELECT
           (SELECT q.id FROM association_enquiries q WHERE q.workspace_id=i.workspace_id AND q.id=i.submission_id) AS submission,
-          k.department_binding AS binding,i.credential_id IS NOT NULL AS keyed
+          k.department_binding AS binding,i.credential_id IS NOT NULL AS keyed,
+          (i.status='retired' AND i.submission_id IS NULL AND i.contact_id IS NULL AND i.follow_up_task_id IS NULL) AS minimized
         FROM crm_intake_idempotency i LEFT JOIN crm_intake_credentials k ON k.workspace_id=i.workspace_id AND k.id=i.credential_id
         WHERE i.workspace_id=$1 AND i.id=$2 FOR SHARE OF i`,[context.workspaceId,id])).rows[0]
       if(!row)throw unavailable()
       if(row.submission)return assertAssociationOrderAuthority(client,context.workspaceId,row.submission,actor,'submission')
+      // A retired receipt keeps only key, hash and status: no personal content, so General.
+      if(!row.keyed && row.minimized)return {scope:crmKeyBindingScope(context.workspaceId,null),sources:[]}
       if(!row.keyed)throw unavailable()
       return {scope:crmKeyBindingScope(context.workspaceId,row.binding as never),sources:[]}
     }],
