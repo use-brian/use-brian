@@ -552,6 +552,7 @@ if (useLocalBrowserRelay) {
     PORT: String(browserRelayPort),
     JWT_SECRET: jwtSecret,
     BROWSER_RELAY_SECRET: browserRelaySecret,
+    BROWSER_AUTHORITY_API_URL: `http://127.0.0.1:${PORTS.api}`,
   })
   await waitForPort(browserRelayPort, 'browser relay')
 }

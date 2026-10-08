@@ -86,6 +86,36 @@ async function flush(): Promise<void> {
 }
 
 describe('[COMP:ext/agent] Relay client (P1.2 connection lifecycle)', () => {
+  it.each([false, true])('stops retrying on authority close without an error frame (ready=%s)', async (ready) => {
+    const { sockets, connect } = fakeWsFactory()
+    const clock = timers()
+    const states: string[] = []
+    const onCommand = vi.fn()
+    const client = new RelayClient({ getUrl: async () => 'wss://relay.example/ext', connect,
+      getToken: async () => 'session-token', onSessionToken: async () => {}, onCommand,
+      onStateChange: state => states.push(state),
+      setTimer: clock.setTimer, clearTimer: clock.clearTimer, now: clock.now })
+    client.start()
+    await flush()
+    const socket = sockets[0]
+    socket.readyState = 1
+    socket.onopen?.()
+    if (ready) socket.onmessage?.({ data: JSON.stringify({ type: 'ready' }) })
+    socket.close(4401)
+    expect(client.getState()).toBe('unpaired')
+    expect(states.at(-1)).toBe('unpaired')
+    clock.advance(300_000)
+    await flush()
+    expect(sockets).toHaveLength(1)
+    socket.onmessage?.({ data: JSON.stringify({ type: 'command', id: 'late', op: 'snapshot', args: {} }) })
+    expect(onCommand).not.toHaveBeenCalled()
+    // Explicit recovery still starts a fresh, server-authorized handshake.
+    client.start()
+    await flush()
+    expect(sockets).toHaveLength(2)
+    client.stop()
+  })
+
   it('sends hello on open, stores the ready session token, and reaches ready', async () => {
     const { sockets, connect } = fakeWsFactory()
     const stored: string[] = []

@@ -37,11 +37,13 @@ export type SessionTokenMinter = (identity: {
 export type RelaySocket = Pick<WebSocket, 'send' | 'close'>
 
 type Pending = {
+  op: string
   resolve: (res: InternalCommandResponse) => void
   timer: NodeJS.Timeout
 }
 
 type Connection = {
+  authorityToken: string
   controlEpoch?: number
   protectedFillV1: boolean
   extensionOrigin: string | null
@@ -50,6 +52,8 @@ type Connection = {
   workspaceId: string
   browserProfileId: string
   pending: Map<string, Pending>
+  activeTaskId: string | null
+  retiredTaskIds: Set<string>
   lastSeenAt: number
   terminalEvent: 'stopped' | 'tab_closed' | null
   /** Source fingerprint the extension reported in hello; null from builds that predate the stamp. */
@@ -90,15 +94,45 @@ export class BrowserRelay {
   private readonly verify: PairingVerifier
   private readonly mintSessionToken: SessionTokenMinter | null
   private readonly commandTimeoutMs: number
+  private readonly authorize: (token: string) => boolean | Promise<boolean>
+  private readonly commandTails = new Map<string, Promise<void>>()
+  private readonly closed = new WeakSet<RelaySocket>()
+  private readonly admitting = new WeakSet<RelaySocket>()
 
   constructor(opts: {
     verifyPairingToken: PairingVerifier
+    authorize: (token: string) => boolean | Promise<boolean>
     mintSessionToken?: SessionTokenMinter
     commandTimeoutMs?: number
   }) {
     this.verify = opts.verifyPairingToken
+    this.authorize = opts.authorize
     this.mintSessionToken = opts.mintSessionToken ?? null
     this.commandTimeoutMs = opts.commandTimeoutMs ?? DEFAULT_COMMAND_TIMEOUT_MS
+  }
+
+  private revoke(socket: RelaySocket): void {
+    this.handleDisconnect(socket)
+    try { socket.close(4401, 'authority unavailable') } catch { /* already closed */ }
+  }
+
+  private current(conn: Connection): boolean {
+    return !this.closed.has(conn.socket) && this.bySocket.get(conn.socket) === conn
+      && this.byConnection.get(connectionKey(conn.userId, conn.browserProfileId)) === conn
+  }
+
+  /** Fail closed while retaining synchronous injected verifiers for deterministic tests. */
+  private allowed(token: string): boolean | Promise<boolean> {
+    try {
+      const result = this.authorize(token)
+      return typeof result === 'boolean' ? result : result.catch(() => false)
+    } catch { return false }
+  }
+
+  async renewAuthority(): Promise<void> {
+    await Promise.all([...this.byConnection.values()].map(async (conn) => {
+      if (!(await this.allowed(conn.authorityToken)) && this.current(conn)) this.revoke(conn.socket)
+    }))
   }
 
   private sendTo(socket: RelaySocket, message: RelayToExtensionMessage): void {
@@ -124,6 +158,7 @@ export class BrowserRelay {
       retry()
     }, this.commandTimeoutMs)
     conn.pending.set(id, {
+      op: 'stop',
       timer,
       resolve: (result) => {
         if (result.ok) this.pendingStops.delete(key)
@@ -185,7 +220,8 @@ export class BrowserRelay {
    * Handle one inbound WebSocket frame. The first frame must be a valid
    * `hello` — anything else (or a bad token) gets `error` + close (4401).
    */
-  handleMessage(socket: RelaySocket, raw: string | Buffer, extensionOrigin?: string): void {
+  async handleMessage(socket: RelaySocket, raw: string | Buffer, extensionOrigin?: string): Promise<void> {
+    if (this.closed.has(socket)) return
     let parsed: unknown
     try {
       parsed = JSON.parse(typeof raw === 'string' ? raw : raw.toString('utf8'))
@@ -207,7 +243,7 @@ export class BrowserRelay {
       // A socket authenticates exactly once. Allowing a second hello with a
       // different profile would leave the first registry key pointing at the
       // same socket and defeat exact-profile routing.
-      if (conn) {
+      if (conn || this.admitting.has(socket)) {
         this.sendTo(socket, { type: 'error', message: 'already authenticated' })
         this.handleDisconnect(socket)
         socket.close(4400, 'already authenticated')
@@ -219,6 +255,12 @@ export class BrowserRelay {
         socket.close(4401, 'unauthorized')
         return
       }
+      this.admitting.add(socket)
+      const admission = this.allowed(msg.data.pairingToken)
+      const admitted = typeof admission === 'boolean' ? admission : await admission
+      this.admitting.delete(socket)
+      if (!admitted) { this.revoke(socket); return }
+      if (this.closed.has(socket)) return
       // Latest pairing wins only INSIDE this browser profile. Other profile
       // connections for the same user remain live and may run concurrently.
       const key = connectionKey(identity.userId, identity.browserProfileId)
@@ -230,6 +272,7 @@ export class BrowserRelay {
           code: 'no_extension',
         })
         this.bySocket.delete(existing.socket)
+        this.closed.add(existing.socket)
         try {
           existing.socket.close(4000, 'replaced')
         } catch {
@@ -242,6 +285,7 @@ export class BrowserRelay {
       const build = msg.data.build ?? null
       const staleBuild = msg.data.clientKind !== 'electron' && isExtensionBuildStale(build)
       const fresh: Connection = {
+        authorityToken: msg.data.pairingToken,
         // Client kind is compatibility metadata, never a capability grant.
         protectedFillV1: msg.data.clientKind !== 'electron' && msg.data.capabilities?.protectedFillV1 === true,
         // Taken from HTTP upgrade headers, never from a model command or hello body.
@@ -251,6 +295,8 @@ export class BrowserRelay {
         workspaceId: identity.workspaceId,
         browserProfileId: identity.browserProfileId,
         pending: new Map(),
+        activeTaskId: null,
+        retiredTaskIds: new Set(),
         lastSeenAt: Date.now(),
         terminalEvent: this.terminalByConnection.get(key) ?? null,
         build,
@@ -268,6 +314,7 @@ export class BrowserRelay {
               browserProfileId: identity.browserProfileId,
             })
           : undefined
+      if (sessionToken) fresh.authorityToken = sessionToken
       this.sendTo(socket, {
         type: 'ready',
         ...(sessionToken ? { sessionToken } : {}),
@@ -290,11 +337,32 @@ export class BrowserRelay {
     conn.lastSeenAt = Date.now()
 
     if (msg.data.type === 'ping') {
+      const check = this.allowed(conn.authorityToken)
+      if (!(typeof check === 'boolean' ? check : await check)) { this.revoke(socket); return }
+      if (!this.current(conn)) return
       this.sendTo(socket, { type: 'pong' })
       return
     }
 
     if (msg.data.type === 'result') {
+      const safetyStop = conn.pending.get(msg.data.id)
+      if (safetyStop?.op === 'stop' && this.current(conn)) {
+        conn.pending.delete(msg.data.id)
+        clearTimeout(safetyStop.timer)
+        if (msg.data.ok) {
+          conn.terminalEvent = 'stopped'
+          this.terminalByConnection.set(connectionKey(conn.userId, conn.browserProfileId), 'stopped')
+          safetyStop.resolve({ ok: true, data: { stopped: true } })
+        } else {
+          safetyStop.resolve({ ok: false, error: 'Browser Stop could not be confirmed.', code: 'backend_error' })
+        }
+        const check = this.allowed(conn.authorityToken)
+        if (!(typeof check === 'boolean' ? check : await check) && this.current(conn)) this.revoke(socket)
+        return
+      }
+      const check = this.allowed(conn.authorityToken)
+      if (!(typeof check === 'boolean' ? check : await check)) { this.revoke(socket); return }
+      if (!this.current(conn)) return
       const pending = conn.pending.get(msg.data.id)
       if (!pending) return // late result after timeout — drop
       conn.pending.delete(msg.data.id)
@@ -341,6 +409,7 @@ export class BrowserRelay {
 
   /** WebSocket close/error hook: clear registry + fail anything in flight. */
   handleDisconnect(socket: RelaySocket): void {
+    this.closed.add(socket)
     const conn = this.bySocket.get(socket)
     if (!conn) return
     this.bySocket.delete(socket)
@@ -365,20 +434,61 @@ export class BrowserRelay {
   async dispatchCommand(params: {
     userId: string
     browserProfileId: string
+    taskId?: string
     controlMode?: 'task_tabs' | 'full_browser'
     op: string
     args?: Record<string, unknown>
     timeoutMs?: number
   }): Promise<InternalCommandResponse> {
+    if (!params.taskId) return this.dispatchBoundCommand(params)
+    const key = connectionKey(params.userId, params.browserProfileId)
+    const connection = this.byConnection.get(key)
+    const dispatch = () => this.byConnection.get(key) === connection
+      ? this.dispatchBoundCommand(params) : Promise.resolve(NO_EXTENSION_RESPONSE)
+    const previous = this.commandTails.get(key)
+    const result = previous ? previous.then(dispatch) : dispatch()
+    const tail = result.then(() => {}, () => {})
+    this.commandTails.set(key, tail)
+    try { return await result } finally { if (this.commandTails.get(key) === tail) this.commandTails.delete(key) }
+  }
+
+  private async dispatchBoundCommand(params: {
+    userId: string; browserProfileId: string; taskId?: string
+    controlMode?: 'task_tabs' | 'full_browser'; op: string; args?: Record<string, unknown>; timeoutMs?: number
+  }): Promise<InternalCommandResponse> {
     const key = connectionKey(params.userId, params.browserProfileId)
     const conn = this.byConnection.get(key)
     if (!conn) {
-      if (params.op === 'stop') {
+      if (params.op === 'stop' && !params.taskId) {
         this.pendingStops.add(key)
         this.terminalByConnection.set(key, 'stopped')
         return { ok: true, data: { stopped: true } }
       }
       return NO_EXTENSION_RESPONSE
+    }
+
+    if (params.op !== 'stop') {
+      const check = this.allowed(conn.authorityToken)
+      if (!(typeof check === 'boolean' ? check : await check)) {
+        this.revoke(conn.socket)
+        return NO_EXTENSION_RESPONSE
+      }
+      if (!this.current(conn)) return NO_EXTENSION_RESPONSE
+    }
+
+    const bindingDenied = (): InternalCommandResponse => ({ ok: false, code: 'no_active_browser', error: 'Browser task binding unavailable.' })
+    if (!params.taskId) {
+      if (conn.activeTaskId !== null || conn.retiredTaskIds.size > 0) return bindingDenied()
+    } else {
+      if (conn.retiredTaskIds.has(params.taskId) && !(params.op === 'stop' && conn.activeTaskId === params.taskId)) return bindingDenied()
+      if (conn.activeTaskId !== params.taskId) {
+        if (params.op !== 'navigate' && params.op !== 'openTab') return bindingDenied()
+        if (conn.pending.size > 0) return bindingDenied()
+        if (conn.activeTaskId) conn.retiredTaskIds.add(conn.activeTaskId)
+        if (conn.retiredTaskIds.size >= 1024) { this.revoke(conn.socket); return NO_EXTENSION_RESPONSE }
+        conn.activeTaskId = params.taskId
+      }
+      if (params.op === 'stop') conn.retiredTaskIds.add(params.taskId)
     }
 
     if (params.op === 'browserFillReference' && (!conn.protectedFillV1 || !/^chrome-extension:\/\/[a-p]{32}$/.test(conn.extensionOrigin ?? ''))) {
@@ -393,6 +503,8 @@ export class BrowserRelay {
     return new Promise<InternalCommandResponse>((resolve) => {
       const timer = setTimeout(() => {
         conn.pending.delete(id)
+        // A timed-out bound effect is uncertain; never dispatch its successor on this connection.
+        if (params.taskId) this.revoke(conn.socket)
         resolve({
           ok: false,
           error: `The extension did not answer within ${Math.round(timeoutMs / 1000)}s.`,
@@ -400,7 +512,7 @@ export class BrowserRelay {
           ...(conn.staleBuild ? { staleBuild: true } : {}),
         })
       }, timeoutMs)
-      conn.pending.set(id, { resolve, timer })
+      conn.pending.set(id, { op: params.op, resolve, timer })
       this.sendTo(conn.socket, {
         type: 'command',
         id,

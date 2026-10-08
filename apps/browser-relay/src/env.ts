@@ -13,6 +13,8 @@ const envSchema = z.object({
    * `POST /api/browser-extension/pair` verify here.
    */
   JWT_SECRET: z.string().min(1, 'JWT_SECRET is required'),
+  /** No configuration means no admission, never JWT-only fallback. */
+  BROWSER_AUTHORITY_API_URL: z.string().url().optional(),
   NODE_ENV: z.enum(['development', 'production', 'test']).default('development'),
 })
 

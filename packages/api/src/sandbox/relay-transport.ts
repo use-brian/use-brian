@@ -38,6 +38,8 @@ export function createRelayCommandTransport(opts: {
     async send(params): Promise<RelayCommandResult> {
       const identity = { userId: params.userId, browserProfileId: params.browserProfileId }
       const protectedOp = params.op === 'browserFillReference'
+      const safetyStop = params.op === 'stop'
+      const stopFailed = (): RelayCommandResult => ({ ok: false, error: 'Browser Stop could not be confirmed.', code: 'backend_error' })
       const epoch = opts.protectedFill?.epoch(identity)
       const blocked = () => opts.protectedFill?.isLocked(identity) || opts.protectedFill?.epoch(identity) !== epoch
       if (protectedOp) {
@@ -50,7 +52,7 @@ export function createRelayCommandTransport(opts: {
       } else if (params.op !== 'stop' && blocked()) return denied()
       let controlMode: LocalBrowserControlMode
       try {
-        controlMode = opts.resolveLocalControlMode
+        controlMode = !safetyStop && opts.resolveLocalControlMode
           ? await opts.resolveLocalControlMode(params.browserProfileId)
           : 'task_tabs'
       } catch {
@@ -63,7 +65,7 @@ export function createRelayCommandTransport(opts: {
       }
       try {
         if (!protectedOp && params.op !== 'stop' && blocked()) return denied()
-        const res = await fetchImpl(`${base}/internal/browser/command`, {
+        const res = await fetchImpl(`${base}/internal/browser/${params.taskId ? 'task-command' : 'command'}`, {
           method: 'POST',
           headers: {
             'content-type': 'application/json',
@@ -72,15 +74,18 @@ export function createRelayCommandTransport(opts: {
           body: JSON.stringify({
             userId: params.userId,
             browserProfileId: params.browserProfileId,
+            ...(params.taskId ? { taskId: params.taskId } : {}),
             controlMode,
             op: params.op,
             args: params.args ?? {},
           }),
           signal: AbortSignal.timeout(protectedOp ? 125_000 : RELAY_HTTP_TIMEOUT_MS),
         })
+        if (params.taskId && res.status === 404) return { ok: false, code: 'not_configured', error: 'Task-scoped browser control requires an updated browser relay. Update the relay before retrying.' }
         if (protectedOp && !res.ok) return denied()
-        if (!protectedOp && blocked()) return denied()
+        if (!protectedOp && !safetyStop && blocked()) return denied()
         if (!res.ok) {
+          if (safetyStop) return stopFailed()
           return {
             ok: false,
             error: `The browser relay answered ${res.status}.`,
@@ -88,6 +93,15 @@ export function createRelayCommandTransport(opts: {
           }
         }
         const body = (await res.json()) as RelayCommandResult
+        if (safetyStop) {
+          const result = z.object({ ok: z.literal(true), data: z.object({ stopped: z.literal(true) }).strict() }).strict().safeParse(body)
+          if (result.success) return result.data
+          // Preserve only known transport/terminal classifications, never raw content.
+          if (body?.ok === false && ['stopped', 'tab_closed', 'no_extension', 'no_active_browser', 'timeout', 'not_configured'].includes(body.code ?? '')) {
+            return { ok: false, error: 'Browser Stop could not be confirmed.', code: body.code }
+          }
+          return stopFailed()
+        }
         if (protectedOp) {
           const result = z.object({ ok: z.literal(true), data: z.object({
             status: z.literal('filled'), filledCount: z.number().int().min(1).max(20),
@@ -102,6 +116,9 @@ export function createRelayCommandTransport(opts: {
         }
         return body
       } catch (err) {
+        if (safetyStop) return err instanceof Error && err.name === 'TimeoutError'
+          ? { ok: false, error: 'Browser Stop could not be confirmed.', code: 'timeout' }
+          : stopFailed()
         if (protectedOp || blocked()) return denied()
         const timedOut = err instanceof Error && err.name === 'TimeoutError'
         return {

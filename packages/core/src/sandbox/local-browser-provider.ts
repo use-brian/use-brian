@@ -66,9 +66,16 @@ function toBackendError(error: string, code?: string, staleBuild?: boolean): Bro
 export function createLocalBrowserProvider(deps: {
   /** Null when no relay is configured (open-core boot without the platform relay). */
   transport: RelayCommandTransport | null
+  /** Admission must renew again before any successful relay result is exposed. */
+  admit?: (ctx: BrowserCallContext, op: string) => Promise<(() => Promise<void>) & { taskId?: string }>
   onDestination?: (ctx: BrowserCallContext, origin: string | null) => void
 }): BrowserProvider {
   async function send(ctx: BrowserCallContext, op: string, args?: Record<string, unknown>): Promise<unknown> {
+    const dispatch = () => sendAdmitted(ctx, op, args)
+    return ctx.authority ? ctx.authority.execute(dispatch) : dispatch()
+  }
+
+  async function sendAdmitted(ctx: BrowserCallContext, op: string, args?: Record<string, unknown>): Promise<unknown> {
     if (!deps.transport) {
       throw new BrowserBackendError(
         'Local browsing is not configured on this deployment (no extension relay).',
@@ -81,16 +88,22 @@ export function createLocalBrowserProvider(deps: {
         'profile_required',
       )
     }
+    if (!deps.admit) throw Object.assign(new Error('Profile authority unavailable'), { code: 'profile_authority_denied' })
+    const renew = await deps.admit(ctx, op)
+    await ctx.authority?.assertCurrent()
     if (['navigate', 'click', 'type', 'openTab', 'switchTab', 'closeTab', 'takeoverInput', 'stop'].includes(op)) {
       deps.onDestination?.(ctx, null)
     }
     const res = await deps.transport.send({
       userId: ctx.userId,
       browserProfileId: ctx.profileId,
+      ...(renew.taskId ? { taskId: renew.taskId } : {}),
       op,
       args,
     })
     if (!res.ok) throw toBackendError(res.error, res.code, res.staleBuild)
+    await renew()
+    await ctx.authority?.assertCurrent()
     if (['navigate', 'snapshot', 'currentUrl', 'openTab', 'switchTab'].includes(op)) {
       const result = BrowserNavigateResultSchema.safeParse(res.data)
       let origin: string | null = null
@@ -116,9 +129,9 @@ export function createLocalBrowserProvider(deps: {
       decodeBrowserData(data, MAX_BROWSER_UPLOAD)
       z.object({}).strict().parse(await send(ctx, 'uploadFile', { ref, name, data }))
     },
-    async fillReference(scope, items) {
+    async fillReference(scope, items, authority) {
       try {
-        const data = await send({ userId: scope.userId, workspaceId: scope.workspaceId,
+        const data = await send({ authority, userId: scope.userId, workspaceId: scope.workspaceId,
           sessionId: scope.sessionId, taskId: scope.taskId, profileId: scope.browserProfileId },
           'browserFillReference', { workspaceId: scope.workspaceId, sessionId: scope.sessionId,
             taskId: scope.taskId, browserProfileId: scope.browserProfileId, destinationOrigin: scope.destinationOrigin, items })

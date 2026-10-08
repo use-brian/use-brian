@@ -1,3 +1,8 @@
+import { assertBrowserTaskPublication, browserPublicationBusy, type BrowserTaskPublication } from './task-publication.js'
+import { AuthoritySourceSchema, type AuthoritySource } from '../security/authority-source.js'
+import { parseBrowserInputScope, mergeBrowserInputScope, type BrowserInputScope } from './input-scope.js'
+import { accessCeilingContains, parseAuthoringAuthority, type AuthoringAuthority } from '../security/access-ceiling.js'
+import type { CurrentAuthorityBoundary } from '../tools/types.js'
 /**
  * The stateless sandbox orchestrator (spec §5): resolves a chat session's
  * active cloud task (creating one, budget-gated, with vault re-injection),
@@ -14,7 +19,7 @@ import { randomUUID } from 'node:crypto'
 import { getDomain } from 'tldts'
 import type { SandboxTaskBinding } from './cloud-browser-provider.js'
 import type { SandboxMeter } from './metering.js'
-import type { BrowserProfileStore } from './profiles.js'
+import { canUseProfile, BrowserProfileAuthoritySchema, type BrowserProfileAuthority, type BrowserProfile, type BrowserProfileStore } from './profiles.js'
 import type {
   BrowserCallContext,
   SandboxProvider,
@@ -36,6 +41,11 @@ export type SandboxTaskRecord = {
    * inject/capture/probe. Null = an identity-less task (no session reuse).
    */
   profileId: string | null
+  /** Original profile floor. Legacy bound tasks without evidence cannot resume or capture. */
+  sourceAuthority?: AuthoritySource | null
+  inputScope?: BrowserInputScope | null
+  executionAuthority?: AuthoringAuthority | null
+  profileAuthority?: BrowserProfileAuthority | null
   /** Registrable domain whose vault bundle was injected at start (probe target). */
   injectedSite: string | null
   /**
@@ -49,6 +59,8 @@ export type SandboxTaskRecord = {
 }
 
 export type SandboxTaskStore = {
+  withPublication<T>(expected: BrowserTaskPublication, operation: () => Promise<T>): Promise<T>
+  noteInputScope(taskId: string, input: BrowserInputScope): Promise<BrowserInputScope | null>
   getActiveBySession(sessionId: string): Promise<SandboxTaskRecord | null>
   /** Running/paused tasks that have entered a browser path — the discovery surface (§5). */
   listActiveByWorkspace(workspaceId: string): Promise<SandboxTaskRecord[]>
@@ -68,8 +80,26 @@ export function createInMemorySandboxTaskStore(): SandboxTaskStore & {
   tasks: Map<string, SandboxTaskRecord>
 } {
   const tasks = new Map<string, SandboxTaskRecord>()
+  const publishing = new Set<string>()
+  const mutable = (sessionId: string) => { if (publishing.has(sessionId)) throw browserPublicationBusy() }
   return {
+    async withPublication(expected, operation) {
+      mutable(expected.sessionId)
+      publishing.add(expected.sessionId)
+      try {
+        const active = [...tasks.values()].find(t => t.sessionId === expected.sessionId && ['running', 'paused'].includes(t.status)) ?? null
+        assertBrowserTaskPublication(expected, active)
+        return await operation()
+      } finally { publishing.delete(expected.sessionId) }
+    },
     tasks,
+    async noteInputScope(taskId, input) {
+      const task = tasks.get(taskId)
+      if (task) mutable(task.sessionId)
+      if (!task || !['running', 'paused'].includes(task.status)) throw Object.assign(new Error('Task unavailable'), { code: 'profile_authority_denied' })
+      task.inputScope = mergeBrowserInputScope(task.inputScope, input, task.workspaceId)
+      return task.inputScope ? structuredClone(task.inputScope) : null
+    },
     async getActiveBySession(sessionId) {
       for (const task of tasks.values()) {
         if (task.sessionId === sessionId && (task.status === 'running' || task.status === 'paused')) {
@@ -87,10 +117,41 @@ export function createInMemorySandboxTaskStore(): SandboxTaskStore & {
       )
     },
     async create(record) {
-      tasks.set(record.taskId, record)
+      mutable(record.sessionId)
+      const frozen = record.executionAuthority ? parseAuthoringAuthority(record.executionAuthority) : null
+      if (record.executionAuthority && (!frozen || frozen.ceiling.userId !== record.userId || frozen.ceiling.workspaceId !== record.workspaceId)) {
+        throw Object.assign(new Error('Task authority unavailable'), { code: 'profile_authority_denied' })
+      }
+      if (record.sourceAuthority && !frozen) throw Object.assign(new Error('Task source authority unavailable'), { code: 'profile_authority_denied' })
+      tasks.set(record.taskId, { ...record, inputScope: record.inputScope ? parseBrowserInputScope(record.inputScope, record.workspaceId) : null, executionAuthority: frozen, sourceAuthority: record.sourceAuthority ? AuthoritySourceSchema.parse(record.sourceAuthority) : null })
     },
     async update(taskId, patch) {
+      if (patch.inputScope !== undefined) throw Object.assign(new Error('Task input protection requires monotonic admission'), { code: 'profile_authority_denied' })
       const existing = tasks.get(taskId)
+      if (existing) mutable(existing.sessionId)
+      if (existing && (['taskId', 'sessionId', 'workspaceId', 'userId', 'sandboxId'] as const)
+        .some(key => patch[key] !== undefined && patch[key] !== existing[key])) {
+        throw Object.assign(new Error('Browser task identity is immutable'), { code: 'profile_authority_denied' })
+      }
+      if (patch.sourceAuthority !== undefined && !patch.executionAuthority) throw Object.assign(new Error('Task source authority unavailable'), { code: 'profile_authority_denied' })
+      if (patch.executionAuthority !== undefined) {
+        const frozen = parseAuthoringAuthority(patch.executionAuthority)
+        if (!existing || existing.executionAuthority || existing.browserStartedAt !== null || !frozen
+          || frozen.ceiling.userId !== existing.userId || frozen.ceiling.workspaceId !== existing.workspaceId) {
+          throw Object.assign(new Error('Task execution authority unavailable'), { code: 'profile_authority_denied' })
+        }
+        patch = { ...patch, executionAuthority: frozen, sourceAuthority: patch.sourceAuthority ? AuthoritySourceSchema.parse(patch.sourceAuthority) : null }
+      }
+      if (patch.profileAuthority) {
+        if (!existing || existing.profileId || existing.profileAuthority || !['running', 'paused'].includes(existing.status)
+          || patch.profileId !== patch.profileAuthority.id || existing.workspaceId !== patch.profileAuthority.workspaceId) {
+          throw Object.assign(new Error('Profile authority unavailable'), { code: 'profile_authority_denied' })
+        }
+      }
+      if ((patch.profileAuthority !== undefined && !patch.profileAuthority)
+        || (patch.profileId !== undefined && !patch.profileAuthority && patch.profileId !== existing?.profileId)) {
+        throw Object.assign(new Error('Profile authority unavailable'), { code: 'profile_authority_denied' })
+      }
       if (existing) tasks.set(taskId, { ...existing, ...patch })
     },
     async listStale(cutoffMs) {
@@ -177,10 +238,12 @@ export type SandboxOrchestratorDeps = {
   /** Encrypted DB impl; null means session reuse is not configured. */
   vault?: SessionVault | null
   /**
-   * Profile lookups (R2-3/R2-4): per-profile BYOP proxy at create time. Null →
-   * profile-less posture when no profile store is configured.
+   * Profile lookups and original-floor renewal, including the BYOP proxy at
+   * create time. Missing wiring permits only identity-less tasks.
    */
   profileStore?: Pick<BrowserProfileStore, 'get'> | null
+  /** Rebuild current original-assistant authority for a persisted task. */
+  resolveExecutionAuthority?: (task: SandboxTaskRecord, caller?: CurrentAuthorityBoundary) => Promise<CurrentAuthorityBoundary>
   /**
    * Pre-task gates (Phase 4 wires the real credit gate + budget
    * authorization; the defaults are permissive-but-bounded).
@@ -199,7 +262,7 @@ export type SandboxOrchestratorDeps = {
   egressAllowlistFor?: (ctx: BrowserCallContext) => string[]
   /** Sink for auto-pulled downloads (workspace-scoped ABOVE the provider seam). */
   saveDownload?: (
-    ctx: { userId: string; workspaceId: string; sessionId: string },
+    ctx: { userId: string; workspaceId: string; sessionId: string; task: SandboxTaskRecord; authority?: CurrentAuthorityBoundary },
     file: { path: string; bytes: Uint8Array },
   ) => Promise<void>
   /**
@@ -225,14 +288,17 @@ export type SandboxOrchestrator = {
   /** Pause during a Take-Over wait (RAM freed, cookies preserved — §4.8). */
   pauseForTakeover(sessionId: string): Promise<void>
   resumeAfterTakeover(sessionId: string): Promise<void>
+  assertTaskAuthority(task: SandboxTaskRecord): Promise<void>
   /**
    * Capture the (post-login) session for a site into the profile's vault.
    * `profileId` binds a previously identity-less task to a profile on its
    * first capture (the Take-Over first-login flow).
    */
-  captureSession(sessionId: string, site: string, profileId?: string): Promise<void>
+  captureSession(sessionId: string, site: string, profileId?: string, authority?: CurrentAuthorityBoundary): Promise<void>
   /** Task end: capture session deltas → pull downloads → kill (§4.10). */
-  completeTask(sessionId: string, outcome?: 'completed' | 'failed'): Promise<SandboxTaskRecord | null>
+  completeTask(sessionId: string, outcome?: 'completed' | 'failed', authority?: CurrentAuthorityBoundary): Promise<SandboxTaskRecord | null>
+  /** Trusted owner-admitted teardown, without session capture or download publication. */
+  discardTask(sessionId: string, expectedTaskId: string): Promise<boolean>
   /** Reaper sweep: kill + fail tasks idle past the abandonment window. */
   reapStale(abandonmentMs: number): Promise<number>
 }
@@ -240,17 +306,81 @@ export type SandboxOrchestrator = {
 export function createSandboxOrchestrator(deps: SandboxOrchestratorDeps): SandboxOrchestrator {
   const now = deps.now ?? Date.now
 
+  async function authorized<T>(authority: CurrentAuthorityBoundary | undefined, operation: () => Promise<T>): Promise<T> {
+    return authority ? authority.execute(operation) : operation()
+  }
+
+  const denied = () => Object.assign(new Error('Browser profile authority changed. Start a new task after checking department access.'), { code: 'profile_authority_denied' })
+
+  async function currentProfile(profileId: string, actor: { userId: string; workspaceId: string }): Promise<BrowserProfile> {
+    const profile = await deps.profileStore?.get(profileId)
+    if (!profile || profile.id !== profileId || profile.workspaceId !== actor.workspaceId
+      || (profile.scope === 'owner' && profile.ownerUserId !== actor.userId)) throw denied()
+    return profile
+  }
+
+  async function taskAuthority(task: SandboxTaskRecord, caller?: CurrentAuthorityBoundary): Promise<CurrentAuthorityBoundary | undefined> {
+    if (!task.executionAuthority) { if (task.sourceAuthority) throw denied(); return caller }
+    const frozen = parseAuthoringAuthority(task.executionAuthority)
+    if (!frozen || frozen.ceiling.userId !== task.userId || frozen.ceiling.workspaceId !== task.workspaceId
+      || !deps.resolveExecutionAuthority) throw denied()
+    const retained = await deps.resolveExecutionAuthority(task, caller)
+    return {
+      ...(caller?.snapshotSource ? { snapshotSource: () => caller.snapshotSource!() } : {}),
+      async assertCurrent() { await retained.assertCurrent(); await caller?.assertCurrent(); await admitTaskProfile(task) },
+      async execute<T>(operation: () => Promise<T>): Promise<T> {
+        return retained.execute(() => authorized(caller, async () => {
+          await admitTaskProfile(task)
+          const result = await operation()
+          await admitTaskProfile(task)
+          return result
+        }))
+      },
+    }
+  }
+
+  async function currentProfileFloor(profileId: string, actor: { userId: string; workspaceId: string }): Promise<BrowserProfileAuthority> {
+    return BrowserProfileAuthoritySchema.parse(await currentProfile(profileId, actor))
+  }
+
+  async function admitTaskProfile(task: SandboxTaskRecord): Promise<BrowserProfileAuthority | null> {
+    if (!task.profileId) {
+      if (task.profileAuthority) throw denied()
+      return null
+    }
+    const parsed = BrowserProfileAuthoritySchema.safeParse(task.profileAuthority)
+    if (!parsed.success || parsed.data.id !== task.profileId || parsed.data.workspaceId !== task.workspaceId) throw denied()
+    const original = parsed.data
+    const current = await currentProfile(task.profileId, task)
+    if (current.ownerUserId !== original.ownerUserId || current.scope !== original.scope
+      || current.clearance !== original.clearance || (current.departmentId ?? null) !== (original.departmentId ?? null)) throw denied()
+    if (task.executionAuthority) {
+      const frozen = parseAuthoringAuthority(task.executionAuthority)
+      if (!frozen || !canUseProfile(current, { userId: task.userId, workspaceId: task.workspaceId,
+        assistantId: frozen.assistantId, assistantClearance: frozen.ceiling.clearance,
+        departmentRead: frozen.ceiling.departmentRead }).ok) throw denied()
+    }
+    return original
+  }
+
+  function assertTaskActor(task: SandboxTaskRecord, ctx: BrowserCallContext): void {
+    if (task.userId !== ctx.userId || task.workspaceId !== ctx.workspaceId || task.sessionId !== ctx.sessionId) throw denied()
+  }
+
   async function injectVaultBundle(
     profileId: string | null,
     sandboxId: string,
     site: string | null,
+    expectedProfile: BrowserProfileAuthority | null,
+    authority?: CurrentAuthorityBoundary,
   ): Promise<string | null> {
     // Session reuse is profile-scoped (R2-4): no profile → no injection.
     if (!deps.vault || !site || !profileId) return null
-    const bundle = await deps.vault.get({ profileId, site })
+    if (!expectedProfile) throw denied()
+    const bundle = await authorized(authority, () => deps.vault!.get({ profileId, site }, expectedProfile))
     if (!bundle) return null
-    await deps.provider.browser(sandboxId).injectStorageState(bundle)
-    await deps.vault.touch({ profileId, site })
+    await authorized(authority, () => deps.provider.browser(sandboxId).injectStorageState(bundle))
+    await authorized(authority, () => deps.vault!.touch({ profileId, site }, expectedProfile))
     return site
   }
 
@@ -260,12 +390,12 @@ export function createSandboxOrchestrator(deps: SandboxOrchestratorDeps): Sandbo
    * gracefully NOW (capture/pull/kill) and the caller gets a clear error.
    * Paused spans are excluded: a paused sandbox holds no compute.
    */
-  async function meterTouch(task: SandboxTaskRecord, wasRunning: boolean): Promise<void> {
+  async function meterTouch(task: SandboxTaskRecord, wasRunning: boolean, authority?: CurrentAuthorityBoundary): Promise<void> {
     if (!deps.meter || !wasRunning) return
     const seconds = Math.max(0, (now() - task.lastActivityAt) / 1000)
     const { capExceeded } = await deps.meter.recordSandboxSeconds(task, seconds)
     if (capExceeded) {
-      await completeTaskInternal(task, 'failed')
+      await completeTaskInternal(task, 'failed', authority)
       throw new Error(
         `This browser task reached its authorized budget (about $${task.authorizedBudgetUsd.toFixed(2)}) and was stopped. Ask the user to raise the workspace's computer-use budget to continue.`,
       )
@@ -284,7 +414,7 @@ export function createSandboxOrchestrator(deps: SandboxOrchestratorDeps): Sandbo
         // registers this finalizer again; explicit Stop and the reaper remain
         // the closure paths if the user never resumes it.
         if (task.status === 'paused') return
-        await completeTaskInternal(task, 'completed')
+        await completeTaskInternal(task, 'completed', ctx.authority)
       },
     )
   }
@@ -292,9 +422,37 @@ export function createSandboxOrchestrator(deps: SandboxOrchestratorDeps): Sandbo
   async function resolve(
     ctx: BrowserCallContext,
     hint?: { url?: string; browser?: boolean },
-  ): Promise<{ sandboxId: string }> {
-    const existing = await deps.taskStore.getActiveBySession(ctx.sessionId)
+  ): Promise<{ sandboxId: string; authority?: CurrentAuthorityBoundary }> {
+    await ctx.authority?.assertCurrent()
+    if (ctx.inputScope) ctx = { ...ctx, inputScope: parseBrowserInputScope(ctx.inputScope, ctx.workspaceId) }
+    let existing = await deps.taskStore.getActiveBySession(ctx.sessionId)
+    if (ctx.taskId && existing?.taskId !== ctx.taskId) throw denied()
     if (existing) {
+      assertTaskActor(existing, ctx)
+      if (ctx.executionAuthority) {
+        if (!existing.executionAuthority) {
+          if (existing.browserStartedAt !== null) throw denied()
+          await deps.taskStore.update(existing.taskId, { executionAuthority: ctx.executionAuthority, sourceAuthority: ctx.sourceAuthority ?? null })
+          existing = { ...existing, executionAuthority: ctx.executionAuthority, sourceAuthority: ctx.sourceAuthority ?? null }
+        } else if (existing.executionAuthority.assistantId !== ctx.executionAuthority.assistantId
+          || !accessCeilingContains(ctx.executionAuthority.ceiling, existing.executionAuthority.ceiling)) throw denied()
+      }
+      ctx = { ...ctx, authority: await taskAuthority(existing, ctx.authority) }
+      await ctx.authority?.assertCurrent()
+      if (ctx.inputScope) existing = { ...existing, inputScope: await deps.taskStore.noteInputScope(existing.taskId, ctx.inputScope) }
+      if (hint?.browser && existing.profileId !== (ctx.profileId ?? null)) {
+        // Compute and browser share one sandbox. Bind an untouched compute-only
+        // task once before its first browser navigation; never switch an existing identity.
+        if (existing.profileId || existing.browserStartedAt !== null || !ctx.profileId || !hint.url) throw denied()
+        const floor = await currentProfileFloor(ctx.profileId, ctx)
+        const boundTask = { ...existing, profileId: ctx.profileId, profileAuthority: floor }
+        const boundAuthority = await taskAuthority(boundTask, ctx.authority)
+        await boundAuthority?.assertCurrent()
+        await deps.taskStore.update(existing.taskId, {profileId:ctx.profileId,profileAuthority:floor})
+        existing = boundTask
+        ctx = { ...ctx, authority: boundAuthority }
+      }
+      const floor = await admitTaskProfile(existing)
       if (hint?.browser && existing.browserStartedAt === null && !hint.url) {
         throw new BrowserBackendError(
           'No browser page is active for this session. Open a target URL with browserNavigate before reading or acting on the page.',
@@ -302,26 +460,23 @@ export function createSandboxOrchestrator(deps: SandboxOrchestratorDeps): Sandbo
         )
       }
       if (hint?.browser) registerBrowserInvocationFinalizer(ctx)
-      await meterTouch(existing, existing.status === 'running')
+      await meterTouch(existing, existing.status === 'running', ctx.authority)
       const touchedAt = now()
       const browserStartedPatch =
         hint?.browser && existing.browserStartedAt === null
           ? { browserStartedAt: touchedAt }
           : {}
-      if (existing.status === 'paused') {
-        await deps.provider.resume(existing.sandboxId)
-        await deps.taskStore.update(existing.taskId, {
-          status: 'running',
-          lastActivityAt: touchedAt,
-          ...browserStartedPatch,
-        })
-      } else {
-        await deps.taskStore.update(existing.taskId, {
-          lastActivityAt: touchedAt,
-          ...browserStartedPatch,
-        })
-      }
-      return { sandboxId: existing.sandboxId }
+      if (existing.status === 'paused') await authorized(ctx.authority, () => deps.provider.resume(existing!.sandboxId))
+      const injectionPatch = hint?.browser && existing.browserStartedAt === null && hint.url
+        ? {injectedSite:await injectVaultBundle(existing.profileId,existing.sandboxId,registrableSiteOf(hint.url),floor,ctx.authority)}
+        : {}
+      await deps.taskStore.update(existing.taskId, {
+        ...(existing.status === 'paused' ? {status:'running' as const} : {}),
+        lastActivityAt: touchedAt,
+        ...browserStartedPatch,
+        ...injectionPatch,
+      })
+      return { sandboxId: existing.sandboxId, authority: ctx.authority }
     }
 
     if (hint?.browser && !hint.url) {
@@ -340,7 +495,15 @@ export function createSandboxOrchestrator(deps: SandboxOrchestratorDeps): Sandbo
     const site = hint?.url ? registrableSiteOf(hint.url) : null
     const profileId = ctx.profileId ?? null
     // Per-profile BYOP proxy (R2-3) wins over the per-site fallback hook.
-    const profile = profileId ? await deps.profileStore?.get(profileId) : null
+    const profile = profileId ? await currentProfile(profileId, ctx) : null
+    const profileAuthority = profile ? BrowserProfileAuthoritySchema.parse(profile) : null
+    ctx = { ...ctx, authority: await taskAuthority({
+      taskId, sandboxId: '', userId: ctx.userId, workspaceId: ctx.workspaceId, sessionId: ctx.sessionId,
+      status: 'running', profileId, profileAuthority, executionAuthority: ctx.executionAuthority ?? null, sourceAuthority: ctx.sourceAuthority ?? null,
+      injectedSite: null, browserStartedAt: hint?.browser ? now() : null,
+      authorizedBudgetUsd, createdAt: now(), lastActivityAt: now(),
+    }, ctx.authority) }
+    await ctx.authority?.assertCurrent()
     const { sandboxId } = await deps.provider.create({
       workspaceId: ctx.workspaceId,
       taskId,
@@ -356,9 +519,10 @@ export function createSandboxOrchestrator(deps: SandboxOrchestratorDeps): Sandbo
     // (`sandbox_tasks.session_id` is `uuid NOT NULL`; the sign-in route's
     // decorated id 502'd every call and leaked a sandbox each time).
     try {
+      await ctx.authority?.assertCurrent()
       // Session reuse (§4.4): inject the profile's vaulted bundle BEFORE the
       // first navigation so the site is already signed in.
-      const injectedSite = await injectVaultBundle(profileId, sandboxId, site)
+      const injectedSite = await injectVaultBundle(profileId, sandboxId, site, profileAuthority, ctx.authority)
 
       const createdAt = now()
       await deps.taskStore.create({
@@ -369,6 +533,10 @@ export function createSandboxOrchestrator(deps: SandboxOrchestratorDeps): Sandbo
         sessionId: ctx.sessionId,
         status: 'running',
         profileId,
+        profileAuthority,
+        executionAuthority: ctx.executionAuthority ?? null,
+        sourceAuthority: ctx.sourceAuthority ?? null,
+        inputScope: ctx.inputScope ? parseBrowserInputScope(ctx.inputScope, ctx.workspaceId) : null,
         injectedSite,
         browserStartedAt: hint?.browser ? createdAt : null,
         authorizedBudgetUsd,
@@ -380,7 +548,7 @@ export function createSandboxOrchestrator(deps: SandboxOrchestratorDeps): Sandbo
       await deps.provider.kill(sandboxId).catch(() => {})
       throw err
     }
-    return { sandboxId }
+    return { sandboxId, authority: ctx.authority }
   }
 
   async function onNavigated(ctx: BrowserCallContext, url: string): Promise<void> {
@@ -388,24 +556,36 @@ export function createSandboxOrchestrator(deps: SandboxOrchestratorDeps): Sandbo
     // login wall is dead server-side — mark it so the UI can prompt re-auth
     // instead of silently reusing a corpse next task.
     const task = await deps.taskStore.getActiveBySession(ctx.sessionId)
-    if (!task?.injectedSite || !task.profileId || !deps.vault) return
+    if (!task) return
+    assertTaskActor(task, ctx)
+    ctx = { ...ctx, authority: await taskAuthority(task, ctx.authority) }
+    await ctx.authority?.assertCurrent()
+    if (!task.injectedSite || !task.profileId || !deps.vault) return
+    const floor = await admitTaskProfile(task)
+    if (!floor) throw denied()
     const site = registrableSiteOf(url)
     if (site === task.injectedSite && looksLikeLoginWall(url)) {
-      await deps.vault.markDead({ profileId: task.profileId, site })
+      await authorized(ctx.authority, () => deps.vault!.markDead({ profileId: task.profileId!, site }, floor))
       await deps.taskStore.update(task.taskId, { injectedSite: null })
     }
   }
 
-  async function captureFor(task: SandboxTaskRecord, site: string, profileId?: string): Promise<void> {
+  async function captureFor(task: SandboxTaskRecord, site: string, profileId?: string, authority?: CurrentAuthorityBoundary): Promise<void> {
+    authority = await taskAuthority(task, authority)
+    await authority?.assertCurrent()
     const pid = profileId ?? task.profileId
     if (!deps.vault || !pid) return
-    const bundle = await deps.provider.browser(task.sandboxId).captureStorageState(site)
-    await deps.vault.put({ profileId: pid, site, bundle })
+    if (pid !== task.profileId) throw denied()
+    const floor = await admitTaskProfile(task)
+    if (!floor) throw denied()
+    const bundle = await authorized(authority, () => deps.provider.browser(task.sandboxId).captureStorageState(site))
+    await authorized(authority, () => deps.vault!.put({ profileId: pid, site, bundle }, floor))
   }
 
   async function completeTaskInternal(
     task: SandboxTaskRecord,
     outcome: 'completed' | 'failed',
+    authority?: CurrentAuthorityBoundary,
   ): Promise<SandboxTaskRecord> {
     // Final sandbox-seconds delta (running spans only) — recorded WITHOUT
     // cap-recursion (a task being torn down cannot be torn down again).
@@ -417,22 +597,24 @@ export function createSandboxOrchestrator(deps: SandboxOrchestratorDeps): Sandbo
     // pull downloads into our store, THEN kill. Killing loses nothing —
     // the sandbox FS is scratch by design (§4.12).
     try {
-      if (task.injectedSite) await captureFor(task, task.injectedSite)
+      if (task.injectedSite) await captureFor(task, task.injectedSite, undefined, authority)
     } catch {
       /* capture is best-effort — an expired page must not block teardown */
     }
     try {
       if (deps.saveDownload) {
-        const downloads = await deps.provider.bridge.pullDownloads(task.sandboxId)
+        const downloadAuthority = await taskAuthority(task, authority)
+        const downloads = await authorized(downloadAuthority, () => deps.provider.bridge.pullDownloads(task.sandboxId))
         for (const file of downloads) {
-          await deps.saveDownload(
-            { userId: task.userId, workspaceId: task.workspaceId, sessionId: task.sessionId },
+          await authorized(downloadAuthority, () => deps.saveDownload!(
+            { userId: task.userId, workspaceId: task.workspaceId, sessionId: task.sessionId, task: structuredClone(task), authority: downloadAuthority },
             file,
-          )
+          ))
         }
       }
     } catch {
-      /* downloads are best-effort too */
+      // Teardown must still run, but lost/denied publication is not a successful completion.
+      outcome = 'failed'
     }
     await deps.provider.kill(task.sandboxId)
     await deps.taskStore.update(task.taskId, { status: outcome, lastActivityAt: now() })
@@ -441,6 +623,8 @@ export function createSandboxOrchestrator(deps: SandboxOrchestratorDeps): Sandbo
 
   return {
     binding: { resolve, onNavigated },
+
+    async assertTaskAuthority(task) { await (await taskAuthority(task))?.assertCurrent() },
 
     getActiveTask: (sessionId) => deps.taskStore.getActiveBySession(sessionId),
 
@@ -456,11 +640,13 @@ export function createSandboxOrchestrator(deps: SandboxOrchestratorDeps): Sandbo
     async resumeAfterTakeover(sessionId) {
       const task = await deps.taskStore.getActiveBySession(sessionId)
       if (!task || task.status !== 'paused') return
-      await deps.provider.resume(task.sandboxId)
+      await admitTaskProfile(task)
+      await authorized(await taskAuthority(task), () => deps.provider.resume(task.sandboxId))
       await deps.taskStore.update(task.taskId, { status: 'running', lastActivityAt: now() })
     },
 
-    async captureSession(sessionId, site, profileId) {
+    async captureSession(sessionId, site, profileId, authority) {
+      await authority?.assertCurrent()
       const task = await deps.taskStore.getActiveBySession(sessionId)
       if (!task) return
       const pid = profileId ?? task.profileId
@@ -469,7 +655,16 @@ export function createSandboxOrchestrator(deps: SandboxOrchestratorDeps): Sandbo
           'This task has no browser profile to save the session into. Create or pick a profile first.',
         )
       }
-      await captureFor(task, site, pid)
+      if (task.profileId && task.profileId !== pid) throw denied()
+      if (!task.profileId) {
+        const floor = await currentProfileFloor(pid, task)
+        if (floor.ownerUserId !== task.userId) throw denied()
+        await (await taskAuthority({ ...task, profileId: pid, profileAuthority: floor }, authority))?.assertCurrent()
+        await deps.taskStore.update(task.taskId, { profileId: pid, profileAuthority: floor })
+        task.profileId = pid
+        task.profileAuthority = floor
+      }
+      await captureFor(task, site, pid, authority)
       await deps.taskStore.update(task.taskId, {
         injectedSite: site,
         profileId: pid,
@@ -477,10 +672,22 @@ export function createSandboxOrchestrator(deps: SandboxOrchestratorDeps): Sandbo
       })
     },
 
-    async completeTask(sessionId, outcome = 'completed') {
+    async completeTask(sessionId, outcome = 'completed', authority) {
       const task = await deps.taskStore.getActiveBySession(sessionId)
       if (!task) return null
-      return completeTaskInternal(task, outcome)
+      return completeTaskInternal(task, outcome, authority)
+    },
+
+    async discardTask(sessionId, expectedTaskId) {
+      const task = await deps.taskStore.getActiveBySession(sessionId)
+      if (!task || task.taskId !== expectedTaskId) return false
+      await deps.provider.kill(task.sandboxId)
+      if (deps.meter && task.status === 'running') {
+        const seconds = Math.max(0, (now() - task.lastActivityAt) / 1000)
+        await deps.meter.recordSandboxSeconds(task, seconds).catch(() => ({}))
+      }
+      await deps.taskStore.update(task.taskId, { status: 'failed', lastActivityAt: now() })
+      return true
     },
 
     async reapStale(abandonmentMs) {

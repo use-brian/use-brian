@@ -48,6 +48,7 @@ import {
   TAKEOVER_BRIDGE_PORT,
   TAKEOVER_STREAM_BRIDGE_MJS,
   TAKEOVER_STREAM_BRIDGE_PATH,
+  mintTakeoverLease,
   bridgeLaunchCommand,
   bridgeProbeCommand,
 } from './takeover-stream.js'
@@ -370,12 +371,14 @@ export function createE2bCloudProvider(
           m.streamToken = token
         }
         const host = handle.getHost(TAKEOVER_BRIDGE_PORT)
+        const lease = mintTakeoverLease(m.streamToken)
         return {
-          framesUrl: `https://${host}/frames?token=${m.streamToken}`,
-          inputUrl: `https://${host}/input?token=${m.streamToken}`,
+          expiresAt: lease.expiresAt,
+          framesUrl: `https://${host}/frames?token=${lease.token}`,
+          inputUrl: `https://${host}/input?token=${lease.token}`,
           // The duplex leg: binary frames down, input up, one socket. Old
           // clients ignore it and stay on SSE + POST against the same bridge.
-          wsUrl: `wss://${host}/ws?token=${m.streamToken}`,
+          wsUrl: `wss://${host}/ws?token=${lease.token}`,
         }
       },
     }

@@ -1,7 +1,8 @@
 import { Router } from 'express'
 import { z } from 'zod'
-import type { BrowserProfileStore } from '@use-brian/core'
-import { signBrowserExtPairToken } from '../auth/browser-ext-pair-token.js'
+import type { BrowserProfile, BrowserProfileStore, DepartmentReadGrant } from '@use-brian/core'
+import { humanCanReadBrowserProfile } from '../sandbox/profile-authority.js'
+import { signBrowserExtPairToken, verifyBrowserExtHelloToken } from '../auth/browser-ext-pair-token.js'
 
 /**
  * Browser-extension pairing (computer-use.md §4, P1.3): an authed user mints
@@ -15,10 +16,42 @@ type WorkspaceMembershipCheck = {
   getMembership(userId: string, workspaceId: string): Promise<unknown | null>
 }
 
+/** Token-specific admission: mount before ordinary user-JWT middleware. */
+export function browserExtensionAuthorityRoutes(deps: {
+  jwtSecret: string
+  workspaceStore: WorkspaceMembershipCheck
+  profileStore: BrowserProfileStore | null
+  getProfileReadGrant: (userId: string, workspaceId: string) => Promise<DepartmentReadGrant | null>
+}): Router {
+  const router = Router()
+  router.post('/authority', async (req, res) => {
+    res.setHeader('Cache-Control', 'no-store')
+    res.setHeader('Pragma', 'no-cache')
+    const authorization = req.headers.authorization
+    const identity = authorization?.startsWith('Bearer ')
+      ? verifyBrowserExtHelloToken(authorization.slice(7), deps.jwtSecret) : null
+    if (!identity) { res.status(401).json({ code: 'not_authorized' }); return }
+    try {
+      const profile = await deps.profileStore?.get(identity.browserProfileId)
+      if (!profile || profile.workspaceId !== identity.workspaceId || profile.ownerUserId !== identity.userId
+        || !(await deps.workspaceStore.getMembership(identity.userId, identity.workspaceId))
+        || !humanCanReadBrowserProfile(profile, identity.userId,
+          await deps.getProfileReadGrant(identity.userId, identity.workspaceId))) {
+        res.status(403).json({ code: 'not_authorized' }); return
+      }
+      res.sendStatus(204)
+    } catch {
+      res.status(403).json({ code: 'not_authorized' })
+    }
+  })
+  return router
+}
+
 export function browserExtensionRoutes(deps: {
   jwtSecret: string
   workspaceStore: WorkspaceMembershipCheck
   profileStore: BrowserProfileStore | null
+  getProfileReadGrant?: (userId: string, workspaceId: string) => Promise<DepartmentReadGrant | null>
   /** Relay websocket URL the extension should connect to (shown in the UI). */
   relayWsUrl: string | null
   /**
@@ -37,6 +70,16 @@ export function browserExtensionRoutes(deps: {
     | null
 }): Router {
   const router = Router()
+
+  async function admittedOwner(profile: BrowserProfile, userId: string): Promise<boolean> {
+    if (profile.ownerUserId !== userId) return false
+    try {
+      if (!(await deps.workspaceStore.getMembership(userId, profile.workspaceId))) return false
+      return humanCanReadBrowserProfile(profile, userId, await deps.getProfileReadGrant?.(userId, profile.workspaceId))
+    } catch {
+      return false
+    }
+  }
 
   const PairBodySchema = z.object({
     workspaceId: z.string().uuid(),
@@ -69,9 +112,11 @@ export function browserExtensionRoutes(deps: {
       ? await deps.profileStore.get(parsed.data.browserProfileId)
       : null
     if (!parsed.data.browserProfileId) {
-      const candidates = (await deps.profileStore.list({ workspaceId: parsed.data.workspaceId })).filter(
+      const owned = (await deps.profileStore.list({ workspaceId: parsed.data.workspaceId })).filter(
         (item) => item.ownerUserId === userId && item.defaultBackend === 'local',
       )
+      const candidates = (await Promise.all(owned.map(async (item) =>
+        await admittedOwner(item, userId) ? item : null))).filter((item) => item !== null)
       if (candidates.length !== 1) {
         res.status(409).json({
           error: 'Choose the Browser profile this local browser should connect to.',
@@ -84,7 +129,7 @@ export function browserExtensionRoutes(deps: {
     if (
       !profile ||
       profile.workspaceId !== parsed.data.workspaceId ||
-      profile.ownerUserId !== userId
+      !(await admittedOwner(profile, userId))
     ) {
       res.status(404).json({ error: 'No such browser profile (or it is not yours to pair).' })
       return
@@ -110,10 +155,14 @@ export function browserExtensionRoutes(deps: {
     const browserProfileId =
       typeof req.query.browserProfileId === 'string' ? req.query.browserProfileId : undefined
     const workspaceId = typeof req.query.workspaceId === 'string' ? req.query.workspaceId : undefined
+    if (!browserProfileId) {
+      res.json({ configured: true, connected: false, build: null, staleBuild: false })
+      return
+    }
     let profileWorkspaceId: string | undefined
     if (browserProfileId) {
       const profile = await deps.profileStore?.get(browserProfileId)
-      if (!profile || profile.ownerUserId !== userId || (workspaceId && profile.workspaceId !== workspaceId)) {
+      if (!profile || (workspaceId && profile.workspaceId !== workspaceId) || !(await admittedOwner(profile, userId))) {
         res.status(404).json({ error: 'No such browser profile (or it is not yours to inspect).' })
         return
       }
@@ -131,6 +180,11 @@ export function browserExtensionRoutes(deps: {
       browserProfileId,
       workspaceId: membershipWorkspaceId,
     })
+    const current = await deps.profileStore?.get(browserProfileId).catch(() => null)
+    if (!current || current.workspaceId !== membershipWorkspaceId || !(await admittedOwner(current, userId))) {
+      res.status(404).json({ error: 'No such browser profile (or it is not yours to inspect).' })
+      return
+    }
     res.json({
       configured: true,
       connected: status?.connected === true,

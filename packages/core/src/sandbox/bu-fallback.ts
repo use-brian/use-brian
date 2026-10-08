@@ -1,3 +1,4 @@
+import type { DepartmentReadGrant } from '../security/department-read.js'
 /**
  * The watched browser-agent path (R2-1/R2-7): `browserExplore` runs Jev
  * Ultrafast for a NOVEL flow inside the cloud micro-VM, with Browser Use as a
@@ -52,6 +53,7 @@ export type CreateBuFallbackToolOptions = {
     store: BrowserProfileStore
     vault?: SessionVault | null
     assistantClearance: (context: ToolContext) => Promise<Sensitivity>
+    departmentRead?: (context: ToolContext) => Promise<DepartmentReadGrant | undefined>
   } | null
   resolvePolicy?: ResolveComputerToolPolicy
   unattendedEnabled?: () => boolean
@@ -182,6 +184,7 @@ export function createBuFallbackTool(opts: CreateBuFallbackToolOptions): { brows
             workspaceId: context.workspaceId,
             assistantId: context.assistantId,
             assistantClearance: actorClearance,
+            departmentRead: await opts.profiles.departmentRead?.(context),
           },
           site,
           profileName: input.profile,

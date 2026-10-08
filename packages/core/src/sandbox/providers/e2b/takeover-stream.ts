@@ -37,6 +37,15 @@
  * [COMP:sandbox/takeover-stream] — spec: docs/architecture/engine/computer-use.md §5.
  */
 
+import { createHmac } from 'node:crypto'
+
+/** Browser bearer leases never reveal the sandbox signing secret. */
+export function mintTakeoverLease(secret: string, now = Date.now()): { token: string; expiresAt: number } {
+  const expiresAt = now + 30_000
+  const payload = String(expiresAt)
+  return { expiresAt, token: `${payload}.${createHmac('sha256', secret).update(payload).digest('hex')}` }
+}
+
 /** The bridge's public listener (0.0.0.0 — the one E2B-ingress-facing port). */
 export const TAKEOVER_BRIDGE_PORT = 49223
 
@@ -97,10 +106,15 @@ const IDLE_SHARP_MS = 700
 const SHARP_QUALITY = 80
 
 function tokenOk(candidate) {
-  const a = crypto.createHash('sha256').update(String(candidate ?? '')).digest()
-  const b = crypto.createHash('sha256').update(TOKEN).digest()
-  return crypto.timingSafeEqual(a, b)
+  if (typeof candidate !== 'string') return false
+  const [expiry, signature, extra] = candidate.split('.')
+  const expiresAt = Number(expiry)
+  if (extra !== undefined || !Number.isSafeInteger(expiresAt) || expiresAt <= Date.now() || !/^[0-9a-f]{64}$/.test(signature || '')) return false
+  const expected = crypto.createHmac('sha256', TOKEN).update(expiry).digest()
+  return crypto.timingSafeEqual(Buffer.from(signature, 'hex'), expected)
 }
+function leaseExpiry(candidate) { return Number(candidate.split('.')[0]) }
+
 
 /** JPEG SOF scan — frame pixel size, for the input coordinate rescale. */
 function jpegDims(buf) {
@@ -284,9 +298,15 @@ setInterval(() => {
   }
 }, 2000)
 
-async function dispatchInput(event, retried) {
+async function dispatchInput(event, retried, candidate) {
+  if (!tokenOk(candidate)) throw new Error('stream_lease_expired')
   try {
     if (!cdp) cdp = await cdpConnect()
+    if (!tokenOk(candidate)) throw new Error('stream_lease_expired')
+    const send = (...args) => {
+      if (!tokenOk(candidate)) throw new Error('stream_lease_expired')
+      return cdpSend(...args)
+    }
     const conn = cdp
     const sid = conn.sessionId
     // Frame pixels → viewport pixels. Clients send the frame width they
@@ -296,20 +316,20 @@ async function dispatchInput(event, retried) {
     const scale = fw > 0 && latest && latest.deviceW > 0 ? latest.deviceW / fw : 1
     if (event.kind === 'click' || event.kind === 'pointer') {
       const base = { x: Math.round(event.x * scale), y: Math.round(event.y * scale), button: 'left', clickCount: 1, pointerType: 'mouse' }
-      await cdpSend(conn, 'Input.dispatchMouseEvent', {
+      await send(conn, 'Input.dispatchMouseEvent', {
         ...base,
         type: 'mouseMoved',
         button: 'none',
         buttons: event.kind === 'pointer' && event.action !== 'down' ? 1 : 0,
       }, sid)
       if (event.kind === 'click' || event.action === 'down') {
-        await cdpSend(conn, 'Input.dispatchMouseEvent', { ...base, type: 'mousePressed', buttons: 1 }, sid)
+        await send(conn, 'Input.dispatchMouseEvent', { ...base, type: 'mousePressed', buttons: 1 }, sid)
       }
       if (event.kind === 'click' || event.action === 'up') {
-        await cdpSend(conn, 'Input.dispatchMouseEvent', { ...base, type: 'mouseReleased', buttons: 0 }, sid)
+        await send(conn, 'Input.dispatchMouseEvent', { ...base, type: 'mouseReleased', buttons: 0 }, sid)
       }
     } else if (event.kind === 'move') {
-      await cdpSend(conn, 'Input.dispatchMouseEvent', {
+      await send(conn, 'Input.dispatchMouseEvent', {
         type: 'mouseMoved',
         x: Math.round(event.x * scale),
         y: Math.round(event.y * scale),
@@ -319,16 +339,16 @@ async function dispatchInput(event, retried) {
     } else if (event.kind === 'key') {
       if (typeof event.text !== 'string' || event.text.length === 0) return
       if (event.text.length === 1) {
-        await cdpSend(conn, 'Input.insertText', { text: event.text }, sid)
+        await send(conn, 'Input.insertText', { text: event.text }, sid)
       } else if (KEYS[event.text]) {
         const def = KEYS[event.text]
-        await cdpSend(conn, 'Input.dispatchKeyEvent', { type: 'keyDown', ...def }, sid)
-        await cdpSend(conn, 'Input.dispatchKeyEvent', { type: 'keyUp', key: def.key, code: def.code, windowsVirtualKeyCode: def.windowsVirtualKeyCode }, sid)
+        await send(conn, 'Input.dispatchKeyEvent', { type: 'keyDown', ...def }, sid)
+        await send(conn, 'Input.dispatchKeyEvent', { type: 'keyUp', key: def.key, code: def.code, windowsVirtualKeyCode: def.windowsVirtualKeyCode }, sid)
       } // unknown named key → deliberate no-op
     } else if (event.kind === 'scroll') {
-      const metrics = await cdpSend(conn, 'Page.getLayoutMetrics', {}, sid)
+      const metrics = await send(conn, 'Page.getLayoutMetrics', {}, sid)
       const vp = metrics.cssVisualViewport ?? metrics.visualViewport ?? { clientWidth: 1280, clientHeight: 720 }
-      await cdpSend(conn, 'Input.dispatchMouseEvent', {
+      await send(conn, 'Input.dispatchMouseEvent', {
         type: 'mouseWheel',
         x: Math.round(vp.clientWidth / 2),
         y: Math.round(vp.clientHeight / 2),
@@ -340,19 +360,19 @@ async function dispatchInput(event, retried) {
       // Browser-chrome navigation (§5, lockstep with takeover-input.ts). goto
       // only carries http(s); ends of history make back/forward a no-op.
       if (event.action === 'reload') {
-        await cdpSend(conn, 'Page.reload', {}, sid)
+        await send(conn, 'Page.reload', {}, sid)
       } else if (event.action === 'goto') {
-        if (/^https?:\\/\\//i.test(event.url || '')) await cdpSend(conn, 'Page.navigate', { url: event.url }, sid)
+        if (/^https?:\\/\\//i.test(event.url || '')) await send(conn, 'Page.navigate', { url: event.url }, sid)
       } else {
         const delta = event.action === 'back' ? -1 : 1
-        const hist = await cdpSend(conn, 'Page.getNavigationHistory', {}, sid)
+        const hist = await send(conn, 'Page.getNavigationHistory', {}, sid)
         const target = hist.entries[hist.currentIndex + delta]
-        if (target) await cdpSend(conn, 'Page.navigateToHistoryEntry', { entryId: target.id }, sid)
+        if (target) await send(conn, 'Page.navigateToHistoryEntry', { entryId: target.id }, sid)
       }
     }
   } catch (err) {
     cdp = null // page target may have navigated/died — re-attach once
-    if (!retried) return dispatchInput(event, true)
+    if (!retried) return dispatchInput(event, true, candidate)
     throw err
   }
 }
@@ -360,8 +380,11 @@ async function dispatchInput(event, retried) {
 // WebSocket frames and HTTP requests can arrive concurrently. Serialize the
 // browser input sequence so pointer up cannot overtake pointer down or move.
 let inputQueue = Promise.resolve()
-function queueInput(event) {
-  const next = inputQueue.then(() => dispatchInput(event, false))
+function queueInput(event, candidate) {
+  const next = inputQueue.then(() => {
+    if (!tokenOk(candidate)) throw new Error('stream_lease_expired')
+    return dispatchInput(event, false, candidate)
+  })
   inputQueue = next.catch(() => {})
   return next
 }
@@ -393,6 +416,7 @@ function handleUpgrade(req, socket, head) {
     socket.destroy()
     return
   }
+  const candidate = url.searchParams.get('token')
   const key = req.headers['sec-websocket-key']
   if (!key) { socket.destroy(); return }
   const accept = crypto.createHash('sha1').update(key + '258EAFA5-E914-47DA-95CA-C5AB0DC85B11').digest('base64')
@@ -404,6 +428,7 @@ function handleUpgrade(req, socket, head) {
   const viewer = {
     stale: null,
     pushFrame(frame) {
+      if (!tokenOk(candidate)) { close(); return }
       // Latest-frame-wins under backpressure: never queue stale pixels.
       if (socket.writableLength > 512 * 1024) { this.stale = frame; return }
       socket.write(wsFrame(2, frame.buf))
@@ -412,7 +437,8 @@ function handleUpgrade(req, socket, head) {
   socket.on('drain', () => { if (viewer.stale) { const f = viewer.stale; viewer.stale = null; viewer.pushFrame(f) } })
 
   const state = { buf: head && head.length ? Buffer.from(head) : Buffer.alloc(0) }
-  const close = () => { detachViewer(viewer); try { socket.destroy() } catch {} }
+  const close = () => { clearTimeout(expiryTimer); detachViewer(viewer); try { socket.destroy() } catch {} }
+  const expiryTimer = setTimeout(close, Math.max(0, leaseExpiry(candidate) - Date.now()))
   socket.on('data', (chunk) => {
     state.buf = Buffer.concat([state.buf, chunk])
     while (true) {
@@ -441,7 +467,7 @@ function handleUpgrade(req, socket, head) {
       if (opcode === 8) { close(); return }
       if (opcode === 9) { socket.write(wsFrame(10, data)); continue }
       if (opcode === 1) {
-        try { void queueInput(JSON.parse(data.toString('utf8'))).catch(() => {}) } catch {}
+        try { void queueInput(JSON.parse(data.toString('utf8')), candidate).catch(() => {}) } catch {}
       }
     }
   })
@@ -461,6 +487,7 @@ const server = http.createServer((req, res) => {
   }
   if (!tokenOk(url.searchParams.get('token'))) { res.writeHead(403); res.end(); return }
 
+  const candidate = url.searchParams.get('token')
   if (req.method === 'GET' && url.pathname === '/frames') {
     res.writeHead(200, {
       'Content-Type': 'text/event-stream',
@@ -471,13 +498,15 @@ const server = http.createServer((req, res) => {
     const viewer = {
       stale: null,
       pushFrame(frame) {
+        if (!tokenOk(candidate)) { res.end(); return }
         if (res.writableLength > 512 * 1024) { this.stale = frame; return }
         res.write('event: frame\\ndata: {"data":"' + frame.b64 + '"}\\n\\n')
       },
     }
     res.on('drain', () => { if (viewer.stale) { const f = viewer.stale; viewer.stale = null; viewer.pushFrame(f) } })
     const ping = setInterval(() => res.write(': ping\\n\\n'), 15000)
-    req.on('close', () => { clearInterval(ping); detachViewer(viewer) })
+    const expiryTimer = setTimeout(() => res.end(), Math.max(0, leaseExpiry(candidate) - Date.now()))
+    req.on('close', () => { clearTimeout(expiryTimer); clearInterval(ping); detachViewer(viewer) })
     attachViewer(viewer)
     return
   }
@@ -487,7 +516,7 @@ const server = http.createServer((req, res) => {
     req.on('data', (c) => { body += c; if (body.length > 65536) req.destroy() })
     req.on('end', async () => {
       try {
-        await queueInput(JSON.parse(body))
+        await queueInput(JSON.parse(body), candidate)
         res.writeHead(204)
         res.end()
       } catch (err) {

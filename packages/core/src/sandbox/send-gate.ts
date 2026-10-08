@@ -27,6 +27,7 @@ export type DecideTerminalSendParams = {
   profile: BrowserProfile
   request: BlockSendRequest
   rehearsal: boolean
+  authorizeProfile?: () => Promise<boolean>
   grants?: BrowserSkillGrantStore | null
   approvals?: BlockApprovalsPort | null
   approvalWaitMs: number
@@ -46,6 +47,7 @@ function approvalPayload(
 ): BlockSendApprovalPayload {
   return {
     skillId: skill.id,
+    skillVersion: skill.version,
     skillName: skill.name,
     profileId: profile.id,
     profileName: profile.name,
@@ -68,6 +70,11 @@ export async function decideTerminalSend(
     return { decision: { approved: false, stub: true }, outcome: { kind: 'stubbed' } }
   }
 
+  const denied = () => ({ decision: { approved: false, reason: 'Browser profile access unavailable.' },
+    outcome: { kind: 'denied' as const, reason: 'profile_unavailable' } })
+  const authorized = async () => !params.authorizeProfile || await params.authorizeProfile().catch(() => false)
+  if (!(await authorized())) return denied()
+
   const ceiling = checkVerbCeiling({
     description: request.description,
     label: request.label,
@@ -89,7 +96,7 @@ export async function decideTerminalSend(
       profileId: profile.id,
     })
     if (grant) {
-      if (skill.version > 1 && Date.parse(grant.createdAt) <= Date.parse(skill.updatedAt)) {
+      if (grant.skillVersion !== skill.version || (skill.version > 1 && Date.parse(grant.createdAt) <= Date.parse(skill.updatedAt))) {
         await grants.void(grant.id, `skill updated to v${skill.version}`)
         return decideTerminalSend({ ...params, grants: null })
       }
@@ -102,6 +109,14 @@ export async function decideTerminalSend(
           grantId: grant.id,
           payload: approvalPayload(skill, profile, request, null),
         })
+        if (!(await authorized())) return denied()
+        const currentGrant = await grants.findActive({
+          workspaceId: skill.workspaceId, skillId: skill.id, profileId: profile.id,
+        }).catch(() => null)
+        if (!currentGrant || currentGrant.id !== grant.id || currentGrant.skillVersion !== skill.version) {
+          return { decision: { approved: false, reason: 'Browser approval access unavailable.' },
+            outcome: { kind: 'denied', reason: 'grant_unavailable' } }
+        }
         return {
           decision: { approved: true },
           outcome: { kind: 'auto_approved', grantId: grant.id },
@@ -129,8 +144,10 @@ export async function decideTerminalSend(
   })
   const deadline = now() + approvalWaitMs
   while (now() < deadline) {
+    if (!(await authorized())) return denied()
     const status: BlockApprovalStatus | null = await approvals.getStatus(id)
     if (status === 'approved') {
+      if (!(await authorized())) return denied()
       return { decision: { approved: true }, outcome: { kind: 'approved', approvalId: id } }
     }
     if (status && status !== 'pending') {

@@ -77,6 +77,7 @@ export type RelayToExtensionMessage = ReadyMessage | CommandMessage | PongMessag
 export const InternalCommandRequestSchema = z.object({
   userId: z.string().min(1),
   browserProfileId: z.string().min(1),
+  taskId: z.string().min(1).max(200).optional(),
   controlMode: z.enum(['task_tabs', 'full_browser']).default('task_tabs'),
   op: z.string().min(1),
   args: z.record(z.unknown()).optional(),

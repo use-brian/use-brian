@@ -1,3 +1,12 @@
+import { scopeEvidenceFromRows, workspaceFilesCtxFor, type CreateComputerToolsOptions } from '@use-brian/core'
+import { prepareBrowserDownload, type BrowserDownload } from './sandbox/download-publication.js'
+import { resolveBrowserTaskExecutionAuthority } from './sandbox/task-execution-authority.js'
+import { assertLocalTaskExecutionAuthority, createLocalTaskAdmission } from './sandbox/local-task-authority.js'
+import { createBrowserTaskDiscard } from './sandbox/task-discard.js'
+import { resolveBrowserProfileDepartmentRead, resolveHumanBrowserProfileDepartmentRead } from './sandbox/profile-authority.js'
+import { previewCrmDestination, resolveCrmDestination } from './crm-operations/creation-destination.js'
+import { getWorkspaceMembershipWithReadScopeSystem } from './db/workspace-store.js'
+import { resolveDepartmentReadGrant } from './context-scope/department-resolver.js'
 import { createTemplateImportRecovery } from './office/template-import-recovery.js'
 import { triageTaskForGoal } from './db/goal-task-triage.js'
 import { createProgrammaticEpisodeTerminal } from './ingest/programmatic-terminal.js'
@@ -317,7 +326,7 @@ import {
   getHomeApp,
   consumeHomeAppBudget,
 } from './db/home-apps-store.js'
-import { browserExtensionRoutes } from './routes/browser-extension.js'
+import { browserExtensionAuthorityRoutes, browserExtensionRoutes } from './routes/browser-extension.js'
 import { computerRoutes, createInMemoryLocalComputerTaskStore } from './routes/computer.js'
 import {
   createRelayCommandTransport,
@@ -4707,6 +4716,7 @@ export async function bootOpenApi(opts: BootOpenApiOptions): Promise<BootResult>
   const authorizeProtectedFill = async (scope: ProtectedFillScope) => {
     if (!await authorizeProtectedIdentity(scope) || !await protectedBrowserSupported(scope.userId, scope.browserProfileId)) return false
     const task = localComputerTasks.getActiveBySession(scope.sessionId)
+    if (task) { try { await assertLocalTaskExecutionAuthority(task) } catch { return false } }
     return Boolean(task && task.userId === scope.userId && task.workspaceId === scope.workspaceId &&
       task.taskId === scope.taskId && task.profileId === scope.browserProfileId && task.destinationOrigin === scope.destinationOrigin)
   }
@@ -4800,6 +4810,7 @@ export async function bootOpenApi(opts: BootOpenApiOptions): Promise<BootResult>
     ? createSandboxOrchestrator({
         provider: sandboxProvider,
         taskStore: sandboxTaskStoreImpl,
+        resolveExecutionAuthority: resolveBrowserTaskExecutionAuthority,
         meter: sandboxMeter,
         vault: ports.browserSessionVault ?? null,
         profileStore: ports.browserProfileStore ?? null,
@@ -4830,16 +4841,10 @@ export async function bootOpenApi(opts: BootOpenApiOptions): Promise<BootResult>
         // TASK's workspace, resolved above the provider seam.
         saveDownload: filesApi
           ? async (dlCtx, file) => {
-              const name = file.path.split('/').pop() || 'download'
-              await filesApi!.writeBytes(
-                { userId: dlCtx.userId, workspaceId: dlCtx.workspaceId, assistantId: null, assistantKind: 'standard' },
-                {
-                  path: `computer/downloads/${Date.now()}-${name.replace(/[^\w.-]+/g, '_')}`,
-                  bytes: file.bytes,
-                  mime: 'application/octet-stream',
-                  title: name,
-                },
-              )
+              const publication = await prepareBrowserDownload(filesApi!, dlCtx.task,
+                () => sandboxTaskStoreImpl.getActiveBySession(dlCtx.sessionId), dlCtx.authority!,
+                (expected, operation) => sandboxTaskStoreImpl.withPublication(expected, operation))
+              await publication.writeBytes({ ...file, name: file.path.split('/').pop() || 'download', mime: 'application/octet-stream' })
             }
           : undefined,
       })
@@ -4866,6 +4871,10 @@ export async function bootOpenApi(opts: BootOpenApiOptions): Promise<BootResult>
               const site = registrableSiteOf(navigation.requestedUrl)
               if (!site) return { retry: false }
               const refreshed = await browserAuthBroker.authenticate({
+                authority: browseCtx.authority,
+                executionAuthority: browseCtx.executionAuthority,
+                sourceAuthority: browseCtx.sourceAuthority,
+                inputScope: browseCtx.inputScope,
                 userId: browseCtx.userId,
                 workspaceId: browseCtx.workspaceId,
                 profileId: browseCtx.profileId,
@@ -4876,13 +4885,18 @@ export async function bootOpenApi(opts: BootOpenApiOptions): Promise<BootResult>
               // orchestrator's login-wall probe, so failure teardown cannot
               // overwrite the freshly brokered vault bundle. The cloud
               // adapter now resolves a new task and injects that bundle.
-              await sandboxOrchestrator.completeTask(browseCtx.sessionId, 'failed')
+              await sandboxOrchestrator.completeTask(browseCtx.sessionId, 'failed', browseCtx.authority)
               return {
                 retry: true,
                 afterRetry: async (currentUrl: string) => {
                   if (!looksLikeLoginWall(currentUrl)) return
+                  await browseCtx.authority?.assertCurrent()
                   await ports.browserCredentialStore?.recordResult({
+                    userId: browseCtx.userId,
+                    workspaceId: browseCtx.workspaceId,
+                    profileId: browseCtx.profileId!,
                     credentialId: refreshed.credentialId,
+                    version: refreshed.credentialVersion,
                     result: 'failure',
                     failureCode: 'login_rejected',
                   })
@@ -4933,13 +4947,51 @@ export async function bootOpenApi(opts: BootOpenApiOptions): Promise<BootResult>
   }
   const localBrowserProvider = createLocalBrowserProvider({
     transport: browserRelayTransport,
+    admit: createLocalTaskAdmission({ profiles: ports.browserProfileStore, tasks: localComputerTasks,
+      resolveHumanRead: resolveHumanBrowserProfileDepartmentRead }),
     onDestination: (ctx, origin) => {
       if (!ctx.profileId || protectedFill?.isLocked({ userId: ctx.userId, browserProfileId: ctx.profileId })) return
       localComputerTasks.touch(ctx, origin ? new URL(origin).hostname : undefined, origin)
     },
   })
+  const discardBrowserTask = createBrowserTaskDiscard({ localTasks: localComputerTasks,
+    orchestrator: sandboxOrchestrator, transport: browserRelayTransport,
+    getWorkspaceRole: (userId, workspaceId) => workspaceStore.getRole(userId, workspaceId) })
+  // One publication admission for every sandbox byte write: browser downloads and compute artifacts.
+  // `profileId: undefined` publishes from whichever profile (if any) the active cloud task holds.
+  const prepareSandboxPublication = filesApi ? (async (ctx, selection) => {
+      const current = async () => selection.backend === 'local' ? localComputerTasks.getActiveBySession(ctx.sessionId)
+        : sandboxTaskStoreImpl.getActiveBySession(ctx.sessionId)
+      const task = await current()
+      if (!task || task.userId !== ctx.userId || task.workspaceId !== ctx.workspaceId || (selection.profileId !== undefined && task.profileId !== selection.profileId)
+        || task.executionAuthority?.assistantId !== ctx.assistantId) throw new Error('Browser task is unavailable for this download.')
+      const authority = {
+        async assertCurrent() {
+          await ctx.authority?.assertCurrent()
+          if (selection.backend === 'local') {
+            const local = localComputerTasks.getActiveBySession(ctx.sessionId)
+            if (!local || local.taskId !== task.taskId) throw new Error('Browser task changed.')
+            await assertLocalTaskExecutionAuthority(local)
+          } else {
+            const cloud = await sandboxTaskStoreImpl.getActiveBySession(ctx.sessionId)
+            if (!cloud || cloud.taskId !== task.taskId || !sandboxOrchestrator) throw new Error('Browser task changed.')
+            await sandboxOrchestrator.assertTaskAuthority(cloud)
+          }
+        },
+        async execute<T>(operation: () => Promise<T>) { await this.assertCurrent(); const result = await operation(); await this.assertCurrent(); return result },
+      }
+      const publication = await prepareBrowserDownload(filesApi!, task, current, authority,
+        (expected, operation) => selection.backend === 'local'
+          ? localComputerTasks.withPublication(expected, operation) : sandboxTaskStoreImpl.withPublication(expected, operation))
+      return { taskId: publication.taskId, assertCurrent: publication.assertCurrent, async writeBytes(file: BrowserDownload) {
+        const saved = await publication.writeBytes(file)
+        ctx.scopeAccumulator?.note(scopeEvidenceFromRows([saved]))
+        return { fileId: saved.id, path: saved.path }
+      } }
+    }) satisfies NonNullable<CreateComputerToolsOptions['files']>['prepareWrite'] : null
   const computerTools = createComputerTools({
-    files: filesApi ? createBrowserFileBridge(filesApi, getAssistantClearance) : null,
+    discardTask: (ctx, sessionId) => discardBrowserTask({ userId: ctx.userId, workspaceId: ctx.workspaceId!, sessionId }),
+    files: filesApi && prepareSandboxPublication ? createBrowserFileBridge(filesApi, getAssistantClearance, prepareSandboxPublication) : null,
     protectedFill: protectedFill ? {
       blocked: (ctx, profileId) => protectedFill.isSessionLocked(ctx.userId, ctx.sessionId) ||
         Boolean(profileId && protectedFill.isLocked({ userId: ctx.userId, browserProfileId: profileId })),
@@ -4964,6 +5016,7 @@ export async function bootOpenApi(opts: BootOpenApiOptions): Promise<BootResult>
           store: ports.browserProfileStore,
           vault: ports.browserSessionVault ?? null,
           assistantClearance: (toolCtx) => getAssistantClearance(toolCtx.assistantId),
+          departmentRead: resolveBrowserProfileDepartmentRead,
         }
       : null,
     // Channel escalate-to-web (§4.8): a cloud login wall surfaces a deep link
@@ -5006,7 +5059,9 @@ export async function bootOpenApi(opts: BootOpenApiOptions): Promise<BootResult>
     onEvent: (evt, ctx) => {
       if (evt.backend === 'local' && evt.ok) {
         localComputerTasks.touch({ ...ctx, profileId: evt.profileId ?? null }, evt.host)
-        void sandboxOrchestrator?.completeTask(ctx.sessionId).catch(() => {})
+        void sandboxOrchestrator?.completeTask(
+          ctx.sessionId, 'completed', ctx.executionContext?.security.authority ?? ctx.authority,
+        ).catch(() => {})
       } else if (evt.backend === 'cloud' && evt.ok) {
         localComputerTasks.complete(ctx.sessionId)
       }
@@ -5037,6 +5092,7 @@ export async function bootOpenApi(opts: BootOpenApiOptions): Promise<BootResult>
   allTools.set('browserListTabs', computerTools.browserListTabs)
   allTools.set('browserSwitchTab', computerTools.browserSwitchTab)
   allTools.set('browserCloseTab', computerTools.browserCloseTab)
+  allTools.set('browserDiscardTask', computerTools.browserDiscardTask)
   allTools.set('browserSnapshot', computerTools.browserSnapshot)
   allTools.set('browserClick', computerTools.browserClick)
   allTools.set('browserType', computerTools.browserType)
@@ -5064,24 +5120,24 @@ export async function bootOpenApi(opts: BootOpenApiOptions): Promise<BootResult>
     binding: sandboxOrchestrator?.binding ?? null,
     files: filesApi
       ? {
+          // Loads read as the turn principal and record the file's protection before the sandbox
+          // sees it; saves publish through the sandbox task's retained input envelope.
           readBytes: async (fctx, fileIdOrPath) => {
-            const res = await filesApi!.readBytes(
-              { userId: fctx.userId, workspaceId: fctx.workspaceId, assistantId: null, assistantKind: 'standard' },
-              fileIdOrPath,
-            )
+            const res = await filesApi!.readBytes(workspaceFilesCtxFor({ ...fctx,
+              clearance: minSensitivity(fctx.clearance ?? 'confidential', await getAssistantClearance(fctx.assistantId)) }), fileIdOrPath)
             if (!res.ok) return null
+            fctx.scopeAccumulator?.note(scopeEvidenceFromRows([res.value.file]))
             return {
               bytes: new Uint8Array(res.value.bytes),
               name: res.value.file.path.split('/').pop() || res.value.file.path,
             }
           },
           writeBytes: async (fctx, params) => {
-            const res = await filesApi!.writeBytes(
-              { userId: fctx.userId, workspaceId: fctx.workspaceId, assistantId: null, assistantKind: 'standard' },
-              { path: params.path, bytes: params.bytes, mime: 'application/octet-stream', title: params.title },
-            )
-            if (!res.ok) throw new Error('Could not save the file to the workspace (quota or conflict).')
-            return { fileId: res.value.id, path: res.value.path }
+            if (!prepareSandboxPublication) throw new Error('Workspace file publication is unavailable.')
+            const publication = await prepareSandboxPublication(fctx, { backend: 'cloud', profileId: undefined })
+            const name = params.path.split('/').pop() || 'artifact'
+            return publication.writeBytes({ path: params.path, name: params.title ?? name, mime: 'application/octet-stream',
+              bytes: params.bytes, origin: 'compute-artifact' })
           },
         }
       : null,
@@ -5153,6 +5209,11 @@ export async function bootOpenApi(opts: BootOpenApiOptions): Promise<BootResult>
           store: ports.browserProfileStore,
           vault: ports.browserSessionVault ?? null,
           assistantClearance: (toolCtx) => getAssistantClearance(toolCtx.assistantId),
+          departmentRead: resolveBrowserProfileDepartmentRead,
+          // Same authority-safe list as the human department picker: only departments this person holds.
+          departmentNames: async (toolCtx) => toolCtx.workspaceId
+            ? new Map((await previewCrmDestination(toolCtx.userId, toolCtx.workspaceId).catch(() => ({ departments: [] }))).departments.map(row => [row.id, row.name] as const))
+            : new Map(),
         }
       : null,
     resolvePolicy: resolveComputerToolPolicy,
@@ -5184,6 +5245,7 @@ export async function bootOpenApi(opts: BootOpenApiOptions): Promise<BootResult>
   allTools.set('saveBrowserSkill', skillRunnerTools.saveBrowserSkill)
   allTools.set('listBrowserSkills', skillRunnerTools.listBrowserSkills)
   allTools.set('listBrowserProfiles', skillRunnerTools.listBrowserProfiles)
+  allTools.set('classifyBrowserProfileDepartment', skillRunnerTools.classifyBrowserProfileDepartment)
 
   // The watched agentic fallback (R2-1/R2-7): browser-use for novel flows,
   // cloud-only, always self-healing into a draft logic-block (R2-5).
@@ -5196,6 +5258,7 @@ export async function bootOpenApi(opts: BootOpenApiOptions): Promise<BootResult>
           store: ports.browserProfileStore,
           vault: ports.browserSessionVault ?? null,
           assistantClearance: (toolCtx) => getAssistantClearance(toolCtx.assistantId),
+          departmentRead: resolveBrowserProfileDepartmentRead,
         }
       : null,
     resolvePolicy: resolveComputerToolPolicy,
@@ -6311,6 +6374,7 @@ export async function bootOpenApi(opts: BootOpenApiOptions): Promise<BootResult>
     }))
   }
   app.use('/api/computer', requireAuth(env.JWT_SECRET), computerRoutes({
+    discardTask: discardBrowserTask,
     protectedFillEnabled: Boolean(protectedFill),
     protectedBrowserSupported,
     protectedFillBlocked: (userId, sessionId) => protectedFill?.isSessionLocked(userId, sessionId) ?? false,
@@ -6334,6 +6398,11 @@ export async function bootOpenApi(opts: BootOpenApiOptions): Promise<BootResult>
     authBroker: browserAuthBroker,
     grants: ports.browserSkillGrantStore ?? null,
     skills: browserSkillsStore,
+    getProfileReadGrant: resolveHumanBrowserProfileDepartmentRead,
+    admitProfileDestination: async (userId, workspaceId, destination) => {
+      await resolveCrmDestination(userId, workspaceId, destination)
+    },
+    previewProfileDestination: previewCrmDestination,
     getWorkspaceRole: (userId, workspaceId) => workspaceStore.getRole(userId, workspaceId),
     setSessionBackend: (sessionId, backend) => {
       if (backend !== 'local') localComputerTasks.complete(sessionId)
@@ -6341,10 +6410,17 @@ export async function bootOpenApi(opts: BootOpenApiOptions): Promise<BootResult>
     },
   }))
 
+  app.use('/api/browser-extension', browserExtensionAuthorityRoutes({
+    jwtSecret: env.JWT_SECRET,
+    workspaceStore,
+    profileStore: ports.browserProfileStore ?? null,
+    getProfileReadGrant: resolveHumanBrowserProfileDepartmentRead,
+  }))
   app.use('/api/browser-extension', requireAuth(env.JWT_SECRET), browserExtensionRoutes({
     jwtSecret: env.JWT_SECRET,
     workspaceStore,
     profileStore: ports.browserProfileStore ?? null,
+    getProfileReadGrant: resolveHumanBrowserProfileDepartmentRead,
     relayWsUrl: browserRelayWsUrl,
     extensionStatus:
       browserRelayUrl && env.BROWSER_RELAY_SECRET

@@ -1,3 +1,6 @@
+import { pinToolAuthoringAuthority } from '../security/tool-authority.js'
+import { browserInputScope } from './input-scope.js'
+import type { DepartmentReadGrant } from '../security/department-read.js'
 import { createHash } from 'node:crypto'
 import { extractPdfText } from '../files/pdf-text.js'
 import { browserFileName, BrowserDownloadsSchema, validateDownloadChunk, decodeBrowserData, MAX_BROWSER_UPLOAD, BROWSER_DOWNLOAD_CHUNK } from './browser-files.js'
@@ -152,13 +155,19 @@ export type ComputerToolProfiles = {
   store: BrowserProfileStore
   vault?: SessionVault | null
   assistantClearance: (context: ToolContext) => Promise<Sensitivity>
+  departmentRead?: (context: ToolContext) => Promise<DepartmentReadGrant | undefined>
 }
 
 export type CreateComputerToolsOptions = {
   /** Full authority is forwarded unchanged. Implementations must use the workspace FilesApi, never local paths. */
   files?: {
     readBytes(context: ToolContext, fileId: string): Promise<{ bytes: Uint8Array; name: string }>
-    writeBytes(context: ToolContext, file: { path: string; name: string; mime: string; bytes: Uint8Array }): Promise<{ fileId: string; path: string }>
+    /** `profileId: undefined` publishes from the active task's own profile, if any (compute artifacts). */
+    prepareWrite(context: ToolContext, selection: { backend: BrowserBackendKind; profileId: string | null | undefined }): Promise<{
+      taskId: string
+      assertCurrent(): Promise<void>
+      writeBytes(file: { path: string; name: string; mime: string; bytes: Uint8Array }): Promise<{ fileId: string; path: string }>
+    }>
   } | null
   protectedFill?: {
     scope: (context: ToolContext, profileId: string, origin: string) => Promise<ProtectedFillScope | null>
@@ -172,6 +181,8 @@ export type CreateComputerToolsOptions = {
   profiles?: ComputerToolProfiles | null
   /** L1/L2 allow/ask/block resolution (mcp_tool_settings, serverName='computer'). */
   resolvePolicy?: ResolveComputerToolPolicy
+  /** Trusted host owner/membership admission; does not grant browser READ. */
+  discardTask?: (context: ToolContext, sessionId: string) => Promise<'discarded' | 'not_active'>
   onEvent?: (event: ComputerToolEvent, context: ToolContext) => void
   /**
    * Barrier 2 (§4.9): the unattended acting path. Defaults to () => false —
@@ -248,6 +259,7 @@ const MAX_TRACKED_SESSIONS = 500
 const SNAPSHOT_MAX_LINES = 150
 
 export type ComputerTools = {
+  browserDiscardTask: Tool
   browserDownloads: Tool
   browserReadDownload: Tool
   browserUploadFile: Tool
@@ -322,6 +334,9 @@ export function createComputerTools(opts: CreateComputerToolsOptions): ComputerT
 
   function callCtx(context: ToolContext, state?: SessionBrowseState): BrowserCallContext {
     return {
+      ...(context.scopeAccumulator ? { inputScope: browserInputScope(context.scopeAccumulator.evidence, context.workspaceId ?? '') } : {}),
+      authority: context.executionContext?.security.authority ?? context.authority,
+      ...(context.executionContext ? { executionAuthority: pinToolAuthoringAuthority(context), sourceAuthority: context.executionContext.security.authority.snapshotSource?.() } : {}),
       userId: context.userId,
       workspaceId: context.workspaceId ?? '',
       sessionId: context.sessionId,
@@ -400,7 +415,7 @@ export function createComputerTools(opts: CreateComputerToolsOptions): ComputerT
     return null
   }
 
-  async function policyBlockGate(toolName: string, context: ToolContext): Promise<ToolResult | null> {
+  async function policyBlockGate(toolName: string, context: ToolContext, failClosed = false): Promise<ToolResult | null> {
     if (!opts.resolvePolicy) return null
     try {
       const policy = await opts.resolvePolicy(toolName, {
@@ -414,6 +429,7 @@ export function createComputerTools(opts: CreateComputerToolsOptions): ComputerT
         }
       }
     } catch {
+      if (failClosed) return { data: 'ERROR: Browser tool policy could not be verified.', isError: true }
       return null // policy outage must not take the tools down (files precedent)
     }
     return null
@@ -481,6 +497,18 @@ export function createComputerTools(opts: CreateComputerToolsOptions): ComputerT
     const state = sessionState(context)
     if (opts.protectedFill?.blocked(context, state.profileId)) return {
       error: { data: 'Protected fill requires human completion in the browser extension.', isError: true },
+    }
+    if (state.profileId) {
+      try {
+        const profile = await opts.profiles?.store.get(state.profileId)
+        if (!profile || !opts.profiles || !canUseProfile(profile, {
+          userId: context.userId, workspaceId: context.workspaceId ?? '', assistantId: context.assistantId,
+          assistantClearance: await opts.profiles.assistantClearance(context),
+          departmentRead: await opts.profiles.departmentRead?.(context),
+        }).ok) return { error: { data: 'Browser profile access unavailable. Check current department access.', isError: true } }
+      } catch {
+        return { error: { data: 'Browser profile access unavailable. Check current department access.', isError: true } }
+      }
     }
     return { state }
   }
@@ -704,6 +732,7 @@ export function createComputerTools(opts: CreateComputerToolsOptions): ComputerT
             workspaceId: context.workspaceId ?? '',
             assistantId: context.assistantId,
             assistantClearance: actorClearance,
+            departmentRead: await opts.profiles.departmentRead?.(context),
           },
           site: registrableSiteOf(input.url),
           profileName: input.profile ?? gate.state.profileName,
@@ -964,6 +993,28 @@ export function createComputerTools(opts: CreateComputerToolsOptions): ComputerT
     },
   })
 
+  const browserDiscardTask = buildTool({
+    name: 'browserDiscardTask', requiresCapability: 'computer',
+    description: 'Stop and discard your browser task without saving its session or downloads, even if its original access was revoked. Defaults to this chat. Cannot undo website actions already sent. Always requires confirmation.',
+    inputSchema: z.object({ sessionId: z.string().min(1).max(200).optional() }).strict(),
+    isReadOnly: false, isConcurrencySafe: false, requiresConfirmation: true,
+    resolveConfirmation: async () => true,
+    describeConfirmation: async () => ['Stop and discard this browser task?', 'Unsaved browser sessions and downloads will not be saved. Actions already sent to websites cannot be undone.'],
+    timeoutMs: 120_000, maxResultSizeChars: 1_000,
+    async execute(input, context) {
+      const unavailable = { data: 'ERROR: Browser discard could not be confirmed. Check the browser before retrying.', isError: true }
+      if (isAutonomousToolContext(context) || !context.workspaceId || !opts.discardTask) return unavailable
+      const blocked = await policyBlockGate('browserDiscardTask', context, true)
+      if (blocked) return blocked
+      try {
+        const authority = context.executionContext?.security.authority ?? context.authority
+        const discard = () => opts.discardTask!(context, input.sessionId ?? context.sessionId)
+        const status = await (authority ? authority.execute(discard) : discard())
+        return { data: status === 'discarded' ? 'Browser task stopped and discarded. No session or downloads were saved.' : 'No active task available to discard.' }
+      } catch { return unavailable }
+    },
+  })
+
   const browserCloseTab = buildTool({
     name: 'browserCloseTab',
     requiresCapability: 'computer',
@@ -1188,6 +1239,7 @@ export function createComputerTools(opts: CreateComputerToolsOptions): ComputerT
         if (!profile || profile.workspaceId !== context.workspaceId || !opts.profiles || !canUseProfile(profile, {
           userId: context.userId, workspaceId: context.workspaceId ?? '', assistantId: context.assistantId,
           assistantClearance: await opts.profiles.assistantClearance(context),
+          departmentRead: await opts.profiles.departmentRead?.(context),
         }).ok) return { data: 'Protected fill unavailable', isError: true }
         const scope = await opts.protectedFill.scope(context, state.profileId, input.destinationOrigin)
         if (!scope || scope.userId !== context.userId || scope.workspaceId !== context.workspaceId ||
@@ -1201,7 +1253,7 @@ export function createComputerTools(opts: CreateComputerToolsOptions): ComputerT
         state.observations.reset()
         state.refLabels.clear()
         state.lastTyped = null
-        await opts.local.fillReference(scope, items)
+        await opts.local.fillReference(scope, items, callCtx(context, gate.state).authority)
         return { data: 'Protected fields filled. The user must finish in the browser and complete cleanup in the extension. Browser observations and actions are blocked.' }
       } catch { return { data: 'Protected fill unavailable. Complete cleanup in the browser extension before continuing.', isError: true } }
     },
@@ -1218,6 +1270,7 @@ export function createComputerTools(opts: CreateComputerToolsOptions): ComputerT
       if (!profile || profile.workspaceId !== context.workspaceId || !canUseProfile(profile, {
         userId: context.userId, workspaceId: context.workspaceId ?? '', assistantId: context.assistantId,
         assistantClearance: minSensitivity(context.clearance ?? 'confidential', await opts.profiles.assistantClearance(context)),
+        departmentRead: await opts.profiles.departmentRead?.(context),
       }).ok) return { error: { data: 'ERROR: Browser profile authorization required. Navigate with an authorized profile first.', isError: true } }
     }
     const fused = backendFuseGate(state, state.backend)
@@ -1244,27 +1297,30 @@ export function createComputerTools(opts: CreateComputerToolsOptions): ComputerT
 
   const browserReadDownload = buildTool({
     name: 'browserReadDownload', requiresCapability: 'computer',
-    description: 'Always requires explicit interactive approval to share: saves a completed browser download (max 32 MiB) to durable workspace files under workspace permissions, potentially broader than a private browser profile. Read PDF text layers or UTF-8 text in 12000-character pages using offset (text characters, NOT byte offset). Scanned PDFs need OCR; other binary formats return a file ID without fabricated text.',
+    description: 'Requires interactive approval to save a completed browser download (max 32 MiB) to durable files, preserving the originating task, private ownership and department protection. Read PDF text layers or UTF-8 text in 12000-character pages using offset (text characters, NOT byte offset). Scanned PDFs need OCR; other binary formats return a file ID without fabricated text.',
     inputSchema: z.object({ id: z.string().min(1).max(512), offset: z.number().int().min(0).default(0) }),
     isReadOnly: false, isConcurrencySafe: false, requiresConfirmation: true,
     resolveConfirmation: async () => true,
     describeConfirmation: async () => [
       'Save this browser download to workspace files and read its contents?',
-      'The saved file uses workspace permissions, which may allow more people to access it than the private browser profile. Workspace files do not preserve owner-only browser profile access.',
-      'Approve only if you agree to share this download under workspace permissions. The saved file remains after the browser session stops.',
+      'The saved file retains private ownership and department protection from this browser task and its sources.',
+      'The saved file remains after the browser session stops. Saving does not grant broader access.',
     ],
     timeoutMs: 120_000, maxResultSizeChars: 16_000,
     async execute(input, context) {
       try {
         const gate = await transferGate('browserReadDownload', context)
         if ('error' in gate) return gate.error!
-        if (isAutonomousToolContext(context)) throw new Error('Saving a browser download requires explicit interactive approval to share it under workspace permissions.')
+        if (isAutonomousToolContext(context)) throw new Error('Saving a browser download requires explicit interactive approval.')
         if (context.abortSignal.aborted) throw new Error('Download cancelled.')
         const provider = providerFor(gate.state.backend)
         if (!provider.listDownloads || !provider.readDownload) throw new Error('Reading browser downloads is unsupported by this browser.')
         if (!context.workspaceId || !opts.files) throw new Error('Workspace file storage is unavailable.')
-        const ctx = callCtx(context, gate.state)
+        const publication = await opts.files.prepareWrite(context, { backend: gate.state.backend, profileId: gate.state.profileId })
+        const ctx = { ...callCtx(context, gate.state), taskId: publication.taskId }
+        await publication.assertCurrent()
         const inventory = await provider.listDownloads(ctx)
+        await publication.assertCurrent()
         if (context.abortSignal.aborted) throw new Error('Download cancelled.')
         const file = BrowserDownloadsSchema.parse(inventory).downloads.find(d => d.id === input.id)
         if (!file || file.state !== 'completed') throw new Error('Download is unavailable or not completed.')
@@ -1273,7 +1329,9 @@ export function createComputerTools(opts: CreateComputerToolsOptions): ComputerT
         do {
           if (context.abortSignal.aborted) throw new Error('Download cancelled.')
           if (chunks.length >= 1024) throw new Error('Too many download chunks.')
+          await publication.assertCurrent()
           const result = await provider.readDownload(ctx, input.id, offset)
+          await publication.assertCurrent()
           if (context.abortSignal.aborted) throw new Error('Download cancelled.')
           const chunk = validateDownloadChunk(result, offset)
           if (chunk.total !== file.size) throw new Error('Download size changed during transfer.')
@@ -1286,7 +1344,8 @@ export function createComputerTools(opts: CreateComputerToolsOptions): ComputerT
         const key = createHash('sha256').update(JSON.stringify([context.userId, context.workspaceId, context.assistantId,
           context.sessionId, gate.state.profileId, input.id])).update(bytes).digest('hex')
         if (context.abortSignal.aborted) throw new Error('Download cancelled.')
-        const saved = await opts.files.writeBytes(context, { path: `/browser-downloads/${key}/${name}`, name, mime: file.mime || 'application/octet-stream', bytes })
+        const persist = () => publication.writeBytes({ path: `/browser-downloads/${key}/${name}`, name, mime: file.mime || 'application/octet-stream', bytes })
+        const saved = await (ctx.authority ? ctx.authority.execute(persist) : persist())
         if (context.abortSignal.aborted) throw new Error('Download cancelled after persistence; the workspace file may already have been saved.')
         let text = ''
         let note = 'Binary file saved; no text extraction is available for this format.'
@@ -1591,6 +1650,9 @@ export function createComputerTools(opts: CreateComputerToolsOptions): ComputerT
       // Identity-less on purpose: no profile resolution, no profileId in the
       // call context — a worker read never initiates a vault injection.
       const ctx: BrowserCallContext = {
+        authority: context.executionContext?.security.authority ?? context.authority,
+        ...(context.scopeAccumulator ? { inputScope: browserInputScope(context.scopeAccumulator.evidence, context.workspaceId ?? '') } : {}),
+        ...(context.executionContext ? { executionAuthority: pinToolAuthoringAuthority(context), sourceAuthority: context.executionContext.security.authority.snapshotSource?.() } : {}),
         userId: context.userId,
         workspaceId: context.workspaceId ?? '',
         sessionId: context.sessionId,
@@ -1664,6 +1726,7 @@ export function createComputerTools(opts: CreateComputerToolsOptions): ComputerT
   })
 
   return {
+    browserDiscardTask,
     browserFillReference,
     browserNavigate,
     browserOpenTab,

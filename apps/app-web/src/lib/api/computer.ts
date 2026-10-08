@@ -1,5 +1,6 @@
-import { markSurfaceCacheStale } from "@/lib/surface-cache";
+import { invalidateSurfaceCache, markSurfaceCacheStale, SurfaceCacheEvictionError } from "@/lib/surface-cache";
 import { publicRuntimeConfig } from "@/lib/runtime-public-config";
+import { browserProfilesCacheKey, browserProfileDestinationsCacheKey } from "@/lib/surface-prefetch";
 /**
  * SDK for the computer-use web surface (app-web).
  *
@@ -110,6 +111,7 @@ export type BrowserCredentialMetadata = {
 };
 
 export type BrowserProfile = {
+  departmentId?: string | null;
   id: string;
   workspaceId: string;
   ownerUserId: string;
@@ -200,6 +202,7 @@ export async function sendComputerInput(sessionId: string, event: TakeoverInput)
 }
 
 export type TakeoverStreamSession = {
+  expiresAt?: number;
   framesUrl: string;
   inputUrl: string;
   /** Duplex WebSocket (binary frames down, JSON input up). Absent from older backends. */
@@ -287,6 +290,17 @@ export async function completeComputerTask(
   return res.ok;
 }
 
+export async function discardComputerTask(sessionId: string, workspaceId: string): Promise<boolean> {
+  const res = await authFetch(`${API_URL}/api/computer/tasks/${encodeURIComponent(sessionId)}/discard`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ workspaceId }),
+  });
+  if (!res.ok) return false;
+  const body = await res.json();
+  return body?.ok === true && (body.status === "discarded" || body.status === "not_active");
+}
+
 /** The live backend toggle (R2-3): null clears back to the profile default. */
 export async function setComputerSessionBackend(
   sessionId: string,
@@ -324,8 +338,41 @@ export async function listBrowserProfiles(
   return { ...body, credentialAuthConfigured: body.credentialAuthConfigured === true };
 }
 
+export async function fetchBrowserProfileDestinations(workspaceId: string): Promise<{
+  departments: { id: string; name: string; clearance: BrowserProfileClearance }[];
+}> {
+  try {
+    const res = await authFetch(`${API_URL}/api/computer/profile-destinations?workspaceId=${encodeURIComponent(workspaceId)}`);
+    if (!res.ok) throw new Error("Profile destination unavailable");
+    return await res.json();
+  } catch (error) { throw new SurfaceCacheEvictionError(error); }
+}
+
+export async function classifyBrowserProfileDepartment(profileId: string, workspaceId: string, params: {
+  departmentId: string | null;
+  expectedDepartmentId: string | null;
+  reason: string;
+  confirmed: true;
+}): Promise<"saved" | "changed" | "admin_required" | "unavailable"> {
+  try {
+    const res = await authFetch(`${API_URL}/api/computer/profiles/${encodeURIComponent(profileId)}/department`, {
+      method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(params),
+    });
+    if (res.ok) return "saved";
+    const body = await res.json().catch(() => ({})) as { code?: string };
+    if (res.status === 409) return "changed";
+    if (body.code === "admin_confirmation_required") return "admin_required";
+    return "unavailable";
+  } catch { return "unavailable"; }
+  finally {
+    invalidateSurfaceCache(browserProfilesCacheKey(workspaceId));
+    invalidateSurfaceCache(browserProfileDestinationsCacheKey(workspaceId));
+  }
+}
+
 export async function createBrowserProfile(params: {
   workspaceId: string;
+  departmentId?: string | null;
   name: string;
   scope?: BrowserProfileScope;
   clearance?: BrowserProfileClearance;

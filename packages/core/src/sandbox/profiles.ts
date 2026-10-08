@@ -3,16 +3,17 @@
  * first-class, clearance-carrying browsing identity — ONE cookie jar, logged
  * into many sites, one account per site (two same-site accounts = two
  * profiles, forced by cookie semantics). Profiles ride the SAME sensitivity
- * ladder as teamspaces/KB/pages; the TOP rung (`confidential`) is owner-only.
- * An assistant may browse as a profile only when it is explicitly enabled for
- * it AND its clearance covers the profile's rung.
+ * ladder as other protected resources. Explicit assistant enablement and
+ * personal ownership remain independent of the department/tier floor.
  *
  * The store is a port: production backs it with `browser_profiles` (open
  * migration 438); tests may use the in-memory impl. Profile
- * EXISTENCE is always workspace-visible (governance); only session
- * decryption is clearance-gated (the vault + RLS enforce that side).
+ * names and use share the department floor when a department is bound.
+ * Human projections and vault access must enforce the same current authority.
  */
+import { z } from 'zod'
 import { canRead, type Sensitivity } from '../security/sensitivity.js'
+import type { DepartmentReadGrant } from '../security/department-read.js'
 import type { SessionVault } from './types.js'
 
 export type BrowserBackendKind = 'local' | 'cloud'
@@ -35,6 +36,8 @@ export type BrowserProfile = {
   name: string
   /** Private to the owner, or offered to the workspace at `clearance`. */
   scope: BrowserProfileScope
+  /** One owning department; null is an unassigned legacy or personal profile. */
+  departmentId?: string | null
   /** The rung a WORKSPACE turn must cover. Ignored while `scope` is 'owner'. */
   clearance: Sensitivity
   /** Assistants explicitly enabled for this identity (R2-4). */
@@ -51,11 +54,23 @@ export type BrowserProfile = {
   updatedAt: string
 }
 
+/** Minimal immutable source floor retained by cloud tasks; never includes secrets or names. */
+export const BrowserProfileAuthoritySchema = z.object({
+  id: z.string().min(1),
+  workspaceId: z.string().min(1),
+  ownerUserId: z.string().min(1),
+  departmentId: z.string().min(1).nullable().optional(),
+  scope: z.enum(['owner', 'workspace']),
+  clearance: z.enum(['public', 'internal', 'confidential']),
+})
+export type BrowserProfileAuthority = z.infer<typeof BrowserProfileAuthoritySchema>
+
 export type CreateBrowserProfileParams = {
   workspaceId: string
   ownerUserId: string
   name: string
   scope?: BrowserProfileScope
+  departmentId?: string | null
   clearance?: Sensitivity
   defaultBackend?: BrowserBackendKind
   localControlMode?: LocalBrowserControlMode
@@ -69,6 +84,7 @@ export type UpdateBrowserProfileParams = Partial<
     BrowserProfile,
     | 'name'
     | 'scope'
+    | 'departmentId'
     | 'clearance'
     | 'defaultBackend'
     | 'localControlMode'
@@ -79,12 +95,21 @@ export type UpdateBrowserProfileParams = Partial<
 >
 
 export interface BrowserProfileStore {
+  /** Explicit audited department assignment/transfer; never a metadata PATCH. */
+  classifyDepartment?(id: string, input: {
+    userId: string; departmentId: string | null; reason: string; confirmed: boolean; expected: BrowserProfile;
+    /** Trusted execution ceiling, never model or HTTP request input. */
+    agentRead?: DepartmentReadGrant;
+  }): Promise<BrowserProfile>
+
   get(id: string): Promise<BrowserProfile | null>
   getByName(params: { workspaceId: string; name: string }): Promise<BrowserProfile | null>
   list(params: { workspaceId: string }): Promise<BrowserProfile[]>
-  create(params: CreateBrowserProfileParams): Promise<BrowserProfile>
-  update(id: string, patch: UpdateBrowserProfileParams): Promise<BrowserProfile | null>
-  delete(id: string): Promise<void>
+  create(params: CreateBrowserProfileParams, actor?: { userId: string }): Promise<BrowserProfile>
+  update(id: string, patch: UpdateBrowserProfileParams, expected?: Pick<BrowserProfile,
+    'workspaceId' | 'ownerUserId' | 'departmentId' | 'scope' | 'clearance'>): Promise<BrowserProfile | null>
+  delete(id: string, expected?: Pick<BrowserProfile,
+    'workspaceId' | 'ownerUserId' | 'departmentId' | 'scope' | 'clearance'>): Promise<boolean>
 }
 
 /** The identity a profile-gated call executes under (from ToolContext, never model input). */
@@ -94,9 +119,26 @@ export type ProfileActor = {
   assistantId: string
   /** The acting assistant's clearance (boot resolves it from the assistant row). */
   assistantClearance: Sensitivity
+  /** Current canonical human-plus-assistant authority, never model input. */
+  departmentRead?: DepartmentReadGrant
 }
 
-export type ProfileDenialReason = 'not_enabled' | 'not_owner' | 'clearance'
+export type ProfileDenialReason = 'not_enabled' | 'not_owner' | 'clearance' | 'department'
+
+/** Resource adapter for the canonical resolved department grant. */
+function profileDepartmentAllowed(profile: BrowserProfile, actor: ProfileActor): boolean {
+  if (profile.workspaceId !== actor.workspaceId) return false
+  const grant = actor.departmentRead
+  if (grant && (grant.workspaceId !== actor.workspaceId || grant.userId !== actor.userId
+    || grant.assistantId !== actor.assistantId)) return false
+  if (!profile.departmentId) return !(grant && profile.scope === 'workspace')
+  if (!grant) return false
+  const department = profile.departmentId
+  const ceiling = grant.departments[department]
+  return Boolean(ceiling && canRead(ceiling, profile.clearance)
+    && (grant.contextDepartment === null || grant.contextDepartment === department)
+    && (grant.binding === null || grant.binding.includes(department)))
+}
 
 /**
  * The profile gate (R2-4, migration 451): explicit enablement, then ONE of two
@@ -113,13 +155,14 @@ export function canUseProfile(
   profile: BrowserProfile,
   actor: ProfileActor,
 ): { ok: true } | { ok: false; reason: ProfileDenialReason } {
+  if (!profileDepartmentAllowed(profile, actor)) return { ok: false, reason: 'department' }
   if (!profile.enabledAssistantIds.includes(actor.assistantId)) {
     return { ok: false, reason: 'not_enabled' }
   }
   if (profile.scope === 'owner') {
     return profile.ownerUserId === actor.userId ? { ok: true } : { ok: false, reason: 'not_owner' }
   }
-  if (!canRead(actor.assistantClearance, profile.clearance)) {
+  if (!profile.departmentId && !canRead(actor.assistantClearance, profile.clearance)) {
     return { ok: false, reason: 'clearance' }
   }
   return { ok: true }
@@ -132,9 +175,10 @@ export function canUseProfile(
  * all can still report `not_enabled`.
  */
 export function profileIsNameableTo(profile: BrowserProfile, actor: ProfileActor): boolean {
+  if (!profileDepartmentAllowed(profile, actor)) return false
   return profile.scope === 'owner'
     ? profile.ownerUserId === actor.userId
-    : canRead(actor.assistantClearance, profile.clearance)
+    : Boolean(profile.departmentId) || canRead(actor.assistantClearance, profile.clearance)
 }
 
 /** The acting assistant's note only; whitespace-only guidance is absent. */
@@ -271,6 +315,7 @@ export function blockedProfilesFor(
  * otherwise report the SHAPE of the obstacle and nothing that identifies it.
  */
 export function describeProfileDenial(blocked: BlockedProfile, actorClearance: Sensitivity): string {
+  if (blocked.reason === 'department') return 'No browser profile is available under the current department authority. Ask an authorized department owner to check the human and assistant memberships, then retry.'
   if (!blocked.nameable) {
     return blocked.reason === 'not_owner'
       ? 'A browser profile in this workspace is private to another member, so this assistant can neither see nor use it and its name is withheld. Its owner would have to share it with the workspace under Browsers > Browser profiles > Advanced settings.'
@@ -321,6 +366,8 @@ export function describeProfileResolution(
       // Reached only when the model NAMED a profile, so echoing the name back
       // discloses nothing it did not already supply.
       switch (res.reason) {
+        case 'department':
+          return 'The requested browser profile is unavailable under the current department authority. Ask an authorized department owner to check the human and assistant memberships, then retry.'
         case 'not_enabled':
           return `This assistant is not enabled for the browser profile "${res.profile.name}". Its owner can make it available under Assistant > Tools > Browser identities.`
         case 'clearance':
@@ -412,7 +459,10 @@ export function createInMemoryBrowserProfileStore(): BrowserProfileStore & {
     async list({ workspaceId }) {
       return [...profiles.values()].filter((p) => p.workspaceId === workspaceId)
     },
-    async create(params) {
+    async create(params, actor) {
+      if (actor && actor.userId !== params.ownerUserId) {
+        throw Object.assign(new Error('Profile authority unavailable'), { code: 'profile_authority_denied' })
+      }
       const now = new Date().toISOString()
       const profile: BrowserProfile = {
         id: `profile-${++counter}`,
@@ -420,6 +470,7 @@ export function createInMemoryBrowserProfileStore(): BrowserProfileStore & {
         ownerUserId: params.ownerUserId,
         name: params.name,
         scope: params.scope ?? 'owner',
+        departmentId: params.departmentId ?? null,
         clearance: params.clearance ?? 'confidential',
         enabledAssistantIds: params.enabledAssistantIds ?? [],
         assistantRoutingNotes: params.assistantRoutingNotes ?? {},
@@ -432,12 +483,17 @@ export function createInMemoryBrowserProfileStore(): BrowserProfileStore & {
       profiles.set(profile.id, profile)
       return profile
     },
-    async update(id, patch) {
+    async update(id, patch, expected) {
       const existing = profiles.get(id)
       if (!existing) return null
+      if (expected && (existing.workspaceId !== expected.workspaceId
+        || existing.ownerUserId !== expected.ownerUserId
+        || (existing.departmentId ?? null) !== (expected.departmentId ?? null)
+        || existing.scope !== expected.scope || existing.clearance !== expected.clearance)) return null
       const next: BrowserProfile = {
         ...existing,
         ...('name' in patch && patch.name !== undefined ? { name: patch.name } : {}),
+        ...('departmentId' in patch && patch.departmentId !== undefined ? { departmentId: patch.departmentId } : {}),
         ...('scope' in patch && patch.scope !== undefined ? { scope: patch.scope } : {}),
         ...('clearance' in patch && patch.clearance !== undefined ? { clearance: patch.clearance } : {}),
         ...('defaultBackend' in patch && patch.defaultBackend !== undefined
@@ -458,8 +514,14 @@ export function createInMemoryBrowserProfileStore(): BrowserProfileStore & {
       profiles.set(id, next)
       return next
     },
-    async delete(id) {
-      profiles.delete(id)
+    async delete(id, expected) {
+      const existing = profiles.get(id)
+      if (!existing) return false
+      if (expected && (existing.workspaceId !== expected.workspaceId
+        || existing.ownerUserId !== expected.ownerUserId
+        || (existing.departmentId ?? null) !== (expected.departmentId ?? null)
+        || existing.scope !== expected.scope || existing.clearance !== expected.clearance)) return false
+      return profiles.delete(id)
     },
   }
 }

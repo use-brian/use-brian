@@ -3,6 +3,7 @@
  * Spec: docs/architecture/engine/computer-use.md.
  */
 export * from './types.js'
+export * from './input-scope.js'
 export * from './profiles.js'
 export * from './browser-credentials.js'
 export * from './browser-auth-broker.js'
@@ -105,3 +106,5 @@ export {
 } from './tools.js'
 
 export { createProtectedFillService, ProtectedFillDenied, PROTECTED_FILL_ERROR, isProtectedFillOrigin, type ProtectedFillScope, type ProtectedFillSource, type ProtectedFillItem, type ProtectedFillService } from './protected-fill.js'
+
+export { browserTaskPublicationSnapshot, assertBrowserTaskPublication, browserPublicationBusy, type BrowserTaskPublication } from './task-publication.js'

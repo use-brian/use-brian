@@ -1,3 +1,5 @@
+import { browserInputScope } from './input-scope.js'
+import { pinToolAuthoringAuthority } from '../security/tool-authority.js'
 /**
  * Isolated compute + file-bridge tools (spec §3, §5; plan §4.7, §4.12):
  *
@@ -27,14 +29,20 @@ export type ComputeToolEvent = {
   detail?: number
 }
 
-/** Workspace-scoped byte I/O — boot backs this with FilesApi (RLS inside). */
+/**
+ * Workspace-scoped byte I/O — boot backs this with FilesApi (RLS inside).
+ * The full tool context is forwarded: a load reads as the turn's principal
+ * (human plus acting-assistant ceiling) and records the file's protection in
+ * the turn before the sandbox sees it; a save publishes with the sandbox task's
+ * retained input envelope, never as the bare human identity.
+ */
 export type SandboxFilesPort = {
   readBytes(
-    ctx: { userId: string; workspaceId: string },
+    ctx: ToolContext & { workspaceId: string },
     fileIdOrPath: string,
   ): Promise<{ bytes: Uint8Array; name: string } | null>
   writeBytes(
-    ctx: { userId: string; workspaceId: string },
+    ctx: ToolContext & { workspaceId: string },
     params: { path: string; bytes: Uint8Array; title?: string },
   ): Promise<{ fileId: string; path: string }>
 }
@@ -132,6 +140,9 @@ export function createComputeTools(opts: CreateComputeToolsOptions): {
       throw new Error('The cloud sandbox is not configured on this deployment, so Python and the file bridge are unavailable.')
     }
     return opts.binding.resolve({
+      authority: context.executionContext?.security.authority ?? context.authority,
+      ...(context.executionContext ? { executionAuthority: pinToolAuthoringAuthority(context), sourceAuthority: context.executionContext.security.authority.snapshotSource?.() } : {}),
+      ...(context.scopeAccumulator ? { inputScope: browserInputScope(context.scopeAccumulator.evidence, context.workspaceId ?? '') } : {}),
       userId: context.userId,
       workspaceId: context.workspaceId ?? '',
       sessionId: context.sessionId,
@@ -220,10 +231,7 @@ export function createComputeTools(opts: CreateComputeToolsOptions): {
       try {
         // Workspace scoping (§4.12): identity comes from the ToolContext
         // ONLY — there is no workspace parameter for the model to supply.
-        const file = await opts.files.readBytes(
-          { userId: context.userId, workspaceId: context.workspaceId as string },
-          input.file,
-        )
+        const file = await opts.files.readBytes({ ...context, workspaceId: context.workspaceId as string }, input.file)
         if (!file) {
           return { data: `ERROR: No workspace file matches "${input.file}".`, isError: true }
         }
@@ -280,7 +288,7 @@ export function createComputeTools(opts: CreateComputeToolsOptions): {
         }
         const name = input.path.split('/').pop() || 'artifact'
         const saved = await opts.files.writeBytes(
-          { userId: context.userId, workspaceId: context.workspaceId as string },
+          { ...context, workspaceId: context.workspaceId as string },
           {
             path: `computer/artifacts/${Date.now()}-${name.replace(/[^\w.-]+/g, '_')}`,
             bytes,

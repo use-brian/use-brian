@@ -60,6 +60,35 @@ describe('protected fill relay boundary', () => {
     expect((await transport.send({ userId: 'u', browserProfileId: 'p', op: 'browserFillReference' })).ok).toBe(false)
     expect(fetcher).not.toHaveBeenCalled()
   })
+
+  it('acknowledges safety Stop while the protected-fill lock still blocks observations', async () => {
+    const { send, issue, service } = setup(async () => response({ ok: true, data: { stopped: true } }))
+    const args = await argsFor(issue)
+    await service.reserve(scope, args.items)
+    expect(await send('stop')).toEqual({ ok: true, data: { stopped: true } })
+    expect(service.isLocked(scope)).toBe(true)
+    expect(await send('snapshot')).toMatchObject({ ok: false, code: 'protected_fill_denied' })
+  })
+
+  it.each([
+    { ok: true, data: { stopped: true, page: 'SECRET_SENTINEL' } },
+    { ok: true, data: { stopped: false } },
+    { ok: true },
+    { ok: false, error: 'SECRET_SENTINEL', code: 'SECRET_SENTINEL' },
+    null,
+  ])('refuses malformed Stop acknowledgements without releasing content: %j', async payload => {
+    const { send } = setup(async () => response(payload))
+    expect(await send('stop')).toEqual({ ok: false, error: 'Browser Stop could not be confirmed.', code: 'backend_error' })
+  })
+
+  it('does not require profile policy lookup or expose fetch failures for safety Stop', async () => {
+    const resolveLocalControlMode = vi.fn(async () => { throw new Error('SECRET_SENTINEL') })
+    const transport = createRelayCommandTransport({ relayUrl: 'https://relay.example', relaySecret: 'secret', resolveLocalControlMode,
+      fetchImpl: async () => { throw new Error('SECRET_SENTINEL') } })
+    expect(await transport.send({ userId: 'u', browserProfileId: 'p', taskId: 't', op: 'stop' }))
+      .toEqual({ ok: false, error: 'Browser Stop could not be confirmed.', code: 'backend_error' })
+    expect(resolveLocalControlMode).not.toHaveBeenCalled()
+  })
 })
 
 

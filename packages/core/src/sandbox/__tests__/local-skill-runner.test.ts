@@ -92,7 +92,7 @@ describe('[COMP:sandbox/local-skill-runner] Local browser skill recording and re
     expect(saved?.contract.terminalSends).toHaveLength(1)
   })
 
-  it('replays a local skill without model snapshots and auto-approves a granted submit', async () => {
+  it.each([false,true])('replays a local skill and renews its grant after audit (revoked=%s)', async revokeDuringAudit => {
     const local = localProvider()
     const skills = createInMemoryBrowserSkillStore()
     const profiles = createInMemoryBrowserProfileStore()
@@ -120,7 +120,11 @@ describe('[COMP:sandbox/local-skill-runner] Local browser skill recording and re
     })
     const approvals = createInMemoryBlockApprovals()
     const grants = createInMemoryBrowserSkillGrantStore()
-    await grants.create({ workspaceId: 'ws-1', skillId: skill.id, profileId: profile.id, grantedBy: 'user-1' })
+    const grant=await grants.create({ workspaceId: 'ws-1', skillId: skill.id, skillVersion: skill.version, profileId: profile.id, grantedBy: 'user-1' })
+    if(revokeDuringAudit) {
+      const audit=approvals.recordAutoApproved.bind(approvals)
+      approvals.recordAutoApproved=async args=>{const result=await audit(args);await grants.revoke(grant.id);return result}
+    }
     const tools = createSkillRunnerTools({
       provider: null,
       local,
@@ -138,6 +142,11 @@ describe('[COMP:sandbox/local-skill-runner] Local browser skill recording and re
       profile: 'My Browser',
       params: { query: 'repeatable search' },
     })
+    if(revokeDuringAudit) {
+      expect(result.isError).toBe(true)
+      expect(local.calls).not.toContain('click:@e2')
+      return
+    }
     expect(result.isError ?? false).toBe(false)
     expect(result.meta).toMatchObject({ backend: 'local' })
     expect(local.calls).toEqual([

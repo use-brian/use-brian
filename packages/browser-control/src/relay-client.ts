@@ -55,6 +55,7 @@ export type RelayClientState = 'disconnected' | 'connecting' | 'ready' | 'unpair
  * client owns the pairing now; the honest move is to stand down and say so.
  */
 const CLOSE_REPLACED = 4000
+const CLOSE_UNAUTHORIZED = 4401
 
 /**
  * Must stay UNDER Chrome's 30 s MV3 service-worker idle kill — the ping is
@@ -230,6 +231,10 @@ export class RelayClient {
           this.readyAt != null && this.now() - this.readyAt >= STABLE_CONNECTION_MS
         this.readyAt = null
         if (wasStable) this.attempts = 0
+        if ((ev as { code?: number } | undefined)?.code === CLOSE_UNAUTHORIZED) {
+          this.setState('unpaired')
+          return
+        }
         if ((ev as { code?: number } | undefined)?.code === CLOSE_REPLACED) {
           this.setState('replaced')
           return

@@ -316,7 +316,7 @@ describe('[COMP:sandbox/browser-tools] Computer tool surface', () => {
       op: string
       args?: Record<string, unknown>
     }> = []
-    const local = createLocalBrowserProvider({
+    const local = createLocalBrowserProvider({ admit: async () => async () => {},
       transport: {
         async send(params) {
           sent.push(params)
@@ -354,7 +354,7 @@ describe('[COMP:sandbox/browser-tools] Computer tool surface', () => {
   })
 
   it('surfaces the clear no-extension error through the tool result (P1.4)', async () => {
-    const local = createLocalBrowserProvider({
+    const local = createLocalBrowserProvider({ admit: async () => async () => {},
       transport: { send: async () => ({ ok: false, error: 'none', code: 'no_extension' }) },
     })
     const tools = createComputerTools({
@@ -1021,5 +1021,27 @@ describe('protected fill live assistant/profile scope', () => {
     await run(tools.browserNavigate, { url: 'https://example.com' })
     expect((await run(tools.browserFillReference, { destinationOrigin: 'https://example.com', items: [{ referenceId: 'a'.repeat(43), ref: '@e1' }] })).isError).toBe(true)
     expect(fills).toBe(0)
+  })
+})
+
+
+describe('[COMP:sandbox/browser-tools] active department authority', () => {
+  it('rechecks a bound profile before each observation and recovers after access returns', async () => {
+    const profiles = await profilesWith([{ name: 'Department account', defaultBackend: 'local' }])
+    const profile = (await profiles.store.list({ workspaceId: 'ws-1' }))[0]!
+    await profiles.store.update(profile.id, { departmentId: 'department-1', scope: 'workspace' })
+    let allowed = true
+    profiles.departmentRead = async () => ({ workspaceId: 'ws-1', userId: 'user-1', assistantId: 'asst-1',
+      base: 'public', departments: allowed ? { 'department-1': 'confidential' } : {} as Record<string, 'confidential'>,
+      contextDepartment: null, binding: null, cap: null })
+    const local = fakeProvider('local')
+    const tools = createComputerTools({ local, cloud: fakeProvider('cloud'), profiles })
+    expect((await run(tools.browserNavigate, { url: 'https://example.com', profile: profile.name })).isError).not.toBe(true)
+    allowed = false
+    const count = local.calls.length
+    expect((await run(tools.browserSnapshot, {})).isError).toBe(true)
+    expect(local.calls).toHaveLength(count)
+    allowed = true
+    expect((await run(tools.browserSnapshot, {})).isError).not.toBe(true)
   })
 })

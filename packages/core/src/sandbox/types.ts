@@ -1,4 +1,8 @@
+import type { AuthoritySource } from '../security/authority-source.js'
+import type { AuthoringAuthority } from '../security/access-ceiling.js'
+import type { CurrentAuthorityBoundary } from '../tools/types.js'
 import type { ProtectedFillScope, ProtectedFillItem } from './protected-fill.js'
+import type { BrowserProfileAuthority } from './profiles.js'
 /**
  * Computer-use provider seams — the two interfaces everything else programs
  * against. Spec: docs/architecture/engine/computer-use.md (§1 "Seams").
@@ -111,6 +115,11 @@ export type BrowserFillFormResult = z.infer<typeof BrowserFillFormResultSchema>
 
 /** Identity a browser op executes under. Derived from ToolContext — never from model input. */
 export type BrowserCallContext = {
+  inputScope?: import('./input-scope.js').BrowserInputScope
+  /** Trusted live source boundary; never serialized to the relay or supplied by the model. */
+  sourceAuthority?: AuthoritySource
+  executionAuthority?: AuthoringAuthority
+  authority?: CurrentAuthorityBoundary
   userId: string
   workspaceId: string
   sessionId: string
@@ -206,7 +215,7 @@ export interface BrowserProvider {
   readDownload?(ctx: BrowserCallContext, id: string, offset: number): Promise<import('./browser-files.js').BrowserDownloadChunk>
   uploadFile?(ctx: BrowserCallContext, ref: string, name: string, data: string): Promise<void>
   readonly kind: 'local' | 'cloud'
-  fillReference?(scope: ProtectedFillScope, items: ProtectedFillItem[]): Promise<void>
+  fillReference?(scope: ProtectedFillScope, items: ProtectedFillItem[], authority?: CurrentAuthorityBoundary): Promise<void>
   navigate(ctx: BrowserCallContext, url: string): Promise<BrowserNavigateResult>
   snapshot(ctx: BrowserCallContext, options?: BrowserSnapshotOptions): Promise<BrowserSnapshot>
   click(ctx: BrowserCallContext, ref: string): Promise<void>
@@ -259,6 +268,8 @@ export type RelayCommandTransport = {
     userId: string
     /** The Use Brian profile whose paired local browser must receive this command. */
     browserProfileId: string
+    /** Host-owned ephemeral task binding; never forwarded to the extension. */
+    taskId?: string
     op: string
     args?: Record<string, unknown>
   }): Promise<RelayCommandResult>
@@ -300,20 +311,19 @@ export type VaultSessionInfo = {
 /**
  * The session-vault port — sessions are CHILDREN of a browser profile
  * (R2-4/R2-6): every bundle is scoped per (profile, site), one login per
- * site per identity. The impl is closed (platform — envelope-encrypted
- * Postgres rows whose RLS derives from the profile's clearance rung);
- * open-core boots without it and cloud session reuse is simply unavailable.
+ * site per identity. The encrypted PostgreSQL implementation is shared OSS;
+ * human writes carry the admitted profile snapshot for transactional authority.
  * The browsing agent has NO tool over this interface — only the orchestrator
  * and the Profile-Management routes call it.
  */
 export interface SessionVault {
-  get(params: { profileId: string; site: string }): Promise<SessionBundle | null>
-  put(params: { profileId: string; site: string; bundle: SessionBundle }): Promise<void>
+  get(params: { profileId: string; site: string }, expectedProfile?: BrowserProfileAuthority): Promise<SessionBundle | null>
+  put(params: { profileId: string; site: string; bundle: SessionBundle }, expectedProfile?: BrowserProfileAuthority): Promise<void>
   /** Silent-death probe outcome: bundle no longer logs in. Kept for re-auth UX. */
-  markDead(params: { profileId: string; site: string }): Promise<void>
-  touch(params: { profileId: string; site: string }): Promise<void>
+  markDead(params: { profileId: string; site: string }, expectedProfile?: BrowserProfileAuthority): Promise<void>
+  touch(params: { profileId: string; site: string }, expectedProfile?: BrowserProfileAuthority): Promise<void>
   list(params: { profileId: string }): Promise<VaultSessionInfo[]>
-  revoke(params: { profileId: string; site: string }): Promise<void>
+  revoke(params: { profileId: string; site: string }, expectedProfile?: BrowserProfileAuthority): Promise<void>
   /**
    * Per-plan inactivity purge (§4.10: ~30 d free / 90 d paid). Optional —
    * the DB impl derives the cutoff from the workspace plan; the reaper
@@ -436,6 +446,8 @@ export type SandboxBridge = {
  * never through the API.
  */
 export type TakeoverStreamInfo = {
+  /** Epoch milliseconds; live capability must be renewed through current authority. */
+  expiresAt?: number
   framesUrl: string
   inputUrl: string
   /** Duplex WebSocket (binary frames down, JSON input up). Absent on backends that only speak SSE. */

@@ -46,6 +46,26 @@ function transportRecording(
 }
 
 describe('[COMP:sandbox/local-browser] LocalBrowserProvider', () => {
+  it('refuses absent admission wiring before relay dispatch or destination observation', async () => {
+    const send = vi.fn()
+    const onDestination = vi.fn()
+    const provider = createLocalBrowserProvider({ transport: { send }, onDestination })
+    await expect(provider.navigate(CTX, 'https://example.com')).rejects.toMatchObject({ code: 'profile_authority_denied' })
+    expect(send).not.toHaveBeenCalled()
+    expect(onDestination).not.toHaveBeenCalled()
+  })
+
+  it('renews every successful operation before returning its result', async () => {
+    const events: string[] = []
+    const provider = createLocalBrowserProvider({
+      transport: { send: async () => { events.push('dispatch'); return { ok: true, data: { url: 'https://example.com' } } } },
+      admit: async () => { events.push('admit'); return async () => { events.push('renew') } },
+      onDestination: (_ctx, origin) => { events.push(origin ? 'observed' : 'cleared') },
+    })
+    await provider.navigate(CTX, 'https://example.com')
+    expect(events).toEqual(['admit', 'cleared', 'dispatch', 'renew', 'observed'])
+  })
+
   it('serializes each tool op to the P1.2 command envelope with the caller and profile ids', async () => {
     const { transport, sent } = transportRecording((op) => {
       if (op === 'navigate') return { ok: true, data: { url: 'https://example.com/' } }
@@ -84,7 +104,7 @@ describe('[COMP:sandbox/local-browser] LocalBrowserProvider', () => {
       if (op === 'captureFrame') return { ok: true, data: { data: 'jpeg-data', mimeType: 'image/jpeg' } }
       return { ok: true }
     })
-    const provider = createLocalBrowserProvider({ transport })
+    const provider = createLocalBrowserProvider({ admit: async () => async () => {}, transport })
 
     await provider.navigate(CTX, 'https://example.com/')
     const snap = await provider.snapshot(CTX)
@@ -132,7 +152,7 @@ describe('[COMP:sandbox/local-browser] LocalBrowserProvider', () => {
 
   it('falls back to the full open-Chrome instruction when the relay gives no reason (P1.4)', async () => {
     const { transport } = transportRecording(() => ({ ok: false, error: '', code: 'no_extension' }))
-    const provider = createLocalBrowserProvider({ transport })
+    const provider = createLocalBrowserProvider({ admit: async () => async () => {}, transport })
     const err = await provider.snapshot(CTX).catch((e: unknown) => e)
     expect(err).toBeInstanceOf(BrowserBackendError)
     expect((err as BrowserBackendError).code).toBe('no_extension')
@@ -150,7 +170,7 @@ describe('[COMP:sandbox/local-browser] LocalBrowserProvider', () => {
       error: 'Extension connection was replaced by a newer pairing.',
       code: 'no_extension',
     }))
-    const provider = createLocalBrowserProvider({ transport })
+    const provider = createLocalBrowserProvider({ admit: async () => async () => {}, transport })
     const err = await provider.snapshot(CTX).catch((e: unknown) => e)
     const message = (err as BrowserBackendError).message
     expect(message).toContain('replaced by a newer pairing')
@@ -166,7 +186,7 @@ describe('[COMP:sandbox/local-browser] LocalBrowserProvider', () => {
       error: 'Use Brian cannot act on a browser settings page.',
       code: 'no_eligible_tab',
     }))
-    const provider = createLocalBrowserProvider({ transport })
+    const provider = createLocalBrowserProvider({ admit: async () => async () => {}, transport })
     const err = await provider.snapshot(CTX).catch((e: unknown) => e)
     expect((err as BrowserBackendError).code).toBe('no_eligible_tab')
     expect((err as BrowserBackendError).message).toContain('browser settings page')
@@ -183,7 +203,7 @@ describe('[COMP:sandbox/local-browser] LocalBrowserProvider', () => {
       error: 'Use Brian is not allowed to manage this browser yet.',
       code: 'no_browser_permission',
     }))
-    const provider = createLocalBrowserProvider({ transport })
+    const provider = createLocalBrowserProvider({ admit: async () => async () => {}, transport })
     const err = await provider.snapshot(CTX).catch((e: unknown) => e)
     expect((err as BrowserBackendError).code).toBe('no_browser_permission')
   })
@@ -193,7 +213,7 @@ describe('[COMP:sandbox/local-browser] LocalBrowserProvider', () => {
     // accept-set is somehow reintroduced by hand, this fails.
     for (const code of BROWSER_BACKEND_ERROR_CODES) {
       const { transport } = transportRecording(() => ({ ok: false, error: 'x', code }))
-      const provider = createLocalBrowserProvider({ transport })
+      const provider = createLocalBrowserProvider({ admit: async () => async () => {}, transport })
       const err = await provider.snapshot(CTX).catch((e: unknown) => e)
       expect((err as BrowserBackendError).code).toBe(code)
     }
@@ -210,7 +230,7 @@ describe('[COMP:sandbox/local-browser] LocalBrowserProvider', () => {
       code: 'backend_error',
       staleBuild: true,
     }))
-    const provider = createLocalBrowserProvider({ transport })
+    const provider = createLocalBrowserProvider({ admit: async () => async () => {}, transport })
     const err = await provider.snapshot(CTX).catch((e: unknown) => e)
     const message = (err as BrowserBackendError).message
     expect(message).toContain('Something specific went wrong.')
@@ -223,20 +243,20 @@ describe('[COMP:sandbox/local-browser] LocalBrowserProvider', () => {
       error: 'Something specific went wrong.',
       code: 'backend_error',
     }))
-    const provider = createLocalBrowserProvider({ transport })
+    const provider = createLocalBrowserProvider({ admit: async () => async () => {}, transport })
     const err = await provider.snapshot(CTX).catch((e: unknown) => e)
     expect((err as BrowserBackendError).message).toBe('Something specific went wrong.')
   })
 
   it('reports not_configured when no relay transport is wired (open-core boot)', async () => {
-    const provider = createLocalBrowserProvider({ transport: null })
+    const provider = createLocalBrowserProvider({ admit: async () => async () => {}, transport: null })
     const err = await provider.navigate(CTX, 'https://example.com/').catch((e: unknown) => e)
     expect((err as BrowserBackendError).code).toBe('not_configured')
   })
 
   it('refuses a local call with no resolved profile instead of routing to an arbitrary browser', async () => {
     const { transport, sent } = transportRecording(() => ({ ok: true }))
-    const provider = createLocalBrowserProvider({ transport })
+    const provider = createLocalBrowserProvider({ admit: async () => async () => {}, transport })
     const err = await provider
       .navigate({ ...CTX, profileId: undefined }, 'https://example.com/')
       .catch((e: unknown) => e)
@@ -247,7 +267,7 @@ describe('[COMP:sandbox/local-browser] LocalBrowserProvider', () => {
 
   it('passes through known backend error codes (user Stop)', async () => {
     const { transport } = transportRecording(() => ({ ok: false, error: 'user stopped the task', code: 'stopped' }))
-    const provider = createLocalBrowserProvider({ transport })
+    const provider = createLocalBrowserProvider({ admit: async () => async () => {}, transport })
     const err = await provider.click(CTX, '@e1').catch((e: unknown) => e)
     expect((err as BrowserBackendError).code).toBe('stopped')
   })
@@ -260,7 +280,7 @@ describe('[COMP:sandbox/local-browser] LocalBrowserProvider', () => {
     // automation when Chrome had simply dropped the debugger.
     for (const code of ['detached', 'consent_denied'] as const) {
       const { transport } = transportRecording(() => ({ ok: false, error: `nope: ${code}`, code }))
-      const provider = createLocalBrowserProvider({ transport })
+      const provider = createLocalBrowserProvider({ admit: async () => async () => {}, transport })
       const err = await provider.snapshot(CTX).catch((e: unknown) => e)
       expect((err as BrowserBackendError).code).toBe(code)
     }
@@ -273,7 +293,7 @@ describe('[COMP:sandbox/local-browser] LocalBrowserProvider', () => {
       'unsupported_browser',
     ] as const) {
       const { transport } = transportRecording(() => ({ ok: false, error: `nope: ${code}`, code }))
-      const provider = createLocalBrowserProvider({ transport })
+      const provider = createLocalBrowserProvider({ admit: async () => async () => {}, transport })
       const err = await provider.snapshot(CTX).catch((e: unknown) => e)
       expect((err as BrowserBackendError).code).toBe(code)
     }
@@ -281,7 +301,7 @@ describe('[COMP:sandbox/local-browser] LocalBrowserProvider', () => {
 
   it('rejects a malformed snapshot payload at the zod boundary', async () => {
     const { transport } = transportRecording(() => ({ ok: true, data: { nodes: 'nope' } }))
-    const provider = createLocalBrowserProvider({ transport })
+    const provider = createLocalBrowserProvider({ admit: async () => async () => {}, transport })
     await expect(provider.snapshot(CTX)).rejects.toThrow()
   })
 
@@ -300,7 +320,7 @@ describe('[COMP:sandbox/local-browser] LocalBrowserProvider', () => {
       }
       return { ok: true }
     })
-    const provider = createLocalBrowserProvider({ transport })
+    const provider = createLocalBrowserProvider({ admit: async () => async () => {}, transport })
 
     const bundle = await provider.captureState?.(CTX, 'example.com')
 
@@ -320,7 +340,7 @@ describe('[COMP:sandbox/local-browser] LocalBrowserProvider', () => {
 
   it('maps no_extension and site_mismatch refusals from captureState to typed errors', async () => {
     const noExtension = transportRecording(() => ({ ok: false, error: '', code: 'no_extension' }))
-    const noExtensionErr = await createLocalBrowserProvider({ transport: noExtension.transport })
+    const noExtensionErr = await createLocalBrowserProvider({ admit: async () => async () => {}, transport: noExtension.transport })
       .captureState?.(CTX, 'example.com')
       .catch((e: unknown) => e)
     expect((noExtensionErr as BrowserBackendError).code).toBe('no_extension')
@@ -330,7 +350,7 @@ describe('[COMP:sandbox/local-browser] LocalBrowserProvider', () => {
       error: 'The allowed tab is on other.example.org, not example.com.',
       code: 'site_mismatch',
     }))
-    const mismatchErr = await createLocalBrowserProvider({ transport: mismatch.transport })
+    const mismatchErr = await createLocalBrowserProvider({ admit: async () => async () => {}, transport: mismatch.transport })
       .captureState?.(CTX, 'example.com')
       .catch((e: unknown) => e)
     expect((mismatchErr as BrowserBackendError).code).toBe('site_mismatch')

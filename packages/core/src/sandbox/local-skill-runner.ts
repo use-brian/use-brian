@@ -120,6 +120,7 @@ export type LocalSkillRunOptions = {
   skill: BrowserSkill
   profile: BrowserProfile
   rehearsal: boolean
+  authorizeProfile?: () => Promise<boolean>
   input?: Record<string, unknown>
   grants?: BrowserSkillGrantStore | null
   approvals?: BlockApprovalsPort | null
@@ -249,6 +250,7 @@ export async function runLocalSkill(params: LocalSkillRunOptions): Promise<{
 
   try {
     for (const step of recording) {
+      if (params.authorizeProfile && !(await params.authorizeProfile())) return fail('Browser profile access unavailable.')
       const label = step.detail ?? null
       if (step.action === 'open') {
         if (!step.url) return fail(`Recording step ${step.step} has no URL.`)
@@ -299,6 +301,7 @@ export async function runLocalSkill(params: LocalSkillRunOptions): Promise<{
           profile: params.profile,
           request,
           rehearsal: params.rehearsal,
+          authorizeProfile: params.authorizeProfile,
           grants: params.grants,
           approvals: params.approvals,
           approvalWaitMs: params.approvalWaitMs,

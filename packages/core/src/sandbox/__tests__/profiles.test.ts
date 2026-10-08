@@ -32,6 +32,20 @@ function store() {
 }
 
 describe('[COMP:sandbox/profiles] Profile clearance + enablement gate (R2-4)', () => {
+  it('does not persist an edit admitted against an obsolete profile authority snapshot', async () => {
+    const s = store()
+    const initial = await s.create({ workspaceId: 'ws-1', ownerUserId: 'owner-1', name: 'Protected browser',
+      departmentId: 'department-1', scope: 'workspace', clearance: 'internal' })
+    const current = await s.update(initial.id, { departmentId: 'department-2', clearance: 'confidential' })
+    expect(await s.update(initial.id, { name: 'Stale edit', clearance: 'internal' }, initial)).toBeNull()
+    expect(await s.update(initial.id, {}, initial)).toBeNull()
+    expect(await s.delete(initial.id, initial)).toBe(false)
+    expect(await s.get(initial.id)).toEqual(current)
+    expect(await s.update(initial.id, { name: 'Admitted edit' }, current!)).toMatchObject({ name: 'Admitted edit' })
+    expect(await s.delete(initial.id, current!)).toBe(true)
+    expect(await s.get(initial.id)).toBeNull()
+  })
+
   it('refuses an assistant that is not explicitly enabled, whatever its clearance', async () => {
     const s = store()
     const p = await s.create({
@@ -355,5 +369,41 @@ describe('[COMP:sandbox/profiles] Profile at call time (R2-10)', () => {
     expect(res).toEqual({ kind: 'none' })
     if (res.kind === 'ok') throw new Error('unreachable: an empty store cannot resolve')
     expect(describeProfileResolution(res, 'internal')).toMatch(/create one in Browsers/i)
+  })
+})
+
+describe('[COMP:sandbox/profiles] department-bound identities', () => {
+  const actor: ProfileActor = { ...OWNER, assistantClearance:'public', departmentRead:{
+    workspaceId:'ws-1',userId:'owner-1',assistantId:'asst-1',base:'public',
+    departments:{research:'confidential'},contextDepartment:null,binding:null,cap:null,
+  }}
+  const profile = () => store().create({workspaceId:'ws-1',ownerUserId:'owner-1',name:'Protected fixture',
+    scope:'workspace',departmentId:'research',clearance:'confidential',enabledAssistantIds:['asst-1']})
+  it('uses the department ceiling instead of General clearance for use and discovery',async()=>{
+    const p=await profile()
+    expect(canUseProfile(p,actor)).toEqual({ok:true})
+    expect(profileIsNameableTo(p,actor)).toBe(true)
+    expect(canUseProfile(p,OWNER)).toEqual({ok:false,reason:'department'})
+  })
+  it.each([
+    {departments:{}}, {departments:{research:'internal' as const}},
+    {contextDepartment:'other'}, {binding:[]}, {workspaceId:'other'},
+    {userId:'other'}, {assistantId:'other'},
+  ] as Array<Partial<NonNullable<ProfileActor['departmentRead']>>>)('withholds both identity and execution for incompatible grant %j',async patch=>{
+    const p=await profile();const denied={...actor,departmentRead:{...actor.departmentRead!,...patch}}
+    expect(canUseProfile(p,denied)).toEqual({ok:false,reason:'department'})
+    expect(profileIsNameableTo(p,denied)).toBe(false)
+  })
+  it('retains enablement and personal ownership as additional requirements',async()=>{
+    const p=await profile()
+    expect(canUseProfile({...p,enabledAssistantIds:[]},actor)).toEqual({ok:false,reason:'not_enabled'})
+    expect(canUseProfile({...p,scope:'owner',ownerUserId:'other'},actor)).toEqual({ok:false,reason:'not_owner'})
+  })
+  it('quarantines unassigned shared profiles for v2 actors without changing personal ownership',async()=>{
+    const p=await profile()
+    expect(canUseProfile({...p,departmentId:null},actor)).toEqual({ok:false,reason:'department'})
+    expect(canUseProfile({...p,departmentId:null,scope:'owner'},actor)).toEqual({ok:true})
+    expect(canUseProfile({...p,departmentId:null},OWNER)).toEqual({ok:true})
+    expect(canUseProfile({...p,departmentId:null}, {...OWNER,workspaceId:'other'})).toEqual({ok:false,reason:'department'})
   })
 })
