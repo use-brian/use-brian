@@ -34,7 +34,7 @@ import {
   crmConfigCacheKey,
   crmRegionCacheKey,
 } from "@/lib/surface-prefetch";
-import { useSurfaceContentCache } from "@/lib/offline/surface-content-cache";
+import { surfaceContentRemaining, useLeasedResource, useSurfaceContentCache, useSurfaceContentRenewal } from "@/lib/offline/surface-content-cache";
 import { Skeleton } from "@/components/skeleton";
 import { OperatorBoardSkeleton } from "@/components/operator/operator-skeletons";
 import { useT } from "@/lib/i18n/client";
@@ -340,24 +340,29 @@ export function CrmSurface({ workspaceId, routeRecord = null }: {
       };
     },
   });
-  const collectionResource = useCachedResource<CrmCollectionPayload>(collectionKey, fetchCollection);
+  // Content lease (perceived-performance.md, "Content lease for protected lists").
+  const collectionResource = useCachedResource<CrmCollectionPayload>(collectionKey, fetchCollection, { expiresInMs: surfaceContentRemaining });
+  useSurfaceContentRenewal(collectionResource.refresh);
   const [retainedCollection, setRetainedCollection] = useState<CrmCollectionPayload | null>(null);
   useEffect(() => {
     if (collectionResource.data) setRetainedCollection(collectionResource.data);
   }, [collectionResource.data]);
+  // The retained copy bridges a filter change only while its own lease holds,
+  // never after a denial or expiry evicted the live value.
   const collection = collectionResource.data
-    ?? (retainedCollection?.section === view.section ? retainedCollection : null);
+    ?? (retainedCollection?.section === view.section && collectionResource.error === undefined
+      && surfaceContentRemaining(retainedCollection) > 0 ? retainedCollection : null);
 
-  const directoriesResource = useCachedResource<CrmDirectories>(
+  const directoriesResource = useLeasedResource<CrmDirectories>(
     crmRegionCacheKey(workspaceId, "lookups"),
     () => fetchCrmDirectories(workspaceId),
   );
   const summaryKey = crmRegionCacheKey(workspaceId, "summary", selectedPipeline?.id ?? "all");
-  const summaryResource = useCachedResource<CrmSummary>(
+  const summaryResource = useLeasedResource<CrmSummary>(
     summaryKey,
     () => fetchCrmSummary(workspaceId, selectedPipeline?.id),
   );
-  const emailContextResource = useCachedResource<CrmData>(
+  const emailContextResource = useLeasedResource<CrmData>(
     view.review === "email" ? crmRegionCacheKey(workspaceId, "email-context") : null,
     async () => {
       const [contacts, companies, deals] = await Promise.all([

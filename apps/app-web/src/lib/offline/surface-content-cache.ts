@@ -42,6 +42,8 @@ import {
   loadSurfaceCache,
   markSurfaceCacheStale,
   readSurfaceCache,
+  useCachedResource,
+  type UseCachedResource,
 } from "@/lib/surface-cache";
 import { idbDelete, idbGet, idbSet } from "./idb";
 
@@ -78,6 +80,16 @@ export async function leaseSurfaceContent<T>(fetch: () => Promise<T>): Promise<T
     throw new SurfaceCacheEvictionError(new Error("surface_content_expired"));
   }
   return value;
+}
+
+/**
+ * A memory-tier read of protected content through the content lease: leased
+ * fetch, expiry and renewal in one call.
+ */
+export function useLeasedResource<T>(key: string | null, fetch: () => Promise<T>): UseCachedResource<T> {
+  const resource = useCachedResource<T>(key, () => leaseSurfaceContent(fetch), { expiresInMs: surfaceContentRemaining });
+  useSurfaceContentRenewal(resource.refresh, key !== null);
+  return resource;
 }
 
 /**
