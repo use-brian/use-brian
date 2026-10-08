@@ -25,6 +25,7 @@ import { useT } from "@/lib/i18n/client";
 import { authFetch } from "@/lib/auth-fetch";
 import { useWorkspaceContext } from "@/lib/workspace-context";
 import { markSurfaceCacheStale, mutateSurfaceCache, useCachedResource } from "@/lib/surface-cache";
+import { leaseSurfaceContent, surfaceContentRemaining, useSurfaceContentRenewal } from "@/lib/offline/surface-content-cache";
 import { assistantsCacheKey, projectDetailCacheKey } from "@/lib/surface-prefetch";
 import { listAssistants } from "@/lib/api/studio";
 import {
@@ -61,7 +62,9 @@ export default function ProjectDetailPage({
   const { role } = useWorkspaceContext();
   const canManage = role === "owner" || role === "admin";
   const bundleKey = projectDetailCacheKey(workspaceId, projectId);
-  const bundle = useCachedResource<ProjectBundle>(bundleKey, () => fetchProjectBundle(workspaceId, projectId));
+  // Content lease: protected counts and previews expire with the viewer's authority.
+  const bundle = useCachedResource<ProjectBundle>(bundleKey, () => leaseSurfaceContent(() => fetchProjectBundle(workspaceId, projectId)), { expiresInMs: surfaceContentRemaining });
+  useSurfaceContentRenewal(bundle.refresh);
   const assistantList = useCachedResource(assistantsCacheKey(workspaceId), () => listAssistants(workspaceId));
   const { refresh: refreshBundle } = bundle;
   const project = bundle.data?.project ?? null;

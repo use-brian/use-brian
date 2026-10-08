@@ -10,6 +10,7 @@ import { Skeleton } from "@/components/skeleton";
 import { useT } from "@/lib/i18n/client";
 import { getProjectContent, type ContextProject, type ProjectContentView } from "@/lib/api/context-scopes";
 import { useCachedResource } from "@/lib/surface-cache";
+import { leaseSurfaceContent, surfaceContentRemaining, useSurfaceContentRenewal } from "@/lib/offline/surface-content-cache";
 import { projectContentCacheKey } from "@/lib/surface-prefetch";
 import { workspaceSearchHref } from "@/lib/workspace-search-navigation";
 import { personalChatHandoffPath, stashChatHandoff } from "@/lib/chat-handoff";
@@ -31,7 +32,9 @@ export function ProjectContent({ project, assistants }: {
     return () => clearTimeout(timer);
   }, [input]);
   const content = useCachedResource(projectContentCacheKey(project.workspaceId, project.id, view, query, offset),
-    () => getProjectContent(project.workspaceId, project.id, view, query, offset), {expiresInMs: () => 60_000});
+    () => leaseSurfaceContent(() => getProjectContent(project.workspaceId, project.id, view, query, offset)), {expiresInMs: surfaceContentRemaining});
+  // Content lease (perceived-performance.md, "Content lease for protected lists").
+  useSurfaceContentRenewal(content.refresh);
   function ask(text: string) {
     if (!assistantId || project.status !== "active") return;
     const requestId = stashChatHandoff({workspaceId: project.workspaceId, assistantId,
