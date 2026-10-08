@@ -134,6 +134,26 @@ describe('[COMP:api/organization-chart] real directory and hierarchy transaction
     await pool.query('UPDATE workspace_team_managers SET revoked_at=now() WHERE workspace_id=$1',[f.workspaceId])
     expect((await getOrganizationChart(f.workspaceId,f.member)).units).toEqual([])
   })
+  it('requires a current department edge for a restricted linked unit in a v2 workspace, even for a legacy-unrestricted member',async()=>{
+    const f=await fixture(),groups=createDbWorkspaceGroupStore()
+    const team=await groups.createTeam(f.owner,f.workspaceId,{name:'Fictional Alder audience',key:'alder'})
+    const unit=await f.unit('Fictional Alder division',null,'members',team.id)
+    await f.place(unit.id,f.colleague)
+    // Legacy reach is unrestricted for this member, so only the department floor can hide the unit.
+    await pool.query("UPDATE workspace_members SET team_scope_mode='legacy' WHERE workspace_id=$1 AND user_id=$2",[f.workspaceId,f.member])
+    await pool.query('UPDATE workspaces SET department_read_v2=true WHERE id=$1',[f.workspaceId])
+    expect((await pool.query('SELECT effective_member_read_compartments($1,$2) IS NULL AS open',[f.member,f.workspaceId])).rows[0].open).toBe(true)
+    const visible=async()=>(await getOrganizationChart(f.workspaceId,f.member)).units.map(u=>u.id)
+    expect(await visible()).toEqual([])
+    expect((await getOrganizationChart(f.workspaceId,f.member)).placements).toEqual([])
+    await pool.query("INSERT INTO department_edges(workspace_id,department_id,principal_kind,user_id,clearance,origin) VALUES($1,$2,'user',$3,'internal','store')",[f.workspaceId,team.id,f.member])
+    expect(await visible()).toEqual([unit.id])
+    await pool.query("UPDATE department_edges SET expires_at=now()-interval '1 second' WHERE workspace_id=$1 AND department_id=$2 AND user_id=$3",[f.workspaceId,team.id,f.member])
+    expect(await visible()).toEqual([])
+    // The legacy rollback switch keeps the legacy Team rule.
+    await pool.query('UPDATE workspaces SET department_read_v2=false WHERE id=$1',[f.workspaceId])
+    expect(await visible()).toEqual([unit.id])
+  })
   it('publishing a unit does not reveal its hidden linked audience name or identifier',async()=>{
     const f=await fixture(),groups=createDbWorkspaceGroupStore()
     const team=await groups.createTeam(f.owner,f.workspaceId,{name:'Private audience',key:'private-audience'})
