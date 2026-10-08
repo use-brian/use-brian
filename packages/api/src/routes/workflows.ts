@@ -207,6 +207,8 @@ const updateBodySchema = z.object({
   lifecycleState: z.literal('active').optional(),
   contextGroupId: z.string().uuid().nullable().optional(),
   contextProjectId: z.string().uuid().nullable().optional(),
+  /** Recapture authoring authority from current access without an edit (legacy recovery). */
+  confirmAuthority: z.literal(true).optional(),
 })
 
 const runBodySchema = z.object({
@@ -498,6 +500,8 @@ function serializeWorkflow(w: import('@use-brian/core').WorkflowRecord) {
     managedBy: w.managedBy,
     contextGroupId: w.contextGroupId ?? null,
     contextProjectId: w.contextProjectId ?? null,
+    // Legacy definitions saved before authority capture cannot run until confirmed.
+    authorityReviewRequired: !w.authoringAuthority,
     createdAt: w.createdAt.toISOString(),
     updatedAt: w.updatedAt.toISOString(),
   }
@@ -872,7 +876,9 @@ export function workflowsRoutes(opts: WorkflowsRouteOptions): Router {
       || parsed.data.contextProjectId !== undefined
     const scheduleEdit = existing.trigger.kind === 'schedule' || fields.trigger?.kind === 'schedule' || !!parsed.data.reviewId
     const preparing = req.method === 'POST'
-    if (executionAffectingEdit && !scheduleEdit && !preparing) {
+    // confirmAuthority recaptures authority even for a schedule workflow; the
+    // store then requires that workflow's schedule review, as for any edit.
+    if ((executionAffectingEdit && !scheduleEdit && !preparing) || (parsed.data.confirmAuthority && !preparing)) {
       fields.authoringAuthority = await opts.resolveAuthoringAuthority({
         userId,
         workspaceId: existing.workspaceId,

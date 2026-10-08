@@ -392,6 +392,25 @@ describe('[COMP:api/workflows-route] schedule trigger → backing scheduled_jobs
   })
 })
 
+describe('[COMP:api/workflows-route] legacy authority recovery', () => {
+  it('reports a definition without captured authority and recaptures it on confirmAuthority without an edit', async () => {
+    workflowStore.getById.mockResolvedValueOnce(wf({ authoringAuthority: null } as never))
+    workflowStore.update.mockResolvedValueOnce(wf({ authoringAuthority: { version: 1 } } as never))
+    const res = await request(app('u-1')).patch('/api/workflows/wf-1').send({ confirmAuthority: true })
+    expect(res.status).toBe(200)
+    const fields = workflowStore.update.mock.calls.at(-1)![2] as Record<string, unknown>
+    expect(fields.authoringAuthority).toMatchObject({ version: 1, ceiling: { userId: 'u-1' } })
+    expect(Object.keys(fields).filter((key) => !['authoringAuthority'].includes(key))).toEqual([])
+    expect(res.body.authorityReviewRequired).toBe(false)
+  })
+
+  it('flags a legacy definition on read', async () => {
+    workflowStore.getById.mockResolvedValueOnce(wf({ authoringAuthority: null } as never))
+    const res = await request(app('u-1')).get('/api/workflows/wf-1')
+    expect(res.body.authorityReviewRequired).toBe(true)
+  })
+})
+
 describe('[COMP:api/workflows-route] GET /pages/:pageId/workflow-runs', () => {
   const PAGE = '22222222-2222-2222-2222-222222222222'
 

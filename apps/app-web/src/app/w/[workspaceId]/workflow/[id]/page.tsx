@@ -152,6 +152,7 @@ export default function WorkflowDetailPage({
 
   const [workflow, setWorkflow] = useState<WorkflowFull | null | undefined>(undefined);
   const [draft, setDraft] = useState<WorkflowFull | null>(null);
+  const [confirmingAuthority, setConfirmingAuthority] = useState(false);
   /** The cache value most recently adopted into `workflow` / `draft`. */
   const adoptedRef = useRef<WorkflowFull | null | undefined>(undefined);
   // Assistants for the picker + board node labels: the Studio `assistants:`
@@ -687,6 +688,27 @@ export default function WorkflowDetailPage({
     void refresh();
   };
 
+  /** Legacy recovery (workflow.md): recapture authority without inventing an edit. */
+  const onConfirmAuthority = async () => {
+    if (!workflow) return;
+    setConfirmingAuthority(true);
+    setError(null);
+    const result = await updateWorkflow(workflow.id, { confirmAuthority: true });
+    setConfirmingAuthority(false);
+    if (!result.ok) {
+      setError(/workflow_schedule_re(view|approval)_required/.test(result.error)
+        ? t.workflowPage.builder.authorityReviewScheduleRequired
+        : result.error || t.workflowPage.builder.saveFail);
+      return;
+    }
+    adoptedRef.current = result.workflow;
+    mutateSurfaceCache<WorkflowFull | null>(detailKey, () => result.workflow);
+    setWorkflow(result.workflow);
+    setDraft(result.workflow);
+    requestWorkflowRefresh(result.workflow.workspaceId);
+    void refresh();
+  };
+
   const onDelete = async () => {
     const ok = await confirmDialog({
       title: t.workflowPage.builder.deleteConfirmTitle,
@@ -978,6 +1000,17 @@ export default function WorkflowDetailPage({
           <div className="text-xs text-green-700 dark:text-green-400">{runMessage}</div>
         )}
         {error && <div className="text-xs text-red-600 dark:text-red-400">{error}</div>}
+        {workflow.authorityReviewRequired && (
+          <div role="status" className="flex flex-col gap-2 rounded-md border border-amber-500/40 bg-amber-500/5 px-3 py-2 text-sm sm:flex-row sm:items-center sm:justify-between">
+            <div>
+              <p className="font-medium">{t.workflowPage.builder.authorityReviewTitle}</p>
+              <p className="text-xs text-muted-foreground">{t.workflowPage.builder.authorityReviewBody}</p>
+            </div>
+            <Button type="button" variant="outline" className="max-sm:min-h-11 shrink-0" disabled={confirmingAuthority || dirty || saving} onClick={() => void onConfirmAuthority()}>
+              {t.workflowPage.builder.authorityReviewConfirm}
+            </Button>
+          </div>
+        )}
         {undoRemove && (
           <div className="flex items-center gap-2 text-xs text-muted-foreground">
             <span>{t.workflowPage.builder.stepRemoved}</span>

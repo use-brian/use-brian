@@ -370,6 +370,8 @@ export type WorkflowTriggerJob = {
 
 export type WorkflowFull = {
   id: string;
+  /** Saved before authority capture: cannot run until permissions are confirmed. */
+  authorityReviewRequired?: boolean;
   workspaceId: string;
   createdBy: string;
   name: string;
@@ -672,6 +674,8 @@ export type UpdateWorkflowInput = {
   pinned?: boolean;
   /** Mig 308 — restore only: `'active'` is the single accepted value. */
   lifecycleState?: "active";
+  /** Recapture authoring authority from current access (legacy recovery). */
+  confirmAuthority?: true;
 };
 
 export type UpdateWorkflowResult =

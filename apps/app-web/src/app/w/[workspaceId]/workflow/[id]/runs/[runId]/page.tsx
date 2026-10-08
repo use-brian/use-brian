@@ -54,6 +54,10 @@ import { Skeleton } from "@/components/skeleton";
 import { cn } from "@/lib/utils";
 import { RunIdCopyButton } from "@/components/workflow/run-id-copy-button";
 
+/** Historical runs that predate the evidence a resume or reuse now requires
+ *  (workflow.md, legacy recovery): the remedy is a fresh run, never a retry. */
+const RUN_EVIDENCE_UNAVAILABLE = ["scope_evidence_missing", "task_event_evidence_missing", "knowledge_event_evidence_missing", "primitive_event_metadata_missing", "page_event_evidence_missing"];
+
 export default function WorkflowRunDetailPage({
   params,
 }: {
@@ -225,6 +229,13 @@ export default function WorkflowRunDetailPage({
                   onClick={() => openWorkspaceSettings("ws-access")}>
                   {t.workflowPage.builder.runDetail.reviewDepartmentAccess}
                 </button>
+              </>
+            ) : RUN_EVIDENCE_UNAVAILABLE.some((code) => [String((run.error as { reason?: unknown }).reason), String((run.error as { message?: unknown }).message)].some((value) => value.includes(code))) ? (
+              <>
+                <p>{t.workflowPage.builder.runDetail.evidenceUnavailable}</p>
+                <Link href={detailHref} className="mt-2 inline-flex min-h-8 max-sm:min-h-11 items-center rounded-md border border-current px-3 text-sm font-medium">
+                  {t.workflowPage.builder.runDetail.openWorkflow}
+                </Link>
               </>
             ) : String((run.error as { message?: unknown }).message ?? JSON.stringify(run.error))}
           </div>
