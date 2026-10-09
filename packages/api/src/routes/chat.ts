@@ -27,7 +27,7 @@ import { getSelfEntityId } from '../db/memories.js'
 import { getRecording, type Recording } from '../db/recordings-store.js'
 import { isConnectionDropError, isEndpointUnreachableError, streamErrorCode, buildMemoryContext, voicePlatformFromDraftTitle, measureDocContext, createMemoryTools, createSelfProfileTool, createMemoryRecallBuffer, createSkillInvocationBuffer, createRetrievalTools, createSessionStateTools, buildSessionStateBlock, runSessionStateDiff, buildActivePlanBlock, createPlanTools, seedPlanFromTasks, calculateCost, sanitize, shouldInline, ensureToolResultPairing, stripUnsignedToolUses, modelRequiresToolSignatures, elideStaleDocToolResults, synthesizeMissingToolResults, createConfirmationResolver, interpretConfirmationEvent, runPreflight, buildPreflightPrompt, runMemoryNudge, collectStream, classifyTopic, fetchEpisodicContext, transcribeFirstAudio, voiceUnavailableNote, TRANSCRIPTION_DISABLED_REASON, probePdfPageCount, estimateDistillTokens, PDF_CONFIRM_PAGE_THRESHOLD, DASHSCOPE_RENDER_WIDTH, filterToolsByCapabilities, modelToCompactionTier, buildWorkspaceFilesContext, buildUploadPolicyBlock, SensitivityAccumulator, CompartmentAccumulator, ContextScopeAccumulator, AttachmentCollector, runLocalMatchCheck, sanitizeTitle, AUTO_TITLE_AI_MIN_CHARS, COORDINATOR_BASE_ADDENDUM, COORDINATOR_RESEARCH_ADDENDUM, buildDocSupervisorSkillBlock, buildAmbientDocSkillBlock, detectOperateSiteIntent, EvidenceAccumulator, matchesDisputedFigure, buildDisputeContextNote, parsePresentedDocumentInput, latestWorkflowProposalReceipt, buildTool, prepareSlashCommand, resolveNativeSlashCommand, buildSlashCommandBlock, buildWorkflowSlashCommandBlock, buildEmailDraftAnchorPrompt, formatActiveEmailDraftContext, type PresentedDocumentInput, type MediaBackend } from '@use-brian/core'
 import { classifySession, policyFor, sessionPolicy } from '../session-kind.js'
-import { precheckTurnAdmission, releaseTurn, takeTurnLease } from '../turn/lease.js'
+import { abortLocalTurn, precheckTurnAdmission, registerTurnAbort, releaseTurn, takeTurnLease, unregisterTurnAbort, waitForTurnSlot } from '../turn/lease.js'
 import { runAssistantTurn, turnUsageIdentity } from '../turn/kernel.js'
 import { resolveTurnBilling } from '../turn/billing.js'
 import { deliverTurnInput, registerTurnInbox } from '../turn-inbox.js'
@@ -179,15 +179,6 @@ export function filterBrainSurfaceTools(
   return tools
 }
 
-/**
- * In-flight turns' abort handles, keyed by sessionId — the same lifecycle as
- * `activeResolvers` (registered beside it, evicted in the same identity-guarded
- * `finally`). `POST /chat/stop` uses this for the common case where the turn
- * runs in THIS process, so a stop is instant rather than waiting on a heartbeat
- * tick. A turn in another process is reached through `sessions.cancel_requested_at`
- * instead; the stop route does both and does not care which one lands.
- */
-const activeTurnAborts = new Map<string, { token: string; abort: () => void }>()
 
 // WU-6.4 — Path B fast-path index. When a workspace-scoped tool call
 // suspends, the `awaiting_approval` event carries both the persisted
@@ -1766,42 +1757,6 @@ export function customModelMediaRefusal(explicitCustomSelection: boolean): ChatT
 }
 
 
-/**
- * How long an addressed room message waits for the in-flight turn's slot.
- *
- * This MUST stay under the hosting request cap (Cloud Run `timeoutSeconds`,
- * 300s). It used to be 15 minutes, which meant the wait could never actually
- * expire in production: the platform truncated the response at exactly 301s
- * and the sender got a severed stream with no reply and no error, rather than
- * the `room_turn_wait_timeout` this code carefully produces. 2026-08-08's two
- * silently-dead sends were both exactly that. Keep a margin so the error is
- * ours to send, not the platform's to swallow.
- */
-const ROOM_TURN_WAIT_TIMEOUT_MS = 240_000
-
-/**
- * Wait until the session's turn slot frees (status leaves 'running').
- * Status-only poll — deliberately NOT `findSessionById`, which touches
- * `last_active_at`. Resolves `false` on timeout.
- */
-async function waitForRoomTurnSlot(
-  sessionId: string,
-  opts?: { timeoutMs?: number; pollMs?: number },
-): Promise<boolean> {
-  const timeoutMs = opts?.timeoutMs ?? ROOM_TURN_WAIT_TIMEOUT_MS
-  const pollMs = opts?.pollMs ?? 2_000
-  const deadline = Date.now() + timeoutMs
-  for (;;) {
-    const row = await query<{ status: string }>(
-      `SELECT status FROM sessions WHERE id = $1`,
-      [sessionId],
-    )
-    const status = row.rows[0]?.status
-    if (!status || status !== 'running') return true
-    if (Date.now() >= deadline) return false
-    await new Promise((resolve) => setTimeout(resolve, pollMs))
-  }
-}
 
 export { attachUserVisibleContext }
 
@@ -3493,7 +3448,7 @@ export function chatRoutes(options: WebChatOptions): Router {
           roomQueueWaiters.add(session.id)
           sendEvent('queued', {})
           try {
-            const freed = await waitForRoomTurnSlot(session.id)
+            const freed = await waitForTurnSlot(session.id)
             if (!freed) {
               sendEvent('error', {
                 code: 'room_turn_wait_timeout',
@@ -6622,7 +6577,7 @@ export function chatRoutes(options: WebChatOptions): Router {
       const slot = await takeTurnLease({
         sessionId: session.id,
         admission: turnPolicy.admission,
-        ...(roomAdmission ? { waitForSlot: waitForRoomTurnSlot } : {}),
+        ...(roomAdmission ? { waitForSlot: waitForTurnSlot } : {}),
       })
       if (!slot.taken) {
         sendEvent('error', slot.code === 'room_turn_wait_timeout'
@@ -7049,10 +7004,7 @@ export function chatRoutes(options: WebChatOptions): Router {
       if (turnLeaseToken) {
         const heldToken = turnLeaseToken
         abortRegistryToken = heldToken
-        activeTurnAborts.set(session.id, {
-          token: heldToken,
-          abort: () => abortController.abort(),
-        })
+        registerTurnAbort(session.id, heldToken, () => abortController.abort())
         // The lease heartbeat (lost lease or stop request -> abort) runs in
         // the turn kernel for the life of the loop.
       }
@@ -8436,7 +8388,7 @@ export function chatRoutes(options: WebChatOptions): Router {
         turnLeaseToken = null
       }
       activeResolvers.delete(session.id)
-      activeTurnAborts.delete(session.id)
+      if (abortRegistryToken) unregisterTurnAbort(session.id, abortRegistryToken)
       roomTurnAddressers.delete(session.id)
       // WU-6.4 — drop any fast-path index entries for this session. If an
       // approval is still genuinely pending at stream close (rare — the
@@ -8853,10 +8805,7 @@ export function chatRoutes(options: WebChatOptions): Router {
       // rather than `turnLeaseToken` — the success and catch paths null the
       // latter once they release, and guarding on it would silently skip this
       // eviction on exactly the paths that reach here with work to do.
-      if (leaseSessionId && abortRegistryToken &&
-          activeTurnAborts.get(leaseSessionId)?.token === abortRegistryToken) {
-        activeTurnAborts.delete(leaseSessionId)
-      }
+      if (leaseSessionId && abortRegistryToken) unregisterTurnAbort(leaseSessionId, abortRegistryToken)
       // Close the assistant-run presence entry on every exit path (success,
       // error, client-disconnect abort). Best-effort + idempotent; the
       // doc-sync TTL sweeper is the backstop if this POST never lands.
@@ -8916,8 +8865,7 @@ export function chatRoutes(options: WebChatOptions): Router {
       const stoppedByName = stopper?.name ?? null
 
       // 1. Same-process turn: abort immediately.
-      const local = activeTurnAborts.get(sessionId)
-      if (local) local.abort()
+      const abortedLocally = abortLocalTurn(sessionId)
 
       // 2. Any process: record the intent. The holder's next heartbeat tick
       //    picks it up (<= TURN_HEARTBEAT_INTERVAL_MS) and aborts itself. Set
@@ -8931,7 +8879,7 @@ export function chatRoutes(options: WebChatOptions): Router {
 
       const outcome = turnStopOutcome({
         status: session.status,
-        abortedLocally: !!local,
+        abortedLocally,
         reclaimedStale,
       })
 

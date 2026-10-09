@@ -15,6 +15,7 @@
  *
  * [COMP:api/turn-kernel]
  */
+import { query } from '../db/client.js'
 import {
   claimTurnSlot,
   isTurnLeaseLive,
@@ -87,6 +88,8 @@ export async function takeTurnLease(params: {
   admission: 'personal' | 'room'
   waitForSlot?: (sessionId: string) => Promise<boolean>
 }): Promise<TurnSlotOutcome> {
+  // A personal session with a wait (a messaging channel: a second message
+  // while the first turn runs) waits for the slot instead of refusing.
   const { sessionId } = params
   if (params.admission === 'room') {
     let claimed = await claimTurnSlot(sessionId)
@@ -103,7 +106,11 @@ export async function takeTurnLease(params: {
       claimed = await claimTurnSlot(sessionId)
     }
   } else {
-    if (await isTurnLeaseLive(sessionId)) return { taken: false, code: 'turn_in_flight' }
+    while (await isTurnLeaseLive(sessionId)) {
+      if (!params.waitForSlot || !(await params.waitForSlot(sessionId))) {
+        return { taken: false, code: params.waitForSlot ? 'room_turn_wait_timeout' : 'turn_in_flight' }
+      }
+    }
     await reclaimStaleTurn(sessionId)
     await takeTurnSlot(sessionId)
   }
@@ -153,4 +160,66 @@ export async function releaseTurn(sessionId: string, token: string, reason: Turn
     console.error('[turn-lease] failed to release turn lease:', err)
     return false
   }
+}
+
+/**
+ * How long a send waits for the in-flight turn's slot. MUST stay under the
+ * hosting request cap (Cloud Run `timeoutSeconds`, 300s): a longer wait is
+ * truncated by the platform at 301s and the sender gets a severed stream with
+ * no reply and no error (2026-08-08). Keep a margin so the error is ours.
+ * This bounds a wait for ANOTHER turn, not agentic work.
+ */
+export const TURN_SLOT_WAIT_TIMEOUT_MS = 240_000
+
+/**
+ * Wait until the session's turn slot frees (status leaves 'running'). A
+ * status-only poll: deliberately NOT `findSessionById`, which touches
+ * `last_active_at`. Resolves `false` on timeout.
+ */
+export async function waitForTurnSlot(
+  sessionId: string,
+  opts?: { timeoutMs?: number; pollMs?: number },
+): Promise<boolean> {
+  const timeoutMs = opts?.timeoutMs ?? TURN_SLOT_WAIT_TIMEOUT_MS
+  const pollMs = opts?.pollMs ?? 2_000
+  const deadline = Date.now() + timeoutMs
+  for (;;) {
+    const row = await query<{ status: string }>(`SELECT status FROM sessions WHERE id = $1`, [sessionId])
+    const status = row.rows[0]?.status
+    if (!status || status !== 'running') return true
+    if (Date.now() >= deadline) return false
+    await new Promise((resolve) => setTimeout(resolve, pollMs))
+  }
+}
+
+/**
+ * In-flight turns' abort handles, keyed by sessionId, for EVERY runner.
+ * `POST /api/chat/stop` uses this when the turn runs in THIS process, so a
+ * stop is instant rather than waiting on a heartbeat tick; a turn in another
+ * process is reached through `sessions.cancel_requested_at`. Because the
+ * kernel registers every leased turn here, a channel turn is as stoppable as
+ * a web one.
+ */
+const activeTurnAborts = new Map<string, { token: string; abort: () => void }>()
+
+export function registerTurnAbort(sessionId: string, token: string, abort: () => void): void {
+  activeTurnAborts.set(sessionId, { token, abort })
+}
+
+/** Is this exact turn's abort handle registered? */
+export function hasTurnAbort(sessionId: string, token: string): boolean {
+  return activeTurnAborts.get(sessionId)?.token === token
+}
+
+/** Identity-guarded: never evicts a successor turn's handle. */
+export function unregisterTurnAbort(sessionId: string, token: string): void {
+  if (activeTurnAborts.get(sessionId)?.token === token) activeTurnAborts.delete(sessionId)
+}
+
+/** Abort the turn running in this process on `sessionId`. True when one was. */
+export function abortLocalTurn(sessionId: string): boolean {
+  const local = activeTurnAborts.get(sessionId)
+  if (!local) return false
+  local.abort()
+  return true
 }

@@ -1,4 +1,9 @@
 import { policyFor } from '../session-kind.js'
+import { releaseTurn, takeTurnLease, waitForTurnSlot } from '../turn/lease.js'
+import { runAssistantTurn } from '../turn/kernel.js'
+
+/** The reply when a channel message waited out another turn on its session. */
+const CHANNEL_TURN_BUSY_NOTICE = "I'm still finishing your previous message. Send this one again once I've replied."
 import { renderSystemContext } from '@use-brian/core'
 // REBRAND-CUTOVER: this file contains sidan.ai runtime values that must flip to usebrian.ai when DNS + Vercel domains + OAuth consoles + webhooks are cut over. Grep REBRAND-CUTOVER.
 /**
@@ -20,7 +25,7 @@ import { renderSystemContext } from '@use-brian/core'
 import { createTurnLedger } from '../ledger/recorder.js'
 import { getLedgerPayloadStore } from '../ledger/runtime.js'
 import {
-  queryLoop, buildMemoryContext, createMemoryTools, createSessionStateTools,
+  buildMemoryContext, createMemoryTools, createSessionStateTools,
   buildSessionStateBlock, runSessionStateDiff,
   synthesizeMissingToolResults,
   collectStream, calculateCost, runPreflight, buildPreflightPrompt,
@@ -47,7 +52,7 @@ import type { ChannelQuestionStore } from '../workflow/channel-questions.js'
 import { channelConfirmations } from './channel-interactions.js'
 import { channelQuestionActions } from './channel-questions.js'
 import { resolveChannelAnswerContext, type AdmittedChannelMessage } from './channel-message-admission.js'
-import { parseFollowUps, resolveCharter } from '@use-brian/shared'
+import { parseFollowUps, resolveCharter, sanitizeDeliveryText } from '@use-brian/shared'
 import { loadDecisionPlaybookContext } from '../decision-learning/playbook-context.js'
 import { runProactiveCompaction } from './proactive-compaction.js'
 import { notifyBrainWriteIfMatch } from '../brain-stream/notify.js'
@@ -95,7 +100,7 @@ import {
 } from '../session-live-publisher.js'
 import {
   findOrCreateSession, addSessionMessage, readSessionMessageScopeSource, setSessionMessageChannelId,
-  getSessionMessages, updateSessionStatus, getPreferredChannel,
+  getSessionMessages, getPreferredChannel,
   getGroupChatContext, buildGroupChatContextPrompt, getSessionTopicLabels,
   markDowngradeNoticeSent, clearDowngradeNotice,
 } from '../db/sessions.js'
@@ -2308,7 +2313,6 @@ async function processChannelMessageTurn(params: ChannelPipelineParams): Promise
   if (!(await deliveryAudienceAdmitsTurn())) return
   await hooks.onProcessingStart?.()
 
-  await updateSessionStatus(session.id, 'running')
   const confirmationResolver = createConfirmationResolver()
 
   // ── Live watch feed (live-work.md §5.2) ──
@@ -2555,6 +2559,24 @@ async function processChannelMessageTurn(params: ChannelPipelineParams): Promise
   >['claims'] | null = null
   const acknowledgedGoalIds = new Set<string>()
 
+  // The turn kernel's admission (D11, D14): a channel turn holds a real lease,
+  // so the sweeper can tell it is alive, Stop reaches it, and a second message
+  // waits for the first turn instead of running beside it on one history.
+  const slot = await takeTurnLease({
+    sessionId: session.id,
+    admission: turnPolicy.admission,
+    waitForSlot: waitForTurnSlot,
+  })
+  if (!slot.taken) {
+    // An attended channel never answers with silence.
+    await hooks.sendResponse(CHANNEL_TURN_BUSY_NOTICE)
+    await hooks.onCleanup?.()
+    return
+  }
+  // Taken here, directly before the `try` whose `finally` releases it, so no
+  // setup failure can strand it until the sweeper.
+  const turnLeaseToken = slot.token
+
   // ── Query loop ──
   try {
     const preparedRun = await prepareAssistantRun({
@@ -2570,14 +2592,24 @@ async function processChannelMessageTurn(params: ChannelPipelineParams): Promise
       trustedContributions: [{ name: 'runtime', content: runtimeSystemContext }],
       userVisibleContributions: [{ name: 'turn', content: userVisibleContext }],
     })
-    for await (const event of queryLoop({
+    await runAssistantTurn({
+      sessionId: session.id,
+      policy: turnPolicy,
+      abortController,
+      lease: { mode: 'held', token: turnLeaseToken },
+      model: {
+        provider: preparedRun.model.provider,
+        model: preparedRun.model.model,
+        configuredProviders: params.configuredProviders,
+        customLlm: customLlmRuntime,
+      },
+      loop: {
       ledger: createTurnLedger({
         workspaceId: assistant.workspaceId ?? null,
         assistantId: assistant.id,
         sessionId: session.id,
         payloads: getLedgerPayloadStore(),
       }).ledger,
-      provider: preparedRun.model.provider, model: preparedRun.model.model,
       maxTokens: preparedRun.model.maxTokens,
       inputTokenLimit: preparedRun.model.inputTokenLimit,
       systemPrompt: splitPrompt.stablePrompt,
@@ -2628,7 +2660,8 @@ async function processChannelMessageTurn(params: ChannelPipelineParams): Promise
       ...(tierBudget
         ? { maxTurns: tierBudget.maxTurns, maxToolCalls: tierBudget.maxToolCalls }
         : {}),
-    })) {
+      },
+      sink: { kind: 'adapter', onEvent: async (event) => {
       await assertDeliveryAudience()
       turnOutput.observe(event)
       switch (event.type) {
@@ -2819,8 +2852,10 @@ async function processChannelMessageTurn(params: ChannelPipelineParams): Promise
                 options: selectedOutput.question.options,
               }
             : undefined
+          // Final-only delivery: no render layer will strip planning
+          // scaffolding the model echoed, so sanitize before it ships.
           const { display: visibleText } = parseFollowUps(
-            selectedOutput.kind === 'text' ? selectedOutput.text : '',
+            selectedOutput.kind === 'text' ? sanitizeDeliveryText(selectedOutput.text) : '',
           )
           const attachmentNotes = failedAttachmentNames.length > 0
             ? `${visibleText ? '\n\n' : ''}${failedAttachmentNames.map((n) => `Could not attach: ${n}`).join('\n')}`
@@ -2995,7 +3030,8 @@ async function processChannelMessageTurn(params: ChannelPipelineParams): Promise
           await hooks.sendError(event.error)
           break
       }
-    }
+    } },
+    })
 
     await flushBufferedTurns('[Tool did not return a result. Treat as failed and do not retry.]')
 
@@ -3185,6 +3221,6 @@ async function processChannelMessageTurn(params: ChannelPipelineParams): Promise
     // Watch viewers clear their "Working" card on the terminal bus event —
     // published in the finally, not on the paths we happened to think of.
     publishTurnCompleted({ sessionId: session.id, senderUserId: userId, publishSessionEvent })
-    await updateSessionStatus(session.id, 'idle')
+    await releaseTurn(session.id, turnLeaseToken, 'completed')
   }
 }

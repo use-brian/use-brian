@@ -43,7 +43,7 @@ import type { ProviderAvailability } from '@use-brian/shared/model-registry'
 import type { ResolvedWorkspaceCustomLlm } from '../custom-llm-runtime.js'
 import { ensureServableModel } from '../model-resolution.js'
 import type { SessionPolicy } from '../session-kind.js'
-import { releaseTurn, startLeaseHeartbeat, takeTurnLease } from './lease.js'
+import { hasTurnAbort, registerTurnAbort, releaseTurn, startLeaseHeartbeat, takeTurnLease, unregisterTurnAbort } from './lease.js'
 import type { TurnBilling } from './billing.js'
 
 export type TurnSinkKind = 'sse' | 'adapter' | 'json' | 'return' | 'none'
@@ -152,6 +152,10 @@ export async function runAssistantTurn(params: RunAssistantTurnParams): Promise<
     token = lease.token
   }
 
+  // Register the in-process abort handle unless the runner already did (a
+  // held lease whose runner keeps it through its post-loop work).
+  const ownsAbortHandle = !!token && !hasTurnAbort(params.sessionId, token)
+  if (ownsAbortHandle) registerTurnAbort(params.sessionId, token!, () => params.abortController.abort())
   const stopHeartbeat = token
     ? startLeaseHeartbeat({
         sessionId: params.sessionId,
@@ -194,6 +198,7 @@ export async function runAssistantTurn(params: RunAssistantTurnParams): Promise<
     return result
   } finally {
     stopHeartbeat()
+    if (ownsAbortHandle) unregisterTurnAbort(params.sessionId, token!)
     if (token && lease.mode === 'kernel') await releaseTurn(params.sessionId, token, 'completed')
   }
 }
