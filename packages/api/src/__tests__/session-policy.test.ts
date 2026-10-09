@@ -69,11 +69,15 @@ describe('[COMP:api/session-policy] sessionPolicy drift ledger', () => {
     expect(feedAnchoredRead(policyFor(ROOM))).toBe(false)
   })
 
-  it('L7 admission: multi-human threads are serialized like personal sessions', () => {
-    expect(policyFor(ROOM).admission).toBe('room')
-    expect(policyFor(DRAFT).admission).toBe('draft_busy')
-    for (const row of [DOC_THREAD, OFFICE, FEED_THREAD]) {
-      expect(policyFor(row).admission).toBe('personal')
+  it('L7 admission: every workspace session takes room admission; personal sessions the lease', () => {
+    for (const row of [ROOM, DRAFT, DOC_THREAD, OFFICE, FEED_THREAD]) {
+      expect(policyFor(row).admission).toBe('room')
+    }
+    expect(policyFor(PERSONAL).admission).toBe('personal')
+    // D12: rooms are mention-gated; anchored threads hear every message.
+    expect(policyFor(ROOM).addressing).toBe('mention')
+    for (const row of [DRAFT, DOC_THREAD, OFFICE, FEED_THREAD, PERSONAL]) {
+      expect(policyFor(row).addressing).toBe('every_message')
     }
   })
 

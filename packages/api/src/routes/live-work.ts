@@ -24,10 +24,10 @@
 import { Router } from 'express'
 import { query, queryWithRLS } from '../db/client.js'
 import { getWorkspaceMembershipWithReadScopeSystem } from '../db/workspace-store.js'
-import { isSharedChatSession, TURN_LEASE_STALE_AFTER_MS } from '../db/sessions.js'
+import { TURN_LEASE_STALE_AFTER_MS } from '../db/sessions.js'
 import { liveSessionTier } from '../session-read-access.js'
 import { anchorReadGate } from '../session-read-authority.js'
-import { policyFor } from '../session-kind.js'
+import { classifySession, policyFor, sessionPolicy } from '../session-kind.js'
 
 /** How long a settled item stays on the roster — a read-time window, no stored state (§3.2). */
 export const LIVE_RECENT_WINDOW_MINUTES = 30
@@ -214,11 +214,15 @@ export function projectSessionRow(
   }
   if (tier === 'full') {
     base.visibility = row.visibility
+    // Steering lands only through the per-session turn inbox, which exists
+    // for personal-admission web conversations (D11): workspace sessions
+    // answer a mid-turn message with a follow-up turn instead.
+    const kind = classifySession(row)
     base.canSteer =
       (state === 'working' || state === 'waiting') &&
-      row.mode !== 'draft' &&
-      (row.channelType === 'web' || row.channelType === 'doc_thread') &&
-      !isSharedChatSession(row)
+      sessionPolicy(kind).admission === 'personal' &&
+      kind.transport === 'web' &&
+      kind.lane === 'conversation'
     if (row.title) base.title = row.title
   }
   return base

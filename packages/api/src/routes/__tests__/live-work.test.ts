@@ -202,6 +202,8 @@ describe('[COMP:api/live-work-roster] roster route', () => {
   it('offers steering only on active turn-inbox-backed personal chat lanes', () => {
     expect(projectSessionRow(sessionRow(), CALLER, 'internal', NOW)?.canSteer).toBe(true)
     expect(projectSessionRow(sessionRow({ channelType: 'doc_thread' }), CALLER, 'internal', NOW)?.canSteer).toBe(true)
+    // A workspace doc thread takes room admission (D11): no turn inbox to steer.
+    expect(projectSessionRow(sessionRow({ channelType: 'doc_thread', visibility: 'workspace' }), CALLER, 'internal', NOW)?.canSteer).toBe(false)
     expect(projectSessionRow(sessionRow({ mode: 'draft' }), CALLER, 'internal', NOW)?.canSteer).toBe(false)
     expect(projectSessionRow(sessionRow({ channelType: 'telegram' }), CALLER, 'internal', NOW)?.canSteer).toBe(false)
     expect(projectSessionRow(sessionRow({

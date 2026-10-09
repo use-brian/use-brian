@@ -952,8 +952,8 @@ describe('[COMP:api/chat-route] live-turn admission guard (lease)', () => {
 })
 
 describe('[COMP:api/chat-route] mid-turn input admission', () => {
-  const ordinary = { clientMidTurn: false, isRoom: false, mode: null }
-  const midTurn = { clientMidTurn: true, isRoom: false, mode: null }
+  const ordinary = { clientMidTurn: false, isRoom: false }
+  const midTurn = { clientMidTurn: true, isRoom: false }
 
   it('runs an ordinary send', () => {
     expect(turnInputAdmission(ordinary)).toBe('run')
@@ -980,10 +980,9 @@ describe('[COMP:api/chat-route] mid-turn input admission', () => {
     expect(turnInputAdmission({ ...midTurn, isRoom: true })).toBe('run')
   })
 
-  it('keeps the draft rejection', () => {
-    expect(turnInputAdmission({ ...midTurn, mode: 'draft' })).toBe('reject')
-    // ...but an ordinary send into a draft is unaffected.
-    expect(turnInputAdmission({ ...ordinary, mode: 'draft' })).toBe('run')
+  it('has no draft rejection: a draft takes room admission like every workspace session (D11)', () => {
+    expect(turnInputAdmission({ ...midTurn, isRoom: true })).toBe('run')
+    expect(turnInputAdmission({ ...ordinary, isRoom: true })).toBe('run')
   })
 
   it('mirrors rare control events so Live can intervene beside an open chat stream', () => {

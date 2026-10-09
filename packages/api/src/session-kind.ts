@@ -204,9 +204,17 @@ export type SessionPolicy = {
   read: ReadPolicy
   /** Free posting without a turn (`POST /api/sessions/:id/messages`). */
   post: boolean
-  /** Turn admission (D11). `draft_busy` is the retiring draft rejection (L7). */
-  admission: 'personal' | 'room' | 'draft_busy'
-  /** Does a message need to address the assistant to run a turn (D12)? */
+  /**
+   * Turn admission, by audience (D11, L7). `room`: free posting, one queued
+   * follow-up turn, folding, an atomic slot claim. `personal`: reject while
+   * the lease is live, reclaim a stale one.
+   */
+  admission: 'personal' | 'room'
+  /**
+   * Does a message need to address the assistant to run a turn (D12)? Plain
+   * and channel rooms are mention-gated; anchored threads and drafts treat
+   * every message as addressed.
+   */
   addressing: 'mention' | 'every_message'
   /** Sender stamping and whether names / the participants block reach the model (L8). */
   attribution: { stamp: boolean; namesReachModel: boolean }
@@ -285,8 +293,8 @@ export function sessionPolicy(kind: SessionKind): SessionPolicy {
   return {
     read: workspace ? { rule: 'workspace', anchorGate } : { rule: 'owner' },
     post: room,
-    admission: room ? 'room' : draft ? 'draft_busy' : 'personal',
-    addressing: room ? 'mention' : 'every_message',
+    admission: workspace ? 'room' : 'personal',
+    addressing: workspace && (anchor === 'none' || anchor === 'channel') ? 'mention' : 'every_message',
     attribution: {
       stamp: room || draft || anchor === 'doc_thread' || anchor === 'feed_thread' || anchor === 'office_file',
       namesReachModel: room,

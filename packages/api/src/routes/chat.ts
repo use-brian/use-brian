@@ -1448,40 +1448,6 @@ export function createUpdateViewedSkillTool(args: {
 // (chat.ts imports channel-pipeline, so the reverse import would cycle).
 // Re-exported here because callers and tests already import it from this
 // module.
-/**
- * One in-flight turn per DRAFT session.
- *
- * A draft is a live multi-watcher thread: any participant may drive a turn,
- * but two at once interleave into one history, and the second turn reads the
- * first one's half-written state. Returns the SSE error payload to send, or
- * `null` when the turn may proceed.
- *
- * Workspace-shared CHAT sessions (rooms) no longer reject here (multiplayer
- * chat D2): posting is never busy-gated, and an ADDRESSED message landing
- * mid-turn queues exactly one follow-up turn instead of erroring (T5 — see
- * the room gate in the POST handler). `shared_session_busy` is gone from the
- * human path; turn serialization is internal (the status claim below).
- *
- * Concurrent-turn QUEUEING for drafts stays deferred.
- *
- * See docs/architecture/features/chat-app.md → "The room model".
- */
-export function sharedTurnRejection(session: {
-  status: string
-  visibility: string | null
-  channelType: string
-  appOrigin: string | null
-  mode: string | null
-}): { error: string; code: string } | null {
-  if (session.status !== 'running') return null
-  if (session.mode === 'draft') {
-    return {
-      error: 'Another team member is currently sending a turn in this draft. Please wait until it completes.',
-      code: 'draft_session_busy',
-    }
-  }
-  return null
-}
 
 /**
  * Does this message ADDRESS the room's assistant? (Multiplayer chat D1/T3.)
@@ -1577,38 +1543,32 @@ const roomQueueWaiters = new Set<string>()
  *              runs no matter how many mentions arrive mid-turn.
  */
 /**
- * Queue-vs-run for an ORDINARY session (mid-turn input). Pure so the
+ * Queue-vs-run for a PERSONAL session (mid-turn input). Pure so the
  * invariant is testable; the route resolves the inputs.
  *
- *   - `run`    — no turn in flight. An ordinary send.
+ *   - `run`    — no turn in flight, or a workspace session (room admission).
  *   - `queue`  — a turn is in flight: hand this message to it rather than
  *                starting a second one on the same history.
- *   - `reject` — a turn is in flight on a DRAFT session. Unchanged behaviour
- *                (`draft_session_busy`); concurrent-turn queueing for drafts
- *                stays deferred. `sharedTurnRejection` already emits that
- *                error upstream of the route's call, so this arm is the rule
- *                stated where the queue decision lives — a future reordering
- *                cannot accidentally start queueing drafts.
  *
- * **Rooms never reach the inbox.** A room message is a durable post every
- * member must see the instant it is sent, whether or not the assistant ever
- * picks it up (multiplayer chat D2/T2) — the exact opposite of the
- * persist-on-drain contract mid-turn input is built on. Rooms answer a
- * mid-turn mention with the T5 follow-up turn instead. Converging the two is
+ * **Workspace sessions never reach the inbox.** A message in a room, a draft
+ * or an anchored thread is a durable post every member must see the instant
+ * it is sent, whether or not the assistant ever picks it up (multiplayer chat
+ * D2/T2), the exact opposite of the persist-on-drain contract mid-turn input
+ * is built on. They answer a mid-turn message with the T5 follow-up turn
+ * instead (unified-sessions D11). Converging the two is
  * `docs/plans/multiplayer-chat.md` §7.
  *
  * See docs/architecture/engine/mid-turn-input.md.
  */
-export type TurnInputAdmission = 'run' | 'queue' | 'reject'
+export type TurnInputAdmission = 'run' | 'queue'
 export function turnInputAdmission(params: {
   /** The client set `midTurn` — it has a live stream open on this session. */
   clientMidTurn: boolean
+  /** `sessionPolicy(kind).admission === 'room'`: every workspace session. */
   isRoom: boolean
-  mode: string | null
 }): TurnInputAdmission {
   if (!params.clientMidTurn) return 'run'
   if (params.isRoom) return 'run'
-  if (params.mode === 'draft') return 'reject'
   return 'queue'
 }
 
@@ -3114,21 +3074,16 @@ export function chatRoutes(options: WebChatOptions): Router {
         if (promoted) message = promoted.replaced
       }
 
-      // Live multi-watcher sessions (draft mode): any participant can drive a
-      // turn, but only one at a time. Reject concurrent turns with a clean 409
-      // so the frontend can render "someone else is in a turn".
-      const busy = sharedTurnRejection(session)
-      if (busy) {
-        sendEvent('error', busy)
-        res.end()
-        return
-      }
-
       sessionIdForError = session.id
       turnTimingIdentity = { userId: user.id, assistantId: assistant.id, sessionId: session.id }
 
       const isRoomSession = isSharedChatSession(session)
       const turnPolicy = sessionPolicy(classifySession(session))
+      // D11: admission is decided by audience. Every workspace session (a
+      // room, a draft, a doc / Office / feed thread) posts freely, queues
+      // one follow-up turn and claims the slot atomically; a personal
+      // session rejects while its lease is live and reclaims a stale one.
+      const roomAdmission = turnPolicy.admission === 'room'
       const scopeAccumulator = new ContextScopeAccumulator({
         compartments: turnScope.writeCompartments,
         projectIds: turnScope.writeProjectIds,
@@ -3220,11 +3175,11 @@ export function chatRoutes(options: WebChatOptions): Router {
       {
         const clientMidTurn = requestedMidTurn === true
         const needsLeaseCheck =
-          session.status === 'running' && !clientMidTurn && !isRoomSession
+          session.status === 'running' && !clientMidTurn && !roomAdmission
         const liveAdmission = liveTurnAdmission({
           status: session.status,
           clientMidTurn,
-          isRoom: isRoomSession,
+          isRoom: roomAdmission,
           leaseLive: needsLeaseCheck ? await isTurnLeaseLive(session.id) : false,
         })
         if (liveAdmission === 'reject') {
@@ -3268,8 +3223,7 @@ export function chatRoutes(options: WebChatOptions): Router {
       // See docs/architecture/engine/mid-turn-input.md.
       if (turnInputAdmission({
         clientMidTurn: requestedMidTurn === true,
-        isRoom: isRoomSession,
-        mode: session.mode,
+        isRoom: roomAdmission,
       }) === 'queue') {
         const text = typeof message === 'string' ? message.trim() : ''
         const carriesAttachments =
@@ -3419,7 +3373,7 @@ export function chatRoutes(options: WebChatOptions): Router {
           return
         }
       }
-      if (isRoomSession && typeof message === 'string' && message.trim()) {
+      if (roomAdmission && typeof message === 'string' && message.trim()) {
         // A `const` alias so the narrowed `string` type survives into the
         // closures below (`persistRoomPost` / `recordMentionsFor`) — `message`
         // itself is `let`-bound and mutable elsewhere in this handler, so TS
@@ -3439,7 +3393,9 @@ export function chatRoutes(options: WebChatOptions): Router {
             // Unresolvable reply target — fall through to the other triggers.
           }
         }
-        const addressed = detectRoomAddress({
+        // D12: a plain room is mention-gated; an anchored thread (doc,
+        // Office, feed, draft) treats every message as addressed.
+        const addressed = turnPolicy.addressing === 'every_message' || detectRoomAddress({
           message,
           assistantName: assistant.name,
           ask: requestedAsk === true,
@@ -6705,7 +6661,7 @@ export function chatRoutes(options: WebChatOptions): Router {
       // slot (its history was assembled pre-claim, so this window is kept
       // rare, not impossible; the early queue path catches the common
       // mid-turn case with a fresh post-wait assembly).
-      if (isRoomSession) {
+      if (roomAdmission) {
         let claimed = await claimRoomTurn(session.id)
         while (!claimed) {
           // A lease that went stale while we waited is reclaimed rather than

@@ -152,39 +152,12 @@ describe('[COMP:api/sessions-workspace-list] shared-chat predicate scope', () =>
   })
 })
 
-describe('[COMP:api/sessions-workspace-list] turn serialization is internal for rooms', () => {
-  const idle = { status: 'idle', visibility: 'workspace', channelType: 'web', appOrigin: 'chat', mode: null }
-  const running = { ...idle, status: 'running' }
-
-  it('lets a turn through when nothing is in flight', async () => {
-    const { sharedTurnRejection } = await import('../chat.js')
-    expect(sharedTurnRejection(idle)).toBeNull()
-  })
-
-  it('no longer rejects a concurrent send in a room — D2: `shared_session_busy` left the human path', async () => {
-    // Multiplayer chat (docs/plans/multiplayer-chat.md): a plain post during
-    // a live turn is accepted (the post path is never gated), and an
-    // ADDRESSED send queues exactly one follow-up turn (roomTurnAdmission,
-    // [COMP:api/room-mechanics]). Serialization moved inside the route.
-    const { sharedTurnRejection } = await import('../chat.js')
-    expect(sharedTurnRejection(running)).toBeNull()
-  })
-
-  it('keeps the draft session busy code (drafts still take one turn at a time)', async () => {
-    const { sharedTurnRejection } = await import('../chat.js')
-    expect(
-      sharedTurnRejection({ ...running, mode: 'draft', appOrigin: null })?.code,
-    ).toBe('draft_session_busy')
-  })
-
-  it('never busy-blocks a personal chat or a doc comment thread', async () => {
-    const { sharedTurnRejection } = await import('../chat.js')
-    // A personal session is single-author — a second turn is the same person.
-    expect(sharedTurnRejection({ ...running, visibility: 'owner' })).toBeNull()
-    // A doc thread is workspace-VISIBLE but single-author; blocking it would
-    // stop someone replying in their own thread.
-    expect(
-      sharedTurnRejection({ ...running, channelType: 'doc_thread', appOrigin: 'doc' }),
-    ).toBeNull()
+describe('[COMP:api/sessions-workspace-list] turn serialization is internal for workspace sessions', () => {
+  it('admits by audience: workspace sessions queue a follow-up turn, personal sessions use the lease (D11)', async () => {
+    const { policyFor } = await import('../../session-kind.js')
+    expect(policyFor({ channelType: 'web', visibility: 'workspace', appOrigin: 'chat' }).admission).toBe('room')
+    expect(policyFor({ channelType: 'web', visibility: 'workspace', mode: 'draft' }).admission).toBe('room')
+    expect(policyFor({ channelType: 'doc_thread', visibility: 'workspace', appOrigin: 'doc' }).admission).toBe('room')
+    expect(policyFor({ channelType: 'web', visibility: 'owner', appOrigin: 'chat' }).admission).toBe('personal')
   })
 })

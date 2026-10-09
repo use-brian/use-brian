@@ -10,7 +10,7 @@
  *   - `detectRoomAddress` (T3) — server-side turn-vs-post decision.
  *   - `roomTurnAdmission` (T5) — queue-depth-one.
  *   - `mayResolveRoomConfirmation` (T11/D8) — addresser-or-admin write gate.
- *   - `sharedTurnRejection` (D2) — rooms are no longer busy-rejected.
+ *   - room admission (D2, unified-sessions D11) — no workspace session is busy-rejected.
  *   - `coalesceConsecutiveUserMessages` (T4) — many posts, one labeled user
  *     turn, strict (user, assistant) alternation restored.
  *
@@ -18,6 +18,7 @@
  */
 
 import { readFileSync } from 'node:fs'
+import { policyFor } from '../../session-kind.js'
 import { describe, it, expect, vi } from 'vitest'
 import {
   buildRoomResponseCoordinationBlock,
@@ -27,7 +28,6 @@ import {
   mayResolveRoomConfirmation,
   publishRoomTurnActivity,
   roomTurnAdmission,
-  sharedTurnRejection,
   turnStopOutcome,
 } from '../chat.js'
 import {
@@ -210,23 +210,15 @@ describe('[COMP:api/room-mechanics] mayResolveRoomConfirmation (T11/D8)', () => 
   })
 })
 
-describe('[COMP:api/room-mechanics] busy gate leaves the human path (D2)', () => {
-  const runningRoom = {
-    status: 'running',
-    visibility: 'workspace',
-    channelType: 'web',
-    appOrigin: 'chat',
-    mode: null,
-  }
-
-  it('a running room session is NOT rejected (serialization is internal now)', () => {
-    expect(sharedTurnRejection(runningRoom)).toBeNull()
-  })
-
-  it('draft sessions keep their distinct busy code', () => {
-    expect(
-      sharedTurnRejection({ ...runningRoom, mode: 'draft', appOrigin: null })?.code,
-    ).toBe('draft_session_busy')
+describe('[COMP:api/room-mechanics] no busy gate on the human path (D2, D11)', () => {
+  it('every workspace session takes room admission, drafts included', () => {
+    for (const row of [
+      { channelType: 'web', visibility: 'workspace', appOrigin: 'chat' },
+      { channelType: 'web', visibility: 'workspace', mode: 'draft' },
+      { channelType: 'doc_thread', visibility: 'workspace' },
+    ]) {
+      expect(policyFor(row).admission).toBe('room')
+    }
   })
 })
 
