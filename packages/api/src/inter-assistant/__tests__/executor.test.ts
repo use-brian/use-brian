@@ -2727,8 +2727,11 @@ describe('[COMP:api/inter-assistant-executor] delivery-conversation commitments 
     expect(sp).toContain('# Open commitments (delivery conversation)')
     expect(sp).toContain('`diet:2026-08-17`')
     expect(sp).toContain('squat 5x5 @ 80kg')
-    // Lands before the # Context footer, beside memory context.
-    expect(sp.indexOf('# Open commitments (delivery conversation)')).toBeLessThan(sp.indexOf('# Context'))
+    // The per-run # Context (date, memory) rides the trusted runtime channel,
+    // never the cacheable stable prompt the commitments block sits in.
+    expect(sp).not.toContain('# Context')
+    const runtime = (mockQueryLoop.mock.calls[0][0] as { runtimeSystemContext?: string }).runtimeSystemContext ?? ''
+    expect(runtime).toContain('# Context')
     // Read-only: no commitment write tools reach the callee surface.
     const tools = mockQueryLoop.mock.calls[0][0].tools as Map<string, unknown>
     expect(tools.has('trackCommitment')).toBe(false)

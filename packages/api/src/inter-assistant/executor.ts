@@ -128,7 +128,7 @@ import {
 } from '../context-scope/delivery-authority.js'
 import { createWorkflowPublicationAuthorizer, type AuthorizeWorkflowPublication } from '../workflow/publication-consent.js'
 import { loadDecisionPlaybookContext } from '../decision-learning/playbook-context.js'
-import { renderCharterBlock } from '@use-brian/shared'
+import { renderCharterBlock, resolveCharter } from '@use-brian/shared'
 import {
   applyPublicResearchToolCeiling,
   resolveApiKeyClientPrincipal,
@@ -1709,7 +1709,18 @@ export function createCalleeExecutor(options: CalleeExecutorOptions): CalleeExec
       ? `\n\n## External client boundary\nThis automated draft is running as one isolated external client. Use only the inbound request and the client-scoped context and tools available in this turn. Do not infer or request another client identity, do not claim access to workspace-wide context, and do not attempt to deliver or send the result. The final text is an internal draft for workspace review.`
       : ''
     const activeWorkspaceContext = formatActiveWorkspaceContext(turnScope)
-    const fullSystemPrompt = `${systemPrompt}${decisionPlaybookBlock}${externalClientGuardBlock}${docAnchorBlock}${priorRunMemoryBlock}${workflowGuardBlock}${recordCreationGuardBlock}${automatedToolPolicyBlock}${unavailableBlock}${skillPromptFragment}${blueprintPromptFragment}${deliveryConversationBlock}\n\n# Context\nCurrent date and time: ${currentDateTime}\nTimezone: ${calleeActor.timezone}\n\n${memoryContext}${activeWorkspaceContext ? `\n\n${activeWorkspaceContext}` : ''}`
+    // Split prompt (turn kernel, section 4.3): the stable prompt carries the
+    // callee's persona (Layer 1 + its charter, the same Layer 2 every other
+    // runner renders) and the step's fixed policy blocks; the date, memory and
+    // workspace context are per-run data and ride the trusted runtime channel,
+    // so they never sit inside the cacheable stable prefix.
+    const calleeCharterBlock = calleeAssistant.kind === 'app'
+      ? null
+      : renderCharterBlock(resolveCharter(calleeAssistant))
+    const calleeStablePrompt = `${systemPrompt}${calleeCharterBlock ? `\n\n${calleeCharterBlock}` : ''}${decisionPlaybookBlock}${externalClientGuardBlock}${docAnchorBlock}${priorRunMemoryBlock}${workflowGuardBlock}${recordCreationGuardBlock}${automatedToolPolicyBlock}${unavailableBlock}${skillPromptFragment}${blueprintPromptFragment}${deliveryConversationBlock}`
+    const calleeRuntimeContext = `# Context\nCurrent date and time: ${currentDateTime}\nTimezone: ${calleeActor.timezone}\n\n${memoryContext}${activeWorkspaceContext ? `\n\n${activeWorkspaceContext}` : ''}`
+    // The whole picture, for compaction and the evidence seed.
+    const fullSystemPrompt = `${calleeStablePrompt}\n\n${calleeRuntimeContext}`
     // 6. Build messages and run the query loop.
     //
     // Persist the user turn first, then build the message list. A durable
@@ -2058,7 +2069,7 @@ export function createCalleeExecutor(options: CalleeExecutorOptions): CalleeExec
     // The synthesis loop sees the gathered findings (research fan-out only);
     // compaction above used the un-injected prompt, which is correct.
     const loopSystemPrompt =
-      (researchContext ? buildPreflightPrompt(fullSystemPrompt, researchContext) : fullSystemPrompt) +
+      (researchContext ? buildPreflightPrompt(calleeStablePrompt, researchContext) : calleeStablePrompt) +
       outputBindingBlock +
       deliveryFormatBlock
 
@@ -2093,6 +2104,7 @@ export function createCalleeExecutor(options: CalleeExecutorOptions): CalleeExec
         : undefined
     if (evidenceAccumulator) {
       evidenceAccumulator.note(loopSystemPrompt)
+      evidenceAccumulator.note(calleeRuntimeContext)
       evidenceAccumulator.note(JSON.stringify(messages))
     }
 
@@ -2113,7 +2125,7 @@ export function createCalleeExecutor(options: CalleeExecutorOptions): CalleeExec
           },
           candidateTools: finalTools,
           bindTools: (candidateTools) => candidateTools,
-          trustedContributions: [{ name: 'callee', content: loopSystemPrompt }],
+          trustedContributions: [{ name: 'runtime', content: calleeRuntimeContext }],
         })
         await runAssistantTurn({
           sessionId: session.id,
@@ -2153,7 +2165,8 @@ export function createCalleeExecutor(options: CalleeExecutorOptions): CalleeExec
           // loop's single bounded continuation instead of recording a visibly
           // truncated step as completed.
           channelType: params.callerChannelType === 'workflow' ? 'workflow' : undefined,
-          systemPrompt: preparedRun.trustedContext,
+          systemPrompt: loopSystemPrompt,
+          runtimeSystemContext: preparedRun.trustedContext,
           messages,
           tools: preparedRun.tools,
           context: {
