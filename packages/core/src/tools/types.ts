@@ -74,6 +74,11 @@ export type ToolContext = {
    */
   attended?: boolean
   /**
+   * False when `sessionId` is synthetic (a workflow run id, a brain-key
+   * namespace), not a `sessions` row. Read through `provenanceSessionId`.
+   */
+  sessionPersisted?: boolean
+  /**
    * Authenticated principal for a programmatic tool call. Brain MCP fills
    * this from the credential that actually authenticated the request so
    * domain services can audit API keys, OAuth grants, and Home apps without

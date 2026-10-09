@@ -13,6 +13,9 @@
  * `app_origin`, the session `channel_type` or the `channel_id` sentinels.
  * Every concern (read, admission, attribution, delivery, live follow,
  * confirmations, lifecycle, billing, ...) is answered once by `sessionPolicy`.
+ * Provenance anchoring is not a session-kind concern either: the runner
+ * stamps whether its session id is a real row (`sessionPersisted`), and
+ * `provenanceSessionId` reads that (L14).
  * Tool interactivity is deliberately NOT a session concern (D13): it comes
  * from the principal driving the turn (`ToolContext.attended`, stamped from
  * the execution identity), so a person in a doc thread is attended and a
@@ -272,11 +275,6 @@ export type SessionPolicy = {
    * Live roster)? Not an Office file's thread: its audience is the file's.
    */
   surfacesBeyondAnchor: boolean
-  /**
-   * Does the turn's `sessionId` name a persisted `sessions` row, per
-   * consumer (L14): task provenance and CRM provenance.
-   */
-  persistedRow: { tasks: boolean; crm: boolean }
   /** Who pays for a turn (D2, L18). */
   billing: 'user' | 'addresser' | 'workspace'
   /** Compaction strategy. */
@@ -334,10 +332,6 @@ export function sessionPolicy(kind: SessionKind): SessionPolicy {
     lifecycle: workspace ? { rename: 'participants', delete: 'admin' } : { rename: 'owner', delete: 'owner' },
     humanActivity: conversation,
     surfacesBeyondAnchor: anchor !== 'office_file',
-    persistedRow: {
-      tasks: kind.machine !== 'programmatic' && kind.machine !== 'workflow',
-      crm: kind.machine !== 'programmatic',
-    },
     billing: 'user',
     compaction: kind.transport === 'web' ? 'context_pressure' : 'idle_tiered',
     createAdmission: room,

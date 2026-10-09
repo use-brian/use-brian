@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest'
-import { isAttendedTurn } from '@use-brian/core'
+import { isAttendedTurn, provenanceSessionId } from '@use-brian/core'
 import { feedAnchoredRead, policyFor, sessionKindSql, transportPolicy, type SessionKindRow } from '../session-kind.js'
 
 /**
@@ -137,9 +137,10 @@ describe('[COMP:api/session-policy] sessionPolicy drift ledger', () => {
     expect(sql).toContain('s.transient IS NOT TRUE')
   })
 
-  it('L14 persisted row: tasks and CRM disagree on workflow runs', () => {
-    expect(policyFor(WORKFLOW).persistedRow).toEqual({ tasks: false, crm: true })
-    expect(policyFor(PROGRAMMATIC).persistedRow).toEqual({ tasks: false, crm: false })
+  it('L14 persisted row: one provenance rule from the runner\'s own fact, not the channel', () => {
+    expect(provenanceSessionId({ sessionId: 'run-1', sessionPersisted: false })).toBeNull()
+    expect(provenanceSessionId({ sessionId: 'callee-session' })).toBe('callee-session')
+    expect('persistedRow' in policyFor(WORKFLOW)).toBe(false)
   })
 
   it('L15 external channel sets: msteams and custom fall out of different lists', () => {

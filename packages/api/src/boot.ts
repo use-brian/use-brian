@@ -3540,6 +3540,7 @@ export async function bootOpenApi(opts: BootOpenApiOptions): Promise<BootResult>
           sessionId: run.id,
           channelType: 'workflow',
           channelId: run.id,
+          sessionPersisted: false,
         },
         attribution: { billingUserId: userId, credentialOwnerUserId: userId },
         key: {

@@ -56,6 +56,23 @@ export function isAttendedTurn(context: Pick<ToolContext, 'attended' | 'executio
   return context.executionContext?.identity.kind === 'attended'
 }
 
+/**
+ * The `source_session_id` a write may stamp (mig 316 provenance): the turn's
+ * session, unless the session id is synthetic (`sessionPersisted === false`:
+ * a workflow run id, a brain-key namespace) or the write came from
+ * extraction / an episode, which carry their own anchor. ONE rule for tasks,
+ * CRM and every other provenance-stamping tool (unified-sessions L14); it
+ * never guesses from the channel type.
+ */
+export function provenanceSessionId(
+  context: Pick<ToolContext, 'sessionId' | 'sessionPersisted'>,
+  opts?: { writeSource?: 'user' | 'extracted'; writeSourceEpisodeId?: string | null },
+): string | null {
+  if (opts?.writeSourceEpisodeId || opts?.writeSource === 'extracted') return null
+  if (context.sessionPersisted === false) return null
+  return context.sessionId
+}
+
 /** The wire carrying this turn: `transport` when stamped, else `channelType`. */
 export function toolTransport(context: Pick<ToolContext, 'transport' | 'channelType'>): string {
   return context.transport ?? context.channelType

@@ -380,6 +380,8 @@ export async function resumeFromApproval(
     userId: run.triggeredBy ?? workflow.createdBy,
     assistantId: toolAssistantId,
     sessionId: run.id,
+    // The run id is not a sessions row.
+    sessionPersisted: false,
     appId: 'Use Brian',
     channelType: 'workflow',
     channelId: run.id,

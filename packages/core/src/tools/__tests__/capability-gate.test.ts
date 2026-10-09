@@ -8,6 +8,7 @@ import { buildTool } from '../types.js'
 import {
   filterToolsByCapabilities,
   isAttendedTurn,
+  provenanceSessionId,
   toolTransport,
 } from '../capability-gate.js'
 import { createExecutionContext, executionToolContext } from '../../security/execution-context.js'
@@ -148,6 +149,19 @@ describe('[COMP:tools/capability-gate] isAttendedTurn (Tier-C write-gate discrim
   it('reads the transport when stamped and falls back to the channel', () => {
     expect(toolTransport({ channelType: 'doc_thread', transport: 'web' })).toBe('web')
     expect(toolTransport({ channelType: 'telegram' })).toBe('telegram')
+  })
+})
+
+
+describe('[COMP:tools/capability-gate] provenanceSessionId (one rule for tasks and CRM, L14)', () => {
+  it('stamps a real session and never a synthetic one, whatever the channel', () => {
+    expect(provenanceSessionId({ sessionId: 's-1' })).toBe('s-1')
+    expect(provenanceSessionId({ sessionId: 'run-1', sessionPersisted: false })).toBeNull()
+  })
+
+  it('leaves extraction and episode writes to their own anchor', () => {
+    expect(provenanceSessionId({ sessionId: 's-1' }, { writeSource: 'extracted' })).toBeNull()
+    expect(provenanceSessionId({ sessionId: 's-1' }, { writeSourceEpisodeId: 'e-1' })).toBeNull()
   })
 })
 
