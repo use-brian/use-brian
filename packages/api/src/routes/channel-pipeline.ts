@@ -1,3 +1,4 @@
+import { PER_TURN_FILES_INDEX_CAP, PER_TURN_INDEX_CAP } from '../turn/index-caps.js'
 import { policyFor } from '../session-kind.js'
 import { releaseTurn, takeTurnLease, waitForTurnSlot } from '../turn/lease.js'
 import { runAssistantTurn } from '../turn/kernel.js'
@@ -151,18 +152,7 @@ import { isRegistryModelAvailable, registryRow } from '@use-brian/shared/model-r
 import type { ProviderAvailability } from '@use-brian/shared/model-registry'
 import { buildWorkspaceNativeSlashCommands } from './native-slash-commands.js'
 
-/**
- * Per-turn memory index cap — see chat.ts for the rationale and
- * docs/architecture/context-engine/memory-system.md → "Index cap".
- * Kept in sync across every per-turn caller.
- */
-const PER_TURN_INDEX_CAP = 60
 
-/**
- * Per-turn cap for the `# Workspace Files` L1 block (Q3 / company-brain §10).
- * Mirror in `routes/chat.ts` — keep in sync.
- */
-const PER_TURN_FILES_INDEX_CAP = 50
 
 // ── Channel hooks ────────────────────────────────────────────────
 

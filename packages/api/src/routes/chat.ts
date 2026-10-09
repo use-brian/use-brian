@@ -1,3 +1,4 @@
+import { PER_TURN_FILES_INDEX_CAP, PER_TURN_INDEX_CAP } from '../turn/index-caps.js'
 import { dispatchPersistedWebInput } from './_incoming-chat-event.js'
 import { filterCoordinatorTools, COORDINATOR_DOCUMENT_WORKFLOW_ADDENDUM } from './chat-coordinator-tools.js'
 import { debugDocumentFlow, executionToolContext, pinAccessCeiling, summarizeProviderError } from '@use-brian/core'
@@ -335,21 +336,7 @@ export async function settleInlineToolApproval(params: {
   return 'already_settled'
 }
 
-/**
- * Maximum non-identity memory-index rows injected into the per-turn
- * system prompt. Sized for ~1,400 input tokens at 60 rows × ~80 chars
- * + footer. Memories beyond the cap are surfaced to the model via a
- * "N more memories stored — use getMemory(...)" footer so retrieval
- * stays explicit rather than relying on full-list enumeration.
- * See docs/architecture/context-engine/memory-system.md → "Index cap".
- */
-const PER_TURN_INDEX_CAP = 60
 
-/**
- * Per-turn cap for the `# Workspace Files` L1 block (Q3 / company-brain §10).
- * Mirror in `channel-pipeline.ts` — keep in sync.
- */
-const PER_TURN_FILES_INDEX_CAP = 50
 
 /**
  * Assistant-run presence client — tells `apps/doc-sync` when a run opens/closes

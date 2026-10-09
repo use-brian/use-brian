@@ -48,12 +48,22 @@ vi.mock('../../db/sessions.js', () => ({
   // default so every consult that carries a deliverTarget stays block-free
   // unless a test seeds it.
   listSessionsByChannelForWorkspaceSystem: vi.fn().mockResolvedValue([]),
+  // Turn-kernel lease (every callee turn holds one).
+  isTurnLeaseLive: vi.fn().mockResolvedValue(false),
+  reclaimStaleTurn: vi.fn().mockResolvedValue(false),
+  takeTurnSlot: vi.fn().mockResolvedValue(undefined),
+  claimTurnSlot: vi.fn().mockResolvedValue(true),
+  startTurnLease: vi.fn().mockResolvedValue('lease-token'),
+  touchTurnLease: vi.fn().mockResolvedValue({ held: true, cancelRequested: false }),
+  releaseTurnLease: vi.fn().mockResolvedValue(true),
+  TURN_HEARTBEAT_INTERVAL_MS: 20_000,
 }))
 vi.mock('../../billing-party.js', () => ({
   billingPartyForAssistant: vi.fn(),
 }))
 vi.mock('../../db/workspace-store.js', () => ({
   getConnectorUserId: vi.fn().mockResolvedValue('owner-1'),
+  getWorkspacePlan: vi.fn().mockResolvedValue('pro'),
   getWorkspaceRoleSystem: vi.fn().mockResolvedValue('member'),
   // injectMcpTools gates the owner-personal base load on this; `true`
   // (solo workspace) preserves the pre-gate load behavior these tests expect.
@@ -164,7 +174,7 @@ function memoryStore() {
   return {
     getSoul: vi.fn().mockResolvedValue(null),
     getIdentity: vi.fn().mockResolvedValue([]),
-    getIndex: vi.fn().mockResolvedValue([]),
+    getIndexRanked: vi.fn().mockResolvedValue({ rows: [], totalCount: 0 }),
     getWorkspaceIdentity: vi.fn().mockResolvedValue([]),
     getWorkspaceIndex: vi.fn().mockResolvedValue([]),
   }
@@ -377,7 +387,7 @@ describe('[COMP:api/inter-assistant-executor] createCalleeExecutor', () => {
       workspaceId: 'workspace-1', userId: 'owner-1', clearance: 'internal',
       compartments: ['product'], mutationCompartments: ['product'], projectIds: null, visibilityAssistantIds: ['caller-1'],
     } })).resolves.toBe('shared response')
-    expect(scopedMemory.getIndex).toHaveBeenCalledWith(expect.objectContaining({ visibilityAssistantIds: [] }))
+    expect(scopedMemory.getIndexRanked).toHaveBeenCalledWith(expect.objectContaining({ visibilityAssistantIds: [] }), 60)
   })
   it('withholds a tool result after revocation and preserves the uncertain-operation warning', async () => {
     const primary = { ...calleeAssistant, workspaceId: 'workspace-1', kind: 'primary', clearance: 'confidential', compartments: null }
@@ -436,9 +446,9 @@ describe('[COMP:api/inter-assistant-executor] createCalleeExecutor', () => {
       workspaceId: 'workspace-1', userId: 'owner-1', clearance: 'internal',
       compartments: ['product'], mutationCompartments: ['product'], projectIds: null, visibilityAssistantIds: ['caller-1'],
     } })).resolves.toBe('bounded')
-    expect(scopedMemory.getIndex).toHaveBeenCalledWith(expect.objectContaining({
+    expect(scopedMemory.getIndexRanked).toHaveBeenCalledWith(expect.objectContaining({
       clearance: 'internal', compartments: ['product'], visibilityAssistantIds: ['caller-1'],
-    }))
+    }), 60)
   })
   it('refuses a serialized request after caller access shrinks, before callee reads', async () => {
     mockFindAssistant.mockResolvedValue({ ...calleeAssistant, id: 'caller-1', workspaceId: 'workspace-1',
@@ -481,7 +491,7 @@ describe('[COMP:api/inter-assistant-executor] createCalleeExecutor', () => {
     yieldsText('Bounded response')
     await runWithAgentAccess({workspaceId:'workspace-1',userId:'actor-1',clearance:'internal',compartments:['product'],mutationCompartments:[],projectIds:[],visibilityAssistantIds:['caller-1']},()=>callee({...baseParams,callerUserId:'actor-1'}))
     expect(mockResolveReadCeilings).toHaveBeenCalledWith('actor-1','workspace-1','confidential',null)
-    expect(scopedMemory.getIndex).toHaveBeenCalledWith(expect.objectContaining({userId:'actor-1',clearance:'internal',compartments:['product'],mutationCompartments:[],projectIds:[],visibilityAssistantIds:['caller-1']}))
+    expect(scopedMemory.getIndexRanked).toHaveBeenCalledWith(expect.objectContaining({userId:'actor-1',clearance:'internal',compartments:['product'],mutationCompartments:[],projectIds:[],visibilityAssistantIds:['caller-1']}), 60)
     expect(mockInjectMcp).toHaveBeenCalledWith(expect.objectContaining({contextScope:expect.objectContaining({effectiveCompartments:['product'],effectiveProjectIds:[]})}))
     expect(mockQueryLoop.mock.calls.at(-1)?.[0].context).toMatchObject({userId:'actor-1',visibilityAssistantIds:['caller-1'],clearance:'internal',compartments:['product'],mutationCompartments:[]})
     expect(mockSession).toHaveBeenCalledWith(expect.objectContaining({userId:'actor-1'}))
@@ -581,12 +591,12 @@ describe('[COMP:api/inter-assistant-executor] createCalleeExecutor', () => {
         userId: 'client-shadow-1',
       },
     }))
-    expect(scopedMemory.getIndex).toHaveBeenCalledWith(expect.objectContaining({
+    expect(scopedMemory.getIndexRanked).toHaveBeenCalledWith(expect.objectContaining({
       userId: 'client-shadow-1',
       clearance: 'public',
       compartments: [],
       clientSelfMemory: { compartment: 'client:client-17' },
-    }))
+    }), 60)
     expect(scopedMemory.getWorkspaceIndex).not.toHaveBeenCalled()
     const loopArgs = mockQueryLoop.mock.calls.at(-1)?.[0]
     expect(loopArgs.maxTurns).toBe(2)
@@ -2153,7 +2163,7 @@ describe('[COMP:api/inter-assistant-executor] workflow research fan-out + memory
     return {
       getSoul: vi.fn().mockResolvedValue(null),
       getIdentity: vi.fn().mockResolvedValue([]),
-      getIndex: vi.fn().mockResolvedValue([]),
+      getIndexRanked: vi.fn().mockResolvedValue({ rows: [], totalCount: 0 }),
       getWorkspaceIdentity: vi.fn().mockResolvedValue([]),
       getWorkspaceIndex: vi.fn().mockResolvedValue([]),
       getWorkspaceMemoriesByCategory: vi.fn().mockResolvedValue([]),
@@ -2220,9 +2230,9 @@ describe('[COMP:api/inter-assistant-executor] workflow research fan-out + memory
 
   it('injects prior-run workflow memories with a save-only-new instruction', async () => {
     const store = wsMemoryStore({
-      getIndex: vi.fn().mockResolvedValue([
+      getIndexRanked: vi.fn().mockResolvedValue({ rows: [
         { id: 'abcd1234-0000-0000-0000-000000000000', summary: 'HK TVP subsidy fact', tags: [] },
-      ]),
+      ], totalCount: 1 }),
       getWorkspaceIndex: vi.fn().mockResolvedValue([
         { id: 'abcd1234-0000-0000-0000-000000000000', summary: 'HK TVP subsidy fact', tags: [] },
       ]),

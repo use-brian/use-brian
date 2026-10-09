@@ -1,3 +1,4 @@
+import { PER_TURN_FILES_INDEX_CAP, PER_TURN_INDEX_CAP } from '../turn/index-caps.js'
 import { renderSystemContext } from '@use-brian/core'
 /**
  * Shared public turn pipeline — the body of the public API's message
@@ -490,8 +491,6 @@ export function resolvePublicContextBlock(params: {
   return buildAssistantNameSection(params.assistantName) ?? ''
 }
 
-/** Per-turn ceiling on the `# Workspace Files` index. Mirrors chat.ts. */
-const PUBLIC_TURN_FILES_INDEX_CAP = 50
 
 const CLIENT_MEMORY_TAG = 'client-self'
 
@@ -1077,11 +1076,11 @@ export async function executePublicTurn(
   // is the substance of what the link is meant to expose.
   let memoryContext = ''
   if (isIdentified || fullScope) {
-    const [soulContext, identityMemories, memoryIndex, workspaceIdentityMemories, teamMemoryIndex] =
+    const [soulContext, identityMemories, rankedIndex, workspaceIdentityMemories, teamMemoryIndex] =
       await Promise.all([
         (deps.memoryStore.getSoulContext?.(memoryViewerCtx, 'Use Brian') ?? Promise.resolve({ content: null, evidence: {} })),
         deps.memoryStore.getIdentity(memoryViewerCtx),
-        deps.memoryStore.getIndex(memoryViewerCtx),
+        deps.memoryStore.getIndexRanked(memoryViewerCtx, PER_TURN_INDEX_CAP),
         // Team memory is what makes a full-scope link useful, and what makes
         // the internal lane a colleague rather than a stranger; the external
         // keyed lanes stay on their per-user projection.
@@ -1096,14 +1095,15 @@ export async function executePublicTurn(
     scopeAccumulator.note(soulContext.evidence)
     noteAutomaticScopeEvidence(scopeAccumulator, [
       ...identityMemories,
-      ...memoryIndex,
+      ...rankedIndex.rows,
       ...workspaceIdentityMemories,
       ...teamMemoryIndex,
     ])
     memoryContext = buildMemoryContext({
       soul,
       identityMemories: identityMemories.map((m) => ({ id: m.id, summary: m.summary, detail: m.detail })),
-      memoryIndex: memoryIndex.map((m) => ({ ...m, appId: null })),
+      memoryIndex: rankedIndex.rows.map((m) => ({ ...m, appId: null })),
+      totalNonIdentityCount: rankedIndex.totalCount,
       workspaceIdentityMemories: workspaceIdentityMemories.map((m) => ({
         id: m.id,
         summary: m.summary,
@@ -1140,7 +1140,7 @@ export async function executePublicTurn(
             projectIds: turnScope.effectiveProjectIds,
             systemRead: laneReadsSystemSide(input.contextScope) || undefined,
           },
-          PUBLIC_TURN_FILES_INDEX_CAP,
+          PER_TURN_FILES_INDEX_CAP,
         )
         noteAutomaticScopeEvidence(scopeAccumulator, rows)
         workspaceFilesContext = buildWorkspaceFilesContext(rows)

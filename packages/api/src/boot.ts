@@ -3305,6 +3305,8 @@ export async function bootOpenApi(opts: BootOpenApiOptions): Promise<BootResult>
   const calleeExecutor = createCalleeExecutor({
     provider,
     resolveWorkspaceCustomLlm,
+    configuredProviders,
+    checkCreditBudget: ports.checkCreditBudget,
     publishSessionEvent,
     tools: allTools,
     memoryStore,
