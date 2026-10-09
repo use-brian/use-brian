@@ -24,7 +24,6 @@ import { createTurnLedger } from '../ledger/recorder.js'
 import { getLedgerPayloadStore } from '../ledger/runtime.js'
 import { randomUUID } from 'node:crypto'
 import {
-  queryLoop,
   buildAssistantNameSection,
   buildMemoryContext,
   createMemoryTools,
@@ -86,6 +85,9 @@ import {
 } from '../context-scope/resolve-turn-scope.js'
 import { resolveExecutionContextSystem } from '../context-scope/execution-context.js'
 import { prepareAssistantRun } from '../runtime/prepare-assistant-run.js'
+import { policyFor } from '../session-kind.js'
+import { runAssistantTurn, TurnRefusal, turnUsageIdentity } from '../turn/kernel.js'
+import { waitForTurnSlot } from '../turn/lease.js'
 import { isAuthorityChangedError } from '../context-scope/authority-lease.js'
 import {
   createDeliveryAudienceAuthorizer,
@@ -348,6 +350,8 @@ export type PublicApiError =
   | 'authority_changed'
   | 'delivery_audience_unverified'
   | 'upstream_failed'
+  /** Another turn on the same conversation did not finish within the wait (409). */
+  | 'conversation_busy'
   | 'internal'
 
 export function fail(
@@ -1404,19 +1408,21 @@ export async function executePublicTurn(
     }
   }
 
-  // ── 11. Run query loop ────────────────────────────────────
-  // Mirrors web chat (chat.ts:1409–1412): abort on consumer
-  // disconnect, with a safety ceiling that exceeds the loop's
-  // own EMPTY_RETRY_WALL_MS (90s in query-loop.ts) so the
-  // empty-response retry plan is never killed mid-flight.
+  // ── 11. Run the turn through the kernel ───────────────────
+  // Abort on consumer disconnect. Liveness is the kernel's stall watchdog
+  // (no provider chunk, no tool activity, no loop event for the derived
+  // window), never a wall clock: the 180 s ceiling this lane carried clipped
+  // slow-but-alive turns and caught nothing the watchdog does not.
   req.on('close', () => abortController.abort())
-  const timeout = setTimeout(() => abortController.abort(), 180_000)
   let sendEvent: PublicTurnSseSender | null = null
+  let loopError: Error | null = null
 
   const turnOutput = createTurnOutputCollector({ format: 'compact' })
-  let totalUsage: TokenUsage | null = null
-  let responseModel: string | null = null
-  let assistantMessageId: string | null = null
+  // Written from the kernel's sink callback; held in one object so the
+  // reads after the turn are not narrowed to their initial `null`.
+  const turnFacts: { totalUsage: TokenUsage | null; responseModel: string | null; assistantMessageId: string | null } = {
+    totalUsage: null, responseModel: null, assistantMessageId: null,
+  }
 
   try {
     await assertDeliveryAudience()
@@ -1440,15 +1446,25 @@ export async function executePublicTurn(
       trustedContributions: [{ name: 'runtime', content: runtimeSystemContext }],
       userVisibleContributions: [{ name: 'turn', content: userVisibleContext }],
     })
-    for await (const event of queryLoop({
+    await runAssistantTurn({
+      sessionId: session.id,
+      policy: policyFor(session),
+      abortController,
+      // A second request on the same conversation waits for the first.
+      lease: { mode: 'kernel', waitForSlot: waitForTurnSlot },
+      model: {
+        provider: preparedRun.model.provider,
+        model: preparedRun.model.model,
+        configuredProviders: deps.configuredProviders,
+        customLlm: customLlmRuntime,
+      },
+      loop: {
       ledger: createTurnLedger({
         workspaceId: assistant.workspaceId ?? null,
         assistantId: assistant.id,
         sessionId: session.id,
         payloads: getLedgerPayloadStore(),
       }).ledger,
-      provider: preparedRun.model.provider,
-      model: preparedRun.model.model,
       maxTokens: preparedRun.model.maxTokens,
       inputTokenLimit: preparedRun.model.inputTokenLimit,
       systemPrompt: fullSystemPrompt,
@@ -1508,7 +1524,8 @@ export async function executePublicTurn(
       // matches web chat (chat.ts:1541).
       compactModel: 'gemini-flash',
       maxTurns,
-    })) {
+      },
+      sink: { kind: 'json', onEvent: async (event) => {
       turnOutput.observe(event)
       if (event.type === 'text_delta') {
         await assertDeliveryAudience()
@@ -1526,8 +1543,8 @@ export async function executePublicTurn(
         }
       } else if (event.type === 'turn_complete') {
         await assertDeliveryAudience()
-        totalUsage = event.totalUsage ?? null
-        responseModel = event.response.model
+        turnFacts.totalUsage = event.totalUsage ?? null
+        turnFacts.responseModel = event.response.model
         // Skip persisting fully empty assistant turns — same posture
         // as chat.ts (1462). queryLoop's empty-response recovery may
         // still exit empty when EMPTY_RETRY_PLAN or EMPTY_RETRY_WALL_MS
@@ -1540,20 +1557,34 @@ export async function executePublicTurn(
             content: event.response.content,
             ...currentTurnWrite(),
           })
-          assistantMessageId = stored.id
+          turnFacts.assistantMessageId = stored.id
         }
       } else if (event.type === 'error') {
         console.error('[public-turn] query loop error:', event.error)
-        if (sendEvent) {
-          sendEvent('error', { error: 'upstream_failed', detail: event.error?.message })
-          sendEvent('done', {})
-          res.end()
-          return
-        }
-        return fail(res, 502, 'upstream_failed', event.error?.message)
+        loopError = event.error ?? new Error('upstream_failed')
       }
+    } },
+    })
+    if (loopError) {
+      const detail = (loopError as Error).message
+      if (sendEvent) {
+        sendEvent('error', { error: 'upstream_failed', detail })
+        sendEvent('done', {})
+        res.end()
+        return
+      }
+      return fail(res, 502, 'upstream_failed', detail)
     }
   } catch (err) {
+    if (err instanceof TurnRefusal) {
+      if (sendEvent) {
+        sendEvent('error', { error: 'conversation_busy' })
+        sendEvent('done', {})
+        res.end()
+        return
+      }
+      return fail(res, 409, 'conversation_busy', 'Another turn on this conversation is still running. Retry once it finishes.')
+    }
     console.error('[public-turn] query loop threw:', err)
     if (isAuthorityChangedError(err) || isDeliveryAudienceUnverifiedError(err)) {
       const error = isAuthorityChangedError(err)
@@ -1574,8 +1605,6 @@ export async function executePublicTurn(
       return
     }
     return fail(res, 502, 'upstream_failed', (err as Error).message)
-  } finally {
-    clearTimeout(timeout)
   }
 
   // ── 12. Record usage (fire-and-forget) ───────────────────
@@ -1583,13 +1612,14 @@ export async function executePublicTurn(
   // drove the turn — pass `actorUserId` so admin per-user views can
   // pivot to the shadow. See migration 100 and
   // docs/architecture/platform/analytics.md → "Actor vs billing party".
+  const { totalUsage, responseModel, assistantMessageId } = turnFacts
   if (deps.usageStore && totalUsage && responseModel) {
     const cost = customLlmRuntime?.providerKeySource === 'user'
       ? 0
       : calculateCost(responseModel, totalUsage)
     deps.usageStore.recordUsage({
-      userId: ownerId,
-      actorUserId: user.id,
+      // The credential's owner pays; the actor drove the turn.
+      ...turnUsageIdentity({ payerUserId: ownerId, actorUserId: user.id }),
       assistantId: assistant.id,
       sessionId: session.id,
       model: responseModel,
