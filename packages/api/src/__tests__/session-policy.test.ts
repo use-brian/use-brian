@@ -162,7 +162,11 @@ describe('[COMP:api/session-policy] sessionPolicy drift ledger', () => {
     expect(policyFor(ROOM).context.personalMemory).toBe(false)
   })
 
-  it('L18 billing: shared rooms bill the turn user', () => {
-    expect(policyFor(ROOM).billing).toBe('user')
+  it('L18 billing: every shared conversation bills the workspace pool (D2)', () => {
+    for (const row of [ROOM, DRAFT, DOC_THREAD, OFFICE, FEED_THREAD, TELEGRAM_DM]) {
+      expect(policyFor(row).billing).toBe('workspace')
+    }
+    expect(policyFor(PERSONAL).billing).toBe('user')
   })
+
 })

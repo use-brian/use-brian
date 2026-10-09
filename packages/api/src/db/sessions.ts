@@ -768,6 +768,29 @@ export type TurnEndReason =
   | 'timeout'
 
 /**
+ * Claim the turn slot atomically: only when nothing holds it. Room admission
+ * (every workspace session, D11) serializes concurrent addressed sends on
+ * this. Returns false when another turn holds the slot.
+ */
+export async function claimTurnSlot(sessionId: string): Promise<boolean> {
+  const result = await query(
+    `UPDATE sessions SET status = 'running', last_active_at = now()
+      WHERE id = $1 AND status <> 'running'`,
+    [sessionId],
+  )
+  if ((result.rowCount ?? 0) > 0) notifySessionChange(sessionId)
+  return (result.rowCount ?? 0) > 0
+}
+
+/**
+ * Take the turn slot for a personal session after admission proved no live
+ * turn holds it (a stale holder has been reclaimed).
+ */
+export async function takeTurnSlot(sessionId: string): Promise<void> {
+  await updateSessionStatus(sessionId, 'running')
+}
+
+/**
  * Take the lease for a turn that has just claimed `status='running'`. Returns
  * the token every later lease operation must present. Clears any stale cancel
  * request and end reason left by the previous turn.

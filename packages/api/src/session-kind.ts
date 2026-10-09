@@ -287,8 +287,14 @@ export type SessionPolicy = {
    * Live roster)? Not an Office file's thread: its audience is the file's.
    */
   surfacesBeyondAnchor: boolean
-  /** Who pays for a turn (D2, L18). */
-  billing: 'user' | 'addresser' | 'workspace'
+  /**
+   * Who pays for a turn (D2, L18). `workspace`: the workspace billing party,
+   * with the addresser recorded as the actor; every workspace session, and
+   * every provider transport (a channel bot is a workspace resource and its
+   * senders may hold no plan of their own). `user`: a personal web session's
+   * own human.
+   */
+  billing: 'user' | 'workspace'
   /** Compaction strategy. */
   compaction: 'context_pressure' | 'idle_tiered'
   /** Creation admission applies to a workspace insert (L12). */
@@ -344,7 +350,7 @@ export function sessionPolicy(kind: SessionKind): SessionPolicy {
     lifecycle: workspace ? { rename: 'participants', delete: 'admin' } : { rename: 'owner', delete: 'owner' },
     humanActivity: conversation,
     surfacesBeyondAnchor: anchor !== 'office_file',
-    billing: 'user',
+    billing: workspace || isExternalTransport(kind.transport) ? 'workspace' : 'user',
     compaction: kind.transport === 'web' ? 'context_pressure' : 'idle_tiered',
     createAdmission: room,
     clearanceSource: anchor === 'office_file' ? 'anchor' : 'assistant',

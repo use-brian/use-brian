@@ -13,7 +13,7 @@ import { z } from 'zod'
 import { getDefaultAssistant, getUserAssistant, getWorkspacePrimaryAssistant, getUserProfilesByIds, updateUserLastSeenTz, resolveAssistantAccess } from '../db/users.js'
 import { charterNeedsIntake, createSaveCharterTool, CHARTER_INTAKE_ADDENDUM } from '../intake/charter-intake.js'
 import { resolvePresenceTimezone } from '../auth/client-timezone.js'
-import { createPersonalWebSession, findOrCreateSession, findSessionByChannel, findSessionById, addSessionMessage, readSessionMessageScopeSource, toStampedMessages, getSessionMessages, updateSessionStatus, updateSessionTitle, countSessionTurns, truncateMessagesFrom, getPreferredChannel, getSessionTopicLabels, isSharedChatSession, coalesceConsecutiveUserMessages, startTurnLease, touchTurnLease, isTurnLeaseSuperseded, releaseTurnLease, requestTurnCancel, reclaimStaleTurn, isTurnLeaseLive, TURN_HEARTBEAT_INTERVAL_MS, type SessionMessage } from '../db/sessions.js'
+import { createPersonalWebSession, findOrCreateSession, findSessionByChannel, findSessionById, addSessionMessage, readSessionMessageScopeSource, toStampedMessages, getSessionMessages, updateSessionTitle, countSessionTurns, truncateMessagesFrom, getPreferredChannel, getSessionTopicLabels, isSharedChatSession, coalesceConsecutiveUserMessages, touchTurnLease, isTurnLeaseSuperseded, releaseTurnLease, requestTurnCancel, reclaimStaleTurn, type SessionMessage } from '../db/sessions.js'
 import { createTurnLedger } from '../ledger/recorder.js'
 import { getLedgerPayloadStore } from '../ledger/runtime.js'
 import { query, getPool } from '../db/client.js'
@@ -25,8 +25,11 @@ import {
 } from '../resolve-session-pins.js'
 import { getSelfEntityId } from '../db/memories.js'
 import { getRecording, type Recording } from '../db/recordings-store.js'
-import { queryLoop, isConnectionDropError, isEndpointUnreachableError, streamErrorCode, buildMemoryContext, voicePlatformFromDraftTitle, measureDocContext, createMemoryTools, createSelfProfileTool, createMemoryRecallBuffer, createSkillInvocationBuffer, createRetrievalTools, createSessionStateTools, buildSessionStateBlock, runSessionStateDiff, buildActivePlanBlock, createPlanTools, seedPlanFromTasks, calculateCost, sanitize, shouldInline, ensureToolResultPairing, stripUnsignedToolUses, modelRequiresToolSignatures, elideStaleDocToolResults, synthesizeMissingToolResults, createConfirmationResolver, interpretConfirmationEvent, runPreflight, buildPreflightPrompt, runMemoryNudge, collectStream, classifyTopic, fetchEpisodicContext, transcribeFirstAudio, voiceUnavailableNote, TRANSCRIPTION_DISABLED_REASON, probePdfPageCount, estimateDistillTokens, PDF_CONFIRM_PAGE_THRESHOLD, DASHSCOPE_RENDER_WIDTH, filterToolsByCapabilities, modelToCompactionTier, buildWorkspaceFilesContext, buildUploadPolicyBlock, SensitivityAccumulator, CompartmentAccumulator, ContextScopeAccumulator, AttachmentCollector, runLocalMatchCheck, sanitizeTitle, AUTO_TITLE_AI_MIN_CHARS, COORDINATOR_BASE_ADDENDUM, COORDINATOR_RESEARCH_ADDENDUM, buildDocSupervisorSkillBlock, buildAmbientDocSkillBlock, detectOperateSiteIntent, EvidenceAccumulator, matchesDisputedFigure, buildDisputeContextNote, parsePresentedDocumentInput, latestWorkflowProposalReceipt, buildTool, prepareSlashCommand, resolveNativeSlashCommand, buildSlashCommandBlock, buildWorkflowSlashCommandBlock, buildEmailDraftAnchorPrompt, formatActiveEmailDraftContext, type PresentedDocumentInput, type MediaBackend } from '@use-brian/core'
+import { isConnectionDropError, isEndpointUnreachableError, streamErrorCode, buildMemoryContext, voicePlatformFromDraftTitle, measureDocContext, createMemoryTools, createSelfProfileTool, createMemoryRecallBuffer, createSkillInvocationBuffer, createRetrievalTools, createSessionStateTools, buildSessionStateBlock, runSessionStateDiff, buildActivePlanBlock, createPlanTools, seedPlanFromTasks, calculateCost, sanitize, shouldInline, ensureToolResultPairing, stripUnsignedToolUses, modelRequiresToolSignatures, elideStaleDocToolResults, synthesizeMissingToolResults, createConfirmationResolver, interpretConfirmationEvent, runPreflight, buildPreflightPrompt, runMemoryNudge, collectStream, classifyTopic, fetchEpisodicContext, transcribeFirstAudio, voiceUnavailableNote, TRANSCRIPTION_DISABLED_REASON, probePdfPageCount, estimateDistillTokens, PDF_CONFIRM_PAGE_THRESHOLD, DASHSCOPE_RENDER_WIDTH, filterToolsByCapabilities, modelToCompactionTier, buildWorkspaceFilesContext, buildUploadPolicyBlock, SensitivityAccumulator, CompartmentAccumulator, ContextScopeAccumulator, AttachmentCollector, runLocalMatchCheck, sanitizeTitle, AUTO_TITLE_AI_MIN_CHARS, COORDINATOR_BASE_ADDENDUM, COORDINATOR_RESEARCH_ADDENDUM, buildDocSupervisorSkillBlock, buildAmbientDocSkillBlock, detectOperateSiteIntent, EvidenceAccumulator, matchesDisputedFigure, buildDisputeContextNote, parsePresentedDocumentInput, latestWorkflowProposalReceipt, buildTool, prepareSlashCommand, resolveNativeSlashCommand, buildSlashCommandBlock, buildWorkflowSlashCommandBlock, buildEmailDraftAnchorPrompt, formatActiveEmailDraftContext, type PresentedDocumentInput, type MediaBackend } from '@use-brian/core'
 import { classifySession, policyFor, sessionPolicy } from '../session-kind.js'
+import { precheckTurnAdmission, releaseTurn, takeTurnLease } from '../turn/lease.js'
+import { runAssistantTurn, turnUsageIdentity } from '../turn/kernel.js'
+import { resolveTurnBilling } from '../turn/billing.js'
 import { deliverTurnInput, registerTurnInbox } from '../turn-inbox.js'
 import { insertClaimProvenance, getClaimsForLatestAssistantMessage } from '../db/claim-provenance-store.js'
 import type { SessionStateStore, SessionStateRecord, PlanStore, AmbientSurface, CrmEmailDraftStore } from '@use-brian/core'
@@ -1572,45 +1575,7 @@ export function turnInputAdmission(params: {
   return 'queue'
 }
 
-/**
- * Ordinary-session guard against taking a slot a LIVE turn still holds
- * (migration 424 lease). Pure so the invariant is testable; the route resolves
- * `leaseLive` with `isTurnLeaseLive` only when it matters (`status='running'`
- * and the client did not say `midTurn`).
- *
- *   - `proceed` — no turn is running, or the client is mid-turn (that path
- *                 queues into the running turn), or this is a room (rooms
- *                 claim atomically and reclaim stale leases themselves).
- *   - `reclaim` — the row says running but the lease is stale: the holder is
- *                 dead. Reclaim it (recording `stalled_reclaimed`) and run.
- *   - `reject`  — the row says running AND the lease is fresh: a turn is
- *                 provably alive and this client just cannot see its stream
- *                 (proxy idle cut, reload, second tab). Blind-claiming here is
- *                 what killed page builds mid-work on 2026-08-18: the new
- *                 `startTurnLease` mints a token, the live turn's next
- *                 heartbeat reads `held:false`, and it aborts itself as an
- *                 "orphan". Refuse the send instead; the live turn keeps
- *                 working and the user is told why.
- *
- * `turnInputAdmission` (above) still keys queue-vs-run on the client flag, per
- * mid-turn-input.md: a client cannot be wrong about its OWN stream. This guard
- * covers the one direction that spec conceded - "two tabs on one session" -
- * now that the lease makes "a live turn exists" provable rather than a stale
- * status column.
- */
-export type LiveTurnAdmission = 'proceed' | 'reclaim' | 'reject'
-export function liveTurnAdmission(params: {
-  status: string
-  clientMidTurn: boolean
-  isRoom: boolean
-  /** `isTurnLeaseLive` for this session - only consulted when it can matter. */
-  leaseLive: boolean
-}): LiveTurnAdmission {
-  if (params.status !== 'running') return 'proceed'
-  if (params.clientMidTurn) return 'proceed'
-  if (params.isRoom) return 'proceed'
-  return params.leaseLive ? 'reject' : 'reclaim'
-}
+export { liveTurnAdmission, type LiveTurnAdmission } from '../turn/lease.js'
 
 export type RoomTurnAdmission = 'run' | 'wait' | 'fold'
 export function roomTurnAdmission(params: {
@@ -1800,15 +1765,6 @@ export function customModelMediaRefusal(explicitCustomSelection: boolean): ChatT
   )
 }
 
-/** Atomically claim a room session's turn slot. True = we own the turn. */
-async function claimRoomTurn(sessionId: string): Promise<boolean> {
-  const result = await query(
-    `UPDATE sessions SET status = 'running', last_active_at = now()
-      WHERE id = $1 AND status <> 'running'`,
-    [sessionId],
-  )
-  return (result.rowCount ?? 0) > 0
-}
 
 /**
  * How long an addressed room message waits for the in-flight turn's slot.
@@ -2384,12 +2340,6 @@ export function chatRoutes(options: WebChatOptions): Router {
     // whose lease was already reclaimed must not unlock its successor.
     let turnLeaseToken: string | null = null
     let leaseSessionId: string | null = null
-    let leaseHeartbeat: ReturnType<typeof setInterval> | null = null
-    // Invalidate in-flight ticks as well as stopping future ticks BEFORE release.
-    const stopLeaseHeartbeat = () => {
-      if (leaseHeartbeat) clearInterval(leaseHeartbeat)
-      leaseHeartbeat = null
-    }
     let sseKeepalive: ReturnType<typeof setInterval> | null = null
     // Per-phase wall-clock of this turn, reported once from `finally` as the
     // `turn_timings` analytics event (docs/architecture/platform/analytics.md)
@@ -3084,6 +3034,13 @@ export function chatRoutes(options: WebChatOptions): Router {
       // one follow-up turn and claims the slot atomically; a personal
       // session rejects while its lease is live and reclaims a stale one.
       const roomAdmission = turnPolicy.admission === 'room'
+      // D2: a workspace session bills the workspace pool, with this member
+      // recorded as the actor; a personal session bills its human.
+      const turnBilling = await resolveTurnBilling({
+        policy: turnPolicy,
+        assistant: { id: assistant.id, ownerUserId: assistant.workspaceId ? null : user.id, workspaceId: assistant.workspaceId },
+        actorUserId: user.id,
+      })
       const scopeAccumulator = new ContextScopeAccumulator({
         compartments: turnScope.writeCompartments,
         projectIds: turnScope.writeProjectIds,
@@ -3173,14 +3130,11 @@ export function chatRoutes(options: WebChatOptions): Router {
       // (2026-08-18: page builds killed 30-90s in). A stale lease is a dead
       // holder - reclaim it so the end reason is recorded, then run.
       {
-        const clientMidTurn = requestedMidTurn === true
-        const needsLeaseCheck =
-          session.status === 'running' && !clientMidTurn && !roomAdmission
-        const liveAdmission = liveTurnAdmission({
+        const liveAdmission = await precheckTurnAdmission({
+          sessionId: session.id,
           status: session.status,
-          clientMidTurn,
-          isRoom: roomAdmission,
-          leaseLive: needsLeaseCheck ? await isTurnLeaseLive(session.id) : false,
+          admission: turnPolicy.admission,
+          clientMidTurn: requestedMidTurn === true,
         })
         if (liveAdmission === 'reject') {
           sendEvent('error', {
@@ -5990,7 +5944,8 @@ export function chatRoutes(options: WebChatOptions): Router {
             resetsAt: gate.resetsAt,
           })
           res.end()
-          await updateSessionStatus(session.id, 'idle')
+          // No slot was claimed yet: the budget gate runs before admission,
+          // so there is no lock to release here.
           // turn_started has already fired for shared sessions (above the
           // budget gate). Pair it with turn_completed so watchers don't
           // see the input dimmed forever.
@@ -6661,35 +6616,35 @@ export function chatRoutes(options: WebChatOptions): Router {
       // slot (its history was assembled pre-claim, so this window is kept
       // rare, not impossible; the early queue path catches the common
       // mid-turn case with a fresh post-wait assembly).
-      if (roomAdmission) {
-        let claimed = await claimRoomTurn(session.id)
-        while (!claimed) {
-          // A lease that went stale while we waited is reclaimed rather than
-          // waited out — the holder is gone, not slow.
-          if (await reclaimStaleTurn(session.id)) {
-            claimed = await claimRoomTurn(session.id)
-            if (claimed) break
-          }
-          const freed = await waitForRoomTurnSlot(session.id)
-          if (!freed) {
-            sendEvent('error', {
+      // The turn kernel's admission (D11): a workspace session claims the slot
+      // atomically and waits for it; a personal session takes it after the
+      // precheck above (refusing if a live turn raced us there).
+      const slot = await takeTurnLease({
+        sessionId: session.id,
+        admission: turnPolicy.admission,
+        ...(roomAdmission ? { waitForSlot: waitForRoomTurnSlot } : {}),
+      })
+      if (!slot.taken) {
+        sendEvent('error', slot.code === 'room_turn_wait_timeout'
+          ? {
               code: 'room_turn_wait_timeout',
               error: 'The in-flight turn did not finish in time. Your message is posted; mention the assistant again to get a reply.',
+            }
+          : {
+              code: 'turn_in_flight',
+              error:
+                'Your assistant is still working on the previous message in this chat. ' +
+                'Wait for it to finish (or press Stop), then send again.',
             })
-            res.end()
-            return
-          }
-          claimed = await claimRoomTurn(session.id)
-        }
-      } else {
-        await updateSessionStatus(session.id, 'running')
+        res.end()
+        return
       }
 
-      // The slot is ours — take the lease that proves we still hold it
+      // The slot is ours, with the lease that proves we still hold it
       // (migration 424). From here every exit path MUST release it, including
       // the ones that reach neither the happy path nor the catch: that is what
       // the `finally` below is for, and what its absence cost on 2026-08-08.
-      turnLeaseToken = await startTurnLease(session.id)
+      turnLeaseToken = slot.token
       leaseSessionId = session.id
 
       // Open the mid-turn inbox now that the slot is ours. Everything sent
@@ -7098,29 +7053,8 @@ export function chatRoutes(options: WebChatOptions): Router {
           token: heldToken,
           abort: () => abortController.abort(),
         })
-        leaseHeartbeat = setInterval(() => {
-          void touchTurnLease(session.id, heldToken)
-            .then(({ held, cancelRequested }) => {
-              if (!leaseHeartbeat || turnLeaseToken !== heldToken) return
-              if (!held) {
-                // Our lease was reclaimed while we were away. We are an orphan:
-                // another turn may already own this session, so stop before we
-                // write a reply into a conversation we no longer hold.
-                console.warn(`[chat] turn lease lost for session ${session.id}; aborting orphaned turn`)
-                abortController.abort()
-                return
-              }
-              if (cancelRequested) {
-                console.log(`[chat] stop requested for session ${session.id}; aborting turn`)
-                abortController.abort()
-              }
-            })
-            .catch((err) => {
-              // A failed tick is not fatal — the next one retries, and the
-              // sweeper is the backstop if they all fail.
-              console.warn('[chat] turn lease heartbeat failed:', err)
-            })
-        }, TURN_HEARTBEAT_INTERVAL_MS)
+        // The lease heartbeat (lost lease or stop request -> abort) runs in
+        // the turn kernel for the life of the loop.
       }
       // Room turns record WHO addressed the assistant this turn — the only
       // member (besides a workspace admin) who may resolve this turn's write
@@ -7155,12 +7089,21 @@ export function chatRoutes(options: WebChatOptions): Router {
         // Tool executions arrive as `tool_start` per call and ONE `tool_result`
         // per batch; the batch's wall-clock is what the turn waited for.
         let toolBatchStartedAt: number | null = null
-        for await (const event of queryLoop({
-          ledger: turnLedgerHandle.ledger,
+        await runAssistantTurn({
+          sessionId: session.id,
+          policy: turnPolicy,
+          abortController,
+          lease: { mode: 'held', token: turnLeaseToken },
           // BYO-aware: when the workspace set its own Gemini key, the main
           // response runs against that provider (else the platform provider).
-          provider: preparedRun.model.provider,
-          model: preparedRun.model.model,
+          model: {
+            provider: preparedRun.model.provider,
+            model: preparedRun.model.model,
+            configuredProviders: options.configuredProviders,
+            customLlm: customLlmRuntime,
+          },
+          loop: {
+          ledger: turnLedgerHandle.ledger,
           maxTokens: preparedRun.model.maxTokens,
           inputTokenLimit: preparedRun.model.inputTokenLimit,
           systemPrompt: splitPrompt.stablePrompt,
@@ -7420,9 +7363,9 @@ export function chatRoutes(options: WebChatOptions): Router {
           // inbox (their mid-turn path is the T5 follow-up turn), so the port
           // is inert there. See docs/architecture/engine/mid-turn-input.md.
           turnInbox: turnInbox.port,
-        })) {
+          },
+          sink: { kind: 'sse', onEvent: async (event) => {
           await assertDeliveryAudience()
-          if (abortController.signal.aborted) break
 
           if (event.type === 'text_delta') {
             turnTiming.count('text_delta')
@@ -7929,7 +7872,7 @@ export function chatRoutes(options: WebChatOptions): Router {
                 ? 0
                 : calculateCost(event.response.model, usage)
               options.usageStore.recordUsage({
-                userId: user.id,
+                ...turnUsageIdentity(turnBilling),
                 assistantId: assistant.id,
                 sessionId: session.id,
                 model: event.response.model,
@@ -8083,7 +8026,8 @@ export function chatRoutes(options: WebChatOptions): Router {
               },
             })
           }
-        }
+          } },
+        })
         turnTiming.mark('loop')
 
         // Happy-path flush: the loop completed without throwing. Any
@@ -8488,11 +8432,8 @@ export function chatRoutes(options: WebChatOptions): Router {
       // was reclaimed mid-turn this is a no-op rather than an unlock of
       // whoever owns the session now. The `finally` is idempotent behind this.
       if (turnLeaseToken) {
-        stopLeaseHeartbeat()
-        await releaseTurnLease(session.id, 'completed', turnLeaseToken)
+        await releaseTurn(session.id, turnLeaseToken, 'completed')
         turnLeaseToken = null
-      } else {
-        await updateSessionStatus(session.id, 'idle')
       }
       activeResolvers.delete(session.id)
       activeTurnAborts.delete(session.id)
@@ -8812,11 +8753,8 @@ export function chatRoutes(options: WebChatOptions): Router {
         // by the concurrent-turn guard. Token-guarded when we hold a lease.
         try {
           if (turnLeaseToken) {
-            stopLeaseHeartbeat()
-            await releaseTurnLease(sessionIdForError, 'completed', turnLeaseToken)
+            await releaseTurn(sessionIdForError, turnLeaseToken, 'completed')
             turnLeaseToken = null
-          } else {
-            await updateSessionStatus(sessionIdForError, 'idle')
           }
         } catch { /* ignore */ }
       }
@@ -8880,10 +8818,6 @@ export function chatRoutes(options: WebChatOptions): Router {
       // Stop the lease heartbeat before anything else — a tick that fires
       // after the release would resurrect nothing (it is token-guarded) but
       // would keep a timer alive past the turn.
-      if (leaseHeartbeat) {
-        clearInterval(leaseHeartbeat)
-        leaseHeartbeat = null
-      }
       if (sseKeepalive) {
         clearInterval(sseKeepalive)
         sseKeepalive = null
@@ -8897,13 +8831,9 @@ export function chatRoutes(options: WebChatOptions): Router {
       // successor that now owns this session. Idempotent: the success and
       // catch paths null the token after their own release.
       if (leaseSessionId && turnLeaseToken) {
-        try {
-          await releaseTurnLease(leaseSessionId, 'completed', turnLeaseToken)
-        } catch (err) {
-          // Nothing left to fall back on but the sweeper, which is now
-          // reading the lease we just failed to clear — so it WILL fire.
-          console.error('[chat] failed to release turn lease on exit:', err)
-        }
+        // `releaseTurn` logs a failure; the sweeper then reads the lease we
+        // failed to clear, so it WILL fire.
+        await releaseTurn(leaseSessionId, turnLeaseToken, 'completed')
         turnLeaseToken = null
       }
       // Evict this turn's confirmation state on error/abort exits — the
