@@ -35,14 +35,16 @@ describe('[COMP:api/session-policy] sessionPolicy drift ledger', () => {
     }
   })
 
-  it('L3 read: the Live roster skips the anchor gate the read gate applies', () => {
-    const p = policyFor(FEED_THREAD)
-    expect(p.read).toMatchObject({ rule: 'workspace', anchorGate: 'feed_collaboration' })
-    expect(p.read.rosterAppliesAnchorGate).toBe(false)
+  it('L3 read: one rule (membership + anchor gate) for the gate and the Live roster', () => {
+    expect(policyFor(FEED_THREAD).read).toEqual({ rule: 'workspace', anchorGate: 'feed_collaboration' })
+    expect(policyFor(DRAFT).read).toEqual({ rule: 'workspace', anchorGate: 'feed_draft_audience' })
+    expect(policyFor(OFFICE).read).toEqual({ rule: 'workspace', anchorGate: 'office_file' })
+    expect(policyFor(PERSONAL).read).toEqual({ rule: 'owner' })
   })
 
-  it('L4 listing: the workspace list filters on clearance only, not the read gate', () => {
-    expect(policyFor(ROOM).read.workspaceListAppliesReadGate).toBe(false)
+  it('L4 listing: the workspace list applies the same read rule as the gate', () => {
+    expect(policyFor(ROOM).read).toEqual({ rule: 'workspace', anchorGate: 'none' })
+    expect(Object.keys(policyFor(ROOM).read).sort()).toEqual(['anchorGate', 'rule'])
   })
 
   it('L5 confirmations: addresser-or-admin applies to web rooms only', () => {

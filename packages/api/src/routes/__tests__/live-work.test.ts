@@ -16,9 +16,11 @@ vi.mock('../../db/client.js', () => ({ query: vi.fn(), queryWithRLS: vi.fn() }))
 vi.mock('../../db/workspace-store.js', () => ({
   getWorkspaceMembershipWithReadScopeSystem: vi.fn(),
 }))
+vi.mock('../../session-read-authority.js', () => ({ anchorReadGate: vi.fn(async () => 'continue') }))
 
 import { query, queryWithRLS } from '../../db/client.js'
 import { getWorkspaceMembershipWithReadScopeSystem } from '../../db/workspace-store.js'
+import { anchorReadGate } from '../../session-read-authority.js'
 import {
   liveWorkRoutes,
   deriveSessionState,
@@ -176,6 +178,24 @@ describe('[COMP:api/live-work-roster] roster route', () => {
       [],
     )
     const res = await request(makeApp()).get(`/api/workspaces/${WS}/live`)
+    expect(res.body.items[0].tier).toBe('full')
+  })
+
+  it('omits an anchored workspace row the anchor gate refuses (L3: the roster obeys the read gate)', async () => {
+    vi.mocked(anchorReadGate).mockResolvedValueOnce({ status: 403, error: 'Draft access required' })
+    primeRoster(
+      [sessionRow({ id: '88888888-8888-8888-8888-888888888888', userId: TEAMMATE, channelType: 'feed_thread', visibility: 'workspace', effectiveClearance: 'internal' })],
+      [],
+    )
+    const res = await request(makeApp()).get(`/api/workspaces/${WS}/live`)
+    expect(vi.mocked(anchorReadGate)).toHaveBeenCalledTimes(1)
+    expect(JSON.stringify(res.body)).not.toContain('88888888-8888-8888-8888-888888888888')
+  })
+
+  it('does not consult the anchor gate for an unanchored room', async () => {
+    primeRoster([sessionRow({ userId: TEAMMATE, visibility: 'workspace', appOrigin: 'chat', effectiveClearance: 'internal' })], [])
+    const res = await request(makeApp()).get(`/api/workspaces/${WS}/live`)
+    expect(vi.mocked(anchorReadGate)).not.toHaveBeenCalled()
     expect(res.body.items[0].tier).toBe('full')
   })
 

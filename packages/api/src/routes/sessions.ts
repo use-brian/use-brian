@@ -14,8 +14,9 @@ import { query } from '../db/client.js'
 import { getTurnTrace } from '../ledger/turn-trace.js'
 import { getLedgerPayloadStore } from '../ledger/runtime.js'
 import { resolveUser } from './route-helpers.js'
-import { getWorkspaceRoleSystem, getWorkspaceMembershipWithClearanceSystem, getWorkspaceMembershipWithReadScopeSystem } from '../db/workspace-store.js'
+import { getWorkspaceRoleSystem, getWorkspaceMembershipWithReadScopeSystem } from '../db/workspace-store.js'
 import { decideSessionRead } from '../session-read-access.js'
+import { sessionKindSql } from '../session-kind.js'
 import { canRead, type Sensitivity } from '@use-brian/core'
 import {
   ContextNotAvailableError,
@@ -419,7 +420,7 @@ export function sessionRoutes(opts: SessionRouteOptions = {}): Router {
       // empty list: "you are not in this workspace" is not the same answer as
       // "this workspace has no shared chats", and conflating them makes a
       // broken workspace switch look like an empty feature.
-      const membership = await getWorkspaceMembershipWithClearanceSystem(user.id, workspaceId)
+      const membership = await getWorkspaceMembershipWithReadScopeSystem(user.id, workspaceId)
       if (!membership) {
         res.status(403).json({ error: 'Not a member of this workspace' })
         return
@@ -429,35 +430,49 @@ export function sessionRoutes(opts: SessionRouteOptions = {}): Router {
         id: string; title: string | null; channelId: string
         lastActiveAt: Date; status: string
         starterUserId: string; effectiveClearance: string | null
-        assistantId: string
+        assistantId: string; visibility: string | null; mode: string | null
         contextGroupId: string | null; contextProjectId: string | null
+        contextCompartments: string[] | null
       }>(
         `SELECT s.id, s.title, s.channel_id AS "channelId",
                 s.last_active_at AS "lastActiveAt", s.status,
                 s.user_id AS "starterUserId",
                 s.effective_clearance AS "effectiveClearance",
                 s.assistant_id AS "assistantId",
+                s.visibility, s.mode,
                 s.context_group_id AS "contextGroupId",
-                s.context_project_id AS "contextProjectId"
+                s.context_project_id AS "contextProjectId",
+                s.context_compartments AS "contextCompartments"
            FROM (SELECT * FROM sessions WHERE feed_draft_audience_allowed(id)) s
            JOIN assistants a ON a.id = s.assistant_id
           WHERE a.workspace_id = $1
-            AND s.visibility = 'workspace'
-            AND s.channel_type = 'web'
-            AND s.app_origin = 'chat'
+            AND ${sessionKindSql.webRoom('s')}
           ORDER BY s.last_active_at DESC
           LIMIT 50`,
         [workspaceId],
       )
 
-      // Clearance filter in JS rather than SQL: `sensitivity_rank` is a
-      // domain rule that already lives in `canRead`, and duplicating the
-      // ordering into a WHERE clause is how the two drift.
-      const visible = result.rows.filter(
-        (r) =>
-          !r.effectiveClearance ||
-          canRead(membership.clearance, r.effectiveClearance as 'public' | 'internal' | 'confidential'),
-      )
+      // The list never outruns the read gate (L4): the same decision the
+      // gate applies (clearance AND current Team/Project/department reach),
+      // so a room the caller could not open is not listed, title and all.
+      const now = new Date()
+      const visible = result.rows.filter((r) => decideSessionRead({
+        callerUserId: user.id,
+        session: {
+          userId: r.starterUserId,
+          visibility: r.visibility,
+          mode: r.mode,
+          effectiveClearance: r.effectiveClearance,
+          contextCompartments: r.contextCompartments ?? [],
+          contextProjectId: r.contextProjectId,
+        },
+        assistantWorkspaceId: workspaceId,
+        membershipClearance: membership.clearance,
+        membershipCompartments: membership.compartments,
+        membershipProjectIds: membership.projectIds,
+        departmentAccess: membership.departmentAccess,
+        now,
+      }).readable)
 
       // Starter identity for the "Started by" chip. One batched lookup;
       // `users` RLS is own-row only, so this is a system read — membership

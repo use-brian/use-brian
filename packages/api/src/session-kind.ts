@@ -196,14 +196,12 @@ export type ReadPolicy =
 
 export type SessionPolicy = {
   /**
-   * Read access (open / list / follow / roster). `rosterAppliesAnchorGate`
-   * and `workspaceListAppliesReadGate` record whether the Live roster and
-   * the workspace list apply the full gate (L3, L4).
+   * Read access, ONE rule for open, list, follow and the Live roster (L3,
+   * L4): personal rows are owner-only; workspace rows pass the membership
+   * decision (`decideSessionRead`) and the anchor's gate
+   * (`anchorReadGate`, session-read-authority.ts).
    */
-  read: ReadPolicy & {
-    rosterAppliesAnchorGate: boolean
-    workspaceListAppliesReadGate: boolean
-  }
+  read: ReadPolicy
   /** Free posting without a turn (`POST /api/sessions/:id/messages`). */
   post: boolean
   /** Turn admission (D11). `draft_busy` is the retiring draft rejection (L7). */
@@ -276,11 +274,7 @@ export function sessionPolicy(kind: SessionKind): SessionPolicy {
           : 'none'
 
   return {
-    read: {
-      ...(workspace ? { rule: 'workspace' as const, anchorGate } : { rule: 'owner' as const }),
-      rosterAppliesAnchorGate: false,
-      workspaceListAppliesReadGate: false,
-    },
+    read: workspace ? { rule: 'workspace', anchorGate } : { rule: 'owner' },
     post: room,
     admission: room ? 'room' : draft ? 'draft_busy' : 'personal',
     addressing: room ? 'mention' : 'every_message',
@@ -351,4 +345,17 @@ export function transportPolicy(transport: Transport): TransportPolicy {
       approvalNotify: APPROVAL_NOTIFY_TRANSPORTS.includes(transport),
     },
   }
+}
+
+// --- SQL -------------------------------------------------------------------
+
+/**
+ * SQL predicate fragments for the same kinds `classifySession` derives, for
+ * queries that must filter in the database. Each takes the `sessions` table
+ * alias. Kept here so the SQL and the TypeScript classifier change together.
+ */
+export const sessionKindSql = {
+  /** The Chat app's workspace room (web, workspace audience, opened from chat). */
+  webRoom: (alias: string): string =>
+    `${alias}.visibility = 'workspace' AND ${alias}.channel_type = 'web' AND ${alias}.app_origin = 'chat'`,
 }

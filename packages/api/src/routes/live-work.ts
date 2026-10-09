@@ -26,6 +26,8 @@ import { query, queryWithRLS } from '../db/client.js'
 import { getWorkspaceMembershipWithReadScopeSystem } from '../db/workspace-store.js'
 import { isSharedChatSession, TURN_LEASE_STALE_AFTER_MS } from '../db/sessions.js'
 import { liveSessionTier } from '../session-read-access.js'
+import { anchorReadGate } from '../session-read-authority.js'
+import { policyFor } from '../session-kind.js'
 
 /** How long a settled item stays on the roster — a read-time window, no stored state (§3.2). */
 export const LIVE_RECENT_WINDOW_MINUTES = 30
@@ -359,18 +361,31 @@ export function liveWorkRoutes(): Router {
         fetchRunRows(workspaceId, callerUserId),
       ])
       const now = new Date()
+      const projected = sessionRows.map((row) => ({
+        row,
+        item: projectSessionRow(
+          row,
+          callerUserId,
+          membership.clearance,
+          now,
+          membership.compartments,
+          membership.projectIds,
+          membership.departmentAccess,
+        ),
+      }))
+      // The roster obeys the SAME read rule as the gate: a workspace row
+      // bound to an anchor (feed draft, feed thread, Office file) is listed
+      // only when the anchor's audience includes the caller (L3). An
+      // anchor refusal is invisible, never presence (D5).
+      const sessionItems = await Promise.all(projected.map(async ({ row, item }) => {
+        if (!item) return null
+        const read = policyFor(row).read
+        if (read.rule !== 'workspace' || read.anchorGate === 'none') return item
+        const verdict = await anchorReadGate(callerUserId, row)
+        return verdict === 'continue' || verdict === null ? item : null
+      }))
       const items: LiveWorkItem[] = [
-        ...sessionRows
-          .map((row) => projectSessionRow(
-            row,
-            callerUserId,
-            membership.clearance,
-            now,
-            membership.compartments,
-            membership.projectIds,
-            membership.departmentAccess,
-          ))
-          .filter((item): item is LiveSessionItem => item !== null),
+        ...sessionItems.filter((item): item is LiveSessionItem => item !== null),
         ...runRows.map((row) => projectRunRow(row, now)),
       ].sort((a, b) => (a.lastActiveAt < b.lastActiveAt ? 1 : a.lastActiveAt > b.lastActiveAt ? -1 : 0))
 

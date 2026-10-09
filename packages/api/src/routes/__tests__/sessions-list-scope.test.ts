@@ -222,3 +222,25 @@ describe('[COMP:api/sessions-list] doc-dock workspace-scope resume', () => {
     expect(params).toHaveLength(3)
   })
 })
+
+describe('[COMP:api/sessions-list] GET /api/sessions/workspace obeys the read gate (L4)', () => {
+  it('omits a room bound to a Team the caller cannot reach, keeps one within reach', async () => {
+    const { getWorkspaceMembershipWithReadScopeSystem } = await import('../../db/workspace-store.js')
+    const { getUserProfilesByIds } = await import('../../db/users.js')
+    vi.mocked(getWorkspaceMembershipWithReadScopeSystem).mockResolvedValue({
+      role: 'member', clearance: 'confidential', compartments: ['team:sales'], projectIds: null,
+    } as never)
+    vi.mocked(getUserProfilesByIds).mockResolvedValue(new Map() as never)
+    const row = (id: string, compartments: string[]) => ({
+      id, title: id, channelId: id, lastActiveAt: new Date(), status: 'idle', starterUserId: USER_ID,
+      effectiveClearance: 'internal', assistantId: WS_PRIMARY_ASSISTANT_ID, visibility: 'workspace', mode: null,
+      contextGroupId: null, contextProjectId: null, contextCompartments: compartments,
+    })
+    mockQuery.mockResolvedValueOnce({ rows: [row('reachable', ['team:sales']), row('hidden', ['team:finance'])], rowCount: 2 } as never)
+
+    const res = await request(makeApp()).get(`/api/sessions/workspace?workspaceId=${WS_ID}`).expect(200)
+
+    expect(res.body.map((s: { id: string }) => s.id)).toEqual(['reachable'])
+    expect(String(mockQuery.mock.calls[0]?.[0])).toContain("s.app_origin = 'chat'")
+  })
+})
