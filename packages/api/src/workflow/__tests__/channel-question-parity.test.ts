@@ -8,7 +8,13 @@ vi.mock('@use-brian/channels', async (original) => ({ ...(await original<typeof 
   createFeishuAdapter: vi.fn(() => ({ sendMessage: send })), createMsTeamsAdapter: vi.fn(() => ({ sendMessage: send })),
   createCustomAdapter: vi.fn(() => ({ sendMessage: send })), createWhatsAppAdapter: vi.fn(() => ({ sendMessage: send })),
 }))
-vi.mock('../../db/sessions.js', () => ({ findOrCreateSession: vi.fn(async () => ({ id: 'session' })), addSessionMessage: vi.fn() }))
+vi.mock('../../db/sessions.js', () => ({
+  findOrCreateSession: vi.fn(async () => ({ id: 'session' })),
+  addSessionMessage: vi.fn(async () => ({ id: 'row' })),
+  setSessionMessageChannelId: vi.fn(async () => {}),
+}))
+// No group here has converged into a room ([COMP:api/channel-room] covers that).
+vi.mock('../../channel-room/room.js', () => ({ findRoomForDelivery: vi.fn(async () => null) }))
 vi.mock('../../db/workspace-store.js', () => ({ getWorkspaceRoleSystem: vi.fn(async () => 'member') }))
 vi.mock('../../feishu/client.js', () => ({ createFeishuApi: vi.fn(() => ({})) }))
 vi.mock('../../context-scope/resolve-turn-scope.js', () => {

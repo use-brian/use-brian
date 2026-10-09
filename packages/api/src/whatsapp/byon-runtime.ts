@@ -51,6 +51,8 @@ export type WhatsappByonRuntimeDeps = {
   usageStore?: UsageStore
   ingestCharge?: (episode: { id: string; workspaceId: string; sourceKind: string; createdByUserId: string }) => Promise<void>
   scheduledBatching?: boolean
+  /** An un-triggered group message: a room post when the group is bound (D4). */
+  postPassive?: (args: { ctx: BotChannelContext; input: WhatsappBotInput; postNotice: (text: string) => Promise<void> }) => Promise<void>
   runPipeline: (args: {
     ctx: BotChannelContext
     input: WhatsappBotInput
@@ -191,6 +193,18 @@ export function createWhatsappByonRuntime(deps: WhatsappByonRuntimeDeps) {
     getRecentHistory: async () => '',
     generateReply: async () => '',
     send: async () => ({ messageId: '' }),
+    postPassive: async (ctx, input) => {
+      if (!ctx.assistantId || !deps.postPassive) return
+      const adapter = createWhatsAppAdapter({
+        connectorUrl: deps.connectorUrl,
+        connectorSecret: deps.connectorSecret,
+        connectionId: input.channelId,
+      })
+      await deps.postPassive({
+        ctx, input,
+        postNotice: async (text) => { await adapter.sendMessage(input.chatJid, { text }) },
+      })
+    },
     runAssistant: async (ctx, input) => {
       if (!ctx.assistantId) return
       const adapter = createWhatsAppAdapter({
@@ -204,6 +218,7 @@ export function createWhatsappByonRuntime(deps: WhatsappByonRuntimeDeps) {
       }
       if (channelConfirmations.handle(scope, { kind: 'text', text: input.text }).handled) return
       const hooks: ChannelHooks = {
+        postNotice: async (text) => { await adapter.sendMessage(input.chatJid, { text }) },
         onProcessingStart: async () => {
           await adapter.sendTypingIndicator(input.chatJid).catch(() => {})
           if (ctx.ackReaction) await adapter.sendReaction(input.chatJid, input.messageId, ctx.ackReaction).catch(() => {})

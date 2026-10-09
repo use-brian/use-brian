@@ -39,7 +39,10 @@ describe.each([{ capabilities: [] }, { capabilities: ['chat'] }])('Discord incom
     })
     await new Promise(r => setImmediate(r))
     expect(dispatchIncomingMessageEvent).toHaveBeenCalledTimes(count)
-    expect(resolveRoutingForSurface).not.toHaveBeenCalled()
+    // With chat on, an un-mentioned group message resolves its assistant so a
+    // bound group can keep it as a room post (unified-sessions D4); it still
+    // runs no turn. Rejected messages never reach routing.
+    if (count === 0 || !capabilities.includes('chat')) expect(resolveRoutingForSurface).not.toHaveBeenCalled()
     if (count) expect(dispatchIncomingMessageEvent).toHaveBeenCalledWith(expect.objectContaining({
       workspaceId: 'ws', integrationId: 'integration', incoming: expect.objectContaining({ channelType: 'discord', messageId: 'msg', timestamp: 1700000000 }),
     }))
@@ -62,7 +65,6 @@ it('matches Discord user and role mention IDs from the original Gateway message'
   await new Promise(r => setImmediate(r))
   expect(dispatchIncomingMessageEvent).toHaveBeenCalledOnce()
   await expectMentionMatches(vi.mocked(dispatchIncomingMessageEvent).mock.calls[0][0], ['member-1', 'member-2', 'role-1'])
-  expect(resolveRoutingForSurface).not.toHaveBeenCalled()
 })
 
 it('dispatches a real mention-only normalization without starting an empty chat turn', async () => {

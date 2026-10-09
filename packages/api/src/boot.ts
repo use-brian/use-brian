@@ -1,4 +1,5 @@
 import { configureTurnKernel } from './turn/runtime.js'
+import { configureChannelRooms, postPassiveChannelMessage } from './channel-room/room.js'
 import { scopeEvidenceFromRows, workspaceFilesCtxFor, type CreateComputerToolsOptions } from '@use-brian/core'
 import { prepareBrowserDownload, type BrowserDownload } from './sandbox/download-publication.js'
 import { resolveBrowserTaskExecutionAuthority } from './sandbox/task-execution-authority.js'
@@ -5811,6 +5812,20 @@ export async function bootOpenApi(opts: BootOpenApiOptions): Promise<BootResult>
         scheduledBatching: ports.roomScheduledBatching,
       })
     : undefined
+  // Channel rooms (unified-sessions §4.4) capture and fan out their posts on
+  // the same seams as web rooms.
+  configureChannelRooms({
+    publishSessionEvent,
+    ...(roomIngestor
+      ? {
+          capturePost: (post) => {
+            void roomIngestor.ingestPost(post).catch((err) => {
+              console.error('[room-ingest] channel room capture failed:', err)
+            })
+          },
+        }
+      : {}),
+  })
   app.use('/api/sessions', optionalAuth(env.JWT_SECRET), sessionRoutes({
     subscribeSessionEvents,
     publishSessionEvent,
@@ -9592,6 +9607,32 @@ export async function bootOpenApi(opts: BootOpenApiOptions): Promise<BootResult>
         usageStore,
         ingestCharge: ports.ingestCharge,
         scheduledBatching: ports.whatsappScheduledBatching,
+        // D4: an un-triggered message in a bound group is a room post.
+        postPassive: async ({ ctx: channel, input, postNotice }) => {
+          if (!channel.assistantId || !input.isGroup || !input.text.trim()) return
+          const integration = await integrationStore.getByChannelForWebhook(input.channelId, 'whatsapp')
+          if (!integration) return
+          const identity = await resolveWhatsappByonTurnIdentity(input, channel.assistantId, {
+            findLinkedAccount: (provider, providerId) => linkedAccountStore.findByProvider(provider, providerId),
+            findUser: findUserById,
+            resolveShadow: (providerUserId, assistantId, displayName) => resolveChannelUser(
+              channelUserStore, 'whatsapp', providerUserId, assistantId,
+              async () => ({ providerUserId, email: null, displayName }),
+            ),
+          })
+          await postPassiveChannelMessage({
+            assistant: { id: channel.assistantId, name: channel.assistantName, workspaceId: channel.workspaceId },
+            channelType: 'whatsapp',
+            channelIntegrationId: integration.id,
+            isGroupChat: true,
+            sessionChannelId: input.chatJid,
+            senderUserId: identity.userId,
+            senderName: input.senderName ?? null,
+            text: input.text,
+            channelMessageId: input.messageId,
+            postNotice,
+          })
+        },
         runPipeline: async ({ ctx: channel, input, hooks, abortController }) => {
           if (!channel.assistantId) return
           const identity = await resolveWhatsappByonTurnIdentity(input, channel.assistantId, {
@@ -9609,6 +9650,7 @@ export async function bootOpenApi(opts: BootOpenApiOptions): Promise<BootResult>
             actorChannelId: identity.actorChannelId,
             interactionScope: identity.interactionScope,
             questionIntegrationId: integration?.id,
+            channelIntegrationId: integration?.id,
             backgroundModel,
             decisionRuntime,
             ownerId: channel.ownerUserId,

@@ -154,6 +154,51 @@ export async function admitAnchoredSession<T extends Input & {
   return { ...params, workspaceId, effectiveClearance }
 }
 
+/**
+ * Creation admission for a CONVERGED CHANNEL ROOM (unified-sessions D15): a
+ * provider group bound to the workspace by its channel integration. The
+ * binding is the authority, not the sender: the starter may be a guest. Mints
+ * the `channel_room` receipt `require_session_creation_admission` checks in a
+ * ready workspace (migration 741). A department assistant's room binds its
+ * department compartment (the 741 sharing guard requires it). Must run in the
+ * insert's transaction.
+ */
+export async function admitChannelRoom(client: PoolClient, params: {
+  assistantId: string
+  userId: string
+  workspaceId: string
+  channelType: string
+  channelId: string
+  channelIntegrationId: string
+}): Promise<{ effectiveClearance: string; contextGroupId: string | null; contextCompartments: string[] }> {
+  const assistant = (await client.query<{ workspaceId: string | null; clearance: string | null; groupId: string | null; compartment: string | null }>(
+    `SELECT a.workspace_id AS "workspaceId", a.clearance, g.id AS "groupId", g.compartment_key AS compartment
+       FROM assistants a LEFT JOIN workspace_groups g ON g.id = a.placement_department_id
+      WHERE a.id=$1 FOR SHARE OF a`, [params.assistantId])).rows[0]
+  if (!assistant || assistant.workspaceId !== params.workspaceId) throw new WorkspaceAccessError('context_not_available', 404)
+  const bound = await client.query(
+    `SELECT 1 FROM channel_integrations ci JOIN channels c ON c.id = ci.channel_id
+      WHERE ci.id=$1 AND c.workspace_id=$2 AND ci.channel_type=$3`,
+    [params.channelIntegrationId, params.workspaceId, params.channelType])
+  if (!bound.rows.length) throw new WorkspaceAccessError('context_not_available', 404)
+  const effectiveClearance = assistant.clearance ?? 'internal'
+  const department = assistant.groupId && assistant.compartment
+    ? { contextGroupId: assistant.groupId, contextCompartments: [assistant.compartment] }
+    : { contextGroupId: null, contextCompartments: [] as string[] }
+  await client.query('SELECT id FROM workspaces WHERE id=$1 FOR UPDATE', [params.workspaceId])
+  const policy = await readAdmissionPolicy(client, params.workspaceId)
+  if (!policy || policy.setupState === 'legacy') return { effectiveClearance, ...department }
+  await client.query("SELECT set_config('app.session_creation_admission',$1,true)", [JSON.stringify({
+    protocol: '1', provenance: 'channel_room', workspaceId: params.workspaceId,
+    policyRevision: policy.revision, actor: params.userId,
+    assistantId: params.assistantId, userId: params.userId,
+    anchorKind: 'channel', sensitivity: effectiveClearance,
+    channelType: params.channelType, channelId: params.channelId,
+    channelIntegrationId: params.channelIntegrationId,
+  })])
+  return { effectiveClearance, ...department }
+}
+
 /** Constructed from verified transport claims, passed separately from input. */
 export type PersonalWebSessionPrincipal = {
   actorUserId: string; authSessionId: string; authVersion: number

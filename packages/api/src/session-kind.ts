@@ -314,6 +314,12 @@ export type SessionPolicy = {
   compaction: 'context_pressure' | 'idle_tiered'
   /** Creation admission applies to a workspace insert (L12). */
   createAdmission: boolean
+  /**
+   * May a turn start from the web composer (`POST /api/chat`)? A converged
+   * channel room lives in its provider group (§4.4): a web turn's reply would
+   * never reach the group, so the Chat app shows it read-only.
+   */
+  webTurns: boolean
   /** Where `effective_clearance` comes from (D10, L10). */
   clearanceSource: 'assistant' | 'anchor'
   /**
@@ -368,6 +374,7 @@ export function sessionPolicy(kind: SessionKind): SessionPolicy {
     billing: workspace || isExternalTransport(kind.transport) ? 'workspace' : 'user',
     compaction: kind.transport === 'web' ? 'context_pressure' : 'idle_tiered',
     createAdmission: room,
+    webTurns: anchor !== 'channel',
     clearanceSource: anchor === 'office_file' ? 'anchor' : 'assistant',
     clearanceRecompute: workspace && anchor !== 'office_file',
   }
@@ -399,7 +406,21 @@ export type TransportPolicy = {
    * (`workflow/channel-delivery.ts`) can push to.
    */
   delivery: { proactive: boolean }
+  /**
+   * Does a group conversation on this transport converge into ONE workspace
+   * room (unified-sessions §4.4, D15)? The room needs a channel integration
+   * that bound the group to a workspace; an unbound group stays on the legacy
+   * per-user path. `privacyLimited` marks a transport whose bots may only see
+   * messages that mention them (Telegram privacy mode, §8), so the room's
+   * disclosure says capture is mentions-only rather than implying more.
+   */
+  rooms: { converge: boolean; privacyLimited: boolean }
 }
+
+/** Transports whose group conversations converge into workspace rooms (§5 S4 order). */
+export const ROOM_TRANSPORTS = [
+  'slack', 'telegram', 'discord', 'feishu', 'msteams', 'whatsapp',
+] as const satisfies readonly Transport[]
 
 /** Transports with a proactive push in `workflow/channel-delivery.ts`. */
 export const PROACTIVE_DELIVERY_TRANSPORTS = [
@@ -410,6 +431,10 @@ export const PROACTIVE_DELIVERY_TRANSPORTS = [
 export function transportPolicy(transport: Transport): TransportPolicy {
   return {
     delivery: { proactive: (PROACTIVE_DELIVERY_TRANSPORTS as readonly Transport[]).includes(transport) },
+    rooms: {
+      converge: (ROOM_TRANSPORTS as readonly Transport[]).includes(transport),
+      privacyLimited: transport === 'telegram',
+    },
   }
 }
 
@@ -483,6 +508,24 @@ export const sessionKindSql = {
    */
   personalIdentityConflict: (): string =>
     `(assistant_id, user_id, channel_type, channel_id, app_id) WHERE visibility = 'personal'`,
+  /** A converged provider group: a workspace room anchored to the channel (§4.4). */
+  channelRoom: (alias: string): string =>
+    `${alias}.visibility = 'workspace' AND ${alias}.anchor_kind = 'channel'`,
+  /**
+   * A room the Chat app's Workspace rail lists: the web room, or a converged
+   * channel room on any transport (multiplayer-chat T10).
+   */
+  railRoom: (alias: string): string =>
+    `${alias}.visibility = 'workspace' AND (${alias}.anchor_kind = 'channel' OR (${alias}.channel_type = 'web' AND ${alias}.anchor_kind = 'none' AND ${alias}.app_origin = 'chat'))`,
+  /**
+   * A legacy per-user session of a provider group, the shape a channel room
+   * replaces (D16): personal, unanchored, still live.
+   */
+  legacyGroupRow: (alias: string): string =>
+    `${alias}.visibility = 'personal' AND ${alias}.anchor_kind = 'none' AND ${alias}.archived_at IS NULL`,
+  /** The ON CONFLICT target of a channel room: `sessions_channel_room_key` (D8). */
+  channelRoomConflict: (): string =>
+    `(workspace_id, channel_type, channel_id) WHERE visibility = 'workspace' AND anchor_kind = 'channel'`,
   /** A session with this anchor (migration 741). */
   anchored: (alias: string, kind: AnchorKind): string =>
     `${alias}.anchor_kind = '${kind}'`,

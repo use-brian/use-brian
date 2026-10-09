@@ -133,6 +133,11 @@ export type WhatsappBotWiringDeps = {
     ctx: BotChannelContext,
     input: WhatsappBotInput,
   ) => Promise<void>
+  /** An un-triggered group message in full-assistant mode (a room post when bound, D4). */
+  postPassive?: (
+    ctx: BotChannelContext,
+    input: WhatsappBotInput,
+  ) => Promise<void>
 }
 
 export function createWhatsappBot(deps: WhatsappBotWiringDeps): WhatsappBot {
@@ -171,6 +176,9 @@ export function createWhatsappBot(deps: WhatsappBotWiringDeps): WhatsappBot {
           // Full-assistant mode — route through processChannelMessage (apps/api).
           ...(deps.runAssistant
             ? { runAssistant: (i: WhatsappBotInput) => deps.runAssistant!(ctx, i) }
+            : {}),
+          ...(deps.postPassive
+            ? { postPassive: (i: WhatsappBotInput) => deps.postPassive!(ctx, i) }
             : {}),
         },
         {

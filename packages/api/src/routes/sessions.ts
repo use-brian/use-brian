@@ -7,7 +7,8 @@ import { createSessionStreamAuthority } from '../session-stream-authority.js'
 import { guardFeedStream } from '../content-planning/source-authority.js'
 import { Router } from 'express'
 import { findOrCreateUser, getDefaultAssistant, getUserAssistant, getUserProfilesByIds, getWorkspacePrimaryAssistant } from '../db/users.js'
-import { addSessionMessage, createPersonalWebSession, createWorkspaceChatSession, findSessionByChannel, findSessionById, getSessionMessageById, getSessionMessages, rebindSessionAssistant, renameSession, updateSessionMessageText } from '../db/sessions.js'
+import { addSessionMessage, createPersonalWebSession, createWorkspaceChatSession, findSessionByChannel, findSessionById, getSessionMessageById, getSessionMessages, readSessionById, rebindSessionAssistant, renameSession, updateSessionMessageText } from '../db/sessions.js'
+import { isWorkspaceAdmin, setRoomCapture } from '../channel-room/room.js'
 import { mayAssistantAnswerInRoom, DOC_DOCK_RESUME_ROW } from './_room-binding.js'
 import { query } from '../db/client.js'
 import { getTurnTrace } from '../ledger/turn-trace.js'
@@ -428,8 +429,11 @@ export function sessionRoutes(opts: SessionRouteOptions = {}): Router {
         assistantId: string; visibility: string | null; mode: string | null
         contextGroupId: string | null; contextProjectId: string | null
         contextCompartments: string[] | null
+        channelType: string; anchorKind: string; roomCapture: boolean
       }>(
         `SELECT s.id, s.title, s.channel_id AS "channelId",
+                s.channel_type AS "channelType", s.anchor_kind AS "anchorKind",
+                s.room_capture AS "roomCapture",
                 s.last_active_at AS "lastActiveAt", s.status,
                 s.user_id AS "starterUserId",
                 s.effective_clearance AS "effectiveClearance",
@@ -441,7 +445,7 @@ export function sessionRoutes(opts: SessionRouteOptions = {}): Router {
            FROM (SELECT * FROM sessions WHERE feed_draft_audience_allowed(id)) s
            JOIN assistants a ON a.id = s.assistant_id
           WHERE a.workspace_id = $1
-            AND ${sessionKindSql.webRoom('s')}
+            AND ${sessionKindSql.railRoom('s')}
           ORDER BY s.last_active_at DESC
           LIMIT 50`,
         [workspaceId],
@@ -488,6 +492,10 @@ export function sessionRoutes(opts: SessionRouteOptions = {}): Router {
         assistantId: s.assistantId,
         contextGroupId: s.contextGroupId,
         contextProjectId: s.contextProjectId,
+        // A converged group on another transport (multiplayer-chat T10): the
+        // rail badges it, and its brain capture is an admin setting (D4).
+        transport: classifySession(s).transport,
+        ...(classifySession(s).anchor.kind === 'channel' ? { roomCapture: s.roomCapture } : {}),
       })))
     } catch (err) {
       console.error('Workspace sessions list error:', err)
@@ -1140,6 +1148,37 @@ export function sessionRoutes(opts: SessionRouteOptions = {}): Router {
    * lifecycle. Write access = read access (`gateSessionRead`): whoever can
    * read the room can post, attributed.
    */
+  /**
+   * PATCH /api/sessions/:id/room-capture — switch a converged channel room's
+   * brain capture (unified-sessions D4). Body: { enabled: boolean }. A
+   * workspace owner or admin only; un-mentioned messages stay in the room's
+   * context either way.
+   */
+  router.patch('/:id/room-capture', async (req, res) => {
+    try {
+      const user = await resolveUser((req as { userId?: string }).userId)
+      if (!user) { res.status(401).json({ error: 'Unauthorized' }); return }
+      const parsed = z.object({ enabled: z.boolean() }).strict().safeParse(req.body)
+      if (!parsed.success) { res.status(400).json({ error: 'invalid_room_capture_request' }); return }
+      const session = await readSessionById(req.params.id)
+      if (!session || classifySession(session).anchor.kind !== 'channel') {
+        res.status(404).json({ error: 'Session not found' })
+        return
+      }
+      const workspace = (await query<{ workspaceId: string | null }>(
+        'SELECT workspace_id AS "workspaceId" FROM assistants WHERE id = $1', [session.assistantId])).rows[0]?.workspaceId
+      if (!workspace || !(await isWorkspaceAdmin(user.id, workspace))) {
+        res.status(403).json({ error: 'Only a workspace admin can change capture for this group' })
+        return
+      }
+      await setRoomCapture(session.id, parsed.data.enabled)
+      res.json({ ok: true, roomCapture: parsed.data.enabled })
+    } catch (err) {
+      console.error('Room capture update error:', err)
+      res.status(500).json({ error: 'Failed to update capture' })
+    }
+  })
+
   router.post('/:id/messages', async (req, res) => {
     try {
       const jwtUserId = (req as { userId?: string }).userId

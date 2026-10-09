@@ -1,6 +1,8 @@
 import { withTurnInference } from '../turn/runtime.js'
 import { PER_TURN_FILES_INDEX_CAP, PER_TURN_INDEX_CAP } from '../turn/index-caps.js'
 import { policyFor } from '../session-kind.js'
+import { roomTurnShape } from '../channel-room/turn.js'
+import { claimRoomDisclosure, claimRoomHydration, findOrCreateChannelRoom, resolveRoomBinding, roomDisclosureText, roomInputScope, roomSpeakerLabel } from '../channel-room/room.js'
 import { releaseTurn, takeTurnLease, waitForTurnSlot } from '../turn/lease.js'
 import { runAssistantTurn } from '../turn/kernel.js'
 
@@ -51,7 +53,7 @@ import { resolveBrandContext } from '../brand/prompt-context.js'
 import type { IncomingMessage, OutgoingDocument, OutgoingAction } from '@use-brian/channels'
 import type { ChannelInteractionScope } from '@use-brian/core'
 import type { ChannelQuestionStore } from '../workflow/channel-questions.js'
-import { channelConfirmations } from './channel-interactions.js'
+import { channelConfirmations, ROOM_INTERACTION_SENDER } from './channel-interactions.js'
 import { channelQuestionActions } from './channel-questions.js'
 import { resolveChannelAnswerContext, type AdmittedChannelMessage } from './channel-message-admission.js'
 import { parseFollowUps, resolveCharter, sanitizeDeliveryText } from '@use-brian/shared'
@@ -93,7 +95,7 @@ import type {
 } from '@use-brian/core'
 
 import { mintActorMediaToken } from '../media-token.js'
-import { findUserById } from '../db/users.js'
+import { findUserById, getUserProfilesByIds } from '../db/users.js'
 import { type PublishSessionEvent, noopPublishSessionEvent } from '../session-event-port.js'
 import {
   createTurnStreamPublisher,
@@ -103,7 +105,7 @@ import {
 import {
   findOrCreateSession, addSessionMessage, readSessionMessageScopeSource, setSessionMessageChannelId,
   getSessionMessages, getPreferredChannel,
-  getGroupChatContext, buildGroupChatContextPrompt, getSessionTopicLabels,
+  getGroupChatContext, buildGroupChatContextPrompt, getSessionTopicLabels, coalesceConsecutiveUserMessages,
   markDowngradeNoticeSent, clearDowngradeNotice,
 } from '../db/sessions.js'
 import { resolveChatModelSelection, wouldBudgetDowngradeAffectModel, chatTierBudget, BACKGROUND_MODEL, backgroundModelFor } from '../model-resolution.js'
@@ -321,6 +323,12 @@ export type ChannelHooks = {
    * (web streaming, scheduled-job executor) return `void`.
    */
   sendResponse(text: string, documents?: OutgoingDocument[], question?: ChannelQuestion, actions?: OutgoingAction[]): Promise<{ channelMessageId?: string } | void>
+  /**
+   * Post a standalone message into the conversation outside the turn's reply
+   * (a channel room's one-time disclosure, D4). Absent: the notice is put in
+   * front of the turn's reply instead.
+   */
+  postNotice?(text: string): Promise<void>
 
   /**
    * Called the FIRST time a session observes the budget-downgraded state.
@@ -497,6 +505,14 @@ export type ChannelPipelineParams = AdmittedChannelMessage & {
    * history by this pipeline.
    */
   providerVisibleContext?: string | null
+  /**
+   * Read the provider-visible history of this group conversation, once, when
+   * the turn lands in a channel room that has not been hydrated yet
+   * (unified-sessions D16). The result joins the user-visible context envelope
+   * of that one turn exactly like `providerVisibleContext`. Absent on
+   * transports whose bots cannot read history (Telegram, WhatsApp).
+   */
+  readProviderHistory?: () => Promise<string | null>
   /**
    * The adapter's raw inbound message text (`incoming.text`) BEFORE any
    * attachment-context prefix or voice-transcript wrapper was prepended.
@@ -989,6 +1005,11 @@ export async function processChannelMessage(params: ChannelPipelineParams): Prom
     params.interactionScope, params.abortController, {
       messageId: messageId == null ? undefined : String(messageId),
       onAbort: () => params.hooks.sendResponse('Stopped.'),
+      // A room's turn records who addressed it: they (or an admin) answer
+      // its confirmations, while any reader may Stop it.
+      ...(params.interactionScope.senderId === ROOM_INTERACTION_SENDER && params.actorChannelId
+        ? { addresserId: params.actorChannelId }
+        : {}),
     },
   ) : undefined
   try {
@@ -1024,9 +1045,28 @@ async function processChannelMessageTurn(params: ChannelPipelineParams): Promise
   if (abortController.signal.aborted) return
   if (answerContext.kind === 'handled') { await hooks.sendResponse(answerContext.reply); return }
   const questionAnswer = answerContext.questionAnswer
-  const externalGuest = params.externalGuest === true
-  const publishSessionEvent = params.publishSessionEvent ?? noopPublishSessionEvent
   const sessionChannelId = params.sessionChannelId ?? channelId
+  // A group bound to the assistant's workspace is ONE room every sender
+  // shares (unified-sessions §4.4, D15); anything else keeps its per-user row.
+  const roomBinding = await resolveRoomBinding({
+    assistant, channelType, channelIntegrationId: params.channelIntegrationId, isGroupChat,
+  })
+  const room = roomBinding
+    ? (await findOrCreateChannelRoom({
+        ...roomBinding,
+        assistantId: assistant.id,
+        channelType,
+        channelId: sessionChannelId,
+        starterUserId: userId,
+      })).room
+    : null
+  // A sender who is not a member is a GUEST of a room (D1): answered at the
+  // room's clearance, never isolated into the conversation-only guest lane.
+  const externalGuest = roomTurnShape({
+    inRoom: room !== null, isGroupChat, senderIsWorkspaceMember: false,
+    senderLinkedIdentity: false, externalGuest: params.externalGuest === true, memberMode: undefined,
+  }).externalGuest
+  const publishSessionEvent = params.publishSessionEvent ?? noopPublishSessionEvent
   const externalGuestConnectorTools = externalGuest && params.externalGuestConnectorTools === true
   const connectorAuthority = params.connectorAuthority ?? 'sender'
   let connectorToolsAllowed = connectorAuthority !== 'disabled'
@@ -1059,12 +1099,39 @@ async function processChannelMessageTurn(params: ChannelPipelineParams): Promise
     : params.userContentBlocks.map(block => block.type === 'text' ? { ...block, text: questionAnswer! } : block)
 
   // ── Session ──
-  const session = await findOrCreateSession({
+  const session = room ?? await findOrCreateSession({
     assistantId: assistant.id,
     userId,
     channelType,
     channelId: sessionChannelId,
   })
+  // D4: the room says once, in the group, that it is shared and captured.
+  let pendingRoomNotice: string | null = null
+  if (room && await claimRoomDisclosure(room.id)) {
+    const notice = roomDisclosureText({ assistantName: assistant.name, channelType })
+    if (hooks.postNotice) {
+      await hooks.postNotice(notice).catch((err: unknown) => {
+        console.error(`[${channelType}] room disclosure failed:`, err)
+      })
+    } else {
+      pendingRoomNotice = notice
+    }
+  }
+  const deliverResponse: ChannelHooks['sendResponse'] = pendingRoomNotice
+    ? (text, ...rest) => {
+        const notice = pendingRoomNotice
+        pendingRoomNotice = null
+        return hooks.sendResponse(notice ? `${notice}\n\n${text}` : text, ...rest)
+      }
+    : hooks.sendResponse
+  // D16: a room is hydrated once from what the provider still shows.
+  const roomHistory = room && params.readProviderHistory && await claimRoomHydration(room.id)
+    ? await params.readProviderHistory().catch((err: unknown) => {
+        console.warn(`[${channelType}] room hydration failed; continuing without history:`, err)
+        return null
+      })
+    : null
+  const providerVisibleContext = room ? roomHistory : params.providerVisibleContext
   // Resolve credential/billing ownership before constructing execution facts.
   // It remains attribution only and never substitutes for the channel actor.
   const billingUserId = await billingPartyForAssistant({
@@ -1083,6 +1150,15 @@ async function processChannelMessageTurn(params: ChannelPipelineParams): Promise
   const senderIsWorkspaceMember = assistant.workspaceId === null
     ? isIdentified
     : senderWorkspaceRole !== null
+  // The room's departures from a per-user group turn, in one graded table.
+  const roomShape = roomTurnShape({
+    inRoom: room !== null,
+    isGroupChat,
+    senderIsWorkspaceMember,
+    senderLinkedIdentity: params.senderLinkedIdentity === true,
+    externalGuest: params.externalGuest === true,
+    memberMode,
+  })
   const authorizeDeliveryAudience = createDeliveryAudienceAuthorizer({
     integrationStore: params.channelIntegrationStore,
   })
@@ -1106,7 +1182,8 @@ async function processChannelMessageTurn(params: ChannelPipelineParams): Promise
     recipientMode: memberMode === 'external' ? 'external' as const : 'member' as const,
     // The verified sender of this group message gets their own personal
     // context here; see `groupSpeakerCeiling`.
-    groupSpeaker: isGroupChat && senderIsWorkspaceMember && params.senderLinkedIdentity === true,
+    // D3: no speaker's personal context ever loads in a converged room.
+    groupSpeaker: roomShape.groupSpeaker,
   }
   const audienceEnvelope = isGroupChat && assistant.workspaceId
     ? await resolveDeliveryAudienceEnvelope(audienceInput)
@@ -1146,7 +1223,9 @@ async function processChannelMessageTurn(params: ChannelPipelineParams): Promise
       },
       workspaceId: assistant.workspaceId,
       session,
-      memberMode,
+      // A room answers at the room's clearance whoever addresses it (D1): the
+      // assistant's own ceilings, capped by the group's approved audience.
+      memberMode: roomShape.memberMode,
       ignoreSessionBinding: isGroupChat,
       // A group reads only rows the whole group may see (decision D4),
       // unless the envelope names the speaker: a linked member speaking in
@@ -1203,12 +1282,14 @@ async function processChannelMessageTurn(params: ChannelPipelineParams): Promise
     compartments: dataTurnScope.writeCompartments,
     projectIds: dataTurnScope.writeProjectIds,
   })
-  const inputMessageScope = sessionMessageInputScope({
-    scope: dataTurnScope,
-    workspaceId: assistant.workspaceId,
-    userId,
-    sharedAudience: !turnPolicy.context.personalMemory,
-  })
+  const inputMessageScope = room && assistant.workspaceId
+    ? roomInputScope(room, assistant.workspaceId)
+    : sessionMessageInputScope({
+        scope: dataTurnScope,
+        workspaceId: assistant.workspaceId,
+        userId,
+        sharedAudience: !turnPolicy.context.personalMemory,
+      })
   const currentTurnWrite = () => turnOutputWrite({
     producer: `turn:${channelType}`,
     accumulator: scopeAccumulator,
@@ -1589,7 +1670,8 @@ async function processChannelMessageTurn(params: ChannelPipelineParams): Promise
           : null,
       // Per-message author for collaborative draft sessions. Other
       // channels and personal sessions pass null/undefined.
-      senderUserId: senderUserId ?? null,
+      // A room attributes every row to its sender (one session, many people).
+      senderUserId: roomShape.attributeSenders ? userId : senderUserId ?? null,
       scope: inputMessageScope,
     }, client)
   const userMessageRow = params.archiveIncoming && !params.archiveInboundAlreadyPersisted
@@ -1688,10 +1770,27 @@ async function processChannelMessageTurn(params: ChannelPipelineParams): Promise
   // ── Proactive compaction (messaging: 0.5× threshold + multi-topic profile) ──
   // runProactiveCompaction owns stamping + tool-result pairing + summary
   // prepending internally. See docs/architecture/context-engine/compaction.md.
+  // A room labels each speaker at assembly (members by name, guests by
+  // handle, D1), the same seam web rooms use; stored content stays clean.
+  let roomSenderNames: Map<string, string> | undefined
+  if (roomShape.attributeSenders) {
+    try {
+      const senderIds = [...new Set(dbMessages.map((m) => m.senderUserId).filter((id): id is string => Boolean(id)))]
+      const profiles = senderIds.length ? await getUserProfilesByIds(senderIds) : new Map<string, { name: string | null }>()
+      roomSenderNames = new Map()
+      for (const id of senderIds) {
+        const label = roomSpeakerLabel(profiles.get(id)?.name, id === userId ? actorDisplayName : null)
+        if (label) roomSenderNames.set(id, label)
+      }
+    } catch (err) {
+      console.warn(`[${channelType}] room speaker lookup failed; turns stay unlabelled:`, err)
+    }
+  }
   if (!(await deliveryAudienceAdmitsTurn())) return
   const compactionResult = await runProactiveCompaction({
     sessionMessages: dbMessages,
     timezone: userTimezone,
+    senderNames: roomSenderNames,
     session,
     tier: modelToCompactionTier(logicalModel),
     channelClass: 'messaging',
@@ -1716,13 +1815,17 @@ async function processChannelMessageTurn(params: ChannelPipelineParams): Promise
     analytics,
     usageStore,
     userMessageId: userMessageRow.id,
-    persistLongTermContext: !isolatedAudience,
+    persistLongTermContext: !isolatedAudience && roomShape.memoryWrites,
     persistSessionSummary: !isolatedAudience,
     compartments: dataTurnScope.writeCompartments,
     projectIds: dataTurnScope.writeProjectIds,
     authority,
   })
-  let messages: Message[] = compactionResult.messages
+  // Coalesced assembly: a room's un-addressed posts are consecutive user rows,
+  // folded into the addressed turn under the provider's alternation contract.
+  let messages: Message[] = roomShape.coalesce
+    ? coalesceConsecutiveUserMessages(compactionResult.messages)
+    : compactionResult.messages
 
   // ── Sensitivity accumulator (per-turn) ──
   // Tracks max sensitivity of every memory / KB / episodic row the model
@@ -1779,7 +1882,8 @@ async function processChannelMessageTurn(params: ChannelPipelineParams): Promise
 
   // ── Group chat context ──
   let groupChatContext = ''
-  if (isGroupChat) {
+  // A room's own transcript already holds every sender's messages.
+  if (roomShape.legacyGroupContext) {
     const channelMessages = await getGroupChatContext({
       assistantId: assistant.id,
       channelType,
@@ -2025,7 +2129,7 @@ async function processChannelMessageTurn(params: ChannelPipelineParams): Promise
   }
   const userVisibleContext = [
     splitPrompt.userVisibleContext,
-    params.providerVisibleContext?.trim() ?? '',
+    providerVisibleContext?.trim() ?? '',
     activeEmailDraftContext,
   ].filter((part) => part.length > 0).join('\n\n')
 
@@ -2059,9 +2163,11 @@ async function processChannelMessageTurn(params: ChannelPipelineParams): Promise
     ? new Map<string, Tool>()
     : filterToolsByCapabilities(new Map(tools), activeCapabilities)
   if (!isolatedAudience) {
-    allTools.set('saveMemory', saveMemory)
     allTools.set('getMemory', getMemory)
-    allTools.set('deleteMemory', deleteMemory)
+    if (roomShape.memoryWrites) {
+      allTools.set('saveMemory', saveMemory)
+      allTools.set('deleteMemory', deleteMemory)
+    }
   }
 
   // Tasks (Q1) + CRM (Q2) are constructed at boot in apps/api/src/index.ts
@@ -2428,7 +2534,7 @@ async function processChannelMessageTurn(params: ChannelPipelineParams): Promise
     const pendingNotice = imageFallbackNotice ?? endpointNotice
     imageFallbackNotice = null
     const actions = questionBinding ? channelQuestionActions(questionBinding, terminalQuestion) : undefined
-    const result = await deliverChannelResponse(hooks, text, documents, terminalQuestion, pendingNotice, actions)
+    const result = await deliverChannelResponse({ sendResponse: deliverResponse }, text, documents, terminalQuestion, pendingNotice, actions)
     const channelMessageId = result && typeof result === 'object'
       ? result.channelMessageId
       : undefined

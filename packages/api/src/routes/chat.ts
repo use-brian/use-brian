@@ -2659,6 +2659,14 @@ export function chatRoutes(options: WebChatOptions): Router {
       if (requestedSessionId) {
         session = await findSessionById(requestedSessionId)
       }
+      if (session && !policyFor(session).webTurns) {
+        sendEvent('error', {
+          code: 'room_on_provider',
+          error: 'This group conversation lives in its chat app. Reply there, or mention the assistant in the group.',
+        })
+        res.end()
+        return
+      }
       const stickyChannelId = resolveStickyChannelId(requestedChannelId, requestedSessionId)
       if (!session && stickyChannelId) {
         session = await findSessionByChannel({

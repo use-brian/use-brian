@@ -65,6 +65,12 @@ vi.mock('../../ingest/feishu-connector-instance.js', () => ({
 vi.mock('../../db/chat-lock.js', () => ({ withChatLock: (_key: string, fn: () => unknown) => fn() }))
 vi.mock('../channel-pipeline.js', () => ({ processChannelMessage: mocks.processChannelMessage }))
 vi.mock('../channel-file-cache.js', () => ({ cacheInboundImageTag: mocks.cacheInboundImageTag }))
+// Room convergence has its own suite ([COMP:api/channel-room]); here groups stay unbound.
+vi.mock('../../channel-room/room.js', async (importOriginal) => ({
+  ...(await importOriginal<typeof import('../../channel-room/room.js')>()),
+  resolveRoomBinding: vi.fn(async () => null),
+  postPassiveChannelMessage: vi.fn(async () => false),
+}))
 
 import { feishuRoutes, resolveFeishuThreadScope, type FeishuRouteOptions } from '../feishu.js'
 
