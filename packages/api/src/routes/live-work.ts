@@ -27,7 +27,7 @@ import { getWorkspaceMembershipWithReadScopeSystem } from '../db/workspace-store
 import { TURN_LEASE_STALE_AFTER_MS } from '../db/sessions.js'
 import { liveSessionTier } from '../session-read-access.js'
 import { anchorReadGate } from '../session-read-authority.js'
-import { classifySession, policyFor, sessionPolicy } from '../session-kind.js'
+import { classifySession, policyFor, sessionKindSql, sessionPolicy } from '../session-kind.js'
 
 /** How long a settled item stays on the roster — a read-time window, no stored state (§3.2). */
 export const LIVE_RECENT_WINDOW_MINUTES = 30
@@ -304,7 +304,8 @@ async function fetchSessionRows(workspaceId: string): Promise<SessionRosterRow[]
       WHERE a.workspace_id = $1 AND feed_draft_audience_allowed(s.id)
         -- An Office file's thread is read by the file's audience only; its
         -- live view is the file's Brian tab (office.md "Brian conversation in the file").
-        AND s.channel_type NOT IN ('workflow', 'assistant-call', 'office_thread')
+        AND ${sessionKindSql.conversationLane('s')}
+        AND ${sessionKindSql.surfacesBeyondAnchor('s')}
         AND (s.status = 'running'
              OR s.last_active_at > now() - ($2 || ' minutes')::interval)
       ORDER BY s.last_active_at DESC

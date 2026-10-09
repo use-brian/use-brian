@@ -121,11 +121,20 @@ describe('[COMP:api/session-policy] sessionPolicy drift ledger', () => {
     }
   })
 
-  it('L13 human activity: four consumers, four exclusion lists', () => {
-    expect(policyFor(WORKFLOW).humanActivity).toEqual({ memory: true, playbook: true, live: false, search: false })
-    expect(policyFor(A2A).humanActivity).toEqual({ memory: false, playbook: true, live: false, search: false })
-    expect(policyFor(CRON).humanActivity).toEqual({ memory: false, playbook: false, live: true, search: false })
-    expect(policyFor(OFFICE).humanActivity).toEqual({ memory: true, playbook: false, live: false, search: false })
+  it('L13 human activity: one answer (the conversation lane) for every consumer', () => {
+    for (const row of [WORKFLOW, A2A, CRON, PROGRAMMATIC]) {
+      expect(policyFor(row).humanActivity).toBe(false)
+    }
+    for (const row of [ROOM, PERSONAL, OFFICE, DOC_THREAD, INBOX]) {
+      expect(policyFor(row).humanActivity).toBe(true)
+    }
+    // An Office thread is human activity, but its content stays in the file.
+    expect(policyFor(OFFICE).surfacesBeyondAnchor).toBe(false)
+    const sql = sessionKindSql.conversationLane('s')
+    for (const lane of ['cron', 'assistant-call', 'workflow', 'api', 'brain_inspection']) {
+      expect(sql).toContain(`'${lane}'`)
+    }
+    expect(sql).toContain('s.transient IS NOT TRUE')
   })
 
   it('L14 persisted row: tasks and CRM disagree on workflow runs', () => {

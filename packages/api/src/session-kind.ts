@@ -262,10 +262,16 @@ export type SessionPolicy = {
    */
   lifecycle: { rename: 'owner' | 'participants'; delete: 'owner' | 'admin' }
   /**
-   * Counts as human activity, per consumer (L13): the memory "active user"
-   * probe, the playbook miner, the Live roster, and workspace search.
+   * Counts as human activity (L13): `lane='conversation'`. One answer for the
+   * memory "active user" probe, the playbook miner, the Live roster and
+   * workspace search (`sessionKindSql.conversationLane`).
    */
-  humanActivity: { memory: boolean; playbook: boolean; live: boolean; search: boolean }
+  humanActivity: boolean
+  /**
+   * May this conversation's content surface beyond its anchor (playbook,
+   * Live roster)? Not an Office file's thread: its audience is the file's.
+   */
+  surfacesBeyondAnchor: boolean
   /**
    * Does the turn's `sessionId` name a persisted `sessions` row, per
    * consumer (L14): task provenance and CRM provenance.
@@ -303,9 +309,6 @@ export function sessionPolicy(kind: SessionKind): SessionPolicy {
   const anchor = kind.anchor.kind
   const draft = anchor === 'feed_draft'
   const conversation = kind.lane === 'conversation'
-  // Anchored web threads stored their anchor in channel_type before S3, so a
-  // channel-type-keyed set never contained them.
-  const plainChannel = anchor === 'none' || anchor === 'feed_draft' || anchor === 'job'
 
   const anchorGate: AnchorReadGate =
     draft ? 'feed_draft_audience'
@@ -329,16 +332,8 @@ export function sessionPolicy(kind: SessionKind): SessionPolicy {
     presence: room || anchor === 'office_file',
     confirmations: workspace ? 'addresser_or_admin' : 'owner',
     lifecycle: workspace ? { rename: 'participants', delete: 'admin' } : { rename: 'owner', delete: 'owner' },
-    humanActivity: {
-      // memories.ts: channel_type NOT IN ('cron', 'assistant-call', 'notification')
-      memory: kind.machine !== 'cron' && kind.machine !== 'a2a' && anchor !== 'inbox',
-      // playbook-store.ts: channel_type NOT IN ('cron', 'office_thread')
-      playbook: kind.machine !== 'cron' && anchor !== 'office_file',
-      // live-work.ts: channel_type NOT IN ('workflow', 'assistant-call', 'office_thread')
-      live: kind.machine !== 'workflow' && kind.machine !== 'a2a' && anchor !== 'office_file',
-      // workspace-search: channel_type='web' AND NOT transient AND mode IS DISTINCT FROM 'draft'
-      search: conversation && kind.transport === 'web' && plainChannel && !draft,
-    },
+    humanActivity: conversation,
+    surfacesBeyondAnchor: anchor !== 'office_file',
     persistedRow: {
       tasks: kind.machine !== 'programmatic' && kind.machine !== 'workflow',
       crm: kind.machine !== 'programmatic',
@@ -397,7 +392,30 @@ export function transportPolicy(transport: Transport): TransportPolicy {
  * queries that must filter in the database. Each takes the `sessions` table
  * alias. Kept here so the SQL and the TypeScript classifier change together.
  */
+const sqlList = (values: readonly string[]): string => values.map((v) => `'${v.replace(/'/g, "''")}'`).join(', ')
+
 export const sessionKindSql = {
+  /**
+   * A human conversation (`lane='conversation'`): not one of the machine-lane
+   * channel types and not transient. The ONE definition of human activity
+   * (L13) for the memory activity probe, the playbook miner, the Live roster
+   * and workspace search.
+   */
+  conversationLane: (alias: string): string =>
+    `${alias}.channel_type NOT IN (${sqlList(Object.keys(MACHINE_CHANNEL_TYPES))}) AND ${alias}.transient IS NOT TRUE`,
+  /**
+   * A conversation whose content may surface beyond its anchor (the
+   * assistant playbook, the Live roster). An Office file's thread is read by
+   * the file's audience only, so it never leaves the file.
+   */
+  surfacesBeyondAnchor: (alias: string): string =>
+    `${alias}.channel_type <> 'office_thread'`,
+  /**
+   * A plain web conversation workspace search indexes: web transport, no
+   * anchor (doc / Office / feed threads and drafts live in their anchors).
+   */
+  searchableConversation: (alias: string): string =>
+    `${alias}.channel_type = 'web' AND ${alias}.mode IS DISTINCT FROM 'draft'`,
   /**
    * Workspace rows whose `effective_clearance` is derived from the ASSISTANT,
    * so an assistant clearance change recomputes them (L10, D10). Excludes the

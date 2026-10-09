@@ -1,3 +1,4 @@
+import { sessionKindSql } from '../session-kind.js'
 import { WORKSPACE_SEARCH_FAMILIES, type WorkspaceSearchFamily } from '@use-brian/shared'
 import { searchDatabase } from './database.js'
 import type { SearchAdapter, SearchAdapters, SearchCandidate } from './service.js'
@@ -75,8 +76,8 @@ export const SEARCH_SOURCE_SQL: Record<WorkspaceSearchFamily, string> = {
         AND m.scope_held IS NOT TRUE AND ${department('m')}
         AND NOT jsonb_path_exists(m.content,'$[*] ? (@.type == "tool_use" || @.type == "tool_result")'))`,
     's.last_active_at', "jsonb_build_object('type','conversation','id',s.id,'visibility',coalesce(s.visibility,'owner'))")}
-    FROM sessions s WHERE s.workspace_id=$1 AND public.assistant_placement_visible($2,s.assistant_id) AND s.channel_type='web' AND s.transient IS NOT TRUE
-      AND s.mode IS DISTINCT FROM 'draft' AND (s.user_id=$2 OR s.visibility='workspace')
+    FROM sessions s WHERE s.workspace_id=$1 AND public.assistant_placement_visible($2,s.assistant_id) AND ${sessionKindSql.conversationLane('s')}
+      AND ${sessionKindSql.searchableConversation('s')} AND (s.user_id=$2 OR s.visibility='workspace')
       AND department_row_allows((SELECT department_read_grants()),s.workspace_id,coalesce(s.effective_clearance,'internal'),s.context_compartments,
         CASE WHEN s.visibility='workspace' THEN NULL ELSE s.user_id END)`,
   workflows: `${record('workflow', 'w', 'w.name', 'w.description', 'w.updated_at', "jsonb_build_object('type','workflow','id',w.id)")}

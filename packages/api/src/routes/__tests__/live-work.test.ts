@@ -244,7 +244,11 @@ describe('[COMP:api/live-work-roster] roster route', () => {
     expect(sessionsSql).toContain('COALESCE(a.icon_seed, 0)')
     expect(sessionsSql).toContain('s.app_origin')
     expect(sessionsSql).toContain('a.workspace_id = $1')
-    expect(sessionsSql).toContain(`NOT IN ('workflow', 'assistant-call', 'office_thread')`)
+    // Machine lanes (the one conversation-lane definition, L13) and Office
+    // threads (their live view is the file's Brian tab) never list here.
+    expect(sessionsSql).toContain("'workflow'")
+    expect(sessionsSql).toContain("'assistant-call'")
+    expect(sessionsSql).toContain("s.channel_type <> 'office_thread'")
     expect(sessionsSql).toContain(
       `pa.approval_payload->>'turnLeaseToken' = s.turn_lease_token::text`,
     )

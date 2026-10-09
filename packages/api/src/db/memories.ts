@@ -1,3 +1,4 @@
+import { sessionKindSql } from '../session-kind.js'
 import { admitMemorySuccessor } from '../workspace-access/memory-successor-admission.js'
 import { WorkspaceAccessError } from '../workspace-access/policy.js'
 import { beginBrainAdmission, admitBrainCreate } from '../workspace-access/brain-create-admission.js'
@@ -1751,7 +1752,7 @@ export async function hasRecentActivity(
          FROM session_messages sm
          JOIN sessions s ON s.id = sm.session_id
          WHERE s.assistant_id = $1 AND s.user_id = $2
-           AND s.channel_type NOT IN ('cron', 'assistant-call', 'notification')
+           AND ${sessionKindSql.conversationLane('s')}
            AND sm.role = 'user'
            AND sm.created_at >= now() - interval '7 days'
        )
