@@ -103,7 +103,7 @@ import {
   turnOutputWrite,
 } from '../context-scope/resolve-turn-scope.js'
 import { resolveExecutionContextSystem } from '../context-scope/execution-context.js'
-import { prepareAssistantRun } from '../runtime/prepare-assistant-run.js'
+import { prepareAssistantRun } from '../turn/prepare.js'
 import { policyFor } from '../session-kind.js'
 import { runAssistantTurn, TurnRefusal } from '../turn/kernel.js'
 import { waitForTurnSlot } from '../turn/lease.js'

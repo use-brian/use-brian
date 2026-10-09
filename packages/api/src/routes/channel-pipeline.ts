@@ -129,7 +129,7 @@ import {
   type ResolveTurnScopeInput,
 } from '../context-scope/resolve-turn-scope.js'
 import { resolveExecutionContextSystem } from '../context-scope/execution-context.js'
-import { prepareAssistantRun } from '../runtime/prepare-assistant-run.js'
+import { prepareAssistantRun } from '../turn/prepare.js'
 import { bindToolsToAgentAccess } from '../context-scope/agent-access-tools.js'
 import { isAuthorityChangedError } from '../context-scope/authority-lease.js'
 import {

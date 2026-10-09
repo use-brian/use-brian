@@ -111,7 +111,7 @@ import {
   sessionMessageInputScope,
 } from '../context-scope/resolve-turn-scope.js'
 import { resolveExecutionContextSystem } from '../context-scope/execution-context.js'
-import { prepareAssistantRun } from '../runtime/prepare-assistant-run.js'
+import { prepareAssistantRun } from '../turn/prepare.js'
 import { assertContextActivationReady } from '../context-scope/context-readiness.js'
 import { getEvolution as getWorkspaceMemoryEvolution } from '../db/workspace-memory-evolution-store.js'
 import { getBrainEvolution } from '../db/workspace-brain-evolution-store.js'

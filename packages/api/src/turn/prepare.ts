@@ -22,7 +22,6 @@ export type PrepareAssistantRunInput = {
   ) => Map<string, Tool> | Promise<Map<string, Tool>>
   trustedContributions?: readonly NamedRunContribution[]
   userVisibleContributions?: readonly NamedRunContribution[]
-  finalizers?: readonly (() => void | Promise<void>)[]
 }
 
 export type PreparedAssistantRun = {
@@ -32,7 +31,6 @@ export type PreparedAssistantRun = {
   trustedContext: string
   userVisibleContext: string
   contributionNames: { trusted: string[]; userVisible: string[] }
-  cleanup(): Promise<void>
 }
 
 function assemble(contributions: readonly NamedRunContribution[]): string {
@@ -42,7 +40,14 @@ function assemble(contributions: readonly NamedRunContribution[]): string {
     .join('\n\n')
 }
 
-/** Common, transport-free preparation for the four model execution adapters. */
+/**
+ * The kernel's assembly stage (unified-sessions section 4.3, stage 6-7):
+ * transport-free preparation every runner hands `runAssistantTurn`. Binds the
+ * candidate tools to the execution's access once, and assembles the trusted
+ * (private runtime) and user-visible contributions by name.
+ *
+ * [COMP:api/turn-kernel]
+ */
 export async function prepareAssistantRun(
   input: PrepareAssistantRunInput,
 ): Promise<PreparedAssistantRun> {
@@ -53,7 +58,6 @@ export async function prepareAssistantRun(
   const tools = await input.bindTools(candidateTools, input.executionContext)
   const trusted = input.trustedContributions ?? []
   const userVisible = input.userVisibleContributions ?? []
-  let cleaned = false
 
   return {
     executionContext: input.executionContext,
@@ -64,11 +68,6 @@ export async function prepareAssistantRun(
     contributionNames: {
       trusted: trusted.map(({ name }) => name),
       userVisible: userVisible.map(({ name }) => name),
-    },
-    async cleanup() {
-      if (cleaned) return
-      cleaned = true
-      await Promise.allSettled((input.finalizers ?? []).map((finalize) => finalize()))
     },
   }
 }
