@@ -13,7 +13,7 @@ import { officePanelCachePrefix, officeListCacheKey, type OfficeListView } from 
 
 /** Every lifecycle view the home lists, in the order a tap most likely came from. */
 import { useOptionalWorkspaceContext } from "@/lib/workspace-context";
-import { officeMetadataRemaining, inheritOfficeMetadata } from './metadata';
+import { officeMetadataRemaining, officeMetadataRenewalDelay, inheritOfficeMetadata } from './metadata';
 import { getUserInfo } from '@/lib/user';
 
 /** Bounded Office reads reuse the shared cache's generation and expiry ownership. */
@@ -63,7 +63,7 @@ export function useOfficeMetadataResource<T>(key: string | null, viewerId: strin
     if (ttl <= 0) {evictSurfaceCacheKey(key, {keepInflight: true});return;}
     // Also owns expiry for an already warm entry. A refresh failure cannot extend it.
     const expiry = setTimeout(() => evictSurfaceCacheKey(key, {keepInflight: true}), Math.ceil(ttl));
-    const renew = ttl > 1000 ? setTimeout(() => {void cache.refresh();}, Math.max(500, ttl - Math.min(5000, ttl / 2))) : undefined;
+    const renew = ttl > 1000 ? setTimeout(() => {void cache.refresh();}, officeMetadataRenewalDelay(retained, viewerId)) : undefined;
     return () => {clearTimeout(expiry);clearTimeout(renew);};
   }, [key, viewerId, retained, cache.refresh]);
   return {...cache, data: officeMetadataRemaining(retained, viewerId) > 0 ? retained : undefined};

@@ -2,7 +2,7 @@
 import {act} from 'react';
 import {createRoot,type Root} from 'react-dom/client';
 import {afterEach,beforeEach,describe,expect,it,vi} from 'vitest';
-import {attachOfficeMetadata,inheritOfficeMetadata,officeMetadataRemaining} from '../metadata';
+import {attachOfficeMetadata,inheritOfficeMetadata,officeMetadataRemaining,officeMetadataRenewalDelay} from '../metadata';
 import {useOfficeMetadataResource} from '../surface-cache';
 import * as api from '../api';
 import {OfficeHome} from '@/components/office/office-home';
@@ -48,6 +48,35 @@ describe('[COMP:app-web/office-surface-cache] bounded Office metadata',()=>{
     vi.setSystemTime(Date.now()-60_000);vi.advanceTimersByTime(1301);
     expect(officeMetadataRemaining(derived,state.viewer)).toBe(0);
     expect(()=>inheritOfficeMetadata({...row},derived,state.viewer)).toThrow('office_projection_expired');
+  });
+  it('inherits observed latency for early renewal without changing either deadline',()=>{
+    const started=performance.now();vi.advanceTimersByTime(8000);
+    const source=attachOfficeMetadata([row],22000,started,state.viewer);
+    const derived=inheritOfficeMetadata({...row},source,state.viewer);
+    expect(officeMetadataRemaining(derived,state.viewer)).toBe(14000);
+    expect(officeMetadataRenewalDelay(derived,state.viewer)).toBe(4000);
+    expect(officeMetadataRenewalDelay(derived,'viewer-b')).toBe(0);
+    expect(JSON.stringify(derived)).not.toContain('requestDurationMs');
+    vi.advanceTimersByTime(14001);
+    expect(officeMetadataRemaining(derived,state.viewer)).toBe(0);
+    expect(officeMetadataRenewalDelay(derived,state.viewer)).toBe(0);
+  });
+  it('keeps a mounted surface available across successive slow successful renewals',async()=>{
+    state.fetch.mockImplementation(()=>new Promise(resolve=>setTimeout(()=>resolve(response({artifacts:[row]},'22000')),8000)));
+    await act(async()=>root.render(<Harness/>));
+    await act(async()=>vi.advanceTimersByTime(8000));await flush();
+    expect(host.textContent).toContain(row.title);
+    // Each observed eight-second read leaves fourteen seconds of authority.
+    // Renewal starts four seconds later and finishes before the preceding expiry.
+    for(let cycle=0;cycle<3;cycle++){
+      await act(async()=>vi.advanceTimersByTime(4000));
+      expect(host.textContent).toContain(row.title);
+      await act(async()=>vi.advanceTimersByTime(7999));
+      expect(host.textContent).toContain(row.title);
+      await act(async()=>vi.advanceTimersByTime(1));await flush();
+      expect(host.textContent).toContain(row.title);
+    }
+    expect(state.fetch).toHaveBeenCalledTimes(4);
   });
   it.each([
     ['artifacts',()=>api.listOfficeArtifacts('workspace-a'),{artifacts:[row]}],
@@ -154,15 +183,15 @@ describe('[COMP:app-web/office-surface-cache] bounded Office metadata',()=>{
     await act(async()=>root.render(<Harness/>));await flush();
     let finish!:(value:Response)=>void;
     state.fetch.mockImplementationOnce(()=>new Promise(resolve=>{finish=resolve}));
-    await act(async()=>vi.advanceTimersByTime(25001));
+    await act(async()=>vi.advanceTimersByTime(15001));
     expect(state.fetch).toHaveBeenCalledTimes(2);
-    await act(async()=>vi.advanceTimersByTime(5001));
+    await act(async()=>vi.advanceTimersByTime(15001));
     expect(host.textContent).not.toContain(row.title);
     expect(readSurfaceCache(officeListCacheKey('workspace-a','active',state.viewer))).toMatchObject({data:undefined,revalidating:true});
-    await act(async()=>vi.advanceTimersByTime(7800));
+    await act(async()=>vi.advanceTimersByTime(2800));
     await act(async()=>finish(response({artifacts:[{...row,title:'Renewed report'}]},'30000')));await flush();
     expect(state.fetch).toHaveBeenCalledTimes(2);expect(host.textContent).toContain('Renewed report');
-    expect(officeMetadataRemaining(readSurfaceCache(officeListCacheKey('workspace-a','active',state.viewer)).data,state.viewer)).toBeGreaterThan(17000);
+    expect(officeMetadataRemaining(readSurfaceCache(officeListCacheKey('workspace-a','active',state.viewer)).data,state.viewer)).toBeGreaterThan(12000);
   });
   it('removes real home cards and lazy preview content at their separate deadlines',async()=>{
     state.fetch.mockImplementation(async(url:string)=>url.endsWith('/snapshot')
