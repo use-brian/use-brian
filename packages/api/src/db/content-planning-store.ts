@@ -11,6 +11,7 @@ import { randomUUID } from 'node:crypto'
 import { getPool, query } from './client.js'
 import { admitAnchoredSession } from '../workspace-access/session-create-admission.js'
 import { addSessionMessage } from './sessions.js'
+import { sessionKindSql } from '../session-kind.js'
 
 /**
  * One image bound to a draft (feed-revamp-depth D32). `fileId` is a
@@ -514,7 +515,7 @@ export function createContentPlanningStore(): ContentPlanningStore {
               WHERE d.session_id = s.id AND d.removed_at IS NULL
            ) counts ON true
           WHERE s.assistant_id = $1 AND feed_draft_audience_allowed(s.id)
-            AND s.mode = 'draft'
+            AND ${sessionKindSql.anchored('s', 'feed_draft')}
             AND ($2::text IS NULL OR s.title LIKE '[' || $2 || ']%')
           ORDER BY s.last_active_at DESC`,
         [params.assistantId, params.platform ?? null],
@@ -553,7 +554,7 @@ export function createContentPlanningStore(): ContentPlanningStore {
     async renameSession(params) {
       const current = await query<{ title: string | null }>(
         `SELECT title FROM sessions
-          WHERE id = $1 AND assistant_id = $2 AND mode = 'draft'`,
+          WHERE id = $1 AND assistant_id = $2 AND ${sessionKindSql.anchored('', 'feed_draft')}`,
         [params.sessionId, params.assistantId],
       )
       const row = current.rows[0]
@@ -566,7 +567,7 @@ export function createContentPlanningStore(): ContentPlanningStore {
         `UPDATE sessions
             SET title = $3,
                 title_manually_set = true
-          WHERE id = $1 AND assistant_id = $2 AND mode = 'draft'
+          WHERE id = $1 AND assistant_id = $2 AND ${sessionKindSql.anchored('', 'feed_draft')}
           RETURNING title`,
         [params.sessionId, params.assistantId, title],
       )
@@ -576,7 +577,7 @@ export function createContentPlanningStore(): ContentPlanningStore {
     async sessionExists(assistantId, sessionId) {
       const result = await query(
         `SELECT 1 FROM sessions
-          WHERE id = $1 AND assistant_id = $2 AND mode = 'draft'`,
+          WHERE id = $1 AND assistant_id = $2 AND ${sessionKindSql.anchored('', 'feed_draft')}`,
         [sessionId, assistantId],
       )
       return result.rows.length > 0
@@ -587,7 +588,7 @@ export function createContentPlanningStore(): ContentPlanningStore {
         `DELETE FROM sessions
           WHERE id = $1
             AND assistant_id = $4
-            AND mode = 'draft'
+            AND ${sessionKindSql.anchored('', 'feed_draft')}
             AND ($3::boolean OR user_id = $2)
           RETURNING id`,
         [
@@ -615,7 +616,7 @@ export function createContentPlanningStore(): ContentPlanningStore {
            FROM sessions s
           WHERE s.id = $2
             AND s.assistant_id = $1
-            AND s.mode = 'draft'
+            AND ${sessionKindSql.anchored('s', 'feed_draft')}
          RETURNING id,
                    assistant_id::text AS "assistantId",
                    session_id::text AS "sessionId",

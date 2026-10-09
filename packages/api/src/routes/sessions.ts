@@ -233,7 +233,7 @@ export function sessionRoutes(opts: SessionRouteOptions = {}): Router {
       // don't know about the field. Keep in sync with the CHECK in
       // migration 255 + the KNOWN_ORIGINS set in chat.ts.
       const KNOWN_ORIGINS = ['brain', 'studio', 'workflow', 'doc', 'chat', 'approvals', 'knowledge-base'] as const
-      const rawOrigin = typeof req.query.appOrigin === 'string' ? req.query.appOrigin : null
+      const rawOrigin = typeof req.query.appOrigin === 'string' ? req.query.appOrigin : null // session-kind-exempt: request query field, not a session row
       const appOrigin = rawOrigin && (KNOWN_ORIGINS as readonly string[]).includes(rawOrigin) ? rawOrigin : null
 
       // `scope=workspace` — list the caller's own sessions across EVERY
@@ -259,7 +259,7 @@ export function sessionRoutes(opts: SessionRouteOptions = {}): Router {
 
       // …and because that thread is per-turn ADDRESSABLE, the resume may only
       // return rows another workspace assistant is allowed to answer on —
-      // `isDocSurface`, the same predicate `crossAssistantSendPolicy` applies
+      // the `docSurface` policy, the same rule `crossAssistantSendPolicy` applies
       // in `chat.ts`. Built from `DOC_DOCK_RESUME_ROW` so the two cannot
       // drift; the surrounding filters (owner visibility, the caller's own
       // rows, the feed-surface exclusions) are unchanged.
@@ -267,16 +267,16 @@ export function sessionRoutes(opts: SessionRouteOptions = {}): Router {
       // This deliberately drops TWO shapes the generic list still accepts:
       // `channel_type='notification'` (the notifications inbox thread) and
       // the `app_origin IS NULL` pre-migration-187 back-compat. Neither
-      // satisfies `isDocSurface`, so the dock could attach them but never
+      // has the `docSurface` policy, so the dock could attach them but never
       // re-address them — the 2026-09-01 dead-thread bug. Losing them costs
       // only same-assistant continuation of a legacy NULL-origin thread; the
       // dock mints a fresh doc row on the next send instead.
       const surfaceFilter = allChannels
         ? ''
         : workspaceScope
-          ? `AND s.channel_type = $3 AND s.app_origin = $4`
+          ? `AND s.channel_type = $3 AND ${sessionKindSql.surfaceIs('s', '$4')}`
           : `AND s.channel_type = 'web'
-             AND ($3::text IS NULL OR s.app_origin = $3 OR s.app_origin IS NULL)`
+             AND ${sessionKindSql.surfaceOrUnscoped('s', '$3')}`
 
       // Hide feed-web's single-thread surfaces from the main web sidebar:
       // post-drafting sessions (`mode='draft'`) and the sticky tuning /
@@ -1143,7 +1143,7 @@ export function sessionRoutes(opts: SessionRouteOptions = {}): Router {
    * coalesced assembly reads (T4; rows-not-buffers keeps the §7 steering door
    * open).
    *
-   * Shared chat sessions ONLY (`isSharedChatSession`) — a personal chat has
+   * Web rooms ONLY (`sessionPolicy(kind).post`) — a personal chat has
    * no silent-post semantics, and doc threads / feed drafts keep their own
    * lifecycle. Write access = read access (`gateSessionRead`): whoever can
    * read the room can post, attributed.

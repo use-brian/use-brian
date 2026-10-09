@@ -49,7 +49,7 @@ vi.mock('../../db/workspace-store.js', () => ({
 }))
 
 import { gateSessionRead } from '../sessions.js'
-import { isSharedChatSession } from '../../db/sessions.js'
+const isWebRoom = (s: Parameters<typeof policyFor>[0]) => policyFor(s).crossAssistantSend === 'room'
 import { policyFor } from '../../session-kind.js'
 
 const STARTER = 'user-starter'
@@ -128,10 +128,10 @@ describe('[COMP:api/sessions-workspace-list] workspace-shared chat access', () =
 
 describe('[COMP:api/sessions-workspace-list] shared-chat predicate scope', () => {
   it('matches only a workspace-visible web chat session', () => {
-    expect(isSharedChatSession(session())).toBe(true)
-    expect(isSharedChatSession(session({ visibility: 'owner' }))).toBe(false)
-    expect(isSharedChatSession(session({ appOrigin: 'doc' }))).toBe(false)
-    expect(isSharedChatSession(session({ channelType: 'doc_thread', anchorKind: null }))).toBe(false)
+    expect(isWebRoom(session())).toBe(true)
+    expect(isWebRoom(session({ visibility: 'owner' }))).toBe(false)
+    expect(isWebRoom(session({ appOrigin: 'doc' }))).toBe(false)
+    expect(isWebRoom(session({ channelType: 'doc_thread', anchorKind: null }))).toBe(false)
   })
 
   it('does NOT sweep in doc comment threads or feed drafts', () => {
@@ -140,8 +140,8 @@ describe('[COMP:api/sessions-workspace-list] shared-chat predicate scope', () =>
     // `comment_threads` and every comment on it.
     const docThread = session({ channelType: 'doc_thread', anchorKind: null, appOrigin: 'doc' })
     const feedDraft = session({ mode: 'draft', appOrigin: null })
-    expect(isSharedChatSession(docThread)).toBe(false)
-    expect(isSharedChatSession(feedDraft)).toBe(false)
+    expect(isWebRoom(docThread)).toBe(false)
+    expect(isWebRoom(feedDraft)).toBe(false)
     // They ARE workspace sessions, so speaker labels apply to them.
     expect(policyFor(docThread).attribution).toBe(true)
     expect(policyFor(feedDraft).attribution).toBe(true)

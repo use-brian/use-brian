@@ -26,9 +26,11 @@ export interface ExtraToolContext {
    */
   session?: {
     id: string
-    /** Session mode (e.g. a host may key tool choice off a 'draft' mode). */
+    /** Session mode (`'plan'` for a content-plan session). */
     mode: string | null
     channelType: string
+    /** The session's classified anchor (`classifySession`); a feed draft is `'feed_draft'`. */
+    anchor: string
   }
   /**
    * Opaque per-turn connector-action audit deps, shared with the MCP inject.

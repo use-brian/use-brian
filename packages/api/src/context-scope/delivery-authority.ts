@@ -14,6 +14,7 @@ import { getWorkspaceRoleSystem } from '../db/workspace-store.js'
 import { resolveLiveAccessCeilingSystem } from './resolve-turn-scope.js'
 import { scopeEvidenceFailureOf, validateAudienceScopeEvidence, type ScopeEvidenceFailure } from './caller-evidence.js'
 import { roomAudienceCeiling } from '../routes/_room-binding.js'
+import { isWebTransport } from '../session-kind.js'
 
 export type DeliveryAudienceInput = {
   workspaceId: string
@@ -278,7 +279,7 @@ async function resolveEnvelope(
   input: DeliveryAudienceInput,
   deps: ReturnType<typeof resolvedDependencies>,
 ): Promise<DeliveryAudienceEnvelopeDecision> {
-  if (input.channelType === 'web' || input.channelType === 'notification') {
+  if (isWebTransport(input.channelType)) {
     const member = await memberCeiling(input.workspaceId, input.assistantId, input.userId, deps, input.recipientMode)
     return member.ceiling
       ? { allowed: true, ceiling: member.ceiling, source: 'member' }

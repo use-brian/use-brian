@@ -34,8 +34,6 @@ export type RoomTurnShape = {
   groupSpeaker: boolean
   /** A guest never gains a memory (D1): no memory-write tools, no extraction. */
   memoryWrites: boolean
-  /** The legacy per-user group context block; a room's transcript replaces it. */
-  legacyGroupContext: boolean
   /** Attribute each stored row to its sender and label speakers at assembly. */
   attributeSenders: boolean
   /** Fold the room's un-addressed posts into the addressed turn. */
@@ -49,7 +47,6 @@ export function roomTurnShape(facts: RoomTurnFacts): RoomTurnShape {
     memberMode: facts.inRoom ? 'assistant' : facts.memberMode,
     groupSpeaker: !facts.inRoom && facts.isGroupChat && facts.senderIsWorkspaceMember && facts.senderLinkedIdentity,
     memoryWrites: !guest,
-    legacyGroupContext: facts.isGroupChat && !facts.inRoom,
     attributeSenders: facts.inRoom,
     coalesce: facts.inRoom,
   }

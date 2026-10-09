@@ -105,7 +105,7 @@ import {
 import {
   findOrCreateSession, addSessionMessage, readSessionMessageScopeSource, setSessionMessageChannelId,
   getSessionMessages, getPreferredChannel,
-  getGroupChatContext, buildGroupChatContextPrompt, getSessionTopicLabels, coalesceConsecutiveUserMessages,
+  getSessionTopicLabels, coalesceConsecutiveUserMessages,
   markDowngradeNoticeSent, clearDowngradeNotice,
 } from '../db/sessions.js'
 import { resolveChatModelSelection, wouldBudgetDowngradeAffectModel, chatTierBudget, BACKGROUND_MODEL, backgroundModelFor } from '../model-resolution.js'
@@ -1880,18 +1880,6 @@ async function processChannelMessageTurn(params: ChannelPipelineParams): Promise
   }
   const preferredChannel = await getPreferredChannel(assistant.id, userId)
 
-  // ── Group chat context ──
-  let groupChatContext = ''
-  // A room's own transcript already holds every sender's messages.
-  if (roomShape.legacyGroupContext) {
-    const channelMessages = await getGroupChatContext({
-      assistantId: assistant.id,
-      channelType,
-      channelId: sessionChannelId,
-    })
-    groupChatContext = buildGroupChatContextPrompt(channelMessages, userId)
-  }
-
   // ── Episodic context (topic-scoped history for resume/cross-topic) ──
   let episodicContext: string | null = null
   if (!isolatedAudience && episodicStore && classification) {
@@ -2048,7 +2036,6 @@ async function processChannelMessageTurn(params: ChannelPipelineParams): Promise
     replyContext: replyResolved
       ? { text: replyResolved.text, fromAssistant: replyResolved.fromAssistant }
       : null,
-    groupChatContext,
   })
   // Everything appended below remains in the trusted system channel.
   let systemAddenda = ''

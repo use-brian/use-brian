@@ -331,7 +331,7 @@ function defaultWorkspaceDirectory(): WorkspaceDirectoryStore {
 /**
  * Build the Doc tool set, capture writes behind the child gateway, and inject
  * only reads + the gateway into the chat tool registry.
- * Gated upstream in `chat.ts` on `isDocSurface(session)` — any assistant on
+ * Gated upstream in `chat.ts` on the `docSurface` policy — any assistant on
  * the doc surface (`docSurface: true`).
  */
 export async function injectDocTools(
@@ -340,7 +340,7 @@ export async function injectDocTools(
   // Belt-and-braces gate. Doc authoring is a skill, injected only on the
   // doc SURFACE (`docSurface: true`) — onto whatever assistant is talking
   // there, the workspace primary by default. The chat route decides via
-  // `isDocSurface(session)`; this gate is the safety net so a stray
+  // the `docSurface` policy; this gate is the safety net so a stray
   // off-surface caller still no-ops cleanly rather than minting tools that have
   // no business there.
   if (options.docSurface !== true) {

@@ -51,7 +51,7 @@ export type StalledGoal = { id: string; sweep: 'running_wedge' | 'dead_chain' }
 const NO_ENABLED_TICK = `NOT EXISTS (
   SELECT 1 FROM scheduled_jobs j
    WHERE j.enabled = true
-     AND j.channel_type = 'workflow'
+     AND j.channel_type = 'workflow' -- session-kind-exempt: scheduled_jobs.channel_type, not a session
      AND j.channel_id = g.id::text
      AND j.instructions LIKE '{"kind":"goal_tick"%'
 )`

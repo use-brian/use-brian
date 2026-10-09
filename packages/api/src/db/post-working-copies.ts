@@ -4,6 +4,7 @@ import { maxSensitivity } from '@use-brian/core'
 import type { CampaignEmailMetadata, FeedComposition, FeedLinkedInContext } from '@use-brian/shared'
 import { getPool, query } from './client.js'
 import { seedFirstContentDraftMessage, withPlatformTitlePrefix, type ContentPlanningPlatform, type PostMedia } from './content-planning-store.js'
+import { sessionKindSql } from '../session-kind.js'
 
 export type PostWorkingContent = {
   /** Server-stamped, monotonic classification of selected source material. */
@@ -39,7 +40,7 @@ export const postWorkingCopiesStore = {
     const result = await query<PostWorkingCopy>(
       `SELECT w.revision, w.mutation_id AS "mutationId", w.content
        FROM feed_post_working_copies w JOIN sessions s ON s.id = w.session_id
-       WHERE s.id = $1 AND s.assistant_id = $2 AND s.mode = 'draft' AND feed_draft_audience_allowed(s.id)`,
+       WHERE s.id = $1 AND s.assistant_id = $2 AND ${sessionKindSql.anchored('s', 'feed_draft')} AND feed_draft_audience_allowed(s.id)`,
       [sessionId, assistantId],
     )
     return result.rows[0] ?? null
@@ -74,7 +75,7 @@ export const postWorkingCopiesStore = {
       // serialize first writes, retries, renames and competing devices.
       const session = (await client.query<{ userId: string; title: string }>(
         `SELECT user_id AS "userId", title FROM sessions
-         WHERE id = $1 AND assistant_id = $2 AND mode = 'draft' FOR UPDATE`,
+         WHERE id = $1 AND assistant_id = $2 AND ${sessionKindSql.anchored('', 'feed_draft')} FOR UPDATE`,
         [sessionId, assistantId],
       )).rows[0]
       if (!session) throw new WorkingCopyError(404)

@@ -1445,7 +1445,7 @@ export function FloatingChat({
       // Defence in depth for the doc dock's `scope: "workspace"` resume. That
       // thread is per-turn addressable (the switcher re-addresses instead of
       // starting a new thread), so a row we ATTACH must be one the server
-      // will let the current pick ANSWER on — `isDocSurface` in `chat.ts`,
+      // will let the current pick ANSWER on — the `docSurface` policy in `chat.ts`,
       // i.e. `app_origin === 'doc'`. Attaching anything else produces a dead
       // thread: every send after a switch fails "Session does not belong to
       // this assistant", and the rejection itself bumps `last_active_at`, so

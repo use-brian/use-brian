@@ -85,7 +85,7 @@ describe('[COMP:api/chat-route] session-binding refusals are observable', () => 
 
   it('records what the refused session actually was', () => {
     // The 2026-09-01 investigation needed exactly these: the row's surface is
-    // what decides `isDocSurface`, and without it a refusal says only "some
+    // what decides the `docSurface` policy, and without it a refusal says only "some
     // session was wrong" — which is where that outage hid.
     const block = sessionBindingBlock()
     expect(block).toContain('session_channel_type')

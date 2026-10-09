@@ -60,7 +60,7 @@ export type Transport =
 export type Lane = 'conversation' | 'machine'
 
 /** Which machine lane a `lane='machine'` row is (D17). Null for conversations. */
-export type MachineLane = 'a2a' | 'workflow' | 'api' | 'inspection' | 'cron' | 'programmatic' | 'internal'
+export type MachineLane = 'a2a' | 'workflow' | 'api' | 'inspection' | 'brain_edit' | 'cron' | 'programmatic' | 'internal'
 
 export type SessionKind = {
   audience: Audience
@@ -119,7 +119,7 @@ const MACHINE_CHANNEL_TYPES: Record<string, MachineLane> = {
   workflow: 'workflow',
   api: 'api',
   brain_inspection: 'inspection',
-  brain_edit: 'inspection',
+  brain_edit: 'brain_edit',
   cron: 'cron',
   programmatic: 'programmatic',
   assistant_mcp: 'programmatic',
@@ -150,6 +150,16 @@ function transportOf(channelType: string): Transport {
   if ((EXTERNAL_TRANSPORTS as readonly string[]).includes(channelType)) return channelType as Transport
   if (channelType === 'api') return 'api'
   return 'internal'
+}
+
+/** Is the inbox (notifications) sentinel this channel id? Its target follows the latest surface. */
+export function isInboxSentinel(channelId: string | null | undefined): boolean {
+  return channelId === 'notifications'
+}
+
+/** Does this channel type ride the web transport (web, doc, an anchored web thread, the inbox)? */
+export function isWebTransport(channelType: string): boolean {
+  return transportOf(channelType) === 'web'
 }
 
 /** Is this a provider transport (a human on Telegram, Slack, ...)? */
@@ -320,6 +330,18 @@ export type SessionPolicy = {
    * never reach the group, so the Chat app shows it read-only.
    */
   webTurns: boolean
+  /**
+   * Is this turn on the Doc surface (the doc dock or a doc comment thread)?
+   * Drives doc-skill injection and the doc-only turn behaviours, decoupled
+   * from which assistant is talking.
+   */
+  docSurface: boolean
+  /**
+   * May a turn be addressed to an assistant other than the session's bound
+   * one? `room`: a web room's multi-assistant addressing (T9); `doc`: the doc
+   * dock's per-turn-addressable thread; `none`: assistant-bound.
+   */
+  crossAssistantSend: 'room' | 'doc' | 'none'
   /** Where `effective_clearance` comes from (D10, L10). */
   clearanceSource: 'assistant' | 'anchor'
   /**
@@ -375,6 +397,8 @@ export function sessionPolicy(kind: SessionKind): SessionPolicy {
     compaction: kind.transport === 'web' ? 'context_pressure' : 'idle_tiered',
     createAdmission: room,
     webTurns: anchor !== 'channel',
+    docSurface: kind.surface === 'doc' || anchor === 'doc_thread',
+    crossAssistantSend: room ? 'room' : kind.surface === 'doc' || anchor === 'doc_thread' ? 'doc' : 'none',
     clearanceSource: anchor === 'office_file' ? 'anchor' : 'assistant',
     clearanceRecompute: workspace && anchor !== 'office_file',
   }
@@ -495,12 +519,12 @@ export const sessionKindSql = {
     `${alias}.visibility = 'personal' AND ${alias}.channel_type = 'web' AND ${alias}.anchor_kind = 'none'`,
   /**
    * A personal conversation the owner's history lists: unanchored or the
-   * inbox, never the settings-panel tuning thread or a per-draft iteration
-   * channel (both are hydrated by their own surface).
+   * inbox, never the settings-panel tuning thread (hydrated by its own
+   * surface). The `draft-iter:` sentinel is retired: nothing writes it.
    */
   personalHistory: (alias: string): string =>
     `${alias}.visibility = 'personal' AND ${alias}.anchor_kind IN ('none', 'inbox')`
-    + ` AND ${alias}.channel_id <> 'tuning' AND ${alias}.channel_id NOT LIKE 'draft-iter:%'`,
+    + ` AND ${alias}.channel_id <> 'tuning'`,
   /**
    * The ON CONFLICT target of a personal session's identity: the partial
    * unique index `sessions_personal_identity_key` (D8). A workspace row has no
@@ -523,10 +547,22 @@ export const sessionKindSql = {
    */
   legacyGroupRow: (alias: string): string =>
     `${alias}.visibility = 'personal' AND ${alias}.anchor_kind = 'none' AND ${alias}.archived_at IS NULL`,
+  /**
+   * The surface a personal history is scoped to (`kind.surface`, the
+   * `app_origin` hint): exactly this surface, given as a bind parameter.
+   */
+  surfaceIs: (alias: string, param: string): string =>
+    `${alias}.app_origin = ${param}`,
+  /**
+   * The surface-scoped personal history: rows of the requested surface plus
+   * the unscoped rows that predate surfaces; a NULL parameter lists everything.
+   */
+  surfaceOrUnscoped: (alias: string, param: string): string =>
+    `(${param}::text IS NULL OR ${alias}.app_origin = ${param} OR ${alias}.app_origin IS NULL)`,
   /** The ON CONFLICT target of a channel room: `sessions_channel_room_key` (D8). */
   channelRoomConflict: (): string =>
     `(workspace_id, channel_type, channel_id) WHERE visibility = 'workspace' AND anchor_kind = 'channel'`,
-  /** A session with this anchor (migration 741). */
+  /** A session with this anchor (migration 741). An empty alias leaves the column unqualified. */
   anchored: (alias: string, kind: AnchorKind): string =>
-    `${alias}.anchor_kind = '${kind}'`,
+    `${alias ? `${alias}.` : ''}anchor_kind = '${kind}'`,
 }

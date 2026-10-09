@@ -15,7 +15,7 @@ import { z } from 'zod'
 import { getDefaultAssistant, getUserAssistant, getWorkspacePrimaryAssistant, getUserProfilesByIds, updateUserLastSeenTz, resolveAssistantAccess } from '../db/users.js'
 import { charterNeedsIntake, createSaveCharterTool, CHARTER_INTAKE_ADDENDUM } from '../intake/charter-intake.js'
 import { resolvePresenceTimezone } from '../auth/client-timezone.js'
-import { createPersonalWebSession, findOrCreateSession, findSessionByChannel, findSessionById, addSessionMessage, readSessionMessageScopeSource, toStampedMessages, getSessionMessages, updateSessionTitle, countSessionTurns, truncateMessagesFrom, getPreferredChannel, getSessionTopicLabels, isSharedChatSession, coalesceConsecutiveUserMessages, touchTurnLease, isTurnLeaseSuperseded, releaseTurnLease, requestTurnCancel, reclaimStaleTurn, type SessionMessage } from '../db/sessions.js'
+import { createPersonalWebSession, findOrCreateSession, findSessionByChannel, findSessionById, addSessionMessage, readSessionMessageScopeSource, toStampedMessages, getSessionMessages, updateSessionTitle, countSessionTurns, truncateMessagesFrom, getPreferredChannel, getSessionTopicLabels, coalesceConsecutiveUserMessages, touchTurnLease, isTurnLeaseSuperseded, releaseTurnLease, requestTurnCancel, reclaimStaleTurn, type SessionMessage } from '../db/sessions.js'
 import { createTurnLedger } from '../ledger/recorder.js'
 import { getLedgerPayloadStore } from '../ledger/runtime.js'
 import { query, getPool } from '../db/client.js'
@@ -41,7 +41,7 @@ import { toolErrorExcerpt, toolOutputExcerpt } from './tool-result-excerpt.js'
 import { renderArtifactManifest } from '../files/artifact-manifest.js'
 import { promotePastedText, shouldPromotePaste } from '../files/paste-promotion.js'
 import type { ArtifactPromoter } from '../files/artifact-promote.js'
-import { mayAssistantAnswerInRoom, crossAssistantSendPolicy, isDocSurface } from './_room-binding.js'
+import { mayAssistantAnswerInRoom, crossAssistantSendPolicy } from './_room-binding.js'
 import { recordRoomMentionsForMessage, type RecordRoomMentionsResult } from '../room-mentions.js'
 import type { Sensitivity } from '@use-brian/core'
 import { resolveMentionSpans } from '@use-brian/shared/mention-matching'
@@ -359,7 +359,7 @@ function resolveRunChannel(session: {
   if (session.channelType === 'telegram') return 'telegram'
   if (session.channelType === 'slack') return 'slack'
   if (session.channelType === 'feishu') return 'feishu'
-  if (session.channelType === 'cron') return 'cron'
+  if (kind.machine === 'cron') return 'cron'
   if (session.channelType === 'web') return 'web'
   return 'unknown'
 }
@@ -462,6 +462,8 @@ type WebChatOptions = {
   resolveExtraSystemPrompt?: (session: {
     mode: string | null
     channelType: string
+    /** The classified anchor (`classifySession`); a feed draft is `'feed_draft'`. */
+    anchor: string
     assistantId?: string
   }) => string | null | Promise<string | null>
   resolveAppSoul?: ResolveAppSoul
@@ -1079,7 +1081,6 @@ export function buildUnscopedFileAttachmentInstruction(
  * resume filter from the same predicate and cannot import this module without
  * closing an ESM cycle.
  */
-export { isDocSurface }
 
 /**
  * Natural-language workspace-room creation is an audience change, so the tool
@@ -1124,11 +1125,12 @@ const APP_SURFACE_ORIGINS = new Set([
  * weak `buildAmbientDocSkillBlock` steering (chat-first, author a page only
  * on an explicit ask) instead of the page-first protocol. Coordinator /
  * research gating is NOT affected by this predicate — those key off
- * `isDocSurface` so a workspace-surface research turn keeps the standard
+ * the `docSurface` policy so a workspace-surface research turn keeps the standard
  * coordinator path.
  */
-export function isAppSurface(session: { appOrigin: string | null }): boolean {
-  return session.appOrigin !== null && APP_SURFACE_ORIGINS.has(session.appOrigin)
+export function isAppSurface(session: { appOrigin: string | null; channelType: string; anchorKind: string | null }): boolean {
+  const surface = classifySession(session).surface
+  return surface !== null && APP_SURFACE_ORIGINS.has(surface)
 }
 
 /**
@@ -2721,11 +2723,11 @@ export function chatRoutes(options: WebChatOptions): Router {
         // into the column. Keep in sync with the migration 255 CHECK + the
         // KNOWN_ORIGINS set in sessions.ts.
         const KNOWN_ORIGINS = new Set(['brain', 'studio', 'workflow', 'doc', 'chat', 'approvals', 'knowledge-base'])
-        const rawOrigin = typeof (req.body as { appOrigin?: unknown })?.appOrigin === 'string'
+        const rawOrigin = typeof (req.body as { appOrigin?: unknown })?.appOrigin === 'string' // session-kind-exempt: request body field, not a session row
           ? (req.body as { appOrigin: string }).appOrigin
           : null
         const appOrigin = rawOrigin && KNOWN_ORIGINS.has(rawOrigin) ? rawOrigin : null
-        const createSession = appOrigin === 'chat' && req.userId && req.authSessionId && req.authVersion !== undefined
+        const createSession = appOrigin === 'chat' && req.userId && req.authSessionId && req.authVersion !== undefined // session-kind-exempt: the requested surface of a new chat, not a session row
           ? (params: Parameters<typeof findOrCreateSession>[0]) => createPersonalWebSession({ ...params, workspaceId: assistant.workspaceId },
             { actorUserId: req.userId!, authSessionId: req.authSessionId!, authVersion: req.authVersion! })
           : findOrCreateSession
@@ -2784,7 +2786,7 @@ export function chatRoutes(options: WebChatOptions): Router {
       if (session.assistantId !== assistant.id) {
         let sameWorkspace = false
         if (
-          (isSharedChatSession(session) || isDocSurface(session)) &&
+          policyFor(session).crossAssistantSend !== 'none' &&
           assistant.workspaceId
         ) {
           const boundWs = await query<{ workspaceId: string | null }>(
@@ -2794,8 +2796,8 @@ export function chatRoutes(options: WebChatOptions): Router {
           sameWorkspace = boundWs.rows[0]?.workspaceId === assistant.workspaceId
         }
         const verdict = crossAssistantSendPolicy({
-          isSharedSession: isSharedChatSession(session),
-          isDocSurfaceSession: isDocSurface(session),
+          isSharedSession: policyFor(session).crossAssistantSend === 'room',
+          isDocSurfaceSession: policyFor(session).crossAssistantSend === 'doc',
           sameWorkspace,
           assistantClearance: assistant.clearance ?? null,
           sessionClearance: session.effectiveClearance,
@@ -2984,8 +2986,8 @@ export function chatRoutes(options: WebChatOptions): Router {
       sessionIdForError = session.id
       turnTimingIdentity = { userId: user.id, assistantId: assistant.id, sessionId: session.id }
 
-      const isRoomSession = isSharedChatSession(session)
       const turnPolicy = sessionPolicy(classifySession(session))
+      const isRoomSession = turnPolicy.crossAssistantSend === 'room'
       // D11: admission is decided by audience. Every workspace session (a
       // room, a draft, a doc / Office / feed thread) posts freely, queues
       // one follow-up turn and claims the slot atomically; a personal
@@ -4409,7 +4411,7 @@ export function chatRoutes(options: WebChatOptions): Router {
         // platform's rules. Tuning chat / ordinary sessions pass null and
         // see every rule, platform-labelled.
         voiceTargetPlatform:
-          session.mode === 'draft' ? voicePlatformFromDraftTitle(session.title) : null,
+          classifySession(session).anchor.kind === 'feed_draft' ? voicePlatformFromDraftTitle(session.title) : null,
         teamPurpose,
         assistantName: assistant.name,
         selfEntityId,
@@ -4620,7 +4622,7 @@ export function chatRoutes(options: WebChatOptions): Router {
       // page-authoring protocol appended as a skill block + the doc tools.
       // (Doc is a surface/skill, not an app type — so this is purely the
       // surface test; `docCtx` is kept as the name the gates below read.)
-      const onDocSurface = isDocSurface(session)
+      const onDocSurface = turnPolicy.docSurface
       const docCtx = onDocSurface
       const docSkillTurn = docCtx && activeCapabilities.has('page') && activeCapabilities.has('home_app:page:read') && activeCapabilities.has('home_app:page:write')
       // The app-web workspace surfaces (Brain / Studio / Workflow / Approvals /
@@ -4857,7 +4859,7 @@ export function chatRoutes(options: WebChatOptions): Router {
             clearance: session.effectiveClearance,
           })
           if (pinnedContext.block) userVisibleContextParts.push(pinnedContext.block)
-          if (session.appOrigin === 'chat') {
+          if (classifySession(session).surface === 'chat') {
             pinnedPageEditTargets = pinnedContext.pageTargets
           }
         } catch (err) {
@@ -5114,7 +5116,7 @@ export function chatRoutes(options: WebChatOptions): Router {
       // workspace + row before trusted context or a scoped write exists.
       if (options.brainEntryMutator && assistant.workspaceId) {
         try {
-          const bound = session.channelType === 'brain_edit'
+          const bound = classifySession(session).machine === 'brain_edit'
             ? parseBrainEditChannelId(session.channelId)
             : null
           const requested =
@@ -5210,6 +5212,7 @@ export function chatRoutes(options: WebChatOptions): Router {
       const extraSystemPrompt = (assistant.appType !== 'distribution' || (activeCapabilities.has('feed') && activeCapabilities.has('home_app:feed:write'))) ? await options.resolveExtraSystemPrompt?.({
         mode: session.mode,
         channelType: session.channelType,
+        anchor: classifySession(session).anchor.kind,
         assistantId: assistant.id,
       }) : null
       if (extraSystemPrompt) {
@@ -5252,7 +5255,7 @@ export function chatRoutes(options: WebChatOptions): Router {
       // docks and channels do not render document_payload events. Existing
       // chat-origin sessions remain capable even if an older client omitted
       // the per-turn surface stamp.
-      if (requestedAppOrigin !== 'chat' && session.appOrigin !== 'chat') {
+      if (requestedAppOrigin !== 'chat' && classifySession(session).surface !== 'chat') {
         allTools.delete('presentDocument')
       }
       // The Office lane offers exactly the file-bound read and revise tools.
@@ -5391,8 +5394,8 @@ export function chatRoutes(options: WebChatOptions): Router {
       // Personal assistants without a workspace don't get the tools
       // (they'd error on the workspace check inside each tool's
       // execute path).
-      const isInspectionSession = session.channelType === 'brain_inspection'
-      const isBrainEditSession = session.channelType === 'brain_edit'
+      const isInspectionSession = classifySession(session).machine === 'inspection'
+      const isBrainEditSession = classifySession(session).machine === 'brain_edit'
       const isPrimaryWithWorkspace =
         assistant.kind === 'primary' && !!assistant.workspaceId
       if (
@@ -5468,6 +5471,7 @@ export function chatRoutes(options: WebChatOptions): Router {
               id: session.id,
               mode: session.mode,
               channelType: session.channelType,
+              anchor: classifySession(session).anchor.kind,
             },
             // Connector-action audit — built once above, shared with the MCP
             // inject (Gmail audit). See `connector-actions.md`.
@@ -5486,7 +5490,7 @@ export function chatRoutes(options: WebChatOptions): Router {
       const docWrittenPageIds = new Set<string>()
 
       // Doc tools — page authoring (renderPage/patchPage/getBlock/…) +
-      // entity tools. Injected for any doc-surface turn (`isDocSurface`) AND
+      // entity tools. Injected for any doc-surface turn (`docSurface` policy) AND
       // for the app-web workspace surfaces (`isAppSurface` — ambient: the
       // tools ride the turn, the skill block above tells the model to author
       // only on an explicit ask).
@@ -5544,7 +5548,7 @@ export function chatRoutes(options: WebChatOptions): Router {
             // admit, and inject.ts re-anchors the child mutation tools to the
             // selected id after validation.
             editPageTargets:
-              session.appOrigin === 'chat' ? pinnedPageEditTargets : [],
+              classifySession(session).surface === 'chat' ? pinnedPageEditTargets : [],
             anchorBlockId:
               typeof requestedDocAnchorBlockId === 'string' && requestedDocAnchorBlockId
                 ? requestedDocAnchorBlockId

@@ -33,7 +33,6 @@ import {
 import {
   COALESCE_MAX_MERGED_ROWS,
   coalesceConsecutiveUserMessages,
-  isSharedChatSession,
   toStampedMessages,
   type SessionMessage,
 } from '../../db/sessions.js'
@@ -601,8 +600,8 @@ describe('[COMP:api/room-mechanics] crossAssistantSendPolicy — per-turn addres
     // the shared policy rather than re-growing an inline room-only check.
     const src = readFileSync(new URL('../chat.ts', import.meta.url), 'utf8')
     expect(src).toContain('crossAssistantSendPolicy({')
-    expect(src).toContain('isDocSurfaceSession: isDocSurface(session)')
-    expect(src).toContain('isSharedSession: isSharedChatSession(session)')
+    expect(src).toContain("isDocSurfaceSession: policyFor(session).crossAssistantSend === 'doc'")
+    expect(src).toContain("isSharedSession: policyFor(session).crossAssistantSend === 'room'")
   })
 })
 
@@ -622,7 +621,7 @@ describe('[COMP:api/room-mechanics] one shared-audience definition', () => {
       expect(policyFor(session).deliveryCeiling.ceiling).toBe('audience')
       expect(policyFor(session).context.personalMemory).toBe(false)
       // The narrower web-room predicate keeps its own lifecycle meaning.
-      expect(isSharedChatSession(session)).toBe(false)
+      expect(policyFor(session).crossAssistantSend).not.toBe('room')
     }
     expect(policyFor(shape({ visibility: 'workspace' })).deliveryCeiling.ceiling).toBe('audience')
     expect(policyFor(shape({})).deliveryCeiling.ceiling).toBe('owner')

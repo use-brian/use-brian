@@ -61,8 +61,6 @@ describe('[COMP:api/channel-room] room turns per transport', () => {
         const shape = roomTurnShape(member)
         expect(shape.coalesce).toBe(true)
         expect(shape.attributeSenders).toBe(true)
-        expect(shape.legacyGroupContext).toBe(false)
-        expect(roomTurnShape({ ...member, inRoom: false }).legacyGroupContext).toBe(true)
       })
     })
   }

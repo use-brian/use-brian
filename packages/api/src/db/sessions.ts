@@ -1,4 +1,4 @@
-import { sessionKindSql } from '../session-kind.js'
+import { classifySession, sessionKindSql } from '../session-kind.js'
 import type pg from 'pg'
 import {
   bindScopeSource,
@@ -188,33 +188,6 @@ export type SessionMessageAttachment = {
   caption?: string
 }
 
-/** The fields the shared-session predicates read. */
-type SessionShape = {
-  visibility: string | null
-  channelType: string
-  appOrigin: string | null
-  mode: string | null
-}
-
-/**
- * A workspace-shared **chat** session — the Chat app's Workspace view.
- *
- * Narrower than `visibility === 'workspace'` on purpose. Doc comment threads
- * and feed drafts are also workspace-visible, and they have their own
- * lifecycle rules that must not be widened by accident: deleting a doc-thread
- * session cascades to its `comment_threads` row and every comment on it. Every
- * rule this build relaxes (delete by admin, the busy gate, the workspace list)
- * gates on THIS predicate, not on `visibility` alone.
- *
- * See docs/architecture/features/chat-app.md → "Workspace view".
- */
-export function isSharedChatSession(s: SessionShape): boolean {
-  return (
-    s.visibility === 'workspace' &&
-    s.channelType === 'web' &&
-    s.appOrigin === 'chat'
-  )
-}
 
 
 
@@ -378,7 +351,12 @@ export async function createPersonalWebSession(params: Omit<CreateSessionParams,
 }
 
 async function findOrCreateSessionInternal(params: CreateSessionParams, authenticatedHuman: boolean): Promise<Session> {
-  if (params.visibility !== 'workspace') return insertSession(params, query, params.channelType === 'web' && params.appOrigin === 'chat')
+  const kind = classifySession({
+    channelType: params.channelType, channelId: params.channelId, appOrigin: params.appOrigin ?? null,
+    visibility: params.visibility ?? 'personal', anchorKind: params.anchorKind ?? null,
+  })
+  // A personal Chat app conversation resumes its existing row first.
+  if (kind.audience === 'personal') return insertSession(params, query, kind.transport === 'web' && kind.surface === 'chat')
   const client = await getPool().connect()
   try {
     await client.query('BEGIN')
@@ -1875,70 +1853,6 @@ export async function truncateMessagesFrom(
   }
 }
 
-/**
- * Fetch recent messages across ALL sessions in a group chat channel.
- * Used to give the bot awareness of the full channel conversation when
- * each user has an isolated session. Returns messages in chronological order.
- */
-export async function getGroupChatContext(params: {
-  assistantId: string
-  channelType: string
-  channelId: string
-  limit?: number
-}): Promise<Array<{ role: string; content: unknown; userId: string; createdAt: Date }>> {
-  const limit = params.limit ?? 30
-  const result = await query<{ role: string; content: unknown; userId: string; createdAt: Date }>(
-    `SELECT sm.role, sm.content, s.user_id as "userId", sm.created_at as "createdAt"
-     FROM session_messages sm
-     JOIN sessions s ON sm.session_id = s.id
-     WHERE s.assistant_id = $1
-       AND s.channel_type = $2
-       AND s.channel_id = $3
-       AND sm.channel_message_id IS NOT NULL
-     ORDER BY sm.created_at DESC
-     LIMIT $4`,
-    [params.assistantId, params.channelType, params.channelId, limit],
-  )
-  // Reverse to chronological order (query returns newest first)
-  return result.rows.reverse()
-}
-
-/**
- * Format group chat messages into a system prompt context section.
- * Extracts text from content blocks and labels messages by role.
- */
-export function buildGroupChatContextPrompt(
-  messages: Array<{ role: string; content: unknown; userId: string; createdAt: Date }>,
-  currentUserId: string,
-): string {
-  if (messages.length === 0) return ''
-
-  function extractText(content: unknown): string {
-    if (typeof content === 'string') return content
-    if (Array.isArray(content)) {
-      return content
-        .filter((b: { type: string }) => b.type === 'text')
-        .map((b: { text: string }) => b.text)
-        .join(' ')
-    }
-    return '(non-text content)'
-  }
-
-  const lines = messages
-    .filter((m) => m.role === 'user' || m.role === 'assistant')
-    .map((m) => {
-      const text = extractText(m.content)
-      if (!text.trim()) return null
-      if (m.role === 'assistant') return `You (assistant): ${text}`
-      const label = m.userId === currentUserId ? 'Current user' : 'Another user'
-      return `${label}: ${text}`
-    })
-    .filter(Boolean)
-
-  if (lines.length === 0) return ''
-
-  return `# Recent channel conversation\n\nThe following is the recent conversation in this group chat channel. Multiple users may be participating. Use this to understand the full context of what was said, including your own previous replies to other users.\n\n${lines.join('\n')}`
-}
 
 /**
  * Find the user's most-active messaging channel.
@@ -2111,7 +2025,7 @@ export async function getSessionTranscriptForWorkspaceSystem(
   )
   if (scope.rows.length === 0) return null
 
-  // Most-recent N, then reverse to chronological (like getGroupChatContext).
+  // Most-recent N, then reverse to chronological (oldest first in the result).
   const result = await query<{ role: string; content: unknown }>(
     `SELECT role, content
      FROM session_messages

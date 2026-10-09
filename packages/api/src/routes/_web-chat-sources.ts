@@ -1,3 +1,4 @@
+import { sessionKindSql } from '../session-kind.js'
 import { isWorkspaceWideWebChat, type WebChatEventScope } from './_web-chat-event-scope.js'
 import type { RequestHandler } from 'express'
 
@@ -24,7 +25,7 @@ export const WEB_CHAT_SOURCE_SQL = `
          s.context_project_id AS "contextProjectId"
     FROM sessions s JOIN assistants a ON a.id = s.assistant_id
    WHERE a.workspace_id = $1 AND s.channel_type = 'web' AND s.anchor_kind = 'none'
-     AND s.visibility = 'workspace' AND s.mode IS NULL
+     AND ${sessionKindSql.workspaceAudience('s')} AND s.mode IS NULL
      AND s.effective_clearance = 'public'
      AND s.context_group_id IS NULL AND s.context_project_id IS NULL
      AND s.context_compartments = ARRAY[]::text[]

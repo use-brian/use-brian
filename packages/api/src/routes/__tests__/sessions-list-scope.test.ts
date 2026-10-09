@@ -33,7 +33,8 @@ vi.mock('../../db/workspace-store.js', () => ({
 vi.mock('../route-helpers.js', () => ({ resolveUser: vi.fn() }))
 
 import { sessionRoutes } from '../sessions.js'
-import { DOC_DOCK_RESUME_ROW, isDocSurface } from '../_room-binding.js'
+import { DOC_DOCK_RESUME_ROW } from '../_room-binding.js'
+import { policyFor } from '../../session-kind.js'
 import { query } from '../../db/client.js'
 import {
   getDefaultAssistant,
@@ -130,7 +131,7 @@ describe('[COMP:api/sessions-list] GET /api/sessions workspace scoping', () => {
  * row another workspace assistant is allowed to answer on.
  *
  * They drifted. The resume accepted `channel_type='notification'` and the
- * pre-migration-187 `app_origin IS NULL` back-compat; `isDocSurface` accepts
+ * pre-migration-187 `app_origin IS NULL` back-compat; the `docSurface` policy accepts
  * neither. On 2026-09-01 a workspace's newest owner row was the
  * `channel_id='notifications'` inbox thread, so the dock attached it and every
  * send after an assistant switch died on "Session does not belong to this
@@ -142,8 +143,8 @@ describe('[COMP:api/sessions-list] GET /api/sessions workspace scoping', () => {
 describe('[COMP:api/sessions-list] doc-dock workspace-scope resume', () => {
   it('only returns rows the cross-assistant send policy can re-address', () => {
     // The invariant itself. The list query is BUILT from this constant, so
-    // widening the resume without widening `isDocSurface` fails here.
-    expect(isDocSurface(DOC_DOCK_RESUME_ROW)).toBe(true)
+    // widening the resume without widening the `docSurface` policy fails here.
+    expect(policyFor(DOC_DOCK_RESUME_ROW).docSurface).toBe(true)
   })
 
   it('binds the doc surface shape instead of the wide back-compat filter', async () => {

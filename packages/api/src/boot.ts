@@ -1133,7 +1133,7 @@ export interface OpenApiPorts {
 
   // ── Feed/distribution host hooks — open default: inert ──
   injectExtraTools?: InjectExtraTools
-  resolveExtraSystemPrompt?: (session: { mode: string | null; channelType: string }) => string | null
+  resolveExtraSystemPrompt?: (session: { mode: string | null; channelType: string; anchor: string }) => string | null
   resolveAppSoul?: ResolveAppSoul
 
   // ── Tool-use hooks (remote MCP preflight) — open default: unset ──
@@ -1524,6 +1524,7 @@ export async function bootOpenApi(opts: BootOpenApiOptions): Promise<BootResult>
   const resolveExtraSystemPrompt = async (session: {
     mode: string | null
     channelType: string
+    anchor: string
     assistantId?: string
   }): Promise<string | null> => {
     const open = await resolveOpenPlanningPrompt(session)

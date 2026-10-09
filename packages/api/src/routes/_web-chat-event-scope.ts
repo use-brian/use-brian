@@ -1,4 +1,5 @@
 import type { Session } from '../db/sessions.js'
+import { classifySession } from '../session-kind.js'
 
 // Required fields deliberately mirror the real Session loaders. A partial
 // projection must not silently widen an input's audience at this boundary.
@@ -18,8 +19,10 @@ export type WebChatEventScope = Pick<Session,
  * assistant-surface chats have exactly the same policy as the chat app.
  */
 export function isWorkspaceWideWebChat(session: WebChatEventScope): boolean {
-  return session.channelType === 'web' &&
-    session.visibility === 'workspace' &&
+  const kind = classifySession(session)
+  return kind.transport === 'web' &&
+    kind.audience === 'workspace' &&
+    kind.anchor.kind === 'none' &&
     session.mode === null &&
     session.effectiveClearance === 'public' &&
     session.contextGroupId === null &&

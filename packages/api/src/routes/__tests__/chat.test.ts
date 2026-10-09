@@ -1,6 +1,7 @@
 import { describe, it, expect, vi } from 'vitest'
 import { readFileSync } from 'node:fs'
-import { appAssistantForbidsResearch, appAssistantForbidsCoordinator, isAdaptiveResearchEligible, isUserBlocked, sanitizeTitle, buildActivePageInstruction, buildActiveRecordingInstruction, recordingParticipantsUpdatedReceipt, buildViewingSkillBlock, createUpdateViewedSkillTool, workspaceSkillRevision, resolveStickyChannelId, isDocSurface, isAppSurface, attachUserVisibleContext, settleInlineToolApproval, buildAttachedRecordingContext, buildUnscopedFileAttachmentInstruction, mayOfferWorkspaceChatHandoff, turnInputAdmission, liveTurnAdmission, SSE_KEEPALIVE_INTERVAL_MS, filterBrainSurfaceTools } from '../chat.js'
+import { appAssistantForbidsResearch, appAssistantForbidsCoordinator, isAdaptiveResearchEligible, isUserBlocked, sanitizeTitle, buildActivePageInstruction, buildActiveRecordingInstruction, recordingParticipantsUpdatedReceipt, buildViewingSkillBlock, createUpdateViewedSkillTool, workspaceSkillRevision, resolveStickyChannelId, isAppSurface, attachUserVisibleContext, settleInlineToolApproval, buildAttachedRecordingContext, buildUnscopedFileAttachmentInstruction, mayOfferWorkspaceChatHandoff, turnInputAdmission, liveTurnAdmission, SSE_KEEPALIVE_INTERVAL_MS, filterBrainSurfaceTools } from '../chat.js'
+import { policyFor } from '../../session-kind.js'
 import type { ConfirmationResolver, Message, Tool, ToolContext } from '@use-brian/core'
 import type { PendingApproval, PendingApprovalsStore } from '../../db/pending-approvals-store.js'
 
@@ -417,19 +418,19 @@ describe('[COMP:api/chat-route] appAssistantForbidsCoordinator', () => {
   })
 })
 
-describe('[COMP:api/chat-route] isDocSurface', () => {
+describe('[COMP:api/chat-route] doc surface policy', () => {
   // The surface signal that drives doc-skill injection independent of which
   // assistant is talking. True when the session originated in apps/app-web
   // (appOrigin='doc') or is a doc comment thread.
   it('is true for an appOrigin=doc session', () => {
-    expect(isDocSurface({ appOrigin: 'doc', channelType: 'web', anchorKind: null })).toBe(true)
+    expect(policyFor({ appOrigin: 'doc', channelType: 'web', anchorKind: null }).docSurface).toBe(true)
   })
   it('is true for a doc_thread channel (comment reply)', () => {
-    expect(isDocSurface({ appOrigin: null, channelType: 'doc_thread', anchorKind: null })).toBe(true)
+    expect(policyFor({ appOrigin: null, channelType: 'doc_thread', anchorKind: null }).docSurface).toBe(true)
   })
   it('is false for ordinary web / telegram sessions', () => {
-    expect(isDocSurface({ appOrigin: null, channelType: 'web', anchorKind: null })).toBe(false)
-    expect(isDocSurface({ appOrigin: 'web', channelType: 'telegram', anchorKind: null })).toBe(false)
+    expect(policyFor({ appOrigin: null, channelType: 'web', anchorKind: null }).docSurface).toBe(false)
+    expect(policyFor({ appOrigin: 'web', channelType: 'telegram', anchorKind: null }).docSurface).toBe(false)
   })
 })
 
@@ -439,12 +440,12 @@ describe('[COMP:api/chat-route] isAppSurface', () => {
   // page-first protocol. Full Chat is included; Doc itself is not.
   it('is true for every SurfaceChatPanel origin', () => {
     for (const origin of ['brain', 'studio', 'workflow', 'approvals', 'knowledge-base', 'chat']) {
-      expect(isAppSurface({ appOrigin: origin })).toBe(true)
+      expect(isAppSurface({ appOrigin: origin, channelType: 'web', anchorKind: null })).toBe(true)
     }
   })
   it('is false for doc and unscoped sessions', () => {
-    expect(isAppSurface({ appOrigin: 'doc' })).toBe(false)
-    expect(isAppSurface({ appOrigin: null })).toBe(false)
+    expect(isAppSurface({ appOrigin: 'doc', channelType: 'web', anchorKind: null })).toBe(false)
+    expect(isAppSurface({ appOrigin: null, channelType: 'web', anchorKind: null })).toBe(false)
   })
 })
 

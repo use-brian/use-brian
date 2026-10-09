@@ -41,7 +41,7 @@ describe('[COMP:api/session-kind] classifySession', () => {
     ['workflow run', { channelType: 'workflow', anchorKind: null, channelId: 'run-1' }, 'workflow'],
     ['public API', { channelType: 'api', anchorKind: null, channelId: 'k' }, 'api'],
     ['brain inspection', { channelType: 'brain_inspection', anchorKind: null, channelId: 'i', transient: true }, 'inspection'],
-    ['brain edit', { channelType: 'brain_edit', anchorKind: null, channelId: 'e', transient: true }, 'inspection'],
+    ['brain edit', { channelType: 'brain_edit', anchorKind: null, channelId: 'e', transient: true }, 'brain_edit'],
     ['legacy cron', { channelType: 'cron', anchorKind: null, channelId: 'j' }, 'cron'],
   ]
   for (const [name, row, machine] of machines) {

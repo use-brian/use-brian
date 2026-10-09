@@ -19,6 +19,12 @@ type Input = {
   contextProjectId?: string | null; contextCompartments?: string[]
   expectedPolicyRevision?: string
 }
+/** A Chat app conversation root: the web transport, opened from the chat surface. */
+function isPersonalChatRoot(params: { channelType: string; appOrigin?: string | null }): boolean {
+  const kind = classifySession({ channelType: params.channelType, appOrigin: params.appOrigin ?? null, anchorKind: null })
+  return kind.transport === 'web' && kind.surface === 'chat'
+}
+
 export async function admitSessionCreate<T extends Input>(client: PoolClient, params: T, human: boolean): Promise<T> {
   const pointer = (await client.query('SELECT workspace_id FROM assistants WHERE id=$1', [params.assistantId])).rows[0]
   const assistantWorkspaceId: string | null = pointer?.workspace_id ?? null
@@ -56,7 +62,7 @@ export async function admitSessionCreate<T extends Input>(client: PoolClient, pa
     throw new WorkspaceAccessError('access_policy_conflict', 409)
   }
   if (!policy || policy.setupState === 'legacy') return params
-  if (!human || params.channelType !== 'web' || params.appOrigin !== 'chat') {
+  if (!human || !isPersonalChatRoot(params)) {
     throw new WorkspaceAccessError('session_admission_unsupported', 409)
   }
   if (params.workspaceId !== workspaceId) throw new WorkspaceAccessError('context_not_available', 404)
@@ -207,7 +213,7 @@ export type PersonalWebSessionPrincipal = {
 /** Personal web roots are private, not ordinary shared work. No mode or
  * assistant defaults, and no ambient/attributed user is authentication proof. */
 export async function admitPersonalWebSession(client: PoolClient, params: Input, principal: PersonalWebSessionPrincipal) {
-  if (principal.actorUserId !== params.userId || params.channelType !== 'web' || params.appOrigin !== 'chat' || !params.workspaceId) {
+  if (principal.actorUserId !== params.userId || !isPersonalChatRoot(params) || !params.workspaceId) {
     throw new WorkspaceAccessError('context_not_available', 404)
   }
   await client.query('SELECT id FROM workspaces WHERE id=$1 FOR UPDATE', [params.workspaceId])

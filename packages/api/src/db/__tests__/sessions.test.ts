@@ -18,7 +18,6 @@ import {
   addSessionMessage,
   truncateMessagesFrom,
   getSessionMessages,
-  getGroupChatContext,
   setCompactSummaryAndBoundary,
   listSessionsForWorkspaceSystem,
   listSessionsByChannelForWorkspaceSystem,
@@ -318,20 +317,6 @@ describe('[COMP:api/sessions-route] getSessionMessages with fromSequence', () =>
     const [sql, params] = mockQuery.mock.calls[0]
     expect(sql).toContain('sequence_num >= $2')
     expect(params).toEqual(['s_1', 42])
-  })
-})
-
-describe('[COMP:api/sessions-route] cross-user group context', () => {
-  it('loads only rows already delivered to the provider conversation', async () => {
-    mockQuery.mockResolvedValueOnce({ rows: [], rowCount: 0 } as never)
-    await getGroupChatContext({
-      assistantId: 'assistant-1',
-      channelType: 'telegram',
-      channelId: '-100123:topic:42',
-    })
-    const [sql, params] = mockQuery.mock.calls[0]
-    expect(sql).toContain('sm.channel_message_id IS NOT NULL')
-    expect(params).toEqual(['assistant-1', 'telegram', '-100123:topic:42', 30])
   })
 })
 

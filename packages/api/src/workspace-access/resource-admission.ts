@@ -71,7 +71,7 @@ export function resolveResourceAdmission(
 
   if (input.destination?.kind === 'department') {
     if (!selectedDepartment || selectedDepartment.id !== input.destination.departmentId) throw new WorkspaceAccessError('context_not_available', 404)
-    if (policy.mode === 'simple' && visibility === 'workspace' && selectedDepartment.id !== policy.defaultDepartmentId) {
+    if (policy.mode === 'simple' && visibility === 'workspace' && selectedDepartment.id !== policy.defaultDepartmentId) { // session-kind-exempt: resource visibility, not a session
       throw new WorkspaceAccessError('access_mode_destination_conflict', 409)
     }
     compartments.push(selectedDepartment.compartment)
@@ -80,15 +80,15 @@ export function resolveResourceAdmission(
   } else if (input.destination?.kind === 'general') {
     // Old clients must not silently replace an explicit General intent with the
     // new shared default. Refresh instead; inherited floors are never removed.
-    if (policy.mode === 'simple' && visibility === 'workspace') throw new WorkspaceAccessError('access_mode_destination_conflict', 409)
+    if (policy.mode === 'simple' && visibility === 'workspace') throw new WorkspaceAccessError('access_mode_destination_conflict', 409) // session-kind-exempt: resource visibility, not a session
     origin = 'explicit'
   } else if (input.requestedLabels?.compartments !== undefined) {
-    if (policy.mode === 'simple' && visibility === 'workspace'
+    if (policy.mode === 'simple' && visibility === 'workspace' // session-kind-exempt: resource visibility, not a session
       && (input.requestedLabels.compartments.length === 0
         || input.requestedLabels.compartments.some(key => key !== policy.defaultCompartment && !parent?.compartments.includes(key)))) {
       throw new WorkspaceAccessError('access_mode_destination_conflict', 409)
     }
-  } else if (!parent && visibility === 'workspace') {
+  } else if (!parent && visibility === 'workspace') { // session-kind-exempt: resource visibility, not a session
     if (policy.mode !== 'simple') throw new WorkspaceAccessError('context_selection_required', 409)
     compartments.push(policy.defaultCompartment!)
     departmentId = policy.defaultDepartmentId

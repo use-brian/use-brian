@@ -26,6 +26,7 @@ import {
   createDeliveryAudienceAuthorizer,
   type AuthorizeDeliveryAudience,
 } from '../context-scope/delivery-authority.js'
+import { isWebTransport } from '../session-kind.js'
 
 export type DeliveryParams = {
   /** Owning workspace for live audience authorization. */
@@ -151,7 +152,7 @@ export async function deliverToChannel(params: DeliveryParams): Promise<ChannelD
   }
 
   // Only persist to notification session if delivering to web (avoid double notification)
-  if (channelType === 'web' || channelType === 'notification') {
+  if (isWebTransport(channelType)) {
     const notifSession = await findOrCreateSession({
       assistantId,
       userId,
