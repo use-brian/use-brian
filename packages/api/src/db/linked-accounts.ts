@@ -18,6 +18,7 @@
  * Component tag: [COMP:api/linked-accounts-store].
  */
 
+import { sessionKindSql } from '../session-kind.js'
 import { captureMemoryVersions } from './brain-row-versions.js'
 import { query, queryWithRLS, getPool } from './client.js'
 
@@ -186,22 +187,28 @@ export async function mergeShadowUser(
     for (const shadow of shadows.rows) {
       const sid = shadow.id
 
-      // 1. Reassign sessions that don't conflict with the real user's
+      // 1. Reassign sessions. A workspace row's user_id only records who
+      //    started it (D9) and has no identity-tuple uniqueness, so it is
+      //    always reassigned and never deleted: the room belongs to the
+      //    workspace. A personal row moves unless the real user already holds
+      //    the same identity.
       await client.query(
         `UPDATE sessions SET user_id = $1
          WHERE user_id = $2
-           AND NOT EXISTS (
+           AND (${sessionKindSql.workspaceAudience('sessions')} OR NOT EXISTS (
              SELECT 1 FROM sessions s2
              WHERE s2.user_id = $1
+               AND ${sessionKindSql.workspaceAudience('s2')} IS NOT TRUE
                AND s2.assistant_id = sessions.assistant_id
                AND s2.channel_type = sessions.channel_type
                AND s2.channel_id = sessions.channel_id
                AND COALESCE(s2.app_id, '') = COALESCE(sessions.app_id, '')
-           )`,
+           ))`,
         [realUserId, sid],
       )
-      // Delete remaining conflicting shadow sessions (cascade deletes messages)
-      await client.query(`DELETE FROM sessions WHERE user_id = $1`, [sid])
+      // Delete the remaining conflicting PERSONAL shadow sessions (cascade
+      // deletes messages). Workspace rows were all reassigned above.
+      await client.query(`DELETE FROM sessions WHERE user_id = $1 AND NOT (${sessionKindSql.workspaceAudience('sessions')})`, [sid])
 
       // 2. Reassign memories (skip duplicates)
       await client.query(

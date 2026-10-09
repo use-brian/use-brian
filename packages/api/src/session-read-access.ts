@@ -23,7 +23,9 @@ import { classifySession } from './session-kind.js'
 
 /** Workspace audience per the one classifier (rooms, threads, drafts). */
 function workspaceAudience(session: Pick<ReadGatedSessionFields, 'visibility' | 'mode'>): boolean {
-  return classifySession({ channelType: 'web', visibility: session.visibility, mode: session.mode }).audience === 'workspace'
+  // The audience is the stored visibility (drafts are 'workspace' since
+  // migration 741); the legacy mode fallback covers in-memory rows.
+  return classifySession({ channelType: 'web', visibility: session.visibility, mode: session.mode, anchorKind: null }).audience === 'workspace'
 }
 
 /** The session fields the read decision consumes. */

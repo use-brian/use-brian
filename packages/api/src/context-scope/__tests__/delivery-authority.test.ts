@@ -69,7 +69,7 @@ function session(overrides: Partial<Session> = {}): Session {
     downgradeNoticeSent: false,
     downgradeNoticePinMessageId: null,
     mode: null,
-    visibility: 'owner',
+    visibility: 'owner', anchorKind: 'none', anchorRef: null, clearanceSource: 'assistant',
     effectiveClearance: null,
     contextGroupId: null,
     contextProjectId: null,

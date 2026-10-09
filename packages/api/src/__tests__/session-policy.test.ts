@@ -7,18 +7,18 @@ import { feedAnchoredRead, policyFor, sessionKindSql, transportPolicy, type Sess
  * Each case asserts the policy's answer for the row; S1 flips a case in the
  * same commit that converges the row.
  */
-const ROOM: SessionKindRow = { channelType: 'web', visibility: 'workspace', appOrigin: 'chat', channelId: 'r' }
-const PERSONAL: SessionKindRow = { channelType: 'web', visibility: 'owner', appOrigin: 'chat', channelId: 'p' }
-const DRAFT: SessionKindRow = { channelType: 'web', visibility: 'workspace', mode: 'draft', channelId: 'd' }
-const DOC_THREAD: SessionKindRow = { channelType: 'doc_thread', visibility: 'workspace', channelId: 't' }
-const OFFICE: SessionKindRow = { channelType: 'office_thread', visibility: 'workspace', channelId: 'o' }
-const FEED_THREAD: SessionKindRow = { channelType: 'feed_thread', visibility: 'workspace', channelId: 'f' }
-const INBOX: SessionKindRow = { channelType: 'notification', visibility: 'owner', channelId: 'notifications' }
-const TELEGRAM_DM: SessionKindRow = { channelType: 'telegram', visibility: 'owner', channelId: '1' }
-const WORKFLOW: SessionKindRow = { channelType: 'workflow', channelId: 'run' }
-const PROGRAMMATIC: SessionKindRow = { channelType: 'programmatic', channelId: 'k' }
-const A2A: SessionKindRow = { channelType: 'assistant-call', channelId: 'a' }
-const CRON: SessionKindRow = { channelType: 'cron', channelId: 'j' }
+const ROOM: SessionKindRow = { channelType: 'web', anchorKind: null, visibility: 'workspace', appOrigin: 'chat', channelId: 'r' }
+const PERSONAL: SessionKindRow = { channelType: 'web', anchorKind: null, visibility: 'owner', appOrigin: 'chat', channelId: 'p' }
+const DRAFT: SessionKindRow = { channelType: 'web', anchorKind: null, visibility: 'workspace', mode: 'draft', channelId: 'd' }
+const DOC_THREAD: SessionKindRow = { channelType: 'doc_thread', anchorKind: null, visibility: 'workspace', channelId: 't' }
+const OFFICE: SessionKindRow = { channelType: 'office_thread', anchorKind: null, visibility: 'workspace', channelId: 'o' }
+const FEED_THREAD: SessionKindRow = { channelType: 'feed_thread', anchorKind: null, visibility: 'workspace', channelId: 'f' }
+const INBOX: SessionKindRow = { channelType: 'notification', anchorKind: null, visibility: 'owner', channelId: 'notifications' }
+const TELEGRAM_DM: SessionKindRow = { channelType: 'telegram', anchorKind: null, visibility: 'owner', channelId: '1' }
+const WORKFLOW: SessionKindRow = { channelType: 'workflow', anchorKind: null, channelId: 'run' }
+const PROGRAMMATIC: SessionKindRow = { channelType: 'programmatic', anchorKind: null, channelId: 'k' }
+const A2A: SessionKindRow = { channelType: 'assistant-call', anchorKind: null, channelId: 'a' }
+const CRON: SessionKindRow = { channelType: 'cron', anchorKind: null, channelId: 'j' }
 
 describe('[COMP:api/session-policy] sessionPolicy drift ledger', () => {
   it('L1 tool interactivity: comes from the principal, so a human in an anchored thread is attended', () => {
@@ -102,9 +102,8 @@ describe('[COMP:api/session-policy] sessionPolicy drift ledger', () => {
     expect(office.clearanceSource).toBe('anchor')
     expect(office.clearanceRecompute).toBe(false)
     expect(policyFor(ROOM).clearanceRecompute).toBe(true)
-    const sql = sessionKindSql.assistantClearanceSourced('s')
-    expect(sql).toContain("s.channel_type <> 'office_thread'")
-    expect(sql).toContain('s.guest_session_token IS NULL')
+    // Migration 741 stores the source (D10): the recompute reads it.
+    expect(sessionKindSql.assistantClearanceSourced('s')).toContain("s.clearance_source = 'assistant'")
   })
 
   it('L11 lifecycle: participants rename and admins delete every workspace session', () => {

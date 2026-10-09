@@ -12,7 +12,7 @@ export type WorkspaceSearchTarget =
   | { type: 'record'; id: string; entityTypeId: string }
   | { type: 'recording'; id: string; segmentIndex?: number }
   | { type: 'office'; id: string; family: 'document' | 'presentation' | 'spreadsheet'; contextId?: string }
-  | { type: 'conversation'; id: string; visibility: 'owner' | 'workspace' }
+  | { type: 'conversation'; id: string; visibility: 'personal' | 'workspace' }
   | { type: 'workflow'; id: string }
 
 export type WorkspaceSearchItem = {

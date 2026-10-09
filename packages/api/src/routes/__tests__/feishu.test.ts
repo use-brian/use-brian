@@ -33,6 +33,7 @@ const mocks = vi.hoisted(() => ({
   billingPartyForAssistant: vi.fn(),
   ensureFeishuConnectorInstance: vi.fn(),
   processChannelMessage: vi.fn(),
+  cacheInboundImageTag: vi.fn(),
 }))
 
 vi.mock('../../feishu/client.js', () => ({ createFeishuApi: () => mocks.api }))
@@ -63,6 +64,7 @@ vi.mock('../../ingest/feishu-connector-instance.js', () => ({
 }))
 vi.mock('../../db/chat-lock.js', () => ({ withChatLock: (_key: string, fn: () => unknown) => fn() }))
 vi.mock('../channel-pipeline.js', () => ({ processChannelMessage: mocks.processChannelMessage }))
+vi.mock('../channel-file-cache.js', () => ({ cacheInboundImageTag: mocks.cacheInboundImageTag }))
 
 import { feishuRoutes, resolveFeishuThreadScope, type FeishuRouteOptions } from '../feishu.js'
 
@@ -188,6 +190,7 @@ describe('[COMP:api/feishu-route] bridge route', () => {
     mocks.mergeShadowUser.mockResolvedValue(undefined)
     mocks.tryResolveSchedulerConfirmation.mockReturnValue(true)
     mocks.processChannelMessage.mockResolvedValue(undefined)
+    mocks.cacheInboundImageTag.mockResolvedValue('')
     mocks.api.send.mockResolvedValue({ messageId: 'om_status' })
     mocks.api.editPost.mockResolvedValue(undefined)
     mocks.api.updateCard.mockResolvedValue(undefined)
@@ -633,6 +636,29 @@ describe('[COMP:api/feishu-route] bridge route', () => {
       replyToMessageId: null,
       modelAlias: 'pro',
     }))
+  })
+
+  it('caches a topic image on the session the turn runs in', async () => {
+    const { app } = setup({ config: { requireMention: true }, route: { fileStore: {} as never } })
+    await request(app)
+      .post('/internal/feishu/inbound')
+      .set('X-Connector-Secret', 'shared-secret')
+      .send({
+        channelId: CHANNEL_ROW_ID,
+        message: normalizedMessage({
+          chatType: 'group', mentionedBot: true, rootId: 'om_root',
+          content: '', rawContentType: 'image',
+          resources: [{ type: 'image', fileKey: 'img_1', fileName: 'photo.png' }],
+        }),
+      })
+      .expect(202)
+    await vi.waitFor(() => expect(mocks.processChannelMessage).toHaveBeenCalledOnce())
+    const turn = mocks.processChannelMessage.mock.calls[0][0] as { sessionChannelId: string }
+    expect(mocks.cacheInboundImageTag).toHaveBeenCalledWith(expect.objectContaining({
+      channelType: 'feishu',
+      channelId: turn.sessionChannelId,
+    }))
+    expect(turn.sessionChannelId).toBe('oc_chat:thread:om_root')
   })
 
   it('can disable assistant connector authority explicitly in channel config', async () => {

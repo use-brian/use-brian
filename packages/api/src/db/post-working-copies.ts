@@ -1,4 +1,5 @@
 /** Durable unfinished Feed compositions. [COMP:feed/post-working-copies] */
+import { admitAnchoredSession } from '../workspace-access/session-create-admission.js'
 import { maxSensitivity } from '@use-brian/core'
 import type { CampaignEmailMetadata, FeedComposition, FeedLinkedInContext } from '@use-brian/shared'
 import { getPool, query } from './client.js'
@@ -50,14 +51,22 @@ export const postWorkingCopiesStore = {
       await client.query('BEGIN')
       let created = false
       if (input.create) {
+        // Admitted by its anchor (unified-sessions L12) when it is new.
+        const exists = (await client.query('SELECT 1 FROM sessions WHERE id = $1', [sessionId])).rows.length > 0
+        const admitted = exists ? null : await admitAnchoredSession(client, {
+          assistantId, userId, channelType: 'web', channelId: `draft:${sessionId}`,
+          anchorKind: 'feed_draft', anchorRef: sessionId,
+        })
         const inserted = await client.query(
           `INSERT INTO sessions (id, assistant_id, user_id, channel_type, channel_id,
-             title, title_manually_set, mode, seed_kind, visibility, workspace_id)
-           SELECT $1, a.id, $3, 'web', $4, $5, true, 'draft', 'freeform', 'workspace', a.workspace_id
+             title, title_manually_set, mode, seed_kind, visibility, workspace_id,
+             anchor_kind, anchor_ref, effective_clearance)
+           SELECT $1, a.id, $3, 'web', $4, $5, true, 'draft', 'freeform', 'workspace', a.workspace_id,
+             'feed_draft', $1::text, COALESCE($6, a.clearance, 'internal')
            FROM assistants a WHERE a.id = $2
            ON CONFLICT (id) DO NOTHING RETURNING id`,
           [sessionId, assistantId, userId, `draft:${sessionId}`,
-            withPlatformTitlePrefix(input.create.platform, input.content.title)],
+            withPlatformTitlePrefix(input.create.platform, input.content.title), admitted?.effectiveClearance ?? null],
         )
         created = inserted.rows.length > 0
       }

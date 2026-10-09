@@ -16,6 +16,12 @@ import { resolveOfficeAccess } from './office/access.js'
 type GatedSession = {
   id?: string
   channelType?: string
+  /**
+   * The stored anchor (migration 741), REQUIRED: an Office or feed thread is
+   * stored as `channel_type='web'`, so without it the anchor's own gate (file
+   * access, draft collaboration) would silently fall back to membership.
+   */
+  anchorKind: string | null
   userId: string
   assistantId: string
   visibility: string | null
@@ -36,9 +42,9 @@ type GatedSession = {
  */
 export async function anchorReadGate(
   jwtUserId: string,
-  session: Pick<GatedSession, 'id' | 'channelType' | 'assistantId' | 'visibility' | 'mode'>,
+  session: Pick<GatedSession, 'id' | 'channelType' | 'assistantId' | 'visibility' | 'mode' | 'anchorKind'>,
 ): Promise<{ status: number; error: string } | null | 'continue'> {
-  const policy = policyFor({ channelType: session.channelType ?? 'web', visibility: session.visibility, mode: session.mode })
+  const policy = policyFor({ channelType: session.channelType ?? 'web', visibility: session.visibility, mode: session.mode, anchorKind: session.anchorKind })
   if (policy.read.rule !== 'workspace') return 'continue'
   switch (policy.read.anchorGate) {
     case 'none':

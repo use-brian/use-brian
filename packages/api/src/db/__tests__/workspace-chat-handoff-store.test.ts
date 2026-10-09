@@ -63,7 +63,7 @@ describe('[COMP:api/workspace-chat-handoff] persistence', () => {
 
     const sourceRead = issued.find((entry) => entry.text.includes('SELECT a.clearance'))!
     expect(sourceRead.text).toContain("s.channel_type = 'web'")
-    expect(sourceRead.text).toContain("s.visibility = 'owner'")
+    expect(sourceRead.text).toContain("s.visibility = 'personal' AND s.channel_type = 'web' AND s.anchor_kind = 'none'")
     expect(sourceRead.values).toEqual([
       'private-session-1',
       'user-1',

@@ -115,7 +115,7 @@ describe('[COMP:api/workspace-chat-handoff] per-turn admission', () => {
   it('admits owner-scoped web chats in the current workspace', () => {
     expect(
       mayOfferWorkspaceChatHandoff(
-        { visibility: 'owner', channelType: 'web' },
+        { visibility: 'owner', channelType: 'web', anchorKind: null },
         'workspace-1',
       ),
     ).toBe(true)
@@ -124,19 +124,19 @@ describe('[COMP:api/workspace-chat-handoff] per-turn admission', () => {
   it('rejects workspace rooms, non-web sessions, and workspace-less assistants', () => {
     expect(
       mayOfferWorkspaceChatHandoff(
-        { visibility: 'workspace', channelType: 'web' },
+        { visibility: 'workspace', channelType: 'web', anchorKind: null },
         'workspace-1',
       ),
     ).toBe(false)
     expect(
       mayOfferWorkspaceChatHandoff(
-        { visibility: 'owner', channelType: 'telegram' },
+        { visibility: 'owner', channelType: 'telegram', anchorKind: null },
         'workspace-1',
       ),
     ).toBe(false)
     expect(
       mayOfferWorkspaceChatHandoff(
-        { visibility: 'owner', channelType: 'web' },
+        { visibility: 'owner', channelType: 'web', anchorKind: null },
         null,
       ),
     ).toBe(false)
@@ -422,14 +422,14 @@ describe('[COMP:api/chat-route] isDocSurface', () => {
   // assistant is talking. True when the session originated in apps/app-web
   // (appOrigin='doc') or is a doc comment thread.
   it('is true for an appOrigin=doc session', () => {
-    expect(isDocSurface({ appOrigin: 'doc', channelType: 'web' })).toBe(true)
+    expect(isDocSurface({ appOrigin: 'doc', channelType: 'web', anchorKind: null })).toBe(true)
   })
   it('is true for a doc_thread channel (comment reply)', () => {
-    expect(isDocSurface({ appOrigin: null, channelType: 'doc_thread' })).toBe(true)
+    expect(isDocSurface({ appOrigin: null, channelType: 'doc_thread', anchorKind: null })).toBe(true)
   })
   it('is false for ordinary web / telegram sessions', () => {
-    expect(isDocSurface({ appOrigin: null, channelType: 'web' })).toBe(false)
-    expect(isDocSurface({ appOrigin: 'web', channelType: 'telegram' })).toBe(false)
+    expect(isDocSurface({ appOrigin: null, channelType: 'web', anchorKind: null })).toBe(false)
+    expect(isDocSurface({ appOrigin: 'web', channelType: 'telegram', anchorKind: null })).toBe(false)
   })
 })
 

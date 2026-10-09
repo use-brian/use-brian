@@ -176,9 +176,9 @@ describe('[COMP:api/sessions-list] doc-dock workspace-scope resume', () => {
 
     const [sql, params] = mockQuery.mock.calls[0] as [string, unknown[]]
     // Recents is a HISTORY list, not a resume target - it never re-addresses,
-    // so legacy null-origin and notification rows stay visible there.
+    // so legacy null-origin and inbox rows stay visible there.
     expect(sql).toContain('app_origin IS NULL')
-    expect(sql).toContain("'notification'")
+    expect(sql).toContain("anchor_kind IN ('none', 'inbox')")
     expect(params).toHaveLength(3)
   })
 
@@ -194,7 +194,7 @@ describe('[COMP:api/sessions-list] doc-dock workspace-scope resume', () => {
     expect(params[0]).toBe(EXPLICIT_ASSISTANT_ID)
   })
 
-  it('scope=workspace&channels=all lifts the surface filter but keeps owner visibility (chat audit list)', async () => {
+  it('scope=workspace&channels=all lifts the surface filter but keeps personal history (chat audit list)', async () => {
     mockWorkspacePrimary.mockResolvedValue(assistant(WS_PRIMARY_ASSISTANT_ID))
 
     await request(makeApp())
@@ -203,7 +203,7 @@ describe('[COMP:api/sessions-list] doc-dock workspace-scope resume', () => {
 
     const [sql, params] = mockQuery.mock.calls[0] as [string, unknown[]]
     expect(sql).toContain('a.workspace_id = $1')
-    expect(sql).toContain("s.visibility = 'owner'")
+    expect(sql).toContain("s.visibility = 'personal'")
     expect(sql).toContain('s.channel_type as "channelType"')
     expect(sql).not.toContain('s.channel_type = $3')
     expect(sql).not.toContain("s.channel_type IN ('web'")
@@ -218,7 +218,8 @@ describe('[COMP:api/sessions-list] doc-dock workspace-scope resume', () => {
       .expect(200)
 
     const [sql, params] = mockQuery.mock.calls[0] as [string, unknown[]]
-    expect(sql).toContain("s.channel_type IN ('web', 'notification')")
+    expect(sql).toContain("s.channel_type = 'web'")
+    expect(sql).toContain("anchor_kind IN ('none', 'inbox')")
     expect(params).toHaveLength(3)
   })
 })

@@ -212,9 +212,9 @@ describe('[COMP:api/room-mechanics] mayResolveRoomConfirmation (T11/D8)', () => 
 describe('[COMP:api/room-mechanics] no busy gate on the human path (D2, D11)', () => {
   it('every workspace session takes room admission, drafts included', () => {
     for (const row of [
-      { channelType: 'web', visibility: 'workspace', appOrigin: 'chat' },
-      { channelType: 'web', visibility: 'workspace', mode: 'draft' },
-      { channelType: 'doc_thread', visibility: 'workspace' },
+      { channelType: 'web', anchorKind: null, visibility: 'workspace', appOrigin: 'chat' },
+      { channelType: 'web', anchorKind: null, visibility: 'workspace', mode: 'draft' },
+      { channelType: 'doc_thread', anchorKind: null, visibility: 'workspace' },
     ]) {
       expect(policyFor(row).admission).toBe('room')
     }
@@ -610,13 +610,13 @@ describe('[COMP:api/room-mechanics] one shared-audience definition', () => {
   // Input stamping and the delivery gate must agree on who the audience is,
   // or every turn in a shape only one of them calls shared is refused.
   const shape = (over: Record<string, string | null>) => ({
-    visibility: 'owner', channelType: 'web', appOrigin: 'chat', mode: null, ...over,
+    visibility: 'owner', channelType: 'web', anchorKind: null, appOrigin: 'chat', mode: null, ...over,
   })
 
   it('treats doc comment threads, Feed threads and live drafts as shared audiences', () => {
     for (const session of [
-      shape({ channelType: 'doc_thread', appOrigin: null, visibility: 'workspace' }),
-      shape({ channelType: 'feed_thread', appOrigin: null, visibility: 'workspace' }),
+      shape({ channelType: 'doc_thread', anchorKind: null, appOrigin: null, visibility: 'workspace' }),
+      shape({ channelType: 'feed_thread', anchorKind: null, appOrigin: null, visibility: 'workspace' }),
       shape({ mode: 'draft' }),
     ]) {
       expect(policyFor(session).deliveryCeiling.ceiling).toBe('audience')

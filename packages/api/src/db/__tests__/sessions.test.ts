@@ -111,7 +111,7 @@ describe('[COMP:api/sessions-route] findOrCreateSession', () => {
       'chat_123',
       'Use Brian',
       null,
-      'owner',
+      'personal',
       null,
       null,
       null,
@@ -119,6 +119,8 @@ describe('[COMP:api/sessions-route] findOrCreateSession', () => {
       null,
       true,
       true,
+      null,
+      null,
     ])
   })
 

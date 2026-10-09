@@ -997,7 +997,9 @@ export function feishuRoutes(options: FeishuRouteOptions): Router {
             ? await cacheInboundImageTag({
                 fileStore: options.fileStore,
                 channelType: 'feishu',
-                channelId: incoming.channelId,
+                // The session's own channel_id: a topic reply keys its session
+                // on the thread scope, not the chat (unified-sessions §4.6).
+                channelId: sessionChannelId,
                 userId: channelUserId,
                 assistant,
                 file: { buffer, mime, fileName: file.name },

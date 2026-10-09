@@ -61,7 +61,7 @@ function session(overrides: Record<string, unknown> = {}) {
     assistantId: 'a-1',
     visibility: 'workspace',
     mode: null,
-    channelType: 'web',
+    channelType: 'web', anchorKind: null,
     appOrigin: 'chat',
     effectiveClearance: 'internal',
     ...overrides,
@@ -131,14 +131,14 @@ describe('[COMP:api/sessions-workspace-list] shared-chat predicate scope', () =>
     expect(isSharedChatSession(session())).toBe(true)
     expect(isSharedChatSession(session({ visibility: 'owner' }))).toBe(false)
     expect(isSharedChatSession(session({ appOrigin: 'doc' }))).toBe(false)
-    expect(isSharedChatSession(session({ channelType: 'doc_thread' }))).toBe(false)
+    expect(isSharedChatSession(session({ channelType: 'doc_thread', anchorKind: null }))).toBe(false)
   })
 
   it('does NOT sweep in doc comment threads or feed drafts', () => {
     // Both are workspace-visible, and both have lifecycle rules the shared-chat
     // relaxations must not touch — deleting a doc thread cascades to
     // `comment_threads` and every comment on it.
-    const docThread = session({ channelType: 'doc_thread', appOrigin: 'doc' })
+    const docThread = session({ channelType: 'doc_thread', anchorKind: null, appOrigin: 'doc' })
     const feedDraft = session({ mode: 'draft', appOrigin: null })
     expect(isSharedChatSession(docThread)).toBe(false)
     expect(isSharedChatSession(feedDraft)).toBe(false)
@@ -156,9 +156,9 @@ describe('[COMP:api/sessions-workspace-list] shared-chat predicate scope', () =>
 describe('[COMP:api/sessions-workspace-list] turn serialization is internal for workspace sessions', () => {
   it('admits by audience: workspace sessions queue a follow-up turn, personal sessions use the lease (D11)', async () => {
     const { policyFor } = await import('../../session-kind.js')
-    expect(policyFor({ channelType: 'web', visibility: 'workspace', appOrigin: 'chat' }).admission).toBe('room')
-    expect(policyFor({ channelType: 'web', visibility: 'workspace', mode: 'draft' }).admission).toBe('room')
-    expect(policyFor({ channelType: 'doc_thread', visibility: 'workspace', appOrigin: 'doc' }).admission).toBe('room')
-    expect(policyFor({ channelType: 'web', visibility: 'owner', appOrigin: 'chat' }).admission).toBe('personal')
+    expect(policyFor({ channelType: 'web', anchorKind: null, visibility: 'workspace', appOrigin: 'chat' }).admission).toBe('room')
+    expect(policyFor({ channelType: 'web', anchorKind: null, visibility: 'workspace', mode: 'draft' }).admission).toBe('room')
+    expect(policyFor({ channelType: 'doc_thread', anchorKind: null, visibility: 'workspace', appOrigin: 'doc' }).admission).toBe('room')
+    expect(policyFor({ channelType: 'web', anchorKind: null, visibility: 'owner', appOrigin: 'chat' }).admission).toBe('personal')
   })
 })

@@ -14,6 +14,7 @@
  * the package. `chat.ts` re-exports it, so existing importers are unchanged.
  */
 
+import { classifySession } from '../session-kind.js'
 import type { AccessCeiling } from '@use-brian/core'
 import type { Session } from '../db/sessions.js'
 
@@ -121,8 +122,10 @@ export function crossAssistantSendPolicy(params: {
 export function isDocSurface(session: {
   appOrigin: string | null
   channelType: string
+  anchorKind: string | null
 }): boolean {
-  return session.appOrigin === 'doc' || session.channelType === 'doc_thread'
+  const kind = classifySession(session)
+  return kind.surface === 'doc' || kind.anchor.kind === 'doc_thread'
 }
 
 /**
@@ -148,4 +151,5 @@ export function isDocSurface(session: {
 export const DOC_DOCK_RESUME_ROW = {
   appOrigin: 'doc',
   channelType: 'web',
+  anchorKind: 'none',
 } as const

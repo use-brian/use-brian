@@ -11,7 +11,7 @@ import {
 } from '@use-brian/core'
 import { getPool, getAppPool, applyRLSGucs, query } from './client.js'
 import { readCurrentScopeSources, recordDerivedResource, validateDerivedMemoryInputs } from './derived-scope-store.js'
-import { admitSessionCreate, admitPersonalWebSession, type PersonalWebSessionPrincipal } from '../workspace-access/session-create-admission.js'
+import { admitAnchoredSession, admitSessionCreate, admitPersonalWebSession, type PersonalWebSessionPrincipal } from '../workspace-access/session-create-admission.js'
 import { notifyWorkspaceChange } from '../brain-stream/notify.js'
 
 /**
@@ -84,12 +84,18 @@ export type Session = {
    */
   mode: string | null
   /**
-   * Read scope (migration 223). `'owner'` (default) → only the session's
+   * The AUDIENCE (migrations 223, 741). `'personal'` → only the session's
    * `user_id` can read it (sessions_own RLS). `'workspace'` → any member of
    * the owning assistant's workspace can read it (sessions_workspace_shared
-   * RLS) — used for doc comment-thread sessions and feed draft sessions.
+   * RLS): rooms, drafts, doc / Office / feed threads, converged groups. On a
+   * workspace row `user_id` means "created by" and grants nothing (D9).
    */
   visibility: string
+  /** What the conversation is attached to (migration 741); read via `classifySession`. */
+  anchorKind: string
+  anchorRef: string | null
+  /** Where `effective_clearance` comes from: the assistant or the anchor (D10). */
+  clearanceSource: string
   /**
    * Denormalized read-clearance (migration 224) = the owning assistant's
    * clearance, for `visibility='workspace'` sessions. Backs the clearance
@@ -317,12 +323,20 @@ type CreateSessionParams = {
    */
   appOrigin?: string | null
   /**
-   * Read scope (migration 223). Omit → DB default `'owner'`. Pass
-   * `'workspace'` for sessions that back a workspace artifact (doc
-   * comment threads). The ON CONFLICT branch deliberately does NOT update
-   * it — visibility is fixed at first insert, like `app_origin`.
+   * The audience (migrations 223, 741). Omit → `'personal'`. Pass
+   * `'workspace'` for a shared conversation. The ON CONFLICT branch
+   * deliberately does NOT update it: the audience is fixed at first insert.
    */
-  visibility?: 'owner' | 'workspace'
+  visibility?: 'personal' | 'workspace'
+  /**
+   * What the conversation is attached to (migration 741). Omit for a plain
+   * conversation; an anchored workspace thread names its anchor so creation
+   * admission can mint the anchored receipt (L12).
+   */
+  anchorKind?: 'doc_thread' | 'office_file' | 'feed_draft' | 'feed_thread'
+  anchorRef?: string | null
+  /** Set when a guest (the sentinel user) opens a doc thread on a public page. */
+  guestAnchor?: true
   /**
    * Denormalized workspace pointer that backs the `sessions_workspace_shared`
    * RLS policy (migration 223). Required for `visibility:'workspace'` sessions
@@ -356,7 +370,7 @@ export async function createPersonalWebSession(params: Omit<CreateSessionParams,
     await client.query('BEGIN')
     await applyRLSGucs(client, principal.actorUserId)
     const admitted = await admitPersonalWebSession(client, params, principal)
-    const session = await insertSession({ ...admitted, visibility: 'owner' }, (sql, values) => client.query(sql, values), true)
+    const session = await insertSession({ ...admitted, visibility: 'personal' }, (sql, values) => client.query(sql, values), true)
     await client.query('COMMIT')
     return session
   } catch (error) { await client.query('ROLLBACK'); throw error }
@@ -369,7 +383,11 @@ async function findOrCreateSessionInternal(params: CreateSessionParams, authenti
   try {
     await client.query('BEGIN')
     await applyRLSGucs(client, params.userId)
-    const admitted = await admitSessionCreate(client, params, authenticatedHuman)
+    // An anchored thread is admitted by its anchor (L12); a room by the
+    // authenticated chat-root receipt.
+    const admitted = params.anchorKind
+      ? await admitAnchoredSession(client, { ...params, anchorKind: params.anchorKind })
+      : await admitSessionCreate(client, params, authenticatedHuman)
     const session = await insertSession(admitted, (sql, values) => client.query(sql, values), true)
     await client.query('COMMIT')
     return session
@@ -382,7 +400,7 @@ async function findOrCreateSessionInternal(params: CreateSessionParams, authenti
 async function insertSession(params: CreateSessionParams, execute: typeof query, resumeFirst = false): Promise<Session> {
   const appId = params.appId ?? 'Use Brian'
   const appOrigin = params.appOrigin ?? null
-  const visibility = params.visibility ?? 'owner'
+  const visibility = params.visibility ?? 'personal'
   const workspaceId = params.workspaceId ?? null
   const effectiveClearance = params.effectiveClearance ?? null
   const inheritAssistantGroup = params.contextGroupId === undefined
@@ -397,6 +415,7 @@ async function insertSession(params: CreateSessionParams, execute: typeof query,
     const resumed = await execute<Session>(
       `UPDATE sessions SET last_active_at=now()
        WHERE assistant_id=$1 AND user_id=$2 AND channel_type=$3 AND channel_id=$4 AND app_id=$5
+         AND visibility=$6
        RETURNING id, assistant_id as "assistantId", user_id as "userId",
                channel_type as "channelType", channel_id as "channelId",
                app_id as "appId", app_origin as "appOrigin", status, compact_summary as "compactSummary",
@@ -405,12 +424,13 @@ async function insertSession(params: CreateSessionParams, execute: typeof query,
                downgrade_notice_sent as "downgradeNoticeSent",
                downgrade_notice_pin_message_id as "downgradeNoticePinMessageId",
                mode, visibility, effective_clearance as "effectiveClearance",
+               anchor_kind as "anchorKind", anchor_ref as "anchorRef", clearance_source as "clearanceSource",
                context_group_id as "contextGroupId",
                context_project_id as "contextProjectId",
                context_compartments as "contextCompartments",
                context_locked_at as "contextLockedAt",
                created_at as "createdAt", last_active_at as "lastActiveAt"`,
-      [params.assistantId, params.userId, params.channelType, params.channelId, appId],
+      [params.assistantId, params.userId, params.channelType, params.channelId, appId, visibility],
     )
     if (resumed.rows[0]) return resumed.rows[0]
   }
@@ -419,7 +439,7 @@ async function insertSession(params: CreateSessionParams, execute: typeof query,
     `INSERT INTO sessions (
        assistant_id, user_id, channel_type, channel_id, app_id, app_origin,
        visibility, workspace_id, effective_clearance, context_group_id,
-       context_project_id, context_compartments
+       context_project_id, context_compartments, anchor_kind, anchor_ref
      )
      SELECT $1, $2, $3, $4, $5, $6, $7,
             COALESCE($8::uuid, a.workspace_id), $9,
@@ -428,7 +448,8 @@ async function insertSession(params: CreateSessionParams, execute: typeof query,
               WHEN $12::text[] IS NOT NULL THEN $12::text[]
               WHEN g.compartment_key IS NOT NULL THEN ARRAY[g.compartment_key]::text[]
               ELSE ARRAY[]::text[]
-            END
+            END,
+            COALESCE($15::text, 'none'), $16::text
        FROM assistants a
        CROSS JOIN LATERAL (
          SELECT CASE WHEN $13::boolean THEN a.default_workspace_group_id ELSE $10::uuid END AS context_group_id,
@@ -436,7 +457,7 @@ async function insertSession(params: CreateSessionParams, execute: typeof query,
        ) selected
        LEFT JOIN workspace_groups g ON g.id = selected.context_group_id
       WHERE a.id = $1
-     ON CONFLICT (assistant_id, user_id, channel_type, channel_id, app_id) DO UPDATE
+     ON CONFLICT ${sessionKindSql.personalIdentityConflict()} DO UPDATE
        SET last_active_at = now()
      RETURNING id, assistant_id as "assistantId", user_id as "userId",
                channel_type as "channelType", channel_id as "channelId",
@@ -446,6 +467,7 @@ async function insertSession(params: CreateSessionParams, execute: typeof query,
                downgrade_notice_sent as "downgradeNoticeSent",
                downgrade_notice_pin_message_id as "downgradeNoticePinMessageId",
                mode, visibility, effective_clearance as "effectiveClearance",
+               anchor_kind as "anchorKind", anchor_ref as "anchorRef", clearance_source as "clearanceSource",
                context_group_id as "contextGroupId",
                context_project_id as "contextProjectId",
                context_compartments as "contextCompartments",
@@ -466,6 +488,8 @@ async function insertSession(params: CreateSessionParams, execute: typeof query,
       contextCompartments,
       inheritAssistantGroup,
       inheritAssistantProject,
+      params.anchorKind ?? null,
+      params.anchorRef ?? null,
     ],
   )
 
@@ -495,6 +519,7 @@ export async function findSessionByChannel(params: {
             downgrade_notice_sent as "downgradeNoticeSent",
             downgrade_notice_pin_message_id as "downgradeNoticePinMessageId",
             mode, visibility, effective_clearance as "effectiveClearance",
+            anchor_kind as "anchorKind", anchor_ref as "anchorRef", clearance_source as "clearanceSource",
             context_group_id as "contextGroupId",
             context_project_id as "contextProjectId",
             context_compartments as "contextCompartments",
@@ -594,6 +619,7 @@ async function createTransientBrainSession(params: {
                downgrade_notice_sent as "downgradeNoticeSent",
                downgrade_notice_pin_message_id as "downgradeNoticePinMessageId",
                mode, visibility, effective_clearance as "effectiveClearance",
+               anchor_kind as "anchorKind", anchor_ref as "anchorRef", clearance_source as "clearanceSource",
                context_group_id as "contextGroupId",
                context_project_id as "contextProjectId",
                context_compartments as "contextCompartments",
@@ -625,6 +651,7 @@ export async function readSessionById(id: string): Promise<Session | null> {
             downgrade_notice_sent as "downgradeNoticeSent",
             downgrade_notice_pin_message_id as "downgradeNoticePinMessageId",
             mode, visibility, effective_clearance as "effectiveClearance",
+            anchor_kind as "anchorKind", anchor_ref as "anchorRef", clearance_source as "clearanceSource",
             context_group_id as "contextGroupId",
             context_project_id as "contextProjectId",
             context_compartments as "contextCompartments",
@@ -987,12 +1014,14 @@ export async function isTurnLeaseLive(
  */
 export async function sweepStuckSessions(
   staleAfterMs: number,
-): Promise<Array<{ id: string; mode: string | null; userId: string; visibility: string }>> {
+): Promise<Array<{ id: string; mode: string | null; userId: string; visibility: string; channelType: string; anchorKind: string }>> {
   const result = await query<{
     id: string
     mode: string | null
     user_id: string
     visibility: string
+    channel_type: string
+    anchor_kind: string
   }>(
     `UPDATE sessions
         SET status = 'timeout',
@@ -1004,7 +1033,7 @@ export async function sweepStuckSessions(
       WHERE status = 'running'
         AND COALESCE(turn_heartbeat_at, last_active_at)
               < now() - ($1 || ' milliseconds')::interval
-      RETURNING id, mode, user_id, visibility`,
+      RETURNING id, mode, user_id, visibility, channel_type, anchor_kind`,
     [String(staleAfterMs)],
   )
   // Per-row emission: the coalescer folds a multi-workspace sweep into one
@@ -1015,6 +1044,8 @@ export async function sweepStuckSessions(
     mode: r.mode,
     userId: r.user_id,
     visibility: r.visibility,
+    channelType: r.channel_type,
+    anchorKind: r.anchor_kind,
   }))
 }
 

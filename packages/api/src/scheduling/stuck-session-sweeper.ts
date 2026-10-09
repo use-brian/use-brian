@@ -64,7 +64,7 @@ export type StuckSessionSweeperDeps = {
    * `'timeout'` and returns the affected rows. Production wires this to
    * `sweepStuckSessions` from `db/sessions.ts`. Tests inject a fake.
    */
-  sweep?: (staleAfterMs: number) => Promise<Array<{ id: string; mode: string | null; userId: string; visibility: string }>>
+  sweep?: (staleAfterMs: number) => Promise<Array<{ id: string; mode: string | null; userId: string; visibility: string; channelType: string; anchorKind: string | null }>>
   /**
    * Publishes a `turn_completed` bus event so any SSE subscriber immediately
    * unblocks their UI's "working" indicator. The bus is in-process **and**
@@ -117,7 +117,7 @@ export function createStuckSessionSweeper(options: StuckSessionSweeperOptions = 
         // Draft sessions AND workspace-shared rooms have live watchers whose
         // UI is pinned on the turn lifecycle. Healing the row without telling
         // them just moves the stuck state into the browser.
-        if (policyFor({ channelType: 'web', mode: row.mode, visibility: row.visibility }).liveFollow) {
+        if (policyFor({ channelType: row.channelType, mode: row.mode, visibility: row.visibility, anchorKind: row.anchorKind }).liveFollow) {
           try {
             publish(row.id)
           } catch (err) {

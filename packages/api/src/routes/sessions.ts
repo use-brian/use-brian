@@ -7,7 +7,7 @@ import { createSessionStreamAuthority } from '../session-stream-authority.js'
 import { guardFeedStream } from '../content-planning/source-authority.js'
 import { Router } from 'express'
 import { findOrCreateUser, getDefaultAssistant, getUserAssistant, getUserProfilesByIds, getWorkspacePrimaryAssistant } from '../db/users.js'
-import { addSessionMessage, createPersonalWebSession, createWorkspaceChatSession, findSessionByChannel, findSessionById, getSessionMessageById, getSessionMessages, isSharedChatSession, rebindSessionAssistant, renameSession, updateSessionMessageText } from '../db/sessions.js'
+import { addSessionMessage, createPersonalWebSession, createWorkspaceChatSession, findSessionByChannel, findSessionById, getSessionMessageById, getSessionMessages, rebindSessionAssistant, renameSession, updateSessionMessageText } from '../db/sessions.js'
 import { mayAssistantAnswerInRoom, DOC_DOCK_RESUME_ROW } from './_room-binding.js'
 import { query } from '../db/client.js'
 import { getTurnTrace } from '../ledger/turn-trace.js'
@@ -15,7 +15,7 @@ import { getLedgerPayloadStore } from '../ledger/runtime.js'
 import { resolveUser } from './route-helpers.js'
 import { getWorkspaceRoleSystem, getWorkspaceMembershipWithReadScopeSystem } from '../db/workspace-store.js'
 import { decideSessionRead } from '../session-read-access.js'
-import { feedAnchoredRead, policyFor, sessionKindSql } from '../session-kind.js'
+import { classifySession, feedAnchoredRead, policyFor, sessionKindSql } from '../session-kind.js'
 import { canRead, type Sensitivity } from '@use-brian/core'
 import {
   ContextNotAvailableError,
@@ -49,7 +49,6 @@ import {
 import { resolveSessionPinLabels } from '../resolve-session-pins.js'
 import { guestAuthorNameForSession, guestSenderProfile } from '../db/guest-comment-store.js'
 import { gateSessionRead } from '../session-read-authority.js'
-import { COMMENT_THREAD_CHANNEL_TYPE } from '../db/comment-thread-store.js'
 
 export { gateSessionRead } from '../session-read-authority.js'
 
@@ -275,7 +274,7 @@ export function sessionRoutes(opts: SessionRouteOptions = {}): Router {
         ? ''
         : workspaceScope
           ? `AND s.channel_type = $3 AND s.app_origin = $4`
-          : `AND s.channel_type IN ('web', 'notification')
+          : `AND s.channel_type = 'web'
              AND ($3::text IS NULL OR s.app_origin = $3 OR s.app_origin IS NULL)`
 
       // Hide feed-web's single-thread surfaces from the main web sidebar:
@@ -310,15 +309,12 @@ export function sessionRoutes(opts: SessionRouteOptions = {}): Router {
            ? `s.assistant_id IN (SELECT a.id FROM assistants a WHERE a.workspace_id = $1)`
            : `s.assistant_id = $1`} AND s.user_id = $2
            AND public.assistant_placement_visible($2,s.assistant_id)
-           -- Enumerations list only owner-scoped sessions. Workspace-shared
-           -- rows (doc threads / drafts, migration 223) are reached by id
-           -- via their surface, never by this list — the channel_type filter
-           -- already excludes them, but the visibility predicate makes the
-           -- intent explicit and survives future channel_type changes.
-           AND s.visibility = 'owner'
-           AND s.mode IS DISTINCT FROM 'draft'
-           AND s.channel_id <> 'tuning'
-           AND s.channel_id NOT LIKE 'draft-iter:%'
+           -- Enumerations list only personal history. Workspace sessions
+           -- (rooms, drafts, doc / Office / feed threads) are reached by id via
+           -- their surface, never by this list; since migration 741 anchored
+           -- threads are stored on the web transport, so the audience and
+           -- anchor predicate, not the channel type, is what excludes them.
+           AND ${sessionKindSql.personalHistory('s')}
            ${surfaceFilter}
          ORDER BY s.last_active_at DESC
          LIMIT ${allChannels ? 200 : 50}`,
@@ -837,6 +833,7 @@ export function sessionRoutes(opts: SessionRouteOptions = {}): Router {
         mode: string | null
         visibility: string | null
         channelType: string
+        anchorKind: string
         appOrigin: string | null
         workspaceId: string | null
       }>(
@@ -845,6 +842,7 @@ export function sessionRoutes(opts: SessionRouteOptions = {}): Router {
                 s.mode,
                 s.visibility,
                 s.channel_type as "channelType",
+                s.anchor_kind as "anchorKind",
                 s.app_origin as "appOrigin",
                 a.workspace_id as "workspaceId"
            FROM (SELECT * FROM sessions WHERE feed_draft_audience_allowed(id)) s
@@ -897,10 +895,11 @@ export function sessionRoutes(opts: SessionRouteOptions = {}): Router {
       const sessionResult = await query<{
         id: string; userId: string; status: string; channelType: string
         mode: string | null; visibility: string | null; appOrigin: string | null
+        anchorKind: string
         workspaceId: string | null
       }>(
         `SELECT s.id, s.user_id as "userId", s.status,
-                s.channel_type as "channelType", s.mode, s.visibility,
+                s.channel_type as "channelType", s.mode, s.visibility, s.anchor_kind as "anchorKind",
                 s.app_origin as "appOrigin",
                 a.workspace_id as "workspaceId"
            FROM (SELECT * FROM sessions WHERE feed_draft_audience_allowed(id)) s
@@ -1092,7 +1091,7 @@ export function sessionRoutes(opts: SessionRouteOptions = {}): Router {
       // every guest "Canvas Guest". Attribute those rows to the thread's
       // `external_author_name` instead (one system read, comment threads only).
       const guestName =
-        session.channelType === COMMENT_THREAD_CHANNEL_TYPE
+        classifySession(session).anchor.kind === 'doc_thread'
           ? await guestAuthorNameForSession(session.id)
           : null
       res.json(messages.map((m) => {
@@ -1173,7 +1172,7 @@ export function sessionRoutes(opts: SessionRouteOptions = {}): Router {
         res.status(404).json({ error: 'Session not found' })
         return
       }
-      if (!isSharedChatSession(session)) {
+      if (!policyFor(session).post) {
         res.status(403).json({ error: 'Posting is only available in workspace chats' })
         return
       }
@@ -1347,7 +1346,7 @@ export function sessionRoutes(opts: SessionRouteOptions = {}): Router {
         res.status(404).json({ error: 'Session not found' })
         return
       }
-      if (!isSharedChatSession(session)) {
+      if (!policyFor(session).post) {
         res.status(403).json({ error: 'Editing is only available in workspace chats' })
         return
       }
@@ -1530,7 +1529,7 @@ export function sessionRoutes(opts: SessionRouteOptions = {}): Router {
       if (!jwtUserId) { res.status(401).json({ error: 'Unauthorized' }); return }
       const session = await findSessionById(req.params.id)
       if (!session) { res.status(404).json({ error: 'Session not found' }); return }
-      if (!isSharedChatSession(session)) {
+      if (!policyFor(session).post) {
         res.status(403).json({ error: 'Typing signals are only available in workspace chats' })
         return
       }
@@ -1589,7 +1588,7 @@ export function sessionRoutes(opts: SessionRouteOptions = {}): Router {
 
       const session = await findSessionById(req.params.id)
       if (!session) { res.status(404).json({ error: 'Session not found' }); return }
-      if (!isSharedChatSession(session)) {
+      if (!policyFor(session).post) {
         // Personal threads stay bound for their lifetime — one person, one
         // assistant, no second participant to want the switch.
         res.status(403).json({ error: 'Only a workspace chat can change assistant' })
@@ -1666,7 +1665,7 @@ export function sessionRoutes(opts: SessionRouteOptions = {}): Router {
     if (!user) return { ok: false, status: 401, error: 'Unauthorized' }
     const session = await findSessionById(String(req.params.id ?? ''))
     if (!session) return { ok: false, status: 404, error: 'Session not found' }
-    if (!isSharedChatSession(session)) {
+    if (!policyFor(session).post) {
       return { ok: false, status: 403, error: 'Pins are only available in workspace chats' }
     }
     const denied = await gateSessionRead(user.id, session)

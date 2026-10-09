@@ -67,7 +67,7 @@ function sessionRow(overrides: Record<string, unknown> = {}) {
     assistantWorkspaceId: WS,
     userId: CALLER,
     ownerName: 'Caller',
-    channelType: 'web',
+    channelType: 'web', anchorKind: null,
     appOrigin: null,
     visibility: 'owner',
     mode: null,
@@ -184,7 +184,7 @@ describe('[COMP:api/live-work-roster] roster route', () => {
   it('omits an anchored workspace row the anchor gate refuses (L3: the roster obeys the read gate)', async () => {
     vi.mocked(anchorReadGate).mockResolvedValueOnce({ status: 403, error: 'Draft access required' })
     primeRoster(
-      [sessionRow({ id: '88888888-8888-8888-8888-888888888888', userId: TEAMMATE, channelType: 'feed_thread', visibility: 'workspace', effectiveClearance: 'internal' })],
+      [sessionRow({ id: '88888888-8888-8888-8888-888888888888', userId: TEAMMATE, channelType: 'feed_thread', anchorKind: null, visibility: 'workspace', effectiveClearance: 'internal' })],
       [],
     )
     const res = await request(makeApp()).get(`/api/workspaces/${WS}/live`)
@@ -201,11 +201,11 @@ describe('[COMP:api/live-work-roster] roster route', () => {
 
   it('offers steering only on active turn-inbox-backed personal chat lanes', () => {
     expect(projectSessionRow(sessionRow(), CALLER, 'internal', NOW)?.canSteer).toBe(true)
-    expect(projectSessionRow(sessionRow({ channelType: 'doc_thread' }), CALLER, 'internal', NOW)?.canSteer).toBe(true)
+    expect(projectSessionRow(sessionRow({ channelType: 'doc_thread', anchorKind: null }), CALLER, 'internal', NOW)?.canSteer).toBe(true)
     // A workspace doc thread takes room admission (D11): no turn inbox to steer.
-    expect(projectSessionRow(sessionRow({ channelType: 'doc_thread', visibility: 'workspace' }), CALLER, 'internal', NOW)?.canSteer).toBe(false)
+    expect(projectSessionRow(sessionRow({ channelType: 'doc_thread', anchorKind: null, visibility: 'workspace' }), CALLER, 'internal', NOW)?.canSteer).toBe(false)
     expect(projectSessionRow(sessionRow({ mode: 'draft' }), CALLER, 'internal', NOW)?.canSteer).toBe(false)
-    expect(projectSessionRow(sessionRow({ channelType: 'telegram' }), CALLER, 'internal', NOW)?.canSteer).toBe(false)
+    expect(projectSessionRow(sessionRow({ channelType: 'telegram', anchorKind: null }), CALLER, 'internal', NOW)?.canSteer).toBe(false)
     expect(projectSessionRow(sessionRow({
       visibility: 'workspace',
       appOrigin: 'chat',
@@ -248,7 +248,7 @@ describe('[COMP:api/live-work-roster] roster route', () => {
     // threads (their live view is the file's Brian tab) never list here.
     expect(sessionsSql).toContain("'workflow'")
     expect(sessionsSql).toContain("'assistant-call'")
-    expect(sessionsSql).toContain("s.channel_type <> 'office_thread'")
+    expect(sessionsSql).toContain("s.anchor_kind <> 'office_file'")
     expect(sessionsSql).toContain(
       `pa.approval_payload->>'turnLeaseToken' = s.turn_lease_token::text`,
     )

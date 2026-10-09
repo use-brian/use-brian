@@ -8,7 +8,7 @@ import { isWorkspaceWideWebChat, type WebChatEventScope } from '../_web-chat-eve
 const input = () => ({
   workspaceId: 'workspace-1',
   session: {
-    id: '11111111-1111-1111-1111-111111111111', channelType: 'web', visibility: 'workspace',
+    id: '11111111-1111-1111-1111-111111111111', channelType: 'web', anchorKind: 'none', visibility: 'workspace',
     mode: null as string | null, effectiveClearance: 'public',
     contextGroupId: null as string | null, contextProjectId: null as string | null,
     contextCompartments: [] as string[],
@@ -99,7 +99,7 @@ describe('persisted web input → normalized dispatcher', () => {
     setMessageEventDispatcher({ dispatch })
     dispatchPersistedWebInput({ ...input(), replay: true })
     dispatchPersistedWebInput({ ...input(), workspaceId: null })
-    dispatchPersistedWebInput({ ...input(), session: { ...input().session, channelType: 'workflow' } })
+    dispatchPersistedWebInput({ ...input(), session: { ...input().session, channelType: 'workflow', anchorKind: 'none' } })
     expect(dispatch).not.toHaveBeenCalled()
   })
 

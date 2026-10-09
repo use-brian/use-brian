@@ -131,6 +131,7 @@ type SessionRosterRow = {
   userId: string
   ownerName: string | null
   channelType: string
+  anchorKind: string | null
   appOrigin: string | null
   visibility: string | null
   mode: string | null
@@ -274,6 +275,7 @@ async function fetchSessionRows(workspaceId: string): Promise<SessionRosterRow[]
             s.user_id                AS "userId",
             u.name                   AS "ownerName",
             s.channel_type           AS "channelType",
+            s.anchor_kind            AS "anchorKind",
             s.app_origin             AS "appOrigin",
             s.visibility,
             s.mode,

@@ -127,7 +127,6 @@ import type { WorkspaceSkillStore } from '../db/skill-store.js'
 import { deploymentCapabilities } from '../edition.js'
 import { buildWorkspaceNativeSlashCommands } from './native-slash-commands.js'
 import { connectorAuthorizationEntry } from '../agent-surface/connector-authorization.js'
-import { OFFICE_THREAD_CHANNEL_TYPE } from '../db/office-artifact-sessions.js'
 import {
   bindOfficeLaneTools,
   DEFAULT_OFFICE_LANE_DEPS,
@@ -352,8 +351,10 @@ const docRunClient = createDocRunClient()
 function resolveRunChannel(session: {
   channelType: string
   appOrigin: string | null
+  anchorKind: string | null
 }): AssistantRunChannel {
-  if (session.appOrigin === 'doc' || session.channelType === 'doc_thread')
+  const kind = classifySession(session)
+  if (kind.surface === 'doc' || kind.anchor.kind === 'doc_thread')
     return 'doc'
   if (session.channelType === 'telegram') return 'telegram'
   if (session.channelType === 'slack') return 'slack'
@@ -1088,13 +1089,16 @@ export { isDocSurface }
  * [COMP:api/workspace-chat-handoff]
  */
 export function mayOfferWorkspaceChatHandoff(
-  session: { visibility: string | null; channelType: string },
+  session: { visibility: string | null; channelType: string; anchorKind: string | null },
   assistantWorkspaceId: string | null | undefined,
 ): boolean {
+  // Only a personal, unanchored web conversation hands off to a room.
+  const kind = classifySession(session)
   return (
     !!assistantWorkspaceId &&
-    session.visibility === 'owner' &&
-    session.channelType === 'web'
+    kind.audience === 'personal' &&
+    kind.transport === 'web' &&
+    kind.anchor.kind === 'none'
   )
 }
 
@@ -2869,7 +2873,7 @@ export function chatRoutes(options: WebChatOptions): Router {
       // file (office.md "Brian conversation in the file").
       let officeLane: OfficeLane | null = null
       const officeLaneDeps = options.officeLane ?? DEFAULT_OFFICE_LANE_DEPS
-      if (session.channelType === OFFICE_THREAD_CHANNEL_TYPE) {
+      if (classifySession(session).anchor.kind === 'office_file') {
         const admitted = await resolveOfficeLane({
           userId: user.id,
           sessionId: session.id,
@@ -4965,7 +4969,7 @@ export function chatRoutes(options: WebChatOptions): Router {
               `Blocks:\n${lines || '  (empty page)'}\n\n` +
               buildActivePageInstruction({
                 isEmptyPage,
-                isCommentThread: session.channelType === 'doc_thread',
+                isCommentThread: classifySession(session).anchor.kind === 'doc_thread',
               }) +
               activeRecordingBlock
             // The open page is visible in the editor and is a valid referent
@@ -5046,7 +5050,7 @@ export function chatRoutes(options: WebChatOptions): Router {
             requestedDocViewId,
           )
           const section = formatThreadDiscovery(summaries, {
-            variant: session.channelType === 'doc_thread' ? 'thread' : 'chat',
+            variant: classifySession(session).anchor.kind === 'doc_thread' ? 'thread' : 'chat',
             currentSessionId: session.id,
           })
           if (section) userVisibleContextParts.push(section)
@@ -7911,7 +7915,7 @@ export function chatRoutes(options: WebChatOptions): Router {
                   eventName: 'doc_context_composition', channelType: 'web',
                   metadata: {
                     model: sanitize(event.response.model),
-                    is_comment_thread: session.channelType === 'doc_thread',
+                    is_comment_thread: classifySession(session).anchor.kind === 'doc_thread',
                     system_prompt_tokens: composition.systemPromptTokens,
                     skill_block_tokens: composition.skillBlockTokens,
                     live_outline_tokens: composition.liveOutlineTokens,
@@ -8423,7 +8427,7 @@ export function chatRoutes(options: WebChatOptions): Router {
       // open default false), or every ~10 human turns. The NULL check is robust
       // against tool-use inflating the message count.
       const needsFirstTitle = !session.title || isPlaceholderTitle(session.title)
-      const isNotification = session.channelType === 'notification'
+      const isNotification = classifySession(session).anchor.kind === 'inbox'
       let shouldTitle = needsFirstTitle && !isNotification
       if (!shouldTitle && !isNotification) {
         const msgCount = await authority.execute(() => countSessionTurns(session.id))

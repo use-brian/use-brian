@@ -3,7 +3,7 @@ import type { Session } from '../db/sessions.js'
 // Required fields deliberately mirror the real Session loaders. A partial
 // projection must not silently widen an input's audience at this boundary.
 export type WebChatEventScope = Pick<Session,
-  'channelType' | 'visibility' | 'mode' | 'effectiveClearance' |
+  'channelType' | 'anchorKind' | 'visibility' | 'mode' | 'effectiveClearance' |
   'contextGroupId' | 'contextProjectId' | 'contextCompartments'>
 
 /** Workspace automation has no per-session authority envelope. Even a caller

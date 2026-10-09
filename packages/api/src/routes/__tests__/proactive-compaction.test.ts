@@ -348,6 +348,9 @@ function makeSessionMessage(partial: Partial<SessionMessage> & { sequenceNum: nu
 
 function makeSession(partial: Partial<Session> = {}): Session {
   return {
+    anchorKind: 'none',
+    anchorRef: null,
+    clearanceSource: 'assistant',
     id: partial.id ?? 's1',
     assistantId: partial.assistantId ?? 'a1',
     userId: partial.userId ?? 'u1',

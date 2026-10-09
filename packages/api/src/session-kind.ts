@@ -75,15 +75,26 @@ export type SessionKind = {
   surface: string | null
 }
 
-/** The row fields the classifier reads. Every session shape satisfies it. */
+/**
+ * The row fields the classifier reads. `anchorKind` is the stored anchor
+ * (migration 741) and is a REQUIRED key: a row source that does not select
+ * `anchor_kind` would classify an anchored web thread (now stored as
+ * `channel_type='web'`) as a plain chat, so the compiler makes every source
+ * say what it has. Pass `null` only for an in-memory row that was never
+ * stored; the legacy discriminators then decide.
+ */
 export type SessionKindRow = {
   visibility?: string | null
   mode?: string | null
   channelType: string
+  anchorKind: string | null
+  anchorRef?: string | null
   appOrigin?: string | null
   channelId?: string | null
   transient?: boolean | null
 }
+
+const ANCHOR_KINDS: readonly AnchorKind[] = ['none', 'doc_thread', 'office_file', 'feed_draft', 'feed_thread', 'channel', 'inbox', 'job']
 
 // --- Transport -------------------------------------------------------------
 
@@ -168,7 +179,10 @@ export function classifySession(row: SessionKindRow, turn: SessionTurnFacts = {}
     ?? (row.transient === true ? 'inspection' : null)
 
   let anchor: Anchor = { kind: 'none', ref: null }
-  if (channelType in WEB_ANCHOR_CHANNEL_TYPES) {
+  if (row.anchorKind && (ANCHOR_KINDS as readonly string[]).includes(row.anchorKind)) {
+    // The stored anchor (migration 741) is authoritative.
+    anchor = { kind: row.anchorKind as AnchorKind, ref: row.anchorRef ?? null }
+  } else if (channelType in WEB_ANCHOR_CHANNEL_TYPES) {
     anchor = { kind: WEB_ANCHOR_CHANNEL_TYPES[channelType]!, ref: channelId }
   } else if (channelId === 'notifications') {
     anchor = { kind: 'inbox', ref: null }
@@ -178,7 +192,8 @@ export function classifySession(row: SessionKindRow, turn: SessionTurnFacts = {}
     anchor = { kind: 'job', ref: channelId }
   }
 
-  const audience: Audience = row.visibility === 'workspace' || row.mode === 'draft' || turn.providerGroup === true
+  // A feed draft is a workspace conversation whatever its legacy visibility.
+  const audience: Audience = row.visibility === 'workspace' || anchor.kind === 'feed_draft' || turn.providerGroup === true
     ? 'workspace'
     : 'personal'
 
@@ -422,31 +437,53 @@ export const sessionKindSql = {
    * the file's audience only, so it never leaves the file.
    */
   surfacesBeyondAnchor: (alias: string): string =>
-    `${alias}.channel_type <> 'office_thread'`,
+    `${alias}.anchor_kind <> 'office_file'`,
   /**
    * A plain web conversation workspace search indexes: web transport, no
    * anchor (doc / Office / feed threads and drafts live in their anchors).
    */
   searchableConversation: (alias: string): string =>
-    `${alias}.channel_type = 'web' AND ${alias}.mode IS DISTINCT FROM 'draft'`,
+    `${alias}.channel_type = 'web' AND ${alias}.anchor_kind = 'none'`,
   /**
    * Workspace rows whose `effective_clearance` is derived from the ASSISTANT,
    * so an assistant clearance change recomputes them (L10, D10). Excludes the
-   * anchor-sourced rows: an Office file's thread reads at the file's
-   * sensitivity, and a guest doc thread on a public page reads at `public`.
+   * anchor-sourced rows (`clearance_source='anchor'`, D10): an Office file's
+   * thread reads at the file's sensitivity, and a guest doc thread on a public
+   * page reads at `public`.
    */
   assistantClearanceSourced: (alias: string): string =>
-    `${alias}.visibility = 'workspace' AND ${alias}.channel_type <> 'office_thread' AND ${alias}.guest_session_token IS NULL`,
+    `${alias}.visibility = 'workspace' AND ${alias}.clearance_source = 'assistant'`,
   /** A session on a transport with a proactive push (`transportPolicy(t).delivery.proactive`). */
   proactiveDeliveryTransport: (alias: string): string =>
     `${alias}.channel_type IN (${sqlList(PROACTIVE_DELIVERY_TRANSPORTS)})`,
   /** A workspace-audience row (rooms, drafts, anchored threads): `classifySession(row).audience`. */
   workspaceAudience: (alias: string): string =>
-    `(${alias}.visibility = 'workspace' OR ${alias}.mode = 'draft')`,
+    `${alias}.visibility = 'workspace'`,
   /** Not the notification inbox (`anchor_kind='inbox'`, the `notifications` sentinel). */
   notInbox: (alias: string): string =>
-    `${alias}.channel_id <> 'notifications'`,
+    `${alias}.anchor_kind <> 'inbox'`,
   /** The Chat app's workspace room (web, workspace audience, opened from chat). */
   webRoom: (alias: string): string =>
-    `${alias}.visibility = 'workspace' AND ${alias}.channel_type = 'web' AND ${alias}.app_origin = 'chat'`,
+    `${alias}.visibility = 'workspace' AND ${alias}.channel_type = 'web' AND ${alias}.anchor_kind = 'none' AND ${alias}.app_origin = 'chat'`,
+  /** A personal, unanchored web conversation (the chat history a person owns). */
+  personalConversation: (alias: string): string =>
+    `${alias}.visibility = 'personal' AND ${alias}.channel_type = 'web' AND ${alias}.anchor_kind = 'none'`,
+  /**
+   * A personal conversation the owner's history lists: unanchored or the
+   * inbox, never the settings-panel tuning thread or a per-draft iteration
+   * channel (both are hydrated by their own surface).
+   */
+  personalHistory: (alias: string): string =>
+    `${alias}.visibility = 'personal' AND ${alias}.anchor_kind IN ('none', 'inbox')`
+    + ` AND ${alias}.channel_id <> 'tuning' AND ${alias}.channel_id NOT LIKE 'draft-iter:%'`,
+  /**
+   * The ON CONFLICT target of a personal session's identity: the partial
+   * unique index `sessions_personal_identity_key` (D8). A workspace row has no
+   * identity-tuple uniqueness, so it never matches and always inserts.
+   */
+  personalIdentityConflict: (): string =>
+    `(assistant_id, user_id, channel_type, channel_id, app_id) WHERE visibility = 'personal'`,
+  /** A session with this anchor (migration 741). */
+  anchored: (alias: string, kind: AnchorKind): string =>
+    `${alias}.anchor_kind = '${kind}'`,
 }

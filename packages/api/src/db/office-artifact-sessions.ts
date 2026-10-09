@@ -10,6 +10,7 @@
  * Spec: docs/architecture/features/office.md -> "Brian conversation in the file".
  * [COMP:api/office-chat-session]
  */
+import { admitAnchoredSession } from '../workspace-access/session-create-admission.js'
 import { randomUUID } from 'node:crypto'
 import { getPool, query } from './client.js'
 
@@ -67,12 +68,21 @@ export async function ensureOfficeArtifactSessionSystem(params: {
       await client.query('COMMIT')
       return existing.rows[0]
     }
+    // The file anchors the thread: admitted by the anchor (L12), read by the
+    // file's audience, its clearance is the file's sensitivity (D10).
+    const channelId = randomUUID()
+    await admitAnchoredSession(client, {
+      assistantId: params.assistantId, userId: params.userId, channelType: 'web', channelId,
+      workspaceId: artifact.workspaceId, effectiveClearance: artifact.sensitivity,
+      anchorKind: 'office_file', anchorRef: params.artifactId,
+    })
     const session = await client.query<{ id: string }>(
       `INSERT INTO sessions (assistant_id, user_id, channel_type, channel_id, app_id,
-                             visibility, workspace_id, effective_clearance)
-       VALUES ($1, $2, $3, $4, 'Use Brian', 'workspace', $5, $6)
+                             visibility, workspace_id, effective_clearance,
+                             anchor_kind, anchor_ref, clearance_source)
+       VALUES ($1, $2, 'web', $3, 'Use Brian', 'workspace', $4, $5, 'office_file', $6, 'anchor')
        RETURNING id`,
-      [params.assistantId, params.userId, OFFICE_THREAD_CHANNEL_TYPE, randomUUID(), artifact.workspaceId, artifact.sensitivity],
+      [params.assistantId, params.userId, channelId, artifact.workspaceId, artifact.sensitivity, params.artifactId],
     )
     const sessionId = session.rows[0]!.id
     await client.query(
