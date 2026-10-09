@@ -33,7 +33,6 @@ import {
 import {
   COALESCE_MAX_MERGED_ROWS,
   coalesceConsecutiveUserMessages,
-  isSharedAudienceSession,
   isSharedChatSession,
   toStampedMessages,
   type SessionMessage,
@@ -620,25 +619,26 @@ describe('[COMP:api/room-mechanics] one shared-audience definition', () => {
       shape({ channelType: 'feed_thread', appOrigin: null, visibility: 'workspace' }),
       shape({ mode: 'draft' }),
     ]) {
-      expect(isSharedAudienceSession(session)).toBe(true)
+      expect(policyFor(session).deliveryCeiling.ceiling).toBe('audience')
+      expect(policyFor(session).context.personalMemory).toBe(false)
       // The narrower web-room predicate keeps its own lifecycle meaning.
       expect(isSharedChatSession(session)).toBe(false)
     }
-    expect(isSharedAudienceSession(shape({ visibility: 'workspace' }))).toBe(true)
-    expect(isSharedAudienceSession(shape({}))).toBe(false)
+    expect(policyFor(shape({ visibility: 'workspace' })).deliveryCeiling.ceiling).toBe('audience')
+    expect(policyFor(shape({})).deliveryCeiling.ceiling).toBe('owner')
   })
 
-  it('is the predicate both the chat route and the delivery gate use', () => {
+  it('is the policy both the chat route and the delivery gate use', () => {
     const chat = readFileSync(new URL('../chat.ts', import.meta.url), 'utf8')
     const delivery = readFileSync(new URL('../../context-scope/delivery-authority.ts', import.meta.url), 'utf8')
-    expect(chat).toContain('sharedAudience: isSharedAudienceSession(session)')
-    expect(delivery).toContain('isSharedAudienceSession(session)')
+    expect(chat).toContain('sharedAudience: !policyFor(session).context.personalMemory')
+    expect(delivery).toContain("policyFor(session).deliveryCeiling.ceiling === 'audience'")
     expect(delivery).not.toMatch(/visibility === 'workspace' \|\| [a-zA-Z.]*mode === 'draft'/)
   })
 
   it('a resumed turn keeps the shared-audience reads and passes the audience gate before saving', () => {
     const resume = readFileSync(new URL('../session-resume-replay.ts', import.meta.url), 'utf8')
-    expect(resume).toContain('sharedAudience: isSharedAudienceSession(session)')
+    expect(resume).toContain('sharedAudience: !policyFor(session).context.personalMemory')
     expect(resume).toContain('sharedAudience: turnScope.access.sharedAudience')
     const gate = resume.indexOf('await authorizeResumeAudience(')
     const save = resume.indexOf("producer: 'turn:resume-output'")

@@ -24,8 +24,6 @@ vi.mock('../../db/sessions.js', () => ({
   getSessionMessages: mocks.getSessionMessages,
   addSessionMessage: mocks.addSessionMessage,
   toStampedMessages: mocks.toStampedMessages,
-  isSharedAudienceSession: (s: { visibility?: string | null; mode?: string | null }) =>
-    s.visibility === 'workspace' || s.mode === 'draft',
 }))
 
 vi.mock('../../db/users.js', () => ({

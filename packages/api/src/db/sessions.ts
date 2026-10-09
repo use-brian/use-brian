@@ -209,18 +209,6 @@ export function isSharedChatSession(s: SessionShape): boolean {
   )
 }
 
-/**
- * Is this session's AUDIENCE shared rather than one owner? The single
- * definition for audience-scoped decisions: how a person's input is stamped,
- * which ceiling delivery checks, and what automatic context a turn may load.
- * Wider than `isSharedChatSession` (web rooms): doc comment threads and Feed
- * threads are `visibility='workspace'`, and live drafts are `mode='draft'`.
- * Two definitions refused every doc-thread and draft turn: input stamped
- * personal, delivery judged against a room.
- */
-export function isSharedAudienceSession(s: Pick<SessionShape, 'visibility' | 'mode'>): boolean {
-  return s.visibility === 'workspace' || s.mode === 'draft'
-}
 
 
 /** Storage-only delimiter for a thread-qualified session channel id. */

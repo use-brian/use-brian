@@ -7,7 +7,8 @@
  */
 
 import { ContextScopeAccumulator } from '@use-brian/core'
-import { findOrCreateSession, addSessionMessage, findSessionById, isSharedAudienceSession } from '../db/sessions.js'
+import { findOrCreateSession, addSessionMessage, findSessionById } from '../db/sessions.js'
+import { policyFor } from '../session-kind.js'
 import { turnOutputWrite } from '../context-scope/resolve-turn-scope.js'
 import type { ChannelIntegrationStore } from '../db/channel-integrations.js'
 import type { FeishuCredentials } from '../db/channel-integrations.js'
@@ -110,7 +111,7 @@ export async function deliverToChannel(params: DeliveryParams): Promise<ChannelD
       accumulator: new ContextScopeAccumulator(evidence),
       envelope: {
         workspaceId: params.workspaceId,
-        userId: session && isSharedAudienceSession(session) ? null : userId,
+        userId: session && policyFor(session).deliveryCeiling.ceiling === 'audience' ? null : userId,
         assistantId: null,
         sensitivity: 'public',
         compartments: [],

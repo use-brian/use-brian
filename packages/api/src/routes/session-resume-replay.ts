@@ -46,12 +46,11 @@ import {
   type AnalyticsLogger,
   type UsageStore,
 } from '@use-brian/core'
-import { classifySession } from '../session-kind.js'
+import { classifySession, policyFor } from '../session-kind.js'
 import {
   findSessionById,
   getSessionMessages,
   addSessionMessage,
-  isSharedAudienceSession,
   toStampedMessages,
   type Session,
 } from '../db/sessions.js'
@@ -374,7 +373,7 @@ export function createSessionResumeReplay(deps: SessionResumeReplayDeps): Sessio
         ...resolved,
         // A resumed room, doc-thread or draft turn keeps the shared-audience
         // read rule the original turn ran under (decision D4).
-        access: { ...resolved.access, ...bounded, ...(isSharedAudienceSession(session) ? { sharedAudience: true } : {}) },
+        access: { ...resolved.access, ...bounded, ...(!policyFor(session).context.personalMemory ? { sharedAudience: true } : {}) },
         effectiveCompartments: bounded.compartments,
         effectiveProjectIds: bounded.projectIds,
       }
@@ -507,7 +506,7 @@ export function createSessionResumeReplay(deps: SessionResumeReplayDeps): Sessio
         scope: turnScope,
         workspaceId: assistant.workspaceId,
         userId: session.userId,
-        sharedAudience: isSharedAudienceSession(session),
+        sharedAudience: !policyFor(session).context.personalMemory,
       })
       const storedOutcome = await executeWithCurrentAuthority(() => addSessionMessage({
         sessionId,

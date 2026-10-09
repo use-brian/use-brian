@@ -7,7 +7,8 @@ import {
 } from '@use-brian/core'
 import { parseTopicChannelId } from '@use-brian/channels'
 import type { ChannelIntegrationStore, DeliveryAudienceBinding } from '../db/channel-integrations.js'
-import { findSessionByChannel, findSessionById, isSharedAudienceSession, type Session } from '../db/sessions.js'
+import { findSessionByChannel, findSessionById, type Session } from '../db/sessions.js'
+import { policyFor } from '../session-kind.js'
 import { findAssistantById } from '../db/users.js'
 import { getWorkspaceRoleSystem } from '../db/workspace-store.js'
 import { resolveLiveAccessCeilingSystem } from './resolve-turn-scope.js'
@@ -292,7 +293,7 @@ async function resolveEnvelope(
       channelType: input.channelType,
       channelId: input.sessionChannelId ?? input.channelId,
     })
-    if (personalSession && !isSharedAudienceSession(personalSession)) {
+    if (personalSession && policyFor(personalSession).deliveryCeiling.ceiling === 'owner') {
       const member = await memberCeiling(input.workspaceId, input.assistantId, input.userId, deps, input.recipientMode)
       if (member.ceiling) return { allowed: true, ceiling: member.ceiling, source: 'member' }
     }
@@ -409,7 +410,7 @@ export function createDeliveryAudienceAuthorizer(dependencies: Dependencies = {}
         return denied(undefined, 'session_assistant_missing')
       }
       let ceiling: AccessCeiling
-      if (isSharedAudienceSession(session)) {
+      if (policyFor(session).deliveryCeiling.ceiling === 'audience') {
         ceiling = roomAudienceCeiling(input.workspaceId, session)
       } else {
         if (session.userId !== input.userId) return denied(undefined, 'session_not_owner')

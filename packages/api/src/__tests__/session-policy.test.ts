@@ -90,9 +90,11 @@ describe('[COMP:api/session-policy] sessionPolicy drift ledger', () => {
     expect(policyFor({ ...PERSONAL, appOrigin: 'doc' }).multiVoice).toBe(true)
   })
 
-  it('L9 delivery: the ceiling keys on audience but recipientType keys on room', () => {
-    expect(policyFor(DOC_THREAD).deliveryCeiling).toEqual({ ceiling: 'audience', recipientType: 'individual' })
-    expect(policyFor(ROOM).deliveryCeiling).toEqual({ ceiling: 'audience', recipientType: 'group' })
+  it('L9 delivery: ceiling and recipient type both follow the audience', () => {
+    for (const row of [ROOM, DRAFT, DOC_THREAD, OFFICE, FEED_THREAD]) {
+      expect(policyFor(row).deliveryCeiling).toEqual({ ceiling: 'audience', recipientType: 'group' })
+    }
+    expect(policyFor(PERSONAL).deliveryCeiling).toEqual({ ceiling: 'owner', recipientType: 'individual' })
   })
 
   it('L10 clearance: a recompute overwrites anchor-sourced clearances', () => {

@@ -230,7 +230,11 @@ export type SessionPolicy = {
   multiVoice: boolean
   /** Memory sources a turn loads (D3, L16). */
   context: { personalMemory: boolean }
-  /** Delivery ceiling and recipient type (L9). */
+  /**
+   * Delivery ceiling and recipient type, from the audience alone (L9): a
+   * workspace session is delivered to its whole audience (a group), a
+   * personal session to its owner.
+   */
   deliveryCeiling: { ceiling: 'audience' | 'owner'; recipientType: 'group' | 'individual' }
   /**
    * Do other viewers follow this session's turns live (L6)? ONE answer for
@@ -310,7 +314,7 @@ export function sessionPolicy(kind: SessionKind): SessionPolicy {
     context: { personalMemory: !workspace },
     deliveryCeiling: {
       ceiling: workspace ? 'audience' : 'owner',
-      recipientType: room ? 'group' : 'individual',
+      recipientType: workspace ? 'group' : 'individual',
     },
     liveFollow: workspace,
     presence: room || anchor === 'office_file',
