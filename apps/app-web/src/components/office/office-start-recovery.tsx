@@ -7,7 +7,21 @@ import Link from "next/link";
 import { FileSpreadsheet, FileText, Presentation, TriangleAlert } from "lucide-react";
 import { OperatorTopbar } from "@/components/operator/operator-topbar";
 import { useT } from "@/lib/i18n/client";
-import type { OfficeFamily } from "@/lib/office/api";
+import type { OfficeFamily, OfficeArtifact } from "@/lib/office/api";
+
+/** The empty canvas reflects its persisted job rather than implying work.
+ * [COMP:app-web/office-generation-pending] */
+export function OfficeGenerationPending({job}:{job:OfficeArtifact["job"]}) {
+  const t=useT().office;
+  const status=job?.status;
+  const label=status==="needs_input" ? t.eventNeedsInput : status==="failed" ? t.failed
+    : status==="cancelled" ? t.cancelled : status==="queued" ? t.queued
+    : status==="running" ? t.running : t.editorFailed;
+  return <div className="m-auto max-w-md space-y-2 p-6 text-center" role="status">
+    <p className="text-sm font-medium">{label}</p>
+    {status==="needs_input" ? <p className="text-sm text-muted-foreground">{t.generationWaitingForInput}</p> : null}
+  </div>;
+}
 
 export function OfficeStartRecovery({
   workspaceId,

@@ -31,7 +31,7 @@ export type OfficeArtifact = {
   lifecycleState: "active" | "archived" | "trash" | "retained" | "purged";
   role: "view" | "comment" | "edit";
   expiresAt?: string;
-  job?: { id: string; status: string; stage: string; errorCode: string | null };
+  job?: { id: string; status: string; stage: string; errorCode: string | null; inputQuestion?: string; canResumeTemplate?: boolean; templateChoices?: OfficeTemplateChoice[] };
 };
 
 export function isOfficeStartFailed(artifact: OfficeArtifact): boolean {
@@ -49,8 +49,18 @@ export type OfficeJob = {
   status: "queued" | "running" | "needs_input" | "completed" | "failed" | "cancelled";
   stage: string;
   errorCode: string | null;
+  inputQuestion?: string;
+  canResumeTemplate?: boolean;
+  templateChoices?: OfficeTemplateChoice[];
   importDiagnostics?: OfficeImportDiagnostic[];
 };
+
+type OfficeTemplateChoice = {templateVersionId:string;name:string};
+export async function resumeOfficeGeneration(input: {artifactId:string;jobId:string;templateVersionId:string}): Promise<{artifactId:string;jobId:string}> {
+  return json(await authFetch(`${API_URL}/api/office/jobs/${input.jobId}/template`,{
+    method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify(input),
+  }),"office_generation_recovery_failed");
+}
 
 export type OfficeJobFailureKind = "presentation_fit" | "presentation_plan" | "fit" | "unexpected";
 

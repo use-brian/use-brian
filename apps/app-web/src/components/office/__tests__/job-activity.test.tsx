@@ -8,7 +8,7 @@ import { en } from "@/lib/i18n/dictionaries/en";
 import type { Dictionary } from "@/lib/i18n/dictionaries";
 import { OfficeJobActivity, OfficeJobActivityView, officeBrianScope } from "../job-activity";
 import { presentationFixture, uid } from "./editor-fixtures";
-import { getOfficeJob, listOfficeJobEvents, type OfficeJob } from "@/lib/office/api";
+import { getOfficeJob, listOfficeJobEvents, resumeOfficeGeneration, type OfficeJob } from "@/lib/office/api";
 
 import {attachOfficeMetadata} from "@/lib/office/metadata";
 import {resetSurfaceCache} from "@/lib/surface-cache";
@@ -20,6 +20,7 @@ vi.mock("@/lib/office/api", async (importOriginal) => ({
   ...await importOriginal<typeof import("@/lib/office/api")>(),
   getOfficeJob: vi.fn(() => new Promise(() => undefined)),
   listOfficeJobEvents: vi.fn(async () => []),
+  resumeOfficeGeneration:vi.fn(async()=>({artifactId:"draft",jobId:"job"})),
 }));
 
 (globalThis as typeof globalThis & { IS_REACT_ACT_ENVIRONMENT: boolean }).IS_REACT_ACT_ENVIRONMENT = true;
@@ -71,6 +72,42 @@ describe("[COMP:app-web/office-iteration-panel] Office iteration panel", () => {
     const html = render({...job("needs_input"),errorCode:"material_fact_missing"}, {events:[{id:"question",seq:1,code:"office.job.needs_input",params:{question:"Please provide the required fields: INVOICE_DATE, PAYMENT_TERMS"},safeNarration:null,createdAt:"2026-01-01T00:00:00Z"}]});
     expect(html).toContain("INVOICE_DATE, PAYMENT_TERMS");
     expect(html).toContain(en.office.eventNeedsInput);
+  });
+
+  it("recovers an older template pause with no question event and no published templates",()=>{
+    const html=render({...job("needs_input"),errorCode:"template_ambiguous",canResumeTemplate:true,templateChoices:[]},{events:[{id:"pause",seq:3,code:"office.job.needs_input",params:{reason:"template_ambiguous"},safeNarration:null,createdAt:"2026-01-01T00:00:00Z"}],templatesHref:"/w/workspace/office/templates"});
+    expect(html).toContain(en.office.templateSelectionQuestion);
+    const host=document.createElement("div");host.innerHTML=html;
+    expect(host.textContent).toContain(en.office.noPublishedTemplateForDraft);
+    expect(html).toContain("/w/workspace/office/templates");
+    expect(html).not.toContain("<textarea");
+    expect(html).not.toContain(en.office.iterationActiveHint);
+  });
+
+  it("offers explicit template selection and resumes the same artifact and job",async()=>{
+    const paused={...job("needs_input"),errorCode:"template_ambiguous",canResumeTemplate:true,templateChoices:[{templateVersionId:"template-version",name:"Quarterly worksheet"}]};
+    vi.mocked(getOfficeJob).mockImplementation(async()=>bounded(paused));
+    vi.mocked(resumeOfficeGeneration).mockClear();
+    const host=document.createElement("div");document.body.append(host);const root=createRoot(host);
+    try {
+      await act(async()=>root.render(<I18nProvider locale="en" dict={en as unknown as Dictionary}><OfficeJobActivity jobId={paused.id} workspaceId="workspace-a" targetIds={[]} canRequestRevision={false} onRequestRevision={vi.fn()} onRevisionCompleted={vi.fn()}/></I18nProvider>));
+      expect(host.textContent).toContain(en.office.templateSelectionQuestion);
+      expect(host.querySelector("textarea")).toBeNull();
+      const trigger=host.querySelector('[role="combobox"]')!;
+      await act(async()=>trigger.dispatchEvent(new MouseEvent("click",{bubbles:true})));
+      const option=Array.from(document.querySelectorAll('[role="option"]')).find(node=>node.textContent?.includes("Quarterly worksheet"))!;
+      expect(option).toBeTruthy();
+      await act(async()=>option.dispatchEvent(new MouseEvent("click",{bubbles:true})));
+      const resume=Array.from(host.querySelectorAll("button")).find(node=>node.textContent===en.office.resumeGeneration)!;
+      await act(async()=>resume.click());
+      expect(resumeOfficeGeneration).toHaveBeenCalledWith({artifactId:paused.artifactId,jobId:paused.id,templateVersionId:"template-version"});
+    } finally {act(()=>root.unmount());host.remove();}
+  });
+
+  it("reads a missing-fact question from the bounded job when events are legacy",()=>{
+    const html=render({...job("needs_input"),errorCode:"material_fact_missing",inputQuestion:"Please provide the required fields: PAYMENT_TERMS"});
+    expect(html).toContain("PAYMENT_TERMS");
+    expect(html).toContain(en.office.generationAnswerHint);
   });
 
   it("shows one failure alert for a failed revision", () => {

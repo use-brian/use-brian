@@ -6,7 +6,7 @@ import type { Dictionary } from "@/lib/i18n/dictionaries";
 
 vi.mock("next/navigation", () => ({ useRouter: () => ({ back: vi.fn(), forward: vi.fn(), prefetch: vi.fn() }) }));
 vi.mock("@/components/doc/doc-sidebar-data", () => ({ useSidebarData: () => ({ sidebarCollapsed: false, setSidebarCollapsed: vi.fn() }) }));
-import { OfficeStartRecovery } from "../office-start-recovery";
+import { OfficeStartRecovery, OfficeGenerationPending } from "../office-start-recovery";
 
 describe("[COMP:app-web/office-start-recovery] Office failed-start recovery", () => {
   it("explains the orphaned shell and exposes the normal trash action", () => {
@@ -15,5 +15,16 @@ describe("[COMP:app-web/office-start-recovery] Office failed-start recovery", ()
     expect(html).toContain("Move to Trash");
     expect(html).toContain("/w/11111111-1111-4111-8111-111111111111/office");
     expect(html).not.toContain(">Working<");
+  });
+});
+
+describe("[COMP:app-web/office-generation-pending] Office generation canvas status",()=>{
+  it.each(["needs_input","failed","cancelled","completed"] as const)("never labels a %s job as Working",status=>{
+    const html=renderToStaticMarkup(<I18nProvider locale="en" dict={en as unknown as Dictionary}><OfficeGenerationPending job={{id:"job",status,stage:status,errorCode:null}}/></I18nProvider>);
+    expect(html).not.toContain(">Working<");
+    if(status==="needs_input") {
+      expect(html).toContain(en.office.eventNeedsInput);
+      expect(html).toContain(en.office.generationWaitingForInput);
+    }
   });
 });

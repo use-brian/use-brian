@@ -22,6 +22,7 @@ export type OfficeGenerationJobRow = {
   leaseExpiresAt: Date | null
   cancelRequestedAt: Date | null
   errorCode: string | null
+  errorDetail?: string | null
   createdAt: Date
   updatedAt: Date
 }
@@ -45,7 +46,7 @@ const JOB_COLUMNS = `id, workspace_id AS "workspaceId", artifact_id AS "artifact
   base_artifact_version::int AS "baseArtifactVersion", checkpoint,
   checkpoint_version AS "checkpointVersion", lease_token AS "leaseToken",
   lease_expires_at AS "leaseExpiresAt", cancel_requested_at AS "cancelRequestedAt",
-  error_code AS "errorCode", created_at AS "createdAt", updated_at AS "updatedAt"`
+  error_code AS "errorCode", error_detail AS "errorDetail", created_at AS "createdAt", updated_at AS "updatedAt"`
 
 // The lease claim updates through a candidate CTE, so every projected column
 // must resolve to the UPDATE target rather than the joined candidate row.
@@ -57,7 +58,15 @@ const CLAIMED_JOB_COLUMNS = `j.id, j.workspace_id AS "workspaceId", j.artifact_i
   j.base_artifact_version::int AS "baseArtifactVersion", j.checkpoint,
   j.checkpoint_version AS "checkpointVersion", j.lease_token AS "leaseToken",
   j.lease_expires_at AS "leaseExpiresAt", j.cancel_requested_at AS "cancelRequestedAt",
-  j.error_code AS "errorCode", j.created_at AS "createdAt", j.updated_at AS "updatedAt"`
+  j.error_code AS "errorCode", j.error_detail AS "errorDetail", j.created_at AS "createdAt", j.updated_at AS "updatedAt"`
+
+/** Only typed input questions are safe user copy. Worker exceptions stay private. */
+export function officeGenerationInputQuestion(job: OfficeGenerationJobRow): string | undefined {
+  if (job.status !== 'needs_input') return undefined
+  if (job.errorCode === 'template_ambiguous') return 'Which published template should I use?'
+  if (job.errorCode === 'material_fact_missing' && job.errorDetail?.startsWith('Please provide the required fields: ')) return job.errorDetail.slice(0,4000)
+  return undefined
+}
 
 export function createOfficeGenerationStore(db: OfficeDbQuery = defaultOfficeDbQuery) {
   return {

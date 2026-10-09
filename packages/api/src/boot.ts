@@ -11,6 +11,8 @@ import { createTemplateImportRecovery } from './office/template-import-recovery.
 import { triageTaskForGoal } from './db/goal-task-triage.js'
 import { createProgrammaticEpisodeTerminal } from './ingest/programmatic-terminal.js'
 import { checkPromptOnlyAuthority, executePromptOnlyGeneration } from './office/generation-publication.js'
+import { resumeOfficeGeneration } from './office/generation-recovery.js'
+import { withOfficeClassificationActor } from './office/classification.js'
 import { createBrowserFileBridge } from './sandbox/browser-files.js'
 import {createLocalLinkedInCloud} from './content-planning/linkedin-cloud.js'
 import {setFeedLinkedInTargetAuthority,setFeedLinkedInPublisher,setFeedLinkedInRecovery} from './content-planning/linkedin-authority.js'
@@ -3075,6 +3077,11 @@ export async function bootOpenApi(opts: BootOpenApiOptions): Promise<BootResult>
   for (const tool of createOfficeTools({
     port: {
       ...officeService,
+      async resumeGeneration(context,input) {
+        const result=await withOfficeClassificationActor(context,()=>resumeOfficeGeneration(context.userId,input))
+        wakeOfficeGeneration?.(context.userId)
+        return result
+      },
       async retryTemplateImport(input) { return retryOfficeTemplateImport(input) },
       async openPdfSession(params) {
         if (!pdfSessionToolRuntime) throw new Error('PDF editing sessions are unavailable')

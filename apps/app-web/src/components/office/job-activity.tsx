@@ -3,11 +3,15 @@
 /** Compact Brian-first iteration rail. [COMP:app-web/office-iteration-panel] */
 
 import { useEffect, useLayoutEffect, useRef, useState } from "react";
-import { ArrowUp, CheckCircle2, ChevronDown, CircleDashed, Sparkles } from "lucide-react";
+import { ArrowUp, CheckCircle2, ChevronRight, CircleAlert, CircleDashed, Crosshair, Sparkles } from "lucide-react";
+import { ChatComposer } from "@use-brian/chat-ui";
 import type { OfficeArtifactSnapshot } from "@use-brian/office-model";
 import { Button } from "@/components/ui/button";
+import Link from "next/link";
+import { SearchableSelect } from "@/components/ui/searchable-select";
 import { useT } from "@/lib/i18n/client";
-import { getOfficeJob, listOfficeJobEvents, officeJobFailureKind, steerOfficeJob, OfficeApiError, type OfficeJob, type OfficeJobEvent } from "@/lib/office/api";
+import { cn } from "@/lib/utils";
+import { getOfficeJob, listOfficeJobEvents, officeJobFailureKind, resumeOfficeGeneration, steerOfficeJob, OfficeApiError, type OfficeJob, type OfficeJobEvent } from "@/lib/office/api";
 
 import { useOfficeMetadataResource, useOfficePanelIdentity } from "@/lib/office/surface-cache";
 import { officeMetadataRemaining } from "@/lib/office/metadata";
@@ -46,6 +50,7 @@ export function officeBrianScope(snapshot: OfficeArtifactSnapshot | undefined, t
 }
 
 type OfficeJobActivityProps = {
+  workspaceId?: string;
   jobId?: string;
   snapshot?: OfficeArtifactSnapshot;
   targetIds: string[];
@@ -60,7 +65,7 @@ export function OfficeJobActivity(props: OfficeJobActivityProps) {
   return <OfficeJobActivityContent key={`${identity.prefix}:${props.snapshot?.artifactId ?? props.jobId ?? "new"}`} {...props} {...identity}/>;
 }
 
-function OfficeJobActivityContent({jobId, snapshot, targetIds, canRequestRevision, requestDisabledReason, onRequestRevision, onRevisionCompleted, prefix, viewerId}: OfficeJobActivityProps & {prefix: string | null; viewerId: string}) {
+function OfficeJobActivityContent({workspaceId,jobId, snapshot, targetIds, canRequestRevision, requestDisabledReason, onRequestRevision, onRevisionCompleted, prefix, viewerId}: OfficeJobActivityProps & {prefix: string | null; viewerId: string}) {
   const [trackedJobId, setTrackedJobId] = useState(jobId);
   const [revisionJobId, setRevisionJobId] = useState<string | null>(null);
   const jobKey = officePanelCacheKey(prefix, "job", trackedJobId);
@@ -76,6 +81,7 @@ function OfficeJobActivityContent({jobId, snapshot, targetIds, canRequestRevisio
   const [instruction, setInstruction] = useState("");
   const [submitting, setSubmitting] = useState(false);
   const [feedback, setFeedback] = useState<RequestFeedback>("idle");
+  const [templateVersionId,setTemplateVersionId] = useState("");
   const completedRevisionIds = useRef(new Set<string>());
   const onRevisionCompletedRef = useRef(onRevisionCompleted);
   onRevisionCompletedRef.current = onRevisionCompleted;
@@ -91,6 +97,7 @@ function OfficeJobActivityContent({jobId, snapshot, targetIds, canRequestRevisio
       setInstruction("");
       setFeedback("idle");
       setSubmitting(false);
+      setTemplateVersionId("");
     }
   }, [available]);
 
@@ -123,7 +130,7 @@ function OfficeJobActivityContent({jobId, snapshot, targetIds, canRequestRevisio
     const started = owner.current;
     const current = () => Boolean(started && started === owner.current && prefix && (!trackedJobId || jobKey && eventKey &&
       officeMetadataRemaining(readSurfaceCache(jobKey).data, viewerId) > 0 && officeMetadataRemaining(readSurfaceCache(eventKey).data, viewerId) > 0));
-    if (!current() || !value || submitting || revisionActive) return;
+    if (!current() || !value || submitting || revisionActive || job?.status === "needs_input" && job.errorCode !== "material_fact_missing") return;
     setSubmitting(true);
     try {
       if (active && trackedJobId && trackedJobId !== revisionJobId) {
@@ -158,6 +165,24 @@ function OfficeJobActivityContent({jobId, snapshot, targetIds, canRequestRevisio
     }
   }
 
+  async function resumeTemplate() {
+    const started=owner.current;
+    const current=()=>Boolean(started && started===owner.current && jobKey && eventKey
+      && officeMetadataRemaining(readSurfaceCache(jobKey).data,viewerId)>0
+      && officeMetadataRemaining(readSurfaceCache(eventKey).data,viewerId)>0);
+    if(!current() || submitting || !job?.canResumeTemplate || !job.templateChoices?.some(choice=>choice.templateVersionId===templateVersionId))return;
+    setSubmitting(true);
+    try {
+      await resumeOfficeGeneration({artifactId:job.artifactId,jobId:job.id,templateVersionId});
+      if(!current())return;
+      setFeedback("idle");setTemplateVersionId("");
+      await Promise.all([jobRead.refresh(),eventRead.refresh()]);
+      if(current())await onRevisionCompletedRef.current();
+    } catch {
+      if(current())setFeedback("failed");
+    } finally {if(current())setSubmitting(false);}
+  }
+
   return <OfficeJobActivityView
     job={available ? job : null}
     events={available ? events : []}
@@ -171,6 +196,10 @@ function OfficeJobActivityContent({jobId, snapshot, targetIds, canRequestRevisio
     feedback={feedback}
     onInstructionChange={setInstruction}
     onSubmit={submit}
+    templatesHref={workspaceId ? `/w/${workspaceId}/office/templates` : undefined}
+    templateVersionId={templateVersionId}
+    onTemplateChange={setTemplateVersionId}
+    onResumeTemplate={()=>void resumeTemplate()}
   />;
 }
 
@@ -187,6 +216,10 @@ export function OfficeJobActivityView({
   feedback = "idle",
   onInstructionChange,
   onSubmit,
+  templatesHref,
+  templateVersionId="",
+  onTemplateChange,
+  onResumeTemplate,
 }: {
   job: OfficeJob | null;
   events: OfficeJobEvent[];
@@ -200,9 +233,16 @@ export function OfficeJobActivityView({
   feedback?: RequestFeedback;
   onInstructionChange(value: string): void;
   onSubmit(event: React.FormEvent): void;
+  templatesHref?:string;
+  templateVersionId?:string;
+  onTemplateChange?(value:string):void;
+  onResumeTemplate?():void;
 }) {
   const t = useT().office;
+  const formRef = useRef<HTMLFormElement>(null);
   const active = Boolean(job && !TERMINAL.has(job.status));
+  const templateNeeded = job?.status === "needs_input" && job.errorCode === "template_ambiguous";
+  const inputNeeded = job?.status === "needs_input";
   const failed = job?.status === "failed";
   const steering = active && !revisionActive;
   const failureKind = officeJobFailureKind(job?.errorCode);
@@ -221,7 +261,7 @@ export function OfficeJobActivityView({
     : feedback === "failed" ? t.brianRevisionFailed
     : feedback === "conflict" ? t.brianRevisionConflict
     : null;
-  const disabled = !instruction.trim() || submitting || revisionActive || !steering && !canRequestRevision;
+  const disabled = !instruction.trim() || submitting || revisionActive || inputNeeded && job?.errorCode !== "material_fact_missing" || !steering && !canRequestRevision;
 
   const eventLabel = (code: string): string => ({
     "office.job.queued": t.eventQueued,
@@ -241,45 +281,87 @@ export function OfficeJobActivityView({
     "office.job.failed": t.eventFailed,
     "office.job.cancelled": t.eventCancelled,
     "office.job.steering_applied": t.eventSteering,
+    "office.job.template_resumed": t.templateGenerationResumed,
   })[code] ?? t.running;
 
   const statusLabel = job?.status === "completed" ? t.completed : failed ? failureTitle : job?.status === "cancelled" ? t.cancelled : job?.status === "queued" ? t.queued : job?.status === "needs_input" ? t.eventNeedsInput : t.running;
 
+  const question = templateNeeded ? t.templateSelectionQuestion : job?.inputQuestion ?? String([...events].reverse().find(event => event.code === "office.job.needs_input" && typeof event.params.question === "string")?.params.question ?? t.eventNeedsInput);
+  const messageText = failed ? failureBody : inputNeeded ? templateNeeded ? t.templateSelectionHint : t.generationAnswerHint : active || loading ? revisionActive ? t.brianRevisionQueued : t.iterationActiveHint : t.brianEditHint;
+  const showFeedback = Boolean(feedbackLabel) && feedbackLabel !== messageText && !(failed && feedback === "failed");
+  const feedbackIsError = feedback === "failed" || feedback === "conflict";
+  const footnote = !steering ? revisionActive ? t.brianRevisionInFlight : !canRequestRevision ? requestDisabledReason : undefined : undefined;
+  const runIcon = job?.status === "completed" ? <CheckCircle2 className="size-3 shrink-0 text-emerald-600" aria-hidden />
+    : failed ? <CircleAlert className="size-3 shrink-0 text-destructive" aria-hidden />
+    : <CircleDashed className={cn("size-3 shrink-0", active && !inputNeeded && "animate-spin [animation-duration:3s]")} aria-hidden />;
+
+  // Same chrome as the rest of the app's chat: an assistant message row
+  // (avatar + prose, activity receipt above the text, as in the dock's
+  // MessageBubble) over the Chat app's bordered composer box.
   return <section className="flex min-h-0 flex-1 flex-col" aria-label={t.editWithBrian}>
-    <div className="min-h-0 flex-1 space-y-4 overflow-y-auto p-4">
-      <div className="flex items-start gap-2.5">
-        <span className="flex size-7 shrink-0 items-center justify-center rounded-lg bg-muted text-foreground"><Sparkles className="size-4" aria-hidden /></span>
-        <div className="min-w-0 pt-1"><h2 className="text-sm font-medium">{t.editWithBrian}</h2><p role={failed ? "alert" : undefined} className={failed ? "mt-1 text-sm leading-relaxed text-destructive" : `mt-1 text-sm leading-relaxed text-muted-foreground ${!active && !loading ? "max-lg:hidden" : ""}`}>{failed ? failureBody : active || loading ? revisionActive ? t.brianRevisionQueued : t.iterationActiveHint : t.brianEditHint}</p></div>
-      </div>
-      {job?.status === "needs_input" ? <p role="status" className="rounded-xl border p-3 text-sm">{String([...events].reverse().find(event => event.code === "office.job.needs_input" && typeof event.params.question === "string")?.params.question ?? t.eventNeedsInput)}</p> : null}
-      {feedbackLabel && !(failed && feedback === "failed") ? <p role={feedback === "failed" || feedback === "conflict" ? "alert" : "status"} className={feedback === "failed" || feedback === "conflict" ? "text-sm text-destructive" : "rounded-xl bg-muted/50 p-3 text-sm text-muted-foreground"}>{feedbackLabel}</p> : null}
-      {job ? <details className="group rounded-xl border bg-muted/20 px-3 py-2.5">
-        <summary className="flex min-h-6 cursor-pointer items-center justify-between gap-2 text-xs font-medium max-sm:min-h-11">
-          <span className="inline-flex items-center gap-1.5"><ChevronDown className="size-3.5 -rotate-90 transition-transform group-open:rotate-0" aria-hidden />{t.runActivity}</span>
-          <span className="inline-flex items-center gap-1.5 text-muted-foreground">{job.status === "completed" ? <CheckCircle2 className="size-3.5 text-emerald-600" aria-hidden /> : <CircleDashed className="size-3.5" aria-hidden />}{statusLabel}</span>
-        </summary>
-        <ol className="mt-3 space-y-3 pb-1">
-          {events.map((event) => <li key={event.id} className="border-l-2 pl-3 text-xs"><p>{eventLabel(event.code)}</p><time className="text-[11px] text-muted-foreground">{new Date(event.createdAt).toLocaleTimeString()}</time></li>)}
-        </ol>
-      </details> : null}
-    </div>
-    <form onSubmit={onSubmit} className="shrink-0 p-3 pt-2">
-      <div className="overflow-hidden rounded-2xl border bg-background shadow-sm focus-within:border-ring [&_:focus-visible]:shadow-none">
-        {!steering ? <div className="mx-3 mt-3 rounded-lg bg-muted/60 px-2.5 py-2 text-xs" data-office-brian-scope={scope.kind}>
-          <span className="text-muted-foreground">{t.brianScope}: </span><span className="font-medium">{scopeLabel}</span>
-        </div> : null}
-        <label className="sr-only" htmlFor="office-brian-instruction">{t.editWithBrian}</label>
-        <textarea id="office-brian-instruction" value={instruction} onChange={(event) => onInstructionChange(event.target.value)} onKeyDown={(event) => {
-          if (event.key === "Enter" && !event.shiftKey && !event.nativeEvent.isComposing && event.keyCode !== 229) {
-            event.preventDefault();
-            if (!disabled) event.currentTarget.form?.requestSubmit();
-          }
-        }} disabled={revisionActive} placeholder={t.iterationPlaceholder} rows={3} className="block max-h-48 min-h-20 w-full resize-none border-0 bg-transparent px-3 py-3 text-base leading-relaxed outline-none placeholder:text-muted-foreground/70 disabled:cursor-not-allowed disabled:opacity-60 md:text-sm" />
-        <div className="flex justify-end px-2.5 pb-2.5">
-          <Button type="submit" size="icon" disabled={disabled} aria-label={submitting ? t.queued : t.askBrian} title={submitting ? t.queued : t.askBrian} className="rounded-full max-sm:size-11"><ArrowUp className="size-4" aria-hidden /></Button>
+    <header className="flex shrink-0 items-center gap-2 border-b border-border px-4 py-2.5">
+      <Sparkles className="size-3.5 text-primary" aria-hidden />
+      <h2 className="text-sm font-medium">{t.editWithBrian}</h2>
+    </header>
+    <div className="min-h-0 flex-1 overflow-y-auto px-4 py-4">
+      <div className="flex gap-2.5">
+        <div className="mt-0.5 flex size-7 shrink-0 items-center justify-center rounded-lg bg-primary/10 text-primary ring-1 ring-primary/15"><Sparkles className="size-3.5" aria-hidden /></div>
+        <div className="min-w-0 flex-1 space-y-2.5 pt-0.5">
+          {job ? <details className="group/run min-w-0 text-xs">
+            <summary className="flex w-fit max-w-full cursor-pointer list-none items-center gap-1.5 py-0.5 text-[11px] text-muted-foreground/70 transition-colors hover:text-muted-foreground max-sm:min-h-11 [&::-webkit-details-marker]:hidden">
+              <ChevronRight className="size-3 shrink-0 transition-transform group-open/run:rotate-90" aria-hidden />
+              {runIcon}
+              <span className="truncate">{t.runActivity}</span>
+              <span aria-hidden>·</span>
+              <span className={cn("truncate", failed && "text-destructive")}>{statusLabel}</span>
+            </summary>
+            {events.length ? <ol className="mt-1.5 flex flex-col gap-1.5 border-l border-border/60 pl-3">
+              {events.map((event) => <li key={event.id} className="flex min-w-0 items-baseline justify-between gap-2 leading-snug text-muted-foreground">
+                <span className="min-w-0 break-words">{eventLabel(event.code)}</span>
+                <time className="shrink-0 text-[10px] tabular-nums text-muted-foreground/60">{new Date(event.createdAt).toLocaleTimeString()}</time>
+              </li>)}
+            </ol> : null}
+          </details> : null}
+          <p role={failed ? "alert" : undefined} className={cn("break-words text-[14px] leading-[1.6]", failed ? "text-destructive" : "text-foreground")}>{messageText}</p>
+          {inputNeeded ? <div className="space-y-3 rounded-xl border border-border bg-muted/30 p-3 text-sm">
+            <p role="status" className="leading-relaxed">{question}</p>
+            {templateNeeded ? job?.canResumeTemplate ? <>
+              {job.templateChoices?.length ? <>
+                <SearchableSelect value={templateVersionId} onValueChange={onTemplateChange ?? (()=>undefined)} items={job.templateChoices.map(choice=>({value:choice.templateVersionId,label:choice.name}))} placeholder={t.chooseTemplateTitle} searchPlaceholder={t.searchTemplates} emptyMessage={t.noMatchingTemplates} aria-label={t.chooseTemplateTitle} className="max-sm:min-h-11 w-full" disabled={submitting}/>
+                <Button type="button" disabled={submitting || !job.templateChoices.some(choice=>choice.templateVersionId===templateVersionId)} onClick={onResumeTemplate} className="max-sm:min-h-11 w-full">{submitting ? t.queued : t.resumeGeneration}</Button>
+              </> : <p className="text-muted-foreground">{t.noPublishedTemplateForDraft}</p>}
+              {templatesHref ? <Link href={templatesHref} className="inline-flex min-h-8 max-sm:min-h-11 items-center underline">{t.openTemplates}</Link> : null}
+            </> : <p className="text-muted-foreground">{t.templateRecoveryUnavailable}</p> : null}
+          </div> : null}
+          {showFeedback ? <p role={feedbackIsError ? "alert" : "status"} className={cn("break-words text-[14px] leading-[1.6]", feedbackIsError ? "text-destructive" : "text-muted-foreground")}>{feedbackLabel}</p> : null}
         </div>
       </div>
-      {!steering && (revisionActive ? t.brianRevisionInFlight : !canRequestRevision ? requestDisabledReason : undefined) ? <p className="mt-2 px-1 text-xs leading-relaxed text-muted-foreground">{revisionActive ? t.brianRevisionInFlight : requestDisabledReason}</p> : null}
-    </form>
+    </div>
+    {!templateNeeded ? <form ref={formRef} onSubmit={onSubmit} className="shrink-0 px-3 pb-3 pt-1">
+      <div className="rounded-xl border border-border bg-background shadow-sm focus-within:border-ring [&_:focus-visible]:shadow-none">
+        <label className="sr-only" htmlFor="office-brian-instruction">{t.editWithBrian}</label>
+        <ChatComposer
+          textareaId="office-brian-instruction"
+          value={instruction}
+          onChange={onInstructionChange}
+          onSend={() => formRef.current?.requestSubmit()}
+          disabled={revisionActive}
+          sendDisabled={disabled}
+          placeholder={t.iterationPlaceholder}
+          sendLabel={<><ArrowUp className="size-4" aria-hidden /><span className="sr-only">{submitting ? t.queued : t.askBrian}</span></>}
+          rowClassName="grid grid-cols-[minmax(0,1fr)_auto] items-center gap-y-1 px-2 pb-2"
+          textareaClassName="order-1 col-span-2 w-full min-h-[44px] max-h-48 min-w-0 resize-none overflow-y-auto bg-transparent px-1.5 pt-2.5 pb-1 text-[16px] leading-relaxed outline-none placeholder:text-muted-foreground focus-visible:shadow-none disabled:cursor-not-allowed disabled:opacity-60 md:text-sm"
+          sendButtonClassName="order-3 ml-1 inline-flex size-11 shrink-0 items-center justify-center rounded-lg bg-action text-action-foreground transition-colors hover:bg-action/90 focus-visible:shadow-none disabled:pointer-events-none disabled:opacity-40 sm:size-8"
+          slotPreInput={<div className="order-2 min-w-0 px-1.5">
+            {!steering ? <span className="flex min-w-0 items-center gap-1.5 text-[11px] text-muted-foreground" data-office-brian-scope={scope.kind}>
+              <Crosshair className="size-3 shrink-0 text-primary/70" aria-hidden />
+              <span className="shrink-0">{t.brianScope}:</span>
+              <span className="truncate font-medium text-foreground">{scopeLabel}</span>
+            </span> : null}
+          </div>}
+        />
+      </div>
+      {footnote ? <p className="mt-2 px-1 text-xs leading-relaxed text-muted-foreground">{footnote}</p> : null}
+    </form> : null}
   </section>;
 }
