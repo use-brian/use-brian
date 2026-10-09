@@ -1,3 +1,4 @@
+import { withTurnInference } from '../turn/runtime.js'
 import { PER_TURN_FILES_INDEX_CAP, PER_TURN_INDEX_CAP } from '../turn/index-caps.js'
 import { dispatchPersistedWebInput } from './_incoming-chat-event.js'
 import { filterCoordinatorTools, COORDINATOR_DOCUMENT_WORKFLOW_ADDENDUM } from './chat-coordinator-tools.js'
@@ -2051,6 +2052,8 @@ export function chatRoutes(options: WebChatOptions): Router {
   const router = Router()
 
   router.post('/', async (req, res) => {
+    // Inference wiring through the turn kernel's boot registration.
+    const turnOptions = withTurnInference(options)
     const { message: rawMessage, sessionId: requestedSessionId, model: requestedModel, fileIds, attachedRecordingIds, truncateFromMessageId, timezone: clientTimezone, assistantId: requestedAssistantId, replyTo, channelId: requestedChannelId, mode: requestedMode, docViewId: requestedDocViewId, docAnchorBlockId: requestedDocAnchorBlockId, docActiveThemeId: requestedActiveThemeId, workspaceId: requestedWorkspaceId, appOrigin: requestedAppOrigin, contextGroupId: requestedContextGroupId, contextProjectId: requestedContextProjectId, followupChips: requestedFollowupChips, viewingSkillRowId: requestedViewingSkillRowId, viewingBrainEntry: requestedViewingBrainEntry, kbSourceId: requestedKbSourceId, meteredProfileId, meteredToolRounds, meteredAccepted, ask: requestedAsk, roomResponseGroup: rawRoomResponseGroup, steer: requestedSteer, inputId: requestedInputId, midTurn: requestedMidTurn } = req.body as {
       message?: string
       sessionId?: string
@@ -2437,8 +2440,8 @@ export function chatRoutes(options: WebChatOptions): Router {
       // final response tier. Background work is logically Standard; if that
       // tier has no custom default, one configured custom endpoint still stays
       // authoritative for the workspace.
-      const backgroundLlmRuntime = assistant.workspaceId && options.resolveWorkspaceCustomLlm
-        ? await options.resolveWorkspaceCustomLlm({
+      const backgroundLlmRuntime = assistant.workspaceId && turnOptions.resolveWorkspaceCustomLlm
+        ? await turnOptions.resolveWorkspaceCustomLlm({
             workspaceId: assistant.workspaceId,
             requestedTier: 'standard',
             allowDefault: true,
@@ -2447,7 +2450,7 @@ export function chatRoutes(options: WebChatOptions): Router {
         : null
       const backgroundProvider = backgroundLlmRuntime?.provider ?? options.provider
       const backgroundModel = backgroundLlmRuntime?.selector
-        ?? backgroundModelFor(options.configuredProviders)
+        ?? backgroundModelFor(turnOptions.configuredProviders)
       const backgroundUsageAttribution = {
         modelTier: 'standard',
         providerKeySource: backgroundLlmRuntime?.providerKeySource ?? 'platform' as const,
@@ -3585,8 +3588,8 @@ export function chatRoutes(options: WebChatOptions): Router {
           // pre-warm. Correctness does not depend on it — the provider
           // boundary swaps a PDF for text regardless of what happens here.
           const resolvedTierModel = resolveModel(requestedModel, userPlan, 'ok')
-          const servedModel = options.configuredProviders
-            ? ensureServableModel(resolvedTierModel, options.configuredProviders)
+          const servedModel = turnOptions.configuredProviders
+            ? ensureServableModel(resolvedTierModel, turnOptions.configuredProviders)
             : resolvedTierModel
           const providerReadsPdfInline = registryRow(servedModel)?.capabilities.nativePdf ?? false
 
@@ -5496,8 +5499,8 @@ export function chatRoutes(options: WebChatOptions): Router {
           await injectDocTools({
             tools: allTools,
             backgroundModel,
-            fallbackModel: options.configuredProviders
-              ? ensureServableModel(standardDocEditModel, options.configuredProviders)
+            fallbackModel: turnOptions.configuredProviders
+              ? ensureServableModel(standardDocEditModel, turnOptions.configuredProviders)
               : standardDocEditModel,
             editMode: researchMode ? 'research' : 'page',
             userId: user.id,
@@ -6021,8 +6024,8 @@ export function chatRoutes(options: WebChatOptions): Router {
       // Substitute a configured model when the default (Gemini) has no key —
       // lets a Qwen-only deployment serve chat by default. No-op when Gemini
       // is configured, or when the caller doesn't pass configuredProviders.
-      const model = options.configuredProviders
-        ? ensureServableModel(logicalModel, options.configuredProviders)
+      const model = turnOptions.configuredProviders
+        ? ensureServableModel(logicalModel, turnOptions.configuredProviders)
         : logicalModel
 
       if (assistant.workspaceId && !meteredTurn) {
@@ -6039,7 +6042,7 @@ export function chatRoutes(options: WebChatOptions): Router {
           requestedModel: explicitCustomSelector,
           requestedTier: logicalTier,
           platformProvider: options.provider,
-          resolveWorkspaceCustomLlm: options.resolveWorkspaceCustomLlm ?? null,
+          resolveWorkspaceCustomLlm: turnOptions.resolveWorkspaceCustomLlm ?? null,
           resolveLegacyByoKey: legacyByoKeyResolver,
           buildLegacyByoProvider: options.buildWorkspaceProvider ?? null,
         })
@@ -6063,10 +6066,10 @@ export function chatRoutes(options: WebChatOptions): Router {
           route: resolvedTurnLlm.customRuntime,
           turnHasImage: turnHasInlineImage(userContentBlocks),
           explicitCustomSelection: Boolean(explicitCustomSelector),
-          builtInServable: !options.configuredProviders
+          builtInServable: !turnOptions.configuredProviders
             || (() => {
               const row = registryRow(model)
-              return row ? isRegistryModelAvailable(row, options.configuredProviders) : false
+              return row ? isRegistryModelAvailable(row, turnOptions.configuredProviders) : false
             })(),
         })
         if (imageRoute === 'refuse') {
@@ -7038,7 +7041,7 @@ export function chatRoutes(options: WebChatOptions): Router {
           model: {
             provider: preparedRun.model.provider,
             model: preparedRun.model.model,
-            configuredProviders: options.configuredProviders,
+            configuredProviders: turnOptions.configuredProviders,
             customLlm: customLlmRuntime,
           },
           loop: {

@@ -23,6 +23,7 @@
  * See docs/architecture/channels/inter-assistant.md.
  */
 
+import { withTurnInference } from '../turn/runtime.js'
 import { PER_TURN_INDEX_CAP } from '../turn/index-caps.js'
 import { randomUUID } from 'node:crypto'
 import { createTurnLedger } from '../ledger/recorder.js'
@@ -500,6 +501,8 @@ export function createCalleeExecutor(options: CalleeExecutorOptions): CalleeExec
   const authorizeAudience = options.authorizeDeliveryAudience
     ?? createDeliveryAudienceAuthorizer({ integrationStore: options.integrationStore })
   return async function executeCalleeQuery(params: CalleeQueryParams, inheritedEvidence?: import('@use-brian/core').ScopeEvidence): Promise<string> {
+    // Inference wiring through the turn kernel's boot registration.
+    const turnOptions = withTurnInference(options)
     if (params.callerScopeEvidence !== undefined && !params.callerAccessCeiling && !inheritedEvidence) {
       throw Object.assign(new Error('Source context requires verified caller authority.'), { reason:'caller_evidence_unavailable', retrySafe:false })
     }
@@ -939,8 +942,8 @@ export function createCalleeExecutor(options: CalleeExecutorOptions): CalleeExec
       }
     }
 
-    const backgroundLlmRuntime = calleeAssistant.workspaceId && options.resolveWorkspaceCustomLlm
-      ? await options.resolveWorkspaceCustomLlm({
+    const backgroundLlmRuntime = calleeAssistant.workspaceId && turnOptions.resolveWorkspaceCustomLlm
+      ? await turnOptions.resolveWorkspaceCustomLlm({
           workspaceId: calleeAssistant.workspaceId,
           requestedTier: 'standard',
           allowDefault: true,
@@ -1925,8 +1928,8 @@ export function createCalleeExecutor(options: CalleeExecutorOptions): CalleeExec
       : params.modelAlias
         ? MODEL_MAP[params.modelAlias] ?? MODEL_MAP.standard
         : 'gemini-flash'
-    const customLlmRuntime = calleeAssistant.workspaceId && options.resolveWorkspaceCustomLlm
-      ? await options.resolveWorkspaceCustomLlm({
+    const customLlmRuntime = calleeAssistant.workspaceId && turnOptions.resolveWorkspaceCustomLlm
+      ? await turnOptions.resolveWorkspaceCustomLlm({
           workspaceId: calleeAssistant.workspaceId,
           requestedTier: tierForModel(model),
           allowDefault: true,
@@ -2135,7 +2138,7 @@ export function createCalleeExecutor(options: CalleeExecutorOptions): CalleeExec
           model: {
             provider: preparedRun.model.provider,
             model: preparedRun.model.model,
-            configuredProviders: options.configuredProviders,
+            configuredProviders: turnOptions.configuredProviders,
             customLlm: customLlmRuntime,
           },
           // The callee lane had no budget gate: a workspace with no active

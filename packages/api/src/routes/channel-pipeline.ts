@@ -1,3 +1,4 @@
+import { withTurnInference } from '../turn/runtime.js'
 import { PER_TURN_FILES_INDEX_CAP, PER_TURN_INDEX_CAP } from '../turn/index-caps.js'
 import { policyFor } from '../session-kind.js'
 import { releaseTurn, takeTurnLease, waitForTurnSlot } from '../turn/lease.js'
@@ -976,6 +977,10 @@ export function recordChannelToolResults(input: {
 }
 
 export async function processChannelMessage(params: ChannelPipelineParams): Promise<void> {
+  // Inference wiring resolves through the turn kernel's boot registration when
+  // a route did not thread it (CLAUDE.md: "Workspace custom LLM must reach
+  // every channel turn").
+  params = withTurnInference(params)
   // Split-admission routes have already sent handled replies. A stopped turn
   // must not re-enter admission or start conversational work after media intake.
   if (params.admittedAnswerContext?.kind === 'handled' || params.abortController.signal.aborted) return

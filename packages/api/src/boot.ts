@@ -1,3 +1,4 @@
+import { configureTurnKernel } from './turn/runtime.js'
 import { scopeEvidenceFromRows, workspaceFilesCtxFor, type CreateComputerToolsOptions } from '@use-brian/core'
 import { prepareBrowserDownload, type BrowserDownload } from './sandbox/download-publication.js'
 import { resolveBrowserTaskExecutionAuthority } from './sandbox/task-execution-authority.js'
@@ -2390,6 +2391,11 @@ export async function bootOpenApi(opts: BootOpenApiOptions): Promise<BootResult>
     managedProvider: provider,
     documentAdaptation: { distill: documentDistill, cache: distillateCache },
   })
+  // The turn kernel's deployment-wide inference wiring (turn/runtime.ts):
+  // every runner resolves the workspace custom endpoint and the configured
+  // providers through this registration, so a route that forgets to thread
+  // them cannot change which model answers a turn.
+  configureTurnKernel({ resolveWorkspaceCustomLlm, configuredProviders })
   const resolveBackgroundRuntime = async (workspaceId: string | null | undefined) =>
     workspaceId
       ? resolveWorkspaceCustomLlm({

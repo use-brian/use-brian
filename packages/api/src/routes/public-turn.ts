@@ -1,3 +1,4 @@
+import { withTurnInference } from '../turn/runtime.js'
 import { PER_TURN_FILES_INDEX_CAP, PER_TURN_INDEX_CAP } from '../turn/index-caps.js'
 import { renderSystemContext } from '@use-brian/core'
 /**
@@ -571,6 +572,8 @@ export async function executePublicTurn(
   req: import('express').Request,
   res: import('express').Response,
 ): Promise<void> {
+  // Inference wiring through the turn kernel's boot registration.
+  deps = withTurnInference(deps)
   const maxTurns = deps.maxTurns ?? 8
   const body = input.body
 

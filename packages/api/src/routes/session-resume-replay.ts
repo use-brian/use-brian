@@ -25,6 +25,7 @@
  * [COMP:brain/session-resume-worker]
  */
 
+import { withTurnInference } from '../turn/runtime.js'
 import { renderCharterBlock, resolveCharter } from '@use-brian/shared'
 import { runAssistantTurn, turnUsageIdentity } from '../turn/kernel.js'
 import { resolveTurnBilling } from '../turn/billing.js'
@@ -330,6 +331,8 @@ export function createSessionResumeReplay(deps: SessionResumeReplayDeps): Sessio
   const model = deps.model ?? 'gemini-flash'
 
   return async function replay(params: ResumeReplayParams): Promise<'completed' | 'deferred'> {
+    // Inference wiring through the turn kernel's boot registration.
+    const turnDeps = withTurnInference(deps)
     const { sessionId, suspendedToolName, startingAccessCeiling: storedStarting } = params
 
     if (!storedStarting) throw authorityUnavailable()
@@ -412,8 +415,8 @@ export function createSessionResumeReplay(deps: SessionResumeReplayDeps): Sessio
     const executeReplay = async (): Promise<'completed' | 'deferred'> => {
       await assertCurrentAuthority()
       const policy = resolveDurableResumePolicy(params, model)
-      const customLlm = params.selectedCustomModel && deps.resolveWorkspaceCustomLlm && !params.selectedLegacyByo
-        ? await deps.resolveWorkspaceCustomLlm({
+      const customLlm = params.selectedCustomModel && turnDeps.resolveWorkspaceCustomLlm && !params.selectedLegacyByo
+        ? await turnDeps.resolveWorkspaceCustomLlm({
             workspaceId: assistant.workspaceId!,
             requestedModel: params.selectedCustomModel,
             requestedTier: policy.logicalTier,
@@ -555,7 +558,7 @@ export function createSessionResumeReplay(deps: SessionResumeReplayDeps): Sessio
         model: {
           provider: continuationProvider,
           model: customLlm?.selector ?? policy.logicalModel,
-          configuredProviders: deps.configuredProviders,
+          configuredProviders: turnDeps.configuredProviders,
           customLlm,
         },
         loop: {
