@@ -26,7 +26,7 @@ import {
 import { getSelfEntityId } from '../db/memories.js'
 import { getRecording, type Recording } from '../db/recordings-store.js'
 import { queryLoop, isConnectionDropError, isEndpointUnreachableError, streamErrorCode, buildMemoryContext, voicePlatformFromDraftTitle, measureDocContext, createMemoryTools, createSelfProfileTool, createMemoryRecallBuffer, createSkillInvocationBuffer, createRetrievalTools, createSessionStateTools, buildSessionStateBlock, runSessionStateDiff, buildActivePlanBlock, createPlanTools, seedPlanFromTasks, calculateCost, sanitize, shouldInline, ensureToolResultPairing, stripUnsignedToolUses, modelRequiresToolSignatures, elideStaleDocToolResults, synthesizeMissingToolResults, createConfirmationResolver, interpretConfirmationEvent, runPreflight, buildPreflightPrompt, runMemoryNudge, collectStream, classifyTopic, fetchEpisodicContext, transcribeFirstAudio, voiceUnavailableNote, TRANSCRIPTION_DISABLED_REASON, probePdfPageCount, estimateDistillTokens, PDF_CONFIRM_PAGE_THRESHOLD, DASHSCOPE_RENDER_WIDTH, filterToolsByCapabilities, modelToCompactionTier, buildWorkspaceFilesContext, buildUploadPolicyBlock, SensitivityAccumulator, CompartmentAccumulator, ContextScopeAccumulator, AttachmentCollector, runLocalMatchCheck, sanitizeTitle, AUTO_TITLE_AI_MIN_CHARS, COORDINATOR_BASE_ADDENDUM, COORDINATOR_RESEARCH_ADDENDUM, buildDocSupervisorSkillBlock, buildAmbientDocSkillBlock, detectOperateSiteIntent, EvidenceAccumulator, matchesDisputedFigure, buildDisputeContextNote, parsePresentedDocumentInput, latestWorkflowProposalReceipt, buildTool, prepareSlashCommand, resolveNativeSlashCommand, buildSlashCommandBlock, buildWorkflowSlashCommandBlock, buildEmailDraftAnchorPrompt, formatActiveEmailDraftContext, type PresentedDocumentInput, type MediaBackend } from '@use-brian/core'
-import { classifySession } from '../session-kind.js'
+import { classifySession, sessionPolicy } from '../session-kind.js'
 import { deliverTurnInput, registerTurnInbox } from '../turn-inbox.js'
 import { insertClaimProvenance, getClaimsForLatestAssistantMessage } from '../db/claim-provenance-store.js'
 import type { SessionStateStore, SessionStateRecord, PlanStore, AmbientSurface, CrmEmailDraftStore } from '@use-brian/core'
@@ -3128,6 +3128,7 @@ export function chatRoutes(options: WebChatOptions): Router {
       turnTimingIdentity = { userId: user.id, assistantId: assistant.id, sessionId: session.id }
 
       const isRoomSession = isSharedChatSession(session)
+      const turnPolicy = sessionPolicy(classifySession(session))
       const scopeAccumulator = new ContextScopeAccumulator({
         compartments: turnScope.writeCompartments,
         projectIds: turnScope.writeProjectIds,
@@ -7168,7 +7169,7 @@ export function chatRoutes(options: WebChatOptions): Router {
       // Room turns record WHO addressed the assistant this turn — the only
       // member (besides a workspace admin) who may resolve this turn's write
       // confirmations (multiplayer chat T11/D8).
-      if (isRoomSession) roomTurnAddressers.set(session.id, user.id)
+      if (turnPolicy.confirmations === 'addresser_or_admin') roomTurnAddressers.set(session.id, user.id)
 
       try {
         // Resolve the current recipient before any provider work. The same
@@ -9132,7 +9133,7 @@ export function chatRoutes(options: WebChatOptions): Router {
         res.status(403).json({ error: 'Not authorized for this confirmation' })
         return
       }
-      if (isSharedChatSession(session)) {
+      if (sessionPolicy(classifySession(session)).confirmations === 'addresser_or_admin') {
         let allowed = mayResolveRoomConfirmation({
           jwtUserId,
           addresserUserId: roomTurnAddressers.get(sessionId),

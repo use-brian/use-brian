@@ -222,7 +222,11 @@ export type SessionPolicy = {
     followStream: boolean
     feedGuard: boolean
   }
-  /** Who may resolve a confirmation raised by a turn (L5). */
+  /**
+   * Who may resolve a confirmation raised by a turn (L5): the owner of a
+   * personal session; in any workspace session, the member who addressed
+   * the turn or a workspace admin.
+   */
   confirmations: 'owner' | 'addresser_or_admin'
   /** Rename / delete authority beyond the owner (L11). */
   lifecycle: { adminRename: boolean; adminDelete: boolean }
@@ -294,7 +298,7 @@ export function sessionPolicy(kind: SessionKind): SessionPolicy {
       followStream: room || anchor === 'office_file',
       feedGuard: draft || anchor === 'feed_thread',
     },
-    confirmations: room ? 'addresser_or_admin' : 'owner',
+    confirmations: workspace ? 'addresser_or_admin' : 'owner',
     lifecycle: { adminRename: draft || room, adminDelete: room },
     humanActivity: {
       // memories.ts: channel_type NOT IN ('cron', 'assistant-call', 'notification')

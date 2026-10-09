@@ -47,11 +47,11 @@ describe('[COMP:api/session-policy] sessionPolicy drift ledger', () => {
     expect(Object.keys(policyFor(ROOM).read).sort()).toEqual(['anchorGate', 'rule'])
   })
 
-  it('L5 confirmations: addresser-or-admin applies to web rooms only', () => {
-    expect(policyFor(ROOM).confirmations).toBe('addresser_or_admin')
-    for (const row of [DRAFT, DOC_THREAD, OFFICE, FEED_THREAD]) {
-      expect(policyFor(row).confirmations).toBe('owner')
+  it('L5 confirmations: the addresser or an admin resolves in every workspace session', () => {
+    for (const row of [ROOM, DRAFT, DOC_THREAD, OFFICE, FEED_THREAD]) {
+      expect(policyFor(row).confirmations).toBe('addresser_or_admin')
     }
+    expect(policyFor(PERSONAL).confirmations).toBe('owner')
   })
 
   it('L6 live follow: five consumers give five answers', () => {
