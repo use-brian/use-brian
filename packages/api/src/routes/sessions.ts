@@ -827,19 +827,10 @@ export function sessionRoutes(opts: SessionRouteOptions = {}): Router {
         return
       }
 
-      // Verify ownership before allowing rename. Shared sessions are
-      // team-shared, so we accept rename from the original starter OR any
-      // team admin/owner of the assistant's team. Non-shared sessions stay
-      // strictly per-user.
-      // NOTE the asymmetry inside `visibility='workspace'` (migration 223).
-      // A workspace-shared CHAT (`app_origin='chat'`) widens to
-      // starter-or-admin, because a shared thread nobody but its starter can
-      // retitle is a shared thread with a private owner. A doc COMMENT THREAD
-      // does not: it is workspace-READABLE, but renaming or destroying it is
-      // still the author's call, and DELETE cascades to `comment_threads` plus
-      // every comment on it. That is why the predicate is
-      // `isSharedChatSession`, not a bare `visibility` check — do NOT "unify"
-      // them.
+      // Rename authority is the `lifecycle` row of sessionPolicy (L11): the
+      // owner of a personal session; any participant who can read a
+      // workspace session (a shared thread nobody but its starter can
+      // retitle is a shared thread with a private owner).
       const sessionResult = await query<{
         id: string
         userId: string
@@ -870,14 +861,13 @@ export function sessionRoutes(opts: SessionRouteOptions = {}): Router {
       const jwtUserId = (req as { userId?: string }).userId
       let allowed = false
       if (jwtUserId) {
-        if (session.userId === jwtUserId) {
-          allowed = true
-        } else if (
-          (session.mode === 'draft' || isSharedChatSession(session)) &&
-          session.workspaceId
-        ) {
-          const role = await getWorkspaceRoleSystem(jwtUserId, session.workspaceId)
-          if (role === 'admin' || role === 'owner') allowed = true
+        // L11: a personal session is renamed by its owner; a workspace session
+        // by any participant who can read it (the read gate, anchor included).
+        if (policyFor(session).lifecycle.rename === 'participants') {
+          const full = await findSessionById(sessionId)
+          allowed = !!full && !(await gateSessionRead(jwtUserId, full))
+        } else {
+          allowed = session.userId === jwtUserId
         }
       } else {
         const { user: guestUser } = await findOrCreateUser({
@@ -926,17 +916,22 @@ export function sessionRoutes(opts: SessionRouteOptions = {}): Router {
 
       const session = sessionResult.rows[0]
 
-      // 2. Verify ownership — session must belong to the requesting user, OR
-      // be a workspace-shared CHAT the caller administers. Doc-thread sessions
-      // stay delete-restricted to the creator by design (see the rename note
-      // above): deletion cascades to the `comment_threads` row + all comments,
-      // which is why this gates on `isSharedChatSession` and not `visibility`.
+      // 2. Verify delete authority (sessionPolicy lifecycle row, L11).
       const jwtUserId = (req as { userId?: string }).userId
       if (jwtUserId) {
-        let allowed = session.userId === jwtUserId
-        if (!allowed && isSharedChatSession(session) && session.workspaceId) {
-          const role = await getWorkspaceRoleSystem(jwtUserId, session.workspaceId)
-          allowed = role === 'admin' || role === 'owner'
+        // L11, D9: a personal session is deleted by its owner; a workspace
+        // session by a workspace admin, whoever started it (its `user_id`
+        // means "created by" and grants nothing). The anchor's cascade runs
+        // through the foreign keys (a doc thread takes its `comment_threads`
+        // row and every comment with it).
+        let allowed = false
+        if (policyFor(session).lifecycle.delete === 'admin') {
+          if (session.workspaceId) {
+            const role = await getWorkspaceRoleSystem(jwtUserId, session.workspaceId)
+            allowed = role === 'admin' || role === 'owner'
+          }
+        } else {
+          allowed = session.userId === jwtUserId
         }
         if (!allowed) {
           res.status(403).json({ error: 'Not your session' })

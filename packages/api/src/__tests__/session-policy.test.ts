@@ -107,10 +107,11 @@ describe('[COMP:api/session-policy] sessionPolicy drift ledger', () => {
     expect(sql).toContain('s.guest_session_token IS NULL')
   })
 
-  it('L11 lifecycle: admins may rename drafts and rooms but delete only rooms', () => {
-    expect(policyFor(DRAFT).lifecycle).toEqual({ adminRename: true, adminDelete: false })
-    expect(policyFor(ROOM).lifecycle).toEqual({ adminRename: true, adminDelete: true })
-    expect(policyFor(DOC_THREAD).lifecycle).toEqual({ adminRename: false, adminDelete: false })
+  it('L11 lifecycle: participants rename and admins delete every workspace session', () => {
+    for (const row of [ROOM, DRAFT, DOC_THREAD, OFFICE, FEED_THREAD]) {
+      expect(policyFor(row).lifecycle).toEqual({ rename: 'participants', delete: 'admin' })
+    }
+    expect(policyFor(PERSONAL).lifecycle).toEqual({ rename: 'owner', delete: 'owner' })
   })
 
   it('L12 create admission: only web chat rooms are admitted', () => {

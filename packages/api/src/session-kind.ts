@@ -255,8 +255,12 @@ export type SessionPolicy = {
    * the turn or a workspace admin.
    */
   confirmations: 'owner' | 'addresser_or_admin'
-  /** Rename / delete authority beyond the owner (L11). */
-  lifecycle: { adminRename: boolean; adminDelete: boolean }
+  /**
+   * Rename / delete authority (L11). Personal: the owner. Workspace: any
+   * participant who can read renames; a workspace admin deletes (the
+   * starter's `user_id` grants nothing, D9), with the anchor's cascade.
+   */
+  lifecycle: { rename: 'owner' | 'participants'; delete: 'owner' | 'admin' }
   /**
    * Counts as human activity, per consumer (L13): the memory "active user"
    * probe, the playbook miner, the Live roster, and workspace search.
@@ -324,7 +328,7 @@ export function sessionPolicy(kind: SessionKind): SessionPolicy {
     liveFollow: workspace,
     presence: room || anchor === 'office_file',
     confirmations: workspace ? 'addresser_or_admin' : 'owner',
-    lifecycle: { adminRename: draft || room, adminDelete: room },
+    lifecycle: workspace ? { rename: 'participants', delete: 'admin' } : { rename: 'owner', delete: 'owner' },
     humanActivity: {
       // memories.ts: channel_type NOT IN ('cron', 'assistant-call', 'notification')
       memory: kind.machine !== 'cron' && kind.machine !== 'a2a' && anchor !== 'inbox',
