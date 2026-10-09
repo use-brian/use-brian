@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest'
 import { isAttendedTurn } from '@use-brian/core'
-import { policyFor, transportPolicy, type SessionKindRow } from '../session-kind.js'
+import { feedAnchoredRead, policyFor, transportPolicy, type SessionKindRow } from '../session-kind.js'
 
 /**
  * One case per drift row of docs/plans/unified-sessions.md section 2.2.
@@ -54,11 +54,19 @@ describe('[COMP:api/session-policy] sessionPolicy drift ledger', () => {
     expect(policyFor(PERSONAL).confirmations).toBe('owner')
   })
 
-  it('L6 live follow: five consumers give five answers', () => {
-    expect(policyFor(DRAFT).liveFollow).toEqual({ publish: true, toolInput: true, sweeperPublish: true, followStream: false, feedGuard: true })
-    expect(policyFor(ROOM).liveFollow).toEqual({ publish: true, toolInput: false, sweeperPublish: true, followStream: true, feedGuard: false })
-    expect(policyFor(FEED_THREAD).liveFollow).toEqual({ publish: false, toolInput: false, sweeperPublish: true, followStream: false, feedGuard: true })
-    expect(policyFor(DOC_THREAD).liveFollow).toEqual({ publish: false, toolInput: false, sweeperPublish: true, followStream: false, feedGuard: false })
+  it('L6 live follow: one answer for every publisher, the sweeper and the stream', () => {
+    for (const row of [ROOM, DRAFT, DOC_THREAD, OFFICE, FEED_THREAD]) {
+      expect(policyFor(row).liveFollow).toBe(true)
+    }
+    expect(policyFor(PERSONAL).liveFollow).toBe(false)
+    // Whole-life follow is the presence surfaces only (rooms, the Office rail).
+    expect(policyFor(ROOM).presence).toBe(true)
+    expect(policyFor(OFFICE).presence).toBe(true)
+    expect(policyFor(DOC_THREAD).presence).toBe(false)
+    // The feed stream guard is the feed anchor's read gate, not a third list.
+    expect(feedAnchoredRead(policyFor(DRAFT))).toBe(true)
+    expect(feedAnchoredRead(policyFor(FEED_THREAD))).toBe(true)
+    expect(feedAnchoredRead(policyFor(ROOM))).toBe(false)
   })
 
   it('L7 admission: multi-human threads are serialized like personal sessions', () => {

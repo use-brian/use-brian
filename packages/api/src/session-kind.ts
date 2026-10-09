@@ -214,14 +214,19 @@ export type SessionPolicy = {
   context: { personalMemory: boolean }
   /** Delivery ceiling and recipient type (L9). */
   deliveryCeiling: { ceiling: 'audience' | 'owner'; recipientType: 'group' | 'individual' }
-  /** Who sees a live turn (L6), per consumer. */
-  liveFollow: {
-    publish: boolean
-    toolInput: boolean
-    sweeperPublish: boolean
-    followStream: boolean
-    feedGuard: boolean
-  }
+  /**
+   * Do other viewers follow this session's turns live (L6)? ONE answer for
+   * every bus publisher (rows, tool input, turn start/finish), the stuck-turn
+   * sweeper's heal broadcast, and the follow stream: every workspace session.
+   * A personal session is followed only by its owner's own tabs.
+   */
+  liveFollow: boolean
+  /**
+   * Does the surface keep a live presence roster, so its follow stream stays
+   * open for the session's whole life rather than one turn: rooms (typing,
+   * who is here) and an Office file's Brian rail.
+   */
+  presence: boolean
   /**
    * Who may resolve a confirmation raised by a turn (L5): the owner of a
    * personal session; in any workspace session, the member who addressed
@@ -291,13 +296,8 @@ export function sessionPolicy(kind: SessionKind): SessionPolicy {
       ceiling: workspace ? 'audience' : 'owner',
       recipientType: room ? 'group' : 'individual',
     },
-    liveFollow: {
-      publish: draft || room || anchor === 'office_file',
-      toolInput: draft,
-      sweeperPublish: workspace,
-      followStream: room || anchor === 'office_file',
-      feedGuard: draft || anchor === 'feed_thread',
-    },
+    liveFollow: workspace,
+    presence: room || anchor === 'office_file',
     confirmations: workspace ? 'addresser_or_admin' : 'owner',
     lifecycle: { adminRename: draft || room, adminDelete: room },
     humanActivity: {
@@ -320,6 +320,16 @@ export function sessionPolicy(kind: SessionKind): SessionPolicy {
     clearanceSource: anchor === 'office_file' ? 'anchor' : 'assistant',
     clearanceRecompute: workspace,
   }
+}
+
+/**
+ * Is a read of this session bound to a feed anchor (draft audience or feed
+ * collaboration)? Those reads are re-checked per streamed event because feed
+ * access can change mid-stream.
+ */
+export function feedAnchoredRead(policy: SessionPolicy): boolean {
+  return policy.read.rule === 'workspace'
+    && (policy.read.anchorGate === 'feed_draft_audience' || policy.read.anchorGate === 'feed_collaboration')
 }
 
 /** Convenience: classify and answer in one call. */

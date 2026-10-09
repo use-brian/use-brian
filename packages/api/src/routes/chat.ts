@@ -13,7 +13,7 @@ import { z } from 'zod'
 import { getDefaultAssistant, getUserAssistant, getWorkspacePrimaryAssistant, getUserProfilesByIds, updateUserLastSeenTz, resolveAssistantAccess } from '../db/users.js'
 import { charterNeedsIntake, createSaveCharterTool, CHARTER_INTAKE_ADDENDUM } from '../intake/charter-intake.js'
 import { resolvePresenceTimezone } from '../auth/client-timezone.js'
-import { createPersonalWebSession, findOrCreateSession, findSessionByChannel, findSessionById, addSessionMessage, readSessionMessageScopeSource, toStampedMessages, getSessionMessages, updateSessionStatus, updateSessionTitle, countSessionTurns, truncateMessagesFrom, getPreferredChannel, getSessionTopicLabels, isSharedChatSession, hasLiveFollowers, isSharedAudienceSession, isMultiParticipantSession, coalesceConsecutiveUserMessages, startTurnLease, touchTurnLease, isTurnLeaseSuperseded, releaseTurnLease, requestTurnCancel, reclaimStaleTurn, isTurnLeaseLive, TURN_HEARTBEAT_INTERVAL_MS, type SessionMessage } from '../db/sessions.js'
+import { createPersonalWebSession, findOrCreateSession, findSessionByChannel, findSessionById, addSessionMessage, readSessionMessageScopeSource, toStampedMessages, getSessionMessages, updateSessionStatus, updateSessionTitle, countSessionTurns, truncateMessagesFrom, getPreferredChannel, getSessionTopicLabels, isSharedChatSession, isSharedAudienceSession, isMultiParticipantSession, coalesceConsecutiveUserMessages, startTurnLease, touchTurnLease, isTurnLeaseSuperseded, releaseTurnLease, requestTurnCancel, reclaimStaleTurn, isTurnLeaseLive, TURN_HEARTBEAT_INTERVAL_MS, type SessionMessage } from '../db/sessions.js'
 import { createTurnLedger } from '../ledger/recorder.js'
 import { getLedgerPayloadStore } from '../ledger/runtime.js'
 import { query, getPool } from '../db/client.js'
@@ -4169,7 +4169,7 @@ export function chatRoutes(options: WebChatOptions): Router {
       // session — a draft-mode session, or a workspace-shared chat — see the
       // new user turn appear live. Without this a teammate's message only
       // shows up on their next refetch, which reads as the chat being broken.
-      if (hasLiveFollowers(session)) {
+      if (turnPolicy.liveFollow) {
         // The queued room path already published its row at queue time.
         if (!prePersistedUserMsg) {
           publishSessionEvent({
@@ -6038,7 +6038,7 @@ export function chatRoutes(options: WebChatOptions): Router {
           // turn_started has already fired for shared sessions (above the
           // budget gate). Pair it with turn_completed so watchers don't
           // see the input dimmed forever.
-          if (hasLiveFollowers(session)) {
+          if (turnPolicy.liveFollow) {
             publishSessionEvent({
               kind: 'turn_completed',
               sessionId: session.id,
@@ -7005,7 +7005,7 @@ export function chatRoutes(options: WebChatOptions): Router {
           // Chat app's workspace-shared threads). We send every turn (not just
           // the final one) because a host's per-turn tool upserts can ride on
           // intermediate tool_use turns.
-          if (hasLiveFollowers(session)) {
+          if (turnPolicy.liveFollow) {
             publishSessionEvent({
               kind: 'assistant_message_saved',
               sessionId: session.id,
@@ -7506,9 +7506,9 @@ export function chatRoutes(options: WebChatOptions): Router {
             // instead of "Using mcp_search").
             sendActivityEvent('tool_input', { id: event.id, name: event.name, input: event.input })
             // Mirror tool activity to the session-event bus so other watchers
-            // of a live draft-mode session see the host's per-turn tool
-            // upserts as they happen.
-            if (session.mode === 'draft') {
+            // of a workspace session see the host's per-turn tool upserts as
+            // they happen (L6: one liveFollow answer for every publisher).
+            if (turnPolicy.liveFollow) {
               publishSessionEvent({
                 kind: 'tool_input',
                 sessionId: session.id,
@@ -7805,7 +7805,7 @@ export function chatRoutes(options: WebChatOptions): Router {
                   messageId: storedQueued.id,
                 })
                 turnStream.resetAnswer()
-                if (hasLiveFollowers(session)) {
+                if (turnPolicy.liveFollow) {
                   publishSessionEvent({
                     kind: 'user_message_saved',
                     sessionId: session.id,
@@ -8553,7 +8553,7 @@ export function chatRoutes(options: WebChatOptions): Router {
       // re-enable their input boxes — draft sessions and workspace-shared
       // chats both take one turn at a time, so this event is what clears the
       // other viewers' busy state. No-op for personal sessions.
-      if (hasLiveFollowers(session)) {
+      if (turnPolicy.liveFollow) {
         publishSessionEvent({
           kind: 'turn_completed',
           sessionId: session.id,

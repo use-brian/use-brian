@@ -1,6 +1,5 @@
 import { z } from 'zod'
 import { WorkspaceAccessError } from '../workspace-access/policy.js'
-import { OFFICE_THREAD_CHANNEL_TYPE } from '../db/office-artifact-sessions.js'
 import { SSE_MAX_LIFETIME_MS } from './brain-stream.js'
 import { webChatSourcesHandler, WEB_CHAT_SOURCE_SQL, type WebChatSourceSession } from './_web-chat-sources.js'
 import { dispatchPersistedWebInput } from './_incoming-chat-event.js'
@@ -16,7 +15,7 @@ import { getLedgerPayloadStore } from '../ledger/runtime.js'
 import { resolveUser } from './route-helpers.js'
 import { getWorkspaceRoleSystem, getWorkspaceMembershipWithReadScopeSystem } from '../db/workspace-store.js'
 import { decideSessionRead } from '../session-read-access.js'
-import { sessionKindSql } from '../session-kind.js'
+import { feedAnchoredRead, policyFor, sessionKindSql } from '../session-kind.js'
 import { canRead, type Sensitivity } from '@use-brian/core'
 import {
   ContextNotAvailableError,
@@ -1862,8 +1861,9 @@ export function sessionRoutes(opts: SessionRouteOptions = {}): Router {
     // Rooms and Office file threads are followed for their whole life, not
     // only while a turn runs. An Office thread is followed from every open
     // file rail, so it bounds its own lifetime (the rail reconnects).
-    const officeThread = session.channelType === OFFICE_THREAD_CHANNEL_TYPE
-    if (isSharedChatSession(session) || officeThread) {
+    const followPolicy = policyFor(session)
+    const officeThread = followPolicy.read.rule === 'workspace' && followPolicy.read.anchorGate === 'office_file'
+    if (followPolicy.presence) {
       let closed = false
       // The viewer joins the room's presence set under their display name —
       // that name is what teammates' typing indicators render.
@@ -1973,7 +1973,7 @@ export function sessionRoutes(opts: SessionRouteOptions = {}): Router {
       sessionId: req.params.id,
       userId: jwtUserId,
       name: null,
-      cb: session.mode === 'draft' || session.channelType === 'feed_thread'
+      cb: feedAnchoredRead(policyFor(session))
         ? guardFeedStream({ query }, req.params.id, jwtUserId, relayEvent, () => finalize([]))
         : relayEvent,
     })

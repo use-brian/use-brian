@@ -223,17 +223,6 @@ export function isSharedAudienceSession(s: Pick<SessionShape, 'visibility' | 'mo
 }
 
 /**
- * Sessions whose turns other viewers follow live on `GET /api/sessions/:id/stream`
- * (new user/assistant rows, turn start/finish): live drafts, the Chat app's
- * workspace rooms, and an Office file's shared thread (office.md "Brian
- * conversation in the file"). One predicate so the publishers and the follow
- * stream cannot drift.
- */
-export function hasLiveFollowers(s: SessionShape): boolean {
-  return s.mode === 'draft' || isSharedChatSession(s) || s.channelType === 'office_thread'
-}
-
-/**
  * A session several humans share, so the model needs speaker labels to tell
  * "the user" apart: shared chats, feed drafts, and doc comment threads.
  */

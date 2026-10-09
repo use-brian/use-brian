@@ -35,6 +35,7 @@
  */
 
 import { sweepStuckSessions, TURN_LEASE_STALE_AFTER_MS } from '../db/sessions.js'
+import { policyFor } from '../session-kind.js'
 
 /**
  * Default staleness threshold — the turn lease's, since that is now the column
@@ -116,7 +117,7 @@ export function createStuckSessionSweeper(options: StuckSessionSweeperOptions = 
         // Draft sessions AND workspace-shared rooms have live watchers whose
         // UI is pinned on the turn lifecycle. Healing the row without telling
         // them just moves the stuck state into the browser.
-        if (row.mode === 'draft' || row.visibility === 'workspace') {
+        if (policyFor({ channelType: 'web', mode: row.mode, visibility: row.visibility }).liveFollow) {
           try {
             publish(row.id)
           } catch (err) {
