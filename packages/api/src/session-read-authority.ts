@@ -8,6 +8,8 @@ import { getUserAssistant } from './db/users.js'
 import { query } from './db/client.js'
 import { getWorkspaceMembershipWithReadScopeSystem } from './db/workspace-store.js'
 import { decideSessionRead } from './session-read-access.js'
+import { findOfficeArtifactForSessionSystem, OFFICE_THREAD_CHANNEL_TYPE } from './db/office-artifact-sessions.js'
+import { resolveOfficeAccess } from './office/access.js'
 
 /** A session whose read-access we gate (the subset of fields the gate reads). */
 type GatedSession = {
@@ -50,6 +52,14 @@ export async function gateSessionRead(
     if (!parent || parent.assistantId !== session.assistantId) return { status: 404, error: 'Draft discussion not found' }
     try { await getFeedCollaboration({ userId: jwtUserId, assistantId: parent.assistantId, sessionId: parent.sessionId, kind: 'user' }); return null }
     catch { return { status: 403, error: 'Draft access required' } }
+  }
+  // An Office file's shared thread is read by exactly the file's audience:
+  // the Office access predicate decides, never workspace membership. A
+  // caller who cannot read the file learns nothing about the thread.
+  if (session.channelType === OFFICE_THREAD_CHANNEL_TYPE) {
+    const link = session.id ? await findOfficeArtifactForSessionSystem(session.id) : null
+    if (!link || !(await resolveOfficeAccess(jwtUserId, link.artifactId))) return { status: 404, error: 'Session not found' }
+    return null
   }
   let assistantWorkspaceId: string | null = null
   let membershipClearance: 'public' | 'internal' | 'confidential' | null = null

@@ -296,7 +296,9 @@ async function fetchSessionRows(workspaceId: string): Promise<SessionRosterRow[]
        JOIN assistants a ON a.id = s.assistant_id
        LEFT JOIN users u ON u.id = s.user_id
       WHERE a.workspace_id = $1 AND feed_draft_audience_allowed(s.id)
-        AND s.channel_type NOT IN ('workflow', 'assistant-call')
+        -- An Office file's thread is read by the file's audience only; its
+        -- live view is the file's Brian tab (office.md "Brian conversation in the file").
+        AND s.channel_type NOT IN ('workflow', 'assistant-call', 'office_thread')
         AND (s.status = 'running'
              OR s.last_active_at > now() - ($2 || ' minutes')::interval)
       ORDER BY s.last_active_at DESC

@@ -611,6 +611,8 @@ import { officeArtifactRoutes } from './routes/office-artifacts.js'
 import { officePdfSessionRoutes } from './routes/office-pdf-sessions.js'
 import { officeJobRoutes } from './routes/office-jobs.js'
 import { officeJobStreamRead, officeJobStreamRoutes } from './routes/office-job-stream.js'
+import { officeConversationRoutes } from './routes/office-conversation.js'
+import { ensureOfficeArtifactSessionSystem, findOfficeArtifactSessionSystem } from './db/office-artifact-sessions.js'
 import { startOfficeJobEventBus } from './office/job-event-bus.js'
 import { officeTemplateRoutes } from './routes/office-templates.js'
 import { createOfficeCommentAnchorWriter } from './office/comment-anchor-storage.js'
@@ -7005,6 +7007,13 @@ export async function bootOpenApi(opts: BootOpenApiOptions): Promise<BootResult>
     async canRestoreVersion(userId, artifactId) {
       return (await resolveDurableOfficeAccess(userId, artifactId))?.canEdit ?? false
     },
+  }))
+  // The file's shared Brian conversation: artifact-scoped routes only (D4).
+  app.use('/api/office', requireAuth(env.JWT_SECRET), officeConversationRoutes({
+    resolveAccess: resolveOfficeAccess,
+    findSession: findOfficeArtifactSessionSystem,
+    ensureSession: ensureOfficeArtifactSessionSystem,
+    workspaceAssistant: getWorkspacePrimaryAssistant,
   }))
   app.use('/api/office', requireAuth(env.JWT_SECRET), officeJobRoutes({
     get: officeGenerationStore.get,

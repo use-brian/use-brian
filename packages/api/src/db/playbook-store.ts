@@ -740,6 +740,8 @@ export async function samplePlaybookEvidence(
      JOIN sessions s ON s.id = sm.session_id
      WHERE s.assistant_id = $1
        AND s.channel_type <> 'cron'
+       -- File chats never feed an assistant-wide playbook: their audience is the file's.
+       AND s.channel_type <> 'office_thread'
        AND sm.role IN ('user', 'assistant')
        AND sm.created_at > now() - ($2 || ' days')::interval
        ${excludeExternalPrincipalsSql('s.user_id')}

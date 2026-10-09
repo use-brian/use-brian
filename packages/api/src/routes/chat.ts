@@ -121,6 +121,16 @@ import type { WorkspaceSkillStore } from '../db/skill-store.js'
 import { deploymentCapabilities } from '../edition.js'
 import { buildWorkspaceNativeSlashCommands } from './native-slash-commands.js'
 import { connectorAuthorizationEntry } from '../agent-surface/connector-authorization.js'
+import { OFFICE_THREAD_CHANNEL_TYPE } from '../db/office-artifact-sessions.js'
+import {
+  bindOfficeLaneTools,
+  DEFAULT_OFFICE_LANE_DEPS,
+  officeLaneContextBlock,
+  officeLaneExecutionBounds,
+  resolveOfficeLane,
+  type OfficeLane,
+  type OfficeLaneDeps,
+} from './office-chat-lane.js'
 import { isAuthorityChangedError } from '../context-scope/authority-lease.js'
 import {
   createDeliveryAudienceAuthorizer,
@@ -438,6 +448,8 @@ type WebChatOptions = {
    *    fall back to the default prompt).
    */
   checkCreditBudget?: CreditBudgetGate
+  /** Office file-chat lane ports; production reads are the default. Test seam. */
+  officeLane?: OfficeLaneDeps
   publishSessionEvent?: PublishSessionEvent
   /**
    * Room human `@mention` badge signal (docs/plans/room-human-mentions.md
@@ -2996,6 +3008,37 @@ export function chatRoutes(options: WebChatOptions): Router {
         return
       }
 
+      // An Office file's shared thread runs the `office` lane: only a
+      // Comment/Edit sender may run a turn, and the turn is capped at the
+      // file (office.md "Brian conversation in the file").
+      let officeLane: OfficeLane | null = null
+      const officeLaneDeps = options.officeLane ?? DEFAULT_OFFICE_LANE_DEPS
+      if (session.channelType === OFFICE_THREAD_CHANNEL_TYPE) {
+        const admitted = await resolveOfficeLane({
+          userId: user.id,
+          sessionId: session.id,
+          selection: (req.body as { officeSelection?: unknown }).officeSelection,
+        }, officeLaneDeps)
+        if ('refused' in admitted) {
+          sendEvent('error', { code: admitted.refused.code, error: admitted.refused.error })
+          options.analytics?.logEvent({
+            userId: user.id,
+            assistantId: assistant.id,
+            sessionId: session.id,
+            eventName: 'chat_setup_error', channelType: 'web',
+            metadata: {
+              error_type: sanitize(admitted.refused.code),
+              stage: sanitize('session_binding'),
+              session_channel_type: sanitize(session.channelType),
+              session_app_origin: sanitize(session.appOrigin ?? ''),
+            },
+          })
+          res.end()
+          return
+        }
+        officeLane = admitted.lane
+      }
+
       let feedTurnContext: Awaited<ReturnType<typeof resolveFeedTurnContext>> = null
       try {
         feedTurnContext = await resolveFeedTurnContext(user.id, assistant.id, session, (req.body as { feedTarget?: unknown }).feedTarget)
@@ -3044,6 +3087,7 @@ export function chatRoutes(options: WebChatOptions): Router {
         },
         attribution: { billingUserId: user.id },
         sessionAuthority: session,
+        ...(officeLane ? officeLaneExecutionBounds(officeLane, user.id, officeLaneDeps) : {}),
       })
       const turnScope = resolvedExecution.turnScope
       const executionContext = resolvedExecution.executionContext
@@ -5287,6 +5331,7 @@ export function chatRoutes(options: WebChatOptions): Router {
           console.warn('[chat] kb-source scope injection failed:', err)
         }
       }
+      if (officeLane) privateRuntimeContextParts.push(officeLaneContextBlock(officeLane))
 
       // ── Host system-prompt addendum ──────────────────────────
       // A host may add a session-specific prompt block (e.g. a draft-session
@@ -5340,6 +5385,8 @@ export function chatRoutes(options: WebChatOptions): Router {
       if (requestedAppOrigin !== 'chat' && session.appOrigin !== 'chat') {
         allTools.delete('presentDocument')
       }
+      // The Office lane offers exactly the file-bound read and revise tools.
+      if (officeLane) bindOfficeLaneTools(allTools, options.tools, officeLane.artifact.id)
       allTools.set('saveMemory', saveMemory)
       allTools.set('getMemory', getMemory)
       allTools.set('deleteMemory', deleteMemory)

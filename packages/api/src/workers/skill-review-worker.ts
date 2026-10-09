@@ -350,6 +350,8 @@ export async function selectCandidateSessions(
        JOIN assistants a ON a.id = s.assistant_id
        WHERE s.last_active_at >= now() - ($1 || ' hours')::interval
          AND COALESCE(s.workspace_id, a.workspace_id) IS NOT NULL
+         -- File chats never induce workspace-wide skills: their audience is the file's.
+         AND s.channel_type IS DISTINCT FROM 'office_thread'
      )
      SELECT id           AS session_id,
             workspace_id,

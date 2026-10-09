@@ -222,7 +222,7 @@ describe('[COMP:api/live-work-roster] roster route', () => {
     expect(sessionsSql).toContain('COALESCE(a.icon_seed, 0)')
     expect(sessionsSql).toContain('s.app_origin')
     expect(sessionsSql).toContain('a.workspace_id = $1')
-    expect(sessionsSql).toContain(`NOT IN ('workflow', 'assistant-call')`)
+    expect(sessionsSql).toContain(`NOT IN ('workflow', 'assistant-call', 'office_thread')`)
     expect(sessionsSql).toContain(
       `pa.approval_payload->>'turnLeaseToken' = s.turn_lease_token::text`,
     )
