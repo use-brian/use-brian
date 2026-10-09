@@ -13,7 +13,7 @@ import { z } from 'zod'
 import { getDefaultAssistant, getUserAssistant, getWorkspacePrimaryAssistant, getUserProfilesByIds, updateUserLastSeenTz, resolveAssistantAccess } from '../db/users.js'
 import { charterNeedsIntake, createSaveCharterTool, CHARTER_INTAKE_ADDENDUM } from '../intake/charter-intake.js'
 import { resolvePresenceTimezone } from '../auth/client-timezone.js'
-import { createPersonalWebSession, findOrCreateSession, findSessionByChannel, findSessionById, addSessionMessage, readSessionMessageScopeSource, toStampedMessages, getSessionMessages, updateSessionStatus, updateSessionTitle, countSessionTurns, truncateMessagesFrom, getPreferredChannel, getSessionTopicLabels, isSharedChatSession, isSharedAudienceSession, isMultiParticipantSession, coalesceConsecutiveUserMessages, startTurnLease, touchTurnLease, isTurnLeaseSuperseded, releaseTurnLease, requestTurnCancel, reclaimStaleTurn, isTurnLeaseLive, TURN_HEARTBEAT_INTERVAL_MS, type SessionMessage } from '../db/sessions.js'
+import { createPersonalWebSession, findOrCreateSession, findSessionByChannel, findSessionById, addSessionMessage, readSessionMessageScopeSource, toStampedMessages, getSessionMessages, updateSessionStatus, updateSessionTitle, countSessionTurns, truncateMessagesFrom, getPreferredChannel, getSessionTopicLabels, isSharedChatSession, isSharedAudienceSession, coalesceConsecutiveUserMessages, startTurnLease, touchTurnLease, isTurnLeaseSuperseded, releaseTurnLease, requestTurnCancel, reclaimStaleTurn, isTurnLeaseLive, TURN_HEARTBEAT_INTERVAL_MS, type SessionMessage } from '../db/sessions.js'
 import { createTurnLedger } from '../ledger/recorder.js'
 import { getLedgerPayloadStore } from '../ledger/runtime.js'
 import { query, getPool } from '../db/client.js'
@@ -3257,7 +3257,7 @@ export function chatRoutes(options: WebChatOptions): Router {
             receivedAt: Date.now(),
             // Only where a session has more than one human in it — telling a
             // 1:1 assistant its own user's name adds nothing.
-            ...(isMultiParticipantSession(session) && user.name ? { from: user.name } : {}),
+            ...(turnPolicy.attribution && user.name ? { from: user.name } : {}),
           },
         })
         sendEvent('session', { sessionId: session.id })
@@ -4046,7 +4046,7 @@ export function chatRoutes(options: WebChatOptions): Router {
         // this also reaches the MODEL (see the sender-name resolution below):
         // without it "the user" is several people and the reply cannot tell
         // them apart.
-        senderUserId: isMultiParticipantSession(session) ? user.id : null,
+        senderUserId: turnPolicy.attribution ? user.id : null,
         scope: inputMessageScope,
       })
       // Reused room rows and regenerate/edit (including seeded kickoffs) are
@@ -4064,7 +4064,7 @@ export function chatRoutes(options: WebChatOptions): Router {
       if (!prePersistedUserMsg) {
         sendEvent('user_message_saved', {
           id: storedUserMsg.id,
-          ...(isMultiParticipantSession(session) ? { senderUserId: user.id } : {}),
+          ...(turnPolicy.attribution ? { senderUserId: user.id } : {}),
         })
         // Room human @mentions (T-H1/T-H2) — this is the single-assistant
         // addressed-and-runs-immediately case, and the FIRST POST of a
@@ -4238,12 +4238,12 @@ export function chatRoutes(options: WebChatOptions): Router {
        *  addressable personal thread: assistant-id → name, for labeling
        *  FOREIGN assistant turns at assembly (`toStampedMessages`
        *  `assistantVoices`) — the answering model must never mistake another
-       *  assistant's words for its own. The human-sender half stays
-       *  rooms-only (a personal doc thread has one human). */
+       *  assistant's words for its own. The human-sender half is every
+       *  workspace session (`attribution`): a personal thread has one human. */
       let roomAssistantVoices: { names: Map<string, string>; currentAssistantId: string } | undefined
-      if (isSharedChatSession(session) || isDocSurface(session)) {
+      if (turnPolicy.multiVoice) {
         try {
-          const senderIds = isSharedChatSession(session)
+          const senderIds = turnPolicy.attribution
             ? [
                 ...new Set(
                   dbMessages
@@ -4914,7 +4914,7 @@ export function chatRoutes(options: WebChatOptions): Router {
       // Shared-chat participants are application-derived runtime metadata.
       // They remain private even though doing so makes this system suffix
       // change as new participants appear.
-      if (isSharedChatSession(session) && sharedParticipants.length > 0) {
+      if (turnPolicy.attribution && sharedParticipants.length > 0) {
         privateRuntimeContextParts.push(
           [
             '# Shared chat',
@@ -7736,7 +7736,7 @@ export function chatRoutes(options: WebChatOptions): Router {
                   sessionId: session.id,
                   role: 'user',
                   content: [{ type: 'text', text: queuedInput.text }],
-                  ...(isMultiParticipantSession(session)
+                  ...(turnPolicy.attribution
                     ? { senderUserId: user.id }
                     : {}),
                   scope: inputMessageScope,

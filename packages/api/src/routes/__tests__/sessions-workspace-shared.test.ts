@@ -49,7 +49,8 @@ vi.mock('../../db/workspace-store.js', () => ({
 }))
 
 import { gateSessionRead } from '../sessions.js'
-import { isSharedChatSession, isMultiParticipantSession } from '../../db/sessions.js'
+import { isSharedChatSession } from '../../db/sessions.js'
+import { policyFor } from '../../session-kind.js'
 
 const STARTER = 'user-starter'
 const TEAMMATE = 'user-teammate'
@@ -141,14 +142,14 @@ describe('[COMP:api/sessions-workspace-list] shared-chat predicate scope', () =>
     const feedDraft = session({ mode: 'draft', appOrigin: null })
     expect(isSharedChatSession(docThread)).toBe(false)
     expect(isSharedChatSession(feedDraft)).toBe(false)
-    // They ARE multi-participant, so speaker labels still apply to them.
-    expect(isMultiParticipantSession(docThread)).toBe(true)
-    expect(isMultiParticipantSession(feedDraft)).toBe(true)
+    // They ARE workspace sessions, so speaker labels apply to them.
+    expect(policyFor(docThread).attribution).toBe(true)
+    expect(policyFor(feedDraft).attribution).toBe(true)
   })
 
   it('leaves a personal chat single-participant (no speaker labels)', () => {
     const personal = session({ visibility: 'owner', effectiveClearance: null })
-    expect(isMultiParticipantSession(personal)).toBe(false)
+    expect(policyFor(personal).attribution).toBe(false)
   })
 })
 

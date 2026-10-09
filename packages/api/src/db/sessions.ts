@@ -222,19 +222,6 @@ export function isSharedAudienceSession(s: Pick<SessionShape, 'visibility' | 'mo
   return s.visibility === 'workspace' || s.mode === 'draft'
 }
 
-/**
- * A session several humans share, so the model needs speaker labels to tell
- * "the user" apart: shared chats, feed drafts, and doc comment threads.
- */
-export function isMultiParticipantSession(s: SessionShape): boolean {
-  return (
-    isSharedChatSession(s) ||
-    s.mode === 'draft' ||
-    s.channelType === 'doc_thread' ||
-    s.channelType === 'feed_thread' ||
-    s.channelType === 'office_thread'
-  )
-}
 
 /** Storage-only delimiter for a thread-qualified session channel id. */
 const THREAD_SESSION_DELIMITER = ':thread:'

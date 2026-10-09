@@ -81,12 +81,13 @@ describe('[COMP:api/session-policy] sessionPolicy drift ledger', () => {
     }
   })
 
-  it('L8 attribution: threads stamp senders but names reach the model only in rooms', () => {
-    expect(policyFor(ROOM).attribution).toEqual({ stamp: true, namesReachModel: true })
-    for (const row of [DRAFT, DOC_THREAD, OFFICE, FEED_THREAD]) {
-      expect(policyFor(row).attribution).toEqual({ stamp: true, namesReachModel: false })
+  it('L8 attribution: every workspace session stamps senders and shows names to the model', () => {
+    for (const row of [ROOM, DRAFT, DOC_THREAD, OFFICE, FEED_THREAD]) {
+      expect(policyFor(row).attribution).toBe(true)
+      expect(policyFor(row).multiVoice).toBe(true)
     }
-    expect(policyFor(PERSONAL).attribution).toEqual({ stamp: false, namesReachModel: false })
+    expect(policyFor(PERSONAL).attribution).toBe(false)
+    expect(policyFor({ ...PERSONAL, appOrigin: 'doc' }).multiVoice).toBe(true)
   })
 
   it('L9 delivery: the ceiling keys on audience but recipientType keys on room', () => {

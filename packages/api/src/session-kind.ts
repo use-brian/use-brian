@@ -216,8 +216,18 @@ export type SessionPolicy = {
    * every message as addressed.
    */
   addressing: 'mention' | 'every_message'
-  /** Sender stamping and whether names / the participants block reach the model (L8). */
-  attribution: { stamp: boolean; namesReachModel: boolean }
+  /**
+   * Stamp each human message with its sender AND show the names (and the
+   * participants block) to the model (L8). Every workspace session: several
+   * people write there, and "the user" is not one person.
+   */
+  attribution: boolean
+  /**
+   * Several assistants may answer in this conversation, so foreign assistant
+   * turns are labeled at assembly: every workspace session, and the doc
+   * dock's per-turn-addressable personal thread.
+   */
+  multiVoice: boolean
   /** Memory sources a turn loads (D3, L16). */
   context: { personalMemory: boolean }
   /** Delivery ceiling and recipient type (L9). */
@@ -295,10 +305,8 @@ export function sessionPolicy(kind: SessionKind): SessionPolicy {
     post: room,
     admission: workspace ? 'room' : 'personal',
     addressing: workspace && (anchor === 'none' || anchor === 'channel') ? 'mention' : 'every_message',
-    attribution: {
-      stamp: room || draft || anchor === 'doc_thread' || anchor === 'feed_thread' || anchor === 'office_file',
-      namesReachModel: room,
-    },
+    attribution: workspace,
+    multiVoice: workspace || kind.surface === 'doc',
     context: { personalMemory: !workspace },
     deliveryCeiling: {
       ceiling: workspace ? 'audience' : 'owner',
