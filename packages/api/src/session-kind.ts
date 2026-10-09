@@ -359,23 +359,24 @@ export function policyFor(row: SessionKindRow): SessionPolicy {
 
 export type TransportPolicy = {
   /**
-   * Eligible as a user's preferred proactive delivery channel, per consumer
-   * (L15): `getPreferredChannel` / the workflow delivery-target list, and the
-   * recent-approval notification resolver.
+   * Can Brian push to this transport without an inbound message to answer
+   * (L15)? ONE answer for the user's preferred proactive channel, the
+   * workflow delivery-target list and the recent-approval notification
+   * resolver: exactly the transports the workflow delivery path
+   * (`workflow/channel-delivery.ts`) can push to.
    */
-  delivery: { preferredChannel: boolean; approvalNotify: boolean }
+  delivery: { proactive: boolean }
 }
 
-const PREFERRED_CHANNEL_TRANSPORTS: readonly Transport[] = ['telegram', 'slack', 'whatsapp', 'custom', 'feishu']
-const APPROVAL_NOTIFY_TRANSPORTS: readonly Transport[] = ['telegram', 'slack', 'whatsapp', 'msteams', 'feishu']
+/** Transports with a proactive push in `workflow/channel-delivery.ts`. */
+export const PROACTIVE_DELIVERY_TRANSPORTS = [
+  'telegram', 'slack', 'whatsapp', 'feishu', 'msteams', 'custom',
+] as const satisfies readonly Transport[]
 
 /** Answer the transport-level concerns for one transport. Pure. */
 export function transportPolicy(transport: Transport): TransportPolicy {
   return {
-    delivery: {
-      preferredChannel: PREFERRED_CHANNEL_TRANSPORTS.includes(transport),
-      approvalNotify: APPROVAL_NOTIFY_TRANSPORTS.includes(transport),
-    },
+    delivery: { proactive: (PROACTIVE_DELIVERY_TRANSPORTS as readonly Transport[]).includes(transport) },
   }
 }
 
@@ -418,6 +419,15 @@ export const sessionKindSql = {
    */
   assistantClearanceSourced: (alias: string): string =>
     `${alias}.visibility = 'workspace' AND ${alias}.channel_type <> 'office_thread' AND ${alias}.guest_session_token IS NULL`,
+  /** A session on a transport with a proactive push (`transportPolicy(t).delivery.proactive`). */
+  proactiveDeliveryTransport: (alias: string): string =>
+    `${alias}.channel_type IN (${sqlList(PROACTIVE_DELIVERY_TRANSPORTS)})`,
+  /** A workspace-audience row (rooms, drafts, anchored threads): `classifySession(row).audience`. */
+  workspaceAudience: (alias: string): string =>
+    `(${alias}.visibility = 'workspace' OR ${alias}.mode = 'draft')`,
+  /** Not the notification inbox (`anchor_kind='inbox'`, the `notifications` sentinel). */
+  notInbox: (alias: string): string =>
+    `${alias}.channel_id <> 'notifications'`,
   /** The Chat app's workspace room (web, workspace audience, opened from chat). */
   webRoom: (alias: string): string =>
     `${alias}.visibility = 'workspace' AND ${alias}.channel_type = 'web' AND ${alias}.app_origin = 'chat'`,

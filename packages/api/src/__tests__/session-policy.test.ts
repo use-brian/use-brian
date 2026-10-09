@@ -143,9 +143,15 @@ describe('[COMP:api/session-policy] sessionPolicy drift ledger', () => {
     expect('persistedRow' in policyFor(WORKFLOW)).toBe(false)
   })
 
-  it('L15 external channel sets: msteams and custom fall out of different lists', () => {
-    expect(transportPolicy('msteams').delivery).toEqual({ preferredChannel: false, approvalNotify: true })
-    expect(transportPolicy('custom').delivery).toEqual({ preferredChannel: true, approvalNotify: false })
+  it('L15 external channel sets: one proactive-delivery answer per transport', () => {
+    for (const t of ['telegram', 'slack', 'whatsapp', 'feishu', 'msteams', 'custom'] as const) {
+      expect(transportPolicy(t).delivery.proactive).toBe(true)
+    }
+    for (const t of ['web', 'discord', 'wechat', 'email', 'api'] as const) {
+      expect(transportPolicy(t).delivery.proactive).toBe(false)
+    }
+    expect(sessionKindSql.proactiveDeliveryTransport('s')).toContain("'msteams'")
+    expect(sessionKindSql.proactiveDeliveryTransport('s')).toContain("'custom'")
   })
 
   it('L16 shared audience: personal memory loads in every personal-audience row, groups included', () => {

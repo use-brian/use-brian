@@ -1,3 +1,4 @@
+import { sessionKindSql } from '../session-kind.js'
 import type pg from 'pg'
 import {
   bindScopeSource,
@@ -1901,8 +1902,9 @@ export async function getPreferredChannel(
     `SELECT channel_type as "channelType", channel_id as "channelId"
      FROM sessions
      WHERE assistant_id = $1 AND user_id = $2
-       AND channel_type IN ('telegram', 'slack', 'whatsapp', 'custom', 'feishu')
-       AND channel_id NOT IN ('notifications', 'default')
+       AND ${sessionKindSql.proactiveDeliveryTransport('sessions')}
+       AND ${sessionKindSql.notInbox('sessions')}
+       AND channel_id <> 'default'
        AND (channel_type != 'whatsapp' OR channel_id LIKE '%@%')
      ORDER BY last_active_at DESC
      LIMIT 1`,

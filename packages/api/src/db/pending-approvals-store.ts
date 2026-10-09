@@ -10,6 +10,7 @@
  * [COMP:api/pending-approvals-store]
  */
 
+import type { PROACTIVE_DELIVERY_TRANSPORTS } from '../session-kind.js'
 import type { PoolClient } from 'pg'
 import { createBrowserProfileStore, withBrowserProfileOwnerMutation } from './browser-profile-store.js'
 import { createBrowserSkillGrantInTransaction } from './browser-skill-grant-store.js'
@@ -111,7 +112,8 @@ export type ApprovalDecisionResolution =
   | 'always_allow'
   | 'always_deny'
 
-export type ApprovalDeliveryChannel = 'web' | 'telegram' | 'slack' | 'whatsapp' | 'msteams' | 'feishu'
+/** `web` (the in-app queue) or a transport with a proactive push (migration 740). */
+export type ApprovalDeliveryChannel = 'web' | (typeof PROACTIVE_DELIVERY_TRANSPORTS)[number]
 
 /**
  * Application-enforced taxonomy for the `kind` column (mig 137).
