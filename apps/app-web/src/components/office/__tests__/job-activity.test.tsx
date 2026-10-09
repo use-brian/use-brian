@@ -8,20 +8,32 @@ import { en } from "@/lib/i18n/dictionaries/en";
 import type { Dictionary } from "@/lib/i18n/dictionaries";
 import { OfficeJobActivity, OfficeJobActivityView, officeBrianScope } from "../job-activity";
 import { presentationFixture, uid } from "./editor-fixtures";
-import { getOfficeJob, listOfficeJobEvents, resumeOfficeGeneration, type OfficeJob } from "@/lib/office/api";
+import { resumeOfficeGeneration, type OfficeJob, type OfficeJobEvent } from "@/lib/office/api";
 
-import {attachOfficeMetadata} from "@/lib/office/metadata";
 import {resetSurfaceCache} from "@/lib/surface-cache";
 vi.mock("@/lib/workspace-context", () => ({useOptionalWorkspaceContext: () => ({workspaceId: "workspace-a", me: {id: "viewer-a"}})}));
-const bounded = <T extends object>(value:T):T => attachOfficeMetadata(value,30_000,performance.now(),"viewer-a");
-afterEach(() => resetSurfaceCache());
+afterEach(() => { resetSurfaceCache(); streams.map.clear(); });
 
 vi.mock("@/lib/office/api", async (importOriginal) => ({
   ...await importOriginal<typeof import("@/lib/office/api")>(),
-  getOfficeJob: vi.fn(() => new Promise(() => undefined)),
-  listOfficeJobEvents: vi.fn(async () => []),
   resumeOfficeGeneration:vi.fn(async()=>({artifactId:"draft",jobId:"job"})),
 }));
+
+// Job progress arrives on the per-job stream; tests drive a fake of it.
+const streams = vi.hoisted(() => ({ map: new Map<string, unknown>(), listeners: new Set<() => void>() }));
+vi.mock("@/lib/office/job-stream", async () => {
+  const React = await import("react");
+  const idle = { job: null, events: [], connection: "live", ended: null };
+  const read = (id?: string | null) => (id && streams.map.get(id)) || idle;
+  return {
+    readOfficeJobStream: read,
+    useOfficeJobStream: (id?: string | null) => React.useSyncExternalStore((listener: () => void) => { streams.listeners.add(listener); return () => { streams.listeners.delete(listener); }; }, () => read(id)),
+  };
+});
+function setStream(jobId: string, job: OfficeJob, events: OfficeJobEvent[] = []) {
+  streams.map.set(jobId, { job, events, connection: "live", ended: null });
+  for (const listener of streams.listeners) listener();
+}
 
 (globalThis as typeof globalThis & { IS_REACT_ACT_ENVIRONMENT: boolean }).IS_REACT_ACT_ENVIRONMENT = true;
 
@@ -54,8 +66,7 @@ const job = (status: OfficeJob["status"]): OfficeJob => ({
 describe("[COMP:app-web/office-iteration-panel] Office iteration panel", () => {
   beforeEach(() => {
     resetSurfaceCache();
-    vi.mocked(getOfficeJob).mockReset().mockImplementation(() => new Promise(() => undefined));
-    vi.mocked(listOfficeJobEvents).mockReset().mockImplementation(async () => bounded([]));
+    streams.map.clear();
   });
 
   it("uses family-neutral guidance and an accurate revision recovery path", () => {
@@ -86,7 +97,7 @@ describe("[COMP:app-web/office-iteration-panel] Office iteration panel", () => {
 
   it("offers explicit template selection and resumes the same artifact and job",async()=>{
     const paused={...job("needs_input"),errorCode:"template_ambiguous",canResumeTemplate:true,templateChoices:[{templateVersionId:"template-version",name:"Quarterly worksheet"}]};
-    vi.mocked(getOfficeJob).mockImplementation(async()=>bounded(paused));
+    setStream(paused.id,paused);
     vi.mocked(resumeOfficeGeneration).mockClear();
     const host=document.createElement("div");document.body.append(host);const root=createRoot(host);
     try {
@@ -199,7 +210,7 @@ describe("[COMP:app-web/office-iteration-panel] Office iteration panel", () => {
   });
 
   it.each(["failed", "completed"] as const)("retains failed instructions but clears successful ones: %s", async (status) => {
-    vi.mocked(getOfficeJob).mockImplementation(async () => bounded({ ...job(status), id: "revision-job" }));
+    setStream("revision-job", { ...job(status), id: "revision-job" });
     const host = document.createElement("div");
     document.body.append(host);
     const root = createRoot(host);
@@ -235,4 +246,31 @@ describe("[COMP:app-web/office-iteration-panel] Office iteration panel", () => {
     expect(html).not.toContain("unrecognized_keys");
     expect(html).not.toContain("slides.6.fields.7");
   });
+
+  it("labels a running job by its latest persisted step and spins only on a live connection", () => {
+    const steps = [{ id: "e1", seq: 1, code: "office.job.started", params: {}, safeNarration: null, createdAt: "2026-10-10T00:00:00Z" }];
+    const live = render(job("running"), { events: steps });
+    expect(live).toContain(en.office.eventStarted);
+    expect(live).toContain("animate-spin");
+    const dropped = render(job("running"), { events: steps, connection: "reconnecting" });
+    expect(dropped).toContain(en.office.jobReconnecting);
+    expect(dropped).not.toContain("animate-spin");
+    expect(dropped).not.toContain(en.office.iterationActiveHint);
+  });
+
+  it("renders the server narration for an unmapped step and omits a step with neither", () => {
+    const html = render(job("running"), { events: [
+      { id: "e1", seq: 1, code: "office.job.future_stage", params: {}, safeNarration: "Server step", createdAt: "2026-10-10T00:00:00Z" },
+      { id: "e2", seq: 2, code: "office.job.silent_stage", params: {}, safeNarration: null, createdAt: "2026-10-10T00:00:00Z" },
+    ] });
+    expect(html.split("Server step").length).toBeGreaterThan(1);
+    expect(html.match(/<li/g)).toHaveLength(1);
+  });
+
+  it("renders a skeleton, not text, before the stream's first frame", () => {
+    const html = render(null, { loading: true });
+    expect(html).toContain('data-office-job-skeleton="true"');
+    expect(html).not.toContain(en.office.brianEditHint);
+  });
 });
+

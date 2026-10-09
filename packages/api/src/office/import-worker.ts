@@ -24,6 +24,7 @@ export function createOfficeImportWorker(deps: OfficeImportWorkerDeps) {
       const [bytes, context] = await Promise.all([deps.readSource({ userId, workspaceId: job.workspaceId, assistantId: job.assistantId, fileId: brief.sourceFileId }), deps.context({ userId, artifactId: job.artifactId, templateVersionId: job.templateVersionId })])
       const result = brief.family === 'document' ? await importOfficeDocument(bytes, context) : brief.family === 'presentation' ? await importOfficePresentation(bytes, context) : await importOfficeSpreadsheet(bytes, context)
       if (!result.ok || !result.snapshot) throw new Error(result.diagnostics.map((item) => `${item.path}: ${item.message}`).join('; ') || 'office_import_failed')
+      await deps.store.appendEvent({ userId, jobId: job.id, workspaceId: job.workspaceId, code: 'office.job.import_parsed', values: { family: brief.family }, actorType: 'system', safeNarration: 'File read' })
       await deps.initialize({ userId, artifactId: job.artifactId, snapshot: result.snapshot })
       await deps.store.appendEvent({ userId, jobId: job.id, workspaceId: job.workspaceId, code: 'office.job.completed', values: { family: brief.family }, actorType: 'system', safeNarration: 'Import completed' })
       await deps.store.finish({ userId, jobId: job.id, leaseToken, status: 'completed', stage: 'completed' })

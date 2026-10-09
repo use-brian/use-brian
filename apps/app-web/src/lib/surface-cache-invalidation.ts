@@ -42,6 +42,7 @@ import { GOAL_REFRESH_EVENT } from "@/lib/goal-events";
 import { WORKSPACE_IDENTITY_REFRESH_EVENT } from "@/lib/workspace-identity-events";
 import {
   LIVE_REFRESH_EVENT,
+  OFFICE_REFRESH_EVENT,
   SCHEDULED_JOB_REFRESH_EVENT,
   SKILL_REFRESH_EVENT,
 } from "@/lib/workspace-events";
@@ -174,6 +175,13 @@ export function staleMarksFor(event: string, workspaceId: string): string[] {
       // the acting tab could bump; the same-tab `requestGoalRefresh` now
       // lands here too, so one path serves both legs.
       return [`goals:${workspaceId}`, `triage:${workspaceId}`, `goal:${workspaceId}:`, `feed-collaboration:${workspaceId}`];
+    case OFFICE_REFRESH_EVENT:
+      // The `office` primitive: a job changed status or recorded progress.
+      // The Office list (`office:<wid>:<viewer>:<view>`) and the template
+      // library (`office-templates:<wid>:<viewer>`) revalidate behind their
+      // paint instead of waiting for metadata renewal. Open editors follow
+      // their own job on the per-job stream.
+      return [`office:${workspaceId}:`, `office-templates:${workspaceId}:`];
     default:
       return [];
   }
@@ -191,6 +199,7 @@ export const SURFACE_CACHE_SPINE_EVENTS: readonly string[] = [
   INBOX_REFRESH_EVENT,
   HOME_APPS_REFRESH_EVENT,
   GOAL_REFRESH_EVENT,
+  OFFICE_REFRESH_EVENT,
   WORKSPACE_IDENTITY_REFRESH_EVENT,
   "brian:organization-changed",
 ];

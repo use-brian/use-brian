@@ -11,12 +11,11 @@ import Link from "next/link";
 import { SearchableSelect } from "@/components/ui/searchable-select";
 import { useT } from "@/lib/i18n/client";
 import { cn } from "@/lib/utils";
-import { getOfficeJob, listOfficeJobEvents, officeJobFailureKind, resumeOfficeGeneration, steerOfficeJob, OfficeApiError, type OfficeJob, type OfficeJobEvent } from "@/lib/office/api";
+import { officeJobFailureKind, resumeOfficeGeneration, steerOfficeJob, type OfficeJob, type OfficeJobEvent } from "@/lib/office/api";
+import { readOfficeJobStream, useOfficeJobStream, type OfficeJobConnection } from "@/lib/office/job-stream";
+import { officeEventLabel, officeJobStateLabel } from "@/lib/office/job-labels";
 
-import { useOfficeMetadataResource, useOfficePanelIdentity } from "@/lib/office/surface-cache";
-import { officeMetadataRemaining } from "@/lib/office/metadata";
-import { officePanelCacheKey } from "@/lib/surface-prefetch";
-import { invalidateSurfaceCache, readSurfaceCache } from "@/lib/surface-cache";
+import { useOfficePanelIdentity } from "@/lib/office/surface-cache";
 
 const TERMINAL = new Set(["completed", "failed", "cancelled"]);
 
@@ -65,18 +64,16 @@ export function OfficeJobActivity(props: OfficeJobActivityProps) {
   return <OfficeJobActivityContent key={`${identity.prefix}:${props.snapshot?.artifactId ?? props.jobId ?? "new"}`} {...props} {...identity}/>;
 }
 
-function OfficeJobActivityContent({workspaceId,jobId, snapshot, targetIds, canRequestRevision, requestDisabledReason, onRequestRevision, onRevisionCompleted, prefix, viewerId}: OfficeJobActivityProps & {prefix: string | null; viewerId: string}) {
+function OfficeJobActivityContent({workspaceId,jobId, snapshot, targetIds, canRequestRevision, requestDisabledReason, onRequestRevision, onRevisionCompleted, prefix}: OfficeJobActivityProps & {prefix: string | null; viewerId: string}) {
   const [trackedJobId, setTrackedJobId] = useState(jobId);
   const [revisionJobId, setRevisionJobId] = useState<string | null>(null);
-  const jobKey = officePanelCacheKey(prefix, "job", trackedJobId);
-  const eventKey = officePanelCacheKey(prefix, "job-events", trackedJobId);
-  const jobRead = useOfficeMetadataResource(jobKey, viewerId, () => getOfficeJob(trackedJobId!));
-  const eventRead = useOfficeMetadataResource(eventKey, viewerId, () => listOfficeJobEvents(trackedJobId!, 0));
-  const job = jobRead.data ?? null;
-  const events = eventRead.data ?? [];
-  const available = Boolean(job && eventRead.data);
+  // Job progress arrives by push on the shared per-job stream; nothing polls.
+  const stream = useOfficeJobStream(trackedJobId);
+  const job = stream.job;
+  const events = stream.events;
+  const available = Boolean(job);
   const owner = useRef<object | null>(null);
-  useLayoutEffect(() => { owner.current = {}; return () => { owner.current = null; }; }, [jobKey, available]);
+  useLayoutEffect(() => { owner.current = {}; return () => { owner.current = null; }; }, [trackedJobId, available]);
   const hadProjection = useRef(false);
   const [instruction, setInstruction] = useState("");
   const [submitting, setSubmitting] = useState(false);
@@ -90,6 +87,7 @@ function OfficeJobActivityContent({workspaceId,jobId, snapshot, targetIds, canRe
     if (!revisionJobId) setTrackedJobId(jobId);
   }, [jobId, revisionJobId]);
 
+  // A revoked stream clears the job, and with it every derived pending state.
   useLayoutEffect(() => {
     if (available) hadProjection.current = true;
     else if (hadProjection.current) {
@@ -102,16 +100,7 @@ function OfficeJobActivityContent({workspaceId,jobId, snapshot, targetIds, canRe
   }, [available]);
 
   useEffect(() => {
-    if (!trackedJobId || !prefix || job && TERMINAL.has(job.status)) return;
-    const error = jobRead.error ?? eventRead.error;
-    if (error instanceof OfficeApiError && ([401,403,404].includes(error.status) || error.message === "office_projection_changed")) return;
-    const timer = setTimeout(() => { void Promise.all([jobRead.refresh(), eventRead.refresh()]); }, error ? 3000 : 1500);
-    return () => clearTimeout(timer);
-  }, [trackedJobId, prefix, job, jobRead.error, eventRead.error, jobRead.refresh, eventRead.refresh]);
-
-  useEffect(() => {
-    if (!available || !job || !trackedJobId || !TERMINAL.has(job.status) || trackedJobId !== revisionJobId || completedRevisionIds.current.has(trackedJobId)) return;
-    if (!jobKey || !eventKey || readSurfaceCache(jobKey).data !== job || readSurfaceCache(eventKey).data !== eventRead.data || officeMetadataRemaining(job, viewerId) <= 0 || officeMetadataRemaining(eventRead.data, viewerId) <= 0) return;
+    if (!job || !trackedJobId || !TERMINAL.has(job.status) || trackedJobId !== revisionJobId || completedRevisionIds.current.has(trackedJobId)) return;
     completedRevisionIds.current.add(trackedJobId);
     if (job.status === "completed") {
       const proposed = events.some(event => event.code === "office.job.completed" && event.params.proposal === true);
@@ -119,7 +108,7 @@ function OfficeJobActivityContent({workspaceId,jobId, snapshot, targetIds, canRe
       setInstruction("");
       void Promise.resolve(onRevisionCompletedRef.current()).catch(() => undefined);
     } else setFeedback("failed");
-  }, [available, job, eventRead.data, trackedJobId, revisionJobId, jobKey, eventKey, viewerId]);
+  }, [job, events, trackedJobId, revisionJobId]);
 
   const active = Boolean(job && !TERMINAL.has(job.status));
   const revisionActive = Boolean(revisionJobId && trackedJobId === revisionJobId && (!job || job.id !== trackedJobId || active));
@@ -128,8 +117,7 @@ function OfficeJobActivityContent({workspaceId,jobId, snapshot, targetIds, canRe
     event.preventDefault();
     const value = instruction.trim();
     const started = owner.current;
-    const current = () => Boolean(started && started === owner.current && prefix && (!trackedJobId || jobKey && eventKey &&
-      officeMetadataRemaining(readSurfaceCache(jobKey).data, viewerId) > 0 && officeMetadataRemaining(readSurfaceCache(eventKey).data, viewerId) > 0));
+    const current = () => Boolean(started && started === owner.current && prefix && readOfficeJobStream(trackedJobId).ended !== "revoked");
     if (!current() || !value || submitting || revisionActive || job?.status === "needs_input" && job.errorCode !== "material_fact_missing") return;
     setSubmitting(true);
     try {
@@ -152,14 +140,8 @@ function OfficeJobActivityContent({workspaceId,jobId, snapshot, targetIds, canRe
       setFeedback(result.mode === "proposal" ? "proposal" : "queued");
       setRevisionJobId(result.jobId);
       setTrackedJobId(result.jobId);
-    } catch (error) {
-      if (current()) {
-        if (error instanceof OfficeApiError && [401,403,404].includes(error.status)) {
-          if (jobKey) invalidateSurfaceCache(jobKey);
-          if (eventKey) invalidateSurfaceCache(eventKey);
-        }
-        setFeedback("failed");
-      }
+    } catch {
+      if (current()) setFeedback("failed");
     } finally {
       if (current()) setSubmitting(false);
     }
@@ -167,16 +149,14 @@ function OfficeJobActivityContent({workspaceId,jobId, snapshot, targetIds, canRe
 
   async function resumeTemplate() {
     const started=owner.current;
-    const current=()=>Boolean(started && started===owner.current && jobKey && eventKey
-      && officeMetadataRemaining(readSurfaceCache(jobKey).data,viewerId)>0
-      && officeMetadataRemaining(readSurfaceCache(eventKey).data,viewerId)>0);
+    const current=()=>Boolean(started && started===owner.current && readOfficeJobStream(trackedJobId).ended !== "revoked");
     if(!current() || submitting || !job?.canResumeTemplate || !job.templateChoices?.some(choice=>choice.templateVersionId===templateVersionId))return;
     setSubmitting(true);
     try {
       await resumeOfficeGeneration({artifactId:job.artifactId,jobId:job.id,templateVersionId});
       if(!current())return;
+      // The stream delivers the resumed status and its event; no refetch.
       setFeedback("idle");setTemplateVersionId("");
-      await Promise.all([jobRead.refresh(),eventRead.refresh()]);
       if(current())await onRevisionCompletedRef.current();
     } catch {
       if(current())setFeedback("failed");
@@ -184,8 +164,9 @@ function OfficeJobActivityContent({workspaceId,jobId, snapshot, targetIds, canRe
   }
 
   return <OfficeJobActivityView
-    job={available ? job : null}
-    events={available ? events : []}
+    job={job}
+    events={events}
+    connection={stream.connection}
     loading={Boolean(trackedJobId && !job)}
     instruction={instruction}
     scope={officeBrianScope(snapshot, targetIds)}
@@ -206,6 +187,7 @@ function OfficeJobActivityContent({workspaceId,jobId, snapshot, targetIds, canRe
 export function OfficeJobActivityView({
   job,
   events,
+  connection = "live",
   loading = false,
   instruction,
   scope,
@@ -223,6 +205,7 @@ export function OfficeJobActivityView({
 }: {
   job: OfficeJob | null;
   events: OfficeJobEvent[];
+  connection?: OfficeJobConnection;
   loading?: boolean;
   instruction: string;
   scope: OfficeBrianScope;
@@ -263,37 +246,22 @@ export function OfficeJobActivityView({
     : null;
   const disabled = !instruction.trim() || submitting || revisionActive || inputNeeded && job?.errorCode !== "material_fact_missing" || !steering && !canRequestRevision;
 
-  const eventLabel = (code: string): string => ({
-    "office.job.queued": t.eventQueued,
-    "office.job.authority_resolved": t.eventAuthority,
-    "office.job.template_selected": t.eventTemplate,
-    "office.job.grounding_started": t.eventGrounding,
-    "office.job.reference_url_inspected": t.eventReferenceUrl,
-    "office.job.context_grounded": t.eventContextGrounded,
-    "office.job.claim_plan_ready": t.eventClaims,
-    "office.job.objects_constructed": t.eventObjects,
-    "office.job.media_processed": t.eventMedia,
-    "office.job.fit_validated": t.eventFit,
-    "office.job.candidate_validated": t.eventValidated,
-    "office.job.export_reopened": t.eventExport,
-    "office.job.completed": t.eventCompleted,
-    "office.job.needs_input": t.eventNeedsInput,
-    "office.job.failed": t.eventFailed,
-    "office.job.cancelled": t.eventCancelled,
-    "office.job.steering_applied": t.eventSteering,
-    "office.job.template_resumed": t.templateGenerationResumed,
-  })[code] ?? t.running;
-
-  const statusLabel = job?.status === "completed" ? t.completed : failed ? failureTitle : job?.status === "cancelled" ? t.cancelled : job?.status === "queued" ? t.queued : job?.status === "needs_input" ? t.eventNeedsInput : t.running;
+  const latestEvent = events.at(-1) ?? null;
+  // Persisted status plus latest persisted event; nothing inferred (office.md "No generic Working").
+  const statusLabel = failed ? failureTitle : officeJobStateLabel(t, job?.status, latestEvent);
+  const live = connection === "live";
+  const inFlight = job?.status === "queued" || job?.status === "running";
 
   const question = templateNeeded ? t.templateSelectionQuestion : job?.inputQuestion ?? String([...events].reverse().find(event => event.code === "office.job.needs_input" && typeof event.params.question === "string")?.params.question ?? t.eventNeedsInput);
-  const messageText = failed ? failureBody : inputNeeded ? templateNeeded ? t.templateSelectionHint : t.generationAnswerHint : active || loading ? revisionActive ? t.brianRevisionQueued : t.iterationActiveHint : t.brianEditHint;
+  const connectionNote = job && !live ? connection === "offline" ? t.jobOffline : t.jobReconnecting : null;
+  const messageText = failed ? failureBody : inputNeeded ? templateNeeded ? t.templateSelectionHint : t.generationAnswerHint
+    : connectionNote ?? (inFlight ? revisionActive ? t.brianRevisionQueued : t.iterationActiveHint : loading ? null : t.brianEditHint);
   const showFeedback = Boolean(feedbackLabel) && feedbackLabel !== messageText && !(failed && feedback === "failed");
   const feedbackIsError = feedback === "failed" || feedback === "conflict";
   const footnote = !steering ? revisionActive ? t.brianRevisionInFlight : !canRequestRevision ? requestDisabledReason : undefined : undefined;
   const runIcon = job?.status === "completed" ? <CheckCircle2 className="size-3 shrink-0 text-emerald-600" aria-hidden />
     : failed ? <CircleAlert className="size-3 shrink-0 text-destructive" aria-hidden />
-    : <CircleDashed className={cn("size-3 shrink-0", active && !inputNeeded && "animate-spin [animation-duration:3s]")} aria-hidden />;
+    : <CircleDashed className={cn("size-3 shrink-0", inFlight && live && "animate-spin [animation-duration:3s]")} aria-hidden />;
 
   // Same chrome as the rest of the app's chat: an assistant message row
   // (avatar + prose, activity receipt above the text, as in the dock's
@@ -312,17 +280,23 @@ export function OfficeJobActivityView({
               <ChevronRight className="size-3 shrink-0 transition-transform group-open/run:rotate-90" aria-hidden />
               {runIcon}
               <span className="truncate">{t.runActivity}</span>
-              <span aria-hidden>·</span>
-              <span className={cn("truncate", failed && "text-destructive")}>{statusLabel}</span>
+              {statusLabel ? <>
+                <span aria-hidden>·</span>
+                <span className={cn("truncate", failed && "text-destructive")}>{statusLabel}</span>
+              </> : null}
             </summary>
             {events.length ? <ol className="mt-1.5 flex flex-col gap-1.5 border-l border-border/60 pl-3">
-              {events.map((event) => <li key={event.id} className="flex min-w-0 items-baseline justify-between gap-2 leading-snug text-muted-foreground">
-                <span className="min-w-0 break-words">{eventLabel(event.code)}</span>
-                <time className="shrink-0 text-[10px] tabular-nums text-muted-foreground/60">{new Date(event.createdAt).toLocaleTimeString()}</time>
-              </li>)}
+              {events.flatMap((event) => {
+                const label = officeEventLabel(t, event);
+                return label ? [<li key={event.id} className="flex min-w-0 items-baseline justify-between gap-2 leading-snug text-muted-foreground">
+                  <span className="min-w-0 break-words">{label}</span>
+                  <time className="shrink-0 text-[10px] tabular-nums text-muted-foreground/60">{new Date(event.createdAt).toLocaleTimeString()}</time>
+                </li>] : [];
+              })}
             </ol> : null}
           </details> : null}
-          <p role={failed ? "alert" : undefined} className={cn("break-words text-[14px] leading-[1.6]", failed ? "text-destructive" : "text-foreground")}>{messageText}</p>
+          {messageText ? <p role={failed ? "alert" : connectionNote ? "status" : undefined} className={cn("break-words text-[14px] leading-[1.6]", failed ? "text-destructive" : connectionNote ? "text-muted-foreground" : "text-foreground")}>{messageText}</p>
+            : <div data-office-job-skeleton="true" aria-hidden className="h-4 w-40 animate-pulse rounded bg-muted" />}
           {inputNeeded ? <div className="space-y-3 rounded-xl border border-border bg-muted/30 p-3 text-sm">
             <p role="status" className="leading-relaxed">{question}</p>
             {templateNeeded ? job?.canResumeTemplate ? <>

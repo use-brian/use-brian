@@ -11,9 +11,19 @@ import type { OfficeGenerationEventRow, OfficeGenerationJobRow } from '../db/off
 export type OfficeJobsRouteDeps = {
   get(userId: string, jobId: string): Promise<OfficeGenerationJobRow | null>
   events(userId: string, jobId: string, afterSeq: number): Promise<OfficeGenerationEventRow[]>
+  latestEvent?(userId: string, jobId: string): Promise<OfficeGenerationEventRow | null>
   steer(params: { userId: string; workspaceId: string; jobId: string; instruction: string }): Promise<{ id: string }>
   wake?(userId: string): void
   cancel(userId: string, jobId: string): Promise<boolean>
+}
+
+/** The one job body every reader sees: `GET /jobs/:jobId` and the stream's `job` frame. */
+export async function officeJobBody(userId: string, job: OfficeGenerationJobRow, latestEvent?: OfficeGenerationEventRow | null) {
+  const {errorDetail: _privateDetail,...visibleJob} = job
+  const recovery = job.status === 'needs_input' && job.errorCode === 'template_ambiguous'
+    ? await readOfficeGenerationRecovery(userId,job.artifactId,job.id) : undefined
+  return {...visibleJob,inputQuestion:officeGenerationInputQuestion(job),...recovery, importDiagnostics: officeImportDiagnostics(job.checkpoint),
+    latestEvent: latestEvent ? {code: latestEvent.code, safeNarration: latestEvent.safeNarration} : null}
 }
 
 export function officeJobRoutes(deps: OfficeJobsRouteDeps): Router {
@@ -21,10 +31,7 @@ export function officeJobRoutes(deps: OfficeJobsRouteDeps): Router {
   router.get('/jobs/:jobId', officeMetadataRoute(async (req, userId) => {
     const job = await deps.get(userId, String(req.params.jobId))
     if (!job) return {status:404,body:{ error: 'Office job not found' }}
-    const {errorDetail: _privateDetail,...visibleJob} = job
-    const recovery = job.status === 'needs_input' && job.errorCode === 'template_ambiguous'
-      ? await readOfficeGenerationRecovery(userId,job.artifactId,job.id) : undefined
-    return {workspaceId:job.workspaceId,body:{job:{...visibleJob,inputQuestion:officeGenerationInputQuestion(job),...recovery, importDiagnostics: officeImportDiagnostics(job.checkpoint)}}}
+    return {workspaceId:job.workspaceId,body:{job:await officeJobBody(userId,job,await deps.latestEvent?.(userId,job.id))}}
   }))
 
   router.get('/jobs/:jobId/events', officeMetadataRoute(async (req, userId) => {

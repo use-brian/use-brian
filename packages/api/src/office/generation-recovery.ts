@@ -1,6 +1,7 @@
 /** Explicit template selection for an uninitialized generation draft.
  * [COMP:api/office-generation-recovery] */
 import { canRead, scopeGrantContains, OfficeGenerationTemplateSelection, type OfficeTemplateChoice } from '@use-brian/core'
+import {dispatchOfficeJobLocal} from './job-event-bus.js'
 import { getAppPool, applyRLSGucs, rollbackAndRelease } from '../db/client.js'
 import { defaultOfficeDbQuery, type OfficeDbQuery } from '../db/office-artifacts.js'
 import { createOfficeGenerationStore, type OfficeGenerationJobRow } from '../db/office-generation.js'
@@ -109,6 +110,7 @@ export async function resumeOfficeGeneration(userId: string, raw: unknown) {
     await createOfficeGenerationStore(query).appendEvent({userId,jobId:input.jobId,workspaceId:root.workspaceId,
       code:'office.job.template_resumed',values:{templateVersionId:input.templateVersionId},actorType:'user',actorUserId:userId})
     await client.query('COMMIT')
+    dispatchOfficeJobLocal({jobId:input.jobId,workspaceId:root.workspaceId})
     return {artifactId:input.artifactId,jobId:input.jobId}
   } finally { await rollbackAndRelease(client) }
 }

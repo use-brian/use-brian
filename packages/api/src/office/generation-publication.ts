@@ -1,5 +1,6 @@
 /** Office-owned staging + atomic app-role publication. Never root-file admission. */
 import { createHash, randomUUID } from 'node:crypto'
+import {dispatchOfficeJobLocal} from './job-event-bus.js'
 import type { PoolClient } from 'pg'
 import { assertOfficeArtifactSnapshot, officeStateVector, snapshotToYDoc, type DocumentSnapshot } from '@use-brian/office-model'
 import { applyRLSGucs, getAppPool, rollbackAndRelease } from '../db/client.js'
@@ -103,6 +104,7 @@ export async function publishPromptOnlyDocument(params:{job:OfficeGenerationJobR
     await createOfficeGenerationStore(queryFor(client,actor)).appendEvent({userId:actor,jobId:job.id,workspaceId:job.workspaceId,
       code:'office.job.completed',values:{artifactId:job.artifactId,version:version.version},actorType:'system',safeNarration:'Completed'})
     committing=true;await client.query('COMMIT');committed=true
+    dispatchOfficeJobLocal({jobId:job.id,workspaceId:job.workspaceId})
     return version
   } finally {
     if(client) await rollbackAndRelease(client)

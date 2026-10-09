@@ -610,6 +610,8 @@ import { PDF_SESSION_FILE_METADATA } from './office/pdf-session-assets.js'
 import { officeArtifactRoutes } from './routes/office-artifacts.js'
 import { officePdfSessionRoutes } from './routes/office-pdf-sessions.js'
 import { officeJobRoutes } from './routes/office-jobs.js'
+import { officeJobStreamRead, officeJobStreamRoutes } from './routes/office-job-stream.js'
+import { startOfficeJobEventBus } from './office/job-event-bus.js'
 import { officeTemplateRoutes } from './routes/office-templates.js'
 import { createOfficeCommentAnchorWriter } from './office/comment-anchor-storage.js'
 import { createOfficeCommentVersionResolver } from './office/comment-version.js'
@@ -3041,6 +3043,7 @@ export async function bootOpenApi(opts: BootOpenApiOptions): Promise<BootResult>
     resolveAccess: resolveOfficeAccess,
     createJob: officeGenerationStore.create,
     latestJob: officeGenerationStore.latestForArtifact,
+    latestJobEvent: officeGenerationStore.latestEvent,
     getSnapshot: officeLiveStore.get,
     wakeGeneration(userId) { wakeOfficeGeneration?.(userId) },
   })
@@ -7006,6 +7009,7 @@ export async function bootOpenApi(opts: BootOpenApiOptions): Promise<BootResult>
   app.use('/api/office', requireAuth(env.JWT_SECRET), officeJobRoutes({
     get: officeGenerationStore.get,
     events: officeGenerationStore.listEvents,
+    latestEvent: officeGenerationStore.latestEvent,
     steer: officeGenerationStore.steer,
     wake: userId => wakeOfficeGeneration?.(userId),
     cancel: officeGenerationStore.cancel,
@@ -7577,6 +7581,17 @@ export async function bootOpenApi(opts: BootOpenApiOptions): Promise<BootResult>
       while (await officeTemplateCompileWorker(userId)) { /* drain eligible template compilations for this member */ }
     })().catch((error) => console.error('[office-template-compile-worker]', error))
   }
+  // Per-job progress stream (office.md "Live job progress"). Mounted after the
+  // wakers so a stalled job resumes for its initiator when anyone looks at it.
+  startOfficeJobEventBus()
+  app.use('/api/office', requireAuth(env.JWT_SECRET), officeJobStreamRoutes({
+    read: officeJobStreamRead(officeGenerationStore),
+    wake: job => {
+      if (job.jobKind === 'import') wakeImport(job.initiatedByUserId)
+      else if (job.jobKind === 'template_compile') wakeTemplateCompile(job.initiatedByUserId)
+      else if (job.jobKind === 'create' || job.jobKind === 'revise') wakeOfficeGeneration?.(job.initiatedByUserId)
+    },
+  }))
   const retryOfficeTemplateImport = createTemplateImportRecovery({
     getJob: officeGenerationStore.get,
     getArtifact: officeArtifactStore.get,

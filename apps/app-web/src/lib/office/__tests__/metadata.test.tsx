@@ -89,8 +89,6 @@ describe('[COMP:app-web/office-surface-cache] bounded Office metadata',()=>{
     ['sharing',()=>api.getOfficeSharing('artifact-a'),{defaultWorkspaceRole:'comment',canManage:true,grants:[],members:[]}],
     ['templates',()=>api.listOfficeTemplates('workspace-a'),{templates:[{id:'template-a'}]}],
     ['routing',()=>api.getOfficeTemplateRouting('template-a'),{routing:{fields:[]}}],
-    ['job',()=>api.getOfficeJob('job-a'),{job:{id:'job-a'}}],
-    ['events',()=>api.listOfficeJobEvents('job-a'),{events:[{seq:1}]}],
   ] as const)('retains a bounded lifetime on %s without serializing it',async(_name,read,body)=>{
     state.fetch.mockResolvedValue(response(body));const result=await read();
     expect(officeMetadataRemaining(result,state.viewer)).toBeGreaterThan(0);
