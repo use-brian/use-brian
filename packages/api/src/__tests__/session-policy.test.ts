@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest'
 import { isAttendedTurn } from '@use-brian/core'
-import { feedAnchoredRead, policyFor, transportPolicy, type SessionKindRow } from '../session-kind.js'
+import { feedAnchoredRead, policyFor, sessionKindSql, transportPolicy, type SessionKindRow } from '../session-kind.js'
 
 /**
  * One case per drift row of docs/plans/unified-sessions.md section 2.2.
@@ -97,10 +97,14 @@ describe('[COMP:api/session-policy] sessionPolicy drift ledger', () => {
     expect(policyFor(PERSONAL).deliveryCeiling).toEqual({ ceiling: 'owner', recipientType: 'individual' })
   })
 
-  it('L10 clearance: a recompute overwrites anchor-sourced clearances', () => {
+  it('L10 clearance: an assistant recompute never overwrites an anchor-sourced clearance', () => {
     const office = policyFor(OFFICE)
     expect(office.clearanceSource).toBe('anchor')
-    expect(office.clearanceRecompute).toBe(true)
+    expect(office.clearanceRecompute).toBe(false)
+    expect(policyFor(ROOM).clearanceRecompute).toBe(true)
+    const sql = sessionKindSql.assistantClearanceSourced('s')
+    expect(sql).toContain("s.channel_type <> 'office_thread'")
+    expect(sql).toContain('s.guest_session_token IS NULL')
   })
 
   it('L11 lifecycle: admins may rename drafts and rooms but delete only rooms', () => {

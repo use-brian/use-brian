@@ -275,7 +275,12 @@ export type SessionPolicy = {
   createAdmission: boolean
   /** Where `effective_clearance` comes from (D10, L10). */
   clearanceSource: 'assistant' | 'anchor'
-  /** Does an assistant clearance recompute overwrite this row (L10)? */
+  /**
+   * Does an assistant clearance recompute overwrite this row (L10)? Only
+   * assistant-sourced workspace rows (`sessionKindSql.assistantClearanceSourced`;
+   * a guest doc thread is anchor-sourced too, which only the SQL can see
+   * until the `clearance_source` column lands).
+   */
   clearanceRecompute: boolean
 }
 
@@ -338,7 +343,7 @@ export function sessionPolicy(kind: SessionKind): SessionPolicy {
     compaction: kind.transport === 'web' ? 'context_pressure' : 'idle_tiered',
     createAdmission: room,
     clearanceSource: anchor === 'office_file' ? 'anchor' : 'assistant',
-    clearanceRecompute: workspace,
+    clearanceRecompute: workspace && anchor !== 'office_file',
   }
 }
 
@@ -389,6 +394,14 @@ export function transportPolicy(transport: Transport): TransportPolicy {
  * alias. Kept here so the SQL and the TypeScript classifier change together.
  */
 export const sessionKindSql = {
+  /**
+   * Workspace rows whose `effective_clearance` is derived from the ASSISTANT,
+   * so an assistant clearance change recomputes them (L10, D10). Excludes the
+   * anchor-sourced rows: an Office file's thread reads at the file's
+   * sensitivity, and a guest doc thread on a public page reads at `public`.
+   */
+  assistantClearanceSourced: (alias: string): string =>
+    `${alias}.visibility = 'workspace' AND ${alias}.channel_type <> 'office_thread' AND ${alias}.guest_session_token IS NULL`,
   /** The Chat app's workspace room (web, workspace audience, opened from chat). */
   webRoom: (alias: string): string =>
     `${alias}.visibility = 'workspace' AND ${alias}.channel_type = 'web' AND ${alias}.app_origin = 'chat'`,
