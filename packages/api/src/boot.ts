@@ -8364,6 +8364,7 @@ export async function bootOpenApi(opts: BootOpenApiOptions): Promise<BootResult>
     .catch((err) => console.error('[boot] deferred confirmation cleanup failed:', err))
 
   const sessionResumeReplay = createSessionResumeReplay({
+    configuredProviders,
     provider,
     resolveWorkspaceCustomLlm,
     resolveWorkspaceByoGeminiKey,

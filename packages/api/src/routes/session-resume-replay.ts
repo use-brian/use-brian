@@ -25,10 +25,13 @@
  * [COMP:brain/session-resume-worker]
  */
 
+import { renderCharterBlock, resolveCharter } from '@use-brian/shared'
+import { runAssistantTurn, turnUsageIdentity } from '../turn/kernel.js'
+import { resolveTurnBilling } from '../turn/billing.js'
+import { waitForTurnSlot } from '../turn/lease.js'
 import { createTurnLedger } from '../ledger/recorder.js'
 import { getLedgerPayloadStore } from '../ledger/runtime.js'
 import {
-  queryLoop,
   calculateCost,
   ensureToolResultPairing,
   SensitivityAccumulator,
@@ -84,6 +87,8 @@ export type SessionResumeReplayDeps = {
   provider: LLMProvider
   /** Resolve the workspace default custom endpoint for the resumed user turn. */
   resolveWorkspaceCustomLlm: import('../custom-llm-runtime.js').WorkspaceCustomLlmResolver | null
+  /** The deployment's configured providers; the turn kernel serves the continuation through `ensureServableModel`. */
+  configuredProviders?: import('@use-brian/shared/model-registry').ProviderAvailability
   resolveWorkspaceByoGeminiKey: ((workspaceId: string) => Promise<string | null>) | null
   buildWorkspaceProvider: ((apiKey: string) => LLMProvider) | null
   usageStore?: UsageStore
@@ -522,8 +527,11 @@ export function createSessionResumeReplay(deps: SessionResumeReplayDeps): Sessio
       if (outcomeSource) scopeAccumulator.noteSource(outcomeSource)
 
       // ── 3. Drive the continuation turn ──
-      const baseSystemPrompt = assistant.systemPrompt
-        ? `${deps.systemPrompt}\n\n${assistant.systemPrompt}`
+      // Layer 2 is the charter block every runner renders, not the legacy
+      // `system_prompt` column (which a post-418 write no longer updates).
+      const charterBlock = renderCharterBlock(resolveCharter(assistant))
+      const baseSystemPrompt = charterBlock
+        ? `${deps.systemPrompt}\n\n${charterBlock}`
         : deps.systemPrompt
       const activeWorkspaceContext = formatActiveWorkspaceContext(turnScope)
       const systemPrompt = activeWorkspaceContext
@@ -531,15 +539,32 @@ export function createSessionResumeReplay(deps: SessionResumeReplayDeps): Sessio
         : baseSystemPrompt
 
       const authorizeResumeAudience = createDeliveryAudienceAuthorizer()
-      for await (const event of queryLoop({
+      const resumePolicy = policyFor(session)
+      // D2: the continuation bills like the turn it resumes.
+      const resumeBilling = await resolveTurnBilling({
+        policy: resumePolicy,
+        assistant: { id: assistant.id, ownerUserId: assistant.ownerUserId, workspaceId: assistant.workspaceId },
+        actorUserId: session.userId,
+      })
+      await runAssistantTurn({
+        sessionId,
+        policy: resumePolicy,
+        abortController: new AbortController(),
+        // The user may be mid-turn on this session; the replay waits its turn.
+        lease: { mode: 'kernel', waitForSlot: waitForTurnSlot },
+        model: {
+          provider: continuationProvider,
+          model: customLlm?.selector ?? policy.logicalModel,
+          configuredProviders: deps.configuredProviders,
+          customLlm,
+        },
+        loop: {
         ledger: createTurnLedger({
           workspaceId: runtimeContext.workspaceId ?? null,
           assistantId: runtimeContext.assistantId,
           sessionId: runtimeContext.sessionId,
           payloads: getLedgerPayloadStore(),
         }).ledger,
-        provider: continuationProvider,
-        model: customLlm?.selector ?? policy.logicalModel,
         maxTokens: customLlm?.maxTokens,
         inputTokenLimit: customLlm?.inputTokenLimit,
         systemPrompt,
@@ -555,7 +580,8 @@ export function createSessionResumeReplay(deps: SessionResumeReplayDeps): Sessio
           loopStepIndex: params.loopStepIndex,
         },
         ...(policy.budget ?? {}),
-      })) {
+        },
+        sink: { kind: 'none', onEvent: async (event) => {
         // The replay is not an interactive stream. No generated event may be
         // accepted or persisted after authority changes.
         await assertCurrentAuthority()
@@ -586,7 +612,7 @@ export function createSessionResumeReplay(deps: SessionResumeReplayDeps): Sessio
             const usage = event.totalUsage
             const turnKeySource: 'user' | 'platform' = customLlm?.providerKeySource ?? providerKeySource
             void deps.usageStore.recordUsage({
-              userId: session.userId,
+              ...turnUsageIdentity(resumeBilling),
               assistantId: assistant.id,
               workspaceId: assistant.workspaceId!,
               sessionId,
@@ -607,7 +633,8 @@ export function createSessionResumeReplay(deps: SessionResumeReplayDeps): Sessio
         } else if (event.type === 'error') {
           throw event.error
         }
-      }
+        } },
+      })
 
       await assertCurrentAuthority()
       return 'completed'
