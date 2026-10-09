@@ -46,6 +46,7 @@ export type OfficeJob = {
   id: string;
   workspaceId: string;
   artifactId: string;
+  jobKind?: "create" | "revise" | "import" | "export" | "template_compile" | "derivative";
   status: "queued" | "running" | "needs_input" | "completed" | "failed" | "cancelled";
   stage: string;
   errorCode: string | null;
@@ -294,6 +295,23 @@ export async function revokeOfficeGrant(artifactId: string, userId: string): Pro
 
 export async function setOfficeDefaultRole(artifactId: string, defaultWorkspaceRole: "view" | "comment" | "edit"): Promise<OfficeSharing> {
   return metadata<OfficeSharing>(`artifacts/${encodeURIComponent(artifactId)}/sharing`,"office_sharing_default_failed",value=>value,{method:"PATCH",headers:{"Content-Type":"application/json"},body:JSON.stringify({defaultWorkspaceRole})})
+}
+
+/** The file's shared Brian conversation (office.md "Brian conversation in the file"). */
+export type OfficeConversation = {
+  sessionId: string | null;
+  canSend: boolean;
+  role: "view" | "comment" | "edit";
+  assistant: { id: string; name: string } | null;
+};
+
+export async function getOfficeConversation(artifactId: string): Promise<OfficeConversation> {
+  return json(await authFetch(`${API_URL}/api/office/artifacts/${encodeURIComponent(artifactId)}/conversation`, { cache: "no-store" }), "office_conversation_failed");
+}
+
+/** Get or lazily create the thread before a first send (Comment/Edit senders only). */
+export async function startOfficeConversation(artifactId: string): Promise<{ sessionId: string; assistant: { id: string; name: string } }> {
+  return json(await authFetch(`${API_URL}/api/office/artifacts/${encodeURIComponent(artifactId)}/conversation`, { method: "POST" }), "office_conversation_failed");
 }
 
 export async function steerOfficeJob(jobId: string, instruction: string): Promise<void> {

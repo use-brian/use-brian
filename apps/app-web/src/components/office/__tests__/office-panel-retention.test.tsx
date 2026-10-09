@@ -2,7 +2,7 @@
 import {act} from 'react';
 import {createRoot,type Root} from 'react-dom/client';
 import {beforeEach,afterEach,describe,it,expect,vi} from 'vitest';
-import {OfficeJobActivity,type OfficeBrianRevisionRequest} from '../job-activity';
+import {OfficeJobActivity} from '../job-activity';
 import {OfficeHistory} from '../history/office-history';
 import {OfficeSharing} from '../sharing/office-sharing';
 import {documentFixture,uid} from './editor-fixtures';
@@ -17,6 +17,8 @@ import {WORKSPACE_IDENTITY_REFRESH_EVENT} from '@/lib/workspace-identity-events'
 import {_resetOfficeJobStreams} from '@/lib/office/job-stream';
 const state=vi.hoisted(()=>({viewer:'viewer-a',workspace:'workspace-a',fetch:vi.fn()}));
 vi.mock('@/lib/user',()=>({getUserInfo:()=>({id:state.viewer})}));
+vi.mock('next/navigation',()=>({useRouter:()=>({push:vi.fn()})}));
+vi.mock('@/components/doc/composer-controls',()=>({useComposerControls:()=>({model:'standard',setModel:vi.fn(),plan:'pro',researchMode:false,setResearchMode:vi.fn(),researchQuota:null,researchExhausted:false}),ComposerControls:()=>null}));
 vi.mock('@/lib/auth-fetch',()=>({authFetch:(...args:unknown[])=>state.fetch(...args)}));
 vi.mock('@/lib/workspace-context',()=>({useOptionalWorkspaceContext:()=>({workspaceId:state.workspace,me:{id:state.viewer}})}));
 vi.mock('@/components/ui/searchable-select',()=>({SearchableSelect:(props:{items:Array<{value:string;label:string}>;onValueChange:(value:string)=>void;disabled?:boolean;'aria-label':string})=><div aria-label={props['aria-label']}>{props.items.map(item=><button type="button" key={item.value} disabled={props.disabled} onClick={()=>props.onValueChange(item.value)}>{item.label}</button>)}</div>}));
@@ -30,10 +32,10 @@ const sharing={defaultWorkspaceRole:'comment',canManage:true,grants:[],members:[
 const response=(body:unknown,ttl='6000',status=200)=>new Response(JSON.stringify(body),{status,headers:{'X-Brian-Projection-Valid-For-Ms':ttl}});
 const pending=()=>new Promise<Response>(()=>{});
 let root:Root,host:HTMLDivElement;
-const copied=vi.fn(),restored=vi.fn(),requested=vi.fn<()=>Promise<OfficeBrianRevisionRequest>>();
-beforeEach(()=>{vi.useFakeTimers();resetSurfaceCache();vi.clearAllMocks();state.viewer='viewer-a';state.workspace='workspace-a';host=document.createElement('div');document.body.append(host);root=createRoot(host);requested.mockResolvedValue({jobId:'revision-a',mode:'direct'});});
+const copied=vi.fn(),restored=vi.fn();
+beforeEach(()=>{vi.useFakeTimers();resetSurfaceCache();vi.clearAllMocks();state.viewer='viewer-a';state.workspace='workspace-a';host=document.createElement('div');document.body.append(host);root=createRoot(host);});
 afterEach(()=>{act(()=>root.unmount());host.remove();resetSurfaceCache();_resetOfficeJobStreams();vi.useRealTimers();});
-async function render(kind:'history'|'sharing'|'job'|'new-job'='history'){await act(async()=>root.render(<I18nProvider locale="en" dict={en}><PromptDialogProvider/><ConfirmDialogProvider/>{kind==='history'?<OfficeHistory artifactId={uid(1)} artifactTitle="Protected artifact" currentVersion={2} canEdit onCopied={copied} onRestored={restored}/>:kind==='sharing'?<OfficeSharing artifactId={uid(1)}/>:<OfficeJobActivity jobId={kind==='job'?'job-a':undefined} snapshot={documentFixture()} targetIds={[uid(10)]} canRequestRevision onRequestRevision={requested} onRevisionCompleted={restored}/>}</I18nProvider>));}
+async function render(kind:'history'|'sharing'|'job'|'new-job'='history'){await act(async()=>root.render(<I18nProvider locale="en" dict={en}><PromptDialogProvider/><ConfirmDialogProvider/>{kind==='history'?<OfficeHistory artifactId={uid(1)} artifactTitle="Protected artifact" currentVersion={2} canEdit onCopied={copied} onRestored={restored}/>:kind==='sharing'?<OfficeSharing artifactId={uid(1)}/>:<OfficeJobActivity workspaceId={state.workspace} artifactId={uid(1)} jobId={kind==='job'?'job-a':undefined} snapshot={documentFixture()} targetIds={[uid(10)]} onRevisionCompleted={restored}/>}</I18nProvider>));}
 const button=(label:string,scope:ParentNode=document)=>[...scope.querySelectorAll('button')].find(x=>x.textContent===label && !x.disabled)!;
 const click=async(label:string,scope?:ParentNode)=>{await act(async()=>button(label,scope).click());};
 function change(input:HTMLInputElement|HTMLTextAreaElement,value:string){act(()=>{Object.getOwnPropertyDescriptor(input.tagName==='TEXTAREA'?HTMLTextAreaElement.prototype:HTMLInputElement.prototype,'value')!.set!.call(input,value);input.dispatchEvent(new Event('input',{bubbles:true}));});}
@@ -49,7 +51,7 @@ async function flush(){for(let i=0;i<5;i++)await act(async()=>{await vi.advanceT
 describe('[COMP:app-web/office-iteration-panel] bounded activity retention',()=>{
   it('shows activity from the job stream and clears it when the stream revokes access',async()=>{
     let push!:(frame:[string,unknown])=>void;
-    state.fetch.mockImplementation(async()=>sse([['job',job],['event',events[0]]],(enqueue)=>{push=enqueue;}));
+    state.fetch.mockImplementation(async(url:string)=>String(url).includes('/jobs/')?sse([['job',job],['event',events[0]]],(enqueue)=>{push=enqueue;}):pending());
     await render('job');await flush();expect(host.querySelector('details')).not.toBeNull();
     change(host.querySelector('textarea')!,'Draft based on protected activity');
     await act(async()=>push(['revoked',{}]));await flush();
@@ -67,9 +69,18 @@ describe('[COMP:app-web/office-iteration-panel] bounded activity retention',()=>
     expect(host.textContent).toContain(en.office.jobReconnecting);expect(host.textContent).toContain(en.office.eventObjects);
     expect(host.querySelector('.animate-spin')).toBeNull();
   });
-  it.each(['viewer','workspace'] as const)('drops a late revision acknowledgement after changing %s',async identity=>{
-    let finish!:(result:OfficeBrianRevisionRequest)=>void;requested.mockImplementation(()=>new Promise(resolve=>{finish=resolve;}));state.fetch.mockImplementation(pending);await render('new-job');change(host.querySelector('textarea')!,'Revise this');await act(async()=>host.querySelector('form')!.dispatchEvent(new Event('submit',{bubbles:true,cancelable:true})));
-    state[identity]=`${identity}-b`;await render('new-job');await act(async()=>finish({jobId:'old-revision',mode:'direct'}));expect(host.querySelector('textarea')!.value).toBe('');expect(state.fetch).not.toHaveBeenCalled();
+  it.each(['viewer','workspace'] as const)('drops a late thread creation after changing %s',async identity=>{
+    let finish!:(response:Response)=>void;
+    state.fetch.mockImplementation(async(url:string,init?:RequestInit)=>{
+      if(url.endsWith('/conversation')&&init?.method==='POST')return new Promise<Response>(resolve=>{finish=resolve;});
+      if(url.endsWith('/conversation'))return new Response(JSON.stringify({sessionId:null,canSend:true,role:'edit',assistant:{id:'assistant-a',name:'Brian'}}),{status:200});
+      return pending();
+    });
+    await render('new-job');await flush();change(host.querySelector('textarea')!,'Revise this');await act(async()=>host.querySelector('form')!.dispatchEvent(new Event('submit',{bubbles:true,cancelable:true})));
+    state[identity]=`${identity}-b`;await render('new-job');
+    await act(async()=>finish(new Response(JSON.stringify({sessionId:'late-session',assistant:{id:'assistant-a',name:'Brian'}}),{status:201})));await flush();
+    expect(host.querySelector('textarea')!.value).toBe('');
+    expect(state.fetch.mock.calls.some(([url])=>String(url).endsWith('/api/chat'))).toBe(false);
   });
 });
 

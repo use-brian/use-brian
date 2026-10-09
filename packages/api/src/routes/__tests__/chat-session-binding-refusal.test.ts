@@ -45,8 +45,8 @@ describe('[COMP:api/chat-route] session-binding refusals are observable', () => 
   it('logs every refusal that ends the stream in the binding block', () => {
     const block = sessionBindingBlock()
     const refusals = block.match(/sendEvent\('error'/g) ?? []
-    // clearance · cross-assistant mismatch · per-user access · Feed target
-    expect(refusals).toHaveLength(4)
+    // clearance · cross-assistant mismatch · per-user access · Office lane · Feed target
+    expect(refusals).toHaveLength(5)
 
     // Each one is answered by a log call. `logSendRefusal` covers the two
     // policy verdicts; the access and Feed target gates log inline.

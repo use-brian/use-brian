@@ -1,5 +1,7 @@
 import { z } from 'zod'
 import { WorkspaceAccessError } from '../workspace-access/policy.js'
+import { OFFICE_THREAD_CHANNEL_TYPE } from '../db/office-artifact-sessions.js'
+import { SSE_MAX_LIFETIME_MS } from './brain-stream.js'
 import { webChatSourcesHandler, WEB_CHAT_SOURCE_SQL, type WebChatSourceSession } from './_web-chat-sources.js'
 import { dispatchPersistedWebInput } from './_incoming-chat-event.js'
 import { createSessionStreamAuthority } from '../session-stream-authority.js'
@@ -1842,7 +1844,11 @@ export function sessionRoutes(opts: SessionRouteOptions = {}): Router {
     // transcript at settle. Current authority is rechecked before each relay
     // and while idle by the guard below. A 25s comment ping defeats proxy idle
     // timeouts.
-    if (isSharedChatSession(session)) {
+    // Rooms and Office file threads are followed for their whole life, not
+    // only while a turn runs. An Office thread is followed from every open
+    // file rail, so it bounds its own lifetime (the rail reconnects).
+    const officeThread = session.channelType === OFFICE_THREAD_CHANNEL_TYPE
+    if (isSharedChatSession(session) || officeThread) {
       let closed = false
       // The viewer joins the room's presence set under their display name —
       // that name is what teammates' typing indicators render.
@@ -1896,12 +1902,20 @@ export function sessionRoutes(opts: SessionRouteOptions = {}): Router {
         if (!res.writableEnded) res.write(': ping\n\n')
       }, 25_000)
       ping.unref?.()
+      const lifetime = officeThread
+        ? setTimeout(() => {
+            if (!res.writableEnded) res.write(': cycle\n\n')
+            closeForAuthority()
+          }, Math.round(SSE_MAX_LIFETIME_MS * (0.8 + Math.random() * 0.4)))
+        : null
+      lifetime?.unref?.()
       const closeRoom = () => {
         if (closed) return
         closed = true
         authority.dispose()
         clearInterval(authorityPoll)
         clearInterval(ping)
+        if (lifetime) clearTimeout(lifetime)
         unsubscribeRoom()
       }
       closeForAuthority = () => { closeRoom(); res.end() }

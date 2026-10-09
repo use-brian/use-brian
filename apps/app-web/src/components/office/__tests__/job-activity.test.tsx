@@ -1,6 +1,11 @@
 // @vitest-environment jsdom
+/**
+ * The Office file's Brian rail: generation status, then one shared
+ * conversation per file. [COMP:app-web/office-iteration-panel]
+ * Spec: docs/architecture/features/office.md -> "Brian conversation in the file".
+ */
 import { act } from "react";
-import { createRoot } from "react-dom/client";
+import { createRoot, type Root } from "react-dom/client";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { renderToStaticMarkup } from "react-dom/server";
 import { I18nProvider } from "@/lib/i18n/client";
@@ -8,15 +13,37 @@ import { en } from "@/lib/i18n/dictionaries/en";
 import type { Dictionary } from "@/lib/i18n/dictionaries";
 import { OfficeJobActivity, OfficeJobActivityView, officeBrianScope } from "../job-activity";
 import { presentationFixture, uid } from "./editor-fixtures";
-import { resumeOfficeGeneration, type OfficeJob, type OfficeJobEvent } from "@/lib/office/api";
+import { getOfficeConversation, resumeOfficeGeneration, startOfficeConversation, steerOfficeJob, type OfficeJob, type OfficeJobEvent } from "@/lib/office/api";
 
-import {resetSurfaceCache} from "@/lib/surface-cache";
-vi.mock("@/lib/workspace-context", () => ({useOptionalWorkspaceContext: () => ({workspaceId: "workspace-a", me: {id: "viewer-a"}})}));
-afterEach(() => { resetSurfaceCache(); streams.map.clear(); });
-
+const net = vi.hoisted(() => ({ chatBodies: [] as unknown[], chatFrames: [] as Array<[string, unknown]>, sessionRows: [] as unknown[], keepOpen: false }));
+vi.mock("@/lib/workspace-context", () => ({ useOptionalWorkspaceContext: () => ({ workspaceId: "workspace-a", me: { id: "viewer-a" } }) }));
+vi.mock("@/lib/user", () => ({ getUserInfo: () => ({ id: "viewer-a" }) }));
+vi.mock("next/navigation", () => ({ useRouter: () => ({ push: vi.fn() }) }));
+vi.mock("@/components/doc/composer-controls", () => ({
+  useComposerControls: () => ({ model: "standard", setModel: vi.fn(), plan: "pro", researchMode: false, setResearchMode: vi.fn(), researchQuota: null, researchExhausted: false }),
+  ComposerControls: () => <span data-composer-controls="true" />,
+}));
+vi.mock("@/lib/api/sessions", async (importOriginal) => ({ ...await importOriginal<typeof import("@/lib/api/sessions")>(), fetchSessionMessages: vi.fn(async () => net.sessionRows) }));
+vi.mock("@/lib/auth-fetch", () => ({
+  authFetch: vi.fn(async (url: string, init?: RequestInit) => {
+    if (url.endsWith("/stream")) return new Response(new ReadableStream({ start() { /* follow stream stays open */ } }), { status: 200 });
+    if (url.endsWith("/api/chat")) {
+      net.chatBodies.push(JSON.parse(String(init?.body)));
+      const encoder = new TextEncoder();
+      return new Response(new ReadableStream({ start(controller) {
+        for (const [event, data] of net.chatFrames) controller.enqueue(encoder.encode(`event: ${event}\ndata: ${JSON.stringify(data)}\n\n`));
+        if (!net.keepOpen) controller.close();
+      } }), { status: 200 });
+    }
+    return new Response("{}", { status: 200 });
+  }),
+}));
 vi.mock("@/lib/office/api", async (importOriginal) => ({
   ...await importOriginal<typeof import("@/lib/office/api")>(),
-  resumeOfficeGeneration:vi.fn(async()=>({artifactId:"draft",jobId:"job"})),
+  getOfficeConversation: vi.fn(async () => ({ sessionId: null, canSend: true, role: "edit", assistant: { id: "assistant-a", name: "Brian" } })),
+  startOfficeConversation: vi.fn(async () => ({ sessionId: "session-a", assistant: { id: "assistant-a", name: "Brian" } })),
+  steerOfficeJob: vi.fn(async () => undefined),
+  resumeOfficeGeneration: vi.fn(async () => ({ artifactId: "draft", jobId: "job" })),
 }));
 
 // Job progress arrives on the per-job stream; tests drive a fake of it.
@@ -37,214 +64,171 @@ function setStream(jobId: string, job: OfficeJob, events: OfficeJobEvent[] = [])
 
 (globalThis as typeof globalThis & { IS_REACT_ACT_ENVIRONMENT: boolean }).IS_REACT_ACT_ENVIRONMENT = true;
 
-function render(job: OfficeJob | null, options: Partial<Parameters<typeof OfficeJobActivityView>[0]> = {}) {
-  return renderToStaticMarkup(
-    <I18nProvider locale="en" dict={en as unknown as Dictionary}>
-      <OfficeJobActivityView
-        job={job}
-        events={[]}
-        instruction=""
-        scope={{ kind: "slide", slide: 1 }}
-        canRequestRevision
-        onInstructionChange={vi.fn()}
-        onSubmit={vi.fn()}
-        {...options}
-      />
-    </I18nProvider>,
-  );
-}
-
-const job = (status: OfficeJob["status"]): OfficeJob => ({
+const ARTIFACT = "10000000-0000-4000-8000-000000000003";
+const job = (status: OfficeJob["status"], jobKind: OfficeJob["jobKind"] = "create"): OfficeJob => ({
   id: "10000000-0000-4000-8000-000000000001",
   workspaceId: "10000000-0000-4000-8000-000000000002",
-  artifactId: "10000000-0000-4000-8000-000000000003",
+  artifactId: ARTIFACT,
+  jobKind,
   status,
   stage: status,
   errorCode: null,
 });
 
-describe("[COMP:app-web/office-iteration-panel] Office iteration panel", () => {
-  beforeEach(() => {
-    resetSurfaceCache();
-    streams.map.clear();
+function render(state: OfficeJob | null, options: Partial<Parameters<typeof OfficeJobActivityView>[0]> = {}) {
+  return renderToStaticMarkup(
+    <I18nProvider locale="en" dict={en as unknown as Dictionary}>
+      <OfficeJobActivityView job={state} events={[]} instruction="" scope={{ kind: "slide", slide: 1 }} canSend onInstructionChange={vi.fn()} onSubmit={vi.fn()} {...options} />
+    </I18nProvider>,
+  );
+}
+
+let host: HTMLDivElement;
+let root: Root;
+beforeEach(() => {
+  streams.map.clear();
+  net.chatBodies = [];
+  net.chatFrames = [];
+  net.sessionRows = [];
+  net.keepOpen = false;
+  vi.mocked(steerOfficeJob).mockClear();
+  vi.mocked(startOfficeConversation).mockClear();
+  vi.mocked(resumeOfficeGeneration).mockClear();
+  host = document.createElement("div");
+  document.body.append(host);
+  root = createRoot(host);
+});
+afterEach(() => { act(() => root.unmount()); host.remove(); });
+
+async function mount(props: Partial<Parameters<typeof OfficeJobActivity>[0]> = {}) {
+  await act(async () => root.render(<I18nProvider locale="en" dict={en as unknown as Dictionary}>
+    <OfficeJobActivity workspaceId="workspace-a" artifactId={ARTIFACT} snapshot={presentationFixture()} targetIds={[]} onRevisionCompleted={vi.fn()} {...props} />
+  </I18nProvider>));
+}
+async function type(text: string) {
+  const input = host.querySelector<HTMLTextAreaElement>("#office-brian-instruction")!;
+  const setter = Object.getOwnPropertyDescriptor(HTMLTextAreaElement.prototype, "value")!.set!;
+  await act(async () => { setter.call(input, text); input.dispatchEvent(new Event("input", { bubbles: true })); });
+  return input;
+}
+async function send() {
+  await act(async () => { host.querySelector("form")!.dispatchEvent(new Event("submit", { bubbles: true, cancelable: true })); });
+  await act(async () => { await new Promise((resolve) => setTimeout(resolve, 0)); });
+}
+
+describe("[COMP:app-web/office-iteration-panel] Office file conversation", () => {
+  it("enables Send with nothing selected and starts a chat turn in the file's shared thread", async () => {
+    await mount({ targetIds: [] });
+    const input = await type("Tighten the opening slide");
+    const button = Array.from(host.querySelectorAll<HTMLButtonElement>("form button")).find((node) => node.textContent?.includes(en.office.askBrian))!;
+    expect(button.disabled).toBe(false);
+    await send();
+    expect(startOfficeConversation).toHaveBeenCalledWith(ARTIFACT);
+    expect(net.chatBodies).toEqual([expect.objectContaining({ message: "Tighten the opening slide", sessionId: "session-a", assistantId: "assistant-a", workspaceId: "workspace-a" })]);
+    expect(net.chatBodies[0]).not.toHaveProperty("officeSelection");
+    expect(input.value).toBe("");
   });
 
-  it("uses family-neutral guidance and an accurate revision recovery path", () => {
-    const html = render(job("completed"), { scope: { kind: "none" }, feedback: "applied" });
+  it("sends the selection as a dismissible focus hint, never a gate", async () => {
+    await mount({ targetIds: [uid(70)] });
+    expect(host.textContent).toContain(en.office.brianScope);
+    await type("Make this bolder");
+    await send();
+    expect(net.chatBodies.at(-1)).toMatchObject({ officeSelection: { targetIds: [uid(70)] } });
+    const clear = host.querySelector<HTMLButtonElement>(`button[aria-label="${en.office.clearFocus}"]`)!;
+    await act(async () => clear.click());
+    expect(host.querySelector("[data-office-brian-scope]")).toBeNull();
+    await type("Now shorter");
+    await send();
+    expect(net.chatBodies.at(-1)).not.toHaveProperty("officeSelection");
+  });
+
+  it("steers an active generation instead of starting a turn", async () => {
+    const running = job("running");
+    setStream(running.id, running, [{ id: "e1", seq: 1, code: "office.job.started", params: {}, safeNarration: null, createdAt: "2026-10-10T00:00:00Z" }]);
+    await mount({ jobId: running.id });
+    await type("Use our brand colours");
+    await send();
+    expect(steerOfficeJob).toHaveBeenCalledWith(running.id, "Use our brand colours");
+    expect(net.chatBodies).toEqual([]);
+    expect(host.querySelector('[data-office-steering="true"]')!.textContent).toContain("Use our brand colours");
+  });
+
+  it("shows a reviseOfficeArtifact result as an edit card tracking its job", async () => {
+    net.chatFrames = [
+      ["tool_start", { id: "call-1", name: "reviseOfficeArtifact" }],
+      ["tool_result", { id: "call-1", output: JSON.stringify({ jobId: "revision-job", mode: "direct" }) }],
+      ["text_delta", { text: "I started the edit." }],
+    ];
+    setStream("revision-job", { ...job("running", "revise"), id: "revision-job" }, [{ id: "e1", seq: 1, code: "office.job.revision_drafted", params: {}, safeNarration: null, createdAt: "2026-10-10T00:00:00Z" }]);
+    // Keep the turn open so the live bubble stays mounted.
+    net.keepOpen = true;
+    await mount();
+    await type("Shorten slide two");
+    await send();
+    expect(host.querySelector('[data-office-edit-card="running"]')).not.toBeNull();
+    expect(host.textContent).toContain(en.office.eventRevisionDrafted);
+  });
+
+  it("lets a View-only reader read the thread but not send", async () => {
+    vi.mocked(getOfficeConversation).mockResolvedValueOnce({ sessionId: "session-a", canSend: false, role: "view", assistant: { id: "assistant-a", name: "Brian" } });
+    net.sessionRows = [{ id: "m1", role: "user", content: "Can you add a summary?", timestamp: "2026-10-10T00:00:00Z", senderUserId: "teammate", senderName: "Avery Example" }];
+    await mount();
+    await act(async () => { await new Promise((resolve) => setTimeout(resolve, 0)); });
+    expect(host.textContent).toContain("Can you add a summary?");
+    expect(host.textContent).toContain("Avery Example");
+    expect(host.querySelector("textarea")).toBeNull();
+    expect(host.querySelector('[data-office-read-only="true"]')!.textContent).toBe(en.office.chatReadOnly);
+  });
+});
+
+describe("[COMP:app-web/office-iteration-panel] generation status as Brian's message", () => {
+  it("uses family-neutral guidance that never asks for a selection", () => {
+    const html = render(null, { scope: { kind: "none" } });
+    expect(html).toContain(en.office.brianEditHint);
     expect(html).not.toContain("Select a slide");
-    expect(html).not.toContain("Make slide 2");
-    expect(html).not.toContain("Use Undo");
-    const host = document.createElement("div");
-    host.innerHTML = html;
-    expect(host.textContent).toContain(en.office.brianRevisionApplied);
+    expect(html).not.toContain("disabled=\"\"><svg");
   });
 
   it("shows the missing facts question while awaiting an answer", () => {
-    const html = render({...job("needs_input"),errorCode:"material_fact_missing"}, {events:[{id:"question",seq:1,code:"office.job.needs_input",params:{question:"Please provide the required fields: INVOICE_DATE, PAYMENT_TERMS"},safeNarration:null,createdAt:"2026-01-01T00:00:00Z"}]});
+    const html = render({ ...job("needs_input"), errorCode: "material_fact_missing" }, { events: [{ id: "question", seq: 1, code: "office.job.needs_input", params: { question: "Please provide the required fields: INVOICE_DATE, PAYMENT_TERMS" }, safeNarration: null, createdAt: "2026-01-01T00:00:00Z" }] });
     expect(html).toContain("INVOICE_DATE, PAYMENT_TERMS");
     expect(html).toContain(en.office.eventNeedsInput);
   });
 
-  it("recovers an older template pause with no question event and no published templates",()=>{
-    const html=render({...job("needs_input"),errorCode:"template_ambiguous",canResumeTemplate:true,templateChoices:[]},{events:[{id:"pause",seq:3,code:"office.job.needs_input",params:{reason:"template_ambiguous"},safeNarration:null,createdAt:"2026-01-01T00:00:00Z"}],templatesHref:"/w/workspace/office/templates"});
+  it("recovers an older template pause with no question event and no published templates", () => {
+    const html = render({ ...job("needs_input"), errorCode: "template_ambiguous", canResumeTemplate: true, templateChoices: [] }, { events: [{ id: "pause", seq: 3, code: "office.job.needs_input", params: { reason: "template_ambiguous" }, safeNarration: null, createdAt: "2026-01-01T00:00:00Z" }], templatesHref: "/w/workspace/office/templates" });
     expect(html).toContain(en.office.templateSelectionQuestion);
-    const host=document.createElement("div");host.innerHTML=html;
-    expect(host.textContent).toContain(en.office.noPublishedTemplateForDraft);
+    const node = document.createElement("div");
+    node.innerHTML = html;
+    expect(node.textContent).toContain(en.office.noPublishedTemplateForDraft);
     expect(html).toContain("/w/workspace/office/templates");
     expect(html).not.toContain("<textarea");
-    expect(html).not.toContain(en.office.iterationActiveHint);
   });
 
-  it("offers explicit template selection and resumes the same artifact and job",async()=>{
-    const paused={...job("needs_input"),errorCode:"template_ambiguous",canResumeTemplate:true,templateChoices:[{templateVersionId:"template-version",name:"Quarterly worksheet"}]};
-    setStream(paused.id,paused);
-    vi.mocked(resumeOfficeGeneration).mockClear();
-    const host=document.createElement("div");document.body.append(host);const root=createRoot(host);
-    try {
-      await act(async()=>root.render(<I18nProvider locale="en" dict={en as unknown as Dictionary}><OfficeJobActivity jobId={paused.id} workspaceId="workspace-a" targetIds={[]} canRequestRevision={false} onRequestRevision={vi.fn()} onRevisionCompleted={vi.fn()}/></I18nProvider>));
-      expect(host.textContent).toContain(en.office.templateSelectionQuestion);
-      expect(host.querySelector("textarea")).toBeNull();
-      const trigger=host.querySelector('[role="combobox"]')!;
-      await act(async()=>trigger.dispatchEvent(new MouseEvent("click",{bubbles:true})));
-      const option=Array.from(document.querySelectorAll('[role="option"]')).find(node=>node.textContent?.includes("Quarterly worksheet"))!;
-      expect(option).toBeTruthy();
-      await act(async()=>option.dispatchEvent(new MouseEvent("click",{bubbles:true})));
-      const resume=Array.from(host.querySelectorAll("button")).find(node=>node.textContent===en.office.resumeGeneration)!;
-      await act(async()=>resume.click());
-      expect(resumeOfficeGeneration).toHaveBeenCalledWith({artifactId:paused.artifactId,jobId:paused.id,templateVersionId:"template-version"});
-    } finally {act(()=>root.unmount());host.remove();}
+  it("offers explicit template selection and resumes the same artifact and job", async () => {
+    const paused = { ...job("needs_input"), errorCode: "template_ambiguous", canResumeTemplate: true, templateChoices: [{ templateVersionId: "template-version", name: "Quarterly worksheet" }] };
+    setStream(paused.id, paused);
+    await mount({ jobId: paused.id });
+    expect(host.textContent).toContain(en.office.templateSelectionQuestion);
+    expect(host.querySelector("textarea")).toBeNull();
+    const trigger = host.querySelector('[role="combobox"]')!;
+    await act(async () => trigger.dispatchEvent(new MouseEvent("click", { bubbles: true })));
+    const option = Array.from(document.querySelectorAll('[role="option"]')).find((node) => node.textContent?.includes("Quarterly worksheet"))!;
+    await act(async () => option.dispatchEvent(new MouseEvent("click", { bubbles: true })));
+    const resume = Array.from(host.querySelectorAll("button")).find((node) => node.textContent === en.office.resumeGeneration)!;
+    await act(async () => resume.click());
+    expect(resumeOfficeGeneration).toHaveBeenCalledWith({ artifactId: paused.artifactId, jobId: paused.id, templateVersionId: "template-version" });
   });
 
-  it("reads a missing-fact question from the bounded job when events are legacy",()=>{
-    const html=render({...job("needs_input"),errorCode:"material_fact_missing",inputQuestion:"Please provide the required fields: PAYMENT_TERMS"});
-    expect(html).toContain("PAYMENT_TERMS");
-    expect(html).toContain(en.office.generationAnswerHint);
-  });
-
-  it("shows one failure alert for a failed revision", () => {
-    const html = render(job("failed"), { feedback: "failed" });
-    expect(html.match(/role="alert"/g)).toHaveLength(1);
-    expect(html.split(en.office.brianRevisionFailed)).toHaveLength(2);
-  });
-
-  it("identifies a persisted revision failure after reloading", () => {
-    const html = render({ ...job("failed"), errorCode: "revision_failed" });
-    expect(html).toContain(en.office.brianRevisionFailed);
-    expect(html).not.toContain(en.office.generationFailedBody);
-  });
-  it("anchors the Brian composer after collapsed run activity", () => {
-    const html = render(job("running"), { events: [{ id: "event-1", seq: 1, code: "office.job.objects_constructed", params: {}, safeNarration: null, createdAt: "2026-08-05T00:00:00.000Z" }] });
-    expect(html).toContain(en.office.editWithBrian);
-    expect(html).toContain(en.office.iterationPlaceholder);
-    expect(html).toContain(en.office.askBrian);
-    expect(html).toContain(`<summary`);
-    expect(html.indexOf(en.office.askBrian)).toBeGreaterThan(html.indexOf(en.office.runActivity));
-    expect(html).not.toContain("<details open");
-    expect(html).not.toContain(en.office.steer);
-  });
-
-  it("sends on Enter, preserves Shift+Enter and IME composition, and respects disabled submission", async () => {
-    const host = document.createElement("div");
-    document.body.append(host);
-    const root = createRoot(host);
-    const onSubmit = vi.fn((event: React.FormEvent) => event.preventDefault());
-    const paint = (canRequestRevision: boolean) => act(() => root.render(<I18nProvider locale="en" dict={en as unknown as Dictionary}><OfficeJobActivityView job={null} events={[]} instruction="Clarify this" scope={{ kind: "targets", count: 1 }} canRequestRevision={canRequestRevision} onInstructionChange={vi.fn()} onSubmit={onSubmit} /></I18nProvider>));
-    try {
-      paint(true);
-      const input = host.querySelector("textarea")!;
-      const press = (options: KeyboardEventInit) => act(() => { input.dispatchEvent(new KeyboardEvent("keydown", { key: "Enter", bubbles: true, cancelable: true, ...options })); });
-      press({ shiftKey: true });
-      press({ isComposing: true });
-      expect(onSubmit).not.toHaveBeenCalled();
-      press({});
-      expect(onSubmit).toHaveBeenCalledTimes(1);
-      paint(false);
-      press({});
-      expect(onSubmit).toHaveBeenCalledTimes(1);
-    } finally { act(() => root.unmount()); host.remove(); }
-  });
-
-  it("keeps Brian as the primary edit path after generation and names the exact scope", () => {
-    const html = render(job("completed"), { scope: { kind: "objects", slide: 3, count: 2 } });
-    expect(html).toContain(en.office.brianEditHint);
-    expect(html).toContain(en.office.brianScope);
-    expect(html).toContain(en.office.brianScopeObjects.replace("{slide}", "3").replace("{count}", "2"));
-    expect(html).toContain(en.office.iterationPlaceholder);
-    expect(html).toContain(en.office.askBrian);
-    expect(html).not.toContain(en.office.openComments);
-  });
-
-  it("disables Brian editing with an owned reason when no scope is selected", () => {
-    const html = render(job("completed"), { scope: { kind: "none" }, canRequestRevision: false, requestDisabledReason: en.office.brianSelectionRequired, instruction: "Shorten this" });
-    expect(html).toContain(en.office.brianScopeNone);
-    expect(html).toContain(en.office.brianSelectionRequired);
-    expect(html).toContain("disabled");
-  });
-
-  it("derives stable slide and object scope labels from Presentation target IDs", () => {
-    const snapshot = presentationFixture();
-    expect(officeBrianScope(snapshot, [uid(63)])).toEqual({ kind: "slide", slide: 1 });
-    expect(officeBrianScope(snapshot, [uid(70)])).toEqual({ kind: "object", slide: 1 });
-    expect(officeBrianScope(snapshot, [uid(70), uid(72)])).toEqual({ kind: "objects", slide: 1, count: 2 });
-    expect(officeBrianScope(snapshot, [uid(999)])).toEqual({ kind: "targets", count: 1 });
-  });
-
-  it("submits a terminal selection directly from the Brian tab", async () => {
-    const host = document.createElement("div");
-    document.body.append(host);
-    const root = createRoot(host);
-    const onRequestRevision = vi.fn(async () => ({ jobId: "revision-job", mode: "direct" as const }));
-    await act(async () => root.render(<I18nProvider locale="en" dict={en as unknown as Dictionary}><OfficeJobActivity snapshot={presentationFixture()} targetIds={[uid(70)]} canRequestRevision onRequestRevision={onRequestRevision} onRevisionCompleted={vi.fn()} /></I18nProvider>));
-    const input = host.querySelector<HTMLTextAreaElement>("#office-brian-instruction")!;
-    const setter = Object.getOwnPropertyDescriptor(HTMLTextAreaElement.prototype, "value")?.set;
-    await act(async () => { setter?.call(input, "Make this title shorter"); input.dispatchEvent(new Event("input", { bubbles: true })); });
-    await act(async () => { host.querySelector("form")!.dispatchEvent(new Event("submit", { bubbles: true, cancelable: true })); });
-    expect(onRequestRevision).toHaveBeenCalledWith("Make this title shorter");
-    expect(host.textContent).toContain(en.office.brianRevisionQueued);
-    expect(input.value).toBe("Make this title shorter");
-    expect(input.disabled).toBe(true);
-    await act(async () => { host.querySelector("form")!.dispatchEvent(new Event("submit", { bubbles: true, cancelable: true })); });
-    expect(onRequestRevision).toHaveBeenCalledTimes(1);
-    act(() => root.unmount());
-    host.remove();
-  });
-
-  it.each(["failed", "completed"] as const)("retains failed instructions but clears successful ones: %s", async (status) => {
-    setStream("revision-job", { ...job(status), id: "revision-job" });
-    const host = document.createElement("div");
-    document.body.append(host);
-    const root = createRoot(host);
-    const onRevisionCompleted = vi.fn();
-    const onRequestRevision = vi.fn(async () => ({ jobId: "revision-job", mode: "direct" as const }));
-    try {
-      await act(async () => root.render(<I18nProvider locale="en" dict={en as unknown as Dictionary}><OfficeJobActivity snapshot={presentationFixture()} targetIds={[uid(70)]} canRequestRevision onRequestRevision={onRequestRevision} onRevisionCompleted={onRevisionCompleted} /></I18nProvider>));
-      const input = host.querySelector<HTMLTextAreaElement>("textarea")!;
-      const setter = Object.getOwnPropertyDescriptor(HTMLTextAreaElement.prototype, "value")!.set!;
-      await act(async () => { setter.call(input, "Clarify the key points"); input.dispatchEvent(new Event("input", { bubbles: true })); });
-      await act(async () => { host.querySelector("form")!.dispatchEvent(new Event("submit", { bubbles: true, cancelable: true })); });
-      expect(input.value).toBe(status === "failed" ? "Clarify the key points" : "");
-      expect(input.disabled).toBe(false);
-      expect(onRevisionCompleted).toHaveBeenCalledTimes(status === "completed" ? 1 : 0);
-      expect(host.querySelectorAll('[role="alert"]')).toHaveLength(status === "failed" ? 1 : 0);
-    } finally {
-      act(() => root.unmount());
-      host.remove();
-    }
-  });
-
-  it("explains a typed presentation-fit failure with an actionable reason", () => {
-    const html = render({ ...job("failed"), errorCode: "presentation_fit_failed" });
-    expect(html).toContain(en.office.presentationFitFailed);
-    expect(html).toContain(en.office.presentationFitFailedBody);
-    expect(html).toContain('role="alert"');
-  });
-
-  it("explains an exhausted presentation-plan failure without exposing validation details", () => {
-    const html = render({ ...job("failed"), errorCode: "presentation_plan_failed" });
-    expect(html).toContain(en.office.presentationPlanFailed);
-    expect(html).toContain(en.office.presentationPlanFailedBody);
-    expect(html).not.toContain("unrecognized_keys");
-    expect(html).not.toContain("slides.6.fields.7");
+  it("explains typed failures with an actionable reason and one alert", () => {
+    const fit = render({ ...job("failed"), errorCode: "presentation_fit_failed" });
+    expect(fit).toContain(en.office.presentationFitFailed);
+    expect(fit).toContain(en.office.presentationFitFailedBody);
+    expect(fit.match(/role="alert"/g)).toHaveLength(1);
+    const plan = render({ ...job("failed"), errorCode: "presentation_plan_failed" });
+    expect(plan).toContain(en.office.presentationPlanFailedBody);
+    expect(plan).not.toContain("unrecognized_keys");
   });
 
   it("labels a running job by its latest persisted step and spins only on a live connection", () => {
@@ -264,7 +248,7 @@ describe("[COMP:app-web/office-iteration-panel] Office iteration panel", () => {
       { id: "e2", seq: 2, code: "office.job.silent_stage", params: {}, safeNarration: null, createdAt: "2026-10-10T00:00:00Z" },
     ] });
     expect(html.split("Server step").length).toBeGreaterThan(1);
-    expect(html.match(/<li/g)).toHaveLength(1);
+    expect(html.match(/<li[\s>]/g)).toHaveLength(1);
   });
 
   it("renders a skeleton, not text, before the stream's first frame", () => {
@@ -272,5 +256,28 @@ describe("[COMP:app-web/office-iteration-panel] Office iteration panel", () => {
     expect(html).toContain('data-office-job-skeleton="true"');
     expect(html).not.toContain(en.office.brianEditHint);
   });
-});
 
+  it("sends on Enter, preserves Shift+Enter and IME composition", async () => {
+    const onSubmit = vi.fn((event: React.FormEvent) => event.preventDefault());
+    const paint = (canSend: boolean) => act(() => root.render(<I18nProvider locale="en" dict={en as unknown as Dictionary}><OfficeJobActivityView job={null} events={[]} instruction="Clarify this" scope={{ kind: "none" }} canSend={canSend} onInstructionChange={vi.fn()} onSubmit={onSubmit} /></I18nProvider>));
+    paint(true);
+    const input = host.querySelector("textarea")!;
+    const press = (options: KeyboardEventInit) => act(() => { input.dispatchEvent(new KeyboardEvent("keydown", { key: "Enter", bubbles: true, cancelable: true, ...options })); });
+    press({ shiftKey: true });
+    press({ isComposing: true });
+    expect(onSubmit).not.toHaveBeenCalled();
+    press({});
+    expect(onSubmit).toHaveBeenCalledTimes(1);
+    paint(false);
+    press({});
+    expect(onSubmit).toHaveBeenCalledTimes(1);
+  });
+
+  it("derives stable slide and object scope labels from Presentation target IDs", () => {
+    const snapshot = presentationFixture();
+    expect(officeBrianScope(snapshot, [uid(63)])).toEqual({ kind: "slide", slide: 1 });
+    expect(officeBrianScope(snapshot, [uid(70)])).toEqual({ kind: "object", slide: 1 });
+    expect(officeBrianScope(snapshot, [uid(70), uid(72)])).toEqual({ kind: "objects", slide: 1, count: 2 });
+    expect(officeBrianScope(snapshot, [uid(999)])).toEqual({ kind: "targets", count: 1 });
+  });
+});

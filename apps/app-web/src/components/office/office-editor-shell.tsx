@@ -571,12 +571,11 @@ function OfficeArtifactShell({ workspaceId, artifactId, viewerId }: { workspaceI
     ]),
   ];
   const templateRoutingBlocked = showTemplateRouting && (!templateRoutingState.ready || templateRoutingState.dirty || templateRoutingState.saving);
-  const brianRevisionDisabledReason = targets.length === 0 ? t.brianSelectionRequired
-    : artifact.role === "view" ? t.brianViewUnavailable
+  // The Brian tab never requires a selection: it is a hint (office.md "Brian conversation in the file").
+  const brianRevisionDisabledReason = artifact.role === "view" ? t.brianViewUnavailable
     : artifact.lifecycleState !== "active" ? t.brianInactiveUnavailable
     : offlineCopyAt || collab.status === "disconnected" ? t.brianOfflineUnavailable
     : undefined;
-  const canRequestBrianRevision = !brianRevisionDisabledReason && Boolean(live);
   const canSuggest = artifact.family === "document" && artifact.role === "edit" && artifact.lifecycleState === "active";
   const toggleSuggestMode = () => { const next = !suggestMode; setSuggestMode(next); if (next) { setPanel("suggestions"); setPanelOpen(true); } };
   const discardRecoveryCopy = async () => {
@@ -631,7 +630,7 @@ function OfficeArtifactShell({ workspaceId, artifactId, viewerId }: { workspaceI
             <div className="min-h-0 flex-1 overflow-y-auto">
             {showTemplateRouting && live && templateId ? <div className={panel === "routing" ? "block" : "hidden"}><TemplateRoutingInspector templateId={templateId} snapshot={live.snapshot} selectedTargetIds={targets} onStateChange={setTemplateRoutingState} /></div> : null}
               {panelOpen ? <>
-                {panel === "activity" ? <OfficeJobActivity workspaceId={workspaceId} jobId={artifact.job?.id} snapshot={live?.snapshot} targetIds={targets} canRequestRevision={canRequestBrianRevision} requestDisabledReason={brianRevisionDisabledReason} onRequestRevision={requestBrianRevision} onRevisionCompleted={refreshArtifact} /> : null}
+                {panel === "activity" ? <OfficeJobActivity workspaceId={workspaceId} artifactId={artifactId} jobId={artifact.job?.id} snapshot={live?.snapshot} targetIds={targets} sendDisabledReason={artifact.role === "view" ? undefined : brianRevisionDisabledReason} onRevisionCompleted={refreshArtifact} onOpenHistory={() => { setPanel("history"); setPanelOpen(true); }} /> : null}
                 {panel === "comments" ? <div className="p-3"><OfficeComments artifactId={artifactId} workspaceId={workspaceId} version={artifact.version} targetIds={targets} selectionAnchor={artifact.family === "document" ? commentAnchor : null} anchorKind={artifact.family === "document" ? "block" : artifact.family === "spreadsheet" ? "table_cell" : "object"} canComment={artifact.role !== "view"} offline={collab.status === "disconnected" || Boolean(offlineCopyAt)} initialThreads={serverComments} initialQueuedThreads={queuedCommentThreads} onQueuedThreadsChange={receiveQueuedComments} onRevisionCompleted={refreshArtifact} /></div> : null}
                 {panel === "suggestions" ? <div className="p-3"><OfficeSuggestions workspaceId={workspaceId} artifactId={artifactId} canDecide={artifact.role === "edit" && artifact.lifecycleState === "active" && !offlineCopyAt} canSuggest={artifact.family === "document" && artifact.role !== "view" && artifact.lifecycleState === "active" && suggestMode} actorId={currentUser?.id} baseVersion={live?.baseVersion} expectedSeq={live?.seq} proposal={suggestionRange} offline={collab.status === "disconnected" || Boolean(offlineCopyAt)} onApplied={refreshArtifact} /></div> : null}
                 {panel === "history" ? <div className="p-3"><OfficeHistory artifactId={artifactId} artifactTitle={artifact.title} currentVersion={artifact.version} canEdit={artifact.role === "edit" && artifact.lifecycleState === "active" && !offlineCopyAt} onRestored={refreshArtifact} onCopied={(copiedId) => { invalidateOfficeList(workspaceId); router.push(`/w/${workspaceId}/office/${copiedId}`); }} /></div> : null}
