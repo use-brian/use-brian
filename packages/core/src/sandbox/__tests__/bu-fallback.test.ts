@@ -22,7 +22,7 @@ function toolContext(overrides: Partial<ToolContext> = {}): ToolContext {
     assistantId: 'asst-1',
     sessionId: 'sess-1',
     appId: 'app-1',
-    channelType: 'web',
+    channelType: 'web', attended: true,
     channelId: 'chan-1',
     workspaceId: 'ws-1',
     abortSignal: new AbortController().signal,
@@ -109,7 +109,7 @@ describe('[COMP:sandbox/bu-fallback] Watched agentic fallback (R2-1/R2-7)', () =
     const result = await run(
       browserExplore,
       { goal: 'check notifications', url: 'https://www.linkedin.com/' },
-      toolContext({ channelType: 'workflow' }),
+      toolContext({ channelType: 'workflow', attended: false }),
     )
     expect(result.isError).toBe(true)
     expect(String(result.data)).toContain('cloud-only')
@@ -130,7 +130,7 @@ describe('[COMP:sandbox/bu-fallback] Watched agentic fallback (R2-1/R2-7)', () =
     const result = await run(
       browserExplore,
       { goal: 'x', url: 'https://example.com/' },
-      toolContext({ channelType: 'workflow' }),
+      toolContext({ channelType: 'workflow', attended: false }),
     )
     expect(result.isError).toBe(true)
     expect(String(result.data)).toContain('autonomous')

@@ -29,7 +29,7 @@ import { isProtectedFillOrigin, type ProtectedFillScope } from './protected-fill
 import { z } from 'zod'
 import { SnapshotObservationState, renderSnapshotNode, type ObservationMode } from './snapshot-observation.js'
 import { buildTool, type Tool, type ToolContext, type ToolResult } from '../tools/types.js'
-import { isAutonomousToolContext } from '../tools/capability-gate.js'
+import { isAttendedTurn } from '../tools/capability-gate.js'
 import { minSensitivity, type Sensitivity } from '../security/sensitivity.js'
 import { estimateStringTokens } from '../compaction/compact.js'
 import {
@@ -368,7 +368,7 @@ export function createComputerTools(opts: CreateComputerToolsOptions): ComputerT
    * interactive/watched only; a missing plan resolver fails closed).
    */
   async function autonomousGate(context: ToolContext): Promise<ToolResult | null> {
-    if (!isAutonomousToolContext(context)) return null
+    if (isAttendedTurn(context)) return null
     if (!unattendedEnabled()) {
       return {
         data:
@@ -782,7 +782,7 @@ export function createComputerTools(opts: CreateComputerToolsOptions): ComputerT
         // model to relay the link fails there; this guarantees the user is
         // told where to watch at the start. Interactive sessions only — a
         // headless autonomous run has no live watcher.
-        if (backend === 'cloud' && !gate.state.takeoverAnnounced && !isAutonomousToolContext(context)) {
+        if (backend === 'cloud' && !gate.state.takeoverAnnounced && isAttendedTurn(context)) {
           gate.state.takeoverAnnounced = true
           const startLink = opts.takeoverLinkFor?.(context) ?? null
           if (startLink) {
@@ -1003,7 +1003,7 @@ export function createComputerTools(opts: CreateComputerToolsOptions): ComputerT
     timeoutMs: 120_000, maxResultSizeChars: 1_000,
     async execute(input, context) {
       const unavailable = { data: 'ERROR: Browser discard could not be confirmed. Check the browser before retrying.', isError: true }
-      if (isAutonomousToolContext(context) || !context.workspaceId || !opts.discardTask) return unavailable
+      if (!isAttendedTurn(context) || !context.workspaceId || !opts.discardTask) return unavailable
       const blocked = await policyBlockGate('browserDiscardTask', context, true)
       if (blocked) return blocked
       try {
@@ -1230,7 +1230,7 @@ export function createComputerTools(opts: CreateComputerToolsOptions): ComputerT
       const gate = await gates('browserFillReference', context)
       if ('error' in gate) return gate.error
       const { state } = gate
-      if (isAutonomousToolContext(context) || state.backend !== 'local' || !state.profileId ||
+      if (!isAttendedTurn(context) || state.backend !== 'local' || !state.profileId ||
         !opts.protectedFill || !opts.local.fillReference) {
         return { data: 'Protected fill unavailable', isError: true }
       }
@@ -1311,7 +1311,7 @@ export function createComputerTools(opts: CreateComputerToolsOptions): ComputerT
       try {
         const gate = await transferGate('browserReadDownload', context)
         if ('error' in gate) return gate.error!
-        if (isAutonomousToolContext(context)) throw new Error('Saving a browser download requires explicit interactive approval.')
+        if (!isAttendedTurn(context)) throw new Error('Saving a browser download requires explicit interactive approval.')
         if (context.abortSignal.aborted) throw new Error('Download cancelled.')
         const provider = providerFor(gate.state.backend)
         if (!provider.listDownloads || !provider.readDownload) throw new Error('Reading browser downloads is unsupported by this browser.')
@@ -1378,7 +1378,7 @@ export function createComputerTools(opts: CreateComputerToolsOptions): ComputerT
         const gate = await transferGate('browserUploadFile', context)
         if ('error' in gate) return gate.error!
         // Never allow unattended selection: file inputs can send immediately.
-        if (isAutonomousToolContext(context)) throw new Error('File upload requires an interactive user approval.')
+        if (!isAttendedTurn(context)) throw new Error('File upload requires an interactive user approval.')
         const provider = providerFor(gate.state.backend)
         if (!provider.uploadFile) throw new Error('File upload is unsupported by this browser.')
         if (!context.workspaceId || !opts.files) throw new Error('Workspace file access is unavailable.')

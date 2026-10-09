@@ -7,9 +7,10 @@ import { z } from 'zod'
 import { buildTool } from '../types.js'
 import {
   filterToolsByCapabilities,
-  isAutonomousToolContext,
-  INTERACTIVE_CHANNEL_TYPES,
+  isAttendedTurn,
+  toolTransport,
 } from '../capability-gate.js'
+import { createExecutionContext, executionToolContext } from '../../security/execution-context.js'
 import type { Tool } from '../types.js'
 
 function makeTool(name: string, requiresCapability?: string): Tool {
@@ -101,42 +102,52 @@ describe('[COMP:tools/capability-gate] filterToolsByCapabilities', () => {
   })
 })
 
-describe('[COMP:tools/capability-gate] isAutonomousToolContext (Tier-C write-gate discriminator)', () => {
-  // Interactive channels — a live human can tap Allow, so NOT autonomous.
-  it.each(['web', 'telegram', 'slack', 'feishu', 'whatsapp', 'discord'])(
-    'treats interactive channel %s as NOT autonomous',
+describe('[COMP:tools/capability-gate] isAttendedTurn (Tier-C write-gate discriminator, D13)', () => {
+  // Interactivity comes from the principal, never the channel: a person in a
+  // doc, Office or feed thread is attended; a workflow on Telegram is not.
+  it.each(['web', 'telegram', 'msteams', 'wechat', 'doc_thread', 'office_thread', 'feed_thread', 'notification'])(
+    'an attended principal on %s is interactive',
     (channelType) => {
-      expect(isAutonomousToolContext({ channelType })).toBe(false)
+      expect(isAttendedTurn({ attended: true, channelType } as never)).toBe(true)
     },
   )
 
-  // Autonomous / headless channels — no human present, so gated.
-  it.each([
-    'workflow', // scheduled jobs run THROUGH the workflow executor
-    'assistant-call', // A2A callee
-    'system', // background workers
-    'synthesis',
-    'notification',
-    'home-refresh',
-    'skill-draft',
-    'api', // public API — no one to confirm in-line
-    'programmatic', // brain-key MCP
-    'cron',
-  ])('treats headless channel %s as autonomous', (channelType) => {
-    expect(isAutonomousToolContext({ channelType })).toBe(true)
+  it.each(['workflow', 'assistant-call', 'system', 'api', 'programmatic', 'cron', 'web', 'telegram'])(
+    'an unattended principal on %s is autonomous',
+    (channelType) => {
+      expect(isAttendedTurn({ attended: false, channelType } as never)).toBe(false)
+    },
+  )
+
+  it('is fail-closed: no stamp and no execution identity is unattended', () => {
+    expect(isAttendedTurn({})).toBe(false)
   })
 
-  it('is fail-closed — an unknown/new channel defaults to autonomous (gated)', () => {
-    expect(isAutonomousToolContext({ channelType: 'some-new-headless-channel' })).toBe(true)
-    expect(isAutonomousToolContext({ channelType: '' })).toBe(true)
+  it('derives attendance from the execution identity', () => {
+    const base = {
+      ownership: { kind: 'workspace' as const, workspaceId: 'w' },
+      access: {
+        workspaceId: 'w', userId: 'u', assistantId: 'a', assistantKind: 'standard' as const,
+        clearance: 'internal' as const, compartments: [], mutationCompartments: [], projectIds: [],
+        visibilityAssistantIds: null,
+      },
+      writeDefaults: { compartments: [], projectIds: [] },
+      lifecycle: { abortSignal: new AbortController().signal, sessionId: 's', channelType: 'doc_thread', channelId: 'c', transport: 'web' },
+    }
+    const attended = executionToolContext(createExecutionContext({
+      ...base, identity: { kind: 'attended', principal: { kind: 'workspace_member', userId: 'u' } },
+    } as never), { appId: 'x' })
+    expect(attended.attended).toBe(true)
+    expect(attended.transport).toBe('web')
+    const system = executionToolContext(createExecutionContext({
+      ...base, identity: { kind: 'system', purpose: 'workflow', jobId: 'j' },
+    } as never), { appId: 'x' })
+    expect(system.attended).toBe(false)
   })
 
-  it('the interactive allowlist is exactly the live-human channels', () => {
-    // `custom` is a bridge-driven channel relaying a live human's chat
-    // (docs/architecture/channels/custom-channel.md).
-    expect([...INTERACTIVE_CHANNEL_TYPES].sort()).toEqual(
-      ['custom', 'discord', 'feishu', 'slack', 'telegram', 'web', 'whatsapp'],
-    )
+  it('reads the transport when stamped and falls back to the channel', () => {
+    expect(toolTransport({ channelType: 'doc_thread', transport: 'web' })).toBe('web')
+    expect(toolTransport({ channelType: 'telegram' })).toBe('telegram')
   })
 })
 

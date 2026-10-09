@@ -1,6 +1,6 @@
 import { z } from 'zod'
 import { buildTool, type ToolContext } from '../tools/types.js'
-import { isAutonomousToolContext } from '../tools/capability-gate.js'
+import { isAttendedTurn } from '../tools/capability-gate.js'
 import { notFoundFailure, toolFailure } from '../tools/tool-failure.js'
 import type { AccessContext } from '../security/access-context.js'
 import type { EntityStore } from './types.js'
@@ -132,7 +132,7 @@ export function createEntityAliasTools(entities: Pick<EntityStore, 'addAlias' | 
     isConcurrencySafe: false,
     isReadOnly: false,
     // Preserve the existing confirmation gate for autonomous alias removal.
-    resolveConfirmation: async (context) => isAutonomousToolContext(context),
+    resolveConfirmation: async (context) => !isAttendedTurn(context),
 
     async execute(input, context) {
       const gate = workspaceGate(context.workspaceId, 'splitAlias')

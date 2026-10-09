@@ -1,4 +1,5 @@
 import { describe, expect, it } from 'vitest'
+import { isAttendedTurn } from '@use-brian/core'
 import { policyFor, transportPolicy, type SessionKindRow } from '../session-kind.js'
 
 /**
@@ -14,24 +15,24 @@ const OFFICE: SessionKindRow = { channelType: 'office_thread', visibility: 'work
 const FEED_THREAD: SessionKindRow = { channelType: 'feed_thread', visibility: 'workspace', channelId: 'f' }
 const INBOX: SessionKindRow = { channelType: 'notification', visibility: 'owner', channelId: 'notifications' }
 const TELEGRAM_DM: SessionKindRow = { channelType: 'telegram', visibility: 'owner', channelId: '1' }
-const FEISHU_DM: SessionKindRow = { channelType: 'feishu', visibility: 'owner', channelId: '1' }
-const TEAMS_DM: SessionKindRow = { channelType: 'msteams', visibility: 'owner', channelId: '1' }
 const WORKFLOW: SessionKindRow = { channelType: 'workflow', channelId: 'run' }
 const PROGRAMMATIC: SessionKindRow = { channelType: 'programmatic', channelId: 'k' }
 const A2A: SessionKindRow = { channelType: 'assistant-call', channelId: 'a' }
 const CRON: SessionKindRow = { channelType: 'cron', channelId: 'j' }
 
 describe('[COMP:api/session-policy] sessionPolicy drift ledger', () => {
-  it('L1 tool interactivity: humans in anchored threads are treated as autonomous', () => {
-    for (const row of [DOC_THREAD, OFFICE, FEED_THREAD, INBOX]) {
-      expect(policyFor(row).interactivity.capabilityGate).toBe(false)
+  it('L1 tool interactivity: comes from the principal, so a human in an anchored thread is attended', () => {
+    for (const channelType of ['doc_thread', 'office_thread', 'feed_thread', 'notification', 'web']) {
+      expect(isAttendedTurn({ attended: true, channelType } as never)).toBe(true)
     }
-    expect(policyFor(ROOM).interactivity.capabilityGate).toBe(true)
+    expect('interactivity' in policyFor(DOC_THREAD)).toBe(false)
   })
 
-  it('L2 interactive sets: capability gate and workflow remedy disagree on feishu and msteams', () => {
-    expect(policyFor(FEISHU_DM).interactivity).toEqual({ capabilityGate: true, workflowRemedy: false })
-    expect(policyFor(TEAMS_DM).interactivity).toEqual({ capabilityGate: false, workflowRemedy: true })
+  it('L2 interactive sets: one answer per principal, whatever the transport', () => {
+    for (const channelType of ['feishu', 'msteams', 'wechat', 'imessage']) {
+      expect(isAttendedTurn({ attended: true, channelType } as never)).toBe(true)
+      expect(isAttendedTurn({ attended: false, channelType } as never)).toBe(false)
+    }
   })
 
   it('L3 read: the Live roster skips the anchor gate the read gate applies', () => {

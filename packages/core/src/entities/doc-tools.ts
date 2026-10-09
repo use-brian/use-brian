@@ -40,7 +40,7 @@
 import { z } from 'zod'
 import { buildTool, type Tool } from '../tools/types.js'
 import { resolveWriteScope, scopeEvidenceFromRows } from '../security/context-scope.js'
-import { isAutonomousToolContext } from '../tools/capability-gate.js'
+import { isAttendedTurn } from '../tools/capability-gate.js'
 import { isBuiltInEntityTypeId } from './doc-built-ins.js'
 import { uuidId } from '../tools/schema-tolerance.js'
 import { toolFailure } from '../tools/tool-failure.js'
@@ -526,7 +526,7 @@ export function createRemovePropertyTool(
     // (cell values stay in JSONB), so no interactive prompt — but a
     // cron/workflow loop rewriting a whole type's schema with no human
     // present must park in Approvals. Gate only on the autonomous path.
-    resolveConfirmation: async (context) => isAutonomousToolContext(context),
+    resolveConfirmation: async (context) => !isAttendedTurn(context),
 
     async execute(input) {
       if (isBuiltInEntityTypeId(input.entityTypeId)) {
@@ -616,7 +616,7 @@ export function createRenamePropertyTool(
     // Tier-C write-gate (see removeProperty): migrates EVERY row's JSONB
     // key in one transaction. Reversible (rename back), so interactive
     // stays silent; the autonomous path gates.
-    resolveConfirmation: async (context) => isAutonomousToolContext(context),
+    resolveConfirmation: async (context) => !isAttendedTurn(context),
 
     async execute(input) {
       if (isBuiltInEntityTypeId(input.entityTypeId)) {
@@ -853,7 +853,7 @@ export function createDeleteEntityTool(
     // Tier-C write-gate (see removeProperty): soft-delete is recoverable
     // (bytes retained), so interactive stays silent; a headless loop
     // mass-deleting rows parks in Approvals.
-    resolveConfirmation: async (context) => isAutonomousToolContext(context),
+    resolveConfirmation: async (context) => !isAttendedTurn(context),
 
     async execute(input) {
       if (isBuiltInEntityTypeId(input.entityId)) {

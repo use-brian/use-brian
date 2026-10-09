@@ -79,6 +79,12 @@ export type ExecutionLifecycle = {
   sessionId: string
   channelType: string
   channelId: string
+  /**
+   * The wire carrying the turn (`web`, `telegram`, ...), when it differs from
+   * the session's stored `channelType` (an anchored web thread). Transport
+   * capabilities (documents, views) read it; absent = `channelType`.
+   */
+  transport?: string
 }
 
 export type ExecutionSurfaceCapabilities = {
@@ -231,6 +237,8 @@ export function executionToolContext(
   | 'appId'
   | 'channelType'
   | 'channelId'
+  | 'transport'
+  | 'attended'
   | 'workspaceId'
   | 'assistantKind'
   | 'visibilityAssistantIds'
@@ -262,6 +270,8 @@ export function executionToolContext(
     appId: base.appId,
     channelType: execution.lifecycle.channelType,
     channelId: execution.lifecycle.channelId,
+    transport: execution.lifecycle.transport ?? execution.lifecycle.channelType,
+    attended: execution.identity.kind === 'attended',
     workspaceId: execution.ownership.kind === 'workspace' ? execution.ownership.workspaceId : null,
     assistantKind: access.assistantKind,
     visibilityAssistantIds: access.visibilityAssistantIds,

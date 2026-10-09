@@ -13,6 +13,10 @@
  * `app_origin`, the session `channel_type` or the `channel_id` sentinels.
  * Every concern (read, admission, attribution, delivery, live follow,
  * confirmations, lifecycle, billing, ...) is answered once by `sessionPolicy`.
+ * Tool interactivity is deliberately NOT a session concern (D13): it comes
+ * from the principal driving the turn (`ToolContext.attended`, stamped from
+ * the execution identity), so a person in a doc thread is attended and a
+ * workflow on Telegram is not.
  * Graded by `pnpm check` (`invariants/session-kind-single-source`).
  *
  * Spec: docs/architecture/context-engine/session-messages.md -> "Session kind".
@@ -230,12 +234,6 @@ export type SessionPolicy = {
    */
   humanActivity: { memory: boolean; playbook: boolean; live: boolean; search: boolean }
   /**
-   * Is a live human on the other end who can answer a confirmation in-band?
-   * Per consumer (L1, L2): the tool capability gate and the workflow tools'
-   * remedy copy.
-   */
-  interactivity: { capabilityGate: boolean; workflowRemedy: boolean }
-  /**
    * Does the turn's `sessionId` name a persisted `sessions` row, per
    * consumer (L14): task provenance and CRM provenance.
    */
@@ -256,11 +254,6 @@ export type SessionPolicy = {
 function isWebRoom(kind: SessionKind): boolean {
   return kind.audience === 'workspace' && kind.anchor.kind === 'none' && kind.transport === 'web' && kind.surface === 'chat'
 }
-
-/** Transports the core capability gate treats as interactive today (L1/L2). */
-const CAPABILITY_GATE_TRANSPORTS: readonly Transport[] = ['web', 'telegram', 'slack', 'feishu', 'whatsapp', 'discord', 'custom']
-/** Transports the workflow tools' remedy copy treats as interactive today (L2). */
-const WORKFLOW_REMEDY_TRANSPORTS: readonly Transport[] = ['web', 'telegram', 'slack', 'whatsapp', 'discord', 'msteams', 'wechat', 'custom', 'imessage']
 
 /**
  * Answer every concern for one kind. Pure. Each field's rule is documented in
@@ -318,10 +311,6 @@ export function sessionPolicy(kind: SessionKind): SessionPolicy {
       live: kind.machine !== 'workflow' && kind.machine !== 'a2a' && anchor !== 'office_file',
       // workspace-search: channel_type='web' AND NOT transient AND mode IS DISTINCT FROM 'draft'
       search: conversation && kind.transport === 'web' && plainChannel && !draft,
-    },
-    interactivity: {
-      capabilityGate: conversation && plainChannel && CAPABILITY_GATE_TRANSPORTS.includes(kind.transport),
-      workflowRemedy: conversation && plainChannel && WORKFLOW_REMEDY_TRANSPORTS.includes(kind.transport),
     },
     persistedRow: {
       tasks: kind.machine !== 'programmatic' && kind.machine !== 'workflow',

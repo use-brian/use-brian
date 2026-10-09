@@ -11,7 +11,7 @@ function toolContext(overrides: Partial<ToolContext> = {}): ToolContext {
     assistantId: 'asst-1',
     sessionId: 'sess-1',
     appId: 'app-1',
-    channelType: 'web',
+    channelType: 'web', attended: true,
     channelId: 'chan-1',
     workspaceId: 'ws-1',
     abortSignal: new AbortController().signal,
@@ -100,7 +100,7 @@ describe('[COMP:sandbox/python-exec] runPython — isolated compute (§4.7)', ()
 
   it('hard-blocks on autonomous paths when unattended computer-use is off (Barrier 2)', async () => {
     const { tools, provider } = build()
-    const res = await run(tools.runPython, { code: 'print(1)' }, toolContext({ channelType: 'workflow' }))
+    const res = await run(tools.runPython, { code: 'print(1)' }, toolContext({ channelType: 'workflow', attended: false }))
     expect(res.isError).toBe(true)
     expect(String(res.data)).toContain('autonomous')
     expect(provider.sandboxes.size).toBe(0)

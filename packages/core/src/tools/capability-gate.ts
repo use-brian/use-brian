@@ -38,49 +38,25 @@ export function missingToolCapability(tool: Tool, activeCapabilities?: ReadonlyS
 }
 
 /**
- * The channels where a live human is on the other end and can answer a
- * confirmation prompt in-band (the tool executor wires a
- * `confirmationResolver` on exactly these turns). Everything NOT in this
- * set is an autonomous / headless path — a scheduled job (which runs
- * through the workflow executor with `channelType: 'workflow'`), a
- * workflow step, an A2A callee (`'assistant-call'`), a background worker
- * (`'system'` / `'synthesis'` / …), or a programmatic API caller
- * (`'api'` / `'programmatic'`), where no one can tap Allow.
+ * Is an attended human driving this turn (unified-sessions D13)? The Tier-C
+ * write-gate (Posture A, `docs/architecture/engine/tool-executor.md` section
+ * 3) keys off the inverse: a destructive-but-recoverable tool
+ * (`deleteEntity`, `healMemories`, ...) gates ONLY on an unattended turn, so a
+ * person who sees the turn is never parked in Approvals, while a cron or
+ * workflow loop deleting entities with no human present is.
  *
- * The allowlist is deliberately the SMALL, interactive side so the check
- * is fail-closed: a new headless channel added later defaults to
- * autonomous (gated) rather than silently slipping through as trusted.
- * The canonical channel union is `a2a/types.ts` → `ChannelType`.
+ * Interactivity comes from the PRINCIPAL, never from the channel. The
+ * retired channel allowlists left humans in doc, Office and feed threads
+ * treated as autonomous (their sessions carried an anchor channel type) and
+ * disagreed with each other about Teams and Feishu. Fail-closed: a context
+ * with no attended identity is unattended.
  */
-export const INTERACTIVE_CHANNEL_TYPES: ReadonlySet<string> = new Set([
-  'web',
-  'telegram',
-  'slack',
-  'feishu',
-  'whatsapp',
-  'discord',
-  // A custom (bridge-driven) channel is a live human surface: the bridge
-  // relays a person's chat (docs/architecture/channels/custom-channel.md).
-  'custom',
-])
+export function isAttendedTurn(context: Pick<ToolContext, 'attended' | 'executionContext'>): boolean {
+  if (context.attended !== undefined) return context.attended
+  return context.executionContext?.identity.kind === 'attended'
+}
 
-/**
- * True when this turn is running on an autonomous / headless path — no
- * live human to confirm a write. This is the honest discriminator the
- * Tier-C write-gate (Posture A, `docs/architecture/engine/tool-executor.md`
- * §3) keys off: a destructive-but-recoverable tool (`deleteEntity`,
- * `healMemories`, …) gates ONLY here — interactive chat stays silent
- * because the user sees the turn and the write is soft/reversible, but a
- * cron/workflow loop deleting entities with no human present is the
- * medication-storm shape and must park in Approvals.
- *
- * Derived from `context.channelType` alone — no new ToolContext field —
- * because the autonomous dispatchers already stamp a distinctive
- * channelType (`'workflow'`, `'assistant-call'`, `'system'`, …) and
- * scheduled jobs execute THROUGH the workflow executor, so they inherit
- * `'workflow'` too (they do NOT keep the originating messaging channel on
- * the ToolContext — that value only rides analytics events).
- */
-export function isAutonomousToolContext(context: Pick<ToolContext, 'channelType'>): boolean {
-  return !INTERACTIVE_CHANNEL_TYPES.has(context.channelType)
+/** The wire carrying this turn: `transport` when stamped, else `channelType`. */
+export function toolTransport(context: Pick<ToolContext, 'transport' | 'channelType'>): string {
+  return context.transport ?? context.channelType
 }

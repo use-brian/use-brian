@@ -10,7 +10,7 @@ function toolContext(overrides: Partial<ToolContext> = {}): ToolContext {
     assistantId: 'asst-1',
     sessionId: 'sess-1',
     appId: 'app-1',
-    channelType: 'web',
+    channelType: 'web', attended: true,
     channelId: 'chan-1',
     workspaceId: 'ws-1',
     abortSignal: new AbortController().signal,
@@ -206,7 +206,7 @@ describe('[COMP:sandbox/read-browse] browserReadPage — the sends-forbidden res
   it('refuses on autonomous (headless-scheduled) paths like every other browser tool', async () => {
     const cloud = fakeCloud()
     const tools = createComputerTools({ local: localNever(), cloud: cloud.provider, cloudAvailable: () => true })
-    const res = await run(tools.browserReadPage, { url: 'https://lu.ma/hk' }, toolContext({ channelType: 'cron' }))
+    const res = await run(tools.browserReadPage, { url: 'https://lu.ma/hk' }, toolContext({ channelType: 'cron', attended: false }))
     expect(res.isError).toBe(true)
     expect(cloud.calls).toEqual([])
   })

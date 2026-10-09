@@ -60,6 +60,20 @@ export type ToolContext = {
   channelType: string
   channelId: string
   /**
+   * The wire carrying this turn (`web`, `telegram`, ...). Transport
+   * capabilities (document upload, view mounting) key on it, never on
+   * `channelType`, which on an anchored web thread names the anchor.
+   * Absent = `channelType`. Read through `toolTransport(context)`.
+   */
+  transport?: string
+  /**
+   * True when an attended human principal drives this turn and can answer a
+   * confirmation in-band (unified-sessions D13). Interactivity comes from the
+   * principal, never from the channel: a person in a doc thread is attended,
+   * a workflow on Telegram is not. Read through `isAttendedTurn(context)`.
+   */
+  attended?: boolean
+  /**
    * Authenticated principal for a programmatic tool call. Brain MCP fills
    * this from the credential that actually authenticated the request so
    * domain services can audit API keys, OAuth grants, and Home apps without

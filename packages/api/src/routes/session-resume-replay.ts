@@ -34,7 +34,6 @@ import {
   SensitivityAccumulator,
   ContextScopeAccumulator,
   boundScopeSource,
-  INTERACTIVE_CHANNEL_TYPES,
   accessCeilingContains,
   intersectAccessCeilings,
   pinAccessCeiling,
@@ -47,6 +46,7 @@ import {
   type AnalyticsLogger,
   type UsageStore,
 } from '@use-brian/core'
+import { classifySession } from '../session-kind.js'
 import {
   findSessionById,
   getSessionMessages,
@@ -146,14 +146,18 @@ function buildContext(
   assistant: AssistantRow,
   turnScope: ResolvedTurnScope,
 ): ToolContext {
+  const kind = classifySession(session)
   return {
     userId: session.userId,
-    workspaceActorUserId: INTERACTIVE_CHANNEL_TYPES.has(session.channelType) ? session.userId : undefined,
+    // The session's own human is the actor when the conversation is one a
+    // person drives; a machine lane has no workspace actor.
+    workspaceActorUserId: kind.lane === 'conversation' ? session.userId : undefined,
     assistantId: assistant.id,
     sessionId: session.id,
     appId: 'Use Brian',
     channelType: session.channelType,
     channelId: session.channelId,
+    transport: kind.transport,
     workspaceId: assistant.workspaceId ?? undefined,
     assistantKind: assistant.kind,
     clearance: turnScope.access.clearance,
