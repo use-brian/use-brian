@@ -154,8 +154,11 @@ describe('[COMP:api/session-policy] sessionPolicy drift ledger', () => {
     expect(sessionKindSql.proactiveDeliveryTransport('s')).toContain("'custom'")
   })
 
-  it('L16 shared audience: personal memory loads in every personal-audience row, groups included', () => {
+  it('L16 shared audience: one definition for web rooms and provider groups (D3)', () => {
     expect(policyFor(TELEGRAM_DM).context.personalMemory).toBe(true)
+    const group = policyFor(TELEGRAM_DM, { providerGroup: true })
+    expect(group.context.personalMemory).toBe(false)
+    expect(group.deliveryCeiling).toEqual({ ceiling: 'audience', recipientType: 'group' })
     expect(policyFor(ROOM).context.personalMemory).toBe(false)
   })
 

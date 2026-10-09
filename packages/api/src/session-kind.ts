@@ -149,9 +149,19 @@ export function isExternalTransport(transport: Transport): boolean {
 // --- Classifier ------------------------------------------------------------
 
 /**
- * Classify a session row. The ONLY reader of the discriminator columns.
+ * Per-turn facts the row cannot carry. `providerGroup`: this turn arrived in
+ * a provider group conversation (a Telegram group, a Slack channel). Until
+ * group chats converge into workspace rooms (unified-sessions S4) their
+ * sessions are per-sender rows, so the group-ness lives on the turn.
  */
-export function classifySession(row: SessionKindRow): SessionKind {
+export type SessionTurnFacts = { providerGroup?: boolean }
+
+/**
+ * Classify a session row. The ONLY reader of the discriminator columns.
+ * A provider-group turn has a shared audience whatever its row says (L16):
+ * one audience definition for web rooms and external groups alike.
+ */
+export function classifySession(row: SessionKindRow, turn: SessionTurnFacts = {}): SessionKind {
   const channelType = row.channelType
   const channelId = row.channelId ?? null
   const machine: MachineLane | null = MACHINE_CHANNEL_TYPES[channelType]
@@ -168,7 +178,9 @@ export function classifySession(row: SessionKindRow): SessionKind {
     anchor = { kind: 'job', ref: channelId }
   }
 
-  const audience: Audience = row.visibility === 'workspace' || row.mode === 'draft' ? 'workspace' : 'personal'
+  const audience: Audience = row.visibility === 'workspace' || row.mode === 'draft' || turn.providerGroup === true
+    ? 'workspace'
+    : 'personal'
 
   return {
     audience,
@@ -351,8 +363,8 @@ export function feedAnchoredRead(policy: SessionPolicy): boolean {
 }
 
 /** Convenience: classify and answer in one call. */
-export function policyFor(row: SessionKindRow): SessionPolicy {
-  return sessionPolicy(classifySession(row))
+export function policyFor(row: SessionKindRow, turn: SessionTurnFacts = {}): SessionPolicy {
+  return sessionPolicy(classifySession(row, turn))
 }
 
 // --- Transport policy ------------------------------------------------------

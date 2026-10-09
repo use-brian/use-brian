@@ -1,3 +1,4 @@
+import { policyFor } from '../session-kind.js'
 import { renderSystemContext } from '@use-brian/core'
 // REBRAND-CUTOVER: this file contains sidan.ai runtime values that must flip to usebrian.ai when DNS + Vercel domains + OAuth consoles + webhooks are cut over. Grep REBRAND-CUTOVER.
 /**
@@ -1088,6 +1089,9 @@ async function processChannelMessageTurn(params: ChannelPipelineParams): Promise
   const resolveDeliveryAudienceEnvelope = createDeliveryAudienceEnvelopeResolver({
     integrationStore: params.channelIntegrationStore,
   })
+  // One audience definition for every surface (L16): a provider-group turn is
+  // a shared audience even on a per-sender row.
+  const turnPolicy = policyFor(session, { providerGroup: isGroupChat })
   const audienceInput = {
     workspaceId: assistant.workspaceId ?? '',
     assistantId: assistant.id,
@@ -1096,7 +1100,7 @@ async function processChannelMessageTurn(params: ChannelPipelineParams): Promise
     channelId,
     sessionChannelId,
     channelIntegrationId: params.channelIntegrationId,
-    recipientType: isGroupChat ? 'group' as const : 'individual' as const,
+    recipientType: turnPolicy.deliveryCeiling.recipientType,
     // A DM from a non-member goes back to that same guest, judged as the
     // guest the turn ran as - never as a member lookup that cannot succeed.
     recipientMode: memberMode === 'external' ? 'external' as const : 'member' as const,
@@ -1147,7 +1151,7 @@ async function processChannelMessageTurn(params: ChannelPipelineParams): Promise
       // A group reads only rows the whole group may see (decision D4),
       // unless the envelope names the speaker: a linked member speaking in
       // an approved group also reads their own personal rows.
-      sharedAudience: isGroupChat && !(audienceEnvelope?.allowed && audienceEnvelope.ceiling.userId),
+      sharedAudience: !turnPolicy.context.personalMemory && !(audienceEnvelope?.allowed && audienceEnvelope.ceiling.userId),
       identity: senderIsWorkspaceMember
         ? { kind: 'attended', principal: { kind: 'workspace_member', userId } }
         : {
@@ -1203,7 +1207,7 @@ async function processChannelMessageTurn(params: ChannelPipelineParams): Promise
     scope: dataTurnScope,
     workspaceId: assistant.workspaceId,
     userId,
-    sharedAudience: isGroupChat,
+    sharedAudience: !turnPolicy.context.personalMemory,
   })
   const currentTurnWrite = () => turnOutputWrite({
     producer: `turn:${channelType}`,
@@ -1266,7 +1270,7 @@ async function processChannelMessageTurn(params: ChannelPipelineParams): Promise
     channelMessageId: string | null
   }>(rows: readonly T[]): Promise<T[]> => filterChannelHistoryForAudience({
     rows,
-    group: isGroupChat,
+    group: turnPolicy.deliveryCeiling.recipientType === 'group',
     ceiling: audienceEnvelope?.allowed ? audienceEnvelope.ceiling : undefined,
   })
 
