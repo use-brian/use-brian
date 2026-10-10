@@ -1,11 +1,11 @@
 // @vitest-environment jsdom
 /**
- * [COMP:app-web/chat-context-pins] Work Bench chrome contract.
+ * [COMP:app-web/chat-context-pins] Work Bench (the side pane's Work tab body).
  *
  * app-web's default Vitest environment is node-only. An SSR pass is enough
- * for the static contract here: the persistent collapsed rail, resizable
- * expanded split-pane section, compact graphic hierarchy, inline Add menu,
- * and durable file-drop-to-pin path. Pointer resizing and live pin fan-in
+ * for the static contract here: the compact graphic hierarchy, inline Add
+ * menu, and durable file-drop-to-pin path. The rail chrome moved to the side
+ * pane (`chat-side-pane.test.tsx`). Pointer resizing and live pin fan-in
  * remain browser QA. Deferred-promise DOM tests below also cover room identity,
  * editor resets, and overlapping pin refreshes without a parent-provided key.
  */
@@ -106,106 +106,17 @@ describe("[COMP:app-web/chat-context-pins] Work Bench section", () => {
     });
   });
 
-  it("collapses to a persistent icon-only rail with an accessible expand control", () => {
+  it("renders as the side pane's Work tab body: compact, icon-led, no rail chrome (chat-parity D6)", () => {
     const html = wrap(
       <ChatContextPins
         sessionId="session-1"
         workspaceId="workspace-1"
         refreshKey={0}
         startedByName="Ada"
-        expanded={false}
-        onExpandedChange={() => {}}
       />,
     );
 
-    expect(html).toContain("Work Bench");
-    expect(html).toContain("Captured to the company brain");
-    expect(html).toMatch(/<aside[^>]*id="chat-work-bench"/);
-    expect(html).toContain("w-11");
-    expect(html).not.toContain("shadow-");
-    expect(html).toMatch(/aria-expanded="false"/);
-    expect(html).toMatch(/aria-controls="chat-work-bench-content"/);
-    expect(html).toMatch(/aria-label="Expand Work Bench\. Captured to the company brain"/);
-    expect(html).not.toContain("Shared with workspace");
-  });
-
-  it("restores the section when the collapsed rail icon is clicked", async () => {
-    const container = document.createElement("div");
-    document.body.appendChild(container);
-    const root = createRoot(container);
-    const onExpandedChange = vi.fn();
-
-    await act(async () => {
-      root.render(
-        <I18nProvider locale="en" dict={dict}>
-          <ChatContextPins
-            sessionId="session-1"
-            workspaceId="workspace-1"
-            refreshKey={0}
-            startedByName="Ada"
-            expanded={false}
-            onExpandedChange={onExpandedChange}
-          />
-        </I18nProvider>,
-      );
-    });
-
-    const expand = container.querySelector<HTMLButtonElement>(
-      'button[aria-label^="Expand Work Bench"]',
-    );
-    expect(expand).toBeTruthy();
-    await act(async () => expand!.click());
-    expect(onExpandedChange).toHaveBeenCalledWith(true);
-
-    act(() => root.unmount());
-    container.remove();
-  });
-
-  it("collapses the expanded section from its header control", async () => {
-    const container = document.createElement("div");
-    document.body.appendChild(container);
-    const root = createRoot(container);
-    const onExpandedChange = vi.fn();
-
-    await act(async () => {
-      root.render(
-        <I18nProvider locale="en" dict={dict}>
-          <ChatContextPins
-            sessionId="session-1"
-            workspaceId="workspace-1"
-            refreshKey={0}
-            startedByName="Ada"
-            expanded
-            onExpandedChange={onExpandedChange}
-          />
-        </I18nProvider>,
-      );
-    });
-
-    const collapse = container.querySelector<HTMLButtonElement>(
-      'button[aria-label="Collapse Work Bench"]',
-    );
-    expect(collapse).toBeTruthy();
-    await act(async () => collapse!.click());
-    expect(onExpandedChange).toHaveBeenCalledWith(false);
-
-    act(() => root.unmount());
-    container.remove();
-  });
-
-  it("uses a compact icon-led hierarchy inside the flat resizable right section", () => {
-    const html = wrap(
-      <ChatContextPins
-        sessionId="session-1"
-        workspaceId="workspace-1"
-        refreshKey={0}
-        startedByName="Ada"
-        expanded
-        onExpandedChange={() => {}}
-      />,
-    );
-
-    expect(html).toMatch(/<aside[^>]*id="chat-work-bench"/);
+    expect(html).toMatch(/<section[^>]*id="chat-work-bench"/);
     expect(html).toContain('aria-label="Room status"');
     expect(html).toContain('aria-label="Shared with workspace"');
     expect(html).toContain('title="Started by Ada"');
@@ -219,9 +130,10 @@ describe("[COMP:app-web/chat-context-pins] Work Bench section", () => {
     expect(html).not.toContain("Live tasks and progress will appear here.");
     expect(html).not.toContain("Nothing is pinned yet");
     expect(html).not.toContain("shadow-");
-    expect(html).toMatch(/aria-label="Collapse Work Bench"/);
-    expect(html).toMatch(/role="separator"/);
-    expect(html).toMatch(/aria-orientation="vertical"/);
+    // Collapse, resize and the phone overlay belong to the side pane now.
+    expect(html).not.toMatch(/aria-label="Collapse Work Bench"/);
+    expect(html).not.toMatch(/role="separator"/);
+    expect(html).not.toContain("<aside");
   });
 
   it("shows the lead and delegated assistants with truthful live step progress", async () => {
@@ -261,8 +173,6 @@ describe("[COMP:app-web/chat-context-pins] Work Bench section", () => {
                 workerId: "worker-pricing",
               },
             ]}
-            expanded
-            onExpandedChange={() => {}}
           />
         </I18nProvider>,
       );
@@ -289,8 +199,6 @@ describe("[COMP:app-web/chat-context-pins] Work Bench section", () => {
         workspaceId="workspace-1"
         refreshKey={0}
         startedByName={null}
-        expanded
-        onExpandedChange={() => {}}
       />,
     );
 
@@ -313,8 +221,6 @@ describe("[COMP:app-web/chat-context-pins] Work Bench section", () => {
             workspaceId="workspace-1"
             refreshKey={0}
             startedByName={null}
-            expanded
-            onExpandedChange={() => {}}
           />
         </I18nProvider>,
       );
@@ -354,8 +260,6 @@ describe("[COMP:app-web/chat-context-pins] Work Bench section", () => {
             workspaceId="workspace-1"
             refreshKey={0}
             startedByName="Ada"
-            expanded
-            onExpandedChange={() => {}}
           />
         </I18nProvider>,
       );
@@ -417,8 +321,6 @@ describe("[COMP:app-web/chat-context-pins] Work Bench section", () => {
             workspaceId="workspace-1"
             refreshKey={0}
             startedByName="Ada"
-            expanded
-            onExpandedChange={() => {}}
           />
         </I18nProvider>,
       );
@@ -464,8 +366,6 @@ describe("[COMP:app-web/chat-context-pins] Work Bench section", () => {
             workspaceId="workspace-1"
             refreshKey={0}
             startedByName="Ada"
-            expanded
-            onExpandedChange={() => {}}
           />
         </I18nProvider>,
       );
@@ -514,8 +414,6 @@ describe("[COMP:app-web/chat-context-pins] Work Bench section", () => {
             workspaceId="workspace-1"
             refreshKey={0}
             startedByName="Ada"
-            expanded
-            onExpandedChange={() => {}}
           />
         </I18nProvider>,
       );
@@ -577,8 +475,6 @@ describe("[COMP:app-web/chat-context-pins] Work Bench section", () => {
             workspaceId="workspace-1"
             refreshKey={0}
             startedByName="Ada"
-            expanded
-            onExpandedChange={() => {}}
           />
         </I18nProvider>,
       );
@@ -635,8 +531,6 @@ describe("[COMP:app-web/chat-context-pins] Work Bench section", () => {
             workspaceId="workspace-1"
             refreshKey={0}
             startedByName="Ada"
-            expanded
-            onExpandedChange={() => {}}
           />
         </I18nProvider>,
       );
@@ -677,8 +571,6 @@ describe("[COMP:app-web/chat-context-pins] Work Bench section", () => {
             workspaceId="workspace-1"
             refreshKey={0}
             startedByName="Ada"
-            expanded
-            onExpandedChange={() => {}}
           />
         </I18nProvider>,
       );
@@ -736,8 +628,6 @@ describe("[COMP:app-web/chat-context-pins] Work Bench section", () => {
             workspaceId="workspace-1"
             refreshKey={0}
             startedByName="Ada"
-            expanded
-            onExpandedChange={() => {}}
           />
         </I18nProvider>,
       );
@@ -784,8 +674,6 @@ describe("[COMP:app-web/chat-context-pins] Work Bench section", () => {
             workspaceId="workspace-1"
             refreshKey={0}
             startedByName="Ada"
-            expanded
-            onExpandedChange={() => {}}
           />
         </I18nProvider>,
       );
@@ -836,8 +724,6 @@ describe("[COMP:app-web/work-bench-stop] Live card stop control", () => {
     workspaceId: "workspace-1",
     refreshKey: 0,
     startedByName: null,
-    expanded: true,
-    onExpandedChange: () => {},
     assistant: { id: "a-1", name: "Brian" },
   };
 
@@ -953,7 +839,7 @@ async function isolationBench() {
     await act(async () => root.render(
       <I18nProvider locale="en" dict={dict}>
         <ChatContextPins sessionId={sessionId} workspaceId="workspace-1"
-          refreshKey={0} startedByName={null} expanded onExpandedChange={() => {}}
+          refreshKey={0} startedByName={null}
           {...props} />
       </I18nProvider>,
     ));

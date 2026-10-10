@@ -8658,6 +8658,22 @@ export const ja: Dictionary = {
       "前のターンが応答しなくなったためリセットし、チャットのブロックを解除しました。メッセージはすべて残っています。もう一度送信すると続けられます。",
     pinnedContext: "ピン",
     assistantClearanceBlocked: "このアシスタントの権限レベルはこのルームより高いため、ここでは回答できません。",
+    // The Chat side pane: Work + pinned + open tabs (chat-parity D4-D8).
+    // [COMP:app-web/chat-side-pane]
+    sidePane: {
+      label: "サイドペイン",
+      tabs: "ペインのタブ",
+      work: "作業",
+      closeTab: "{title} を閉じる",
+      closePane: "ペインを閉じる",
+      openPane: "サイドペインを開く",
+      openPaneCount: "サイドペインを開く（タブ {count} 件）",
+      back: "戻る",
+      forward: "進む",
+      untitledPage: "無題のページ",
+      browser: "ブラウザ",
+      workEmpty: "チャットを始めると、ライブの作業とピンがここに表示されます。",
+    },
     documentViewer: {
       label: "元のドキュメント",
       open: "ドキュメントを開く",

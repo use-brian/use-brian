@@ -8892,6 +8892,22 @@ export const en = {
       "The previous turn stopped responding and was reset, so the chat is unblocked. Nothing was lost: your messages are still here. Send again to continue.",
     pinnedContext: "Pins",
     assistantClearanceBlocked: "That assistant is cleared above this room and cannot answer here.",
+    // The Chat side pane: Work + pinned + open tabs (chat-parity D4-D8).
+    // [COMP:app-web/chat-side-pane]
+    sidePane: {
+      label: "Side pane",
+      tabs: "Pane tabs",
+      work: "Work",
+      closeTab: "Close {title}",
+      closePane: "Close pane",
+      openPane: "Open side pane",
+      openPaneCount: "Open side pane, {count} tabs",
+      back: "Back",
+      forward: "Forward",
+      untitledPage: "Untitled page",
+      browser: "Browser",
+      workEmpty: "Live work and pins appear here once this chat starts.",
+    },
     documentViewer: {
       label: "Raw document",
       open: "Open document",

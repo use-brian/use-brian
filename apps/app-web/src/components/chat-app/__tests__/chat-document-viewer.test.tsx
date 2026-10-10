@@ -6,8 +6,8 @@ import { I18nProvider } from '@/lib/i18n/client'
 import { en } from '@/lib/i18n/dictionaries/en'
 import type { Dictionary } from '@/lib/i18n/dictionaries'
 import {
+  ChatDocumentBody,
   ChatDocumentCard,
-  ChatDocumentViewer,
 } from '../chat-document-viewer'
 
 const dict = en as unknown as Dictionary
@@ -20,7 +20,7 @@ function wrap(node: React.ReactNode): string {
   )
 }
 
-describe('[COMP:app-web/chat-document-viewer] raw document viewer', () => {
+describe('[COMP:app-web/chat-document-viewer] raw document tab body', () => {
   const textDocument = {
     id: 'doc-1',
     title: 'Design objective.docx',
@@ -31,21 +31,19 @@ describe('[COMP:app-web/chat-document-viewer] raw document viewer', () => {
 
   it('renders plain text without interpreting source markup', () => {
     const html = wrap(
-      <ChatDocumentViewer document={textDocument} onClose={() => {}} />,
+      <ChatDocumentBody document={textDocument} />,
     )
     expect(html).toContain('aria-label="Raw document"')
     expect(html).toContain('data-document-format="text"')
     expect(html).toContain('**literal asterisks**')
     expect(html).not.toContain('<strong>literal asterisks</strong>')
-    expect(html).toContain('Close document viewer')
+    // The side pane owns closing (chat-parity D4): the body has no close.
+    expect(html).not.toContain('Close document viewer')
   })
 
   it('uses the safe chat markdown renderer only for markdown sources', () => {
     const html = wrap(
-      <ChatDocumentViewer
-        document={{ ...textDocument, format: 'markdown' }}
-        onClose={() => {}}
-      />,
+      <ChatDocumentBody document={{ ...textDocument, format: 'markdown' }} />,
     )
     expect(html).toContain('data-document-format="markdown"')
     expect(html).toContain('<strong>literal asterisks</strong>')

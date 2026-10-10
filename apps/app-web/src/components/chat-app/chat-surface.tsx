@@ -245,6 +245,14 @@ import { requestApprovalsRefresh } from "@/lib/approvals-events";
 import { PendingQuestionPanel } from "@/components/chrome/pending-question-panel";
 import { ChatConfirmationCard } from "@/components/chrome/chat-confirmation-card";
 import { ChatContextPins } from "@/components/chat-app/chat-context-pins";
+import { ChatSidePane, ChatSidePaneToggle } from "@/components/chat-app/chat-side-pane";
+import {
+  adoptFreshChatPane,
+  resetFreshChatPane,
+  updateChatPane,
+  useChatPane,
+} from "@/lib/chat-pane-session";
+import { openInPane, type OpenOptions, type PaneRef } from "@/lib/chat-pane-tabs";
 import { resolveRequestedFreshAssistant } from "@/components/chat-app/assistant-deeplink";
 import {
   isAssistantPickerLive,
@@ -301,7 +309,6 @@ import {
 } from "@/lib/recordings/use-recording-upload";
 import {
   ChatDocumentCard,
-  ChatDocumentViewer,
 } from "@/components/chat-app/chat-document-viewer";
 import { ChatPageLinkCard } from "@/components/chat-app/chat-page-link-card";
 import {
@@ -463,8 +470,6 @@ export function ChatSurface({ workspaceId }: { workspaceId: string }) {
   const [error, setError] = useState<string | null>(null);
   const [startingShared, setStartingShared] = useState(false);
   const [copiedMessageId, setCopiedMessageId] = useState<string | null>(null);
-  /** The source currently occupying the Chat app's right-hand split pane. */
-  const [openDocument, setOpenDocument] = useState<DocumentAttachment | null>(null);
   /** The viewer's own user id — filters this client's OWN turn out of the
    *  room's bus mirror (it streams over this client's POST already). */
   const meId = getUserInfo()?.id ?? null;
@@ -552,6 +557,12 @@ export function ChatSurface({ workspaceId }: { workspaceId: string }) {
   const [restoring, setRestoring] = useState<ChatLocation | null>(null);
   const activeSessionId = restoring ? restoring.sessionId : urlSessionId;
   const view: ChatView = restoring ? restoring.view : urlView;
+  /**
+   * The side pane of the open chat (chat-parity D4-D8). Its tabs and whether
+   * it is open live in the per-chat store, not in this component, so they
+   * survive leaving `/chat` (T6). Phones seed it closed (T11).
+   */
+  const pane = useChatPane(workspaceId, activeSessionId, () => !isPhoneViewport());
   // One hero context picker for both views (chat-parity T5). A fresh personal
   // pane's Team/Project choice stays this surface's own state (handoffs and
   // restored drafts seed it), held by the shared creation context.
@@ -1372,7 +1383,7 @@ export function ChatSurface({ workspaceId }: { workspaceId: string }) {
     resetTurnActivity();
     att.clear();
     setError(null);
-    setOpenDocument(null);
+    // The side pane is per chat (T6): switching chats shows that chat's pane.
     // A quote points at a row in the thread being left. `session/set` only
     // moves the id, so nothing else clears this.
     setReplyTo(null);
@@ -1450,16 +1461,23 @@ export function ChatSurface({ workspaceId }: { workspaceId: string }) {
   /** Bumped by the room stream's `pins_changed` signal — Work Bench
    *  refetches through its own loader (signals, never data). */
   const [pinsEpoch, setPinsEpoch] = useState(0);
-  /** The room's working frame is a persistent right rail. Expanded is the
-   *  remembered resizable drawer; collapsed is one icon-only column. Seeded
-   *  expanded (the desktop default, and the SSR-safe value); the mount effect
-   *  below collapses it on a phone, where an expanded bench is a full-pane
-   *  overlay that would otherwise open OVER the transcript the user came for
-   *  (responsive contract M1 / M5). */
-  const [workBenchExpanded, setWorkBenchExpanded] = useState(true);
-  useEffect(() => {
-    if (isPhoneViewport()) setWorkBenchExpanded(false);
-  }, []);
+  /**
+   * Open something in THIS chat's side pane (D9), keyed by the session the
+   * send or stream belongs to right now (a fresh pane's first turn adopts
+   * its id mid-stream), never by a render-time closure. Expands the pane and
+   * focuses the tab (D8); nothing here ever collapses it.
+   */
+  const openInChatPane = useCallback(
+    (ref: PaneRef, options?: OpenOptions) => {
+      updateChatPane(
+        workspaceId,
+        sessionIdRef.current,
+        (state) => openInPane(state, ref, options),
+        !isPhoneViewport(),
+      );
+    },
+    [workspaceId],
+  );
 
   const resetRemoteTurn = useCallback(() => {
     setRemoteAssistantId(null);
@@ -2056,7 +2074,8 @@ export function ChatSurface({ workspaceId }: { workspaceId: string }) {
     freshChannelIdRef.current = null;
     setError(null);
     setInput("");
-    setOpenDocument(null);
+    // A new chat starts with an empty pane.
+    resetFreshChatPane(workspaceId);
     att.clear();
     chat.loadMessages([]);
     chat.dispatch({ type: "stream/abort" });
@@ -2664,6 +2683,9 @@ export function ChatSurface({ workspaceId }: { workspaceId: string }) {
               // Record the binding so the next turn resolves this thread to
               // the SAME assistant before the rail refetch lands.
               sessionAssistantRef.current.set(id, target.id);
+              // The fresh pane (a document this first turn presented) moves
+              // onto the session it just minted (T6).
+              adoptFreshChatPane(workspaceId, id);
               chat.setSession(id);
               selectSession(id);
               // The fresh thread is now listable — tell the sidebar rail.
@@ -2932,7 +2954,9 @@ export function ChatSurface({ workspaceId }: { workspaceId: string }) {
               ...turnDocumentsRef.current.filter((item) => item.id !== document.id),
               document,
             ];
-            setOpenDocument(document);
+            // Brian presenting a document opens it as a tab and expands the
+            // pane (D8). Its ending never collapses the pane.
+            openInChatPane({ kind: "document", document });
             break;
           }
           case "status": {
@@ -4513,6 +4537,8 @@ export function ChatSurface({ workspaceId }: { workspaceId: string }) {
           </div>
         }
         right={
+          <div className="flex items-center gap-1">
+          {!heroMode && <ChatSidePaneToggle pane={pane} />}
           <button
             type="button"
             onClick={
@@ -4526,6 +4552,7 @@ export function ChatSurface({ workspaceId }: { workspaceId: string }) {
             <Plus className="size-3.5" aria-hidden />
             {view === "workspace" ? t.newWorkspaceChat : t.newChat}
           </button>
+          </div>
         }
       />
 
@@ -4838,7 +4865,7 @@ export function ChatSurface({ workspaceId }: { workspaceId: string }) {
                       <ChatDocumentCard
                         key={document.id}
                         document={document}
-                        onOpen={setOpenDocument}
+                        onOpen={(document) => openInChatPane({ kind: "document", document })}
                       />
                     ))}
                     {m.pageLinks?.map((pageId) => (
@@ -5181,29 +5208,32 @@ export function ChatSurface({ workspaceId }: { workspaceId: string }) {
           <div ref={composerBarRef} className="mx-auto w-full max-w-3xl">{composerBox}</div>
         </div>
       </section>
-      {openDocument ? (
-        <ChatDocumentViewer
-          document={openDocument}
-          onClose={() => setOpenDocument(null)}
-        />
-      ) : panePolicy.pins && activeSessionId ? (
-        <ChatContextPins
-          sessionId={activeSessionId}
-          workspaceId={workspaceId}
-          refreshKey={pinsEpoch}
-          shared={panePolicy.post}
-          startedByName={activeStartedByName}
-          assistant={workBenchAssistant}
-          turnActive={workBenchTurnActive}
-          waitingForInput={workBenchWaiting}
-          currentStep={workBenchCurrentStep}
-          tools={workBenchTools}
-          lastProgressAt={workBenchTurnActive ? lastProgressAt : null}
-          onStopTurn={stopActiveTurn}
-          expanded={workBenchExpanded}
-          onExpandedChange={setWorkBenchExpanded}
-        />
-      ) : null}
+      <ChatSidePane
+        workspaceId={workspaceId}
+        pane={pane}
+        renderTab={(ref) =>
+          ref.kind === "work" ? (
+            panePolicy.pins && activeSessionId ? (
+              <ChatContextPins
+                sessionId={activeSessionId}
+                workspaceId={workspaceId}
+                refreshKey={pinsEpoch}
+                shared={panePolicy.post}
+                startedByName={activeStartedByName}
+                assistant={workBenchAssistant}
+                turnActive={workBenchTurnActive}
+                waitingForInput={workBenchWaiting}
+                currentStep={workBenchCurrentStep}
+                tools={workBenchTools}
+                lastProgressAt={workBenchTurnActive ? lastProgressAt : null}
+                onStopTurn={stopActiveTurn}
+              />
+            ) : (
+              <p className="px-4 py-6 text-sm text-muted-foreground">{t.sidePane.workEmpty}</p>
+            )
+          ) : undefined
+        }
+      />
       </div>
       )}
     </div>

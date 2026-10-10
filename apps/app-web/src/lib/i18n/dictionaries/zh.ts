@@ -8609,6 +8609,22 @@ export const zh: Dictionary = {
       "上一個回合停止回應，系統已將它重設並解除聊天封鎖。訊息都還在，重新傳送即可繼續。",
     pinnedContext: "釘選",
     assistantClearanceBlocked: "該助理的權限層級高於此聊天室，無法在這裡回答。",
+    // The Chat side pane: Work + pinned + open tabs (chat-parity D4-D8).
+    // [COMP:app-web/chat-side-pane]
+    sidePane: {
+      label: "側邊窗格",
+      tabs: "窗格分頁",
+      work: "工作",
+      closeTab: "關閉 {title}",
+      closePane: "關閉窗格",
+      openPane: "開啟側邊窗格",
+      openPaneCount: "開啟側邊窗格（{count} 個分頁）",
+      back: "返回",
+      forward: "前進",
+      untitledPage: "未命名頁面",
+      browser: "瀏覽器",
+      workEmpty: "開始對話後，即時工作與釘選會顯示在這裡。",
+    },
     documentViewer: {
       label: "原始文件",
       open: "開啟文件",

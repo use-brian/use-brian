@@ -1,14 +1,16 @@
 "use client";
 
 /**
- * Read-only raw-document split pane + transcript reopen card.
+ * Read-only raw document: the Chat side pane's `document` tab body, plus the
+ * transcript card that reopens it (chat-parity D5; the old split view is
+ * gone, the pane owns closing and resizing).
  * [COMP:app-web/chat-document-viewer]
  */
 
 import { useEffect, useRef, useState } from "react";
 import { ChatMarkdown, type DocumentAttachment } from "@use-brian/chat-ui";
 import remarkGfm from "remark-gfm";
-import { Check, ChevronRight, Copy, FileText, X } from "lucide-react";
+import { Check, ChevronRight, Copy, FileText } from "lucide-react";
 import { format, useT } from "@/lib/i18n/client";
 import { cn } from "@/lib/utils";
 
@@ -48,13 +50,7 @@ export function ChatDocumentCard({
   );
 }
 
-export function ChatDocumentViewer({
-  document,
-  onClose,
-}: {
-  document: DocumentAttachment;
-  onClose: () => void;
-}) {
+export function ChatDocumentBody({ document }: { document: DocumentAttachment }) {
   const t = useT().chatApp.documentViewer;
   const [copied, setCopied] = useState(false);
   const resetRef = useRef<number | null>(null);
@@ -74,13 +70,7 @@ export function ChatDocumentViewer({
   };
 
   return (
-    <aside
-      aria-label={t.label}
-      className={cn(
-        "absolute inset-0 z-30 flex min-h-0 flex-col border-l border-border bg-background",
-        "md:relative md:inset-auto md:z-auto md:w-[46%] md:min-w-[360px] md:max-w-[760px]",
-      )}
-    >
+    <div aria-label={t.label} className="flex min-h-0 flex-1 flex-col">
       <header className="flex min-h-14 shrink-0 items-center gap-3 border-b border-border px-3.5 py-2.5">
         <span className="flex size-8 shrink-0 items-center justify-center rounded-lg bg-muted text-muted-foreground">
           <FileText className="size-4" aria-hidden />
@@ -106,15 +96,6 @@ export function ChatDocumentViewer({
             <Copy className="size-4" aria-hidden />
           )}
         </button>
-        <button
-          type="button"
-          onClick={onClose}
-          aria-label={t.close}
-          title={t.close}
-          className="inline-flex size-11 items-center justify-center rounded-md text-muted-foreground transition-colors hover:bg-muted hover:text-foreground focus-visible:shadow-none sm:size-8"
-        >
-          <X className="size-4" aria-hidden />
-        </button>
       </header>
 
       <div className="min-h-0 flex-1 overflow-y-auto px-5 py-6 sm:px-7 md:px-8">
@@ -134,6 +115,6 @@ export function ChatDocumentViewer({
           </pre>
         )}
       </div>
-    </aside>
+    </div>
   );
 }

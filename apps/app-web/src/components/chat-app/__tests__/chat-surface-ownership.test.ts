@@ -191,7 +191,7 @@ function directStream(initialSession: string | null = "A") {
     flushQueuedInputs: vi.fn(), setQueuedNotice: vi.fn(),
     askedQuestionRef: { current: true }, refreshPendingInput: vi.fn(),
     panePolicy: { post: true, presence: true, multiVoice: true, pins: true, queue: true, addressing: "mention" },
-    markRoomSeen: vi.fn(), reloadShared: vi.fn(),
+    markRoomSeen: vi.fn(), reloadShared: vi.fn(), adoptFreshChatPane: vi.fn(),
     setError: vi.fn(), t: { errorGeneric: "error" },
   };
   // Keep the same mutable owner closure across the session event and terminal
@@ -233,6 +233,8 @@ describe("[COMP:app-web/chat-sessions-cache] stream completion ownership", () =>
     expect(scope.sessionIdRef.current).toBe("minted");
     expect(scope.applyQueuedInput).toHaveBeenCalledWith("input", "message", "minted");
     expect(scope.flushQueuedInputs).toHaveBeenCalledWith("minted");
+    // The fresh side pane moves onto the session the first turn minted (T6).
+    expect(scope.adoptFreshChatPane).toHaveBeenCalledWith("workspace", "minted");
     if (name === "onDone") {
       expect(scope.refreshPendingInput).toHaveBeenCalledWith("minted");
       expect(scope.markRoomSeen).toHaveBeenCalledWith("workspace", "minted");

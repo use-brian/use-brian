@@ -8479,6 +8479,22 @@ export const zhCN: Dictionary = {
     turnReclaimed: "上一个回合停止回应，系统已将它重设并解除聊天阻止。消息都还在，重新发送即可继续。",
     pinnedContext: "钉选",
     assistantClearanceBlocked: "该助理的权限层级高于此聊天室，无法在这里回答。",
+    // The Chat side pane: Work + pinned + open tabs (chat-parity D4-D8).
+    // [COMP:app-web/chat-side-pane]
+    sidePane: {
+      label: "侧边窗格",
+      tabs: "窗格标签页",
+      work: "工作",
+      closeTab: "关闭 {title}",
+      closePane: "关闭窗格",
+      openPane: "打开侧边窗格",
+      openPaneCount: "打开侧边窗格（{count} 个标签页）",
+      back: "返回",
+      forward: "前进",
+      untitledPage: "未命名页面",
+      browser: "浏览器",
+      workEmpty: "开始对话后，实时工作和置顶内容会显示在这里。",
+    },
     documentViewer: {
       label: "原始文档",
       open: "打开文档",
