@@ -118,9 +118,21 @@ export class EmbeddedBrowser {
         onSessionToken: async next => { token = next; },
         onStateChange: state => {
           if (this.relay !== relay) return;
-          if (state === "ready") settle(true);
+          // A network drop is not a revocation: RelayClient reconnects with
+          // backoff by itself. Tearing down here left the pane dead until the
+          // app restarted, because automatic pairing never retries a key.
+          // Only 4401 (unpaired), a newer pairing (replaced) or Stop end control.
+          // A reconnect is a fresh relay connection with no stop epoch. Dormant
+          // after Stop: re-send it, or every later command fails the fence below
+          // as pre-shutdown. Active again: pre-Stop commands died with the old
+          // socket, so drop the fence instead of re-announcing a stop.
+          if (state === "ready") {
+            settle(true);
+            if (this.active) { this.commandEpoch = undefined; this.host?.setStatus(""); }
+            else if (this.commandEpoch !== undefined) relay.sendEvent("stopped", this.commandEpoch);
+          }
           else if (state === "unpaired" || state === "replaced") { settle(false); this.stop(); }
-          else if (state === "disconnected") this.stop(false);
+          else if (state === "disconnected" && this.active) this.host?.setStatus("Reconnecting to Brian...");
         },
         onCommand: cmd => {
           if (this.relay === relay) this.receive(cmd, this.generation);
