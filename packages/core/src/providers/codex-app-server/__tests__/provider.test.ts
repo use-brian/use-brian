@@ -514,6 +514,146 @@ describe('[COMP:providers/codex-app-server] Codex app-server provider bridge', (
     harness.peer.close()
   })
 
+  // Codex's exec envelope yields to the model after yield_time_ms while a Brian
+  // tool is still held, so the turn keeps going with no send open. Everything
+  // it does in that gap must reach the next send - an approval wait made the
+  // resumed send stall silently until the stream-idle retry failed.
+  describe('a turn that runs on while a Brian tool is held', () => {
+    const toolCall = (harness: Harness, id: string, callId: string) =>
+      request(harness, id, 'item/tool/call', { threadId: 'thread-1', turnId: 'turn-1', callId, tool: 'brian_echo', namespace: null, arguments: { text: callId } })
+    const resultFor = (callId: string): Message[] => [{ role: 'user', content: [{ type: 'tool_result', toolUseId: callId, name: 'brian_echo', content: `echoed ${callId}` }] }]
+    const held = async () => {
+      const harness = createHarness()
+      const { session, first } = await startToolTurn(harness)
+      toolCall(harness, 'tool-request-1', 'call-1')
+      await first
+      return { harness, session }
+    }
+
+    it('delivers gap text and a gap tool call to the next send, then resumes the same turn', async () => {
+      const { harness, session } = await held()
+      notify(harness, 'item/agentMessage/delta', { threadId: 'thread-1', turnId: 'turn-1', itemId: 'm', delta: 'still working' })
+      toolCall(harness, 'tool-request-2', 'call-2')
+      await new Promise<void>((resolve) => setImmediate(resolve))
+
+      const second = await collect(session.send(resultFor('call-1')))
+      expect((await waitForResponse(harness, 'tool-request-1')).result).toMatchObject({ success: true })
+      // Notification vs request dispatch order is the RPC peer's, as on a live send.
+      expect(second).toContainEqual({ type: 'text_delta', text: 'still working' })
+      expect(second).toContainEqual({ type: 'tool_use_start', id: 'call-2', name: 'brian_echo' })
+      expect(second.at(-1)).toMatchObject({ type: 'message_end', stopReason: 'tool_use' })
+
+      // The gap call is now an ordinary surfaced call: its result resumes the same turn.
+      const third = collect(session.send(resultFor('call-2')))
+      expect((await waitForResponse(harness, 'tool-request-2')).result).toMatchObject({ success: true })
+      notify(harness, 'item/agentMessage/delta', { threadId: 'thread-1', turnId: 'turn-1', itemId: 'm2', delta: 'done' })
+      complete(harness, 'thread-1', 'turn-1')
+      expect((await third).map(c => c.type)).toEqual(['message_start', 'text_delta', 'message_end'])
+      expect(harness.outbound.filter((frame) => frame.method === 'turn/start')).toHaveLength(1)
+      harness.peer.close()
+    })
+
+    it('starts a fresh turn with the results when the held turn completed in the gap', async () => {
+      const { harness, session } = await held()
+      notify(harness, 'item/agentMessage/delta', { threadId: 'thread-1', turnId: 'turn-1', itemId: 'm', delta: 'answered without the result' })
+      complete(harness, 'thread-1', 'turn-1')
+      // Codex cancelled the pending call when its turn ended.
+      expect((await waitForResponse(harness, 'tool-request-1')).result).toMatchObject({ success: false })
+
+      const second = collect(session.send(resultFor('call-1')))
+      const turnStart = await waitForMethod(harness, 'turn/start', 1)
+      expect(JSON.stringify(turnStart.params)).toContain('echoed call-1')
+      respondToTurnStart(harness, turnStart, 'turn-2')
+      await new Promise<void>((resolve) => setImmediate(resolve))
+      notify(harness, 'item/agentMessage/delta', { threadId: 'thread-1', turnId: 'turn-2', itemId: 'm2', delta: 'with the result' })
+      complete(harness, 'thread-1', 'turn-2')
+      const chunks = await second
+      expect(chunks.filter(c => c.type === 'text_delta')).toEqual([{ type: 'text_delta', text: 'with the result' }])
+      expect(chunks.at(-1)).toMatchObject({ type: 'message_end', stopReason: 'end_turn' })
+      harness.peer.close()
+    })
+
+    it('fails the next send honestly when the held turn failed in the gap', async () => {
+      const { harness, session } = await held()
+      notify(harness, 'turn/completed', { threadId: 'thread-1', turn: { id: 'turn-1', status: 'failed', error: { message: 'upstream' } } })
+      await waitForResponse(harness, 'tool-request-1')
+      await expect(collect(session.send(resultFor('call-1')))).rejects.toBeInstanceOf(CodexTurnError)
+      expect(harness.outbound.filter((frame) => frame.method === 'turn/start')).toHaveLength(1)
+      harness.peer.close()
+    })
+
+    it('drops a gap call the result timeout answered before Brian ever saw it', async () => {
+      const harness = createHarness()
+      const provider = createCodexAppServerProvider({ transport: { rpc: harness.peer, cwd: '/tmp/brian-codex-test' }, models: [MODEL], toolBatchQuietMs: 1, toolResultTimeoutMs: 40 })
+      const session = provider.createSession({ model: MODEL, systemPrompt: 'You are Brian.', tools: [ECHO_TOOL] })
+      const first = collect(session.send([{ role: 'user', content: 'Use the echo tool.' }]))
+      respondToThreadStart(harness, await waitForMethod(harness, 'thread/start'))
+      respondToTurnStart(harness, await waitForMethod(harness, 'turn/start'))
+      await new Promise<void>((resolve) => setImmediate(resolve))
+      toolCall(harness, 'tool-request-1', 'call-1')
+      await first
+      // call-2 arrives in the gap; both expire while Brian is still on call-1.
+      toolCall(harness, 'tool-request-2', 'call-2')
+      expect((await waitForResponse(harness, 'tool-request-2')).result).toMatchObject({ success: false })
+      await waitForResponse(harness, 'tool-request-1')
+      const second = collect(session.send(resultFor('call-1')))
+      await new Promise((resolve) => setTimeout(resolve, 20))
+      complete(harness, 'thread-1', 'turn-1')
+      // Codex already failed call-2, so Brian must never be handed it to run.
+      const chunks = await second
+      expect(chunks.some(c => c.type === 'tool_use_start')).toBe(false)
+      harness.peer.close()
+    })
+
+    it('discards gap output when the resuming send fails', async () => {
+      const { harness, session } = await held()
+      toolCall(harness, 'tool-request-2', 'call-2')
+      await new Promise<void>((resolve) => setImmediate(resolve))
+      // A result for a call Codex never made fails the batch closed.
+      await expect(collect(session.send(resultFor('call-9')))).rejects.toBeInstanceOf(CodexProviderProtocolError)
+      complete(harness, 'thread-1', 'turn-1')
+      await new Promise<void>((resolve) => setImmediate(resolve))
+      // The next send is a fresh turn; the dead gap call is not replayed into it.
+      const next = collect(session.send([{ role: 'user', content: 'hello again' }]))
+      respondToTurnStart(harness, await waitForMethod(harness, 'turn/start', 1), 'turn-2')
+      await new Promise<void>((resolve) => setImmediate(resolve))
+      complete(harness, 'thread-1', 'turn-2')
+      expect((await next).some(c => c.type === 'tool_use_start')).toBe(false)
+      harness.peer.close()
+    })
+
+    it('bills the model calls Codex made in the gap on the next message_end', async () => {
+      const { harness, session } = await held()
+      usage(harness, 'thread-1', 'turn-1')
+      await new Promise<void>((resolve) => setImmediate(resolve))
+      const second = collect(session.send(resultFor('call-1')))
+      await waitForResponse(harness, 'tool-request-1')
+      usage(harness, 'thread-1', 'turn-1')
+      complete(harness, 'thread-1', 'turn-1')
+      expect((await second).at(-1)).toMatchObject({ type: 'message_end', usage: { inputTokens: 22, outputTokens: 14, cacheReadTokens: 6 } })
+      harness.peer.close()
+    })
+
+    it('ignores a late result for a call the result timeout already answered', async () => {
+      const harness = createHarness()
+      const provider = createCodexAppServerProvider({ transport: { rpc: harness.peer, cwd: '/tmp/brian-codex-test' }, models: [MODEL], toolBatchQuietMs: 1, toolResultTimeoutMs: 20 })
+      const session = provider.createSession({ model: MODEL, systemPrompt: 'You are Brian.', tools: [ECHO_TOOL] })
+      const first = collect(session.send([{ role: 'user', content: 'Use the echo tool.' }]))
+      respondToThreadStart(harness, await waitForMethod(harness, 'thread/start'))
+      respondToTurnStart(harness, await waitForMethod(harness, 'turn/start'))
+      await new Promise<void>((resolve) => setImmediate(resolve))
+      toolCall(harness, 'tool-request-1', 'call-1')
+      await first
+      expect((await waitForResponse(harness, 'tool-request-1')).result).toMatchObject({ success: false })
+      toolCall(harness, 'tool-request-2', 'call-2')
+      await new Promise<void>((resolve) => setImmediate(resolve))
+      // call-1's late result must not read as a batch mismatch.
+      const second = await collect(session.send(resultFor('call-1')))
+      expect(second.map(c => c.type)).toEqual(['message_start', 'tool_use_start', 'tool_use_delta', 'tool_use_end', 'message_end'])
+      harness.peer.close()
+    })
+  })
+
   it('returns Brian tool failures to Codex as unsuccessful dynamic-tool results', async () => {
     const harness = createHarness()
     const { session, first } = await startToolTurn(harness)

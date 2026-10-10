@@ -73,6 +73,8 @@ type ParkedToolCall = {
   call: DynamicToolCallParams
   resolve: (response: DynamicToolCallResponse) => void
   timeout: ReturnType<typeof setTimeout>
+  /** Its tool_use reached a Brian send, so the next send must carry its result. */
+  surfaced: boolean
 }
 
 type UserInput =
@@ -294,6 +296,16 @@ class CodexProviderSession implements ProviderSession {
   #releaseTurnStart: (() => void) | undefined
   #activeQueue: AsyncStreamQueue<StreamChunk> | undefined
   #parked = new Map<string, ParkedToolCall>()
+  // Codex nests Brian's tools in its `exec` envelope, which hands control back
+  // to the model once yield_time_ms (10 s by default) passes with a Brian tool
+  // still held. The turn then keeps running - or ends - while no send is open.
+  // What it emits meanwhile waits here for the next send instead of vanishing.
+  #detached: StreamChunk[] = []
+  #detachedEnd: { error?: Error } | undefined
+  /** Parked calls already answered by the result timeout; a late result for one is ignored. */
+  #expired = new Set<string>()
+  /** Model calls Codex made in the gap; billed on the next message_end. */
+  #detachedUsage: TokenUsage = emptyUsage()
   #toolBatchTimer: ReturnType<typeof setTimeout> | undefined
   #idleTimer: ReturnType<typeof setTimeout> | undefined
   #abortListener: (() => void) | undefined
@@ -354,14 +366,30 @@ class CodexProviderSession implements ProviderSession {
     queue.push({ type: 'message_start', model: this.#options.model })
 
     try {
-      if (this.#parked.size > 0) {
+      const resumable = Array.from(this.#parked.values()).some((entry) => entry.surfaced)
+      const ended = this.#detachedEnd
+      if (ended) {
+        // The turn finished while Brian held its tool, so the model never saw
+        // these results. Its gap output was produced without them; start a
+        // fresh turn on the same thread that does see them.
+        this.#detachedEnd = undefined
+        this.#detached = []
+        if (ended.error) throw ended.error
+        await this.#startFreshTurn(messages, opts)
+      } else if (resumable || this.#detached.length > 0 || this.#answersExpired(messages)) {
+        // Validates the batch even with nothing surfaced left (all expired):
+        // a result for an unknown call still fails closed.
         this.#resumeParkedTools(messages)
+        this.#flushDetached(queue)
       } else {
         await this.#startFreshTurn(messages, opts)
       }
       yield* queue
     } catch (error) {
       this.#failParked('Brian could not resume the tool call.')
+      // Gap output belongs to calls that just failed; never replay it later.
+      this.#detached = []
+      this.#detachedEnd = undefined
       queue.fail(asError(error))
       throw error
     } finally {
@@ -371,6 +399,8 @@ class CodexProviderSession implements ProviderSession {
   }
 
   async #startFreshTurn(messages: Message[], opts: SendOptions): Promise<void> {
+    // Call ids from an earlier turn can no longer arrive as results.
+    this.#expired.clear()
     if (this.#activeTurnId) {
       throw new CodexProviderProtocolError(
         'Cannot start a new Codex turn while the previous turn is still active',
@@ -535,30 +565,43 @@ class CodexProviderSession implements ProviderSession {
     if (!args.success) {
       throw new CodexProviderProtocolError('Codex dynamic tool arguments must be an object')
     }
-    if (!this.#activeQueue) {
-      throw new CodexProviderProtocolError('Codex emitted a tool call outside an active send')
-    }
+    // A call made after exec yielded arrives with no send open: park it
+    // unsurfaced and hand its tool_use to the next send.
+    const queue = this.#activeQueue
 
     const response = new Promise<DynamicToolCallResponse>((resolve) => {
       const timeout = setTimeout(() => {
         const parked = this.#parked.get(call.callId)
         if (!parked) return
         this.#parked.delete(call.callId)
+        if (parked.surfaced) {
+          this.#expired.add(call.callId)
+        } else {
+          // Brian never saw it: drop its tool_use so no later send runs a dead call.
+          this.#detached = this.#detached.filter((chunk) => !('id' in chunk) || chunk.id !== call.callId)
+        }
         parked.resolve(failedToolResponse('Brian timed out waiting for the tool result.'))
       }, this.#toolResultTimeoutMs)
       timeout.unref?.()
-      this.#parked.set(call.callId, { call: { ...call, arguments: args.data }, resolve, timeout })
+      this.#parked.set(call.callId, {
+        call: { ...call, arguments: args.data },
+        resolve,
+        timeout,
+        surfaced: queue !== undefined,
+      })
     })
 
-    const serializedArgs = JSON.stringify(args.data)
-    this.#activeQueue.push({ type: 'tool_use_start', id: call.callId, name: call.tool })
-    this.#activeQueue.push({
-      type: 'tool_use_delta',
-      id: call.callId,
-      input: serializedArgs,
-    })
-    this.#activeQueue.push({ type: 'tool_use_end', id: call.callId })
-    this.#scheduleToolBatchEnd()
+    const chunks: StreamChunk[] = [
+      { type: 'tool_use_start', id: call.callId, name: call.tool },
+      { type: 'tool_use_delta', id: call.callId, input: JSON.stringify(args.data) },
+      { type: 'tool_use_end', id: call.callId },
+    ]
+    if (queue) {
+      for (const chunk of chunks) queue.push(chunk)
+      this.#scheduleToolBatchEnd()
+    } else {
+      this.#detached.push(...chunks)
+    }
 
     return response
   }
@@ -584,6 +627,21 @@ class CodexProviderSession implements ProviderSession {
     this.#toolBatchTimer.unref?.()
   }
 
+  /** A late result for a timed-out call still belongs to the running turn, not a fresh one. */
+  #answersExpired(messages: Message[]): boolean {
+    if (!this.#activeTurnId || this.#expired.size === 0) return false
+    return messages.some((message) =>
+      typeof message.content !== 'string'
+      && message.content.some((block) => block.type === 'tool_result' && this.#expired.has(block.toolUseId)))
+  }
+
+  #flushDetached(queue: AsyncStreamQueue<StreamChunk>): void {
+    const chunks = this.#detached.splice(0)
+    for (const chunk of chunks) queue.push(chunk)
+    for (const entry of this.#parked.values()) entry.surfaced = true
+    if (chunks.some((chunk) => chunk.type === 'tool_use_end')) this.#scheduleToolBatchEnd()
+  }
+
   #resumeParkedTools(messages: Message[]): void {
     const results = new Map<string, Extract<ContentBlock, { type: 'tool_result' }>>()
     const guidance: string[] = []
@@ -597,7 +655,7 @@ class CodexProviderSession implements ProviderSession {
           if (results.has(block.toolUseId)) {
             throw new CodexProviderProtocolError('Duplicate Brian tool result id')
           }
-          results.set(block.toolUseId, block)
+          if (!this.#expired.delete(block.toolUseId)) results.set(block.toolUseId, block)
         } else if (block.type === 'text' && block.text.trim().length > 0) {
           guidance.push(block.text)
         } else if (block.type !== 'text') {
@@ -608,7 +666,10 @@ class CodexProviderSession implements ProviderSession {
       }
     }
 
-    const pendingIds = new Set(this.#parked.keys())
+    // Only surfaced calls are answerable here: a call Codex made after exec
+    // yielded has not reached Brian yet and is flushed after this resume.
+    const parked = Array.from(this.#parked.values()).filter((entry) => entry.surfaced)
+    const pendingIds = new Set(parked.map((entry) => entry.call.callId))
     const missing = Array.from(pendingIds).filter((id) => !results.has(id))
     const extra = Array.from(results.keys()).filter((id) => !pendingIds.has(id))
     if (missing.length > 0 || extra.length > 0) {
@@ -617,8 +678,7 @@ class CodexProviderSession implements ProviderSession {
       )
     }
 
-    const parked = Array.from(this.#parked.values())
-    this.#parked.clear()
+    for (const id of pendingIds) this.#parked.delete(id)
     parked.forEach((entry, index) => {
       clearTimeout(entry.timeout)
       const result = results.get(entry.call.callId)
@@ -653,32 +713,53 @@ class CodexProviderSession implements ProviderSession {
   }
 
   onTextDelta(turnId: string, delta: string): void {
-    if (turnId === this.#activeTurnId) {
-      this.#activeQueue?.push({ type: 'text_delta', text: delta })
-    }
+    if (turnId === this.#activeTurnId) this.#emit({ type: 'text_delta', text: delta })
   }
 
   onThinkingDelta(turnId: string, delta: string): void {
-    if (turnId === this.#activeTurnId) {
-      this.#activeQueue?.push({ type: 'thinking_delta', text: delta })
-    }
+    if (turnId === this.#activeTurnId) this.#emit({ type: 'thinking_delta', text: delta })
+  }
+
+  #emit(chunk: StreamChunk): void {
+    if (this.#activeQueue) this.#activeQueue.push(chunk)
+    else this.#detached.push(chunk)
   }
 
   onUsage(notification: ThreadTokenUsageUpdatedNotification): void {
     if (notification.turnId !== this.#activeTurnId) return
     const usage = notification.tokenUsage.last
-    this.#lastUsage = {
+    const mapped: TokenUsage = {
       inputTokens: usage.inputTokens,
       outputTokens: usage.outputTokens,
       cacheReadTokens: usage.cachedInputTokens,
       cacheWriteTokens: usage.cacheWriteInputTokens,
     }
+    // A gap model call happens with no send open; it is real spend, so it
+    // accumulates and rides on the next message_end instead of being overwritten.
+    if (this.#activeQueue) this.#lastUsage = mapped
+    else this.#detachedUsage = addUsage(this.#detachedUsage, mapped)
   }
 
   onTurnCompleted(notification: TurnCompletedNotification): void {
     if (notification.turn.id !== this.#activeTurnId) return
     const queue = this.#activeQueue
     this.#activeTurnId = undefined
+
+    if (!queue) {
+      // The turn ended while Brian held a tool. Codex has already cancelled
+      // the pending calls; the next send learns the outcome from #detachedEnd.
+      const status = notification.turn.status
+      this.#detachedEnd =
+        status === 'completed'
+          ? {}
+          : status === 'failed'
+            ? { error: new CodexTurnError() }
+            : status === 'interrupted'
+              ? { error: new CodexTurnError('Codex app-server turn was interrupted') }
+              : { error: new CodexProviderProtocolError('Codex completed a turn with an invalid status') }
+      this.#failParked('The Codex turn ended before Brian returned the tool result.')
+      return
+    }
 
     if (notification.turn.status === 'failed') {
       const error = new CodexTurnError()
@@ -791,8 +872,9 @@ class CodexProviderSession implements ProviderSession {
   }
 
   #takeUsage(): TokenUsage {
-    const usage = this.#lastUsage
+    const usage = addUsage(this.#lastUsage, this.#detachedUsage)
     this.#lastUsage = emptyUsage()
+    this.#detachedUsage = emptyUsage()
     return usage
   }
 }
@@ -1106,6 +1188,15 @@ function truncateUtf8(value: string, maxBytes: number): string {
 
 function emptyUsage(): TokenUsage {
   return { inputTokens: 0, outputTokens: 0, cacheReadTokens: 0, cacheWriteTokens: 0 }
+}
+
+function addUsage(a: TokenUsage, b: TokenUsage): TokenUsage {
+  return {
+    inputTokens: a.inputTokens + b.inputTokens,
+    outputTokens: a.outputTokens + b.outputTokens,
+    cacheReadTokens: (a.cacheReadTokens ?? 0) + (b.cacheReadTokens ?? 0),
+    cacheWriteTokens: (a.cacheWriteTokens ?? 0) + (b.cacheWriteTokens ?? 0),
+  }
 }
 
 function failedToolResponse(message: string): DynamicToolCallResponse {
