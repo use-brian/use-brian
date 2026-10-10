@@ -78,7 +78,9 @@ describe("[COMP:app-web/chat-parity] Chat surface parity", () => {
     expect(reset).toContain("freshChannelIdRef.current = null");
     expect(reset).toContain("att.clear()");
     expect(source).toContain("!att.uploading && isAssistantPickerLive({");
-    expect(source).toMatch(/onTeamChange=\{setPickedContextGroupId\}\s*onProjectChange=\{setPickedContextProjectId\}\s*disabled=\{att\.uploading\}/);
+    // One hero picker for both views (chat-parity T5), frozen mid-upload: an
+    // upload on a fresh pane mints the conversation with these picks.
+    expect(source).toMatch(/<ModeAwareCreationContext context=\{creationContext\}(?: compact)? disabled=\{att\.uploading\}\/>/);
   });
 
   it("carries ready files and previews through a turn and restored history", () => {

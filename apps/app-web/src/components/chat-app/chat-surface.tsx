@@ -220,7 +220,6 @@ import {
   type ChatSessionPolicy,
 } from "@/lib/chat-session-policy";
 import {ModeAwareCreationContext,useCreationContext} from "@/components/context/mode-aware-context";
-import { ContextScopePicker } from "@/components/context/context-scope-picker";
 import { ContextScopeChips } from "@/components/context/context-scope-chips";
 import {
   listContextProjects,
@@ -553,7 +552,14 @@ export function ChatSurface({ workspaceId }: { workspaceId: string }) {
   const [restoring, setRestoring] = useState<ChatLocation | null>(null);
   const activeSessionId = restoring ? restoring.sessionId : urlSessionId;
   const view: ChatView = restoring ? restoring.view : urlView;
-  const creationContext=useCreationContext(activeSessionId?"existing":view==="workspace"?"new-shared":"private");
+  // One hero context picker for both views (chat-parity T5). A fresh personal
+  // pane's Team/Project choice stays this surface's own state (handoffs and
+  // restored drafts seed it), held by the shared creation context.
+  const creationContext=useCreationContext(activeSessionId?"existing":view==="workspace"?"new-shared":"private",{
+    teamId:pickedContextGroupId,
+    projectId:pickedContextProjectId,
+    select:(team,project)=>{setPickedContextGroupId(team);setPickedContextProjectId(project);},
+  });
   /** The open thread's rail row, from either list: a personal chat or a room. */
   const activeRow: DocSession | WorkspaceSession | null = useMemo(
     () =>
@@ -2355,7 +2361,9 @@ export function ChatSurface({ workspaceId }: { workspaceId: string }) {
     /** Cmd/Ctrl+Enter during a room turn this pane does not stream (D3). */
     steer?: boolean;
   }) => {
-    if(!sessionIdRef.current&&view==="workspace"&&!creationContext.snapshot()){setError(t.newWorkspaceChatFailed);return false;}
+    // Both views wait for the creation context (T5): a fresh pane binds its
+    // Team/Project from the one hero picker before its first send.
+    if(!sessionIdRef.current&&!creationContext.snapshot()){setError(view==="workspace"?t.newWorkspaceChatFailed:t.errorGeneric);return false;}
     const sendEpoch = sessionEpochRef.current;
     let owningSessionId = sessionIdRef.current;
     const ownsSend = () =>
@@ -4184,7 +4192,7 @@ export function ChatSurface({ workspaceId }: { workspaceId: string }) {
             ? () => void send({ forceAddress: true })
             : undefined
         }
-        disabled={!!pendingQuestion||(!activeSessionId&&view==="workspace"&&!creationContext.ready)}
+        disabled={!!pendingQuestion||(!activeSessionId&&!creationContext.ready)}
         // Mid-turn sends are text-only: an attachment needs the full pre-turn
         // pipeline, which belongs to a turn of its own. Staged chips stay
         // visible and ride the next turn.
@@ -4552,15 +4560,7 @@ export function ChatSurface({ workspaceId }: { workspaceId: string }) {
               </div>
             )}
             <div className="w-full rounded-xl border border-border/70 bg-muted/20 p-3">
-              {view==="workspace"?<ModeAwareCreationContext context={creationContext}/>:<ContextScopePicker
-                teams={contextTeams}
-                projects={contextProjects}
-                teamId={pickedContextGroupId}
-                projectId={pickedContextProjectId}
-                onTeamChange={setPickedContextGroupId}
-                onProjectChange={setPickedContextProjectId}
-                disabled={att.uploading}
-              />}
+              <ModeAwareCreationContext context={creationContext} disabled={att.uploading}/>
             </div>
             <div className="w-full">{composerBox}</div>
             {error && (
