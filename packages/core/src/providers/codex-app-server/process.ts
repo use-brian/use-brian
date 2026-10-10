@@ -8,6 +8,7 @@ import {
   InitializeParamsSchema,
   InitializeResponseSchema,
   PINNED_CODEX_VERSION,
+  PINNED_CODEX_CATALOG_VERSION,
   type InitializeResponse,
 } from './protocol.js'
 import { CodexRpcClosedError, CodexRpcPeer } from './rpc.js'
@@ -196,18 +197,26 @@ export function buildCodexEnvironment(
   return environment
 }
 
-export async function resolvePinnedCodexCommand(): Promise<CodexCommand> {
+export async function resolvePinnedCodexCommand(
+  surface?: StartCodexAppServerOptions['surface'],
+): Promise<CodexCommand> {
   const require = createRequire(import.meta.url)
-  const packageJsonPath = require.resolve('@openai/codex/package.json')
+  const packageName = surface === 'account' ? '@openai/codex-catalog' : '@openai/codex'
+  const expectedVersion = surface === 'account' ? PINNED_CODEX_CATALOG_VERSION : PINNED_CODEX_VERSION
+  const packageJsonPath = surface === 'account'
+    ? require.resolve('@openai/codex-catalog/package.json')
+    : require.resolve('@openai/codex/package.json')
   const packageJson = PackageJsonSchema.parse(JSON.parse(await readFile(packageJsonPath, 'utf8')))
-  if (packageJson.version !== PINNED_CODEX_VERSION) {
+  if (packageJson.version !== expectedVersion) {
     throw new Error(
-      `Unsupported @openai/codex version ${packageJson.version}; expected ${PINNED_CODEX_VERSION}`,
+      `Unsupported ${packageName} version ${packageJson.version}; expected ${expectedVersion}`,
     )
   }
   return {
     command: process.execPath,
-    argsPrefix: [require.resolve('@openai/codex/bin/codex.js')],
+    argsPrefix: [surface === 'account'
+      ? require.resolve('@openai/codex-catalog/bin/codex.js')
+      : require.resolve('@openai/codex/bin/codex.js')],
   }
 }
 
@@ -230,7 +239,7 @@ export async function startCodexAppServer(
     DEFAULT_SHUTDOWN_TIMEOUT_MS,
     'shutdownTimeoutMs',
   )
-  const command = options.command ?? (await resolvePinnedCodexCommand())
+  const command = options.command ?? (await resolvePinnedCodexCommand(options.surface))
   const allowedRequestMethods =
     options.surface === 'image'
       ? IMAGE_REQUEST_METHODS

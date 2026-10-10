@@ -88,16 +88,18 @@ describe('[COMP:providers/model-registry] derivations match the pre-registry lit
       // like the flash-lite lane it may replace.
       'qwen3.5-flash',
       'gpt-5.6-luna',
+      'gpt-6-luna',
     ].sort())
     expect([...tierModelIds('pro')].sort()).toEqual([
       'pro', 'gemini-flash-3', 'gemini-3-flash-preview', 'gemini-flash',
       'gpt-5.6-terra',
+      'gpt-6-sol',
     ].sort())
     expect([...tierModelIds('max')].sort()).toEqual([
-      'max', 'gemini-3.8-flash', 'gemini-3.7-flash', 'gemini-3.6-flash', 'gemini-3.5-flash', 'gemini-3.1-pro-preview', 'gpt-5.6-sol',
+      'max', 'gemini-3.8-flash', 'gemini-3.7-flash', 'gemini-3.6-flash', 'gemini-3.5-flash', 'gemini-3.1-pro-preview', 'gpt-5.6-sol', 'gpt-6.1-sol',
     ].sort())
     expect([...tierModelIds('research')].sort()).toEqual([
-      'research', 'gemini-3-pro-research', 'gpt-5.5', 'gpt-5.2',
+      'research', 'gemini-3-pro-research', 'gpt-5.5', 'gpt-5.2', 'gpt-6-astra',
     ].sort())
     expect([...tierModelIds('embedding')].sort()).toEqual([
       'gemini-embedding-001', 'text-embedding-004', 'text-embedding-005',
@@ -229,6 +231,10 @@ describe('[COMP:providers/model-registry] provider derivations', () => {
       'gpt-5.6-sol',
       'gpt-5.5',
       'gpt-5.2',
+      'gpt-6-luna',
+      'gpt-6-sol',
+      'gpt-6.1-sol',
+      'gpt-6-astra',
     ])
   })
 
@@ -273,14 +279,18 @@ describe('[COMP:providers/model-registry] wave-1 slate + menus (plan §5.1)', ()
       'gemini-flash-3',
       'gpt-5.6-luna',
       'gpt-5.6-terra',
+      'gpt-6-luna',
+      'gpt-6-sol',
     ])
     expect(menuForClass('max').map((r) => r.alias)).toEqual([
       'gemini-3.8-flash',
       'gpt-5.6-sol',
+      'gpt-6.1-sol',
     ])
     expect(menuForClass('research').map((r) => r.alias)).toEqual([
       'gpt-5.5',
       'gpt-5.2',
+      'gpt-6-astra',
     ])
     expect(menuForClass('metered').map((r) => r.alias).sort()).toEqual(
       ['qwen3.7-plus', 'deepseek-v4-flash', 'qwen3.7-max', 'deepseek-v4-pro'].sort(),
