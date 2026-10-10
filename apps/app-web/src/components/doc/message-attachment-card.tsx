@@ -31,6 +31,7 @@ import { useFileCacheMedia } from "@/lib/use-doc-media";
 import { hasConvertiblePdfPreview } from "@/lib/convertible-preview";
 import { VisualLightbox } from "./visual-lightbox";
 import { PdfFrame, useLocalFileUrl, type PreviewState } from "./file-preview";
+import { usePaneLinks } from "@/components/chat-app/chat-link-routing";
 import type { MessageAttachmentRef } from "@/lib/api/sessions";
 
 
@@ -138,6 +139,9 @@ function AttachmentCard({
   workspaceId?: string;
 }) {
   const [open, setOpen] = React.useState(false);
+  // In the full Chat app an attachment opens as a `file` tab of the side
+  // pane (chat-parity D9); surfaces without a pane keep the modals.
+  const links = usePaneLinks();
   const isImage = attachment.mime.startsWith("image/");
   const isPdf = attachment.mime === "application/pdf";
   // Office/structured docs render server-side, so they need the file id (to
@@ -177,6 +181,28 @@ function AttachmentCard({
       </span>
     </>
   );
+
+  if (links) {
+    return (
+      <button
+        type="button"
+        data-pane-link="file"
+        onClick={() =>
+          links.open({
+            kind: "file",
+            fileId: attachment.id || null,
+            name: attachment.name,
+            mime: attachment.mime,
+            dataUrl: attachment.dataUrl ?? null,
+            source: "cache",
+          })
+        }
+        className={cn(cardClass, "text-left transition-colors hover:bg-accent")}
+      >
+        {body}
+      </button>
+    );
+  }
 
   // Cards with nothing to open stay static.
   if (!previewable) return <div className={cardClass}>{body}</div>;

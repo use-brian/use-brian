@@ -8624,6 +8624,10 @@ export const zh: Dictionary = {
       untitledPage: "未命名頁面",
       browser: "瀏覽器",
       workEmpty: "開始對話後，即時工作與釘選會顯示在這裡。",
+      openFullPage: "開啟完整頁面",
+      openInBrowser: "在瀏覽器中開啟",
+      urlLoading: "正在載入預覽",
+      urlNotEmbeddable: "此網站無法在應用程式內顯示。",
     },
     documentViewer: {
       label: "原始文件",

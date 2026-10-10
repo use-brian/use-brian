@@ -8673,6 +8673,10 @@ export const ja: Dictionary = {
       untitledPage: "無題のページ",
       browser: "ブラウザ",
       workEmpty: "チャットを始めると、ライブの作業とピンがここに表示されます。",
+      openFullPage: "ページ全体を開く",
+      openInBrowser: "ブラウザで開く",
+      urlLoading: "プレビューを読み込み中",
+      urlNotEmbeddable: "このサイトはアプリ内に表示できません。",
     },
     documentViewer: {
       label: "元のドキュメント",

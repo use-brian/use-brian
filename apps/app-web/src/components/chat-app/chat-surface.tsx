@@ -246,6 +246,7 @@ import { PendingQuestionPanel } from "@/components/chrome/pending-question-panel
 import { ChatConfirmationCard } from "@/components/chrome/chat-confirmation-card";
 import { ChatContextPins } from "@/components/chat-app/chat-context-pins";
 import { ChatSidePane, ChatSidePaneToggle } from "@/components/chat-app/chat-side-pane";
+import { ChatPaneLink, PaneLinkProvider } from "@/components/chat-app/chat-link-routing";
 import {
   adoptFreshChatPane,
   resetFreshChatPane,
@@ -329,7 +330,8 @@ import {
 
 const API_URL = publicRuntimeConfig().apiUrl ?? "http://localhost:4000";
 const REMARK_PLUGINS = [remarkGfm];
-const CHAT_MARKDOWN_COMPONENTS = { pre: ChatCodeBlock };
+// Links in a reply open in the side pane, never away from the chat (D9).
+const CHAT_MARKDOWN_COMPONENTS = { pre: ChatCodeBlock, a: ChatPaneLink };
 /** Stable empties for the cold-cache case, so memoised derivations keyed on
  *  the lists do not recompute every render. */
 const EMPTY_PERSONAL: DocSession[] = [];
@@ -2932,14 +2934,17 @@ export function ChatSurface({ workspaceId }: { workspaceId: string }) {
             break;
           }
           case "page_created": {
-            // The assistant created a new Page. Link it under the reply and
-            // tell the hoisted sidebar provider to reload so the Page shows
-            // in the Pages tree without a refresh. No navigation: Chat stays
-            // the surface; the card is how the user opens it.
+            // The assistant created a new Page. Link it under the reply, open
+            // it in the side pane, and tell the hoisted sidebar provider to
+            // reload so the Page shows in the Pages tree without a refresh.
+            // No navigation: Chat stays the surface.
             const newPageId =
               typeof payload.pageId === "string" ? payload.pageId : "";
             if (!newPageId) break;
             turnPageLinksRef.current = addPageLinks(turnPageLinksRef.current, [newPageId]);
+            // Brian created a page: it opens as a tab and the pane expands
+            // (D8), so the user watches it fill in beside the chat.
+            openInChatPane({ kind: "page", pageId: newPageId });
             window.dispatchEvent(
               new CustomEvent("doc:draft-created", {
                 detail: { viewId: newPageId, action: "created" },
@@ -4497,6 +4502,7 @@ export function ChatSurface({ workspaceId }: { workspaceId: string }) {
   );
 
   return (
+    <PaneLinkProvider openInPane={openInChatPane}>
     <div
       className="relative flex h-full min-h-0 flex-col"
       {...drop.dropProps}
@@ -4872,7 +4878,7 @@ export function ChatSurface({ workspaceId }: { workspaceId: string }) {
                       <ChatPageLinkCard
                         key={pageId}
                         pageId={pageId}
-                        onOpen={(id) => router.push(docPagePath(workspaceId, id))}
+                        onOpen={(id) => openInChatPane({ kind: "page", pageId: id })}
                       />
                     ))}
                     {m.text
@@ -5237,5 +5243,6 @@ export function ChatSurface({ workspaceId }: { workspaceId: string }) {
       </div>
       )}
     </div>
+    </PaneLinkProvider>
   );
 }

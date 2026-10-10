@@ -41,6 +41,7 @@
 
 import { useEffect, useRef, useState } from "react";
 import { Check, ChevronRight, ExternalLink, RotateCcw } from "lucide-react";
+import { PaneUrlAnchor } from "@/components/chat-app/chat-link-routing";
 import { ChatMarkdown, type ActivityNote, type CitationSource, type ToolUsed } from "@use-brian/chat-ui";
 import type { BuildEvent } from "@/lib/build-events";
 import {
@@ -79,17 +80,17 @@ export function ChatCitationList({
       </div>
       <div className="flex flex-wrap gap-1.5">
         {visible.map((citation) => (
-          <a
+          // In the full Chat app a citation opens as a `url` tab of the side
+          // pane (chat-parity D9); in the dock, a new browser tab as before.
+          <PaneUrlAnchor
             key={citation.url}
-            href={citation.url}
-            target="_blank"
-            rel="noopener noreferrer"
+            url={citation.url}
+            tabTitle={citation.title}
+            iconFirst
             className="inline-flex max-w-[220px] items-center gap-1 truncate rounded-md bg-muted/60 px-2 py-0.5 text-[11px] text-muted-foreground transition-colors hover:bg-muted hover:text-foreground"
-            title={citation.url}
           >
-            <ExternalLink className="size-2.5 shrink-0" aria-hidden />
             <span className="truncate">{citation.title}</span>
-          </a>
+          </PaneUrlAnchor>
         ))}
         {!expanded && hidden > 0 ? (
           <button
@@ -261,16 +262,13 @@ function StepRow({
         <StepIcon status={status} live={live} />
         <span className="flex min-w-0 flex-1 items-center truncate">
           {url ? (
-            <a
-              href={url}
-              target="_blank"
-              rel="noopener noreferrer"
-              title={url}
+            <PaneUrlAnchor
+              url={url}
               className="hover:underline inline-flex max-w-full items-center gap-1"
             >
               {label}
               <ExternalLink className="size-2.5 shrink-0" aria-hidden />
-            </a>
+            </PaneUrlAnchor>
           ) : canExpand ? (
             <button
               type="button"

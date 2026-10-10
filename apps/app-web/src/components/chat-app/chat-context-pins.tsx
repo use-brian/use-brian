@@ -57,6 +57,7 @@ import {
 import { AssistantAvatar } from "@/components/assistant-avatar";
 import { cn } from "@/lib/utils";
 import { useT, format } from "@/lib/i18n/client";
+import { paneRefForPin, usePaneLinks } from "./chat-link-routing";
 import {
   addSessionPin,
   listSessionPins,
@@ -197,6 +198,7 @@ function SessionContextPins({
   lastProgressAt = null,
   onStopTurn,
 }: ChatContextPinsProps) {
+  const links = usePaneLinks();
   const mounted = useRef(false);
   const pinRead = useRef(0);
   useEffect(() => {
@@ -1141,6 +1143,11 @@ function SessionContextPins({
             )}
             {visiblePins.map((pin) => {
               const Icon = KIND_ICON[pin.kind] ?? Pin;
+              // A page, file or URL pin opens as a tab of the side pane
+              // (chat-parity D9); other kinds have no pane form, and an
+              // unavailable (unresolvable) page or file pin opens nothing.
+              const paneRef =
+                links && (pin.label !== null || pin.kind === "url") ? paneRefForPin(pin) : null;
               return (
                 <article
                   key={pin.id}
@@ -1157,15 +1164,26 @@ function SessionContextPins({
                       <div className="text-xs font-medium uppercase tracking-wide text-muted-foreground">
                         {kindLabel(pin.kind)}
                       </div>
-                      <div
-                        className={cn(
-                          "mt-0.5 break-words text-xs leading-relaxed text-foreground",
-                          pin.label === null && pin.kind !== "url" && "italic",
-                        )}
-                      >
-                        {pin.kind === "instruction" ? pin.text : chipLabel(pin)}
-                      </div>
-                      {pin.kind === "url" && pin.url && (
+                      {paneRef && links ? (
+                        <button
+                          type="button"
+                          data-pane-link={paneRef.kind}
+                          onClick={() => links.open(paneRef)}
+                          className="mt-0.5 block max-w-full break-words text-left text-xs leading-relaxed text-foreground underline-offset-2 hover:underline"
+                        >
+                          {chipLabel(pin)}
+                        </button>
+                      ) : (
+                        <div
+                          className={cn(
+                            "mt-0.5 break-words text-xs leading-relaxed text-foreground",
+                            pin.label === null && pin.kind !== "url" && "italic",
+                          )}
+                        >
+                          {pin.kind === "instruction" ? pin.text : chipLabel(pin)}
+                        </div>
+                      )}
+                      {pin.kind === "url" && pin.url && !links && (
                         <a
                           href={pin.url}
                           target="_blank"
@@ -1174,6 +1192,9 @@ function SessionContextPins({
                         >
                           {pin.url}
                         </a>
+                      )}
+                      {pin.kind === "url" && pin.url && links && pin.label && (
+                        <div className="mt-1 truncate text-xs text-muted-foreground">{pin.url}</div>
                       )}
                       {pin.addedByName && (
                         <div className="mt-1 text-xs text-muted-foreground">

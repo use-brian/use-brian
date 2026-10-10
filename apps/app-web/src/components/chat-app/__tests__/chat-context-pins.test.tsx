@@ -78,6 +78,7 @@ vi.mock("@/lib/api/pending-questions", () => ({
 }));
 
 import { ChatContextPins } from "../chat-context-pins";
+import { PaneLinkProvider } from "../chat-link-routing";
 
 const dict = en as unknown as Dictionary;
 
@@ -1056,3 +1057,44 @@ describe("[COMP:app-web/chat-context-pins] session and request isolation", () =>
     } finally { bench.dispose(); }
   });
 });
+
+describe("[COMP:app-web/chat-link-routing] Work tab pin rows open in the side pane (chat-parity D9)", () => {
+  const pinRow = (over: Record<string, unknown>) => ({
+    id: String(over.id), kind: "page", refId: null, url: null, text: null, label: null, position: 1,
+    addedByUserId: "u-1", addedByAssistantId: null, addedByName: null, createdAt: "2026-10-10T00:00:00Z",
+    ...over,
+  });
+
+  it("page, file and URL pins open as tabs; other kinds and unavailable pins do not", async () => {
+    listSessionPins.mockReset().mockResolvedValue([
+      pinRow({ id: "p1", kind: "page", refId: "page-1", label: "Launch plan" }),
+      pinRow({ id: "p2", kind: "file", refId: "file-1", label: "deck.pdf" }),
+      pinRow({ id: "p3", kind: "url", url: "https://example.com/spec", label: "Spec" }),
+      pinRow({ id: "p4", kind: "task", refId: "task-1", label: "Ship it" }),
+      pinRow({ id: "p5", kind: "page", refId: "page-gone", label: null }),
+    ]);
+    const open = vi.fn();
+    const container = document.createElement("div");
+    document.body.appendChild(container);
+    const root = createRoot(container);
+    await act(async () => {
+      root.render(
+        <I18nProvider locale="en" dict={dict}>
+          <PaneLinkProvider openInPane={open}>
+            <ChatContextPins sessionId="session-1" workspaceId="workspace-1" refreshKey={0} startedByName={null} />
+          </PaneLinkProvider>
+        </I18nProvider>,
+      );
+    });
+    const routed = Array.from(container.querySelectorAll<HTMLButtonElement>("button[data-pane-link]"));
+    expect(routed.map((button) => button.getAttribute("data-pane-link"))).toEqual(["page", "file", "url"]);
+    for (const button of routed) await act(async () => button.click());
+    expect(open.mock.calls.map(([ref]) => ref.kind)).toEqual(["page", "file", "url"]);
+    expect(open.mock.calls[0]![0]).toEqual({ kind: "page", pageId: "page-1", title: "Launch plan" });
+    // No pin opens a new browser tab inside the pane.
+    expect(container.querySelector('a[target="_blank"]')).toBeNull();
+    act(() => root.unmount());
+    container.remove();
+  });
+});
+

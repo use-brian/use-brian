@@ -13,6 +13,13 @@ import { resetChatPaneSession, useChatPane, type ChatPane } from "@/lib/chat-pan
 import type { PaneRef } from "@/lib/chat-pane-tabs";
 import { ChatSidePane, ChatSidePaneToggle } from "../chat-side-pane";
 
+const router = vi.hoisted(() => ({ push: vi.fn() }));
+vi.mock("next/navigation", () => ({ useRouter: () => router }));
+vi.mock("../chat-pane-bodies", () => ({
+  PanePageBody: ({ pageId }: { pageId: string }) => <div data-testid="page-body">{pageId}</div>,
+  PaneUrlBody: ({ url }: { url: string }) => <div data-testid="url-body">{url}</div>,
+}));
+
 vi.mock("@/lib/use-doc-media", () => ({
   useDocMedia: () => ({ url: null, mimeType: null, loading: false, error: null }),
   useFileCacheMedia: () => ({ url: null, mimeType: null, loading: true, error: null }),
@@ -113,5 +120,19 @@ describe("[COMP:app-web/chat-side-pane] one right pane with tabs", () => {
     expect(aside.querySelector('[role="separator"]')).not.toBeNull();
     expect(aside.className).toContain("max-sm:absolute");
     expect(aside.className).toContain("max-sm:inset-0");
+  });
+
+  it("T10/T9: page and url tabs render their bodies, with the only explicit ways out", () => {
+    act(() => pane.open({ kind: "page", pageId: "page-7", title: "Launch plan" }));
+    expect(host.querySelector('[data-testid="page-body"]')?.textContent).toBe("page-7");
+    const full = Array.from(host.querySelectorAll("button")).find((b) => b.textContent === en.chatApp.sidePane.openFullPage);
+    act(() => full!.click());
+    expect(router.push).toHaveBeenCalledWith("/w/ws/p/page-7");
+
+    act(() => pane.open({ kind: "url", url: "https://example.com/spec" }));
+    expect(host.querySelector('[data-testid="url-body"]')?.textContent).toBe("https://example.com/spec");
+    const out = Array.from(host.querySelectorAll("a")).find((a) => a.textContent === en.chatApp.sidePane.openInBrowser);
+    expect(out?.getAttribute("href")).toBe("https://example.com/spec");
+    expect(out?.getAttribute("target")).toBe("_blank");
   });
 });

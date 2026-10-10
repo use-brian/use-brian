@@ -8907,6 +8907,10 @@ export const en = {
       untitledPage: "Untitled page",
       browser: "Browser",
       workEmpty: "Live work and pins appear here once this chat starts.",
+      openFullPage: "Open full page",
+      openInBrowser: "Open in browser",
+      urlLoading: "Loading preview",
+      urlNotEmbeddable: "This site cannot be shown inside the app.",
     },
     documentViewer: {
       label: "Raw document",

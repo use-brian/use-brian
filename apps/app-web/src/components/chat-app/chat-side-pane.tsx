@@ -26,10 +26,12 @@
  */
 
 import type { ReactNode } from "react";
+import { useRouter } from "next/navigation";
 import {
   Activity,
   ArrowLeft,
   ArrowRight,
+  ExternalLink,
   FileText,
   Globe,
   Monitor,
@@ -54,7 +56,9 @@ import {
   type PaneRef,
   type PaneTab,
 } from "@/lib/chat-pane-tabs";
+import { docPagePath } from "@/lib/doc-page-url";
 import { ChatDocumentBody } from "./chat-document-viewer";
+import { PanePageBody, PaneUrlBody } from "./chat-pane-bodies";
 
 const CHAT_SIDE_PANE_ID = "chat-side-pane";
 
@@ -122,6 +126,7 @@ export function ChatSidePane({
   tabActions?: (ref: PaneRef, tab: PaneTab) => ReactNode;
 }) {
   const t = useT().chatApp.sidePane;
+  const router = useRouter();
   const { width, resizing, handleProps } = usePeekResize("chat:side-pane-width");
   const { state } = pane;
   if (!state.open) return null;
@@ -140,6 +145,33 @@ export function ChatSidePane({
         dataUrl={ref.dataUrl ?? null}
         source={ref.source ?? "cache"}
       />
+    ) : ref.kind === "page" ? (
+      <PanePageBody key={ref.pageId} pageId={ref.pageId} />
+    ) : ref.kind === "url" ? (
+      <PaneUrlBody key={ref.url} url={ref.url} title={ref.title ?? null} />
+    ) : null;
+  // The explicit ways out of the pane (D9): a page's full view, a link in
+  // the user's browser. Nothing else in the chat navigates away.
+  const builtinAction =
+    ref.kind === "page" ? (
+      <button
+        type="button"
+        onClick={() => router.push(docPagePath(workspaceId, ref.pageId))}
+        className="inline-flex min-h-11 items-center gap-1.5 rounded-md px-2 text-xs text-muted-foreground hover:bg-muted hover:text-foreground sm:min-h-7"
+      >
+        <ExternalLink className="size-3.5" aria-hidden />
+        {t.openFullPage}
+      </button>
+    ) : ref.kind === "url" ? (
+      <a
+        href={ref.url}
+        target="_blank"
+        rel="noopener noreferrer"
+        className="inline-flex min-h-11 items-center gap-1.5 rounded-md px-2 text-xs text-muted-foreground hover:bg-muted hover:text-foreground sm:min-h-7"
+      >
+        <ExternalLink className="size-3.5" aria-hidden />
+        {t.openInBrowser}
+      </a>
     ) : null;
   const historyNav = current.key !== WORK_TAB_KEY && (canGoBackInTab(current) || canGoForwardInTab(current));
 
@@ -220,7 +252,7 @@ export function ChatSidePane({
         </button>
       </header>
 
-      {(historyNav || tabActions) && current.key !== WORK_TAB_KEY && (
+      {(historyNav || tabActions || builtinAction) && current.key !== WORK_TAB_KEY && (
         <div className="flex shrink-0 items-center gap-1 border-b border-border/70 px-2 py-1">
           {historyNav && (
             <>
@@ -246,7 +278,10 @@ export function ChatSidePane({
               </button>
             </>
           )}
-          <div className="ml-auto flex items-center gap-1">{tabActions?.(ref, current)}</div>
+          <div className="ml-auto flex items-center gap-1">
+            {tabActions?.(ref, current)}
+            {builtinAction}
+          </div>
         </div>
       )}
 

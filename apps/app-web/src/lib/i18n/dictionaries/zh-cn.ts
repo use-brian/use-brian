@@ -8494,6 +8494,10 @@ export const zhCN: Dictionary = {
       untitledPage: "未命名页面",
       browser: "浏览器",
       workEmpty: "开始对话后，实时工作和置顶内容会显示在这里。",
+      openFullPage: "打开完整页面",
+      openInBrowser: "在浏览器中打开",
+      urlLoading: "正在加载预览",
+      urlNotEmbeddable: "此网站无法在应用内显示。",
     },
     documentViewer: {
       label: "原始文档",
