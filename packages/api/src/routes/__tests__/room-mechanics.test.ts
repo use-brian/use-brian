@@ -595,6 +595,21 @@ describe('[COMP:api/room-mechanics] crossAssistantSendPolicy — per-turn addres
     expect(crossAssistantSendPolicy(base)).toBe('reject')
   })
 
+  it('a personal chat (a room with one human, chat-parity T3) takes any same-workspace assistant, uncapped', () => {
+    // Its only reader is its owner: no wider audience for the floor to protect.
+    expect(
+      crossAssistantSendPolicy({
+        ...base,
+        isSharedSession: true,
+        ownerOnly: true,
+        assistantClearance: 'confidential',
+      }),
+    ).toBe('allow')
+    expect(
+      crossAssistantSendPolicy({ ...base, isSharedSession: true, ownerOnly: true, sameWorkspace: false }),
+    ).toBe('reject')
+  })
+
   it('the chat route gate actually runs through the policy', () => {
     // Source guard: the route must feed BOTH per-turn-addressable kinds into
     // the shared policy rather than re-growing an inline room-only check.
@@ -602,6 +617,7 @@ describe('[COMP:api/room-mechanics] crossAssistantSendPolicy — per-turn addres
     expect(src).toContain('crossAssistantSendPolicy({')
     expect(src).toContain("isDocSurfaceSession: policyFor(session).crossAssistantSend === 'doc'")
     expect(src).toContain("isSharedSession: policyFor(session).crossAssistantSend === 'room'")
+    expect(src).toContain("ownerOnly: policyFor(session).read.rule === 'owner'")
   })
 })
 

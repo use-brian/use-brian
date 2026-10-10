@@ -15,7 +15,7 @@ import { z } from 'zod'
 import { getDefaultAssistant, getUserAssistant, getWorkspacePrimaryAssistant, getUserProfilesByIds, updateUserLastSeenTz, resolveAssistantAccess } from '../db/users.js'
 import { charterNeedsIntake, createSaveCharterTool, CHARTER_INTAKE_ADDENDUM } from '../intake/charter-intake.js'
 import { resolvePresenceTimezone } from '../auth/client-timezone.js'
-import { createPersonalWebSession, findOrCreateSession, findSessionByChannel, findSessionById, addSessionMessage, readSessionMessageScopeSource, toStampedMessages, getSessionMessages, updateSessionTitle, countSessionTurns, truncateMessagesFrom, getPreferredChannel, getSessionTopicLabels, coalesceConsecutiveUserMessages, touchTurnLease, isTurnLeaseSuperseded, releaseTurnLease, requestTurnCancel, reclaimStaleTurn, type SessionMessage } from '../db/sessions.js'
+import { createPersonalWebSession, findOrCreateSession, findSessionByChannel, findSessionById, findSessionTurnLeaseState, countSessionHumans, addSessionMessage, readSessionMessageScopeSource, toStampedMessages, getSessionMessages, updateSessionTitle, countSessionTurns, truncateMessagesFrom, getPreferredChannel, getSessionTopicLabels, coalesceConsecutiveUserMessages, touchTurnLease, isTurnLeaseSuperseded, releaseTurnLease, requestTurnCancel, reclaimStaleTurn, type SessionMessage } from '../db/sessions.js'
 import { createTurnLedger } from '../ledger/recorder.js'
 import { getLedgerPayloadStore } from '../ledger/runtime.js'
 import { query, getPool } from '../db/client.js'
@@ -29,10 +29,10 @@ import { getSelfEntityId } from '../db/memories.js'
 import { getRecording, type Recording } from '../db/recordings-store.js'
 import { isConnectionDropError, isEndpointUnreachableError, streamErrorCode, buildMemoryContext, voicePlatformFromDraftTitle, measureDocContext, createMemoryTools, createSelfProfileTool, createMemoryRecallBuffer, createSkillInvocationBuffer, createRetrievalTools, createSessionStateTools, buildSessionStateBlock, runSessionStateDiff, buildActivePlanBlock, createPlanTools, seedPlanFromTasks, calculateCost, sanitize, shouldInline, ensureToolResultPairing, stripUnsignedToolUses, modelRequiresToolSignatures, elideStaleDocToolResults, synthesizeMissingToolResults, createConfirmationResolver, interpretConfirmationEvent, runPreflight, buildPreflightPrompt, runMemoryNudge, collectStream, classifyTopic, fetchEpisodicContext, transcribeFirstAudio, voiceUnavailableNote, TRANSCRIPTION_DISABLED_REASON, probePdfPageCount, estimateDistillTokens, PDF_CONFIRM_PAGE_THRESHOLD, DASHSCOPE_RENDER_WIDTH, filterToolsByCapabilities, modelToCompactionTier, buildWorkspaceFilesContext, buildUploadPolicyBlock, SensitivityAccumulator, CompartmentAccumulator, ContextScopeAccumulator, AttachmentCollector, runLocalMatchCheck, sanitizeTitle, AUTO_TITLE_AI_MIN_CHARS, COORDINATOR_BASE_ADDENDUM, COORDINATOR_RESEARCH_ADDENDUM, buildDocSupervisorSkillBlock, buildAmbientDocSkillBlock, detectOperateSiteIntent, EvidenceAccumulator, matchesDisputedFigure, buildDisputeContextNote, parsePresentedDocumentInput, latestWorkflowProposalReceipt, buildTool, prepareSlashCommand, resolveNativeSlashCommand, buildSlashCommandBlock, buildWorkflowSlashCommandBlock, buildEmailDraftAnchorPrompt, formatActiveEmailDraftContext, type PresentedDocumentInput, type MediaBackend } from '@use-brian/core'
 import { classifySession, policyFor, sessionPolicy } from '../session-kind.js'
-import { abortLocalTurn, precheckTurnAdmission, registerTurnAbort, releaseTurn, takeTurnLease, unregisterTurnAbort, waitForTurnSlot } from '../turn/lease.js'
+import { abortLocalTurn, precheckTurnAdmission, registerTurnAbort, releaseTurn, takeTurnLease, unregisterTurnAbort, waitForTurnSlot, TURN_SLOT_WAIT_TIMEOUT_MS } from '../turn/lease.js'
 import { runAssistantTurn, turnUsageIdentity } from '../turn/kernel.js'
 import { resolveTurnBilling } from '../turn/billing.js'
-import { deliverTurnInput, registerTurnInbox } from '../turn-inbox.js'
+import { acknowledgeTurnInputs, awaitTurnInputOutcome, deliverTurnInput, localTurnInboxAssistant, registerTurnInbox, roomInputAdmission } from '../turn-inbox.js'
 import { insertClaimProvenance, getClaimsForLatestAssistantMessage } from '../db/claim-provenance-store.js'
 import type { SessionStateStore, SessionStateRecord, PlanStore, AmbientSurface, CrmEmailDraftStore } from '@use-brian/core'
 import { runProactiveCompaction } from './proactive-compaction.js'
@@ -1538,13 +1538,14 @@ const roomQueueWaiters = new Set<string>()
  *   - `queue`  — a turn is in flight: hand this message to it rather than
  *                starting a second one on the same history.
  *
- * **Workspace sessions never reach the inbox.** A message in a room, a draft
- * or an anchored thread is a durable post every member must see the instant
- * it is sent, whether or not the assistant ever picks it up (multiplayer chat
- * D2/T2), the exact opposite of the persist-on-drain contract mid-turn input
- * is built on. They answer a mid-turn message with the T5 follow-up turn
- * instead (unified-sessions D11). Converging the two is
- * `docs/plans/multiplayer-chat.md` §7.
+ * **Workspace sessions take the room gate instead.** A message in a room, a
+ * draft or an anchored thread is a durable post every member must see the
+ * instant it is sent (multiplayer chat D2/T2), so it is never held by the
+ * client the way a personal mid-turn message is. The room gate saves it
+ * first and then decides with `roomInputAdmission` (`turn-inbox.ts`): an
+ * addressed mid-turn message for the running assistant ALSO enters that
+ * turn's inbox (chat-parity D3, section 6); anything else keeps the T5
+ * follow-up turn (unified-sessions D11).
  *
  * See docs/architecture/engine/mid-turn-input.md.
  */
@@ -2798,6 +2799,7 @@ export function chatRoutes(options: WebChatOptions): Router {
         const verdict = crossAssistantSendPolicy({
           isSharedSession: policyFor(session).crossAssistantSend === 'room',
           isDocSurfaceSession: policyFor(session).crossAssistantSend === 'doc',
+          ownerOnly: policyFor(session).read.rule === 'owner',
           sameWorkspace,
           assistantClearance: assistant.clearance ?? null,
           sessionClearance: session.effectiveClearance,
@@ -3205,7 +3207,7 @@ export function chatRoutes(options: WebChatOptions): Router {
         if (!isRoomSession || !assistant.workspaceId) {
           sendEvent('error', {
             code: 'invalid_room_response_group',
-            error: 'Multi-assistant responses are available only in workspace rooms.',
+            error: 'Multi-assistant responses are available only in Chat conversations.',
           })
           res.end()
           return
@@ -3229,12 +3231,14 @@ export function chatRoutes(options: WebChatOptions): Router {
           orderedRows.length === requestedRoomResponseGroup.assistantIds.length &&
           orderedRows.every((row) => row.workspaceId === assistant.workspaceId)
         const currentIndex = requestedRoomResponseGroup.assistantIds.indexOf(assistant.id)
-        const clearanceOk = groupIsValid && orderedRows.every((row) =>
+        // A personal chat's only reader is its owner (chat-parity T3): each
+        // responder reads under its own clearance, so no room cap applies.
+        const clearanceOk = groupIsValid && (turnPolicy.read.rule === 'owner' || orderedRows.every((row) =>
           mayAssistantAnswerInRoom({
             assistantClearance: row.clearance,
             roomClearance: session.effectiveClearance,
           }),
-        )
+        ))
         const continuationShapeOk = requestedRoomResponseGroup.sourceMessageId
           ? currentIndex > 0
           : currentIndex === 0
@@ -3307,8 +3311,15 @@ export function chatRoutes(options: WebChatOptions): Router {
           }
         }
         // D12: a plain room is mention-gated; an anchored thread (doc,
-        // Office, feed, draft) treats every message as addressed.
-        const addressed = turnPolicy.addressing === 'every_message' || detectRoomAddress({
+        // Office, feed, draft) treats every message as addressed. Chat-parity
+        // D2: the gate follows the number of humans, so a web room with one
+        // human (the sender counted) hears every message, like a personal
+        // chat, and turns mention-gated once a second human has posted.
+        const roomHumans = turnPolicy.post
+          ? (await countSessionHumans([session.id], user.id)).get(session.id)
+          : undefined
+        const addressing = sessionPolicy(classifySession(session), { humanCount: roomHumans }).addressing
+        const addressed = addressing === 'every_message' || detectRoomAddress({
           message,
           assistantName: assistant.name,
           ask: requestedAsk === true,
@@ -3426,10 +3437,83 @@ export function chatRoutes(options: WebChatOptions): Router {
           })
         }
 
-        const admission = roomTurnAdmission({
+        let admission: RoomTurnAdmission | 'inbox' = roomInputAdmission({
           status: liveStatus,
           waiterArmed: roomQueueWaiters.has(session.id),
+          clientMidTurn: requestedMidTurn === true && !roomResponseGroupContext,
+          queue: turnPolicy.queue,
+          runningAssistantId: localTurnInboxAssistant(session.id),
+          addressedAssistantId: assistant.id,
         })
+        if (admission === 'inbox') {
+          // Chat-parity D3 / section 6: a room steer. The message is a durable
+          // post first (every member sees it the instant it is sent), and it
+          // is ALSO handed to the running turn, which takes it at its next
+          // boundary (Cmd/Ctrl+Enter: steers) and reuses this row rather than
+          // writing it again. It never arms a follow-up turn of its own,
+          // unless the turn ends without taking it: then the room's T5 path
+          // (arm or fold) answers it below, unchanged.
+          sendEvent('session', { sessionId: session.id })
+          if (!prePersistedUserMsg) {
+            const persisted = await persistRoomPost()
+            prePersistedUserMsg = persisted.stored
+            if (persisted.mentions.unreachable.length > 0) {
+              sendEvent('mention_unreachable', { unreachable: persisted.mentions.unreachable })
+            }
+          }
+          const roomInputId =
+            typeof requestedInputId === 'string' && requestedInputId
+              ? requestedInputId.slice(0, 64)
+              : crypto.randomUUID()
+          const roomInputMode = requestedSteer === true ? 'steer' as const : 'queued' as const
+          const deliveredHere = deliverTurnInput({
+            sessionId: session.id,
+            input: {
+              id: roomInputId,
+              text: roomMessageText.trim(),
+              mode: roomInputMode,
+              receivedAt: Date.now(),
+              ...(turnPolicy.attribution && user.name ? { from: user.name } : {}),
+              persistedMessageId: prePersistedUserMsg.id,
+              assistantId: assistant.id,
+            },
+          })
+          sendEvent('input_queued', {
+            inputId: roomInputId,
+            mode: roomInputMode,
+            delivered: deliveredHere,
+            messageId: prePersistedUserMsg.id,
+          })
+          options.analytics?.logEvent({
+            userId: user.id, assistantId: assistant.id, sessionId: session.id,
+            eventName: 'turn_input_queued', channelType: 'web',
+            metadata: { mode: sanitize(roomInputMode), delivered_locally: deliveredHere, room: true },
+          })
+          const outcome = await awaitTurnInputOutcome({
+            sessionId: session.id,
+            inputId: roomInputId,
+            isRunning: async () => (await findSessionTurnLeaseState(session.id))?.status === 'running',
+            timeoutMs: TURN_SLOT_WAIT_TIMEOUT_MS,
+          })
+          if (outcome === 'applied') {
+            sendEvent('done', {})
+            res.end()
+            return
+          }
+          if (outcome === 'timeout') {
+            sendEvent('error', {
+              code: 'room_turn_wait_timeout',
+              error: 'The in-flight turn did not finish in time. Your message is posted; mention the assistant again to get a reply.',
+            })
+            res.end()
+            return
+          }
+          // The turn ended before taking it: the T5 path, on the fresh slot.
+          admission = roomTurnAdmission({
+            status: (await findSessionTurnLeaseState(session.id))?.status ?? 'idle',
+            waiterArmed: roomQueueWaiters.has(session.id),
+          })
+        }
         if (admission !== 'run') {
           // Addressed mid-turn. Persist now (instant fan-in), then either
           // fold into the already-armed follow-up turn or become it.
@@ -3987,7 +4071,9 @@ export function chatRoutes(options: WebChatOptions): Router {
         // here — that's what keeps this a once-per-row call, not
         // once-per-POST. The un-addressed/queued paths above already
         // recorded via `persistRoomPost`'s own call.
-        if (isRoomSession && assistant.workspaceId && typeof message === 'string' && message.trim()) {
+        // Human @mentions notify teammates, so only a room records them: a
+        // personal chat (a room with one human) has nobody else to reach.
+        if (turnPolicy.post && assistant.workspaceId && typeof message === 'string' && message.trim()) {
           try {
             const mentions = await recordRoomMentionsForMessage({
               workspaceId: assistant.workspaceId,
@@ -4850,8 +4936,10 @@ export function chatRoutes(options: WebChatOptions): Router {
       // frame, resolved FRESH each turn under the session's clearance. An
       // index, not inlined content. The pins are visible on the room surface,
       // so their representation is valid user-visible context. Best-effort: a
-      // resolver failure costs the block, never the turn.
-      if (isRoomSession && assistant.workspaceId) {
+      // resolver failure costs the block, never the turn. Every Chat
+      // conversation pins (`policy.pins`): a personal chat is a room with one
+      // human (chat-parity D1).
+      if (turnPolicy.pins && assistant.workspaceId) {
         try {
           const pinnedContext = await resolvePinnedContext({
             sessionId: session.id,
@@ -5291,11 +5379,12 @@ export function chatRoutes(options: WebChatOptions): Router {
         )
       }
 
-      // Room pin tools — the assistant's write access to the room's shared
+      // Room pin tools — the assistant's write access to the conversation's
       // Pins panel ("pin all tasks in this project here"). Per-turn admission,
-      // ROOM sessions only: no other surface renders a pin, so personal chats,
-      // channels, workflows, and workers never discover these.
-      if (isRoomSession && assistant.workspaceId) {
+      // Chat conversations only (`policy.pins`: a room or a personal chat,
+      // whose Work Bench renders the pins): channels, the doc dock,
+      // workflows, and workers never discover these.
+      if (turnPolicy.pins && assistant.workspaceId) {
         const pinTools = createSessionPinTools({
           sessionId: session.id,
           workspaceId: assistant.workspaceId,
@@ -6612,7 +6701,7 @@ export function chatRoutes(options: WebChatOptions): Router {
       // into this session from here until the outer `finally` lands in the
       // running loop instead of starting a second turn.
       // See docs/architecture/engine/mid-turn-input.md.
-      const turnInbox = registerTurnInbox(session.id)
+      const turnInbox = registerTurnInbox(session.id, { assistantId: assistant.id })
       turnInboxHandle = turnInbox
 
       // Assistant-run presence — announce to every tab viewing this doc page
@@ -7317,9 +7406,9 @@ export function chatRoutes(options: WebChatOptions): Router {
           questionResumeEnabled: !!assistant.workspaceId,
           // Mid-turn input — a message sent while this turn runs joins it at
           // the loop's next safe boundary (or interrupts the in-flight
-          // response, for a steer). Nothing is ever delivered into a room's
-          // inbox (their mid-turn path is the T5 follow-up turn), so the port
-          // is inert there. See docs/architecture/engine/mid-turn-input.md.
+          // response, for a steer). In a room only an addressed message for
+          // THIS assistant arrives here, already saved as a post (chat-parity
+          // section 6). See docs/architecture/engine/mid-turn-input.md.
           turnInbox: turnInbox.port,
           },
           sink: { kind: 'sse', onEvent: async (event) => {
@@ -7631,21 +7720,32 @@ export function chatRoutes(options: WebChatOptions): Router {
             // pairing invariant covers assistant/tool_result pairs, and a plain
             // user row sits outside that contract.
             // See docs/architecture/engine/mid-turn-input.md.
+            // A room input (chat-parity section 6) is a post saved the instant
+            // it was sent: reuse that row, and wake its enqueueing request so
+            // it arms no follow-up turn for a message this turn answers.
+            const roomInputIds = event.inputs
+              .filter((queuedInput) => Boolean(queuedInput.persistedMessageId))
+              .map((queuedInput) => queuedInput.id)
+            acknowledgeTurnInputs(session.id, roomInputIds)
             for (const queuedInput of event.inputs) {
               try {
-                const storedQueued = await authority.execute(() => addSessionMessage({
-                  sessionId: session.id,
-                  role: 'user',
-                  content: [{ type: 'text', text: queuedInput.text }],
-                  ...(turnPolicy.attribution
-                    ? { senderUserId: user.id }
-                    : {}),
-                  scope: inputMessageScope,
-                }))
-                dispatchPersistedWebInput({
-                  workspaceId: assistant.workspaceId, session, userId: user.id,
-                  stored: storedQueued, text: queuedInput.text,
-                })
+                const storedQueued = queuedInput.persistedMessageId
+                  ? { id: queuedInput.persistedMessageId }
+                  : await authority.execute(() => addSessionMessage({
+                    sessionId: session.id,
+                    role: 'user',
+                    content: [{ type: 'text', text: queuedInput.text }],
+                    ...(turnPolicy.attribution
+                      ? { senderUserId: user.id }
+                      : {}),
+                    scope: inputMessageScope,
+                  }))
+                if (!queuedInput.persistedMessageId && 'sequenceNum' in storedQueued) {
+                  dispatchPersistedWebInput({
+                    workspaceId: assistant.workspaceId, session, userId: user.id,
+                    stored: storedQueued, text: queuedInput.text,
+                  })
+                }
                 const queuedSource = await readSessionMessageScopeSource(
                   assistant.workspaceId,
                   storedQueued.id,
@@ -7662,7 +7762,8 @@ export function chatRoutes(options: WebChatOptions): Router {
                   messageId: storedQueued.id,
                 })
                 turnStream.resetAnswer()
-                if (turnPolicy.liveFollow) {
+                // A room input's row was announced when it was posted.
+                if (turnPolicy.liveFollow && 'sequenceNum' in storedQueued) {
                   publishSessionEvent({
                     kind: 'user_message_saved',
                     sessionId: session.id,

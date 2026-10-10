@@ -24,6 +24,7 @@ vi.mock('../../db/sessions.js', () => ({
   findSessionById: vi.fn(),
   getSessionMessages: vi.fn(),
   renameSession: vi.fn(),
+  countSessionHumans: vi.fn(async () => new Map()),
 }))
 vi.mock('../../db/workspace-store.js', () => ({
   getWorkspaceRoleSystem: vi.fn(),

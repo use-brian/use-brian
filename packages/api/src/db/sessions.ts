@@ -1127,6 +1127,42 @@ export async function countSessionTurns(sessionId: string): Promise<number> {
 }
 
 /**
+ * How many humans take part in each session, as the caller would see it:
+ * the starter (`user_id`), every human who has posted (`sender_user_id`),
+ * and the caller, who is about to take part by sending. One batched read for
+ * the room rail and one session for the chat route's address gate.
+ *
+ * The count decides addressing (`SessionTurnFacts.humanCount`, chat-parity
+ * D2): with one human every message runs a turn, and the gate turns
+ * mention-based the moment a second human posts. There is no participants
+ * table; posting is what joins a room. Personal sessions store no sender, so
+ * they always count one. Spec: docs/architecture/features/chat-app.md ->
+ * "Addressing follows the humans".
+ */
+export async function countSessionHumans(
+  sessionIds: readonly string[],
+  callerUserId: string,
+): Promise<Map<string, number>> {
+  const out = new Map<string, number>()
+  if (sessionIds.length === 0) return out
+  const result = await query<{ sessionId: string; count: number }>(
+    `SELECT h.session_id AS "sessionId", COUNT(DISTINCT h.user_id)::int AS count
+       FROM (
+         SELECT s.id AS session_id, s.user_id FROM sessions s WHERE s.id = ANY($1::uuid[])
+         UNION
+         SELECT m.session_id, m.sender_user_id FROM session_messages m
+          WHERE m.session_id = ANY($1::uuid[]) AND m.role = 'user' AND m.sender_user_id IS NOT NULL
+         UNION
+         SELECT s.id, $2::uuid FROM sessions s WHERE s.id = ANY($1::uuid[])
+       ) h
+      GROUP BY h.session_id`,
+    [sessionIds, callerUserId],
+  )
+  for (const row of result.rows) out.set(row.sessionId, Number(row.count))
+  return out
+}
+
+/**
  * Get messages for a session, ordered by sequence number.
  *
  * `fromSequence` is inclusive (returns rows with sequence_num >= N) and is

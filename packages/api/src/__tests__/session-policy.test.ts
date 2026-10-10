@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest'
 import { isAttendedTurn, provenanceSessionId } from '@use-brian/core'
-import { feedAnchoredRead, policyFor, sessionKindSql, transportPolicy, type SessionKindRow } from '../session-kind.js'
+import { classifySession, clientSessionPolicy, feedAnchoredRead, policyFor, sessionKindSql, sessionPolicy, transportPolicy, type SessionKindRow } from '../session-kind.js'
 
 /**
  * One case per drift row of docs/plans/unified-sessions.md section 2.2.
@@ -58,7 +58,11 @@ describe('[COMP:api/session-policy] sessionPolicy drift ledger', () => {
     for (const row of [ROOM, DRAFT, DOC_THREAD, OFFICE, FEED_THREAD]) {
       expect(policyFor(row).liveFollow).toBe(true)
     }
-    expect(policyFor(PERSONAL).liveFollow).toBe(false)
+    // Chat-parity T2: a personal web chat publishes too (its reader is still
+    // its owner alone); other personal sessions publish nothing.
+    expect(policyFor(PERSONAL).liveFollow).toBe(true)
+    expect(policyFor(INBOX).liveFollow).toBe(false)
+    expect(policyFor(TELEGRAM_DM).liveFollow).toBe(false)
     // Whole-life follow is the presence surfaces only (rooms, the Office rail).
     expect(policyFor(ROOM).presence).toBe(true)
     expect(policyFor(OFFICE).presence).toBe(true)
@@ -168,4 +172,74 @@ describe('[COMP:api/session-policy] sessionPolicy drift ledger', () => {
     expect(policyFor(PERSONAL).billing).toBe('user')
   })
 
+})
+
+const DOC_DOCK: SessionKindRow = { channelType: 'web', anchorKind: null, visibility: 'personal', appOrigin: 'doc', channelId: 'dd' }
+const DOCK_BRAIN: SessionKindRow = { channelType: 'web', anchorKind: null, visibility: 'personal', appOrigin: 'brain', channelId: 'db' }
+const CHANNEL_ROOM: SessionKindRow = { channelType: 'slack', anchorKind: 'channel', visibility: 'workspace', channelId: 'C1' }
+
+describe('[COMP:api/session-policy] chat parity: a personal chat is a room with one human', () => {
+  it('T2: a personal web chat follows live, pins, answers in several voices and takes cross-assistant sends', () => {
+    for (const row of [PERSONAL, DOCK_BRAIN]) {
+      const policy = policyFor(row)
+      expect(policy.liveFollow).toBe(true)
+      expect(policy.pins).toBe(true)
+      expect(policy.multiVoice).toBe(true)
+      expect(policy.crossAssistantSend).toBe('room')
+      expect(policy.addressing).toBe('every_message')
+      expect(policy.queue).toBe(true)
+    }
+    // The room keeps every one of them.
+    const room = policyFor(ROOM)
+    expect([room.liveFollow, room.pins, room.multiVoice, room.crossAssistantSend]).toEqual([true, true, true, 'room'])
+  })
+
+  it('D1: audience, memory, billing, reading and presence stay personal', () => {
+    const policy = policyFor(PERSONAL)
+    expect(policy.read).toEqual({ rule: 'owner' })
+    expect(policy.context).toEqual({ personalMemory: true })
+    expect(policy.billing).toBe('user')
+    expect(policy.admission).toBe('personal')
+    expect(policy.attribution).toBe(false)
+    expect(policy.deliveryCeiling).toEqual({ ceiling: 'owner', recipientType: 'individual' })
+    // Presence stays off while the user is the only human, and nothing posts.
+    expect(policy.presence).toBe(false)
+    expect(policy.post).toBe(false)
+  })
+
+  it('D2: addressing follows the number of humans, not the audience', () => {
+    const room = classifySession(ROOM)
+    expect(sessionPolicy(room, { humanCount: 1 }).addressing).toBe('every_message')
+    expect(sessionPolicy(room, { humanCount: 2 }).addressing).toBe('mention')
+    expect(sessionPolicy(room, { humanCount: 5 }).addressing).toBe('mention')
+    // Unknown stays mention-gated, the safe default.
+    expect(sessionPolicy(room).addressing).toBe('mention')
+    expect(policyFor(ROOM, { humanCount: 1 }).addressing).toBe('every_message')
+    // A provider group's humans cannot be counted here: it stays gated.
+    expect(sessionPolicy(classifySession(CHANNEL_ROOM), { humanCount: 1 }).addressing).toBe('mention')
+    // One human always, for a personal chat.
+    expect(sessionPolicy(classifySession(PERSONAL), { humanCount: 1 }).addressing).toBe('every_message')
+  })
+
+  it('D3: every web conversation may hand a message to the running turn; a provider room may not', () => {
+    for (const row of [ROOM, PERSONAL, DOC_THREAD, DRAFT]) expect(policyFor(row).queue).toBe(true)
+    for (const row of [CHANNEL_ROOM, TELEGRAM_DM, WORKFLOW, A2A]) expect(policyFor(row).queue).toBe(false)
+  })
+
+  it('pins belong to Chat conversations only: not the doc dock, channels, anchored threads or machine lanes', () => {
+    for (const row of [DOC_DOCK, DOC_THREAD, OFFICE, FEED_THREAD, DRAFT, INBOX, TELEGRAM_DM, CHANNEL_ROOM, WORKFLOW]) {
+      expect(policyFor(row).pins).toBe(false)
+    }
+    // The doc dock keeps its own per-turn addressing.
+    expect(policyFor(DOC_DOCK).crossAssistantSend).toBe('doc')
+  })
+
+  it('T1: the client projection carries exactly the flags the Chat app renders from', () => {
+    expect(clientSessionPolicy(policyFor(PERSONAL))).toEqual({
+      addressing: 'every_message', multiVoice: true, pins: true, queue: true, post: false, presence: false,
+    })
+    expect(clientSessionPolicy(policyFor(ROOM, { humanCount: 2 }))).toEqual({
+      addressing: 'mention', multiVoice: true, pins: true, queue: true, post: true, presence: true,
+    })
+  })
 })

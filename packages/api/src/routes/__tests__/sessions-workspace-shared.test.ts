@@ -49,7 +49,9 @@ vi.mock('../../db/workspace-store.js', () => ({
 }))
 
 import { gateSessionRead } from '../sessions.js'
-const isWebRoom = (s: Parameters<typeof policyFor>[0]) => policyFor(s).crossAssistantSend === 'room'
+// The web room is the one session kind that posts freely; since chat-parity
+// D1 a personal chat shares its cross-assistant addressing but not this.
+const isWebRoom = (s: Parameters<typeof policyFor>[0]) => policyFor(s).post
 import { policyFor } from '../../session-kind.js'
 
 const STARTER = 'user-starter'

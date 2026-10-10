@@ -174,8 +174,12 @@ export function isExternalTransport(transport: Transport): boolean {
  * a provider group conversation (a Telegram group, a Slack channel). Until
  * group chats converge into workspace rooms (unified-sessions S4) their
  * sessions are per-sender rows, so the group-ness lives on the turn.
+ * `humanCount`: how many humans take part in a web room (its starter, every
+ * human who has posted, and the caller), from `countSessionHumans`. It
+ * decides `addressing` (chat-parity D2) and is never read by the classifier.
+ * Unknown leaves a room mention-gated, the safe default.
  */
-export type SessionTurnFacts = { providerGroup?: boolean }
+export type SessionTurnFacts = { providerGroup?: boolean; humanCount?: number }
 
 /**
  * Classify a session row. The ONLY reader of the discriminator columns.
@@ -253,7 +257,10 @@ export type SessionPolicy = {
   /**
    * Does a message need to address the assistant to run a turn (D12)? Plain
    * and channel rooms are mention-gated; anchored threads and drafts treat
-   * every message as addressed.
+   * every message as addressed. Addressing follows the number of humans,
+   * not the audience (chat-parity D2): a web room with one human treats
+   * every message as addressed, exactly like a personal chat, and turns
+   * mention-gated the moment a second human takes part (`humanCount`).
    */
   addressing: 'mention' | 'every_message'
   /**
@@ -264,8 +271,9 @@ export type SessionPolicy = {
   attribution: boolean
   /**
    * Several assistants may answer in this conversation, so foreign assistant
-   * turns are labeled at assembly: every workspace session, and the doc
-   * dock's per-turn-addressable personal thread.
+   * turns are labeled at assembly: every workspace session, the doc
+   * dock's per-turn-addressable personal thread, and a personal web chat
+   * (chat-parity D1: `@` mentions bring other assistants in).
    */
   multiVoice: boolean
   /** Memory sources a turn loads (D3, L16). */
@@ -279,8 +287,10 @@ export type SessionPolicy = {
   /**
    * Do other viewers follow this session's turns live (L6)? ONE answer for
    * every bus publisher (rows, tool input, turn start/finish), the stuck-turn
-   * sweeper's heal broadcast, and the follow stream: every workspace session.
-   * A personal session is followed only by its owner's own tabs.
+   * sweeper's heal broadcast, and the follow stream: every workspace session,
+   * and a personal web chat so its Work Bench Live card mirrors the turn on
+   * every one of its owner's tabs (chat-parity T2). Its reader is still the
+   * owner alone (`read`). Other personal sessions publish nothing.
    */
   liveFollow: boolean
   /**
@@ -289,6 +299,23 @@ export type SessionPolicy = {
    * who is here) and an Office file's Brian rail.
    */
   presence: boolean
+  /**
+   * May the Chat app's Work Bench pin context to this conversation (the
+   * `session_pins` routes, the assistant's pin tools and the pinned-context
+   * block)? Every Chat conversation: a web room, and a personal web chat,
+   * which is a room with one human (chat-parity D1, T2). The doc dock's
+   * thread keeps its own surface and has no pins.
+   */
+  pins: boolean
+  /**
+   * May the web composer hand a message to the RUNNING turn (`midTurn`,
+   * docs/architecture/engine/mid-turn-input.md)? Every web conversation a
+   * person types into. A personal session queues through the inbox and the
+   * client holds the message; a room saves the message first and also
+   * hands it to the running turn when it addresses that turn's assistant
+   * (chat-parity D3, section 6). A converged provider room has no web turns.
+   */
+  queue: boolean
   /**
    * Who may resolve a confirmation raised by a turn (L5): the owner of a
    * personal session; in any workspace session, the member who addressed
@@ -338,8 +365,10 @@ export type SessionPolicy = {
   docSurface: boolean
   /**
    * May a turn be addressed to an assistant other than the session's bound
-   * one? `room`: a web room's multi-assistant addressing (T9); `doc`: the doc
-   * dock's per-turn-addressable thread; `none`: assistant-bound.
+   * one? `room`: a web room's or a personal web chat's multi-assistant
+   * addressing (T9, chat-parity T2/T3; the room clearance cap applies only
+   * where the audience is wider than the owner); `doc`: the doc dock's
+   * per-turn-addressable thread; `none`: assistant-bound.
    */
   crossAssistantSend: 'room' | 'doc' | 'none'
   /** Where `effective_clearance` comes from (D10, L10). */
@@ -359,15 +388,33 @@ function isWebRoom(kind: SessionKind): boolean {
 }
 
 /**
- * Answer every concern for one kind. Pure. Each field's rule is documented in
- * docs/plans/unified-sessions.md section 4.2.
+ * Is this a personal web chat: an owner-only, unanchored web conversation
+ * the Chat app lists, from any surface except the doc dock (whose thread has
+ * its own per-turn addressing, `crossAssistantSend: 'doc'`)? Chat-parity D1
+ * makes it a room with one human: it gets the room surfaces while its
+ * audience, memory and billing stay personal.
  */
-export function sessionPolicy(kind: SessionKind): SessionPolicy {
+function isPersonalChat(kind: SessionKind): boolean {
+  return kind.audience === 'personal' && kind.anchor.kind === 'none' && kind.transport === 'web'
+    && kind.lane === 'conversation' && kind.surface !== 'doc'
+}
+
+/**
+ * Answer every concern for one kind. Pure. Each field's rule is documented in
+ * docs/plans/unified-sessions.md section 4.2, amended by
+ * docs/plans/chat-parity-and-side-pane.md T2. `facts.humanCount` is the only
+ * turn fact the policy reads (addressing, D2).
+ */
+export function sessionPolicy(kind: SessionKind, facts: SessionTurnFacts = {}): SessionPolicy {
   const workspace = kind.audience === 'workspace'
   const room = isWebRoom(kind)
+  const personalChat = isPersonalChat(kind)
   const anchor = kind.anchor.kind
   const draft = anchor === 'feed_draft'
   const conversation = kind.lane === 'conversation'
+  // D2: a web room with exactly one human hears every message. A provider
+  // room's humans are not countable from here, so it stays mention-gated.
+  const soloRoom = room && facts.humanCount !== undefined && facts.humanCount <= 1
 
   const anchorGate: AnchorReadGate =
     draft ? 'feed_draft_audience'
@@ -379,16 +426,18 @@ export function sessionPolicy(kind: SessionKind): SessionPolicy {
     read: workspace ? { rule: 'workspace', anchorGate } : { rule: 'owner' },
     post: room,
     admission: workspace ? 'room' : 'personal',
-    addressing: workspace && (anchor === 'none' || anchor === 'channel') ? 'mention' : 'every_message',
+    addressing: workspace && !soloRoom && (anchor === 'none' || anchor === 'channel') ? 'mention' : 'every_message',
     attribution: workspace,
-    multiVoice: workspace || kind.surface === 'doc',
+    multiVoice: workspace || kind.surface === 'doc' || personalChat,
     context: { personalMemory: !workspace },
     deliveryCeiling: {
       ceiling: workspace ? 'audience' : 'owner',
       recipientType: workspace ? 'group' : 'individual',
     },
-    liveFollow: workspace,
+    liveFollow: workspace || personalChat,
     presence: room || anchor === 'office_file',
+    pins: room || personalChat,
+    queue: conversation && kind.transport === 'web' && anchor !== 'channel',
     confirmations: workspace ? 'addresser_or_admin' : 'owner',
     lifecycle: workspace ? { rename: 'participants', delete: 'admin' } : { rename: 'owner', delete: 'owner' },
     humanActivity: conversation,
@@ -398,7 +447,7 @@ export function sessionPolicy(kind: SessionKind): SessionPolicy {
     createAdmission: room,
     webTurns: anchor !== 'channel',
     docSurface: kind.surface === 'doc' || anchor === 'doc_thread',
-    crossAssistantSend: room ? 'room' : kind.surface === 'doc' || anchor === 'doc_thread' ? 'doc' : 'none',
+    crossAssistantSend: room || personalChat ? 'room' : kind.surface === 'doc' || anchor === 'doc_thread' ? 'doc' : 'none',
     clearanceSource: anchor === 'office_file' ? 'anchor' : 'assistant',
     clearanceRecompute: workspace && anchor !== 'office_file',
   }
@@ -414,9 +463,37 @@ export function feedAnchoredRead(policy: SessionPolicy): boolean {
     && (policy.read.anchorGate === 'feed_draft_audience' || policy.read.anchorGate === 'feed_collaboration')
 }
 
+/**
+ * The policy flags a client renders from (chat-parity T1). The Chat app
+ * never works "room" out from list membership or the `?v=` view: every
+ * branch reads one of these, echoed on the session list, the session read
+ * and room creation beside `humanCount`.
+ */
+type ClientSessionPolicy = {
+  addressing: SessionPolicy['addressing']
+  multiVoice: boolean
+  pins: boolean
+  queue: boolean
+  /** Free posting (silent posts, post edits, typing, a shared rebind). */
+  post: boolean
+  /** A whole-life follow stream with a presence roster (rooms); else per-turn reconnect. */
+  presence: boolean
+}
+
+export function clientSessionPolicy(policy: SessionPolicy): ClientSessionPolicy {
+  return {
+    addressing: policy.addressing,
+    multiVoice: policy.multiVoice,
+    pins: policy.pins,
+    queue: policy.queue,
+    post: policy.post,
+    presence: policy.presence,
+  }
+}
+
 /** Convenience: classify and answer in one call. */
 export function policyFor(row: SessionKindRow, turn: SessionTurnFacts = {}): SessionPolicy {
-  return sessionPolicy(classifySession(row, turn))
+  return sessionPolicy(classifySession(row, turn), turn)
 }
 
 // --- Transport policy ------------------------------------------------------

@@ -7,7 +7,7 @@ import { createSessionStreamAuthority } from '../session-stream-authority.js'
 import { guardFeedStream } from '../content-planning/source-authority.js'
 import { Router } from 'express'
 import { findOrCreateUser, getDefaultAssistant, getUserAssistant, getUserProfilesByIds, getWorkspacePrimaryAssistant } from '../db/users.js'
-import { addSessionMessage, createPersonalWebSession, createWorkspaceChatSession, findSessionByChannel, findSessionById, getSessionMessageById, getSessionMessages, readSessionById, rebindSessionAssistant, renameSession, updateSessionMessageText } from '../db/sessions.js'
+import { addSessionMessage, countSessionHumans, createPersonalWebSession, createWorkspaceChatSession, findSessionByChannel, findSessionById, getSessionMessageById, getSessionMessages, readSessionById, rebindSessionAssistant, renameSession, updateSessionMessageText } from '../db/sessions.js'
 import { isWorkspaceAdmin, setRoomCapture } from '../channel-room/room.js'
 import { mayAssistantAnswerInRoom, DOC_DOCK_RESUME_ROW } from './_room-binding.js'
 import { query } from '../db/client.js'
@@ -16,7 +16,7 @@ import { getLedgerPayloadStore } from '../ledger/runtime.js'
 import { resolveUser } from './route-helpers.js'
 import { getWorkspaceRoleSystem, getWorkspaceMembershipWithReadScopeSystem } from '../db/workspace-store.js'
 import { decideSessionRead } from '../session-read-access.js'
-import { classifySession, feedAnchoredRead, policyFor, sessionKindSql } from '../session-kind.js'
+import { classifySession, clientSessionPolicy, feedAnchoredRead, policyFor, sessionKindSql, sessionPolicy } from '../session-kind.js'
 import { canRead, type Sensitivity } from '@use-brian/core'
 import {
   ContextNotAvailableError,
@@ -144,7 +144,10 @@ export type ReconnectRelayFrame = { event: string; data: unknown }
  *     reason?, stoppedByName? }`) THEN `done {}`, with `finalize` true: the
  *     relay writes both frames and ends the response. The server never
  *     reopens; a client that wants more opens a new stream.
- * Every other bus kind (room posts, presence, pins, the room-only
+ *   - `pins_changed` -> `pins_changed` (a signal, never data): a personal
+ *     chat pins too (chat-parity D1), and its assistant may pin mid-turn,
+ *     so the Work Bench refetches.
+ * Every other bus kind (room posts, presence, the room-only
  * `turn_started`) is not part of a personal turn and yields no frame.
  */
 export function reconnectRelayFrames(
@@ -155,6 +158,8 @@ export function reconnectRelayFrames(
       return { frames: [{ event: 'snapshot', data: event.payload }], finalize: false }
     case 'turn_activity':
       return { frames: [{ event: 'activity', data: event.payload }], finalize: false }
+    case 'pins_changed':
+      return { frames: [{ event: 'pins_changed', data: event.payload }], finalize: false }
     case 'turn_completed':
       return {
         frames: [
@@ -294,10 +299,12 @@ export function sessionRoutes(opts: SessionRouteOptions = {}): Router {
         contextGroupId: string | null; contextProjectId: string | null
         userId: string; visibility: string | null; mode: string | null
         effectiveClearance: string | null; contextCompartments: string[] | null
+        anchorKind: string | null
       }>(
         `SELECT s.id, s.title, s.channel_id as "channelId",
                 s.last_active_at as "lastActiveAt", s.status,
                 s.app_origin as "appOrigin",
+                s.anchor_kind as "anchorKind",
                 s.assistant_id as "assistantId",
                 s.channel_type as "channelType",
                 s.context_group_id as "contextGroupId",
@@ -376,6 +383,13 @@ export function sessionRoutes(opts: SessionRouteOptions = {}): Router {
         channelType: s.channelType,
         contextGroupId: s.contextGroupId,
         contextProjectId: s.contextProjectId,
+        // The turn slot, so the rail's working pulse reads personal rows the
+        // same way it reads rooms (chat-parity T4).
+        status: s.status,
+        // What the Chat app renders from (chat-parity T1): a personal chat is
+        // a room with one human, never worked out from which list it is in.
+        policy: clientSessionPolicy(policyFor(s)),
+        humanCount: 1,
       })))
     } catch (err) {
       console.error('Sessions list error:', err)
@@ -430,9 +444,11 @@ export function sessionRoutes(opts: SessionRouteOptions = {}): Router {
         contextGroupId: string | null; contextProjectId: string | null
         contextCompartments: string[] | null
         channelType: string; anchorKind: string; roomCapture: boolean
+        appOrigin: string | null
       }>(
         `SELECT s.id, s.title, s.channel_id AS "channelId",
                 s.channel_type AS "channelType", s.anchor_kind AS "anchorKind",
+                s.app_origin AS "appOrigin",
                 s.room_capture AS "roomCapture",
                 s.last_active_at AS "lastActiveAt", s.status,
                 s.user_id AS "starterUserId",
@@ -477,6 +493,13 @@ export function sessionRoutes(opts: SessionRouteOptions = {}): Router {
       // `users` RLS is own-row only, so this is a system read — membership
       // above already authorized seeing who is in this workspace.
       const profiles = await getUserProfilesByIds(visible.map((r) => r.starterUserId))
+      // D2: addressing follows the humans in each room, the caller counted.
+      // Best-effort: an unknown count leaves a room mention-gated.
+      const humans = await countSessionHumans(visible.map((r) => r.id), user.id)
+        .catch((err) => {
+          console.warn('[sessions] room human count failed (rooms stay mention-gated):', err)
+          return new Map<string, number>()
+        })
       res.json(visible.map((s) => ({
         id: s.id,
         title: s.title ?? 'New Chat',
@@ -496,6 +519,8 @@ export function sessionRoutes(opts: SessionRouteOptions = {}): Router {
         // rail badges it, and its brain capture is an admin setting (D4).
         transport: classifySession(s).transport,
         ...(classifySession(s).anchor.kind === 'channel' ? { roomCapture: s.roomCapture } : {}),
+        humanCount: humans.get(s.id) ?? null,
+        policy: clientSessionPolicy(sessionPolicy(classifySession(s), { humanCount: humans.get(s.id) })),
       })))
     } catch (err) {
       console.error('Workspace sessions list error:', err)
@@ -642,6 +667,9 @@ export function sessionRoutes(opts: SessionRouteOptions = {}): Router {
         assistantId: session.assistantId,
         contextGroupId: session.contextGroupId,
         contextProjectId: session.contextProjectId,
+        // A fresh room has one human, its starter (chat-parity D2).
+        humanCount: 1,
+        policy: clientSessionPolicy(policyFor(session, { humanCount: 1 })),
       })
     } catch (err) {
       if (['40001', '40P01'].includes((err as { code?: string }).code ?? '')) {
@@ -804,6 +832,64 @@ export function sessionRoutes(opts: SessionRouteOptions = {}): Router {
     } catch (err) {
       console.error('Session by-channel error:', err)
       res.status(500).json({ error: 'Failed to lookup session' })
+    }
+  })
+
+  /**
+   * GET /api/sessions/:id — the session read (chat-parity T1).
+   *
+   * One conversation's summary plus the policy flags and `humanCount` the
+   * Chat app renders from, for a thread that is not (yet) in a list the
+   * client holds: a deep link, a room shared a moment ago, a just-minted
+   * chat. Same read gate as `/:id/messages`; a session the caller cannot
+   * read is a 404, never a "forbidden" that confirms it exists. Reads
+   * without touching `last_active_at`.
+   */
+  router.get('/:id', async (req, res) => {
+    try {
+      const jwtUserId = (req as { userId?: string }).userId
+      const user = await resolveUser(jwtUserId)
+      if (!user) { res.status(401).json({ error: 'Unauthorized' }); return }
+      const id = String(req.params.id ?? '')
+      if (!/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(id)) {
+        res.status(404).json({ error: 'Session not found' }); return
+      }
+      const session = await readSessionById(id)
+      if (!session) { res.status(404).json({ error: 'Session not found' }); return }
+      const denied = await gateSessionRead(user.id, session)
+      if (denied) { res.status(404).json({ error: 'Session not found' }); return }
+      const kind = classifySession(session)
+      const humanCount = kind.audience === 'workspace'
+        ? (await countSessionHumans([session.id], user.id).catch(() => new Map<string, number>())).get(session.id) ?? null
+        : 1
+      const starter = kind.audience === 'workspace'
+        ? (await getUserProfilesByIds([session.userId])).get(session.userId) ?? null
+        : null
+      res.json({
+        id: session.id,
+        title: session.title ?? 'New Chat',
+        channelId: session.channelId,
+        lastActive: session.lastActiveAt,
+        status: session.status,
+        appOrigin: session.appOrigin,
+        assistantId: session.assistantId,
+        transport: kind.transport,
+        audience: kind.audience,
+        contextGroupId: session.contextGroupId,
+        contextProjectId: session.contextProjectId,
+        ...(kind.audience === 'workspace'
+          ? {
+              startedByUserId: session.userId,
+              startedByName: starter?.name ?? null,
+              startedByAvatarUrl: starter?.avatarUrl ?? null,
+            }
+          : {}),
+        humanCount,
+        policy: clientSessionPolicy(sessionPolicy(kind, { humanCount: humanCount ?? undefined })),
+      })
+    } catch (err) {
+      console.error('Session read error:', err)
+      res.status(500).json({ error: 'Failed to load session' })
     }
   })
 
@@ -1704,8 +1790,11 @@ export function sessionRoutes(opts: SessionRouteOptions = {}): Router {
     if (!user) return { ok: false, status: 401, error: 'Unauthorized' }
     const session = await findSessionById(String(req.params.id ?? ''))
     if (!session) return { ok: false, status: 404, error: 'Session not found' }
-    if (!policyFor(session).post) {
-      return { ok: false, status: 403, error: 'Pins are only available in workspace chats' }
+    // Every Chat conversation pins: a room, and a personal chat, which is a
+    // room with one human (chat-parity D1/T2). The read gate below keeps a
+    // personal chat's pins its owner's alone.
+    if (!policyFor(session).pins) {
+      return { ok: false, status: 403, error: 'Pins are only available in Chat conversations' }
     }
     const denied = await gateSessionRead(user.id, session)
     if (denied) return { ok: false, status: denied.status, error: denied.error }

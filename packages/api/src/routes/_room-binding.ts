@@ -72,14 +72,16 @@ export function mayAssistantAnswerInRoom(params: {
  *     capped by the room's read floor (`mayAssistantAnswerInRoom`) — an
  *     assistant cleared above the room would draw on data its readers may
  *     not see;
+ *   - a personal web chat (chat-parity D1, a room with one human): allowed
+ *     same-workspace with NO clearance cap (`ownerOnly`), as below;
  *   - the doc dock's PERSONAL thread (the room mechanics without the room):
  *     allowed same-workspace with NO clearance cap — the thread's audience
  *     is its owner alone, reachability is already `getUserAssistant`-gated,
  *     and each turn's tool reads run under the ANSWERING assistant's own
  *     clearance via RLS, so there is no widened reader to protect.
  *
- * Everything else — an ordinary personal chat thread, a cross-workspace id —
- * stays rejected. Pure so `room-mechanics.test.ts` can pin the whole matrix.
+ * Everything else (a personal thread on another surface or transport, a
+ * cross-workspace id) stays rejected. Pure so `room-mechanics.test.ts` can pin the whole matrix.
  */
 export function crossAssistantSendPolicy(params: {
   /** `sessionPolicy(kind).crossAssistantSend === 'room'`: a workspace room. */
@@ -92,8 +94,17 @@ export function crossAssistantSendPolicy(params: {
   assistantClearance: string | null
   /** The session's `effective_clearance` (rooms; null on personal rows). */
   sessionClearance: string | null
+  /**
+   * `sessionPolicy(kind).read.rule === 'owner'`: a personal web chat, a room
+   * with one human (chat-parity D1/T3). Its only reader is its owner, so
+   * there is no wider audience for a clearance cap to protect: the
+   * answering assistant reads under its own clearance, exactly as in a 1:1
+   * chat with that user, the same reasoning as the doc dock's thread.
+   */
+  ownerOnly?: boolean
 }): 'allow' | 'clearance_refused' | 'reject' {
   if (!params.sameWorkspace) return 'reject'
+  if (params.isSharedSession && params.ownerOnly === true) return 'allow'
   if (params.isSharedSession) {
     return mayAssistantAnswerInRoom({
       assistantClearance: params.assistantClearance,

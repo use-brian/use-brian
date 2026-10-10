@@ -37,6 +37,20 @@ export type PendingTurnInput = {
   from?: string
   /** Arrival order. Drains emit oldest-first. */
   receivedAt: number
+  /**
+   * A room message is saved the instant it is sent (every member sees it),
+   * and ALSO handed to the running turn when it addresses that turn's
+   * assistant (chat-parity D3 / section 6). The id of that already-saved
+   * row: the consumer reuses it instead of persisting the text again.
+   * Unset for a personal mid-turn message, which is persisted on drain.
+   */
+  persistedMessageId?: string
+  /**
+   * The assistant the message addresses. An inbox owned by a turn of a
+   * different assistant does not take it, so it stays on the room's
+   * follow-up-turn path. Unset means "whichever turn is running".
+   */
+  assistantId?: string
 }
 
 /** Cheap synchronous state read. Called at every boundary, so it must stay O(1). */

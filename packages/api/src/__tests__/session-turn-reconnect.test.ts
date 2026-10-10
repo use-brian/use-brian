@@ -111,7 +111,6 @@ describe('[COMP:api/session-turn-reconnect] reconnect relay frames', () => {
       },
       { kind: 'tool_input', sessionId: 'sess-1', payload: { name: 'webSearch', input: {} } },
       { kind: 'turn_started', sessionId: 'sess-1', payload: { senderUserId: 'user-1' } },
-      { kind: 'pins_changed', sessionId: 'sess-1', payload: { byUserId: 'user-1' } },
       {
         kind: 'session_assistant_changed',
         sessionId: 'sess-1',
@@ -123,6 +122,11 @@ describe('[COMP:api/session-turn-reconnect] reconnect relay frames', () => {
     for (const event of unrelated) {
       expect(reconnectRelayFrames(event)).toEqual({ frames: [], finalize: false })
     }
+  })
+
+  it('relays pins_changed as a signal: a personal chat pins too (chat-parity D1)', () => {
+    expect(reconnectRelayFrames({ kind: 'pins_changed', sessionId: 'sess-1', payload: { byAssistantId: 'a-1' } }))
+      .toEqual({ frames: [{ event: 'pins_changed', data: { byAssistantId: 'a-1' } }], finalize: false })
   })
 
   it('backstop: the DB-status poll sends the same terminal pair with an empty completion', () => {
