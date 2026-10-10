@@ -11,6 +11,7 @@ export {
   buildDocSupervisorSkillBlock,
   buildDocEditAgentPrompt,
   buildAmbientDocSkillBlock,
+  ambientSurfaceLine,
 } from './soul.js'
 export type {
   BuildDocSkillParams,

@@ -24,8 +24,15 @@ vi.mock('../../db/sessions.js', () => ({
   getSessionMessages: mocks.getSessionMessages,
   addSessionMessage: mocks.addSessionMessage,
   toStampedMessages: mocks.toStampedMessages,
-  isSharedAudienceSession: (s: { visibility?: string | null; mode?: string | null }) =>
-    s.visibility === 'workspace' || s.mode === 'draft',
+  // Turn-kernel lease (the replay holds one like every runner).
+  isTurnLeaseLive: async () => false,
+  reclaimStaleTurn: async () => false,
+  takeTurnSlot: async () => undefined,
+  claimTurnSlot: async () => true,
+  startTurnLease: async () => 'lease-token',
+  touchTurnLease: async () => ({ held: true, cancelRequested: false }),
+  releaseTurnLease: async () => true,
+  TURN_HEARTBEAT_INTERVAL_MS: 20_000,
 }))
 
 vi.mock('../../db/users.js', () => ({

@@ -19,6 +19,14 @@
  */
 import { read, type AccessSnapshot, type Principal, type Tier } from './context-scope/reference-predicate.js'
 import { canRead, scopeGrantContains, type ScopeGrant } from '@use-brian/core'
+import { classifySession } from './session-kind.js'
+
+/** Workspace audience per the one classifier (rooms, threads, drafts). */
+function workspaceAudience(session: Pick<ReadGatedSessionFields, 'visibility' | 'mode'>): boolean {
+  // The audience is the stored visibility (drafts are 'workspace' since
+  // migration 741); the legacy mode fallback covers in-memory rows.
+  return classifySession({ channelType: 'web', visibility: session.visibility, mode: session.mode, anchorKind: null }).audience === 'workspace'
+}
 
 /** The session fields the read decision consumes. */
 export type ReadGatedSessionFields = {
@@ -76,11 +84,11 @@ export function decideSessionRead(facts: SessionReadFacts): SessionReadDecision 
     const allowed = read(snapshot, { principal, assistant: null }, {
       id: 'session', workspaceId: assistantWorkspaceId, tier: tier as Tier,
       departmentIds: compartments.map(key => key.slice(5)),
-      userId: session.visibility === 'workspace' || session.mode === 'draft' ? null : session.userId,
+      userId: workspaceAudience(session) ? null : session.userId,
     }, { workspaceId: assistantWorkspaceId, department: null, now: facts.now ?? new Date() })
     return allowed ? { readable: true } : { readable: false, status: 403, error: 'Session context unavailable' }
   }
-  if (session.visibility === 'workspace' || session.mode === 'draft') {
+  if (workspaceAudience(session)) {
     if (!assistantWorkspaceId) {
       return { readable: false, status: 403, error: 'Draft session is not team-owned' }
     }
@@ -128,7 +136,7 @@ export function decideSessionRead(facts: SessionReadFacts): SessionReadDecision 
 export type LiveSessionTier = 'full' | 'presence' | 'omitted'
 
 export function liveSessionTier(facts: SessionReadFacts): LiveSessionTier {
-  if (facts.session.visibility === 'workspace' || facts.session.mode === 'draft') {
+  if (workspaceAudience(facts.session)) {
     return decideSessionRead(facts).readable ? 'full' : 'omitted'
   }
   if (facts.session.userId === facts.callerUserId) return decideSessionRead(facts).readable ? 'full' : 'omitted'

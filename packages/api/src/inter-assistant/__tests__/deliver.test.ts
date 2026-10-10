@@ -4,7 +4,6 @@ vi.mock('../../db/sessions.js', () => ({
   findOrCreateSession: vi.fn(),
   addSessionMessage: vi.fn(),
   findSessionById: vi.fn(async () => null),
-  isSharedAudienceSession: vi.fn(() => false),
 }))
 
 // Adapters mocked, Slack error translation real — the failure copy under test

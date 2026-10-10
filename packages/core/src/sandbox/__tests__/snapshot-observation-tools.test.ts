@@ -27,7 +27,7 @@ function fixture() {
     async stop() {},
   }
   const context: ToolContext = {
-    userId: 'u', assistantId: 'a', sessionId: 's', appId: 'app', channelType: 'web',
+    userId: 'u', assistantId: 'a', sessionId: 's', appId: 'app', channelType: 'web', attended: true,
     channelId: 'c', workspaceId: 'w', abortSignal: new AbortController().signal,
   }
   const tools = createComputerTools({ local: provider, cloud: provider, cloudAvailable: () => true })

@@ -12,7 +12,7 @@ function toolContext(overrides: Partial<ToolContext> = {}): ToolContext {
     assistantId: 'asst-1',
     sessionId: 'sess-1',
     appId: 'app-1',
-    channelType: 'web',
+    channelType: 'web', attended: true,
     channelId: 'chan-1',
     workspaceId: 'ws-1',
     abortSignal: new AbortController().signal,
@@ -483,7 +483,7 @@ describe('[COMP:sandbox/browser-tools] Computer tool surface', () => {
     it('refuses every browser tool on a headless channel when unattended mode is off', async () => {
       const local = fakeProvider('local')
       const tools = createComputerTools({ local, cloud: fakeProvider('cloud') })
-      const cronCtx = toolContext({ channelType: 'workflow' })
+      const cronCtx = toolContext({ channelType: 'workflow', attended: false })
       for (const tool of [tools.browserNavigate, tools.browserSnapshot, tools.browserClick, tools.browserType, tools.browserCurrentUrl]) {
         const res = await tool.execute(
           tool.inputSchema.parse(
@@ -511,7 +511,7 @@ describe('[COMP:sandbox/browser-tools] Computer tool surface', () => {
         unattendedEnabled: () => true,
         getWorkspacePlan: async () => 'pro',
       })
-      const res = await run(tools.browserSnapshot, {}, toolContext({ channelType: 'workflow' }))
+      const res = await run(tools.browserSnapshot, {}, toolContext({ channelType: 'workflow', attended: false }))
       expect(res.isError).toBeUndefined()
       expect(local.calls).toEqual(['snapshot'])
     })
@@ -524,7 +524,7 @@ describe('[COMP:sandbox/browser-tools] Computer tool surface', () => {
         unattendedEnabled: () => true,
         getWorkspacePlan: async () => 'free',
       })
-      const res = await run(tools.browserSnapshot, {}, toolContext({ channelType: 'workflow' }))
+      const res = await run(tools.browserSnapshot, {}, toolContext({ channelType: 'workflow', attended: false }))
       expect(res.isError).toBe(true)
       expect(String(res.data)).toContain('paid plans')
       expect(local.calls).toEqual([])
@@ -537,7 +537,7 @@ describe('[COMP:sandbox/browser-tools] Computer tool surface', () => {
         cloud: fakeProvider('cloud'),
         unattendedEnabled: () => true,
       })
-      const res = await run(tools.browserSnapshot, {}, toolContext({ channelType: 'workflow' }))
+      const res = await run(tools.browserSnapshot, {}, toolContext({ channelType: 'workflow', attended: false }))
       expect(res.isError).toBe(true)
       expect(local.calls).toEqual([])
     })
@@ -809,7 +809,7 @@ describe('[COMP:sandbox/browser-tools] Computer tool surface', () => {
       const res = await run(
         tools.browserNavigate,
         { url: 'https://news.ycombinator.com/' },
-        toolContext({ channelType: 'workflow' }),
+        toolContext({ channelType: 'workflow', attended: false }),
       )
       expect(res.isError ?? false).toBe(false) // the navigate itself is allowed
       expect(announced).toEqual([]) // but a headless run gets no proactive push

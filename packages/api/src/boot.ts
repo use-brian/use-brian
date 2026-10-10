@@ -1,3 +1,5 @@
+import { configureTurnKernel } from './turn/runtime.js'
+import { configureChannelRooms, postPassiveChannelMessage } from './channel-room/room.js'
 import { scopeEvidenceFromRows, workspaceFilesCtxFor, type CreateComputerToolsOptions } from '@use-brian/core'
 import { prepareBrowserDownload, type BrowserDownload } from './sandbox/download-publication.js'
 import { resolveBrowserTaskExecutionAuthority } from './sandbox/task-execution-authority.js'
@@ -11,6 +13,8 @@ import { createTemplateImportRecovery } from './office/template-import-recovery.
 import { triageTaskForGoal } from './db/goal-task-triage.js'
 import { createProgrammaticEpisodeTerminal } from './ingest/programmatic-terminal.js'
 import { checkPromptOnlyAuthority, executePromptOnlyGeneration } from './office/generation-publication.js'
+import { resumeOfficeGeneration } from './office/generation-recovery.js'
+import { withOfficeClassificationActor } from './office/classification.js'
 import { createBrowserFileBridge } from './sandbox/browser-files.js'
 import {createLocalLinkedInCloud} from './content-planning/linkedin-cloud.js'
 import {setFeedLinkedInTargetAuthority,setFeedLinkedInPublisher,setFeedLinkedInRecovery} from './content-planning/linkedin-authority.js'
@@ -608,6 +612,10 @@ import { PDF_SESSION_FILE_METADATA } from './office/pdf-session-assets.js'
 import { officeArtifactRoutes } from './routes/office-artifacts.js'
 import { officePdfSessionRoutes } from './routes/office-pdf-sessions.js'
 import { officeJobRoutes } from './routes/office-jobs.js'
+import { officeJobStreamRead, officeJobStreamRoutes } from './routes/office-job-stream.js'
+import { officeConversationRoutes } from './routes/office-conversation.js'
+import { ensureOfficeArtifactSessionSystem, findOfficeArtifactSessionSystem } from './db/office-artifact-sessions.js'
+import { startOfficeJobEventBus } from './office/job-event-bus.js'
 import { officeTemplateRoutes } from './routes/office-templates.js'
 import { createOfficeCommentAnchorWriter } from './office/comment-anchor-storage.js'
 import { createOfficeCommentVersionResolver } from './office/comment-version.js'
@@ -1125,7 +1133,7 @@ export interface OpenApiPorts {
 
   // ── Feed/distribution host hooks — open default: inert ──
   injectExtraTools?: InjectExtraTools
-  resolveExtraSystemPrompt?: (session: { mode: string | null; channelType: string }) => string | null
+  resolveExtraSystemPrompt?: (session: { mode: string | null; channelType: string; anchor: string }) => string | null
   resolveAppSoul?: ResolveAppSoul
 
   // ── Tool-use hooks (remote MCP preflight) — open default: unset ──
@@ -1516,6 +1524,7 @@ export async function bootOpenApi(opts: BootOpenApiOptions): Promise<BootResult>
   const resolveExtraSystemPrompt = async (session: {
     mode: string | null
     channelType: string
+    anchor: string
     assistantId?: string
   }): Promise<string | null> => {
     const open = await resolveOpenPlanningPrompt(session)
@@ -2384,6 +2393,11 @@ export async function bootOpenApi(opts: BootOpenApiOptions): Promise<BootResult>
     managedProvider: provider,
     documentAdaptation: { distill: documentDistill, cache: distillateCache },
   })
+  // The turn kernel's deployment-wide inference wiring (turn/runtime.ts):
+  // every runner resolves the workspace custom endpoint and the configured
+  // providers through this registration, so a route that forgets to thread
+  // them cannot change which model answers a turn.
+  configureTurnKernel({ resolveWorkspaceCustomLlm, configuredProviders })
   const resolveBackgroundRuntime = async (workspaceId: string | null | undefined) =>
     workspaceId
       ? resolveWorkspaceCustomLlm({
@@ -3039,6 +3053,7 @@ export async function bootOpenApi(opts: BootOpenApiOptions): Promise<BootResult>
     resolveAccess: resolveOfficeAccess,
     createJob: officeGenerationStore.create,
     latestJob: officeGenerationStore.latestForArtifact,
+    latestJobEvent: officeGenerationStore.latestEvent,
     getSnapshot: officeLiveStore.get,
     wakeGeneration(userId) { wakeOfficeGeneration?.(userId) },
   })
@@ -3075,6 +3090,11 @@ export async function bootOpenApi(opts: BootOpenApiOptions): Promise<BootResult>
   for (const tool of createOfficeTools({
     port: {
       ...officeService,
+      async resumeGeneration(context,input) {
+        const result=await withOfficeClassificationActor(context,()=>resumeOfficeGeneration(context.userId,input))
+        wakeOfficeGeneration?.(context.userId)
+        return result
+      },
       async retryTemplateImport(input) { return retryOfficeTemplateImport(input) },
       async openPdfSession(params) {
         if (!pdfSessionToolRuntime) throw new Error('PDF editing sessions are unavailable')
@@ -3293,6 +3313,8 @@ export async function bootOpenApi(opts: BootOpenApiOptions): Promise<BootResult>
   const calleeExecutor = createCalleeExecutor({
     provider,
     resolveWorkspaceCustomLlm,
+    configuredProviders,
+    checkCreditBudget: ports.checkCreditBudget,
     publishSessionEvent,
     tools: allTools,
     memoryStore,
@@ -3528,6 +3550,7 @@ export async function bootOpenApi(opts: BootOpenApiOptions): Promise<BootResult>
           sessionId: run.id,
           channelType: 'workflow',
           channelId: run.id,
+          sessionPersisted: false,
         },
         attribution: { billingUserId: userId, credentialOwnerUserId: userId },
         key: {
@@ -5790,6 +5813,20 @@ export async function bootOpenApi(opts: BootOpenApiOptions): Promise<BootResult>
         scheduledBatching: ports.roomScheduledBatching,
       })
     : undefined
+  // Channel rooms (unified-sessions §4.4) capture and fan out their posts on
+  // the same seams as web rooms.
+  configureChannelRooms({
+    publishSessionEvent,
+    ...(roomIngestor
+      ? {
+          capturePost: (post) => {
+            void roomIngestor.ingestPost(post).catch((err) => {
+              console.error('[room-ingest] channel room capture failed:', err)
+            })
+          },
+        }
+      : {}),
+  })
   app.use('/api/sessions', optionalAuth(env.JWT_SECRET), sessionRoutes({
     subscribeSessionEvents,
     publishSessionEvent,
@@ -6996,9 +7033,17 @@ export async function bootOpenApi(opts: BootOpenApiOptions): Promise<BootResult>
       return (await resolveDurableOfficeAccess(userId, artifactId))?.canEdit ?? false
     },
   }))
+  // The file's shared Brian conversation: artifact-scoped routes only (D4).
+  app.use('/api/office', requireAuth(env.JWT_SECRET), officeConversationRoutes({
+    resolveAccess: resolveOfficeAccess,
+    findSession: findOfficeArtifactSessionSystem,
+    ensureSession: ensureOfficeArtifactSessionSystem,
+    workspaceAssistant: getWorkspacePrimaryAssistant,
+  }))
   app.use('/api/office', requireAuth(env.JWT_SECRET), officeJobRoutes({
     get: officeGenerationStore.get,
     events: officeGenerationStore.listEvents,
+    latestEvent: officeGenerationStore.latestEvent,
     steer: officeGenerationStore.steer,
     wake: userId => wakeOfficeGeneration?.(userId),
     cancel: officeGenerationStore.cancel,
@@ -7570,6 +7615,17 @@ export async function bootOpenApi(opts: BootOpenApiOptions): Promise<BootResult>
       while (await officeTemplateCompileWorker(userId)) { /* drain eligible template compilations for this member */ }
     })().catch((error) => console.error('[office-template-compile-worker]', error))
   }
+  // Per-job progress stream (office.md "Live job progress"). Mounted after the
+  // wakers so a stalled job resumes for its initiator when anyone looks at it.
+  startOfficeJobEventBus()
+  app.use('/api/office', requireAuth(env.JWT_SECRET), officeJobStreamRoutes({
+    read: officeJobStreamRead(officeGenerationStore),
+    wake: job => {
+      if (job.jobKind === 'import') wakeImport(job.initiatedByUserId)
+      else if (job.jobKind === 'template_compile') wakeTemplateCompile(job.initiatedByUserId)
+      else if (job.jobKind === 'create' || job.jobKind === 'revise') wakeOfficeGeneration?.(job.initiatedByUserId)
+    },
+  }))
   const retryOfficeTemplateImport = createTemplateImportRecovery({
     getJob: officeGenerationStore.get,
     getArtifact: officeArtifactStore.get,
@@ -8330,6 +8386,7 @@ export async function bootOpenApi(opts: BootOpenApiOptions): Promise<BootResult>
     .catch((err) => console.error('[boot] deferred confirmation cleanup failed:', err))
 
   const sessionResumeReplay = createSessionResumeReplay({
+    configuredProviders,
     provider,
     resolveWorkspaceCustomLlm,
     resolveWorkspaceByoGeminiKey,
@@ -9551,6 +9608,32 @@ export async function bootOpenApi(opts: BootOpenApiOptions): Promise<BootResult>
         usageStore,
         ingestCharge: ports.ingestCharge,
         scheduledBatching: ports.whatsappScheduledBatching,
+        // D4: an un-triggered message in a bound group is a room post.
+        postPassive: async ({ ctx: channel, input, postNotice }) => {
+          if (!channel.assistantId || !input.isGroup || !input.text.trim()) return
+          const integration = await integrationStore.getByChannelForWebhook(input.channelId, 'whatsapp')
+          if (!integration) return
+          const identity = await resolveWhatsappByonTurnIdentity(input, channel.assistantId, {
+            findLinkedAccount: (provider, providerId) => linkedAccountStore.findByProvider(provider, providerId),
+            findUser: findUserById,
+            resolveShadow: (providerUserId, assistantId, displayName) => resolveChannelUser(
+              channelUserStore, 'whatsapp', providerUserId, assistantId,
+              async () => ({ providerUserId, email: null, displayName }),
+            ),
+          })
+          await postPassiveChannelMessage({
+            assistant: { id: channel.assistantId, name: channel.assistantName, workspaceId: channel.workspaceId },
+            channelType: 'whatsapp',
+            channelIntegrationId: integration.id,
+            isGroupChat: true,
+            sessionChannelId: input.chatJid,
+            senderUserId: identity.userId,
+            senderName: input.senderName ?? null,
+            text: input.text,
+            channelMessageId: input.messageId,
+            postNotice,
+          })
+        },
         runPipeline: async ({ ctx: channel, input, hooks, abortController }) => {
           if (!channel.assistantId) return
           const identity = await resolveWhatsappByonTurnIdentity(input, channel.assistantId, {
@@ -9568,6 +9651,7 @@ export async function bootOpenApi(opts: BootOpenApiOptions): Promise<BootResult>
             actorChannelId: identity.actorChannelId,
             interactionScope: identity.interactionScope,
             questionIntegrationId: integration?.id,
+            channelIntegrationId: integration?.id,
             backgroundModel,
             decisionRuntime,
             ownerId: channel.ownerUserId,

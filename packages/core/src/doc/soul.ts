@@ -103,6 +103,7 @@ export type AmbientSurface =
   | 'approvals'
   | 'knowledge-base'
   | 'chat'
+  | 'office'
 
 /**
  * One line per surface naming what the user is looking at, so an ambiguous
@@ -124,6 +125,13 @@ const AMBIENT_SURFACE_GLOSS: Record<AmbientSurface, string> = {
     "the **Knowledge base** surface — the workspace's curated reference entries",
   chat:
     'the **Chat** surface — the full conversation workspace, including any Pages the room has pinned as its working context',
+  office:
+    "the **Office** surface: an open Office file (document, presentation or spreadsheet) and its Brian tab, where everyone who can read the file shares this conversation",
+}
+
+/** The one line naming what the user is looking at. Product surface only, never a tool. */
+export function ambientSurfaceLine(surface: AmbientSurface): string {
+  return `The user is currently looking at ${AMBIENT_SURFACE_GLOSS[surface]}. When a question is ambiguous, read it against what that surface shows.`
 }
 
 /** Params for the ambient (on-request) variant — no mode split: a workspace
@@ -154,7 +162,7 @@ export function buildAmbientDocSkillBlock(
   params: BuildAmbientDocSkillParams = {},
 ): string {
   const surfaceLine = params.surface
-    ? `\n\nThe user is currently looking at ${AMBIENT_SURFACE_GLOSS[params.surface]}. When a question is ambiguous, read it against what that surface shows.`
+    ? `\n\n${ambientSurfaceLine(params.surface)}`
     : ''
   return `${AMBIENT_SKILL_BLOCK}${surfaceLine}${workspaceLine(params)}`
 }

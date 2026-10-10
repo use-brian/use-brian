@@ -381,6 +381,8 @@ export async function resolveWorkflowRunScope(params: Parameters<typeof resolveW
       sessionId:params.run.id,
       channelType:'workflow',
       channelId:params.run.id,
+      // The run id is not a sessions row.
+      sessionPersisted:false,
     },
     attribution:{ billingUserId:params.userId },
   })

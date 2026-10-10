@@ -1,5 +1,6 @@
 /** Single process-local registry shared by scheduled producers, web and channels. */
 import type { ConfirmationDecision, ConfirmationResolver } from '@use-brian/core'
+import { isInboxSentinel } from '../session-kind.js'
 
 export const SHARED_TELEGRAM_CONFIRMATION_INTEGRATION = 'system:telegram'
 export const SYSTEM_WHATSAPP_CONFIRMATION_INTEGRATION = 'system:whatsapp'
@@ -38,7 +39,7 @@ export function bindSchedulerConfirmationDelivery(toolCallId: string,
   const entry = registry.get(toolCallId)
   if (!entry || !entry.owner.userId || entry.expiresAt <= Date.now()
     || entry.owner.channelType !== delivery.channelType
-    || (entry.owner.channelId !== delivery.channelId && entry.owner.channelId !== 'notifications')
+    || (entry.owner.channelId !== delivery.channelId && !isInboxSentinel(entry.owner.channelId))
     || (entry.owner.workspaceId && entry.owner.workspaceId !== delivery.workspaceId)
     || (entry.owner.assistantId && entry.owner.assistantId !== delivery.assistantId)) return false
   entry.delivery = { ...delivery, userId: entry.owner.userId }

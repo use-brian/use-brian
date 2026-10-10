@@ -2,6 +2,7 @@
 import { OfficeImportDiagnosticSchema, type OfficeImportDiagnostic } from '@use-brian/office-model'
 import { APP_LEVEL_ASSISTANT_ID } from '@use-brian/shared'
 import { defaultOfficeDbQuery, type OfficeDbQuery } from './office-artifacts.js'
+import { dispatchOfficeJobLocal } from '../office/job-event-bus.js'
 
 export type OfficeGenerationJobRow = {
   id: string
@@ -22,6 +23,7 @@ export type OfficeGenerationJobRow = {
   leaseExpiresAt: Date | null
   cancelRequestedAt: Date | null
   errorCode: string | null
+  errorDetail?: string | null
   createdAt: Date
   updatedAt: Date
 }
@@ -45,19 +47,22 @@ const JOB_COLUMNS = `id, workspace_id AS "workspaceId", artifact_id AS "artifact
   base_artifact_version::int AS "baseArtifactVersion", checkpoint,
   checkpoint_version AS "checkpointVersion", lease_token AS "leaseToken",
   lease_expires_at AS "leaseExpiresAt", cancel_requested_at AS "cancelRequestedAt",
-  error_code AS "errorCode", created_at AS "createdAt", updated_at AS "updatedAt"`
+  error_code AS "errorCode", error_detail AS "errorDetail", created_at AS "createdAt", updated_at AS "updatedAt"`
 
-// The lease claim updates through a candidate CTE, so every projected column
-// must resolve to the UPDATE target rather than the joined candidate row.
-const CLAIMED_JOB_COLUMNS = `j.id, j.workspace_id AS "workspaceId", j.artifact_id AS "artifactId",
-  j.initiated_by_user_id AS "initiatedByUserId", j.assistant_id AS "assistantId",
-  j.job_kind AS "jobKind", j.status, j.stage, j.brief,
-  j.authority_projection AS "authorityProjection",
-  j.template_version_id AS "templateVersionId",
-  j.base_artifact_version::int AS "baseArtifactVersion", j.checkpoint,
-  j.checkpoint_version AS "checkpointVersion", j.lease_token AS "leaseToken",
-  j.lease_expires_at AS "leaseExpiresAt", j.cancel_requested_at AS "cancelRequestedAt",
-  j.error_code AS "errorCode", j.created_at AS "createdAt", j.updated_at AS "updatedAt"`
+/** Next per-job event seq, evaluated against the statement's snapshot. */
+const NEXT_SEQ = (job: string) => `COALESCE((SELECT max(e.seq) FROM office_generation_events e WHERE e.job_id = ${job}), 0) + 1`
+
+/** Terminal statuses whose event `finish` guarantees (office.md "Live job progress"). */
+const TERMINAL_NARRATION = `CASE d.status WHEN 'completed' THEN 'Completed' WHEN 'failed' THEN 'Failed'
+  WHEN 'cancelled' THEN 'Cancelled' ELSE 'Input needed' END`
+
+/** Only typed input questions are safe user copy. Worker exceptions stay private. */
+export function officeGenerationInputQuestion(job: OfficeGenerationJobRow): string | undefined {
+  if (job.status !== 'needs_input') return undefined
+  if (job.errorCode === 'template_ambiguous') return 'Which published template should I use?'
+  if (job.errorCode === 'material_fact_missing' && job.errorDetail?.startsWith('Please provide the required fields: ')) return job.errorDetail.slice(0,4000)
+  return undefined
+}
 
 export function createOfficeGenerationStore(db: OfficeDbQuery = defaultOfficeDbQuery) {
   return {
@@ -135,15 +140,27 @@ export function createOfficeGenerationStore(db: OfficeDbQuery = defaultOfficeDbQ
            ORDER BY next_attempt_at, created_at
            FOR UPDATE SKIP LOCKED LIMIT 1
         )
-        UPDATE office_generation_jobs j
-           SET status = 'running', lease_token = $1,
-               lease_expires_at = now() + ($2::text || ' milliseconds')::interval,
-               attempt = attempt + 1, started_at = COALESCE(started_at, now()),
-               updated_at = now()
-          FROM candidate c WHERE j.id = c.id
-        RETURNING ${CLAIMED_JOB_COLUMNS}
+        , claimed AS (
+          UPDATE office_generation_jobs j
+             SET status = 'running', lease_token = $1,
+                 lease_expires_at = now() + ($2::text || ' milliseconds')::interval,
+                 attempt = attempt + 1, started_at = COALESCE(started_at, now()),
+                 updated_at = now()
+            FROM candidate c WHERE j.id = c.id
+          RETURNING j.*
+        ), started AS (
+          -- Every claim is a transition, so it is an event in the same
+          -- statement. Workers never emit their own started.
+          INSERT INTO office_generation_events (job_id, workspace_id, seq, code, params, actor_type, safe_narration)
+          SELECT id, workspace_id, ${NEXT_SEQ('claimed.id')}, 'office.job.started',
+                 jsonb_build_object('attempt', attempt), 'system', 'Started'
+            FROM claimed
+        )
+        SELECT ${JOB_COLUMNS} FROM claimed
       `, [params.leaseToken, params.leaseMs, params.jobKinds ?? ['create'], params.userId])
-      return result.rows[0] ?? null
+      const job = result.rows[0] ?? null
+      if (job) dispatchOfficeJobLocal({ jobId: job.id, workspaceId: job.workspaceId })
+      return job
     },
 
     async checkpoint(params: { userId: string; jobId: string; leaseToken: string; stage: string; expectedVersion: number; checkpoint: unknown; status?: OfficeGenerationJobRow['status'] }): Promise<boolean> {
@@ -154,8 +171,10 @@ export function createOfficeGenerationStore(db: OfficeDbQuery = defaultOfficeDbQ
           status = COALESCE($6, status), updated_at = now()
         WHERE id = $1 AND lease_token = $2 AND checkpoint_version = $3
           AND lease_expires_at > now()
-        RETURNING id
+        RETURNING id, workspace_id AS "workspaceId"
       `, [params.jobId, params.leaseToken, params.expectedVersion, params.stage, JSON.stringify(params.checkpoint), params.status ?? null])
+      const row = (result.rows as Array<{ id: string; workspaceId?: string }>)[0]
+      if (row) dispatchOfficeJobLocal({ jobId: params.jobId, workspaceId: row.workspaceId })
       return result.rows.length === 1
     },
 
@@ -171,6 +190,7 @@ export function createOfficeGenerationStore(db: OfficeDbQuery = defaultOfficeDbQ
                   created_at AS "createdAt"
       `, [params.jobId, params.workspaceId, params.code, JSON.stringify(params.values), params.actorType, params.actorUserId ?? null, params.actorAssistantId ?? null, params.safeNarration ?? null])
       if (!result.rows[0]) throw new Error('Office generation event insert returned no row')
+      dispatchOfficeJobLocal({ jobId: params.jobId, workspaceId: params.workspaceId, seq: result.rows[0].seq })
       return result.rows[0]
     },
 
@@ -185,6 +205,17 @@ export function createOfficeGenerationStore(db: OfficeDbQuery = defaultOfficeDbQ
       return result.rows
     },
 
+    async latestEvent(userId: string, jobId: string): Promise<OfficeGenerationEventRow | null> {
+      const result = await db<OfficeGenerationEventRow>(userId, `
+        SELECT id, job_id AS "jobId", seq::int, code, params,
+               actor_type AS "actorType", safe_narration AS "safeNarration",
+               created_at AS "createdAt"
+          FROM office_generation_events WHERE job_id = $1
+         ORDER BY seq DESC LIMIT 1
+      `, [jobId])
+      return result.rows[0] ?? null
+    },
+
     async steer(params: { userId: string; workspaceId: string; jobId: string; instruction: string }): Promise<{ id: string }> {
       const result = await db<{ id: string }>(params.userId, `WITH resumed AS (
         UPDATE office_generation_jobs SET status='queued',stage='queued',error_code=NULL,error_detail=NULL,
@@ -193,11 +224,16 @@ export function createOfficeGenerationStore(db: OfficeDbQuery = defaultOfficeDbQ
         WHERE id=$1 AND workspace_id=$2 AND initiated_by_user_id=$3 AND status='needs_input'
           AND error_code='material_fact_missing' AND job_kind='create'
           AND length(concat_ws(E'\\n',NULLIF(brief->>'additionalContext',''),$4::text))<=4000
-        RETURNING id
+        RETURNING id, workspace_id
+      ), received AS (
+        INSERT INTO office_generation_events (job_id, workspace_id, seq, code, params, actor_type, actor_user_id, safe_narration)
+        SELECT id, workspace_id, ${NEXT_SEQ('resumed.id')}, 'office.job.input_received', '{}'::jsonb, 'user', $3, 'Answer received'
+          FROM resumed
       ) INSERT INTO office_generation_steering (job_id,workspace_id,sender_user_id,instruction)
         SELECT $1,$2,$3,$4 WHERE EXISTS(SELECT 1 FROM resumed) OR EXISTS(
           SELECT 1 FROM office_generation_jobs WHERE id=$1 AND status IN ('queued','running')) RETURNING id`, [params.jobId, params.workspaceId, params.userId, params.instruction])
       if (!result.rows[0]) throw new Error('Office steering insert returned no row')
+      dispatchOfficeJobLocal({ jobId: params.jobId, workspaceId: params.workspaceId })
       return result.rows[0]
     },
 
@@ -216,12 +252,26 @@ export function createOfficeGenerationStore(db: OfficeDbQuery = defaultOfficeDbQ
     },
 
     async finish(params: { userId: string; jobId: string; leaseToken: string; status: 'completed' | 'failed' | 'cancelled' | 'needs_input'; stage: string; errorCode?: string; errorDetail?: string; importDiagnostics?: OfficeImportDiagnostic[] }): Promise<boolean> {
-      const result = await db<{ id: string }>(params.userId, `
-        UPDATE office_generation_jobs SET status=$3,stage=$4,error_code=$5,
-          error_detail=$6,checkpoint=CASE WHEN $7::jsonb IS NULL THEN checkpoint ELSE jsonb_set(checkpoint,'{importDiagnostics}',$7::jsonb) END,completed_at=CASE WHEN $3 IN ('completed','failed','cancelled') THEN now() END,
-          lease_token=NULL,lease_expires_at=NULL,updated_at=now()
-        WHERE id=$1 AND ($2::uuid IS NULL OR lease_token=$2) RETURNING id
+      const result = await db<{ id: string; workspaceId: string }>(params.userId, `
+        WITH d AS (
+          UPDATE office_generation_jobs SET status=$3,stage=$4,error_code=$5,
+            error_detail=$6,checkpoint=CASE WHEN $7::jsonb IS NULL THEN checkpoint ELSE jsonb_set(checkpoint,'{importDiagnostics}',$7::jsonb) END,completed_at=CASE WHEN $3 IN ('completed','failed','cancelled') THEN now() END,
+            lease_token=NULL,lease_expires_at=NULL,updated_at=now()
+          WHERE id=$1 AND ($2::uuid IS NULL OR lease_token=$2) RETURNING id, workspace_id, status, error_code
+        ), terminal AS (
+          -- A bare finish is never silent: append the terminal event unless the
+          -- worker's own narration already recorded it as the latest event.
+          INSERT INTO office_generation_events (job_id, workspace_id, seq, code, params, actor_type, safe_narration)
+          SELECT d.id, d.workspace_id, ${NEXT_SEQ('d.id')}, 'office.job.' || d.status,
+                 CASE WHEN d.error_code IS NULL THEN '{}'::jsonb ELSE jsonb_build_object('code', d.error_code) END,
+                 'system', ${TERMINAL_NARRATION}
+            FROM d
+           WHERE (SELECT e.code FROM office_generation_events e WHERE e.job_id = d.id ORDER BY e.seq DESC LIMIT 1)
+                 IS DISTINCT FROM 'office.job.' || d.status
+        )
+        SELECT id, workspace_id AS "workspaceId" FROM d
       `, [params.jobId, params.leaseToken, params.status, params.stage, params.errorCode ?? null, params.errorDetail ?? null, params.importDiagnostics ? JSON.stringify(params.importDiagnostics.map(item => OfficeImportDiagnosticSchema.parse(item))) : null])
+      if (result.rows[0]) dispatchOfficeJobLocal({ jobId: params.jobId, workspaceId: result.rows[0].workspaceId })
       return result.rows.length === 1
     },
   }

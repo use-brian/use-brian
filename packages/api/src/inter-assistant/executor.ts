@@ -23,6 +23,8 @@
  * See docs/architecture/channels/inter-assistant.md.
  */
 
+import { withTurnInference } from '../turn/runtime.js'
+import { PER_TURN_INDEX_CAP } from '../turn/index-caps.js'
 import { randomUUID } from 'node:crypto'
 import { createTurnLedger } from '../ledger/recorder.js'
 import { getLedgerPayloadStore } from '../ledger/runtime.js'
@@ -37,7 +39,6 @@ import type {
   SessionStateStore,
 } from '@use-brian/core'
 import {
-  queryLoop,
   formatAssistantQuestion,
   buildMemoryContext,
   buildDeliveryConversationStateBlock,
@@ -103,7 +104,12 @@ import {
   turnOutputWrite,
 } from '../context-scope/resolve-turn-scope.js'
 import { resolveExecutionContextSystem } from '../context-scope/execution-context.js'
-import { prepareAssistantRun } from '../runtime/prepare-assistant-run.js'
+import { prepareAssistantRun } from '../turn/prepare.js'
+import { policyFor } from '../session-kind.js'
+import { runAssistantTurn, TurnRefusal } from '../turn/kernel.js'
+import { waitForTurnSlot } from '../turn/lease.js'
+import { checkUsageBudget } from '../routes/route-helpers.js'
+import { getWorkspacePlan } from '../db/workspace-store.js'
 import { injectMcpTools } from '../mcp/inject.js'
 import type { ConnectorStore } from '../db/connector-store.js'
 import type { AssistantConnectorStore } from '../db/assistant-connector-store.js'
@@ -123,7 +129,7 @@ import {
 } from '../context-scope/delivery-authority.js'
 import { createWorkflowPublicationAuthorizer, type AuthorizeWorkflowPublication } from '../workflow/publication-consent.js'
 import { loadDecisionPlaybookContext } from '../decision-learning/playbook-context.js'
-import { renderCharterBlock } from '@use-brian/shared'
+import { renderCharterBlock, resolveCharter } from '@use-brian/shared'
 import {
   applyPublicResearchToolCeiling,
   resolveApiKeyClientPrincipal,
@@ -138,6 +144,14 @@ export type CalleeExecutorOptions = {
   provider: LLMProvider
   /** OSS workspace custom endpoint default for the callee's final loop. */
   resolveWorkspaceCustomLlm?: import('../custom-llm-runtime.js').WorkspaceCustomLlmResolver
+  /**
+   * The deployment's configured providers. The turn kernel serves the
+   * callee's model through `ensureServableModel` against it, so a step never
+   * runs a model no configured provider can serve.
+   */
+  configuredProviders?: import('@use-brian/shared/model-registry').ProviderAvailability
+  /** The hosted credit gate (absent in OSS = uncapped). A blocked workspace runs no callee turn. */
+  checkCreditBudget?: import('../routes/route-helpers.js').CreditBudgetGate
   /**
    * Session live-event bus publish — callee turns (`workflow` /
    * `assistant-call` sessions) mirror onto the bus through the shared
@@ -487,6 +501,8 @@ export function createCalleeExecutor(options: CalleeExecutorOptions): CalleeExec
   const authorizeAudience = options.authorizeDeliveryAudience
     ?? createDeliveryAudienceAuthorizer({ integrationStore: options.integrationStore })
   return async function executeCalleeQuery(params: CalleeQueryParams, inheritedEvidence?: import('@use-brian/core').ScopeEvidence): Promise<string> {
+    // Inference wiring through the turn kernel's boot registration.
+    const turnOptions = withTurnInference(options)
     if (params.callerScopeEvidence !== undefined && !params.callerAccessCeiling && !inheritedEvidence) {
       throw Object.assign(new Error('Source context requires verified caller authority.'), { reason:'caller_evidence_unavailable', retrySafe:false })
     }
@@ -926,8 +942,8 @@ export function createCalleeExecutor(options: CalleeExecutorOptions): CalleeExec
       }
     }
 
-    const backgroundLlmRuntime = calleeAssistant.workspaceId && options.resolveWorkspaceCustomLlm
-      ? await options.resolveWorkspaceCustomLlm({
+    const backgroundLlmRuntime = calleeAssistant.workspaceId && turnOptions.resolveWorkspaceCustomLlm
+      ? await turnOptions.resolveWorkspaceCustomLlm({
           workspaceId: calleeAssistant.workspaceId,
           requestedTier: 'standard',
           allowDefault: true,
@@ -1446,11 +1462,12 @@ export function createCalleeExecutor(options: CalleeExecutorOptions): CalleeExec
       ...turnScope.access,
       clientSelfMemory: externalClient?.clientSelfMemory,
     }
-    const [soulContext, identityMemories, memoryIndex] = await Promise.all([
+    const [soulContext, identityMemories, rankedIndex] = await Promise.all([
       (options.memoryStore.getSoulContext?.(calleeCtx, 'Use Brian') ?? Promise.resolve({ content: null, evidence: {} })),
       options.memoryStore.getIdentity(calleeCtx),
-      options.memoryStore.getIndex(calleeCtx),
+      options.memoryStore.getIndexRanked(calleeCtx, PER_TURN_INDEX_CAP),
     ])
+    const memoryIndex = rankedIndex.rows
     const soul = soulContext.content
 
     let workspaceIdentityMemories: Awaited<ReturnType<typeof options.memoryStore.getWorkspaceIdentity>> = []
@@ -1501,6 +1518,7 @@ export function createCalleeExecutor(options: CalleeExecutorOptions): CalleeExec
       memoryIndex: memoryIndex
         .filter((m) => !priorRunIds.has(m.id))
         .map((m) => ({ ...m, appId: null })),
+      totalNonIdentityCount: rankedIndex.totalCount,
       workspaceIdentityMemories: workspaceIdentityMemories
         .filter((m) => !priorRunIds.has(m.id))
         .map((m) => ({ id: m.id, summary: m.summary, detail: m.detail })),
@@ -1694,7 +1712,18 @@ export function createCalleeExecutor(options: CalleeExecutorOptions): CalleeExec
       ? `\n\n## External client boundary\nThis automated draft is running as one isolated external client. Use only the inbound request and the client-scoped context and tools available in this turn. Do not infer or request another client identity, do not claim access to workspace-wide context, and do not attempt to deliver or send the result. The final text is an internal draft for workspace review.`
       : ''
     const activeWorkspaceContext = formatActiveWorkspaceContext(turnScope)
-    const fullSystemPrompt = `${systemPrompt}${decisionPlaybookBlock}${externalClientGuardBlock}${docAnchorBlock}${priorRunMemoryBlock}${workflowGuardBlock}${recordCreationGuardBlock}${automatedToolPolicyBlock}${unavailableBlock}${skillPromptFragment}${blueprintPromptFragment}${deliveryConversationBlock}\n\n# Context\nCurrent date and time: ${currentDateTime}\nTimezone: ${calleeActor.timezone}\n\n${memoryContext}${activeWorkspaceContext ? `\n\n${activeWorkspaceContext}` : ''}`
+    // Split prompt (turn kernel, section 4.3): the stable prompt carries the
+    // callee's persona (Layer 1 + its charter, the same Layer 2 every other
+    // runner renders) and the step's fixed policy blocks; the date, memory and
+    // workspace context are per-run data and ride the trusted runtime channel,
+    // so they never sit inside the cacheable stable prefix.
+    const calleeCharterBlock = calleeAssistant.kind === 'app'
+      ? null
+      : renderCharterBlock(resolveCharter(calleeAssistant))
+    const calleeStablePrompt = `${systemPrompt}${calleeCharterBlock ? `\n\n${calleeCharterBlock}` : ''}${decisionPlaybookBlock}${externalClientGuardBlock}${docAnchorBlock}${priorRunMemoryBlock}${workflowGuardBlock}${recordCreationGuardBlock}${automatedToolPolicyBlock}${unavailableBlock}${skillPromptFragment}${blueprintPromptFragment}${deliveryConversationBlock}`
+    const calleeRuntimeContext = `# Context\nCurrent date and time: ${currentDateTime}\nTimezone: ${calleeActor.timezone}\n\n${memoryContext}${activeWorkspaceContext ? `\n\n${activeWorkspaceContext}` : ''}`
+    // The whole picture, for compaction and the evidence seed.
+    const fullSystemPrompt = `${calleeStablePrompt}\n\n${calleeRuntimeContext}`
     // 6. Build messages and run the query loop.
     //
     // Persist the user turn first, then build the message list. A durable
@@ -1899,8 +1928,8 @@ export function createCalleeExecutor(options: CalleeExecutorOptions): CalleeExec
       : params.modelAlias
         ? MODEL_MAP[params.modelAlias] ?? MODEL_MAP.standard
         : 'gemini-flash'
-    const customLlmRuntime = calleeAssistant.workspaceId && options.resolveWorkspaceCustomLlm
-      ? await options.resolveWorkspaceCustomLlm({
+    const customLlmRuntime = calleeAssistant.workspaceId && turnOptions.resolveWorkspaceCustomLlm
+      ? await turnOptions.resolveWorkspaceCustomLlm({
           workspaceId: calleeAssistant.workspaceId,
           requestedTier: tierForModel(model),
           allowDefault: true,
@@ -2043,7 +2072,7 @@ export function createCalleeExecutor(options: CalleeExecutorOptions): CalleeExec
     // The synthesis loop sees the gathered findings (research fan-out only);
     // compaction above used the un-injected prompt, which is correct.
     const loopSystemPrompt =
-      (researchContext ? buildPreflightPrompt(fullSystemPrompt, researchContext) : fullSystemPrompt) +
+      (researchContext ? buildPreflightPrompt(calleeStablePrompt, researchContext) : calleeStablePrompt) +
       outputBindingBlock +
       deliveryFormatBlock
 
@@ -2078,6 +2107,7 @@ export function createCalleeExecutor(options: CalleeExecutorOptions): CalleeExec
         : undefined
     if (evidenceAccumulator) {
       evidenceAccumulator.note(loopSystemPrompt)
+      evidenceAccumulator.note(calleeRuntimeContext)
       evidenceAccumulator.note(JSON.stringify(messages))
     }
 
@@ -2098,9 +2128,31 @@ export function createCalleeExecutor(options: CalleeExecutorOptions): CalleeExec
           },
           candidateTools: finalTools,
           bindTools: (candidateTools) => candidateTools,
-          trustedContributions: [{ name: 'callee', content: loopSystemPrompt }],
+          trustedContributions: [{ name: 'runtime', content: calleeRuntimeContext }],
         })
-        for await (const event of queryLoop({
+        await runAssistantTurn({
+          sessionId: session.id,
+          policy: policyFor(session),
+          abortController,
+          lease: { mode: 'kernel', waitForSlot: waitForTurnSlot },
+          model: {
+            provider: preparedRun.model.provider,
+            model: preparedRun.model.model,
+            configuredProviders: turnOptions.configuredProviders,
+            customLlm: customLlmRuntime,
+          },
+          // The callee lane had no budget gate: a workspace with no active
+          // plan still ran workflow and A2A turns.
+          budget: async () => {
+            if (!calleeAssistant.workspaceId || !options.usageStore) return
+            const gate = await checkUsageBudget(
+              calleeAssistant.workspaceId,
+              await getWorkspacePlan(calleeAssistant.workspaceId),
+              options.checkCreditBudget,
+            )
+            if (gate.status === 'blocked') throw new TurnRefusal('budget_blocked', 'This workspace has no active plan, so the assistant step did not run.')
+          },
+          loop: {
           ledger: createTurnLedger({
             workspaceId: calleeAssistant.workspaceId ?? null,
             assistantId: params.calleeAssistantId,
@@ -2108,8 +2160,6 @@ export function createCalleeExecutor(options: CalleeExecutorOptions): CalleeExec
             actor: params.callerChannelType === 'workflow' ? 'workflow_step' : 'a2a',
             payloads: getLedgerPayloadStore(),
           }).ledger,
-          provider: preparedRun.model.provider,
-          model: preparedRun.model.model,
           maxTokens: preparedRun.model.maxTokens,
           inputTokenLimit: preparedRun.model.inputTokenLimit,
           // Workflow assistant calls are unattended and their terminal text is
@@ -2118,7 +2168,8 @@ export function createCalleeExecutor(options: CalleeExecutorOptions): CalleeExec
           // loop's single bounded continuation instead of recording a visibly
           // truncated step as completed.
           channelType: params.callerChannelType === 'workflow' ? 'workflow' : undefined,
-          systemPrompt: preparedRun.trustedContext,
+          systemPrompt: loopSystemPrompt,
+          runtimeSystemContext: preparedRun.trustedContext,
           messages,
           tools: preparedRun.tools,
           context: {
@@ -2162,10 +2213,11 @@ export function createCalleeExecutor(options: CalleeExecutorOptions): CalleeExec
           },
           maxTurns: budget.maxTurns,
           maxToolCalls: budget.maxToolCalls,
-          stallIdleMs,
           confirmationResolver,
           confirmationTimeoutMs: deferredConfirmations ? 300_000 : undefined,
-        })) {
+          },
+          stallIdleMs,
+          sink: { kind: 'return', onEvent: async (event) => {
           await assertCurrentAuthority()
           turnOutput.observe(event)
           if (params.onActivity) {
@@ -2399,7 +2451,8 @@ export function createCalleeExecutor(options: CalleeExecutorOptions): CalleeExec
           console.error(`[inter-assistant] callee query error:`, event.error)
           throw event.error
         }
-        }
+        } },
+        })
       }
     } catch (err) {
       // A wall-clock timeout fired `abortController.abort()`, surfacing as an

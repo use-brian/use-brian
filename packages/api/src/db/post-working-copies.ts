@@ -1,8 +1,10 @@
 /** Durable unfinished Feed compositions. [COMP:feed/post-working-copies] */
+import { admitAnchoredSession } from '../workspace-access/session-create-admission.js'
 import { maxSensitivity } from '@use-brian/core'
 import type { CampaignEmailMetadata, FeedComposition, FeedLinkedInContext } from '@use-brian/shared'
 import { getPool, query } from './client.js'
 import { seedFirstContentDraftMessage, withPlatformTitlePrefix, type ContentPlanningPlatform, type PostMedia } from './content-planning-store.js'
+import { sessionKindSql } from '../session-kind.js'
 
 export type PostWorkingContent = {
   /** Server-stamped, monotonic classification of selected source material. */
@@ -38,7 +40,7 @@ export const postWorkingCopiesStore = {
     const result = await query<PostWorkingCopy>(
       `SELECT w.revision, w.mutation_id AS "mutationId", w.content
        FROM feed_post_working_copies w JOIN sessions s ON s.id = w.session_id
-       WHERE s.id = $1 AND s.assistant_id = $2 AND s.mode = 'draft' AND feed_draft_audience_allowed(s.id)`,
+       WHERE s.id = $1 AND s.assistant_id = $2 AND ${sessionKindSql.anchored('s', 'feed_draft')} AND feed_draft_audience_allowed(s.id)`,
       [sessionId, assistantId],
     )
     return result.rows[0] ?? null
@@ -50,14 +52,22 @@ export const postWorkingCopiesStore = {
       await client.query('BEGIN')
       let created = false
       if (input.create) {
+        // Admitted by its anchor (unified-sessions L12) when it is new.
+        const exists = (await client.query('SELECT 1 FROM sessions WHERE id = $1', [sessionId])).rows.length > 0
+        const admitted = exists ? null : await admitAnchoredSession(client, {
+          assistantId, userId, channelType: 'web', channelId: `draft:${sessionId}`,
+          anchorKind: 'feed_draft', anchorRef: sessionId,
+        })
         const inserted = await client.query(
           `INSERT INTO sessions (id, assistant_id, user_id, channel_type, channel_id,
-             title, title_manually_set, mode, seed_kind, visibility, workspace_id)
-           SELECT $1, a.id, $3, 'web', $4, $5, true, 'draft', 'freeform', 'workspace', a.workspace_id
+             title, title_manually_set, mode, seed_kind, visibility, workspace_id,
+             anchor_kind, anchor_ref, effective_clearance)
+           SELECT $1, a.id, $3, 'web', $4, $5, true, 'draft', 'freeform', 'workspace', a.workspace_id,
+             'feed_draft', $1::text, COALESCE($6, a.clearance, 'internal')
            FROM assistants a WHERE a.id = $2
            ON CONFLICT (id) DO NOTHING RETURNING id`,
           [sessionId, assistantId, userId, `draft:${sessionId}`,
-            withPlatformTitlePrefix(input.create.platform, input.content.title)],
+            withPlatformTitlePrefix(input.create.platform, input.content.title), admitted?.effectiveClearance ?? null],
         )
         created = inserted.rows.length > 0
       }
@@ -65,7 +75,7 @@ export const postWorkingCopiesStore = {
       // serialize first writes, retries, renames and competing devices.
       const session = (await client.query<{ userId: string; title: string }>(
         `SELECT user_id AS "userId", title FROM sessions
-         WHERE id = $1 AND assistant_id = $2 AND mode = 'draft' FOR UPDATE`,
+         WHERE id = $1 AND assistant_id = $2 AND ${sessionKindSql.anchored('', 'feed_draft')} FOR UPDATE`,
         [sessionId, assistantId],
       )).rows[0]
       if (!session) throw new WorkingCopyError(404)

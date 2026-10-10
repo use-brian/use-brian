@@ -7,7 +7,8 @@ import {
 } from '@use-brian/core'
 import type { OfficeArtifactSnapshot } from '@use-brian/office-model'
 import { isDurableOfficeArtifact, type OfficeArtifactRow } from '../db/office-artifacts.js'
-import { officeImportDiagnostics } from '../db/office-generation.js'
+import { officeImportDiagnostics, officeGenerationInputQuestion } from '../db/office-generation.js'
+import { readOfficeGenerationRecovery } from './generation-recovery.js'
 import type { OfficeGenerationJobRow } from '../db/office-generation.js'
 import type { ResolvedOfficeAccess } from './access.js'
 import { createHumanOfficeGeneration, type OfficeHumanGenerationOptions, type OfficeGenerationRequest } from '../db/office-generation-admission.js'
@@ -21,6 +22,8 @@ export type OfficeServiceDeps = {
   resolveAccess(userId: string, artifactId: string): Promise<ResolvedOfficeAccess | null>
   createJob(params: { userId: string; workspaceId: string; artifactId: string; assistantId: string | null; jobKind: OfficeGenerationJobRow['jobKind']; brief: unknown; authorityProjection: unknown; templateVersionId?: string; baseArtifactVersion?: number; idempotencyKey: string }): Promise<OfficeGenerationJobRow>
   latestJob(userId: string, artifactId: string): Promise<OfficeGenerationJobRow | null>
+  /** Latest persisted event: the job state shown is status plus this, never a generic label. */
+  latestJobEvent?(userId: string, jobId: string): Promise<{ code: string; safeNarration: string | null } | null>
   getSnapshot(userId: string, artifactId: string): Promise<{ snapshot: OfficeArtifactSnapshot } | null>
   wakeGeneration?(userId: string): void
 }
@@ -161,7 +164,10 @@ export function createOfficeService(deps: OfficeServiceDeps): OfficeService {
       const [artifact, access] = await Promise.all([deps.getArtifact(params.userId, params.artifactId), deps.resolveAccess(params.userId, params.artifactId)])
       if (!artifact || !access || !artifactWithinTurnScope(artifact, params)) return null
       const [job, live] = await Promise.all([deps.latestJob(params.userId, params.artifactId), deps.getSnapshot(params.userId, params.artifactId)])
-      return { artifactId: artifact.id, family: artifact.family, mode: artifact.mode, title: artifact.title, version: artifact.headVersion, lifecycleState: artifact.lifecycleState === 'purged' ? 'retained' : artifact.lifecycleState, role: access.role, ...(artifact.expiresAt ? { expiresAt: artifact.expiresAt.toISOString() } : {}), scopeEvidence: { sensitivity: artifact.sensitivity, compartments: artifact.compartments, projectIds: artifact.projectIds }, ...(live ? targetOutline(live.snapshot, params.targetOffset) : {}), job: job ? { id: job.id, status: job.status, stage: job.stage, errorCode: job.errorCode, ...(officeImportDiagnostics(job.checkpoint).length ? { importDiagnostics: officeImportDiagnostics(job.checkpoint) } : {}) } : undefined }
+      const recovery = job?.status === 'needs_input' && job.errorCode === 'template_ambiguous'
+        ? await readOfficeGenerationRecovery(params.userId,artifact.id,job.id,params) : undefined
+      const latest = job && deps.latestJobEvent ? await deps.latestJobEvent(params.userId, job.id) : null
+      return { artifactId: artifact.id, family: artifact.family, mode: artifact.mode, title: artifact.title, version: artifact.headVersion, lifecycleState: artifact.lifecycleState === 'purged' ? 'retained' : artifact.lifecycleState, role: access.role, ...(artifact.expiresAt ? { expiresAt: artifact.expiresAt.toISOString() } : {}), scopeEvidence: { sensitivity: artifact.sensitivity, compartments: artifact.compartments, projectIds: artifact.projectIds }, ...(live ? targetOutline(live.snapshot, params.targetOffset) : {}), job: job ? { id: job.id, status: job.status, stage: job.stage, errorCode: job.errorCode, inputQuestion:officeGenerationInputQuestion(job), ...(latest ? { latestEvent: { code: latest.code, safeNarration: latest.safeNarration } } : {}), ...recovery, ...(officeImportDiagnostics(job.checkpoint).length ? { importDiagnostics: officeImportDiagnostics(job.checkpoint) } : {}) } : undefined }
     },
 
     async revise(params) {

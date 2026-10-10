@@ -1,19 +1,22 @@
 import { z } from 'zod'
 import { WorkspaceAccessError } from '../workspace-access/policy.js'
+import { SSE_MAX_LIFETIME_MS } from './brain-stream.js'
 import { webChatSourcesHandler, WEB_CHAT_SOURCE_SQL, type WebChatSourceSession } from './_web-chat-sources.js'
 import { dispatchPersistedWebInput } from './_incoming-chat-event.js'
 import { createSessionStreamAuthority } from '../session-stream-authority.js'
 import { guardFeedStream } from '../content-planning/source-authority.js'
 import { Router } from 'express'
 import { findOrCreateUser, getDefaultAssistant, getUserAssistant, getUserProfilesByIds, getWorkspacePrimaryAssistant } from '../db/users.js'
-import { addSessionMessage, createPersonalWebSession, createWorkspaceChatSession, findSessionByChannel, findSessionById, getSessionMessageById, getSessionMessages, isSharedChatSession, rebindSessionAssistant, renameSession, updateSessionMessageText } from '../db/sessions.js'
+import { addSessionMessage, createPersonalWebSession, createWorkspaceChatSession, findSessionByChannel, findSessionById, getSessionMessageById, getSessionMessages, readSessionById, rebindSessionAssistant, renameSession, updateSessionMessageText } from '../db/sessions.js'
+import { isWorkspaceAdmin, setRoomCapture } from '../channel-room/room.js'
 import { mayAssistantAnswerInRoom, DOC_DOCK_RESUME_ROW } from './_room-binding.js'
 import { query } from '../db/client.js'
 import { getTurnTrace } from '../ledger/turn-trace.js'
 import { getLedgerPayloadStore } from '../ledger/runtime.js'
 import { resolveUser } from './route-helpers.js'
-import { getWorkspaceRoleSystem, getWorkspaceMembershipWithClearanceSystem, getWorkspaceMembershipWithReadScopeSystem } from '../db/workspace-store.js'
+import { getWorkspaceRoleSystem, getWorkspaceMembershipWithReadScopeSystem } from '../db/workspace-store.js'
 import { decideSessionRead } from '../session-read-access.js'
+import { classifySession, feedAnchoredRead, policyFor, sessionKindSql } from '../session-kind.js'
 import { canRead, type Sensitivity } from '@use-brian/core'
 import {
   ContextNotAvailableError,
@@ -47,7 +50,6 @@ import {
 import { resolveSessionPinLabels } from '../resolve-session-pins.js'
 import { guestAuthorNameForSession, guestSenderProfile } from '../db/guest-comment-store.js'
 import { gateSessionRead } from '../session-read-authority.js'
-import { COMMENT_THREAD_CHANNEL_TYPE } from '../db/comment-thread-store.js'
 
 export { gateSessionRead } from '../session-read-authority.js'
 
@@ -231,7 +233,7 @@ export function sessionRoutes(opts: SessionRouteOptions = {}): Router {
       // don't know about the field. Keep in sync with the CHECK in
       // migration 255 + the KNOWN_ORIGINS set in chat.ts.
       const KNOWN_ORIGINS = ['brain', 'studio', 'workflow', 'doc', 'chat', 'approvals', 'knowledge-base'] as const
-      const rawOrigin = typeof req.query.appOrigin === 'string' ? req.query.appOrigin : null
+      const rawOrigin = typeof req.query.appOrigin === 'string' ? req.query.appOrigin : null // session-kind-exempt: request query field, not a session row
       const appOrigin = rawOrigin && (KNOWN_ORIGINS as readonly string[]).includes(rawOrigin) ? rawOrigin : null
 
       // `scope=workspace` — list the caller's own sessions across EVERY
@@ -257,7 +259,7 @@ export function sessionRoutes(opts: SessionRouteOptions = {}): Router {
 
       // …and because that thread is per-turn ADDRESSABLE, the resume may only
       // return rows another workspace assistant is allowed to answer on —
-      // `isDocSurface`, the same predicate `crossAssistantSendPolicy` applies
+      // the `docSurface` policy, the same rule `crossAssistantSendPolicy` applies
       // in `chat.ts`. Built from `DOC_DOCK_RESUME_ROW` so the two cannot
       // drift; the surrounding filters (owner visibility, the caller's own
       // rows, the feed-surface exclusions) are unchanged.
@@ -265,16 +267,16 @@ export function sessionRoutes(opts: SessionRouteOptions = {}): Router {
       // This deliberately drops TWO shapes the generic list still accepts:
       // `channel_type='notification'` (the notifications inbox thread) and
       // the `app_origin IS NULL` pre-migration-187 back-compat. Neither
-      // satisfies `isDocSurface`, so the dock could attach them but never
+      // has the `docSurface` policy, so the dock could attach them but never
       // re-address them — the 2026-09-01 dead-thread bug. Losing them costs
       // only same-assistant continuation of a legacy NULL-origin thread; the
       // dock mints a fresh doc row on the next send instead.
       const surfaceFilter = allChannels
         ? ''
         : workspaceScope
-          ? `AND s.channel_type = $3 AND s.app_origin = $4`
-          : `AND s.channel_type IN ('web', 'notification')
-             AND ($3::text IS NULL OR s.app_origin = $3 OR s.app_origin IS NULL)`
+          ? `AND s.channel_type = $3 AND ${sessionKindSql.surfaceIs('s', '$4')}`
+          : `AND s.channel_type = 'web'
+             AND ${sessionKindSql.surfaceOrUnscoped('s', '$3')}`
 
       // Hide feed-web's single-thread surfaces from the main web sidebar:
       // post-drafting sessions (`mode='draft'`) and the sticky tuning /
@@ -308,15 +310,12 @@ export function sessionRoutes(opts: SessionRouteOptions = {}): Router {
            ? `s.assistant_id IN (SELECT a.id FROM assistants a WHERE a.workspace_id = $1)`
            : `s.assistant_id = $1`} AND s.user_id = $2
            AND public.assistant_placement_visible($2,s.assistant_id)
-           -- Enumerations list only owner-scoped sessions. Workspace-shared
-           -- rows (doc threads / drafts, migration 223) are reached by id
-           -- via their surface, never by this list — the channel_type filter
-           -- already excludes them, but the visibility predicate makes the
-           -- intent explicit and survives future channel_type changes.
-           AND s.visibility = 'owner'
-           AND s.mode IS DISTINCT FROM 'draft'
-           AND s.channel_id <> 'tuning'
-           AND s.channel_id NOT LIKE 'draft-iter:%'
+           -- Enumerations list only personal history. Workspace sessions
+           -- (rooms, drafts, doc / Office / feed threads) are reached by id via
+           -- their surface, never by this list; since migration 741 anchored
+           -- threads are stored on the web transport, so the audience and
+           -- anchor predicate, not the channel type, is what excludes them.
+           AND ${sessionKindSql.personalHistory('s')}
            ${surfaceFilter}
          ORDER BY s.last_active_at DESC
          LIMIT ${allChannels ? 200 : 50}`,
@@ -417,7 +416,7 @@ export function sessionRoutes(opts: SessionRouteOptions = {}): Router {
       // empty list: "you are not in this workspace" is not the same answer as
       // "this workspace has no shared chats", and conflating them makes a
       // broken workspace switch look like an empty feature.
-      const membership = await getWorkspaceMembershipWithClearanceSystem(user.id, workspaceId)
+      const membership = await getWorkspaceMembershipWithReadScopeSystem(user.id, workspaceId)
       if (!membership) {
         res.status(403).json({ error: 'Not a member of this workspace' })
         return
@@ -427,35 +426,52 @@ export function sessionRoutes(opts: SessionRouteOptions = {}): Router {
         id: string; title: string | null; channelId: string
         lastActiveAt: Date; status: string
         starterUserId: string; effectiveClearance: string | null
-        assistantId: string
+        assistantId: string; visibility: string | null; mode: string | null
         contextGroupId: string | null; contextProjectId: string | null
+        contextCompartments: string[] | null
+        channelType: string; anchorKind: string; roomCapture: boolean
       }>(
         `SELECT s.id, s.title, s.channel_id AS "channelId",
+                s.channel_type AS "channelType", s.anchor_kind AS "anchorKind",
+                s.room_capture AS "roomCapture",
                 s.last_active_at AS "lastActiveAt", s.status,
                 s.user_id AS "starterUserId",
                 s.effective_clearance AS "effectiveClearance",
                 s.assistant_id AS "assistantId",
+                s.visibility, s.mode,
                 s.context_group_id AS "contextGroupId",
-                s.context_project_id AS "contextProjectId"
+                s.context_project_id AS "contextProjectId",
+                s.context_compartments AS "contextCompartments"
            FROM (SELECT * FROM sessions WHERE feed_draft_audience_allowed(id)) s
            JOIN assistants a ON a.id = s.assistant_id
           WHERE a.workspace_id = $1
-            AND s.visibility = 'workspace'
-            AND s.channel_type = 'web'
-            AND s.app_origin = 'chat'
+            AND ${sessionKindSql.railRoom('s')}
           ORDER BY s.last_active_at DESC
           LIMIT 50`,
         [workspaceId],
       )
 
-      // Clearance filter in JS rather than SQL: `sensitivity_rank` is a
-      // domain rule that already lives in `canRead`, and duplicating the
-      // ordering into a WHERE clause is how the two drift.
-      const visible = result.rows.filter(
-        (r) =>
-          !r.effectiveClearance ||
-          canRead(membership.clearance, r.effectiveClearance as 'public' | 'internal' | 'confidential'),
-      )
+      // The list never outruns the read gate (L4): the same decision the
+      // gate applies (clearance AND current Team/Project/department reach),
+      // so a room the caller could not open is not listed, title and all.
+      const now = new Date()
+      const visible = result.rows.filter((r) => decideSessionRead({
+        callerUserId: user.id,
+        session: {
+          userId: r.starterUserId,
+          visibility: r.visibility,
+          mode: r.mode,
+          effectiveClearance: r.effectiveClearance,
+          contextCompartments: r.contextCompartments ?? [],
+          contextProjectId: r.contextProjectId,
+        },
+        assistantWorkspaceId: workspaceId,
+        membershipClearance: membership.clearance,
+        membershipCompartments: membership.compartments,
+        membershipProjectIds: membership.projectIds,
+        departmentAccess: membership.departmentAccess,
+        now,
+      }).readable)
 
       // Starter identity for the "Started by" chip. One batched lookup;
       // `users` RLS is own-row only, so this is a system read — membership
@@ -476,6 +492,10 @@ export function sessionRoutes(opts: SessionRouteOptions = {}): Router {
         assistantId: s.assistantId,
         contextGroupId: s.contextGroupId,
         contextProjectId: s.contextProjectId,
+        // A converged group on another transport (multiplayer-chat T10): the
+        // rail badges it, and its brain capture is an admin setting (D4).
+        transport: classifySession(s).transport,
+        ...(classifySession(s).anchor.kind === 'channel' ? { roomCapture: s.roomCapture } : {}),
       })))
     } catch (err) {
       console.error('Workspace sessions list error:', err)
@@ -811,25 +831,17 @@ export function sessionRoutes(opts: SessionRouteOptions = {}): Router {
         return
       }
 
-      // Verify ownership before allowing rename. Shared sessions are
-      // team-shared, so we accept rename from the original starter OR any
-      // team admin/owner of the assistant's team. Non-shared sessions stay
-      // strictly per-user.
-      // NOTE the asymmetry inside `visibility='workspace'` (migration 223).
-      // A workspace-shared CHAT (`app_origin='chat'`) widens to
-      // starter-or-admin, because a shared thread nobody but its starter can
-      // retitle is a shared thread with a private owner. A doc COMMENT THREAD
-      // does not: it is workspace-READABLE, but renaming or destroying it is
-      // still the author's call, and DELETE cascades to `comment_threads` plus
-      // every comment on it. That is why the predicate is
-      // `isSharedChatSession`, not a bare `visibility` check — do NOT "unify"
-      // them.
+      // Rename authority is the `lifecycle` row of sessionPolicy (L11): the
+      // owner of a personal session; any participant who can read a
+      // workspace session (a shared thread nobody but its starter can
+      // retitle is a shared thread with a private owner).
       const sessionResult = await query<{
         id: string
         userId: string
         mode: string | null
         visibility: string | null
         channelType: string
+        anchorKind: string
         appOrigin: string | null
         workspaceId: string | null
       }>(
@@ -838,6 +850,7 @@ export function sessionRoutes(opts: SessionRouteOptions = {}): Router {
                 s.mode,
                 s.visibility,
                 s.channel_type as "channelType",
+                s.anchor_kind as "anchorKind",
                 s.app_origin as "appOrigin",
                 a.workspace_id as "workspaceId"
            FROM (SELECT * FROM sessions WHERE feed_draft_audience_allowed(id)) s
@@ -854,14 +867,13 @@ export function sessionRoutes(opts: SessionRouteOptions = {}): Router {
       const jwtUserId = (req as { userId?: string }).userId
       let allowed = false
       if (jwtUserId) {
-        if (session.userId === jwtUserId) {
-          allowed = true
-        } else if (
-          (session.mode === 'draft' || isSharedChatSession(session)) &&
-          session.workspaceId
-        ) {
-          const role = await getWorkspaceRoleSystem(jwtUserId, session.workspaceId)
-          if (role === 'admin' || role === 'owner') allowed = true
+        // L11: a personal session is renamed by its owner; a workspace session
+        // by any participant who can read it (the read gate, anchor included).
+        if (policyFor(session).lifecycle.rename === 'participants') {
+          const full = await findSessionById(sessionId)
+          allowed = !!full && !(await gateSessionRead(jwtUserId, full))
+        } else {
+          allowed = session.userId === jwtUserId
         }
       } else {
         const { user: guestUser } = await findOrCreateUser({
@@ -891,10 +903,11 @@ export function sessionRoutes(opts: SessionRouteOptions = {}): Router {
       const sessionResult = await query<{
         id: string; userId: string; status: string; channelType: string
         mode: string | null; visibility: string | null; appOrigin: string | null
+        anchorKind: string
         workspaceId: string | null
       }>(
         `SELECT s.id, s.user_id as "userId", s.status,
-                s.channel_type as "channelType", s.mode, s.visibility,
+                s.channel_type as "channelType", s.mode, s.visibility, s.anchor_kind as "anchorKind",
                 s.app_origin as "appOrigin",
                 a.workspace_id as "workspaceId"
            FROM (SELECT * FROM sessions WHERE feed_draft_audience_allowed(id)) s
@@ -910,17 +923,22 @@ export function sessionRoutes(opts: SessionRouteOptions = {}): Router {
 
       const session = sessionResult.rows[0]
 
-      // 2. Verify ownership — session must belong to the requesting user, OR
-      // be a workspace-shared CHAT the caller administers. Doc-thread sessions
-      // stay delete-restricted to the creator by design (see the rename note
-      // above): deletion cascades to the `comment_threads` row + all comments,
-      // which is why this gates on `isSharedChatSession` and not `visibility`.
+      // 2. Verify delete authority (sessionPolicy lifecycle row, L11).
       const jwtUserId = (req as { userId?: string }).userId
       if (jwtUserId) {
-        let allowed = session.userId === jwtUserId
-        if (!allowed && isSharedChatSession(session) && session.workspaceId) {
-          const role = await getWorkspaceRoleSystem(jwtUserId, session.workspaceId)
-          allowed = role === 'admin' || role === 'owner'
+        // L11, D9: a personal session is deleted by its owner; a workspace
+        // session by a workspace admin, whoever started it (its `user_id`
+        // means "created by" and grants nothing). The anchor's cascade runs
+        // through the foreign keys (a doc thread takes its `comment_threads`
+        // row and every comment with it).
+        let allowed = false
+        if (policyFor(session).lifecycle.delete === 'admin') {
+          if (session.workspaceId) {
+            const role = await getWorkspaceRoleSystem(jwtUserId, session.workspaceId)
+            allowed = role === 'admin' || role === 'owner'
+          }
+        } else {
+          allowed = session.userId === jwtUserId
         }
         if (!allowed) {
           res.status(403).json({ error: 'Not your session' })
@@ -1081,7 +1099,7 @@ export function sessionRoutes(opts: SessionRouteOptions = {}): Router {
       // every guest "Canvas Guest". Attribute those rows to the thread's
       // `external_author_name` instead (one system read, comment threads only).
       const guestName =
-        session.channelType === COMMENT_THREAD_CHANNEL_TYPE
+        classifySession(session).anchor.kind === 'doc_thread'
           ? await guestAuthorNameForSession(session.id)
           : null
       res.json(messages.map((m) => {
@@ -1125,11 +1143,42 @@ export function sessionRoutes(opts: SessionRouteOptions = {}): Router {
    * coalesced assembly reads (T4; rows-not-buffers keeps the §7 steering door
    * open).
    *
-   * Shared chat sessions ONLY (`isSharedChatSession`) — a personal chat has
+   * Web rooms ONLY (`sessionPolicy(kind).post`) — a personal chat has
    * no silent-post semantics, and doc threads / feed drafts keep their own
    * lifecycle. Write access = read access (`gateSessionRead`): whoever can
    * read the room can post, attributed.
    */
+  /**
+   * PATCH /api/sessions/:id/room-capture — switch a converged channel room's
+   * brain capture (unified-sessions D4). Body: { enabled: boolean }. A
+   * workspace owner or admin only; un-mentioned messages stay in the room's
+   * context either way.
+   */
+  router.patch('/:id/room-capture', async (req, res) => {
+    try {
+      const user = await resolveUser((req as { userId?: string }).userId)
+      if (!user) { res.status(401).json({ error: 'Unauthorized' }); return }
+      const parsed = z.object({ enabled: z.boolean() }).strict().safeParse(req.body)
+      if (!parsed.success) { res.status(400).json({ error: 'invalid_room_capture_request' }); return }
+      const session = await readSessionById(req.params.id)
+      if (!session || classifySession(session).anchor.kind !== 'channel') {
+        res.status(404).json({ error: 'Session not found' })
+        return
+      }
+      const workspace = (await query<{ workspaceId: string | null }>(
+        'SELECT workspace_id AS "workspaceId" FROM assistants WHERE id = $1', [session.assistantId])).rows[0]?.workspaceId
+      if (!workspace || !(await isWorkspaceAdmin(user.id, workspace))) {
+        res.status(403).json({ error: 'Only a workspace admin can change capture for this group' })
+        return
+      }
+      await setRoomCapture(session.id, parsed.data.enabled)
+      res.json({ ok: true, roomCapture: parsed.data.enabled })
+    } catch (err) {
+      console.error('Room capture update error:', err)
+      res.status(500).json({ error: 'Failed to update capture' })
+    }
+  })
+
   router.post('/:id/messages', async (req, res) => {
     try {
       const jwtUserId = (req as { userId?: string }).userId
@@ -1162,7 +1211,7 @@ export function sessionRoutes(opts: SessionRouteOptions = {}): Router {
         res.status(404).json({ error: 'Session not found' })
         return
       }
-      if (!isSharedChatSession(session)) {
+      if (!policyFor(session).post) {
         res.status(403).json({ error: 'Posting is only available in workspace chats' })
         return
       }
@@ -1336,7 +1385,7 @@ export function sessionRoutes(opts: SessionRouteOptions = {}): Router {
         res.status(404).json({ error: 'Session not found' })
         return
       }
-      if (!isSharedChatSession(session)) {
+      if (!policyFor(session).post) {
         res.status(403).json({ error: 'Editing is only available in workspace chats' })
         return
       }
@@ -1519,7 +1568,7 @@ export function sessionRoutes(opts: SessionRouteOptions = {}): Router {
       if (!jwtUserId) { res.status(401).json({ error: 'Unauthorized' }); return }
       const session = await findSessionById(req.params.id)
       if (!session) { res.status(404).json({ error: 'Session not found' }); return }
-      if (!isSharedChatSession(session)) {
+      if (!policyFor(session).post) {
         res.status(403).json({ error: 'Typing signals are only available in workspace chats' })
         return
       }
@@ -1578,7 +1627,7 @@ export function sessionRoutes(opts: SessionRouteOptions = {}): Router {
 
       const session = await findSessionById(req.params.id)
       if (!session) { res.status(404).json({ error: 'Session not found' }); return }
-      if (!isSharedChatSession(session)) {
+      if (!policyFor(session).post) {
         // Personal threads stay bound for their lifetime — one person, one
         // assistant, no second participant to want the switch.
         res.status(403).json({ error: 'Only a workspace chat can change assistant' })
@@ -1655,7 +1704,7 @@ export function sessionRoutes(opts: SessionRouteOptions = {}): Router {
     if (!user) return { ok: false, status: 401, error: 'Unauthorized' }
     const session = await findSessionById(String(req.params.id ?? ''))
     if (!session) return { ok: false, status: 404, error: 'Session not found' }
-    if (!isSharedChatSession(session)) {
+    if (!policyFor(session).post) {
       return { ok: false, status: 403, error: 'Pins are only available in workspace chats' }
     }
     const denied = await gateSessionRead(user.id, session)
@@ -1842,7 +1891,12 @@ export function sessionRoutes(opts: SessionRouteOptions = {}): Router {
     // transcript at settle. Current authority is rechecked before each relay
     // and while idle by the guard below. A 25s comment ping defeats proxy idle
     // timeouts.
-    if (isSharedChatSession(session)) {
+    // Rooms and Office file threads are followed for their whole life, not
+    // only while a turn runs. An Office thread is followed from every open
+    // file rail, so it bounds its own lifetime (the rail reconnects).
+    const followPolicy = policyFor(session)
+    const officeThread = followPolicy.read.rule === 'workspace' && followPolicy.read.anchorGate === 'office_file'
+    if (followPolicy.presence) {
       let closed = false
       // The viewer joins the room's presence set under their display name —
       // that name is what teammates' typing indicators render.
@@ -1896,12 +1950,20 @@ export function sessionRoutes(opts: SessionRouteOptions = {}): Router {
         if (!res.writableEnded) res.write(': ping\n\n')
       }, 25_000)
       ping.unref?.()
+      const lifetime = officeThread
+        ? setTimeout(() => {
+            if (!res.writableEnded) res.write(': cycle\n\n')
+            closeForAuthority()
+          }, Math.round(SSE_MAX_LIFETIME_MS * (0.8 + Math.random() * 0.4)))
+        : null
+      lifetime?.unref?.()
       const closeRoom = () => {
         if (closed) return
         closed = true
         authority.dispose()
         clearInterval(authorityPoll)
         clearInterval(ping)
+        if (lifetime) clearTimeout(lifetime)
         unsubscribeRoom()
       }
       closeForAuthority = () => { closeRoom(); res.end() }
@@ -1944,7 +2006,7 @@ export function sessionRoutes(opts: SessionRouteOptions = {}): Router {
       sessionId: req.params.id,
       userId: jwtUserId,
       name: null,
-      cb: session.mode === 'draft' || session.channelType === 'feed_thread'
+      cb: feedAnchoredRead(policyFor(session))
         ? guardFeedStream({ query }, req.params.id, jwtUserId, relayEvent, () => finalize([]))
         : relayEvent,
     })

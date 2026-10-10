@@ -8,11 +8,20 @@ import { getUserAssistant } from './db/users.js'
 import { query } from './db/client.js'
 import { getWorkspaceMembershipWithReadScopeSystem } from './db/workspace-store.js'
 import { decideSessionRead } from './session-read-access.js'
+import { findOfficeArtifactForSessionSystem } from './db/office-artifact-sessions.js'
+import { policyFor } from './session-kind.js'
+import { resolveOfficeAccess } from './office/access.js'
 
 /** A session whose read-access we gate (the subset of fields the gate reads). */
 type GatedSession = {
   id?: string
   channelType?: string
+  /**
+   * The stored anchor (migration 741), REQUIRED: an Office or feed thread is
+   * stored as `channel_type='web'`, so without it the anchor's own gate (file
+   * access, draft collaboration) would silently fall back to membership.
+   */
+  anchorKind: string | null
   userId: string
   assistantId: string
   visibility: string | null
@@ -20,6 +29,46 @@ type GatedSession = {
   effectiveClearance: string | null
   contextCompartments?: string[]
   contextProjectId?: string | null
+}
+
+/**
+ * The anchor half of the read rule (`sessionPolicy(kind).read.anchorGate`).
+ * A workspace session attached to a feed draft, a feed thread or an Office
+ * file is read by that anchor's audience, in addition to (draft) or instead
+ * of (feed thread, Office file) the membership decision. Returns
+ * `'continue'` when the membership decision must still run, `null` when the
+ * anchor alone authorizes, or the refusal. The ONE implementation the gate,
+ * the workspace list and the Live roster share (unified-sessions L3, L4).
+ */
+export async function anchorReadGate(
+  jwtUserId: string,
+  session: Pick<GatedSession, 'id' | 'channelType' | 'assistantId' | 'visibility' | 'mode' | 'anchorKind'>,
+): Promise<{ status: number; error: string } | null | 'continue'> {
+  const policy = policyFor({ channelType: session.channelType ?? 'web', visibility: session.visibility, mode: session.mode, anchorKind: session.anchorKind })
+  if (policy.read.rule !== 'workspace') return 'continue'
+  switch (policy.read.anchorGate) {
+    case 'none':
+      return 'continue'
+    case 'feed_draft_audience':
+      if (session.id && !(await query('SELECT feed_draft_audience_allowed($1) AS allowed', [session.id])).rows[0]?.allowed) {
+        return { status: 403, error: 'Draft source access required' }
+      }
+      return 'continue'
+    case 'feed_collaboration': {
+      const parent = session.id ? await findFeedThreadDraft(session.id) : null
+      if (!parent || parent.assistantId !== session.assistantId) return { status: 404, error: 'Draft discussion not found' }
+      try { await getFeedCollaboration({ userId: jwtUserId, assistantId: parent.assistantId, sessionId: parent.sessionId, kind: 'user' }); return null }
+      catch { return { status: 403, error: 'Draft access required' } }
+    }
+    case 'office_file': {
+      // An Office file's shared thread is read by exactly the file's
+      // audience: the Office access predicate decides, never workspace
+      // membership. A caller who cannot read the file learns nothing.
+      const link = session.id ? await findOfficeArtifactForSessionSystem(session.id) : null
+      if (!link || !(await resolveOfficeAccess(jwtUserId, link.artifactId))) return { status: 404, error: 'Session not found' }
+      return null
+    }
+  }
 }
 
 /**
@@ -44,13 +93,8 @@ export async function gateSessionRead(
   session: GatedSession,
 ): Promise<{ status: number; error: string } | null> {
   if (!(await getUserAssistant(jwtUserId, session.assistantId))) return { status: 403, error: 'Session not available' }
-  if (session.mode === 'draft' && session.id && !(await query('SELECT feed_draft_audience_allowed($1) AS allowed', [session.id])).rows[0]?.allowed) return { status: 403, error: 'Draft source access required' }
-  if (session.channelType === 'feed_thread') {
-    const parent = session.id ? await findFeedThreadDraft(session.id) : null
-    if (!parent || parent.assistantId !== session.assistantId) return { status: 404, error: 'Draft discussion not found' }
-    try { await getFeedCollaboration({ userId: jwtUserId, assistantId: parent.assistantId, sessionId: parent.sessionId, kind: 'user' }); return null }
-    catch { return { status: 403, error: 'Draft access required' } }
-  }
+  const anchor = await anchorReadGate(jwtUserId, session)
+  if (anchor !== 'continue') return anchor
   let assistantWorkspaceId: string | null = null
   let membershipClearance: 'public' | 'internal' | 'confidential' | null = null
   let membershipCompartments: string[] | null | undefined

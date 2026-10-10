@@ -49,7 +49,8 @@ vi.mock('../../db/workspace-store.js', () => ({
 }))
 
 import { gateSessionRead } from '../sessions.js'
-import { isSharedChatSession, isMultiParticipantSession } from '../../db/sessions.js'
+const isWebRoom = (s: Parameters<typeof policyFor>[0]) => policyFor(s).crossAssistantSend === 'room'
+import { policyFor } from '../../session-kind.js'
 
 const STARTER = 'user-starter'
 const TEAMMATE = 'user-teammate'
@@ -60,7 +61,7 @@ function session(overrides: Record<string, unknown> = {}) {
     assistantId: 'a-1',
     visibility: 'workspace',
     mode: null,
-    channelType: 'web',
+    channelType: 'web', anchorKind: null,
     appOrigin: 'chat',
     effectiveClearance: 'internal',
     ...overrides,
@@ -127,64 +128,37 @@ describe('[COMP:api/sessions-workspace-list] workspace-shared chat access', () =
 
 describe('[COMP:api/sessions-workspace-list] shared-chat predicate scope', () => {
   it('matches only a workspace-visible web chat session', () => {
-    expect(isSharedChatSession(session())).toBe(true)
-    expect(isSharedChatSession(session({ visibility: 'owner' }))).toBe(false)
-    expect(isSharedChatSession(session({ appOrigin: 'doc' }))).toBe(false)
-    expect(isSharedChatSession(session({ channelType: 'doc_thread' }))).toBe(false)
+    expect(isWebRoom(session())).toBe(true)
+    expect(isWebRoom(session({ visibility: 'owner' }))).toBe(false)
+    expect(isWebRoom(session({ appOrigin: 'doc' }))).toBe(false)
+    expect(isWebRoom(session({ channelType: 'doc_thread', anchorKind: null }))).toBe(false)
   })
 
   it('does NOT sweep in doc comment threads or feed drafts', () => {
     // Both are workspace-visible, and both have lifecycle rules the shared-chat
     // relaxations must not touch — deleting a doc thread cascades to
     // `comment_threads` and every comment on it.
-    const docThread = session({ channelType: 'doc_thread', appOrigin: 'doc' })
+    const docThread = session({ channelType: 'doc_thread', anchorKind: null, appOrigin: 'doc' })
     const feedDraft = session({ mode: 'draft', appOrigin: null })
-    expect(isSharedChatSession(docThread)).toBe(false)
-    expect(isSharedChatSession(feedDraft)).toBe(false)
-    // They ARE multi-participant, so speaker labels still apply to them.
-    expect(isMultiParticipantSession(docThread)).toBe(true)
-    expect(isMultiParticipantSession(feedDraft)).toBe(true)
+    expect(isWebRoom(docThread)).toBe(false)
+    expect(isWebRoom(feedDraft)).toBe(false)
+    // They ARE workspace sessions, so speaker labels apply to them.
+    expect(policyFor(docThread).attribution).toBe(true)
+    expect(policyFor(feedDraft).attribution).toBe(true)
   })
 
   it('leaves a personal chat single-participant (no speaker labels)', () => {
     const personal = session({ visibility: 'owner', effectiveClearance: null })
-    expect(isMultiParticipantSession(personal)).toBe(false)
+    expect(policyFor(personal).attribution).toBe(false)
   })
 })
 
-describe('[COMP:api/sessions-workspace-list] turn serialization is internal for rooms', () => {
-  const idle = { status: 'idle', visibility: 'workspace', channelType: 'web', appOrigin: 'chat', mode: null }
-  const running = { ...idle, status: 'running' }
-
-  it('lets a turn through when nothing is in flight', async () => {
-    const { sharedTurnRejection } = await import('../chat.js')
-    expect(sharedTurnRejection(idle)).toBeNull()
-  })
-
-  it('no longer rejects a concurrent send in a room — D2: `shared_session_busy` left the human path', async () => {
-    // Multiplayer chat (docs/plans/multiplayer-chat.md): a plain post during
-    // a live turn is accepted (the post path is never gated), and an
-    // ADDRESSED send queues exactly one follow-up turn (roomTurnAdmission,
-    // [COMP:api/room-mechanics]). Serialization moved inside the route.
-    const { sharedTurnRejection } = await import('../chat.js')
-    expect(sharedTurnRejection(running)).toBeNull()
-  })
-
-  it('keeps the draft session busy code (drafts still take one turn at a time)', async () => {
-    const { sharedTurnRejection } = await import('../chat.js')
-    expect(
-      sharedTurnRejection({ ...running, mode: 'draft', appOrigin: null })?.code,
-    ).toBe('draft_session_busy')
-  })
-
-  it('never busy-blocks a personal chat or a doc comment thread', async () => {
-    const { sharedTurnRejection } = await import('../chat.js')
-    // A personal session is single-author — a second turn is the same person.
-    expect(sharedTurnRejection({ ...running, visibility: 'owner' })).toBeNull()
-    // A doc thread is workspace-VISIBLE but single-author; blocking it would
-    // stop someone replying in their own thread.
-    expect(
-      sharedTurnRejection({ ...running, channelType: 'doc_thread', appOrigin: 'doc' }),
-    ).toBeNull()
+describe('[COMP:api/sessions-workspace-list] turn serialization is internal for workspace sessions', () => {
+  it('admits by audience: workspace sessions queue a follow-up turn, personal sessions use the lease (D11)', async () => {
+    const { policyFor } = await import('../../session-kind.js')
+    expect(policyFor({ channelType: 'web', anchorKind: null, visibility: 'workspace', appOrigin: 'chat' }).admission).toBe('room')
+    expect(policyFor({ channelType: 'web', anchorKind: null, visibility: 'workspace', mode: 'draft' }).admission).toBe('room')
+    expect(policyFor({ channelType: 'doc_thread', anchorKind: null, visibility: 'workspace', appOrigin: 'doc' }).admission).toBe('room')
+    expect(policyFor({ channelType: 'web', anchorKind: null, visibility: 'owner', appOrigin: 'chat' }).admission).toBe('personal')
   })
 })

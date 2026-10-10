@@ -1,3 +1,4 @@
+import { classifySession, sessionKindSql } from '../session-kind.js'
 import type pg from 'pg'
 import {
   bindScopeSource,
@@ -10,7 +11,7 @@ import {
 } from '@use-brian/core'
 import { getPool, getAppPool, applyRLSGucs, query } from './client.js'
 import { readCurrentScopeSources, recordDerivedResource, validateDerivedMemoryInputs } from './derived-scope-store.js'
-import { admitSessionCreate, admitPersonalWebSession, type PersonalWebSessionPrincipal } from '../workspace-access/session-create-admission.js'
+import { admitAnchoredSession, admitSessionCreate, admitPersonalWebSession, type PersonalWebSessionPrincipal } from '../workspace-access/session-create-admission.js'
 import { notifyWorkspaceChange } from '../brain-stream/notify.js'
 
 /**
@@ -83,12 +84,18 @@ export type Session = {
    */
   mode: string | null
   /**
-   * Read scope (migration 223). `'owner'` (default) → only the session's
+   * The AUDIENCE (migrations 223, 741). `'personal'` → only the session's
    * `user_id` can read it (sessions_own RLS). `'workspace'` → any member of
    * the owning assistant's workspace can read it (sessions_workspace_shared
-   * RLS) — used for doc comment-thread sessions and feed draft sessions.
+   * RLS): rooms, drafts, doc / Office / feed threads, converged groups. On a
+   * workspace row `user_id` means "created by" and grants nothing (D9).
    */
   visibility: string
+  /** What the conversation is attached to (migration 741); read via `classifySession`. */
+  anchorKind: string
+  anchorRef: string | null
+  /** Where `effective_clearance` comes from: the assistant or the anchor (D10). */
+  clearanceSource: string
   /**
    * Denormalized read-clearance (migration 224) = the owning assistant's
    * clearance, for `visibility='workspace'` sessions. Backs the clearance
@@ -181,59 +188,8 @@ export type SessionMessageAttachment = {
   caption?: string
 }
 
-/** The fields the shared-session predicates read. */
-type SessionShape = {
-  visibility: string | null
-  channelType: string
-  appOrigin: string | null
-  mode: string | null
-}
 
-/**
- * A workspace-shared **chat** session — the Chat app's Workspace view.
- *
- * Narrower than `visibility === 'workspace'` on purpose. Doc comment threads
- * and feed drafts are also workspace-visible, and they have their own
- * lifecycle rules that must not be widened by accident: deleting a doc-thread
- * session cascades to its `comment_threads` row and every comment on it. Every
- * rule this build relaxes (delete by admin, the busy gate, the workspace list)
- * gates on THIS predicate, not on `visibility` alone.
- *
- * See docs/architecture/features/chat-app.md → "Workspace view".
- */
-export function isSharedChatSession(s: SessionShape): boolean {
-  return (
-    s.visibility === 'workspace' &&
-    s.channelType === 'web' &&
-    s.appOrigin === 'chat'
-  )
-}
 
-/**
- * Is this session's AUDIENCE shared rather than one owner? The single
- * definition for audience-scoped decisions: how a person's input is stamped,
- * which ceiling delivery checks, and what automatic context a turn may load.
- * Wider than `isSharedChatSession` (web rooms): doc comment threads and Feed
- * threads are `visibility='workspace'`, and live drafts are `mode='draft'`.
- * Two definitions refused every doc-thread and draft turn: input stamped
- * personal, delivery judged against a room.
- */
-export function isSharedAudienceSession(s: Pick<SessionShape, 'visibility' | 'mode'>): boolean {
-  return s.visibility === 'workspace' || s.mode === 'draft'
-}
-
-/**
- * A session several humans share, so the model needs speaker labels to tell
- * "the user" apart: shared chats, feed drafts, and doc comment threads.
- */
-export function isMultiParticipantSession(s: SessionShape): boolean {
-  return (
-    isSharedChatSession(s) ||
-    s.mode === 'draft' ||
-    s.channelType === 'doc_thread' ||
-    s.channelType === 'feed_thread'
-  )
-}
 
 /** Storage-only delimiter for a thread-qualified session channel id. */
 const THREAD_SESSION_DELIMITER = ':thread:'
@@ -340,12 +296,20 @@ type CreateSessionParams = {
    */
   appOrigin?: string | null
   /**
-   * Read scope (migration 223). Omit → DB default `'owner'`. Pass
-   * `'workspace'` for sessions that back a workspace artifact (doc
-   * comment threads). The ON CONFLICT branch deliberately does NOT update
-   * it — visibility is fixed at first insert, like `app_origin`.
+   * The audience (migrations 223, 741). Omit → `'personal'`. Pass
+   * `'workspace'` for a shared conversation. The ON CONFLICT branch
+   * deliberately does NOT update it: the audience is fixed at first insert.
    */
-  visibility?: 'owner' | 'workspace'
+  visibility?: 'personal' | 'workspace'
+  /**
+   * What the conversation is attached to (migration 741). Omit for a plain
+   * conversation; an anchored workspace thread names its anchor so creation
+   * admission can mint the anchored receipt (L12).
+   */
+  anchorKind?: 'doc_thread' | 'office_file' | 'feed_draft' | 'feed_thread'
+  anchorRef?: string | null
+  /** Set when a guest (the sentinel user) opens a doc thread on a public page. */
+  guestAnchor?: true
   /**
    * Denormalized workspace pointer that backs the `sessions_workspace_shared`
    * RLS policy (migration 223). Required for `visibility:'workspace'` sessions
@@ -379,7 +343,7 @@ export async function createPersonalWebSession(params: Omit<CreateSessionParams,
     await client.query('BEGIN')
     await applyRLSGucs(client, principal.actorUserId)
     const admitted = await admitPersonalWebSession(client, params, principal)
-    const session = await insertSession({ ...admitted, visibility: 'owner' }, (sql, values) => client.query(sql, values), true)
+    const session = await insertSession({ ...admitted, visibility: 'personal' }, (sql, values) => client.query(sql, values), true)
     await client.query('COMMIT')
     return session
   } catch (error) { await client.query('ROLLBACK'); throw error }
@@ -387,12 +351,21 @@ export async function createPersonalWebSession(params: Omit<CreateSessionParams,
 }
 
 async function findOrCreateSessionInternal(params: CreateSessionParams, authenticatedHuman: boolean): Promise<Session> {
-  if (params.visibility !== 'workspace') return insertSession(params, query, params.channelType === 'web' && params.appOrigin === 'chat')
+  const kind = classifySession({
+    channelType: params.channelType, channelId: params.channelId, appOrigin: params.appOrigin ?? null,
+    visibility: params.visibility ?? 'personal', anchorKind: params.anchorKind ?? null,
+  })
+  // A personal Chat app conversation resumes its existing row first.
+  if (kind.audience === 'personal') return insertSession(params, query, kind.transport === 'web' && kind.surface === 'chat')
   const client = await getPool().connect()
   try {
     await client.query('BEGIN')
     await applyRLSGucs(client, params.userId)
-    const admitted = await admitSessionCreate(client, params, authenticatedHuman)
+    // An anchored thread is admitted by its anchor (L12); a room by the
+    // authenticated chat-root receipt.
+    const admitted = params.anchorKind
+      ? await admitAnchoredSession(client, { ...params, anchorKind: params.anchorKind })
+      : await admitSessionCreate(client, params, authenticatedHuman)
     const session = await insertSession(admitted, (sql, values) => client.query(sql, values), true)
     await client.query('COMMIT')
     return session
@@ -405,7 +378,7 @@ async function findOrCreateSessionInternal(params: CreateSessionParams, authenti
 async function insertSession(params: CreateSessionParams, execute: typeof query, resumeFirst = false): Promise<Session> {
   const appId = params.appId ?? 'Use Brian'
   const appOrigin = params.appOrigin ?? null
-  const visibility = params.visibility ?? 'owner'
+  const visibility = params.visibility ?? 'personal'
   const workspaceId = params.workspaceId ?? null
   const effectiveClearance = params.effectiveClearance ?? null
   const inheritAssistantGroup = params.contextGroupId === undefined
@@ -420,6 +393,7 @@ async function insertSession(params: CreateSessionParams, execute: typeof query,
     const resumed = await execute<Session>(
       `UPDATE sessions SET last_active_at=now()
        WHERE assistant_id=$1 AND user_id=$2 AND channel_type=$3 AND channel_id=$4 AND app_id=$5
+         AND visibility=$6
        RETURNING id, assistant_id as "assistantId", user_id as "userId",
                channel_type as "channelType", channel_id as "channelId",
                app_id as "appId", app_origin as "appOrigin", status, compact_summary as "compactSummary",
@@ -428,12 +402,13 @@ async function insertSession(params: CreateSessionParams, execute: typeof query,
                downgrade_notice_sent as "downgradeNoticeSent",
                downgrade_notice_pin_message_id as "downgradeNoticePinMessageId",
                mode, visibility, effective_clearance as "effectiveClearance",
+               anchor_kind as "anchorKind", anchor_ref as "anchorRef", clearance_source as "clearanceSource",
                context_group_id as "contextGroupId",
                context_project_id as "contextProjectId",
                context_compartments as "contextCompartments",
                context_locked_at as "contextLockedAt",
                created_at as "createdAt", last_active_at as "lastActiveAt"`,
-      [params.assistantId, params.userId, params.channelType, params.channelId, appId],
+      [params.assistantId, params.userId, params.channelType, params.channelId, appId, visibility],
     )
     if (resumed.rows[0]) return resumed.rows[0]
   }
@@ -442,7 +417,7 @@ async function insertSession(params: CreateSessionParams, execute: typeof query,
     `INSERT INTO sessions (
        assistant_id, user_id, channel_type, channel_id, app_id, app_origin,
        visibility, workspace_id, effective_clearance, context_group_id,
-       context_project_id, context_compartments
+       context_project_id, context_compartments, anchor_kind, anchor_ref
      )
      SELECT $1, $2, $3, $4, $5, $6, $7,
             COALESCE($8::uuid, a.workspace_id), $9,
@@ -451,7 +426,8 @@ async function insertSession(params: CreateSessionParams, execute: typeof query,
               WHEN $12::text[] IS NOT NULL THEN $12::text[]
               WHEN g.compartment_key IS NOT NULL THEN ARRAY[g.compartment_key]::text[]
               ELSE ARRAY[]::text[]
-            END
+            END,
+            COALESCE($15::text, 'none'), $16::text
        FROM assistants a
        CROSS JOIN LATERAL (
          SELECT CASE WHEN $13::boolean THEN a.default_workspace_group_id ELSE $10::uuid END AS context_group_id,
@@ -459,7 +435,7 @@ async function insertSession(params: CreateSessionParams, execute: typeof query,
        ) selected
        LEFT JOIN workspace_groups g ON g.id = selected.context_group_id
       WHERE a.id = $1
-     ON CONFLICT (assistant_id, user_id, channel_type, channel_id, app_id) DO UPDATE
+     ON CONFLICT ${sessionKindSql.personalIdentityConflict()} DO UPDATE
        SET last_active_at = now()
      RETURNING id, assistant_id as "assistantId", user_id as "userId",
                channel_type as "channelType", channel_id as "channelId",
@@ -469,6 +445,7 @@ async function insertSession(params: CreateSessionParams, execute: typeof query,
                downgrade_notice_sent as "downgradeNoticeSent",
                downgrade_notice_pin_message_id as "downgradeNoticePinMessageId",
                mode, visibility, effective_clearance as "effectiveClearance",
+               anchor_kind as "anchorKind", anchor_ref as "anchorRef", clearance_source as "clearanceSource",
                context_group_id as "contextGroupId",
                context_project_id as "contextProjectId",
                context_compartments as "contextCompartments",
@@ -489,6 +466,8 @@ async function insertSession(params: CreateSessionParams, execute: typeof query,
       contextCompartments,
       inheritAssistantGroup,
       inheritAssistantProject,
+      params.anchorKind ?? null,
+      params.anchorRef ?? null,
     ],
   )
 
@@ -518,6 +497,7 @@ export async function findSessionByChannel(params: {
             downgrade_notice_sent as "downgradeNoticeSent",
             downgrade_notice_pin_message_id as "downgradeNoticePinMessageId",
             mode, visibility, effective_clearance as "effectiveClearance",
+            anchor_kind as "anchorKind", anchor_ref as "anchorRef", clearance_source as "clearanceSource",
             context_group_id as "contextGroupId",
             context_project_id as "contextProjectId",
             context_compartments as "contextCompartments",
@@ -617,6 +597,7 @@ async function createTransientBrainSession(params: {
                downgrade_notice_sent as "downgradeNoticeSent",
                downgrade_notice_pin_message_id as "downgradeNoticePinMessageId",
                mode, visibility, effective_clearance as "effectiveClearance",
+               anchor_kind as "anchorKind", anchor_ref as "anchorRef", clearance_source as "clearanceSource",
                context_group_id as "contextGroupId",
                context_project_id as "contextProjectId",
                context_compartments as "contextCompartments",
@@ -648,6 +629,7 @@ export async function readSessionById(id: string): Promise<Session | null> {
             downgrade_notice_sent as "downgradeNoticeSent",
             downgrade_notice_pin_message_id as "downgradeNoticePinMessageId",
             mode, visibility, effective_clearance as "effectiveClearance",
+            anchor_kind as "anchorKind", anchor_ref as "anchorRef", clearance_source as "clearanceSource",
             context_group_id as "contextGroupId",
             context_project_id as "contextProjectId",
             context_compartments as "contextCompartments",
@@ -789,6 +771,29 @@ export type TurnEndReason =
   | 'stopped_by_user'
   | 'stalled_reclaimed'
   | 'timeout'
+
+/**
+ * Claim the turn slot atomically: only when nothing holds it. Room admission
+ * (every workspace session, D11) serializes concurrent addressed sends on
+ * this. Returns false when another turn holds the slot.
+ */
+export async function claimTurnSlot(sessionId: string): Promise<boolean> {
+  const result = await query(
+    `UPDATE sessions SET status = 'running', last_active_at = now()
+      WHERE id = $1 AND status <> 'running'`,
+    [sessionId],
+  )
+  if ((result.rowCount ?? 0) > 0) notifySessionChange(sessionId)
+  return (result.rowCount ?? 0) > 0
+}
+
+/**
+ * Take the turn slot for a personal session after admission proved no live
+ * turn holds it (a stale holder has been reclaimed).
+ */
+export async function takeTurnSlot(sessionId: string): Promise<void> {
+  await updateSessionStatus(sessionId, 'running')
+}
 
 /**
  * Take the lease for a turn that has just claimed `status='running'`. Returns
@@ -987,12 +992,14 @@ export async function isTurnLeaseLive(
  */
 export async function sweepStuckSessions(
   staleAfterMs: number,
-): Promise<Array<{ id: string; mode: string | null; userId: string; visibility: string }>> {
+): Promise<Array<{ id: string; mode: string | null; userId: string; visibility: string; channelType: string; anchorKind: string }>> {
   const result = await query<{
     id: string
     mode: string | null
     user_id: string
     visibility: string
+    channel_type: string
+    anchor_kind: string
   }>(
     `UPDATE sessions
         SET status = 'timeout',
@@ -1004,7 +1011,7 @@ export async function sweepStuckSessions(
       WHERE status = 'running'
         AND COALESCE(turn_heartbeat_at, last_active_at)
               < now() - ($1 || ' milliseconds')::interval
-      RETURNING id, mode, user_id, visibility`,
+      RETURNING id, mode, user_id, visibility, channel_type, anchor_kind`,
     [String(staleAfterMs)],
   )
   // Per-row emission: the coalescer folds a multi-workspace sweep into one
@@ -1015,6 +1022,8 @@ export async function sweepStuckSessions(
     mode: r.mode,
     userId: r.user_id,
     visibility: r.visibility,
+    channelType: r.channel_type,
+    anchorKind: r.anchor_kind,
   }))
 }
 
@@ -1844,70 +1853,6 @@ export async function truncateMessagesFrom(
   }
 }
 
-/**
- * Fetch recent messages across ALL sessions in a group chat channel.
- * Used to give the bot awareness of the full channel conversation when
- * each user has an isolated session. Returns messages in chronological order.
- */
-export async function getGroupChatContext(params: {
-  assistantId: string
-  channelType: string
-  channelId: string
-  limit?: number
-}): Promise<Array<{ role: string; content: unknown; userId: string; createdAt: Date }>> {
-  const limit = params.limit ?? 30
-  const result = await query<{ role: string; content: unknown; userId: string; createdAt: Date }>(
-    `SELECT sm.role, sm.content, s.user_id as "userId", sm.created_at as "createdAt"
-     FROM session_messages sm
-     JOIN sessions s ON sm.session_id = s.id
-     WHERE s.assistant_id = $1
-       AND s.channel_type = $2
-       AND s.channel_id = $3
-       AND sm.channel_message_id IS NOT NULL
-     ORDER BY sm.created_at DESC
-     LIMIT $4`,
-    [params.assistantId, params.channelType, params.channelId, limit],
-  )
-  // Reverse to chronological order (query returns newest first)
-  return result.rows.reverse()
-}
-
-/**
- * Format group chat messages into a system prompt context section.
- * Extracts text from content blocks and labels messages by role.
- */
-export function buildGroupChatContextPrompt(
-  messages: Array<{ role: string; content: unknown; userId: string; createdAt: Date }>,
-  currentUserId: string,
-): string {
-  if (messages.length === 0) return ''
-
-  function extractText(content: unknown): string {
-    if (typeof content === 'string') return content
-    if (Array.isArray(content)) {
-      return content
-        .filter((b: { type: string }) => b.type === 'text')
-        .map((b: { text: string }) => b.text)
-        .join(' ')
-    }
-    return '(non-text content)'
-  }
-
-  const lines = messages
-    .filter((m) => m.role === 'user' || m.role === 'assistant')
-    .map((m) => {
-      const text = extractText(m.content)
-      if (!text.trim()) return null
-      if (m.role === 'assistant') return `You (assistant): ${text}`
-      const label = m.userId === currentUserId ? 'Current user' : 'Another user'
-      return `${label}: ${text}`
-    })
-    .filter(Boolean)
-
-  if (lines.length === 0) return ''
-
-  return `# Recent channel conversation\n\nThe following is the recent conversation in this group chat channel. Multiple users may be participating. Use this to understand the full context of what was said, including your own previous replies to other users.\n\n${lines.join('\n')}`
-}
 
 /**
  * Find the user's most-active messaging channel.
@@ -1925,8 +1870,9 @@ export async function getPreferredChannel(
     `SELECT channel_type as "channelType", channel_id as "channelId"
      FROM sessions
      WHERE assistant_id = $1 AND user_id = $2
-       AND channel_type IN ('telegram', 'slack', 'whatsapp', 'custom', 'feishu')
-       AND channel_id NOT IN ('notifications', 'default')
+       AND ${sessionKindSql.proactiveDeliveryTransport('sessions')}
+       AND ${sessionKindSql.notInbox('sessions')}
+       AND channel_id <> 'default'
        AND (channel_type != 'whatsapp' OR channel_id LIKE '%@%')
      ORDER BY last_active_at DESC
      LIMIT 1`,
@@ -2079,7 +2025,7 @@ export async function getSessionTranscriptForWorkspaceSystem(
   )
   if (scope.rows.length === 0) return null
 
-  // Most-recent N, then reverse to chronological (like getGroupChatContext).
+  // Most-recent N, then reverse to chronological (oldest first in the result).
   const result = await query<{ role: string; content: unknown }>(
     `SELECT role, content
      FROM session_messages

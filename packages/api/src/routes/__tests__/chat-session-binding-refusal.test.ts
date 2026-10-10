@@ -45,8 +45,8 @@ describe('[COMP:api/chat-route] session-binding refusals are observable', () => 
   it('logs every refusal that ends the stream in the binding block', () => {
     const block = sessionBindingBlock()
     const refusals = block.match(/sendEvent\('error'/g) ?? []
-    // clearance · cross-assistant mismatch · per-user access · Feed target
-    expect(refusals).toHaveLength(4)
+    // clearance · cross-assistant mismatch · per-user access · Office lane · Feed target
+    expect(refusals).toHaveLength(5)
 
     // Each one is answered by a log call. `logSendRefusal` covers the two
     // policy verdicts; the access and Feed target gates log inline.
@@ -85,7 +85,7 @@ describe('[COMP:api/chat-route] session-binding refusals are observable', () => 
 
   it('records what the refused session actually was', () => {
     // The 2026-09-01 investigation needed exactly these: the row's surface is
-    // what decides `isDocSurface`, and without it a refusal says only "some
+    // what decides the `docSurface` policy, and without it a refusal says only "some
     // session was wrong" — which is where that outage hid.
     const block = sessionBindingBlock()
     expect(block).toContain('session_channel_type')

@@ -33,7 +33,8 @@ vi.mock('../../db/workspace-store.js', () => ({
 vi.mock('../route-helpers.js', () => ({ resolveUser: vi.fn() }))
 
 import { sessionRoutes } from '../sessions.js'
-import { DOC_DOCK_RESUME_ROW, isDocSurface } from '../_room-binding.js'
+import { DOC_DOCK_RESUME_ROW } from '../_room-binding.js'
+import { policyFor } from '../../session-kind.js'
 import { query } from '../../db/client.js'
 import {
   getDefaultAssistant,
@@ -130,7 +131,7 @@ describe('[COMP:api/sessions-list] GET /api/sessions workspace scoping', () => {
  * row another workspace assistant is allowed to answer on.
  *
  * They drifted. The resume accepted `channel_type='notification'` and the
- * pre-migration-187 `app_origin IS NULL` back-compat; `isDocSurface` accepts
+ * pre-migration-187 `app_origin IS NULL` back-compat; the `docSurface` policy accepts
  * neither. On 2026-09-01 a workspace's newest owner row was the
  * `channel_id='notifications'` inbox thread, so the dock attached it and every
  * send after an assistant switch died on "Session does not belong to this
@@ -142,8 +143,8 @@ describe('[COMP:api/sessions-list] GET /api/sessions workspace scoping', () => {
 describe('[COMP:api/sessions-list] doc-dock workspace-scope resume', () => {
   it('only returns rows the cross-assistant send policy can re-address', () => {
     // The invariant itself. The list query is BUILT from this constant, so
-    // widening the resume without widening `isDocSurface` fails here.
-    expect(isDocSurface(DOC_DOCK_RESUME_ROW)).toBe(true)
+    // widening the resume without widening the `docSurface` policy fails here.
+    expect(policyFor(DOC_DOCK_RESUME_ROW).docSurface).toBe(true)
   })
 
   it('binds the doc surface shape instead of the wide back-compat filter', async () => {
@@ -176,9 +177,9 @@ describe('[COMP:api/sessions-list] doc-dock workspace-scope resume', () => {
 
     const [sql, params] = mockQuery.mock.calls[0] as [string, unknown[]]
     // Recents is a HISTORY list, not a resume target - it never re-addresses,
-    // so legacy null-origin and notification rows stay visible there.
+    // so legacy null-origin and inbox rows stay visible there.
     expect(sql).toContain('app_origin IS NULL')
-    expect(sql).toContain("'notification'")
+    expect(sql).toContain("anchor_kind IN ('none', 'inbox')")
     expect(params).toHaveLength(3)
   })
 
@@ -194,7 +195,7 @@ describe('[COMP:api/sessions-list] doc-dock workspace-scope resume', () => {
     expect(params[0]).toBe(EXPLICIT_ASSISTANT_ID)
   })
 
-  it('scope=workspace&channels=all lifts the surface filter but keeps owner visibility (chat audit list)', async () => {
+  it('scope=workspace&channels=all lifts the surface filter but keeps personal history (chat audit list)', async () => {
     mockWorkspacePrimary.mockResolvedValue(assistant(WS_PRIMARY_ASSISTANT_ID))
 
     await request(makeApp())
@@ -203,7 +204,7 @@ describe('[COMP:api/sessions-list] doc-dock workspace-scope resume', () => {
 
     const [sql, params] = mockQuery.mock.calls[0] as [string, unknown[]]
     expect(sql).toContain('a.workspace_id = $1')
-    expect(sql).toContain("s.visibility = 'owner'")
+    expect(sql).toContain("s.visibility = 'personal'")
     expect(sql).toContain('s.channel_type as "channelType"')
     expect(sql).not.toContain('s.channel_type = $3')
     expect(sql).not.toContain("s.channel_type IN ('web'")
@@ -218,7 +219,30 @@ describe('[COMP:api/sessions-list] doc-dock workspace-scope resume', () => {
       .expect(200)
 
     const [sql, params] = mockQuery.mock.calls[0] as [string, unknown[]]
-    expect(sql).toContain("s.channel_type IN ('web', 'notification')")
+    expect(sql).toContain("s.channel_type = 'web'")
+    expect(sql).toContain("anchor_kind IN ('none', 'inbox')")
     expect(params).toHaveLength(3)
+  })
+})
+
+describe('[COMP:api/sessions-list] GET /api/sessions/workspace obeys the read gate (L4)', () => {
+  it('omits a room bound to a Team the caller cannot reach, keeps one within reach', async () => {
+    const { getWorkspaceMembershipWithReadScopeSystem } = await import('../../db/workspace-store.js')
+    const { getUserProfilesByIds } = await import('../../db/users.js')
+    vi.mocked(getWorkspaceMembershipWithReadScopeSystem).mockResolvedValue({
+      role: 'member', clearance: 'confidential', compartments: ['team:sales'], projectIds: null,
+    } as never)
+    vi.mocked(getUserProfilesByIds).mockResolvedValue(new Map() as never)
+    const row = (id: string, compartments: string[]) => ({
+      id, title: id, channelId: id, lastActiveAt: new Date(), status: 'idle', starterUserId: USER_ID,
+      effectiveClearance: 'internal', assistantId: WS_PRIMARY_ASSISTANT_ID, visibility: 'workspace', mode: null,
+      contextGroupId: null, contextProjectId: null, contextCompartments: compartments,
+    })
+    mockQuery.mockResolvedValueOnce({ rows: [row('reachable', ['team:sales']), row('hidden', ['team:finance'])], rowCount: 2 } as never)
+
+    const res = await request(makeApp()).get(`/api/sessions/workspace?workspaceId=${WS_ID}`).expect(200)
+
+    expect(res.body.map((s: { id: string }) => s.id)).toEqual(['reachable'])
+    expect(String(mockQuery.mock.calls[0]?.[0])).toContain("s.app_origin = 'chat'")
   })
 })

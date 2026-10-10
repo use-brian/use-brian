@@ -302,6 +302,14 @@ export type WorkspaceSession = DocSession & {
   startedByUserId: string;
   startedByName: string | null;
   startedByAvatarUrl: string | null;
+  /**
+   * The wire the room lives on: `web` for a Chat app room, or the provider of
+   * a converged group (`telegram`, `slack`, ...) that the rail badges.
+   * Absent means web.
+   */
+  transport?: string;
+  /** A converged group's brain capture (D4); absent on web rooms. */
+  roomCapture?: boolean;
 };
 
 type RawWorkspaceRow = RawListRow & {
@@ -311,6 +319,8 @@ type RawWorkspaceRow = RawListRow & {
   startedByAvatarUrl?: string | null;
   /** The room's bound assistant (rooms may bind any workspace assistant). */
   assistantId?: string;
+  transport?: string;
+  roomCapture?: boolean;
 };
 
 function toWorkspaceSession(r: RawWorkspaceRow): WorkspaceSession {
@@ -329,7 +339,27 @@ function toWorkspaceSession(r: RawWorkspaceRow): WorkspaceSession {
     ...(r.assistantId ? { assistantId: r.assistantId } : {}),
     contextGroupId: r.contextGroupId ?? null,
     contextProjectId: r.contextProjectId ?? null,
+    transport: r.transport ?? "web",
+    ...(r.roomCapture !== undefined ? { roomCapture: r.roomCapture } : {}),
   };
+}
+
+/**
+ * Switch a converged group's brain capture (`PATCH
+ * /api/sessions/:id/room-capture`, unified-sessions D4). Workspace admins
+ * only; returns false when the server refused.
+ */
+export async function setRoomCapture(sessionId: string, enabled: boolean): Promise<boolean> {
+  try {
+    const res = await authFetch(`${API_URL}/api/sessions/${encodeURIComponent(sessionId)}/room-capture`, {
+      method: "PATCH",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ enabled }),
+    });
+    return res.ok;
+  } catch {
+    return false;
+  }
 }
 
 /**

@@ -14,6 +14,7 @@
  * the package. `chat.ts` re-exports it, so existing importers are unchanged.
  */
 
+import { classifySession } from '../session-kind.js'
 import type { AccessCeiling } from '@use-brian/core'
 import type { Session } from '../db/sessions.js'
 
@@ -81,9 +82,9 @@ export function mayAssistantAnswerInRoom(params: {
  * stays rejected. Pure so `room-mechanics.test.ts` can pin the whole matrix.
  */
 export function crossAssistantSendPolicy(params: {
-  /** `isSharedChatSession(session)` — a workspace-shared room. */
+  /** `sessionPolicy(kind).crossAssistantSend === 'room'`: a workspace room. */
   isSharedSession: boolean
-  /** `isDocSurface(session)` — the doc dock's personal thread. */
+  /** `sessionPolicy(kind).crossAssistantSend === 'doc'`: the doc dock's personal thread. */
   isDocSurfaceSession: boolean
   /** The requested assistant lives in the SAME workspace as the session's
    *  bound assistant. */
@@ -105,25 +106,6 @@ export function crossAssistantSendPolicy(params: {
   return 'reject'
 }
 
-/**
- * Is this turn happening on the Doc surface? True for a session that
- * originated in `apps/app-web` (`appOrigin='doc'`) or a doc comment
- * thread. This is the surface signal that drives doc-skill injection,
- * decoupled from WHICH assistant is talking (the workspace primary by default,
- * or any assistant the user switched to). Mirrors the surface test in
- * `resolveRunChannel`.
- *
- * Lives here rather than in `chat.ts` because `sessions.ts` needs the SAME
- * predicate to decide what the doc dock's resume may return (see
- * `DOC_DOCK_RESUME_ROW`) and cannot import `chat.ts` without closing an ESM
- * cycle. `chat.ts` re-exports it, so existing importers are unchanged.
- */
-export function isDocSurface(session: {
-  appOrigin: string | null
-  channelType: string
-}): boolean {
-  return session.appOrigin === 'doc' || session.channelType === 'doc_thread'
-}
 
 /**
  * The ONLY session shape the doc dock's `scope=workspace` resume may return
@@ -133,7 +115,7 @@ export function isDocSurface(session: {
  * header does NOT start a new thread, it re-addresses the next turn on the
  * current one. So a row the resume can ATTACH must also be a row
  * `crossAssistantSendPolicy` will let another workspace assistant ANSWER on —
- * i.e. it must satisfy `isDocSurface`. When the two drifted apart the dock
+ * i.e. its policy must be `docSurface`. When the two drifted apart the dock
  * latched onto rows it could never re-address (2026-09-01: the workspace's
  * newest owner row was the `channel_id='notifications'` inbox thread —
  * `app_origin IS NULL`, `channel_type='notification'` — so every send after an
@@ -142,10 +124,11 @@ export function isDocSurface(session: {
  * `last_active_at`, keeping the unusable row at the top of the resume).
  *
  * The list query is BUILT from these values rather than hard-coding them, and
- * `sessions-list-scope.test.ts` asserts `isDocSurface(DOC_DOCK_RESUME_ROW)` —
+ * `sessions-list-scope.test.ts` asserts `policyFor(DOC_DOCK_RESUME_ROW).docSurface` —
  * so widening the resume without widening the policy fails the test.
  */
 export const DOC_DOCK_RESUME_ROW = {
   appOrigin: 'doc',
   channelType: 'web',
+  anchorKind: 'none',
 } as const

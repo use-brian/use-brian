@@ -3,6 +3,7 @@ import { extractCitations, formatStamp, type CitationIndex } from '@use-brian/sh
 import type { AccessContext } from '../security/access-context.js'
 import { intersectScopeGrants, resolveWriteScope, scopeEvidenceFromRows } from '../security/context-scope.js'
 import { deriveContextFloor, DerivedScopeError } from '../security/derived-scope.js'
+import { provenanceSessionId } from '../tools/capability-gate.js'
 import { buildTool, type Tool, type ToolContext } from '../tools/types.js'
 import { tolerantBoolean, tolerantEnumArray, tolerantInt } from '../tools/schema-tolerance.js'
 import {
@@ -500,17 +501,10 @@ export function createTaskTools(
           visibility: inheritedVisibility(context),
           access: accessFor(context),
           source: opts?.writeSource,
-          // Provenance anchors (mig 316). Extraction runs (writeSource
-          // 'extracted') and the programmatic brain-MCP surface carry a
-          // SYNTHETIC context.sessionId (randomUUID, no sessions row) — a
-          // real session is only stamped for interactive chat. Workflow run
-          // UUIDs identify execution, not a persisted sessions row.
+          // Provenance anchors (mig 316): the one shared rule (L14).
           sourceEpisodeId: opts?.writeSourceEpisodeId ?? null,
           sourceStartMs: moment?.startMs ?? null,
-          sourceSessionId:
-            opts?.writeSourceEpisodeId || opts?.writeSource === 'extracted' || (context.channelType === 'programmatic' || context.channelType === 'workflow')
-              ? null
-              : context.sessionId,
+          sourceSessionId: provenanceSessionId(context, opts),
           createdByAssistantId: context.assistantId,
           dependsOn: input.depends_on,
           // Assistant-mediated write (incl. interactive chat) — the workflow

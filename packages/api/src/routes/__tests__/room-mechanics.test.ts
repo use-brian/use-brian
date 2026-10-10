@@ -10,7 +10,7 @@
  *   - `detectRoomAddress` (T3) — server-side turn-vs-post decision.
  *   - `roomTurnAdmission` (T5) — queue-depth-one.
  *   - `mayResolveRoomConfirmation` (T11/D8) — addresser-or-admin write gate.
- *   - `sharedTurnRejection` (D2) — rooms are no longer busy-rejected.
+ *   - room admission (D2, unified-sessions D11) — no workspace session is busy-rejected.
  *   - `coalesceConsecutiveUserMessages` (T4) — many posts, one labeled user
  *     turn, strict (user, assistant) alternation restored.
  *
@@ -18,6 +18,7 @@
  */
 
 import { readFileSync } from 'node:fs'
+import { policyFor } from '../../session-kind.js'
 import { describe, it, expect, vi } from 'vitest'
 import {
   buildRoomResponseCoordinationBlock,
@@ -27,14 +28,11 @@ import {
   mayResolveRoomConfirmation,
   publishRoomTurnActivity,
   roomTurnAdmission,
-  sharedTurnRejection,
   turnStopOutcome,
 } from '../chat.js'
 import {
   COALESCE_MAX_MERGED_ROWS,
   coalesceConsecutiveUserMessages,
-  isSharedAudienceSession,
-  isSharedChatSession,
   toStampedMessages,
   type SessionMessage,
 } from '../../db/sessions.js'
@@ -210,23 +208,15 @@ describe('[COMP:api/room-mechanics] mayResolveRoomConfirmation (T11/D8)', () => 
   })
 })
 
-describe('[COMP:api/room-mechanics] busy gate leaves the human path (D2)', () => {
-  const runningRoom = {
-    status: 'running',
-    visibility: 'workspace',
-    channelType: 'web',
-    appOrigin: 'chat',
-    mode: null,
-  }
-
-  it('a running room session is NOT rejected (serialization is internal now)', () => {
-    expect(sharedTurnRejection(runningRoom)).toBeNull()
-  })
-
-  it('draft sessions keep their distinct busy code', () => {
-    expect(
-      sharedTurnRejection({ ...runningRoom, mode: 'draft', appOrigin: null })?.code,
-    ).toBe('draft_session_busy')
+describe('[COMP:api/room-mechanics] no busy gate on the human path (D2, D11)', () => {
+  it('every workspace session takes room admission, drafts included', () => {
+    for (const row of [
+      { channelType: 'web', anchorKind: null, visibility: 'workspace', appOrigin: 'chat' },
+      { channelType: 'web', anchorKind: null, visibility: 'workspace', mode: 'draft' },
+      { channelType: 'doc_thread', anchorKind: null, visibility: 'workspace' },
+    ]) {
+      expect(policyFor(row).admission).toBe('room')
+    }
   })
 })
 
@@ -610,8 +600,8 @@ describe('[COMP:api/room-mechanics] crossAssistantSendPolicy — per-turn addres
     // the shared policy rather than re-growing an inline room-only check.
     const src = readFileSync(new URL('../chat.ts', import.meta.url), 'utf8')
     expect(src).toContain('crossAssistantSendPolicy({')
-    expect(src).toContain('isDocSurfaceSession: isDocSurface(session)')
-    expect(src).toContain('isSharedSession: isSharedChatSession(session)')
+    expect(src).toContain("isDocSurfaceSession: policyFor(session).crossAssistantSend === 'doc'")
+    expect(src).toContain("isSharedSession: policyFor(session).crossAssistantSend === 'room'")
   })
 })
 
@@ -619,34 +609,35 @@ describe('[COMP:api/room-mechanics] one shared-audience definition', () => {
   // Input stamping and the delivery gate must agree on who the audience is,
   // or every turn in a shape only one of them calls shared is refused.
   const shape = (over: Record<string, string | null>) => ({
-    visibility: 'owner', channelType: 'web', appOrigin: 'chat', mode: null, ...over,
+    visibility: 'owner', channelType: 'web', anchorKind: null, appOrigin: 'chat', mode: null, ...over,
   })
 
   it('treats doc comment threads, Feed threads and live drafts as shared audiences', () => {
     for (const session of [
-      shape({ channelType: 'doc_thread', appOrigin: null, visibility: 'workspace' }),
-      shape({ channelType: 'feed_thread', appOrigin: null, visibility: 'workspace' }),
+      shape({ channelType: 'doc_thread', anchorKind: null, appOrigin: null, visibility: 'workspace' }),
+      shape({ channelType: 'feed_thread', anchorKind: null, appOrigin: null, visibility: 'workspace' }),
       shape({ mode: 'draft' }),
     ]) {
-      expect(isSharedAudienceSession(session)).toBe(true)
+      expect(policyFor(session).deliveryCeiling.ceiling).toBe('audience')
+      expect(policyFor(session).context.personalMemory).toBe(false)
       // The narrower web-room predicate keeps its own lifecycle meaning.
-      expect(isSharedChatSession(session)).toBe(false)
+      expect(policyFor(session).crossAssistantSend).not.toBe('room')
     }
-    expect(isSharedAudienceSession(shape({ visibility: 'workspace' }))).toBe(true)
-    expect(isSharedAudienceSession(shape({}))).toBe(false)
+    expect(policyFor(shape({ visibility: 'workspace' })).deliveryCeiling.ceiling).toBe('audience')
+    expect(policyFor(shape({})).deliveryCeiling.ceiling).toBe('owner')
   })
 
-  it('is the predicate both the chat route and the delivery gate use', () => {
+  it('is the policy both the chat route and the delivery gate use', () => {
     const chat = readFileSync(new URL('../chat.ts', import.meta.url), 'utf8')
     const delivery = readFileSync(new URL('../../context-scope/delivery-authority.ts', import.meta.url), 'utf8')
-    expect(chat).toContain('sharedAudience: isSharedAudienceSession(session)')
-    expect(delivery).toContain('isSharedAudienceSession(session)')
+    expect(chat).toContain('sharedAudience: !policyFor(session).context.personalMemory')
+    expect(delivery).toContain("policyFor(session).deliveryCeiling.ceiling === 'audience'")
     expect(delivery).not.toMatch(/visibility === 'workspace' \|\| [a-zA-Z.]*mode === 'draft'/)
   })
 
   it('a resumed turn keeps the shared-audience reads and passes the audience gate before saving', () => {
     const resume = readFileSync(new URL('../session-resume-replay.ts', import.meta.url), 'utf8')
-    expect(resume).toContain('sharedAudience: isSharedAudienceSession(session)')
+    expect(resume).toContain('sharedAudience: !policyFor(session).context.personalMemory')
     expect(resume).toContain('sharedAudience: turnScope.access.sharedAudience')
     const gate = resume.indexOf('await authorizeResumeAudience(')
     const save = resume.indexOf("producer: 'turn:resume-output'")

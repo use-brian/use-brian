@@ -289,13 +289,46 @@ describe('native pairing lifecycle with the real RelayClient', () => {
     const retry = browser.pair(input(), 'account'); await flush(); socket().open(); socket().message({ type: 'error', message: 'Unauthorized' });
     expect(await retry).toBe(false); expect(mocks.hosts).toHaveLength(0);
   });
-  it.each([1006, 4000])('disconnect/replacement (%s) stops control without reconnecting', async code => {
+  it('replacement (4000) stops control without reconnecting', async () => {
     await connect(); await command('openTab', { url: 'https://example.com' });
     const wc = host().tabs()[0].contents;
-    socket().drop(code); await vi.advanceTimersByTimeAsync(60000);
-    expect(browser.status()).toEqual({ controlEpoch: 2, connected: false, automaticBlocked: code === 4000, ...identity });
+    socket().drop(4000); await vi.advanceTimersByTimeAsync(60000);
+    expect(browser.status()).toEqual({ controlEpoch: 2, connected: false, automaticBlocked: true, ...identity });
     expect(wc.stop).toHaveBeenCalled(); expect(wc.debugger.isAttached()).toBe(false);
     expect(Socket.all).toHaveLength(1); expect(host().destroy).toHaveBeenCalledOnce();
+  });
+  it('a network drop (1006) keeps the pane and resumes control after the relay reconnects', async () => {
+    await connect(); await command('openTab', { url: 'https://example.com' });
+    const pane = host(); const first = socket();
+    first.drop(1006);
+    expect(browser.status().connected).toBe(false);
+    expect(pane.setStatus).toHaveBeenLastCalledWith('Reconnecting to Brian...');
+    await vi.advanceTimersByTimeAsync(60000);
+    expect(Socket.all).toHaveLength(2);
+    socket().open(); socket().message({ type: 'ready', sessionToken: 'session-secret-2' }); await flush();
+    expect(browser.status()).toEqual({ controlEpoch: 1, connected: true, automaticBlocked: false, ...identity });
+    expect(pane.setStatus).toHaveBeenLastCalledWith('');
+    expect(pane.destroy).not.toHaveBeenCalled(); expect(mocks.hosts).toHaveLength(1);
+    expect(await command('currentUrl')).toMatchObject({ ok: true, data: { url: 'https://example.com/' } });
+  });
+  it('a network drop after Stop re-sends the stop epoch so a new navigation still starts the browser', async () => {
+    await connect(); host().callbacks.stop();
+    const epoch = socket().sent.filter(m => m.type === 'event' && m.kind === 'stopped').at(-1)?.controlEpoch;
+    expect(epoch).toBeDefined();
+    socket().drop(1006); await vi.advanceTimersByTimeAsync(60000);
+    expect(Socket.all).toHaveLength(2);
+    socket().open(); socket().message({ type: 'ready', sessionToken: 'session-secret-2' }); await flush();
+    expect(socket().sent).toContainEqual(expect.objectContaining({ type: 'event', kind: 'stopped', controlEpoch: epoch }));
+    expect(await command('navigate', { url: 'https://after.example/' })).toMatchObject({ ok: true });
+    expect(mocks.hosts).toHaveLength(2);
+  });
+  it('a network drop after Stop and a restarted task does not re-announce the stop', async () => {
+    await connect(); host().callbacks.stop();
+    expect(await command('navigate', { url: 'https://restarted.example/' })).toMatchObject({ ok: true });
+    socket().drop(1006); await vi.advanceTimersByTimeAsync(60000);
+    socket().open(); socket().message({ type: 'ready', sessionToken: 'session-secret-2' }); await flush();
+    expect(socket().sent.some(m => m.type === 'event' && m.kind === 'stopped')).toBe(false);
+    expect(await command('currentUrl')).toMatchObject({ ok: true, data: { url: 'https://restarted.example/' } });
   });
 });
 
@@ -501,10 +534,11 @@ describe('browser shutdown and restart', () => {
     expect(mocks.hosts).toHaveLength(2);
     expect(await command('navigate', { url: 'https://latest.example/' })).toMatchObject({ ok: true });
   });
-  it.each(['dispose', 'disconnect', 'replacement'])('%s discards the dormant restart capability', async action => {
+  // A network drop (1006) is not here: it keeps the approved relay and reconnects.
+  it.each(['dispose', 'replacement'])('%s discards the dormant restart capability', async action => {
     await connect(); host().callbacks.stop();
     if (action === 'dispose') browser.dispose();
-    else socket().drop(action === 'replacement' ? 4000 : 1006);
+    else socket().drop(4000);
     browser.show();
     await command('openTab', { url: 'https://late.example/' });
     expect(mocks.hosts).toHaveLength(1);

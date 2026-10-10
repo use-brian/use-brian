@@ -5,7 +5,7 @@
  *
  * Top to bottom:
  *  - Workspace switcher (existing pill).
- *  - Projects and Organization, always labelled in a workspace context row.
+ *  - Organization and Projects, always labelled in a workspace context row.
  *  - Top nav — a horizontal Notion-style icon toolbar, left to right: Home
  *    (→ the workspace's persisted operator app — Page / Tasks / Feed — via
  *    `homeHref`; the Home hub's app-bar in the content pane switches between
@@ -616,17 +616,6 @@ export function DocSidebar(props: Props) {
 
       {/* Workspace context stays fully labelled above main navigation. */}
       <div data-doc-chrome data-workspace-context-nav className="mx-2 flex shrink-0 flex-wrap items-center gap-1 pt-1">
-        <Tooltip label={copy.contextScope.projectsTitle}>
-          <Link href={`/w/${workspaceId}/projects`}
-            {...intentPrefetch(`/w/${workspaceId}/projects`)}
-            aria-label={copy.contextScope.projectsTitle}
-            aria-current={surfaceActive("projects") ? "page" : undefined}
-            className={contextNavItemCls(surfaceActive("projects"))}>
-            <FolderKanban className="size-[17px] shrink-0" aria-hidden />
-            <span>{copy.contextScope.projectsTitle}</span>
-          </Link>
-        </Tooltip>
-
         <Tooltip label={copy.organization.title}>
           <Link href={`/w/${workspaceId}/organization`}
             {...intentPrefetch(`/w/${workspaceId}/organization`)}
@@ -635,6 +624,17 @@ export function DocSidebar(props: Props) {
             className={contextNavItemCls(surfaceActive("organization"))}>
             <Users className="size-[17px] shrink-0" aria-hidden />
             <span>{copy.organization.title}</span>
+          </Link>
+        </Tooltip>
+
+        <Tooltip label={copy.contextScope.projectsTitle}>
+          <Link href={`/w/${workspaceId}/projects`}
+            {...intentPrefetch(`/w/${workspaceId}/projects`)}
+            aria-label={copy.contextScope.projectsTitle}
+            aria-current={surfaceActive("projects") ? "page" : undefined}
+            className={contextNavItemCls(surfaceActive("projects"))}>
+            <FolderKanban className="size-[17px] shrink-0" aria-hidden />
+            <span>{copy.contextScope.projectsTitle}</span>
           </Link>
         </Tooltip>
       </div>

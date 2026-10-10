@@ -1,6 +1,7 @@
 /** Ordinary shared web/chat admission only, backed by migration 633.
  * Generic shared writers lack human provenance and fail closed in
  * ready mode; personal, channel/public and resumed sessions gain no defaults. */
+import { classifySession } from '../session-kind.js'
 import type { PoolClient } from 'pg'
 import { scopeGrantContains } from '@use-brian/core'
 import type { query } from '../db/client.js'
@@ -18,6 +19,12 @@ type Input = {
   contextProjectId?: string | null; contextCompartments?: string[]
   expectedPolicyRevision?: string
 }
+/** A Chat app conversation root: the web transport, opened from the chat surface. */
+function isPersonalChatRoot(params: { channelType: string; appOrigin?: string | null }): boolean {
+  const kind = classifySession({ channelType: params.channelType, appOrigin: params.appOrigin ?? null, anchorKind: null })
+  return kind.transport === 'web' && kind.surface === 'chat'
+}
+
 export async function admitSessionCreate<T extends Input>(client: PoolClient, params: T, human: boolean): Promise<T> {
   const pointer = (await client.query('SELECT workspace_id FROM assistants WHERE id=$1', [params.assistantId])).rows[0]
   const assistantWorkspaceId: string | null = pointer?.workspace_id ?? null
@@ -55,7 +62,7 @@ export async function admitSessionCreate<T extends Input>(client: PoolClient, pa
     throw new WorkspaceAccessError('access_policy_conflict', 409)
   }
   if (!policy || policy.setupState === 'legacy') return params
-  if (!human || params.channelType !== 'web' || params.appOrigin !== 'chat') {
+  if (!human || !isPersonalChatRoot(params)) {
     throw new WorkspaceAccessError('session_admission_unsupported', 409)
   }
   if (params.workspaceId !== workspaceId) throw new WorkspaceAccessError('context_not_available', 404)
@@ -105,7 +112,7 @@ export async function admitSessionCreate<T extends Input>(client: PoolClient, pa
     assistantId: params.assistantId, userId: params.userId,
     channelType: params.channelType, channelId: params.channelId,
     appId: params.appId ?? 'Use Brian', appOrigin: params.appOrigin,
-    visibility: 'workspace', mode: null,
+    visibility: 'workspace', mode: null, anchorKind: 'none',
     sensitivity: admitted.envelope.sensitivity,
     groupId: groupId ?? null, projectId: projectId ?? null,
     compartments: admitted.envelope.compartments,
@@ -113,6 +120,89 @@ export async function admitSessionCreate<T extends Input>(client: PoolClient, pa
   return { ...params, workspaceId, effectiveClearance: admitted.envelope.sensitivity,
     contextGroupId: groupId ?? null, contextProjectId: projectId ?? null,
     contextCompartments: admitted.envelope.compartments }
+}
+
+/**
+ * Creation admission for an ANCHORED workspace thread (unified-sessions L12):
+ * a doc / Office / feed thread or a feed draft. The anchor decides the
+ * thread's audience and the caller has already checked the actor's authority
+ * over the anchor (page access, file access, draft collaboration, or a live
+ * public-page comment grant for a guest). This mints the one-use
+ * `anchored_thread` receipt the database trigger
+ * (`require_session_creation_admission`, migration 741) requires in a ready
+ * workspace; a legacy workspace needs none. Must run in the same transaction
+ * as the insert.
+ */
+export async function admitAnchoredSession<T extends Input & {
+  anchorKind: 'doc_thread' | 'office_file' | 'feed_draft' | 'feed_thread'
+  anchorRef?: string | null
+  guestAnchor?: true
+}>(client: PoolClient, params: T): Promise<T & { workspaceId?: string | null; effectiveClearance?: string | null }> {
+  const assistant = (await client.query<{ workspaceId: string | null; clearance: string | null }>(
+    'SELECT workspace_id AS "workspaceId", clearance FROM assistants WHERE id=$1 FOR SHARE', [params.assistantId])).rows[0]
+  if (!assistant) throw new WorkspaceAccessError('context_not_available', 404)
+  const workspaceId = params.workspaceId ?? assistant.workspaceId
+  if (!workspaceId) return params
+  await client.query('SELECT id FROM workspaces WHERE id=$1 FOR UPDATE', [workspaceId])
+  const policy = await readAdmissionPolicy(client, workspaceId)
+  const effectiveClearance = params.effectiveClearance ?? assistant.clearance ?? 'internal'
+  if (!policy || policy.setupState === 'legacy') return { ...params, workspaceId, effectiveClearance }
+  if (assistant.workspaceId !== workspaceId) throw new WorkspaceAccessError('context_not_available', 404)
+  await client.query("SELECT set_config('app.session_creation_admission',$1,true)", [JSON.stringify({
+    protocol: '1', provenance: 'anchored_thread', workspaceId,
+    policyRevision: policy.revision, actor: params.userId,
+    assistantId: params.assistantId, userId: params.userId,
+    anchorKind: params.anchorKind,
+    ...(params.anchorRef !== undefined && params.anchorRef !== null ? { anchorRef: params.anchorRef } : {}),
+    sensitivity: effectiveClearance,
+    ...(params.guestAnchor ? { guest: 'true' } : {}),
+  })])
+  return { ...params, workspaceId, effectiveClearance }
+}
+
+/**
+ * Creation admission for a CONVERGED CHANNEL ROOM (unified-sessions D15): a
+ * provider group bound to the workspace by its channel integration. The
+ * binding is the authority, not the sender: the starter may be a guest. Mints
+ * the `channel_room` receipt `require_session_creation_admission` checks in a
+ * ready workspace (migration 741). A department assistant's room binds its
+ * department compartment (the 741 sharing guard requires it). Must run in the
+ * insert's transaction.
+ */
+export async function admitChannelRoom(client: PoolClient, params: {
+  assistantId: string
+  userId: string
+  workspaceId: string
+  channelType: string
+  channelId: string
+  channelIntegrationId: string
+}): Promise<{ effectiveClearance: string; contextGroupId: string | null; contextCompartments: string[] }> {
+  const assistant = (await client.query<{ workspaceId: string | null; clearance: string | null; groupId: string | null; compartment: string | null }>(
+    `SELECT a.workspace_id AS "workspaceId", a.clearance, g.id AS "groupId", g.compartment_key AS compartment
+       FROM assistants a LEFT JOIN workspace_groups g ON g.id = a.placement_department_id
+      WHERE a.id=$1 FOR SHARE OF a`, [params.assistantId])).rows[0]
+  if (!assistant || assistant.workspaceId !== params.workspaceId) throw new WorkspaceAccessError('context_not_available', 404)
+  const bound = await client.query(
+    `SELECT 1 FROM channel_integrations ci JOIN channels c ON c.id = ci.channel_id
+      WHERE ci.id=$1 AND c.workspace_id=$2 AND ci.channel_type=$3`,
+    [params.channelIntegrationId, params.workspaceId, params.channelType])
+  if (!bound.rows.length) throw new WorkspaceAccessError('context_not_available', 404)
+  const effectiveClearance = assistant.clearance ?? 'internal'
+  const department = assistant.groupId && assistant.compartment
+    ? { contextGroupId: assistant.groupId, contextCompartments: [assistant.compartment] }
+    : { contextGroupId: null, contextCompartments: [] as string[] }
+  await client.query('SELECT id FROM workspaces WHERE id=$1 FOR UPDATE', [params.workspaceId])
+  const policy = await readAdmissionPolicy(client, params.workspaceId)
+  if (!policy || policy.setupState === 'legacy') return { effectiveClearance, ...department }
+  await client.query("SELECT set_config('app.session_creation_admission',$1,true)", [JSON.stringify({
+    protocol: '1', provenance: 'channel_room', workspaceId: params.workspaceId,
+    policyRevision: policy.revision, actor: params.userId,
+    assistantId: params.assistantId, userId: params.userId,
+    anchorKind: 'channel', sensitivity: effectiveClearance,
+    channelType: params.channelType, channelId: params.channelId,
+    channelIntegrationId: params.channelIntegrationId,
+  })])
+  return { effectiveClearance, ...department }
 }
 
 /** Constructed from verified transport claims, passed separately from input. */
@@ -123,7 +213,7 @@ export type PersonalWebSessionPrincipal = {
 /** Personal web roots are private, not ordinary shared work. No mode or
  * assistant defaults, and no ambient/attributed user is authentication proof. */
 export async function admitPersonalWebSession(client: PoolClient, params: Input, principal: PersonalWebSessionPrincipal) {
-  if (principal.actorUserId !== params.userId || params.channelType !== 'web' || params.appOrigin !== 'chat' || !params.workspaceId) {
+  if (principal.actorUserId !== params.userId || !isPersonalChatRoot(params) || !params.workspaceId) {
     throw new WorkspaceAccessError('context_not_available', 404)
   }
   await client.query('SELECT id FROM workspaces WHERE id=$1 FOR UPDATE', [params.workspaceId])
@@ -138,11 +228,12 @@ export async function admitPersonalWebSession(client: PoolClient, params: Input,
     default_compartments AS "defaultCompartments",team_scope_mode AS "teamScopeMode",project_scope_mode AS "projectScopeMode"
     FROM assistants WHERE id=$1 AND workspace_id=$2 FOR SHARE`, [params.assistantId, params.workspaceId])).rows[0]
   if (!assistant) throw new WorkspaceAccessError('context_not_available', 404)
-  const existing = (await client.query(`SELECT visibility,mode,workspace_id FROM sessions
+  const existing = (await client.query(`SELECT visibility,mode,workspace_id,channel_type AS "channelType",anchor_kind AS "anchorKind" FROM sessions
     WHERE assistant_id=$1 AND user_id=$2 AND channel_type='web' AND channel_id=$3 AND app_id=$4 FOR SHARE`,
   [params.assistantId, params.userId, params.channelId, params.appId ?? 'Use Brian'])).rows[0]
   if (existing) {
-    if (existing.visibility !== 'owner' || existing.mode !== null || existing.workspace_id !== params.workspaceId) throw new WorkspaceAccessError('context_not_available', 404)
+    const kind = classifySession(existing)
+    if (kind.audience !== 'personal' || kind.anchor.kind !== 'none' || existing.workspace_id !== params.workspaceId) throw new WorkspaceAccessError('context_not_available', 404)
     return params // Store UPDATE-first returns the actual binding, including null.
   }
   const policy = await readAdmissionPolicy(client, params.workspaceId)

@@ -9,7 +9,7 @@ import {
   resolvePinnedCodexCommand,
   startCodexAppServer,
 } from '../process.js'
-import { PINNED_CODEX_VERSION } from '../protocol.js'
+import { PINNED_CODEX_VERSION, PINNED_CODEX_CATALOG_VERSION } from '../protocol.js'
 
 const fakeServer = fileURLToPath(new URL('./fixtures/fake-codex-app-server.mjs', import.meta.url))
 const cleanupPaths: string[] = []
@@ -60,6 +60,13 @@ describe('[COMP:providers/codex-process] managed Codex app-server process', () =
     expect(command.argsPrefix).toHaveLength(1)
     expect(command.argsPrefix?.[0]).toContain('@openai+codex@0.146.0-alpha.10.1')
     expect(command.argsPrefix?.[0]).toMatch(/bin[/\\]codex\.js$/)
+  })
+
+  it('resolves the separate account-only discovery pin', async () => {
+    const command = await resolvePinnedCodexCommand('account')
+    expect(PINNED_CODEX_CATALOG_VERSION).toBe('0.162.1')
+    expect(command.argsPrefix?.[0]).toContain('@openai+codex@0.162.1')
+    expect((await resolvePinnedCodexCommand('image')).argsPrefix).toEqual((await resolvePinnedCodexCommand('inference')).argsPrefix)
   })
 
   it('builds an allowlisted environment without API keys, access tokens, or HOME', () => {

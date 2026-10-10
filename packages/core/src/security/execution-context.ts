@@ -79,6 +79,18 @@ export type ExecutionLifecycle = {
   sessionId: string
   channelType: string
   channelId: string
+  /**
+   * The wire carrying the turn (`web`, `telegram`, ...), when it differs from
+   * the session's stored `channelType` (an anchored web thread). Transport
+   * capabilities (documents, views) read it; absent = `channelType`.
+   */
+  transport?: string
+  /**
+   * False when `sessionId` is synthetic (a workflow run id, a brain-key
+   * namespace) rather than a `sessions` row. Provenance anchors read it
+   * through `provenanceSessionId`; absent = a real row.
+   */
+  sessionPersisted?: boolean
 }
 
 export type ExecutionSurfaceCapabilities = {
@@ -231,6 +243,9 @@ export function executionToolContext(
   | 'appId'
   | 'channelType'
   | 'channelId'
+  | 'transport'
+  | 'attended'
+  | 'sessionPersisted'
   | 'workspaceId'
   | 'assistantKind'
   | 'visibilityAssistantIds'
@@ -262,6 +277,9 @@ export function executionToolContext(
     appId: base.appId,
     channelType: execution.lifecycle.channelType,
     channelId: execution.lifecycle.channelId,
+    transport: execution.lifecycle.transport ?? execution.lifecycle.channelType,
+    attended: execution.identity.kind === 'attended',
+    ...(execution.lifecycle.sessionPersisted === false ? { sessionPersisted: false } : {}),
     workspaceId: execution.ownership.kind === 'workspace' ? execution.ownership.workspaceId : null,
     assistantKind: access.assistantKind,
     visibilityAssistantIds: access.visibilityAssistantIds,

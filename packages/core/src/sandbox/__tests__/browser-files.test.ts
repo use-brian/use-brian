@@ -7,7 +7,7 @@ import { minimalPdf } from '../../files/__tests__/pdf-fixture.js'
 import type { BrowserProvider, BrowserCallContext } from '../types.js'
 import type { ToolContext, Tool } from '../../tools/types.js'
 
-const context: ToolContext = { userId: 'u', workspaceId: 'w', assistantId: 'a', sessionId: 's', appId: 'app', channelType: 'web', channelId: 'c', abortSignal: new AbortController().signal }
+const context: ToolContext = { userId: 'u', workspaceId: 'w', assistantId: 'a', sessionId: 's', appId: 'app', channelType: 'web', attended: true, channelId: 'c', abortSignal: new AbortController().signal }
 const ctx: BrowserCallContext = { ...context, workspaceId: 'w', profileId: 'p' }
 const fileId = '11111111-1111-4111-8111-111111111111'
 const download = { id: 'opaque/../id', name: 'test.txt', mime: 'text/plain', size: 3, state: 'completed' as const }
@@ -100,7 +100,7 @@ describe('browser file tools', () => {
     const warning = (await tools.browserReadDownload.describeConfirmation!({ id: download.id }, context))!.join(' ')
     expect(warning).toMatch(/retains private ownership and department protection/i)
     expect(warning).toMatch(/does not grant broader access/i)
-    const result = await run(tools.browserReadDownload, { id: download.id }, { ...context, channelType: 'heartbeat' })
+    const result = await run(tools.browserReadDownload, { id: download.id }, { ...context, channelType: 'heartbeat', attended: false })
     expect(result.isError).toBe(true)
     expect(result.data).toMatch(/interactive approval/)
     expect(f.provider.listDownloads).not.toHaveBeenCalled()

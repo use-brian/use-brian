@@ -16,6 +16,7 @@
 
 import { z } from 'zod'
 import { buildTool, type Tool } from '../tools/types.js'
+import { toolTransport } from '../tools/capability-gate.js'
 import type { FilesApi } from './api.js'
 import {
   DOCUMENT_CAPABLE_CHANNELS,
@@ -71,6 +72,9 @@ export function createSendFileTool(
       if (policyGate) return policyGate
 
       // ── Gate 1: delivery surface ──
+      // Transport, not channelType: an anchored web thread (doc, Office,
+      // feed) stores its anchor in channelType but is delivered on web.
+      const transport = toolTransport(context)
       const collector = context.outboundAttachments
       if (!collector) {
         return {
@@ -87,13 +91,13 @@ export function createSendFileTool(
       // `channelDocumentsSupported` admits a channel INSTANCE that proved the
       // capability at runtime (a custom bridge declaring `documents` in its
       // state report) without widening the static per-type set.
-      if (!DOCUMENT_CAPABLE_CHANNELS.has(context.channelType) && context.channelDocumentsSupported !== true) {
+      if (!DOCUMENT_CAPABLE_CHANNELS.has(transport) && context.channelDocumentsSupported !== true) {
         const where = 'Tell the user to fetch the file from the web app, or to ask again on web chat, Telegram, or Slack.'
         return {
           data:
-            context.channelType === 'whatsapp'
+            transport === 'whatsapp'
               ? `File attachments are not supported on WhatsApp. ${where}`
-              : `File attachments are not supported on this channel (${context.channelType}). ${where}`,
+              : `File attachments are not supported on this channel (${transport}). ${where}`,
           isError: true,
         }
       }
@@ -105,7 +109,7 @@ export function createSendFileTool(
       const file = result.value
 
       // ── Gate 2: sensitivity (external channels put bytes on third-party servers) ──
-      const external = context.channelType !== 'web'
+      const external = transport !== 'web'
       if (external && file.sensitivity === 'confidential') {
         return {
           data: `${file.path} is confidential and can only be shared in the web app chat. Tell the user to open it there — do not paste its contents here.`,
@@ -117,7 +121,7 @@ export function createSendFileTool(
       // Per-channel, because some platforms are stricter than our own ceiling
       // (Discord: 10 MiB unboosted). Refusing here beats a 413 at the adapter,
       // where the only honest outcome left is a "could not attach" notice.
-      const byteCap = external ? documentByteCapFor(context.channelType) : MAX_EXTERNAL_DOCUMENT_BYTES
+      const byteCap = external ? documentByteCapFor(transport) : MAX_EXTERNAL_DOCUMENT_BYTES
       if (external && file.sizeBytes > byteCap) {
         return {
           data: `${file.path} is ${formatMb(file.sizeBytes)} — over the ${formatMb(byteCap)} limit for this channel. Tell the user to download it from the web app.`,

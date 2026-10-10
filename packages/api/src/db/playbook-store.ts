@@ -17,6 +17,7 @@
  * [COMP:api/assistant-playbook]
  */
 
+import { sessionKindSql } from '../session-kind.js'
 import { createHash } from 'node:crypto'
 
 import { z } from 'zod'
@@ -739,7 +740,9 @@ export async function samplePlaybookEvidence(
      FROM session_messages sm
      JOIN sessions s ON s.id = sm.session_id
      WHERE s.assistant_id = $1
-       AND s.channel_type <> 'cron'
+       AND ${sessionKindSql.conversationLane('s')}
+       -- File chats never feed an assistant-wide playbook: their audience is the file's.
+       AND ${sessionKindSql.surfacesBeyondAnchor('s')}
        AND sm.role IN ('user', 'assistant')
        AND sm.created_at > now() - ($2 || ' days')::interval
        ${excludeExternalPrincipalsSql('s.user_id')}

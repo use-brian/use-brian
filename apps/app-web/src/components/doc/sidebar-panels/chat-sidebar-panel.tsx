@@ -43,7 +43,7 @@
 import { useCallback, useEffect, useMemo, useState } from "react";
 import Link from "next/link";
 import { usePathname, useRouter, useSearchParams } from "next/navigation";
-import { ChevronRight, MoreHorizontal, Pencil, Plus, Trash2 } from "lucide-react";
+import { Brain, ChevronRight, MoreHorizontal, Pencil, Plus, Trash2 } from "lucide-react";
 import { cn } from "@/lib/utils";
 import { useT, format } from "@/lib/i18n/client";
 import { AssistantAvatar } from "@/components/assistant-avatar";
@@ -58,6 +58,7 @@ import {
 import {
   createWorkspaceSession,
   deleteSession,
+  setRoomCapture,
   renameSessionTitle,
   type DocSession,
   type WorkspaceSession,
@@ -273,6 +274,23 @@ export function ChatSidebarPanel({ workspaceId }: { workspaceId: string }) {
     [t, workspaceId],
   );
 
+  /** A converged group's brain capture (unified-sessions D4); admins only. */
+  const onToggleCapture = useCallback(
+    async (row: WorkspaceSession) => {
+      setMenuFor(null);
+      const enabled = row.roomCapture === false;
+      if (!(await setRoomCapture(row.id, enabled))) {
+        setError(t.roomCaptureDenied);
+        return;
+      }
+      setError(null);
+      patchSharedChatSessions(workspaceId, <R extends DocSession>(list: R[]): R[] =>
+        list.map((r) => (r.id === row.id ? { ...r, roomCapture: enabled } : r)));
+      dispatchChatSessionsRefresh(workspaceId);
+    },
+    [t, workspaceId],
+  );
+
   const onDelete = useCallback(
     async (row: DocSession) => {
       setMenuFor(null);
@@ -375,6 +393,16 @@ export function ChatSidebarPanel({ workspaceId }: { workspaceId: string }) {
           <span className="min-w-0 flex-1">
             <span className="flex items-center gap-1.5">
               <span className="min-w-0 truncate">{row.title}</span>
+              {"transport" in row && row.transport && row.transport !== "web" && (
+                <span
+                  aria-label={format(t.roomTransportAria, {
+                    transport: t.roomTransport[row.transport as keyof typeof t.roomTransport] ?? row.transport,
+                  })}
+                  className="shrink-0 rounded border border-sidebar-border px-1 text-[10px] leading-4 text-sidebar-foreground/60"
+                >
+                  {t.roomTransport[row.transport as keyof typeof t.roomTransport] ?? row.transport}
+                </span>
+              )}
               {unread && (
                 <span
                   role="status"
@@ -416,6 +444,16 @@ export function ChatSidebarPanel({ workspaceId }: { workspaceId: string }) {
             <Pencil className="size-3.5" aria-hidden />
             {t.rename}
           </button>
+          {"roomCapture" in row && row.roomCapture !== undefined && (
+            <button
+              type="button"
+              onClick={() => void onToggleCapture(row)}
+              className="flex w-full items-center gap-2 px-2.5 py-1.5 text-left text-xs hover:bg-accent"
+            >
+              <Brain className="size-3.5" aria-hidden />
+              {row.roomCapture ? t.roomCaptureOff : t.roomCaptureOn}
+            </button>
+          )}
           <button
             type="button"
             onClick={() => void onDelete(row)}

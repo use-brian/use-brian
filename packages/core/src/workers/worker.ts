@@ -14,6 +14,7 @@ import type { Tool, ToolContext } from '../tools/types.js'
 import { filterToolsByCapabilities } from '../tools/capability-gate.js'
 import { queryLoop, type QueryEvent } from '../engine/query-loop.js'
 import { createExecutionContext, executionToolContext } from '../security/execution-context.js'
+import { isAttendedTurn } from '../tools/capability-gate.js'
 
 // ── Types ──────────────────────────────────────────────────────
 
@@ -671,6 +672,9 @@ export function createWorkerManager(options: WorkerOptions) {
             ...(workerExecution
               ? executionToolContext(workerExecution, { appId: context.appId })
               : {}),
+            // A worker acts for the turn that spawned it: if a human attends
+            // that turn, they attend the worker's writes too (D13).
+            attended: isAttendedTurn(context),
             abortSignal: abortController.signal,
             // Workers must NOT have workerManager — otherwise Phase 4b
             // triggers inside the worker and deadlocks waiting for sibling workers.

@@ -1,3 +1,4 @@
+import { classifySession } from '../session-kind.js'
 import { AsyncLocalStorage } from 'node:async_hooks'
 import { createKnowledgeTools, calculateCost, scopeGrantContains, type UsageStore, type TokenUsage, ContextScopeAccumulator, SensitivityAccumulator, CompartmentAccumulator, maxSensitivity,
   type LLMProvider, type Tool, type Embedder, type SavedViewStore, type ScopeEvidence,
@@ -21,6 +22,12 @@ import { createLiveInteractionTools } from './live-interaction-tools.js'
  * No workers start until the returned service's start() is called. Each job owns its
  * context, evidence, live cursors and ledger; no chat buffers/managers are inherited.
  */
+/** A personal, unanchored web conversation (the classifier's answer). */
+function isPersonalWebConversation(session: Parameters<typeof classifySession>[0]): boolean {
+  const kind = classifySession(session)
+  return kind.audience === 'personal' && kind.transport === 'web' && kind.anchor.kind === 'none' && kind.lane === 'conversation'
+}
+
 export type LiveInteractionRuntimeDeps = {
   provider: LLMProvider
   model: string
@@ -67,7 +74,7 @@ export function createLiveInteractionRuntime(deps: LiveInteractionRuntimeDeps) {
       deps.workspaceStore.getRole(userId, binding.workspaceId),
     ])
     if (!role || !session || !assistant || session.userId !== userId ||
-      session.channelType !== 'web' || session.visibility !== 'owner' || session.mode !== null ||
+      !isPersonalWebConversation(session) ||
       session.assistantId !== assistant.id || assistant.workspaceId !== binding.workspaceId) throw deny()
     const resolved = await resolveExecutionContextSystem({
       userId, assistant, workspaceId: binding.workspaceId, session, sessionAuthority: session,

@@ -134,6 +134,16 @@ export type BrainPrimitive =
    * `until:event` park markers. `rowId` is the goal id, nothing else travels.
    */
   | 'goal'
+  /**
+   * An OFFICE job changed status or recorded progress
+   * (docs/architecture/features/office.md -> "Live job progress"). The Office
+   * home list and template library stale-mark their `office-*` caches off it
+   * instead of waiting for metadata renewal. Emitted only by the Office
+   * job-event bus, which receives migration 738's NOTIFY on every instance and
+   * dispatches into that instance's LOCAL subscribers (never re-notified),
+   * coalesced per workspace. `rowId` is the job id, nothing else travels.
+   */
+  | 'office'
 
 /** Alias reflecting the widened, workspace-wide scope. */
 export type WorkspacePrimitive = BrainPrimitive

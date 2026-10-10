@@ -198,10 +198,11 @@ export class BrowserBackendError extends Error {
  * never a hang, and that does not require discarding the reason.
  */
 export const NO_EXTENSION_REMEDY =
-  'Ask the user to open a supported browser with the Use Brian extension installed and enabled, then retry.'
+  'Ask the user to open the Use Brian desktop app (its in-app browser connects automatically and can be resumed from Browsers), ' +
+  'or a supported browser with the Use Brian extension installed and enabled, then retry.'
 
 /** The P1.4 contract: a missing extension is a clear instruction, never a hang. */
-export const NO_EXTENSION_MESSAGE = `No Use Brian browser extension is connected. ${NO_EXTENSION_REMEDY}`
+export const NO_EXTENSION_MESSAGE = `No browser is connected for this browser profile. ${NO_EXTENSION_REMEDY}`
 
 // ── BrowserProvider seam (§4.15) ───────────────────────────────
 

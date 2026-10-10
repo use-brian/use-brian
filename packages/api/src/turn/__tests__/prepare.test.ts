@@ -5,7 +5,7 @@ import {
   type LLMProvider,
   type Tool,
 } from '@use-brian/core'
-import { prepareAssistantRun } from '../prepare-assistant-run.js'
+import { prepareAssistantRun } from '../prepare.js'
 
 const provider = { name: 'fixture', models: ['fixture'] } as LLMProvider
 const tool = { name: 'readThing' } as Tool
@@ -70,24 +70,20 @@ describe('[COMP:api/assistant-run-preparation] shared preparation stages', () =>
     })
   })
 
-  it('does not let a surface binder widen the validated context and runs cleanup once', async () => {
+  it('does not let a surface binder widen the validated context', async () => {
     const authority: CurrentAuthorityBoundary = {
       async assertCurrent() {},
       async execute<T>(operation: () => Promise<T>) { return operation() },
     }
-    const finalize = vi.fn(async () => {})
     const prepared = await prepareAssistantRun({
       executionContext: execution(authority),
       model: { provider, model: 'fixture' },
       candidateTools: new Map([[tool.name, tool]]),
-      bindTools: (tools, context) => {
+      bindTools: (tools: Map<string, Tool>, context) => {
         expect(context.security.ceiling.compartments).toEqual([])
         return tools
       },
-      finalizers: [finalize],
     })
-    await prepared.cleanup()
-    await prepared.cleanup()
-    expect(finalize).toHaveBeenCalledOnce()
+    expect(prepared.tools.size).toBe(1)
   })
 })

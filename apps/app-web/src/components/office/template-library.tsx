@@ -13,7 +13,8 @@ import { Select, SelectContent, SelectItem, SelectTrigger } from "@/components/u
 import { useT } from "@/lib/i18n/client";
 import { cn } from "@/lib/utils";
 import { useFileDrop } from "@/lib/use-file-drop";
-import { createOfficeTemplate, getOfficeJob, retryOfficeTemplateImport, type OfficeImportDiagnostic, importOfficeTemplateDraft, listOfficeTemplates, transitionOfficeTemplateLifecycle, uploadOfficeSource, type OfficeArtifact, type OfficeFamily, type OfficeTemplate } from "@/lib/office/api";
+import { awaitOfficeJob } from "@/lib/office/job-stream";
+import { createOfficeTemplate, retryOfficeTemplateImport, type OfficeImportDiagnostic, importOfficeTemplateDraft, listOfficeTemplates, transitionOfficeTemplateLifecycle, uploadOfficeSource, type OfficeArtifact, type OfficeFamily, type OfficeTemplate } from "@/lib/office/api";
 import { invalidateSurfaceCache, markSurfaceCacheStale } from "@/lib/surface-cache";
 import { invalidateOfficeList, officeArtifactCacheKey, officeSnapshotCacheKey, officeTemplateListCacheKey } from "@/lib/surface-prefetch";
 import { useOfficeMetadataResource } from "@/lib/office/surface-cache";
@@ -46,14 +47,11 @@ class TemplateImportError extends Error {
   constructor(readonly diagnostics: OfficeImportDiagnostic[]) { super("office_template_import_failed"); }
 }
 
+/** Await the import job's settled frame on its stream (no poll, no wall-clock cap). */
 async function waitForTemplateImport(jobId: string): Promise<void> {
-  for (let attempt = 0; attempt < 160; attempt += 1) {
-    const job = await getOfficeJob(jobId);
-    if (job.status === "completed") return;
-    if (job.status === "failed" || job.status === "cancelled") throw new TemplateImportError(job.importDiagnostics ?? []);
-    await new Promise((resolve) => setTimeout(resolve, 750));
-  }
-  throw new Error("office_template_import_timeout");
+  const job = await awaitOfficeJob(jobId);
+  if (job.status === "completed") return;
+  throw new TemplateImportError(job.importDiagnostics ?? []);
 }
 
 export function OfficeTemplateLibrary(props: { workspaceId: string; templateId?: string }) {

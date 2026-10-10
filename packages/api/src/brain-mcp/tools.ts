@@ -2327,6 +2327,8 @@ export function makeBrainContextResolver(
           sessionId,
           channelType,
           channelId: keyId,
+          // A brain-key namespace, not a sessions row.
+          sessionPersisted: false,
         },
         attribution: {
           credentialOwnerUserId: target.ownerUserId,

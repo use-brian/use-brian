@@ -18,7 +18,7 @@ import type { DepartmentReadGrant } from '../security/department-read.js'
  */
 import { z } from 'zod'
 import { buildTool, type Tool, type ToolContext, type ToolResult } from '../tools/types.js'
-import { isAutonomousToolContext } from '../tools/capability-gate.js'
+import { isAttendedTurn } from '../tools/capability-gate.js'
 import type { Sensitivity } from '../security/sensitivity.js'
 import { extractEffectContract } from './effect-contract.js'
 import {
@@ -127,7 +127,7 @@ export function createBuFallbackTool(opts: CreateBuFallbackToolOptions): { brows
     },
     timeoutMs: DEFAULT_TIMEOUT_MS + 60_000,
     async execute(input, context) {
-      const autonomous = isAutonomousToolContext(context)
+      const autonomous = !isAttendedTurn(context)
       if (autonomous) {
         if (!unattendedEnabled()) {
           return {

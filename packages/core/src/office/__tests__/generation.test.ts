@@ -32,6 +32,12 @@ function deps() {
 }
 
 describe('[COMP:office/generation] Office generation pipeline', () => {
+  it('persists the template question before pausing and does not construct content',async()=>{
+    const test=deps();test.value.selectTemplate=vi.fn(async()=>({ambiguous:['Private worksheet']}))
+    expect(await runOfficeGenerationPipeline(brief(),test.value)).toMatchObject({status:'needs_input',code:'template_ambiguous'})
+    expect(test.value.emit).toHaveBeenCalledWith(expect.objectContaining({code:'office.job.needs_input',params:{reason:'template_ambiguous',question:'Which published template should I use?'}}))
+    expect(test.value.construct).not.toHaveBeenCalled()
+  })
   it('inherits template department/project restrictions without broadening caller grants', async () => {
     const test = deps()
     test.value.resolveAuthority = vi.fn(async () => ({ sensitivity: 'internal' as const, clearance: 'confidential' as const, visibilityUserIds: [], compartments: ['request'], projectIds: [], compartmentGrant: ['finance'], projectGrant: ['project-a'], sourceHandles: [] }))

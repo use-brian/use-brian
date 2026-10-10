@@ -32,6 +32,7 @@ import {
   getSessionMessages,
 } from '../db/sessions.js'
 import { findUserById } from '../db/users.js'
+import { classifySession } from '../session-kind.js'
 import {
   getSessionPresence,
   setSessionTyping,
@@ -516,7 +517,7 @@ export function contentPlanningRoutes(
       if (
         !session
         || session.assistantId !== req.params.assistantId
-        || session.mode !== 'draft'
+        || classifySession(session).anchor.kind !== 'feed_draft'
       ) {
         res.status(404).json({ error: 'Draft session not found' })
         return

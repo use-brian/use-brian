@@ -82,7 +82,8 @@ const EVENT_MESSAGES = {
 
 const NO_EXTENSION_RESPONSE: InternalCommandResponse = {
   ok: false,
-  error: 'No connected browser extension for this browser profile.',
+  error:
+    'No browser is connected for this browser profile (neither the Use Brian desktop app in-app browser nor the browser extension).',
   code: 'no_extension',
 }
 

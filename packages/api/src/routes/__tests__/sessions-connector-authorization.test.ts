@@ -20,7 +20,6 @@ vi.mock('../../workflow/approval.js', () => ({
 vi.mock('../../db/sessions.js', () => ({
   findSessionById: vi.fn(),
   findSessionTurnLeaseState: vi.fn(async () => null),
-  isSharedChatSession: vi.fn(() => false),
 }))
 vi.mock('../../db/users.js', () => ({
   getUserAssistant: vi.fn(async () => ({ id: 'assistant-test' })), findAssistantById: vi.fn() }))

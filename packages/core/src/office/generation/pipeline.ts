@@ -136,8 +136,9 @@ export async function runOfficeGenerationPipeline(input: unknown, deps: OfficeGe
 
     const selected = await deps.selectTemplate(brief, authority)
     if (!selected.template) {
-      await deps.emit({ stage: 'needs_input', code: 'office.job.needs_input', params: { reason: 'template_ambiguous' } })
-      return { status: 'needs_input', code: 'template_ambiguous', question: selected.ambiguous?.length ? `Which template should I use: ${selected.ambiguous.join(', ')}?` : 'Which admitted template should I use?' }
+      const question = 'Which published template should I use?'
+      await deps.emit({ stage: 'needs_input', code: 'office.job.needs_input', params: { reason: 'template_ambiguous', question } })
+      return { status: 'needs_input', code: 'template_ambiguous', question }
     }
     const template = selected.template
     if (!canRead(authority.clearance ?? authority.sensitivity, template.sensitivity) || !canRead(authority.clearance ?? authority.sensitivity, selected.sourceScope?.sensitivity ?? template.sensitivity) || !scopeGrantContains(authority.compartmentGrant, selected.sourceScope?.compartments ?? []) || !scopeGrantContains(authority.projectGrant, selected.sourceScope?.projectIds ?? [])) return { status: 'failed', code: 'template_scope_denied', message: 'The selected template is outside this execution scope.' }

@@ -5,7 +5,7 @@ import type { Tool, ToolContext } from '../../tools/types.js'
 
 const context: ToolContext = {
   userId: 'user', assistantId: 'assistant', sessionId: 'session', appId: 'app',
-  channelType: 'web', channelId: 'channel', workspaceId: 'workspace',
+  channelType: 'web', attended: true, channelId: 'channel', workspaceId: 'workspace',
   abortSignal: new AbortController().signal,
 }
 
@@ -208,7 +208,7 @@ describe('[COMP:sandbox/browser-fill-form] tool integration', () => {
     { name: 'missing plan resolver', options: { unattendedEnabled: (): boolean => true }, message: 'paid plans' },
   ])('blocks autonomous batches with $name before backend access', async ({ options, message }) => {
     const f = fixture(options)
-    const result = await f.run(f.tools.browserFillForm, { fields }, { ...context, channelType: 'workflow' })
+    const result = await f.run(f.tools.browserFillForm, { fields }, { ...context, channelType: 'workflow', attended: false })
     expect(result.isError).toBe(true)
     expect(result.data).toContain(message)
     expect(f.fillForm).not.toHaveBeenCalled()
@@ -218,7 +218,7 @@ describe('[COMP:sandbox/browser-fill-form] tool integration', () => {
 
   it('allows autonomous batches when unattended mode and a paid plan are both enabled', async () => {
     const f = fixture({ unattendedEnabled: (): boolean => true, getWorkspacePlan: async () => 'pro' })
-    const ctx = { ...context, channelType: 'workflow' }
+    const ctx = { ...context, channelType: 'workflow', attended: false }
     await f.run(f.tools.browserSnapshot, { mode: 'full' }, ctx)
     const result = await f.run(f.tools.browserFillForm, { fields }, ctx)
     expect(result.isError).toBeUndefined()

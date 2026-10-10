@@ -251,7 +251,6 @@ export type BuildPromptParams = {
   episodicContext?: string | null
   topicHint?: TopicClassification | null
   replyContext?: ReplyContextInput | null
-  groupChatContext?: string
   skillsFragment?: string
   /**
    * Doc page-authoring protocol injected as a SKILL block for an assistant
@@ -523,11 +522,6 @@ function collectPromptSections(
   // 8. Current topic (per-turn classifier).
   const topicBlock = renderTopicHint(p.topicHint)
   if (topicBlock) sections.push(topicBlock)
-
-  // 9. Group-chat context.
-  if (p.groupChatContext && p.groupChatContext.trim().length > 0) {
-    sections.push(p.groupChatContext)
-  }
 
   // 10. Unavailable capabilities — "do not search for these" guardrail.
   if (p.unavailableCapabilitiesPrompt && p.unavailableCapabilitiesPrompt.length > 0) {

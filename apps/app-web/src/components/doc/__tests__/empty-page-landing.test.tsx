@@ -247,6 +247,13 @@ describe("[COMP:app-web/empty-page-landing] Draft-assistant picker", () => {
     ),
     "utf8",
   );
+  // Restored-row mapping (`mapSessionRows`) moved to the shared bubble module.
+  const chatMessageBubbleSource = readFileSync(
+    fileURLToPath(
+      new URL("../../chrome/chat-message-bubble.tsx", import.meta.url),
+    ),
+    "utf8",
+  );
 
   it("hides the picker until the roster resolves (SSR renders no chip)", () => {
     // The roster loads in an effect, so SSR (and hydration) always see an
@@ -337,7 +344,7 @@ describe("[COMP:app-web/empty-page-landing] Draft-assistant picker", () => {
     expect(floatingChatSource).toContain(
       "{ senderAssistantId: turnVoiceRef.current }",
     );
-    expect(floatingChatSource).toContain(
+    expect(chatMessageBubbleSource).toContain(
       "{ senderAssistantId: m.senderAssistantId }",
     );
   });

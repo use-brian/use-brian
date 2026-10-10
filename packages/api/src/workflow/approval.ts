@@ -14,6 +14,7 @@
  * [COMP:workflow/approval]
  */
 
+import type { ApprovalDeliveryChannel } from '../db/pending-approvals-store.js'
 import { assertCurrentAuthority } from '../context-scope/authority-lease.js'
 import type {
   ExecutorDeps,
@@ -47,7 +48,7 @@ export type ApprovalDeliveryDispatcher = (params: {
   toolName: string
   arguments: Record<string, unknown>
   approverUserId: string
-  deliveryChannelType: 'web' | 'telegram' | 'slack' | 'whatsapp' | 'msteams' | 'feishu'
+  deliveryChannelType: ApprovalDeliveryChannel
   deliveryChannelId: string | null
   recentTarget?: RecentApprovalTarget
   assistantId?: string
@@ -380,6 +381,8 @@ export async function resumeFromApproval(
     userId: run.triggeredBy ?? workflow.createdBy,
     assistantId: toolAssistantId,
     sessionId: run.id,
+    // The run id is not a sessions row.
+    sessionPersisted: false,
     appId: 'Use Brian',
     channelType: 'workflow',
     channelId: run.id,

@@ -1,6 +1,7 @@
 import { FeishuTurnCard } from '../feishu/turn-card.js'
 import { dispatchIncomingMessageEvent } from '../message-events.js'
-import { channelConfirmations, confirmationMessage, type ChannelInteractionScope } from './channel-interactions.js'
+import { channelConfirmations, confirmationMessage, roomInteractionScope, type ChannelInteractionScope } from './channel-interactions.js'
+import { isWorkspaceAdmin, postPassiveChannelMessage, resolveRoomBinding } from '../channel-room/room.js'
 import { resolveChannelQuestion } from './channel-questions.js'
 /**
  * Feishu/Lark internal route: authenticated long-connection bridge input,
@@ -702,10 +703,13 @@ export function feishuRoutes(options: FeishuRouteOptions): Router {
     if (workflowCallback) incoming = { ...incoming, text: '' }
     const { sessionChannelId } = resolveFeishuThreadScope(eventMessage, replyInThread)
 
-    if (incoming.isGroupChat && (config.requireMention ?? true) && !incoming.isMentioned) return
+    // An unbound group keeps the mention gate; a group bound to the workspace
+    // keeps un-mentioned messages as room posts (unified-sessions D4).
+    const unaddressed = !actionData && !workflowCallback
+      && incoming.isGroupChat && (config.requireMention ?? true) && !incoming.isMentioned
     if (!feishuUserAllowed(config, incoming.userId)) return
 
-    if (config.ackReaction && incoming.messageId) {
+    if (config.ackReaction && incoming.messageId && !unaddressed) {
       adapter.reactToMessage?.(incoming.channelId, incoming.messageId, config.ackReaction)
         .catch(() => {})
     }
@@ -720,17 +724,33 @@ export function feishuRoutes(options: FeishuRouteOptions): Router {
       workspaceId: assistant.workspaceId ?? null,
     })
 
-    const scope: ChannelInteractionScope = {
+    const roomBinding = await resolveRoomBinding({
+      assistant, channelType: 'feishu', channelIntegrationId: integration.id, isGroupChat: incoming.isGroupChat,
+    })
+    if (unaddressed && !roomBinding) return
+    const senderScope: ChannelInteractionScope = {
       channelType: 'feishu', integrationId: channelRowId,
       conversationId: incoming.channelId, senderId: incoming.userId,
       sessionId: sessionChannelId,
     }
-    if (!actionData && !workflowCallback && channelConfirmations.handle(scope, { kind: 'text', text: incoming.text }).handled) return
+    // A room's turn belongs to the room: any reader stops it, the addresser
+    // or an admin answers its confirmations.
+    const scope = roomBinding ? roomInteractionScope(senderScope) : senderScope
+    if (!unaddressed && !actionData && !workflowCallback && (roomBinding
+      ? await channelConfirmations.handleRoom(scope, { kind: 'text', text: incoming.text }, {
+          senderId: incoming.userId,
+          // An admin is a linked account; a shadow sender never is.
+          isAdmin: async () => {
+            const linked = await options.linkedAccountStore?.findByProvider('feishu', senderScope.senderId)
+            return linked?.userId ? isWorkspaceAdmin(linked.userId, roomBinding.workspaceId) : false
+          },
+        })
+      : channelConfirmations.handle(scope, { kind: 'text', text: incoming.text })).handled) return
 
     // Link-code claim. A signed-in user mints this in Settings and sends it
     // through Feishu/Lark. Claim before sender resolution so the next normal
     // turn immediately uses the real account rather than the Tier 2 shadow.
-    if (options.linkCodeStore && options.linkedAccountStore && incoming.text) {
+    if (!unaddressed && options.linkCodeStore && options.linkedAccountStore && incoming.text) {
       const trimmed = incoming.text.trim().toUpperCase()
       if (/^[A-Z0-9]{6}$/.test(trimmed)) {
         const candidate = await options.linkCodeStore.findValidCode(trimmed)
@@ -829,6 +849,28 @@ export function feishuRoutes(options: FeishuRouteOptions): Router {
     }
 
     await options.integrationStore.touchLastEventAt(integration.id).catch(() => {})
+    if (unaddressed) {
+      // A top-level message in a reply-in-thread chat belongs to no room yet.
+      const passive = resolveFeishuThreadScope(eventMessage, false)
+      if (passive.threadRoot || !replyInThread) {
+        await postPassiveChannelMessage({
+          assistant: { id: assistant.id, name: assistant.name, workspaceId: assistant.workspaceId },
+          channelType: 'feishu',
+          channelIntegrationId: integration.id,
+          isGroupChat: true,
+          sessionChannelId: passive.sessionChannelId,
+          senderUserId: channelUserId,
+          senderName: incoming.senderDisplay?.trim() || null,
+          text: incoming.text,
+          channelMessageId: incoming.messageId ?? null,
+          postNotice: async (text) => {
+            await adapter.sendMessage(incoming.channelId, { text },
+              passive.threadRoot ? { threadTs: passive.threadRoot } : undefined)
+          },
+        })
+      }
+      return
+    }
     const currentIncoming = incoming
     await withChatLock(`feishu:${sessionChannelId}`, async () => {
       const answer = actionData ? resolveChannelQuestion({ integrationId: channelRowId, assistantId: assistant.id, userId: channelUserId, incoming: currentIncoming }, actionData) : null
@@ -997,7 +1039,9 @@ export function feishuRoutes(options: FeishuRouteOptions): Router {
             ? await cacheInboundImageTag({
                 fileStore: options.fileStore,
                 channelType: 'feishu',
-                channelId: incoming.channelId,
+                // The session's own channel_id: a topic reply keys its session
+                // on the thread scope, not the chat (unified-sessions §4.6).
+                channelId: sessionChannelId,
                 userId: channelUserId,
                 assistant,
                 file: { buffer, mime, fileName: file.name },
@@ -1223,6 +1267,9 @@ export function feishuRoutes(options: FeishuRouteOptions): Router {
       crmEmailDraftStore: options.crmEmailDraftStore,
       capabilityStore: options.capabilityStore,
       hooks: {
+        async postNotice(text) {
+          await adapter.sendMessage(incoming.channelId, { text }, replyTarget ? { threadTs: replyTarget } : undefined)
+        },
         async onProcessingStart() {
           statusClosed = false
           cardAttempted = false

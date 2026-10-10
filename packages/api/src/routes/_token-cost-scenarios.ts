@@ -460,7 +460,6 @@ export const scenarios: Scenario[] = [
           memoryIndex: buildIndexRows(5),
           totalNonIdentityCount: 5,
         }),
-        groupChatContext: '# Group chat\nParticipants: Alice, Bob, Carol. Recent messages: …',
       }),
       tools: toolBundles.base(),
     }),

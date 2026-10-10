@@ -20,7 +20,7 @@ function context(patch: Partial<ToolContext> = {}): ToolContext {
     assistantId: ASSISTANT_ID,
     sessionId: SESSION_ID,
     appId: ASSISTANT_ID,
-    channelType: 'web',
+    channelType: 'web', attended: true,
     channelId: 'channel-1',
     workspaceId: WORKSPACE_ID,
     abortSignal: new AbortController().signal,
@@ -148,7 +148,7 @@ describe('[COMP:crm/operations-tools] canonical CRM operation tools', () => {
       locale: 'ja',
       metadata: {},
     }, context({
-      channelType: 'programmatic',
+      channelType: 'programmatic', attended: false,
       channelId: CREDENTIAL_ID,
       programmaticPrincipal: {
         kind: 'oauth_token', credentialId: CREDENTIAL_ID, userId: USER_ID,
@@ -299,7 +299,7 @@ describe('[COMP:crm/operations-tools] credential lifecycle tools', () => {
         .toMatchObject({ isError: true, data: { error: 'not_authorized' } })
     }
     for (const ctx of [context({ activeCapabilities: new Set(capabilities) }),
-      { ...attended(), channelType: 'workflow' as const },
+      { ...attended(), channelType: 'workflow' as const, attended: false },
       { ...attended(), programmaticPrincipal: { kind: 'brain_key' as const, credentialId: CREDENTIAL_ID } }]) {
       expect(await native.createCrmCredential.execute(request, ctx)).toMatchObject({ isError: true, data: { error: 'not_authorized' } })
     }

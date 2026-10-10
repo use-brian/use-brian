@@ -21,7 +21,7 @@ import type { DepartmentReadGrant } from '../security/department-read.js'
  */
 import { z } from 'zod'
 import { buildTool, type Tool, type ToolContext, type ToolResult } from '../tools/types.js'
-import { isAutonomousToolContext } from '../tools/capability-gate.js'
+import { isAttendedTurn } from '../tools/capability-gate.js'
 import type { Sensitivity } from '../security/sensitivity.js'
 import {
   contractAllowsRun,
@@ -140,7 +140,7 @@ export function createSkillRunnerTools(opts: CreateSkillRunnerToolsOptions): {
   const now = opts.now ?? Date.now
 
   async function autonomousGate(context: ToolContext): Promise<ToolResult | null> {
-    if (!isAutonomousToolContext(context)) return null
+    if (isAttendedTurn(context)) return null
     if (!unattendedEnabled()) {
       return {
         data: 'ERROR: Browser skills are unavailable on autonomous runs until unattended computer use is enabled on this deployment.',
@@ -775,7 +775,7 @@ export function createSkillRunnerTools(opts: CreateSkillRunnerToolsOptions): {
     async execute(input, context) {
       const unavailable = {data:'Profile classification unavailable. Review current access and classification in Browsers, then request a new one-time approval.',isError:true}
       const approval = context.approvedToolInvocation
-      if (isAutonomousToolContext(context) || !context.workspaceId || !approval
+      if (!isAttendedTurn(context) || !context.workspaceId || !approval
         || approval.toolName !== 'classifyBrowserProfileDepartment' || approval.approverUserId !== context.userId
         || !opts.profiles?.store.classifyDepartment || !opts.profiles.departmentRead) return unavailable
       try {
