@@ -166,6 +166,12 @@ type ChatContextPinsProps = {
   workspaceId: string;
   refreshKey: number;
   startedByName: string | null;
+  /**
+   * The conversation has a wider audience than its owner (a room): the header
+   * shows the shared badge and the always-on capture glyph. A personal chat
+   * (a room with one human, chat-parity D1) shows neither. Default true.
+   */
+  shared?: boolean;
   assistant?: WorkBenchAssistant | null;
   turnActive?: boolean;
   waitingForInput?: boolean;
@@ -190,6 +196,7 @@ function SessionContextPins({
   workspaceId,
   refreshKey,
   startedByName,
+  shared = true,
   assistant = null,
   turnActive = false,
   waitingForInput = false,
@@ -685,14 +692,16 @@ function SessionContextPins({
           {chatT.workBench}
         </h2>
         <div className="flex items-center gap-1" aria-label={chatT.roomStatus}>
-          <span
-            role="img"
-            aria-label={chatT.sharedBadge}
-            title={chatT.sharedBadge}
-            className="grid size-7 place-items-center rounded-md bg-muted/70 text-muted-foreground"
-          >
-            <Users className="size-3.5" aria-hidden />
-          </span>
+          {shared && (
+            <span
+              role="img"
+              aria-label={chatT.sharedBadge}
+              title={chatT.sharedBadge}
+              className="grid size-7 place-items-center rounded-md bg-muted/70 text-muted-foreground"
+            >
+              <Users className="size-3.5" aria-hidden />
+            </span>
+          )}
           {startedByName && (
             <span
               title={format(chatT.startedBy, { name: startedByName })}
@@ -702,14 +711,16 @@ function SessionContextPins({
               <span className="truncate">{startedByName}</span>
             </span>
           )}
-          <span
-            role="img"
-            aria-label={chatT.captureIndicator}
-            title={chatT.captureIndicator}
-            className="grid size-7 place-items-center rounded-md bg-primary/10 text-primary"
-          >
-            <BrainCircuit className="size-3.5" aria-hidden />
-          </span>
+          {shared && (
+            <span
+              role="img"
+              aria-label={chatT.captureIndicator}
+              title={chatT.captureIndicator}
+              className="grid size-7 place-items-center rounded-md bg-primary/10 text-primary"
+            >
+              <BrainCircuit className="size-3.5" aria-hidden />
+            </span>
+          )}
         </div>
         <button
           type="button"

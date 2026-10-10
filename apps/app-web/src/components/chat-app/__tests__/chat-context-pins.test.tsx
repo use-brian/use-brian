@@ -856,6 +856,28 @@ describe("[COMP:app-web/work-bench-stop] Live card stop control", () => {
     expect(html).toContain("Working");
   });
 
+  it("a personal chat's Work Bench offers the same Stop, without the room's shared chrome (chat-parity D1)", () => {
+    const html = wrap(
+      <ChatContextPins
+        {...baseProps}
+        shared={false}
+        turnActive
+        currentStep="Thinking..."
+        lastProgressAt={Date.now()}
+        onStopTurn={() => {}}
+      />,
+    );
+
+    expect(html).toContain("Stop");
+    expect(html).toContain("Working");
+    // Nobody else reads a personal chat: no shared badge, no capture glyph.
+    expect(html).not.toContain(`aria-label="${en.chatApp.sharedBadge}"`);
+    expect(html).not.toContain(`aria-label="${en.chatApp.captureIndicator}"`);
+    // A room keeps both.
+    const room = wrap(<ChatContextPins {...baseProps} turnActive onStopTurn={() => {}} />);
+    expect(room).toContain(`aria-label="${en.chatApp.sharedBadge}"`);
+  });
+
   it("omits Stop when nothing is running — there is no turn to stop", () => {
     const html = wrap(
       <ChatContextPins {...baseProps} turnActive={false} onStopTurn={() => {}} />,

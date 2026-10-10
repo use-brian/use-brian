@@ -154,3 +154,40 @@ describe("[COMP:app-web/mid-turn-queue]", () => {
     expect(sideStream).not.toHaveBeenCalled();
   });
 });
+
+describe("[COMP:app-web/mid-turn-queue] room messages are server-held (chat-parity D3)", () => {
+  it("posts a room message with its address fields and never re-sends it", () => {
+    act(() => {
+      expect(latest.queue("use last Friday", true, {
+        serverHeld: true,
+        body: { ask: true, assistantId: "asst-b" },
+      })).toBe(true);
+    });
+    expect(sideStream).toHaveBeenCalledTimes(1);
+    expect(sideStream.mock.calls[0][0].body).toMatchObject({
+      message: "use last Friday", midTurn: true, steer: true, ask: true, assistantId: "asst-b",
+    });
+    const held = latest.queued[0]!;
+    expect(held.serverHeld).toBe(true);
+    // Saved as a post already: re-posting it as a steer would post it twice.
+    act(() => latest.steer(held.inputId));
+    expect(sideStream).toHaveBeenCalledTimes(1);
+    act(() => { latest.queue("a personal follow-up", false); });
+    // The end-of-stream fallback re-sends only client-held input; the room
+    // message leaves the tray because the server answers it on its own.
+    let left: ReturnType<typeof latest.drain> = [];
+    act(() => { left = latest.drain("A"); });
+    expect(left.map((input) => input.text)).toEqual(["a personal follow-up"]);
+    expect(latest.queued).toEqual([]);
+  });
+
+  it("the running turn taking a room message moves it out of the tray", () => {
+    act(() => { latest.queue("and Jack?", false, { serverHeld: true, body: { ask: true } }); });
+    const id = latest.queued[0]!.inputId;
+    let taken: ReturnType<typeof latest.take> = null;
+    act(() => { taken = latest.take(id, "A"); });
+    expect(taken).toMatchObject({ text: "and Jack?", serverHeld: true });
+    expect(latest.queued).toEqual([]);
+  });
+});
+

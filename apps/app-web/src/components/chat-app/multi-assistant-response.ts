@@ -100,28 +100,22 @@ export function partitionRoomMentions<T extends RoomMentionTarget>(
 /**
  * Is the composer's assistant chip a live PICKER, or a static label?
  *
- * Three rules, and the middle one is the whole point:
+ * Every Chat conversation picks (chat-parity D1: a personal chat is a room
+ * with one human):
  *   - a fresh pane picks the assistant its new session/room will bind;
  *   - an open ROOM keeps picking — the binding is the room's default voice,
  *     movable by anyone who can post (`PATCH /api/sessions/:id/assistant`);
- *   - an open PERSONAL thread does NOT — one person, one assistant, and
- *     switching mid-thread would hand another assistant's soul and memory a
- *     transcript written for someone else.
+ *   - an open PERSONAL chat keeps picking too — the picked assistant answers
+ *     its next turns on the same thread under its own clearance (T3), the
+ *     binding unmoved, as the doc dock's thread does.
  *
  * A single-assistant workspace has nothing to pick between, so the chip
  * degrades to the label in every case.
  *
  * Spec: docs/architecture/features/chat-app.md → "Choosing an assistant".
  */
-export function isAssistantPickerLive(params: {
-  /** An open thread, vs. the fresh new-chat pane. */
-  hasOpenSession: boolean;
-  /** The pane is a room — an open shared thread, or the Workspace hero. */
-  paneIsRoom: boolean;
-  rosterSize: number;
-}): boolean {
-  if (params.rosterSize < 2) return false;
-  return !params.hasOpenSession || params.paneIsRoom;
+export function isAssistantPickerLive(params: { rosterSize: number }): boolean {
+  return params.rosterSize >= 2;
 }
 
 /** Move the active autocomplete option, wrapping at either end. */

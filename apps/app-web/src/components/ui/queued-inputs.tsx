@@ -37,7 +37,9 @@ export function QueuedInputs(props: {
             </div>
             <div className="flex items-center justify-end gap-2 text-[11px] text-muted-foreground">
               <span>{input.steer ? props.dict.steering : props.dict.pending}</span>
-              {input.steer ? null : (
+              {/* A room message is already a saved post: re-posting it as a
+                  steer would post it twice, so steer is chosen at send. */}
+              {input.steer || input.serverHeld ? null : (
                 <button
                   type="button"
                   onClick={() => props.onSteer(input.inputId)}

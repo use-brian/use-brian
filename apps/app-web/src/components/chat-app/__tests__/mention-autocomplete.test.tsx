@@ -23,6 +23,7 @@ import {
   useAssistantMentions,
   type MentionAssistant,
 } from "../mention-autocomplete";
+import { PERSONAL_CHAT_POLICY } from "@/lib/chat-session-policy";
 
 (globalThis as unknown as { IS_REACT_ACT_ENVIRONMENT: boolean }).IS_REACT_ACT_ENVIRONMENT =
   true;
@@ -44,11 +45,11 @@ const mergedRoster: MentionAssistant[] = [
   { id: "jane-doe", name: "Jane Doe", mentionKind: "member" },
 ];
 
-function Harness(props: { roster?: MentionAssistant[] }) {
+function Harness(props: { roster?: MentionAssistant[]; enabled?: boolean }) {
   const roster = props.roster ?? assistants;
   const [value, setValue] = useState("");
   const mentions = useAssistantMentions({
-    enabled: true,
+    enabled: props.enabled ?? true,
     assistants: roster,
     value,
     onChange: setValue,
@@ -84,14 +85,14 @@ function Harness(props: { roster?: MentionAssistant[] }) {
 let root: Root | null = null;
 let container: HTMLElement | null = null;
 
-async function mount(roster?: MentionAssistant[]) {
+async function mount(roster?: MentionAssistant[], enabled?: boolean) {
   container = document.createElement("div");
   document.body.appendChild(container);
   root = createRoot(container);
   await act(async () => {
     root!.render(
       <I18nProvider locale="en" dict={en as unknown as Dictionary}>
-        <Harness roster={roster} />
+        <Harness roster={roster} enabled={enabled} />
       </I18nProvider>,
     );
   });
@@ -328,3 +329,20 @@ describe("[COMP:app-web/mention-autocomplete] room human mentions (merged roster
     expect(options()[1].getAttribute("aria-label")).toBe("Notify Jane");
   });
 });
+
+describe("[COMP:app-web/mention-autocomplete] a personal chat mentions assistants too (chat-parity D1)", () => {
+  it("opens the `@` popup in a personal chat, which answers in several voices", async () => {
+    // The surface enables the popup from `panePolicy.multiVoice`.
+    expect(PERSONAL_CHAT_POLICY.multiVoice).toBe(true);
+    await mount(undefined, PERSONAL_CHAT_POLICY.multiVoice);
+    await type("@Blend");
+    expect(options()).toHaveLength(2);
+  });
+
+  it("stays closed where the policy does not allow several voices", async () => {
+    await mount(undefined, false);
+    await type("@Blend");
+    expect(options()).toHaveLength(0);
+  });
+});
+

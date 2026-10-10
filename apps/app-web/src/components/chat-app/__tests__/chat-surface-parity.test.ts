@@ -93,14 +93,17 @@ describe("[COMP:app-web/chat-parity] Chat surface parity", () => {
 
   it("never degrades a file-bearing room send into a text-only post", () => {
     expect(source).toMatch(
-      /const addressed =[\s\S]*turnFileIds\.length > 0[\s\S]*override\?\.forceAddress === true/,
+      /const explicitAddress =[\s\S]*turnFileIds\.length > 0[\s\S]*override\?\.forceAddress === true/,
     );
-    expect(source).toContain("...(isRoom && addressed ? { ask: true } : {})");
+    // The address decision reads the pane's policy and live human count
+    // (chat-parity D2), and only an explicit address asks the server.
+    expect(source).toContain("const addressed = isAddressedSend({");
+    expect(source).toContain("...(panePolicy.post && explicitAddress ? { ask: true } : {})");
   });
 
   it("addresses slash-shaped room messages through the chat turn route", () => {
     expect(source).toMatch(
-      /const addressed =[\s\S]*isSlashCommandShaped\(trimmed\)[\s\S]*mentioned\.length > 0/,
+      /const explicitAddress =[\s\S]*isSlashCommandShaped\(trimmed\)[\s\S]*mentioned\.length > 0/,
     );
   });
 

@@ -199,6 +199,8 @@ import {
   fetchMentionableRoster,
   stopTurn,
   postSessionTyping,
+  getChatSessionSummary,
+  type ChatSessionSummary,
   type MessageAttachmentRef,
   type DocSession,
   type DocSessionMessage,
@@ -207,6 +209,16 @@ import {
 } from "@/lib/api/sessions";
 import { getUserInfo } from "@/lib/user";
 import { markRoomSeen } from "@/lib/chat-seen";
+import {
+  askAffordanceVisible,
+  effectiveHumanCount,
+  FRESH_PANE_POLICY,
+  isAddressedSend,
+  midTurnPath,
+  PENDING_POLICY,
+  typingPresenceActive,
+  type ChatSessionPolicy,
+} from "@/lib/chat-session-policy";
 import {ModeAwareCreationContext,useCreationContext} from "@/components/context/mode-aware-context";
 import { ContextScopePicker } from "@/components/context/context-scope-picker";
 import { ContextScopeChips } from "@/components/context/context-scope-chips";
@@ -542,17 +554,44 @@ export function ChatSurface({ workspaceId }: { workspaceId: string }) {
   const activeSessionId = restoring ? restoring.sessionId : urlSessionId;
   const view: ChatView = restoring ? restoring.view : urlView;
   const creationContext=useCreationContext(activeSessionId?"existing":view==="workspace"?"new-shared":"private");
-  /** The open thread is shared when it is in the workspace list. */
-  const activeShared = useMemo(
-    () => sharedSessions.find((r) => r.id === activeSessionId) ?? null,
-    [sharedSessions, activeSessionId],
+  /** The open thread's rail row, from either list: a personal chat or a room. */
+  const activeRow: DocSession | WorkspaceSession | null = useMemo(
+    () =>
+      sharedSessions.find((r) => r.id === activeSessionId) ??
+      personalSessions.find((r) => r.id === activeSessionId) ??
+      null,
+    [sharedSessions, personalSessions, activeSessionId],
   );
-  const activeContextSession = activeShared
-    ?? personalSessions.find((session) => session.id === activeSessionId)
-    ?? null;
-  /** Whether the CURRENT pane is a room — an open shared thread, or the
-   *  Workspace hero about to create one. Drives the post-vs-ask composer. */
-  const paneIsRoom = activeSessionId ? !!activeShared : view === "workspace";
+  /** The open thread's session read (chat-parity T1) for a thread no list
+   *  holds with a policy yet: a deep link, a room created a moment ago, a chat
+   *  this send just minted, a row from an older cache. */
+  const [activeSummary, setActiveSummary] = useState<ChatSessionSummary | null>(null);
+  const summaryWanted = !!activeSessionId && !activeRow?.policy;
+  useEffect(() => {
+    if (!activeSessionId || !summaryWanted) return;
+    const controller = new AbortController();
+    void getChatSessionSummary(activeSessionId, controller.signal).then((summary) => {
+      if (!controller.signal.aborted && summary?.id === activeSessionId) setActiveSummary(summary);
+    });
+    return () => controller.abort();
+  }, [activeSessionId, summaryWanted]);
+  const paneSummary = activeSummary?.id === activeSessionId ? activeSummary : null;
+  const activeContextSession = activeRow ?? paneSummary;
+  /** An open room's starter ("Started by"); a personal chat has none. */
+  const activeStartedByName =
+    (activeRow as Partial<WorkspaceSession> | null)?.startedByName ??
+    paneSummary?.startedByName ??
+    null;
+  /**
+   * How the CURRENT pane behaves (chat-parity T1). A personal chat is a room
+   * with one human (D1), so every branch below reads one of these flags and
+   * none asks which list the thread is in or which view is open. The view
+   * only decides what a fresh pane creates, and a fresh pane behaves the same
+   * either way: one human, every message addressed (FRESH_PANE_POLICY).
+   */
+  const panePolicy: ChatSessionPolicy = !activeSessionId
+    ? FRESH_PANE_POLICY
+    : activeRow?.policy ?? paneSummary?.policy ?? PENDING_POLICY;
 
   // ── In-chat goal pursuit (docs/architecture/features/goals.md) ────────────
   /** Reload the open session's goals. Guarded against thread switches: only
@@ -585,15 +624,15 @@ export function ChatSurface({ workspaceId }: { workspaceId: string }) {
 
   /**
    * `@` autocomplete's roster (T9/T-H4/T-H5): the WHOLE workspace assistant
-   * list, merged with this room's clearance-passing members when the pane is
-   * a room and `mentionRoster` has landed. Assistants are ordered FIRST so an
-   * exact name tie resolves to the assistant (D-H3), matching the server's
-   * `resolveRoomMentions`. A fresh Workspace pane (no session yet, so no room
-   * to scope member clearance against) and a personal chat both fall back to
-   * assistants-only — exactly today's roster.
+   * list, merged with this room's clearance-passing members when the
+   * conversation posts (other humans read it) and `mentionRoster` has landed.
+   * Assistants are ordered FIRST so an exact name tie resolves to the
+   * assistant (D-H3), matching the server's `resolveRoomMentions`. A fresh
+   * pane (no session yet, so no room to scope member clearance against) and a
+   * personal chat (nobody else to notify) offer assistants only.
    */
   const mentionTargets: (RoomMentionTarget & { iconSeed?: number | null })[] = useMemo(() => {
-    if (paneIsRoom && mentionRoster) {
+    if (panePolicy.post && mentionRoster) {
       return [
         ...mentionRoster.assistants.map((a) => ({
           id: a.id,
@@ -614,7 +653,7 @@ export function ChatSurface({ workspaceId }: { workspaceId: string }) {
       mentionKind: "assistant" as const,
       iconSeed: a.iconSeed,
     }));
-  }, [paneIsRoom, mentionRoster, assistants]);
+  }, [panePolicy.post, mentionRoster, assistants]);
 
   /** `@` autocomplete (T9/T-H4/T-H5): typing `@` (or a partial after it) at
    *  the end of the input offers every assistant that can answer here, plus
@@ -623,7 +662,8 @@ export function ChatSurface({ workspaceId }: { workspaceId: string }) {
    *  Escape or a click outside collapses it, and a confirmed mention is
    *  painted as a chip rather than left looking like prose. */
   const mentions = useAssistantMentions({
-    enabled: paneIsRoom,
+    // Every Chat conversation answers in several voices (D1, `multiVoice`).
+    enabled: panePolicy.multiVoice,
     assistants: mentionTargets,
     value: input,
     onChange: setInput,
@@ -643,7 +683,7 @@ export function ChatSurface({ workspaceId }: { workspaceId: string }) {
   /** The same autocomplete inside the inline message editor — one instance is
    *  enough because only one message is editable at a time. */
   const editMentions = useAssistantMentions({
-    enabled: paneIsRoom,
+    enabled: panePolicy.multiVoice,
     assistants: mentionTargets,
     value: editingText,
     onChange: setEditingText,
@@ -651,6 +691,14 @@ export function ChatSurface({ workspaceId }: { workspaceId: string }) {
 
   const chat = useChatSession();
   const stream = useMessageStream();
+  /** Humans taking part as this client sees them now (D2): the server's count
+   *  raised by any new sender the transcript shows, so a second human's first
+   *  post switches the room rules on without a reload. */
+  const paneHumanCount = effectiveHumanCount({
+    serverCount: activeRow?.humanCount ?? paneSummary?.humanCount ?? null,
+    viewerUserId: meId,
+    senderUserIds: (chat.state.messages as SurfaceMessage[]).map((m) => m.senderUserId),
+  });
 
   /** Transcript command rendering needs the roster the composer fetches
    *  lazily: pull it as soon as history contains a slash-shaped user message,
@@ -665,10 +713,10 @@ export function ChatSurface({ workspaceId }: { workspaceId: string }) {
     // its stable parts, so depending on those (not the object) keeps this quiet.
   }, [chat.state.messages, slashCommands.roster, slashCommands.ensureRoster]);
   /**
-   * Mid-turn input (queue + steer). Personal-view only: a ROOM message is a
-   * durable post every member must see the instant it is sent, whether or not
-   * the assistant takes it, so rooms keep their own follow-up-turn path.
-   * See docs/architecture/engine/mid-turn-input.md.
+   * Mid-turn input (queue + steer), every Chat conversation (D3). A personal
+   * chat's message is held here until the running turn takes it; a room's is
+   * a durable post the server saved first, held here only for its tray
+   * (`serverHeld`), never re-sent. See docs/architecture/engine/mid-turn-input.md.
    */
   /** The id the next turn should resume, read by the queue during render. */
   const sessionIdRef = useRef<string | null>(null);
@@ -982,11 +1030,11 @@ export function ChatSurface({ workspaceId }: { workspaceId: string }) {
 
   // The room's clearance-filtered `@mention` roster (T-H4). Keyed on the open
   // session, not on every keystroke — `mentionable` is a roster snapshot, not
-  // a live search. A fresh Workspace pane has no session yet (no room to
-  // scope member clearance against), so it is left null and `mentionTargets`
-  // above falls back to assistants-only until the first send mints a room.
+  // a live search. Only a conversation that posts has teammates to mention; a
+  // fresh pane has no session yet, so it is left null and `mentionTargets`
+  // above falls back to assistants-only until the first send mints one.
   useEffect(() => {
-    if (!paneIsRoom || !activeSessionId) {
+    if (!panePolicy.post || !activeSessionId) {
       setMentionRoster(null);
       return;
     }
@@ -1001,7 +1049,7 @@ export function ChatSurface({ workspaceId }: { workspaceId: string }) {
     return () => {
       cancelled = true;
     };
-  }, [paneIsRoom, activeSessionId]);
+  }, [panePolicy.post, activeSessionId]);
 
   // First-party installers can open a fresh standard chat with one assistant
   // preselected. Existing sessions ignore this hint because their persisted
@@ -1025,8 +1073,8 @@ export function ChatSurface({ workspaceId }: { workspaceId: string }) {
       // and sends all resolve to the room's own assistant.
       const boundId =
         sessionAssistantRef.current.get(activeSessionId) ??
-        activeShared?.assistantId ??
-        personalSessions.find((r) => r.id === activeSessionId)?.assistantId ??
+        activeRow?.assistantId ??
+        paneSummary?.assistantId ??
         null;
       if (boundId) {
         const bound = assistants.find((a) => a.id === boundId);
@@ -1040,7 +1088,7 @@ export function ChatSurface({ workspaceId }: { workspaceId: string }) {
       );
     }
     return primaryAssistant;
-  }, [activeSessionId, activeShared, personalSessions, assistants, pickedAssistantId, primaryAssistant]);
+  }, [activeSessionId, activeRow, paneSummary, assistants, pickedAssistantId, primaryAssistant]);
   // Read by the mid-turn queue at post time — the pane's assistant can change
   // between mounting the hook and sending.
   const activeAssistantIdRef = useRef<string | null>(null);
@@ -1052,7 +1100,10 @@ export function ChatSurface({ workspaceId }: { workspaceId: string }) {
    * Pick the pane's interlocutor from the composer chip.
    *
    * A fresh pane just remembers the choice (the room/session binds it on
-   * create). An OPEN room persists it — the binding is the room's default
+   * create). An open personal chat (a room with one human, D1) re-addresses
+   * its next turns on the same thread without moving its binding: the picked
+   * assistant answers there under its own clearance (T3), the way the doc
+   * dock's thread switches. An OPEN room persists it — the binding is the room's default
    * voice for every member, so it has to survive a reload and reach the
    * other people in it. The optimistic write must move the adoption REF as
    * well as the row: the ref wins in `activeAssistant`, so updating only the
@@ -1065,12 +1116,19 @@ export function ChatSurface({ workspaceId }: { workspaceId: string }) {
   const pickAssistant = useCallback(
     async (assistantId: string) => {
       const sessionId = activeSessionId;
-      if (!sessionId || !activeShared) {
+      if (!sessionId) {
+        setPickedAssistantId(assistantId);
+        return;
+      }
+      if (!panePolicy.post) {
+        sessionAssistantRef.current.set(sessionId, assistantId);
         setPickedAssistantId(assistantId);
         return;
       }
       const previous =
-        sessionAssistantRef.current.get(sessionId) ?? activeShared.assistantId;
+        sessionAssistantRef.current.get(sessionId) ??
+        activeRow?.assistantId ??
+        paneSummary?.assistantId;
       if (previous === assistantId) return;
       sessionAssistantRef.current.set(sessionId, assistantId);
       patchSharedChatSessions(workspaceId, (rows) =>
@@ -1092,16 +1150,25 @@ export function ChatSurface({ workspaceId }: { workspaceId: string }) {
         setError(err instanceof Error ? err.message : t.roomAssistantChangeFailed);
       }
     },
-    [activeSessionId, activeShared, t, workspaceId],
+    [activeSessionId, activeRow, paneSummary, panePolicy.post, t, workspaceId],
   );
 
-  /** Same predicate `send` computes per call — hoisted for the composer. */
-  const isRoomView = activeSessionId ? !!activeShared : view === "workspace";
+  /** Which mid-turn path a send takes while a turn is live (D3). */
+  const midTurnRoute = midTurnPath(panePolicy);
   /**
-   * May a send right now be handed to the running turn instead of starting
-   * one? Rooms are excluded on purpose (see the `midTurn` comment above).
+   * May a send right now join THIS client's running turn instead of starting
+   * one? A personal chat hands it over and holds it until taken; a room saves
+   * it as a post first and hands an addressed one over too (chat-parity §6).
    */
-  const canQueueMidTurn = chat.state.isStreaming && !isRoomView;
+  const canQueueMidTurn = chat.state.isStreaming && midTurnRoute !== "none";
+  /**
+   * Live voice interaction belongs to a personal chat: an open one whose
+   * policy says nobody else reads it, or a fresh pane that will create one
+   * (the view only decides what a fresh pane creates).
+   */
+  const voiceInteractionHere = activeSessionId
+    ? panePolicy !== PENDING_POLICY && !panePolicy.post
+    : view === "personal";
 
   // The full-page surface uses the SAME attachment lanes as the dock:
   // transient cache upload for ordinary files and storage-only recording
@@ -1311,10 +1378,10 @@ export function ChatSurface({ workspaceId }: { workspaceId: string }) {
     // reload) may have a turn running that no stream in this tab is
     // painting. Want a re-attach once: the route answers `status` then
     // `done` and closes when idle (one cheap GET), and `status: running`
-    // paints the mirror. Rooms hold their follow stream regardless; a shared
-    // list still loading reads as "not a room" here and the stream effect
-    // simply re-opens in follow mode once the list lands.
-    setReconnectSessionId(activeSessionId && !activeShared ? activeSessionId : null);
+    // paints the mirror. A presence conversation (a room) holds its follow
+    // stream regardless; a policy still pending reads as "no presence" here
+    // and the stream effect simply re-opens in follow mode once it lands.
+    setReconnectSessionId(activeSessionId && !panePolicy.presence ? activeSessionId : null);
     if (!activeSessionId) {
       chat.loadMessages([]);
       setTranscriptCold(false);
@@ -1387,7 +1454,6 @@ export function ChatSurface({ workspaceId }: { workspaceId: string }) {
   useEffect(() => {
     if (isPhoneViewport()) setWorkBenchExpanded(false);
   }, []);
-  const isSharedOpen = !!activeShared;
 
   const resetRemoteTurn = useCallback(() => {
     setRemoteAssistantId(null);
@@ -1468,7 +1534,7 @@ export function ChatSurface({ workspaceId }: { workspaceId: string }) {
       !!activeSessionId && reconnectSessionId === activeSessionId;
     if (
       !activeSessionId ||
-      !shouldOpenSessionStream({ isRoom: isSharedOpen, reconnectWanted })
+      !shouldOpenSessionStream({ isRoom: panePolicy.presence, reconnectWanted })
     ) {
       resetRemoteTurn();
       setRemoteConfirmation(null);
@@ -1507,7 +1573,7 @@ export function ChatSurface({ workspaceId }: { workspaceId: string }) {
     setRoomTypers([]);
 
     // Opening a room reads it — stamp the unread watermark (T7).
-    if (isSharedOpen) markRoomSeen(workspaceId, sessionId);
+    if (panePolicy.post) markRoomSeen(workspaceId, sessionId);
 
     // A room found suspended on open surfaces its answer panel immediately
     // (any member with read access may answer — D8).
@@ -1800,7 +1866,7 @@ export function ChatSurface({ workspaceId }: { workspaceId: string }) {
           void loadTranscript(sessionId, { force: true });
           void reloadShared();
           dispatchChatSessionsRefresh(workspaceId);
-          if (isSharedOpen) markRoomSeen(workspaceId, sessionId);
+          if (panePolicy.post) markRoomSeen(workspaceId, sessionId);
           refreshPendingInput(sessionId);
           break;
         }
@@ -1809,7 +1875,7 @@ export function ChatSurface({ workspaceId }: { workspaceId: string }) {
           // stream on purpose once there is nothing left to attach to (the
           // turn is over, or was never running) and never reopens it. A
           // room's follow stream has no `done`.
-          if (isSharedOpen) break;
+          if (panePolicy.presence) break;
           sawDone = true;
           if (reconnectWanted) chatController.complete(controllerRun);
           setReconnectSessionId(null);
@@ -1857,7 +1923,7 @@ export function ChatSurface({ workspaceId }: { workspaceId: string }) {
           // its retry cadence as before; a reconnecting personal session
           // gives up, and reports it only when the user was shown the
           // reconnect notice (the hydrate probe failing is not news).
-          if (!isSharedOpen) {
+          if (!panePolicy.presence) {
             sawDone = true;
             setReconnectSessionId(null);
             setReconnectNotice(false);
@@ -1885,7 +1951,7 @@ export function ChatSurface({ workspaceId }: { workspaceId: string }) {
         // still be running); after `done` the server has nothing more.
         if (
           ownsFollow() &&
-          shouldReopenSessionStream({ isRoom: isSharedOpen, sawDone, cancelled })
+          shouldReopenSessionStream({ isRoom: panePolicy.presence, sawDone, cancelled })
         ) {
           setTimeout(() => {
             if (ownsFollow()) setSubscribeEpoch((n) => n + 1);
@@ -1901,7 +1967,7 @@ export function ChatSurface({ workspaceId }: { workspaceId: string }) {
     // `resetRemoteTurn` / `refreshPendingInput` / `loadTranscript` /
     // `reloadShared` are stable callbacks.
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [activeSessionId, isSharedOpen, reconnectSessionId, subscribeEpoch, meId, workspaceId, tChat.toolNarration]);
+  }, [activeSessionId, panePolicy.presence, panePolicy.post, reconnectSessionId, subscribeEpoch, meId, workspaceId, tChat.toolNarration]);
 
   // ── Typing beacon (rooms) ───────────────────────────────────────────
   // Tell the bus while this member composes: a throttled `true` beacon keeps
@@ -1924,8 +1990,10 @@ export function ChatSurface({ workspaceId }: { workspaceId: string }) {
     [],
   );
 
+  /** Typing only matters with another human present (D2). */
+  const typingActive = typingPresenceActive(panePolicy, paneHumanCount);
   useEffect(() => {
-    if (!isSharedOpen || !activeSessionId) return;
+    if (!typingActive || !activeSessionId) return;
     const sessionId = activeSessionId;
     if (input.trim().length === 0) {
       if (typingIdleTimerRef.current) clearTimeout(typingIdleTimerRef.current);
@@ -1942,18 +2010,18 @@ export function ChatSurface({ workspaceId }: { workspaceId: string }) {
     typingIdleTimerRef.current = setTimeout(() => {
       if (typingBeaconRef.current.active) sendTypingBeacon(sessionId, false);
     }, TYPING_IDLE_OFF_MS);
-  }, [input, isSharedOpen, activeSessionId, sendTypingBeacon]);
+  }, [input, typingActive, activeSessionId, sendTypingBeacon]);
 
   // Leaving the room (thread switch, view change, unmount) clears the flag
   // for teammates immediately rather than waiting for the server sweep.
   useEffect(() => {
-    if (!isSharedOpen || !activeSessionId) return;
+    if (!typingActive || !activeSessionId) return;
     const sessionId = activeSessionId;
     return () => {
       if (typingIdleTimerRef.current) clearTimeout(typingIdleTimerRef.current);
       if (typingBeaconRef.current.active) sendTypingBeacon(sessionId, false);
     };
-  }, [isSharedOpen, activeSessionId, sendTypingBeacon]);
+  }, [typingActive, activeSessionId, sendTypingBeacon]);
 
   // Keep the transcript pinned to the newest turn as it streams.
   useEffect(() => {
@@ -2223,6 +2291,51 @@ export function ChatSurface({ workspaceId }: { workspaceId: string }) {
   /** Tracks whether the in-flight turn streamed an askQuestion step, so the
    *  settle can fetch the pending row and surface the answer panel. */
   const askedQuestionRef = useRef(false);
+  /**
+   * A silent room post (T2): send = post, instantly, for every member — one
+   * durable row, no turn, no busy gate. The optimistic bubble stays; the
+   * follow stream's refetch reconciles it against the stored row. Callable
+   * while this client's own turn streams: posting is free in a room (D3).
+   */
+  const postToRoom = useCallback(
+    async (
+      targetId: string,
+      text: string,
+      reply: typeof pendingReplyRef.current,
+      usesComposerTray: boolean,
+    ): Promise<boolean> => {
+      const sendEpoch = sessionEpochRef.current;
+      const ownsPost = () =>
+        sessionEpochRef.current === sendEpoch && sessionIdRef.current === targetId;
+      chat.appendMessage({
+        id: `local-${Date.now()}`,
+        role: "user",
+        text,
+        timestamp: new Date(),
+        ...(reply ? { replyTo: reply } : {}),
+      });
+      setInput("");
+      setReplyTo(null);
+      if (usesComposerTray) att.detach();
+      setError(null);
+      markRoomSeen(workspaceId, targetId);
+      try {
+        const posted = await postRoomMessage(
+          targetId,
+          text,
+          reply ? { text: reply.text } : undefined,
+        );
+        // D-H4 — the message still posted; this is a heads-up, not an error.
+        if (ownsPost() && posted.unreachableMentions.length > 0) {
+          setUnreachableNote(posted.unreachableMentions);
+        }
+      } catch {
+        if (ownsPost()) setError(t.postFailed);
+      }
+      return true;
+    },
+    [att.detach, chat, setReplyTo, t.postFailed, workspaceId],
+  );
   // Resolves TRUE once the message was dispatched (turn started / room post
   // landed), FALSE when a disqualifier dropped it — the dock's `sendMessage`
   // contract, which the recorder's voice-clip hand-off relies on: a `false`
@@ -2239,6 +2352,8 @@ export function ChatSurface({ workspaceId }: { workspaceId: string }) {
     /** An EDIT, not a replay: read the mentions out of the new text. A retry
      *  replays a message that already chose its responders. */
     resolveMentions?: boolean;
+    /** Cmd/Ctrl+Enter during a room turn this pane does not stream (D3). */
+    steer?: boolean;
   }) => {
     if(!sessionIdRef.current&&view==="workspace"&&!creationContext.snapshot()){setError(t.newWorkspaceChatFailed);return false;}
     const sendEpoch = sessionEpochRef.current;
@@ -2273,12 +2388,13 @@ export function ChatSurface({ workspaceId }: { workspaceId: string }) {
     }
     const controllerRun = chatController.begin(owningSessionId);
 
-    // The room decision (multiplayer chat D1/T3): in a room, send = POST
-    // unless this message ADDRESSES the assistant (typed @mention or the
-    // armed Ask affordance). The server re-validates either way, so this
-    // only picks the endpoint.
-    const isRoom = activeSessionId ? !!activeShared : view === "workspace";
-    // Multi-assistant rooms (T9b): every distinct `@Name` answers, in the
+    // The address decision (multiplayer chat D1/T3, chat-parity D2): in a
+    // conversation that posts and has more than one human, send = POST unless
+    // this message ADDRESSES the assistant (typed @mention or the armed Ask
+    // affordance); with one human every send is addressed. The server
+    // re-validates either way (it alone counts the humans), so this only
+    // picks the endpoint.
+    // Multi-assistant conversations (T9b, chat-parity D1): every distinct `@Name` answers, in the
     // order written. A retry replays a message that already chose its
     // responders, so it stays single-assistant — a replay must not duplicate a
     // previously completed response group. An EDIT is the opposite case:
@@ -2290,7 +2406,7 @@ export function ChatSurface({ workspaceId }: { workspaceId: string }) {
     // the server's `resolveRoomMentions`, which only a single pass over the
     // full roster can guarantee — see `partitionRoomMentions`'s doc comment.
     const mentioned =
-      isRoom && (!override?.truncateFromMessageId || override.resolveMentions)
+      panePolicy.multiVoice && (!override?.truncateFromMessageId || override.resolveMentions)
         ? partitionRoomMentions(trimmed, mentionTargets)
             .assistants.map((entry) => assistants.find((a) => a.id === entry.id))
             .filter((a): a is WorkspaceAssistantSummary => !!a)
@@ -2300,7 +2416,7 @@ export function ChatSurface({ workspaceId }: { workspaceId: string }) {
     // question about it, only to have A answer, reads as the wrong assistant
     // barging in. An explicit `@mention` still wins — it names its responder.
     const repliedAssistant =
-      isRoom && reply?.role === "assistant" && reply.assistantId
+      panePolicy.multiVoice && reply?.role === "assistant" && reply.assistantId
         ? assistants.find((a) => a.id === reply.assistantId)
         : undefined;
     const targets =
@@ -2314,8 +2430,7 @@ export function ChatSurface({ workspaceId }: { workspaceId: string }) {
     // the quoted row's role): the client picks the ENDPOINT, so a client that
     // thought this was a silent post would send it somewhere the server never
     // gets to reconsider it, and the reply would go unanswered.
-    const addressed =
-      !isRoom ||
+    const explicitAddress =
       askArmed ||
       isSlashCommandShaped(trimmed) ||
       mentioned.length > 0 ||
@@ -2324,6 +2439,11 @@ export function ChatSurface({ workspaceId }: { workspaceId: string }) {
       turnRecordingIds.length > 0 ||
       turnResearchMode ||
       override?.forceAddress === true;
+    const addressed = isAddressedSend({
+      policy: panePolicy,
+      humanCount: paneHumanCount,
+      explicit: explicitAddress,
+    });
     setAskArmed(false);
     mentions.reset();
     // D-H4 — never survives past the message that produced it.
@@ -2369,37 +2489,10 @@ export function ChatSurface({ workspaceId }: { workspaceId: string }) {
       }
     }
 
-    // A silent room post (T2): send = post, instantly, for every member —
-    // one durable row, no turn, no busy gate. The optimistic bubble stays;
-    // the follow stream's refetch reconciles it against the stored row.
-    if (isRoom && !addressed && sessionIdRef.current) {
-      const targetId = sessionIdRef.current;
-      chat.appendMessage({
-        id: `local-${Date.now()}`,
-        role: "user",
-        text: trimmed,
-        timestamp: new Date(),
-        ...(reply ? { replyTo: reply } : {}),
-      });
-      setInput("");
-      setReplyTo(null);
-      if (usesComposerTray) att.detach();
-      setError(null);
-      markRoomSeen(workspaceId, targetId);
-      try {
-        const posted = await postRoomMessage(
-          targetId,
-          trimmed,
-          reply ? { text: reply.text } : undefined,
-        );
-        // D-H4 — the message still posted; this is a heads-up, not an error.
-        if (ownsSend() && posted.unreachableMentions.length > 0) {
-          setUnreachableNote(posted.unreachableMentions);
-        }
-      } catch {
-        if (ownsSend()) setError(t.postFailed);
-      }
-      return true;
+    // A silent room post (T2): only a conversation that posts, with another
+    // human in it, carries an unaddressed message.
+    if (panePolicy.post && !addressed && sessionIdRef.current) {
+      return postToRoom(sessionIdRef.current, trimmed, reply, usesComposerTray);
     }
 
     // "New chat" mints a fresh channel id (the §107 spec). The chat route's
@@ -2511,9 +2604,16 @@ export function ChatSurface({ workspaceId }: { workspaceId: string }) {
         // address signal — replying to an assistant asks THAT assistant, the
         // same way an `@mention` does (`detectRoomAddress`).
         ...(reply?.id ? { replyTo: { id: reply.id, text: reply.text } } : {}),
-        // The Ask affordance marks address intent (T3) — the server decides.
-        ...(isRoom && addressed ? { ask: true } : {}),
-        ...(isRoom && targets.length > 1
+        // The Ask affordance marks address intent (T3) — the server decides,
+        // counting the humans itself (D2), so only an explicit address asks.
+        ...(panePolicy.post && explicitAddress ? { ask: true } : {}),
+        // A room turn is already live (a teammate's, or ours that this pane
+        // re-attached to): the message is saved first and ALSO handed to that
+        // turn when it addresses its assistant (chat-parity D3, §6).
+        ...(panePolicy.post && remoteActive && addressed
+          ? { midTurn: true, ...(override?.steer ? { steer: true } : {}) }
+          : {}),
+        ...(targets.length > 1
           ? {
               roomResponseGroup: {
                 assistantIds: responseAssistantIds,
@@ -2882,10 +2982,13 @@ export function ChatSurface({ workspaceId }: { workspaceId: string }) {
             });
             break;
           }
-          case "queued": {
+          case "queued":
+          case "input_queued": {
             // A quiet "will reply after this" line, never an error (T5). A
             // folded queue means another member's mention already armed the
-            // follow-up turn — this message's row rides its backlog.
+            // follow-up turn — this message's row rides its backlog. An
+            // `input_queued` room message (D3) was saved and handed to the
+            // running turn, which answers it in the reply already streaming.
             setQueuedNotice(true);
             break;
           }
@@ -3058,7 +3161,7 @@ export function ChatSurface({ workspaceId }: { workspaceId: string }) {
         if (askedQuestionRef.current && owningSessionId) {
           refreshPendingInput(owningSessionId);
         }
-        if (isRoom && owningSessionId) {
+        if (panePolicy.post && owningSessionId) {
           markRoomSeen(workspaceId, owningSessionId);
         }
         void reloadShared();
@@ -3140,12 +3243,12 @@ export function ChatSurface({ workspaceId }: { workspaceId: string }) {
     // an earlier fetch erase a later assistant's live/final row. It also
     // catches teammate posts that arrived while this direct stream owned the
     // room mirror and viewer identity had not hydrated yet.
-    if (ownsSend() && isRoom && sourceMessageId && owningSessionId) {
+    if (ownsSend() && (panePolicy.post || targets.length > 1) && sourceMessageId && owningSessionId) {
       await loadTranscript(owningSessionId, { force: true });
     }
     return true;
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [creationContext, input, activeAssistant, activeSessionId, activeShared, askArmed, model, researchMode, view, workspaceId, pickedContextGroupId, pickedContextProjectId, chat.state.isStreaming, refreshPendingInput, reloadShared, resetTurnActivity, selectSession, startingShared, stream, t, tChat.toolNarration, att.attachments, att.uploading, att.fileIds, att.detach, pendingQuestion, pendingRecordings, recordingUpload.status, assistants, applyQueuedInput, buildStreamedTurnMessage, flushQueuedInputs, mentions.reset, setReplyTo]);
+  }, [creationContext, input, activeAssistant, activeSessionId, panePolicy, paneHumanCount, remoteActive, postToRoom, askArmed, model, researchMode, view, workspaceId, pickedContextGroupId, pickedContextProjectId, chat.state.isStreaming, refreshPendingInput, reloadShared, resetTurnActivity, selectSession, startingShared, stream, t, tChat.toolNarration, att.attachments, att.uploading, att.fileIds, att.detach, pendingQuestion, pendingRecordings, recordingUpload.status, assistants, applyQueuedInput, buildStreamedTurnMessage, flushQueuedInputs, mentions.reset, setReplyTo]);
 
   // While this full-page surface is mounted it IS the visible chat, so a
   // short capture's voice turn must land in the open thread here — never in
@@ -3157,7 +3260,7 @@ export function ChatSurface({ workspaceId }: { workspaceId: string }) {
       registerDockRecorderChatTarget({
         sendVoiceClip: (fileId) => send({ text: "", fileIds: [fileId] }),
         getSessionId: () => sessionIdRef.current ?? undefined,
-        ...(!isRoomView && view === "personal" ? { ensureInteractionSession: async () => {
+        ...(voiceInteractionHere ? { ensureInteractionSession: async () => {
           if (sessionIdRef.current) return sessionIdRef.current;
           if (!activeAssistant) throw new Error(t.errorGeneric);
           const epoch = sessionEpochRef.current;
@@ -3180,7 +3283,7 @@ export function ChatSurface({ workspaceId }: { workspaceId: string }) {
           return created.id as string;
         } } : {}),
       }),
-    [send, isRoomView, view, activeAssistant, workspaceId, pickedContextGroupId, pickedContextProjectId, chat.setSession, selectSession, t.errorGeneric],
+    [send, voiceInteractionHere, activeAssistant, workspaceId, pickedContextGroupId, pickedContextProjectId, chat.setSession, selectSession, t.errorGeneric],
   );
 
   // The mid-turn flush runs inside `send`'s own `onDone`; the ref is the only
@@ -3192,6 +3295,62 @@ export function ChatSurface({ workspaceId }: { workspaceId: string }) {
       void send({ text });
     };
   }, [send]);
+
+  /** The Ask toggle and chord: only where a plain send would post (D2). */
+  const askVisible = askAffordanceVisible(panePolicy, paneHumanCount);
+  /** A room turn this pane does not stream (a teammate's, or a re-attached
+   *  one): an addressed send joins it rather than queueing a follow-up (D3). */
+  const roomTurnLive =
+    !chat.state.isStreaming && remoteActive && midTurnRoute === "room_inbox";
+
+  /**
+   * A send while THIS client's turn streams (chat-parity D3, §6). A personal
+   * chat hands the message to the running turn and holds it until taken. A
+   * room posts it first: an unaddressed message is just a post; an addressed
+   * one is also handed to the running turn, held here only for its tray
+   * (`serverHeld`), since the server owns its fallback (the room's follow-up
+   * turn). A steer is always addressed.
+   */
+  const sendDuringTurn = useCallback(
+    (steer: boolean): boolean => {
+      const text = input.trim();
+      if (!text) return false;
+      if (midTurnRoute === "client_queue") return midTurn.queue(text, steer);
+      if (midTurnRoute !== "room_inbox") return false;
+      const sessionId = sessionIdRef.current;
+      if (!sessionId) return false;
+      const reply = pendingReplyRef.current;
+      const mentioned = partitionRoomMentions(text, mentionTargets)
+        .assistants.map((entry) => assistants.find((a) => a.id === entry.id))
+        .filter((a): a is WorkspaceAssistantSummary => !!a);
+      const replied =
+        reply?.role === "assistant" && reply.assistantId
+          ? assistants.find((a) => a.id === reply.assistantId)
+          : undefined;
+      const explicit =
+        steer || askArmed || mentioned.length > 0 || reply?.role === "assistant" ||
+        isSlashCommandShaped(text);
+      setAskArmed(false);
+      mentions.reset();
+      setUnreachableNote([]);
+      if (!isAddressedSend({ policy: panePolicy, humanCount: paneHumanCount, explicit })) {
+        void postToRoom(sessionId, text, reply, false);
+        return true;
+      }
+      const target = mentioned[0] ?? replied ?? activeAssistant;
+      const queued = midTurn.queue(text, steer, {
+        serverHeld: true,
+        body: {
+          ask: true,
+          ...(target ? { assistantId: target.id } : {}),
+          ...(reply?.id ? { replyTo: { id: reply.id, text: reply.text } } : {}),
+        },
+      });
+      if (queued) setReplyTo(null);
+      return queued;
+    },
+    [activeAssistant, askArmed, assistants, input, mentionTargets, mentions.reset, midTurn, midTurnRoute, paneHumanCount, panePolicy, postToRoom, setReplyTo],
+  );
 
   const captureComposerDraft = ():RecoverableChatDraft|null => {
     if (!input.trim() && !att.hasReady && pendingRecordings.length===0) return null;
@@ -3332,9 +3491,9 @@ export function ChatSurface({ workspaceId }: { workspaceId: string }) {
       // D-H4 — a stale note from a previous send/edit must not survive an
       // edit that turns out to name nobody unreachable.
       setUnreachableNote([]);
-      const isRoom = activeSessionId ? !!activeShared : view === "workspace";
       const dispatch = resolveEditDispatch({
-        isRoom,
+        // Only a conversation that posts keeps an unanswered edit a post.
+        isRoom: panePolicy.post,
         newText: next,
         roster: mentionTargets,
         answered: messages[index + 1]?.role === "assistant",
@@ -3377,7 +3536,7 @@ export function ChatSurface({ workspaceId }: { workspaceId: string }) {
     },
     [
       activeSessionId,
-      activeShared,
+      panePolicy.post,
       cancelEdit,
       chat,
       editingText,
@@ -3509,11 +3668,11 @@ export function ChatSurface({ workspaceId }: { workspaceId: string }) {
     }
   }, [activeSessionId, t.stopTurnFailed]);
 
-  /** A personal session has no Work Bench, so the composer's Stop is its only
-   *  Stop. Keep it while the re-attached mirror carries a turn this tab lost
-   *  its direct stream to; a room keeps the Live card's Stop instead. */
+  /** A conversation without a whole-life follow stream re-attaches per turn;
+   *  keep the composer's Stop while that re-attached mirror carries a turn
+   *  this tab lost its direct stream to (the Live card's Stop is there too). */
   const mirrorStopAvailable =
-    !isSharedOpen &&
+    !panePolicy.presence &&
     remoteActive &&
     !!activeSessionId &&
     reconnectSessionId === activeSessionId;
@@ -3759,7 +3918,7 @@ export function ChatSurface({ workspaceId }: { workspaceId: string }) {
         />
       </div>
       <p className="mt-1 px-1 text-right text-[11px] text-muted-foreground">
-        {paneIsRoom ? t.editHintRoom : t.editHint}
+        {panePolicy.post ? t.editHintRoom : t.editHint}
       </p>
     </div>
   );
@@ -3790,8 +3949,6 @@ export function ChatSurface({ workspaceId }: { workspaceId: string }) {
   const interlocutorControl =
     activeAssistant &&
     (!att.uploading && isAssistantPickerLive({
-      hasOpenSession: !!activeSessionId,
-      paneIsRoom,
       rosterSize: assistants.length,
     }) ? (
       <Popover open={switcherOpen} onOpenChange={setSwitcherOpen}>
@@ -3999,28 +4156,31 @@ export function ChatSurface({ workspaceId }: { workspaceId: string }) {
         ]}
         inputWrapClassName="order-1 col-span-3 min-w-0"
         // While a turn streams, Send QUEUES into the running turn and
-        // Cmd/Ctrl+Enter steers. Rooms keep the ordinary path — a room message
-        // is a durable post, not a queued one.
+        // Cmd/Ctrl+Enter steers, in every Chat conversation (D3). In a room the
+        // message is a post first: an unaddressed one just posts, an addressed
+        // one is also handed to the running turn.
         // See docs/architecture/engine/mid-turn-input.md.
         onSend={() =>
-          canQueueMidTurn && midTurn.queue(input, false)
+          canQueueMidTurn && sendDuringTurn(false)
             ? setInput("")
             : void send()
         }
         onSteer={
           canQueueMidTurn
             ? () => {
-                if (midTurn.queue(input, true)) setInput("");
+                if (sendDuringTurn(true)) setInput("");
               }
-            : undefined
+            : roomTurnLive
+              ? () => void send({ forceAddress: true, steer: true })
+              : undefined
         }
-        // Cmd/Ctrl+Enter in a room = send AND ask, so addressing the assistant
-        // never costs a trip to the pointer. Rooms never queue mid-turn, so
-        // this chord is free here — see the composer's intent resolver for the
-        // steer-wins precedence. Personal chats leave it unwired: every send
-        // there is addressed already.
+        // Cmd/Ctrl+Enter = send AND ask where a plain send would only post (a
+        // room with more than one human), so addressing the assistant never
+        // costs a trip to the pointer. While a turn is live the steer above
+        // wins (the composer's intent resolver) and a steer is addressed too.
+        // With one human every send is addressed already, so it stays unwired.
         onAsk={
-          paneIsRoom && activeAssistant
+          askVisible && activeAssistant
             ? () => void send({ forceAddress: true })
             : undefined
         }
@@ -4216,11 +4376,12 @@ export function ChatSurface({ workspaceId }: { workspaceId: string }) {
               showResearch
               selectSide="top"
             />
-            {/* The Ask affordance (D1/T3) — rooms only. In a room, send =
-                post; arming this (or typing an @mention) makes the next send
-                address the assistant. Never a "run a turn?" toggle on
-                personal chats, where every send is already addressed. */}
-            {paneIsRoom && activeAssistant && (
+            {/* The Ask affordance (D1/T3) — only where a plain send would
+                post: a room with more than one human (chat-parity D2).
+                Arming this (or typing an @mention) makes the next send
+                address the assistant. Hidden while the user is the only
+                human, where every send is already addressed. */}
+            {askVisible && activeAssistant && (
               <button
                 type="button"
                 onClick={() => setAskArmed((v) => !v)}
@@ -4447,7 +4608,7 @@ export function ChatSurface({ workspaceId }: { workspaceId: string }) {
                 <button type="button" className="min-h-8 max-sm:min-h-11 text-sm underline" onClick={() => dockRecorder.setInteractionEnabled(false)}>{interactionT.stop}</button>
               </div>
             )}
-            {!isRoomView && view === "personal" && <LiveInteractionJobs
+            {voiceInteractionHere && <LiveInteractionJobs
               workspaceId={workspaceId}
               sessionId={activeSessionId}
               messageIds={new Set(chat.state.messages.map((message) => message.id))}
@@ -4482,7 +4643,7 @@ export function ChatSurface({ workspaceId }: { workspaceId: string }) {
                 </div>
               ) : (
                 <p className="py-20 text-center text-sm text-muted-foreground">
-                  {activeShared ? t.sharedTranscriptEmpty : t.transcriptEmpty}
+                  {panePolicy.post ? t.sharedTranscriptEmpty : t.transcriptEmpty}
                 </p>
               ))}
             {(chat.state.messages as SurfaceMessage[]).map((m, messageIndex) => {
@@ -4633,11 +4794,12 @@ export function ChatSurface({ workspaceId }: { workspaceId: string }) {
                 >
                   {avatarFor(m.senderAssistantId)}
                   <div className="min-w-0 flex-1 space-y-2.5 pt-0.5">
-                    {/* Group header — the answering assistant's name (shared
-                        rooms, where several assistants may speak) + time. */}
+                    {/* Group header — the answering assistant's name (every
+                        Chat conversation, where several assistants may
+                        speak, D1) + time. */}
                     {meta?.startsGroup && timeChip && (
                       <span className="flex items-baseline gap-1.5 text-[11px] text-muted-foreground">
-                        {isSharedOpen && assistantNameFor(m.senderAssistantId) && (
+                        {panePolicy.multiVoice && assistantNameFor(m.senderAssistantId) && (
                           <span className="font-medium">
                             {assistantNameFor(m.senderAssistantId)}
                           </span>
@@ -5024,12 +5186,13 @@ export function ChatSurface({ workspaceId }: { workspaceId: string }) {
           document={openDocument}
           onClose={() => setOpenDocument(null)}
         />
-      ) : activeShared && activeSessionId ? (
+      ) : panePolicy.pins && activeSessionId ? (
         <ChatContextPins
           sessionId={activeSessionId}
           workspaceId={workspaceId}
           refreshKey={pinsEpoch}
-          startedByName={activeShared.startedByName}
+          shared={panePolicy.post}
+          startedByName={activeStartedByName}
           assistant={workBenchAssistant}
           turnActive={workBenchTurnActive}
           waitingForInput={workBenchWaiting}

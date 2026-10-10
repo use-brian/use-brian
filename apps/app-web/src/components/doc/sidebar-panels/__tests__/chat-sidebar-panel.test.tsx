@@ -80,7 +80,8 @@ vi.mock("@/components/assistant-avatar", () => ({
   AssistantAvatar: ({ name }: { name: string }) => <span>{name}</span>,
 }));
 
-vi.mock("@/lib/chat-seen", () => ({ isRoomUnread: () => false }));
+const seen = vi.hoisted(() => ({ isRoomUnread: vi.fn(() => false) }));
+vi.mock("@/lib/chat-seen", () => seen);
 vi.mock("@/lib/chat-session-events", () => ({
   CHAT_SESSION_ACTIVITY_EVENT: "chat:session-activity",
   CHAT_SESSIONS_REFRESH_EVENT: "chat:sessions-refresh",
@@ -222,3 +223,51 @@ describe("[COMP:app-web/sidebar-panel-chat] live room activity", () => {
     expect(container!.querySelector('[data-chat-working="true"]')).toBeNull();
   });
 });
+
+describe("[COMP:app-web/sidebar-panel-chat] one row renderer for both rails (chat-parity T4)", () => {
+  const personalRow = {
+    id: "chat-1",
+    title: "Quarter plan",
+    channelId: "channel-p",
+    lastActive: "2026-08-01T01:00:00.000Z",
+    appOrigin: "chat",
+    assistantId: "assistant-1",
+    status: "running",
+    humanCount: 1,
+    policy: { addressing: "every_message", multiVoice: true, pins: true, queue: true, post: false, presence: false },
+  };
+
+  it("pulses a running personal chat exactly as it pulses a room", async () => {
+    navigation.search = "";
+    sessionApi.listSessionsForAssistants.mockResolvedValue([personalRow]);
+    await renderPanel();
+    const working = container!.querySelector('[data-chat-working="true"]');
+    expect(working).not.toBeNull();
+    expect(working?.getAttribute("aria-label")).toBe("Brian is working");
+  });
+
+  it("never dots a conversation with one human", async () => {
+    seen.isRoomUnread.mockReturnValue(true);
+    navigation.search = "";
+    sessionApi.listSessionsForAssistants.mockResolvedValue([{ ...personalRow, status: "idle" }]);
+    await renderPanel();
+    expect(container!.querySelector(`[aria-label="${en.chatApp.unreadDotAria}"]`)).toBeNull();
+    seen.isRoomUnread.mockReturnValue(false);
+  });
+
+  it("keeps the dot for a room another human takes part in", async () => {
+    seen.isRoomUnread.mockReturnValue(true);
+    navigation.search = "v=workspace";
+    sessionApi.listWorkspaceSessions.mockResolvedValueOnce([
+      {
+        id: "room-2", title: "Launch", channelId: "channel-2", lastActive: "2026-08-01T01:00:00.000Z",
+        appOrigin: "chat", assistantId: "assistant-1", status: "idle", startedByUserId: "user-1",
+        startedByName: "Alice", startedByAvatarUrl: null, humanCount: 2,
+      },
+    ]);
+    await renderPanel();
+    expect(container!.querySelector(`[aria-label="${en.chatApp.unreadDotAria}"]`)).not.toBeNull();
+    seen.isRoomUnread.mockReturnValue(false);
+  });
+});
+

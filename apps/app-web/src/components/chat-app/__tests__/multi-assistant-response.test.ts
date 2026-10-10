@@ -1,4 +1,6 @@
+import { readFileSync } from "node:fs";
 import { describe, expect, it } from "vitest";
+import { isAddressedSend } from "@/lib/chat-session-policy";
 import {
   acceptsMentionSelection,
   completeTrailingAssistantMention,
@@ -113,31 +115,16 @@ describe("[COMP:app-web/multi-assistant-response] room response group", () => {
     ).toEqual({ at: 13, partial: "Sal" });
   });
 
-  it("keeps the assistant chip pickable in an open ROOM, static in an open personal thread", () => {
-    const rosterSize = roster.length;
-    // A fresh pane picks what the new session/room will bind.
-    expect(
-      isAssistantPickerLive({ hasOpenSession: false, paneIsRoom: false, rosterSize }),
-    ).toBe(true);
-    // An open room keeps picking — the binding is its default voice, and any
-    // member who can post may move it.
-    expect(
-      isAssistantPickerLive({ hasOpenSession: true, paneIsRoom: true, rosterSize }),
-    ).toBe(true);
-    // An open PERSONAL thread does not: no mid-thread switch.
-    expect(
-      isAssistantPickerLive({ hasOpenSession: true, paneIsRoom: false, rosterSize }),
-    ).toBe(false);
+  it("keeps the assistant chip pickable in every Chat conversation (chat-parity D1)", () => {
+    // A fresh pane picks what the new session/room will bind; an open room
+    // moves its default voice; an open personal chat re-addresses its next
+    // turns. One rule now: there is a choice whenever there are two.
+    expect(isAssistantPickerLive({ rosterSize: roster.length })).toBe(true);
   });
 
   it("degrades to a static label when there is nothing to pick between", () => {
-    for (const paneIsRoom of [true, false]) {
-      for (const hasOpenSession of [true, false]) {
-        expect(
-          isAssistantPickerLive({ hasOpenSession, paneIsRoom, rosterSize: 1 }),
-        ).toBe(false);
-      }
-    }
+    expect(isAssistantPickerLive({ rosterSize: 1 })).toBe(false);
+    expect(isAssistantPickerLive({ rosterSize: 0 })).toBe(false);
   });
 
   it("shows the local or followed responder instead of the room default", () => {
@@ -245,21 +232,30 @@ describe("[COMP:app-web/multi-assistant-response] room mention partition", () =>
   it("the regression case never sets send()'s `addressed` gate — no assistant POST fires", () => {
     const text = "@Jane Doe can you take this?";
     const mentioned = partitionRoomMentions(text, merged).assistants;
-    const addressed =
-      // !isRoom || askArmed || mentioned.length > 0 || reply?.role === "assistant" ||
-      // turnFileIds.length > 0 || turnRecordingIds.length > 0 || researchMode ||
-      // override?.forceAddress === true — every other disjunct held false/absent,
-      // matching a member-only send with no file/reply/research/forceAddress signal.
-      false ||
-      false ||
-      mentioned.length > 0 ||
-      false ||
-      false ||
-      false ||
-      false ||
-      false;
+    // send() decides through the pane's policy (chat-parity D2): a room with
+    // two humans is mention-gated, and a member-only mention with no file,
+    // reply, research or forced address is not an explicit address.
+    const addressed = isAddressedSend({
+      policy: { addressing: "mention", multiVoice: true, pins: true, queue: true, post: true, presence: true },
+      humanCount: 2,
+      explicit: mentioned.length > 0,
+    });
     expect(mentioned).toEqual([]);
     expect(addressed).toBe(false);
+  });
+
+  it("a personal chat's `@` mentions of two assistants make a response group (chat-parity D1)", () => {
+    // A personal chat's roster is assistants only (no teammates to notify).
+    const personalRoster: RoomMentionTarget[] = merged.filter((r) => r.mentionKind === "assistant");
+    const text = `@${personalRoster[0]!.name} and @${personalRoster[1]!.name}, compare notes`;
+    expect(partitionRoomMentions(text, personalRoster).assistants.map((a) => a.id)).toEqual(
+      personalRoster.slice(0, 2).map((a) => a.id),
+    );
+    // send() asks for the group whenever there are several targets, in any
+    // Chat conversation, and the multi-voice policy enables the parsing.
+    const surface = readFileSync(new URL("../chat-surface.tsx", import.meta.url), "utf8");
+    expect(surface).toContain("...(targets.length > 1\n          ? {");
+    expect(surface).toContain("panePolicy.multiVoice && (!override?.truncateFromMessageId || override.resolveMentions)");
   });
 
   it("caps each partition at MAX_ROOM_RESPONDERS independently", () => {
