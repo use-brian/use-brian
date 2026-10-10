@@ -85,7 +85,14 @@ export interface DesktopLinkNavigationState {
  * show focuses the existing host without opening a consent dialog. */
 export type DesktopBrowserControlMessage =
   | { type: "status" | "request-control" | "show" | "disconnect" | "cancel" }
-  | { type: "pair"; relayUrl: string; pairingToken: string; automatic?: boolean; expectedControlEpoch?: number };
+  | { type: "pair"; relayUrl: string; pairingToken: string; automatic?: boolean; expectedControlEpoch?: number }
+  /** The Chat side pane's browser slot, CSS px in the app frame (chat-parity T7). */
+  | { type: "pane-slot"; chatKey: string | null; rect: { x: number; y: number; width: number; height: number } | null }
+  /** The chat whose turn is live: a task's new tabs belong to it. */
+  | { type: "pane-chat"; chatKey: string | null };
+
+/** A tab Brian opened in the shell's browser, for that chat's side pane. */
+export type DesktopBrowserPaneEvent = { type: "tab-opened"; chatKey: string | null; browserId: string; url: string };
 
 /** Mirrors the shell's `RendererUpdateStatus` (app-desktop `auto-update.ts`). */
 export type DesktopUpdateStatus =
@@ -97,6 +104,14 @@ export interface DesktopBridge {
   browserControl?: (message: DesktopBrowserControlMessage) => Promise<{ ok: boolean; controlEpoch?: number; hasControl?: boolean; connected?: boolean; automaticBlocked?: boolean; browserProfileId?: string; workspaceId?: string }>;
   /** Host OS reported by Electron (`darwin`, `win32`, or `linux`). */
   platform?: string;
+  /**
+   * The shell hosts its browser inside the Chat side pane (chat-parity T7).
+   * App-web gates on the exact number; older shells omit it and keep docking
+   * the browser natively, which the web pane then leaves alone.
+   */
+  browserPaneProtocol?: number;
+  /** Hear the tabs Brian opens in the shell's browser. Returns an unsubscribe. */
+  onBrowserPane?: (callback: (event: DesktopBrowserPaneEvent) => void) => () => void;
   /** Open the macOS Shortcuts editor for the one-time Siri workflow setup. */
   openSiriSetup?: () => Promise<boolean>;
   /** Current Chromium page zoom factor, exposed read-only by the preload. */

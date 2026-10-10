@@ -5,7 +5,7 @@ import { BrowserApprovals } from "./browser-approvals.js";
 import { TabExecutor, ExecutorError, type ExecutorPlatform, type ExecutorTabUpdatedListener } from "@use-brian/browser-control/executor.js";
 import { RelayClient, type WebSocketLike } from "@use-brian/browser-control/relay-client.js";
 import type { LocalControlMode } from "@use-brian/browser-control/protocol.js";
-import { EmbeddedBrowserHost } from "./embedded-browser-host.js";
+import { EmbeddedBrowserHost, type BrowserSlot } from "./embedded-browser-host.js";
 import { parseBrowserTheme } from "./browser-theme.js";
 
 export function browserUrl(value: unknown): string {
@@ -13,6 +13,31 @@ export function browserUrl(value: unknown): string {
   const url = new URL(value);
   if (!["http:", "https:"].includes(url.protocol) || url.username || url.password) throw new Error("Only HTTP(S) URLs are supported");
   return url.href;
+}
+
+/**
+ * A message from the Chat side pane (chat-parity T7), already from the
+ * trusted app frame: its browser slot (CSS px, scaled by the app's zoom to
+ * window DIP) or the chat whose turn is live. Null when malformed.
+ */
+function paneMessage(input: unknown, zoomFactor: number):
+  | { type: "slot"; slot: BrowserSlot }
+  | { type: "task-chat"; chatKey: string | null }
+  | null {
+  if (!input || typeof input !== "object") return null;
+  const value = input as { type?: unknown; chatKey?: unknown; rect?: unknown };
+  const chatKey = value.chatKey === null ? null
+    : typeof value.chatKey === "string" && value.chatKey.length > 0 && value.chatKey.length <= 200 ? value.chatKey : undefined;
+  if (chatKey === undefined) return null;
+  if (value.type === "pane-chat") return { type: "task-chat", chatKey };
+  if (value.type !== "pane-slot") return null;
+  if (value.rect === null) return { type: "slot", slot: { chatKey, rect: null } };
+  const rect = value.rect as Record<string, unknown> | undefined;
+  const zoom = Number.isFinite(zoomFactor) && zoomFactor > 0 ? zoomFactor : 1;
+  const parts = ["x", "y", "width", "height"].map(key => rect?.[key]);
+  if (!parts.every(part => typeof part === "number" && Number.isFinite(part) && part >= 0 && part <= 20_000)) return null;
+  const [x, y, width, height] = (parts as number[]).map(part => Math.round(part * zoom));
+  return { type: "slot", slot: { chatKey, rect: { x: x!, y: y!, width: width!, height: height! } } };
 }
 
 /** Parse claims ONLY to name storage. The relay, not this parser, authenticates the token. */
@@ -58,6 +83,11 @@ export class EmbeddedBrowser {
   private partition: string | null = null;
   private commandEpoch: number | undefined;
   private uploadApproval: AbortController | null = null;
+  /** Brian's control was released (T8): the host and its tabs stay, the user's. */
+  private released = false;
+  /** The Chat side pane's slot and live-turn chat (T7), applied to every host. */
+  private paneSlot: BrowserSlot | null = null;
+  private paneTaskChat: string | null = null;
   private readonly approvals: Pick<BrowserApprovals, "has" | "grant">;
 
   constructor(private readonly options: {
@@ -80,6 +110,19 @@ export class EmbeddedBrowser {
   }
 
   isDockedFocused(): boolean { return this.host?.isDockedFocused() ?? false; }
+
+  /** A Chat side pane message (T7). Remembered, so a host started later picks it up. */
+  pane(input: unknown, zoomFactor = 1): boolean {
+    const message = paneMessage(input, zoomFactor);
+    if (!message) return false;
+    if (message.type === "slot") { this.paneSlot = message.slot; this.host?.setSlot(message.slot); return true; }
+    this.paneTaskChat = message.chatKey;
+    // Any pane message means the app hosts the browser in its Chat pane: run
+    // in pane mode (hidden until a slot shows it), never in the edge dock.
+    if (!this.paneSlot) { this.paneSlot = { chatKey: message.chatKey, rect: null }; this.host?.setSlot(this.paneSlot); }
+    this.host?.setTaskChat(message.chatKey);
+    return true;
+  }
 
   status(): { connected: boolean; automaticBlocked: boolean; controlEpoch: number; workspaceId?: string; browserProfileId?: string } {
     return { connected: this.active && this.relay?.getState() === "ready",
@@ -128,7 +171,8 @@ export class EmbeddedBrowser {
           // socket, so drop the fence instead of re-announcing a stop.
           if (state === "ready") {
             settle(true);
-            if (this.active) { this.commandEpoch = undefined; this.host?.setStatus(""); }
+            // Released (T8) is dormant too: the user's tabs stay, Brian's control does not.
+            if (this.active && !this.released) { this.commandEpoch = undefined; this.host?.setStatus(""); }
             else if (this.commandEpoch !== undefined) relay.sendEvent("stopped", this.commandEpoch);
           }
           else if (state === "unpaired" || state === "replaced") { settle(false); this.stop(); }
@@ -156,18 +200,26 @@ export class EmbeddedBrowser {
 
   private startHost(partition: string): void {
     const generation = this.generation;
-    this.host = new EmbeddedBrowserHost(partition, {
-      stop: () => { if (generation === this.generation) this.shutdown(); },
-      closed: () => { if (generation === this.generation) this.dispose(); },
+    // Callbacks guard by host identity, not generation: releasing control
+    // (T8) moves the generation on while this host and its tabs stay.
+    const host: EmbeddedBrowserHost = new EmbeddedBrowserHost(partition, {
+      // The toolbar's Stop ends Brian's work; the user's tabs stay (D10).
+      stop: () => { if (this.host === host) this.releaseControl(); },
+      closed: () => { if (this.host === host) this.dispose(); },
+      empty: () => { if (this.host === host) this.shutdown(); },
       tabClosed: id => {
-        if (generation === this.generation && this.executor?.attachedTab() === id) {
+        if (this.host === host && this.executor?.attachedTab() === id) {
           this.executor.onDetached(id); this.relay?.sendEvent("tab_closed");
         }
       },
       detached: id => {
-        if (generation === this.generation && this.executor?.onDetached(id)) this.stop();
+        if (this.host === host && this.executor?.onDetached(id)) this.stop();
       },
     }, { dockWindow: this.options.getDockWindow?.() });
+    this.host = host;
+    if (this.paneSlot) host.setSlot(this.paneSlot);
+    host.setTaskChat(this.paneTaskChat);
+    this.released = false;
     this.partition = partition;
     this.automaticBlocked = false;
     this.active = true;
@@ -178,6 +230,41 @@ export class EmbeddedBrowser {
 
   /** Close every renderer, but retain the approved relay for an explicit new browser task. */
   private shutdown(): void { this.stop(true, true); }
+
+  /**
+   * Brian's task is over: a relay `stop` (the task completed, or the safety
+   * stop) or the toolbar's Stop. Fence and detach control at once, exactly as
+   * a shutdown does, but keep the host and every tab: they stay on their
+   * final page and become the user's (chat-parity T8, D10). The host is
+   * destroyed only when the user closes its last tab, or quits. The next
+   * task's first command takes the same host back (`receive`).
+   */
+  private releaseControl(): void {
+    const host = this.host;
+    if (!host) { this.shutdown(); return; }
+    this.uploadApproval?.abort();
+    this.uploadApproval = null;
+    this.generation++;
+    this.cancelReady?.();
+    this.cancelReady = null;
+    this.commandEpoch = this.generation;
+    this.relay?.sendEvent("stopped", this.commandEpoch);
+    const executor = this.executor;
+    this.executor = null;
+    void executor?.detach().catch(() => undefined);
+    for (const tab of host.tabs()) {
+      try {
+        if (tab.contents.isDestroyed()) continue;
+        // Brian's own in-flight load stops; the page it reached stays (D10).
+        if (tab.taskOwned) tab.contents.stop();
+        if (tab.contents.debugger.isAttached()) tab.contents.debugger.detach();
+      } catch { /* A debugger can disappear mid-release; the fence already holds. */ }
+    }
+    host.releaseTasks();
+    host.setStatus("");
+    this.released = true;
+    this.queue = Promise.resolve();
+  }
 
   /** Synchronous revocation before any async detach. Queued/in-flight CDP calls are fenced. */
   stop(blockAutomatic = true, keepControlChannel = false): void {
@@ -271,7 +358,16 @@ export class EmbeddedBrowser {
       relay?.sendResult({ id: cmd.id, ok: false, error: "Command predates browser shutdown. Start a new navigation with an updated browser relay.", code: "user_stopped" });
       return;
     }
-    if (cmd.op === "stop") { relay?.sendResult({ id: cmd.id, ok: true, data: { stopped: true } }); this.shutdown(); return; }
+    if (cmd.op === "stop") { relay?.sendResult({ id: cmd.id, ok: true, data: { stopped: true } }); this.releaseControl(); return; }
+    // A command past the epoch fence after a release belongs to the next
+    // task: Brian takes the same host back and may reuse the user's tabs in
+    // that chat before opening new ones (D10).
+    if (this.released && this.host) {
+      this.released = false;
+      generation = this.generation;
+      this.executor = new TabExecutor(this.platform(generation));
+      this.host.setTaskChat(this.paneTaskChat);
+    }
     // Follow-up reads/clicks from the stopped task must not reopen the browser.
     // Only a URL-bearing starter can create a fresh task session.
     if (!this.active && this.partition && (cmd.op === "navigate" || cmd.op === "openTab")) {
@@ -304,7 +400,7 @@ export class EmbeddedBrowser {
     const executor = this.executor!;
     const { op, args } = cmd;
     // Both control modes cover this isolated host; taskOwned records creation source only.
-    const eligible = () => host.tabs();
+    const eligible = () => host.taskTabs();
     const selection = (id: number) => { const t = host.tabs().find(t => t.id === id)!; return { tabId: t.handle, url: t.contents.getURL(), title: t.contents.getTitle() }; };
     if (op === "openTab") {
       const id = await host.createTab(browserUrl(args.url), true);
@@ -327,6 +423,8 @@ export class EmbeddedBrowser {
     const allowed = ["navigate", "snapshot", "click", "type", "fillForm", "currentUrl", "captureState", "captureFrame", "takeoverInput", "uploadFile"];
     if (!allowed.includes(op)) throw new ExecutorError("Unsupported browser operation", "backend_error");
     let tab = eligible().find(t => t.id === host.selectedId());
+    // Reuse the user's tab in this chat before opening a new one (D10).
+    if (!tab && eligible().length > 0) { tab = eligible().at(-1)!; host.selectTab(tab.id); }
     if (!tab && op === "navigate") {
       const id = await host.createTab(browserUrl(args.url), true);
       this.check(generation);

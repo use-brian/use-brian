@@ -10,6 +10,9 @@ vi.mock('../embedded-browser-host.js', () => ({
     entries: any[] = [];
     selected: number | null = null;
     show = vi.fn(); destroy = vi.fn(); setStatus = vi.fn(); setTheme = vi.fn();
+    setSlot = vi.fn(); setTaskChat = vi.fn();
+    releaseTasks = vi.fn(() => { for (const tab of this.entries) tab.taskOwned = false; });
+    taskTabs() { return this.entries; }
     isDockedFocused = vi.fn(() => false);
     files = { list: vi.fn(() => ({ downloads: [] })), read: vi.fn(async () => ({ data: 'eA==', offset: 0, total: 1 })), stageUpload: vi.fn(async () => '/private/staged/file.pdf') };
     constructor(public partition: string, public callbacks: any, public options?: { dockWindow?: BrowserWindow | null }) { mocks.hosts.push(this); }
@@ -90,7 +93,7 @@ const theme = (colorScheme: 'light' | 'dark') => ({
   fontFamily: colorScheme === 'dark' ? 'Georgia, serif' : 'Arial, sans-serif',
 });
 
-describe('live app theme validation', () => {
+describe('[COMP:app-desktop/embedded-browser] live app theme validation', () => {
   it('validates unknown payloads before forwarding to the current host', async () => {
     expect(() => browser.setTheme(theme('light'))).not.toThrow();
     expect(mocks.hosts).toHaveLength(0);
@@ -113,7 +116,7 @@ describe('live app theme validation', () => {
   });
 });
 
-describe('pairing validation and storage isolation', () => {
+describe('[COMP:app-desktop/embedded-browser] pairing validation and storage isolation', () => {
   it('uses stable opaque partitions scoped to account, relay, user, workspace and profile', () => {
     const base = browserPairing(input(), 'account').partition;
     expect(base).toMatch(/^persist:embedded-browser-[a-f0-9]{64}$/);
@@ -138,13 +141,15 @@ describe('pairing validation and storage isolation', () => {
   it('normalizes HTTP(S) URLs', () => { expect(browserUrl('https://EXAMPLE.com')).toBe('https://example.com/'); });
 });
 
-describe('browser file transfer commands', () => {
+describe('[COMP:app-desktop/embedded-browser] browser file transfer commands', () => {
   it('lists and reads only through the active host file manager', async () => {
     await connect();
     expect(await command('listDownloads')).toMatchObject({ ok: true, data: { downloads: [] } });
     expect(await command('readDownload', { id: 'download-id', offset: 0 })).toMatchObject({ ok: true, data: { data: 'eA==', total: 1 } });
     expect(host().files.read).toHaveBeenCalledWith('download-id', 0);
     await command('stop');
+    // The host stays after a stop (T8); it goes when its last tab closes.
+    host().callbacks.empty();
     expect(await command('listDownloads')).toMatchObject({ ok: false });
   });
   it('requires native approval before staging or selecting a workspace file', async () => {
@@ -181,7 +186,7 @@ describe('browser file transfer commands', () => {
   });
 });
 
-describe('native pairing lifecycle with the real RelayClient', () => {
+describe('[COMP:app-desktop/embedded-browser] native pairing lifecycle with the real RelayClient', () => {
   it('waits for relay ready, advertises Electron without protected-fill capabilities', async () => {
     let settled = false;
     const pending = browser.pair(input(), 'account').then(ok => { settled = true; return ok; });
@@ -311,7 +316,7 @@ describe('native pairing lifecycle with the real RelayClient', () => {
     expect(pane.destroy).not.toHaveBeenCalled(); expect(mocks.hosts).toHaveLength(1);
     expect(await command('currentUrl')).toMatchObject({ ok: true, data: { url: 'https://example.com/' } });
   });
-  it('a network drop after Stop re-sends the stop epoch so a new navigation still starts the browser', async () => {
+  it('a network drop after Stop re-sends the stop epoch so a new navigation still drives the browser', async () => {
     await connect(); host().callbacks.stop();
     const epoch = socket().sent.filter(m => m.type === 'event' && m.kind === 'stopped').at(-1)?.controlEpoch;
     expect(epoch).toBeDefined();
@@ -320,7 +325,8 @@ describe('native pairing lifecycle with the real RelayClient', () => {
     socket().open(); socket().message({ type: 'ready', sessionToken: 'session-secret-2' }); await flush();
     expect(socket().sent).toContainEqual(expect.objectContaining({ type: 'event', kind: 'stopped', controlEpoch: epoch }));
     expect(await command('navigate', { url: 'https://after.example/' })).toMatchObject({ ok: true });
-    expect(mocks.hosts).toHaveLength(2);
+    // The released host is taken back, not replaced (T8).
+    expect(mocks.hosts).toHaveLength(1);
   });
   it('a network drop after Stop and a restarted task does not re-announce the stop', async () => {
     await connect(); host().callbacks.stop();
@@ -332,7 +338,7 @@ describe('native pairing lifecycle with the real RelayClient', () => {
   });
 });
 
-describe('standing approval and automatic lifecycle', () => {
+describe('[COMP:app-desktop/embedded-browser] standing approval and automatic lifecycle', () => {
   const automatic = (overrides = {}, relay?: string) => ({ ...input(overrides, relay), automatic: true });
   async function ready(pending: Promise<boolean>) {
     await flush(); socket().open(); socket().message({ type: 'ready' });
@@ -473,93 +479,83 @@ describe('standing approval and automatic lifecycle', () => {
   });
 });
 
-describe('browser shutdown and restart', () => {
-  it('toolbar Stop closes the host, keeps only the relay, and show starts an empty browser', async () => {
+describe('[COMP:app-desktop/embedded-browser] a stop releases control and keeps the tabs (chat-parity T8, D10)', () => {
+  it('a relay stop keeps every tab, flips task tabs to the user, and fences the stopped task', async () => {
     await connect();
     await command('openTab', { url: 'https://task.example/' });
     await host().createTab('https://manual.example/', false);
-    const previous = host();
-    previous.callbacks.stop();
-    expect(previous.destroy).toHaveBeenCalledOnce();
-    expect(browser.isDockedFocused()).toBe(false);
-    expect(browser.status()).toMatchObject({ connected: false, automaticBlocked: true });
-    expect(socket().close).not.toHaveBeenCalled();
-    expect(await browser.pair({ ...input(), automatic: true }, 'account')).toBe(false);
-    expect(mocks.hosts).toHaveLength(1);
-    browser.show();
-    expect(mocks.hosts).toHaveLength(2);
-    expect(host().partition).toBe(previous.partition);
-    expect(host().tabs()).toEqual([]);
-    expect(browser.status()).toMatchObject({ connected: true, automaticBlocked: false });
-    expect(mocks.consent).toHaveBeenCalledOnce();
-    expect(await command('openTab', { url: 'https://new.example/' })).toMatchObject({ ok: true });
-  });
-  it.each(['navigate', 'openTab'])('Brian can restart with %s, but reads, clicks and invalid URLs cannot', async op => {
-    await connect();
+    const kept = host();
+    expect(kept.tabs().map((t: any) => t.taskOwned)).toEqual([true, false]);
     expect(await command('stop')).toMatchObject({ ok: true });
-    expect(host().destroy).toHaveBeenCalledOnce();
-    for (const followup of ['snapshot', 'click', 'listTabs']) {
-      expect(await command(followup)).toMatchObject({ ok: false, code: 'user_stopped' });
-    }
-    expect(await command(op, { url: 'file:///secret' })).toMatchObject({ ok: false });
-    expect(mocks.hosts).toHaveLength(1);
-    expect(await command(op, { url: 'https://new.example/' })).toMatchObject({ ok: true });
-    expect(mocks.hosts).toHaveLength(2);
-    expect(host().tabs()).toHaveLength(1);
-    expect(browser.status()).toMatchObject({ connected: true, automaticBlocked: false });
-    expect(Socket.all).toHaveLength(1);
-    expect(mocks.consent).toHaveBeenCalledOnce();
+    expect(kept.destroy).not.toHaveBeenCalled();
+    expect(kept.releaseTasks).toHaveBeenCalledOnce();
+    expect(kept.tabs().map((t: any) => t.taskOwned)).toEqual([false, false]);
+    expect(kept.tabs()[0].contents.debugger.isAttached()).toBe(false);
+    expect(browser.status()).toMatchObject({ connected: true });
+    expect(socket().close).not.toHaveBeenCalled();
+    // A command still in transit from the stopped task is fenced.
+    socket().message({ type: 'command', id: 'late', op: 'click', args: { ref: 'a' } });
+    await flush();
+    expect(socket().sent).toContainEqual(expect.objectContaining({ id: 'late', ok: false, code: 'user_stopped' }));
   });
-  it('rejects pre-Stop commands still in transit, including after a fresh restart', async () => {
+  it('the next task takes the same host back and reuses the user\'s tab before opening one', async () => {
+    await connect();
+    await command('openTab', { url: 'https://task.example/' });
+    expect(await command('stop')).toMatchObject({ ok: true });
+    const kept = host();
+    // The next task's first command takes the same host back: the user's
+    // (released) tab is there for it, and no second host or tab is opened.
+    expect(await command('listTabs')).toMatchObject({
+      ok: true, data: { tabs: [expect.objectContaining({ url: 'https://task.example/', taskOwned: false, active: true })] },
+    });
+    expect(mocks.hosts).toHaveLength(1);
+    expect(kept.tabs()).toHaveLength(1);
+  });
+  it('the toolbar Stop releases control too; the host goes only when its last tab closes', async () => {
+    await connect();
+    await command('openTab', { url: 'https://task.example/' });
+    const kept = host();
+    kept.callbacks.stop();
+    expect(kept.destroy).not.toHaveBeenCalled();
+    expect(kept.tabs()[0].taskOwned).toBe(false);
+    kept.callbacks.empty();
+    expect(kept.destroy).toHaveBeenCalledOnce();
+    expect(socket().close).not.toHaveBeenCalled();
+    // The approved relay remains: a new navigation starts a fresh host.
+    expect(await command('navigate', { url: 'https://new.example/' })).toMatchObject({ ok: true });
+    expect(mocks.hosts).toHaveLength(2);
+  });
+  it('an old host\'s callbacks cannot touch its successor', async () => {
     await connect();
     const oldHost = host();
-    oldHost.callbacks.stop();
-    socket().message({ type: 'command', id: 'late-start', op: 'navigate', args: { url: 'https://stale.example/' } });
-    await flush();
-    expect(mocks.hosts).toHaveLength(1);
-    expect(socket().sent).toContainEqual(expect.objectContaining({ id: 'late-start', ok: false, code: 'user_stopped' }));
+    oldHost.callbacks.empty();
     expect(await command('navigate', { url: 'https://new.example/' })).toMatchObject({ ok: true });
     const freshHost = host();
-    socket().message({ type: 'command', id: 'late-input', op: 'type', args: { ref: 'a', text: 'stale' } });
-    oldHost.callbacks.detached(freshHost.tabs()[0].id);
     oldHost.callbacks.closed();
     oldHost.callbacks.stop();
-    await flush();
-    expect(socket().sent).toContainEqual(expect.objectContaining({ id: 'late-input', ok: false, code: 'user_stopped' }));
+    oldHost.callbacks.empty();
     expect(freshHost.destroy).not.toHaveBeenCalled();
     expect(browser.status().connected).toBe(true);
-    freshHost.callbacks.stop();
-    socket().message({ type: 'command', id: 'older-epoch', op: 'openTab', args: { url: 'https://stale.example/' }, controlEpoch: 2 });
-    await flush();
-    expect(mocks.hosts).toHaveLength(2);
-    expect(await command('navigate', { url: 'https://latest.example/' })).toMatchObject({ ok: true });
   });
-  // A network drop (1006) is not here: it keeps the approved relay and reconnects.
-  it.each(['dispose', 'replacement'])('%s discards the dormant restart capability', async action => {
-    await connect(); host().callbacks.stop();
-    if (action === 'dispose') browser.dispose();
-    else socket().drop(4000);
-    browser.show();
-    await command('openTab', { url: 'https://late.example/' });
-    expect(mocks.hosts).toHaveLength(1);
-    expect(browser.status().connected).toBe(false);
+  it('remembers the Chat pane\'s slot and live-turn chat for the host it starts', async () => {
+    expect(browser.pane({ type: 'pane-slot', chatKey: 'chat-a', rect: { x: 10, y: 20, width: 300, height: 400 } }, 2)).toBe(true);
+    expect(browser.pane({ type: 'pane-chat', chatKey: 'chat-a' })).toBe(true);
+    expect(browser.pane({ type: 'pane-slot', chatKey: 'x'.repeat(201), rect: null })).toBe(false);
+    expect(browser.pane({ type: 'pane-slot', chatKey: 'chat-a', rect: { x: -1, y: 0, width: 1, height: 1 } })).toBe(false);
+    await connect();
+    await command('openTab', { url: 'https://task.example/' });
+    expect(host().setSlot).toHaveBeenCalledWith({ chatKey: 'chat-a', rect: { x: 20, y: 40, width: 600, height: 800 } });
+    expect(host().setTaskChat).toHaveBeenCalledWith('chat-a');
   });
-  it('new navigation is not blocked by an old unresolved debugger command', async () => {
-    await connect(); await command('openTab', { url: 'https://old.example/' });
-    const pending = deferred<unknown>();
-    host().tabs()[0].contents.debugger.sendCommand.mockImplementation(() => pending.promise);
-    socket().message({ type: 'command', id: 'old', op: 'captureFrame', args: {} });
-    await flush();
-    socket().message({ type: 'command', id: 'queued', op: 'openTab', args: { url: 'https://queued.example/' } });
-    host().callbacks.stop();
-    expect(await command('navigate', { url: 'https://new.example/' })).toMatchObject({ ok: true });
-    pending.resolve({}); await flush();
-    expect(host().tabs()).toHaveLength(1);
-    expect(socket().sent.filter(m => ['old', 'queued'].includes(m.id))).toEqual([]);
+  it('a live-turn report alone starts the host in pane mode, hidden, never docked', async () => {
+    expect(browser.pane({ type: 'pane-chat', chatKey: 'chat-b' })).toBe(true);
+    await connect();
+    await command('openTab', { url: 'https://task.example/' });
+    expect(host().setSlot).toHaveBeenCalledWith({ chatKey: 'chat-b', rect: null });
   });
 });
 
-describe('operations and revocation with the real TabExecutor', () => {
+describe('[COMP:app-desktop/embedded-browser] operations and revocation with the real TabExecutor', () => {
   it('returns protocol shapes for opening, listing, switching, reading and closing', async () => {
     await connect();
     expect(await command('openTab', { url: 'https://example.com' })).toMatchObject({ ok: true, data: { tabId: 'tab-1', url: 'https://example.com/', title: 'Example' } });

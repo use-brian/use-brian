@@ -38,6 +38,7 @@ function Harness({ work }: { work: string }) {
       <ChatSidePaneToggle pane={pane} />
       <ChatSidePane
         workspaceId="ws"
+        chatKey="chat-1"
         pane={pane}
         renderTab={(ref) => (ref.kind === "work" ? <p data-testid="work">{work}</p> : undefined)}
       />

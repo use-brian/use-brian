@@ -254,6 +254,13 @@ import {
   useChatPane,
 } from "@/lib/chat-pane-session";
 import { openInPane, type OpenOptions, type PaneRef } from "@/lib/chat-pane-tabs";
+import {
+  desktopBrowserPane,
+  isBrowserToolName,
+  reportTurnChat,
+  subscribeBrowserPane,
+} from "@/lib/desktop-browser-pane";
+import { getComputerTask } from "@/lib/api/computer";
 import { resolveRequestedFreshAssistant } from "@/components/chat-app/assistant-deeplink";
 import {
   isAssistantPickerLive,
@@ -1481,6 +1488,57 @@ export function ChatSurface({ workspaceId }: { workspaceId: string }) {
     [workspaceId],
   );
 
+  // ── The browser in the side pane (chat-parity T7, D8, D10) ─────────
+  // Desktop: the shell tells us which tabs Brian opened; each opens in its
+  // own chat's pane (keyed by the chat it belongs to, not the open one).
+  useEffect(
+    () =>
+      subscribeBrowserPane((event) => {
+        const chatKey = event.chatKey ?? sessionIdRef.current;
+        updateChatPane(
+          workspaceId,
+          chatKey,
+          (state) => openInPane(state, { kind: "browser", browserId: event.browserId, url: event.url }),
+          !isPhoneViewport(),
+        );
+      }),
+    [workspaceId],
+  );
+  /** Chats whose cloud browser this mount already opened as a tab. */
+  const computerTabsRef = useRef<Set<string>>(new Set());
+  /**
+   * Web: a browser tool step starts in this chat's turn. If the browse runs in
+   * a cloud browser (or there is no desktop pane to host a local one), open
+   * its Take-Over frame as a `browser` tab of this chat's pane.
+   */
+  const openComputerTab = useCallback(
+    (sessionId: string) => {
+      if (computerTabsRef.current.has(sessionId)) return;
+      computerTabsRef.current.add(sessionId);
+      void getComputerTask(sessionId)
+        .then((task) => {
+          if (!task || (task.backend === "local" && desktopBrowserPane())) {
+            computerTabsRef.current.delete(sessionId);
+            return;
+          }
+          updateChatPane(
+            workspaceId,
+            sessionId,
+            (state) =>
+              openInPane(state, {
+                kind: "browser",
+                browserId: `computer:${sessionId}`,
+                url: null,
+                title: task.injectedSite,
+              }),
+            !isPhoneViewport(),
+          );
+        })
+        .catch(() => computerTabsRef.current.delete(sessionId));
+    },
+    [workspaceId],
+  );
+
   const resetRemoteTurn = useCallback(() => {
     setRemoteAssistantId(null);
     remoteLogRef.current = EMPTY_LOG;
@@ -2015,6 +2073,12 @@ export function ChatSurface({ workspaceId }: { workspaceId: string }) {
     },
     [],
   );
+
+  // Desktop: the chat whose turn is live owns a task's new browser tabs.
+  const turnLiveHere = chat.state.isStreaming || remoteActive;
+  useEffect(() => {
+    if (turnLiveHere && activeSessionId) reportTurnChat(activeSessionId);
+  }, [turnLiveHere, activeSessionId]);
 
   /** Typing only matters with another human present (D2). */
   const typingActive = typingPresenceActive(panePolicy, paneHumanCount);
@@ -2792,6 +2856,8 @@ export function ChatSurface({ workspaceId }: { workspaceId: string }) {
             // An askQuestion step means this turn may SUSPEND — the settle
             // fetches the pending row and surfaces the answer panel.
             if (name === "askQuestion") askedQuestionRef.current = true;
+            // Brian started browsing: show the browser in this chat's pane.
+            if (isBrowserToolName(name) && owningSessionId) openComputerTab(owningSessionId);
             // Dedup — re-emits keep the existing row.
             if (turnToolsRef.current.some((tool) => tool.id === id)) break;
             // Arm the answer-segment reset and clear the live stream buffer
@@ -5216,6 +5282,7 @@ export function ChatSurface({ workspaceId }: { workspaceId: string }) {
       </section>
       <ChatSidePane
         workspaceId={workspaceId}
+        chatKey={activeSessionId}
         pane={pane}
         renderTab={(ref) =>
           ref.kind === "work" ? (

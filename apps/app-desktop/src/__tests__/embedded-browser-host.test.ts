@@ -52,7 +52,7 @@ vi.mock('electron', async () => {
 import { BaseWindow, type BrowserWindow, ipcMain, session as electronSession } from 'electron';
 import { browserAddress, EmbeddedBrowserHost } from '../embedded-browser-host.js';
 let hosts: EmbeddedBrowserHost[];
-let callbacks: { stop: ReturnType<typeof vi.fn>; closed: ReturnType<typeof vi.fn>; tabClosed: ReturnType<typeof vi.fn>; detached: ReturnType<typeof vi.fn> };
+let callbacks: { stop: ReturnType<typeof vi.fn>; closed: ReturnType<typeof vi.fn>; tabClosed: ReturnType<typeof vi.fn>; detached: ReturnType<typeof vi.fn>; empty: ReturnType<typeof vi.fn> };
 const create = (partition = 'persist:embedded-test') => { const h = new EmbeddedBrowserHost(partition, callbacks); hosts.push(h); return h; };
 const win = () => electronMocks.windows.at(-1)!;
 const toolbar = () => electronMocks.views[0].webContents;
@@ -64,7 +64,7 @@ const ipc = (command: string, value?: unknown, overrides = {}) => {
 };
 beforeEach(() => {
   hosts = []; electronMocks.windows.length = 0; electronMocks.views.length = 0; electronMocks.sessions.clear();
-  callbacks = { stop: vi.fn(), closed: vi.fn(), tabClosed: vi.fn(), detached: vi.fn() };
+  callbacks = { stop: vi.fn(), closed: vi.fn(), tabClosed: vi.fn(), detached: vi.fn(), empty: vi.fn() };
 });
 afterEach(() => { for (const h of hosts) h.destroy(); });
 
@@ -75,7 +75,7 @@ const theme = (colorScheme: 'light' | 'dark') => ({
   fontFamily: colorScheme === 'dark' ? 'Georgia, serif' : 'Arial, sans-serif',
 });
 
-describe('typed browser addresses', () => {
+describe('[COMP:app-desktop/embedded-browser] typed browser addresses', () => {
   it.each([
     [' example.com ', 'https://example.com/'],
     ['example.com/path?q=hello#section', 'https://example.com/path?q=hello#section'],
@@ -100,7 +100,7 @@ describe('typed browser addresses', () => {
   });
 });
 
-describe('embedded browser host isolation and native boundaries', () => {
+describe('[COMP:app-desktop/embedded-browser] embedded browser host isolation and native boundaries', () => {
   it.each(['', 'default', 'persist:', 'persist:deployment-production'])('rejects unsafe partition %s', partition => {
     expect(() => create(partition)).toThrow(); expect(electronMocks.windows).toHaveLength(0);
   });
@@ -265,7 +265,7 @@ describe('embedded browser host isolation and native boundaries', () => {
 });
 
 
-describe('docked view ownership and layout', () => {
+describe('[COMP:app-desktop/embedded-browser] docked view ownership and layout', () => {
   const setup = () => {
     const main = new BaseWindow({}) as any;
     const h = new EmbeddedBrowserHost('persist:docked-test', callbacks, { dockWindow: main as BrowserWindow });
@@ -371,7 +371,7 @@ describe('docked view ownership and layout', () => {
   });
 });
 
-describe('trusted toolbar navigation and resize controls', () => {
+describe('[COMP:app-desktop/embedded-browser] trusted toolbar navigation and resize controls', () => {
   it('submits typed addresses without approval controls and preserves resizing', () => {
     const html = readFileSync(new URL('../embedded-browser.html', import.meta.url), 'utf8');
     expect(html).not.toContain('id="approve"');
@@ -435,3 +435,71 @@ describe('trusted toolbar navigation and resize controls', () => {
     expect(ipcRenderer.send).toHaveBeenLastCalledWith('embedded-browser:command', 'stop', undefined);
   });
 });
+
+describe('[COMP:app-desktop/embedded-browser] the browser inside the Chat side pane (chat-parity T7, T8, D10)', () => {
+  const setup = () => {
+    const main = new BaseWindow({}) as any;
+    const h = new EmbeddedBrowserHost('persist:pane-test', callbacks, { dockWindow: main as BrowserWindow });
+    hosts.push(h);
+    return { h, main };
+  };
+  const viewOf = (contentsId: number) => electronMocks.views.find((view: any) => view.webContents.id === contentsId)!;
+  const visible = (contentsId: number) => viewOf(contentsId).setVisible.mock.lastCall?.[0];
+  const rect = { x: 900, y: 60, width: 420, height: 700 };
+
+  it('switching chatKey swaps the visible tabs', async () => {
+    const { h } = setup();
+    h.setSlot({ chatKey: 'chat-a', rect });
+    const a = await h.createTab('https://a.example/', false);
+    h.setSlot({ chatKey: 'chat-b', rect });
+    const b = await h.createTab('https://b.example/', false);
+    expect(h.tabs().map(tab => tab.chatKey)).toEqual(['chat-a', 'chat-b']);
+    expect(visible(b)).toBe(true);
+    expect(visible(a)).toBe(false);
+    h.setSlot({ chatKey: 'chat-a', rect });
+    expect(visible(a)).toBe(true);
+    expect(visible(b)).toBe(false);
+    // The tab sits inside the slot, below the toolbar, never against the window edge.
+    expect(viewOf(a).setBounds.mock.lastCall[0]).toEqual({ x: 900, y: 188, width: 420, height: 572 });
+  });
+
+  it('hides everything when the slot is hidden, and never narrows the app', async () => {
+    const { h, main } = setup();
+    h.setSlot({ chatKey: 'chat-a', rect });
+    const a = await h.createTab('https://a.example/', false);
+    h.setSlot({ chatKey: 'chat-a', rect: null });
+    expect(visible(a)).toBe(false);
+    expect(electronMocks.views[0].setVisible.mock.lastCall[0]).toBe(false);
+    const layouts = main.webContents.send.mock.calls.filter(([channel]: [string]) => channel === 'embedded-browser:dock-layout');
+    expect(layouts.at(-1)[1]).toMatchObject({ reservedWidth: 0 });
+  });
+
+  it('opens a task tab in the chat whose turn is live and tells the app', async () => {
+    const { h, main } = setup();
+    h.setSlot({ chatKey: 'chat-open', rect });
+    h.setTaskChat('chat-working');
+    await h.createTab('https://task.example/', true);
+    expect(h.tabs()[0]).toMatchObject({ chatKey: 'chat-working', taskOwned: true });
+    expect(main.webContents.send).toHaveBeenCalledWith('embedded-browser:pane', expect.objectContaining({
+      type: 'tab-opened', chatKey: 'chat-working', url: 'https://task.example/',
+    }));
+    // The task sees its chat's tabs; the open chat's view is unaffected.
+    expect(h.taskTabs().map(tab => tab.chatKey)).toEqual(['chat-working']);
+    expect(h.selectedId()).toBe(h.tabs()[0].id);
+  });
+
+  it('a release flips task tabs to the user and keeps them; the last tab closing empties the host', async () => {
+    const { h } = setup();
+    h.setSlot({ chatKey: 'chat-a', rect });
+    const task = await h.createTab('https://task.example/', true);
+    await h.createTab('https://mine.example/', false);
+    h.releaseTasks();
+    expect(h.tabs().map(tab => tab.taskOwned)).toEqual([false, false]);
+    expect(h.tabs()).toHaveLength(2);
+    expect(callbacks.empty).not.toHaveBeenCalled();
+    for (const tab of h.tabs()) h.closeTab(tab.id);
+    expect(callbacks.empty).toHaveBeenCalledOnce();
+    expect(task).toBeTypeOf('number');
+  });
+});
+

@@ -59,6 +59,7 @@ import {
 import { docPagePath } from "@/lib/doc-page-url";
 import { ChatDocumentBody } from "./chat-document-viewer";
 import { PanePageBody, PaneUrlBody } from "./chat-pane-bodies";
+import { PaneBrowserBody } from "./chat-pane-browser";
 
 const CHAT_SIDE_PANE_ID = "chat-side-pane";
 
@@ -111,11 +112,14 @@ function TabIcon({ kind }: { kind: PaneRef["kind"] }) {
 
 export function ChatSidePane({
   workspaceId,
+  chatKey,
   pane,
   renderTab,
   tabActions,
 }: {
   workspaceId: string;
+  /** The open chat: a desktop browser slot reports it so the shell swaps tabs (T7). */
+  chatKey: string | null;
   pane: ChatPane;
   /**
    * The host's bodies: the Work tab, and any kind it owns. Returning
@@ -149,6 +153,14 @@ export function ChatSidePane({
       <PanePageBody key={ref.pageId} pageId={ref.pageId} />
     ) : ref.kind === "url" ? (
       <PaneUrlBody key={ref.url} url={ref.url} title={ref.title ?? null} />
+    ) : ref.kind === "browser" ? (
+      <PaneBrowserBody
+        key={ref.browserId}
+        workspaceId={workspaceId}
+        chatKey={chatKey}
+        browserId={ref.browserId}
+        url={ref.url ?? null}
+      />
     ) : null;
   // The explicit ways out of the pane (D9): a page's full view, a link in
   // the user's browser. Nothing else in the chat navigates away.
