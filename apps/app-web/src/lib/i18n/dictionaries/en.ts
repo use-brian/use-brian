@@ -8919,6 +8919,11 @@ export const en = {
       browserOpen: "Open",
       browserNoFrame: "Waiting for the first view of the page",
       browserDesktopOnly: "This browser tab is open in the desktop app.",
+      pinTab: "Pin tab",
+      unpinTab: "Unpin",
+      pinned: "Pinned",
+      pinFailed: "Couldn't pin this tab",
+      unpinFailed: "Couldn't unpin this tab",
     },
     documentViewer: {
       label: "Raw document",

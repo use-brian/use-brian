@@ -8685,6 +8685,11 @@ export const ja: Dictionary = {
       browserOpen: "開く",
       browserNoFrame: "ページの最初の表示を待っています",
       browserDesktopOnly: "このブラウザタブはデスクトップアプリで開いています。",
+      pinTab: "タブを固定",
+      unpinTab: "固定を解除",
+      pinned: "固定済み",
+      pinFailed: "このタブを固定できませんでした",
+      unpinFailed: "このタブの固定を解除できませんでした",
     },
     documentViewer: {
       label: "元のドキュメント",

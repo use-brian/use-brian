@@ -43,7 +43,8 @@ type Callbacks = {
  * user's when control is released (chat-parity D10). `chatKey`: the Chat
  * conversation whose side pane shows the tab (T7); null in the legacy dock.
  */
-type Tab = { id: number; handle: string; taskOwned: boolean; chatKey: string | null; contents: WebContents; view: WebContentsView };
+/** `announced`: the app shows this tab in its chat's side pane, so it hears where the tab goes (D7, D8). */
+type Tab = { id: number; handle: string; taskOwned: boolean; chatKey: string | null; announced: boolean; contents: WebContents; view: WebContentsView };
 /** The Chat side pane's browser slot, in window DIP (T7). A null rect hides the browser. */
 export type BrowserSlot = { chatKey: string | null; rect: { x: number; y: number; width: number; height: number } | null };
 
@@ -170,7 +171,7 @@ export class EmbeddedBrowserHost {
     const contents = view.webContents;
     const id = contents.id;
     const chatKey = this.slot ? (taskOwned ? this.taskChat ?? this.slot.chatKey : this.slot.chatKey) : null;
-    const tab: Tab = { id, handle: randomUUID(), taskOwned, chatKey, contents, view };
+    const tab: Tab = { id, handle: randomUUID(), taskOwned, chatKey, announced: taskOwned && this.slot !== null, contents, view };
     this.entries.set(id, tab);
     // about:blank exists only as the initial, empty document. Every subsequent
     // navigation/redirect, including subframes and popup destinations, must be HTTP(S).
@@ -189,9 +190,9 @@ export class EmbeddedBrowserHost {
       this.setStatus("Popup blocked. Open the destination manually in a new tab; popup-based sign-in may not work.");
       return { action: "deny" };
     });
-    contents.on("did-navigate", () => this.publish());
-    contents.on("did-navigate-in-page", () => this.publish());
-    contents.on("page-title-updated", () => this.publish());
+    contents.on("did-navigate", () => { this.publish(); this.announceUpdate(tab); });
+    contents.on("did-navigate-in-page", () => { this.publish(); this.announceUpdate(tab); });
+    contents.on("page-title-updated", () => { this.publish(); this.announceUpdate(tab); });
     contents.on("did-start-loading", () => this.publish());
     contents.on("did-stop-loading", () => this.publish());
     contents.on("render-process-gone", () => {
@@ -209,7 +210,7 @@ export class EmbeddedBrowserHost {
     this.owner.contentView.addChildView(view);
     this.selectTab(id);
     // Brian opening a tab opens it in that chat's side pane (D8).
-    if (taskOwned && this.slot) this.sendPane({ type: "tab-opened", chatKey, browserId: tab.handle, url: target });
+    if (tab.announced) this.sendPane({ type: "tab-opened", chatKey, browserId: tab.handle, url: target });
     await this.load(tab, target);
     return id;
   }
@@ -403,8 +404,16 @@ export class EmbeddedBrowserHost {
       reservedWidth: !this.disposed && this.docked && !this.slot ? this.panelWidth : 0, contentWidth,
     });
   }
+  /** Keep the app's pane tab on the page this tab is showing: pinning it saves that URL (D7). */
+  private announceUpdate(tab: Tab): void {
+    if (!tab.announced || tab.contents.isDestroyed()) return;
+    const url = validWebUrl(tab.contents.getURL());
+    if (url) this.sendPane({ type: "tab-updated", chatKey: tab.chatKey, browserId: tab.handle, url, title: tab.contents.getTitle() || null });
+  }
   /** Tell the app renderer about the browser's tabs (pane mode only). */
-  private sendPane(payload: { type: "tab-opened"; chatKey: string | null; browserId: string; url: string }): void {
+  private sendPane(payload:
+    | { type: "tab-opened"; chatKey: string | null; browserId: string; url: string }
+    | { type: "tab-updated"; chatKey: string | null; browserId: string; url: string; title: string | null }): void {
     if (!this.dockContents || this.dockContents.isDestroyed()) return;
     this.dockContents.send("embedded-browser:pane", payload);
   }

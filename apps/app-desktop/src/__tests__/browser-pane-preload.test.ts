@@ -47,4 +47,17 @@ describe('[COMP:app-desktop/embedded-browser] the app bridge for the Chat side p
     emit({ type: 'tab-opened', chatKey: null, browserId: 'h-3', url: 'https://c.example/' });
     expect(seen).toHaveLength(1);
   });
+
+  it('relays where an announced tab moved, with a string-or-null title', () => {
+    const { bridge, emit } = load();
+    const seen: unknown[] = [];
+    bridge.onBrowserPane((event: unknown) => seen.push(event));
+    emit({ type: 'tab-updated', chatKey: 'chat-a', browserId: 'h-1', url: 'https://a.example/next', title: 'Next', extra: 1 });
+    emit({ type: 'tab-updated', chatKey: 'chat-a', browserId: 'h-1', url: 'https://a.example/more', title: 7 });
+    emit({ type: 'tab-updated', chatKey: 'chat-a', browserId: 'h-1' });
+    expect(seen).toEqual([
+      { type: 'tab-updated', chatKey: 'chat-a', browserId: 'h-1', url: 'https://a.example/next', title: 'Next' },
+      { type: 'tab-updated', chatKey: 'chat-a', browserId: 'h-1', url: 'https://a.example/more', title: null },
+    ]);
+  });
 });

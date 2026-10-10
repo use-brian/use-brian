@@ -182,6 +182,8 @@ type ChatContextPinsProps = {
   lastProgressAt?: number | null;
   /** Absent when the surface cannot stop a turn (no session bound yet). */
   onStopTurn?: () => Promise<void> | void;
+  /** A pin was added or removed here: the side pane's pinned tabs follow (D7). */
+  onPinsChanged?: () => void;
 };
 
 function SessionContextPins({
@@ -197,6 +199,7 @@ function SessionContextPins({
   tools = [],
   lastProgressAt = null,
   onStopTurn,
+  onPinsChanged,
 }: ChatContextPinsProps) {
   const links = usePaneLinks();
   const mounted = useRef(false);
@@ -376,6 +379,7 @@ function SessionContextPins({
       setError(null);
       try {
         await addSessionPin(sessionId, pin);
+        onPinsChanged?.();
         if (!mounted.current) return;
         setAddOpen(false);
         setSearch("");
@@ -388,7 +392,7 @@ function SessionContextPins({
         if (mounted.current) setBusy(false);
       }
     },
-    [busy, refresh, sessionId, t],
+    [busy, onPinsChanged, refresh, sessionId, t],
   );
 
   const pinFiles = useCallback(
@@ -538,7 +542,10 @@ function SessionContextPins({
           }
           updateUpload(upload.id, null);
         }
-        if (anyPinned) await refresh();
+        if (anyPinned) {
+          onPinsChanged?.();
+          await refresh();
+        }
         if (mounted.current && !anyFailed) setAddOpen(false);
       } catch {
         for (const upload of uploads) {
@@ -551,7 +558,7 @@ function SessionContextPins({
         if (mounted.current) setFileBusy(false);
       }
     },
-    [fileBusy, refresh, sessionId, t, workspaceId],
+    [fileBusy, onPinsChanged, refresh, sessionId, t, workspaceId],
   );
 
   const { isDragging, dropProps } = useFileDrop(
@@ -563,12 +570,13 @@ function SessionContextPins({
     async (pinId: string) => {
       try {
         await removeSessionPin(sessionId, pinId);
+        onPinsChanged?.();
         await refresh();
       } catch {
         if (mounted.current) setError(t.removeFailed);
       }
     },
-    [refresh, sessionId, t],
+    [onPinsChanged, refresh, sessionId, t],
   );
 
   const kindLabel = (kind: SessionPinKind): string =>

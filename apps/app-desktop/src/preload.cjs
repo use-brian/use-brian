@@ -218,10 +218,12 @@ ipcRenderer.on("Use Brian:update-status", (_event, status) => {
 // the fields reaches the app.
 const browserPaneListeners = new Set();
 ipcRenderer.on("embedded-browser:pane", (_event, payload) => {
-  if (!payload || typeof payload !== "object" || payload.type !== "tab-opened") return;
-  const { chatKey, browserId, url } = payload;
+  if (!payload || typeof payload !== "object" || (payload.type !== "tab-opened" && payload.type !== "tab-updated")) return;
+  const { chatKey, browserId, url, title } = payload;
   if ((chatKey !== null && typeof chatKey !== "string") || typeof browserId !== "string" || typeof url !== "string") return;
-  const event = { type: "tab-opened", chatKey, browserId, url };
+  const event = payload.type === "tab-opened"
+    ? { type: "tab-opened", chatKey, browserId, url }
+    : { type: "tab-updated", chatKey, browserId, url, title: typeof title === "string" ? title : null };
   for (const listener of browserPaneListeners) listener(event);
 });
 ipcRenderer.on("Use Brian:link-navigation-state", (_event, state) => {

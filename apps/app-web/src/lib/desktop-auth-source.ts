@@ -92,7 +92,10 @@ export type DesktopBrowserControlMessage =
   | { type: "pane-chat"; chatKey: string | null };
 
 /** A tab Brian opened in the shell's browser, for that chat's side pane. */
-export type DesktopBrowserPaneEvent = { type: "tab-opened"; chatKey: string | null; browserId: string; url: string };
+export type DesktopBrowserPaneEvent =
+  | { type: "tab-opened"; chatKey: string | null; browserId: string; url: string }
+  /** Where a tab the app shows moved to (D7: a pinned browser tab saves its current URL). */
+  | { type: "tab-updated"; chatKey: string | null; browserId: string; url: string; title: string | null };
 
 /** Mirrors the shell's `RendererUpdateStatus` (app-desktop `auto-update.ts`). */
 export type DesktopUpdateStatus =

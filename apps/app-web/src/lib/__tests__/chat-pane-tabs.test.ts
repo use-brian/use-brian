@@ -5,11 +5,14 @@ import {
   closePaneTab,
   initPane,
   openInPane,
+  panePinFor,
   paneRefId,
   paneTabCount,
+  refreshPaneRef,
   setPaneOpen,
   setPaneTabPin,
   stepPaneTab,
+  syncPinnedTabs,
   tabRef,
   updatePaneTabRef,
   WORK_TAB_KEY,
@@ -99,5 +102,70 @@ describe("[COMP:app-web/chat-pane-tabs] the side pane's tab model", () => {
     let state = openInPane(initPane(true), { kind: "page", pageId: "p", title: null });
     state = updatePaneTabRef(state, state.activeKey, { kind: "page", pageId: "p", title: "Plan" });
     expect(activeTab(state).history).toEqual([{ kind: "page", pageId: "p", title: "Plan" }]);
+  });
+});
+
+describe("[COMP:app-web/chat-pane-tabs] pinned tabs are the chat's pins (chat-parity D7)", () => {
+  it("maps each tab kind to the pin it writes; Work, raw documents and chat uploads do not pin", () => {
+    expect(panePinFor(page("pg"))).toEqual({ kind: "page", refId: "pg" });
+    expect(panePinFor(url("https://a.example/x"))).toEqual({ kind: "url", url: "https://a.example/x" });
+    expect(panePinFor({ kind: "file", fileId: "f1", name: "a.pdf", mime: "application/pdf", source: "durable" }))
+      .toEqual({ kind: "file", refId: "f1" });
+    expect(panePinFor({ kind: "file", fileId: "c1", name: "a.pdf", mime: "application/pdf" })).toBeNull();
+    // A pinned browser tab saves its current URL as a url pin.
+    expect(panePinFor({ kind: "browser", browserId: "h-1", url: "https://now.example/page" }))
+      .toEqual({ kind: "url", url: "https://now.example/page" });
+    expect(panePinFor({ kind: "browser", browserId: "computer:s", url: null })).toBeNull();
+    expect(panePinFor({ kind: "work" })).toBeNull();
+    expect(panePinFor(doc("d"))).toBeNull();
+  });
+
+  it("restores pins as pinned tabs first, without focusing them or opening the pane", () => {
+    const start = openInPane(initPane(false), doc("open"), { reveal: false });
+    const state = syncPinnedTabs(start, [
+      { id: "pin-1", ref: page("pg") },
+      { id: "pin-2", ref: url("https://a.example/") },
+    ]);
+    expect(state.tabs.map((tab) => tab.pinId ?? null)).toEqual([null, "pin-1", "pin-2", null]);
+    expect(state.tabs.map((tab) => tabRef(tab).kind)).toEqual(["work", "page", "url", "document"]);
+    expect(state.activeKey).toBe(start.activeKey);
+    expect(state.open).toBe(false);
+    // Nothing changed: the same object, so the store does not notify.
+    expect(syncPinnedTabs(state, [
+      { id: "pin-1", ref: page("pg") },
+      { id: "pin-2", ref: url("https://a.example/") },
+    ])).toBe(state);
+  });
+
+  it("adopts the open tab already showing a pin instead of opening a second", () => {
+    const start = openInPane(initPane(true), url("https://a.example/doc"));
+    const state = syncPinnedTabs(start, [{ id: "pin-1", ref: url("https://a.example/doc#top") }]);
+    expect(state.tabs).toHaveLength(2);
+    expect(state.tabs[1]).toMatchObject({ key: start.activeKey, pinId: "pin-1" });
+  });
+
+  it("an unpin anywhere leaves the tab open, unpinned", () => {
+    const pinned = syncPinnedTabs(initPane(true), [{ id: "pin-1", ref: page("pg") }]);
+    const state = syncPinnedTabs(pinned, []);
+    expect(state.tabs).toHaveLength(2);
+    expect(state.tabs[1]!.pinId).toBeNull();
+  });
+
+  it("one tab per pin: the copy restored while the pin request was in flight goes", () => {
+    let state = openInPane(initPane(true), { kind: "browser", browserId: "h-1", url: "https://now.example/" });
+    const browserKey = state.activeKey;
+    // The pins_changed echo landed first and restored the new url pin as its own tab.
+    state = syncPinnedTabs(state, [{ id: "pin-9", ref: url("https://now.example/") }]);
+    expect(state.tabs).toHaveLength(3);
+    state = setPaneTabPin(state, browserKey, "pin-9");
+    expect(state.tabs.map((tab) => tab.key)).toEqual([WORK_TAB_KEY, browserKey]);
+    expect(state.tabs[1]!.pinId).toBe("pin-9");
+  });
+
+  it("refreshes where an open browser tab is without opening one that is not", () => {
+    const start = openInPane(initPane(true), { kind: "browser", browserId: "h-1", url: "https://a.example/" });
+    const moved = refreshPaneRef(start, { kind: "browser", browserId: "h-1", url: "https://a.example/next", title: "Next" });
+    expect(tabRef(activeTab(moved))).toEqual({ kind: "browser", browserId: "h-1", url: "https://a.example/next", title: "Next" });
+    expect(refreshPaneRef(start, { kind: "browser", browserId: "h-2", url: "https://b.example/" })).toBe(start);
   });
 });

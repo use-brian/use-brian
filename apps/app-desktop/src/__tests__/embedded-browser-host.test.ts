@@ -501,5 +501,24 @@ describe('[COMP:app-desktop/embedded-browser] the browser inside the Chat side p
     expect(callbacks.empty).toHaveBeenCalledOnce();
     expect(task).toBeTypeOf('number');
   });
+
+  it('keeps the app tab on the page an announced tab moved to, so a pin saves where it is (D7)', async () => {
+    const { h, main } = setup();
+    h.setSlot({ chatKey: 'chat-a', rect });
+    const task = await h.createTab('https://task.example/', true);
+    const mine = await h.createTab('https://mine.example/', false);
+    const contentsOf = (id: number) => viewOf(id).webContents;
+    contentsOf(task).url = 'https://task.example/results';
+    contentsOf(task).emit('did-navigate');
+    contentsOf(mine).url = 'https://mine.example/next';
+    contentsOf(mine).emit('did-navigate');
+    const updates = main.webContents.send.mock.calls
+      .filter(([channel, payload]: [string, { type: string }]) => channel === 'embedded-browser:pane' && payload.type === 'tab-updated')
+      .map(([, payload]: [string, unknown]) => payload);
+    // Only the tab the app shows reports; the user's own toolbar tab stays private.
+    expect(updates).toEqual([{
+      type: 'tab-updated', chatKey: 'chat-a', browserId: h.tabs()[0].handle, url: 'https://task.example/results', title: 'Example',
+    }]);
+  });
 });
 

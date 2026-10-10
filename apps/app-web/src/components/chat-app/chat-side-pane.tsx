@@ -19,6 +19,9 @@
  * The host renders the bodies it owns (`renderTab`: Work, and the kinds
  * later phases add); this component renders the `document` and `file`
  * bodies itself.
+ * - **Pins (D7):** with `pins`, a pinnable tab offers Pin / Unpin. A pinned
+ *   tab is a `session_pins` row: it shows a pin glyph and has no close
+ *   control (unpin it first), and every client of the chat shows it.
  *
  * Spec: docs/architecture/features/chat-app.md -> "Side pane".
  *
@@ -37,6 +40,8 @@ import {
   Monitor,
   NotebookText,
   Paperclip,
+  Pin,
+  PinOff,
   X,
 } from "lucide-react";
 import { format, useT } from "@/lib/i18n/client";
@@ -47,6 +52,7 @@ import {
 } from "@/components/operator/resizable-peek";
 import { FilePreviewBody } from "@/components/doc/file-preview";
 import type { ChatPane } from "@/lib/chat-pane-session";
+import type { ChatPanePins } from "@/lib/use-chat-pane-pins";
 import {
   activeTab,
   canGoBackInTab,
@@ -116,6 +122,7 @@ export function ChatSidePane({
   pane,
   renderTab,
   tabActions,
+  pins = null,
 }: {
   workspaceId: string;
   /** The open chat: a desktop browser slot reports it so the shell swaps tabs (T7). */
@@ -128,6 +135,8 @@ export function ChatSidePane({
   renderTab: (ref: PaneRef, tab: PaneTab) => ReactNode | undefined;
   /** Extra per-tab actions (pin, open full page, open in browser, detach). */
   tabActions?: (ref: PaneRef, tab: PaneTab) => ReactNode;
+  /** Pinned tabs (D7); null where this chat cannot pin. */
+  pins?: ChatPanePins | null;
 }) {
   const t = useT().chatApp.sidePane;
   const router = useRouter();
@@ -185,6 +194,25 @@ export function ChatSidePane({
         {t.openInBrowser}
       </a>
     ) : null;
+  const pinAction =
+    pins && current.key !== WORK_TAB_KEY && pins.pinnable(current) ? (
+      <>
+        {pins.failedKey === current.key && (
+          <span role="status" className="px-1 text-xs text-destructive">
+            {current.pinId ? t.unpinFailed : t.pinFailed}
+          </span>
+        )}
+        <button
+          type="button"
+          onClick={() => pins.toggle(current)}
+          aria-pressed={!!current.pinId}
+          className="inline-flex min-h-11 items-center gap-1.5 rounded-md px-2 text-xs text-muted-foreground hover:bg-muted hover:text-foreground sm:min-h-7"
+        >
+          {current.pinId ? <PinOff className="size-3.5" aria-hidden /> : <Pin className="size-3.5" aria-hidden />}
+          {current.pinId ? t.unpinTab : t.pinTab}
+        </button>
+      </>
+    ) : null;
   const historyNav = current.key !== WORK_TAB_KEY && (canGoBackInTab(current) || canGoForwardInTab(current));
 
   return (
@@ -236,8 +264,14 @@ export function ChatSidePane({
                 >
                   <TabIcon kind={tabValue.kind} />
                   <span className="truncate">{label}</span>
+                  {tab.pinId && (
+                    <>
+                      <Pin className="size-3 shrink-0 text-muted-foreground" aria-hidden />
+                      <span className="sr-only">{t.pinned}</span>
+                    </>
+                  )}
                 </button>
-                {tab.key !== WORK_TAB_KEY && (
+                {tab.key !== WORK_TAB_KEY && !tab.pinId && (
                   <button
                     type="button"
                     onClick={() => pane.close(tab.key)}
@@ -264,7 +298,7 @@ export function ChatSidePane({
         </button>
       </header>
 
-      {(historyNav || tabActions || builtinAction) && current.key !== WORK_TAB_KEY && (
+      {(historyNav || tabActions || builtinAction || pinAction) && current.key !== WORK_TAB_KEY && (
         <div className="flex shrink-0 items-center gap-1 border-b border-border/70 px-2 py-1">
           {historyNav && (
             <>
@@ -292,6 +326,7 @@ export function ChatSidePane({
           )}
           <div className="ml-auto flex items-center gap-1">
             {tabActions?.(ref, current)}
+            {pinAction}
             {builtinAction}
           </div>
         </div>

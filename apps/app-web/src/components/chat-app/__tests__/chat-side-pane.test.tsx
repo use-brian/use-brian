@@ -1,7 +1,8 @@
 // @vitest-environment jsdom
 /**
  * [COMP:app-web/chat-side-pane] The Chat side pane shell and its built-in
- * `document` / `file` tab bodies (chat-parity D4-D6, T10, T11).
+ * `document` / `file` tab bodies (chat-parity D4-D6, T10, T11), and its pin
+ * controls (D7).
  */
 import { act } from "react";
 import { createRoot, type Root } from "react-dom/client";
@@ -11,6 +12,7 @@ import { en } from "@/lib/i18n/dictionaries/en";
 import type { Dictionary } from "@/lib/i18n/dictionaries";
 import { resetChatPaneSession, useChatPane, type ChatPane } from "@/lib/chat-pane-session";
 import type { PaneRef } from "@/lib/chat-pane-tabs";
+import type { ChatPanePins } from "@/lib/use-chat-pane-pins";
 import { ChatSidePane, ChatSidePaneToggle } from "../chat-side-pane";
 
 const router = vi.hoisted(() => ({ push: vi.fn() }));
@@ -30,6 +32,7 @@ vi.mock("@/lib/use-doc-media", () => ({
 let root: Root;
 let host: HTMLDivElement;
 let pane: ChatPane;
+let pinsProp: ChatPanePins | null = null;
 
 function Harness({ work }: { work: string }) {
   pane = useChatPane("ws", "chat-1", () => true);
@@ -40,6 +43,7 @@ function Harness({ work }: { work: string }) {
         workspaceId="ws"
         chatKey="chat-1"
         pane={pane}
+        pins={pinsProp}
         renderTab={(ref) => (ref.kind === "work" ? <p data-testid="work">{work}</p> : undefined)}
       />
     </>
@@ -67,6 +71,7 @@ const docRef: PaneRef = {
 
 beforeEach(() => {
   resetChatPaneSession();
+  pinsProp = null;
   mount();
 });
 afterEach(() => {
@@ -135,5 +140,30 @@ describe("[COMP:app-web/chat-side-pane] one right pane with tabs", () => {
     const out = Array.from(host.querySelectorAll("a")).find((a) => a.textContent === en.chatApp.sidePane.openInBrowser);
     expect(out?.getAttribute("href")).toBe("https://example.com/spec");
     expect(out?.getAttribute("target")).toBe("_blank");
+  });
+
+  it("D7: Pin writes through the host; a pinned tab shows its glyph, cannot be closed, and offers Unpin", () => {
+    const toggle = vi.fn();
+    pinsProp = { pinnable: (tab) => tab.key !== "work" && !tab.history.some((ref) => ref.kind === "document"), toggle, failedKey: null };
+    act(() => pane.open(docRef));
+    // A raw document does not pin.
+    const buttonNamed = (name: string) =>
+      Array.from(host.querySelectorAll("button")).find((button) => button.textContent === name);
+    expect(buttonNamed(en.chatApp.sidePane.pinTab)).toBeUndefined();
+    act(() => pane.open({ kind: "page", pageId: "pg-1", title: "Plan" }));
+    const pageKey = pane.state.activeKey;
+    act(() => buttonNamed(en.chatApp.sidePane.pinTab)!.click());
+    expect(toggle).toHaveBeenCalledWith(expect.objectContaining({ key: pageKey }));
+    act(() => pane.setPin(pageKey, "pin-1"));
+    // Pinned tabs sit before open ones, with a glyph and no close control.
+    expect(tabs().map((tab) => tab.textContent)).toEqual(["Work", `Plan${en.chatApp.sidePane.pinned}`, "Brief.md"]);
+    expect(host.querySelector('button[aria-label="Close Plan"]')).toBeNull();
+    expect(host.querySelector('button[aria-label="Close Brief.md"]')).not.toBeNull();
+    const unpin = buttonNamed(en.chatApp.sidePane.unpinTab)!;
+    expect(unpin.getAttribute("aria-pressed")).toBe("true");
+    pinsProp = { ...pinsProp, failedKey: pageKey };
+    act(() => pane.activate(pageKey));
+    act(() => pane.open({ kind: "page", pageId: "pg-1", title: "Plan" }));
+    expect(host.textContent).toContain(en.chatApp.sidePane.unpinFailed);
   });
 });

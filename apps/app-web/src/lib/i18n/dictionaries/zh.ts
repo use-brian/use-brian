@@ -8636,6 +8636,11 @@ export const zh: Dictionary = {
       browserOpen: "開啟",
       browserNoFrame: "正在等待頁面的第一個畫面",
       browserDesktopOnly: "此瀏覽器分頁在桌面應用程式中開啟。",
+      pinTab: "釘選分頁",
+      unpinTab: "取消釘選",
+      pinned: "已釘選",
+      pinFailed: "無法釘選此分頁",
+      unpinFailed: "無法取消釘選此分頁",
     },
     documentViewer: {
       label: "原始文件",

@@ -253,7 +253,8 @@ import {
   updateChatPane,
   useChatPane,
 } from "@/lib/chat-pane-session";
-import { openInPane, type OpenOptions, type PaneRef } from "@/lib/chat-pane-tabs";
+import { openInPane, refreshPaneRef, type OpenOptions, type PaneRef } from "@/lib/chat-pane-tabs";
+import { useChatPanePins } from "@/lib/use-chat-pane-pins";
 import {
   desktopBrowserPane,
   isBrowserToolName,
@@ -1470,6 +1471,15 @@ export function ChatSurface({ workspaceId }: { workspaceId: string }) {
   /** Bumped by the room stream's `pins_changed` signal — Work Bench
    *  refetches through its own loader (signals, never data). */
   const [pinsEpoch, setPinsEpoch] = useState(0);
+  const bumpPins = useCallback(() => setPinsEpoch((n) => n + 1), []);
+  /** Pinned tabs are the chat's pins (D7): restored first, synced on `pins_changed`. */
+  const panePins = useChatPanePins({
+    workspaceId,
+    sessionId: activeSessionId,
+    enabled: panePolicy.pins,
+    refreshKey: pinsEpoch,
+    onChanged: bumpPins,
+  });
   /**
    * Open something in THIS chat's side pane (D9), keyed by the session the
    * send or stream belongs to right now (a fresh pane's first turn adopts
@@ -1491,6 +1501,7 @@ export function ChatSurface({ workspaceId }: { workspaceId: string }) {
   // ── The browser in the side pane (chat-parity T7, D8, D10) ─────────
   // Desktop: the shell tells us which tabs Brian opened; each opens in its
   // own chat's pane (keyed by the chat it belongs to, not the open one).
+  // It also says where those tabs go, so pinning one saves that URL (D7).
   useEffect(
     () =>
       subscribeBrowserPane((event) => {
@@ -1498,7 +1509,10 @@ export function ChatSurface({ workspaceId }: { workspaceId: string }) {
         updateChatPane(
           workspaceId,
           chatKey,
-          (state) => openInPane(state, { kind: "browser", browserId: event.browserId, url: event.url }),
+          (state) =>
+            event.type === "tab-updated"
+              ? refreshPaneRef(state, { kind: "browser", browserId: event.browserId, url: event.url, title: event.title })
+              : openInPane(state, { kind: "browser", browserId: event.browserId, url: event.url }),
           !isPhoneViewport(),
         );
       }),
@@ -5284,6 +5298,7 @@ export function ChatSurface({ workspaceId }: { workspaceId: string }) {
         workspaceId={workspaceId}
         chatKey={activeSessionId}
         pane={pane}
+        pins={panePins}
         renderTab={(ref) =>
           ref.kind === "work" ? (
             panePolicy.pins && activeSessionId ? (
@@ -5300,6 +5315,7 @@ export function ChatSurface({ workspaceId }: { workspaceId: string }) {
                 tools={workBenchTools}
                 lastProgressAt={workBenchTurnActive ? lastProgressAt : null}
                 onStopTurn={stopActiveTurn}
+                onPinsChanged={bumpPins}
               />
             ) : (
               <p className="px-4 py-6 text-sm text-muted-foreground">{t.sidePane.workEmpty}</p>

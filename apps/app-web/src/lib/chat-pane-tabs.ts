@@ -239,12 +239,86 @@ export function stepPaneTab(state: ChatPaneState, delta: -1 | 1): ChatPaneState 
 
 /**
  * Mark a tab pinned (with its `session_pins` row id) or unpinned (`null`),
- * keeping the strip's fixed order.
+ * keeping the strip's fixed order. One tab per pin: a copy of the same pin
+ * that `syncPinnedTabs` restored while the pin request was in flight goes.
  */
 export function setPaneTabPin(state: ChatPaneState, key: string, pinId: string | null): ChatPaneState {
-  if (key === WORK_TAB_KEY) return state;
-  const tabs = state.tabs.map((tab) => (tab.key === key ? { ...tab, pinId } : tab));
-  return { ...state, tabs: ordered(tabs) };
+  if (key === WORK_TAB_KEY || !state.tabs.some((tab) => tab.key === key)) return state;
+  const tabs = state.tabs
+    .filter((tab) => tab.key === key || !pinId || tab.pinId !== pinId)
+    .map((tab) => (tab.key === key ? { ...tab, pinId } : tab));
+  const activeKey = tabs.some((tab) => tab.key === state.activeKey) ? state.activeKey : key;
+  return { ...state, tabs: ordered(tabs), activeKey };
+}
+
+/** The `session_pins` row a tab pins as (D7). */
+export type PanePin = { kind: "page" | "file"; refId: string } | { kind: "url"; url: string };
+
+function webUrl(url: string | null | undefined): url is string {
+  try {
+    const protocol = new URL(url ?? "").protocol;
+    return protocol === "http:" || protocol === "https:";
+  } catch {
+    return false;
+  }
+}
+
+/**
+ * What pinning a reference writes (D7), or null when it cannot be pinned: a
+ * page by id; a stored workspace file by id (a chat upload is no durable
+ * reference); a web link; a browser tab as its current URL. Work and raw
+ * documents do not pin.
+ */
+export function panePinFor(ref: PaneRef): PanePin | null {
+  switch (ref.kind) {
+    case "page":
+      return { kind: "page", refId: ref.pageId };
+    case "file":
+      return ref.source === "durable" && ref.fileId ? { kind: "file", refId: ref.fileId } : null;
+    case "url":
+      return webUrl(ref.url) ? { kind: "url", url: ref.url } : null;
+    case "browser":
+      return webUrl(ref.url) ? { kind: "url", url: ref.url } : null;
+    default:
+      return null;
+  }
+}
+
+/**
+ * Reconcile the strip with the chat's pins (D7): each pin is one pinned tab.
+ * A pin no tab carries adopts the open tab already showing it, or is
+ * restored as a new pinned tab, unfocused and without expanding the pane. A
+ * tab whose pin is gone (unpinned here or on another device) stays open,
+ * unpinned. A second pin of something a pinned tab already shows gets no
+ * tab of its own. Returns `state` itself when nothing changes.
+ */
+export function syncPinnedTabs(
+  state: ChatPaneState,
+  pins: ReadonlyArray<{ id: string; ref: PaneRef }>,
+): ChatPaneState {
+  const ids = new Set(pins.map((pin) => pin.id));
+  let changed = false;
+  let tabs = state.tabs.map((tab) => {
+    if (!tab.pinId || ids.has(tab.pinId)) return tab;
+    changed = true;
+    return { ...tab, pinId: null };
+  });
+  let nextKey = state.nextKey;
+  for (const pin of pins) {
+    if (tabs.some((tab) => tab.pinId === pin.id)) continue;
+    const id = paneRefId(pin.ref);
+    const showing = tabs.filter((tab) => tab.key !== WORK_TAB_KEY && paneRefId(tabRef(tab)) === id);
+    if (showing.some((tab) => tab.pinId)) continue;
+    changed = true;
+    const open = showing[0];
+    if (open) {
+      tabs = tabs.map((tab) => (tab === open ? { ...tab, pinId: pin.id } : tab));
+    } else {
+      tabs = [...tabs, { key: `p${nextKey}`, history: [pin.ref], cursor: 0, pinId: pin.id }];
+      nextKey += 1;
+    }
+  }
+  return changed ? { ...state, tabs: ordered(tabs), nextKey } : state;
 }
 
 /**
@@ -260,6 +334,17 @@ export function updatePaneTabRef(state: ChatPaneState, key: string, ref: PaneRef
         : tab,
     ),
   };
+}
+
+/**
+ * Refresh the reference an open tab shows (same identity: a browser tab's
+ * new URL or title) without focusing it or opening the pane. Nothing open
+ * shows it: no change.
+ */
+export function refreshPaneRef(state: ChatPaneState, ref: PaneRef): ChatPaneState {
+  const id = paneRefId(ref);
+  const tab = state.tabs.find((entry) => entry.key !== WORK_TAB_KEY && paneRefId(tabRef(entry)) === id);
+  return tab ? updatePaneTabRef(state, tab.key, ref) : state;
 }
 
 /** How many tabs the header badge counts: everything but Work. */

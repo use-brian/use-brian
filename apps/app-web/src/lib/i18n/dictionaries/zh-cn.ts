@@ -8506,6 +8506,11 @@ export const zhCN: Dictionary = {
       browserOpen: "打开",
       browserNoFrame: "正在等待页面的第一个画面",
       browserDesktopOnly: "此浏览器标签页在桌面应用中打开。",
+      pinTab: "固定标签页",
+      unpinTab: "取消固定",
+      pinned: "已固定",
+      pinFailed: "无法固定此标签页",
+      unpinFailed: "无法取消固定此标签页",
     },
     documentViewer: {
       label: "原始文档",
