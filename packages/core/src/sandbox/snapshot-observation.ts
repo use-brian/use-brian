@@ -33,6 +33,15 @@ export class SnapshotObservationState {
     return provider
   }
 
+  /** True when this state already minted `ref` and no longer binds it, so resolve() fails now
+   * and forever: ids are minted monotonically, and a reset or baseline-less scan mints fresh ids,
+   * so a retired ref is never re-bound. A ref not yet minted is NOT retired - a scan still in
+   * flight could mint and bind it, so callers must keep treating it as unknown. */
+  isRetired(ref: string): boolean {
+    const minted = /^@e([1-9][0-9]*)$/.exec(ref)
+    return minted !== null && Number(minted[1]) <= this.serial && !this.bindings.has(ref)
+  }
+
   observe(snapshot: BrowserSnapshot, options: {
     scope: string
     mode?: 'interactive' | 'full'

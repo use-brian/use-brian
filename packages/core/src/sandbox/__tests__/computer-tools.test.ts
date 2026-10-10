@@ -246,6 +246,25 @@ describe('[COMP:sandbox/browser-tools] Computer tool surface', () => {
     expect(await tools.browserClick.resolveConfirmation!(ctx, { ref: '@e3' })).toBe(false)
   })
 
+  it('a ref retired by a fresh scan fails as stale without raising an approval prompt', async () => {
+    const local = fakeProvider('local')
+    const tools = createComputerTools({ local, cloud: fakeProvider('cloud') })
+    const ctx = toolContext()
+    await run(tools.browserNavigate, { url: 'https://www.linkedin.com/messaging/' }, ctx)
+    // A full observation resets the baseline, so every ref from the navigate is retired.
+    await run(tools.browserSnapshot, { mode: 'full', observation: 'full' }, ctx)
+    // Retired, even with a send-like label, submit intent or policy 'ask': the click can never run.
+    expect(await tools.browserClick.resolveConfirmation!(ctx, { ref: '@e2' })).toBe(false)
+    expect(await tools.browserClick.resolveConfirmation!(ctx, { ref: '@e2', intent: 'submit' })).toBe(false)
+    // A ref never minted stays fail-closed: a batched scan still in flight could bind it.
+    expect(await tools.browserClick.resolveConfirmation!(ctx, { ref: '@e999' })).toBe(true)
+    const clicks = local.calls.filter(c => c.startsWith('click')).length
+    const res = await run(tools.browserClick, { ref: '@e2' }, ctx)
+    expect(res.isError).toBe(true)
+    expect(String(res.data)).toContain('Stale or unknown browser ref @e2')
+    expect(local.calls.filter(c => c.startsWith('click')).length).toBe(clicks)
+  })
+
   it('the live toggle wins over the profile default for the session (R2-3)', async () => {
     const local = fakeProvider('local')
     const cloud = fakeProvider('cloud')

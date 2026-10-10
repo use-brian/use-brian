@@ -154,8 +154,15 @@ describe('[COMP:sandbox/browser-fill-form] tool integration', () => {
     expect(output.slice(output.indexOf('Observation')).length).toBeLessThan(20_000)
 
     const overCap = size > 24_000
-    // Cached labels must be cleared too: a now-unknown click fails closed.
-    expect(await f.tools.browserClick.resolveConfirmation!(context, { ref: '@e1' })).toBe(overCap)
+    // Over the cap the ref is retired: the click fails as stale below instead
+    // of asking a human to approve a click that cannot run. Under the cap the
+    // cached label is a plain textbox, so neither case prompts.
+    expect(await f.tools.browserClick.resolveConfirmation!(context, { ref: '@e1' })).toBe(false)
+    if (overCap) {
+      const clicked = await f.run(f.tools.browserClick, { ref: '@e1' })
+      expect(clicked.data).toContain('Stale or unknown browser ref @e1')
+      expect(f.provider.click).not.toHaveBeenCalled()
+    }
     const typed = await f.run(f.tools.browserType, { ref: '@e1', text: 'retry' })
     if (overCap) {
       expect(typed.isError).toBe(true)

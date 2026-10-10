@@ -1134,6 +1134,14 @@ export function createComputerTools(opts: CreateComputerToolsOptions): ComputerT
 
   // ── browserClick (send-gated) ────────────────────────────────
 
+  // Clicks the send gate let through unprompted because their ref was retired.
+  // execute() fails these as stale from this record, not by re-reading the
+  // browse state: that state can be evicted and recreated with its ref serial
+  // back at zero, so a re-read could find the same ref minted for another node.
+  // Counted, so two batched clicks on one retired ref each find their record.
+  const retiredClickSkips = new Map<string, number>()
+  const retiredSkipKey = (sessionId: string, ref: string) => `${sessionId}\x00${ref}`
+
   const browserClick = buildTool({
     name: 'browserClick',
     requiresCapability: 'computer',
@@ -1154,11 +1162,26 @@ export function createComputerTools(opts: CreateComputerToolsOptions): ComputerT
     // click confirms when the model declared submit intent, when the target's
     // accessible name is send-like, or — fail-closed — when the label is
     // unknown (no snapshot cached this session, e.g. after a process restart).
+    // A ref this session already retired is the exception: execute() fails it
+    // as stale without clicking, so asking a human to approve it only stalls
+    // the turn on a prompt for a click that cannot happen. Retired is checked,
+    // not "unbound": confirmation runs while an earlier batched tool may still
+    // be scanning, and that scan could mint and bind a ref the model guessed.
     resolveConfirmation: async (context, input) => {
-      if (await policyAsk('browserClick')(context)) return true
       const parsed = input as { ref?: string; intent?: string } | undefined
+      const state = sessions.get(context.sessionId)
+      if (parsed?.ref && state?.observations.isRetired(parsed.ref)) {
+        const key = retiredSkipKey(context.sessionId, parsed.ref)
+        // Bounded by evicting the oldest key only, never a pending batch's.
+        if (!retiredClickSkips.has(key) && retiredClickSkips.size >= 1_000) {
+          retiredClickSkips.delete(retiredClickSkips.keys().next().value!)
+        }
+        retiredClickSkips.set(key, (retiredClickSkips.get(key) ?? 0) + 1)
+        return false
+      }
+      if (await policyAsk('browserClick')(context)) return true
       if (parsed?.intent === 'submit') return true
-      const label = parsed?.ref ? sessions.get(context.sessionId)?.refLabels.get(parsed.ref) : undefined
+      const label = parsed?.ref ? state?.refLabels.get(parsed.ref) : undefined
       if (label === undefined) return true
       return SEND_LIKE_LABEL_PATTERN.test(label)
     },
@@ -1177,6 +1200,13 @@ export function createComputerTools(opts: CreateComputerToolsOptions): ComputerT
     timeoutMs: 90_000,
     maxResultSizeChars: 24_000,
     async execute(input, context) {
+      const skipKey = retiredSkipKey(context.sessionId, input.ref)
+      const skips = retiredClickSkips.get(skipKey)
+      if (skips !== undefined) {
+        if (skips > 1) retiredClickSkips.set(skipKey, skips - 1)
+        else retiredClickSkips.delete(skipKey)
+        return { data: `ERROR: Stale or unknown browser ref ${input.ref}; take browserSnapshot again.`, isError: true }
+      }
       const gate = await gates('browserClick', context)
       if ('error' in gate) return gate.error
       const backend = gate.state.backend

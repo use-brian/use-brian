@@ -49,6 +49,19 @@ describe('semantic snapshot observations', () => {
     if (['pagination', 'truncation', 'duplicate'].includes(reason)) expect(state.observe(page(), options).rendered).toContain('v3 full')
   })
 
+  it('retires a dropped ref for good, but never a ref it has not minted yet', () => {
+    const state = new SnapshotObservationState()
+    state.observe(page(), options)
+    expect(state.isRetired('@e1')).toBe(false)
+    state.observe(page(), { ...options, observation: 'full' })
+    // The reset minted fresh ids; the old ones can never be re-bound.
+    expect(state.isRetired('@e1')).toBe(true)
+    expect(state.observe(page(), options).refLabels.has('@e1')).toBe(false)
+    expect(state.isRetired('@e1')).toBe(true)
+    expect(state.isRetired('@e99')).toBe(false)
+    expect(state.isRetired('not-a-ref')).toBe(false)
+  })
+
   it('auto retains full when a delta is larger, while diff explicitly requests it', () => {
     const state = new SnapshotObservationState()
     const tiny = { ...options, render: () => 'tiny' }
