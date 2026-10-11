@@ -77,6 +77,38 @@ describe('[COMP:app-web/office-surface-cache] bounded Office metadata',()=>{
     expect(JSON.parse(vi.mocked(console.warn).mock.calls[1][1] as string)).toMatchObject({reason:'body_parse_failed',status:200});
     expect(JSON.stringify(vi.mocked(console.warn).mock.calls)).not.toMatch(/private transport detail|private malformed body/);
   });
+  it('separates response wait from body reading without extending the original deadline',async()=>{
+    state.fetch.mockImplementation(async()=>{
+      vi.advanceTimersByTime(6000);
+      const reply=response({artifacts:[row]},'15000');
+      const read=reply.json.bind(reply);
+      vi.spyOn(reply,'json').mockImplementation(async()=>{vi.advanceTimersByTime(2000);return read();});
+      return reply;
+    });
+    const result=await api.listOfficeArtifacts('workspace-private');
+    expect(officeMetadataRemaining(result,state.viewer)).toBe(7000);
+    const serialized=vi.mocked(console.warn).mock.calls[0][1] as string;
+    expect(JSON.parse(serialized)).toMatchObject({reason:'renewal_slack_insufficient',requestDurationMs:8000,responseWaitMs:6000,bodyReadMs:2000,remainingMs:7000});
+    expect(serialized).not.toMatch(/workspace-private|viewer-a|artifact-a|Department report|\/api\//);
+    expect(JSON.stringify(result)).not.toMatch(/responseWaitMs|bodyReadMs/);
+    vi.advanceTimersByTime(7001);expect(officeMetadataRemaining(result,state.viewer)).toBe(0);
+  });
+  it('records only elapsed phases when a response or body fails',async()=>{
+    const failure=new Error('private transport detail');
+    state.fetch.mockImplementation(async()=>{vi.advanceTimersByTime(3000);throw failure;});
+    await expect(api.listOfficeArtifacts('workspace-a')).rejects.toBe(failure);
+    expect(JSON.parse(vi.mocked(console.warn).mock.calls[0][1] as string)).toMatchObject({reason:'transport_failed',responseWaitMs:3000,bodyReadMs:null});
+    const bodyFailure=new SyntaxError('private body detail');
+    state.fetch.mockImplementation(async()=>{
+      vi.advanceTimersByTime(1000);
+      const reply=response({artifacts:[row]});
+      vi.spyOn(reply,'json').mockImplementation(async()=>{vi.advanceTimersByTime(2000);throw bodyFailure;});
+      return reply;
+    });
+    await expect(api.listOfficeArtifacts('workspace-a')).rejects.toBe(bodyFailure);
+    expect(JSON.parse(vi.mocked(console.warn).mock.calls[1][1] as string)).toMatchObject({reason:'body_parse_failed',responseWaitMs:1000,bodyReadMs:2000});
+    expect(JSON.stringify(vi.mocked(console.warn).mock.calls)).not.toMatch(/private transport detail|private body detail/);
+  });
   it('inherits both original deadlines without renewing or serializing them',()=>{
     const source=attachOfficeMetadata([row],2000,performance.now(),state.viewer);
     vi.advanceTimersByTime(700);

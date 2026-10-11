@@ -123,11 +123,14 @@ async function metadata<T extends object, B = T>(path: string, fallback: string,
   const started = performance.now(), viewerId = getUserInfo()?.id;
   let stage: "request" | "body" | "annotation" = "request";
   let response: Response | undefined, header: string | null = null, validForMs = NaN;
+  let responseReceived: number | undefined, bodyRead: number | undefined;
   let selectedValueIsObject = false;
   // Fixed codes and scalar measurements only: never log the path, body or error.
   const diagnostic = (reason: string, remainingMs?: number) => console.warn("[office_metadata_read]", JSON.stringify({
     reason, stage, status: response?.status ?? null,
     requestDurationMs: Math.round(performance.now() - started),
+    responseWaitMs: Math.round((responseReceived ?? performance.now()) - started),
+    bodyReadMs: responseReceived === undefined ? null : Math.round((bodyRead ?? performance.now()) - responseReceived),
     validForMs: Number.isFinite(validForMs) ? validForMs : null,
     headerPresent: header !== null, selectedValueIsObject,
     viewerPresent: Boolean(viewerId), viewerChanged: viewerId !== getUserInfo()?.id,
@@ -135,8 +138,10 @@ async function metadata<T extends object, B = T>(path: string, fallback: string,
   }));
   try {
     response = await authFetch(`${API_URL}/api/office/${path}`, {...init,cache:"no-store"});
+    responseReceived = performance.now();
     stage = "body";
     const body = await json<B>(response, fallback);
+    bodyRead = performance.now();
     header = response.headers.get("X-Brian-Projection-Valid-For-Ms");
     validForMs = header === null ? NaN : Number(header);
     stage = "annotation";
