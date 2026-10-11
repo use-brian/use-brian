@@ -15,7 +15,18 @@ export function officeProjectionQuery(userId:string):OfficeDbQuery|undefined {
   return context.query
 }
 
-export type OfficeMetadataReply={workspaceId?:string;body:unknown;status?:number;validForMs?:number}
+const requestOrigin=Symbol('office-projection-request-origin')
+export type OfficeMetadataReply={workspaceId?:string;body:unknown;status?:number;validForMs?:number;
+  readonly [requestOrigin]?:{started:number;allowance:number}}
+
+/** Metadata HTTP clients subtract their complete request duration from this
+ * allowance. Internal/media consumers retain the existing remaining TTL. */
+export function officeProjectionHeaderLifetime(reply:OfficeMetadataReply):number|undefined {
+  const origin=reply[requestOrigin]
+  if(!origin)return reply.validForMs
+  const elapsed=performance.now()-origin.started
+  return Number.isFinite(elapsed)&&elapsed>=0&&elapsed<origin.allowance?origin.allowance:0
+}
 
 export async function readOfficeProjection(userId:string,read:()=>Promise<OfficeMetadataReply>):Promise<OfficeMetadataReply> {
   if(contexts.getStore())throw new Error('office_projection_nested')
@@ -43,11 +54,21 @@ export async function readOfficeProjection(userId:string,read:()=>Promise<Office
       const current=await client.query(statement.sql,statement.params)
       if(JSON.stringify(current.rows)!==statement.rows)return {status:409,body:{error:'office_projection_changed'}}
     }
+    // SQL returns remaining time at its own evaluation. Sampling before the
+    // query keeps query/response latency from extending an authority deadline.
+    const lifetimeStarted=performance.now()
     const lifetime=await client.query<{ttl:number}>('SELECT department_media_valid_for_ms($1) AS ttl',[reply.workspaceId])
-    const validForMs=Math.floor(Math.min(30_000,lifetime.rows[0]?.ttl??0,reply.validForMs??Number.POSITIVE_INFINITY)-(performance.now()-started))
+    const ttl=lifetime.rows[0]?.ttl??0
+    const elapsed=performance.now()-started
+    const validForMs=Math.floor(Math.min(30_000,ttl,reply.validForMs??Number.POSITIVE_INFINITY)-elapsed)
     if(!Number.isFinite(validForMs)||validForMs<=0)return {status:404,body:{error:'Office metadata unavailable'}}
+    const allowance=Math.floor(Math.min(30_000,ttl+(lifetimeStarted-started),reply.validForMs??Number.POSITIVE_INFINITY))
+    if(!Number.isFinite(ttl)||ttl<=0||!Number.isFinite(lifetimeStarted-started)||lifetimeStarted<started||!Number.isFinite(allowance)||allowance<=elapsed)
+      return {status:404,body:{error:'Office metadata unavailable'}}
     await client.query('COMMIT')
-    return {...reply,validForMs}
+    const result:OfficeMetadataReply={...reply,validForMs}
+    Object.defineProperty(result,requestOrigin,{value:{started,allowance}})
+    return result
   } finally {
     context.active=false
     await rollbackAndRelease(client)
