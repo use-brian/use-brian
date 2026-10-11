@@ -232,6 +232,12 @@ export type WhatsappBotDeps = {
    * docs/architecture/channels/whatsapp.md → "BYON bot mode".
    */
   runAssistant?: (input: WhatsappBotInput) => Promise<void>
+  /**
+   * An un-triggered group message in full-assistant mode. A group bound to
+   * the workspace keeps it as a room post that runs no turn
+   * (unified-sessions D4); otherwise it is dropped as before.
+   */
+  postPassive?: (input: WhatsappBotInput) => Promise<void>
 }
 
 /**
@@ -282,7 +288,10 @@ export function buildWhatsappBotHandler(
       //    Groups still require a matching `reply` rule. The legacy lightweight
       //    path keeps the trigger gate for DMs too (no `runAssistant`).
       const triggerGated = input.isGroup || !deps.runAssistant
-      if (triggerGated && !(await deps.evalTrigger(input))) return
+      if (triggerGated && !(await deps.evalTrigger(input))) {
+        if (input.isGroup && deps.runAssistant && deps.postPassive) await deps.postPassive(input)
+        return
+      }
 
       // 3. Full-assistant mode — hand off to the real engine. It owns context
       //    assembly, tools, sending, confirmations and session persistence.

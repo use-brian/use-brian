@@ -43,7 +43,8 @@ import type {
 import type { ConnectorStore } from '../db/connector-store.js'
 import { humanizeToolName, describeToolInput } from '@use-brian/shared'
 import { processChannelMessage } from './channel-pipeline.js'
-import { channelConfirmations, confirmationMessage, type ChannelInteractionScope } from './channel-interactions.js'
+import { channelConfirmations, confirmationMessage, roomInteractionScope, type ChannelInteractionScope } from './channel-interactions.js'
+import { isWorkspaceAdmin, postPassiveChannelMessage, resolveRoomBinding } from '../channel-room/room.js'
 import { channelUserErrorText } from './_channel-error-text.js'
 import { cacheInboundImageTag } from './channel-file-cache.js'
 import { billingPartyForAssistant } from '../billing-party.js'
@@ -244,8 +245,12 @@ export function msteamsRoutes(options: MsTeamsRouteOptions): Router {
         })
       }
       if (!channel.enabledCapabilities.includes('chat')) return
-      const incoming = adapter.parseIncoming(req.body)
+      // The adapter applies the mention gate. An un-mentioned group message
+      // can still become a room post when the group is bound (D4).
+      const addressed = adapter.parseIncoming(req.body)
+      const incoming = addressed ?? (eventIncoming?.isGroupChat && eventIncoming.text.trim() ? eventIncoming : null)
       if (!incoming) return
+      const unaddressed = addressed === null
 
       // Mark the integration reachable on first inbound (Connected in the UI),
       // and remember the serviceUrl for proactive delivery. Best-effort.
@@ -264,6 +269,10 @@ export function msteamsRoutes(options: MsTeamsRouteOptions): Router {
       if (!routing) return
       const assistant = await findAssistantById(routing.assistantId)
       if (!assistant) return
+      const roomBinding = await resolveRoomBinding({
+        assistant, channelType: 'msteams', channelIntegrationId: integration.id, isGroupChat: incoming.isGroupChat,
+      })
+      if (unaddressed && !roomBinding) return
       const ownerId = await billingPartyForAssistant({
         id: assistant.id,
         ownerUserId: assistant.ownerUserId ?? null,
@@ -291,12 +300,36 @@ export function msteamsRoutes(options: MsTeamsRouteOptions): Router {
         }
       }
 
+      if (unaddressed) {
+        await postPassiveChannelMessage({
+          assistant: { id: assistant.id, name: assistant.name, workspaceId: assistant.workspaceId },
+          channelType: 'msteams',
+          channelIntegrationId: integration.id,
+          isGroupChat: true,
+          sessionChannelId: incoming.channelId,
+          senderUserId: channelUserId,
+          senderName: activity.from?.name ?? null,
+          text: incoming.text,
+          channelMessageId: incoming.messageId ?? null,
+          postNotice: async (text) => { await adapter.sendMessage(incoming.channelId, { text }) },
+        })
+        return
+      }
+
       // Resolve before acquiring the conversation lock held by the suspended turn.
-      const scope: ChannelInteractionScope = {
+      const senderScope: ChannelInteractionScope = {
         channelType: 'msteams', integrationId: channelId,
         conversationId: incoming.channelId, senderId: incoming.userId,
       }
-      if (channelConfirmations.handle(scope, { kind: 'text', text: incoming.text }).handled) return
+      // A room's turn belongs to the room: any reader stops it, the addresser
+      // or an admin answers its confirmations.
+      const scope = roomBinding ? roomInteractionScope(senderScope) : senderScope
+      if ((roomBinding
+        ? await channelConfirmations.handleRoom(scope, { kind: 'text', text: incoming.text }, {
+            senderId: incoming.userId,
+            isAdmin: () => isWorkspaceAdmin(channelUserId, roomBinding.workspaceId),
+          })
+        : channelConfirmations.handle(scope, { kind: 'text', text: incoming.text })).handled) return
 
       // 10. Sequentialize per Teams conversation.
       await withChatLock(`msteams:${incoming.channelId}`, () =>
@@ -494,6 +527,9 @@ export function msteamsRoutes(options: MsTeamsRouteOptions): Router {
       crmEmailDraftStore: options.crmEmailDraftStore,
       capabilityStore: options.capabilityStore,
       hooks: {
+        async postNotice(text) {
+          await adapter.sendMessage(incoming.channelId, { text })
+        },
         async onProcessingStart() {
           await setStatus('Thinking...', true)
         },

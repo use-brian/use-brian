@@ -15,6 +15,7 @@
 
 import { z } from 'zod'
 import { buildTool, type Tool } from '../tools/types.js'
+import { toolTransport } from '../tools/capability-gate.js'
 import { toolFailure } from '../tools/tool-failure.js'
 import type { CrmStore } from '../crm/types.js'
 import type { TaskStore } from '../tasks/types.js'
@@ -352,7 +353,7 @@ export function createRenderViewTool(deps: ViewToolDeps): Tool {
         const blockId = newBlockId()
         const newBlock: Block = { kind: 'data', id: blockId, binding }
         const activeViewId = context.docViewId ?? null
-        const outApp = !VIEW_MOUNT_CHANNELS.has(context.channelType)
+        const outApp = !VIEW_MOUNT_CHANNELS.has(toolTransport(context))
         let viewId: string | undefined
         let action: 'appended' | 'created' | 'reused' = 'created'
 
@@ -702,7 +703,7 @@ export function createRenderChartTool(deps: ViewToolDeps): Tool {
         // Previously renderChart always minted a separate draft even with
         // an active doc anchor; appending is the deliberate alignment.
         const activeViewId = context.docViewId ?? null
-        const outApp = !VIEW_MOUNT_CHANNELS.has(context.channelType)
+        const outApp = !VIEW_MOUNT_CHANNELS.has(toolTransport(context))
         // Same out-app contract as renderView: a page the user cannot
         // navigate to does not exist, so appends/creates outside the web
         // app carry the absolute URL + the link instruction.

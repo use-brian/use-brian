@@ -16,7 +16,7 @@ vi.mock('@use-brian/core', async () => ({
 const WS = '11111111-1111-1111-1111-111111111111'
 const session = (overrides: Partial<WebChatSourceSession> = {}): WebChatSourceSession => ({
   id: 'session-uuid', workspaceId: WS, assistantId: 'assistant', userId: 'user',
-  channelType: 'web', title: 'My chat', appOrigin: 'workflow', visibility: 'workspace',
+  channelType: 'web', anchorKind: 'none', title: 'My chat', appOrigin: 'workflow', visibility: 'workspace',
   mode: null, effectiveClearance: 'public', contextCompartments: [], contextGroupId: null, contextProjectId: null,
   ...overrides,
 })
@@ -78,8 +78,8 @@ describe('web chat event sources', () => {
       session({ id: 'group-only', contextGroupId: 'hidden-team' }),
       session({ id: 'draft', mode: 'draft' }),
       session({ id: 'foreign', workspaceId: 'other-workspace' }),
-      session({ id: 'public', channelType: 'api' }),
-      session({ id: 'generated', channelType: 'workflow' }),
+      session({ id: 'public', channelType: 'api', anchorKind: 'none' }),
+      session({ id: 'generated', channelType: 'workflow', anchorKind: 'none' }),
       session({ id: 'high', visibility: 'workspace', effectiveClearance: 'confidential' }),
       session({ id: 'team', visibility: 'workspace', contextCompartments: ['team:hidden'] }),
       session({ id: 'project', visibility: 'workspace', contextProjectId: 'hidden' }),

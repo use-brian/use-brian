@@ -698,7 +698,7 @@ export function createDbJobStore(): JobStore {
       let idx = 3
       if (params.workspaceId) {
         where.push(
-          `((assistant_id = $1 AND user_id = $2) OR (channel_type = 'workflow' AND workflow_step_run_id IS NULL AND workflow_id IN (SELECT id FROM workflows WHERE workspace_id = $${idx})))`,
+          `((assistant_id = $1 AND user_id = $2) OR (channel_type = 'workflow' AND workflow_step_run_id IS NULL AND workflow_id IN (SELECT id FROM workflows WHERE workspace_id = $${idx})))`, // session-kind-exempt: scheduled_jobs.channel_type, not a session
         )
         values.push(params.workspaceId)
         idx++

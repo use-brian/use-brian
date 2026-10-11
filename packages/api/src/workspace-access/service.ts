@@ -1,4 +1,5 @@
 /** Canonical administrative command service. [COMP:api/workspace-access] */
+import { sessionKindSql } from '../session-kind.js'
 import { createHash,randomUUID } from 'node:crypto'
 import type { PoolClient } from 'pg'
 import type { DepartmentAccessCommand, DepartmentAccessRequest, DepartmentReadGrant, WorkspaceAccessOverview, WorkspaceAccessHistory, WorkspaceAccessHistoryQuery } from '@use-brian/shared'
@@ -241,8 +242,9 @@ export async function executeDepartmentAccessInTransaction(client:PoolClient,wor
         if(ownership?.role!=='owner')throw new WorkspaceAccessError('admin_required')
       }
       await client.query('UPDATE assistants SET clearance=$3,updated_at=now() WHERE workspace_id=$1 AND id=$2',[workspaceId,command.assistantId,command.clearance])
-      await client.query("UPDATE sessions SET effective_clearance=$2 WHERE assistant_id=$1 AND visibility='workspace'",[command.assistantId,command.clearance])
-      await client.query('UPDATE comment_threads ct SET effective_clearance=$2 FROM sessions s WHERE s.id=ct.session_id AND s.assistant_id=$1',[command.assistantId,command.clearance])
+      // Only assistant-sourced rows (L10): Office and guest threads keep their anchor's clearance.
+      await client.query(`UPDATE sessions s SET effective_clearance=$2 WHERE s.assistant_id=$1 AND ${sessionKindSql.assistantClearanceSourced('s')}`,[command.assistantId,command.clearance])
+      await client.query(`UPDATE comment_threads ct SET effective_clearance=$2 FROM sessions s WHERE s.id=ct.session_id AND s.assistant_id=$1 AND ${sessionKindSql.assistantClearanceSourced('s')}`,[command.assistantId,command.clearance])
       await client.query('UPDATE workspace_access_policies SET revision=revision+1,updated_at=now() WHERE workspace_id=$1',[workspaceId])
       subjectId=command.assistantId
     }else if(command.type==='member.access.set') {

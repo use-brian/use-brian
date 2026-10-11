@@ -1,4 +1,5 @@
 /** Feed's authorized UI/assistant adapter. [COMP:feed/draft-comments] */
+import { classifySession } from '../session-kind.js'
 import { feedChatTargetSchema, type FeedChatTarget, type FeedCommandRequest } from '@use-brian/shared'
 import { feedTargetQuote } from '@use-brian/doc-model'
 import { query } from '../db/client.js'
@@ -34,13 +35,14 @@ export async function findFeedThreadDraft(transcriptSessionId: string) {
   )).rows[0] ?? null
 }
 export type FeedTurnContext = { actor: FeedActor; reference: FeedChatTarget; snapshot: Awaited<ReturnType<typeof getFeedCollaboration>>; selectedQuote: string; learningSources?: FeedReviewSource[]; learningCoverage?: FeedReviewCoverage; applicationId?: string }
-export async function resolveFeedTurnContext(userId: string, assistantId: string, session: { id: string; mode: string | null; channelType: string }, raw?: unknown): Promise<FeedTurnContext | null> {
-  if (raw === undefined && session.mode !== 'draft' && session.channelType !== 'feed_thread') return null
+export async function resolveFeedTurnContext(userId: string, assistantId: string, session: { id: string; mode: string | null; channelType: string; anchorKind: string | null }, raw?: unknown): Promise<FeedTurnContext | null> {
+  const anchor = classifySession(session).anchor.kind
+  if (raw === undefined && anchor !== 'feed_draft' && anchor !== 'feed_thread') return null
   const supplied = raw === undefined ? null : feedChatTargetSchema.parse(raw)
-  const thread = session.channelType === 'feed_thread' ? await findFeedThreadDraft(session.id) : null
-  if (session.channelType === 'feed_thread' && !thread) throw new FeedCollaborationError(404, 'thread_not_found')
+  const thread = anchor === 'feed_thread' ? await findFeedThreadDraft(session.id) : null
+  if (anchor === 'feed_thread' && !thread) throw new FeedCollaborationError(404, 'thread_not_found')
   const draftSessionId = thread?.sessionId ?? session.id
-  if ((supplied && supplied.sessionId !== draftSessionId) || (thread && thread.assistantId !== assistantId) || (!thread && session.mode !== 'draft')) throw new FeedCollaborationError(403, 'feed_context_mismatch')
+  if ((supplied && supplied.sessionId !== draftSessionId) || (thread && thread.assistantId !== assistantId) || (!thread && anchor !== 'feed_draft')) throw new FeedCollaborationError(403, 'feed_context_mismatch')
   const actor: FeedActor = { userId, assistantId, sessionId: draftSessionId, kind: 'assistant' }
   const access = await resolvePlanningAccess(userId, assistantId)
   if (!access && !supplied && !thread) return null

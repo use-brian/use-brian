@@ -4571,6 +4571,9 @@ if (!gotLock) {
     // Capability, not an implicit permission grant: pairing has its own native consent.
     if (type === "status" || type === "request-control") return { ok: true, hasControl: true, ...embeddedBrowser.status() };
     if (type === "show") { embeddedBrowser.show(); return { ok: true }; }
+    // The Chat side pane's browser slot and live-turn chat (chat-parity T7).
+    // CSS px from the app frame, scaled to window DIP by its own zoom.
+    if (type === "pane-slot" || type === "pane-chat") return { ok: embeddedBrowser.pane(input, event.sender.getZoomFactor()) };
     if (type === "cancel") { embeddedBrowser.cancelPending(); return { ok: true }; }
     if (type === "disconnect") { embeddedBrowser.dispose(true); return { ok: true }; }
     if (type !== "pair") return { ok: false };

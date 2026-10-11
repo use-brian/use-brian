@@ -48,6 +48,7 @@
  * [COMP:workers/skill-review-worker]
  */
 
+import { classifySession, sessionKindSql } from '../session-kind.js'
 import { query } from '../db/client.js'
 import {
   boundScopeSource,
@@ -289,10 +290,11 @@ export function classifySessionOrigin(
   channelType: string | null,
   channelId: string | null,
 ): Pick<SessionCandidate, 'origin' | 'sourceWorkflowId' | 'sourceWorkflowStepId'> {
-  if (channelType === 'workflow' || channelType === 'cron') {
+  const machine = channelType ? classifySession({ channelType, channelId, anchorKind: null }).machine : null
+  if (machine === 'workflow' || machine === 'cron') {
     return { origin: 'workflow', sourceWorkflowId: null, sourceWorkflowStepId: null }
   }
-  if (channelType === 'assistant-call' && channelId) {
+  if (machine === 'a2a' && channelId) {
     const persistent = PERSISTENT_WORKFLOW_CHANNEL_RE.exec(channelId)
     if (persistent) {
       return {
@@ -350,6 +352,8 @@ export async function selectCandidateSessions(
        JOIN assistants a ON a.id = s.assistant_id
        WHERE s.last_active_at >= now() - ($1 || ' hours')::interval
          AND COALESCE(s.workspace_id, a.workspace_id) IS NOT NULL
+         -- File chats never induce workspace-wide skills: their audience is the file's.
+         AND ${sessionKindSql.surfacesBeyondAnchor('s')}
      )
      SELECT id           AS session_id,
             workspace_id,

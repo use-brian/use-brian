@@ -1,6 +1,7 @@
 import { claimChannelEvent } from '../db/channel-event-dedup.js'
 import { dispatchIncomingMessageEvent } from '../message-events.js'
-import { channelConfirmations, confirmationMessage, type ChannelInteractionScope } from './channel-interactions.js'
+import { roomInteractionScope, channelConfirmations, confirmationMessage, type ChannelInteractionScope } from './channel-interactions.js'
+import { isWorkspaceAdmin, postPassiveChannelMessage, resolveRoomBinding } from '../channel-room/room.js'
 // REBRAND-CUTOVER: this file contains sidan.ai runtime values that must flip to usebrian.ai when DNS + Vercel domains + OAuth consoles + webhooks are cut over. Grep REBRAND-CUTOVER.
 /**
  * Slack webhook route — per-channel BYO credentials.
@@ -683,7 +684,47 @@ export function slackRoutes(options: SlackRouteOptions): Router {
       assistantId: assistant.id,
       targetStore: options.realtimeThreadTargetStore,
     })
-    if (!addressing.accepted) return
+    // A channel bound to this workspace is one room (unified-sessions §4.4).
+    const roomBinding = await resolveRoomBinding({
+      assistant, channelType: 'slack', channelIntegrationId: integration.id, isGroupChat: incoming.isGroupChat,
+    })
+    const resolveSender = async () => incoming.userId
+      ? resolveSlackSender({
+          slackUserId: incoming.userId,
+          assistantId: resolvedAssistantId,
+          ownerId,
+          workspaceId: assistant.workspaceId ?? null,
+          linkedAccountStore: options.linkedAccountStore,
+          channelUserStore: options.channelUserStore,
+          fetchProfile: () => fetchSlackProfile(incoming.userId, slackCreds.bot_token),
+        })
+      : { userId: ownerId, isIdentified: false, viaLink: false }
+    if (!addressing.accepted) {
+      // D4: an un-mentioned message in a room is a post that runs no turn. A
+      // top-level message in a reply-in-thread channel belongs to no room yet.
+      const passiveScope = incoming.replyToMessageId
+        ? buildSlackSessionChannelId(incoming.channelId, incoming.replyToMessageId)
+        : slackConfig.replyInThread === true ? null : incoming.channelId
+      if (roomBinding && passiveScope && incoming.text) {
+        const sender = await resolveSender()
+        await postPassiveChannelMessage({
+          assistant: { id: assistant.id, name: assistant.name, workspaceId: assistant.workspaceId },
+          channelType: 'slack',
+          channelIntegrationId: integration.id,
+          isGroupChat: true,
+          sessionChannelId: passiveScope,
+          senderUserId: sender.userId,
+          senderName: incoming.senderDisplay ?? null,
+          text: incoming.text,
+          channelMessageId: incoming.messageId ?? null,
+          postNotice: async (text) => {
+            await adapter.sendMessage(incoming.channelId, { text },
+              incoming.replyToMessageId ? { threadTs: incoming.replyToMessageId } : undefined)
+          },
+        })
+      }
+      return
+    }
     const realtimeThreadTarget = addressing.target
 
     // Ack reaction — instant visual feedback before processing starts
@@ -702,12 +743,21 @@ export function slackRoutes(options: SlackRouteOptions): Router {
     // session identity must include the thread root. Until this split, every
     // native Slack thread in one DM/channel appended to the same transcript.
 
-    const interactionScope: ChannelInteractionScope = {
+    const senderScope: ChannelInteractionScope = {
       channelType: 'slack', integrationId: channelId,
       conversationId: incoming.channelId, senderId: incoming.userId, sessionId: sessionChannelId,
     }
+    // A room's turn belongs to the room: any reader stops it, the addresser
+    // or an admin answers its confirmations.
+    const interactionScope = roomBinding ? roomInteractionScope(senderScope) : senderScope
     if (incoming.isEdit) channelConfirmations.abortForEdit(interactionScope, incoming.messageId)
-    if (channelConfirmations.handle(interactionScope, { kind: 'text', text: incoming.text }).handled) return
+    const interaction = roomBinding
+      ? await channelConfirmations.handleRoom(interactionScope, { kind: 'text', text: incoming.text }, {
+          senderId: incoming.userId,
+          isAdmin: async () => isWorkspaceAdmin((await resolveSender()).userId, roomBinding.workspaceId),
+        })
+      : channelConfirmations.handle(interactionScope, { kind: 'text', text: incoming.text })
+    if (interaction.handled) return
 
     // 5a-link. Link-code claim — a 6-char alphanumeric code in a Slack
     //          message binds this Slack user to the sidan web user that
@@ -762,15 +812,7 @@ export function slackRoutes(options: SlackRouteOptions): Router {
     let channelUserId = ownerId
     let isIdentified = false
     if (incoming.userId) {
-      const sender = await resolveSlackSender({
-        slackUserId: incoming.userId,
-        assistantId: resolvedAssistantId,
-        ownerId,
-        workspaceId: assistant.workspaceId ?? null,
-        linkedAccountStore: options.linkedAccountStore,
-        channelUserStore: options.channelUserStore,
-        fetchProfile: () => fetchSlackProfile(incoming.userId, slackCreds.bot_token),
-      })
+      const sender = await resolveSender()
       channelUserId = sender.userId
       isIdentified = sender.isIdentified
     }
@@ -794,6 +836,7 @@ export function slackRoutes(options: SlackRouteOptions): Router {
           threadTs,
           sessionChannelId,
           realtimeThreadTarget,
+          room: roomBinding !== null,
           botToken: slackCreds.bot_token,
           ...options,
           interactionScope,
@@ -1191,6 +1234,8 @@ type ProcessMessageParams = {
   /** Thread-qualified Brian conversation id; never sent to the Slack API. */
   sessionChannelId: string
   realtimeThreadTarget?: import('@use-brian/core').RealtimeThreadTarget | null
+  /** The conversation is a converged workspace room (unified-sessions §4.4). */
+  room?: boolean
   botToken: string
   ingestChannelMediaRef?: SlackRouteOptions['ingestChannelMediaRef']
   provider: LLMProvider
@@ -1319,7 +1364,7 @@ type SlackVisibleThreadMessage = SlackConversationMessage & {
 export type SlackCurrentThreadRead = {
   messages: SlackVisibleThreadMessage[]
   truncated: boolean
-  coverage: 'full_thread' | 'root_only'
+  coverage: 'full_thread' | 'root_only' | 'recent_channel'
   source: 'slack_replies' | 'slack_history' | 'stored_message'
   /** Diagnosis for a degraded root-only provider read. */
   providerWarning?: string
@@ -1450,8 +1495,10 @@ export function formatSlackThreadSnapshot(
 
   const coverage = read.coverage === 'full_thread'
     ? 'Coverage: provider thread snapshot.'
-    : 'Coverage: root message only. Slack did not grant a full reply read; do not treat this as complete thread history.'
-  const lines = ['# Current Slack thread', coverage]
+    : read.coverage === 'recent_channel'
+      ? 'Coverage: the most recent channel messages Slack returned, before Brian joined this room.'
+      : 'Coverage: root message only. Slack did not grant a full reply read; do not treat this as complete thread history.'
+  const lines = [read.coverage === 'recent_channel' ? '# Recent Slack channel messages' : '# Current Slack thread', coverage]
   let length = lines.join('\n\n').length
   let omittedForSize = false
 
@@ -1693,6 +1740,20 @@ async function processMessage(params: ProcessMessageParams): Promise<void> {
   // ── Slack-specific: provider-visible thread recovery + reaction tools ──
   const extraTools = new Map(params.tools)
   let providerVisibleContext: string | null = null
+  let readProviderHistory: (() => Promise<string | null>) | undefined
+  if (params.room && !threadTs) {
+    // A channel-level room hydrates once from the channel's recent history
+    // (D16). Slack returns newest first.
+    readProviderHistory = async () => {
+      const history = await createSlackApi({ botToken }).conversationsHistory(incoming.channelId, { limit: 50 })
+      return formatSlackThreadSnapshot({
+        messages: [...history.messages].reverse(),
+        truncated: history.messages.length >= 50,
+        coverage: 'recent_channel',
+        source: 'slack_history',
+      }, { excludeMessageTs: incoming.messageId })
+    }
+  }
   if (threadTs) {
     const slackApi = createSlackApi({ botToken })
     let cachedThreadRead: Promise<SlackCurrentThreadRead> | null = null
@@ -1721,10 +1782,17 @@ async function processMessage(params: ProcessMessageParams): Promise<void> {
       createSlackReadCurrentThreadTool({ readThread }),
     )
 
+    // A room hydrates once from the same thread read (D16), whatever its
+    // transcript holds; the pipeline claims it.
+    if (params.room) {
+      readProviderHistory = async () => formatSlackThreadSnapshot(await readThread(50), {
+        excludeMessageTs: incoming.messageId,
+      })
+    }
     // A top-level message is itself a brand-new thread root, so there cannot
     // be anything above it to hydrate. Replies carry the root ts and are the
     // only turns where an empty exact session can represent a cutover.
-    if (incoming.replyToMessageId) {
+    if (incoming.replyToMessageId && !params.room) {
       try {
         const bootstrap = await loadSlackThreadBootstrapContext({
           findSession: () => findSessionByChannel({
@@ -1827,6 +1895,7 @@ async function processMessage(params: ProcessMessageParams): Promise<void> {
     messageText: incoming.text,
     userContentBlocks,
     providerVisibleContext,
+    readProviderHistory,
     // Raw paste for the large-paste intercept (Slack has no prefix wrapper).
     rawUserText: incoming.text ?? '',
     isGroupChat: incoming.isGroupChat,
@@ -1869,6 +1938,9 @@ async function processMessage(params: ProcessMessageParams): Promise<void> {
     crmEmailDraftStore: params.crmEmailDraftStore,
     capabilityStore: params.capabilityStore,
     hooks: {
+      async postNotice(text) {
+        await adapter.sendMessage(incoming.channelId, { text }, threadOpts)
+      },
       async onProcessingStart() {
         await adapter.sendStatus(incoming.channelId, 'Thinking...', statusOpts).catch(() => {})
       },

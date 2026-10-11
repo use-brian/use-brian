@@ -1,3 +1,5 @@
+import { withTurnInference } from '../turn/runtime.js'
+import { PER_TURN_FILES_INDEX_CAP, PER_TURN_INDEX_CAP } from '../turn/index-caps.js'
 import { renderSystemContext } from '@use-brian/core'
 /**
  * Shared public turn pipeline — the body of the public API's message
@@ -24,7 +26,6 @@ import { createTurnLedger } from '../ledger/recorder.js'
 import { getLedgerPayloadStore } from '../ledger/runtime.js'
 import { randomUUID } from 'node:crypto'
 import {
-  queryLoop,
   buildAssistantNameSection,
   buildMemoryContext,
   createMemoryTools,
@@ -85,7 +86,10 @@ import {
   sessionMessageInputScope,
 } from '../context-scope/resolve-turn-scope.js'
 import { resolveExecutionContextSystem } from '../context-scope/execution-context.js'
-import { prepareAssistantRun } from '../runtime/prepare-assistant-run.js'
+import { prepareAssistantRun } from '../turn/prepare.js'
+import { policyFor } from '../session-kind.js'
+import { runAssistantTurn, TurnRefusal, turnUsageIdentity } from '../turn/kernel.js'
+import { waitForTurnSlot } from '../turn/lease.js'
 import { isAuthorityChangedError } from '../context-scope/authority-lease.js'
 import {
   createDeliveryAudienceAuthorizer,
@@ -348,6 +352,8 @@ export type PublicApiError =
   | 'authority_changed'
   | 'delivery_audience_unverified'
   | 'upstream_failed'
+  /** Another turn on the same conversation did not finish within the wait (409). */
+  | 'conversation_busy'
   | 'internal'
 
 export function fail(
@@ -486,8 +492,6 @@ export function resolvePublicContextBlock(params: {
   return buildAssistantNameSection(params.assistantName) ?? ''
 }
 
-/** Per-turn ceiling on the `# Workspace Files` index. Mirrors chat.ts. */
-const PUBLIC_TURN_FILES_INDEX_CAP = 50
 
 const CLIENT_MEMORY_TAG = 'client-self'
 
@@ -568,6 +572,8 @@ export async function executePublicTurn(
   req: import('express').Request,
   res: import('express').Response,
 ): Promise<void> {
+  // Inference wiring through the turn kernel's boot registration.
+  deps = withTurnInference(deps)
   const maxTurns = deps.maxTurns ?? 8
   const body = input.body
 
@@ -1073,11 +1079,11 @@ export async function executePublicTurn(
   // is the substance of what the link is meant to expose.
   let memoryContext = ''
   if (isIdentified || fullScope) {
-    const [soulContext, identityMemories, memoryIndex, workspaceIdentityMemories, teamMemoryIndex] =
+    const [soulContext, identityMemories, rankedIndex, workspaceIdentityMemories, teamMemoryIndex] =
       await Promise.all([
         (deps.memoryStore.getSoulContext?.(memoryViewerCtx, 'Use Brian') ?? Promise.resolve({ content: null, evidence: {} })),
         deps.memoryStore.getIdentity(memoryViewerCtx),
-        deps.memoryStore.getIndex(memoryViewerCtx),
+        deps.memoryStore.getIndexRanked(memoryViewerCtx, PER_TURN_INDEX_CAP),
         // Team memory is what makes a full-scope link useful, and what makes
         // the internal lane a colleague rather than a stranger; the external
         // keyed lanes stay on their per-user projection.
@@ -1092,14 +1098,15 @@ export async function executePublicTurn(
     scopeAccumulator.note(soulContext.evidence)
     noteAutomaticScopeEvidence(scopeAccumulator, [
       ...identityMemories,
-      ...memoryIndex,
+      ...rankedIndex.rows,
       ...workspaceIdentityMemories,
       ...teamMemoryIndex,
     ])
     memoryContext = buildMemoryContext({
       soul,
       identityMemories: identityMemories.map((m) => ({ id: m.id, summary: m.summary, detail: m.detail })),
-      memoryIndex: memoryIndex.map((m) => ({ ...m, appId: null })),
+      memoryIndex: rankedIndex.rows.map((m) => ({ ...m, appId: null })),
+      totalNonIdentityCount: rankedIndex.totalCount,
       workspaceIdentityMemories: workspaceIdentityMemories.map((m) => ({
         id: m.id,
         summary: m.summary,
@@ -1136,7 +1143,7 @@ export async function executePublicTurn(
             projectIds: turnScope.effectiveProjectIds,
             systemRead: laneReadsSystemSide(input.contextScope) || undefined,
           },
-          PUBLIC_TURN_FILES_INDEX_CAP,
+          PER_TURN_FILES_INDEX_CAP,
         )
         noteAutomaticScopeEvidence(scopeAccumulator, rows)
         workspaceFilesContext = buildWorkspaceFilesContext(rows)
@@ -1404,19 +1411,21 @@ export async function executePublicTurn(
     }
   }
 
-  // ── 11. Run query loop ────────────────────────────────────
-  // Mirrors web chat (chat.ts:1409–1412): abort on consumer
-  // disconnect, with a safety ceiling that exceeds the loop's
-  // own EMPTY_RETRY_WALL_MS (90s in query-loop.ts) so the
-  // empty-response retry plan is never killed mid-flight.
+  // ── 11. Run the turn through the kernel ───────────────────
+  // Abort on consumer disconnect. Liveness is the kernel's stall watchdog
+  // (no provider chunk, no tool activity, no loop event for the derived
+  // window), never a wall clock: the 180 s ceiling this lane carried clipped
+  // slow-but-alive turns and caught nothing the watchdog does not.
   req.on('close', () => abortController.abort())
-  const timeout = setTimeout(() => abortController.abort(), 180_000)
   let sendEvent: PublicTurnSseSender | null = null
+  let loopError: Error | null = null
 
   const turnOutput = createTurnOutputCollector({ format: 'compact' })
-  let totalUsage: TokenUsage | null = null
-  let responseModel: string | null = null
-  let assistantMessageId: string | null = null
+  // Written from the kernel's sink callback; held in one object so the
+  // reads after the turn are not narrowed to their initial `null`.
+  const turnFacts: { totalUsage: TokenUsage | null; responseModel: string | null; assistantMessageId: string | null } = {
+    totalUsage: null, responseModel: null, assistantMessageId: null,
+  }
 
   try {
     await assertDeliveryAudience()
@@ -1440,15 +1449,25 @@ export async function executePublicTurn(
       trustedContributions: [{ name: 'runtime', content: runtimeSystemContext }],
       userVisibleContributions: [{ name: 'turn', content: userVisibleContext }],
     })
-    for await (const event of queryLoop({
+    await runAssistantTurn({
+      sessionId: session.id,
+      policy: policyFor(session),
+      abortController,
+      // A second request on the same conversation waits for the first.
+      lease: { mode: 'kernel', waitForSlot: waitForTurnSlot },
+      model: {
+        provider: preparedRun.model.provider,
+        model: preparedRun.model.model,
+        configuredProviders: deps.configuredProviders,
+        customLlm: customLlmRuntime,
+      },
+      loop: {
       ledger: createTurnLedger({
         workspaceId: assistant.workspaceId ?? null,
         assistantId: assistant.id,
         sessionId: session.id,
         payloads: getLedgerPayloadStore(),
       }).ledger,
-      provider: preparedRun.model.provider,
-      model: preparedRun.model.model,
       maxTokens: preparedRun.model.maxTokens,
       inputTokenLimit: preparedRun.model.inputTokenLimit,
       systemPrompt: fullSystemPrompt,
@@ -1508,7 +1527,8 @@ export async function executePublicTurn(
       // matches web chat (chat.ts:1541).
       compactModel: 'gemini-flash',
       maxTurns,
-    })) {
+      },
+      sink: { kind: 'json', onEvent: async (event) => {
       turnOutput.observe(event)
       if (event.type === 'text_delta') {
         await assertDeliveryAudience()
@@ -1526,8 +1546,8 @@ export async function executePublicTurn(
         }
       } else if (event.type === 'turn_complete') {
         await assertDeliveryAudience()
-        totalUsage = event.totalUsage ?? null
-        responseModel = event.response.model
+        turnFacts.totalUsage = event.totalUsage ?? null
+        turnFacts.responseModel = event.response.model
         // Skip persisting fully empty assistant turns — same posture
         // as chat.ts (1462). queryLoop's empty-response recovery may
         // still exit empty when EMPTY_RETRY_PLAN or EMPTY_RETRY_WALL_MS
@@ -1540,20 +1560,34 @@ export async function executePublicTurn(
             content: event.response.content,
             ...currentTurnWrite(),
           })
-          assistantMessageId = stored.id
+          turnFacts.assistantMessageId = stored.id
         }
       } else if (event.type === 'error') {
         console.error('[public-turn] query loop error:', event.error)
-        if (sendEvent) {
-          sendEvent('error', { error: 'upstream_failed', detail: event.error?.message })
-          sendEvent('done', {})
-          res.end()
-          return
-        }
-        return fail(res, 502, 'upstream_failed', event.error?.message)
+        loopError = event.error ?? new Error('upstream_failed')
       }
+    } },
+    })
+    if (loopError) {
+      const detail = (loopError as Error).message
+      if (sendEvent) {
+        sendEvent('error', { error: 'upstream_failed', detail })
+        sendEvent('done', {})
+        res.end()
+        return
+      }
+      return fail(res, 502, 'upstream_failed', detail)
     }
   } catch (err) {
+    if (err instanceof TurnRefusal) {
+      if (sendEvent) {
+        sendEvent('error', { error: 'conversation_busy' })
+        sendEvent('done', {})
+        res.end()
+        return
+      }
+      return fail(res, 409, 'conversation_busy', 'Another turn on this conversation is still running. Retry once it finishes.')
+    }
     console.error('[public-turn] query loop threw:', err)
     if (isAuthorityChangedError(err) || isDeliveryAudienceUnverifiedError(err)) {
       const error = isAuthorityChangedError(err)
@@ -1574,8 +1608,6 @@ export async function executePublicTurn(
       return
     }
     return fail(res, 502, 'upstream_failed', (err as Error).message)
-  } finally {
-    clearTimeout(timeout)
   }
 
   // ── 12. Record usage (fire-and-forget) ───────────────────
@@ -1583,13 +1615,14 @@ export async function executePublicTurn(
   // drove the turn — pass `actorUserId` so admin per-user views can
   // pivot to the shadow. See migration 100 and
   // docs/architecture/platform/analytics.md → "Actor vs billing party".
+  const { totalUsage, responseModel, assistantMessageId } = turnFacts
   if (deps.usageStore && totalUsage && responseModel) {
     const cost = customLlmRuntime?.providerKeySource === 'user'
       ? 0
       : calculateCost(responseModel, totalUsage)
     deps.usageStore.recordUsage({
-      userId: ownerId,
-      actorUserId: user.id,
+      // The credential's owner pays; the actor drove the turn.
+      ...turnUsageIdentity({ payerUserId: ownerId, actorUserId: user.id }),
       assistantId: assistant.id,
       sessionId: session.id,
       model: responseModel,

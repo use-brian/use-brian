@@ -20,6 +20,7 @@ import { Download, FileText, Loader2 } from "lucide-react";
 import { useDocMediaDownload } from "@/lib/use-doc-media";
 import { useT } from "@/lib/i18n/client";
 import { cn } from "@/lib/utils";
+import { usePaneLinks } from "@/components/chat-app/chat-link-routing";
 
 /** Mirrors `formatBytes` in `components/doc/block-file.tsx` (module-private there). */
 function formatBytes(n: number): string {
@@ -33,8 +34,22 @@ function FileAttachmentCard({ attachment }: { attachment: ChatFileAttachment }) 
   const t = useT().chat.fileAttachments;
   const download = useDocMediaDownload(attachment.workspaceId);
   const [state, setState] = useState<"idle" | "downloading" | "error">("idle");
+  // In the full Chat app the file opens as a `file` tab of the side pane
+  // (chat-parity D9), where it previews and offers the download; the dock
+  // keeps the direct download.
+  const links = usePaneLinks();
 
   async function handleClick(): Promise<void> {
+    if (links) {
+      links.open({
+        kind: "file",
+        fileId: attachment.fileId,
+        name: attachment.name,
+        mime: attachment.mime,
+        source: "durable",
+      });
+      return;
+    }
     if (state === "downloading") return;
     setState("downloading");
     try {

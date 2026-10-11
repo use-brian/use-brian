@@ -7,10 +7,11 @@ import { parseTopicChannelId } from '@use-brian/channels'
 import type { DeliverToChannel } from '@use-brian/core'
 import { query } from '../db/client.js'
 import { providerChannelIdFromSession, SLACK_THREAD_SESSION_DELIMITER } from '../db/sessions.js'
+import { PROACTIVE_DELIVERY_TRANSPORTS, sessionKindSql } from '../session-kind.js'
 
 export type RecentApprovalTarget = Pick<Parameters<DeliverToChannel>[0],
   'channelId' | 'channelIntegrationId' | 'threadRef'> & {
-  channelType: 'telegram' | 'slack' | 'whatsapp' | 'msteams' | 'feishu'
+  channelType: (typeof PROACTIVE_DELIVERY_TRANSPORTS)[number]
 }
 export type RecentApprovalResolver = (scope: {
   workspaceId: string
@@ -28,7 +29,7 @@ export const resolveRecentApprovalChannel: RecentApprovalResolver = async (scope
      JOIN assistants a ON a.id = s.assistant_id
      WHERE a.workspace_id = $1 AND s.assistant_id = $2 AND s.user_id = $3
        AND m.role = 'user' AND (m.sender_user_id IS NULL OR m.sender_user_id = $3)
-       AND s.channel_type IN ('telegram', 'slack', 'whatsapp', 'msteams', 'feishu')
+       AND ${sessionKindSql.proactiveDeliveryTransport('s')}
        AND s.channel_id <> ''
      ORDER BY m.created_at DESC, m.id DESC LIMIT 1`,
     [scope.workspaceId, scope.assistantId, scope.approverUserId],

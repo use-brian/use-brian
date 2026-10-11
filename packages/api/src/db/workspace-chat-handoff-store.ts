@@ -4,6 +4,7 @@
  * [COMP:api/workspace-chat-handoff]
  */
 
+import { sessionKindSql } from '../session-kind.js'
 import { randomUUID } from 'node:crypto'
 import type { WorkspaceChatHandoffPort } from '@use-brian/core'
 import { getAppPool } from './client.js'
@@ -37,8 +38,7 @@ export function createWorkspaceChatHandoffStore(): WorkspaceChatHandoffPort {
             WHERE s.id = $1
               AND s.user_id = $2
               AND s.assistant_id = $3
-              AND s.channel_type = 'web'
-              AND s.visibility = 'owner'
+              AND ${sessionKindSql.personalConversation('s')}
               AND a.workspace_id = $4
             FOR UPDATE OF s`,
           [

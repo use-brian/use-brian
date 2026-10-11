@@ -37,6 +37,15 @@ export type QueuedInput = {
   inputId: string;
   text: string;
   steer: boolean;
+  /**
+   * A room message (chat-parity D3): the server saved it as a post when it
+   * was sent and owns its fallback (the room's follow-up turn), so the
+   * client never re-sends it, and it cannot be re-posted as a steer later
+   * (that would post it twice). Steer is chosen at send time instead.
+   */
+  serverHeld?: boolean;
+  /** Extra request fields for this input (a room send's `ask`, `assistantId`, `replyTo`). */
+  body?: Record<string, unknown>;
 };
 
 export type MidTurnQueueParams = {
@@ -60,7 +69,11 @@ export type MidTurnQueue = {
    * session to hand it to, or selection changed before the host rendered.
    * A fallback send must independently validate the intended session.
    */
-  queue: (text: string, steer: boolean) => boolean;
+  queue: (
+    text: string,
+    steer: boolean,
+    opts?: { serverHeld?: boolean; body?: Record<string, unknown> },
+  ) => boolean;
   /** Escalate an already-queued message to a steer. No-op if already steering. */
   steer: (inputId: string) => void;
   /**
@@ -144,6 +157,7 @@ export function useMidTurnQueue(params: MidTurnQueueParams): MidTurnQueue {
         ...(p.getAssistantId?.() ? { assistantId: p.getAssistantId?.() } : {}),
         ...(p.appOrigin ? { appOrigin: p.appOrigin } : {}),
         ...(p.timezone ? { timezone: p.timezone } : {}),
+        ...(input.body ?? {}),
       },
       // The side connection answers `session` / `input_queued` / `done` and
       // closes. Nothing to render from it: a delivery that never lands is
@@ -154,11 +168,22 @@ export function useMidTurnQueue(params: MidTurnQueueParams): MidTurnQueue {
   }, []);
 
   const queue = useCallback(
-    (text: string, steer: boolean): boolean => {
+    (
+      text: string,
+      steer: boolean,
+      opts?: { serverHeld?: boolean; body?: Record<string, unknown> },
+    ): boolean => {
       const trimmed = text.trim();
       const sessionId = currentSession();
       if (!trimmed || !sessionId) return false;
-      const input: QueuedInput = { sessionId, inputId: mintInputId(), text: trimmed, steer };
+      const input: QueuedInput = {
+        sessionId,
+        inputId: mintInputId(),
+        text: trimmed,
+        steer,
+        ...(opts?.serverHeld ? { serverHeld: true } : {}),
+        ...(opts?.body ? { body: opts.body } : {}),
+      };
       publish([...queuedRef.current, input]);
       post(input);
       return true;
@@ -170,7 +195,7 @@ export function useMidTurnQueue(params: MidTurnQueueParams): MidTurnQueue {
     (inputId: string) => {
       const sessionId = currentSession();
       const entry = queuedRef.current.find((q) => q.inputId === inputId);
-      if (!entry || entry.steer) return;
+      if (!entry || entry.steer || entry.serverHeld) return;
       if (sessionId !== entry.sessionId) return;
       publish(queuedRef.current.map((q) =>
         q.inputId === inputId ? { ...q, steer: true } : q,
@@ -197,7 +222,9 @@ export function useMidTurnQueue(params: MidTurnQueueParams): MidTurnQueue {
     if (!sessionId || selected !== sessionId) return [];
     const left = queuedRef.current.filter((q) => q.sessionId === sessionId);
     if (left.length) publish(queuedRef.current.filter((q) => q.sessionId !== sessionId));
-    return left;
+    // A room message is already a saved post with a server-side fallback:
+    // it leaves the tray here and is never re-sent by the client.
+    return left.filter((q) => !q.serverHeld);
   }, [publish, currentSession]);
 
   return {

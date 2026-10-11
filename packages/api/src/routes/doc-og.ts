@@ -35,6 +35,7 @@ import { lookup as dnsLookup } from 'node:dns'
 import { isIP, isIPv4, isIPv6 } from 'node:net'
 import { promisify } from 'node:util'
 import { createRateLimiter } from '@use-brian/core'
+import { decideFrameEmbedding } from '../url-embeddable.js'
 
 const dnsLookupAsync = promisify(dnsLookup)
 
@@ -47,6 +48,13 @@ export type OgPreviewResponse = {
   image?: string
   siteName?: string
   favicon?: string
+  /**
+   * May the Chat side pane frame this page (chat-parity T9)? From the final
+   * response's `X-Frame-Options` / CSP `frame-ancestors`
+   * (`decideFrameEmbedding`, `url-embeddable.ts`). Absent when the page
+   * could not be read.
+   */
+  embeddable?: boolean
   fetchedAt: string
 }
 
@@ -443,12 +451,18 @@ async function fetchAndParse(
   }
   if (!response) return { ok: false, error: 'fetch_failed' }
 
+  const header = (name: string): string | null => response!.headers?.get?.(name) ?? null
+  const { embeddable } = decideFrameEmbedding({
+    xFrameOptions: header('x-frame-options'),
+    contentSecurityPolicy: header('content-security-policy'),
+  })
+
   if (!response.ok) {
     // 4xx / 5xx — return an empty-meta success response so the
     // bookmark still renders with just the URL.
     return {
       ok: true,
-      value: { url: currentUrl.toString(), fetchedAt: new Date().toISOString() },
+      value: { url: currentUrl.toString(), embeddable, fetchedAt: new Date().toISOString() },
     }
   }
 
@@ -463,7 +477,7 @@ async function fetchAndParse(
   const parsedOg = parseOgTags(html, currentUrl)
   return {
     ok: true,
-    value: { ...parsedOg, fetchedAt: new Date().toISOString() },
+    value: { ...parsedOg, embeddable, fetchedAt: new Date().toISOString() },
   }
 }
 

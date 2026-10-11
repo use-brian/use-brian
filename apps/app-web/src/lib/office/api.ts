@@ -31,7 +31,7 @@ export type OfficeArtifact = {
   lifecycleState: "active" | "archived" | "trash" | "retained" | "purged";
   role: "view" | "comment" | "edit";
   expiresAt?: string;
-  job?: { id: string; status: string; stage: string; errorCode: string | null };
+  job?: { id: string; status: string; stage: string; errorCode: string | null; inputQuestion?: string; canResumeTemplate?: boolean; templateChoices?: OfficeTemplateChoice[]; latestEvent?: OfficeJobLatestEvent | null };
 };
 
 export function isOfficeStartFailed(artifact: OfficeArtifact): boolean {
@@ -46,11 +46,25 @@ export type OfficeJob = {
   id: string;
   workspaceId: string;
   artifactId: string;
+  jobKind?: "create" | "revise" | "import" | "export" | "template_compile" | "derivative";
   status: "queued" | "running" | "needs_input" | "completed" | "failed" | "cancelled";
   stage: string;
   errorCode: string | null;
+  inputQuestion?: string;
+  canResumeTemplate?: boolean;
+  templateChoices?: OfficeTemplateChoice[];
   importDiagnostics?: OfficeImportDiagnostic[];
+  latestEvent?: OfficeJobLatestEvent | null;
 };
+/** The latest persisted event: what a job card shows instead of a generic label. */
+type OfficeJobLatestEvent = { code: string; safeNarration: string | null };
+
+type OfficeTemplateChoice = {templateVersionId:string;name:string};
+export async function resumeOfficeGeneration(input: {artifactId:string;jobId:string;templateVersionId:string}): Promise<{artifactId:string;jobId:string}> {
+  return json(await authFetch(`${API_URL}/api/office/jobs/${input.jobId}/template`,{
+    method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify(input),
+  }),"office_generation_recovery_failed");
+}
 
 export type OfficeJobFailureKind = "presentation_fit" | "presentation_plan" | "fit" | "unexpected";
 
@@ -283,24 +297,21 @@ export async function setOfficeDefaultRole(artifactId: string, defaultWorkspaceR
   return metadata<OfficeSharing>(`artifacts/${encodeURIComponent(artifactId)}/sharing`,"office_sharing_default_failed",value=>value,{method:"PATCH",headers:{"Content-Type":"application/json"},body:JSON.stringify({defaultWorkspaceRole})})
 }
 
-export async function getOfficeJob(jobId: string): Promise<OfficeJob> {
-  return metadata<OfficeJob, {job: OfficeJob}>(`jobs/${encodeURIComponent(jobId)}`, "office_job_failed", body => body.job);
+/** The file's shared Brian conversation (office.md "Brian conversation in the file"). */
+export type OfficeConversation = {
+  sessionId: string | null;
+  canSend: boolean;
+  role: "view" | "comment" | "edit";
+  assistant: { id: string; name: string } | null;
+};
+
+export async function getOfficeConversation(artifactId: string): Promise<OfficeConversation> {
+  return json(await authFetch(`${API_URL}/api/office/artifacts/${encodeURIComponent(artifactId)}/conversation`, { cache: "no-store" }), "office_conversation_failed");
 }
 
-export async function waitForOfficeJob(jobId: string, timeoutMs = 180_000, isCurrent: () => boolean = () => true): Promise<OfficeJob> {
-  const deadline = Date.now() + timeoutMs;
-  while (true) {
-    if (!isCurrent()) throw new Error("office_job_owner_expired");
-    const job = await getOfficeJob(jobId);
-    if (!isCurrent()) throw new Error("office_job_owner_expired");
-    if (["completed", "failed", "cancelled", "needs_input"].includes(job.status)) return job;
-    if (Date.now() >= deadline) throw new Error("office_job_timeout");
-    await new Promise((resolve) => setTimeout(resolve, 750));
-  }
-}
-
-export async function listOfficeJobEvents(jobId: string, afterSeq = 0): Promise<OfficeJobEvent[]> {
-  return metadata<OfficeJobEvent[], {events: OfficeJobEvent[]}>(`jobs/${encodeURIComponent(jobId)}/events?afterSeq=${afterSeq}`, "office_events_failed", body => body.events);
+/** Get or lazily create the thread before a first send (Comment/Edit senders only). */
+export async function startOfficeConversation(artifactId: string): Promise<{ sessionId: string; assistant: { id: string; name: string } }> {
+  return json(await authFetch(`${API_URL}/api/office/artifacts/${encodeURIComponent(artifactId)}/conversation`, { method: "POST" }), "office_conversation_failed");
 }
 
 export async function steerOfficeJob(jobId: string, instruction: string): Promise<void> {

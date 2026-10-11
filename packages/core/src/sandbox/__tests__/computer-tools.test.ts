@@ -12,7 +12,7 @@ function toolContext(overrides: Partial<ToolContext> = {}): ToolContext {
     assistantId: 'asst-1',
     sessionId: 'sess-1',
     appId: 'app-1',
-    channelType: 'web',
+    channelType: 'web', attended: true,
     channelId: 'chan-1',
     workspaceId: 'ws-1',
     abortSignal: new AbortController().signal,
@@ -244,6 +244,25 @@ describe('[COMP:sandbox/browser-tools] Computer tool surface', () => {
     // The inline snapshot fed the send gate: a send-like label needs approval.
     expect(await tools.browserClick.resolveConfirmation!(ctx, { ref: '@e2' })).toBe(true)
     expect(await tools.browserClick.resolveConfirmation!(ctx, { ref: '@e3' })).toBe(false)
+  })
+
+  it('a ref retired by a fresh scan fails as stale without raising an approval prompt', async () => {
+    const local = fakeProvider('local')
+    const tools = createComputerTools({ local, cloud: fakeProvider('cloud') })
+    const ctx = toolContext()
+    await run(tools.browserNavigate, { url: 'https://www.linkedin.com/messaging/' }, ctx)
+    // A full observation resets the baseline, so every ref from the navigate is retired.
+    await run(tools.browserSnapshot, { mode: 'full', observation: 'full' }, ctx)
+    // Retired, even with a send-like label, submit intent or policy 'ask': the click can never run.
+    expect(await tools.browserClick.resolveConfirmation!(ctx, { ref: '@e2' })).toBe(false)
+    expect(await tools.browserClick.resolveConfirmation!(ctx, { ref: '@e2', intent: 'submit' })).toBe(false)
+    // A ref never minted stays fail-closed: a batched scan still in flight could bind it.
+    expect(await tools.browserClick.resolveConfirmation!(ctx, { ref: '@e999' })).toBe(true)
+    const clicks = local.calls.filter(c => c.startsWith('click')).length
+    const res = await run(tools.browserClick, { ref: '@e2' }, ctx)
+    expect(res.isError).toBe(true)
+    expect(String(res.data)).toContain('Stale or unknown browser ref @e2')
+    expect(local.calls.filter(c => c.startsWith('click')).length).toBe(clicks)
   })
 
   it('the live toggle wins over the profile default for the session (R2-3)', async () => {
@@ -483,7 +502,7 @@ describe('[COMP:sandbox/browser-tools] Computer tool surface', () => {
     it('refuses every browser tool on a headless channel when unattended mode is off', async () => {
       const local = fakeProvider('local')
       const tools = createComputerTools({ local, cloud: fakeProvider('cloud') })
-      const cronCtx = toolContext({ channelType: 'workflow' })
+      const cronCtx = toolContext({ channelType: 'workflow', attended: false })
       for (const tool of [tools.browserNavigate, tools.browserSnapshot, tools.browserClick, tools.browserType, tools.browserCurrentUrl]) {
         const res = await tool.execute(
           tool.inputSchema.parse(
@@ -511,7 +530,7 @@ describe('[COMP:sandbox/browser-tools] Computer tool surface', () => {
         unattendedEnabled: () => true,
         getWorkspacePlan: async () => 'pro',
       })
-      const res = await run(tools.browserSnapshot, {}, toolContext({ channelType: 'workflow' }))
+      const res = await run(tools.browserSnapshot, {}, toolContext({ channelType: 'workflow', attended: false }))
       expect(res.isError).toBeUndefined()
       expect(local.calls).toEqual(['snapshot'])
     })
@@ -524,7 +543,7 @@ describe('[COMP:sandbox/browser-tools] Computer tool surface', () => {
         unattendedEnabled: () => true,
         getWorkspacePlan: async () => 'free',
       })
-      const res = await run(tools.browserSnapshot, {}, toolContext({ channelType: 'workflow' }))
+      const res = await run(tools.browserSnapshot, {}, toolContext({ channelType: 'workflow', attended: false }))
       expect(res.isError).toBe(true)
       expect(String(res.data)).toContain('paid plans')
       expect(local.calls).toEqual([])
@@ -537,7 +556,7 @@ describe('[COMP:sandbox/browser-tools] Computer tool surface', () => {
         cloud: fakeProvider('cloud'),
         unattendedEnabled: () => true,
       })
-      const res = await run(tools.browserSnapshot, {}, toolContext({ channelType: 'workflow' }))
+      const res = await run(tools.browserSnapshot, {}, toolContext({ channelType: 'workflow', attended: false }))
       expect(res.isError).toBe(true)
       expect(local.calls).toEqual([])
     })
@@ -809,7 +828,7 @@ describe('[COMP:sandbox/browser-tools] Computer tool surface', () => {
       const res = await run(
         tools.browserNavigate,
         { url: 'https://news.ycombinator.com/' },
-        toolContext({ channelType: 'workflow' }),
+        toolContext({ channelType: 'workflow', attended: false }),
       )
       expect(res.isError ?? false).toBe(false) // the navigate itself is allowed
       expect(announced).toEqual([]) // but a headless run gets no proactive push

@@ -1,6 +1,12 @@
 import { expectMentionMatches } from './incoming-event-assertions.js'
 import { dispatchIncomingMessageEvent } from '../../message-events.js'
 vi.mock('../../message-events.js', () => ({ dispatchIncomingMessageEvent: vi.fn(async () => {}) }))
+// Room convergence has its own suite ([COMP:api/channel-room]); here groups stay unbound.
+vi.mock('../../channel-room/room.js', async (importOriginal) => ({
+  ...(await importOriginal<typeof import('../../channel-room/room.js')>()),
+  resolveRoomBinding: vi.fn(async () => null),
+  postPassiveChannelMessage: vi.fn(async () => false),
+}))
 import type { ChannelQuestionStore } from '../../workflow/channel-questions.js'
 import { channelQuestionActions, resolveChannelQuestion } from '../channel-questions.js'
 import { channelConfirmations, type ChannelInteractionScope } from '../channel-interactions.js'

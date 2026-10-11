@@ -14,6 +14,7 @@ import {
   type CodexImageProvider,
   CodexAccountClient,
   CodexCatalogClient,
+  AccountLoginCompletedNotificationSchema,
   CodexRpcClosedError,
   createCodexAppServerProvider,
   startCodexAppServer,
@@ -41,6 +42,7 @@ type StartProcess = typeof startCodexAppServer
 
 type Runtime = {
   process: CodexAppServerProcess
+  accountProcess: CodexAppServerProcess
   account: CodexAccountClient
   catalog: CodexCatalogClient
   provider: LLMProvider
@@ -212,9 +214,11 @@ class ManagedCodexProvider implements CodexProviderManager {
 
   async logout(): Promise<void> {
     this.#invalidateImages()
-    await (await this.#requireRuntime()).account.logout()
+    const runtime = await this.#requireRuntime()
+    await runtime.account.logout()
+    this.#handleRuntimeClose(runtime, false)
     this.#availability.setModelCatalog(PROVIDER_ID, null)
-    this.#lastStatus = disconnectedStatus(true, this.#preferredProvider())
+    this.#lastStatus = disconnectedStatus(false, this.#preferredProvider())
   }
 
   async setPreferredProvider(provider: OssPreferredProvider): Promise<void> {
@@ -237,7 +241,7 @@ class ManagedCodexProvider implements CodexProviderManager {
     this.#runtime = undefined
     runtime?.removeCloseListener()
     runtime?.account.close()
-    await runtime?.process.close()
+    await Promise.all([runtime?.process.close(), runtime?.accountProcess.close()])
   }
 
   #invalidateImages(): void {
@@ -262,24 +266,38 @@ class ManagedCodexProvider implements CodexProviderManager {
       ...(this.#codexHome ? { codexHome: this.#codexHome } : {}),
       surface: 'inference',
     })
-    if (this.#closed) {
+    let accountProcess: CodexAppServerProcess
+    try {
+      accountProcess = await this.#startProcess({ codexHome: process.codexHome, surface: 'account' })
+    } catch (error) {
       await process.close()
-      throw new CodexRpcClosedError('Codex provider manager closed during startup')
+      throw error
     }
-    const account = new CodexAccountClient(process.rpc)
-    const catalog = new CodexCatalogClient(process.rpc)
+    if (this.#closed || process.rpc.closed || accountProcess.rpc.closed) {
+      await Promise.all([process.close(), accountProcess.close()])
+      throw new CodexRpcClosedError('Codex provider runtime closed during startup')
+    }
+    const account = new CodexAccountClient(accountProcess.rpc)
+    const catalog = new CodexCatalogClient(accountProcess.rpc)
     const provider = createCodexAppServerProvider({
       transport: { rpc: process.rpc, cwd: process.cwd },
       models: this.#reviewedModels,
     })
     const runtime = {
       process,
+      accountProcess,
       account,
       catalog,
       provider,
       removeCloseListener: () => {},
     } satisfies Runtime
-    runtime.removeCloseListener = process.rpc.onClose(() => this.#handleRuntimeClose(runtime))
+    const removeInferenceClose = process.rpc.onClose(() => this.#handleRuntimeClose(runtime))
+    const removeAccountClose = accountProcess.rpc.onClose(() => this.#handleRuntimeClose(runtime))
+    const removeLoginCompleted = accountProcess.rpc.onNotification('account/login/completed', params => {
+      const result = AccountLoginCompletedNotificationSchema.safeParse(params)
+      if (result.success && result.data.success) this.#handleRuntimeClose(runtime, false)
+    })
+    runtime.removeCloseListener = () => { removeInferenceClose(); removeAccountClose(); removeLoginCompleted() }
     this.#runtime = runtime
     try {
       await this.refresh()
@@ -292,16 +310,17 @@ class ManagedCodexProvider implements CodexProviderManager {
     }
   }
 
-  #handleRuntimeClose(runtime: Runtime): void {
+  #handleRuntimeClose(runtime: Runtime, unexpected = true): void {
     if (this.#runtime !== runtime) return
     this.#runtime = undefined
     runtime.removeCloseListener()
     runtime.account.close()
+    this.#invalidateImages()
     this.#availability.setModelCatalog(PROVIDER_ID, null)
     this.#lastStatus = disconnectedStatus(false, this.#preferredProvider())
-    void runtime.process.close()
-    if (this.#closed || this.#restartBudget <= 0 || this.#restartTimer) return
-    this.#restartBudget--
+    void Promise.all([runtime.process.close(), runtime.accountProcess.close()])
+    if (this.#closed || (unexpected && this.#restartBudget <= 0) || this.#restartTimer) return
+    if (unexpected) this.#restartBudget--
     this.#restartTimer = setTimeout(() => {
       this.#restartTimer = undefined
       void this.#ensureRuntime().catch(() => {

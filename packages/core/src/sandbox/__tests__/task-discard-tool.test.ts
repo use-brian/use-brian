@@ -4,7 +4,7 @@ import { createLocalBrowserProvider } from '../local-browser-provider.js'
 import type { ToolContext } from '../../tools/types.js'
 
 const ctx: ToolContext = { userId: 'user-1', assistantId: 'assistant-1', sessionId: 'session-1', appId: 'app-1',
-  workspaceId: 'workspace-1', channelType: 'web', channelId: 'channel-1', abortSignal: new AbortController().signal }
+  workspaceId: 'workspace-1', channelType: 'web', attended: true, channelId: 'channel-1', abortSignal: new AbortController().signal }
 function fixture() {
   const discardTask = vi.fn(async () => 'discarded' as const)
   const resolvePolicy = vi.fn(async () => 'allow' as 'allow' | 'ask' | 'block')
@@ -29,7 +29,7 @@ describe('[COMP:sandbox/task-discard] attended agent recovery', () => {
     const h = fixture()
     h.resolvePolicy.mockResolvedValueOnce('block')
     expect((await h.run()).isError).toBe(true)
-    expect((await h.run({}, { ...ctx, channelType: 'scheduled' })).isError).toBe(true)
+    expect((await h.run({}, { ...ctx, channelType: 'scheduled', attended: false })).isError).toBe(true)
     const authority = { assertCurrent: async () => { throw new Error('SECRET_SENTINEL') }, execute: async () => { throw new Error('SECRET_SENTINEL') } }
     const result = await h.run({}, { ...ctx, authority })
     expect(result.isError).toBe(true)

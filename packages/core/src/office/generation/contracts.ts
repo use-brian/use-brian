@@ -59,6 +59,18 @@ export type OfficeGenerationEventCode =
   | 'office.job.failed'
   | 'office.job.cancelled'
   | 'office.job.steering_applied'
+  /** Claimed by a worker (shared store `claim`, same statement as `running`). */
+  | 'office.job.started'
+  /** A steering answer resumed a paused job (same statement as the status change). */
+  | 'office.job.input_received'
+  /** The initiator chose a template for a paused generation. */
+  | 'office.job.template_resumed'
+  /** Revision worker: the model drafted the command batch. */
+  | 'office.job.revision_drafted'
+  /** Import worker: the source file parsed to a canonical snapshot. */
+  | 'office.job.import_parsed'
+  /** Template compile worker: the uploaded template parsed to a snapshot. */
+  | 'office.job.template_parsed'
 
 export type OfficeGenerationEvent = {
   stage: OfficeGenerationStage | 'needs_input' | 'failed' | 'cancelled'

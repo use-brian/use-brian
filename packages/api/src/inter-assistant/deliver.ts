@@ -7,7 +7,8 @@
  */
 
 import { ContextScopeAccumulator } from '@use-brian/core'
-import { findOrCreateSession, addSessionMessage, findSessionById, isSharedAudienceSession } from '../db/sessions.js'
+import { findOrCreateSession, addSessionMessage, findSessionById } from '../db/sessions.js'
+import { policyFor } from '../session-kind.js'
 import { turnOutputWrite } from '../context-scope/resolve-turn-scope.js'
 import type { ChannelIntegrationStore } from '../db/channel-integrations.js'
 import type { FeishuCredentials } from '../db/channel-integrations.js'
@@ -25,6 +26,7 @@ import {
   createDeliveryAudienceAuthorizer,
   type AuthorizeDeliveryAudience,
 } from '../context-scope/delivery-authority.js'
+import { isWebTransport } from '../session-kind.js'
 
 export type DeliveryParams = {
   /** Owning workspace for live audience authorization. */
@@ -110,7 +112,7 @@ export async function deliverToChannel(params: DeliveryParams): Promise<ChannelD
       accumulator: new ContextScopeAccumulator(evidence),
       envelope: {
         workspaceId: params.workspaceId,
-        userId: session && isSharedAudienceSession(session) ? null : userId,
+        userId: session && policyFor(session).deliveryCeiling.ceiling === 'audience' ? null : userId,
         assistantId: null,
         sensitivity: 'public',
         compartments: [],
@@ -150,7 +152,7 @@ export async function deliverToChannel(params: DeliveryParams): Promise<ChannelD
   }
 
   // Only persist to notification session if delivering to web (avoid double notification)
-  if (channelType === 'web' || channelType === 'notification') {
+  if (isWebTransport(channelType)) {
     const notifSession = await findOrCreateSession({
       assistantId,
       userId,

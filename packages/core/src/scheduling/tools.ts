@@ -157,7 +157,7 @@ export function createSchedulingTools(deps: SchedulingToolDeps): {
     channelType: string
     workflowStepRunId: string | null
   }): boolean {
-    return job.workflowId !== null && job.channelType === 'workflow' && job.workflowStepRunId === null
+    return job.workflowId !== null && job.channelType === 'workflow' && job.workflowStepRunId === null // session-kind-exempt: scheduled_jobs.channel_type, not a session
   }
 
   /**
@@ -807,7 +807,7 @@ export function createSchedulingTools(deps: SchedulingToolDeps): {
       // Cascade-delete the implicit one-step reminder workflow. A
       // `scheduleWorkflow`-backed job (channelType 'workflow') points at a
       // user-authored workflow we must leave intact.
-      if (job.workflowId && job.channelType !== 'workflow') {
+      if (job.workflowId && job.channelType !== 'workflow') { // session-kind-exempt: scheduled_jobs.channel_type, not a session
         await workflowStore.delete(context.userId, job.workflowId).catch((err) => {
           console.error(`[scheduling] failed to delete reminder workflow ${job.workflowId}:`, err)
         })

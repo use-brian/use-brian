@@ -27,6 +27,7 @@ export function createOfficeRevisionWorker(deps: OfficeRevisionWorkerDeps) {
       if (!live || live.baseVersion < brief.expectedVersion) throw new Error('revision_version_conflict')
       const revision = await deps.revise({ snapshot: live.snapshot, targetIds: brief.targetIds, instruction: brief.instruction, currentVersion: live.baseVersion, versionDrifted: live.baseVersion !== brief.expectedVersion, job })
       if (!revision.commands.length) throw new Error('Office revision has no commands')
+      await deps.appendEvent({ userId, jobId: job.id, workspaceId: job.workspaceId, code: 'office.job.revision_drafted', values: { mode: revision.mode, commands: revision.commands.length }, actorType: 'system', safeNarration: 'Changes drafted' })
       let replayed = live.snapshot
       for (const command of revision.commands) {
         if (command.baseVersion !== live.baseVersion || command.artifactId !== job.artifactId) throw new Error('Office revision command envelope mismatch')

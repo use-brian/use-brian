@@ -135,7 +135,12 @@ export function browserExtensionRoutes(deps: {
       return
     }
     const pairingToken = signBrowserExtPairToken(
-      { userId, workspaceId: parsed.data.workspaceId, browserProfileId: profile.id },
+      {
+        userId,
+        workspaceId: parsed.data.workspaceId,
+        browserProfileId: profile.id,
+        browserProfileName: profile.name,
+      },
       deps.jwtSecret,
     )
     res.json({

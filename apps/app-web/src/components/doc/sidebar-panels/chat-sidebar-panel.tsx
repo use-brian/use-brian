@@ -43,7 +43,7 @@
 import { useCallback, useEffect, useMemo, useState } from "react";
 import Link from "next/link";
 import { usePathname, useRouter, useSearchParams } from "next/navigation";
-import { ChevronRight, MoreHorizontal, Pencil, Plus, Trash2 } from "lucide-react";
+import { Brain, ChevronRight, MoreHorizontal, Pencil, Plus, Trash2 } from "lucide-react";
 import { cn } from "@/lib/utils";
 import { useT, format } from "@/lib/i18n/client";
 import { AssistantAvatar } from "@/components/assistant-avatar";
@@ -58,6 +58,7 @@ import {
 import {
   createWorkspaceSession,
   deleteSession,
+  setRoomCapture,
   renameSessionTitle,
   type DocSession,
   type WorkspaceSession,
@@ -140,12 +141,15 @@ export function ChatSidebarPanel({ workspaceId }: { workspaceId: string }) {
   >({});
 
   /** Reconcile the immediate same-tab signal with persisted session status
-   *  whenever the shared list (re)paints. A short grace keeps a just-started
-   *  turn pulsing while the chat route is still in preflight and has not
-   *  flipped the row to `running` yet. */
+   *  whenever either list (re)paints: personal rows carry `status` too
+   *  (chat-parity T4), so a personal chat pulses the same way a room does. A
+   *  short grace keeps a just-started turn pulsing while the chat route is
+   *  still in preflight and has not flipped the row to `running` yet. */
   useEffect(() => {
-    if (!sharedRows) return;
-    const byId = new Map(sharedRows.map((row) => [row.id, row]));
+    if (!sharedRows && !rows) return;
+    const byId = new Map<string, DocSession>(
+      [...(rows ?? []), ...(sharedRows ?? [])].map((row) => [row.id, row]),
+    );
     const now = Date.now();
     setActivityBySession((current) => {
       let changed = false;
@@ -164,7 +168,7 @@ export function ChatSidebarPanel({ workspaceId }: { workspaceId: string }) {
       }
       return changed ? next : current;
     });
-  }, [sharedRows]);
+  }, [sharedRows, rows]);
 
   useEffect(() => {
     const handler = (event: Event) => {
@@ -273,6 +277,23 @@ export function ChatSidebarPanel({ workspaceId }: { workspaceId: string }) {
     [t, workspaceId],
   );
 
+  /** A converged group's brain capture (unified-sessions D4); admins only. */
+  const onToggleCapture = useCallback(
+    async (row: WorkspaceSession) => {
+      setMenuFor(null);
+      const enabled = row.roomCapture === false;
+      if (!(await setRoomCapture(row.id, enabled))) {
+        setError(t.roomCaptureDenied);
+        return;
+      }
+      setError(null);
+      patchSharedChatSessions(workspaceId, <R extends DocSession>(list: R[]): R[] =>
+        list.map((r) => (r.id === row.id ? { ...r, roomCapture: enabled } : r)));
+      dispatchChatSessionsRefresh(workspaceId);
+    },
+    [t, workspaceId],
+  );
+
   const onDelete = useCallback(
     async (row: DocSession) => {
       setMenuFor(null);
@@ -327,16 +348,18 @@ export function ChatSidebarPanel({ workspaceId }: { workspaceId: string }) {
     const rowAssistant =
       (row.assistantId ? assistantById.get(row.assistantId) : undefined) ??
       primary;
-    // Unread is a DOT, not a count (multiplayer chat T7): shared rows only,
-    // off `last_active_at` vs this device's localStorage watermark. The open
-    // room never dots — the surface stamps the watermark as activity lands.
+    // ONE row renderer for both rails (chat-parity T4). Unread is a DOT, not
+    // a count (multiplayer chat T7), off `last_active_at` vs this device's
+    // localStorage watermark, and only where another human takes part: a
+    // conversation with one human (every personal chat) is always read by
+    // that human, so it never dots. The open row never dots either — the
+    // surface stamps the watermark as activity lands.
     const unread =
-      "startedByUserId" in row &&
+      row.humanCount !== 1 &&
       row.id !== activeSessionId &&
       isRoomUnread(workspaceId, row.id, row.lastActive);
-    const working =
-      "startedByUserId" in row &&
-      (activityBySession[row.id]?.working ?? row.status === "running");
+    // The working pulse reads every row's turn slot, personal or room.
+    const working = activityBySession[row.id]?.working ?? row.status === "running";
     return (
     <div key={row.id} className="group relative">
       <Link
@@ -375,6 +398,16 @@ export function ChatSidebarPanel({ workspaceId }: { workspaceId: string }) {
           <span className="min-w-0 flex-1">
             <span className="flex items-center gap-1.5">
               <span className="min-w-0 truncate">{row.title}</span>
+              {"transport" in row && row.transport && row.transport !== "web" && (
+                <span
+                  aria-label={format(t.roomTransportAria, {
+                    transport: t.roomTransport[row.transport as keyof typeof t.roomTransport] ?? row.transport,
+                  })}
+                  className="shrink-0 rounded border border-sidebar-border px-1 text-[10px] leading-4 text-sidebar-foreground/60"
+                >
+                  {t.roomTransport[row.transport as keyof typeof t.roomTransport] ?? row.transport}
+                </span>
+              )}
               {unread && (
                 <span
                   role="status"
@@ -416,6 +449,16 @@ export function ChatSidebarPanel({ workspaceId }: { workspaceId: string }) {
             <Pencil className="size-3.5" aria-hidden />
             {t.rename}
           </button>
+          {"roomCapture" in row && row.roomCapture !== undefined && (
+            <button
+              type="button"
+              onClick={() => void onToggleCapture(row)}
+              className="flex w-full items-center gap-2 px-2.5 py-1.5 text-left text-xs hover:bg-accent"
+            >
+              <Brain className="size-3.5" aria-hidden />
+              {row.roomCapture ? t.roomCaptureOff : t.roomCaptureOn}
+            </button>
+          )}
           <button
             type="button"
             onClick={() => void onDelete(row)}

@@ -39,6 +39,27 @@ describe('compact browser panel controls', () => {
     }
   });
 
+  it('shows which browser profile the pane signs into, and hides the chip without one', () => {
+    expect(html).toMatch(/<div class="row"><span id="profile" hidden><\/span><span id="status"/);
+    const elements = new Map<string, any>();
+    const document: any = { documentElement: { style: { setProperty: vi.fn() } }, getElementById: (id: string) => {
+      if (!elements.has(id)) elements.set(id, { hidden: false, addEventListener: vi.fn(), setAttribute: vi.fn(), replaceChildren: vi.fn() });
+      return elements.get(id);
+    } };
+    const window = { addEventListener: vi.fn() };
+    const ipcRenderer = { send: vi.fn(), on: vi.fn() };
+    runInNewContext(readFileSync(new URL('../embedded-browser-preload.cjs', import.meta.url), 'utf8'), {
+      document, window, require: () => ({ ipcRenderer }),
+    });
+    window.addEventListener.mock.calls.find(([name]) => name === 'DOMContentLoaded')![1]();
+    const update = ipcRenderer.on.mock.calls.find(([name]) => name === 'embedded-browser:state')![1];
+    update({}, { tabs: [], selected: null, status: '', profile: 'Work Twitter' });
+    expect(elements.get('profile')).toMatchObject({ hidden: false, textContent: 'Profile: Work Twitter' });
+    expect(elements.get('profile').title).toContain('"Work Twitter"');
+    update({}, { tabs: [], selected: null, status: '', profile: null });
+    expect(elements.get('profile')).toMatchObject({ hidden: true, textContent: '' });
+  });
+
   it('applies live explicit app themes without consulting the OS preference', () => {
     const properties = new Map<string, string>();
     const style = { colorScheme: '', setProperty: vi.fn((key: string, value: string) => properties.set(key, value)) };

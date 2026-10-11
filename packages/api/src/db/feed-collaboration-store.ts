@@ -1,3 +1,5 @@
+import { admitAnchoredSession } from '../workspace-access/session-create-admission.js'
+import { sessionKindSql } from '../session-kind.js'
 import { assertFeedLinkedInDestination } from '../content-planning/linkedin-authority.js'
 import { feedSelectedFiles, readFeedSelectedSources, feedSourceFloor } from '../content-planning/source-authority.js'
 /** Atomic Feed content, discussion and decision history. [COMP:feed/draft-comments] [COMP:feed/draft-suggestions] [COMP:feed/editorial-decisions] */
@@ -25,7 +27,7 @@ export type FeedScope = { workspaceId: string; clearance: string; compartments: 
 export async function lockFeedAccess(client: pg.PoolClient, actor: FeedActor, write = true): Promise<FeedScope> {
   const row = (await client.query<FeedScope>(
     `SELECT a.workspace_id AS "workspaceId", a.clearance, a.compartments FROM sessions s JOIN assistants a ON a.id=s.assistant_id
-     WHERE s.id=$1 AND a.id=$2 AND s.mode='draft' AND s.channel_type <> 'feed_thread'
+     WHERE s.id=$1 AND a.id=$2 AND ${sessionKindSql.anchored('s', 'feed_draft')}
        AND s.workspace_id=a.workspace_id AND a.kind='app' AND a.app_type='distribution' FOR UPDATE OF s`,
     [actor.sessionId, actor.assistantId],
   )).rows[0]
@@ -181,7 +183,9 @@ export async function executeFeedCommands(actor: FeedActor, raw: FeedCommandRequ
         const sourceRevision = command.sourceRevision ?? currentRevision
         const source = await historicalFeedContent(client, actor.sessionId, sourceRevision, currentRevision, structured)
         const anchor = await mapFeedHistoricalAnchor(client, actor.sessionId, createFeedAnchor(source.composition, command.target, sourceRevision), currentRevision, source.composition); const transcript = randomUUID()
-        await client.query(`INSERT INTO sessions(id,assistant_id,user_id,channel_type,channel_id,workspace_id,visibility,title) VALUES($1,$2,$3,'feed_thread',$4,$5,'workspace','Draft discussion')`, [transcript, actor.assistantId, actor.userId, `feed-thread:${command.threadId}`, scope.workspaceId])
+        // The draft anchors the discussion: admitted by its anchor (L12).
+        const admitted = await admitAnchoredSession(client, { assistantId: actor.assistantId, userId: actor.userId, channelType: 'web', channelId: `feed-thread:${command.threadId}`, workspaceId: scope.workspaceId, anchorKind: 'feed_thread', anchorRef: command.threadId })
+        await client.query(`INSERT INTO sessions(id,assistant_id,user_id,channel_type,channel_id,workspace_id,visibility,title,anchor_kind,anchor_ref,effective_clearance) VALUES($1,$2,$3,'web',$4,$5,'workspace','Draft discussion','feed_thread',$6,$7)`, [transcript, actor.assistantId, actor.userId, `feed-thread:${command.threadId}`, scope.workspaceId, command.threadId, admitted.effectiveClearance])
         await client.query(`INSERT INTO feed_comment_threads(id,session_id,workspace_id,assistant_id,transcript_session_id,anchor,author_user_id,author_kind) VALUES($1,$2,$3,$4,$5,$6,$7,$8)`, [command.threadId, actor.sessionId, scope.workspaceId, actor.assistantId, transcript, JSON.stringify(anchor), actor.userId, actor.kind])
         await client.query(`INSERT INTO session_messages(session_id,role,content,sequence_num,sender_user_id) VALUES($1,$2,$3,1,$4)`, [transcript, actor.kind === 'user' ? 'user' : 'assistant', JSON.stringify([{ type: 'text', text: command.text }]), actor.kind === 'user' ? actor.userId : null])
         receipt.threadIds.push(command.threadId); sequence++

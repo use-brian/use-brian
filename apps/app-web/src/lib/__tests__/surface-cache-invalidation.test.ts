@@ -21,6 +21,7 @@ import {
   SCHEDULED_JOB_REFRESH_EVENT,
 } from "@/lib/workspace-events";
 import { INBOX_REFRESH_EVENT } from "@/lib/inbox-refresh-events";
+import { OFFICE_REFRESH_EVENT } from "@/lib/workspace-events";
 import { GOAL_REFRESH_EVENT } from "@/lib/goal-events";
 import { WORKSPACE_IDENTITY_REFRESH_EVENT } from "@/lib/workspace-identity-events";
 import { HOME_APPS_REFRESH_EVENT } from "@/lib/home-apps-events";
@@ -235,6 +236,11 @@ describe("[COMP:app-web/surface-cache-invalidation] goal primitive and brain det
       "feed-collaboration:w1",
     ]);
     expect(SURFACE_CACHE_SPINE_EVENTS).toContain(GOAL_REFRESH_EVENT);
+  });
+
+  it("OFFICE_REFRESH_EVENT marks the Office list and the template library, never an open editor's snapshot", () => {
+    expect(staleMarksFor(OFFICE_REFRESH_EVENT, "w1")).toEqual(["office:w1:", "office-templates:w1:"]);
+    expect(SURFACE_CACHE_SPINE_EVENTS).toContain(OFFICE_REFRESH_EVENT);
   });
 
   it("a goal change keeps the board's rows while it revalidates, per status slot", async () => {

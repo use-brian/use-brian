@@ -11,6 +11,11 @@ import { canEnableOfficeCreation } from './templates/compiler.js'
 import { buildTool, type Tool, type ToolContext } from '../tools/types.js'
 import { resolveWriteScope, scopeEvidenceFromRows, type ScopeEvidence } from '../security/context-scope.js'
 
+export const OfficeGenerationTemplateSelection = z.object({
+  artifactId: z.string().uuid(), jobId: z.string().uuid(), templateVersionId: z.string().uuid(),
+}).strict()
+export type OfficeTemplateChoice = { templateVersionId: string; name: string }
+
 export type OfficeArtifactToolProjection = {
   artifactId: string
   family: 'document' | 'presentation' | 'spreadsheet' | 'pdf'
@@ -37,12 +42,13 @@ export type OfficeArtifactToolProjection = {
   }>
   targetsTruncated?: boolean
   nextTargetOffset?: number
-  job?: { id: string; status: string; stage: string; errorCode: string | null; importDiagnostics?: Array<{ reason: string; part?: string }> }
+  job?: { id: string; status: string; stage: string; errorCode: string | null; inputQuestion?: string; canResumeTemplate?: boolean; templateChoices?: OfficeTemplateChoice[]; importDiagnostics?: Array<{ reason: string; part?: string }> }
   /** Internal-only root evidence; the tool strips it before model delivery. */
   scopeEvidence?: ScopeEvidence
 }
 
 export type OfficeToolPort = {
+  resumeGeneration?(context: ToolContext, input: z.infer<typeof OfficeGenerationTemplateSelection>): Promise<{artifactId:string;jobId:string}>
   retryTemplateImport?(input: { userId: string; workspaceId: string; artifactId: string; failedJobId: string; fileId?: string; assistantId?: string; clearance?: 'public' | 'internal' | 'confidential'; compartmentGrant?: string[] | null; projectGrant?: string[] | null }): Promise<{ jobId: string } | null>
   inspectClassification?(context:ToolContext, artifactId:string): Promise<unknown>;
   restrictClassification?(context:ToolContext, input:{artifactId:string;expectedRevision:string;departmentId?:string;sensitivity:'public'|'internal'|'confidential'}): Promise<unknown>;
@@ -208,7 +214,7 @@ export function createOfficeTools(params: {
     resolveConfirmation: askGate('getOfficeArtifact'),
     isConcurrencySafe: true,
     isReadOnly: true,
-    description: 'Read the current permission-filtered metadata, collaboration role, version, lifecycle, generation state, and one bounded page of the semantic target outline for a Brian-native Office artifact. Use the returned stable target IDs with reviseOfficeArtifact. When nextTargetOffset is present, call again with that targetOffset to continue discovery. Returns no existence signal when the caller is ineligible and never returns binary resources or the complete canonical snapshot.',
+    description: 'Read the current permission-filtered metadata, collaboration role, version, lifecycle, generation state, and one bounded page of the semantic target outline for a Brian-native Office artifact. A draft paused for template selection includes job.inputQuestion and permission-filtered job.templateChoices with published version IDs. Use the returned stable target IDs with reviseOfficeArtifact. When nextTargetOffset is present, call again with that targetOffset to continue discovery. Returns no existence signal when the caller is ineligible and never returns binary resources or the complete canonical snapshot.',
     inputSchema: z.object({ artifactId: z.string().uuid(), targetOffset: z.number().int().min(0).optional() }),
     async execute(input, context) {
       const blocked = await blockGate('getOfficeArtifact', context)
@@ -409,5 +415,16 @@ export function createOfficeTools(params: {
       },
     }))
   }
-  return [createOfficeArtifact, getOfficeArtifact, reviseOfficeArtifact, openPdfEditingSession, placePdfSignature,...classificationTools, ...recoveryTools]
+  const generationRecoveryTools = params.port.resumeGeneration ? [buildTool({
+    name:'resumeOfficeGeneration', requiresCapability:'office', isReadOnly:false, isConcurrencySafe:false,
+    resolveConfirmation:askGate('resumeOfficeGeneration'),
+    description:'Resume one uninitialized Office draft paused for template selection. Read getOfficeArtifact first and select a published matching templateVersionId from job.templateChoices, or an exact version selected by the user. Requires the initiating user and current Edit authority. Preserves the draft, brief and execution protections. Never selects an unpublished template or resets an edited or completed draft. If no choices are available, ask the user to upload, review and publish a template in Office > Templates first.',
+    inputSchema:OfficeGenerationTemplateSelection,
+    async execute(input,context) {
+      const blocked=await blockGate('resumeOfficeGeneration',context);if(blocked)return blocked
+      const data=await params.port.resumeGeneration!(context,input)
+      return {data:{...data,editorUrl:context.workspaceId ? link(params.appOrigin,context.workspaceId,data.artifactId) : undefined}}
+    },
+  })] : []
+  return [createOfficeArtifact, getOfficeArtifact, reviseOfficeArtifact, openPdfEditingSession, placePdfSignature,...classificationTools, ...recoveryTools,...generationRecoveryTools]
 }

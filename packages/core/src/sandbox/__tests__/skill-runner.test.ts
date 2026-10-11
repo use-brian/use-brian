@@ -32,7 +32,7 @@ function toolContext(overrides: Partial<ToolContext> = {}): ToolContext {
     assistantId: 'asst-1',
     sessionId: 'sess-1',
     appId: 'app-1',
-    channelType: 'web',
+    channelType: 'web', attended: true,
     channelId: 'chan-1',
     workspaceId: 'ws-1',
     abortSignal: new AbortController().signal,
@@ -501,7 +501,7 @@ describe('[COMP:sandbox/skill-runner] Profile at call time (R2-10) + backends + 
   it('refuses on autonomous paths unless unattended is enabled AND the plan is paid (R2-8)', async () => {
     const { tools, addSkill } = await build()
     await addSkill('collect-feed', READ_ONLY_CODE)
-    const off = await run(tools.runBrowserSkill, { skill: 'collect-feed' }, toolContext({ channelType: 'workflow' }))
+    const off = await run(tools.runBrowserSkill, { skill: 'collect-feed' }, toolContext({ channelType: 'workflow', attended: false }))
     expect(off.isError).toBe(true)
     expect(String(off.data)).toContain('autonomous')
   })
@@ -585,7 +585,7 @@ describe('[COMP:sandbox/skill-runner] attended profile classification', () => {
   })
   it.each(['workflow','api','assistant-call'])('refuses %s even with a supplied receipt',async(channelType)=>{
     const f=await fixture()
-    expect((await f.tool.execute(input,{...f.context,channelType})).isError).toBe(true)
+    expect((await f.tool.execute(input,{...f.context,channelType,attended:false})).isError).toBe(true)
     expect(f.classifyDepartment).not.toHaveBeenCalled()
   })
   it('refuses missing or mismatched receipts and a stale reviewed source',async()=>{

@@ -1,5 +1,6 @@
 import { isWorkspaceWideWebChat, type WebChatEventScope } from './_web-chat-event-scope.js'
 import { dispatchIncomingMessageEvent } from '../message-events.js'
+import { classifySession } from '../session-kind.js'
 
 /** Call only after authorizing and persisting a new human input, never output.
  * Web has no installed channel integration: the DB session UUID is its stable
@@ -26,7 +27,7 @@ export function dispatchPersistedWebInput(input: {
       channelId: input.session.id,
       messageId: input.stored.id,
       text: input.text,
-      isGroupChat: input.session.visibility === 'workspace',
+      isGroupChat: classifySession(input.session).audience === 'workspace',
       timestamp: input.stored.createdAt.getTime() / 1000,
       // Never forward the HTTP body, attachment context, or authorization data.
       raw: {},

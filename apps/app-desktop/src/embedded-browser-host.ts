@@ -33,8 +33,20 @@ export function browserAddress(value: unknown): string | null {
   return validWebUrl(hasScheme && !hostPort ? address : `https://${address}`);
 }
 
-type Callbacks = { stop: () => void; closed: () => void; tabClosed: (id: number) => void; detached: (id: number) => void };
-type Tab = { id: number; handle: string; taskOwned: boolean; contents: WebContents; view: WebContentsView };
+type Callbacks = {
+  stop: () => void; closed: () => void; tabClosed: (id: number) => void; detached: (id: number) => void;
+  /** The user closed the last tab: the host has nothing left to show (T8). */
+  empty?: () => void;
+};
+/**
+ * `taskOwned`: opened by Brian for a task still in control; it becomes the
+ * user's when control is released (chat-parity D10). `chatKey`: the Chat
+ * conversation whose side pane shows the tab (T7); null in the legacy dock.
+ */
+/** `announced`: the app shows this tab in its chat's side pane, so it hears where the tab goes (D7, D8). */
+type Tab = { id: number; handle: string; taskOwned: boolean; chatKey: string | null; announced: boolean; contents: WebContents; view: WebContentsView };
+/** The Chat side pane's browser slot, in window DIP (T7). A null rect hides the browser. */
+export type BrowserSlot = { chatKey: string | null; rect: { x: number; y: number; width: number; height: number } | null };
 
 /** Owns an exclusive persistent browsing partition; never use an app deployment partition. */
 export class EmbeddedBrowserHost {
@@ -56,14 +68,25 @@ export class EmbeddedBrowserHost {
   private readonly entries = new Map<number, Tab>();
   private selected: number | null = null;
   private status = "";
+  private readonly profileName: string | null;
   private theme: BrowserTheme | null = null;
   private disposed = false;
+  /**
+   * Pane mode (chat-parity T7): set once the Chat side pane reports its slot.
+   * The browser then lives inside that slot, never docked against the window
+   * edge, and only the open chat's tabs are visible. Null = the legacy dock.
+   */
+  private slot: BrowserSlot | null = null;
+  /** The chat a running task's new tabs belong to: the chat whose turn is live. */
+  private taskChat: string | null = null;
+  private readonly selectedByChat = new Map<string | null, number>();
   readonly files = new BrowserFiles(message => this.setStatus(message));
 
-  constructor(partition: string, private readonly callbacks: Callbacks, options: { dockWindow?: BrowserWindow | null } = {}) {
+  constructor(partition: string, private readonly callbacks: Callbacks, options: { dockWindow?: BrowserWindow | null; profileName?: string | null } = {}) {
     if (!partition.startsWith("persist:") || partition.length <= 8 || partition.startsWith("persist:deployment-")) {
       throw new Error("Embedded browser requires a dedicated persistent partition (not an app deployment partition)");
     }
+    this.profileName = options.profileName ?? null;
     this.browsingSession = session.fromPartition(partition);
     if (this.browsingSession === session.defaultSession || activeSessions.has(this.browsingSession)) {
       throw new Error("Embedded browser partition is already in use");
@@ -149,7 +172,8 @@ export class EmbeddedBrowserHost {
     } });
     const contents = view.webContents;
     const id = contents.id;
-    const tab: Tab = { id, handle: randomUUID(), taskOwned, contents, view };
+    const chatKey = this.slot ? (taskOwned ? this.taskChat ?? this.slot.chatKey : this.slot.chatKey) : null;
+    const tab: Tab = { id, handle: randomUUID(), taskOwned, chatKey, announced: taskOwned && this.slot !== null, contents, view };
     this.entries.set(id, tab);
     // about:blank exists only as the initial, empty document. Every subsequent
     // navigation/redirect, including subframes and popup destinations, must be HTTP(S).
@@ -168,9 +192,9 @@ export class EmbeddedBrowserHost {
       this.setStatus("Popup blocked. Open the destination manually in a new tab; popup-based sign-in may not work.");
       return { action: "deny" };
     });
-    contents.on("did-navigate", () => this.publish());
-    contents.on("did-navigate-in-page", () => this.publish());
-    contents.on("page-title-updated", () => this.publish());
+    contents.on("did-navigate", () => { this.publish(); this.announceUpdate(tab); });
+    contents.on("did-navigate-in-page", () => { this.publish(); this.announceUpdate(tab); });
+    contents.on("page-title-updated", () => { this.publish(); this.announceUpdate(tab); });
     contents.on("did-start-loading", () => this.publish());
     contents.on("did-stop-loading", () => this.publish());
     contents.on("render-process-gone", () => {
@@ -187,12 +211,18 @@ export class EmbeddedBrowserHost {
     });
     this.owner.contentView.addChildView(view);
     this.selectTab(id);
+    // Brian opening a tab opens it in that chat's side pane (D8).
+    if (tab.announced) this.sendPane({ type: "tab-opened", chatKey, browserId: tab.handle, url: target });
     await this.load(tab, target);
     return id;
   }
 
   selectTab(id: number): void {
-    if (this.disposed || !this.entries.has(id)) return;
+    const target = this.entries.get(id);
+    if (this.disposed || !target) return;
+    this.selectedByChat.set(target.chatKey, id);
+    // In pane mode a tab of another chat is selected for that chat only (T7).
+    if (this.slot && target.chatKey !== this.slot.chatKey) { this.publish(); return; }
     this.selected = id;
     this.layout();
     if (!this.collapsed) this.entries.get(id)?.contents.focus();
@@ -206,10 +236,45 @@ export class EmbeddedBrowserHost {
     if (!tab.contents.isDestroyed()) tab.contents.close({ waitForBeforeUnload: false });
   }
 
-  tabs(): Array<{ id: number; handle: string; taskOwned: boolean; contents: WebContents }> {
-    return [...this.entries.values()].map(({ id, handle, taskOwned, contents }) => ({ id, handle, taskOwned, contents }));
+  tabs(): Array<{ id: number; handle: string; taskOwned: boolean; chatKey: string | null; contents: WebContents }> {
+    return [...this.entries.values()].map(({ id, handle, taskOwned, chatKey, contents }) => ({ id, handle, taskOwned, chatKey, contents }));
   }
-  selectedId(): number | null { return this.selected; }
+  /** The tabs the running task may use: its chat's in pane mode, every tab in the dock. */
+  taskTabs(): ReturnType<EmbeddedBrowserHost["tabs"]> {
+    if (!this.slot) return this.tabs();
+    const chatKey = this.taskChat ?? this.slot.chatKey;
+    return this.tabs().filter(tab => tab.chatKey === chatKey);
+  }
+  /** The task's selected tab (its chat's, in pane mode). */
+  selectedId(): number | null {
+    return this.slot ? this.selectedByChat.get(this.taskChat ?? this.slot.chatKey) ?? null : this.selected;
+  }
+  /**
+   * The Chat side pane reports its browser slot (T7): the open chat and the
+   * slot's rect, or null when the slot is hidden (another tab active, the
+   * pane closed, a modal open). Switching chats swaps the visible tabs.
+   */
+  setSlot(slot: BrowserSlot): void {
+    if (this.disposed) return;
+    const chatChanged = !this.slot || this.slot.chatKey !== slot.chatKey;
+    this.slot = slot;
+    if (chatChanged) {
+      const remembered = this.selectedByChat.get(slot.chatKey);
+      const fallback = [...this.entries.values()].reverse().find(tab => tab.chatKey === slot.chatKey)?.id;
+      this.selected = remembered !== undefined && this.entries.has(remembered) ? remembered : fallback ?? null;
+    }
+    this.layout();
+  }
+  /** The chat whose live turn owns a new task's tabs (null: the open chat). */
+  setTaskChat(chatKey: string | null): void { this.taskChat = chatKey; }
+  /** Control was released (T8, D10): every task tab is the user's now. */
+  releaseTasks(): void {
+    let changed = false;
+    for (const tab of this.entries.values()) {
+      if (tab.taskOwned) { tab.taskOwned = false; changed = true; }
+    }
+    if (changed) this.publish();
+  }
   show(): void {
     if (this.disposed) return;
     this.userCollapsed = false;
@@ -336,12 +401,45 @@ export class EmbeddedBrowserHost {
   public publishDockLayout(): void {
     if (!this.dockWindow || this.dockWindow.isDestroyed() || this.dockWindow.webContents.isDestroyed()) return;
     const [contentWidth] = this.dockWindow.getContentSize();
+    // Pane mode never narrows the app: the browser sits inside the Chat pane.
     this.dockWindow.webContents.send("embedded-browser:dock-layout", {
-      reservedWidth: !this.disposed && this.docked ? this.panelWidth : 0, contentWidth,
+      reservedWidth: !this.disposed && this.docked && !this.slot ? this.panelWidth : 0, contentWidth,
     });
+  }
+  /** Keep the app's pane tab on the page this tab is showing: pinning it saves that URL (D7). */
+  private announceUpdate(tab: Tab): void {
+    if (!tab.announced || tab.contents.isDestroyed()) return;
+    const url = validWebUrl(tab.contents.getURL());
+    if (url) this.sendPane({ type: "tab-updated", chatKey: tab.chatKey, browserId: tab.handle, url, title: tab.contents.getTitle() || null });
+  }
+  /** Tell the app renderer about the browser's tabs (pane mode only). */
+  private sendPane(payload:
+    | { type: "tab-opened"; chatKey: string | null; browserId: string; url: string }
+    | { type: "tab-updated"; chatKey: string | null; browserId: string; url: string; title: string | null }): void {
+    if (!this.dockContents || this.dockContents.isDestroyed()) return;
+    this.dockContents.send("embedded-browser:pane", payload);
+  }
+  /** Lay the toolbar and the open chat's selected tab into the pane slot (T7). */
+  private slotLayout(slot: BrowserSlot): void {
+    const rect = slot.rect && slot.rect.width > 0 && slot.rect.height > 0 ? slot.rect : null;
+    this.collapsed = false;
+    this.toolbar.setVisible(rect !== null);
+    if (rect) {
+      this.panelWidth = rect.width;
+      this.toolbar.setBounds({ x: rect.x, y: rect.y, width: rect.width, height: Math.min(TOOLBAR_HEIGHT, rect.height) });
+    }
+    for (const tab of this.entries.values()) {
+      tab.view.setVisible(rect !== null && tab.chatKey === slot.chatKey && tab.id === this.selected);
+      // A hidden tab keeps its last viewport, so background automation still sees a page.
+      if (rect) tab.view.setBounds({ x: rect.x, y: rect.y + TOOLBAR_HEIGHT, width: rect.width, height: Math.max(0, rect.height - TOOLBAR_HEIGHT) });
+    }
+    this.publishDockLayout();
+    this.publish();
   }
   private layout(): void {
     if (this.disposed) return;
+    if (this.slot && this.docked) { this.slotLayout(this.slot); return; }
+    this.toolbar.setVisible(true);
     const [width, height] = this.owner.getContentSize();
     this.maxWidth = this.docked ? Math.max(360, width - 640) : width;
     this.collapsed = this.docked && (this.userCollapsed || width < 1000);
@@ -361,10 +459,10 @@ export class EmbeddedBrowserHost {
   private publish(): void {
     if (this.disposed || this.toolbar.webContents.isDestroyed()) return;
     this.toolbar.webContents.send(STATE, {
-      status: this.status, selected: this.selected, theme: this.theme,
+      status: this.status, profile: this.profileName, selected: this.selected, theme: this.theme,
       presentation: { mode: this.docked ? "docked" : "detached", collapsed: this.collapsed,
         panelWidth: this.panelWidth, minWidth: 360, maxWidth: this.maxWidth },
-      tabs: [...this.entries.values()].filter(tab => !tab.contents.isDestroyed()).map(tab => ({
+      tabs: [...this.entries.values()].filter(tab => !tab.contents.isDestroyed() && (!this.slot || tab.chatKey === this.slot.chatKey)).map(tab => ({
         id: tab.id, title: tab.contents.getTitle() || "New tab", url: tab.contents.getURL(),
         taskOwned: tab.taskOwned, back: tab.contents.navigationHistory.canGoBack(),
         forward: tab.contents.navigationHistory.canGoForward(),
@@ -375,14 +473,17 @@ export class EmbeddedBrowserHost {
     const tab = this.entries.get(id);
     if (!tab) return;
     this.entries.delete(id);
+    if (this.selectedByChat.get(tab.chatKey) === id) this.selectedByChat.delete(tab.chatKey);
     if (!this.owner.isDestroyed()) this.owner.contentView.removeChildView(tab.view);
     if (this.selected === id) {
       this.selected = null;
-      const next = this.entries.keys().next().value;
+      const next = [...this.entries.values()].find(other => !this.slot || other.chatKey === tab.chatKey)?.id;
       if (next !== undefined) this.selectTab(next);
     }
     this.publish();
     this.notify(() => this.callbacks.tabClosed(id));
+    // The host lives until the user closes its last tab (T8).
+    if (this.entries.size === 0) this.notify(() => this.callbacks.empty?.());
   }
   private notify(callback: () => void): void {
     // Controller errors (including accidentally async callbacks) must not escape Electron events.

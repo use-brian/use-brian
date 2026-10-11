@@ -34,6 +34,8 @@
  * names the step.
  */
 
+import { sessionKindSql } from '../session-kind.js'
+
 export interface TeardownClient {
   query: <R extends Record<string, unknown> = Record<string, unknown>>(
     sql: string,
@@ -298,7 +300,7 @@ export const ruleKey = (fk: FkColumn) => `${fk.table.replace(/^public\./, '').re
 
 /** Rows the schema would cascade away with the user that must NOT go: workspace rooms. */
 const CASCADE_KEEP: Readonly<Record<string, string>> = {
-  'sessions.user_id': "t.visibility = 'workspace'",
+  'sessions.user_id': sessionKindSql.workspaceAudience('t'),
   // A team brain key records the auth session it was configured in (NO
   // ACTION) and refuses a rebind, so that session row stays, revoked.
   'auth_sessions.user_id': 'EXISTS (SELECT 1 FROM brain_keys k WHERE k.configuration_session_id = t.id)',
@@ -490,7 +492,7 @@ export async function deleteAccountFootprint(
     {
       name: 'sessions (rooms to workspace owner)',
       sql: `UPDATE sessions t SET user_id = ${OWNER}
-             WHERE t.user_id = $1 AND t.visibility = 'workspace' AND ${OWNER} IS NOT NULL AND ${OWNER} <> $1`,
+             WHERE t.user_id = $1 AND ${sessionKindSql.workspaceAudience('t')} AND ${OWNER} IS NOT NULL AND ${OWNER} <> $1`,
       values: [userId],
     },
     // Tasks assigned to the user move to the owner. `assignee_id` names a

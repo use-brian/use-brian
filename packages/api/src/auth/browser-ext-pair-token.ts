@@ -19,6 +19,8 @@ export type BrowserExtPairTokenPayload = {
   userId: string
   workspaceId: string
   browserProfileId: string
+  /** Display-only label for the native browser chrome. Never part of an identity key. */
+  browserProfileName?: string
   iat: number
   exp: number
 }
@@ -29,7 +31,7 @@ function base64url(data: string | Buffer): string {
 }
 
 export function signBrowserExtPairToken(
-  input: { userId: string; workspaceId: string; browserProfileId: string },
+  input: { userId: string; workspaceId: string; browserProfileId: string; browserProfileName?: string },
   secret: string,
 ): string {
   const now = Math.floor(Date.now() / 1000)
@@ -38,6 +40,7 @@ export function signBrowserExtPairToken(
     userId: input.userId,
     workspaceId: input.workspaceId,
     browserProfileId: input.browserProfileId,
+    ...(input.browserProfileName ? { browserProfileName: input.browserProfileName } : {}),
     iat: now,
     exp: now + TTL_SECONDS,
   }

@@ -17,7 +17,7 @@ import { pinToolAuthoringAuthority } from '../security/tool-authority.js'
  */
 import { z } from 'zod'
 import { buildTool, type Tool, type ToolContext, type ToolResult } from '../tools/types.js'
-import { isAutonomousToolContext } from '../tools/capability-gate.js'
+import { isAttendedTurn } from '../tools/capability-gate.js'
 import type { SandboxTaskBinding } from './cloud-browser-provider.js'
 import type { SandboxProvider } from './types.js'
 import type { ComputerToolPolicy, ResolveComputerToolPolicy } from './tools.js'
@@ -73,7 +73,7 @@ export function createComputeTools(opts: CreateComputeToolsOptions): {
 
   /** Barrier 2 + R2-8: unattended needs live metering AND a paid plan. */
   async function autonomousGate(context: ToolContext): Promise<ToolResult | null> {
-    if (!isAutonomousToolContext(context)) return null
+    if (isAttendedTurn(context)) return null
     if (!unattendedEnabled()) {
       return {
         data: 'ERROR: Computer tools are unavailable on autonomous runs; ask the user to run this from chat.',

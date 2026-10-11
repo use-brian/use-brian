@@ -29,9 +29,10 @@ import { OfficeComments } from "./comments/office-comments";
 import { OfficeSuggestions } from "./suggestions/office-suggestions";
 import type { DocumentCommentAnchor, DocumentSuggestionRange } from "./document/comment-anchor";
 import { OfficeReview } from "./office-review";
-import { OfficeStartRecovery } from "./office-start-recovery";
+import { awaitOfficeJob, useOfficeJobStream } from "@/lib/office/job-stream";
+import { OfficeStartRecovery, OfficeGenerationPending } from "./office-start-recovery";
 import { useT } from "@/lib/i18n/client";
-import { compileOfficeTemplateDraft, createOfficeComment, detachMissingOfficeComments, getOfficeArtifact, getOfficeSnapshot, initializeOfficeTemplateDraft, isOfficeStartFailed, listOfficeComments, listOfficeSuggestions, OfficeApiError, submitOfficeCommand, syncOfficeOfflineCommands, transitionOfficeLifecycle, waitForOfficeJob, type OfficeArtifact, type OfficeCommentThread, type OfficeFamily, type OfficeLiveSnapshot, type OfficeSuggestion } from "@/lib/office/api";
+import { compileOfficeTemplateDraft, createOfficeComment, detachMissingOfficeComments, getOfficeArtifact, getOfficeSnapshot, initializeOfficeTemplateDraft, isOfficeStartFailed, listOfficeComments, listOfficeSuggestions, OfficeApiError, submitOfficeCommand, syncOfficeOfflineCommands, transitionOfficeLifecycle, type OfficeArtifact, type OfficeCommentThread, type OfficeFamily, type OfficeLiveSnapshot, type OfficeSuggestion } from "@/lib/office/api";
 import { useCollabProvider } from "@/lib/collab/use-collab-provider";
 import { usePresence, usePublishPresenceActivity, usePublishPresenceIdentity } from "@/lib/collab/use-presence";
 import { getUserInfo } from "@/lib/user";
@@ -277,8 +278,9 @@ function OfficeArtifactShell({ workspaceId, artifactId, viewerId }: { workspaceI
   }, [artifactEntry.error, artifactEntry.revalidating, artifactId, artifactKey, artifactRow, denied, snapshotKey, offlineOwner]);
 
   // Snapshot fetch failed: an uninitialized template draft is initialized
-  // through a fresh bounded read; a still-running generation / import job polls
-  // both keys until the snapshot exists.
+  // through a fresh bounded read. A still-running generation / import job is
+  // followed on its stream below (no poll); any other failure is an explicit
+  // error state with Retry.
   useEffect(() => {
     const error = snapshotEntry.error;
     if (denied || offline || !artifactRow || snapshotEntry.data !== undefined || error === undefined || snapshotEntry.revalidating) return;
@@ -292,10 +294,18 @@ function OfficeArtifactShell({ workspaceId, artifactId, viewerId }: { workspaceI
       }).catch(() => {if (current()) setTemplateDraftFailed(true);});
       return;
     }
-    if (!artifactRow.job || ["failed", "cancelled"].includes(artifactRow.job.status)) return;
-    const timer = setTimeout(() => { void Promise.all([artifactEntry.refresh(), snapshotEntry.refresh()]); }, 1500);
-    return () => clearTimeout(timer);
-  }, [artifactEntry.refresh, artifactId, artifactRow, denied, offline, snapshotEntry.data, snapshotEntry.error, snapshotEntry.refresh, snapshotEntry.revalidating, snapshotKey, templateId, workspaceId]);
+  }, [artifactId, artifactRow, denied, offline, snapshotEntry.data, snapshotEntry.error, snapshotEntry.revalidating, snapshotKey, templateId, workspaceId]);
+
+  // The artifact's own job reaches the canvas by push. A status change (the
+  // job publishing its head, pausing for input, or ending) re-reads the
+  // artifact and its snapshot once; nothing refetches on a timer.
+  const pendingJobId = artifactRow?.job && !["completed", "failed", "cancelled"].includes(artifactRow.job.status) ? artifactRow.job.id : undefined;
+  const pendingJob = useOfficeJobStream(pendingJobId);
+  const pendingStatus = pendingJob.job?.status;
+  useEffect(() => {
+    if (!pendingJobId || !pendingStatus || (pendingStatus === artifactRow?.job?.status && pendingJob.ended !== "done")) return;
+    void Promise.all([artifactEntry.refresh(), snapshotEntry.refresh()]);
+  }, [artifactEntry.refresh, artifactRow?.job?.status, pendingJob.ended, pendingJobId, pendingStatus, snapshotEntry.refresh]);
 
   useEffect(() => {
     const reconnect = () => { void Promise.all([artifactEntry.refresh(), snapshotEntry.refresh()]); };
@@ -527,7 +537,7 @@ function OfficeArtifactShell({ workspaceId, artifactId, viewerId }: { workspaceI
     setPanel("activity");
     setPanelOpen(true);
     if (!revision || revision === "version_conflict") throw new Error("Worksheet image revision could not start");
-    const job = await waitForOfficeJob(revision.jobId, 180_000, current);
+    const job = await awaitOfficeJob(revision.jobId, current);
     if (job.status !== "completed") throw new Error("Worksheet image revision did not complete");
     await refreshArtifact();
   }
@@ -538,7 +548,7 @@ function OfficeArtifactShell({ workspaceId, artifactId, viewerId }: { workspaceI
     try {
       const queued = await compileOfficeTemplateDraft({ templateId, workspaceId, draftArtifactId: artifactId });
       if (!current()) return;
-      const job = await waitForOfficeJob(queued.jobId, 180_000, current);
+      const job = await awaitOfficeJob(queued.jobId, current);
       if (!current()) return;
       setTemplateCompileState(job.status === "completed" ? "idle" : "failed");
     } catch {
@@ -546,7 +556,7 @@ function OfficeArtifactShell({ workspaceId, artifactId, viewerId }: { workspaceI
     }
   }
   const editorRole = artifact.lifecycleState === "active" ? artifact.role : "view" as const;
-  const editor = live?.snapshot.family === "document" ? <DocumentEditor snapshot={live.snapshot} baseVersion={live.baseVersion} role={editorRole} suggestMode={suggestMode} doc={collab.doc} provider={collab.provider} currentUser={currentUser} synced={collab.synced || Boolean(offlineCopyAt)} onCommand={(command) => void apply(command)} onSelectTargets={setTargets} onSelectCommentAnchor={setCommentAnchor} onSelectSuggestionRange={setSuggestionRange} commentThreads={commentThreads} suggestions={suggestions} /> : live?.snapshot.family === "presentation" ? <PresentationEditor snapshot={live.snapshot} baseVersion={live.baseVersion} role={editorRole} suggestMode={suggestMode} onCommand={(command) => void apply(command)} onSelectTargets={setTargets} /> : live?.snapshot.family === "spreadsheet" ? <SpreadsheetEditor snapshot={live.snapshot} baseVersion={live.baseVersion} role={editorRole} suggestMode={suggestMode} onCommand={(command) => void apply(command)} onSelectTargets={setTargets} onEditImageWithBrian={artifact.role !== "view" && artifact.lifecycleState === "active" && !offlineCopyAt && collab.status !== "disconnected" ? editSpreadsheetImageWithBrian : undefined} /> : live?.snapshot.family === "pdf" && artifact.mode === "session" && artifact.expiresAt ? <PdfEditor workspaceId={workspaceId} snapshot={live.snapshot} seq={live.seq} baseVersion={live.baseVersion} artifactVersion={artifact.version} expiresAt={artifact.expiresAt} role={editorRole} onCommand={apply} onReadback={refreshArtifact} onSelectTargets={setTargets} /> : snapshotPending ? <OfficeEditorSkeleton family={artifact.family} /> : <p className="m-auto text-sm text-muted-foreground">{t.running}</p>;
+  const editor = live?.snapshot.family === "document" ? <DocumentEditor snapshot={live.snapshot} baseVersion={live.baseVersion} role={editorRole} suggestMode={suggestMode} doc={collab.doc} provider={collab.provider} currentUser={currentUser} synced={collab.synced || Boolean(offlineCopyAt)} onCommand={(command) => void apply(command)} onSelectTargets={setTargets} onSelectCommentAnchor={setCommentAnchor} onSelectSuggestionRange={setSuggestionRange} commentThreads={commentThreads} suggestions={suggestions} /> : live?.snapshot.family === "presentation" ? <PresentationEditor snapshot={live.snapshot} baseVersion={live.baseVersion} role={editorRole} suggestMode={suggestMode} onCommand={(command) => void apply(command)} onSelectTargets={setTargets} /> : live?.snapshot.family === "spreadsheet" ? <SpreadsheetEditor snapshot={live.snapshot} baseVersion={live.baseVersion} role={editorRole} suggestMode={suggestMode} onCommand={(command) => void apply(command)} onSelectTargets={setTargets} onEditImageWithBrian={artifact.role !== "view" && artifact.lifecycleState === "active" && !offlineCopyAt && collab.status !== "disconnected" ? editSpreadsheetImageWithBrian : undefined} /> : live?.snapshot.family === "pdf" && artifact.mode === "session" && artifact.expiresAt ? <PdfEditor workspaceId={workspaceId} snapshot={live.snapshot} seq={live.seq} baseVersion={live.baseVersion} artifactVersion={artifact.version} expiresAt={artifact.expiresAt} role={editorRole} onCommand={apply} onReadback={refreshArtifact} onSelectTargets={setTargets} /> : snapshotPending ? <OfficeEditorSkeleton family={artifact.family} /> : <OfficeGenerationPending job={artifact.job} stream={pendingJob} onRetry={snapshotEntry.error !== undefined && !["queued", "running", "needs_input"].includes(pendingStatus ?? artifact.job?.status ?? "") ? () => void Promise.all([artifactEntry.refresh(), snapshotEntry.refresh()]) : undefined} />;
   const isPdfSession = artifact.family === "pdf" && artifact.mode === "session";
   const showTemplateRouting = artifact.mode === "template" && Boolean(live) && Boolean(templateId);
   const panelTabs: { id: Panel; label: string; icon: React.ReactNode }[] = [
@@ -561,12 +571,11 @@ function OfficeArtifactShell({ workspaceId, artifactId, viewerId }: { workspaceI
     ]),
   ];
   const templateRoutingBlocked = showTemplateRouting && (!templateRoutingState.ready || templateRoutingState.dirty || templateRoutingState.saving);
-  const brianRevisionDisabledReason = targets.length === 0 ? t.brianSelectionRequired
-    : artifact.role === "view" ? t.brianViewUnavailable
+  // The Brian tab never requires a selection: it is a hint (office.md "Brian conversation in the file").
+  const brianRevisionDisabledReason = artifact.role === "view" ? t.brianViewUnavailable
     : artifact.lifecycleState !== "active" ? t.brianInactiveUnavailable
     : offlineCopyAt || collab.status === "disconnected" ? t.brianOfflineUnavailable
     : undefined;
-  const canRequestBrianRevision = !brianRevisionDisabledReason && Boolean(live);
   const canSuggest = artifact.family === "document" && artifact.role === "edit" && artifact.lifecycleState === "active";
   const toggleSuggestMode = () => { const next = !suggestMode; setSuggestMode(next); if (next) { setPanel("suggestions"); setPanelOpen(true); } };
   const discardRecoveryCopy = async () => {
@@ -621,7 +630,7 @@ function OfficeArtifactShell({ workspaceId, artifactId, viewerId }: { workspaceI
             <div className="min-h-0 flex-1 overflow-y-auto">
             {showTemplateRouting && live && templateId ? <div className={panel === "routing" ? "block" : "hidden"}><TemplateRoutingInspector templateId={templateId} snapshot={live.snapshot} selectedTargetIds={targets} onStateChange={setTemplateRoutingState} /></div> : null}
               {panelOpen ? <>
-                {panel === "activity" ? <OfficeJobActivity jobId={artifact.job?.id} snapshot={live?.snapshot} targetIds={targets} canRequestRevision={canRequestBrianRevision} requestDisabledReason={brianRevisionDisabledReason} onRequestRevision={requestBrianRevision} onRevisionCompleted={refreshArtifact} /> : null}
+                {panel === "activity" ? <OfficeJobActivity workspaceId={workspaceId} artifactId={artifactId} jobId={artifact.job?.id} snapshot={live?.snapshot} targetIds={targets} sendDisabledReason={artifact.role === "view" ? undefined : brianRevisionDisabledReason} onRevisionCompleted={refreshArtifact} onOpenHistory={() => { setPanel("history"); setPanelOpen(true); }} /> : null}
                 {panel === "comments" ? <div className="p-3"><OfficeComments artifactId={artifactId} workspaceId={workspaceId} version={artifact.version} targetIds={targets} selectionAnchor={artifact.family === "document" ? commentAnchor : null} anchorKind={artifact.family === "document" ? "block" : artifact.family === "spreadsheet" ? "table_cell" : "object"} canComment={artifact.role !== "view"} offline={collab.status === "disconnected" || Boolean(offlineCopyAt)} initialThreads={serverComments} initialQueuedThreads={queuedCommentThreads} onQueuedThreadsChange={receiveQueuedComments} onRevisionCompleted={refreshArtifact} /></div> : null}
                 {panel === "suggestions" ? <div className="p-3"><OfficeSuggestions workspaceId={workspaceId} artifactId={artifactId} canDecide={artifact.role === "edit" && artifact.lifecycleState === "active" && !offlineCopyAt} canSuggest={artifact.family === "document" && artifact.role !== "view" && artifact.lifecycleState === "active" && suggestMode} actorId={currentUser?.id} baseVersion={live?.baseVersion} expectedSeq={live?.seq} proposal={suggestionRange} offline={collab.status === "disconnected" || Boolean(offlineCopyAt)} onApplied={refreshArtifact} /></div> : null}
                 {panel === "history" ? <div className="p-3"><OfficeHistory artifactId={artifactId} artifactTitle={artifact.title} currentVersion={artifact.version} canEdit={artifact.role === "edit" && artifact.lifecycleState === "active" && !offlineCopyAt} onRestored={refreshArtifact} onCopied={(copiedId) => { invalidateOfficeList(workspaceId); router.push(`/w/${workspaceId}/office/${copiedId}`); }} /></div> : null}

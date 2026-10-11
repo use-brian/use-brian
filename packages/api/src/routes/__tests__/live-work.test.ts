@@ -16,9 +16,11 @@ vi.mock('../../db/client.js', () => ({ query: vi.fn(), queryWithRLS: vi.fn() }))
 vi.mock('../../db/workspace-store.js', () => ({
   getWorkspaceMembershipWithReadScopeSystem: vi.fn(),
 }))
+vi.mock('../../session-read-authority.js', () => ({ anchorReadGate: vi.fn(async () => 'continue') }))
 
 import { query, queryWithRLS } from '../../db/client.js'
 import { getWorkspaceMembershipWithReadScopeSystem } from '../../db/workspace-store.js'
+import { anchorReadGate } from '../../session-read-authority.js'
 import {
   liveWorkRoutes,
   deriveSessionState,
@@ -65,7 +67,7 @@ function sessionRow(overrides: Record<string, unknown> = {}) {
     assistantWorkspaceId: WS,
     userId: CALLER,
     ownerName: 'Caller',
-    channelType: 'web',
+    channelType: 'web', anchorKind: null,
     appOrigin: null,
     visibility: 'owner',
     mode: null,
@@ -179,11 +181,31 @@ describe('[COMP:api/live-work-roster] roster route', () => {
     expect(res.body.items[0].tier).toBe('full')
   })
 
+  it('omits an anchored workspace row the anchor gate refuses (L3: the roster obeys the read gate)', async () => {
+    vi.mocked(anchorReadGate).mockResolvedValueOnce({ status: 403, error: 'Draft access required' })
+    primeRoster(
+      [sessionRow({ id: '88888888-8888-8888-8888-888888888888', userId: TEAMMATE, channelType: 'feed_thread', anchorKind: null, visibility: 'workspace', effectiveClearance: 'internal' })],
+      [],
+    )
+    const res = await request(makeApp()).get(`/api/workspaces/${WS}/live`)
+    expect(vi.mocked(anchorReadGate)).toHaveBeenCalledTimes(1)
+    expect(JSON.stringify(res.body)).not.toContain('88888888-8888-8888-8888-888888888888')
+  })
+
+  it('does not consult the anchor gate for an unanchored room', async () => {
+    primeRoster([sessionRow({ userId: TEAMMATE, visibility: 'workspace', appOrigin: 'chat', effectiveClearance: 'internal' })], [])
+    const res = await request(makeApp()).get(`/api/workspaces/${WS}/live`)
+    expect(vi.mocked(anchorReadGate)).not.toHaveBeenCalled()
+    expect(res.body.items[0].tier).toBe('full')
+  })
+
   it('offers steering only on active turn-inbox-backed personal chat lanes', () => {
     expect(projectSessionRow(sessionRow(), CALLER, 'internal', NOW)?.canSteer).toBe(true)
-    expect(projectSessionRow(sessionRow({ channelType: 'doc_thread' }), CALLER, 'internal', NOW)?.canSteer).toBe(true)
+    expect(projectSessionRow(sessionRow({ channelType: 'doc_thread', anchorKind: null }), CALLER, 'internal', NOW)?.canSteer).toBe(true)
+    // A workspace doc thread takes room admission (D11): no turn inbox to steer.
+    expect(projectSessionRow(sessionRow({ channelType: 'doc_thread', anchorKind: null, visibility: 'workspace' }), CALLER, 'internal', NOW)?.canSteer).toBe(false)
     expect(projectSessionRow(sessionRow({ mode: 'draft' }), CALLER, 'internal', NOW)?.canSteer).toBe(false)
-    expect(projectSessionRow(sessionRow({ channelType: 'telegram' }), CALLER, 'internal', NOW)?.canSteer).toBe(false)
+    expect(projectSessionRow(sessionRow({ channelType: 'telegram', anchorKind: null }), CALLER, 'internal', NOW)?.canSteer).toBe(false)
     expect(projectSessionRow(sessionRow({
       visibility: 'workspace',
       appOrigin: 'chat',
@@ -222,7 +244,11 @@ describe('[COMP:api/live-work-roster] roster route', () => {
     expect(sessionsSql).toContain('COALESCE(a.icon_seed, 0)')
     expect(sessionsSql).toContain('s.app_origin')
     expect(sessionsSql).toContain('a.workspace_id = $1')
-    expect(sessionsSql).toContain(`NOT IN ('workflow', 'assistant-call')`)
+    // Machine lanes (the one conversation-lane definition, L13) and Office
+    // threads (their live view is the file's Brian tab) never list here.
+    expect(sessionsSql).toContain("'workflow'")
+    expect(sessionsSql).toContain("'assistant-call'")
+    expect(sessionsSql).toContain("s.anchor_kind <> 'office_file'")
     expect(sessionsSql).toContain(
       `pa.approval_payload->>'turnLeaseToken' = s.turn_lease_token::text`,
     )

@@ -33,9 +33,9 @@ import { CONFIGURE_CAPABILITY, type CapabilityStore, type WorkerRunsStore, type 
 import {
   findSessionById,
   findSessionTurnLeaseState,
-  isSharedChatSession,
 } from '../db/sessions.js'
 import { gateSessionRead } from './sessions.js'
+import { policyFor } from '../session-kind.js'
 import { findAssistantById } from '../db/users.js'
 import type { PendingApprovalsStore, PendingApproval } from '../db/pending-approvals-store.js'
 import {
@@ -152,7 +152,7 @@ async function resolveQuestionApproval(
   if (own) return { approval: own, sessionAuthorized: false }
 
   const session = await findSessionById(sessionId)
-  if (!session || !isSharedChatSession(session)) {
+  if (!session || policyFor(session).confirmations !== 'addresser_or_admin') {
     return { approval: null, sessionAuthorized: false }
   }
   if (await gateSessionRead(userId, session)) {

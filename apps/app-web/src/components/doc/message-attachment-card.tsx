@@ -24,12 +24,14 @@
 
 import * as React from "react";
 import { Dialog } from "@base-ui/react/dialog";
-import { Download, FileAudio, FileImage, FileText, FileVideo, Loader2, X } from "lucide-react";
+import { Download, FileAudio, FileImage, FileText, FileVideo, X } from "lucide-react";
 import { cn } from "@/lib/utils";
 import { useT } from "@/lib/i18n/client";
 import { useFileCacheMedia } from "@/lib/use-doc-media";
 import { hasConvertiblePdfPreview } from "@/lib/convertible-preview";
 import { VisualLightbox } from "./visual-lightbox";
+import { PdfFrame, useLocalFileUrl, type PreviewState } from "./file-preview";
+import { usePaneLinks } from "@/components/chat-app/chat-link-routing";
 import type { MessageAttachmentRef } from "@/lib/api/sessions";
 
 
@@ -73,42 +75,13 @@ function PdfPreviewDialog({
   source: PdfSource;
 }) {
   const t = useT().attachments;
-  const [localState, setState] = React.useState<
-    { kind: "idle" } | { kind: "loading" } | { kind: "ready"; src: string } | { kind: "error" }
-  >({ kind: "idle" });
-
-  // The host builds `source` inline each render, so the effect keys on the
-  // stable primitives inside it — depending on the object identity would
-  // refetch on every render while open.
-  const sourceKey = source.kind === "dataUrl" ? source.dataUrl : source.workspaceId+':'+source.fileId;
+  // The same body the Chat side pane's file tab renders (chat-parity T10):
+  // bytes the client holds, or the authenticated server render.
+  const local = useLocalFileUrl(source.kind === "dataUrl" ? source.dataUrl : null, open);
   const remote = useFileCacheMedia(open&&source.kind==='remote'?source.workspaceId:null,open&&source.kind==='remote'?source.fileId:null,'pdf');
-  const state = source.kind==='remote'
-    ? remote.url?{kind:'ready' as const,src:remote.url}:remote.error?{kind:'error' as const}:{kind:'loading' as const}
-    : localState;
-  React.useEffect(() => {
-    if (!open) {
-      setState({ kind: "idle" });
-      return;
-    }
-    if (source.kind === "dataUrl") {
-      if (!source.dataUrl.startsWith("data:")) {
-        setState({ kind: "ready", src: source.dataUrl });
-        return;
-      }
-      const m = /^data:([^;]+);base64,(.+)$/.exec(source.dataUrl);
-      if (!m) {
-        setState({ kind: "error" });
-        return;
-      }
-      const bytes = Uint8Array.from(atob(m[2]), (c) => c.charCodeAt(0));
-      const url = URL.createObjectURL(new Blob([bytes], { type: m[1] }));
-      setState({ kind: "ready", src: url });
-      return () => URL.revokeObjectURL(url);
-    }
-
-    // eslint-disable-next-line react-hooks/exhaustive-deps -- sourceKey stands in for the unstable `source` object
-  }, [open, source.kind, sourceKey]);
-
+  const state: PreviewState = source.kind==='remote'
+    ? remote.url?{kind:'ready',src:remote.url}:remote.error?{kind:'error'}:{kind:'loading'}
+    : local;
   const src = state.kind === "ready" ? state.src : null;
 
   return (
@@ -151,20 +124,7 @@ function PdfPreviewDialog({
               <X className="size-4" aria-hidden />
             </Dialog.Close>
           </div>
-          {src ? (
-            <iframe src={src} title={name} className="min-h-0 w-full flex-1" />
-          ) : (
-            <div className="flex min-h-0 flex-1 items-center justify-center px-6 text-center">
-              {state.kind === "error" ? (
-                <p className="text-[13px] text-muted-foreground">{t.previewUnavailable}</p>
-              ) : (
-                <p className="inline-flex items-center gap-2 text-[13px] text-muted-foreground">
-                  <Loader2 className="size-4 animate-spin" aria-hidden />
-                  {t.preparing}
-                </p>
-              )}
-            </div>
-          )}
+          <PdfFrame name={name} state={state} />
         </Dialog.Popup>
       </Dialog.Portal>
     </Dialog.Root>
@@ -179,6 +139,9 @@ function AttachmentCard({
   workspaceId?: string;
 }) {
   const [open, setOpen] = React.useState(false);
+  // In the full Chat app an attachment opens as a `file` tab of the side
+  // pane (chat-parity D9); surfaces without a pane keep the modals.
+  const links = usePaneLinks();
   const isImage = attachment.mime.startsWith("image/");
   const isPdf = attachment.mime === "application/pdf";
   // Office/structured docs render server-side, so they need the file id (to
@@ -218,6 +181,28 @@ function AttachmentCard({
       </span>
     </>
   );
+
+  if (links) {
+    return (
+      <button
+        type="button"
+        data-pane-link="file"
+        onClick={() =>
+          links.open({
+            kind: "file",
+            fileId: attachment.id || null,
+            name: attachment.name,
+            mime: attachment.mime,
+            dataUrl: attachment.dataUrl ?? null,
+            source: "cache",
+          })
+        }
+        className={cn(cardClass, "text-left transition-colors hover:bg-accent")}
+      >
+        {body}
+      </button>
+    );
+  }
 
   // Cards with nothing to open stay static.
   if (!previewable) return <div className={cardClass}>{body}</div>;

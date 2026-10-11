@@ -15,6 +15,7 @@ type SessionRow = {
   userId: string
   workspaceId: string
   channelType: string
+  anchorKind: string
   appOrigin: string | null
   status: string
   mode: string | null
@@ -323,6 +324,7 @@ export class SupportCapsuleBuilder {
               s.user_id AS "userId",
               COALESCE(s.workspace_id, a.workspace_id) AS "workspaceId",
               s.channel_type AS "channelType",
+              s.anchor_kind AS "anchorKind",
               s.app_origin AS "appOrigin",
               s.status,
               s.mode,

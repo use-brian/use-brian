@@ -73,6 +73,10 @@ export async function createGuestThread(params: CreateGuestThreadParams): Promis
     visibility: 'workspace',
     workspaceId: params.workspaceId,
     effectiveClearance: 'public',
+    // A guest thread is admitted by its anchor: the route validated the live
+    // `comment` grant on a public page (L12).
+    anchorKind: 'doc_thread',
+    guestAnchor: true,
   })
   await query(`UPDATE sessions SET guest_session_token = $1 WHERE id = $2`, [
     params.guestSessionToken,

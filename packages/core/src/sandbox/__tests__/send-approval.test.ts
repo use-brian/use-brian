@@ -49,7 +49,7 @@ const ctx: ToolContext = {
   assistantId: 'a',
   sessionId: 's',
   appId: 'Use Brian',
-  channelType: 'web',
+  channelType: 'web', attended: true,
   channelId: 'c',
   workspaceId: 'w',
   abortSignal: new AbortController().signal,

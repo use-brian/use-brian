@@ -1,16 +1,16 @@
 "use client";
 
 /**
- * Work Bench — the shared room's resizable right-hand context drawer
- * (multiplayer chat P1b, T16/D10).
+ * Work Bench — the body of the Chat side pane's fixed **Work** tab
+ * (multiplayer chat P1b, T16/D10; chat-parity D6).
  *
  * The transcript no longer spends two full-width rows on room metadata and
- * pinned-context chips. `ChatContextPins` is a persistent flat right section:
- * expanded it shows an icon-led live assistant roster and pin surface;
- * collapsed it becomes one icon-only column. It reuses the shared operator
- * resize behavior and remembers its expanded width. There is deliberately no
- * shadow/elevation, no prose-heavy metadata card, and no duplicate trigger in
- * the Chat top bar.
+ * pinned-context chips. `ChatContextPins` shows an icon-led live assistant
+ * roster (Live work, Stop, worker runs) and the pin surface. Its rail chrome
+ * (collapse, resize, the phone overlay) moved to the side pane that hosts it
+ * (`chat-side-pane.tsx`); a personal chat (a room with one human) gets the
+ * same body without the room's shared badge and capture glyph. There is
+ * deliberately no shadow/elevation and no prose-heavy metadata card.
  *
  * Data flows through `lib/api/session-pins.ts`; the parent bumps
  * `refreshKey` off the room stream's `pins_changed` signal so every viewer's
@@ -45,8 +45,6 @@ import {
   FileText,
   Link as LinkIcon,
   LoaderCircle,
-  PanelRightClose,
-  PanelRightOpen,
   Paperclip,
   Pin,
   Plus,
@@ -59,10 +57,7 @@ import {
 import { AssistantAvatar } from "@/components/assistant-avatar";
 import { cn } from "@/lib/utils";
 import { useT, format } from "@/lib/i18n/client";
-import {
-  PeekResizeHandle,
-  usePeekResize,
-} from "@/components/operator/resizable-peek";
+import { paneRefForPin, usePaneLinks } from "./chat-link-routing";
 import {
   addSessionPin,
   listSessionPins,
@@ -166,6 +161,12 @@ type ChatContextPinsProps = {
   workspaceId: string;
   refreshKey: number;
   startedByName: string | null;
+  /**
+   * The conversation has a wider audience than its owner (a room): the header
+   * shows the shared badge and the always-on capture glyph. A personal chat
+   * (a room with one human, chat-parity D1) shows neither. Default true.
+   */
+  shared?: boolean;
   assistant?: WorkBenchAssistant | null;
   turnActive?: boolean;
   waitingForInput?: boolean;
@@ -181,8 +182,8 @@ type ChatContextPinsProps = {
   lastProgressAt?: number | null;
   /** Absent when the surface cannot stop a turn (no session bound yet). */
   onStopTurn?: () => Promise<void> | void;
-  expanded: boolean;
-  onExpandedChange: (expanded: boolean) => void;
+  /** A pin was added or removed here: the side pane's pinned tabs follow (D7). */
+  onPinsChanged?: () => void;
 };
 
 function SessionContextPins({
@@ -190,6 +191,7 @@ function SessionContextPins({
   workspaceId,
   refreshKey,
   startedByName,
+  shared = true,
   assistant = null,
   turnActive = false,
   waitingForInput = false,
@@ -197,9 +199,9 @@ function SessionContextPins({
   tools = [],
   lastProgressAt = null,
   onStopTurn,
-  expanded,
-  onExpandedChange,
+  onPinsChanged,
 }: ChatContextPinsProps) {
+  const links = usePaneLinks();
   const mounted = useRef(false);
   const pinRead = useRef(0);
   useEffect(() => {
@@ -228,9 +230,6 @@ function SessionContextPins({
   const fileInputRef = useRef<HTMLInputElement>(null);
   const [workerSummary, setWorkerSummary] = useState<WorkerRunSummary>(
     EMPTY_WORKER_RUN_SUMMARY,
-  );
-  const { width, resizing, handleProps } = usePeekResize(
-    "chat:work-bench-width",
   );
   const [stopping, setStopping] = useState(false);
   /**
@@ -266,14 +265,6 @@ function SessionContextPins({
       if (mounted.current) setStopping(false);
     }
   }, [onStopTurn, stopping]);
-
-  useEffect(() => {
-    const onKeyDown = (event: KeyboardEvent) => {
-      if (event.key === "Escape" && expanded) onExpandedChange(false);
-    };
-    window.addEventListener("keydown", onKeyDown);
-    return () => window.removeEventListener("keydown", onKeyDown);
-  }, [expanded, onExpandedChange]);
 
   const refresh = useCallback(async () => {
     if (!mounted.current) return;
@@ -388,6 +379,7 @@ function SessionContextPins({
       setError(null);
       try {
         await addSessionPin(sessionId, pin);
+        onPinsChanged?.();
         if (!mounted.current) return;
         setAddOpen(false);
         setSearch("");
@@ -400,7 +392,7 @@ function SessionContextPins({
         if (mounted.current) setBusy(false);
       }
     },
-    [busy, refresh, sessionId, t],
+    [busy, onPinsChanged, refresh, sessionId, t],
   );
 
   const pinFiles = useCallback(
@@ -550,7 +542,10 @@ function SessionContextPins({
           }
           updateUpload(upload.id, null);
         }
-        if (anyPinned) await refresh();
+        if (anyPinned) {
+          onPinsChanged?.();
+          await refresh();
+        }
         if (mounted.current && !anyFailed) setAddOpen(false);
       } catch {
         for (const upload of uploads) {
@@ -563,7 +558,7 @@ function SessionContextPins({
         if (mounted.current) setFileBusy(false);
       }
     },
-    [fileBusy, refresh, sessionId, t, workspaceId],
+    [fileBusy, onPinsChanged, refresh, sessionId, t, workspaceId],
   );
 
   const { isDragging, dropProps } = useFileDrop(
@@ -575,12 +570,13 @@ function SessionContextPins({
     async (pinId: string) => {
       try {
         await removeSessionPin(sessionId, pinId);
+        onPinsChanged?.();
         await refresh();
       } catch {
         if (mounted.current) setError(t.removeFailed);
       }
     },
-    [refresh, sessionId, t],
+    [onPinsChanged, refresh, sessionId, t],
   );
 
   const kindLabel = (kind: SessionPinKind): string =>
@@ -632,99 +628,47 @@ function SessionContextPins({
   const activeLead = turnActive && assistant ? assistant : null;
   const activeCount = (activeLead ? 1 : 0) + workerSummary.running;
 
-  if (!expanded) {
-    const expandLabel = `${chatT.workBenchExpand}. ${chatT.captureIndicator}`;
-    return (
-      <aside
-        id={WORK_BENCH_ID}
-        aria-label={chatT.workBench}
-        className="relative flex h-full w-11 shrink-0 flex-col items-center overflow-hidden border-l border-border bg-background transition-[width] duration-200 ease-out"
-      >
-        <button
-          type="button"
-          onClick={() => onExpandedChange(true)}
-          aria-expanded={false}
-          aria-controls={WORK_BENCH_CONTENT_ID}
-          aria-label={expandLabel}
-          title={expandLabel}
-          className="relative mt-2 grid size-9 place-items-center rounded-lg text-primary transition-colors hover:bg-accent focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring/50"
-        >
-          <PanelRightOpen className="size-4" aria-hidden />
-          {activeCount > 0 && (
-            <span
-              className="absolute right-1.5 top-1.5 size-1.5 rounded-full bg-emerald-500 ring-2 ring-background"
-              aria-hidden
-            />
-          )}
-        </button>
-      </aside>
-    );
-  }
-
   return (
-    <aside
+    <section
       id={WORK_BENCH_ID}
       aria-label={chatT.workBench}
-      style={width !== null ? { width } : undefined}
-      className={cn(
-        "relative flex h-full max-w-full shrink-0 flex-col overflow-hidden border-l border-border bg-background",
-        width === null && "w-full sm:w-[360px] lg:w-[400px]",
-        // Below `sm` the bench is a full-pane OVERLAY, never a flex sibling:
-        // as a sibling its `w-full` took the whole row and collapsed the
-        // transcript and composer to 0px (responsive contract M5). The
-        // remembered desktop width is inline, so `!w-full` has to out-rank it.
-        "max-sm:absolute max-sm:inset-0 max-sm:z-20 max-sm:!w-full max-sm:border-l-0",
-        !resizing && "transition-[width] duration-200 ease-out",
-        resizing && "select-none",
-      )}
+      className="flex h-full min-h-0 flex-col"
     >
-      <PeekResizeHandle resizing={resizing} {...handleProps} />
-
-      <header className="flex shrink-0 items-center gap-3 border-b border-border/70 px-4 py-3">
-        <h2 className="min-w-0 flex-1 text-sm font-semibold text-foreground">
-          {chatT.workBench}
-        </h2>
-        <div className="flex items-center gap-1" aria-label={chatT.roomStatus}>
-          <span
-            role="img"
-            aria-label={chatT.sharedBadge}
-            title={chatT.sharedBadge}
-            className="grid size-7 place-items-center rounded-md bg-muted/70 text-muted-foreground"
-          >
-            <Users className="size-3.5" aria-hidden />
-          </span>
-          {startedByName && (
-            <span
-              title={format(chatT.startedBy, { name: startedByName })}
-              className="inline-flex h-7 max-w-28 items-center gap-1.5 rounded-md bg-muted/70 px-2 text-xs text-muted-foreground"
-            >
-              <User className="size-3 shrink-0" aria-hidden />
-              <span className="truncate">{startedByName}</span>
-            </span>
-          )}
-          <span
-            role="img"
-            aria-label={chatT.captureIndicator}
-            title={chatT.captureIndicator}
-            className="grid size-7 place-items-center rounded-md bg-primary/10 text-primary"
-          >
-            <BrainCircuit className="size-3.5" aria-hidden />
-          </span>
+      {(shared || startedByName) && (
+        <div className="flex shrink-0 items-center justify-end gap-3 border-b border-border/70 px-4 py-2">
+          <div className="flex items-center gap-1" aria-label={chatT.roomStatus}>
+            {shared && (
+              <span
+                role="img"
+                aria-label={chatT.sharedBadge}
+                title={chatT.sharedBadge}
+                className="grid size-7 place-items-center rounded-md bg-muted/70 text-muted-foreground"
+              >
+                <Users className="size-3.5" aria-hidden />
+              </span>
+            )}
+            {startedByName && (
+              <span
+                title={format(chatT.startedBy, { name: startedByName })}
+                className="inline-flex h-7 max-w-28 items-center gap-1.5 rounded-md bg-muted/70 px-2 text-xs text-muted-foreground"
+              >
+                <User className="size-3 shrink-0" aria-hidden />
+                <span className="truncate">{startedByName}</span>
+              </span>
+            )}
+            {shared && (
+              <span
+                role="img"
+                aria-label={chatT.captureIndicator}
+                title={chatT.captureIndicator}
+                className="grid size-7 place-items-center rounded-md bg-primary/10 text-primary"
+              >
+                <BrainCircuit className="size-3.5" aria-hidden />
+              </span>
+            )}
+          </div>
         </div>
-        <button
-          type="button"
-          onClick={() => onExpandedChange(false)}
-          aria-expanded="true"
-          aria-controls={WORK_BENCH_CONTENT_ID}
-          aria-label={chatT.workBenchCollapse}
-          title={chatT.workBenchCollapse}
-          // 44px on a phone (M3): this is the only way back to the transcript
-          // while the bench overlays it.
-          className="grid size-11 place-items-center rounded-md text-muted-foreground transition-colors hover:bg-accent hover:text-foreground sm:size-7"
-        >
-          <PanelRightClose className="size-4" aria-hidden />
-        </button>
-      </header>
+      )}
 
       <div
         id={WORK_BENCH_CONTENT_ID}
@@ -1207,6 +1151,11 @@ function SessionContextPins({
             )}
             {visiblePins.map((pin) => {
               const Icon = KIND_ICON[pin.kind] ?? Pin;
+              // A page, file or URL pin opens as a tab of the side pane
+              // (chat-parity D9); other kinds have no pane form, and an
+              // unavailable (unresolvable) page or file pin opens nothing.
+              const paneRef =
+                links && (pin.label !== null || pin.kind === "url") ? paneRefForPin(pin) : null;
               return (
                 <article
                   key={pin.id}
@@ -1223,15 +1172,26 @@ function SessionContextPins({
                       <div className="text-xs font-medium uppercase tracking-wide text-muted-foreground">
                         {kindLabel(pin.kind)}
                       </div>
-                      <div
-                        className={cn(
-                          "mt-0.5 break-words text-xs leading-relaxed text-foreground",
-                          pin.label === null && pin.kind !== "url" && "italic",
-                        )}
-                      >
-                        {pin.kind === "instruction" ? pin.text : chipLabel(pin)}
-                      </div>
-                      {pin.kind === "url" && pin.url && (
+                      {paneRef && links ? (
+                        <button
+                          type="button"
+                          data-pane-link={paneRef.kind}
+                          onClick={() => links.open(paneRef)}
+                          className="mt-0.5 block max-w-full break-words text-left text-xs leading-relaxed text-foreground underline-offset-2 hover:underline"
+                        >
+                          {chipLabel(pin)}
+                        </button>
+                      ) : (
+                        <div
+                          className={cn(
+                            "mt-0.5 break-words text-xs leading-relaxed text-foreground",
+                            pin.label === null && pin.kind !== "url" && "italic",
+                          )}
+                        >
+                          {pin.kind === "instruction" ? pin.text : chipLabel(pin)}
+                        </div>
+                      )}
+                      {pin.kind === "url" && pin.url && !links && (
                         <a
                           href={pin.url}
                           target="_blank"
@@ -1240,6 +1200,9 @@ function SessionContextPins({
                         >
                           {pin.url}
                         </a>
+                      )}
+                      {pin.kind === "url" && pin.url && links && pin.label && (
+                        <div className="mt-1 truncate text-xs text-muted-foreground">{pin.url}</div>
                       )}
                       {pin.addedByName && (
                         <div className="mt-1 text-xs text-muted-foreground">
@@ -1266,6 +1229,6 @@ function SessionContextPins({
           )}
         </section>
       </div>
-    </aside>
+    </section>
   );
 }

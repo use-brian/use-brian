@@ -11,7 +11,7 @@ import type { AuthoringAuthority } from '../security/access-ceiling.js'
 import { CrmIntegrationGrantsSchema, CrmCredentialDepartmentSelectionSchema, CrmCredentialParentSchema, type CrmCredentialParent } from './integration-authority.js'
 import { pinToolAuthoringAuthority } from '../security/tool-authority.js'
 import { buildTool, type Tool, type ToolContext } from '../tools/types.js'
-import { missingToolCapability, INTERACTIVE_CHANNEL_TYPES } from '../tools/capability-gate.js'
+import { missingToolCapability, isAttendedTurn } from '../tools/capability-gate.js'
 import { AssociationPlanInputSchema, AssociationEventInputSchema } from '../association/domain.js'
 import {
   CrmDeliveryChannelSchema,
@@ -790,7 +790,7 @@ export function createCrmCredentialTools(port: CrmCredentialToolsPort): Record<s
             return { isError: true, data: { error: 'not_authorized', message: 'Authenticated parent credential evidence is required.' } }
           }
           parent = parsed.data
-        } else if (!INTERACTIVE_CHANNEL_TYPES.has(context.channelType)) {
+        } else if (!isAttendedTurn(context)) {
           const source = context.authority?.snapshotSource?.()
           const retained = source?.kind === 'workflow' ? CrmCredentialParentSchema.safeParse({
             version:1,kind:'workflow',credentialId:source.runId,workspaceId:context.workspaceId,userId:context.userId,source,

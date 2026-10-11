@@ -6,7 +6,8 @@ import { officeInputClassName } from "@/components/office/office-chrome";
 /** Semantic/spatial Office comments with range anchors and task workflows. [COMP:app-web/office-comments] */
 import { useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
 import { APP_LEVEL_ASSISTANT_ID } from "@use-brian/shared";
-import { createOfficeComment, listOfficeComments, reactOfficeComment, replyOfficeComment, resolveOfficeComment, updateOfficeCommentThread, waitForOfficeJob, type OfficeCommentThread, OfficeApiError } from "@/lib/office/api";
+import { awaitOfficeJob } from "@/lib/office/job-stream";
+import { createOfficeComment, listOfficeComments, reactOfficeComment, replyOfficeComment, resolveOfficeComment, updateOfficeCommentThread, type OfficeCommentThread, OfficeApiError } from "@/lib/office/api";
 import { useOptionalWorkspaceContext } from "@/lib/workspace-context";
 import { getUserInfo } from "@/lib/user";
 import { Skeleton } from "@/components/skeleton";
@@ -143,7 +144,7 @@ function OfficeCommentsContent({ artifactId, workspaceId, version, targetIds, se
         const created = await createOfficeComment({artifactId, anchor, body: body.trim(), mentions, invokeBrian});
         if (!current()) return;
         if (created.revision && typeof created.revision === "object") {
-          const job = await waitForOfficeJob(created.revision.jobId, 180_000, current);
+          const job = await awaitOfficeJob(created.revision.jobId, current);
           if (current() && job.status === "completed") await onRevisionCompleted?.();
         }
       }

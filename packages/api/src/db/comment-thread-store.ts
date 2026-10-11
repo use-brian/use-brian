@@ -286,6 +286,9 @@ export function createDbCommentThreadStore(): CommentThreadStore {
         visibility: 'workspace',
         workspaceId: params.workspaceId,
         effectiveClearance,
+        // The anchor admits the thread (unified-sessions L12): the caller
+        // already passed the page-access gate.
+        anchorKind: 'doc_thread',
       })
 
       // 2. Derive the quote from the anchored block's text when the caller

@@ -40,7 +40,7 @@ export const injectContentPlanningTools: InjectExtraTools = async (
   // out a month. Injecting only the matching one keeps the tool-awareness
   // rule intact - a plan session never sees a tool it has no cardboard for.
   const tool =
-    ctx.session?.mode === 'draft'
+    ctx.session?.anchor === 'feed_draft'
       ? buildProposeDraftsTool()
       : ctx.session?.mode === 'plan'
         ? buildProposePlanTool()
@@ -52,8 +52,9 @@ export const injectContentPlanningTools: InjectExtraTools = async (
 export const resolveContentPlanningPrompt = (session: {
   mode: string | null
   channelType: string
+  anchor: string
 }): string | null =>
-  session.mode === 'draft'
+  session.anchor === 'feed_draft'
     ? DRAFT_SESSION_ADDENDUM
     : session.mode === 'plan'
       ? PLAN_SESSION_ADDENDUM
@@ -78,6 +79,7 @@ export function buildContentPlanningPromptResolver(deps?: {
 }): (session: {
   mode: string | null
   channelType: string
+  anchor: string
   assistantId?: string
 }) => Promise<string | null> {
   const planStore = deps?.planStore ?? createContentPlanStore()

@@ -47,6 +47,7 @@ import type { SavedViewStore } from '@use-brian/core'
 import type { PageTemplateStore } from '../db/page-templates-store.js'
 import type { BlueprintRecord, BlueprintRecordStore } from '../db/blueprint-records-store.js'
 import { createRecordPageProjector } from './synthesize.js'
+import { classifySession } from '../session-kind.js'
 
 /**
  * Stable per-(workspace, blueprint, subject) record/page anchor. SAME literal
@@ -379,9 +380,7 @@ export function createBlueprintRecordTools(deps: BlueprintRecordToolDeps): Tool[
         // joins on. Callee turns without a run id still mark 'workflow';
         // anything else is an interactive chat surface.
         sourceKind:
-          context.workflowRunId ||
-          context.channelType === 'assistant-call' ||
-          context.channelType === 'workflow'
+          context.workflowRunId || isWorkflowLane(context.channelType)
             ? 'workflow'
             : 'chat',
         sourceId: context.workflowRunId ?? context.sessionId ?? null,
@@ -717,4 +716,11 @@ export function buildBlueprintSurfacePrompt(blueprints: CustomPageTemplateSummar
     ...lines,
     '',
   ].join('\n')
+}
+
+/** A callee or workflow lane (`classifySession(...).machine`): its saves are workflow-origin. */
+function isWorkflowLane(channelType: string | undefined): boolean {
+  if (!channelType) return false
+  const machine = classifySession({ channelType, anchorKind: null }).machine
+  return machine === 'a2a' || machine === 'workflow'
 }

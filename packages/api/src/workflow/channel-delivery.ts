@@ -42,7 +42,8 @@ import {
 } from '@use-brian/channels'
 import type { ChannelIntegrationStore } from '../db/channel-integrations.js'
 import type { CustomChannelStore } from '../db/custom-channel-store.js'
-import { findOrCreateSession, addSessionMessage } from '../db/sessions.js'
+import { findOrCreateSession, addSessionMessage, setSessionMessageChannelId } from '../db/sessions.js'
+import { findRoomForDelivery } from '../channel-room/room.js'
 import { query } from './../db/client.js'
 import { whatsappCloudUserAllowed } from '../whatsapp/cloud-access.js'
 import { createFeishuApi } from '../feishu/client.js'
@@ -102,6 +103,40 @@ function slackDeliveryFailure(err: unknown, channelId: string, threadRef?: strin
 export function createWorkflowChannelDelivery(
   options: WorkflowChannelDeliveryOptions,
 ): DeliverToChannel {
+  const deliver = createDelivery(options)
+  return async (args) => {
+    let persistedRowId: string | undefined
+    const outcome = await deliver(args, (id) => { persistedRowId = id })
+    // The room's transcript carries the provider id of what was posted, so a
+    // reply to it resolves like a reply to any other group message.
+    if (outcome.status === 'delivered' && outcome.messageId && persistedRowId) {
+      await setSessionMessageChannelId(persistedRowId, outcome.messageId).catch((err: unknown) => {
+        console.warn('[workflow-delivery] provider message id not recorded:', err)
+      })
+    }
+    return outcome
+  }
+}
+
+/**
+ * The session a delivery is persisted into: the group's room when the group
+ * converged (§4.4), else the per-user delivery session.
+ */
+async function deliverySession(params: {
+  workspaceId: string; assistantId: string; userId: string; channelType: string; channelId: string
+}): Promise<{ id: string }> {
+  const room = await findRoomForDelivery(params)
+  return room ?? findOrCreateSession({
+    assistantId: params.assistantId,
+    userId: params.userId,
+    channelType: params.channelType,
+    channelId: params.channelId,
+  })
+}
+
+function createDelivery(
+  options: WorkflowChannelDeliveryOptions,
+): (args: Parameters<DeliverToChannel>[0], onPersisted: (rowId: string) => void) => Promise<DeliveryOutcome> {
   return async ({
     workspaceId,
     assistantId,
@@ -116,7 +151,7 @@ export function createWorkflowChannelDelivery(
     questionResponse,
     threadRef,
     replyToTrigger,
-  }): Promise<DeliveryOutcome> => {
+  }, onPersisted): Promise<DeliveryOutcome> => {
     // Strip any model scaffolding / meta-commentary before it is persisted to
     // the delivery session OR pushed to the channel — a cron-framed turn can
     // echo a "Message body:" planning preamble and a duplicated body (see
@@ -251,18 +286,17 @@ export function createWorkflowChannelDelivery(
         return { status: 'skipped', channelType, reason: 'access_denied' }
       }
 
-      const session = await findOrCreateSession({
-        assistantId,
-        userId,
-        channelType,
-        channelId: targetChannelId,
+      const session = await deliverySession({
+        workspaceId, assistantId, userId, channelType, channelId: targetChannelId,
       })
-      await addSessionMessage({
+      const persisted = await addSessionMessage({
         sessionId: session.id,
         role: 'assistant',
         content: [{ type: 'text', text: deliverable }],
+        senderAssistantId: assistantId,
         derivation: messageDerivation,
       })
+      onPersisted(persisted.id)
       const prepared = await prepareQuestion(integration.id)
       const messageId = await createWhatsAppCloudAdapter({
         accessToken: credentials.access_token,
@@ -287,18 +321,17 @@ export function createWorkflowChannelDelivery(
     // to manufacture a copy. The workflow retains the result and original
     // evidence, plus an approval receipt on successful publication.
     if (!publicationApprovalId) {
-      const session = await findOrCreateSession({
-        assistantId,
-        userId,
-        channelType,
-        channelId: targetChannelId,
+      const session = await deliverySession({
+        workspaceId, assistantId, userId, channelType, channelId: targetChannelId,
       })
-      await addSessionMessage({
+      const persisted = await addSessionMessage({
         sessionId: session.id,
         role: 'assistant',
         content: [{ type: 'text', text: deliverable }],
+        senderAssistantId: assistantId,
         derivation: messageDerivation,
       })
+      onPersisted(persisted.id)
     }
 
     if (channelType === 'telegram') {

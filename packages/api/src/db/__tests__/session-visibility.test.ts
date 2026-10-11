@@ -2,7 +2,7 @@
  * [COMP:api/session-visibility] Session visibility dimension.
  *
  * Unit half — verifies the `visibility` column is threaded through the
- * sessions store: `findOrCreateSession` persists it (defaulting to 'owner',
+ * sessions store: `findOrCreateSession` persists it (defaulting to 'personal',
  * 'workspace' when asked), and the by-id / by-channel reads project it. The
  * RLS *enforcement* (a workspace member reading a teammate's shared session,
  * a non-member being denied) is covered by the sibling
@@ -59,7 +59,7 @@ function row(over: Record<string, unknown> = {}) {
     downgradeNoticeSent: false,
     downgradeNoticePinMessageId: null,
     mode: null,
-    visibility: 'owner',
+    visibility: 'personal',
     effectiveClearance: null,
     createdAt: new Date('2026-01-01T00:00:00.000Z'),
     lastActiveAt: new Date('2026-01-01T00:00:00.000Z'),
@@ -103,7 +103,7 @@ describe('[COMP:api/session-visibility] Session visibility dimension', () => {
     expect(session.visibility).toBe('workspace')
   })
 
-  it('findOrCreateSession defaults visibility=owner + workspace_id/effective_clearance=null when omitted', async () => {
+  it('findOrCreateSession defaults visibility=personal + workspace_id/effective_clearance=null when omitted', async () => {
     mockQuery.mockResolvedValue({ rows: [row()] } as never)
 
     await findOrCreateSession({
@@ -114,7 +114,7 @@ describe('[COMP:api/session-visibility] Session visibility dimension', () => {
     })
 
     const [, params] = mockQuery.mock.calls[0] as [string, unknown[]]
-    expect(params[6]).toBe('owner')
+    expect(params[6]).toBe('personal')
     expect(params[7]).toBe(null)
     expect(params[8]).toBe(null)
   })
@@ -154,6 +154,6 @@ describe('[COMP:api/session-visibility] Session visibility dimension', () => {
     })
     const [sql] = mockQuery.mock.calls[0] as [string]
     expect(sql).toContain('visibility')
-    expect(session?.visibility).toBe('owner')
+    expect(session?.visibility).toBe('personal')
   })
 })

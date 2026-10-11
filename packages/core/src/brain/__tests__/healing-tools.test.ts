@@ -103,12 +103,12 @@ const ctxAutonomous: ToolContext = {
   assistantId: 'a1',
   sessionId: 's1',
   appId: 'Use Brian',
-  channelType: 'workflow',
+  channelType: 'workflow', attended: false,
   channelId: 'c1',
   workspaceId: 'ws-1',
   abortSignal: new AbortController().signal,
 }
-const ctxInteractive: ToolContext = { ...ctxAutonomous, channelType: 'web' }
+const ctxInteractive: ToolContext = { ...ctxAutonomous, channelType: 'web', attended: true }
 
 describe('[COMP:brain/healing-tools] dedupeEntities Tier-D gate', () => {
   it('is gated everywhere (requiresConfirmation: true)', () => {

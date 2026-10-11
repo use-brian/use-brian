@@ -9,6 +9,9 @@ let created: boolean
 beforeEach(() => {
   vi.clearAllMocks(); previous = undefined; created = true
   db.query.mockImplementation(async (sql: string) => {
+    // Creation admission by anchor (L12) reads the assistant; no policy row = legacy.
+    if (sql.includes('FROM assistants WHERE id=$1 FOR SHARE')) return { rows: [{ workspaceId: 'ws-1', clearance: 'internal' }] }
+    if (sql.includes("current_setting('app.system_bypass'")) return { rows: [{ value: null }] }
     if (sql.includes('SELECT feed_draft_audience_allowed')) return { rows: [{ allowed: true }] }
     if (sql.startsWith('INSERT INTO sessions')) return { rows: created ? [{ id: 'session-1' }] : [] }
     if (sql.includes('FOR UPDATE')) return { rows: [{ userId: 'user-1', title: '[threads] Launch notes' }] }
@@ -51,6 +54,8 @@ describe('[COMP:feed/post-working-copies] transactional persistence', () => {
   })
   it('rolls back session creation if the seeded-message write fails', async () => {
     db.query.mockImplementation(async (sql: string) => {
+      if (sql.includes('FROM assistants WHERE id=$1 FOR SHARE')) return { rows: [{ workspaceId: 'ws-1', clearance: 'internal' }] }
+      if (sql.includes("current_setting('app.system_bypass'")) return { rows: [{ value: null }] }
       if (sql.includes('INSERT INTO sessions')) return { rows: [{ id: 'session-1' }] }
       if (sql.includes('FOR UPDATE')) return { rows: [{ userId: 'user-1', title: '[threads] Launch notes' }] }
       if (sql.includes('INSERT INTO session_messages')) throw new Error('disk full')

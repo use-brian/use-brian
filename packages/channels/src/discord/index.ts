@@ -13,6 +13,7 @@ export type {
   DiscordButton,
   DiscordInteractionResponse,
   DiscordApplicationCommand,
+  DiscordHistoryMessage,
 } from './api.js'
 export {
   verifyDiscordSignature,

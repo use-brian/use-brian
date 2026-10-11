@@ -336,7 +336,7 @@ import type { ToolContext } from '@use-brian/core'
 describe('[COMP:feed/draft-suggestions] live selection and proposal lineage', () => {
   it('scenario 11: every reused whole-draft index retains a distinct complete immutable source', async () => {
     const f = await fixture('Original body.'); await f.upgrade()
-    const context = await resolveFeedTurnContext(f.actor.userId, f.actor.assistantId, { id: f.actor.sessionId, mode: 'draft', channelType: 'web' }, { sessionId: f.actor.sessionId, revision: 2 })
+    const context = await resolveFeedTurnContext(f.actor.userId, f.actor.assistantId, { id: f.actor.sessionId, mode: 'draft', channelType: 'web', anchorKind: null }, { sessionId: f.actor.sessionId, revision: 2 })
     const tool = buildFeedCollaborationTools(context!).find(item => item.name === 'proposeDrafts')!
     const first = { index: 1, text: 'First alternative', label: 'concise', imageBrief: 'A fictional diagram' }
     const second = { index: 1, text: 'Revised alternative', label: 'warm', imageBrief: 'A second diagram' }
@@ -350,7 +350,7 @@ describe('[COMP:feed/draft-suggestions] live selection and proposal lineage', ()
   it('scenario 11: a whole-thread alternative replaces every explicit segment and preserves their identities', async () => {
     const f = await fixture('First segment.'); const content = await f.upgrade(); const secondId = randomUUID()
     await f.command([{ kind: 'context', postFormat: 'thread' }, { kind: 'edit', edits: [{ kind: 'insertSegment', afterId: content.composition.segments[0]!.id, segment: { id: secondId, content: [feedParagraph('Second segment.')] } }] }], 2)
-    const context = await resolveFeedTurnContext(f.actor.userId, f.actor.assistantId, { id: f.actor.sessionId, mode: 'draft', channelType: 'web' }, { sessionId: f.actor.sessionId, revision: 4 })
+    const context = await resolveFeedTurnContext(f.actor.userId, f.actor.assistantId, { id: f.actor.sessionId, mode: 'draft', channelType: 'web', anchorKind: null }, { sessionId: f.actor.sessionId, revision: 4 })
     const tool = buildFeedCollaborationTools(context!).find(item => item.name === 'proposeDrafts')!
     await expect(tool.execute({ rationale: 'Ambiguous thread', drafts: [{ index: 1, text: 'Only one body' }] }, {} as ToolContext)).rejects.toMatchObject({ code: 'matching_thread_segments_required' })
     await tool.execute({ rationale: 'Two-part argument', drafts: [{ index: 1, text: 'New first. New second.', threadSegments: ['New first.', 'New second.'] }] }, {} as ToolContext)
@@ -366,7 +366,7 @@ describe('[COMP:feed/draft-suggestions] live selection and proposal lineage', ()
     await f.command([{ kind: 'comment', threadId, target, text: 'Discuss the second phrase.' }], 2)
     const snapshot = await getFeedCollaboration(f.actor); const transcriptId = snapshot.threads[0]!.transcriptSessionId
     const sourceMessageId = (await getFeedThreadMessages(f.actor, threadId))[0]!.id
-    const context = await resolveFeedTurnContext(f.actor.userId, f.actor.assistantId, { id: transcriptId, mode: null, channelType: 'feed_thread' }, { sessionId: f.actor.sessionId, revision: 2, threadId })
+    const context = await resolveFeedTurnContext(f.actor.userId, f.actor.assistantId, { id: transcriptId, mode: null, channelType: 'feed_thread', anchorKind: null }, { sessionId: f.actor.sessionId, revision: 2, threadId })
     expect(context!.selectedQuote).toBe('same phrase'); expect(context!.reference.target).toEqual(target)
     const tools = buildFeedCollaborationTools(context!, sourceMessageId)
     await tools.find(tool => tool.name === 'commentOnFeedDraft')!.execute({ mutationId: randomUUID(), text: 'A precise alternative would help.' }, {} as ToolContext)
@@ -375,7 +375,7 @@ describe('[COMP:feed/draft-suggestions] live selection and proposal lineage', ()
     const proposal = (await getFeedCollaboration(f.actor)).suggestions[0]!
     expect(proposal.edits).toMatchObject([{ kind: 'replaceText', spans: target.spans }])
     await expect(tools.find(tool => tool.name === 'suggestFeedDraftChange')!.execute({ mutationId: randomUUID(), edits: [replace(content, 0, 'Unselected')], rationale: 'Wrong target' }, {} as ToolContext)).rejects.toMatchObject({ status: 403 })
-    await expect(resolveFeedTurnContext(f.actor.userId, f.actor.assistantId, { id: f.actor.sessionId, mode: 'draft', channelType: 'web' }, { sessionId: f.actor.sessionId, revision: 2, threadId })).rejects.toMatchObject({ code: 'thread_scope_mismatch' })
+    await expect(resolveFeedTurnContext(f.actor.userId, f.actor.assistantId, { id: f.actor.sessionId, mode: 'draft', channelType: 'web', anchorKind: null }, { sessionId: f.actor.sessionId, revision: 2, threadId })).rejects.toMatchObject({ code: 'thread_scope_mismatch' })
     await f.command([{ kind: 'edit', edits: [replace(content, 0, 'New surrounding copy')] }], 2)
     await expect(tools.find(tool => tool.name === 'readFeedDraft')!.execute({}, {} as ToolContext)).rejects.toMatchObject({ code: 'draft_context_changed' })
   })
@@ -594,7 +594,7 @@ describe('[COMP:feed/draft-generation] scoped tools and decision provenance', ()
     const f = await generationFixture()
     const imageSlot = { type: 'generationPlaceholder' as const, attrs: { ...f.slot, kind: 'image' as const, briefRevision: 1 } }
     await f.command([{ kind: 'edit', edits: [{ kind: 'replaceBlock', segmentId: f.segmentId, blockId: f.slotId, preimage: { type: 'generationPlaceholder', attrs: f.slot }, replacement: [imageSlot] }] }])
-    const context = await resolveFeedTurnContext(f.actor.userId, f.actor.assistantId, { id: f.actor.sessionId, mode: 'draft', channelType: 'web' }, { sessionId: f.actor.sessionId, revision: 4, ...(explicitPost ? { target: { kind: 'post' } } : {}) })
+    const context = await resolveFeedTurnContext(f.actor.userId, f.actor.assistantId, { id: f.actor.sessionId, mode: 'draft', channelType: 'web', anchorKind: null }, { sessionId: f.actor.sessionId, revision: 4, ...(explicitPost ? { target: { kind: 'post' } } : {}) })
     const tool = buildFeedCollaborationTools(context!, undefined, f.service).find(item => item.name === 'editFeedPlaceholder')!
     const target = { kind: 'block' as const, segmentId: f.segmentId, blockId: f.slotId }
     const input = { mutationId: randomUUID(), action: 'update', target, patch: { brief: 'Simplify the diagram to three shapes.' } }
@@ -614,7 +614,7 @@ describe('[COMP:feed/draft-generation] scoped tools and decision provenance', ()
     const f = await generationFixture()
     const paragraph = (await getFeedCollaboration(f.actor)).copy!.content.composition!.segments[0]!.content[0]!
     const target = kind === 'block' ? { kind, segmentId: f.segmentId, blockId: paragraph.attrs.id } : { kind, spans: [{ segmentId: f.segmentId, blockId: paragraph.attrs.id, from: 0, to: 7 }] }
-    const context = await resolveFeedTurnContext(f.actor.userId, f.actor.assistantId, { id: f.actor.sessionId, mode: 'draft', channelType: 'web' }, { sessionId: f.actor.sessionId, revision: 3, target })
+    const context = await resolveFeedTurnContext(f.actor.userId, f.actor.assistantId, { id: f.actor.sessionId, mode: 'draft', channelType: 'web', anchorKind: null }, { sessionId: f.actor.sessionId, revision: 3, target })
     const tool = buildFeedCollaborationTools(context!, undefined, f.service).find(item => item.name === 'editFeedPlaceholder')!
     await expect(tool.execute({ mutationId: randomUUID(), action: 'update', target: { kind: 'block', segmentId: f.segmentId, blockId: f.slotId }, patch: { brief: 'Outside attached context.' } }, {} as ToolContext)).rejects.toMatchObject({ code: 'selection_scope_mismatch' })
     const snapshot = await getFeedCollaboration(f.actor)
@@ -625,7 +625,7 @@ describe('[COMP:feed/draft-generation] scoped tools and decision provenance', ()
   })
   it('scenarios 6 and 7: Brian edits the selected slot through shared commands and duplicates never inherit a run', async () => {
     const f = await generationFixture()
-    const context = await resolveFeedTurnContext(f.actor.userId, f.actor.assistantId, { id: f.actor.sessionId, mode: 'draft', channelType: 'web' }, { sessionId: f.actor.sessionId, revision: 3, target: { kind: 'block', segmentId: f.segmentId, blockId: f.slotId } })
+    const context = await resolveFeedTurnContext(f.actor.userId, f.actor.assistantId, { id: f.actor.sessionId, mode: 'draft', channelType: 'web', anchorKind: null }, { sessionId: f.actor.sessionId, revision: 3, target: { kind: 'block', segmentId: f.segmentId, blockId: f.slotId } })
     const tools = buildFeedCollaborationTools(context!, undefined, f.service)
     const change = tools.find(tool => tool.name === 'editFeedPlaceholder')!
     expect(change.requiresConfirmation).toBe(true)
@@ -634,7 +634,7 @@ describe('[COMP:feed/draft-generation] scoped tools and decision provenance', ()
     const node = copy.content.composition!.segments[0]!.content[1]!
     expect(node).toMatchObject({ attrs: { id: f.slotId, briefRevision: 1, brief: 'Use an example without numbers.' } })
     await expect(f.command([{ kind: 'edit', edits: [{ kind: 'replaceBlock', segmentId: f.segmentId, blockId: f.slotId, preimage: node, replacement: [{ type: 'generationPlaceholder', attrs: { ...f.slot, brief: 'Missing revision increment.', briefRevision: 1 } }] }] }])).rejects.toMatchObject({ code: 'placeholder_brief_revision_conflict' })
-    const refreshed = await resolveFeedTurnContext(f.actor.userId, f.actor.assistantId, { id: f.actor.sessionId, mode: 'draft', channelType: 'web' }, { sessionId: f.actor.sessionId, revision: 4, target: { kind: 'block', segmentId: f.segmentId, blockId: f.slotId } })
+    const refreshed = await resolveFeedTurnContext(f.actor.userId, f.actor.assistantId, { id: f.actor.sessionId, mode: 'draft', channelType: 'web', anchorKind: null }, { sessionId: f.actor.sessionId, revision: 4, target: { kind: 'block', segmentId: f.segmentId, blockId: f.slotId } })
     await buildFeedCollaborationTools(refreshed!, undefined, f.service).find(tool => tool.name === 'editFeedPlaceholder')!.execute({ mutationId: randomUUID(), action: 'duplicate' }, {} as ToolContext)
     const slots = (await getFeedCollaboration(f.actor)).copy!.content.composition!.segments[0]!.content.filter(node => node.type === 'generationPlaceholder')
     expect(slots).toHaveLength(2); expect(slots[0]!.attrs.id).not.toBe(slots[1]!.attrs.id); expect((await getFeedCollaboration(f.actor)).runs).toHaveLength(0); expect(f.call).not.toHaveBeenCalled()
@@ -681,7 +681,7 @@ describe('[COMP:feed/draft-generation] durable image and output integration', ()
       const fixed = { type: 'image' as const, attrs: { id: f.slotId, fileId: uploaded.value.id, mimeType: 'image/png' as const, placement: 'attachment' as const, alt: 'Detailed orchard diagram' } }
       await f.command([{ kind: 'edit', edits: [{ kind: 'replaceBlock', segmentId: f.segmentId, blockId: f.slotId, preimage: { type: 'generationPlaceholder', attrs: f.slot }, replacement: [fixed] }] }])
       const target = { kind: 'block' as const, segmentId: f.segmentId, blockId: f.slotId }
-      const context = await resolveFeedTurnContext(f.actor.userId, f.actor.assistantId, { id: f.actor.sessionId, mode: 'draft', channelType: 'web' }, { sessionId: f.actor.sessionId, revision: 4, ...(wholePost ? {} : { target }) })
+      const context = await resolveFeedTurnContext(f.actor.userId, f.actor.assistantId, { id: f.actor.sessionId, mode: 'draft', channelType: 'web', anchorKind: null }, { sessionId: f.actor.sessionId, revision: 4, ...(wholePost ? {} : { target }) })
       const tool = buildFeedCollaborationTools(context!, undefined, f.service).find(item => item.name === 'editFeedPlaceholder')!
       expect(tool.description).toContain('selected fixed image')
       await tool.execute({ mutationId: randomUUID(), action: 'convert', kind: 'image', ...(wholePost ? { target } : {}), patch: { brief: 'Use a simplified visual with three shapes.' } }, {} as ToolContext)

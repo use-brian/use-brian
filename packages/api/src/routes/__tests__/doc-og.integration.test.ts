@@ -37,6 +37,23 @@ describe('[COMP:api/doc-og-fetch] Doc OG preview route', () => {
     vi.resetAllMocks()
   })
 
+  it('reports whether the Chat side pane may frame the page (chat-parity T9)', async () => {
+    const framed = vi.fn(async () => ({
+      ok: true,
+      status: 200,
+      headers: new Headers({ 'x-frame-options': 'SAMEORIGIN' }),
+      text: async () => '<title>Locked</title>',
+    })) as unknown as FetchFn
+    const locked = await request(createTestApp('/api/doc', docOgRoutes({ fetchFn: framed, cache: new OgPreviewCache() }), { userId: 'u_1' }))
+      .post('/api/doc/og-preview').send({ url: 'https://example.com/locked' })
+    expect(locked.status).toBe(200)
+    expect(locked.body.embeddable).toBe(false)
+
+    const open = await request(createTestApp('/api/doc', docOgRoutes({ fetchFn: htmlFetch('<title>Open</title>'), cache: new OgPreviewCache() }), { userId: 'u_1' }))
+      .post('/api/doc/og-preview').send({ url: 'https://example.com/open' })
+    expect(open.body.embeddable).toBe(true)
+  })
+
   // ── Happy path ───────────────────────────────────────────────
 
   it('fetches and parses a URL with rich OG tags', async () => {

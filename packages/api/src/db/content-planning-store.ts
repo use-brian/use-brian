@@ -8,8 +8,10 @@ import { confirmFeedPost } from '../content-planning/confirmation.js'
  */
 
 import { randomUUID } from 'node:crypto'
-import { query } from './client.js'
+import { getPool, query } from './client.js'
+import { admitAnchoredSession } from '../workspace-access/session-create-admission.js'
 import { addSessionMessage } from './sessions.js'
+import { sessionKindSql } from '../session-kind.js'
 
 /**
  * One image bound to a draft (feed-revamp-depth D32). `fileId` is a
@@ -364,32 +366,45 @@ export function createContentPlanningStore(): ContentPlanningStore {
         params.seed,
       )
       const seedKind = params.seed?.kind ?? 'freeform'
-      const result = await query<{
-        id: string
-        createdAt: Date
-        lastActiveAt: Date
-        starterId: string
-        starterName: string | null
-      }>(
-        `WITH inserted AS (
-           INSERT INTO sessions (
-             assistant_id, user_id, channel_type, channel_id, title, mode,
-             seed_kind, visibility, workspace_id
+      // A feed draft is a workspace conversation anchored to itself: admitted
+      // by its anchor (unified-sessions L12) in the same transaction as the
+      // insert, which is why the id is minted here.
+      const draftId = randomUUID()
+      const client = await getPool().connect()
+      let result: { rows: Array<{ id: string; createdAt: Date; lastActiveAt: Date; starterId: string; starterName: string | null }> }
+      try {
+        await client.query('BEGIN')
+        const admitted = await admitAnchoredSession(client, {
+          assistantId: params.assistantId, userId: params.userId, channelType: 'web', channelId,
+          anchorKind: 'feed_draft', anchorRef: draftId,
+        })
+        result = await client.query(
+          `WITH inserted AS (
+             INSERT INTO sessions (
+               id, assistant_id, user_id, channel_type, channel_id, title, mode,
+               seed_kind, visibility, workspace_id, anchor_kind, anchor_ref, effective_clearance
+             )
+             SELECT $6, $1, $2, 'web', $3, $4, 'draft', $5, 'workspace', a.workspace_id, 'feed_draft', $6::text, $7
+               FROM assistants a
+              WHERE a.id = $1
+             RETURNING id, user_id, created_at, last_active_at
            )
-           SELECT $1, $2, 'web', $3, $4, 'draft', $5, 'workspace', a.workspace_id
-             FROM assistants a
-            WHERE a.id = $1
-           RETURNING id, user_id, created_at, last_active_at
-         )
-         SELECT i.id,
-                i.created_at AS "createdAt",
-                i.last_active_at AS "lastActiveAt",
-                i.user_id::text AS "starterId",
-                u.name AS "starterName"
-           FROM inserted i
-           LEFT JOIN users u ON u.id = i.user_id`,
-        [params.assistantId, params.userId, channelId, title, seedKind],
-      )
+           SELECT i.id,
+                  i.created_at AS "createdAt",
+                  i.last_active_at AS "lastActiveAt",
+                  i.user_id::text AS "starterId",
+                  u.name AS "starterName"
+             FROM inserted i
+             LEFT JOIN users u ON u.id = i.user_id`,
+          [params.assistantId, params.userId, channelId, title, seedKind, draftId, admitted.effectiveClearance ?? null],
+        )
+        await client.query('COMMIT')
+      } catch (error) {
+        await client.query('ROLLBACK').catch(() => undefined)
+        throw error
+      } finally {
+        client.release()
+      }
       const row = result.rows[0]
       if (!row) throw new Error('assistant not found')
 
@@ -500,7 +515,7 @@ export function createContentPlanningStore(): ContentPlanningStore {
               WHERE d.session_id = s.id AND d.removed_at IS NULL
            ) counts ON true
           WHERE s.assistant_id = $1 AND feed_draft_audience_allowed(s.id)
-            AND s.mode = 'draft'
+            AND ${sessionKindSql.anchored('s', 'feed_draft')}
             AND ($2::text IS NULL OR s.title LIKE '[' || $2 || ']%')
           ORDER BY s.last_active_at DESC`,
         [params.assistantId, params.platform ?? null],
@@ -539,7 +554,7 @@ export function createContentPlanningStore(): ContentPlanningStore {
     async renameSession(params) {
       const current = await query<{ title: string | null }>(
         `SELECT title FROM sessions
-          WHERE id = $1 AND assistant_id = $2 AND mode = 'draft'`,
+          WHERE id = $1 AND assistant_id = $2 AND ${sessionKindSql.anchored('', 'feed_draft')}`,
         [params.sessionId, params.assistantId],
       )
       const row = current.rows[0]
@@ -552,7 +567,7 @@ export function createContentPlanningStore(): ContentPlanningStore {
         `UPDATE sessions
             SET title = $3,
                 title_manually_set = true
-          WHERE id = $1 AND assistant_id = $2 AND mode = 'draft'
+          WHERE id = $1 AND assistant_id = $2 AND ${sessionKindSql.anchored('', 'feed_draft')}
           RETURNING title`,
         [params.sessionId, params.assistantId, title],
       )
@@ -562,7 +577,7 @@ export function createContentPlanningStore(): ContentPlanningStore {
     async sessionExists(assistantId, sessionId) {
       const result = await query(
         `SELECT 1 FROM sessions
-          WHERE id = $1 AND assistant_id = $2 AND mode = 'draft'`,
+          WHERE id = $1 AND assistant_id = $2 AND ${sessionKindSql.anchored('', 'feed_draft')}`,
         [sessionId, assistantId],
       )
       return result.rows.length > 0
@@ -573,7 +588,7 @@ export function createContentPlanningStore(): ContentPlanningStore {
         `DELETE FROM sessions
           WHERE id = $1
             AND assistant_id = $4
-            AND mode = 'draft'
+            AND ${sessionKindSql.anchored('', 'feed_draft')}
             AND ($3::boolean OR user_id = $2)
           RETURNING id`,
         [
@@ -601,7 +616,7 @@ export function createContentPlanningStore(): ContentPlanningStore {
            FROM sessions s
           WHERE s.id = $2
             AND s.assistant_id = $1
-            AND s.mode = 'draft'
+            AND ${sessionKindSql.anchored('s', 'feed_draft')}
          RETURNING id,
                    assistant_id::text AS "assistantId",
                    session_id::text AS "sessionId",

@@ -2060,6 +2060,8 @@ async function dispatchToolCall(
         userId: ctx.run.triggeredBy ?? ctx.workflow.createdBy,
         assistantId: ctx.toolAssistantId,
         sessionId: ctx.run.id,
+        // The run id is not a sessions row.
+        sessionPersisted: false,
         appId: 'Use Brian',
         channelType: 'workflow',
         channelId: ctx.run.id,

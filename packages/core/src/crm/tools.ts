@@ -4,6 +4,7 @@ import type { EntityKind } from '../entities/types.js'
 import type { AccessContext } from '../security/access-context.js'
 import { researchWriteFloor } from '../security/sensitivity.js'
 import { resolveWriteScope, scopeEvidenceFromRows } from '../security/context-scope.js'
+import { provenanceSessionId } from '../tools/capability-gate.js'
 import { buildTool, type Tool, type ToolContext } from '../tools/types.js'
 import { tolerantInt, uuidId } from '../tools/schema-tolerance.js'
 import {
@@ -316,21 +317,6 @@ function eventCtx(context: { userId: string; assistantId: string; sessionId: str
   }
 }
 
-/**
- * The `source_session_id` to stamp on a fresh CRM row (mig 316). Extraction
- * runs (`writeSource: 'extracted'`, incl. synthesis) and the programmatic
- * brain-MCP surface mint a SYNTHETIC `context.sessionId` (randomUUID, no
- * `sessions` row) — stamping it would store a dangling anchor. Only
- * interactive/workflow chat, where the session is real, gets the anchor.
- */
-function crmSessionAnchor(
-  opts: { writeSource?: 'user' | 'extracted'; writeSourceEpisodeId?: string | null } | undefined,
-  context: { sessionId: string; channelType: string },
-): string | null {
-  if (opts?.writeSourceEpisodeId || opts?.writeSource === 'extracted') return null
-  if (context.channelType === 'programmatic') return null
-  return context.sessionId
-}
 
 /** Ids of active companies whose name exactly matches (case-insensitive) — the store's dedupe key. */
 async function existingCompanyMatchIds(
@@ -635,7 +621,7 @@ export function createCrmTools(
           // (randomUUID, no sessions row) — only interactive/workflow chat
           // stamps a real session anchor. See saveTask.
           sourceEpisodeId: opts?.writeSourceEpisodeId ?? null,
-          sourceSessionId: crmSessionAnchor(opts, context),
+          sourceSessionId: provenanceSessionId(context, opts),
           createdByAssistantId: context.assistantId,
         })
         opts?.onEvent?.({ type: 'contact_created', contactId: contact.id }, eventCtx(context))
@@ -898,7 +884,7 @@ export function createCrmTools(
           source: opts?.writeSource,
           // Provenance anchors (mig 316) — see saveContact.
           sourceEpisodeId: opts?.writeSourceEpisodeId ?? null,
-          sourceSessionId: crmSessionAnchor(opts, context),
+          sourceSessionId: provenanceSessionId(context, opts),
           createdByAssistantId: context.assistantId,
         })
       } catch (error) {
@@ -1131,7 +1117,7 @@ export function createCrmTools(
           source: opts?.writeSource,
           // Provenance anchors (mig 316) — see saveContact.
           sourceEpisodeId: opts?.writeSourceEpisodeId ?? null,
-          sourceSessionId: crmSessionAnchor(opts, context),
+          sourceSessionId: provenanceSessionId(context, opts),
           createdByAssistantId: context.assistantId,
         })
         opts?.onEvent?.({ type: 'deal_created', dealId: deal.id }, eventCtx(context))

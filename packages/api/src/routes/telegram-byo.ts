@@ -1,5 +1,6 @@
 import { dispatchIncomingMessageEvent } from '../message-events.js'
-import { channelConfirmations, confirmationMessage, type ChannelInteractionScope } from './channel-interactions.js'
+import { channelConfirmations, confirmationMessage, roomInteractionScope, type ChannelInteractionScope } from './channel-interactions.js'
+import { isWorkspaceAdmin, postPassiveChannelMessage, resolveRoomBinding } from '../channel-room/room.js'
 import { channelQuestions, resolveChannelQuestion } from './channel-questions.js'
 import { createTelegramDiscussionStore, observeTelegramDiscussion, telegramDiscussionContext, type TelegramDiscussionStore, type DiscussionMessage } from '../telegram-discussion-context.js'
 import type { ChannelQuestionStore } from '../workflow/channel-questions.js'
@@ -551,10 +552,16 @@ export function telegramByoRoutes(options: TelegramByoRouteOptions): Router {
       console.error('[telegram-byo] discussion context persistence failed:', err)
       return
     }
+    // A group bound to this workspace converges into one room (§4.4): its
+    // un-mentioned messages arrive as passive posts instead of being dropped.
+    const roomBinding = await resolveRoomBinding({
+      assistant, channelType: 'telegram', channelIntegrationId: integration.id, isGroupChat: true,
+    })
     const tgConfig: TelegramAdapterConfig = {
       discussionChatIds,
       ackReaction: storedConfig.ackReaction,
       requireMention: requireMentionResolved,
+      ...(roomBinding ? { normalizePassive: true } : {}),
     }
     const routeAssistantId = assistant.id
     function reportIncomingFailure(kind: 'message' | 'media group', channelId: string, err: unknown): void {
@@ -984,7 +991,7 @@ export function telegramByoRoutes(options: TelegramByoRouteOptions): Router {
       }
 
       // 4c. Ack reaction — instant visual feedback before processing starts
-      if (tgConfig.ackReaction && incoming.messageId) {
+      if (tgConfig.ackReaction && incoming.messageId && !incoming.captureOnly) {
         adapter.reactToMessage?.(incoming.channelId, incoming.messageId, tgConfig.ackReaction)
           .catch(() => {}) // non-critical
       }
@@ -1212,12 +1219,23 @@ export function telegramByoRoutes(options: TelegramByoRouteOptions): Router {
       // ownerId is only a storage fallback, never evidence of sender identity.
       if (!isIdentified) externalGuest = true
 
-      const interactionScope: ChannelInteractionScope = {
+      const senderScope: ChannelInteractionScope = {
         channelType: 'telegram', integrationId: boundIntegration.channelId!,
         conversationId: incoming.channelId, senderId: incoming.userId,
       }
+      // A room's turn belongs to the room: any reader stops it, the addresser
+      // or an admin answers its confirmations.
+      const inRoom = roomBinding !== null && incoming.isGroupChat
+      const interactionScope = inRoom ? roomInteractionScope(senderScope) : senderScope
+      const roomActor = {
+        senderId: incoming.userId,
+        isAdmin: () => roomBinding ? isWorkspaceAdmin(channelUserId, roomBinding.workspaceId) : Promise.resolve(false),
+      }
+      const handleInteraction = (event: Parameters<typeof channelConfirmations.handle>[1]) => inRoom
+        ? channelConfirmations.handleRoom(interactionScope, event, roomActor)
+        : Promise.resolve(channelConfirmations.handle(interactionScope, event))
       if (workflowCallback?.data.startsWith('mcp_confirm:')) {
-        const result = channelConfirmations.handle(interactionScope, { kind: 'action', data: workflowCallback.data })
+        const result = await handleInteraction({ kind: 'action', data: workflowCallback.data })
         if (result.status === 'resolved') {
           await adapter.setMessageActions(incoming.channelId, workflowCallback.messageId, [{
             id: 'decision', label: DECISION_LABELS[result.decision ?? ''] ?? 'Handled',
@@ -1227,8 +1245,8 @@ export function telegramByoRoutes(options: TelegramByoRouteOptions): Router {
         }
         // Preserve callback provenance for the central durable approval handler.
         // Unavailable/stale callbacks must never become ordinary conversational text.
-      } else if (!workflowCallback && !actionData
-        && channelConfirmations.handle(interactionScope, { kind: 'text', text: incoming.text }).handled) return
+      } else if (!workflowCallback && !actionData && !incoming.captureOnly
+        && (await handleInteraction({ kind: 'text', text: incoming.text })).handled) return
 
       // 6. Sequentialize per chat via Postgres advisory lock
       await withChatLock(`tg-byo:${incoming.channelId}`, async () => {
@@ -1666,10 +1684,25 @@ async function processMessage(params: ProcessMessageParams): Promise<void> {
   // model for every file shared between humans in a group.
   // See docs/architecture/channels/adapter-pattern.md → "Unaddressed group media".
   if (incoming.captureOnly) {
+    // D4: in a converged room an un-addressed message is a room post.
+    if (incoming.isGroupChat && incoming.text) {
+      await postPassiveChannelMessage({
+        assistant: { id: assistant.id, name: assistant.name, workspaceId: assistant.workspaceId },
+        channelType: 'telegram',
+        channelIntegrationId: params.integrationId,
+        isGroupChat: true,
+        sessionChannelId: incoming.channelId,
+        senderUserId: channelUserId,
+        senderName: incoming.senderDisplay ?? null,
+        text: incoming.text,
+        channelMessageId: incoming.messageId ?? null,
+        postNotice: async (text) => { await adapter.sendMessage(incoming.channelId, { text }) },
+      }).catch((err: unknown) => console.error('[telegram-byo] room post failed:', err))
+    }
     // If the intake seam is unwired there was nothing to file, and returning
     // silently would recreate the exact drop this flag exists to end. Say so
     // rather than letting an unconfigured deployment look like a working one.
-    if (!params.ingestChannelMediaRef || !assistant.workspaceId) {
+    if (incoming.mediaType && (!params.ingestChannelMediaRef || !assistant.workspaceId)) {
       console.warn(
         `[telegram-byo] capture-only media in chat ${incoming.channelId} was not filed: ${
           !params.ingestChannelMediaRef ? 'ingestChannelMediaRef is unwired' : 'assistant has no workspaceId'
@@ -1982,6 +2015,9 @@ async function processMessage(params: ProcessMessageParams): Promise<void> {
     capabilityStore: params.capabilityStore,
     voiceTranscriptionUsage,
     hooks: {
+      async postNotice(text) {
+        await adapter.sendMessage(incoming.channelId, { text })
+      },
       async onProcessingStart() {
         await adapter.sendTypingIndicator(incoming.channelId)
       },

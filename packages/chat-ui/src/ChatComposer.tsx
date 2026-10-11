@@ -165,6 +165,8 @@ export type ChatComposerProps = {
   /** Optional CSS classes for layout customization. */
   className?: string
   textareaClassName?: string
+  /** DOM id for the textarea, so a host can point a `<label htmlFor>` at it. */
+  textareaId?: string
   /** Class for the inner row containing the textarea, send button, and slots. */
   rowClassName?: string
   /** Class for the built-in Send button. */
@@ -360,6 +362,7 @@ export function ChatComposer(props: ChatComposerProps) {
   const input = (
     <textarea
       ref={textareaRef}
+      id={props.textareaId}
       value={props.value}
       onChange={handleChange}
       onKeyDown={handleKeyDown}

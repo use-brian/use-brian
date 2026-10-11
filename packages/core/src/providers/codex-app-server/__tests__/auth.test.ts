@@ -40,7 +40,7 @@ function respond(harness: Harness, requestIndex: number, result: unknown): void 
 }
 
 describe('[COMP:providers/codex-auth] Codex-managed ChatGPT authentication', () => {
-  it('returns masked ChatGPT account state without exposing the raw email', async () => {
+  it.each(['plus', 'promax', 'self_serve_business_prolite', 'enterprise_cbp_automation', 'edu_plus', 'edu_pro'] as const)('returns masked ChatGPT account state for %s without exposing the raw email', async (planType) => {
     const harness = createHarness()
     const client = new CodexAccountClient(harness.peer)
     const status = client.readAccount()
@@ -50,14 +50,14 @@ describe('[COMP:providers/codex-auth] Codex-managed ChatGPT authentication', () 
       params: { refreshToken: false },
     })
     respond(harness, 0, {
-      account: { type: 'chatgpt', email: 'person@example.com', planType: 'plus' },
+      account: { type: 'chatgpt', email: 'person@example.com', planType },
       requiresOpenaiAuth: true,
     })
 
     await expect(status).resolves.toEqual({
       connected: true,
       authType: 'chatgpt',
-      planType: 'plus',
+      planType,
       emailHint: 'p***@example.com',
       requiresOpenaiAuth: true,
     })

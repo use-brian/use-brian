@@ -17,6 +17,7 @@ import { HOME_APPS_REFRESH_EVENT } from "@/lib/home-apps-events";
 import { WORKSPACE_IDENTITY_REFRESH_EVENT } from "@/lib/workspace-identity-events";
 import { INBOX_REFRESH_EVENT } from "@/lib/inbox-refresh-events";
 import { GOAL_REFRESH_EVENT } from "@/lib/goal-events";
+import { OFFICE_REFRESH_EVENT } from "@/lib/workspace-events";
 import {
   allDomainDispatches,
   createRefreshFolder,
@@ -147,6 +148,14 @@ describe("[COMP:app-web/workspace-events] routeWorkspaceChange", () => {
         event: GOAL_REFRESH_EVENT,
         detail: { workspaceId: "ws-1", rowId: "g-1" },
       },
+    ]);
+  });
+
+  // Office job progress: the bus forwards a coalesced primitive so the Office
+  // list stale-marks instead of waiting for metadata renewal.
+  it("routes office job changes to the office-refresh bus with rowId", () => {
+    expect(routeWorkspaceChange(payload("office", { rowId: "job-1", action: "update" }))).toEqual([
+      { event: OFFICE_REFRESH_EVENT, detail: { workspaceId: "ws-1", rowId: "job-1" } },
     ]);
   });
 

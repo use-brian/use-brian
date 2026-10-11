@@ -328,6 +328,21 @@ describe('[COMP:api/model-resolution] ensureServableModel — default falls to a
     expect(ensureServableModel('gemini-3-pro-research', codex)).toBe('gpt-5.5')
   })
 
+  it('serves every current Codex tier when only current models are entitled', () => {
+    const codex = new MutableProviderAvailability()
+    codex.setModelCatalog('openai-codex', new Set(['gpt-6-luna', 'gpt-6-sol', 'gpt-6.1-sol', 'gpt-6-astra']))
+    expect(ensureServableModel('gemini-3-flash-standard', codex)).toBe('gpt-6-luna')
+    expect(ensureServableModel('gemini-flash-3', codex)).toBe('gpt-6-sol')
+    expect(ensureServableModel('gemini-3.8-flash', codex)).toBe('gpt-6.1-sol')
+    expect(ensureServableModel('gemini-3-pro-research', codex)).toBe('gpt-6-astra')
+    codex.setPreferredProvider('openai-codex')
+    expect(backgroundModelFor(codex)).toBe('gpt-6-luna')
+    expect(providerVisionModelFor(codex, 'openai-codex')).toBe('gpt-6-luna')
+    for (const model of ['gpt-6-luna', 'gpt-6-sol', 'gpt-6.1-sol', 'gpt-6-astra']) {
+      expect(ensureServableModel(model, codex)).toBe(model)
+    }
+  })
+
   it('honors the OSS preferred provider for auto tier rows in a mixed deployment', () => {
     const mixed = new MutableProviderAvailability()
     mixed.setStaticProvider('gemini', true)

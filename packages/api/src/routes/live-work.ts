@@ -24,8 +24,10 @@
 import { Router } from 'express'
 import { query, queryWithRLS } from '../db/client.js'
 import { getWorkspaceMembershipWithReadScopeSystem } from '../db/workspace-store.js'
-import { isSharedChatSession, TURN_LEASE_STALE_AFTER_MS } from '../db/sessions.js'
+import { TURN_LEASE_STALE_AFTER_MS } from '../db/sessions.js'
 import { liveSessionTier } from '../session-read-access.js'
+import { anchorReadGate } from '../session-read-authority.js'
+import { classifySession, policyFor, sessionKindSql, sessionPolicy } from '../session-kind.js'
 
 /** How long a settled item stays on the roster — a read-time window, no stored state (§3.2). */
 export const LIVE_RECENT_WINDOW_MINUTES = 30
@@ -129,6 +131,7 @@ type SessionRosterRow = {
   userId: string
   ownerName: string | null
   channelType: string
+  anchorKind: string | null
   appOrigin: string | null
   visibility: string | null
   mode: string | null
@@ -212,11 +215,15 @@ export function projectSessionRow(
   }
   if (tier === 'full') {
     base.visibility = row.visibility
+    // Steering lands only through the per-session turn inbox, which exists
+    // for personal-admission web conversations (D11): workspace sessions
+    // answer a mid-turn message with a follow-up turn instead.
+    const kind = classifySession(row)
     base.canSteer =
       (state === 'working' || state === 'waiting') &&
-      row.mode !== 'draft' &&
-      (row.channelType === 'web' || row.channelType === 'doc_thread') &&
-      !isSharedChatSession(row)
+      sessionPolicy(kind).admission === 'personal' &&
+      kind.transport === 'web' &&
+      kind.lane === 'conversation'
     if (row.title) base.title = row.title
   }
   return base
@@ -268,6 +275,7 @@ async function fetchSessionRows(workspaceId: string): Promise<SessionRosterRow[]
             s.user_id                AS "userId",
             u.name                   AS "ownerName",
             s.channel_type           AS "channelType",
+            s.anchor_kind            AS "anchorKind",
             s.app_origin             AS "appOrigin",
             s.visibility,
             s.mode,
@@ -296,7 +304,10 @@ async function fetchSessionRows(workspaceId: string): Promise<SessionRosterRow[]
        JOIN assistants a ON a.id = s.assistant_id
        LEFT JOIN users u ON u.id = s.user_id
       WHERE a.workspace_id = $1 AND feed_draft_audience_allowed(s.id)
-        AND s.channel_type NOT IN ('workflow', 'assistant-call')
+        -- An Office file's thread is read by the file's audience only; its
+        -- live view is the file's Brian tab (office.md "Brian conversation in the file").
+        AND ${sessionKindSql.conversationLane('s')}
+        AND ${sessionKindSql.surfacesBeyondAnchor('s')}
         AND (s.status = 'running'
              OR s.last_active_at > now() - ($2 || ' minutes')::interval)
       ORDER BY s.last_active_at DESC
@@ -357,18 +368,31 @@ export function liveWorkRoutes(): Router {
         fetchRunRows(workspaceId, callerUserId),
       ])
       const now = new Date()
+      const projected = sessionRows.map((row) => ({
+        row,
+        item: projectSessionRow(
+          row,
+          callerUserId,
+          membership.clearance,
+          now,
+          membership.compartments,
+          membership.projectIds,
+          membership.departmentAccess,
+        ),
+      }))
+      // The roster obeys the SAME read rule as the gate: a workspace row
+      // bound to an anchor (feed draft, feed thread, Office file) is listed
+      // only when the anchor's audience includes the caller (L3). An
+      // anchor refusal is invisible, never presence (D5).
+      const sessionItems = await Promise.all(projected.map(async ({ row, item }) => {
+        if (!item) return null
+        const read = policyFor(row).read
+        if (read.rule !== 'workspace' || read.anchorGate === 'none') return item
+        const verdict = await anchorReadGate(callerUserId, row)
+        return verdict === 'continue' || verdict === null ? item : null
+      }))
       const items: LiveWorkItem[] = [
-        ...sessionRows
-          .map((row) => projectSessionRow(
-            row,
-            callerUserId,
-            membership.clearance,
-            now,
-            membership.compartments,
-            membership.projectIds,
-            membership.departmentAccess,
-          ))
-          .filter((item): item is LiveSessionItem => item !== null),
+        ...sessionItems.filter((item): item is LiveSessionItem => item !== null),
         ...runRows.map((row) => projectRunRow(row, now)),
       ].sort((a, b) => (a.lastActiveAt < b.lastActiveAt ? 1 : a.lastActiveAt > b.lastActiveAt ? -1 : 0))
 

@@ -20,7 +20,7 @@ describe('[COMP:feed/content-planning-hooks] open planning host hooks', () => {
         kind: 'app',
         appType: 'distribution',
       },
-      session: { id: 'session-1', mode: 'draft', channelType: 'web' },
+      session: { id: 'session-1', mode: 'draft', channelType: 'web', anchor: 'feed_draft' },
     })
     expect(draftTools.has('proposeDrafts')).toBe(true)
 
@@ -33,7 +33,7 @@ describe('[COMP:feed/content-planning-hooks] open planning host hooks', () => {
         kind: 'app',
         appType: 'distribution',
       },
-      session: { id: 'session-2', mode: null, channelType: 'web' },
+      session: { id: 'session-2', mode: null, channelType: 'web', anchor: 'none' },
     })
     expect(tuningTools.has('proposeDrafts')).toBe(false)
   })
@@ -59,11 +59,13 @@ describe('[COMP:feed/content-planning-prompt] draft prompt', () => {
     expect(resolveContentPlanningPrompt({
       mode: 'draft',
       channelType: 'web',
+      anchor: 'feed_draft',
     })).toBe(DRAFT_SESSION_ADDENDUM)
     expect(DRAFT_SESSION_ADDENDUM).toContain('Put every proposed post body')
     expect(resolveContentPlanningPrompt({
       mode: null,
       channelType: 'web',
+      anchor: 'none',
     })).toBeNull()
   })
 })
@@ -99,6 +101,7 @@ describe('[COMP:feed/content-planning-prompt] plan prompt (P10 clarify + §6 con
     const prompt = await resolve({
       mode: 'plan',
       channelType: 'web',
+      anchor: 'none',
       assistantId: 'assistant-1',
     })
     expect(prompt).toContain('# Plan session output')
@@ -125,7 +128,7 @@ describe('[COMP:feed/content-planning-prompt] plan prompt (P10 clarify + §6 con
       now,
     })
     expect(
-      await broken({ mode: 'plan', channelType: 'web', assistantId: 'a1' }),
+      await broken({ mode: 'plan', channelType: 'web', anchor: 'none', assistantId: 'a1' }),
     ).toBe(PLAN_SESSION_ADDENDUM)
 
     const resolve = buildContentPlanningPromptResolver({
@@ -134,13 +137,13 @@ describe('[COMP:feed/content-planning-prompt] plan prompt (P10 clarify + §6 con
       now,
     })
     expect(
-      await resolve({ mode: 'draft', channelType: 'web', assistantId: 'a1' }),
+      await resolve({ mode: 'draft', channelType: 'web', anchor: 'feed_draft', assistantId: 'a1' }),
     ).toBe(DRAFT_SESSION_ADDENDUM)
     // No assistant id (a consult without a session) — static only, no fetch.
-    expect(await resolve({ mode: 'plan', channelType: 'web' })).toBe(
+    expect(await resolve({ mode: 'plan', channelType: 'web', anchor: 'none' })).toBe(
       PLAN_SESSION_ADDENDUM,
     )
-    expect(await resolve({ mode: null, channelType: 'web' })).toBeNull()
+    expect(await resolve({ mode: null, channelType: 'web', anchor: 'none' })).toBeNull()
   })
 
   it('renders unset presets honestly instead of inventing them', async () => {
@@ -156,6 +159,7 @@ describe('[COMP:feed/content-planning-prompt] plan prompt (P10 clarify + §6 con
     const prompt = await resolve({
       mode: 'plan',
       channelType: 'web',
+      anchor: 'none',
       assistantId: 'assistant-1',
     })
     expect(prompt).toContain('brief: (not set)')

@@ -66,7 +66,8 @@ use only".
 The implementation now reaches the OSS launcher, API, model menus, routing,
 query loop, and localized Settings surface:
 
-- `@openai/codex` is pinned to the schema-reviewed runtime version.
+- `@openai/codex` inference and the `@openai/codex-catalog` account-only alias
+  have separate exact schema-reviewed pins.
 - A bounded, Zod-validated JSONL RPC peer owns initialization, correlation,
   notifications, server requests, cancellation, and shutdown.
 - A managed process seam starts the pinned package over stdio with an isolated
@@ -81,8 +82,8 @@ query loop, and localized Settings surface:
 - Model discovery is paginated, bounded, duplicate-rejecting, and returns a
   reviewed normalized catalog; hidden models stay absent by default.
 - The pinned-runtime request-capture test proves that the hardened inference
-  profile exposes only Codex's isolated `exec`/`wait` code-mode envelope, and
-  that the only callable operations inside that envelope are the
+  profile exposes either the supplied functions directly or Codex's isolated
+  `exec`/`wait` code-mode envelope, and that the only callable operations are the
   Brian-supplied dynamic tools. Planning, skills, collaboration, shell, file,
   browser, computer, app, MCP, and hosted-search capabilities are absent.
 - The `openai-codex` registry identities and provider factory exist. Routing
@@ -171,7 +172,12 @@ Add `packages/core/src/providers/codex-app-server/`:
 - `provider.ts` — implements Brian's `LLMProvider` and maps Codex events to
   Brian `StreamChunk`s.
 
-The client is a process singleton per OSS API process. Provider sessions are
+The manager owns an account-only process and a separate inference process per
+OSS API process, sharing Brian-owned `CODEX_HOME`. Loss of either closes both
+and clears entitlement; a partial startup closes the first process. Shutdown
+closes both. Successful login completion and logout also recycle the
+pair, so inference cannot retain cached credentials from the prior account.
+The client remains a singleton per OSS API process. Provider sessions are
 isolated logical threads over that client. A crash fails the active turn,
 restarts once with backoff, and re-checks `account/read`; it never loops
 indefinitely.
@@ -231,6 +237,21 @@ hardening gate and may adjust these mappings before the README moves to
 Supported.
 
 ### 3. Query-loop bridge
+
+Inference and images keep the tested `@openai/codex` runtime
+`0.146.0-alpha.10.1`. A separate `@openai/codex-catalog` npm alias pins
+`0.162.1` for account/login/catalog discovery only, reviewed against
+its generated experimental schemas. It cannot start a thread or turn. Newer
+model presets add native tools that are not reliably disabled by the existing
+strict profile; separating discovery from inference preserves Brian's tool
+authority. A real inference capture covers every active reviewed model and
+checks the selected wire model as well as the tool surface. The reviewed
+catalog adds GPT-6 Luna (Standard), GPT-6 Sol (Pro), GPT-6.1 Sol (Max), and
+GPT-6 Astra (Research). Older selections and Auto priority are retained;
+new models remain intersected with picker-visible account discovery. Their
+context budget is the subscription client's conservative 272K default, with
+Brian's existing 32,768-token output cap. Hidden internal and unreviewed models
+are never promoted into Brian's registry automatically.
 
 Codex app-server dynamic tools are request/response RPC, while Brian's query
 loop consumes a streamed tool call, executes it under Brian policy, then calls

@@ -1,6 +1,7 @@
 import { confirmationDecisionLabel, interpretConfirmationEvent, type NormalizedConfirmationEvent } from '@use-brian/core'
 import type { DeferredConfirmationStore } from '../db/deferred-confirmation-store.js'
 import { schedulerCallbackDeliveryScope, findSchedulerChannelConfirmations, tryResolveSchedulerConfirmation, type SchedulerChannelScope } from '../scheduling/confirmation-registry.js'
+import { isInboxSentinel } from '../session-kind.js'
 export type DeferredChannelScope = SchedulerChannelScope
 
 /** After live conversational confirmation handling, before questions/LLM.
@@ -44,7 +45,7 @@ export async function maybeHandleChannelDeferredConfirmation(params: {
       if (!row || row.status !== 'pending' || row.expiresAt.getTime() <= Date.now()
         || row.userId !== params.scope.userId || row.assistantId !== params.scope.assistantId
         || row.channelType !== params.scope.channelType
-        || (row.channelId !== params.scope.channelId && row.channelId !== 'notifications')) {
+        || (row.channelId !== params.scope.channelId && !isInboxSentinel(row.channelId))) {
         return 'This confirmation is unavailable.'
       }
     }

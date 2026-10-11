@@ -1,16 +1,20 @@
 import { spawn } from 'node:child_process'
-import { mkdtemp, rm } from 'node:fs/promises'
+import { mkdtemp, rm, writeFile, readFile } from 'node:fs/promises'
 import { createServer } from 'node:http'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { once } from 'node:events'
 import { describe, expect, it } from 'vitest'
 import { z } from 'zod'
+import { providerModelIds } from '@use-brian/shared/model-registry'
 import {
   buildCodexEnvironment,
   CODEX_INFERENCE_HARDENING_ARGS,
   resolvePinnedCodexCommand,
+  startCodexAppServer,
 } from '../process.js'
+import { CodexCatalogClient } from '../catalog.js'
+import { CodexAccountClient } from '../auth.js'
 import { InitializeResponseSchema } from '../protocol.js'
 import { CodexRpcPeer } from '../rpc.js'
 
@@ -21,7 +25,62 @@ const ThreadStartResponseSchema = z
   .passthrough()
 
 describe('[COMP:providers/codex-native-tool-boundary] pinned runtime tool surface', () => {
-  it('exposes only Brian dynamic tools after every configurable native feature is disabled', async () => {
+  it('preserves the existing Brian-owned login across both runtime pins', async () => {
+    const codexHome = await mkdtemp(join(tmpdir(), 'use-brian-codex-shared-login-'))
+    const claims = { exp: Math.floor(Date.now() / 1000) + 86_400, email: 'fixture@example.com',
+      'https://api.openai.com/auth': { chatgpt_plan_type: 'pro', chatgpt_account_id: 'fixture-account' } }
+    const token = `fixture.${Buffer.from(JSON.stringify(claims)).toString('base64url')}.fixture`
+    const auth = JSON.stringify({ auth_mode: 'chatgpt', tokens: { id_token: token, access_token: token,
+      refresh_token: 'local-fixture-only', account_id: 'fixture-account' }, last_refresh: new Date().toISOString() })
+    await writeFile(join(codexHome, 'auth.json'), auth)
+    const server = createServer((_request, response) => {
+      response.writeHead(200, { 'content-type': 'application/json' })
+      response.end(JSON.stringify({ accounts: [{ id: 'fixture-account', account_id: 'fixture-account',
+        name: 'Fixture', email: 'fixture@example.com', plan_type: 'pro',
+        workspace_backend_origin: 'https://chatgpt.com', account_routing_override: 'NO_CONSTRAINT' }],
+        account_ordering: ['fixture-account'], default_account_id: 'fixture-account' }))
+    })
+    server.listen(0, '127.0.0.1')
+    await once(server, 'listening')
+    const address = server.address()
+    if (!address || typeof address === 'string') throw new Error('account fixture has no port')
+    try {
+      for (const surface of ['account', 'inference'] as const) {
+        const command = await resolvePinnedCodexCommand(surface)
+        const process = await startCodexAppServer({ codexHome, surface, command: {
+          ...command, argsPrefix: [...(command.argsPrefix ?? []), '-c', `chatgpt_base_url="http://127.0.0.1:${address.port}"`],
+        } })
+        const account = new CodexAccountClient(process.rpc)
+        try {
+          await expect(account.readAccount()).resolves.toMatchObject({ connected: true, authType: 'chatgpt', planType: 'pro' })
+          expect(await readFile(join(codexHome, 'auth.json'), 'utf8')).toBe(auth)
+        } finally { account.close(); await process.close() }
+      }
+    } finally {
+      server.closeAllConnections()
+      server.close()
+      await rm(codexHome, { recursive: true, force: true })
+    }
+  })
+
+  it('discovers the current public model slate through a real account-only runtime', async () => {
+    const codexHome = await mkdtemp(join(tmpdir(), 'use-brian-codex-catalog-home-'))
+    const client = await startCodexAppServer({ codexHome, surface: 'account' })
+    try {
+      const catalog = await new CodexCatalogClient(client.rpc).listModels()
+      expect(catalog.models.map(model => model.model)).toEqual(expect.arrayContaining([
+        'gpt-6-luna', 'gpt-6-sol', 'gpt-6.1-sol', 'gpt-6-astra',
+      ]))
+      for (const method of ['thread/start', 'turn/start']) {
+        await expect(client.rpc.request(method, {}, z.unknown())).rejects.toThrow(`RPC method is not enabled: ${method}`)
+      }
+    } finally {
+      await client.close()
+      await rm(codexHome, { recursive: true, force: true })
+    }
+  })
+
+  it.each(providerModelIds('openai-codex'))('exposes only Brian dynamic tools for %s', async (model) => {
     const codexHome = await mkdtemp(join(tmpdir(), 'use-brian-codex-boundary-home-'))
     const cwd = await mkdtemp(join(tmpdir(), 'use-brian-codex-boundary-cwd-'))
     const bodies: unknown[] = []
@@ -102,7 +161,7 @@ describe('[COMP:providers/codex-native-tool-boundary] pinned runtime tool surfac
       const started = await rpc.request(
         'thread/start',
         {
-          model: 'gpt-5.6-sol',
+          model,
           modelProvider: 'brian_mock',
           cwd,
           ephemeral: true,
@@ -150,6 +209,7 @@ describe('[COMP:providers/codex-native-tool-boundary] pinned runtime tool surfac
 
       const request = z
         .object({
+          model: z.string(),
           input: z.array(z.unknown()),
           tools: z
             .array(
@@ -164,6 +224,7 @@ describe('[COMP:providers/codex-native-tool-boundary] pinned runtime tool surfac
         })
         .passthrough()
         .parse(bodies[0])
+      expect(request.model).toBe(model)
       const additionalTools = request.input
         .map((item) =>
           z
@@ -182,21 +243,21 @@ describe('[COMP:providers/codex-native-tool-boundary] pinned runtime tool surfac
             .safeParse(item),
         )
         .find((result) => result.success)
-      expect(additionalTools?.success).toBe(true)
-      if (!additionalTools?.success) throw new Error('missing additional_tools request item')
+      if (!additionalTools?.success) {
+        expect(request.tools.map((tool) => tool.name)).toEqual(['brian_echo'])
+        expect(request.tools.map((tool) => tool.type)).toEqual(['function'])
+        return
+      }
 
       const directNames = request.tools.map((tool) => tool.name ?? tool.type ?? 'unknown')
-      const envelopeNames = additionalTools.data.tools.map((tool) => tool.name)
-      const execDescription =
-        additionalTools.data.tools.find((tool) => tool.name === 'exec')?.description ?? ''
-      const nestedNames = Array.from(
-        execDescription.matchAll(/^### `([^`]+)`$/gm),
-        (match) => match[1],
-      )
-
       expect(directNames).toEqual([])
-      expect(envelopeNames).toEqual(['exec', 'wait'])
-      expect(nestedNames).toEqual(['brian_echo'])
+      const names = additionalTools.data.tools.map((tool) => tool.name)
+      const tools = names[0] === 'functions'
+        ? z.object({ tools: z.array(z.object({ name: z.string(), description: z.string().optional() }).passthrough()) }).parse(additionalTools.data.tools[0]).tools
+        : additionalTools.data.tools
+      expect(tools.map((tool) => tool.name)).toEqual(['exec', 'wait'])
+      const description = tools.find((tool) => tool.name === 'exec')?.description ?? ''
+      expect(Array.from(description.matchAll(/^### `([^`]+)`$/gm), (match) => match[1])).toEqual(['brian_echo'])
     } catch (error) {
       throw new Error(
         `Codex native-tool boundary probe failed (stderr=${JSON.stringify(stderr)}): ${

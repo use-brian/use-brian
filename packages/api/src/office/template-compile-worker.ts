@@ -120,6 +120,7 @@ export function createOfficeTemplateCompileWorker(deps: OfficeTemplateCompileWor
           }))
           throw new Error(imported.diagnostics.map((item) => `${item.path}: ${item.message}`).join('; ') || 'template_upload_import_failed')
         }
+        await deps.appendEvent({ userId, jobId: job.id, workspaceId: job.workspaceId, code: 'office.job.template_parsed', values: { family: template.family }, actorType: 'system', safeNarration: 'Template file read' })
         const currentSource = await deps.readSource({ userId, workspaceId: job.workspaceId, assistantId: job.assistantId, fileId: brief.source.fileId })
         const currentTemplate = await deps.getTemplate(userId, brief.templateId)
         const currentArtifact = await deps.getArtifact(userId, job.artifactId)

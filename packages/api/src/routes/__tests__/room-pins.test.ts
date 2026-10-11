@@ -2,9 +2,10 @@
  * [COMP:api/room-pins] — pinned room context (multiplayer chat P1b).
  *
  * Two halves:
- *   - The CRUD routes (T14): pinning is post-gated (`gateSessionRead`, shared
- *     chat sessions only) and attributed (`added_by_user_id`); changes emit
- *     `pins_changed` on the per-session bus.
+ *   - The CRUD routes (T14): pinning is gated by `sessionPolicy(kind).pins`
+ *     (every Chat conversation: a room, or a personal chat, which is a room
+ *     with one human, chat-parity D1) plus `gateSessionRead`, and attributed
+ *     (`added_by_user_id`); changes emit `pins_changed` on the per-session bus.
  *   - Assembly resolution (T15): the pin block is an INDEX — a pinned task
  *     renders as a compact current-state card, a pinned page as title +
  *     id ONLY (never its body), a pin above the session's clearance renders
@@ -135,7 +136,7 @@ beforeEach(() => {
   mockRemovePin.mockClear()
 })
 
-describe('[COMP:api/room-pins] pin CRUD is post-gated and attributed (T14)', () => {
+describe('[COMP:api/room-pins] pin CRUD is pins-gated and attributed (T14, chat-parity D7)', () => {
   it('refuses pinning when the member can no longer access the room assistant', async () => {
     mockFindSession.mockResolvedValue(roomSession())
     vi.mocked(getUserAssistant).mockResolvedValueOnce(null)
@@ -164,8 +165,39 @@ describe('[COMP:api/room-pins] pin CRUD is post-gated and attributed (T14)', () 
     ])
   })
 
-  it('refuses pinning on a personal session', async () => {
-    mockFindSession.mockResolvedValue(roomSession({ visibility: 'owner', effectiveClearance: null }))
+  it('a personal chat pins too (chat-parity D1/D7): pinning writes a session_pins row', async () => {
+    const published: SessionEvent[] = []
+    mockFindSession.mockResolvedValue(roomSession({
+      id: 's-1', visibility: 'personal', effectiveClearance: null, userId: 'u-2',
+    }))
+    const res = await request(makeApp(published))
+      .post('/api/sessions/s-1/pins')
+      .send({ kind: 'url', url: 'https://example.com/spec' })
+    expect(res.status).toBe(201)
+    expect(mockAddPin).toHaveBeenCalledTimes(1)
+    expect(mockAddPin.mock.calls[0][0]).toMatchObject({
+      sessionId: 's-1', kind: 'url', url: 'https://example.com/spec', addedByUserId: 'u-2',
+    })
+    expect(published).toEqual([
+      { kind: 'pins_changed', sessionId: 's-1', payload: { byUserId: 'u-2' } },
+    ])
+  })
+
+  it("another person's personal chat stays its owner's: no pin is written", async () => {
+    mockFindSession.mockResolvedValue(roomSession({
+      id: 's-1', visibility: 'personal', effectiveClearance: null, userId: 'u-owner',
+    }))
+    const res = await request(makeApp())
+      .post('/api/sessions/s-1/pins')
+      .send({ kind: 'instruction', text: 'x' })
+    expect(res.status).not.toBe(201)
+    expect(mockAddPin).not.toHaveBeenCalled()
+  })
+
+  it('refuses pinning outside a Chat conversation (the doc dock thread)', async () => {
+    mockFindSession.mockResolvedValue(roomSession({
+      id: 's-1', visibility: 'personal', effectiveClearance: null, userId: 'u-2', appOrigin: 'doc',
+    }))
     const res = await request(makeApp())
       .post('/api/sessions/s-1/pins')
       .send({ kind: 'instruction', text: 'x' })

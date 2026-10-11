@@ -96,7 +96,7 @@ function catalogModel(model: string, overrides: Record<string, unknown> = {}) {
 describe('[COMP:api/codex-provider] OSS Codex provider manager', () => {
   it('uses a dedicated image process for cheap discovery and invalidates its estimate on logout', async () => {
     const chat = processHarness(); const image = processHarness()
-    const startProcess = vi.fn().mockResolvedValueOnce(chat.process).mockResolvedValueOnce(image.process)
+    const startProcess = vi.fn().mockResolvedValueOnce(chat.process).mockResolvedValueOnce(chat.process).mockResolvedValueOnce(image.process)
     const starting = startCodexProviderManager({ availability: new MutableProviderAvailability(), startProcess })
     respond(chat, await waitForMethod(chat, 'account/read'), { account: null, requiresOpenaiAuth: true })
     const manager = await starting
@@ -106,21 +106,22 @@ describe('[COMP:api/codex-provider] OSS Codex provider manager', () => {
     respond(image, await waitForMethod(image, 'model/list'), { data: [catalogModel('gpt-5.6-sol')], nextCursor: null })
     const snapshot = await inspecting
     expect(snapshot).toMatchObject({ model: 'gpt-image-2', orchestratorModel: 'gpt-5.6-sol' })
-    expect(startProcess.mock.calls.map(call => call[0].surface)).toEqual(['inference', 'image'])
+    expect(startProcess.mock.calls.map(call => call[0].surface)).toEqual(['inference', 'account', 'image'])
     expect(image.close).toHaveBeenCalledOnce()
     expect(image.outbound.some(frame => frame.method === 'turn/start')).toBe(false)
     const logout = manager.logout(); respond(chat, await waitForMethod(chat, 'account/logout'), {}); await logout
     await expect(manager.images.generate({ snapshot, prompt: 'A diagram', signal: new AbortController().signal })).rejects.toThrow('generation_configuration_changed')
-    expect(startProcess).toHaveBeenCalledTimes(2)
+    expect(startProcess).toHaveBeenCalledTimes(3)
     await manager.close()
   })
 
   it('publishes only the reviewed intersection of registry and live account catalog', async () => {
     const harness = processHarness()
+    const inference = processHarness()
     const availability = new MutableProviderAvailability()
     const starting = startCodexProviderManager({
       availability,
-      startProcess: vi.fn(async () => harness.process),
+      startProcess: vi.fn(async options => options?.surface === 'account' ? harness.process : inference.process),
     })
 
     const accountRead = await waitForMethod(harness, 'account/read')
@@ -133,6 +134,11 @@ describe('[COMP:api/codex-provider] OSS Codex provider manager', () => {
       data: [
         catalogModel('gpt-5.6-sol'),
         catalogModel('gpt-5.6-terra'),
+        catalogModel('gpt-6-luna'),
+        catalogModel('gpt-6-sol'),
+        catalogModel('gpt-6.1-sol'),
+        catalogModel('gpt-6-astra'),
+        { ...catalogModel('gpt-5.5'), hidden: true },
         catalogModel('future-unreviewed-model'),
       ],
       nextCursor: null,
@@ -143,6 +149,11 @@ describe('[COMP:api/codex-provider] OSS Codex provider manager', () => {
     expect(availability.isModelAvailable('openai-codex', 'gpt-5.6-sol')).toBe(true)
     expect(availability.isModelAvailable('openai-codex', 'future-unreviewed-model')).toBe(false)
     expect(manager.provider.models).toContain('gpt-5.6-sol')
+    expect(inference.outbound).toEqual([])
+    for (const model of ['gpt-6-luna', 'gpt-6-sol', 'gpt-6.1-sol', 'gpt-6-astra']) {
+      expect(availability.isModelAvailable('openai-codex', model)).toBe(true)
+    }
+    expect(availability.isModelAvailable('openai-codex', 'gpt-5.5')).toBe(false)
 
     const statusPromise = manager.status()
     const statusAccount = await waitForMethod(harness, 'account/read', 1)
@@ -161,6 +172,7 @@ describe('[COMP:api/codex-provider] OSS Codex provider manager', () => {
       models: [{ model: 'gpt-5.6-terra' }],
     })
     expect(availability.isModelAvailable('openai-codex', 'gpt-5.6-sol')).toBe(false)
+    expect(availability.isModelAvailable('openai-codex', 'gpt-6.1-sol')).toBe(false)
 
     const revokedStatus = manager.status()
     const revokedAccount = await waitForMethod(harness, 'account/read', 2)
@@ -172,6 +184,8 @@ describe('[COMP:api/codex-provider] OSS Codex provider manager', () => {
     })
     expect(availability.has('openai-codex')).toBe(false)
     await manager.close()
+    expect(inference.close).toHaveBeenCalledOnce()
+    expect(harness.close).toHaveBeenCalledOnce()
   })
 
   it('keeps the runtime available for login while the account is disconnected', async () => {
@@ -201,13 +215,17 @@ describe('[COMP:api/codex-provider] OSS Codex provider manager', () => {
     await manager.close()
   })
 
-  it('clears entitlement and restarts the process once after an unexpected close', async () => {
+  it.each(['account', 'inference'] as const)('clears entitlement and restarts both processes after %s closes', async (surface) => {
     const first = processHarness()
     const second = processHarness()
+    const firstInference = processHarness()
+    const secondInference = processHarness()
     const availability = new MutableProviderAvailability()
     const startProcess = vi
       .fn()
+      .mockResolvedValueOnce(firstInference.process)
       .mockResolvedValueOnce(first.process)
+      .mockResolvedValueOnce(secondInference.process)
       .mockResolvedValueOnce(second.process)
     const starting = startCodexProviderManager({
       availability,
@@ -218,11 +236,43 @@ describe('[COMP:api/codex-provider] OSS Codex provider manager', () => {
     respond(first, firstAccount, { account: null, requiresOpenaiAuth: true })
     const manager = await starting
 
-    first.peer.close(new CodexRpcClosedError('crash'))
+    ;(surface === 'account' ? first : firstInference).peer.close(new CodexRpcClosedError('crash'))
     const secondAccount = await waitForMethod(second, 'account/read')
     respond(second, secondAccount, { account: null, requiresOpenaiAuth: true })
-    await vi.waitFor(() => expect(startProcess).toHaveBeenCalledTimes(2))
+    await vi.waitFor(() => expect(startProcess).toHaveBeenCalledTimes(4))
+    expect(first.close).toHaveBeenCalledOnce()
+    expect(firstInference.close).toHaveBeenCalledOnce()
     expect(availability.has('openai-codex')).toBe(false)
+    await manager.close()
+  })
+
+  it('recycles cached inference credentials after successful login completion', async () => {
+    const inference = processHarness(); const account = processHarness()
+    const nextInference = processHarness(); const nextAccount = processHarness()
+    const availability = new MutableProviderAvailability()
+    const startProcess = vi.fn().mockResolvedValueOnce(inference.process).mockResolvedValueOnce(account.process)
+      .mockResolvedValueOnce(nextInference.process).mockResolvedValueOnce(nextAccount.process)
+    const starting = startCodexProviderManager({ availability, startProcess, restartBackoffMs: 1 })
+    respond(account, await waitForMethod(account, 'account/read'), { account: null, requiresOpenaiAuth: true })
+    const manager = await starting
+    account.inbound.write(`${JSON.stringify({ method: 'account/login/completed', params: { loginId: 'fixture-login', success: true, error: null } })}\n`)
+    respond(nextAccount, await waitForMethod(nextAccount, 'account/read'), {
+      account: { type: 'chatgpt', email: 'next-fixture@example.com', planType: 'plus' }, requiresOpenaiAuth: true,
+    })
+    respond(nextAccount, await waitForMethod(nextAccount, 'model/list'), { data: [catalogModel('gpt-6.1-sol')], nextCursor: null })
+    await vi.waitFor(() => expect(availability.isModelAvailable('openai-codex', 'gpt-6.1-sol')).toBe(true))
+    expect(inference.close).toHaveBeenCalledOnce()
+    expect(account.close).toHaveBeenCalledOnce()
+    expect(startProcess.mock.calls.map(call => call[0].surface)).toEqual(['inference', 'account', 'inference', 'account'])
+    await manager.close()
+  })
+
+  it('closes inference when the account process cannot start', async () => {
+    const inference = processHarness()
+    const startProcess = vi.fn().mockResolvedValueOnce(inference.process).mockRejectedValueOnce(new Error('catalog binary unavailable'))
+    const manager = await startCodexProviderManager({ availability: new MutableProviderAvailability(), startProcess })
+    expect(startProcess.mock.calls.map(call => call[0].surface)).toEqual(['inference', 'account'])
+    expect(inference.close).toHaveBeenCalledOnce()
     await manager.close()
   })
 

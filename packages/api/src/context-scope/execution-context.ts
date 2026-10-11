@@ -40,6 +40,14 @@ export type ResolveExecutionContextInput = ResolveTurnScopeInput & {
   /** Live counterpart to maximumAccess; revocation must stop tool execution. */
   maximumAccessCurrent?: () => Promise<AccessCeiling | null>
   /**
+   * Labels everything this execution persists, replacing the session-derived
+   * write defaults. An Office file chat pins the file's labels so nothing it
+   * writes is readable outside the file's audience (office.md "Brian
+   * conversation in the file"). Pair it with a `maximumAccess` that admits
+   * those labels; the write gate still refuses a label the sender cannot write.
+   */
+  pinnedWriteDefaults?: { compartments: string[]; projectIds: string[] }
+  /**
    * The turn's audience is shared (decision D4): every read in it - automatic
    * context and tools alike - sees only rows with no user owner.
    */
@@ -182,10 +190,9 @@ export async function resolveExecutionContextSystem(
       identity: input.identity,
       ownership: input.ownership,
       access,
-      writeDefaults: {
-        compartments: turnScope.writeCompartments,
-        projectIds: turnScope.writeProjectIds,
-      },
+      writeDefaults: input.pinnedWriteDefaults
+        ? { compartments: [...input.pinnedWriteDefaults.compartments], projectIds: [...input.pinnedWriteDefaults.projectIds] }
+        : { compartments: turnScope.writeCompartments, projectIds: turnScope.writeProjectIds },
       provenance: input.provenance,
       authority,
       lifecycle: input.lifecycle,

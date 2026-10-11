@@ -13,7 +13,7 @@ function context(): ToolContext {
     assistantId: 'asst-1',
     sessionId: 'sess-1',
     appId: 'app-1',
-    channelType: 'web',
+    channelType: 'web', attended: true,
     channelId: 'chan-1',
     workspaceId: 'ws-1',
     abortSignal: new AbortController().signal,

@@ -2,7 +2,7 @@
 
 /**
  * Home Dock — the single "Suggested for you" entry in the sidebar, rendered
- * above Projects / Organization across workspace surfaces. Deliberately quiet: one row, a sparkle, and a "needs you"
+ * above Organization / Projects across workspace surfaces. Deliberately quiet: one row, a sparkle, and a "needs you"
  * count. The actual suggestions live at the explicit `/p?suggested=1` Page
  * content-pane route (`SuggestedView`), not here - the sidebar stays
  * Notion-calm.

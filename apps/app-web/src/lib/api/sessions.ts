@@ -35,6 +35,12 @@ import { publicRuntimeConfig } from "@/lib/runtime-public-config";
 
 import { authFetch } from "@/lib/auth-fetch";
 import type { DocumentAttachment } from "@use-brian/chat-ui";
+import {
+  legacyRoomPolicy,
+  parseChatSessionPolicy,
+  PERSONAL_CHAT_POLICY,
+  type ChatSessionPolicy,
+} from "@/lib/chat-session-policy";
 
 const API_URL = publicRuntimeConfig().apiUrl ?? "http://localhost:4000";
 
@@ -66,6 +72,14 @@ export type DocSession = {
   /** Immutable Team/Project binding for this conversation. */
   contextGroupId?: string | null;
   contextProjectId?: string | null;
+  /** The turn slot (`running` while a turn is live), for the rail's working
+   *  pulse on every row (chat-parity T4). */
+  status?: string;
+  /** How this conversation behaves (chat-parity T1): the Chat app reads these
+   *  flags, never which list the row came from. */
+  policy?: ChatSessionPolicy;
+  /** Humans taking part, the viewer counted; `null` when unknown (D2). */
+  humanCount?: number | null;
 };
 
 /**
@@ -137,6 +151,9 @@ type RawListRow = {
   channelType?: string;
   contextGroupId?: string | null;
   contextProjectId?: string | null;
+  status?: string;
+  policy?: unknown;
+  humanCount?: number | null;
 };
 
 type RawMessageRow = {
@@ -258,6 +275,11 @@ async function listSessions(opts: {
       assistantId: opts.assistantId,
       contextGroupId: r.contextGroupId ?? null,
       contextProjectId: r.contextProjectId ?? null,
+      ...(r.status ? { status: r.status } : {}),
+      // An older server sends no policy: every row on this list is a
+      // personal chat, a room with one human (chat-parity D1).
+      policy: parseChatSessionPolicy(r.policy) ?? PERSONAL_CHAT_POLICY,
+      humanCount: typeof r.humanCount === "number" ? r.humanCount : 1,
     }));
   } catch {
     return [];
@@ -302,6 +324,14 @@ export type WorkspaceSession = DocSession & {
   startedByUserId: string;
   startedByName: string | null;
   startedByAvatarUrl: string | null;
+  /**
+   * The wire the room lives on: `web` for a Chat app room, or the provider of
+   * a converged group (`telegram`, `slack`, ...) that the rail badges.
+   * Absent means web.
+   */
+  transport?: string;
+  /** A converged group's brain capture (D4); absent on web rooms. */
+  roomCapture?: boolean;
 };
 
 type RawWorkspaceRow = RawListRow & {
@@ -311,6 +341,8 @@ type RawWorkspaceRow = RawListRow & {
   startedByAvatarUrl?: string | null;
   /** The room's bound assistant (rooms may bind any workspace assistant). */
   assistantId?: string;
+  transport?: string;
+  roomCapture?: boolean;
 };
 
 function toWorkspaceSession(r: RawWorkspaceRow): WorkspaceSession {
@@ -329,7 +361,83 @@ function toWorkspaceSession(r: RawWorkspaceRow): WorkspaceSession {
     ...(r.assistantId ? { assistantId: r.assistantId } : {}),
     contextGroupId: r.contextGroupId ?? null,
     contextProjectId: r.contextProjectId ?? null,
+    transport: r.transport ?? "web",
+    ...(r.roomCapture !== undefined ? { roomCapture: r.roomCapture } : {}),
+    policy: parseChatSessionPolicy(r.policy) ?? legacyRoomPolicy(r.transport),
+    humanCount: typeof r.humanCount === "number" ? r.humanCount : null,
   };
+}
+
+/**
+ * One conversation as `GET /api/sessions/:id` reads it (chat-parity T1): the
+ * row fields plus the policy and human count, for a thread not (yet) in a
+ * list this client holds. Rooms carry the starter identity.
+ */
+export type ChatSessionSummary = DocSession & {
+  audience: "personal" | "workspace";
+  transport: string;
+  startedByUserId?: string;
+  startedByName?: string | null;
+  startedByAvatarUrl?: string | null;
+  policy: ChatSessionPolicy;
+};
+
+/** Read one conversation's summary; `null` when absent, unreadable or on failure. */
+export async function getChatSessionSummary(
+  sessionId: string,
+  signal?: AbortSignal,
+): Promise<ChatSessionSummary | null> {
+  try {
+    const res = await authFetch(
+      `${API_URL}/api/sessions/${encodeURIComponent(sessionId)}`,
+      signal ? { signal } : {},
+    );
+    if (!res.ok) return null;
+    const r = (await res.json()) as RawWorkspaceRow & {
+      audience?: string;
+      transport?: string;
+    };
+    const policy = parseChatSessionPolicy(r.policy);
+    if (!r?.id || !policy) return null;
+    return {
+      id: r.id,
+      title: r.title,
+      channelId: r.channelId,
+      lastActive: toIso(r.lastActive),
+      appOrigin: r.appOrigin ?? null,
+      ...(r.assistantId ? { assistantId: r.assistantId } : {}),
+      contextGroupId: r.contextGroupId ?? null,
+      contextProjectId: r.contextProjectId ?? null,
+      ...(r.status ? { status: r.status } : {}),
+      audience: r.audience === "workspace" ? "workspace" : "personal",
+      transport: r.transport ?? "web",
+      ...(r.startedByUserId ? { startedByUserId: r.startedByUserId } : {}),
+      ...(r.startedByName !== undefined ? { startedByName: r.startedByName } : {}),
+      ...(r.startedByAvatarUrl !== undefined ? { startedByAvatarUrl: r.startedByAvatarUrl } : {}),
+      policy,
+      humanCount: typeof r.humanCount === "number" ? r.humanCount : null,
+    };
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * Switch a converged group's brain capture (`PATCH
+ * /api/sessions/:id/room-capture`, unified-sessions D4). Workspace admins
+ * only; returns false when the server refused.
+ */
+export async function setRoomCapture(sessionId: string, enabled: boolean): Promise<boolean> {
+  try {
+    const res = await authFetch(`${API_URL}/api/sessions/${encodeURIComponent(sessionId)}/room-capture`, {
+      method: "PATCH",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ enabled }),
+    });
+    return res.ok;
+  } catch {
+    return false;
+  }
 }
 
 /**

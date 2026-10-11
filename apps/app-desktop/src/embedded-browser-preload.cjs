@@ -84,6 +84,10 @@ window.addEventListener("DOMContentLoaded", () => {
     const tab = state.tabs.find(tab => tab.id === state.selected);
     if (selected !== state.selected || document.activeElement !== address) address.value = tab?.url || "";
     selected = state.selected;
+    // Which Use Brian browser profile this pane's cookies (and any sign-in) belong to.
+    element("profile").hidden = !state.profile;
+    element("profile").textContent = state.profile ? `Profile: ${state.profile}` : "";
+    element("profile").title = state.profile ? `Signed-in sites are saved to the browser profile "${state.profile}"` : "";
     element("status").textContent = state.status || "Browser";
     element("status").title = state.status || "Browser";
     element("back").disabled = !tab?.back;

@@ -116,7 +116,8 @@ type WorkspacePrimitive =
   | "workspace_config"
   | "inbox"
   | "session"
-  | "goal";
+  | "goal"
+  | "office";
 
 export type WorkspaceChangePayload = {
   workspaceId: string;
@@ -134,6 +135,12 @@ export const SCHEDULED_JOB_REFRESH_EVENT = "sidan:scheduled-job-refresh";
  * else, so it can never leak content past a tier.
  */
 export const LIVE_REFRESH_EVENT = "sidan:live-refresh";
+/**
+ * The `office` primitive's domain event: an Office job changed status or
+ * recorded progress. No listener of its own; the surface-cache map marks the
+ * Office list and template library stale (office.md "Live job progress").
+ */
+export const OFFICE_REFRESH_EVENT = "sidan:office-refresh";
 
 type SkillRefreshDetail = {
   workspaceId: string | null;
@@ -271,6 +278,13 @@ export function routeWorkspaceChange(
           } satisfies GoalRefreshDetail,
         },
       ];
+    case "office":
+      return [
+        {
+          event: OFFICE_REFRESH_EVENT,
+          detail: { workspaceId: payload.workspaceId, rowId: payload.rowId },
+        },
+      ];
     default:
       return [];
   }
@@ -296,6 +310,7 @@ export function allDomainDispatches(workspaceId: string): DomainDispatch[] {
     { event: INBOX_REFRESH_EVENT, detail: { workspaceId, catchUp } },
     { event: LIVE_REFRESH_EVENT, detail: { workspaceId, catchUp } },
     { event: GOAL_REFRESH_EVENT, detail: { workspaceId, catchUp } },
+    { event: OFFICE_REFRESH_EVENT, detail: { workspaceId, catchUp } },
   ];
 }
 

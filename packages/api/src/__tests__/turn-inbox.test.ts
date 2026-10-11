@@ -14,8 +14,13 @@ import {
   registerTurnInbox,
   deliverTurnInput,
   hasTurnInbox,
+  localTurnInboxAssistant,
+  acknowledgeTurnInputs,
+  awaitTurnInputOutcome,
+  roomInputAdmission,
   _resetTurnInboxes,
 } from '../turn-inbox.js'
+import { registerNotifyChannel } from '../db/notify-listener.js'
 import type { PendingTurnInput } from '@use-brian/core'
 
 const input = (over: Partial<PendingTurnInput> & { text: string }): PendingTurnInput => ({
@@ -103,5 +108,95 @@ describe('[COMP:api/turn-inbox] Mid-turn input registry', () => {
     deliverTurnInput({ sessionId: 's1', input: input({ text: 'mine' }) })
     expect(b.port.peek().pending).toBe(false)
     expect(a.port.drain()).toHaveLength(1)
+  })
+})
+
+describe('[COMP:api/turn-inbox] Room steer (chat-parity D3, section 6)', () => {
+  beforeEach(() => {
+    _resetTurnInboxes()
+  })
+
+  const running = {
+    status: 'running',
+    waiterArmed: false,
+    clientMidTurn: true,
+    queue: true,
+    runningAssistantId: 'a1' as string | null | undefined,
+    addressedAssistantId: 'a1',
+  }
+  const roomInput = (over: Partial<PendingTurnInput> = {}): PendingTurnInput => ({
+    id: 'r1', text: 'use last Friday', mode: 'steer', receivedAt: 1,
+    persistedMessageId: 'm1', assistantId: 'a1', ...over,
+  })
+
+  it('a room steer for the running assistant goes into the inbox and never arms a follow-up', () => {
+    expect(roomInputAdmission(running)).toBe('inbox')
+    // Even with a follow-up already armed, it is the running turn's to take.
+    expect(roomInputAdmission({ ...running, waiterArmed: true })).toBe('inbox')
+    // A turn running on another instance: the inbox there decides.
+    expect(roomInputAdmission({ ...running, runningAssistantId: undefined })).toBe('inbox')
+  })
+
+  it('a message for a different assistant arms or folds, the T5 path unchanged', () => {
+    expect(roomInputAdmission({ ...running, addressedAssistantId: 'a2' })).toBe('wait')
+    expect(roomInputAdmission({ ...running, addressedAssistantId: 'a2', waiterArmed: true })).toBe('fold')
+  })
+
+  it('without a mid-turn send, or where the composer may not queue, it is T5; an idle room runs', () => {
+    expect(roomInputAdmission({ ...running, clientMidTurn: false })).toBe('wait')
+    expect(roomInputAdmission({ ...running, queue: false, waiterArmed: true })).toBe('fold')
+    expect(roomInputAdmission({ ...running, status: 'idle' })).toBe('run')
+  })
+
+  it("another assistant's turn refuses a room input; the running assistant's turn takes it with its saved row", () => {
+    const handle = registerTurnInbox('s1', { assistantId: 'a1' })
+    expect(localTurnInboxAssistant('s1')).toBe('a1')
+    expect(localTurnInboxAssistant('elsewhere')).toBeUndefined()
+    expect(deliverTurnInput({ sessionId: 's1', input: roomInput({ id: 'x', assistantId: 'a2' }) })).toBe(false)
+    expect(handle.port.peek().pending).toBe(false)
+    expect(deliverTurnInput({ sessionId: 's1', input: roomInput() })).toBe(true)
+    expect(handle.port.peek()).toEqual({ pending: true, steer: true })
+    expect(handle.port.drain()).toEqual([expect.objectContaining({ id: 'r1', persistedMessageId: 'm1', assistantId: 'a1' })])
+    // A personal mid-turn message names no assistant and is still taken.
+    expect(deliverTurnInput({ sessionId: 's1', input: { id: 'p', text: 'and Jack?', mode: 'queued', receivedAt: 2 } })).toBe(true)
+  })
+
+  it('the waiter learns the turn took it: applied, so it arms nothing', async () => {
+    const outcome = awaitTurnInputOutcome({
+      sessionId: 's1', inputId: 'r1', isRunning: async () => true, timeoutMs: 5_000, pollMs: 5, graceMs: 5,
+    })
+    acknowledgeTurnInputs('s1', ['r1'])
+    await expect(outcome).resolves.toBe('applied')
+  })
+
+  it('an acknowledgement that lands before its waiter still counts', async () => {
+    acknowledgeTurnInputs('s1', ['early'])
+    await expect(awaitTurnInputOutcome({
+      sessionId: 's1', inputId: 'early', isRunning: async () => false, timeoutMs: 1_000,
+    })).resolves.toBe('applied')
+  })
+
+  it('the turn ending first hands it back to the follow-up path', async () => {
+    let calls = 0
+    await expect(awaitTurnInputOutcome({
+      sessionId: 's1', inputId: 'late', isRunning: async () => (++calls) < 3, timeoutMs: 5_000, pollMs: 2, graceMs: 2,
+    })).resolves.toBe('turn_ended')
+  })
+
+  it('a cross-instance acknowledgement wakes the waiter through the NOTIFY channel', async () => {
+    registerTurnInbox('s2', { assistantId: 'a1' })
+    const handler = vi.mocked(registerNotifyChannel).mock.calls[0]?.[1] as (payload: string) => void
+    expect(handler).toBeTypeOf('function')
+    const outcome = awaitTurnInputOutcome({
+      sessionId: 's2', inputId: 'remote', isRunning: async () => true, timeoutMs: 5_000, pollMs: 5,
+    })
+    handler(JSON.stringify({ sessionId: 's2', applied: ['remote'] }))
+    await expect(outcome).resolves.toBe('applied')
+  })
+
+  it('gives up past the queue budget while the turn still runs', async () => {
+    await expect(awaitTurnInputOutcome({
+      sessionId: 's1', inputId: 'slow', isRunning: async () => true, timeoutMs: 10, pollMs: 2,
+    })).resolves.toBe('timeout')
   })
 })

@@ -18,6 +18,7 @@ export function ContextScopePicker({
   teamDisabled,
   hideTeam=false,
   projectDisabled,
+  showProjectHint=true,
 }: {
   teams: ContextTeam[];
   projects: ContextProject[];
@@ -29,6 +30,7 @@ export function ContextScopePicker({
   teamDisabled?: boolean;
   hideTeam?: boolean;
   projectDisabled?: boolean;
+  showProjectHint?: boolean;
 }) {
   const t = useT().contextScope;
   return (
@@ -64,7 +66,7 @@ export function ContextScopePicker({
           aria-label={t.project}
           disabled={disabled || projectDisabled}
         />
-        <span className="text-xs font-normal">{t.projectAccessHint}</span>
+        {showProjectHint?<span className="text-xs font-normal">{t.projectAccessHint}</span>:null}
       </label>
     </div>
   );

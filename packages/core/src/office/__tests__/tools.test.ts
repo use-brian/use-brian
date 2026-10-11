@@ -21,6 +21,17 @@ vi.mock('../templates/compiler.js', async (importOriginal) => {
 const context = { userId: id(80), assistantId: id(81), workspaceId: id(2), sessionId: id(82), appId: 'chat', channelType: 'web', channelId: 'web', abortSignal: new AbortController().signal }
 
 describe('[COMP:office/tools] Office tools', () => {
+  it('offers template recovery through the same typed selection and enforces tool policy',async()=>{
+    const resumeGeneration=vi.fn(async()=>({artifactId:id(1),jobId:id(90)}))
+    const port:OfficeToolPort={create:vi.fn(),get:vi.fn(),revise:vi.fn(),resumeGeneration}
+    const input={artifactId:id(1),jobId:id(90),templateVersionId:id(91)}
+    const allowed=createOfficeTools({port}).find(tool=>tool.name==='resumeOfficeGeneration')!
+    expect((await allowed.execute(input,context)).data).toMatchObject({artifactId:id(1),jobId:id(90)})
+    expect(resumeGeneration).toHaveBeenCalledWith(context,input)
+    const blocked=createOfficeTools({port,resolvePolicy:async()=>'block'}).find(tool=>tool.name==='resumeOfficeGeneration')!
+    expect((await blocked.execute(input,context)).isError).toBe(true)
+    expect(resumeGeneration).toHaveBeenCalledTimes(1)
+  })
   it('creates only a durable shell/job and returns its native editor link', async () => {
     const port: OfficeToolPort = {
       create: vi.fn(async () => ({ artifactId: id(1), jobId: id(90) })),

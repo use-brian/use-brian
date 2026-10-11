@@ -1,13 +1,37 @@
 "use client";
 
-import { buttonVariants } from "@/components/ui/button";
+import { Button, buttonVariants } from "@/components/ui/button";
 
 /** Recovery surface for an empty Office shell whose job was never admitted. [COMP:app-web/office-start-recovery] */
 import Link from "next/link";
 import { FileSpreadsheet, FileText, Presentation, TriangleAlert } from "lucide-react";
 import { OperatorTopbar } from "@/components/operator/operator-topbar";
 import { useT } from "@/lib/i18n/client";
-import type { OfficeFamily } from "@/lib/office/api";
+import type { OfficeFamily, OfficeArtifact } from "@/lib/office/api";
+import type { OfficeJobStreamState } from "@/lib/office/job-stream";
+import { officeJobStateLabel } from "@/lib/office/job-labels";
+
+/** The empty canvas reflects its persisted job rather than implying work: the
+ * persisted status plus its latest persisted stage from the job stream. A
+ * snapshot that failed to load is its own error state with Retry.
+ * [COMP:app-web/office-generation-pending] */
+export function OfficeGenerationPending({job,stream,onRetry}:{job:OfficeArtifact["job"];stream?:OfficeJobStreamState;onRetry?:()=>void}) {
+  const t=useT().office;
+  if (onRetry) return <div className="m-auto max-w-md space-y-3 p-6 text-center" role="alert">
+    <p className="text-sm font-medium">{t.snapshotLoadFailed}</p>
+    <Button type="button" variant="outline" size="sm" className="max-sm:min-h-11" onClick={onRetry}>{t.retryLoad}</Button>
+  </div>;
+  const status=stream?.job?.status ?? job?.status;
+  if (!status) return <div className="m-auto max-w-md p-6 text-center" role="status"><p className="text-sm font-medium">{t.editorFailed}</p></div>;
+  const latest=stream?.events.at(-1) ?? stream?.job?.latestEvent ?? job?.latestEvent ?? null;
+  const label=officeJobStateLabel(t,status,latest);
+  const connectionNote=stream?.job && stream.connection!=="live" ? stream.connection==="offline" ? t.jobOffline : t.jobReconnecting : null;
+  return <div className="m-auto max-w-md space-y-2 p-6 text-center" role="status">
+    {label ? <p className="text-sm font-medium">{label}</p> : <div aria-hidden data-office-job-skeleton="true" className="mx-auto h-4 w-32 animate-pulse rounded bg-muted" />}
+    {status==="needs_input" ? <p className="text-sm text-muted-foreground">{t.generationWaitingForInput}</p> : null}
+    {connectionNote ? <p className="text-xs text-muted-foreground">{connectionNote}</p> : null}
+  </div>;
+}
 
 export function OfficeStartRecovery({
   workspaceId,

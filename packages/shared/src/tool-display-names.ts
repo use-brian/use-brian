@@ -199,6 +199,7 @@ export const TOOL_DISPLAY_NAMES: Record<string, string> = {
   getOfficeClassification: 'Read Office protection',
   restrictOfficeClassification: 'Add Office protection',
   retryOfficeTemplateImport: 'Retry a template import',
+  resumeOfficeGeneration: 'Resume an Office draft',
   getOfficeArtifact: 'Read an Office artifact',
   reviseOfficeArtifact: 'Revise an Office artifact',
   openPdfEditingSession: 'Open a PDF editing session',

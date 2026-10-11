@@ -1,6 +1,7 @@
 import { dispatchIncomingMessageEvent } from '../message-events.js'
 import type { ChannelQuestionStore } from '../workflow/channel-questions.js'
-import { channelConfirmations, confirmationMessage, type ChannelInteractionScope } from './channel-interactions.js'
+import { channelConfirmations, confirmationMessage, roomInteractionScope, type ChannelInteractionScope } from './channel-interactions.js'
+import { formatProviderHistory, isWorkspaceAdmin, postPassiveChannelMessage, resolveRoomBinding } from '../channel-room/room.js'
 import { resolveChannelQuestion } from './channel-questions.js'
 // REBRAND-CUTOVER: this file contains sidan.ai runtime values that must flip to usebrian.ai when DNS + Vercel domains + OAuth consoles + webhooks are cut over. Grep REBRAND-CUTOVER.
 /**
@@ -28,7 +29,7 @@ import { resolveChannelQuestion } from './channel-questions.js'
 
 import { timingSafeEqual } from 'node:crypto'
 import { Router } from 'express'
-import { createDiscordAdapter, denormalizeActions, DiscordApiError, respondToInteraction } from '@use-brian/channels'
+import { createDiscordAdapter, createDiscordApi, denormalizeActions, DiscordApiError, respondToInteraction } from '@use-brian/channels'
 import type { IncomingMessage } from '@use-brian/channels'
 import { findAssistantById } from '../db/users.js'
 import { withChatLock } from '../db/chat-lock.js'
@@ -360,9 +361,10 @@ export function discordRoutes(options: DiscordRouteOptions): Router {
       // Event normalization retains standalone @bot messages, but empty chat
       // turns must remain suppressed (native callbacks use a separate lane).
       if (!actionData && !workflowCallback && !incoming.text.trim() && !incoming.files?.length) return
-      // The connector now forwards passive messages for workflows. Retain its
-      // historical mention/reply gate here, before any conversational work.
-      if (!actionData && !workflowCallback && incoming.isGroupChat && !incoming.isMentioned) return
+      // The connector forwards passive messages for workflows. An unbound
+      // group keeps the historical mention/reply gate; a group bound to the
+      // workspace turns them into room posts below (unified-sessions D4).
+      const unaddressed = !actionData && !workflowCallback && incoming.isGroupChat && !incoming.isMentioned
 
       // 3. Resolve the answering assistant (per Discord-channel surface, else default).
       const routing = await resolveRoutingForSurface(channelId, incoming.channelId)
@@ -375,6 +377,10 @@ export function discordRoutes(options: DiscordRouteOptions): Router {
         console.error(`[discord] assistant ${routing.assistantId} not found (orphaned integration?)`)
         return
       }
+      const roomBinding = await resolveRoomBinding({
+        assistant, channelType: 'discord', channelIntegrationId: integration.id, isGroupChat: incoming.isGroupChat,
+      })
+      if (unaddressed && !roomBinding) return
       const ownerId = await billingPartyForAssistant({
         id: assistant.id,
         ownerUserId: assistant.ownerUserId ?? null,
@@ -411,11 +417,36 @@ export function discordRoutes(options: DiscordRouteOptions): Router {
         botUserId: integration.botUserId ?? undefined,
       })
 
-      const scope: ChannelInteractionScope = {
+      if (unaddressed) {
+        const author = (incoming.raw as { author?: { username?: string; global_name?: string | null } })?.author
+        await postPassiveChannelMessage({
+          assistant: { id: assistant.id, name: assistant.name, workspaceId: assistant.workspaceId },
+          channelType: 'discord',
+          channelIntegrationId: integration.id,
+          isGroupChat: true,
+          sessionChannelId: incoming.channelId,
+          senderUserId: channelUserId,
+          senderName: author?.global_name ?? author?.username ?? null,
+          text: incoming.text,
+          channelMessageId: incoming.messageId ?? null,
+          postNotice: async (text) => { await adapter.sendMessage(incoming.channelId, { text }) },
+        })
+        return
+      }
+
+      const senderScope: ChannelInteractionScope = {
         channelType: 'discord', integrationId: channelId,
         conversationId: incoming.channelId, senderId: incoming.userId,
       }
-      if (!actionData && !workflowCallback && channelConfirmations.handle(scope, { kind: 'text', text: incoming.text }).handled) return
+      // A room's turn belongs to the room: any reader stops it, the addresser
+      // or an admin answers its confirmations.
+      const scope = roomBinding ? roomInteractionScope(senderScope) : senderScope
+      if (!actionData && !workflowCallback && (roomBinding
+        ? await channelConfirmations.handleRoom(scope, { kind: 'text', text: incoming.text }, {
+            senderId: incoming.userId,
+            isAdmin: () => isWorkspaceAdmin(channelUserId, roomBinding.workspaceId),
+          })
+        : channelConfirmations.handle(scope, { kind: 'text', text: incoming.text })).handled) return
 
       // 7. Sequentialize per Discord channel.
       await withChatLock(`discord:${incoming.channelId}`, async () => {
@@ -437,6 +468,7 @@ export function discordRoutes(options: DiscordRouteOptions): Router {
           isIdentified,
           routing,
           integrationId: integration.id,
+          botToken: creds.bot_token,
           ingestChannelMediaRef: options.ingestChannelMediaRef,
           archiveConnectorInstanceId: integration.connectorInstanceId,
         })
@@ -520,6 +552,7 @@ export function discordRoutes(options: DiscordRouteOptions): Router {
     isIdentified: boolean
     routing: { assistantId: string; modelAlias: string }
     integrationId: string
+    botToken: string
     ingestChannelMediaRef?: DiscordRouteOptions['ingestChannelMediaRef']
     archiveConnectorInstanceId?: string | null
   }): Promise<void> {
@@ -696,6 +729,14 @@ export function discordRoutes(options: DiscordRouteOptions): Router {
       channelType: 'discord',
       channelId,
       channelIntegrationId: params.integrationId,
+      // A room hydrates once from the channel's recent history (D16).
+      readProviderHistory: async () => formatProviderHistory({
+        transportLabel: 'Discord channel',
+        messages: (await createDiscordApi({ token: params.botToken }).listChannelMessages(channelId, 50))
+          .reverse()
+          .map((m) => ({ id: m.id, at: m.timestamp, speaker: m.author.global_name ?? m.author.username, text: m.content })),
+        excludeId: incoming.messageId,
+      }),
       channelIntegrationStore: options.integrationStore,
       messageText: incoming.text,
       userContentBlocks,
@@ -740,6 +781,9 @@ export function discordRoutes(options: DiscordRouteOptions): Router {
       crmEmailDraftStore: options.crmEmailDraftStore,
       capabilityStore: options.capabilityStore,
       hooks: {
+        async postNotice(text) {
+          await adapter.sendMessage(channelId, { text })
+        },
         async onProcessingStart() {
           await setStatus('Thinking...', true)
         },

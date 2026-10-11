@@ -48,7 +48,7 @@ describe('protected fill API → tool → relay → direct extension resolve →
     const tools = createComputerTools({ local, cloud: { ...local, kind: 'cloud' }, profiles: { store: profiles, assistantClearance: async () => 'confidential' },
       protectedFill: { scope: async () => scope, blocked: () => service.isLocked(scope) },
     })
-    const context: ToolContext = { userId: 'u', workspaceId: 'w', sessionId: 's', assistantId: 'a', appId: 'app', channelType: 'web', channelId: 'web', abortSignal: new AbortController().signal }
+    const context: ToolContext = { userId: 'u', workspaceId: 'w', sessionId: 's', assistantId: 'a', appId: 'app', channelType: 'web', attended: true, channelId: 'web', abortSignal: new AbortController().signal }
     await tools.browserNavigate.execute({ url: 'https://example.com/form' }, context)
     const result = await tools.browserFillReference.execute({ destinationOrigin: scope.destinationOrigin,
       items: issued.body.references.map((r: { referenceId: string }, i: number) => ({ referenceId: r.referenceId, ref: `@e${i + 1}` })),

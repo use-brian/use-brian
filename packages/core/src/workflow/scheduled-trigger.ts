@@ -150,7 +150,7 @@ export async function syncWorkflowScheduleTrigger(
     // Overwrite only when the row IS a workflow-channel trigger (its
     // instructions are the payload) or when we actually carry an input.
     const carriesInput = Object.keys(params.input ?? {}).length > 0
-    const overwriteInstructions = keep.channelType === 'workflow' || carriesInput
+    const overwriteInstructions = keep.channelType === 'workflow' || carriesInput // session-kind-exempt: scheduled_jobs.channel_type, not a session
     job =
       (await deps.jobStore.update(keep.id, {
         schedule: params.schedule,

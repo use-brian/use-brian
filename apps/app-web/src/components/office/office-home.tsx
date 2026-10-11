@@ -15,6 +15,7 @@ import { useOfficeMetadataResource } from "@/lib/office/surface-cache";
 import { GridSurfaceSkeleton } from "@/components/chrome/surface-skeleton";
 import { OfficeCardPreview } from "./office-card-preview";
 import { OfficeTopbar } from "./office-topbar";
+import { officeJobStateLabel } from "@/lib/office/job-labels";
 
 type View = OfficeListView;
 type Filter = "all" | OfficeFamily;
@@ -90,7 +91,7 @@ export function OfficeHome({ workspaceId, initialArtifacts }: { workspaceId: str
                 : artifact.job?.status === "failed"
                   ? failureKind === "presentation_fit" ? t.presentationFitFailed : failureKind === "presentation_plan" ? t.presentationPlanFailed : failureKind === "fit" ? t.fitFailed : t.failed
                 : artifact.job
-                  ? t[artifact.job.status as keyof Pick<typeof t, "queued" | "running" | "completed" | "failed" | "cancelled">] ?? artifact.job.stage
+                  ? officeJobStateLabel(t, artifact.job.status, artifact.job.latestEvent)
                   : null;
               return (
                 <Link key={artifact.artifactId} data-office-file-card={artifact.family} href={`/w/${workspaceId}/office/${artifact.artifactId}`} className="group min-w-0 overflow-hidden rounded-xl border bg-card shadow-[0_1px_2px_rgb(0_0_0/0.03)] transition-[border-color,box-shadow] hover:border-foreground/25 hover:shadow-sm focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2">

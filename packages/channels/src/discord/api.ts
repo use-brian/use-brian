@@ -272,7 +272,22 @@ export function createDiscordApi(options: DiscordApiOptions) {
     /** POST /channels/{channel.id}/typing — shows the bot "typing…" for ~10s. */
     triggerTyping: (channelId: string) =>
       call<void>('POST', `/channels/${channelId}/typing`),
+
+    /**
+     * GET /channels/{channel.id}/messages — the most recent messages, newest
+     * first (needs Read Message History). Used once to hydrate a converged
+     * room from what the channel still shows.
+     */
+    listChannelMessages: (channelId: string, limit = 50) =>
+      call<DiscordHistoryMessage[]>('GET', `/channels/${channelId}/messages?limit=${Math.min(Math.max(limit, 1), 100)}`),
   }
+}
+
+/** The fields of a Discord message read back from channel history. */
+export type DiscordHistoryMessage = DiscordRestMessage & {
+  content: string
+  timestamp: string
+  author: { id: string; username: string; global_name?: string | null; bot?: boolean }
 }
 
 export type DiscordApi = ReturnType<typeof createDiscordApi>

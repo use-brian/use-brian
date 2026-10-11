@@ -17,6 +17,7 @@
  *   DELETE /:assistantId          — delete assistant (owner only, solo-owned)
  */
 
+import { sessionKindSql } from '../session-kind.js'
 import { Router } from 'express'
 import {departmentRouteReview,executeReviewedDepartmentRoute} from '../workspace-access/reviewed-route.js'
 import {WorkspaceAccessError} from '../workspace-access/policy.js'
@@ -492,15 +493,18 @@ export function assistantRoutes(options: AssistantRouteOptions): Router {
       // (bare query): these rows are owned by various thread creators, so an
       // RLS-scoped update wouldn't reach them.
       if (clearance !== undefined) {
+        // Only assistant-sourced rows: an Office thread reads at its file's
+        // sensitivity and a guest doc thread at `public` (L10).
         await query(
-          `UPDATE sessions SET effective_clearance = $1
-            WHERE assistant_id = $2 AND visibility = 'workspace'`,
+          `UPDATE sessions s SET effective_clearance = $1
+            WHERE s.assistant_id = $2 AND ${sessionKindSql.assistantClearanceSourced('s')}`,
           [row.clearance, assistantId],
         )
         await query(
           `UPDATE comment_threads ct SET effective_clearance = $1
              FROM sessions s
-            WHERE s.id = ct.session_id AND s.assistant_id = $2`,
+            WHERE s.id = ct.session_id AND s.assistant_id = $2
+              AND ${sessionKindSql.assistantClearanceSourced('s')}`,
           [row.clearance, assistantId],
         )
       }

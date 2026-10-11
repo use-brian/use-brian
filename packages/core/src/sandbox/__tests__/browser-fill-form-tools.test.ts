@@ -5,7 +5,7 @@ import type { Tool, ToolContext } from '../../tools/types.js'
 
 const context: ToolContext = {
   userId: 'user', assistantId: 'assistant', sessionId: 'session', appId: 'app',
-  channelType: 'web', channelId: 'channel', workspaceId: 'workspace',
+  channelType: 'web', attended: true, channelId: 'channel', workspaceId: 'workspace',
   abortSignal: new AbortController().signal,
 }
 
@@ -154,8 +154,15 @@ describe('[COMP:sandbox/browser-fill-form] tool integration', () => {
     expect(output.slice(output.indexOf('Observation')).length).toBeLessThan(20_000)
 
     const overCap = size > 24_000
-    // Cached labels must be cleared too: a now-unknown click fails closed.
-    expect(await f.tools.browserClick.resolveConfirmation!(context, { ref: '@e1' })).toBe(overCap)
+    // Over the cap the ref is retired: the click fails as stale below instead
+    // of asking a human to approve a click that cannot run. Under the cap the
+    // cached label is a plain textbox, so neither case prompts.
+    expect(await f.tools.browserClick.resolveConfirmation!(context, { ref: '@e1' })).toBe(false)
+    if (overCap) {
+      const clicked = await f.run(f.tools.browserClick, { ref: '@e1' })
+      expect(clicked.data).toContain('Stale or unknown browser ref @e1')
+      expect(f.provider.click).not.toHaveBeenCalled()
+    }
     const typed = await f.run(f.tools.browserType, { ref: '@e1', text: 'retry' })
     if (overCap) {
       expect(typed.isError).toBe(true)
@@ -208,7 +215,7 @@ describe('[COMP:sandbox/browser-fill-form] tool integration', () => {
     { name: 'missing plan resolver', options: { unattendedEnabled: (): boolean => true }, message: 'paid plans' },
   ])('blocks autonomous batches with $name before backend access', async ({ options, message }) => {
     const f = fixture(options)
-    const result = await f.run(f.tools.browserFillForm, { fields }, { ...context, channelType: 'workflow' })
+    const result = await f.run(f.tools.browserFillForm, { fields }, { ...context, channelType: 'workflow', attended: false })
     expect(result.isError).toBe(true)
     expect(result.data).toContain(message)
     expect(f.fillForm).not.toHaveBeenCalled()
@@ -218,7 +225,7 @@ describe('[COMP:sandbox/browser-fill-form] tool integration', () => {
 
   it('allows autonomous batches when unattended mode and a paid plan are both enabled', async () => {
     const f = fixture({ unattendedEnabled: (): boolean => true, getWorkspacePlan: async () => 'pro' })
-    const ctx = { ...context, channelType: 'workflow' }
+    const ctx = { ...context, channelType: 'workflow', attended: false }
     await f.run(f.tools.browserSnapshot, { mode: 'full' }, ctx)
     const result = await f.run(f.tools.browserFillForm, { fields }, ctx)
     expect(result.isError).toBeUndefined()

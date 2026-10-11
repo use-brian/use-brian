@@ -10,7 +10,7 @@ export function workspaceSearchHref(workspaceId:string,target:WorkspaceSearchTar
     case 'record':return `${base}/records/${id}?type=${encodeURIComponent(target.entityTypeId)}`
     case 'recording':return `${base}/recordings/${id}${target.segmentIndex===undefined?'':`?segment=${target.segmentIndex}`}`
     case 'office':return `${base}/office/${id}${target.contextId?`?context=${encodeURIComponent(target.contextId)}`:''}`
-    case 'conversation':return `${base}/chat?${new URLSearchParams({v:target.visibility==='owner'?'personal':'workspace',s:target.id})}`
+    case 'conversation':return `${base}/chat?${new URLSearchParams({v:target.visibility==='workspace'?'workspace':'personal',s:target.id})}`
     case 'workflow':return `${base}/workflow/${id}`
   }
 }

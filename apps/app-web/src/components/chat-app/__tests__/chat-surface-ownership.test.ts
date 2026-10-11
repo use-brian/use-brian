@@ -190,7 +190,8 @@ function directStream(initialSession: string | null = "A") {
     turnTextRef: { current: "text" }, resetTurnActivity: vi.fn(),
     flushQueuedInputs: vi.fn(), setQueuedNotice: vi.fn(),
     askedQuestionRef: { current: true }, refreshPendingInput: vi.fn(),
-    isRoom: true, markRoomSeen: vi.fn(), reloadShared: vi.fn(),
+    panePolicy: { post: true, presence: true, multiVoice: true, pins: true, queue: true, addressing: "mention" },
+    markRoomSeen: vi.fn(), reloadShared: vi.fn(), adoptFreshChatPane: vi.fn(),
     setError: vi.fn(), t: { errorGeneric: "error" },
   };
   // Keep the same mutable owner closure across the session event and terminal
@@ -232,6 +233,8 @@ describe("[COMP:app-web/chat-sessions-cache] stream completion ownership", () =>
     expect(scope.sessionIdRef.current).toBe("minted");
     expect(scope.applyQueuedInput).toHaveBeenCalledWith("input", "message", "minted");
     expect(scope.flushQueuedInputs).toHaveBeenCalledWith("minted");
+    // The fresh side pane moves onto the session the first turn minted (T6).
+    expect(scope.adoptFreshChatPane).toHaveBeenCalledWith("workspace", "minted");
     if (name === "onDone") {
       expect(scope.refreshPendingInput).toHaveBeenCalledWith("minted");
       expect(scope.markRoomSeen).toHaveBeenCalledWith("workspace", "minted");
@@ -282,7 +285,7 @@ describe("[COMP:app-web/chat-sessions-cache] follow-stream ownership", () => {
       ...base(), sessionId: "A", cancelled: false, epoch: 1,
       shouldAcceptRoomMirror: vi.fn().mockReturnValue(true), meId: "viewer",
       directTurnSessionRef: { current: null }, stream: { inFlight: () => false },
-      isSharedOpen: false, setReconnectSessionId: vi.fn(), setReconnectNotice: vi.fn(),
+      panePolicy: { post: false, presence: false }, setReconnectSessionId: vi.fn(), setReconnectNotice: vi.fn(),
       resetRemoteTurn: vi.fn(), setRemoteConfirmation: vi.fn(), chat: { dispatch: vi.fn() },
       loadTranscript: vi.fn(), dispatchChatSessionsRefresh: vi.fn(), workspaceId: "workspace",
       refreshPendingInput: vi.fn(), setQueuedNotice: vi.fn(), flushQueuedInputs: vi.fn(),
@@ -313,7 +316,7 @@ describe("[COMP:app-web/chat-sessions-cache] follow-stream ownership", () => {
     vi.useFakeTimers();
     const response = deferred<unknown>();
     const scope = {
-      ...base(), activeSessionId: "A", reconnectSessionId: "A", isSharedOpen: false,
+      ...base(), activeSessionId: "A", reconnectSessionId: "A", panePolicy: { post: false, presence: false },
       shouldOpenSessionStream: () => true, reconnectNotice: true,
       setRoomTypers: vi.fn(), refreshPendingInput: vi.fn(), API_URL: "http://test",
       authFetch: vi.fn().mockReturnValue(response.promise),

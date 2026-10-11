@@ -12,6 +12,12 @@ import { officeCollaborationRoutes } from '../office-collaboration.js'
 import { OfficeGenerationUnavailableError } from '../../office/service.js'
 import { guidedTemplateSnapshot } from '../office-templates.js'
 import { OfficeArtifactSnapshotSchema, preflightOfficeCandidate } from '@use-brian/office-model'
+import {readOfficeGenerationRecovery,resumeOfficeGeneration} from '../../office/generation-recovery.js'
+
+vi.mock('../../office/generation-recovery.js',()=>({
+  readOfficeGenerationRecovery:vi.fn(async()=>({canResumeTemplate:true,templateChoices:[]})),
+  resumeOfficeGeneration:vi.fn(async()=>({artifactId:'20000000-0000-4000-8000-000000000004',jobId:'20000000-0000-4000-8000-000000000005'})),
+}))
 
 // Transport fixtures only; real transaction/RLS proof lives in office-library-scope.integration.
 vi.mock('../../db/office-read-projection.js', async importOriginal => ({
@@ -79,6 +85,22 @@ function app() {
 }
 
 describe('[COMP:api/office-routes] Office API routes', () => {
+  it('projects an older input question without private exception details and refuses text template steering',async()=>{
+    const test=app();test.jobs.get.mockResolvedValue({...await test.jobs.get(),status:'needs_input',errorCode:'template_ambiguous',errorDetail:'private exception'} as never)
+    const response=await request(test.server).get(`/api/office/jobs/${JOB}`).expect(200)
+    expect(response.body.job.inputQuestion).toBe('Which published template should I use?')
+    expect(response.body.job.errorDetail).toBeUndefined()
+    expect(response.body.job.canResumeTemplate).toBe(true)
+    expect(readOfficeGenerationRecovery).toHaveBeenCalledWith(USER,ARTIFACT,JOB)
+    await request(test.server).post(`/api/office/jobs/${JOB}/steering`).send({instruction:'Use the uploaded file'}).expect(409)
+    expect(test.jobs.steer).not.toHaveBeenCalled()
+  })
+  it('uses the authenticated identity and exact typed template selection for recovery',async()=>{
+    const test=app()
+    await request(test.server).post(`/api/office/jobs/${JOB}/template`).send({artifactId:ARTIFACT,templateVersionId:RESOURCE}).expect(202)
+    expect(resumeOfficeGeneration).toHaveBeenCalledWith(USER,{artifactId:ARTIFACT,jobId:JOB,templateVersionId:RESOURCE})
+    await request(test.server).post(`/api/office/jobs/${JOB}/template`).send({artifactId:ARTIFACT,templateVersionId:RESOURCE,userId:'other'}).expect(400)
+  })
   it('creates a shell/job and exposes permission-filtered artifact state', async () => {
     const test = app()
     await request(test.server).get('/api/office/capabilities').expect(200, { generationAvailable: true, generationFamilies: ['document', 'presentation', 'spreadsheet'] })

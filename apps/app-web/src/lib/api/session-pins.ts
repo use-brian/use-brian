@@ -50,7 +50,7 @@ export async function addSessionPin(
     | { kind: Exclude<SessionPinKind, "url" | "instruction">; refId: string }
     | { kind: "url"; url: string }
     | { kind: "instruction"; text: string },
-): Promise<void> {
+): Promise<{ id: string }> {
   const res = await authFetch(
     `${API_URL}/api/sessions/${encodeURIComponent(sessionId)}/pins`,
     {
@@ -63,6 +63,7 @@ export async function addSessionPin(
     const body = (await res.json().catch(() => ({}))) as { error?: string };
     throw new Error(body.error ?? `Pin failed: ${res.status}`);
   }
+  return (await res.json()) as { id: string };
 }
 
 export async function removeSessionPin(

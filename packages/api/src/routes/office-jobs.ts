@@ -2,15 +2,28 @@
 import { Router } from 'express'
 import {officeMetadataRoute} from './office-metadata.js'
 import { z } from 'zod'
-import { officeImportDiagnostics } from '../db/office-generation.js'
+import { officeImportDiagnostics, officeGenerationInputQuestion } from '../db/office-generation.js'
+import { OfficeGenerationTemplateSelection } from '@use-brian/core'
+import { readOfficeGenerationRecovery, resumeOfficeGeneration } from '../office/generation-recovery.js'
+import { WorkspaceAccessError } from '../workspace-access/policy.js'
 import type { OfficeGenerationEventRow, OfficeGenerationJobRow } from '../db/office-generation.js'
 
 export type OfficeJobsRouteDeps = {
   get(userId: string, jobId: string): Promise<OfficeGenerationJobRow | null>
   events(userId: string, jobId: string, afterSeq: number): Promise<OfficeGenerationEventRow[]>
+  latestEvent?(userId: string, jobId: string): Promise<OfficeGenerationEventRow | null>
   steer(params: { userId: string; workspaceId: string; jobId: string; instruction: string }): Promise<{ id: string }>
   wake?(userId: string): void
   cancel(userId: string, jobId: string): Promise<boolean>
+}
+
+/** The one job body every reader sees: `GET /jobs/:jobId` and the stream's `job` frame. */
+export async function officeJobBody(userId: string, job: OfficeGenerationJobRow, latestEvent?: OfficeGenerationEventRow | null) {
+  const {errorDetail: _privateDetail,...visibleJob} = job
+  const recovery = job.status === 'needs_input' && job.errorCode === 'template_ambiguous'
+    ? await readOfficeGenerationRecovery(userId,job.artifactId,job.id) : undefined
+  return {...visibleJob,inputQuestion:officeGenerationInputQuestion(job),...recovery, importDiagnostics: officeImportDiagnostics(job.checkpoint),
+    latestEvent: latestEvent ? {code: latestEvent.code, safeNarration: latestEvent.safeNarration} : null}
 }
 
 export function officeJobRoutes(deps: OfficeJobsRouteDeps): Router {
@@ -18,7 +31,7 @@ export function officeJobRoutes(deps: OfficeJobsRouteDeps): Router {
   router.get('/jobs/:jobId', officeMetadataRoute(async (req, userId) => {
     const job = await deps.get(userId, String(req.params.jobId))
     if (!job) return {status:404,body:{ error: 'Office job not found' }}
-    return {workspaceId:job.workspaceId,body:{job:{...job, importDiagnostics: officeImportDiagnostics(job.checkpoint)}}}
+    return {workspaceId:job.workspaceId,body:{job:await officeJobBody(userId,job,await deps.latestEvent?.(userId,job.id))}}
   }))
 
   router.get('/jobs/:jobId/events', officeMetadataRoute(async (req, userId) => {
@@ -37,9 +50,24 @@ export function officeJobRoutes(deps: OfficeJobsRouteDeps): Router {
     const jobId = String(req.params.jobId)
     const job = await deps.get(userId, jobId)
     if (!job || !['queued', 'running', 'needs_input'].includes(job.status)) return void res.status(409).json({ error: 'Job cannot accept steering' })
+    if (job.status === 'needs_input' && job.errorCode !== 'material_fact_missing') return void res.status(409).json({error:'office_generation_template_required'})
     const result = await deps.steer({ userId, workspaceId: job.workspaceId, jobId, instruction: body.data.instruction })
     deps.wake?.(userId)
     res.status(202).json(result)
+  })
+
+  router.post('/jobs/:jobId/template',async(req,res)=>{
+    if(!req.userId)return void res.status(401).json({error:'Unauthorized'})
+    const input=OfficeGenerationTemplateSelection.safeParse({...req.body,jobId:String(req.params.jobId)})
+    if(!input.success)return void res.status(400).json({error:'invalid_office_generation_template'})
+    try {
+      const result=await resumeOfficeGeneration(req.userId,input.data)
+      deps.wake?.(req.userId)
+      res.status(202).json(result)
+    } catch(cause) {
+      if(cause instanceof WorkspaceAccessError)return void res.status(cause.status).json({error:cause.code})
+      throw cause
+    }
   })
 
   router.post('/jobs/:jobId/cancel', async (req, res) => {

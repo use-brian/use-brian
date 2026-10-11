@@ -36,7 +36,7 @@
 import { z } from 'zod'
 import { createEntityAliasTools } from '../entities/alias-tools.js'
 import { buildTool, type Tool, type ToolContext } from '../tools/types.js'
-import { isAutonomousToolContext } from '../tools/capability-gate.js'
+import { isAttendedTurn } from '../tools/capability-gate.js'
 import type { AccessContext } from '../security/access-context.js'
 import { createRateLimiter } from '../security/rate-limiter.js'
 import { notFoundFailure, toolFailure } from '../tools/tool-failure.js'
@@ -476,7 +476,7 @@ export function createBrainHealingTools(deps: HealingToolsDeps): Tool[] {
     // §3): recreates memories / archives tasks / retracts edges. Itself an
     // undo of soft ops, so interactive stays silent; the autonomous path
     // gates so a headless loop can't silently roll changes back and forth.
-    resolveConfirmation: async (context) => isAutonomousToolContext(context),
+    resolveConfirmation: async (context) => !isAttendedTurn(context),
 
     async execute(input, context) {
       const gate = workspaceGate(context.workspaceId, 'undoReclassification')
@@ -673,7 +673,7 @@ export function createBrainHealingTools(deps: HealingToolsDeps): Tool[] {
     // task / edge reclassifications across memories. Mixed reversibility,
     // so interactive stays silent (the user sees the turn); a cron/workflow
     // run mass-reclassifying with no human present parks in Approvals.
-    resolveConfirmation: async (context) => isAutonomousToolContext(context),
+    resolveConfirmation: async (context) => !isAttendedTurn(context),
 
     async execute(input, context) {
       // Gate on the workspace BEFORE the limiter: a call that can never run
@@ -1217,7 +1217,7 @@ export function createBrainHealingTools(deps: HealingToolsDeps): Tool[] {
     // path for an errant merge, so interactive stays silent; the
     // autonomous path gates so a headless loop can't roll merges back and
     // forth unattended.
-    resolveConfirmation: async (context) => isAutonomousToolContext(context),
+    resolveConfirmation: async (context) => !isAttendedTurn(context),
 
     async execute(input, context) {
       const gate = workspaceGate(context.workspaceId, 'undoEntityMerge')

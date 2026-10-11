@@ -213,6 +213,19 @@ ipcRenderer.on("Use Brian:brian-nearby-state", (_event, enabled) => {
 ipcRenderer.on("Use Brian:update-status", (_event, status) => {
   for (const listener of updateStatusListeners) listener(status || null);
 });
+// The shell's browser reports the tabs Brian opens, so the Chat side pane can
+// show them as `browser` tabs (chat-parity T7, D8). Only a validated copy of
+// the fields reaches the app.
+const browserPaneListeners = new Set();
+ipcRenderer.on("embedded-browser:pane", (_event, payload) => {
+  if (!payload || typeof payload !== "object" || (payload.type !== "tab-opened" && payload.type !== "tab-updated")) return;
+  const { chatKey, browserId, url, title } = payload;
+  if ((chatKey !== null && typeof chatKey !== "string") || typeof browserId !== "string" || typeof url !== "string") return;
+  const event = payload.type === "tab-opened"
+    ? { type: "tab-opened", chatKey, browserId, url }
+    : { type: "tab-updated", chatKey, browserId, url, title: typeof title === "string" ? title : null };
+  for (const listener of browserPaneListeners) listener(event);
+});
 ipcRenderer.on("Use Brian:link-navigation-state", (_event, state) => {
   for (const listener of linkNavigationListeners) listener(state || null);
 });
@@ -232,6 +245,16 @@ const bridge = {
   platform: process.platform,
   // Main validates the trusted sender; websites never receive this preload.
   browserControl: (message) => ipcRenderer.invoke("Use Brian:browser-control", message),
+  // The browser lives inside the Chat side pane (chat-parity T7): the app
+  // reports its slot through `browserControl({ type: "pane-slot" | "pane-chat" })`
+  // and hears Brian's tabs here. App-web checks this exact protocol number;
+  // older shells omit it and keep the native dock.
+  browserPaneProtocol: 1,
+  onBrowserPane: (callback) => {
+    if (typeof callback !== "function") return () => {};
+    browserPaneListeners.add(callback);
+    return () => browserPaneListeners.delete(callback);
+  },
   // Native macOS traffic lights stay in window coordinates while page zoom
   // scales app-web's CSS pixels. Expose only the current numeric factor so the
   // workspace chrome can keep its 76px clearance invariant. `webFrame` is used

@@ -27,6 +27,7 @@ import { z } from 'zod'
 import { createHmac, randomBytes, timingSafeEqual } from 'node:crypto'
 import { deflateRawSync, inflateRawSync } from 'node:zlib'
 import { buildTool, type Tool, type ToolContext } from '../tools/types.js'
+import { isAttendedTurn } from '../tools/capability-gate.js'
 import { accessCeilingContains, pinToolAuthoringAuthority, type AuthoringAuthority } from '../security/index.js'
 import { NO_TOOL_TIMEOUT } from '../engine/tool-executor.js'
 import { CrmDomainEventTypeSchema } from '../crm/operations-types.js'
@@ -609,37 +610,23 @@ function workflowNotFound(workflowId: string): string {
  */
 const KEYED_AGENT_CHANNELS = new Set(['programmatic', 'assistant_mcp', 'api'])
 
-/** Chat surfaces where a human genuinely can move to a workspace-scoped chat. */
-const INTERACTIVE_CHAT_CHANNELS = new Set([
-  'web',
-  'telegram',
-  'slack',
-  'whatsapp',
-  'discord',
-  'msteams',
-  'wechat',
-  'custom',
-  'imessage',
-])
-
 /**
  * The workspace gate for every workflow tool. The REMEDY branches on who is
- * calling (`ToolContext.channelType`), because the two principals fix this
+ * calling, because the two principals fix this
  * differently and an unfollowable instruction is worse than none: a chat user
  * opens a workspace-scoped chat; a keyed agent cannot, and needs its key
  * re-scoped. Unknown surfaces get the neutral both-ways sentence rather than
  * a guess (docs/architecture/engine/tool-executor.md → "Failure copy").
  */
 function workspaceGate(
-  workspaceId: string | null | undefined,
-  channelType?: string,
+  context: Pick<ToolContext, 'workspaceId' | 'channelType' | 'attended' | 'executionContext'>,
 ): { data: string; isError: true } | null {
-  if (!workspaceId) {
-    const remedy = KEYED_AGENT_CHANNELS.has(channelType ?? '')
+  if (!context.workspaceId) {
+    const remedy = KEYED_AGENT_CHANNELS.has(context.channelType ?? '')
       ? 'The credential this call authenticated with is not workspace-scoped, and no argument change ' +
         'can make it so: a workspace admin must re-issue or re-scope the key against the workspace. ' +
         'Report that to the user.'
-      : INTERACTIVE_CHAT_CHANNELS.has(channelType ?? '')
+      : isAttendedTurn(context)
         ? 'Open a workspace-scoped chat (pick the workspace in the app, or message the workspace ' +
           'assistant) and re-issue the call there. Personal chats have no workflow store to read or write.'
         : 'This surface is not workspace-scoped. If a human is driving it, re-issue the call from a ' +
@@ -2102,7 +2089,7 @@ export function createWorkflowTools(deps: WorkflowToolDeps): {
     isConcurrencySafe: true,
     isReadOnly: true,
     async execute(input, context) {
-      const gate = workspaceGate(context.workspaceId, context.channelType)
+      const gate = workspaceGate(context)
       if (gate) return gate
 
       let definitionInput: Record<string, unknown> = { ...input.definition }
@@ -2419,7 +2406,7 @@ export function createWorkflowTools(deps: WorkflowToolDeps): {
     inputSchema: createWorkflowInputSchema,
     requiresConfirmation: false,
     async execute(input, context) {
-      const gate = workspaceGate(context.workspaceId, context.channelType)
+      const gate = workspaceGate(context)
       if (gate) return gate
 
       let createInput: z.infer<typeof createProposalInputSchema>
@@ -2630,7 +2617,7 @@ export function createWorkflowTools(deps: WorkflowToolDeps): {
     inputSchema: updateWorkflowInputSchema,
     requiresConfirmation: false,
     async execute(input, context) {
-      const gate = workspaceGate(context.workspaceId, context.channelType)
+      const gate = workspaceGate(context)
       if (gate) return gate
 
       let updateInput: z.infer<typeof updateProposalInputSchema>
@@ -2932,7 +2919,7 @@ export function createWorkflowTools(deps: WorkflowToolDeps): {
     isConcurrencySafe: true,
     isReadOnly: true,
     async execute(input, context) {
-      const gate = workspaceGate(context.workspaceId, context.channelType)
+      const gate = workspaceGate(context)
       if (gate) return gate
 
       const workflow = await deps.workflowStore.getById(context.userId, input.workflowId)
@@ -3013,7 +3000,7 @@ export function createWorkflowTools(deps: WorkflowToolDeps): {
     // the honest terminal outcome however long the run legitimately takes.
     timeoutMs: NO_TOOL_TIMEOUT,
     async execute(input, context) {
-      const gate = workspaceGate(context.workspaceId, context.channelType)
+      const gate = workspaceGate(context)
       if (gate) return gate
 
       const workflow = await deps.workflowStore.getById(context.userId, input.workflowId)
@@ -3073,7 +3060,7 @@ export function createWorkflowTools(deps: WorkflowToolDeps): {
     isConcurrencySafe: true,
     isReadOnly: true,
     async execute(_input, context) {
-      const gate = workspaceGate(context.workspaceId, context.channelType)
+      const gate = workspaceGate(context)
       if (gate) return gate
 
       const rows = await deps.workflowStore.list(context.userId, context.workspaceId!)
@@ -3231,7 +3218,7 @@ export function createWorkflowTools(deps: WorkflowToolDeps): {
     isConcurrencySafe: true,
     isReadOnly: true,
     async execute(input, context) {
-      const gate = workspaceGate(context.workspaceId, context.channelType)
+      const gate = workspaceGate(context)
       if (gate) return gate
 
       const resolved = await resolveRunId(context, input.runId)
@@ -3281,7 +3268,7 @@ export function createWorkflowTools(deps: WorkflowToolDeps): {
     isReadOnly: true,
     isConcurrencySafe: true,
     async execute(input, context) {
-      const gate = workspaceGate(context.workspaceId, context.channelType)
+      const gate = workspaceGate(context)
       if (gate) return gate
       if (!deps.listSlackChannels) {
         return {
@@ -3315,7 +3302,7 @@ export function createWorkflowTools(deps: WorkflowToolDeps): {
     isReadOnly: true,
     isConcurrencySafe: true,
     async execute(input, context) {
-      const gate = workspaceGate(context.workspaceId, context.channelType)
+      const gate = workspaceGate(context)
       if (gate) return gate
       if (!deps.listSlackMembers) {
         return {

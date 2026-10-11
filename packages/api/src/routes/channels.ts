@@ -16,6 +16,7 @@
  * Component tag: [COMP:api/channels-route].
  */
 
+import { sessionKindSql } from '../session-kind.js'
 import { randomBytes, randomUUID } from 'node:crypto'
 import { Router } from 'express'
 import type { Response } from 'express'
@@ -654,8 +655,8 @@ export function channelsRoutes(opts: ChannelsRouteOptions): Router {
        FROM sessions s
        JOIN assistants a ON a.id = s.assistant_id
        WHERE a.workspace_id = $1
-         AND s.channel_type IN ('telegram', 'slack', 'whatsapp', 'custom', 'feishu')
-         AND s.channel_id <> 'notifications'
+         AND ${sessionKindSql.proactiveDeliveryTransport('s')}
+         AND ${sessionKindSql.notInbox('s')}
        ORDER BY s.channel_type, s.channel_id, s.last_active_at DESC
        LIMIT 200`,
       [workspaceId],

@@ -1,6 +1,7 @@
 import { describe, it, expect, vi } from 'vitest'
 import { readFileSync } from 'node:fs'
-import { appAssistantForbidsResearch, appAssistantForbidsCoordinator, isAdaptiveResearchEligible, isUserBlocked, sanitizeTitle, buildActivePageInstruction, buildActiveRecordingInstruction, recordingParticipantsUpdatedReceipt, buildViewingSkillBlock, createUpdateViewedSkillTool, workspaceSkillRevision, resolveStickyChannelId, isDocSurface, isAppSurface, attachUserVisibleContext, settleInlineToolApproval, buildAttachedRecordingContext, buildUnscopedFileAttachmentInstruction, mayOfferWorkspaceChatHandoff, turnInputAdmission, liveTurnAdmission, SSE_KEEPALIVE_INTERVAL_MS, filterBrainSurfaceTools } from '../chat.js'
+import { appAssistantForbidsResearch, appAssistantForbidsCoordinator, isAdaptiveResearchEligible, isUserBlocked, sanitizeTitle, buildActivePageInstruction, buildActiveRecordingInstruction, recordingParticipantsUpdatedReceipt, buildViewingSkillBlock, createUpdateViewedSkillTool, workspaceSkillRevision, resolveStickyChannelId, isAppSurface, attachUserVisibleContext, settleInlineToolApproval, buildAttachedRecordingContext, buildUnscopedFileAttachmentInstruction, mayOfferWorkspaceChatHandoff, turnInputAdmission, liveTurnAdmission, SSE_KEEPALIVE_INTERVAL_MS, filterBrainSurfaceTools } from '../chat.js'
+import { policyFor } from '../../session-kind.js'
 import type { ConfirmationResolver, Message, Tool, ToolContext } from '@use-brian/core'
 import type { PendingApproval, PendingApprovalsStore } from '../../db/pending-approvals-store.js'
 
@@ -115,7 +116,7 @@ describe('[COMP:api/workspace-chat-handoff] per-turn admission', () => {
   it('admits owner-scoped web chats in the current workspace', () => {
     expect(
       mayOfferWorkspaceChatHandoff(
-        { visibility: 'owner', channelType: 'web' },
+        { visibility: 'owner', channelType: 'web', anchorKind: null },
         'workspace-1',
       ),
     ).toBe(true)
@@ -124,19 +125,19 @@ describe('[COMP:api/workspace-chat-handoff] per-turn admission', () => {
   it('rejects workspace rooms, non-web sessions, and workspace-less assistants', () => {
     expect(
       mayOfferWorkspaceChatHandoff(
-        { visibility: 'workspace', channelType: 'web' },
+        { visibility: 'workspace', channelType: 'web', anchorKind: null },
         'workspace-1',
       ),
     ).toBe(false)
     expect(
       mayOfferWorkspaceChatHandoff(
-        { visibility: 'owner', channelType: 'telegram' },
+        { visibility: 'owner', channelType: 'telegram', anchorKind: null },
         'workspace-1',
       ),
     ).toBe(false)
     expect(
       mayOfferWorkspaceChatHandoff(
-        { visibility: 'owner', channelType: 'web' },
+        { visibility: 'owner', channelType: 'web', anchorKind: null },
         null,
       ),
     ).toBe(false)
@@ -417,19 +418,19 @@ describe('[COMP:api/chat-route] appAssistantForbidsCoordinator', () => {
   })
 })
 
-describe('[COMP:api/chat-route] isDocSurface', () => {
+describe('[COMP:api/chat-route] doc surface policy', () => {
   // The surface signal that drives doc-skill injection independent of which
   // assistant is talking. True when the session originated in apps/app-web
   // (appOrigin='doc') or is a doc comment thread.
   it('is true for an appOrigin=doc session', () => {
-    expect(isDocSurface({ appOrigin: 'doc', channelType: 'web' })).toBe(true)
+    expect(policyFor({ appOrigin: 'doc', channelType: 'web', anchorKind: null }).docSurface).toBe(true)
   })
   it('is true for a doc_thread channel (comment reply)', () => {
-    expect(isDocSurface({ appOrigin: null, channelType: 'doc_thread' })).toBe(true)
+    expect(policyFor({ appOrigin: null, channelType: 'doc_thread', anchorKind: null }).docSurface).toBe(true)
   })
   it('is false for ordinary web / telegram sessions', () => {
-    expect(isDocSurface({ appOrigin: null, channelType: 'web' })).toBe(false)
-    expect(isDocSurface({ appOrigin: 'web', channelType: 'telegram' })).toBe(false)
+    expect(policyFor({ appOrigin: null, channelType: 'web', anchorKind: null }).docSurface).toBe(false)
+    expect(policyFor({ appOrigin: 'web', channelType: 'telegram', anchorKind: null }).docSurface).toBe(false)
   })
 })
 
@@ -439,12 +440,12 @@ describe('[COMP:api/chat-route] isAppSurface', () => {
   // page-first protocol. Full Chat is included; Doc itself is not.
   it('is true for every SurfaceChatPanel origin', () => {
     for (const origin of ['brain', 'studio', 'workflow', 'approvals', 'knowledge-base', 'chat']) {
-      expect(isAppSurface({ appOrigin: origin })).toBe(true)
+      expect(isAppSurface({ appOrigin: origin, channelType: 'web', anchorKind: null })).toBe(true)
     }
   })
   it('is false for doc and unscoped sessions', () => {
-    expect(isAppSurface({ appOrigin: 'doc' })).toBe(false)
-    expect(isAppSurface({ appOrigin: null })).toBe(false)
+    expect(isAppSurface({ appOrigin: 'doc', channelType: 'web', anchorKind: null })).toBe(false)
+    expect(isAppSurface({ appOrigin: null, channelType: 'web', anchorKind: null })).toBe(false)
   })
 })
 
@@ -952,8 +953,8 @@ describe('[COMP:api/chat-route] live-turn admission guard (lease)', () => {
 })
 
 describe('[COMP:api/chat-route] mid-turn input admission', () => {
-  const ordinary = { clientMidTurn: false, isRoom: false, mode: null }
-  const midTurn = { clientMidTurn: true, isRoom: false, mode: null }
+  const ordinary = { clientMidTurn: false, isRoom: false }
+  const midTurn = { clientMidTurn: true, isRoom: false }
 
   it('runs an ordinary send', () => {
     expect(turnInputAdmission(ordinary)).toBe('run')
@@ -980,10 +981,9 @@ describe('[COMP:api/chat-route] mid-turn input admission', () => {
     expect(turnInputAdmission({ ...midTurn, isRoom: true })).toBe('run')
   })
 
-  it('keeps the draft rejection', () => {
-    expect(turnInputAdmission({ ...midTurn, mode: 'draft' })).toBe('reject')
-    // ...but an ordinary send into a draft is unaffected.
-    expect(turnInputAdmission({ ...ordinary, mode: 'draft' })).toBe('run')
+  it('has no draft rejection: a draft takes room admission like every workspace session (D11)', () => {
+    expect(turnInputAdmission({ ...midTurn, isRoom: true })).toBe('run')
+    expect(turnInputAdmission({ ...ordinary, isRoom: true })).toBe('run')
   })
 
   it('mirrors rare control events so Live can intervene beside an open chat stream', () => {
