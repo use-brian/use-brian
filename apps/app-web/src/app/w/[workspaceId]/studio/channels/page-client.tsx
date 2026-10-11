@@ -79,9 +79,6 @@ import {
   connectWhatsAppCloudChannel,
   listWhatsAppCloudGroups,
   createWhatsAppCloudGroup,
-  startWechatPairing,
-  getWechatPairingStatus,
-  submitWechatVerifyCode,
   connectCustomChannel,
   rotateCustomChannelToken,
   getCustomChannelState,
@@ -131,6 +128,8 @@ import {
 import { StudioTopbarActions } from "@/components/studio/studio-topbar";
 import { ScrollableNav } from "@/components/scrollable-nav";
 import { ChannelIdentityFooter } from "@/components/channel-identity/channel-identity";
+import { WechatConnectTab } from "./wechat-connect";
+import { getUserInfo } from "@/lib/user";
 import { DISPLAY_API_URL } from "@/lib/display-api-url";
 import {
   Bot,
@@ -387,6 +386,20 @@ export default function StudioChannelsPage() {
       detailRef.current?.scrollIntoView({ block: "start" });
     });
   }, []);
+
+  // A shared link (`?channel=<id>`, e.g. the WeChat staff link) opens that
+  // channel's detail once its row is visible; access is still decided by the
+  // server for everything the detail does.
+  const linkedChannelRef = useRef<string | null>(null);
+  useEffect(() => {
+    if (typeof window === "undefined") return;
+    const requested = new URLSearchParams(window.location.search).get("channel");
+    if (!requested || linkedChannelRef.current === requested) return;
+    if (!channels?.some((c) => c.id === requested)) return;
+    linkedChannelRef.current = requested;
+    setSelected(requested);
+    revealDetail();
+  }, [channels, revealDetail]);
   // Assistant email inboxes (agentmail.md). Null while probing; a 503 probe
   // means no email provider is configured server-side — the email tab and
   // inbox affordances then stay hidden (the dark contract).
@@ -590,6 +603,7 @@ export default function StudioChannelsPage() {
           emailConfigured={emailConfigured}
           emailDomains={emailDomains}
           onEmailCreated={refreshEmailInboxes}
+          canPrepareForStaff={myRole === "owner" || myRole === "admin"}
         />
       )}
 
@@ -685,6 +699,7 @@ export default function StudioChannelsPage() {
                 onEmailCreated={refreshEmailInboxes}
                 onPin={() => setPinnedPlatform(sel.platform)}
                 onCreated={onInlineChannelCreated}
+                canPrepareForStaff={myRole === "owner" || myRole === "admin"}
                 onDone={(createdId) => {
                   setPinnedPlatform(null);
                   if (createdId) setSelected(createdId);
@@ -740,6 +755,7 @@ function AvailableChannelPanel({
   onPin,
   onCreated,
   onDone,
+  canPrepareForStaff = false,
 }: {
   platform: ChannelPlatform;
   workspaceId: string;
@@ -750,6 +766,7 @@ function AvailableChannelPanel({
   onPin: () => void;
   onCreated: (channel: Channel) => void | Promise<void>;
   onDone: (createdId: string | null) => void;
+  canPrepareForStaff?: boolean;
 }) {
   const t = useT();
   const tr = t.studioPage.channels;
@@ -783,6 +800,7 @@ function AvailableChannelPanel({
           onEmailCreated={onEmailCreated}
           initialPlatform={platform}
           lockPlatform
+          canPrepareForStaff={canPrepareForStaff}
           onCreated={async (channel) => {
             createdIdRef.current = channel.id;
             if (jumpsOnConnect) {
@@ -2491,11 +2509,14 @@ export function AddChannelForm({
   onEmailCreated,
   initialPlatform = "slack",
   lockPlatform = false,
+  canPrepareForStaff = false,
 }: {
   workspaceId: string;
   assistants: StudioAssistantSummary[];
   onCreated: (channel: Channel) => void | Promise<void>;
   onClose: () => void;
+  /** Owner/admin: may prepare a WeChat connection for a staff member. */
+  canPrepareForStaff?: boolean;
   emailConfigured?: boolean;
   emailDomains?: EmailDomainSummary[];
   onEmailCreated?: () => void | Promise<void>;
@@ -2507,6 +2528,7 @@ export function AddChannelForm({
   const t = useT();
   const add = t.studioPage.channels.add;
   const [platform, setPlatform] = useState<ChannelPlatform>(initialPlatform);
+  const activeWorkspaceName = useWorkspaces().active?.name ?? "";
 
   // WhatsApp pairs via QR (no token submit). After the connect stream reports
   // `connected`, the integration row lands shortly after — poll the channel
@@ -2849,8 +2871,14 @@ export function AddChannelForm({
         <WechatConnectTab
           workspaceId={workspaceId}
           defaultAssistantId={defaultAssistantId || null}
-          onConnected={(channel) => {
-            if (channel) void onCreated(channel);
+          canPrepareForStaff={canPrepareForStaff}
+          accountLabel={(() => { const u = getUserInfo(); return u?.name || u?.email || ""; })()}
+          workspaceName={activeWorkspaceName}
+          onConnected={(channelId) => {
+            void listChannels(workspaceId).then((chans) => {
+              const channel = chans.find((c) => c.id === channelId);
+              if (channel) void onCreated(channel);
+            });
           }}
         />
       ) : platform === "custom" ? (
@@ -4235,204 +4263,6 @@ export function CustomBridgeSection({
           <span className="text-xs text-destructive">{c.disconnectError}</span>
         )}
       </div>
-    </div>
-  );
-}
-
-type WechatConnectPhase =
-  | { kind: "idle" }
-  | { kind: "loading" }
-  | { kind: "qr"; url: string }
-  | { kind: "scanned" }
-  | { kind: "verify"; rejected: boolean }
-  | { kind: "connected"; connectorError: string | null }
-  | { kind: "already_bound" }
-  | { kind: "expired" }
-  | { kind: "error"; message: string };
-
-/**
- * WeChat connect tab — BYON iLink bot binding by QR. Poll-based (not SSE like
- * WhatsApp) because iLink's login machine has a mid-flow input state: it can
- * demand a pairing code (`need_verifycode`) that the user reads off their
- * phone and types here. The QR may also refresh in place when a code expires.
- * On `connected` the API already persisted the channel + started the
- * long-poll, and returns the channel row for the rail. The iLink limits are
- * stated inline — this connects a NEW bot contact, not the user's own WeChat.
- */
-function WechatConnectTab({
-  workspaceId,
-  defaultAssistantId,
-  onConnected,
-}: {
-  workspaceId: string;
-  defaultAssistantId: string | null;
-  onConnected: (channel: Channel | null) => void;
-}) {
-  const t = useT();
-  const wc = t.studioPage.channels.add.wechat;
-  const limits = t.studioPage.channels.wechat;
-  const [phase, setPhase] = useState<WechatConnectPhase>({ kind: "idle" });
-  const [verifyCode, setVerifyCode] = useState("");
-  const pairingIdRef = useRef<string | null>(null);
-  const stopRef = useRef(false);
-
-  const poll = useCallback(
-    async (pairingId: string) => {
-      while (!stopRef.current && pairingIdRef.current === pairingId) {
-        try {
-          const status = await getWechatPairingStatus(workspaceId, pairingId);
-          if (stopRef.current || pairingIdRef.current !== pairingId) return;
-          if (status.status === "connected") {
-            setPhase({ kind: "connected", connectorError: status.connectorError ?? null });
-            onConnected(status.channel ?? null);
-            return;
-          }
-          if (status.status === "qr" && status.qrcodeUrl) {
-            setPhase({ kind: "qr", url: status.qrcodeUrl });
-          } else if (status.status === "scanned") {
-            setPhase({ kind: "scanned" });
-          } else if (status.status === "need_verifycode") {
-            setPhase({ kind: "verify", rejected: false });
-          } else if (status.status === "verify_code_rejected") {
-            setPhase({ kind: "verify", rejected: true });
-          } else if (status.status === "already_bound") {
-            setPhase({ kind: "already_bound" });
-            return;
-          } else if (status.status === "expired") {
-            setPhase({ kind: "expired" });
-            return;
-          } else if (status.status === "error") {
-            setPhase({ kind: "error", message: status.error ?? "" });
-            return;
-          }
-        } catch (e) {
-          if (stopRef.current || pairingIdRef.current !== pairingId) return;
-          setPhase({ kind: "error", message: (e as Error).message });
-          return;
-        }
-        await new Promise((r) => setTimeout(r, 1500));
-      }
-    },
-    [workspaceId, onConnected],
-  );
-
-  const start = useCallback(() => {
-    setPhase({ kind: "loading" });
-    setVerifyCode("");
-    void startWechatPairing(workspaceId, { defaultAssistantId })
-      .then((started) => {
-        pairingIdRef.current = started.pairingId;
-        setPhase({ kind: "qr", url: started.qrcodeUrl });
-        void poll(started.pairingId);
-      })
-      .catch((e: unknown) => {
-        setPhase({ kind: "error", message: (e as Error).message });
-      });
-  }, [workspaceId, defaultAssistantId, poll]);
-
-  const submitCode = useCallback(() => {
-    const pairingId = pairingIdRef.current;
-    const code = verifyCode.trim();
-    if (!pairingId || !code) return;
-    setPhase({ kind: "scanned" });
-    setVerifyCode("");
-    void submitWechatVerifyCode(workspaceId, pairingId, code).catch((e: unknown) => {
-      setPhase({ kind: "error", message: (e as Error).message });
-    });
-  }, [workspaceId, verifyCode]);
-
-  useEffect(
-    () => () => {
-      stopRef.current = true;
-    },
-    [],
-  );
-
-  return (
-    <div className="flex flex-col gap-3">
-      <p className="text-xs text-muted-foreground">{wc.hint}</p>
-      <ul className="flex flex-col gap-0.5 text-xs text-muted-foreground list-disc pl-4">
-        <li>{limits.limitContact}</li>
-        <li>{limits.limitDmsOnly}</li>
-        <li>{limits.limitNoHistory}</li>
-        <li>{limits.limitSingleConnection}</li>
-      </ul>
-
-      {phase.kind === "qr" ? (
-        <div className="flex flex-col items-center gap-2 self-center py-2">
-          <div className="rounded-lg bg-white p-3">
-            <QRCodeSVG value={phase.url} size={208} />
-          </div>
-          <p className="max-w-xs text-center text-xs text-muted-foreground">
-            {wc.scanHint}
-          </p>
-        </div>
-      ) : phase.kind === "loading" ? (
-        <p className="py-4 text-center text-sm text-muted-foreground">{wc.loading}</p>
-      ) : phase.kind === "scanned" ? (
-        <p className="py-4 text-center text-sm text-muted-foreground">{wc.verifying}</p>
-      ) : phase.kind === "verify" ? (
-        <div className="flex flex-col gap-2 self-center py-2">
-          <p className="max-w-xs text-center text-sm">
-            {phase.rejected ? wc.verifyRejected : wc.verifyPrompt}
-          </p>
-          <div className="flex items-center gap-2 self-center">
-            <input
-              type="text"
-              inputMode="numeric"
-              value={verifyCode}
-              onChange={(e) => setVerifyCode(e.target.value)}
-              onKeyDown={(e) => {
-                if (e.key === "Enter") submitCode();
-              }}
-              maxLength={8}
-              className="w-28 text-center text-[16px] md:text-sm rounded-md border border-border bg-background px-2 py-1.5 font-mono tracking-widest"
-            />
-            <button
-              type="button"
-              onClick={submitCode}
-              disabled={!verifyCode.trim()}
-              className="rounded-md bg-action px-3 py-1.5 text-sm font-medium text-action-foreground disabled:opacity-50"
-            >
-              {wc.verifySubmit}
-            </button>
-          </div>
-        </div>
-      ) : phase.kind === "connected" ? (
-        <div className="flex flex-col gap-1">
-          <p className="text-sm font-medium text-emerald-600 dark:text-emerald-400">
-            {wc.connected}
-          </p>
-          {phase.connectorError && (
-            <p className="text-xs text-amber-600 dark:text-amber-400">
-              {wc.connectorWarning}
-            </p>
-          )}
-        </div>
-      ) : phase.kind === "already_bound" ? (
-        <p className="text-sm text-muted-foreground">{wc.alreadyBound}</p>
-      ) : phase.kind === "expired" || phase.kind === "error" ? (
-        <div className="flex items-center gap-3">
-          <span className="text-xs text-destructive">
-            {phase.kind === "expired" ? wc.expired : wc.error}
-          </span>
-          <button
-            type="button"
-            onClick={start}
-            className="rounded-md bg-action px-3 py-1.5 text-sm font-medium text-action-foreground"
-          >
-            {wc.retry}
-          </button>
-        </div>
-      ) : (
-        <button
-          type="button"
-          onClick={start}
-          className="self-start rounded-md bg-action px-3 py-1.5 text-sm font-medium text-action-foreground"
-        >
-          {wc.startAction}
-        </button>
-      )}
     </div>
   );
 }

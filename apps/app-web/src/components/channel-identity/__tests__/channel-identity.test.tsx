@@ -1,3 +1,4 @@
+// @vitest-environment jsdom
 /**
  * [COMP:app-web/channel-identity] One connect surface for every chat
  * channel: Settings -> Account -> Connected accounts and the Studio channel
@@ -24,15 +25,25 @@ import { CHANNEL_IDENTITY } from "@use-brian/shared";
 import { I18nProvider } from "@/lib/i18n/client";
 import { en } from "@/lib/i18n/dictionaries/en";
 import type { Dictionary } from "@/lib/i18n/dictionaries";
-import { createChannelLinkCode, getChannelIdentities, type LinkedAccount } from "@/lib/api/account";
+import {
+  createChannelLinkCode,
+  getChannelIdentities,
+  type LinkedAccount,
+  type WechatBinding,
+} from "@/lib/api/account";
+import { act } from "react";
+import { createRoot } from "react-dom/client";
 import {
   ChannelIdentityFooter,
   ChannelIdentityRow,
   ConnectedAccountsList,
+  WechatChannelIdentityRow,
 } from "../channel-identity";
 
 const copy = en.settings.account.channelIdentity;
-const empty = { linked: [], emailMatches: [], emailMatching: [], emailMatchingVisible: false };
+const empty = {
+  linked: [], emailMatches: [], emailMatching: [], emailMatchingVisible: false, wechatBindings: [], wechatChannels: [],
+};
 const feishuLink: LinkedAccount = {
   id: "link-1",
   provider: "feishu",
@@ -57,9 +68,11 @@ beforeEach(() => authFetch.mockReset());
 describe("[COMP:app-web/channel-identity] ConnectedAccountsList (Settings)", () => {
   it("renders a row for every connectable channel and names the rest once", () => {
     const html = render(<ConnectedAccountsList initialData={empty} />);
-    for (const label of ["Telegram", "Slack", "Feishu / Lark", "WhatsApp"]) expect(html).toContain(label);
-    expect(html).toContain("Not available yet: Discord, Microsoft Teams, WeChat, Email, Custom channel.");
+    for (const label of ["Telegram", "Slack", "Feishu / Lark", "WhatsApp", "WeChat"]) expect(html).toContain(label);
+    expect(html).toContain("Not available yet: Discord, Microsoft Teams, Email, Custom channel.");
+    // WeChat is channel-scoped: no single global row, only my connections.
     expect(html.match(/data-channel-identity=/g)).toHaveLength(4);
+    expect(html).toContain(copy.wechatNone.replaceAll(">", "&gt;"));
   });
 
   it("shows a linked channel by name with Disconnect, never Connect", () => {
@@ -213,7 +226,139 @@ describe("[COMP:app-web/channel-identity] API wire contracts", () => {
 
   it("reads channel identities scoped to the workspace and defaults safely", async () => {
     authFetch.mockResolvedValueOnce({ ok: false, json: async () => ({}) });
-    expect(await getChannelIdentities("ws-1")).toEqual({ emailMatches: [], emailMatching: [], emailMatchingVisible: false });
+    expect(await getChannelIdentities("ws-1")).toEqual({
+      emailMatches: [], emailMatching: [], emailMatchingVisible: false, wechatBindings: [], wechatChannels: [],
+    });
     expect(String(authFetch.mock.calls[0][0])).toContain("/api/account/channel-identities?workspaceId=ws-1");
+  });
+});
+
+// ── WeChat: channel-scoped rows (A12) ───────────────────────────────
+
+const WS = "00000000-0000-4000-a000-0000000000aa";
+const wechatBinding = (i: number, state: WechatBinding["state"] = "linked"): WechatBinding => ({
+  bindingId: `00000000-0000-4000-b000-${String(i).padStart(12, "0")}`,
+  workspaceId: WS,
+  channelId: `00000000-0000-4000-c000-${String(i).padStart(12, "0")}`,
+  channelName: `WeChat bot ${i}`,
+  state,
+  linkedAt: "2026-10-11T00:00:00.000Z",
+  revokedAt: null,
+});
+
+describe("[COMP:app-web/channel-identity] WeChat connections (channel-scoped)", () => {
+  it("Settings lists each of my twelve WeChat connections as its own row", () => {
+    const bindings = Array.from({ length: 12 }, (_, i) => wechatBinding(i + 1));
+    const html = render(<ConnectedAccountsList kinds={["wechat"]} initialData={{ ...empty, wechatBindings: bindings }} />);
+    expect(html.match(/data-wechat-channel=/g)).toHaveLength(12);
+    expect(html.match(/data-state="linked"/g)).toHaveLength(12);
+    for (const b of bindings) expect(html).toContain(b.channelName!);
+    expect(html).not.toContain(copy.wechatNone.replaceAll(">", "&gt;"));
+  });
+
+  it("names every state with an actionable path, never another account", () => {
+    const cases: Array<[WechatBinding["state"], string, string | null]> = [
+      ["access_removed", copy.wechatAccessRemoved, copy.disconnect],
+      ["pairing_replaced", copy.wechatPairingReplaced, copy.wechatLinkAgain],
+      ["revoked", copy.wechatRevoked, copy.wechatLinkAgain],
+    ];
+    for (const [state, text, action] of cases) {
+      const html = render(<ConnectedAccountsList kinds={["wechat"]} initialData={{ ...empty, wechatBindings: [wechatBinding(1, state)] }} />);
+      expect(html).toContain(htmlText(text));
+      if (action) expect(html).toContain(action);
+    }
+  });
+
+  it("the Studio footer offers a scoped link to a member with no binding and hides the admin summary", () => {
+    const html = render(
+      <ChannelIdentityFooter channel={{ id: "ch-w", channelType: "wechat", displayName: "Front desk bot" }} workspaceId={WS} initialData={empty} />,
+    );
+    expect(html).toContain(copy.wechatNotLinked);
+    expect(html).toContain(`>${copy.wechatLink}<`);
+    expect(html).not.toContain(en.studioPage.channels.wechat.identityTitle);
+  });
+
+  it("an admin sees linked/unlinked/conflict per channel, with revoke or the staff link", () => {
+    const wc = en.studioPage.channels.wechat;
+    const linked = render(
+      <ChannelIdentityFooter
+        channel={{ id: "ch-w", channelType: "wechat" }}
+        workspaceId={WS}
+        initialData={{ ...empty, emailMatchingVisible: true, wechatChannels: [{
+          channelId: "ch-w", channelName: "Bot", state: "linked", account: { id: "u", name: "Sam Example", email: null }, linkedAt: "x",
+        }] }}
+      />,
+    );
+    expect(linked).toContain("Linked to Sam Example.");
+    expect(linked).toContain(wc.revokeBinding);
+    const unlinked = render(
+      <ChannelIdentityFooter
+        channel={{ id: "ch-w", channelType: "wechat" }}
+        workspaceId={WS}
+        initialData={{ ...empty, emailMatchingVisible: true, wechatChannels: [{
+          channelId: "ch-w", channelName: "Bot", state: "unlinked", account: null, linkedAt: null,
+        }] }}
+      />,
+    );
+    expect(unlinked).toContain(wc.stateUnlinked);
+    expect(unlinked).toContain(wc.copyStaffLink);
+    expect(unlinked).not.toContain(wc.revokeBinding);
+  });
+
+  it("linking mints a scoped code, shows the LINK command, and turns linked when the binding appears", async () => {
+    (globalThis as { IS_REACT_ACT_ENVIRONMENT?: boolean }).IS_REACT_ACT_ENVIRONMENT = true;
+    const channelId = "00000000-0000-4000-c000-000000000009";
+    authFetch.mockImplementation(async (url: unknown, init?: { method?: string; body?: string }) => {
+      if (String(url).endsWith("/api/account/wechat/link-code")) {
+        expect(JSON.parse(init!.body!)).toEqual({ workspaceId: WS, channelId });
+        return new Response(JSON.stringify({ code: "ABCDEFGH", expiresAt: new Date(Date.now() + 900_000).toISOString(), channelName: "Bot" }), { status: 200 });
+      }
+      return new Response(JSON.stringify({ ...empty, wechatBindings: [{ ...wechatBinding(9), channelId }] }), { status: 200 });
+    });
+    const onChanged = vi.fn();
+    const container = document.createElement("div");
+    document.body.appendChild(container);
+    const root = createRoot(container);
+    act(() => {
+      root.render(
+        <I18nProvider locale="en" dict={en as unknown as Dictionary}>
+          <WechatChannelIdentityRow workspaceId={WS} channelId={channelId} channelName="Bot" binding={null} onChanged={onChanged} pollMs={5} />
+        </I18nProvider>,
+      );
+    });
+    await act(async () => {
+      [...container.querySelectorAll("button")].find((b) => b.textContent === copy.wechatLink)!.click();
+      await new Promise((r) => setTimeout(r, 0));
+    });
+    expect(container.textContent).toContain("ABCDEFGH");
+    expect(container.textContent).toContain("LINK ABCDEFGH");
+    await act(async () => { await new Promise((r) => setTimeout(r, 30)); });
+    expect(onChanged).toHaveBeenCalled();
+    expect(container.textContent).toContain(copy.wechatLinkedNotice);
+    act(() => root.unmount());
+    container.remove();
+  });
+
+  it("a channel held by another account shows that state without naming the account", async () => {
+    (globalThis as { IS_REACT_ACT_ENVIRONMENT?: boolean }).IS_REACT_ACT_ENVIRONMENT = true;
+    authFetch.mockResolvedValue(new Response(JSON.stringify({ error: "linked_elsewhere", code: "linked_elsewhere" }), { status: 409 }));
+    const container = document.createElement("div");
+    document.body.appendChild(container);
+    const root = createRoot(container);
+    act(() => {
+      root.render(
+        <I18nProvider locale="en" dict={en as unknown as Dictionary}>
+          <WechatChannelIdentityRow workspaceId={WS} channelId="ch" channelName="Bot" binding={null} />
+        </I18nProvider>,
+      );
+    });
+    await act(async () => {
+      [...container.querySelectorAll("button")].find((b) => b.textContent === copy.wechatLink)!.click();
+      await new Promise((r) => setTimeout(r, 0));
+    });
+    expect(container.textContent).toContain(copy.wechatLinkedElsewhere);
+    expect(container.querySelector("[data-state]")?.getAttribute("data-state")).toBe("linked_elsewhere");
+    act(() => root.unmount());
+    container.remove();
   });
 });

@@ -2463,6 +2463,27 @@ export function channelsRoutes(opts: ChannelsRouteOptions): Router {
     res.json({ ok: true })
   })
 
+  // GET /workspaces/:workspaceId/channels/:channelId/wechat/transport —
+  // owner/admin view of the connector loop: polling, paused (stale bot token),
+  // stopped / not running, or unreachable. Coarse states only.
+  router.get('/workspaces/:workspaceId/channels/:channelId/wechat/transport', async (req, res) => {
+    const userId = (req as { userId?: string }).userId
+    if (!userId) { res.status(401).json({ error: 'Unauthorized' }); return }
+    const { workspaceId, channelId } = req.params
+    const role = await opts.workspaceStore.getRole(userId, workspaceId)
+    if (role !== 'owner' && role !== 'admin') { res.status(403).json({ error: 'Forbidden' }); return }
+    if (!UUID_RE.test(channelId) || !opts.identityStore) { res.status(404).json({ error: 'Not found' }); return }
+    const summary = await opts.identityStore.listWorkspaceWechatIdentitySummary(workspaceId)
+    if (!summary.some((c) => c.channelId === channelId)) { res.status(404).json({ error: 'Not found' }); return }
+    if (!opts.wechatConnector) { res.json({ status: 'unavailable' }); return }
+    try {
+      const status = await opts.wechatConnector.status(channelId)
+      res.json({ status: status?.status ?? 'not_running' })
+    } catch {
+      res.json({ status: 'unavailable' })
+    }
+  })
+
   // DELETE /workspaces/:workspaceId/channels/:channelId/wechat/binding —
   // owner/admin revocation of a connection's staff binding. Revokes access
   // and outstanding link codes; never assigns a replacement account.

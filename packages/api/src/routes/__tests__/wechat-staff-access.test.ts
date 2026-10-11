@@ -86,6 +86,7 @@ function setup(roles: Record<string, 'owner' | 'admin' | 'member' | null>) {
     provisionWechatTransport: vi.fn(),
     revokeWechatChannelBinding: vi.fn(),
     invalidateWechatTransport: vi.fn(),
+    listWorkspaceWechatIdentitySummary: vi.fn(async () => [{ channelId: CHANNEL }]),
   } as unknown as ChannelIdentityBindingStore & {
     provisionWechatTransport: ReturnType<typeof vi.fn>
     revokeWechatChannelBinding: ReturnType<typeof vi.fn>
@@ -223,6 +224,20 @@ describe('[COMP:api/wechat-inbound] WeChat pairing: creator-only, explicit final
     vi.mocked(findAssistantById).mockResolvedValue({ id: ASSISTANT, workspaceId: 'other' } as never)
     expect((await t.as('alice').post(base).send({ mode: 'self', defaultAssistantId: ASSISTANT })).status).toBe(400)
     expect(t.connector.startPairing).not.toHaveBeenCalled()
+  })
+
+  it('A12: owners/admins read a WeChat connector state (paused, not running); members and foreign channels do not', async () => {
+    const t = setup({ alice: 'member', admin: 'admin' })
+    const path = `/api/workspaces/${WS}/channels/${CHANNEL}/wechat/transport`
+    expect((await t.as('alice').get(path)).status).toBe(403)
+    t.connector.status.mockResolvedValueOnce({ channelId: CHANNEL, status: 'paused' })
+    expect((await t.as('admin').get(path)).body).toEqual({ status: 'paused' })
+    t.connector.status.mockResolvedValueOnce(null)
+    expect((await t.as('admin').get(path)).body).toEqual({ status: 'not_running' })
+    t.connector.status.mockRejectedValueOnce(new Error('down'))
+    expect((await t.as('admin').get(path)).body).toEqual({ status: 'unavailable' })
+    const other = '00000000-0000-4000-a000-0000000000ee'
+    expect((await t.as('admin').get(`/api/workspaces/${WS}/channels/${other}/wechat/transport`)).status).toBe(404)
   })
 
   it('A3/D9: only owners and admins revoke a connection binding, with an audit event', async () => {

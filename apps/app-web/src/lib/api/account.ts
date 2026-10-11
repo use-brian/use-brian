@@ -218,6 +218,30 @@ export type ChannelEmailMatching = {
   at: string;
 };
 
+/**
+ * One of the caller's own WeChat connections (per bot, per workspace). WeChat
+ * links are channel-scoped: never collapsed into one global WeChat link.
+ * See docs/architecture/channels/wechat.md → "Staff identity".
+ */
+export type WechatBinding = {
+  bindingId: string;
+  workspaceId: string;
+  channelId: string;
+  channelName: string | null;
+  state: "linked" | "revoked" | "pairing_replaced" | "access_removed";
+  linkedAt: string;
+  revokedAt: string | null;
+};
+
+/** Owner/admin per-channel summary. Members never receive this. */
+export type WechatChannelSummary = {
+  channelId: string;
+  channelName: string | null;
+  state: "linked" | "unlinked" | "revoked" | "conflict";
+  account: { id: string; name: string | null; email: string | null } | null;
+  linkedAt: string | null;
+};
+
 export type ChannelIdentities = {
   /** Providers whose sender was matched to this account by email. */
   emailMatches: ChannelEmailMatch[];
@@ -225,13 +249,19 @@ export type ChannelIdentities = {
   emailMatching: ChannelEmailMatching[];
   /** True when the caller is an owner/admin of the requested workspace. */
   emailMatchingVisible: boolean;
+  /** The caller's own WeChat connections. */
+  wechatBindings: WechatBinding[];
+  /** Per WeChat channel linked/unlinked/revoked/conflict; owners/admins only. */
+  wechatChannels: WechatChannelSummary[];
 };
 
 /** `GET /api/account/channel-identities`. Resolves empty lists on failure. */
 export async function getChannelIdentities(
   workspaceId?: string | null,
 ): Promise<ChannelIdentities> {
-  const empty: ChannelIdentities = { emailMatches: [], emailMatching: [], emailMatchingVisible: false };
+  const empty: ChannelIdentities = {
+    emailMatches: [], emailMatching: [], emailMatchingVisible: false, wechatBindings: [], wechatChannels: [],
+  };
   try {
     const qs = workspaceId ? `?workspaceId=${encodeURIComponent(workspaceId)}` : "";
     const res = await authFetch(`${API_URL}/api/account/channel-identities${qs}`);
@@ -241,8 +271,52 @@ export async function getChannelIdentities(
       emailMatches: data.emailMatches ?? [],
       emailMatching: data.emailMatching ?? [],
       emailMatchingVisible: data.emailMatchingVisible === true,
+      wechatBindings: data.wechatBindings ?? [],
+      wechatChannels: data.wechatChannels ?? [],
     };
   } catch {
     return empty;
+  }
+}
+
+export type WechatLinkCodeResult =
+  | { ok: true; code: string; expiresAt: string; channelName: string | null }
+  | { ok: false; reason: "not_found" | "linked_elsewhere" | "conflict" | "rate_limited" | "unavailable" | "error" };
+
+/**
+ * Mint a WeChat link code for the signed-in account on ONE channel. The
+ * person sends `LINK <code>` from the WeChat account that paired that bot.
+ */
+export async function createWechatLinkCode(
+  workspaceId: string,
+  channelId: string,
+): Promise<WechatLinkCodeResult> {
+  try {
+    const res = await authFetch(`${API_URL}/api/account/wechat/link-code`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ workspaceId, channelId }),
+    });
+    if (res.ok) return { ok: true, ...((await res.json()) as { code: string; expiresAt: string; channelName: string | null }) };
+    if (res.status === 503) return { ok: false, reason: "unavailable" };
+    const data = (await res.json().catch(() => ({}))) as { code?: string };
+    const reason = data.code === "linked_elsewhere" || data.code === "conflict" || data.code === "rate_limited" || data.code === "not_found"
+      ? data.code
+      : "error";
+    return { ok: false, reason };
+  } catch {
+    return { ok: false, reason: "error" };
+  }
+}
+
+/** Disconnect one of the caller's own WeChat connections. */
+export async function revokeWechatBinding(bindingId: string): Promise<boolean> {
+  try {
+    const res = await authFetch(`${API_URL}/api/account/wechat/bindings/${encodeURIComponent(bindingId)}`, {
+      method: "DELETE",
+    });
+    return res.ok;
+  } catch {
+    return false;
   }
 }

@@ -49,6 +49,15 @@ export type ChannelIdentityDescriptor = {
    */
   emailMatching: boolean
   /**
+   * What one link covers. `account` (the default): one link per provider for
+   * the whole account, read from `linked_identities`. `channel`: one link per
+   * Studio channel and workspace (WeChat, where every staff member pairs their
+   * own bot), minted with `{ workspaceId, channelId }` and read from the
+   * canonical `identity_bindings` table; such rows are never collapsed into
+   * one global link. See docs/architecture/channels/wechat.md → "Staff identity".
+   */
+  scope: 'account' | 'channel'
+  /**
    * Whether the route records its email-matching status
    * (`channel_email_lookup_*`), so the Studio footer can show it to admins.
    * A channel that matches by email but does not report shows no status line
@@ -60,6 +69,7 @@ export type ChannelIdentityDescriptor = {
 export const CHANNEL_IDENTITY: Record<ChannelIdentityKind, ChannelIdentityDescriptor> = {
   telegram: {
     kind: 'telegram',
+    scope: 'account',
     linkProvider: 'telegram',
     connect: 'code_deeplink',
     codeEndpoint: '/api/account/telegram/link-code',
@@ -68,6 +78,7 @@ export const CHANNEL_IDENTITY: Record<ChannelIdentityKind, ChannelIdentityDescri
   },
   slack: {
     kind: 'slack',
+    scope: 'account',
     linkProvider: 'slack',
     connect: 'code',
     codeEndpoint: '/api/account/slack/link-code',
@@ -76,6 +87,7 @@ export const CHANNEL_IDENTITY: Record<ChannelIdentityKind, ChannelIdentityDescri
   },
   feishu: {
     kind: 'feishu',
+    scope: 'account',
     linkProvider: 'feishu',
     connect: 'code',
     codeEndpoint: '/api/account/feishu/link-code',
@@ -84,17 +96,28 @@ export const CHANNEL_IDENTITY: Record<ChannelIdentityKind, ChannelIdentityDescri
   },
   whatsapp: {
     kind: 'whatsapp',
+    scope: 'account',
     linkProvider: 'whatsapp',
     connect: 'code',
     codeEndpoint: '/api/account/whatsapp/link-code',
     emailMatching: false,
     emailStatusReported: false,
   },
-  discord: { kind: 'discord', linkProvider: null, connect: 'unavailable', codeEndpoint: null, emailMatching: false, emailStatusReported: false },
-  msteams: { kind: 'msteams', linkProvider: null, connect: 'unavailable', codeEndpoint: null, emailMatching: false, emailStatusReported: false },
-  wechat: { kind: 'wechat', linkProvider: null, connect: 'unavailable', codeEndpoint: null, emailMatching: false, emailStatusReported: false },
-  email: { kind: 'email', linkProvider: null, connect: 'unavailable', codeEndpoint: null, emailMatching: false, emailStatusReported: false },
-  custom: { kind: 'custom', linkProvider: null, connect: 'unavailable', codeEndpoint: null, emailMatching: false, emailStatusReported: false },
+  discord: { kind: 'discord', scope: 'account', linkProvider: null, connect: 'unavailable', codeEndpoint: null, emailMatching: false, emailStatusReported: false },
+  msteams: { kind: 'msteams', scope: 'account', linkProvider: null, connect: 'unavailable', codeEndpoint: null, emailMatching: false, emailStatusReported: false },
+  // Per-channel: each staff member links the bot they paired. The claim is
+  // `LINK <code>` sent from that QR-bound WeChat account (routes/wechat.ts).
+  wechat: {
+    kind: 'wechat',
+    scope: 'channel',
+    linkProvider: null,
+    connect: 'code',
+    codeEndpoint: '/api/account/wechat/link-code',
+    emailMatching: false,
+    emailStatusReported: false,
+  },
+  email: { kind: 'email', scope: 'account', linkProvider: null, connect: 'unavailable', codeEndpoint: null, emailMatching: false, emailStatusReported: false },
+  custom: { kind: 'custom', scope: 'account', linkProvider: null, connect: 'unavailable', codeEndpoint: null, emailMatching: false, emailStatusReported: false },
 }
 
 /**
