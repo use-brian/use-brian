@@ -68,6 +68,7 @@ export class EmbeddedBrowserHost {
   private readonly entries = new Map<number, Tab>();
   private selected: number | null = null;
   private status = "";
+  private readonly profileName: string | null;
   private theme: BrowserTheme | null = null;
   private disposed = false;
   /**
@@ -81,10 +82,11 @@ export class EmbeddedBrowserHost {
   private readonly selectedByChat = new Map<string | null, number>();
   readonly files = new BrowserFiles(message => this.setStatus(message));
 
-  constructor(partition: string, private readonly callbacks: Callbacks, options: { dockWindow?: BrowserWindow | null } = {}) {
+  constructor(partition: string, private readonly callbacks: Callbacks, options: { dockWindow?: BrowserWindow | null; profileName?: string | null } = {}) {
     if (!partition.startsWith("persist:") || partition.length <= 8 || partition.startsWith("persist:deployment-")) {
       throw new Error("Embedded browser requires a dedicated persistent partition (not an app deployment partition)");
     }
+    this.profileName = options.profileName ?? null;
     this.browsingSession = session.fromPartition(partition);
     if (this.browsingSession === session.defaultSession || activeSessions.has(this.browsingSession)) {
       throw new Error("Embedded browser partition is already in use");
@@ -457,7 +459,7 @@ export class EmbeddedBrowserHost {
   private publish(): void {
     if (this.disposed || this.toolbar.webContents.isDestroyed()) return;
     this.toolbar.webContents.send(STATE, {
-      status: this.status, selected: this.selected, theme: this.theme,
+      status: this.status, profile: this.profileName, selected: this.selected, theme: this.theme,
       presentation: { mode: this.docked ? "docked" : "detached", collapsed: this.collapsed,
         panelWidth: this.panelWidth, minWidth: 360, maxWidth: this.maxWidth },
       tabs: [...this.entries.values()].filter(tab => !tab.contents.isDestroyed() && (!this.slot || tab.chatKey === this.slot.chatKey)).map(tab => ({

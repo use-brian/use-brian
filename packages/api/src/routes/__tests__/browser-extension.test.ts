@@ -132,6 +132,8 @@ describe('[COMP:sandbox/browser-tools] Profile-scoped browser-extension pairing 
       userId: 'user-1',
       workspaceId: WORKSPACE_ID,
       browserProfileId: profile.id,
+      // Display-only: lets the native browser chrome name the profile it signs into.
+      browserProfileName: 'Personal Chrome',
     })
   })
 

@@ -15,6 +15,13 @@ export function browserUrl(value: unknown): string {
   return url.href;
 }
 
+/** Display-only profile name. Never keys storage, so a rename keeps the profile's cookies. */
+export function profileLabel(value: unknown): string | null {
+  if (typeof value !== "string") return null;
+  const label = value.replace(/[\u0000-\u001f\u007f-\u009f\u200b-\u200f\u202a-\u202e\u2066-\u2069]/g, "").trim();
+  return label ? (label.length > 80 ? `${label.slice(0, 79)}…` : label) : null;
+}
+
 /**
  * A message from the Chat side pane (chat-parity T7), already from the
  * trusted app frame: its browser slot (CSS px, scaled by the app's zoom to
@@ -55,6 +62,7 @@ export function browserPairing(input: unknown, accountScope: string) {
   const key = createHash("sha256").update(JSON.stringify([accountScope, url.href, claims.userId, claims.workspaceId, claims.browserProfileId])).digest("hex");
   return { relayUrl: url.href, token: value.pairingToken, userId: claims.userId as string,
     workspaceId: claims.workspaceId as string, browserProfileId: claims.browserProfileId as string,
+    browserProfileName: profileLabel(claims.browserProfileName),
     partition: `persist:embedded-browser-${key}` };
 }
 
@@ -77,6 +85,7 @@ export class EmbeddedBrowser {
   private queue: Promise<void> = Promise.resolve();
   private cancelReady: (() => void) | null = null;
   private identity: { workspaceId: string; browserProfileId: string } | null = null;
+  private profileName: string | null = null;
 
   private automaticBlocked = false;
   // Keep only the approved control channel while the browser renderers are shut down.
@@ -125,7 +134,9 @@ export class EmbeddedBrowser {
   }
 
   status(): { connected: boolean; automaticBlocked: boolean; controlEpoch: number; workspaceId?: string; browserProfileId?: string } {
-    return { connected: this.active && this.relay?.getState() === "ready",
+    // An armed relay (automatic pair, pane not opened yet) is connected: Brian can drive it.
+    const live = this.partition !== null && (this.active || !this.automaticBlocked);
+    return { connected: live && this.relay?.getState() === "ready",
       automaticBlocked: this.automaticBlocked, controlEpoch: this.generation, ...this.identity };
   }
 
@@ -136,15 +147,16 @@ export class EmbeddedBrowser {
     // An explicit Resume must not override a newer Stop while credentials were minted.
     if (expectedControlEpoch !== undefined && expectedControlEpoch !== this.generation) return false;
     const automatic = auto === true;
-    if (automatic && (this.automaticBlocked || this.active)) return false;
+    if (automatic && (this.automaticBlocked || this.active || this.partition !== null)) return false;
     this.pairing = true;
     this.dispose();
     this.identity = { workspaceId: pair.workspaceId, browserProfileId: pair.browserProfileId };
+    this.profileName = pair.browserProfileName;
     const generation = this.generation;
     try {
       if (!this.approvals.has(pair.partition)) {
-        const answer = await dialog.showMessageBox({ type: "question", title: "Set up Brian Browser", message: "Allow this browser profile to start automatically?",
-          detail: `Relay: ${new URL(pair.relayUrl).origin}\n\nBrian can read and interact with all in-app tabs, including tabs you open manually and sites you sign in to. This never grants access to your system browser or the Use Brian app. This browser has separate cookies from your normal browser. Approval is remembered for this account, relay and profile. Stop Brian hands every tab back to you without closing it; the browser closes when you close its last tab. The browser button or a new Brian navigation request can start it again. Webpage downloads (up to 32 MiB each) are held temporarily and can be read or saved to workspace files by Brian. Uploads use authorized workspace files (up to 4 MiB each) and require approval; websites may send them immediately upon selection. Temporary files are deleted when this browser closes. Protected credential filling is not supported. This replaces any browser already paired to this profile.`,
+        const answer = await dialog.showMessageBox({ type: "question", title: "Set up Brian Browser", message: pair.browserProfileName ? `Allow browser profile "${pair.browserProfileName}" to start automatically?` : "Allow this browser profile to start automatically?",
+          detail: `${pair.browserProfileName ? `Browser profile: ${pair.browserProfileName}\n` : ""}Relay: ${new URL(pair.relayUrl).origin}\n\nBrian can read and interact with all in-app tabs, including tabs you open manually and sites you sign in to. This never grants access to your system browser or the Use Brian app. This browser has separate cookies from your normal browser. Approval is remembered for this account, relay and profile. Stop Brian hands every tab back to you without closing it; the browser closes when you close its last tab. The browser button or a new Brian navigation request can start it again. Webpage downloads (up to 32 MiB each) are held temporarily and can be read or saved to workspace files by Brian. Uploads use authorized workspace files (up to 4 MiB each) and require approval; websites may send them immediately upon selection. Temporary files are deleted when this browser closes. Protected credential filling is not supported. This replaces any browser already paired to this profile.`,
           buttons: ["Not now", "Allow automatic sessions"], defaultId: 0, cancelId: 0 });
         if (generation !== this.generation) return false;
         if (answer.response !== 1) { this.automaticBlocked = true; return false; }
@@ -190,7 +202,10 @@ export class EmbeddedBrowser {
       this.cancelReady = null;
       if (!connected || generation !== this.generation) { if (generation === this.generation) this.dispose(); return false; }
       this.approvals.grant(pair.partition);
-      this.startHost(pair.partition);
+      // A background pair only arms the relay. The pane opens on Brian's first
+      // command or an explicit open, never just because the app loaded.
+      if (automatic) { this.partition = pair.partition; this.automaticBlocked = false; }
+      else this.startHost(pair.partition);
       return true;
     } catch {
       if (generation === this.generation) this.dispose();
@@ -215,7 +230,7 @@ export class EmbeddedBrowser {
       detached: id => {
         if (this.host === host && this.executor?.onDetached(id)) this.stop();
       },
-    }, { dockWindow: this.options.getDockWindow?.() });
+    }, { dockWindow: this.options.getDockWindow?.(), profileName: this.profileName });
     this.host = host;
     if (this.paneSlot) host.setSlot(this.paneSlot);
     host.setTaskChat(this.paneTaskChat);
@@ -305,6 +320,7 @@ export class EmbeddedBrowser {
     this.stop(false);
     if (!preserveAutomaticBlock) this.automaticBlocked = false;
     this.identity = null;
+    this.profileName = null;
   }
 
   private check(generation: number): void {
@@ -369,10 +385,12 @@ export class EmbeddedBrowser {
       this.host.setTaskChat(this.paneTaskChat);
     }
     // Follow-up reads/clicks from the stopped task must not reopen the browser.
-    // Only a URL-bearing starter can create a fresh task session.
-    if (!this.active && this.partition && (cmd.op === "navigate" || cmd.op === "openTab")) {
+    // Only a URL-bearing starter can create a fresh task session. An armed
+    // relay (never stopped since pairing) opens the pane for any command.
+    const starter = cmd.op === "navigate" || cmd.op === "openTab";
+    if (!this.active && this.partition && (starter || !this.automaticBlocked)) {
       try {
-        browserUrl(cmd.args.url);
+        if (starter) browserUrl(cmd.args.url);
         generation = ++this.generation;
         this.startHost(this.partition);
       } catch (error) {

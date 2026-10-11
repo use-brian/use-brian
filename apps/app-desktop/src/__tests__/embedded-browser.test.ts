@@ -15,7 +15,7 @@ vi.mock('../embedded-browser-host.js', () => ({
     taskTabs() { return this.entries; }
     isDockedFocused = vi.fn(() => false);
     files = { list: vi.fn(() => ({ downloads: [] })), read: vi.fn(async () => ({ data: 'eA==', offset: 0, total: 1 })), stageUpload: vi.fn(async () => '/private/staged/file.pdf') };
-    constructor(public partition: string, public callbacks: any, public options?: { dockWindow?: BrowserWindow | null }) { mocks.hosts.push(this); }
+    constructor(public partition: string, public callbacks: any, public options?: { dockWindow?: BrowserWindow | null; profileName?: string | null }) { mocks.hosts.push(this); }
     tabs() { return this.entries; }
     selectedId() { return this.selected; }
     selectTab(id: number) { this.selected = id; }
@@ -38,7 +38,7 @@ vi.mock('../embedded-browser-host.js', () => ({
   },
 }));
 import { TabExecutor } from '@use-brian/browser-control/executor.js';
-import { browserPairing, browserUrl, EmbeddedBrowser } from '../embedded-browser.js';
+import { browserPairing, browserUrl, EmbeddedBrowser, profileLabel } from '../embedded-browser.js';
 
 class Socket {
   static all: Socket[] = [];
@@ -124,6 +124,16 @@ describe('[COMP:app-desktop/embedded-browser] pairing validation and storage iso
     const others = [browserPairing(input(), 'other'), browserPairing(input({}, 'wss://other.example/'), 'account'),
       ...['userId', 'workspaceId', 'browserProfileId'].map(key => browserPairing(input({ [key]: 'other' }), 'account'))];
     expect(new Set([base, ...others.map(p => p.partition)]).size).toBe(6);
+  });
+  it('reads the profile name for display only, so a rename keeps the same cookie partition', () => {
+    const named = browserPairing(input({ browserProfileName: 'Work Twitter' }), 'account');
+    expect(named.browserProfileName).toBe('Work Twitter');
+    expect(named.partition).toBe(browserPairing(input(), 'account').partition);
+    expect(browserPairing(input({ browserProfileName: 'Renamed' }), 'account').partition).toBe(named.partition);
+    expect(browserPairing(input(), 'account').browserProfileName).toBeNull();
+  });
+  it.each([[42, null], ['   ', null], ['\u202eevil\u0007 name ', 'evil name'], ['x'.repeat(200), `${'x'.repeat(79)}…`]])('normalizes profile label %j', (value, expected) => {
+    expect(profileLabel(value)).toBe(expected);
   });
   it.each(['ws://remote.example', 'https://relay.example', 'wss://u:p@relay.example', 'wss://relay.example/#x', 'wss://relay.example/?token=x'])('rejects unsafe relay %s', url => {
     expect(() => browserPairing(input({}, url), 'account')).toThrow();
@@ -338,6 +348,23 @@ describe('[COMP:app-desktop/embedded-browser] native pairing lifecycle with the 
   });
 });
 
+describe('[COMP:app-desktop/embedded-browser] profile name in native chrome', () => {
+  it('names the profile in the consent dialog and hands it to the browser toolbar', async () => {
+    const pending = browser.pair(input({ browserProfileName: 'Work Twitter' }), 'account');
+    await flush(); socket().open(); socket().message({ type: 'ready', sessionToken: 'session-secret' });
+    expect(await pending).toBe(true);
+    const dialog = mocks.consent.mock.calls[0][0];
+    expect(dialog.message).toContain('"Work Twitter"');
+    expect(dialog.detail).toMatch(/^Browser profile: Work Twitter\n/);
+    expect(host().options?.profileName).toBe('Work Twitter');
+  });
+  it('falls back to the generic copy when the server sent no name', async () => {
+    await connect();
+    expect(mocks.consent.mock.calls[0][0].message).toBe('Allow this browser profile to start automatically?');
+    expect(host().options?.profileName).toBeNull();
+  });
+});
+
 describe('[COMP:app-desktop/embedded-browser] standing approval and automatic lifecycle', () => {
   const automatic = (overrides = {}, relay?: string) => ({ ...input(overrides, relay), automatic: true });
   async function ready(pending: Promise<boolean>) {
@@ -350,6 +377,7 @@ describe('[COMP:app-desktop/embedded-browser] standing approval and automatic li
     browser.dispose(); browser = new EmbeddedBrowser({ approvals });
     await ready(browser.pair(automatic({ exp: claims.exp + 10 }), 'account'));
     expect(mocks.consent).toHaveBeenCalledOnce();
+    browser.show();
     await host().createTab('https://manual.example/', false);
     expect(await command('currentUrl')).toMatchObject({ ok: true, data: { url: 'https://manual.example/' } });
     expect(mocks.consent).toHaveBeenCalledOnce();
@@ -361,6 +389,27 @@ describe('[COMP:app-desktop/embedded-browser] standing approval and automatic li
     await ready(browser.pair(next, dimension === 'account' ? 'other-account' : 'account'));
     expect(mocks.consent).toHaveBeenCalledTimes(2);
     expect(new Set(approvals.grant.mock.calls.map(([key]) => key)).size).toBe(2);
+  });
+  it('automatic pairing arms the relay without opening the pane until Brian or the user does', async () => {
+    await connect(); browser.dispose(); mocks.hosts.length = 0;
+    await ready(browser.pair(automatic(), 'account'));
+    expect(mocks.hosts).toHaveLength(0);
+    expect(browser.status()).toEqual({ controlEpoch: 3, connected: true, automaticBlocked: false, ...identity });
+    // An armed relay is a live session: another automatic pair must not replace it.
+    expect(await browser.pair(automatic({ browserProfileId: 'other' }), 'account')).toBe(false);
+    expect(Socket.all).toHaveLength(2);
+    expect(await command('listTabs')).toMatchObject({ ok: true });
+    expect(mocks.hosts).toHaveLength(1); expect(host().show).toHaveBeenCalledOnce();
+  });
+  it('an armed relay opens the pane on an explicit show or a Brian navigation', async () => {
+    await connect(); browser.dispose(); mocks.hosts.length = 0;
+    await ready(browser.pair(automatic(), 'account'));
+    browser.show();
+    expect(mocks.hosts).toHaveLength(1); expect(host().show).toHaveBeenCalledOnce();
+    browser.dispose(); mocks.hosts.length = 0;
+    await ready(browser.pair(automatic(), 'account'));
+    expect(await command('navigate', { url: 'https://example.com' })).toMatchObject({ ok: true });
+    expect(mocks.hosts).toHaveLength(1); expect(host().show).toHaveBeenCalledOnce();
   });
   it('denial blocks repeated automatic attempts until explicit resume', async () => {
     mocks.consent.mockResolvedValueOnce({ response: 0 });
