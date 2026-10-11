@@ -56,6 +56,19 @@ export type WechatConnectorStatus = {
   lastEventAt?: number
 }
 
+/**
+ * Start (or replace) one bot's loop. `botId` lets the connector refuse a
+ * second live loop for the same bot; `generation` tags every inbound and
+ * cursor write so a replaced loop cannot speak for the new transport.
+ */
+export type WechatConnectInput = {
+  botToken: string
+  baseUrl: string
+  botId: string
+  generation: number
+  getUpdatesBuf?: string
+}
+
 export type WechatConnectorClient = {
   /** Open a QR pairing session. Returns the id to poll + the QR content URL. */
   startPairing(): Promise<{ pairingId: string; qrcodeUrl: string }>
@@ -66,7 +79,7 @@ export type WechatConnectorClient = {
   /** Start (or replace) the long-poll loop for a channel's bot. */
   connect(
     channelId: string,
-    input: { botToken: string; baseUrl: string; getUpdatesBuf?: string },
+    input: WechatConnectInput,
   ): Promise<WechatConnectorStatus>
   /** Stop the long-poll loop for a channel. Idempotent. */
   disconnect(channelId: string): Promise<void>

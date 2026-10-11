@@ -118,7 +118,7 @@ export const CHANNEL_CAPABILITIES: Record<ChannelType, ChannelCapability[]> = {
  * vanished mid-connect; the runtime resolver clamps it down for plans that
  * don't allow Pro, so an over-generous seed is safe.
  */
-async function seedAliasForAssistant(
+export async function seedAliasForAssistant(
   client: PoolClient,
   assistantId: string,
 ): Promise<ChannelModelAlias> {

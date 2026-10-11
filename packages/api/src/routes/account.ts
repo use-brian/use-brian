@@ -14,6 +14,7 @@ import { getWorkspaceRoleSystem } from '../db/workspace-store.js'
 
 const UUID_PATTERN = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i
 import type { LinkCodeStore } from '../db/link-codes.js'
+import type { ChannelIdentityBindingStore } from '../db/channel-identity-bindings.js'
 import type { GcsFilesClient } from '../files/gcs-client.js'
 import { buildStorageKey, buildStorageUri } from '../files/gcs-client.js'
 import type { FilesClientResolver } from '../files/files-api.js'
@@ -34,6 +35,13 @@ type AccountRouteOptions = {
    * See docs/architecture/platform/auth.md → "Linked accounts".
    */
   linkCodeStore?: LinkCodeStore
+  /**
+   * Canonical channel identity store (migration 743) backing the scoped
+   * WeChat link-code, binding projection and self-revocation routes. Absent
+   * (no CHANNEL_CREDENTIAL_KEY) → those routes return 503 and the projection
+   * omits WeChat. See docs/architecture/channels/wechat.md → "Staff identity".
+   */
+  wechatIdentityStore?: ChannelIdentityBindingStore
   /**
    * Resolves the official bot's @username (boot-cached getMe) so the
    * Settings UI can render a `https://t.me/<bot>?start=<code>` deep link.
@@ -99,6 +107,8 @@ const upload = multer({
  *   POST   /api/account/slack/link-code      — mint a 6-char Slack link code (same rule;
  *                                              pasted to the Brian app in Slack)
  *   POST   /api/account/feishu/link-code     — mint a 6-char Feishu/Lark link code
+ *   POST   /api/account/wechat/link-code     — mint a scoped 8-char code for one WeChat channel
+ *   DELETE /api/account/wechat/bindings/:id  — revoke the caller's own WeChat binding
  *   DELETE /api/account/memories             — wipe memories + user_souls for the calling user
  *   DELETE /api/account                      — tear down the user's entire footprint
  *   PATCH  /api/account/profile              — update display name
@@ -280,10 +290,92 @@ export function accountRoutes(options: AccountRouteOptions = {}): Router {
           }
         })
       }
-      res.json({ emailMatches: matches.rows, emailMatching, emailMatchingVisible })
+      // WeChat bindings are per channel and per workspace: the caller's own
+      // rows (RLS-scoped), plus the per-channel summary for owners/admins.
+      const wechatBindings = options.wechatIdentityStore
+        ? await options.wechatIdentityStore.listOwnWechatBindings(userId, workspaceId)
+        : []
+      const wechatChannels = options.wechatIdentityStore && emailMatchingVisible && workspaceId
+        ? await options.wechatIdentityStore.listWorkspaceWechatIdentitySummary(workspaceId)
+        : []
+      res.json({ emailMatches: matches.rows, emailMatching, emailMatchingVisible, wechatBindings, wechatChannels })
     } catch (err) {
       console.error('[account] channel identities failed:', err)
       res.status(500).json({ error: 'Failed to load channel identities' })
+    }
+  })
+
+  // ── POST /api/account/wechat/link-code ──────────────────────────
+  // Mints a scoped code for the AUTHENTICATED account on one WeChat channel.
+  // The target account is the session's, never the body's. The staff member
+  // sends `LINK <code>` from the QR-bound WeChat account; routes/wechat.ts
+  // claims it. Spec: docs/architecture/channels/wechat.md → "Staff identity".
+
+  router.post('/wechat/link-code', async (req, res) => {
+    const userId = req.userId
+    if (!userId) {
+      res.status(401).json({ error: 'Missing or invalid Authorization header' })
+      return
+    }
+    if (!options.wechatIdentityStore) {
+      res.status(503).json({ error: 'WeChat linking not configured' })
+      return
+    }
+    const body = (req.body ?? {}) as { workspaceId?: unknown; channelId?: unknown }
+    const workspaceId = typeof body.workspaceId === 'string' && UUID_PATTERN.test(body.workspaceId) ? body.workspaceId : null
+    const channelId = typeof body.channelId === 'string' && UUID_PATTERN.test(body.channelId) ? body.channelId : null
+    if (!workspaceId || !channelId) {
+      res.status(400).json({ error: 'workspaceId and channelId are required', code: 'invalid_input' })
+      return
+    }
+    try {
+      const minted = await options.wechatIdentityStore.mintWechatLinkCode({ accountId: userId, workspaceId, channelId })
+      if (!minted.ok) {
+        // Not a member and not found look the same: no existence oracle.
+        const status = minted.reason === 'rate_limited' ? 429
+          : minted.reason === 'linked_elsewhere' || minted.reason === 'conflict' ? 409
+            : 404
+        res.status(status).json({
+          error: minted.reason === 'not_member' ? 'not_found' : minted.reason,
+          code: minted.reason === 'not_member' ? 'not_found' : minted.reason,
+        })
+        return
+      }
+      res.json({ code: minted.code, expiresAt: minted.expiresAt, channelName: minted.channelName })
+    } catch (err) {
+      console.error('[account] wechat link-code failed:', err)
+      res.status(500).json({ error: 'Failed to generate linking code' })
+    }
+  })
+
+  // ── DELETE /api/account/wechat/bindings/:bindingId ──────────────
+  // Revoke the caller's own WeChat binding (RLS-scoped) and its open codes.
+  // Idempotent; another account's binding is indistinguishable from absent.
+
+  router.delete('/wechat/bindings/:bindingId', async (req, res) => {
+    const userId = req.userId
+    if (!userId) {
+      res.status(401).json({ error: 'Missing or invalid Authorization header' })
+      return
+    }
+    if (!options.wechatIdentityStore) {
+      res.status(503).json({ error: 'WeChat linking not configured' })
+      return
+    }
+    if (!UUID_PATTERN.test(req.params.bindingId)) {
+      res.status(404).json({ error: 'Not found' })
+      return
+    }
+    try {
+      const revoked = await options.wechatIdentityStore.revokeOwnWechatBinding(userId, req.params.bindingId)
+      if (!revoked) {
+        res.status(404).json({ error: 'Not found' })
+        return
+      }
+      res.json({ ok: true })
+    } catch (err) {
+      console.error('[account] wechat binding revoke failed:', err)
+      res.status(500).json({ error: 'Failed to disconnect' })
     }
   })
 

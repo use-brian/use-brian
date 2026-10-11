@@ -14,6 +14,7 @@ vi.mock('../../db/workspace-store.js', () => ({
 import { accountRoutes } from '../account.js'
 import { query } from '../../db/client.js'
 import { getWorkspaceRoleSystem } from '../../db/workspace-store.js'
+import type { ChannelIdentityBindingStore } from '../../db/channel-identity-bindings.js'
 
 const mockQuery = vi.mocked(query)
 const mockRole = vi.mocked(getWorkspaceRoleSystem)
@@ -91,5 +92,80 @@ describe('[COMP:api/account-channel-identities] GET /api/account/channel-identit
   it('requires auth', async () => {
     const res = await request(createTestApp('/api/account', accountRoutes({}), {})).get('/api/account/channel-identities')
     expect(res.status).toBe(401)
+  })
+})
+
+describe('[COMP:api/account-channel-identities] scoped WeChat account routes', () => {
+  const bindingId = '00000000-0000-4000-a000-0000000000bb'
+  function wechatStore(over: Partial<ChannelIdentityBindingStore> = {}) {
+    return {
+      mintWechatLinkCode: vi.fn(),
+      revokeOwnWechatBinding: vi.fn(),
+      listOwnWechatBindings: vi.fn().mockResolvedValue([]),
+      listWorkspaceWechatIdentitySummary: vi.fn().mockResolvedValue([]),
+      ...over,
+    } as unknown as ChannelIdentityBindingStore
+  }
+  function wechatApp(store: ChannelIdentityBindingStore, userId = 'u_1') {
+    return createTestApp('/api/account', accountRoutes({ wechatIdentityStore: store }), { userId })
+  }
+  beforeEach(() => {
+    vi.resetAllMocks()
+    mockQuery.mockResolvedValue({ rows: [], rowCount: 0 } as never)
+  })
+
+  it('mints for the session account only, never a body-supplied account', async () => {
+    const store = wechatStore({
+      mintWechatLinkCode: vi.fn().mockResolvedValue({ ok: true, code: 'ABCDEFGH', expiresAt: '2026-10-11T00:15:00.000Z', channelName: 'WeChat bot' }),
+    })
+    const res = await request(wechatApp(store)).post('/api/account/wechat/link-code')
+      .send({ workspaceId, channelId, accountId: 'someone-else', userId: 'someone-else' })
+    expect(res.status).toBe(200)
+    expect(res.body).toEqual({ code: 'ABCDEFGH', expiresAt: '2026-10-11T00:15:00.000Z', channelName: 'WeChat bot' })
+    expect(store.mintWechatLinkCode).toHaveBeenCalledWith({ accountId: 'u_1', workspaceId, channelId })
+  })
+
+  it('answers a non-member exactly like an unknown channel, and types the other refusals', async () => {
+    const mint = vi.fn()
+    const store = wechatStore({ mintWechatLinkCode: mint })
+    const cases: Array<[string, number, string]> = [
+      ['not_member', 404, 'not_found'], ['not_found', 404, 'not_found'],
+      ['linked_elsewhere', 409, 'linked_elsewhere'], ['conflict', 409, 'conflict'], ['rate_limited', 429, 'rate_limited'],
+    ]
+    for (const [reason, status, code] of cases) {
+      mint.mockResolvedValueOnce({ ok: false, reason })
+      const res = await request(wechatApp(store)).post('/api/account/wechat/link-code').send({ workspaceId, channelId })
+      expect([res.status, res.body.code]).toEqual([status, code])
+      expect(JSON.stringify(res.body)).not.toMatch(/u_|account/)
+    }
+    const bad = await request(wechatApp(store)).post('/api/account/wechat/link-code').send({ workspaceId: 'x', channelId })
+    expect(bad.status).toBe(400)
+  })
+
+  it('revokes only through the caller id and hides other accounts\' bindings as 404', async () => {
+    const revoke = vi.fn().mockResolvedValueOnce(true).mockResolvedValueOnce(false)
+    const store = wechatStore({ revokeOwnWechatBinding: revoke })
+    expect((await request(wechatApp(store)).delete(`/api/account/wechat/bindings/${bindingId}`)).status).toBe(200)
+    expect(revoke).toHaveBeenCalledWith('u_1', bindingId)
+    expect((await request(wechatApp(store)).delete(`/api/account/wechat/bindings/${bindingId}`)).status).toBe(404)
+    expect((await request(wechatApp(store)).delete('/api/account/wechat/bindings/not-a-uuid')).status).toBe(404)
+  })
+
+  it('projects the caller\'s own bindings, and the per-channel summary only to owners and admins', async () => {
+    const own = [{ bindingId, workspaceId, channelId, channelName: 'WeChat bot', state: 'linked', linkedAt: 'x', revokedAt: null }]
+    const summary = [{ channelId, channelName: 'WeChat bot', state: 'linked', account: { id: 'u_1', name: 'A', email: null }, linkedAt: 'x' }]
+    const store = wechatStore({
+      listOwnWechatBindings: vi.fn().mockResolvedValue(own),
+      listWorkspaceWechatIdentitySummary: vi.fn().mockResolvedValue(summary),
+    })
+    mockRole.mockResolvedValueOnce('member')
+    const member = await request(wechatApp(store)).get(`/api/account/channel-identities?workspaceId=${workspaceId}`)
+    expect(member.body.wechatBindings).toEqual(own)
+    expect(member.body.wechatChannels).toEqual([])
+    expect(store.listOwnWechatBindings).toHaveBeenCalledWith('u_1', workspaceId)
+    expect(store.listWorkspaceWechatIdentitySummary).not.toHaveBeenCalled()
+    mockRole.mockResolvedValueOnce('admin')
+    const admin = await request(wechatApp(store)).get(`/api/account/channel-identities?workspaceId=${workspaceId}`)
+    expect(admin.body.wechatChannels).toEqual(summary)
   })
 })
