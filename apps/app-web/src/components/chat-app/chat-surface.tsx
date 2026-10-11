@@ -4664,16 +4664,10 @@ export function ChatSurface({ workspaceId }: { workspaceId: string }) {
                     ? t.workspaceHeroTitle
                     : format(t.heroTitle, { name: activeAssistant.name })}
                 </h2>
-                {view === "workspace" && (
-                  <p className="flex items-center gap-1.5 text-sm leading-relaxed text-muted-foreground">
-                    <Users className="size-4 shrink-0" aria-hidden />
-                    {t.sharedTranscriptEmpty}
-                  </p>
-                )}
               </div>
             )}
             <div className="w-full rounded-xl border border-border/70 bg-muted/20 p-3">
-              <ModeAwareCreationContext context={creationContext} disabled={att.uploading}/>
+              <ModeAwareCreationContext context={creationContext} compact disabled={att.uploading}/>
             </div>
             <div className="w-full">{composerBox}</div>
             {error && (
