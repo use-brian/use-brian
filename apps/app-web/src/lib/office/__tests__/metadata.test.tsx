@@ -33,11 +33,50 @@ function Harness({viewer=state.viewer}:{viewer?:string}){
 async function flush(){await act(async()=>{await Promise.resolve();await Promise.resolve();});}
 beforeEach(()=>{
   vi.useFakeTimers();resetSurfaceCache();state.viewer='viewer-a';state.fetch.mockReset();
+  vi.spyOn(console,'warn').mockImplementation(()=>{});
   host=document.createElement('div');document.body.append(host);root=createRoot(host);
 });
-afterEach(()=>{act(()=>root.unmount());host.remove();resetSurfaceCache();vi.useRealTimers();});
+afterEach(()=>{act(()=>root.unmount());host.remove();resetSurfaceCache();vi.useRealTimers();vi.restoreAllMocks();});
 
 describe('[COMP:app-web/office-surface-cache] bounded Office metadata',()=>{
+  it.each([
+    [null,{artifacts:[row]},'missing_lifetime'],
+    ['nonsense',{artifacts:[row]},'invalid_lifetime'],
+    ['30000',{},'invalid_payload'],
+  ] as const)('diagnoses rejected reads without logging protected data (%s)',async(ttl,body,reason)=>{
+    state.fetch.mockResolvedValue(response(body,ttl));
+    await expect(api.listOfficeArtifacts('workspace-private')).rejects.toMatchObject({message:'office_projection_expired',status:409});
+    expect(console.warn).toHaveBeenCalledTimes(1);
+    const [label,serialized]=vi.mocked(console.warn).mock.calls[0];
+    expect(label).toBe('[office_metadata_read]');
+    expect(JSON.parse(serialized as string)).toMatchObject({reason,stage:'annotation',status:200});
+    expect(serialized).not.toMatch(/workspace-private|viewer-a|artifact-a|Department report|\/api\//);
+  });
+  it('distinguishes exhausted lifetime from HTTP rejection without changing either error',async()=>{
+    state.fetch.mockImplementation(async()=>{vi.advanceTimersByTime(4000);return response({artifacts:[row]},'4000');});
+    await expect(api.listOfficeArtifacts('workspace-a')).rejects.toMatchObject({message:'office_projection_expired',status:409});
+    expect(JSON.parse(vi.mocked(console.warn).mock.calls[0][1] as string)).toMatchObject({reason:'lifetime_exhausted',status:200,requestDurationMs:4000,validForMs:4000});
+    state.fetch.mockResolvedValue(response({error:'office_projection_changed'},null,409));
+    await expect(api.listOfficeArtifacts('workspace-a')).rejects.toMatchObject({message:'office_projection_changed',status:409});
+    expect(JSON.parse(vi.mocked(console.warn).mock.calls[1][1] as string)).toMatchObject({reason:'http_error',stage:'body',status:409});
+  });
+  it('warns about insufficient renewal slack while preserving the accepted deadline',async()=>{
+    state.fetch.mockImplementation(async()=>{vi.advanceTimersByTime(8000);return response({artifacts:[row]},'15000');});
+    const result=await api.listOfficeArtifacts('workspace-a');
+    expect(officeMetadataRemaining(result,state.viewer)).toBe(7000);
+    expect(JSON.parse(vi.mocked(console.warn).mock.calls[0][1] as string)).toMatchObject({reason:'renewal_slack_insufficient',requestDurationMs:8000,validForMs:15000,remainingMs:7000});
+    expect(JSON.stringify(result)).not.toContain('renewal_slack_insufficient');
+    vi.advanceTimersByTime(7001);expect(officeMetadataRemaining(result,state.viewer)).toBe(0);
+  });
+  it('keeps transport and JSON errors intact and excludes their arbitrary text from diagnostics',async()=>{
+    const failure=new Error('private transport detail');state.fetch.mockRejectedValue(failure);
+    await expect(api.listOfficeArtifacts('workspace-a')).rejects.toBe(failure);
+    expect(JSON.parse(vi.mocked(console.warn).mock.calls[0][1] as string)).toMatchObject({reason:'transport_failed',status:null});
+    state.fetch.mockResolvedValue(new Response('private malformed body',{status:200}));
+    await expect(api.listOfficeArtifacts('workspace-a')).rejects.toBeInstanceOf(SyntaxError);
+    expect(JSON.parse(vi.mocked(console.warn).mock.calls[1][1] as string)).toMatchObject({reason:'body_parse_failed',status:200});
+    expect(JSON.stringify(vi.mocked(console.warn).mock.calls)).not.toMatch(/private transport detail|private malformed body/);
+  });
   it('inherits both original deadlines without renewing or serializing them',()=>{
     const source=attachOfficeMetadata([row],2000,performance.now(),state.viewer);
     vi.advanceTimersByTime(700);
