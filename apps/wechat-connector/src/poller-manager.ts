@@ -14,6 +14,16 @@
  * - 3 consecutive failures → 30s backoff, else 2s retry.
  * - notifystart/notifystop bracket the loop lifecycle (best-effort).
  *
+ * Many bots, one service (docs/architecture/channels/wechat.md →
+ * "Multi-connection operation"): every loop owns its credentials, cursor,
+ * dedup buffer, retry counters and stale-token pause, so one bot's failure
+ * never touches another. iLink allows ONE poller per bot, so replacement is
+ * serialized per channel and awaits the previous loop's exit (including
+ * `notifystop`) before the replacement's `notifystart`, and a second channel
+ * presenting a bot id another live loop holds is refused. Every inbound and
+ * cursor write carries the loop's transport `generation`; the API ignores a
+ * stale one, and a loop told its cursor generation is stale stops itself.
+ *
  * Component tag: [COMP:app/wechat-connector].
  */
 
@@ -37,28 +47,59 @@ type ManagedPoller = {
   lastEventAt?: number
 }
 
+export type PollerConnectInput = {
+  botToken: string
+  baseUrl: string
+  /** iLink bot id; lets the manager refuse a second live loop for the same bot. */
+  botId?: string
+  /** Transport generation; tags every inbound and cursor write. */
+  generation?: number
+  getUpdatesBuf?: string
+}
+
+/** A second channel tried to poll a bot another live loop already holds. */
+export class DuplicateBotError extends Error {
+  readonly code = 'duplicate_bot'
+  constructor(readonly channelId: string, readonly heldBy: string) {
+    super(`bot is already polled by channel ${heldBy}`)
+    this.name = 'DuplicateBotError'
+  }
+}
+
+type IlinkLike = Pick<ReturnType<typeof createIlinkClient>, 'notifyStart' | 'notifyStop' | 'getUpdates'>
+type AdapterLike = Pick<ReturnType<typeof createWechatAdapter>, 'parseIncoming' | 'deduplicateId'>
+
+/** Injectable transport seams (tests run many fake bots without Tencent). */
+type PollerManagerDeps = {
+  createClient?: (config: { baseUrl: string; token: string }) => IlinkLike
+  createAdapter?: (config: { baseUrl: string; botToken: string }) => AdapterLike
+  fetch?: typeof fetch
+  sleep?: (ms: number, signal: AbortSignal) => Promise<void>
+}
+
 export type PollerManagerOptions = {
   apiUrl: string
   connectorSecret: string
+  deps?: PollerManagerDeps
 }
 
 export type PollerManager = {
-  connect(
-    channelId: string,
-    input: { botToken: string; baseUrl: string; getUpdatesBuf?: string },
-  ): ManagedPoller
-  disconnect(channelId: string): void
+  connect(channelId: string, input: PollerConnectInput): Promise<ManagedPoller>
+  disconnect(channelId: string): Promise<void>
   getStatus(channelId: string): ManagedPoller | null
-  disconnectAll(): void
+  disconnectAll(): Promise<void>
   restoreAll(): Promise<void>
 }
 
 type LoopState = {
   snapshot: ManagedPoller
   abort: AbortController
+  done: Promise<void>
+  botId?: string
+  generation?: number
 }
 
-function sleep(ms: number, signal: AbortSignal): Promise<void> {
+function defaultSleep(ms: number, signal: AbortSignal): Promise<void> {
   return new Promise((resolve) => {
     const t = setTimeout(done, ms)
     function done(): void {
@@ -72,66 +113,67 @@ function sleep(ms: number, signal: AbortSignal): Promise<void> {
 
 export function createPollerManager(options: PollerManagerOptions): PollerManager {
   const apiUrl = options.apiUrl.replace(/\/$/, '')
+  const deps = options.deps ?? {}
+  const createClient = deps.createClient ?? ((c) => createIlinkClient(c))
+  const createAdapter = deps.createAdapter ?? ((c) => createWechatAdapter(c))
+  const doFetch = deps.fetch ?? fetch
+  const sleep = deps.sleep ?? defaultSleep
   const loops = new Map<string, LoopState>()
+  /** Per-channel lifecycle chain: connect/disconnect never interleave. */
+  const chains = new Map<string, Promise<unknown>>()
 
-  async function forwardToApi(channelId: string, message: unknown): Promise<void> {
+  function serialized<T>(channelId: string, op: () => Promise<T>): Promise<T> {
+    const prev = chains.get(channelId) ?? Promise.resolve()
+    const next = prev.then(op, op)
+    chains.set(channelId, next.catch(() => undefined))
+    return next
+  }
+
+  async function post(path: string, body: unknown): Promise<Response> {
+    return doFetch(`${apiUrl}${path}`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', 'X-Connector-Secret': options.connectorSecret },
+      body: JSON.stringify(body),
+    })
+  }
+
+  async function forwardToApi(channelId: string, generation: number | undefined, message: unknown): Promise<void> {
     try {
-      const res = await fetch(`${apiUrl}/internal/wechat/inbound`, {
-        method: 'POST',
-        headers: {
-          'Content-Type': 'application/json',
-          'X-Connector-Secret': options.connectorSecret,
-        },
-        body: JSON.stringify({ channelId, message }),
-      })
-      if (!res.ok) {
-        console.error(`[wechat-poller] inbound forward failed for ${channelId}: ${res.status}`)
-      }
+      const res = await post('/internal/wechat/inbound', { channelId, ...(generation ? { generation } : {}), message })
+      if (!res.ok) console.error(`[wechat-poller] inbound forward failed for ${channelId}: ${res.status}`)
     } catch (err) {
-      console.error(`[wechat-poller] inbound forward error for ${channelId}:`, err)
+      console.error(`[wechat-poller] inbound forward error for ${channelId}:`, (err as Error).message)
     }
   }
 
-  async function persistCursor(channelId: string, getUpdatesBuf: string): Promise<void> {
+  /** Returns false when the API reports this loop's generation is stale. */
+  async function persistCursor(channelId: string, generation: number | undefined, getUpdatesBuf: string): Promise<boolean> {
     try {
-      const res = await fetch(`${apiUrl}/internal/wechat/cursor`, {
-        method: 'POST',
-        headers: {
-          'Content-Type': 'application/json',
-          'X-Connector-Secret': options.connectorSecret,
-        },
-        body: JSON.stringify({ channelId, getUpdatesBuf }),
-      })
-      if (!res.ok) {
-        console.warn(`[wechat-poller] cursor persist failed for ${channelId}: ${res.status}`)
-      }
+      const res = await post('/internal/wechat/cursor', { channelId, getUpdatesBuf, ...(generation ? { generation } : {}) })
+      if (res.status === 409) return false
+      if (!res.ok) console.warn(`[wechat-poller] cursor persist failed for ${channelId}: ${res.status}`)
     } catch (err) {
-      console.warn(`[wechat-poller] cursor persist error for ${channelId}:`, err)
+      console.warn(`[wechat-poller] cursor persist error for ${channelId}:`, (err as Error).message)
     }
+    return true
   }
 
-  async function runLoop(
-    channelId: string,
-    input: { botToken: string; baseUrl: string; getUpdatesBuf?: string },
-    state: LoopState,
-  ): Promise<void> {
-    const client = createIlinkClient({ baseUrl: input.baseUrl, token: input.botToken })
+  async function runLoop(channelId: string, input: PollerConnectInput, state: LoopState): Promise<void> {
+    const client = createClient({ baseUrl: input.baseUrl, token: input.botToken })
     // Parse-only adapter — normalizes raw WeixinMessages; sends never happen here.
-    const adapter = createWechatAdapter({ baseUrl: input.baseUrl, botToken: input.botToken })
+    const adapter = createAdapter({ baseUrl: input.baseUrl, botToken: input.botToken })
     const dedup = createDedupBuffer()
     const signal = state.abort.signal
 
     try {
       const notified = await client.notifyStart()
       if (notified.ret !== undefined && notified.ret !== 0) {
-        console.warn(
-          `[wechat-poller] ${channelId}: notifystart returned ret=${notified.ret} errmsg=${notified.errmsg ?? ''}`,
-        )
+        console.warn(`[wechat-poller] ${channelId}: notifystart returned ret=${notified.ret}`)
       }
     } catch (err) {
       // Tencent treats this as online reconciliation rather than the transport
       // itself, so keep polling but retain the reason behind an offline badge.
-      console.warn(`[wechat-poller] ${channelId}: notifystart failed:`, err)
+      console.warn(`[wechat-poller] ${channelId}: notifystart failed:`, (err as Error).message)
     }
 
     let getUpdatesBuf = input.getUpdatesBuf ?? ''
@@ -165,7 +207,7 @@ export function createPollerManager(options: PollerManagerOptions): PollerManage
           }
           consecutiveFailures += 1
           console.error(
-            `[wechat-poller] ${channelId}: getupdates failed ret=${resp.ret} errcode=${resp.errcode} errmsg=${resp.errmsg ?? ''} (${consecutiveFailures}/${MAX_CONSECUTIVE_FAILURES})`,
+            `[wechat-poller] ${channelId}: getupdates failed ret=${resp.ret} errcode=${resp.errcode} (${consecutiveFailures}/${MAX_CONSECUTIVE_FAILURES})`,
           )
           await sleep(consecutiveFailures >= MAX_CONSECUTIVE_FAILURES ? BACKOFF_DELAY_MS : RETRY_DELAY_MS, signal)
           if (consecutiveFailures >= MAX_CONSECUTIVE_FAILURES) consecutiveFailures = 0
@@ -177,10 +219,17 @@ export function createPollerManager(options: PollerManagerOptions): PollerManage
 
         if (resp.get_updates_buf != null && resp.get_updates_buf !== '' && resp.get_updates_buf !== getUpdatesBuf) {
           getUpdatesBuf = resp.get_updates_buf
-          void persistCursor(channelId, getUpdatesBuf)
+          void persistCursor(channelId, state.generation, getUpdatesBuf).then((current) => {
+            if (current || signal.aborted) return
+            // The API holds a newer transport for this channel: this loop was
+            // replaced elsewhere and must not keep polling the bot.
+            console.warn(`[wechat-poller] ${channelId}: transport generation is stale, stopping this loop`)
+            state.abort.abort()
+          })
         }
 
         for (const raw of resp.msgs ?? []) {
+          if (signal.aborted) break
           const dedupId = adapter.deduplicateId(raw)
           if (dedupId && dedup.isDuplicate(dedupId)) continue
           const incoming = adapter.parseIncoming(raw)
@@ -197,18 +246,16 @@ export function createPollerManager(options: PollerManagerOptions): PollerManage
             continue
           }
           if (incoming.mediaType) {
-            console.log(
-              `[wechat-poller] ${channelId}: inbound carries ${incoming.mediaType} (${incoming.mediaName ?? 'unnamed'}) — forwarding for archive staging`,
-            )
+            console.log(`[wechat-poller] ${channelId}: inbound carries ${incoming.mediaType} — forwarding for archive staging`)
           }
-          await forwardToApi(channelId, incoming)
+          await forwardToApi(channelId, state.generation, incoming)
         }
       } catch (err) {
         if (signal.aborted) break
         consecutiveFailures += 1
         console.error(
           `[wechat-poller] ${channelId}: getupdates error (${consecutiveFailures}/${MAX_CONSECUTIVE_FAILURES}):`,
-          err,
+          (err as Error).message,
         )
         await sleep(consecutiveFailures >= MAX_CONSECUTIVE_FAILURES ? BACKOFF_DELAY_MS : RETRY_DELAY_MS, signal)
         if (consecutiveFailures >= MAX_CONSECUTIVE_FAILURES) consecutiveFailures = 0
@@ -216,50 +263,64 @@ export function createPollerManager(options: PollerManagerOptions): PollerManage
     }
 
     state.snapshot.status = 'stopped'
-    await client.notifyStop().catch((err) => {
-      console.warn(`[wechat-poller] ${channelId}: notifystop failed:`, err)
+    await client.notifyStop().catch((err: unknown) => {
+      console.warn(`[wechat-poller] ${channelId}: notifystop failed:`, (err as Error).message)
     })
   }
 
-  return {
-    connect(channelId, input) {
-      // Replace any existing loop for this channel — iLink allows exactly one
-      // poller per account (exclusive lock), so the old loop must die first.
-      const existing = loops.get(channelId)
-      if (existing) existing.abort.abort()
+  async function stop(channelId: string): Promise<void> {
+    const state = loops.get(channelId)
+    if (!state) return
+    state.abort.abort()
+    await state.done
+    if (loops.get(channelId) === state) loops.delete(channelId)
+  }
 
-      const state: LoopState = {
-        snapshot: { channelId, status: 'polling' },
-        abort: new AbortController(),
-      }
-      loops.set(channelId, state)
-      void runLoop(channelId, input, state).catch((err) => {
-        console.error(`[wechat-poller] ${channelId}: loop crashed:`, err)
-        state.snapshot.status = 'stopped'
+  const manager: PollerManager = {
+    connect(channelId, input) {
+      return serialized(channelId, async () => {
+        if (input.botId) {
+          for (const [other, state] of loops) {
+            if (other !== channelId && state.botId === input.botId && !state.abort.signal.aborted) {
+              throw new DuplicateBotError(channelId, other)
+            }
+          }
+        }
+        // Exactly one poller per bot: the previous loop fully exits (and
+        // sends notifystop) before the replacement sends notifystart.
+        await stop(channelId)
+        const state: LoopState = {
+          snapshot: { channelId, status: 'polling' },
+          abort: new AbortController(),
+          done: Promise.resolve(),
+          botId: input.botId,
+          generation: input.generation,
+        }
+        state.done = runLoop(channelId, input, state).catch((err: unknown) => {
+          console.error(`[wechat-poller] ${channelId}: loop crashed:`, (err as Error).message)
+          state.snapshot.status = 'stopped'
+        })
+        loops.set(channelId, state)
+        return state.snapshot
       })
-      return state.snapshot
     },
 
     disconnect(channelId) {
-      const state = loops.get(channelId)
-      if (!state) return
-      state.abort.abort()
-      loops.delete(channelId)
+      return serialized(channelId, () => stop(channelId))
     },
 
     getStatus(channelId) {
       return loops.get(channelId)?.snapshot ?? null
     },
 
-    disconnectAll() {
-      for (const state of loops.values()) state.abort.abort()
-      loops.clear()
+    async disconnectAll() {
+      await Promise.all([...loops.keys()].map((channelId) => manager.disconnect(channelId)))
     },
 
     async restoreAll() {
-      let rows: Array<{ channelId: string; botToken: string; baseUrl: string; getUpdatesBuf?: string }>
+      let rows: Array<PollerConnectInput & { channelId: string }>
       try {
-        const res = await fetch(`${apiUrl}/internal/wechat/channels`, {
+        const res = await doFetch(`${apiUrl}/internal/wechat/channels`, {
           headers: { 'X-Connector-Secret': options.connectorSecret },
         })
         if (!res.ok) {
@@ -268,17 +329,19 @@ export function createPollerManager(options: PollerManagerOptions): PollerManage
         }
         rows = (await res.json()) as typeof rows
       } catch (err) {
-        console.warn('[wechat-poller] restoreAll skipped: API unreachable:', err)
+        console.warn('[wechat-poller] restoreAll skipped: API unreachable:', (err as Error).message)
         return
       }
-      for (const row of rows) {
-        this.connect(row.channelId, {
-          botToken: row.botToken,
-          baseUrl: row.baseUrl,
-          getUpdatesBuf: row.getUpdatesBuf,
-        })
-      }
-      console.log(`[wechat-poller] restored ${rows.length} channel(s)`)
+      const results = await Promise.allSettled(rows.map((row) => manager.connect(row.channelId, {
+        botToken: row.botToken,
+        baseUrl: row.baseUrl,
+        botId: row.botId,
+        generation: row.generation,
+        getUpdatesBuf: row.getUpdatesBuf,
+      })))
+      const refused = results.filter((r) => r.status === 'rejected').length
+      console.log(`[wechat-poller] restored ${rows.length - refused} channel(s)${refused ? `, refused ${refused} conflicting` : ''}`)
     },
   }
+  return manager
 }

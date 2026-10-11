@@ -731,6 +731,7 @@ import {
   createDbChannelIntegrationStore,
   loadChannelCredentialKey,
 } from './db/channel-integrations.js'
+import { createChannelIdentityBindingStore } from './db/channel-identity-bindings.js'
 import { createDbApiKeyStore } from './db/api-key-store.js'
 import { publicApiRoutes } from './routes/public-api.js'
 import { apiKeyRoutes } from './routes/api-keys.js'
@@ -2344,6 +2345,10 @@ export async function bootOpenApi(opts: BootOpenApiOptions): Promise<BootResult>
   const communitySkillRegistry = loadSkillRegistry()
 
   const integrationStore = credKey ? createDbChannelIntegrationStore(credKey) : null
+  // Canonical channel identity bindings (migration 743) - the WeChat staff
+  // identity slice. Same key as the integrations it rotates; its challenge
+  // digest derives a separate key under its own domain string.
+  const channelIdentityStore = credKey ? createChannelIdentityBindingStore(credKey) : null
   const channelQuestionStore = createChannelQuestionStore()
   syncNativeSlashCommands = integrationStore
     ? (userId: string, workspaceId: string) => syncWorkspaceNativeSlashCommands({
@@ -6096,6 +6101,7 @@ export async function bootOpenApi(opts: BootOpenApiOptions): Promise<BootResult>
   app.use('/api/account', requireAuth(env.JWT_SECRET), accountRoutes({
     linkedAccountStore,
     linkCodeStore,
+    wechatIdentityStore: channelIdentityStore ?? undefined,
     getTelegramBotUsername,
     getWhatsappOfficialNumber: ports.getWhatsappOfficialNumber,
     teardownRules: ports.accountTeardownRules,
@@ -9576,6 +9582,8 @@ export async function bootOpenApi(opts: BootOpenApiOptions): Promise<BootResult>
       discordConnector,
       whatsappConnector,
       wechatConnector,
+      identityStore: channelIdentityStore ?? undefined,
+      analytics,
       feishuConnector,
       customChannelStore,
       // Fallback bot for naming sessions-derived telegram delivery destinations.

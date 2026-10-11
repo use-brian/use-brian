@@ -3,7 +3,7 @@ import express from 'express'
 import request from 'supertest'
 import { beforeEach, describe, expect, it, vi } from 'vitest'
 
-const mocks = vi.hoisted(() => ({ pipeline: vi.fn(), resolveUser: vi.fn(), channelType: 'wechat' }))
+const mocks = vi.hoisted(() => ({ pipeline: vi.fn(), resolveUser: vi.fn(), sendMessage: vi.fn(), channelType: 'wechat' }))
 vi.mock('../channel-pipeline.js', () => ({ processChannelMessage: mocks.pipeline }))
 vi.mock('../../db/channels-store.js', () => ({
   getChannelForWebhook: vi.fn(async () => ({ channelType: mocks.channelType, status: 'active', enabledCapabilities: ['chat'], workspaceId: 'workspace' })),
@@ -13,9 +13,36 @@ vi.mock('../../db/users.js', () => ({ findAssistantById: vi.fn(async () => ({ id
 vi.mock('../../billing-party.js', () => ({ billingPartyForAssistant: vi.fn(async () => 'owner') }))
 vi.mock('../../db/channel-user-store.js', () => ({ resolveChannelUser: mocks.resolveUser }))
 vi.mock('../../db/chat-lock.js', () => ({ withChatLock: (_key: string, fn: () => unknown) => fn() }))
+vi.mock('../../db/wechat-context-tokens.js', () => ({
+  upsertWechatContextToken: vi.fn(async () => {}),
+  getWechatContextToken: vi.fn(async () => 'ctx'),
+}))
+vi.mock('@use-brian/channels', async (importOriginal) => ({
+  ...(await importOriginal<typeof import('@use-brian/channels')>()),
+  createWechatAdapter: vi.fn(() => ({ sendMessage: mocks.sendMessage })),
+}))
+vi.mock('../../db/workspace-store.js', async (importOriginal) => ({
+  ...(await importOriginal<typeof import('../../db/workspace-store.js')>()),
+  getWorkspaceRoleSystem: vi.fn(async () => 'member'),
+}))
 
-import { wechatRoutes } from '../wechat.js'
+import { wechatRoutes, WECHAT_IDENTITY_NOTICES } from '../wechat.js'
 import { whatsappCloudRoutes } from '../whatsapp-cloud.js'
+
+const WECHAT_SENDER = '15550000001'
+
+// WeChat acts only as the QR-bound sender's linked Brian account (no shadow
+// users, no owner fallback - see wechat-staff-access.test.ts), so its parity
+// fixture is a bound identity; WhatsApp still resolves through channel users.
+function wechatIdentityStore(sender: string) {
+  return {
+    resolveWechatSender: vi.fn(async () => ({ kind: 'bound', receipt: {
+      bindingId: 'binding-1', version: 1, accountId: `resolved:${sender}`, workspaceId: 'workspace',
+      channelId: 'platform-channel', botId: 'bot@im.bot', senderId: sender, transportGeneration: 1,
+    } })),
+    isWechatReceiptCurrent: vi.fn(async () => true),
+  }
+}
 
 const cloudCredentials = {
   provider: 'cloud_api', access_token: 'token', app_secret: 'app-secret', verify_token: 'verify-token',
@@ -30,10 +57,12 @@ function setup(provider: 'wechat' | 'whatsapp', identified: boolean) {
   const options = {
     connectorSecret: 'secret', tools: new Map(), questionStore,
     channelUserStore: identified ? {} : undefined,
+    identityStore: provider === 'wechat' && identified ? wechatIdentityStore(WECHAT_SENDER) : undefined,
     integrationStore: {
       getByChannelForWebhook: vi.fn(async () => ({
         id: 'integration-uuid', channelId: 'platform-channel', config: { userAccessMode: 'allow_all' },
-        credentials: provider === 'whatsapp' ? cloudCredentials : { bot_token: 'token', base_url: 'https://example.com' },
+        credentials: provider === 'whatsapp' ? cloudCredentials
+          : { bot_token: 'token', base_url: 'https://example.com', ilink_bot_id: 'bot@im.bot', bound_user_id: WECHAT_SENDER },
       })),
       touchLastEventAt: vi.fn(async () => {}),
     },
@@ -57,13 +86,15 @@ function setup(provider: 'wechat' | 'whatsapp', identified: boolean) {
 beforeEach(() => {
   vi.clearAllMocks()
   mocks.pipeline.mockResolvedValue(undefined)
+  mocks.sendMessage.mockResolvedValue({ messageId: 'notice' })
   mocks.resolveUser.mockImplementation(async (_store, _provider, sender) => ({ user: { id: `resolved:${sender}` }, isIdentified: true }))
 })
 
 describe.each(['wechat', 'whatsapp'] as const)('%s workflow input parity', provider => {
   it('preserves reply metadata and separates integration UUID from platform channel identity', async () => {
     const { send, questionStore } = setup(provider, true)
-    for (const sender of ['15550000001', '15550000002']) {
+    const senders = provider === 'wechat' ? [WECHAT_SENDER] : ['15550000001', '15550000002']
+    for (const sender of senders) {
       expect((await send(sender)).status).toBe(200)
       await vi.waitFor(() => expect(mocks.pipeline).toHaveBeenCalledWith(expect.objectContaining({
         questionIntegrationId: 'integration-uuid', questionStore, userId: `resolved:${sender}`, isIdentified: true,
@@ -76,6 +107,12 @@ describe.each(['wechat', 'whatsapp'] as const)('%s workflow input parity', provi
   it('never identifies an owner fallback when sender resolution is unavailable', async () => {
     const { send } = setup(provider, false)
     expect((await send('15550000001')).status).toBe(200)
+    if (provider === 'wechat') {
+      // No identity store: a fixed refusal, never a turn as the owner.
+      await vi.waitFor(() => expect(mocks.sendMessage).toHaveBeenCalledWith('conversation', { text: WECHAT_IDENTITY_NOTICES.unverified }))
+      expect(mocks.pipeline).not.toHaveBeenCalled()
+      return
+    }
     await vi.waitFor(() => expect(mocks.pipeline).toHaveBeenCalledWith(expect.objectContaining({ userId: 'owner', isIdentified: false })))
   })
 })

@@ -12,6 +12,13 @@ import { I18nProvider } from "@/lib/i18n/client";
 import { en } from "@/lib/i18n/dictionaries/en";
 import { AddChannelDialog, AddChannelForm } from "../page-client";
 
+// AddChannelForm reads the active workspace name for the WeChat tab; the real
+// app mounts the route WorkspaceContextProvider, these renders do not.
+vi.mock("@/contexts/workspace-context", async (importOriginal) => ({
+  ...(await importOriginal<typeof import("@/contexts/workspace-context")>()),
+  useWorkspaces: () => ({ workspaces: [], activeId: "ws-1", active: null, setActive: () => {} }),
+}));
+
 (globalThis as { IS_REACT_ACT_ENVIRONMENT?: boolean }).IS_REACT_ACT_ENVIRONMENT =
   true;
 

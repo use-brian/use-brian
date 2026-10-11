@@ -11,8 +11,19 @@ describe('[COMP:shared/channel-identity] channel identity registry', () => {
         expect(row.linkProvider).toBeNull()
       } else {
         expect(row.codeEndpoint).toMatch(/^\/api\/account\/[a-z]+\/link-code$/)
-        expect(row.linkProvider).toBe(kind)
+        // Account-scoped links live in linked_identities under the channel's
+        // own provider; channel-scoped links live in identity_bindings.
+        expect(row.linkProvider).toBe(row.scope === 'account' ? kind : null)
       }
+    }
+  })
+
+  it('scopes WeChat links to one channel and workspace, never one global link', () => {
+    expect(CHANNEL_IDENTITY.wechat).toMatchObject({
+      connect: 'code', scope: 'channel', linkProvider: null, codeEndpoint: '/api/account/wechat/link-code', emailMatching: false,
+    })
+    for (const kind of CHANNEL_IDENTITY_KINDS) {
+      if (kind !== 'wechat') expect(CHANNEL_IDENTITY[kind].scope).toBe('account')
     }
   })
 

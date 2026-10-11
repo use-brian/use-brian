@@ -15,6 +15,7 @@ import { resolveLiveAccessCeilingSystem } from './resolve-turn-scope.js'
 import { scopeEvidenceFailureOf, validateAudienceScopeEvidence, type ScopeEvidenceFailure } from './caller-evidence.js'
 import { roomAudienceCeiling } from '../routes/_room-binding.js'
 import { isWebTransport } from '../session-kind.js'
+import { isWechatRecipientCurrentSystem } from '../db/channel-identity-bindings.js'
 
 export type DeliveryAudienceInput = {
   workspaceId: string
@@ -80,6 +81,7 @@ export type DeliveryAudienceDiagnostic =
   | 'binding_approver_not_admin'
   | 'binding_recipient_conflict'
   | 'no_binding_ceiling'
+  | 'wechat_recipient_unbound'
 
 type Denial = {
   allowed: false
@@ -138,6 +140,7 @@ type Dependencies = {
   getWorkspaceRole?: typeof getWorkspaceRoleSystem
   resolveLiveAccess?: typeof resolveLiveAccessCeilingSystem
   validateEvidence?: typeof validateAudienceScopeEvidence
+  isWechatRecipientCurrent?: typeof isWechatRecipientCurrentSystem
 }
 
 function denial(detail?: DeliveryAudienceDenialDetail, diagnostic?: DeliveryAudienceDiagnostic): Denial {
@@ -271,6 +274,7 @@ function resolvedDependencies(dependencies: Dependencies) {
     getWorkspaceRole: dependencies.getWorkspaceRole ?? getWorkspaceRoleSystem,
     resolveLiveAccess: dependencies.resolveLiveAccess ?? resolveLiveAccessCeilingSystem,
     validateEvidence: dependencies.validateEvidence ?? validateAudienceScopeEvidence,
+    isWechatRecipientCurrent: dependencies.isWechatRecipientCurrent ?? isWechatRecipientCurrentSystem,
     integrationStore: dependencies.integrationStore,
   }
 }
@@ -280,6 +284,32 @@ async function resolveEnvelope(
   deps: ReturnType<typeof resolvedDependencies>,
 ): Promise<DeliveryAudienceEnvelopeDecision> {
   if (isWebTransport(input.channelType)) {
+    const member = await memberCeiling(input.workspaceId, input.assistantId, input.userId, deps, input.recipientMode)
+    return member.ceiling
+      ? { allowed: true, ceiling: member.ceiling, source: 'member' }
+      : envelopeDenied(undefined, member.diagnostic)
+  }
+
+  // WeChat: the recipient is authorized only as the exact QR-bound sender of
+  // a current binding for this account, named by the session key. This runs
+  // BEFORE the session shortcut below, so an old private session (a raw peer
+  // id, or a binding version that has since been revoked or re-paired) can
+  // never authorize delivery, whatever the evidence says - even none.
+  // See scoped-context.md → "Channel credential receipts".
+  if (input.channelType === 'wechat') {
+    let current = false
+    try {
+      current = await deps.isWechatRecipientCurrent({
+        workspaceId: input.workspaceId,
+        accountId: input.userId,
+        peerId: input.channelId,
+        sessionChannelId: input.sessionChannelId,
+        channelIntegrationId: input.channelIntegrationId,
+      })
+    } catch (error) {
+      console.warn('[delivery-authority] wechat recipient check failed:', (error as Error)?.message ?? error)
+    }
+    if (!current) return envelopeDenied(undefined, 'wechat_recipient_unbound')
     const member = await memberCeiling(input.workspaceId, input.assistantId, input.userId, deps, input.recipientMode)
     return member.ceiling
       ? { allowed: true, ceiling: member.ceiling, source: 'member' }

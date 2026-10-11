@@ -449,6 +449,14 @@ export type ChannelPipelineParams = AdmittedChannelMessage & {
    * data path sender-scoped; `disabled` removes connector tools for the turn.
    */
   connectorAuthority?: 'sender' | 'assistant' | 'disabled'
+  /**
+   * Live validity of a revocable channel credential this turn's identity rests
+   * on (WeChat: the durable binding receipt). Threaded into the execution
+   * context, so the authority lease re-checks it at every tool, write,
+   * confirmation and delivery boundary; false invalidates the turn for good.
+   * See scoped-context.md → "Channel credential receipts".
+   */
+  credentialCurrent?: () => Promise<boolean>
   checkCreditBudget?: CreditBudgetGate
 
   // ── Channel context ──
@@ -1253,6 +1261,7 @@ async function processChannelMessageTurn(params: ChannelPipelineParams): Promise
       },
       attribution: { billingUserId },
       sessionAuthority: session,
+      credentialCurrent: params.credentialCurrent,
       ...(audienceEnvelope?.allowed
         ? {
             maximumAccess: {
@@ -2842,6 +2851,9 @@ async function processChannelMessageTurn(params: ChannelPipelineParams): Promise
             // The goal is already running. A transient channel-send failure
             // must not unwind the durable kickoff or abort the final reply.
             try {
+              // The acknowledgement is an outbound send like any other: the
+              // destination must still be authorized for this turn.
+              await assertDeliveryAudience()
               await hooks.onGoalAccepted?.(GOAL_ACCEPTED_CHANNEL_MESSAGE, goalId)
             } catch {
               // Best-effort acknowledgement only; the final response still
@@ -2850,6 +2862,9 @@ async function processChannelMessageTurn(params: ChannelPipelineParams): Promise
           }
           break
         case 'tool_confirmation_required':
+          // A confirmation is a capability handed to the recipient: create it
+          // only while the turn's authority and destination are current.
+          await assertDeliveryAudience()
           if (params.interactionScope) {
             channelConfirmations.register(params.interactionScope, event.request, confirmationResolver, abortController.signal)
           }
@@ -2998,6 +3013,9 @@ async function processChannelMessageTurn(params: ChannelPipelineParams): Promise
             // which fall through to the fixed notice. It runs on the
             // background provider on purpose: the endpoint that just produced
             // nothing must not also decide whether the user hears about it.
+            // Never synthesize for a destination that is no longer authorized:
+            // a refusal here unwinds to the live-authority exit below.
+            if (emptyReason === 'tools_only') await assertDeliveryAudience()
             const recovered = emptyReason === 'tools_only'
               ? await composeRecoveryMessage({
                   provider: backgroundProvider,
@@ -3265,6 +3283,18 @@ async function processChannelMessageTurn(params: ChannelPipelineParams): Promise
         stage: sanitizeAnalytics('query_loop'),
       },
     })
+
+    // A recovery message is model output for this destination: if the turn's
+    // authority or audience went stale while it failed, no synthesis runs,
+    // and only the fixed audience notice may be sent.
+    try {
+      await assertDeliveryAudience()
+    } catch (authErr) {
+      if (!isAuthorityChangedError(authErr) && !isDeliveryAudienceUnverifiedError(authErr)) throw authErr
+      console.warn(`[${channelType}] recovery withheld: live authority refused`, (authErr as Error).name)
+      if (isDeliveryAudienceUnverifiedError(authErr)) await hooks.sendError(authErr)
+      return
+    }
 
     // Try to compose a context-aware recovery message naming any tools
     // that already shipped, so the operator doesn't blindly retry the

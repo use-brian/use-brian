@@ -13,7 +13,14 @@
  * route would ignore the link. States: loading, connected (by code), matched
  * by email, not connected, connecting (code + countdown), unavailable.
  *
- * Spec: docs/plans/channel-identity-binding.md §4.
+ * WeChat is channel-scoped (`scope: 'channel'`): one row per bot the person
+ * paired or was given, minted with `{ workspaceId, channelId }` and read from
+ * the canonical bindings - `WechatChannelIdentityRow`. States: linked as me,
+ * not linked, linked elsewhere (no other account named), access removed,
+ * paired again, disconnected, conflict.
+ *
+ * Spec: docs/plans/channel-identity-binding.md §4;
+ * docs/architecture/channels/wechat.md → "Staff identity".
  * Component tag: [COMP:app-web/channel-identity].
  */
 
@@ -27,14 +34,24 @@ import {
 } from "@use-brian/shared";
 import {
   createChannelLinkCode,
+  createWechatLinkCode,
   getChannelIdentities,
   listLinkedAccounts,
+  revokeWechatBinding,
   unlinkAccount,
   type ChannelEmailMatch,
   type ChannelEmailMatching,
   type ChannelLinkCode,
   type LinkedAccount,
+  type WechatBinding,
+  type WechatChannelSummary,
 } from "@/lib/api/account";
+import {
+  getWechatTransportStatus,
+  revokeWechatChannelBinding,
+  wechatPreparedLink,
+  type WechatTransportStatus,
+} from "@/lib/api/channels";
 import { buildTelegramDeepLink, formatCountdown, linkCodeSecondsLeft } from "@/lib/telegram-link";
 import { buildWhatsappDeepLink } from "@/lib/whatsapp-link";
 import { confirmDialog } from "@/components/ui/confirm-dialog";
@@ -259,6 +276,312 @@ export function ChannelIdentityRow({
   );
 }
 
+// ── WeChat: one row per channel ──────────────────────────────────────
+
+type WechatRowState =
+  | "linked" | "not_linked" | "linked_elsewhere" | "access_removed"
+  | "pairing_replaced" | "revoked" | "conflict" | "not_available";
+
+/**
+ * The caller on ONE WeChat channel. Linking mints a code scoped to this
+ * workspace and channel; the person sends `LINK <code>` from the WeChat
+ * account that paired the bot, and the row polls until the binding appears.
+ * Never shows which other account holds a channel.
+ */
+export function WechatChannelIdentityRow({
+  workspaceId,
+  channelId,
+  channelName,
+  binding,
+  onChanged,
+  hideLabel,
+  pollMs = 3000,
+}: {
+  workspaceId: string;
+  channelId: string;
+  channelName: string | null;
+  binding: WechatBinding | null;
+  onChanged?: () => void;
+  hideLabel?: boolean;
+  /** Test seam. */
+  pollMs?: number;
+}) {
+  const t = useT();
+  const copy = t.settings.account.channelIdentity;
+  const [code, setCode] = useState<{ code: string; expiresAt: string } | null>(null);
+  const [busy, setBusy] = useState(false);
+  const [notice, setNotice] = useState<Notice>(null);
+  const [refused, setRefused] = useState<WechatRowState | null>(null);
+  const [secondsLeft, setSecondsLeft] = useState(0);
+
+  useEffect(() => {
+    if (!code) return;
+    const expiresAt = code.expiresAt;
+    setSecondsLeft(linkCodeSecondsLeft(expiresAt));
+    const tick = setInterval(() => setSecondsLeft(linkCodeSecondsLeft(expiresAt)), 1000);
+    const poll = setInterval(() => {
+      if (linkCodeSecondsLeft(expiresAt) <= 0) return;
+      void getChannelIdentities(workspaceId).then((data) => {
+        if (data.wechatBindings.some((b) => b.channelId === channelId && b.state === "linked")) {
+          setCode(null);
+          setNotice({ kind: "success", text: copy.wechatLinkedNotice });
+          onChanged?.();
+        }
+      });
+    }, pollMs);
+    return () => {
+      clearInterval(tick);
+      clearInterval(poll);
+    };
+  }, [code, workspaceId, channelId, copy.wechatLinkedNotice, onChanged, pollMs]);
+
+  async function onLink() {
+    setBusy(true);
+    setNotice(null);
+    setRefused(null);
+    try {
+      const minted = await createWechatLinkCode(workspaceId, channelId);
+      if (minted.ok) {
+        setCode({ code: minted.code, expiresAt: minted.expiresAt });
+        return;
+      }
+      if (minted.reason === "linked_elsewhere") setRefused("linked_elsewhere");
+      else if (minted.reason === "conflict") setRefused("conflict");
+      else if (minted.reason === "not_found") setRefused("not_available");
+      else setNotice({
+        kind: "error",
+        text: minted.reason === "rate_limited" ? copy.wechatRateLimited
+          : minted.reason === "unavailable" ? copy.notOnInstallation
+            : copy.error,
+      });
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  async function onDisconnect() {
+    if (!binding) return;
+    const ok = await confirmDialog({
+      title: format(copy.disconnectTitle, { channel: channelName ?? copy.labels.wechat }),
+      description: copy.wechatDisconnectConfirm,
+      confirmLabel: copy.disconnect,
+      cancelLabel: copy.cancel,
+      variant: "destructive",
+    });
+    if (!ok) return;
+    setBusy(true);
+    setNotice(null);
+    try {
+      if (!(await revokeWechatBinding(binding.bindingId))) {
+        setNotice({ kind: "error", text: copy.error });
+        return;
+      }
+      setNotice({ kind: "success", text: format(copy.unlinked, { channel: channelName ?? copy.labels.wechat }) });
+      onChanged?.();
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  const state: WechatRowState = refused
+    ?? (binding?.state === "linked" ? "linked"
+      : binding?.state === "access_removed" ? "access_removed"
+        : binding?.state === "pairing_replaced" ? "pairing_replaced"
+          : binding?.state === "revoked" ? "revoked"
+            : "not_linked");
+  const status = {
+    linked: copy.wechatLinked,
+    not_linked: copy.wechatNotLinked,
+    linked_elsewhere: copy.wechatLinkedElsewhere,
+    access_removed: copy.wechatAccessRemoved,
+    pairing_replaced: copy.wechatPairingReplaced,
+    revoked: copy.wechatRevoked,
+    conflict: copy.wechatConflict,
+    not_available: copy.wechatNotAvailable,
+  }[state];
+  const hint = {
+    linked: null,
+    not_linked: copy.wechatNotLinkedHint,
+    linked_elsewhere: copy.wechatLinkedElsewhereHint,
+    access_removed: copy.wechatAccessRemovedHint,
+    pairing_replaced: copy.wechatPairingReplacedHint,
+    revoked: copy.wechatNotLinkedHint,
+    conflict: copy.wechatConflictHint,
+    not_available: null,
+  }[state];
+  const canLink = state === "not_linked" || state === "pairing_replaced" || state === "revoked";
+  const expired = code !== null && secondsLeft <= 0;
+
+  return (
+    <div className="space-y-3" data-channel-identity="wechat" data-wechat-channel={channelId} data-state={state}>
+      <div className="flex items-center justify-between gap-3">
+        <div className="min-w-0">
+          {!hideLabel && <div className="text-sm font-medium truncate">{channelName ?? copy.labels.wechat}</div>}
+          <div className="text-xs text-muted-foreground">{status}</div>
+          {hint && !code && <div className="text-[11px] text-muted-foreground mt-0.5">{hint}</div>}
+        </div>
+        {(state === "linked" || state === "access_removed") ? (
+          <button
+            type="button"
+            onClick={() => void onDisconnect()}
+            disabled={busy}
+            className="shrink-0 min-h-11 md:min-h-0 text-sm font-medium border border-border px-4 py-2 rounded-lg hover:bg-muted transition-colors disabled:opacity-50"
+          >
+            {busy ? "…" : copy.disconnect}
+          </button>
+        ) : canLink && !code ? (
+          <button
+            type="button"
+            onClick={() => void onLink()}
+            disabled={busy}
+            className="shrink-0 min-h-11 md:min-h-0 text-sm font-medium px-4 py-2 rounded-lg bg-action text-action-foreground hover:bg-action/90 disabled:opacity-50"
+          >
+            {busy ? "…" : state === "not_linked" ? copy.wechatLink : copy.wechatLinkAgain}
+          </button>
+        ) : null}
+      </div>
+
+      {code && (
+        <div className="rounded-lg border border-border bg-muted/30 p-4 space-y-3">
+          <div className="text-2xl font-mono tracking-[0.3em] text-center select-all">{code.code}</div>
+          <p className="text-[12px] text-muted-foreground">
+            {format(copy.howTo.wechat, { command: `LINK ${code.code}` })}
+          </p>
+          <p className="text-[11px] text-muted-foreground">{copy.wechatNoHistoryMove}</p>
+          <div className="flex flex-wrap items-center gap-3">
+            {expired && (
+              <button
+                type="button"
+                onClick={() => void onLink()}
+                disabled={busy}
+                className="min-h-11 md:min-h-0 inline-flex items-center text-sm font-medium px-4 py-2 rounded-lg bg-action text-action-foreground hover:bg-action/90 disabled:opacity-50"
+              >
+                {busy ? "…" : copy.generateNewCode}
+              </button>
+            )}
+            <button
+              type="button"
+              onClick={() => setCode(null)}
+              className="min-h-11 md:min-h-0 text-sm text-muted-foreground hover:text-foreground"
+            >
+              {copy.cancel}
+            </button>
+          </div>
+          <p className="text-[11px] text-muted-foreground">
+            {expired ? copy.codeExpired : format(copy.codeExpiresIn, { time: formatCountdown(secondsLeft) })}
+          </p>
+        </div>
+      )}
+
+      {notice && (
+        <p className={notice.kind === "success" ? "text-[12px] text-primary" : "text-[12px] text-red-400"}>
+          {notice.text}
+        </p>
+      )}
+    </div>
+  );
+}
+
+/**
+ * Owner/admin view of a WeChat channel's identity: linked / unlinked /
+ * revoked / conflict, the staff link to share, and a revoke that assigns
+ * nobody. Members never see another account's name - the server sends this
+ * summary to owners and admins only.
+ */
+function WechatChannelAdminSummary({
+  workspaceId,
+  summary,
+  onChanged,
+}: {
+  workspaceId: string;
+  summary: WechatChannelSummary;
+  onChanged?: () => void;
+}) {
+  const t = useT();
+  const copy = t.studioPage.channels.wechat;
+  const [busy, setBusy] = useState(false);
+  const [notice, setNotice] = useState<string | null>(null);
+  const [copied, setCopied] = useState(false);
+  const [transport, setTransport] = useState<WechatTransportStatus | null>(null);
+  useEffect(() => {
+    let live = true;
+    void getWechatTransportStatus(workspaceId, summary.channelId).then((status) => {
+      if (live) setTransport(status);
+    });
+    return () => {
+      live = false;
+    };
+  }, [workspaceId, summary.channelId]);
+  const state =
+    summary.state === "linked"
+      ? format(copy.stateLinked, { name: summary.account?.name ?? summary.account?.email ?? "" })
+      : summary.state === "unlinked" ? copy.stateUnlinked
+        : summary.state === "revoked" ? copy.stateRevoked
+          : copy.stateConflict;
+
+  async function onRevoke() {
+    const ok = await confirmDialog({
+      title: copy.revokeTitle,
+      description: copy.revokeDesc,
+      confirmLabel: copy.revokeBinding,
+      cancelLabel: t.settings.account.channelIdentity.cancel,
+      variant: "destructive",
+    });
+    if (!ok) return;
+    setBusy(true);
+    try {
+      const done = await revokeWechatChannelBinding(workspaceId, summary.channelId);
+      setNotice(done ? copy.revoked : t.settings.account.channelIdentity.error);
+      if (done) onChanged?.();
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  const link = typeof window !== "undefined"
+    ? wechatPreparedLink(window.location.origin, workspaceId, summary.channelId)
+    : "";
+
+  return (
+    <div className="border-t border-border pt-3 space-y-2" data-testid="wechat-admin-summary">
+      <div className="text-[12px] font-medium">{copy.identityTitle}</div>
+      <p className="text-[12px] text-muted-foreground">{state}</p>
+      {transport && (
+        <p className="text-[12px] text-muted-foreground" data-testid="wechat-transport">
+          {transport === "polling" ? copy.transportPolling
+            : transport === "paused" ? copy.transportPaused
+              : transport === "unavailable" ? copy.transportUnavailable
+                : copy.transportNotRunning}
+        </p>
+      )}
+      <div className="flex flex-wrap gap-2">
+        {summary.state !== "linked" && summary.state !== "conflict" && (
+          <button
+            type="button"
+            onClick={() => {
+              void navigator.clipboard?.writeText(link).then(() => setCopied(true), () => {});
+            }}
+            className="min-h-11 md:min-h-0 rounded-md border border-border px-3 py-1.5 text-sm"
+          >
+            {copied ? t.studioPage.channels.add.wechat.linkCopied : copy.copyStaffLink}
+          </button>
+        )}
+        {summary.state === "linked" && (
+          <button
+            type="button"
+            onClick={() => void onRevoke()}
+            disabled={busy}
+            className="min-h-11 md:min-h-0 rounded-md border border-border px-3 py-1.5 text-sm hover:bg-muted disabled:opacity-50"
+          >
+            {busy ? "…" : copy.revokeBinding}
+          </button>
+        )}
+      </div>
+      {notice && <p className="text-[12px] text-muted-foreground">{notice}</p>}
+    </div>
+  );
+}
+
 function RowSkeleton() {
   return <div aria-hidden className="h-10 rounded-lg bg-muted/40 animate-pulse" />;
 }
@@ -270,6 +593,8 @@ type IdentityData = {
   emailMatches: ChannelEmailMatch[];
   emailMatching: ChannelEmailMatching[];
   emailMatchingVisible: boolean;
+  wechatBindings: WechatBinding[];
+  wechatChannels: WechatChannelSummary[];
 };
 
 function useChannelIdentityData(workspaceId: string | null, initial?: IdentityData) {
@@ -317,7 +642,26 @@ export function ConnectedAccountsList({
   if (!data) return <RowSkeleton />;
   return (
     <div className="space-y-4">
-      {connectable.map((kind) => (
+      {connectable.map((kind) => CHANNEL_IDENTITY[kind].scope === "channel" ? (
+        // Channel-scoped: my own connections, one row each, never one global link.
+        <div key={kind} className="space-y-3" data-testid="wechat-connections">
+          <div className="text-sm font-medium">{copy.labels[kind]}</div>
+          {data.wechatBindings.length === 0 ? (
+            <p className="text-[11px] text-muted-foreground">{copy.wechatNone}</p>
+          ) : (
+            data.wechatBindings.map((binding) => (
+              <WechatChannelIdentityRow
+                key={binding.bindingId}
+                workspaceId={binding.workspaceId}
+                channelId={binding.channelId}
+                channelName={binding.channelName}
+                binding={binding}
+                onChanged={reload}
+              />
+            ))
+          )}
+        </div>
+      ) : (
         <ChannelIdentityRow
           key={kind}
           descriptor={CHANNEL_IDENTITY[kind]}
@@ -346,7 +690,7 @@ export function ChannelIdentityFooter({
   workspaceId,
   initialData,
 }: {
-  channel: { id: string; channelType: string; integrationProvider?: string | null };
+  channel: { id: string; channelType: string; integrationProvider?: string | null; displayName?: string | null };
   workspaceId: string;
   initialData?: IdentityData;
 }) {
@@ -364,10 +708,26 @@ export function ChannelIdentityFooter({
         <h3 className="text-sm font-semibold">{copy.footerTitle}</h3>
         <p className="text-[12px] text-muted-foreground">{copy.footerDesc}</p>
       </div>
-      {data ? (
-        <ChannelIdentityRow descriptor={descriptor} {...rowInputs(data, descriptor)} onChanged={reload} hideLabel />
-      ) : (
+      {!data ? (
         <RowSkeleton />
+      ) : descriptor.scope === "channel" ? (
+        <WechatChannelIdentityRow
+          workspaceId={workspaceId}
+          channelId={channel.id}
+          channelName={channel.displayName ?? null}
+          binding={data.wechatBindings.find((b) => b.channelId === channel.id) ?? null}
+          onChanged={reload}
+          hideLabel
+        />
+      ) : (
+        <ChannelIdentityRow descriptor={descriptor} {...rowInputs(data, descriptor)} onChanged={reload} hideLabel />
+      )}
+      {descriptor.scope === "channel" && data?.wechatChannels.some((c) => c.channelId === channel.id) && (
+        <WechatChannelAdminSummary
+          workspaceId={workspaceId}
+          summary={data.wechatChannels.find((c) => c.channelId === channel.id)!}
+          onChanged={reload}
+        />
       )}
       {showMatching && (
         <div className="border-t border-border pt-3 space-y-1" data-testid="channel-email-matching">

@@ -600,35 +600,60 @@ export async function connectWhatsAppCloudChannel(
 
 // ── WeChat — QR pairing (poll-based) ────────────────────────────
 
+export type WechatPairingMode = "self" | "admin_prepare";
+
 export type WechatPairingStatus = {
   status:
     | "qr"
     | "scanned"
     | "need_verifycode"
     | "verify_code_rejected"
+    | "confirmed"
     | "already_bound"
     | "expired"
     | "error"
     | "connected";
+  mode?: WechatPairingMode;
   /** URL to render as a QR code; refreshes in place when iLink expires one. */
   qrcodeUrl?: string | null;
   error?: string | null;
-  /** Present when status = connected. */
-  channel?: Channel | null;
-  /** Soft warning: saved, but the long-poll didn't open yet (retries on boot). */
+  /** Present once finalized (status = connected). */
+  channelId?: string;
+  identity?: "linked" | "unlinked";
+  /** Soft warning: saved, but the long-poll didn't open yet. */
   connectorError?: string | null;
 };
 
+export type WechatFinalizeResult = {
+  status: "connected";
+  mode: WechatPairingMode;
+  channelId: string;
+  reused: boolean;
+  identity: "linked" | "unlinked";
+  connectorError: string | null;
+};
+
+/** A typed pairing refusal (`binding_conflict`, `other_workspace`, ...). */
+export class WechatPairingError extends Error {
+  constructor(readonly code: string, readonly status: number) {
+    super(code);
+    this.name = "WechatPairingError";
+  }
+}
+
 /**
- * Start a WeChat QR pairing session. The user scans the returned URL
- * (rendered as a QR) with their WeChat; poll `getWechatPairingStatus` until
- * `connected`. iLink may demand a pairing code mid-flow
- * (`need_verifycode`) — submit it via `submitWechatVerifyCode`.
+ * Start a WeChat QR pairing session. `self` (Connect my WeChat) links the
+ * scanning WeChat account to the signed-in account at finalize;
+ * `admin_prepare` (owners/admins) saves an unlinked connection for a staff
+ * member. Poll `getWechatPairingStatus` until `confirmed`, then the person
+ * explicitly confirms with `finalizeWechatPairing`. iLink may demand a
+ * pairing code mid-flow (`need_verifycode`): submit it via
+ * `submitWechatVerifyCode`.
  */
 export async function startWechatPairing(
   workspaceId: string,
-  input: { defaultAssistantId?: string | null } = {},
-): Promise<{ pairingId: string; qrcodeUrl: string }> {
+  input: { mode: WechatPairingMode; defaultAssistantId?: string | null },
+): Promise<{ pairingId: string; qrcodeUrl: string; mode: WechatPairingMode }> {
   const res = await authFetch(
     `${API_URL}/api/workspaces/${encodeURIComponent(workspaceId)}/channels/wechat/pairing`,
     {
@@ -640,13 +665,62 @@ export async function startWechatPairing(
   if (!res.ok) {
     const data = (await res.json().catch(() => ({}))) as {
       error?: string;
-      detail?: string;
+      code?: string;
     };
-    throw new Error(
-      data.detail ?? data.error ?? `WeChat pairing failed (${res.status})`,
-    );
+    throw new WechatPairingError(data.code ?? data.error ?? "pairing_failed", res.status);
   }
-  return (await res.json()) as { pairingId: string; qrcodeUrl: string };
+  return (await res.json()) as { pairingId: string; qrcodeUrl: string; mode: WechatPairingMode };
+}
+
+/** The creator's explicit confirmation: the one call that saves anything. */
+export async function finalizeWechatPairing(
+  workspaceId: string,
+  pairingId: string,
+): Promise<WechatFinalizeResult> {
+  const res = await authFetch(
+    `${API_URL}/api/workspaces/${encodeURIComponent(workspaceId)}/channels/wechat/pairing/${encodeURIComponent(pairingId)}/finalize`,
+    { method: "POST" },
+  );
+  if (!res.ok) {
+    const data = (await res.json().catch(() => ({}))) as { error?: string };
+    throw new WechatPairingError(data.error ?? "finalize_failed", res.status);
+  }
+  return (await res.json()) as WechatFinalizeResult;
+}
+
+/** Owner/admin: revoke a WeChat connection's staff binding. Assigns nobody. */
+export async function revokeWechatChannelBinding(
+  workspaceId: string,
+  channelId: string,
+): Promise<boolean> {
+  const res = await authFetch(
+    `${API_URL}/api/workspaces/${encodeURIComponent(workspaceId)}/channels/${encodeURIComponent(channelId)}/wechat/binding`,
+    { method: "DELETE" },
+  );
+  return res.ok;
+}
+
+export type WechatTransportStatus = "polling" | "paused" | "stopped" | "not_running" | "unavailable";
+
+/** Owner/admin: the connector loop's coarse state for one WeChat channel. */
+export async function getWechatTransportStatus(
+  workspaceId: string,
+  channelId: string,
+): Promise<WechatTransportStatus | null> {
+  try {
+    const res = await authFetch(
+      `${API_URL}/api/workspaces/${encodeURIComponent(workspaceId)}/channels/${encodeURIComponent(channelId)}/wechat/transport`,
+    );
+    if (!res.ok) return null;
+    return ((await res.json()) as { status: WechatTransportStatus }).status;
+  } catch {
+    return null;
+  }
+}
+
+/** The link an admin shares so a staff member can link a prepared connection. */
+export function wechatPreparedLink(origin: string, workspaceId: string, channelId: string): string {
+  return `${origin}/w/${encodeURIComponent(workspaceId)}/studio/channels?channel=${encodeURIComponent(channelId)}`;
 }
 
 export async function getWechatPairingStatus(

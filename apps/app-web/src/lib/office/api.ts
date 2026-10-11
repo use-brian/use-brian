@@ -4,7 +4,7 @@ import { authFetch } from "@/lib/auth-fetch";
 import type { OfficeArtifactSnapshot, OfficeCommand, OfficeResourceRef, OfficeTemplateRoutingDraft, OfficeTemplateSlideRole } from "@use-brian/office-model";
 
 import { getUserInfo } from "@/lib/user";
-import { attachOfficeMetadata, type OfficeMetadata } from "./metadata";
+import { attachOfficeMetadata, officeMetadataRemaining, type OfficeMetadata } from "./metadata";
 
 const API_URL = publicRuntimeConfig().apiUrl ?? "http://localhost:4000";
 
@@ -121,14 +121,47 @@ async function json<T>(response: Response, fallback: string): Promise<T> {
 /** SQL GET metadata is bounded independently of the HTTP cache. */
 async function metadata<T extends object, B = T>(path: string, fallback: string, select: (body: B) => T = value => value as unknown as T,init?:RequestInit): Promise<OfficeMetadata<T>> {
   const started = performance.now(), viewerId = getUserInfo()?.id;
-  const response = await authFetch(`${API_URL}/api/office/${path}`, {...init,cache:"no-store"});
-  const body = await json<B>(response, fallback);
-  const header = response.headers.get("X-Brian-Projection-Valid-For-Ms");
+  let stage: "request" | "body" | "annotation" = "request";
+  let response: Response | undefined, header: string | null = null, validForMs = NaN;
+  let selectedValueIsObject = false;
+  // Fixed codes and scalar measurements only: never log the path, body or error.
+  const diagnostic = (reason: string, remainingMs?: number) => console.warn("[office_metadata_read]", JSON.stringify({
+    reason, stage, status: response?.status ?? null,
+    requestDurationMs: Math.round(performance.now() - started),
+    validForMs: Number.isFinite(validForMs) ? validForMs : null,
+    headerPresent: header !== null, selectedValueIsObject,
+    viewerPresent: Boolean(viewerId), viewerChanged: viewerId !== getUserInfo()?.id,
+    ...(remainingMs === undefined ? {} : {remainingMs: Math.floor(remainingMs)}),
+  }));
   try {
+    response = await authFetch(`${API_URL}/api/office/${path}`, {...init,cache:"no-store"});
+    stage = "body";
+    const body = await json<B>(response, fallback);
+    header = response.headers.get("X-Brian-Projection-Valid-For-Ms");
+    validForMs = header === null ? NaN : Number(header);
+    stage = "annotation";
     if (!viewerId || getUserInfo()?.id !== viewerId) throw new Error("office_viewer_changed");
-    return attachOfficeMetadata(select(body), header === null ? NaN : Number(header), started, viewerId);
+    const value = select(body);
+    selectedValueIsObject = Boolean(value && typeof value === "object");
+    const result = attachOfficeMetadata(value, validForMs, started, viewerId);
+    const remainingMs = officeMetadataRemaining(result, viewerId);
+    if (remainingMs <= performance.now() - started + 500) diagnostic("renewal_slack_insufficient", remainingMs);
+    return result;
+  } catch (error) {
+    const elapsed = performance.now() - started;
+    const reason = stage === "request" ? "transport_failed"
+      : stage === "body" ? response?.ok ? "body_parse_failed" : "http_error"
+      : !viewerId || viewerId !== getUserInfo()?.id ? "viewer_changed"
+      : header === null ? "missing_lifetime"
+      : !Number.isFinite(validForMs) || validForMs <= 0 ? "invalid_lifetime"
+      : !selectedValueIsObject ? "invalid_payload"
+      : !Number.isFinite(elapsed) || elapsed < 0 ? "invalid_duration"
+      : Math.min(validForMs, 30_000) <= elapsed ? "lifetime_exhausted"
+      : "annotation_failed";
+    diagnostic(reason);
+    if (stage === "annotation") throw new OfficeApiError("office_projection_expired", 409);
+    throw error;
   }
-  catch { throw new OfficeApiError("office_projection_expired", 409); }
 }
 
 async function protectedMediaJson<T extends object, B = T>(response: Response, fallback: string, started: number, viewerId: string | undefined, select: (body: B) => T = value => value as unknown as T): Promise<OfficeMetadata<T>> {

@@ -35,12 +35,14 @@ const integrationStore = (credentials: object) => ({
   getByChannelForWebhook: async () => ({ id: 'integration', channelId: 'channel', credentials, config: {}, connectorInstanceId: 'connector' }),
   touchLastEventAt: async () => {}, mergeConfigSystem: async () => {},
 })
-it.each(['bound', 'shadow', 'resolver failure', 'no resolver'])('WeChat identity: %s', async mode => {
+// WeChat no longer infers an owner or mints shadows (wechat.md → "Staff
+// identity"): without a verified binding, none of the former shapes - the
+// QR-bound sender, another contact, a failing or absent shadow resolver -
+// reaches the pipeline, and the shadow resolver is never consulted.
+it.each(['bound', 'shadow', 'resolver failure', 'no resolver'])('WeChat identity without a binding: %s never runs a turn', async mode => {
   if (mode === 'shadow') mocks.resolveUser.mockResolvedValue({ user: { id: 'shadow' }, isIdentified: false })
-  if (mode === 'resolver failure') {
-    mocks.resolveUser.mockRejectedValue(new Error('resolution failed'))
-    vi.spyOn(console, 'error').mockImplementation(() => {})
-  }
+  if (mode === 'resolver failure') mocks.resolveUser.mockRejectedValue(new Error('resolution failed'))
+  vi.spyOn(console, 'error').mockImplementation(() => {})
   const app = express(); app.use(express.json())
   app.use('/wechat', wechatRoutes({ connectorSecret: 'secret', tools: new Map(), channelUserStore: mode === 'no resolver' ? undefined : {},
     integrationStore: integrationStore({ bot_token: 'token', base_url: 'https://example.com', bound_user_id: 'owner-wechat' }),
@@ -48,11 +50,9 @@ it.each(['bound', 'shadow', 'resolver failure', 'no resolver'])('WeChat identity
   await request(app).post('/wechat/inbound').set('X-Connector-Secret', 'secret').send({ channelId: 'channel', message: {
     userId: mode === 'bound' ? 'owner-wechat' : 'other-wechat', channelId: 'peer', messageId: 'message', text: 'hello', isGroupChat: false, timestamp: 1, raw: {},
   } }).expect(200)
-  await vi.waitFor(() => expect(mocks.pipeline).toHaveBeenCalledOnce())
-  expect(mocks.resolveUser).toHaveBeenCalledTimes(mode === 'bound' || mode === 'no resolver' ? 0 : 1)
-  expect(mocks.pipeline.mock.calls[0][0]).toMatchObject({
-    userId: mode === 'shadow' ? 'shadow' : 'owner', isIdentified: mode === 'bound',
-  })
+  await new Promise(resolve => setTimeout(resolve, 20))
+  expect(mocks.pipeline).not.toHaveBeenCalled()
+  expect(mocks.resolveUser).not.toHaveBeenCalled()
 })
 it.each([true, false])('successive Feishu choices preserve the session (initial binding session: %s)', async initialSession => {
   mocks.channelType = 'feishu'

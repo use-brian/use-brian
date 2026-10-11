@@ -15,6 +15,13 @@ import {
   FEISHU_PERMISSION_IMPORT,
 } from "../page-client";
 
+// AddChannelForm reads the active workspace name for the WeChat tab; the real
+// app mounts the route WorkspaceContextProvider, these renders do not.
+vi.mock("@/contexts/workspace-context", async (importOriginal) => ({
+  ...(await importOriginal<typeof import("@/contexts/workspace-context")>()),
+  useWorkspaces: () => ({ workspaces: [], activeId: "ws-1", active: null, setActive: () => {} }),
+}));
+
 vi.mock("@/lib/api/channels", async (importOriginal) => {
   const actual = await importOriginal<typeof import("@/lib/api/channels")>();
   return {

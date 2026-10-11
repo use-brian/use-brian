@@ -17,6 +17,13 @@ import {
   WhatsAppCloudChatSection,
 } from "../page-client";
 
+// AddChannelForm reads the active workspace name for the WeChat tab; the real
+// app mounts the route WorkspaceContextProvider, these renders do not.
+vi.mock("@/contexts/workspace-context", async (importOriginal) => ({
+  ...(await importOriginal<typeof import("@/contexts/workspace-context")>()),
+  useWorkspaces: () => ({ workspaces: [], activeId: "ws-1", active: null, setActive: () => {} }),
+}));
+
 const confirmDialog = vi.hoisted(() =>
   vi.fn(async (_options: ConfirmOptions) => false),
 );

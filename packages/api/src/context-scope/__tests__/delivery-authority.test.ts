@@ -648,3 +648,54 @@ describe('[COMP:api/delivery-authority] company-wide group approval', () => {
     expect(connectorExposureAllowed(turnOf(general.ceiling), sales)).toBe(false)
   })
 })
+
+describe('[COMP:api/delivery-authority] WeChat recipient binding (staff identity)', () => {
+  // A private owner session under the raw peer id is exactly what an old
+  // owner-fallback turn left behind: it must not authorize anything.
+  const oldSession = session({ channelType: 'wechat', channelId: 'peer@im.wechat', visibility: 'owner' })
+  const deps = (current: boolean | Error) => ({
+    findAssistant: vi.fn(async () => ({ id: ASSISTANT, workspaceId: WS })) as never,
+    findSession: vi.fn(async () => null),
+    findChannelSession: vi.fn(async () => oldSession) as never,
+    getWorkspaceRole: vi.fn(async () => 'owner' as const),
+    resolveLiveAccess: vi.fn(async () => ceiling()),
+    isWechatRecipientCurrent: vi.fn(async () => {
+      if (current instanceof Error) throw current
+      return current
+    }),
+  })
+  const input = {
+    workspaceId: WS,
+    assistantId: ASSISTANT,
+    userId: USER,
+    channelType: 'wechat',
+    channelId: 'peer@im.wechat',
+    channelIntegrationId: '99999999-9999-4999-8999-999999999999',
+    sessionChannelId: 'wechat:chan:b:binding:v1:g1',
+    recipientType: 'individual' as const,
+  }
+
+  it('checks the exact binding before the session shortcut, and refuses even empty evidence', async () => {
+    const d = deps(false)
+    await expect(createDeliveryAudienceAuthorizer(d)({ ...input, scopeEvidence: {} }))
+      .resolves.toMatchObject({ allowed: false, diagnostic: 'wechat_recipient_unbound' })
+    expect(d.findChannelSession).not.toHaveBeenCalled()
+    expect(d.isWechatRecipientCurrent).toHaveBeenCalledWith({
+      workspaceId: WS, accountId: USER, peerId: 'peer@im.wechat',
+      sessionChannelId: 'wechat:chan:b:binding:v1:g1', channelIntegrationId: input.channelIntegrationId,
+    })
+  })
+
+  it('a lookup failure is a refusal, never permission', async () => {
+    await expect(createDeliveryAudienceAuthorizer(deps(new Error('db down')))({ ...input, scopeEvidence: {} }))
+      .resolves.toMatchObject({ allowed: false, diagnostic: 'wechat_recipient_unbound' })
+  })
+
+  it('a current binding delivers the member\'s own rows as a member recipient', async () => {
+    const d = deps(true)
+    await expect(createDeliveryAudienceAuthorizer(d)({ ...input, scopeEvidence: { sources: [source('own', ASSISTANT)] } }))
+      .resolves.toMatchObject({ allowed: true })
+    await expect(createDeliveryAudienceEnvelopeResolver(d)(input))
+      .resolves.toMatchObject({ allowed: true, source: 'member' })
+  })
+})
