@@ -13,6 +13,13 @@ import type { Channel } from "@/lib/api/channels";
 import type { EmailInbox } from "@/lib/api/email-inboxes";
 import { AddChannelForm, ChannelDetail } from "../page-client";
 
+// AddChannelForm reads the active workspace name for the WeChat tab; the real
+// app mounts the route WorkspaceContextProvider, these renders do not.
+vi.mock("@/contexts/workspace-context", async (importOriginal) => ({
+  ...(await importOriginal<typeof import("@/contexts/workspace-context")>()),
+  useWorkspaces: () => ({ workspaces: [], activeId: "ws-1", active: null, setActive: () => {} }),
+}));
+
 const authFetch = vi.hoisted(() => vi.fn());
 vi.mock("@/lib/auth-fetch", () => ({ authFetch }));
 
