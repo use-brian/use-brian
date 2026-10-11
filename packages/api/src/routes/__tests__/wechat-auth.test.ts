@@ -7,13 +7,13 @@
  * constant-time and fail closed: an empty configured secret matches nothing,
  * rather than comparing `undefined !== undefined` and waving an
  * unauthenticated caller through to the token list. Also covers the cursor
- * persistence endpoint (get_updates_buf merge into credentials).
+ * persistence endpoint (generation-checked get_updates_buf write).
  */
 
 import { describe, it, expect, vi, beforeEach } from 'vitest'
 import express from 'express'
 import request from 'supertest'
-import { isBoundWechatOwner, wechatRoutes } from '../wechat.js'
+import { isQrBoundSender, wechatRoutes } from '../wechat.js'
 
 vi.mock('../../message-events.js', () => ({ dispatchIncomingMessageEvent: vi.fn(async () => {}) }))
 vi.mock('../../db/channels-store.js', () => ({ getChannelForWebhook: vi.fn(), resolveRoutingForSurface: vi.fn(async () => null) }))
@@ -22,7 +22,7 @@ vi.mock('../../db/client.js', () => ({ query: vi.fn(async () => ({ rows: [] })),
 import { dispatchIncomingMessageEvent } from '../../message-events.js'
 import { getChannelForWebhook } from '../../db/channels-store.js'
 
-describe('[COMP:api/wechat-inbound] QR-bound owner identity', () => {
+describe('[COMP:api/wechat-inbound] QR-bound sender (provider proof only)', () => {
   const credentials = {
     bot_token: 'token',
     base_url: 'https://ilink.example',
@@ -31,12 +31,12 @@ describe('[COMP:api/wechat-inbound] QR-bound owner identity', () => {
   }
 
   it('recognizes only the WeChat account that performed the QR binding', () => {
-    expect(isBoundWechatOwner('owner@im.wechat', credentials)).toBe(true)
-    expect(isBoundWechatOwner('another-contact@im.wechat', credentials)).toBe(false)
+    expect(isQrBoundSender('owner@im.wechat', credentials)).toBe(true)
+    expect(isQrBoundSender('another-contact@im.wechat', credentials)).toBe(false)
   })
 
   it('fails closed for legacy credentials without a bound user', () => {
-    expect(isBoundWechatOwner('owner@im.wechat', { ...credentials, bound_user_id: undefined })).toBe(false)
+    expect(isQrBoundSender('owner@im.wechat', { ...credentials, bound_user_id: undefined })).toBe(false)
   })
 })
 
@@ -57,6 +57,23 @@ function buildApp(connectorSecret: string) {
     getByChannelForWebhook: vi.fn(async () => ({ id: 'int-1', credentials: { ilink_bot_id: 'bot' }, config: {} })),
     mergeCredentialsSystem: vi.fn(async () => {}),
   }
+  const identityStore = {
+    listActiveWechatTransportsSystem: vi.fn(async () => [
+      {
+        channelId: 'chan-1', workspaceId: 'ws-1', botId: 'bot123@im.bot', generation: 4, conflict: false,
+        credentials: {
+          bot_token: 'wechat-bot-token-1', base_url: 'https://shdx.ilink.example',
+          ilink_bot_id: 'bot123@im.bot', get_updates_buf: 'cursor-abc',
+        },
+      },
+      {
+        channelId: 'chan-dup', workspaceId: 'ws-2', botId: 'dup@im.bot', generation: 1, conflict: true,
+        credentials: { bot_token: 'dup-token', base_url: 'https://x', ilink_bot_id: 'dup@im.bot' },
+      },
+    ]),
+    persistWechatCursor: vi.fn(async (_c: string, generation?: number) => generation === undefined || generation === 4),
+    getWechatTransportGeneration: vi.fn(async () => 4),
+  }
   const app = express()
   app.use(express.json())
   app.use(
@@ -64,6 +81,7 @@ function buildApp(connectorSecret: string) {
     wechatRoutes({
       connectorSecret,
       integrationStore,
+      identityStore,
       provider: {},
       systemPrompt: '',
       tools: new Map(),
@@ -71,15 +89,15 @@ function buildApp(connectorSecret: string) {
       capabilityStore: {},
     } as never),
   )
-  return { app, integrationStore }
+  return { app, integrationStore, identityStore }
 }
 
 describe('[COMP:api/wechat-inbound] connector-secret guard', () => {
   it('401s /channels without the secret header — no token rows leave', async () => {
-    const { app, integrationStore } = buildApp('s3cret')
+    const { app, identityStore } = buildApp('s3cret')
     const res = await request(app).get('/internal/wechat/channels')
     expect(res.status).toBe(401)
-    expect(integrationStore.listActiveWithCredentialsSystem).not.toHaveBeenCalled()
+    expect(identityStore.listActiveWechatTransportsSystem).not.toHaveBeenCalled()
   })
 
   it('401s a wrong secret', async () => {
@@ -91,15 +109,15 @@ describe('[COMP:api/wechat-inbound] connector-secret guard', () => {
   })
 
   it('fails closed when the configured secret is empty — even an empty header loses', async () => {
-    const { app, integrationStore } = buildApp('')
+    const { app, identityStore } = buildApp('')
     const res = await request(app)
       .get('/internal/wechat/channels')
       .set('x-connector-secret', '')
     expect(res.status).toBe(401)
-    expect(integrationStore.listActiveWithCredentialsSystem).not.toHaveBeenCalled()
+    expect(identityStore.listActiveWechatTransportsSystem).not.toHaveBeenCalled()
   })
 
-  it('serves the credential list to the correct secret', async () => {
+  it('serves the credential list with bot id + generation, excluding conflicted bots', async () => {
     const { app } = buildApp('s3cret')
     const res = await request(app)
       .get('/internal/wechat/channels')
@@ -108,6 +126,8 @@ describe('[COMP:api/wechat-inbound] connector-secret guard', () => {
     expect(res.body).toEqual([
       {
         channelId: 'chan-1',
+        botId: 'bot123@im.bot',
+        generation: 4,
         botToken: 'wechat-bot-token-1',
         baseUrl: 'https://shdx.ilink.example',
         getUpdatesBuf: 'cursor-abc',
@@ -117,28 +137,19 @@ describe('[COMP:api/wechat-inbound] connector-secret guard', () => {
 })
 
 describe('[COMP:api/wechat-inbound] cursor persistence', () => {
-  it('merges the new get_updates_buf into the channel credentials', async () => {
-    const { app, integrationStore } = buildApp('s3cret')
-    const res = await request(app)
+  it('persists the cursor only for the current generation; a cursor never rotates identity', async () => {
+    const { app, identityStore } = buildApp('s3cret')
+    const ok = await request(app)
       .post('/internal/wechat/cursor')
       .set('x-connector-secret', 's3cret')
-      .send({ channelId: 'chan-1', getUpdatesBuf: 'cursor-next' })
-    expect(res.status).toBe(200)
-    expect(integrationStore.mergeCredentialsSystem).toHaveBeenCalledTimes(1)
-    const calls = integrationStore.mergeCredentialsSystem.mock.calls as unknown as Array<
-      [string, string, (c: Record<string, unknown>) => Record<string, unknown>]
-    >
-    const [channelId, channelType, mutate] = calls[0]
-    expect(channelId).toBe('chan-1')
-    expect(channelType).toBe('wechat')
-    expect(
-      mutate({
-        bot_token: 't',
-        base_url: 'u',
-        ilink_bot_id: 'b',
-        get_updates_buf: 'old',
-      }),
-    ).toEqual({ bot_token: 't', base_url: 'u', ilink_bot_id: 'b', get_updates_buf: 'cursor-next' })
+      .send({ channelId: 'chan-1', getUpdatesBuf: 'cursor-next', generation: 4 })
+    expect(ok.status).toBe(200)
+    expect(identityStore.persistWechatCursor).toHaveBeenCalledWith('chan-1', 4, 'cursor-next')
+    const stale = await request(app)
+      .post('/internal/wechat/cursor')
+      .set('x-connector-secret', 's3cret')
+      .send({ channelId: 'chan-1', getUpdatesBuf: 'rollback', generation: 3 })
+    expect(stale.status).toBe(409)
   })
 
   it('400s a payload without a cursor string', async () => {

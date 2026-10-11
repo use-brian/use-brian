@@ -18,7 +18,45 @@ vi.mock('../../context-scope/resolve-turn-scope.js', async (importOriginal) => (
   resolveLiveAccessCeilingSystem: vi.fn(),
 }))
 
+vi.mock('../../db/channels-store.js', async (importOriginal) => ({
+  ...(await importOriginal<typeof import('../../db/channels-store.js')>()),
+  getChannelForWebhook: vi.fn(),
+  resolveRoutingForSurface: vi.fn(),
+}))
+vi.mock('../channel-pipeline.js', () => ({ processChannelMessage: vi.fn(async () => {}) }))
+vi.mock('../../message-events.js', () => ({ dispatchIncomingMessageEvent: vi.fn(async () => {}) }))
+vi.mock('../../billing-party.js', () => ({ billingPartyForAssistant: vi.fn(async () => 'billing-owner') }))
+vi.mock('../../db/wechat-context-tokens.js', () => ({
+  upsertWechatContextToken: vi.fn(async () => {}),
+  getWechatContextToken: vi.fn(async () => 'ctx'),
+}))
+vi.mock('../../db/workspace-store.js', async (importOriginal) => ({
+  ...(await importOriginal<typeof import('../../db/workspace-store.js')>()),
+  getWorkspaceRoleSystem: vi.fn(),
+}))
+vi.mock('../../db/chat-lock.js', () => ({ withChatLock: vi.fn(async (_key: string, fn: () => Promise<void>) => fn()) }))
+vi.mock('../../chat-archive/live-writer.js', () => ({
+  archiveUnroutedInbound: vi.fn(async () => {}),
+  resolveChatArchiveInstanceId: vi.fn(async () => null),
+}))
+vi.mock('@use-brian/channels', async (importOriginal) => ({
+  ...(await importOriginal<typeof import('@use-brian/channels')>()),
+  createWechatAdapter: vi.fn(),
+  createIlinkClient: vi.fn(() => ({ getConfig: vi.fn(async () => ({})), sendTyping: vi.fn(async () => ({})) })),
+}))
+
 import { channelsRoutes } from '../channels.js'
+import { wechatRoutes, WECHAT_IDENTITY_NOTICES, WECHAT_LINK_REPLIES } from '../wechat.js'
+import { processChannelMessage } from '../channel-pipeline.js'
+import { dispatchIncomingMessageEvent } from '../../message-events.js'
+import { getChannelForWebhook, resolveRoutingForSurface } from '../../db/channels-store.js'
+import { getWorkspaceRoleSystem } from '../../db/workspace-store.js'
+import { upsertWechatContextToken } from '../../db/wechat-context-tokens.js'
+import { archiveUnroutedInbound } from '../../chat-archive/live-writer.js'
+import { createWechatAdapter } from '@use-brian/channels'
+import { createDeliveryAudienceAuthorizer } from '../../context-scope/delivery-authority.js'
+import { WorkflowStepSchema } from '@use-brian/core'
+import { wechatSessionChannelId, type WechatIdentityReceipt } from '../../db/channel-identity-bindings.js'
 import { findAssistantById } from '../../db/users.js'
 import { resolveLiveAccessCeilingSystem } from '../../context-scope/resolve-turn-scope.js'
 import type { ChannelIdentityBindingStore } from '../../db/channel-identity-bindings.js'
@@ -197,5 +235,231 @@ describe('[COMP:api/wechat-inbound] WeChat pairing: creator-only, explicit final
     expect(res.body).toEqual({ ok: true, revoked: 1 })
     expect(t.identityStore.revokeWechatChannelBinding).toHaveBeenCalledWith(WS, CHANNEL)
     expect(t.analytics.logEvent).toHaveBeenCalledWith(expect.objectContaining({ eventName: 'wechat_binding_revoked', userId: 'admin' }))
+  })
+})
+
+// ── Inbound: sender execution and session isolation ──────────────────
+
+const SECRET = 'connector-secret'
+type Bot = { channelId: string; botId: string; sender: string; account: string; integrationId: string; generation: number }
+
+function bots(n: number): Bot[] {
+  return Array.from({ length: n }, (_, i) => {
+    const id = String(i + 1).padStart(12, '0')
+    return {
+      channelId: `00000000-0000-4000-a000-${id}`,
+      botId: `bot${i + 1}@im.bot`,
+      sender: `staff${i + 1}@im.wechat`,
+      account: `00000000-0000-4000-b000-${id}`,
+      integrationId: `00000000-0000-4000-c000-${id}`,
+      generation: 1,
+    }
+  })
+}
+
+function receiptFor(b: Bot, version = 1): WechatIdentityReceipt {
+  return {
+    bindingId: `00000000-0000-4000-d000-${b.channelId.slice(-12)}`, version, accountId: b.account,
+    workspaceId: WS, channelId: b.channelId, botId: b.botId, senderId: b.sender, transportGeneration: b.generation,
+  }
+}
+
+function inboundWorld(fleet: Bot[], opts: { bindings?: Map<string, WechatIdentityReceipt | 'conflict' | 'error'> } = {}) {
+  const byChannel = new Map(fleet.map((b) => [b.channelId, b]))
+  const sent: Array<{ channelId: string; peer: string; text: string }> = []
+  vi.mocked(createWechatAdapter).mockImplementation(((config: { botToken: string }) => ({
+    sendMessage: vi.fn(async (peer: string, msg: { text: string }) => {
+      sent.push({ channelId: config.botToken.replace('token-', ''), peer, text: msg.text })
+      return 'mid'
+    }),
+  })) as never)
+  vi.mocked(getChannelForWebhook).mockImplementation(async (id: string) => (byChannel.has(id)
+    ? { id, workspaceId: WS, channelType: 'wechat', status: 'active', enabledCapabilities: ['chat'] } : null) as never)
+  vi.mocked(resolveRoutingForSurface).mockResolvedValue({ assistantId: ASSISTANT, modelAlias: 'pro' } as never)
+  vi.mocked(findAssistantById).mockResolvedValue({
+    id: ASSISTANT, name: 'Brian', workspaceId: WS, ownerUserId: null, clearance: 'internal', kind: 'standard',
+    compartments: ['ops'], defaultCompartments: [], teamScopeMode: 'assigned', systemPrompt: null,
+  } as never)
+  vi.mocked(getWorkspaceRoleSystem).mockResolvedValue('member')
+  const bindings = opts.bindings ?? new Map(fleet.map((b) => [b.channelId, receiptFor(b)]))
+  const integrationStore = {
+    getByChannelForWebhook: vi.fn(async (channelId: string) => {
+      const b = byChannel.get(channelId)
+      return b ? {
+        id: b.integrationId, channelId, config: {}, connectorInstanceId: null,
+        credentials: { bot_token: `token-${channelId}`, base_url: 'https://ilink.example', ilink_bot_id: b.botId, bound_user_id: b.sender } as Record<string, string>,
+      } : null
+    }),
+  }
+  const identityStore = {
+    getWechatTransportGeneration: vi.fn(async (channelId: string) => byChannel.get(channelId)?.generation ?? null),
+    resolveWechatSender: vi.fn(async ({ channelId }: { channelId: string }) => {
+      const r = bindings.get(channelId)
+      if (r === 'error') throw new Error('store down')
+      if (r === 'conflict') return { kind: 'conflict' }
+      return r ? { kind: 'bound', receipt: r } : { kind: 'unbound' }
+    }),
+    isWechatReceiptCurrent: vi.fn(async () => true),
+    claimWechatLinkCode: vi.fn(),
+  }
+  const app = express()
+  app.use(express.json())
+  app.use('/internal/wechat', wechatRoutes({
+    connectorSecret: SECRET, integrationStore, identityStore, provider: {}, systemPrompt: '',
+    tools: new Map(), memoryStore: {}, capabilityStore: {},
+  } as never))
+  const send = (b: Bot, text: string, over: Record<string, unknown> = {}) => request(app)
+    .post('/internal/wechat/inbound').set('x-connector-secret', SECRET)
+    .send({ channelId: b.channelId, generation: b.generation, message: { userId: b.sender, channelId: b.sender, messageId: `m-${Math.random()}`, text, raw: { context_token: 'ctx-1' }, ...over } })
+  return { app, send, sent, identityStore, integrationStore }
+}
+
+const pipelineCalls = () => vi.mocked(processChannelMessage).mock.calls.map((c) => c[0])
+const settle = () => new Promise((resolve) => setTimeout(resolve, 20))
+
+describe('[COMP:api/wechat-inbound] staff execution, isolation and fixed refusals', () => {
+  beforeEach(() => {
+    vi.mocked(processChannelMessage).mockClear()
+    vi.mocked(dispatchIncomingMessageEvent).mockClear()
+    vi.mocked(archiveUnroutedInbound).mockClear()
+    vi.mocked(upsertWechatContextToken).mockClear()
+  })
+
+  it('A1: twelve bots in one workspace each run as their own staff account, never the billing owner', async () => {
+    const fleet = bots(12)
+    const w = inboundWorld(fleet)
+    await Promise.all(fleet.map((b) => w.send(b, `hello from ${b.sender}`)))
+    await vi.waitFor(() => expect(processChannelMessage).toHaveBeenCalledTimes(12))
+    const calls = pipelineCalls()
+    for (const b of fleet) {
+      const call = calls.find((c) => c.channelId === b.sender)!
+      expect(call).toMatchObject({
+        userId: b.account, ownerId: 'billing-owner', isIdentified: true, senderLinkedIdentity: true,
+        connectorAuthority: 'sender', actorChannelId: b.sender, channelId: b.sender,
+        channelIntegrationId: b.integrationId,
+        sessionChannelId: wechatSessionChannelId(receiptFor(b)),
+      })
+      expect(call.interactionScope).toMatchObject({ integrationId: b.channelId, sessionId: wechatSessionChannelId(receiptFor(b)) })
+      expect(call.assistant).toMatchObject({ compartments: ['ops'], teamScopeMode: 'assigned' })
+    }
+    expect(new Set(calls.map((c) => c.userId)).size).toBe(12)
+    expect(calls.some((c) => c.userId === 'billing-owner')).toBe(false)
+    // Each turn's live credential check reads ITS OWN receipt.
+    await calls[0].credentialCurrent!()
+    expect(w.identityStore.isWechatReceiptCurrent).toHaveBeenCalledWith(
+      receiptFor(fleet.find((b) => b.sender === calls[0].channelId)!))
+  })
+
+  it('A5: legacy/unbound bots, unknown or missing senders, store failure and duplicates make zero model calls', async () => {
+    const fleet = bots(5)
+    const [legacy, conflicted, broken, ok, missingSender] = fleet
+    const w = inboundWorld(fleet, { bindings: new Map<string, WechatIdentityReceipt | 'conflict' | 'error'>([
+      [conflicted.channelId, 'conflict'], [broken.channelId, 'error'], [ok.channelId, receiptFor(ok)],
+      [missingSender.channelId, receiptFor(missingSender)],
+    ]) })
+    w.integrationStore.getByChannelForWebhook.mockImplementation(async (channelId: string) => {
+      const b = fleet.find((x) => x.channelId === channelId)!
+      return {
+        id: b.integrationId, channelId, config: {}, connectorInstanceId: null,
+        credentials: { bot_token: `token-${channelId}`, base_url: 'https://ilink.example', ilink_bot_id: b.botId,
+          ...(b === missingSender ? {} : { bound_user_id: b.sender }) } as Record<string, string>,
+      }
+    })
+    await w.send(legacy, 'hi')
+    await w.send(conflicted, 'hi')
+    await w.send(broken, 'hi')
+    await w.send(missingSender, 'hi')
+    await w.send(ok, 'hi', { userId: 'stranger@im.wechat', channelId: 'stranger@im.wechat' })
+    await vi.waitFor(() => expect(w.sent).toHaveLength(5))
+    expect(processChannelMessage).not.toHaveBeenCalled()
+    expect(w.sent.map((m) => m.text).sort()).toEqual([
+      WECHAT_IDENTITY_NOTICES.unlinked, WECHAT_IDENTITY_NOTICES.conflict, WECHAT_IDENTITY_NOTICES.unverified,
+      WECHAT_IDENTITY_NOTICES.notOwner, WECHAT_IDENTITY_NOTICES.notOwner,
+    ].sort())
+    for (const text of Object.values(WECHAT_IDENTITY_NOTICES)) expect(text).not.toContain('\u2014')
+  })
+
+  it('A5: a removed member and a missing identity store get fixed notices, never a turn', async () => {
+    const [b] = bots(1)
+    const w = inboundWorld([b])
+    vi.mocked(getWorkspaceRoleSystem).mockResolvedValueOnce(null)
+    await w.send(b, 'hi')
+    await vi.waitFor(() => expect(w.sent).toHaveLength(1))
+    expect(w.sent[0].text).toBe(WECHAT_IDENTITY_NOTICES.accessRemoved)
+    expect(processChannelMessage).not.toHaveBeenCalled()
+  })
+
+  it('LINK <code> is claimed before any event, archive, session or model sees the text', async () => {
+    const [b] = bots(1)
+    const w = inboundWorld([b], { bindings: new Map() })
+    w.identityStore.claimWechatLinkCode
+      .mockResolvedValueOnce({ ok: true, idempotent: false, receipt: receiptFor(b) })
+      .mockResolvedValueOnce({ ok: false, reason: 'invalid' })
+    const logs = vi.spyOn(console, 'log')
+    await w.send(b, 'LINK abcd-efgh')
+    await w.send(b, 'link wrongcode')
+    await vi.waitFor(() => expect(w.sent).toHaveLength(2))
+    expect(w.identityStore.claimWechatLinkCode).toHaveBeenNthCalledWith(1, expect.objectContaining({
+      channelId: b.channelId, botId: b.botId, senderId: b.sender, code: 'ABCDEFGH',
+    }))
+    expect(w.identityStore.claimWechatLinkCode).toHaveBeenNthCalledWith(2, expect.objectContaining({ code: null }))
+    expect(w.sent.map((m) => m.text)).toEqual([WECHAT_LINK_REPLIES.linked, WECHAT_LINK_REPLIES.invalid])
+    expect(dispatchIncomingMessageEvent).not.toHaveBeenCalled()
+    expect(archiveUnroutedInbound).not.toHaveBeenCalled()
+    expect(processChannelMessage).not.toHaveBeenCalled()
+    expect(upsertWechatContextToken).toHaveBeenCalled()
+    expect(logs.mock.calls.flat().join(' ')).not.toContain('ABCDEFGH')
+    logs.mockRestore()
+  })
+
+  it('A9: the same peer id on two bots, and a rebind on one bot, never share a session or scope', async () => {
+    const [a, b] = bots(2)
+    const shared = { ...b, sender: a.sender }
+    const w = inboundWorld([a, shared])
+    await w.send(a, 'one')
+    await w.send(shared, 'two')
+    await vi.waitFor(() => expect(processChannelMessage).toHaveBeenCalledTimes(2))
+    const [first, second] = pipelineCalls()
+    expect(first.channelId).toBe(second.channelId)
+    expect(first.sessionChannelId).not.toBe(second.sessionChannelId)
+    expect(first.interactionScope).not.toEqual(second.interactionScope)
+    // Rebinding the first bot (new binding version) opens a new session key.
+    w.identityStore.resolveWechatSender.mockResolvedValueOnce({ kind: 'bound', receipt: receiptFor(a, 2) })
+    await w.send(a, 'three')
+    await vi.waitFor(() => expect(processChannelMessage).toHaveBeenCalledTimes(3))
+    expect(pipelineCalls()[2].sessionChannelId).not.toBe(first.sessionChannelId)
+  })
+
+  it('A10 (API side): an inbound from a replaced loop generation is ignored', async () => {
+    const [b] = bots(1)
+    const w = inboundWorld([b])
+    await w.send({ ...b, generation: 99 }, 'from a stale loop')
+    await settle()
+    expect(processChannelMessage).not.toHaveBeenCalled()
+    expect(dispatchIncomingMessageEvent).not.toHaveBeenCalled()
+    expect(w.sent).toEqual([])
+  })
+
+  it('A9: workflow WeChat sends stay unsupported and an old owner session cannot authorize them', async () => {
+    const [b] = bots(1)
+    const step = (channelType: string) => WorkflowStepSchema.safeParse({
+      id: 'notify', type: 'assistant_call', target: { assistantId: 'primary' }, prompt: 'Summarize',
+      deliver: { channelType, channelId: b.sender },
+    })
+    expect(step('telegram').success).toBe(true)
+    expect(step('wechat').success).toBe(false)
+    // Independently, the recipient rule refuses an old raw-peer owner session.
+    const authorize = createDeliveryAudienceAuthorizer({
+      findAssistant: vi.fn(async () => ({ id: ASSISTANT, workspaceId: WS })) as never,
+      findSession: vi.fn(async () => null),
+      findChannelSession: vi.fn(async () => ({ id: 'old', assistantId: ASSISTANT, userId: 'billing-owner',
+        channelType: 'wechat', channelId: b.sender, visibility: 'owner', anchorKind: 'none' })) as never,
+      resolveLiveAccess: vi.fn(async () => ({ workspaceId: WS, userId: 'billing-owner', clearance: 'confidential' as const,
+        compartments: null, mutationCompartments: null, projectIds: null, visibilityAssistantIds: null })),
+      isWechatRecipientCurrent: vi.fn(async () => false),
+    })
+    await expect(authorize({ workspaceId: WS, assistantId: ASSISTANT, userId: 'billing-owner', channelType: 'wechat',
+      channelId: b.sender, sessionChannelId: b.sender, recipientType: 'individual', scopeEvidence: {} }))
+      .resolves.toMatchObject({ allowed: false, diagnostic: 'wechat_recipient_unbound' })
   })
 })

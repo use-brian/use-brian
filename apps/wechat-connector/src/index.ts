@@ -17,7 +17,7 @@
 import express from 'express'
 import { connectorSecretMatches } from './auth.js'
 import { getEnv } from './env.js'
-import { createPollerManager } from './poller-manager.js'
+import { createPollerManager, DuplicateBotError } from './poller-manager.js'
 import { createPairingManager } from './pairing-manager.js'
 
 const env = getEnv()
@@ -80,24 +80,40 @@ app.post('/pair/:pairingId/verify-code', (req, res) => {
 
 // ── Lifecycle routes ──────────────────────────────────────────
 
-// Start (or replace) the long-poll loop for a channel's bot.
-app.post('/connect/:channelId', (req, res) => {
+// Start (or replace) the long-poll loop for a channel's bot. Replacement is
+// serialized and exclusive; a bot already held by another channel is 409.
+app.post('/connect/:channelId', async (req, res) => {
   const { channelId } = req.params
-  const { botToken, baseUrl, getUpdatesBuf } = (req.body ?? {}) as {
+  const { botToken, baseUrl, botId, generation, getUpdatesBuf } = (req.body ?? {}) as {
     botToken?: string
     baseUrl?: string
+    botId?: string
+    generation?: number
     getUpdatesBuf?: string
   }
   if (!botToken || !baseUrl) {
     res.status(400).json({ error: 'botToken and baseUrl are required' })
     return
   }
-  const managed = pollers.connect(channelId, { botToken, baseUrl, getUpdatesBuf })
-  res.json({ channelId: managed.channelId, status: managed.status })
+  try {
+    const managed = await pollers.connect(channelId, {
+      botToken, baseUrl, botId,
+      generation: typeof generation === 'number' && generation > 0 ? generation : undefined,
+      getUpdatesBuf,
+    })
+    res.json({ channelId: managed.channelId, status: managed.status })
+  } catch (err) {
+    if (err instanceof DuplicateBotError) {
+      res.status(409).json({ error: 'duplicate_bot' })
+      return
+    }
+    console.error('[wechat-connector] connect failed:', (err as Error).message)
+    res.status(500).json({ error: 'connect_failed' })
+  }
 })
 
-app.post('/disconnect/:channelId', (req, res) => {
-  pollers.disconnect(req.params.channelId)
+app.post('/disconnect/:channelId', async (req, res) => {
+  await pollers.disconnect(req.params.channelId)
   res.json({ ok: true })
 })
 
@@ -125,8 +141,9 @@ function shutdown(): void {
   console.log('Shutting down wechat-connector...')
   server.close()
   pairings.stopAll()
-  pollers.disconnectAll()
-  process.exit(0)
+  // Await each loop's notifystop, bounded so a hung iLink call cannot block exit.
+  void Promise.race([pollers.disconnectAll(), new Promise((resolve) => setTimeout(resolve, 5_000))])
+    .finally(() => process.exit(0))
 }
 
 process.on('SIGTERM', shutdown)
