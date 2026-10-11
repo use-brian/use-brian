@@ -24,7 +24,7 @@ vi.mock('@/lib/use-doc-media',()=>({useOfficeResourceUrls:()=>({urls:{}})}));
 (globalThis as unknown as {IS_REACT_ACT_ENVIRONMENT:boolean}).IS_REACT_ACT_ENVIRONMENT=true;
 const row={artifactId:'artifact-a',family:'document',title:'Department report',role:'view',version:1,lifecycleState:'active'};
 let host:HTMLDivElement,root:Root;
-function response(body:unknown,ttl:string|null='6000',status=200){return new Response(JSON.stringify(body),{status,headers:ttl===null?{}:{'X-Brian-Projection-Valid-For-Ms':ttl}});}
+function response(body:unknown,ttl:string|null='6000',status=200){return new Response(JSON.stringify(body),{status,headers:{'Cache-Control':'private, no-store',...(ttl===null?{}:{'X-Brian-Projection-Valid-For-Ms':ttl})}});}
 function Harness({viewer=state.viewer}:{viewer?:string}){
   const key=officeListCacheKey('workspace-a','active',viewer);
   const read=useOfficeMetadataResource(key,viewer,()=>api.listOfficeArtifacts('workspace-a'));
@@ -72,7 +72,7 @@ describe('[COMP:app-web/office-surface-cache] bounded Office metadata',()=>{
     const failure=new Error('private transport detail');state.fetch.mockRejectedValue(failure);
     await expect(api.listOfficeArtifacts('workspace-a')).rejects.toBe(failure);
     expect(JSON.parse(vi.mocked(console.warn).mock.calls[0][1] as string)).toMatchObject({reason:'transport_failed',status:null});
-    state.fetch.mockResolvedValue(new Response('private malformed body',{status:200}));
+    state.fetch.mockResolvedValue(new Response('private malformed body',{status:200,headers:{'Cache-Control':'private, no-store'}}));
     await expect(api.listOfficeArtifacts('workspace-a')).rejects.toBeInstanceOf(SyntaxError);
     expect(JSON.parse(vi.mocked(console.warn).mock.calls[1][1] as string)).toMatchObject({reason:'body_parse_failed',status:200});
     expect(JSON.stringify(vi.mocked(console.warn).mock.calls)).not.toMatch(/private transport detail|private malformed body/);
@@ -120,6 +120,15 @@ describe('[COMP:app-web/office-surface-cache] bounded Office metadata',()=>{
     expect(officeMetadataRemaining(derived,state.viewer)).toBe(0);
     expect(()=>inheritOfficeMetadata({...row},derived,state.viewer)).toThrow('office_projection_expired');
   });
+  it.each([null,'private, max-age=600'])('refuses a successful response without no-store before reading its body (%s)',async(policy)=>{
+    const reply=response({artifacts:[row]},'30000');
+    if(policy===null)reply.headers.delete('Cache-Control');else reply.headers.set('Cache-Control',policy);
+    const parse=vi.spyOn(reply,'json');state.fetch.mockResolvedValue(reply);
+    await expect(api.listOfficeArtifacts('workspace-private')).rejects.toMatchObject({message:'office_projection_expired',status:409});
+    expect(parse).not.toHaveBeenCalled();
+    expect(JSON.parse(vi.mocked(console.warn).mock.calls[0][1] as string)).toMatchObject({reason:'missing_no_store',noStorePresent:false,status:200});
+    expect(state.fetch).toHaveBeenCalledWith(expect.any(String),{cache:'default'});
+  });
   it('inherits observed latency for early renewal without changing either deadline',()=>{
     const started=performance.now();vi.advanceTimersByTime(8000);
     const source=attachOfficeMetadata([row],22000,started,state.viewer);
@@ -165,7 +174,7 @@ describe('[COMP:app-web/office-surface-cache] bounded Office metadata',()=>{
     expect(officeMetadataRemaining(result,state.viewer)).toBeGreaterThan(0);
     expect(officeMetadataRemaining(result,'other-viewer')).toBe(0);
     expect(JSON.stringify(result)).not.toMatch(/Deadline|monotonic|viewerId/);
-    expect(state.fetch).toHaveBeenCalledWith(expect.any(String),{cache:'no-store'});
+    expect(state.fetch).toHaveBeenCalledWith(expect.any(String),{cache:'default'});
   });
   it.each([
     ['name',()=>api.nameOfficeVersion('artifact-a','version-a','Named'),{versions:[{id:'version-a'}]},'PATCH'],
@@ -177,14 +186,14 @@ describe('[COMP:app-web/office-surface-cache] bounded Office metadata',()=>{
   ] as const)('requires bounded metadata on %s mutation publication',async(_name,write,body,method)=>{
     state.fetch.mockResolvedValue(response(body));const result=await write();
     expect(officeMetadataRemaining(result,state.viewer)).toBeGreaterThan(0)
-    expect(state.fetch).toHaveBeenCalledWith(expect.any(String),expect.objectContaining({method,cache:'no-store'}))
+    expect(state.fetch).toHaveBeenCalledWith(expect.any(String),expect.objectContaining({method,cache:'default'}))
   });
   it.each([null,'','0','-1','Infinity','nonsense'])('rejects missing or invalid lifetime %s',async ttl=>{
     state.fetch.mockResolvedValue(response({artifacts:[row]},ttl));
     await expect(api.listOfficeArtifacts('workspace-a')).rejects.toMatchObject({message:'office_projection_expired'});
   });
   it('subtracts the complete body read duration and rejects a response crossing identities',async()=>{
-    state.fetch.mockResolvedValue({ok:true,headers:new Headers({'X-Brian-Projection-Valid-For-Ms':'4000'}),json:async()=>{
+    state.fetch.mockResolvedValue({ok:true,headers:new Headers({'Cache-Control':'private, no-store','X-Brian-Projection-Valid-For-Ms':'4000'}),json:async()=>{
       vi.advanceTimersByTime(1000);return {artifacts:[row]};
     }});
     const result=await api.listOfficeArtifacts('workspace-a');expect(officeMetadataRemaining(result)).toBeLessThanOrEqual(3000);

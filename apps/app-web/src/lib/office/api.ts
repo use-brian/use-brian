@@ -125,6 +125,7 @@ async function metadata<T extends object, B = T>(path: string, fallback: string,
   let response: Response | undefined, header: string | null = null, validForMs = NaN;
   let responseReceived: number | undefined, bodyRead: number | undefined;
   let selectedValueIsObject = false;
+  let noStorePresent = false;
   // Fixed codes and scalar measurements only: never log the path, body or error.
   const diagnostic = (reason: string, remainingMs?: number) => console.warn("[office_metadata_read]", JSON.stringify({
     reason, stage, status: response?.status ?? null,
@@ -133,12 +134,20 @@ async function metadata<T extends object, B = T>(path: string, fallback: string,
     bodyReadMs: responseReceived === undefined ? null : Math.round((bodyRead ?? performance.now()) - responseReceived),
     validForMs: Number.isFinite(validForMs) ? validForMs : null,
     headerPresent: header !== null, selectedValueIsObject,
+    noStorePresent,
     viewerPresent: Boolean(viewerId), viewerChanged: viewerId !== getUserInfo()?.id,
     ...(remainingMs === undefined ? {} : {remainingMs: Math.floor(remainingMs)}),
   }));
   try {
-    response = await authFetch(`${API_URL}/api/office/${path}`, {...init,cache:"no-store"});
+    // The server forbids body storage. Default request mode lets WebKit reuse
+    // the independent CORS preflight instead of queueing another OPTIONS.
+    response = await authFetch(`${API_URL}/api/office/${path}`, {...init,cache:"default"});
     responseReceived = performance.now();
+    noStorePresent = response.headers.get('Cache-Control')?.split(',').some(value => value.trim().toLowerCase() === 'no-store') ?? false;
+    if (response.ok && !noStorePresent) {
+      stage = 'annotation';
+      throw new Error('office_cache_policy_missing');
+    }
     stage = "body";
     const body = await json<B>(response, fallback);
     bodyRead = performance.now();
@@ -156,6 +165,7 @@ async function metadata<T extends object, B = T>(path: string, fallback: string,
     const elapsed = performance.now() - started;
     const reason = stage === "request" ? "transport_failed"
       : stage === "body" ? response?.ok ? "body_parse_failed" : "http_error"
+      : !noStorePresent ? "missing_no_store"
       : !viewerId || viewerId !== getUserInfo()?.id ? "viewer_changed"
       : header === null ? "missing_lifetime"
       : !Number.isFinite(validForMs) || validForMs <= 0 ? "invalid_lifetime"

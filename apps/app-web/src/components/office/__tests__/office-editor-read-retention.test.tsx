@@ -39,7 +39,7 @@ vi.mock('@/lib/office/offline',()=>({loadOfflinePackage:vi.fn(async()=>null),lis
 const artifact=()=>({artifactId:uid(1),title:'Protected artifact title',family:'document',role:'edit',version:1,lifecycleState:'active',...(state.search?{mode:'template'}:{})});
 const snapshot=(title='Protected snapshot text')=>({...documentFixture(),workspaceId:state.workspace,title});
 const live=(title?:string)=>({snapshot:snapshot(title),seq:1,baseVersion:1});
-const response=(body:unknown,ttl='6000',status=200)=>new Response(JSON.stringify(body),{status,headers:{'X-Brian-Projection-Valid-For-Ms':ttl}});
+const response=(body:unknown,ttl='6000',status=200)=>new Response(JSON.stringify(body),{status,headers:{'Cache-Control':'private, no-store','X-Brian-Projection-Valid-For-Ms':ttl}});
 const pending=()=>new Promise<Response>(()=>{});
 const command=(text='Live edited title',commandId=uid(100)):OfficeCommand=>({kind:'updateText',artifactId:uid(1),commandId,actor:{type:'user',id:state.viewer},origin:'manual',baseVersion:1,targetId:uid(12),runs:[{...documentFixture().sections[0]!.header[0]!,text}]});
 const artifactKey=()=>officeArtifactCacheKey(state.workspace,uid(1),state.viewer);

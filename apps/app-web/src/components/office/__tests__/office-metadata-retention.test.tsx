@@ -27,7 +27,7 @@ vi.mock('../office-card-preview',()=>({OfficeCardPreview:()=>null}));
 (globalThis as unknown as {IS_REACT_ACT_ENVIRONMENT:boolean}).IS_REACT_ACT_ENVIRONMENT=true;
 let root:Root,host:HTMLDivElement;
 const onState=vi.fn();
-const response=(body:unknown,ttl='6000',status=200)=>new Response(JSON.stringify(body),{status,headers:{'X-Brian-Projection-Valid-For-Ms':ttl}});
+const response=(body:unknown,ttl='6000',status=200)=>new Response(JSON.stringify(body),{status,headers:{'Cache-Control':'private, no-store','X-Brian-Projection-Valid-For-Ms':ttl}});
 const empty:OfficeTemplateRoutingDraft={source:'upload',fields:[],slideRecipes:[]};
 const template={id:'template-a',currentVersionId:'version-a',lifecycleState:'admitted',family:'document',name:'Department contract',description:'Protected template guidance'};
 function tokenFixture(){const snapshot=documentFixture();snapshot.sections[0]!.header[0]!.text='{{NAME}}';return snapshot;}
