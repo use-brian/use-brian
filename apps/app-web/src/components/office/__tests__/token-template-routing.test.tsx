@@ -106,7 +106,11 @@ describe("[COMP:app-web/office-template-routing] DOCX/XLSX token configuration",
     await act(async () => (host.querySelector('[aria-label="Content type"]') as HTMLElement).click());
     const option = [...document.querySelectorAll('[role="option"]')].find((element) => element.textContent === en.office.routingFieldTypes.number) as HTMLElement;
     expect(option).toBeTruthy();
+    // A mouse selection highlights its target before clicking. A bare DOM
+    // click intentionally does not select an unhighlighted Base UI option.
+    await act(async () => { option.dispatchEvent(new MouseEvent("mousemove", { bubbles: true })); });
     await act(async () => option.click());
+    expect(host.querySelector('[aria-label="Content type"]')?.textContent).toContain(en.office.routingFieldTypes.number);
     await act(async () => saveButton().click());
     expect(saveOfficeTemplateRouting).toHaveBeenCalledWith(uid(99), expect.objectContaining({ fields: [expect.objectContaining({ name: "NAME", label: "Account name", type: "number", required: true, maxLength: 42, aiInstruction: "Use the supplied account name.", targetIds: [snapshot.family === "document" ? uid(5) : uid(91)] })] }));
     expect(onState).toHaveBeenLastCalledWith({ ready: true, dirty: false, saving: false });
