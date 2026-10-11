@@ -193,7 +193,7 @@ export function WechatConnectTab({
               role="radio"
               aria-checked={mode === value}
               onClick={() => setMode(value)}
-              className={`min-h-11 rounded-lg border px-3 py-2 text-left ${mode === value ? "border-foreground bg-muted/50" : "border-border hover:bg-muted/30"}`}
+              className={`min-h-11 md:min-h-0 rounded-lg border px-3 py-2 text-left ${mode === value ? "border-foreground bg-muted/50" : "border-border hover:bg-muted/30"}`}
             >
               <span className="block text-sm font-medium">{value === "self" ? wc.modeSelf : wc.modeAdmin}</span>
               <span className="block text-[12px] text-muted-foreground">{value === "self" ? wc.modeSelfDesc : wc.modeAdminDesc}</span>

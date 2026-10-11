@@ -488,7 +488,7 @@ export function WechatChannelIdentityRow({
  * nobody. Members never see another account's name - the server sends this
  * summary to owners and admins only.
  */
-export function WechatChannelAdminSummary({
+function WechatChannelAdminSummary({
   workspaceId,
   summary,
   onChanged,
