@@ -47,6 +47,7 @@ async function authorize(client:PoolClient, expected:OfficeGenerationJobRow, lea
     || !equal(a.visibility_user_ids,p.visibilityUserIds)) throw denied()
   if((await client.query('SELECT 1 FROM office_artifact_sources WHERE artifact_id=$1 LIMIT 1',[job.artifactId])).rows.length) throw denied()
   for(const key of p.compartments) if(key.startsWith('team:') && !(await client.query("SELECT 1 FROM workspace_groups WHERE workspace_id=$1 AND compartment_key=$2 AND status='active'",[job.workspaceId,key])).rows.length) throw denied()
+  for(const key of p.compartments) if(key.startsWith('project:') && !(await client.query("SELECT 1 FROM project_shared_scopes WHERE workspace_id=$1 AND project_id::text=$2 AND status='active'",[job.workspaceId,key.slice(8)])).rows.length) throw denied()
   for(const id of p.projectIds) if(!(await client.query("SELECT 1 FROM workspace_projects WHERE workspace_id=$1 AND id=$2 AND status='active'",[job.workspaceId,id])).rows.length) throw denied()
   if(!(await client.query('SELECT 1 FROM office_generation_jobs WHERE id=$1 AND lease_expires_at>clock_timestamp()',[job.id])).rows.length) throw denied()
   return a

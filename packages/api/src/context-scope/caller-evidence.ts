@@ -68,12 +68,18 @@ function labelFailure(
     if(departments.some(id=>!Object.hasOwn(v2.departments,id)
       || v2.contextDepartment!==null && v2.contextDepartment!==id
       || v2.binding!==null && !v2.binding.includes(id)))return 'teams'
+    // Shared Project labels: admitted for this ceiling (member or read
+    // oversight) and inside a credential binding; never a tier.
+    const projects=labels.compartments.filter(label=>label.startsWith('project:')).map(label=>label.slice(8))
+    if(projects.some(id=>!v2.projects?.[id] || v2.binding!==null && !v2.binding.includes(id)))return 'teams'
     if(RANK[labels.sensitivity]>RANK[v2.cap??'confidential']
       || (departments.length===0 ? RANK[labels.sensitivity]>RANK[v2.base]
         : departments.some(id=>RANK[labels.sensitivity]>RANK[v2.departments[id]])))return 'clearance'
     return null
   }
   if (RANK[labels.sensitivity] > RANK[ceiling.clearance]) return 'clearance'
+  // A legacy ceiling has no Project admission, even as a universe grant.
+  if (labels.compartments.some(label => label.startsWith('project:'))) return 'teams'
   if (!scopeGrantContains(ceiling.compartments, labels.compartments)) return 'teams'
   return null
 }

@@ -327,6 +327,8 @@ function viewMetadata(view: SavedView) {
     // /views/:id/reparent.
     teamspaceId: view.teamspaceId ?? null,
     projectId: view.projectId ?? null,
+    // The shared Project collection (migration 749); null when none.
+    sharedProjectId: view.sharedProjectId ?? null,
     // Notion-style per-page width mode (migration 220). The doc client
     // reads this to pick the body wrapper width (full vs constrained column).
     fullWidth: view.fullWidth ?? false,
@@ -641,6 +643,8 @@ export function viewsRoutes(opts: ViewsRouteOptions): Router {
         // Private group (all teamspaces render empty), and a drag into a
         // teamspace never sticks across the reload.
         teamspaceId: r.teamspaceId ?? null,
+        // Shared Project collection: the sidebar's Projects section (migration 749).
+        sharedProjectId: r.sharedProjectId ?? null,
         updatedAt: r.updatedAt.toISOString(),
       })),
     })
@@ -959,6 +963,9 @@ export function viewsRoutes(opts: ViewsRouteOptions): Router {
     if (!(await canManageShare(userId, view))) {
       return res.status(403).json({ error: 'Only the page owner or a workspace admin can share this page' })
     }
+    // Project-shared material is never widened by a link or publication
+    // (project-shared-spaces.md); there is no release operation for it.
+    if (view.sharedProjectId) return res.status(409).json({ error: 'project_publication_unsupported' })
 
     // Publishing is an explicit declassification — the page must be public.
     if (view.clearance !== 'public' && !parsed.data.declassify) {
@@ -1030,6 +1037,9 @@ export function viewsRoutes(opts: ViewsRouteOptions): Router {
     if (!(await canManageShare(userId, view))) {
       return res.status(403).json({ error: 'Only the page owner or a workspace admin can publish this page' })
     }
+    // Project-shared material is never widened by a link or publication
+    // (project-shared-spaces.md); there is no release operation for it.
+    if (view.sharedProjectId) return res.status(409).json({ error: 'project_publication_unsupported' })
     // Publishing is an explicit declassification, never a silent one.
     if (view.clearance !== 'public' && body.declassify !== true) {
       return res.status(409).json({ error: 'Page must be public to publish', code: 'not_public' })
@@ -1809,16 +1819,23 @@ export function viewsRoutes(opts: ViewsRouteOptions): Router {
     const existing = await opts.savedViewStore.getById(userId, req.params.id)
     if (!existing) return notFound(res, 'View not found')
 
-    const moved = await opts.savedViewStore.reparent(
-      userId,
-      req.params.id,
-      parsed.data.nestParentId,
-      parsed.data.position,
-      undefined,
-      parsed.data.teamspaceId,
-      parsed.data.projectId,
-      parsed.data.contextMoveConfirmed,
-    )
+    let moved: boolean
+    try {
+      moved = await opts.savedViewStore.reparent(
+        userId,
+        req.params.id,
+        parsed.data.nestParentId,
+        parsed.data.position,
+        undefined,
+        parsed.data.teamspaceId,
+        parsed.data.projectId,
+        parsed.data.contextMoveConfirmed,
+      )
+    } catch (error) {
+      // A move into or out of a shared Project collection changes the audience.
+      if ((error as Error).message === 'project_placement_move_refused') return res.status(409).json({ error: 'project_placement_move_refused' })
+      throw error
+    }
     if (!moved) {
       return badRequest(
         res,
@@ -1898,6 +1915,7 @@ export function viewsRoutes(opts: ViewsRouteOptions): Router {
       nestParentId?: unknown
       blocks?: unknown
       teamspaceId?: unknown
+      sharedProjectId?: unknown
     }
 
     const parsedId = z.string().uuid().optional().safeParse(body.id)
@@ -1947,6 +1965,9 @@ export function viewsRoutes(opts: ViewsRouteOptions): Router {
       }
       teamspaceId = parsedTeamspace.data
     }
+    // A shared Project collection (the Pages > Projects section "+").
+    const parsedShared = z.string().uuid().optional().safeParse(body.sharedProjectId ?? undefined)
+    if (!parsedShared.success) return badRequest(res, 'sharedProjectId must be a UUID')
 
     // A user-supplied name is a deliberate title (e.g. Duplicate copies the
     // source name) → frozen against auto-title. A bare "+ New draft" lands on
@@ -1975,6 +1996,7 @@ export function viewsRoutes(opts: ViewsRouteOptions): Router {
         page: seededPage ?? emptyPage,
         nestParentId,
         teamspaceId,
+        ...(parsedShared.data ? { sharedProjectId: parsedShared.data } : {}),
         // Interactive create (the doc-editor blank / from-template flows): defer
         // the `created` page-event-trigger instead of firing it on this empty,
         // just-minted draft. The client commits it once the user engages
@@ -1991,6 +2013,7 @@ export function viewsRoutes(opts: ViewsRouteOptions): Router {
         res.status(409).json({ error: 'Page ID is already in use' })
         return
       }
+      if (error instanceof WorkspaceAccessError) { res.status(error.status).json({ error: error.code }); return }
       throw error
     }
   })

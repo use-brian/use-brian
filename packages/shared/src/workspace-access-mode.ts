@@ -15,6 +15,8 @@ export type WorkspaceAccessModeState = {
 export type ResourceDestination =
   | { kind: 'department'; departmentId: string; projectId?: string | null }
   | { kind: 'general'; projectId?: string | null }
+  /** A shared Project's material (project-shared-spaces.md): guarded by its roster. */
+  | { kind: 'project'; projectId: string }
 
 export type WorkspaceResourceEnvelope = {
   visibility: 'workspace' | 'private'

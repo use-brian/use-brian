@@ -671,7 +671,7 @@ export function contextScopeRoutes(options: ContextScopeRouteOptions): Router {
     if (access.role === 'owner' || access.role === 'admin') return 'edit'
     if (exposure.kind === 'grant' && exposure.grant.grantedByUserId === access.userId) return 'edit'
     const inAudience = exposure.compartments
-      .every((label) => !label.startsWith('team:') || departments.has(label.slice(5)))
+      .every((label) => !label.startsWith('project:') && (!label.startsWith('team:') || departments.has(label.slice(5))))
     if (!inAudience) return null
     return exposure.kind === 'instance' ? 'edit' : 'view'
   }

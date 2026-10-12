@@ -68,6 +68,23 @@ export async function withPagePlacement<T>(
     const policy = await readAdmissionPolicy(client, workspaceId)
     const placement = { ...input }
     let source: LockedPageCopySource | undefined
+    // Shared Project collection (project-shared-spaces.md -> "Pages"): a child
+    // stays in its parent's collection; a root create names it explicitly and
+    // has no teamspace. The SQL guard and RLS enforce the same rule.
+    if (input.nestParentId) {
+      const parentShared = (await client.query<{ shared: string | null }>(
+        'SELECT shared_project_id AS shared FROM saved_views WHERE id=$1 AND workspace_id=$2', [input.nestParentId, workspaceId])).rows[0]?.shared ?? null
+      if (input.sharedProjectId !== undefined && input.sharedProjectId !== parentShared) throw new WorkspaceAccessError('project_placement_move_refused', 409)
+      placement.sharedProjectId = parentShared
+    }
+    if (placement.sharedProjectId) {
+      if (input.teamspaceId) throw new WorkspaceAccessError('access_mode_destination_conflict', 409)
+      const live = await client.query(`SELECT 1 FROM project_shared_scopes s JOIN workspaces w ON w.id=s.workspace_id
+        WHERE s.project_id=$1 AND s.workspace_id=$2 AND s.status='active' AND w.project_shared_spaces`, [placement.sharedProjectId, workspaceId])
+      if (!live.rows.length) throw new WorkspaceAccessError('project_shared_disabled', 409)
+      if (!input.nestParentId) placement.teamspaceId = null
+      if (placement.projectId === undefined) placement.projectId = placement.sharedProjectId
+    }
     if (copySource) {
       if (policy?.setupState !== 'ready') throw new WorkspaceAccessError('access_mode_setup_required', 409)
       // UPDATE lock also excludes a concurrent first documents INSERT via its
@@ -128,7 +145,7 @@ export async function withPagePlacement<T>(
         if (ranks[parent.clearance] > ranks[placement.clearance ?? 'internal']) placement.clearance = parent.clearance
         inherited = true
       }
-      if (placement.teamspaceId === undefined) {
+      if (placement.teamspaceId === undefined && !placement.sharedProjectId) {
         if (policy.mode !== 'simple') throw new WorkspaceAccessError('context_selection_required', 409)
         const linked = await lockPlacementMetadata(client, workspaceId, null, policy.defaultDepartmentId)
         // Provisioning is an access change, never a writer-side repair.
@@ -145,12 +162,16 @@ export async function withPagePlacement<T>(
       }
       let sensitivity = placement.clearance ?? 'internal'
       if (team && ranks[team.sensitivity] > ranks[sensitivity]) sensitivity = team.sensitivity
-      const envelope = { visibility: placement.teamspaceId ? 'workspace' as const : 'private' as const,
-        sensitivity, compartments: team?.compartment ? [team.compartment] : [], projectIds: placement.projectId ? [placement.projectId] : [] }
+      const shared = placement.sharedProjectId ?? null
+      const envelope = { visibility: placement.teamspaceId || shared ? 'workspace' as const : 'private' as const,
+        sensitivity, compartments: [...(team?.compartment ? [team.compartment] : []), ...(shared ? [`project:${shared}`] : [])],
+        projectIds: placement.projectId ? [placement.projectId] : [] }
       await admitWorkspaceResource(client, workspaceId, userId, {
         visibility: envelope.visibility, sensitivity,
-        ...(inherited ? { inherited: envelope } : team ? { destination: { kind: 'department' as const, departmentId: team.departmentId! } } : {}),
-        requestedLabels: { projectIds: envelope.projectIds },
+        ...(inherited ? { inherited: envelope }
+          : shared ? { destination: { kind: 'project' as const, projectId: shared } }
+          : team ? { destination: { kind: 'department' as const, departmentId: team.departmentId! } } : {}),
+        ...(shared && !inherited ? {} : { requestedLabels: { projectIds: envelope.projectIds } }),
       })
       const allowed = (await client.query<{ ok: boolean }>(`SELECT
         saved_view_principal_boundary_allows($1,$2,$3,$4,$5,$6)

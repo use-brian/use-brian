@@ -130,6 +130,7 @@ import {
   sessionMessageInputScope,
   type ResolvedTurnScope,
   type ResolveTurnScopeInput,
+  automaticContextAccess,
 } from '../context-scope/resolve-turn-scope.js'
 import { resolveExecutionContextSystem } from '../context-scope/execution-context.js'
 import { prepareAssistantRun } from '../turn/prepare.js'
@@ -1852,7 +1853,7 @@ async function processChannelMessageTurn(params: ChannelPipelineParams): Promise
   // docs/architecture/context-engine/memory-system.md → "Index cap".
   let memoryContext = ''
   if (isIdentified && !isolatedAudience) {
-    const viewerCtx = dataTurnScope.access
+    const viewerCtx = automaticContextAccess(dataTurnScope.access, dataTurnScope.activeProjectId)
     const [soulContext, identityMemories, rankedIndex] = await Promise.all([
       (memoryStore.getSoulContext?.(viewerCtx, 'Use Brian') ?? Promise.resolve({ content: null, evidence: {} })),
       memoryStore.getIdentity(viewerCtx),

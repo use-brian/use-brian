@@ -4,6 +4,7 @@ import {
   type AccessSnapshot, type Reader, type Row,
 } from '../reference-predicate.js'
 import { PROJECT_CASES, PROJECT_ROWS, PROJECT_SNAPSHOT, PROJECTS, projectCtx, projectReader } from './fixtures/project-shared-matrix.js'
+import { automaticContextAccess } from '../resolve-turn-scope.js'
 import {
   ALL_READERS, ALL_ROWS, ASSISTANTS, BEFORE_EXPIRY, CASES_4_1, DEPARTMENTS, LANES, PEOPLE, ROWS, SNAPSHOT,
   WORKSPACE, fixtureCtx, fixtureReader,
@@ -183,5 +184,17 @@ describe('[COMP:access/reference-predicate] Shared Project leg (project-shared-s
     expect(splitScopeLabels([`team:${DEPARTMENTS.finance}`, `project:${PROJECTS.atlas}`]))
       .toEqual({ departmentIds: [DEPARTMENTS.finance], projectScopeIds: [PROJECTS.atlas] })
     expect(splitScopeLabels(['client:acme'])).toBeNull()
+  })
+})
+
+describe('[COMP:access/reference-predicate] Automatic-context relevance (D18)', () => {
+  it('keeps only the bound shared Project and never adds one', () => {
+    const access = { workspaceId: WORKSPACE, userId: PEOPLE.maya.id, departmentRead: { workspaceId: WORKSPACE, userId: PEOPLE.maya.id, assistantId: null,
+      base: 'internal' as const, departments: {}, contextDepartment: null, binding: null, cap: null,
+      projects: { [PROJECTS.atlas]: 'member' as const, [PROJECTS.beacon]: 'member' as const } } }
+    expect(automaticContextAccess(access, PROJECTS.atlas).departmentRead?.projects).toEqual({ [PROJECTS.atlas]: 'member' })
+    expect(automaticContextAccess(access, null).departmentRead?.projects).toBeUndefined()
+    expect(automaticContextAccess(access, 'not-admitted').departmentRead?.projects).toBeUndefined()
+    expect(automaticContextAccess({ workspaceId: WORKSPACE, userId: PEOPLE.maya.id }, PROJECTS.atlas)).toEqual({ workspaceId: WORKSPACE, userId: PEOPLE.maya.id })
   })
 })

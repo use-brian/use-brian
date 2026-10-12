@@ -91,3 +91,36 @@ describe('[COMP:security/access-ceiling] department authority',()=>{
     expect(intersectAccessCeilings(start,{...start,departmentRead:undefined,compartments:[]}).departmentRead?.departments).toEqual({})
   })
 })
+
+describe('[COMP:security/access-ceiling] Shared Project admission in ceilings (project-shared-spaces.md)', () => {
+  const v2 = (projects?: Record<string, 'member' | 'oversight'>) => ({
+    workspaceId: 'w', userId: 'u', assistantId: 'a', base: 'internal' as const, departments: {}, contextDepartment: null,
+    binding: null, cap: null, ...(projects ? { projects } : {}),
+  })
+  const ceiling = (projects?: Record<string, 'member' | 'oversight'>) => ({
+    workspaceId: 'w', userId: 'u', clearance: 'internal' as const, compartments: null, mutationCompartments: null,
+    projectIds: null, visibilityAssistantIds: null, departmentRead: v2(projects),
+  })
+
+  it('a removed, expired or downgraded Project admission contracts a pinned ceiling', () => {
+    const start = ceiling({ p1: 'member' })
+    expect(accessCeilingContains(ceiling({ p1: 'member' }), start)).toBe(true)
+    expect(accessCeilingContains(ceiling({}), start)).toBe(false)
+    expect(accessCeilingContains(ceiling({ p1: 'oversight' }), start)).toBe(false)
+    // Losing the workspace-owner role ends oversight on the next boundary.
+    expect(accessCeilingContains(ceiling(), ceiling({ p1: 'oversight' }))).toBe(false)
+  })
+
+  it('a frozen ceiling never widens when a person is invited later', () => {
+    const frozen = ceiling()
+    const narrowed = intersectAccessCeilings(frozen, ceiling({ p1: 'member' }))
+    expect(narrowed.departmentRead?.projects ?? {}).toEqual({})
+    expect(intersectAccessCeilings(ceiling({ p1: 'member' }), ceiling({ p1: 'oversight' })).departmentRead?.projects).toEqual({ p1: 'oversight' })
+  })
+
+  it('persisted Project admission is validated and detached', () => {
+    const pinned = intersectAccessCeilings(ceiling({ p1: 'member' }), ceiling({ p1: 'member' }))
+    expect(pinned.departmentRead?.projects).toEqual({ p1: 'member' })
+    expect(() => intersectAccessCeilings(ceiling({ p1: 'owner' as never }), ceiling())).toThrow('access_ceiling_missing')
+  })
+})

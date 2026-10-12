@@ -58,6 +58,7 @@ const FULL_SELECT = `
   position,
   teamspace_id   AS "teamspaceId",
   project_id     AS "projectId",
+  shared_project_id AS "sharedProjectId",
   full_width     AS "fullWidth",
   clearance,
   origin_prompt  AS "originPrompt",
@@ -86,6 +87,7 @@ const LIST_SELECT = `
   position,
   teamspace_id   AS "teamspaceId",
   project_id     AS "projectId",
+  shared_project_id AS "sharedProjectId",
   updated_at     AS "updatedAt"
 `
 
@@ -107,6 +109,7 @@ type FullRow = {
   position: number
   teamspaceId: string | null
   projectId: string | null
+  sharedProjectId: string | null
   fullWidth: boolean
   clearance: 'public' | 'internal' | 'confidential'
   anchorKey: string | null
@@ -135,6 +138,7 @@ type ListRow = {
   position: number
   teamspaceId: string | null
   projectId: string | null
+  sharedProjectId: string | null
   anchorKey: string | null
   updatedAt: Date
 }
@@ -159,6 +163,7 @@ function rowToFull(row: FullRow): SavedView {
     position: row.position,
     teamspaceId: row.teamspaceId,
     projectId: row.projectId,
+    sharedProjectId: row.sharedProjectId ?? null,
     fullWidth: row.fullWidth,
     clearance: row.clearance,
     originPrompt: row.originPrompt,
@@ -187,6 +192,7 @@ function rowToList(row: ListRow): SavedViewListRow {
     position: row.position,
     teamspaceId: row.teamspaceId,
     projectId: row.projectId,
+    sharedProjectId: row.sharedProjectId ?? null,
     updatedAt: row.updatedAt,
   }
 }
@@ -538,7 +544,7 @@ export function createDbSavedViewStore(
       return result.rows.length > 0
     },
 
-    async createDraft({ id, userId, workspaceId, name, nameOrigin, icon, entity, viewType, binding, page, nestParentId, autoPruneDays, originPrompt, anchorKey, writtenBy, deferCreatedEvent, teamspaceId, projectId, state }, options) {
+    async createDraft({ id, userId, workspaceId, name, nameOrigin, icon, entity, viewType, binding, page, nestParentId, autoPruneDays, originPrompt, anchorKey, writtenBy, deferCreatedEvent, teamspaceId, projectId, sharedProjectId, state }, options) {
       // Born-saved rows are durable artifacts (a paid synthesis brief), not
       // speculative renders: no prune date at all, so neither the daily prune
       // worker nor a later `unsave` can strand them on an expired timestamp.
@@ -555,7 +561,7 @@ export function createDbSavedViewStore(
       // title (renderPage/createSubPage pass 'user'). Migration 218.
       const origin: NameOrigin = nameOrigin ?? 'placeholder'
       let replay = false
-      const result = await withPagePlacement(workspaceId, userId, { teamspaceId, projectId, nestParentId }, async (client, placement) => {
+      const result = await withPagePlacement(workspaceId, userId, { teamspaceId, projectId, nestParentId, ...(sharedProjectId !== undefined ? { sharedProjectId } : {}) }, async (client, placement) => {
         const inserted = await client.query<FullRow>(
         // `position` appends to the end of the destination sibling set so
         // new pages get a distinct, contiguous slot instead of all sharing
@@ -587,7 +593,7 @@ export function createDbSavedViewStore(
         // a private page, never an insert into a teamspace the caller can't
         // see (the policy WITH CHECK backstops that anyway).
         `INSERT INTO saved_views
-           (workspace_id, created_by, name, name_origin, description, icon, entity, view_type, binding, page, state, nest_parent_id, position, origin_prompt, auto_prune_at, anchor_key, created_event_pending, teamspace_id, project_id, clearance${id ? ', id' : ''})
+           (workspace_id, created_by, name, name_origin, description, icon, entity, view_type, binding, page, state, nest_parent_id, position, origin_prompt, auto_prune_at, anchor_key, created_event_pending, teamspace_id, project_id, clearance, shared_project_id${id ? ', id' : ''})
          VALUES ($1, $2, $3, $4, NULL, $10, $5, $6, $7, $8, $17, $9,
            (SELECT COALESCE(MAX(position) + 1, 0) FROM saved_views
               WHERE nest_parent_id IS NOT DISTINCT FROM $9 AND workspace_id = $1),
@@ -601,7 +607,7 @@ export function createDbSavedViewStore(
              WHEN $18::boolean THEN $19::uuid
              WHEN $9::uuid IS NOT NULL THEN (SELECT p.project_id FROM saved_views p WHERE p.id = $9)
              ELSE NULL
-           END, $20${id ? ', $21::uuid' : ''})
+           END, $20, $21::uuid${id ? ', $22::uuid' : ''})
          ${id ? 'ON CONFLICT (id) DO NOTHING' : ''}
          RETURNING ${FULL_SELECT}`,
         [
@@ -625,6 +631,7 @@ export function createDbSavedViewStore(
           placement.projectId !== undefined,
           placement.projectId ?? null,
           placement.clearance ?? 'internal',
+          placement.sharedProjectId ?? null,
           ...(id ? [id] : []),
         ],
         )

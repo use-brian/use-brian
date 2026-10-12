@@ -58,6 +58,12 @@ export function resolveResourceAdmission(
   // In particular, a default destination must not mask non-default raw labels.
   if (input.destination && input.requestedLabels?.compartments !== undefined) throw new WorkspaceAccessError('access_mode_destination_conflict', 409)
   if (policy.setupState !== 'ready') throw new WorkspaceAccessError('access_mode_setup_required', 409)
+  // Shared Project material is guarded only by the v2 row rule; a legacy-read
+  // workspace has no Project admission, so it cannot hold such material.
+  if (input.destination?.kind === 'project'
+    || [...(input.inherited?.compartments ?? []), ...(input.requestedLabels?.compartments ?? [])].some(key => key.startsWith('project:'))) {
+    throw new WorkspaceAccessError('project_shared_disabled', 409)
+  }
   if (policy.mode === 'simple' && (!policy.defaultDepartmentId || !policy.defaultCompartment)) {
     throw new WorkspaceAccessError('access_mode_default_invalid', 409)
   }
@@ -196,6 +202,7 @@ export async function admitWorkspaceResource(
 }
 
 const TEAM = 'team:'
+const PROJECT = 'project:'
 /**
  * Permission model v2 admission (workspace v2 flag on): the reference WRITE.
  * The new row is stamped with ctx.department (the chosen destination, else
@@ -219,14 +226,24 @@ async function admitDepartmentWrite(
     throw new WorkspaceAccessError('context_not_available', 404)
   }
   const department = (key: string) => key.startsWith(TEAM) ? key.slice(TEAM.length) : null
+  const project = (key: string) => key.startsWith(PROJECT) ? key.slice(PROJECT.length) : null
   const parent = input.inherited
-  const otherKeys = [...(parent?.compartments ?? []), ...(input.requestedLabels?.compartments ?? [])].filter(k => department(k) === null)
+  const otherKeys = [...(parent?.compartments ?? []), ...(input.requestedLabels?.compartments ?? [])].filter(k => department(k) === null && project(k) === null)
   const sources: Row[] = []
   const inheritedDepartments = (parent?.compartments ?? []).map(department).filter((d): d is string => d !== null)
   const requested = (input.requestedLabels?.compartments ?? []).map(department).filter((d): d is string => d !== null)
-  if (parent || requested.length) {
+  // Inherited and requested Project labels are requirements the write keeps
+  // (I12/I13) and must itself satisfy as a member.
+  const sourceProjects = [...(parent?.compartments ?? []), ...(input.requestedLabels?.compartments ?? [])]
+    .map(project).filter((p): p is string => p !== null)
+  if (parent || requested.length || sourceProjects.length) {
     sources.push({ id: '__inherited__', workspaceId, tier: parent?.sensitivity ?? input.sensitivity,
-      departmentIds: [...new Set([...inheritedDepartments, ...requested])], userId: null })
+      departmentIds: [...new Set([...inheritedDepartments, ...requested])], userId: null,
+      ...(sourceProjects.length ? { projectScopeIds: [...new Set(sourceProjects)] } : {}) })
+  }
+  const destinationProject = input.destination?.kind === 'project' ? input.destination.projectId : null
+  if (destinationProject && !(snapshot.activeProjects ?? []).includes(destinationProject)) {
+    throw new WorkspaceAccessError('context_not_available', 404)
   }
   // D24: a write naming no department lands in the writer's home department
   // (the acting assistant's, else the person's). An explicit General choice by
@@ -241,7 +258,7 @@ async function admitDepartmentWrite(
     principal,
     assistant: grant?.assistantId ? { kind: 'assistant', id: grant.assistantId } : null,
     credential: grant?.cap ? { issuerUserId: userId, cap: grant.cap, binding: grant.binding, scope: 'read_write' } : null,
-  }, { requestedTier: input.sensitivity, sources, homeDepartment: home, explicitGeneral }, {
+  }, { requestedTier: input.sensitivity, sources, homeDepartment: home, explicitGeneral, destinationProject }, {
     workspaceId, department: destination ?? grant?.contextDepartment ?? null, now: new Date(),
   })
   if (!result.allowed) throw new WorkspaceAccessError('context_not_available', 404)
@@ -253,7 +270,8 @@ async function admitDepartmentWrite(
     origin: parent ? 'inherited' : visibility === 'private' ? 'private' : 'explicit',
     departmentId: destination ?? grant?.contextDepartment ?? (result.row.departmentIds.length === 1 && !parent ? result.row.departmentIds[0] : null),
     envelope: { visibility, sensitivity: result.row.tier,
-      compartments: canonical([...result.row.departmentIds.map(d => TEAM + d), ...otherKeys]), projectIds },
+      compartments: canonical([...result.row.departmentIds.map(d => TEAM + d), ...(result.row.projectScopeIds ?? []).map(id => PROJECT + id), ...otherKeys]),
+      projectIds },
   }
   if (input.writerKind) {
     await client.query("SELECT set_config('app.creation_admission',$1,true)", [JSON.stringify({

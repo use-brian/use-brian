@@ -46,6 +46,8 @@ export type WorkspaceProject = {
   createdBy: string
   createdAt: string
   updatedAt: string
+  /** A shared Project scope exists (project-shared-spaces.md); absent on reads that do not project it. */
+  shared?: boolean
 }
 
 export type WorkspaceProjectDetail = WorkspaceProject & {
@@ -103,6 +105,7 @@ function mapProject(row: {
   createdBy: string
   createdAt: Date
   updatedAt: Date
+  shared?: boolean
 }): WorkspaceProject {
   return {
     ...row,
@@ -307,7 +310,8 @@ export function createDbContextScopeStore(transactionClient?: pg.PoolClient): Co
         `SELECT id, workspace_id AS "workspaceId", name,
                 normalized_name AS "normalizedName", description, icon, status,
                 entity_id AS "entityId", created_by AS "createdBy",
-                created_at AS "createdAt", updated_at AS "updatedAt"
+                created_at AS "createdAt", updated_at AS "updatedAt",
+                EXISTS (SELECT 1 FROM project_shared_scopes s WHERE s.project_id = workspace_projects.id) AS shared
            FROM workspace_projects
           WHERE id = $1 AND workspace_id = $2`,
         [projectId, workspaceId],

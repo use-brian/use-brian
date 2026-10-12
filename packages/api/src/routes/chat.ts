@@ -110,6 +110,7 @@ import {
   turnOutputWrite,
   resolveTurnScopeSystem,
   sessionMessageInputScope,
+  automaticContextAccess,
 } from '../context-scope/resolve-turn-scope.js'
 import { resolveExecutionContextSystem } from '../context-scope/execution-context.js'
 import { prepareAssistantRun } from '../turn/prepare.js'
@@ -4401,7 +4402,8 @@ export function chatRoutes(options: WebChatOptions): Router {
       // (passed as `assistantClearance` on the tool context below).
       const readClearance = turnScope.access.clearance ?? assistant.clearance
       const readCompartments = turnScope.effectiveCompartments
-      const viewerCtx = turnScope.access
+      // Automatic context reads only the bound shared Project (D18 relevance).
+      const viewerCtx = automaticContextAccess(turnScope.access, turnScope.activeProjectId)
       turnTiming.mark('admission')
       const [soulContext, identityMemories, rankedIndex, preferredChannel, selfEntityId] = await Promise.all([
         (options.memoryStore.getSoulContext?.(viewerCtx, 'Use Brian') ?? Promise.resolve({ content: null, evidence: {} })),
@@ -4530,6 +4532,7 @@ export function chatRoutes(options: WebChatOptions): Router {
               mutationCompartments: turnScope.access.mutationCompartments,
               projectIds: turnScope.effectiveProjectIds,
               sharedAudience: turnScope.access.sharedAudience,
+              ...(viewerCtx.departmentRead ? { departmentRead: viewerCtx.departmentRead } : {}),
             },
             PER_TURN_FILES_INDEX_CAP,
           )

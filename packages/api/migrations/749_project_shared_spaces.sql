@@ -589,6 +589,97 @@ CREATE POLICY session_messages_project_scope ON session_messages AS RESTRICTIVE 
   USING (session_project_labels_allowed(session_id, false))
   WITH CHECK (session_project_labels_allowed(session_id, true));
 
+-- A workspace-audience session bound to a shared Project is a shared Project
+-- chat: it carries the Project label (D24). Personal sessions bound to the
+-- same Project stay personal and unlabelled. Until the first message locks the
+-- context, a changed binding drops the stale Project label.
+CREATE FUNCTION public.stamp_session_project_label() RETURNS trigger
+LANGUAGE plpgsql SECURITY DEFINER SET search_path = pg_catalog, public AS $$
+BEGIN
+  IF NEW.context_locked_at IS NOT NULL THEN RETURN NEW; END IF;
+  IF TG_OP = 'UPDATE' AND NEW.context_project_id IS DISTINCT FROM OLD.context_project_id THEN
+    NEW.context_compartments := ARRAY(SELECT k FROM unnest(coalesce(NEW.context_compartments, '{}'::text[])) k
+      WHERE k NOT LIKE 'project:%' OR k = 'project:' || NEW.context_project_id::text);
+  END IF;
+  IF NEW.visibility = 'workspace' AND NEW.context_project_id IS NOT NULL
+     AND EXISTS (SELECT 1 FROM public.project_shared_scopes s WHERE s.project_id = NEW.context_project_id AND s.workspace_id = NEW.workspace_id)
+     AND NOT (('project:' || NEW.context_project_id::text) = ANY (coalesce(NEW.context_compartments, '{}'::text[]))) THEN
+    NEW.context_compartments := array_append(coalesce(NEW.context_compartments, '{}'::text[]), 'project:' || NEW.context_project_id::text);
+  END IF;
+  RETURN NEW;
+END $$;
+CREATE TRIGGER aaab_session_project_label BEFORE INSERT OR UPDATE OF context_project_id, visibility ON public.sessions
+  FOR EACH ROW EXECUTE FUNCTION public.stamp_session_project_label();
+
+-- 473's binding validator, plus: the bound shared Project's own label is the
+-- one permitted addition to the Team projection; any other Project label is
+-- refused.
+CREATE OR REPLACE FUNCTION public.validate_session_context_binding() RETURNS trigger
+LANGUAGE plpgsql SECURITY DEFINER
+SET search_path TO 'public', 'pg_temp'
+AS $$
+DECLARE
+  backing_key text;
+  project_label text := CASE WHEN NEW.context_project_id IS NULL THEN NULL ELSE 'project:' || NEW.context_project_id::text END;
+  team_labels text[];
+BEGIN
+  IF EXISTS (SELECT 1 FROM unnest(coalesce(NEW.context_compartments, '{}'::text[])) k
+              WHERE k LIKE 'project:%' AND (k IS DISTINCT FROM project_label OR NOT EXISTS (
+                SELECT 1 FROM public.project_shared_scopes s WHERE s.project_id = NEW.context_project_id AND s.workspace_id = NEW.workspace_id))) THEN
+    RAISE EXCEPTION 'session Project label must name its bound shared Project';
+  END IF;
+  team_labels := ARRAY(SELECT k FROM unnest(coalesce(NEW.context_compartments, '{}'::text[])) k WHERE k NOT LIKE 'project:%');
+  IF NEW.context_group_id IS NOT NULL THEN
+    SELECT g.compartment_key INTO backing_key
+      FROM public.workspace_groups g
+     WHERE g.id = NEW.context_group_id
+       AND g.workspace_id = NEW.workspace_id
+       AND g.kind = 'team';
+    IF backing_key IS NULL THEN
+      RAISE EXCEPTION 'session Team must belong to its workspace';
+    END IF;
+    IF team_labels IS DISTINCT FROM ARRAY[backing_key]::text[] THEN
+      RAISE EXCEPTION 'session context_compartments must equal the selected Team backing key';
+    END IF;
+  ELSIF cardinality(team_labels) <> 0 THEN
+    RAISE EXCEPTION 'a session without a Team must have an empty context_compartments projection';
+  END IF;
+
+  IF NEW.context_project_id IS NOT NULL AND NOT EXISTS (
+    SELECT 1 FROM public.workspace_projects p
+     WHERE p.id = NEW.context_project_id AND p.workspace_id = NEW.workspace_id
+  ) THEN
+    RAISE EXCEPTION 'session Project must belong to its workspace';
+  END IF;
+  RETURN NEW;
+END;
+$$;
+
+-- 594's projection lifetime, plus the viewer's expiring shared Project edges.
+CREATE OR REPLACE FUNCTION department_media_valid_for_ms(p_workspace_id uuid) RETURNS integer
+LANGUAGE sql STABLE SECURITY DEFINER SET search_path=public,pg_temp AS $$
+  WITH actor AS (
+    SELECT nullif(current_setting('app.current_user_id',true),'')::uuid AS id
+  ), boundaries AS (
+    SELECT now()+interval '30 seconds' AS boundary
+    UNION ALL
+    SELECT point FROM workspace_access_grants g
+      CROSS JOIN LATERAL unnest(ARRAY[g.starts_at,g.expires_at]) AS point
+      WHERE g.workspace_id=p_workspace_id AND g.revoked_at IS NULL AND point>now()
+        AND can_view_department_request(g.request_id,(SELECT id FROM actor))
+    UNION ALL
+    SELECT request_expires_at FROM workspace_access_requests r
+      WHERE r.workspace_id=p_workspace_id AND r.status='pending' AND r.request_expires_at>now()
+        AND can_view_department_request(r.id,(SELECT id FROM actor))
+    UNION ALL
+    SELECT e.expires_at FROM project_shared_members e
+      WHERE e.workspace_id=p_workspace_id AND e.user_id=(SELECT id FROM actor) AND e.expires_at>now()
+  ) SELECT CASE WHEN EXISTS (
+      SELECT 1 FROM workspace_members m WHERE m.workspace_id=p_workspace_id AND m.user_id=(SELECT id FROM actor)
+    ) THEN greatest(0,floor(extract(epoch FROM (min(boundary)-clock_timestamp()))*1000))::integer
+      ELSE 0 END FROM boundaries
+$$;
+
 -- ── Registry visibility (D18, D26) ─────────────────────────────────────────
 CREATE POLICY workspace_projects_shared_audience ON public.workspace_projects AS RESTRICTIVE FOR ALL
   USING (public.project_shared_audience_allows(id, workspace_id))

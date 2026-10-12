@@ -375,14 +375,19 @@ async function resolveScope(
 
   let activeProject: ResolvedTurnScope['activeProject'] = null
   let effectiveProjectIds = canonicalScopeGrant(assistantProjectGrant)
+  // A shared Project (project-shared-spaces.md) is governed by its roster, not
+  // by the legacy assistant Project focus grant; admission is checked below
+  // against the v2 grant.
+  let sharedProject = false
   if (binding.projectId) {
     const project = await store!.getProjectSystem(workspaceId, binding.projectId)
     if (!project) throw new ContextNotAvailableError('project', 'not_found')
+    sharedProject = project.shared === true
     requireActiveOrHistorical('project', project.status, binding.historical)
-    if (!scopeGrantContains(assistantProjectGrant, [project.id])) {
+    if (!sharedProject && !scopeGrantContains(assistantProjectGrant, [project.id])) {
       throw new ContextNotAvailableError('project', 'outside_grant')
     }
-    effectiveProjectIds = intersectScopeGrants(assistantProjectGrant, [project.id])
+    effectiveProjectIds = sharedProject ? [project.id] : intersectScopeGrants(assistantProjectGrant, [project.id])
     activeProject = { id: project.id, name: project.name, status: project.status }
   }
 
@@ -397,6 +402,16 @@ async function resolveScope(
     ? await resolveDepartmentGrant(input, workspaceId, binding.groupId, deps.departmentRead
       ?? { query: flagged.departmentQuery ?? systemQuery as <R>(sql: string, values: unknown[]) => Promise<{ rows: R[] }> })
     : undefined
+  // Shared Project admission: the bound Project must be admitted for (P, A);
+  // its label joins the write stamp only for a member (oversight never writes).
+  const projectAdmission = sharedProject && activeProject ? departmentRead?.projects?.[activeProject.id] : undefined
+  if (sharedProject && !projectAdmission) throw new ContextNotAvailableError('project', 'outside_grant')
+  // Keep the legacy-shaped envelope consistent: a finite compartment ceiling
+  // names every admitted Project label, so it never fails closed by accident.
+  const projectLabels = (level: 'read' | 'mutation') => Object.entries(departmentRead?.projects ?? {})
+    .filter(([, admission]) => level === 'read' || admission === 'member').map(([id]) => `project:${id}`)
+  if (effectiveCompartments !== null) effectiveCompartments = canonicalScopeGrant([...effectiveCompartments, ...projectLabels('read')])
+  if (mutationCompartments !== null) mutationCompartments = canonicalScopeGrant([...mutationCompartments, ...projectLabels('mutation')])
   return applyProjection({
     access: {
       workspaceId,
@@ -416,9 +431,10 @@ async function resolveScope(
     effectiveProjectIds,
     writeCompartments: externalPrincipal
       ? []
-      : activeTeam
-        ? [activeTeam.compartmentKey]
-        : [...new Set(input.assistant.defaultCompartments ?? [])].sort(),
+      : [...new Set([
+          ...(activeTeam ? [activeTeam.compartmentKey] : [...(input.assistant.defaultCompartments ?? [])]),
+          ...(projectAdmission === 'member' && activeProject ? [`project:${activeProject.id}`] : []),
+        ])].sort(),
     writeProjectIds: externalPrincipal ? [] : activeProject ? [activeProject.id] : [],
     activeTeam,
     activeProject,
@@ -455,6 +471,22 @@ async function resolveDepartmentGrant(
   const loaded = await loadDepartmentSnapshot(deps.query, read)
   const principal = external ? { kind: 'anonymous' as const, id: 'anonymous' } : loaded.principal
   return resolveDepartmentReadGrant(loaded.snapshot, principal, read, deps.now?.() ?? new Date())
+}
+
+/**
+ * D18 relevance (project-shared-spaces.md -> "Turn scope, relevance and
+ * delivery"): automatic context (soul, identity, memory index, workspace
+ * memories, file index) reads only the turn's bound shared Project. A person
+ * admitted to Projects A and B still sees both on explicit reads, but a turn
+ * about A never has B's material injected. Narrowing only ever removes
+ * Project admission, so it cannot widen anything.
+ */
+export function automaticContextAccess<T extends Pick<ResolvedTurnScope, 'access'>['access']>(access: T, activeProjectId: string | null): T {
+  const grant = access.departmentRead
+  if (!grant?.projects) return access
+  const kept = Object.fromEntries(Object.entries(grant.projects).filter(([id]) => id === activeProjectId))
+  const { projects: _all, ...rest } = grant
+  return { ...access, departmentRead: Object.keys(kept).length ? { ...rest, projects: kept } : rest }
 }
 
 /** Trusted prompt fact; empty for a legacy company-wide turn. */

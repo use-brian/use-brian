@@ -55,7 +55,7 @@ describe('[COMP:api/telegram-byo-route] external guest connector scope', () => {
     expect(connectorBlock).toContain('contextScope: turnScope')
     expect(outsideConnectorBlock).not.toMatch(/\bturnScope\s*\./)
     expect(outsideConnectorBlock).not.toMatch(/\b(?:const|let)\s+turnScope\b/)
-    expect(content).toContain('const viewerCtx = dataTurnScope.access')
+    expect(content).toContain('const viewerCtx = automaticContextAccess(dataTurnScope.access, dataTurnScope.activeProjectId)')
     // Forward the complete canonical access object, including departmentRead.
     // A reconstruction from legacy flat compartments can drop the v2 ceiling.
     expect(content).toContain('bindToolsToAgentAccess(candidateTools, execution.security.access)')
