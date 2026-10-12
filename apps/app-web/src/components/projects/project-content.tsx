@@ -15,6 +15,7 @@ import { projectContentCacheKey } from "@/lib/surface-prefetch";
 import { workspaceSearchHref } from "@/lib/workspace-search-navigation";
 import { personalChatHandoffPath, stashChatHandoff } from "@/lib/chat-handoff";
 import { ProjectChatLauncher, type ProjectChatAudience } from "./project-chat-launcher";
+import { BriefEntry } from "@/components/briefs/brief-entry";
 
 export function ProjectContent({ project, assistants }: {
   project: ContextProject; assistants: Array<{ id: string; name: string }>;
@@ -48,6 +49,8 @@ export function ProjectContent({ project, assistants }: {
     if (requestId) router.push(personalChatHandoffPath(project.workspaceId, assistantId, requestId));
   }
   return <>
+    {/* The governed Brief of a shared Project (project-briefs.md); a legacy Project has none. */}
+    {shared ? <BriefEntry workspaceId={project.workspaceId} ownerKind="project" ownerId={project.id} /> : null}
     <section className="rounded-xl border border-border bg-muted/20 p-4">
       <div className="flex flex-wrap items-center justify-between gap-3">
         <h2 className="font-medium">{copy.ask}</h2>

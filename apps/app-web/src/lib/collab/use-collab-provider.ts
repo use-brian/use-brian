@@ -35,6 +35,8 @@ export type CollabHandle = {
   synced: boolean;
   writeDenied?: boolean;
   reloadRequired?: boolean;
+  /** A Brief Direction edit was refused (project-briefs.md); reload to continue. */
+  briefProtected?: boolean;
   recoveryRequired?: boolean;
   accessDenied?: boolean;
   discardLocalChanges?: () => Promise<void>;
@@ -50,6 +52,7 @@ export function useCollabProvider(pageId: string | null): CollabHandle {
   const [synced, setSynced] = useState(false);
   const [writeDenied, setWriteDenied] = useState(false);
   const [reloadRequired, setReloadRequired] = useState(false);
+  const [briefProtected, setBriefProtected] = useState(false);
   const [recoveryRequired, setRecoveryRequired] = useState(false);
   const [accessDenied, setAccessDenied] = useState(false);
 
@@ -112,6 +115,9 @@ export function useCollabProvider(pageId: string | null): CollabHandle {
       onAuthenticationFailed: () => setWriteDenied(true),
       onStateless: ({ payload }) => {
         if (payload === 'drawing-protocol-reload-required') { setWriteDenied(true); setReloadRequired(true); }
+        // A Brief's Direction changes only through the Brief pane (project-briefs.md):
+        // the refused local edit is discarded by reloading.
+        if (payload === 'brief-direction-protected') { setWriteDenied(true); setReloadRequired(true); setBriefProtected(true); }
         if (payload === 'drawing-legacy-state-recovery-required') { setWriteDenied(true); setRecoveryRequired(true); }
         if (payload === 'page-write-denied') setWriteDenied(true);
         if (payload === 'page-write-allowed') setWriteDenied(false);
@@ -195,6 +201,7 @@ export function useCollabProvider(pageId: string | null): CollabHandle {
       setSynced(false);
       setWriteDenied(false);
       setReloadRequired(false);
+      setBriefProtected(false);
       setRecoveryRequired(false);
       setAccessDenied(false);
     };
@@ -207,6 +214,7 @@ export function useCollabProvider(pageId: string | null): CollabHandle {
     synced,
     writeDenied: writeDenied || reloadRequired || recoveryRequired,
     reloadRequired,
+    briefProtected,
     recoveryRequired,
     accessDenied,
     discardLocalChanges: bundle?.discardLocalChanges,

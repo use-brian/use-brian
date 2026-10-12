@@ -77,6 +77,7 @@ import {
   Trash2,
   UserPlus,
   Users,
+  Compass,
 } from "lucide-react";
 import type { WorkspaceSurface } from "@/lib/doc-page-url";
 import type { CustomHomeApp } from "@/lib/api/home-apps";
@@ -825,6 +826,17 @@ export function DocSidebar(props: Props) {
                 onLeave={() => props.onLeaveTeamspace(ts.id)}
                 onDelete={() => props.onDeleteTeamspace(ts.id)}
               >
+                {/* Stable Brief entry for a Department-owned teamspace
+                    (project-briefs.md); identity is the Department, not a page title. */}
+                {ts.workspaceGroupId ? (
+                  <Link
+                    href={`/w/${props.workspaceId}/briefs/department/${ts.workspaceGroupId}`}
+                    className="flex min-h-8 items-center gap-1.5 rounded px-2 text-sm text-sidebar-foreground/80 hover:bg-muted max-sm:min-h-11"
+                  >
+                    <Compass className="size-3.5 shrink-0 text-muted-foreground" aria-hidden />
+                    <span className="truncate">{copy.briefs.departmentEntry}</span>
+                  </Link>
+                ) : null}
                 {renderSectionBody(sectionTrees.get(ts.id) ?? [])}
               </TeamspaceRow>
             ))}

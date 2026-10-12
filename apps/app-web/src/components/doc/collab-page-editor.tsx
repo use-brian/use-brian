@@ -199,6 +199,7 @@ export function CollabPageEditor({
 }: CollabPageEditorProps) {
   const workspace = useWorkspaceContext();
   const drawingCopy = useT().docPage.diagramSource;
+  const briefCopy = useT().briefs;
   const [recoveryFailed, setRecoveryFailed] = useState(false);
   const { doc, provider, synced, status } = collab;
   if (!doc || !provider) {
@@ -225,7 +226,15 @@ export function CollabPageEditor({
       }}>{drawingCopy.drawingRecoveryAction}</button>
       {recoveryFailed && <p role="alert">{drawingCopy.drawingRecoveryFailed}</p>}
     </div>}
-    {collab.reloadRequired && !collab.recoveryRequired && <div role="alert" className="rounded border border-border p-3 text-sm">
+    {collab.briefProtected && <div role="alert" className="rounded border border-border p-3 text-sm">
+      <p>{briefCopy.directionProtected}</p>
+      {/* The refused Direction edit lives only in this tab's local state: drop it, then reload. */}
+      <button type="button" className="max-sm:min-h-11 rounded px-3 py-2 text-primary hover:bg-muted" onClick={async () => {
+        await collab.discardLocalChanges?.().catch(() => undefined);
+        window.location.reload();
+      }}>{drawingCopy.drawingReloadAction}</button>
+    </div>}
+    {collab.reloadRequired && !collab.recoveryRequired && !collab.briefProtected && <div role="alert" className="rounded border border-border p-3 text-sm">
       <p>{drawingCopy.drawingReload}</p>
       <button type="button" className="max-sm:min-h-11 rounded px-3 py-2 text-primary hover:bg-muted" onClick={() => window.location.reload()}>{drawingCopy.drawingReloadAction}</button>
     </div>}
