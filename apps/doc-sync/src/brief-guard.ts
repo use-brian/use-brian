@@ -26,7 +26,7 @@ export type BriefRegionLayout = Pick<BriefLayout, 'directionStartId' | 'contextS
 
 export const BRIEF_PROTECTED_REASON = 'brief-direction-protected'
 
-export const BRIEF_LAYOUT_SQL =
+const BRIEF_LAYOUT_SQL =
   'SELECT direction_start_id AS "directionStartId", context_start_id AS "contextStartId" FROM brief_bindings WHERE page_id = $1'
 
 export async function briefLayoutFor(pageId: string, query: SysQuery): Promise<BriefRegionLayout | null> {
@@ -46,7 +46,7 @@ function cloneOf(doc: Y.Doc): Y.Doc {
 }
 
 /** Would this Yjs update change the accepted Direction region? */
-export function directionChangedByUpdate(doc: Y.Doc, update: Uint8Array, layout: BriefRegionLayout): boolean {
+function directionChangedByUpdate(doc: Y.Doc, update: Uint8Array, layout: BriefRegionLayout): boolean {
   const before = regionOf(doc, layout)
   const clone = cloneOf(doc)
   try {
@@ -99,7 +99,7 @@ export async function recoverBriefDocument(params: { pageId: string; ydoc: Y.Doc
   return true
 }
 
-export function isBriefDirectionRefusal(error: unknown): boolean {
+function isBriefDirectionRefusal(error: unknown): boolean {
   return /brief_direction_protected/.test((error as Error | undefined)?.message ?? '')
 }
 

@@ -31,6 +31,7 @@ import {
   type Page,
 } from '@use-brian/core'
 import { query } from '../db/client.js'
+import { classifySession } from '../session-kind.js'
 import { withPagePlacement } from '../db/page-placement-admission.js'
 import {
   bindPage,
@@ -123,12 +124,17 @@ export async function resolveEvidenceEnvelope(client: PoolClient, actor: BriefAc
              LEFT JOIN workspace_groups g ON g.id = t.workspace_group_id
             WHERE sv.id = $1 AND sv.workspace_id = $2`, [item.id, actor.workspaceId])).rows[0]
         break
-      case 'session':
-        row = (await client.query<{ sensitivity: Sensitivity; compartments: string[] | null; privateOwner: string | null }>(
-          `SELECT 'internal'::text AS sensitivity, s.context_compartments AS compartments,
-                  CASE WHEN s.visibility = 'workspace' THEN NULL ELSE s.user_id END AS "privateOwner"
+      case 'session': {
+        const session = (await client.query<{ compartments: string[] | null; userId: string; visibility: string | null; mode: string | null
+          channelType: string; anchorKind: string | null; channelId: string | null }>(
+          `SELECT s.context_compartments AS compartments, s.user_id AS "userId", s.visibility, s.mode, s.channel_type AS "channelType",
+                  s.anchor_kind AS "anchorKind", s.channel_id AS "channelId"
              FROM sessions s WHERE s.id = $1 AND s.workspace_id = $2`, [item.id, actor.workspaceId])).rows[0]
+        // A personal conversation is a private source (session-kind.ts is the one audience classifier).
+        row = session ? { sensitivity: 'internal', compartments: session.compartments,
+          privateOwner: classifySession(session).audience === 'workspace' ? null : session.userId } : undefined
         break
+      }
       case 'memory':
       case 'task':
       case 'file': {

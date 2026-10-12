@@ -296,7 +296,7 @@ describe('[COMP:workflow/goal-seeker] goal driver tick', () => {
     expect(goal.outcome).toBe(makeGoal().outcome)
     expect(goal.budget).toEqual(makeGoal().budget)
     // Arming (an explicit resume) adopts the current accepted direction before the first tick.
-    const resumed = makeDriver({ goal: { ...goal, confirmedAt: goal.confirmedAt ?? NOW.toISOString(), means: { ...goal.means, workflowId: goal.means.workflowId ?? 'wf-1' } },
+    const resumed = makeDriver({ goal: { ...goal, confirmedAt: goal.confirmedAt ?? NOW, means: { ...goal.means, workflowId: goal.means.workflowId ?? 'wf-1' } },
       overrides: { briefBoundary: { capture: async g => { captured.push(g.id) }, check: async () => 'ok' } } })
     await resumed.driver.kickoffGoal(goal.id)
     expect(captured).toEqual([goal.id])
