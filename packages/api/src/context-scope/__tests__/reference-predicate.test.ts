@@ -1,8 +1,9 @@
 import { describe, expect, it } from 'vitest'
 import {
-  clearanceIn, eff, explainRead, read, readable, updatePreservesFloor, write,
+  clearanceIn, eff, explainRead, read, readable, splitScopeLabels, updatePreservesFloor, write,
   type AccessSnapshot, type Reader, type Row,
 } from '../reference-predicate.js'
+import { PROJECT_CASES, PROJECT_ROWS, PROJECT_SNAPSHOT, PROJECTS, projectCtx, projectReader } from './fixtures/project-shared-matrix.js'
 import {
   ALL_READERS, ALL_ROWS, ASSISTANTS, BEFORE_EXPIRY, CASES_4_1, DEPARTMENTS, LANES, PEOPLE, ROWS, SNAPSHOT,
   WORKSPACE, fixtureCtx, fixtureReader,
@@ -127,5 +128,60 @@ describe('[COMP:access/reference-predicate] Reference READ / WRITE (permission m
       { ...ROWS.r5, tier: 'public' }, { workspaceId: WORKSPACE, department: null, now: ctx.now })).toBe(true)
     expect(read(SNAPSHOT, { principal: { kind: 'anonymous', id: 'anonymous' }, assistant: ASSISTANTS.brian },
       ROWS.r3, ctx)).toBe(false)
+  })
+})
+
+describe('[COMP:access/reference-predicate] Shared Project leg (project-shared-spaces.md)', () => {
+  it.each(PROJECT_CASES.map(c => [c.name, c] as const))('%s', (_name, c) => {
+    expect(read(PROJECT_SNAPSHOT, c.reader, c.row, c.ctx)).toBe(c.expected)
+  })
+
+  it('a page grant never stands in for Project membership', () => {
+    const reader = { principal: PEOPLE.jun, assistant: ASSISTANTS.brian, pageGrants: [{ rowId: PROJECT_ROWS.note.id, principal: PEOPLE.jun }] }
+    expect(explainRead(PROJECT_SNAPSHOT, reader, PROJECT_ROWS.note, projectCtx())).toEqual({ allowed: false, denial: 'project' })
+  })
+
+  it('a disabled capability (no active scopes) admits nobody, never General', () => {
+    const disabled = { ...PROJECT_SNAPSHOT, activeProjects: [] }
+    for (const reader of [projectReader('maya', 'brian'), projectReader('ava', null)]) {
+      expect(read(disabled, reader, PROJECT_ROWS.note, projectCtx())).toBe(false)
+    }
+  })
+
+  it('WRITE to a Project destination needs member writers; oversight and absent assistants are refused', () => {
+    const input = { requestedTier: 'internal' as const, sources: [], destinationProject: PROJECTS.atlas, homeDepartment: DEPARTMENTS.platform }
+    const ok = write(PROJECT_SNAPSHOT, projectReader('maya', 'brian'), input, projectCtx())
+    // An explicit Project destination is a choice: the home Department does not apply.
+    expect(ok).toEqual({ allowed: true, row: { workspaceId: WORKSPACE, tier: 'internal', departmentIds: [], userId: null, projectScopeIds: [PROJECTS.atlas] } })
+    expect(write(PROJECT_SNAPSHOT, projectReader('ava', null), input, projectCtx())).toMatchObject({ allowed: false, denial: 'project' })
+    expect(write(PROJECT_SNAPSHOT, projectReader('maya', 'ops'), input, projectCtx())).toMatchObject({ allowed: false, denial: 'project' })
+    expect(write(PROJECT_SNAPSHOT, projectReader('jun', 'brian'), input, projectCtx())).toMatchObject({ allowed: false, denial: 'project' })
+  })
+
+  it('a derived write keeps every source Department, tier and Project (I12), so the audience cannot launder it', () => {
+    const derived = write(PROJECT_SNAPSHOT, projectReader('maya', 'brian'), {
+      requestedTier: 'public', sources: [PROJECT_ROWS.financeSummary, PROJECT_ROWS.beaconNote], destinationProject: PROJECTS.atlas,
+    }, projectCtx())
+    expect(derived).toMatchObject({ allowed: true, row: { departmentIds: [DEPARTMENTS.finance], tier: 'internal',
+      projectScopeIds: [PROJECTS.atlas, PROJECTS.beacon].sort() } })
+    if (!derived.allowed) return
+    const stored = { ...derived.row, id: 'derived' }
+    // A participant without Finance, or without Beacon, still cannot read it.
+    expect(read(PROJECT_SNAPSHOT, projectReader('sales', 'brian'), stored, projectCtx())).toBe(false)
+    expect(read(PROJECT_SNAPSHOT, projectReader('priya', 'brian'), stored, projectCtx())).toBe(false)
+    expect(read(PROJECT_SNAPSHOT, projectReader('maya', 'brian'), stored, projectCtx())).toBe(true)
+  })
+
+  it('an update may add a Project requirement but never drop one (I13)', () => {
+    expect(updatePreservesFloor({ tier: 'internal', departmentIds: [], projectScopeIds: [PROJECTS.atlas] },
+      { tier: 'internal', departmentIds: [], projectScopeIds: [] })).toBe(false)
+    expect(updatePreservesFloor({ tier: 'internal', departmentIds: [], projectScopeIds: [] },
+      { tier: 'internal', departmentIds: [], projectScopeIds: [PROJECTS.atlas] })).toBe(true)
+  })
+
+  it('labels split into Department and Project requirements; an unknown label is refused', () => {
+    expect(splitScopeLabels([`team:${DEPARTMENTS.finance}`, `project:${PROJECTS.atlas}`]))
+      .toEqual({ departmentIds: [DEPARTMENTS.finance], projectScopeIds: [PROJECTS.atlas] })
+    expect(splitScopeLabels(['client:acme'])).toBeNull()
   })
 })

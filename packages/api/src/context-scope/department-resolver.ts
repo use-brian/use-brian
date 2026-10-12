@@ -8,7 +8,7 @@
  * Spec: docs/architecture/context-engine/scoped-context.md -> "Reference predicate (v2)".
  */
 import type { DepartmentReadGrant, Sensitivity } from '@use-brian/core'
-import { ANONYMOUS, eff, effBase, type AccessSnapshot, type Edge, type Principal, type Reader, type Tier } from './reference-predicate.js'
+import { ANONYMOUS, eff, effBase, projectAdmission, type AccessSnapshot, type Edge, type Principal, type ProjectEdge, type Reader, type Tier } from './reference-predicate.js'
 
 type Query = <R>(sql: string, values: unknown[]) => Promise<{ rows: R[] }>
 
@@ -50,7 +50,21 @@ export async function loadDepartmentSnapshot(query: Query, input: DepartmentRead
     [input.workspaceId, input.userId, input.assistantId, member !== undefined])).rows
   const edges: Edge[] = rows.map(r => ({ principal: { kind: r.kind, id: r.id }, departmentId: r.departmentId,
     clearance: r.clearance, expiresAt: r.expiresAt }))
-  return { snapshot: { workspaceId: input.workspaceId, edges, base }, principal }
+  // Shared Projects (project-shared-spaces.md): active scopes only while the
+  // workspace capability is on; roster edges of exactly these two principals.
+  const scopes = (await query<{ projectId: string }>(
+    `SELECT s.project_id AS "projectId" FROM project_shared_scopes s JOIN workspaces w ON w.id = s.workspace_id
+      WHERE s.workspace_id = $1 AND s.status = 'active' AND w.project_shared_spaces ORDER BY s.project_id`,
+    [input.workspaceId])).rows
+  const projectRows = scopes.length === 0 ? [] : (await query<{ kind: 'user' | 'assistant'; id: string; projectId: string; expiresAt: Date | null }>(
+    `SELECT principal_kind AS kind, coalesce(user_id, assistant_id) AS id, project_id AS "projectId", expires_at AS "expiresAt"
+       FROM project_shared_members
+      WHERE workspace_id = $1 AND ((user_id = $2 AND $4::boolean) OR assistant_id = $3)`,
+    [input.workspaceId, input.userId, input.assistantId, member !== undefined])).rows
+  const projectEdges: ProjectEdge[] = projectRows.map(r => ({ principal: { kind: r.kind, id: r.id }, projectId: r.projectId, expiresAt: r.expiresAt }))
+  return { snapshot: { workspaceId: input.workspaceId, edges, base, projectEdges,
+    activeProjects: scopes.map(row => row.projectId),
+    workspaceOwners: member?.role === 'owner' ? [input.userId] : [] }, principal }
 }
 
 /** eff and eff_base for every department P holds an edge in, evaluated at `now`. */
@@ -70,6 +84,11 @@ export function resolveDepartmentReadGrant(snapshot: AccessSnapshot, principal: 
     const c = capped(eff(snapshot, reader, d, now))
     if (c) departments[d] = c
   }
+  const projects: Record<string, 'member' | 'oversight'> = {}
+  for (const projectId of snapshot.activeProjects ?? []) {
+    const admission = projectAdmission(snapshot, reader, projectId, now)
+    if (admission) projects[projectId] = admission
+  }
   return {
     workspaceId: input.workspaceId,
     userId: input.userId,
@@ -79,5 +98,6 @@ export function resolveDepartmentReadGrant(snapshot: AccessSnapshot, principal: 
     contextDepartment: input.contextDepartment ?? null,
     binding: input.credential?.binding ? [...input.credential.binding].sort() : null,
     cap,
+    projects,
   }
 }

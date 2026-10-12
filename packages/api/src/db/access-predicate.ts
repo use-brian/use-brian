@@ -237,7 +237,8 @@ export function buildDepartmentReadPredicate(ctx:AccessContext,grant:DepartmentR
   // A shared audience reads only rows with no user owner (decision D4).
   const viewer=ctx.sharedAudience||agent?.sharedAudience?NO_USER:grant.userId
   const sql=`${p}workspace_id = $${i} AND public.department_row_allows($${i+1}::jsonb, ${p}workspace_id, ${p}sensitivity, ${p}compartments, ${p}user_id)`
-  return {sql,params:[ctx.workspaceId,departmentReadGrantJson({...grant,userId:viewer})],nextIdx:i+2}
+  // A mutation never carries workspace-owner Project oversight (D27).
+  return {sql,params:[ctx.workspaceId,departmentReadGrantJson({...grant,userId:viewer},options?.operation??'read')],nextIdx:i+2}
 }
 
 /** Also fences special read branches that intentionally have different content rules. */

@@ -107,8 +107,11 @@ function departmentSnapshot(value: DepartmentReadGrant | undefined, actor: {work
     || !isSensitivity(value.base) || !(value.cap===null || isSensitivity(value.cap))
     || !(value.contextDepartment===null || typeof value.contextDepartment==='string' && value.contextDepartment.length>0)
     || !value.departments || typeof value.departments!=='object' || Array.isArray(value.departments)
-    || Object.entries(value.departments).some(([id,tier])=>!id || !isSensitivity(tier)))throw new Error('access_ceiling_missing')
-  return {departmentRead:{...value,departments:{...value.departments},binding:grant(value.binding)}}
+    || Object.entries(value.departments).some(([id,tier])=>!id || !isSensitivity(tier))
+    || value.projects!==undefined && (!value.projects || typeof value.projects!=='object' || Array.isArray(value.projects)
+      || Object.entries(value.projects).some(([id,level])=>!id || (level!=='member' && level!=='oversight'))))throw new Error('access_ceiling_missing')
+  return {departmentRead:{...value,departments:{...value.departments},binding:grant(value.binding),
+    ...(value.projects!==undefined?{projects:{...value.projects}}:{})}}
 }
 
 function intersectDepartments(a:AccessCeiling,b:AccessCeiling):{departmentRead?:DepartmentReadGrant} {
@@ -121,7 +124,10 @@ function intersectDepartments(a:AccessCeiling,b:AccessCeiling):{departmentRead?:
   const departments=Object.fromEntries(Object.entries(v2.departments)
     .filter(([id])=>legacy.compartments===null || legacy.compartments.includes(`team:${id}`))
     .map(([id,tier])=>[id,minSensitivity(tier,legacy.clearance)]))
-  return {departmentRead:{...v2,base:minSensitivity(v2.base,legacy.clearance),departments}}
+  // A finite legacy ceiling admits a shared Project only when it names its label.
+  const projects=Object.fromEntries(Object.entries(v2.projects??{})
+    .filter(([id])=>legacy.compartments===null || legacy.compartments.includes(`project:${id}`)))
+  return {departmentRead:{...v2,base:minSensitivity(v2.base,legacy.clearance),departments,projects}}
 }
 
 function departmentContains(current:DepartmentReadGrant,starting:DepartmentReadGrant):boolean {
@@ -130,6 +136,10 @@ function departmentContains(current:DepartmentReadGrant,starting:DepartmentReadG
   const reachable=(g:DepartmentReadGrant,id:string)=>
     (g.contextDepartment===null || g.contextDepartment===id) && (g.binding===null || g.binding.includes(id))
   if(rank(current,current.base)<rank(starting,starting.base))return false
+  // Every starting Project must remain admitted at an equal or stronger level.
+  const level=(value:string|undefined)=>value==='member'?2:value==='oversight'?1:0
+  if(Object.entries(starting.projects??{}).some(([id,admission])=>
+    (starting.binding===null || starting.binding.includes(id)) && level(current.projects?.[id])<level(admission)))return false
   return Object.entries(starting.departments).every(([id,tier])=>!reachable(starting,id)
     || reachable(current,id) && Object.hasOwn(current.departments,id) && rank(current,current.departments[id])>=rank(starting,tier))
 }

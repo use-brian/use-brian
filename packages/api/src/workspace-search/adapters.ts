@@ -20,13 +20,14 @@ export const SEARCH_SOURCE_SQL: Record<WorkspaceSearchFamily, string> = {
   pages: `${record('page', 'p', 'coalesce(d.snapshot_title,p.name)', jsonText('coalesce(d.snapshot_json,p.page)'), 'p.updated_at', "jsonb_build_object('type','page','id',p.id)")}
     FROM saved_views p LEFT JOIN documents d ON d.page_id=p.id
     WHERE p.workspace_id=$1 AND (p.state='saved' OR (p.state='draft' AND p.created_by=$2))
-      AND saved_view_principal_boundary_allows(p.workspace_id,p.created_by,p.teamspace_id,p.clearance,p.project_id)
-      AND saved_view_operation_scope_allows(p.workspace_id,p.clearance,p.teamspace_id,p.project_id,false)
+      AND saved_view_principal_boundary_allows(p.workspace_id,p.created_by,p.teamspace_id,p.clearance,p.project_id,p.shared_project_id)
+      AND saved_view_operation_scope_allows(p.workspace_id,p.clearance,p.teamspace_id,p.project_id,false,p.shared_project_id)
       AND department_row_allows((SELECT department_read_grants()),p.workspace_id,
         coalesce((SELECT CASE WHEN sensitivity_rank(t.sensitivity)>sensitivity_rank(p.clearance) THEN t.sensitivity ELSE p.clearance END
           FROM teamspaces t WHERE t.id=p.teamspace_id AND t.workspace_id=p.workspace_id),p.clearance),
         ARRAY(SELECT g.compartment_key FROM teamspaces t JOIN workspace_groups g ON g.id=t.workspace_group_id
-          WHERE t.id=p.teamspace_id AND t.workspace_id=p.workspace_id AND g.compartment_key IS NOT NULL),NULL::uuid)`,
+          WHERE t.id=p.teamspace_id AND t.workspace_id=p.workspace_id AND g.compartment_key IS NOT NULL)
+          || CASE WHEN p.shared_project_id IS NULL THEN '{}'::text[] ELSE ARRAY['project:'||p.shared_project_id::text] END,NULL::uuid)`,
   knowledge: `${record('knowledge', 'k', 'k.title', `concat_ws(' ',k.summary,k.content,
       (SELECT string_agg(c.chunk_text,' ' ORDER BY c.chunk_index) FROM kb_chunks c
         WHERE c.workspace_id=k.workspace_id AND c.source_path=k.path AND ${live('c')} AND ${department('c')}))`,

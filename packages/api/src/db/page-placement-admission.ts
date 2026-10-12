@@ -7,6 +7,8 @@ import { admitWorkspaceResource } from '../workspace-access/resource-admission.j
 import { WorkspaceAccessError } from '../workspace-access/policy.js'
 
 export type PagePlacement = {
+  /** A shared Project collection (project-shared-spaces.md -> "Pages"); exclusive of a teamspace for new pages. */
+  sharedProjectId?: string | null
   teamspaceId?: string | null
   projectId?: string | null
   nestParentId?: string | null
@@ -151,9 +153,9 @@ export async function withPagePlacement<T>(
         requestedLabels: { projectIds: envelope.projectIds },
       })
       const allowed = (await client.query<{ ok: boolean }>(`SELECT
-        saved_view_principal_boundary_allows($1,$2,$3,$4,$5)
-        AND saved_view_operation_scope_allows($1,$4,$3,$5,true) AS ok`,
-      [workspaceId, userId, placement.teamspaceId, sensitivity, placement.projectId ?? null])).rows[0]
+        saved_view_principal_boundary_allows($1,$2,$3,$4,$5,$6)
+        AND saved_view_operation_scope_allows($1,$4,$3,$5,true,$6) AS ok`,
+      [workspaceId, userId, placement.teamspaceId, sensitivity, placement.projectId ?? null, placement.sharedProjectId ?? null])).rows[0]
       if (!allowed?.ok) throw new WorkspaceAccessError('context_not_available', 404)
       placement.clearance = sensitivity
     }

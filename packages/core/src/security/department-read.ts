@@ -25,6 +25,36 @@ export type DepartmentReadGrant = {
   binding: readonly string[] | null
   /** A credential's cap, already folded into `base` and `departments`. */
   cap: Sensitivity | null
+  /**
+   * Shared Project admission (platform plan project-shared-spaces D16-D27):
+   * `member` = the human and the acting assistant each hold an unexpired
+   * roster edge; `oversight` = the human is the current workspace owner and
+   * the acting assistant holds an edge (read only, never a write). A Project
+   * absent here is not admitted, so an older grant without this field reads
+   * no Project-labelled row.
+   * Spec: docs/architecture/features/project-shared-spaces.md -> "The admission map".
+   */
+  projects?: Readonly<Record<string, ProjectAdmission>>
+}
+
+export type ProjectAdmission = 'member' | 'oversight'
+
+/** A Project survives an intersection only on both sides, at the weaker level. */
+export function intersectProjectAdmissions(
+  a: Readonly<Record<string, ProjectAdmission>> | undefined,
+  b: Readonly<Record<string, ProjectAdmission>> | undefined,
+): Record<string, ProjectAdmission> {
+  const result: Record<string, ProjectAdmission> = {}
+  for (const [id, level] of Object.entries(a ?? {})) {
+    const other = b?.[id]
+    if (other) result[id] = level === 'member' && other === 'member' ? 'member' : 'oversight'
+  }
+  return result
+}
+
+/** Write authority never includes workspace-owner oversight (D27). */
+export function mutationProjectAdmissions(grant: Pick<DepartmentReadGrant, 'projects'>): Record<string, ProjectAdmission> {
+  return Object.fromEntries(Object.entries(grant.projects ?? {}).filter(([, level]) => level === 'member'))
 }
 
 /** A nested execution may only narrow: per-department min, base min, binding intersect. */
@@ -49,19 +79,27 @@ export function intersectDepartmentReadGrants(a: DepartmentReadGrant, b: Departm
     contextDepartment: a.contextDepartment ?? b.contextDepartment,
     binding: binding === null ? null : [...binding].sort(),
     cap: caps.length === 0 ? null : caps.reduce((low, c) => (RANK[c] < RANK[low] ? c : low)),
+    ...(a.projects === undefined && b.projects === undefined ? {} : { projects: intersectProjectAdmissions(a.projects, b.projects) }),
   }
 }
 
 /**
  * The JSON map the shared SQL row function `department_row_allows` reads, for
- * one workspace: `{ "<workspaceId>": { b, d, c, k, u } }` with ranks
- * public=1 / internal=2 / confidential=3. RLS builds the same shape in SQL
- * from the edges; the store predicate builds it here from the resolved grant.
+ * one workspace: `{ "<workspaceId>": { b, d, c, k, u, p, o } }` with ranks
+ * public=1 / internal=2 / confidential=3, `p` the admitted Project ids and `o`
+ * the read-only oversight Project ids. RLS builds the same shape in SQL from
+ * the edges; the store predicate builds it here from the resolved grant. A
+ * mutation drops `o` (D27: oversight is never write authority).
  */
-export function departmentReadGrantJson(grant: DepartmentReadGrant): string {
+export function departmentReadGrantJson(grant: DepartmentReadGrant, operation: 'read' | 'mutation' = 'read'): string {
   const d: Record<string, number> = {}
   for (const [id, c] of Object.entries(grant.departments)) d[id] = RANK[c]
+  const p: string[] = [], o: string[] = []
+  for (const [id, level] of Object.entries(grant.projects ?? {})) {
+    if (level === 'member') p.push(id)
+    else if (operation === 'read') o.push(id)
+  }
   return JSON.stringify({ [grant.workspaceId]: {
-    b: RANK[grant.base], d, c: grant.contextDepartment, k: grant.binding, u: grant.userId,
+    b: RANK[grant.base], d, c: grant.contextDepartment, k: grant.binding, u: grant.userId, p: p.sort(), o: o.sort(),
   } })
 }
