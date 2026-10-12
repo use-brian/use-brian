@@ -14,6 +14,7 @@ import { leaseSurfaceContent, surfaceContentRemaining, useSurfaceContentRenewal 
 import { projectContentCacheKey } from "@/lib/surface-prefetch";
 import { workspaceSearchHref } from "@/lib/workspace-search-navigation";
 import { personalChatHandoffPath, stashChatHandoff } from "@/lib/chat-handoff";
+import { ProjectChatLauncher, type ProjectChatAudience } from "./project-chat-launcher";
 
 export function ProjectContent({ project, assistants }: {
   project: ContextProject; assistants: Array<{ id: string; name: string }>;
@@ -26,6 +27,11 @@ export function ProjectContent({ project, assistants }: {
   const [query, setQuery] = useState("");
   const [offset, setOffset] = useState(0);
   const [pickedAssistant, setPickedAssistant] = useState("");
+  // D24: a new chat in a shared Project defaults to the Project's participants.
+  const shared = project.shared ?? null;
+  const canShare = shared?.myRole === "owner" || shared?.myRole === "participant";
+  const [audience, setAudience] = useState<ProjectChatAudience>("shared");
+  const privateChat = !shared || !canShare || audience === "private";
   const assistantId = assistants.some(row => row.id === pickedAssistant) ? pickedAssistant : assistants[0]?.id ?? "";
   useEffect(() => {
     const timer = setTimeout(() => { setQuery(input.trim()); setOffset(0); }, 250);
@@ -51,12 +57,14 @@ export function ProjectContent({ project, assistants }: {
           searchPlaceholder={copy.chooseAssistant} emptyMessage={t.projectDetailEmptyAssistants}
           className="w-full sm:w-56" disabled={project.status === "archived" || !assistants.length} />
       </div>
-      <p className="mt-2 text-sm text-muted-foreground">{project.status === "archived" ? copy.archivedChat : copy.chatHint}</p>
-      <div className="mt-3 flex flex-wrap gap-2">
+      {shared && project.status !== "archived" ? <div className="mt-3"><ProjectChatLauncher workspaceId={project.workspaceId} projectId={project.id}
+        assistantId={assistantId} audience={audience} onAudience={setAudience} canShare={canShare} disabled={!assistantId} /></div>
+        : <p className="mt-2 text-sm text-muted-foreground">{project.status === "archived" ? copy.archivedChat : copy.chatHint}</p>}
+      {privateChat ? <div className="mt-3 flex flex-wrap gap-2">
         {[copy.next, copy.blockers, copy.changes].map(prompt => <Button key={prompt} variant="outline"
           className="max-sm:min-h-11 h-auto whitespace-normal text-left" disabled={!assistantId || project.status === "archived"}
           onClick={() => ask(`${prompt}\n\n${copy.cite}`)}>{prompt}</Button>)}
-      </div>
+      </div> : null}
     </section>
     <section className="space-y-4">
       <div className="flex flex-wrap items-center justify-between gap-3">

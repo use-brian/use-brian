@@ -228,6 +228,9 @@ export function groupRowsByTeamspace(
 ): Map<string | null, ViewListRow[]> {
   const groups = new Map<string | null, ViewListRow[]>();
   for (const row of rows) {
+    // A shared Project collection page is never Private: it renders under
+    // Projects (`groupRowsBySharedProject`).
+    if (row.sharedProjectId) continue;
     const key = row.teamspaceId ?? null;
     const group = groups.get(key);
     if (group) {
@@ -319,4 +322,20 @@ export function buildBreadcrumb(
     cursor = byId.get(parentId);
   }
   return chain;
+}
+
+/**
+ * Pages in shared Project collections (migration 749), grouped by Project id
+ * for the sidebar's Projects section. A page whose Project is not in the
+ * caller's visible list keeps its own group, so a visible row is never dropped.
+ */
+export function groupRowsBySharedProject(rows: ViewListRow[]): Map<string, ViewListRow[]> {
+  const groups = new Map<string, ViewListRow[]>();
+  for (const row of rows) {
+    if (!row.sharedProjectId) continue;
+    const group = groups.get(row.sharedProjectId);
+    if (group) group.push(row);
+    else groups.set(row.sharedProjectId, [row]);
+  }
+  return groups;
 }

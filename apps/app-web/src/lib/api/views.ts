@@ -421,6 +421,11 @@ export type ViewListRow = {
   teamspaceId: string | null;
   /** Stable Project context inherited by the page subtree. */
   projectId: string | null;
+  /**
+   * The shared Project collection the page belongs to (migration 749): its
+   * participants are the audience. The sidebar groups these under Projects.
+   */
+  sharedProjectId?: string | null;
 };
 
 /**
@@ -508,6 +513,8 @@ export type ViewMetadata = {
    * page private to its creator. See `ViewListRow.teamspaceId`.
    */
   teamspaceId: string | null;
+  /** The shared Project collection, or null. See `ViewListRow.sharedProjectId`. */
+  sharedProjectId?: string | null;
   /**
    * Notion-style page-width mode (migration 220). `false` (default) —
    * the page body renders as a constrained, centered reading column;
@@ -1348,6 +1355,8 @@ export type DraftInput = {
    * adopts its parent's teamspace server-side.
    */
   teamspaceId?: string | null;
+  /** A shared Project collection (Pages > Projects "+"); a child inherits its parent's. */
+  sharedProjectId?: string;
   /**
    * Optional block seed (migration 281) — "Start from a template" creates the
    * draft pre-filled with a template's blocks. Omit for an empty page.
@@ -1401,6 +1410,7 @@ export async function createDraftOnServer(params: DraftInput): Promise<ViewMetad
         ...(params.teamspaceId !== undefined
           ? { teamspaceId: params.teamspaceId }
           : {}),
+        ...(params.sharedProjectId ? { sharedProjectId: params.sharedProjectId } : {}),
         ...(params.blocks ? { blocks: params.blocks } : {}),
       }),
     },

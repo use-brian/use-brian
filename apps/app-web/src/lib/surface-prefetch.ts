@@ -782,6 +782,11 @@ export function projectDetailCacheKey(workspaceId: string, projectId: string): s
   return `project:${workspaceId}${viewerSuffix()}:${projectId}`;
 }
 
+/** Whether shared Project spaces are on for the workspace (project-shared-spaces.md). */
+export function projectSharedCapabilityCacheKey(workspaceId: string): string {
+  return `project:${workspaceId}${viewerSuffix()}:shared-capability`;
+}
+
 export function homeAppSessionCacheKey(workspaceId: string, appId: string): string {
   return `home-app-session:${workspaceId}${viewerSuffix()}:${appId}`;
 }

@@ -1,6 +1,7 @@
 "use client";
 
 import { ProjectContent } from "@/components/projects/project-content";
+import { ProjectAccessPanel } from "@/components/projects/project-access-panel";
 import { publicRuntimeConfig } from "@/lib/runtime-public-config";
 /**
  * Project home with canonical records and a fresh contextual chat. [COMP:app-web/project-detail]
@@ -26,10 +27,12 @@ import { authFetch } from "@/lib/auth-fetch";
 import { useWorkspaceContext } from "@/lib/workspace-context";
 import { markSurfaceCacheStale, mutateSurfaceCache, useCachedResource } from "@/lib/surface-cache";
 import { leaseSurfaceContent, surfaceContentRemaining, useSurfaceContentRenewal } from "@/lib/offline/surface-content-cache";
-import { assistantsCacheKey, projectDetailCacheKey } from "@/lib/surface-prefetch";
+import { assistantsCacheKey, projectDetailCacheKey, projectSharedCapabilityCacheKey } from "@/lib/surface-prefetch";
 import { listAssistants } from "@/lib/api/studio";
 import {
   getContextProject,
+  getProjectSharedCapability,
+  type ProjectRoster,
   setContextProjectAssistant,
   setContextProjectMember,
   updateContextProject,
@@ -39,7 +42,7 @@ import { useLeasedResource } from "@/lib/offline/surface-content-cache";
 
 const API_URL = publicRuntimeConfig().apiUrl ?? "http://localhost:4000";
 type Member = { userId: string; userName?: string | null; email?: string | null };
-type Assistant = { id: string; name: string };
+type Assistant = { id: string; name: string; kind?: string | null };
 type ProjectBundle = { project: ContextProject; members: Member[] };
 
 /** The project row and the member roster it is checked against, in parallel. */
@@ -60,8 +63,9 @@ export default function ProjectDetailPage({
 }) {
   const { workspaceId, projectId } = use(params);
   const t = useT().contextScope;
-  const { role } = useWorkspaceContext();
+  const { role, me } = useWorkspaceContext();
   const canManage = role === "owner" || role === "admin";
+  const capability = useCachedResource(projectSharedCapabilityCacheKey(workspaceId), () => getProjectSharedCapability(workspaceId));
   const bundleKey = projectDetailCacheKey(workspaceId, projectId);
   // Content lease: protected counts and previews expire with the viewer's authority.
   const bundle = useCachedResource<ProjectBundle>(bundleKey, () => leaseSurfaceContent(() => fetchProjectBundle(workspaceId, projectId)), { expiresInMs: surfaceContentRemaining });
@@ -71,6 +75,10 @@ export default function ProjectDetailPage({
   const project = bundle.data?.project ?? null;
   const members = bundle.data?.members ?? [];
   const assistants: Assistant[] = assistantList.data ?? NO_ASSISTANTS;
+  // A shared Project carries its roster (project-shared-spaces.md); its owners
+  // govern it, not the workspace admin role.
+  const roster = (project?.shared ?? null) as ProjectRoster | null;
+  const canEditDetails = roster ? roster.myRole === "owner" : canManage;
   const [error, setError] = useState<string | null>(null);
   const [editName, setEditName] = useState("");
   const [editDescription, setEditDescription] = useState("");
@@ -174,7 +182,13 @@ export default function ProjectDetailPage({
 
         <ProjectContent key={project.id} project={project} assistants={assistants} />
 
-        <div className="grid gap-4 md:grid-cols-2">
+        <ProjectAccessPanel workspaceId={workspaceId} projectId={project.id} roster={roster}
+          people={members.map(member => ({ userId: member.userId, name: member.userName ?? member.email ?? member.userId }))}
+          assistants={assistants.map(assistant => ({ id: assistant.id, name: assistant.name, kind: assistant.kind ?? null }))}
+          meId={me.id} workspaceRole={role} sharedEnabled={capability.data?.enabled === true}
+          onChanged={() => { markSurfaceCacheStale(`projects:${workspaceId}`); return refreshBundle(); }} />
+
+        {roster ? null : <div className="grid gap-4 md:grid-cols-2">
           <section className="rounded-xl border border-border p-4">
             <h2 className="text-sm font-medium">{t.projectDetailPeople}</h2>
             <div className="mt-3 space-y-2">
@@ -199,8 +213,8 @@ export default function ProjectDetailPage({
               )) : <p className="text-sm text-muted-foreground">{t.projectDetailEmptyAssistants}</p>}
             </div>
           </section>
-        </div>
-        {canManage && project.status === "active" ? (
+        </div>}
+        {canEditDetails && project.status === "active" ? (
           <details className="rounded-xl border border-border p-4">
             <summary className="min-h-8 max-sm:min-h-11 cursor-pointer py-2 text-sm font-medium">{t.projectSettings}</summary>
             <div className="grid gap-3 pt-3 sm:grid-cols-2">

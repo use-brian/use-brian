@@ -46,7 +46,8 @@
 
 import { useCallback, useEffect, useMemo, useState } from "react";
 import Link from "next/link";
-import { inboxCacheKey, useIntentPrefetch } from "@/lib/surface-prefetch";
+import { inboxCacheKey, surfaceDataKey, useIntentPrefetch } from "@/lib/surface-prefetch";
+import { listContextProjects } from "@/lib/api/context-scopes";
 import {
   markSurfaceCacheStale,
   readSurfaceCache,
@@ -113,6 +114,7 @@ import type { Teamspace } from "@/lib/api/teamspaces";
 import {
   buildTree,
   dispatchReparentWithContextConfirmation,
+  groupRowsBySharedProject,
   groupRowsByTeamspace,
   savedAncestorIds,
   type ContextAwareReparentMove,
@@ -172,7 +174,7 @@ type Props = {
   onSelect: (id: string) => void;
   /** Create a page: a teamspace id files it there, `null` = Private,
    *  omitted = the server default (General). */
-  onNewDraft: (teamspaceId?: string | null) => void;
+  onNewDraft: (teamspaceId?: string | null, sharedProjectId?: string) => void;
   onAddChild: (parentId: string) => void;
   onSave: (id: string) => void;
   onUnsave: (id: string) => void;
@@ -436,6 +438,15 @@ export function DocSidebar(props: Props) {
   // and the prune worker spares them (same rule, server-side). Derived once
   // over the full row set and read by every row renderer below.
   const keptByAncestry = useMemo(() => savedAncestorIds(allRows), [allRows]);
+  // Shared Project collections (D25, project-shared-spaces.md -> "Pages"):
+  // one per visible shared Project. The registry rides the viewer-keyed
+  // Projects cache, which `workspace_config` signals mark stale.
+  const projectRegistry = useCachedResource(surfaceDataKey("projects", workspaceId), () => listContextProjects(workspaceId, true));
+  const sharedProjects = useMemo(() => (projectRegistry.data ?? []).filter((project) => project.shared), [projectRegistry.data]);
+  const projectTrees = useMemo(() => {
+    const groups = groupRowsBySharedProject(allRows);
+    return new Map([...groups].map(([projectId, rows]) => [projectId, buildTree(rows)]));
+  }, [allRows]);
   // ── DnD ──────────────────────────────────────────────────────────────
   const [draggingId, setDraggingId] = useState<string | null>(null);
   const sensors = useSensors(
@@ -817,6 +828,40 @@ export function DocSidebar(props: Props) {
                 {renderSectionBody(sectionTrees.get(ts.id) ?? [])}
               </TeamspaceRow>
             ))}
+
+            {/* Projects — shared Project collections. A page here is shared
+                with that Project's participants; moves in or out are refused
+                server-side, so these sections are not drop targets. */}
+            {sharedProjects.length > 0 || projectTrees.size > 0 ? (
+              <section className="mt-4" aria-label={copy.contextScope.sharedProjects.pagesSection}>
+                <div className="mb-1 px-1 text-[11px] font-semibold uppercase tracking-wide text-sidebar-foreground/45">
+                  {copy.contextScope.sharedProjects.pagesSection}
+                </div>
+                {[...sharedProjects.map((project) => ({ id: project.id, name: project.name, writable: project.status === "active"
+                    && (project.shared?.myRole === "owner" || project.shared?.myRole === "participant") })),
+                  ...[...projectTrees.keys()].filter((id) => !sharedProjects.some((p) => p.id === id))
+                    .map((id) => ({ id, name: copy.contextScope.sharedProjects.badge, writable: false }))]
+                  .map((project) => (
+                  <div key={project.id} className="group/proj">
+                    <div className="flex items-center rounded px-1">
+                      <span className="min-w-0 flex-1 truncate text-sm text-sidebar-foreground/80" title={project.name}>{project.name}</span>
+                      {project.writable ? (
+                        <button
+                          type="button"
+                          aria-label={format(copy.contextScope.sharedProjects.newProjectPage, { name: project.name })}
+                          disabled={props.busyNewDraft}
+                          onClick={() => props.onNewDraft(undefined, project.id)}
+                          className="flex size-8 shrink-0 items-center justify-center rounded text-muted-foreground opacity-100 hover:bg-muted hover:text-foreground disabled:opacity-50 md:size-5 md:opacity-0 md:group-hover/proj:opacity-100"
+                        >
+                          <Plus className="size-3.5" />
+                        </button>
+                      ) : null}
+                    </div>
+                    {renderSectionBody(projectTrees.get(project.id) ?? [])}
+                  </div>
+                ))}
+              </section>
+            ) : null}
 
             {/* Private — the caller's unfiled pages (`teamspaceId: null`), a
                 plain group label + `+` (create private) + drop zone (drag a

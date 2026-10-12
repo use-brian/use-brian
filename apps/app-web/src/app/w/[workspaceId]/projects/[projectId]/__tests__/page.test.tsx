@@ -19,10 +19,12 @@ vi.mock("@/lib/api/context-scopes", () => ({
   updateContextProject: (...args: unknown[]) => api.updateProject(...args),
   setContextProjectMember: (...args: unknown[]) => api.setMember(...args),
   setContextProjectAssistant: (...args: unknown[]) => api.setAssistant(...args),
+  // Legacy Projects in a workspace without shared spaces: the access panel renders nothing.
+  getProjectSharedCapability: async () => ({ enabled: false, canConfigure: false }),
 }));
 vi.mock("@/components/projects/project-content", () => ({ ProjectContent: () => <section><h2>projectContent</h2></section> }));
 vi.mock("@/lib/auth-fetch", () => ({ authFetch: (...args: unknown[]) => api.authFetch(...args) }));
-vi.mock("@/lib/workspace-context", () => ({ useWorkspaceContext: () => ({ role: "admin" }) }));
+vi.mock("@/lib/workspace-context", () => ({ useWorkspaceContext: () => ({ role: "admin", me: { id: "me" } }) }));
 vi.mock("@/lib/i18n/client", () => ({
   useT: () => ({ contextScope: new Proxy({projectHome:{brief:"Project brief",noBrief:"No brief"}}, { get: (target, key) => key === "projectHome" ? target.projectHome : String(key) }) }),
 }));

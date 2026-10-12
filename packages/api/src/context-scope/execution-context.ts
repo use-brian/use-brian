@@ -18,6 +18,7 @@ import {
   type SessionAuthoritySnapshot,
 } from './authority-lease.js'
 import {
+  projectRoomAudienceCeiling,
   resolveLiveAccessCeilingSystem,
   resolveTurnScopeSystem,
   type ResolveTurnScopeDeps,
@@ -130,8 +131,12 @@ export async function resolveExecutionContextSystem(
     resolveWorkspaceRole: deps.resolveWorkspaceRole,
   }
   const bounded = boundTurnScope(await resolveScope(input, scopeDeps), input.maximumAccess)
+  // A shared Project room reads only what its whole audience may read.
+  const room = input.sharedAudience
+    ? input.session as { contextCompartments?: string[] | null; effectiveClearance?: string | null } | undefined
+    : undefined
   const turnScope = input.sharedAudience
-    ? { ...bounded, access: { ...bounded.access, sharedAudience: true } }
+    ? { ...bounded, access: { ...projectRoomAudienceCeiling(bounded.access, room), sharedAudience: true } }
     : bounded
   const access: ResolvedExecutionAccess = {
     ...turnScope.access,

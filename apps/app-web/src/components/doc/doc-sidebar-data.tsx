@@ -262,7 +262,7 @@ type SidebarData = {
    * Create a draft. `teamspaceId` files it in that section, explicit `null`
    * creates it Private, omitted lets the server default apply (General).
    */
-  handleNewDraft: (teamspaceId?: string | null) => Promise<void>;
+  handleNewDraft: (teamspaceId?: string | null, sharedProjectId?: string) => Promise<void>;
   handleAddChild: (parentId: string) => Promise<void>;
   handleSave: (id: string) => Promise<void>;
   handleUnsave: (id: string) => Promise<void>;
@@ -645,16 +645,17 @@ export function DocSidebarDataProvider({
 
   // ── Mutation handlers ─────────────────────────────────────────────────
   const handleNewDraft = useCallback(
-    async (teamspaceId?: string | null) => {
+    async (teamspaceId?: string | null, sharedProjectId?: string) => {
       setBusyNewDraft(true);
       setTopError(null);
       try {
         // `null` = private, a section's id = that teamspace, omitted =
         // server default (General). Spread on `!== undefined` so an explicit
-        // null survives to the wire.
+        // null survives to the wire. A shared Project collection's "+" passes
+        // its Project instead (the page's audience is that Project).
         const created = await createDraft({
           workspaceId,
-          ...(teamspaceId !== undefined ? { teamspaceId } : {}),
+          ...(sharedProjectId ? { sharedProjectId } : teamspaceId !== undefined ? { teamspaceId } : {}),
         });
         reloadSidebar();
         recordPrune(created.id, created.autoPruneAt);

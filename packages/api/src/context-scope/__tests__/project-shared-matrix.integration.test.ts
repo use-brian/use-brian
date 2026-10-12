@@ -19,7 +19,7 @@ import { admitWorkspaceResource } from '../../workspace-access/resource-admissio
 import { decideSessionRead } from '../../session-read-access.js'
 import { accessCeilingContains } from '@use-brian/core'
 import { createAuthorityLease } from '../authority-lease.js'
-import { automaticContextAccess, resolveLiveAccessCeilingSystem, type TurnScopeAssistant } from '../resolve-turn-scope.js'
+import { automaticContextAccess, projectRoomAudienceCeiling, resolveLiveAccessCeilingSystem, type TurnScopeAssistant } from '../resolve-turn-scope.js'
 import { buildAccessPredicate } from '../../db/access-predicate.js'
 
 import { buildDepartmentReadPredicate } from '../../db/access-predicate.js'
@@ -387,6 +387,13 @@ describe('[COMP:access/project-shared-matrix] Shared Project foundation: referen
     expect(await select(access)).toEqual([...ids].sort())
     expect(await select(automaticContextAccess(access, PROJECTS.atlas))).toEqual([PROJECT_ROWS.note.id])
     expect(await select(automaticContextAccess(access, null))).toEqual([])
+    // In a shared Atlas room the answer goes to every participant: the Finance
+    // summary Maya can read is excluded before generation, as is Beacon.
+    const all = [PROJECT_ROWS.note.id, PROJECT_ROWS.financeSummary.id, PROJECT_ROWS.beaconNote.id]
+    const room = projectRoomAudienceCeiling(access, { contextCompartments: [`project:${PROJECTS.atlas}`], effectiveClearance: 'internal' })
+    const predicate = buildAccessPredicate(room, { startIdx: 2 })
+    const visible = (await pool.query(`SELECT id FROM tasks WHERE id = ANY($1::uuid[]) AND ${predicate.sql}`, [all, ...predicate.params])).rows.map(r => r.id)
+    expect(visible).toEqual([PROJECT_ROWS.note.id])
   })
 
   it('a label naming no shared scope in the row workspace is refused at write time', async () => {

@@ -4,7 +4,7 @@ import {
   type AccessSnapshot, type Reader, type Row,
 } from '../reference-predicate.js'
 import { PROJECT_CASES, PROJECT_ROWS, PROJECT_SNAPSHOT, PROJECTS, projectCtx, projectReader } from './fixtures/project-shared-matrix.js'
-import { automaticContextAccess } from '../resolve-turn-scope.js'
+import { automaticContextAccess, projectRoomAudienceCeiling } from '../resolve-turn-scope.js'
 import {
   ALL_READERS, ALL_ROWS, ASSISTANTS, BEFORE_EXPIRY, CASES_4_1, DEPARTMENTS, LANES, PEOPLE, ROWS, SNAPSHOT,
   WORKSPACE, fixtureCtx, fixtureReader,
@@ -189,12 +189,24 @@ describe('[COMP:access/reference-predicate] Shared Project leg (project-shared-s
 
 describe('[COMP:access/reference-predicate] Automatic-context relevance (D18)', () => {
   it('keeps only the bound shared Project and never adds one', () => {
-    const access = { workspaceId: WORKSPACE, userId: PEOPLE.maya.id, departmentRead: { workspaceId: WORKSPACE, userId: PEOPLE.maya.id, assistantId: null,
+    const access = { workspaceId: WORKSPACE, userId: PEOPLE.maya.id, assistantId: 'a', assistantKind: 'standard' as const, departmentRead: { workspaceId: WORKSPACE, userId: PEOPLE.maya.id, assistantId: null,
       base: 'internal' as const, departments: {}, contextDepartment: null, binding: null, cap: null,
       projects: { [PROJECTS.atlas]: 'member' as const, [PROJECTS.beacon]: 'member' as const } } }
     expect(automaticContextAccess(access, PROJECTS.atlas).departmentRead?.projects).toEqual({ [PROJECTS.atlas]: 'member' })
     expect(automaticContextAccess(access, null).departmentRead?.projects).toBeUndefined()
     expect(automaticContextAccess(access, 'not-admitted').departmentRead?.projects).toBeUndefined()
-    expect(automaticContextAccess({ workspaceId: WORKSPACE, userId: PEOPLE.maya.id }, PROJECTS.atlas)).toEqual({ workspaceId: WORKSPACE, userId: PEOPLE.maya.id })
+    const bare = { workspaceId: WORKSPACE, userId: PEOPLE.maya.id, assistantId: 'a', assistantKind: 'standard' as const }
+    expect(automaticContextAccess(bare, PROJECTS.atlas)).toEqual(bare)
+  })
+
+  it('a shared Project room reads only what its whole audience may read: its Project, no Department, the room floor', () => {
+    const access = { workspaceId: WORKSPACE, userId: PEOPLE.maya.id, assistantId: 'a', assistantKind: 'standard' as const, departmentRead: {
+      workspaceId: WORKSPACE, userId: PEOPLE.maya.id, assistantId: null, base: 'confidential' as const, departments: { [DEPARTMENTS.finance]: 'internal' as const },
+      contextDepartment: null, binding: null, cap: null, projects: { [PROJECTS.atlas]: 'member' as const, [PROJECTS.beacon]: 'member' as const } } }
+    const room = projectRoomAudienceCeiling(access, { contextCompartments: [`project:${PROJECTS.atlas}`], effectiveClearance: 'internal' })
+    expect(room.departmentRead).toMatchObject({ base: 'internal', departments: {}, projects: { [PROJECTS.atlas]: 'member' } })
+    // A personal or Department session is untouched.
+    expect(projectRoomAudienceCeiling(access, { contextCompartments: [`team:${DEPARTMENTS.finance}`] })).toBe(access)
+    expect(projectRoomAudienceCeiling(access, null)).toBe(access)
   })
 })

@@ -80,8 +80,9 @@ import {
   type ViewMetadata,
 } from "@/lib/api/views";
 import { getUserInfo, subscribeUserInfo } from "@/lib/user";
-import { loadSurfaceCache, readSurfaceCache } from "@/lib/surface-cache";
-import { docPageCacheKey } from "@/lib/surface-prefetch";
+import { loadSurfaceCache, readSurfaceCache, useCachedResource } from "@/lib/surface-cache";
+import { listContextProjects } from "@/lib/api/context-scopes";
+import { docPageCacheKey, surfaceDataKey } from "@/lib/surface-prefetch";
 import { buildBreadcrumb } from "@/lib/sidebar-tree";
 import { useT, format } from "@/lib/i18n/client";
 import { useWorkspaceContext } from "@/lib/workspace-context";
@@ -155,9 +156,12 @@ const CREATED_COMMIT_TEMPLATE_MS = 15_000;
 export function DocShell({ workspaceId, assistantId }: ShellProps) {
   // `assistantId` is forwarded to `<CollabPageEditor>` (the centre pane). The
   // assistant chat dock is mounted in `WorkspaceChrome`, not here.
-  const t = useT().docPage;
+  const copy = useT();
+  const t = copy.docPage;
   const workspace = useWorkspaceContext();
   const router = useRouter();
+  // A shared Project page's container is its Project audience, never "Private".
+  const projectRegistry = useCachedResource(surfaceDataKey("projects", workspaceId), () => listContextProjects(workspaceId, true));
   const pathname = usePathname();
   const searchParams = useSearchParams();
   // The active page id is the canonical `/p/<pageId>` path segment — NOT a
@@ -1215,7 +1219,11 @@ export function DocShell({ workspaceId, assistantId }: ShellProps) {
                 view={pageView}
                 breadcrumb={breadcrumb}
                 teamspace={
-                  pageView.teamspaceId === null
+                  pageView.sharedProjectId
+                    ? { name: format(copy.contextScope.sharedProjects.pageAudience, {
+                        name: projectRegistry.data?.find((p) => p.id === pageView.sharedProjectId)?.name ?? copy.contextScope.sharedProjects.badge }),
+                        icon: projectRegistry.data?.find((p) => p.id === pageView.sharedProjectId)?.icon ?? null }
+                  : pageView.teamspaceId === null
                     ? null
                     : sidebar.teamspaces.find(
                         (teamspace) => teamspace.id === pageView.teamspaceId,

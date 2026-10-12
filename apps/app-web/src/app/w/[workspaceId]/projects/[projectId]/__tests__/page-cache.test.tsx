@@ -27,6 +27,8 @@ vi.mock("@/lib/api/context-scopes", () => ({
   updateContextProject: vi.fn(),
   setContextProjectMember: vi.fn(),
   setContextProjectAssistant: vi.fn(),
+  // Legacy Projects in a workspace without shared spaces: the access panel renders nothing.
+  getProjectSharedCapability: async () => ({ enabled: false, canConfigure: false }),
 }));
 // The content panel has its own cache/router tests; this suite exercises the page bundle.
 vi.mock("@/components/projects/project-content", () => ({ ProjectContent: () => <section data-testid="project-content" /> }));
@@ -34,7 +36,7 @@ vi.mock("@/lib/api/studio", () => ({
   listAssistants: (...args: unknown[]) => api.listAssistants(...args),
 }));
 vi.mock("@/lib/auth-fetch", () => ({ authFetch: (...args: unknown[]) => api.authFetch(...args) }));
-vi.mock("@/lib/workspace-context", () => ({ useWorkspaceContext: () => ({ role: "admin" }) }));
+vi.mock("@/lib/workspace-context", () => ({ useWorkspaceContext: () => ({ role: "admin", me: { id: "me" } }) }));
 vi.mock("@/lib/i18n/client", () => ({
   useT: () => ({ contextScope: new Proxy({}, { get: (_target, key) => String(key) }) }),
 }));

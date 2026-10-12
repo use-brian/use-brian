@@ -489,6 +489,30 @@ export function automaticContextAccess<T extends Pick<ResolvedTurnScope, 'access
   return { ...access, departmentRead: Object.keys(kept).length ? { ...rest, projects: kept } : rest }
 }
 
+/**
+ * Destination audience of a shared Project room (D24, §15.2 item 5): the
+ * answer is shown to every participant, so the turn reads only what that
+ * audience can read. Department admissions are dropped (a Department source
+ * is excluded before generation, never routed into the room), only the room's
+ * own Project stays admitted, and General reads are capped at the room's read
+ * floor. A person who needs a Department source uses a private chat. Only
+ * ever narrows.
+ */
+export function projectRoomAudienceCeiling<T extends Pick<ResolvedTurnScope, 'access'>['access']>(
+  access: T,
+  room: { contextCompartments?: readonly string[] | null; effectiveClearance?: string | null } | null | undefined,
+): T {
+  const grant = access.departmentRead
+  const project = (room?.contextCompartments ?? []).find(label => label.startsWith('project:'))?.slice(8)
+  if (!grant || !project) return access
+  const admitted = grant.projects?.[project]
+  const floor = room?.effectiveClearance
+  const ranks = { public: 1, internal: 2, confidential: 3 } as const
+  const base = floor && floor in ranks && ranks[floor as keyof typeof ranks] < ranks[grant.base] ? floor as typeof grant.base : grant.base
+  const { projects: _all, ...rest } = grant
+  return { ...access, departmentRead: { ...rest, base, departments: {}, ...(admitted ? { projects: { [project]: admitted } } : {}) } }
+}
+
 /** Trusted prompt fact; empty for a legacy company-wide turn. */
 export function formatActiveWorkspaceContext(scope: ResolvedTurnScope): string {
   if (!scope.activeTeam && !scope.activeProject) return ''
