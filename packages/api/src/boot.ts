@@ -598,6 +598,7 @@ import { createDepartmentTools } from './workspace-access/department-tools.js'
 import { createProjectAccessTools } from './workspace-access/project-access-tools.js'
 import { createBriefTools } from './briefs/tools.js'
 import { briefRoutes } from './routes/briefs.js'
+import { configureBriefTurnContext, createGoalBriefBoundary, resolveBriefTurn } from './briefs/context.js'
 import { createWorkspaceMigrationTools } from './workspace-access/migration-tools.js'
 import { createTeamspaceStore } from './db/teamspace-store.js'
 import { createOfficeArtifactStore, isDurableOfficeArtifact } from './db/office-artifacts.js'
@@ -2365,6 +2366,8 @@ export async function bootOpenApi(opts: BootOpenApiOptions): Promise<BootResult>
   // providers through this registration, so a route that forgets to thread
   // them cannot change which model answers a turn.
   configureTurnKernel({ resolveWorkspaceCustomLlm, configuredProviders })
+  // Accepted Brief grounding + revision boundary for every runner's prepare stage.
+  configureBriefTurnContext(resolveBriefTurn)
   const resolveBackgroundRuntime = async (workspaceId: string | null | undefined) =>
     workspaceId
       ? resolveWorkspaceCustomLlm({
@@ -3737,6 +3740,7 @@ export async function bootOpenApi(opts: BootOpenApiOptions): Promise<BootResult>
   }
 
   const goalDriver = createGoalDriver({
+    briefBoundary: createGoalBriefBoundary(),
     claimCrmEventResume: claimCrmGoalEventResume,
     assertSourceAuthority: assertGoalCrmSourceAuthority,
     executeWithAuthority: async (goal, operation) =>

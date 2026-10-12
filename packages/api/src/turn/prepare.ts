@@ -1,4 +1,5 @@
 import type { ExecutionContext, LLMProvider, Tool } from '@use-brian/core'
+import { applyBriefToRun } from '../briefs/context.js'
 
 export type PreparedModelSelection = {
   provider: LLMProvider
@@ -55,8 +56,14 @@ export async function prepareAssistantRun(
   const candidateTools = typeof input.candidateTools === 'function'
     ? await input.candidateTools()
     : new Map(input.candidateTools)
-  const tools = await input.bindTools(candidateTools, input.executionContext)
-  const trusted = input.trustedContributions ?? []
+  const bound = await input.bindTools(candidateTools, input.executionContext)
+  // Accepted Brief grounding for a Project-bound turn, below runtime policy;
+  // mutating tools recheck the accepted direction before they act, and an
+  // unattended run refuses an incompatible change before any provider work
+  // (project-briefs.md -> "Grounding a turn", "Revision boundaries").
+  const brief = await applyBriefToRun(input.executionContext, bound)
+  const tools = brief.tools
+  const trusted = [...(input.trustedContributions ?? []), ...(brief.contribution ? [brief.contribution] : [])]
   const userVisible = input.userVisibleContributions ?? []
 
   return {

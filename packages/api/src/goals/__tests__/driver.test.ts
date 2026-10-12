@@ -284,6 +284,25 @@ describe('[COMP:workflow/goal-seeker] goal driver tick', () => {
     expect(h.ticks).toHaveLength(0) // blocked → no re-arm
   })
 
+  it('blocks on an incompatible accepted Brief change before any iteration, leaving outcome and budget untouched', async () => {
+    const goal = makeGoal({ contextProjectId: 'project-1' } as Partial<GoalRecord>)
+    const captured: string[] = []
+    const { driver, h } = makeDriver({ goal, overrides: { briefBoundary: { capture: async g => { captured.push(g.id) }, check: async () => 'changed' } } })
+    await driver.tickGoal(goal.id)
+    expect(h.dispatch).not.toHaveBeenCalled()
+    expect(h.statuses.at(-1)).toEqual({ status: 'blocked', reason: 'brief_direction_changed' })
+    expect(h.delivered).toEqual([{ terminal: 'blocked', reason: 'brief_direction_changed' }])
+    expect(h.ticks).toHaveLength(0)
+    expect(goal.outcome).toBe(makeGoal().outcome)
+    expect(goal.budget).toEqual(makeGoal().budget)
+    // Arming (an explicit resume) adopts the current accepted direction before the first tick.
+    const resumed = makeDriver({ goal: { ...goal, confirmedAt: goal.confirmedAt ?? NOW.toISOString(), means: { ...goal.means, workflowId: goal.means.workflowId ?? 'wf-1' } },
+      overrides: { briefBoundary: { capture: async g => { captured.push(g.id) }, check: async () => 'ok' } } })
+    await resumed.driver.kickoffGoal(goal.id)
+    expect(captured).toEqual([goal.id])
+    expect(resumed.h.ticks).toHaveLength(1)
+  })
+
   it('runs the iteration when the workspace is UNDER its budget', async () => {
     const { driver, h } = makeDriver({
       metering: true,

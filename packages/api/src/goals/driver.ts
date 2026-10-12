@@ -191,6 +191,15 @@ export type GoalDriverDeps = {
   claimCrmEventResume?: (goalId: string, event: DispatchEvent, marker: GoalAwaitingEvent) => Promise<boolean>
   /** Revalidate durable causal sources before ticks, iterations and delivery. */
   assertSourceAuthority?: (goal: GoalRecord) => Promise<void>
+  /** Accepted Brief boundary (goals.md -> "Brief direction boundary"): `capture`
+   *  freezes the Project's effective direction when the goal arms; `check`
+   *  before each iteration returns `changed` for an incompatible accepted
+   *  change, which blocks the goal without touching its outcome, budget,
+   *  usage or authority. Omitted: no Brief boundary. */
+  briefBoundary?: {
+    capture: (goal: GoalRecord) => Promise<void>
+    check: (goal: GoalRecord) => Promise<'ok' | 'changed'>
+  }
   /** Install the goal's persisted author/current sticky authority for host work. */
   executeWithAuthority?: <T>(goal: GoalRecord, operation: () => Promise<T>) => Promise<T>
   /** Resolve the workspace override for a budget-less goal. Omitted or failed
@@ -346,6 +355,14 @@ export function createGoalDriver(deps: GoalDriverDeps): GoalDriver {
       return
     }
 
+    // The Project's accepted direction changed incompatibly since this goal
+    // armed: block for review before the next action. Nothing is retried and
+    // the goal's outcome, budget and usage stay as they are.
+    if (deps.briefBoundary && (await deps.briefBoundary.check(goal)) === 'changed') {
+      await finishGoal(goal, 'blocked', 'brief_direction_changed', claimedFinishDeps)
+      return
+    }
+
     // Per-tick run bookkeeping, captured in the closures below so `rearm` can
     // write the updated handoff without the core threading it back.
     let activeRunId = state.runId
@@ -462,6 +479,8 @@ export function createGoalDriver(deps: GoalDriverDeps): GoalDriver {
         }
         goal = (await deps.applyDefaultBudget(goal!.id, defaultBudget)) ?? goal
       }
+      // Arming (including an explicit resume) adopts the current accepted direction.
+      await deps.briefBoundary?.capture(goal!)
       await deps.scheduleGoalTick(goal!, deps.now(), INITIAL_STATE)
     }
     if (deps.executeWithAuthority) await deps.executeWithAuthority(goal, arm)
