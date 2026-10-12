@@ -2287,8 +2287,9 @@ export async function resolveAgentCapabilities(workspaceId: string): Promise<Rea
  * Build the per-request `ToolContext` for a workspace-bound tool call.
  *
  * Exported for first-party app routes (`routes/apps-shopify.ts`) as well as
- * the brain-MCP surface. Both bind to the same principal - the workspace owner
- * plus its primary assistant, via `resolveWriteTarget` - so a second
+ * the brain-MCP surface. Both bind to the same principal - the credential's
+ * human (viewer, consenting user, or brain-key issuer; the workspace owner only
+ * for a legacy key) plus the primary assistant, via `resolveWriteTarget` - so a second
  * hand-rolled context beside this one would be a place for the two to drift on
  * clearance, compartments or capabilities without anything failing.
  *
@@ -2312,9 +2313,12 @@ export function makeBrainContextResolver(
       cached = { error: 'This workspace has no assistant to bind the call to.' }
       return cached
     }
-    // User-linked credentials act as their authenticated user; ownership is attribution only.
+    // Credentials act as their human: the viewer or consenting user, and for a
+    // brain key its issuer (D13), so a key bound to a department runs on the
+    // edges of the person who bound it. Only a legacy key with no recorded
+    // issuer acts as the workspace owner. Ownership is attribution only.
     const actingUserId = programmaticPrincipal?.kind === 'home_app' || programmaticPrincipal?.kind === 'oauth_token'
-      ? programmaticPrincipal.userId : target.ownerUserId
+      ? programmaticPrincipal.userId : programmaticPrincipal?.userId ?? target.ownerUserId
     if (!actingUserId) return { error: 'Authenticated credential user required' }
     const clearance = effectiveBrainClearance(target.clearance, maxClearance)
     const activeCapabilities = await loadActiveCapabilities(target.assistantId)
@@ -2350,7 +2354,7 @@ export function makeBrainContextResolver(
         ...(admitted ? {
           sharedAudience: true,
           maximumAccess: {
-            workspaceId, userId: target.ownerUserId, clearance,
+            workspaceId, userId: actingUserId, clearance,
             compartments: admitted.admittedCompartments ?? [],
             mutationCompartments: admitted.admittedCompartments ?? [],
             projectIds: admitted.admittedProjectIds ?? [],

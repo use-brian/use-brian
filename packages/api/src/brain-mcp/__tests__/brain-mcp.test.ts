@@ -647,6 +647,17 @@ describe('[COMP:api/brain-mcp] authenticateBrainRequest', () => {
     expect(await authenticateBrainRequest(reqWith(), { brainKeyStore: store })).toBeNull()
   })
 
+  it('acts as the key issuer, and refuses the key once the issuer has left the workspace', async () => {
+    const { id, plaintext, store } = await fakeKeyStore()
+    const issuer = randomUUID()
+    const row = (await store.getByIdSystem(id))!
+    const lookup = vi.spyOn(store, 'getByIdSystem').mockResolvedValue({ ...row, credentialOwnerUserId: issuer })
+    const auth = await authenticateBrainRequest(reqWith(`Bearer ${plaintext}`), { brainKeyStore: store })
+    expect(auth?.actingUserId).toBe(issuer)
+    lookup.mockResolvedValue({ ...row, credentialOwnerUserId: null })
+    expect(await authenticateBrainRequest(reqWith(`Bearer ${plaintext}`), { brainKeyStore: store })).toBeNull()
+  })
+
   it('rejects changed Brain-key context and admission evidence on retained authentication', async () => {
     const { id, plaintext, store } = await fakeKeyStore()
     const original = { ...(await store.getByIdSystem(id))!, credentialOwnerUserId: randomUUID(), configurationSessionId: randomUUID(),
