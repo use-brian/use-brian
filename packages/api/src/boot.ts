@@ -57,7 +57,7 @@ import type http from 'node:http'
 
 import express, { type Express } from 'express'
 import { createTelegramApi } from '@use-brian/channels'
-import { isOpaqueDesktopBearerRequest } from './cors-policy.js'
+import { createApiCorsMiddleware } from './cors-policy.js'
 import {
   vertexTransport, resolveVertexTokenSource, aiStudioTransport, credentialPoolAiStudioTransport,
   createEmbedderForAdapter, type EmbedderAdapterConfig, type GoogleTransport, type MediaBackend,
@@ -1594,58 +1594,8 @@ export async function bootOpenApi(opts: BootOpenApiOptions): Promise<BootResult>
     jsonParser(req, res, next)
   })
 
-  /**
-   * Paths a sandboxed Home app frame may call cross-origin. Bearer-authed
-   * only — see the `Origin: null` branch below for why that is what makes it
-   * safe to answer an opaque origin at all.
-   */
-  function isHomeAppBridgePath(path: string): boolean {
-    return path === '/api/brain/mcp' || /^\/api\/home-apps\/[^/]+\/state$/.test(path)
-  }
-
   // ── CORS ──
-  const allowedOrigins = new Set([env.APP_URL, env.FEED_URL, env.AUTHED_APP_URL].filter(Boolean) as string[])
-  app.use((req, res, next) => {
-    // Resolution/completion/recovery own their extension-only CORS, including preflight.
-    if (/^\/api\/protected-browser-fill\/(resolve|complete|recover)$/.test(req.path)) { next(); return }
-    const origin = req.headers.origin
-    if (origin && allowedOrigins.has(origin)) {
-      res.header('Access-Control-Allow-Origin', origin)
-      res.header('Access-Control-Allow-Credentials', 'true')
-      res.header('Vary', 'Origin')
-    } else if (
-      origin === 'null'
-      && (
-        isHomeAppBridgePath(req.path)
-        || isOpaqueDesktopBearerRequest({
-          path: req.path,
-          authorization: req.headers.authorization,
-          requestedHeaders: req.headers['access-control-request-headers'],
-        })
-      )
-    ) {
-      // A custom Home app runs in a sandbox with no `allow-same-origin`, so
-      // its fetches carry `Origin: null`. Without this the bridge is
-      // unreachable from the only place it is ever called — the browser
-      // discards the response and the app shows "Failed to fetch".
-      //
-      // NEVER with `Allow-Credentials`. `null` is shared by every sandboxed
-      // frame on the internet, so crediting it would let any page's sandbox
-      // make cookie-authenticated calls to this API. Safe only because the
-      // bridge authenticates by BEARER TOKEN, which an attacker's frame does
-      // not have — the app's token is minted per app, per viewer, per grant.
-      //
-      // The installed file:// renderer is admitted only when the request
-      // carries bearer auth (or preflights it), plus the explicit-token refresh
-      // endpoint. Never enable credentials for an opaque origin.
-      res.header('Access-Control-Allow-Origin', 'null')
-      res.header('Vary', 'Origin')
-    }
-    res.header('Access-Control-Allow-Headers', 'Content-Type, Content-Range, Authorization, X-Client-Timezone, X-Brian-Access-Review-Id, X-Brian-Access-Review-Hash')
-    res.header('Access-Control-Allow-Methods', 'GET, POST, PUT, PATCH, DELETE, OPTIONS')
-    if (req.method === 'OPTIONS') { res.sendStatus(204); return }
-    next()
-  })
+  app.use(createApiCorsMiddleware([env.APP_URL, env.FEED_URL, env.AUTHED_APP_URL].filter(Boolean) as string[]))
 
   // ── Client timezone capture ──
   app.use(attachClientTimezone())

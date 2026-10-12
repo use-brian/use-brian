@@ -2,11 +2,12 @@ import express from 'express'
 import request from 'supertest'
 import { Writable } from 'node:stream'
 import { afterAll, beforeAll, describe, expect, it, vi } from 'vitest'
-import { promises as fs, readFileSync } from 'node:fs'
+import { promises as fs } from 'node:fs'
 import { join } from 'node:path'
 import { tmpdir } from 'node:os'
 import { createLocalFilesClient, type LocalFilesClient } from '../../files/local-files-client.js'
 import { localFilesTransferRoutes } from '../local-files-transfer.js'
+import { createApiCorsMiddleware } from '../../cors-policy.js'
 
 const SECRET = 'local-transfer-test-secret'
 let baseDir: string
@@ -36,11 +37,19 @@ function pathOf(url: string): string {
 }
 
 describe('[COMP:files/local-transfer] Signed local file transfers', () => {
-  it('allows the browser Content-Range header through the API CORS preflight', () => {
-    const bootSource = readFileSync(new URL('../../boot.ts', import.meta.url), 'utf8')
-    expect(bootSource).toContain(
-      "Access-Control-Allow-Headers', 'Content-Type, Content-Range, Authorization, X-Client-Timezone, X-Brian-Access-Review-Id, X-Brian-Access-Review-Hash'",
-    )
+  it('allows the browser Content-Range header through the API CORS preflight', async () => {
+    const app = express()
+    app.use(createApiCorsMiddleware(['https://app.example']))
+    const response = await request(app).options('/api/local-files/upload')
+      .set('Origin', 'https://app.example')
+      .set('Access-Control-Request-Method', 'PUT')
+      .set('Access-Control-Request-Headers', 'Content-Type, Content-Range')
+      .expect(204)
+    expect(response.headers['access-control-allow-origin']).toBe('https://app.example')
+    expect(response.headers['access-control-allow-headers'].split(',').map((value: string) => value.trim()))
+      .toEqual(expect.arrayContaining(['Content-Type', 'Content-Range']))
+    expect(response.headers['access-control-allow-methods'].split(',').map((value: string) => value.trim()))
+      .toContain('PUT')
   })
 
   it('streams a signed PUT to disk and serves the signed read back', async () => {

@@ -29,7 +29,7 @@ const job={id:'job-a',workspaceId:'workspace-a',artifactId:uid(1),status:'comple
 const events=[{id:'event-a',seq:1,code:'office.job.completed',params:{},safeNarration:null,createdAt:'2026-09-27T01:00:00Z'}];
 const versions=[{id:'version-a',version:1,summary:'Protected version summary',origin:'manual',createdAt:'2026-09-27T01:00:00Z'}];
 const sharing={defaultWorkspaceRole:'comment',canManage:true,grants:[],members:[{userId:'member-a',userName:'Protected member',email:'member@example.com',isOwner:false}]};
-const response=(body:unknown,ttl='6000',status=200)=>new Response(JSON.stringify(body),{status,headers:{'X-Brian-Projection-Valid-For-Ms':ttl}});
+const response=(body:unknown,ttl='6000',status=200)=>new Response(JSON.stringify(body),{status,headers:{'Cache-Control':'private, no-store','X-Brian-Projection-Valid-For-Ms':ttl}});
 const pending=()=>new Promise<Response>(()=>{});
 let root:Root,host:HTMLDivElement;
 const copied=vi.fn(),restored=vi.fn();

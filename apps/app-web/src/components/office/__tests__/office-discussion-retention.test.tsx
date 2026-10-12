@@ -20,7 +20,7 @@ vi.mock('@/lib/office/offline',()=>({listOfflineJournal:(...args:unknown[])=>sta
 const threads=[{id:'thread-a',artifactVersionId:'version-a',anchorKind:'block',anchor:{kind:'block',targetIds:['block-a']},status:'open',messages:[{id:'message-a',authorType:'user',body:'Protected comment body',mentions:[],createdAt:'2026-01-01T00:00:00Z'}]}];
 const suggestions=[{id:'suggestion-a',status:'open',commandBatch:{kind:'replaceTextRange'}},{id:'suggestion-b',status:'open',commandBatch:{kind:'replaceTextRange'}}];
 const proposal={targetId:'block-a',from:0,to:16,text:'Protected source',style:{fontFamily:'Arial',fontSizePt:12,bold:false,italic:false,underline:false,strike:false,color:'#000000'}};
-const response=(body:unknown,ttl='6000',status=200)=>new Response(JSON.stringify(body),{status,headers:{'X-Brian-Projection-Valid-For-Ms':ttl}});
+const response=(body:unknown,ttl='6000',status=200)=>new Response(JSON.stringify(body),{status,headers:{'Cache-Control':'private, no-store','X-Brian-Projection-Valid-For-Ms':ttl}});
 const pending=()=>new Promise<Response>(()=>{});
 type Kind='comments'|'suggestions';
 let root:Root,host:HTMLDivElement;

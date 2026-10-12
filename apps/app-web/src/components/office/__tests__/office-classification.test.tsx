@@ -15,7 +15,7 @@ vi.mock('../office-scope-picker',()=>({OfficeScopePicker:({onChange}:{onChange:(
 (globalThis as {IS_REACT_ACT_ENVIRONMENT?:boolean}).IS_REACT_ACT_ENVIRONMENT=true;
 afterEach(()=>{vi.useRealTimers();vi.clearAllMocks();resetSurfaceCache();});
 const classification={workspaceId:'workspace',revision:'a'.repeat(64),sensitivity:'internal',compartments:['team:operations'],canManage:true,history:[]};
-const response=(value:unknown,ttl='1000')=>new Response(JSON.stringify(value),{headers:{'Content-Type':'application/json','X-Brian-Projection-Valid-For-Ms':ttl}});
+const response=(value:unknown,ttl='1000')=>new Response(JSON.stringify(value),{headers:{'Content-Type':'application/json','Cache-Control':'private, no-store','X-Brian-Projection-Valid-For-Ms':ttl}});
 async function mount(){const host=document.createElement('div');document.body.append(host);const root=createRoot(host);await act(async()=>root.render(<I18nProvider locale="en" dict={en}><OfficeClassificationPanel artifactId="artifact"/></I18nProvider>));return {host,close:()=>{act(()=>root.unmount());host.remove();}};}
 const button=(host:HTMLElement,text:string)=>Array.from(host.querySelectorAll('button')).find(b=>b.textContent===text)!;
 describe('[COMP:app-web/office-classification] reviewed department protection',()=>{

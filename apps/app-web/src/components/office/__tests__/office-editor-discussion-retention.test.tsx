@@ -37,7 +37,7 @@ vi.mock('@/lib/office/offline',()=>({loadOfflinePackage:vi.fn(async()=>null),lis
 (globalThis as {IS_REACT_ACT_ENVIRONMENT?:boolean}).IS_REACT_ACT_ENVIRONMENT=true;
 const threads=[{id:'thread-a',artifactVersionId:'version-a',anchorKind:'block',anchor:{kind:'block',targetIds:['block-a']},status:'open',messages:[{id:'message-a',authorType:'user',body:'Protected server comment',mentions:[],createdAt:'2026-01-01T00:00:00Z'}]}];
 const suggestions=[{id:'protected-suggestion',status:'open',commandBatch:{kind:'replaceTextRange'}}];
-const response=(body:unknown,ttl='6000',status=200)=>new Response(JSON.stringify(body),{status,headers:{'X-Brian-Projection-Valid-For-Ms':ttl}});
+const response=(body:unknown,ttl='6000',status=200)=>new Response(JSON.stringify(body),{status,headers:{'Cache-Control':'private, no-store','X-Brian-Projection-Valid-For-Ms':ttl}});
 const pending=()=>new Promise<Response>(()=>{});
 let root:Root,host:HTMLDivElement;
 beforeEach(()=>{vi.useFakeTimers();resetSurfaceCache();vi.clearAllMocks();state.viewer='viewer-a';state.workspace='workspace-a';state.status='connected';state.role='view';host=document.createElement('div');document.body.append(host);root=createRoot(host);});
