@@ -64,12 +64,13 @@ import {
   type CrmPreparationVersionRow,
 } from '../db/crm-commercial-document-store.js'
 import { assignCrmReferenceAtEvent } from './business-references.js'
+import { closeBillingRequest, reopenBillingRequestsForInvoice } from './governed-records.js'
 import { actorColumns, commercialAudit, commercialResult, refuse, unavailable, withOperationReceipt, type CommercialResult } from './commercial-transaction.js'
 import type { CrmOfficeBindingPort } from './office-binding.js'
 
 type Command<K extends CrmCommercialDocumentCommand['kind']> = Extract<CrmCommercialDocumentCommand, { kind: K }>
 type Content = { dealIds: string[]; servicePeriodStart: string | null; servicePeriodEnd: string | null; lines: Array<{ description: string; quantity: string; unitPrice: string; dealId: string | null }>
-  values: CrmCommercialFields; allocations: Array<{ dealId: string; amount: string }> }
+  values: CrmCommercialFields; allocations: Array<{ dealId: string; amount: string; billingRequestId?: string }> }
 type CellValue = { valueType: 'blank'; value: null } | { valueType: 'string'; value: string } | { valueType: 'number'; value: number } | { valueType: 'boolean'; value: boolean } | { valueType: 'date'; value: string }
 type Question = CrmResolutionReceipt['questions'][number]
 
@@ -157,7 +158,7 @@ function tokenValues(map: CrmInvoiceTemplateMap, data: {
 }
 
 type Computed = {
-  resolution: CrmResolutionReceipt; totals: CrmInvoiceTotals | null; allocations: Array<{ dealId: string; amount: string }>
+  resolution: CrmResolutionReceipt; totals: CrmInvoiceTotals | null; allocations: Array<{ dealId: string; amount: string; billingRequestId?: string }>
   questions: Question[]; draftReady: boolean; issueReady: boolean; sourceHash: string; contentHash: string
   envelope: CrmScopeEnvelope; tokens: Record<string, CellValue>
 }
@@ -205,14 +206,15 @@ async function compute(tx: CrmOperationsTransaction, params: {
       throw error
     }
   }
-  let allocations: Array<{ dealId: string; amount: string }> = []
+  let allocations: Array<{ dealId: string; amount: string; billingRequestId?: string }> = []
   if (!params.content.dealIds.length) {
     questions.push({ fieldKey: 'deals', label: 'Deals', kind: 'missing', requiredFor: 'issue', question: 'Which deal does this invoice bill?' })
   } else if (totals) {
     if (params.content.dealIds.length === 1 && !params.content.allocations.length) {
       allocations = [{ dealId: params.content.dealIds[0]!, amount: totals.total }]
     } else {
-      allocations = params.content.allocations.map((allocation) => ({ dealId: allocation.dealId, amount: crmDecimalRound(allocation.amount, totals!.minorUnits) }))
+      allocations = params.content.allocations.map((allocation) => ({ dealId: allocation.dealId, amount: crmDecimalRound(allocation.amount, totals!.minorUnits),
+        ...(allocation.billingRequestId ? { billingRequestId: allocation.billingRequestId } : {}) }))
       const covered = new Set(allocations.map((allocation) => allocation.dealId))
       const sum = allocations.reduce((total, allocation) => crmDecimalAdd(total, allocation.amount, totals!.minorUnits), crmDecimalRound('0', totals.minorUnits))
       if (covered.size !== params.content.dealIds.length || params.content.dealIds.some((dealId) => !covered.has(dealId)) || crmDecimalCompare(sum, totals.total) !== 0) {
@@ -379,6 +381,10 @@ async function issue(tx: CrmOperationsTransaction, command: Command<'issue_invoi
     seller: { id: seller.id, legalName: seller.legalName }, buyer: { companyId: account.companyId, name: company.displayName, accountId: account.id } }
   await freezeInvoice(client, context.workspaceId, invoice.id, { number: reference.printableValue, referenceId: reference.id, issueDate: command.issueDate,
     payload, hash: crmOperationsSha256(payload), lines: totals.lines.map((line) => ({ ...line, dealId: line.dealId ?? null })), allocations: recomputed.allocations, currency: totals.currency })
+  // Allocations naming a billing request close it in this transaction, once, for exactly its reviewed amount.
+  for (const allocation of recomputed.allocations) {
+    if (allocation.billingRequestId) await closeBillingRequest(client, context.workspaceId, allocation.billingRequestId, invoice.id, allocation.dealId, allocation.amount, totals.currency)
+  }
   await updatePreparation(client, context.workspaceId, preparation.id, { state: 'issue_pending', actor: actorColumns(context) })
   const attempt = await enqueueIssueAttempt(client, context.workspaceId, invoice.id, command.operationId, access.userId)
   await commercialAudit(tx, context, { action: 'crm.invoice.issue_requested', subjectKind: 'crm_invoice', subjectId: invoice.id, details: { preparationVersion: version.version } })
@@ -413,12 +419,14 @@ async function voidInvoice(tx: CrmOperationsTransaction, command: Command<'void_
   if (!invoice) unavailable()
   if (invoice.version !== command.expectedVersion) refuse('conflict', 'The invoice changed. Reread it first.', { reason: 'stale_version', currentVersion: invoice.version })
   if (!['issued', 'issue_failed'].includes(invoice.state)) refuse('invalid_transition', 'Only an issued or failed invoice can be voided.', { state: invoice.state })
+  if (invoice.origin === 'external') refuse('invalid_transition', 'An externally issued invoice belongs to its provider; correct its reference instead of voiding it.', { reason: 'provider_owned' })
   const account = await lockAccount(client, context.workspaceId, invoice.accountId, access)
   if (!account) unavailable()
   if (context.authority.integration) requireCrmIntegrationResources(context.authority.integration, 'crm.commercial.issue', { sellerKeys: account.sellerKey })
   await setInvoiceState(client, context.workspaceId, invoice.id, 'voided', { voidReason: command.reason })
+  const reopened = await reopenBillingRequestsForInvoice(client, context.workspaceId, invoice.id)
   if (invoice.preparationId) await updatePreparation(client, context.workspaceId, invoice.preparationId, { state: 'voided', actor: actorColumns(context) })
-  await commercialAudit(tx, context, { action: 'crm.invoice.voided', subjectKind: 'crm_invoice', subjectId: invoice.id, details: { reason: command.reason } })
+  await commercialAudit(tx, context, { action: 'crm.invoice.voided', subjectKind: 'crm_invoice', subjectId: invoice.id, details: { reason: command.reason, reopenedBillingRequests: reopened } })
   return [commercialResult(command.kind, { invoice: (await lockInvoice(client, context.workspaceId, invoice.id, null))! }), null]
 }
 

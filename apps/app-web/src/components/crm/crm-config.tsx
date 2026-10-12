@@ -41,6 +41,7 @@ import { crmFieldKeyFromLabel } from "@/lib/crm-r2";
 import { CrmIntakeSettings } from "./operations/intake-settings";
 import { CrmReferenceSettings } from "./operations/references-settings";
 import { CrmCommercialSettings } from "./operations/commercial-settings";
+import { CrmGovernanceSettings } from "./operations/governance-settings";
 import { useOptionalWorkspaceContext } from "@/lib/workspace-context";
 
 export function CrmConfigDialog({
@@ -324,6 +325,7 @@ export function CrmConfigDialog({
             </section>
             <CrmReferenceSettings workspaceId={workspaceId} canConfigure={role === "owner" || role === "admin"} onOpenRecord={onOpenRecord} />
             <CrmCommercialSettings workspaceId={workspaceId} canConfigure={role === "owner" || role === "admin"} />
+            <CrmGovernanceSettings workspaceId={workspaceId} canConfigure={role === "owner" || role === "admin"} />
             <CrmIntakeSettings workspaceId={workspaceId} />
           </div>
         </Dialog.Popup>

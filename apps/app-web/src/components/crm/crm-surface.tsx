@@ -25,7 +25,7 @@
 
 import { useCallback, useEffect, useMemo, useState } from "react";
 import { usePathname, useRouter, useSearchParams } from "next/navigation";
-import { BarChart3, CalendarDays, ChevronDown, ChevronUp, Inbox, Kanban, Mail, Rows3, Settings2, UsersRound } from "lucide-react";
+import { BarChart3, CalendarDays, ChevronDown, ChevronUp, Inbox, Kanban, Mail, Rows3, Settings2, ShieldCheck, UsersRound } from "lucide-react";
 import { OperatorTopbar } from "@/components/operator/operator-topbar";
 import { cn } from "@/lib/utils";
 import { mutateSurfaceCache, useCachedResource } from "@/lib/surface-cache";
@@ -161,6 +161,7 @@ import { CrmMobileActions } from "./crm-mobile-actions";
 import { CrmSubmissionInbox } from "./operations/submission-inbox";
 import { CrmSegmentsPanel } from "./operations/segments-panel";
 import { CrmProgramsPanel } from "./operations/programs-panel";
+import { CrmReviewQueue } from "./operations/review-queue";
 
 const NONE = "__none__";
 const EMPTY_PIPELINE: CrmPipeline = {
@@ -503,6 +504,14 @@ export function CrmSurface({ workspaceId, routeRecord = null }: {
       name: memberDisplayName(member) ?? t.r2.memberUnknown,
     })),
     [roster, t.r2.memberUnknown],
+  );
+  const governedNames = useMemo(() => new Map<string, string>([
+    ...(data?.deals ?? []).map((row) => [row.id, row.name] as const),
+    ...(data?.companies ?? []).map((row) => [row.id, row.name] as const),
+  ]), [data]);
+  const governedMembers = useMemo(
+    () => ownerOptions.map((option) => ({ userId: option.id, name: option.name })),
+    [ownerOptions],
   );
   const sectionEntityKind = view.section === "contacts" ? "person" : view.section === "companies" ? "company" : "deal";
   const sectionFields = useMemo(
@@ -1074,6 +1083,9 @@ export function CrmSurface({ workspaceId, routeRecord = null }: {
                 {view.review === "programs" && (
                   <CalendarDays className="size-3.5 shrink-0" aria-hidden />
                 )}
+                {view.review === "governed" && (
+                  <ShieldCheck className="size-3.5 shrink-0" aria-hidden />
+                )}
                 <span className="truncate">
                   {view.review === "email"
                     ? t.r2.emailDrafts
@@ -1083,6 +1095,8 @@ export function CrmSurface({ workspaceId, routeRecord = null }: {
                         ? t.operations.segments
                         : view.review === "programs"
                           ? t.operations.programs
+                          : view.review === "governed"
+                            ? t.governed.reviewsNav
                       : sectionLabels[view.section]}
                 </span>
                 <ChevronDown
@@ -1138,6 +1152,10 @@ export function CrmSurface({ workspaceId, routeRecord = null }: {
                 >
                   <CalendarDays className="size-3.5" aria-hidden />
                   <span className="min-w-28 flex-1">{t.operations.programs}</span>
+                </DropdownMenuItem>
+                <DropdownMenuItem onClick={() => setView({ review: "governed" })}>
+                  <ShieldCheck className="size-3.5" aria-hidden />
+                  <span className="min-w-28 flex-1">{t.governed.reviewsNav}</span>
                 </DropdownMenuItem>
                 <DropdownMenuItem
                   onClick={() =>
@@ -1238,6 +1256,21 @@ export function CrmSurface({ workspaceId, routeRecord = null }: {
               >
                 <CalendarDays className="size-3.5" aria-hidden />
                 <span>{t.operations.programs}</span>
+              </button>
+              <button
+                type="button"
+                aria-label={t.governed.reviewsNav}
+                aria-pressed={view.review === "governed"}
+                onClick={() => setView({ review: "governed" })}
+                className={cn(
+                  "inline-flex h-7 items-center gap-1.5 rounded-md px-2 text-[12.5px] transition-colors",
+                  view.review === "governed"
+                    ? "bg-sidebar-accent text-sidebar-accent-foreground"
+                    : "text-sidebar-foreground/70 hover:bg-sidebar-accent/60 hover:text-sidebar-accent-foreground",
+                )}
+              >
+                <ShieldCheck className="size-3.5" aria-hidden />
+                <span>{t.governed.reviewsNav}</span>
               </button>
               <button
                 type="button"
@@ -1487,6 +1520,13 @@ export function CrmSurface({ workspaceId, routeRecord = null }: {
             workspaceId={workspaceId}
             selectedId={view.segment}
             onSelect={(segment) => setView({ review: "segments", segment })}
+          />
+        ) : view.review === "governed" ? (
+          <CrmReviewQueue
+            workspaceId={workspaceId}
+            canDecide={role === "owner" || role === "admin"}
+            members={governedMembers}
+            recordName={(id) => governedNames.get(id) ?? null}
           />
         ) : view.review === "programs" ? (
           <CrmProgramsPanel

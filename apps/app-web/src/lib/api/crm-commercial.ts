@@ -18,6 +18,7 @@
  */
 
 import { CrmReferenceRequestError, crmOperationsRequest } from "@/lib/api/crm-references";
+import type { CrmGovernedCommand } from "@/lib/api/crm-governed";
 
 export type CrmSensitivity = "public" | "internal" | "confidential";
 export type CrmCommercialStatus = "active" | "archived";
@@ -135,7 +136,7 @@ export type CrmOperationDefinition = {
 
 export type CrmInvoiceState = "draft" | "ready" | "issue_pending" | "issue_failed" | "issued" | "voided";
 
-export type CrmInvoiceLineInput = { description: string; quantity: string; unitPrice: string; dealId: string | null };
+type CrmInvoiceLineInput = { description: string; quantity: string; unitPrice: string; dealId: string | null };
 
 /** One complete preparation version: a revision always sends all of it, never a patch. */
 export type CrmPreparationContent = {
@@ -144,10 +145,11 @@ export type CrmPreparationContent = {
   servicePeriodEnd: string | null;
   lines: CrmInvoiceLineInput[];
   values: CrmCommercialFields;
-  allocations: Array<{ dealId: string; amount: string }>;
+  /** `billingRequestId` closes that ready-to-bill request for exactly its reviewed amount at issue. */
+  allocations: Array<{ dealId: string; amount: string; billingRequestId?: string }>;
 };
 
-export type CrmInvoiceTotals = {
+type CrmInvoiceTotals = {
   currency: string;
   minorUnits: number;
   lines: Array<CrmInvoiceLineInput & { amount: string }>;
@@ -168,6 +170,10 @@ type CrmIssueAttempt = {
 
 export type CrmInvoiceSummary = {
   id: string;
+  /** `external` invoices were issued by a provider and recorded here; they are corrected, never voided. */
+  origin?: "native" | "external";
+  externalProvider?: string | null;
+  externalRemoteId?: string | null;
   state: CrmInvoiceState;
   number: string | null;
   issueDate: string | null;
@@ -302,7 +308,8 @@ export type CrmCommercialCommand =
   | { kind: "mark_preparation_ready"; operationId: string; preparationId: string; expectedVersion: number }
   | { kind: "issue_invoice"; operationId: string; preparationId: string; expectedVersion: number; issueDate: string }
   | { kind: "retry_invoice_issue"; operationId: string; invoiceId: string; expectedVersion: number }
-  | { kind: "void_invoice"; operationId: string; invoiceId: string; expectedVersion: number; reason: string };
+  | { kind: "void_invoice"; operationId: string; invoiceId: string; expectedVersion: number; reason: string }
+  | CrmGovernedCommand;
 
 export type CrmCommercialCommandResult = {
   command: string;

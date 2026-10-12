@@ -40,6 +40,22 @@ import {
   RetryCrmInvoiceIssueCommandSchema,
   VoidCrmInvoiceCommandSchema,
 } from './invoice-preparation.js'
+import {
+  SaveCrmChangeRequestCommandSchema,
+  SubmitCrmChangeRequestCommandSchema,
+  DecideCrmChangeRequestCommandSchema,
+  WithdrawCrmChangeRequestCommandSchema,
+  UpdateCrmEngagementTrackingCommandSchema,
+  SetCrmCommercialValuesCommandSchema,
+  CommitCrmRecurringSuccessorsCommandSchema,
+  SaveCrmGovernancePolicyCommandSchema,
+  SaveCrmEngagementCatalogCommandSchema,
+  CreateCrmBillingRequestCommandSchema,
+  DecideCrmBillingRequestCommandSchema,
+  CancelCrmBillingRequestCommandSchema,
+  RecordCrmExternalInvoiceCommandSchema,
+  CorrectCrmExternalInvoiceReferenceCommandSchema,
+} from './governed-records.js'
 
 export const CrmOperationsUuidSchema = z.string().uuid()
 export const CrmOperationsStableKeySchema = z.string().trim().toLowerCase()
@@ -719,6 +735,20 @@ export const CrmOperationsCommandSchema = z.union([
   IssueCrmInvoiceCommandSchema,
   RetryCrmInvoiceIssueCommandSchema,
   VoidCrmInvoiceCommandSchema,
+  SaveCrmChangeRequestCommandSchema,
+  SubmitCrmChangeRequestCommandSchema,
+  DecideCrmChangeRequestCommandSchema,
+  WithdrawCrmChangeRequestCommandSchema,
+  UpdateCrmEngagementTrackingCommandSchema,
+  SetCrmCommercialValuesCommandSchema,
+  CommitCrmRecurringSuccessorsCommandSchema,
+  SaveCrmGovernancePolicyCommandSchema,
+  SaveCrmEngagementCatalogCommandSchema,
+  CreateCrmBillingRequestCommandSchema,
+  DecideCrmBillingRequestCommandSchema,
+  CancelCrmBillingRequestCommandSchema,
+  RecordCrmExternalInvoiceCommandSchema,
+  CorrectCrmExternalInvoiceReferenceCommandSchema,
 ])
 export type CrmOperationsCommand = z.infer<typeof CrmOperationsCommandSchema>
 
@@ -735,6 +765,8 @@ export const CrmDomainEventTypeSchema = z.enum([
   'crm.reference.assigned',
   'crm.reference.replaced',
   'crm.reference.retired',
+  'crm.change_request.submitted',
+  'crm.change_request.decided',
 ])
 export type CrmDomainEventType = z.infer<typeof CrmDomainEventTypeSchema>
 
@@ -862,6 +894,8 @@ export function commandRequiresConfigurationAuthority(command: CrmOperationsComm
     || command.kind === 'issue_invoice'
     || command.kind === 'retry_invoice_issue'
     || command.kind === 'void_invoice'
+    || command.kind === 'save_governance_policy'
+    || command.kind === 'save_engagement_catalog'
 }
 
 export function assertCrmOperationsAuthority(
@@ -901,6 +935,13 @@ export function assertCrmOperationsAuthority(
       prepare_commercial_document: 'crm.commercial.write', revise_commercial_preparation: 'crm.commercial.write',
       mark_preparation_ready: 'crm.commercial.write', issue_invoice: 'crm.commercial.issue',
       retry_invoice_issue: 'crm.commercial.issue', void_invoice: 'crm.commercial.issue',
+      save_change_request: 'crm.changes.write', submit_change_request: 'crm.changes.write',
+      withdraw_change_request: 'crm.changes.write', decide_change_request: 'crm.changes.review',
+      update_engagement_tracking: 'crm.engagements.write', commit_recurring_successors: 'crm.engagements.write',
+      set_commercial_values: 'crm.billing.write', create_billing_request: 'crm.billing.write',
+      cancel_billing_request: 'crm.billing.write', decide_billing_request: 'crm.billing.review',
+      record_external_invoice: 'crm.billing.write', correct_external_invoice_reference: 'crm.billing.write',
+      save_governance_policy: 'crm.catalog.configure', save_engagement_catalog: 'crm.catalog.configure',
     }
     const operation = operations[command.kind]
     if (!operation) throw new CrmOperationsError('not_authorized', 'This operation is not available to integration credentials.')

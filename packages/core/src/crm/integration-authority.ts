@@ -14,6 +14,8 @@ export const CRM_INTEGRATION_OPERATIONS = [
   'association.provider_events.write',
   'crm.references.read', 'crm.references.write', 'crm.references.configure',
   'crm.commercial.read', 'crm.commercial.write', 'crm.commercial.configure', 'crm.commercial.issue',
+  'crm.changes.read', 'crm.changes.write', 'crm.changes.review', 'crm.engagements.read', 'crm.engagements.write',
+  'crm.billing.read', 'crm.billing.write', 'crm.billing.review',
 ] as const
 export const CrmIntegrationOperationSchema = z.enum(CRM_INTEGRATION_OPERATIONS)
 export type CrmIntegrationOperation = z.infer<typeof CrmIntegrationOperationSchema>
@@ -53,6 +55,9 @@ export const CRM_INTEGRATION_RESOURCE_CATALOG = {
   'crm.references.configure': ['referenceDefinitionKeys'],
   'crm.commercial.read': ['sellerKeys', 'operationKeys'], 'crm.commercial.write': ['sellerKeys', 'operationKeys'],
   'crm.commercial.configure': ['sellerKeys', 'operationKeys'], 'crm.commercial.issue': ['sellerKeys', 'operationKeys'],
+  'crm.changes.read': [], 'crm.changes.write': [], 'crm.changes.review': [],
+  'crm.engagements.read': [], 'crm.engagements.write': [],
+  'crm.billing.read': [], 'crm.billing.write': [], 'crm.billing.review': [],
 } as const satisfies Record<CrmIntegrationOperation, readonly CrmIntegrationSelector[]>
 
 export const CrmIntegrationGrantSchema = z.object({

@@ -20,6 +20,10 @@ vi.mock("@/lib/api/crm-commercial", async (importOriginal) => ({
   ...await importOriginal<typeof import("@/lib/api/crm-commercial")>(),
   ...api,
 }));
+vi.mock("@/lib/api/crm-governed", async (importOriginal) => ({
+  ...await importOriginal<typeof import("@/lib/api/crm-governed")>(),
+  listCrmBillingRequests: vi.fn(async () => []),
+}));
 vi.mock("@/lib/office/api", () => ({ readOfficeReleasedFile: vi.fn() }));
 vi.mock("next/link", () => ({
   default: ({ href, children, ...rest }: { href: string; children: React.ReactNode }) => <a href={href} {...rest}>{children}</a>,

@@ -27,13 +27,15 @@ const Content = {
   service_period_end: IsoDate.nullable().default(null),
   lines: Lines,
   values: CrmCommercialFieldsSchema.default({}).describe('Only values the user explicitly gave for fields the operation lets a transaction set.'),
-  allocations: z.array(z.object({ deal_id: Uuid, amount: CrmDecimalStringSchema }).strict()).max(50).default([]),
+  allocations: z.array(z.object({ deal_id: Uuid, amount: CrmDecimalStringSchema, billing_request_id: Uuid.optional()
+    .describe('A ready-to-bill request this allocation invoices; it closes at issue for exactly its reviewed amount.') }).strict()).max(50).default([]),
 }
 type ContentInput = { deal_ids: string[]; service_period_start: string | null; service_period_end: string | null
-  lines: Array<{ description: string; quantity: string; unit_price: string; deal_id: string | null }>; values: CrmCommercialFields; allocations: Array<{ deal_id: string; amount: string }> }
+  lines: Array<{ description: string; quantity: string; unit_price: string; deal_id: string | null }>; values: CrmCommercialFields; allocations: Array<{ deal_id: string; amount: string; billing_request_id?: string }> }
 const content = (input: ContentInput) => ({ dealIds: input.deal_ids, servicePeriodStart: input.service_period_start, servicePeriodEnd: input.service_period_end,
   lines: input.lines.map((line) => ({ description: line.description, quantity: line.quantity, unitPrice: line.unit_price, dealId: line.deal_id })),
-  values: input.values, allocations: input.allocations.map((allocation) => ({ dealId: allocation.deal_id, amount: allocation.amount })) })
+  values: input.values, allocations: input.allocations.map((allocation) => ({ dealId: allocation.deal_id, amount: allocation.amount,
+    ...(allocation.billing_request_id ? { billingRequestId: allocation.billing_request_id } : {}) })) })
 
 export type CrmCommercialDocumentTools = {
   getCrmPreparation: Tool

@@ -54,6 +54,7 @@ import {
   useCommercialCommand,
 } from "./commercial-shared";
 import { InvoicePreparationForm, InvoicePreparationPanel, InvoiceStateBadge, formatInvoiceMoney } from "./invoice-preparation";
+import { CorrectExternalReferenceForm, RecordExternalInvoiceForm } from "./external-invoices";
 
 type Loaded = { accounts: CrmCustomerAccount[]; sellers: CrmSellerProfile[] };
 
@@ -486,10 +487,18 @@ function AccountInvoices({ workspaceId, account, canIssue, deals }: {
   deals: ReadonlyArray<{ id: string; name: string }>;
 }) {
   const t = useT().crmPage.invoices;
+  const g = useT().crmPage.governed;
   const [loaded, setLoaded] = useState<{ invoices: CrmInvoiceSummary[]; operations: CrmOperationDefinition[] } | null>(null);
   const [failed, setFailed] = useState(false);
   const [attempt, setAttempt] = useState(0);
-  const [view, setView] = useState<{ kind: "prepare" } | { kind: "preparation"; preparationId: string } | null>(null);
+  const [view, setView] = useState<
+    | { kind: "prepare" }
+    | { kind: "preparation"; preparationId: string }
+    | { kind: "external" }
+    | { kind: "correct"; invoice: CrmInvoiceSummary }
+    | null
+  >(null);
+  const [notice, setNotice] = useState<string | null>(null);
 
   useEffect(() => {
     let cancelled = false;
@@ -523,12 +532,37 @@ function AccountInvoices({ workspaceId, account, canIssue, deals }: {
           <Button size="xs" variant="ghost" className="max-md:min-h-11" onClick={() => { setView(null); reload(); }}>
             <X aria-hidden />{t.close}
           </Button>
-        ) : loaded.operations.length > 0 && (
-          <Button size="xs" variant="outline" className="max-md:min-h-11" onClick={() => setView({ kind: "prepare" })}>
-            <Plus aria-hidden />{t.prepare}
-          </Button>
+        ) : (
+          <div className="flex flex-wrap gap-1">
+            <Button size="xs" variant="ghost" className="max-md:min-h-11" onClick={() => { setNotice(null); setView({ kind: "external" }); }}>
+              <Plus aria-hidden />{g.recordExternal}
+            </Button>
+            {loaded.operations.length > 0 && (
+              <Button size="xs" variant="outline" className="max-md:min-h-11" onClick={() => { setNotice(null); setView({ kind: "prepare" }); }}>
+                <Plus aria-hidden />{t.prepare}
+              </Button>
+            )}
+          </div>
         )}
       </div>
+      {notice && <p role="status" className="text-xs text-emerald-700 dark:text-emerald-300">{notice}</p>}
+      {view?.kind === "external" && (
+        <RecordExternalInvoiceForm
+          workspaceId={workspaceId}
+          accountId={account.id}
+          deals={deals}
+          onCancel={() => setView(null)}
+          onSaved={(message) => { setView(null); setNotice(message); reload(); }}
+        />
+      )}
+      {view?.kind === "correct" && (
+        <CorrectExternalReferenceForm
+          workspaceId={workspaceId}
+          invoice={view.invoice}
+          onCancel={() => setView(null)}
+          onSaved={(message) => { setView(null); setNotice(message); reload(); }}
+        />
+      )}
       {!view && loaded.operations.length === 0 && <p className="text-[11px] text-muted-foreground">{t.noInvoiceOperation}</p>}
       {view?.kind === "prepare" && (
         <InvoicePreparationForm
@@ -554,7 +588,20 @@ function AccountInvoices({ workspaceId, account, canIssue, deals }: {
         <p className="text-[11px] text-muted-foreground">{t.empty}</p>
       ) : (
         <ul className="divide-y divide-border/60">
-          {loaded.invoices.map((invoice) => (
+          {loaded.invoices.map((invoice) => invoice.origin === "external" ? (
+            <li key={invoice.id} data-crm-invoice={invoice.id} data-invoice-origin="external"
+              className="flex min-w-0 flex-wrap items-center gap-x-2 gap-y-1 py-2 text-xs">
+              <span className="font-mono">{invoice.number}</span>
+              <span className="rounded-full bg-muted px-2 py-0.5 text-[10px] text-muted-foreground">
+                {g.externalBadge.replace("{provider}", invoice.externalProvider ?? "")}
+              </span>
+              {invoice.issueDate && <span className="text-muted-foreground">{invoice.issueDate}</span>}
+              {invoice.total !== null && <span className="tabular-nums">{formatInvoiceMoney(invoice.total, invoice.currency)}</span>}
+              <Button size="xs" variant="ghost" className="ml-auto max-md:min-h-11" onClick={() => { setNotice(null); setView({ kind: "correct", invoice }); }}>
+                {g.correctReference}
+              </Button>
+            </li>
+          ) : (
             <li key={invoice.id} data-crm-invoice={invoice.id}>
               <button type="button" disabled={!invoice.preparationId}
                 className="flex w-full min-w-0 flex-wrap items-center gap-x-2 gap-y-1 py-2 text-left text-xs hover:bg-muted/40 disabled:cursor-default max-md:min-h-11"

@@ -343,6 +343,9 @@ export async function createCompany(
     /** The assistant that mediated the write. */
     createdByAssistantId?: string | null
     access?: AccessContext
+    /** Default true: a same-named visible company is updated instead of duplicated. Governed and imported
+     * creates pass false, because name equality must never merge identities they were asked to keep apart. */
+    mergeByName?: boolean
   },
   transaction?: CrmWriteTransaction,
 ): Promise<CompanyRecord> {
@@ -369,7 +372,7 @@ export async function createCompany(
       ORDER BY created_at ASC LIMIT 1`,
     [params.workspaceId, params.name, ...ap.params, ...member.params],
   )
-  if (existing.rows[0]) {
+  if (existing.rows[0] && params.mergeByName !== false) {
     const merged = await mergeCompanyFields(userId, existing.rows[0].id, {
       domain: params.domain ?? null, tags: params.tags, externalRef: params.externalRef,
     }, { compartments: params.compartments ?? [], projectIds: params.projectIds ?? [], sensitivity: params.sensitivity ?? 'internal' }, access, transaction)

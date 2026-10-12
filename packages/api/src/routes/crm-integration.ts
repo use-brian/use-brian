@@ -11,6 +11,8 @@ import {
   CrmReferenceLookupQuerySchema, CrmReferencePreviewQuerySchema, type CrmReferenceReadPort,
   CrmAccountListQuerySchema, CrmCommercialProfileQuerySchema, CrmResolutionQuerySchema, type CrmCommercialContextReadPort,
   CrmInvoiceListQuerySchema, type CrmCommercialDocumentReadPort,
+  CrmChangeRequestQuerySchema, CrmEngagementQuerySchema, CrmBillingRequestQuerySchema, CrmBillingBalanceQuerySchema,
+  CrmRecurringPreviewQuerySchema, type CrmGovernedReadPort,
   type CrmDeliveryServicePort,
   type CrmOperationsContext, type CrmOperationsServicePort, type AssociationServicePort,
 } from '@use-brian/core'
@@ -37,6 +39,7 @@ import { CrmIntegrationBindingOptionsSchema } from '../crm-operations/integratio
 import { createCrmReferenceReadStore } from '../db/crm-business-reference-store.js'
 import { createCrmCommercialContextReadStore } from '../db/crm-commercial-context-store.js'
 import { createCrmCommercialDocumentReadStore } from '../db/crm-commercial-document-store.js'
+import { createCrmGovernedReadStore } from '../db/crm-governed-store.js'
 
 const UUID = z.string().uuid()
 export function crmIntegrationContext(principal: CrmIntegrationPrincipal): CrmOperationsContext {
@@ -57,6 +60,7 @@ export function crmIntegrationRoutes(options: {
   referenceReads?: CrmReferenceReadPort
   commercialReads?: CrmCommercialContextReadPort
   documentReads?: CrmCommercialDocumentReadPort
+  governedReads?: CrmGovernedReadPort
   /** Website media library reads (`association.read`); absent → 404. */
   websiteMedia?: Pick<WebsiteMediaDeps, 'store' | 'resolver'>
   memberProfiles?: (principal: CrmIntegrationPrincipal) => {
@@ -287,6 +291,37 @@ export function crmIntegrationRoutes(options: {
     const found = await documentReads.getPreparation(principal(res).workspaceId, documentViewer(res), UUID.parse(req.params.id))
     if (!found) { res.status(404).json({ error: 'not_found' }); return }
     res.json(found)
+  }))
+  // Governed records: workspace-wide read grants, evaluated as the credential's department-bound viewer.
+  const governedReads = options.governedReads ?? createCrmGovernedReadStore()
+  const governedViewer = (res: Response, operation: 'crm.changes.read' | 'crm.engagements.read' | 'crm.billing.read') => {
+    const current = principal(res)
+    requireCrmIntegrationOperation(current, operation)
+    if (!current.departmentRead) throw new CrmOperationsError('not_authorized', 'Governed record reads require a department-bound integration credential.')
+    return { userId: current.departmentRead.userId }
+  }
+  router.get('/operations/change-requests', endpoint(async (req, res) => {
+    res.json(await governedReads.listChangeRequests(principal(res).workspaceId, governedViewer(res, 'crm.changes.read'), CrmChangeRequestQuerySchema.parse(req.query)))
+  }))
+  router.get('/operations/change-requests/:id', endpoint(async (req, res) => {
+    const found = await governedReads.getChangeRequest(principal(res).workspaceId, governedViewer(res, 'crm.changes.read'), UUID.parse(req.params.id))
+    if (!found) { res.status(404).json({ error: 'not_found' }); return }
+    res.json(found)
+  }))
+  router.get('/operations/engagements', endpoint(async (req, res) => {
+    const query = CrmEngagementQuerySchema.parse(req.query)
+    // Protected values need the billing read grant as well as their own row protection.
+    if (query.includeCommercialValues) governedViewer(res, 'crm.billing.read')
+    res.json(await governedReads.listEngagements(principal(res).workspaceId, governedViewer(res, 'crm.engagements.read'), query))
+  }))
+  router.get('/operations/billing-requests', endpoint(async (req, res) => {
+    res.json(await governedReads.listBillingRequests(principal(res).workspaceId, governedViewer(res, 'crm.billing.read'), CrmBillingRequestQuerySchema.parse(req.query)))
+  }))
+  router.get('/operations/billing-balance', endpoint(async (req, res) => {
+    res.json(await governedReads.billingBalance(principal(res).workspaceId, governedViewer(res, 'crm.billing.read'), CrmBillingBalanceQuerySchema.parse(req.query)))
+  }))
+  router.get('/operations/recurring-successors/preview', endpoint(async (req, res) => {
+    res.json(await governedReads.previewRecurringSuccessors(principal(res).workspaceId, governedViewer(res, 'crm.engagements.read'), CrmRecurringPreviewQuerySchema.parse(req.query)))
   }))
   router.get('/operations/operation-definitions', endpoint(async (_req, res) => {
     const { viewer, operations } = commercialViewer(res)

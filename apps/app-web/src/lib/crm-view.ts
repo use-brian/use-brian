@@ -253,7 +253,7 @@ export function crmSectionCounts(summary: CrmSummary | null | undefined): Record
 export type CrmViewState = {
   section: CrmSection;
   /** Dedicated consequential-action workspace layered over the record lens. */
-  review: "email" | "submissions" | "segments" | "programs" | null;
+  review: "email" | "submissions" | "segments" | "programs" | "governed" | null;
   /** Selected pending approval while `review=email`. */
   draft: string | null;
   /** Selected intake submission while `review=submissions`. */
@@ -357,7 +357,7 @@ export function crmViewFromSearch(
   }
   return {
     section,
-    review: oneOf(params.get("review"), ["email", "submissions", "segments", "programs"] as const),
+    review: oneOf(params.get("review"), ["email", "submissions", "segments", "programs", "governed"] as const),
     draft: params.get("review") === "email" ? params.get("draft") : null,
     submission: params.get("review") === "submissions" ? params.get("submission") : null,
     segment: params.get("review") === "segments" ? params.get("segment") : null,
@@ -400,6 +400,7 @@ export function searchFromCrmView(state: CrmViewState): string {
     params.set("review", "segments");
     if (state.segment) params.set("segment", state.segment);
   }
+  if (state.review === "governed") params.set("review", "governed");
   if (state.review === "programs") {
     params.set("review", "programs");
     if (state.plan) params.set("plan", state.plan);

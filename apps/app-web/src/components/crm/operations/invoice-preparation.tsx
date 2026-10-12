@@ -32,6 +32,7 @@ import {
   type CrmPreparationContent,
   type CrmPreparationDetail,
 } from "@/lib/api/crm-commercial";
+import { listCrmBillingRequests, type CrmBillingRequest } from "@/lib/api/crm-governed";
 import { CrmReferenceRequestError, newCrmOperationId } from "@/lib/api/crm-references";
 import { readOfficeReleasedFile } from "@/lib/office/api";
 import { useT } from "@/lib/i18n/client";
@@ -51,6 +52,7 @@ import {
   useCommercialCommand,
   type CommercialCopy,
 } from "./commercial-shared";
+import { describeGovernedRefusal, type GovernedCopy } from "./governed-shared";
 
 type InvoiceCopy = Dictionary["crmPage"]["invoices"];
 type DealOption = { id: string; name: string };
@@ -85,12 +87,42 @@ function todayLocal(): string {
 }
 
 /** A truthful sentence for a definite refusal on an invoice command. */
-function describeInvoiceRefusal(error: CrmReferenceRequestError, t: InvoiceCopy, commercial: CommercialCopy): string {
+function describeInvoiceRefusal(error: CrmReferenceRequestError, t: InvoiceCopy, commercial: CommercialCopy, governed: GovernedCopy): string {
   const reason = error.reason;
   if (reason === "stale_version") return t.refusals.stale_version.replace("{version}", String(error.details.currentVersion ?? ""));
   if (reason && reason in t.refusals) return t.refusals[reason as keyof InvoiceCopy["refusals"]];
+  if (reason && reason in governed.refusals) return describeGovernedRefusal(error, governed, commercial);
   if (error.code === "invalid_transition") return t.refusals.invalid_transition;
   return describeCommercialRefusal(error, commercial);
+}
+
+export const NO_BILLING_REQUEST = "__none__";
+
+/** Ready-to-bill requests on the given deals; empty when they cannot be read. */
+export function useReadyBillingRequests(workspaceId: string, dealIds: readonly string[]): CrmBillingRequest[] {
+  const [requests, setRequests] = useState<CrmBillingRequest[]>([]);
+  const key = dealIds.join(",");
+  useEffect(() => {
+    if (!key) { setRequests([]); return; }
+    let cancelled = false;
+    const wanted = new Set(key.split(","));
+    void listCrmBillingRequests(workspaceId, { state: "ready_to_bill" })
+      .then((rows) => { if (!cancelled) setRequests(rows.filter((row) => wanted.has(row.dealId))); })
+      .catch(() => { if (!cancelled) setRequests([]); });
+    return () => { cancelled = true; };
+  }, [workspaceId, key]);
+  return requests;
+}
+
+/** Options for one allocation's optional billing request: only ready-to-bill requests on that deal. */
+export function billingRequestOptions(requests: readonly CrmBillingRequest[], dealId: string, noneLabel: string) {
+  return [
+    { value: NO_BILLING_REQUEST, label: noneLabel },
+    ...requests.filter((request) => request.dealId === dealId).map((request) => ({
+      value: request.id,
+      label: `${formatInvoiceMoney(request.amount, request.currency)} · ${request.description}`,
+    })),
+  ];
 }
 
 const STATE_TONE: Record<CrmInvoiceState, string> = {
@@ -165,6 +197,7 @@ export function InvoicePreparationForm({ workspaceId, accountId, deals, operatio
 }) {
   const t = useT().crmPage.invoices;
   const commercial = useT().crmPage.commercial;
+  const governed = useT().crmPage.governed;
   const initial = existing?.content;
   const [operationKey, setOperationKey] = useState(() => operations[0]?.operationKey ?? "");
   const [title, setTitle] = useState("");
@@ -176,6 +209,9 @@ export function InvoicePreparationForm({ workspaceId, accountId, deals, operatio
     : [emptyLine()]);
   const [allocations, setAllocations] = useState<Record<string, string>>(() =>
     Object.fromEntries((initial?.allocations ?? []).map((allocation) => [allocation.dealId, allocation.amount])));
+  const [allocationRequests, setAllocationRequests] = useState<Record<string, string>>(() =>
+    Object.fromEntries((initial?.allocations ?? []).filter((allocation) => allocation.billingRequestId)
+      .map((allocation) => [allocation.dealId, allocation.billingRequestId!])));
   const [values, setValues] = useState<Record<string, ValueDraft>>(() =>
     Object.fromEntries(Object.entries(initial?.values ?? {}).map(([key, entry]) => [key, draftFromEntry(entry)])));
   const [refusal, setRefusal] = useState<string | null>(null);
@@ -188,6 +224,14 @@ export function InvoicePreparationForm({ workspaceId, accountId, deals, operatio
   const overridable = (operationVersion?.fieldBindings ?? []).filter((binding) => binding.overridable);
   const dealName = (id: string) => deals.find((deal) => deal.id === id)?.name ?? id;
   const dealOptions = [...new Set([...deals.map((deal) => deal.id), ...dealIds])];
+  const readyRequests = useReadyBillingRequests(workspaceId, dealOptions);
+  const requestFor = (dealId: string) => {
+    const id = allocationRequests[dealId];
+    return id && id !== NO_BILLING_REQUEST ? id : null;
+  };
+  const singleRequest = dealIds.length === 1 ? requestFor(dealIds[0]) : null;
+  const showAllocations = dealIds.length > 1
+    || (dealIds.length === 1 && (readyRequests.some((request) => request.dealId === dealIds[0]) || singleRequest !== null));
 
   const issues: string[] = [];
   if (!existing && !operationKey) issues.push(t.issues.operation);
@@ -198,6 +242,7 @@ export function InvoicePreparationForm({ workspaceId, accountId, deals, operatio
   if ((periodStart && !isCalendarDate(periodStart)) || (periodEnd && !isCalendarDate(periodEnd))
     || (periodStart && periodEnd && periodEnd < periodStart)) issues.push(t.issues.period);
   if (dealIds.length > 1 && dealIds.some((id) => !DECIMAL_PATTERN.test((allocations[id] ?? "").trim()))) issues.push(t.issues.allocation);
+  if (singleRequest && !DECIMAL_PATTERN.test((allocations[dealIds[0]] ?? "").trim())) issues.push(t.issues.allocation);
   for (const binding of overridable) {
     if (!validValue(binding, values[binding.fieldKey]?.value ?? "")) {
       issues.push(t.issues.value.replace("{field}", binding.label).replace("{type}", commercial.fieldTypes[binding.type]));
@@ -219,7 +264,13 @@ export function InvoicePreparationForm({ workspaceId, accountId, deals, operatio
       if (id) onSaved(id, typeof record?.version?.version === "number" ? record.version.version : null);
       return;
     }
-    if (!outcome.error.uncertain) setRefusal(describeInvoiceRefusal(outcome.error, t, commercial));
+    if (!outcome.error.uncertain) setRefusal(describeInvoiceRefusal(outcome.error, t, commercial, governed));
+  }
+
+  function pickRequest(dealId: string, value: string) {
+    setAllocationRequests((current) => ({ ...current, [dealId]: value }));
+    const request = readyRequests.find((item) => item.id === value);
+    if (request) setAllocations((current) => ({ ...current, [dealId]: request.amount }));
   }
 
   function submit() {
@@ -241,7 +292,12 @@ export function InvoicePreparationForm({ workspaceId, accountId, deals, operatio
         dealId: line.dealId && chosen.includes(line.dealId) ? line.dealId : null,
       })),
       values: fieldValues,
-      allocations: chosen.length > 1 ? chosen.map((dealId) => ({ dealId, amount: (allocations[dealId] ?? "").trim() })) : [],
+      allocations: chosen.length > 1 || (chosen.length === 1 && requestFor(chosen[0]))
+        ? chosen.map((dealId) => {
+          const billingRequestId = requestFor(dealId);
+          return { dealId, amount: (allocations[dealId] ?? "").trim(), ...(billingRequestId ? { billingRequestId } : {}) };
+        })
+        : [],
     };
     void send(existing
       ? { kind: "revise_commercial_preparation", operationId: newCrmOperationId(), preparationId: existing.preparationId, expectedVersion: existing.version, ...content }
@@ -310,16 +366,24 @@ export function InvoicePreparationForm({ workspaceId, accountId, deals, operatio
             <Plus aria-hidden />{t.addLine}
           </Button>
         </div>
-        {dealIds.length > 1 && (
+        {showAllocations && (
           <div data-invoice-allocations>
             <div className="mb-1 text-xs font-medium">{t.allocations}</div>
-            <p className="mb-1 text-[11px] text-muted-foreground">{t.allocationsHelp}</p>
-            <div className="grid gap-2 sm:grid-cols-2">
+            <p className="mb-1 text-[11px] text-muted-foreground">{dealIds.length > 1 ? t.allocationsHelp : governed.singleAllocationHelp}</p>
+            <ul className="space-y-2">
               {dealIds.map((id) => (
-                <CommercialInput key={id} label={t.allocationAmount.replace("{deal}", dealName(id))} value={allocations[id] ?? ""} maxLength={26}
-                  onChange={(amount) => setAllocations((current) => ({ ...current, [id]: amount.trim() }))} />
+                <li key={id} className="grid min-w-0 gap-2 sm:grid-cols-2" data-invoice-allocation={id}>
+                  {(dealIds.length > 1 || requestFor(id)) && (
+                    <CommercialInput label={t.allocationAmount.replace("{deal}", dealName(id))} value={allocations[id] ?? ""} maxLength={26}
+                      disabled={requestFor(id) !== null}
+                      onChange={(amount) => setAllocations((current) => ({ ...current, [id]: amount.trim() }))} />
+                  )}
+                  <CommercialSelect label={governed.billingRequestFor.replace("{deal}", dealName(id))} value={allocationRequests[id] ?? NO_BILLING_REQUEST}
+                    options={billingRequestOptions(readyRequests, id, governed.noBillingRequest)}
+                    onChange={(value) => pickRequest(id, value)} />
+                </li>
               ))}
-            </div>
+            </ul>
           </div>
         )}
         {overridable.length > 0 && (
@@ -402,6 +466,7 @@ export function InvoicePreparationPanel({ workspaceId, preparationId, canIssue, 
 }) {
   const t = useT().crmPage.invoices;
   const commercial = useT().crmPage.commercial;
+  const governed = useT().crmPage.governed;
   const [detail, setDetail] = useState<CrmPreparationDetail | null>(null);
   const [failed, setFailed] = useState(false);
   const [attempt, setAttempt] = useState(0);
@@ -460,7 +525,7 @@ export function InvoicePreparationPanel({ workspaceId, preparationId, canIssue, 
     const outcome = await writer.run(command);
     if (outcome.ok) { after(message); return; }
     if (!outcome.error.uncertain) {
-      setRefusal(describeInvoiceRefusal(outcome.error, t, commercial));
+      setRefusal(describeInvoiceRefusal(outcome.error, t, commercial, governed));
       refresh();
     }
   }

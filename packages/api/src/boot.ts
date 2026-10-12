@@ -123,7 +123,7 @@ import {
   createInternalLinkTools,
   createCrmTools,
   createCrmOperationsTools, createCrmCredentialTools, CRM_INTEGRATION_OPERATIONS, CRM_INTEGRATION_RESOURCE_CATALOG,
-  createCrmBusinessReferenceTools, createCrmCommercialContextTools, createCrmCommercialDocumentTools,
+  createCrmBusinessReferenceTools, createCrmCommercialContextTools, createCrmCommercialDocumentTools, createCrmGovernedRecordTools,
   createAssociationTools,
   createCrmEmailDraftTools,
   createCampaignTools,
@@ -301,6 +301,7 @@ import { createDbCrmOperationsStore } from './db/crm-operations-store.js'
 import { createCrmReferenceReadStore } from './db/crm-business-reference-store.js'
 import { createCrmCommercialContextReadStore } from './db/crm-commercial-context-store.js'
 import { createCrmCommercialDocumentReadStore } from './db/crm-commercial-document-store.js'
+import { createCrmGovernedReadStore } from './db/crm-governed-store.js'
 import { createDbCrmIntakeReadStore } from './db/crm-intake-store.js'
 import { createCampaignConversionOutboxWorker } from './campaigns/conversion-outbox.js'
 import { createCampaignDispatchService } from './campaigns/dispatch.js'
@@ -4416,6 +4417,8 @@ export async function bootOpenApi(opts: BootOpenApiOptions): Promise<BootResult>
   for (const tool of Object.values(crmCommercialContextTools)) allTools.set(tool.name, tool)
   const crmCommercialDocumentTools = createCrmCommercialDocumentTools({ reads: createCrmCommercialDocumentReadStore(), service: crmOperationsService })
   for (const tool of Object.values(crmCommercialDocumentTools)) allTools.set(tool.name, tool)
+  const crmGovernedRecordTools = createCrmGovernedRecordTools({ reads: createCrmGovernedReadStore(), service: crmOperationsService })
+  for (const tool of Object.values(crmGovernedRecordTools)) allTools.set(tool.name, tool)
   const crmCredentialTools = createCrmCredentialTools({
     preview: async (input, authority, parent) => ({
       ...await crmIntegrationStore.bindingOptions(authority.ceiling.workspaceId, authority.ceiling.userId, input, authority, parent),
@@ -5704,7 +5707,7 @@ export async function bootOpenApi(opts: BootOpenApiOptions): Promise<BootResult>
       : {}),
     memoryTools: brainMemoryTools,
     taskTools,
-    crmTools: { ...crmTools, ...crmOperationsTools, ...crmBusinessReferenceTools, ...crmCommercialContextTools, ...crmCommercialDocumentTools },
+    crmTools: { ...crmTools, ...crmOperationsTools, ...crmBusinessReferenceTools, ...crmCommercialContextTools, ...crmCommercialDocumentTools, ...crmGovernedRecordTools },
     credentialTools: crmCredentialTools,
     associationTools,
     retrievalTools: brainRetrievalTools,

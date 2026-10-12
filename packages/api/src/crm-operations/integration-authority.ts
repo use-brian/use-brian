@@ -173,5 +173,30 @@ export async function authorizeCrmIntegrationCommand(client: PoolClient, context
       required('crm.commercial.issue', { sellerKeys: row.seller! })
       break
     }
+    // Governed records are workspace-wide grants (checked above); invoices also need the seller's commercial write.
+    case 'save_change_request':
+    case 'submit_change_request':
+    case 'decide_change_request':
+    case 'withdraw_change_request':
+    case 'update_engagement_tracking':
+    case 'set_commercial_values':
+    case 'commit_recurring_successors':
+    case 'save_governance_policy':
+    case 'save_engagement_catalog':
+    case 'create_billing_request':
+    case 'decide_billing_request':
+    case 'cancel_billing_request': break
+    case 'record_external_invoice': {
+      const key = (await existing(`SELECT s.seller_key AS key FROM crm_customer_accounts a JOIN crm_seller_profiles s
+        ON s.workspace_id=a.workspace_id AND s.id=a.seller_id WHERE a.workspace_id=$1 AND a.id=$2`, command.accountId)).key!
+      required('crm.commercial.write', { sellerKeys: key })
+      break
+    }
+    case 'correct_external_invoice_reference': {
+      const row = await existing(`SELECT s.seller_key AS seller FROM crm_invoices i JOIN crm_seller_profiles s
+        ON s.workspace_id=i.workspace_id AND s.id=i.seller_id WHERE i.workspace_id=$1 AND i.id=$2`, command.invoiceId)
+      required('crm.commercial.write', { sellerKeys: row.seller! })
+      break
+    }
   }
 }

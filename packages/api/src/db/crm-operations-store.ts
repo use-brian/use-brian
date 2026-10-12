@@ -337,6 +337,8 @@ export type CrmCommercialTransaction = {
   context: CrmOperationsContext
   /** Current resource principal for target reads/locks (member, agent or bound integration). */
   actorAccess(): Promise<AccessContext>
+  /** Defer a projection effect (cache/index refresh) of a canonical CRM writer until after COMMIT. */
+  afterCommit(effect: () => void): void
 }
 
 export type CrmOperationsStore = {
@@ -356,7 +358,7 @@ function actorAssistantId(actor: CrmOperationsActor): string | null {
   return actor.kind === 'assistant' ? actor.assistantId : null
 }
 
-function createTransaction(client: PoolClient, context: CrmOperationsContext): CrmOperationsTransaction {
+function createTransaction(client: PoolClient, context: CrmOperationsContext, effects: Array<() => void> = []): CrmOperationsTransaction {
   const workspaceId = context.workspaceId
   const identity = actorAuditIdentity(context.actor)
   const operationalActor: AssociationActor = { credentialKind: context.actor.kind, credentialId: identity.actorCredentialId,
@@ -1689,6 +1691,7 @@ function createTransaction(client: PoolClient, context: CrmOperationsContext): C
     commercial() {
       return {
         client, context,
+        afterCommit(effect: () => void) { effects.push(effect) },
         async actorAccess() {
           if (context.actor.kind === 'integration_key') {
             const ambient = currentAgentAccess()
@@ -1724,6 +1727,7 @@ export function createDbCrmOperationsStore(pool: Pool = getPool(), transactionCl
   return {
     async transaction(context, fn) {
       const client = transactionClient ?? await pool.connect()
+      const effects: Array<() => void> = []
       try {
         if (!transactionClient) {
           await client.query('BEGIN')
@@ -1740,7 +1744,7 @@ export function createDbCrmOperationsStore(pool: Pool = getPool(), transactionCl
           ? await lockCrmIntegrationCredential(client, context.workspaceId, actor.credentialId) : null
         const departmentRead = intake?.departmentRead ?? integration?.departmentRead
         const execute = async () => {
-          const result = await fn(createTransaction(client, context))
+          const result = await fn(createTransaction(client, context, effects))
           if (intake && actor.kind === 'intake_key') {
             const renewed = await readCrmIntakeAuthority(client, context.workspaceId, actor.credentialId, actor.definitionId, true)
             if (JSON.stringify(renewed) !== JSON.stringify(intake)) throw new CrmOperationsError('not_authorized', 'Intake authority changed.')
@@ -1755,6 +1759,9 @@ export function createDbCrmOperationsStore(pool: Pool = getPool(), transactionCl
           userId: departmentRead.userId, departmentRead,
           clearance: 'confidential', compartments: null, ...(intake?.executionLimits ?? integration?.executionLimits) }, execute) : await execute()
         if (!transactionClient) await client.query('COMMIT')
+        for (const effect of effects) {
+          try { effect() } catch (error) { console.warn('[crm-operations] after-commit projection failed:', error instanceof Error ? error.message : 'unknown') }
+        }
         return result
       } catch (error) {
         if (!transactionClient) await client.query('ROLLBACK')

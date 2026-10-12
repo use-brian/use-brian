@@ -80,6 +80,8 @@ import { CrmContactLifecycle } from "./operations/contact-lifecycle";
 import { CrmCampaignAttribution } from "./crm-campaign-attribution";
 import { CrmRecordReferences } from "./operations/record-references";
 import { CrmRecordAccounts } from "./operations/record-accounts";
+import { CrmDealEngagement } from "./operations/deal-engagement";
+import { CrmCompanyChangeRequests } from "./operations/change-requests";
 import { useOptionalWorkspaceContext } from "@/lib/workspace-context";
 
 export type CrmRecordRef =
@@ -142,7 +144,9 @@ export function CrmRecordDetail({
 }) {
   const dictionary = useT();
   const t = dictionary.crmPage;
-  const workspaceRole = useOptionalWorkspaceContext()?.role ?? "member";
+  const workspaceContext = useOptionalWorkspaceContext();
+  const workspaceRole = workspaceContext?.role ?? "member";
+  const currentUserId = workspaceContext?.me?.id ?? null;
   const [roster, setRoster] = useState<FeedWorkspaceMember[] | null>(null);
   const [rosterLoading, setRosterLoading] = useState(true);
   useEffect(() => {
@@ -171,6 +175,10 @@ export function CrmRecordDetail({
     email: member.email,
     avatarUrl: member.avatarUrl,
     roleLabel: memberRoleLabels[member.role] ?? null,
+  }));
+  const governedMembers = (roster ?? []).map((member) => ({
+    userId: member.userId,
+    name: memberDisplayName(member) ?? t.r2.memberUnknown,
   }));
   const ownerValue = owner ? {
     name: memberDisplayName(owner) ?? t.r2.memberUnknown,
@@ -317,6 +325,29 @@ export function CrmRecordDetail({
             recordKind={record.kind}
             recordId={record.row.id}
             canConfigure={workspaceRole === "owner" || workspaceRole === "admin"}
+          />
+        )}
+
+        {record.kind === "deal" && (
+          <CrmDealEngagement
+            workspaceId={workspaceId}
+            dealId={record.row.id}
+            canConfigure={workspaceRole === "owner" || workspaceRole === "admin"}
+            currentUserId={currentUserId}
+            members={governedMembers}
+            onRecordChanged={onChanged}
+          />
+        )}
+
+        {record.kind === "company" && (
+          <CrmCompanyChangeRequests
+            workspaceId={workspaceId}
+            companyId={record.row.id}
+            companyName={record.row.name}
+            domain={record.row.domain ?? null}
+            currentUserId={currentUserId}
+            members={governedMembers}
+            onRecordChanged={onChanged}
           />
         )}
 

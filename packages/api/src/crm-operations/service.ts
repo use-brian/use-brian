@@ -23,6 +23,7 @@ import {
   isCrmBusinessReferenceCommand,
   isCrmCommercialContextCommand,
   isCrmCommercialDocumentCommand,
+  isCrmGovernedCommand,
   canonicalCrmRequest,
   crmOperationsSha256,
   prepareCrmSubmissionAttachments,
@@ -55,6 +56,7 @@ import { hashSecret } from '../db/api-key-store.js'
 import { assertIntakeVerificationConfiguration, verifyIntakeIdentity } from './identity-verification.js'
 import { executeCrmBusinessReferenceCommand } from './business-references.js'
 import { executeCrmCommercialContextCommand } from './commercial-context.js'
+import { executeCrmGovernedCommand } from './governed-records.js'
 import { executeCrmCommercialDocumentCommand, processCrmIssueAttempts, renderCrmPreparationDraft, type CrmCommercialDocumentRuntime, type CrmDocumentFollowUp } from './commercial-preparations.js'
 
 type ServiceClock = () => Date
@@ -602,6 +604,12 @@ export function createCrmOperationsService(
         })
         if (outcome.followUp) await runDocumentFollowUp(store, options.documents ?? { binding: null }, outcome.followUp)
         return outcome.result
+      }
+      if (isCrmGovernedCommand(command)) {
+        return store.transaction(context, async (tx) => {
+          if (context.authority.integration) await tx.authorizeIntegration(command)
+          return executeCrmGovernedCommand(tx, command, now)
+        })
       }
       if (isCrmCommercialContextCommand(command)) {
         return store.transaction(context, async (tx) => {

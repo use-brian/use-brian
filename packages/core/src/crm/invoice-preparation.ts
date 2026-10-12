@@ -28,7 +28,8 @@ const PreparationContent = {
   servicePeriodEnd: IsoDate.nullable().default(null),
   lines: z.array(CrmInvoiceLineInputSchema).max(CRM_INVOICE_MAX_LINES).default([]),
   values: CrmCommercialFieldsSchema.default({}),
-  allocations: z.array(z.object({ dealId: Uuid, amount: CrmDecimalStringSchema }).strict()).max(50).default([]),
+  /** Per-deal amounts; naming a ready billing request closes it at issue, once, for exactly its reviewed amount. */
+  allocations: z.array(z.object({ dealId: Uuid, amount: CrmDecimalStringSchema, billingRequestId: Uuid.optional() }).strict()).max(50).default([]),
 }
 
 export const PrepareCrmCommercialDocumentCommandSchema = z.object({

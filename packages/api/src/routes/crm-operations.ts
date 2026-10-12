@@ -51,6 +51,12 @@ import {
   isCrmCommercialDocumentCommand,
   CrmInvoiceListQuerySchema,
   type CrmCommercialDocumentReadPort,
+  CrmChangeRequestQuerySchema,
+  CrmEngagementQuerySchema,
+  CrmBillingRequestQuerySchema,
+  CrmBillingBalanceQuerySchema,
+  CrmRecurringPreviewQuerySchema,
+  type CrmGovernedReadPort,
   CrmAccountListQuerySchema,
   CrmCommercialProfileQuerySchema,
   CrmResolutionQuerySchema,
@@ -84,6 +90,7 @@ import { CrmPipelinesQuerySchema, CrmRecordFieldsQuerySchema } from '../db/crm-c
 import { createCrmReferenceReadStore } from '../db/crm-business-reference-store.js'
 import { createCrmCommercialContextReadStore } from '../db/crm-commercial-context-store.js'
 import { createCrmCommercialDocumentReadStore } from '../db/crm-commercial-document-store.js'
+import { createCrmGovernedReadStore } from '../db/crm-governed-store.js'
 
 const SaveDefinitionBody = SaveCrmIntakeDefinitionCommandSchema.omit({ kind: true }).strict()
 const CreateCredentialBody = CreateCrmIntakeCredentialCommandSchema.omit({ kind: true }).strict()
@@ -220,6 +227,7 @@ type Options = {
   referenceReads?: CrmReferenceReadPort
   commercialReads?: CrmCommercialContextReadPort
   documentReads?: CrmCommercialDocumentReadPort
+  governedReads?: CrmGovernedReadPort
 }
 
 function writeError(res: Response, error: unknown): void {
@@ -364,6 +372,25 @@ export function crmOperationsRoutes(options: Options): Router {
       res.set('Cache-Control', 'no-store').json(found)
     } catch (error) { writeError(res, error) }
   })
+  const governedReads = options.governedReads ?? createCrmGovernedReadStore()
+  const governedRead = (path: string, run: (ctx: CrmOperationsContext, req: Request) => Promise<unknown>, notFound = false) => {
+    router.get(`/:workspaceId/operations${path}`, async (req, res) => {
+      const ctx = await context(req, res)
+      if (!ctx) return
+      try {
+        const found = await run(ctx, req)
+        if (notFound && !found) { res.status(404).json({ error: 'not_found' }); return }
+        res.set('Cache-Control', 'no-store').json(found)
+      } catch (error) { writeError(res, error) }
+    })
+  }
+  governedRead('/change-requests', (ctx, req) => governedReads.listChangeRequests(ctx.workspaceId, viewer(ctx), CrmChangeRequestQuerySchema.parse(req.query)))
+  governedRead('/change-requests/:requestId', (ctx, req) => governedReads.getChangeRequest(ctx.workspaceId, viewer(ctx), CrmOperationsUuidSchema.parse(req.params.requestId)), true)
+  governedRead('/engagements', (ctx, req) => governedReads.listEngagements(ctx.workspaceId, viewer(ctx), CrmEngagementQuerySchema.parse(req.query)))
+  governedRead('/billing-requests', (ctx, req) => governedReads.listBillingRequests(ctx.workspaceId, viewer(ctx), CrmBillingRequestQuerySchema.parse(req.query)))
+  governedRead('/billing-balance', (ctx, req) => governedReads.billingBalance(ctx.workspaceId, viewer(ctx), CrmBillingBalanceQuerySchema.parse(req.query)))
+  governedRead('/recurring-successors/preview', (ctx, req) => governedReads.previewRecurringSuccessors(ctx.workspaceId, viewer(ctx), CrmRecurringPreviewQuerySchema.parse(req.query)))
+  governedRead('/governance', (ctx) => governedReads.listCatalogs(ctx.workspaceId))
   router.get('/:workspaceId/operations/references/:referenceId/history', async (req, res) => {
     const ctx = await context(req, res)
     if (!ctx) return

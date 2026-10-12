@@ -197,7 +197,7 @@ export async function setInvoiceState(client: PoolClient, workspaceId: string, i
 export async function freezeInvoice(client: PoolClient, workspaceId: string, invoiceId: string, params: {
   number: string; referenceId: string; issueDate: string; payload: Record<string, unknown>; hash: string
   lines: Array<{ description: string; quantity: string; unitPrice: string; amount: string; dealId: string | null }>
-  allocations: Array<{ dealId: string; amount: string }>; currency: string
+  allocations: Array<{ dealId: string; amount: string; billingRequestId?: string }>; currency: string
 }): Promise<void> {
   await client.query(`UPDATE crm_invoices SET state='issue_pending',number=$3,reference_id=$4,issue_date=$5::date,frozen_payload=$6::jsonb,frozen_hash=$7,
       version=version+1,updated_at=now() WHERE workspace_id=$1 AND id=$2`,
@@ -207,8 +207,8 @@ export async function freezeInvoice(client: PoolClient, workspaceId: string, inv
       VALUES($1,$2,$3,$4,$5,$6,$7,$8)`, [workspaceId, invoiceId, index + 1, line.description, line.quantity, line.unitPrice, line.amount, line.dealId])
   }
   for (const allocation of params.allocations) {
-    await client.query(`INSERT INTO crm_invoice_allocations(workspace_id,invoice_id,deal_id,amount,currency) VALUES($1,$2,$3,$4,$5)`,
-      [workspaceId, invoiceId, allocation.dealId, allocation.amount, params.currency])
+    await client.query(`INSERT INTO crm_invoice_allocations(workspace_id,invoice_id,deal_id,amount,currency,billing_request_id) VALUES($1,$2,$3,$4,$5,$6)`,
+      [workspaceId, invoiceId, allocation.dealId, allocation.amount, params.currency, allocation.billingRequestId ?? null])
   }
 }
 
@@ -256,7 +256,7 @@ export function createCrmCommercialDocumentReadStore(run: Run = query as unknown
     const [lines, allocations, attempts] = await Promise.all([
       run<Row>(`SELECT position,description,quantity::text AS quantity,unit_price::text AS "unitPrice",amount::text AS amount,deal_id AS "dealId"
         FROM crm_invoice_lines WHERE workspace_id=$1 AND invoice_id=$2 ORDER BY position`, [workspaceId, invoice.id]),
-      run<Row>(`SELECT deal_id AS "dealId",amount::text AS amount,currency FROM crm_invoice_allocations WHERE workspace_id=$1 AND invoice_id=$2 ORDER BY deal_id`, [workspaceId, invoice.id]),
+      run<Row>(`SELECT deal_id AS "dealId",amount::text AS amount,currency,billing_request_id AS "billingRequestId" FROM crm_invoice_allocations WHERE workspace_id=$1 AND invoice_id=$2 ORDER BY deal_id`, [workspaceId, invoice.id]),
       listAttempts({ query: run }, workspaceId, invoice.id),
     ])
     return {
