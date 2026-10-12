@@ -27,6 +27,8 @@ export * from './page-schemas.js'
 // Page actions — button bindings on blueprints/pages (mig 318).
 export * from './page-action-types.js'
 export * from './ops.js'
+// Governed Brief Page structure (project-briefs.md).
+export * from './brief-types.js'
 export * from './outline.js'
 export * from './undo.js'
 
