@@ -596,6 +596,8 @@ import { departmentRoutes } from './routes/departments.js'
 import { createOrganizationTools, createWorkspaceAccessTools } from './workspace-access/tools.js'
 import { createDepartmentTools } from './workspace-access/department-tools.js'
 import { createProjectAccessTools } from './workspace-access/project-access-tools.js'
+import { createBriefTools } from './briefs/tools.js'
+import { briefRoutes } from './routes/briefs.js'
 import { createWorkspaceMigrationTools } from './workspace-access/migration-tools.js'
 import { createTeamspaceStore } from './db/teamspace-store.js'
 import { createOfficeArtifactStore, isDurableOfficeArtifact } from './db/office-artifacts.js'
@@ -4350,7 +4352,7 @@ export async function bootOpenApi(opts: BootOpenApiOptions): Promise<BootResult>
   )
 
   allTools.set('listWorkspaceMembers', createWorkspaceTools(workspaceDirectoryStore).listWorkspaceMembers)
-  for (const tool of [...createOrganizationTools(),...createWorkspaceAccessTools(),...createWorkspaceMigrationTools(),...createDepartmentTools(),...createProjectAccessTools()]) allTools.set(tool.name,tool)
+  for (const tool of [...createOrganizationTools(),...createWorkspaceAccessTools(),...createWorkspaceMigrationTools(),...createDepartmentTools(),...createProjectAccessTools(),...createBriefTools()]) allTools.set(tool.name,tool)
 
   for (const tool of Object.values(createInternalLinkTools(internalLinkService))) {
     allTools.set(tool.name, tool)
@@ -6587,6 +6589,8 @@ export async function bootOpenApi(opts: BootOpenApiOptions): Promise<BootResult>
     connectorInstanceStore,
     connectorGrantStore,
   }))
+  // Governed Project and Department Briefs (project-briefs.md).
+  app.use('/api', requireAuth(env.JWT_SECRET), briefRoutes())
 
   app.use('/api', requireAuth(env.JWT_SECRET), workflowApprovalsRoutes({
     approvalsStore: pendingApprovalsStore,

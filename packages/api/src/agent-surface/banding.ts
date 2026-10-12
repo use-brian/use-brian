@@ -43,6 +43,11 @@ export const TIER2_WRITE_BANDS: Readonly<Record<string, WriteBand>> = {
   deleteBrainRow: 'auto',
   reclassifySensitivity: 'auto',
 
+  // ── Briefs — context maintenance is additive and receipt-idempotent;
+  //    manageBrief includes an owner's Apply direction, so a human approves.
+  maintainBriefContext: 'auto',
+  manageBrief: 'approve',
+
   // ── Skills — proposing stages its own approval (the skills governance
   //    loop IS the gate); enabling on an assistant changes what that
   //    assistant can invoke (approve); disabling only reduces power (auto).

@@ -11,7 +11,14 @@ import { withBriefActor, listProposals, publish, readPageState } from '../../db/
 import { createDbDocPageStore } from '../../db/doc-page-store.js'
 import { applyDirection, restoreRevision, setBriefSyncClientForTests, buildPublishedState } from '../publication.js'
 import { dismissProposal, ensureBrief, inspectBrief, proposeChange, saveDraft, briefHistory } from '../service.js'
-import { actorOf, briefFixture } from './fixture.js'
+import { actorOf, briefFixture, type BriefFixture } from './fixture.js'
+import express from 'express'
+import request from 'supertest'
+import type { ToolContext } from '@use-brian/core'
+import { briefRoutes } from '../../routes/briefs.js'
+import { createBriefTools } from '../tools.js'
+import { maintainBriefContext } from '../maintenance.js'
+import { selectDepartmentBriefs, repairBrief } from '../service.js'
 
 const { assertLocalFixture } = await import(new URL('../../../../../scripts/crm/local-fixture.mjs', import.meta.url).href)
 await assertLocalFixture()
@@ -263,5 +270,131 @@ describe('[COMP:api/brief-publication] Brief canonical state, drafts and publica
     expect(after.direction).toEqual({ outcome: ['Version one'], rules: [], decisions: [] })
     expect((await briefHistory(lead, bindingId)).map(r => r.kind)).toEqual(['restore', 'apply', 'apply', 'created'])
     setBriefSyncClientForTests(undefined)
+  })
+
+  const appFor = (userId: string) => {
+    const app = express()
+    app.use(express.json())
+    app.use((req, _res, next) => { (req as { userId?: string }).userId = userId; next() })
+    app.use('/api', briefRoutes())
+    return app
+  }
+  const ctx = (f: BriefFixture, userId: string, assistantId: string) => ({ workspaceId: f.workspaceId, workspaceActorUserId: userId, userId, assistantId } as unknown as ToolContext)
+  const [inspectTool, manageTool, maintainTool] = createBriefTools()
+
+  it('the Brief pane (REST) and Brian (tools) share inputs, authority, conflicts and receipts', async () => {
+    const f = await briefFixture()
+    setBriefSyncClientForTests(null)
+    const created = await request(appFor(f.people.member)).post(`/api/workspaces/${f.workspaceId}/briefs/ensure`).send({ ownerKind: 'project', ownerId: f.projectId })
+    expect(created.status).toBe(200)
+    const bindingId = created.body.bindingId
+    const viaBrian = await inspectTool.execute({ projectId: f.projectId } as never, ctx(f, f.people.member, f.assistants.brian)) as { data: { brief: { bindingId: string; established: boolean } } }
+    expect(viaBrian.data.brief).toMatchObject({ bindingId, established: false })
+    const body = { sections: { outcome: ['Shared outcome'] }, expectedDirectionRevision: 0, expectedSelectionRevision: 0, idempotencyKey: randomUUID() }
+    // Same refusal for a participant on both paths.
+    const restRefused = await request(appFor(f.people.member)).post(`/api/workspaces/${f.workspaceId}/briefs/${bindingId}/apply`).send(body)
+    const brianRefused = await manageTool.execute({ action: 'apply', bindingId, ...body } as never, ctx(f, f.people.member, f.assistants.brian)) as { data: { error: string } }
+    expect({ rest: restRefused.body.error, brian: brianRefused.data.error }).toEqual({ rest: 'brief_owner_required', brian: 'brief_owner_required' })
+    // Governing actions need the person's confirmation; proposals and maintenance do not.
+    expect(await manageTool.resolveConfirmation!(ctx(f, f.people.lead, f.assistants.brian), { action: 'apply', bindingId, ...body })).toBe(true)
+    expect(await manageTool.resolveConfirmation!(ctx(f, f.people.lead, f.assistants.brian), { action: 'propose', bindingId, sections: {}, evidence: [{ kind: 'human' }] })).toBe(false)
+    expect(maintainTool.requiresConfirmation).toBe(false)
+    // An owner applies via REST; the receipt and the state Brian reads agree.
+    const applied = await request(appFor(f.people.lead)).post(`/api/workspaces/${f.workspaceId}/briefs/${bindingId}/apply`).send(body)
+    expect(applied.body.receipt).toMatchObject({ directionRevision: 1, replayed: false })
+    const replayViaBrian = await manageTool.execute({ action: 'apply', bindingId, ...body } as never, ctx(f, f.people.lead, f.assistants.brian)) as { data: { receipt: { revisionId: string; replayed: boolean } } }
+    expect(replayViaBrian.data.receipt).toMatchObject({ revisionId: applied.body.receipt.revisionId, replayed: true })
+    const after = await inspectTool.execute({ bindingId } as never, ctx(f, f.people.member, f.assistants.brian)) as { data: { brief: { acceptedDirection: { outcome: string[] }; pendingProposals: unknown[] } } }
+    expect(after.data.brief.acceptedDirection.outcome).toEqual(['Shared outcome'])
+    // A bad body is a typed 400, not a crash.
+    expect((await request(appFor(f.people.lead)).post(`/api/workspaces/${f.workspaceId}/briefs/${bindingId}/apply`).send({})).status).toBe(400)
+  })
+
+  it('Department Briefs bind only by explicit owner selection, grant no access, and refuse stale selection', async () => {
+    const f = await briefFixture()
+    const project = await ensureBrief(actorOf(f, f.people.lead), { kind: 'project', id: f.projectId })
+    const finance = await ensureBrief(actorOf(f, f.people.financeLead), { kind: 'department', id: f.finance })
+    // None initially, and joining the Project as a Finance member added nothing.
+    expect((await inspectBrief(actorOf(f, f.people.lead), { bindingId: project.bindingId })).selections).toEqual([])
+    const key = randomUUID()
+    expect(await code(selectDepartmentBriefs(actorOf(f, f.people.financeLead), project.bindingId, { departmentBindingIds: [finance.bindingId], expectedSelectionRevision: 0, idempotencyKey: key })))
+      .toBe('brief_owner_required') // Department ownership is not Project ownership
+    const receipt = await selectDepartmentBriefs(actorOf(f, f.people.lead), project.bindingId, { departmentBindingIds: [finance.bindingId], expectedSelectionRevision: 0, idempotencyKey: key })
+    expect(receipt).toMatchObject({ selectionRevision: 1, replayed: false })
+    expect((await selectDepartmentBriefs(actorOf(f, f.people.lead), project.bindingId, { departmentBindingIds: [finance.bindingId], expectedSelectionRevision: 0, idempotencyKey: key })).replayed).toBe(true)
+    expect(await code(selectDepartmentBriefs(actorOf(f, f.people.lead), project.bindingId, { departmentBindingIds: [], expectedSelectionRevision: 0, idempotencyKey: randomUUID() })))
+      .toBe('brief_revision_stale')
+    expect(await code(selectDepartmentBriefs(actorOf(f, f.people.lead), project.bindingId, { departmentBindingIds: [project.bindingId], expectedSelectionRevision: 1, idempotencyKey: randomUUID() })))
+      .toBe('brief_selection_invalid')
+    // Selection grants nothing: the Project owner still cannot read Finance's Brief.
+    expect(await code(inspectBrief(actorOf(f, f.people.lead), { bindingId: finance.bindingId }))).toBe('brief_not_found')
+    // The Project owner cannot accept Finance's rules by selecting them.
+    expect(await code(applyDirection(actorOf(f, f.people.lead), finance.bindingId, { change: { sections: { rules: ['x'] } }, expectedDirectionRevision: 0, expectedSelectionRevision: 0, idempotencyKey: randomUUID() })))
+      .toBe('brief_not_found')
+    expect((await briefHistory(actorOf(f, f.people.lead), project.bindingId)).map(r => r.kind)).toEqual(['selection', 'created'])
+  })
+
+  it('maintenance is source-backed and idempotent: repeats make zero writes, status comes from real work, foreign sources stay out', async () => {
+    const f = await briefFixture()
+    const { bindingId } = await ensureBrief(actorOf(f, f.people.lead), { kind: 'project', id: f.projectId })
+    const pageId = await pageOf(bindingId)
+    const brian = actorOf(f, f.people.member, f.assistants.brian)
+    const task = randomUUID()
+    await q(`INSERT INTO tasks(id,workspace_id,user_id,title,status,sensitivity,compartments,project_ids) VALUES($1,$2,NULL,'Draft the pricing memo','in_progress','internal',$3,$4)`,
+      [task, f.workspaceId, [`project:${f.projectId}`], [f.projectId]])
+    const first = await maintainBriefContext(brian, bindingId, { section: 'findings', items: [
+      { text: 'Vendor A quoted 12 weeks', source: { kind: 'human', passage: 'vendor A said 12 weeks', label: 'kickoff call' } },
+    ], coverage: 'partial' })
+    expect(first.results[0]).toMatchObject({ result: 'maintained', replayed: false })
+    const progress = await maintainBriefContext(brian, bindingId, { section: 'references', items: [
+      { text: 'Task is done!', source: { kind: 'task', id: task } },
+    ] })
+    expect(progress.results[0].result).toBe('maintained')
+    const seq = (await snapshotOf(pageId)).seq
+    // Repeated evidence: no Page write at all.
+    const again = await maintainBriefContext(brian, bindingId, { section: 'findings', items: [
+      { text: 'Vendor A quoted 12 weeks', source: { kind: 'human', passage: 'vendor A said 12 weeks', label: 'kickoff call' } },
+    ], coverage: 'partial' })
+    expect(again.results[0]).toMatchObject({ result: 'no_change', replayed: true })
+    expect((await snapshotOf(pageId)).seq).toBe(seq)
+    // A Finance-only source cannot be written into the Project's shared Brief.
+    const financePage = randomUUID()
+    await q(`INSERT INTO saved_views(id,workspace_id,created_by,name,entity,view_type,binding,page,state,teamspace_id,clearance)
+      VALUES($1,$2,$3,'Finance notes','tasks','table','{}'::jsonb,'{"blocks":[]}'::jsonb,'saved',$4,'internal')`, [financePage, f.workspaceId, f.people.financeLead, f.financeSpace])
+    const foreign = await maintainBriefContext(actorOf(f, f.people.financeLead), bindingId, { section: 'findings', items: [
+      { text: 'Finance-only fact', source: { kind: 'page', id: financePage } },
+    ] })
+    expect(foreign.results[0].result).toBe('unavailable')
+    const view = await inspectBrief(actorOf(f, f.people.lead), { bindingId })
+    const texts = (key: 'findings' | 'references') => view.context![key].map(b => (b as { text?: string }).text)
+    expect(texts('findings')).toEqual([expect.stringMatching(/^Vendor A quoted 12 weeks \(source: kickoff call, \d{4}-\d{2}-\d{2}\) \[partial capture\]$/)])
+    expect(texts('references')).toEqual([expect.stringMatching(/^Task "Draft the pricing memo": in_progress /)])
+    // None of it touched accepted direction.
+    expect(view.binding.directionRevision).toBe(0)
+  })
+
+  it('a missing bound Page is repaired by an owner from accepted history, never manufactured', async () => {
+    const f = await briefFixture()
+    setBriefSyncClientForTests(null)
+    const lead = actorOf(f, f.people.lead)
+    const { bindingId } = await ensureBrief(lead, { kind: 'project', id: f.projectId })
+    await applyDirection(lead, bindingId, { change: { sections: { rules: ['Kept rule'] } }, expectedDirectionRevision: 0, expectedSelectionRevision: 0, idempotencyKey: randomUUID() })
+    const pageId = await pageOf(bindingId)
+    // Simulate a page lost outside the product (the ordinary path refuses deletion).
+    await q('ALTER TABLE saved_views DISABLE TRIGGER saved_views_brief_guard')
+    await q('ALTER TABLE documents DISABLE TRIGGER documents_brief_guard')
+    try { await q('DELETE FROM saved_views WHERE id=$1', [pageId]) } finally {
+      await q('ALTER TABLE saved_views ENABLE TRIGGER saved_views_brief_guard')
+      await q('ALTER TABLE documents ENABLE TRIGGER documents_brief_guard')
+    }
+    const missing = await inspectBrief(lead, { bindingId })
+    expect(missing).toMatchObject({ missing: true, pageId: null })
+    expect(await code(repairBrief(actorOf(f, f.people.member), bindingId))).toBe('brief_owner_required')
+    const repaired = await repairBrief(lead, bindingId)
+    expect(repaired.directionRevision).toBe(1)
+    const view = await inspectBrief(lead, { bindingId })
+    expect(view).toMatchObject({ missing: false, pageId: repaired.pageId })
+    expect(view.direction!.rules).toEqual(['Kept rule'])
+    expect((await briefHistory(lead, bindingId)).map(r => r.kind)).toEqual(['repair', 'apply', 'created'])
   })
 })

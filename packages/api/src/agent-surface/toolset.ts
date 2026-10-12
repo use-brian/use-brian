@@ -60,6 +60,8 @@ const BRIDGE_READ_NAMES = [
   // Inter-assistant
   'listConnectedAssistants',
   'askAssistant',
+  // Governed Briefs (project-briefs.md)
+  'inspectBrief',
   // Hosted operator extension (absent in OSS; capability-gated when injected).
   'listOperatorWorkflowEventBindings',
 ] as const
@@ -81,6 +83,9 @@ const BRIDGE_WRITE_NAMES = [
   'retractMemory',
   'deleteBrainRow',
   'reclassifySensitivity',
+  // Governed Briefs: maintenance is additive context; direction changes are an owner's acceptance.
+  'maintainBriefContext',
+  'manageBrief',
   // Hosted operator extension (absent in OSS; always Approve-band).
   'configureOperatorWorkflowEventBinding',
   'disableOperatorWorkflowEventBinding',

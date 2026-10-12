@@ -45,15 +45,20 @@ import {
   listRevisions,
   listSelections,
   readPageState,
+  repairBind,
   saveProposal,
+  selectDepartments as selectDepartmentsCommand,
   withBriefActor,
   type BriefBinding,
   type BriefEnvelope,
   type BriefEvidence,
   type BriefProposal,
+  type BriefPublicationReceipt,
   type BriefRevision,
   type BriefRole,
 } from '../db/brief-store.js'
+import { hashCommandReviewIntent } from '../workspace-access/command-review.js'
+import { BRIEF_CONTEXT_SECTIONS, BRIEF_SECTION_LABELS, type BriefLocale } from '@use-brian/core'
 
 export type BriefActor = { userId: string; workspaceId: string; assistantId: string | null }
 export type BriefOwner = { kind: BriefOwnerKind; id: string }
@@ -356,4 +361,89 @@ export async function dismissProposal(actor: BriefActor, proposalId: string): Pr
   })
 }
 
-export { briefFail }
+
+// ── Department rule bindings ─────────────────────────────────────────────
+
+export type DepartmentBriefOption = { bindingId: string; departmentId: string; name: string | null; directionRevision: number }
+
+/** Department Briefs the actor can see, for an owner's explicit selection. */
+export async function listDepartmentBriefs(actor: BriefActor): Promise<DepartmentBriefOption[]> {
+  return withBriefActor(actor.userId, async client => {
+    const rows = await client.query<{ id: string; department_id: string; name: string | null; direction_revision: number }>(
+      `SELECT b.id, b.department_id, g.name, b.direction_revision FROM brief_bindings b
+         LEFT JOIN workspace_groups g ON g.id = b.department_id
+        WHERE b.workspace_id = $1 AND b.owner_kind = 'department' ORDER BY g.name NULLS LAST, b.id`, [actor.workspaceId])
+    return rows.rows.map(row => ({ bindingId: row.id, departmentId: row.department_id, name: row.name, directionRevision: row.direction_revision }))
+  })
+}
+
+/**
+ * Replace a Project's selected Department Briefs (D29). Explicit ids and the
+ * expected selection revision; selection grants no source access, copies no
+ * rule, and order is display only.
+ */
+export async function selectDepartmentBriefs(actor: BriefActor, bindingId: string, input: {
+  departmentBindingIds: string[]; expectedSelectionRevision: number; idempotencyKey: string; activeWork?: 'pause' | 'continue'
+}): Promise<BriefPublicationReceipt> {
+  const activeWork = input.activeWork ?? 'pause'
+  const requestHash = hashCommandReviewIntent({ bindingId, departmentBindingIds: input.departmentBindingIds, expectedSelectionRevision: input.expectedSelectionRevision, activeWork })
+  return withBriefActor(actor.userId, async client => {
+    const binding = await getBinding(client, bindingId)
+    if (!binding || binding.workspaceId !== actor.workspaceId) briefFail('brief_not_found')
+    return selectDepartmentsCommand(client, {
+      bindingId, departmentBindingIds: input.departmentBindingIds, expectedSelection: input.expectedSelectionRevision,
+      idempotencyKey: input.idempotencyKey, requestHash, activeWork, assistantId: actor.assistantId,
+    })
+  })
+}
+
+// ── Repair ───────────────────────────────────────────────────────────────
+
+/**
+ * Recreate a missing bound Page from the last accepted checkpoint (owner only).
+ * The accepted Direction is restored exactly; missing rules are never
+ * manufactured and General is never a fallback. Current context starts empty.
+ */
+export async function repairBrief(actor: BriefActor, bindingId: string): Promise<{ pageId: string; directionRevision: number }> {
+  const plan = await withBriefActor(actor.userId, async client => {
+    const binding = await getBinding(client, bindingId)
+    if (!binding || binding.workspaceId !== actor.workspaceId) briefFail('brief_not_found')
+    const role = await getRole(client, bindingId, actor.userId, actor.assistantId)
+    if (!role) briefFail('brief_not_found')
+    if (role !== 'owner') briefFail('brief_owner_required')
+    if (binding.pageId) briefFail('brief_ops_invalid')
+    const last = (await listRevisions(client, bindingId, 200)).find(r => r.directionSnapshot && r.kind !== 'selection')
+    if (!last?.directionSnapshot) briefFail('brief_unavailable')
+    return { binding, region: last.directionSnapshot }
+  })
+  const { binding, region } = plan
+  const labels = BRIEF_SECTION_LABELS[normalizeBriefLocale(binding.locale) as BriefLocale]
+  const page: Page = { blocks: [
+    ...region,
+    { kind: 'heading', id: binding.layout.contextStartId, level: 2, text: labels.context },
+    ...BRIEF_CONTEXT_SECTIONS.map(key => ({ kind: 'heading' as const, id: binding.layout.sectionIds[key], level: 3 as const, text: labels[key] })),
+  ] }
+  const placement = binding.ownerKind === 'project'
+    ? { sharedProjectId: binding.ownerId }
+    : { teamspaceId: (await departmentTeamspace(actor.workspaceId, binding.ownerId)) ?? briefFail('brief_unavailable') }
+  try {
+    return await withPagePlacement(actor.workspaceId, actor.userId, placement, async (client, placed) => {
+      const encoded = encodeBriefPage(page, 'Brief')
+      const inserted = await client.query<{ id: string }>(
+        `INSERT INTO saved_views (workspace_id, created_by, name, name_origin, entity, view_type, binding, page, state,
+            teamspace_id, project_id, clearance, shared_project_id, position)
+         VALUES ($1, $2, 'Brief', 'user', 'tasks', 'table', '{"entity":"tasks","viewType":"table"}'::jsonb, $3::jsonb, 'saved', $4, $5, $6, $7, 0)
+         RETURNING id`,
+        [actor.workspaceId, actor.userId, JSON.stringify(encoded.snapshot), placed.teamspaceId ?? null, placed.projectId ?? null,
+          placed.clearance ?? 'internal', placed.sharedProjectId ?? null])
+      const pageId = inserted.rows[0].id
+      await client.query(
+        `INSERT INTO documents (page_id, ydoc, state_vector, snapshot_json, snapshot_title, seq, updated_at) VALUES ($1, $2, $3, $4::jsonb, $5, 1, now())`,
+        [pageId, encoded.ydoc, encoded.stateVector, JSON.stringify(encoded.snapshot), encoded.title])
+      const receipt = await repairBind(client, bindingId, pageId, actor.assistantId)
+      return { pageId, directionRevision: receipt.directionRevision }
+    }, { provenance: { kind: 'human-authored', actorId: actor.userId } } as never)
+  } catch (error) {
+    throw briefError(error)
+  }
+}
