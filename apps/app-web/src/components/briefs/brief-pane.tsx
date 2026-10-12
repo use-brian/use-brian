@@ -201,7 +201,7 @@ export function BriefPane({ workspaceId, ownerKind, ownerId, pageHref }: {
 
     <section aria-labelledby="brief-proposals" className="rounded-xl border border-border p-4">
       <h3 id="brief-proposals" className="font-medium">{t.proposals}</h3>
-      {brief.proposals.length ? <ul className="mt-2 space-y-3">{brief.proposals.map(p => <li key={p.id} className="rounded-lg border border-border p-3 text-sm">
+      {brief.proposals.length ? <ul className="mt-2 divide-y divide-border">{brief.proposals.map(p => <li key={p.id} className="py-3 text-sm">
         <div className="flex flex-wrap items-center gap-2">
           <span className="rounded bg-muted px-1.5 py-0.5 text-xs">{t.pendingBadge}</span>
           {p.stale ? <span className="text-xs text-muted-foreground">{t.staleBadge}</span> : null}

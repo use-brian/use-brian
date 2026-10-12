@@ -10,7 +10,7 @@ const API_URL = publicRuntimeConfig().apiUrl ?? "http://localhost:4000";
 
 export type BriefOwnerKind = "project" | "department";
 export type BriefDirectionSection = "outcome" | "rules" | "decisions";
-export type BriefContextSection = "findings" | "questions" | "references";
+type BriefContextSection = "findings" | "questions" | "references";
 export type BriefSections = Partial<Record<BriefDirectionSection, string[]>>;
 
 type Block = { id: string; kind: string; text?: string };
