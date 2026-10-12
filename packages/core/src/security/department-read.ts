@@ -79,7 +79,8 @@ export function intersectDepartmentReadGrants(a: DepartmentReadGrant, b: Departm
     contextDepartment: a.contextDepartment ?? b.contextDepartment,
     binding: binding === null ? null : [...binding].sort(),
     cap: caps.length === 0 ? null : caps.reduce((low, c) => (RANK[c] < RANK[low] ? c : low)),
-    ...(a.projects === undefined && b.projects === undefined ? {} : { projects: intersectProjectAdmissions(a.projects, b.projects) }),
+    // Absent and empty both admit no Project; keep the field only when it admits one.
+    ...((projects) => Object.keys(projects).length ? { projects } : {})(intersectProjectAdmissions(a.projects, b.projects)),
   }
 }
 

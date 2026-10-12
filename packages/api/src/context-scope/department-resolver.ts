@@ -98,6 +98,6 @@ export function resolveDepartmentReadGrant(snapshot: AccessSnapshot, principal: 
     contextDepartment: input.contextDepartment ?? null,
     binding: input.credential?.binding ? [...input.credential.binding].sort() : null,
     cap,
-    projects,
+    ...(Object.keys(projects).length ? { projects } : {}),
   }
 }

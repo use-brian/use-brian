@@ -152,7 +152,7 @@ describe('[COMP:access/project-shared-matrix] Shared Project foundation: referen
     try {
       expect((await viaRls(priya, 'SELECT id FROM tasks WHERE id=$1', [PROJECT_ROWS.note.id])).rowCount).toBe(0)
       expect((await viaStore(priya, 'id=$1', [PROJECT_ROWS.note.id])).rowCount).toBe(0)
-      expect((await grantFor(priya)).grant.projects).toEqual({})
+      expect((await grantFor(priya)).grant.projects ?? {}).toEqual({})
     } finally {
       await q('UPDATE project_shared_members SET expires_at = now() + interval \'16 days\' WHERE project_id=$1 AND user_id=$2', [PROJECTS.atlas, PEOPLE.priya.id])
     }

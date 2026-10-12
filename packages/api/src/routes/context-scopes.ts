@@ -12,6 +12,7 @@ import { Router, type Request, type Response } from 'express'
 import { z } from 'zod'
 import { scopeGrantContains, type ScopeGrant } from '@use-brian/core'
 import { projectAggregates, projectContent } from '../db/project-aggregates.js'
+import { createProjectSharedStore, type ProjectSharedStore } from '../db/project-shared-store.js'
 import {
   createDbContextScopeStore,
   type ContextScopeStore,
@@ -74,7 +75,26 @@ const createProjectBody = z.object({
   description: nullableText.optional(),
   icon: z.string().max(64).nullable().optional(),
   entityId: UUID.nullable().optional(),
+  /** Shared spaces (D20/D21): the visibly selected People and Assistants. */
+  participants: z.object({
+    userIds: z.array(UUID).max(200).default([]),
+    assistantIds: z.array(UUID).max(50).default([]),
+  }).strict().optional(),
 }).strict()
+
+const projectPrincipal = z.object({ kind: z.enum(['user', 'assistant']), id: UUID }).strict()
+const expectedRevision = z.number().int().positive().optional()
+const sharedMemberBody = z.object({ principal: projectPrincipal, expiresAt: z.string().datetime().nullable().optional(), expectedRevision }).strict()
+const sharedRemoveBody = z.object({ principal: projectPrincipal, expectedRevision }).strict()
+const sharedOwnerBody = z.object({ userId: UUID, expectedRevision }).strict()
+const sharedRecoverBody = z.object({ targetUserId: UUID.nullable().optional(), reason: z.string().trim().min(1).max(1000), expectedRevision }).strict()
+const sharedStatusBody = z.object({ status: z.enum(['active', 'quarantined']), reason: z.string().trim().max(1000).optional(), expectedRevision }).strict()
+const sharedConvertBody = z.discriminatedUnion('mode', [
+  z.object({ mode: z.literal('preview'), ownerUserId: UUID.nullable().optional(), userIds: z.array(UUID).max(200), assistantIds: z.array(UUID).max(50) }).strict(),
+  z.object({ mode: z.literal('apply'), ownerUserId: UUID.nullable().optional(), userIds: z.array(UUID).max(200), assistantIds: z.array(UUID).max(50),
+    idempotencyKey: UUID, requestHash: z.string().regex(/^[a-f0-9]{64}$/) }).strict(),
+])
+const capabilityBody = z.object({ enabled: z.boolean() }).strict()
 
 const updateProjectBody = z.object({
   name: z.string().trim().min(1).max(200).optional(),
@@ -129,6 +149,7 @@ export type ContextScopeRouteOptions = {
   getReadiness?: (workspaceId: string) => Promise<ContextReadiness>
   connectorInstanceStore?: ConnectorInstanceStore
   connectorGrantStore?: ConnectorGrantStore
+  projectSharedStore?: ProjectSharedStore
 }
 
 function invalid(res: Response, parsed: { error: z.ZodError }): void {
@@ -200,6 +221,23 @@ export function contextScopeRoutes(options: ContextScopeRouteOptions): Router {
   const reclassificationStore = options.reclassificationStore
     ?? createDbContextReclassificationStore()
   const getReadiness = options.getReadiness ?? getContextReadinessSystem
+  const sharedStore = options.projectSharedStore ?? createProjectSharedStore()
+  /** A WorkspaceAccessError becomes its typed status; anything else is a crash. */
+  const fail = (res: Response, error: unknown) => {
+    if (error instanceof WorkspaceAccessError) return void res.status(error.status).json({ error: error.code })
+    throw error
+  }
+  /**
+   * A Project id in the path, resolved through RLS: a restricted shared Project
+   * the caller cannot see is `not_found`, exactly like a missing one (D18).
+   */
+  async function visibleProject(access: { userId: string; workspaceId: string }, projectId: string) {
+    if (!UUID.safeParse(projectId).success) return null
+    const project = await contextStore.getProjectDetail(access.userId, access.workspaceId, projectId)
+    if (!project) return null
+    const shared = (await sharedStore.summaries(access.userId, access.workspaceId)).find(row => row.projectId === project.id) ?? null
+    return { project, shared }
+  }
   const executeAccess = (req:Request,workspaceId:string,userId:string,command:unknown) =>
     (options.executeAccessCommand ?? executeReviewedDepartmentRoute)(workspaceId,userId,command,departmentRouteReview(req))
 
@@ -343,12 +381,15 @@ export function contextScopeRoutes(options: ContextScopeRouteOptions): Router {
     const access = await gate(req, res)
     if (!access) return
     const includeArchived = req.query.includeArchived === 'true'
+    const [projects, shared, capability] = await Promise.all([
+      contextStore.listProjects(access.userId, access.workspaceId, includeArchived),
+      sharedStore.summaries(access.userId, access.workspaceId),
+      sharedStore.capability(access.userId, access.workspaceId),
+    ])
+    const byId = new Map(shared.map(row => [row.projectId, row]))
     res.json({
-      projects: await contextStore.listProjects(
-        access.userId,
-        access.workspaceId,
-        includeArchived,
-      ),
+      projects: projects.map(project => ({ ...project, shared: byId.get(project.id) ?? null })),
+      sharedSpaces: capability,
     })
   })
 
@@ -358,9 +399,20 @@ export function contextScopeRoutes(options: ContextScopeRouteOptions): Router {
     const parsed = createProjectBody.safeParse(req.body)
     if (!parsed.success) return invalid(res, parsed)
     try {
+      // D23: with shared spaces on, every new Project is participant-restricted.
+      if ((await sharedStore.capability(access.userId, access.workspaceId)).enabled) {
+        const { participants, entityId: _entityId, ...details } = parsed.data
+        const id = await sharedStore.create(access.userId, access.workspaceId, {
+          ...details, userIds: participants?.userIds ?? [], assistantIds: participants?.assistantIds ?? [],
+        })
+        const project = await contextStore.getProjectDetail(access.userId, access.workspaceId, id)
+        return void res.status(201).json({ project, shared: await sharedStore.roster(access.userId, access.workspaceId, id) })
+      }
+      if (parsed.data.participants) return void res.status(409).json({ error: 'project_shared_disabled' })
       const project = await contextStore.createProject(access.userId, access.workspaceId, parsed.data)
       res.status(201).json({ project })
     } catch (error) {
+      if (error instanceof WorkspaceAccessError) return fail(res, error)
       res.status(409).json({ error: (error as Error).message })
     }
   })
@@ -368,14 +420,12 @@ export function contextScopeRoutes(options: ContextScopeRouteOptions): Router {
   router.get('/workspaces/:workspaceId/projects/:projectId', async (req, res) => {
     const access = await gate(req, res)
     if (!access) return
-    const project = await contextStore.getProjectDetail(
-      access.userId,
-      access.workspaceId,
-      req.params.projectId,
-    )
-    if (!project) return void res.status(404).json({ error: 'not_found' })
+    const visible = await visibleProject(access, req.params.projectId)
+    if (!visible) return void res.status(404).json({ error: 'not_found' })
+    const { project } = visible
     const aggregates = await projectAggregates(access.userId, access.workspaceId, project.id)
-    res.json({ project: { ...project, aggregates } })
+    const shared = visible.shared ? await sharedStore.roster(access.userId, access.workspaceId, project.id) : null
+    res.json({ project: { ...project, aggregates, shared } })
   })
 
   router.get('/workspaces/:workspaceId/projects/:projectId/content', async (req, res) => {
@@ -394,6 +444,20 @@ export function contextScopeRoutes(options: ContextScopeRouteOptions): Router {
   })
 
   router.patch('/workspaces/:workspaceId/projects/:projectId', async (req, res) => {
+    const member = await gate(req, res)
+    if (!member) return
+    const visible = await visibleProject(member, req.params.projectId)
+    if (!visible) return void res.status(404).json({ error: 'not_found' })
+    if (visible.shared) {
+      const parsed = updateProjectBody.safeParse(req.body)
+      if (!parsed.success) return invalid(res, parsed)
+      try {
+        const { status, entityId: _entityId, ...details } = parsed.data
+        if (Object.keys(details).length) await sharedStore.updateDetails(member.userId, visible.project.id, details)
+        if (status === 'active') await sharedStore.archive(member.userId, visible.project.id, false)
+        return void res.json({ project: await contextStore.getProjectDetail(member.userId, member.workspaceId, visible.project.id) })
+      } catch (error) { return fail(res, error) }
+    }
     const access = await gate(req, res, true)
     if (!access) return
     const parsed = updateProjectBody.safeParse(req.body)
@@ -411,6 +475,10 @@ export function contextScopeRoutes(options: ContextScopeRouteOptions): Router {
   router.put('/workspaces/:workspaceId/projects/:projectId/members/:userId', async (req, res) => {
     const access = await gate(req, res, true)
     if (!access) return
+    const visible = await visibleProject(access, req.params.projectId)
+    if (!visible) return void res.status(404).json({ error: 'not_found' })
+    // A shared Project has one roster; legacy participation never governs it.
+    if (visible.shared) return void res.status(409).json({ error: 'project_shared_use_roster' })
     const parsed = projectMemberBody.safeParse(req.body ?? {})
     if (!parsed.success) return invalid(res, parsed)
     const project = await contextStore.getProjectSystem(access.workspaceId, req.params.projectId)
@@ -422,6 +490,10 @@ export function contextScopeRoutes(options: ContextScopeRouteOptions): Router {
   router.delete('/workspaces/:workspaceId/projects/:projectId/members/:userId', async (req, res) => {
     const access = await gate(req, res, true)
     if (!access) return
+    const visible = await visibleProject(access, req.params.projectId)
+    if (!visible) return void res.status(404).json({ error: 'not_found' })
+    // A shared Project has one roster; legacy participation never governs it.
+    if (visible.shared) return void res.status(409).json({ error: 'project_shared_use_roster' })
     const project = await contextStore.getProjectSystem(access.workspaceId, req.params.projectId)
     if (!project) return void res.status(404).json({ error: 'not_found' })
     await contextStore.setProjectMember(access.userId, project.id, req.params.userId, null)
@@ -431,6 +503,10 @@ export function contextScopeRoutes(options: ContextScopeRouteOptions): Router {
   router.put('/workspaces/:workspaceId/projects/:projectId/assistants/:assistantId', async (req, res) => {
     const access = await gate(req, res, true)
     if (!access) return
+    const visible = await visibleProject(access, req.params.projectId)
+    if (!visible) return void res.status(404).json({ error: 'not_found' })
+    // A shared Project has one roster; legacy participation never governs it.
+    if (visible.shared) return void res.status(409).json({ error: 'project_shared_use_roster' })
     await assertContextActivationReady(access.workspaceId, options.getReadiness)
     const project = await contextStore.getProjectSystem(access.workspaceId, req.params.projectId)
     if (!project || project.status !== 'active') return void res.status(404).json({ error: 'not_found' })
@@ -441,6 +517,10 @@ export function contextScopeRoutes(options: ContextScopeRouteOptions): Router {
   router.delete('/workspaces/:workspaceId/projects/:projectId/assistants/:assistantId', async (req, res) => {
     const access = await gate(req, res, true)
     if (!access) return
+    const visible = await visibleProject(access, req.params.projectId)
+    if (!visible) return void res.status(404).json({ error: 'not_found' })
+    // A shared Project has one roster; legacy participation never governs it.
+    if (visible.shared) return void res.status(409).json({ error: 'project_shared_use_roster' })
     const project = await contextStore.getProjectSystem(access.workspaceId, req.params.projectId)
     if (!project) return void res.status(404).json({ error: 'not_found' })
     await contextStore.setProjectAssistant(access.userId, project.id, req.params.assistantId, false)
@@ -448,6 +528,14 @@ export function contextScopeRoutes(options: ContextScopeRouteOptions): Router {
   })
 
   router.post('/workspaces/:workspaceId/projects/:projectId/archive', async (req, res) => {
+    const member = await gate(req, res)
+    if (!member) return
+    const visible = await visibleProject(member, req.params.projectId)
+    if (!visible) return void res.status(404).json({ error: 'not_found' })
+    if (visible.shared) {
+      try { await sharedStore.archive(member.userId, visible.project.id, true) } catch (error) { return fail(res, error) }
+      return void res.status(204).end()
+    }
     const access = await gate(req, res, true)
     if (!access) return
     const project = await contextStore.getProjectSystem(access.workspaceId, req.params.projectId)
@@ -455,6 +543,86 @@ export function contextScopeRoutes(options: ContextScopeRouteOptions): Router {
     await contextStore.archiveProject(access.userId, project.id)
     res.status(204).end()
   })
+
+  // ── Shared Project governance (project-shared-spaces.md -> "Canonical commands") ──
+
+  router.get('/workspaces/:workspaceId/project-shared/capability', async (req, res) => {
+    const access = await gate(req, res)
+    if (!access) return
+    try { res.json(await sharedStore.capability(access.userId, access.workspaceId)) } catch (error) { fail(res, error) }
+  })
+  router.put('/workspaces/:workspaceId/project-shared/capability', async (req, res) => {
+    const access = await gate(req, res)
+    if (!access) return
+    const parsed = capabilityBody.safeParse(req.body)
+    if (!parsed.success) return invalid(res, parsed)
+    try { res.json({ enabled: await sharedStore.setCapability(access.userId, access.workspaceId, parsed.data.enabled) }) } catch (error) { fail(res, error) }
+  })
+
+  /** Every shared route resolves the Project through RLS first: hidden is not_found. */
+  async function sharedRoute(req: Request, res: Response, run: (access: { userId: string; workspaceId: string }, projectId: string) => Promise<unknown>) {
+    const access = await gate(req, res)
+    if (!access) return
+    res.setHeader('Cache-Control', 'no-store')
+    try {
+      const visible = await visibleProject(access, String(req.params.projectId))
+      if (!visible) return void res.status(404).json({ error: 'not_found' })
+      const result = await run(access, visible.project.id)
+      if (result !== undefined) res.json(result)
+    } catch (error) { fail(res, error) }
+  }
+  const bodyOf = <T>(schema: z.ZodType<T>, req: Request, res: Response): T | null => {
+    const parsed = schema.safeParse(req.body ?? {})
+    if (!parsed.success) { invalid(res, parsed as { error: z.ZodError }); return null }
+    return parsed.data
+  }
+
+  router.get('/workspaces/:workspaceId/projects/:projectId/shared', (req, res) =>
+    sharedRoute(req, res, (a, id) => sharedStore.roster(a.userId, a.workspaceId, id)))
+  router.put('/workspaces/:workspaceId/projects/:projectId/shared/members', (req, res) =>
+    sharedRoute(req, res, async (a, id) => {
+      const b = bodyOf(sharedMemberBody, req, res); if (!b) return undefined
+      return { revision: await sharedStore.setMember(a.userId, id, b.principal, b.expiresAt ? new Date(b.expiresAt) : null, b.expectedRevision) }
+    }))
+  router.delete('/workspaces/:workspaceId/projects/:projectId/shared/members', (req, res) =>
+    sharedRoute(req, res, async (a, id) => {
+      const b = bodyOf(sharedRemoveBody, req, res); if (!b) return undefined
+      return { revision: await sharedStore.removeMember(a.userId, id, b.principal, b.expectedRevision) }
+    }))
+  router.post('/workspaces/:workspaceId/projects/:projectId/shared/owners', (req, res) =>
+    sharedRoute(req, res, async (a, id) => {
+      const b = bodyOf(sharedOwnerBody, req, res); if (!b) return undefined
+      return { revision: await sharedStore.addOwner(a.userId, id, b.userId, b.expectedRevision) }
+    }))
+  router.delete('/workspaces/:workspaceId/projects/:projectId/shared/owners', (req, res) =>
+    sharedRoute(req, res, async (a, id) => {
+      const b = bodyOf(sharedOwnerBody, req, res); if (!b) return undefined
+      return { revision: await sharedStore.removeOwner(a.userId, id, b.userId, b.expectedRevision) }
+    }))
+  router.post('/workspaces/:workspaceId/projects/:projectId/shared/transfer', (req, res) =>
+    sharedRoute(req, res, async (a, id) => {
+      const b = bodyOf(sharedOwnerBody, req, res); if (!b) return undefined
+      return { revision: await sharedStore.transferOwner(a.userId, id, b.userId, b.expectedRevision) }
+    }))
+  router.post('/workspaces/:workspaceId/projects/:projectId/shared/recover', (req, res) =>
+    sharedRoute(req, res, async (a, id) => {
+      const b = bodyOf(sharedRecoverBody, req, res); if (!b) return undefined
+      return { revision: await sharedStore.recover(a.userId, id, b.targetUserId ?? null, b.reason, b.expectedRevision) }
+    }))
+  router.post('/workspaces/:workspaceId/projects/:projectId/shared/status', (req, res) =>
+    sharedRoute(req, res, async (a, id) => {
+      const b = bodyOf(sharedStatusBody, req, res); if (!b) return undefined
+      return { revision: await sharedStore.setStatus(a.userId, id, b.status, b.reason ?? null, b.expectedRevision) }
+    }))
+  // Conversion targets a legacy Project, which is visible to members: the
+  // command itself requires the current workspace owner.
+  router.post('/workspaces/:workspaceId/projects/:projectId/shared/convert', (req, res) =>
+    sharedRoute(req, res, async (a, id) => {
+      const b = bodyOf(sharedConvertBody, req, res); if (!b) return undefined
+      return b.mode === 'preview'
+        ? { preview: await sharedStore.previewConversion(a.userId, a.workspaceId, id, b) }
+        : { receipt: await sharedStore.applyConversion(a.userId, a.workspaceId, id, b) }
+    }))
 
   async function connectorExposure(
     userId: string,
