@@ -15,6 +15,7 @@ import {
   inspectBrief,
   listDepartmentBriefs,
   proposeChange,
+  adoptPageAsProposal,
   repairBrief,
   saveDraft,
   selectDepartmentBriefs,
@@ -108,6 +109,10 @@ export function briefRoutes(): Router {
     return { receipt: await selectDepartmentBriefs(actor, param(req, 'bindingId'), body) }
   }))
   router.post('/workspaces/:workspaceId/briefs/:bindingId/repair', handle(async (actor, req) => repairBrief(actor, param(req, 'bindingId'))))
+  router.post('/workspaces/:workspaceId/briefs/:bindingId/adopt-page', handle(async (actor, req) => {
+    const body = z.object({ pageId: UUID, section: z.enum(['outcome', 'rules', 'decisions']) }).strict().parse(req.body)
+    return { proposal: await adoptPageAsProposal(actor, param(req, 'bindingId'), body) }
+  }, 201))
   router.post('/workspaces/:workspaceId/briefs/:bindingId/context', handle(async (actor, req) => {
     const body = maintainBriefContextSchema.omit({ bindingId: true }).parse(req.body)
     return maintainBriefContext(actor, param(req, 'bindingId'), body)

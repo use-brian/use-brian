@@ -211,4 +211,21 @@ describe('[COMP:api/brief-context] Accepted Brief grounding and live revision bo
     // The owner without the assistant still reads it.
     expect((await inspectBrief(actorOf(f, f.people.lead), { bindingId })).direction!.rules).toEqual(['Finance approves invoices'])
   })
+
+  it('a missing or unreadable Project Brief is a visible prerequisite, never a fallback to General or invented rules', async () => {
+    const f = await briefFixture()
+    const { bindingId } = await establishedBrief(f)
+    const pageId = (await q('SELECT page_id FROM brief_bindings WHERE id=$1', [bindingId])).rows[0].page_id
+    await q('ALTER TABLE saved_views DISABLE TRIGGER saved_views_brief_guard')
+    await q('ALTER TABLE documents DISABLE TRIGGER documents_brief_guard')
+    try { await q('DELETE FROM saved_views WHERE id=$1', [pageId]) } finally {
+      await q('ALTER TABLE saved_views ENABLE TRIGGER saved_views_brief_guard')
+      await q('ALTER TABLE documents ENABLE TRIGGER documents_brief_guard')
+    }
+    const run = await prepare(f, { userId: f.people.member })
+    expect(run.trustedContext).toContain('The Project Brief is not available in this conversation')
+    expect(run.trustedContext).not.toContain('Finance approves invoices')
+    expect((await call(run, 'sendUpdate')).data.error).toBe('brief_rules_unavailable')
+    expect(executions).toEqual([])
+  })
 })

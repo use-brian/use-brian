@@ -453,3 +453,32 @@ export async function repairBrief(actor: BriefActor, bindingId: string): Promise
     throw briefError(error)
   }
 }
+
+// ── Explicit legacy adoption ─────────────────────────────────────────────
+
+/**
+ * Offer an existing ordinary Page as a source-backed proposal for one
+ * Direction section, chosen explicitly by the person (plan §5). The Page is
+ * never bound and nothing is accepted: its lines become a pending proposal
+ * whose evidence is the Page at its current version, read as the actor, with
+ * the Page's own audience folded into the proposal envelope.
+ */
+export async function adoptPageAsProposal(actor: BriefActor, bindingId: string, input: { pageId: string; section: BriefDirectionSection }): Promise<BriefProposal> {
+  const source = await withBriefActor(actor.userId, async client => {
+    const binding = await getBinding(client, bindingId)
+    if (!binding || binding.workspaceId !== actor.workspaceId) briefFail('brief_not_found')
+    if (binding.pageId === input.pageId) briefFail('brief_ops_invalid')
+    const state = await readPageState(client, input.pageId)
+    const legacy = state ? null : (await client.query<{ page: Page | null; version: number }>(
+      'SELECT page, version FROM saved_views WHERE id = $1 AND workspace_id = $2', [input.pageId, actor.workspaceId])).rows[0]
+    if (!state && !legacy) briefFail('brief_unavailable')
+    const page = state?.snapshot ?? legacy?.page ?? { blocks: [] }
+    const lines = sectionLines(page.blocks).slice(0, 50)
+    if (!lines.length) briefFail('brief_ops_invalid')
+    return { lines, version: String(state?.seq ?? legacy?.version ?? 0) }
+  })
+  return proposeChange(actor, bindingId, { sections: { [input.section]: source.lines } }, {
+    evidence: [{ kind: 'page', id: input.pageId, version: source.version, passage: source.lines.join('\n').slice(0, 4000), label: 'Existing Page offered for adoption' }],
+    summary: 'An existing Page offered as Brief direction. It is not accepted until an owner applies it.',
+  })
+}

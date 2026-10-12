@@ -18,7 +18,7 @@ import type { ToolContext } from '@use-brian/core'
 import { briefRoutes } from '../../routes/briefs.js'
 import { createBriefTools } from '../tools.js'
 import { maintainBriefContext } from '../maintenance.js'
-import { selectDepartmentBriefs, repairBrief } from '../service.js'
+import { selectDepartmentBriefs, repairBrief, adoptPageAsProposal } from '../service.js'
 
 const { assertLocalFixture } = await import(new URL('../../../../../scripts/crm/local-fixture.mjs', import.meta.url).href)
 await assertLocalFixture()
@@ -396,5 +396,33 @@ describe('[COMP:api/brief-publication] Brief canonical state, drafts and publica
     expect(view).toMatchObject({ missing: false, pageId: repaired.pageId })
     expect(view.direction!.rules).toEqual(['Kept rule'])
     expect((await briefHistory(lead, bindingId)).map(r => r.kind)).toEqual(['repair', 'apply', 'created'])
+  })
+
+  it('legacy material is only offered: an adopted Page becomes a pending proposal, is never bound, and archive/restore keeps history', async () => {
+    const f = await briefFixture()
+    setBriefSyncClientForTests(null)
+    const lead = actorOf(f, f.people.lead)
+    const { bindingId } = await ensureBrief(lead, { kind: 'project', id: f.projectId })
+    await applyDirection(lead, bindingId, { change: { sections: { rules: ['Existing rule'] } }, expectedDirectionRevision: 0, expectedSelectionRevision: 0, idempotencyKey: randomUUID() })
+    // An ordinary Project Page with old working notes.
+    const old = randomUUID()
+    await q(`INSERT INTO saved_views(id,workspace_id,created_by,name,entity,view_type,binding,page,state,shared_project_id,project_id,clearance)
+      VALUES($1,$2,$3,'Old notes','tasks','table','{}'::jsonb,$4::jsonb,'saved',$5,$5,'internal')`,
+      [old, f.workspaceId, f.people.lead, JSON.stringify({ blocks: [{ kind: 'text', id: randomUUID(), text: 'Ship by Q1' }] }), f.projectId])
+    const proposal = await adoptPageAsProposal(lead, bindingId, { pageId: old, section: 'outcome' })
+    expect(proposal).toMatchObject({ kind: 'proposal', status: 'open' })
+    expect(proposal.evidence[0]).toMatchObject({ kind: 'page', id: old, passage: 'Ship by Q1' })
+    const view = await inspectBrief(lead, { bindingId })
+    expect(view.direction!.outcome).toEqual([]) // not instructions until applied
+    expect((await q('SELECT count(*)::int n FROM brief_bindings WHERE page_id=$1', [old])).rows[0].n).toBe(0)
+    // The old Page stays an ordinary Page: freely editable and deletable.
+    expect(await code(q(`UPDATE saved_views SET page='{"blocks":[]}'::jsonb WHERE id=$1`, [old]))).toBe('ok')
+    // Project archive and restore keep the binding and accepted history and restart nothing.
+    const store = createProjectSharedStore()
+    const before = (await briefHistory(lead, bindingId)).map(r => r.id)
+    await store.archive(f.people.lead, f.projectId, true)
+    await store.archive(f.people.lead, f.projectId, false)
+    expect((await briefHistory(lead, bindingId)).map(r => r.id)).toEqual(before)
+    expect((await inspectBrief(lead, { bindingId })).direction!.rules).toEqual(['Existing rule'])
   })
 })

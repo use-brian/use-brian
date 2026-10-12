@@ -19,6 +19,7 @@ import {
   briefHistory,
   listDepartmentBriefs,
   proposeChange,
+  adoptPageAsProposal,
   repairBrief,
   saveDraft,
   selectDepartmentBriefs,
@@ -50,6 +51,7 @@ export const manageBriefSchema = z.discriminatedUnion('action', [
   z.object({ action: z.literal('select_departments'), bindingId: uuid, departmentBindingIds: z.array(uuid).max(20),
     expectedSelectionRevision: z.number().int().min(0), activeWork: z.enum(['pause', 'continue']).default('pause'), idempotencyKey: uuid.optional() }).strict(),
   z.object({ action: z.literal('repair'), bindingId: uuid }).strict(),
+  z.object({ action: z.literal('adopt_page'), bindingId: uuid, pageId: uuid, section: z.enum(['outcome', 'rules', 'decisions']) }).strict(),
 ])
 type ManageInput = z.infer<typeof manageBriefSchema>
 const GOVERNING = new Set(['apply', 'restore', 'select_departments', 'repair'])
@@ -124,6 +126,7 @@ async function run(actor: BriefActor, input: ManageInput) {
       activeWork: input.activeWork, idempotencyKey: input.idempotencyKey ?? randomUUID(),
     }) }
     case 'repair': return await repairBrief(actor, input.bindingId)
+    case 'adopt_page': return { proposal: await adoptPageAsProposal(actor, input.bindingId, { pageId: input.pageId, section: input.section }) }
   }
 }
 
@@ -149,7 +152,7 @@ export function createBriefTools(): Tool[] {
     },
   }), buildTool({
     name: 'manageBrief',
-    description: 'Change a Brief through the same commands as the Brief pane. save_draft stores your own unaccepted draft of Direction sections. propose stores a reviewable proposal with its original source passages and versions as evidence (use this for every goal, rule or decision change you suggest, including from a meeting note or chat). dismiss closes a proposal. apply is an owner\'s explicit acceptance: pass proposalId (or the owner\'s exact sections), the expectedDirectionRevision and expectedSelectionRevision from inspectBrief, and activeWork (pause, the default, pauses running work governed by the change at its next action; continue declares it compatible). Never apply on your own inference that a change is wanted. restore prepares a proposal that restores a past accepted revision. select_departments sets which Department Briefs\' accepted rules apply to a Project (owners only; grants no access). repair recreates a missing Brief Page from its last accepted revision. Only owners apply, select, restore or repair; workspace-owner oversight is read only.',
+    description: 'Change a Brief through the same commands as the Brief pane. save_draft stores your own unaccepted draft of Direction sections. propose stores a reviewable proposal with its original source passages and versions as evidence (use this for every goal, rule or decision change you suggest, including from a meeting note or chat). dismiss closes a proposal. apply is an owner\'s explicit acceptance: pass proposalId (or the owner\'s exact sections), the expectedDirectionRevision and expectedSelectionRevision from inspectBrief, and activeWork (pause, the default, pauses running work governed by the change at its next action; continue declares it compatible). Never apply on your own inference that a change is wanted. restore prepares a proposal that restores a past accepted revision. select_departments sets which Department Briefs\' accepted rules apply to a Project (owners only; grants no access). repair recreates a missing Brief Page from its last accepted revision. adopt_page offers the text of an existing ordinary Page as a pending proposal for one section (never accepted, never bound). Only owners apply, select, restore or repair; workspace-owner oversight is read only.',
     inputSchema: manageBriefSchema,
     isReadOnly: false, isConcurrencySafe: false, requiresConfirmation: true, allowPersistentApproval: false,
     async resolveConfirmation(_context, input) {
