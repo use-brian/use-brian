@@ -18,6 +18,7 @@
  */
 
 import { CrmReferenceRequestError, crmOperationsRequest } from "@/lib/api/crm-references";
+import type { CrmErpCommand } from "@/lib/api/crm-erp";
 import type { CrmGovernedCommand } from "@/lib/api/crm-governed";
 
 export type CrmSensitivity = "public" | "internal" | "confidential";
@@ -309,7 +310,8 @@ export type CrmCommercialCommand =
   | { kind: "issue_invoice"; operationId: string; preparationId: string; expectedVersion: number; issueDate: string }
   | { kind: "retry_invoice_issue"; operationId: string; invoiceId: string; expectedVersion: number }
   | { kind: "void_invoice"; operationId: string; invoiceId: string; expectedVersion: number; reason: string }
-  | CrmGovernedCommand;
+  | CrmGovernedCommand
+  | CrmErpCommand;
 
 export type CrmCommercialCommandResult = {
   command: string;

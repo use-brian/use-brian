@@ -24,6 +24,7 @@ import {
   isCrmCommercialContextCommand,
   isCrmCommercialDocumentCommand,
   isCrmGovernedCommand,
+  isCrmErpCommand,
   canonicalCrmRequest,
   crmOperationsSha256,
   prepareCrmSubmissionAttachments,
@@ -57,6 +58,7 @@ import { assertIntakeVerificationConfiguration, verifyIntakeIdentity } from './i
 import { executeCrmBusinessReferenceCommand } from './business-references.js'
 import { executeCrmCommercialContextCommand } from './commercial-context.js'
 import { executeCrmGovernedCommand } from './governed-records.js'
+import { executeCrmErpCommand } from './erp-bridge.js'
 import { executeCrmCommercialDocumentCommand, processCrmIssueAttempts, renderCrmPreparationDraft, type CrmCommercialDocumentRuntime, type CrmDocumentFollowUp } from './commercial-preparations.js'
 
 type ServiceClock = () => Date
@@ -604,6 +606,12 @@ export function createCrmOperationsService(
         })
         if (outcome.followUp) await runDocumentFollowUp(store, options.documents ?? { binding: null }, outcome.followUp)
         return outcome.result
+      }
+      if (isCrmErpCommand(command)) {
+        return store.transaction(context, async (tx) => {
+          if (context.authority.integration) await tx.authorizeIntegration(command)
+          return executeCrmErpCommand(tx, command)
+        })
       }
       if (isCrmGovernedCommand(command)) {
         return store.transaction(context, async (tx) => {

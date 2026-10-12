@@ -1,4 +1,6 @@
 import { createHash } from 'node:crypto'
+import { mkdirSync, writeFileSync } from 'node:fs'
+import path from 'node:path'
 import pg from 'pg'
 import { afterAll, describe, expect, it } from 'vitest'
 import { extractPdfText, importOfficeSpreadsheet, renderedPdfPageCount } from '@use-brian/core'
@@ -65,6 +67,13 @@ describe('[COMP:office/crm-invoice-release] issued invoice through Office and Li
     expect(text).not.toContain('Fictional setup notes')
     expect(text).not.toMatch(/\[INVOICE/)
     expect(Buffer.from(pdf!.bytes).includes(Buffer.from('/Image'))).toBe(true)
+    // Under the commercial assurance harness, keep the actual released bytes as evidence.
+    const evidence = process.env.BRIAN_ASSURANCE_REPORT_DIR
+    if (evidence) {
+      mkdirSync(path.join(evidence, 'artifacts'), { recursive: true, mode: 0o700 })
+      writeFileSync(path.join(evidence, 'artifacts', 'crm-invoice.xlsx'), xlsx!.bytes, { mode: 0o600 })
+      writeFileSync(path.join(evidence, 'artifacts', 'crm-invoice.pdf'), pdf!.bytes, { mode: 0o600 })
+    }
   })
 
   it('I6 keeps the invoice scope on the artifact and both released files', async () => {

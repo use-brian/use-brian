@@ -16,6 +16,7 @@ export const CRM_INTEGRATION_OPERATIONS = [
   'crm.commercial.read', 'crm.commercial.write', 'crm.commercial.configure', 'crm.commercial.issue',
   'crm.changes.read', 'crm.changes.write', 'crm.changes.review', 'crm.engagements.read', 'crm.engagements.write',
   'crm.billing.read', 'crm.billing.write', 'crm.billing.review',
+  'crm.projections.read', 'crm.projections.write', 'crm.cutovers.configure',
 ] as const
 export const CrmIntegrationOperationSchema = z.enum(CRM_INTEGRATION_OPERATIONS)
 export type CrmIntegrationOperation = z.infer<typeof CrmIntegrationOperationSchema>
@@ -58,6 +59,7 @@ export const CRM_INTEGRATION_RESOURCE_CATALOG = {
   'crm.changes.read': [], 'crm.changes.write': [], 'crm.changes.review': [],
   'crm.engagements.read': [], 'crm.engagements.write': [],
   'crm.billing.read': [], 'crm.billing.write': [], 'crm.billing.review': [],
+  'crm.projections.read': [], 'crm.projections.write': [], 'crm.cutovers.configure': [],
 } as const satisfies Record<CrmIntegrationOperation, readonly CrmIntegrationSelector[]>
 
 export const CrmIntegrationGrantSchema = z.object({

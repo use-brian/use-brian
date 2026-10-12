@@ -389,7 +389,8 @@ function validPartitionKey(definition: CrmReferenceDefinitionRow, key: string): 
     && parts.filter((part) => part.startsWith('category=')).every((part) => definition.categories.some((item) => `category=${item.key}` === part))
 }
 
-async function importReferences(tx: CrmOperationsTransaction, command: Command<'import_business_references'>): Promise<CommercialResult> {
+/** Also composed by the ERP bridge import, inside its confirmed transaction. */
+export async function importReferences(tx: CrmOperationsTransaction, command: Command<'import_business_references'>): Promise<CommercialResult> {
   const { client, context } = tx.commercial()
   requireReferenceGrant(context, 'crm.references.configure', command.definitionKey)
   const definition = await readDefinitionByKey(client, context.workspaceId, command.definitionKey, 'update')

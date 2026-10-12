@@ -44,6 +44,16 @@ const BILLING_COLUMNS = `b.id,b.deal_id AS "dealId",b.state,b.review_step AS "re
 const VALUE_COLUMNS = `v.id,v.deal_id AS "dealId",v.value_kind AS "valueKind",v.version,v.amount::text AS amount,v.currency,v.rate,v.evidence,
   v.actor_kind AS "actorKind",v.actor_user_id AS "actorUserId",v.created_at AS "createdAt"`
 
+/**
+ * Historical rows keep the envelope they were created with; a reader must
+ * also see the canonical record they concern now, so raising a deal's
+ * protection hides its requests and values too.
+ */
+function currentTarget(userId: string, workspaceId: string, column: string, startIdx: number) {
+  const scope = entityVisibility(userId, workspaceId, 't', startIdx)
+  return { ...scope, sql: `EXISTS(SELECT 1 FROM entities t WHERE t.workspace_id=$1 AND t.id=${column} AND ${scope.sql})` }
+}
+
 const BILLED_STATES = `('issue_pending','issue_failed','issued')`
 
 /** Strip insignificant trailing zeros from a NUMERIC text without changing its value. */
@@ -57,20 +67,23 @@ export function createCrmGovernedReadStore(run: Run = query as unknown as Run): 
   async function visibleValues(workspaceId: string, userId: string, dealIds: string[]): Promise<Row[]> {
     if (!dealIds.length) return []
     const scope = commercialVisibility(userId, workspaceId, 'v', 3)
+    const target = currentTarget(userId, workspaceId, 'v.deal_id', scope.nextIdx)
     return (await run<Row>(`SELECT ${VALUE_COLUMNS} FROM crm_commercial_values v WHERE v.workspace_id=$1 AND v.deal_id=ANY($2::uuid[]) AND v.status='current' AND ${scope.sql}
-      ORDER BY v.deal_id,v.value_kind`, [workspaceId, dealIds, ...scope.params])).rows.map((row) => ({ ...row, amount: decimal(row.amount) }))
+      AND ${target.sql} ORDER BY v.deal_id,v.value_kind`, [workspaceId, dealIds, ...scope.params, ...target.params])).rows.map((row) => ({ ...row, amount: decimal(row.amount) }))
   }
 
   return {
     async listChangeRequests(workspaceId, viewer, input) {
       const scope = commercialVisibility(viewer.userId, workspaceId, 'r', 2)
-      const params: unknown[] = [workspaceId, ...scope.params]
+      const target = currentTarget(viewer.userId, workspaceId, 'coalesce(r.applied_target_id,r.target_id)', scope.nextIdx)
+      const params: unknown[] = [workspaceId, ...scope.params, ...target.params]
       const add = (value: unknown) => { params.push(value); return `$${params.length}` }
       const filters: string[] = []
       if (input.state) filters.push(`r.state=${add(input.state)}`)
       if (input.reviewable) filters.push(`r.state='submitted'`)
       if (input.targetId) filters.push(`(r.target_id=${add(input.targetId)} OR r.applied_target_id=$${params.length})`)
-      const sql = `SELECT ${REQUEST_COLUMNS} FROM crm_change_requests r WHERE r.workspace_id=$1 AND ${scope.sql}${filters.length ? ` AND ${filters.join(' AND ')}` : ''}`
+      const sql = `SELECT ${REQUEST_COLUMNS} FROM crm_change_requests r WHERE r.workspace_id=$1 AND ${scope.sql}
+        AND (coalesce(r.applied_target_id,r.target_id) IS NULL OR ${target.sql})${filters.length ? ` AND ${filters.join(' AND ')}` : ''}`
       const page = await queryCrmPage<'requests', Row>(run, { workspaceId, resource: 'crm_change_requests', key: 'requests', sql, params,
         query: { limit: input.limit, ...(input.cursor ? { cursor: input.cursor } : {}) } })
       return { schemaVersion: 1, requests: page.requests, nextCursor: page.nextCursor }
@@ -78,8 +91,9 @@ export function createCrmGovernedReadStore(run: Run = query as unknown as Run): 
 
     async getChangeRequest(workspaceId, viewer, requestId) {
       const scope = commercialVisibility(viewer.userId, workspaceId, 'r', 3)
-      const found = (await run<Row>(`SELECT ${REQUEST_COLUMNS} FROM crm_change_requests r WHERE r.workspace_id=$1 AND r.id=$2 AND ${scope.sql}`,
-        [workspaceId, requestId, ...scope.params])).rows[0]
+      const target = currentTarget(viewer.userId, workspaceId, 'coalesce(r.applied_target_id,r.target_id)', scope.nextIdx)
+      const found = (await run<Row>(`SELECT ${REQUEST_COLUMNS} FROM crm_change_requests r WHERE r.workspace_id=$1 AND r.id=$2 AND ${scope.sql}
+        AND (coalesce(r.applied_target_id,r.target_id) IS NULL OR ${target.sql})`, [workspaceId, requestId, ...scope.params, ...target.params])).rows[0]
       if (!found) return null
       const [revisions, decisions] = await Promise.all([
         run<Row>(`SELECT revision,changes,current_snapshot AS "currentSnapshot",base_versions AS "baseVersions",policy,policy_version AS "policyVersion",
@@ -115,12 +129,13 @@ export function createCrmGovernedReadStore(run: Run = query as unknown as Run): 
 
     async listBillingRequests(workspaceId, viewer, input) {
       const scope = commercialVisibility(viewer.userId, workspaceId, 'b', 2)
-      const params: unknown[] = [workspaceId, ...scope.params]
+      const target = currentTarget(viewer.userId, workspaceId, 'b.deal_id', scope.nextIdx)
+      const params: unknown[] = [workspaceId, ...scope.params, ...target.params]
       const add = (value: unknown) => { params.push(value); return `$${params.length}` }
       const filters: string[] = []
       if (input.state) filters.push(`b.state=${add(input.state)}`)
       if (input.dealId) filters.push(`b.deal_id=${add(input.dealId)}`)
-      const sql = `SELECT ${BILLING_COLUMNS} FROM crm_billing_requests b WHERE b.workspace_id=$1 AND ${scope.sql}${filters.length ? ` AND ${filters.join(' AND ')}` : ''}`
+      const sql = `SELECT ${BILLING_COLUMNS} FROM crm_billing_requests b WHERE b.workspace_id=$1 AND ${scope.sql} AND ${target.sql}${filters.length ? ` AND ${filters.join(' AND ')}` : ''}`
       const page = await queryCrmPage<'requests', Row>(run, { workspaceId, resource: 'crm_billing_requests', key: 'requests', sql, params,
         query: { limit: input.limit, ...(input.cursor ? { cursor: input.cursor } : {}) } })
       return { schemaVersion: 1, requests: page.requests.map((row) => ({ ...row, amount: decimal(row.amount) })), nextCursor: page.nextCursor }

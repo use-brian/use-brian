@@ -13,6 +13,7 @@ import {
   CrmInvoiceListQuerySchema, type CrmCommercialDocumentReadPort,
   CrmChangeRequestQuerySchema, CrmEngagementQuerySchema, CrmBillingRequestQuerySchema, CrmBillingBalanceQuerySchema,
   CrmRecurringPreviewQuerySchema, type CrmGovernedReadPort,
+  CrmLegacyMappingQuerySchema, CrmProjectionEventQuerySchema,
   type CrmDeliveryServicePort,
   type CrmOperationsContext, type CrmOperationsServicePort, type AssociationServicePort,
 } from '@use-brian/core'
@@ -40,12 +41,13 @@ import { createCrmReferenceReadStore } from '../db/crm-business-reference-store.
 import { createCrmCommercialContextReadStore } from '../db/crm-commercial-context-store.js'
 import { createCrmCommercialDocumentReadStore } from '../db/crm-commercial-document-store.js'
 import { createCrmGovernedReadStore } from '../db/crm-governed-store.js'
+import { createCrmErpReadStore } from '../db/crm-erp-store.js'
 
 const UUID = z.string().uuid()
 export function crmIntegrationContext(principal: CrmIntegrationPrincipal): CrmOperationsContext {
   return { workspaceId: principal.workspaceId, actor: { kind: 'integration_key', credentialId: principal.credentialId },
     authority: { role: 'system', canWrite: true,
-      canConfigure: principal.grants.some((grant) => ['crm.catalog.configure', 'crm.references.configure', 'crm.commercial.configure'].includes(grant.operation)),
+      canConfigure: principal.grants.some((grant) => ['crm.catalog.configure', 'crm.references.configure', 'crm.commercial.configure', 'crm.cutovers.configure'].includes(grant.operation)),
       trustedIdentitySources: [], integration: { credentialId: principal.credentialId, grants: principal.grants } } }
 }
 
@@ -61,6 +63,7 @@ export function crmIntegrationRoutes(options: {
   commercialReads?: CrmCommercialContextReadPort
   documentReads?: CrmCommercialDocumentReadPort
   governedReads?: CrmGovernedReadPort
+  erpReads?: ReturnType<typeof createCrmErpReadStore>
   /** Website media library reads (`association.read`); absent → 404. */
   websiteMedia?: Pick<WebsiteMediaDeps, 'store' | 'resolver'>
   memberProfiles?: (principal: CrmIntegrationPrincipal) => {
@@ -70,6 +73,7 @@ export function crmIntegrationRoutes(options: {
   }
 }): Router {
   const router = Router()
+  const erpReads = options.erpReads ?? createCrmErpReadStore()
   router.use(async (req, res, next) => {
     try {
       const header = req.get('authorization')
@@ -77,6 +81,14 @@ export function crmIntegrationRoutes(options: {
       const principal = token ? await options.credentials.authenticate(token) : null
       if (!principal) { res.status(401).json({ error: 'invalid_crm_integration_credential' }); return }
       res.locals.crmIntegration = principal
+      // An enrolled ERP viewer acts as the member who enrolled, limited to this credential's operation grants.
+      const viewerId = req.get('x-crm-viewer'), viewerBinding = req.get('x-crm-binding')
+      if (viewerId !== undefined || viewerBinding !== undefined) {
+        if (!viewerId || !viewerBinding) throw new CrmOperationsError('invalid_input', 'Send both X-Crm-Viewer and X-Crm-Binding.')
+        res.locals.crmViewer = await erpReads.resolveViewer(principal.workspaceId, principal.credentialId, viewerBinding, viewerId)
+        next()
+        return
+      }
       if (principal.departmentRead) {
         runWithAgentAccess({ workspaceId: principal.workspaceId, userId: principal.departmentRead.userId,
           clearance: 'confidential', compartments: null, ...principal.executionLimits, departmentRead: principal.departmentRead }, next)
@@ -84,6 +96,15 @@ export function crmIntegrationRoutes(options: {
     } catch (error) { associationErrorResponse(error, res) }
   })
   const principal = (res: Response): CrmIntegrationPrincipal => res.locals.crmIntegration as CrmIntegrationPrincipal
+  /** Command context: the credential itself, or the enrolled viewer under the credential's grants. */
+  const commandContext = (res: Response): CrmOperationsContext => {
+    const base = crmIntegrationContext(principal(res))
+    const viewer = res.locals.crmViewer as { userId: string; role: 'owner' | 'admin' | 'member' } | undefined
+    if (!viewer) return base
+    return { workspaceId: base.workspaceId, actor: { kind: 'user', userId: viewer.userId }, authority: { ...base.authority, role: viewer.role,
+      canConfigure: base.authority.canConfigure && viewer.role !== 'member', viaCredentialId: principal(res).credentialId } }
+  }
+  const StableKeyParam = z.string().regex(/^[a-z][a-z0-9_-]{0,62}$/)
   const reads = (res: Response) => (options.reads ?? createDbCrmIntakeReadStore)(principal(res))
   const memberProfiles = (res: Response) => (options.memberProfiles ?? createCrmIntegrationRecordReadStore)(principal(res))
   const endpoint = (fn: (req: Request, res: Response) => Promise<void>) => async (req: Request, res: Response) => {
@@ -297,6 +318,8 @@ export function crmIntegrationRoutes(options: {
   const governedViewer = (res: Response, operation: 'crm.changes.read' | 'crm.engagements.read' | 'crm.billing.read') => {
     const current = principal(res)
     requireCrmIntegrationOperation(current, operation)
+    const viewer = res.locals.crmViewer as { userId: string } | undefined
+    if (viewer) return { userId: viewer.userId }
     if (!current.departmentRead) throw new CrmOperationsError('not_authorized', 'Governed record reads require a department-bound integration credential.')
     return { userId: current.departmentRead.userId }
   }
@@ -323,13 +346,56 @@ export function crmIntegrationRoutes(options: {
   router.get('/operations/recurring-successors/preview', endpoint(async (req, res) => {
     res.json(await governedReads.previewRecurringSuccessors(principal(res).workspaceId, governedViewer(res, 'crm.engagements.read'), CrmRecurringPreviewQuerySchema.parse(req.query)))
   }))
+  // ERP bridge: binding, mapping and projection reads need crm.projections.read; import and cutover reports need crm.cutovers.configure.
+  const erpReader = (res: Response, operation: 'crm.projections.read' | 'crm.cutovers.configure') => {
+    const current = principal(res)
+    requireCrmIntegrationOperation(current, operation)
+    const viewer = res.locals.crmViewer as { userId: string } | undefined
+    if (viewer) return { userId: viewer.userId }
+    if (!current.departmentRead) throw new CrmOperationsError('not_authorized', 'ERP bridge reads require a department-bound credential or an enrolled viewer.')
+    return { userId: current.departmentRead.userId }
+  }
+  const ownBinding = async (res: Response, bindingKey: string, operation: 'crm.projections.read' | 'crm.cutovers.configure' = 'crm.projections.read') => {
+    const found = await erpReads.getBinding(principal(res).workspaceId, erpReader(res, operation), bindingKey) as { binding: { integrationCredentialId: string | null } } | null
+    if (!found || (found.binding.integrationCredentialId && found.binding.integrationCredentialId !== principal(res).credentialId)) {
+      throw new CrmOperationsError('not_found', 'The ERP binding is not configured for this credential.')
+    }
+    return found
+  }
+  router.get('/operations/erp-bindings/:bindingKey', endpoint(async (req, res) => {
+    res.set('Cache-Control', 'no-store').json(await ownBinding(res, StableKeyParam.parse(req.params.bindingKey)))
+  }))
+  router.get('/operations/legacy-mappings', endpoint(async (req, res) => {
+    const query = CrmLegacyMappingQuerySchema.parse(req.query)
+    await ownBinding(res, query.bindingKey)
+    const found = await erpReads.lookupMapping(principal(res).workspaceId, erpReader(res, 'crm.projections.read'), query)
+    if (!found) { res.status(404).json({ error: 'not_found' }); return }
+    res.json(found)
+  }))
+  router.get('/operations/projection-events', endpoint(async (req, res) => {
+    const query = CrmProjectionEventQuerySchema.parse(req.query)
+    await ownBinding(res, query.bindingKey)
+    res.set('Cache-Control', 'no-store').json(await erpReads.listProjectionEvents(principal(res).workspaceId, erpReader(res, 'crm.projections.read'), query))
+  }))
+  router.get('/operations/erp-imports/:id', endpoint(async (req, res) => {
+    const found = await erpReads.getImport(principal(res).workspaceId, erpReader(res, 'crm.cutovers.configure'), UUID.parse(req.params.id)) as { bindingKey: string } | null
+    if (found) await ownBinding(res, found.bindingKey, 'crm.cutovers.configure')
+    if (!found) { res.status(404).json({ error: 'not_found' }); return }
+    res.json(found)
+  }))
+  router.get('/operations/cutovers/:id', endpoint(async (req, res) => {
+    const found = await erpReads.getCutover(principal(res).workspaceId, erpReader(res, 'crm.cutovers.configure'), UUID.parse(req.params.id)) as { bindingKey: string } | null
+    if (found) await ownBinding(res, found.bindingKey, 'crm.cutovers.configure')
+    if (!found) { res.status(404).json({ error: 'not_found' }); return }
+    res.json(found)
+  }))
   router.get('/operations/operation-definitions', endpoint(async (_req, res) => {
     const { viewer, operations } = commercialViewer(res)
     const result = await commercialReads.listOperationDefinitions(principal(res).workspaceId, viewer)
     res.json({ ...result, operations: result.operations.filter((row) => operations === 'all' || operations.includes(row.operationKey as string)) })
   }))
   router.post('/operations/commands', endpoint(async (req, res) => {
-    const context = crmIntegrationContext(principal(res))
+    const context = commandContext(res)
     if (req.body && ['workspaceId', 'actor', 'authority'].some((key) => Object.hasOwn(req.body, key))) {
       throw new CrmOperationsError('invalid_input', 'Workspace and authority are credential-derived.')
     }

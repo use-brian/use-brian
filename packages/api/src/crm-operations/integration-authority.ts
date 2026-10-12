@@ -186,6 +186,13 @@ export async function authorizeCrmIntegrationCommand(client: PoolClient, context
     case 'create_billing_request':
     case 'decide_billing_request':
     case 'cancel_billing_request': break
+    // Bridge operations are workspace-wide grants; binding ownership is checked by the bridge itself.
+    case 'stage_erp_import':
+    case 'confirm_erp_import':
+    case 'record_projection_receipt':
+    case 'prepare_erp_cutover':
+    case 'commit_erp_cutover': break
+    case 'enroll_erp_viewer': throw new CrmOperationsError('not_authorized', 'A viewer enrolls their own legacy identity while signed in.')
     case 'record_external_invoice': {
       const key = (await existing(`SELECT s.seller_key AS key FROM crm_customer_accounts a JOIN crm_seller_profiles s
         ON s.workspace_id=a.workspace_id AND s.id=a.seller_id WHERE a.workspace_id=$1 AND a.id=$2`, command.accountId)).key!

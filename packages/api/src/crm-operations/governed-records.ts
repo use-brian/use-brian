@@ -91,11 +91,19 @@ type ChangeRequestRow = { id: string; targetKind: 'company' | 'deal'; targetId: 
 const REQUEST_COLUMNS = `r.id,r.target_kind AS "targetKind",r.target_id AS "targetId",r.applied_target_id AS "appliedTargetId",r.policy_subject AS "policySubject",
   r.state,r.revision,r.draft_changes AS "draftChanges",r.author_user_id AS "authorUserId",r.author_id AS "authorId",r.version,r.sensitivity,r.compartments,r.project_ids AS "projectIds"`
 
+/** A request or billing row is usable only while its canonical record is visible now, whatever envelope it was created with. */
+function currentTarget(access: AccessContext, workspaceId: string, column: string, startIdx: number) {
+  const scope = commercialVisibility(access.userId, workspaceId, 't', startIdx, 'read', access)
+  return { params: scope.params, sql: `EXISTS(SELECT 1 FROM entities t WHERE t.workspace_id=$1 AND t.id=${column} AND t.valid_to IS NULL
+    AND t.retracted_at IS NULL AND NOT t.scope_held AND ${scope.sql})` }
+}
+
 async function lockRequest(tx: CrmOperationsTransaction, requestId: string, access: AccessContext): Promise<ChangeRequestRow> {
   const { client, context } = tx.commercial()
   const scope = commercialVisibility(access.userId, context.workspaceId, 'r', 3, 'read', access)
-  const row = (await client.query<ChangeRequestRow>(`SELECT ${REQUEST_COLUMNS} FROM crm_change_requests r WHERE r.workspace_id=$1 AND r.id=$2 AND ${scope.sql} FOR UPDATE OF r`,
-    [context.workspaceId, requestId, ...scope.params])).rows[0]
+  const target = currentTarget(access, context.workspaceId, 'coalesce(r.applied_target_id,r.target_id)', scope.nextIdx)
+  const row = (await client.query<ChangeRequestRow>(`SELECT ${REQUEST_COLUMNS} FROM crm_change_requests r WHERE r.workspace_id=$1 AND r.id=$2 AND ${scope.sql}
+    AND (coalesce(r.applied_target_id,r.target_id) IS NULL OR ${target.sql}) FOR UPDATE OF r`, [context.workspaceId, requestId, ...scope.params, ...target.params])).rows[0]
   if (!row) unavailable()
   return row
 }
@@ -110,7 +118,7 @@ async function readTarget(tx: CrmOperationsTransaction, kind: 'company' | 'deal'
   return target
 }
 
-async function readEngagement(client: PoolClient, workspaceId: string, dealId: string) {
+export async function readEngagement(client: PoolClient, workspaceId: string, dealId: string) {
   return (await client.query<Record<string, unknown> & { version: number }>(`SELECT service_category AS "serviceCategory",to_char(period_start,'YYYY-MM-DD') AS "periodStart",
       to_char(period_end,'YYYY-MM-DD') AS "periodEnd",financial_period AS "financialPeriod",work_status AS "workStatus",to_char(deadline,'YYYY-MM-DD') AS deadline,
       owner_user_id AS "ownerUserId",participant_ids AS "participantIds",recurrence_parent_deal_id AS "recurrenceParentDealId",recurrence_period_key AS "recurrencePeriodKey",version
@@ -153,7 +161,7 @@ async function validateChanges(tx: CrmOperationsTransaction, request: { targetKi
   }
 }
 
-async function upsertEngagement(client: PoolClient, workspaceId: string, dealId: string, fields: Record<string, unknown>, recurrence?: { parentDealId: string; periodKey: string }) {
+export async function upsertEngagement(client: PoolClient, workspaceId: string, dealId: string, fields: Record<string, unknown>, recurrence?: { parentDealId: string; periodKey: string }) {
   const current = await readEngagement(client, workspaceId, dealId)
   const merged = { ...(current ?? {}), ...fields }
   await client.query(`INSERT INTO crm_engagement_extensions(workspace_id,deal_id,service_category,period_start,period_end,financial_period,work_status,deadline,owner_user_id,
@@ -350,7 +358,7 @@ async function updateTracking(tx: CrmOperationsTransaction, command: Command<'up
 }
 
 /** Version one protected value: supersede the current row and insert the next, refusing a stale expected version. */
-async function writeCommercialValue(client: PoolClient, context: CrmOperationsContext, value: {
+export async function writeCommercialValue(client: PoolClient, context: CrmOperationsContext, value: {
   dealId: string; valueKind: 'quoted' | 'confirmed' | 'outsource'; expectedVersion: number; amount: string | null; currency: string
   rate?: Record<string, unknown> | null; evidence: Record<string, unknown>; operationId: string
   envelope: { sensitivity: 'public' | 'internal' | 'confidential'; compartments: string[]; projectIds: string[] }
@@ -475,8 +483,9 @@ async function lockBilling(tx: CrmOperationsTransaction, requestId: string): Pro
   const { client, context } = tx.commercial()
   const access = await tx.commercial().actorAccess()
   const scope = commercialVisibility(access.userId, context.workspaceId, 'b', 3, 'read', access)
-  const row = (await client.query<BillingRow>(`SELECT ${BILLING_COLUMNS} FROM crm_billing_requests b WHERE b.workspace_id=$1 AND b.id=$2 AND ${scope.sql} FOR UPDATE OF b`,
-    [context.workspaceId, requestId, ...scope.params])).rows[0]
+  const target = currentTarget(access, context.workspaceId, 'b.deal_id', scope.nextIdx)
+  const row = (await client.query<BillingRow>(`SELECT ${BILLING_COLUMNS} FROM crm_billing_requests b WHERE b.workspace_id=$1 AND b.id=$2 AND ${scope.sql} AND ${target.sql} FOR UPDATE OF b`,
+    [context.workspaceId, requestId, ...scope.params, ...target.params])).rows[0]
   if (!row) unavailable()
   return row
 }

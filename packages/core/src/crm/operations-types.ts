@@ -56,6 +56,14 @@ import {
   RecordCrmExternalInvoiceCommandSchema,
   CorrectCrmExternalInvoiceReferenceCommandSchema,
 } from './governed-records.js'
+import {
+  StageCrmErpImportCommandSchema,
+  ConfirmCrmErpImportCommandSchema,
+  RecordCrmProjectionReceiptCommandSchema,
+  PrepareCrmErpCutoverCommandSchema,
+  CommitCrmErpCutoverCommandSchema,
+  EnrollCrmErpViewerCommandSchema,
+} from './erp-bridge.js'
 
 export const CrmOperationsUuidSchema = z.string().uuid()
 export const CrmOperationsStableKeySchema = z.string().trim().toLowerCase()
@@ -150,6 +158,8 @@ export const CrmOperationsAuthoritySchema = z.object({
   canConfigure: z.boolean(),
   trustedIdentitySources: z.array(CrmOperationsStableKeySchema).max(50).default([]),
   integration: CrmIntegrationAuthoritySchema.optional(),
+  /** Set when an enrolled viewer acts through this integration credential; recorded as audit evidence. */
+  viaCredentialId: CrmOperationsUuidSchema.optional(),
   nativeDelivery: CrmNativeDeliveryAuthoritySchema.optional(),
 })
 export type CrmOperationsAuthority = z.infer<typeof CrmOperationsAuthoritySchema>
@@ -749,6 +759,12 @@ export const CrmOperationsCommandSchema = z.union([
   CancelCrmBillingRequestCommandSchema,
   RecordCrmExternalInvoiceCommandSchema,
   CorrectCrmExternalInvoiceReferenceCommandSchema,
+  StageCrmErpImportCommandSchema,
+  ConfirmCrmErpImportCommandSchema,
+  RecordCrmProjectionReceiptCommandSchema,
+  PrepareCrmErpCutoverCommandSchema,
+  CommitCrmErpCutoverCommandSchema,
+  EnrollCrmErpViewerCommandSchema,
 ])
 export type CrmOperationsCommand = z.infer<typeof CrmOperationsCommandSchema>
 
@@ -896,6 +912,10 @@ export function commandRequiresConfigurationAuthority(command: CrmOperationsComm
     || command.kind === 'void_invoice'
     || command.kind === 'save_governance_policy'
     || command.kind === 'save_engagement_catalog'
+    || command.kind === 'stage_erp_import'
+    || command.kind === 'confirm_erp_import'
+    || command.kind === 'prepare_erp_cutover'
+    || command.kind === 'commit_erp_cutover'
 }
 
 export function assertCrmOperationsAuthority(
@@ -908,6 +928,10 @@ export function assertCrmOperationsAuthority(
   if (['preview_import_file_cleanup', 'execute_import_file_cleanup', 'preview_retention', 'execute_retention', 'preview_contact_erasure', 'erase_contact_with_preview', 'save_privacy_policy', 'release_address_suppression', 'save_managed_mailbox_policy', 'save_mailbox_integration_grant', 'correct_participation_check_in'].includes(command.kind) && (context.actor.kind !== 'user'
     || !['owner', 'admin'].includes(context.authority.role))) {
     throw new CrmOperationsError('not_authorized', 'This reviewed operation requires a workspace owner or admin member.')
+  }
+  // A viewer enrolls their own legacy identity while signed in; no credential or agent can do it for them.
+  if (command.kind === 'enroll_erp_viewer' && (context.actor.kind !== 'user' || context.authority.integration || context.authority.viaCredentialId)) {
+    throw new CrmOperationsError('not_authorized', 'A viewer enrolls their own legacy identity while signed in to the workspace.')
   }
   if (context.actor.kind === 'integration_key' && context.authority.integration?.credentialId !== context.actor.credentialId) {
     throw new CrmOperationsError('not_authorized', 'Integration authority must come from its authenticated credential.')
@@ -942,6 +966,9 @@ export function assertCrmOperationsAuthority(
       cancel_billing_request: 'crm.billing.write', decide_billing_request: 'crm.billing.review',
       record_external_invoice: 'crm.billing.write', correct_external_invoice_reference: 'crm.billing.write',
       save_governance_policy: 'crm.catalog.configure', save_engagement_catalog: 'crm.catalog.configure',
+      stage_erp_import: 'crm.cutovers.configure', confirm_erp_import: 'crm.cutovers.configure',
+      prepare_erp_cutover: 'crm.cutovers.configure', commit_erp_cutover: 'crm.cutovers.configure',
+      record_projection_receipt: 'crm.projections.write',
     }
     const operation = operations[command.kind]
     if (!operation) throw new CrmOperationsError('not_authorized', 'This operation is not available to integration credentials.')

@@ -52,11 +52,17 @@ import {
   CrmInvoiceListQuerySchema,
   type CrmCommercialDocumentReadPort,
   CrmChangeRequestQuerySchema,
+  CrmGovernedCommandSchema,
+  isCrmGovernedCommand,
+  CrmErpCommandSchema,
+  isCrmErpCommand,
   CrmEngagementQuerySchema,
   CrmBillingRequestQuerySchema,
   CrmBillingBalanceQuerySchema,
   CrmRecurringPreviewQuerySchema,
   type CrmGovernedReadPort,
+  CrmLegacyMappingQuerySchema,
+  CrmProjectionEventQuerySchema,
   CrmAccountListQuerySchema,
   CrmCommercialProfileQuerySchema,
   CrmResolutionQuerySchema,
@@ -91,6 +97,7 @@ import { createCrmReferenceReadStore } from '../db/crm-business-reference-store.
 import { createCrmCommercialContextReadStore } from '../db/crm-commercial-context-store.js'
 import { createCrmCommercialDocumentReadStore } from '../db/crm-commercial-document-store.js'
 import { createCrmGovernedReadStore } from '../db/crm-governed-store.js'
+import { createCrmErpReadStore } from '../db/crm-erp-store.js'
 
 const SaveDefinitionBody = SaveCrmIntakeDefinitionCommandSchema.omit({ kind: true }).strict()
 const CreateCredentialBody = CreateCrmIntakeCredentialCommandSchema.omit({ kind: true }).strict()
@@ -228,6 +235,7 @@ type Options = {
   commercialReads?: CrmCommercialContextReadPort
   documentReads?: CrmCommercialDocumentReadPort
   governedReads?: CrmGovernedReadPort
+  erpReads?: ReturnType<typeof createCrmErpReadStore>
 }
 
 function writeError(res: Response, error: unknown): void {
@@ -292,7 +300,9 @@ export function crmOperationsRoutes(options: Options): Router {
       const command = isCrmBusinessReferenceCommand(req.body ?? {}) ? CrmBusinessReferenceCommandSchema.parse(req.body)
         : isCrmCommercialContextCommand(req.body ?? {}) ? CrmCommercialContextCommandSchema.parse(req.body)
           : isCrmCommercialDocumentCommand(req.body ?? {}) ? CrmCommercialDocumentCommandSchema.parse(req.body)
-            : CrmConfigCommandSchema.parse(req.body)
+            : isCrmGovernedCommand(req.body ?? {}) ? CrmGovernedCommandSchema.parse(req.body)
+              : isCrmErpCommand(req.body ?? {}) ? CrmErpCommandSchema.parse(req.body)
+                : CrmConfigCommandSchema.parse(req.body)
       const output = await options.service.execute(ctx, command)
       res.status(output.created ? 201 : 200).json(output)
     } catch (error) { writeError(res, error) }
@@ -391,6 +401,13 @@ export function crmOperationsRoutes(options: Options): Router {
   governedRead('/billing-balance', (ctx, req) => governedReads.billingBalance(ctx.workspaceId, viewer(ctx), CrmBillingBalanceQuerySchema.parse(req.query)))
   governedRead('/recurring-successors/preview', (ctx, req) => governedReads.previewRecurringSuccessors(ctx.workspaceId, viewer(ctx), CrmRecurringPreviewQuerySchema.parse(req.query)))
   governedRead('/governance', (ctx) => governedReads.listCatalogs(ctx.workspaceId))
+  const erpReads = options.erpReads ?? createCrmErpReadStore()
+  const StableKeyParam = z.string().regex(/^[a-z][a-z0-9_-]{0,62}$/)
+  governedRead('/erp-bindings/:bindingKey', (ctx, req) => erpReads.getBinding(ctx.workspaceId, viewer(ctx), StableKeyParam.parse(req.params.bindingKey)), true)
+  governedRead('/erp-imports/:importId', (ctx, req) => erpReads.getImport(ctx.workspaceId, viewer(ctx), CrmOperationsUuidSchema.parse(req.params.importId)), true)
+  governedRead('/cutovers/:cutoverId', (ctx, req) => erpReads.getCutover(ctx.workspaceId, viewer(ctx), CrmOperationsUuidSchema.parse(req.params.cutoverId)), true)
+  governedRead('/legacy-mappings', (ctx, req) => erpReads.lookupMapping(ctx.workspaceId, viewer(ctx), CrmLegacyMappingQuerySchema.parse(req.query)), true)
+  governedRead('/projection-events', (ctx, req) => erpReads.listProjectionEvents(ctx.workspaceId, viewer(ctx), CrmProjectionEventQuerySchema.parse(req.query)))
   router.get('/:workspaceId/operations/references/:referenceId/history', async (req, res) => {
     const ctx = await context(req, res)
     if (!ctx) return

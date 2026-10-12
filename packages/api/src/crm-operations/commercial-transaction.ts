@@ -84,13 +84,15 @@ export async function commercialAudit(
   params: { action: string; subjectKind: string; subjectId: string; details?: Record<string, unknown> },
 ): Promise<void> {
   const identity = actorAuditIdentity(context.actor)
+  // An enrolled viewer acting through an integration credential is audited with that credential.
+  const via = context.authority.viaCredentialId ? { viaCredentialId: context.authority.viaCredentialId } : {}
   await tx.appendDomainAudit({
     action: params.action, subjectKind: params.subjectKind, subjectId: params.subjectId,
-    actor: identity, metadata: params.details,
+    actor: identity, metadata: { ...params.details, ...via },
   })
   await tx.appendWorkspaceAudit({
     eventType: params.action, subjectId: params.subjectId, actorUserId: identity.actingUserId,
-    details: { subjectKind: params.subjectKind, actorKind: context.actor.kind, ...params.details },
+    details: { subjectKind: params.subjectKind, actorKind: context.actor.kind, ...params.details, ...via },
   })
 }
 
