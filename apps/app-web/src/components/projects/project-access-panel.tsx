@@ -93,7 +93,10 @@ export function ProjectAccessPanel({ workspaceId, projectId, roster, people, ass
           </label>)}
         </fieldset>
       </div>
-      {preview ? <p className="text-sm">{format(t.convertSummary, { owner: nameOf(preview.ownerUserId), count: preview.userIds.length + preview.assistantIds.length })}</p> : null}
+      {preview ? <div className="space-y-1 text-sm">
+        <p>{format(t.convertSummary, { owner: nameOf(preview.ownerUserId), count: preview.userIds.length + preview.assistantIds.length })}</p>
+        <p className="text-muted-foreground">{format(t.linkedUnchanged, { count: Object.values(preview.linkedMaterial).reduce((sum, n) => sum + n, 0) })}</p>
+      </div> : null}
       {error ? <p role="alert" className="text-sm text-destructive">{error}</p> : null}
       <div className="flex flex-wrap gap-2">
         <Button variant="outline" className="max-sm:min-h-11" disabled={busy}

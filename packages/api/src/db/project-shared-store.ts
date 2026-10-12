@@ -57,6 +57,8 @@ export type ProjectConversionPreview = {
   assistantIds: string[]
   /** Old participation metadata is shown for reference only; never preselected. */
   legacyParticipation: { userIds: string[]; assistantIds: string[] }
+  /** Linked material the caller can see; conversion leaves all of it with its current audience. */
+  linkedMaterial: { tasks: number; pages: number; files: number; chats: number }
   relabelled: 0
   requestHash: string
 }
@@ -278,10 +280,15 @@ export function createProjectSharedStore() {
           `SELECT coalesce((SELECT array_agg(user_id::text ORDER BY user_id) FROM workspace_project_members WHERE project_id=$1), '{}') AS "userIds",
                   coalesce((SELECT array_agg(assistant_id::text ORDER BY assistant_id) FROM assistant_project_grants WHERE project_id=$1), '{}') AS "assistantIds"`,
           [projectId])).rows[0]
+        const linked = (await client.query<{ tasks: number; pages: number; files: number; chats: number }>(
+          `SELECT (SELECT count(*)::int FROM tasks WHERE workspace_id=$2 AND project_ids @> ARRAY[$1::uuid]) AS tasks,
+                  (SELECT count(*)::int FROM saved_views WHERE workspace_id=$2 AND project_id=$1) AS pages,
+                  (SELECT count(*)::int FROM workspace_files WHERE workspace_id=$2 AND project_ids @> ARRAY[$1::uuid]) AS files,
+                  (SELECT count(*)::int FROM sessions WHERE workspace_id=$2 AND context_project_id=$1) AS chats`, [projectId, workspaceId])).rows[0]
         const ownerUserId = input.ownerUserId ?? actor
         const userIds = sorted([...input.userIds, ownerUserId])
         const assistantIds = sorted(input.assistantIds)
-        return { projectId, projectName: project.name, ownerUserId, userIds, assistantIds, legacyParticipation: legacy, relabelled: 0,
+        return { projectId, projectName: project.name, ownerUserId, userIds, assistantIds, legacyParticipation: legacy, linkedMaterial: linked, relabelled: 0,
           requestHash: projectConversionHash({ projectId, ownerUserId, userIds, assistantIds }) }
       })
     },

@@ -52,6 +52,15 @@ const ctx = (f: Fixture, userId: string) => ({ workspaceId: f.workspaceId, works
 const roster = async (projectId: string) => (await q(
   `SELECT principal_kind AS kind, coalesce(user_id,assistant_id)::text AS id FROM project_shared_members WHERE project_id=$1 ORDER BY 1,2`, [projectId])).rows
 const owners = async (projectId: string) => (await q('SELECT user_id::text AS id FROM project_shared_owners WHERE project_id=$1 ORDER BY 1', [projectId])).rows.map(r => r.id)
+/** A read as the member on the app role (RLS), no assistant acting. */
+const queryAsMember = async (userId: string, sql: string, values: unknown[]) => {
+  const client = await getAppPool().connect()
+  try {
+    await client.query('BEGIN')
+    await client.query(`SELECT set_config('app.current_user_id',$1,true)`, [userId])
+    return (await client.query(sql, values)).rows
+  } finally { await client.query('ROLLBACK'); client.release() }
+}
 const revision = async (projectId: string) => Number((await q('SELECT revision FROM project_shared_scopes WHERE project_id=$1', [projectId])).rows[0].revision)
 
 describe('[COMP:api/project-shared-governance] Shared Project roster, ownership and conversion', () => {
@@ -226,6 +235,48 @@ describe('[COMP:api/project-shared-governance] Shared Project roster, ownership 
     expect((await q('SELECT compartments FROM tasks WHERE id=$1', [taskId])).rows[0].compartments).toEqual([])
     const second = await request(appFor(f.owner)).post(base).send({ ...apply, idempotencyKey: randomUUID() })
     expect(second.body.error).toBe('project_already_shared')
+  })
+
+
+  it('upgrade: an existing legacy Project keeps its meaning; linked material is counted, not relabelled, by the preview', async () => {
+    const f = await fixture({ enabled: false })
+    const made = await request(appFor(f.lead)).post(`/api/workspaces/${f.workspaceId}/projects`).send({ name: 'Meridian' })
+    const id = made.body.project.id
+    const taskId = randomUUID()
+    await q(`INSERT INTO tasks(id,workspace_id,title,sensitivity,compartments,project_ids) VALUES($1,$2,'legacy linked work','internal','{}',$3)`, [taskId, f.workspaceId, [id]])
+    await q('UPDATE workspaces SET project_shared_spaces=true WHERE id=$1', [f.workspaceId])
+    // Enabling shared spaces changes nothing for an existing Project: every member still sees it and its linked work.
+    const listed = await request(appFor(f.outsider)).get(`/api/workspaces/${f.workspaceId}/projects`)
+    expect(listed.body.projects.find((p: { id: string }) => p.id === id)).toMatchObject({ shared: null })
+    const read = await queryAsMember(f.outsider, 'SELECT id FROM tasks WHERE id=$1', [taskId])
+    expect(read).toHaveLength(1)
+    const preview = await store.previewConversion(f.owner, f.workspaceId, id, { userIds: [], assistantIds: [] })
+    expect(preview.linkedMaterial).toMatchObject({ tasks: 1 })
+    await store.applyConversion(f.owner, f.workspaceId, id, { userIds: [], assistantIds: [], idempotencyKey: randomUUID(), requestHash: preview.requestHash })
+    // Converted: the scope exists, but the historical row is not relabelled and stays readable as before.
+    expect((await q('SELECT compartments FROM tasks WHERE id=$1', [taskId])).rows[0].compartments).toEqual([])
+    expect(await queryAsMember(f.outsider, 'SELECT id FROM tasks WHERE id=$1', [taskId])).toHaveLength(1)
+  })
+
+  it('quarantine and capability disable make Project material unavailable (never General) and are reversible through product commands', async () => {
+    const f = await fixture()
+    const id = await store.create(f.lead, f.workspaceId, { name: 'Nimbus', userIds: [f.member], assistantIds: [] })
+    const taskId = randomUUID()
+    await q(`INSERT INTO tasks(id,workspace_id,title,sensitivity,compartments,project_ids) VALUES($1,$2,'shared note','internal',$3,$4)`,
+      [taskId, f.workspaceId, [`project:${id}`], [id]])
+    const memberSees = async () => (await queryAsMember(f.member, 'SELECT id FROM tasks WHERE id=$1', [taskId])).length === 1
+    expect(await memberSees()).toBe(true)
+    await expect(store.setStatus(f.lead, id, 'quarantined', 'review', undefined)).rejects.toMatchObject({ code: 'project_recovery_owner_only' })
+    await store.setStatus(f.owner, id, 'quarantined', 'Suspected mislabel')
+    expect(await memberSees()).toBe(false)
+    expect(await queryAsMember(f.outsider, 'SELECT id FROM tasks WHERE id=$1', [taskId])).toHaveLength(0)
+    await store.setStatus(f.owner, id, 'active', 'Reviewed')
+    expect(await memberSees()).toBe(true)
+    await store.setCapability(f.owner, f.workspaceId, false)
+    expect(await memberSees()).toBe(false)
+    expect(await queryAsMember(f.owner, 'SELECT id FROM tasks WHERE id=$1', [taskId])).toHaveLength(0)
+    await store.setCapability(f.owner, f.workspaceId, true)
+    expect(await memberSees()).toBe(true)
   })
 
   it('archive pauses bound unattended work and restore does not restart it; capability is the workspace owner\'s switch', async () => {

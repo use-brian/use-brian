@@ -63,6 +63,7 @@ export type ProjectConversionPreview = {
   userIds: string[];
   assistantIds: string[];
   legacyParticipation: { userIds: string[]; assistantIds: string[] };
+  linkedMaterial: { tasks: number; pages: number; files: number; chats: number };
   relabelled: 0;
   requestHash: string;
 };

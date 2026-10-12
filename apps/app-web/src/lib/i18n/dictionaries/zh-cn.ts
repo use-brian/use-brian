@@ -2278,6 +2278,8 @@ export const zhCN: Dictionary = {
   },
   contextScope: {
     sharedProjects: {
+      "linkedUnchanged": "{count} 个已关联的项目保留当前的访问设置。",
+      "assistantNotParticipant": "此助理不是项目的参与者。请在下方的访问权限面板添加,或选择已是参与者的助理。",
       "badge": "共享",
       "roleOwner": "所有者",
       "roleParticipant": "参与者",

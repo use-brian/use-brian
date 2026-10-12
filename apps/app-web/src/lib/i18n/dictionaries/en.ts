@@ -2280,6 +2280,8 @@ export const en = {
   },
   contextScope: {
     sharedProjects: {
+      "linkedUnchanged": "{count} linked items keep their current access.",
+      "assistantNotParticipant": "This assistant is not a participant of the project. Add it on the Access panel below, or choose an assistant that is.",
       "badge": "Shared",
       "roleOwner": "Owner",
       "roleParticipant": "Participant",

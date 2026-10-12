@@ -396,6 +396,26 @@ describe('[COMP:access/project-shared-matrix] Shared Project foundation: referen
     expect(visible).toEqual([PROJECT_ROWS.note.id])
   })
 
+
+  it('a turn whose assistant is not on the roster gets an actionable refusal, and disabling the capability contracts a live turn', async () => {
+    const ops = (await q(`SELECT id, workspace_id AS "workspaceId", kind, clearance, compartments, default_compartments AS "defaultCompartments",
+      team_scope_mode AS "teamScopeMode", default_workspace_group_id AS "defaultWorkspaceGroupId", project_scope_mode AS "projectScopeMode",
+      default_project_id AS "defaultProjectId" FROM assistants WHERE id=$1`, [ASSISTANTS.ops.id])).rows[0]
+    await expect(resolveLiveAccessCeilingSystem({ userId: PEOPLE.maya.id, assistant: ops, workspaceId: WORKSPACE,
+      session: { contextGroupId: null, contextProjectId: PROJECTS.atlas, contextLockedAt: new Date() } as never }))
+      .rejects.toMatchObject({ code: 'context_not_available', reason: 'assistant_not_participant' })
+    await expect(resolveLiveAccessCeilingSystem({ userId: PEOPLE.jun.id, assistant: await brianRow(), workspaceId: WORKSPACE,
+      session: { contextGroupId: null, contextProjectId: PROJECTS.atlas, contextLockedAt: new Date() } as never }))
+      .rejects.toMatchObject({ reason: 'outside_grant' })
+    const lease = createAuthorityLease(await liveCeiling(PEOPLE.maya.id), async () => { try { return await liveCeiling(PEOPLE.maya.id) } catch { return null } })
+    await q('UPDATE workspaces SET project_shared_spaces=false WHERE id=$1', [WORKSPACE])
+    try {
+      await expect(lease.assertCurrent()).rejects.toMatchObject({ reason: 'authority_changed' })
+    } finally {
+      await q('UPDATE workspaces SET project_shared_spaces=true WHERE id=$1', [WORKSPACE])
+    }
+  })
+
   it('a label naming no shared scope in the row workspace is refused at write time', async () => {
     await expect(q(`INSERT INTO tasks(workspace_id,title,sensitivity,compartments) VALUES($1,'x','internal',$2)`, [WORKSPACE, [`project:${PROJECTS.legacy}`]]))
       .rejects.toThrow(/project_scope_label_invalid/)

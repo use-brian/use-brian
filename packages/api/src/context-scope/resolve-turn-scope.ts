@@ -70,9 +70,12 @@ export class ContextNotAvailableError extends Error {
       | 'not_a_member'
       | 'not_found'
       | 'archived'
-      | 'outside_grant',
+      | 'outside_grant'
+      | 'assistant_not_participant',
   ) {
-    super(`Requested ${axis} context is not available (${reason}).`)
+    super(reason === 'assistant_not_participant'
+      ? 'This assistant is not a participant of the project. Add it on the project\'s Access panel, or choose an assistant that is.'
+      : `Requested ${axis} context is not available (${reason}).`)
     this.name = 'ContextNotAvailableError'
   }
 }
@@ -405,7 +408,16 @@ async function resolveScope(
   // Shared Project admission: the bound Project must be admitted for (P, A);
   // its label joins the write stamp only for a member (oversight never writes).
   const projectAdmission = sharedProject && activeProject ? departmentRead?.projects?.[activeProject.id] : undefined
-  if (sharedProject && !projectAdmission) throw new ContextNotAvailableError('project', 'outside_grant')
+  if (sharedProject && !projectAdmission) {
+    // Actionable setup (§4 "Assistants"): name the missing assistant
+    // membership instead of an unexplained refusal.
+    const query = deps.departmentRead?.query ?? flagged.departmentQuery ?? systemQuery as <R>(sql: string, values: unknown[]) => Promise<{ rows: R[] }>
+    const people = await query<{ human: boolean; assistant: boolean }>(
+      `SELECT project_member_live($1,'user',$2) OR EXISTS (SELECT 1 FROM workspace_members m WHERE m.workspace_id=$4 AND m.user_id=$2 AND m.role='owner') AS human,
+              project_member_live($1,'assistant',$3) AS assistant`, [activeProject!.id, input.userId, input.assistant.id, workspaceId]).catch(() => ({ rows: [] }))
+    const row = people.rows[0]
+    throw new ContextNotAvailableError('project', row?.human && !row.assistant ? 'assistant_not_participant' : 'outside_grant')
+  }
   // Keep the legacy-shaped envelope consistent: a finite compartment ceiling
   // names every admitted Project label, so it never fails closed by accident.
   const projectLabels = (level: 'read' | 'mutation') => Object.entries(departmentRead?.projects ?? {})

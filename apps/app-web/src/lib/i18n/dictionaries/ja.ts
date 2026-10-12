@@ -2267,6 +2267,8 @@ export const ja: Dictionary = {
   },
   contextScope: {
     sharedProjects: {
+      "linkedUnchanged": "リンクされた {count} 件の項目は現在のアクセス設定のままです。",
+      "assistantNotParticipant": "このアシスタントはプロジェクトの参加者ではありません。下のアクセスパネルで追加するか、参加しているアシスタントを選んでください。",
       "badge": "共有",
       "roleOwner": "オーナー",
       "roleParticipant": "参加者",

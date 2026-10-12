@@ -44,8 +44,9 @@ export function ProjectChatLauncher({ workspaceId, projectId, assistantId, audie
       patchSharedChatSessions(workspaceId, rows => [created, ...rows.filter(r => r.id !== created.id)], { seed: true });
       dispatchChatSessionsRefresh(workspaceId);
       router.push(`/w/${workspaceId}/chat?v=workspace&s=${encodeURIComponent(created.id)}`);
-    } catch {
-      setError(t.chatFailed);
+    } catch (cause) {
+      // The room's assistant must itself be a participant (D20): say so.
+      setError(cause instanceof Error && cause.message === "context_not_available" ? t.assistantNotParticipant : t.chatFailed);
     } finally { setBusy(false); }
   }
 

@@ -146,7 +146,7 @@ describe('[COMP:app-web/project-shared-journey] Shared Project foundation journe
 
   it('converts a legacy Project only from an explicit reviewed selection, never preselected', async () => {
     ports.preview.mockResolvedValue({ projectId: 'legacy', projectName: 'Legacy', ownerUserId: 'ws-owner', userIds: ['pat', 'ws-owner'], assistantIds: [],
-      legacyParticipation: { userIds: ['sam'], assistantIds: ['ops'] }, relabelled: 0, requestHash: 'a'.repeat(64) });
+      legacyParticipation: { userIds: ['sam'], assistantIds: ['ops'] }, linkedMaterial: { tasks: 2, pages: 1, files: 0, chats: 0 }, relabelled: 0, requestHash: 'a'.repeat(64) });
     await render(<ProjectAccessPanel workspaceId="ws" projectId="legacy" roster={null} people={people} assistants={assistants}
       meId="ws-owner" workspaceRole="owner" sharedEnabled onChanged={() => undefined} />);
     const boxes = Array.from(host.querySelectorAll<HTMLInputElement>('input[type=checkbox]'));
@@ -155,6 +155,7 @@ describe('[COMP:app-web/project-shared-journey] Shared Project foundation journe
     await act(async () => boxes.find((_, i) => i === 1)!.click()); // Pat
     await click(t.convertPreview);
     expect(ports.preview).toHaveBeenCalledWith('ws', 'legacy', { userIds: ['pat'], assistantIds: [] });
+    expect(host.textContent).toContain('3 linked items keep their current access.');
     await click(t.convertApply);
     expect(ports.apply).toHaveBeenCalledWith('ws', 'legacy', expect.objectContaining({ userIds: ['pat'], assistantIds: [], requestHash: 'a'.repeat(64) }));
     // A non-owner never sees conversion.

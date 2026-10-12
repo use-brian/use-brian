@@ -2267,6 +2267,8 @@ export const zh: Dictionary = {
   },
   contextScope: {
     sharedProjects: {
+      "linkedUnchanged": "{count} 個已連結的項目保留目前的存取設定。",
+      "assistantNotParticipant": "此助理不是專案的參與者。請在下方的存取權面板加入,或選擇已是參與者的助理。",
       "badge": "共享",
       "roleOwner": "擁有者",
       "roleParticipant": "參與者",
