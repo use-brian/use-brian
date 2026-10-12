@@ -26,6 +26,7 @@ vi.mock('@use-brian/core', async (io) => ({
 }))
 
 import { workflowsRoutes } from '../workflows.js'
+import { contextReadinessFixture } from '../../context-scope/__tests__/readiness-fixture.js'
 
 const WS = '11111111-1111-1111-1111-111111111111'
 const workflowStore = { list: vi.fn(), getById: vi.fn(), create: vi.fn(), delete: vi.fn(), update: vi.fn() }
@@ -179,12 +180,7 @@ describe('[COMP:api/workflows-route] GET / POST /workflows', () => {
 
   it('POST /workflows blocks a scoped binding until the readiness matrix is green', async () => {
     workspaceStore.getRole.mockResolvedValueOnce('admin')
-    const getContextReadiness = vi.fn().mockResolvedValue({
-      enforcementVersion: 1,
-      readyForActivation: false,
-      checks: [{ id: 'connectors', ready: false, blocking: true, detail: 'missing' }],
-      legacyGeneral: {},
-    })
+    const getContextReadiness = vi.fn().mockResolvedValue(contextReadinessFixture(['connectors']))
     const res = await request(app('u-1', { getContextReadiness }))
       .post('/api/workflows')
       .send({

@@ -1159,7 +1159,7 @@ function CreateKeyForm({
         }),
       );
     } catch (err) {
-      setError((err as Error).message);
+      setError(createKeyErrorMessage(t, (err as Error).message));
     } finally {
       setSubmitting(false);
     }
@@ -1364,4 +1364,11 @@ function RevealKeyView({
       </div>
     </div>
   );
+}
+
+/** Name the cause of a refused create instead of rendering the API's code. */
+function createKeyErrorMessage(t: ReturnType<typeof useT>, code: string): string {
+  if (code === "context_activation_blocked") return t.programmaticAccess.createBlockedEnforcement;
+  if (code === "context_not_available") return t.programmaticAccess.createContextUnavailable;
+  return code;
 }

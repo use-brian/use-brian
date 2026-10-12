@@ -12125,6 +12125,10 @@ export const en = {
     },
   },
   programmaticAccess: {
+    createBlockedEnforcement:
+      "This installation has not finished setting up department isolation, so keys cannot be limited to a department yet. Ask whoever runs Use Brian for you to update it, or create the key without a department.",
+    createContextUnavailable:
+      "That department or project is no longer active. Choose another one, or create the key without one.",
     newKey: "New key",
     keysTitle: "Keys",
     lastUsedLabel: "Last used",

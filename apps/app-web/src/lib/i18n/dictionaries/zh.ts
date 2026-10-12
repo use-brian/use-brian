@@ -11818,6 +11818,10 @@ export const zh: Dictionary = {
     },
   },
   programmaticAccess: {
+    createBlockedEnforcement:
+      "此安裝尚未完成部門隔離設定，因此暫時無法將金鑰限制在某個部門。請聯絡負責維運 Use Brian 的人員進行更新，或建立不指定部門的金鑰。",
+    createContextUnavailable:
+      "該部門或專案已不再啟用。請選擇其他部門或專案，或建立不指定的金鑰。",
     newKey: "新增金鑰",
     keysTitle: "金鑰",
     lastUsedLabel: "最近使用",

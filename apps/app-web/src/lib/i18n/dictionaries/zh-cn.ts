@@ -11979,6 +11979,10 @@ export const zhCN: Dictionary = {
     },
   },
   programmaticAccess: {
+    createBlockedEnforcement:
+      "此安装尚未完成部门隔离设置，因此暂时无法将密钥限制在某个部门。请联系负责运维 Use Brian 的人员进行更新，或创建不指定部门的密钥。",
+    createContextUnavailable:
+      "该部门或项目已不再启用。请选择其他部门或项目，或创建不指定的密钥。",
     newKey: "添加密钥",
     keysTitle: "密钥",
     lastUsedLabel: "最近使用",

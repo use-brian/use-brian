@@ -236,6 +236,10 @@ export type ContextReadinessOptions = {
   /** Count Workspace General rows. Informational only; the departmental
    * verdict never reads them, so its callers skip the eleven table counts. */
   legacyInventory?: boolean
+  /** Evaluate the legacy scope-review inventory. Only callers that discard the
+   * `scope_review` row (the binding gate) pass false; the row then reports
+   * `not_evaluated`, so the verdict can never read activation-ready. */
+  scopeReview?: boolean
 }
 
 export async function getContextReadinessSystem(
@@ -261,7 +265,8 @@ export async function getContextReadinessSystem(
     REQUIRED_TRIGGERS.write_inheritance,
   )
   const functionMissing=(id:keyof typeof REQUIRED_FUNCTIONS)=>missingTriggers(functionNames,REQUIRED_FUNCTIONS[id])
-  const reviewedInventoryRevision=missingColumns.length===0
+  const evaluateScopeReview=options.scopeReview!==false
+  const reviewedInventoryRevision=evaluateScopeReview&&missingColumns.length===0
     ? (await queryFn<{revision:string|null}>('SELECT reviewed_inventory_revision::text AS revision FROM workspace_access_policies WHERE workspace_id=$1',[workspaceId])).rows[0]?.revision??null
     : null
   // scope_review passes only with zero unresolved rows AND an inventory
@@ -270,7 +275,7 @@ export async function getContextReadinessSystem(
   // thousands of rows, 5-15s on a working brain), so it runs only when the
   // acknowledgement holds and its count can still change the verdict.
   const inventoryAcknowledged=reviewedInventoryRevision===String(SCOPE_REVIEW_REGISTRY_REVISION)
-  const coverage=missingColumns.length===0&&inventoryAcknowledged
+  const coverage=evaluateScopeReview&&missingColumns.length===0&&inventoryAcknowledged
     ? await getScopeReviewCoverage({query:queryFn},workspaceId)
     : {registryRevision:String(SCOPE_REVIEW_REGISTRY_REVISION),unresolved:'1',families:[]}
 
@@ -374,7 +379,7 @@ export async function getContextReadinessSystem(
       true,
       'Workspace General rows are informational and remain reviewable.',
     ),
-    check(
+    evaluateScopeReview ? check(
       'scope_review',
       CONTEXT_SCOPE_CODE_CAPABILITIES.scope_review&&functionMissing('scope_review').length===0
         &&coverage.unresolved==='0'&&reviewedInventoryRevision===coverage.registryRevision,
@@ -384,7 +389,7 @@ export async function getContextReadinessSystem(
         : 'The complete scope inventory still has unresolved or unacknowledged rows.',
       [...functionMissing('scope_review'),...coverage.families.filter(family=>family.unresolved!=='0').map(family=>family.family),
         ...(inventoryAcknowledged?[]:['reviewed_inventory_revision'])],
-    ),
+    ) : check('scope_review', false, 'The scope inventory was not evaluated for this caller.', ['not_evaluated']),
   ]
 
   return {
@@ -406,19 +411,37 @@ export class ContextActivationBlockedError extends Error {
   }
 }
 
+/**
+ * Checks the binding gate requires. Every blocking check except `scope_review`:
+ * a Team/Project binding only narrows what its holder reads, so the legacy
+ * inventory's completeness cannot make one unsafe. That inventory gates strict
+ * activation and departmental delegation instead (workspace-access.md).
+ * Spec: docs/architecture/context-engine/scoped-context.md ->
+ * "Binding gate versus strict activation".
+ */
+const CONTEXT_BINDING_REQUIRED_CHECKS: readonly ContextReadinessCheckId[] = [
+  'row_store_coverage', 'turn_entry_points', 'write_inheritance',
+  'session_isolation', 'teamspace_agent_access', 'connectors', 'ingest',
+  'background_lanes', 'derived_writes', 'delegation', 'operation_separation',
+  'replay_delivery', 'grant_expiry', 'org_references',
+]
+
+const bindingReadiness = (workspaceId: string) =>
+  getContextReadinessSystem(workspaceId, query, { legacyInventory: false, scopeReview: false })
+
+/** Gate for accepting a first non-General Team/Project binding. Fail-closed: a
+ * required check that is missing, duplicated or not ready blocks. */
 export async function assertContextActivationReady(
   workspaceId: string,
   readiness?: (
     workspaceId: string,
   ) => Promise<ContextReadiness>,
 ): Promise<ContextReadiness> {
-  const result = await (readiness ?? getContextReadinessSystem)(workspaceId)
-  if (!result.readyForActivation) {
-    throw new ContextActivationBlockedError(
-      result.checks
-        .filter((item) => item.blocking && !item.ready)
-        .map((item) => item.id),
-    )
-  }
+  const result = await (readiness ?? bindingReadiness)(workspaceId)
+  const failed = CONTEXT_BINDING_REQUIRED_CHECKS.filter((id) => {
+    const rows = result.checks.filter((item) => item.id === id)
+    return rows.length !== 1 || !rows[0].ready
+  })
+  if (failed.length > 0) throw new ContextActivationBlockedError(failed)
   return result
 }

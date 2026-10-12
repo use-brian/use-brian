@@ -11882,6 +11882,10 @@ export const ja: Dictionary = {
     },
   },
   programmaticAccess: {
+    createBlockedEnforcement:
+      "このインストールでは部門分離の設定がまだ完了していないため、キーを部門に限定できません。Use Brian の管理者に更新を依頼するか、部門を指定せずにキーを作成してください。",
+    createContextUnavailable:
+      "その部門またはプロジェクトはすでに有効ではありません。別のものを選ぶか、指定せずにキーを作成してください。",
     newKey: "新しいキー",
     keysTitle: "キー",
     lastUsedLabel: "最終使用",

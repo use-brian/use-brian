@@ -431,7 +431,7 @@ export function contextScopeRoutes(options: ContextScopeRouteOptions): Router {
   router.put('/workspaces/:workspaceId/projects/:projectId/assistants/:assistantId', async (req, res) => {
     const access = await gate(req, res, true)
     if (!access) return
-    await assertContextActivationReady(access.workspaceId, getReadiness)
+    await assertContextActivationReady(access.workspaceId, options.getReadiness)
     const project = await contextStore.getProjectSystem(access.workspaceId, req.params.projectId)
     if (!project || project.status !== 'active') return void res.status(404).json({ error: 'not_found' })
     await contextStore.setProjectAssistant(access.userId, project.id, req.params.assistantId, true)

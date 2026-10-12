@@ -138,4 +138,30 @@ describe('[COMP:api/context-scope-routes] activation readiness', () => {
     expect(seen.some((sql) => sql.includes('cardinality(compartments)'))).toBe(false)
     expect(result.readyForActivation).toBe(true)
   })
+
+  it('lets a binding through while only the legacy scope inventory is unreviewed', async () => {
+    const result = await getContextReadinessSystem('workspace', readinessQuery({ reviewed: null }))
+    expect(result.readyForActivation).toBe(false)
+    await expect(assertContextActivationReady('workspace', async () => result)).resolves.toBe(result)
+  })
+
+  it('never evaluates the inventory when asked not to, and never reads ready from it', async () => {
+    const seen: string[] = []
+    const result = await getContextReadinessSystem('workspace', readinessQuery({ seen }), { legacyInventory: false, scopeReview: false })
+    expect(seen.some((sql) => sql.includes('reviewed_inventory_revision'))).toBe(false)
+    expect(seen.some((sql) => sql.includes('read_scope_review_source'))).toBe(false)
+    expect(result.checks.find((check) => check.id === 'scope_review')).toMatchObject({ ready: false, missing: ['not_evaluated'] })
+    expect(result.readyForActivation).toBe(false)
+    await expect(assertContextActivationReady('workspace', async () => result)).resolves.toBe(result)
+  })
+
+  it('blocks a binding when a required enforcement check is missing or duplicated', async () => {
+    const result = await getContextReadinessSystem('workspace', readinessQuery())
+    const missing = { ...result, checks: result.checks.filter((check) => check.id !== 'ingest') }
+    await expect(assertContextActivationReady('workspace', async () => missing))
+      .rejects.toMatchObject({ code: 'context_activation_blocked', failedChecks: ['ingest'] })
+    const duplicated = { ...result, checks: [...result.checks, { ...result.checks[0] }] }
+    await expect(assertContextActivationReady('workspace', async () => duplicated))
+      .rejects.toMatchObject({ failedChecks: [result.checks[0].id] })
+  })
 })
