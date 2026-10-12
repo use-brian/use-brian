@@ -26,6 +26,8 @@ import {
   type CrmCommercialProfile,
   type CrmCommercialProfileOwner,
   type CrmCommercialReferenceKind,
+  type CrmCommercialResolution,
+  type CrmResolutionQuestion,
   type CrmSensitivity,
 } from "@/lib/api/crm-commercial";
 import { CrmReferenceRequestError, newCrmOperationId } from "@/lib/api/crm-references";
@@ -207,7 +209,7 @@ export function sensitivityOptions(t: CommercialCopy, includeDefault: boolean) {
 }
 
 /** Human rendering of one typed value. Absent is "missing"; null is a recorded "does not apply". */
-export function formatCommercialValue(value: unknown, t: CommercialCopy): string {
+function formatCommercialValue(value: unknown, t: CommercialCopy): string {
   if (value === undefined) return t.missingValue;
   if (value === null) return t.doesNotApply;
   if (typeof value === "boolean") return value ? t.yes : t.no;
@@ -217,6 +219,74 @@ export function formatCommercialValue(value: unknown, t: CommercialCopy): string
     return `${kind} ${reference.id}`;
   }
   return String(value);
+}
+
+type QuestionGroup = keyof CommercialCopy["questionGroups"];
+
+function questionGroup(question: CrmResolutionQuestion): QuestionGroup {
+  if (question.kind === "conflict") return "conflict";
+  if (question.kind === "review_required") return "review";
+  return question.requiredFor === "draft" ? "draft" : "issue";
+}
+
+function sourceLabel(source: NonNullable<CrmCommercialResolution["fields"][string]["source"]>, t: CommercialCopy): string {
+  return t.sourceLabels[source.kind].replace("{version}", String(source.version ?? ""));
+}
+
+/** Each resolved field with its value and the accepted source that filled it. */
+export function ResolvedFieldList({ fields, labelFor }: {
+  fields: CrmCommercialResolution["fields"];
+  labelFor: (fieldKey: string) => string;
+}) {
+  const t = useT().crmPage.commercial;
+  return (
+    <dl className="mt-2 divide-y divide-border/60 text-xs">
+      {Object.values(fields).map((field) => (
+        <div key={field.fieldKey} className="flex flex-wrap items-baseline justify-between gap-x-3 py-1.5" data-resolved-field={field.fieldKey}>
+          <dt className="min-w-0">
+            <span className="font-medium">{labelFor(field.fieldKey)}</span>
+            <span className="ml-1 font-mono text-[11px] text-muted-foreground">{field.fieldKey}</span>
+          </dt>
+          <dd className="flex flex-wrap items-baseline gap-2">
+            <span className={field.value === undefined || field.value === null ? "italic text-muted-foreground" : ""}>
+              {formatCommercialValue(field.value, t)}
+            </span>
+            <span className="text-[11px] text-muted-foreground" data-resolved-source>
+              {field.source ? sourceLabel(field.source, t) : t.noSource}
+              {field.overridden ? ` · ${t.overridden}` : ""}
+            </span>
+          </dd>
+        </div>
+      ))}
+    </dl>
+  );
+}
+
+/** Open questions grouped by what they block: draft, issue, conflicts, review. */
+export function QuestionGroups({ questions }: { questions: CrmResolutionQuestion[] }) {
+  const t = useT().crmPage.commercial;
+  const groups = new Map<QuestionGroup, CrmResolutionQuestion[]>();
+  for (const question of questions) {
+    const group = questionGroup(question);
+    groups.set(group, [...(groups.get(group) ?? []), question]);
+  }
+  if (groups.size === 0) return <p className="mt-2 text-[11px] text-muted-foreground">{t.noQuestions}</p>;
+  return (
+    <>
+      {(["draft", "issue", "conflict", "review"] as const).filter((group) => groups.has(group)).map((group) => (
+        <div key={group} className="mt-2" data-question-group={group}>
+          <div className="text-[11px] font-semibold text-amber-700 dark:text-amber-300">{t.questionGroups[group]}</div>
+          <ul className="mt-0.5 list-disc pl-5 text-xs">
+            {groups.get(group)!.map((question) => (
+              <li key={`${question.kind}:${question.fieldKey}`}>
+                <span className="font-medium">{question.label}</span>: {question.question}
+              </li>
+            ))}
+          </ul>
+        </div>
+      ))}
+    </>
+  );
 }
 
 function effectiveLabel(profile: Pick<CrmCommercialProfile, "effectiveFrom" | "effectiveTo">, t: CommercialCopy): string {

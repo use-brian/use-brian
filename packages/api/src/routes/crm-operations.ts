@@ -47,6 +47,10 @@ import {
   isCrmBusinessReferenceCommand,
   CrmCommercialContextCommandSchema,
   isCrmCommercialContextCommand,
+  CrmCommercialDocumentCommandSchema,
+  isCrmCommercialDocumentCommand,
+  CrmInvoiceListQuerySchema,
+  type CrmCommercialDocumentReadPort,
   CrmAccountListQuerySchema,
   CrmCommercialProfileQuerySchema,
   CrmResolutionQuerySchema,
@@ -79,6 +83,7 @@ import { query } from '../db/client.js'
 import { CrmPipelinesQuerySchema, CrmRecordFieldsQuerySchema } from '../db/crm-config-catalog.js'
 import { createCrmReferenceReadStore } from '../db/crm-business-reference-store.js'
 import { createCrmCommercialContextReadStore } from '../db/crm-commercial-context-store.js'
+import { createCrmCommercialDocumentReadStore } from '../db/crm-commercial-document-store.js'
 
 const SaveDefinitionBody = SaveCrmIntakeDefinitionCommandSchema.omit({ kind: true }).strict()
 const CreateCredentialBody = CreateCrmIntakeCredentialCommandSchema.omit({ kind: true }).strict()
@@ -214,6 +219,7 @@ type Options = {
   deliveries?: CrmDeliveryServicePort
   referenceReads?: CrmReferenceReadPort
   commercialReads?: CrmCommercialContextReadPort
+  documentReads?: CrmCommercialDocumentReadPort
 }
 
 function writeError(res: Response, error: unknown): void {
@@ -277,7 +283,8 @@ export function crmOperationsRoutes(options: Options): Router {
       }
       const command = isCrmBusinessReferenceCommand(req.body ?? {}) ? CrmBusinessReferenceCommandSchema.parse(req.body)
         : isCrmCommercialContextCommand(req.body ?? {}) ? CrmCommercialContextCommandSchema.parse(req.body)
-          : CrmConfigCommandSchema.parse(req.body)
+          : isCrmCommercialDocumentCommand(req.body ?? {}) ? CrmCommercialDocumentCommandSchema.parse(req.body)
+            : CrmConfigCommandSchema.parse(req.body)
       const output = await options.service.execute(ctx, command)
       res.status(output.created ? 201 : 200).json(output)
     } catch (error) { writeError(res, error) }
@@ -332,6 +339,30 @@ export function crmOperationsRoutes(options: Options): Router {
     const ctx = await context(req, res)
     if (!ctx) return
     try { res.json(await commercialReads.listOperationDefinitions(ctx.workspaceId, viewer(ctx))) } catch (error) { writeError(res, error) }
+  })
+  const documentReads = options.documentReads ?? createCrmCommercialDocumentReadStore()
+  router.get('/:workspaceId/operations/preparations/:preparationId', async (req, res) => {
+    const ctx = await context(req, res)
+    if (!ctx) return
+    try {
+      const found = await documentReads.getPreparation(ctx.workspaceId, viewer(ctx), CrmOperationsUuidSchema.parse(req.params.preparationId))
+      if (!found) { res.status(404).json({ error: 'not_found' }); return }
+      res.set('Cache-Control', 'no-store').json(found)
+    } catch (error) { writeError(res, error) }
+  })
+  router.get('/:workspaceId/operations/invoices', async (req, res) => {
+    const ctx = await context(req, res)
+    if (!ctx) return
+    try { res.json(await documentReads.listInvoices(ctx.workspaceId, viewer(ctx), CrmInvoiceListQuerySchema.parse(req.query))) } catch (error) { writeError(res, error) }
+  })
+  router.get('/:workspaceId/operations/invoices/:invoiceId', async (req, res) => {
+    const ctx = await context(req, res)
+    if (!ctx) return
+    try {
+      const found = await documentReads.getInvoice(ctx.workspaceId, viewer(ctx), CrmOperationsUuidSchema.parse(req.params.invoiceId))
+      if (!found) { res.status(404).json({ error: 'not_found' }); return }
+      res.set('Cache-Control', 'no-store').json(found)
+    } catch (error) { writeError(res, error) }
   })
   router.get('/:workspaceId/operations/references/:referenceId/history', async (req, res) => {
     const ctx = await context(req, res)

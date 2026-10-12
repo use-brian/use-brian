@@ -93,7 +93,7 @@ import type {
   Sensitivity,
   Tool,
   ToolContext,
-  CrmOperationsTools, CrmBusinessReferenceTools, CrmCommercialContextTools,
+  CrmOperationsTools, CrmBusinessReferenceTools, CrmCommercialContextTools, CrmCommercialDocumentTools,
   AssociationTools,
   Embedder,
 } from '@use-brian/core'
@@ -187,7 +187,7 @@ export type BrainCrmTools = {
   advanceDealStage: Tool
   listCrmFields: Tool
   setCrmCustomFields: Tool
-} & CrmOperationsTools & CrmBusinessReferenceTools & CrmCommercialContextTools
+} & CrmOperationsTools & CrmBusinessReferenceTools & CrmCommercialContextTools & CrmCommercialDocumentTools
 
 export type BrainRetrievalTools = {
   search: Tool
@@ -451,6 +451,8 @@ const READ_TOOL_NAMES = new Set<string>([
   'listCrmCommercialProfiles',
   'resolveCrmCommercialFields',
   'listCrmOperationDefinitions',
+  'getCrmPreparation',
+  'listCrmInvoices',
   'getCrmDelivery',
   // Workspace files (read) — present only when fileTools are wired
   'fileRead',
@@ -1668,6 +1670,13 @@ export function buildBrainTools(opts: BuildOpts): BrainTool[] {
     bridgeCoreTool(opts.crmTools.resolveCrmCommercialFields, resolveCtx, workspaceId),
     bridgeCoreTool(opts.crmTools.listCrmOperationDefinitions, resolveCtx, workspaceId),
     bridgeCoreTool(opts.crmTools.saveCrmCustomerAccount, resolveCtx, workspaceId),
+    bridgeCoreTool(opts.crmTools.getCrmPreparation, resolveCtx, workspaceId),
+    bridgeCoreTool(opts.crmTools.listCrmInvoices, resolveCtx, workspaceId),
+    bridgeCoreTool(opts.crmTools.prepareCrmInvoice, resolveCtx, workspaceId),
+    bridgeCoreTool(opts.crmTools.reviseCrmPreparation, resolveCtx, workspaceId),
+    bridgeCoreTool(opts.crmTools.markCrmPreparationReady, resolveCtx, workspaceId),
+    ...[...filterToolsByCapabilities(new Map([opts.crmTools.issueCrmInvoice, opts.crmTools.retryCrmInvoiceIssue, opts.crmTools.voidCrmInvoice]
+      .map(tool => [tool.name, tool])), opts.agentActiveCapabilities ?? new Set()).values()].map(tool => bridgeCoreTool(tool, resolveCtx, workspaceId)),
     ...[...filterToolsByCapabilities(new Map([opts.crmTools.saveCrmSellerProfile, opts.crmTools.acceptCrmCommercialProfile,
       opts.crmTools.proposeCrmOperationVersion].map(tool => [tool.name, tool])),
     opts.agentActiveCapabilities ?? new Set()).values()].map(tool => bridgeCoreTool(tool, resolveCtx, workspaceId)),
@@ -1898,7 +1907,8 @@ export function buildBrainTools(opts: BuildOpts): BrainTool[] {
       t.name === 'listCrmReferenceDefinitions' || t.name === 'previewCrmReference' ||
       t.name === 'findCrmReference' || t.name === 'getCrmReferenceHistory' ||
       t.name === 'listCrmCustomerAccounts' || t.name === 'listCrmCommercialProfiles' ||
-      t.name === 'resolveCrmCommercialFields' || t.name === 'listCrmOperationDefinitions'
+      t.name === 'resolveCrmCommercialFields' || t.name === 'listCrmOperationDefinitions' ||
+      t.name === 'getCrmPreparation' || t.name === 'listCrmInvoices'
     ),
     ...fileBridges.filter((t) => t.name === 'fileRead' || t.name === 'fileSearch'),
     ...brandBridges.filter((t) => t.name === 'getBrand'),
@@ -1931,7 +1941,9 @@ export function buildBrainTools(opts: BuildOpts): BrainTool[] {
       t.name === 'assignCrmReference' || t.name === 'saveCrmReferenceDefinition' ||
       t.name === 'replaceCrmReference' || t.name === 'retireCrmReference' || t.name === 'importCrmReferences' ||
       t.name === 'saveCrmCustomerAccount' || t.name === 'saveCrmSellerProfile' ||
-      t.name === 'acceptCrmCommercialProfile' || t.name === 'proposeCrmOperationVersion'
+      t.name === 'acceptCrmCommercialProfile' || t.name === 'proposeCrmOperationVersion' ||
+      t.name === 'prepareCrmInvoice' || t.name === 'reviseCrmPreparation' || t.name === 'markCrmPreparationReady' ||
+      t.name === 'issueCrmInvoice' || t.name === 'retryCrmInvoiceIssue' || t.name === 'voidCrmInvoice'
     ),
     ...fileBridges.filter((t) =>
       t.name === 'fileWrite' || t.name === 'fileAppend' ||

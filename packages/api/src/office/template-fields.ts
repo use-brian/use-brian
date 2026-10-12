@@ -12,12 +12,14 @@ export function templateFieldGuidance(template: OfficeTemplateBundle): string {
   return JSON.stringify([...officeTemplateTokenTargets(template.snapshot).keys()].map((name) => ({ name, required: false })))
 }
 
-export function validateTemplateFieldValues(template: OfficeTemplateBundle, values: Record<string, string | { valueType: string; value: string | number | boolean | null }>): void {
+/** `deferred` names staged tokens (filled at a later lifecycle step) that are present but not yet type-validated. */
+export function validateTemplateFieldValues(template: OfficeTemplateBundle, values: Record<string, string | { valueType: string; value: string | number | boolean | null }>, deferred: ReadonlySet<string> = new Set()): void {
   templateFieldGuidance(template)
   const expected = officeTemplateTokenTargets(template.snapshot)
   if (!expected.size || Object.keys(values).length !== expected.size || [...expected.keys()].some((name) => !Object.hasOwn(values, name))) throw new Error('Template response fields do not match the admitted tokens')
   const missing: string[] = []
   for (const field of template.fields) {
+    if (deferred.has(field.name)) continue
     const entry = values[field.name]!
     const value = typeof entry === 'string' ? entry : entry.value
     if (field.maxLength !== undefined && value !== null && String(value).length > field.maxLength) throw new Error(`Field ${field.name} exceeds maxLength ${field.maxLength}`)

@@ -10,6 +10,7 @@ import {
   CrmPageQuerySchema, requireCrmIntegrationOperation, crmIntegrationResourceSelection,
   CrmReferenceLookupQuerySchema, CrmReferencePreviewQuerySchema, type CrmReferenceReadPort,
   CrmAccountListQuerySchema, CrmCommercialProfileQuerySchema, CrmResolutionQuerySchema, type CrmCommercialContextReadPort,
+  CrmInvoiceListQuerySchema, type CrmCommercialDocumentReadPort,
   type CrmDeliveryServicePort,
   type CrmOperationsContext, type CrmOperationsServicePort, type AssociationServicePort,
 } from '@use-brian/core'
@@ -35,6 +36,7 @@ import { runWithAgentAccess } from '../db/agent-access-context.js'
 import { CrmIntegrationBindingOptionsSchema } from '../crm-operations/integration-department-authority.js'
 import { createCrmReferenceReadStore } from '../db/crm-business-reference-store.js'
 import { createCrmCommercialContextReadStore } from '../db/crm-commercial-context-store.js'
+import { createCrmCommercialDocumentReadStore } from '../db/crm-commercial-document-store.js'
 
 const UUID = z.string().uuid()
 export function crmIntegrationContext(principal: CrmIntegrationPrincipal): CrmOperationsContext {
@@ -54,6 +56,7 @@ export function crmIntegrationRoutes(options: {
   reads?: (principal: CrmIntegrationPrincipal) => DbCrmOperationsReadStore
   referenceReads?: CrmReferenceReadPort
   commercialReads?: CrmCommercialContextReadPort
+  documentReads?: CrmCommercialDocumentReadPort
   /** Website media library reads (`association.read`); absent → 404. */
   websiteMedia?: Pick<WebsiteMediaDeps, 'store' | 'resolver'>
   memberProfiles?: (principal: CrmIntegrationPrincipal) => {
@@ -264,6 +267,26 @@ export function crmIntegrationRoutes(options: {
     if (operations !== 'all' && !operations.includes(query.operationKey)) throw new CrmOperationsError('not_found', 'The operation has no accepted version.')
     await accountSellerAllowed(res, viewer, sellers, query.accountId)
     res.set('Cache-Control', 'no-store').json(await commercialReads.resolve(principal(res).workspaceId, viewer, query))
+  }))
+  // Invoices and preparations: only all-seller read grants see documents; amounts follow the document's own scope.
+  const documentReads = options.documentReads ?? createCrmCommercialDocumentReadStore()
+  const documentViewer = (res: Response) => {
+    const { viewer, sellers } = commercialViewer(res)
+    if (sellers !== 'all') throw new CrmOperationsError('not_authorized', 'Document reads require a commercial read grant for every seller.')
+    return viewer
+  }
+  router.get('/operations/invoices', endpoint(async (req, res) => {
+    res.json(await documentReads.listInvoices(principal(res).workspaceId, documentViewer(res), CrmInvoiceListQuerySchema.parse(req.query)))
+  }))
+  router.get('/operations/invoices/:id', endpoint(async (req, res) => {
+    const found = await documentReads.getInvoice(principal(res).workspaceId, documentViewer(res), UUID.parse(req.params.id))
+    if (!found) { res.status(404).json({ error: 'not_found' }); return }
+    res.json(found)
+  }))
+  router.get('/operations/preparations/:id', endpoint(async (req, res) => {
+    const found = await documentReads.getPreparation(principal(res).workspaceId, documentViewer(res), UUID.parse(req.params.id))
+    if (!found) { res.status(404).json({ error: 'not_found' }); return }
+    res.json(found)
   }))
   router.get('/operations/operation-definitions', endpoint(async (_req, res) => {
     const { viewer, operations } = commercialViewer(res)

@@ -14,11 +14,12 @@
  */
 
 import { useEffect, useState } from "react";
-import { Landmark, Plus } from "lucide-react";
+import { Landmark, Plus, X } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import {
   listCrmCommercialProfiles,
   listCrmCustomerAccounts,
+  listCrmInvoices,
   listCrmOperationDefinitions,
   listCrmSellers,
   resolveCrmCommercialFields,
@@ -27,8 +28,8 @@ import {
   type CrmCommercialResolution,
   type CrmCommercialStatus,
   type CrmCustomerAccount,
+  type CrmInvoiceSummary,
   type CrmOperationDefinition,
-  type CrmResolutionQuestion,
   type CrmSellerProfile,
   type CrmSensitivity,
 } from "@/lib/api/crm-commercial";
@@ -41,26 +42,30 @@ import {
   IssueList,
   ProfileEditor,
   ProfileSummary,
+  QuestionGroups,
+  ResolvedFieldList,
   RefusalLine,
   SensitivityBadge,
   UUID_PATTERN,
   UncertainWrite,
   describeCommercialRefusal,
-  formatCommercialValue,
   isCalendarDate,
   sensitivityOptions,
   useCommercialCommand,
-  type CommercialCopy,
 } from "./commercial-shared";
+import { InvoicePreparationForm, InvoicePreparationPanel, InvoiceStateBadge, formatInvoiceMoney } from "./invoice-preparation";
 
 type Loaded = { accounts: CrmCustomerAccount[]; sellers: CrmSellerProfile[] };
 
-export function CrmRecordAccounts({ workspaceId, companyId, canConfigure, contactNames }: {
+export function CrmRecordAccounts({ workspaceId, companyId, canConfigure, contactNames, deals = [] }: {
   workspaceId: string;
   companyId: string;
+  /** Owner or admin: accepts terms, and issues, retries and voids invoices. */
   canConfigure: boolean;
   /** Contact id to display name, for the billing contact line. */
   contactNames?: ReadonlyMap<string, string>;
+  /** The company's deals, offered when preparing an invoice. */
+  deals?: ReadonlyArray<{ id: string; name: string }>;
 }) {
   const t = useT().crmPage.commercial;
   const [data, setData] = useState<Loaded | null>(null);
@@ -139,6 +144,7 @@ export function CrmRecordAccounts({ workspaceId, companyId, canConfigure, contac
                   seller={sellerById.get(account.sellerId) ?? null}
                   canConfigure={canConfigure}
                   contactName={account.billingContactId ? contactNames?.get(account.billingContactId) ?? null : null}
+                  deals={deals}
                   onEdit={() => { setSaved(false); setEditing({ account }); }}
                 />
               ))}
@@ -150,16 +156,18 @@ export function CrmRecordAccounts({ workspaceId, companyId, canConfigure, contac
   );
 }
 
-function AccountRow({ workspaceId, account, seller, canConfigure, contactName, onEdit }: {
+function AccountRow({ workspaceId, account, seller, canConfigure, contactName, deals, onEdit }: {
   workspaceId: string;
   account: CrmCustomerAccount;
   seller: CrmSellerProfile | null;
   canConfigure: boolean;
   contactName: string | null;
+  deals: ReadonlyArray<{ id: string; name: string }>;
   onEdit: () => void;
 }) {
   const t = useT().crmPage.commercial;
-  const [open, setOpen] = useState<"terms" | "resolve" | null>(null);
+  const ti = useT().crmPage.invoices;
+  const [open, setOpen] = useState<"terms" | "resolve" | "invoices" | null>(null);
   return (
     <li className="py-2" data-crm-account={account.id}>
       <div className="flex flex-wrap items-center gap-x-2 gap-y-1">
@@ -173,6 +181,8 @@ function AccountRow({ workspaceId, account, seller, canConfigure, contactName, o
             onClick={() => setOpen((value) => value === "terms" ? null : "terms")}>{t.terms}</Button>
           <Button size="xs" variant={open === "resolve" ? "secondary" : "ghost"} className="max-md:min-h-11" aria-pressed={open === "resolve"}
             onClick={() => setOpen((value) => value === "resolve" ? null : "resolve")}>{t.resolveTitle}</Button>
+          <Button size="xs" variant={open === "invoices" ? "secondary" : "ghost"} className="max-md:min-h-11" aria-pressed={open === "invoices"}
+            onClick={() => setOpen((value) => value === "invoices" ? null : "invoices")}>{ti.toggle}</Button>
         </div>
       </div>
       <div className="mt-1 text-[11px] text-muted-foreground">
@@ -183,6 +193,7 @@ function AccountRow({ workspaceId, account, seller, canConfigure, contactName, o
       {account.billingAddress && <div className="mt-0.5 whitespace-pre-line text-[11px] text-muted-foreground">{account.billingAddress}</div>}
       {open === "terms" && <AccountTerms workspaceId={workspaceId} account={account} canConfigure={canConfigure} />}
       {open === "resolve" && <ResolvePreview workspaceId={workspaceId} accountId={account.id} />}
+      {open === "invoices" && <AccountInvoices workspaceId={workspaceId} account={account} canIssue={canConfigure} deals={deals} />}
     </li>
   );
 }
@@ -364,18 +375,6 @@ function AccountTerms({ workspaceId, account, canConfigure }: {
   );
 }
 
-type QuestionGroup = keyof CommercialCopy["questionGroups"];
-
-function questionGroup(question: CrmResolutionQuestion): QuestionGroup {
-  if (question.kind === "conflict") return "conflict";
-  if (question.kind === "review_required") return "review";
-  return question.requiredFor === "draft" ? "draft" : "issue";
-}
-
-function sourceLabel(source: NonNullable<CrmCommercialResolution["fields"][string]["source"]>, t: CommercialCopy): string {
-  return t.sourceLabels[source.kind].replace("{version}", String(source.version ?? ""));
-}
-
 function ResolvePreview({ workspaceId, accountId }: { workspaceId: string; accountId: string }) {
   const t = useT().crmPage.commercial;
   const [operations, setOperations] = useState<CrmOperationDefinition[] | null>(null);
@@ -441,11 +440,6 @@ function ResolvePreview({ workspaceId, accountId }: { workspaceId: string; accou
 
   const accepted = result?.operation.versions.find((version) => version.id === result.resolution.operationVersionId);
   const labelFor = (fieldKey: string) => accepted?.fieldBindings.find((binding) => binding.fieldKey === fieldKey)?.label ?? fieldKey;
-  const groups = new Map<QuestionGroup, CrmResolutionQuestion[]>();
-  for (const question of result?.resolution.questions ?? []) {
-    const group = questionGroup(question);
-    groups.set(group, [...(groups.get(group) ?? []), question]);
-  }
 
   return (
     <div className="mt-2 space-y-3 border-l border-border pl-3" data-crm-resolve-preview>
@@ -473,43 +467,109 @@ function ResolvePreview({ workspaceId, accountId }: { workspaceId: string; accou
               {result.resolution.issueReady ? t.issueReady : t.issueNotReady}
             </span>
           </div>
-          <dl className="mt-2 divide-y divide-border/60 text-xs">
-            {Object.values(result.resolution.fields).map((field) => (
-              <div key={field.fieldKey} className="flex flex-wrap items-baseline justify-between gap-x-3 py-1.5" data-resolved-field={field.fieldKey}>
-                <dt className="min-w-0">
-                  <span className="font-medium">{labelFor(field.fieldKey)}</span>
-                  <span className="ml-1 font-mono text-[11px] text-muted-foreground">{field.fieldKey}</span>
-                </dt>
-                <dd className="flex flex-wrap items-baseline gap-2">
-                  <span className={field.value === undefined || field.value === null ? "italic text-muted-foreground" : ""}>
-                    {formatCommercialValue(field.value, t)}
-                  </span>
-                  <span className="text-[11px] text-muted-foreground" data-resolved-source>
-                    {field.source ? sourceLabel(field.source, t) : t.noSource}
-                    {field.overridden ? ` · ${t.overridden}` : ""}
-                  </span>
-                </dd>
-              </div>
-            ))}
-          </dl>
-          {groups.size === 0 ? (
-            <p className="mt-2 text-[11px] text-muted-foreground">{t.noQuestions}</p>
-          ) : (
-            (["draft", "issue", "conflict", "review"] as const).filter((group) => groups.has(group)).map((group) => (
-              <div key={group} className="mt-2" data-question-group={group}>
-                <div className="text-[11px] font-semibold text-amber-700 dark:text-amber-300">{t.questionGroups[group]}</div>
-                <ul className="mt-0.5 list-disc pl-5 text-xs">
-                  {groups.get(group)!.map((question) => (
-                    <li key={`${question.kind}:${question.fieldKey}`}>
-                      <span className="font-medium">{question.label}</span>: {question.question}
-                    </li>
-                  ))}
-                </ul>
-              </div>
-            ))
-          )}
+          <ResolvedFieldList fields={result.resolution.fields} labelFor={labelFor} />
+          <QuestionGroups questions={result.resolution.questions} />
         </div>
       )}
+    </div>
+  );
+}
+
+/**
+ * The account's invoices, newest state first as the server lists them, and the
+ * "Prepare invoice" entry. Selecting an invoice opens its preparation.
+ */
+function AccountInvoices({ workspaceId, account, canIssue, deals }: {
+  workspaceId: string;
+  account: CrmCustomerAccount;
+  canIssue: boolean;
+  deals: ReadonlyArray<{ id: string; name: string }>;
+}) {
+  const t = useT().crmPage.invoices;
+  const [loaded, setLoaded] = useState<{ invoices: CrmInvoiceSummary[]; operations: CrmOperationDefinition[] } | null>(null);
+  const [failed, setFailed] = useState(false);
+  const [attempt, setAttempt] = useState(0);
+  const [view, setView] = useState<{ kind: "prepare" } | { kind: "preparation"; preparationId: string } | null>(null);
+
+  useEffect(() => {
+    let cancelled = false;
+    setFailed(false);
+    void Promise.all([listCrmInvoices(workspaceId, { accountId: account.id }), listCrmOperationDefinitions(workspaceId)])
+      .then(([invoices, operations]) => {
+        if (cancelled) return;
+        setLoaded({ invoices, operations: operations.filter((operation) => operation.operationKind === "invoice" && operation.currentVersionId) });
+      })
+      .catch(() => { if (!cancelled) setFailed(true); });
+    return () => { cancelled = true; };
+  }, [workspaceId, account.id, attempt]);
+
+  const reload = () => setAttempt((value) => value + 1);
+
+  if (failed && !loaded) {
+    return (
+      <div className="mt-2 flex items-center justify-between gap-2 text-xs text-destructive">
+        <span>{t.loadFailed}</span>
+        <Button size="sm" variant="ghost" onClick={reload}>{t.retry}</Button>
+      </div>
+    );
+  }
+  if (!loaded) return <div className="mt-2 text-xs text-muted-foreground">{t.loading}</div>;
+
+  return (
+    <div className="mt-2 space-y-2 border-l border-border pl-3" data-crm-account-invoices>
+      <div className="flex flex-wrap items-center justify-between gap-2">
+        <span className="text-xs font-medium">{t.title}</span>
+        {view ? (
+          <Button size="xs" variant="ghost" className="max-md:min-h-11" onClick={() => { setView(null); reload(); }}>
+            <X aria-hidden />{t.close}
+          </Button>
+        ) : loaded.operations.length > 0 && (
+          <Button size="xs" variant="outline" className="max-md:min-h-11" onClick={() => setView({ kind: "prepare" })}>
+            <Plus aria-hidden />{t.prepare}
+          </Button>
+        )}
+      </div>
+      {!view && loaded.operations.length === 0 && <p className="text-[11px] text-muted-foreground">{t.noInvoiceOperation}</p>}
+      {view?.kind === "prepare" && (
+        <InvoicePreparationForm
+          workspaceId={workspaceId}
+          accountId={account.id}
+          deals={deals}
+          operations={loaded.operations}
+          onCancel={() => setView(null)}
+          onSaved={(preparationId) => { setView({ kind: "preparation", preparationId }); reload(); }}
+        />
+      )}
+      {view?.kind === "preparation" && (
+        <InvoicePreparationPanel
+          workspaceId={workspaceId}
+          preparationId={view.preparationId}
+          canIssue={canIssue}
+          deals={deals}
+          operations={loaded.operations}
+          onChanged={reload}
+        />
+      )}
+      {!view && (loaded.invoices.length === 0 ? (
+        <p className="text-[11px] text-muted-foreground">{t.empty}</p>
+      ) : (
+        <ul className="divide-y divide-border/60">
+          {loaded.invoices.map((invoice) => (
+            <li key={invoice.id} data-crm-invoice={invoice.id}>
+              <button type="button" disabled={!invoice.preparationId}
+                className="flex w-full min-w-0 flex-wrap items-center gap-x-2 gap-y-1 py-2 text-left text-xs hover:bg-muted/40 disabled:cursor-default max-md:min-h-11"
+                onClick={() => { if (invoice.preparationId) setView({ kind: "preparation", preparationId: invoice.preparationId }); }}>
+                <span className="font-mono">{invoice.number ?? t.numberAtIssue}</span>
+                <InvoiceStateBadge state={invoice.state} />
+                {invoice.issueDate && <span className="text-muted-foreground">{invoice.issueDate}</span>}
+                {invoice.total !== null && (
+                  <span className="ml-auto tabular-nums">{formatInvoiceMoney(invoice.total, invoice.currency)}</span>
+                )}
+              </button>
+            </li>
+          ))}
+        </ul>
+      ))}
     </div>
   );
 }

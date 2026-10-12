@@ -150,5 +150,28 @@ export async function authorizeCrmIntegrationCommand(client: PoolClient, context
       required('crm.commercial.configure', { operationKeys: command.operationKey })
       break
     case 'accept_operation_version': throw new CrmOperationsError('not_authorized', 'An operation version is accepted by a workspace owner or admin.')
+    case 'prepare_commercial_document': {
+      const key = (await existing(`SELECT s.seller_key AS key FROM crm_customer_accounts a JOIN crm_seller_profiles s
+        ON s.workspace_id=a.workspace_id AND s.id=a.seller_id WHERE a.workspace_id=$1 AND a.id=$2`, command.accountId)).key!
+      required('crm.commercial.write', { sellerKeys: key, operationKeys: command.operationKey })
+      break
+    }
+    case 'revise_commercial_preparation':
+    case 'mark_preparation_ready':
+    case 'issue_invoice': {
+      const row = await existing(`SELECT s.seller_key AS seller,d.operation_key AS operation FROM crm_commercial_preparations p
+        JOIN crm_seller_profiles s ON s.workspace_id=p.workspace_id AND s.id=p.seller_id
+        JOIN crm_operation_definitions d ON d.workspace_id=p.workspace_id AND d.id=p.operation_definition_id
+        WHERE p.workspace_id=$1 AND p.id=$2`, command.preparationId)
+      required(command.kind === 'issue_invoice' ? 'crm.commercial.issue' : 'crm.commercial.write', { sellerKeys: row.seller!, operationKeys: row.operation! })
+      break
+    }
+    case 'retry_invoice_issue':
+    case 'void_invoice': {
+      const row = await existing(`SELECT s.seller_key AS seller FROM crm_invoices i JOIN crm_seller_profiles s
+        ON s.workspace_id=i.workspace_id AND s.id=i.seller_id WHERE i.workspace_id=$1 AND i.id=$2`, command.invoiceId)
+      required('crm.commercial.issue', { sellerKeys: row.seller! })
+      break
+    }
   }
 }

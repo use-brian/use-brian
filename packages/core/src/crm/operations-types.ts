@@ -32,6 +32,14 @@ import {
   SaveCrmOperationDefinitionCommandSchema,
   AcceptCrmOperationVersionCommandSchema,
 } from './commercial-context.js'
+import {
+  PrepareCrmCommercialDocumentCommandSchema,
+  ReviseCrmCommercialPreparationCommandSchema,
+  MarkCrmPreparationReadyCommandSchema,
+  IssueCrmInvoiceCommandSchema,
+  RetryCrmInvoiceIssueCommandSchema,
+  VoidCrmInvoiceCommandSchema,
+} from './invoice-preparation.js'
 
 export const CrmOperationsUuidSchema = z.string().uuid()
 export const CrmOperationsStableKeySchema = z.string().trim().toLowerCase()
@@ -78,7 +86,7 @@ export const CrmOperationsActorSchema = z.discriminatedUnion('kind', [
   z.object({ kind: z.literal('integration_key'), credentialId: CrmOperationsUuidSchema }),
   z.object({
     kind: z.literal('system_job'),
-    job: z.enum(['association_expiry', 'association_reconciliation', 'entitlement_expiry', 'entitlement_reconciliation', 'crm_retention', 'crm_delivery']),
+    job: z.enum(['association_expiry', 'association_reconciliation', 'entitlement_expiry', 'entitlement_reconciliation', 'crm_retention', 'crm_delivery', 'commercial_documents']),
     runId: CrmOperationsUuidSchema,
   }),
   z.object({
@@ -705,6 +713,12 @@ export const CrmOperationsCommandSchema = z.union([
   AcceptCrmCommercialProfileCommandSchema,
   SaveCrmOperationDefinitionCommandSchema,
   AcceptCrmOperationVersionCommandSchema,
+  PrepareCrmCommercialDocumentCommandSchema,
+  ReviseCrmCommercialPreparationCommandSchema,
+  MarkCrmPreparationReadyCommandSchema,
+  IssueCrmInvoiceCommandSchema,
+  RetryCrmInvoiceIssueCommandSchema,
+  VoidCrmInvoiceCommandSchema,
 ])
 export type CrmOperationsCommand = z.infer<typeof CrmOperationsCommandSchema>
 
@@ -845,6 +859,9 @@ export function commandRequiresConfigurationAuthority(command: CrmOperationsComm
     || command.kind === 'accept_commercial_profile'
     || command.kind === 'save_operation_definition'
     || command.kind === 'accept_operation_version'
+    || command.kind === 'issue_invoice'
+    || command.kind === 'retry_invoice_issue'
+    || command.kind === 'void_invoice'
 }
 
 export function assertCrmOperationsAuthority(
@@ -881,6 +898,9 @@ export function assertCrmOperationsAuthority(
       assign_business_reference: 'crm.references.write',
       save_seller_profile: 'crm.commercial.configure', accept_commercial_profile: 'crm.commercial.configure',
       save_operation_definition: 'crm.commercial.configure', save_customer_account: 'crm.commercial.write',
+      prepare_commercial_document: 'crm.commercial.write', revise_commercial_preparation: 'crm.commercial.write',
+      mark_preparation_ready: 'crm.commercial.write', issue_invoice: 'crm.commercial.issue',
+      retry_invoice_issue: 'crm.commercial.issue', void_invoice: 'crm.commercial.issue',
     }
     const operation = operations[command.kind]
     if (!operation) throw new CrmOperationsError('not_authorized', 'This operation is not available to integration credentials.')

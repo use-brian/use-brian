@@ -22,6 +22,7 @@ import {
   isCrmConfigCommand,
   isCrmBusinessReferenceCommand,
   isCrmCommercialContextCommand,
+  isCrmCommercialDocumentCommand,
   canonicalCrmRequest,
   crmOperationsSha256,
   prepareCrmSubmissionAttachments,
@@ -54,6 +55,7 @@ import { hashSecret } from '../db/api-key-store.js'
 import { assertIntakeVerificationConfiguration, verifyIntakeIdentity } from './identity-verification.js'
 import { executeCrmBusinessReferenceCommand } from './business-references.js'
 import { executeCrmCommercialContextCommand } from './commercial-context.js'
+import { executeCrmCommercialDocumentCommand, processCrmIssueAttempts, renderCrmPreparationDraft, type CrmCommercialDocumentRuntime, type CrmDocumentFollowUp } from './commercial-preparations.js'
 
 type ServiceClock = () => Date
 
@@ -62,6 +64,8 @@ export type CrmOperationsServiceOptions = {
   privacy?:CrmPrivacyServicePort
   fileCleanup?:CrmImportFileCleanupPort
   retention?:CrmRetentionServicePort
+  /** Office binding for commercial documents; absent means drafts record an unavailable renderer. */
+  documents?: CrmCommercialDocumentRuntime
   now?: ServiceClock
   randomCredentialId?: () => string
   randomSecret?: () => string
@@ -479,6 +483,16 @@ async function executeSubmission(
   })
 }
 
+/** After-commit document work never changes the committed command result; its outcome is recorded on the preparation or attempt. */
+async function runDocumentFollowUp(store: CrmOperationsStore, runtime: CrmCommercialDocumentRuntime, followUp: CrmDocumentFollowUp): Promise<void> {
+  try {
+    if (followUp.kind === 'render_draft') await renderCrmPreparationDraft(store, runtime, followUp)
+    else await processCrmIssueAttempts(store, runtime, { attemptId: followUp.attemptId })
+  } catch (error) {
+    console.warn('[crm-documents] after-commit work failed; the durable state is retryable:', error instanceof Error ? error.message : 'unknown')
+  }
+}
+
 export function createCrmOperationsService(
   store: CrmOperationsStore,
   options: CrmOperationsServiceOptions = {},
@@ -580,6 +594,14 @@ export function createCrmOperationsService(
           if (context.authority.integration) await tx.authorizeIntegration(command)
           return executeCrmBusinessReferenceCommand(tx, command, now)
         })
+      }
+      if (isCrmCommercialDocumentCommand(command)) {
+        const outcome = await store.transaction(context, async (tx) => {
+          if (context.authority.integration) await tx.authorizeIntegration(command)
+          return executeCrmCommercialDocumentCommand(tx, command)
+        })
+        if (outcome.followUp) await runDocumentFollowUp(store, options.documents ?? { binding: null }, outcome.followUp)
+        return outcome.result
       }
       if (isCrmCommercialContextCommand(command)) {
         return store.transaction(context, async (tx) => {

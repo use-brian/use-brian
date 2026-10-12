@@ -8,7 +8,12 @@
  * caller-held `operationId`; a 4xx is a definite refusal, a network failure
  * or a 5xx is `uncertain` and is retried only with the SAME command.
  *
- * Spec: docs/architecture/features/crm-commercial-operations.md -> "Commercial context".
+ * Invoice preparation shares the same lane: the preparation, revision, ready,
+ * issue, retry and void commands, plus the preparation and invoice reads.
+ * Money arrives as decimal strings already rounded by the server; the browser
+ * only formats them.
+ *
+ * Spec: docs/architecture/features/crm-commercial-operations.md -> "Commercial context", "Invoice preparation".
  * [COMP:app-web/crm-commercial-operations]
  */
 
@@ -128,6 +133,93 @@ export type CrmOperationDefinition = {
   versions: CrmOperationVersion[];
 };
 
+export type CrmInvoiceState = "draft" | "ready" | "issue_pending" | "issue_failed" | "issued" | "voided";
+
+export type CrmInvoiceLineInput = { description: string; quantity: string; unitPrice: string; dealId: string | null };
+
+/** One complete preparation version: a revision always sends all of it, never a patch. */
+export type CrmPreparationContent = {
+  dealIds: string[];
+  servicePeriodStart: string | null;
+  servicePeriodEnd: string | null;
+  lines: CrmInvoiceLineInput[];
+  values: CrmCommercialFields;
+  allocations: Array<{ dealId: string; amount: string }>;
+};
+
+export type CrmInvoiceTotals = {
+  currency: string;
+  minorUnits: number;
+  lines: Array<CrmInvoiceLineInput & { amount: string }>;
+  subtotal: string;
+  taxRate: string;
+  taxAmount: string;
+  total: string;
+};
+
+type CrmIssueAttempt = {
+  attempt: number;
+  state: "pending" | "running" | "failed" | "succeeded";
+  errorCode: string | null;
+  errorDetail: string | null;
+  createdAt: string;
+  finishedAt?: string | null;
+};
+
+export type CrmInvoiceSummary = {
+  id: string;
+  state: CrmInvoiceState;
+  number: string | null;
+  issueDate: string | null;
+  currency: string | null;
+  minorUnits?: number | null;
+  total: string | null;
+  preparationId: string | null;
+  accountId: string;
+  version: number;
+  issuedAt: string | null;
+};
+
+export type CrmInvoiceDetail = CrmInvoiceSummary & {
+  subtotal: string | null;
+  taxRate?: string | null;
+  taxAmount: string | null;
+  xlsxFileId: string | null;
+  pdfFileId: string | null;
+  pdfPageCount: number | null;
+  voidedAt: string | null;
+  voidReason: string | null;
+  lines: Array<{ position?: number; description: string; quantity: string; unitPrice: string; amount: string | null; dealId: string | null }>;
+  allocations: Array<{ dealId: string; amount: string | null }>;
+  attempts: CrmIssueAttempt[];
+};
+
+export type CrmPreparationDetail = {
+  preparation: {
+    id: string;
+    title: string;
+    state: CrmInvoiceState;
+    version: number;
+    readyVersion: number | null;
+    operationVersionId: string;
+    accountId: string;
+    officeArtifactId: string | null;
+    officeVersion: number | null;
+    officeBinding?: { version: number } | null;
+    draftRenderError: string | null;
+  };
+  current: {
+    version: number;
+    content: CrmPreparationContent;
+    resolution: Pick<CrmCommercialResolution, "fields"> & Partial<CrmCommercialResolution>;
+    totals: { invoice: CrmInvoiceTotals | null; allocations?: Array<{ dealId: string; amount: string }> } | null;
+    questions: CrmResolutionQuestion[];
+    draftReady: boolean;
+    issueReady: boolean;
+  } | null;
+  invoice: CrmInvoiceDetail | null;
+};
+
 type CrmResolvedField = {
   fieldKey: string;
   type: CrmCommercialFieldType;
@@ -204,7 +296,13 @@ export type CrmCommercialCommand =
     operationKey: string;
     versionId: string;
     expectedVersion: number;
-  };
+  }
+  | ({ kind: "prepare_commercial_document"; operationId: string; operationKey: string; accountId: string; title?: string } & CrmPreparationContent)
+  | ({ kind: "revise_commercial_preparation"; operationId: string; preparationId: string; expectedVersion: number } & CrmPreparationContent)
+  | { kind: "mark_preparation_ready"; operationId: string; preparationId: string; expectedVersion: number }
+  | { kind: "issue_invoice"; operationId: string; preparationId: string; expectedVersion: number; issueDate: string }
+  | { kind: "retry_invoice_issue"; operationId: string; invoiceId: string; expectedVersion: number }
+  | { kind: "void_invoice"; operationId: string; invoiceId: string; expectedVersion: number; reason: string };
 
 export type CrmCommercialCommandResult = {
   command: string;
@@ -288,4 +386,30 @@ export function executeCrmCommercialCommand(
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify(command),
   });
+}
+
+/** One preparation: current version, resolution, totals, questions, Office draft, and its invoice with attempts. */
+export function getCrmPreparation(workspaceId: string, preparationId: string): Promise<CrmPreparationDetail> {
+  return crmOperationsRequest(`${base(workspaceId)}/preparations/${encodeURIComponent(preparationId)}`);
+}
+
+/** Every invoice of one account in the caller's scope, following continuation. */
+export async function listCrmInvoices(workspaceId: string, input: { accountId: string }): Promise<CrmInvoiceSummary[]> {
+  const invoices: CrmInvoiceSummary[] = [];
+  const seen = new Set<string>();
+  let cursor: string | null = null;
+  do {
+    const params = new URLSearchParams({ accountId: input.accountId, limit: "100" });
+    if (cursor) params.set("cursor", cursor);
+    const body: { invoices?: CrmInvoiceSummary[]; nextCursor?: string | null } =
+      await crmOperationsRequest(`${base(workspaceId)}/invoices?${params}`);
+    invoices.push(...requireArray(body.invoices));
+    const next = body.nextCursor ?? null;
+    if (next !== null && (typeof next !== "string" || !next || seen.has(next))) {
+      throw new CrmReferenceRequestError("invalid_response", 502);
+    }
+    cursor = next;
+    if (cursor) seen.add(cursor);
+  } while (cursor);
+  return invoices;
 }

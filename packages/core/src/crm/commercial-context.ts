@@ -11,6 +11,7 @@
  */
 
 import { z } from 'zod'
+import { CrmInvoiceTemplateMapSchema } from './invoice-template-map.js'
 
 const Uuid = z.string().uuid()
 const StableKey = z.string().trim().toLowerCase().regex(/^[a-z][a-z0-9_-]{0,62}$/)
@@ -80,7 +81,8 @@ export const CrmOperationVersionInputSchema = z.object({
     .refine((values) => new Set(values.map((value) => value.fieldKey)).size === values.length, 'Field keys must be unique')
     .refine((values) => new Set(values.flatMap((value) => value.templateToken ? [value.templateToken] : [])).size
       === values.filter((value) => value.templateToken).length, 'Template tokens must be unique'),
-  templateBinding: z.object({ templateId: Uuid, templateVersionId: Uuid.optional(), pdfPreset: z.enum(['invoice', 'worksheet']).default('invoice') }).strict().nullable().default(null),
+  templateBinding: z.object({ templateId: Uuid, templateVersionId: Uuid.optional(), pdfPreset: z.enum(['invoice', 'worksheet']).default('invoice'),
+    map: CrmInvoiceTemplateMapSchema.optional() }).strict().nullable().default(null),
   reviewPolicy: z.enum(['direct', 'exact_version_review']).default('direct'),
   referenceDefinitionKey: StableKey.nullable().default(null),
 }).strict()

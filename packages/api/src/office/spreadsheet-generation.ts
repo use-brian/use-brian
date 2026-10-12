@@ -252,6 +252,47 @@ export async function generateSpreadsheetFromTemplate(params: {
   return assertOfficeArtifactSnapshot(snapshot) as SpreadsheetSnapshot
 }
 
+export type SpreadsheetTemplateValue = SpreadsheetValue
+export type SpreadsheetTokenCell = { token: string; sheetId: string; cellId: string; address: string }
+
+/**
+ * Deterministic template fill: no model. Every admitted placeholder gets an
+ * explicit value; `deferred` tokens are staged for a later step and skip type
+ * validation only. Returns the whole-cell location of each token so later
+ * steps can rewrite exactly those cells through canonical commands.
+ */
+export function fillSpreadsheetTemplateValues(params: {
+  template: OfficeTemplateBundle
+  artifactId: string
+  workspaceId: string
+  templateVersionId: string
+  title: string
+  values: Record<string, SpreadsheetTemplateValue>
+  deferred?: ReadonlySet<string>
+}): { snapshot: SpreadsheetSnapshot; tokenCells: SpreadsheetTokenCell[] } {
+  if (params.template.family !== 'spreadsheet' || params.template.snapshot.family !== 'spreadsheet') throw new Error('Spreadsheet fill requires a spreadsheet template')
+  const placeholders = spreadsheetPlaceholders(params.template.snapshot)
+  if (placeholders.length === 0) throw new Error('Spreadsheet template contains no fillable fields')
+  const values = Object.fromEntries(Object.entries(params.values).map(([key, value]) => [key, SpreadsheetValueSchema.parse(value)]))
+  assertExactValues(placeholders, values)
+  validateTemplateFieldValues(params.template, values, params.deferred)
+  const tokenCells: SpreadsheetTokenCell[] = []
+  for (const sheet of params.template.snapshot.worksheets) {
+    for (const cell of sheet.cells) {
+      const exact = !cell.formula && cell.valueType === 'string' && typeof cell.value === 'string' ? /^\{\{([A-Z][A-Z0-9_]*)\}\}$/.exec(cell.value.trim()) : null
+      if (exact?.[1]) tokenCells.push({ token: exact[1], sheetId: sheet.id, cellId: cell.id, address: cell.address })
+    }
+  }
+  const source = structuredClone(params.template.snapshot)
+  const snapshot = replaceSpreadsheetPlaceholders({
+    snapshot: { ...source, artifactId: params.artifactId, workspaceId: params.workspaceId, templateVersionId: params.templateVersionId,
+      resources: structuredClone(params.template.resources) },
+    title: params.title,
+    values,
+  })
+  return { snapshot: assertOfficeArtifactSnapshot(snapshot) as SpreadsheetSnapshot, tokenCells }
+}
+
 function workbookContext(snapshot: SpreadsheetSnapshot, selectedIds: Set<string>): unknown[] {
   return snapshot.worksheets.flatMap((sheet) => sheet.cells
     .filter((cell) => spreadsheetCellDisplayValue(cell).trim() || selectedIds.has(cell.id))

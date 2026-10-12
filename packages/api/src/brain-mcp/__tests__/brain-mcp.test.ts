@@ -172,6 +172,14 @@ const CRM_TOOLS_STUB: BrainCrmTools = {
   saveCrmSellerProfile: { ...stubCoreTool('saveCrmSellerProfile'), requiresCapability: 'configure', homeAppToolSet: { app: 'crm', set: 'write' } },
   acceptCrmCommercialProfile: { ...stubCoreTool('acceptCrmCommercialProfile'), requiresCapability: 'configure', homeAppToolSet: { app: 'crm', set: 'write' } },
   proposeCrmOperationVersion: { ...stubCoreTool('proposeCrmOperationVersion'), requiresCapability: 'configure', homeAppToolSet: { app: 'crm', set: 'write' } },
+  getCrmPreparation: stubCoreTool('getCrmPreparation', true),
+  listCrmInvoices: stubCoreTool('listCrmInvoices', true),
+  prepareCrmInvoice: stubCoreTool('prepareCrmInvoice'),
+  reviseCrmPreparation: stubCoreTool('reviseCrmPreparation'),
+  markCrmPreparationReady: stubCoreTool('markCrmPreparationReady'),
+  issueCrmInvoice: { ...stubCoreTool('issueCrmInvoice'), requiresCapability: 'configure', homeAppToolSet: { app: 'crm', set: 'write' } },
+  retryCrmInvoiceIssue: { ...stubCoreTool('retryCrmInvoiceIssue'), requiresCapability: 'configure', homeAppToolSet: { app: 'crm', set: 'write' } },
+  voidCrmInvoice: { ...stubCoreTool('voidCrmInvoice'), requiresCapability: 'configure', homeAppToolSet: { app: 'crm', set: 'write' } },
 }
 
 const RETRIEVAL_TOOLS_STUB: BrainRetrievalTools = {
@@ -271,6 +279,8 @@ const READ_TOOL_NAMES = [
   'listCrmCommercialProfiles',
   'resolveCrmCommercialFields',
   'listCrmOperationDefinitions',
+  'getCrmPreparation',
+  'listCrmInvoices',
   'listTasks',
   'listRecordings',
   'searchBrain',
@@ -316,6 +326,9 @@ const WRITE_TOOL_NAMES = [
   'setDealPipelineStage',
   'assignCrmReference',
   'saveCrmCustomerAccount',
+  'prepareCrmInvoice',
+  'reviseCrmPreparation',
+  'markCrmPreparationReady',
   'updateTask',
 ] as const
 

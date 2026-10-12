@@ -238,11 +238,12 @@ async function resolveValue(tx: CrmOperationsTransaction, definition: CrmReferen
  * references audit without their value and publish no outbox event.
  */
 function scopedPublication(kind: string): boolean {
+  // Invoices and accounts may be stricter than any canonical entity they relate to.
   return kind === 'company' || kind === 'deal'
 }
 
 /** A reference target: a canonical company or deal, or a customer account. */
-type ReferenceTarget = { id: string; kind: string; displayName: string; updatedAt: string; parentCompanyId: string | null }
+export type ReferenceTarget = { id: string; kind: string; displayName: string; updatedAt: string; parentCompanyId: string | null }
 
 async function lockTarget(tx: CrmOperationsTransaction, kind: string, id: string): Promise<ReferenceTarget> {
   const { client, context } = tx.commercial()
@@ -444,6 +445,42 @@ async function importReferences(tx: CrmOperationsTransaction, command: Command<'
       details: { definitionKey: definition.definitionKey, partitions: command.partitionCounters } })
   }
   return commercialResult(command.kind, { definitionKey: definition.definitionKey, imported, counters: command.partitionCounters }, { created: true })
+}
+
+/**
+ * Lifecycle-owned assignment for definitions whose event is `issue` or
+ * `approval`. The caller holds the target lock and has already authorized
+ * the lifecycle command; this reuses the same allocation, reservation,
+ * history and audit as a direct assignment. Returns the existing value when
+ * the target already has one.
+ */
+export async function assignCrmReferenceAtEvent(tx: CrmOperationsTransaction, params: {
+  definitionKey: string
+  event: 'issue' | 'approval'
+  target: ReferenceTarget
+  businessDate?: string
+  categoryKey?: string
+  value?: string
+  external?: { provider: string; remoteId: string }
+  operationId: string
+}): Promise<CrmReferenceRow> {
+  const { client, context } = tx.commercial()
+  const definition = await readDefinitionByKey(client, context.workspaceId, params.definitionKey)
+  if (!definition || definition.status !== 'active') refuse('conflict', 'The numbering definition is not active.', { reason: 'definition_inactive', definitionKey: params.definitionKey })
+  if (definition.assignmentEvent !== params.event || !definition.targetKinds.includes(params.target.kind as never)) {
+    refuse('conflict', `The numbering definition is not configured for ${params.event} on ${params.target.kind}.`, { reason: 'definition_mismatch', definitionKey: params.definitionKey })
+  }
+  const existing = await readActiveReference(client, context.workspaceId, definition.id, params.target.id)
+  if (existing) return existing
+  const allocation = await resolveValue(tx, definition, params.target, params)
+  const saved = await persist(tx, definition, { kind: params.target.kind, id: params.target.id }, allocation, params.operationId)
+  await insertHistory(client, context.workspaceId, { referenceId: saved.id, definitionId: definition.id, targetKind: saved.targetKind,
+    targetId: saved.targetId, action: 'assigned', formerValue: null, newValue: saved.printableValue, reason: null,
+    actor: actorColumns(context), operationId: params.operationId })
+  const published = scopedPublication(params.target.kind)
+  await commercialAudit(tx, context, { action: 'crm.reference.assigned', subjectKind: published ? params.target.kind : `crm_${params.target.kind}`, subjectId: params.target.id,
+    details: { referenceId: saved.id, definitionKey: definition.definitionKey, origin: saved.origin, event: params.event, ...(published ? { value: saved.printableValue } : {}) } })
+  return saved
 }
 
 export async function executeCrmBusinessReferenceCommand(

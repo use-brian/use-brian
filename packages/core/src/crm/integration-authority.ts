@@ -13,7 +13,7 @@ export const CRM_INTEGRATION_OPERATIONS = [
   'crm.delivery.read', 'crm.delivery.dispatch', 'association.read', 'association.orders.write',
   'association.provider_events.write',
   'crm.references.read', 'crm.references.write', 'crm.references.configure',
-  'crm.commercial.read', 'crm.commercial.write', 'crm.commercial.configure',
+  'crm.commercial.read', 'crm.commercial.write', 'crm.commercial.configure', 'crm.commercial.issue',
 ] as const
 export const CrmIntegrationOperationSchema = z.enum(CRM_INTEGRATION_OPERATIONS)
 export type CrmIntegrationOperation = z.infer<typeof CrmIntegrationOperationSchema>
@@ -52,7 +52,7 @@ export const CRM_INTEGRATION_RESOURCE_CATALOG = {
   'crm.references.read': ['referenceDefinitionKeys'], 'crm.references.write': ['referenceDefinitionKeys'],
   'crm.references.configure': ['referenceDefinitionKeys'],
   'crm.commercial.read': ['sellerKeys', 'operationKeys'], 'crm.commercial.write': ['sellerKeys', 'operationKeys'],
-  'crm.commercial.configure': ['sellerKeys', 'operationKeys'],
+  'crm.commercial.configure': ['sellerKeys', 'operationKeys'], 'crm.commercial.issue': ['sellerKeys', 'operationKeys'],
 } as const satisfies Record<CrmIntegrationOperation, readonly CrmIntegrationSelector[]>
 
 export const CrmIntegrationGrantSchema = z.object({

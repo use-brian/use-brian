@@ -123,7 +123,7 @@ import {
   createInternalLinkTools,
   createCrmTools,
   createCrmOperationsTools, createCrmCredentialTools, CRM_INTEGRATION_OPERATIONS, CRM_INTEGRATION_RESOURCE_CATALOG,
-  createCrmBusinessReferenceTools, createCrmCommercialContextTools,
+  createCrmBusinessReferenceTools, createCrmCommercialContextTools, createCrmCommercialDocumentTools,
   createAssociationTools,
   createCrmEmailDraftTools,
   createCampaignTools,
@@ -300,6 +300,7 @@ import {
 import { createDbCrmOperationsStore } from './db/crm-operations-store.js'
 import { createCrmReferenceReadStore } from './db/crm-business-reference-store.js'
 import { createCrmCommercialContextReadStore } from './db/crm-commercial-context-store.js'
+import { createCrmCommercialDocumentReadStore } from './db/crm-commercial-document-store.js'
 import { createDbCrmIntakeReadStore } from './db/crm-intake-store.js'
 import { createCampaignConversionOutboxWorker } from './campaigns/conversion-outbox.js'
 import { createCampaignDispatchService } from './campaigns/dispatch.js'
@@ -640,7 +641,9 @@ import { officeReleaseContextRevision, officeReleaseRoutes } from './routes/offi
 import { officeLifecycleRoutes } from './routes/office-lifecycle.js'
 import { officeOfflineContextRevision, officeOfflineRoutes } from './routes/office-offline.js'
 import { officeResourceRoutes } from './routes/office-resources.js'
-import { createOfficeResourceReader } from './office/resource-read.js'
+import { createOfficeReleaseRuntime, createOfficeTemplateBundleReader } from './office/release-runtime.js'
+import { createCrmOfficeBindingFromOffice } from './crm-operations/office-binding.js'
+import { crmDocumentWorker } from './crm-operations/commercial-preparations.js'
 import { bindOfficeFile, classifyOfficeOutput, officeFileBindingRevision, fileMatchesOfficeOutput, officeOutputScopeRevision, officeScopePathSegment, sameOfficeFileBinding, type OfficeOutputScope } from './office/file-binding.js'
 import { readOfficeProjection } from './db/office-read-projection.js'
 import { internalOfficeCheckpointRoutes } from './routes/internal-office-checkpoint.js'
@@ -1873,7 +1876,9 @@ export async function bootOpenApi(opts: BootOpenApiOptions): Promise<BootResult>
     publicOrigin: env.CAMPAIGN_PUBLIC_ORIGIN ?? env.API_URL,
     oneClickEnabled: Boolean(campaignDkim),
   })
-  const crmOperationsService = createCrmOperationsService(createDbCrmOperationsStore(), { deliveries: crmDeliveries })
+  // The Office binding is attached once Office storage and release are composed below.
+  const crmDocumentRuntime: import('./crm-operations/commercial-preparations.js').CrmCommercialDocumentRuntime = { binding: null }
+  const crmOperationsService = createCrmOperationsService(createDbCrmOperationsStore(), { deliveries: crmDeliveries, documents: crmDocumentRuntime })
   const providerEntitlements = createProviderEntitlementService({
     pool: getPool(),
     operationsForTransaction: (client) => createCrmOperationsService(createDbCrmOperationsStore(getPool(), client)),
@@ -4409,6 +4414,8 @@ export async function bootOpenApi(opts: BootOpenApiOptions): Promise<BootResult>
   for (const tool of Object.values(crmBusinessReferenceTools)) allTools.set(tool.name, tool)
   const crmCommercialContextTools = createCrmCommercialContextTools({ reads: createCrmCommercialContextReadStore(), service: crmOperationsService })
   for (const tool of Object.values(crmCommercialContextTools)) allTools.set(tool.name, tool)
+  const crmCommercialDocumentTools = createCrmCommercialDocumentTools({ reads: createCrmCommercialDocumentReadStore(), service: crmOperationsService })
+  for (const tool of Object.values(crmCommercialDocumentTools)) allTools.set(tool.name, tool)
   const crmCredentialTools = createCrmCredentialTools({
     preview: async (input, authority, parent) => ({
       ...await crmIntegrationStore.bindingOptions(authority.ceiling.workspaceId, authority.ceiling.userId, input, authority, parent),
@@ -5697,7 +5704,7 @@ export async function bootOpenApi(opts: BootOpenApiOptions): Promise<BootResult>
       : {}),
     memoryTools: brainMemoryTools,
     taskTools,
-    crmTools: { ...crmTools, ...crmOperationsTools, ...crmBusinessReferenceTools, ...crmCommercialContextTools },
+    crmTools: { ...crmTools, ...crmOperationsTools, ...crmBusinessReferenceTools, ...crmCommercialContextTools, ...crmCommercialDocumentTools },
     credentialTools: crmCredentialTools,
     associationTools,
     retrievalTools: brainRetrievalTools,
@@ -7011,70 +7018,15 @@ export async function bootOpenApi(opts: BootOpenApiOptions): Promise<BootResult>
     wake: userId => wakeOfficeGeneration?.(userId),
     cancel: officeGenerationStore.cancel,
   }))
-  const readBoundOfficeFile = filesApi ? async (params: { userId: string; workspaceId: string; assistantId?: string | null; fileId: string }) => {
-    const membership = await getWorkspaceMembershipWithClearanceSystem(params.userId, params.workspaceId)
-    if (!membership) return null
-    const clearance = membership.role === 'owner' || membership.role === 'admin' ? 'confidential' as const : membership.clearance
-    const context = {
-      workspaceId: params.workspaceId,
-      userId: params.userId,
-      assistantId: params.assistantId ?? null,
-      assistantKind: 'standard' as const,
-      clearance,
-    }
-    const read = await filesApi!.readBytes(context, params.fileId)
-    if (!read.ok || read.value.file.workspaceId !== params.workspaceId) return null
-    const revision = workspaceFileReadRevision(read.value.file)
-    const projectionStarted = performance.now()
-    const projection = await getWorkspaceFileReadProjection({
-      workspaceId: params.workspaceId,
-      userId: params.userId,
-      assistantId: params.assistantId ?? params.userId,
-      assistantKind: 'standard',
-      clearance,
-    }, read.value.file.id)
-    const validForMs = Math.floor(Math.min(30_000, projection?.validForMs ?? 0) - (performance.now() - projectionStarted))
-    if (!projection || workspaceFileReadRevision(projection.file) !== revision || !Number.isFinite(validForMs) || validForMs <= 0) return null
-    return { bytes: read.value.bytes, binding: bindOfficeFile(read.value.file, read.value.bytes), validForMs }
-  } : null
-  const saveClassifiedOfficeFile = filesApi ? async (params: {
-    userId: string
-    workspaceId: string
-    path: string
-    bytes: Uint8Array
-    mime: string
-    hash: string
-    scope: OfficeOutputScope
-  }): Promise<string> => {
-    const membership = await getWorkspaceMembershipWithClearanceSystem(params.userId, params.workspaceId)
-    if (!membership) throw new Error('Office output membership unavailable')
-    const clearance = membership.role === 'owner' || membership.role === 'admin' ? 'confidential' as const : membership.clearance
-    const context = {
-      workspaceId: params.workspaceId,
-      userId: params.userId,
-      assistantKind: 'standard' as const,
-      clearance,
-      writeSensitivity: params.scope.sensitivity,
-      writeCompartments: params.scope.compartments,
-      writeProjectIds: params.scope.projectIds,
-    }
-    const existing = await filesApi!.stat(context, params.path)
-    if (existing.ok) {
-      const read = await filesApi!.readBytes(context, existing.value.id)
-      if (!read.ok || !fileMatchesOfficeOutput(read.value.file, read.value.bytes, params)) {
-        throw new Error('office_output_reuse_mismatch')
-      }
-      return read.value.file.id
-    }
-    const saved = await filesApi!.writeBytes(context, {
-      path: params.path,
-      bytes: params.bytes,
-      mime: params.mime,
-      sensitivity: params.scope.sensitivity,
-    })
-    if (!saved.ok) throw new Error(`Office output save failed: ${saved.error.kind}`)
-    return saved.value.id
-  } : null
+  // Late-bound: PDF session assets compose on top of the classified writer below.
+  let officePdfSessionReader: import('./office/release-runtime.js').OfficePdfSessionAssetReader | null = null
+  const officeReleaseRuntime = filesApi ? createOfficeReleaseRuntime({
+    filesApi, artifacts: officeArtifactStore, live: officeLiveStore, releases: officeReleaseStore, templates: officeTemplateStore,
+    brandClaims: async (userId, workspaceId) => (await getBrandStore().get(userId, workspaceId))?.activeRecord?.claims,
+    pdfSessionAssets: () => officePdfSessionReader,
+  }) : null
+  const readBoundOfficeFile = officeReleaseRuntime?.readBoundOfficeFile ?? null
+  const saveClassifiedOfficeFile = officeReleaseRuntime?.saveClassifiedOfficeFile ?? null
   const pdfSessionFiles = filesApi
   const pdfSessionAssets = pdfSessionFiles && saveClassifiedOfficeFile ? {
     async write(params: Parameters<import('./office/pdf-session-assets.js').PdfSessionAssetPort['write']>[0]) {
@@ -7127,6 +7079,7 @@ export async function bootOpenApi(opts: BootOpenApiOptions): Promise<BootResult>
       return { id }
     },
   } satisfies import('./office/pdf-session-assets.js').PdfSessionAssetPort : null
+  officePdfSessionReader = pdfSessionAssets as unknown as typeof officePdfSessionReader
   const pdfSessionService = pdfSessionAssets && canBootPdfEditingSession() ? createPdfSessionService({
     sessions: officePdfSessionStore,
     live: officeLiveStore,
@@ -7311,21 +7264,8 @@ export async function bootOpenApi(opts: BootOpenApiOptions): Promise<BootResult>
     }
     return committed
   }
-  const readOfficeTemplateBundle = async (userId: string, workspaceId: string, versionId: string, onSource?: (scope: import('./office/file-binding.js').OfficeOutputScope, revision: string) => void, execution?: { assistantId: string; clearance: Sensitivity; compartments?: string[] | null; projectIds?: string[] | null }) => {
-    if (!filesApi) return null
-    const version = await officeTemplateStore.getVersion(userId, versionId)
-    if (!version || version.workspaceId !== workspaceId || version.status !== 'admitted') return null
-    const read = await filesApi.readBytes({ workspaceId, userId, assistantKind: 'standard', clearance: 'confidential', ...execution }, version.bundleFileId)
-    if (!read.ok) throw new Error(`Office template bundle unavailable: ${read.error.kind}`)
-    const templateRoot = await officeTemplateStore.get(userId, version.templateId)
-    const root = templateRoot?.draftArtifactId ? await officeArtifactStore.get(userId, templateRoot.draftArtifactId) : null
-    if (!templateRoot || !root || root.workspaceId !== workspaceId) throw new Error('Office template source unavailable')
-    const binding = bindOfficeFile(read.value.file, read.value.bytes)
-    const sourceScope = classifyOfficeOutput(binding, root)
-    onSource?.(sourceScope, JSON.stringify([officeFileBindingRevision(binding), root.id, root.sensitivity, [...root.compartments].sort(), [...root.projectIds].sort(), templateRoot.lifecycleState]))
-    const stored = JSON.parse(new TextDecoder().decode(read.value.bytes))
-    return materializeOfficeTemplateBundleForGeneration(stored, { id: version.id, version: version.version, status: 'admitted' })
-  }
+  const officeTemplateBundleReader = filesApi ? createOfficeTemplateBundleReader({ filesApi, templates: officeTemplateStore, artifacts: officeArtifactStore }) : null
+  const readOfficeTemplateBundle: NonNullable<typeof officeTemplateBundleReader> = async (...args) => officeTemplateBundleReader ? officeTemplateBundleReader(...args) : null
   const createGenerationRunner = (userId: string) => createOfficeGenerationWorker({
     store: officeGenerationStore,
     workerUserId: userId,
@@ -7718,11 +7658,7 @@ export async function bootOpenApi(opts: BootOpenApiOptions): Promise<BootResult>
       return { version: version.version }
     },
   }))
-  const readOfficeResource = filesApi ? createOfficeResourceReader({
-    filesApi, getResource: officeTemplateStore.getResource,
-    membership: getWorkspaceMembershipWithClearanceSystem,
-    readProjection: getWorkspaceFileReadProjection,
-  }) : async () => null
+  const readOfficeResource = officeReleaseRuntime?.readOfficeResource ?? (async () => null)
   if (filesApi) app.use('/api/office', requireAuth(env.JWT_SECRET), officeResourceRoutes({
     async load(userId, artifactId) {
       const [artifact, access, live] = await Promise.all([
@@ -7754,58 +7690,10 @@ export async function bootOpenApi(opts: BootOpenApiOptions): Promise<BootResult>
     },
     readResource: readOfficeResource,
   }))
-  const loadOfficeReleaseContext = async (userId: string, artifactId: string) => {
-    const [artifact, access, live, head] = await Promise.all([officeArtifactStore.get(userId, artifactId), resolveOfficeAccess(userId, artifactId), officeLiveStore.get(userId, artifactId), officeArtifactStore.getHeadVersion(userId, artifactId)])
-    if (!artifact || !access || !live) return null
-    const [claims, media] = artifact.headVersionId ? await Promise.all([officeReleaseStore.listClaims(userId, artifactId, artifact.headVersionId), officeReleaseStore.listMedia(userId, artifactId, artifact.headVersionId)]) : [[], []]
-    // The brand's APPROVED claims register (docs/architecture/features/brand.md
-    // → "Claims reach the release gate"). Best-effort: a brand read failing must
-    // not make a release impossible, and no brand simply contributes nothing.
-    let brandClaims: readonly import('@use-brian/shared').BrandClaim[] | undefined
-    try {
-      const brand = await getBrandStore().get(userId, artifact.workspaceId)
-      brandClaims = brand?.activeRecord?.claims
-    } catch (err) {
-      console.warn('[office-release] brand claims lookup failed:', err)
-    }
-    return { artifact: { ...artifact, headVersionId: head?.snapshotHash === live.canonicalHash ? artifact.headVersionId : null }, access, snapshot: live.snapshot, claims, brandClaims, media }
-  }
-  const revalidateOfficeRelease = async (params: {
-    userId: string
-    expected: NonNullable<Awaited<ReturnType<typeof loadOfficeReleaseContext>>>
-    releasedFileId?: string
-    releasedHash?: string
-    releasedMime?: string
-  }): Promise<{ scope: OfficeOutputScope; validForMs: number } | null> => {
-    const current = await loadOfficeReleaseContext(params.userId, params.expected.artifact.id)
-    if (!current || officeReleaseContextRevision(current) !== officeReleaseContextRevision(params.expected)) return null
-    const session = current.artifact.mode === 'session'
-    const resourceReads = await Promise.all(current.snapshot.resources.map(async (ref) => {
-      if (session && pdfSessionAssets) {
-        const resource = await pdfSessionAssets.read({ userId: params.userId, workspaceId: current.artifact.workspaceId, fileId: ref.id })
-        return resource && resource.file.mime === ref.mime && resource.file.sha256 === ref.hash ? resource : null
-      }
-      const resource = await readOfficeResource(params.userId, current.artifact.workspaceId, ref.id)
-      return resource && resource.hash === ref.hash && resource.mime === ref.mime ? resource : null
-    }))
-    if (resourceReads.some((resource) => resource === null)) return null
-    const scope = classifyOfficeOutput({
-      sensitivity: current.artifact.sensitivity,
-      compartments: current.artifact.compartments,
-      projectIds: current.artifact.projectIds,
-    }, ...resourceReads.flatMap((resource) => resource && 'binding' in resource ? [resource.binding] : []))
-    let validForMs = session && current.artifact.expiresAt
-      ? Math.min(30_000, current.artifact.expiresAt.getTime() - Date.now())
-      : resourceReads.reduce((ttl, resource) => Math.min(ttl, resource && 'validForMs' in resource ? resource.validForMs : ttl), 30_000)
-    if (params.releasedFileId) {
-      const output = await readBoundOfficeFile!({ userId: params.userId, workspaceId: current.artifact.workspaceId, fileId: params.releasedFileId })
-      if (!output || output.binding.hash !== params.releasedHash || output.binding.mime !== params.releasedMime ||
-        officeOutputScopeRevision(output.binding) !== officeOutputScopeRevision(scope)) return null
-      validForMs = Math.min(validForMs, output.validForMs)
-    }
-    return Number.isFinite(validForMs) && validForMs > 0 ? { scope, validForMs: Math.floor(validForMs) } : null
-  }
-  if (filesApi) app.use('/api/office', requireAuth(env.JWT_SECRET), officeReleaseRoutes({
+  const loadOfficeReleaseContext = async (userId: string, artifactId: string) => officeReleaseRuntime ? officeReleaseRuntime.loadOfficeReleaseContext(userId, artifactId) : null
+  const revalidateOfficeRelease: import('./routes/office-releases.js').OfficeReleaseRouteDeps['revalidate'] = async (params) =>
+    officeReleaseRuntime ? officeReleaseRuntime.revalidateOfficeRelease(params) : null
+  const officeReleaseDeps: import('./routes/office-releases.js').OfficeReleaseRouteDeps | null = filesApi ? {
     load: loadOfficeReleaseContext,
     resolveResource: (userId, workspaceId) => async (resourceId) => readOfficeResource(userId, workspaceId, resourceId),
     revalidate: revalidateOfficeRelease,
@@ -7849,7 +7737,12 @@ export async function bootOpenApi(opts: BootOpenApiOptions): Promise<BootResult>
       ])
       return { artifactId: shell.id, version: version.version }
     },
-  }))
+  } : null
+  if (officeReleaseDeps) app.use('/api/office', requireAuth(env.JWT_SECRET), officeReleaseRoutes(officeReleaseDeps))
+  if (officeReleaseDeps && filesApi && officeTemplateBundleReader) {
+    crmDocumentRuntime.binding = createCrmOfficeBindingFromOffice({ filesApi, artifacts: officeArtifactStore, live: officeLiveStore,
+      readTemplateBundle: (userId, workspaceId, versionId) => officeTemplateBundleReader(userId, workspaceId, versionId), releaseDeps: officeReleaseDeps })
+  }
   app.use('/api/office', requireAuth(env.JWT_SECRET), officeLifecycleRoutes({ resolveAccess: resolveDurableOfficeAccess, transition: officeArtifactStore.transitionLifecycle, revokeOffline: officeReleaseStore.revokeOfflinePackages }))
   const loadOfficeOfflineContext = async (userId: string, artifactId: string) => {
     const reply = await readOfficeProjection(userId, async () => {
@@ -8236,6 +8129,9 @@ export async function bootOpenApi(opts: BootOpenApiOptions): Promise<BootResult>
   if (runWorkers) campaignDispatchService.start()
   const crmRetentionWorker = createCrmRetentionWorker({ onError: () => console.warn('[crm-retention] Retention run failed; inspect the workspace run report.') })
   if (runWorkers) crmRetentionWorker.start()
+  // Recovers issue attempts whose inline run did not finish (crash, deploy, lease expiry).
+  const crmIssueWorker = crmDocumentWorker(createDbCrmOperationsStore(), crmDocumentRuntime, { onError: () => console.warn('[crm-documents] An issue attempt could not be processed; a later scan retries it.') })
+  if (runWorkers) crmIssueWorker.start()
   const crmEntitlementWorker=createCrmEntitlementWorker({onError:()=>console.warn('[crm-entitlement-expiry] A due grant could not be processed; a later scan will retry.')})
   if(runWorkers) crmEntitlementWorker.start()
   const associationLifecycleWorker=createAssociationLifecycleWorker({onError:()=>console.warn('[association-lifecycle] A lifecycle operation failed; a later scan will retry.')})
@@ -9950,6 +9846,7 @@ export async function bootOpenApi(opts: BootOpenApiOptions): Promise<BootResult>
     campaignConversionWorker.stop()
     campaignDispatchService.stop()
     crmRetentionWorker.stop()
+    crmIssueWorker.stop()
     crmEntitlementWorker.stop()
     associationLifecycleWorker.stop()
     providerInboxWorker.stop()

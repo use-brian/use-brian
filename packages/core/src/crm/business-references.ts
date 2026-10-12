@@ -14,7 +14,7 @@ import { z } from 'zod'
 const Uuid = z.string().uuid()
 const StableKey = z.string().trim().toLowerCase().regex(/^[a-z][a-z0-9_-]{0,62}$/)
 
-export const CRM_REFERENCE_TARGET_KINDS = ['company', 'deal', 'account'] as const
+export const CRM_REFERENCE_TARGET_KINDS = ['company', 'deal', 'account', 'invoice'] as const
 export const CrmReferenceTargetKindSchema = z.enum(CRM_REFERENCE_TARGET_KINDS)
 export type CrmReferenceTargetKind = z.infer<typeof CrmReferenceTargetKindSchema>
 
@@ -88,13 +88,13 @@ export function crmReferenceDefinitionIssues(input: CrmReferenceDefinitionInput)
   }
   const parents = format.filter((segment) => segment.kind === 'parent')
   if (parents.length > 1) issues.push({ path: 'format', message: 'A format has at most one parent segment.' })
-  if (parents.length && input.targetKinds.some((kind) => kind === 'company')) {
+  if (parents.length && input.targetKinds.some((kind) => kind === 'company' || kind === 'invoice')) {
     issues.push({ path: 'format', message: 'A parent segment requires every target kind to have a parent company (deals and accounts).' })
   }
   if (parents.some((segment) => segment.kind === 'parent' && segment.definitionKey === input.definitionKey)) {
     issues.push({ path: 'format', message: 'A definition cannot reference itself as its parent.' })
   }
-  if (input.partitionDimensions.includes('parent_target') && input.targetKinds.some((kind) => kind === 'company')) {
+  if (input.partitionDimensions.includes('parent_target') && input.targetKinds.some((kind) => kind === 'company' || kind === 'invoice')) {
     issues.push({ path: 'partitionDimensions', message: 'parent_target partitions require every target kind to have a parent company (deals and accounts).' })
   }
   const usesCategory = format.some((segment) => segment.kind === 'category') || input.partitionDimensions.includes('service_category')
@@ -104,7 +104,10 @@ export function crmReferenceDefinitionIssues(input: CrmReferenceDefinitionInput)
   if (input.assignmentMode !== 'native' && input.partitionDimensions.length) {
     issues.push({ path: 'partitionDimensions', message: 'Only native definitions declare counter partitions.' })
   }
-  if (input.assignmentEvent === 'issue') {
+  const invoices = input.targetKinds.includes('invoice')
+  if (invoices && (input.targetKinds.length !== 1 || input.assignmentEvent !== 'issue')) {
+    issues.push({ path: 'assignmentEvent', message: 'Invoice numbers are assigned only at issue, in a definition dedicated to invoices.' })
+  } else if (!invoices && input.assignmentEvent === 'issue') {
     issues.push({ path: 'assignmentEvent', message: 'Issue-time assignment is reserved for invoice definitions.' })
   }
   return issues

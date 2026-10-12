@@ -326,6 +326,7 @@ export function CrmRecordDetail({
             companyId={record.row.id}
             canConfigure={workspaceRole === "owner" || workspaceRole === "admin"}
             contactNames={new Map(data.contacts.map((contact) => [contact.id, contact.name]))}
+            deals={data.deals.filter((deal) => deal.companyId === record.row.id).map((deal) => ({ id: deal.id, name: deal.name }))}
           />
         )}
 
