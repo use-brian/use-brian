@@ -134,6 +134,10 @@ describe('[COMP:api/project-shared-governance] Shared Project roster, ownership 
     expect(listed.body.projects.map((p: { id: string }) => p.id)).not.toContain(id)
     const adminBrian = await inspectTool.execute({ projectId: id } as never, ctx(f, f.admin))
     expect((adminBrian as { data: { error: string } }).data.error).toBe('project_not_found')
+    // Ordinary participants edit material, not governance or Project direction.
+    const details = await request(appFor(f.member)).patch(`/api/workspaces/${f.workspaceId}/projects/${id}`).send({ description: 'New goal' })
+    expect(details.body.error).toBe('project_owner_required')
+    expect((await q('SELECT description FROM workspace_projects WHERE id=$1', [id])).rows[0].description).toBeNull()
     // The legacy participation routes refuse a shared Project.
     const legacy = await request(appFor(f.lead)).put(`/api/workspaces/${f.workspaceId}/projects/${id}/members/${f.outsider}`).send({ role: 'member' })
     expect(legacy.body.error).toBe('project_shared_use_roster')
