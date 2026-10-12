@@ -40,6 +40,7 @@ import { useT } from "@/lib/i18n/client";
 import { crmFieldKeyFromLabel } from "@/lib/crm-r2";
 import { CrmIntakeSettings } from "./operations/intake-settings";
 import { CrmReferenceSettings } from "./operations/references-settings";
+import { CrmCommercialSettings } from "./operations/commercial-settings";
 import { useOptionalWorkspaceContext } from "@/lib/workspace-context";
 
 export function CrmConfigDialog({
@@ -322,6 +323,7 @@ export function CrmConfigDialog({
               </div>
             </section>
             <CrmReferenceSettings workspaceId={workspaceId} canConfigure={role === "owner" || role === "admin"} onOpenRecord={onOpenRecord} />
+            <CrmCommercialSettings workspaceId={workspaceId} canConfigure={role === "owner" || role === "admin"} />
             <CrmIntakeSettings workspaceId={workspaceId} />
           </div>
         </Dialog.Popup>

@@ -14,7 +14,7 @@ import { z } from 'zod'
 const Uuid = z.string().uuid()
 const StableKey = z.string().trim().toLowerCase().regex(/^[a-z][a-z0-9_-]{0,62}$/)
 
-export const CRM_REFERENCE_TARGET_KINDS = ['company', 'deal'] as const
+export const CRM_REFERENCE_TARGET_KINDS = ['company', 'deal', 'account'] as const
 export const CrmReferenceTargetKindSchema = z.enum(CRM_REFERENCE_TARGET_KINDS)
 export type CrmReferenceTargetKind = z.infer<typeof CrmReferenceTargetKindSchema>
 
@@ -88,14 +88,14 @@ export function crmReferenceDefinitionIssues(input: CrmReferenceDefinitionInput)
   }
   const parents = format.filter((segment) => segment.kind === 'parent')
   if (parents.length > 1) issues.push({ path: 'format', message: 'A format has at most one parent segment.' })
-  if (parents.length && input.targetKinds.some((kind) => kind !== 'deal')) {
-    issues.push({ path: 'format', message: 'A parent segment requires every target kind to have a parent record (deals).' })
+  if (parents.length && input.targetKinds.some((kind) => kind === 'company')) {
+    issues.push({ path: 'format', message: 'A parent segment requires every target kind to have a parent company (deals and accounts).' })
   }
   if (parents.some((segment) => segment.kind === 'parent' && segment.definitionKey === input.definitionKey)) {
     issues.push({ path: 'format', message: 'A definition cannot reference itself as its parent.' })
   }
-  if (input.partitionDimensions.includes('parent_target') && input.targetKinds.some((kind) => kind !== 'deal')) {
-    issues.push({ path: 'partitionDimensions', message: 'parent_target partitions require every target kind to have a parent record (deals).' })
+  if (input.partitionDimensions.includes('parent_target') && input.targetKinds.some((kind) => kind === 'company')) {
+    issues.push({ path: 'partitionDimensions', message: 'parent_target partitions require every target kind to have a parent company (deals and accounts).' })
   }
   const usesCategory = format.some((segment) => segment.kind === 'category') || input.partitionDimensions.includes('service_category')
   if (usesCategory && input.categories.length === 0) {

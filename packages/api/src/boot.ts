@@ -123,7 +123,7 @@ import {
   createInternalLinkTools,
   createCrmTools,
   createCrmOperationsTools, createCrmCredentialTools, CRM_INTEGRATION_OPERATIONS, CRM_INTEGRATION_RESOURCE_CATALOG,
-  createCrmBusinessReferenceTools,
+  createCrmBusinessReferenceTools, createCrmCommercialContextTools,
   createAssociationTools,
   createCrmEmailDraftTools,
   createCampaignTools,
@@ -299,6 +299,7 @@ import {
 } from './crm-operations/domain-event-worker.js'
 import { createDbCrmOperationsStore } from './db/crm-operations-store.js'
 import { createCrmReferenceReadStore } from './db/crm-business-reference-store.js'
+import { createCrmCommercialContextReadStore } from './db/crm-commercial-context-store.js'
 import { createDbCrmIntakeReadStore } from './db/crm-intake-store.js'
 import { createCampaignConversionOutboxWorker } from './campaigns/conversion-outbox.js'
 import { createCampaignDispatchService } from './campaigns/dispatch.js'
@@ -4406,6 +4407,8 @@ export async function bootOpenApi(opts: BootOpenApiOptions): Promise<BootResult>
   for (const tool of Object.values(crmOperationsTools)) allTools.set(tool.name, tool)
   const crmBusinessReferenceTools = createCrmBusinessReferenceTools({ reads: createCrmReferenceReadStore(), service: crmOperationsService })
   for (const tool of Object.values(crmBusinessReferenceTools)) allTools.set(tool.name, tool)
+  const crmCommercialContextTools = createCrmCommercialContextTools({ reads: createCrmCommercialContextReadStore(), service: crmOperationsService })
+  for (const tool of Object.values(crmCommercialContextTools)) allTools.set(tool.name, tool)
   const crmCredentialTools = createCrmCredentialTools({
     preview: async (input, authority, parent) => ({
       ...await crmIntegrationStore.bindingOptions(authority.ceiling.workspaceId, authority.ceiling.userId, input, authority, parent),
@@ -5694,7 +5697,7 @@ export async function bootOpenApi(opts: BootOpenApiOptions): Promise<BootResult>
       : {}),
     memoryTools: brainMemoryTools,
     taskTools,
-    crmTools: { ...crmTools, ...crmOperationsTools, ...crmBusinessReferenceTools },
+    crmTools: { ...crmTools, ...crmOperationsTools, ...crmBusinessReferenceTools, ...crmCommercialContextTools },
     credentialTools: crmCredentialTools,
     associationTools,
     retrievalTools: brainRetrievalTools,

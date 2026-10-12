@@ -205,7 +205,8 @@ export class CrmReferenceRequestError extends Error {
 
 const base = (workspaceId: string) => `/api/crm/${encodeURIComponent(workspaceId)}/operations`;
 
-async function referenceRequest<T>(path: string, init?: RequestInit): Promise<T> {
+/** One request on the CRM operations API, translating failures into `CrmReferenceRequestError` (shared by the commercial-context client). */
+export async function crmOperationsRequest<T>(path: string, init?: RequestInit): Promise<T> {
   let res: Response;
   try {
     res = await authFetch(`${API_URL}${path}`, init);
@@ -229,7 +230,7 @@ export async function listCrmReferenceDefinitions(
   workspaceId: string,
   includeArchived = false,
 ): Promise<CrmReferenceDefinition[]> {
-  const body = await referenceRequest<{ definitions: CrmReferenceDefinition[] }>(
+  const body = await crmOperationsRequest<{ definitions: CrmReferenceDefinition[] }>(
     `${base(workspaceId)}/reference-definitions?includeArchived=${includeArchived ? "true" : "false"}`,
   );
   if (!Array.isArray(body.definitions)) throw new CrmReferenceRequestError("invalid_response", 502);
@@ -244,7 +245,7 @@ export function previewCrmReference(
   if (input.targetId) params.set("targetId", input.targetId);
   if (input.businessDate) params.set("businessDate", input.businessDate);
   if (input.categoryKey) params.set("categoryKey", input.categoryKey);
-  return referenceRequest(`${base(workspaceId)}/references/preview?${params}`);
+  return crmOperationsRequest(`${base(workspaceId)}/references/preview?${params}`);
 }
 
 /** Every reference (current and former) on one record, following continuation. */
@@ -259,7 +260,7 @@ export async function listCrmReferencesForTarget(
     const params = new URLSearchParams({ targetId, includeFormer: "true", limit: "100" });
     if (cursor) params.set("cursor", cursor);
     const body: { references: CrmBusinessReference[]; nextCursor?: string | null } =
-      await referenceRequest(`${base(workspaceId)}/references?${params}`);
+      await crmOperationsRequest(`${base(workspaceId)}/references?${params}`);
     if (!Array.isArray(body.references)) throw new CrmReferenceRequestError("invalid_response", 502);
     references.push(...body.references);
     const next = body.nextCursor ?? null;
@@ -278,21 +279,21 @@ export function findCrmReferences(
   match: "exact" | "prefix" = "exact",
 ): Promise<{ references: CrmBusinessReference[]; nextCursor: string | null }> {
   const params = new URLSearchParams({ q, match });
-  return referenceRequest(`${base(workspaceId)}/references?${params}`);
+  return crmOperationsRequest(`${base(workspaceId)}/references?${params}`);
 }
 
 export function getCrmReferenceHistory(
   workspaceId: string,
   referenceId: string,
 ): Promise<{ reference: CrmBusinessReference; history: CrmReferenceHistoryEntry[] }> {
-  return referenceRequest(`${base(workspaceId)}/references/${encodeURIComponent(referenceId)}/history`);
+  return crmOperationsRequest(`${base(workspaceId)}/references/${encodeURIComponent(referenceId)}/history`);
 }
 
 export function executeCrmReferenceCommand(
   workspaceId: string,
   command: CrmReferenceCommand,
 ): Promise<CrmReferenceCommandResult> {
-  return referenceRequest(`${base(workspaceId)}/commands`, {
+  return crmOperationsRequest(`${base(workspaceId)}/commands`, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify(command),

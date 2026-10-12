@@ -21,10 +21,10 @@ import {
   type CrmBusinessDate,
   type CrmBusinessReferenceCommand,
   type CrmOperationsContext,
-  type EntityRecord,
 } from '@use-brian/core'
 import type { CrmOperationsTransaction } from '../db/crm-operations-store.js'
 import { readCrmMutationSource, readCrmReference } from '../db/crm.js'
+import { lockAccount } from '../db/crm-commercial-context-store.js'
 import {
   allocateCounter,
   definitionUsage,
@@ -155,7 +155,7 @@ type Allocation = {
 }
 
 /** Resolve the value for one target: native allocation or a supplied manual/external value. */
-async function resolveValue(tx: CrmOperationsTransaction, definition: CrmReferenceDefinitionRow, target: EntityRecord, input: {
+async function resolveValue(tx: CrmOperationsTransaction, definition: CrmReferenceDefinitionRow, target: ReferenceTarget, input: {
   businessDate?: string; categoryKey?: string; value?: string; external?: { provider: string; remoteId: string }
 }): Promise<Allocation> {
   const { client, context } = tx.commercial()
@@ -193,8 +193,8 @@ async function resolveValue(tx: CrmOperationsTransaction, definition: CrmReferen
   let parentTargetId: string | null = null
   let parentReference: CrmReferenceRow | null = null
   if (needsParent) {
-    parentTargetId = target.kind === 'deal' && typeof target.attributes.company_id === 'string' ? target.attributes.company_id : null
-    if (!parentTargetId) refuse('invalid_input', 'Link the deal to its company before assigning this reference.', { reason: 'parent_record_required' })
+    parentTargetId = target.parentCompanyId
+    if (!parentTargetId) refuse('invalid_input', 'Link the record to its company before assigning this reference.', { reason: 'parent_record_required' })
     const access = await tx.commercial().actorAccess()
     // The parent is printed into this value, so the actor must be able to read it now.
     await readCrmReference(access.userId, context.workspaceId, parentTargetId, 'company', access, client).catch(() => unavailable())
@@ -231,15 +231,34 @@ async function resolveValue(tx: CrmOperationsTransaction, definition: CrmReferen
   }
 }
 
-async function lockTarget(tx: CrmOperationsTransaction, kind: string, id: string): Promise<EntityRecord> {
-  const { client } = tx.commercial()
+/**
+ * Company and deal references publish under their canonical entity, whose
+ * scope floor the outbox and audit derive. An account may be stricter than its
+ * company, and neither surface has an account scope source, so account
+ * references audit without their value and publish no outbox event.
+ */
+function scopedPublication(kind: string): boolean {
+  return kind === 'company' || kind === 'deal'
+}
+
+/** A reference target: a canonical company or deal, or a customer account. */
+type ReferenceTarget = { id: string; kind: string; displayName: string; updatedAt: string; parentCompanyId: string | null }
+
+async function lockTarget(tx: CrmOperationsTransaction, kind: string, id: string): Promise<ReferenceTarget> {
+  const { client, context } = tx.commercial()
   const access = await tx.commercial().actorAccess()
+  if (kind === 'account') {
+    const account = await lockAccount(client, context.workspaceId, id, access)
+    if (!account) unavailable()
+    return { id: account.id, kind, displayName: account.label, updatedAt: account.updatedAt, parentCompanyId: account.companyId }
+  }
   const target = await readCrmMutationSource(access, id, [kind], client).catch((error: { code?: string }) => {
     if (error?.code === 'scope_operation_denied') return null
     throw error
   })
   if (!target) unavailable()
-  return target
+  return { id: target.id, kind, displayName: target.displayName, updatedAt: new Date(target.updatedAt).toISOString(),
+    parentCompanyId: target.kind === 'deal' && typeof target.attributes.company_id === 'string' ? target.attributes.company_id : null }
 }
 
 async function persist(tx: CrmOperationsTransaction, definition: CrmReferenceDefinitionRow, target: { kind: string; id: string },
@@ -286,13 +305,14 @@ async function assign(tx: CrmOperationsTransaction, command: Command<'assign_bus
   await insertHistory(client, context.workspaceId, { referenceId: saved.id, definitionId: definition.id, targetKind: saved.targetKind,
     targetId: saved.targetId, action: 'assigned', formerValue: null, newValue: saved.printableValue, reason: null,
     actor: actorColumns(context), operationId: command.operationId })
-  await commercialAudit(tx, context, { action: 'crm.reference.assigned', subjectKind: command.target.kind, subjectId: target.id,
-    details: { referenceId: saved.id, definitionKey: definition.definitionKey, value: saved.printableValue, origin: saved.origin } })
-  const eventId = await commercialEmit(tx, context, { eventType: 'crm.reference.assigned', eventKey: `crm.reference.assigned:${saved.id}`,
+  const published = scopedPublication(command.target.kind)
+  await commercialAudit(tx, context, { action: 'crm.reference.assigned', subjectKind: published ? command.target.kind : 'customer_account', subjectId: target.id,
+    details: { referenceId: saved.id, definitionKey: definition.definitionKey, origin: saved.origin, ...(published ? { value: saved.printableValue } : {}) } })
+  const emitted = published ? [await commercialEmit(tx, context, { eventType: 'crm.reference.assigned', eventKey: `crm.reference.assigned:${saved.id}`,
     subjectKind: command.target.kind, subjectId: target.id, occurredAt,
     payload: { referenceId: saved.id, definitionKey: definition.definitionKey, targetKind: command.target.kind, targetId: target.id,
-      value: saved.printableValue, origin: saved.origin, actorKind: context.actor.kind, occurredAt } })
-  return commercialResult(command.kind, { reference: referenceRecord(saved, target.displayName) }, { created: true, emittedEventIds: [eventId] })
+      value: saved.printableValue, origin: saved.origin, actorKind: context.actor.kind, occurredAt } })] : []
+  return commercialResult(command.kind, { reference: referenceRecord(saved, target.displayName) }, { created: true, emittedEventIds: emitted })
 }
 
 async function lockChangeableReference(tx: CrmOperationsTransaction, referenceId: string, expectedVersion: number) {
@@ -325,16 +345,17 @@ async function replace(tx: CrmOperationsTransaction, command: Command<'replace_b
   await insertHistory(client, context.workspaceId, { referenceId: saved.id, definitionId: definition.id, targetKind: saved.targetKind,
     targetId: saved.targetId, action: 'replaced', formerValue: reference.printableValue, newValue: saved.printableValue,
     reason: command.reason, actor: actorColumns(context), operationId: command.operationId })
-  await commercialAudit(tx, context, { action: 'crm.reference.replaced', subjectKind: reference.targetKind, subjectId: reference.targetId,
+  const published = scopedPublication(reference.targetKind)
+  await commercialAudit(tx, context, { action: 'crm.reference.replaced', subjectKind: published ? reference.targetKind : 'customer_account', subjectId: reference.targetId,
     details: { referenceId: saved.id, formerReferenceId: reference.id, definitionKey: definition.definitionKey,
-      formerValue: reference.printableValue, value: saved.printableValue, reason: command.reason } })
-  const eventId = await commercialEmit(tx, context, { eventType: 'crm.reference.replaced', eventKey: `crm.reference.replaced:${saved.id}`,
+      ...(published ? { formerValue: reference.printableValue, value: saved.printableValue, reason: command.reason } : {}) } })
+  const emitted = !published ? [] : [await commercialEmit(tx, context, { eventType: 'crm.reference.replaced', eventKey: `crm.reference.replaced:${saved.id}`,
     subjectKind: reference.targetKind, subjectId: reference.targetId, occurredAt,
     payload: { referenceId: saved.id, formerReferenceId: reference.id, definitionKey: definition.definitionKey,
       targetKind: reference.targetKind, targetId: reference.targetId, value: saved.printableValue, formerValue: reference.printableValue,
-      actorKind: context.actor.kind, occurredAt } })
+      actorKind: context.actor.kind, occurredAt } })]
   return commercialResult(command.kind, { reference: referenceRecord(saved, target.displayName), replaced: referenceRecord({ ...reference, status: 'replaced', version: reference.version + 1 }, target.displayName) },
-    { created: true, emittedEventIds: [eventId] })
+    { created: true, emittedEventIds: emitted })
 }
 
 async function retire(tx: CrmOperationsTransaction, command: Command<'retire_business_reference'>, occurredAt: string): Promise<CommercialResult> {
@@ -345,13 +366,14 @@ async function retire(tx: CrmOperationsTransaction, command: Command<'retire_bus
   await insertHistory(client, context.workspaceId, { referenceId: saved.id, definitionId: definition.id, targetKind: saved.targetKind,
     targetId: saved.targetId, action: 'retired', formerValue: saved.printableValue, newValue: null, reason: command.reason,
     actor: actorColumns(context), operationId: command.operationId })
-  await commercialAudit(tx, context, { action: 'crm.reference.retired', subjectKind: reference.targetKind, subjectId: reference.targetId,
-    details: { referenceId: saved.id, definitionKey: definition.definitionKey, value: saved.printableValue, reason: command.reason } })
-  const eventId = await commercialEmit(tx, context, { eventType: 'crm.reference.retired', eventKey: `crm.reference.retired:${saved.id}`,
+  const published = scopedPublication(reference.targetKind)
+  await commercialAudit(tx, context, { action: 'crm.reference.retired', subjectKind: published ? reference.targetKind : 'customer_account', subjectId: reference.targetId,
+    details: { referenceId: saved.id, definitionKey: definition.definitionKey, ...(published ? { value: saved.printableValue, reason: command.reason } : {}) } })
+  const emitted = !published ? [] : [await commercialEmit(tx, context, { eventType: 'crm.reference.retired', eventKey: `crm.reference.retired:${saved.id}`,
     subjectKind: reference.targetKind, subjectId: reference.targetId, occurredAt,
     payload: { referenceId: saved.id, definitionKey: definition.definitionKey, targetKind: reference.targetKind,
-      targetId: reference.targetId, value: saved.printableValue, actorKind: context.actor.kind, occurredAt } })
-  return commercialResult(command.kind, { reference: referenceRecord(saved, target.displayName) }, { emittedEventIds: [eventId] })
+      targetId: reference.targetId, value: saved.printableValue, actorKind: context.actor.kind, occurredAt } })]
+  return commercialResult(command.kind, { reference: referenceRecord(saved, target.displayName) }, { emittedEventIds: emitted })
 }
 
 const PARTITION_PART = /^(year=\d{4}|parent=[0-9a-f-]{36}|category=[a-z][a-z0-9_-]{0,62})$/
@@ -373,7 +395,7 @@ async function importReferences(tx: CrmOperationsTransaction, command: Command<'
   if (!definition || definition.status === 'archived') refuse('not_found', 'Reference definition was not found.')
   const conflicts: Array<{ index: number; reason: string; value?: string; partitionKey?: string }> = []
   const seen = new Map<string, number>()
-  const targets: EntityRecord[] = []
+  const targets: ReferenceTarget[] = []
   for (const [index, row] of command.rows.entries()) {
     if (!definition.targetKinds.includes(row.target.kind)) { conflicts.push({ index, reason: 'target_kind_not_allowed' }); continue }
     const normalized = normalizeCrmBusinessReference(row.value)
@@ -409,8 +431,9 @@ async function importReferences(tx: CrmOperationsTransaction, command: Command<'
     await insertHistory(client, context.workspaceId, { referenceId: saved.id, definitionId: definition.id, targetKind: saved.targetKind,
       targetId: saved.targetId, action: 'imported', formerValue: null, newValue: saved.printableValue, reason: null,
       actor: actorColumns(context), operationId: command.operationId })
-    await commercialAudit(tx, context, { action: 'crm.reference.imported', subjectKind: row.target.kind, subjectId: target.id,
-      details: { referenceId: saved.id, definitionKey: definition.definitionKey, value: saved.printableValue, status: saved.status } })
+    const published = scopedPublication(row.target.kind)
+    await commercialAudit(tx, context, { action: 'crm.reference.imported', subjectKind: published ? row.target.kind : 'customer_account', subjectId: target.id,
+      details: { referenceId: saved.id, definitionKey: definition.definitionKey, status: saved.status, ...(published ? { value: saved.printableValue } : {}) } })
     imported.push({ index, referenceId: saved.id, value: saved.printableValue, status: saved.status })
   }
   for (const counter of command.partitionCounters) {

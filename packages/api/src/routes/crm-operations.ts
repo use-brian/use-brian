@@ -45,6 +45,12 @@ import {
   CrmReferenceLookupQuerySchema,
   CrmReferencePreviewQuerySchema,
   isCrmBusinessReferenceCommand,
+  CrmCommercialContextCommandSchema,
+  isCrmCommercialContextCommand,
+  CrmAccountListQuerySchema,
+  CrmCommercialProfileQuerySchema,
+  CrmResolutionQuerySchema,
+  type CrmCommercialContextReadPort,
   type CrmReferenceReadPort,
   type CrmOperationsContext,
   type CrmOperationsServicePort,
@@ -72,6 +78,7 @@ import { readCrmManagedMailboxPolicy, readCrmMailboxIntegrationGrant } from '../
 import { query } from '../db/client.js'
 import { CrmPipelinesQuerySchema, CrmRecordFieldsQuerySchema } from '../db/crm-config-catalog.js'
 import { createCrmReferenceReadStore } from '../db/crm-business-reference-store.js'
+import { createCrmCommercialContextReadStore } from '../db/crm-commercial-context-store.js'
 
 const SaveDefinitionBody = SaveCrmIntakeDefinitionCommandSchema.omit({ kind: true }).strict()
 const CreateCredentialBody = CreateCrmIntakeCredentialCommandSchema.omit({ kind: true }).strict()
@@ -206,6 +213,7 @@ type Options = {
   importService?: CrmProductionImportService
   deliveries?: CrmDeliveryServicePort
   referenceReads?: CrmReferenceReadPort
+  commercialReads?: CrmCommercialContextReadPort
 }
 
 function writeError(res: Response, error: unknown): void {
@@ -267,9 +275,9 @@ export function crmOperationsRoutes(options: Options): Router {
       if (req.body && ['workspaceId', 'actor', 'authority'].some((key) => Object.hasOwn(req.body, key))) {
         throw new CrmOperationsError('invalid_input', 'Workspace and authority come from your session.')
       }
-      const command = isCrmBusinessReferenceCommand(req.body ?? {})
-        ? CrmBusinessReferenceCommandSchema.parse(req.body)
-        : CrmConfigCommandSchema.parse(req.body)
+      const command = isCrmBusinessReferenceCommand(req.body ?? {}) ? CrmBusinessReferenceCommandSchema.parse(req.body)
+        : isCrmCommercialContextCommand(req.body ?? {}) ? CrmCommercialContextCommandSchema.parse(req.body)
+          : CrmConfigCommandSchema.parse(req.body)
       const output = await options.service.execute(ctx, command)
       res.status(output.created ? 201 : 200).json(output)
     } catch (error) { writeError(res, error) }
@@ -298,6 +306,32 @@ export function crmOperationsRoutes(options: Options): Router {
     try {
       res.json(await referenceReads.lookup(ctx.workspaceId, viewer(ctx), CrmReferenceLookupQuerySchema.parse(req.query)))
     } catch (error) { writeError(res, error) }
+  })
+  const commercialReads = options.commercialReads ?? createCrmCommercialContextReadStore()
+  router.get('/:workspaceId/operations/sellers', async (req, res) => {
+    const ctx = await context(req, res)
+    if (!ctx) return
+    try { res.json(await commercialReads.listSellers(ctx.workspaceId, viewer(ctx))) } catch (error) { writeError(res, error) }
+  })
+  router.get('/:workspaceId/operations/accounts', async (req, res) => {
+    const ctx = await context(req, res)
+    if (!ctx) return
+    try { res.json(await commercialReads.listAccounts(ctx.workspaceId, viewer(ctx), CrmAccountListQuerySchema.parse(req.query))) } catch (error) { writeError(res, error) }
+  })
+  router.get('/:workspaceId/operations/commercial-profiles', async (req, res) => {
+    const ctx = await context(req, res)
+    if (!ctx) return
+    try { res.json(await commercialReads.listProfiles(ctx.workspaceId, viewer(ctx), CrmCommercialProfileQuerySchema.parse(req.query))) } catch (error) { writeError(res, error) }
+  })
+  router.get('/:workspaceId/operations/commercial-profiles/resolve', async (req, res) => {
+    const ctx = await context(req, res)
+    if (!ctx) return
+    try { res.set('Cache-Control', 'no-store').json(await commercialReads.resolve(ctx.workspaceId, viewer(ctx), CrmResolutionQuerySchema.parse(req.query))) } catch (error) { writeError(res, error) }
+  })
+  router.get('/:workspaceId/operations/operation-definitions', async (req, res) => {
+    const ctx = await context(req, res)
+    if (!ctx) return
+    try { res.json(await commercialReads.listOperationDefinitions(ctx.workspaceId, viewer(ctx))) } catch (error) { writeError(res, error) }
   })
   router.get('/:workspaceId/operations/references/:referenceId/history', async (req, res) => {
     const ctx = await context(req, res)

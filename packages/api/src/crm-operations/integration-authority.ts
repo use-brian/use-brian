@@ -133,5 +133,22 @@ export async function authorizeCrmIntegrationCommand(client: PoolClient, context
       required('crm.references.configure', { referenceDefinitionKeys: row.key! })
       break
     }
+    case 'save_seller_profile':
+      required('crm.commercial.configure', { sellerKeys: command.seller.sellerKey })
+      break
+    case 'save_customer_account':
+      required('crm.commercial.write', { sellerKeys: command.account.sellerKey })
+      break
+    case 'accept_commercial_profile': {
+      const key = command.owner.kind === 'seller' ? command.owner.sellerKey
+        : (await existing(`SELECT s.seller_key AS key FROM crm_customer_accounts a JOIN crm_seller_profiles s
+            ON s.workspace_id=a.workspace_id AND s.id=a.seller_id WHERE a.workspace_id=$1 AND a.id=$2`, command.owner.accountId)).key!
+      required('crm.commercial.configure', { sellerKeys: key })
+      break
+    }
+    case 'save_operation_definition':
+      required('crm.commercial.configure', { operationKeys: command.operationKey })
+      break
+    case 'accept_operation_version': throw new CrmOperationsError('not_authorized', 'An operation version is accepted by a workspace owner or admin.')
   }
 }

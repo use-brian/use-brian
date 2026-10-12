@@ -25,6 +25,13 @@ import {
   RetireCrmBusinessReferenceCommandSchema,
   ImportCrmBusinessReferencesCommandSchema,
 } from './business-references.js'
+import {
+  SaveCrmSellerProfileCommandSchema,
+  SaveCrmCustomerAccountCommandSchema,
+  AcceptCrmCommercialProfileCommandSchema,
+  SaveCrmOperationDefinitionCommandSchema,
+  AcceptCrmOperationVersionCommandSchema,
+} from './commercial-context.js'
 
 export const CrmOperationsUuidSchema = z.string().uuid()
 export const CrmOperationsStableKeySchema = z.string().trim().toLowerCase()
@@ -693,6 +700,11 @@ export const CrmOperationsCommandSchema = z.union([
   ReplaceCrmBusinessReferenceCommandSchema,
   RetireCrmBusinessReferenceCommandSchema,
   ImportCrmBusinessReferencesCommandSchema,
+  SaveCrmSellerProfileCommandSchema,
+  SaveCrmCustomerAccountCommandSchema,
+  AcceptCrmCommercialProfileCommandSchema,
+  SaveCrmOperationDefinitionCommandSchema,
+  AcceptCrmOperationVersionCommandSchema,
 ])
 export type CrmOperationsCommand = z.infer<typeof CrmOperationsCommandSchema>
 
@@ -829,6 +841,10 @@ export function commandRequiresConfigurationAuthority(command: CrmOperationsComm
     || command.kind === 'replace_business_reference'
     || command.kind === 'retire_business_reference'
     || command.kind === 'import_business_references'
+    || command.kind === 'save_seller_profile'
+    || command.kind === 'accept_commercial_profile'
+    || command.kind === 'save_operation_definition'
+    || command.kind === 'accept_operation_version'
 }
 
 export function assertCrmOperationsAuthority(
@@ -863,6 +879,8 @@ export function assertCrmOperationsAuthority(
       save_reference_definition: 'crm.references.configure', import_business_references: 'crm.references.configure',
       replace_business_reference: 'crm.references.configure', retire_business_reference: 'crm.references.configure',
       assign_business_reference: 'crm.references.write',
+      save_seller_profile: 'crm.commercial.configure', accept_commercial_profile: 'crm.commercial.configure',
+      save_operation_definition: 'crm.commercial.configure', save_customer_account: 'crm.commercial.write',
     }
     const operation = operations[command.kind]
     if (!operation) throw new CrmOperationsError('not_authorized', 'This operation is not available to integration credentials.')

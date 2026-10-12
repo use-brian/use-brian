@@ -31,6 +31,7 @@ import {
 import { query } from './client.js'
 import { buildAccessPredicate, buildCurrentMemberSourcePredicate, mutationActorAccess } from './access-predicate.js'
 import { queryCrmPage } from '../crm-operations/pagination.js'
+import { commercialVisibility } from './crm-commercial-context-store.js'
 
 type Row = QueryResultRow & Record<string, unknown>
 type Run = <T extends QueryResultRow>(sql: string, values: unknown[]) => Promise<{ rows: T[] }>
@@ -289,6 +290,20 @@ function visibleTarget(viewer: CrmReferenceViewer, workspaceId: string, startIdx
   }
 }
 
+/** Join and predicate for any reference target kind: entity targets and account targets each apply their own scope. */
+function targetJoin(viewer: CrmReferenceViewer, workspaceId: string, startIdx: number) {
+  const entity = visibleTarget(viewer, workspaceId, startIdx, 'e')
+  const account = commercialVisibility(viewer.userId, workspaceId, 'ca', entity.nextIdx)
+  return {
+    join: `LEFT JOIN entities e ON r.target_kind IN('company','deal') AND e.workspace_id=r.workspace_id AND e.id=r.target_id AND e.kind=r.target_kind
+      LEFT JOIN crm_customer_accounts ca ON r.target_kind='account' AND ca.workspace_id=r.workspace_id AND ca.id=r.target_id`,
+    sql: `((e.id IS NOT NULL AND ${entity.sql}) OR (ca.id IS NOT NULL AND ${account.sql}))`,
+    name: 'coalesce(e.display_name,ca.label)',
+    params: [...entity.params, ...account.params],
+    nextIdx: account.nextIdx,
+  }
+}
+
 function escapeLike(value: string): string {
   return value.replace(/[\\%_]/g, (character) => `\\${character}`)
 }
@@ -309,7 +324,12 @@ export function createCrmReferenceReadStore(run: Run = query as unknown as Run):
       `SELECT e.id,e.kind,e.display_name AS name,e.attributes->>'company_id' AS "companyId" FROM entities e
         WHERE e.workspace_id=$1 AND e.id=$2 AND e.kind IN('company','deal') AND ${scope.sql}`,
       [workspaceId, targetId, ...scope.params])
-    return result.rows[0] ?? null
+    if (result.rows[0]) return result.rows[0]
+    const account = commercialVisibility(viewer.userId, workspaceId, 'ca', 3)
+    const found = await run<{ id: string; kind: string; name: string; companyId: string | null }>(
+      `SELECT ca.id,'account' AS kind,ca.label AS name,ca.company_id AS "companyId" FROM crm_customer_accounts ca
+        WHERE ca.workspace_id=$1 AND ca.id=$2 AND ${account.sql}`, [workspaceId, targetId, ...account.params])
+    return found.rows[0] ?? null
   }
   return {
     async listDefinitions(workspaceId, viewer, options = {}) {
@@ -341,7 +361,7 @@ export function createCrmReferenceReadStore(run: Run = query as unknown as Run):
       if (input.targetId) {
         const target = await visibleTargetRow(workspaceId, viewer, input.targetId)
         if (!target) throw new CrmOperationsError('not_found', 'The record is unavailable in your current scope.')
-        parentTargetId = target.kind === 'deal' ? target.companyId : null
+        parentTargetId = target.kind === 'deal' || target.kind === 'account' ? target.companyId : null
         const parentSegment = definition.format?.find((segment) => segment.kind === 'parent')
         if (parentSegment?.kind === 'parent' && parentTargetId && await visibleTargetRow(workspaceId, viewer, parentTargetId)) {
           const parent = await run<{ value: string }>(
@@ -376,7 +396,7 @@ export function createCrmReferenceReadStore(run: Run = query as unknown as Run):
       }
     },
     async lookup(workspaceId, viewer, input, allowedDefinitionKeys) {
-      const scope = visibleTarget(viewer, workspaceId, 2)
+      const scope = targetJoin(viewer, workspaceId, 2)
       const params: unknown[] = [workspaceId, ...scope.params]
       const add = (value: unknown) => { params.push(value); return `$${params.length}` }
       const filters: string[] = []
@@ -390,10 +410,10 @@ export function createCrmReferenceReadStore(run: Run = query as unknown as Run):
       if (input.definitionKey) filters.push(`d.definition_key=${add(input.definitionKey)}`)
       if (allowedDefinitionKeys) filters.push(`d.definition_key=ANY(${add([...allowedDefinitionKeys])}::text[])`)
       if (!input.includeFormer) filters.push(`r.status='active'`)
-      const sql = `SELECT ${REFERENCE_COLUMNS},e.display_name AS "targetName"
+      const sql = `SELECT ${REFERENCE_COLUMNS},${scope.name} AS "targetName"
         FROM crm_business_references r
         JOIN crm_reference_definitions d ON d.workspace_id=r.workspace_id AND d.id=r.definition_id
-        JOIN entities e ON e.workspace_id=r.workspace_id AND e.id=r.target_id AND e.kind=r.target_kind
+        ${scope.join}
         WHERE r.workspace_id=$1 AND ${scope.sql}${filters.length ? ` AND ${filters.join(' AND ')}` : ''}`
       const page = await queryCrmPage<'references', Row>(run, {
         workspaceId, resource: 'crm_business_references', key: 'references', sql, params,
@@ -406,11 +426,11 @@ export function createCrmReferenceReadStore(run: Run = query as unknown as Run):
       }
     },
     async history(workspaceId, viewer, referenceId, allowedDefinitionKeys) {
-      const scope = visibleTarget(viewer, workspaceId, 4)
+      const scope = targetJoin(viewer, workspaceId, 4)
       const found = await run<Row>(
-        `SELECT ${REFERENCE_COLUMNS},e.display_name AS "targetName" FROM crm_business_references r
+        `SELECT ${REFERENCE_COLUMNS},${scope.name} AS "targetName" FROM crm_business_references r
            JOIN crm_reference_definitions d ON d.workspace_id=r.workspace_id AND d.id=r.definition_id
-           JOIN entities e ON e.workspace_id=r.workspace_id AND e.id=r.target_id AND e.kind=r.target_kind
+           ${scope.join}
           WHERE r.workspace_id=$1 AND r.id=$2 AND ($3::text[] IS NULL OR d.definition_key=ANY($3::text[])) AND ${scope.sql}`,
         [workspaceId, referenceId, allowedDefinitionKeys ? [...allowedDefinitionKeys] : null, ...scope.params])
       const row = found.rows[0]

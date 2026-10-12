@@ -79,6 +79,7 @@ import { CrmContactCompliance } from "./operations/contact-compliance";
 import { CrmContactLifecycle } from "./operations/contact-lifecycle";
 import { CrmCampaignAttribution } from "./crm-campaign-attribution";
 import { CrmRecordReferences } from "./operations/record-references";
+import { CrmRecordAccounts } from "./operations/record-accounts";
 import { useOptionalWorkspaceContext } from "@/lib/workspace-context";
 
 export type CrmRecordRef =
@@ -316,6 +317,15 @@ export function CrmRecordDetail({
             recordKind={record.kind}
             recordId={record.row.id}
             canConfigure={workspaceRole === "owner" || workspaceRole === "admin"}
+          />
+        )}
+
+        {record.kind === "company" && (
+          <CrmRecordAccounts
+            workspaceId={workspaceId}
+            companyId={record.row.id}
+            canConfigure={workspaceRole === "owner" || workspaceRole === "admin"}
+            contactNames={new Map(data.contacts.map((contact) => [contact.id, contact.name]))}
           />
         )}
 

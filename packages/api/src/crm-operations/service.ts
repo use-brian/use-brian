@@ -21,6 +21,7 @@ import {
   assertCrmOperationsAuthority,
   isCrmConfigCommand,
   isCrmBusinessReferenceCommand,
+  isCrmCommercialContextCommand,
   canonicalCrmRequest,
   crmOperationsSha256,
   prepareCrmSubmissionAttachments,
@@ -52,6 +53,7 @@ import {createCrmRetentionService} from './retention-service.js'
 import { hashSecret } from '../db/api-key-store.js'
 import { assertIntakeVerificationConfiguration, verifyIntakeIdentity } from './identity-verification.js'
 import { executeCrmBusinessReferenceCommand } from './business-references.js'
+import { executeCrmCommercialContextCommand } from './commercial-context.js'
 
 type ServiceClock = () => Date
 
@@ -577,6 +579,12 @@ export function createCrmOperationsService(
         return store.transaction(context, async (tx) => {
           if (context.authority.integration) await tx.authorizeIntegration(command)
           return executeCrmBusinessReferenceCommand(tx, command, now)
+        })
+      }
+      if (isCrmCommercialContextCommand(command)) {
+        return store.transaction(context, async (tx) => {
+          if (context.authority.integration) await tx.authorizeIntegration(command)
+          return executeCrmCommercialContextCommand(tx, command)
         })
       }
 

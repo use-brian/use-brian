@@ -9,6 +9,7 @@ import {
   CrmOperationsCommandSchema, CrmOperationsError, assertCrmOperationsAuthority,
   CrmPageQuerySchema, requireCrmIntegrationOperation, crmIntegrationResourceSelection,
   CrmReferenceLookupQuerySchema, CrmReferencePreviewQuerySchema, type CrmReferenceReadPort,
+  CrmAccountListQuerySchema, CrmCommercialProfileQuerySchema, CrmResolutionQuerySchema, type CrmCommercialContextReadPort,
   type CrmDeliveryServicePort,
   type CrmOperationsContext, type CrmOperationsServicePort, type AssociationServicePort,
 } from '@use-brian/core'
@@ -33,12 +34,13 @@ import { SubmissionQuery, SendabilityQuery, EntitlementPlansQuery, EntitlementsQ
 import { runWithAgentAccess } from '../db/agent-access-context.js'
 import { CrmIntegrationBindingOptionsSchema } from '../crm-operations/integration-department-authority.js'
 import { createCrmReferenceReadStore } from '../db/crm-business-reference-store.js'
+import { createCrmCommercialContextReadStore } from '../db/crm-commercial-context-store.js'
 
 const UUID = z.string().uuid()
 export function crmIntegrationContext(principal: CrmIntegrationPrincipal): CrmOperationsContext {
   return { workspaceId: principal.workspaceId, actor: { kind: 'integration_key', credentialId: principal.credentialId },
     authority: { role: 'system', canWrite: true,
-      canConfigure: principal.grants.some((grant) => grant.operation === 'crm.catalog.configure' || grant.operation === 'crm.references.configure'),
+      canConfigure: principal.grants.some((grant) => ['crm.catalog.configure', 'crm.references.configure', 'crm.commercial.configure'].includes(grant.operation)),
       trustedIdentitySources: [], integration: { credentialId: principal.credentialId, grants: principal.grants } } }
 }
 
@@ -51,6 +53,7 @@ export function crmIntegrationRoutes(options: {
   importSources?: CrmImportSources
   reads?: (principal: CrmIntegrationPrincipal) => DbCrmOperationsReadStore
   referenceReads?: CrmReferenceReadPort
+  commercialReads?: CrmCommercialContextReadPort
   /** Website media library reads (`association.read`); absent → 404. */
   websiteMedia?: Pick<WebsiteMediaDeps, 'store' | 'resolver'>
   memberProfiles?: (principal: CrmIntegrationPrincipal) => {
@@ -225,6 +228,47 @@ export function crmIntegrationRoutes(options: {
     const found = await referenceReads.history(principal(res).workspaceId, viewer, UUID.parse(req.params.id), allowed)
     if (!found) { res.status(404).json({ error: 'not_found' }); return }
     res.json(found)
+  }))
+  // Commercial context reads; selectors filter by seller and operation before any row is returned.
+  const commercialReads = options.commercialReads ?? createCrmCommercialContextReadStore()
+  const commercialViewer = (res: Response) => {
+    const current = principal(res)
+    requireCrmIntegrationOperation(current, 'crm.commercial.read')
+    if (!current.departmentRead) throw new CrmOperationsError('not_authorized', 'Commercial reads require a department-bound integration credential.')
+    const sellers = crmIntegrationResourceSelection(current, 'crm.commercial.read', 'sellerKeys')
+    const operations = crmIntegrationResourceSelection(current, 'crm.commercial.read', 'operationKeys')
+    return { viewer: { userId: current.departmentRead.userId, canConfigure: false }, sellers, operations }
+  }
+  const sellerAllowed = (sellers: 'all' | readonly string[], key: unknown) => sellers === 'all' || (typeof key === 'string' && sellers.includes(key))
+  router.get('/operations/accounts', endpoint(async (req, res) => {
+    const { viewer, sellers } = commercialViewer(res)
+    const query = CrmAccountListQuerySchema.parse(req.query)
+    if (sellers !== 'all' && (!query.sellerKey || !sellers.includes(query.sellerKey))) throw new CrmOperationsError('invalid_input', 'Name a granted sellerKey.', { validValues: sellers })
+    res.json(await commercialReads.listAccounts(principal(res).workspaceId, viewer, query))
+  }))
+  const accountSellerAllowed = async (res: Response, viewer: { userId: string }, sellers: 'all' | readonly string[], accountId: string) => {
+    if (sellers === 'all') return
+    const account = await commercialReads.getAccount(principal(res).workspaceId, viewer, accountId)
+    if (!account || !sellerAllowed(sellers, account.sellerKey)) throw new CrmOperationsError('not_found', 'The record is unavailable in your current scope.')
+  }
+  router.get('/operations/commercial-profiles', endpoint(async (req, res) => {
+    const { viewer, sellers } = commercialViewer(res)
+    const query = CrmCommercialProfileQuerySchema.parse(req.query)
+    if (query.accountId) await accountSellerAllowed(res, viewer, sellers, query.accountId)
+    else if (!sellerAllowed(sellers, query.sellerKey)) throw new CrmOperationsError('not_found', 'The record is unavailable in your current scope.')
+    res.json(await commercialReads.listProfiles(principal(res).workspaceId, viewer, query))
+  }))
+  router.get('/operations/commercial-profiles/resolve', endpoint(async (req, res) => {
+    const { viewer, sellers, operations } = commercialViewer(res)
+    const query = CrmResolutionQuerySchema.parse(req.query)
+    if (operations !== 'all' && !operations.includes(query.operationKey)) throw new CrmOperationsError('not_found', 'The operation has no accepted version.')
+    await accountSellerAllowed(res, viewer, sellers, query.accountId)
+    res.set('Cache-Control', 'no-store').json(await commercialReads.resolve(principal(res).workspaceId, viewer, query))
+  }))
+  router.get('/operations/operation-definitions', endpoint(async (_req, res) => {
+    const { viewer, operations } = commercialViewer(res)
+    const result = await commercialReads.listOperationDefinitions(principal(res).workspaceId, viewer)
+    res.json({ ...result, operations: result.operations.filter((row) => operations === 'all' || operations.includes(row.operationKey as string)) })
   }))
   router.post('/operations/commands', endpoint(async (req, res) => {
     const context = crmIntegrationContext(principal(res))
