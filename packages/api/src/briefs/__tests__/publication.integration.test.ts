@@ -7,7 +7,9 @@ import { randomUUID } from 'node:crypto'
 import { afterAll, describe, expect, it } from 'vitest'
 import { getAppPool, getPool } from '../../db/client.js'
 import { createProjectSharedStore } from '../../db/project-shared-store.js'
-import { withBriefActor, listProposals } from '../../db/brief-store.js'
+import { withBriefActor, listProposals, publish, readPageState } from '../../db/brief-store.js'
+import { createDbDocPageStore } from '../../db/doc-page-store.js'
+import { applyDirection, restoreRevision, setBriefSyncClientForTests, buildPublishedState } from '../publication.js'
 import { dismissProposal, ensureBrief, inspectBrief, proposeChange, saveDraft, briefHistory } from '../service.js'
 import { actorOf, briefFixture } from './fixture.js'
 
@@ -139,5 +141,127 @@ describe('[COMP:api/brief-publication] Brief canonical state, drafts and publica
     // Even the owner role cannot rewrite accepted history.
     expect(await code(q(`UPDATE brief_revisions SET direction_hash='x' WHERE binding_id=$1`, [bindingId]))).toBe('brief_history_immutable')
     expect(await code(q('DELETE FROM brief_revisions WHERE binding_id=$1', [bindingId]))).toBe('brief_history_immutable')
+  })
+
+  it('explicit Apply publishes Page, revision and history atomically exactly once; a replay returns the same receipt', async () => {
+    const f = await briefFixture()
+    const synced: string[] = []
+    setBriefSyncClientForTests({ syncBrief: async pageId => { synced.push(pageId); return true } })
+    const { bindingId } = await ensureBrief(actorOf(f, f.people.lead), { kind: 'project', id: f.projectId })
+    const pageId = await pageOf(bindingId)
+    const draft = await saveDraft(actorOf(f, f.people.lead), bindingId, { sections: { outcome: ['Launch the billing pilot'], rules: ['Finance approves invoices'] } })
+    const key = randomUUID()
+    const receipt = await applyDirection(actorOf(f, f.people.lead), bindingId, { proposalId: draft.id, expectedDirectionRevision: 0, expectedSelectionRevision: 0, idempotencyKey: key })
+    expect(receipt).toMatchObject({ directionRevision: 1, replayed: false })
+    const view = await inspectBrief(actorOf(f, f.people.member), { bindingId })
+    expect(view.established).toBe(true)
+    expect(view.direction).toEqual({ outcome: ['Launch the billing pilot'], rules: ['Finance approves invoices'], decisions: [] })
+    expect(view.contentSeq).toBe(receipt.contentSeq)
+    expect((await briefHistory(actorOf(f, f.people.lead), bindingId)).map(r => r.kind)).toEqual(['apply', 'created'])
+    expect((await q('SELECT status FROM brief_proposals WHERE id=$1', [draft.id])).rows[0].status).toBe('applied')
+    expect(synced).toEqual([pageId])
+    expect((await q('SELECT broadcast_at FROM brief_revisions WHERE id=$1', [receipt.revisionId])).rows[0].broadcast_at).not.toBeNull()
+    // Identical confirmed replay: same receipt, no second publication or broadcast.
+    const replay = await applyDirection(actorOf(f, f.people.lead), bindingId, { proposalId: draft.id, expectedDirectionRevision: 0, expectedSelectionRevision: 0, idempotencyKey: key })
+    expect(replay).toMatchObject({ revisionId: receipt.revisionId, directionRevision: 1, replayed: true })
+    expect((await q('SELECT count(*)::int n FROM brief_revisions WHERE binding_id=$1', [bindingId])).rows[0].n).toBe(2)
+    expect(synced).toHaveLength(1)
+    // Same key, different request: refused, not merged.
+    expect(await code(applyDirection(actorOf(f, f.people.lead), bindingId, { change: { sections: { outcome: ['Other'] } }, expectedDirectionRevision: 1, expectedSelectionRevision: 0, idempotencyKey: key })))
+      .toBe('brief_idempotency_conflict')
+    setBriefSyncClientForTests(undefined)
+  })
+
+  it('only an owner applies; Brian executes an owner\'s explicit Apply within its own admission', async () => {
+    const f = await briefFixture()
+    setBriefSyncClientForTests(null)
+    const { bindingId } = await ensureBrief(actorOf(f, f.people.lead), { kind: 'project', id: f.projectId })
+    const proposal = await proposeChange(actorOf(f, f.people.member, f.assistants.brian), bindingId, { sections: { rules: ['Weekly status on Fridays'] } },
+      { evidence: [{ kind: 'human', passage: 'we agreed weekly status on Fridays' }] })
+    const apply = (userId: string, assistantId: string | null = null) => applyDirection(actorOf(f, userId, assistantId), bindingId,
+      { proposalId: proposal.id, expectedDirectionRevision: 0, expectedSelectionRevision: 0, idempotencyKey: randomUUID() })
+    expect(await code(apply(f.people.member))).toBe('brief_owner_required')
+    expect(await code(apply(f.people.member, f.assistants.brian))).toBe('brief_owner_required')
+    expect(await code(apply(f.people.owner))).toBe('brief_owner_required') // workspace-owner oversight is not approval
+    expect(await code(apply(f.people.lead, f.assistants.ops))).toBe('brief_not_found') // Ops holds no Project admission
+    const ok = await apply(f.people.lead, f.assistants.brian)
+    const row = (await q('SELECT actor_user_id, acting_assistant_id, evidence FROM brief_revisions WHERE id=$1', [ok.revisionId])).rows[0]
+    expect(row).toMatchObject({ actor_user_id: f.people.lead, acting_assistant_id: f.assistants.brian })
+    expect(row.evidence[0]).toMatchObject({ passage: 'we agreed weekly status on Fridays' })
+  })
+
+  it('stale and concurrent applications are refused without partial mutation', async () => {
+    const f = await briefFixture()
+    setBriefSyncClientForTests(null)
+    const { bindingId } = await ensureBrief(actorOf(f, f.people.lead), { kind: 'project', id: f.projectId })
+    const pageId = await pageOf(bindingId)
+    const early = await proposeChange(actorOf(f, f.people.member), bindingId, { sections: { decisions: ['Use vendor A'] } }, { evidence: [{ kind: 'human', passage: 'vendor A' }] })
+    const racers = await Promise.allSettled([1, 2].map(n => applyDirection(actorOf(f, f.people.lead), bindingId,
+      { change: { sections: { outcome: [`Outcome ${n}`] } }, expectedDirectionRevision: 0, expectedSelectionRevision: 0, idempotencyKey: randomUUID() })))
+    expect(racers.filter(r => r.status === 'fulfilled')).toHaveLength(1)
+    expect(racers.filter(r => r.status === 'rejected').map(r => (r as PromiseRejectedResult).reason.code)).toEqual(['brief_revision_stale'])
+    const before = await snapshotOf(pageId)
+    // The proposal was drafted against revision 0: it needs review against the current state.
+    expect(await code(applyDirection(actorOf(f, f.people.lead), bindingId, { proposalId: early.id, expectedDirectionRevision: 1, expectedSelectionRevision: 0, idempotencyKey: randomUUID() })))
+      .toBe('brief_revision_stale')
+    // A publication against an old content base is refused by the SQL CAS itself.
+    const stale = await withBriefActor(f.people.lead, async client => {
+      const state = (await readPageState(client, pageId, { withYdoc: true }))!
+      const next = buildPublishedState(new Uint8Array(state.ydoc!), [])
+      return code(publish(client, { bindingId, proposalId: null, ops: [], expectedDirection: 1, expectedSelection: 0, baseSeq: state.seq - 1,
+        nextYdoc: next.ydoc, nextStateVector: next.stateVector, nextSnapshot: next.snapshot.page, nextTitle: null, idempotencyKey: randomUUID(),
+        requestHash: 'a'.repeat(64), evidence: [], activeWork: 'pause', kind: 'apply', assistantId: null }))
+    })
+    expect(stale).toBe('brief_page_changed')
+    expect(await snapshotOf(pageId)).toEqual(before)
+    expect((await q('SELECT direction_revision FROM brief_bindings WHERE id=$1', [bindingId])).rows[0].direction_revision).toBe(1)
+  })
+
+  it('every raw writer is refused: legacy CAS, raw snapshots, delete and move; Current context stays editable', async () => {
+    const f = await briefFixture()
+    setBriefSyncClientForTests(null)
+    const { bindingId } = await ensureBrief(actorOf(f, f.people.lead), { kind: 'project', id: f.projectId })
+    await applyDirection(actorOf(f, f.people.lead), bindingId, { change: { sections: { rules: ['Accepted rule'] } }, expectedDirectionRevision: 0, expectedSelectionRevision: 0, idempotencyKey: randomUUID() })
+    const pageId = await pageOf(bindingId)
+    const view = await inspectBrief(actorOf(f, f.people.lead), { bindingId })
+    const current = (await snapshotOf(pageId)).snapshot_json
+    // Legacy CAS (patchPage without doc-sync, Undo's last_undo restore): the legacy body is frozen.
+    const legacy = createDbDocPageStore()
+    expect(await code(legacy.applyPatch({ userId: f.people.lead, pageId, expectedVersion: 1, nextPage: { blocks: [] }, undo: null as never })))
+      .toBe('brief_direction_protected')
+    // A raw snapshot write that changes Direction, even by the owner role (bypassing RLS).
+    const tampered = { blocks: current.blocks.map((b: { id: string; text?: string }) => b.id === view.directionBlocks!.rules[0].id ? { ...b, text: 'Injected rule' } : b) }
+    expect(await code(q('UPDATE documents SET snapshot_json=$2 WHERE page_id=$1', [pageId, JSON.stringify(tampered)]))).toBe('brief_direction_protected')
+    // A Current-context-only write passes the same guard.
+    const findings = view.binding.layout.sectionIds.findings
+    const idx = current.blocks.findIndex((b: { id: string }) => b.id === findings)
+    const withFinding = { blocks: [...current.blocks.slice(0, idx + 1), { kind: 'text', id: randomUUID(), text: 'A finding' }, ...current.blocks.slice(idx + 1)] }
+    expect(await code(q('UPDATE documents SET snapshot_json=$2 WHERE page_id=$1', [pageId, JSON.stringify(withFinding)]))).toBe('ok')
+    // Delete, move and documents removal are refused outside workspace teardown.
+    expect(await code(withBriefActor(f.people.lead, c => c.query('DELETE FROM saved_views WHERE id=$1', [pageId])))).toBe('brief_page_bound')
+    expect(await code(q('UPDATE saved_views SET shared_project_id=NULL WHERE id=$1', [pageId]))).toBe('brief_page_bound')
+    expect(await code(q('DELETE FROM documents WHERE page_id=$1', [pageId]))).toBe('brief_page_bound')
+    expect((await inspectBrief(actorOf(f, f.people.lead), { bindingId })).direction!.rules).toEqual(['Accepted rule'])
+  })
+
+  it('restoring history is a new reviewed change; a failed broadcast never fakes or loses acceptance', async () => {
+    const f = await briefFixture()
+    setBriefSyncClientForTests({ syncBrief: async () => false })
+    const lead = actorOf(f, f.people.lead)
+    const { bindingId } = await ensureBrief(lead, { kind: 'project', id: f.projectId })
+    const first = await applyDirection(lead, bindingId, { change: { sections: { outcome: ['Version one'] } }, expectedDirectionRevision: 0, expectedSelectionRevision: 0, idempotencyKey: randomUUID() })
+    await applyDirection(lead, bindingId, { change: { sections: { outcome: ['Version two'], decisions: ['Added later'] } }, expectedDirectionRevision: 1, expectedSelectionRevision: 0, idempotencyKey: randomUUID() })
+    // The broadcast failed, yet the committed state is the accepted state.
+    expect((await q('SELECT broadcast_at FROM brief_revisions WHERE id=$1', [first.revisionId])).rows[0].broadcast_at).toBeNull()
+    expect((await inspectBrief(lead, { bindingId })).direction!.outcome).toEqual(['Version two'])
+    const { proposalId } = await restoreRevision(lead, bindingId, first.revisionId)
+    // Restoring proposes; nothing changes until the owner applies under current authority.
+    expect((await inspectBrief(lead, { bindingId })).direction!.outcome).toEqual(['Version two'])
+    const restored = await applyDirection(lead, bindingId, { proposalId, expectedDirectionRevision: 2, expectedSelectionRevision: 0, idempotencyKey: randomUUID() })
+    expect(restored.directionRevision).toBe(3)
+    const after = await inspectBrief(lead, { bindingId })
+    expect(after.direction).toEqual({ outcome: ['Version one'], rules: [], decisions: [] })
+    expect((await briefHistory(lead, bindingId)).map(r => r.kind)).toEqual(['restore', 'apply', 'apply', 'created'])
+    setBriefSyncClientForTests(undefined)
   })
 })

@@ -1,5 +1,5 @@
 import { describe, it, expect, vi } from 'vitest'
-import { createDocGateway } from '../doc-gateway.js'
+import { createBriefSyncClient, createDocGateway } from '../doc-gateway.js'
 
 const OPS = [{ op: 'setTitle' as const, title: 'Hi' }]
 
@@ -84,5 +84,24 @@ describe('[COMP:api/doc-model-gateway] DocGateway', () => {
     })!
     const out = await gw.applyOps({ userId: 'u', pageId: 'p', ops: OPS })
     expect('error' in out && out.error).toContain('sync unreachable')
+  })
+
+  it('names a Brief Direction refusal instead of a bare status, so Brian proposes instead', async () => {
+    const fetchImpl = vi.fn(async () => new Response(JSON.stringify({ error: 'brief_direction_protected' }), { status: 409 }))
+    const gw = createDocGateway({ syncUrl: 'ws://sync', syncSecret: 's', fetchImpl: fetchImpl as unknown as typeof fetch })!
+    const out = await gw.applyOps({ userId: 'u', pageId: 'p', ops: OPS })
+    expect('error' in out && out.error).toMatch(/^brief_direction_protected: .*manageBrief/)
+  })
+
+  it('posts the post-commit Brief merge notice to the live holder and reports delivery', async () => {
+    expect(createBriefSyncClient({ syncUrl: undefined, syncSecret: undefined })).toBeUndefined()
+    const fetchImpl = vi.fn(async () => new Response(JSON.stringify({ merged: true }), { status: 200 }))
+    const client = createBriefSyncClient({ syncUrl: 'wss://sync.example', syncSecret: 's', fetchImpl: fetchImpl as unknown as typeof fetch })!
+    expect(await client.syncBrief('page-1')).toBe(true)
+    const [url, init] = fetchImpl.mock.calls[0] as unknown as [string, RequestInit]
+    expect(url).toBe('https://sync.example/internal/brief-sync')
+    expect(JSON.parse(String(init.body))).toEqual({ pageId: 'page-1' })
+    const failing = createBriefSyncClient({ syncUrl: 'ws://sync', syncSecret: 's', fetchImpl: (async () => { throw new Error('down') }) as unknown as typeof fetch })!
+    expect(await failing.syncBrief('page-1')).toBe(false)
   })
 })
