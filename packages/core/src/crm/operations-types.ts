@@ -18,6 +18,13 @@ import { AssociationPlanInputSchema, AssociationEventInputSchema } from '../asso
 import { CrmConfigCommandSchema, isCrmConfigCommand } from './config-commands.js'
 import { PreviewCrmImportFileCleanupCommandSchema, ExecuteCrmImportFileCleanupCommandSchema } from './file-cleanup-types.js'
 import { CrmRetentionPolicySchema, PreviewCrmRetentionCommandSchema, ExecuteCrmRetentionCommandSchema } from './retention-types.js'
+import {
+  SaveCrmReferenceDefinitionCommandSchema,
+  AssignCrmBusinessReferenceCommandSchema,
+  ReplaceCrmBusinessReferenceCommandSchema,
+  RetireCrmBusinessReferenceCommandSchema,
+  ImportCrmBusinessReferencesCommandSchema,
+} from './business-references.js'
 
 export const CrmOperationsUuidSchema = z.string().uuid()
 export const CrmOperationsStableKeySchema = z.string().trim().toLowerCase()
@@ -681,6 +688,11 @@ export const CrmOperationsCommandSchema = z.union([
   UpdateCrmParticipationCommandSchema,
   CorrectCrmParticipationCheckInCommandSchema,
   SetDealPipelineStageCommandSchema,
+  SaveCrmReferenceDefinitionCommandSchema,
+  AssignCrmBusinessReferenceCommandSchema,
+  ReplaceCrmBusinessReferenceCommandSchema,
+  RetireCrmBusinessReferenceCommandSchema,
+  ImportCrmBusinessReferencesCommandSchema,
 ])
 export type CrmOperationsCommand = z.infer<typeof CrmOperationsCommandSchema>
 
@@ -694,6 +706,9 @@ export const CrmDomainEventTypeSchema = z.enum([
   'crm.deal.stage_changed',
   'association.inventory.sold_out',
   'association.inventory.available',
+  'crm.reference.assigned',
+  'crm.reference.replaced',
+  'crm.reference.retired',
 ])
 export type CrmDomainEventType = z.infer<typeof CrmDomainEventTypeSchema>
 
@@ -810,6 +825,10 @@ export function commandRequiresConfigurationAuthority(command: CrmOperationsComm
     || command.kind === 'release_address_suppression'
     || command.kind === 'save_managed_mailbox_policy'
     || command.kind === 'save_mailbox_integration_grant'
+    || command.kind === 'save_reference_definition'
+    || command.kind === 'replace_business_reference'
+    || command.kind === 'retire_business_reference'
+    || command.kind === 'import_business_references'
 }
 
 export function assertCrmOperationsAuthority(
@@ -841,6 +860,9 @@ export function assertCrmOperationsAuthority(
       grant_entitlement: 'crm.entitlements.write', update_entitlement: 'crm.entitlements.write',
       record_participation: 'crm.participation.write', update_participation: 'crm.participation.write',
       set_deal_pipeline_stage: 'crm.records.write',
+      save_reference_definition: 'crm.references.configure', import_business_references: 'crm.references.configure',
+      replace_business_reference: 'crm.references.configure', retire_business_reference: 'crm.references.configure',
+      assign_business_reference: 'crm.references.write',
     }
     const operation = operations[command.kind]
     if (!operation) throw new CrmOperationsError('not_authorized', 'This operation is not available to integration credentials.')

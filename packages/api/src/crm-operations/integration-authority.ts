@@ -117,5 +117,21 @@ export async function authorizeCrmIntegrationCommand(client: PoolClient, context
     case 'set_deal_pipeline_stage': break // Workspace-wide records.write already checked.
     case 'create_intake_credential':
     case 'revoke_intake_credential': throw new CrmOperationsError('not_authorized', 'Integration credentials cannot administer other credentials.')
+    case 'save_reference_definition':
+      required('crm.references.configure', { referenceDefinitionKeys: command.definition.definitionKey })
+      break
+    case 'import_business_references':
+      required('crm.references.configure', { referenceDefinitionKeys: command.definitionKey })
+      break
+    case 'assign_business_reference':
+      required('crm.references.write', { referenceDefinitionKeys: command.definitionKey })
+      break
+    case 'replace_business_reference':
+    case 'retire_business_reference': {
+      const row = await existing(`SELECT d.definition_key AS key FROM crm_business_references r JOIN crm_reference_definitions d
+        ON d.workspace_id=r.workspace_id AND d.id=r.definition_id WHERE r.workspace_id=$1 AND r.id=$2`, command.referenceId)
+      required('crm.references.configure', { referenceDefinitionKeys: row.key! })
+      break
+    }
   }
 }

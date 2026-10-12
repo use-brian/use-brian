@@ -609,7 +609,7 @@ const TOOL_DEFAULTS: ToolDefaults = {
   requiresConfirmation: false,
 }
 
-type ToolInput<Input extends z.ZodType> = Omit<Tool<Input>, keyof ToolDefaults> & Partial<ToolDefaults>
+export type ToolInput<Input extends z.ZodType> = Omit<Tool<Input>, keyof ToolDefaults> & Partial<ToolDefaults>
 
 export function buildTool<Input extends z.ZodType>(def: ToolInput<Input>): Tool<Input> {
   return { ...TOOL_DEFAULTS, ...def }

@@ -60,7 +60,29 @@ const CAMPAIGN_PRIVACY_COVERAGE: readonly CrmPrivacyCoverageEntry[] = [
     `t.result->>'contactId'=$2::text`, ['idempotency_key','request_fingerprint'], { idempotency_key: 'NULL', request_fingerprint: 'NULL' }, 't.idempotency_key'),
 ]
 
+/** Commercial records attach to companies and deals, never to a person subject. */
+const commercialPrivacyEntry = (
+  domain: string,
+  columns: readonly string[],
+  excludedColumns: readonly string[] = [],
+  orderBy = 't.id',
+): CrmPrivacyCoverageEntry => ({
+  domain, columns, excludedColumns, workspaceWhere: 'true', subjectWhere: null,
+  subjectRedactions: {}, transforms: {}, orderBy,
+  reason: 'Commercial references and their configuration attach to company and deal records, not to a person subject; they are exported with the workspace.',
+})
+
+const COMMERCIAL_PRIVACY_COVERAGE: readonly CrmPrivacyCoverageEntry[] = [
+  commercialPrivacyEntry('crm_reference_definitions', ['id','workspace_id','definition_key','label','target_kinds','assignment_mode','namespace_key','format','partition_dimensions','categories','timezone','assignment_event','change_policy','status','version','created_by_kind','created_by_id','created_by_user_id','updated_by_kind','updated_by_id','updated_by_user_id','created_at','updated_at']),
+  commercialPrivacyEntry('crm_number_series', ['id','workspace_id','definition_id','counter_start','counter_width','partition_dimensions','config_version','state','version','created_at','updated_at']),
+  commercialPrivacyEntry('crm_number_partitions', ['workspace_id','series_id','partition_key','next_value','allocated_count','created_at','updated_at'], [], 't.series_id,t.partition_key'),
+  commercialPrivacyEntry('crm_business_references', ['id','workspace_id','definition_id','definition_version','target_kind','target_id','printable_value','normalized_value','origin','status','format_snapshot','series_id','partition_key','counter_value','parent_reference_id','parent_snapshot','business_date','category_key','external_evidence','operation_id','assigned_by_kind','assigned_by_id','assigned_by_user_id','status_reason','version','created_at','updated_at']),
+  commercialPrivacyEntry('crm_business_reference_history', ['id','workspace_id','reference_id','definition_id','target_kind','target_id','action','former_value','new_value','reason','actor_kind','actor_id','actor_user_id','operation_id','effective_at']),
+  commercialPrivacyEntry('crm_operation_receipts', ['workspace_id','operation_id','command_kind','request_fingerprint','actor_kind','actor_id','result','created_at'], ['request_fingerprint'], 't.operation_id'),
+]
+
 export const CRM_PRIVACY_COVERAGE: readonly CrmPrivacyCoverageEntry[] = [
+  ...COMMERCIAL_PRIVACY_COVERAGE,
   {"domain": "association_membership_catalogues", "columns": ["workspace_id", "draft_version", "draft", "published_revision", "observations", "updated_at"], "excludedColumns": ["workspace_id", "draft_version", "draft", "published_revision", "observations", "updated_at"], "workspaceWhere": "false", "subjectWhere": null, "subjectRedactions": {}, "transforms": {}, "orderBy": "t.workspace_id", "reason": "Website draft and publication documents have no canonical CRM subject attribution; use the separate website content facility."},
   {"domain": "association_membership_catalogue_revisions", "columns": ["workspace_id", "revision", "document", "actor", "published_at"], "excludedColumns": ["workspace_id", "revision", "document", "actor", "published_at"], "workspaceWhere": "false", "subjectWhere": null, "subjectRedactions": {}, "transforms": {}, "orderBy": "t.workspace_id,t.revision", "reason": "Website draft and publication documents have no canonical CRM subject attribution; use the separate website content facility."},
   {"domain": "association_programme_catalogues", "columns": ["workspace_id", "draft_version", "draft", "published_revision", "observations", "updated_at"], "excludedColumns": ["workspace_id", "draft_version", "draft", "published_revision", "observations", "updated_at"], "workspaceWhere": "false", "subjectWhere": null, "subjectRedactions": {}, "transforms": {}, "orderBy": "t.workspace_id", "reason": "Website draft and publication documents have no canonical CRM subject attribution; use the separate website content facility."},

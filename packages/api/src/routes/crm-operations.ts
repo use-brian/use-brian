@@ -41,6 +41,11 @@ import {
   UpdateCrmEntitlementCommandSchema,
   UpdateCrmParticipationCommandSchema,
   SetDealPipelineStageCommandSchema,
+  CrmBusinessReferenceCommandSchema,
+  CrmReferenceLookupQuerySchema,
+  CrmReferencePreviewQuerySchema,
+  isCrmBusinessReferenceCommand,
+  type CrmReferenceReadPort,
   type CrmOperationsContext,
   type CrmOperationsServicePort,
 } from '@use-brian/core'
@@ -66,6 +71,7 @@ import { listCrmAddressSuppression } from '../crm-operations/suppression-tombsto
 import { readCrmManagedMailboxPolicy, readCrmMailboxIntegrationGrant } from '../crm-operations/delivery-policy.js'
 import { query } from '../db/client.js'
 import { CrmPipelinesQuerySchema, CrmRecordFieldsQuerySchema } from '../db/crm-config-catalog.js'
+import { createCrmReferenceReadStore } from '../db/crm-business-reference-store.js'
 
 const SaveDefinitionBody = SaveCrmIntakeDefinitionCommandSchema.omit({ kind: true }).strict()
 const CreateCredentialBody = CreateCrmIntakeCredentialCommandSchema.omit({ kind: true }).strict()
@@ -199,6 +205,7 @@ type Options = {
   readStore: DbCrmOperationsReadStore
   importService?: CrmProductionImportService
   deliveries?: CrmDeliveryServicePort
+  referenceReads?: CrmReferenceReadPort
 }
 
 function writeError(res: Response, error: unknown): void {
@@ -257,9 +264,48 @@ export function crmOperationsRoutes(options: Options): Router {
     const ctx = await context(req, res)
     if (!ctx) return
     try {
-      const command = CrmConfigCommandSchema.parse(req.body)
+      if (req.body && ['workspaceId', 'actor', 'authority'].some((key) => Object.hasOwn(req.body, key))) {
+        throw new CrmOperationsError('invalid_input', 'Workspace and authority come from your session.')
+      }
+      const command = isCrmBusinessReferenceCommand(req.body ?? {})
+        ? CrmBusinessReferenceCommandSchema.parse(req.body)
+        : CrmConfigCommandSchema.parse(req.body)
       const output = await options.service.execute(ctx, command)
       res.status(output.created ? 201 : 200).json(output)
+    } catch (error) { writeError(res, error) }
+  })
+
+  const referenceReads = options.referenceReads ?? createCrmReferenceReadStore()
+  const viewer = (ctx: CrmOperationsContext) => ({ userId: (ctx.actor as { userId: string }).userId, canConfigure: ctx.authority.canConfigure })
+  router.get('/:workspaceId/operations/reference-definitions', async (req, res) => {
+    const ctx = await context(req, res)
+    if (!ctx) return
+    try {
+      const filters = z.object({ includeArchived: z.enum(['true', 'false']).optional() }).strict().parse(req.query)
+      res.json(await referenceReads.listDefinitions(ctx.workspaceId, viewer(ctx), { includeArchived: filters.includeArchived === 'true' }))
+    } catch (error) { writeError(res, error) }
+  })
+  router.get('/:workspaceId/operations/references/preview', async (req, res) => {
+    const ctx = await context(req, res)
+    if (!ctx) return
+    try {
+      res.set('Cache-Control', 'no-store').json(await referenceReads.preview(ctx.workspaceId, viewer(ctx), CrmReferencePreviewQuerySchema.parse(req.query)))
+    } catch (error) { writeError(res, error) }
+  })
+  router.get('/:workspaceId/operations/references', async (req, res) => {
+    const ctx = await context(req, res)
+    if (!ctx) return
+    try {
+      res.json(await referenceReads.lookup(ctx.workspaceId, viewer(ctx), CrmReferenceLookupQuerySchema.parse(req.query)))
+    } catch (error) { writeError(res, error) }
+  })
+  router.get('/:workspaceId/operations/references/:referenceId/history', async (req, res) => {
+    const ctx = await context(req, res)
+    if (!ctx) return
+    try {
+      const found = await referenceReads.history(ctx.workspaceId, viewer(ctx), CrmOperationsUuidSchema.parse(req.params.referenceId))
+      if (!found) { res.status(404).json({ error: 'not_found' }); return }
+      res.json(found)
     } catch (error) { writeError(res, error) }
   })
 

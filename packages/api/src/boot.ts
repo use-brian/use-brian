@@ -123,6 +123,7 @@ import {
   createInternalLinkTools,
   createCrmTools,
   createCrmOperationsTools, createCrmCredentialTools, CRM_INTEGRATION_OPERATIONS, CRM_INTEGRATION_RESOURCE_CATALOG,
+  createCrmBusinessReferenceTools,
   createAssociationTools,
   createCrmEmailDraftTools,
   createCampaignTools,
@@ -297,6 +298,7 @@ import {
   createDbCrmDomainEventOutboxStore,
 } from './crm-operations/domain-event-worker.js'
 import { createDbCrmOperationsStore } from './db/crm-operations-store.js'
+import { createCrmReferenceReadStore } from './db/crm-business-reference-store.js'
 import { createDbCrmIntakeReadStore } from './db/crm-intake-store.js'
 import { createCampaignConversionOutboxWorker } from './campaigns/conversion-outbox.js'
 import { createCampaignDispatchService } from './campaigns/dispatch.js'
@@ -4402,6 +4404,8 @@ export async function bootOpenApi(opts: BootOpenApiOptions): Promise<BootResult>
     service: crmOperationsService,
   })
   for (const tool of Object.values(crmOperationsTools)) allTools.set(tool.name, tool)
+  const crmBusinessReferenceTools = createCrmBusinessReferenceTools({ reads: createCrmReferenceReadStore(), service: crmOperationsService })
+  for (const tool of Object.values(crmBusinessReferenceTools)) allTools.set(tool.name, tool)
   const crmCredentialTools = createCrmCredentialTools({
     preview: async (input, authority, parent) => ({
       ...await crmIntegrationStore.bindingOptions(authority.ceiling.workspaceId, authority.ceiling.userId, input, authority, parent),
@@ -5690,7 +5694,7 @@ export async function bootOpenApi(opts: BootOpenApiOptions): Promise<BootResult>
       : {}),
     memoryTools: brainMemoryTools,
     taskTools,
-    crmTools: { ...crmTools, ...crmOperationsTools },
+    crmTools: { ...crmTools, ...crmOperationsTools, ...crmBusinessReferenceTools },
     credentialTools: crmCredentialTools,
     associationTools,
     retrievalTools: brainRetrievalTools,

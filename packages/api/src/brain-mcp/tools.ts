@@ -93,7 +93,7 @@ import type {
   Sensitivity,
   Tool,
   ToolContext,
-  CrmOperationsTools,
+  CrmOperationsTools, CrmBusinessReferenceTools,
   AssociationTools,
   Embedder,
 } from '@use-brian/core'
@@ -187,7 +187,7 @@ export type BrainCrmTools = {
   advanceDealStage: Tool
   listCrmFields: Tool
   setCrmCustomFields: Tool
-} & CrmOperationsTools
+} & CrmOperationsTools & CrmBusinessReferenceTools
 
 export type BrainRetrievalTools = {
   search: Tool
@@ -443,6 +443,10 @@ const READ_TOOL_NAMES = new Set<string>([
   'listCrmEvents',
   'listCrmParticipation',
   'listCrmPipelines',
+  'listCrmReferenceDefinitions',
+  'previewCrmReference',
+  'findCrmReference',
+  'getCrmReferenceHistory',
   'getCrmDelivery',
   // Workspace files (read) — present only when fileTools are wired
   'fileRead',
@@ -1650,6 +1654,14 @@ export function buildBrainTools(opts: BuildOpts): BrainTool[] {
     bridgeCoreTool(opts.crmTools.recordCrmParticipation, resolveCtx, workspaceId),
     bridgeCoreTool(opts.crmTools.updateCrmParticipation, resolveCtx, workspaceId),
     bridgeCoreTool(opts.crmTools.setDealPipelineStage, resolveCtx, workspaceId),
+    bridgeCoreTool(opts.crmTools.listCrmReferenceDefinitions, resolveCtx, workspaceId),
+    bridgeCoreTool(opts.crmTools.previewCrmReference, resolveCtx, workspaceId),
+    bridgeCoreTool(opts.crmTools.findCrmReference, resolveCtx, workspaceId),
+    bridgeCoreTool(opts.crmTools.getCrmReferenceHistory, resolveCtx, workspaceId),
+    bridgeCoreTool(opts.crmTools.assignCrmReference, resolveCtx, workspaceId),
+    ...[...filterToolsByCapabilities(new Map([opts.crmTools.saveCrmReferenceDefinition, opts.crmTools.replaceCrmReference,
+      opts.crmTools.retireCrmReference, opts.crmTools.importCrmReferences].map(tool => [tool.name, tool])),
+    opts.agentActiveCapabilities ?? new Set()).values()].map(tool => bridgeCoreTool(tool, resolveCtx, workspaceId)),
     ...[...filterToolsByCapabilities(new Map([opts.crmTools.sendCrmMessage,opts.crmTools.getCrmDelivery].map(tool=>[tool.name,tool])),opts.agentActiveCapabilities ?? new Set()).values()].map(tool=>bridgeCoreTool(tool,resolveCtx,workspaceId)),
   ]
 
@@ -1870,7 +1882,9 @@ export function buildBrainTools(opts: BuildOpts): BrainTool[] {
       t.name === 'listCrmEvents' || t.name === 'listCrmParticipation' ||
       t.name === 'getCrmDelivery' ||
       t.name === 'previewCrmCredentialBindings' || t.name === 'listCrmCredentials' ||
-      t.name === 'listCrmPipelines'
+      t.name === 'listCrmPipelines' ||
+      t.name === 'listCrmReferenceDefinitions' || t.name === 'previewCrmReference' ||
+      t.name === 'findCrmReference' || t.name === 'getCrmReferenceHistory'
     ),
     ...fileBridges.filter((t) => t.name === 'fileRead' || t.name === 'fileSearch'),
     ...brandBridges.filter((t) => t.name === 'getBrand'),
@@ -1899,7 +1913,9 @@ export function buildBrainTools(opts: BuildOpts): BrainTool[] {
       t.name === 'recordCrmParticipation' || t.name === 'updateCrmParticipation' ||
       t.name === 'setDealPipelineStage' || t.name === 'sendCrmMessage' ||
       t.name === 'saveCrmEntitlementPlan' || t.name === 'saveCrmEvent' ||
-      t.name === 'createCrmCredential' || t.name === 'revokeCrmCredential'
+      t.name === 'createCrmCredential' || t.name === 'revokeCrmCredential' ||
+      t.name === 'assignCrmReference' || t.name === 'saveCrmReferenceDefinition' ||
+      t.name === 'replaceCrmReference' || t.name === 'retireCrmReference' || t.name === 'importCrmReferences'
     ),
     ...fileBridges.filter((t) =>
       t.name === 'fileWrite' || t.name === 'fileAppend' ||

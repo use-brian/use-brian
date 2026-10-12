@@ -12,6 +12,7 @@ export const CRM_INTEGRATION_OPERATIONS = [
   'crm.imports.read', 'crm.imports.write', 'crm.audit.read', 'crm.privacy.export', 'crm.privacy.retention',
   'crm.delivery.read', 'crm.delivery.dispatch', 'association.read', 'association.orders.write',
   'association.provider_events.write',
+  'crm.references.read', 'crm.references.write', 'crm.references.configure',
 ] as const
 export const CrmIntegrationOperationSchema = z.enum(CRM_INTEGRATION_OPERATIONS)
 export type CrmIntegrationOperation = z.infer<typeof CrmIntegrationOperationSchema>
@@ -29,6 +30,7 @@ function selector<T extends z.ZodTypeAny>(item: T) {
 export const CrmIntegrationSelectorsSchema = z.object({
   definitionIds: selector(Id).optional(), purposeKeys: selector(Key).optional(),
   planIds: selector(Id).optional(), eventIds: selector(Id).optional(), providerKeys: selector(Key).optional(),
+  referenceDefinitionKeys: selector(Key).optional(),
 }).strict()
 export type CrmIntegrationSelectors = z.infer<typeof CrmIntegrationSelectorsSchema>
 export type CrmIntegrationSelector = keyof CrmIntegrationSelectors
@@ -46,6 +48,8 @@ export const CRM_INTEGRATION_RESOURCE_CATALOG = {
   'crm.delivery.read': ['purposeKeys', 'providerKeys'], 'crm.delivery.dispatch': ['purposeKeys', 'providerKeys'],
   'association.read': ['eventIds'], 'association.orders.write': ['eventIds'],
   'association.provider_events.write': ['eventIds', 'providerKeys'],
+  'crm.references.read': ['referenceDefinitionKeys'], 'crm.references.write': ['referenceDefinitionKeys'],
+  'crm.references.configure': ['referenceDefinitionKeys'],
 } as const satisfies Record<CrmIntegrationOperation, readonly CrmIntegrationSelector[]>
 
 export const CrmIntegrationGrantSchema = z.object({

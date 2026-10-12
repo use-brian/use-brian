@@ -39,19 +39,25 @@ import {
 import { useT } from "@/lib/i18n/client";
 import { crmFieldKeyFromLabel } from "@/lib/crm-r2";
 import { CrmIntakeSettings } from "./operations/intake-settings";
+import { CrmReferenceSettings } from "./operations/references-settings";
+import { useOptionalWorkspaceContext } from "@/lib/workspace-context";
 
 export function CrmConfigDialog({
   workspaceId,
   open,
   onOpenChange,
   onChanged,
+  onOpenRecord,
 }: {
   workspaceId: string;
   open: boolean;
   onOpenChange: (open: boolean) => void;
   onChanged?: () => void;
+  /** Opens a company or deal from the reference lookup. */
+  onOpenRecord?: (kind: "company" | "deal", id: string) => void;
 }) {
   const t = useT().crmPage.r2;
+  const role = useOptionalWorkspaceContext()?.role ?? "member";
   const [config, setConfig] = useState<CrmConfig | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [fieldKind, setFieldKind] = useState<"person" | "company" | "deal">("deal");
@@ -315,6 +321,7 @@ export function CrmConfigDialog({
                 {config?.fields.length === 0 && <div className="text-xs text-muted-foreground">{t.noFields}</div>}
               </div>
             </section>
+            <CrmReferenceSettings workspaceId={workspaceId} canConfigure={role === "owner" || role === "admin"} onOpenRecord={onOpenRecord} />
             <CrmIntakeSettings workspaceId={workspaceId} />
           </div>
         </Dialog.Popup>

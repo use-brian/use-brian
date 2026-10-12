@@ -7,7 +7,8 @@ import { z } from 'zod'
 import {
   CRM_INTEGRATION_OPERATIONS, CRM_INTEGRATION_RESOURCE_CATALOG,
   CrmOperationsCommandSchema, CrmOperationsError, assertCrmOperationsAuthority,
-  CrmPageQuerySchema, requireCrmIntegrationOperation,
+  CrmPageQuerySchema, requireCrmIntegrationOperation, crmIntegrationResourceSelection,
+  CrmReferenceLookupQuerySchema, CrmReferencePreviewQuerySchema, type CrmReferenceReadPort,
   type CrmDeliveryServicePort,
   type CrmOperationsContext, type CrmOperationsServicePort, type AssociationServicePort,
 } from '@use-brian/core'
@@ -31,12 +32,13 @@ import { sendWebsiteMedia, type WebsiteMediaDeps } from './association-media.js'
 import { SubmissionQuery, SendabilityQuery, EntitlementPlansQuery, EntitlementsQuery, EventsQuery, ParticipationQuery, SegmentListQuery } from './crm-operations.js'
 import { runWithAgentAccess } from '../db/agent-access-context.js'
 import { CrmIntegrationBindingOptionsSchema } from '../crm-operations/integration-department-authority.js'
+import { createCrmReferenceReadStore } from '../db/crm-business-reference-store.js'
 
 const UUID = z.string().uuid()
 export function crmIntegrationContext(principal: CrmIntegrationPrincipal): CrmOperationsContext {
   return { workspaceId: principal.workspaceId, actor: { kind: 'integration_key', credentialId: principal.credentialId },
     authority: { role: 'system', canWrite: true,
-      canConfigure: principal.grants.some((grant) => grant.operation === 'crm.catalog.configure'),
+      canConfigure: principal.grants.some((grant) => grant.operation === 'crm.catalog.configure' || grant.operation === 'crm.references.configure'),
       trustedIdentitySources: [], integration: { credentialId: principal.credentialId, grants: principal.grants } } }
 }
 
@@ -48,6 +50,7 @@ export function crmIntegrationRoutes(options: {
   imports?: CrmProductionImportService
   importSources?: CrmImportSources
   reads?: (principal: CrmIntegrationPrincipal) => DbCrmOperationsReadStore
+  referenceReads?: CrmReferenceReadPort
   /** Website media library reads (`association.read`); absent → 404. */
   websiteMedia?: Pick<WebsiteMediaDeps, 'store' | 'resolver'>
   memberProfiles?: (principal: CrmIntegrationPrincipal) => {
@@ -192,6 +195,36 @@ export function crmIntegrationRoutes(options: {
     const receipt=await options.deliveries.get(context,UUID.parse(req.params.id))
     if(!receipt) {res.status(404).json({error:'not_found'});return}
     res.set('Cache-Control','no-store').json({receipt})
+  }))
+  // Reference reads run under the credential's bound department principal.
+  const referenceReads = options.referenceReads ?? createCrmReferenceReadStore()
+  const referenceViewer = (res: Response) => {
+    const current = principal(res)
+    requireCrmIntegrationOperation(current, 'crm.references.read')
+    if (!current.departmentRead) throw new CrmOperationsError('not_authorized', 'Reference reads require a department-bound integration credential.')
+    const selection = crmIntegrationResourceSelection(current, 'crm.references.read', 'referenceDefinitionKeys')
+    return { viewer: { userId: current.departmentRead.userId, canConfigure: false }, allowed: selection === 'all' ? undefined : selection }
+  }
+  router.get('/operations/reference-definitions', endpoint(async (req, res) => {
+    const { viewer, allowed } = referenceViewer(res)
+    z.object({}).strict().parse(req.query)
+    res.json(await referenceReads.listDefinitions(principal(res).workspaceId, viewer, { allowedDefinitionKeys: allowed }))
+  }))
+  router.get('/operations/references/preview', endpoint(async (req, res) => {
+    const { viewer, allowed } = referenceViewer(res)
+    const query = CrmReferencePreviewQuerySchema.parse(req.query)
+    if (allowed && !allowed.includes(query.definitionKey)) throw new CrmOperationsError('not_found', 'Reference definition was not found.')
+    res.set('Cache-Control', 'no-store').json(await referenceReads.preview(principal(res).workspaceId, viewer, query))
+  }))
+  router.get('/operations/references', endpoint(async (req, res) => {
+    const { viewer, allowed } = referenceViewer(res)
+    res.json(await referenceReads.lookup(principal(res).workspaceId, viewer, CrmReferenceLookupQuerySchema.parse(req.query), allowed))
+  }))
+  router.get('/operations/references/:id/history', endpoint(async (req, res) => {
+    const { viewer, allowed } = referenceViewer(res)
+    const found = await referenceReads.history(principal(res).workspaceId, viewer, UUID.parse(req.params.id), allowed)
+    if (!found) { res.status(404).json({ error: 'not_found' }); return }
+    res.json(found)
   }))
   router.post('/operations/commands', endpoint(async (req, res) => {
     const context = crmIntegrationContext(principal(res))

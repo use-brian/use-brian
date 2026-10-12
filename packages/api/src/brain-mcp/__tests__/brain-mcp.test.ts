@@ -155,6 +155,15 @@ const CRM_TOOLS_STUB: BrainCrmTools = {
   saveCrmEvent: { ...stubCoreTool('saveCrmEvent'), requiresCapability: 'configure', homeAppToolSet: { app: 'crm', set: 'write' } },
   sendCrmMessage: {...stubCoreTool('sendCrmMessage'),requiresCapability:'crm',homeAppToolSet:{app:'crm',set:'write'}},
   getCrmDelivery: {...stubCoreTool('getCrmDelivery',true),requiresCapability:'crm',homeAppToolSet:{app:'crm',set:'read'}},
+  listCrmReferenceDefinitions: stubCoreTool('listCrmReferenceDefinitions', true),
+  previewCrmReference: stubCoreTool('previewCrmReference', true),
+  findCrmReference: stubCoreTool('findCrmReference', true),
+  getCrmReferenceHistory: stubCoreTool('getCrmReferenceHistory', true),
+  assignCrmReference: stubCoreTool('assignCrmReference'),
+  saveCrmReferenceDefinition: { ...stubCoreTool('saveCrmReferenceDefinition'), requiresCapability: 'configure', homeAppToolSet: { app: 'crm', set: 'write' } },
+  replaceCrmReference: { ...stubCoreTool('replaceCrmReference'), requiresCapability: 'configure', homeAppToolSet: { app: 'crm', set: 'write' } },
+  retireCrmReference: { ...stubCoreTool('retireCrmReference'), requiresCapability: 'configure', homeAppToolSet: { app: 'crm', set: 'write' } },
+  importCrmReferences: { ...stubCoreTool('importCrmReferences'), requiresCapability: 'configure', homeAppToolSet: { app: 'crm', set: 'write' } },
 }
 
 const RETRIEVAL_TOOLS_STUB: BrainRetrievalTools = {
@@ -246,6 +255,10 @@ const READ_TOOL_NAMES = [
   'listCrmParticipation',
   'listCrmPipelines',
   'previewCrmSegment',
+  'listCrmReferenceDefinitions',
+  'previewCrmReference',
+  'findCrmReference',
+  'getCrmReferenceHistory',
   'listTasks',
   'listRecordings',
   'searchBrain',
@@ -289,6 +302,7 @@ const WRITE_TOOL_NAMES = [
   'updateCrmEntitlement',
   'updateCrmParticipation',
   'setDealPipelineStage',
+  'assignCrmReference',
   'updateTask',
 ] as const
 

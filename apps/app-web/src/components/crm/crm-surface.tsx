@@ -1885,6 +1885,10 @@ export function CrmSurface({ workspaceId, routeRecord = null }: {
         open={configOpen}
         onOpenChange={setConfigOpen}
         onChanged={() => void configResource.refresh()}
+        onOpenRecord={(kind, id) => {
+          setConfigOpen(false);
+          openRecord(kind, id);
+        }}
       />
       <CrmReportingDialog
         workspaceId={workspaceId}

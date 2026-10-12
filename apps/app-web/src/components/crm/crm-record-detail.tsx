@@ -78,6 +78,8 @@ import { CrmParticipants } from "./crm-participants";
 import { CrmContactCompliance } from "./operations/contact-compliance";
 import { CrmContactLifecycle } from "./operations/contact-lifecycle";
 import { CrmCampaignAttribution } from "./crm-campaign-attribution";
+import { CrmRecordReferences } from "./operations/record-references";
+import { useOptionalWorkspaceContext } from "@/lib/workspace-context";
 
 export type CrmRecordRef =
   | { kind: "deal"; row: CrmDealRow }
@@ -139,6 +141,7 @@ export function CrmRecordDetail({
 }) {
   const dictionary = useT();
   const t = dictionary.crmPage;
+  const workspaceRole = useOptionalWorkspaceContext()?.role ?? "member";
   const [roster, setRoster] = useState<FeedWorkspaceMember[] | null>(null);
   const [rosterLoading, setRosterLoading] = useState(true);
   useEffect(() => {
@@ -304,6 +307,15 @@ export function CrmRecordDetail({
             contacts={data.contacts}
             initialParticipants={initialParticipants}
             onChanged={onChanged}
+          />
+        )}
+
+        {(record.kind === "company" || record.kind === "deal") && (
+          <CrmRecordReferences
+            workspaceId={workspaceId}
+            recordKind={record.kind}
+            recordId={record.row.id}
+            canConfigure={workspaceRole === "owner" || workspaceRole === "admin"}
           />
         )}
 

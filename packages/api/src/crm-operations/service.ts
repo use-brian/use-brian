@@ -20,6 +20,7 @@ import {
   actorAuditIdentity,
   assertCrmOperationsAuthority,
   isCrmConfigCommand,
+  isCrmBusinessReferenceCommand,
   canonicalCrmRequest,
   crmOperationsSha256,
   prepareCrmSubmissionAttachments,
@@ -50,6 +51,7 @@ import {createCrmImportFileCleanupService} from './import-file-cleanup-service.j
 import {createCrmRetentionService} from './retention-service.js'
 import { hashSecret } from '../db/api-key-store.js'
 import { assertIntakeVerificationConfiguration, verifyIntakeIdentity } from './identity-verification.js'
+import { executeCrmBusinessReferenceCommand } from './business-references.js'
 
 type ServiceClock = () => Date
 
@@ -570,6 +572,13 @@ export function createCrmOperationsService(
       const now = clock()
       const occurredAt = now.toISOString()
       const identity = actorAuditIdentity(context.actor)
+
+      if (isCrmBusinessReferenceCommand(command)) {
+        return store.transaction(context, async (tx) => {
+          if (context.authority.integration) await tx.authorizeIntegration(command)
+          return executeCrmBusinessReferenceCommand(tx, command, now)
+        })
+      }
 
       return store.transaction(context, async (tx) => {
         if (context.authority.integration && !isCrmConfigCommand(command)) await tx.authorizeIntegration(command)

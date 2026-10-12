@@ -53,7 +53,7 @@ import { WorkspaceAccessError } from '../workspace-access/policy.js'
 import { mutationActorAccess } from './access-predicate.js'
 
 /** A command role or credential author is not a resource principal. */
-async function stageActorAccess(client: PoolClient, context: CrmOperationsContext): Promise<AccessContext> {
+export async function stageActorAccess(client: PoolClient, context: CrmOperationsContext): Promise<AccessContext> {
   const denied = () => Object.assign(new Error('This operation requires a verifiable current resource scope.'), { code: 'scope_operation_denied' })
   const actor = context.actor
   if (!['user', 'import', 'assistant', 'workflow'].includes(actor.kind)
@@ -327,6 +327,16 @@ export type CrmOperationsTransaction = {
     actor: CrmOperationsActor
     occurredAt: string
   }): Promise<string>
+  /** Commercial command port bound to this exact transaction client. */
+  commercial(): CrmCommercialTransaction
+}
+
+/** Raw transaction seam for commercial handlers; never connects, commits or releases. */
+export type CrmCommercialTransaction = {
+  client: PoolClient
+  context: CrmOperationsContext
+  /** Current resource principal for target reads/locks (member, agent or bound integration). */
+  actorAccess(): Promise<AccessContext>
 }
 
 export type CrmOperationsStore = {
@@ -1676,6 +1686,23 @@ function createTransaction(client: PoolClient, context: CrmOperationsContext): C
       return result.rows[0]!.id
     },
 
+    commercial() {
+      return {
+        client, context,
+        async actorAccess() {
+          if (context.actor.kind === 'integration_key') {
+            const ambient = currentAgentAccess()
+            if (!ambient?.departmentRead || ambient.workspaceId !== workspaceId || !ambient.userId || !context.authority.canWrite) {
+              throw new CrmOperationsError('not_authorized', 'Commercial record commands require a department-bound integration credential.')
+            }
+            const member = await client.query('SELECT 1 FROM workspace_members WHERE workspace_id=$1 AND user_id=$2 FOR SHARE', [workspaceId, ambient.userId])
+            if (!member.rowCount) throw Object.assign(new Error('This operation requires a verifiable current resource scope.'), { code: 'scope_operation_denied' })
+            return { userId: ambient.userId, workspaceId, assistantId: '', assistantKind: 'primary' } as AccessContext
+          }
+          return stageActorAccess(client, context)
+        },
+      }
+    },
     async emitDomainEvent(params) {
       const result = await client.query<{ id: string }>(
         `INSERT INTO crm_domain_event_outbox (
