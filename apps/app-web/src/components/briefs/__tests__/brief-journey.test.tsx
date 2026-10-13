@@ -23,11 +23,18 @@ vi.mock('@/lib/api/briefs', async () => {
 vi.mock('@/components/ui/confirm-dialog', () => ({ confirmDialog: api.confirm }));
 // The pane also mounts the live work section (project-briefs.md -> "Work");
 // its own behaviour is covered by brief-work.test.tsx.
-vi.mock('next/navigation', () => ({ useRouter: () => ({ push: vi.fn(), replace: vi.fn() }) }));
+const nav = vi.hoisted(() => ({ push: vi.fn(), stash: vi.fn(() => 'req-1'), fetchWork: vi.fn() }));
+vi.mock('next/navigation', () => ({ useRouter: () => ({ push: nav.push, replace: vi.fn() }) }));
+vi.mock('@/contexts/primary-assistant', () => ({ usePrimaryAssistant: () => ({ assistantId: 'a-primary', resolved: true, refresh: () => {} }) }));
+vi.mock('@/lib/chat-handoff', async (importOriginal) => ({
+  ...(await importOriginal<typeof import('@/lib/chat-handoff')>()),
+  stashChatHandoff: nav.stash,
+}));
+const emptyWork = { scope: { kind: 'project', id: 'atlas' }, viewer: { memberId: 'm1' },
+  sections: { needsYou: [], myWork: [], needsAssignment: [] }, counts: { needsYou: 0, myWork: 0, needsAssignment: 0 }, generatedAt: '2026-10-13T00:00:00Z' };
 vi.mock('@/lib/api/work', async (importOriginal) => ({
   ...(await importOriginal<typeof import('@/lib/api/work')>()),
-  fetchWork: vi.fn(async () => ({ scope: { kind: 'project', id: 'atlas' }, viewer: { memberId: 'm1' },
-    sections: { needsYou: [], myWork: [], needsAssignment: [] }, counts: { needsYou: 0, myWork: 0, needsAssignment: 0 }, generatedAt: '2026-10-13T00:00:00Z' })),
+  fetchWork: nav.fetchWork,
 }));
 vi.mock('@/components/ui/checkbox', () => ({
   Checkbox: ({ checked, onCheckedChange }: { checked: boolean; onCheckedChange: (v: boolean) => void }) =>
@@ -38,6 +45,7 @@ vi.mock('@/lib/i18n/client', async () => {
   return { useT: () => en, useLocale: () => 'ja', format: (text: string, vars: Record<string, string>) => text.replace(/\{(\w+)\}/g, (_m, key) => vars[key] ?? '') };
 });
 import { en } from '@/lib/i18n/dictionaries/en';
+import { resetSurfaceCache } from '@/lib/surface-cache';
 import { BriefPane } from '../brief-pane';
 import { BriefEntry } from '../brief-entry';
 
@@ -66,6 +74,9 @@ describe('[COMP:app-web/brief-journey] Brief pane and entry on existing surfaces
   beforeEach(() => {
     host = document.createElement('div'); document.body.appendChild(host); root = createRoot(host);
     for (const fn of Object.values(api)) fn.mockReset();
+    resetSurfaceCache();
+    nav.push.mockReset(); nav.stash.mockClear();
+    nav.fetchWork.mockReset(); nav.fetchWork.mockResolvedValue(emptyWork);
   });
   afterEach(async () => { await act(async () => root.unmount()); host.remove(); vi.useRealTimers(); });
 
@@ -189,5 +200,21 @@ describe('[COMP:app-web/brief-journey] Brief pane and entry on existing surfaces
     await click(t.open);
     expect(host.querySelector('[data-testid="brief-pane"]')).not.toBeNull();
     expect((host.querySelector('a') as HTMLAnchorElement).getAttribute('href')).toBe('/w/w1/p/page-1');
+  });
+
+  it('picks a task up into Chat as a draft only: the prompt travels in the one-shot handoff, never the URL', async () => {
+    api.getBriefByOwner.mockResolvedValue(view());
+    nav.fetchWork.mockResolvedValue({ ...emptyWork, counts: { ...emptyWork.counts, myWork: 1 }, sections: { ...emptyWork.sections, myWork: [{
+      taskId: 'task-7', title: 'Draft the billing memo', status: 'todo', due: null, home: { kind: 'project', id: 'atlas' },
+      executor: { kind: 'assistant', assistantId: 'a-ops', name: 'Ops' }, followUp: { source: 'home_owners', home: { kind: 'project', id: 'atlas' }, viewerIsOwner: true },
+      reasons: ['follow_up'], nextAction: 'open', blockerReason: null, updatedAt: '2026-10-12T00:00:00Z' }] } });
+    await render(<BriefPane workspaceId="w1" ownerKind="project" ownerId="atlas" />); await flush();
+    await click(en.briefs.work.actions.continueInChat);
+    expect(nav.stash).toHaveBeenCalledWith(expect.objectContaining({
+      workspaceId: 'w1', assistantId: 'a-ops', draftOnly: true, contextProjectId: 'atlas',
+      text: 'Work on task "Draft the billing memo" (task task-7).',
+    }));
+    expect(nav.push).toHaveBeenCalledWith('/w/w1/chat?v=personal&assistant=a-ops&handoff=req-1');
+    expect(String(nav.push.mock.calls[0][0])).not.toContain('billing');
   });
 });

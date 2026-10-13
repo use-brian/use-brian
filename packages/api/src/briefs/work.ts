@@ -33,21 +33,21 @@ import { resolveWorkspaceViewpoint } from '../db/workspace-viewpoint.js'
 import { homeOwnerIds } from '../tasks/responsibility.js'
 import { WorkspaceAccessError } from '../workspace-access/policy.js'
 
-export type WorkScope = { kind: 'personal' } | { kind: 'department' | 'project'; id: string }
+type WorkScope = { kind: 'personal' } | { kind: 'department' | 'project'; id: string }
 
-export type WorkExecutor =
+type WorkExecutor =
   | { kind: 'person'; memberId: string; name: string | null }
   | { kind: 'assistant'; assistantId: string; name: string | null }
   | { kind: 'unassigned' }
 
-export type WorkFollowUp =
+type WorkFollowUp =
   | { source: 'explicit' | 'executor'; memberId: string; name: string | null }
   | { source: 'home_owners'; home: TaskHome; viewerIsOwner: boolean }
   | { source: 'missing_routing'; reason: 'no_home' | 'no_eligible_owner' }
   | { source: 'owner_queue'; home: TaskHome }
   | { source: 'none' }
 
-export type WorkItem = {
+type WorkItem = {
   taskId: string
   title: string
   status: string

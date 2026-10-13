@@ -30,7 +30,7 @@ import { query } from '../db/client.js'
 type Db = { query: (text: string, values: unknown[]) => Promise<{ rows: Record<string, unknown>[] }> }
 
 /** The protection of the row being written, as the writer already resolved it. */
-export type TaskResponsibilityEnvelope = {
+type TaskResponsibilityEnvelope = {
   workspaceId: string
   sensitivity: string
   compartments: string[]
@@ -104,7 +104,7 @@ export async function homeOwnerIds(workspaceId: string, homes: readonly TaskHome
   return out
 }
 
-export type ClaimExecutor = { kind: 'person' } | { kind: 'assistant'; assistantId: string }
+type ClaimExecutor = { kind: 'person' } | { kind: 'assistant'; assistantId: string }
 
 /**
  * The guarded claim behind an owner-queue card: an unassigned task takes the
