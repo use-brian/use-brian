@@ -4119,6 +4119,13 @@ export async function bootOpenApi(opts: BootOpenApiOptions): Promise<BootResult>
   const taskTools = createTaskTools(taskStore, {
     admission: createTaskAdmissionPort(),
     entityLinks: entityLinksStore,
+    // Recurring work: a task created inside a workflow run takes the
+    // workflow's typed defaultExecutor (workflow.md -> "Default executor").
+    resolveRunExecutorDefault: async (workflowRunId) => {
+      const run = await workflowRunStore.getRunSystem(workflowRunId)
+      const workflow = run ? await workflowStore.findByIdSystem(run.workflowId) : null
+      return workflow?.definition.defaultExecutor ?? null
+    },
     onEvent: (evt, ctx) => {
       const base = { userId: ctx.userId, assistantId: ctx.assistantId, sessionId: ctx.sessionId, channelType: ctx.channelType }
       if (evt.type === 'task_created') {

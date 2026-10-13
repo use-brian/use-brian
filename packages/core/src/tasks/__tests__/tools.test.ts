@@ -1297,3 +1297,35 @@ describe('[COMP:tasks/tools] responsibility fields (executor, follow-up, home)',
   })
 })
 
+
+describe('[COMP:tasks/responsibility] recurring default executor inside workflow runs', () => {
+  const ASSISTANT = '22222222-2222-4222-8222-222222222222'
+  const PERSON = '33333333-3333-4333-8333-333333333333'
+
+  it('uses the workflow default for root work, the parent for children, and an explicit choice first', async () => {
+    const store = makeFakeStore()
+    const resolveRunExecutorDefault = vi.fn(async () => ({ kind: 'assistant' as const, assistantId: ASSISTANT }))
+    const { saveTask } = createTaskTools(store, { resolveRunExecutorDefault })
+    const inRun = { ...ctx, workflowRunId: 'run-1' } as typeof ctx
+    await saveTask.execute({ title: 'Weekly fictional report' } as never, inRun)
+    const root = store.rows.at(-1)!
+    expect(root.executorAssistantId).toBe(ASSISTANT)
+    expect(resolveRunExecutorDefault).toHaveBeenCalledWith('run-1')
+
+    store.rows[store.rows.length - 1] = { ...root, executorAssistantId: null, assigneeId: PERSON }
+    await saveTask.execute({ title: 'Gather inputs', parent_id: root.id } as never, inRun)
+    expect(store.rows.at(-1)).toMatchObject({ assigneeId: PERSON, executorAssistantId: null })
+
+    await saveTask.execute({ title: 'Explicitly unassigned', executor_assistant_id: null } as never, inRun)
+    expect(store.rows.at(-1)).toMatchObject({ assigneeId: null, executorAssistantId: null })
+  })
+
+  it('changes nothing outside a workflow run', async () => {
+    const store = makeFakeStore()
+    const resolveRunExecutorDefault = vi.fn(async () => ({ kind: 'assistant' as const, assistantId: ASSISTANT }))
+    const { saveTask } = createTaskTools(store, { resolveRunExecutorDefault })
+    await saveTask.execute({ title: 'Chat-created fictional task' } as never, ctx)
+    expect(store.rows.at(-1)).toMatchObject({ assigneeId: null, executorAssistantId: null })
+    expect(resolveRunExecutorDefault).not.toHaveBeenCalled()
+  })
+})

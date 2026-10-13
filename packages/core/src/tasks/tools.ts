@@ -6,7 +6,7 @@ import { deriveContextFloor, DerivedScopeError } from '../security/derived-scope
 import { provenanceSessionId } from '../tools/capability-gate.js'
 import { buildTool, type Tool, type ToolContext } from '../tools/types.js'
 import { tolerantBoolean, tolerantEnumArray, tolerantInt } from '../tools/schema-tolerance.js'
-import { TASK_HOME_KINDS, TaskResponsibilityError, claimPrecondition } from './responsibility.js'
+import { TASK_HOME_KINDS, TaskResponsibilityError, claimPrecondition, resolveTaskExecutor, taskExecutor, type TaskExecutor } from './responsibility.js'
 import {
   applyExplicitCloses,
   applyExplicitLinks,
@@ -83,6 +83,13 @@ export type TaskToolOptions = {
    * instead (`context.sessionId`, stamped unconditionally by saveTask).
    */
   writeSourceEpisodeId?: string | null
+  /**
+   * Resolve the `defaultExecutor` of the workflow behind a run
+   * (`ToolContext.workflowRunId`). When present, `saveTask` inside a workflow
+   * run applies `resolveTaskExecutor`: explicit choice, then the parent's
+   * executor, then this default. Outside workflow runs nothing changes.
+   */
+  resolveRunExecutorDefault?: (workflowRunId: string) => Promise<TaskExecutor | null>
   /**
    * WIDEN `saveTask` to ask which moment of the source recording the task was
    * committed at (migration 338) — Fathom's lesson: an action item is a pointer
@@ -309,6 +316,11 @@ export function createTaskTools(
     return ctxFor({...context,workspaceId:context.workspaceId!})
   }
 
+  async function parentExecutor(context: ToolContext, parentId: string): Promise<TaskExecutor | null> {
+    const parent = await store.getById(accessFor(context), parentId)
+    return parent ? taskExecutor({ assigneeId: parent.assigneeId, executorAssistantId: parent.executorAssistantId ?? null }) : null
+  }
+
   function writeGrant(context:ToolContext){
     return intersectScopeGrants(context.compartments??null,
       context.mutationCompartments===undefined?context.compartments??null:context.mutationCompartments)
@@ -509,13 +521,20 @@ export function createTaskTools(
           compartmentGrant: writeGrant(context),
           projectGrant: context.projectIds,
         })
+        const executor = context.workflowRunId && opts?.resolveRunExecutorDefault
+          ? resolveTaskExecutor({
+              explicit: { assigneeId: input.assignee_id, executorAssistantId: input.executor_assistant_id },
+              parent: input.parent_id ? await parentExecutor(context, input.parent_id) : null,
+              workflowDefault: input.parent_id ? null : await opts.resolveRunExecutorDefault(context.workflowRunId),
+            })
+          : { assigneeId: input.assignee_id ?? null, executorAssistantId: input.executor_assistant_id ?? null }
         const task = await store.create({
           userId: context.userId,
           workspaceId: context.workspaceId!,
           title: input.title,
           status: input.status,
-          assigneeId: input.assignee_id ?? null,
-          executorAssistantId: input.executor_assistant_id ?? null,
+          assigneeId: executor.assigneeId,
+          executorAssistantId: executor.executorAssistantId,
           followUpMemberId: input.follow_up_member_id ?? null,
           home: input.home ?? null,
           due: input.due ? new Date(input.due) : null,

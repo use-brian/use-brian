@@ -355,6 +355,8 @@ export type WorkflowDefinition = {
    * by the executor and by `summarize()` — presentation only.
    */
   layout?: Record<string, WorkflowNodePosition>
+  /** Executor for root tasks a run creates (workflow.md -> "Default executor"). */
+  defaultExecutor?: { kind: 'assistant'; assistantId: string } | { kind: 'person'; memberId: string }
 }
 
 // ── Event trigger ───────────────────────────────────────────────────────

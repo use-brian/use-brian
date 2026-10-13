@@ -32,6 +32,31 @@ export type TaskExecutor =
   | { kind: 'assistant'; assistantId: string }
   | { kind: 'unassigned' }
 
+/**
+ * Executor for a task created inside a workflow run (recurring work):
+ * an explicit task-specific choice (including an explicit clear) wins; a child
+ * keeps its parent's executor; root work takes the workflow's
+ * `defaultExecutor`; otherwise unassigned. The result is still validated by
+ * the normal responsibility check at write time, so an unavailable default
+ * fails for correction instead of being substituted.
+ * Spec: docs/architecture/features/workflow.md -> "Default executor".
+ */
+export function resolveTaskExecutor(input: {
+  explicit: { assigneeId?: string | null; executorAssistantId?: string | null }
+  parent: TaskExecutor | null
+  workflowDefault: TaskExecutor | null
+}): { assigneeId: string | null; executorAssistantId: string | null; source: 'explicit' | 'parent' | 'workflow_default' | 'none' } {
+  const { explicit } = input
+  if (explicit.assigneeId !== undefined || explicit.executorAssistantId !== undefined) {
+    return { assigneeId: explicit.assigneeId ?? null, executorAssistantId: explicit.executorAssistantId ?? null, source: 'explicit' }
+  }
+  const pick = (e: TaskExecutor | null, source: 'parent' | 'workflow_default') =>
+    e?.kind === 'assistant' ? { assigneeId: null, executorAssistantId: e.assistantId, source }
+      : e?.kind === 'person' ? { assigneeId: e.memberId, executorAssistantId: null, source } : null
+  return pick(input.parent, 'parent') ?? pick(input.workflowDefault, 'workflow_default')
+    ?? { assigneeId: null, executorAssistantId: null, source: 'none' }
+}
+
 export type TaskResponsibility = {
   assigneeId: string | null
   executorAssistantId: string | null

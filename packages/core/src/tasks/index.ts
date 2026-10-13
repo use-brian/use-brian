@@ -71,6 +71,7 @@ export {
   claimPrecondition,
   classifyTaskForViewer,
   executorChanged,
+  resolveTaskExecutor,
   resolveTaskFollowUp,
   taskExecutor,
   type ClassifiableTask,

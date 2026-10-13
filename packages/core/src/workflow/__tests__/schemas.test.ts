@@ -1239,3 +1239,13 @@ describe('[COMP:workflow/schemas] authored question response authority', () => {
     expect(result.success).toBe(false)
   })
 })
+
+describe('[COMP:workflow/schemas] defaultExecutor', () => {
+  const base = { startStepId: 's', steps: [{ id: 's', type: 'assistant_call', target: { assistantId: 'primary' }, prompt: 'Weekly fictional report' }] }
+  it('accepts a typed assistant or person default and rejects anything else', () => {
+    expect(WorkflowDefinitionSchema.safeParse({ ...base, defaultExecutor: { kind: 'assistant', assistantId: '44444444-4444-4444-8444-444444444444' } }).success).toBe(true)
+    expect(WorkflowDefinitionSchema.safeParse({ ...base, defaultExecutor: { kind: 'person', memberId: '55555555-5555-4555-8555-555555555555' } }).success).toBe(true)
+    expect(WorkflowDefinitionSchema.safeParse({ ...base, defaultExecutor: { kind: 'assistant', assistantId: 'primary' } }).success).toBe(false)
+    expect(WorkflowDefinitionSchema.safeParse({ ...base, defaultExecutor: { kind: 'team', id: 'x' } }).success).toBe(false)
+  })
+})

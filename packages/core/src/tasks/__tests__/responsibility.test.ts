@@ -154,3 +154,20 @@ describe('[COMP:tasks/responsibility] Task executor, human follow-up and home', 
     })
   })
 })
+
+describe('[COMP:tasks/responsibility] resolveTaskExecutor', () => {
+  it('orders explicit, parent, workflow default, none', async () => {
+    const { resolveTaskExecutor } = await import('../responsibility.js')
+    const def = { kind: 'assistant' as const, assistantId: 'a-1' }
+    expect(resolveTaskExecutor({ explicit: { assigneeId: 'm-1' }, parent: def, workflowDefault: def }))
+      .toEqual({ assigneeId: 'm-1', executorAssistantId: null, source: 'explicit' })
+    expect(resolveTaskExecutor({ explicit: { executorAssistantId: null }, parent: def, workflowDefault: def }))
+      .toEqual({ assigneeId: null, executorAssistantId: null, source: 'explicit' })
+    expect(resolveTaskExecutor({ explicit: {}, parent: { kind: 'person', memberId: 'm-2' }, workflowDefault: def }))
+      .toEqual({ assigneeId: 'm-2', executorAssistantId: null, source: 'parent' })
+    expect(resolveTaskExecutor({ explicit: {}, parent: { kind: 'unassigned' }, workflowDefault: def }))
+      .toEqual({ assigneeId: null, executorAssistantId: 'a-1', source: 'workflow_default' })
+    expect(resolveTaskExecutor({ explicit: {}, parent: null, workflowDefault: null }))
+      .toEqual({ assigneeId: null, executorAssistantId: null, source: 'none' })
+  })
+})

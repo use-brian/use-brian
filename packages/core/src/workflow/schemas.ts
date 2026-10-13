@@ -495,6 +495,13 @@ export const WorkflowDefinitionSchema = z
     steps: z.array(tolerantStepSchema).min(1).max(50),
     failureDelivery: workflowDeliverySchema.optional(),
     principal: externalClientWorkflowPrincipalSchema.optional(),
+    // Executor for root tasks a run creates (recurring work). A task-specific
+    // choice wins; a child keeps its parent's executor. Validated at task
+    // write time like any executor. See workflow.md -> "Default executor".
+    defaultExecutor: z.discriminatedUnion('kind', [
+      z.object({ kind: z.literal('assistant'), assistantId: z.string().uuid() }).strict(),
+      z.object({ kind: z.literal('person'), memberId: z.string().uuid() }).strict(),
+    ]).optional(),
     layout: z.record(nodePositionSchema).optional(),
   })
   .superRefine((def, ctx) => {
