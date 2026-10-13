@@ -45,6 +45,7 @@ describe('[COMP:brain/decision-event-schema] typed decision event registry', () 
 
   it('keeps the event-kind registry closed and versioned', () => {
     expect(DECISION_EVENT_KINDS).toEqual([
+      'research.followup_recorded', 'research.feedback_corrected',
       'feed.linkedin_delivery_reconciled', 'feed.linkedin_manual_published', 'feed.draft_revised', 'feed.proposal_decided', 'feed.post_confirmed', 'feed.confirmation_revoked',
       'approval.decided',
       'email.draft_revised',
@@ -65,6 +66,18 @@ describe('[COMP:brain/decision-event-schema] typed decision event registry', () 
       }),
       schemaVersion: 2,
     })).toThrow()
+  })
+
+  it('admits research follow-up events with ids only', () => {
+    const id = '00000000-0000-4000-8000-000000000001'
+    expect(parseDecisionEventWrite(base('research.followup_recorded', {
+      feedbackId: id, activityId: id, messageId: id, outputKey: `page:${id}:1`, association: 'explicit_reply',
+    })).eventKind).toBe('research.followup_recorded')
+    expect(() => parseDecisionEventWrite(base('research.followup_recorded', {
+      feedbackId: id, activityId: id, messageId: id, outputKey: 'k', association: 'explicit_reply', prompt: 'copied prompt',
+    }))).toThrow()
+    expect(parseDecisionEventWrite(base('research.feedback_corrected', { feedbackId: id, revision: 2, stance: 'disagreement' })).eventKind)
+      .toBe('research.feedback_corrected')
   })
 
   it.each([

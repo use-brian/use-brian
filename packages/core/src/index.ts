@@ -5,6 +5,7 @@ export { LAYER_1_SYSTEM_PROMPT, FOLLOW_UP_QUESTIONS_ADDENDUM, RESEARCH_MODE_ADDE
 export * from './memory/index.js'
 export * from './tasks/index.js'
 export * from './goals/index.js'
+export * from './research/index.js'
 export * from './crm/index.js'
 export * from './workspace/index.js'
 export * from './entities/index.js'

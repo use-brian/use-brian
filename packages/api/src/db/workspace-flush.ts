@@ -161,6 +161,18 @@ export const WORKSPACE_FLUSH_TABLES = [
   'goals',
   'goal_crm_event_sources', // after goals and workflow runs; causal receipt cleanup
   'goal_recipes',
+  // Saved research manifests, follow-ups and learned research lessons
+  // (features/research.md). Children before parents; the activities would
+  // also cascade with their sessions. `assistant_playbook_rules` carries a
+  // workspace_id only on research lessons, so the workspace delete removes
+  // exactly the lessons learned from this workspace's flushed follow-ups.
+  'research_feedback_revisions',
+  'research_feedback',
+  'research_artifact_links',
+  'research_activities',
+  'research_comparisons',
+  'research_improvements',
+  'assistant_playbook_rules',
   // Knowledge
   'kb_chunks',
   'knowledge_entries',
