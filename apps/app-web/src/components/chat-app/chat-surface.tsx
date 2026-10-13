@@ -2553,6 +2553,11 @@ export function ChatSurface({ workspaceId }: { workspaceId: string }) {
       explicit: explicitAddress,
     });
     setAskArmed(false);
+    // Research is per message, like the Ask affordance above: a deep-research
+    // turn takes minutes and research quota, so the toggle must never carry
+    // silently into the next, ordinary question. Every send consumes it,
+    // including an explicit override (handoff, onboarding seed, replay).
+    setResearchMode(false);
     mentions.reset();
     // D-H4 — never survives past the message that produced it.
     setUnreachableNote([]);
@@ -3193,6 +3198,10 @@ export function ChatSurface({ workspaceId }: { workspaceId: string }) {
             }
             if (payload.code === "assistant_clearance_exceeds_room") {
               setError(t.assistantClearanceBlocked);
+              break;
+            }
+            if (payload.code === "delivery_audience_unverified" && payload.sharedChat === true) {
+              setError(t.deliveryAudienceBlocked);
               break;
             }
             // Dropped provider connection: retrying is safe and usually

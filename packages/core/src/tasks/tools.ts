@@ -1,7 +1,7 @@
 import { z } from 'zod'
 import { extractCitations, formatStamp, type CitationIndex } from '@use-brian/shared'
 import type { AccessContext } from '../security/access-context.js'
-import { intersectScopeGrants, resolveWriteScope, scopeEvidenceFromRows } from '../security/context-scope.js'
+import { createdRowEvidence, intersectScopeGrants, resolveWriteScope, scopeEvidenceFromRows } from '../security/context-scope.js'
 import { deriveContextFloor, DerivedScopeError } from '../security/derived-scope.js'
 import { provenanceSessionId } from '../tools/capability-gate.js'
 import { buildTool, type Tool, type ToolContext } from '../tools/types.js'
@@ -560,7 +560,7 @@ export function createTaskTools(
         const momentNote = moment ? ` @ ${formatStamp(moment.startMs)}` : ''
         return {
           data: `Created task [${task.id}]: ${task.title}${momentNote}${formatLinksSummary(linksSummary)}${admissionWarning ?? ''}`,
-          scopeEvidence: scopeEvidenceFromRows([task]),
+          scopeEvidence: createdRowEvidence([task]),
         }
       } catch (err) {
         const refused = responsibilityRefusal(err)

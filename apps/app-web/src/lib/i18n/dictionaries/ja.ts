@@ -8743,6 +8743,7 @@ export const ja: Dictionary = {
       "前のターンが応答しなくなったためリセットし、チャットのブロックを解除しました。メッセージはすべて残っています。もう一度送信すると続けられます。",
     pinnedContext: "ピン",
     assistantClearanceBlocked: "このアシスタントの権限レベルはこのルームより高いため、ここでは回答できません。",
+    deliveryAudienceBlocked: "この回答には、この共有チャットの全員が閲覧できるわけではない情報が含まれているため、ここには投稿されませんでした。個人チャットで改めて質問してください。",
     // The Chat side pane: Work + pinned + open tabs (chat-parity D4-D8).
     // [COMP:app-web/chat-side-pane]
     sidePane: {

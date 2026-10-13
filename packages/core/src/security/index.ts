@@ -38,6 +38,7 @@ export {
   normalizeProjectName,
   resolveWriteScope,
   scopeEvidenceFromRows,
+  createdRowEvidence,
   scopeGrantContains,
   unionScopeRequirements,
 } from './context-scope.js'

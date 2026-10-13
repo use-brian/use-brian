@@ -8977,6 +8977,7 @@ export const en = {
       "The previous turn stopped responding and was reset, so the chat is unblocked. Nothing was lost: your messages are still here. Send again to continue.",
     pinnedContext: "Pins",
     assistantClearanceBlocked: "That assistant is cleared above this room and cannot answer here.",
+    deliveryAudienceBlocked: "This answer drew on information that not everyone in this shared chat can see, so it was not posted here. Ask again in a personal chat.",
     // The Chat side pane: Work + pinned + open tabs (chat-parity D4-D8).
     // [COMP:app-web/chat-side-pane]
     sidePane: {

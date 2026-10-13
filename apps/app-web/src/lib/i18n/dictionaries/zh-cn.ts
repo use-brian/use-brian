@@ -8564,6 +8564,7 @@ export const zhCN: Dictionary = {
     turnReclaimed: "上一个回合停止回应，系统已将它重设并解除聊天阻止。消息都还在，重新发送即可继续。",
     pinnedContext: "钉选",
     assistantClearanceBlocked: "该助理的权限层级高于此聊天室，无法在这里回答。",
+    deliveryAudienceBlocked: "这个回答用到了并非此共享聊天中所有人都能查看的信息，因此没有在这里发布。请在个人聊天中再问一次。",
     // The Chat side pane: Work + pinned + open tabs (chat-parity D4-D8).
     // [COMP:app-web/chat-side-pane]
     sidePane: {

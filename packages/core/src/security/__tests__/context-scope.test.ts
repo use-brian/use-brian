@@ -3,12 +3,15 @@ import {
   ContextScopeAccumulator,
   ContextScopeViolation,
   canonicalScopeGrant,
+  createdRowEvidence,
   intersectScopeGrants,
   normalizeProjectName,
   resolveWriteScope,
+  scopeEvidenceFromRows,
   scopeGrantContains,
   unionScopeRequirements,
 } from '../context-scope.js'
+import { bindScopeSource } from '../source-evidence.js'
 import type { ScopeSource } from '../derived-scope.js'
 
 describe('[COMP:security/context-scope] Team and Project scope algebra', () => {
@@ -99,5 +102,25 @@ describe('[COMP:security/context-scope] re-reading a source within one turn', ()
     expect(() => accumulator.noteSource(read('2', []))).not.toThrow()
     expect(accumulator.evidence.sources?.map((s) => s.version)).toEqual(['2'])
     expect(accumulator.compartments).toEqual(['team:sales'])
+  })
+})
+
+describe('[COMP:security/context-scope] a created row is not a read source', () => {
+  // A personal note the model saved during a workspace room turn used to come
+  // back as a source the turn had READ. The room's delivery check then refused
+  // the finished answer for user_visibility (2026-10-12): the turn's own
+  // output made the turn undeliverable.
+  it('keeps the created row labels and drops its source', () => {
+    const memory = bindScopeSource(
+      { id: 'm-1', summary: 'note', sensitivity: 'confidential', compartments: ['team:a'], projectIds: ['p-1'] },
+      {
+        workspaceId: 'w-1', resourceKind: 'memory', resourceId: 'm-1', version: '1',
+        userId: 'u-1', assistantId: null, sensitivity: 'confidential', compartments: ['team:a'], projectIds: ['p-1'],
+      },
+    )
+    expect(scopeEvidenceFromRows([memory]).sources).toHaveLength(1)
+    const created = createdRowEvidence([memory])
+    expect(created.sources).toBeUndefined()
+    expect(created).toMatchObject({ sensitivity: 'confidential', compartments: ['team:a'], projectIds: ['p-1'] })
   })
 })

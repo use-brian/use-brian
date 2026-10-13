@@ -8694,6 +8694,7 @@ export const zh: Dictionary = {
       "上一個回合停止回應，系統已將它重設並解除聊天封鎖。訊息都還在，重新傳送即可繼續。",
     pinnedContext: "釘選",
     assistantClearanceBlocked: "該助理的權限層級高於此聊天室，無法在這裡回答。",
+    deliveryAudienceBlocked: "這個回答用到了並非此共享聊天中所有人都能查看的資訊，因此沒有在這裡發布。請在個人聊天中再問一次。",
     // The Chat side pane: Work + pinned + open tabs (chat-parity D4-D8).
     // [COMP:app-web/chat-side-pane]
     sidePane: {

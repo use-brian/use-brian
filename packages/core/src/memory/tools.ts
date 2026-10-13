@@ -7,7 +7,7 @@ import { createHash } from 'node:crypto'
 import type { AccessContext } from '../security/access-context.js'
 import type { Sensitivity } from '../security/sensitivity.js'
 import { maxSensitivity, researchWriteFloor } from '../security/sensitivity.js'
-import { resolveWriteScope, scopeEvidenceFromRows } from '../security/context-scope.js'
+import { createdRowEvidence, resolveWriteScope, scopeEvidenceFromRows } from '../security/context-scope.js'
 import { looksLikeCronOperationalState } from '../consolidation/phases.js'
 import type { EntityStore, EntityLinksStore } from '../entities/types.js'
 import { applyExplicitLinks, explicitLinksField, formatLinksSummary } from '../entities/explicit-links.js'
@@ -621,7 +621,7 @@ export function createMemoryTools(
         })
         return {
           data: `Saved note [${memory.id}] on ${noteEntity.displayName}: ${memory.summary}${formatLinksSummary(linksSummary)}`,
-          scopeEvidence: scopeEvidenceFromRows([memory]),
+          scopeEvidence: createdRowEvidence([memory]),
         }
       }
 
@@ -645,7 +645,7 @@ export function createMemoryTools(
       // the model fabricating the remaining 28 chars when it decided it
       // needed the full id — observed in prod 2026-04-23 with id prefixes
       // `02eca923` → hallucinated `02eca923-3b10-4822-8789-994119d88320`.
-      return { data: `Saved memory [${memory.id}]: ${memory.summary}${formatLinksSummary(generalLinksSummary)}`, scopeEvidence: scopeEvidenceFromRows([memory]) }
+      return { data: `Saved memory [${memory.id}]: ${memory.summary}${formatLinksSummary(generalLinksSummary)}`, scopeEvidence: createdRowEvidence([memory]) }
     },
   })
 

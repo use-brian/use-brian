@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest'
-import { createTurnTiming } from '../turn-timings.js'
+import { createTurnTiming, markTurnEnd } from '../turn-timings.js'
 
 function clock(start = 1_000) {
   let t = start
@@ -41,5 +41,28 @@ describe('[COMP:api/turn-timings] per-phase turn accounting', () => {
     c.tick(10.4); timing.mark('flush')
     c.tick(5.4); timing.mark('flush')
     expect(timing.snapshot()).toEqual({ total_ms: 16, flush_ms: 16 })
+  })
+
+  it('books a loop that threw as loop time, not post time', () => {
+    const c = clock()
+    const timing = createTurnTiming(c.now)
+    c.tick(500); timing.mark('admission')
+    c.tick(100); timing.mark('prompt')
+    c.tick(275_000) // the loop throws before its own mark('loop')
+    c.tick(800)
+    markTurnEnd(timing)
+    const snap = timing.snapshot()
+    expect(snap.loop_ms).toBe(275_800)
+    expect(snap.post_ms).toBe(0)
+  })
+
+  it('keeps post time separate once the loop closed normally', () => {
+    const c = clock()
+    const timing = createTurnTiming(c.now)
+    c.tick(100); timing.mark('prompt')
+    c.tick(6_000); timing.mark('loop')
+    c.tick(300)
+    markTurnEnd(timing)
+    expect(timing.snapshot()).toMatchObject({ loop_ms: 6_000, post_ms: 300 })
   })
 })

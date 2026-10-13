@@ -19,7 +19,7 @@ import { createPersonalWebSession, findOrCreateSession, findSessionByChannel, fi
 import { createTurnLedger } from '../ledger/recorder.js'
 import { getLedgerPayloadStore } from '../ledger/runtime.js'
 import { query, getPool } from '../db/client.js'
-import { createTurnTiming } from './turn-timings.js'
+import { createTurnTiming, markTurnEnd } from './turn-timings.js'
 import { bindToolsToAgentAccess } from '../context-scope/agent-access-tools.js'
 import {
   resolvePinnedContext,
@@ -1699,7 +1699,10 @@ export class ChatTurnRefusal extends Error {
  * banner, because an unknown crash has nothing safe to say. Pure, so the
  * distinction is testable without standing up the streaming handler.
  */
-export function chatTurnErrorEvent(err: unknown): Record<string, unknown> {
+export function chatTurnErrorEvent(
+  err: unknown,
+  turn: { sharedAudience?: boolean } = {},
+): Record<string, unknown> {
   if (isAuthorityChangedError(err)) {
     return {
       code: 'authority_changed',
@@ -1708,7 +1711,9 @@ export function chatTurnErrorEvent(err: unknown): Record<string, unknown> {
     }
   }
   if (isDeliveryAudienceUnverifiedError(err)) {
-    return { code: err.reason, error: err.message }
+    // `sharedChat` lets the client say what to do (ask in a personal chat)
+    // without learning which hidden axis refused: the diagnostic stays here.
+    return { code: err.reason, error: err.message, ...(turn.sharedAudience ? { sharedChat: true } : {}) }
   }
   if (err instanceof ChatTurnRefusal) {
     return { code: err.code, error: err.message, ...err.detail }
@@ -2268,6 +2273,7 @@ export function chatRoutes(options: WebChatOptions): Router {
     let userIdForError: string | null = null
     let assistantIdForError: string | null = null
     let sessionIdForError: string | null = null
+    let sharedAudienceForError = false
     // Set by the inner catch when a context-aware recovery message was
     // successfully composed + delivered after a queryLoop bail. Tells
     // the outer catch to send a clean `done` event instead of the
@@ -2991,6 +2997,7 @@ export function chatRoutes(options: WebChatOptions): Router {
 
       const turnPolicy = sessionPolicy(classifySession(session))
       const isRoomSession = turnPolicy.crossAssistantSend === 'room'
+      sharedAudienceForError = turnPolicy.deliveryCeiling.ceiling === 'audience'
       // D11: admission is decided by audience. Every workspace session (a
       // room, a draft, a doc / Office / feed thread) posts freely, queues
       // one follow-up turn and claims the slot atomically; a personal
@@ -8795,7 +8802,7 @@ export function chatRoutes(options: WebChatOptions): Router {
       if (recoveryDelivered) {
         sendEvent('done', {})
       } else {
-        sendEvent('error', chatTurnErrorEvent(err))
+        sendEvent('error', chatTurnErrorEvent(err, { sharedAudience: sharedAudienceForError }))
       }
       // If a turn_started was broadcast for a draft session before the
       // crash, pair it with turn_completed so collaborators don't see the
@@ -8865,7 +8872,7 @@ export function chatRoutes(options: WebChatOptions): Router {
       // pre-flight refusals are not); those still surface through
       // chat_route_error. Emitted from `finally` so error paths report too.
       if (turnTimingIdentity && 'prompt_ms' in turnTiming.snapshot()) {
-        turnTiming.mark('post')
+        markTurnEnd(turnTiming)
         const timings = turnTiming.snapshot()
         console.log(
           `[chat] turn timings session ${turnTimingIdentity.sessionId} ${turnTimingOutcome}: `
