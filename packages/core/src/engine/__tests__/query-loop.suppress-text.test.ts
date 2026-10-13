@@ -175,3 +175,169 @@ describe('[COMP:engine/query-loop] suppressIntermediateText', () => {
     expect(turn0Text).not.toContain('Be concise')
   })
 })
+
+// ── Coordinator turns while workers run ──────────────────────────────
+// Spec: docs/architecture/engine/coordinator-pattern.md → "Waiting on
+// workers" (empty turn = wait, no empty-response retry; askQuestion strip
+// restores suppression; held text released when no worker is busy).
+
+function countingProvider(scripts: StreamChunk[][]): { provider: LLMProvider; calls: () => number } {
+  let n = 0
+  const inner = scriptedProvider(scripts)
+  const wrap = <T>(fn: () => T): T => { n++; return fn() }
+  const innerSession = inner.createSession!({} as SessionOptions)
+  return {
+    provider: {
+      ...inner,
+      stream: (...args: Parameters<LLMProvider['stream']>) => wrap(() => inner.stream(...args)),
+      createSession: () => ({
+        send: (m: Message[], o?: SendOptions) => wrap(() => innerSession.send(m, o)),
+      }),
+    },
+    calls: () => n,
+  }
+}
+
+/** Worker-manager stub: one pending worker that settles on the first wait. */
+function pendingWorkerManager() {
+  let pending = 1
+  let notified = false
+  return {
+    pendingCountFor: () => pending,
+    hasNotificationsFor: () => notified,
+    waitForNext: async () => { pending = 0; notified = true },
+    drainNotifications: () => {
+      if (!notified) return []
+      notified = false
+      return [{ workerId: 'w1', description: 'research', result: 'worker found X', status: 'completed' }]
+    },
+    formatNotification: () => '<worker w1>worker found X</worker>',
+  }
+}
+
+const emptyTurn: StreamChunk[] = [
+  { type: 'message_start', model: 'mock-model' },
+  { type: 'message_end', stopReason: 'end_turn', usage: { inputTokens: 5, outputTokens: 0 } },
+]
+
+const spawnOnly: StreamChunk[] = [
+  { type: 'message_start', model: 'mock-model' },
+  { type: 'tool_use_start', id: 'call_1', name: 'spawnWorker' },
+  { type: 'tool_use_delta', id: 'call_1', input: '{"prompt":"research X"}' },
+  { type: 'tool_use_end', id: 'call_1' },
+  { type: 'message_end', stopReason: 'tool_use', usage: { inputTokens: 10, outputTokens: 5 } },
+]
+
+function streamed(events: QueryEvent[]): string {
+  return events
+    .filter((e): e is { type: 'text_delta'; text: string } => e.type === 'text_delta')
+    .map((e) => e.text)
+    .join('')
+}
+
+function persistedTexts(events: QueryEvent[]): string[] {
+  return events
+    .filter((e) => e.type === 'assistant_turn')
+    .map((e) => (e.type === 'assistant_turn'
+      ? e.response.content
+        .filter((b): b is { type: 'text'; text: string } => b.type === 'text')
+        .map((b) => b.text)
+        .join('')
+      : ''))
+    .filter((t) => t.length > 0)
+}
+
+async function runCoordinator(
+  provider: LLMProvider,
+  wm: unknown,
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  tools: Map<string, any>,
+): Promise<QueryEvent[]> {
+  const events: QueryEvent[] = []
+  for await (const ev of queryLoop({ ledger: NOOP_TURN_LEDGER,
+    provider,
+    model: 'mock-model',
+    systemPrompt: 'sp',
+    messages: [{ role: 'user', content: 'hi' }],
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    tools: tools as any,
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    context: { ...baseContext, workerManager: wm as any },
+    maxTurns: 8,
+    suppressIntermediateText: true,
+  })) {
+    events.push(ev)
+  }
+  return events
+}
+
+describe('[COMP:engine/query-loop] coordinator turns while workers run', () => {
+  it('an empty turn while a worker is pending waits in Phase 4b instead of firing the empty-response retry', async () => {
+    const { provider, calls } = countingProvider([spawnOnly, emptyTurn, synthesisAnswer])
+    const events = await runCoordinator(
+      provider,
+      pendingWorkerManager(),
+      new Map([['spawnWorker', spawnWorkerTool]]),
+    )
+    // spawn turn + the empty feedback turn + ONE synthesis turn. A retry
+    // would have added 1-2 nudged calls between the empty turn and the drain.
+    expect(calls()).toBe(3)
+    expect(streamed(events)).toBe('The Labor Day long weekend is driving HK conversation.')
+    expect(events.some((e) => e.type === 'turn_complete')).toBe(true)
+  })
+
+  it('a stripped askQuestion restores suppression, so a pre-drain answer is not streamed or persisted beside the synthesis', async () => {
+    const askAlongsideLookup: StreamChunk[] = [
+      { type: 'message_start', model: 'mock-model' },
+      { type: 'tool_use_start', id: 'call_q', name: 'askQuestion' },
+      { type: 'tool_use_delta', id: 'call_q', input: '{"question":"Please wait"}' },
+      { type: 'tool_use_end', id: 'call_q' },
+      { type: 'tool_use_start', id: 'call_l', name: 'lookup' },
+      { type: 'tool_use_delta', id: 'call_l', input: '{"query":"files"}' },
+      { type: 'tool_use_end', id: 'call_l' },
+      { type: 'message_end', stopReason: 'tool_use', usage: { inputTokens: 5, outputTokens: 5 } },
+    ]
+    const prematureAnswer: StreamChunk[] = [
+      { type: 'message_start', model: 'mock-model' },
+      { type: 'text_delta', text: 'Premature answer from file titles.' },
+      { type: 'message_end', stopReason: 'end_turn', usage: { inputTokens: 5, outputTokens: 5 } },
+    ]
+    const { askQuestionTool } = await import('../../tools/base/ask-question.js')
+    const { provider } = countingProvider([spawnOnly, askAlongsideLookup, prematureAnswer, synthesisAnswer])
+    const events = await runCoordinator(
+      provider,
+      pendingWorkerManager(),
+      new Map<string, unknown>([
+        ['spawnWorker', spawnWorkerTool],
+        ['lookup', lookupTool],
+        ['askQuestion', askQuestionTool],
+      ]),
+    )
+    expect(events.some((e) => e.type === 'tool_dropped')).toBe(true)
+    expect(streamed(events)).not.toContain('Premature')
+    expect(persistedTexts(events)).toEqual(['The Labor Day long weekend is driving HK conversation.'])
+  })
+
+  it('releases held text when a coordinator turn answers directly and no worker is busy', async () => {
+    const directAnswer: StreamChunk[] = [
+      { type: 'message_start', model: 'mock-model' },
+      { type: 'text_delta', text: 'Here is the direct answer.' },
+      { type: 'message_end', stopReason: 'end_turn', usage: { inputTokens: 5, outputTokens: 5 } },
+    ]
+    const idle = {
+      pendingCountFor: () => 0,
+      hasNotificationsFor: () => false,
+      waitForNext: async () => {},
+      drainNotifications: () => [],
+      formatNotification: () => '',
+    }
+    const { provider, calls } = countingProvider([directAnswer])
+    const events = await runCoordinator(provider, idle, new Map([['spawnWorker', spawnWorkerTool]]))
+    // One call: no empty-response retry, no empty-turn fallback.
+    expect(calls()).toBe(1)
+    expect(streamed(events)).toBe('Here is the direct answer.')
+    const complete = events.find((e) => e.type === 'turn_complete')
+    if (complete?.type !== 'turn_complete') throw new Error('expected turn_complete')
+    expect(complete.response.content).toEqual([{ type: 'text', text: 'Here is the direct answer.' }])
+  })
+})

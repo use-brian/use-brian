@@ -148,8 +148,17 @@ export type SessionOptions = {
 /** Internal admission coordination; never emitted as stream content. */
 export type HttpRetryWindow = { deadline: number; rateLimited: boolean }
 
+/**
+ * The caller's liveness clock (the query loop's stall watchdog). A provider
+ * wrapper that does real work before the first chunk (document distillation)
+ * touches it while it works, so slow-but-progressing preparation is not
+ * mistaken for a stall. Never a reason to emit stream content.
+ */
+export type ProviderProgress = { touch(kind: string): void }
+
 export type SendOptions = {
   signal?: AbortSignal
+  progress?: ProviderProgress
   httpRetryWindow?: HttpRetryWindow
   /** Per-call thinking-level override. Falls back to the session default. */
   thinkingLevel?: ThinkingLevel
@@ -185,6 +194,8 @@ export type ProviderRequest = {
   temperature?: number
   thinkingLevel?: ThinkingLevel
   signal?: AbortSignal
+  /** See `ProviderProgress`. */
+  progress?: ProviderProgress
   /**
    * Advisory HINT ONLY: ask for JSON output (Gemini maps it to
    * `responseMimeType: application/json`). It does **not** constrain the

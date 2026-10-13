@@ -49,6 +49,7 @@ import type {
   ContentBlock,
   LLMProvider,
   Message,
+  ProviderProgress,
   ProviderRequest,
   ProviderSession,
   SendOptions,
@@ -260,15 +261,29 @@ function swapUnsupportedMedia(
  * A capable provider returns untouched only when there is no validated PDF
  * distillation port to use.
  */
+/** Liveness tick while distilling; far inside any stall window. */
+const DISTILL_HEARTBEAT_MS = 15_000
+
 export function wrapDocumentAdaptation(
   provider: LLMProvider,
   options: DocumentAdaptationOptions,
 ): LLMProvider {
   if (options.nativePdf && options.vision && !options.distill) return provider
 
-  async function adapt(messages: readonly Message[]): Promise<Message[]> {
+  async function adapt(messages: readonly Message[], progress?: ProviderProgress): Promise<Message[]> {
     if (!hasUnsupportedMedia(messages, options)) return messages as Message[]
-    return swapUnsupportedMedia(messages, await resolveDistillates(messages, options), options)
+    // A first distill of a long PDF can run for minutes before the model sees
+    // a byte, and no stream chunk flows meanwhile. Tell the caller's liveness
+    // clock that this is work, not a stall: a 49-page attachment was aborted
+    // by the stall watchdog at 180 s with "last activity: start" (2026-10-12).
+    const heartbeat = progress
+      ? setInterval(() => progress.touch('document_distill'), DISTILL_HEARTBEAT_MS)
+      : undefined
+    try {
+      return swapUnsupportedMedia(messages, await resolveDistillates(messages, options), options)
+    } finally {
+      if (heartbeat) clearInterval(heartbeat)
+    }
   }
 
   return {
@@ -279,7 +294,7 @@ export function wrapDocumentAdaptation(
       // `stream` is synchronous by signature, so the async swap happens inside
       // the generator — the first `next()` awaits it before anything dispatches.
       return (async function* () {
-        const messages = await adapt(request.messages)
+        const messages = await adapt(request.messages, request.progress)
         debugDocumentFlow('document_adaptation', { model: request.model, before: request.messages, messages })
         yield* provider.stream(messages === request.messages ? request : { ...request, messages })
       })()
@@ -290,7 +305,7 @@ export function wrapDocumentAdaptation(
       return {
         send(messages: Message[], opts?: SendOptions): AsyncIterable<StreamChunk> {
           return (async function* () {
-            const adapted = await adapt(messages)
+            const adapted = await adapt(messages, opts?.progress)
             debugDocumentFlow('document_adaptation', { model: sessionOptions.model, before: messages, messages: adapted })
             yield* inner.send(adapted, opts)
           })()
