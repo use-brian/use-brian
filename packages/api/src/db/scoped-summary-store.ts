@@ -30,14 +30,20 @@ export async function writeScopedSummary(params: {
     // A regenerated summary is not an edit of the previous output: its only
     // inputs are the synthesis evidence. updateMemory would add the predecessor
     // as an input, making later ancestor invalidation hold the current summary
-    // itself. Invalidate first, including old buggy chains, then let createMemory
-    // revalidate every input. A source depending on the retired output must fail,
-    // not be silently refreshed or released from holding.
+    // itself, so the new row is created fresh and the old one is retired.
+    //
+    // Retirement is NOT a source change and holds nothing. The previous row's
+    // content and labels stay exactly what every reader saw, and the slot is
+    // keyed by the same scope key, so a memory that read it (every turn notes
+    // the SOUL into its derivation evidence) keeps a correct floor. Holding its
+    // descendants here hid every memory saved from such a turn on each Deep
+    // tick (context-engine/memory-consolidation.md -> "Regeneration retires,
+    // it does not hold"). A real input change still holds the whole lineage
+    // through the source's own version trigger.
     const previous = rows[0]
     if (previous) {
-      await client.query(`SELECT hold_scope_descendants($1,'memory',$2)`,[floor.workspaceId,previous.memoryId])
-      // Retire before validation so even a direct citation of this output is
-      // rejected. A failed create rolls back retirement and all descendant holds.
+      // Retire before validation so a direct citation of this output is
+      // rejected (`scope_source_changed`). A failed create rolls it back.
       await client.query(`UPDATE memories SET valid_to=COALESCE(valid_to,now()),updated_at=now()
         WHERE workspace_id=$1 AND id=$2`,[floor.workspaceId,previous.memoryId])
     }
