@@ -22,9 +22,12 @@
  *      only; drafts and no-means monitors are never touched. Re-armed as-is.
  *
  * Recovered ticks restart from a fresh loop state — the in-flight counters
- * died with the chain. Accepted (v1): cumulative spend/iteration restart per
- * recovered leg; the goal budget still bounds each leg and the durable spend
- * truth remains `usage_tracking`.
+ * died with the chain. Accepted (v1) for legacy goals: cumulative
+ * spend/iteration restart per recovered leg. A goal with a task execution
+ * state recovers through the SAME guarded path as an interactive tick: the
+ * driver's `executionLedger.beginTick` reloads its durable pool and checkpoint
+ * and settles any crashed attempt from the ledger, so recovery never
+ * initializes a fresh allowance (goals.md -> "Resumable task execution").
  *
  * Started on the workers boot path (`runWorkers`-gated), like the
  * stuck-session sweeper. Doc: docs/architecture/features/goals.md →

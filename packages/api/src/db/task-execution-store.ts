@@ -553,7 +553,8 @@ export async function settleIterationSystem(stateId: string, input: SettleInput)
     const cpRev = input.checkpoint ? state.checkpointRevision + 1 : state.checkpointRevision
     const r = fenced
       ? await client.query(
-        `UPDATE task_execution_states SET in_flight = NULL, checkpoint = $2::jsonb, checkpoint_revision = $3
+        `UPDATE task_execution_states SET in_flight = NULL, checkpoint = $2::jsonb, checkpoint_revision = $3,
+                phase = CASE WHEN phase = 'running' THEN 'ready' ELSE phase END
           WHERE id = $1 RETURNING ${STATE_COLUMNS}`, [state.id, JSON.stringify(checkpoint), cpRev])
       : await client.query(
         `UPDATE task_execution_states SET in_flight = NULL, checkpoint = $2::jsonb, checkpoint_revision = $3, phase = $4,

@@ -77,6 +77,8 @@ export type ExecutionLedger = {
   /** Done requires checked completion evidence, not a status write. */
   completionSatisfied(goal: GoalRecord): Promise<boolean>
   onTerminal(goal: GoalRecord, terminal: 'done' | 'blocked', reason: string | null): Promise<void>
+  /** Current phase of the goal's active native execution, or null. */
+  phaseOf(goal: GoalRecord): Promise<ExecutionState['phase'] | null>
 }
 
 const unique = <T>(xs: T[], key: (x: T) => string) => [...new Map(xs.map(x => [key(x), x])).values()]
@@ -187,5 +189,9 @@ export function createExecutionLedger(deps: { allowance: AllowanceTree }): Execu
     await setExecutionPhaseSystem(state.id, terminal, terminal === 'blocked' ? { blocker: { reason: reason ?? 'blocked' } } : {})
   }
 
-  return { beginTick, bindRun: bindAttemptRunSystem, endIteration, completionSatisfied, onTerminal }
+  async function phaseOf(goal: GoalRecord) {
+    return (await active(goal))?.phase ?? null
+  }
+
+  return { beginTick, bindRun: bindAttemptRunSystem, endIteration, completionSatisfied, onTerminal, phaseOf }
 }
