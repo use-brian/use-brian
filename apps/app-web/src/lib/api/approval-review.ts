@@ -23,7 +23,7 @@ export type ApprovalReviewAssignment = {
   origin: "ui" | "chat";
 };
 
-export type AttentionReview = {
+type AttentionReview = {
   assignmentId: string;
   reviewerAssistantId: string;
   reviewerName: string | null;
@@ -56,7 +56,7 @@ export type ReviewResult =
   | { outcome: "resolved"; receipt: { id: string; reviewerAssistantId: string }; replay: boolean }
   | { outcome: "needs_human" | "blocked"; reasons: string[] };
 
-export class ApprovalReviewApiError extends Error {
+class ApprovalReviewApiError extends Error {
   constructor(public readonly code: string, public readonly status: number, message: string) {
     super(message);
   }
