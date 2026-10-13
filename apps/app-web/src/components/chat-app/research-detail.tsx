@@ -13,6 +13,7 @@
 
 import { useCallback, useEffect, useState } from "react";
 import { FlaskConical } from "lucide-react";
+import { Button } from "@/components/ui/button";
 import { confirmDialog } from "@/components/ui/confirm-dialog";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
 import { format, useT } from "@/lib/i18n/client";
@@ -282,7 +283,6 @@ function LessonRow({ lesson, busy, onDecide }: {
   onDecide: (decision: "approve" | "reject" | "retire") => void;
 }) {
   const t = useT().chatApp.research;
-  const button = "min-h-11 rounded-md border border-border px-3 hover:bg-accent disabled:opacity-50 md:min-h-8";
   return (
     <li className="space-y-1 rounded-md border border-border p-2" data-lesson-id={lesson.id}>
       <p>{lesson.rule}</p>
@@ -293,14 +293,14 @@ function LessonRow({ lesson, busy, onDecide }: {
       <div className="flex flex-wrap gap-2">
         {lesson.status === "suggested" && (
           <>
-            <button type="button" className={button} disabled={busy} onClick={() => onDecide("approve")}>
+            <Button type="button" variant="outline" size="sm" disabled={busy} onClick={() => onDecide("approve")}>
               {lesson.scope === "workspace" ? t.approveCompany : t.approve}
-            </button>
-            <button type="button" className={button} disabled={busy} onClick={() => onDecide("reject")}>{t.reject}</button>
+            </Button>
+            <Button type="button" variant="outline" size="sm" disabled={busy} onClick={() => onDecide("reject")}>{t.reject}</Button>
           </>
         )}
         {lesson.status === "active" && (
-          <button type="button" className={button} disabled={busy} onClick={() => onDecide("retire")}>{t.retire}</button>
+          <Button type="button" variant="outline" size="sm" disabled={busy} onClick={() => onDecide("retire")}>{t.retire}</Button>
         )}
       </div>
     </li>
@@ -332,10 +332,10 @@ function ImprovementForm({ busy, onSubmit }: {
         <span className="text-xs text-muted-foreground">{t.desired}</span>
         <textarea className={field} rows={2} value={desired} onChange={(e) => setDesired(e.target.value)} maxLength={2000} />
       </label>
-      <button
+      <Button
         type="button"
+        size="sm"
         disabled={busy || !ready}
-        className="min-h-11 rounded-md bg-primary px-3 text-primary-foreground disabled:opacity-50 md:min-h-8"
         onClick={() => {
           onSubmit({ title: title.trim(), pattern: pattern.trim(), desiredBehavior: desired.trim() });
           setTitle("");
@@ -344,7 +344,7 @@ function ImprovementForm({ busy, onSubmit }: {
         }}
       >
         {t.submit}
-      </button>
+      </Button>
     </section>
   );
 }

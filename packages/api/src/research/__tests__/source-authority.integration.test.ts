@@ -42,6 +42,18 @@ describe('[COMP:api/research-source-authority] research visibility follows its s
     const again = await beginResearchActivity({ workspaceId: f.workspaceId, sessionId: activity.sessionId, requestMessageId: activity.requestMessageId!,
       actorUserId: f.people.member, assistantId: f.assistants.brian, projectId: f.projectId, entry: 'explicit', runtime: {} })
     expect(again).toMatchObject({ id: activity.id, plannedPageId: activity.plannedPageId, status: 'saved' })
+
+    // The Project lead continues it from a fresh chat by selecting it, without repasting.
+    const fresh = await session(f, f.people.lead, f.projectId)
+    const followup = await message(f, fresh, 'user', 'You missed the support terms', f.people.lead)
+    const captured = await captureResearchFollowupForMessage({ workspaceId: f.workspaceId, sessionId: fresh, assistantId: f.assistants.brian,
+      messageId: followup, actorUserId: f.people.lead, externalPrincipal: false, selectedActivityId: activity.id })
+    expect(captured).toMatchObject({ outcome: 'recorded', feedback: { activityId: activity.id, association: 'explicit_selection', kind: 'missing_coverage' } })
+    // An outsider cannot attach feedback to a result they cannot see.
+    const outsiderChat = await session(f, f.people.outsider)
+    const probe = await message(f, outsiderChat, 'user', 'You missed the support terms', f.people.outsider)
+    expect(await captureResearchFollowupForMessage({ workspaceId: f.workspaceId, sessionId: outsiderChat, assistantId: f.assistants.brian,
+      messageId: probe, actorUserId: f.people.outsider, externalPrincipal: false, selectedActivityId: activity.id })).toMatchObject({ outcome: 'no_research' })
   })
 
   it('R08: list, count and detail admit the session audience and live Project members only', async () => {
