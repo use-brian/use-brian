@@ -11,9 +11,9 @@ import { publicRuntimeConfig } from "@/lib/runtime-public-config";
 
 const API_URL = publicRuntimeConfig().apiUrl ?? "http://localhost:4000";
 
-export type ExecutionPhase = "planning" | "ready" | "running" | "waiting" | "paused" | "blocked" | "done" | "retired";
-export type ReadinessReason = { kind: string; subject: string; detail?: string };
-export type ExternalFreshness = "live" | "stale" | "disconnected" | "never_reported";
+type ExecutionPhase = "planning" | "ready" | "running" | "waiting" | "paused" | "blocked" | "done" | "retired";
+type ReadinessReason = { kind: string; subject: string; detail?: string };
+type ExternalFreshness = "live" | "stale" | "disconnected" | "never_reported";
 
 export type TaskExecution = {
   id: string;
@@ -54,7 +54,7 @@ export type TaskExecution = {
 };
 
 export type ControlAction = "pause" | "steer" | "continue";
-export type ControlReceipt = {
+type ControlReceipt = {
   outcome: "applied" | "stale" | "blocked" | "duplicate";
   receipt: { reason: string | null; resultRevision: number | null; renewedSegment: number | null };
   execution: TaskExecution;
