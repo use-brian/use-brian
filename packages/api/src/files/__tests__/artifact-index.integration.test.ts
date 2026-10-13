@@ -177,6 +177,79 @@ describeIf('[COMP:files/artifact-index] indexFileArtifact + lifecycle propagatio
     expect(resumed.segmentCount).toBe(first.segmentCount)
   })
 
+  // Migration 752. The ingest job stamps its parent AFTER publishing segments
+  // (metadata.indexing ready, then source_episode_id). Those stamps used to
+  // advance the file's scope_version, which held every segment the job had
+  // just written - extracted text that no member could ever read.
+  it("the ingest job's own bookkeeping stamps leave its segments readable", async () => {
+    const { createFileIngestWorker } = await import('../file-ingest-worker.js')
+    let claimed = false
+    const worker = createFileIngestWorker({
+      claim: async () => {
+        if (claimed) return null
+        claimed = true
+        return {
+          id: 'job-1', fileId, workspaceId, actingUserId: userId,
+          assistantId: '00000000-0000-4000-8000-000000000001', sourceLabel: 'handbook.md',
+          mode: 'explicit', status: 'processing', attempts: 1, lastError: null,
+        }
+      },
+      markDone: async () => {},
+      markFailed: async (_id, error) => { throw new Error(`job failed: ${error}`) },
+      filesApi: {
+        readBytes: async () => ({
+          ok: true,
+          value: { file: { mime: 'text/markdown', name: 'handbook.md' }, bytes: new TextEncoder().encode(DOC) },
+        }) as never,
+      },
+      brainIngest: async () => ({ episodeId: '00000000-0000-4000-8000-0000000000e1' }) as never,
+    })
+    await worker.tick()
+
+    const client = await pool!.connect()
+    try {
+      const wf = await client.query(
+        `SELECT scope_version, source_episode_id, metadata->'indexing'->>'status' AS status FROM workspace_files WHERE id = $1`,
+        [fileId],
+      )
+      expect(wf.rows[0].status).toBe('ready')
+      expect(wf.rows[0].source_episode_id).toBe('00000000-0000-4000-8000-0000000000e1')
+      // The live-parent walk reads the file as the current member.
+      await client.query(`SELECT set_config('app.current_user_id', $1, false)`, [userId])
+      const segs = await client.query(
+        `SELECT s.scope_held, media_parent_visible('file_segment', s.id) AS live_parent, ds.source_version
+           FROM file_segments s
+           JOIN scope_derivations d ON d.resource_kind = 'file_segment' AND d.resource_id = s.id
+           JOIN scope_derivation_sources ds ON ds.derivation_id = d.id AND ds.source_kind = 'workspace_file'
+          WHERE s.file_id = $1 AND s.valid_to IS NULL`,
+        [fileId],
+      )
+      expect(segs.rows.length).toBeGreaterThan(0)
+      for (const s of segs.rows) {
+        expect(s.scope_held).toBe(false) // media_scope_holding would hide it
+        expect(s.live_parent).toBe(true) // live_media_parent would hide it
+        expect(String(s.source_version)).toBe(String(wf.rows[0].scope_version))
+      }
+    } finally {
+      await client.query(`SELECT set_config('app.current_user_id', '', false)`)
+      client.release()
+    }
+  })
+
+  it('a real edit to the parent still holds the segments derived from it', async () => {
+    await indexMod.indexFileArtifact({ fileId, workspaceId, text: DOC, actingUserId: userId })
+    const updated = await wfStore.updateWorkspaceFileMeta(userId, workspaceId, fileId, { title: 'Renamed handbook' })
+    expect(updated).not.toBeNull()
+    const client = await pool!.connect()
+    try {
+      const segs = await client.query(`SELECT scope_held FROM file_segments WHERE file_id = $1 AND valid_to IS NULL`, [fileId])
+      expect(segs.rows.length).toBeGreaterThan(0)
+      for (const s of segs.rows) expect(s.scope_held).toBe(true)
+    } finally {
+      client.release()
+    }
+  })
+
   it('a sensitivity raise on the parent propagates to every segment', async () => {
     await indexMod.indexFileArtifact({ fileId, workspaceId, text: DOC, actingUserId: userId })
     const updated = await wfStore.updateWorkspaceFileMeta(userId, workspaceId, fileId, {
