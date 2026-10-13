@@ -151,8 +151,13 @@ export const WORKSPACE_FLUSH_TABLES = [
   'crm_consent_purposes',
   'crm_segments',
   'episodes',
-  // Tasks + goals
+  // Tasks + goals. Execution receipts/states/segments before their pools;
+  // states cascade with goals too, but are listed for the classifier.
   'tasks',
+  'task_execution_commands',
+  'task_execution_states',
+  'task_execution_segments',
+  'task_execution_pools',
   'goals',
   'goal_crm_event_sources', // after goals and workflow runs; causal receipt cleanup
   'goal_recipes',

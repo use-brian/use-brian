@@ -8,6 +8,7 @@ import { assertAuthorshipPresent } from './authorship-guard.js'
 import { applyRLSGucs, getAppPool, query, queryGated, queryWithRLS, rollbackAndRelease } from './client.js'
 import { emitDependsOnEdges, emitMentionedEdges } from './edge-hooks.js'
 import { abandonGoalsForHostTaskSystem } from './goals.js'
+import { repointTaskExecutions } from './task-execution-store.js'
 import { currentAgentAccess } from './agent-access-context.js'
 import { publishTaskLifecycle } from '../task-event-fanout.js'
 import { validateTaskResponsibility } from '../tasks/responsibility.js'
@@ -905,6 +906,8 @@ export async function updateTask(
          WHERE host_type = 'task' AND host_id = $2`,
         [newRow.id, liveId],
       )
+      // Resumable execution follows the same lineage (native and external lanes).
+      await repointTaskExecutions(client, liveId, newRow.id)
 
       // Host-lifecycle cascade: a task that just went terminal is no longer
       // assignable, so its DRAFT goals go with it — a "your assistant could

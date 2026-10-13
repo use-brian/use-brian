@@ -371,7 +371,23 @@ export async function abandonGoalsForHostTaskSystem(
     [taskId, reason, skippedStatuses],
   )
   for (const row of result.rows ?? []) notifyGoalChange(row.workspaceId, 'update', row.id)
-  return result.rowCount ?? 0
+  let retired = 0
+  if (reason !== 'host_task_closed') {
+    // Resumable execution (goals.md -> "Resumable task execution"): a deleted
+    // host or a changed executor retires the native execution (history and
+    // receipts kept) and fences the pursuit bound to it, CONFIRMED goals
+    // included, so the next executor never inherits the previous one's lease.
+    const exec2 = await exec.query(
+      `WITH retired AS (SELECT goal_id FROM public.task_execution_retire($1, $2::text))
+       UPDATE goals SET status = 'abandoned', blocker_reason = $2, updated_at = now()
+        WHERE id IN (SELECT goal_id FROM retired WHERE goal_id IS NOT NULL) AND status <> ALL($3)
+        RETURNING id, workspace_id as "workspaceId"`,
+      [taskId, reason, GOAL_TERMINAL_STATUSES],
+    )
+    for (const row of exec2.rows ?? []) notifyGoalChange(row.workspaceId, 'update', row.id)
+    retired = exec2.rowCount ?? 0
+  }
+  return (result.rowCount ?? 0) + retired
 }
 
 /** System read: goals bound to a given host — the rollup lookup. */

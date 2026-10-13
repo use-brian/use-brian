@@ -155,12 +155,17 @@ describe('[COMP:goals/store] goal primitive store-seam emits', () => {
       ],
       rowCount: 2,
     } as never)
-    await expect(abandonGoalsForHostTaskSystem('task-1', 'host_task_deleted')).resolves.toBe(2)
-    expect(mockNotify).toHaveBeenCalledTimes(2)
+    // Deletion also retires the task's execution and fences its bound goal.
+    mockQuery.mockResolvedValueOnce({ rows: [{ id: 'goal-3', workspaceId: 'ws-1' }], rowCount: 1 } as never)
+    await expect(abandonGoalsForHostTaskSystem('task-1', 'host_task_deleted')).resolves.toBe(3)
+    expect(mockNotify).toHaveBeenCalledTimes(3)
     expect(mockNotify).toHaveBeenCalledWith('ws-1', 'goal', 'update', 'goal-1')
     expect(mockNotify).toHaveBeenCalledWith('ws-1', 'goal', 'update', 'goal-2')
+    expect(mockNotify).toHaveBeenCalledWith('ws-1', 'goal', 'update', 'goal-3')
     const [sql] = mockQuery.mock.calls[0] as [string, unknown[]]
     expect(sql).toContain('RETURNING id, workspace_id')
+    const [retire] = mockQuery.mock.calls[1] as [string, unknown[]]
+    expect(retire).toContain('task_execution_retire')
   })
 
   it('an injected transaction executor that returns no rows still retires the goals, silently', async () => {
