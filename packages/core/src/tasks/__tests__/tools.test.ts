@@ -3,6 +3,7 @@ import { buildCitationIndex } from '@use-brian/shared'
 import { createTaskTools, type TaskToolEvent } from '../tools.js'
 import { formatToolError } from '../../engine/tool-executor.js'
 import type { TaskRecord, TaskStore } from '../types.js'
+import { applyResponsibilityPatch, TaskResponsibilityError } from '../responsibility.js'
 import type { TaskAdmissionPort, TaskRuleRecord } from '../admission.js'
 import { ContextScopeAccumulator } from '../../security/context-scope.js'
 import type { ToolContext } from '../../tools/types.js'
@@ -50,6 +51,9 @@ function makeFakeStore(): TaskStore & {
         title: params.title,
         status: params.status ?? 'todo',
         assigneeId: params.assigneeId ?? null,
+        executorAssistantId: params.executorAssistantId ?? null,
+        followUpMemberId: params.followUpMemberId ?? null,
+        home: params.home ?? null,
         due: params.due ?? null,
         tags: params.tags ?? [],
         parentId: params.parentId ?? null,
@@ -97,13 +101,16 @@ function makeFakeStore(): TaskStore & {
         updatedAt: r.updatedAt,
       }))
     },
-    async update(_userId, id, fields) {
+    async update(_userId, id, fields, opts) {
       updateDependsOn.push(fields.dependsOn)
       const row = rows.find((r) => r.id === id)
       if (!row) return null
+      const current = { assigneeId: row.assigneeId, executorAssistantId: row.executorAssistantId ?? null,
+        followUpMemberId: row.followUpMemberId ?? null, home: row.home ?? null }
+      if (opts?.precondition?.({ ...current, status: row.status, workspaceId: row.workspaceId }) === 'noop') return { ...row }
+      Object.assign(row, applyResponsibilityPatch(current, fields))
       if (fields.title !== undefined) row.title = fields.title
       if (fields.status !== undefined) row.status = fields.status
-      if (fields.assigneeId !== undefined) row.assigneeId = fields.assigneeId
       if (fields.due !== undefined) row.due = fields.due
       if (fields.tags !== undefined) row.tags = fields.tags
       if (fields.parentId !== undefined) {
@@ -1229,3 +1236,64 @@ describe('[COMP:tasks/tools] lifecycle scope and bulk failure reporting', () => 
     }
   })
 })
+
+describe('[COMP:tasks/tools] responsibility fields (executor, follow-up, home)', () => {
+  const ASSISTANT = '22222222-2222-2222-2222-222222222222'
+  const MEMBER = '33333333-3333-3333-3333-333333333333'
+  const OTHER_MEMBER = '44444444-4444-4444-4444-444444444444'
+  const DEPT = '55555555-5555-5555-5555-555555555555'
+
+  it('saveTask records an assistant executor, an explicit contact and a home, and getTask reads them back', async () => {
+    const store = makeFakeStore()
+    const tools = createTaskTools(store)
+    const saved = await tools.saveTask.execute({ title: 'Reconcile invoices', executor_assistant_id: ASSISTANT,
+      follow_up_member_id: MEMBER, home: { kind: 'department', id: DEPT } }, ctx)
+    expect(saved.isError).toBeFalsy()
+    const id = store.rows[0].id
+    const read = await tools.getTask.execute({ id }, ctx)
+    expect(read.data).toMatchObject({ executor_assistant_id: ASSISTANT, follow_up_member_id: MEMBER, assignee_id: null, home: { kind: 'department', id: DEPT } })
+  })
+
+  it('setting a contact never changes the assistant executor', async () => {
+    const store = makeFakeStore()
+    const tools = createTaskTools(store)
+    await tools.saveTask.execute({ title: 'Assistant work', executor_assistant_id: ASSISTANT }, ctx)
+    const id = store.rows[0].id
+    await tools.updateTask.execute({ id, follow_up_member_id: MEMBER }, ctx)
+    expect(store.rows[0]).toMatchObject({ executorAssistantId: ASSISTANT, assigneeId: null, followUpMemberId: MEMBER })
+  })
+
+  it('a person executor replaces an assistant executor (one slot)', async () => {
+    const store = makeFakeStore()
+    const tools = createTaskTools(store)
+    await tools.saveTask.execute({ title: 'Hand over', executor_assistant_id: ASSISTANT }, ctx)
+    await tools.updateTask.execute({ id: store.rows[0].id, assignee_id: MEMBER }, ctx)
+    expect(store.rows[0]).toMatchObject({ assigneeId: MEMBER, executorAssistantId: null })
+  })
+
+  it('reports a refused responsibility change as a final error, not a crash', async () => {
+    const store = makeFakeStore()
+    store.create = async () => { throw new TaskResponsibilityError('task_executor_invalid', 'That assistant cannot execute this task.') }
+    const tools = createTaskTools(store)
+    const result = await tools.saveTask.execute({ title: 'Refused', executor_assistant_id: ASSISTANT }, ctx)
+    expect(result.isError).toBe(true)
+    expect(String(result.data)).toContain('task_executor_invalid')
+    expect(String(result.data)).toContain('Nothing was changed')
+  })
+
+  it('if_unassigned claims once: idempotent for the same executor, refused for another', async () => {
+    const store = makeFakeStore()
+    const tools = createTaskTools(store)
+    await tools.saveTask.execute({ title: 'Queue item' }, ctx)
+    const id = store.rows[0].id
+    expect((await tools.updateTask.execute({ id, assignee_id: MEMBER, if_unassigned: true }, ctx)).isError).toBeFalsy()
+    expect((await tools.updateTask.execute({ id, assignee_id: MEMBER, if_unassigned: true }, ctx)).isError).toBeFalsy()
+    const taken = await tools.updateTask.execute({ id, assignee_id: OTHER_MEMBER, if_unassigned: true }, ctx)
+    expect(taken.isError).toBe(true)
+    expect(String(taken.data)).toContain('task_already_claimed')
+    expect(store.rows[0].assigneeId).toBe(MEMBER)
+    const empty = await tools.updateTask.execute({ id, status: 'in_progress', if_unassigned: true }, ctx)
+    expect(empty.isError).toBe(true)
+  })
+})
+

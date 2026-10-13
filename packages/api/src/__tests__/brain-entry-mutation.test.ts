@@ -33,6 +33,9 @@ vi.mock('../db/memory-verifications-store.js', () => ({
 vi.mock('../brain-stream/notify.js', () => ({
   notifyBrainInboxChange: vi.fn(),
 }))
+vi.mock('../db/tasks.js', () => ({
+  updateTask: vi.fn(),
+}))
 
 import { createBrainEntryMutator } from '../brain-entry-mutation.js'
 import { getBrainInboxRow } from '../db/brain-inbox-store.js'
@@ -40,6 +43,8 @@ import {
   getMemoryByIdSystem,
 } from '../db/memories.js'
 import { adjustMemoryDecision } from '../db/memory-verifications-store.js'
+import { updateTask } from '../db/tasks.js'
+import { TaskResponsibilityError } from '@use-brian/core'
 
 const workspaceStore = {
   getRole: vi.fn().mockResolvedValue('member'),
@@ -249,3 +254,38 @@ describe('[COMP:api/brain-entry-mutation] shared Review-entry mutation seam', ()
     }))
   })
 })
+
+describe('[COMP:api/task-responsibility] Brain inbox adjust carries executor, follow-up and home', () => {
+  beforeEach(() => vi.clearAllMocks())
+  const taskRow = { ...row, primitive: 'task' as const, body: { title: 'Fictional task', attributes: { priority: 'high' } } }
+  const ASSISTANT = '22222222-2222-4222-8222-222222222222'
+  const MEMBER = '33333333-3333-4333-8333-333333333333'
+  const DEPT = '55555555-5555-4555-8555-555555555555'
+  const adjust = (changes: Record<string, unknown>) => createBrainEntryMutator({ workspaceStore }).mutate({
+    userId: 'user-1', workspaceId: 'workspace-1', access: actorAccess, primitive: 'task', rowId: row.id, changes,
+  })
+
+  it('forwards the typed fields to the canonical update, which validates them', async () => {
+    vi.mocked(getBrainInboxRow).mockResolvedValue(taskRow as never)
+    vi.mocked(updateTask).mockResolvedValueOnce({ id: 'next-id' } as never)
+    const result = await adjust({ executor_assistant_id: ASSISTANT, follow_up_member_id: MEMBER, home: { kind: 'department', id: DEPT } })
+    expect(result).toMatchObject({ status: 200, body: { ok: true, id: 'next-id' } })
+    expect(updateTask).toHaveBeenCalledWith('user-1', row.id,
+      { executorAssistantId: ASSISTANT, followUpMemberId: MEMBER, home: { kind: 'department', id: DEPT } },
+      undefined, { access: actorAccess })
+  })
+
+  it('rejects malformed values before writing', async () => {
+    vi.mocked(getBrainInboxRow).mockResolvedValue(taskRow as never)
+    expect((await adjust({ executor_assistant_id: 'not-a-uuid' })).status).toBe(400)
+    expect((await adjust({ home: { kind: 'team', id: DEPT } })).status).toBe(400)
+    expect(updateTask).not.toHaveBeenCalled()
+  })
+
+  it('returns a refused responsibility change as its typed status, not a 500', async () => {
+    vi.mocked(getBrainInboxRow).mockResolvedValue(taskRow as never)
+    vi.mocked(updateTask).mockRejectedValueOnce(new TaskResponsibilityError('task_follow_up_invalid'))
+    expect(await adjust({ follow_up_member_id: MEMBER })).toMatchObject({ status: 400, body: { error: 'task_follow_up_invalid' } })
+  })
+})
+

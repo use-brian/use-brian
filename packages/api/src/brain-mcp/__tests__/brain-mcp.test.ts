@@ -12,7 +12,7 @@ import express from 'express'
 import request from 'supertest'
 import type { Request } from 'express'
 import { z } from 'zod'
-import { buildTool, createAssociationTools, createCrmCredentialTools, type PipelineBResult, type Tool, type ToolContext } from '@use-brian/core'
+import { buildTool, createAssociationTools, createCrmCredentialTools, createTaskTools, type PipelineBResult, type TaskStore, type Tool, type ToolContext } from '@use-brian/core'
 import { hashSecret } from '../../db/api-key-store.js'
 import { mintBrainPlaintext, type BrainKeyStore } from '../../db/brain-keys-store.js'
 import { mintBridgeToken } from '../../home-apps/tokens.js'
@@ -2065,3 +2065,38 @@ describe('[COMP:api/brain-mcp] scoped-search workspace gate', () => {
     expect(body).not.toContain('No workspace is bound to this call')
   })
 })
+
+describe('[COMP:api/brain-mcp] task responsibility parity with the core tools', () => {
+  it('exposes executor, follow-up, home and the guarded claim, and passes them to the same store command', async () => {
+    const created: Record<string, unknown>[] = []
+    const updates: Array<{ fields: Record<string, unknown>; precondition: boolean }> = []
+    const store = {
+      create: async (params: Record<string, unknown>) => { created.push(params); return { id: '44444444-4444-4444-4444-444444444444', workspaceId: params.workspaceId, title: params.title, status: 'todo', assigneeId: null, due: null, tags: [], parentId: null, externalRef: {}, attributes: {}, createdAt: new Date(), updatedAt: new Date() } },
+      update: async (_u: string, id: string, fields: Record<string, unknown>, opts?: { precondition?: unknown }) => { updates.push({ fields, precondition: !!opts?.precondition }); return { id, workspaceId: '33333333-3333-3333-3333-333333333333', title: 'T', status: 'todo', assigneeId: null, due: null, tags: [], parentId: null, externalRef: {}, attributes: {}, createdAt: new Date(), updatedAt: new Date() } },
+      getById: async () => null,
+      list: async () => [],
+    } as unknown as TaskStore
+    const core = createTaskTools(store)
+    const tools = buildBrainTools({
+      workspaceId: '33333333-3333-3333-3333-333333333333',
+      scope: 'read_write',
+      keyId: 'aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa',
+      maxClearance: null,
+      ...ALL_STUBS,
+      taskTools: { ...TASK_TOOLS_STUB, saveTask: core.saveTask, updateTask: core.updateTask },
+    })
+    const save = tools.find((t) => t.name === 'saveTask')!
+    const update = tools.find((t) => t.name === 'updateTask')!
+    for (const key of ['executor_assistant_id', 'follow_up_member_id', 'home']) {
+      expect(Object.keys(save.inputSchema)).toContain(key)
+      expect(Object.keys(update.inputSchema)).toContain(key)
+    }
+    expect(Object.keys(update.inputSchema)).toContain('if_unassigned')
+    const assistant = '55555555-5555-5555-5555-555555555555', dept = '66666666-6666-6666-6666-666666666666'
+    await save.handler({ title: 'Bridged', executor_assistant_id: assistant, home: { kind: 'department', id: dept } })
+    expect(created[0]).toMatchObject({ executorAssistantId: assistant, home: { kind: 'department', id: dept } })
+    await update.handler({ id: '44444444-4444-4444-4444-444444444444', executor_assistant_id: assistant, if_unassigned: true })
+    expect(updates[0]).toEqual({ fields: { executorAssistantId: assistant }, precondition: true })
+  })
+})
+

@@ -6,6 +6,7 @@ import { deriveContextFloor, DerivedScopeError } from '../security/derived-scope
 import { provenanceSessionId } from '../tools/capability-gate.js'
 import { buildTool, type Tool, type ToolContext } from '../tools/types.js'
 import { tolerantBoolean, tolerantEnumArray, tolerantInt } from '../tools/schema-tolerance.js'
+import { TASK_HOME_KINDS, TaskResponsibilityError, claimPrecondition } from './responsibility.js'
 import {
   applyExplicitCloses,
   applyExplicitLinks,
@@ -125,6 +126,18 @@ const statusEnum = z.enum(STATUS_VALUES)
 const idShape = z.string().uuid()
 const tagShape = z.array(z.string().min(1).max(64)).max(20)
 
+/** Explicit operating home (tasks.md -> "Responsibility"). Never inferred. */
+const homeShape = z.object({ kind: z.enum(TASK_HOME_KINDS), id: idShape }).strict()
+const executorDescription = 'UUID of a configured workspace assistant that EXECUTES the task. The executor is one slot: setting this clears assignee_id, and passing both non-null in one call is refused. Only an assistant-executed task gets automatic Goal triage, for that assistant.'
+const followUpDescription = 'workspace_members id of an optional human who follows up on the task (receives its questions and review). It never makes that person the executor and never stops an assistant executor. The person must be able to see the task.'
+const homeDescription = 'The Department ({kind:"department", id: <department id>}) or Project ({kind:"project", id: <project id>}) this work belongs to. When an assistant executes and no follow-up person is set, its human attention goes to the current owners of this home. Only set it when the user names the Department or Project; never guess one.'
+
+/** A refused responsibility change is the user-facing answer, not a crash. */
+function responsibilityRefusal(err: unknown): { data: string; isError: true } | null {
+  if (!(err instanceof TaskResponsibilityError)) return null
+  return { data: `${err.message} (${err.code}). Nothing was changed. Choose a different person, assistant or home instead of retrying the same one.`, isError: true }
+}
+
 /**
  * The task body. A conventional `attributes` key, not a column — the v1 schema
  * is frozen against typed scalar fields (tasks.md §1) — but the tools surface
@@ -214,6 +227,9 @@ function compactRow(row: TaskListRow): {
   title: string
   status: TaskRecordStatus
   assignee_id: string | null
+  executor_assistant_id: string | null
+  follow_up_member_id: string | null
+  home: { kind: string; id: string } | null
   due: string | null
   tags: string[]
   parent_id: string | null
@@ -225,6 +241,9 @@ function compactRow(row: TaskListRow): {
     title: row.title,
     status: row.status,
     assignee_id: row.assigneeId,
+    executor_assistant_id: row.executorAssistantId ?? null,
+    follow_up_member_id: row.followUpMemberId ?? null,
+    home: row.home ?? null,
     due: row.due ? row.due.toISOString() : null,
     tags: row.tags,
     parent_id: row.parentId,
@@ -238,6 +257,9 @@ function fullRow(row: TaskRecord): {
   title: string
   status: TaskRecordStatus
   assignee_id: string | null
+  executor_assistant_id: string | null
+  follow_up_member_id: string | null
+  home: { kind: string; id: string } | null
   due: string | null
   tags: string[]
   parent_id: string | null
@@ -254,6 +276,9 @@ function fullRow(row: TaskRecord): {
     title: row.title,
     status: row.status,
     assignee_id: row.assigneeId,
+    executor_assistant_id: row.executorAssistantId ?? null,
+    follow_up_member_id: row.followUpMemberId ?? null,
+    home: row.home ?? null,
     due: row.due ? row.due.toISOString() : null,
     tags: row.tags,
     parent_id: row.parentId,
@@ -397,7 +422,10 @@ export function createTaskTools(
       description: descriptionShape.optional().describe(
         'What the task actually is, written so whoever opens it later can act without reading this conversation: the objective and context, where or how to start, and what result means done. Markdown. Write one whenever the conversation supports it — a bare title makes the reader reconstruct the ask. Ground it in what was said; never invent a target, a tool, or a deadline the user did not give you.',
       ),
-      assignee_id: idShape.optional().describe('UUID of a workspace_members row (NOT a user_id). Omit if the task is unassigned. Call `listWorkspaceMembers` to resolve a person named in chat to their member id — usually filled in only when the user has named someone.'),
+      assignee_id: idShape.optional().describe('UUID of a workspace_members row (NOT a user_id) for a PERSON who executes the task. Omit if the task is unassigned. Call `listWorkspaceMembers` to resolve a person named in chat to their member id — usually filled in only when the user has named someone.'),
+      executor_assistant_id: idShape.optional().describe(executorDescription),
+      follow_up_member_id: idShape.optional().describe(followUpDescription),
+      home: homeShape.optional().describe(homeDescription),
       due: isoDateOrDateTime.optional().describe('Resolve relative phrases like "Friday" to an absolute value in `userTimezone`: a zone-qualified ISO-8601 timestamp (offset or "Z") or a bare date.'),
       tags: tagShape.optional(),
       parent_id: idShape.nullable().optional().describe('UUID of an existing same-workspace task to nest this one under. Omit or pass null for a top-level task. The DB rejects cross-workspace parents.'),
@@ -487,6 +515,9 @@ export function createTaskTools(
           title: input.title,
           status: input.status,
           assigneeId: input.assignee_id ?? null,
+          executorAssistantId: input.executor_assistant_id ?? null,
+          followUpMemberId: input.follow_up_member_id ?? null,
+          home: input.home ?? null,
           due: input.due ? new Date(input.due) : null,
           tags: input.tags,
           parentId: input.parent_id ?? null,
@@ -532,6 +563,8 @@ export function createTaskTools(
           scopeEvidence: scopeEvidenceFromRows([task]),
         }
       } catch (err) {
+        const refused = responsibilityRefusal(err)
+        if (refused) return refused
         const msg = err instanceof Error ? err.message : String(err)
         if (msg.includes('parent_id must reference a task in the same workspace')) {
           return { data: 'parent_id must reference a task in the same workspace.', isError: true }
@@ -580,6 +613,8 @@ export function createTaskTools(
       'Default excludes archived tasks (set `include_archived: true` to include them). Default limit is 25 (max 100). Status accepts a single value or an array (e.g. `["todo", "in_progress"]`).',
     inputSchema: z.object({
       assignee_id: idShape.optional().describe('workspace_members id — from `listWorkspaceMembers`. For "my tasks" use the row flagged `isCurrentUser: true`; never guess a member id from a name.'),
+      executor_assistant_id: idShape.optional().describe('Only tasks this assistant executes.'),
+      follow_up_member_id: idShape.optional().describe('Only tasks with this explicit human follow-up (workspace_members id).'),
       // Tolerant because this is the param models serialise loosely — a
       // stringified or comma-joined list reads as neither branch of the union
       // and failed 35 times in production. See `tolerantEnumArray`.
@@ -602,6 +637,8 @@ export function createTaskTools(
         ctxFor({...context, workspaceId: context.workspaceId!}),
         {
           assigneeId: input.assignee_id,
+          executorAssistantId: input.executor_assistant_id,
+          followUpMemberId: input.follow_up_member_id,
           status: input.status,
           dueBefore: input.due_before ? new Date(input.due_before) : undefined,
           dueAfter: input.due_after ? new Date(input.due_after) : undefined,
@@ -623,6 +660,7 @@ export function createTaskTools(
     id: string,
     fields: Parameters<TaskStore['update']>[2],
     operations: readonly TaskRuleOperation[],
+    precondition?: NonNullable<Parameters<TaskStore['update']>[3]>['precondition'],
   ): Promise<
     | { data: string; isError: true }
     | { ok: true; record: TaskRecord; changedFields: string[] }
@@ -639,7 +677,9 @@ export function createTaskTools(
     try {
       // Assistant-mediated write (incl. interactive chat) — the workflow
       // task-event self-loop guard keys on this (fromBots gate).
-      const lifecycleOnly = Object.keys(fields).every((key) => ['status', 'assigneeId', 'due'].includes(key))
+      // Responsibility keys carry no task prose, like status / assignee / due.
+      const lifecycleOnly = Object.keys(fields).every((key) =>
+        ['status', 'assigneeId', 'executorAssistantId', 'followUpMemberId', 'home', 'due'].includes(key))
       const writeScope = lifecycleOnly ? undefined : resolveWriteScope({
         baseCompartments: context.assistantDefaultCompartments,
         baseProjectIds: context.assistantDefaultProjectIds,
@@ -659,8 +699,11 @@ export function createTaskTools(
           compartments: writeScope?.compartments ?? [],
           projectIds: writeScope?.projectIds ?? [],
         },
+        ...(precondition ? { precondition } : {}),
       })
     } catch (err) {
+      const refused = responsibilityRefusal(err)
+      if (refused) return refused
       const msg = err instanceof Error ? err.message : String(err)
       if (msg.includes('tasks_one_project_check')) {
         return { data: taskProjectConflict, isError: true }
@@ -694,7 +737,11 @@ export function createTaskTools(
         'Replace the task body — the objective and context, where or how to start, and what result means done. Markdown. Pass null to clear it. Merged into the task, so sibling attribute keys (priority, icon, sprint fields) survive; this is a full replacement of the body text itself, so include what you want kept.',
       ),
       status: statusEnum.optional(),
-      assignee_id: idShape.nullable().optional().describe('workspace_members id — call `listWorkspaceMembers` to resolve a name. Pass null to unassign.'),
+      assignee_id: idShape.nullable().optional().describe('workspace_members id of the PERSON who executes — call `listWorkspaceMembers` to resolve a name. Pass null to unassign. Setting a person clears an assistant executor.'),
+      executor_assistant_id: idShape.nullable().optional().describe(`${executorDescription} Pass null to clear.`),
+      follow_up_member_id: idShape.nullable().optional().describe(`${followUpDescription} Pass null to clear.`),
+      home: homeShape.nullable().optional().describe(`${homeDescription} Pass null to clear.`),
+      if_unassigned: tolerantBoolean().optional().describe('Guarded claim: apply the new assignee_id / executor_assistant_id only if the task has no executor yet. Succeeds again if the same executor already holds it; refused (task_already_claimed) if someone else does. Use it to take work from an owner queue.'),
       due: isoDateOrDateTime.nullable().optional(),
       tags: tagShape.optional(),
       parent_id: idShape.nullable().optional().describe('Re-parent under another same-workspace task, or pass null to detach to top-level. Re-parenting works, but updateTask returns a NEW task id (bi-temporal supersession) — use the id from the result for any further edits to this task. When building a fresh tree, prefer setting parent_id on saveTask at creation time instead.'),
@@ -709,6 +756,9 @@ export function createTaskTools(
       if (input.title !== undefined) fields.title = input.title
       if (input.status !== undefined) fields.status = input.status
       if (input.assignee_id !== undefined) fields.assigneeId = input.assignee_id
+      if (input.executor_assistant_id !== undefined) fields.executorAssistantId = input.executor_assistant_id
+      if (input.follow_up_member_id !== undefined) fields.followUpMemberId = input.follow_up_member_id
+      if (input.home !== undefined) fields.home = input.home
       if (input.due !== undefined) fields.due = input.due === null ? null : new Date(input.due)
       if (input.tags !== undefined) fields.tags = input.tags
       if (input.parent_id !== undefined) fields.parentId = input.parent_id
@@ -787,7 +837,11 @@ export function createTaskTools(
         ) {
           operations.push('update_details')
         }
-        const result = await applyUpdate(context, input.id, fields, [...new Set(operations)])
+        if (input.if_unassigned && !fields.assigneeId && !fields.executorAssistantId) {
+          return { data: 'if_unassigned needs the executor to claim with: pass assignee_id or executor_assistant_id. Nothing was changed.', isError: true }
+        }
+        const claim = input.if_unassigned ? claimPrecondition(fields) : undefined
+        const result = await applyUpdate(context, input.id, fields, [...new Set(operations)], claim)
         if ('isError' in result) return result
         opts?.onEvent?.({ type: 'task_updated', taskId: result.record.id, fields: result.changedFields }, eventCtx(context))
         const { linksMsg, closesMsg } = await writeEdgesAndClose(result.record.id)

@@ -95,6 +95,10 @@ describe('[COMP:brain/tasks-list-http] GET /api/brain/tasks', () => {
         title: 'Ship the deck',
         status: 'todo',
         assigneeId: 'm1',
+        // Responsibility (migration 753): an unreported value reads as null.
+        executorAssistantId: null,
+        followUpMemberId: null,
+        home: null,
         due: '2026-08-01T00:00:00.000Z',
         tags: ['project:launch'],
         parentId: null,

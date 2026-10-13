@@ -598,6 +598,7 @@ import { createDepartmentTools } from './workspace-access/department-tools.js'
 import { createProjectAccessTools } from './workspace-access/project-access-tools.js'
 import { createBriefTools } from './briefs/tools.js'
 import { briefRoutes } from './routes/briefs.js'
+import { workRoutes } from './routes/work.js'
 import { configureBriefTurnContext, createGoalBriefBoundary, resolveBriefTurn } from './briefs/context.js'
 import { createWorkspaceMigrationTools } from './workspace-access/migration-tools.js'
 import { createTeamspaceStore } from './db/teamspace-store.js'
@@ -6609,6 +6610,7 @@ export async function bootOpenApi(opts: BootOpenApiOptions): Promise<BootResult>
   }))
   // Governed Project and Department Briefs (project-briefs.md).
   app.use('/api', requireAuth(env.JWT_SECRET), briefRoutes())
+  app.use('/api', workRoutes({ taskStore, auth: requireAuth(env.JWT_SECRET) }))
 
   app.use('/api', requireAuth(env.JWT_SECRET), workflowApprovalsRoutes({
     approvalsStore: pendingApprovalsStore,
