@@ -11,6 +11,7 @@ import { getPool } from '../db/client.js'
 import { WorkspaceAccessError } from './policy.js'
 import { notifyWorkspaceChange } from '../brain-stream/notify.js'
 import { getDepartmentalReadinessSystem } from './readiness.js'
+import { countOpenReviewRequests, recheckHeldMemory, releaseHeldMemory } from './hold-recovery.js'
 import type { ScopeReview, ScopeReviewContent, ScopeReviewImpact, ScopeReviewInventory, ScopeReviewKind, ScopeReviewSource, ScopeReviewSummary } from '@use-brian/shared'
 import { departmentIsolationManifestCoverage } from '@use-brian/shared'
 import {
@@ -26,7 +27,7 @@ type Snapshot = ScopeReviewSource
 const previewSchema = z.object({
   type:z.literal('scope.review.preview'),resourceKind:kindSchema,
   resourceIds:z.array(z.string().uuid()).min(1).max(100).refine(ids=>new Set(ids.map(id=>id.toLowerCase())).size===ids.length),
-  action:z.enum(['confirm_general','assign_team','consolidate_default','hold']),targetTeamId:z.string().uuid().nullable(),
+  action:z.enum(['confirm_general','assign_team','consolidate_default','hold','release']),targetTeamId:z.string().uuid().nullable(),
   reason:z.string().trim().min(1).max(1000),
 }).strict().refine(command=>(['assign_team','consolidate_default'].includes(command.action))===(command.targetTeamId!==null))
 const applySchema=z.object({type:z.enum(['scope.review.apply','scope.review.cancel']),reviewId:z.string().uuid(),
@@ -101,7 +102,8 @@ async function lockSourceAncestry(client:PoolClient,workspaceId:string,kind:Kind
 /** Same traversal as invalidation. Stabilize after locking, since a concurrent
  * derivation may have committed while its source row lock was being acquired. */
 async function captureImpact(client:PoolClient,workspaceId:string,kind:Kind,id:string,action:Job['action'],held:boolean):Promise<ScopeReviewImpact>{
-  if(sourceAdapter(kind).category==='impact'||action==='confirm_general'||(action==='hold'&&held))return {version:2,descendants:[],dependents:{}}
+  // A release writes a replacement and retires the held row; it holds nothing new.
+  if(sourceAdapter(kind).category==='impact'||action==='confirm_general'||action==='release'||(action==='hold'&&held))return {version:2,descendants:[],dependents:{}}
   const read=async()=> (await client.query<{resourceKind:Kind;resourceId:string}>(
     `SELECT resource_kind AS "resourceKind",resource_id AS "resourceId"
        FROM scope_descendant_resources($1,$2,$3)
@@ -282,7 +284,11 @@ export async function getWorkspaceScopeInventory(workspaceId:string,userId:strin
     const base=`FROM (SELECT r.id FROM ${adapter.from} WHERE ${adapter.workspacePredicate}) rows
       CROSS JOIN LATERAL (SELECT read_scope_review_source($1,$2,rows.id) AS body) evidence
       CROSS JOIN LATERAL (SELECT read_scope_review_content($1,$2,rows.id) AS body) display
-      WHERE evidence.body IS NOT NULL AND display.body IS NOT NULL AND (
+      WHERE evidence.body IS NOT NULL AND display.body IS NOT NULL
+        -- A held memory already released (or edited away) is history, not work.
+        AND NOT ($2='memory' AND coalesce((evidence.body->>'held')::boolean,false)
+          AND (evidence.body->>'validTo' IS NOT NULL OR evidence.body->>'retractedAt' IS NOT NULL))
+        AND (
         ${includeClassified?'true':'false'} OR coalesce((evidence.body->>'held')::boolean,false)
         OR evidence.body->>'sensitivity' IS NULL
         OR jsonb_typeof(evidence.body->'compartments') IS DISTINCT FROM 'array'
@@ -320,7 +326,14 @@ export async function getWorkspaceScopeInventory(workspaceId:string,userId:strin
     const reviewed=policyRow?.reviewedInventoryRevision??null
     const coverageComplete=manifestCoverage.complete&&coverage.unresolved==='0'&&reviewed===coverage.registryRevision
     const readiness=await getDepartmentalReadinessSystem(workspaceId,client.query.bind(client))
-    return {resourceKind:parsed.data,total,items:rows.slice(0,100).map(row=>({...row,allowedActions:[...adapter.actions]})),nextCursor:rows.length>100?rows[99].id:null,
+    const items=[]
+    for(const row of rows.slice(0,100)){
+      // The re-check is computed for display; release repeats it under locks.
+      const recovery=parsed.data==='memory'&&row.held?(await recheckHeldMemory(client,workspaceId,row.id)).recovery:undefined
+      items.push({...row,allowedActions:[...adapter.actions],...(recovery?{recovery}:{})})
+    }
+    const releaseRequests=parsed.data==='memory'?await countOpenReviewRequests(client,workspaceId):undefined
+    return {resourceKind:parsed.data,total,items,...(releaseRequests!==undefined?{releaseRequests}:{}),nextCursor:rows.length>100?rows[99].id:null,
       supportedKinds:[...SCOPE_REVIEW_KINDS],completeCoverage:coverageComplete,validForMs:30_000,recentReviews,nextReviewCursor:reviewRows.length>20?reviewRows[19].id:null,
       selectedReview:reviewId?await view(client,workspaceId,reviewId):null,
       policyRevision:policyRow?.revision??'1',classificationMode:policyRow?.classificationMode??'legacy',readiness,canActivateStrict:coverageComplete&&readiness.ready&&policyRow?.classificationMode!=='strict',
@@ -372,6 +385,15 @@ export async function executeWorkspaceScopeReviewInTransaction(client:PoolClient
         if(!current)throw new WorkspaceAccessError('scope_review_selection_unavailable',409)
         const display=await content(client,workspaceId,command.resourceKind,id)
         if(!display)throw new WorkspaceAccessError('scope_review_selection_unavailable',409)
+        if(command.action==='release'){
+          // Re-check now and freeze its plan in the hashed impact; apply must
+          // reproduce exactly this plan under locks (docs/plans/scope-hold-recovery.md §3).
+          const recheck=await recheckHeldMemory(client,workspaceId,id)
+          if(recheck.recovery.status!=='safe'||!('plan' in recheck))throw new WorkspaceAccessError('scope_review_release_blocked',409)
+          snapshots.push(current);contents.push(display)
+          impacts.push({version:2,descendants:[],dependents:{},release:recheck.plan})
+          continue
+        }
         if(command.action!=='hold'&&(current.held||current.sensitivity===null||current.compartments===null||current.projectIds===null||(command.action!=='consolidate_default'&&current.compartments.length>0)||current.validTo||current.retractedAt))throw new WorkspaceAccessError('scope_review_release_required',409)
         snapshots.push(current)
         contents.push(display)
@@ -420,6 +442,11 @@ export async function executeWorkspaceScopeReviewInTransaction(client:PoolClient
       if(!stale&&canonical(await content(client,workspaceId,job.resourceKind,item.resourceId))!==canonical(item.content))stale=true
       if(!stale){
         const impact=await captureImpact(client,workspaceId,job.resourceKind,item.resourceId,job.action,current!.held)
+        if(job.action==='release'&&impact.version===2){
+          const recheck=await recheckHeldMemory(client,workspaceId,item.resourceId)
+          if(recheck.recovery.status!=='safe'||!('plan' in recheck)){stale=true;break}
+          impact.release=recheck.plan
+        }
         if(job.action==='consolidate_default'&&impact.version===2){
           try{impact.consolidation=await consolidation(client,workspaceId,current!,job.targetCompartment!)}
           catch(error){
@@ -437,7 +464,7 @@ export async function executeWorkspaceScopeReviewInTransaction(client:PoolClient
       await audit(client,workspaceId,userId,'scope.review.stale',job.id,await policy(client,workspaceId),{payloadHash:job.payloadHash})
       return view(client,workspaceId,job.id)
     }
-    const applied:Array<{before:Snapshot;after:Snapshot}>=[]
+    const applied:Array<{before:Snapshot;after:Snapshot;replacementId?:string}>=[]
     let interrupted=false
     for(const item of pending.slice(0,25)){
       // An earlier item can invalidate a selected derived descendant in this
@@ -455,6 +482,20 @@ export async function executeWorkspaceScopeReviewInTransaction(client:PoolClient
         }
       }
       if(job.action==='consolidate_default'&&Date.parse(job.expiresAt!)<=Date.now())throw new WorkspaceAccessError('scope_review_expired',409)
+      if(job.action==='release'){
+        const plan=item.impact?.version===2?item.impact.release:undefined
+        if(!plan){interrupted=true;break}
+        const released=await releaseHeldMemory(client,workspaceId,item.resourceId,plan)
+        if('stale' in released){interrupted=true;break}
+        // The held row keeps its held state row as history; the replacement is reviewed.
+        const replacement=(await source(client,workspaceId,'memory',released.replacementId))!
+        await client.query(`INSERT INTO scope_resource_states(workspace_id,resource_kind,resource_id,resource_version,review_state,classification_revision,holding_reason) VALUES($1,'memory',$2,$3,'reviewed',$4,NULL) ON CONFLICT(workspace_id,resource_kind,resource_id,resource_version) DO UPDATE SET review_state='reviewed',classification_revision=excluded.classification_revision,holding_reason=NULL,updated_at=now()`,
+          [workspaceId,released.replacementId,replacement.version,await policy(client,workspaceId)])
+        const after=(await source(client,workspaceId,job.resourceKind,item.resourceId))!
+        await client.query("UPDATE workspace_scope_review_items SET status='applied',result_version=$4 WHERE workspace_id=$1 AND review_id=$2 AND resource_id=$3",[workspaceId,job.id,item.resourceId,after.version])
+        applied.push({before:item.source,after,replacementId:released.replacementId})
+        continue
+      }
       const adapter=sourceAdapter(job.resourceKind)
       if(job.action==='assign_team'||job.action==='consolidate_default')await client.query(`UPDATE ${adapter.table} SET compartments=ARRAY[$3::text] WHERE workspace_id=$1 AND id=$2`,[workspaceId,item.resourceId,job.targetCompartment])
       if(job.action==='hold'){
@@ -480,10 +521,10 @@ export async function executeWorkspaceScopeReviewInTransaction(client:PoolClient
       await client.query("UPDATE workspace_scope_review_items SET status='applied',result_version=$4 WHERE workspace_id=$1 AND review_id=$2 AND resource_id=$3",[workspaceId,job.id,item.resourceId,after.version])
       applied.push({before:item.source,after})
     }
-    await client.query("UPDATE workspace_access_policies SET classification_mode=CASE WHEN classification_mode='legacy' AND $2<>'consolidate_default' THEN 'review' ELSE classification_mode END,revision=revision+1,updated_at=now() WHERE workspace_id=$1",[workspaceId,job.action])
+    await client.query("UPDATE workspace_access_policies SET classification_mode=CASE WHEN classification_mode='legacy' AND $2 NOT IN('consolidate_default','release') THEN 'review' ELSE classification_mode END,revision=revision+1,updated_at=now() WHERE workspace_id=$1",[workspaceId,job.action])
     const revision=await policy(client,workspaceId)
     const coverage=await getScopeReviewCoverage(client,workspaceId)
-    if(job.action!=='consolidate_default')await client.query('UPDATE workspace_access_policies SET reviewed_inventory_revision=$2 WHERE workspace_id=$1',[workspaceId,coverage.unresolved==='0'?SCOPE_REVIEW_REGISTRY_REVISION:null])
+    if(!['consolidate_default','release'].includes(job.action))await client.query('UPDATE workspace_access_policies SET reviewed_inventory_revision=$2 WHERE workspace_id=$1',[workspaceId,coverage.unresolved==='0'?SCOPE_REVIEW_REGISTRY_REVISION:null])
     if(interrupted)await client.query("UPDATE workspace_scope_review_items SET status='stale',error_code='scope_review_changed' WHERE workspace_id=$1 AND review_id=$2 AND status='pending'",[workspaceId,job.id])
     await client.query('UPDATE workspace_scope_reviews SET status=$3,version=version+1,policy_revision=$4,updated_at=now() WHERE workspace_id=$1 AND id=$2',[workspaceId,job.id,interrupted?'stale':pending.length<=25?'complete':'running',revision])
     await audit(client,workspaceId,userId,'scope.review.apply',job.id,revision,{payloadHash:job.payloadHash,applied})

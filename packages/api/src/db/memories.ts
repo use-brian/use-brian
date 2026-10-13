@@ -596,6 +596,43 @@ export async function updateMemory(
 }
 
 /**
+ * Insert the replacement of a HELD memory for scope-review `release`
+ * (workspace-access/hold-recovery.ts; docs/plans/scope-hold-recovery.md §3).
+ * A verbatim copy of the held row's content, authorship and envelope with a
+ * fresh id: it never mints a different `user_id` (in particular never NULL
+ * from a private row), and it refuses a row with no author. The caller holds
+ * the row lock, records lineage, and retires the held row.
+ */
+export async function insertHeldMemoryReplacement(
+  client: Pick<pg.PoolClient, 'query'>,
+  workspaceId: string,
+  heldId: string,
+): Promise<{ id: string; version: string }> {
+  const held = (await client.query<{ userId: string | null; author: string | null; assistantAuthor: string | null; held: boolean }>(
+    `SELECT user_id AS "userId", created_by_user_id AS author, created_by_assistant_id AS "assistantAuthor", scope_held AS held
+       FROM memories WHERE workspace_id=$1 AND id=$2`, [workspaceId, heldId],
+  )).rows[0]
+  if (!held || !held.held) throw new Error('memory_not_held')
+  if (!held.author && !held.assistantAuthor) throw new Error('memory_author_missing')
+  const inserted = (await client.query<{ id: string; version: string; userId: string | null }>(
+    `INSERT INTO memories (
+       assistant_id, user_id, app_id, workspace_id, scope, tags, summary, detail, confidence,
+       sensitivity, source, source_session_id, created_by_user_id, created_by_assistant_id, source_episode_id,
+       verified_by_user_id, verified_at, original_scope, original_sensitivity, original_summary,
+       compartments, project_ids, valid_from)
+     SELECT assistant_id, user_id, app_id, workspace_id, scope, tags, summary, detail, confidence,
+       sensitivity, source, source_session_id, created_by_user_id, created_by_assistant_id, source_episode_id,
+       verified_by_user_id, verified_at, original_scope, original_sensitivity, original_summary,
+       compartments, project_ids, now()
+       FROM memories WHERE workspace_id=$1 AND id=$2
+     RETURNING id, scope_version::text AS version, user_id AS "userId"`,
+    [workspaceId, heldId],
+  )).rows[0]
+  if (!inserted || inserted.userId !== held.userId) throw new Error('memory_replacement_partition_changed')
+  return { id: inserted.id, version: inserted.version }
+}
+
+/**
  * Get a memory by ID (full detail).
  */
 export async function getMemoryById(ctx: AccessContext, id: string): Promise<Memory | null> {

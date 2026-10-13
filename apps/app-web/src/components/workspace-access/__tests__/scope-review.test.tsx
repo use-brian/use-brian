@@ -4,7 +4,8 @@ import {renderToStaticMarkup} from 'react-dom/server';
 import { createRoot, type Root } from 'react-dom/client';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import type { ScopeReviewInventory, ScopeReview } from '@use-brian/shared';
-import { ScopeReviewPanel } from '../scope-review';
+import { ScopeReviewPanel, canReleaseRow, scopeReviewSelectionBlocked } from '../scope-review';
+import { format } from '@/lib/i18n/format';
 import { I18nProvider } from '@/lib/i18n/client';
 import { en } from '@/lib/i18n/dictionaries/en';
 import { ja } from '@/lib/i18n/dictionaries/ja';
@@ -287,6 +288,30 @@ describe('[COMP:app-web/scope-review] explicit administrator review path',()=>{
       const paragraph=[...host.querySelectorAll('p')].find(p=>p.textContent?.startsWith(label+':'))!;
       expect(paragraph.textContent).toContain(`${t.visibility}: ${t.workspace}`);expect(paragraph.textContent).not.toContain(t.private);
     }
+  })
+  it('re-checks held memories and offers Release only for rows marked safe',async()=>{
+    const base=fixture(),memoryActions=['confirm_general','assign_team','consolidate_default','hold','release'] as const;
+    const held=(id:string,recovery:NonNullable<ScopeReviewInventory['items'][number]['recovery']>)=>({...base.items[1],id,allowedActions:[...memoryActions],recovery});
+    mocks.fetch.mockResolvedValue(protectedData({...base,releaseRequests:2,items:[{...base.items[0],allowedActions:[...memoryActions]},held('safe-held',{status:'safe'}),held('blocked-held',{status:'blocked',reason:'labels_changed'})]}));
+    await render();
+    expect(host.textContent).toContain(format(t.releaseRequests,{count:2}));
+    expect(host.querySelector('[data-testid="recovery-safe-held"]')!.textContent).toBe(t.recoverySafe);
+    expect(host.querySelector('[data-testid="recovery-blocked-held"]')!.textContent).toBe(`${t.recoveryBlocked}: ${t.blocked_labels_changed}`);
+    const submit=()=>host.querySelector<HTMLButtonElement>('button[type="submit"]')!;
+    await click(t.release);await reason();
+    await select('blocked-held');expect(submit().disabled).toBe(true);expect(host.textContent).toContain(t.releaseOnlySafe);
+    await select('blocked-held');await select('record-one');expect(submit().disabled).toBe(true);
+    await select('record-one');await select('safe-held');expect(submit().disabled).toBe(false);expect(host.textContent).not.toContain(t.releaseOnlySafe);
+    await act(async()=>host.querySelector('form')!.dispatchEvent(new Event('submit',{bubbles:true,cancelable:true})));
+    expect(mocks.save).toHaveBeenCalledWith('review-workspace',{type:'scope.review.preview',resourceKind:'memory',resourceIds:['safe-held'],action:'release',targetTeamId:null,reason:'Classify selected source'});
+  })
+  it('gates Release in the pure selection rule',()=>{
+    const row=fixture().items[1];
+    expect(canReleaseRow({...row,allowedActions:['release'],recovery:{status:'safe'}})).toBe(true);
+    expect(canReleaseRow({...row,allowedActions:['release'],recovery:{status:'blocked',reason:'source_held'}})).toBe(false);
+    expect(canReleaseRow({...row,held:false,allowedActions:['release'],recovery:{status:'safe'}})).toBe(false);
+    expect(canReleaseRow({...row,allowedActions:['hold'],recovery:{status:'safe'}})).toBe(false);
+    expect(scopeReviewSelectionBlocked('hold',[row],null)).toBe(false);
   })
   it('keeps all locales complete and free of em dashes',()=>{
     for(const dict of [en,ja,zh,zhCN]){expect(Object.keys(dict.scopeReview).sort()).toEqual(Object.keys(t).sort());expect(JSON.stringify(dict.scopeReview)).not.toContain('—')}

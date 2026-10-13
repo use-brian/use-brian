@@ -124,6 +124,7 @@ import {
 import { suggestedSkillCount } from "@/lib/skills-view";
 import { FilterStrip } from "@/components/brain/filter-strip";
 import { EmptyState, PristineBrainNudge } from "@/components/brain/empty-state";
+import { HeldMemoriesNotice } from "@/components/brain/held-memories-notice";
 import { ReviewAllClear, ReviewPanel } from "@/components/brain/review-panel";
 import { AuditPanel } from "@/components/brain/audit-panel";
 import { BrainTopbar, BrainTopbarPager } from "@/components/brain/brain-topbar";
@@ -1133,6 +1134,10 @@ function BrainPageInner() {
           />
         )}
       </div>
+
+      {/* Member's own held memories: a count + Request review, nothing more
+          (docs/plans/scope-hold-recovery.md §2 D3). Renders nothing at 0. */}
+      {activeId && !offline && <HeldMemoriesNotice workspaceId={activeId} />}
 
       <div className="flex flex-1 min-h-0 flex-col">
         {section === "reviews" ? (
