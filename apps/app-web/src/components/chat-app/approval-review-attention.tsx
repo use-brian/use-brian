@@ -185,7 +185,7 @@ function AttentionRow({ t, workspaceId, item, onChanged }: { t: Dict; workspaceI
       <li className="rounded-md border p-2 text-xs" data-kind={item.kind}>
         <p className="font-medium">{format(item.invalidated ? t.decidedInvalid : t.decided, { name })}</p>
         {item.toolName && <p className="truncate text-muted-foreground">{item.toolName}</p>}
-        <Link className="mt-1 inline-block underline" href={`/w/${workspaceId}/approvals?id=${item.approvalId}`}>{t.open}</Link>
+        <Link className="mt-1 inline-block underline" href={`/w/${workspaceId}/p?panel=approvals&approval=${item.approvalId}`}>{t.open}</Link>
       </li>
     );
   }
@@ -204,7 +204,7 @@ function AttentionRow({ t, workspaceId, item, onChanged }: { t: Dict; workspaceI
         </div>
       )}
       <div className="flex flex-wrap gap-1.5">
-        <Link className="inline-flex min-h-7 items-center underline max-md:min-h-11" href={`/w/${workspaceId}/approvals?id=${item.approvalId}`}>{t.open}</Link>
+        <Link className="inline-flex min-h-7 items-center underline max-md:min-h-11" href={`/w/${workspaceId}/p?panel=approvals&approval=${item.approvalId}`}>{t.open}</Link>
         {review ? (
           <>
             <Button size="sm" variant="outline" disabled={busy} onClick={() => void act(async () => {

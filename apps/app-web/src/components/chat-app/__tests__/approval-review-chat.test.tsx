@@ -148,7 +148,7 @@ describe("[COMP:app-web/approval-review-chat] chat attention and reviewer contro
     expect(host.textContent).toContain(t.decidedInvalid.replace("{name}", "Ops"));
     expect(host.textContent).toContain(t.routeBlockers.reconcile_before_retry);
     expect(host.querySelector(`a[href="/w/${ws}/workflow/wf-1"]`)).toBeTruthy();
-    expect(host.querySelector(`a[href="/w/${ws}/approvals?id=ap-2"]`)).toBeTruthy();
+    expect(host.querySelector(`a[href="/w/${ws}/p?panel=approvals&approval=ap-2"]`)).toBeTruthy();
   });
 
   it("a failed load is an error with retry, never an empty list; the approval signal refreshes", async () => {
