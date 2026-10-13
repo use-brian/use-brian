@@ -37,3 +37,14 @@ describe('[COMP:api/channel-pipeline-audience-refusal] pre-generation audience r
     expect(source).toMatch(/channelId,\s*\n\s*sessionChannelId,\s*\n\s*channelIntegrationId: params\.channelIntegrationId/)
   })
 })
+
+
+describe('[COMP:api/channel-pipeline-audience-refusal] group provider rows are not audience evidence', () => {
+  // 2026-10-13: the inbound row was counted while the identical history rule
+  // skipped it, so a room floor above the group's approval refused every turn.
+  it('applies the rule to the inbound message and to history alike', () => {
+    expect(source).toMatch(/if \(storedUserSource && countsAsGroupAudienceEvidence\(userMessageRow, isGroupChat\)\)/)
+    expect(source).toMatch(/dbMessages\.filter\(\(message\) => countsAsGroupAudienceEvidence\(message, isGroupChat\)\)/)
+    expect(source).not.toMatch(/if \(storedUserSource\) scopeAccumulator\.noteSource/)
+  })
+})
