@@ -367,6 +367,7 @@ export function createFileTools(
           data:
             `${result.value.file.path} is ${result.value.file.mime} — a binary file whose contents cannot be read as text. ` +
             'Do not attempt to describe or quote its contents from this tool. ' +
+            'If the file has been ingested, read its extracted text with searchFileContent (the per-file content search) instead. ' +
             'The file itself can still be delivered: send it to the user in this conversation, or attach it to an email, using its path. ' +
             'Its title, summary, and tags are in the workspace files index if you need to describe it.',
           isError: true,
