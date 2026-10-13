@@ -13,6 +13,7 @@ import {
   type ParameterPolicy,
   type SupportRecord,
 } from '../contracts.js'
+import { isLocalRouteLoss, selectOperationalRoute } from '../route-recovery.js'
 
 const step = { id: 'send', type: 'tool_call', toolName: 'slackPostMessage', arguments: { channel: '#ops', text: '{{vars.summary}}' }, approval: { required: true } }
 const wf = (over: Partial<Extract<DescriptorSource, { kind: 'workflow_step' }>> = {}): DescriptorSource => ({
@@ -158,5 +159,40 @@ describe('[COMP:approval-review/contracts] delegated approval review contracts',
       expect(resolveEffectiveAssignment([cand({ status: 'revoked' })], scopes)).toBeNull()
       expect(resolveEffectiveAssignment([cand({ delegatorUserId: 'someone-else' })], scopes)).toBeNull()
     })
+  })
+})
+
+describe('[COMP:approval-review/contracts] operational route selection', () => {
+  const local = { kind: 'browser_profile' as const, id: 'local', accountKey: 'ops@fictional.example', locality: 'local' as const }
+  const remote = { kind: 'browser_profile' as const, id: 'remote', accountKey: 'ops@fictional.example', locality: 'remote' as const }
+  const connector = { kind: 'connector_instance' as const, id: 'conn', accountKey: 'OPS@fictional.example', locality: 'connector' as const, operations: ['send'] }
+  const other = { kind: 'browser_profile' as const, id: 'other', accountKey: 'someone@fictional.example', locality: 'remote' as const }
+  const up = (...ids: string[]) => new Map(ids.map((id) => [id, { available: true }]))
+
+  it('prefers an available nonlocal route for always-on work, intended first within a class', () => {
+    expect(selectOperationalRoute({ intended: local, alternatives: [remote, connector], probes: up('local', 'remote', 'conn'), effect: 'none' }))
+      .toMatchObject({ kind: 'selected', route: { id: 'remote' }, fallback: true })
+    expect(selectOperationalRoute({ intended: remote, alternatives: [connector], probes: up('remote', 'conn'), effect: 'none' }))
+      .toMatchObject({ kind: 'selected', route: { id: 'remote' }, fallback: false })
+  })
+
+  it('fences the lost route and only accepts same-account, permitted, available alternatives', () => {
+    expect(selectOperationalRoute({ intended: local, alternatives: [other], lostRouteId: 'local', probes: up('local', 'other'), effect: 'none' }))
+      .toEqual({ kind: 'blocked', blocker: 'no_authorized_alternative' })
+    expect(selectOperationalRoute({ intended: local, alternatives: [connector], lostRouteId: 'local', probes: up('conn'), effect: 'none', operation: 'submit' }))
+      .toEqual({ kind: 'blocked', blocker: 'no_authorized_alternative' })
+    expect(selectOperationalRoute({ intended: local, alternatives: [connector], lostRouteId: 'local', probes: up('conn'), effect: 'none', operation: 'send' }))
+      .toMatchObject({ kind: 'selected', route: { id: 'conn' } })
+    expect(selectOperationalRoute({ intended: local, alternatives: [remote], lostRouteId: 'local', probes: new Map([['remote', { available: true, accountKey: 'intruder@fictional.example' }]]), effect: 'none' }))
+      .toEqual({ kind: 'blocked', blocker: 'account_mismatch' })
+  })
+
+  it('reconciles an uncertain effect instead of retrying, and needs a binding', () => {
+    expect(selectOperationalRoute({ intended: local, alternatives: [remote], lostRouteId: 'local', probes: up('remote'), effect: 'uncertain' }))
+      .toEqual({ kind: 'blocked', blocker: 'reconcile_before_retry' })
+    expect(selectOperationalRoute({ intended: local, alternatives: [], probes: up(), effect: 'completed' })).toEqual({ kind: 'done' })
+    expect(selectOperationalRoute({ intended: null, alternatives: [], probes: up(), effect: 'none' })).toEqual({ kind: 'blocked', blocker: 'no_route_binding' })
+    expect(isLocalRouteLoss({ code: 'no_extension' })).toBe(true)
+    expect(isLocalRouteLoss({ code: 'timeout' })).toBe(false)
   })
 })

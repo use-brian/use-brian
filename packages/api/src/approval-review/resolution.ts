@@ -21,8 +21,10 @@ import {
   humanOnlyCategory,
   matchPattern,
   patternKeyFor,
+  type ActionDescriptor,
   type ReviewOutcome,
   type ReviewReason,
+  type SupportEvaluation,
 } from '@use-brian/core'
 import { getPool } from '../db/client.js'
 import { createPendingApprovalsStore, type PendingApproval } from '../db/pending-approvals-store.js'
@@ -32,11 +34,13 @@ import {
   getReceiptByKey,
   insertAttempt,
   insertReceipt,
+  type ApprovalPattern,
+  type ApprovalReviewAssignment,
   type DelegatedResolution,
   type ReviewAttempt,
 } from '../db/approval-review-store.js'
 import { notifyWorkspaceChange } from '../brain-stream/notify.js'
-import { loadRequestFacts, reviewerAdmission } from './source.js'
+import { loadRequestFacts, reviewerAdmission, type RequestFacts } from './source.js'
 import { ELIGIBLE_KINDS, effectiveAssignmentFor, evaluateLineage } from './patterns.js'
 import { appendApprovalReviewAudit } from './common.js'
 import { ApprovalReviewError } from './errors.js'
@@ -97,31 +101,10 @@ export async function reviewApprovalRequest(params: {
     return { outcome, reasons, assignmentId: assignment?.id ?? null, reviewerAssistantId: assignment?.reviewerAssistantId ?? null, patternId }
   }
 
-  if (approval.status !== 'pending') return leave('blocked', ['not_pending'])
-  if (approval.expiresAt && approval.expiresAt.getTime() <= Date.now()) return leave('blocked', ['expired'])
-  if (!assignment) return leave('needs_human', ['no_assignment'])
-  if (params.requester.kind === 'assistant' && params.requester.assistantId !== assignment.reviewerAssistantId) {
-    return leave('blocked', ['reviewer_not_assigned'])
-  }
-  if (assignment.delegatorUserId !== approval.approverUserId) return leave('needs_human', ['delegator_not_approver'])
-  if (!await approvals.getById(assignment.delegatorUserId, approval.id)) return leave('needs_human', ['delegator_source_denied'])
-  const reviewer = await reviewerAdmission(assignment.reviewerAssistantId, approval.workspaceId, facts)
-  if (!reviewer.ok) return leave('needs_human', [reviewer.reason])
-  if (!ELIGIBLE_KINDS.has(approval.kind) || !facts.descriptor.ok) {
-    return leave('needs_human', [`unresolved:${facts.descriptor.ok ? 'ineligible_kind' : facts.descriptor.reason}`])
-  }
-  const d = facts.descriptor.descriptor
-  const category = humanOnlyCategory({ actionKind: d.actionKind, parameters: d.parameters, effectTexts: d.effectTexts,
-    ceiling: typeof approval.approvalPayload.ceiling === 'string' ? approval.approvalPayload.ceiling : null })
-  if (category) return leave('needs_human', [`human_only:${category}`])
-
-  const lineage = await findLiveLineage(getPool(), approval.workspaceId, patternKeyFor(d, assignment.parameterPolicy))
-  if (!lineage || lineage.status === 'proposed') return leave('needs_human', ['no_active_pattern'], lineage?.id ?? null)
-  if (lineage.status !== 'active') return leave('needs_human', ['pattern_suspended'], lineage.id)
-  const match = matchPattern(lineage, d)
-  if (!match.ok) return leave('needs_human', [`mismatch:${match.reason}`], lineage.id)
-  const evaluation = await evaluateLineage(getPool(), lineage)
-  if (!evaluation.qualifies) return leave('needs_human', ['pattern_suspended'], lineage.id)
+  const check = await checkReview(approval, facts, assignment, params.requester)
+  if (!check.ok) return leave(check.outcome, check.reasons, check.patternId)
+  const { lineage, evaluation, reviewer, descriptor: d } = check
+  if (!assignment) throw new Error('unreachable')
 
   // ── Atomic claim ──
   const client = await getPool().connect()
@@ -203,6 +186,47 @@ export async function reviewApprovalRequest(params: {
   }
   // Browser terminal sends need no dispatch: the runner's poll consumes the receipt.
   return { outcome: 'resolved', receipt, replay: false, consumer }
+}
+
+export type ReviewCheck =
+  | { ok: true; lineage: ApprovalPattern; evaluation: SupportEvaluation; reviewer: { clearance: string }; descriptor: ActionDescriptor }
+  | { ok: false; outcome: 'needs_human' | 'blocked'; reasons: ReviewReason[]; patternId: string | null }
+
+/**
+ * Every precondition of a delegated decision, read-only. Shared by the claim
+ * and by inspection (a dry run that records nothing).
+ */
+export async function checkReview(
+  approval: PendingApproval,
+  facts: RequestFacts,
+  assignment: ApprovalReviewAssignment | null,
+  requester: ReviewRequester,
+): Promise<ReviewCheck> {
+  const no = (outcome: 'needs_human' | 'blocked', reasons: ReviewReason[], patternId: string | null = null): ReviewCheck => ({ ok: false, outcome, reasons, patternId })
+  const approvals = createPendingApprovalsStore()
+  if (approval.status !== 'pending') return no('blocked', ['not_pending'])
+  if (approval.expiresAt && approval.expiresAt.getTime() <= Date.now()) return no('blocked', ['expired'])
+  if (!assignment) return no('needs_human', ['no_assignment'])
+  if (requester.kind === 'assistant' && requester.assistantId !== assignment.reviewerAssistantId) return no('blocked', ['reviewer_not_assigned'])
+  if (assignment.delegatorUserId !== approval.approverUserId) return no('needs_human', ['delegator_not_approver'])
+  if (!await approvals.getById(assignment.delegatorUserId, approval.id)) return no('needs_human', ['delegator_source_denied'])
+  const reviewer = await reviewerAdmission(assignment.reviewerAssistantId, approval.workspaceId, facts)
+  if (!reviewer.ok) return no('needs_human', [reviewer.reason])
+  if (!ELIGIBLE_KINDS.has(approval.kind) || !facts.descriptor.ok) {
+    return no('needs_human', [`unresolved:${facts.descriptor.ok ? 'ineligible_kind' : facts.descriptor.reason}`])
+  }
+  const d = facts.descriptor.descriptor
+  const category = humanOnlyCategory({ actionKind: d.actionKind, parameters: d.parameters, effectTexts: d.effectTexts,
+    ceiling: typeof approval.approvalPayload.ceiling === 'string' ? approval.approvalPayload.ceiling : null })
+  if (category) return no('needs_human', [`human_only:${category}`])
+  const lineage = await findLiveLineage(getPool(), approval.workspaceId, patternKeyFor(d, assignment.parameterPolicy))
+  if (!lineage || lineage.status === 'proposed') return no('needs_human', ['no_active_pattern'], lineage?.id ?? null)
+  if (lineage.status !== 'active') return no('needs_human', ['pattern_suspended'], lineage.id)
+  const match = matchPattern(lineage, d)
+  if (!match.ok) return no('needs_human', [`mismatch:${match.reason}`], lineage.id)
+  const evaluation = await evaluateLineage(getPool(), lineage)
+  if (!evaluation.qualifies) return no('needs_human', ['pattern_suspended'], lineage.id)
+  return { ok: true, lineage, evaluation, reviewer: { clearance: reviewer.clearance }, descriptor: d }
 }
 
 /**

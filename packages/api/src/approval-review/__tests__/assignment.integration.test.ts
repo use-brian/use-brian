@@ -8,6 +8,11 @@
  */
 import { randomUUID } from 'node:crypto'
 import { afterAll, describe, expect, it } from 'vitest'
+import express from 'express'
+import request from 'supertest'
+import type { ToolContext } from '@use-brian/core'
+import { approvalReviewRoutes } from '../../routes/approval-review.js'
+import { createApprovalReviewTools } from '../tools.js'
 import { getAppPool, getPool } from '../../db/client.js'
 import { listAssignmentsForViewer } from '../../db/approval-review-store.js'
 import { assignReviewer, changeAssignment, revokeAssignment } from '../assignment.js'
@@ -153,5 +158,64 @@ describe('[COMP:api/approval-review-assignment] explicit reviewer assignment (re
     expect(done).toMatchObject({ status: 'approved', respondedBy: f.people.lead, resolutionOrigin: 'human' })
     const ev = await pool.query(`SELECT count(*)::int n FROM decision_events WHERE source_id = $1 AND event_kind = 'approval.decided'`, [approval.id])
     expect(ev.rows[0].n).toBe(1)
+  })
+})
+
+describe('[COMP:api/approval-review-assignment] REST, Brian and MCP share one authority (A13)', () => {
+  const app = () => {
+    const a = express()
+    a.use(express.json())
+    const auth: express.RequestHandler = (req, res, next) => {
+      const user = req.header('x-test-user')
+      if (!user) { res.status(401).json({ error: 'unauthorized' }); return }
+      ;(req as { userId?: string }).userId = user
+      next()
+    }
+    a.use('/api', approvalReviewRoutes({ auth }))
+    return a
+  }
+  const ctx = (f: Awaited<ReturnType<typeof setup>>['f'], over: Partial<ToolContext>): ToolContext => ({
+    userId: f.people.lead, assistantId: f.assistants.brian, sessionId: randomUUID(), appId: 'Use Brian', channelType: 'web',
+    channelId: 'c', workspaceId: f.workspaceId, abortSignal: new AbortController().signal, ...over,
+  }) as ToolContext
+
+  it('REST: the authenticated user is the actor; body-asserted actors are refused', async () => {
+    const { f, workflowId } = await setup()
+    const path = `/api/workspaces/${f.workspaceId}/approval-review/assignments`
+    expect((await request(app()).post(path).send(wfAssign(f.assistants.ops, workflowId))).status).toBe(401)
+    expect((await request(app()).post(path).set('x-test-user', f.people.lead).send({ ...wfAssign(f.assistants.ops, workflowId), human: true })).status).toBe(400)
+    const body = wfAssign(f.assistants.ops, workflowId)
+    const created = await request(app()).post(path).set('x-test-user', f.people.lead).send(body)
+    expect(created.status).toBe(200)
+    expect(created.body).toMatchObject({ outcome: 'created', assignment: { origin: 'ui', delegatorUserId: f.people.lead } })
+    expect((await request(app()).post(path).set('x-test-user', f.people.lead).send(body)).body).toMatchObject({ outcome: 'duplicate' })
+    expect((await request(app()).post(path).set('x-test-user', f.people.member).send(wfAssign(f.assistants.ops, workflowId))).status).toBe(403)
+    const list = await request(app()).get(path).set('x-test-user', f.people.lead)
+    expect(list.body.assignments.map((x: { id: string }) => x.id)).toContain(created.body.assignment.id)
+    const revoke = await request(app()).post(`${path}/${created.body.assignment.id}/revoke`).set('x-test-user', f.people.lead).send({ reason: 'Fictional' })
+    expect(revoke.body).toMatchObject({ status: 'revoked' })
+  })
+
+  it('Brian: only an attended human turn can assign; unattended, relayed or MCP callers are refused', async () => {
+    const { f, workflowId } = await setup()
+    const tools = createApprovalReviewTools()
+    const input = { reviewer_assistant_id: f.assistants.ops, scope_kind: 'workflow', scope_id: workflowId }
+    const unattended = await tools.assignApprovalReviewer.execute(input as never, ctx(f, { attended: false }))
+    expect(unattended).toMatchObject({ isError: true })
+    expect(String(unattended.data)).toContain('human_intent_required')
+    const viaMcp = await tools.assignApprovalReviewer.execute(input as never, ctx(f, { attended: true, workspaceActorUserId: f.people.lead,
+      programmaticPrincipal: { kind: 'brain_key', credentialId: randomUUID(), userId: f.people.lead } } as never))
+    expect(String(viaMcp.data)).toContain('human_intent_required')
+    const attended = await tools.assignApprovalReviewer.execute(input as never, ctx(f, { attended: true, workspaceActorUserId: f.people.lead }))
+    expect(attended.isError).toBeFalsy()
+    expect(attended.data).toMatchObject({ outcome: 'created', assignment: { origin: 'chat', delegatorUserId: f.people.lead } })
+    // Same turn, same arguments: one assignment.
+    const replay = await tools.assignApprovalReviewer.execute(input as never, ctx(f, { attended: true, workspaceActorUserId: f.people.lead, sessionId: (attended.data as { assignment: { instructionReceipt: { sessionId: string } } }).assignment.instructionReceipt.sessionId }))
+    expect(replay.data).toMatchObject({ outcome: 'duplicate' })
+    const { approval } = await pendingStepApproval(f, workflowId)
+    const notReviewer = await tools.reviewApprovalRequest.execute({ approval_id: approval.id } as never, ctx(f, { assistantId: f.assistants.brian }))
+    expect(notReviewer.data).toMatchObject({ outcome: 'blocked', reasons: ['reviewer_not_assigned'] })
+    const inspected = await tools.inspectApprovalReview.execute({ approval_id: approval.id } as never, ctx(f, { attended: true, workspaceActorUserId: f.people.lead }))
+    expect(inspected.data).toMatchObject({ assignment: { reviewerAssistantId: f.assistants.ops, reviewerName: 'Ops' }, eligibility: { eligible: false, reasons: ['no_active_pattern'] } })
   })
 })

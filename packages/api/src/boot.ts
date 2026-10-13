@@ -521,6 +521,8 @@ import { createTaskExecutionTools, type ControlEffects } from './tasks/execution
 import { createExternalProgressTools } from './tasks/external-progress.js'
 import { taskExecutionRoutes } from './routes/task-execution.js'
 import { researchRoutes } from './routes/research.js'
+import { approvalReviewRoutes } from './routes/approval-review.js'
+import { createApprovalReviewTools } from './approval-review/tools.js'
 import { createResearchTools } from './research/tools.js'
 import { captureTaskGoalSource } from './workspace-access/goal-source-admission.js'
 import { getWorkspaceAccessMode } from './workspace-access/mode-policy.js'
@@ -4516,6 +4518,8 @@ export async function bootOpenApi(opts: BootOpenApiOptions): Promise<BootResult>
   // Saved research commands (features/research.md): one service for Brian, REST and MCP.
   const researchTools = createResearchTools()
   for (const tool of Object.values(researchTools)) allTools.set(tool.name, tool)
+  const approvalReviewTools = createApprovalReviewTools()
+  for (const tool of Object.values(approvalReviewTools)) allTools.set(tool.name, tool)
 
   // Task-autopilot spin-up tools (confirm a draft goal; work a task to done) +
   // the agentic completion signal (markGoalComplete). `gatherEvidence` hands the
@@ -5900,6 +5904,7 @@ export async function bootOpenApi(opts: BootOpenApiOptions): Promise<BootResult>
     taskTools,
     taskExecutionTools: { ...taskExecutionTools, ...externalProgressTools },
     researchTools,
+    approvalReviewTools,
     crmTools: { ...crmTools, ...crmOperationsTools, ...crmBusinessReferenceTools, ...crmCommercialContextTools, ...crmCommercialDocumentTools, ...crmGovernedRecordTools },
     credentialTools: crmCredentialTools,
     associationTools,
@@ -6785,6 +6790,8 @@ export async function bootOpenApi(opts: BootOpenApiOptions): Promise<BootResult>
   app.use('/api', taskExecutionRoutes({ auth: requireAuth(env.JWT_SECRET), effects: executionControlEffects }))
   // Saved research: activities, follow-up corrections, lessons, improvements (features/research.md).
   app.use('/api', researchRoutes({ auth: requireAuth(env.JWT_SECRET) }))
+  // Explicitly delegated approval review (features/approval-review.md).
+  app.use('/api', approvalReviewRoutes({ auth: requireAuth(env.JWT_SECRET) }))
 
   app.use('/api', requireAuth(env.JWT_SECRET), workflowApprovalsRoutes({
     approvalsStore: pendingApprovalsStore,

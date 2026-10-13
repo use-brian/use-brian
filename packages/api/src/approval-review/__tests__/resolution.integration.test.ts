@@ -20,6 +20,7 @@ import { assignReviewer, revokeAssignment } from '../assignment.js'
 import { captureHumanDecisionSupport, revokePattern } from '../patterns.js'
 import { reviewApprovalRequest, type ReviewConsumers } from '../resolution.js'
 import { consumeDelegatedReceipt, validateDelegatedReceipt } from '../consumption.js'
+import { listAttention, markSeen } from '../attention.js'
 import {
   approveThreeTimes, briefFixture, grantConfigure, key, makeWorkflow, patternRows, pendingStepApproval, person, revokeConfigure,
   sendStep, setWorkflowStep, store, type BriefFixture,
@@ -257,5 +258,39 @@ describe('[COMP:api/approval-review-resolution] delegated resolution (real PG + 
     const [pattern] = await patternRows(f.workspaceId)
     await revokePattern(person(f.people.lead), f.workspaceId, pattern.id)
     expect(await readBrowserSendApprovalStatus(store, later.id)).toBe('unavailable')
+  })
+})
+
+describe('[COMP:api/approval-review-resolution] chat attention is derived and source-filtered (A09, A12)', () => {
+  it('lists waiting requests with their reviewer, clears on resolution, records decisions, and hides others', async () => {
+    const { f, workflowId } = await qualified()
+    const { approval } = await pendingStepApproval(f, workflowId)
+    let view = await listAttention(person(f.people.lead), f.workspaceId)
+    expect(view.items).toEqual([expect.objectContaining({ kind: 'approval_waiting', approvalId: approval.id, seen: false,
+      review: expect.objectContaining({ reviewerAssistantId: f.assistants.ops, reviewerName: 'Ops' }) })])
+    expect(view.unseen).toBe(1)
+    await markSeen(person(f.people.lead), f.workspaceId, [`approval:${approval.id}`, 'not-a-key'])
+    expect((await listAttention(person(f.people.lead), f.workspaceId)).unseen).toBe(0)
+    // Others never see someone else's waiting requests or delegated decisions.
+    expect((await listAttention(person(f.people.member), f.workspaceId)).items).toEqual([])
+    await expect(listAttention(person(randomUUID()), f.workspaceId)).rejects.toMatchObject({ code: 'not_found' })
+
+    await review(f, approval.id)
+    view = await listAttention(person(f.people.lead), f.workspaceId)
+    expect(view.items.map((i) => i.kind)).toEqual(['delegated_decision'])
+    expect(view.items[0]).toMatchObject({ approvalId: approval.id, reviewerName: 'Ops', invalidated: false, seen: false })
+    expect((await listAttention(person(f.people.lead), f.workspaceId, { sessionId: randomUUID() })).items).toEqual([])
+    expect((await listAttention(person(f.people.lead), f.workspaceId, { projectId: f.projectId })).items).toEqual([])
+  })
+
+  it('surfaces an open route blocker until a route is selected, with no reminder or send', async () => {
+    const f = await briefFixture()
+    const workflowId = await makeWorkflow(f)
+    await pool.query(`INSERT INTO operational_route_events (workspace_id, workflow_id, outcome, blocker) VALUES ($1,$2,'blocked','no_authorized_alternative')`, [f.workspaceId, workflowId])
+    const view = await listAttention(person(f.people.lead), f.workspaceId)
+    expect(view.items).toEqual([expect.objectContaining({ kind: 'route_blocker', workflowId, blocker: 'no_authorized_alternative' })])
+    await pool.query(`UPDATE operational_route_events SET resolved_at = now() WHERE workflow_id = $1`, [workflowId])
+    expect((await listAttention(person(f.people.lead), f.workspaceId)).items).toEqual([])
+    expect((await pool.query(`SELECT count(*)::int n FROM scheduled_jobs j JOIN assistants a ON a.id = j.assistant_id WHERE a.workspace_id = $1`, [f.workspaceId])).rows[0].n).toBe(0)
   })
 })

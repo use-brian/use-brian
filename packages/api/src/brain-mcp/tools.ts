@@ -419,6 +419,8 @@ type BuildOpts = {
    * human, so it cannot approve a company method.
    */
   researchTools?: Record<string, Tool>
+  /** Delegated approval review (features/approval-review.md). Assignment and revocation refuse programmatic callers. */
+  approvalReviewTools?: Record<string, Tool>
 }
 
 /**
@@ -442,6 +444,9 @@ const READ_TOOL_NAMES = new Set<string>([
   'getTask',
   'listTasks',
   'getTaskExecution',
+  // Delegated approval review inspection (features/approval-review.md)
+  'inspectApprovalReview',
+  'inspectApprovalPattern',
   'listResearchActivities',
   'getResearchActivity',
   'getResearchImprovement',
@@ -1642,6 +1647,10 @@ export function buildBrainTools(opts: BuildOpts): BrainTool[] {
     ? Object.values(opts.researchTools).map(tool => bridgeCoreTool(tool, resolveCtx, workspaceId))
     : []
   const RESEARCH_READS = new Set(['listResearchActivities', 'getResearchActivity', 'getResearchImprovement'])
+  const approvalReviewBridges = opts.approvalReviewTools
+    ? Object.values(opts.approvalReviewTools).map(tool => bridgeCoreTool(tool, resolveCtx, workspaceId))
+    : []
+  const APPROVAL_REVIEW_READS = new Set(['inspectApprovalReview', 'inspectApprovalPattern'])
   const executionBridges = opts.taskExecutionTools
     ? Object.values(opts.taskExecutionTools).map(tool => bridgeCoreTool(tool, resolveCtx, workspaceId))
     : []
@@ -1943,6 +1952,7 @@ export function buildBrainTools(opts: BuildOpts): BrainTool[] {
     ...taskBridges.filter((t) => t.name === 'getTask' || t.name === 'listTasks'),
     ...executionBridges.filter((t) => t.name === 'getTaskExecution'),
     ...researchBridges.filter((t) => RESEARCH_READS.has(t.name)),
+    ...approvalReviewBridges.filter((t) => APPROVAL_REVIEW_READS.has(t.name)),
     ...crmBridges.filter((t) =>
       t.name === 'getContact' || t.name === 'listContacts' ||
       t.name === 'getCompany' || t.name === 'listCompanies' ||
@@ -1981,6 +1991,7 @@ export function buildBrainTools(opts: BuildOpts): BrainTool[] {
     ),
     ...executionBridges.filter((t) => t.name !== 'getTaskExecution'),
     ...researchBridges.filter((t) => !RESEARCH_READS.has(t.name)),
+    ...approvalReviewBridges.filter((t) => !APPROVAL_REVIEW_READS.has(t.name)),
     ...crmBridges.filter((t) =>
       t.name === 'saveContact' || t.name === 'updateContact' ||
       t.name === 'saveCompany' || t.name === 'updateCompany' ||
