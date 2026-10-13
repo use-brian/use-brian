@@ -20,6 +20,7 @@ import { appendDecisionEvent } from './decision-event-store.js'
 import type { ApprovalResolutionOrigin, DerivedWriteEvidence } from '@use-brian/core'
 import { readSessionById } from './sessions.js'
 import { gateSessionRead } from '../session-read-authority.js'
+import { captureHumanDecisionSupport } from '../approval-review/patterns.js'
 
 /** Approval projections retain the current authority of every persisted parent. */
 async function canReadApprovalSource(userId: string, approval: PendingApproval): Promise<boolean> {
@@ -1454,6 +1455,8 @@ export function createPendingApprovalsStore(): PendingApprovalsStore {
           causedByApplicationId: decisionApplicationId(approval),
           payload: { approvalId: id, approvalKind: approval.kind, toolName: 'runBrowserSkill', resolution },
         }, client)
+        // Human evidence for explicitly delegated review (approval-review.md -> "Evidence").
+        await captureHumanDecisionSupport(client, approval, decision, responderUserId)
         await assertSourceFresh()
         return { approval, grantId: grant?.id ?? null }
       })
@@ -1514,6 +1517,8 @@ export function createPendingApprovalsStore(): PendingApprovalsStore {
             accountKey: approvalAccountKey(responded),
           },
         }, client)
+        // Human evidence for explicitly delegated review (approval-review.md -> "Evidence").
+        await captureHumanDecisionSupport(client, responded, decision, responderUserId)
         await client.query('COMMIT')
         notifyWorkspaceChange(responded.workspaceId, 'approval', 'update', responded.id)
         return responded
