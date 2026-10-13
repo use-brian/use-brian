@@ -316,7 +316,7 @@ describe('boot task-triage adapter: canonical mode selection and actual task cal
     const task = await f.run(() => tasks.create(input))
     const goal = await completion
     expect(goal).toMatchObject({ host: { type: 'task', id: task.id }, createdByUserId: f.userId })
-    expect(callback).toHaveBeenCalledWith(expect.objectContaining({ id: task.id }), f.userId)
+    expect(callback).toHaveBeenCalledWith(expect.objectContaining({ id: task.id }), f.userId, undefined)
     expect((await f.run(() => tasks.create(input))).id).toBe(task.id)
     expect(callback).toHaveBeenCalledOnce()
     expect(d.judge).toHaveBeenCalledOnce()

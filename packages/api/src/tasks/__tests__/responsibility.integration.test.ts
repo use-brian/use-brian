@@ -131,7 +131,7 @@ describe('[COMP:api/task-responsibility] executor, follow-up, home and guarded c
     expect(person).toMatchObject({ assigneeId: await memberId(f, f.people.financeLead), executorAssistantId: null })
     expect(await goalStatus(draft)).toEqual({ status: 'abandoned', blocker_reason: 'executor_changed' })
     expect((await goalStatus(confirmed)).status).toBe('active')
-    expect(hook).toHaveBeenCalledWith(expect.objectContaining({ id: person!.id }), expect.objectContaining({ executorAssistantId: f.assistants.brian }), f.people.financeLead)
+    expect(hook).toHaveBeenCalledWith(expect.objectContaining({ id: person!.id }), expect.objectContaining({ executorAssistantId: f.assistants.brian }), f.people.financeLead, undefined)
     hook.mockClear()
     // A contact change is not an executor change: no cascade, no hook.
     const later = await seedGoal(f, person!.id, false)

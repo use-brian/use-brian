@@ -681,6 +681,20 @@ export function bindTaskExecutorChangeHook(hook: ExecutorChangeHook | null): voi
   executorChangeHook = hook
 }
 
+type TaskClosedHook = (task: TaskRecord, previousStatus: TaskRecordStatus) => void
+let taskClosedHook: TaskClosedHook | null = null
+
+/**
+ * Late-bound consumer of a committed transition INTO `done` / `archived`, on
+ * every write path (tools, MCP, Brain inbox, rollup). Boot binds the waiting
+ * execution wake here (goals.md -> "Descendants and the shared pool"): a
+ * prerequisite that actually completed revalidates the work waiting on it.
+ * Fire-and-forget; a no-op until bound.
+ */
+export function bindTaskClosedHook(hook: TaskClosedHook | null): void {
+  taskClosedHook = hook
+}
+
 /**
  * Bi-temporal supersession update.
  *
@@ -940,6 +954,7 @@ export async function updateTask(
       await client.query('COMMIT')
       const newTask = toRecord(newRow)
       if (reassigned && newTask.parentId === null) executorChangeHook?.(newTask, before, userId, opts?.assignment)
+      if ((newTask.status === 'done' || newTask.status === 'archived') && old.status !== newTask.status) taskClosedHook?.(newTask, old.status)
 
       // Workflow task-event emit — fire-and-forget after COMMIT. The old
       // row (already read for the supersession write) supplies the

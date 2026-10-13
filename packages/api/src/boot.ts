@@ -202,7 +202,7 @@ import { captureAuthoringAuthoritySystem, resolveGoalAuthoritySystem, resolveWor
 import { deploymentProfile, usesOpenStandaloneRoutes } from './edition.js'
 import { createEmailAdmission, requireOutpostAuthPortal } from './auth/email-admission.js'
 import { validateOutpostAuthConfig } from './auth/outpost-auth-config.js'
-import { bindTaskExecutorChangeHook, getTaskByIdSystem } from './db/tasks.js'
+import { bindTaskClosedHook, bindTaskExecutorChangeHook, getTaskByIdSystem } from './db/tasks.js'
 import { createBrowserSkillsStore } from './db/browser-skills-store.js'
 import { createDbConnectorActionStore } from './db/connector-actions-store.js'
 import { createWorkspaceChatHandoffStore } from './db/workspace-chat-handoff-store.js'
@@ -514,7 +514,7 @@ import {
 } from './db/goals.js'
 import { createAllowanceTree } from './goals/allowance-tree.js'
 import { createExecutionLedger } from './goals/execution-state.js'
-import { briefFromPlan, enterAssignedExecution, readExecutionSources, type EntryDeps } from './goals/execution-qualification.js'
+import { briefFromPlan, enterAssignedExecution, readExecutionSources, revalidateWaitingExecutions, type EntryDeps } from './goals/execution-qualification.js'
 import { findActiveNativeExecutionSystem } from './db/task-execution-store.js'
 import { createTaskExecutionTools, type ControlEffects } from './tasks/execution-control.js'
 import { createExternalProgressTools } from './tasks/external-progress.js'
@@ -4460,6 +4460,12 @@ export async function bootOpenApi(opts: BootOpenApiOptions): Promise<BootResult>
   }
   bindTaskExecutorChangeHook((task, _previous, userId, assignment) => {
     if (task.executorAssistantId) enterOrTriageTask?.(task, userId, assignment)
+  })
+  // Dependency wake: a prerequisite that actually completed revalidates the
+  // unarmed work waiting on it (no polling; the close is the event).
+  bindTaskClosedHook((task) => {
+    void revalidateWaitingExecutions(task.id, { ...executionEntryDeps, loadTask: getTaskByIdSystem })
+      .catch((err) => console.error('[execution] dependency wake failed:', err))
   })
 
   // Execution controls reach the driver: pause holds the goal without

@@ -386,6 +386,23 @@ export async function hasRetiredNativeExecutionSystem(goalId: string): Promise<b
   return r.rows[0]?.ok === true
 }
 
+/**
+ * Unarmed root executions waiting on a prerequisite in the given task's
+ * lineage. Dependencies are recorded with the id read at planning time and a
+ * closing write mints a new head, so the match walks the supersession chain.
+ */
+export async function findExecutionsWaitingOnSystem(taskId: string): Promise<ExecutionState[]> {
+  const r = await getPool().query(
+    `WITH RECURSIVE lineage AS (
+       SELECT id FROM tasks WHERE id = $1
+       UNION SELECT t.id FROM tasks t JOIN lineage l ON t.superseded_by = l.id)
+     SELECT ${STATE_COLUMNS} FROM task_execution_states s
+      WHERE s.lane = 'native' AND s.parent_state_id IS NULL AND s.goal_id IS NULL AND s.phase IN ('waiting', 'planning')
+        AND EXISTS (SELECT 1 FROM jsonb_array_elements(coalesce(s.plan->'dependencies', '[]'::jsonb)) d
+                     WHERE (d->>'taskId') IN (SELECT id::text FROM lineage))`, [taskId])
+  return (r.rows as StateRow[]).map(toState)
+}
+
 export async function getPoolSystem(poolId: string): Promise<ExecutionPool | null> {
   return loadPool(getPool(), poolId, false)
 }

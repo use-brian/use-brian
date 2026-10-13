@@ -38,6 +38,8 @@ import {
   bindExecutionGoalSystem,
   createRootExecution,
   findActiveNativeExecutionSystem,
+  findExecutionsWaitingOnSystem,
+  getPoolSystem,
   setExecutionPhaseSystem,
   type ExecutionState,
 } from '../db/task-execution-store.js'
@@ -153,18 +155,59 @@ export async function enterAssignedExecution(task: QualifyTask, provenance: Exec
   if (!created) return { kind: 'duplicate', state }
   if (readiness.state !== 'ready') return { kind: 'entered', state, goalId: null, readiness }
 
+  return armReadyExecution(state, task, q.plan, provenance, q.executorAssistantId, budget, deps)
+}
+
+/** Arm a ready execution through the canonical goal path, or record honestly
+ *  why it could not be armed. Shared by entry and dependency wake. */
+async function armReadyExecution(state: ExecutionState, task: QualifyTask, plan: ExecutionPlan, provenance: ExecutionProvenance,
+  executorAssistantId: string, budget: GoalDefaultBudget, deps: EntryDeps): Promise<EntryResult> {
   try {
-    const authority = await deps.captureAuthority({ userId: provenance.actorUserId, workspaceId: task.workspaceId, assistantId: q.executorAssistantId })
-    const goal = await deps.armGoal({ task, plan: q.plan, authority, createdByUserId: provenance.actorUserId, budget })
+    const authority = await deps.captureAuthority({ userId: provenance.actorUserId, workspaceId: task.workspaceId, assistantId: executorAssistantId })
+    const goal = await deps.armGoal({ task, plan, authority, createdByUserId: provenance.actorUserId, budget })
     const bound = (await bindExecutionGoalSystem(state.id, goal.id)) ?? state
     await deps.kickoffGoal(goal.id)
-    return { kind: 'entered', state: bound, goalId: goal.id, readiness }
+    return { kind: 'entered', state: bound, goalId: goal.id, readiness: plan.readiness }
   } catch (error) {
     // Authority or arming failed: record it honestly instead of a fresh lease.
-    console.error('[execution] automatic entry could not arm the goal:', error)
+    console.error('[execution] could not arm the goal:', error)
     const blocked = await setExecutionPhaseSystem(state.id, 'blocked', { blocker: { reason: 'authority_unproven', detail: 'reauthorize' } })
-    return { kind: 'entered', state: blocked ?? state, goalId: null, readiness }
+    return { kind: 'entered', state: blocked ?? state, goalId: null, readiness: plan.readiness }
   }
+}
+
+/**
+ * Dependency wake (R06): a prerequisite that actually completed revalidates
+ * the unarmed work waiting on it, under the provenance captured at entry.
+ * Unrelated closes match nothing; a cancelled or unreadable prerequisite
+ * re-qualifies as still waiting; a cycle never completes, so it never wakes.
+ * Nothing here polls: the wake is the close event.
+ */
+export async function revalidateWaitingExecutions(closedTaskId: string, deps: EntryDeps & {
+  loadTask: (taskId: string) => Promise<QualifyTask | null>
+}): Promise<EntryResult[]> {
+  const out: EntryResult[] = []
+  for (const state of await findExecutionsWaitingOnSystem(closedTaskId)) {
+    const provenance = isTrustedProvenance(state.authoringRef) ? state.authoringRef : null
+    const task = state.taskId ? await deps.loadTask(state.taskId) : null
+    if (!provenance || !task || task.executorAssistantId !== state.executor?.id) continue
+    const q = await qualifyTaskExecution(task, provenance.actorUserId, deps)
+    if (q.kind !== 'qualified') continue
+    const readiness = q.plan.readiness
+    if (readiness.state !== 'ready') {
+      const updated = await setExecutionPhaseSystem(state.id, PHASE_FOR[readiness.state], {
+        plan: q.plan, sourceRefs: q.plan.sourceBasis,
+        blocker: readiness.state === 'unavailable' && readiness.reasons[0] ? { reason: readiness.reasons[0].kind, detail: readiness.reasons[0].subject } : null,
+      })
+      out.push({ kind: 'entered', state: updated ?? state, goalId: null, readiness })
+      continue
+    }
+    await setExecutionPhaseSystem(state.id, 'ready', { plan: q.plan, sourceRefs: q.plan.sourceBasis })
+    const pool = await getPoolSystem(state.poolId)
+    const budget = { maxSpend: pool?.maxSpend ?? 5, maxIterations: pool?.maxIterations ?? 30 }
+    out.push(await armReadyExecution(state, task, q.plan, provenance, q.executorAssistantId, budget, deps))
+  }
+  return out
 }
 
 /** The task-specific acceptance the planner chose, carried into the Goal brief

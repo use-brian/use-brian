@@ -100,15 +100,16 @@ describe('[COMP:api/task-external-progress] external progress capture (real PG +
     const { f, task } = await setup()
     const tools = createExternalProgressTools()
     const credentialId = randomUUID()
+    const eventId = `evt-${randomUUID()}`
     const ctx = (f2: BriefFixture): ToolContext => ({ userId: f2.people.member, assistantId: f2.assistants.brian, sessionId: randomUUID(),
       appId: 'Use Brian', channelType: 'programmatic', channelId: credentialId, workspaceId: f2.workspaceId,
       abortSignal: new AbortController().signal, programmaticPrincipal: { kind: 'brain_key', credentialId, userId: f2.people.member } }) as ToolContext
     const bound = await tools.bindExternalTaskExecution.execute({ task_id: task.id, external_execution_id: 'mcp-session', harness: 'claude-code' } as never, ctx(f))
     expect(String(bound.data)).toContain('Brian cannot start, stop or steer it')
-    const sent = await tools.reportTaskProgress.execute({ task_id: task.id, external_execution_id: 'mcp-session', event_id: 'e1', sequence: 1,
+    const sent = await tools.reportTaskProgress.execute({ task_id: task.id, external_execution_id: 'mcp-session', event_id: eventId, sequence: 1,
       milestone: 'tests written', state: 'running', summary: 'Reported by the fictional lead (impersonation attempt)' } as never, ctx(f))
     expect(String(sent.data)).toContain('Recorded')
-    const receipt = (await pool.query(`SELECT actor_kind, actor_id, origin FROM task_execution_commands WHERE external_event_id='e1'`)).rows[0]
+    const receipt = (await pool.query(`SELECT actor_kind, actor_id, origin FROM task_execution_commands WHERE external_event_id=$1`, [eventId])).rows[0]
     expect(receipt).toEqual({ actor_kind: 'credential', actor_id: credentialId, origin: 'mcp' })
   })
 })
