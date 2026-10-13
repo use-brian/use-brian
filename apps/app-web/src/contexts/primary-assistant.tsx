@@ -17,7 +17,7 @@
  * Hoisting the resolution here kills both problems: one request instead of two,
  * and the doc shell renders immediately with `assistantId` undefined, filling
  * it in when the list lands. Every consumer of `assistantId` already treats it
- * as optional (`SuggestedView`, `EmptyPageLanding`, the page header), because
+ * as optional (`EmptyPageLanding`, the Brief work pickup, the page header), because
  * the chrome's copy was always allowed to be null.
  *
  * Mounted in `/w/[workspaceId]/layout.tsx`, above `WorkspaceChrome`, so both

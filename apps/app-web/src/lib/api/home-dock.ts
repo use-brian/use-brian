@@ -85,18 +85,3 @@ export async function fetchHomeDock(workspaceId: string): Promise<ResolvedDock |
     return null;
   }
 }
-
-/** Run the primary assistant once to re-curate, returning the refreshed dock. */
-export async function refreshHomeDock(workspaceId: string): Promise<ResolvedDock | null> {
-  try {
-    const res = await authFetch(
-      `${API_URL}/api/home-dock/refresh?workspaceId=${encodeURIComponent(workspaceId)}`,
-      { method: "POST" },
-    );
-    if (!res.ok) return null;
-    const data = (await res.json()) as { dock?: ResolvedDock };
-    return data.dock ?? null;
-  } catch {
-    return null;
-  }
-}

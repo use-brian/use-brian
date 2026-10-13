@@ -12,7 +12,12 @@
  * [COMP:app-web/brief-journey]
  */
 import { useCallback, useEffect, useRef, useState } from "react";
+import { useRouter } from "next/navigation";
 import { Button } from "@/components/ui/button";
+import { BriefWork } from "@/components/briefs/brief-work";
+import { usePrimaryAssistant } from "@/contexts/primary-assistant";
+import { personalChatHandoffPath, stashChatHandoff } from "@/lib/chat-handoff";
+import type { WorkItem } from "@/lib/api/work";
 import { Checkbox } from "@/components/ui/checkbox";
 import { Skeleton } from "@/components/skeleton";
 import { format, useLocale, useT } from "@/lib/i18n/client";
@@ -57,6 +62,22 @@ export function BriefPane({ workspaceId, ownerKind, ownerId, pageHref }: {
   const [departments, setDepartments] = useState<DepartmentBriefOption[] | null>(null);
   const [selection, setSelection] = useState<string[]>([]);
   const draftTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const router = useRouter();
+  const primary = usePrimaryAssistant();
+
+  // Draft-only pickup (project-briefs.md -> "Work"): the task-bound draft is
+  // carried in the one-shot handoff, never the URL, and the person sends it.
+  // An assistant-executed task opens with its executor; otherwise the primary.
+  const continueInChat = useCallback((item: WorkItem, draft: string) => {
+    const assistantId = item.executor.kind === "assistant" ? item.executor.assistantId : primary.assistantId;
+    if (!assistantId) return;
+    const requestId = stashChatHandoff({ workspaceId, assistantId, text: draft, draftOnly: true, ts: Date.now(),
+      ...(ownerKind === "project" ? { contextProjectId: ownerId } : {}) });
+    if (requestId) router.push(personalChatHandoffPath(workspaceId, assistantId, requestId));
+  }, [primary.assistantId, workspaceId, ownerKind, ownerId, router]);
+  // Live work beside Direction; an empty or missing Direction is not a gate.
+  const work = <BriefWork workspaceId={workspaceId} scope={{ kind: ownerKind, id: ownerId }}
+    onContinueInChat={primary.assistantId ? continueInChat : undefined} />;
 
   const message = useCallback((err: unknown) => {
     const code = err instanceof BriefRequestError ? err.code : "";
@@ -126,12 +147,15 @@ export function BriefPane({ workspaceId, ownerKind, ownerId, pageHref }: {
     return <div aria-busy="true" aria-label={t.loading} className="space-y-3"><Skeleton className="h-24 w-full rounded-xl" /></div>;
   }
   if (brief === null) {
-    return <section className="rounded-xl border border-dashed border-border p-4 text-sm">
-      <p className="text-muted-foreground">{t.createHint}</p>
-      {error ? <p role="alert" className="mt-2 text-destructive">{error}</p> : null}
-      <Button className="mt-3 max-sm:min-h-11" disabled={busy}
-        onClick={() => void run(() => ensureBrief(workspaceId, ownerKind, ownerId, locale))}>{t.create}</Button>
-    </section>;
+    return <div className="space-y-4" data-testid="brief-pane">
+      <section className="rounded-xl border border-dashed border-border p-4 text-sm">
+        <p className="text-muted-foreground">{t.createHint}</p>
+        {error ? <p role="alert" className="mt-2 text-destructive">{error}</p> : null}
+        <Button className="mt-3 max-sm:min-h-11" disabled={busy}
+          onClick={() => void run(() => ensureBrief(workspaceId, ownerKind, ownerId, locale))}>{t.create}</Button>
+      </section>
+      {work}
+    </div>;
   }
 
   const owner = brief.role === "owner";
@@ -173,6 +197,8 @@ export function BriefPane({ workspaceId, ownerKind, ownerId, pageHref }: {
         </div>)}
       </dl>
     </section>
+
+    {work}
 
     {writer && draft ? <section aria-labelledby="brief-draft" className="rounded-xl border border-border p-4">
       <h3 id="brief-draft" className="font-medium">{t.draftTitle}</h3>

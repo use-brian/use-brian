@@ -124,6 +124,7 @@ import {
 import { useChatController } from "@/lib/chat/use-chat-controller";
 import { QueuedInputs } from "@/components/ui/queued-inputs";
 import { OperatorTopbar } from "@/components/operator/operator-topbar";
+import { WorkEntry } from "./work-entry";
 import { AssistantAvatar } from "@/components/assistant-avatar";
 import { ComposerControls } from "@/components/doc/composer-controls";
 import { useChatModelTier } from "@/lib/chat-model";
@@ -4649,8 +4650,11 @@ export function ChatSurface({ workspaceId }: { workspaceId: string }) {
         // reads as changing the audience, not changing apps. Workspace adds
         // the shared-audience explainer, and its first send creates the
         // shared thread before streaming into it (see `send`).
-        <section className="flex min-h-0 min-w-0 flex-1 flex-col items-center justify-center overflow-y-auto px-4 py-8">
-          <div className="flex w-full max-w-2xl flex-col items-center gap-5">
+        <section className="flex min-h-0 min-w-0 flex-1 flex-col items-center overflow-y-auto px-4 py-8">
+          {/* `my-auto`, not `justify-center`: the work entry can make the hero
+              taller than the pane, and a centred overflow cannot scroll to
+              its top. */}
+          <div className="my-auto flex w-full max-w-2xl flex-col items-center gap-5">
             {activeAssistant && (
               <div className="flex flex-col items-center gap-2.5 text-center">
                 <AssistantAvatar
@@ -4675,6 +4679,18 @@ export function ChatSurface({ workspaceId }: { workspaceId: string }) {
                 {error}
               </p>
             )}
+            {/* Chat-first work entry (chat-app.md -> "Work entry"): the
+                viewer's work, or the explicitly picked Project / Department's.
+                Pickup only fills the composer; the person sends. */}
+            <div className="w-full">
+              <WorkEntry
+                workspaceId={workspaceId}
+                scope={pickedContextProjectId ? { kind: "project", id: pickedContextProjectId }
+                  : pickedContextGroupId ? { kind: "department", id: pickedContextGroupId }
+                  : { kind: "personal" }}
+                onDraft={(draft) => { setInput(draft); requestAnimationFrame(focusComposer); }}
+              />
+            </div>
           </div>
         </section>
       ) : (

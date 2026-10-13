@@ -27,7 +27,7 @@ describe("[COMP:app-web/home-dock] compact sidebar suggestion entry", () => {
     if (kind === "pickUp") dock.pickUp = [{ id: "draft-1", name: "Draft", updatedAt: "2026-01-01" }];
     if (kind === "comingUp") dock.comingUp = [{ id: "run-1", name: "Run", nextRunAt: "2026-01-01" }];
     if (kind === "growth") dock.brain.growth7d = 1;
-    expect(render()).toContain('href="/w/workspace-1/p?suggested=1"');
+    expect(render()).toContain('href="/w/workspace-1/chat"');
     expect(render()).toContain(en.docPage.suggested.sidebarEntry);
   });
 });

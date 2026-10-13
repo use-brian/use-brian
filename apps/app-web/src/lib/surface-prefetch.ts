@@ -598,6 +598,18 @@ export function homeDockCacheKey(workspaceId: string): string {
 }
 
 /**
+ * The viewer-bound work projection (Chat work entry + Brief work section).
+ * Workspace first, then viewer, then scope, so `work:<wid>` stale-marks every
+ * scope after a task or approval change. Spec: project-briefs.md -> "Work".
+ */
+export function workCacheKey(
+  workspaceId: string,
+  scope: { kind: "personal" } | { kind: "department" | "project"; id: string },
+): string {
+  return `work:${workspaceId}${viewerSuffix()}:${scope.kind === "personal" ? "personal" : `${scope.kind}:${scope.id}`}`;
+}
+
+/**
  * In-memory key for the sidebar page tree (`saved` + `drafts` + teamspaces,
  * fetched in parallel by `doc-sidebar-data.tsx`).
  *

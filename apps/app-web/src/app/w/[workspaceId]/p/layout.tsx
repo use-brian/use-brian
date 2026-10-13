@@ -32,7 +32,7 @@
  * `usePrimaryAssistant()` ([COMP:app-web/primary-assistant-context]), which resolves
  * once in the workspace layout — so the shell mounts on the first frame and
  * the assistant id fills in when it lands. `assistantId` is optional all the
- * way down (`SuggestedView`, `EmptyPageLanding`, the page header), which is
+ * way down (`EmptyPageLanding`, the page header), which is
  * what makes rendering ahead of it safe.
  *
  * The page leaves under this layout render nothing; their only job is to

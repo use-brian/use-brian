@@ -240,6 +240,12 @@ export type AdjustMemoryChanges = {
   due_at?: string | null;
   /** task adjust — a workspace_members row id, or null to unassign. */
   assignee_id?: string | null;
+  /** task adjust — the executing assistant id, or null to clear (tasks.md -> "Responsibility"). */
+  executor_assistant_id?: string | null;
+  /** task adjust — the explicit human follow-up member id, or null to clear. */
+  follow_up_member_id?: string | null;
+  /** task adjust — the explicit Department / Project home, or null to clear. */
+  home?: { kind: "department" | "project"; id: string } | null;
   /** task adjust — the conventional `attributes.priority` key; null clears. */
   priority?: "low" | "medium" | "high" | "urgent" | null;
   /** task adjust — the conventional `attributes.description` page body

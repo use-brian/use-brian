@@ -21,6 +21,14 @@ vi.mock('@/lib/api/briefs', async () => {
   return { ...api, BriefRequestError };
 });
 vi.mock('@/components/ui/confirm-dialog', () => ({ confirmDialog: api.confirm }));
+// The pane also mounts the live work section (project-briefs.md -> "Work");
+// its own behaviour is covered by brief-work.test.tsx.
+vi.mock('next/navigation', () => ({ useRouter: () => ({ push: vi.fn(), replace: vi.fn() }) }));
+vi.mock('@/lib/api/work', async (importOriginal) => ({
+  ...(await importOriginal<typeof import('@/lib/api/work')>()),
+  fetchWork: vi.fn(async () => ({ scope: { kind: 'project', id: 'atlas' }, viewer: { memberId: 'm1' },
+    sections: { needsYou: [], myWork: [], needsAssignment: [] }, counts: { needsYou: 0, myWork: 0, needsAssignment: 0 }, generatedAt: '2026-10-13T00:00:00Z' })),
+}));
 vi.mock('@/components/ui/checkbox', () => ({
   Checkbox: ({ checked, onCheckedChange }: { checked: boolean; onCheckedChange: (v: boolean) => void }) =>
     <input type="checkbox" checked={checked} onChange={event => onCheckedChange(event.target.checked)} />,
@@ -66,6 +74,8 @@ describe('[COMP:app-web/brief-journey] Brief pane and entry on existing surfaces
     api.ensureBrief.mockResolvedValue(view());
     await render(<BriefPane workspaceId="w1" ownerKind="project" ownerId="atlas" />); await flush();
     expect(host.textContent).toContain(t.createHint);
+    // Work pickup is not gated on creating the Brief or establishing Direction.
+    expect(host.querySelector('[data-testid="brief-work"]')).not.toBeNull()
     await click(t.create);
     expect(api.ensureBrief).toHaveBeenCalledWith('w1', 'project', 'atlas', 'ja');
     expect(host.textContent).toContain(t.notEstablished);
