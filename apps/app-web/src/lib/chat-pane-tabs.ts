@@ -20,7 +20,7 @@
 import type { DocumentAttachment } from "@use-brian/chat-ui";
 
 /** What a tab shows: one variant per kind the pane holds (D5): `work`,
- *  `browser`, `page`, `file`, `document`, `url`. */
+ *  `browser`, `page`, `file`, `document`, `url`, `research`. */
 export type PaneRef =
   | { kind: "work" }
   /** A live browser tab: the desktop native view, or the web cloud frame. */
@@ -43,7 +43,9 @@ export type PaneRef =
   /** A raw document a turn presented (`document_payload`). */
   | { kind: "document"; document: DocumentAttachment }
   /** A web link. */
-  | { kind: "url"; url: string; title?: string | null };
+  | { kind: "url"; url: string; title?: string | null }
+  /** A saved research result's detail (features/research.md -> "UI"). */
+  | { kind: "research"; activityId: string };
 
 export type PaneTab = {
   /** `work` for the fixed tab; otherwise deterministic `p0`, `p1`, … */
@@ -110,6 +112,8 @@ export function paneRefId(ref: PaneRef): string {
       return `document:${ref.document.id}`;
     case "url":
       return `url:${normalizePaneUrl(ref.url)}`;
+    case "research":
+      return `research:${ref.activityId}`;
   }
 }
 

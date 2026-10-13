@@ -115,6 +115,8 @@ type Options = {
   browserSkills?: import('@use-brian/core').BrowserSkillStore
   /** Task execution read/pause and external progress reporting. */
   taskExecutionTools?: Record<'getTaskExecution' | 'controlTaskExecution' | 'bindExternalTaskExecution' | 'reportTaskProgress', import('@use-brian/core').Tool>
+  /** Saved research command tools (features/research.md). */
+  researchTools?: Record<string, import('@use-brian/core').Tool>
   /**
    * Resolve a custom Home app's commerce-store tools, bound to the workspace
    * primary assistant — the same binding the agent capability toolset uses.
@@ -275,6 +277,7 @@ export function brainMcpRoutes(opts: Options): Router {
       embedder: opts.embedder,
       browserSkills: opts.browserSkills,
       taskExecutionTools: opts.taskExecutionTools,
+      researchTools: opts.researchTools,
       storeTools,
       ...(agentTask
         ? {

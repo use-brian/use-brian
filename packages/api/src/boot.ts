@@ -520,6 +520,8 @@ import { findActiveNativeExecutionSystem } from './db/task-execution-store.js'
 import { createTaskExecutionTools, type ControlEffects } from './tasks/execution-control.js'
 import { createExternalProgressTools } from './tasks/external-progress.js'
 import { taskExecutionRoutes } from './routes/task-execution.js'
+import { researchRoutes } from './routes/research.js'
+import { createResearchTools } from './research/tools.js'
 import { captureTaskGoalSource } from './workspace-access/goal-source-admission.js'
 import { getWorkspaceAccessMode } from './workspace-access/mode-policy.js'
 import { goalsRoutes } from './routes/goals.js'
@@ -4491,6 +4493,9 @@ export async function bootOpenApi(opts: BootOpenApiOptions): Promise<BootResult>
   allTools.set('controlTaskExecution', taskExecutionTools.controlTaskExecution)
   allTools.set('bindExternalTaskExecution', externalProgressTools.bindExternalTaskExecution)
   allTools.set('reportTaskProgress', externalProgressTools.reportTaskProgress)
+  // Saved research commands (features/research.md): one service for Brian, REST and MCP.
+  const researchTools = createResearchTools()
+  for (const tool of Object.values(researchTools)) allTools.set(tool.name, tool)
 
   // Task-autopilot spin-up tools (confirm a draft goal; work a task to done) +
   // the agentic completion signal (markGoalComplete). `gatherEvidence` hands the
@@ -5872,6 +5877,7 @@ export async function bootOpenApi(opts: BootOpenApiOptions): Promise<BootResult>
     memoryTools: brainMemoryTools,
     taskTools,
     taskExecutionTools: { ...taskExecutionTools, ...externalProgressTools },
+    researchTools,
     crmTools: { ...crmTools, ...crmOperationsTools, ...crmBusinessReferenceTools, ...crmCommercialContextTools, ...crmCommercialDocumentTools, ...crmGovernedRecordTools },
     credentialTools: crmCredentialTools,
     associationTools,
@@ -6755,6 +6761,8 @@ export async function bootOpenApi(opts: BootOpenApiOptions): Promise<BootResult>
   app.use('/api', requireAuth(env.JWT_SECRET), briefRoutes())
   app.use('/api', workRoutes({ taskStore, auth: requireAuth(env.JWT_SECRET) }))
   app.use('/api', taskExecutionRoutes({ auth: requireAuth(env.JWT_SECRET), effects: executionControlEffects }))
+  // Saved research: activities, follow-up corrections, lessons, improvements (features/research.md).
+  app.use('/api', researchRoutes({ auth: requireAuth(env.JWT_SECRET) }))
 
   app.use('/api', requireAuth(env.JWT_SECRET), workflowApprovalsRoutes({
     approvalsStore: pendingApprovalsStore,
@@ -8878,8 +8886,8 @@ export async function bootOpenApi(opts: BootOpenApiOptions): Promise<BootResult>
   if (runWorkers) decisionReflectionWorker.start()
 
   // ── Research reflection (features/research.md -> "Scoped lessons"): the
-  //    same daily, bounded background lane as decision reflection. Usage is
-  //    attributed to the workspace owner as research overhead.
+  //    same daily, bounded background lane as decision reflection, metered
+  //    as the same playbook-reflection overhead (attributed to the owner).
   const researchReflectionWorker = createResearchReflectionWorker({
     modelCall: async ({ workspaceId, system, prompt }) => {
       const customRuntime = await resolveBackgroundRuntime(workspaceId)
@@ -8906,7 +8914,7 @@ export async function bootOpenApi(opts: BootOpenApiOptions): Promise<BootResult>
             cacheReadTokens: response.usage.cacheReadTokens,
             cacheWriteTokens: response.usage.cacheWriteTokens,
             actualCostUsd: customRuntime?.providerKeySource === 'user' ? 0 : calculateCost(servedModel, response.usage),
-            source: 'overhead:research-reflection',
+            source: 'overhead:playbook-reflection',
             providerKeySource: customRuntime?.providerKeySource ?? 'platform',
           }).catch((err) => console.error('[research-reflection] usage tracking failed:', err))
         }

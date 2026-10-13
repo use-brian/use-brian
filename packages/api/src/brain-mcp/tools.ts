@@ -413,6 +413,12 @@ type BuildOpts = {
     bindExternalTaskExecution: Tool
     reportTaskProgress: Tool
   }
+  /**
+   * Saved research (features/research.md -> "Commands"): the same command
+   * service as REST and Brian. A key acts as its credential, never as a
+   * human, so it cannot approve a company method.
+   */
+  researchTools?: Record<string, Tool>
 }
 
 /**
@@ -436,6 +442,9 @@ const READ_TOOL_NAMES = new Set<string>([
   'getTask',
   'listTasks',
   'getTaskExecution',
+  'listResearchActivities',
+  'getResearchActivity',
+  'getResearchImprovement',
   'getContact',
   'listContacts',
   'getCompany',
@@ -1629,6 +1638,10 @@ export function buildBrainTools(opts: BuildOpts): BrainTool[] {
     bridgeCoreTool(opts.taskTools.bulkUpdateTasks, resolveCtx, workspaceId),
     bridgeCoreTool(opts.taskTools.archiveTasks, resolveCtx, workspaceId),
   ]
+  const researchBridges = opts.researchTools
+    ? Object.values(opts.researchTools).map(tool => bridgeCoreTool(tool, resolveCtx, workspaceId))
+    : []
+  const RESEARCH_READS = new Set(['listResearchActivities', 'getResearchActivity', 'getResearchImprovement'])
   const executionBridges = opts.taskExecutionTools
     ? Object.values(opts.taskExecutionTools).map(tool => bridgeCoreTool(tool, resolveCtx, workspaceId))
     : []
@@ -1929,6 +1942,7 @@ export function buildBrainTools(opts: BuildOpts): BrainTool[] {
     getMemory,
     ...taskBridges.filter((t) => t.name === 'getTask' || t.name === 'listTasks'),
     ...executionBridges.filter((t) => t.name === 'getTaskExecution'),
+    ...researchBridges.filter((t) => RESEARCH_READS.has(t.name)),
     ...crmBridges.filter((t) =>
       t.name === 'getContact' || t.name === 'listContacts' ||
       t.name === 'getCompany' || t.name === 'listCompanies' ||
@@ -1966,6 +1980,7 @@ export function buildBrainTools(opts: BuildOpts): BrainTool[] {
       t.name === 'bulkUpdateTasks' || t.name === 'archiveTasks',
     ),
     ...executionBridges.filter((t) => t.name !== 'getTaskExecution'),
+    ...researchBridges.filter((t) => !RESEARCH_READS.has(t.name)),
     ...crmBridges.filter((t) =>
       t.name === 'saveContact' || t.name === 'updateContact' ||
       t.name === 'saveCompany' || t.name === 'updateCompany' ||

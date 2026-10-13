@@ -97,6 +97,7 @@ export type ResearchFeedback = {
   uncertain: boolean
   origin: ResearchFeedbackOrigin
   decisionEventId: string | null
+  sensitivity: ResearchSensitivity
   createdAt: Date
 }
 
@@ -115,7 +116,7 @@ const FEEDBACK_COLUMNS = `f.id, f.workspace_id AS "workspaceId", f.activity_id A
   f.message_version::int AS "messageVersion", f.actor_user_id AS "actorUserId", f.output_key AS "outputKey",
   f.association, f.project_id AS "projectId", f.current_revision AS "currentRevision",
   (SELECT max(r2.revision) FROM research_feedback_revisions r2 WHERE r2.feedback_id = f.id)::int AS version,
-  r.kind, r.uncertain, r.origin, f.decision_event_id AS "decisionEventId", f.created_at AS "createdAt"`
+  r.kind, r.uncertain, r.origin, f.decision_event_id AS "decisionEventId", f.sensitivity, f.created_at AS "createdAt"`
 
 function parseSources(value: unknown): ResearchSourceRef[] {
   if (!Array.isArray(value)) return []
@@ -583,4 +584,137 @@ export async function findSessionMessageByChannelIdSystem(sessionId: string, cha
     `SELECT id FROM session_messages WHERE session_id = $1 AND channel_message_id = $2 ORDER BY sequence_num DESC LIMIT 1`,
     [sessionId, channelMessageId])
   return r.rows[0]?.id ?? null
+}
+
+// ── Improvement candidates and comparisons ────────────────────────────────
+
+export type ResearchImprovement = {
+  id: string
+  workspaceId: string
+  createdBy: string
+  title: string
+  pattern: string
+  desiredBehavior: string
+  status: 'proposed' | 'evaluating' | 'checked' | 'deferred'
+  taskId: string | null
+  feedbackIds: string[]
+  activityIds: string[]
+  sensitivity: ResearchSensitivity
+  revision: number
+  createdAt: Date
+}
+
+export type ResearchComparisonRecord = {
+  id: string
+  improvementId: string
+  recordedBy: string
+  verification: 'local_verified' | 'externally_reported'
+  caseSetVersion: string
+  datasetVersion: string
+  judgeIdentity: string
+  baselineIdentity: Record<string, unknown>
+  candidateIdentity: Record<string, unknown>
+  result: Record<string, unknown>
+  createdAt: Date
+}
+
+const IMPROVEMENT_COLUMNS = `i.id, i.workspace_id AS "workspaceId", i.created_by AS "createdBy", i.title, i.pattern,
+  i.desired_behavior AS "desiredBehavior", i.status, i.task_id AS "taskId", i.feedback_ids AS "feedbackIds",
+  i.activity_ids AS "activityIds", i.sensitivity, i.revision::int AS revision, i.created_at AS "createdAt"`
+
+const COMPARISON_COLUMNS = `c.id, c.improvement_id AS "improvementId", c.recorded_by AS "recordedBy", c.verification,
+  c.case_set_version AS "caseSetVersion", c.dataset_version AS "datasetVersion", c.judge_identity AS "judgeIdentity",
+  c.baseline_identity AS "baselineIdentity", c.candidate_identity AS "candidateIdentity", c.result, c.created_at AS "createdAt"`
+
+export async function insertResearchImprovementSystem(input: {
+  workspaceId: string
+  createdBy: string
+  title: string
+  pattern: string
+  desiredBehavior: string
+  taskId: string | null
+  feedbackIds: string[]
+  activityIds: string[]
+  sensitivity: ResearchSensitivity
+  compartments: string[]
+  idempotencyKey: string
+}): Promise<{ improvement: ResearchImprovement; created: boolean }> {
+  const pool = getPool()
+  const inserted = await pool.query<ResearchImprovement>(
+    `INSERT INTO research_improvements AS i (workspace_id, created_by, title, pattern, desired_behavior, task_id, feedback_ids,
+       activity_ids, sensitivity, compartments, idempotency_key)
+     VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11)
+     ON CONFLICT (workspace_id, idempotency_key) DO NOTHING RETURNING ${IMPROVEMENT_COLUMNS}`,
+    [input.workspaceId, input.createdBy, input.title, input.pattern, input.desiredBehavior, input.taskId, input.feedbackIds,
+      input.activityIds, input.sensitivity, input.compartments, input.idempotencyKey])
+  if (inserted.rows[0]) return { improvement: inserted.rows[0], created: true }
+  const existing = await pool.query<ResearchImprovement>(
+    `SELECT ${IMPROVEMENT_COLUMNS} FROM research_improvements i WHERE i.workspace_id = $1 AND i.idempotency_key = $2`,
+    [input.workspaceId, input.idempotencyKey])
+  return { improvement: existing.rows[0]!, created: false }
+}
+
+export async function listResearchImprovementsForViewer(userId: string, workspaceId: string): Promise<ResearchImprovement[]> {
+  return asViewer(userId, async (client) => (await client.query<ResearchImprovement>(
+    `SELECT ${IMPROVEMENT_COLUMNS} FROM research_improvements i WHERE i.workspace_id = $1 ORDER BY i.created_at DESC LIMIT 100`,
+    [workspaceId])).rows)
+}
+
+export async function getResearchImprovementForViewer(userId: string, workspaceId: string, id: string): Promise<{
+  improvement: ResearchImprovement
+  comparisons: ResearchComparisonRecord[]
+} | null> {
+  return asViewer(userId, async (client) => {
+    const i = (await client.query<ResearchImprovement>(
+      `SELECT ${IMPROVEMENT_COLUMNS} FROM research_improvements i WHERE i.id = $1 AND i.workspace_id = $2`, [id, workspaceId])).rows[0]
+    if (!i) return null
+    const comparisons = (await client.query<ResearchComparisonRecord>(
+      `SELECT ${COMPARISON_COLUMNS} FROM research_comparisons c WHERE c.improvement_id = $1 ORDER BY c.created_at`, [id])).rows
+    return { improvement: i, comparisons }
+  })
+}
+
+/** Immutable comparison plus the improvement's evidence-readiness status, in one transaction. */
+export async function insertResearchComparisonSystem(input: {
+  workspaceId: string
+  improvementId: string
+  recordedBy: string
+  verification: ResearchComparisonRecord['verification']
+  caseSetVersion: string
+  datasetVersion: string
+  judgeIdentity: string
+  baselineIdentity: Record<string, unknown>
+  candidateIdentity: Record<string, unknown>
+  result: Record<string, unknown>
+  traceManifest: Record<string, unknown>
+  idempotencyKey: string
+}): Promise<{ comparison: ResearchComparisonRecord; created: boolean }> {
+  return withResearchTransaction(async (client) => {
+    const inserted = await client.query<ResearchComparisonRecord>(
+      `INSERT INTO research_comparisons AS c (workspace_id, improvement_id, recorded_by, verification, case_set_version, dataset_version,
+         judge_identity, baseline_identity, candidate_identity, result, trace_manifest, idempotency_key)
+       VALUES ($1,$2,$3,$4,$5,$6,$7,$8::jsonb,$9::jsonb,$10::jsonb,$11::jsonb,$12)
+       ON CONFLICT (improvement_id, idempotency_key) DO NOTHING RETURNING ${COMPARISON_COLUMNS}`,
+      [input.workspaceId, input.improvementId, input.recordedBy, input.verification, input.caseSetVersion, input.datasetVersion,
+        input.judgeIdentity, JSON.stringify(input.baselineIdentity), JSON.stringify(input.candidateIdentity), JSON.stringify(input.result),
+        JSON.stringify(input.traceManifest), input.idempotencyKey])
+    if (!inserted.rows[0]) {
+      const existing = await client.query<ResearchComparisonRecord>(
+        `SELECT ${COMPARISON_COLUMNS} FROM research_comparisons c WHERE c.improvement_id = $1 AND c.idempotency_key = $2`,
+        [input.improvementId, input.idempotencyKey])
+      return { comparison: existing.rows[0]!, created: false }
+    }
+    // Readiness only: a locally verified comparison makes the candidate
+    // `checked`; a reported one leaves it `evaluating`. Never a release.
+    await client.query(
+      `UPDATE research_improvements SET status = CASE WHEN $2 = 'local_verified' THEN 'checked' ELSE
+         CASE WHEN status = 'checked' THEN status ELSE 'evaluating' END END, revision = revision + 1, updated_at = now() WHERE id = $1`,
+      [input.improvementId, input.verification])
+    return { comparison: inserted.rows[0], created: true }
+  })
+}
+
+/** Is this task readable to the user right now (native work linkage)? */
+export async function taskReadableForViewer(userId: string, taskId: string): Promise<boolean> {
+  return asViewer(userId, async (client) => (await client.query('SELECT 1 FROM tasks WHERE id = $1', [taskId])).rows.length > 0)
 }

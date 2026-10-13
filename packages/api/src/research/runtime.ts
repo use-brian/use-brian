@@ -23,6 +23,7 @@ import {
 } from '../db/research-store.js'
 import { getPool } from '../db/client.js'
 import { createDbSavedViewStore } from '../db/saved-views-store.js'
+import { notifyWorkspaceChange } from '../brain-stream/notify.js'
 import { publishPageLifecycle } from '../page-event-fanout.js'
 import type { ResearchDeliveryDeps } from './delivery.js'
 import { captureResearchFollowup, replayResearchFollowups, type FollowupCaptureResult, type ResearchFeedbackDeps } from './feedback.js'
@@ -86,7 +87,11 @@ let cachedStore: SavedViewStore | null = null
 export function createResearchDeliveryDeps(savedViewStore?: SavedViewStore): ResearchDeliveryDeps {
   const store = () => savedViewStore ?? (cachedStore ??= createDbSavedViewStore({ onPageLifecycle: publishPageLifecycle }))
   return {
-    settle: settleResearchActivitySystem,
+    async settle(input) {
+      const settled = await settleResearchActivitySystem(input)
+      notifyWorkspaceChange(settled.workspaceId, 'research', 'update', settled.id)
+      return settled
+    },
     inspect: artifactReadableForViewer,
     async writeDefaultPage(input) {
       // The canonical writer places a new page at `internal`; it has no
@@ -127,7 +132,11 @@ export function createResearchFeedbackDeps(): ResearchFeedbackDeps & {
       const detail = await getResearchActivityForViewer(actor, workspaceId, activityId)
       return detail ? { activity: detail.activity, artifacts: detail.artifacts } : null
     },
-    record: recordResearchFeedbackSystem,
+    async record(input) {
+      const result = await recordResearchFeedbackSystem(input)
+      if (result.inserted) notifyWorkspaceChange(input.workspaceId, 'research', 'update', input.activityId)
+      return result
+    },
     listMessagesAfter: listResearchMessagesAfterSystem,
   }
 }

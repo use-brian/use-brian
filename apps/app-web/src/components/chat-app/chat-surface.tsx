@@ -321,6 +321,7 @@ import {
   ChatDocumentCard,
 } from "@/components/chat-app/chat-document-viewer";
 import { ChatPageLinkCard } from "@/components/chat-app/chat-page-link-card";
+import { announceResearchChanged, ChatResearchCard, useSessionResearch } from "@/components/chat-app/research-detail";
 import {
   PAGE_WRITING_TOOLS,
   addPageLinks,
@@ -574,6 +575,8 @@ export function ChatSurface({ workspaceId }: { workspaceId: string }) {
    * survive leaving `/chat` (T6). Phones seed it closed (T11).
    */
   const pane = useChatPane(workspaceId, activeSessionId, () => !isPhoneViewport());
+  // Saved research of this chat, matched to the replies that delivered it.
+  const sessionResearch = useSessionResearch(workspaceId, activeSessionId);
   // One hero context picker for both views (chat-parity T5). A fresh personal
   // pane's Team/Project choice stays this surface's own state (handoffs and
   // restored drafts seed it), held by the shared creation context.
@@ -816,6 +819,8 @@ export function ChatSurface({ workspaceId }: { workspaceId: string }) {
   // Pages the turn created or edited (live `page_created` + page-writing
   // tool results) — linked under the reply. See lib/chat-page-links.ts.
   const turnPageLinksRef = useRef<string[]>([]);
+  // The research activity this turn settled (live `research_saved`).
+  const turnResearchRef = useRef<SurfaceMessage["research"] | null>(null);
   const turnCitationsRef = useRef<CitationSource[]>([]);
   const turnFileAttachmentsRef = useRef<ChatFileAttachment[]>([]);
   const turnWorkerDescriptionsRef = useRef<Map<string, string>>(new Map());
@@ -842,6 +847,7 @@ export function ChatSurface({ workspaceId }: { workspaceId: string }) {
     turnNotesRef.current = [];
     turnDocumentsRef.current = [];
     turnPageLinksRef.current = [];
+    turnResearchRef.current = null;
     turnCitationsRef.current = [];
     turnFileAttachmentsRef.current = [];
     turnWorkerDescriptionsRef.current = new Map();
@@ -907,6 +913,7 @@ export function ChatSurface({ workspaceId }: { workspaceId: string }) {
         ...(activityReasoning ? { activityReasoning } : {}),
         ...(finalDocuments.length > 0 ? { documents: finalDocuments } : {}),
         ...(finalPageLinks.length > 0 ? { pageLinks: finalPageLinks } : {}),
+        ...(turnResearchRef.current ? { research: turnResearchRef.current } : {}),
         ...(activityDurationMs != null ? { activityDurationMs } : {}),
         ...(finalCitations.length > 0 ? { citations: finalCitations } : {}),
         ...(finalFileAttachments.length > 0
@@ -3019,6 +3026,17 @@ export function ChatSurface({ workspaceId }: { workspaceId: string }) {
             setToolTimeline(turnToolsRef.current);
             break;
           }
+          case "research_saved": {
+            // The research turn settled into a saved/partial/failed activity
+            // (features/research.md -> "UI"): card under the reply.
+            const activityId = typeof payload.activityId === "string" ? payload.activityId : "";
+            const status = payload.status;
+            if (activityId && (status === "saved" || status === "partial" || status === "failed")) {
+              turnResearchRef.current = { activityId, status };
+              announceResearchChanged();
+            }
+            break;
+          }
           case "page_created": {
             // The assistant created a new Page. Link it under the reply, open
             // it in the side pane, and tell the hoisted sidebar provider to
@@ -4980,6 +4998,16 @@ export function ChatSurface({ workspaceId }: { workspaceId: string }) {
                         onOpen={(id) => openInChatPane({ kind: "page", pageId: id })}
                       />
                     ))}
+                    {(() => {
+                      const research = m.research ?? (sessionResearch.get(m.id)
+                        ? { activityId: sessionResearch.get(m.id)!.id, status: sessionResearch.get(m.id)!.status } : null);
+                      return research ? (
+                        <ChatResearchCard
+                          status={research.status}
+                          onOpen={() => openInChatPane({ kind: "research", activityId: research.activityId })}
+                        />
+                      ) : null;
+                    })()}
                     {m.text
                       ? messageActions(
                           m.id,
