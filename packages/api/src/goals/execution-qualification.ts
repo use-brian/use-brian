@@ -65,7 +65,7 @@ export type QualificationDeps = {
   manifest: (assistantId: string, workspaceId: string, actorUserId: string) => Promise<ExecutorManifest | null>
   readSources: (actorUserId: string, task: QualifyTask) => Promise<GroundedSources>
   /** Plan proposer (a model in production, a fake in tests). null = no plan. */
-  planner: (input: { task: QualifyTask; context: string; executorAssistantId: string; manifestTools: string[] }) => Promise<ExecutionPlanDraft | null>
+  planner: (input: { task: QualifyTask; context: string; executorAssistantId: string; manifestTools: string[]; actorUserId: string }) => Promise<ExecutionPlanDraft | null>
   /** Optional §12 clarity gate over the planned outcome. */
   assessClarity?: GoalClarityAssessor
 }
@@ -88,7 +88,7 @@ export async function qualifyTaskExecution(task: QualifyTask, actorUserId: strin
   const manifest = usable ? await deps.manifest(executor, task.workspaceId, actorUserId) : null
   const grounded = await deps.readSources(actorUserId, task)
   const draft = (manifest
-    ? await deps.planner({ task, context: grounded.context, executorAssistantId: executor, manifestTools: [...manifest.tools].sort() })
+    ? await deps.planner({ task, context: grounded.context, executorAssistantId: executor, manifestTools: [...manifest.tools].sort(), actorUserId })
     : null) ?? EMPTY_DRAFT(task)
   if (manifest && deps.assessClarity && draft.outcome) {
     const verdict = await deps.assessClarity({ outcome: draft.outcome, verification: draft.completionEvidence.join('; '),

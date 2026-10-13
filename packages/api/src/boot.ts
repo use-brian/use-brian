@@ -4422,8 +4422,8 @@ export async function bootOpenApi(opts: BootOpenApiOptions): Promise<BootResult>
       return { tools, accounts }
     },
     readSources: readExecutionSources,
-    planner: ({ task, context, executorAssistantId, manifestTools }) =>
-      executionPlanner({ title: task.title, context, manifestTools, userId: '', workspaceId: task.workspaceId, assistantId: executorAssistantId }),
+    planner: ({ task, context, executorAssistantId, manifestTools, actorUserId }) =>
+      executionPlanner({ title: task.title, context, manifestTools, userId: actorUserId, workspaceId: task.workspaceId, assistantId: executorAssistantId }),
     assessClarity: goalClarityAssessor,
     captureAuthority: ({ userId, workspaceId, assistantId }) => captureAuthoringAuthoritySystem({ userId, workspaceId, assistantId }),
     defaultBudget: async (workspaceId) => (await goalDefaultBudgetStore.get(workspaceId)).budget,

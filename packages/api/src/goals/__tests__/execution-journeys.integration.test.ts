@@ -59,7 +59,11 @@ async function world(opts: { plan: ExecutionPlanDraft; tools?: string[]; account
   const driver = createGoalDriver({
     goalStore: createDbGoalStore(), tryClaim: tryClaimGoalForTick, transitionRunningStatus: transitionRunningGoalStatusSystem,
     sessionCostUsd: (s) => usage.store.getSessionCostUsd(s), meteringAvailable: () => true,
-    getAwaitingEvent: getGoalAwaitingEventSystem, setAwaitingEvent: setGoalAwaitingEventSystem, clearAwaitingEvent: clearGoalAwaitingEventSystem,
+    getAwaitingEvent: async (goalId) => {
+      const m = await getGoalAwaitingEventSystem(goalId)
+      return m ? { subscriptions: m.subscriptions, state: m.state as GoalLoopState | undefined } : null
+    },
+    setAwaitingEvent: (goalId, marker) => setGoalAwaitingEventSystem(goalId, marker), clearAwaitingEvent: clearGoalAwaitingEventSystem,
     executionLedger: ledger, now: () => new Date(),
     deliver: async (goal, terminal, reason) => { delivered.push({ goalId: goal.id, terminal, reason }) },
     scheduleGoalTick: async (goal, _at, state) => { queue.push({ goalId: goal.id, state }) },
