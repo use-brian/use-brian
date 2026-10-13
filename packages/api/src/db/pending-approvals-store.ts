@@ -794,6 +794,12 @@ export async function readBrowserSendApprovalStatus(
   if (binding.kind !== 'browser_skill_send') return 'unavailable'
   const current = await store.getById(binding.approverUserId, id)
   if (!current || current.kind !== 'browser_skill_send' || current.approverUserId !== binding.approverUserId) return 'unavailable'
+  // A delegated approval is approved only while its receipt still validates
+  // (docs/architecture/features/approval-review.md -> "Consumption").
+  if (current.status === 'approved' && current.resolutionOrigin === 'delegated_assistant') {
+    const { consumeDelegatedReceipt } = await import('../approval-review/consumption.js')
+    if (!(await consumeDelegatedReceipt(current)).ok) return 'unavailable'
+  }
   return current.status
 }
 

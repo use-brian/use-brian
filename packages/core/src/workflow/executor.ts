@@ -465,6 +465,13 @@ export type ExecutorDeps = {
     decisionApplicationId?: string
   }) => Promise<void>
   /**
+   * Called once a run has been fully persisted as paused on an approval
+   * (after `requestApproval` and the `awaiting_input` flip). The API uses it
+   * to let an explicitly assigned reviewer review the new request
+   * (docs/architecture/features/approval-review.md). Fire-and-forget.
+   */
+  onApprovalPaused?: (params: { runId: string; workspaceId: string }) => Promise<void>
+  /**
    * Page-anchor creation port — backs `assistant_call.page.create`. The API
    * layer implements it over `savedViewStore` (createDraft + setState
    * 'saved': a configured deliverable must not auto-prune). Returns the new
@@ -1330,7 +1337,18 @@ export async function advanceWorkflowRun(
     await handleSettled(settled)
   }
 
-  if (pausedOutcome && !firstFailure) return pausedOutcome
+  if (pausedOutcome && !firstFailure) {
+    // The run is fully persisted as paused before anyone may act on its
+    // approval (an explicitly assigned reviewer included). Deferred so the
+    // caller's own return completes first; never awaited, never throws.
+    const outcome = pausedOutcome as RunOutcome
+    if (deps.onApprovalPaused && outcome.kind === 'paused' && outcome.reason === 'approval') {
+      const hook = deps.onApprovalPaused
+      const paused = { runId, workspaceId: run.workspaceId }
+      setImmediate(() => { void Promise.resolve().then(() => hook(paused)).catch(() => {}) })
+    }
+    return pausedOutcome
+  }
 
   if (firstFailure) {
     const status = firstFailure.isTimeout ? 'timeout' : 'failed'

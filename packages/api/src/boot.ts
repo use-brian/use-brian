@@ -583,12 +583,15 @@ import { connectorWorkflowEventAdmissibleSystem } from './workflow/connector-eve
 import { callRemoteMcpTool } from './mcp/client.js'
 import { createPendingApprovalsStore, readBrowserSendApprovalStatus } from './db/pending-approvals-store.js'
 import {
+  continueDelegatedWorkflowApproval,
   makeRequestApproval,
   sweepExpiredApprovals,
   sweepExpiredQuestions,
   type ApprovalBridgeDeps,
 } from './workflow/approval.js'
 import { resolveRecentApprovalChannel } from './workflow/recent-approval-channel.js'
+import { configureApprovalReviewConsumers, reviewOnCreate } from './approval-review/resolution.js'
+import { consumeDelegatedReceipt } from './approval-review/consumption.js'
 import { createApprovalDeliveryDispatcher } from './workflow/approval-deliveries.js'
 import { workflowApprovalsRoutes } from './routes/workflow-approvals.js'
 import { approvalsRoutes } from './routes/approvals.js'
@@ -3704,6 +3707,23 @@ export async function bootOpenApi(opts: BootOpenApiOptions): Promise<BootResult>
   }
   configureChannelWorkflowReplies(approvalBridgeDeps)
   workflowExecutorDeps.requestApproval = makeRequestApproval(approvalBridgeDeps)
+  // Explicitly delegated approval review (features/approval-review.md): a
+  // run fully paused on an approval is offered to its assigned reviewer, and
+  // a delegated decision continues through the same bridge with the original
+  // executor and a receipt revalidated before the gated tool runs.
+  workflowExecutorDeps.onApprovalPaused = async ({ runId }) => {
+    const pending = await getPool().query<{ id: string; workspace_id: string; kind: string }>(
+      `SELECT id, workspace_id, kind FROM pending_approvals WHERE workflow_run_id = $1 AND status = 'pending'`, [runId])
+    for (const row of pending.rows) await reviewOnCreate({ id: row.id, workspaceId: row.workspace_id, kind: row.kind as 'workflow_step' })
+  }
+  configureApprovalReviewConsumers({
+    workflowStep: (approval, receipt) => continueDelegatedWorkflowApproval(approvalBridgeDeps, approval, receipt.delegatorUserId, async () => {
+      const fresh = await pendingApprovalsStore.getByIdSystem(approval.id)
+      if (!fresh) return { ok: false, reason: 'request_missing' }
+      const check = await consumeDelegatedReceipt(fresh)
+      return check.ok ? { ok: true } : { ok: false, reason: check.reason }
+    }),
+  })
 
   // ── Goal-seeker acting loop (R1) ──
   // The stateless driver: one tick = one bounded workflow run + a `done_when`
@@ -5365,6 +5385,8 @@ export async function bootOpenApi(opts: BootOpenApiOptions): Promise<BootResult>
         payload: p.payload as unknown as Record<string, unknown>,
         expiresAt: p.expiresAt ? new Date(p.expiresAt) : null,
       })
+      // An explicitly assigned reviewer may resolve it; the runner's poll consumes the receipt.
+      void reviewOnCreate(row)
       return { id: row.id }
     },
     async getStatus(id) {

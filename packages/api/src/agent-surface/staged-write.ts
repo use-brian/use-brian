@@ -65,6 +65,12 @@ export async function applyStagedWrite(
   approval: PendingApproval,
   approverUserId: string,
 ): Promise<StagedWriteOutcome> {
+  // A staged write is never delegated: refuse rather than borrow the
+  // owner/primary principal for a decision no human made
+  // (docs/architecture/features/approval-review.md -> "Consumption").
+  if (approval.resolutionOrigin === 'delegated_assistant') {
+    return { ok: false, error: 'delegated_staged_write_unsupported' }
+  }
   const toolName = approval.toolName
   if (!toolName) return { ok: false, error: 'staged_write row carries no tool_name' }
   const tool = deps.rawWrites.get(toolName)
