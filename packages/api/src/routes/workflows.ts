@@ -878,7 +878,7 @@ export function workflowsRoutes(opts: WorkflowsRouteOptions): Router {
     const preparing = req.method === 'POST'
     // confirmAuthority recaptures authority even for a schedule workflow; the
     // store then requires that workflow's schedule review, as for any edit.
-    if ((executionAffectingEdit && !scheduleEdit && !preparing) || (parsed.data.confirmAuthority && !preparing)) {
+    if (!existing.definition.taskIntake && ((executionAffectingEdit && !scheduleEdit && !preparing) || (parsed.data.confirmAuthority && !preparing))) {
       fields.authoringAuthority = await opts.resolveAuthoringAuthority({
         userId,
         workspaceId: existing.workspaceId,

@@ -89,3 +89,5 @@ export {
   type WorkSection,
   type WorkViewer,
 } from './responsibility.js'
+export { RoutineTaskIntakeSchema, routineConfigurationIssues, routineConfigurationShape, readRoutineInput,
+  type RoutineTaskIntake } from './routine-intake.js'

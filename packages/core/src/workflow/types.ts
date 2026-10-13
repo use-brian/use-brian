@@ -337,6 +337,8 @@ export type ResolvedExternalClientWorkflowPrincipal = {
 }
 
 export type WorkflowDefinition = {
+  /** Optional explicit routine intake; accepted human provenance lives server-side. */
+  taskIntake?: import('../tasks/routine-intake.js').RoutineTaskIntake
   /**
    * Scalar = one entry step; ARRAY = trigger fan-out — every listed step
    * starts in parallel when the trigger fires (distinct, max

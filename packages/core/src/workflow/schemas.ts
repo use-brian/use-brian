@@ -10,6 +10,7 @@ import { askQuestionSchema } from '../tools/base/ask-question.js'
  */
 
 import { z } from 'zod'
+import { RoutineTaskIntakeSchema } from '../tasks/routine-intake.js'
 import { CrmDomainEventTypeSchema } from '../crm/operations-types.js'
 import { WORKFLOW_STEP_TYPES } from './types.js'
 import type { ToolCallStep, WorkflowDefinition } from './types.js'
@@ -487,6 +488,7 @@ const externalClientWorkflowPrincipalSchema = z
 
 export const WorkflowDefinitionSchema = z
   .object({
+    taskIntake: RoutineTaskIntakeSchema.optional(),
     // Scalar = one entry step; ARRAY = trigger fan-out (every listed step
     // starts in parallel when the trigger fires) — same shape and width cap
     // as a step's nextStepId array.

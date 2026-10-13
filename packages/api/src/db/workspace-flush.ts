@@ -75,6 +75,7 @@ export const WORKSPACE_FLUSH_TABLES = [
   'campaign_command_receipts',
   'campaigns',
   // Automation + approvals
+  'task_routine_intake_receipts',
   // Delegated approval review (features/approval-review.md): receipts,
   // attempts and support reference requests; patterns and assignments are
   // learned/operational state; route bindings and events are per workflow.
