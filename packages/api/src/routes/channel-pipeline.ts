@@ -2039,6 +2039,7 @@ async function processChannelMessageTurn(params: ChannelPipelineParams): Promise
   }
 
   const decisionPlaybookContext = await loadDecisionPlaybookContext({
+    ...(adaptiveResearchActive ? { research: { projectId: session.contextProjectId ?? null } } : {}),
     workspaceId: assistant.workspaceId ?? null,
     assistantId: assistant.id,
     actorUserId: userId,

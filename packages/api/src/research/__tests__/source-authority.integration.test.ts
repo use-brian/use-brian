@@ -5,7 +5,6 @@
  * Department floors and erasure do to those projections (R01, R08, R18).
  * Runs only through scripts/crm/local-fixture.mjs. Fictional identities.
  */
-import { randomUUID } from 'node:crypto'
 import { afterAll, describe, expect, it } from 'vitest'
 import { getAppPool, getPool } from '../../db/client.js'
 import {
@@ -14,49 +13,17 @@ import {
   listResearchActivitiesForViewer,
   listResearchEvidenceSystem,
 } from '../../db/research-store.js'
-import { briefFixture, type BriefFixture } from '../../briefs/__tests__/fixture.js'
-import { createResearchTurnObserver, recordResearchDelivery } from '../delivery.js'
+import { briefFixture, researchMessage, researchSession, savedResearch } from './fixture.js'
 import { flushWorkspaceData, WORKSPACE_FLUSH_PRESERVED_TABLES, WORKSPACE_FLUSH_TABLES } from '../../db/workspace-flush.js'
-import { beginResearchActivity, captureResearchFollowupForMessage, createResearchDeliveryDeps } from '../runtime.js'
+import { beginResearchActivity, captureResearchFollowupForMessage } from '../runtime.js'
 
 const { assertLocalFixture } = await import(new URL('../../../../../scripts/crm/local-fixture.mjs', import.meta.url).href)
 await assertLocalFixture()
 const pool = getPool()
 afterAll(async () => { await getAppPool().end(); await pool.end() })
 
-let seq = 0
-async function session(f: BriefFixture, userId: string, projectId: string | null = null) {
-  const id = randomUUID()
-  await pool.query(`INSERT INTO sessions(id,assistant_id,user_id,channel_type,channel_id,workspace_id,effective_clearance,context_project_id)
-    VALUES($1,$2,$3,'web',$6,$4,'internal',$5)`, [id, f.assistants.brian, userId, f.workspaceId, projectId, id])
-  return id
-}
-
-async function message(f: BriefFixture, sessionId: string, role: 'user' | 'assistant', text: string, owner: string) {
-  seq += 1
-  return (await pool.query<{ id: string }>(`INSERT INTO session_messages(session_id,role,content,sequence_num,workspace_id,user_id,assistant_id,
-      sensitivity,compartments,project_ids,scope_version,scope_held)
-    VALUES($1,$2,$3::jsonb,$4,$5,$6,$7,'internal','{}','{}',1,false) RETURNING id`,
-  [sessionId, role, JSON.stringify([{ type: 'text', text }]), seq, f.workspaceId, owner, f.assistants.brian])).rows[0]!.id
-}
-
-/** A real research turn for `actor`: activity, default Page in the Project collection, inspected link. */
-async function savedResearch(f: BriefFixture, actor: string, projectId: string | null) {
-  const sessionId = await session(f, actor, projectId)
-  const request = await message(f, sessionId, 'user', 'Research fictional widget vendors', actor)
-  const activity = await beginResearchActivity({
-    workspaceId: f.workspaceId, sessionId, requestMessageId: request, actorUserId: actor, assistantId: f.assistants.brian,
-    projectId, entry: 'explicit', runtime: { surface: 'test' },
-  })
-  const output = await message(f, sessionId, 'assistant', 'Vendor A leads on price.', actor)
-  const observer = createResearchTurnObserver()
-  observer.observeWorker({ type: 'tool_input', id: 'w1', name: 'urlReader', input: { url: 'https://example.com/vendors' } })
-  observer.observeWorker({ type: 'tool_result', id: 'w1', results: [{ type: 'tool_result', toolUseId: 'w1', name: 'urlReader', content: 'text' }] })
-  const settled = await recordResearchDelivery(createResearchDeliveryDeps(), {
-    activity, observation: observer.snapshot(), finalText: '## Vendors\nVendor A leads on price.', outputMessageId: output, requestText: 'Research fictional widget vendors',
-  })
-  return { sessionId, request, output, activity: settled }
-}
+const session = researchSession
+const message = researchMessage
 
 describe('[COMP:api/research-source-authority] research visibility follows its sources (real PG + RLS)', () => {
   it('R01: saves one canonical Project page, links it, and a fresh admitted chat can find and inspect it', async () => {

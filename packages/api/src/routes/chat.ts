@@ -4824,6 +4824,7 @@ export function chatRoutes(options: WebChatOptions): Router {
       // rule text separately from the content-free application id used only
       // by an exact frozen approval created later in this turn.
       const decisionPlaybookContext = await loadDecisionPlaybookContext({
+        ...(researchMode ? { research: { projectId: session.contextProjectId ?? null } } : {}),
         workspaceId: assistant.workspaceId ?? null,
         assistantId: assistant.id,
         actorUserId: user.id,

@@ -1696,6 +1696,8 @@ export function createCalleeExecutor(options: CalleeExecutorOptions): CalleeExec
         operationKind: 'workflow_assistant_call',
         operationId: params.decisionContext.operationId,
         applicability: params.decisionContext.applicability,
+        // A deep-research workflow step also receives research lessons.
+        ...(params.depth?.tier === 'deep' ? { research: { projectId: null } } : {}),
         sourceKind: 'workflow_step',
         sourceId: params.decisionContext.operationId,
         channelType: 'workflow',

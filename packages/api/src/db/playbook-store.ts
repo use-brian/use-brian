@@ -38,7 +38,7 @@ export type PlaybookRule = {
   rationale: string | null
   provenance: unknown
   status: PlaybookRuleStatus
-  createdBy: 'reflection' | 'owner' | 'decision_reflection'
+  createdBy: 'reflection' | 'owner' | 'decision_reflection' | 'research_reflection'
   appliesToUserId: string | null
   applicabilityKind: 'general' | 'email' | 'tool' | 'feed'
   applicabilityKey: string | null
@@ -88,7 +88,7 @@ const ROW_COLUMNS = `
 export async function listPlaybookRules(assistantId: string): Promise<PlaybookRule[]> {
   const result = await query<PlaybookRule>(
     `SELECT ${ROW_COLUMNS} FROM assistant_playbook_rules
-     WHERE assistant_id = $1 AND applies_to_user_id IS NULL
+     WHERE assistant_id = $1 AND applies_to_user_id IS NULL AND applicability_kind <> 'research'
      ORDER BY created_at DESC`,
     [assistantId],
   )
@@ -108,7 +108,7 @@ export async function listPlaybookRulesForViewer(params: {
 }): Promise<PlaybookRule[]> {
   const result = await query<PlaybookRule>(
     `SELECT ${ROW_COLUMNS} FROM assistant_playbook_rules
-      WHERE assistant_id = $1
+      WHERE assistant_id = $1 AND applicability_kind <> 'research'
         AND (
           (
             applies_to_user_id IS NULL
@@ -156,7 +156,7 @@ export async function listActivePlaybookRulesForActor(params: {
             feed_scope AS "feedScope", decision_compartments AS "decisionCompartments", decision_project_ids AS "decisionProjectIds",
             decision_sensitivity AS "decisionSensitivity"
        FROM assistant_playbook_rules
-      WHERE assistant_id = $1 AND status = 'active'
+      WHERE assistant_id = $1 AND status = 'active' AND applicability_kind <> 'research'
         AND (
           applies_to_user_id IS NULL
           OR (
@@ -179,7 +179,7 @@ export async function listActivePlaybookRulesForActor(params: {
 export async function listActivePlaybookRules(assistantId: string): Promise<string[]> {
   const result = await query<{ rule: string }>(
     `SELECT rule FROM assistant_playbook_rules
-     WHERE assistant_id = $1 AND applies_to_user_id IS NULL AND status = 'active'
+     WHERE assistant_id = $1 AND applies_to_user_id IS NULL AND status = 'active' AND applicability_kind <> 'research'
      ORDER BY decided_at DESC NULLS LAST, created_at DESC`,
     [assistantId],
   )
@@ -190,7 +190,7 @@ export async function listActivePlaybookRules(assistantId: string): Promise<stri
 export async function countPendingPlaybookSuggestions(assistantId: string): Promise<number> {
   const result = await query<{ count: string }>(
     `SELECT COUNT(*)::text AS count FROM assistant_playbook_rules
-     WHERE assistant_id = $1 AND applies_to_user_id IS NULL AND status = 'suggested'`,
+     WHERE assistant_id = $1 AND applies_to_user_id IS NULL AND status = 'suggested' AND applicability_kind <> 'research'`,
     [assistantId],
   )
   return Number(result.rows[0]?.count ?? 0)
@@ -200,7 +200,7 @@ export async function countPendingPlaybookSuggestions(assistantId: string): Prom
 export async function listPlaybookCorpus(assistantId: string): Promise<{ rule: string; status: PlaybookRuleStatus }[]> {
   const result = await query<{ rule: string; status: PlaybookRuleStatus }>(
     `SELECT rule, status FROM assistant_playbook_rules
-     WHERE assistant_id = $1 AND applies_to_user_id IS NULL
+     WHERE assistant_id = $1 AND applies_to_user_id IS NULL AND applicability_kind <> 'research'
      ORDER BY created_at DESC
      LIMIT 100`,
     [assistantId],
@@ -224,7 +224,7 @@ export async function insertPlaybookRules(
 ): Promise<{ activated: number; suggested: number }> {
   const active = await query<{ count: string }>(
     `SELECT COUNT(*)::text AS count FROM assistant_playbook_rules
-     WHERE assistant_id = $1 AND applies_to_user_id IS NULL AND status = 'active'`,
+     WHERE assistant_id = $1 AND applies_to_user_id IS NULL AND status = 'active' AND applicability_kind <> 'research'`,
     [assistantId],
   )
   let slots = MAX_ACTIVE_PLAYBOOK_RULES - Number(active.rows[0]?.count ?? 0)
@@ -597,7 +597,7 @@ export async function decidePlaybookRule(params: {
     if (ownedClient) await client.query('BEGIN')
     const selected = await client.query<PlaybookRule>(
       `SELECT ${ROW_COLUMNS} FROM assistant_playbook_rules
-        WHERE id = $1 AND assistant_id = $2
+        WHERE id = $1 AND assistant_id = $2 AND applicability_kind <> 'research'
         FOR UPDATE`,
       [ruleId, assistantId],
     )
@@ -631,7 +631,7 @@ export async function decidePlaybookRule(params: {
         : MAX_ACTIVE_PLAYBOOK_RULES
       const active = await client.query<{ count: string }>(
         `SELECT COUNT(*)::text AS count FROM assistant_playbook_rules
-          WHERE assistant_id = $1 AND status = 'active'
+          WHERE assistant_id = $1 AND status = 'active' AND applicability_kind <> 'research'
             AND applies_to_user_id IS NOT DISTINCT FROM $2::uuid`,
         [assistantId, rule.appliesToUserId],
       )

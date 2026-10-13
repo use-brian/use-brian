@@ -431,6 +431,7 @@ import { createSkillReviewWorker } from './workers/skill-review-worker.js'
 import { createGeminiSkillReviewLLM } from './workers/skill-review-llm.js'
 import { createPlaybookReflectionWorker } from './workers/playbook-reflection-worker.js'
 import { createDecisionReflectionWorker } from './workers/decision-reflection-worker.js'
+import { createResearchReflectionWorker } from './research/learning.js'
 import { buildWorkspaceCuratorScope } from './workers/workspace-curator-scope.js'
 import { loadSkillRegistry } from './registry/load-skill-registry.js'
 import { handleRoutes } from './routes/handles.js'
@@ -8876,6 +8877,52 @@ export async function bootOpenApi(opts: BootOpenApiOptions): Promise<BootResult>
   })
   if (runWorkers) decisionReflectionWorker.start()
 
+  // ── Research reflection (features/research.md -> "Scoped lessons"): the
+  //    same daily, bounded background lane as decision reflection. Usage is
+  //    attributed to the workspace owner as research overhead.
+  const researchReflectionWorker = createResearchReflectionWorker({
+    modelCall: async ({ workspaceId, system, prompt }) => {
+      const customRuntime = await resolveBackgroundRuntime(workspaceId)
+      const callProvider = customRuntime?.provider ?? provider
+      const callModel = customRuntime?.selector ?? BACKGROUND_MODEL
+      const response = await collectStream(callProvider.stream({
+        model: callModel, messages: [{ role: 'user', content: prompt }], systemPrompt: system, maxTokens: 1200,
+      }))
+      if (response.usage && usageStore) {
+        const owner = (await getPool().query<{ userId: string; assistantId: string | null }>(
+          `SELECT w.owner_user_id AS "userId",
+                  (SELECT a.id FROM assistants a WHERE a.workspace_id = w.id ORDER BY (a.kind = 'primary') DESC, a.created_at LIMIT 1) AS "assistantId"
+             FROM workspaces w WHERE w.id = $1`, [workspaceId])).rows[0]
+        const servedModel = response.model || callModel
+        if (owner?.userId && owner.assistantId) {
+          usageStore.recordUsage({
+            userId: owner.userId,
+            assistantId: owner.assistantId,
+            sessionId: null,
+            model: servedModel,
+            modelTier: 'standard',
+            inputTokens: response.usage.inputTokens,
+            outputTokens: response.usage.outputTokens,
+            cacheReadTokens: response.usage.cacheReadTokens,
+            cacheWriteTokens: response.usage.cacheWriteTokens,
+            actualCostUsd: customRuntime?.providerKeySource === 'user' ? 0 : calculateCost(servedModel, response.usage),
+            source: 'overhead:research-reflection',
+            providerKeySource: customRuntime?.providerKeySource ?? 'platform',
+          }).catch((err) => console.error('[research-reflection] usage tracking failed:', err))
+        }
+      }
+      return response.content.filter((block) => block.type === 'text').map((block) => block.type === 'text' ? block.text : '').join('')
+    },
+    onEvent: (event) => {
+      if (event.type === 'subject_processed') {
+        console.log(`[research-reflection] workspace=${event.workspaceId} created=${event.result.created} active=${event.result.activated} suggested=${event.result.suggested} rejected=${event.result.rejected} deduped=${event.result.deduped}`)
+      } else if (event.type === 'error') {
+        console.error(`[research-reflection] error workspace=${event.workspaceId ?? '<global>'}: ${event.error}`)
+      }
+    },
+  })
+  if (runWorkers) researchReflectionWorker.start()
+
   // ── Sandbox lifecycle reaper (computer-use.md §7) — kills tasks idle past
   //    the Take-Over abandonment window + runs the vault's per-plan purge.
   //    Only exists when a sandbox provider is configured. ──
@@ -10008,6 +10055,7 @@ export async function bootOpenApi(opts: BootOpenApiOptions): Promise<BootResult>
     skillReviewWorker.stop()
     playbookReflectionWorker.stop()
     decisionReflectionWorker.stop()
+    researchReflectionWorker.stop()
     feedEditorialWorker.stop()
     embeddingWorker.stop()
     pollWorker.stop()
