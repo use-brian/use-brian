@@ -92,6 +92,9 @@ export function staleMarksFor(event: string, workspaceId: string): string[] {
         // counts move with it (project-briefs.md -> "Work" -> "Freshness").
         `work:${workspaceId}`,
         `home-dock:${workspaceId}`,
+        // A control, checkpoint or external report notifies the task's
+        // brain row; every tab's workbench revalidates from the server.
+        `task-execution:${workspaceId}`,
       ];
     case APPROVALS_REFRESH_EVENT:
       // The home dock's "needs you" counts move with every approval created
@@ -254,6 +257,7 @@ export function applySpineEventToSurfaceCache(
     // Work cards are protected content and owner routing moves with
     // Department ownership, so a revocation evicts them, never just marks.
     drop(`work:${workspaceId}`);
+    drop(`task-execution:${workspaceId}`);
     drop(`live:${workspaceId}:`);
     drop(`projects:${workspaceId}`);
     drop(`project:${workspaceId}:`);

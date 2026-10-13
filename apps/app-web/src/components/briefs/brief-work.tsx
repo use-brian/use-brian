@@ -17,6 +17,7 @@
  */
 import Link from "next/link";
 import { useId, useState, type ReactNode } from "react";
+import { TaskExecutionWorkbench } from "@/components/chat-app/task-execution-workbench";
 import { Button } from "@/components/ui/button";
 import { SearchableSelect } from "@/components/ui/searchable-select";
 import { Skeleton } from "@/components/skeleton";
@@ -124,6 +125,8 @@ function WorkCard({ t, item, workspaceId, viewerMemberId, busy, act, onContinueI
   const locale = useLocale();
   const [assistants, setAssistants] = useState<WorkspaceAssistantSummary[] | null>(null);
   const [picking, setPicking] = useState(false);
+  const [workbenchOpen, setWorkbenchOpen] = useState(false);
+  const tExec = useT().chatApp.taskExecution;
   const name = (value: string | null) => value || t.unknownName;
   const executor = item.executor.kind === "assistant" ? format(t.executorAssistant, { name: name(item.executor.name) })
     : item.executor.kind === "person" ? format(t.executorPerson, { name: name(item.executor.name) })
@@ -177,7 +180,11 @@ function WorkCard({ t, item, workspaceId, viewerMemberId, busy, act, onContinueI
             onClick={() => onContinueInChat(item, format(t.draft, { title: item.title, id: item.taskId }))}>{t.actions.continueInChat}</Button>
         ) : null}
         <Link href={brainRowUrl("", workspaceId, item.taskId, "task")} className="text-sm text-muted-foreground underline max-sm:inline-flex max-sm:min-h-11 max-sm:items-center">{t.actions.openTask}</Link>
+        {item.executor.kind === "assistant" ? (
+          <Button size="sm" variant="ghost" aria-expanded={workbenchOpen} className="max-sm:min-h-11" onClick={() => setWorkbenchOpen((open) => !open)}>{tExec.toggle}</Button>
+        ) : null}
       </div>
+      {workbenchOpen ? <TaskExecutionWorkbench workspaceId={workspaceId} taskId={item.taskId} /> : null}
     </li>
   );
 }

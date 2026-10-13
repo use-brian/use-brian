@@ -602,6 +602,12 @@ export function homeDockCacheKey(workspaceId: string): string {
  * Workspace first, then viewer, then scope, so `work:<wid>` stale-marks every
  * scope after a task or approval change. Spec: project-briefs.md -> "Work".
  */
+/** One task's execution (chat-app.md -> "Task execution workbench"). Viewer
+ *  keyed: the projection is source-filtered for the reader. */
+export function taskExecutionCacheKey(workspaceId: string, taskId: string): string {
+  return `task-execution:${workspaceId}${viewerSuffix()}:${taskId}`
+}
+
 export function workCacheKey(
   workspaceId: string,
   scope: { kind: "personal" } | { kind: "department" | "project"; id: string },

@@ -26,7 +26,9 @@
  */
 import Link from "next/link";
 import { ArrowUpRight, LoaderCircle, Target } from "lucide-react";
+import { useState } from "react";
 import { GoalExecutionActivity } from "@/components/chat-app/goal-execution-activity";
+import { TaskExecutionWorkbench } from "@/components/chat-app/task-execution-workbench";
 import type { GoalRow } from "@/lib/api/goals";
 import { useT } from "@/lib/i18n/client";
 import { cn } from "@/lib/utils";
@@ -107,6 +109,9 @@ export function GoalPursuitCard({
   const terminal = isGoalPursuitTerminal(status);
   const statusLabel =
     t.goalsPage.status[status as keyof typeof t.goalsPage.status] ?? status;
+  // Opening the workbench only reads; it never starts or renews anything.
+  const [workbenchOpen, setWorkbenchOpen] = useState(false);
+  const taskId = goal.host?.type === "task" ? goal.host.id : null;
 
   return (
     <section
@@ -150,6 +155,19 @@ export function GoalPursuitCard({
             onStatusChange={(next) => onStatusChange?.(goal.id, next)}
             className="mt-2 border-t border-primary/10 pt-1.5"
           />
+          {taskId ? (
+            <>
+              <button
+                type="button"
+                aria-expanded={workbenchOpen}
+                onClick={() => setWorkbenchOpen((open) => !open)}
+                className="mt-2 text-xs font-medium text-primary hover:underline max-sm:inline-flex max-sm:min-h-11 max-sm:items-center"
+              >
+                {tApp.taskExecution.toggle}
+              </button>
+              {workbenchOpen ? <TaskExecutionWorkbench workspaceId={workspaceId} taskId={taskId} /> : null}
+            </>
+          ) : null}
         </div>
       </div>
     </section>
