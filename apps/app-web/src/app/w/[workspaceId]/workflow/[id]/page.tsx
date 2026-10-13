@@ -99,6 +99,7 @@ import { buildToolCatalog } from "@/lib/workflow-tools";
 import { StepEditor } from "@/components/workflow/step-editor";
 import { TriggerEditor } from "@/components/workflow/trigger-editor";
 import { ButtonBindingsList, TriggerJobsList } from "@/components/workflow/trigger-jobs-list";
+import { WorkflowReviewerSetting } from "@/components/workflow/workflow-reviewer-setting";
 import { RunHistory } from "@/components/workflow/run-history";
 import { LiveRunBanner } from "@/components/workflow/live-run-banner";
 import {
@@ -1098,6 +1099,10 @@ export default function WorkflowDetailPage({
       {workflow.buttonBindings && workflow.buttonBindings.length > 0 && (
         <ButtonBindingsList bindings={workflow.buttonBindings} />
       )}
+
+      {/* Explicit approval reviewer default (approval-review.md): an
+          assignment the person makes, never a definition field. */}
+      <WorkflowReviewerSetting workspaceId={workspaceId} workflowId={workflow.id} />
 
       {/* Editor panel — always live (no edit mode). Shows only the editor
           for the node focused on the board (the trigger or a single step);

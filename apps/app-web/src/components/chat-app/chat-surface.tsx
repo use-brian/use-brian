@@ -322,6 +322,7 @@ import {
 } from "@/components/chat-app/chat-document-viewer";
 import { ChatPageLinkCard } from "@/components/chat-app/chat-page-link-card";
 import { announceResearchChanged, ChatResearchCard, useSessionResearch } from "@/components/chat-app/research-detail";
+import { ApprovalReviewAttention } from "@/components/chat-app/approval-review-attention";
 import {
   PAGE_WRITING_TOOLS,
   addPageLinks,
@@ -4652,6 +4653,12 @@ export function ChatSurface({ workspaceId }: { workspaceId: string }) {
         }
         right={
           <div className="flex items-center gap-1">
+          {/* Attention (chat-app.md -> "Attention"): work that needs this person, narrowed to this chat's Project or session. */}
+          <ApprovalReviewAttention
+            workspaceId={workspaceId}
+            sessionId={activeSessionId ?? null}
+            projectId={activeContextSession?.contextProjectId ?? null}
+          />
           {!heroMode && <ChatSidePaneToggle pane={pane} />}
           <button
             type="button"
