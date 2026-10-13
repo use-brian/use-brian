@@ -158,6 +158,21 @@ describe("[COMP:app-web/surface-cache-invalidation] routing table", () => {
     expect(staleMarksFor(APPROVALS_REFRESH_EVENT, "w2")).not.toContain("home-dock:w1");
   });
 
+  it("a task or approval change marks every work scope and the dock (resolved cards leave everywhere)", () => {
+    // project-briefs.md -> "Work" -> "Freshness": `work:<wid>` prefixes every
+    // viewer and scope key, so one mark repairs Chat and every Brief.
+    expect(staleMarksFor(BRAIN_REFRESH_EVENT, "w1")).toEqual(expect.arrayContaining(["work:w1", "home-dock:w1"]));
+    expect(staleMarksFor(APPROVALS_REFRESH_EVENT, "w1")).toContain("work:w1");
+    expect(staleMarksFor(BRAIN_REFRESH_EVENT, "w2")).not.toContain("work:w1");
+  });
+
+  it("an authority change evicts cached work instead of keeping protected cards painted", async () => {
+    const { seedSurfaceCache, readSurfaceCache } = await import("@/lib/surface-cache");
+    seedSurfaceCache("work:w1:u1:personal", { counts: { needsYou: 1 } });
+    applySpineEventToSurfaceCache("brian:organization-changed", { workspaceId: "w1" }, "w1");
+    expect(readSurfaceCache("work:w1:u1:personal").data).toBeUndefined();
+  });
+
   it("a workspace_config change marks the Settings detail row (name, icon, purpose, roster)", () => {
     expect(staleMarksFor(WORKSPACE_IDENTITY_REFRESH_EVENT, "w1")).toContain("workspace-detail:w1");
   });
@@ -234,6 +249,8 @@ describe("[COMP:app-web/surface-cache-invalidation] goal primitive and brain det
       "triage:w1",
       "goal:w1:",
       "feed-collaboration:w1",
+      // A blocked or approval-waiting hosted Goal moves a work card.
+      "work:w1",
     ]);
     expect(SURFACE_CACHE_SPINE_EVENTS).toContain(GOAL_REFRESH_EVENT);
   });

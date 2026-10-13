@@ -32,6 +32,9 @@ vi.mock('../../db/client.js', () => {
   return { query: vi.fn((t: string) => run(t)), queryGated: vi.fn((_c: unknown, t: string) => run(t)), queryWithRLS: vi.fn((_u: string, t: string) => run(t)) }
 })
 
+const notify = vi.hoisted(() => vi.fn())
+vi.mock('../../brain-stream/notify.js', () => ({ notifyBrainInboxChange: notify }))
+
 const { readWorkProjection, WorkUnavailableError } = await import('../work.js')
 const { workRoutes } = await import('../../routes/work.js')
 
@@ -111,6 +114,16 @@ describe('[COMP:api/brief-work] work projection and work routes', () => {
       const taken = await fetch(`${s.base}/workspaces/${WS}/tasks/${TASK}/claim`, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ executor: { kind: 'person' } }) })
       expect(taken.status).toBe(409)
       expect(await taken.json()).toEqual({ error: 'task_already_claimed' })
+      s.close()
+    })
+
+    it('notifies other tabs after a successful claim', async () => {
+      const update = vi.fn(async (_a: string, id: string) => ({ id: `${id}-next`, assigneeId: 'member-me', executorAssistantId: null }))
+      db.rows = []
+      const s = await serve(update as never)
+      const ok = await fetch(`${s.base}/workspaces/${WS}/tasks/${TASK}/claim`, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ executor: { kind: 'person' } }) })
+      expect(ok.status).toBe(200)
+      expect(notify).toHaveBeenCalledWith(WS, 'task', `${TASK}-next`, 'update')
       s.close()
     })
 

@@ -61,12 +61,7 @@ import {
   invalidateDocPage,
   sidebarTreeCacheKey,
 } from "@/lib/surface-prefetch";
-import {
-  loadSurfaceCache,
-  mutateSurfaceCache,
-  readSurfaceCache,
-  useCachedResource,
-} from "@/lib/surface-cache";
+import { readSurfaceCache } from "@/lib/surface-cache";
 import { isAuthoritativeBrainDenial } from "@/lib/offline/brain-content-cache";
 import { useT, format } from "@/lib/i18n/client";
 import {
@@ -113,7 +108,7 @@ import { idbGet, idbSet } from "@/lib/offline/idb";
 import { dropPageFromDocTabsSession } from "@/lib/doc-tabs-session";
 import { offlineWrite, getOnline } from "@/lib/offline/offline-writes";
 import type { SidebarMove } from "./doc-sidebar";
-import { leaseSurfaceContent, surfaceContentRemaining, useLeasedResource } from "@/lib/offline/surface-content-cache";
+import { useLeasedResource } from "@/lib/offline/surface-content-cache";
 
 /** localStorage key for the per-workspace recently-opened page list. */
 function recentsKey(workspaceId: string): string {
@@ -233,10 +228,10 @@ type SidebarData = {
    */
   feedProfiles: FeedProfile[] | null;
   /**
-   * The workspace's resolved home dock ("Suggested for you"), fetched here —
-   * once per workspace, revalidated on every list reload — so the sidebar
-   * badge (`HomeDock`) and the Home pane (`SuggestedView`) read ONE dock that
-   * survives soft-nav and never disagrees between the two surfaces. Null until
+   * The workspace's resolved home dock (live attention signals), fetched
+   * here — once per workspace, revalidated on every list reload — so the
+   * sidebar badge (`HomeDock`) and the Chat work entry's attention links read
+   * ONE dock that survives soft-nav and never disagrees between the two. Null until
    * the first fetch lands (or when it failed with nothing cached).
    */
   dock: ResolvedDock | null;
@@ -244,8 +239,6 @@ type SidebarData = {
   dockLoading: boolean;
   /** Background-revalidate the dock (stale-while-revalidate; never flashes). */
   reloadDock: () => void;
-  /** Push an already-fetched dock (SuggestedView's POST /refresh result). */
-  setDock: (dock: ResolvedDock) => void;
   /** Refetch both sidebar lists. Centre-pane mutations route through here too. */
   reloadSidebar: () => void;
   /** Record the open of a page id into the recents list (+ localStorage). */
@@ -570,18 +563,18 @@ export function DocSidebarDataProvider({
   const drafts = paintedTree?.drafts ?? EMPTY_ROWS;
   const teamspaces = paintedTree?.teamspaces ?? EMPTY_TEAMSPACES;
 
-  // ── Home dock (the "Suggested for you" data) ───────────────────────────
+  // ── Home dock (the live attention signals) ────────────────────────────
   // Owned here per docs/architecture/features/home-dock.md → Frontend: the
-  // sidebar badge (HomeDock), the Home pane (SuggestedView) AND the workspace
-  // root (which decides whether to land on Suggested) read ONE cached slot,
+  // sidebar badge (HomeDock), the Chat work entry's attention links AND the
+  // Home landing cadence read ONE cached slot,
   // `homeDockCacheKey` - so a warm dock lets the root decide synchronously
   // while this provider revalidates behind it. Stale-while-revalidate: a
   // refetch keeps the current dock until the new one lands, and a failed
   // refetch keeps it entirely (fetchHomeDock nulls on error; the fetcher
   // returns the dock already on screen so the badge never blinks out on a
   // transient failure, and resolves null only when there was nothing).
-  // Approval create / resolve events mark this key stale through the spine
-  // map (`surface-cache-invalidation.ts` -> APPROVALS_REFRESH_EVENT), so the
+  // Approval and task (brain refresh) events mark this key stale through the
+  // spine map (`surface-cache-invalidation.ts`), so the
   // provider carries no listener of its own; page mutations (drafts created /
   // deleted / saved) move the dock's pickUp list, so `reloadSidebar` refreshes
   // it alongside the lists.
@@ -599,20 +592,6 @@ export function DocSidebarDataProvider({
   const reloadDock = useCallback(() => {
     void dockRefresh();
   }, [dockRefresh]);
-  // SuggestedView's POST /refresh already holds the server's answer: write it
-  // straight into the slot (a load when the slot is still cold, so the value
-  // is not dropped by the no-op-when-empty patch seam).
-  const setDock = useCallback(
-    (next: ResolvedDock) => {
-      if (!dockKey) return;
-      if (readSurfaceCache<ResolvedDock | null>(dockKey).data !== undefined) {
-        mutateSurfaceCache<ResolvedDock | null>(dockKey, () => next);
-      } else {
-        void loadSurfaceCache(dockKey, () => leaseSurfaceContent(async () => next), { expiresInMs: surfaceContentRemaining });
-      }
-    },
-    [dockKey],
-  );
   const treeRefresh = tree.refresh;
   const refreshRef = useRef({ tree: treeRefresh, dock: dockRefresh });
   refreshRef.current = { tree: treeRefresh, dock: dockRefresh };
@@ -995,7 +974,6 @@ export function DocSidebarDataProvider({
       dock,
       dockLoading,
       reloadDock,
-      setDock,
       reloadSidebar,
       pushRecent,
       recordPrune,

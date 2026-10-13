@@ -15,6 +15,7 @@ import { TaskResponsibilityError, type TaskStore } from '@use-brian/core'
 import { WorkspaceAccessError } from '../workspace-access/policy.js'
 import { readWorkProjection, WorkUnavailableError } from '../briefs/work.js'
 import { claimTask } from '../tasks/responsibility.js'
+import { notifyBrainInboxChange } from '../brain-stream/notify.js'
 
 const UUID = z.string().uuid()
 const claimBody = z.object({
@@ -67,6 +68,9 @@ export function workRoutes(deps: { taskStore: Pick<TaskStore, 'update'>; auth: R
     if (!taskId.success) throw new TaskResponsibilityError('task_not_found')
     const body = claimBody.parse(req.body)
     const task = await claimTask(deps.taskStore, userId, workspaceId, taskId.data, body.executor)
+    // A direct REST write bypasses the tool-loop notifier: tell every other
+    // tab and device so their work lists and Tasks surface repaint.
+    notifyBrainInboxChange(workspaceId, 'task', task.id, 'update')
     return { task: { id: task.id, assigneeId: task.assigneeId, executorAssistantId: task.executorAssistantId ?? null } }
   }))
 

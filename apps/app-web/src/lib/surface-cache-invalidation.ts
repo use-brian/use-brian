@@ -87,13 +87,19 @@ export function staleMarksFor(event: string, workspaceId: string): string[] {
         `brain-entry:${workspaceId}:`,
         `brain-blueprint:${workspaceId}:`,
         `feed-collaboration:${workspaceId}`,
+        // Every task change (claim, follow-up, status, supersession) can move
+        // a card between work sections or out of them, and the dock's task
+        // counts move with it (project-briefs.md -> "Work" -> "Freshness").
+        `work:${workspaceId}`,
+        `home-dock:${workspaceId}`,
       ];
     case APPROVALS_REFRESH_EVENT:
       // The home dock's "needs you" counts move with every approval created
       // or resolved, so the Suggested badge, the Home pane and the workspace
       // root (which lands on Suggested off the same dock) all revalidate here
       // instead of through a listener of the provider's own.
-      return [`approvals:${workspaceId}`, `crm:${workspaceId}:`, `home-dock:${workspaceId}`];
+      // A resolved Goal approval also clears its "answer" work card.
+      return [`approvals:${workspaceId}`, `crm:${workspaceId}:`, `home-dock:${workspaceId}`, `work:${workspaceId}`];
     case WORKFLOW_REFRESH_EVENT:
       // The detail key is mark-stale only, never invalidate: an open editable
       // draft must not be clobbered (realtime-sync.md -> editable-draft rule).
@@ -131,6 +137,9 @@ export function staleMarksFor(event: string, workspaceId: string): string[] {
         // (`/api/assistants` filtered to `appType='distribution'`), so a
         // brand voice created from chat reaches the Feed gate too.
         `feed-workspace:${workspaceId}`,
+        // Work cards name their executor assistant; a rename, placement or
+        // removal re-resolves them (and an executor's removal unassigns).
+        `work:${workspaceId}`,
       ];
     case "brian:organization-changed":
       return [`workspace-access:${workspaceId}:`, `organization:${workspaceId}:`, `scope-review:${workspaceId}:`];
@@ -174,7 +183,9 @@ export function staleMarksFor(event: string, workspaceId: string): string[] {
       // full page). The panels used to rely on a local refetch tick only
       // the acting tab could bump; the same-tab `requestGoalRefresh` now
       // lands here too, so one path serves both legs.
-      return [`goals:${workspaceId}`, `triage:${workspaceId}`, `goal:${workspaceId}:`, `feed-collaboration:${workspaceId}`];
+      // A hosted Goal becoming blocked or awaiting approval moves a work card
+      // into Needs you, and its resolution moves it back.
+      return [`goals:${workspaceId}`, `triage:${workspaceId}`, `goal:${workspaceId}:`, `feed-collaboration:${workspaceId}`, `work:${workspaceId}`];
     case OFFICE_REFRESH_EVENT:
       // The `office` primitive: a job changed status or recorded progress.
       // The Office list (`office:<wid>:<viewer>:<view>`) and the template
@@ -240,6 +251,9 @@ export function applySpineEventToSurfaceCache(
   }
   if (event === WORKSPACE_IDENTITY_REFRESH_EVENT || event === "brian:organization-changed") {
     // Authority changes purge even an unmounted directory/access surface.
+    // Work cards are protected content and owner routing moves with
+    // Department ownership, so a revocation evicts them, never just marks.
+    drop(`work:${workspaceId}`);
     drop(`live:${workspaceId}:`);
     drop(`projects:${workspaceId}`);
     drop(`project:${workspaceId}:`);
