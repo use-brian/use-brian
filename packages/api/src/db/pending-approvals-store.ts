@@ -17,7 +17,7 @@ import { createBrowserSkillGrantInTransaction } from './browser-skill-grant-stor
 import { getPool, query, queryWithRLS } from './client.js'
 import { notifyWorkspaceChange } from '../brain-stream/notify.js'
 import { appendDecisionEvent } from './decision-event-store.js'
-import type { DerivedWriteEvidence } from '@use-brian/core'
+import type { ApprovalResolutionOrigin, DerivedWriteEvidence } from '@use-brian/core'
 import { readSessionById } from './sessions.js'
 import { gateSessionRead } from '../session-read-authority.js'
 
@@ -170,6 +170,12 @@ export type PendingApproval = {
   /** User's free-text answer for kind='question' rows. NULL until the user submits via POST /answer.
    *  Length-capped to 8000 chars at the DB. See docs/architecture/engine/askquestion-suspend-resume.md. */
   answerText: string | null
+  /**
+   * Who actually decided (migration 757). `delegated_assistant` rows carry an
+   * `approval_delegated_resolutions` receipt and a NULL `respondedBy`; NULL on
+   * pending and legacy rows. See docs/architecture/features/approval-review.md.
+   */
+  resolutionOrigin?: ApprovalResolutionOrigin | null
 }
 
 export type CreateApprovalParams = {
@@ -289,7 +295,8 @@ const COLS = `
   source_session_required   AS "sourceSessionRequired",
   approval_payload          AS "approvalPayload",
   originating_assistant_id  AS "originatingAssistantId",
-  answer_text               AS "answerText"
+  answer_text               AS "answerText",
+  resolution_origin         AS "resolutionOrigin"
 `
 
 /**
@@ -772,6 +779,7 @@ function rowToApproval(row: Record<string, unknown>): PendingApproval {
     approvalPayload: (row.approvalPayload as Record<string, unknown>) ?? {},
     originatingAssistantId: (row.originatingAssistantId as string | null) ?? null,
     answerText: (row.answerText as string | null) ?? null,
+    resolutionOrigin: (row.resolutionOrigin as ApprovalResolutionOrigin | null) ?? null,
   }
 }
 
@@ -1187,9 +1195,9 @@ export function createPendingApprovalsStore(): PendingApprovalsStore {
            workspace_id, kind, blocking_session_id, approver_user_id,
            tool_name, arguments, approval_payload,
            delivery_channel_type, status, responded_at, responded_by,
-           workflow_run_id, workflow_step_run_id
+           workflow_run_id, workflow_step_run_id, resolution_origin
          )
-         VALUES ($1, 'browser_skill_send', $2, $3, 'runBrowserSkill', $4, $5, 'web', 'auto_approved', now(), $3, NULL, NULL)
+         VALUES ($1, 'browser_skill_send', $2, $3, 'runBrowserSkill', $4, $5, 'web', 'auto_approved', now(), $3, NULL, NULL, 'standing_grant')
          RETURNING ${COLS}`,
         [
           params.workspaceId,
@@ -1432,7 +1440,7 @@ export function createPendingApprovalsStore(): PendingApprovalsStore {
           skillId: payload.skillId as string, skillVersion: payload.skillVersion as number, grantedBy: responderUserId,
         }, id) : null
         const changed = await client.query(`UPDATE pending_approvals SET status=$3,
-          responded_at=clock_timestamp(), responded_by=$2, reject_reason=$4
+          responded_at=clock_timestamp(), responded_by=$2, reject_reason=$4, resolution_origin='human'
           WHERE id=$1 AND status='pending' AND (expires_at IS NULL OR expires_at>clock_timestamp()) RETURNING ${COLS}`,
           [id, responderUserId, decision, decision === 'rejected' ? options.reason ?? null : null])
         if (!changed.rows[0]) throw denied()
@@ -1464,7 +1472,8 @@ export function createPendingApprovalsStore(): PendingApprovalsStore {
            SET status = $2,
                responded_at = now(),
                responded_by = $3,
-               reject_reason = $4
+               reject_reason = $4,
+               resolution_origin = 'human'
            WHERE id = $1 AND status = 'pending' AND kind NOT IN ('department_access', 'browser_skill_send')
            RETURNING ${COLS}`,
           [id, decision, responderUserId, rejectReason ?? null],
