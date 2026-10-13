@@ -1,7 +1,7 @@
 import { isDeepStrictEqual } from 'node:util'
 import { admitTaskCreate } from '../workspace-access/task-create-admission.js'
 import { applyResponsibilityPatch, bindScopeSource, executorChanged, maxSensitivity, unionScopeRequirements } from '@use-brian/core'
-import type { AccessContext, EntityLinksStore, Sensitivity, TaskHome, TaskListFilters, TaskListRow, TaskRecord, TaskRecordStatus, TaskResponsibility, TaskUpdateFields, TaskWriteActor, TaskStore } from '@use-brian/core'
+import type { AccessContext, EntityLinksStore, Sensitivity, TaskHome, TaskListFilters, TaskListRow, TaskRecord, TaskRecordStatus, TaskResponsibility, TaskUpdateFields, TaskWriteActor, TaskStore, TaskAssignmentProvenance } from '@use-brian/core'
 import type pg from 'pg'
 import { assertExecutionResourceScope, buildAccessPredicate } from './access-predicate.js'
 import { assertAuthorshipPresent } from './authorship-guard.js'
@@ -666,7 +666,7 @@ export async function resolveTaskById(
   return result.rows.length === 0 ? null : toRecord(result.rows[0])
 }
 
-type ExecutorChangeHook = (task: TaskRecord, previous: TaskResponsibility, actorUserId: string) => void
+type ExecutorChangeHook = (task: TaskRecord, previous: TaskResponsibility, actorUserId: string, assignment?: TaskAssignmentProvenance) => void
 let executorChangeHook: ExecutorChangeHook | null = null
 
 /**
@@ -939,7 +939,7 @@ export async function updateTask(
 
       await client.query('COMMIT')
       const newTask = toRecord(newRow)
-      if (reassigned && newTask.parentId === null) executorChangeHook?.(newTask, before, userId)
+      if (reassigned && newTask.parentId === null) executorChangeHook?.(newTask, before, userId, opts?.assignment)
 
       // Workflow task-event emit — fire-and-forget after COMMIT. The old
       // row (already read for the supersession write) supplies the

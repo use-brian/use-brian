@@ -201,10 +201,10 @@ export function createTaskExecutionTools(effects: ControlEffects = {}): { getTas
     name: 'getTaskExecution',
     requiresCapability: 'goals',
     description: 'Read the live execution of an assistant-executed task: phase, readiness and the smallest missing thing, next step, branches, remaining allowance and lifetime use, the control revision, and any external coding sessions reporting on it. Pass task_id (or execution_id). Read only.',
-    inputSchema: z.object({ task_id: z.string().uuid().optional(), execution_id: z.string().uuid().optional() })
-      .refine(v => Boolean(v.task_id) !== Boolean(v.execution_id), 'Pass exactly one of task_id or execution_id.'),
+    inputSchema: z.object({ task_id: z.string().uuid().optional(), execution_id: z.string().uuid().optional() }),
     async execute(input, context) {
       if (!context.workspaceId) return { data: 'Task execution needs a workspace-scoped conversation. Nothing was read.', isError: true }
+      if (Boolean(input.task_id) === Boolean(input.execution_id)) return { data: 'Pass exactly one of task_id or execution_id. Nothing was read.', isError: true }
       try {
         const view = await inspectExecution(controlActorFromTool(context), context.workspaceId,
           input.execution_id ? { executionId: input.execution_id } : { taskId: input.task_id! })

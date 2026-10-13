@@ -134,3 +134,4 @@ export {
   reserveIteration,
   iterationSpendEstimate,
 } from './execution.js'
+export { createExecutionPlanner, parseExecutionPlan, type ExecutionPlannerInput } from './planner.js'

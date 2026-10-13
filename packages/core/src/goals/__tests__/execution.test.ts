@@ -100,3 +100,14 @@ describe('[COMP:goals/allowance-tree] segment reservation arithmetic', () => {
     expect(iterationSpendEstimate(0.9, 3)).toBe(0.3)
   })
 })
+
+describe('[COMP:goals/execution-qualification] planner parsing is fail-closed', () => {
+  it('accepts a complete plan and rejects anything else', async () => {
+    const { parseExecutionPlan } = await import('../planner.js')
+    const plan = parseExecutionPlan('Here: {"outcome":"Venue booked","steps":[{"title":"Shortlist","contribution":"options"}],"completionEvidence":["booking id"],"requiredOperations":["webSearch"]}')
+    expect(plan).toMatchObject({ outcome: 'Venue booked', constraints: [], requiredAccounts: [], questions: [], completionEvidence: ['booking id'] })
+    expect(parseExecutionPlan('no json')).toBeNull()
+    expect(parseExecutionPlan('{"outcome":""}')).toBeNull()
+    expect(parseExecutionPlan('{"steps":[]}')).toBeNull()
+  })
+})

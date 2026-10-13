@@ -113,6 +113,8 @@ type Options = {
    * OSS authoring skill's brain-sync tool. Optional; write-scope keys only.
    */
   browserSkills?: import('@use-brian/core').BrowserSkillStore
+  /** Task execution read/pause and external progress reporting. */
+  taskExecutionTools?: Record<'getTaskExecution' | 'controlTaskExecution' | 'bindExternalTaskExecution' | 'reportTaskProgress', import('@use-brian/core').Tool>
   /**
    * Resolve a custom Home app's commerce-store tools, bound to the workspace
    * primary assistant — the same binding the agent capability toolset uses.
@@ -272,6 +274,7 @@ export function brainMcpRoutes(opts: Options): Router {
       agentWritesEnabled,
       embedder: opts.embedder,
       browserSkills: opts.browserSkills,
+      taskExecutionTools: opts.taskExecutionTools,
       storeTools,
       ...(agentTask
         ? {

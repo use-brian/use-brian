@@ -19,6 +19,7 @@ import {
 } from '../entities/index.js'
 import {
   TASK_STATUSES,
+  type TaskAssignmentProvenance,
   type TaskListRow,
   type TaskRecord,
   type TaskRecordStatus,
@@ -316,7 +317,15 @@ export function createTaskTools(
     return ctxFor({...context,workspaceId:context.workspaceId!})
   }
 
-  async function parentExecutor(context: ToolContext, parentId: string): Promise<TaskExecutor | null> {
+  /** Trusted assignment provenance: only an attended turn whose sender is the
+   *  verified workspace actor conveys a human assignment. Workflows,
+   *  synthesis and brain MCP convey none. */
+  function attendedAssignment(context: ToolContext): TaskAssignmentProvenance | undefined {
+    if (context.programmaticPrincipal || context.attended !== true || !context.workspaceActorUserId) return undefined
+    return { actorUserId: context.workspaceActorUserId, origin: 'chat' }
+  }
+
+    async function parentExecutor(context: ToolContext, parentId: string): Promise<TaskExecutor | null> {
     const parent = await store.getById(accessFor(context), parentId)
     return parent ? taskExecutor({ assigneeId: parent.assigneeId, executorAssistantId: parent.executorAssistantId ?? null }) : null
   }
@@ -560,6 +569,7 @@ export function createTaskTools(
           // Assistant-mediated write (incl. interactive chat) — the workflow
           // task-event self-loop guard keys on this (fromBots gate).
           writtenBy: 'system',
+          assignment: attendedAssignment(context),
         })
         opts?.onEvent?.({ type: 'task_created', taskId: task.id }, eventCtx(context))
         const linksSummary = await applyExplicitLinks({
@@ -711,6 +721,7 @@ export function createTaskTools(
       })
       updated = await store.update(context.userId, id, fields, {
         writtenBy: 'system',
+        assignment: attendedAssignment(context),
         access: accessFor(context),
         scope: {
           sensitivity: writeScope?.sensitivity,

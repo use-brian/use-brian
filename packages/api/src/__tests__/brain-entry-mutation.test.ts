@@ -272,7 +272,7 @@ describe('[COMP:api/task-responsibility] Brain inbox adjust carries executor, fo
     expect(result).toMatchObject({ status: 200, body: { ok: true, id: 'next-id' } })
     expect(updateTask).toHaveBeenCalledWith('user-1', row.id,
       { executorAssistantId: ASSISTANT, followUpMemberId: MEMBER, home: { kind: 'department', id: DEPT } },
-      undefined, { access: actorAccess })
+      undefined, { access: actorAccess, assignment: { actorUserId: 'user-1', origin: 'ui' } })
   })
 
   it('rejects malformed values before writing', async () => {

@@ -132,6 +132,8 @@ export async function claimTask(
   const guard = claimPrecondition(fields)
   const task = await store.update(actorUserId, taskId, fields, {
     writtenBy: 'user',
+    // An authenticated owner-queue claim is a human assignment.
+    assignment: { actorUserId, origin: 'ui' },
     precondition: (current: TaskResponsibility & { status: TaskRecordStatus; workspaceId: string }) => {
       if (current.workspaceId !== workspaceId) throw new TaskResponsibilityError('task_not_found')
       return guard(current)

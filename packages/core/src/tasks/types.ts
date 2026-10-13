@@ -31,6 +31,15 @@ export type TaskRecordStatus = (typeof TASK_STATUSES)[number]
  */
 export type TaskWriteActor = 'user' | 'system'
 
+/**
+ * Trusted assignment provenance for automatic execution entry
+ * (goals.md -> "Formation, readiness and automatic entry"). Set only by an
+ * authenticated REST write (`ui`) or an attended chat turn whose sender is the
+ * verified workspace actor (`chat`). Synthesis, workflows and brain MCP never
+ * set it. Not persisted on the task.
+ */
+export type TaskAssignmentProvenance = { actorUserId: string; origin: 'ui' | 'chat' }
+
 /** Trusted write metadata, separate from model-editable task fields. */
 export type TaskWriteScope = {
   sensitivity?: Sensitivity
@@ -184,6 +193,8 @@ export type TaskStore = {
      * passes `'system'`. Not persisted.
      */
     writtenBy?: TaskWriteActor
+    /** Trusted human assignment behind this write, if any. */
+    assignment?: TaskAssignmentProvenance
   }): Promise<TaskRecord>
 
   /**
@@ -219,6 +230,8 @@ export type TaskStore = {
     fields: TaskUpdateFields,
     opts?: {
       writtenBy?: TaskWriteActor
+      /** Trusted human assignment behind this write, if any. */
+      assignment?: TaskAssignmentProvenance
       /** High-water scope inherited by the successor; never clears old scope. */
       scope?: TaskWriteScope
       access?: AccessContext

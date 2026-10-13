@@ -84,9 +84,11 @@ import {
   createGoalClarityAssessor,
   createGoalVerifier,
   createTaskTriageJudge,
+  createExecutionPlanner,
   type GoalLlmRuntime,
   type GoalLlmUsageContext,
   type TaskRecord,
+  type TaskAssignmentProvenance,
   collectStream,
   createInterAssistantTools,
   createReportBugTool,
@@ -506,7 +508,19 @@ import {
   setGoalAwaitingEventSystem,
   clearGoalAwaitingEventSystem,
   findEventWaitingGoalsSystem,
+  createGoal,
+  listGoalsByHostSystem,
+  setGoalStatusSystem,
 } from './db/goals.js'
+import { createAllowanceTree } from './goals/allowance-tree.js'
+import { createExecutionLedger } from './goals/execution-state.js'
+import { briefFromPlan, enterAssignedExecution, readExecutionSources, type EntryDeps } from './goals/execution-qualification.js'
+import { findActiveNativeExecutionSystem } from './db/task-execution-store.js'
+import { createTaskExecutionTools, type ControlEffects } from './tasks/execution-control.js'
+import { createExternalProgressTools } from './tasks/external-progress.js'
+import { taskExecutionRoutes } from './routes/task-execution.js'
+import { captureTaskGoalSource } from './workspace-access/goal-source-admission.js'
+import { getWorkspaceAccessMode } from './workspace-access/mode-policy.js'
 import { goalsRoutes } from './routes/goals.js'
 import { goalDefaultBudgetRoutes } from './routes/goal-default-budget.js'
 import { createDbCrmStore } from './db/crm-store.js'
@@ -1855,10 +1869,15 @@ export async function bootOpenApi(opts: BootOpenApiOptions): Promise<BootResult>
   // in boot, so the hook calls through this late-bound ref. Null (OSS keyless,
   // or before wiring) = no drafting — fail-closed by design.
   let judgeTaskForGoal: ((task: TaskRecord, userId: string) => void) | null = null
+  // Assigned execution (goals.md -> "Formation, readiness and automatic
+  // entry"): late-bound like the judge. A create carrying trusted human
+  // assignment provenance enters execution; anything else keeps triage.
+  let enterOrTriageTask: ((task: TaskRecord, userId: string, assignment?: TaskAssignmentProvenance) => void) | null = null
   const taskStore = createDbTaskStore({
     onTaskTerminal: goalRollup.onTaskTerminal,
-    onTaskCreate: (task, userId) => {
-      judgeTaskForGoal?.(task, userId)
+    onTaskCreate: (task, userId, assignment) => {
+      if (enterOrTriageTask) enterOrTriageTask(task, userId, assignment)
+      else judgeTaskForGoal?.(task, userId)
     },
   })
   const crmStore = createDbCrmStore()
@@ -3740,7 +3759,12 @@ export async function bootOpenApi(opts: BootOpenApiOptions): Promise<BootResult>
     })
   }
 
+  // Resumable task execution: durable pool/checkpoint state for goals that
+  // have a native execution (the edition's real UsageStore is usage truth).
+  const executionLedger = createExecutionLedger({ allowance: createAllowanceTree({ usageStore: usageStore ?? null }) })
+
   const goalDriver = createGoalDriver({
+    executionLedger,
     briefBoundary: createGoalBriefBoundary(),
     claimCrmEventResume: claimCrmGoalEventResume,
     assertSourceAuthority: assertGoalCrmSourceAuthority,
@@ -3803,6 +3827,12 @@ export async function bootOpenApi(opts: BootOpenApiOptions): Promise<BootResult>
         const runInput: Record<string, unknown> = { goalOutcome: goal.outcome, goalId: goal.id }
         if (goal.brief?.verification) runInput.goalVerification = goal.brief.verification
         if (goal.brief?.approach) runInput.goalApproach = goal.brief.approach
+        // Human steering and the qualified plan travel with the iteration.
+        const execution = await findActiveNativeExecutionSystem({ goalId: goal.id })
+        if (execution) {
+          if (execution.steering.length > 0) runInput.executionSteering = execution.steering.map((x) => x.instruction).join('\n')
+          if (execution.checkpoint?.nextStep ?? execution.plan.nextStep) runInput.executionNextStep = execution.checkpoint?.nextStep ?? execution.plan.nextStep
+        }
         if (goal.host?.type === 'task') {
           const t = await query<{ title: string }>(
             `SELECT title FROM tasks WHERE id = $1 AND valid_to IS NULL`,
@@ -3840,11 +3870,24 @@ export async function bootOpenApi(opts: BootOpenApiOptions): Promise<BootResult>
       // poll. The marker was cleared at claim time, so this reflects only THIS
       // iteration's `waitForEvent` call (if any).
       const parked = await getGoalAwaitingEventSystem(goal.id)
+      // Engine-observed evidence: the run's output content, versioned by
+      // hash, so an identical output twice is not new evidence (a finished
+      // run alone is never progress).
+      let evidence: { summary: string; artifacts: { kind: string; ref: string; version: string }[] } | undefined
+      if (outcome.kind === 'completed') {
+        const finished = await workflowRunStore.getRunSystem(activeRunId)
+        const body = JSON.stringify((finished as { output?: unknown } | null)?.output ?? null)
+        if (body !== 'null') {
+          evidence = { summary: `Workflow run ${activeRunId} completed.`,
+            artifacts: [{ kind: 'workflow_output', ref: goal.means.workflowId ?? 'workflow', version: createHash('sha256').update(body).digest('hex').slice(0, 16) }] }
+        }
+      }
       return {
         runId: activeRunId,
         terminal,
         completed: outcome.kind === 'completed',
         eventSubscriptions: parked?.subscriptions ?? null,
+        evidence,
       }
     },
     deliver: deliverGoalTerminal,
@@ -4353,9 +4396,94 @@ export async function bootOpenApi(opts: BootOpenApiOptions): Promise<BootResult>
   }
   // An update that makes an assistant the executor triages for it (the
   // previous executor's drafts were retired in the update transaction).
-  bindTaskExecutorChangeHook((task, _previous, userId) => {
-    if (task.executorAssistantId) judgeTaskForGoal?.(task, userId)
+  const executionPlanner = createExecutionPlanner({
+    provider, model: TRIAGE_MODEL, modelTier: 'standard', resolveLlm: resolveGoalLlm,
+    onUsage: recordGoalOverheadUsage('overhead:goal-triage'),
   })
+  const executionEntryDeps: EntryDeps = {
+    executorUsable: async (actor, workspaceId, executorAssistantId) => {
+      const usable = await query<{ ok: boolean }>(
+        `SELECT EXISTS (SELECT 1 FROM assistants a WHERE a.id = $3 AND a.workspace_id = $2 AND a.kind <> 'app'
+           AND public.assistant_placement_visible($1, a.id)) AS ok`, [actor, workspaceId, executorAssistantId])
+      return usable.rows[0]?.ok === true
+    },
+    // The selected assistant's actual runtime manifest: tools its active
+    // capability grants admit, plus the official tools of connectors usable
+    // here. Never connector labels or workflow ids.
+    manifest: async (assistantId, workspaceId, actorUserId) => {
+      const capabilities = new Set(await capabilityStore.listActive(assistantId))
+      const tools = new Set([...allTools.values()]
+        .filter((t) => !t.requiresCapability || capabilities.has(t.requiresCapability)).map((t) => t.name))
+      const accounts = new Set<string>()
+      for (const u of await listUsableWorkspaceConnectors({ connectorInstanceStore, connectorGrantStore, userId: actorUserId, workspaceId })) {
+        accounts.add(u.instance.provider)
+        for (const t of OFFICIAL_CONNECTOR_TOOLS[u.instance.provider] ?? []) tools.add(t.name)
+      }
+      return { tools, accounts }
+    },
+    readSources: readExecutionSources,
+    planner: ({ task, context, executorAssistantId, manifestTools }) =>
+      executionPlanner({ title: task.title, context, manifestTools, userId: '', workspaceId: task.workspaceId, assistantId: executorAssistantId }),
+    assessClarity: goalClarityAssessor,
+    captureAuthority: ({ userId, workspaceId, assistantId }) => captureAuthoringAuthoritySystem({ userId, workspaceId, assistantId }),
+    defaultBudget: async (workspaceId) => (await goalDefaultBudgetStore.get(workspaceId)).budget,
+    // The canonical arming path: confirm the task's existing draft, or mint
+    // one with source proof (ready mode) and confirm it, exactly like the
+    // confirm route, with a real authoring envelope.
+    armGoal: async ({ task, plan, authority, createdByUserId, budget }) => {
+      let goal = (await listGoalsByHostSystem({ type: 'task', id: task.id }))
+        .find((g) => g.status !== 'done' && g.status !== 'abandoned') ?? null
+      if (!goal) {
+        const draft = { workspaceId: task.workspaceId, createdByUserId, host: { type: 'task' as const, id: task.id }, outcome: plan.outcome,
+          doneWhen: { kind: 'query' as const, query: { description: 'task complete', predicate: { hostTaskDone: true } } },
+          means: {}, confirmed: false, brief: briefFromPlan(plan) }
+        const { setupState } = await getWorkspaceAccessMode(task.workspaceId, createdByUserId)
+        goal = setupState === 'ready'
+          ? await createGoal(draft, undefined, await captureTaskGoalSource({ userId: createdByUserId, workspaceId: task.workspaceId, assistantId: authority.assistantId, taskId: task.id }))
+          : await goalStore.create(draft)
+      }
+      const workflowId = goal.means.workflowId ?? await createCompletionWorkflow(goal, createdByUserId)
+      const armed = await updateGoalSystem(goal.id, { confirm: true, authoringAuthority: authority, outcome: plan.outcome,
+        brief: briefFromPlan(plan), means: { ...goal.means, workflowId }, budget })
+      if (!armed) throw new Error('goal_authority_unavailable')
+      return armed
+    },
+    kickoffGoal: goalDriver.kickoffGoal,
+  }
+  enterOrTriageTask = (task, userId, assignment) => {
+    if (!task.executorAssistantId) return
+    if (!assignment) { judgeTaskForGoal?.(task, userId); return }
+    void enterAssignedExecution(task, { kind: 'human_assignment', actorUserId: assignment.actorUserId, origin: assignment.origin,
+      at: new Date().toISOString() }, executionEntryDeps)
+      .then((r) => { if (r.kind === 'not_entered') judgeTaskForGoal?.(task, userId) })
+      .catch((err) => console.error('[execution] automatic entry failed:', err))
+  }
+  bindTaskExecutorChangeHook((task, _previous, userId, assignment) => {
+    if (task.executorAssistantId) enterOrTriageTask?.(task, userId, assignment)
+  })
+
+  // Execution controls reach the driver: pause holds the goal without
+  // delivery; steer / continue re-activate it and tick now. Counters come
+  // from the durable pool, so the fresh handoff state never resets them.
+  const executionControlEffects: ControlEffects = {
+    afterControl: async (state, kind) => {
+      if (!state.goalId) return
+      const goal = await getGoalByIdSystem(state.goalId)
+      if (!goal || goal.status === 'done' || goal.status === 'abandoned') return
+      if (kind === 'pause') {
+        if (goal.status === 'active') await setGoalStatusSystem(goal.id, 'blocked', 'execution_paused')
+        return
+      }
+      if (goal.status === 'blocked') await setGoalStatusSystem(goal.id, 'active', null)
+      if (goal.status !== 'running') await scheduleGoalTick(goal, new Date(), INITIAL_GOAL_LOOP_STATE)
+    },
+  }
+  const taskExecutionTools = createTaskExecutionTools(executionControlEffects)
+  const externalProgressTools = createExternalProgressTools()
+  allTools.set('getTaskExecution', taskExecutionTools.getTaskExecution)
+  allTools.set('controlTaskExecution', taskExecutionTools.controlTaskExecution)
+  allTools.set('bindExternalTaskExecution', externalProgressTools.bindExternalTaskExecution)
+  allTools.set('reportTaskProgress', externalProgressTools.reportTaskProgress)
 
   // Task-autopilot spin-up tools (confirm a draft goal; work a task to done) +
   // the agentic completion signal (markGoalComplete). `gatherEvidence` hands the
@@ -5736,6 +5864,7 @@ export async function bootOpenApi(opts: BootOpenApiOptions): Promise<BootResult>
       : {}),
     memoryTools: brainMemoryTools,
     taskTools,
+    taskExecutionTools: { ...taskExecutionTools, ...externalProgressTools },
     crmTools: { ...crmTools, ...crmOperationsTools, ...crmBusinessReferenceTools, ...crmCommercialContextTools, ...crmCommercialDocumentTools, ...crmGovernedRecordTools },
     credentialTools: crmCredentialTools,
     associationTools,
@@ -6618,6 +6747,7 @@ export async function bootOpenApi(opts: BootOpenApiOptions): Promise<BootResult>
   // Governed Project and Department Briefs (project-briefs.md).
   app.use('/api', requireAuth(env.JWT_SECRET), briefRoutes())
   app.use('/api', workRoutes({ taskStore, auth: requireAuth(env.JWT_SECRET) }))
+  app.use('/api', taskExecutionRoutes({ auth: requireAuth(env.JWT_SECRET), effects: executionControlEffects }))
 
   app.use('/api', requireAuth(env.JWT_SECRET), workflowApprovalsRoutes({
     approvalsStore: pendingApprovalsStore,

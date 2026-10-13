@@ -401,6 +401,18 @@ type BuildOpts = {
    * skill write surface. Write-scope keys only.
    */
   browserSkills?: BrowserSkillStore
+  /**
+   * Resumable task execution (goals.md -> "Resumable task execution"):
+   * read the execution, pause it, and bind/report an external coding
+   * session. The bridged context carries the authenticated credential, so a
+   * report or control here can never claim human intent or renew allowance.
+   */
+  taskExecutionTools?: {
+    getTaskExecution: Tool
+    controlTaskExecution: Tool
+    bindExternalTaskExecution: Tool
+    reportTaskProgress: Tool
+  }
 }
 
 /**
@@ -423,6 +435,7 @@ const READ_TOOL_NAMES = new Set<string>([
   'getMemory',
   'getTask',
   'listTasks',
+  'getTaskExecution',
   'getContact',
   'listContacts',
   'getCompany',
@@ -1616,6 +1629,9 @@ export function buildBrainTools(opts: BuildOpts): BrainTool[] {
     bridgeCoreTool(opts.taskTools.bulkUpdateTasks, resolveCtx, workspaceId),
     bridgeCoreTool(opts.taskTools.archiveTasks, resolveCtx, workspaceId),
   ]
+  const executionBridges = opts.taskExecutionTools
+    ? Object.values(opts.taskExecutionTools).map(tool => bridgeCoreTool(tool, resolveCtx, workspaceId))
+    : []
 
   // ── CRM bridges
   const crmBridges = [
@@ -1912,6 +1928,7 @@ export function buildBrainTools(opts: BuildOpts): BrainTool[] {
     getEntity,
     getMemory,
     ...taskBridges.filter((t) => t.name === 'getTask' || t.name === 'listTasks'),
+    ...executionBridges.filter((t) => t.name === 'getTaskExecution'),
     ...crmBridges.filter((t) =>
       t.name === 'getContact' || t.name === 'listContacts' ||
       t.name === 'getCompany' || t.name === 'listCompanies' ||
@@ -1948,6 +1965,7 @@ export function buildBrainTools(opts: BuildOpts): BrainTool[] {
       t.name === 'closeTask' || t.name === 'reopenTask' ||
       t.name === 'bulkUpdateTasks' || t.name === 'archiveTasks',
     ),
+    ...executionBridges.filter((t) => t.name !== 'getTaskExecution'),
     ...crmBridges.filter((t) =>
       t.name === 'saveContact' || t.name === 'updateContact' ||
       t.name === 'saveCompany' || t.name === 'updateCompany' ||

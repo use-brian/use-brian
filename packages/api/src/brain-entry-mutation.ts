@@ -1233,6 +1233,8 @@ export function createBrainEntryMutator(args: {
 
         const updated = await updateTask(userId, rowId, fields, undefined, {
           access: req.access,
+          // Authenticated Brain inbox edit: a human assignment.
+          assignment: { actorUserId: userId, origin: 'ui' },
         })
         if (!updated) {
           res.status(404).json({ error: 'Task not found' })
