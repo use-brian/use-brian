@@ -801,6 +801,22 @@ export function connectorToolsAllowedForChannelTurn(
   return !externalGuest || externalGuestConnectorTools === true
 }
 
+/**
+ * Does this transcript row count as audience evidence for a channel turn?
+ * In a group, a row carrying a provider message id was already shown to the
+ * group, so it can never be more restricted than the group's audience: its
+ * stamp is the room's read floor, not something the turn read. That holds for
+ * the inbound message as much as for history. Counting it made a room whose
+ * floor was fixed above the group's approval (by whichever bot created it)
+ * refuse every turn, 2026-10-13.
+ */
+export function countsAsGroupAudienceEvidence(
+  row: { channelMessageId: string | null },
+  isGroupChat: boolean,
+): boolean {
+  return !isGroupChat || row.channelMessageId === null
+}
+
 /** Keep exact-audience transcript history without laundering hidden results. */
 export async function filterChannelHistoryForAudience<T extends {
   channelMessageId: string | null
@@ -1706,7 +1722,9 @@ async function processChannelMessageTurn(params: ChannelPipelineParams): Promise
     assistant.workspaceId,
     userMessageRow.id,
   )
-  if (storedUserSource) scopeAccumulator.noteSource(storedUserSource)
+  if (storedUserSource && countsAsGroupAudienceEvidence(userMessageRow, isGroupChat)) {
+    scopeAccumulator.noteSource(storedUserSource)
+  }
 
   // Surface the persisted user-message row to streaming channels so
   // the client can attach feedback / edit / retry actions to it, and
@@ -1771,9 +1789,7 @@ async function processChannelMessageTurn(params: ChannelPipelineParams): Promise
   }))
   noteAutomaticScopeEvidence(
     scopeAccumulator,
-    isGroupChat
-      ? dbMessages.filter((message) => message.channelMessageId === null)
-      : dbMessages,
+    dbMessages.filter((message) => countsAsGroupAudienceEvidence(message, isGroupChat)),
   )
   const workflowProposalReceipt = latestWorkflowProposalReceipt(dbMessages)
 
