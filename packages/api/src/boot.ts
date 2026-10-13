@@ -200,7 +200,7 @@ import { captureAuthoringAuthoritySystem, resolveGoalAuthoritySystem, resolveWor
 import { deploymentProfile, usesOpenStandaloneRoutes } from './edition.js'
 import { createEmailAdmission, requireOutpostAuthPortal } from './auth/email-admission.js'
 import { validateOutpostAuthConfig } from './auth/outpost-auth-config.js'
-import { getTaskByIdSystem } from './db/tasks.js'
+import { bindTaskExecutorChangeHook, getTaskByIdSystem } from './db/tasks.js'
 import { createBrowserSkillsStore } from './db/browser-skills-store.js'
 import { createDbConnectorActionStore } from './db/connector-actions-store.js'
 import { createWorkspaceChatHandoffStore } from './db/workspace-chat-handoff-store.js'
@@ -4327,13 +4327,27 @@ export async function bootOpenApi(opts: BootOpenApiOptions): Promise<BootResult>
   judgeTaskForGoal = (task, userId) => {
     void triageTaskForGoal(task, userId, {
       goalStore,
-      resolveAssistantId: async (actor, workspaceId) => (await getWorkspacePrimaryAssistant(actor, workspaceId))?.id,
+      // The task's selected executor, and only while the acting user can
+      // still see it (tasks.md -> "Responsibility"). Never the primary by
+      // inference: no usable executor means no automatic draft.
+      resolveAssistantId: async (actor, workspaceId, executorAssistantId) => {
+        const usable = await query<{ ok: boolean }>(
+          `SELECT EXISTS (SELECT 1 FROM assistants a WHERE a.id = $3 AND a.workspace_id = $2 AND a.kind <> 'app'
+             AND public.assistant_placement_visible($1, a.id)) AS ok`,
+          [actor, workspaceId, executorAssistantId])
+        return usable.rows[0]?.ok ? executorAssistantId : undefined
+      },
       // Ready goals use only these public constants; connector metadata is legacy-only.
       publicCoreCapabilities: CORE_CAPABILITY_LINES,
       summariseCapabilities: summariseWorkspaceCapabilities,
       judge: taskTriageJudge,
     }).catch((err) => console.error('[goals] task triage draft failed:', err))
   }
+  // An update that makes an assistant the executor triages for it (the
+  // previous executor's drafts were retired in the update transaction).
+  bindTaskExecutorChangeHook((task, _previous, userId) => {
+    if (task.executorAssistantId) judgeTaskForGoal?.(task, userId)
+  })
 
   // Task-autopilot spin-up tools (confirm a draft goal; work a task to done) +
   // the agentic completion signal (markGoalComplete). `gatherEvidence` hands the

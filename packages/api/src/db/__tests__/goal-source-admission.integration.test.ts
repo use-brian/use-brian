@@ -34,7 +34,9 @@ async function fixture() {
   const definition = { startStepId: 'call', steps: [{ id: 'call', type: 'assistant_call' as const, target: { assistantId }, prompt: 'Test' }] }
   await pool.query("UPDATE workspace_access_policies SET access_mode='departments',setup_state='ready' WHERE workspace_id=$1", [workspaceId])
   const access = { workspaceId, userId, clearance: 'internal' as const, compartments: [compartment], mutationCompartments: [compartment], projectIds: [] as string[], visibilityAssistantIds: [assistantId] }
-  const task = await createTask(owner, { workspaceId, title: 'Canonical title', compartments: [compartment] })
+  // Automatic triage follows the selected executor (migration 753), so the
+  // fixture task is executed by the fixture assistant.
+  const task = { ...await createTask(owner, { workspaceId, title: 'Canonical title', compartments: [compartment] }), executorAssistantId: assistantId }
   const input = { workspaceId, userId, assistantId, taskId: task.id }
   const run = <T>(fn: () => T) => runWithAgentAccess(access, fn)
   const capture = () => run(() => captureTaskGoalSource(input))
@@ -205,16 +207,31 @@ describe('boot task-triage adapter: canonical mode selection and actual task cal
     expect(d.judge).toHaveBeenCalledWith(expect.objectContaining({ title: 'Canonical title', userId: f.userId }))
     expect(legacyCreate).not.toHaveBeenCalled()
   })
-  it('legacy retains the original judge/store path, optional assistant and no saved proof', async () => {
+  it('legacy retains the original judge/store path for the selected executor and no saved proof', async () => {
     const f = await fixture(), d = deps(f)
     await pool.query("UPDATE workspace_access_policies SET setup_state='legacy' WHERE workspace_id=$1", [f.workspaceId])
-    d.resolveAssistantId = vi.fn(async () => undefined)
     const legacyCreate = vi.spyOn(d.goalStore, 'create')
     const goal = await triageTaskForGoal({ ...f.task, title: 'Original legacy callback' }, f.userId, d)
-    expect(d.judge).toHaveBeenCalledWith(expect.objectContaining({ title: 'Original legacy callback', assistantId: undefined, userId: f.userId }))
+    expect(d.resolveAssistantId).toHaveBeenCalledWith(f.userId, f.workspaceId, f.assistantId)
+    expect(d.judge).toHaveBeenCalledWith(expect.objectContaining({ title: 'Original legacy callback', assistantId: f.assistantId, userId: f.userId }))
     expect(legacyCreate).toHaveBeenCalledOnce()
     expect(goal).toMatchObject({ createdByUserId: f.userId, authoringAuthority: null, confirmedAt: null })
     expect((await pool.query('SELECT count(*)::int n FROM goal_task_source_authority WHERE workspace_id=$1', [f.workspaceId])).rows[0].n).toBe(0)
+  })
+  it.each(['ready', 'legacy'] as const)('%s drafts nothing for human-executed or unassigned work', async setupState => {
+    const f = await fixture(), d = deps(f)
+    await pool.query('UPDATE workspace_access_policies SET setup_state=$2 WHERE workspace_id=$1', [f.workspaceId, setupState])
+    expect(await f.run(() => triageTaskForGoal({ ...f.task, executorAssistantId: null }, f.userId, d))).toBeNull()
+    expect(d.resolveAssistantId).not.toHaveBeenCalled()
+    expect(d.judge).not.toHaveBeenCalled()
+    expect((await pool.query('SELECT count(*)::int n FROM goals WHERE workspace_id=$1', [f.workspaceId])).rows[0].n).toBe(0)
+  })
+  it('legacy drafts nothing when the selected executor is not usable, and never substitutes another assistant', async () => {
+    const f = await fixture(), d = deps(f)
+    await pool.query("UPDATE workspace_access_policies SET setup_state='legacy' WHERE workspace_id=$1", [f.workspaceId])
+    d.resolveAssistantId = vi.fn(async () => undefined)
+    expect(await triageTaskForGoal(f.task, f.userId, d)).toBeNull()
+    expect(d.judge).not.toHaveBeenCalled()
   })
   it.each(['ready', 'legacy'] as const)('%s capability input isolates ready goals from secret connector canaries', async setupState => {
     const f = await fixture(), d = deps(f)
@@ -295,7 +312,7 @@ describe('boot task-triage adapter: canonical mode selection and actual task cal
       completion = triageTaskForGoal(task, actor, d)
     })
     const tasks = createDbTaskStore({ onTaskCreate: callback })
-    const input = { workspaceId: f.workspaceId, userId: f.userId, title: 'Actual task writer', compartments: [f.compartment] }
+    const input = { workspaceId: f.workspaceId, userId: f.userId, title: 'Actual task writer', compartments: [f.compartment], executorAssistantId: f.assistantId }
     const task = await f.run(() => tasks.create(input))
     const goal = await completion
     expect(goal).toMatchObject({ host: { type: 'task', id: task.id }, createdByUserId: f.userId })

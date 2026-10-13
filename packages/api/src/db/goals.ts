@@ -317,7 +317,7 @@ export async function listGoals(
 // as history.
 
 /** Why a host-lifecycle cascade retired the goal. Lands in `blocker_reason`. */
-export type GoalHostCascadeReason = 'host_task_deleted' | 'host_task_closed'
+export type GoalHostCascadeReason = 'host_task_deleted' | 'host_task_closed' | 'executor_changed'
 
 /** Task CLOSE skips already-terminal goals plus `running` (the loop may be
  * completing that host). Task DELETE skips terminal goals only: the host is

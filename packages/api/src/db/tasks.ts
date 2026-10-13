@@ -1,7 +1,7 @@
 import { isDeepStrictEqual } from 'node:util'
 import { admitTaskCreate } from '../workspace-access/task-create-admission.js'
-import { bindScopeSource, maxSensitivity, unionScopeRequirements } from '@use-brian/core'
-import type { AccessContext, EntityLinksStore, Sensitivity, TaskListFilters, TaskListRow, TaskRecord, TaskRecordStatus, TaskUpdateFields, TaskWriteActor, TaskStore } from '@use-brian/core'
+import { applyResponsibilityPatch, bindScopeSource, executorChanged, maxSensitivity, unionScopeRequirements } from '@use-brian/core'
+import type { AccessContext, EntityLinksStore, Sensitivity, TaskHome, TaskListFilters, TaskListRow, TaskRecord, TaskRecordStatus, TaskResponsibility, TaskUpdateFields, TaskWriteActor, TaskStore } from '@use-brian/core'
 import type pg from 'pg'
 import { assertExecutionResourceScope, buildAccessPredicate } from './access-predicate.js'
 import { assertAuthorshipPresent } from './authorship-guard.js'
@@ -10,10 +10,14 @@ import { emitDependsOnEdges, emitMentionedEdges } from './edge-hooks.js'
 import { abandonGoalsForHostTaskSystem } from './goals.js'
 import { currentAgentAccess } from './agent-access-context.js'
 import { publishTaskLifecycle } from '../task-event-fanout.js'
+import { validateTaskResponsibility } from '../tasks/responsibility.js'
+
+const RESPONSIBILITY_SELECT = `executor_assistant_id AS "executorAssistantId", follow_up_member_id AS "followUpMemberId",
+  home_kind AS "homeKind", home_id AS "homeId"`
 
 const FULL_SELECT = `
   id, workspace_id as "workspaceId", title, status,
-  assignee_id as "assigneeId", due, tags,
+  assignee_id as "assigneeId", ${RESPONSIBILITY_SELECT}, due, tags,
   parent_id as "parentId", external_ref as "externalRef", attributes,
   sensitivity, compartments, project_ids as "projectIds", user_id AS "userId", assistant_id AS "assistantId", scope_version::text AS "scopeVersion",
   created_at as "createdAt", updated_at as "updatedAt"
@@ -21,12 +25,22 @@ const FULL_SELECT = `
 
 const COMPACT_SELECT = `
   id, workspace_id as "workspaceId", title, status,
-  assignee_id as "assigneeId", due, tags,
+  assignee_id as "assigneeId", ${RESPONSIBILITY_SELECT}, due, tags,
   parent_id as "parentId", attributes, sensitivity, compartments,
   project_ids as "projectIds", user_id AS "userId", assistant_id AS "assistantId", scope_version::text AS "scopeVersion", updated_at as "updatedAt"
 `
 
-type TaskRow = {
+type ResponsibilityRow = {
+  executorAssistantId: string | null
+  followUpMemberId: string | null
+  homeKind: TaskHome['kind'] | null
+  homeId: string | null
+}
+
+const homeOf = (row: Pick<ResponsibilityRow, 'homeKind' | 'homeId'>): TaskHome | null =>
+  row.homeKind && row.homeId ? { kind: row.homeKind, id: row.homeId } : null
+
+type TaskRow = ResponsibilityRow & {
   id: string
   workspaceId: string
   title: string
@@ -47,7 +61,7 @@ type TaskRow = {
   updatedAt: Date
 }
 
-type CompactRow = {
+type CompactRow = ResponsibilityRow & {
   id: string
   workspaceId: string
   title: string
@@ -95,6 +109,9 @@ function toRecord(row: TaskRow): TaskRecord {
     title: row.title,
     status: row.status,
     assigneeId: row.assigneeId,
+    executorAssistantId: row.executorAssistantId,
+    followUpMemberId: row.followUpMemberId,
+    home: homeOf(row),
     due: row.due,
     tags: row.tags,
     parentId: row.parentId,
@@ -115,6 +132,9 @@ function toListRow(row: CompactRow): TaskListRow {
     title: row.title,
     status: row.status,
     assigneeId: row.assigneeId,
+    executorAssistantId: row.executorAssistantId,
+    followUpMemberId: row.followUpMemberId,
+    home: homeOf(row),
     due: row.due,
     tags: row.tags,
     parentId: row.parentId,
@@ -198,7 +218,7 @@ async function findTaskDuplicateInTransaction(userId: string, coords: Parameters
   await checkTaskProject(userId,coords,client)
   // Relationship writes are not represented by the row, so never swallow them.
   if (coords.title === PLACEHOLDER_TASK_TITLE||coords.dependsOn?.length||coords.linkedEntityIds?.length) return null
-  const ap=buildAccessPredicate(access,{startIdx:20,operation:'mutation'})
+  const ap=buildAccessPredicate(access,{startIdx:24,operation:'mutation'})
   const result = await client.query<TaskRow>(
     `SELECT ${FULL_SELECT} FROM tasks
       WHERE workspace_id=$1 AND title=$2 AND status=$3 AND parent_id IS NOT DISTINCT FROM $4
@@ -208,6 +228,8 @@ async function findTaskDuplicateInTransaction(userId: string, coords: Parameters
         AND project_ids @> $8::uuid[] AND project_ids <@ $8::uuid[]
         AND user_id IS NOT DISTINCT FROM $9::uuid AND assistant_id IS NOT DISTINCT FROM $10::uuid
         AND assignee_id IS NOT DISTINCT FROM $11::uuid AND due IS NOT DISTINCT FROM $12::timestamptz
+        AND executor_assistant_id IS NOT DISTINCT FROM $20::uuid AND follow_up_member_id IS NOT DISTINCT FROM $21::uuid
+        AND home_kind IS NOT DISTINCT FROM $22::text AND home_id IS NOT DISTINCT FROM $23::uuid
         AND tags=$13::text[] AND attributes=$14::jsonb AND external_ref=$15::jsonb
         AND created_by_user_id=$16 AND created_by_assistant_id IS NOT DISTINCT FROM $17::uuid
         AND source=$18 AND jsonb_build_array(source_session_id,source_episode_id,source_start_ms)=$19::jsonb
@@ -223,7 +245,8 @@ async function findTaskDuplicateInTransaction(userId: string, coords: Parameters
       coords.visibility?.userId??null,coords.visibility?.assistantId??null,coords.assigneeId??null,coords.due??null,
       coords.tags??[],JSON.stringify(coords.attributes??{}),JSON.stringify(coords.externalRef??{}),
       userId,coords.createdByAssistantId??null,coords.source??'user',
-      JSON.stringify([coords.sourceSessionId??null,coords.sourceEpisodeId??null,coords.sourceStartMs??null]),...ap.params])
+      JSON.stringify([coords.sourceSessionId??null,coords.sourceEpisodeId??null,coords.sourceStartMs??null]),
+      coords.executorAssistantId??null,coords.followUpMemberId??null,coords.home?.kind??null,coords.home?.id??null,...ap.params])
   return result.rows[0] ? toRecord(result.rows[0]) : null
 }
 
@@ -243,7 +266,14 @@ export async function createTask(
     expectedPolicyRevision?: string
     title: string
     status?: TaskRecordStatus
+    /** PERSON executor. Never together with `executorAssistantId` (task_executor_conflict). */
     assigneeId?: string | null
+    /** ASSISTANT executor (migration 753); validated against the actor and the home. */
+    executorAssistantId?: string | null
+    /** Explicit human follow-up contact; never implies execution. */
+    followUpMemberId?: string | null
+    /** Explicit operating home; omitted means unknown. */
+    home?: TaskHome | null
     due?: Date | null
     tags?: string[]
     parentId?: string | null
@@ -319,6 +349,15 @@ export async function createTask(
     params = await admitTaskCreate(client,userId,params,taskAccess(userId,params.workspaceId,params.access))
     checkTaskCreate(userId,params)
     await checkTaskProject(userId,params,client)
+    const responsibility = applyResponsibilityPatch(
+      { assigneeId: null, executorAssistantId: null, followUpMemberId: null, home: null },
+      { assigneeId: params.assigneeId ?? null, executorAssistantId: params.executorAssistantId ?? null,
+        followUpMemberId: params.followUpMemberId ?? null, home: params.home ?? null })
+    await validateTaskResponsibility(client, userId, {
+      workspaceId: params.workspaceId, sensitivity: params.sensitivity ?? 'internal',
+      compartments: params.compartments ?? [], projectIds: params.projectIds ?? [],
+      privateUserId: params.visibility?.userId ?? null, privateAssistantId: params.visibility?.assistantId ?? null,
+    }, null, responsibility)
     if (options?.deduplicate) {
       const duplicate = await findTaskDuplicateInTransaction(userId,params,client)
       if (duplicate) {
@@ -327,8 +366,9 @@ export async function createTask(
       }
     }
     const sql =
-      `INSERT INTO tasks (workspace_id, title, status, assignee_id, due, tags, parent_id, external_ref, attributes, created_by_user_id, compartments, project_ids, source, source_session_id, source_episode_id, created_by_assistant_id, source_start_ms, sensitivity, user_id, assistant_id)
-       SELECT $1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19, $20
+      `INSERT INTO tasks (workspace_id, title, status, assignee_id, due, tags, parent_id, external_ref, attributes, created_by_user_id, compartments, project_ids, source, source_session_id, source_episode_id, created_by_assistant_id, source_start_ms, sensitivity, user_id, assistant_id,
+          executor_assistant_id, follow_up_member_id, home_kind, home_id)
+       SELECT $1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19, $20, $21, $22, $23, $24
        WHERE EXISTS(SELECT 1 FROM workspace_members WHERE workspace_id=$1 AND user_id=$10)
          AND (effective_member_team_compartments($10,$1) IS NULL
            OR $11::text[] <@ effective_member_team_compartments($10,$1))
@@ -352,6 +392,8 @@ export async function createTask(
         params.createdByAssistantId ?? null,
         params.sourceStartMs ?? null,
         params.sensitivity??'internal',params.visibility?.userId??null,params.visibility?.assistantId??null,
+        responsibility.executorAssistantId, responsibility.followUpMemberId,
+        responsibility.home?.kind ?? null, responsibility.home?.id ?? null,
       ]
     const result = await client.query<TaskRow>(sql, values)
     if (!result.rows[0]) throw Object.assign(new Error('The task operation is outside the current access scope.'), { code: 'scope_operation_denied' })
@@ -441,6 +483,16 @@ export async function listTasks(ctx: AccessContext, filters: TaskListFilters): P
     values.push(filters.assigneeId)
     idx++
   }
+  if (filters.executorAssistantId) {
+    wheres.push(`executor_assistant_id = $${idx}`)
+    values.push(filters.executorAssistantId)
+    idx++
+  }
+  if (filters.followUpMemberId) {
+    wheres.push(`follow_up_member_id = $${idx}`)
+    values.push(filters.followUpMemberId)
+    idx++
+  }
   if (filters.status) {
     if (Array.isArray(filters.status)) {
       wheres.push(`status = ANY($${idx})`)
@@ -522,6 +574,11 @@ type OldTaskRow = {
   created_by_assistant_id: string | null
   /** Migration 334 — carried through supersession, see the INSERT below. */
   source_start_ms: number | null
+  /** Migration 753 — responsibility, carried through supersession. */
+  executor_assistant_id: string | null
+  follow_up_member_id: string | null
+  home_kind: TaskHome['kind'] | null
+  home_id: string | null
 }
 
 /**
@@ -537,7 +594,10 @@ function diffChangedFields(
   const changed: string[] = []
   if (fields.title !== undefined && next.title !== old.title) changed.push('title')
   if (fields.status !== undefined && next.status !== old.status) changed.push('status')
-  if (fields.assigneeId !== undefined && next.assigneeId !== old.assignee_id) changed.push('assigneeId')
+  if (next.assigneeId !== old.assignee_id) changed.push('assigneeId')
+  if ((next.executorAssistantId ?? null) !== old.executor_assistant_id) changed.push('executorAssistantId')
+  if ((next.followUpMemberId ?? null) !== old.follow_up_member_id) changed.push('followUpMemberId')
+  if ((next.home?.kind ?? null) !== old.home_kind || (next.home?.id ?? null) !== old.home_id) changed.push('home')
   if (
     fields.due !== undefined &&
     (next.due?.getTime() ?? null) !== (old.due?.getTime() ?? null)
@@ -605,6 +665,21 @@ export async function resolveTaskById(
   return result.rows.length === 0 ? null : toRecord(result.rows[0])
 }
 
+type ExecutorChangeHook = (task: TaskRecord, previous: TaskResponsibility, actorUserId: string) => void
+let executorChangeHook: ExecutorChangeHook | null = null
+
+/**
+ * Late-bound consumer of a committed executor change on a top-level task
+ * (migration 753). Boot binds executor-gated Goal triage here, so every write
+ * path (Brian tools, MCP, the Brain inbox routes, the claim route) reaches it,
+ * not only writes through one store instance. Fire-and-forget; a no-op until
+ * bound. The drafts made for the previous executor are already retired inside
+ * the update transaction.
+ */
+export function bindTaskExecutorChangeHook(hook: ExecutorChangeHook | null): void {
+  executorChangeHook = hook
+}
+
 /**
  * Bi-temporal supersession update.
  *
@@ -654,7 +729,7 @@ export async function updateTask(
         await client.query('ROLLBACK')
         return null
       }
-      const liveId = liveRes.rows[0].id
+      let liveId = liveRes.rows[0].id
       const access=taskAccess(userId,liveRes.rows[0].workspaceId,opts?.access)
       const ap=buildAccessPredicate(access,{startIdx:2,operation:readOnly?'read':'mutation'})
       const memberScope=`context_scope_allows_current_principal(workspace_id,sensitivity,compartments,project_ids)
@@ -671,11 +746,18 @@ export async function updateTask(
       }
 
       await client.query('SELECT id FROM workspaces WHERE id=$1 FOR UPDATE',[liveRes.rows[0].workspaceId])
+      // A concurrent writer may have superseded the head while this one waited
+      // for the workspace lock; re-resolve so it edits (or, for a guarded
+      // claim, judges) the current row instead of reporting not-found.
+      const relocked = await client.query<{ id: string }>(
+        `${LIVE_TASK_ID_CTE} SELECT id FROM chain WHERE valid_to IS NULL LIMIT 1`, [liveId])
+      if (relocked.rows[0]) liveId = relocked.rows[0].id
       const oldRes = await client.query<OldTaskRow>(
         `SELECT workspace_id, title, status, assignee_id, due, tags, parent_id, external_ref, attributes,
                 sensitivity, compartments, project_ids,
                 user_id, assistant_id, source, source_episode_id,
-                source_session_id, created_by_assistant_id, source_start_ms
+                source_session_id, created_by_assistant_id, source_start_ms,
+                executor_assistant_id, follow_up_member_id, home_kind, home_id
          FROM tasks WHERE id = $1 AND valid_to IS NULL AND retracted_at IS NULL AND NOT scope_held
            AND ${ap.sql} AND ${memberScope} FOR UPDATE`,
         [liveId,...ap.params],
@@ -686,9 +768,27 @@ export async function updateTask(
       }
       const old = oldRes.rows[0]
 
+      // Responsibility (migration 753): the executor is one slot, contact and
+      // home are independent. A precondition (the guarded claim) runs on the
+      // locked live row; 'noop' answers an idempotent repeat without a write.
+      const before: TaskResponsibility = {
+        assigneeId: old.assignee_id, executorAssistantId: old.executor_assistant_id,
+        followUpMemberId: old.follow_up_member_id,
+        home: old.home_kind && old.home_id ? { kind: old.home_kind, id: old.home_id } : null,
+      }
+      if (opts?.precondition?.({ ...before, status: old.status, workspaceId: old.workspace_id }) === 'noop') {
+        const current = await client.query<TaskRow>(`SELECT ${FULL_SELECT} FROM tasks WHERE id=$1`, [liveId])
+        await client.query('COMMIT')
+        return current.rows[0] ? toRecord(current.rows[0]) : null
+      }
+      const after = applyResponsibilityPatch(before, {
+        assigneeId: fields.assigneeId, executorAssistantId: fields.executorAssistantId,
+        followUpMemberId: fields.followUpMemberId, home: fields.home,
+      })
+
       const newTitle = fields.title !== undefined ? fields.title : old.title
       const newStatus = fields.status !== undefined ? fields.status : old.status
-      const newAssigneeId = fields.assigneeId !== undefined ? fields.assigneeId : old.assignee_id
+      const newAssigneeId = after.assigneeId
       const newDue = fields.due !== undefined ? fields.due : old.due
       const newTags = fields.tags !== undefined ? fields.tags : old.tags
       const newParentId = fields.parentId !== undefined ? fields.parentId : old.parent_id
@@ -711,6 +811,10 @@ export async function updateTask(
       nextUserId=admitted.visibility.userId;nextAssistantId=admitted.visibility.assistantId
       assertExecutionResourceScope({workspaceId:old.workspace_id,userId:nextUserId,assistantId:nextAssistantId,
         sensitivity:nextSensitivity,compartments:nextCompartments,projectIds:nextProjectIds},'mutation',access)
+      await validateTaskResponsibility(client, userId, {
+        workspaceId: old.workspace_id, sensitivity: nextSensitivity, compartments: nextCompartments,
+        projectIds: nextProjectIds, privateUserId: nextUserId, privateAssistantId: nextAssistantId,
+      }, before, after)
 
       const insertRes = await client.query<TaskRow>(
         `INSERT INTO tasks (
@@ -718,13 +822,15 @@ export async function updateTask(
            sensitivity, compartments, project_ids,
            user_id, assistant_id, source, source_episode_id,
            source_session_id, created_by_assistant_id, source_start_ms,
-           created_by_user_id, valid_from, valid_to, superseded_by
+           created_by_user_id, valid_from, valid_to, superseded_by,
+           executor_assistant_id, follow_up_member_id, home_kind, home_id
          )
          SELECT $1, $2, $3, $4, $5, $6, $7, $8::jsonb, $9::jsonb,
                  $10, $11::text[], $12::uuid[],
                  $13, $14, $15, $16,
                  $17, $18, $19,
-                 $20, now(), NULL, NULL
+                 $20, now(), NULL, NULL,
+                 $21, $22, $23, $24
          WHERE EXISTS(SELECT 1 FROM workspace_members WHERE workspace_id=$1 AND user_id=$20)
            AND (effective_member_team_compartments($20,$1) IS NULL
              OR $11::text[] <@ effective_member_team_compartments($20,$1))
@@ -762,6 +868,10 @@ export async function updateTask(
           // first place; the column only helps if the supersede carries it.
           old.source_start_ms,
           userId,
+          after.executorAssistantId,
+          after.followUpMemberId,
+          after.home?.kind ?? null,
+          after.home?.id ?? null,
         ],
       )
       const newRow = insertRes.rows[0]
@@ -812,9 +922,21 @@ export async function updateTask(
           exec: client,
         })
       }
+      // Executor change: an automatic draft made for the previous executor
+      // must not continue for the next one. Drafts only; a confirmed Goal is
+      // never cancelled by an assignment change (goals.md -> "Host-lifecycle
+      // cascade", "Executor-gated triage").
+      const reassigned = executorChanged(before, after)
+      if (reassigned) {
+        await abandonGoalsForHostTaskSystem(newRow.id, 'executor_changed', {
+          draftsOnly: true,
+          exec: client,
+        })
+      }
 
       await client.query('COMMIT')
       const newTask = toRecord(newRow)
+      if (reassigned && newTask.parentId === null) executorChangeHook?.(newTask, before, userId)
 
       // Workflow task-event emit — fire-and-forget after COMMIT. The old
       // row (already read for the supersession write) supplies the

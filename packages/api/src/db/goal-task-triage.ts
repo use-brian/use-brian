@@ -6,7 +6,12 @@ import { produceTaskGoalDraft } from './goal-task-producer.js'
 type TriageBrief = GoalBrief & { outcome: string }
 export type TaskGoalTriageDeps = {
   goalStore: Pick<GoalStore, 'create'>
-  resolveAssistantId: (userId: string, workspaceId: string) => Promise<string | undefined>
+  /**
+   * Confirm the task's selected executor assistant is usable by the acting
+   * user and return it; `undefined` when it is not. Never substitutes another
+   * assistant (the creator's primary is not an executor by inference).
+   */
+  resolveAssistantId: (userId: string, workspaceId: string, executorAssistantId: string) => Promise<string | undefined>
   /** Fixed public server-authored descriptions only: no connector metadata. */
   publicCoreCapabilities: readonly string[]
   /** Legacy only. System connector reads are not proof of ready source scope. */
@@ -17,22 +22,30 @@ export type TaskGoalTriageDeps = {
   }) => Promise<TriageBrief | null>
 }
 
-/** The onTaskCreate actor is the executing create user, never historical
+/** Executor gate (tasks.md -> "Responsibility"; goals.md -> "Executor-gated
+ * triage"): automatic formation runs only for a task whose executor is a
+ * selected assistant, and drafts for THAT assistant. A human-executed or
+ * unassigned task returns null without a judge call; explicit help the user
+ * asks for (confirmGoal / workTask) is a separate, unchanged path.
+ *
+ * The onTaskCreate actor is the executing create user, never historical
  * task authorship. Mode selection is a member-scoped projection only; the
  * selected writer rechecks policy in its insertion transaction. In particular,
  * a ready proof cannot downgrade to legacy and legacy cannot bypass activation.
  * There is deliberately no catch-and-fallback between the two branches. */
 export async function triageTaskForGoal(
-  task: Pick<TaskRecord, 'id' | 'workspaceId' | 'title' | 'attributes'>,
+  task: Pick<TaskRecord, 'id' | 'workspaceId' | 'title' | 'attributes' | 'executorAssistantId'>,
   userId: string,
   deps: TaskGoalTriageDeps,
 ) {
+  const executor = task.executorAssistantId
+  if (!executor) return null
   const { setupState } = await getWorkspaceAccessMode(task.workspaceId, userId)
   if (setupState !== 'legacy' && setupState !== 'ready') {
     throw new WorkspaceAccessError('access_mode_setup_required', 409)
   }
   if (setupState === 'ready') {
-    const assistantId = await deps.resolveAssistantId(userId, task.workspaceId)
+    const assistantId = await deps.resolveAssistantId(userId, task.workspaceId, executor)
     if (!assistantId) throw new WorkspaceAccessError('goal_source_unsupported', 409)
     return produceTaskGoalDraft({ userId, workspaceId: task.workspaceId, assistantId, taskId: task.id }, async canonical => {
       // Dynamic connector labels may carry private/confidential/cross-scope
@@ -48,7 +61,8 @@ export async function triageTaskForGoal(
   // original task input, and unconfirmed goalStore.create without fresh proof.
   const capabilities = await deps.summariseCapabilities(userId, task.workspaceId)
   const attrs = Object.keys(task.attributes ?? {}).length > 0 ? JSON.stringify(task.attributes) : null
-  const assistantId = await deps.resolveAssistantId(userId, task.workspaceId)
+  const assistantId = await deps.resolveAssistantId(userId, task.workspaceId, executor)
+  if (!assistantId) return null
   const brief = await deps.judge({ title: task.title, description: attrs, capabilities,
     userId, workspaceId: task.workspaceId, assistantId })
   if (!brief) return null
