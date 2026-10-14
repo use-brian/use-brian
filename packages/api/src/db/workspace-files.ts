@@ -1,5 +1,5 @@
 import { currentArchivePublication,admitProgrammaticFile,completeProgrammaticFile } from '../workspace-access/file-programmatic-admission.js'
-import { admitFileTransaction } from '../workspace-access/file-transaction-admission.js'
+import { admitFileTransaction,admitFileErasure } from '../workspace-access/file-transaction-admission.js'
 import { admitSessionFile, admitUploadedFile, readFileSessionBinding, type FileSessionBinding } from '../workspace-access/file-publication-admission.js'
 import { randomUUID } from 'node:crypto'
 import type {
@@ -566,18 +566,19 @@ export async function deleteWorkspaceFile(
 ): Promise<boolean> {
   access = fileMutationAccess(userId, workspaceId, access)
   const guard = fileSourceGuard(userId, access, 3)
-  // Hard-deletes the current row. WU-6 (D.3 retraction) introduces the
-  // soft-delete path; for now `delete` clears both the DB row and (via
-  // files-api) the GCS blob, matching pre-WS-2 semantics.
-  const result = await queryWithRLS<{ id: string }>(
-    userId,
-    `DELETE FROM workspace_files
-     WHERE id = $1 AND workspace_id = $2 AND valid_to IS NULL
-       AND retracted_at IS NULL AND NOT scope_held AND ${guard.sql}
-     RETURNING id`,
-    [id, workspaceId, ...guard.params],
-  )
-  return result.rows.length > 0
+  const client=await getAppPool().connect()
+  try {
+    await client.query('BEGIN');await applyRLSGucs(client,userId)
+    await client.query('SELECT id FROM workspaces WHERE id=$1 FOR UPDATE',[workspaceId])
+    const current=(await client.query<FileRow>(`SELECT ${FULL_SELECT} FROM workspace_files
+      WHERE id=$1 AND workspace_id=$2 AND valid_to IS NULL AND retracted_at IS NULL AND NOT scope_held AND ${guard.sql} FOR UPDATE`,
+      [id,workspaceId,...guard.params])).rows[0]
+    if(!current)return false
+    const finish=await admitFileErasure(client,userId,toRecord(current))
+    const result=await client.query('DELETE FROM workspace_files WHERE id=$1 AND workspace_id=$2 RETURNING id',[id,workspaceId])
+    if(result.rowCount!==1)return false
+    await finish(id);await client.query('COMMIT');return true
+  }finally{await rollbackAndRelease(client)}
 }
 
 /**

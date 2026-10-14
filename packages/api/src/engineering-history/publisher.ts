@@ -3,10 +3,11 @@ import type { FilesApi,FilesContext } from '@use-brian/core'
 import type { ArchiveCapture,ArchiveSnapshot } from './contracts.js'
 import { EngineeringHistoryError } from './contracts.js'
 import { archiveDigest,archiveReceipt,enqueueArchive,claimArchiveBatch,finishArchiveBatch,releaseArchiveBatch } from '../db/engineering-history-store.js'
-import { withArchivePublication } from '../workspace-access/file-programmatic-admission.js'
+import { withArchivePublication,previewArchiveScope } from '../workspace-access/file-programmatic-admission.js'
 export function createEngineeringArchivePublisher(files:FilesApi){
  const authFor=(s:ArchiveSnapshot)=>({workspaceId:s.workspaceId,keyId:s.principalId,authKind:s.principalKind,actingUserId:s.actingUserId})
  async function publish(s:ArchiveSnapshot){
+  await previewArchiveScope(s)
   const prior=await archiveReceipt(authFor(s),s.eventId,s.payloadDigest)
   if(prior?.deliveryStatus==='archived'||prior?.deliveryStatus==='deleted'||prior?.deliveryStatus==='excluded')return prior
   const ctx:FilesContext={workspaceId:s.workspaceId,userId:s.actingUserId,assistantId:s.assistantId,assistantKind:'standard',clearance:s.sensitivity,
@@ -28,7 +29,7 @@ export function createEngineeringArchivePublisher(files:FilesApi){
   const claim=await claimArchiveBatch(batchId)
   if(!claim)return null
   try{const receipt=await publish(claim.snapshot);await finishArchiveBatch(claim.id,claim.token);return receipt}
-  catch(error){await releaseArchiveBatch(claim.id,claim.token,error instanceof EngineeringHistoryError&&error.status<500);throw error}
+  catch(error){await releaseArchiveBatch(claim.id,claim.token,typeof error==='object'&&error!==null&&typeof(error as {status?:unknown}).status==='number'&&(error as {status:number}).status<500);throw error}
  }
  const capture:ArchiveCapture=async(auth,input,target,rule,scope)=>{
   const prior=await archiveReceipt(auth,input.eventId,archiveDigest(input))
@@ -37,7 +38,7 @@ export function createEngineeringArchivePublisher(files:FilesApi){
   if(!enqueued){const current=await archiveReceipt(auth,input.eventId,archiveDigest(input));if(current)return current}
   const receipt=scope.realtime&&enqueued?await drain(enqueued.batchId):null
   return receipt??{contractVersion:1,processingPurpose:'archive_only',outcome:enqueued?'queued':'duplicate',receiptStatus:'queued',
-   archiveId:enqueued?.snapshot.archiveId??prior?.archiveId,deliveryStatus:'pending',indexStatus:'pending',profileId:target.profileId,profileRevision:target.revision,ruleId:rule.id}
+   archiveId:enqueued?.snapshot.archiveId??prior?.archiveId,deliveryStatus:'pending',indexStatus:'pending',profileId:target.profileId,profileRevision:target.revision,ruleId:rule.id,firesAt:scope.firesAt}
  }
  return {capture,drain,publish}
 }

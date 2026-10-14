@@ -1,3 +1,4 @@
+import { recordArchiveDrop } from '../db/engineering-history-store.js'
 import type { ArchiveCapture } from '../engineering-history/contracts.js'
 /**
  * Deterministic routed capture for Brain MCP events.
@@ -268,6 +269,7 @@ export function createProgrammaticCaptureRouter(deps: {
       : null
 
     if (!matchedRule || decision.routing_mode === 'drop') {
+      if(target.processingMode==='archive_only')return recordArchiveDrop(auth,input.eventId,input,target.profileId)
       const receipt = await recordDroppedProgrammaticEvent({
         workspaceId: auth.workspaceId,
         principalKind: principalKind(auth),

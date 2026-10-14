@@ -1,3 +1,5 @@
+import type { ToolContext } from '@use-brian/core'
+import type { CaptureConfiguration,EngineeringHistoryCommand } from '@use-brian/shared'
 /**
  * Brain MCP server — Streamable HTTP endpoint.
  *
@@ -94,6 +96,8 @@ type Options = {
     auth: BrainAuth,
     input: ProgrammaticCaptureInput,
   ) => Promise<ProgrammaticCaptureResult>
+  captureConfiguration?: (auth:BrainAuth)=>Promise<CaptureConfiguration>
+  engineeringHistory?: (auth:BrainAuth,input:EngineeringHistoryCommand,ctx:ToolContext)=>Promise<unknown>
   /**
    * The shared agent capability toolset (agent-facing capability surface) —
    * built at boot via `buildAgentToolset`. Optional: a deploy without it
@@ -272,6 +276,8 @@ export function brainMcpRoutes(opts: Options): Router {
       ...(opts.programmaticCapture
         ? { routeCapture: (input) => opts.programmaticCapture!(auth, input) }
         : {}),
+      ...(opts.captureConfiguration?{captureConfiguration:()=>opts.captureConfiguration!(auth)}:{}),
+      ...(opts.engineeringHistory?{engineeringHistory:(input:EngineeringHistoryCommand,ctx:ToolContext)=>opts.engineeringHistory!(auth,input,ctx)}:{}),
       agentTools: opts.agentTools,
       agentActiveCapabilities,
       agentWritesEnabled,

@@ -1,3 +1,7 @@
+import { createEngineeringArchivePublisher } from './engineering-history/publisher.js'
+import { createEngineeringHistoryService } from './engineering-history/service.js'
+import { createCaptureConfigurationReader } from './engineering-history/configuration.js'
+import { engineeringHistoryRoutes } from './routes/engineering-history.js'
 import { configureTurnKernel } from './turn/runtime.js'
 import { configureChannelRooms, postPassiveChannelMessage } from './channel-room/room.js'
 import { scopeEvidenceFromRows, workspaceFilesCtxFor, type CreateComputerToolsOptions } from '@use-brian/core'
@@ -3162,12 +3166,14 @@ export async function bootOpenApi(opts: BootOpenApiOptions): Promise<BootResult>
   const chatEpisodeIngestor: ChatEpisodeIngestor =
     builtIngestors?.chatEpisodeIngestor ?? (async () => {})
   const brainEpisodeIngestor: BrainEpisodeIngestor | undefined = builtIngestors?.brainEpisodeIngestor
-  const programmaticCapture = brainEpisodeIngestor
-    ? createProgrammaticCaptureRouter({
+  let engineeringArchive:ReturnType<typeof createEngineeringArchivePublisher>|null=null
+  let engineeringHistory:ReturnType<typeof createEngineeringHistoryService>|null=null
+  const captureConfiguration=createCaptureConfigurationReader(programmaticCaptureStore,()=>engineeringArchive!==null)
+  const programmaticCapture = createProgrammaticCaptureRouter({
         store: programmaticCaptureStore,
-        ingest: brainEpisodeIngestor,
+        ingest: brainEpisodeIngestor??(async()=>{throw new Error('capture_extraction_unavailable')}),
+        archive:(...args)=>{if(!engineeringArchive)throw new Error('capture_archive_unavailable');return engineeringArchive.capture(...args)},
       })
-    : undefined
   const programmaticBatchWorker = brainEpisodeIngestor
     ? createBatchWorker({
         store: createDbProgrammaticBatchStore(),
@@ -4784,6 +4790,11 @@ export async function bootOpenApi(opts: BootOpenApiOptions): Promise<BootResult>
         (l2?.policy as FileToolPolicy) ?? fallback,
       )
     }
+    engineeringArchive=createEngineeringArchivePublisher(filesApi)
+    engineeringHistory=createEngineeringHistoryService({files:filesApi,cursorSecret:env.JWT_SECRET})
+    if(runWorkers){let draining=false;const timer=setInterval(()=>{if(draining||!engineeringArchive)return;draining=true
+      void (async()=>{for(let i=0;i<10;i++){try{if(!await engineeringArchive!.drain())break}catch{break}}})().finally(()=>{draining=false})
+    },30_000);timer.unref()}
     const fileTools = createFileTools(filesApi, {
       entityLinks: entityLinksStore,
       readCachedFile: (id, ctx) => fileStore.get(id, ctx),
@@ -5922,6 +5933,11 @@ export async function bootOpenApi(opts: BootOpenApiOptions): Promise<BootResult>
     docTools: { savedViewStore, docPageStore, docGateway, pageTemplateStore },
     ingest: brainEpisodeIngestor,
     programmaticCapture,
+    captureConfiguration,
+    engineeringHistory:async(auth,input,ctx)=>{
+      if(!engineeringHistory)throw new Error('history_unavailable')
+      return engineeringHistory.execute({...workspaceFilesCtxFor(ctx),principalRef:`${auth.authKind}:${auth.keyId}`,readOnly:auth.scope!=='read_write',origin:'programmatic'},input)
+    },
     agentTools: { reads: agentToolset.reads, writes: agentToolset.writes },
     // Powers the searchRecording tool's vector arm (recording-to-brain).
     embedder: sharedEmbedder,
@@ -6566,6 +6582,7 @@ export async function bootOpenApi(opts: BootOpenApiOptions): Promise<BootResult>
   app.use('/api/invitations', optionalAuth(env.JWT_SECRET), invitationRouter)
 
   app.use('/api/workspaces/:workspaceId/brain-keys', requireAuth(env.JWT_SECRET), brainKeysRoutes({ brainKeyStore, workspaceStore }))
+  if(engineeringHistory)app.use('/api/workspaces/:workspaceId/engineering-history',requireAuth(env.JWT_SECRET),engineeringHistoryRoutes({service:engineeringHistory,workspaceStore}))
   app.use(
     '/api/workspaces/:workspaceId/programmatic-capture-profiles',
     requireAuth(env.JWT_SECRET),

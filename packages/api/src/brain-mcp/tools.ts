@@ -1,3 +1,6 @@
+import { ProgrammaticCaptureError } from '../ingest/programmatic-capture.js'
+import { EngineeringHistoryCommandSchema,type EngineeringHistoryCommand,type CaptureConfiguration } from '@use-brian/shared'
+import { EngineeringHistoryError,ARCHIVE_TEXT_LIMIT } from '../engineering-history/contracts.js'
 import type { CrmCredentialParent } from '@use-brian/core'
 /**
  * Brain MCP server — tool surface.
@@ -388,6 +391,8 @@ type BuildOpts = {
   ingest?: BrainEpisodeIngestor
   /** Opt-in Pipeline-C producer used by `captureMode: 'routed'`. */
   routeCapture?: (input: ProgrammaticCaptureInput) => Promise<ProgrammaticCaptureResult>
+  captureConfiguration?: () => Promise<CaptureConfiguration>
+  engineeringHistory?: (input:EngineeringHistoryCommand,ctx:ToolContext)=>Promise<unknown>
   /**
    * Doc-page stores for the `readPage` / `editPage` / `deletePage` surface.
    * Optional — a deploy that omits it exposes no page tools (mirrors
@@ -428,6 +433,7 @@ type BuildOpts = {
  * `tools/list` and rejected on `tools/call`.
  */
 const READ_TOOL_NAMES = new Set<string>([
+  'getCaptureConfiguration','engineeringHistory',
   // Unified read
   'searchBrain',
   // Recording catalog discovery and scoped transcript retrieval
@@ -1470,7 +1476,7 @@ export function buildBrainTools(opts: BuildOpts): BrainTool[] {
       content: z
         .string()
         .min(1)
-        .max(MAX_INGEST_CHARS)
+        .max(ARCHIVE_TEXT_LIMIT)
         .describe(
           'The text to ingest — ideally one coherent unit (a project readme, a meeting note, a person profile).',
         ),
@@ -1530,8 +1536,9 @@ export function buildBrainTools(opts: BuildOpts): BrainTool[] {
         .describe('Deprecated alias for sourceLabel; retained for back-compat.'),
     },
     async handler(args) {
-      const content = String(args.content ?? '').trim()
-      if (!content) return text('Provide non-empty content.', true)
+      const original = String(args.content ?? '')
+      const content=args.captureMode==='routed'?original:original.trim()
+      if (!content.trim()) return text('Provide non-empty content.', true)
       const rawLabel =
         (typeof args.sourceLabel === 'string' && args.sourceLabel.trim()) ||
         (typeof args.title === 'string' && args.title.trim()) ||
@@ -1565,6 +1572,7 @@ export function buildBrainTools(opts: BuildOpts): BrainTool[] {
               ? { metadata: args.metadata as Record<string, string | number | boolean> }
               : {}),
           })
+          if(result.processingPurpose==='archive_only')return {...text(JSON.stringify(result)),structuredContent:result}
           if (result.outcome === 'queued') {
             return text(
               `Queued event ${eventId} for pooled capture` +
@@ -1580,10 +1588,10 @@ export function buildBrainTools(opts: BuildOpts): BrainTool[] {
           }
           return text(formatIngestResult(result.extraction!, sourceLabel))
         } catch (err) {
-          const msg = err instanceof Error ? err.message : String(err)
-          return text(`Routed capture failed: ${msg}`, true)
+          return {...text('Routed capture unavailable.',true),structuredContent:{contractVersion:1,failureCode:(err as {code?:string}).code==='file_publication_uncertain'?'archive_publication_uncertain':err instanceof EngineeringHistoryError?err.code:err instanceof ProgrammaticCaptureError?err.code:'capture_unavailable'}}
         }
       }
+      if(content.length>MAX_INGEST_CHARS)return text('Content exceeds the immediate ingest limit.',true)
       // Default to the smart path; `decompose: false` opts into the direct save.
       const decompose = args.decompose !== false
 
@@ -1937,7 +1945,17 @@ export function buildBrainTools(opts: BuildOpts): BrainTool[] {
       }
     : null
 
+  const historyTools:BrainTool[]=[]
+  if(opts.captureConfiguration)historyTools.push({name:'getCaptureConfiguration',description:'Read this authenticated connection’s effective capture purpose, readiness, admitted audience and limits. Does not observe the local emitter.',inputSchema:{},
+    async handler(){try{if(opts.credentialCurrent&&!await opts.credentialCurrent())throw new EngineeringHistoryError('capture_target_unavailable');const config=await opts.captureConfiguration!();return {...text(JSON.stringify(config)),structuredContent:config}}catch{return {...text('Capture configuration unavailable.',true),structuredContent:{contractVersion:1,failureCode:'capture_target_unavailable'}}}}})
+  if(opts.engineeringHistory)historyTools.push({name:'engineeringHistory',description:'Explicit admitted engineering archive list/search/read/JSONL export. Originals and reported results are unverified. Write credentials may annotate, exclude or delete with expected versions and idempotency.',
+    inputSchema:{...EngineeringHistoryCommandSchema.shape,action:opts.scope==='read'?z.enum(['list','search','read','export']):EngineeringHistoryCommandSchema.shape.action},
+    async handler(args){try{if(opts.credentialCurrent&&!await opts.credentialCurrent())throw new EngineeringHistoryError('history_not_available',404);const ctx=await resolveCtx();if('error' in ctx)throw new EngineeringHistoryError('history_not_available',404)
+      const result=await opts.engineeringHistory!(EngineeringHistoryCommandSchema.parse(args),ctx);if(opts.credentialCurrent&&!await opts.credentialCurrent())throw new EngineeringHistoryError('history_not_available',404)
+      return {...text(JSON.stringify(result)),structuredContent:result as Record<string,unknown>}
+    }catch(error){return {...text('Engineering history unavailable.',true),structuredContent:{contractVersion:1,failureCode:error instanceof EngineeringHistoryError?error.code:'history_unavailable'}}}}})
   const all: BrainTool[] = [
+    ...historyTools,
     ...associationBridges,
     ...storeBridges,
     ...(askStoreAssistant ? [askStoreAssistant] : []),
@@ -2059,6 +2077,10 @@ export function buildBrainTools(opts: BuildOpts): BrainTool[] {
   return exposed.map(tool => ({
     ...tool,
     handler: async args => {
+      if(tool.name==='getCaptureConfiguration'||tool.name==='ingestToBrain'&&args.captureMode==='routed'){
+        if(opts.credentialCurrent&&!await opts.credentialCurrent())return {...text('Capture unavailable.',true),structuredContent:{contractVersion:1,failureCode:'capture_target_unavailable'}}
+        return tool.handler(args)
+      }
       const ctx = await resolveCtx()
       if ('error' in ctx) return text(ctx.error, true)
       const security = ctx.executionContext?.security

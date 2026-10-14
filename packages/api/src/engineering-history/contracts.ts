@@ -6,6 +6,7 @@ export const ARCHIVE_TEXT_LIMIT = 256 * 1024
 export type ArchiveSnapshot = {
  processingPurpose: 'archive_only'
  archiveId: string
+ serverSequence?: string
  workspaceId: string
  assistantId: string
  profileId: string
@@ -22,6 +23,7 @@ export type ArchiveSnapshot = {
  eventId: string
  content: string
  payloadDigest: string
+ contentDigest: string
  occurredAt: string
  receivedAt: string
  role: 'user' | 'assistant'

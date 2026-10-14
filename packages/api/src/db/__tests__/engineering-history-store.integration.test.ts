@@ -1,3 +1,17 @@
+import {z} from 'zod'
+import {buildTool,workspaceFilesCtxFor} from '@use-brian/core'
+import {brainMcpRoutes} from '../../brain-mcp/server.js'
+import {mkdtempSync,rmSync} from 'node:fs'
+import {tmpdir} from 'node:os'
+import {join} from 'node:path'
+import express from 'express'
+import request from 'supertest'
+import {requireAuth} from '../../auth/middleware.js'
+import {createTokens} from '../../auth/jwt.js'
+import {createWorkspaceStore} from '../workspace-store.js'
+import {engineeringHistoryRoutes} from '../../routes/engineering-history.js'
+import {createEngineeringHistoryService} from '../../engineering-history/service.js'
+import {createCaptureConfigurationReader} from '../../engineering-history/configuration.js'
 import { randomUUID } from 'node:crypto'
 import { afterAll,describe,it,expect,vi } from 'vitest'
 import { getPool,getAppPool,queryWithRLS } from '../client.js'
@@ -29,9 +43,9 @@ async function fixture(ready=false){
  const store=createProgrammaticCaptureStore()
  const profile=await store.createProfile({actingUserId:userId,authSessionId:session,workspaceId,name:'Engineering',processingMode:'archive_only',partitionBy:'session',enabled:true,...(ready?{destination:{kind:'department' as const,departmentId:team.id}}:{})})
  const rule=await store.addRule({actingUserId:userId,authSessionId:session,workspaceId,profileId:profile.id,rule:{filterType:'role_match',filterParams:{values:['user','assistant']},routingMode:'realtime',scopeBindingMode:'explicit',compartments:[team.compartmentKey!]}})
- if(ready)keyId=(await withExternalKeyActor(userId,session,()=>createDbBrainKeyStore().create({workspaceId,actingUserId:userId,name:'Fixture',scope:'read_write',maxClearance:'internal',contextGroupId:team.id,contextProjectId:null,captureAssistantId:assistantId,captureProfileId:profile.id}))).id
- else await pool.query(`INSERT INTO brain_keys(id,workspace_id,name,key_hash,key_prefix,scope,issuer_user_id,capture_assistant_id,capture_profile_id)
-  VALUES($1,$2,'Fixture key','not-a-credential','fixture','read_write',$3,$4,$5)`,[keyId,workspaceId,userId,assistantId,profile.id])
+ const issued=await withExternalKeyActor(userId,session,()=>createDbBrainKeyStore().create({workspaceId,actingUserId:userId,name:'Fixture',scope:'read_write',maxClearance:'internal',contextGroupId:ready?team.id:null,contextProjectId:null,captureAssistantId:assistantId,captureProfileId:profile.id}))
+ keyId=issued.id
+
  const auth:BrainAuth={workspaceId,keyId,scope:'read_write',maxClearance:'internal',authKind:'api_key',storeScope:'none',agentScope:'none',actingUserId:userId,captureAssistantId:assistantId,captureProfileId:profile.id}
  const ctx:FilesContext={workspaceId,userId,assistantId,assistantKind:'primary',clearance:'confidential'}
  const blobs=new Map<string,Buffer>(),audit=vi.fn(),ingest=vi.fn()
@@ -39,7 +53,7 @@ async function fixture(ready=false){
  const api=createFilesApi({store:createDbWorkspaceFilesStore(),gcs:{writeBlob:async(k:string,b:Buffer)=>{if(fail)throw new Error('storage unavailable');blobs.set(k,b);await io()},readBlob:async(k:string)=>blobs.has(k)?{bytes:blobs.get(k)!}:null,deleteBlob:async(k:string)=>{blobs.delete(k)}} as never,bucket:'fixture',auditStore:{append:audit} as never})
  const publisher=createEngineeringArchivePublisher(api),route=createProgrammaticCaptureRouter({store,ingest,archive:publisher.capture})
  const send=(eventId=randomUUID(),content='  original\n工程 ☃\n\t')=>route(auth,{eventId,content,sessionId:'fictional-session',role:'user',metadata:{provider:'codex'}})
- return {workspaceId,userId,memberId,keyId,profile,rule:rule!,auth,ctx,store,api,blobs,ingest,publisher,route,send,team,
+ return {workspaceId,userId,memberId,keyId,plaintext:issued.plaintext,profile,rule:rule!,auth,ctx,store,api,blobs,ingest,publisher,route,send,team,
   during(fn:()=>Promise<void>){io=fn},failStorage(){fail=true},workingStorage(){fail=false}}
 }
 describe('[COMP:api/engineering-history] native publication and identity',()=>{
@@ -171,6 +185,106 @@ describe('[COMP:api/engineering-history] native publication and identity',()=>{
   const restricted=await f.send()
   expect((await f.api.readBytes(oversight,restricted.fileId!)).ok).toBe(false)
   expect((await f.api.readBytes({...f.ctx,workspaceId:randomUUID()},restricted.fileId!)).ok).toBe(false)
+ })
+
+ it('EH09/EH10 shared history preserves original export, annotations, versions and canonical erasure',async()=>{
+  const f=await fixture(),r=await f.send(),history=createEngineeringHistoryService({files:f.api,cursorSecret:'fixture-cursor-secret'})
+  const original=await history.read(f.ctx,r.archiveId!)
+  expect(original.content).toBe('  original\n工程 ☃\n\t')
+  const command={action:'annotate' as const,eventId:original.id,text:'Reported result is unverified.',expectedRevision:original.revision,expectedFileVersion:original.fileVersion,idempotencyKey:randomUUID()}
+  const first=await history.execute(f.ctx,command)
+  expect(await history.execute(f.ctx,command)).toEqual(first)
+  expect((await history.read(f.ctx,original.id)).content).toBe(original.content)
+  expect((await history.read(f.ctx,original.id)).annotations).toHaveLength(1)
+  await expect(history.execute(f.ctx,{...command,text:'changed'})).rejects.toThrow('history_command_conflict')
+  await expect(history.execute(f.ctx,{...command,idempotencyKey:randomUUID()})).rejects.toThrow('history_version_conflict')
+  const exported=await history.exportPage(f.ctx,{query:'工程'})
+  expect(JSON.parse(exported.jsonl).content).toBe(original.content);expect(exported.status).toBe('complete')
+  const current=await history.read(f.ctx,original.id),erase={action:'delete' as const,eventId:current.id,expectedRevision:current.revision,expectedFileVersion:current.fileVersion,idempotencyKey:randomUUID()}
+  expect(await history.execute(f.ctx,erase)).toMatchObject({status:'deleted'})
+  expect(await history.execute(f.ctx,erase)).toMatchObject({status:'deleted'})
+  expect((await history.list(f.ctx)).events).toEqual([])
+  await expect(history.read(f.ctx,original.id)).rejects.toThrow('history_not_available')
+  expect(f.blobs.size).toBe(0)
+ })
+ it('EH09 scoped cursors, original JSONL partial failure and read-only commands disclose only admitted events',async()=>{
+  const f=await fixture(),a=await f.send(),b=await f.send(),history=createEngineeringHistoryService({files:f.api,cursorSecret:'fixture-cursor-secret'})
+  const page=await history.list(f.ctx,{limit:1});expect(page.events).toHaveLength(1);expect(page.nextCursor).toBeTruthy()
+  expect((await history.list(f.ctx,{limit:1,cursor:page.nextCursor!})).events).toHaveLength(1)
+  await expect(history.list({...f.ctx,userId:f.memberId},{limit:1,cursor:page.nextCursor!})).rejects.toThrow('history_cursor_invalid')
+  expect((await history.list({...f.ctx,userId:f.memberId})).events).toEqual([])
+  await expect(history.read({...f.ctx,userId:f.memberId},a.archiveId!)).rejects.toThrow('history_not_available')
+  const event=await history.read(f.ctx,a.archiveId!)
+  await expect(history.execute({...f.ctx,readOnly:true},{action:'delete',eventId:event.id,expectedRevision:event.revision,expectedFileVersion:event.fileVersion,idempotencyKey:randomUUID()})).rejects.toThrow('history_write_denied')
+  f.blobs.delete(`${f.workspaceId}/${b.fileId}`)
+  const partial=await history.exportPage(f.ctx)
+  expect(partial).toMatchObject({status:'partial',count:1,failureCode:'history_not_available'})
+  expect(JSON.parse(partial.jsonl).id).toBe(a.archiveId)
+ })
+ it('EH01 configuration inherits the selected assistant and fails readiness after key revocation',async()=>{
+  const f=await fixture(),configuration=createCaptureConfigurationReader(f.store,()=>true)
+  expect(await configuration(f.auth)).toMatchObject({ready:true,processingPurpose:'archive_only',permittedEventKinds:['user','assistant'],localEmitterObserved:false})
+  await f.store.setAssistantProfile({actingUserId:f.userId,workspaceId:f.workspaceId,assistantId:f.auth.captureAssistantId!,profileId:f.profile.id})
+  expect(await configuration({...f.auth,captureProfileId:null})).toMatchObject({ready:true,profileId:f.profile.id})
+  expect(await configuration({...f.auth,scope:'read'})).toMatchObject({ready:false})
+  await pool.query("UPDATE brain_keys SET status='revoked' WHERE id=$1",[f.keyId])
+  expect(await configuration(f.auth)).toMatchObject({ready:false})
+ })
+ it('EH09 HTTP authenticates real web users and registers static JSONL export before event ids',async()=>{
+  const f=await fixture(),r=await f.send(),history=createEngineeringHistoryService({files:f.api,cursorSecret:'fixture-cursor-secret'})
+  const session=(await pool.query("INSERT INTO auth_sessions(user_id,auth_version,device_label) VALUES($1,0,'History fixture') RETURNING id",[f.userId])).rows[0].id
+  const secret='fictional-history-web-secret',token=createTokens(f.userId,secret,{id:session,authVersion:0}).accessToken,app=express()
+  app.use(express.json());app.use(requireAuth(secret));app.use('/api/workspaces/:workspaceId/engineering-history',engineeringHistoryRoutes({service:history,workspaceStore:createWorkspaceStore()}))
+  const path=`/api/workspaces/${f.workspaceId}/engineering-history`
+  expect((await request(app).get(path)).status).toBe(401)
+  const original=await request(app).get(`${path}/${r.archiveId}`).auth(token,{type:'bearer'})
+  expect(original.status).toBe(200);expect(original.body.content).toContain('工程')
+  const exported=await request(app).get(`${path}/export`).auth(token,{type:'bearer'})
+  expect(exported.status).toBe(200);expect(exported.headers['x-brian-export-status']).toBe('complete');expect(JSON.parse(exported.text).id).toBe(r.archiveId)
+ })
+
+ it.each(['codex','claude-code'] as const)('EH11 provider fixture reaches the actual MCP transport, native publisher and exact history for %s',async provider=>{
+  const f=await fixture(true),history=createEngineeringHistoryService({files:f.api,cursorSecret:'fixture-cursor-secret'}),configuration=createCaptureConfigurationReader(f.store,()=>true)
+  const unused=vi.fn(async()=>{throw new Error('operational tool must not run')})
+  const tools=new Proxy({}, {get(_target,name){return buildTool({name:String(name),description:'Fixture boundary',inputSchema:z.object({id:z.string().optional()}),execute:unused})}})
+  const app=express();app.use(express.json());app.use('/api/brain/mcp',brainMcpRoutes({brainKeyStore:createDbBrainKeyStore(),memoryTools:tools as never,taskTools:tools as never,crmTools:tools as never,retrievalTools:tools as never,
+   programmaticCapture:f.route,captureConfiguration:configuration,engineeringHistory:(auth,input,ctx)=>history.execute({...workspaceFilesCtxFor(ctx),readOnly:auth.scope==='read',principalRef:`${auth.authKind}:${auth.keyId}`,origin:'programmatic'},input)}))
+  const server=await new Promise<import('node:http').Server>(resolve=>{const s=app.listen(0,'127.0.0.1',()=>resolve(s))}),address=server.address() as import('node:net').AddressInfo
+  const collector=await import(new URL('../../../../engineering-capture/dist/index.js',import.meta.url).href) as {
+   CollectorConfigSchema:{parse(v:unknown):any};CaptureSpool:new(c:any)=>{enqueue(v:any):string;close():void;status():any};
+   projectCodexHook(v:unknown):any;projectClaudeCodeHook(v:unknown):any;connectCaptureTransport(c:any,e:Record<string,string>):Promise<any>;flushCapture(c:any,s:any,connect:()=>Promise<any>):Promise<any>
+  }
+  const dir=mkdtempSync(join(tmpdir(),'engineering-round-trip-')),config=collector.CollectorConfigSchema.parse({version:1,provider,endpoint:`http://127.0.0.1:${address.port}/api/brain/mcp`,credentialEnv:'BRAIN_CAPTURE_FIXTURE_KEY',project:'/workspace/example-project',stateRoot:dir}),spool=new collector.CaptureSpool(config)
+  try{
+   const project=provider==='codex'?collector.projectCodexHook:collector.projectClaudeCodeHook
+   for(const [hook,field,text] of [['UserPromptSubmit','prompt','  Submitted\n工程 ☃\n'],['Stop','last_assistant_message','\nReported result.\t ']]){
+    const selected=project({hook_event_name:hook,session_id:'fixture-session',turn_id:'fixture-turn',cwd:'/workspace/example-project',[field!]:text,reasoning:'excluded',tool_result:'excluded',transcript_path:'/unread/fixture'})
+    expect(selected.event).toBeTruthy();spool.enqueue(selected.event)
+   }
+   const result=await collector.flushCapture(config,spool,()=>collector.connectCaptureTransport(config,{BRAIN_CAPTURE_FIXTURE_KEY:f.plaintext}))
+   expect(result).toMatchObject({delivered:2});expect(spool.status()).toMatchObject({counts:{archived:2}})
+   const events=(await history.list(f.ctx)).events;expect(events).toHaveLength(2)
+   expect((await history.read(f.ctx,events[0]!.id)).content).toBe('  Submitted\n工程 ☃\n')
+   expect((await history.read(f.ctx,events[1]!.id)).content).toBe('\nReported result.\t ')
+   expect(f.ingest).not.toHaveBeenCalled();expect(unused).not.toHaveBeenCalled()
+  }finally{spool.close();rmSync(dir,{recursive:true,force:true});await new Promise<void>((resolve,reject)=>server.close(e=>e?reject(e):resolve()))}
+ })
+
+ it('EH04 capture-assistant Department revocation blocks new capture and hides original history',async()=>{
+  const f=await fixture(),r=await f.send(),configuration=createCaptureConfigurationReader(f.store,()=>true)
+  await pool.query('DELETE FROM department_edges WHERE department_id=$1 AND assistant_id=$2',[f.team.id,f.auth.captureAssistantId])
+  expect(await configuration(f.auth)).toMatchObject({ready:false})
+  await expect(f.send()).rejects.toThrow()
+  expect((await f.api.readBytes(f.ctx,r.fileId!)).ok).toBe(false)
+  expect(f.ingest).not.toHaveBeenCalled()
+ })
+ it('EH07 enqueue sequence preserves navigation when publication completes out of order',async()=>{
+  const f=await fixture(),history=createEngineeringHistoryService({files:f.api,cursorSecret:'fixture-cursor-secret'})
+  await f.store.updateRule({actingUserId:f.userId,workspaceId:f.workspaceId,profileId:f.profile.id,ruleId:f.rule.id,rule:{filterType:'always',routingMode:'scheduled',routingSchedule:'0 0 * * *',scopeBindingMode:'explicit',compartments:[f.team.compartmentKey!]}})
+  const first=await f.send(randomUUID(),'first accepted'),batch=(await pool.query("SELECT id FROM pending_ingest_batches WHERE workspace_id=$1 AND events->0->>'archiveId'=$2",[f.workspaceId,first.archiveId])).rows[0].id
+  const second=await f.send(randomUUID(),'second accepted'),other=(await pool.query("SELECT id FROM pending_ingest_batches WHERE workspace_id=$1 AND events->0->>'archiveId'=$2",[f.workspaceId,second.archiveId])).rows[0].id
+  await f.publisher.drain(other);await f.publisher.drain(batch)
+  expect((await history.list(f.ctx)).events.map(e=>e.id)).toEqual([first.archiveId,second.archiveId])
  })
 
 })
