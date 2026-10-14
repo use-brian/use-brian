@@ -50,6 +50,15 @@ describe('[COMP:platform/local-rig] no-paid administrative fixture', () => {
     assert.match(adminRuntimeNodeOptions('/path with spaces'), /path%20with%20spaces/)
   })
 
+  it('selects only a validated loopback administrative database port',()=>{
+    const env=adminRigEnvironment('/fixture',{BRIAN_ADMIN_PG_PORT:'55483',DATABASE_URL:'postgres://remote.example/data'})
+    assert.equal(new URL(env.DATABASE_URL).hostname,'127.0.0.1')
+    assert.equal(new URL(env.DATABASE_URL).port,'55483')
+    assert.equal(new URL(env.DATABASE_URL_APP).port,'55483')
+    assert.equal(env.BRIAN_ADMIN_PG_PORT,'55483')
+    for(const port of ['443','65536','remote.example','54;false'])assert.throws(()=>adminRigEnvironment('/fixture',{BRIAN_ADMIN_PG_PORT:port}),/Invalid/)
+  })
+
   it('allows actual loopback HTTP while refusing TCP, TLS and fetch before external lookup', () => {
     const child = spawnSync(process.execPath, ['--input-type=module', '-e', `
       import assert from 'node:assert/strict';

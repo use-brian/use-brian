@@ -49,12 +49,14 @@ async function fixture(ready=false){
  const auth:BrainAuth={workspaceId,keyId,scope:'read_write',maxClearance:'internal',authKind:'api_key',storeScope:'none',agentScope:'none',actingUserId:userId,captureAssistantId:assistantId,captureProfileId:profile.id}
  const ctx:FilesContext={workspaceId,userId,assistantId,assistantKind:'primary',clearance:'confidential'}
  const blobs=new Map<string,Buffer>(),audit=vi.fn(),ingest=vi.fn()
- let io=async()=>{},fail=false
- const api=createFilesApi({store:createDbWorkspaceFilesStore(),gcs:{writeBlob:async(k:string,b:Buffer)=>{if(fail)throw new Error('storage unavailable');blobs.set(k,b);await io()},readBlob:async(k:string)=>blobs.has(k)?{bytes:blobs.get(k)!}:null,deleteBlob:async(k:string)=>{blobs.delete(k)}} as never,bucket:'fixture',auditStore:{append:audit} as never})
+ let io=async()=>{},fail=false,lostAck=false
+ const fileStore=createDbWorkspaceFilesStore(),nativeCreate=fileStore.create.bind(fileStore)
+ fileStore.create=async(...args)=>{const file=await nativeCreate(...args);if(lostAck){lostAck=false;throw new Error('lost commit acknowledgement')}return file}
+ const api=createFilesApi({store:fileStore,gcs:{writeBlob:async(k:string,b:Buffer)=>{if(fail)throw new Error('storage unavailable');blobs.set(k,b);await io()},readBlob:async(k:string)=>blobs.has(k)?{bytes:blobs.get(k)!}:null,deleteBlob:async(k:string)=>{blobs.delete(k)}} as never,bucket:'fixture',auditStore:{append:audit} as never})
  const publisher=createEngineeringArchivePublisher(api),route=createProgrammaticCaptureRouter({store,ingest,archive:publisher.capture})
  const send=(eventId=randomUUID(),content='  original\n工程 ☃\n\t')=>route(auth,{eventId,content,sessionId:'fictional-session',role:'user',metadata:{provider:'codex'}})
  return {workspaceId,userId,memberId,keyId,plaintext:issued.plaintext,profile,rule:rule!,auth,ctx,store,api,blobs,ingest,publisher,route,send,team,
-  during(fn:()=>Promise<void>){io=fn},failStorage(){fail=true},workingStorage(){fail=false}}
+  uncertainCommit(){lostAck=true},during(fn:()=>Promise<void>){io=fn},failStorage(){fail=true},workingStorage(){fail=false}}
 }
 describe('[COMP:api/engineering-history] native publication and identity',()=>{
  it('EH01/EH02/EH05 publishes exact original once with stable native receipt and no extraction',async()=>{
@@ -90,6 +92,23 @@ describe('[COMP:api/engineering-history] native publication and identity',()=>{
   expect((await f.send(id)).deliveryStatus).toBe('archived')
   expect(f.blobs.size).toBe(1)
  })
+ it('EH05/EH08 lost commit acknowledgement reconciles the existing canonical original and receipt',async()=>{
+  const f=await fixture(),id=randomUUID();f.uncertainCommit()
+  await expect(f.send(id)).rejects.toThrow('could not be confirmed')
+  const retry=await f.send(id),history=createEngineeringHistoryService({files:f.api,cursorSecret:'fixture-cursor-secret'})
+  expect(retry).toMatchObject({deliveryStatus:'archived',outcome:'duplicate'})
+  expect((await history.read(f.ctx,retry.archiveId!)).content).toBe('  original\n工程 ☃\n\t')
+  expect(f.blobs.size).toBe(1);expect((await pool.query('SELECT id FROM workspace_files WHERE workspace_id=$1',[f.workspaceId])).rows).toHaveLength(1);expect(f.ingest).not.toHaveBeenCalled()
+ })
+ it.each(['programmatic_archive_events','programmatic_capture_receipts'])('EH08 %s publication fault rolls back File/projection/receipt atomically and retains WIP',async table=>{
+  const f=await fixture(),id=randomUUID(),fn='fixture_archive_publication_fault',trigger='fixture_archive_fault'
+  const condition=table==='programmatic_archive_events'?`NEW.workspace_id='${f.workspaceId}'::uuid`:`NEW.workspace_id='${f.workspaceId}'::uuid AND NEW.status='completed'`
+  await pool.query(`CREATE FUNCTION ${fn}() RETURNS trigger LANGUAGE plpgsql AS $$ BEGIN IF ${condition} THEN RAISE EXCEPTION 'fixture_publication_fault'; END IF; RETURN NEW; END $$; CREATE TRIGGER ${trigger} BEFORE INSERT OR UPDATE ON ${table} FOR EACH ROW EXECUTE FUNCTION ${fn}()`)
+  try{await expect(f.send(id)).rejects.toThrow();expect((await pool.query('SELECT id FROM workspace_files WHERE workspace_id=$1',[f.workspaceId])).rows).toEqual([]);expect((await pool.query('SELECT status FROM programmatic_capture_receipts WHERE workspace_id=$1',[f.workspaceId])).rows[0].status).toBe('queued');expect((await pool.query('SELECT events FROM pending_ingest_batches WHERE workspace_id=$1',[f.workspaceId])).rows[0].events[0].content).toContain('工程')}
+  finally{await pool.query(`DROP TRIGGER ${trigger} ON ${table}; DROP FUNCTION ${fn}()`)}
+  await f.publisher.drain((await pool.query('SELECT id FROM pending_ingest_batches WHERE workspace_id=$1',[f.workspaceId])).rows[0].id)
+  const result=await f.send(id);expect(result.deliveryStatus).toBe('archived');expect(f.blobs.size).toBe(1);expect(f.ingest).not.toHaveBeenCalled()
+ })
  it('EH07 old extraction SQL cannot claim archives and profile edits hold pending purpose',async()=>{
   const f=await fixture()
   await f.store.updateRule({actingUserId:f.userId,workspaceId:f.workspaceId,profileId:f.profile.id,ruleId:f.rule.id,
@@ -120,7 +139,7 @@ describe('[COMP:api/engineering-history] native publication and identity',()=>{
   expect(await f.api.setMeta(f.ctx,r.fileId!,{tags:['operational']})).toMatchObject({ok:false,error:{kind:'read_only'}})
   expect((await queryWithRLS(f.userId,"SELECT read_entity_derivation_source($1,'workspace_file',$2) AS source",[f.workspaceId,r.fileId])).rows[0].source).toBeNull()
   await expect(pool.query("INSERT INTO file_ingest_jobs(file_id,workspace_id,acting_user_id,source_label) VALUES($1,$2,$3,'fixture')",[r.fileId,f.workspaceId,f.userId])).rejects.toThrow('engineering_archive_operational_input_denied')
-  for(const table of ['episodes','memories','entities','tasks'])expect((await pool.query(`SELECT count(*)::int AS n FROM ${table} WHERE workspace_id=$1`,[f.workspaceId])).rows[0].n).toBe(0)
+  for(const table of ['episodes','memories','entities','tasks','goals','brief_bindings','research_activities','research_improvements','feed_learning_outputs'])expect((await pool.query(`SELECT count(*)::int AS n FROM ${table} WHERE workspace_id=$1`,[f.workspaceId])).rows[0].n).toBe(0)
   expect(f.ingest).not.toHaveBeenCalled()
  })
  it('EH04 native admission permits collaborators and revokes reads immediately',async()=>{

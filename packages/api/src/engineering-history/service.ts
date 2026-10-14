@@ -1,3 +1,4 @@
+import {notifyWorkspaceChange} from '../brain-stream/notify.js'
 /** One admitted history service for HTTP, MCP and UI. [COMP:api/engineering-history] */
 import {createHash,createHmac,randomUUID,timingSafeEqual} from 'node:crypto'
 import type {AccessContext,FilesApi,FilesContext,WorkspaceFile} from '@use-brian/core'
@@ -115,6 +116,7 @@ export function createEngineeringHistoryService(options:{files:FilesApi;cursorSe
     return async()=>{await finishCommand(client,ctx,c,key,result)}
    },()=>options.files.delete(ctx,event.fileId))
    if(!deleted.ok)throw missing()
+   notifyWorkspaceChange(ctx.workspaceId,'file','delete',event.fileId)
    return result
   }
   const client=await getAppPool().connect()
@@ -134,7 +136,7 @@ export function createEngineeringHistoryService(options:{files:FilesApi;cursorSe
     await client.query("UPDATE workspace_files SET retracted_at=now(),retracted_by=$2,retracted_reason='engineering_history_exclusion' WHERE id=$1 AND scope_version=$3",[current.fileId,ctx.userId,c.expectedFileVersion])
    }else throw new EngineeringHistoryError('history_action_invalid',400)
    const result={eventId:c.eventId,status:c.action==='annotate'?'annotated':'excluded',revision:current.revision+1}
-   await finishCommand(client,ctx,c,key,result);await client.query('COMMIT');return result
+   await finishCommand(client,ctx,c,key,result);await client.query('COMMIT');notifyWorkspaceChange(ctx.workspaceId,'file','update',current.fileId);return result
   }finally{await rollbackAndRelease(client)}
  }
  async function execute(ctx:HistoryActor,input:EngineeringHistoryCommand){

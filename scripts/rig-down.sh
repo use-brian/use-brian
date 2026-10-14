@@ -69,6 +69,12 @@ if [ "$ADMIN_ONLY" = 1 ]; then
   SESSION_FILE="$STATE/session.json"
   CONTAINER=usebrian-admin-test
   VOLUME=usebrian-admin-test-data
+  admin_pg_port="${BRIAN_ADMIN_PG_PORT:-5443}"
+  [[ "$admin_pg_port" =~ ^[0-9]+$ ]] && [ "$admin_pg_port" -ge 1024 ] && [ "$admin_pg_port" -le 65535 ] || die "invalid administrative fixture database port"
+  if [ "$admin_pg_port" != 5443 ]; then
+    CONTAINER="usebrian-admin-test-$admin_pg_port"
+    VOLUME="usebrian-admin-test-$admin_pg_port-data"
+  fi
 fi
 
 # ── the stack ───────────────────────────────────────────────────────────────

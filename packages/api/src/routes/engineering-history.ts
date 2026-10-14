@@ -24,7 +24,7 @@ export function engineeringHistoryRoutes(options:{service:EngineeringHistoryServ
  router.get('/',async(req,res)=>{try{const ctx=await actor(req,res);if(ctx)res.json(await options.service.list(ctx,EngineeringHistoryQuerySchema.parse(req.query)))}catch(e){fail(e,res)}})
  // Static export is deliberately before the opaque event UUID route.
  router.get('/export',async(req,res)=>{try{const ctx=await actor(req,res);if(!ctx)return;const result=await options.service.exportPage(ctx,EngineeringHistoryQuerySchema.parse(req.query))
-  res.setHeader('Content-Type','application/x-ndjson; charset=utf-8');res.setHeader('Content-Disposition','attachment; filename="engineering-history.jsonl"')
+  res.setHeader('Access-Control-Expose-Headers','X-Brian-Export-Status, X-Brian-Next-Cursor, X-Brian-Export-Error');res.setHeader('Content-Type','application/x-ndjson; charset=utf-8');res.setHeader('Content-Disposition','attachment; filename="engineering-history.jsonl"')
   res.setHeader('X-Brian-Export-Status',result.status);if(result.nextCursor)res.setHeader('X-Brian-Next-Cursor',result.nextCursor);if(result.failureCode)res.setHeader('X-Brian-Export-Error',result.failureCode)
   res.send(result.jsonl)
  }catch(e){fail(e,res)}})

@@ -23,7 +23,7 @@
  */
 import { existsSync, readFileSync } from 'node:fs'
 import { join } from 'node:path'
-import { ADMIN_DATABASE_URL } from './rig-admin.mjs'
+import { adminDatabaseUrls } from './rig-admin.mjs'
 
 /** Postgres 18 + pgvector, port 5442, throwaway credentials. */
 export const DEFAULT_DATABASE_URL = 'postgres://brian:brian@127.0.0.1:5442/usebrian'
@@ -70,7 +70,7 @@ export function resolveRigDatabase({
   readText = (path) => (existsSync(path) ? readFileSync(path, 'utf8') : null),
   defaultUrl = DEFAULT_DATABASE_URL,
 } = {}) {
-  let url = env.USEBRIAN_ADMIN_ONLY === '1' ? ADMIN_DATABASE_URL : env.DATABASE_URL?.trim()
+  let url = env.USEBRIAN_ADMIN_ONLY === '1' ? adminDatabaseUrls(env).databaseUrl : env.DATABASE_URL?.trim()
   let source = env.USEBRIAN_ADMIN_ONLY === '1' ? 'admin-fixture' : 'env'
   if (!url) {
     const text = readText(join(root, '.env'))

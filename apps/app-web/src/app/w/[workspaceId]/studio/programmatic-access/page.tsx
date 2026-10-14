@@ -26,6 +26,9 @@
  * [COMP:app-web/studio-programmatic-access]
  */
 
+import Link from "next/link";
+import {CapturePreset,CaptureSetup} from "@/components/engineering-history/capture-preset";
+import {invalidateSurfaceCache} from "@/lib/surface-cache";
 import { useCallback, useState } from "react";
 import {
   AppWindow,
@@ -223,6 +226,10 @@ export default function ProgrammaticAccessPage() {
   return (
     <div className="flex flex-col gap-6">
       <EndpointPanel t={t} />
+      {activeId&&<Link className="inline-flex min-h-8 max-sm:min-h-11 items-center self-start text-sm underline" href={`/w/${activeId}/studio/programmatic-access/history`}>{t.engineeringHistory.open}</Link>}
+      {!adminOnly&&!cold&&activeId&&<CapturePreset workspaceId={activeId} teams={teams} projects={projects} onCreated={async()=>{setCaptureProfiles(await listCaptureProfiles(activeId))}} onError={setError}/>}
+      <CaptureSetup/>
+
 
       {adminOnly && (
         <div className="rounded-xl border border-dashed border-border px-5 py-10 text-center text-[13px] text-muted-foreground">
@@ -242,6 +249,8 @@ export default function ProgrammaticAccessPage() {
         <CaptureProfilesSection
           workspaceId={activeId}
           assistants={assistants}
+          teams={teams}
+          projects={projects}
           profiles={captureProfiles}
           onProfilesChange={setCaptureProfiles}
           onError={setError}
@@ -292,6 +301,7 @@ export default function ProgrammaticAccessPage() {
                       : row));
                     try {
                       await updateBrainKeyCaptureBinding(activeId, k.id, assistantId, profileId);
+                      invalidateSurfaceCache(`engineering-history:${activeId}`);
                     } catch (err) {
                       setError((err as Error).message);
                       load();
@@ -308,6 +318,7 @@ export default function ProgrammaticAccessPage() {
                     if (!ok || !activeId) return;
                     try {
                       await revokeBrainKey(activeId, k.id);
+                      invalidateSurfaceCache(`engineering-history:${activeId}`);
                       setKeys((prev) =>
                         prev.map((x) =>
                           x.id === k.id ? { ...x, status: "revoked" as const } : x,
@@ -735,12 +746,16 @@ function CaptureBindingControl({
 function CaptureProfilesSection({
   workspaceId,
   assistants,
+  teams,
+  projects,
   profiles,
   onProfilesChange,
   onError,
 }: {
   workspaceId: string;
   assistants: StudioAssistantSummary[];
+  teams: ContextTeam[];
+  projects: ContextProject[];
   profiles: CaptureProfile[];
   onProfilesChange: (profiles: CaptureProfile[]) => void;
   onError: (error: string | null) => void;
@@ -760,6 +775,7 @@ function CaptureProfilesSection({
     try {
       await operation();
       await refresh();
+      invalidateSurfaceCache(`engineering-history:${workspaceId}`);
     } catch (err) {
       onError((err as Error).message);
     } finally {
@@ -826,12 +842,15 @@ function CaptureProfilesSection({
         </div>
       ) : profiles.map((profile) => (
         <div key={profile.id} className="rounded-xl border border-border bg-card overflow-hidden">
-          <div className="flex items-center gap-3 px-4 py-3 border-b border-border">
+          <div className="flex flex-wrap items-center gap-3 px-4 py-3 border-b border-border">
             <div className="flex h-8 w-8 items-center justify-center rounded-lg bg-primary/10 text-primary">
               <Database className="h-4 w-4" />
             </div>
             <div className="min-w-0 flex-1">
               <div className="text-[14px] font-medium truncate">{profile.name}</div>
+              <div className="mt-1 text-xs text-muted-foreground">{profile.processingMode==="archive_only"?t.engineeringHistory.archive:t.engineeringHistory.extract}</div>
+              {profile.processingMode==="archive_only"&&<p className="mt-1 break-words text-xs text-muted-foreground">{t.engineeringHistory.audience}: {Array.from(new Set(profile.rules.flatMap(rule=>[...rule.compartments.map(key=>teams.find(team=>`team:${team.id}`===key)?.name??key),...rule.projectIds.map(id=>projects.find(project=>project.id===id)?.name??id)]))).join(" / ")}</p>}
+
               <div className="text-[11px] text-muted-foreground">
                 {format(t.programmaticAccess.capture.profileMeta, {
                   partition: partitionItems[profile.partitionBy],
@@ -839,6 +858,7 @@ function CaptureProfilesSection({
                 })}
               </div>
             </div>
+            <Select value={profile.processingMode??"extract"} items={{extract:t.engineeringHistory.extract,archive_only:t.engineeringHistory.archive}} disabled={saving} onValueChange={value=>value&&run(async()=>{await updateCaptureProfile(workspaceId,{...profile,processingMode:value as "extract"|"archive_only"})})}><SelectTrigger className="min-h-8 max-sm:min-h-11 w-full sm:w-48" aria-label={t.engineeringHistory.purpose}><SelectValue/></SelectTrigger><SelectContent><SelectItem value="extract">{t.engineeringHistory.extract}</SelectItem><SelectItem value="archive_only">{t.engineeringHistory.archive}</SelectItem></SelectContent></Select>
             <Button
               size="sm"
               variant="outline"

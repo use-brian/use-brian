@@ -1,3 +1,4 @@
+import {notifyWorkspaceChange} from '../brain-stream/notify.js'
 import { withExternalKeyActor } from '../db/external-key-admission.js'
 /**
  * Brain key management routes — the Settings ▸ Programmatic access surface.
@@ -69,6 +70,7 @@ const CaptureBindingBody = z.object({
 export function brainKeysRoutes(opts: Options): Router {
   // mergeParams so `:workspaceId` from the mount path is visible here.
   const router = Router({ mergeParams: true })
+  router.use((req,res,next)=>{const workspaceId=String(req.params.workspaceId??'');res.once('finish',()=>{if(!['GET','HEAD','OPTIONS'].includes(req.method)&&res.statusCode<300)notifyWorkspaceChange(workspaceId,'workspace_config','update')});next()})
   const contextStore = opts.contextStore ?? createDbContextScopeStore()
 
   /**

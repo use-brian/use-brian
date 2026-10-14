@@ -1110,3 +1110,8 @@ export function connectorReconnectCacheKey(workspaceId:string,userId:string,inst
 export function projectContentCacheKey(workspaceId: string, projectId: string, view: string, query: string, offset: number): string {
   return `${projectDetailCacheKey(workspaceId, projectId)}:content:${JSON.stringify([view, query, offset])}`;
 }
+
+/** Engineering originals are protected, viewer-scoped memory-only projections. */
+export function engineeringHistoryCacheKey(workspaceId: string, selection: string): string {
+  return `engineering-history:${workspaceId}${viewerSuffix()}:${selection}`;
+}

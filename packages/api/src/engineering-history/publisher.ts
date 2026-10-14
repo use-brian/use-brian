@@ -1,3 +1,4 @@
+import {notifyWorkspaceChange} from '../brain-stream/notify.js'
 /** Durable archive terminal. No Episode or model port. [COMP:api/engineering-history] */
 import type { FilesApi,FilesContext } from '@use-brian/core'
 import type { ArchiveCapture,ArchiveSnapshot } from './contracts.js'
@@ -23,6 +24,7 @@ export function createEngineeringArchivePublisher(files:FilesApi){
   }
   const receipt=await archiveReceipt(authFor(s),s.eventId,s.payloadDigest)
   if(receipt?.deliveryStatus!=='archived')throw new EngineeringHistoryError('archive_publication_uncertain',503)
+  notifyWorkspaceChange(s.workspaceId,'file','create',s.archiveId)
   return {...receipt,outcome:'archived' as const,profileId:s.profileId,profileRevision:s.profileRevision,ruleId:s.ruleId}
  }
  async function drain(batchId?:string){

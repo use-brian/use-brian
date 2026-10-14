@@ -1,3 +1,4 @@
+import {notifyWorkspaceChange} from '../brain-stream/notify.js'
 /**
  * Workspace-admin CRUD for reusable assistant capture profiles.
  * [COMP:api/programmatic-capture]
@@ -99,6 +100,7 @@ type Options = {
 
 export function programmaticCaptureRoutes(opts: Options): Router {
   const router = Router({ mergeParams: true })
+  router.use((req,res,next)=>{const workspaceId=String(req.params.workspaceId??'');res.once('finish',()=>{if(!['GET','HEAD','OPTIONS'].includes(req.method)&&res.statusCode<300)notifyWorkspaceChange(workspaceId,'workspace_config','update')});next()})
   function admissionError(err: unknown,res:Response):boolean {
     if(err instanceof WorkspaceAccessError){res.status(err.status).json({error:err.code});return true}
     if(err instanceof Error && /^capture_(configuration|destination|binding|ready)_/.test(err.message)) {

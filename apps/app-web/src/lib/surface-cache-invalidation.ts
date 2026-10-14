@@ -239,6 +239,10 @@ export function applySpineEventToSurfaceCache(
   const drop = detail?.catchUp === true ? markSurfaceCacheStale : invalidateSurfaceCache;
   if (event === BRAIN_REFRESH_EVENT || event === WORKSPACE_IDENTITY_REFRESH_EVENT) drop(`workspace-member-directory:${workspaceId}:`);
   if (event === BRAIN_REFRESH_EVENT || event === WORKSPACE_IDENTITY_REFRESH_EVENT) drop(`page-directory:${workspaceId}:`);
+  if (event === BRAIN_REFRESH_EVENT || event === WORKSPACE_IDENTITY_REFRESH_EVENT || event === "brian:organization-changed" || event === ASSISTANT_REFRESH_EVENT) {
+    drop(`engineering-history:${workspaceId}`);
+    drop(`brain-keys:${workspaceId}`);
+  }
   if (event === BRAIN_REFRESH_EVENT) {
     drop(`project:${workspaceId}:`);
     drop(`doc-media:${workspaceId}:`);
