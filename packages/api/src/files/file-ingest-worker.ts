@@ -141,6 +141,7 @@ export function createFileIngestWorker(deps: FileIngestWorkerDeps): FileIngestWo
     // every path reaches.
     if (deps.filesApi.stat) {
       const meta = await deps.filesApi.stat(ctx, job.fileId)
+      if(meta.ok && meta.value.purpose==='engineering_archive')throw new Error('engineering_archive_operational_input_denied')
       if (meta.ok && meta.value.sizeBytes > MAX_INGEST_PARSE_BYTES) {
         await setIndexing(job.fileId, {
           status: 'skipped',
@@ -155,6 +156,7 @@ export function createFileIngestWorker(deps: FileIngestWorkerDeps): FileIngestWo
       throw new Error(`file-ingest: readBytes ${job.fileId} failed (${read.error.kind})`)
     }
     const { file } = read.value
+    if(file.purpose==='engineering_archive')throw new Error('engineering_archive_operational_input_denied')
     // readBytes types its payload as Uint8Array; parse/distill want a Buffer.
     const bytes = Buffer.from(read.value.bytes)
     const mime = file.mime

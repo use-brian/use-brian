@@ -503,6 +503,7 @@ export function createFilesApi(deps: CreateFilesApiDeps): DerivedFilesApi {
     async append(ctx, idOrPath, content): Promise<FilesResult<WorkspaceFile>> {
       const file = await resolveByIdOrPath(ctx, idOrPath)
       if (!file) return err({ kind: 'not_found', reference: idOrPath })
+      if(file.purpose==='engineering_archive')return err({kind:'read_only',path:file.path})
       if (localDirectoryMetadata(file) || assistantInWebsiteMedia(ctx, file.path)) return err({ kind: 'read_only', path: file.path })
       if (!mutationAllowed(ctx, file)) return err({ kind: 'read_only', reason: 'scope', path: file.path })
       if (!file.scopeVersion) return err({ kind: 'conflict', reason: 'changed', path: file.path })
@@ -580,6 +581,7 @@ export function createFilesApi(deps: CreateFilesApiDeps): DerivedFilesApi {
     async setMeta(ctx, idOrPath, patch: WorkspaceFileMetaPatch): Promise<FilesResult<WorkspaceFile>> {
       const file = await resolveByIdOrPath(ctx, idOrPath)
       if (!file) return err({ kind: 'not_found', reference: idOrPath })
+      if(file.purpose==='engineering_archive')return err({kind:'read_only',path:file.path})
       if (assistantInWebsiteMedia(ctx, file.path)) return err({ kind: 'read_only', path: file.path })
       if (patch.sensitivity !== undefined && maxSensitivity(file.sensitivity, ctx.writeSensitivity ?? 'public', patch.sensitivity) !== patch.sensitivity) {
         return err({ kind: 'read_only', reason: 'release_required', path: file.path })

@@ -19,7 +19,7 @@ export async function archiveReceipt(auth: Pick<BrainAuth,'workspaceId'|'authKin
    [auth.workspaceId,auth.authKind,auth.keyId,eventId])).rows[0]
   if(!r)return null
   if(r.processing_purpose!=='archive_only'||digest&&r.payload_digest!==digest)throw new EngineeringHistoryError('capture_event_conflict')
-  const status=r.delivery_status??(r.status==='completed'?'deleted':r.status==='dropped'?'dropped':'pending')
+  const status=r.archive_delivery_status??r.delivery_status??(r.status==='completed'?'deleted':r.status==='dropped'?'dropped':'pending')
   return {contractVersion:1,processingPurpose:'archive_only',outcome:'duplicate',receiptStatus:r.status,archiveId:r.archive_id??undefined,
    fileId:r.file_id??undefined,deliveryStatus:status,indexStatus:status==='archived'?'ready':status==='pending'?'pending':'withheld'}
  }finally {await rollbackAndRelease(client)}

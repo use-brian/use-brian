@@ -659,7 +659,7 @@ export async function listWorkspaceFilesByPath(
     ctx.userId,
     `SELECT ${INDEX_SELECT} FROM workspace_files
      WHERE ${ap.sql}
-       AND parent_path = $${ap.nextIdx} AND valid_to IS NULL
+       AND purpose='operational' AND parent_path = $${ap.nextIdx} AND valid_to IS NULL
        AND path NOT LIKE '/office/sessions/%'
        AND NOT COALESCE((metadata->>'noIndex')::boolean, false)
      ORDER BY updated_at DESC
@@ -715,6 +715,7 @@ export async function searchWorkspaceFiles(
   //              into the assistant's context.
   const wheres: string[] = [
     ap.sql,
+    "purpose='operational'",
     'valid_to IS NULL',
     "path NOT LIKE '/doc/%'",
     "path NOT LIKE '/apps/%'",
@@ -769,7 +770,7 @@ export async function listWorkspaceFilesIndexRanked(
   const result = await queryWithRLS<IndexRow>(
     ctx.userId,
     `SELECT ${INDEX_SELECT} FROM workspace_files
-     WHERE ${ap.sql} AND valid_to IS NULL
+     WHERE ${ap.sql} AND purpose='operational' AND valid_to IS NULL
        AND path NOT LIKE '/doc/%' AND path NOT LIKE '/apps/%'
        AND path NOT LIKE '/office/sessions/%'
        AND NOT COALESCE((metadata->>'noIndex')::boolean, false)

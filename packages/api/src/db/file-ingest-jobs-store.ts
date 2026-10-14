@@ -76,7 +76,7 @@ export async function enqueueFileIngestJob(input: {
     `INSERT INTO file_ingest_jobs (file_id, workspace_id, acting_user_id, assistant_id, source_label, mode)
      SELECT $1,$2,$3,$4,$5,$6
        FROM workspace_files f
-      WHERE f.id=$1 AND f.workspace_id=$2
+      WHERE f.id=$1 AND f.workspace_id=$2 AND f.purpose='operational'
         AND f.path NOT LIKE '/office/sessions/%'
         AND NOT COALESCE((f.metadata->>'noIndex')::boolean,false)
      ON CONFLICT DO NOTHING
@@ -105,7 +105,7 @@ export async function claimNextFileIngestJob(): Promise<FileIngestJob | null> {
         SET status = 'processing', attempts = attempts + 1, locked_at = now(), updated_at = now()
       WHERE id = (
         SELECT id FROM file_ingest_jobs
-         WHERE status = 'pending'
+         WHERE status = 'pending' AND EXISTS(SELECT 1 FROM workspace_files f WHERE f.id=file_ingest_jobs.file_id AND f.purpose='operational')
          ORDER BY created_at
          FOR UPDATE SKIP LOCKED
          LIMIT 1

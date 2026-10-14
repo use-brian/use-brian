@@ -297,7 +297,7 @@ export function createProgrammaticCaptureRouter(deps: {
     const compartments=scope.compartments
     const projectIds=scope.projectIds
     if(target.processingMode==='archive_only'){
-      if(!scope.resolved || !deps.archive)throw new ProgrammaticCaptureError('capture_target_unavailable','Archive publication unavailable.')
+      if(!scope.resolved || !deps.archive || (!compartments.length&&!projectIds.length))throw new ProgrammaticCaptureError('capture_target_unavailable','Archive publication unavailable.')
       const firesAt=decision.routing_mode==='realtime' ? (deps.now?.()??new Date())
         : decision.schedule ? computeNextRun({type:'cron',expression:decision.schedule},decision.timezone,deps.now?.()) : null
       if(!firesAt)throw new ProgrammaticCaptureError('capture_rule_invalid','Archive schedule unavailable.')

@@ -129,7 +129,7 @@ const PRIMITIVE_CONFIGS: Partial<Record<EmbeddingPrimitive, PrimitiveConfig>> = 
     table: 'workspace_files',
     textExpr: "coalesce(title, name) || coalesce(E'\\n' || summary, '')",
     recencyExpr: 'created_at',
-    extraWhere: "path NOT LIKE '/office/sessions/%' AND NOT COALESCE((metadata->>'noIndex')::boolean,false)",
+    extraWhere: "purpose='operational' AND path NOT LIKE '/office/sessions/%' AND NOT COALESCE((metadata->>'noIndex')::boolean,false)",
   },
   // recording transcript segments — the packed segment text is the embed unit.
   // The store stamps embedding=NULL on insert; the worker drains these rows
@@ -146,6 +146,7 @@ const PRIMITIVE_CONFIGS: Partial<Record<EmbeddingPrimitive, PrimitiveConfig>> = 
   // join here (the claim SQL is single-table by design).
   file_segment: {
     table: 'file_segments',
+    extraWhere: "EXISTS(SELECT 1 FROM workspace_files parent WHERE parent.id=file_segments.file_id AND parent.purpose='operational')",
     textExpr:
       "(CASE WHEN heading_path <> '{}' THEN array_to_string(heading_path, ' > ') || E'\\n' ELSE '' END) || content",
     recencyExpr: 'created_at',

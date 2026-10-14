@@ -468,7 +468,7 @@ export async function artifactReadableForViewer(userId: string, kind: ResearchAr
       return { readable: !!r.rows[0], version: r.rows[0]?.version ?? null }
     }
     if (kind === 'file') {
-      const r = await client.query('SELECT 1 FROM workspace_files WHERE id = $1', [artifactId])
+      const r = await client.query("SELECT 1 FROM workspace_files WHERE id = $1 AND purpose='operational'", [artifactId])
       return { readable: !!r.rows[0], version: null }
     }
     const r = await client.query<{ version: number | null }>('SELECT version FROM office_artifacts WHERE id = $1', [artifactId])
