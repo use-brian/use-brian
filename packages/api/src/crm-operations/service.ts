@@ -24,6 +24,7 @@ import {
   isCrmCommercialContextCommand,
   isCrmCommercialDocumentCommand,
   isCrmGovernedCommand,
+  isDeliveryCommand,
   isCrmErpCommand,
   canonicalCrmRequest,
   crmOperationsSha256,
@@ -57,6 +58,7 @@ import { hashSecret } from '../db/api-key-store.js'
 import { assertIntakeVerificationConfiguration, verifyIntakeIdentity } from './identity-verification.js'
 import { executeCrmBusinessReferenceCommand } from './business-references.js'
 import { executeCrmCommercialContextCommand } from './commercial-context.js'
+import { executeDeliveryCommand } from './delivery-oversight.js'
 import { executeCrmGovernedCommand } from './governed-records.js'
 import { executeCrmErpCommand } from './erp-bridge.js'
 import { executeCrmCommercialDocumentCommand, processCrmIssueAttempts, renderCrmPreparationDraft, type CrmCommercialDocumentRuntime, type CrmDocumentFollowUp } from './commercial-preparations.js'
@@ -612,6 +614,9 @@ export function createCrmOperationsService(
           if (context.authority.integration) await tx.authorizeIntegration(command)
           return executeCrmErpCommand(tx, command)
         })
+      }
+      if (isDeliveryCommand(command)) {
+        return store.transaction(context, async (tx) => executeDeliveryCommand(tx, command))
       }
       if (isCrmGovernedCommand(command)) {
         return store.transaction(context, async (tx) => {

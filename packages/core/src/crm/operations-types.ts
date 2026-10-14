@@ -10,6 +10,7 @@
 
 import { createHash } from 'node:crypto'
 import { z } from 'zod'
+import { DeliveryCommandSchema } from './delivery-oversight.js'
 import { parseAuthoringAuthority, type AuthoringAuthority } from '../security/access-ceiling.js'
 import { APP_LOCALES } from '@use-brian/shared'
 import { campaignAttributionContextSchema } from '@use-brian/shared/campaigns'
@@ -698,6 +699,7 @@ export interface CrmPrivacyServicePort {
 }
 
 export const CrmOperationsCommandSchema = z.union([
+  DeliveryCommandSchema,
   PreviewCrmImportFileCleanupCommandSchema,
   ExecuteCrmImportFileCleanupCommandSchema,
   PreviewCrmRetentionCommandSchema,
@@ -769,6 +771,7 @@ export const CrmOperationsCommandSchema = z.union([
 export type CrmOperationsCommand = z.infer<typeof CrmOperationsCommandSchema>
 
 export const CrmDomainEventTypeSchema = z.enum([
+  'crm.delivery_projection.changed',
   'crm.submission.received',
   'crm.submission.updated',
   'crm.consent.changed',
