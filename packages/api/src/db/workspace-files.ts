@@ -1,3 +1,4 @@
+import { currentArchivePublication,admitProgrammaticFile,completeProgrammaticFile } from '../workspace-access/file-programmatic-admission.js'
 import { admitFileTransaction } from '../workspace-access/file-transaction-admission.js'
 import { admitSessionFile, admitUploadedFile, readFileSessionBinding, type FileSessionBinding } from '../workspace-access/file-publication-admission.js'
 import { randomUUID } from 'node:crypto'
@@ -28,7 +29,7 @@ const FULL_SELECT = `
   id, workspace_id as "workspaceId", path, parent_path as "parentPath",
   name, title, summary, mime, size_bytes as "sizeBytes",
   tags, related_ids as "relatedIds", storage_uri as "storageUri",
-  sensitivity, compartments, project_ids as "projectIds", metadata, scope_version::text as "scopeVersion",
+  purpose, sensitivity, compartments, project_ids as "projectIds", metadata, scope_version::text as "scopeVersion",
   user_id as "userId", assistant_id as "assistantId",
   source, source_episode_id as "sourceEpisodeId",
   verified_by_user_id as "verifiedByUserId", verified_at as "verifiedAt",
@@ -44,11 +45,12 @@ const FULL_SELECT = `
 const INDEX_SELECT = `
   id, workspace_id as "workspaceId", path, parent_path as "parentPath",
   name, title, summary, mime, size_bytes as "sizeBytes",
-  tags, sensitivity, compartments, project_ids as "projectIds", updated_at as "updatedAt",
+  purpose, tags, sensitivity, compartments, project_ids as "projectIds", updated_at as "updatedAt",
   user_id AS "userId", assistant_id AS "assistantId", scope_version::text AS "scopeVersion"
 `
 
 type FileRow = {
+  purpose?: 'operational' | 'engineering_archive'
   scopeVersion: string
   id: string
   workspaceId: string
@@ -87,6 +89,7 @@ type FileRow = {
 type IndexRow = {
   userId: string | null
   assistantId: string | null
+  purpose?: 'operational' | 'engineering_archive'
   scopeVersion: string
   id: string
   workspaceId: string
@@ -112,6 +115,7 @@ function asNumber(v: number | string): number {
 function toRecord(row: FileRow): WorkspaceFile {
   return bindFileSource({
     scopeVersion: row.scopeVersion,
+    purpose: row.purpose ?? 'operational',
     id: row.id,
     workspaceId: row.workspaceId,
     path: row.path,
@@ -149,6 +153,7 @@ function toRecord(row: FileRow): WorkspaceFile {
 
 function toIndexRow(row: IndexRow): WorkspaceFileIndexRow {
   return bindFileSource({
+    purpose: row.purpose ?? 'operational',
     id: row.id,
     workspaceId: row.workspaceId,
     path: row.path,
@@ -241,7 +246,8 @@ export async function createWorkspaceFile(
     const renewAdmission = await admitFileTransaction(client, userId, input)
     await client.query('SELECT id FROM workspaces WHERE id=$1 FOR UPDATE',[input.workspaceId])
     if(derivation&&!opts.sessionBinding&&!opts.uploadId)derivation=await expandDerivedFileEvidence(client,derivation)
-    input = opts.sessionBinding ? await admitSessionFile(client,userId,input,opts.sessionBinding,access)
+    input = currentArchivePublication() ? await admitProgrammaticFile(client,userId,input,access)
+      : opts.sessionBinding ? await admitSessionFile(client,userId,input,opts.sessionBinding,access)
       : opts.uploadId ? await admitUploadedFile(client,userId,input,opts.uploadId,access)
       : opts.derivation
       ? await admitDerivedFile(client, userId, input, derivation!, access, opts.expectedPolicyRevision)
@@ -255,13 +261,14 @@ export async function createWorkspaceFile(
     // and DB row share the same uuid), use it; otherwise let the DB
     // default `gen_random_uuid()` fire.
     const cols: string[] = [
-      'workspace_id', 'path', 'parent_path', 'name', 'title', 'summary',
+      'purpose', 'workspace_id', 'path', 'parent_path', 'name', 'title', 'summary',
       'mime', 'size_bytes', 'tags', 'related_ids', 'storage_uri',
       'sensitivity', 'metadata',
       'user_id', 'assistant_id', 'source', 'source_episode_id',
       'created_by_user_id', 'created_by_assistant_id', 'compartments', 'project_ids',
     ]
     const values: unknown[] = [
+      currentArchivePublication() ? 'engineering_archive' : 'operational',
       input.workspaceId,
       input.path,
       input.parentPath,
@@ -317,6 +324,7 @@ export async function createWorkspaceFile(
         VALUES($1,$2,$3,$4,$5,$6)`,[opts.sessionBinding.artifactId,input.workspaceId,userId,file.id,role,input.metadata.contentSha256])
     }
     if (opts.uploadId) await client.query("UPDATE workspace_file_uploads SET status='completed',completed_at=now(),updated_at=now() WHERE id=$1",[opts.uploadId])
+    await completeProgrammaticFile(client,file.id,file.scopeVersion!)
     await renewAdmission(file.id)
     await client.query('COMMIT')
   } catch (error) {

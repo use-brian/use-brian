@@ -55,7 +55,7 @@ export async function admitSessionFile(client: PoolClient, actor: string, input:
   return after
 }
 
-async function admitBoundFile(client: PoolClient, actor: string, input: WorkspaceFileCreateInput, inherited: ResourceScope, access?: AccessContext) {
+export async function admitBoundFile(client: PoolClient, actor: string, input: WorkspaceFileCreateInput, inherited: ResourceScope, access?: AccessContext) {
   assertExecutionResourceScope({...inherited,sensitivity:input.sensitivity??inherited.sensitivity,
     compartments:input.compartments??inherited.compartments,projectIds:input.projectIds??inherited.projectIds},'mutation',access)
   await assertCurrentFileAssistant(client,{...inherited,sensitivity:input.sensitivity??inherited.sensitivity,compartments:input.compartments??inherited.compartments,projectIds:input.projectIds??inherited.projectIds},access)

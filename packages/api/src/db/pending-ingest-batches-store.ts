@@ -107,7 +107,7 @@ export function createDbProgrammaticBatchStore(
                   scope_binding_origin, scope_held
              FROM pending_ingest_batches
             WHERE fires_at < now() AND processed_at IS NULL
-              AND source = 'programmatic' AND NOT scope_held
+              AND source = 'programmatic' AND processing_purpose='extract' AND NOT purpose_held AND NOT scope_held
               AND NOT EXISTS(SELECT 1 FROM jsonb_array_elements(events) ev
                 WHERE programmatic_intake_current(workspace_id,assistant_id,rule_id,ev) IS NOT TRUE)
             FOR UPDATE SKIP LOCKED

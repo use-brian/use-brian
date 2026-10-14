@@ -15,6 +15,8 @@ import { readAdmissionPolicy } from '../workspace-access/admission-policy-read.j
 import { programmaticIntakeClient } from './programmatic-intake-context.js'
 import { getAppPool, applyRLSGucs, query, queryWithRLS } from './client.js'
 
+export type CaptureProcessingMode = 'extract' | 'archive_only'
+
 export type CapturePartitionBy = 'connection' | 'user' | 'session' | 'subject'
 export type CaptureRoutingMode = 'realtime' | 'scheduled' | 'drop'
 export type CaptureSensitivity = 'public' | 'internal' | 'confidential'
@@ -43,6 +45,8 @@ export type ProgrammaticCaptureProfile = {
   id: string
   workspaceId: string
   name: string
+  processingMode?: CaptureProcessingMode
+  revision?: string
   partitionBy: CapturePartitionBy
   enabled: boolean
   createdBy: string | null
@@ -66,6 +70,8 @@ export type ProgrammaticCaptureTarget = {
   classificationMode?: 'legacy' | 'review' | 'strict'
   profileId: string
   profileName: string
+  processingMode?: CaptureProcessingMode
+  revision?: string
   partitionBy: CapturePartitionBy
   rules: ProgrammaticCaptureRule[]
 }
@@ -85,6 +91,8 @@ export type ProgrammaticCaptureBatchTarget = Pick<
   | 'classificationMode'
   | 'profileId'
   | 'profileName'
+  | 'processingMode'
+  | 'revision'
 >
 
 export type CaptureRuleInput = {
@@ -107,6 +115,7 @@ export type ProgrammaticCaptureStore = {
     authSessionId?: string
     workspaceId: string
     name: string
+    processingMode?: CaptureProcessingMode
     partitionBy: CapturePartitionBy
     enabled: boolean
     destination?: ResourceDestination | null
@@ -117,6 +126,7 @@ export type ProgrammaticCaptureStore = {
     workspaceId: string
     profileId: string
     name: string
+    processingMode?: CaptureProcessingMode
     partitionBy: CapturePartitionBy
     enabled: boolean
   }): Promise<ProgrammaticCaptureProfile | null>
@@ -168,6 +178,7 @@ const PROFILE_COLS = `
   workspace_id AS "workspaceId",
   name,
   partition_by AS "partitionBy",
+  processing_mode AS "processingMode", revision::text AS revision,
   enabled,
   created_by AS "createdBy",
   created_at AS "createdAt",
@@ -292,8 +303,8 @@ export function createProgrammaticCaptureStore(): ProgrammaticCaptureStore {
         }
         if(binding)await client.query("SELECT set_config('app.capture_admission',$1,true)",[JSON.stringify(binding)])
         const result = await client.query<ProfileRow>(`INSERT INTO programmatic_capture_profiles
-          (workspace_id,name,partition_by,enabled,created_by,intake_binding) VALUES($1,$2,$3,$4,$5,$6::jsonb) RETURNING ${PROFILE_COLS}`,
-          [input.workspaceId,input.name,input.partitionBy,input.enabled,input.actingUserId, binding ? JSON.stringify(binding) : null])
+          (workspace_id,name,partition_by,enabled,created_by,intake_binding,processing_mode) VALUES($1,$2,$3,$4,$5,$6::jsonb,$7) RETURNING ${PROFILE_COLS}`,
+          [input.workspaceId,input.name,input.partitionBy,input.enabled,input.actingUserId, binding ? JSON.stringify(binding) : null, input.processingMode ?? 'extract'])
         await client.query('COMMIT')
         return { ...result.rows[0]!, assistantIds:[], rules:[] }
       } catch(error) { await client.query('ROLLBACK'); throw error } finally { client.release() }
@@ -303,10 +314,10 @@ export function createProgrammaticCaptureStore(): ProgrammaticCaptureStore {
       const result = await captureWrite<ProfileRow>(
         input,
         `UPDATE programmatic_capture_profiles
-            SET name = $3, partition_by = $4, enabled = $5, updated_at = now()
+            SET name = $3, partition_by = $4, enabled = $5, processing_mode = coalesce($6,processing_mode), updated_at = now()
           WHERE id = $1 AND workspace_id = $2
           RETURNING ${PROFILE_COLS}`,
-        [input.profileId, input.workspaceId, input.name, input.partitionBy, input.enabled],
+        [input.profileId, input.workspaceId, input.name, input.partitionBy, input.enabled, input.processingMode ?? null],
       )
       const row = result.rows[0]
       if (!row) return null
@@ -474,6 +485,7 @@ export function createProgrammaticCaptureStore(): ProgrammaticCaptureStore {
                 p.id AS "profileId",
                 wap.setup_state AS "accessSetupState",
                 p.intake_binding AS "intakeBinding",
+                p.processing_mode AS "processingMode", p.revision::text AS revision,
                 p.name AS "profileName",
                 p.partition_by AS "partitionBy"
            FROM workspaces w
@@ -521,6 +533,7 @@ export function createProgrammaticCaptureStore(): ProgrammaticCaptureStore {
                 p.id AS "profileId",
                 wap.setup_state AS "accessSetupState",
                 p.intake_binding AS "intakeBinding",
+                p.processing_mode AS "processingMode", p.revision::text AS revision,
                 p.name AS "profileName"
            FROM assistants a
            JOIN workspaces w ON w.id = a.workspace_id

@@ -1,3 +1,4 @@
+import { currentArchivePublication } from '../workspace-access/file-programmatic-admission.js'
 import type { DerivedWriteEvidence } from '@use-brian/core'
 import type { DerivedWorkspaceFilesStore } from '../db/workspace-files-store.js'
 /**
@@ -402,7 +403,7 @@ export function createFilesApi(deps: CreateFilesApiDeps): DerivedFilesApi {
       ? await store.prepareSessionOwned(ctx.userId,ctx.workspaceId,path,ac) : undefined
     // Session-derived model evidence needs a combined adapter, not an ignored floor.
     if (sessionBinding && p.derivation) throw new Error('scope_evidence_missing')
-    const fileId = randomUUID()
+    const fileId = currentArchivePublication()?.archiveId ?? randomUUID()
     const storageKey = buildStorageKey(ctx.workspaceId, fileId)
     const storageUri = buildStorageUri(bucket, ctx.workspaceId, fileId, uriScheme)
 
@@ -453,7 +454,7 @@ export function createFilesApi(deps: CreateFilesApiDeps): DerivedFilesApi {
       // Only an explicit constraint/permission refusal proves the INSERT did
       // not commit. An uncertain acknowledgement must retain the staged object.
       const code = (dbErr as { code?: string }).code
-      if (typeof code !== 'string' || !(code.startsWith('23') || code === '42501' || code === 'scope_operation_denied' || ['context_not_available','access_policy_conflict','file_admission_provenance_required','access_mode_destination_conflict','pdf_intake_source_changed','pdf_intake_source_unavailable','pdf_intake_asset_changed'].includes(code))) {
+      if (typeof code !== 'string' || !(code.startsWith('23') || code === '42501' || code === 'scope_operation_denied' || ['capture_target_unavailable','archive_receipt_conflict','archive_publication_required','context_not_available','access_policy_conflict','file_admission_provenance_required','access_mode_destination_conflict','pdf_intake_source_changed','pdf_intake_source_unavailable','pdf_intake_asset_changed'].includes(code))) {
         throw new FilePublicationUncertainError()
       }
       try { await gcs.deleteBlob(storageKey) } catch { /* Unpublished orphan: storage retention handles cleanup. */ }

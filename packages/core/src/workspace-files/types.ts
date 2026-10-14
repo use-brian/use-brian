@@ -39,7 +39,11 @@ export type FileSensitivity = (typeof FILE_SENSITIVITIES)[number]
 
 export type WorkspaceFileMetadata = Record<string, unknown>
 
+export type WorkspaceFilePurpose = 'operational' | 'engineering_archive'
+
 export type WorkspaceFile = {
+  /** Server-owned processing purpose; absent only on legacy adapters. */
+  purpose?: WorkspaceFilePurpose
   /** Canonical revision used to fence staged content publication. */
   scopeVersion?: string
   id: string
@@ -102,7 +106,7 @@ export function workspaceFileStatus(row: WorkspaceFile): WorkspaceFileRowStatus 
  */
 export type WorkspaceFileIndexRow = Pick<
   WorkspaceFile,
-  'id' | 'workspaceId' | 'path' | 'parentPath' | 'name' | 'title' | 'summary' | 'mime' | 'sizeBytes' | 'tags' | 'sensitivity' | 'compartments' | 'projectIds' | 'updatedAt'
+  'purpose' | 'id' | 'workspaceId' | 'path' | 'parentPath' | 'name' | 'title' | 'summary' | 'mime' | 'sizeBytes' | 'tags' | 'sensitivity' | 'compartments' | 'projectIds' | 'updatedAt'
 >
 
 export type WorkspaceFileCreateInput = {

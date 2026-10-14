@@ -1,3 +1,4 @@
+import type { ArchiveCapture } from '../engineering-history/contracts.js'
 /**
  * Deterministic routed capture for Brain MCP events.
  *
@@ -54,8 +55,15 @@ export type ProgrammaticCaptureInput = {
 }
 
 export type ProgrammaticCaptureResult = {
-  outcome: 'queued' | 'dropped' | 'processed' | 'duplicate'
+  outcome: 'queued' | 'dropped' | 'processed' | 'duplicate' | 'archived'
   receiptStatus: ProgrammaticCaptureReceiptStatus
+  contractVersion?: 1
+  processingPurpose?: 'extract' | 'archive_only'
+  archiveId?: string
+  fileId?: string
+  deliveryStatus?: string
+  indexStatus?: string
+  profileRevision?: string
   profileId?: string
   ruleId?: string
   batchId?: string
@@ -213,6 +221,7 @@ export function createProgrammaticCaptureRouter(deps: {
   store: ProgrammaticCaptureStore
   ingest: BrainEpisodeIngestor
   now?: () => Date
+  archive?: ArchiveCapture
 }) {
   return async function routeProgrammaticCapture(
     auth: BrainAuth,
@@ -230,7 +239,7 @@ export function createProgrammaticCaptureRouter(deps: {
       )
     }
 
-    if(target.intakeBinding && target.rules.some(rule=>rule.routingMode==='realtime')) throw new ProgrammaticCaptureError('capture_target_unavailable','Capture target unavailable.')
+    if(target.processingMode!=='archive_only' && target.intakeBinding && target.rules.some(rule=>rule.routingMode==='realtime')) throw new ProgrammaticCaptureError('capture_target_unavailable','Capture target unavailable.')
     const occurredAt = input.occurredAt ?? deps.now?.() ?? new Date()
     const metadata = input.metadata ?? {}
     const event: IngestEvent = {
@@ -287,6 +296,13 @@ export function createProgrammaticCaptureRouter(deps: {
     const scope=resolvedCaptureScope(target,matchedRule)
     const compartments=scope.compartments
     const projectIds=scope.projectIds
+    if(target.processingMode==='archive_only'){
+      if(!scope.resolved || !deps.archive)throw new ProgrammaticCaptureError('capture_target_unavailable','Archive publication unavailable.')
+      const firesAt=decision.routing_mode==='realtime' ? (deps.now?.()??new Date())
+        : decision.schedule ? computeNextRun({type:'cron',expression:decision.schedule},decision.timezone,deps.now?.()) : null
+      if(!firesAt)throw new ProgrammaticCaptureError('capture_rule_invalid','Archive schedule unavailable.')
+      return deps.archive(auth,input,target,matchedRule,{sensitivity,compartments,projectIds,firesAt,realtime:decision.routing_mode==='realtime'})
+    }
     const queuedEvent:QueuedProgrammaticCaptureEvent={
       eventId:input.eventId,content:input.content,occurredAt:occurredAt.toISOString(),
       receivedAt:(deps.now?.()??new Date()).toISOString(),role:input.role??'user',
@@ -469,6 +485,7 @@ export function createProgrammaticBatchProcessor(deps: {
         `Programmatic batch ${batch.id} target is unavailable.`,
       )
     }
+    if(target.processingMode==='archive_only' || batch.events.some(e=>(e as {processingPurpose?:string}).processingPurpose==='archive_only'))throw new ProgrammaticCaptureError('capture_target_unavailable','Archive requires its supported-purpose publisher.')
     if(target.classificationMode==='strict'&&!['explicit','reviewed'].includes(batch.scopeBindingOrigin??'legacy')){
       throw new ProgrammaticCaptureError('capture_target_unavailable',`Programmatic batch ${batch.id} has an unresolved scope binding.`)
     }

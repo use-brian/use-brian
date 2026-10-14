@@ -17,6 +17,7 @@ const Uuid = z.string().uuid()
 
 const ProfileBody = z.object({
   name: z.string().trim().min(1).max(120),
+  processingMode: z.enum(['extract','archive_only']).optional(),
   partitionBy: z.enum(['connection', 'user', 'session', 'subject']),
   enabled: z.boolean().default(true),
   destination: z.union([z.object({kind:z.literal('department'),departmentId:Uuid,projectId:Uuid.optional()}).strict(),z.object({kind:z.literal('general')}).strict()]).nullable().optional(),
