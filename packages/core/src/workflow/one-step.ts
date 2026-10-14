@@ -89,6 +89,8 @@ export function oneStepReminderDefinition(params: {
   depth?: ResearchDepthConfig
   /** Model tier for the run. Defaults to Pro (`REMINDER_DEFAULT_MODEL_ALIAS`). */
   modelAlias?: WorkflowModelAlias
+  /** Optional native assistant-call operation ceiling. An empty list admits no tools. */
+  tools?: string[]
 }): WorkflowDefinition {
   // Step IDs must start with a letter per `WorkflowStepSchema`'s regex —
   // ~60% of raw UUIDs start with a hex digit (0–9), which gets rejected by
@@ -108,6 +110,7 @@ export function oneStepReminderDefinition(params: {
         nextStepId: null,
         modelAlias: params.modelAlias ?? REMINDER_DEFAULT_MODEL_ALIAS,
         ...(params.depth ? { depth: params.depth } : {}),
+        ...(params.tools !== undefined ? { tools: params.tools } : {}),
       },
     ],
   }
@@ -140,6 +143,7 @@ export async function buildOneStepReminderWorkflow(
     depth?: ResearchDepthConfig
     /** Model tier for the run. Defaults to Pro (`REMINDER_DEFAULT_MODEL_ALIAS`). */
     modelAlias?: WorkflowModelAlias
+    tools?: string[]
     /**
      * Trigger to stamp on the workflow row so the builder reflects reality.
      * The scheduling tool passes `{ kind: 'schedule', schedule, timezone }`;
@@ -150,9 +154,11 @@ export async function buildOneStepReminderWorkflow(
     contextGroupId?: string | null
     contextProjectId?: string | null
     authoringAuthority: AuthoringAuthority
+    /** Internal canonical Goal source, never human/configuration flags. */
+    captureGoalSource?: (material: Parameters<WorkflowStore['create']>[0]) => Promise<object>
   },
 ): Promise<string> {
-  const workflow = await store.create({
+  const material: Parameters<WorkflowStore['create']>[0] = {
     userId: params.userId,
     workspaceId: params.workspaceId,
     name: params.name ?? 'Scheduled reminder',
@@ -163,11 +169,14 @@ export async function buildOneStepReminderWorkflow(
       deliver: params.deliver,
       depth: params.depth,
       modelAlias: params.modelAlias,
+      tools: params.tools,
     }),
     trigger: params.trigger ?? { kind: 'manual' },
     contextGroupId: params.contextGroupId ?? null,
     contextProjectId: params.contextProjectId ?? null,
     authoringAuthority: params.authoringAuthority,
-  })
+  }
+  const sourceGoal = await params.captureGoalSource?.(material)
+  const workflow = sourceGoal ? await store.create(material, { sourceGoal }) : await store.create(material)
   return workflow.id
 }

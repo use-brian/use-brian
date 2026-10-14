@@ -24,13 +24,25 @@ function canonical(value: unknown): string {
 export const routineConfigurationDigest = (configuration: RoutineConfiguration): string =>
   createHash('sha256').update(canonical(routineConfigurationShape(configuration))).digest('hex')
 
+/** Optional metadata for the pre-existing Goal path. Intake itself requires the
+ * complete schema, while an unmigrated legacy Goal has no routine ceiling. */
+export async function readRoutineOperationCeiling(workspaceId: string, taskId: string,
+  client: Pick<PoolClient, 'query'> = getPool()): Promise<{ actions: string[] } | null> {
+  if (!(await client.query("SELECT to_regclass('public.task_routine_intake_receipts') IS NOT NULL AS ready")).rows[0]?.ready) return null
+  return (await client.query(`SELECT basis->'permittedActions' AS actions FROM task_routine_intake_receipts
+    WHERE workspace_id=$1 AND task_id=$2`, [workspaceId, taskId])).rows[0] ?? null
+}
+
 /** Cheap, read-only preflight before a configuration or admission command. */
 export async function requireRoutineSchema(client: Pick<PoolClient, 'query'> = getPool()): Promise<void> {
   const row = (await client.query<{ ready: boolean }>(`SELECT to_regclass('public.task_routine_intake_receipts') IS NOT NULL
     AND EXISTS(SELECT 1 FROM information_schema.columns WHERE table_schema='public' AND table_name='workflows'
       AND column_name='task_intake_revision')
     AND EXISTS(SELECT 1 FROM information_schema.columns WHERE table_schema='public' AND table_name='workflow_runs'
-      AND column_name='routine_intake_context') AS ready`)).rows[0]
+      AND column_name='routine_intake_context')
+    AND to_regprocedure('public.routine_question_route_admitted(uuid,uuid)') IS NOT NULL
+    AND to_regclass('public.routine_execution_receipt_once') IS NOT NULL
+    AND to_regclass('public.routine_input_question_revision') IS NOT NULL AS ready`)).rows[0]
   if (!row?.ready) throw Object.assign(new Error('routine_schema_not_ready'), { status: 409 })
 }
 

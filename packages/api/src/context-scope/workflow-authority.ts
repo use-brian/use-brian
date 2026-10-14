@@ -409,7 +409,12 @@ export async function resolveGoalAuthoritySystem(goal: GoalRecord) {
   } catch {
     throw goalUnavailable()
   }
+  const taskSourcesCurrent = async () => goal.host?.type !== 'task' || (await queryWithRLS(goal.createdByUserId!,
+    'SELECT id FROM tasks WHERE id=$1 AND workspace_id=$2 AND valid_to IS NULL AND retracted_at IS NULL AND NOT scope_held',
+    [goal.host.id, goal.workspaceId])).rows.length === 1
+  if (!await runWithAgentAccess(saved.ceiling, taskSourcesCurrent)) throw goalUnavailable()
   const lease = createAuthorityLease(saved.ceiling, async () => {
+    if (!await runWithAgentAccess(saved.ceiling, taskSourcesCurrent)) return null
     const row = (await query<{
       actor: string | null
       contextGroupId: string | null

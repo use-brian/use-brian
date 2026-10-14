@@ -367,6 +367,8 @@ export type ExecutorDeps = {
     /** API-owned live lease; rejects stale results without retrying effects. */
     executeWithAuthority?: <T>(operation: () => Promise<T>) => Promise<T>
   }>
+  /** API-owned admission and native Task handoff; null means a legacy run. */
+  routineIntake?: (runId: string) => Promise<{ taskId: string; receiptId: string; vars: Record<string, unknown> } | null>
   emitAudit?: EmitAuditEvent
   /**
    * Deterministic page-send port backing `send_page` steps (page-actions
@@ -724,6 +726,25 @@ export async function advanceWorkflowRun(
     const err: ExecutorError = { message: `Workflow ${run.workflowId} not found.`, reason: 'workflow_not_found' }
     await markRunFailed(deps, run, '<unknown>', err)
     return failOutcome(runId, '<unknown>', err, 0)
+  }
+
+  if (run.triggerKind === 'event' && (deps.routineIntake || workflow.definition.taskIntake)) {
+    try {
+      if (!deps.routineIntake) throw new Error('routine_intake_unavailable')
+      const intake = await deps.routineIntake(run.id)
+      if (intake) {
+        await deps.runStore.updateRun(run.id, { status: 'completed', finishedAt: new Date(now()),
+          vars: { ...run.vars, ...intake.vars, routineIntake: { taskId: intake.taskId, receiptId: intake.receiptId } } })
+        return { kind: 'completed', runId, stepCount: 0 }
+      }
+      if (workflow.definition.taskIntake) throw new Error('routine_snapshot_unavailable')
+    } catch (error) {
+      const err: ExecutorError = { message: error instanceof Error ? error.message : String(error),
+        reason: typeof (error as { reason?: unknown })?.reason === 'string'
+          ? (error as { reason: string }).reason : 'routine_intake_unavailable' }
+      await markRunFailed(deps, run, '<routine-intake>', err)
+      return failOutcome(runId, '<routine-intake>', err, 0)
+    }
   }
 
   // Resolve and freeze run-wide external-client authority before building a

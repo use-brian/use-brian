@@ -462,6 +462,8 @@ export type CreateQuestionParams = {
   deliveryChannelId?: string | null
   /** Optional. Default policy: now + 24h (chat-route-side). NULL = never expire. */
   expiresAt?: Date | null
+  /** Internal native Task question. Never supplied by askQuestion model input. */
+  executionQuestion?: { executionId: string; controlRevision: number; sourceTaskId: string }
 }
 
 export type PendingApprovalsStore = {
@@ -1244,6 +1246,7 @@ export function createPendingApprovalsStore(): PendingApprovalsStore {
         ...(params.context !== undefined ? { context: params.context } : {}),
         ...(params.allowCustom !== undefined ? { allowCustom: params.allowCustom } : {}),
         ...(params.options !== undefined ? { options: params.options } : {}),
+        ...(params.executionQuestion ? { operation: 'routine_input', ...params.executionQuestion } : {}),
       }
       const result = await query(
         `INSERT INTO pending_approvals (
@@ -1253,6 +1256,8 @@ export function createPendingApprovalsStore(): PendingApprovalsStore {
            workflow_run_id, workflow_step_run_id
          )
          VALUES ($1, 'question', $2, $3, $4, 'askQuestion', $5, $6, $7, $8, $9, NULL, NULL)
+         ${params.executionQuestion ? `ON CONFLICT ((approval_payload->>'executionId'), (approval_payload->>'controlRevision'))
+           WHERE kind='question' AND approval_payload->>'operation'='routine_input' DO NOTHING` : ''}
          RETURNING ${COLS}`,
         [
           params.workspaceId,
@@ -1266,6 +1271,12 @@ export function createPendingApprovalsStore(): PendingApprovalsStore {
           params.expiresAt ?? null,
         ],
       )
+      if (!result.rows[0] && params.executionQuestion) {
+        const existing = await query(`SELECT ${COLS} FROM pending_approvals WHERE kind='question'
+          AND approval_payload->>'operation'='routine_input' AND approval_payload->>'executionId'=$1
+          AND approval_payload->>'controlRevision'=$2`, [params.executionQuestion.executionId, String(params.executionQuestion.controlRevision)])
+        return rowToApproval(existing.rows[0] as Record<string, unknown>)
+      }
       const approval = rowToApproval(result.rows[0] as Record<string, unknown>)
       notifyWorkspaceChange(approval.workspaceId, 'approval', 'create', approval.id)
       return approval

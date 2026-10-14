@@ -519,7 +519,10 @@ import {
 } from './db/goals.js'
 import { createAllowanceTree } from './goals/allowance-tree.js'
 import { createExecutionLedger } from './goals/execution-state.js'
-import { briefFromPlan, enterAssignedExecution, readExecutionSources, revalidateWaitingExecutions, type EntryDeps } from './goals/execution-qualification.js'
+import { armQualifiedTaskGoal, enterAssignedExecution, readExecutionSources, resumeAssignedExecution, revalidateWaitingExecutions, type EntryDeps } from './goals/execution-qualification.js'
+import { advanceRoutineIntake, answerRoutineQuestion, ensureRoutineQuestion, noteRoutinePlanningUsage, routineExecutionDeps, routineManifestScope } from './tasks/routine-execution.js'
+import { captureGoalMaterializationSource, scheduleNativeGoalTick } from './goals/materialization-source.js'
+import { readRoutineOperationCeiling } from './db/routine-intake-store.js'
 import { findActiveNativeExecutionSystem } from './db/task-execution-store.js'
 import { createTaskExecutionTools, type ControlEffects } from './tasks/execution-control.js'
 import { createExternalProgressTools } from './tasks/external-progress.js'
@@ -528,8 +531,6 @@ import { researchRoutes } from './routes/research.js'
 import { approvalReviewRoutes } from './routes/approval-review.js'
 import { createApprovalReviewTools } from './approval-review/tools.js'
 import { createResearchTools } from './research/tools.js'
-import { captureTaskGoalSource } from './workspace-access/goal-source-admission.js'
-import { getWorkspaceAccessMode } from './workspace-access/mode-policy.js'
 import { goalsRoutes } from './routes/goals.js'
 import { goalDefaultBudgetRoutes } from './routes/goal-default-budget.js'
 import { createDbCrmStore } from './db/crm-store.js'
@@ -578,7 +579,6 @@ import {
   getRunIdForStepRun,
   findEventTriggeredWorkflowsSystem,
   getWorkflowCreatorSystem,
-  getPrimaryAssistantForWorkspace,
   createWorkflowRunQueueStore,
   countRecentRunsForWorkflowSystem,
   pauseWorkflowSystem,
@@ -1841,7 +1841,7 @@ export async function bootOpenApi(opts: BootOpenApiOptions): Promise<BootResult>
         ...(reason ? { reason: sanitizeAnalytics(reason) } : {}),
       },
     })
-    const assistantId = await getPrimaryAssistantForWorkspace(goal.workspaceId)
+    const assistantId = goal.authoringAuthority?.assistantId
     if (!assistantId) return
     const text =
       terminal === 'done'
@@ -3767,28 +3767,8 @@ export async function bootOpenApi(opts: BootOpenApiOptions): Promise<BootResult>
   // The goal-tick writer, shared by the driver's re-arm and the stall reaper's
   // recovery re-arm. A goal tick intentionally carries NO workflow_id — see
   // driver.ts GOAL_TICK_KIND.
-  const scheduleGoalTick = async (goal: GoalRecord, fireAt: Date, state: GoalLoopState): Promise<void> => {
-    const assistantId = await getPrimaryAssistantForWorkspace(goal.workspaceId)
-    if (!assistantId) {
-      // A workspace with no primary assistant cannot re-arm — log loudly, the
-      // stall reaper will keep retrying rather than the chain dying silently.
-      console.error(`[goals] cannot arm tick for goal ${goal.id}: workspace ${goal.workspaceId} has no primary assistant`)
-      return
-    }
-    await jobStore.create({
-      assistantId,
-      userId: goal.createdByUserId ?? assistantId,
-      schedule: { type: 'once', datetime: fireAt.toISOString().slice(0, 19) },
-      timezone: 'UTC',
-      mode: 'local',
-      instructions: JSON.stringify({ kind: GOAL_TICK_KIND, goalId: goal.id, state }),
-      channelType: 'workflow',
-      channelId: goal.id,
-      nextRunAt: fireAt,
-      contextGroupId: goal.contextGroupId,
-      contextProjectId: goal.contextProjectId,
-    })
-  }
+  const scheduleGoalTick = (goal: GoalRecord, fireAt: Date, state: GoalLoopState): Promise<void> =>
+    scheduleNativeGoalTick(jobStore, goal, fireAt, state)
 
   // Resumable task execution: durable pool/checkpoint state for goals that
   // have a native execution (the edition's real UsageStore is usage truth).
@@ -3960,7 +3940,9 @@ export async function bootOpenApi(opts: BootOpenApiOptions): Promise<BootResult>
   // runs each iteration. A fresh workflow row per goal (no template store); the
   // task title + outcome arrive as run input ({{input.*}}).
   const createCompletionWorkflow = async (goal: GoalRecord, userId: string): Promise<string> => {
-    const assistantId = (await getPrimaryAssistantForWorkspace(goal.workspaceId)) ?? userId
+    const assistantId = goal.authoringAuthority?.assistantId
+    if (!assistantId) throw new Error('goal_authority_unavailable')
+    const intake = goal.host?.type === 'task' ? await readRoutineOperationCeiling(goal.workspaceId, goal.host.id) : null
     // A `verify` goal (§12) has no objective predicate: the agent works the
     // outcome and signals completion via markGoalComplete, gated by the
     // adversarial verifier. A task goal keeps the close-the-task path
@@ -3982,12 +3964,14 @@ export async function bootOpenApi(opts: BootOpenApiOptions): Promise<BootResult>
       userId,
       workspaceId: goal.workspaceId,
       assistantId,
+      ...(intake ? { tools: intake.actions } : {}),
       name: isVerify ? 'Work a goal to done' : 'Complete a task',
       instructions,
       contextGroupId: goal.contextGroupId,
       contextProjectId: goal.contextProjectId,
       authoringAuthority: goal.authoringAuthority
         ?? (() => { throw new Error('goal_authority_unavailable') })(),
+      captureGoalSource: material => captureGoalMaterializationSource(goal.id, 'completion_workflow', material),
       // No wall-clock on a goal iteration (2026-08-19). It used to pin the
       // 900s ceiling because the 90s reminder default clipped real work (a
       // browser-skill run in the cloud sandbox, a research pass, file writes)
@@ -4295,6 +4279,7 @@ export async function bootOpenApi(opts: BootOpenApiOptions): Promise<BootResult>
   const recordGoalOverheadUsage =
     (source: 'overhead:goal-clarity' | 'overhead:goal-verify' | 'overhead:goal-triage') =>
     (usage: TokenUsage, context: GoalLlmUsageContext): void => {
+      noteRoutinePlanningUsage(context.providerKeySource === 'user' ? 0 : calculateCost(context.model, usage))
       if (!usageStore || !context.userId) return
       const store = usageStore
       const userId = context.userId
@@ -4431,7 +4416,7 @@ export async function bootOpenApi(opts: BootOpenApiOptions): Promise<BootResult>
     provider, model: TRIAGE_MODEL, modelTier: 'standard', resolveLlm: resolveGoalLlm,
     onUsage: recordGoalOverheadUsage('overhead:goal-triage'),
   })
-  const executionEntryDeps: EntryDeps = {
+  const executionEntryDeps: EntryDeps = routineExecutionDeps({
     executorUsable: async (actor, workspaceId, executorAssistantId) => {
       const usable = await query<{ ok: boolean }>(
         `SELECT EXISTS (SELECT 1 FROM assistants a WHERE a.id = $3 AND a.workspace_id = $2 AND a.kind <> 'app'
@@ -4441,14 +4426,20 @@ export async function bootOpenApi(opts: BootOpenApiOptions): Promise<BootResult>
     // The selected assistant's actual runtime manifest: tools its active
     // capability grants admit, plus the official tools of connectors usable
     // here. Never connector labels or workflow ids.
-    manifest: async (assistantId, workspaceId, actorUserId) => {
+    manifest: async (assistantId, workspaceId, actorUserId, task) => {
       const capabilities = new Set(await capabilityStore.listActive(assistantId))
+      const turnScope = task ? await routineManifestScope(actorUserId, task) : null
+      const registry = turnScope ? await workflowExecutorDeps.buildToolRegistry({ assistantId, workspaceId, userId: actorUserId, turnScope }) : allTools
       const tools = new Set([...allTools.values()]
-        .filter((t) => !t.requiresCapability || capabilities.has(t.requiresCapability)).map((t) => t.name))
+        .filter((t) => registry.has(t.name) && (!t.requiresCapability || capabilities.has(t.requiresCapability))).map((t) => t.name))
+      if (turnScope) for (const tool of registry.values()) {
+        if (!tool.requiresCapability || capabilities.has(tool.requiresCapability)) tools.add(tool.name)
+      }
       const accounts = new Set<string>()
       for (const u of await listUsableWorkspaceConnectors({ connectorInstanceStore, connectorGrantStore, userId: actorUserId, workspaceId })) {
-        accounts.add(u.instance.provider)
-        for (const t of OFFICIAL_CONNECTOR_TOOLS[u.instance.provider] ?? []) tools.add(t.name)
+        const available = OFFICIAL_CONNECTOR_TOOLS[u.instance.provider] ?? []
+        if (!turnScope || available.some(t => tools.has(t.name))) accounts.add(u.instance.provider)
+        if (!turnScope) for (const t of available) tools.add(t.name)
       }
       return { tools, accounts }
     },
@@ -4461,26 +4452,14 @@ export async function bootOpenApi(opts: BootOpenApiOptions): Promise<BootResult>
     // The canonical arming path: confirm the task's existing draft, or mint
     // one with source proof (ready mode) and confirm it, exactly like the
     // confirm route, with a real authoring envelope.
-    armGoal: async ({ task, plan, authority, createdByUserId, budget }) => {
-      let goal = (await listGoalsByHostSystem({ type: 'task', id: task.id }))
-        .find((g) => g.status !== 'done' && g.status !== 'abandoned') ?? null
-      if (!goal) {
-        const draft = { workspaceId: task.workspaceId, createdByUserId, host: { type: 'task' as const, id: task.id }, outcome: plan.outcome,
-          doneWhen: { kind: 'query' as const, query: { description: 'task complete', predicate: { hostTaskDone: true } } },
-          means: {}, confirmed: false, brief: briefFromPlan(plan) }
-        const { setupState } = await getWorkspaceAccessMode(task.workspaceId, createdByUserId)
-        goal = setupState === 'ready'
-          ? await createGoal(draft, undefined, await captureTaskGoalSource({ userId: createdByUserId, workspaceId: task.workspaceId, assistantId: authority.assistantId, taskId: task.id }))
-          : await goalStore.create(draft)
-      }
-      const workflowId = goal.means.workflowId ?? await createCompletionWorkflow(goal, createdByUserId)
-      const armed = await updateGoalSystem(goal.id, { confirm: true, authoringAuthority: authority, outcome: plan.outcome,
-        brief: briefFromPlan(plan), means: { ...goal.means, workflowId }, budget })
-      if (!armed) throw new Error('goal_authority_unavailable')
-      return armed
-    },
+    armGoal: input => armQualifiedTaskGoal(input, createCompletionWorkflow),
     kickoffGoal: goalDriver.kickoffGoal,
-  }
+  }, async workspaceId => {
+    if (!creditGate) return true
+    const { status } = await creditGate(workspaceId, await getWorkspacePlan(workspaceId))
+    return status === 'ok'
+  })
+  workflowExecutorDeps.routineIntake = runId => advanceRoutineIntake(runId, executionEntryDeps, pendingApprovalsStore)
   enterOrTriageTask = (task, userId, assignment) => {
     if (!task.executorAssistantId) return
     if (!assignment) { judgeTaskForGoal?.(task, userId); return }
@@ -4504,7 +4483,15 @@ export async function bootOpenApi(opts: BootOpenApiOptions): Promise<BootResult>
   // from the durable pool, so the fresh handoff state never resets them.
   const executionControlEffects: ControlEffects = {
     afterControl: async (state, kind) => {
-      if (!state.goalId) return
+      if (!state.goalId) {
+        if (kind === 'pause' || !state.taskId) return
+        const task = await getTaskByIdSystem(state.taskId)
+        if (!task) return
+        await resumeAssignedExecution(state.id, task, executionEntryDeps)
+        const current = await findActiveNativeExecutionSystem({ taskId: task.id })
+        if (current && !current.goalId) await ensureRoutineQuestion(current, pendingApprovalsStore)
+        return
+      }
       const goal = await getGoalByIdSystem(state.goalId)
       if (!goal || goal.status === 'done' || goal.status === 'abandoned') return
       if (kind === 'pause') {
@@ -6034,6 +6021,7 @@ export async function bootOpenApi(opts: BootOpenApiOptions): Promise<BootResult>
   }))
   app.use('/api/sessions', requireAuth(env.JWT_SECRET), sessionQuestionRoutes({
     approvalsStore: pendingApprovalsStore,
+    answerTaskQuestion: approval => answerRoutineQuestion(approval, executionControlEffects),
     resumeDeps: {
       approvalsStore: pendingApprovalsStore,
       sessionResumeStore,

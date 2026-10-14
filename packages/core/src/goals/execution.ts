@@ -158,13 +158,21 @@ export type ExecutionProvenance = {
   actorUserId: string
   origin: 'ui' | 'chat'
   at: string
+} | {
+  /** API-owned canonical intake receipt; never accepted from Task tool input. */
+  kind: 'routine_assignment'
+  receiptId: string
+  actorUserId: string
+  origin: 'routine'
+  at: string
 }
 
 export function isTrustedProvenance(value: unknown): value is ExecutionProvenance {
   if (!value || typeof value !== 'object') return false
   const p = value as Partial<ExecutionProvenance>
-  return p.kind === 'human_assignment' && typeof p.actorUserId === 'string' && p.actorUserId.length > 0
-    && (p.origin === 'ui' || p.origin === 'chat') && typeof p.at === 'string'
+  return typeof p.actorUserId === 'string' && p.actorUserId.length > 0 && typeof p.at === 'string'
+    && (p.kind === 'human_assignment' && (p.origin === 'ui' || p.origin === 'chat')
+      || p.kind === 'routine_assignment' && p.origin === 'routine' && typeof p.receiptId === 'string' && p.receiptId.length > 0)
 }
 
 // --- checkpoint + classification ------------------------------------------------

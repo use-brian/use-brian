@@ -827,6 +827,8 @@ export type WorkflowStepRunRecord = {
 
 /** Trusted server-only creation context. Never deserialize from a request/tool body. */
 export type WorkflowCreateOptions = {
+  /** API-minted canonical Goal producer capability, never serialized. */
+  sourceGoal?: object
   /** Internal receipt: the store committed workflow + firing row atomically. */
   onSchedulePublished?: () => void
   authoring?: {

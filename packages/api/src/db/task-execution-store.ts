@@ -370,11 +370,12 @@ export async function getExecutionSystem(id: string): Promise<ExecutionState | n
   return r.rows[0] ? toState(r.rows[0] as StateRow) : null
 }
 
-export async function findActiveNativeExecutionSystem(target: { taskId: string } | { goalId: string }): Promise<ExecutionState | null> {
+export async function findActiveNativeExecutionSystem(target: { taskId: string } | { goalId: string }, includeTerminal = false): Promise<ExecutionState | null> {
   const [col, val] = 'taskId' in target ? ['task_id', target.taskId] : ['goal_id', target.goalId]
   const r = await getPool().query(
     `SELECT ${STATE_COLUMNS} FROM task_execution_states
-      WHERE ${col} = $1 AND lane = 'native' AND parent_state_id IS NULL AND phase NOT IN ('done','retired') LIMIT 1`, [val])
+      WHERE ${col} = $1 AND lane = 'native' AND parent_state_id IS NULL
+        AND ($2 OR phase NOT IN ('done','retired')) ORDER BY created_at DESC LIMIT 1`, [val, includeTerminal])
   return r.rows[0] ? toState(r.rows[0] as StateRow) : null
 }
 
@@ -588,13 +589,15 @@ export async function settleIterationSystem(stateId: string, input: SettleInput)
 export async function setExecutionPhaseSystem(stateId: string, phase: ExecutionPhase, extra: {
   blocker?: ExecutionState['blocker']; wait?: Record<string, unknown> | null; plan?: Partial<ExecutionPlan>
   sourceRefs?: ExecutionSourceRef[]
+  expectedControlRevision?: number
 } = {}): Promise<ExecutionState | null> {
   const r = await getPool().query(
     `UPDATE task_execution_states SET phase = $2, blocker = $3::jsonb, wait = $4::jsonb,
             plan = coalesce($5::jsonb, plan), source_refs = coalesce($6::jsonb, source_refs)
-      WHERE id = $1 AND phase NOT IN ('paused','retired') RETURNING ${STATE_COLUMNS}`,
+      WHERE id = $1 AND phase NOT IN ('paused','retired') AND ($7::bigint IS NULL OR control_revision=$7) RETURNING ${STATE_COLUMNS}`,
     [stateId, phase, extra.blocker ? JSON.stringify(extra.blocker) : null, extra.wait ? JSON.stringify(extra.wait) : null,
-      extra.plan ? JSON.stringify(extra.plan) : null, extra.sourceRefs ? JSON.stringify(extra.sourceRefs) : null])
+      extra.plan ? JSON.stringify(extra.plan) : null, extra.sourceRefs ? JSON.stringify(extra.sourceRefs) : null,
+      extra.expectedControlRevision ?? null])
   return r.rows[0] ? toState(r.rows[0] as StateRow) : null
 }
 
@@ -692,6 +695,9 @@ export async function applyControlSystem(stateId: string, cmd: ControlCommand,
           WHERE id = $1 RETURNING ${STATE_COLUMNS}`,
         [state.id, phase, nextRevision, JSON.stringify(steering)])
     }
+    if (state.authoringRef?.kind === 'routine_assignment') await client.query(`UPDATE pending_approvals
+      SET status='superseded',responded_at=now() WHERE kind='question' AND status='pending'
+      AND approval_payload->>'operation'='routine_input' AND approval_payload->>'executionId'=$1`, [state.id])
     return { receipt, state: toState(updated.rows[0] as StateRow), pool: (await loadPool(client, state.poolId, false))!, replayed: false }
   })
 }

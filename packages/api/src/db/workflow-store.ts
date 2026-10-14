@@ -8,6 +8,7 @@ import { validateCallerScopeEvidence } from '../context-scope/caller-evidence.js
 import type { PoolClient } from 'pg'
 import { WorkspaceAccessError } from '../workspace-access/policy.js'
 import { admitOperationalAuthoring, lockOperationalPolicy, readWorkflowScheduleAuthority, type OperationalHumanAuthor } from '../workspace-access/operational-admission.js'
+import { admitGoalMaterializationSource } from '../goals/materialization-source.js'
 /**
  * Workflow store + run store, backed by PostgreSQL.
  *
@@ -207,7 +208,8 @@ export function createDbWorkflowStore(hooks?: WorkflowStoreHooks): WorkflowStore
     }
   }
   return {
-    async create({
+    async create(params, options) {
+      let {
       userId,
       workspaceId,
       name,
@@ -223,7 +225,7 @@ export function createDbWorkflowStore(hooks?: WorkflowStoreHooks): WorkflowStore
       contextGroupId,
       contextProjectId,
       authoringAuthority,
-    }, options) {
+      } = params
       const client = await getAppPool().connect()
       let schedulePublished = false
       const result = await (async () => {
@@ -265,7 +267,9 @@ export function createDbWorkflowStore(hooks?: WorkflowStoreHooks): WorkflowStore
               }, client)
             })
           }
-          const admitted = await admitOperationalAuthoring(client, {
+          const inheritedGoal = options?.sourceGoal ? await admitGoalMaterializationSource(client, options.sourceGoal, 'completion_workflow', params) : null
+          const admitted = inheritedGoal ? { contextGroupId: inheritedGoal.contextGroupId,
+            contextProjectId: inheritedGoal.contextProjectId, authoringAuthority: inheritedGoal.authority } : await admitOperationalAuthoring(client, {
             userId, workspaceId, contextGroupId, contextProjectId, authoringAuthority,
           }, managedBy ? undefined : humanAuthor)
           contextGroupId = admitted.contextGroupId
@@ -1129,20 +1133,6 @@ export async function getRunIdForStepRun(stepRunId: string): Promise<string | nu
     [stepRunId],
   )
   return result.rows[0]?.runId ?? null
-}
-
-/**
- * Resolve the workspace's primary assistant for billing / cron-session
- * attribution on workflow-backed scheduled jobs. Mirrors the inline
- * lookup in apps/api/src/index.ts so wait wake-up can build a job
- * scaffold without re-hitting the user-channel dispatch path.
- */
-export async function getPrimaryAssistantForWorkspace(workspaceId: string): Promise<string | null> {
-  const result = await query<{ id: string }>(
-    `SELECT id FROM assistants WHERE workspace_id = $1 AND kind = 'primary' LIMIT 1`,
-    [workspaceId],
-  )
-  return result.rows[0]?.id ?? null
 }
 
 // ── Event-trigger helpers (workflow event dispatcher) ───────────────────

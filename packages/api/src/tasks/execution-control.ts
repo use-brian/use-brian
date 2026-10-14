@@ -21,6 +21,7 @@ import { createHash } from 'node:crypto'
 import { z } from 'zod'
 import { buildTool, type Tool, type ToolContext } from '@use-brian/core'
 import { query } from '../db/client.js'
+import { notifyWorkspaceChange } from '../brain-stream/notify.js'
 import {
   applyControlSystem,
   getExecutionSystem,
@@ -148,7 +149,13 @@ export async function controlExecution(actor: ControlActor, workspaceId: string,
   }, async (locked) => (await controlAdmitted(actor.userId, locked)) ? null : 'execution_control_denied')
   if (!result) throw new ExecutionControlError('execution_not_found')
   const outcome = result.replayed ? 'duplicate' as const : result.receipt.outcome
-  if (outcome === 'applied') await effects.afterControl?.(result.state, parsed.data.action)
+  if (outcome === 'applied') {
+    await effects.afterControl?.(result.state, parsed.data.action)
+    if (result.state.authoringRef?.kind === 'routine_assignment') {
+      notifyWorkspaceChange(workspaceId, 'task', 'update', result.state.taskId ?? undefined)
+      notifyWorkspaceChange(workspaceId, 'approval', 'update')
+    }
+  }
   return { outcome, receipt: result.receipt, state: result.state, renewedSegment: result.replayed ? null : result.receipt.renewedSegment }
 }
 

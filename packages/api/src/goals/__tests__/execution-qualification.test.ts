@@ -11,6 +11,7 @@ const store = vi.hoisted(() => ({
   createRootExecution: vi.fn(),
   bindExecutionGoalSystem: vi.fn(),
   setExecutionPhaseSystem: vi.fn(),
+  getExecutionSystem: vi.fn(),
 }))
 vi.mock('../../db/task-execution-store.js', () => store)
 vi.mock('../../briefs/service.js', () => ({ inspectBrief: vi.fn() }))
@@ -48,6 +49,7 @@ function deps(over: Record<string, unknown> = {}) {
 beforeEach(() => {
   vi.clearAllMocks()
   store.findActiveNativeExecutionSystem.mockResolvedValue(null)
+  store.getExecutionSystem.mockResolvedValue({ id: 's-1', phase: 'ready' })
   store.createRootExecution.mockImplementation(async (input: { phase: string }) => ({ state: { id: 's-1', phase: input.phase }, created: true }))
   store.bindExecutionGoalSystem.mockImplementation(async (id: string, goalId: string) => ({ id, goalId }))
   store.setExecutionPhaseSystem.mockImplementation(async (id: string, phase: string, extra: unknown) => ({ id, phase, ...(extra as object) }))

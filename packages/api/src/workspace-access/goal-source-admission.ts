@@ -1,5 +1,5 @@
 import type { PoolClient } from 'pg'
-import { accessCeilingContains, pinAccessCeiling, parseAuthoringAuthority, type AuthoringAuthority, type GoalCreateParams } from '@use-brian/core'
+import { accessCeilingContains, pinAccessCeiling, pinAuthoringAuthority, parseAuthoringAuthority, type AuthoringAuthority, type GoalCreateParams } from '@use-brian/core'
 import { getPool } from '../db/client.js'
 import { currentAgentAccess, runWithAgentAccess } from '../db/agent-access-context.js'
 import { buildAccessPredicate, buildCurrentMemberSourcePredicate, mutationActorAccess } from '../db/access-predicate.js'
@@ -68,10 +68,10 @@ export async function captureTaskGoalSource(input: { userId: string; workspaceId
     const ambient = runtime(input.userId, input.workspaceId)
     // Pin only the canonical source requirements from the actual finite runtime.
     // This is producer inheritance, NOT attended authoring/default capture.
-    const authority: AuthoringAuthority = existing?.authority ?? { version: 1, assistantId: input.assistantId,
-      ceiling: { workspaceId: input.workspaceId, userId: input.userId, clearance: row.sensitivity,
-        compartments: row.compartments, mutationCompartments: row.compartments,
-        projectIds: row.projectIds, visibilityAssistantIds: [input.assistantId] } }
+    const authority: AuthoringAuthority = existing?.authority ?? pinAuthoringAuthority({ ...ambient,
+      workspaceId: input.workspaceId, userId: input.userId, assistantId: input.assistantId, assistantKind: 'standard', clearance: row.sensitivity,
+      compartments: row.compartments, mutationCompartments: row.compartments,
+      projectIds: row.projectIds, visibilityAssistantIds: [input.assistantId] })
     const proof: Proof = { ...input, snapshot: row.snapshot, contextGroupId: row.contextGroupId,
       contextProjectId: row.contextProjectId, authority }
     if (existing && (existing.userId !== input.userId || existing.assistantId !== input.assistantId
