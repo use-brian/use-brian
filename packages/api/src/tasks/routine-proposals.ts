@@ -11,7 +11,7 @@ import {
 } from '@use-brian/core'
 import { applyRLSGucs, getPool, queryWithRLS, rollbackAndRelease } from '../db/client.js'
 import { requireRoutineSchema, routineConfigurationDigest, type RoutineConfiguration } from '../db/routine-intake-store.js'
-import { lockOperationalPolicy } from '../workspace-access/operational-admission.js'
+import { admitOperationalAuthoring, lockOperationalPolicy } from '../workspace-access/operational-admission.js'
 import { captureAuthoringAuthoritySystem, resolveWorkflowAuthoringScope } from '../context-scope/workflow-authority.js'
 import { validateCallerScopeEvidence } from '../context-scope/caller-evidence.js'
 import { validateTaskResponsibility } from './responsibility.js'
@@ -76,6 +76,8 @@ async function admitConfiguration(client: PoolClient, userId: string, row: Workf
   if (issues.length) fail(issues[0])
   const authority = await captureAuthoringAuthoritySystem({ userId, workspaceId: row.workspace_id, assistantId: old.assistantId,
     contextGroupId: after.contextGroupId, contextProjectId: after.contextProjectId }, client)
+  await admitOperationalAuthoring(client, { userId, workspaceId: row.workspace_id, authoringAuthority: authority,
+    contextGroupId: after.contextGroupId, contextProjectId: after.contextProjectId }, { userId, assistantId: old.assistantId })
   const scope = await resolveWorkflowAuthoringScope({ userId, workspaceId: row.workspace_id, assistantId: authority.assistantId,
     authoringAuthority: authority, contextGroupId: after.contextGroupId, contextProjectId: after.contextProjectId }, client)
   await validateCallerScopeEvidence(evidence, pinAccessCeiling(scope.access), client)

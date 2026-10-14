@@ -4,6 +4,7 @@
  */
 import { z } from 'zod'
 import type { WorkflowDefinition, WorkflowTrigger } from '../workflow/types.js'
+import type { TaskReadinessAssessment } from './admission.js'
 
 const bindingPath = z.string().max(200).regex(/^event\.[A-Za-z0-9_]+(?:\.[A-Za-z0-9_]+)*$/)
   .refine(path => !path.split('.').some(key => ['__proto__', 'prototype', 'constructor'].includes(key)),
@@ -12,6 +13,7 @@ const bindingPath = z.string().max(200).regex(/^event\.[A-Za-z0-9_]+(?:\.[A-Za-z
 export const RoutineTaskIntakeSchema = z.object({
   version: z.literal(1),
   blueprint: z.object({
+    title: z.string().trim().min(1).max(512).refine(title => !title.includes('{{'), 'Tracking titles are static.').optional(),
     outcome: z.string().trim().min(1).max(512),
     description: z.string().trim().min(1).max(10000),
     completionCheck: z.string().trim().min(1).max(2000),
@@ -32,6 +34,13 @@ export const RoutineTaskIntakeSchema = z.object({
       path: ['blueprint', 'inputs', index, 'key'], message: 'Input keys must be distinct.' })
     keys.add(input.key)
   })
+  for (const field of ['outcome', 'description', 'completionCheck'] as const) {
+    for (const token of config.blueprint[field].matchAll(/\{\{([^}]+)\}\}/g)) {
+      if (!token[1].trim().startsWith('input.') || !bindingPath.safeParse(token[1].trim().slice(6)).success) {
+        ctx.addIssue({ code: z.ZodIssueCode.custom, path: ['blueprint', field], message: 'Templates may read only safe input.event paths.' })
+      }
+    }
+  }
 })
 
 export type RoutineTaskIntake = z.infer<typeof RoutineTaskIntakeSchema>
@@ -76,4 +85,18 @@ export function readRoutineInput(input: unknown, path: string): unknown {
     value = (value as Record<string, unknown>)[key]
   }
   return value
+}
+
+export type RoutineTrackingQualification =
+  | { kind: 'untrackable'; reason: 'unverified' | 'not_work' | 'outcome_missing' }
+  | { kind: 'trackable'; execution: 'ready' | 'waiting_for_input'; missingInputs: string[] }
+
+/** This result is policy input, never provenance. Only the internal API run
+ * admission may pass it to the Task gate after proving native authority. */
+export function qualifyRoutineTracking(quality: TaskReadinessAssessment, missingInputs: readonly string[]): RoutineTrackingQualification {
+  if (!quality.evidenceVerified) return { kind: 'untrackable', reason: 'unverified' }
+  if (quality.classification === 'not_a_task' || quality.commitment !== 'explicit') return { kind: 'untrackable', reason: 'not_work' }
+  if (!quality.objective?.trim()) return { kind: 'untrackable', reason: 'outcome_missing' }
+  return { kind: 'trackable', execution: missingInputs.length || quality.classification !== 'ready' ? 'waiting_for_input' : 'ready',
+    missingInputs: [...new Set(missingInputs)] }
 }
