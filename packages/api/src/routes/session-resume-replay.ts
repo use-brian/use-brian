@@ -554,7 +554,7 @@ export function createSessionResumeReplay(deps: SessionResumeReplayDeps): Sessio
         policy: resumePolicy,
         abortController: new AbortController(),
         // The user may be mid-turn on this session; the replay waits its turn.
-        lease: { mode: 'kernel', waitForSlot: waitForTurnSlot },
+        lease: { mode: 'kernel', waitForSlot: waitForTurnSlot, assistantId: assistant.id },
         model: {
           provider: continuationProvider,
           model: customLlm?.selector ?? policy.logicalModel,

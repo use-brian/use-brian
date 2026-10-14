@@ -6675,6 +6675,9 @@ export function chatRoutes(options: WebChatOptions): Router {
       const slot = await takeTurnLease({
         sessionId: session.id,
         admission: turnPolicy.admission,
+        // The answering assistant: a doc-dock or room send may re-address the
+        // turn away from the session's binding (live-work.md "Voice label").
+        assistantId: assistant.id,
         ...(roomAdmission ? { waitForSlot: waitForTurnSlot } : {}),
       })
       if (!slot.taken) {
