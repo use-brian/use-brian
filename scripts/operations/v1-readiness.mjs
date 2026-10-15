@@ -70,7 +70,8 @@ async function runNative(directory, env, sourceDigest, proofs, pgBin, receipts) 
     const guardPath = 'evidence/fixture-ownership.json'
     await writeFile(join(directory, guardPath), JSON.stringify(owned, null, 2), { mode: 0o600 }); proofs.push(await artifact(directory, guardPath))
     const integration = CATALOGUE.suites.filter(s => s.file.startsWith('packages/api/') && s.file.endsWith('.integration.test.ts'))
-    Object.assign(receipts, await runGroup(integration, directory, fixture.env, sourceDigest, proofs, 'native-api', true))
+    Object.assign(receipts, await runGroup(integration, directory, { ...fixture.env, BRIAN_OPERATIONS_EVIDENCE_DIR: join(directory, 'evidence') }, sourceDigest, proofs, 'native-api', true))
+    try { proofs.push(await artifact(directory, 'evidence/native-counters.json')) } catch {}
     const docs = CATALOGUE.suites.filter(s => s.file.startsWith('apps/doc-sync/'))
     if (docs.length) Object.assign(receipts, await runGroup(docs, directory, fixture.env, sourceDigest, proofs, 'native-doc-sync', true))
     return { ...owned, status: 'executed' }
@@ -128,7 +129,7 @@ export async function runReadiness(options) {
   if (options.mode === 'inspect') cases.V14 = { status: 'not_run', reasons: ['local_execution_not_run_in_inspect_mode'], assertions: [] }
   let report = aggregate(CATALOGUE, receipts, after, artifactMap, cases)
   if (report.suites[nativeFile]?.status !== 'passed') {
-    for (const id of ['V03', 'V04', 'V05', 'V07', 'V08', 'V09', 'V11', 'V12']) {
+    for (const id of ['V03', 'V04', 'V05', 'V07', 'V08', 'V09', 'V11', 'V12', 'V14']) {
       report.cases[id] = { ...report.cases[id], status: 'blocked', reasons: [...report.cases[id].reasons, 'native_suite_incomplete'] }
     }
   }

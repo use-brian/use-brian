@@ -2,7 +2,8 @@
  * Missing mail/calendar admission is asserted as a stop, never certified as a lane pass.
  */
 import { randomUUID } from 'node:crypto'
-import { readFile } from 'node:fs/promises'
+import { readFile, writeFile } from 'node:fs/promises'
+import { join } from 'node:path'
 import { afterAll, describe, expect, it, vi } from 'vitest'
 import { z } from 'zod'
 import { OFFICIAL_CONNECTOR_TOOLS } from '@use-brian/shared/builtin-connectors'
@@ -207,8 +208,10 @@ describe('[COMP:api/operations-v1-readiness] native disposable pilot lanes', () 
     }
   })
 
-  it('V11 owned fixture execution makes zero remote calls or paid model calls and only fake effects', () => {
+  it('V11 owned fixture execution makes zero remote calls or paid model calls and only fake effects', async () => {
     expect(outbound).toMatchObject({ paidModel: 0, network: 0, realEffect: 0 })
     expect(outbound.fakeEffect).toBe(1)
+    if (process.env.BRIAN_OPERATIONS_EVIDENCE_DIR) await writeFile(join(process.env.BRIAN_OPERATIONS_EVIDENCE_DIR, 'native-counters.json'),
+      JSON.stringify({ schema: 'operations-provider-counters-v1', ...outbound, liveSchedules: 0, credentialChanges: 0, realEmailReadsOrSends: 0, releasesOrDeployments: 0 }), { mode: 0o600 })
   })
 })
