@@ -1,9 +1,11 @@
 /**
- * Suggested-for-you landing cadence.
+ * Home landing cadence, now pointing at the Chat work entry.
  *
- * Home resumes the last operator app by default. The briefing interrupts that
- * resume only once per local calendar day, or after three net-new pending
+ * Home resumes the last operator app by default. The work entry interrupts
+ * that resume only once per local calendar day, or after three net-new pending
  * approvals since it last rendered. State is per workspace and per device.
+ * The retired `/p?suggested=1` briefing transitions to the same destination
+ * (doc-shell; home-dock.md -> "Chat-first transition").
  *
  * [COMP:app-web/home-suggested]
  */
@@ -85,8 +87,29 @@ export function markSuggestedShown(
   }
 }
 
-export function suggestedPath(workspaceId: string): string {
-  return `/w/${workspaceId}/p?suggested=1`;
+/** The Chat work entry: Chat is the working entry point (chat-app.md -> "Work entry"). */
+export function workEntryPath(workspaceId: string): string {
+  return `/w/${workspaceId}/chat`;
+}
+
+/**
+ * Where a retired `?suggested=1` URL goes (home-dock.md -> "Chat-first
+ * transition"): a URL that addresses a Page keeps that Page and only drops the
+ * flag (every other parameter survives); a bare briefing URL becomes the Chat
+ * work entry. Null when the URL carries no flag, so nothing else is touched.
+ */
+export function suggestedTransitionTarget(input: {
+  workspaceId: string;
+  pathname: string;
+  search: string;
+  pageAddressed: boolean;
+}): string | null {
+  const params = new URLSearchParams(input.search);
+  if (params.get("suggested") !== "1") return null;
+  if (!input.pageAddressed) return workEntryPath(input.workspaceId);
+  params.delete("suggested");
+  const query = params.toString();
+  return query ? `${input.pathname}?${query}` : input.pathname;
 }
 
 /** Apply the shared cadence to a resolved operator-app resume destination. */
@@ -101,6 +124,6 @@ export function homeLandingPath(
     approvalCount,
     now,
   )
-    ? suggestedPath(workspaceId)
+    ? workEntryPath(workspaceId)
     : resumePath;
 }

@@ -1,5 +1,7 @@
 "use client";
 
+import { RoutineChatPickup } from "@/components/workflow/routine-intake";
+
 
 import { useChatHandoff } from "@/lib/use-chat-handoff";
 import { readChatDrafts, writeChatDrafts, type RecoverableChatDraft } from "@/lib/chat-draft-recovery";
@@ -124,6 +126,8 @@ import {
 import { useChatController } from "@/lib/chat/use-chat-controller";
 import { QueuedInputs } from "@/components/ui/queued-inputs";
 import { OperatorTopbar } from "@/components/operator/operator-topbar";
+import { WorkEntry } from "./work-entry";
+import { ClientDeliveryOversight } from "./client-delivery-oversight";
 import { AssistantAvatar } from "@/components/assistant-avatar";
 import { ComposerControls } from "@/components/doc/composer-controls";
 import { useChatModelTier } from "@/lib/chat-model";
@@ -320,6 +324,8 @@ import {
   ChatDocumentCard,
 } from "@/components/chat-app/chat-document-viewer";
 import { ChatPageLinkCard } from "@/components/chat-app/chat-page-link-card";
+import { announceResearchChanged, ChatResearchCard, useSessionResearch } from "@/components/chat-app/research-detail";
+import { ApprovalReviewAttention } from "@/components/chat-app/approval-review-attention";
 import {
   PAGE_WRITING_TOOLS,
   addPageLinks,
@@ -573,6 +579,8 @@ export function ChatSurface({ workspaceId }: { workspaceId: string }) {
    * survive leaving `/chat` (T6). Phones seed it closed (T11).
    */
   const pane = useChatPane(workspaceId, activeSessionId, () => !isPhoneViewport());
+  // Saved research of this chat, matched to the replies that delivered it.
+  const sessionResearch = useSessionResearch(workspaceId, activeSessionId);
   // One hero context picker for both views (chat-parity T5). A fresh personal
   // pane's Team/Project choice stays this surface's own state (handoffs and
   // restored drafts seed it), held by the shared creation context.
@@ -815,6 +823,8 @@ export function ChatSurface({ workspaceId }: { workspaceId: string }) {
   // Pages the turn created or edited (live `page_created` + page-writing
   // tool results) — linked under the reply. See lib/chat-page-links.ts.
   const turnPageLinksRef = useRef<string[]>([]);
+  // The research activity this turn settled (live `research_saved`).
+  const turnResearchRef = useRef<SurfaceMessage["research"] | null>(null);
   const turnCitationsRef = useRef<CitationSource[]>([]);
   const turnFileAttachmentsRef = useRef<ChatFileAttachment[]>([]);
   const turnWorkerDescriptionsRef = useRef<Map<string, string>>(new Map());
@@ -841,6 +851,7 @@ export function ChatSurface({ workspaceId }: { workspaceId: string }) {
     turnNotesRef.current = [];
     turnDocumentsRef.current = [];
     turnPageLinksRef.current = [];
+    turnResearchRef.current = null;
     turnCitationsRef.current = [];
     turnFileAttachmentsRef.current = [];
     turnWorkerDescriptionsRef.current = new Map();
@@ -906,6 +917,7 @@ export function ChatSurface({ workspaceId }: { workspaceId: string }) {
         ...(activityReasoning ? { activityReasoning } : {}),
         ...(finalDocuments.length > 0 ? { documents: finalDocuments } : {}),
         ...(finalPageLinks.length > 0 ? { pageLinks: finalPageLinks } : {}),
+        ...(turnResearchRef.current ? { research: turnResearchRef.current } : {}),
         ...(activityDurationMs != null ? { activityDurationMs } : {}),
         ...(finalCitations.length > 0 ? { citations: finalCitations } : {}),
         ...(finalFileAttachments.length > 0
@@ -2552,6 +2564,11 @@ export function ChatSurface({ workspaceId }: { workspaceId: string }) {
       explicit: explicitAddress,
     });
     setAskArmed(false);
+    // Research is per message, like the Ask affordance above: a deep-research
+    // turn takes minutes and research quota, so the toggle must never carry
+    // silently into the next, ordinary question. Every send consumes it,
+    // including an explicit override (handoff, onboarding seed, replay).
+    setResearchMode(false);
     mentions.reset();
     // D-H4 — never survives past the message that produced it.
     setUnreachableNote([]);
@@ -3013,6 +3030,17 @@ export function ChatSurface({ workspaceId }: { workspaceId: string }) {
             setToolTimeline(turnToolsRef.current);
             break;
           }
+          case "research_saved": {
+            // The research turn settled into a saved/partial/failed activity
+            // (features/research.md -> "UI"): card under the reply.
+            const activityId = typeof payload.activityId === "string" ? payload.activityId : "";
+            const status = payload.status;
+            if (activityId && (status === "saved" || status === "partial" || status === "failed")) {
+              turnResearchRef.current = { activityId, status };
+              announceResearchChanged();
+            }
+            break;
+          }
           case "page_created": {
             // The assistant created a new Page. Link it under the reply, open
             // it in the side pane, and tell the hoisted sidebar provider to
@@ -3192,6 +3220,10 @@ export function ChatSurface({ workspaceId }: { workspaceId: string }) {
             }
             if (payload.code === "assistant_clearance_exceeds_room") {
               setError(t.assistantClearanceBlocked);
+              break;
+            }
+            if (payload.code === "delivery_audience_unverified" && payload.sharedChat === true) {
+              setError(t.deliveryAudienceBlocked);
               break;
             }
             // Dropped provider connection: retrying is safe and usually
@@ -4624,6 +4656,12 @@ export function ChatSurface({ workspaceId }: { workspaceId: string }) {
         }
         right={
           <div className="flex items-center gap-1">
+          {/* Attention (chat-app.md -> "Attention"): work that needs this person, narrowed to this chat's Project or session. */}
+          <ApprovalReviewAttention
+            workspaceId={workspaceId}
+            sessionId={activeSessionId ?? null}
+            projectId={activeContextSession?.contextProjectId ?? null}
+          />
           {!heroMode && <ChatSidePaneToggle pane={pane} />}
           <button
             type="button"
@@ -4649,8 +4687,11 @@ export function ChatSurface({ workspaceId }: { workspaceId: string }) {
         // reads as changing the audience, not changing apps. Workspace adds
         // the shared-audience explainer, and its first send creates the
         // shared thread before streaming into it (see `send`).
-        <section className="flex min-h-0 min-w-0 flex-1 flex-col items-center justify-center overflow-y-auto px-4 py-8">
-          <div className="flex w-full max-w-2xl flex-col items-center gap-5">
+        <section className="flex min-h-0 min-w-0 flex-1 flex-col items-center overflow-y-auto px-4 py-8">
+          {/* `my-auto`, not `justify-center`: the work entry can make the hero
+              taller than the pane, and a centred overflow cannot scroll to
+              its top. */}
+          <div className="my-auto flex w-full max-w-2xl flex-col items-center gap-5">
             {activeAssistant && (
               <div className="flex flex-col items-center gap-2.5 text-center">
                 <AssistantAvatar
@@ -4675,6 +4716,19 @@ export function ChatSurface({ workspaceId }: { workspaceId: string }) {
                 {error}
               </p>
             )}
+            {/* Chat-first work entry (chat-app.md -> "Work entry"): the
+                viewer's work, or the explicitly picked Project / Department's.
+                Pickup only fills the composer; the person sends. */}
+            <div className="w-full">
+              <WorkEntry
+                includeDelivery={view === "personal"}
+                workspaceId={workspaceId}
+                scope={pickedContextProjectId ? { kind: "project", id: pickedContextProjectId }
+                  : pickedContextGroupId ? { kind: "department", id: pickedContextGroupId }
+                  : { kind: "personal" }}
+                onDraft={(draft) => { setInput(draft); requestAnimationFrame(focusComposer); }}
+              />
+            </div>
           </div>
         </section>
       ) : (
@@ -4690,6 +4744,11 @@ export function ChatSurface({ workspaceId }: { workspaceId: string }) {
           className="min-h-0 flex-1 overflow-y-auto px-4 pt-6 pb-[calc(1.5rem+var(--floating-recorder-reserve,0px))]"
         >
           <div className="mx-auto flex w-full max-w-3xl flex-col gap-5">
+            {activeSessionId && activeContextSession ? <ClientDeliveryOversight key={activeSessionId}
+              workspaceId={workspaceId} chatId={activeSessionId}
+              scope={activeContextSession.contextProjectId ? {kind:"project",id:activeContextSession.contextProjectId}
+                : activeContextSession.contextGroupId ? {kind:"department",id:activeContextSession.contextGroupId} : {kind:"personal"}}
+              onDraft={draft=>{setInput(draft);requestAnimationFrame(focusComposer)}}/> : null}
             {/* In-chat pursuit: the always-visible strip while any session
                 goal is still being worked; click jumps to the inline card. */}
             <GoalPursuitSticky
@@ -4955,6 +5014,16 @@ export function ChatSurface({ workspaceId }: { workspaceId: string }) {
                         onOpen={(id) => openInChatPane({ kind: "page", pageId: id })}
                       />
                     ))}
+                    {(() => {
+                      const research = m.research ?? (sessionResearch.get(m.id)
+                        ? { activityId: sessionResearch.get(m.id)!.id, status: sessionResearch.get(m.id)!.status } : null);
+                      return research ? (
+                        <ChatResearchCard
+                          status={research.status}
+                          onOpen={() => openInChatPane({ kind: "research", activityId: research.activityId })}
+                        />
+                      ) : null;
+                    })()}
                     {m.text
                       ? messageActions(
                           m.id,
@@ -5137,6 +5206,7 @@ export function ChatSurface({ workspaceId }: { workspaceId: string }) {
             {/* A suspended askQuestion — any member with read access may
                 answer, attributed (D8); Answer/Cancel are the reader-gated
                 session routes. */}
+            {workspaceId && activeSessionId && <RoutineChatPickup workspaceId={workspaceId} sessionId={activeSessionId} />}
             {pendingQuestion && pendingQuestion.sessionId === activeSessionId && (
               <PendingQuestionPanel
                 sessionId={pendingQuestion.sessionId}

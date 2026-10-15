@@ -159,7 +159,7 @@ export type JobStore = {
     contextProjectId?: string | null
     contextCompartments?: string[]
     contextProjectIds?: string[]
-  }): Promise<ScheduledJob>
+  }, execution?: { sourceGoal: object }): Promise<ScheduledJob>
 
   update(id: string, updates: {
     schedule?: StructuredSchedule

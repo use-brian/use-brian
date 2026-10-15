@@ -21,6 +21,7 @@
     "token-report": "tsx scripts/token-report.ts",
     "eval": "tsx scripts/eval.ts",
     "eval:decisions": "tsx scripts/eval-decisions.ts",
+    "eval:research": "tsx scripts/eval-research.ts",
     "promote:decision-profile": "tsx scripts/promote-decision-profile.ts",
     "revoke:decision-profile": "tsx scripts/revoke-decision-profile.ts"
   },

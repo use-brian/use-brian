@@ -8,6 +8,7 @@ import { validateCallerScopeEvidence } from '../context-scope/caller-evidence.js
 import type { PoolClient } from 'pg'
 import { WorkspaceAccessError } from '../workspace-access/policy.js'
 import { admitOperationalAuthoring, lockOperationalPolicy, readWorkflowScheduleAuthority, type OperationalHumanAuthor } from '../workspace-access/operational-admission.js'
+import { admitGoalMaterializationSource } from '../goals/materialization-source.js'
 /**
  * Workflow store + run store, backed by PostgreSQL.
  *
@@ -76,6 +77,8 @@ const WORKFLOW_SELECT = `
   context_group_id    AS "contextGroupId",
   context_project_id  AS "contextProjectId",
   authoring_authority AS "authoringAuthority",
+  to_jsonb(workflows)->>'task_intake_applied_by' AS "taskIntakeAppliedBy",
+  coalesce((to_jsonb(workflows)->>'task_intake_revision')::integer,0) AS "taskIntakeRevision",
   created_at          AS "createdAt",
   updated_at          AS "updatedAt"
 `
@@ -104,6 +107,8 @@ type WorkflowRow = {
   contextGroupId: string | null
   contextProjectId: string | null
   authoringAuthority: WorkflowRecord['authoringAuthority']
+  taskIntakeRevision?: number
+  taskIntakeAppliedBy?: string | null
   createdAt: Date
   updatedAt: Date
 }
@@ -138,6 +143,7 @@ function backfillStepRunSettings(
 
 function rowToWorkflow(row: WorkflowRow): WorkflowRecord {
   return {
+    taskIntakeRevision:row.taskIntakeRevision ?? 0,
     id: row.id,
     workspaceId: row.workspaceId,
     createdBy: row.createdBy,
@@ -195,6 +201,16 @@ export type WorkflowStoreHooks = {
   onChanged?: (userId: string, workspaceId: string) => void
 }
 
+const creationTransactions = new WeakMap<object, { client: PoolClient; id: string }>()
+/** Canonical compound writer. The command owns commit, release and notification. */
+export async function createWorkflowInTransaction(client: PoolClient, id: string,
+  params: Parameters<WorkflowStore['create']>[0], options?: Parameters<WorkflowStore['create']>[1]) {
+  const transaction = Object.freeze({})
+  creationTransactions.set(transaction, { client, id })
+  try { return await createDbWorkflowStore().create(params, { ...options, transaction }) }
+  finally { creationTransactions.delete(transaction) }
+}
+
 // Provenance is per call, never an identity attached to the shared store.
 export function createDbWorkflowStore(hooks?: WorkflowStoreHooks): WorkflowStore {
   const fireChanged = (userId: string, workspaceId: string): void => {
@@ -205,7 +221,8 @@ export function createDbWorkflowStore(hooks?: WorkflowStoreHooks): WorkflowStore
     }
   }
   return {
-    async create({
+    async create(params, options) {
+      let {
       userId,
       workspaceId,
       name,
@@ -221,12 +238,14 @@ export function createDbWorkflowStore(hooks?: WorkflowStoreHooks): WorkflowStore
       contextGroupId,
       contextProjectId,
       authoringAuthority,
-    }, options) {
-      const client = await getAppPool().connect()
+      } = params
+      const joined = options?.transaction ? creationTransactions.get(options.transaction) : undefined
+      if (options?.transaction && !joined) throw new WorkspaceAccessError('operational_authoring_proof_required', 409)
+      const client = joined?.client ?? await getAppPool().connect()
       let schedulePublished = false
       const result = await (async () => {
         try {
-          await client.query('BEGIN')
+          if (!joined) await client.query('BEGIN')
           await applyRLSGucs(client, userId)
           const policy = await lockOperationalPolicy(client, workspaceId)
           const provenance = options?.authoring
@@ -263,7 +282,9 @@ export function createDbWorkflowStore(hooks?: WorkflowStoreHooks): WorkflowStore
               }, client)
             })
           }
-          const admitted = await admitOperationalAuthoring(client, {
+          const inheritedGoal = options?.sourceGoal ? await admitGoalMaterializationSource(client, options.sourceGoal, 'completion_workflow', params) : null
+          const admitted = inheritedGoal ? { contextGroupId: inheritedGoal.contextGroupId,
+            contextProjectId: inheritedGoal.contextProjectId, authoringAuthority: inheritedGoal.authority } : await admitOperationalAuthoring(client, {
             userId, workspaceId, contextGroupId, contextProjectId, authoringAuthority,
           }, managedBy ? undefined : humanAuthor)
           contextGroupId = admitted.contextGroupId
@@ -277,12 +298,12 @@ export function createDbWorkflowStore(hooks?: WorkflowStoreHooks): WorkflowStore
                workspace_id, created_by, name, description, definition, trigger,
                webhook_slug, webhook_secret,
                model_alias, max_turns, research_mode, managed_by,
-               context_group_id, context_project_id, authoring_authority
+               context_group_id, context_project_id, authoring_authority, id
              )
              VALUES (
                $1, $2, $3, $4, $5, COALESCE($6::jsonb, '{"kind":"manual"}'::jsonb),
                $7, $8,
-               COALESCE($9, 'pro'), $10, COALESCE($11, false), $12, $13, $14, $15::jsonb
+               COALESCE($9, 'pro'), $10, COALESCE($11, false), $12, $13, $14, $15::jsonb, COALESCE($16::uuid,gen_random_uuid())
              )
              RETURNING ${WORKFLOW_SELECT}`,
             [
@@ -301,6 +322,7 @@ export function createDbWorkflowStore(hooks?: WorkflowStoreHooks): WorkflowStore
               contextGroupId ?? null,
               contextProjectId ?? null,
               JSON.stringify(authoringAuthority),
+              joined?.id ?? null,
             ],
           )
           if (policy?.setupState === 'ready' && trigger?.kind === 'schedule') {
@@ -308,13 +330,14 @@ export function createDbWorkflowStore(hooks?: WorkflowStoreHooks): WorkflowStore
             await insertWorkflowScheduleJob(client, workspaceId, inserted.rows[0].id)
             schedulePublished = true
           }
-          await client.query('COMMIT')
+          if (!joined) await client.query('COMMIT')
           return inserted
         } finally {
-          await rollbackAndRelease(client)
+          if (!joined) await rollbackAndRelease(client)
         }
       })()
       const record = rowToWorkflow(result.rows[0])
+      if (joined) return record
       if (schedulePublished) options?.onSchedulePublished?.()
       notifyWorkspaceChange(record.workspaceId, 'workflow', 'create', record.id)
       fireChanged(userId, record.workspaceId)
@@ -690,7 +713,7 @@ export async function readWorkflowRunInTransaction(client: PoolClient, workspace
 }
 
 /** Validate only against write-time metadata, never today's relabeled row. */
-function validatePrimitiveEventMetadata(input: Record<string, unknown> | undefined, sourceType: unknown, metadata: unknown, workspaceId: string): void {
+export function validatePrimitiveEventMetadata(input: Record<string, unknown> | undefined, sourceType: unknown, metadata: unknown, workspaceId: string): void {
   const fail = () => new WorkspaceAccessError('primitive_event_metadata_conflict', 409)
   if (!input || Object.keys(input).some(key => !['trigger','event'].includes(key))
     || !metadata || typeof metadata !== 'object' || Array.isArray(metadata)) throw fail()
@@ -743,15 +766,16 @@ async function withPrimitiveEventAdmission<T>(params: Parameters<WorkflowRunStor
     const row = (await client.query<WorkflowRow>(`SELECT ${WORKFLOW_SELECT} FROM workflows
       WHERE id=$1 AND workspace_id=$2 FOR SHARE`, [params.workflowId,params.workspaceId])).rows[0]
     const authority = parseAuthoringAuthority(row?.authoringAuthority)
-    if (!row || !authority || params.triggeredBy !== row.createdBy || authority.ceiling.userId !== row.createdBy) {
+    const authorUserId = row?.definition.taskIntake ? row.taskIntakeAppliedBy : row?.createdBy
+    if (!row || !authority || !authorUserId || params.triggeredBy !== authorUserId || authority.ceiling.userId !== authorUserId) {
       throw new WorkspaceAccessError('workflow_authority_unavailable', 409)
     }
     // This owner transaction represents the verified saved workflow author.
     // Admitted metadata facades require that actor even on the system pool;
     // the resolved saved/executing ceiling is independently checked below.
-    await client.query("SELECT set_config('app.current_user_id',$1,true)",[row.createdBy])
+    await client.query("SELECT set_config('app.current_user_id',$1,true)",[authorUserId])
     const boundary = (await client.query<{ until: Date | null }>('SELECT lock_task_workflow_dispatch_inputs($1,$2,$3) AS until',
-      [params.workspaceId,row.createdBy,authority.assistantId])).rows[0].until
+      [params.workspaceId,authorUserId,authority.assistantId])).rows[0].until
     const event = params.input?.event as { taskId?: unknown; entryId?: unknown; pageId?: unknown; sourceVersion?: unknown } | undefined
     const sourceType = (params.input?.trigger as { sourceType?: unknown } | undefined)?.sourceType
     let sources: unknown
@@ -771,13 +795,13 @@ async function withPrimitiveEventAdmission<T>(params: Parameters<WorkflowRunStor
         `SELECT page_event_input_evidence($1,$2,$3,$4) AS evidence,
            metadata||jsonb_build_object('sourceVersion',revision::text) AS metadata
          FROM workflow_page_event_receipts WHERE workspace_id=$1 AND revision=$2 AND page_id=$3 FOR SHARE`,
-        [params.workspaceId,event.sourceVersion,event.pageId,row.createdBy])).rows[0]
+        [params.workspaceId,event.sourceVersion,event.pageId,authorUserId])).rows[0]
       sources = receipt?.evidence?.sources; metadata = receipt?.metadata
     }
     const evidence = parseWorkflowCopyEvidence({ sensitivity:'public',compartments:[],projectIds:[],sources })
     if (!evidence?.sources?.length) throw new WorkspaceAccessError(sourceType === 'page' ? 'page_event_evidence_missing' : sourceType === 'knowledge' ? 'knowledge_event_evidence_missing' : 'task_event_evidence_missing', 409)
     const admit = async () => {
-      const scope = await resolveWorkflowAuthoringScope({ userId:row.createdBy, workspaceId:params.workspaceId,
+      const scope = await resolveWorkflowAuthoringScope({ userId:authorUserId, workspaceId:params.workspaceId,
         assistantId:authority.assistantId,authoringAuthority:authority,
         contextGroupId:row.contextGroupId,contextProjectId:row.contextProjectId },client)
       await validateCallerScopeEvidence(evidence,pinAccessCeiling(scope.access),client)
@@ -1128,20 +1152,6 @@ export async function getRunIdForStepRun(stepRunId: string): Promise<string | nu
   return result.rows[0]?.runId ?? null
 }
 
-/**
- * Resolve the workspace's primary assistant for billing / cron-session
- * attribution on workflow-backed scheduled jobs. Mirrors the inline
- * lookup in apps/api/src/index.ts so wait wake-up can build a job
- * scaffold without re-hitting the user-channel dispatch path.
- */
-export async function getPrimaryAssistantForWorkspace(workspaceId: string): Promise<string | null> {
-  const result = await query<{ id: string }>(
-    `SELECT id FROM assistants WHERE workspace_id = $1 AND kind = 'primary' LIMIT 1`,
-    [workspaceId],
-  )
-  return result.rows[0]?.id ?? null
-}
-
 // ── Event-trigger helpers (workflow event dispatcher) ───────────────────
 
 /**
@@ -1188,7 +1198,8 @@ export async function getWorkflowCreatorSystem(
   workflowId: string,
 ): Promise<string | null> {
   const result = await query<{ createdBy: string }>(
-    `SELECT created_by AS "createdBy" FROM workflows WHERE id = $1`,
+    `SELECT CASE WHEN definition ? 'taskIntake' THEN (to_jsonb(workflows)->>'task_intake_applied_by')::uuid
+      ELSE created_by END AS "createdBy" FROM workflows WHERE id = $1`,
     [workflowId],
   )
   return result.rows[0]?.createdBy ?? null

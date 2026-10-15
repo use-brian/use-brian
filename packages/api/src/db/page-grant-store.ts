@@ -316,6 +316,8 @@ export function createDbPageGrantStore(): PageGrantStore {
             AND pg.revoked_at IS NULL
             AND (pg.expires_at IS NULL OR pg.expires_at > now())
             AND sv.clearance = 'public'
+            -- Project-shared material is never published (project-shared-spaces.md).
+            AND sv.shared_project_id IS NULL
             AND w.external_sharing_enabled = true
           LIMIT 1`,
         [tokenHash],
@@ -357,6 +359,7 @@ export function createDbPageGrantStore(): PageGrantStore {
             AND pg.revoked_at IS NULL
             AND (pg.expires_at IS NULL OR pg.expires_at > now())
             AND r.clearance = 'public'
+            AND r.shared_project_id IS NULL AND t.shared_project_id IS NULL
             AND w.external_sharing_enabled = true
             AND r.id IN (SELECT id FROM chain)
             -- A link never reaches a descendant in another department (doc.md publishing).
@@ -388,6 +391,11 @@ export function createDbPageGrantStore(): PageGrantStore {
     },
 
     async publishPage({ userId, pageId, indexable, role }) {
+      // Audience widening of Project-shared material needs a release operation
+      // that does not exist in the foundation: refuse it typed.
+      const shared = await queryWithRLS<{ shared: boolean }>(userId,
+        'SELECT shared_project_id IS NOT NULL AS shared FROM saved_views WHERE id = $1', [pageId])
+      if (shared.rows[0]?.shared) throw Object.assign(new Error('project_publication_unsupported'), { code: 'project_publication_unsupported', status: 409 })
       // One active published grant per page: update in place if present, else
       // insert. principal_ref = pageId (the page is its own principal). The
       // route declassifies the page to `clearance='public'` first. `role`
@@ -467,6 +475,7 @@ export function createDbPageGrantStore(): PageGrantStore {
                                 AND (SELECT ts.workspace_group_id FROM teamspaces ts WHERE ts.id = g.teamspace_id)
                                     IS NOT DISTINCT FROM (SELECT ts.workspace_group_id FROM teamspaces ts WHERE ts.id = t.teamspace_id))
           WHERE t.id = $1
+            AND t.shared_project_id IS NULL
             AND w.external_sharing_enabled = true
           GROUP BY t.id, t.workspace_id, t.name, t.icon, t.full_width
          HAVING bool_or(pg.id IS NOT NULL)`,

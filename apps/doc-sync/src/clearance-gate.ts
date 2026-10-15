@@ -75,7 +75,7 @@ export const PAGE_ACCESS_SQL = `
          wm.clearance    AS "memberClearance",
          ts.sensitivity  AS "teamspaceSensitivity",
          saved_view_operation_scope_allows(
-           sv.workspace_id, sv.clearance, sv.teamspace_id, sv.project_id, true
+           sv.workspace_id, sv.clearance, sv.teamspace_id, sv.project_id, true, sv.shared_project_id
          ) AS "canMutate"
   FROM saved_views sv
   JOIN workspace_members wm ON wm.workspace_id = sv.workspace_id

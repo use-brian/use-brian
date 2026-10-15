@@ -14,6 +14,7 @@ import {
   type CrmDomainEventEnvelope,
   type WorkflowEventInput,
 } from '@use-brian/core'
+import { notifyWorkspaceChange } from '../brain-stream/notify.js'
 import { query, getPool } from '../db/client.js'
 import { acquireCrmPrivacyWriterAdmission } from './privacy-admission.js'
 
@@ -83,10 +84,12 @@ export function createDbCrmDomainEventOutboxStore(): CrmDomainEventOutboxStore {
           FOR NO KEY UPDATE`,[lease.id,lease.workspaceId,workerId,lease.attempts])
         const current=result.rows[0]
         if(!current) {await client.query('COMMIT');return 'skipped'}
-        await dispatch(current)
+        // Projection invalidation is never routine/workflow intake or work authority.
+        if (current.eventType !== 'crm.delivery_projection.changed') await dispatch(current)
         await client.query(`UPDATE crm_domain_event_outbox SET status='delivered',delivered_at=clock_timestamp(),
           lease_owner=NULL,leased_until=NULL,last_error=NULL WHERE id=$1 AND workspace_id=$2`,[lease.id,lease.workspaceId])
         await client.query('COMMIT')
+        if(current.eventType==='crm.delivery_projection.changed')notifyWorkspaceChange(current.workspaceId,'entity','update')
         return 'delivered'
       } catch(error) {
         await client.query('ROLLBACK').catch(()=>{})

@@ -102,6 +102,7 @@ import {
   resolveLiveAccessCeilingSystem,
   sessionMessageInputScope,
   turnOutputWrite,
+  automaticContextAccess,
 } from '../context-scope/resolve-turn-scope.js'
 import { resolveExecutionContextSystem } from '../context-scope/execution-context.js'
 import { prepareAssistantRun } from '../turn/prepare.js'
@@ -1459,7 +1460,7 @@ export function createCalleeExecutor(options: CalleeExecutorOptions): CalleeExec
       calleeAssistant.workspaceId !== undefined
 
     const calleeCtx = {
-      ...turnScope.access,
+      ...automaticContextAccess(turnScope.access, turnScope.activeProjectId),
       clientSelfMemory: externalClient?.clientSelfMemory,
     }
     const [soulContext, identityMemories, rankedIndex] = await Promise.all([
@@ -1695,6 +1696,8 @@ export function createCalleeExecutor(options: CalleeExecutorOptions): CalleeExec
         operationKind: 'workflow_assistant_call',
         operationId: params.decisionContext.operationId,
         applicability: params.decisionContext.applicability,
+        // A deep-research workflow step also receives research lessons.
+        ...(params.depth?.tier === 'deep' ? { research: { projectId: null } } : {}),
         sourceKind: 'workflow_step',
         sourceId: params.decisionContext.operationId,
         channelType: 'workflow',

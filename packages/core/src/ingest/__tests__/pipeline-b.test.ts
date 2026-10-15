@@ -2717,6 +2717,7 @@ describe('[COMP:brain/pipeline-b] windowed extraction', () => {
 
   it('mergeExtractionOutputs: dedupes entities/edges, concats the rest, unions tags, joins summaries', () => {
     const a: ExtractionOutput = {
+      delivery_commitments: [],
       summary: 'first half',
       entities: [
         { kind: 'person', display_name: 'Ashley', canonical_id: null } as ExtractionOutput['entities'][number],
@@ -2749,6 +2750,7 @@ describe('[COMP:brain/pipeline-b] windowed extraction', () => {
 
   it('mergeExtractionOutputs: single payload passes through by reference (fast path)', () => {
     const only: ExtractionOutput = {
+      delivery_commitments: [],
       summary: 's', entities: [], edges: [], tasks: [], memories: [], ephemeral: [], tags: [],
     }
     expect(mergeExtractionOutputs([only])).toBe(only)
@@ -3534,4 +3536,37 @@ describe('[COMP:tasks/task-readiness] Pipeline B — grounded automatic task qua
     expect(recorded[0]).toMatchObject({ status: 'pending', reasonCode: 'suggested' })
     expect(recorded[0].quality.description).toContain('Done when the updated page is live')
   })
+})
+
+
+describe('[COMP:crm/delivery-oversight] native extraction bounds',()=>{
+ const quote='Agreed: deliver the accepted report.'
+ const proposal={candidateKey:'accepted-report',quote,outcome:'Deliver accepted report',basis:'explicit_agreement',companyId:null,dealId:null,agreeingUserId:null,taskIds:[],goalIds:[],dueDate:null}
+ const payload=JSON.stringify({summary:'Agreement recorded',delivery_commitments:[proposal],entities:[],edges:[],tasks:[],memories:[],ephemeral:[],tags:[]})
+ async function run(responses:string[]) {
+  const ep=baseEpisode({id:'11111111-1111-4111-8111-111111111111'}),requests:ProviderRequest[]=[]
+  const application={apply:vi.fn(async(input:Parameters<PipelineBApplicationPort['apply']>[0])=>({id:'run-delivery',workspaceId:input.workspaceId,
+   episodeId:ep.id,attemptKey:input.attemptKey,planHash:input.plan.planHash,extractionState:'succeeded' as const,applicationState:'complete' as const,
+   errorCode:null,counts:{pending:0,committed:input.plan.candidates.length,already_applied:0,held:0,rejected:0,failed:0},items:[]}))}
+  await processEpisode(ep,quote,makeDeps({provider:sequencedProvider(responses,requests),application,
+   episodes:{...spyEpisodes().port,getEpisodeByIdSystem:async()=>({...ep,status:'archived',scopeVersion:'1',scopeHeld:false,extractionLocked:false}) as never}}))
+  return {requests,application,plan:application.apply.mock.calls[0]?.[0].plan}
+ }
+ it('CO06 reuses one extraction and freezes exact source identity without Task candidates',async()=>{
+  const r=await run([payload]);expect(r.requests.filter(v=>v.responseSchema)).toHaveLength(1)
+  expect(r.requests).toHaveLength(2) // existing sensitivity classification, no extra recognition call
+  const candidates=r.plan!.candidates.filter(v=>v.primitiveKind==='delivery_commitment')
+  expect(candidates).toHaveLength(1)
+  expect(candidates[0].payload).toMatchObject({command:'delivery_commitment',proposal:{source:{kind:'episode',revision:'1',quote,start:0,end:quote.length}}})
+  expect(r.plan!.candidates.some(v=>v.primitiveKind==='task')).toBe(false)
+ })
+ it('CO06 generic parse recovery cannot retry delivery recognition',async()=>{
+  const r=await run(['invalid',payload]);expect(r.requests.filter(v=>v.responseSchema)).toHaveLength(2)
+  expect(r.requests[1].messages.at(-1)?.content).toContain('Do not synthesize delivery_commitments')
+  expect(r.plan!.candidates.some(v=>v.primitiveKind==='delivery_commitment')).toBe(false)
+ })
+ it('CO02 unmatched exact quotes do not become commitments',async()=>{
+  const r=await run([payload.replace(quote,'An invented quotation.')])
+  expect(r.plan!.candidates.some(v=>v.primitiveKind==='delivery_commitment')).toBe(false)
+ })
 })

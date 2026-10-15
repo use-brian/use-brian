@@ -88,6 +88,9 @@ import {
 } from "@/lib/api/views";
 import type { CustomPageTemplateSummary } from "@use-brian/doc-model";
 import { listWorkspaceSkills, type WorkspaceSkillSummary } from "@/lib/api/skills";
+import { RoutineIntakeEditor } from '@/components/workflow/routine-intake';
+import { proposeRoutineIntake, toggleRoutineIntake } from '@/lib/api/routine-intake';
+import { requestApprovalsRefresh } from '@/lib/approvals-events';
 import { WorkflowPublicationConsent } from "@/components/workflow/publication-consent";
 import { WorkflowBoard } from "@/components/workflow/workflow-board";
 import {
@@ -99,6 +102,7 @@ import { buildToolCatalog } from "@/lib/workflow-tools";
 import { StepEditor } from "@/components/workflow/step-editor";
 import { TriggerEditor } from "@/components/workflow/trigger-editor";
 import { ButtonBindingsList, TriggerJobsList } from "@/components/workflow/trigger-jobs-list";
+import { WorkflowReviewerSetting } from "@/components/workflow/workflow-reviewer-setting";
 import { RunHistory } from "@/components/workflow/run-history";
 import { LiveRunBanner } from "@/components/workflow/live-run-banner";
 import {
@@ -648,6 +652,16 @@ export default function WorkflowDetailPage({
           : s,
       ),
     };
+    const material = (value: WorkflowFull['definition']) => { const {layout: _layout,...rest}=value; return rest; };
+    if ((workflow.definition.taskIntake || definition.taskIntake) &&
+      (JSON.stringify(material(definition))!==JSON.stringify(material(workflow.definition)) || JSON.stringify(draft.trigger)!==JSON.stringify(workflow.trigger))) {
+      try {
+        await proposeRoutineIntake(workflow.id,{definition,trigger:draft.trigger,contextGroupId:draft.contextGroupId ?? null,
+          contextProjectId:draft.contextProjectId ?? null},workflow.taskIntakeRevision ?? 0,t.routineIntake.editorRationale,crypto.randomUUID());
+        setRunMessage(t.routineIntake.inactive); requestApprovalsRefresh(workflow.workspaceId);
+      } catch {setError(t.routineIntake.unavailable);} finally {setSaving(false);}
+      return;
+    }
     const result = await updateWorkflow(workflow.id, {
       name: draft.name,
       description: draft.description,
@@ -752,6 +766,14 @@ export default function WorkflowDetailPage({
   const onToggleEnabled = async () => {
     setError(null);
     setSaving(true);
+    if (workflow.definition.taskIntake) {
+      try {
+        await toggleRoutineIntake(workflow.id,!workflow.enabled,workflow.taskIntakeRevision ?? 0,crypto.randomUUID());
+        const saved=await getWorkflowFull(workflow.id);if (saved) adoptServerRow(saved);
+        requestWorkflowRefresh(workflow.workspaceId);
+      } catch {setError(t.routineIntake.unavailable);} finally {setSaving(false);}
+      return;
+    }
     const result = await updateWorkflow(workflow.id, { enabled: !workflow.enabled });
     setSaving(false);
     if (!result.ok) {
@@ -1067,6 +1089,10 @@ export default function WorkflowDetailPage({
       )}
 
       <WorkflowPublicationConsent workflow={workflow} dirty={dirty || saving} />
+      {!workflow.managedBy && (draft.trigger.kind==='event' || !!draft.definition.taskIntake) && <RoutineIntakeEditor workflow={workflow} draft={draft}
+        executorChoices={(assistantRows ?? []).map(a=>({value:`assistant:${a.id}`,label:a.name}))}
+        onChange={definition=>updateDraft({definition})}
+        onApplied={()=>{void getWorkflowFull(workflow.id).then(saved=>{if(saved) adoptServerRow(saved);});}} />}
 
       {/* Board — the n8n-style illustration. Always visible; reflects the
           live draft. Clicking a node opens its editor. */}
@@ -1098,6 +1124,10 @@ export default function WorkflowDetailPage({
       {workflow.buttonBindings && workflow.buttonBindings.length > 0 && (
         <ButtonBindingsList bindings={workflow.buttonBindings} />
       )}
+
+      {/* Explicit approval reviewer default (approval-review.md): an
+          assignment the person makes, never a definition field. */}
+      <WorkflowReviewerSetting workspaceId={workspaceId} workflowId={workflow.id} />
 
       {/* Editor panel — always live (no edit mode). Shows only the editor
           for the node focused on the board (the trigger or a single step);

@@ -1,5 +1,5 @@
 import type { WorkspaceDepartmentRegistry,WorkspaceAccessExplanation,WorkspaceAccessExplanationQuery,WorkspaceAccessEvents} from '@use-brian/shared';
-import type { WorkspaceAccessHistory, OrganizationChart, OrganizationCommandIntent, OrganizationCommandApply, OrganizationCommandReview, DepartmentAccessCommand, DepartmentCommandReview, DepartmentCommandApply, WorkspaceAccessOverview, ScopeReviewInventory, ScopeReviewCommand, ScopeReview, ScopeReviewKind } from '@use-brian/shared';
+import type { WorkspaceAccessHistory, OrganizationChart, OrganizationCommandIntent, OrganizationCommandApply, OrganizationCommandReview, DepartmentAccessCommand, DepartmentCommandReview, DepartmentCommandApply, WorkspaceAccessOverview, ScopeReviewInventory, ScopeReviewCommand, ScopeReview, ScopeReviewKind, HeldMemorySummary } from '@use-brian/shared';
 import { protectProjection, type ProtectedProjection } from '@/lib/use-protected-projection';
 import { authFetch } from '@/lib/auth-fetch';
 import { publicRuntimeConfig } from '@/lib/runtime-public-config';
@@ -75,6 +75,18 @@ async function scopeReviewRequest<T extends {validForMs:number}>(workspaceId:str
   const response=await authFetch(`${root}/api/workspaces/${encodeURIComponent(workspaceId)}/${path}`,{cache:'no-store',...(command?{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(command)}:{})});
   if(!response.ok){const body=await response.json().catch(()=>({})) as {error?:string};const error=new Error(body.error??'scope_review_unavailable');if(!command&&([401,403,404].includes(response.status)||body.error==='access_history_changed'))throw new SurfaceCacheEvictionError(error);throw error;}
   return protectProjection(await response.json() as T,started);
+}
+
+/** The caller's own held memories: a count only (docs/plans/scope-hold-recovery.md D3). Member auth. */
+export async function fetchHeldMemorySummary(workspaceId:string):Promise<HeldMemorySummary>{return heldMemoryRequest(workspaceId,'summary');}
+/** Ask an administrator to review the caller's hidden memories. Idempotent within 24h; `nothing_held` when the count is 0. */
+export async function requestHeldMemoryReview(workspaceId:string):Promise<HeldMemorySummary>{return heldMemoryRequest(workspaceId,'review-request',true);}
+async function heldMemoryRequest(workspaceId:string,path:'summary'|'review-request',post=false):Promise<HeldMemorySummary>{
+  const root=publicRuntimeConfig().apiUrl??'http://localhost:4000';
+  const response=await authFetch(`${root}/api/workspaces/${encodeURIComponent(workspaceId)}/held-memories/${path}`,{cache:'no-store',...(post?{method:'POST'}:{})});
+  const body=await response.json().catch(()=>({})) as Partial<HeldMemorySummary>&{error?:string};
+  if(!response.ok)throw new Error(body.error??'held_memories_unavailable');
+  return {count:Number(body.count??0),requestedAt:body.requestedAt??null};
 }
 
 export async function fetchWorkspaceAccessHistory(workspaceId:string,kind:'requests'|'grants',after:string,expectedPolicyRevision:string):Promise<ProtectedProjection<WorkspaceAccessHistory>> {

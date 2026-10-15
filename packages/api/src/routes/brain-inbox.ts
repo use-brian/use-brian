@@ -1192,7 +1192,8 @@ export function brainInboxRoutes({
             id,
             rowFields,
             undefined,
-            { access },
+            // Authenticated bulk edit: a human assignment.
+            { access, assignment: { actorUserId: userId, origin: 'ui' } },
           )
           if (updated) results.push({ id, ok: true, newId: updated.id })
           else results.push({ id, ok: false })

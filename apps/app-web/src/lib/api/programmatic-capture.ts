@@ -33,6 +33,8 @@ export type CaptureProfile = {
   workspaceId: string;
   name: string;
   partitionBy: CapturePartition;
+  processingMode?: "extract" | "archive_only";
+  revision?: string;
   enabled: boolean;
   assistantIds: string[];
   rules: CaptureRule[];
@@ -61,7 +63,7 @@ export async function listCaptureProfiles(workspaceId: string): Promise<CaptureP
 
 export async function createCaptureProfile(
   workspaceId: string,
-  input: { name: string; partitionBy: CapturePartition; enabled: boolean },
+  input: { name: string; partitionBy: CapturePartition; enabled: boolean; processingMode?: "extract" | "archive_only"; destination?: {kind:"department";departmentId:string;projectId?:string} },
 ): Promise<CaptureProfile> {
   const data = await expectJson<{ profile: CaptureProfile }>(await authFetch(base(workspaceId), {
     method: "POST",
@@ -73,7 +75,7 @@ export async function createCaptureProfile(
 
 export async function updateCaptureProfile(
   workspaceId: string,
-  profile: Pick<CaptureProfile, "id" | "name" | "partitionBy" | "enabled">,
+  profile: Pick<CaptureProfile, "id" | "name" | "partitionBy" | "enabled" | "processingMode">,
 ): Promise<CaptureProfile> {
   const data = await expectJson<{ profile: CaptureProfile }>(await authFetch(
     `${base(workspaceId)}/${encodeURIComponent(profile.id)}`,
@@ -84,6 +86,7 @@ export async function updateCaptureProfile(
         name: profile.name,
         partitionBy: profile.partitionBy,
         enabled: profile.enabled,
+        processingMode: profile.processingMode,
       }),
     },
   ));

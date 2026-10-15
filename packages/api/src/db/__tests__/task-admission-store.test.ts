@@ -129,6 +129,7 @@ describe('[COMP:tasks/admission-store] task admission DB adapter', () => {
   it('atomically writes a tombstone and an active source/channel-scoped rule', async () => {
     db.clientQuery.mockImplementation(async (sql: string) => {
       if (sql === 'BEGIN' || sql === 'COMMIT') return { rows: [] }
+      if (sql.includes('SELECT id FROM workspaces')) return { rows: [{ id: 'workspace-1' }] }
       if (sql.includes('SELECT t.id, t.title')) {
         return {
           rows: [
@@ -207,6 +208,7 @@ describe('[COMP:tasks/admission-store] task admission DB adapter', () => {
   it('releases the client on the not-found early return (2026-08-07 pool-exhaustion outage)', async () => {
     db.clientQuery.mockImplementation(async (sql: string) => {
       if (sql === 'BEGIN') return { rows: [] }
+      if (sql.includes('SELECT id FROM workspaces')) return { rows: [] }
       if (sql.includes('SELECT t.id, t.title')) return { rows: [] }
       throw new Error(`Unexpected query: ${sql}`)
     })

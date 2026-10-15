@@ -1,5 +1,5 @@
 import { describe, expect, it, vi } from 'vitest'
-import type { AccessCeiling, ScopeSource } from '@use-brian/core'
+import { bindScopeSource, createdRowEvidence, scopeEvidenceFromRows, type AccessCeiling, type ScopeSource } from '@use-brian/core'
 import type { ChannelIntegrationStore } from '../../db/channel-integrations.js'
 import type { Session } from '../../db/sessions.js'
 import {
@@ -343,6 +343,27 @@ describe('[COMP:api/delivery-authority] destination-bound output policy', () => 
       sessionId: '66666666-6666-4666-8666-666666666666',
       scopeEvidence: { sensitivity: 'internal', compartments: ['legal'], projectIds: [PROJECT] },
     })).resolves.toEqual({ allowed: false, reason: 'delivery_audience_unverified', diagnostic: 'teams' })
+  })
+
+  // 2026-10-12: a research turn in a workspace room saved a personal note,
+  // the note came back as a READ source, and the room refused the finished
+  // answer. The turn's own created row carries labels only.
+  it('delivers a room turn that created a personal note, and still refuses one that read it', async () => {
+    const authorize = authorizer({
+      originSession: session({ visibility: 'workspace', effectiveClearance: 'confidential' }),
+    })
+    const note = bindScopeSource({ id: 'note-1', sensitivity: 'confidential', compartments: [], projectIds: [] }, {
+      workspaceId: WS, resourceKind: 'memory', resourceId: '77777777-7777-4777-8777-777777777777', version: '1',
+      userId: USER, assistantId: null, sensitivity: 'confidential', compartments: [], projectIds: [],
+    })
+    const input = {
+      workspaceId: WS, assistantId: ASSISTANT, userId: USER, channelType: 'web', channelId: 'default',
+      sessionId: '66666666-6666-4666-8666-666666666666',
+    }
+    await expect(authorize({ ...input, scopeEvidence: createdRowEvidence([note]) }))
+      .resolves.toMatchObject({ allowed: true })
+    await expect(authorize({ ...input, scopeEvidence: scopeEvidenceFromRows([note]) }))
+      .resolves.toMatchObject({ allowed: false, diagnostic: 'user_visibility' })
   })
 })
 

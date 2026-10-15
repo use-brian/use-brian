@@ -51,6 +51,8 @@ import {
 
 export type SessionQuestionRouteOptions = {
   approvalsStore: PendingApprovalsStore
+  /** Task-bound input uses native execution steering, not suspended-tool resume. */
+  answerTaskQuestion?: (approval: PendingApproval) => Promise<boolean>
   /**
    * Resume deps used by `enqueueToolInvocationResume`. The same fast-path
    * + scheduled-job machinery powers the question kind; only the replay
@@ -421,11 +423,19 @@ export function sessionQuestionRoutes(opts: SessionQuestionRouteOptions): Router
     if (!updated) {
       // Lost a race — another submit settled the row first.
       const settled = await opts.approvalsStore.getById(userId, approvalId)
+      if (settled?.respondedBy === userId && await opts.answerTaskQuestion?.(settled)) {
+        res.json({ status: settled.status, idempotent: true, resume: { status: 'task_execution' } })
+        return
+      }
       res.status(409).json({
         error: 'Question already resolved',
         status: settled?.status ?? 'unknown',
         idempotent: true,
       })
+      return
+    }
+    if (await opts.answerTaskQuestion?.(updated)) {
+      res.json({ status: updated.status, resume: { status: 'task_execution' } })
       return
     }
     const resume = await enqueueToolInvocationResume(opts.resumeDeps, {
@@ -528,6 +538,10 @@ export function sessionQuestionRoutes(opts: SessionQuestionRouteOptions): Router
         status: settled?.status ?? 'unknown',
         idempotent: true,
       })
+      return
+    }
+    if (await opts.answerTaskQuestion?.(updated)) {
+      res.json({ status: updated.status, resume: { status: 'task_execution' } })
       return
     }
     const resume = await enqueueToolInvocationResume(opts.resumeDeps, {

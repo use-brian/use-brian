@@ -6,6 +6,7 @@ import { assertLegacyJobCreation, lockOperationalPolicy, readWorkflowScheduleAut
 import type { JobStore, ScheduledJob, ScheduledJobMode, ScheduledJobState, StructuredSchedule } from '@use-brian/core'
 import { query, getPool } from './client.js'
 import { notifyWorkspaceChange } from '../brain-stream/notify.js'
+import { admitGoalMaterializationSource } from '../goals/materialization-source.js'
 
 /**
  * Guard against Invalid Date reaching Postgres. pg serialises an Invalid
@@ -181,19 +182,21 @@ export async function insertWorkflowScheduleJob(client: PoolClient, workspaceId:
 
 export function createDbJobStore(): JobStore {
   return {
-    async create(params) {
+    async create(params, execution) {
       const client = await getPool().connect()
       const result = await (async () => {
         try {
           await client.query('BEGIN')
           const pointer = (await client.query('SELECT workspace_id FROM assistants WHERE id=$1', [params.assistantId])).rows[0]?.workspace_id
           const policy = pointer ? await lockOperationalPolicy(client, pointer) : undefined
+          const goalSource = execution?.sourceGoal ? await admitGoalMaterializationSource(client, execution.sourceGoal, 'goal_tick', params) : null
+          if (goalSource && policy && policy.setupState !== 'legacy' && policy.setupState !== 'ready') throw new WorkspaceAccessError('access_mode_setup_required', 409)
           if (policy?.setupState === 'ready' && params.workflowId && !params.workflowStepRunId) {
             const inherited = await insertWorkflowScheduleJob(client, pointer, params.workflowId, params)
             await client.query('COMMIT')
             return { rows: [inherited as JobRow] }
           }
-          await assertLegacyJobCreation(client, params.assistantId)
+          if (!goalSource) await assertLegacyJobCreation(client, params.assistantId)
           const inserted = await client.query<JobRow>(
             `INSERT INTO scheduled_jobs (
                assistant_id, user_id, schedule, timezone, mode, instructions,

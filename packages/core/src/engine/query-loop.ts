@@ -672,6 +672,16 @@ async function* queryLoopCore(
   // Gemini's part order `[text, functionCall]` leaks the text portion before
   // the reactive flip in the spawnWorker branch can fire.
   let suppressText = options.suppressIntermediateText === true
+  // True while THIS session has background workers running or undrained
+  // worker results. Phase 4b will wait/drain and run a synthesis turn, so an
+  // empty or suppressed turn in that state is the correct "wait", not a
+  // failure to recover from.
+  const sessionWorkersBusy = (): boolean => {
+    const wm = context.workerManager
+    return wm
+      ? (wm.pendingCountFor(context.sessionId) > 0 || wm.hasNotificationsFor(context.sessionId))
+      : false
+  }
 
   // Build tool definitions for the LLM
   const toolDefinitions: ToolDefinition[] = Array.from(tools.values()).map((t) => ({
@@ -866,6 +876,19 @@ async function* queryLoopCore(
     // Also gates the mid-stream steer interrupt, for the same reason.
     let hasYieldedUserVisibleOutput = false
 
+    // Text dropped by `suppressText` this turn, held (not streamed, not in
+    // the accumulator) so a coordinator turn that answers directly without
+    // ever spawning a worker can still release it at the end of the turn.
+    // See the release block after `accumulator.finish()`.
+    let heldSuppressedText = ''
+    // `suppressText` as it stood before an askQuestion tool_use_start flipped
+    // it off this turn. Restored when the askQuestion is stripped as misuse,
+    // so a stripped status-narration call does not leave suppression off for
+    // the rest of the loop (that streamed a pre-drain answer AND the
+    // post-drain synthesis as two final answers).
+    let suppressBeforeAskQuestion: boolean | undefined
+    let spawnedWorkerThisTurn = false
+
     // Set when a `steer` arrives mid-stream and the gate above allows us to
     // drop this response on the floor and re-enter with the new instruction.
     let steerInterrupted = false
@@ -874,8 +897,11 @@ async function* queryLoopCore(
       await context.authority?.assertCurrent()
       // Stateless: send full history via provider.stream() (no rawHistory accumulation).
       // Stateful: send only new messages via session.send() (preserves thought signatures).
-      const sendOpts: SendOptions | undefined = nextThinkingLevel
-        ? { thinkingLevel: nextThinkingLevel }
+      const sendOpts: SendOptions | undefined = nextThinkingLevel || progress
+        ? {
+            ...(nextThinkingLevel ? { thinkingLevel: nextThinkingLevel } : {}),
+            ...(progress ? { progress } : {}),
+          }
         : undefined
       // Ledger: record what is about to go on the wire — the delta in
       // stateful mode (recorder reconstructs full = start.messages + deltas),
@@ -899,6 +925,7 @@ async function* queryLoopCore(
             maxTokens: options.maxTokens,
             inputTokenLimit: options.inputTokenLimit,
             ...(nextThinkingLevel ? { thinkingLevel: nextThinkingLevel } : {}),
+            ...(progress ? { progress } : {}),
             signal: context.abortSignal,
           })
       // Consumed — clear so non-retry turns revert to the provider default.
@@ -941,6 +968,7 @@ async function* queryLoopCore(
         // and surfaces on session reload, defeating the live suppression.
         if (chunk.type === 'text_delta' && suppressText) {
           // intentionally skip both yield and accumulator.push for this chunk
+          heldSuppressedText += chunk.text
         } else {
           accumulator.push(chunk)
         }
@@ -967,9 +995,15 @@ async function* queryLoopCore(
           // askQuestion needs its accompanying text visible to the user
           // Suppress text while coordinator is spawning workers — user shouldn't
           // see intermediate chatter like "I'm sending workers..."
-          if (chunk.name === 'spawnWorker') suppressText = true
+          if (chunk.name === 'spawnWorker') {
+            suppressText = true
+            spawnedWorkerThisTurn = true
+          }
           // But askQuestion needs its text visible
-          if (chunk.name === 'askQuestion') suppressText = false
+          if (chunk.name === 'askQuestion') {
+            if (suppressBeforeAskQuestion === undefined) suppressBeforeAskQuestion = suppressText
+            suppressText = false
+          }
         }
 
         if (chunk.type === 'tool_use_delta') {
@@ -1144,6 +1178,29 @@ async function* queryLoopCore(
     }
 
     const response = accumulator.finish()
+
+    // ── Release held coordinator text ──────────────────────────
+    // Coordinator mode starts suppressed so a preamble before the first
+    // spawnWorker never leaks. But a turn that answers directly (no tool
+    // call) while no worker is running or waiting to drain is the final
+    // reply, and nothing will ever un-suppress it: dropping it produced an
+    // "empty" turn, two empty-response retries, and the empty-turn fallback.
+    // Release it here, before the leak sanitiser and the Phase 4 checks see
+    // the content. When workers ARE busy the text stays dropped: Phase 4b
+    // drains them and the synthesis turn supersedes it.
+    if (
+      suppressText
+      && hasVisibleText(heldSuppressedText)
+      && !response.content.some((b) => b.type === 'tool_use')
+      && !sessionWorkersBusy()
+    ) {
+      console.log(`[query-loop] turn ${turn} releasing ${heldSuppressedText.length} chars of held text (no workers busy, no tool call)`)
+      yield { type: 'text_delta', text: heldSuppressedText }
+      hasYieldedUserVisibleOutput = true
+      response.content.unshift({ type: 'text', text: heldSuppressedText })
+    }
+    heldSuppressedText = ''
+
     debugDocumentFlow('response', { sessionId: context.sessionId, model: response.model, turn, messages: [{ role: 'assistant', content: response.content }], stopReason: response.stopReason, usage: response.usage, truncated: response.stopReason === 'max_tokens' || response.stopReason === 'incomplete' })
     addUsage(totalUsage, response.usage, response.model)
 
@@ -1313,6 +1370,13 @@ async function* queryLoopCore(
       console.warn(
         `[query-loop] askQuestion on turn ${turn} — stripping as no-op (model misuse: ${reason}).`,
       )
+      // The askQuestion tool_use_start turned suppression off so its question
+      // text could stream. The question is void, so put suppression back:
+      // what it was before, or on when workers are (still) running, since
+      // Phase 4b's drain will produce the one synthesis answer.
+      if (suppressBeforeAskQuestion !== undefined) {
+        suppressText = suppressBeforeAskQuestion || spawnedWorkerThisTurn || workersStillActive
+      }
       const askQuestionToolUseIds = new Set<string>()
       response.content = response.content.filter((b) => {
         if (b.type === 'tool_use' && b.name === 'askQuestion') {
@@ -1413,7 +1477,18 @@ async function* queryLoopCore(
     // 'low'` to force a text commit. Bounded by `EMPTY_RETRY_WALL_MS` of
     // total loop wall-clock so users on messaging channels don't wait
     // forever for a recovery that isn't coming.
-    if (!hasToolUse && !hasText && emptyResponseRetries < EMPTY_RETRY_PLAN_LENGTH) {
+    //
+    // Never while this session's workers are busy: in coordinator mode the
+    // turn after spawnWorker only feeds back the "running in background"
+    // tool_result, and the model correctly has nothing to say. That empty
+    // turn IS the wait; fall through to Phase 4b, which waits for the
+    // workers and runs the synthesis turn. Retrying here spent 1-2 model
+    // calls per coordinator turn on a nudge ("write the response now, no
+    // more tools") that pushed an answer out before the evidence arrived.
+    if (
+      !hasToolUse && !hasText && emptyResponseRetries < EMPTY_RETRY_PLAN_LENGTH
+      && !sessionWorkersBusy()
+    ) {
       const elapsed = Date.now() - loopStartTime
       if (elapsed > EMPTY_RETRY_WALL_MS) {
         console.warn(

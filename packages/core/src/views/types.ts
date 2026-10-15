@@ -376,6 +376,12 @@ export type SavedView = {
   /** Stable Project context for this page; null is Workspace General. */
   projectId?: string | null
   /**
+   * The shared Project collection this page belongs to (migration 749), or
+   * null. Its participants are the audience; see
+   * docs/architecture/features/project-shared-spaces.md -> "Pages".
+   */
+  sharedProjectId?: string | null
+  /**
    * The user's *first prompt* — the chat message that created this page
    * (migration 231). Snapshotted at creation by the `renderPage` /
    * `createSubPage` doc tools from the turn's user message; `null` on
@@ -432,6 +438,7 @@ export type SavedViewListRow = Pick<
   | 'position'
   | 'teamspaceId'
   | 'projectId'
+  | 'sharedProjectId'
   | 'updatedAt'
 >
 
@@ -537,6 +544,8 @@ export type CreateDraftInput = {
   teamspaceId?: string | null
   /** Omitted inherits a parent; null selects Workspace General. */
   projectId?: string | null
+  /** A shared Project collection destination; a nested page inherits its parent's. */
+  sharedProjectId?: string | null
   /** Defaults to 30 days. Ignored when `state` is `'saved'` (never prunes). */
   autoPruneDays?: number
   /**

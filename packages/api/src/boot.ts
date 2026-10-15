@@ -1,3 +1,7 @@
+import { createEngineeringArchivePublisher } from './engineering-history/publisher.js'
+import { createEngineeringHistoryService } from './engineering-history/service.js'
+import { createCaptureConfigurationReader } from './engineering-history/configuration.js'
+import { engineeringHistoryRoutes } from './routes/engineering-history.js'
 import { configureTurnKernel } from './turn/runtime.js'
 import { configureChannelRooms, postPassiveChannelMessage } from './channel-room/room.js'
 import { scopeEvidenceFromRows, workspaceFilesCtxFor, type CreateComputerToolsOptions } from '@use-brian/core'
@@ -84,9 +88,11 @@ import {
   createGoalClarityAssessor,
   createGoalVerifier,
   createTaskTriageJudge,
+  createExecutionPlanner,
   type GoalLlmRuntime,
   type GoalLlmUsageContext,
   type TaskRecord,
+  type TaskAssignmentProvenance,
   collectStream,
   createInterAssistantTools,
   createReportBugTool,
@@ -123,6 +129,7 @@ import {
   createInternalLinkTools,
   createCrmTools,
   createCrmOperationsTools, createCrmCredentialTools, CRM_INTEGRATION_OPERATIONS, CRM_INTEGRATION_RESOURCE_CATALOG,
+  createCrmBusinessReferenceTools, createCrmCommercialContextTools, createCrmCommercialDocumentTools, createCrmGovernedRecordTools, createCrmDeliveryOversightTools,
   createAssociationTools,
   createCrmEmailDraftTools,
   createCampaignTools,
@@ -199,7 +206,7 @@ import { captureAuthoringAuthoritySystem, resolveGoalAuthoritySystem, resolveWor
 import { deploymentProfile, usesOpenStandaloneRoutes } from './edition.js'
 import { createEmailAdmission, requireOutpostAuthPortal } from './auth/email-admission.js'
 import { validateOutpostAuthConfig } from './auth/outpost-auth-config.js'
-import { getTaskByIdSystem } from './db/tasks.js'
+import { bindTaskClosedHook, bindTaskExecutorChangeHook, getTaskByIdSystem } from './db/tasks.js'
 import { createBrowserSkillsStore } from './db/browser-skills-store.js'
 import { createDbConnectorActionStore } from './db/connector-actions-store.js'
 import { createWorkspaceChatHandoffStore } from './db/workspace-chat-handoff-store.js'
@@ -297,6 +304,11 @@ import {
   createDbCrmDomainEventOutboxStore,
 } from './crm-operations/domain-event-worker.js'
 import { createDbCrmOperationsStore } from './db/crm-operations-store.js'
+import { createCrmReferenceReadStore } from './db/crm-business-reference-store.js'
+import { createCrmCommercialContextReadStore } from './db/crm-commercial-context-store.js'
+import { createCrmCommercialDocumentReadStore } from './db/crm-commercial-document-store.js'
+import { createCrmDeliveryReadStore } from './db/crm-delivery-oversight-store.js'
+import { createCrmGovernedReadStore } from './db/crm-governed-store.js'
 import { createDbCrmIntakeReadStore } from './db/crm-intake-store.js'
 import { createCampaignConversionOutboxWorker } from './campaigns/conversion-outbox.js'
 import { createCampaignDispatchService } from './campaigns/dispatch.js'
@@ -424,6 +436,7 @@ import { createSkillReviewWorker } from './workers/skill-review-worker.js'
 import { createGeminiSkillReviewLLM } from './workers/skill-review-llm.js'
 import { createPlaybookReflectionWorker } from './workers/playbook-reflection-worker.js'
 import { createDecisionReflectionWorker } from './workers/decision-reflection-worker.js'
+import { createResearchReflectionWorker } from './research/learning.js'
 import { buildWorkspaceCuratorScope } from './workers/workspace-curator-scope.js'
 import { loadSkillRegistry } from './registry/load-skill-registry.js'
 import { handleRoutes } from './routes/handles.js'
@@ -501,7 +514,28 @@ import {
   setGoalAwaitingEventSystem,
   clearGoalAwaitingEventSystem,
   findEventWaitingGoalsSystem,
+  createGoal,
+  listGoalsByHostSystem,
+  setGoalStatusSystem,
 } from './db/goals.js'
+import { createAllowanceTree } from './goals/allowance-tree.js'
+import { createExecutionLedger } from './goals/execution-state.js'
+import { armQualifiedTaskGoal, enterAssignedExecution, readExecutionSources, resumeAssignedExecution, revalidateWaitingExecutions, type EntryDeps } from './goals/execution-qualification.js'
+import { advanceRoutineIntake, answerRoutineQuestion, ensureRoutineQuestion, noteRoutinePlanningUsage, routineExecutionDeps, routineManifestScope } from './tasks/routine-execution.js'
+import { captureGoalMaterializationSource, scheduleNativeGoalTick } from './goals/materialization-source.js'
+import { readRoutineOperationCeiling } from './db/routine-intake-store.js'
+import { createRoutineTools } from './tasks/routine-tools.js'
+import { observeRoutineTasks } from './tasks/routine-observations.js'
+import { setRoutineConfigurationPreflight, RoutineConfigurationError } from './tasks/routine-proposals.js'
+import { assertRoutineRuntimeReady } from './tasks/routine-preflight.js'
+import { findActiveNativeExecutionSystem } from './db/task-execution-store.js'
+import { createTaskExecutionTools, type ControlEffects } from './tasks/execution-control.js'
+import { createExternalProgressTools } from './tasks/external-progress.js'
+import { taskExecutionRoutes } from './routes/task-execution.js'
+import { researchRoutes } from './routes/research.js'
+import { approvalReviewRoutes } from './routes/approval-review.js'
+import { createApprovalReviewTools } from './approval-review/tools.js'
+import { createResearchTools } from './research/tools.js'
 import { goalsRoutes } from './routes/goals.js'
 import { goalDefaultBudgetRoutes } from './routes/goal-default-budget.js'
 import { createDbCrmStore } from './db/crm-store.js'
@@ -550,7 +584,6 @@ import {
   getRunIdForStepRun,
   findEventTriggeredWorkflowsSystem,
   getWorkflowCreatorSystem,
-  getPrimaryAssistantForWorkspace,
   createWorkflowRunQueueStore,
   countRecentRunsForWorkflowSystem,
   pauseWorkflowSystem,
@@ -561,12 +594,15 @@ import { connectorWorkflowEventAdmissibleSystem } from './workflow/connector-eve
 import { callRemoteMcpTool } from './mcp/client.js'
 import { createPendingApprovalsStore, readBrowserSendApprovalStatus } from './db/pending-approvals-store.js'
 import {
+  continueDelegatedWorkflowApproval,
   makeRequestApproval,
   sweepExpiredApprovals,
   sweepExpiredQuestions,
   type ApprovalBridgeDeps,
 } from './workflow/approval.js'
 import { resolveRecentApprovalChannel } from './workflow/recent-approval-channel.js'
+import { configureApprovalReviewConsumers, reviewOnCreate } from './approval-review/resolution.js'
+import { consumeDelegatedReceipt } from './approval-review/consumption.js'
 import { createApprovalDeliveryDispatcher } from './workflow/approval-deliveries.js'
 import { workflowApprovalsRoutes } from './routes/workflow-approvals.js'
 import { approvalsRoutes } from './routes/approvals.js'
@@ -574,6 +610,7 @@ import { liveWorkRoutes } from './routes/live-work.js'
 import {
   workflowsRoutes,
   createValidatedDefinitionEditor,
+  preflightWorkflowDefinition,
   type ValidatedDefinitionEditor,
 } from './routes/workflows.js'
 import { modelMenuRoutes } from './routes/model-menu.js'
@@ -590,6 +627,11 @@ import { workspaceAccessRoutes } from './routes/workspace-access.js'
 import { departmentRoutes } from './routes/departments.js'
 import { createOrganizationTools, createWorkspaceAccessTools } from './workspace-access/tools.js'
 import { createDepartmentTools } from './workspace-access/department-tools.js'
+import { createProjectAccessTools } from './workspace-access/project-access-tools.js'
+import { createBriefTools } from './briefs/tools.js'
+import { briefRoutes } from './routes/briefs.js'
+import { workRoutes } from './routes/work.js'
+import { configureBriefTurnContext, createGoalBriefBoundary, resolveBriefTurn } from './briefs/context.js'
 import { createWorkspaceMigrationTools } from './workspace-access/migration-tools.js'
 import { createTeamspaceStore } from './db/teamspace-store.js'
 import { createOfficeArtifactStore, isDurableOfficeArtifact } from './db/office-artifacts.js'
@@ -637,7 +679,9 @@ import { officeReleaseContextRevision, officeReleaseRoutes } from './routes/offi
 import { officeLifecycleRoutes } from './routes/office-lifecycle.js'
 import { officeOfflineContextRevision, officeOfflineRoutes } from './routes/office-offline.js'
 import { officeResourceRoutes } from './routes/office-resources.js'
-import { createOfficeResourceReader } from './office/resource-read.js'
+import { createOfficeReleaseRuntime, createOfficeTemplateBundleReader } from './office/release-runtime.js'
+import { createCrmOfficeBindingFromOffice } from './crm-operations/office-binding.js'
+import { crmDocumentWorker } from './crm-operations/commercial-preparations.js'
 import { bindOfficeFile, classifyOfficeOutput, officeFileBindingRevision, fileMatchesOfficeOutput, officeOutputScopeRevision, officeScopePathSegment, sameOfficeFileBinding, type OfficeOutputScope } from './office/file-binding.js'
 import { readOfficeProjection } from './db/office-read-projection.js'
 import { internalOfficeCheckpointRoutes } from './routes/internal-office-checkpoint.js'
@@ -1803,7 +1847,7 @@ export async function bootOpenApi(opts: BootOpenApiOptions): Promise<BootResult>
         ...(reason ? { reason: sanitizeAnalytics(reason) } : {}),
       },
     })
-    const assistantId = await getPrimaryAssistantForWorkspace(goal.workspaceId)
+    const assistantId = goal.authoringAuthority?.assistantId
     if (!assistantId) return
     const text =
       terminal === 'done'
@@ -1843,10 +1887,15 @@ export async function bootOpenApi(opts: BootOpenApiOptions): Promise<BootResult>
   // in boot, so the hook calls through this late-bound ref. Null (OSS keyless,
   // or before wiring) = no drafting — fail-closed by design.
   let judgeTaskForGoal: ((task: TaskRecord, userId: string) => void) | null = null
+  // Assigned execution (goals.md -> "Formation, readiness and automatic
+  // entry"): late-bound like the judge. A create carrying trusted human
+  // assignment provenance enters execution; anything else keeps triage.
+  let enterOrTriageTask: ((task: TaskRecord, userId: string, assignment?: TaskAssignmentProvenance) => void) | null = null
   const taskStore = createDbTaskStore({
     onTaskTerminal: goalRollup.onTaskTerminal,
-    onTaskCreate: (task, userId) => {
-      judgeTaskForGoal?.(task, userId)
+    onTaskCreate: (task, userId, assignment) => {
+      if (enterOrTriageTask) enterOrTriageTask(task, userId, assignment)
+      else judgeTaskForGoal?.(task, userId)
     },
   })
   const crmStore = createDbCrmStore()
@@ -1870,7 +1919,9 @@ export async function bootOpenApi(opts: BootOpenApiOptions): Promise<BootResult>
     publicOrigin: env.CAMPAIGN_PUBLIC_ORIGIN ?? env.API_URL,
     oneClickEnabled: Boolean(campaignDkim),
   })
-  const crmOperationsService = createCrmOperationsService(createDbCrmOperationsStore(), { deliveries: crmDeliveries })
+  // The Office binding is attached once Office storage and release are composed below.
+  const crmDocumentRuntime: import('./crm-operations/commercial-preparations.js').CrmCommercialDocumentRuntime = { binding: null }
+  const crmOperationsService = createCrmOperationsService(createDbCrmOperationsStore(), { deliveries: crmDeliveries, documents: crmDocumentRuntime })
   const providerEntitlements = createProviderEntitlementService({
     pool: getPool(),
     operationsForTransaction: (client) => createCrmOperationsService(createDbCrmOperationsStore(getPool(), client)),
@@ -2353,6 +2404,8 @@ export async function bootOpenApi(opts: BootOpenApiOptions): Promise<BootResult>
   // providers through this registration, so a route that forgets to thread
   // them cannot change which model answers a turn.
   configureTurnKernel({ resolveWorkspaceCustomLlm, configuredProviders })
+  // Accepted Brief grounding + revision boundary for every runner's prepare stage.
+  configureBriefTurnContext(resolveBriefTurn)
   const resolveBackgroundRuntime = async (workspaceId: string | null | undefined) =>
     workspaceId
       ? resolveWorkspaceCustomLlm({
@@ -3119,12 +3172,14 @@ export async function bootOpenApi(opts: BootOpenApiOptions): Promise<BootResult>
   const chatEpisodeIngestor: ChatEpisodeIngestor =
     builtIngestors?.chatEpisodeIngestor ?? (async () => {})
   const brainEpisodeIngestor: BrainEpisodeIngestor | undefined = builtIngestors?.brainEpisodeIngestor
-  const programmaticCapture = brainEpisodeIngestor
-    ? createProgrammaticCaptureRouter({
+  let engineeringArchive:ReturnType<typeof createEngineeringArchivePublisher>|null=null
+  let engineeringHistory:ReturnType<typeof createEngineeringHistoryService>|null=null
+  const captureConfiguration=createCaptureConfigurationReader(programmaticCaptureStore,()=>engineeringArchive!==null)
+  const programmaticCapture = createProgrammaticCaptureRouter({
         store: programmaticCaptureStore,
-        ingest: brainEpisodeIngestor,
+        ingest: brainEpisodeIngestor??(async()=>{throw new Error('capture_extraction_unavailable')}),
+        archive:(...args)=>{if(!engineeringArchive)throw new Error('capture_archive_unavailable');return engineeringArchive.capture(...args)},
       })
-    : undefined
   const programmaticBatchWorker = brainEpisodeIngestor
     ? createBatchWorker({
         store: createDbProgrammaticBatchStore(),
@@ -3666,6 +3721,23 @@ export async function bootOpenApi(opts: BootOpenApiOptions): Promise<BootResult>
   }
   configureChannelWorkflowReplies(approvalBridgeDeps)
   workflowExecutorDeps.requestApproval = makeRequestApproval(approvalBridgeDeps)
+  // Explicitly delegated approval review (features/approval-review.md): a
+  // run fully paused on an approval is offered to its assigned reviewer, and
+  // a delegated decision continues through the same bridge with the original
+  // executor and a receipt revalidated before the gated tool runs.
+  workflowExecutorDeps.onApprovalPaused = async ({ runId }) => {
+    const pending = await getPool().query<{ id: string; workspace_id: string; kind: string }>(
+      `SELECT id, workspace_id, kind FROM pending_approvals WHERE workflow_run_id = $1 AND status = 'pending'`, [runId])
+    for (const row of pending.rows) await reviewOnCreate({ id: row.id, workspaceId: row.workspace_id, kind: row.kind as 'workflow_step' })
+  }
+  configureApprovalReviewConsumers({
+    workflowStep: (approval, receipt) => continueDelegatedWorkflowApproval(approvalBridgeDeps, approval, receipt.delegatorUserId, async () => {
+      const fresh = await pendingApprovalsStore.getByIdSystem(approval.id)
+      if (!fresh) return { ok: false, reason: 'request_missing' }
+      const check = await consumeDelegatedReceipt(fresh)
+      return check.ok ? { ok: true } : { ok: false, reason: check.reason }
+    }),
+  })
 
   // ── Goal-seeker acting loop (R1) ──
   // The stateless driver: one tick = one bounded workflow run + a `done_when`
@@ -3701,30 +3773,16 @@ export async function bootOpenApi(opts: BootOpenApiOptions): Promise<BootResult>
   // The goal-tick writer, shared by the driver's re-arm and the stall reaper's
   // recovery re-arm. A goal tick intentionally carries NO workflow_id — see
   // driver.ts GOAL_TICK_KIND.
-  const scheduleGoalTick = async (goal: GoalRecord, fireAt: Date, state: GoalLoopState): Promise<void> => {
-    const assistantId = await getPrimaryAssistantForWorkspace(goal.workspaceId)
-    if (!assistantId) {
-      // A workspace with no primary assistant cannot re-arm — log loudly, the
-      // stall reaper will keep retrying rather than the chain dying silently.
-      console.error(`[goals] cannot arm tick for goal ${goal.id}: workspace ${goal.workspaceId} has no primary assistant`)
-      return
-    }
-    await jobStore.create({
-      assistantId,
-      userId: goal.createdByUserId ?? assistantId,
-      schedule: { type: 'once', datetime: fireAt.toISOString().slice(0, 19) },
-      timezone: 'UTC',
-      mode: 'local',
-      instructions: JSON.stringify({ kind: GOAL_TICK_KIND, goalId: goal.id, state }),
-      channelType: 'workflow',
-      channelId: goal.id,
-      nextRunAt: fireAt,
-      contextGroupId: goal.contextGroupId,
-      contextProjectId: goal.contextProjectId,
-    })
-  }
+  const scheduleGoalTick = (goal: GoalRecord, fireAt: Date, state: GoalLoopState): Promise<void> =>
+    scheduleNativeGoalTick(jobStore, goal, fireAt, state)
+
+  // Resumable task execution: durable pool/checkpoint state for goals that
+  // have a native execution (the edition's real UsageStore is usage truth).
+  const executionLedger = createExecutionLedger({ allowance: createAllowanceTree({ usageStore: usageStore ?? null }) })
 
   const goalDriver = createGoalDriver({
+    executionLedger,
+    briefBoundary: createGoalBriefBoundary(),
     claimCrmEventResume: claimCrmGoalEventResume,
     assertSourceAuthority: assertGoalCrmSourceAuthority,
     executeWithAuthority: async (goal, operation) =>
@@ -3786,6 +3844,12 @@ export async function bootOpenApi(opts: BootOpenApiOptions): Promise<BootResult>
         const runInput: Record<string, unknown> = { goalOutcome: goal.outcome, goalId: goal.id }
         if (goal.brief?.verification) runInput.goalVerification = goal.brief.verification
         if (goal.brief?.approach) runInput.goalApproach = goal.brief.approach
+        // Human steering and the qualified plan travel with the iteration.
+        const execution = await findActiveNativeExecutionSystem({ goalId: goal.id })
+        if (execution) {
+          if (execution.steering.length > 0) runInput.executionSteering = execution.steering.map((x) => x.instruction).join('\n')
+          if (execution.checkpoint?.nextStep ?? execution.plan.nextStep) runInput.executionNextStep = execution.checkpoint?.nextStep ?? execution.plan.nextStep
+        }
         if (goal.host?.type === 'task') {
           const t = await query<{ title: string }>(
             `SELECT title FROM tasks WHERE id = $1 AND valid_to IS NULL`,
@@ -3823,11 +3887,24 @@ export async function bootOpenApi(opts: BootOpenApiOptions): Promise<BootResult>
       // poll. The marker was cleared at claim time, so this reflects only THIS
       // iteration's `waitForEvent` call (if any).
       const parked = await getGoalAwaitingEventSystem(goal.id)
+      // Engine-observed evidence: the run's output content, versioned by
+      // hash, so an identical output twice is not new evidence (a finished
+      // run alone is never progress).
+      let evidence: { summary: string; artifacts: { kind: string; ref: string; version: string }[] } | undefined
+      if (outcome.kind === 'completed') {
+        const finished = await workflowRunStore.getRunSystem(activeRunId)
+        const body = JSON.stringify((finished as { output?: unknown } | null)?.output ?? null)
+        if (body !== 'null') {
+          evidence = { summary: `Workflow run ${activeRunId} completed.`,
+            artifacts: [{ kind: 'workflow_output', ref: goal.means.workflowId ?? 'workflow', version: createHash('sha256').update(body).digest('hex').slice(0, 16) }] }
+        }
+      }
       return {
         runId: activeRunId,
         terminal,
         completed: outcome.kind === 'completed',
         eventSubscriptions: parked?.subscriptions ?? null,
+        evidence,
       }
     },
     deliver: deliverGoalTerminal,
@@ -3869,7 +3946,9 @@ export async function bootOpenApi(opts: BootOpenApiOptions): Promise<BootResult>
   // runs each iteration. A fresh workflow row per goal (no template store); the
   // task title + outcome arrive as run input ({{input.*}}).
   const createCompletionWorkflow = async (goal: GoalRecord, userId: string): Promise<string> => {
-    const assistantId = (await getPrimaryAssistantForWorkspace(goal.workspaceId)) ?? userId
+    const assistantId = goal.authoringAuthority?.assistantId
+    if (!assistantId) throw new Error('goal_authority_unavailable')
+    const intake = goal.host?.type === 'task' ? await readRoutineOperationCeiling(goal.workspaceId, goal.host.id) : null
     // A `verify` goal (§12) has no objective predicate: the agent works the
     // outcome and signals completion via markGoalComplete, gated by the
     // adversarial verifier. A task goal keeps the close-the-task path
@@ -3891,12 +3970,14 @@ export async function bootOpenApi(opts: BootOpenApiOptions): Promise<BootResult>
       userId,
       workspaceId: goal.workspaceId,
       assistantId,
+      ...(intake ? { tools: intake.actions } : {}),
       name: isVerify ? 'Work a goal to done' : 'Complete a task',
       instructions,
       contextGroupId: goal.contextGroupId,
       contextProjectId: goal.contextProjectId,
       authoringAuthority: goal.authoringAuthority
         ?? (() => { throw new Error('goal_authority_unavailable') })(),
+      captureGoalSource: material => captureGoalMaterializationSource(goal.id, 'completion_workflow', material),
       // No wall-clock on a goal iteration (2026-08-19). It used to pin the
       // 900s ceiling because the 90s reminder default clipped real work (a
       // browser-skill run in the cloud sandbox, a research pass, file writes)
@@ -4100,8 +4181,16 @@ export async function bootOpenApi(opts: BootOpenApiOptions): Promise<BootResult>
   // the model relays; a near-duplicate creates it with a warning appended.
   // Spec: docs/architecture/features/task-guardrails.md
   const taskTools = createTaskTools(taskStore, {
+    onObserved: observeRoutineTasks,
     admission: createTaskAdmissionPort(),
     entityLinks: entityLinksStore,
+    // Recurring work: a task created inside a workflow run takes the
+    // workflow's typed defaultExecutor (workflow.md -> "Default executor").
+    resolveRunExecutorDefault: async (workflowRunId) => {
+      const run = await workflowRunStore.getRunSystem(workflowRunId)
+      const workflow = run ? await workflowStore.findByIdSystem(run.workflowId) : null
+      return workflow?.definition.defaultExecutor ?? null
+    },
     onEvent: (evt, ctx) => {
       const base = { userId: ctx.userId, assistantId: ctx.assistantId, sessionId: ctx.sessionId, channelType: ctx.channelType }
       if (evt.type === 'task_created') {
@@ -4197,6 +4286,7 @@ export async function bootOpenApi(opts: BootOpenApiOptions): Promise<BootResult>
   const recordGoalOverheadUsage =
     (source: 'overhead:goal-clarity' | 'overhead:goal-verify' | 'overhead:goal-triage') =>
     (usage: TokenUsage, context: GoalLlmUsageContext): void => {
+      noteRoutinePlanningUsage(context.providerKeySource === 'user' ? 0 : calculateCost(context.model, usage))
       if (!usageStore || !context.userId) return
       const store = usageStore
       const userId = context.userId
@@ -4311,13 +4401,126 @@ export async function bootOpenApi(opts: BootOpenApiOptions): Promise<BootResult>
   judgeTaskForGoal = (task, userId) => {
     void triageTaskForGoal(task, userId, {
       goalStore,
-      resolveAssistantId: async (actor, workspaceId) => (await getWorkspacePrimaryAssistant(actor, workspaceId))?.id,
+      // The task's selected executor, and only while the acting user can
+      // still see it (tasks.md -> "Responsibility"). Never the primary by
+      // inference: no usable executor means no automatic draft.
+      resolveAssistantId: async (actor, workspaceId, executorAssistantId) => {
+        const usable = await query<{ ok: boolean }>(
+          `SELECT EXISTS (SELECT 1 FROM assistants a WHERE a.id = $3 AND a.workspace_id = $2 AND a.kind <> 'app'
+             AND public.assistant_placement_visible($1, a.id)) AS ok`,
+          [actor, workspaceId, executorAssistantId])
+        return usable.rows[0]?.ok ? executorAssistantId : undefined
+      },
       // Ready goals use only these public constants; connector metadata is legacy-only.
       publicCoreCapabilities: CORE_CAPABILITY_LINES,
       summariseCapabilities: summariseWorkspaceCapabilities,
       judge: taskTriageJudge,
     }).catch((err) => console.error('[goals] task triage draft failed:', err))
   }
+  // An update that makes an assistant the executor triages for it (the
+  // previous executor's drafts were retired in the update transaction).
+  const executionPlanner = createExecutionPlanner({
+    provider, model: TRIAGE_MODEL, modelTier: 'standard', resolveLlm: resolveGoalLlm,
+    onUsage: recordGoalOverheadUsage('overhead:goal-triage'),
+  })
+  const executionEntryDeps: EntryDeps = routineExecutionDeps({
+    executorUsable: async (actor, workspaceId, executorAssistantId) => {
+      const usable = await query<{ ok: boolean }>(
+        `SELECT EXISTS (SELECT 1 FROM assistants a WHERE a.id = $3 AND a.workspace_id = $2 AND a.kind <> 'app'
+           AND public.assistant_placement_visible($1, a.id)) AS ok`, [actor, workspaceId, executorAssistantId])
+      return usable.rows[0]?.ok === true
+    },
+    // The selected assistant's actual runtime manifest: tools its active
+    // capability grants admit, plus the official tools of connectors usable
+    // here. Never connector labels or workflow ids.
+    manifest: async (assistantId, workspaceId, actorUserId, task) => {
+      const capabilities = new Set(await capabilityStore.listActive(assistantId))
+      const turnScope = task ? await routineManifestScope(actorUserId, task) : null
+      const registry = turnScope ? await workflowExecutorDeps.buildToolRegistry({ assistantId, workspaceId, userId: actorUserId, turnScope }) : allTools
+      const tools = new Set([...allTools.values()]
+        .filter((t) => registry.has(t.name) && (!t.requiresCapability || capabilities.has(t.requiresCapability))).map((t) => t.name))
+      if (turnScope) for (const tool of registry.values()) {
+        if (!tool.requiresCapability || capabilities.has(tool.requiresCapability)) tools.add(tool.name)
+      }
+      const accounts = new Set<string>()
+      for (const u of await listUsableWorkspaceConnectors({ connectorInstanceStore, connectorGrantStore, userId: actorUserId, workspaceId })) {
+        const available = OFFICIAL_CONNECTOR_TOOLS[u.instance.provider] ?? []
+        if (!turnScope || available.some(t => tools.has(t.name))) accounts.add(u.instance.provider)
+        if (!turnScope) for (const t of available) tools.add(t.name)
+      }
+      return { tools, accounts }
+    },
+    readSources: readExecutionSources,
+    planner: ({ task, context, executorAssistantId, manifestTools, actorUserId }) =>
+      executionPlanner({ title: task.title, context, manifestTools, userId: actorUserId, workspaceId: task.workspaceId, assistantId: executorAssistantId }),
+    assessClarity: goalClarityAssessor,
+    captureAuthority: ({ userId, workspaceId, assistantId }) => captureAuthoringAuthoritySystem({ userId, workspaceId, assistantId }),
+    defaultBudget: async (workspaceId) => (await goalDefaultBudgetStore.get(workspaceId)).budget,
+    // The canonical arming path: confirm the task's existing draft, or mint
+    // one with source proof (ready mode) and confirm it, exactly like the
+    // confirm route, with a real authoring envelope.
+    armGoal: input => armQualifiedTaskGoal(input, createCompletionWorkflow),
+    kickoffGoal: goalDriver.kickoffGoal,
+  }, async workspaceId => {
+    if (!creditGate) return true
+    const { status } = await creditGate(workspaceId, await getWorkspacePlan(workspaceId))
+    return status === 'ok'
+  })
+  workflowExecutorDeps.routineIntake = runId => advanceRoutineIntake(runId, executionEntryDeps, pendingApprovalsStore)
+  enterOrTriageTask = (task, userId, assignment) => {
+    if (!task.executorAssistantId) return
+    if (!assignment) { judgeTaskForGoal?.(task, userId); return }
+    void enterAssignedExecution(task, { kind: 'human_assignment', actorUserId: assignment.actorUserId, origin: assignment.origin,
+      at: new Date().toISOString() }, executionEntryDeps)
+      .then((r) => { if (r.kind === 'not_entered') judgeTaskForGoal?.(task, userId) })
+      .catch((err) => console.error('[execution] automatic entry failed:', err))
+  }
+  bindTaskExecutorChangeHook((task, _previous, userId, assignment) => {
+    if (task.executorAssistantId) enterOrTriageTask?.(task, userId, assignment)
+  })
+  // Dependency wake: a prerequisite that actually completed revalidates the
+  // unarmed work waiting on it (no polling; the close is the event).
+  bindTaskClosedHook((task) => {
+    void revalidateWaitingExecutions(task.id, { ...executionEntryDeps, loadTask: getTaskByIdSystem })
+      .catch((err) => console.error('[execution] dependency wake failed:', err))
+  })
+
+  // Execution controls reach the driver: pause holds the goal without
+  // delivery; steer / continue re-activate it and tick now. Counters come
+  // from the durable pool, so the fresh handoff state never resets them.
+  const executionControlEffects: ControlEffects = {
+    afterControl: async (state, kind) => {
+      if (!state.goalId) {
+        if (kind === 'pause' || !state.taskId) return
+        const task = await getTaskByIdSystem(state.taskId)
+        if (!task) return
+        await resumeAssignedExecution(state.id, task, executionEntryDeps)
+        const current = await findActiveNativeExecutionSystem({ taskId: task.id })
+        if (current && !current.goalId) await ensureRoutineQuestion(current, pendingApprovalsStore)
+        return
+      }
+      const goal = await getGoalByIdSystem(state.goalId)
+      if (!goal || goal.status === 'done' || goal.status === 'abandoned') return
+      if (kind === 'pause') {
+        if (goal.status === 'active') await setGoalStatusSystem(goal.id, 'blocked', 'execution_paused')
+        return
+      }
+      if (goal.status === 'blocked') await setGoalStatusSystem(goal.id, 'active', null)
+      if (goal.status !== 'running') await scheduleGoalTick(goal, new Date(), INITIAL_GOAL_LOOP_STATE)
+    },
+  }
+  const taskExecutionTools = createTaskExecutionTools(executionControlEffects)
+  const externalProgressTools = createExternalProgressTools()
+  allTools.set('getTaskExecution', taskExecutionTools.getTaskExecution)
+  allTools.set('controlTaskExecution', taskExecutionTools.controlTaskExecution)
+  allTools.set('bindExternalTaskExecution', externalProgressTools.bindExternalTaskExecution)
+  allTools.set('reportTaskProgress', externalProgressTools.reportTaskProgress)
+  // Saved research commands (features/research.md): one service for Brian, REST and MCP.
+  const researchTools = createResearchTools()
+  for (const tool of Object.values(researchTools)) allTools.set(tool.name, tool)
+  for (const tool of Object.values(createRoutineTools())) allTools.set(tool.name,tool)
+  const approvalReviewTools = createApprovalReviewTools()
+  for (const tool of Object.values(approvalReviewTools)) allTools.set(tool.name, tool)
 
   // Task-autopilot spin-up tools (confirm a draft goal; work a task to done) +
   // the agentic completion signal (markGoalComplete). `gatherEvidence` hands the
@@ -4340,7 +4543,7 @@ export async function bootOpenApi(opts: BootOpenApiOptions): Promise<BootResult>
   )
 
   allTools.set('listWorkspaceMembers', createWorkspaceTools(workspaceDirectoryStore).listWorkspaceMembers)
-  for (const tool of [...createOrganizationTools(),...createWorkspaceAccessTools(),...createWorkspaceMigrationTools(),...createDepartmentTools()]) allTools.set(tool.name,tool)
+  for (const tool of [...createOrganizationTools(),...createWorkspaceAccessTools(),...createWorkspaceMigrationTools(),...createDepartmentTools(),...createProjectAccessTools(),...createBriefTools()]) allTools.set(tool.name,tool)
 
   for (const tool of Object.values(createInternalLinkTools(internalLinkService))) {
     allTools.set(tool.name, tool)
@@ -4402,6 +4605,16 @@ export async function bootOpenApi(opts: BootOpenApiOptions): Promise<BootResult>
     service: crmOperationsService,
   })
   for (const tool of Object.values(crmOperationsTools)) allTools.set(tool.name, tool)
+  const crmBusinessReferenceTools = createCrmBusinessReferenceTools({ reads: createCrmReferenceReadStore(), service: crmOperationsService })
+  for (const tool of Object.values(crmBusinessReferenceTools)) allTools.set(tool.name, tool)
+  const crmCommercialContextTools = createCrmCommercialContextTools({ reads: createCrmCommercialContextReadStore(), service: crmOperationsService })
+  for (const tool of Object.values(crmCommercialContextTools)) allTools.set(tool.name, tool)
+  const crmCommercialDocumentTools = createCrmCommercialDocumentTools({ reads: createCrmCommercialDocumentReadStore(), service: crmOperationsService })
+  for (const tool of Object.values(crmCommercialDocumentTools)) allTools.set(tool.name, tool)
+  const crmDeliveryOversightTools=createCrmDeliveryOversightTools({reads:createCrmDeliveryReadStore(),service:crmOperationsService})
+  for(const tool of Object.values(crmDeliveryOversightTools))allTools.set(tool.name,tool)
+  const crmGovernedRecordTools = createCrmGovernedRecordTools({ reads: createCrmGovernedReadStore(), service: crmOperationsService })
+  for (const tool of Object.values(crmGovernedRecordTools)) allTools.set(tool.name, tool)
   const crmCredentialTools = createCrmCredentialTools({
     preview: async (input, authority, parent) => ({
       ...await crmIntegrationStore.bindingOptions(authority.ceiling.workspaceId, authority.ceiling.userId, input, authority, parent),
@@ -4574,6 +4787,11 @@ export async function bootOpenApi(opts: BootOpenApiOptions): Promise<BootResult>
         (l2?.policy as FileToolPolicy) ?? fallback,
       )
     }
+    engineeringArchive=createEngineeringArchivePublisher(filesApi)
+    engineeringHistory=createEngineeringHistoryService({files:filesApi,cursorSecret:env.JWT_SECRET})
+    if(runWorkers){let draining=false;const timer=setInterval(()=>{if(draining||!engineeringArchive)return;draining=true
+      void (async()=>{for(let i=0;i<10;i++){try{if(!await engineeringArchive!.drain())break}catch{break}}})().finally(()=>{draining=false})
+    },30_000);timer.unref()}
     const fileTools = createFileTools(filesApi, {
       entityLinks: entityLinksStore,
       readCachedFile: (id, ctx) => fileStore.get(id, ctx),
@@ -5179,6 +5397,8 @@ export async function bootOpenApi(opts: BootOpenApiOptions): Promise<BootResult>
         payload: p.payload as unknown as Record<string, unknown>,
         expiresAt: p.expiresAt ? new Date(p.expiresAt) : null,
       })
+      // An explicitly assigned reviewer may resolve it; the runner's poll consumes the receipt.
+      void reviewOnCreate(row)
       return { id: row.id }
     },
     async getStatus(id) {
@@ -5690,7 +5910,10 @@ export async function bootOpenApi(opts: BootOpenApiOptions): Promise<BootResult>
       : {}),
     memoryTools: brainMemoryTools,
     taskTools,
-    crmTools: { ...crmTools, ...crmOperationsTools },
+    taskExecutionTools: { ...taskExecutionTools, ...externalProgressTools },
+    researchTools,
+    approvalReviewTools,
+    crmTools: { ...crmTools, ...crmOperationsTools, ...crmBusinessReferenceTools, ...crmCommercialContextTools, ...crmCommercialDocumentTools, ...crmGovernedRecordTools, ...crmDeliveryOversightTools },
     credentialTools: crmCredentialTools,
     associationTools,
     retrievalTools: brainRetrievalTools,
@@ -5707,6 +5930,11 @@ export async function bootOpenApi(opts: BootOpenApiOptions): Promise<BootResult>
     docTools: { savedViewStore, docPageStore, docGateway, pageTemplateStore },
     ingest: brainEpisodeIngestor,
     programmaticCapture,
+    captureConfiguration,
+    engineeringHistory:async(auth,input,ctx)=>{
+      if(!engineeringHistory)throw new Error('history_unavailable')
+      return engineeringHistory.execute({...workspaceFilesCtxFor(ctx),principalRef:`${auth.authKind}:${auth.keyId}`,readOnly:auth.scope!=='read_write',origin:'programmatic'},input)
+    },
     agentTools: { reads: agentToolset.reads, writes: agentToolset.writes },
     // Powers the searchRecording tool's vector arm (recording-to-brain).
     embedder: sharedEmbedder,
@@ -5803,6 +6031,7 @@ export async function bootOpenApi(opts: BootOpenApiOptions): Promise<BootResult>
   }))
   app.use('/api/sessions', requireAuth(env.JWT_SECRET), sessionQuestionRoutes({
     approvalsStore: pendingApprovalsStore,
+    answerTaskQuestion: approval => answerRoutineQuestion(approval, executionControlEffects),
     resumeDeps: {
       approvalsStore: pendingApprovalsStore,
       sessionResumeStore,
@@ -6351,6 +6580,7 @@ export async function bootOpenApi(opts: BootOpenApiOptions): Promise<BootResult>
   app.use('/api/invitations', optionalAuth(env.JWT_SECRET), invitationRouter)
 
   app.use('/api/workspaces/:workspaceId/brain-keys', requireAuth(env.JWT_SECRET), brainKeysRoutes({ brainKeyStore, workspaceStore }))
+  if(engineeringHistory)app.use('/api/workspaces/:workspaceId/engineering-history',requireAuth(env.JWT_SECRET),engineeringHistoryRoutes({service:engineeringHistory,workspaceStore}))
   app.use(
     '/api/workspaces/:workspaceId/programmatic-capture-profiles',
     requireAuth(env.JWT_SECRET),
@@ -6569,6 +6799,14 @@ export async function bootOpenApi(opts: BootOpenApiOptions): Promise<BootResult>
     connectorInstanceStore,
     connectorGrantStore,
   }))
+  // Governed Project and Department Briefs (project-briefs.md).
+  app.use('/api', requireAuth(env.JWT_SECRET), briefRoutes())
+  app.use('/api', workRoutes({ taskStore, auth: requireAuth(env.JWT_SECRET) }))
+  app.use('/api', taskExecutionRoutes({ auth: requireAuth(env.JWT_SECRET), effects: executionControlEffects }))
+  // Saved research: activities, follow-up corrections, lessons, improvements (features/research.md).
+  app.use('/api', researchRoutes({ auth: requireAuth(env.JWT_SECRET) }))
+  // Explicitly delegated approval review (features/approval-review.md).
+  app.use('/api', approvalReviewRoutes({ auth: requireAuth(env.JWT_SECRET) }))
 
   app.use('/api', requireAuth(env.JWT_SECRET), workflowApprovalsRoutes({
     approvalsStore: pendingApprovalsStore,
@@ -6707,6 +6945,15 @@ export async function bootOpenApi(opts: BootOpenApiOptions): Promise<BootResult>
     listButtonBindings: (actorUserId, workspaceId, workflowId) =>
       pageActionsStore.listForWorkflow(actorUserId, workspaceId, workflowId),
   }
+  setRoutineConfigurationPreflight(async ({userId,workspaceId,configuration,sourceEvidence})=>{
+    const issues=await preflightWorkflowDefinition(configuration.definition,{userId,workspaceId},workflowsRouteOptions)
+    if (issues.length) throw new RoutineConfigurationError('routine_dependencies_unavailable')
+    await assertRoutineRuntimeReady({userId,workspaceId,configuration,sourceEvidence},{
+      buildRegistry:params=>workflowExecutorDeps.buildToolRegistry(params),
+      usableAccounts:async registry=>new Set((await listUsableWorkspaceConnectors({connectorInstanceStore,connectorGrantStore,userId,workspaceId}))
+        .filter(u=>(OFFICIAL_CONNECTOR_TOOLS[u.instance.provider] ?? []).some(t=>registry.has(t.name))).map(u=>u.instance.provider)),
+    })
+  })
   app.use('/api', requireAuth(env.JWT_SECRET), workflowsRoutes(workflowsRouteOptions))
 
   // Live — the all-activity roster (docs/architecture/features/live-work.md
@@ -7004,70 +7251,15 @@ export async function bootOpenApi(opts: BootOpenApiOptions): Promise<BootResult>
     wake: userId => wakeOfficeGeneration?.(userId),
     cancel: officeGenerationStore.cancel,
   }))
-  const readBoundOfficeFile = filesApi ? async (params: { userId: string; workspaceId: string; assistantId?: string | null; fileId: string }) => {
-    const membership = await getWorkspaceMembershipWithClearanceSystem(params.userId, params.workspaceId)
-    if (!membership) return null
-    const clearance = membership.role === 'owner' || membership.role === 'admin' ? 'confidential' as const : membership.clearance
-    const context = {
-      workspaceId: params.workspaceId,
-      userId: params.userId,
-      assistantId: params.assistantId ?? null,
-      assistantKind: 'standard' as const,
-      clearance,
-    }
-    const read = await filesApi!.readBytes(context, params.fileId)
-    if (!read.ok || read.value.file.workspaceId !== params.workspaceId) return null
-    const revision = workspaceFileReadRevision(read.value.file)
-    const projectionStarted = performance.now()
-    const projection = await getWorkspaceFileReadProjection({
-      workspaceId: params.workspaceId,
-      userId: params.userId,
-      assistantId: params.assistantId ?? params.userId,
-      assistantKind: 'standard',
-      clearance,
-    }, read.value.file.id)
-    const validForMs = Math.floor(Math.min(30_000, projection?.validForMs ?? 0) - (performance.now() - projectionStarted))
-    if (!projection || workspaceFileReadRevision(projection.file) !== revision || !Number.isFinite(validForMs) || validForMs <= 0) return null
-    return { bytes: read.value.bytes, binding: bindOfficeFile(read.value.file, read.value.bytes), validForMs }
-  } : null
-  const saveClassifiedOfficeFile = filesApi ? async (params: {
-    userId: string
-    workspaceId: string
-    path: string
-    bytes: Uint8Array
-    mime: string
-    hash: string
-    scope: OfficeOutputScope
-  }): Promise<string> => {
-    const membership = await getWorkspaceMembershipWithClearanceSystem(params.userId, params.workspaceId)
-    if (!membership) throw new Error('Office output membership unavailable')
-    const clearance = membership.role === 'owner' || membership.role === 'admin' ? 'confidential' as const : membership.clearance
-    const context = {
-      workspaceId: params.workspaceId,
-      userId: params.userId,
-      assistantKind: 'standard' as const,
-      clearance,
-      writeSensitivity: params.scope.sensitivity,
-      writeCompartments: params.scope.compartments,
-      writeProjectIds: params.scope.projectIds,
-    }
-    const existing = await filesApi!.stat(context, params.path)
-    if (existing.ok) {
-      const read = await filesApi!.readBytes(context, existing.value.id)
-      if (!read.ok || !fileMatchesOfficeOutput(read.value.file, read.value.bytes, params)) {
-        throw new Error('office_output_reuse_mismatch')
-      }
-      return read.value.file.id
-    }
-    const saved = await filesApi!.writeBytes(context, {
-      path: params.path,
-      bytes: params.bytes,
-      mime: params.mime,
-      sensitivity: params.scope.sensitivity,
-    })
-    if (!saved.ok) throw new Error(`Office output save failed: ${saved.error.kind}`)
-    return saved.value.id
-  } : null
+  // Late-bound: PDF session assets compose on top of the classified writer below.
+  let officePdfSessionReader: import('./office/release-runtime.js').OfficePdfSessionAssetReader | null = null
+  const officeReleaseRuntime = filesApi ? createOfficeReleaseRuntime({
+    filesApi, artifacts: officeArtifactStore, live: officeLiveStore, releases: officeReleaseStore, templates: officeTemplateStore,
+    brandClaims: async (userId, workspaceId) => (await getBrandStore().get(userId, workspaceId))?.activeRecord?.claims,
+    pdfSessionAssets: () => officePdfSessionReader,
+  }) : null
+  const readBoundOfficeFile = officeReleaseRuntime?.readBoundOfficeFile ?? null
+  const saveClassifiedOfficeFile = officeReleaseRuntime?.saveClassifiedOfficeFile ?? null
   const pdfSessionFiles = filesApi
   const pdfSessionAssets = pdfSessionFiles && saveClassifiedOfficeFile ? {
     async write(params: Parameters<import('./office/pdf-session-assets.js').PdfSessionAssetPort['write']>[0]) {
@@ -7120,6 +7312,7 @@ export async function bootOpenApi(opts: BootOpenApiOptions): Promise<BootResult>
       return { id }
     },
   } satisfies import('./office/pdf-session-assets.js').PdfSessionAssetPort : null
+  officePdfSessionReader = pdfSessionAssets as unknown as typeof officePdfSessionReader
   const pdfSessionService = pdfSessionAssets && canBootPdfEditingSession() ? createPdfSessionService({
     sessions: officePdfSessionStore,
     live: officeLiveStore,
@@ -7304,21 +7497,8 @@ export async function bootOpenApi(opts: BootOpenApiOptions): Promise<BootResult>
     }
     return committed
   }
-  const readOfficeTemplateBundle = async (userId: string, workspaceId: string, versionId: string, onSource?: (scope: import('./office/file-binding.js').OfficeOutputScope, revision: string) => void, execution?: { assistantId: string; clearance: Sensitivity; compartments?: string[] | null; projectIds?: string[] | null }) => {
-    if (!filesApi) return null
-    const version = await officeTemplateStore.getVersion(userId, versionId)
-    if (!version || version.workspaceId !== workspaceId || version.status !== 'admitted') return null
-    const read = await filesApi.readBytes({ workspaceId, userId, assistantKind: 'standard', clearance: 'confidential', ...execution }, version.bundleFileId)
-    if (!read.ok) throw new Error(`Office template bundle unavailable: ${read.error.kind}`)
-    const templateRoot = await officeTemplateStore.get(userId, version.templateId)
-    const root = templateRoot?.draftArtifactId ? await officeArtifactStore.get(userId, templateRoot.draftArtifactId) : null
-    if (!templateRoot || !root || root.workspaceId !== workspaceId) throw new Error('Office template source unavailable')
-    const binding = bindOfficeFile(read.value.file, read.value.bytes)
-    const sourceScope = classifyOfficeOutput(binding, root)
-    onSource?.(sourceScope, JSON.stringify([officeFileBindingRevision(binding), root.id, root.sensitivity, [...root.compartments].sort(), [...root.projectIds].sort(), templateRoot.lifecycleState]))
-    const stored = JSON.parse(new TextDecoder().decode(read.value.bytes))
-    return materializeOfficeTemplateBundleForGeneration(stored, { id: version.id, version: version.version, status: 'admitted' })
-  }
+  const officeTemplateBundleReader = filesApi ? createOfficeTemplateBundleReader({ filesApi, templates: officeTemplateStore, artifacts: officeArtifactStore }) : null
+  const readOfficeTemplateBundle: NonNullable<typeof officeTemplateBundleReader> = async (...args) => officeTemplateBundleReader ? officeTemplateBundleReader(...args) : null
   const createGenerationRunner = (userId: string) => createOfficeGenerationWorker({
     store: officeGenerationStore,
     workerUserId: userId,
@@ -7711,11 +7891,7 @@ export async function bootOpenApi(opts: BootOpenApiOptions): Promise<BootResult>
       return { version: version.version }
     },
   }))
-  const readOfficeResource = filesApi ? createOfficeResourceReader({
-    filesApi, getResource: officeTemplateStore.getResource,
-    membership: getWorkspaceMembershipWithClearanceSystem,
-    readProjection: getWorkspaceFileReadProjection,
-  }) : async () => null
+  const readOfficeResource = officeReleaseRuntime?.readOfficeResource ?? (async () => null)
   if (filesApi) app.use('/api/office', requireAuth(env.JWT_SECRET), officeResourceRoutes({
     async load(userId, artifactId) {
       const [artifact, access, live] = await Promise.all([
@@ -7747,58 +7923,10 @@ export async function bootOpenApi(opts: BootOpenApiOptions): Promise<BootResult>
     },
     readResource: readOfficeResource,
   }))
-  const loadOfficeReleaseContext = async (userId: string, artifactId: string) => {
-    const [artifact, access, live, head] = await Promise.all([officeArtifactStore.get(userId, artifactId), resolveOfficeAccess(userId, artifactId), officeLiveStore.get(userId, artifactId), officeArtifactStore.getHeadVersion(userId, artifactId)])
-    if (!artifact || !access || !live) return null
-    const [claims, media] = artifact.headVersionId ? await Promise.all([officeReleaseStore.listClaims(userId, artifactId, artifact.headVersionId), officeReleaseStore.listMedia(userId, artifactId, artifact.headVersionId)]) : [[], []]
-    // The brand's APPROVED claims register (docs/architecture/features/brand.md
-    // → "Claims reach the release gate"). Best-effort: a brand read failing must
-    // not make a release impossible, and no brand simply contributes nothing.
-    let brandClaims: readonly import('@use-brian/shared').BrandClaim[] | undefined
-    try {
-      const brand = await getBrandStore().get(userId, artifact.workspaceId)
-      brandClaims = brand?.activeRecord?.claims
-    } catch (err) {
-      console.warn('[office-release] brand claims lookup failed:', err)
-    }
-    return { artifact: { ...artifact, headVersionId: head?.snapshotHash === live.canonicalHash ? artifact.headVersionId : null }, access, snapshot: live.snapshot, claims, brandClaims, media }
-  }
-  const revalidateOfficeRelease = async (params: {
-    userId: string
-    expected: NonNullable<Awaited<ReturnType<typeof loadOfficeReleaseContext>>>
-    releasedFileId?: string
-    releasedHash?: string
-    releasedMime?: string
-  }): Promise<{ scope: OfficeOutputScope; validForMs: number } | null> => {
-    const current = await loadOfficeReleaseContext(params.userId, params.expected.artifact.id)
-    if (!current || officeReleaseContextRevision(current) !== officeReleaseContextRevision(params.expected)) return null
-    const session = current.artifact.mode === 'session'
-    const resourceReads = await Promise.all(current.snapshot.resources.map(async (ref) => {
-      if (session && pdfSessionAssets) {
-        const resource = await pdfSessionAssets.read({ userId: params.userId, workspaceId: current.artifact.workspaceId, fileId: ref.id })
-        return resource && resource.file.mime === ref.mime && resource.file.sha256 === ref.hash ? resource : null
-      }
-      const resource = await readOfficeResource(params.userId, current.artifact.workspaceId, ref.id)
-      return resource && resource.hash === ref.hash && resource.mime === ref.mime ? resource : null
-    }))
-    if (resourceReads.some((resource) => resource === null)) return null
-    const scope = classifyOfficeOutput({
-      sensitivity: current.artifact.sensitivity,
-      compartments: current.artifact.compartments,
-      projectIds: current.artifact.projectIds,
-    }, ...resourceReads.flatMap((resource) => resource && 'binding' in resource ? [resource.binding] : []))
-    let validForMs = session && current.artifact.expiresAt
-      ? Math.min(30_000, current.artifact.expiresAt.getTime() - Date.now())
-      : resourceReads.reduce((ttl, resource) => Math.min(ttl, resource && 'validForMs' in resource ? resource.validForMs : ttl), 30_000)
-    if (params.releasedFileId) {
-      const output = await readBoundOfficeFile!({ userId: params.userId, workspaceId: current.artifact.workspaceId, fileId: params.releasedFileId })
-      if (!output || output.binding.hash !== params.releasedHash || output.binding.mime !== params.releasedMime ||
-        officeOutputScopeRevision(output.binding) !== officeOutputScopeRevision(scope)) return null
-      validForMs = Math.min(validForMs, output.validForMs)
-    }
-    return Number.isFinite(validForMs) && validForMs > 0 ? { scope, validForMs: Math.floor(validForMs) } : null
-  }
-  if (filesApi) app.use('/api/office', requireAuth(env.JWT_SECRET), officeReleaseRoutes({
+  const loadOfficeReleaseContext = async (userId: string, artifactId: string) => officeReleaseRuntime ? officeReleaseRuntime.loadOfficeReleaseContext(userId, artifactId) : null
+  const revalidateOfficeRelease: import('./routes/office-releases.js').OfficeReleaseRouteDeps['revalidate'] = async (params) =>
+    officeReleaseRuntime ? officeReleaseRuntime.revalidateOfficeRelease(params) : null
+  const officeReleaseDeps: import('./routes/office-releases.js').OfficeReleaseRouteDeps | null = filesApi ? {
     load: loadOfficeReleaseContext,
     resolveResource: (userId, workspaceId) => async (resourceId) => readOfficeResource(userId, workspaceId, resourceId),
     revalidate: revalidateOfficeRelease,
@@ -7842,7 +7970,12 @@ export async function bootOpenApi(opts: BootOpenApiOptions): Promise<BootResult>
       ])
       return { artifactId: shell.id, version: version.version }
     },
-  }))
+  } : null
+  if (officeReleaseDeps) app.use('/api/office', requireAuth(env.JWT_SECRET), officeReleaseRoutes(officeReleaseDeps))
+  if (officeReleaseDeps && filesApi && officeTemplateBundleReader) {
+    crmDocumentRuntime.binding = createCrmOfficeBindingFromOffice({ filesApi, artifacts: officeArtifactStore, live: officeLiveStore,
+      readTemplateBundle: (userId, workspaceId, versionId) => officeTemplateBundleReader(userId, workspaceId, versionId), releaseDeps: officeReleaseDeps })
+  }
   app.use('/api/office', requireAuth(env.JWT_SECRET), officeLifecycleRoutes({ resolveAccess: resolveDurableOfficeAccess, transition: officeArtifactStore.transitionLifecycle, revokeOffline: officeReleaseStore.revokeOfflinePackages }))
   const loadOfficeOfflineContext = async (userId: string, artifactId: string) => {
     const reply = await readOfficeProjection(userId, async () => {
@@ -8229,6 +8362,9 @@ export async function bootOpenApi(opts: BootOpenApiOptions): Promise<BootResult>
   if (runWorkers) campaignDispatchService.start()
   const crmRetentionWorker = createCrmRetentionWorker({ onError: () => console.warn('[crm-retention] Retention run failed; inspect the workspace run report.') })
   if (runWorkers) crmRetentionWorker.start()
+  // Recovers issue attempts whose inline run did not finish (crash, deploy, lease expiry).
+  const crmIssueWorker = crmDocumentWorker(createDbCrmOperationsStore(), crmDocumentRuntime, { onError: () => console.warn('[crm-documents] An issue attempt could not be processed; a later scan retries it.') })
+  if (runWorkers) crmIssueWorker.start()
   const crmEntitlementWorker=createCrmEntitlementWorker({onError:()=>console.warn('[crm-entitlement-expiry] A due grant could not be processed; a later scan will retry.')})
   if(runWorkers) crmEntitlementWorker.start()
   const associationLifecycleWorker=createAssociationLifecycleWorker({onError:()=>console.warn('[association-lifecycle] A lifecycle operation failed; a later scan will retry.')})
@@ -8801,6 +8937,52 @@ export async function bootOpenApi(opts: BootOpenApiOptions): Promise<BootResult>
     },
   })
   if (runWorkers) decisionReflectionWorker.start()
+
+  // ── Research reflection (features/research.md -> "Scoped lessons"): the
+  //    same daily, bounded background lane as decision reflection, metered
+  //    as the same playbook-reflection overhead (attributed to the owner).
+  const researchReflectionWorker = createResearchReflectionWorker({
+    modelCall: async ({ workspaceId, system, prompt }) => {
+      const customRuntime = await resolveBackgroundRuntime(workspaceId)
+      const callProvider = customRuntime?.provider ?? provider
+      const callModel = customRuntime?.selector ?? BACKGROUND_MODEL
+      const response = await collectStream(callProvider.stream({
+        model: callModel, messages: [{ role: 'user', content: prompt }], systemPrompt: system, maxTokens: 1200,
+      }))
+      if (response.usage && usageStore) {
+        const owner = (await getPool().query<{ userId: string; assistantId: string | null }>(
+          `SELECT w.owner_user_id AS "userId",
+                  (SELECT a.id FROM assistants a WHERE a.workspace_id = w.id ORDER BY (a.kind = 'primary') DESC, a.created_at LIMIT 1) AS "assistantId"
+             FROM workspaces w WHERE w.id = $1`, [workspaceId])).rows[0]
+        const servedModel = response.model || callModel
+        if (owner?.userId && owner.assistantId) {
+          usageStore.recordUsage({
+            userId: owner.userId,
+            assistantId: owner.assistantId,
+            sessionId: null,
+            model: servedModel,
+            modelTier: 'standard',
+            inputTokens: response.usage.inputTokens,
+            outputTokens: response.usage.outputTokens,
+            cacheReadTokens: response.usage.cacheReadTokens,
+            cacheWriteTokens: response.usage.cacheWriteTokens,
+            actualCostUsd: customRuntime?.providerKeySource === 'user' ? 0 : calculateCost(servedModel, response.usage),
+            source: 'overhead:playbook-reflection',
+            providerKeySource: customRuntime?.providerKeySource ?? 'platform',
+          }).catch((err) => console.error('[research-reflection] usage tracking failed:', err))
+        }
+      }
+      return response.content.filter((block) => block.type === 'text').map((block) => block.type === 'text' ? block.text : '').join('')
+    },
+    onEvent: (event) => {
+      if (event.type === 'subject_processed') {
+        console.log(`[research-reflection] workspace=${event.workspaceId} created=${event.result.created} active=${event.result.activated} suggested=${event.result.suggested} rejected=${event.result.rejected} deduped=${event.result.deduped}`)
+      } else if (event.type === 'error') {
+        console.error(`[research-reflection] error workspace=${event.workspaceId ?? '<global>'}: ${event.error}`)
+      }
+    },
+  })
+  if (runWorkers) researchReflectionWorker.start()
 
   // ── Sandbox lifecycle reaper (computer-use.md §7) — kills tasks idle past
   //    the Take-Over abandonment window + runs the vault's per-plan purge.
@@ -9934,6 +10116,7 @@ export async function bootOpenApi(opts: BootOpenApiOptions): Promise<BootResult>
     skillReviewWorker.stop()
     playbookReflectionWorker.stop()
     decisionReflectionWorker.stop()
+    researchReflectionWorker.stop()
     feedEditorialWorker.stop()
     embeddingWorker.stop()
     pollWorker.stop()
@@ -9943,6 +10126,7 @@ export async function bootOpenApi(opts: BootOpenApiOptions): Promise<BootResult>
     campaignConversionWorker.stop()
     campaignDispatchService.stop()
     crmRetentionWorker.stop()
+    crmIssueWorker.stop()
     crmEntitlementWorker.stop()
     associationLifecycleWorker.stop()
     providerInboxWorker.stop()

@@ -10,6 +10,7 @@ import { askQuestionSchema } from '../tools/base/ask-question.js'
  */
 
 import { z } from 'zod'
+import { RoutineTaskIntakeSchema } from '../tasks/routine-intake.js'
 import { CrmDomainEventTypeSchema } from '../crm/operations-types.js'
 import { WORKFLOW_STEP_TYPES } from './types.js'
 import type { ToolCallStep, WorkflowDefinition } from './types.js'
@@ -487,6 +488,7 @@ const externalClientWorkflowPrincipalSchema = z
 
 export const WorkflowDefinitionSchema = z
   .object({
+    taskIntake: RoutineTaskIntakeSchema.optional(),
     // Scalar = one entry step; ARRAY = trigger fan-out (every listed step
     // starts in parallel when the trigger fires) — same shape and width cap
     // as a step's nextStepId array.
@@ -495,6 +497,13 @@ export const WorkflowDefinitionSchema = z
     steps: z.array(tolerantStepSchema).min(1).max(50),
     failureDelivery: workflowDeliverySchema.optional(),
     principal: externalClientWorkflowPrincipalSchema.optional(),
+    // Executor for root tasks a run creates (recurring work). A task-specific
+    // choice wins; a child keeps its parent's executor. Validated at task
+    // write time like any executor. See workflow.md -> "Default executor".
+    defaultExecutor: z.discriminatedUnion('kind', [
+      z.object({ kind: z.literal('assistant'), assistantId: z.string().uuid() }).strict(),
+      z.object({ kind: z.literal('person'), memberId: z.string().uuid() }).strict(),
+    ]).optional(),
     layout: z.record(nodePositionSchema).optional(),
   })
   .superRefine((def, ctx) => {

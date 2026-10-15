@@ -79,10 +79,17 @@ export async function admitSessionCreate<T extends Input>(client: PoolClient, pa
     default_workspace_group_id AS "defaultWorkspaceGroupId",project_scope_mode AS "projectScopeMode",
     default_project_id AS "defaultProjectId" FROM assistants WHERE id=$1 FOR SHARE`, [params.assistantId])).rows[0]
   if (!assistant || assistant.workspaceId !== workspaceId) throw new WorkspaceAccessError('context_not_available', 404)
-  const groupId = params.contextGroupId !== undefined ? params.contextGroupId
-    : policy.mode === 'simple' ? policy.defaultDepartmentId : assistant.defaultWorkspaceGroupId
   const projectId = params.contextProjectId !== undefined ? params.contextProjectId : assistant.defaultProjectId
-  if (params.contextGroupId === undefined && !groupId) {
+  // A shared Project chat's audience is the Project (D24): no default
+  // Department is stamped onto it; an explicit Department plus a shared
+  // Project would be an ambiguous audience.
+  const sharedProject = projectId ? (await client.query("SELECT 1 FROM project_shared_scopes WHERE project_id=$1 AND workspace_id=$2 AND status='active'",
+    [projectId, workspaceId])).rows.length > 0 : false
+  if (sharedProject && params.contextGroupId) throw new WorkspaceAccessError('project_context_department_conflict', 409)
+  const groupId = params.contextGroupId !== undefined ? params.contextGroupId
+    : sharedProject ? null
+    : policy.mode === 'simple' ? policy.defaultDepartmentId : assistant.defaultWorkspaceGroupId
+  if (params.contextGroupId === undefined && !groupId && !sharedProject) {
     throw new WorkspaceAccessError(policy.mode === 'simple' ? 'access_mode_default_invalid' : 'context_selection_required', 409)
   }
   const execute: typeof query = (sql, values) => client.query(sql, values)
@@ -95,7 +102,8 @@ export async function admitSessionCreate<T extends Input>(client: PoolClient, pa
   })
   const admitted = await admitWorkspaceResource(client, workspaceId, params.userId, {
     expectedPolicyRevision: params.expectedPolicyRevision, visibility: 'workspace', sensitivity: assistant.clearance,
-    destination: groupId ? { kind: 'department', departmentId: groupId, ...(projectId ? { projectId } : {}) }
+    destination: sharedProject ? { kind: 'project', projectId: projectId! }
+      : groupId ? { kind: 'department', departmentId: groupId, ...(projectId ? { projectId } : {}) }
       : { kind: 'general', ...(projectId ? { projectId } : {}) },
   })
   const ranks = { public: 0, internal: 1, confidential: 2 }

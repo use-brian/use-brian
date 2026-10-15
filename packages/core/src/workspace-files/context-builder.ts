@@ -56,6 +56,7 @@ function groupByFolder(rows: WorkspaceFileIndexRow[]): Map<string, WorkspaceFile
 }
 
 export function buildWorkspaceFilesContext(rows: WorkspaceFileIndexRow[]): string {
+  rows=rows.filter(row=>row.purpose!=='engineering_archive')
   if (rows.length === 0) {
     return `${HEADER}\n${PROLOGUE}\n\n${EMPTY_BODY}`
   }

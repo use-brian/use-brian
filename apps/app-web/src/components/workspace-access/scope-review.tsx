@@ -4,7 +4,7 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
 import type { ScopeReview, ScopeReviewAction, ScopeReviewCommand, ScopeReviewInventory, ScopeReviewKind } from '@use-brian/shared';
 import { useWorkspaceContext } from '@/lib/workspace-context';
-import { useT } from '@/lib/i18n/client';
+import { useT, format } from '@/lib/i18n/client';
 import { useCachedResource, invalidateSurfaceCache, markSurfaceCacheStale } from '@/lib/surface-cache';
 import { scopeReviewCacheKey, workspaceAccessModeCacheKey } from '@/lib/surface-prefetch';
 import { useProtectedProjection } from '@/lib/use-protected-projection';
@@ -19,6 +19,11 @@ import { DepartmentChangeFeedback, useDepartmentChange } from './use-department-
 
 const fieldClass='min-h-8 max-sm:min-h-11 w-full rounded-lg border border-border bg-background px-3 text-[16px] md:text-sm';
 type EvidenceJob=Pick<ScopeReview,'action'|'expiresAt'> & {status?:ScopeReview['status'];items:Array<Pick<ScopeReview['items'][number],'resourceId'|'source'|'content'|'impact'|'status'>>};
+type InventoryRow=ScopeReviewInventory['items'][number];
+/** Release (docs/plans/scope-hold-recovery.md §2 D2) is offered only for a held row the automatic re-check marks safe. */
+export const canReleaseRow=(row:InventoryRow)=>row.held&&row.recovery?.status==='safe'&&row.allowedActions.includes('release');
+/** Whether the selection blocks the chosen action. Release has its own gate; other actions keep their existing rules. */
+export const scopeReviewSelectionBlocked=(action:ScopeReviewAction,rows:InventoryRow[],defaultTeam:string|null)=>action==='release'?rows.some(row=>!canReleaseRow(row)):action==='consolidate_default'?(!defaultTeam||rows.some(row=>row.held)):action!=='hold'&&rows.some(row=>!row.canClassify);
 const knownImpact=(job:Pick<EvidenceJob,'items'>)=>[...new Map(job.items.flatMap(item=>item.impact?.descendants??[]).map(row=>[`${'resourceKind' in row?row.resourceKind:'memory'}:${row.resourceId}`,row])).values()];
 export function ScopeReviewPanel({teams,close}:{teams:Array<{id:string;name:string}>;close:()=>void}) {
   const {workspaceId,me}=useWorkspaceContext();
@@ -73,9 +78,9 @@ function ScopeReviewWorkspace({teams,close}:{teams:Array<{id:string;name:string}
       if(!Number.isFinite(remaining())||remaining()<=0)return;
       timeout=setTimeout(()=>active.controller.abort(),Math.ceil(remaining()));
       if(command.type!=='scope.review.preview'&&job){
-      const target=job.targetTeamId?teams.find(team=>team.id===job.targetTeamId)?.name??job.targetCompartment:t.general;
+      const target=job.action==='release'?null:job.targetTeamId?teams.find(team=>team.id===job.targetTeamId)?.name??job.targetCompartment:t.general;
       const impact=knownImpact(job);
-      if(!await confirmDialog({signal:active.controller.signal,title:t.confirmTitle,description:`${t[job.action]}: ${target}. ${job.reason}. ${job.items.filter(item=>item.status==='pending').length} ${t.pending}. ${command.type==='scope.review.cancel'?t.cancelHint:`${t.applyHint} ${t.impactCount}: ${impact.length}. ${t.alreadyHeld}: ${impact.filter(row=>row.held).length}. ${t.impactHint}`} ${job.action==='consolidate_default'?`${t.scopeOnly} ${t.futureMembers}`:t.generalHint} ${t.coverage}`,confirmLabel:a.confirm,cancelLabel:a.cancel}))return;
+      if(!await confirmDialog({signal:active.controller.signal,title:t.confirmTitle,description:`${t[job.action]}${target===null?'':`: ${target}`}. ${job.reason}. ${job.items.filter(item=>item.status==='pending').length} ${t.pending}. ${command.type==='scope.review.cancel'?t.cancelHint:`${t.applyHint} ${t.impactCount}: ${impact.length}. ${t.alreadyHeld}: ${impact.filter(row=>row.held).length}. ${t.impactHint}`} ${job.action==='consolidate_default'?`${t.scopeOnly} ${t.futureMembers}`:job.action==='release'?t.releaseHint:t.generalHint} ${t.coverage}`,confirmLabel:a.confirm,cancelLabel:a.cancel}))return;
       }
       if(active.controller.signal.aborted||remaining()<=0)return;
       clearTimeout(timeout);timeout=undefined;active.submitted=true;
@@ -83,7 +88,7 @@ function ScopeReviewWorkspace({teams,close}:{teams:Array<{id:string;name:string}
       if(active.controller.signal.aborted)return;
       setReviewId(result.id);setSelected([]);invalidateSurfaceCache(`scope-review:${workspaceId}:`);
     }
-    catch(error){if(!active.controller.signal.aborted){setError(error instanceof Error&&error.message==='scope_review_impact_too_large'?t.impactTooLarge:error instanceof Error&&error.message==='scope_review_impact_missing'?t.impactMissing:t.saveError);invalidateSurfaceCache(key);}}
+    catch(error){if(!active.controller.signal.aborted){setError(error instanceof Error&&error.message==='scope_review_impact_too_large'?t.impactTooLarge:error instanceof Error&&error.message==='scope_review_impact_missing'?t.impactMissing:error instanceof Error&&error.message==='scope_review_release_blocked'?t.releaseBlockedError:t.saveError);invalidateSurfaceCache(key);}}
     finally{clearTimeout(timeout);if(operation.current===active){operation.current=null;setBusy(false);}}
   };
   const sensitivityLabel=(value:string|null)=>value==='public'?t.public:value==='internal'?t.internal:value==='confidential'?t.confidential:t.unknown;
@@ -93,7 +98,8 @@ function ScopeReviewWorkspace({teams,close}:{teams:Array<{id:string;name:string}
   const job=data.selectedReview,canApply=job&&(job.status==='preview'||job.status==='running');
   const impactMissing=job?.items.some(item=>!item.impact||job.action==='consolidate_default'&&(item.impact.version!==2||!item.impact.consolidation));
   const selectedRows=data.items.filter(row=>selected.includes(row.id));
-  const classificationBlocked=action==='consolidate_default'?(!defaultTeam||selectedRows.some(row=>row.held)):action!=='hold'&&selectedRows.some(row=>!row.canClassify);
+  const classificationBlocked=scopeReviewSelectionBlocked(action,selectedRows,defaultTeam);
+  const recoveryLabel=(row:InventoryRow)=>!row.recovery?null:row.recovery.status==='safe'?t.recoverySafe:`${t.recoveryBlocked}: ${t[`blocked_${row.recovery.reason}`]}`;
   const unsupportedAction=selectedRows.some(row=>!row.allowedActions.includes(action));
   const reviewOptions=job&&!data.recentReviews.some(review=>review.id===job.id)?[job,...data.recentReviews]:data.recentReviews;
   return <section className="min-w-0 space-y-5 p-4 md:p-6">{header(data.classificationMode)}
@@ -109,7 +115,7 @@ function ScopeReviewWorkspace({teams,close}:{teams:Array<{id:string;name:string}
         <DepartmentChangeFeedback change={activation}/>
       </>}
     </article>
-    <div className="grid min-w-0 grid-cols-1 gap-3 md:grid-cols-2">{picker(t.kind,kind,v=>{setKind(v as ScopeReviewKind);setAfter('');setSelected([]);},data.supportedKinds.map(k=>({value:k,label:t[k]})))}{picker(t.recent,reviewId,id=>{setReviewId(id);setSelected([]);},[{value:'',label:t.newReview},...reviewOptions.map(r=>({value:r.id,label:`${t[r.resourceKind]} · ${t[r.action]} · ${t[r.status]} · ${r.id}`}))])}</div>
+    <div className="grid min-w-0 grid-cols-1 gap-3 md:grid-cols-2">{picker(t.kind,kind,v=>{setKind(v as ScopeReviewKind);setAfter('');setSelected([]);if(v!=='memory'&&action==='release')setAction('confirm_general');},data.supportedKinds.map(k=>({value:k,label:t[k]})))}{picker(t.recent,reviewId,id=>{setReviewId(id);setSelected([]);},[{value:'',label:t.newReview},...reviewOptions.map(r=>({value:r.id,label:`${t[r.resourceKind]} · ${t[r.action]} · ${t[r.status]} · ${r.id}`}))])}</div>
     <div className="flex flex-wrap gap-2"><Button variant="outline" className="max-sm:min-h-11" disabled={busy||!reviewAfter} onClick={()=>{setReviewAfter('');setSelected([]);}}>{t.latestReviews}</Button><Button variant="outline" className="max-sm:min-h-11" disabled={busy||!data.nextReviewCursor} onClick={()=>{setReviewAfter(data.nextReviewCursor??'');setSelected([]);}}>{t.olderReviews}</Button></div>
     {job?<article className="space-y-3 rounded-xl border border-border p-4">
       <h2 className="font-semibold">{t.savedPreview}: {t[job.status]}</h2>
@@ -120,15 +126,15 @@ function ScopeReviewWorkspace({teams,close}:{teams:Array<{id:string;name:string}
       <Button variant="ghost" className="max-sm:min-h-11" disabled={busy} onClick={()=>{setReviewId('');setSelected([]);}}>{t.newReview}</Button>
     </article>:<form className="space-y-4" onSubmit={event=>{event.preventDefault();if(!selectedRows.length||selectedRows.length!==selected.length||!reason.trim()||unsupportedAction||(action==='assign_team'&&!team)|| classificationBlocked)return;void save({type:'scope.review.preview',resourceKind:kind,resourceIds:selected,action,targetTeamId:action==='consolidate_default'?defaultTeam:action==='assign_team'?team:null,reason});}}>
       <label className="flex min-h-8 max-sm:min-h-11 items-center gap-3 text-sm"><Checkbox aria-label={t.includeClassified} checked={includeClassified} disabled={busy} onCheckedChange={checked=>{cancelConfirmation();setSelected([]);setAfter('');setIncludeClassified(checked===true);invalidateSurfaceCache(`scope-review:${workspaceId}:`);}}/>{t.includeClassified}</label>
-      <h2 className="font-semibold">{t.inventory}: {data.total}</h2><p className="text-sm text-muted-foreground">{t.metadataHint}</p>
+      <h2 className="font-semibold">{t.inventory}: {data.total}</h2>{data.releaseRequests&&data.releaseRequests>0?<p role="status" className="inline-flex rounded-full border border-border bg-muted/40 px-3 py-1 text-xs">{data.releaseRequests===1?t.releaseRequestOne:format(t.releaseRequests,{count:data.releaseRequests})}</p>:null}<p className="text-sm text-muted-foreground">{t.metadataHint}</p>
       {!data.items.length?<p className="text-sm">{t.empty}</p>:null}
-      <ul className="space-y-2">{data.items.map(row=><li key={row.id} className="rounded-lg border border-border p-3"><label className="flex min-h-8 max-sm:min-h-11 items-start gap-3 text-sm"><Checkbox aria-label={`${t.select} ${row.id}`} checked={selected.includes(row.id)} disabled={busy} onCheckedChange={checked=>setSelected(ids=>checked?[...ids,row.id]:ids.filter(id=>id!==row.id))}/><span className="min-w-0 break-words"><strong className="block">{row.content.title}</strong><span className="line-clamp-3 block whitespace-pre-wrap">{row.content.text}</span><span className="font-mono">{row.id}</span><span className="block">{t.clearance}: {sensitivityLabel(row.sensitivity)} · {row.held?t.held:row.canClassify?t.unreviewed:t.historical}</span><span className="block">{t.departments}: {row.compartments?.join(', ')||t.general} · {t.visibility}: {row.userId||row.assistantId?t.private:t.workspace} · {t.projects}: {row.projectIds?.length??0}</span></span></label></li>)}</ul>
+      <ul className="space-y-2">{data.items.map(row=><li key={row.id} className="rounded-lg border border-border p-3"><label className="flex min-h-8 max-sm:min-h-11 items-start gap-3 text-sm"><Checkbox aria-label={`${t.select} ${row.id}`} checked={selected.includes(row.id)} disabled={busy} onCheckedChange={checked=>setSelected(ids=>checked?[...ids,row.id]:ids.filter(id=>id!==row.id))}/><span className="min-w-0 break-words"><strong className="block">{row.content.title}</strong><span className="line-clamp-3 block whitespace-pre-wrap">{row.content.text}</span><span className="font-mono">{row.id}</span><span className="block">{t.clearance}: {sensitivityLabel(row.sensitivity)} · {row.held?t.held:row.canClassify?t.unreviewed:t.historical}{recoveryLabel(row)?<> · <span data-testid={`recovery-${row.id}`} className={row.recovery?.status==='safe'?'font-medium':'text-muted-foreground'}>{recoveryLabel(row)}</span></>:null}</span><span className="block">{t.departments}: {row.compartments?.join(', ')||t.general} · {t.visibility}: {row.userId||row.assistantId?t.private:t.workspace} · {t.projects}: {row.projectIds?.length??0}</span></span></label></li>)}</ul>
       <div className="flex flex-wrap gap-2"><Button variant="outline" type="button" className="max-sm:min-h-11" disabled={busy||!after} onClick={()=>{setAfter('');setSelected([]);}}>{t.first}</Button><Button variant="outline" type="button" className="max-sm:min-h-11" disabled={busy||!data.nextCursor} onClick={()=>{setAfter(data.nextCursor??'');setSelected([]);}}>{t.next}</Button></div>
-      {picker(t.action,action,value=>setAction(value as ScopeReviewAction),(['confirm_general','assign_team','consolidate_default','hold'] as const).map(value=>({value,label:t[value]})))}
+      {picker(t.action,action,value=>setAction(value as ScopeReviewAction),([...(['confirm_general','assign_team','consolidate_default','hold'] as const),...(kind==='memory'?(['release'] as const):[])]).map(value=>({value,label:t[value]})))}
       {action==='consolidate_default'?<p role="status" className="text-sm">{t.defaultTarget}: {defaultTeam?(mode?.defaultDepartmentName??defaultTeam):t.defaultUnavailable}. {t.scopeOnly}</p>:null}
       {action==='assign_team'?picker(a.team,team,setTeam,teams.map(row=>({value:row.id,label:row.name}))):null}
       <label className="grid gap-1 text-sm">{a.reason}<textarea className={`${fieldClass} min-h-24 py-2`} required maxLength={1000} value={reason} disabled={busy} onChange={event=>setReason(event.target.value)}/></label>
-      {classificationBlocked&&(action!=='consolidate_default'||selectedRows.some(row=>row.held))?<p role="alert" className="text-sm">{t.releaseRequired}</p>:null}
+      {classificationBlocked&&action==='release'?<p role="alert" className="text-sm">{t.releaseOnlySafe}</p>:classificationBlocked&&(action!=='consolidate_default'||selectedRows.some(row=>row.held))?<p role="alert" className="text-sm">{t.releaseRequired}</p>:null}
       {unsupportedAction?<p role="alert" className="text-sm">{t.actionUnsupported}</p>:null}
       <Button type="submit" className="max-sm:min-h-11" disabled={busy||unsupportedAction||!selectedRows.length||!reason.trim()||(action==='assign_team'&&!team)||classificationBlocked}>{t.createPreview} ({selectedRows.length})</Button>
     </form>}

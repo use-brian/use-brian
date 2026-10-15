@@ -1,3 +1,6 @@
+import { ProgrammaticCaptureError } from '../ingest/programmatic-capture.js'
+import { EngineeringHistoryCommandSchema,type EngineeringHistoryCommand,type CaptureConfiguration } from '@use-brian/shared'
+import { EngineeringHistoryError,ARCHIVE_TEXT_LIMIT } from '../engineering-history/contracts.js'
 import type { CrmCredentialParent } from '@use-brian/core'
 /**
  * Brain MCP server — tool surface.
@@ -93,7 +96,7 @@ import type {
   Sensitivity,
   Tool,
   ToolContext,
-  CrmOperationsTools,
+  CrmOperationsTools, CrmBusinessReferenceTools, CrmCommercialContextTools, CrmCommercialDocumentTools, CrmGovernedRecordTools, CrmDeliveryOversightTools,
   AssociationTools,
   Embedder,
 } from '@use-brian/core'
@@ -187,7 +190,7 @@ export type BrainCrmTools = {
   advanceDealStage: Tool
   listCrmFields: Tool
   setCrmCustomFields: Tool
-} & CrmOperationsTools
+} & CrmOperationsTools & CrmBusinessReferenceTools & CrmCommercialContextTools & CrmCommercialDocumentTools & CrmGovernedRecordTools & Partial<CrmDeliveryOversightTools>
 
 export type BrainRetrievalTools = {
   search: Tool
@@ -388,6 +391,8 @@ type BuildOpts = {
   ingest?: BrainEpisodeIngestor
   /** Opt-in Pipeline-C producer used by `captureMode: 'routed'`. */
   routeCapture?: (input: ProgrammaticCaptureInput) => Promise<ProgrammaticCaptureResult>
+  captureConfiguration?: () => Promise<CaptureConfiguration>
+  engineeringHistory?: (input:EngineeringHistoryCommand,ctx:ToolContext)=>Promise<unknown>
   /**
    * Doc-page stores for the `readPage` / `editPage` / `deletePage` surface.
    * Optional — a deploy that omits it exposes no page tools (mirrors
@@ -401,6 +406,26 @@ type BuildOpts = {
    * skill write surface. Write-scope keys only.
    */
   browserSkills?: BrowserSkillStore
+  /**
+   * Resumable task execution (goals.md -> "Resumable task execution"):
+   * read the execution, pause it, and bind/report an external coding
+   * session. The bridged context carries the authenticated credential, so a
+   * report or control here can never claim human intent or renew allowance.
+   */
+  taskExecutionTools?: {
+    getTaskExecution: Tool
+    controlTaskExecution: Tool
+    bindExternalTaskExecution: Tool
+    reportTaskProgress: Tool
+  }
+  /**
+   * Saved research (features/research.md -> "Commands"): the same command
+   * service as REST and Brian. A key acts as its credential, never as a
+   * human, so it cannot approve a company method.
+   */
+  researchTools?: Record<string, Tool>
+  /** Delegated approval review (features/approval-review.md). Assignment and revocation refuse programmatic callers. */
+  approvalReviewTools?: Record<string, Tool>
 }
 
 /**
@@ -408,6 +433,7 @@ type BuildOpts = {
  * `tools/list` and rejected on `tools/call`.
  */
 const READ_TOOL_NAMES = new Set<string>([
+  'getCaptureConfiguration','engineeringHistory',
   // Unified read
   'searchBrain',
   // Recording catalog discovery and scoped transcript retrieval
@@ -423,6 +449,13 @@ const READ_TOOL_NAMES = new Set<string>([
   'getMemory',
   'getTask',
   'listTasks',
+  'getTaskExecution',
+  // Delegated approval review inspection (features/approval-review.md)
+  'inspectApprovalReview',
+  'inspectApprovalPattern',
+  'listResearchActivities',
+  'getResearchActivity',
+  'getResearchImprovement',
   'getContact',
   'listContacts',
   'getCompany',
@@ -443,6 +476,24 @@ const READ_TOOL_NAMES = new Set<string>([
   'listCrmEvents',
   'listCrmParticipation',
   'listCrmPipelines',
+  'listCrmReferenceDefinitions',
+  'previewCrmReference',
+  'findCrmReference',
+  'getCrmReferenceHistory',
+  'listCrmCustomerAccounts',
+  'listCrmCommercialProfiles',
+  'resolveCrmCommercialFields',
+  'listCrmOperationDefinitions',
+  'getCrmPreparation',
+  'listCrmInvoices',
+  'listCrmChangeRequests',
+  'getCrmChangeRequest',
+  'listCrmEngagements',
+  'listCrmBillingRequests',
+  'getCrmBillingBalance',
+  'previewCrmRecurringSuccessors',
+  'listCrmDeliveryCommitments',
+  'getCrmDeliveryAssessment',
   'getCrmDelivery',
   // Workspace files (read) — present only when fileTools are wired
   'fileRead',
@@ -1422,12 +1473,14 @@ export function buildBrainTools(opts: BuildOpts): BrainTool[] {
       'Set `captureMode: "routed"` for message-level capture governed by the ' +
       'connection\'s assistant capture profile. Routed calls require a stable ' +
       '`eventId`; a scheduled rule durably queues the event without running an ' +
-      'extraction model, then one pooled window is extracted when it flushes.',
+      'extraction model. Extraction profiles process a pooled window when it flushes. ' +
+      'Archive-only profiles preserve individual original events in native Files without operational enrichment; ' +
+      'discover getCaptureConfiguration and use structured archive receipts to verify readiness and delivery.',
     inputSchema: {
       content: z
         .string()
         .min(1)
-        .max(MAX_INGEST_CHARS)
+        .max(ARCHIVE_TEXT_LIMIT)
         .describe(
           'The text to ingest — ideally one coherent unit (a project readme, a meeting note, a person profile).',
         ),
@@ -1487,8 +1540,9 @@ export function buildBrainTools(opts: BuildOpts): BrainTool[] {
         .describe('Deprecated alias for sourceLabel; retained for back-compat.'),
     },
     async handler(args) {
-      const content = String(args.content ?? '').trim()
-      if (!content) return text('Provide non-empty content.', true)
+      const original = String(args.content ?? '')
+      const content=args.captureMode==='routed'?original:original.trim()
+      if (!content.trim()) return text('Provide non-empty content.', true)
       const rawLabel =
         (typeof args.sourceLabel === 'string' && args.sourceLabel.trim()) ||
         (typeof args.title === 'string' && args.title.trim()) ||
@@ -1522,6 +1576,7 @@ export function buildBrainTools(opts: BuildOpts): BrainTool[] {
               ? { metadata: args.metadata as Record<string, string | number | boolean> }
               : {}),
           })
+          if(result.processingPurpose==='archive_only')return {...text(JSON.stringify(result)),structuredContent:result}
           if (result.outcome === 'queued') {
             return text(
               `Queued event ${eventId} for pooled capture` +
@@ -1537,10 +1592,10 @@ export function buildBrainTools(opts: BuildOpts): BrainTool[] {
           }
           return text(formatIngestResult(result.extraction!, sourceLabel))
         } catch (err) {
-          const msg = err instanceof Error ? err.message : String(err)
-          return text(`Routed capture failed: ${msg}`, true)
+          return {...text('Routed capture unavailable.',true),structuredContent:{contractVersion:1,failureCode:(err as {code?:string}).code==='file_publication_uncertain'?'archive_publication_uncertain':err instanceof EngineeringHistoryError?err.code:err instanceof ProgrammaticCaptureError?err.code:'capture_unavailable'}}
         }
       }
+      if(content.length>MAX_INGEST_CHARS)return text('Content exceeds the immediate ingest limit.',true)
       // Default to the smart path; `decompose: false` opts into the direct save.
       const decompose = args.decompose !== false
 
@@ -1600,6 +1655,17 @@ export function buildBrainTools(opts: BuildOpts): BrainTool[] {
     bridgeCoreTool(opts.taskTools.bulkUpdateTasks, resolveCtx, workspaceId),
     bridgeCoreTool(opts.taskTools.archiveTasks, resolveCtx, workspaceId),
   ]
+  const researchBridges = opts.researchTools
+    ? Object.values(opts.researchTools).map(tool => bridgeCoreTool(tool, resolveCtx, workspaceId))
+    : []
+  const RESEARCH_READS = new Set(['listResearchActivities', 'getResearchActivity', 'getResearchImprovement'])
+  const approvalReviewBridges = opts.approvalReviewTools
+    ? Object.values(opts.approvalReviewTools).map(tool => bridgeCoreTool(tool, resolveCtx, workspaceId))
+    : []
+  const APPROVAL_REVIEW_READS = new Set(['inspectApprovalReview', 'inspectApprovalPattern'])
+  const executionBridges = opts.taskExecutionTools
+    ? Object.values(opts.taskExecutionTools).map(tool => bridgeCoreTool(tool, resolveCtx, workspaceId))
+    : []
 
   // ── CRM bridges
   const crmBridges = [
@@ -1650,6 +1716,49 @@ export function buildBrainTools(opts: BuildOpts): BrainTool[] {
     bridgeCoreTool(opts.crmTools.recordCrmParticipation, resolveCtx, workspaceId),
     bridgeCoreTool(opts.crmTools.updateCrmParticipation, resolveCtx, workspaceId),
     bridgeCoreTool(opts.crmTools.setDealPipelineStage, resolveCtx, workspaceId),
+    bridgeCoreTool(opts.crmTools.listCrmReferenceDefinitions, resolveCtx, workspaceId),
+    bridgeCoreTool(opts.crmTools.previewCrmReference, resolveCtx, workspaceId),
+    bridgeCoreTool(opts.crmTools.findCrmReference, resolveCtx, workspaceId),
+    bridgeCoreTool(opts.crmTools.getCrmReferenceHistory, resolveCtx, workspaceId),
+    bridgeCoreTool(opts.crmTools.assignCrmReference, resolveCtx, workspaceId),
+    bridgeCoreTool(opts.crmTools.listCrmCustomerAccounts, resolveCtx, workspaceId),
+    bridgeCoreTool(opts.crmTools.listCrmCommercialProfiles, resolveCtx, workspaceId),
+    bridgeCoreTool(opts.crmTools.resolveCrmCommercialFields, resolveCtx, workspaceId),
+    bridgeCoreTool(opts.crmTools.listCrmOperationDefinitions, resolveCtx, workspaceId),
+    bridgeCoreTool(opts.crmTools.saveCrmCustomerAccount, resolveCtx, workspaceId),
+    bridgeCoreTool(opts.crmTools.getCrmPreparation, resolveCtx, workspaceId),
+    bridgeCoreTool(opts.crmTools.listCrmInvoices, resolveCtx, workspaceId),
+    bridgeCoreTool(opts.crmTools.prepareCrmInvoice, resolveCtx, workspaceId),
+    bridgeCoreTool(opts.crmTools.reviseCrmPreparation, resolveCtx, workspaceId),
+    bridgeCoreTool(opts.crmTools.markCrmPreparationReady, resolveCtx, workspaceId),
+    bridgeCoreTool(opts.crmTools.listCrmChangeRequests, resolveCtx, workspaceId),
+    ...Object.entries(opts.crmTools).filter(([name])=>['listCrmDeliveryCommitments','getCrmDeliveryAssessment','refreshCrmDeliveryAssessment',
+      'recordCrmDeliveryRecognition','reviewCrmDeliveryRecognition','appendCrmDeliveryObservation','withdrawCrmDeliveryObservation'].includes(name))
+      .filter(([,tool])=>filterToolsByCapabilities(new Map([[tool.name,tool]]),opts.agentActiveCapabilities??new Set()).size>0)
+      .map(([,tool])=>bridgeCoreTool(tool,resolveCtx,workspaceId)),
+    bridgeCoreTool(opts.crmTools.getCrmChangeRequest, resolveCtx, workspaceId),
+    bridgeCoreTool(opts.crmTools.listCrmEngagements, resolveCtx, workspaceId),
+    bridgeCoreTool(opts.crmTools.listCrmBillingRequests, resolveCtx, workspaceId),
+    bridgeCoreTool(opts.crmTools.getCrmBillingBalance, resolveCtx, workspaceId),
+    bridgeCoreTool(opts.crmTools.previewCrmRecurringSuccessors, resolveCtx, workspaceId),
+    bridgeCoreTool(opts.crmTools.saveCrmChangeRequest, resolveCtx, workspaceId),
+    bridgeCoreTool(opts.crmTools.submitCrmChangeRequest, resolveCtx, workspaceId),
+    bridgeCoreTool(opts.crmTools.withdrawCrmChangeRequest, resolveCtx, workspaceId),
+    bridgeCoreTool(opts.crmTools.updateCrmEngagementTracking, resolveCtx, workspaceId),
+    bridgeCoreTool(opts.crmTools.setCrmCommercialValues, resolveCtx, workspaceId),
+    bridgeCoreTool(opts.crmTools.commitCrmRecurringSuccessors, resolveCtx, workspaceId),
+    bridgeCoreTool(opts.crmTools.saveCrmBillingRequest, resolveCtx, workspaceId),
+    bridgeCoreTool(opts.crmTools.cancelCrmBillingRequest, resolveCtx, workspaceId),
+    bridgeCoreTool(opts.crmTools.recordCrmExternalInvoice, resolveCtx, workspaceId),
+    bridgeCoreTool(opts.crmTools.correctCrmExternalInvoiceReference, resolveCtx, workspaceId),
+    ...[...filterToolsByCapabilities(new Map([opts.crmTools.issueCrmInvoice, opts.crmTools.retryCrmInvoiceIssue, opts.crmTools.voidCrmInvoice]
+      .map(tool => [tool.name, tool])), opts.agentActiveCapabilities ?? new Set()).values()].map(tool => bridgeCoreTool(tool, resolveCtx, workspaceId)),
+    ...[...filterToolsByCapabilities(new Map([opts.crmTools.saveCrmSellerProfile, opts.crmTools.acceptCrmCommercialProfile,
+      opts.crmTools.proposeCrmOperationVersion].map(tool => [tool.name, tool])),
+    opts.agentActiveCapabilities ?? new Set()).values()].map(tool => bridgeCoreTool(tool, resolveCtx, workspaceId)),
+    ...[...filterToolsByCapabilities(new Map([opts.crmTools.saveCrmReferenceDefinition, opts.crmTools.replaceCrmReference,
+      opts.crmTools.retireCrmReference, opts.crmTools.importCrmReferences].map(tool => [tool.name, tool])),
+    opts.agentActiveCapabilities ?? new Set()).values()].map(tool => bridgeCoreTool(tool, resolveCtx, workspaceId)),
     ...[...filterToolsByCapabilities(new Map([opts.crmTools.sendCrmMessage,opts.crmTools.getCrmDelivery].map(tool=>[tool.name,tool])),opts.agentActiveCapabilities ?? new Set()).values()].map(tool=>bridgeCoreTool(tool,resolveCtx,workspaceId)),
   ]
 
@@ -1844,7 +1953,17 @@ export function buildBrainTools(opts: BuildOpts): BrainTool[] {
       }
     : null
 
+  const historyTools:BrainTool[]=[]
+  if(opts.captureConfiguration)historyTools.push({name:'getCaptureConfiguration',description:'Read this authenticated connection’s effective capture purpose, readiness, admitted audience and limits. Does not observe the local emitter.',inputSchema:{},
+    async handler(){try{if(opts.credentialCurrent&&!await opts.credentialCurrent())throw new EngineeringHistoryError('capture_target_unavailable');const config=await opts.captureConfiguration!();if(opts.credentialCurrent&&!await opts.credentialCurrent())throw new EngineeringHistoryError('capture_target_unavailable');return {...text(JSON.stringify(config)),structuredContent:config}}catch{return {...text('Capture configuration unavailable.',true),structuredContent:{contractVersion:1,failureCode:'capture_target_unavailable'}}}}})
+  if(opts.engineeringHistory)historyTools.push({name:'engineeringHistory',description:'Explicit admitted engineering archive list/search/read/JSONL export. Originals and reported results are unverified. Write credentials may annotate, exclude or delete with expected versions and idempotency.',
+    inputSchema:{...EngineeringHistoryCommandSchema.shape,action:opts.scope==='read'?z.enum(['list','search','read','export']):EngineeringHistoryCommandSchema.shape.action},
+    async handler(args){try{if(opts.credentialCurrent&&!await opts.credentialCurrent())throw new EngineeringHistoryError('history_not_available',404);const ctx=await resolveCtx();if('error' in ctx)throw new EngineeringHistoryError('history_not_available',404)
+      const result=await opts.engineeringHistory!(EngineeringHistoryCommandSchema.parse(args),ctx);if(opts.credentialCurrent&&!await opts.credentialCurrent())throw new EngineeringHistoryError('history_not_available',404)
+      return {...text(JSON.stringify(result)),structuredContent:result as Record<string,unknown>}
+    }catch(error){return {...text('Engineering history unavailable.',true),structuredContent:{contractVersion:1,failureCode:error instanceof EngineeringHistoryError?error.code:'history_unavailable'}}}}})
   const all: BrainTool[] = [
+    ...historyTools,
     ...associationBridges,
     ...storeBridges,
     ...(askStoreAssistant ? [askStoreAssistant] : []),
@@ -1857,6 +1976,9 @@ export function buildBrainTools(opts: BuildOpts): BrainTool[] {
     getEntity,
     getMemory,
     ...taskBridges.filter((t) => t.name === 'getTask' || t.name === 'listTasks'),
+    ...executionBridges.filter((t) => t.name === 'getTaskExecution'),
+    ...researchBridges.filter((t) => RESEARCH_READS.has(t.name)),
+    ...approvalReviewBridges.filter((t) => APPROVAL_REVIEW_READS.has(t.name)),
     ...crmBridges.filter((t) =>
       t.name === 'getContact' || t.name === 'listContacts' ||
       t.name === 'getCompany' || t.name === 'listCompanies' ||
@@ -1868,9 +1990,15 @@ export function buildBrainTools(opts: BuildOpts): BrainTool[] {
       t.name === 'listCrmSegments' || t.name === 'previewCrmSegment' ||
       t.name === 'listCrmEntitlementPlans' || t.name === 'listCrmEntitlements' ||
       t.name === 'listCrmEvents' || t.name === 'listCrmParticipation' ||
-      t.name === 'getCrmDelivery' ||
+      t.name === 'listCrmDeliveryCommitments' || t.name === 'getCrmDeliveryAssessment' || t.name === 'getCrmDelivery' ||
       t.name === 'previewCrmCredentialBindings' || t.name === 'listCrmCredentials' ||
-      t.name === 'listCrmPipelines'
+      t.name === 'listCrmPipelines' ||
+      t.name === 'listCrmReferenceDefinitions' || t.name === 'previewCrmReference' ||
+      t.name === 'findCrmReference' || t.name === 'getCrmReferenceHistory' ||
+      t.name === 'listCrmCustomerAccounts' || t.name === 'listCrmCommercialProfiles' ||
+      t.name === 'resolveCrmCommercialFields' || t.name === 'listCrmOperationDefinitions' ||
+      t.name === 'getCrmPreparation' || t.name === 'listCrmInvoices' ||
+      t.name === 'listCrmChangeRequests' || t.name === 'getCrmChangeRequest' || t.name === 'listCrmEngagements' || t.name === 'listCrmBillingRequests' || t.name === 'getCrmBillingBalance' || t.name === 'previewCrmRecurringSuccessors'
     ),
     ...fileBridges.filter((t) => t.name === 'fileRead' || t.name === 'fileSearch'),
     ...brandBridges.filter((t) => t.name === 'getBrand'),
@@ -1887,6 +2015,9 @@ export function buildBrainTools(opts: BuildOpts): BrainTool[] {
       t.name === 'closeTask' || t.name === 'reopenTask' ||
       t.name === 'bulkUpdateTasks' || t.name === 'archiveTasks',
     ),
+    ...executionBridges.filter((t) => t.name !== 'getTaskExecution'),
+    ...researchBridges.filter((t) => !RESEARCH_READS.has(t.name)),
+    ...approvalReviewBridges.filter((t) => !APPROVAL_REVIEW_READS.has(t.name)),
     ...crmBridges.filter((t) =>
       t.name === 'saveContact' || t.name === 'updateContact' ||
       t.name === 'saveCompany' || t.name === 'updateCompany' ||
@@ -1899,7 +2030,14 @@ export function buildBrainTools(opts: BuildOpts): BrainTool[] {
       t.name === 'recordCrmParticipation' || t.name === 'updateCrmParticipation' ||
       t.name === 'setDealPipelineStage' || t.name === 'sendCrmMessage' ||
       t.name === 'saveCrmEntitlementPlan' || t.name === 'saveCrmEvent' ||
-      t.name === 'createCrmCredential' || t.name === 'revokeCrmCredential'
+      t.name === 'createCrmCredential' || t.name === 'revokeCrmCredential' ||
+      t.name === 'assignCrmReference' || t.name === 'saveCrmReferenceDefinition' ||
+      t.name === 'replaceCrmReference' || t.name === 'retireCrmReference' || t.name === 'importCrmReferences' ||
+      t.name === 'saveCrmCustomerAccount' || t.name === 'saveCrmSellerProfile' ||
+      t.name === 'acceptCrmCommercialProfile' || t.name === 'proposeCrmOperationVersion' ||
+      t.name === 'prepareCrmInvoice' || t.name === 'reviseCrmPreparation' || t.name === 'markCrmPreparationReady' ||
+      t.name === 'issueCrmInvoice' || t.name === 'retryCrmInvoiceIssue' || t.name === 'voidCrmInvoice' ||
+      t.name === 'refreshCrmDeliveryAssessment' || t.name === 'recordCrmDeliveryRecognition' || t.name === 'reviewCrmDeliveryRecognition' || t.name === 'appendCrmDeliveryObservation' || t.name === 'withdrawCrmDeliveryObservation' || t.name === 'saveCrmChangeRequest' || t.name === 'submitCrmChangeRequest' || t.name === 'withdrawCrmChangeRequest' || t.name === 'updateCrmEngagementTracking' || t.name === 'setCrmCommercialValues' || t.name === 'commitCrmRecurringSuccessors' || t.name === 'saveCrmBillingRequest' || t.name === 'cancelCrmBillingRequest' || t.name === 'recordCrmExternalInvoice' || t.name === 'correctCrmExternalInvoiceReference'
     ),
     ...fileBridges.filter((t) =>
       t.name === 'fileWrite' || t.name === 'fileAppend' ||
@@ -1947,10 +2085,14 @@ export function buildBrainTools(opts: BuildOpts): BrainTool[] {
   return exposed.map(tool => ({
     ...tool,
     handler: async args => {
+      if(tool.name==='getCaptureConfiguration'||tool.name==='ingestToBrain'&&args.captureMode==='routed'){
+        if(opts.credentialCurrent&&!await opts.credentialCurrent())return {...text('Capture unavailable.',true),structuredContent:{contractVersion:1,failureCode:'capture_target_unavailable'}}
+        return tool.handler(args)
+      }
       const ctx = await resolveCtx()
       if ('error' in ctx) return text(ctx.error, true)
       const security = ctx.executionContext?.security
-      if (!security?.access.sharedAudience) return tool.handler(args)
+      if (!security || !security.access.sharedAudience && !['listCrmDeliveryCommitments','getCrmDeliveryAssessment','refreshCrmDeliveryAssessment','recordCrmDeliveryRecognition','reviewCrmDeliveryRecognition','appendCrmDeliveryObservation','withdrawCrmDeliveryObservation'].includes(tool.name)) return tool.handler(args)
       try {
         return await security.authority.execute(() =>
           runWithAgentAccess(security.access, () => tool.handler(args)))
@@ -2219,8 +2361,9 @@ export async function resolveAgentCapabilities(workspaceId: string): Promise<Rea
  * Build the per-request `ToolContext` for a workspace-bound tool call.
  *
  * Exported for first-party app routes (`routes/apps-shopify.ts`) as well as
- * the brain-MCP surface. Both bind to the same principal - the workspace owner
- * plus its primary assistant, via `resolveWriteTarget` - so a second
+ * the brain-MCP surface. Both bind to the same principal - the credential's
+ * human (viewer, consenting user, or brain-key issuer; the workspace owner only
+ * for a legacy key) plus the primary assistant, via `resolveWriteTarget` - so a second
  * hand-rolled context beside this one would be a place for the two to drift on
  * clearance, compartments or capabilities without anything failing.
  *
@@ -2244,9 +2387,12 @@ export function makeBrainContextResolver(
       cached = { error: 'This workspace has no assistant to bind the call to.' }
       return cached
     }
-    // User-linked credentials act as their authenticated user; ownership is attribution only.
+    // Credentials act as their human: the viewer or consenting user, and for a
+    // brain key its issuer (D13), so a key bound to a department runs on the
+    // edges of the person who bound it. Only a legacy key with no recorded
+    // issuer acts as the workspace owner. Ownership is attribution only.
     const actingUserId = programmaticPrincipal?.kind === 'home_app' || programmaticPrincipal?.kind === 'oauth_token'
-      ? programmaticPrincipal.userId : target.ownerUserId
+      ? programmaticPrincipal.userId : programmaticPrincipal?.userId ?? target.ownerUserId
     if (!actingUserId) return { error: 'Authenticated credential user required' }
     const clearance = effectiveBrainClearance(target.clearance, maxClearance)
     const activeCapabilities = await loadActiveCapabilities(target.assistantId)
@@ -2282,7 +2428,7 @@ export function makeBrainContextResolver(
         ...(admitted ? {
           sharedAudience: true,
           maximumAccess: {
-            workspaceId, userId: target.ownerUserId, clearance,
+            workspaceId, userId: actingUserId, clearance,
             compartments: admitted.admittedCompartments ?? [],
             mutationCompartments: admitted.admittedCompartments ?? [],
             projectIds: admitted.admittedProjectIds ?? [],

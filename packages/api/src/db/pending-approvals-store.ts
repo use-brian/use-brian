@@ -17,9 +17,10 @@ import { createBrowserSkillGrantInTransaction } from './browser-skill-grant-stor
 import { getPool, query, queryWithRLS } from './client.js'
 import { notifyWorkspaceChange } from '../brain-stream/notify.js'
 import { appendDecisionEvent } from './decision-event-store.js'
-import type { DerivedWriteEvidence } from '@use-brian/core'
+import type { ApprovalResolutionOrigin, DerivedWriteEvidence } from '@use-brian/core'
 import { readSessionById } from './sessions.js'
 import { gateSessionRead } from '../session-read-authority.js'
+import { captureHumanDecisionSupport } from '../approval-review/patterns.js'
 
 /** Approval projections retain the current authority of every persisted parent. */
 async function canReadApprovalSource(userId: string, approval: PendingApproval): Promise<boolean> {
@@ -170,6 +171,12 @@ export type PendingApproval = {
   /** User's free-text answer for kind='question' rows. NULL until the user submits via POST /answer.
    *  Length-capped to 8000 chars at the DB. See docs/architecture/engine/askquestion-suspend-resume.md. */
   answerText: string | null
+  /**
+   * Who actually decided (migration 757). `delegated_assistant` rows carry an
+   * `approval_delegated_resolutions` receipt and a NULL `respondedBy`; NULL on
+   * pending and legacy rows. See docs/architecture/features/approval-review.md.
+   */
+  resolutionOrigin?: ApprovalResolutionOrigin | null
 }
 
 export type CreateApprovalParams = {
@@ -289,7 +296,8 @@ const COLS = `
   source_session_required   AS "sourceSessionRequired",
   approval_payload          AS "approvalPayload",
   originating_assistant_id  AS "originatingAssistantId",
-  answer_text               AS "answerText"
+  answer_text               AS "answerText",
+  resolution_origin         AS "resolutionOrigin"
 `
 
 /**
@@ -454,6 +462,8 @@ export type CreateQuestionParams = {
   deliveryChannelId?: string | null
   /** Optional. Default policy: now + 24h (chat-route-side). NULL = never expire. */
   expiresAt?: Date | null
+  /** Internal native Task question. Never supplied by askQuestion model input. */
+  executionQuestion?: { executionId: string; controlRevision: number; sourceTaskId: string }
 }
 
 export type PendingApprovalsStore = {
@@ -772,6 +782,7 @@ function rowToApproval(row: Record<string, unknown>): PendingApproval {
     approvalPayload: (row.approvalPayload as Record<string, unknown>) ?? {},
     originatingAssistantId: (row.originatingAssistantId as string | null) ?? null,
     answerText: (row.answerText as string | null) ?? null,
+    resolutionOrigin: (row.resolutionOrigin as ApprovalResolutionOrigin | null) ?? null,
   }
 }
 
@@ -785,6 +796,12 @@ export async function readBrowserSendApprovalStatus(
   if (binding.kind !== 'browser_skill_send') return 'unavailable'
   const current = await store.getById(binding.approverUserId, id)
   if (!current || current.kind !== 'browser_skill_send' || current.approverUserId !== binding.approverUserId) return 'unavailable'
+  // A delegated approval is approved only while its receipt still validates
+  // (docs/architecture/features/approval-review.md -> "Consumption").
+  if (current.status === 'approved' && current.resolutionOrigin === 'delegated_assistant') {
+    const { consumeDelegatedReceipt } = await import('../approval-review/consumption.js')
+    if (!(await consumeDelegatedReceipt(current)).ok) return 'unavailable'
+  }
   return current.status
 }
 
@@ -1187,9 +1204,9 @@ export function createPendingApprovalsStore(): PendingApprovalsStore {
            workspace_id, kind, blocking_session_id, approver_user_id,
            tool_name, arguments, approval_payload,
            delivery_channel_type, status, responded_at, responded_by,
-           workflow_run_id, workflow_step_run_id
+           workflow_run_id, workflow_step_run_id, resolution_origin
          )
-         VALUES ($1, 'browser_skill_send', $2, $3, 'runBrowserSkill', $4, $5, 'web', 'auto_approved', now(), $3, NULL, NULL)
+         VALUES ($1, 'browser_skill_send', $2, $3, 'runBrowserSkill', $4, $5, 'web', 'auto_approved', now(), $3, NULL, NULL, 'standing_grant')
          RETURNING ${COLS}`,
         [
           params.workspaceId,
@@ -1229,6 +1246,7 @@ export function createPendingApprovalsStore(): PendingApprovalsStore {
         ...(params.context !== undefined ? { context: params.context } : {}),
         ...(params.allowCustom !== undefined ? { allowCustom: params.allowCustom } : {}),
         ...(params.options !== undefined ? { options: params.options } : {}),
+        ...(params.executionQuestion ? { operation: 'routine_input', ...params.executionQuestion } : {}),
       }
       const result = await query(
         `INSERT INTO pending_approvals (
@@ -1238,6 +1256,8 @@ export function createPendingApprovalsStore(): PendingApprovalsStore {
            workflow_run_id, workflow_step_run_id
          )
          VALUES ($1, 'question', $2, $3, $4, 'askQuestion', $5, $6, $7, $8, $9, NULL, NULL)
+         ${params.executionQuestion ? `ON CONFLICT ((approval_payload->>'executionId'), (approval_payload->>'controlRevision'))
+           WHERE kind='question' AND approval_payload->>'operation'='routine_input' DO NOTHING` : ''}
          RETURNING ${COLS}`,
         [
           params.workspaceId,
@@ -1251,6 +1271,12 @@ export function createPendingApprovalsStore(): PendingApprovalsStore {
           params.expiresAt ?? null,
         ],
       )
+      if (!result.rows[0] && params.executionQuestion) {
+        const existing = await query(`SELECT ${COLS} FROM pending_approvals WHERE kind='question'
+          AND approval_payload->>'operation'='routine_input' AND approval_payload->>'executionId'=$1
+          AND approval_payload->>'controlRevision'=$2`, [params.executionQuestion.executionId, String(params.executionQuestion.controlRevision)])
+        return rowToApproval(existing.rows[0] as Record<string, unknown>)
+      }
       const approval = rowToApproval(result.rows[0] as Record<string, unknown>)
       notifyWorkspaceChange(approval.workspaceId, 'approval', 'create', approval.id)
       return approval
@@ -1432,7 +1458,7 @@ export function createPendingApprovalsStore(): PendingApprovalsStore {
           skillId: payload.skillId as string, skillVersion: payload.skillVersion as number, grantedBy: responderUserId,
         }, id) : null
         const changed = await client.query(`UPDATE pending_approvals SET status=$3,
-          responded_at=clock_timestamp(), responded_by=$2, reject_reason=$4
+          responded_at=clock_timestamp(), responded_by=$2, reject_reason=$4, resolution_origin='human'
           WHERE id=$1 AND status='pending' AND (expires_at IS NULL OR expires_at>clock_timestamp()) RETURNING ${COLS}`,
           [id, responderUserId, decision, decision === 'rejected' ? options.reason ?? null : null])
         if (!changed.rows[0]) throw denied()
@@ -1446,6 +1472,8 @@ export function createPendingApprovalsStore(): PendingApprovalsStore {
           causedByApplicationId: decisionApplicationId(approval),
           payload: { approvalId: id, approvalKind: approval.kind, toolName: 'runBrowserSkill', resolution },
         }, client)
+        // Human evidence for explicitly delegated review (approval-review.md -> "Evidence").
+        await captureHumanDecisionSupport(client, approval, decision, responderUserId)
         await assertSourceFresh()
         return { approval, grantId: grant?.id ?? null }
       })
@@ -1464,7 +1492,8 @@ export function createPendingApprovalsStore(): PendingApprovalsStore {
            SET status = $2,
                responded_at = now(),
                responded_by = $3,
-               reject_reason = $4
+               reject_reason = $4,
+               resolution_origin = 'human'
            WHERE id = $1 AND status = 'pending' AND kind NOT IN ('department_access', 'browser_skill_send')
            RETURNING ${COLS}`,
           [id, decision, responderUserId, rejectReason ?? null],
@@ -1505,6 +1534,8 @@ export function createPendingApprovalsStore(): PendingApprovalsStore {
             accountKey: approvalAccountKey(responded),
           },
         }, client)
+        // Human evidence for explicitly delegated review (approval-review.md -> "Evidence").
+        await captureHumanDecisionSupport(client, responded, decision, responderUserId)
         await client.query('COMMIT')
         notifyWorkspaceChange(responded.workspaceId, 'approval', 'update', responded.id)
         return responded

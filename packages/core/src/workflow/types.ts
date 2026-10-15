@@ -337,6 +337,8 @@ export type ResolvedExternalClientWorkflowPrincipal = {
 }
 
 export type WorkflowDefinition = {
+  /** Optional explicit routine intake; accepted human provenance lives server-side. */
+  taskIntake?: import('../tasks/routine-intake.js').RoutineTaskIntake
   /**
    * Scalar = one entry step; ARRAY = trigger fan-out — every listed step
    * starts in parallel when the trigger fires (distinct, max
@@ -355,6 +357,8 @@ export type WorkflowDefinition = {
    * by the executor and by `summarize()` — presentation only.
    */
   layout?: Record<string, WorkflowNodePosition>
+  /** Executor for root tasks a run creates (workflow.md -> "Default executor"). */
+  defaultExecutor?: { kind: 'assistant'; assistantId: string } | { kind: 'person'; memberId: string }
 }
 
 // ── Event trigger ───────────────────────────────────────────────────────
@@ -656,6 +660,7 @@ export type WorkflowLifecycleState = (typeof WORKFLOW_LIFECYCLE_STATES)[number]
 export type WorkflowModelAlias = 'standard' | 'pro' | 'max'
 
 export type WorkflowRecord = {
+  taskIntakeRevision?: number
   id: string
   workspaceId: string
   createdBy: string
@@ -823,6 +828,10 @@ export type WorkflowStepRunRecord = {
 
 /** Trusted server-only creation context. Never deserialize from a request/tool body. */
 export type WorkflowCreateOptions = {
+  /** API-minted transaction capability for canonical compound commands. */
+  transaction?: object
+  /** API-minted canonical Goal producer capability, never serialized. */
+  sourceGoal?: object
   /** Internal receipt: the store committed workflow + firing row atomically. */
   onSchedulePublished?: () => void
   authoring?: {

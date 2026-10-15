@@ -35,6 +35,7 @@ import {
 import type { PendingApprovalsStore } from '../db/pending-approvals-store.js'
 import { bandOf } from './banding.js'
 import { createAgentWriteTools, workspaceGateFailure, type AgentWriteToolDeps } from './write-tools.js'
+import { isRoutineDecisionTool } from '../tasks/routine-tools.js'
 
 /** BRIDGE candidates pulled from the boot allTools map, by name. */
 const BRIDGE_READ_NAMES = [
@@ -42,6 +43,7 @@ const BRIDGE_READ_NAMES = [
   'listWorkflows',
   'getWorkflow',
   'getWorkflowRun',
+  'getRoutineIntake',
   'proposeWorkflow', // read-only draft helper
   'listSlackChannels', // read-only: real Slack channel ids for a delivery target
   'listSlackMembers', // read-only: real Slack member ids for <@…> mentions
@@ -60,6 +62,8 @@ const BRIDGE_READ_NAMES = [
   // Inter-assistant
   'listConnectedAssistants',
   'askAssistant',
+  // Governed Briefs (project-briefs.md)
+  'inspectBrief',
   // Hosted operator extension (absent in OSS; capability-gated when injected).
   'listOperatorWorkflowEventBindings',
 ] as const
@@ -69,6 +73,10 @@ const BRIDGE_WRITE_NAMES = [
   'createWorkflow',
   'updateWorkflow',
   'runWorkflow',
+  'proposeRoutineIntake',
+  'applyRoutineIntake',
+  'rejectRoutineIntake',
+  'setRoutineIntakeEnabled',
   // Scheduling
   'createScheduledJob',
   'updateScheduledJob',
@@ -81,6 +89,9 @@ const BRIDGE_WRITE_NAMES = [
   'retractMemory',
   'deleteBrainRow',
   'reclassifySensitivity',
+  // Governed Briefs: maintenance is additive context; direction changes are an owner's acceptance.
+  'maintainBriefContext',
+  'manageBrief',
   // Hosted operator extension (absent in OSS; always Approve-band).
   'configureOperatorWorkflowEventBinding',
   'disableOperatorWorkflowEventBinding',
@@ -224,7 +235,7 @@ export function buildAgentToolset(deps: AgentToolsetDeps): AgentToolset & {
         name,
         wrapApproveBand(tool, {
           approvalsStore: deps.approvalsStore,
-          resolveApprover: deps.writeToolDeps.resolveApprover,
+          resolveApprover: isRoutineDecisionTool(name) ? async context=>context.userId : deps.writeToolDeps.resolveApprover,
           resolveOrigin,
         }),
       )

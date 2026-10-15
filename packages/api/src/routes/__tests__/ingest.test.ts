@@ -25,6 +25,7 @@ vi.mock('../../db/ingest-rules-editor-store.js', () => ({
 }))
 
 import { ingestRoutes } from '../ingest.js'
+import { contextReadinessFixture } from '../../context-scope/__tests__/readiness-fixture.js'
 
 const USER_ID = '00000000-0000-0000-0000-000000000020'
 const INSTANCE_ID = '00000000-0000-0000-0000-0000000000a2'
@@ -152,12 +153,7 @@ function setup(ready = true) {
     connectorGrantStore: {} as never,
     ingestSinkStore: ingestSinkStore as never,
     contextStore: contextStore as never,
-    getReadiness: vi.fn().mockResolvedValue({
-      enforcementVersion: 1,
-      readyForActivation: ready,
-      checks: ready ? [] : [{ id: 'connectors', ready: false, blocking: true, detail: 'missing' }],
-      legacyGeneral: {},
-    }),
+    getReadiness: vi.fn().mockResolvedValue(contextReadinessFixture(ready ? [] : ['connectors'])),
   }))
   return { app, connectorInstanceStore, ingestRulesStore, workspaceStore, ingestSinkStore, contextStore }
 }

@@ -126,7 +126,9 @@ export async function createLocalPage(input: DraftInput & { id: string }): Promi
   }
   const teamspacesKey = sidebarCacheKey("teamspaces", input.workspaceId);
   const teamspaces = (teamspacesKey ? await idbGet<Teamspace[]>(teamspacesKey) : null) ?? [];
-  const teamspaceId = parentRow ? parentRow.teamspaceId : (input.teamspaceId !== undefined
+  // A shared Project collection page (migration 749) has no teamspace; a child stays in its parent's collection.
+  const sharedProjectId = parentRow ? parentRow.sharedProjectId ?? null : input.sharedProjectId ?? null;
+  const teamspaceId = parentRow ? parentRow.teamspaceId : sharedProjectId ? null : (input.teamspaceId !== undefined
     ? input.teamspaceId : teamspaces.find((t) => t.isDefault)?.id ?? null);
   const now = new Date().toISOString();
   // Keep the canonical REST placeholder and seed identical to doc-sync's
@@ -138,7 +140,7 @@ export async function createLocalPage(input: DraftInput & { id: string }): Promi
     description: null, entity: input.binding?.entity === "custom" ? "tasks" : input.binding?.entity ?? "tasks",
     viewType: input.binding?.viewType ?? "table", state: "draft",
     nestParentId: input.nestParentId ?? null, teamspaceId,
-    projectId: parentRow?.projectId ?? null,
+    projectId: parentRow?.projectId ?? sharedProjectId ?? null, sharedProjectId,
     position: Math.max(-1, ...rows.filter((p) => p.nestParentId === (input.nestParentId ?? null)).map((p) => p.position)) + 1,
     icon: null, fullWidth: false, clearance: "internal", originPrompt: null,
     autoPruneAt: null, brainSyncEnabled: false, createdEventPending: true,

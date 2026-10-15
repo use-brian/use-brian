@@ -12,6 +12,7 @@ vi.mock('../../db/goals.js', () => ({
   setGoalStatusSystem: vi.fn(),
 }))
 import { getGoalById, narrowGoalContextSystem, updateGoalSystem, setGoalStatusSystem } from '../../db/goals.js'
+import { contextReadinessFixture } from '../../context-scope/__tests__/readiness-fixture.js'
 const mockGetGoalById = vi.mocked(getGoalById)
 const mockNarrowGoalContextSystem = vi.mocked(narrowGoalContextSystem)
 const mockUpdateGoalSystem = vi.mocked(updateGoalSystem)
@@ -61,14 +62,7 @@ function makeApp(opts: {
       resolveAssistantId: async () => 'a1',
       resolveAuthoringAuthority: async () => AUTHORING_AUTHORITY,
       contextStore: contextStore as never,
-      getReadiness: async () => ({
-        enforcementVersion: 1,
-        readyForActivation: opts.ready ?? true,
-        checks: opts.ready === false
-          ? [{ id: 'schema', ready: false, blocking: true, detail: 'missing' }]
-          : [],
-        legacyGeneral: {},
-      } as never),
+      getReadiness: async () => contextReadinessFixture(opts.ready === false ? ['row_store_coverage'] : []),
     }),
     opts.userId ? { userId: opts.userId } : undefined,
   )

@@ -273,6 +273,6 @@ Rules (violations are stripped or refused):
 - askQuestion only as the sole action: in Phase 0 (start) or post-drain (a new fork emerged). Never alongside other tools, never while workers run.
 - Save without asking. In Phase 4, save via the right write tool with no permission step, then state what you saved and invite changes ("Saved - tell me what to adjust"). Never ask "want this saved / linked?" in prose.
 - Final reply contains no XML scaffolding tag names. No vague excuses ("technical roadblock") - name the specific failure.
-- Never end a turn silently (no tool calls AND no text).
+- Never end a turn silently (no tool calls AND no text) once research is complete. While workers are running, an empty turn is the expected wait - results arrive on their own.
 
 For "link existing brain entities" requests (no new research needed): see the createEdge tool description - the standard list → createEdge path applies, not the 5-phase protocol.`

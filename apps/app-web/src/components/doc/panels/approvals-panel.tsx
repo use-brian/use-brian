@@ -65,6 +65,7 @@ import { useWorkspaces } from "@/contexts/workspace-context";
 import { feedPath } from "@/lib/feed-nav";
 import {
   isSkillApprovalKind,
+  isRoutineProposal,
   listApprovals,
   listSkillApprovalDetails,
   reviseEmailApproval,
@@ -112,6 +113,7 @@ import {
   ToolInputToggle,
   ToolPreview,
 } from "./approval-tool-previews";
+import { RoutineProposalReview } from '@/components/workflow/routine-intake';
 import { Button } from "@/components/ui/button";
 import { cn } from "@/lib/utils";
 import {
@@ -232,7 +234,7 @@ export function ApprovalsPanel() {
             isActionable(r.kind) &&
             r.kind !== "email_sender" &&
             r.kind !== "department_access" &&
-            !isReviewedWorkflowEmailApproval(r),
+            !isReviewedWorkflowEmailApproval(r) && !isRoutineProposal(r),
         )
         .map((r) => r.id),
     [filtered],
@@ -465,7 +467,7 @@ export function ApprovalsPanel() {
                 isActionable(row.kind) &&
                 row.kind !== "email_sender" &&
                 row.kind !== "department_access" &&
-                !isReviewedWorkflowEmailApproval(row)
+                !isReviewedWorkflowEmailApproval(row) && !isRoutineProposal(row)
               }
               selected={selected.has(row.id)}
               batchBusy={batchBusy}
@@ -732,7 +734,8 @@ function ApprovalCard({
     setEmailBody(frozenEmailBody);
   }, [row.id, frozenEmailBody]);
 
-  const actionable = isActionable(row.kind);
+  const routine = isRoutineProposal(row);
+  const actionable = isActionable(row.kind) && !routine;
   // staged_write rows always title on the staged tool's name — the
   // arguments preview + provenance line below carry the detail. Skill rows
   // title on the skill name (the kind chip already names the action);
@@ -1071,7 +1074,7 @@ function ApprovalCard({
                 detailsLoaded={skillDetailsLoaded}
               />
             )}
-            {row.kind === "workflow_refinement" && (
+            {routine ? activeWorkspaceId ? <RoutineProposalReview workspaceId={activeWorkspaceId} proposalId={row.id} onResolved={()=>onResolved(row.id)} /> : null : row.kind === "workflow_refinement" && (
               <WorkflowRefinementBody
                 row={row}
                 detail={skillDetail}

@@ -4,6 +4,7 @@ export {
   type FileSensitivity,
   type WorkspaceFileMetadata,
   type WorkspaceFile,
+  type WorkspaceFilePurpose,
   type WorkspaceFileIndexRow,
   type WorkspaceFileCreateInput,
   type WorkspaceFileMetaPatch,

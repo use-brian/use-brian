@@ -66,6 +66,7 @@ describe("[COMP:app-web/surface-cache-invalidation] routing table", () => {
       "project:w1:",
       "workflow:w1",
       "workflow-detail:w1:",
+      "routine-intake:w1",
       "workflow-run:w1:",
       "live:w1",
     ]);
@@ -79,6 +80,7 @@ describe("[COMP:app-web/surface-cache-invalidation] routing table", () => {
     // brain-detail block below).
     expect(staleMarksFor(SKILL_REFRESH_EVENT, "w1")).toContain("skills:w1");
     expect(staleMarksFor(LIVE_REFRESH_EVENT, "w1")).toEqual([
+      "delivery:w1:",
       "live:w1",
       "chat-sessions:w1",
       "project:w1:",
@@ -158,6 +160,21 @@ describe("[COMP:app-web/surface-cache-invalidation] routing table", () => {
     expect(staleMarksFor(APPROVALS_REFRESH_EVENT, "w2")).not.toContain("home-dock:w1");
   });
 
+  it("a task or approval change marks every work scope and the dock (resolved cards leave everywhere)", () => {
+    // project-briefs.md -> "Work" -> "Freshness": `work:<wid>` prefixes every
+    // viewer and scope key, so one mark repairs Chat and every Brief.
+    expect(staleMarksFor(BRAIN_REFRESH_EVENT, "w1")).toEqual(expect.arrayContaining(["work:w1", "home-dock:w1"]));
+    expect(staleMarksFor(APPROVALS_REFRESH_EVENT, "w1")).toContain("work:w1");
+    expect(staleMarksFor(BRAIN_REFRESH_EVENT, "w2")).not.toContain("work:w1");
+  });
+
+  it("an authority change evicts cached work instead of keeping protected cards painted", async () => {
+    const { seedSurfaceCache, readSurfaceCache } = await import("@/lib/surface-cache");
+    seedSurfaceCache("work:w1:u1:personal", { counts: { needsYou: 1 } });
+    applySpineEventToSurfaceCache("brian:organization-changed", { workspaceId: "w1" }, "w1");
+    expect(readSurfaceCache("work:w1:u1:personal").data).toBeUndefined();
+  });
+
   it("a workspace_config change marks the Settings detail row (name, icon, purpose, roster)", () => {
     expect(staleMarksFor(WORKSPACE_IDENTITY_REFRESH_EVENT, "w1")).toContain("workspace-detail:w1");
   });
@@ -230,10 +247,13 @@ describe("[COMP:app-web/surface-cache-invalidation] goal primitive and brain det
 
   it("GOAL_REFRESH_EVENT marks the board, the triage queue and every goal detail", () => {
     expect(staleMarksFor(GOAL_REFRESH_EVENT, "w1")).toEqual([
+      "delivery:w1:",
       "goals:w1",
       "triage:w1",
       "goal:w1:",
       "feed-collaboration:w1",
+      // A blocked or approval-waiting hosted Goal moves a work card.
+      "work:w1",
     ]);
     expect(SURFACE_CACHE_SPINE_EVENTS).toContain(GOAL_REFRESH_EVENT);
   });
@@ -346,4 +366,16 @@ it.each(['brian:organization-changed', WORKSPACE_IDENTITY_REFRESH_EVENT])('[COMP
   expect(readSurfaceCache(keys[0]).data).toBeUndefined();
   expect(readSurfaceCache(keys[1]).data).toBeUndefined();
   expect(readSurfaceCache(keys[2]).data).toEqual(['protected title']);
+});
+
+// Delivery facts are security-sensitive; unlike editable list metadata they
+// must disappear before source/Goal authority revalidation completes.
+describe("[COMP:app-web/client-delivery-oversight] cache revocation",()=>{
+  beforeEach(()=>resetSurfaceCache());
+  it.each([BRAIN_REFRESH_EVENT,GOAL_REFRESH_EVENT,WORKSPACE_IDENTITY_REFRESH_EVENT,LIVE_REFRESH_EVENT,ASSISTANT_REFRESH_EVENT])("evicts admitted delivery evidence on %s",async event=>{
+    const key="delivery:w1:detail:viewer:record";
+    await loadSurfaceCache(key,async()=>({quote:"Fictional admitted evidence"}));
+    applySpineEventToSurfaceCache(event,{workspaceId:"w1"},"w1");
+    expect(readSurfaceCache(key).data).toBeUndefined();
+  });
 });

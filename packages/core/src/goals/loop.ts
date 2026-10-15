@@ -31,6 +31,12 @@ export type IterationOutcome = {
   awaitingEvent?: Record<string, unknown> | null
   /** COGS dollars this iteration recorded (0 when metering is off). */
   spend: number
+  /** Execution runtime verdict: stop with this reason (a known blocker, the
+   *  no-progress limit, exhausted transient retries) unless done_when is met. */
+  blockedReason?: string | null
+  /** A human control changed the execution while this iteration ran: its
+   *  write-back is fenced, so the loop neither finishes nor re-arms. */
+  fenced?: boolean
 }
 
 export type LoopState = {
@@ -101,6 +107,13 @@ export async function processGoalIteration(
     meteringAvailable: deps.meteringAvailable(),
   })
 
+  if (decision.decision !== 'done' && outcome.fenced) {
+    return { decision: 'blocked', reason: 'execution_fenced' }
+  }
+  if (decision.decision !== 'done' && outcome.blockedReason) {
+    await deps.finish(goal, 'blocked', outcome.blockedReason, verdict.trace)
+    return { decision: 'blocked', reason: outcome.blockedReason }
+  }
   if (decision.decision === 'done') {
     await deps.finish(goal, 'done', null, verdict.trace)
   } else if (decision.decision === 'blocked') {

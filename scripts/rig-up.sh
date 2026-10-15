@@ -89,6 +89,12 @@ if [ "$ADMIN_ONLY" = 1 ]; then
   API_PORT_FILE="$STATE/api-port"
   CONTAINER=usebrian-admin-test
   VOLUME=usebrian-admin-test-data
+  admin_pg_port="${BRIAN_ADMIN_PG_PORT:-5443}"
+  [[ "$admin_pg_port" =~ ^[0-9]+$ ]] && [ "$admin_pg_port" -ge 1024 ] && [ "$admin_pg_port" -le 65535 ] || die "invalid administrative fixture database port"
+  if [ "$admin_pg_port" != 5443 ]; then
+    CONTAINER="usebrian-admin-test-$admin_pg_port"
+    VOLUME="usebrian-admin-test-$admin_pg_port-data"
+  fi
   RIG_LABEL="com.usebrian.rig=admin-test"
   IMAGE=pgvector/pgvector:pg18
   export USEBRIAN_ADMIN_ONLY=1
@@ -306,6 +312,9 @@ END $$;
 GRANT USAGE ON SCHEMA public TO admin_fixture_app;
 GRANT SELECT, INSERT, UPDATE, DELETE ON ALL TABLES IN SCHEMA public TO admin_fixture_app;
 GRANT USAGE, SELECT ON ALL SEQUENCES IN SCHEMA public TO admin_fixture_app;
+GRANT EXECUTE ON FUNCTION crm_delivery_source_visible(uuid,text,uuid,text,uuid),
+  crm_delivery_envelope_visible(uuid,uuid,uuid,text,text[],uuid[],uuid),
+  crm_delivery_source_navigation(uuid,text,uuid,text,uuid) TO admin_fixture_app;
 ALTER ROLE admin_fixture_app SET app.current_user_id = '00000000-0000-0000-0000-000000000000';
 SQL
   fi

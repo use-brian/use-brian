@@ -117,5 +117,93 @@ export async function authorizeCrmIntegrationCommand(client: PoolClient, context
     case 'set_deal_pipeline_stage': break // Workspace-wide records.write already checked.
     case 'create_intake_credential':
     case 'revoke_intake_credential': throw new CrmOperationsError('not_authorized', 'Integration credentials cannot administer other credentials.')
+    case 'save_reference_definition':
+      required('crm.references.configure', { referenceDefinitionKeys: command.definition.definitionKey })
+      break
+    case 'import_business_references':
+      required('crm.references.configure', { referenceDefinitionKeys: command.definitionKey })
+      break
+    case 'assign_business_reference':
+      required('crm.references.write', { referenceDefinitionKeys: command.definitionKey })
+      break
+    case 'replace_business_reference':
+    case 'retire_business_reference': {
+      const row = await existing(`SELECT d.definition_key AS key FROM crm_business_references r JOIN crm_reference_definitions d
+        ON d.workspace_id=r.workspace_id AND d.id=r.definition_id WHERE r.workspace_id=$1 AND r.id=$2`, command.referenceId)
+      required('crm.references.configure', { referenceDefinitionKeys: row.key! })
+      break
+    }
+    case 'save_seller_profile':
+      required('crm.commercial.configure', { sellerKeys: command.seller.sellerKey })
+      break
+    case 'save_customer_account':
+      required('crm.commercial.write', { sellerKeys: command.account.sellerKey })
+      break
+    case 'accept_commercial_profile': {
+      const key = command.owner.kind === 'seller' ? command.owner.sellerKey
+        : (await existing(`SELECT s.seller_key AS key FROM crm_customer_accounts a JOIN crm_seller_profiles s
+            ON s.workspace_id=a.workspace_id AND s.id=a.seller_id WHERE a.workspace_id=$1 AND a.id=$2`, command.owner.accountId)).key!
+      required('crm.commercial.configure', { sellerKeys: key })
+      break
+    }
+    case 'save_operation_definition':
+      required('crm.commercial.configure', { operationKeys: command.operationKey })
+      break
+    case 'accept_operation_version': throw new CrmOperationsError('not_authorized', 'An operation version is accepted by a workspace owner or admin.')
+    case 'prepare_commercial_document': {
+      const key = (await existing(`SELECT s.seller_key AS key FROM crm_customer_accounts a JOIN crm_seller_profiles s
+        ON s.workspace_id=a.workspace_id AND s.id=a.seller_id WHERE a.workspace_id=$1 AND a.id=$2`, command.accountId)).key!
+      required('crm.commercial.write', { sellerKeys: key, operationKeys: command.operationKey })
+      break
+    }
+    case 'revise_commercial_preparation':
+    case 'mark_preparation_ready':
+    case 'issue_invoice': {
+      const row = await existing(`SELECT s.seller_key AS seller,d.operation_key AS operation FROM crm_commercial_preparations p
+        JOIN crm_seller_profiles s ON s.workspace_id=p.workspace_id AND s.id=p.seller_id
+        JOIN crm_operation_definitions d ON d.workspace_id=p.workspace_id AND d.id=p.operation_definition_id
+        WHERE p.workspace_id=$1 AND p.id=$2`, command.preparationId)
+      required(command.kind === 'issue_invoice' ? 'crm.commercial.issue' : 'crm.commercial.write', { sellerKeys: row.seller!, operationKeys: row.operation! })
+      break
+    }
+    case 'retry_invoice_issue':
+    case 'void_invoice': {
+      const row = await existing(`SELECT s.seller_key AS seller FROM crm_invoices i JOIN crm_seller_profiles s
+        ON s.workspace_id=i.workspace_id AND s.id=i.seller_id WHERE i.workspace_id=$1 AND i.id=$2`, command.invoiceId)
+      required('crm.commercial.issue', { sellerKeys: row.seller! })
+      break
+    }
+    // Governed records are workspace-wide grants (checked above); invoices also need the seller's commercial write.
+    case 'save_change_request':
+    case 'submit_change_request':
+    case 'decide_change_request':
+    case 'withdraw_change_request':
+    case 'update_engagement_tracking':
+    case 'set_commercial_values':
+    case 'commit_recurring_successors':
+    case 'save_governance_policy':
+    case 'save_engagement_catalog':
+    case 'create_billing_request':
+    case 'decide_billing_request':
+    case 'cancel_billing_request': break
+    // Bridge operations are workspace-wide grants; binding ownership is checked by the bridge itself.
+    case 'stage_erp_import':
+    case 'confirm_erp_import':
+    case 'record_projection_receipt':
+    case 'prepare_erp_cutover':
+    case 'commit_erp_cutover': break
+    case 'enroll_erp_viewer': throw new CrmOperationsError('not_authorized', 'A viewer enrolls their own legacy identity while signed in.')
+    case 'record_external_invoice': {
+      const key = (await existing(`SELECT s.seller_key AS key FROM crm_customer_accounts a JOIN crm_seller_profiles s
+        ON s.workspace_id=a.workspace_id AND s.id=a.seller_id WHERE a.workspace_id=$1 AND a.id=$2`, command.accountId)).key!
+      required('crm.commercial.write', { sellerKeys: key })
+      break
+    }
+    case 'correct_external_invoice_reference': {
+      const row = await existing(`SELECT s.seller_key AS seller FROM crm_invoices i JOIN crm_seller_profiles s
+        ON s.workspace_id=i.workspace_id AND s.id=i.seller_id WHERE i.workspace_id=$1 AND i.id=$2`, command.invoiceId)
+      required('crm.commercial.write', { sellerKeys: row.seller! })
+      break
+    }
   }
 }

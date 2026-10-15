@@ -1,0 +1,55 @@
+{
+  "caseSetVersion": "research-cases-v1",
+  "datasetVersion": "fixture-2026-10",
+  "cases": [
+    {
+      "id": "vendor-pricing-a",
+      "family": "vendor-pricing",
+      "split": "target",
+      "request": "Compare pricing and support terms for the three fictional widget vendors.",
+      "context": { "projectBrief": "Fictional pilot: pick one widget vendor for a small team.", "priorArtifacts": [] },
+      "sources": [
+        { "id": "s1", "kind": "web", "ref": "https://vendor-a.example/pricing", "available": true, "content": "Vendor A charges 10 per seat and offers email support." },
+        { "id": "s2", "kind": "web", "ref": "https://vendor-b.example/pricing", "available": false }
+      ],
+      "expected": {
+        "claims": [{ "id": "c1", "text": "Vendor A charges 10 per seat.", "supportedBy": ["s1"] }],
+        "coverage": ["pricing", "support"],
+        "mustSaveArtifact": true,
+        "feedbackKind": "missing_coverage"
+      },
+      "requirements": { "tools": ["webSearch", "urlReader"], "live": false, "estimatedCostUsd": 0.04 }
+    },
+    {
+      "id": "vendor-pricing-a-rev2",
+      "family": "vendor-pricing",
+      "split": "target",
+      "request": "Revise the vendor comparison to add contract length.",
+      "context": { "priorArtifacts": ["Vendor A charges 10 per seat."] },
+      "sources": [{ "id": "s1", "kind": "web", "ref": "https://vendor-a.example/terms", "available": true, "content": "Vendor A contracts run 12 months." }],
+      "expected": { "claims": [{ "id": "c1", "text": "Vendor A contracts run 12 months.", "supportedBy": ["s1"] }], "coverage": ["contract length"], "mustSaveArtifact": true },
+      "requirements": { "tools": ["urlReader"], "live": false, "estimatedCostUsd": 0.02 }
+    },
+    {
+      "id": "regulation-scan",
+      "family": "regulation",
+      "split": "heldout",
+      "request": "Summarize the fictional data retention rule that applies to widget logs.",
+      "sources": [
+        { "id": "s1", "kind": "document", "available": true, "content": "Fictional rule: keep widget logs for 30 days." },
+        { "id": "s2", "kind": "web", "ref": "https://regulator.example/full-text", "available": false }
+      ],
+      "expected": { "claims": [{ "id": "c1", "text": "Widget logs are kept for 30 days.", "supportedBy": ["s1"] }], "coverage": ["retention"], "mustSaveArtifact": true },
+      "requirements": { "tools": ["urlReader"], "live": false, "estimatedCostUsd": 0.03 }
+    },
+    {
+      "id": "market-sizing",
+      "family": "market",
+      "split": "regression",
+      "request": "Estimate the size of the fictional widget market.",
+      "sources": [{ "id": "s1", "kind": "web", "ref": "https://analyst.example/widgets", "available": true }],
+      "expected": { "claims": [], "coverage": ["market size"], "mustSaveArtifact": false },
+      "requirements": { "tools": ["webSearch"], "live": true, "estimatedCostUsd": null }
+    }
+  ]
+}

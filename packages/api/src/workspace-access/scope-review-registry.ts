@@ -18,9 +18,12 @@ type SourceAdapter = {
 const DIRECT_ACTIONS = ['confirm_general', 'assign_team', 'consolidate_default', 'hold'] as const
 const IMPACT_ACTIONS = ['confirm_general', 'hold'] as const
 const HOLD_ACTIONS = ['hold'] as const
+// Release re-derives a replacement through a supersession writer; only memory
+// has one (docs/plans/scope-hold-recovery.md §4).
+const MEMORY_ACTIONS = [...DIRECT_ACTIONS, 'release'] as const
 
 export const SCOPE_REVIEW_SOURCE_ADAPTERS: Readonly<Record<ScopeReviewKind, SourceAdapter>> = Object.freeze({
-  memory: { table: 'memories', category: 'source', actions: DIRECT_ACTIONS, from: 'memories r', workspacePredicate: 'r.workspace_id=$1' },
+  memory: { table: 'memories', category: 'source', actions: MEMORY_ACTIONS, from: 'memories r', workspacePredicate: 'r.workspace_id=$1' },
   entity: { table: 'entities', category: 'source', actions: DIRECT_ACTIONS, from: 'entities r', workspacePredicate: 'r.workspace_id=$1' },
   entity_link: { table: 'entity_links', category: 'source', actions: DIRECT_ACTIONS, from: 'entity_links r', workspacePredicate: 'r.workspace_id=$1' },
   task: { table: 'tasks', category: 'source', actions: DIRECT_ACTIONS, from: 'tasks r', workspacePredicate: 'r.workspace_id=$1' },

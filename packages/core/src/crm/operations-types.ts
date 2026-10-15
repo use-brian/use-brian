@@ -10,14 +10,61 @@
 
 import { createHash } from 'node:crypto'
 import { z } from 'zod'
+import { DeliveryCommandSchema } from './delivery-oversight.js'
 import { parseAuthoringAuthority, type AuthoringAuthority } from '../security/access-ceiling.js'
 import { APP_LOCALES } from '@use-brian/shared'
 import { campaignAttributionContextSchema } from '@use-brian/shared/campaigns'
-import { CrmCredentialDepartmentSelectionSchema, CrmIntegrationAuthoritySchema, requireCrmIntegrationOperation, type CrmIntegrationOperation } from './integration-authority.js'
+import { CrmCredentialParentSchema, CrmCredentialDepartmentSelectionSchema, CrmIntegrationAuthoritySchema, requireCrmIntegrationOperation, type CrmIntegrationOperation } from './integration-authority.js'
 import { AssociationPlanInputSchema, AssociationEventInputSchema } from '../association/domain.js'
 import { CrmConfigCommandSchema, isCrmConfigCommand } from './config-commands.js'
 import { PreviewCrmImportFileCleanupCommandSchema, ExecuteCrmImportFileCleanupCommandSchema } from './file-cleanup-types.js'
 import { CrmRetentionPolicySchema, PreviewCrmRetentionCommandSchema, ExecuteCrmRetentionCommandSchema } from './retention-types.js'
+import {
+  SaveCrmReferenceDefinitionCommandSchema,
+  AssignCrmBusinessReferenceCommandSchema,
+  ReplaceCrmBusinessReferenceCommandSchema,
+  RetireCrmBusinessReferenceCommandSchema,
+  ImportCrmBusinessReferencesCommandSchema,
+} from './business-references.js'
+import {
+  SaveCrmSellerProfileCommandSchema,
+  SaveCrmCustomerAccountCommandSchema,
+  AcceptCrmCommercialProfileCommandSchema,
+  SaveCrmOperationDefinitionCommandSchema,
+  AcceptCrmOperationVersionCommandSchema,
+} from './commercial-context.js'
+import {
+  PrepareCrmCommercialDocumentCommandSchema,
+  ReviseCrmCommercialPreparationCommandSchema,
+  MarkCrmPreparationReadyCommandSchema,
+  IssueCrmInvoiceCommandSchema,
+  RetryCrmInvoiceIssueCommandSchema,
+  VoidCrmInvoiceCommandSchema,
+} from './invoice-preparation.js'
+import {
+  SaveCrmChangeRequestCommandSchema,
+  SubmitCrmChangeRequestCommandSchema,
+  DecideCrmChangeRequestCommandSchema,
+  WithdrawCrmChangeRequestCommandSchema,
+  UpdateCrmEngagementTrackingCommandSchema,
+  SetCrmCommercialValuesCommandSchema,
+  CommitCrmRecurringSuccessorsCommandSchema,
+  SaveCrmGovernancePolicyCommandSchema,
+  SaveCrmEngagementCatalogCommandSchema,
+  CreateCrmBillingRequestCommandSchema,
+  DecideCrmBillingRequestCommandSchema,
+  CancelCrmBillingRequestCommandSchema,
+  RecordCrmExternalInvoiceCommandSchema,
+  CorrectCrmExternalInvoiceReferenceCommandSchema,
+} from './governed-records.js'
+import {
+  StageCrmErpImportCommandSchema,
+  ConfirmCrmErpImportCommandSchema,
+  RecordCrmProjectionReceiptCommandSchema,
+  PrepareCrmErpCutoverCommandSchema,
+  CommitCrmErpCutoverCommandSchema,
+  EnrollCrmErpViewerCommandSchema,
+} from './erp-bridge.js'
 
 export const CrmOperationsUuidSchema = z.string().uuid()
 export const CrmOperationsStableKeySchema = z.string().trim().toLowerCase()
@@ -64,7 +111,7 @@ export const CrmOperationsActorSchema = z.discriminatedUnion('kind', [
   z.object({ kind: z.literal('integration_key'), credentialId: CrmOperationsUuidSchema }),
   z.object({
     kind: z.literal('system_job'),
-    job: z.enum(['association_expiry', 'association_reconciliation', 'entitlement_expiry', 'entitlement_reconciliation', 'crm_retention', 'crm_delivery']),
+    job: z.enum(['association_expiry', 'association_reconciliation', 'entitlement_expiry', 'entitlement_reconciliation', 'crm_retention', 'crm_delivery', 'commercial_documents']),
     runId: CrmOperationsUuidSchema,
   }),
   z.object({
@@ -112,7 +159,12 @@ export const CrmOperationsAuthoritySchema = z.object({
   canConfigure: z.boolean(),
   trustedIdentitySources: z.array(CrmOperationsStableKeySchema).max(50).default([]),
   integration: CrmIntegrationAuthoritySchema.optional(),
+  /** Set when an enrolled viewer acts through this integration credential; recorded as audit evidence. */
+  viaCredentialId: CrmOperationsUuidSchema.optional(),
   nativeDelivery: CrmNativeDeliveryAuthoritySchema.optional(),
+  /** Server-stamped native evidence; never command/HTTP input. */
+  deliveryCredentialParent: CrmCredentialParentSchema.optional(),
+  deliveryReviewApproval: z.object({approvalId:CrmOperationsUuidSchema,approverUserId:CrmOperationsUuidSchema,toolName:z.literal('reviewCrmDeliveryRecognition')}).strict().optional(),
 })
 export type CrmOperationsAuthority = z.infer<typeof CrmOperationsAuthoritySchema>
 
@@ -650,6 +702,7 @@ export interface CrmPrivacyServicePort {
 }
 
 export const CrmOperationsCommandSchema = z.union([
+  DeliveryCommandSchema,
   PreviewCrmImportFileCleanupCommandSchema,
   ExecuteCrmImportFileCleanupCommandSchema,
   PreviewCrmRetentionCommandSchema,
@@ -681,10 +734,47 @@ export const CrmOperationsCommandSchema = z.union([
   UpdateCrmParticipationCommandSchema,
   CorrectCrmParticipationCheckInCommandSchema,
   SetDealPipelineStageCommandSchema,
+  SaveCrmReferenceDefinitionCommandSchema,
+  AssignCrmBusinessReferenceCommandSchema,
+  ReplaceCrmBusinessReferenceCommandSchema,
+  RetireCrmBusinessReferenceCommandSchema,
+  ImportCrmBusinessReferencesCommandSchema,
+  SaveCrmSellerProfileCommandSchema,
+  SaveCrmCustomerAccountCommandSchema,
+  AcceptCrmCommercialProfileCommandSchema,
+  SaveCrmOperationDefinitionCommandSchema,
+  AcceptCrmOperationVersionCommandSchema,
+  PrepareCrmCommercialDocumentCommandSchema,
+  ReviseCrmCommercialPreparationCommandSchema,
+  MarkCrmPreparationReadyCommandSchema,
+  IssueCrmInvoiceCommandSchema,
+  RetryCrmInvoiceIssueCommandSchema,
+  VoidCrmInvoiceCommandSchema,
+  SaveCrmChangeRequestCommandSchema,
+  SubmitCrmChangeRequestCommandSchema,
+  DecideCrmChangeRequestCommandSchema,
+  WithdrawCrmChangeRequestCommandSchema,
+  UpdateCrmEngagementTrackingCommandSchema,
+  SetCrmCommercialValuesCommandSchema,
+  CommitCrmRecurringSuccessorsCommandSchema,
+  SaveCrmGovernancePolicyCommandSchema,
+  SaveCrmEngagementCatalogCommandSchema,
+  CreateCrmBillingRequestCommandSchema,
+  DecideCrmBillingRequestCommandSchema,
+  CancelCrmBillingRequestCommandSchema,
+  RecordCrmExternalInvoiceCommandSchema,
+  CorrectCrmExternalInvoiceReferenceCommandSchema,
+  StageCrmErpImportCommandSchema,
+  ConfirmCrmErpImportCommandSchema,
+  RecordCrmProjectionReceiptCommandSchema,
+  PrepareCrmErpCutoverCommandSchema,
+  CommitCrmErpCutoverCommandSchema,
+  EnrollCrmErpViewerCommandSchema,
 ])
 export type CrmOperationsCommand = z.infer<typeof CrmOperationsCommandSchema>
 
 export const CrmDomainEventTypeSchema = z.enum([
+  'crm.delivery_projection.changed',
   'crm.submission.received',
   'crm.submission.updated',
   'crm.consent.changed',
@@ -694,6 +784,11 @@ export const CrmDomainEventTypeSchema = z.enum([
   'crm.deal.stage_changed',
   'association.inventory.sold_out',
   'association.inventory.available',
+  'crm.reference.assigned',
+  'crm.reference.replaced',
+  'crm.reference.retired',
+  'crm.change_request.submitted',
+  'crm.change_request.decided',
 ])
 export type CrmDomainEventType = z.infer<typeof CrmDomainEventTypeSchema>
 
@@ -810,6 +905,23 @@ export function commandRequiresConfigurationAuthority(command: CrmOperationsComm
     || command.kind === 'release_address_suppression'
     || command.kind === 'save_managed_mailbox_policy'
     || command.kind === 'save_mailbox_integration_grant'
+    || command.kind === 'save_reference_definition'
+    || command.kind === 'replace_business_reference'
+    || command.kind === 'retire_business_reference'
+    || command.kind === 'import_business_references'
+    || command.kind === 'save_seller_profile'
+    || command.kind === 'accept_commercial_profile'
+    || command.kind === 'save_operation_definition'
+    || command.kind === 'accept_operation_version'
+    || command.kind === 'issue_invoice'
+    || command.kind === 'retry_invoice_issue'
+    || command.kind === 'void_invoice'
+    || command.kind === 'save_governance_policy'
+    || command.kind === 'save_engagement_catalog'
+    || command.kind === 'stage_erp_import'
+    || command.kind === 'confirm_erp_import'
+    || command.kind === 'prepare_erp_cutover'
+    || command.kind === 'commit_erp_cutover'
 }
 
 export function assertCrmOperationsAuthority(
@@ -822,6 +934,10 @@ export function assertCrmOperationsAuthority(
   if (['preview_import_file_cleanup', 'execute_import_file_cleanup', 'preview_retention', 'execute_retention', 'preview_contact_erasure', 'erase_contact_with_preview', 'save_privacy_policy', 'release_address_suppression', 'save_managed_mailbox_policy', 'save_mailbox_integration_grant', 'correct_participation_check_in'].includes(command.kind) && (context.actor.kind !== 'user'
     || !['owner', 'admin'].includes(context.authority.role))) {
     throw new CrmOperationsError('not_authorized', 'This reviewed operation requires a workspace owner or admin member.')
+  }
+  // A viewer enrolls their own legacy identity while signed in; no credential or agent can do it for them.
+  if (command.kind === 'enroll_erp_viewer' && (context.actor.kind !== 'user' || context.authority.integration || context.authority.viaCredentialId)) {
+    throw new CrmOperationsError('not_authorized', 'A viewer enrolls their own legacy identity while signed in to the workspace.')
   }
   if (context.actor.kind === 'integration_key' && context.authority.integration?.credentialId !== context.actor.credentialId) {
     throw new CrmOperationsError('not_authorized', 'Integration authority must come from its authenticated credential.')
@@ -841,6 +957,24 @@ export function assertCrmOperationsAuthority(
       grant_entitlement: 'crm.entitlements.write', update_entitlement: 'crm.entitlements.write',
       record_participation: 'crm.participation.write', update_participation: 'crm.participation.write',
       set_deal_pipeline_stage: 'crm.records.write',
+      save_reference_definition: 'crm.references.configure', import_business_references: 'crm.references.configure',
+      replace_business_reference: 'crm.references.configure', retire_business_reference: 'crm.references.configure',
+      assign_business_reference: 'crm.references.write',
+      save_seller_profile: 'crm.commercial.configure', accept_commercial_profile: 'crm.commercial.configure',
+      save_operation_definition: 'crm.commercial.configure', save_customer_account: 'crm.commercial.write',
+      prepare_commercial_document: 'crm.commercial.write', revise_commercial_preparation: 'crm.commercial.write',
+      mark_preparation_ready: 'crm.commercial.write', issue_invoice: 'crm.commercial.issue',
+      retry_invoice_issue: 'crm.commercial.issue', void_invoice: 'crm.commercial.issue',
+      save_change_request: 'crm.changes.write', submit_change_request: 'crm.changes.write',
+      withdraw_change_request: 'crm.changes.write', decide_change_request: 'crm.changes.review',
+      update_engagement_tracking: 'crm.engagements.write', commit_recurring_successors: 'crm.engagements.write',
+      set_commercial_values: 'crm.billing.write', create_billing_request: 'crm.billing.write',
+      cancel_billing_request: 'crm.billing.write', decide_billing_request: 'crm.billing.review',
+      record_external_invoice: 'crm.billing.write', correct_external_invoice_reference: 'crm.billing.write',
+      save_governance_policy: 'crm.catalog.configure', save_engagement_catalog: 'crm.catalog.configure',
+      stage_erp_import: 'crm.cutovers.configure', confirm_erp_import: 'crm.cutovers.configure',
+      prepare_erp_cutover: 'crm.cutovers.configure', commit_erp_cutover: 'crm.cutovers.configure',
+      record_projection_receipt: 'crm.projections.write',
     }
     const operation = operations[command.kind]
     if (!operation) throw new CrmOperationsError('not_authorized', 'This operation is not available to integration credentials.')

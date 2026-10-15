@@ -1,6 +1,6 @@
 import { AsyncLocalStorage } from 'node:async_hooks'
 import type { PoolClient } from 'pg'
-import type { WorkspaceFileCreateInput } from '@use-brian/core'
+import type { WorkspaceFileCreateInput,WorkspaceFile } from '@use-brian/core'
 
 type Renewal = (fileId: string) => Promise<void>
 type Admission = (client: PoolClient, actor: string, input: WorkspaceFileCreateInput) => Promise<void | Renewal>
@@ -19,4 +19,13 @@ export async function admitFileTransaction(client: PoolClient, actor: string, in
   return async fileId => {
     for (const renew of renewals) await renew(fileId)
   }
+}
+
+// A semantic erasure command pins versions and finishes its receipt in the
+// same app-role transaction as native File deletion. No transport can set it.
+type ErasureAdmission=(client:PoolClient,actor:string,file:WorkspaceFile)=>Promise<Renewal>
+const erasures=new AsyncLocalStorage<ErasureAdmission>()
+export function withFileErasureAdmission<T>(admission:ErasureAdmission,operation:()=>T):T{return erasures.run(admission,operation)}
+export async function admitFileErasure(client:PoolClient,actor:string,file:WorkspaceFile):Promise<Renewal>{
+ return erasures.getStore()?.(client,actor,file)??(async()=>{})
 }

@@ -144,6 +144,14 @@ export type BrainPrimitive =
    * coalesced per workspace. `rowId` is the job id, nothing else travels.
    */
   | 'office'
+  /**
+   * Saved research changed (features/research.md -> "UI"): an activity
+   * settled, a follow-up was recorded or relabelled, a lesson was decided or
+   * an improvement/comparison was recorded. Signal only (`rowId` = the
+   * activity, lesson or improvement id); every tab refetches through its own
+   * viewer-scoped read, so the signal never carries research content.
+   */
+  | 'research'
 
 /** Alias reflecting the widened, workspace-wide scope. */
 export type WorkspacePrimitive = BrainPrimitive

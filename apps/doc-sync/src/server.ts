@@ -50,10 +50,16 @@ import {
   maybeEnqueueBrainIngest,
   notifyPageUpdated,
   notifyOfficeCheckpoint,
-  storePageSnapshot,
   type SysQuery,
 } from './persistence.js'
 import { bridgeConnection } from './ws-bridge.js'
+import {
+  assertBriefDirection,
+  briefLayoutFor,
+  directionChangedByOps,
+  recoverBriefDocument,
+  storePageSnapshotGuarded,
+} from './brief-guard.js'
 import { createRunRegistry, type RunRegistry } from './run-registry.js'
 import { parseSyncDocumentName } from './document-router.js'
 import { loadOfficeUpdate, officeCanonicalSnapshotHash, officeSnapshotUpdate, readOfficeSuggestionStatus, replaceLiveOfficeSnapshot, storeOfficeSnapshot, verifyOfficeCommittedHead } from './office-collab.js'
@@ -237,9 +243,16 @@ const hocuspocus = new Hocuspocus({
   },
 
   async beforeSync(data) {
-    if (parseSyncDocumentName(data.documentName).kind !== 'page' || data.context?.service) return
+    const target = parseSyncDocumentName(data.documentName)
+    if (target.kind !== 'page' || data.context?.service) return
     assertDrawingProtocol({ doc: data.document, protocol: data.context?.drawingProtocol,
       type: data.type, update: data.payload, connection: data.connection })
+    // A bound Brief's Direction changes only through brief_publish: refuse the
+    // update before Hocuspocus integrates or broadcasts it (project-briefs.md).
+    if (data.type !== 0) {
+      assertBriefDirection({ doc: data.document, type: data.type, update: data.payload,
+        layout: await briefLayoutFor(target.id, sysQuery), connection: data.connection })
+    }
   },
 
   async onLoadDocument(data) {
@@ -309,11 +322,8 @@ const hocuspocus = new Hocuspocus({
       return
     }
     const pageId = target.id
-    const { page } = await storePageSnapshot({
-      pageId,
-      ydoc: data.document as unknown as Y.Doc,
-      query: sysQuery,
-    })
+    // Recovers a missed Brief publication notice (see brief-guard.ts).
+    const { page } = await storePageSnapshotGuarded({ pageId, ydoc: data.document as unknown as Y.Doc, query: sysQuery })
     // Drain the self-loop flag for this settle window BEFORE any early return, so
     // a system write is never left pending to mis-mark a later human edit.
     const wroteBySystem = pagesWithSystemWriteSinceStore.delete(pageId)
@@ -496,6 +506,15 @@ async function handleInternalApply(
     // session d98e2acd). Captured inside the SAME transaction as the apply so a
     // concurrent human edit can't slip between mutate and read.
     let snapshot: { page: unknown; title: string } = { page: { blocks: [] }, title: '' }
+    // A bound Brief's Direction is owner-governed: refuse an op batch that
+    // would change it before anything is applied or broadcast.
+    const briefLayout = await briefLayoutFor(pageId, sysQuery)
+    if (briefLayout && connection.document
+      && directionChangedByOps(connection.document as unknown as Y.Doc, ops, briefLayout)) {
+      res.writeHead(409, { 'Content-Type': 'application/json' })
+      res.end(JSON.stringify({ error: 'brief_direction_protected' }))
+      return
+    }
     await connection.transact((doc) => {
       const yDoc = doc as unknown as import('yjs').Doc
       result = applyOpsToYDoc(yDoc, ops)
@@ -760,6 +779,40 @@ async function handleInternalRun(
   res.end(JSON.stringify({ ok: true }))
 }
 
+/**
+ * `/internal/brief-sync` { pageId }: after `brief_publish` commits, the API
+ * asks the live holder to merge the committed persisted state so connected
+ * tabs see the accepted Direction now. Idempotent; a page with no loaded
+ * document has nothing to merge (it loads the committed state on open).
+ */
+async function handleInternalBriefSync(req: IncomingMessage, res: ServerResponse): Promise<void> {
+  if (!isInternalAuthorized(req)) {
+    res.writeHead(401)
+    res.end()
+    return
+  }
+  let payload: { pageId?: unknown }
+  try {
+    payload = (await readJsonBody(req)) as typeof payload
+  } catch {
+    res.writeHead(400, { 'Content-Type': 'application/json' })
+    res.end(JSON.stringify({ error: 'invalid json' }))
+    return
+  }
+  const pageId = OfficeUuidSchema.safeParse(payload.pageId)
+  if (!pageId.success) {
+    res.writeHead(400, { 'Content-Type': 'application/json' })
+    res.end(JSON.stringify({ error: 'pageId required' }))
+    return
+  }
+  const loaded = hocuspocus.documents.get(pageId.data)
+  const merged = loaded
+    ? await recoverBriefDocument({ pageId: pageId.data, ydoc: loaded as unknown as Y.Doc, query: sysQuery })
+    : false
+  res.writeHead(200, { 'Content-Type': 'application/json' })
+  res.end(JSON.stringify({ merged, loaded: !!loaded }))
+}
+
 // Plain HTTP server for the Cloud Run health probe, the internal AI apply
 // endpoint, and the WS upgrade to Hocuspocus.
 const httpServer = createServer((req: IncomingMessage, res: ServerResponse) => {
@@ -773,6 +826,14 @@ const httpServer = createServer((req: IncomingMessage, res: ServerResponse) => {
       console.error('[doc-sync] /internal/apply error', err)
       if (!res.headersSent) res.writeHead(500, { 'Content-Type': 'application/json' })
       res.end(JSON.stringify({ error: 'apply failed' }))
+    })
+    return
+  }
+  if (req.method === 'POST' && req.url === '/internal/brief-sync') {
+    handleInternalBriefSync(req, res).catch((err) => {
+      console.error('[doc-sync] /internal/brief-sync error', err)
+      if (!res.headersSent) res.writeHead(500, { 'Content-Type': 'application/json' })
+      res.end(JSON.stringify({ error: 'brief sync failed' }))
     })
     return
   }

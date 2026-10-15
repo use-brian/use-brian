@@ -1,3 +1,6 @@
+import {discardOwnPendingArchives} from '../db/engineering-history-store.js'
+import {EngineeringHistoryError} from '../engineering-history/contracts.js'
+import {notifyWorkspaceChange} from '../brain-stream/notify.js'
 /**
  * Workspace-admin CRUD for reusable assistant capture profiles.
  * [COMP:api/programmatic-capture]
@@ -17,6 +20,7 @@ const Uuid = z.string().uuid()
 
 const ProfileBody = z.object({
   name: z.string().trim().min(1).max(120),
+  processingMode: z.enum(['extract','archive_only']).optional(),
   partitionBy: z.enum(['connection', 'user', 'session', 'subject']),
   enabled: z.boolean().default(true),
   destination: z.union([z.object({kind:z.literal('department'),departmentId:Uuid,projectId:Uuid.optional()}).strict(),z.object({kind:z.literal('general')}).strict()]).nullable().optional(),
@@ -98,8 +102,10 @@ type Options = {
 
 export function programmaticCaptureRoutes(opts: Options): Router {
   const router = Router({ mergeParams: true })
+  router.use((req,res,next)=>{const workspaceId=String(req.params.workspaceId??'');res.once('finish',()=>{if(!['GET','HEAD','OPTIONS'].includes(req.method)&&res.statusCode<300)notifyWorkspaceChange(workspaceId,'workspace_config','update')});next()})
   function admissionError(err: unknown,res:Response):boolean {
     if(err instanceof WorkspaceAccessError){res.status(err.status).json({error:err.code});return true}
+    if(err instanceof Error&&err.message==='capture_pending_archive_review_required'){res.status(409).json({error:err.message});return true}
     if(err instanceof Error && /^capture_(configuration|destination|binding|ready)_/.test(err.message)) {
       res.status(409).json({error:'Capture configuration unavailable'});return true
     }
@@ -132,6 +138,15 @@ export function programmaticCaptureRoutes(opts: Options): Router {
     const value = req.params[name]
     return typeof value === 'string' && Uuid.safeParse(value).success ? value : null
   }
+
+  router.delete('/pending-archives',async(req:Request,res:Response)=>{
+    const workspaceId=String(req.params.workspaceId??'')
+    if(!req.userId)return void res.status(401).json({error:'Unauthorized'})
+    if(!Uuid.safeParse(workspaceId).success)return void res.status(400).json({error:'Invalid workspace id'})
+    const input=z.object({idempotencyKey:Uuid}).strict().safeParse(req.body);if(!input.success)return void res.status(400).json({error:'Invalid input'})
+    try{res.json(await discardOwnPendingArchives(workspaceId,req.userId,input.data.idempotencyKey))}
+    catch(error){if(admissionError(error,res))return;res.status(error instanceof EngineeringHistoryError?error.status:503).json({error:error instanceof EngineeringHistoryError?error.code:'capture_unavailable'})}
+  })
 
   router.get('/', async (req, res) => {
     const workspaceId = await gate(req, res)
@@ -190,9 +205,14 @@ export function programmaticCaptureRoutes(opts: Options): Router {
     if (!workspaceId) return
     const profileId = idParam(req, 'profileId')
     if (!profileId) return void res.status(404).json({ error: 'Capture profile not found' })
+    try {
     const deleted = await opts.store.deleteProfile(req.userId!, workspaceId, profileId)
     if (!deleted) return void res.status(404).json({ error: 'Capture profile not found' })
     res.status(204).end()
+    } catch (error) {
+      if(admissionError(error,res))return
+      res.status(503).json({error:'capture_configuration_unavailable'})
+    }
   })
 
   router.post('/:profileId/rules', async (req, res) => {
@@ -252,11 +272,16 @@ export function programmaticCaptureRoutes(opts: Options): Router {
     const profileId = idParam(req, 'profileId')
     const ruleId = idParam(req, 'ruleId')
     if (!profileId || !ruleId) return void res.status(404).json({ error: 'Capture rule not found' })
+    try {
     const deleted = await opts.store.deleteRule({
       actingUserId: req.userId!, workspaceId, profileId, ruleId,
     })
     if (!deleted) return void res.status(404).json({ error: 'Capture rule not found' })
     res.status(204).end()
+    } catch (error) {
+      if(admissionError(error,res))return
+      res.status(503).json({error:'capture_configuration_unavailable'})
+    }
   })
 
   router.put('/assistants/:assistantId/default', async (req, res) => {

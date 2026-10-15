@@ -294,7 +294,7 @@ export async function readDecisionEvidence(
       `SELECT rule, status, semantic_key AS "semanticKey",
               applies_to_user_id AS "appliesToUserId"
          FROM assistant_playbook_rules
-        WHERE assistant_id = $1
+        WHERE assistant_id = $1 AND applicability_kind <> 'research'
           AND (applies_to_user_id IS NULL OR applies_to_user_id = $2)
         ORDER BY created_at DESC
         LIMIT 100`,
@@ -345,7 +345,7 @@ export async function readFeedDecisionEvidence(params: { assistantId: string; ac
     grouped.set(row.sessionId, { eventIds: [row.id], sourceObjectId: row.sessionId, sourceKind: 'feed_post', applicabilityKind: 'feed', applicabilityKey: key, occurredAt: row.createdAt, sensitivity: row.scope.sensitivity, reason: row.reason })
   }
   const evidence = [...grouped.values()].slice(0, 30)
-  const corpus = (await queryable.query<DecisionPlaybookCorpusEntry>(`SELECT rule,status,semantic_key AS "semanticKey",applies_to_user_id AS "appliesToUserId" FROM assistant_playbook_rules WHERE assistant_id=$1 AND (applies_to_user_id IS NULL OR applies_to_user_id=$2) ORDER BY created_at DESC LIMIT 100`, [params.assistantId, params.actorUserId])).rows
+  const corpus = (await queryable.query<DecisionPlaybookCorpusEntry>(`SELECT rule,status,semantic_key AS "semanticKey",applies_to_user_id AS "appliesToUserId" FROM assistant_playbook_rules WHERE assistant_id=$1 AND applicability_kind <> 'research' AND (applies_to_user_id IS NULL OR applies_to_user_id=$2) ORDER BY created_at DESC LIMIT 100`, [params.assistantId, params.actorUserId])).rows
   const eligible = Number(rows[0]?.total ?? 0); const retained = evidence.reduce((n, item) => n + item.eventIds.length, 0)
   return { assistantId: params.assistantId, actorUserId: params.actorUserId, evidence, corpus, newestLinkedEvidenceAt: null, hasNewEvidence: evidence.length > 0, coverage: { eligible, retained, omitted: Math.max(0, eligible - retained) } }
 }

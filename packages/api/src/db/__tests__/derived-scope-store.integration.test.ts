@@ -7,7 +7,7 @@ import { getPool, getAppPool } from '../client.js'
 import { createDbMemoryStore } from '../memory-store.js'
 import { runLightConsolidation, runREMConsolidation, runDeepConsolidation } from '@use-brian/core'
 import { getSoulContext, writeScopedSummary } from '../scoped-summary-store.js'
-import { addSessionMessage } from '../sessions.js'
+import { addSessionMessage, setSessionMessageChannelId } from '../sessions.js'
 
 const { assertLocalFixture } = await import(new URL('../../../../../scripts/crm/local-fixture.mjs', import.meta.url).href)
 await assertLocalFixture()
@@ -326,7 +326,9 @@ describe('[COMP:api/derived-scope-store] actual memory writes and source races',
         const old = (await pool.query('SELECT valid_to,superseded_by FROM memories WHERE id=$1',[previous])).rows[0]
         expect(old.valid_to).not.toBeNull()
         expect(old.superseded_by).toBe(id)
-        expect(await getMemoryByIdSystem(dependent!.id)).toBeNull()
+        // Retiring the predecessor is not a source change: a memory that read
+        // it keeps its version and stays visible.
+        expect(await getMemoryByIdSystem(dependent!.id)).toMatchObject({ scopeHeld: false })
       }
       previous = id
       dependent = await f.derive([current!])
@@ -358,7 +360,7 @@ describe('[COMP:api/derived-scope-store] actual memory writes and source races',
     expect((await getSoulContext(ctx)).content).toBe('Next healthy summary')
   })
 
-  it.each(['previous output', 'dependent'] as const)('rolls back summary replacement citing the %s', async sourceKind => {
+  it('rolls back summary replacement citing the previous output', async () => {
     const f = await fixture(), input = await f.create()
     const write = (sources: ScopeSource[], content: string) => writeScopedSummary({
       assistantId: f.assistantId,userId: f.userId,kind: 'soul',slotKey: 'shared',content,
@@ -367,13 +369,76 @@ describe('[COMP:api/derived-scope-store] actual memory writes and source races',
     await write([asSource(input)],'Original summary')
     const id = (await pool.query('SELECT memory_id FROM memory_summary_slots WHERE workspace_id=$1',[f.workspaceId])).rows[0].memory_id
     const summary = await getMemoryByIdSystem(id), dependent = await f.derive([summary!])
-    const source = sourceKind === 'previous output' ? summary! : dependent
-    await expect(write([asSource(source)],'Invalid circular synthesis')).rejects.toThrow('scope_source_changed')
+    await expect(write([asSource(summary!)],'Invalid circular synthesis')).rejects.toThrow('scope_source_changed')
     expect((await pool.query('SELECT memory_id FROM memory_summary_slots WHERE workspace_id=$1',[f.workspaceId])).rows[0].memory_id).toBe(id)
     expect(await getMemoryByIdSystem(id)).toMatchObject({ detail: 'Original summary',validTo: null,scopeHeld: false })
     expect(await getMemoryByIdSystem(dependent.id)).toMatchObject({ scopeHeld: false })
     expect((await pool.query(`SELECT count(*)::int n FROM memories WHERE workspace_id=$1
       AND tags @> ARRAY['consolidation:soul']::text[]`,[f.workspaceId])).rows[0].n).toBe(1)
+  })
+
+  it('regenerating a summary never holds memories saved from turns that read it', async () => {
+    // Every turn notes the SOUL evidence, so every saved memory derives from
+    // the summary current at that time. Regeneration keeps the same slot
+    // scope key and only retires the old row, which is not a source change.
+    const f = await fixture(), input = await f.create({ compartments: ['finance'] })
+    const write = (sources: ScopeSource[], content: string) => writeScopedSummary({
+      assistantId: f.assistantId,userId: f.userId,kind: 'soul',slotKey: 'shared',content,
+      derivation: { producer: 'consolidation:soul',sources },
+    })
+    const slot = async () => (await pool.query('SELECT memory_id FROM memory_summary_slots WHERE workspace_id=$1',[f.workspaceId])).rows[0].memory_id as string
+    await write([asSource(input)],'First summary')
+    const first = (await getMemoryByIdSystem(await slot()))!
+    const saved = await f.derive([first,input])
+    await write([asSource(input)],'Second summary')
+    expect(await getMemoryByIdSystem(saved.id)).toMatchObject({ scopeHeld: false,validTo: null })
+    expect((await pool.query(`SELECT count(*)::int n FROM scope_resource_states
+      WHERE workspace_id=$1 AND resource_kind='memory' AND resource_id=$2`,[f.workspaceId,saved.id])).rows[0].n).toBe(0)
+    // A memory that read the retired summary can feed the next synthesis.
+    await write([asSource(input),asSource(saved)],'Third summary')
+    expect((await getSoulContext({ workspaceId: f.workspaceId,userId: f.userId,assistantId: f.assistantId,
+      assistantKind: 'standard' as const,clearance: 'confidential' as const,compartments: null })).content).toBe('Third summary')
+    expect(await getMemoryByIdSystem(saved.id)).toMatchObject({ scopeHeld: false })
+    // A real upstream change still holds the whole lineage.
+    await pool.query('UPDATE memories SET summary=$2 WHERE id=$1',[input.id,'Changed finance source'])
+    expect(await getMemoryByIdSystem(saved.id)).toBeNull()
+    expect((await pool.query(`SELECT holding_reason FROM scope_resource_states
+      WHERE workspace_id=$1 AND resource_kind='memory' AND resource_id=$2`,[f.workspaceId,saved.id])).rows)
+      .toEqual([{ holding_reason: 'source_changed' }])
+  })
+
+  it('a channel delivery stamp is bookkeeping, a content edit is a source change', async () => {
+    const f = await fixture(), sessionId = randomUUID()
+    await pool.query(`INSERT INTO sessions(id,assistant_id,user_id,channel_type,channel_id)
+      VALUES($1::uuid,$2,$3,'telegram',$1::uuid::text)`, [sessionId,f.assistantId,f.userId])
+    const input = await f.create({ userId: null,compartments: ['finance'] })
+    await pool.query('UPDATE memories SET assistant_id=NULL WHERE id=$1', [input.id])
+    const inputSource = (await pool.query('SELECT read_scope_source($1,$2,$3) AS source',
+      [f.workspaceId,'memory',input.id])).rows[0].source as ScopeSource
+    const message = await addSessionMessage({ sessionId, role: 'user', content: 'Channel question',
+      derivation: { producer: 'turn:input', sources: [inputSource] } })
+    const readMessage = async () => (await pool.query('SELECT read_scope_source($1,$2,$3) AS source',
+      [f.workspaceId,'session_message',message.id])).rows[0].source as ScopeSource
+    const source = await readMessage()
+    const reply = await addSessionMessage({ sessionId, role: 'assistant', content: 'Channel answer',
+      derivation: { producer: 'turn:output', sources: [source] } })
+    const saved = await f.create({ userId: null,summary: 'Saved during the channel turn',
+      derivation: { producer: 'tool:saveMemory:create',sources: [source] } })
+    await setSessionMessageChannelId(message.id,'channel-msg-1')
+    await setSessionMessageChannelId(reply.id,'channel-msg-2')
+    expect((await readMessage()).version).toBe(source.version)
+    expect((await pool.query('SELECT scope_held FROM session_messages WHERE id=$1',[reply.id])).rows[0].scope_held).toBe(false)
+    expect(await getMemoryByIdSystem(saved.id)).toMatchObject({ scopeHeld: false })
+    // Holding a message is not a version change either.
+    await pool.query('UPDATE session_messages SET scope_held=true WHERE id=$1',[message.id])
+    expect((await pool.query('SELECT scope_version::text v FROM session_messages WHERE id=$1',[message.id])).rows[0].v).toBe(source.version)
+    // ...but a direct hold still holds what derived from the message.
+    expect(await getMemoryByIdSystem(saved.id)).toBeNull()
+    expect((await pool.query('SELECT scope_held FROM session_messages WHERE id=$1',[reply.id])).rows[0].scope_held).toBe(true)
+    // A content edit still advances the version.
+    await pool.query(`UPDATE session_messages SET content='"Edited question"'::jsonb WHERE id=$1`,[message.id])
+    expect(Number((await pool.query('SELECT scope_version FROM session_messages WHERE id=$1',[message.id])).rows[0].scope_version))
+      .toBe(Number(source.version) + 1)
   })
 
   it('A08 a scoped summary slot cannot resurrect held content and can rebuild from current evidence', async () => {

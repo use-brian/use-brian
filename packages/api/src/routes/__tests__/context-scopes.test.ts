@@ -65,7 +65,7 @@ function makeApp(role: 'owner' | 'admin' | 'member' | null = 'owner', opts: { de
       readAll: false,
       readBundle: [`team:${GID}`],
     }),
-    getProjectDetail: vi.fn().mockResolvedValue({id:GID,workspaceId:WID}),
+    getProjectDetail: vi.fn().mockImplementation(async (_u: string, _w: string, id: string) => ({ id, workspaceId: WID })),
     getProjectSystem: vi.fn().mockResolvedValue(null),
     updateProject: vi.fn().mockResolvedValue({
       id: '55555555-5555-4555-8555-555555555555',
@@ -93,6 +93,10 @@ function makeApp(role: 'owner' | 'admin' | 'member' | null = 'owner', opts: { de
     reclassify: vi.fn(),
     getRequirements: vi.fn().mockResolvedValue(null),
   }
+  const projectSharedStore = {
+    summaries: vi.fn().mockResolvedValue([]),
+    capability: vi.fn().mockResolvedValue({ enabled: false, canConfigure: false }),
+  }
   const getReadiness=vi.fn().mockResolvedValue(blocked)
   const getDepartmentalReadiness=vi.fn().mockResolvedValue({ready:false,enforcementVersion:1,requiredEnforcementVersion:2,missingCapabilities:['replay_delivery']})
   const executeAccessCommand=vi.fn().mockResolvedValue({appliedCommand:{subjectId:GID}})
@@ -112,6 +116,7 @@ function makeApp(role: 'owner' | 'admin' | 'member' | null = 'owner', opts: { de
     connectorInstanceStore: connectorInstanceStore as never,
     connectorGrantStore: connectorGrantStore as never,
     reclassificationStore: reclassificationStore as never,
+    projectSharedStore: projectSharedStore as never,
   }))
   return {
     app,

@@ -290,6 +290,9 @@ type ExternalClientWorkflowPrincipal = {
 };
 
 export type WorkflowDefinition = {
+  defaultExecutor?: {kind:'person';memberId:string}|{kind:'assistant';assistantId:string};
+  taskIntake?: {version:1;home?:{kind:'department'|'project';id:string};permittedActions:string[];requiredAccounts:string[];
+    blueprint:{outcome:string;description?:string;completionCheck:string;inputs:{key:string;label:string;path:string;required:boolean}[]}};
   /**
    * Scalar = one entry step; ARRAY = trigger fan-out — every listed step
    * starts in parallel when the trigger fires (distinct, max 5).
@@ -369,6 +372,7 @@ export type WorkflowTriggerJob = {
 };
 
 export type WorkflowFull = {
+  taskIntakeRevision?:number;
   id: string;
   /** Saved before authority capture: cannot run until permissions are confirmed. */
   authorityReviewRequired?: boolean;

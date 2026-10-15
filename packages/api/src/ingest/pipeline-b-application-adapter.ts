@@ -1,5 +1,9 @@
 /** Transaction-bound interpreter for frozen Pipeline B commands. */
 import type pg from 'pg'
+import { createHash } from 'node:crypto'
+import { createCrmOperationsService } from '../crm-operations/service.js'
+import { createDbCrmOperationsStore } from '../db/crm-operations-store.js'
+import { runWithAgentAccess } from '../db/agent-access-context.js'
 import {
   DROPPED_CANDIDATE_TTL_DAYS,
   admitTask,
@@ -135,6 +139,30 @@ export function createPipelineBApplicationMutationPort(): ExtractionCandidateMut
     const client = transaction(transactionContext)
     const payload = command(candidate.payload)
     switch (payload.command) {
+      case 'delivery_commitment': {
+        const member=(await client.query<{role:'owner'|'admin'|'member'}>('SELECT role FROM workspace_members WHERE workspace_id=$1 AND user_id=$2 FOR SHARE',
+          [payload.workspaceId,payload.createdByUserId])).rows[0]
+        if(!member) return {disposition:'held',safeCode:'delivery_source_unavailable',targetRecordId:null}
+        const digest=createHash('sha256').update(`${payload.episodeId}:${candidate.candidateId}:${candidate.payloadHash}`).digest('hex')
+        const operationId=`${digest.slice(0,8)}-${digest.slice(8,12)}-4${digest.slice(13,16)}-8${digest.slice(17,20)}-${digest.slice(20,32)}`
+        try {
+          const saved=await runWithAgentAccess({workspaceId:payload.workspaceId,userId:payload.createdByUserId,
+            clearance:payload.sensitivity,compartments:payload.compartments,mutationCompartments:payload.compartments,
+            projectIds:payload.projectIds,visibilityAssistantIds:payload.assistantId?[payload.assistantId]:null},
+            ()=>createCrmOperationsService(createDbCrmOperationsStore(undefined,client)).execute({workspaceId:payload.workspaceId,
+              actor:{kind:'import',jobId:payload.episodeId,userId:payload.createdByUserId},
+              authority:{role:member.role,canWrite:true,canConfigure:false,trustedIdentitySources:[]}},
+              {kind:'record_delivery_recognition',operationId,proposal:payload.proposal}))
+          return {targetRecordId:saved.record.id as string}
+        } catch(error) {
+          // A typed unavailable/invalid proposal is a terminal gap; the application
+          // ledger freezes that result and never renews a model/read allowance.
+          if(error && typeof error==='object' && 'code' in error && ['not_found','not_authorized','invalid_input','idempotency_conflict'].includes(String(error.code))) {
+            return {disposition:'held',safeCode:'delivery_source_unavailable',targetRecordId:null}
+          }
+          throw error
+        }
+      }
       case 'entity':
         return { targetRecordId: await applyEntity(payload, client) }
       case 'memory':

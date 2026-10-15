@@ -1,6 +1,6 @@
 import { describe, expect, it, vi } from 'vitest'
 import { bindScopeSource, type AccessCeiling, type ScopeEvidence } from '@use-brian/core'
-import { filterChannelHistoryForAudience } from '../channel-pipeline.js'
+import { countsAsGroupAudienceEvidence, filterChannelHistoryForAudience } from '../channel-pipeline.js'
 
 const ceiling: AccessCeiling = {
   workspaceId: 'workspace-1',
@@ -61,5 +61,13 @@ describe('[COMP:api/delivery-authority] provider-visible channel history', () =>
       group: false,
       ceiling,
     })).resolves.toEqual(rows)
+  })
+
+  // A group row with a provider id was already shown to the group; its stamp
+  // is the room's read floor, not something the turn read (2026-10-13).
+  it('does not count a group row the group already saw as evidence', () => {
+    expect(countsAsGroupAudienceEvidence({ channelMessageId: '4417' }, true)).toBe(false)
+    expect(countsAsGroupAudienceEvidence({ channelMessageId: null }, true)).toBe(true)
+    expect(countsAsGroupAudienceEvidence({ channelMessageId: '4417' }, false)).toBe(true)
   })
 })

@@ -14,6 +14,10 @@ export async function projectionLifetime(client: PoolClient, workspaceId: string
       SELECT request_expires_at FROM workspace_access_requests r
         WHERE r.workspace_id=$1 AND r.status='pending' AND r.request_expires_at>now()
           AND can_view_department_request(r.id,$2)
+      UNION ALL
+      -- A shared Project membership that expires ends the projection with it.
+      SELECT e.expires_at FROM project_shared_members e
+        WHERE e.workspace_id=$1 AND e.user_id=$2 AND e.expires_at>now()
     ) SELECT greatest(0,floor(extract(epoch FROM (min(boundary)-clock_timestamp()))*1000))::integer AS ttl
       FROM boundaries`, [workspaceId,userId])
   return result.rows[0].ttl

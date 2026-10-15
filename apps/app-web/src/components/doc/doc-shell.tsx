@@ -80,8 +80,9 @@ import {
   type ViewMetadata,
 } from "@/lib/api/views";
 import { getUserInfo, subscribeUserInfo } from "@/lib/user";
-import { loadSurfaceCache, readSurfaceCache } from "@/lib/surface-cache";
-import { docPageCacheKey } from "@/lib/surface-prefetch";
+import { loadSurfaceCache, readSurfaceCache, useCachedResource } from "@/lib/surface-cache";
+import { listContextProjects } from "@/lib/api/context-scopes";
+import { docPageCacheKey, surfaceDataKey } from "@/lib/surface-prefetch";
 import { buildBreadcrumb } from "@/lib/sidebar-tree";
 import { useT, format } from "@/lib/i18n/client";
 import { useWorkspaceContext } from "@/lib/workspace-context";
@@ -113,7 +114,7 @@ import { EmptyPageLanding } from "./empty-page-landing";
 import { TemplateGallery } from "./template-gallery";
 import { SaveAsTemplateDialog, type SaveAsTemplateInput } from "./save-as-template-dialog";
 import { templateExtractionFromBlocks } from "@/lib/blueprints";
-import { SuggestedView } from "./suggested-view";
+import { suggestedTransitionTarget } from "@/lib/suggested-landing";
 import { OperatorTopbar } from "@/components/operator/operator-topbar";
 import { useActiveOperatorApp } from "./workspace-chrome";
 import {
@@ -155,9 +156,12 @@ const CREATED_COMMIT_TEMPLATE_MS = 15_000;
 export function DocShell({ workspaceId, assistantId }: ShellProps) {
   // `assistantId` is forwarded to `<CollabPageEditor>` (the centre pane). The
   // assistant chat dock is mounted in `WorkspaceChrome`, not here.
-  const t = useT().docPage;
+  const copy = useT();
+  const t = copy.docPage;
   const workspace = useWorkspaceContext();
   const router = useRouter();
+  // A shared Project page's container is its Project audience, never "Private".
+  const projectRegistry = useCachedResource(surfaceDataKey("projects", workspaceId), () => listContextProjects(workspaceId, true));
   const pathname = usePathname();
   const searchParams = useSearchParams();
   // The active page id is the canonical `/p/<pageId>` path segment — NOT a
@@ -183,6 +187,17 @@ export function DocShell({ workspaceId, assistantId }: ShellProps) {
     : urlPanel
       ? panelTabEntry(urlPanel)
       : urlViewId;
+  // The Suggested briefing is retired (home-dock.md -> "Chat-first
+  // transition"). An old `/p?suggested=1` link moves to the Chat work entry;
+  // a URL that also addresses a Page keeps that target and only drops the
+  // flag. Nothing else (Office documents, tasks, panels) is ever redirected.
+  useEffect(() => {
+    if (!suggestedOpen) return;
+    const target = suggestedTransitionTarget({
+      workspaceId, pathname, search: searchParams?.toString() ?? "", pageAddressed: Boolean(urlViewId),
+    });
+    if (target) router.replace(target);
+  }, [suggestedOpen, urlViewId, pathname, searchParams, router, workspaceId]);
 
   // Sidebar lists + page-mutation handlers live in the hoisted provider
   // (`DocSidebarDataProvider`, mounted by the workspace layout). The centre
@@ -670,20 +685,6 @@ export function DocShell({ workspaceId, assistantId }: ShellProps) {
     }
   }
 
-  // Open a panel (Approvals / Autopilot) in a NEW tab and focus it — the home
-  // dock's needs-you cards call this. Deduped: if a tab already shows the
-  // panel, focus THAT tab instead of spawning a duplicate. The tabs → URL
-  // effect then mirrors the active entry to `/p?panel=<id>`, and the render
-  // branch below paints the panel in the centre pane.
-  const openPanelInNewTab = useCallback((panel: PanelId) => {
-    const entry = panelTabEntry(panel);
-    setTabsState((s) => {
-      const existing = s.tabs.find((tb) => tabPageId(tb) === entry);
-      if (existing) return switchTab(s, existing.key);
-      return openPage(newTab(s), entry);
-    });
-  }, []);
-
   // ── Active-page bridge ─────────────────────────────────────────────────
   // Register the centre-pane handles the hoisted provider's mutation handlers
   // call through (optimistic `setActiveView`, tab-history scrub, navigation,
@@ -1166,18 +1167,9 @@ export function DocShell({ workspaceId, assistantId }: ShellProps) {
           </div>
         ) : null}
         {suggestedOpen && !activeError && (
-          <div className="flex-1 min-h-0 overflow-y-auto">
-            {/* The explicit Home briefing. Its slim composer starts a fresh
-                Personal conversation in Chat; needs-you cards open doc-shell
-                panels without making this the Page app's default. Spec:
-                docs/architecture/features/home-dock.md. */}
-            <SuggestedView
-              workspaceId={workspaceId}
-              assistantId={assistantId}
-              userName={user.name}
-              onOpenPanel={openPanelInNewTab}
-            />
-          </div>
+          // Transitional frame while the retired briefing URL is replaced
+          // (see the transition effect above); nothing renders here.
+          <div className="flex-1 min-h-0" aria-busy="true" />
         )}
         {!suggestedOpen && !urlPanel && !urlViewId && !activeError && (
           <div className="flex-1 min-h-0 overflow-y-auto">
@@ -1215,7 +1207,11 @@ export function DocShell({ workspaceId, assistantId }: ShellProps) {
                 view={pageView}
                 breadcrumb={breadcrumb}
                 teamspace={
-                  pageView.teamspaceId === null
+                  pageView.sharedProjectId
+                    ? { name: format(copy.contextScope.sharedProjects.pageAudience, {
+                        name: projectRegistry.data?.find((p) => p.id === pageView.sharedProjectId)?.name ?? copy.contextScope.sharedProjects.badge }),
+                        icon: projectRegistry.data?.find((p) => p.id === pageView.sharedProjectId)?.icon ?? null }
+                  : pageView.teamspaceId === null
                     ? null
                     : sidebar.teamspaces.find(
                         (teamspace) => teamspace.id === pageView.teamspaceId,

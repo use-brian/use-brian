@@ -34,6 +34,38 @@ export type ContextProject = {
   members?: Array<{ userId: string; role: "lead" | "member"; name: string | null; email: string | null }>;
   assistantIds?: string[];
   aggregates?: Record<string, number>;
+  /** Shared Project summary (project-shared-spaces.md); null for a legacy focus-only Project. */
+  shared?: ProjectSharedSummary | ProjectRoster | null;
+};
+
+/** The caller's role in a shared Project; `oversight` is the workspace owner's read-only access (D27). */
+export type ProjectSharedRole = "owner" | "participant" | "oversight";
+
+export type ProjectSharedSummary = {
+  projectId: string;
+  status: "active" | "quarantined";
+  revision: number;
+  myRole: ProjectSharedRole | null;
+};
+
+export type ProjectPrincipal = { kind: "user" | "assistant"; id: string };
+
+export type ProjectRoster = ProjectSharedSummary & {
+  origin: "created" | "converted";
+  members: Array<{ principal: ProjectPrincipal; name: string | null; email: string | null; isOwner: boolean; expiresAt: string | null; origin: string }>;
+  oversight: Array<{ userId: string; name: string | null; isMember: boolean }>;
+};
+
+export type ProjectConversionPreview = {
+  projectId: string;
+  projectName: string;
+  ownerUserId: string;
+  userIds: string[];
+  assistantIds: string[];
+  legacyParticipation: { userIds: string[]; assistantIds: string[] };
+  linkedMaterial: { tasks: number; pages: number; files: number; chats: number };
+  relabelled: 0;
+  requestHash: string;
 };
 
 export type ContextReadiness = {
@@ -108,7 +140,9 @@ export async function getContextProject(
 
 export async function createContextProject(
   workspaceId: string,
-  input: { name: string; description?: string | null; icon?: string | null },
+  input: { name: string; description?: string | null; icon?: string | null;
+    /** Shared spaces: the visible People/Assistants selection (D20/D21). */
+    participants?: { userIds: string[]; assistantIds: string[] } },
 ): Promise<ContextProject> {
   const body = await json<{ project: ContextProject }>(
     `/api/workspaces/${encodeURIComponent(workspaceId)}/projects`,
@@ -255,4 +289,52 @@ export type ProjectContentPage = {
 export function getProjectContent(workspaceId: string, projectId: string, view: ProjectContentView, q: string, offset: number) {
   const query = new URLSearchParams({view,q,offset:String(offset)});
   return json<ProjectContentPage>(`/api/workspaces/${encodeURIComponent(workspaceId)}/projects/${encodeURIComponent(projectId)}/content?${query}`);
+}
+
+// ── Shared Project spaces (project-shared-spaces.md -> "Canonical commands") ──
+// One store backs these routes and Brian's manageProjectAccess tool.
+
+const sharedBase = (workspaceId: string, projectId: string) =>
+  `/api/workspaces/${encodeURIComponent(workspaceId)}/projects/${encodeURIComponent(projectId)}/shared`;
+const send = (method: string, body: unknown): RequestInit =>
+  ({ method, headers: { "Content-Type": "application/json" }, body: JSON.stringify(body) });
+
+export async function getProjectSharedCapability(workspaceId: string): Promise<{ enabled: boolean; canConfigure: boolean }> {
+  return json(`/api/workspaces/${encodeURIComponent(workspaceId)}/project-shared/capability`);
+}
+
+export async function setProjectSharedCapability(workspaceId: string, enabled: boolean): Promise<{ enabled: boolean }> {
+  return json(`/api/workspaces/${encodeURIComponent(workspaceId)}/project-shared/capability`, send("PUT", { enabled }));
+}
+
+/** Add a participant, or change their expiry. No clearance choice (D22). */
+export async function setProjectParticipant(workspaceId: string, projectId: string, principal: ProjectPrincipal, expectedRevision?: number): Promise<{ revision: number }> {
+  return json(`${sharedBase(workspaceId, projectId)}/members`, send("PUT", { principal, ...(expectedRevision ? { expectedRevision } : {}) }));
+}
+
+export async function removeProjectParticipant(workspaceId: string, projectId: string, principal: ProjectPrincipal, expectedRevision?: number): Promise<{ revision: number }> {
+  return json(`${sharedBase(workspaceId, projectId)}/members`, send("DELETE", { principal, ...(expectedRevision ? { expectedRevision } : {}) }));
+}
+
+export async function setProjectOwner(workspaceId: string, projectId: string, userId: string, owner: boolean, expectedRevision?: number): Promise<{ revision: number }> {
+  return json(`${sharedBase(workspaceId, projectId)}/owners`, send(owner ? "POST" : "DELETE", { userId, ...(expectedRevision ? { expectedRevision } : {}) }));
+}
+
+export async function transferProjectOwnership(workspaceId: string, projectId: string, userId: string, expectedRevision?: number): Promise<{ revision: number }> {
+  return json(`${sharedBase(workspaceId, projectId)}/transfer`, send("POST", { userId, ...(expectedRevision ? { expectedRevision } : {}) }));
+}
+
+/** D26: the workspace owner adds an owner (default: themself) at any time; audited. */
+export async function recoverProjectOwnership(workspaceId: string, projectId: string, input: { targetUserId?: string | null; reason: string; expectedRevision?: number }): Promise<{ revision: number }> {
+  return json(`${sharedBase(workspaceId, projectId)}/recover`, send("POST", input));
+}
+
+export async function previewProjectConversion(workspaceId: string, projectId: string,
+  input: { ownerUserId?: string | null; userIds: string[]; assistantIds: string[] }): Promise<ProjectConversionPreview> {
+  return (await json<{ preview: ProjectConversionPreview }>(`${sharedBase(workspaceId, projectId)}/convert`, send("POST", { mode: "preview", ...input }))).preview;
+}
+
+export async function applyProjectConversion(workspaceId: string, projectId: string,
+  input: { ownerUserId?: string | null; userIds: string[]; assistantIds: string[]; idempotencyKey: string; requestHash: string }): Promise<{ replayed: boolean }> {
+  return (await json<{ receipt: { replayed: boolean } }>(`${sharedBase(workspaceId, projectId)}/convert`, send("POST", { mode: "apply", ...input }))).receipt;
 }

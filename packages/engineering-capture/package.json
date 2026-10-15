@@ -1,0 +1,7 @@
+{
+ "name":"@use-brian/engineering-capture","version":"0.1.0","type":"module","description":"Opted-in archive-only engineering history hooks for Brian MCP.","license":"AGPL-3.0-only",
+ "bin":{"brian-capture":"dist/cli.js"},"main":"dist/index.js","types":"dist/index.d.ts","files":["dist","README.md"],"engines":{"node":">=22.13"},
+ "scripts":{"build":"tsc --emitDeclarationOnly && esbuild src/index.ts src/cli.ts --bundle --platform=node --target=node22 --format=esm --outdir=dist --external:@modelcontextprotocol/sdk/* --external:zod","typecheck":"tsc --noEmit","test":"pnpm build && vitest run"},
+ "dependencies":{"@modelcontextprotocol/sdk":"^1.29.0","zod":"^3.24"},
+ "devDependencies":{"@use-brian/shared":"workspace:*","@types/node":"^22","typescript":"^5.7","vitest":"^3","esbuild":"^0.25.0"}
+}

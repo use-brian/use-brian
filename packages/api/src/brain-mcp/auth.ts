@@ -85,7 +85,9 @@ export type BrainAuth = {
    * An app never acts as "the workspace" in the abstract — it acts inside a
    * page someone has open, and writes should be attributable to that person.
    * OAuth grants carry the consenting user for the same reason: first-party
-   * install routes must recheck that person's live workspace role.
+   * install routes must recheck that person's live workspace role. A brain
+   * key carries its issuer (D13), or the workspace owner for a legacy key with
+   * no recorded issuer.
    */
   actingUserId?: string
   /** OAuth client identity when available; useful for provenance, never authority. */
@@ -161,6 +163,12 @@ export async function authenticateBrainRequest(
     if (row.status !== 'active') return null
     const ok = await verifySecret(apiKeyParts.secret, row.keyHash)
     if (!ok) return null
+    // A key reads and writes as its issuer (D13). An issuer who has left the
+    // workspace ends the key; it never falls back to the workspace owner.
+    if (row.credentialOwnerUserId === null) {
+      console.warn(`[brain-mcp] brain key ${row.id} refused: issuer is no longer a workspace member`)
+      return null
+    }
     opts.brainKeyStore.touchLastUsedAt(row.id).catch((err) => {
       console.error('[brain-mcp] touchLastUsedAt failed:', err)
     })
@@ -174,6 +182,7 @@ export async function authenticateBrainRequest(
       agentScope: 'none',
       captureAssistantId: row.captureAssistantId ?? null,
       captureProfileId: row.captureProfileId ?? null,
+      ...(row.credentialOwnerUserId ? { actingUserId: row.credentialOwnerUserId } : {}),
     }
     if (row.scope === 'read_write' && row.credentialOwnerUserId) authenticatedCrmParents.set(auth, {
       version: 1, kind: 'brain_key', credentialId: row.id, workspaceId: row.workspaceId,

@@ -20,6 +20,12 @@ import {
   actorAuditIdentity,
   assertCrmOperationsAuthority,
   isCrmConfigCommand,
+  isCrmBusinessReferenceCommand,
+  isCrmCommercialContextCommand,
+  isCrmCommercialDocumentCommand,
+  isCrmGovernedCommand,
+  isDeliveryCommand,
+  isCrmErpCommand,
   canonicalCrmRequest,
   crmOperationsSha256,
   prepareCrmSubmissionAttachments,
@@ -50,6 +56,12 @@ import {createCrmImportFileCleanupService} from './import-file-cleanup-service.j
 import {createCrmRetentionService} from './retention-service.js'
 import { hashSecret } from '../db/api-key-store.js'
 import { assertIntakeVerificationConfiguration, verifyIntakeIdentity } from './identity-verification.js'
+import { executeCrmBusinessReferenceCommand } from './business-references.js'
+import { executeCrmCommercialContextCommand } from './commercial-context.js'
+import { executeDeliveryCommand } from './delivery-oversight.js'
+import { executeCrmGovernedCommand } from './governed-records.js'
+import { executeCrmErpCommand } from './erp-bridge.js'
+import { executeCrmCommercialDocumentCommand, processCrmIssueAttempts, renderCrmPreparationDraft, type CrmCommercialDocumentRuntime, type CrmDocumentFollowUp } from './commercial-preparations.js'
 
 type ServiceClock = () => Date
 
@@ -58,6 +70,8 @@ export type CrmOperationsServiceOptions = {
   privacy?:CrmPrivacyServicePort
   fileCleanup?:CrmImportFileCleanupPort
   retention?:CrmRetentionServicePort
+  /** Office binding for commercial documents; absent means drafts record an unavailable renderer. */
+  documents?: CrmCommercialDocumentRuntime
   now?: ServiceClock
   randomCredentialId?: () => string
   randomSecret?: () => string
@@ -475,6 +489,16 @@ async function executeSubmission(
   })
 }
 
+/** After-commit document work never changes the committed command result; its outcome is recorded on the preparation or attempt. */
+async function runDocumentFollowUp(store: CrmOperationsStore, runtime: CrmCommercialDocumentRuntime, followUp: CrmDocumentFollowUp): Promise<void> {
+  try {
+    if (followUp.kind === 'render_draft') await renderCrmPreparationDraft(store, runtime, followUp)
+    else await processCrmIssueAttempts(store, runtime, { attemptId: followUp.attemptId })
+  } catch (error) {
+    console.warn('[crm-documents] after-commit work failed; the durable state is retryable:', error instanceof Error ? error.message : 'unknown')
+  }
+}
+
 export function createCrmOperationsService(
   store: CrmOperationsStore,
   options: CrmOperationsServiceOptions = {},
@@ -570,6 +594,42 @@ export function createCrmOperationsService(
       const now = clock()
       const occurredAt = now.toISOString()
       const identity = actorAuditIdentity(context.actor)
+
+      if (isCrmBusinessReferenceCommand(command)) {
+        return store.transaction(context, async (tx) => {
+          if (context.authority.integration) await tx.authorizeIntegration(command)
+          return executeCrmBusinessReferenceCommand(tx, command, now)
+        })
+      }
+      if (isCrmCommercialDocumentCommand(command)) {
+        const outcome = await store.transaction(context, async (tx) => {
+          if (context.authority.integration) await tx.authorizeIntegration(command)
+          return executeCrmCommercialDocumentCommand(tx, command)
+        })
+        if (outcome.followUp) await runDocumentFollowUp(store, options.documents ?? { binding: null }, outcome.followUp)
+        return outcome.result
+      }
+      if (isCrmErpCommand(command)) {
+        return store.transaction(context, async (tx) => {
+          if (context.authority.integration) await tx.authorizeIntegration(command)
+          return executeCrmErpCommand(tx, command)
+        })
+      }
+      if (isDeliveryCommand(command)) {
+        return store.transaction(context, async (tx) => executeDeliveryCommand(tx, command))
+      }
+      if (isCrmGovernedCommand(command)) {
+        return store.transaction(context, async (tx) => {
+          if (context.authority.integration) await tx.authorizeIntegration(command)
+          return executeCrmGovernedCommand(tx, command, now)
+        })
+      }
+      if (isCrmCommercialContextCommand(command)) {
+        return store.transaction(context, async (tx) => {
+          if (context.authority.integration) await tx.authorizeIntegration(command)
+          return executeCrmCommercialContextCommand(tx, command)
+        })
+      }
 
       return store.transaction(context, async (tx) => {
         if (context.authority.integration && !isCrmConfigCommand(command)) await tx.authorizeIntegration(command)

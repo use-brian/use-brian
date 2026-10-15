@@ -83,6 +83,20 @@ export async function leaseSurfaceContent<T>(fetch: () => Promise<T>): Promise<T
 }
 
 /**
+ * Whether a surface error is a lease that ran out before its response arrived
+ * (a read slower than `SURFACE_CONTENT_LEASE_MS`), rather than a failed read.
+ * The value is still never painted; the surface reports slowness, not a fault,
+ * and the renewal timer retries. Matches the cause the cache stores on eviction.
+ */
+export function isSurfaceContentExpiry(error: unknown): boolean {
+  const cause = error instanceof SurfaceCacheEvictionError ? error.cause : error;
+  return (
+    cause instanceof Error &&
+    (cause.message === "surface_content_expired" || cause.message === "cache_resource_expired")
+  );
+}
+
+/**
  * A memory-tier read of protected content through the content lease: leased
  * fetch, expiry and renewal in one call.
  */

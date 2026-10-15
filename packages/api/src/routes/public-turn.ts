@@ -84,6 +84,7 @@ import {
   noteAutomaticScopeEvidence,
   turnOutputWrite,
   sessionMessageInputScope,
+  automaticContextAccess,
 } from '../context-scope/resolve-turn-scope.js'
 import { resolveExecutionContextSystem } from '../context-scope/execution-context.js'
 import { prepareAssistantRun } from '../turn/prepare.js'
@@ -1041,7 +1042,7 @@ export async function executePublicTurn(
   // visitor's session into memories either. Withholding the tool is therefore
   // sufficient; there is no second write path to close.
   const memoryViewerCtx = {
-    ...turnScope.access,
+    ...automaticContextAccess(turnScope.access, turnScope.activeProjectId),
     clientSelfMemory: clientSelfMemory ?? undefined,
   }
   if (body.clientMemory && clientSelfMemory) {

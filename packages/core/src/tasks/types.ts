@@ -14,6 +14,7 @@
 
 import type { AccessContext } from '../security/access-context.js'
 import type { Sensitivity } from '../security/sensitivity.js'
+import type { TaskHome, TaskResponsibility } from './responsibility.js'
 
 export const TASK_STATUSES = ['todo', 'in_progress', 'in_review', 'blocked', 'done', 'archived'] as const
 export type TaskRecordStatus = (typeof TASK_STATUSES)[number]
@@ -29,6 +30,15 @@ export type TaskRecordStatus = (typeof TASK_STATUSES)[number]
  * rides the write into the lifecycle emit.
  */
 export type TaskWriteActor = 'user' | 'system'
+
+/**
+ * Trusted assignment provenance for automatic execution entry
+ * (goals.md -> "Formation, readiness and automatic entry"). Set only by an
+ * authenticated REST write (`ui`) or an attended chat turn whose sender is the
+ * verified workspace actor (`chat`). Synthesis, workflows and brain MCP never
+ * set it. Not persisted on the task.
+ */
+export type TaskAssignmentProvenance = { actorUserId: string; origin: 'ui' | 'chat' }
 
 /** Trusted write metadata, separate from model-editable task fields. */
 export type TaskWriteScope = {
@@ -60,7 +70,14 @@ export type TaskRecord = {
   workspaceId: string
   title: string
   status: TaskRecordStatus
+  /** PERSON executor: a `workspace_members` row id. Never set with `executorAssistantId`. */
   assigneeId: string | null
+  /** ASSISTANT executor (migration 753). See `responsibility.ts`. Absent when a store does not report it. */
+  executorAssistantId?: string | null
+  /** Optional explicit human follow-up contact (`workspace_members` id). Never implies execution. */
+  followUpMemberId?: string | null
+  /** Explicit operating home; null means unknown, never inferred. */
+  home?: TaskHome | null
   due: Date | null
   tags: string[]
   parentId: string | null
@@ -80,11 +97,13 @@ export type TaskRecord = {
  */
 export type TaskListRow = Pick<
   TaskRecord,
-  'id' | 'workspaceId' | 'title' | 'status' | 'assigneeId' | 'due' | 'tags' | 'parentId' | 'attributes' | 'sensitivity' | 'compartments' | 'projectIds' | 'updatedAt'
+  'id' | 'workspaceId' | 'title' | 'status' | 'assigneeId' | 'executorAssistantId' | 'followUpMemberId' | 'home' | 'due' | 'tags' | 'parentId' | 'attributes' | 'sensitivity' | 'compartments' | 'projectIds' | 'updatedAt'
 >
 
 export type TaskListFilters = {
   assigneeId?: string
+  executorAssistantId?: string
+  followUpMemberId?: string
   status?: TaskRecordStatus | TaskRecordStatus[]
   dueBefore?: Date
   dueAfter?: Date
@@ -98,8 +117,14 @@ export type TaskListFilters = {
 export type TaskUpdateFields = {
   title?: string
   status?: TaskRecordStatus
-  /** Pass `null` to clear; omit to leave unchanged. */
+  /** Pass `null` to clear; omit to leave unchanged. A person clears an assistant executor. */
   assigneeId?: string | null
+  /** Pass `null` to clear; omit to leave unchanged. An assistant clears a person executor. */
+  executorAssistantId?: string | null
+  /** Pass `null` to clear; omit to leave unchanged. Never touches the executor. */
+  followUpMemberId?: string | null
+  /** Pass `null` to clear; omit to leave unchanged. */
+  home?: TaskHome | null
   /** Pass `null` to clear; omit to leave unchanged. */
   due?: Date | null
   tags?: string[]
@@ -123,6 +148,9 @@ export type TaskStore = {
     title: string
     status?: TaskRecordStatus
     assigneeId?: string | null
+    executorAssistantId?: string | null
+    followUpMemberId?: string | null
+    home?: TaskHome | null
     due?: Date | null
     tags?: string[]
     parentId?: string | null
@@ -165,6 +193,8 @@ export type TaskStore = {
      * passes `'system'`. Not persisted.
      */
     writtenBy?: TaskWriteActor
+    /** Trusted human assignment behind this write, if any. */
+    assignment?: TaskAssignmentProvenance
   }): Promise<TaskRecord>
 
   /**
@@ -200,9 +230,17 @@ export type TaskStore = {
     fields: TaskUpdateFields,
     opts?: {
       writtenBy?: TaskWriteActor
+      /** Trusted human assignment behind this write, if any. */
+      assignment?: TaskAssignmentProvenance
       /** High-water scope inherited by the successor; never clears old scope. */
       scope?: TaskWriteScope
       access?: AccessContext
+      /**
+       * Checked on the locked live row before the write. Throw to refuse;
+       * return `'noop'` to answer the current row without a write (an
+       * idempotent repeat). The guarded claim uses it.
+       */
+      precondition?: (current: TaskResponsibility & { status: TaskRecordStatus; workspaceId: string }) => void | 'noop'
     },
   ): Promise<TaskRecord | null>
 

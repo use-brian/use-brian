@@ -221,7 +221,31 @@ const feedLinkedInManualSchema=z.object({...baseDecisionEventShape,eventKind:z.l
 
 const feedLinkedInReconciledSchema=z.object({...baseDecisionEventShape,eventKind:z.literal('feed.linkedin_delivery_reconciled'),payload:z.object({deliveryId:z.string().uuid(),revision:z.number().int().positive(),url:z.string().url()}).strict()}).strict()
 
+// Research follow-up evidence (features/research.md -> "Journal"). Ids and
+// kind only: the prompt stays in its canonical message, the report in its
+// artifact, and the model's interpretation is not a journal event.
+const researchFollowupRecordedSchema = z.object({
+  ...baseDecisionEventShape, eventKind: z.literal('research.followup_recorded'),
+  payload: z.object({
+    feedbackId: z.string().uuid(),
+    activityId: z.string().uuid(),
+    messageId: z.string().uuid(),
+    outputKey: z.string().trim().min(1).max(200),
+    association: z.enum(['explicit_selection', 'explicit_reply', 'same_chat_continuation']),
+  }).strict(),
+}).strict()
+
+const researchFeedbackCorrectedSchema = z.object({
+  ...baseDecisionEventShape, eventKind: z.literal('research.feedback_corrected'),
+  payload: z.object({
+    feedbackId: z.string().uuid(),
+    revision: z.number().int().positive(),
+    stance: z.enum(['interpretation', 'disagreement']),
+  }).strict(),
+}).strict()
+
 export const decisionEventWriteSchema = z.discriminatedUnion('eventKind', [
+  researchFollowupRecordedSchema, researchFeedbackCorrectedSchema,
   feedLinkedInReconciledSchema, feedLinkedInManualSchema, feedDraftRevisedSchema, feedProposalDecidedSchema, feedPostConfirmedSchema, feedConfirmationRevokedSchema,
   approvalDecidedSchema,
   emailDraftRevisedSchema,
@@ -241,6 +265,7 @@ export type DecisionEvent = z.output<typeof decisionEventWriteSchema>
 export type DecisionEventKind = DecisionEvent['eventKind']
 
 export const DECISION_EVENT_KINDS = [
+  'research.followup_recorded', 'research.feedback_corrected',
   'feed.linkedin_delivery_reconciled', 'feed.linkedin_manual_published', 'feed.draft_revised', 'feed.proposal_decided', 'feed.post_confirmed', 'feed.confirmation_revoked',
   'approval.decided',
   'email.draft_revised',

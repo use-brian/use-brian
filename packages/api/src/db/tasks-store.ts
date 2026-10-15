@@ -1,4 +1,4 @@
-import type { EntityLinksStore, TaskRecord, TaskStore } from '@use-brian/core'
+import type { EntityLinksStore, TaskAssignmentProvenance, TaskRecord, TaskStore } from '@use-brian/core'
 import { createTask, findTasksByExternalRefSystem, getTaskById, listTasks, resolveTaskById, updateTask } from './tasks.js'
 
 /**
@@ -32,12 +32,12 @@ export function createDbTaskStore(
   deps: {
     entityLinks?: EntityLinksStore
     onTaskTerminal?: (host: { type: 'task'; id: string }) => void
-    onTaskCreate?: (task: TaskRecord, userId: string) => void
+    onTaskCreate?: (task: TaskRecord, userId: string, assignment?: TaskAssignmentProvenance) => void
   } = {},
 ): TaskStore {
   const { entityLinks, onTaskTerminal, onTaskCreate } = deps
   return {
-    async create({ userId, ...params }) {
+    async create({ userId, assignment, ...params }) {
       // Admission and dedup share the writer transaction; only inserts emit hooks.
       // `linkedEntityIds` is not on the `TaskStore.create` interface
       // yet (a follow-up type widening) — read it via a permissive
@@ -45,7 +45,7 @@ export function createDbTaskStore(
       const extras = params as typeof params & { linkedEntityIds?: readonly string[] }
       const record = await createTask(userId, { ...params, linkedEntityIds: extras.linkedEntityIds }, entityLinks, undefined, {
         deduplicate: true,
-        onInserted: task => { if (onTaskCreate && task.parentId === null) onTaskCreate(task, userId) },
+        onInserted: task => { if (onTaskCreate && task.parentId === null) onTaskCreate(task, userId, assignment) },
       })
       return record
     },

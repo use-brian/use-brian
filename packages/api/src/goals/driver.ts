@@ -48,8 +48,10 @@ import {
   type GoalRecord,
   type GoalStatus,
   type GoalStore,
+  type ReadinessReason,
 } from '@use-brian/core'
 import { buildGoalResolvers, finishGoal, type GoalDeliver } from './writeback.js'
+import type { ExecutionLedger, IterationEvidence } from './execution-state.js'
 
 /** The loop state carried across the re-arm chain (the durable handoff). */
 export type GoalLoopState = {
@@ -145,6 +147,12 @@ export type DispatchRunResult = {
    *  `until:event` re-arm (durable marker + safety net) instead of the
    *  paused-run poll. Null / absent → not parked on an event. */
   eventSubscriptions?: EventSubscription[] | null
+  /** Engine-observed evidence this iteration produced (artifacts, completed or
+   *  uncertain effects, checked results). Drives progress classification for
+   *  goals with a task execution state. */
+  evidence?: IterationEvidence
+  /** A known blocker the iteration hit (missing operation/account/input). */
+  blocker?: ReadinessReason | null
 }
 
 export type GoalDriverDeps = {
@@ -191,6 +199,15 @@ export type GoalDriverDeps = {
   claimCrmEventResume?: (goalId: string, event: DispatchEvent, marker: GoalAwaitingEvent) => Promise<boolean>
   /** Revalidate durable causal sources before ticks, iterations and delivery. */
   assertSourceAuthority?: (goal: GoalRecord) => Promise<void>
+  /** Accepted Brief boundary (goals.md -> "Brief direction boundary"): `capture`
+   *  freezes the Project's effective direction when the goal arms; `check`
+   *  before each iteration returns `changed` for an incompatible accepted
+   *  change, which blocks the goal without touching its outcome, budget,
+   *  usage or authority. Omitted: no Brief boundary. */
+  briefBoundary?: {
+    capture: (goal: GoalRecord) => Promise<void>
+    check: (goal: GoalRecord) => Promise<'ok' | 'changed'>
+  }
   /** Install the goal's persisted author/current sticky authority for host work. */
   executeWithAuthority?: <T>(goal: GoalRecord, operation: () => Promise<T>) => Promise<T>
   /** Resolve the workspace override for a budget-less goal. Omitted or failed
@@ -204,9 +221,18 @@ export type GoalDriverDeps = {
    *  the error (backoff re-arm, or the loud terminal block when `willRetry` is
    *  false). Boot wires a `goal_tick_error` analytics event. Best-effort. */
   onTickError?: (goal: GoalRecord, error: unknown, willRetry: boolean) => void
+  /** Resumable task execution (goals.md -> "Resumable task execution"). When
+   *  a goal has a native execution state, loop counters come from its durable
+   *  pool and checkpoint instead of the handoff, each iteration is classified
+   *  by new checked evidence, controls fence write-back, and `done` requires
+   *  checked completion evidence. Absent, or no state: legacy behavior. */
+  executionLedger?: ExecutionLedger
   /** Injected clock (api side; the core takes `now` as a string param). */
   now: () => Date
 }
+
+/** The iteration reserved in a durable execution during this tick, if any. */
+type OpenAttempt = { current: { stateId: string; attemptId: string; runId: string | null } | null }
 
 /** The fresh loop state a chain starts (or restarts — the reaper's recovery
  *  re-arm) from. */
@@ -271,10 +297,22 @@ export function createGoalDriver(deps: GoalDriverDeps): GoalDriver {
       // Single-flight: only one tick may drive a goal at a time. The claim flips
       // `active`→`running` atomically; a lost claim means a concurrent tick owns it.
       if (!(await deps.tryClaim(goalId))) return
+      const attempt: OpenAttempt = { current: null }
       try {
         await deps.assertSourceAuthority?.(goal)
-        await runClaimedTick(goal, carried)
+        await runClaimedTick(goal, carried, attempt)
       } catch (err) {
+        if (attempt.current && deps.executionLedger && !isGoalAuthorityFailure(err)) {
+          // A durable execution counts its own consecutive transient faults.
+          const end = await deps.executionLedger.endIteration(attempt.current.stateId, attempt.current.attemptId,
+            { runId: attempt.current.runId, terminal: false, waiting: false, transientFault: true })
+          if (end.blockedReason) {
+            await finishGoal(goal, 'blocked', end.blockedReason, claimedFinishDeps)
+            await deps.executionLedger.onTerminal(goal, 'blocked', end.blockedReason)
+            deps.onTickError?.(goal, err, false)
+            return
+          }
+        }
         await handleTickError(goal, carried, err)
       }
     }
@@ -326,7 +364,7 @@ export function createGoalDriver(deps: GoalDriverDeps): GoalDriver {
     }
   }
 
-  async function runClaimedTick(goal: GoalRecord, carried?: GoalLoopState): Promise<void> {
+  async function runClaimedTick(goal: GoalRecord, carried: GoalLoopState | undefined, attempt: OpenAttempt): Promise<void> {
     const goalId = goal.id
     // This tick is acting NOW (a resume, a safety-net fire, or a normal tick),
     // so drop any stale `until:event` park marker: a fresh decision (park again,
@@ -346,6 +384,42 @@ export function createGoalDriver(deps: GoalDriverDeps): GoalDriver {
       return
     }
 
+    // The Project's accepted direction changed incompatibly since this goal
+    // armed: block for review before the next action. Nothing is retried and
+    // the goal's outcome, budget and usage stay as they are.
+    if (deps.briefBoundary && (await deps.briefBoundary.check(goal)) === 'changed') {
+      await finishGoal(goal, 'blocked', 'brief_direction_changed', claimedFinishDeps)
+      return
+    }
+
+    // Durable execution: reserve this iteration in the shared pool and take the
+    // loop counters from it. A paused, retired or exhausted execution never
+    // dispatches; recovery reloads here rather than starting a fresh allowance.
+    let loopState: GoalLoopState = state
+    const ledger = deps.executionLedger
+    if (ledger) {
+      const begin = await ledger.beginTick(goal)
+      if (begin.kind === 'paused') {
+        // Pause is not a terminal outcome: no delivery, and the reaper skips
+        // a blocked goal. Continue re-activates it.
+        await releaseClaim(goal.id, 'blocked', 'execution_paused')
+        return
+      }
+      if (begin.kind === 'retired') {
+        await releaseClaim(goal.id, 'abandoned', 'execution_retired')
+        return
+      }
+      if (begin.kind === 'blocked') {
+        await finishGoal(goal, 'blocked', begin.reason, claimedFinishDeps)
+        return
+      }
+      if (begin.kind === 'proceed') {
+        attempt.current = { stateId: begin.stateId, attemptId: begin.attemptId, runId: state.runId }
+        loopState = { ...state, iteration: begin.loop.iteration, spend: begin.loop.spend, noProgressStreak: begin.loop.noProgressStreak }
+        if (state.runId) await ledger.bindRun(begin.stateId, begin.attemptId, state.runId)
+      }
+    }
+
     // Per-tick run bookkeeping, captured in the closures below so `rearm` can
     // write the updated handoff without the core threading it back.
     let activeRunId = state.runId
@@ -362,9 +436,27 @@ export function createGoalDriver(deps: GoalDriverDeps): GoalDriver {
         // Terminal run → clear the id so the next tick starts a fresh iteration;
         // paused run → keep it so the next tick advances the same run.
         activeRunId = r.terminal ? null : r.runId
+        const eventSubs = r.eventSubscriptions ?? null
+        if (ledger && attempt.current) {
+          const open = attempt.current
+          if (open.runId !== r.runId) await ledger.bindRun(open.stateId, open.attemptId, r.runId)
+          const end = await ledger.endIteration(open.stateId, open.attemptId, {
+            runId: r.runId, terminal: r.terminal, waiting: Boolean(eventSubs?.length) || !r.terminal,
+            evidence: r.evidence, blocker: r.blocker ?? null,
+          })
+          attempt.current = null
+          lastSpend = end.spend
+          lastProgressed = end.progressed
+          return {
+            progressed: end.progressed,
+            blockedReason: end.blockedReason,
+            fenced: end.fenced,
+            awaitingEvent: eventSubs && eventSubs.length > 0 ? { eventSubscriptions: eventSubs } : r.terminal ? null : { runId: r.runId },
+            spend: end.spend,
+          }
+        }
         lastSpend = await deps.sessionCostUsd(`workflow_run_${r.runId}`)
         lastProgressed = r.completed
-        const eventSubs = r.eventSubscriptions ?? null
         return {
           progressed: r.completed,
           // Priority: the agent parked this goal on an EXTERNAL event this
@@ -394,13 +486,24 @@ export function createGoalDriver(deps: GoalDriverDeps): GoalDriver {
         if (status === 'running') return
         ownsRunningGoal = await deps.transitionRunningStatus(id, status)
       },
-      finish: (g, terminal, reason) => finishGoal(g, terminal, reason, claimedFinishDeps),
+      finish: async (g, terminal, reason) => {
+        let t = terminal
+        let why = reason
+        // A status write or closed children cannot manufacture delivery: an
+        // execution-backed goal finishes done only on checked evidence.
+        if (ledger && t === 'done' && !(await ledger.completionSatisfied(g))) {
+          t = 'blocked'
+          why = 'completion_evidence_missing'
+        }
+        await finishGoal(g, t, why, claimedFinishDeps)
+        await ledger?.onTerminal(g, t, why)
+      },
       rearm: async (g, resume) => {
         if (!ownsRunningGoal) return
         const nextState: GoalLoopState = {
-          iteration: state.iteration + 1,
-          spend: state.spend + lastSpend,
-          noProgressStreak: lastProgressed ? 0 : state.noProgressStreak + 1,
+          iteration: loopState.iteration + 1,
+          spend: loopState.spend + lastSpend,
+          noProgressStreak: lastProgressed ? 0 : loopState.noProgressStreak + 1,
           runId: activeRunId,
           // A completed iteration (even a no-progress one) clears the errored-
           // tick streak — only CONSECUTIVE throws count toward the ceiling.
@@ -439,7 +542,22 @@ export function createGoalDriver(deps: GoalDriverDeps): GoalDriver {
       },
     }
 
-    await processGoalIteration(goal, state, nowDate.toISOString(), loopDeps)
+    const decision = await processGoalIteration(goal, loopState, nowDate.toISOString(), loopDeps)
+    if (decision.decision === 'blocked' && decision.reason === 'execution_fenced') {
+      // A human control landed mid-iteration. Paused: hold without delivery.
+      // Steered/continued: pick up the new instruction on an immediate tick.
+      if (ledger && (await ledger.phaseOf(goal)) === 'paused') {
+        await releaseClaim(goal.id, 'blocked', 'execution_paused')
+      } else if (await releaseClaim(goal.id, 'active')) {
+        await deps.scheduleGoalTick(goal, deps.now(), { ...state, runId: activeRunId, errorStreak: 0 })
+      }
+    }
+  }
+
+  /** Compare-and-set out of `running` without terminal delivery. */
+  async function releaseClaim(goalId: string, status: GoalStatus, reason?: string): Promise<boolean> {
+    if (deps.transitionRunningStatus) return deps.transitionRunningStatus(goalId, status, reason ?? null)
+    return Boolean(await deps.goalStore.setStatusSystem(goalId, status, reason ?? null))
   }
 
   async function kickoffGoal(goalId: string): Promise<void> {
@@ -462,6 +580,8 @@ export function createGoalDriver(deps: GoalDriverDeps): GoalDriver {
         }
         goal = (await deps.applyDefaultBudget(goal!.id, defaultBudget)) ?? goal
       }
+      // Arming (including an explicit resume) adopts the current accepted direction.
+      await deps.briefBoundary?.capture(goal!)
       await deps.scheduleGoalTick(goal!, deps.now(), INITIAL_STATE)
     }
     if (deps.executeWithAuthority) await deps.executeWithAuthority(goal, arm)

@@ -1,0 +1,19 @@
+{
+  "caseSetVersion": "research-cases-v1",
+  "datasetVersion": "fixture-2026-10",
+  "engine": { "id": "research-coordinator", "version": "v1", "config": {} },
+  "runtime": { "model": "fixture-model", "tools": ["urlReader", "webSearch"] },
+  "judge": { "id": "fixture-judge", "version": "1" },
+  "results": [
+    { "caseId": "vendor-pricing-a", "status": "completed",
+      "claims": [{ "caseClaimId": "c1", "sources": ["s1"], "supported": false }],
+      "readSources": ["s1"], "citedSources": ["s1"], "coverage": ["pricing"],
+      "savedArtifact": { "claimed": true, "verified": false }, "usefulness": 2, "humanCorrections": 2, "costUsd": 0.05, "latencyMs": 40000 },
+    { "caseId": "vendor-pricing-a-rev2", "status": "skipped", "savedArtifact": { "claimed": false, "verified": false } },
+    { "caseId": "regulation-scan", "status": "completed",
+      "claims": [{ "caseClaimId": "c1", "sources": ["s1"], "supported": true }],
+      "readSources": ["s1"], "citedSources": ["s1"], "coverage": ["retention"],
+      "savedArtifact": { "claimed": true, "verified": true }, "usefulness": 3, "humanCorrections": 0, "costUsd": null, "latencyMs": 30000 },
+    { "caseId": "market-sizing", "status": "unavailable", "savedArtifact": { "claimed": false, "verified": false } }
+  ]
+}

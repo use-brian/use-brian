@@ -19,7 +19,7 @@ import { createPersonalWebSession, findOrCreateSession, findSessionByChannel, fi
 import { createTurnLedger } from '../ledger/recorder.js'
 import { getLedgerPayloadStore } from '../ledger/runtime.js'
 import { query, getPool } from '../db/client.js'
-import { createTurnTiming } from './turn-timings.js'
+import { createTurnTiming, markTurnEnd } from './turn-timings.js'
 import { bindToolsToAgentAccess } from '../context-scope/agent-access-tools.js'
 import {
   resolvePinnedContext,
@@ -83,7 +83,7 @@ import type { Message, LLMProvider, Tool, MemoryStore, UsageStore, AnalyticsLogg
 import { resolveModel, ensureServableModel, backgroundModelFor, isStandardTier, chatTierBudget, planNudgeCap, tierForModel, isExplicitMeteredModelSelection } from '../model-resolution.js'
 import { isRegistryModelAvailable, registryRow } from '@use-brian/shared/model-registry'
 import type { ConnectorStore } from '../db/connector-store.js'
-import { getToolDisplayName, stripFollowUps, stripCommentThreadReplyTag, resolveCharter, charterMission, recordingIdFromAnchorKey } from '@use-brian/shared'
+import { sanitizeDeliveryText, getToolDisplayName, stripFollowUps, stripCommentThreadReplyTag, resolveCharter, charterMission, recordingIdFromAnchorKey } from '@use-brian/shared'
 import { loadDecisionPlaybookContext } from '../decision-learning/playbook-context.js'
 import {
   CUSTOM_MODEL_ENDPOINT_FALLBACK_NOTICE,
@@ -110,6 +110,7 @@ import {
   turnOutputWrite,
   resolveTurnScopeSystem,
   sessionMessageInputScope,
+  automaticContextAccess,
 } from '../context-scope/resolve-turn-scope.js'
 import { resolveExecutionContextSystem } from '../context-scope/execution-context.js'
 import { prepareAssistantRun } from '../turn/prepare.js'
@@ -137,6 +138,9 @@ import {
   type OfficeLaneDeps,
 } from './office-chat-lane.js'
 import { isAuthorityChangedError } from '../context-scope/authority-lease.js'
+import { beginResearchActivity, captureResearchFollowupForMessage, createResearchDeliveryDeps } from '../research/runtime.js'
+import { createResearchTurnObserver, recordResearchDelivery } from '../research/delivery.js'
+import type { ResearchActivity } from '../db/research-store.js'
 import {
   createDeliveryAudienceAuthorizer,
   DeliveryAudienceUnverifiedError,
@@ -1698,7 +1702,10 @@ export class ChatTurnRefusal extends Error {
  * banner, because an unknown crash has nothing safe to say. Pure, so the
  * distinction is testable without standing up the streaming handler.
  */
-export function chatTurnErrorEvent(err: unknown): Record<string, unknown> {
+export function chatTurnErrorEvent(
+  err: unknown,
+  turn: { sharedAudience?: boolean } = {},
+): Record<string, unknown> {
   if (isAuthorityChangedError(err)) {
     return {
       code: 'authority_changed',
@@ -1707,7 +1714,9 @@ export function chatTurnErrorEvent(err: unknown): Record<string, unknown> {
     }
   }
   if (isDeliveryAudienceUnverifiedError(err)) {
-    return { code: err.reason, error: err.message }
+    // `sharedChat` lets the client say what to do (ask in a personal chat)
+    // without learning which hidden axis refused: the diagnostic stays here.
+    return { code: err.reason, error: err.message, ...(turn.sharedAudience ? { sharedChat: true } : {}) }
   }
   if (err instanceof ChatTurnRefusal) {
     return { code: err.code, error: err.message, ...err.detail }
@@ -2061,7 +2070,13 @@ export function chatRoutes(options: WebChatOptions): Router {
   router.post('/', async (req, res) => {
     // Inference wiring through the turn kernel's boot registration.
     const turnOptions = withTurnInference(options)
-    const { message: rawMessage, sessionId: requestedSessionId, model: requestedModel, fileIds, attachedRecordingIds, truncateFromMessageId, timezone: clientTimezone, assistantId: requestedAssistantId, replyTo, channelId: requestedChannelId, mode: requestedMode, docViewId: requestedDocViewId, docAnchorBlockId: requestedDocAnchorBlockId, docActiveThemeId: requestedActiveThemeId, workspaceId: requestedWorkspaceId, appOrigin: requestedAppOrigin, contextGroupId: requestedContextGroupId, contextProjectId: requestedContextProjectId, followupChips: requestedFollowupChips, viewingSkillRowId: requestedViewingSkillRowId, viewingBrainEntry: requestedViewingBrainEntry, kbSourceId: requestedKbSourceId, meteredProfileId, meteredToolRounds, meteredAccepted, ask: requestedAsk, roomResponseGroup: rawRoomResponseGroup, steer: requestedSteer, inputId: requestedInputId, midTurn: requestedMidTurn } = req.body as {
+    const { message: rawMessage, sessionId: requestedSessionId, model: requestedModel, fileIds, attachedRecordingIds, truncateFromMessageId, timezone: clientTimezone, assistantId: requestedAssistantId, replyTo, channelId: requestedChannelId, mode: requestedMode, docViewId: requestedDocViewId, docAnchorBlockId: requestedDocAnchorBlockId, docActiveThemeId: requestedActiveThemeId, workspaceId: requestedWorkspaceId, appOrigin: requestedAppOrigin, contextGroupId: requestedContextGroupId, contextProjectId: requestedContextProjectId, followupChips: requestedFollowupChips, viewingSkillRowId: requestedViewingSkillRowId, viewingBrainEntry: requestedViewingBrainEntry, kbSourceId: requestedKbSourceId, meteredProfileId, meteredToolRounds, meteredAccepted, ask: requestedAsk, roomResponseGroup: rawRoomResponseGroup, steer: requestedSteer, inputId: requestedInputId, midTurn: requestedMidTurn, researchActivityId: requestedResearchActivityId } = req.body as {
+      /**
+       * A saved research result the member is explicitly following up on
+       * (research card). Resolved under the member's own access; an unknown
+       * or hidden id simply links nothing. See features/research.md.
+       */
+      researchActivityId?: string
       message?: string
       sessionId?: string
       model?: string
@@ -2267,6 +2282,7 @@ export function chatRoutes(options: WebChatOptions): Router {
     let userIdForError: string | null = null
     let assistantIdForError: string | null = null
     let sessionIdForError: string | null = null
+    let sharedAudienceForError = false
     // Set by the inner catch when a context-aware recovery message was
     // successfully composed + delivered after a queryLoop bail. Tells
     // the outer catch to send a clean `done` event instead of the
@@ -2990,6 +3006,7 @@ export function chatRoutes(options: WebChatOptions): Router {
 
       const turnPolicy = sessionPolicy(classifySession(session))
       const isRoomSession = turnPolicy.crossAssistantSend === 'room'
+      sharedAudienceForError = turnPolicy.deliveryCeiling.ceiling === 'audience'
       // D11: admission is decided by audience. Every workspace session (a
       // room, a draft, a doc / Office / feed thread) posts freely, queues
       // one follow-up turn and claims the slot atomically; a personal
@@ -4027,6 +4044,8 @@ export function chatRoutes(options: WebChatOptions): Router {
       // collaborators can see "alice asked, bob refined" attribution.
       // A QUEUED room turn (T5) already persisted + fanned out its row before
       // waiting for the slot — reuse it instead of inserting twice.
+      let researchActivity: ResearchActivity | null = null
+      let researchObserver: ReturnType<typeof createResearchTurnObserver> | null = null
       const storedUserMsg = prePersistedUserMsg ?? await addSessionMessage({
         sessionId: session.id,
         role: 'user',
@@ -4043,7 +4062,7 @@ export function chatRoutes(options: WebChatOptions): Router {
         // this also reaches the MODEL (see the sender-name resolution below):
         // without it "the user" is several people and the reply cannot tell
         // them apart.
-        senderUserId: turnPolicy.attribution ? user.id : null,
+        senderUserId: user.id, // authenticated human attribution also survives personal-source recognition
         scope: inputMessageScope,
       })
       // Reused room rows and regenerate/edit (including seeded kickoffs) are
@@ -4058,6 +4077,34 @@ export function chatRoutes(options: WebChatOptions): Router {
         storedUserMsg.id,
       )
       if (storedUserSource) scopeAccumulator.noteSource(storedUserSource)
+      // Research follow-up capture and the research activity manifest
+      // (features/research.md). Capture never blocks the reply; a missed one
+      // is recovered by the next turn's replay. The activity opens only for an
+      // actual research invocation on a fresh member message.
+      if (assistant.workspaceId && !prePersistedUserMsg) {
+        void captureResearchFollowupForMessage({
+          workspaceId: assistant.workspaceId, sessionId: session.id, assistantId: assistant.id,
+          messageId: storedUserMsg.id, actorUserId: user.id, externalPrincipal: false,
+          selectedActivityId: typeof requestedResearchActivityId === 'string' ? requestedResearchActivityId : null,
+          replyToMessageId: replyTo?.id ?? null,
+          onError: (error) => console.error('[research] follow-up capture failed', { sessionId: session.id, error: error instanceof Error ? error.message : String(error) }),
+        })
+      }
+      if (researchMode && assistant.workspaceId && !prePersistedUserMsg) {
+        try {
+          researchActivity = await beginResearchActivity({
+            workspaceId: assistant.workspaceId, sessionId: session.id, requestMessageId: storedUserMsg.id,
+            actorUserId: user.id, assistantId: assistant.id, projectId: session.contextProjectId ?? null,
+            entry: requestedMode === 'research' ? 'explicit' : 'adaptive',
+            runtime: { surface: 'web', assistantKind: assistant.kind, plan: userPlan ?? null },
+            sensitivity: inputMessageScope?.sensitivity ?? null,
+            compartments: inputMessageScope?.compartments ?? null,
+          })
+          researchObserver = createResearchTurnObserver()
+        } catch (error) {
+          console.error('[research] activity open failed', { sessionId: session.id, error: error instanceof Error ? error.message : String(error) })
+        }
+      }
       if (!prePersistedUserMsg) {
         sendEvent('user_message_saved', {
           id: storedUserMsg.id,
@@ -4401,7 +4448,8 @@ export function chatRoutes(options: WebChatOptions): Router {
       // (passed as `assistantClearance` on the tool context below).
       const readClearance = turnScope.access.clearance ?? assistant.clearance
       const readCompartments = turnScope.effectiveCompartments
-      const viewerCtx = turnScope.access
+      // Automatic context reads only the bound shared Project (D18 relevance).
+      const viewerCtx = automaticContextAccess(turnScope.access, turnScope.activeProjectId)
       turnTiming.mark('admission')
       const [soulContext, identityMemories, rankedIndex, preferredChannel, selfEntityId] = await Promise.all([
         (options.memoryStore.getSoulContext?.(viewerCtx, 'Use Brian') ?? Promise.resolve({ content: null, evidence: {} })),
@@ -4530,6 +4578,7 @@ export function chatRoutes(options: WebChatOptions): Router {
               mutationCompartments: turnScope.access.mutationCompartments,
               projectIds: turnScope.effectiveProjectIds,
               sharedAudience: turnScope.access.sharedAudience,
+              ...(viewerCtx.departmentRead ? { departmentRead: viewerCtx.departmentRead } : {}),
             },
             PER_TURN_FILES_INDEX_CAP,
           )
@@ -4775,6 +4824,7 @@ export function chatRoutes(options: WebChatOptions): Router {
       // rule text separately from the content-free application id used only
       // by an exact frozen approval created later in this turn.
       const decisionPlaybookContext = await loadDecisionPlaybookContext({
+        ...(researchMode ? { research: { projectId: session.contextProjectId ?? null } } : {}),
         workspaceId: assistant.workspaceId ?? null,
         assistantId: assistant.id,
         actorUserId: user.id,
@@ -6380,6 +6430,7 @@ export function chatRoutes(options: WebChatOptions): Router {
             const seenWorkers = new Set<string>()
             const seenCitationUrls = new Set<string>()
             options.workerManager?.setOnEvent((workerId, event) => {
+              researchObserver?.observeWorker(event)
               if (!seenWorkers.has(workerId)) {
                 seenWorkers.add(workerId)
                 const desc = options.workerManager?.getDescription(workerId)
@@ -6672,6 +6723,9 @@ export function chatRoutes(options: WebChatOptions): Router {
       const slot = await takeTurnLease({
         sessionId: session.id,
         admission: turnPolicy.admission,
+        // The answering assistant: a doc-dock or room send may re-address the
+        // turn away from the session's binding (live-work.md "Voice label").
+        assistantId: assistant.id,
         ...(roomAdmission ? { waitForSlot: waitForTurnSlot } : {}),
       })
       if (!slot.taken) {
@@ -6788,6 +6842,25 @@ export function chatRoutes(options: WebChatOptions): Router {
       }
       const pendingAssistantTurns: PendingTurn[] = []
       let lastAssistantMessageId: string | null = null
+      // Settle the research activity from what the turn actually did
+      // (features/research.md -> "Delivery"). Saved only with an inspected
+      // canonical write; otherwise partial with its recovery reason.
+      const settleResearch = async (answerText: string, interrupted: boolean, pausedForAnswer = false) => {
+        const activity = researchActivity
+        const observer = researchObserver
+        researchActivity = null
+        if (!activity || !observer) return
+        try {
+          const settled = await recordResearchDelivery(createResearchDeliveryDeps(), {
+            activity, observation: observer.snapshot(),
+            finalText: pausedForAnswer ? '' : answerText,
+            outputMessageId: lastAssistantMessageId, requestText: rawMessage ?? null, interrupted: interrupted || pausedForAnswer,
+          })
+          sendEvent('research_saved', { activityId: settled.id, status: settled.status, saveError: pausedForAnswer ? 'awaiting_answer' : settled.saveError })
+        } catch (error) {
+          console.error('[research] delivery failed', { sessionId: session.id, activityId: activity.id, error: error instanceof Error ? error.message : String(error) })
+        }
+      }
       let flushed = false
       let queryLoopError: Error | null = null
       let queryLoopErrorEvent: Record<string, unknown> | null = null
@@ -7136,7 +7209,7 @@ export function chatRoutes(options: WebChatOptions): Router {
         // Tool executions arrive as `tool_start` per call and ONE `tool_result`
         // per batch; the batch's wall-clock is what the turn waited for.
         let toolBatchStartedAt: number | null = null
-        await runAssistantTurn({
+        const turnLoopResult = await runAssistantTurn({
           sessionId: session.id,
           policy: turnPolicy,
           abortController,
@@ -7413,6 +7486,7 @@ export function chatRoutes(options: WebChatOptions): Router {
           },
           sink: { kind: 'sse', onEvent: async (event) => {
           await assertDeliveryAudience()
+          researchObserver?.observe(event)
 
           if (event.type === 'text_delta') {
             turnTiming.count('text_delta')
@@ -8098,6 +8172,11 @@ export function chatRoutes(options: WebChatOptions): Router {
             ? '[Tool execution was aborted before completion.]'
             : '[Tool did not return a result. Treat as failed and do not retry.]',
         )
+        await settleResearch(
+          turnLoopResult.selection.kind === 'text' ? sanitizeDeliveryText(turnLoopResult.selection.text) : '',
+          abortController.signal.aborted || !!queryLoopError,
+          turnLoopResult.selection.kind === 'question',
+        )
 
         if (queryLoopError && !recoveryDelivered) {
           let closingPersisted = false
@@ -8415,6 +8494,7 @@ export function chatRoutes(options: WebChatOptions): Router {
         await flushBufferedTurns(
           '[Stream terminated unexpectedly before the tool result was recorded.]',
         )
+        await settleResearch('', true)
 
         // CL-8: an LLM-detected error / provider error fails the
         // success criterion — discard the buffer instead of bumping
@@ -8792,7 +8872,7 @@ export function chatRoutes(options: WebChatOptions): Router {
       if (recoveryDelivered) {
         sendEvent('done', {})
       } else {
-        sendEvent('error', chatTurnErrorEvent(err))
+        sendEvent('error', chatTurnErrorEvent(err, { sharedAudience: sharedAudienceForError }))
       }
       // If a turn_started was broadcast for a draft session before the
       // crash, pair it with turn_completed so collaborators don't see the
@@ -8862,7 +8942,7 @@ export function chatRoutes(options: WebChatOptions): Router {
       // pre-flight refusals are not); those still surface through
       // chat_route_error. Emitted from `finally` so error paths report too.
       if (turnTimingIdentity && 'prompt_ms' in turnTiming.snapshot()) {
-        turnTiming.mark('post')
+        markTurnEnd(turnTiming)
         const timings = turnTiming.snapshot()
         console.log(
           `[chat] turn timings session ${turnTimingIdentity.sessionId} ${turnTimingOutcome}: `

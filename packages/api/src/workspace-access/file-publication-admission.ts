@@ -55,7 +55,7 @@ export async function admitSessionFile(client: PoolClient, actor: string, input:
   return after
 }
 
-async function admitBoundFile(client: PoolClient, actor: string, input: WorkspaceFileCreateInput, inherited: ResourceScope, access?: AccessContext) {
+export async function admitBoundFile(client: PoolClient, actor: string, input: WorkspaceFileCreateInput, inherited: ResourceScope, access?: AccessContext) {
   assertExecutionResourceScope({...inherited,sensitivity:input.sensitivity??inherited.sensitivity,
     compartments:input.compartments??inherited.compartments,projectIds:input.projectIds??inherited.projectIds},'mutation',access)
   await assertCurrentFileAssistant(client,{...inherited,sensitivity:input.sensitivity??inherited.sensitivity,compartments:input.compartments??inherited.compartments,projectIds:input.projectIds??inherited.projectIds},access)
@@ -65,6 +65,8 @@ async function admitBoundFile(client: PoolClient, actor: string, input: Workspac
   }
   for (const key of input.compartments??inherited.compartments) {
     if (key.startsWith('team:') && !(await client.query("SELECT id FROM workspace_groups WHERE compartment_key=$1 AND workspace_id=$2 AND kind='team' AND status='active'",[key,input.workspaceId])).rows.length) throw denied()
+    // A shared Project label stays live only while its scope is active.
+    if (key.startsWith('project:') && !(await client.query("SELECT 1 FROM project_shared_scopes WHERE project_id::text=$1 AND workspace_id=$2 AND status='active'",[key.slice(8),input.workspaceId])).rows.length) throw denied()
   }
   const policy=await readAdmissionPolicy(client,input.workspaceId)
   if (policy && policy.setupState!=='legacy') await admitWorkspaceResource(client,input.workspaceId,actor,{

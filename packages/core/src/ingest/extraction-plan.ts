@@ -22,6 +22,7 @@ export type ExtractionItemDisposition =
   | 'failed'
 
 export type ExtractionPrimitiveKind =
+  | 'delivery_commitment'
   | 'entity'
   | 'edge'
   | 'task'

@@ -14,6 +14,7 @@ import {
   type PlaybookPromptRule,
 } from '../db/playbook-store.js'
 import { appendDecisionApplication } from '../db/decision-provenance-store.js'
+import { listResearchLessonsForTurn, type ResearchPromptLesson } from '../research/learning.js'
 
 type Sensitivity = PlaybookPromptRule['decisionSensitivity']
 
@@ -120,6 +121,12 @@ export async function loadDecisionPlaybookContext(params: {
   channelType?: string
   analytics?: AnalyticsLogger
   logLabel: string
+  /**
+   * Present only on a research turn: also select the actor's research
+   * lessons, the turn Project's lessons (live roster for actor and
+   * assistant) and accepted company methods (features/research.md).
+   */
+  research?: { projectId: string | null }
 }): Promise<DecisionPlaybookContext> {
   let loaded: PlaybookPromptRule[]
   try {
@@ -148,22 +155,46 @@ export async function loadDecisionPlaybookContext(params: {
     }
   }
 
-  const ordered = loaded
+  // Research lessons ride the same loader and cap. A failed lesson read omits
+  // them with an honest operational error; it never fails the turn.
+  let researchLessons: ResearchPromptLesson[] = []
+  if (params.research && params.workspaceId) {
+    try {
+      researchLessons = await listResearchLessonsForTurn({
+        workspaceId: params.workspaceId,
+        actorUserId: params.actorUserId,
+        assistantId: params.assistantId,
+        projectId: params.research.projectId,
+        externalPrincipal: params.externalPrincipal,
+      })
+    } catch (err) {
+      console.error(`[${params.logLabel}] research lesson read failed:`, err)
+    }
+  }
+  const researchRules: PlaybookPromptRule[] = researchLessons.map((lesson) => ({
+    id: lesson.id, rule: lesson.rule, createdBy: 'research_reflection',
+    appliesToUserId: null, applicabilityKind: 'general', applicabilityKey: null,
+    decisionSensitivity: lesson.sensitivity, feedScope: null, decisionCompartments: [], decisionProjectIds: [],
+  }))
+  const researchRank = new Map(researchLessons.map((lesson) => [lesson.id, lesson.scope === 'user' ? 0 : 1]))
+
+  const ordered = [...loaded
     .filter(rule => !params.allowedRuleIds || params.allowedRuleIds.includes(rule.id))
     .filter((rule) => rule.appliesToUserId === null || (
       !params.externalPrincipal
       && params.actorUserId !== null
       && rule.appliesToUserId === params.actorUserId
     ))
-    .filter((rule) => isApplicable(rule, params.applicability))
+    .filter((rule) => isApplicable(rule, params.applicability)), ...researchRules]
     .map((rule, index) => ({ rule, index }))
     .sort((left, right) =>
-      orderRank(left.rule, params.applicability) - orderRank(right.rule, params.applicability)
+      (researchRank.get(left.rule.id) ?? orderRank(left.rule, params.applicability))
+        - (researchRank.get(right.rule.id) ?? orderRank(right.rule, params.applicability))
       || left.index - right.index)
     .map(({ rule }) => rule)
   const selected = fitWholeRules(ordered)
   const decisionRules = selected.filter((rule) =>
-    rule.createdBy === 'decision_reflection' && rule.appliesToUserId !== null)
+    (rule.createdBy === 'decision_reflection' && rule.appliesToUserId !== null) || researchRank.has(rule.id))
 
   let decisionApplicationId: string | null = null
   if (params.recordApplication !== false && decisionRules.length > 0 && params.actorUserId && !params.externalPrincipal) {

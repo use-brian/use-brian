@@ -27,6 +27,8 @@ export type ChatSurfaceMessage = Message & {
   documents?: TranscriptDocumentAttachment[];
   /** Pages the assistant created or edited this turn (lib/chat-page-links). */
   pageLinks?: string[];
+  /** The saved research this reply delivered (features/research.md -> "UI"). */
+  research?: { activityId: string; status: "running" | "saved" | "partial" | "failed" };
 };
 
 /** Per-row presentation metadata for the group-chat transcript timeline. */

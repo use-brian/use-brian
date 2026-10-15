@@ -18,6 +18,7 @@ import request from 'supertest'
 import type { BrainKeyStore, CreatedBrainKey } from '../../db/brain-keys-store.js'
 import type { WorkspaceStore } from '../../db/workspace-store.js'
 import { brainKeysRoutes } from '../brain-keys.js'
+import { contextReadinessFixture } from '../../context-scope/__tests__/readiness-fixture.js'
 
 const WID = '11111111-1111-1111-1111-111111111111'
 const KID = '22222222-2222-2222-2222-222222222222'
@@ -59,12 +60,7 @@ function makeDeps() {
     getTeamSystem: vi.fn().mockResolvedValue({ id: TEAM_ID, status: 'active' }),
     getProjectSystem: vi.fn().mockResolvedValue({ id: PROJECT_ID, status: 'active' }),
   }
-  const getContextReadiness = vi.fn().mockResolvedValue({
-    enforcementVersion: 1,
-    readyForActivation: true,
-    checks: [],
-    legacyGeneral: {},
-  })
+  const getContextReadiness = vi.fn().mockResolvedValue(contextReadinessFixture())
   return { brainKeyStore, workspaceStore, contextStore: contextStore as never, getContextReadiness }
 }
 
@@ -179,12 +175,7 @@ describe('[COMP:api/brain-keys-route] POST / (create)', () => {
 
   it('does not issue a scoped key while readiness is red', async () => {
     const deps = makeDeps()
-    deps.getContextReadiness.mockResolvedValue({
-      enforcementVersion: 1,
-      readyForActivation: false,
-      checks: [{ id: 'connectors', ready: false, blocking: true, detail: 'missing' }],
-      legacyGeneral: {},
-    })
+    deps.getContextReadiness.mockResolvedValue(contextReadinessFixture(['connectors']))
     const res = await request(makeApp(deps, 'u1'))
       .post(base)
       .send({ name: 'Scoped agent', contextGroupId: TEAM_ID })
@@ -194,6 +185,16 @@ describe('[COMP:api/brain-keys-route] POST / (create)', () => {
       failedChecks: ['connectors'],
     })
     expect(deps.brainKeyStore.create).not.toHaveBeenCalled()
+  })
+
+  it('issues a scoped key while only the legacy scope review is unresolved', async () => {
+    const deps = makeDeps()
+    deps.getContextReadiness.mockResolvedValue(contextReadinessFixture(['scope_review']))
+    const res = await request(makeApp(deps, 'u1'))
+      .post(base)
+      .send({ name: 'Scoped agent', contextGroupId: TEAM_ID })
+    expect(res.status).toBe(200)
+    expect(deps.brainKeyStore.create).toHaveBeenCalled()
   })
 })
 

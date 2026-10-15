@@ -130,6 +130,7 @@ import {
   sessionMessageInputScope,
   type ResolvedTurnScope,
   type ResolveTurnScopeInput,
+  automaticContextAccess,
 } from '../context-scope/resolve-turn-scope.js'
 import { resolveExecutionContextSystem } from '../context-scope/execution-context.js'
 import { prepareAssistantRun } from '../turn/prepare.js'
@@ -154,6 +155,9 @@ import { appendInboundChatArchive, appendOutboundChatArchive, persistInboundChat
 import { isRegistryModelAvailable, registryRow } from '@use-brian/shared/model-registry'
 import type { ProviderAvailability } from '@use-brian/shared/model-registry'
 import { buildWorkspaceNativeSlashCommands } from './native-slash-commands.js'
+import { beginResearchActivity, captureResearchFollowupForMessage, createResearchDeliveryDeps } from '../research/runtime.js'
+import { createResearchTurnObserver, recordResearchDelivery } from '../research/delivery.js'
+import type { ResearchActivity } from '../db/research-store.js'
 
 
 
@@ -798,6 +802,22 @@ export function connectorToolsAllowedForChannelTurn(
   externalGuestConnectorTools: boolean | undefined,
 ): boolean {
   return !externalGuest || externalGuestConnectorTools === true
+}
+
+/**
+ * Does this transcript row count as audience evidence for a channel turn?
+ * In a group, a row carrying a provider message id was already shown to the
+ * group, so it can never be more restricted than the group's audience: its
+ * stamp is the room's read floor, not something the turn read. That holds for
+ * the inbound message as much as for history. Counting it made a room whose
+ * floor was fixed above the group's approval (by whichever bot created it)
+ * refuse every turn, 2026-10-13.
+ */
+export function countsAsGroupAudienceEvidence(
+  row: { channelMessageId: string | null },
+  isGroupChat: boolean,
+): boolean {
+  return !isGroupChat || row.channelMessageId === null
 }
 
 /** Keep exact-audience transcript history without laundering hidden results. */
@@ -1705,7 +1725,49 @@ async function processChannelMessageTurn(params: ChannelPipelineParams): Promise
     assistant.workspaceId,
     userMessageRow.id,
   )
-  if (storedUserSource) scopeAccumulator.noteSource(storedUserSource)
+  if (storedUserSource && countsAsGroupAudienceEvidence(userMessageRow, isGroupChat)) {
+    scopeAccumulator.noteSource(storedUserSource)
+  }
+
+  // Research follow-up capture and activity manifest, same composition as the
+  // web chat (features/research.md). Capture never blocks the reply.
+  let researchActivity: ResearchActivity | null = null
+  let researchObserver: ReturnType<typeof createResearchTurnObserver> | null = null
+  if (assistant.workspaceId && !isolatedAudience) {
+    void captureResearchFollowupForMessage({
+      workspaceId: assistant.workspaceId, sessionId: session.id, assistantId: assistant.id,
+      messageId: userMessageRow.id, actorUserId: userId ?? null, externalPrincipal: isolatedAudience,
+      replyToChannelMessageId: replyToMessageId != null ? String(replyToMessageId) : null,
+      onError: (error) => console.error(`[${channelType}] research follow-up capture failed`, { sessionId: session.id, error: error instanceof Error ? error.message : String(error) }),
+    })
+    if (adaptiveResearchActive && userId) {
+      try {
+        researchActivity = await beginResearchActivity({
+          workspaceId: assistant.workspaceId, sessionId: session.id, requestMessageId: userMessageRow.id,
+          actorUserId: userId, assistantId: assistant.id, projectId: session.contextProjectId ?? null,
+          entry: 'adaptive', runtime: { surface: channelType, assistantKind: assistant.kind },
+          sensitivity: inputMessageScope?.sensitivity ?? null, compartments: inputMessageScope?.compartments ?? null,
+        })
+        researchObserver = createResearchTurnObserver()
+      } catch (error) {
+        console.error(`[${channelType}] research activity open failed`, { sessionId: session.id, error: error instanceof Error ? error.message : String(error) })
+      }
+    }
+  }
+  const settleResearch = async (answerText: string, interrupted: boolean) => {
+    const activity = researchActivity
+    const observer = researchObserver
+    researchActivity = null
+    if (!activity || !observer) return
+    try {
+      await recordResearchDelivery(createResearchDeliveryDeps(), {
+        activity, observation: observer.snapshot(), finalText: answerText,
+        outputMessageId: lastFlushedAssistantRowId, requestText: messageText ?? null, interrupted,
+      })
+    } catch (error) {
+      console.error(`[${channelType}] research delivery failed`, { sessionId: session.id, activityId: activity.id, error: error instanceof Error ? error.message : String(error) })
+    }
+  }
 
   // Surface the persisted user-message row to streaming channels so
   // the client can attach feedback / edit / retry actions to it, and
@@ -1770,9 +1832,7 @@ async function processChannelMessageTurn(params: ChannelPipelineParams): Promise
   }))
   noteAutomaticScopeEvidence(
     scopeAccumulator,
-    isGroupChat
-      ? dbMessages.filter((message) => message.channelMessageId === null)
-      : dbMessages,
+    dbMessages.filter((message) => countsAsGroupAudienceEvidence(message, isGroupChat)),
   )
   const workflowProposalReceipt = latestWorkflowProposalReceipt(dbMessages)
 
@@ -1852,7 +1912,7 @@ async function processChannelMessageTurn(params: ChannelPipelineParams): Promise
   // docs/architecture/context-engine/memory-system.md → "Index cap".
   let memoryContext = ''
   if (isIdentified && !isolatedAudience) {
-    const viewerCtx = dataTurnScope.access
+    const viewerCtx = automaticContextAccess(dataTurnScope.access, dataTurnScope.activeProjectId)
     const [soulContext, identityMemories, rankedIndex] = await Promise.all([
       (memoryStore.getSoulContext?.(viewerCtx, 'Use Brian') ?? Promise.resolve({ content: null, evidence: {} })),
       memoryStore.getIdentity(viewerCtx),
@@ -1995,6 +2055,7 @@ async function processChannelMessageTurn(params: ChannelPipelineParams): Promise
   }
 
   const decisionPlaybookContext = await loadDecisionPlaybookContext({
+    ...(adaptiveResearchActive ? { research: { projectId: session.contextProjectId ?? null } } : {}),
     workspaceId: assistant.workspaceId ?? null,
     assistantId: assistant.id,
     actorUserId: userId,
@@ -2689,7 +2750,7 @@ async function processChannelMessageTurn(params: ChannelPipelineParams): Promise
       trustedContributions: [{ name: 'runtime', content: runtimeSystemContext }],
       userVisibleContributions: [{ name: 'turn', content: userVisibleContext }],
     })
-    await runAssistantTurn({
+    const turnLoopResult = await runAssistantTurn({
       sessionId: session.id,
       policy: turnPolicy,
       abortController,
@@ -2761,6 +2822,7 @@ async function processChannelMessageTurn(params: ChannelPipelineParams): Promise
       sink: { kind: 'adapter', onEvent: async (event) => {
       await assertDeliveryAudience()
       turnOutput.observe(event)
+      researchObserver?.observe(event)
       switch (event.type) {
         case 'question':
           break
@@ -3140,6 +3202,7 @@ async function processChannelMessageTurn(params: ChannelPipelineParams): Promise
     })
 
     await flushBufferedTurns('[Tool did not return a result. Treat as failed and do not retry.]')
+    await settleResearch(turnLoopResult.finalText ?? '', abortController.signal.aborted)
 
     // ── Session-state diff pass (fire-and-forget safety net) ──
     // See docs/architecture/context-engine/session-state.md.
@@ -3273,6 +3336,7 @@ async function processChannelMessageTurn(params: ChannelPipelineParams): Promise
       return
     }
     await flushBufferedTurns('[Stream terminated unexpectedly before the tool result was recorded.]')
+    await settleResearch('', true)
     console.error(`[${channelType}] unexpected query loop error:`, err)
     analytics?.logEvent({
       userId, assistantId: assistant.id, sessionId: session.id,

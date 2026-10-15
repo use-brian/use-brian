@@ -35,6 +35,7 @@
  */
 
 import { z } from 'zod'
+import { DeliveryProposalSchema } from '../crm/delivery-oversight.js'
 import { isDecisionModelRow, registryRowForPricing } from '@use-brian/shared/model-registry'
 
 import { sanitize, type AnalyticsLogger } from '../analytics/logger.js'
@@ -608,7 +609,9 @@ const extractedMemorySchema = z.object({
   why_not_task: z.string().min(1).max(200),
 })
 
+const extractedDeliverySchema = DeliveryProposalSchema.omit({source:true}).extend({ quote:z.string().min(1).max(2000) }).strict()
 const extractionOutputSchema = z.object({
+  delivery_commitments: z.array(extractedDeliverySchema).max(20).nullish().transform(v=>v??[]),
   summary: z.string().max(2000).nullish().transform((v) => v ?? ''),
   entities: z.array(extractedEntitySchema).max(50).nullish().transform((v) => v ?? []),
   edges: z.array(extractedEdgeSchema).max(100).nullish().transform((v) => v ?? []),
@@ -649,6 +652,12 @@ type ExtractionOutput = z.infer<typeof extractionOutputSchema>
 const EXTRACTION_RESPONSE_SCHEMA: Record<string, unknown> = {
   type: 'object',
   properties: {
+    delivery_commitments: { type:'array',items:{type:'object',properties:{
+      candidateKey:{type:'string'},quote:{type:'string'},outcome:{type:'string'},dueDate:{type:'string',nullable:true},
+      companyId:{type:'string',nullable:true},dealId:{type:'string',nullable:true},agreeingUserId:{type:'string',nullable:true},
+      basis:{type:'string',enum:['explicit_agreement','accepted_terms','ambiguous']},
+      taskIds:{type:'array',items:{type:'string'}},goalIds:{type:'array',items:{type:'string'}},
+    },required:['candidateKey','quote','outcome','basis']} },
     summary: { type: 'string' },
     entities: {
       type: 'array',
@@ -823,6 +832,7 @@ export function mergeExtractionOutputs(payloads: ExtractionOutput[]): Extraction
     }
   }
   return {
+    delivery_commitments: payloads[0]?.delivery_commitments ?? [],
     summary: payloads.map((p) => p.summary).filter((s) => s.length > 0).join('\n\n'),
     entities,
     edges,
@@ -1833,10 +1843,13 @@ export async function processEpisode(
   const windowPayloads: ExtractionOutput[] = []
   for (let wi = 0; wi < windows.length; wi++) {
     const extractionMessages: Message[] = [
-      { role: 'user', content: buildExtractionPrompt(episode, windows[wi], taskPolicyBlock) },
+      { role: 'user', content: buildExtractionPrompt(episode, windows[wi], taskPolicyBlock) + (wi===0
+        ? '\nOptionally return delivery_commitments (max 20): existing accepted client agreements only, exact verbatim quote and outcome, candidateKey, basis explicit_agreement/accepted_terms/ambiguous. Use null for unknown native companyId/dealId/agreeingUserId/dueDate, and empty taskIds/goalIds. Never invent identities or new terms; missing authority stays ambiguous. Do not make tasks or recovery plans from delivery recognition.'
+        : '\nDo not return delivery_commitments in this continuation window.') },
     ]
     let windowPayload: ExtractionOutput | null = null
     for (let attempt = 1; attempt <= 2 && !windowPayload; attempt++) {
+      if(attempt>1) { const last=extractionMessages.at(-1); if(last && typeof last.content==='string') last.content+='\nDelivery recognition has exhausted its one attempt. Do not synthesize delivery_commitments in this generic extraction recovery.' }
       let rawText = ''
       let truncated = false
       // Recorded for the failure log: without the stop reason and the token
@@ -1903,7 +1916,7 @@ export async function processEpisode(
       } else {
         const parseRes = parseExtraction(rawText)
         if (parseRes.ok) {
-          windowPayload = parseRes.payload
+          windowPayload = { ...parseRes.payload, delivery_commitments: wi===0 && attempt===1 ? parseRes.payload.delivery_commitments : [] }
           break
         }
         reason = parseRes.reason
@@ -2330,7 +2343,7 @@ export async function processEpisode(
   }
 }
 
-const PIPELINE_B_APPLICATION_CONTRACT = 'pipeline-b-v1'
+const PIPELINE_B_APPLICATION_CONTRACT = 'pipeline-b-v2-delivery'
 
 function sourceEnvelope(episode: PipelineBEpisode): PipelineBSourceEnvelope {
   return {
@@ -2718,6 +2731,15 @@ async function processDurableExtractionApplication(input: {
     } satisfies PipelineBApplicationCommand,
   })
 
+  for(const proposal of input.payload.delivery_commitments) {
+    const start=input.resolvedContent.indexOf(proposal.quote)
+    if(start<0) continue
+    const {quote,...interpretation}=proposal
+    drafts.push({key:`delivery:${proposal.candidateKey}`,primitiveKind:'delivery_commitment',payload:{
+      ...sourceEnvelope(episode), command:'delivery_commitment', proposal:{...interpretation,
+        source:{kind:'episode',id:episode.id,revision:archived.scopeVersion,quote,start,end:start+quote.length}},
+    } satisfies PipelineBApplicationCommand})
+  }
   const sourceContentHash = hashExtractionSource(input.resolvedContent)
   const plan = freezeExtractionPlan({
     episodeId: episode.id,

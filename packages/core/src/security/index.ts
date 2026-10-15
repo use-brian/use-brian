@@ -38,6 +38,7 @@ export {
   normalizeProjectName,
   resolveWriteScope,
   scopeEvidenceFromRows,
+  createdRowEvidence,
   scopeGrantContains,
   unionScopeRequirements,
 } from './context-scope.js'
@@ -53,8 +54,8 @@ export { bindScopeSource, boundScopeSource } from './source-evidence.js'
 
 export { pinAccessCeiling, pinAuthoringAuthority, parseAuthoringAuthority, intersectAccessCeilings, accessCeilingContains } from './access-ceiling.js'
 export type { AccessCeiling, AuthoringAuthority } from './access-ceiling.js'
-export { intersectDepartmentReadGrants, departmentReadGrantJson } from './department-read.js'
-export type { DepartmentReadGrant } from './department-read.js'
+export { intersectDepartmentReadGrants, departmentReadGrantJson, intersectProjectAdmissions, mutationProjectAdmissions } from './department-read.js'
+export type { DepartmentReadGrant, ProjectAdmission } from './department-read.js'
 export { pinToolAuthoringAuthority } from './tool-authority.js'
 export { createExecutionContext, executionToolContext } from './execution-context.js'
 export type {

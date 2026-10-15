@@ -9,9 +9,11 @@ import { surfaceDataKey } from "@/lib/surface-prefetch";
 import { ProjectsBrowser } from "../projects-browser";
 
 (globalThis as { IS_REACT_ACT_ENVIRONMENT?: boolean }).IS_REACT_ACT_ENVIRONMENT = true;
-const mocks = vi.hoisted(() => ({ list: vi.fn(), create: vi.fn(), archive: vi.fn(), update: vi.fn(), confirm: vi.fn(), role: "owner", workspaceId: "workspace-1" }));
-vi.mock("@/lib/api/context-scopes", () => ({ listContextProjects: mocks.list, createContextProject: mocks.create, archiveContextProject: mocks.archive, updateContextProject: mocks.update }));
-vi.mock("@/lib/workspace-context", () => ({ useWorkspaceContext: () => ({ workspaceId: mocks.workspaceId, role: mocks.role }) }));
+const mocks = vi.hoisted(() => ({ list: vi.fn(), create: vi.fn(), archive: vi.fn(), update: vi.fn(), confirm: vi.fn(), capability: vi.fn(), setCapability: vi.fn(), role: "owner", workspaceId: "workspace-1" }));
+vi.mock("@/lib/api/context-scopes", () => ({ listContextProjects: mocks.list, createContextProject: mocks.create, archiveContextProject: mocks.archive, updateContextProject: mocks.update,
+  getProjectSharedCapability: mocks.capability, setProjectSharedCapability: mocks.setCapability }));
+vi.mock("@/lib/api/studio", () => ({ listAssistants: vi.fn(async () => []) }));
+vi.mock("@/lib/workspace-context", () => ({ useWorkspaceContext: () => ({ workspaceId: mocks.workspaceId, role: mocks.role, me: { id: "me" } }) }));
 vi.mock("@/lib/surface-prefetch", async original => ({ ...await original<typeof import("@/lib/surface-prefetch")>(), useIntentPrefetch: () => () => ({}) }));
 vi.mock("@/components/ui/confirm-dialog", () => ({ confirmDialog: mocks.confirm }));
 vi.mock("next/link", () => ({ default: ({ href, children, ...props }: React.AnchorHTMLAttributes<HTMLAnchorElement>) => <a href={href} {...props}>{children}</a> }));
@@ -27,6 +29,8 @@ beforeEach(() => {
   vi.clearAllMocks(); resetSurfaceCache(); mocks.role = "owner"; mocks.workspaceId = "workspace-1";
   mocks.list.mockResolvedValue([project("p1", "Atlas"), project("p2", "Beacon", "archived")]);
   mocks.confirm.mockResolvedValue(true);
+  // Shared spaces off: the legacy create path these cases describe.
+  mocks.capability.mockResolvedValue({ enabled: false, canConfigure: false });
   host = document.createElement("div"); document.body.append(host); root = createRoot(host);
 });
 afterEach(async () => { await act(async () => root.unmount()); host.remove(); });

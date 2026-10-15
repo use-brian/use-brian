@@ -443,3 +443,35 @@ describe('[COMP:providers/document-adaptation] applied per concrete model in rou
     expect(content[0]!.text).toContain('The image contains a blue invoice.')
   })
 })
+
+describe('[COMP:providers/document-adaptation] liveness while distilling', () => {
+  // A first distill of a long PDF runs before any stream chunk exists. The
+  // stall watchdog aborted a 49-page attachment at 180 s with "last activity:
+  // start" (2026-10-12); the wrapper now touches the caller's progress clock.
+  it('touches the caller progress clock while a slow distill runs, then stops', async () => {
+    vi.useFakeTimers()
+    try {
+      const { provider } = recordingProvider()
+      let release!: () => void
+      const gate = new Promise<void>((resolve) => { release = resolve })
+      const port: DocumentDistillPort = {
+        configKey: 'v1:w1120:c6:dashscope',
+        distill: vi.fn(async () => { await gate; return { text: '## Page 1\n\nok', model: 'fake-vision' } }),
+      }
+      const touch = vi.fn()
+      const wrapped = wrapDocumentAdaptation(provider, { nativePdf: false, vision: true, distill: port })
+      const run = drain(wrapped.createSession({ model: 'm', systemPrompt: 'sys' } as never)
+        .send([{ role: 'user', content: [pdfBlock(PDF_BYTES, 'long.pdf')] }], { progress: { touch } }))
+      await vi.advanceTimersByTimeAsync(61_000)
+      expect(touch).toHaveBeenCalledWith('document_distill')
+      expect(touch.mock.calls.length).toBeGreaterThanOrEqual(4)
+      release()
+      await run
+      const settled = touch.mock.calls.length
+      await vi.advanceTimersByTimeAsync(60_000)
+      expect(touch.mock.calls.length).toBe(settled)
+    } finally {
+      vi.useRealTimers()
+    }
+  })
+})

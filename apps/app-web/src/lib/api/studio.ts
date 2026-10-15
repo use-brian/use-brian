@@ -30,6 +30,8 @@ export type StudioAssistantSummary = {
   placementDepartmentName?: string | null;
   clearance?: string | null;
   iconSeed?: number | null;
+  /** `primary` is the workspace's Brian (preselected in shared Project creation, D21). */
+  kind?: string | null;
 };
 
 export async function listAssistants(
@@ -88,6 +90,7 @@ function normalizeAssistant(
     channels: Array.isArray(a.channels) ? a.channels : [],
     clearance: a.clearance ?? null,
     iconSeed: typeof a.iconSeed === "number" ? a.iconSeed : null,
+    kind: typeof a.kind === "string" ? a.kind : null,
   };
 }
 

@@ -1,0 +1,75 @@
+{
+  "schemaVersion": 1,
+  "description": "Fictional professional-services ERP used to prove the CRM bridge. Every company, person, code and amount is invented.",
+  "binding": { "bindingKey": "reference-erp", "label": "Reference ERP (fictional)" },
+  "referencePresets": [
+    {
+      "definitionKey": "client-code", "label": "Client code", "targetKinds": ["company"], "assignmentMode": "manual",
+      "namespaceKey": "client-codes", "changePolicy": "correctable"
+    },
+    {
+      "definitionKey": "job-code", "label": "Job code", "targetKinds": ["deal"], "assignmentMode": "manual",
+      "namespaceKey": "job-codes", "changePolicy": "correctable"
+    }
+  ],
+  "catalogs": {
+    "service_category": [{ "key": "audit", "label": "Audit" }, { "key": "tax", "label": "Tax" }, { "key": "advisory", "label": "Advisory" }],
+    "work_status": [{ "key": "not_started", "label": "Not started" }, { "key": "fieldwork", "label": "Fieldwork" }, { "key": "review", "label": "Review" }, { "key": "complete", "label": "Complete" }]
+  },
+  "reviewPolicies": {
+    "client_change": { "mode": "single_review", "directRoles": ["owner"] },
+    "engagement_change": { "mode": "single_review", "directRoles": ["owner"] },
+    "billing_request": { "mode": "reviewer_then_finance", "directRoles": [] }
+  },
+  "users": [
+    { "legacyUserId": "u-partner", "role": "owner", "name": "Fictional Partner" },
+    { "legacyUserId": "u-manager", "role": "admin", "name": "Fictional Manager" },
+    { "legacyUserId": "u-finance", "role": "admin", "name": "Fictional Finance Lead" },
+    { "legacyUserId": "u-staff", "role": "member", "name": "Fictional Associate" }
+  ],
+  "clients": [
+    { "legacyId": "CL-100", "name": "Example Harbour Trading Limited", "domain": "harbour-trading.example", "code": "C-0100", "formerCodes": ["HT-OLD-1"] },
+    { "legacyId": "CL-200", "name": "Example Orchard Holdings Limited", "domain": null, "code": "C-0200", "formerCodes": [] },
+    { "legacyId": "CL-300", "name": "Example Lantern Studio Limited", "domain": "lantern.example", "code": "C-0300", "formerCodes": [] }
+  ],
+  "engagements": [
+    { "legacyId": "EN-1", "clientLegacyId": "CL-100", "name": "Example Harbour annual audit 2026", "code": "J-0001", "formerCodes": [],
+      "serviceCategory": "audit", "workStatus": "fieldwork", "periodStart": "2026-01-01", "periodEnd": "2026-12-31", "financialPeriod": "FY2026",
+      "quotedFee": { "amount": "48000", "currency": "HKD" }, "confirmedFee": { "amount": "45000", "currency": "HKD" } },
+    { "legacyId": "EN-2", "clientLegacyId": "CL-100", "name": "Example Harbour tax filing 2026", "code": "J-0002", "formerCodes": ["TX-26-OLD"],
+      "serviceCategory": "tax", "workStatus": "not_started", "periodStart": "2026-04-01", "periodEnd": "2027-03-31", "financialPeriod": "FY2026",
+      "quotedFee": null, "confirmedFee": { "amount": "12500.50", "currency": "HKD" } },
+    { "legacyId": "EN-3", "clientLegacyId": "CL-200", "name": "Example Orchard advisory retainer", "code": "J-0003", "formerCodes": [],
+      "serviceCategory": "advisory", "workStatus": "review", "periodStart": "2026-01-01", "periodEnd": "2026-06-30", "financialPeriod": "H1-2026",
+      "quotedFee": { "amount": "9000", "currency": "USD" }, "confirmedFee": { "amount": "8800", "currency": "USD" } },
+    { "legacyId": "EN-4", "clientLegacyId": "CL-300", "name": "Example Lantern audit 2026", "code": "J-0004", "formerCodes": [],
+      "serviceCategory": "audit", "workStatus": "not_started", "periodStart": "2026-01-01", "periodEnd": "2026-12-31", "financialPeriod": "FY2026",
+      "quotedFee": null, "confirmedFee": null }
+  ],
+  "timesheets": [
+    { "entryId": "T-1", "engagementLegacyId": "EN-1", "legacyUserId": "u-staff", "date": "2026-03-02", "hours": "3.5" },
+    { "entryId": "T-2", "engagementLegacyId": "EN-2", "legacyUserId": "u-staff", "date": "2026-03-03", "hours": "1.25" },
+    { "entryId": "T-3", "engagementLegacyId": "EN-3", "legacyUserId": "u-manager", "date": "2026-03-04", "hours": "2" }
+  ],
+  "exportPresets": {
+    "engagement-list": [
+      { "header": "Job code", "source": "code:job-code" },
+      { "header": "Engagement", "source": "name" },
+      { "header": "Client code", "source": "client.code:client-code" },
+      { "header": "Client", "source": "client.name" },
+      { "header": "Status", "source": "workStatus" },
+      { "header": "Service", "source": "serviceCategory" },
+      { "header": "Period", "source": "financialPeriod" }
+    ]
+  },
+  "retirement": [
+    { "row": "client_master", "replacedBy": "Canonical CRM companies with client-code references and former-code lookup" },
+    { "row": "engagement_master", "replacedBy": "Canonical deals with governed engagement extensions and catalogs" },
+    { "row": "change_requests", "replacedBy": "save/submit/decide_change_request through the CRM command plane" },
+    { "row": "protected_fees", "replacedBy": "Protected commercial values, absent from projections and exports" },
+    { "row": "billing_handoff", "replacedBy": "Billing requests with reviewer-then-finance review and external invoice allocation" },
+    { "row": "recurring_successors", "replacedBy": "commit_recurring_successors with one successor per period" },
+    { "row": "imports_exports", "replacedBy": "Staged ERP import with reconciliation and preset export mappings from projections" },
+    { "row": "engagement_projection", "replacedBy": "Versioned fee-free projection feed with receipts and resync for timesheets" }
+  ]
+}

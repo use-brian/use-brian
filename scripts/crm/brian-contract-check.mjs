@@ -72,7 +72,7 @@ export function validateOptions(options) {
 }
 
 /** Shell-free, bounded process group. It cannot kill another test runner. */
-async function command(executable, args, { cwd = root, env = cleanRuntimeEnvironment(process.env), timeoutMs = 60_000 } = {}) {
+export async function command(executable, args, { cwd = root, env = cleanRuntimeEnvironment(process.env), timeoutMs = 60_000 } = {}) {
   return new Promise(accept => {
     const child = spawn(executable, args, { cwd, env, shell: false, detached: process.platform !== 'win32', stdio: ['ignore', 'pipe', 'pipe'] })
     let output = '', timedOut = false, escalation
@@ -85,7 +85,7 @@ async function command(executable, args, { cwd = root, env = cleanRuntimeEnviron
   })
 }
 
-async function revision(cwd) {
+export async function revision(cwd) {
   const sha = await command('git', ['rev-parse', 'HEAD'], { cwd })
   if (sha.code) return null
   const status = await command('git', ['status', '--porcelain=v1', '--untracked-files=all'], { cwd })

@@ -116,3 +116,23 @@ describe('[COMP:goals/loop] acting loop', () => {
     expect(log.rearmed).toBeNull()
   })
 })
+
+describe('[COMP:goals/loop] execution runtime outcomes', () => {
+  const state: LoopState = { iteration: 0, spend: 0, noProgressStreak: 0 }
+
+  it('finishes blocked with the runtime reason unless done_when is met', async () => {
+    const { deps, log } = harness({ outcome: { progressed: false, spend: 0, blockedReason: 'no_progress' } })
+    expect(await processGoalIteration(goal(), state, NOW, deps)).toEqual({ decision: 'blocked', reason: 'no_progress' })
+    expect(log.finished).toEqual({ terminal: 'blocked', reason: 'no_progress' })
+    expect(log.rearmed).toBeNull()
+    const met = harness({ met: true, outcome: { progressed: false, spend: 0, blockedReason: 'no_progress' } })
+    expect((await processGoalIteration(goal(), state, NOW, met.deps)).decision).toBe('done')
+  })
+
+  it('neither finishes nor re-arms a fenced iteration', async () => {
+    const { deps, log } = harness({ outcome: { progressed: true, spend: 0.1, fenced: true } })
+    expect(await processGoalIteration(goal(), state, NOW, deps)).toEqual({ decision: 'blocked', reason: 'execution_fenced' })
+    expect(log.finished).toBeNull()
+    expect(log.rearmed).toBeNull()
+  })
+})

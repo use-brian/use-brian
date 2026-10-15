@@ -6,9 +6,15 @@ import { execFileSync } from 'node:child_process'
 
 export const ADMIN_DATABASE_URL = 'postgres://brian:brian@127.0.0.1:5443/usebrian_admin_test'
 export const ADMIN_APP_DATABASE_URL = 'postgres://admin_fixture_app:fixture-only@127.0.0.1:5443/usebrian_admin_test'
+export function adminDatabaseUrls(env={}) {
+  const port=String(env.BRIAN_ADMIN_PG_PORT || '5443')
+  if(!/^\d+$/.test(port)||Number(port)<1024||Number(port)>65535)throw new Error('Invalid administrative fixture database port')
+  return {port,databaseUrl:ADMIN_DATABASE_URL.replace(':5443/',`:${port}/`),appDatabaseUrl:ADMIN_APP_DATABASE_URL.replace(':5443/',`:${port}/`)}
+}
 const osKeys = ['PATH', 'HOME', 'USER', 'LOGNAME', 'SHELL', 'TMPDIR', 'TMP', 'TEMP', 'LANG', 'LC_ALL', 'TERM', 'SystemRoot', 'ComSpec', 'PATHEXT']
 
 export function adminRigEnvironment(root, original = {}, readText = path => existsSync(path) ? readFileSync(path, 'utf8') : '') {
+  const database=adminDatabaseUrls(original)
   const env = Object.fromEntries(osKeys.filter(key => original[key] !== undefined).map(key => [key, original[key]]))
   // Prevent dotenv/Next children from refilling omitted secrets. Only key names
   // are copied, always with empty values; the real provider profile is never read.
@@ -22,8 +28,9 @@ export function adminRigEnvironment(root, original = {}, readText = path => exis
   }
   return {
     ...env,
-    DATABASE_URL: ADMIN_DATABASE_URL,
-    DATABASE_URL_APP: ADMIN_APP_DATABASE_URL,
+    DATABASE_URL: database.databaseUrl,
+    DATABASE_URL_APP: database.appDatabaseUrl,
+    BRIAN_ADMIN_PG_PORT: database.port,
     MIGRATION_DIRS: '',
     USEBRIAN_ADMIN_ONLY: '1',
     USEBRIAN_API_PORT: original.USEBRIAN_API_PORT || '4100',

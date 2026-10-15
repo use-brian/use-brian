@@ -25,6 +25,7 @@
 import { Router } from 'express'
 import { WorkspaceAccessError } from '../workspace-access/policy.js'
 import { mountWorkflowPublicationRoutes } from './workflow-publication.js'
+import { mountRoutineIntakeRoutes } from './routine-intake.js'
 import type { PublicationConsentStore } from '../workflow/publication-consent.js'
 import { randomBytes } from 'node:crypto'
 import {
@@ -463,6 +464,11 @@ async function dependencyIssues(
   return issues
 }
 
+/** Shared authoring preflight for exact routine revisions and native editors. */
+export async function preflightWorkflowDefinition(definition: WorkflowDefinition, ctx:{userId:string;workspaceId:string}, opts:WorkflowsRouteOptions) {
+  return [...await pageAnchorIssues(definition,ctx,opts.savedViewStore),...await dependencyIssues(definition,ctx,opts)]
+}
+
 // Non-blocking authoring advisories (`stepAdvisories`) moved to
 // `@use-brian/core` (packages/core/src/workflow/advisories.ts) so the
 // chat-authoring path (`proposeWorkflow`) emits the SAME advisories as this
@@ -502,6 +508,7 @@ function serializeWorkflow(w: import('@use-brian/core').WorkflowRecord) {
     contextProjectId: w.contextProjectId ?? null,
     // Legacy definitions saved before authority capture cannot run until confirmed.
     authorityReviewRequired: !w.authoringAuthority,
+    taskIntakeRevision:w.taskIntakeRevision ?? 0,
     createdAt: w.createdAt.toISOString(),
     updatedAt: w.updatedAt.toISOString(),
   }
@@ -529,6 +536,7 @@ function serializeSummary(w: import('@use-brian/core').WorkflowRecord) {
 
 export function workflowsRoutes(opts: WorkflowsRouteOptions): Router {
   const router = Router()
+  mountRoutineIntakeRoutes(router)
   mountWorkflowPublicationRoutes(router, opts)
 
   // Reconcile the firing `scheduled_jobs` row from a workflow's trigger — the
@@ -878,7 +886,7 @@ export function workflowsRoutes(opts: WorkflowsRouteOptions): Router {
     const preparing = req.method === 'POST'
     // confirmAuthority recaptures authority even for a schedule workflow; the
     // store then requires that workflow's schedule review, as for any edit.
-    if ((executionAffectingEdit && !scheduleEdit && !preparing) || (parsed.data.confirmAuthority && !preparing)) {
+    if (!existing.definition.taskIntake && ((executionAffectingEdit && !scheduleEdit && !preparing) || (parsed.data.confirmAuthority && !preparing))) {
       fields.authoringAuthority = await opts.resolveAuthoringAuthority({
         userId,
         workspaceId: existing.workspaceId,

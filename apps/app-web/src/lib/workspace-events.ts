@@ -57,6 +57,7 @@ import { publicRuntimeConfig } from "@/lib/runtime-public-config";
  * [COMP:app-web/workspace-events]
  */
 
+import { RESEARCH_CHANGED_EVENT } from "@/lib/api/research";
 import { useEffect } from "react";
 
 import { getValidAccessToken } from "@/lib/auth-fetch";
@@ -117,7 +118,8 @@ type WorkspacePrimitive =
   | "inbox"
   | "session"
   | "goal"
-  | "office";
+  | "office"
+  | "research";
 
 export type WorkspaceChangePayload = {
   workspaceId: string;
@@ -285,6 +287,13 @@ export function routeWorkspaceChange(
           detail: { workspaceId: payload.workspaceId, rowId: payload.rowId },
         },
       ];
+    case "research":
+      return [
+        {
+          event: RESEARCH_CHANGED_EVENT,
+          detail: { workspaceId: payload.workspaceId, rowId: payload.rowId },
+        },
+      ];
     default:
       return [];
   }
@@ -311,6 +320,7 @@ export function allDomainDispatches(workspaceId: string): DomainDispatch[] {
     { event: LIVE_REFRESH_EVENT, detail: { workspaceId, catchUp } },
     { event: GOAL_REFRESH_EVENT, detail: { workspaceId, catchUp } },
     { event: OFFICE_REFRESH_EVENT, detail: { workspaceId, catchUp } },
+    { event: RESEARCH_CHANGED_EVENT, detail: { workspaceId, catchUp } },
   ];
 }
 

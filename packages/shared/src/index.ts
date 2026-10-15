@@ -52,3 +52,5 @@ export * from './workspace-search.js'
 
 export * from './feed-linkedin.js'
 export { feedLinkedInPayloadSchema, feedLinkedInCloudRequestSchema, type FeedLinkedInCloudRequest } from './feed-linkedin-cloud.js'
+export {CaptureConfigurationSchema,EngineeringCaptureReceiptSchema,EngineeringHistoryQuerySchema,EngineeringHistoryCommandSchema,
+ type CaptureConfiguration,type EngineeringCaptureReceipt,type EngineeringHistoryQuery,type EngineeringHistoryCommand} from './engineering-history.js'

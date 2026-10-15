@@ -17,7 +17,7 @@
  *
  * [COMP:api/live-work-roster]
  */
-import { read, type AccessSnapshot, type Principal, type Tier } from './context-scope/reference-predicate.js'
+import { read, splitScopeLabels, type AccessSnapshot, type Principal, type Tier } from './context-scope/reference-predicate.js'
 import { canRead, scopeGrantContains, type ScopeGrant } from '@use-brian/core'
 import { classifySession } from './session-kind.js'
 
@@ -75,15 +75,16 @@ export function decideSessionRead(facts: SessionReadFacts): SessionReadDecision 
   } = facts
   if (facts.departmentAccess && assistantWorkspaceId) {
     const { snapshot, principal } = facts.departmentAccess
-    const compartments = session.contextCompartments ?? []
     const tier = session.effectiveClearance ?? 'public'
-    if (!['public', 'internal', 'confidential'].includes(tier)
-      || compartments.some(key => !key.startsWith('team:'))) {
+    // Department and shared Project requirements (project-shared-spaces.md ->
+    // "Chats"); any other label is refused, never ignored.
+    const labels = splitScopeLabels(session.contextCompartments ?? [])
+    if (!['public', 'internal', 'confidential'].includes(tier) || !labels) {
       return { readable: false, status: 403, error: 'Session context unavailable' }
     }
     const allowed = read(snapshot, { principal, assistant: null }, {
       id: 'session', workspaceId: assistantWorkspaceId, tier: tier as Tier,
-      departmentIds: compartments.map(key => key.slice(5)),
+      departmentIds: labels.departmentIds, projectScopeIds: labels.projectScopeIds,
       userId: workspaceAudience(session) ? null : session.userId,
     }, { workspaceId: assistantWorkspaceId, department: null, now: facts.now ?? new Date() })
     return allowed ? { readable: true } : { readable: false, status: 403, error: 'Session context unavailable' }
@@ -102,7 +103,8 @@ export function decideSessionRead(facts: SessionReadFacts): SessionReadDecision 
     ) {
       return { readable: false, status: 403, error: 'Insufficient clearance' }
     }
-    if (!scopeGrantContains(membershipCompartments, session.contextCompartments ?? [])) {
+    if (!scopeGrantContains(membershipCompartments, session.contextCompartments ?? [])
+      || (session.contextCompartments ?? []).some(key => key.startsWith('project:'))) {
       return { readable: false, status: 403, error: 'Session context unavailable' }
     }
     if (!scopeGrantContains(

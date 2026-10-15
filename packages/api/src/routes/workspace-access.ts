@@ -9,6 +9,7 @@ import { applyDepartmentCommand, prepareDepartmentCommand } from '../workspace-a
 import { WorkspaceAccessError } from '../workspace-access/policy.js'
 import { getOrganizationChart, OrganizationError } from '../db/org-chart-store.js'
 import { executeWorkspaceScopeReview, getWorkspaceScopeInventory } from '../workspace-access/scope-review.js'
+import { getHeldMemorySummary, requestHeldMemoryReview } from '../workspace-access/hold-recovery.js'
 import { getWorkspaceAccessMode } from '../workspace-access/mode-policy.js'
 import { migrationItemApplySchema, createMigrationPlan, getMigrationPlan, listMigrationPlans, prepareMigrationItem, applyMigrationItem, setMigrationPlanState } from '../workspace-access/migration-service.js'
 import { departmentCommandApplySchema } from '../workspace-access/commands.js'
@@ -105,6 +106,16 @@ export function workspaceAccessRoutes(): Router {
   router.post('/workspaces/:workspaceId/access/commands',async(req,res,next) => {
     try { const execute = typeof req.body?.type === 'string' && req.body.type.startsWith('org.') ? applyOrganizationCommand : typeof req.body?.type === 'string' && req.body.type.startsWith('scope.review.') ? executeWorkspaceScopeReview : applyDepartmentCommand; res.json(await execute(String(req.params.workspaceId),req.userId!,req.body)) }
     catch(error) { if (error instanceof OrganizationError || error instanceof WorkspaceAccessError) res.status(error.status).json({error:error.code}); else next(error) }
+  })
+  // A member's own hidden memories, as a count, and a request for an admin
+  // review (docs/plans/scope-hold-recovery.md D3). Never content or reason.
+  router.get('/workspaces/:workspaceId/held-memories/summary',async(req,res,next)=>{
+    try{res.json(await getHeldMemorySummary(String(req.params.workspaceId),req.userId!))}
+    catch(error){if(error instanceof WorkspaceAccessError)res.status(error.status).json({error:error.code});else next(error)}
+  })
+  router.post('/workspaces/:workspaceId/held-memories/review-request',async(req,res,next)=>{
+    try{res.json(await requestHeldMemoryReview(String(req.params.workspaceId),req.userId!))}
+    catch(error){if(error instanceof WorkspaceAccessError)res.status(error.status).json({error:error.code});else next(error)}
   })
   router.get('/workspaces/:workspaceId/scope-review',async(req,res,next)=>{
     try {

@@ -16,7 +16,7 @@ import type {
   TaskRecordStatus,
   TaskUpdateFields,
 } from '@use-brian/core'
-import { DEAL_STAGES, TASK_STATUSES } from '@use-brian/core'
+import { DEAL_STAGES, TASK_STATUSES, TaskResponsibilityError } from '@use-brian/core'
 import { query } from './db/client.js'
 import type { WorkspaceStore } from './db/workspace-store.js'
 import {
@@ -43,6 +43,8 @@ import { updateWorkspaceFileMeta } from './db/workspace-files.js'
 import { updateTask } from './db/tasks.js'
 import { appendCrmActivity } from './db/crm-r2.js'
 import { notifyBrainInboxChange } from './brain-stream/notify.js'
+
+const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i
 
 export const EDITABLE_BRAIN_PRIMITIVES = [
   'memory',
@@ -71,6 +73,9 @@ export const EDITABLE_FIELDS_BY_PRIMITIVE: Record<
     'due_at',
     'tags',
     'assignee_id',
+    'executor_assistant_id',
+    'follow_up_member_id',
+    'home',
     'priority',
     'description',
     'icon',
@@ -1021,12 +1026,16 @@ export function createBrainEntryMutator(args: {
       // attributes (null removes the key) so sibling keys survive. Each edit
       // supersedes the row (a new bi-temporal id), so the preserved old
       // row IS the audit trail — no brain_verification stamp here.
-      const { title, status, due_at, tags, assignee_id, priority, description, icon } = req.body as {
+      const { title, status, due_at, tags, assignee_id, priority, description, icon,
+        executor_assistant_id, follow_up_member_id, home } = req.body as {
         title?: unknown
         status?: unknown
         due_at?: unknown
         tags?: unknown
         assignee_id?: unknown
+        executor_assistant_id?: unknown
+        follow_up_member_id?: unknown
+        home?: unknown
         priority?: unknown
         description?: unknown
         icon?: unknown
@@ -1092,6 +1101,34 @@ export function createBrainEntryMutator(args: {
         fields.assigneeId = assignee_id as string | null
       }
 
+      // Responsibility (tasks.md -> "Responsibility"): shape only here; who
+      // may be executor / contact / home is decided by the same actor-bound
+      // validation every other path uses, inside updateTask's transaction.
+      const uuidOrNull = (value: unknown) => value === null || (typeof value === 'string' && UUID_RE.test(value))
+      if (executor_assistant_id !== undefined) {
+        if (!uuidOrNull(executor_assistant_id)) {
+          res.status(400).json({ error: 'executor_assistant_id must be an assistant id or null' })
+          return
+        }
+        fields.executorAssistantId = executor_assistant_id as string | null
+      }
+      if (follow_up_member_id !== undefined) {
+        if (!uuidOrNull(follow_up_member_id)) {
+          res.status(400).json({ error: 'follow_up_member_id must be a workspace member id or null' })
+          return
+        }
+        fields.followUpMemberId = follow_up_member_id as string | null
+      }
+      if (home !== undefined) {
+        const candidate = home as { kind?: unknown; id?: unknown } | null
+        if (candidate !== null && !(candidate && typeof candidate === 'object'
+          && (candidate.kind === 'department' || candidate.kind === 'project') && typeof candidate.id === 'string' && UUID_RE.test(candidate.id))) {
+          res.status(400).json({ error: 'home must be {kind: "department" | "project", id} or null' })
+          return
+        }
+        fields.home = candidate === null ? null : { kind: candidate.kind as 'department' | 'project', id: candidate.id as string }
+      }
+
       // Tracked outside `fields` — it merges into the row's current
       // attributes, which we only have after the pre-check SELECT.
       let priorityChange: string | null | undefined
@@ -1147,7 +1184,7 @@ export function createBrainEntryMutator(args: {
         && iconChange === undefined
       ) {
         res.status(400).json({
-          error: 'At least one field (title, status, due_at, tags, assignee_id, priority, description, icon) is required',
+          error: 'At least one field (title, status, due_at, tags, assignee_id, executor_assistant_id, follow_up_member_id, home, priority, description, icon) is required',
         })
         return
       }
@@ -1196,6 +1233,8 @@ export function createBrainEntryMutator(args: {
 
         const updated = await updateTask(userId, rowId, fields, undefined, {
           access: req.access,
+          // Authenticated Brain inbox edit: a human assignment.
+          assignment: { actorUserId: userId, origin: 'ui' },
         })
         if (!updated) {
           res.status(404).json({ error: 'Task not found' })
@@ -1207,6 +1246,10 @@ export function createBrainEntryMutator(args: {
         void notifyBrainInboxChange(workspaceId, 'task', rowId, 'update')
         res.json({ ok: true, stamped: true, id: updated.id })
       } catch (err) {
+        if (err instanceof TaskResponsibilityError) {
+          res.status(err.status).json({ error: err.code })
+          return
+        }
         console.error('[brain-inbox] task adjust failed:', err)
         res.status(500).json({ error: 'Failed to adjust task' })
       }

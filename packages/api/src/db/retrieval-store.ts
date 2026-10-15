@@ -690,7 +690,7 @@ async function searchFilesScope(
               source, verified_by_user_id, retracted_at,
               ts_rank_cd(search_vector, plainto_tsquery('english', $${qIdx})) AS rank
          FROM workspace_files
-        WHERE ${visibility}${filters}
+        WHERE purpose='operational' AND ${visibility}${filters}
           AND search_vector @@ plainto_tsquery('english', $${qIdx})
         ORDER BY rank DESC, valid_from DESC, id DESC
         LIMIT $${limIdx} OFFSET $${offIdx}`,
@@ -733,7 +733,7 @@ async function searchFilesScope(
     `SELECT id AS row_id, title, name, tags, sensitivity, compartments, project_ids, valid_from,
             source, verified_by_user_id, retracted_at
        FROM workspace_files
-      WHERE ${visibility}${filters}
+      WHERE purpose='operational' AND ${visibility}${filters}
         AND (title ILIKE $${likeIdx} OR name ILIKE $${likeIdx})
       ORDER BY valid_from DESC, id DESC
       LIMIT $${limIdx} OFFSET $${offIdx}`,
@@ -1200,7 +1200,7 @@ async function searchFileSegmentsScope(
               (SELECT coalesce(wf.title, wf.name) FROM workspace_files wf WHERE wf.id = fs.file_id) AS file_name,
               ROW_NUMBER() OVER (PARTITION BY fs.file_id ORDER BY fs.segment_index) AS grp_rn
          FROM file_segments fs
-        WHERE ${visibility}${filters}
+        WHERE EXISTS(SELECT 1 FROM workspace_files parent WHERE parent.id=fs.file_id AND parent.purpose='operational') AND ${visibility}${filters}
           AND (fs.content ILIKE $${likeIdx} OR array_to_string(fs.heading_path, ' > ') ILIKE $${likeIdx})
      ) sub
       WHERE sub.grp_rn <= ${FILE_SEGMENT_ARM_CAP}
@@ -1579,6 +1579,7 @@ const VECTOR_SCOPES: readonly VectorScopeConfig[] = [
   {
     scope: 'file',
     table: 'workspace_files',
+    extraWhere: "purpose='operational'",
     projection: 'title, name, tags',
     filterCols: { sinceColumn: 'valid_from', tagsColumn: 'tags', sourceColumn: 'source', sensitivityColumn: 'sensitivity' },
     toRow: (r) => ({
@@ -1614,6 +1615,7 @@ const VECTOR_SCOPES: readonly VectorScopeConfig[] = [
   {
     scope: 'file_segment',
     table: 'file_segments',
+    extraWhere: "EXISTS(SELECT 1 FROM workspace_files parent WHERE parent.id=file_segments.file_id AND parent.purpose='operational')",
     projection:
       "file_id, segment_index, heading_path, left(content, 240) AS snippet, tags, (SELECT coalesce(wf.title, wf.name) FROM workspace_files wf WHERE wf.id = file_id) AS file_name",
     filterCols: { sinceColumn: 'valid_from', tagsColumn: 'tags', sourceColumn: 'source', sensitivityColumn: 'sensitivity' },

@@ -119,6 +119,10 @@ export function createIngestApplicationService(options: {
     outboxJobId?: string | null
   }): Promise<ExtractionApplicationRun> => {
     try {
+      const source=await options.episodes.getEpisodeById({workspaceId:input.workspaceId,userId:input.actorUserId,
+        assistantId:'',assistantKind:'primary',compartments:input.mutationCompartments,mutationCompartments:input.mutationCompartments,
+        projectIds:input.projectIds},input.plan.episodeId)
+      if(!source) throw new IngestApplicationServiceError('forbidden','The source is unavailable in the current native scope')
       return await applyFrozenExtractionPlan({
         store: options.store,
         workspaceId: input.workspaceId,

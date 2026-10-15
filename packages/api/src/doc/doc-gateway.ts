@@ -94,6 +94,14 @@ export function createDocGateway(
           signal: controller.signal,
         })
         if (!res.ok) {
+          const body = (await res.json().catch(() => null)) as { error?: string } | null
+          // A bound Brief's Direction is owner-governed (project-briefs.md):
+          // name the refusal and the governed path instead of a bare status.
+          if (body?.error === 'brief_direction_protected') {
+            return {
+              error: 'brief_direction_protected: this page is a Brief and its Direction changes only through an owner\'s Apply direction. Propose the change with manageBrief instead; Current context can still be edited.',
+            }
+          }
           return { error: `sync apply HTTP ${res.status}` }
         }
         const json = (await res.json()) as {
@@ -115,6 +123,39 @@ export function createDocGateway(
         return {
           error: `sync unreachable: ${err instanceof Error ? err.message : String(err)}`,
         }
+      } finally {
+        clearTimeout(timer)
+      }
+    },
+  }
+}
+
+/**
+ * Post-commit Brief broadcast (project-briefs.md -> "The publication
+ * barrier"): ask doc-sync to merge the committed persisted state into a loaded
+ * live document. Undefined when the live path is not configured; a failed
+ * notice is recovered by doc-sync on its next refused store.
+ */
+export function createBriefSyncClient(
+  opts: DocGatewayOptions = {},
+): { syncBrief: (pageId: string) => Promise<boolean> } | undefined {
+  const resolved = resolveDocSyncHttp(opts)
+  if (!resolved) return undefined
+  const { httpBase, syncSecret, doFetch, timeoutMs } = resolved
+  return {
+    async syncBrief(pageId) {
+      const controller = new AbortController()
+      const timer = setTimeout(() => controller.abort(), timeoutMs)
+      try {
+        const res = await doFetch(`${httpBase}/internal/brief-sync`, {
+          method: 'POST',
+          headers: { 'content-type': 'application/json', 'x-doc-sync-secret': syncSecret },
+          body: JSON.stringify({ pageId }),
+          signal: controller.signal,
+        })
+        return res.ok
+      } catch {
+        return false
       } finally {
         clearTimeout(timer)
       }

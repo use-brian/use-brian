@@ -31,6 +31,7 @@
  */
 
 // ── Thresholds ───────────────────────────────────────────────────────────────
+import type { RoutineTrackingQualification } from './routine-intake.js'
 
 /**
  * Similarity thresholds, calibrated against the actual production duplicates in
@@ -599,6 +600,7 @@ export type EvaluateTaskAdmissionInput = {
  */
 export function evaluateTaskAdmission(
   input: EvaluateTaskAdmissionInput,
+  routineTracking?: RoutineTrackingQualification,
 ): TaskAdmissionDecision {
   const { candidate, rules, tombstoneMatches, taskMatches } = input
 
@@ -667,7 +669,7 @@ export function evaluateTaskAdmission(
       }
     }
 
-    if (!isTaskAgentReady(candidate.quality)) {
+    if (!isTaskAgentReady(candidate.quality) && routineTracking?.kind !== 'trackable') {
       const missing = missingAgentReadyFacts(candidate.quality)
       return {
         outcome: 'hold',
@@ -711,6 +713,11 @@ export function evaluateTaskAdmission(
   //    lane: suggestion-first - only an active `allow` rule (the workspace's
   //    explicit opt-in) auto-creates; everything else waits for review.
   if (candidate.lane === 'extracted') {
+    // Configured routine tracking is distinct from ordinary extraction and
+    // from execution readiness. Every stronger gate above still applies.
+    if (routineTracking?.kind === 'trackable' && candidate.quality?.evidenceVerified && candidate.quality.commitment === 'explicit') {
+      return { outcome: 'allow' }
+    }
     // The floor is above the rule: an allow rule may only auto-create a
     // candidate the readiness judge verified as agent-ready. A candidate
     // with no quality assessment at all (a wired gate without the judge)

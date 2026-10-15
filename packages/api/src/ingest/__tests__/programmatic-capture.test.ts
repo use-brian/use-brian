@@ -88,6 +88,7 @@ function store(resolved: ProgrammaticCaptureTarget | null): ProgrammaticCaptureS
       assistantDefaultProjectId: resolved.assistantDefaultProjectId,
       profileId: resolved.profileId,
       profileName: resolved.profileName,
+      processingMode: resolved.processingMode,
     }),
     listProfiles: vi.fn(),
     createProfile: vi.fn(),
@@ -101,6 +102,13 @@ function store(resolved: ProgrammaticCaptureTarget | null): ProgrammaticCaptureS
 }
 
 describe('[COMP:api/programmatic-capture] routed producer', () => {
+  it('rejects an unknown future purpose before routing or extraction',async()=>{
+    const resolved={...target([rule()]),processingMode:'future-purpose'} as unknown as ProgrammaticCaptureTarget
+    const ingest=vi.fn(),capture=createProgrammaticCaptureRouter({store:store(resolved),ingest})
+    await expect(capture(AUTH,{eventId:'future-event',content:'Selected source',sessionId:'fictional-session',role:'user'})).rejects.toThrow('Capture purpose unsupported')
+    expect(ingest).not.toHaveBeenCalled();expect(db.append).not.toHaveBeenCalled()
+  })
+
   beforeEach(() => {
     vi.clearAllMocks()
     db.append.mockResolvedValue({
@@ -234,6 +242,14 @@ describe('[COMP:api/programmatic-capture] pooled processor', () => {
       ruleId:rule().id,source:'programmatic',firesAt:new Date(),createdAt:new Date(),episodeSensitivity:'internal',
       events:[],scopeBindingOrigin:'legacy',scopeHeld:true})).rejects.toMatchObject({code:'capture_target_unavailable'})
     expect(captureStore.resolveBatchTargetSystem).not.toHaveBeenCalled();expect(ingest).not.toHaveBeenCalled()
+  })
+  it.each([['archive_only',undefined],['future-purpose',undefined],['extract','future-purpose']] as const)('refuses unsupported target/event purpose before extraction: %s/%s',async(processingMode,eventPurpose)=>{
+    const resolved={...target([rule()]),processingMode} as unknown as ProgrammaticCaptureTarget,ingest=vi.fn()
+    const process=createProgrammaticBatchProcessor({store:store(resolved),ingest})
+    await expect(process({id:'unsupported',workspaceId:AUTH.workspaceId,assistantId:AUTH.captureAssistantId,ruleId:rule().id,
+      source:'programmatic',firesAt:new Date(),createdAt:new Date(),episodeSensitivity:'internal',scopeHeld:false,
+      events:eventPurpose?[{processingPurpose:eventPurpose}]:[]} as unknown as PendingBatch)).rejects.toMatchObject({code:'capture_target_unavailable'})
+    expect(ingest).not.toHaveBeenCalled()
   })
   it('orders one window and invokes Pipeline B exactly once for the whole batch', async () => {
     const resolved = target([rule()])

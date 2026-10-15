@@ -45,6 +45,8 @@ const actions:Record<string,CrmPrivacyDomainReview['action']>={
   decision_events:'blocked',decision_applications:'blocked',decision_derivations:'blocked',
   association_notification_outbox:'retire',crm_domain_event_outbox:'retire',
   workflow_runs:'retire',workflow_step_runs:'delete',workflow_run_copy_sources:'retain',
+  // A customer account naming the person as billing contact must be reassigned first.
+  crm_customer_accounts:'blocked',
 }
 async function inspect(client:PoolClient,workspaceId:string,contactId:string) {
   const person=await client.query("SELECT id FROM entities WHERE workspace_id=$1 AND id=$2 AND kind='person'",[workspaceId,contactId])

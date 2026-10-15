@@ -201,6 +201,22 @@ export function scopeEvidenceFromRows(rows: readonly unknown[]): ScopeEvidence {
   return accumulator.evidence
 }
 
+/**
+ * Evidence for rows a tool just CREATED from the turn's own content: their
+ * labels raise the floor, but the rows are not sources the turn read. Their
+ * lineage already names every source the turn read, so listing them again
+ * adds nothing, and it would make the turn undeliverable to an audience the
+ * row's own visibility excludes: a personal note saved during a workspace
+ * room turn failed the room's delivery check (`user_visibility`) and
+ * discarded a finished research answer (2026-10-12). Only for creation; an
+ * update or read returns content the model had not authored, which stays a
+ * source. See scoped-context.md -> "Reading is not deriving".
+ */
+export function createdRowEvidence(rows: readonly unknown[]): ScopeEvidence {
+  const { sources: _created, ...labels } = scopeEvidenceFromRows(rows)
+  return labels
+}
+
 export class ContextScopeViolation extends Error {
   readonly code = 'context_scope_not_granted'
 

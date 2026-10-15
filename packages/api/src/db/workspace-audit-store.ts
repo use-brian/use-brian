@@ -66,6 +66,13 @@ export type WorkspaceAuditEventType =
   | 'workflow.approval_approved'
   | 'workflow.approval_rejected'
   | 'workflow.approval_expired'
+  // Delegated approval review (features/approval-review.md)
+  | 'approval_review.assigned'
+  | 'approval_review.assignment_changed'
+  | 'approval_review.assignment_revoked'
+  | 'approval_review.delegated_decision'
+  | 'approval_review.pattern_revoked'
+  | 'operational_route.binding_updated'
   // Q3 Phase A — workspace filesystem (§10)
   | 'file.created'
   | 'file.appended'

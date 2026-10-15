@@ -799,17 +799,23 @@ export async function takeTurnSlot(sessionId: string): Promise<void> {
  * Take the lease for a turn that has just claimed `status='running'`. Returns
  * the token every later lease operation must present. Clears any stale cancel
  * request and end reason left by the previous turn.
+ *
+ * `assistantId` is the turn's ANSWERING assistant, stamped on
+ * `turn_assistant_id` so the Live roster names the voice of a re-addressed
+ * turn rather than the session's binding. Omitted (NULL) means the bound
+ * assistant answers.
  */
-export async function startTurnLease(sessionId: string): Promise<string> {
+export async function startTurnLease(sessionId: string, assistantId: string | null = null): Promise<string> {
   const result = await query<{ turn_lease_token: string }>(
     `UPDATE sessions
         SET turn_lease_token = gen_random_uuid(),
             turn_heartbeat_at = now(),
             cancel_requested_at = NULL,
-            turn_end_reason = NULL
+            turn_end_reason = NULL,
+            turn_assistant_id = $2
       WHERE id = $1
       RETURNING turn_lease_token`,
-    [sessionId],
+    [sessionId, assistantId],
   )
   const token = result.rows[0]?.turn_lease_token
   if (!token) throw new Error(`startTurnLease: session ${sessionId} not found`)
@@ -1305,6 +1311,7 @@ export async function updateSessionMessageText(params: {
                attachments`,
     [params.messageId, params.sessionId, JSON.stringify([{ type: 'text', text: params.text }])],
   )
+  if(result.rows[0])notifySessionChange(params.sessionId)
   return result.rows[0] ?? null
 }
 

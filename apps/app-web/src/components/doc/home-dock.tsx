@@ -1,11 +1,11 @@
 "use client";
 
 /**
- * Home Dock — the single "Suggested for you" entry in the sidebar, rendered
- * above Organization / Projects across workspace surfaces. Deliberately quiet: one row, a sparkle, and a "needs you"
- * count. The actual suggestions live at the explicit `/p?suggested=1` Page
- * content-pane route (`SuggestedView`), not here - the sidebar stays
- * Notion-calm.
+ * Home Dock - the single "Your work" entry in the sidebar, rendered above
+ * Organization / Projects across workspace surfaces. Deliberately quiet: one
+ * row, a sparkle, and a "needs you" count. It opens the Chat work entry
+ * (`workEntryPath`, chat-app.md -> "Work entry"), which replaced the retired
+ * Suggested briefing - the sidebar stays Notion-calm.
  *
  * The badge is the live total of items waiting on the user — the sum of the
  * resolved dock's "Needs you" card counts (approvals + brain reviews +
@@ -23,7 +23,7 @@ import Link from "next/link";
 import { Sparkles } from "lucide-react";
 import { useT, format } from "@/lib/i18n/client";
 import { needsYouTotal } from "@/lib/api/home-dock";
-import { suggestedPath } from "@/lib/suggested-landing";
+import { workEntryPath } from "@/lib/suggested-landing";
 import { useSidebarData } from "./doc-sidebar-data";
 
 export function HomeDock({ workspaceId }: { workspaceId: string }) {
@@ -34,7 +34,7 @@ export function HomeDock({ workspaceId }: { workspaceId: string }) {
     && !dock.comingUp.length && dock.brain.growth7d <= 0)) return null;
   return (
     <Link
-      href={suggestedPath(workspaceId)}
+      href={workEntryPath(workspaceId)}
       className="group min-h-7 max-md:min-h-11 flex items-center gap-2.5 rounded-md px-2 py-0.5 hover:bg-sidebar-accent"
     >
       <Sparkles className="size-4 shrink-0 text-primary" aria-hidden />

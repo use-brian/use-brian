@@ -16,6 +16,7 @@
 
 import type { ApprovalDeliveryChannel } from '../db/pending-approvals-store.js'
 import { assertCurrentAuthority } from '../context-scope/authority-lease.js'
+import { query } from '../db/client.js'
 import type {
   ExecutorDeps,
   JobStore,
@@ -214,7 +215,38 @@ export async function resumeFromApproval(
     const existing = await deps.approvalsStore.getByIdSystem(approvalId)
     return { status: existing?.status ?? 'unknown', runId: existing?.workflowRunId ?? null }
   }
+  return continueAfterDecision(deps, updated, decision, responderUserId, rejectReason, abortSignal)
+}
 
+/**
+ * Continue a workflow run whose approval an explicitly assigned reviewer
+ * resolved (docs/architecture/features/approval-review.md -> "Consumption").
+ * Runs with the request's ORIGINAL executor and the run's own user; never
+ * falls back to the workspace primary assistant, and revalidates the
+ * delegated receipt immediately before the gated tool executes.
+ */
+export async function continueDelegatedWorkflowApproval(
+  deps: ApprovalBridgeDeps,
+  approval: PendingApproval,
+  delegatorUserId: string,
+  revalidate: () => Promise<{ ok: boolean; reason?: string }>,
+  abortSignal?: AbortSignal,
+): Promise<{ status: string; runId: string | null }> {
+  if (approval.kind !== 'workflow_step' || approval.status !== 'approved' || approval.resolutionOrigin !== 'delegated_assistant') {
+    return { status: 'unavailable', runId: approval.workflowRunId ?? null }
+  }
+  return continueAfterDecision(deps, approval, 'approved', delegatorUserId, undefined, abortSignal, { revalidate })
+}
+
+async function continueAfterDecision(
+  deps: ApprovalBridgeDeps,
+  updated: PendingApproval,
+  decision: 'approved' | 'rejected',
+  responderUserId: string,
+  rejectReason: string | undefined,
+  abortSignal: AbortSignal | undefined,
+  delegated?: { revalidate: () => Promise<{ ok: boolean; reason?: string }> },
+): Promise<{ status: string; runId: string | null }> {
   const run = await deps.runStore.getRunSystem(updated.workflowRunId)
   if (!run) {
     return { status: 'orphaned', runId: updated.workflowRunId }
@@ -230,12 +262,14 @@ export async function resumeFromApproval(
   // Audit the decision.
   deps.auditStore.append({
     workspaceId: updated.workspaceId,
-    actorUserId: responderUserId,
+    // A delegated decision is never attributed to a human actor.
+    actorUserId: delegated ? null : responderUserId,
     eventType: decision === 'approved' ? 'workflow.approval_approved' : 'workflow.approval_rejected',
     subjectId: updated.id,
     details: {
       runId: run.id,
       toolName: updated.toolName,
+      ...(delegated ? { origin: 'delegated_assistant' } : {}),
       ...(decision === 'rejected' && rejectReason ? { reason: rejectReason } : {}),
     },
   }).catch(() => { /* fire-and-forget */ })
@@ -281,7 +315,12 @@ export async function resumeFromApproval(
     return { status: 'orphaned_workflow', runId: run.id }
   }
 
-  const primaryAssistantId = await deps.resolvePrimary(run.workspaceId)
+  // The delegated lane uses the original executor only (no primary fallback).
+  if (delegated && !updated.originatingAssistantId) {
+    await failStep(deps, run, workflow, updated, 'delegated_executor_missing', 'The delegated approval has no original executor.')
+    return { status: 'failed', runId: run.id }
+  }
+  const primaryAssistantId = delegated ? updated.originatingAssistantId : await deps.resolvePrimary(run.workspaceId)
   if (abortSignal?.aborted) return cancelResume()
   if (!primaryAssistantId) {
     await deps.runStore.updateRun(run.id, {
@@ -372,6 +411,10 @@ export async function resumeFromApproval(
     return { status: 'failed', runId: run.id }
   }
 
+  // The delegated lane never borrows primary-assistant standing: use the executor's own kind.
+  const delegatedExecutorKind = delegated
+    ? ((await query<{ kind: 'primary' | 'standard' | 'app' }>('SELECT kind FROM assistants WHERE id = $1', [toolAssistantId])).rows[0]?.kind ?? 'standard')
+    : undefined
   const execution = runtimeScope?.executionContext
   const resumedExecution = execution && abortSignal
     ? { ...execution, lifecycle: { ...execution.lifecycle,
@@ -387,7 +430,7 @@ export async function resumeFromApproval(
     channelType: 'workflow',
     channelId: run.id,
     workspaceId: run.workspaceId,
-    assistantKind: workflow.definition.principal ? 'standard' : 'primary',
+    assistantKind: delegated ? delegatedExecutorKind : workflow.definition.principal ? 'standard' : 'primary',
     visibilityAssistantIds: runtimeScope?.turnScope.access.visibilityAssistantIds,
     clearance: runtimeScope?.turnScope.access.clearance,
     compartments: runtimeScope?.turnScope.effectiveCompartments,
@@ -406,6 +449,14 @@ export async function resumeFromApproval(
 
   let result
   if (abortSignal?.aborted) return cancelResume()
+  if (delegated) {
+    // Current delegated authority, not just status='approved', gates the effect.
+    const check = await delegated.revalidate()
+    if (!check.ok) {
+      await failStep(deps, run, workflow, updated, 'delegated_authority_lost', `Delegated approval no longer valid: ${check.reason ?? 'unknown'}. The request needs a person.`)
+      return { status: 'failed', runId: run.id }
+    }
+  }
   try {
     const execute = () => {
       // Live authority renewal awaits I/O; Stop may arrive after the outer check.

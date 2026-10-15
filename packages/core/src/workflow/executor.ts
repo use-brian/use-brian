@@ -367,6 +367,8 @@ export type ExecutorDeps = {
     /** API-owned live lease; rejects stale results without retrying effects. */
     executeWithAuthority?: <T>(operation: () => Promise<T>) => Promise<T>
   }>
+  /** API-owned admission and native Task handoff; null means a legacy run. */
+  routineIntake?: (runId: string) => Promise<{ taskId: string; receiptId: string; vars: Record<string, unknown> } | null>
   emitAudit?: EmitAuditEvent
   /**
    * Deterministic page-send port backing `send_page` steps (page-actions
@@ -464,6 +466,13 @@ export type ExecutorDeps = {
     /** Exact out-of-band application id from the immediately upstream model step. */
     decisionApplicationId?: string
   }) => Promise<void>
+  /**
+   * Called once a run has been fully persisted as paused on an approval
+   * (after `requestApproval` and the `awaiting_input` flip). The API uses it
+   * to let an explicitly assigned reviewer review the new request
+   * (docs/architecture/features/approval-review.md). Fire-and-forget.
+   */
+  onApprovalPaused?: (params: { runId: string; workspaceId: string }) => Promise<void>
   /**
    * Page-anchor creation port — backs `assistant_call.page.create`. The API
    * layer implements it over `savedViewStore` (createDraft + setState
@@ -717,6 +726,25 @@ export async function advanceWorkflowRun(
     const err: ExecutorError = { message: `Workflow ${run.workflowId} not found.`, reason: 'workflow_not_found' }
     await markRunFailed(deps, run, '<unknown>', err)
     return failOutcome(runId, '<unknown>', err, 0)
+  }
+
+  if (run.triggerKind === 'event' && (deps.routineIntake || workflow.definition.taskIntake)) {
+    try {
+      if (!deps.routineIntake) throw new Error('routine_intake_unavailable')
+      const intake = await deps.routineIntake(run.id)
+      if (intake) {
+        await deps.runStore.updateRun(run.id, { status: 'completed', finishedAt: new Date(now()),
+          vars: { ...run.vars, ...intake.vars, routineIntake: { taskId: intake.taskId, receiptId: intake.receiptId } } })
+        return { kind: 'completed', runId, stepCount: 0 }
+      }
+      if (workflow.definition.taskIntake) throw new Error('routine_snapshot_unavailable')
+    } catch (error) {
+      const err: ExecutorError = { message: error instanceof Error ? error.message : String(error),
+        reason: typeof (error as { reason?: unknown })?.reason === 'string'
+          ? (error as { reason: string }).reason : 'routine_intake_unavailable' }
+      await markRunFailed(deps, run, '<routine-intake>', err)
+      return failOutcome(runId, '<routine-intake>', err, 0)
+    }
   }
 
   // Resolve and freeze run-wide external-client authority before building a
@@ -1330,7 +1358,18 @@ export async function advanceWorkflowRun(
     await handleSettled(settled)
   }
 
-  if (pausedOutcome && !firstFailure) return pausedOutcome
+  if (pausedOutcome && !firstFailure) {
+    // The run is fully persisted as paused before anyone may act on its
+    // approval (an explicitly assigned reviewer included). Deferred so the
+    // caller's own return completes first; never awaited, never throws.
+    const outcome = pausedOutcome as RunOutcome
+    if (deps.onApprovalPaused && outcome.kind === 'paused' && outcome.reason === 'approval') {
+      const hook = deps.onApprovalPaused
+      const paused = { runId, workspaceId: run.workspaceId }
+      setImmediate(() => { void Promise.resolve().then(() => hook(paused)).catch(() => {}) })
+    }
+    return pausedOutcome
+  }
 
   if (firstFailure) {
     const status = firstFailure.isTimeout ? 'timeout' : 'failed'

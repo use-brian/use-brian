@@ -314,6 +314,11 @@ function workspaceError() {
   }
 }
 
+/** Shared typed refusal shape for every CRM operations tool family. */
+export function crmOperationsToolFailure(error: unknown) {
+  return failure(error)
+}
+
 function failure(error: unknown) {
   if ((error as { code?: string } | null)?.code === 'scope_operation_denied') {
     return { data: { error: 'scope_operation_denied',

@@ -46,7 +46,7 @@ import {
   type TaskTombstoneRecord,
 } from '@use-brian/core'
 import type pg from 'pg'
-import { applyRLSGucs, getAppPool, query, rollbackAndRelease } from './client.js'
+import { applyRLSGucs, getAppPool, getPool, query, rollbackAndRelease } from './client.js'
 import { buildAccessPredicate, mutationActorAccess, type AccessContext } from './access-predicate.js'
 import { appendDecisionEvent } from './decision-event-store.js'
 import { appendBrainVerification } from './brain-inbox-store.js'
@@ -311,6 +311,17 @@ export function createTaskAdmissionPort(transactionClient?: pg.PoolClient): Task
 
 // ── Rules ────────────────────────────────────────────────────────────────────
 
+async function withAdmissionPolicyWrite<T>(workspaceId: string, write: (client: pg.PoolClient) => Promise<T>): Promise<T> {
+  const client = await getPool().connect()
+  try {
+    await client.query('BEGIN')
+    await client.query('SELECT id FROM workspaces WHERE id=$1 FOR UPDATE', [workspaceId])
+    const result = await write(client)
+    await client.query('COMMIT')
+    return result
+  } finally { await rollbackAndRelease(client) }
+}
+
 export async function createRule(input: {
   workspaceId: string
   userId: string | null
@@ -321,7 +332,7 @@ export async function createRule(input: {
   status: TaskRuleStatus
   origin?: 'user' | 'proposed'
 }): Promise<TaskRuleRecord> {
-  const res = await query<RuleRow>(
+  const res = await withAdmissionPolicyWrite(input.workspaceId, client => client.query<RuleRow>(
     `INSERT INTO task_rules
        (workspace_id, status, effect, predicate, nl_clause, reason, origin, created_by_user_id)
      VALUES ($1,$2,$3,$4,$5,$6,$7,$8)
@@ -336,7 +347,7 @@ export async function createRule(input: {
       input.origin ?? 'user',
       input.userId,
     ],
-  )
+  ))
   return toRule(res.rows[0])
 }
 
@@ -361,12 +372,12 @@ export async function setRuleStatus(input: {
   ruleId: string
   status: TaskRuleStatus
 }): Promise<TaskRuleRecord | null> {
-  const res = await query<RuleRow>(
+  const res = await withAdmissionPolicyWrite(input.workspaceId, client => client.query<RuleRow>(
     `UPDATE task_rules SET status = $3
       WHERE id = $2 AND workspace_id = $1
       RETURNING ${RULE_SELECT}`,
     [input.workspaceId, input.ruleId, input.status],
-  )
+  ))
   return res.rows.length === 0 ? null : toRule(res.rows[0])
 }
 
@@ -374,10 +385,10 @@ export async function deleteRule(input: {
   workspaceId: string
   ruleId: string
 }): Promise<boolean> {
-  const res = await query(`DELETE FROM task_rules WHERE id = $2 AND workspace_id = $1`, [
+  const res = await withAdmissionPolicyWrite(input.workspaceId, client => client.query(`DELETE FROM task_rules WHERE id = $2 AND workspace_id = $1`, [
     input.workspaceId,
     input.ruleId,
-  ])
+  ]))
   return (res.rowCount ?? 0) > 0
 }
 
@@ -441,6 +452,9 @@ export async function rejectTask(input: {
     // policies evaluate against the nil-UUID sentinel and this SELECT can
     // never see the task (every reject 404'd in prod, 2026-08-07).
     await applyRLSGucs(client, input.userId)
+    // Same workspace-first barrier as configured intake: a current human
+    // rejection cannot race a policy snapshot into a new Task commit.
+    await client.query('SELECT id FROM workspaces WHERE id=$1 FOR UPDATE', [input.workspaceId])
 
     const existing = await client.query<{
       id: string

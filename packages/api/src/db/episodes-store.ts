@@ -58,6 +58,8 @@ export type EpisodeRecord = {
   createdByAssistantId: string | null
   parentEpisodeId: string | null
   extractionLocked: boolean
+  scopeVersion?: string
+  scopeHeld?: boolean
   createdAt: Date
 }
 
@@ -176,6 +178,8 @@ const FULL_SELECT = `
   created_by_assistant_id AS "createdByAssistantId",
   parent_episode_id   AS "parentEpisodeId",
   extraction_locked   AS "extractionLocked",
+  scope_version::text AS "scopeVersion",
+  scope_held          AS "scopeHeld",
   created_at          AS "createdAt"
 `
 
@@ -201,12 +205,16 @@ type EpisodeRow = {
   createdByAssistantId: string | null
   parentEpisodeId: string | null
   extractionLocked: boolean
+  scopeVersion?: string
+  scopeHeld?: boolean
   createdAt: Date
 }
 
 function toEpisode(row: EpisodeRow): EpisodeRecord {
   return {
     id: row.id,
+    scopeVersion: row.scopeVersion,
+    scopeHeld: row.scopeHeld,
     sourceKind: row.sourceKind,
     sourceRef: row.sourceRef ?? {},
     occurredAt: row.occurredAt,

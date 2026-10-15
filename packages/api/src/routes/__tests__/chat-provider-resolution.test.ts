@@ -84,6 +84,19 @@ describe('[COMP:api/chat-route] post-SSE turn refusals', () => {
     })
   })
 
+  it('marks a refused delivery in a shared chat without exposing the refusing axis', () => {
+    const event = chatTurnErrorEvent(
+      new DeliveryAudienceUnverifiedError(undefined, 'user_visibility'),
+      { sharedAudience: true },
+    )
+    expect(event).toEqual({
+      code: 'delivery_audience_unverified',
+      error: 'The current destination is not authorized for this response.',
+      sharedChat: true,
+    })
+    expect(JSON.stringify(event)).not.toContain('user_visibility')
+  })
+
   // A tier route captures every built-in in the model picker, so the old copy
   // ("choose a built-in model") named a recovery step that workspace does not
   // have. Only an explicit `custom:<id>` pick can be undone that way.

@@ -12,7 +12,7 @@ import express from 'express'
 import request from 'supertest'
 import type { Request } from 'express'
 import { z } from 'zod'
-import { buildTool, createAssociationTools, createCrmCredentialTools, type PipelineBResult, type Tool, type ToolContext } from '@use-brian/core'
+import { buildTool, createAssociationTools, createCrmCredentialTools, createTaskTools, type PipelineBResult, type TaskStore, type Tool, type ToolContext } from '@use-brian/core'
 import { hashSecret } from '../../db/api-key-store.js'
 import { mintBrainPlaintext, type BrainKeyStore } from '../../db/brain-keys-store.js'
 import { mintBridgeToken } from '../../home-apps/tokens.js'
@@ -155,6 +155,47 @@ const CRM_TOOLS_STUB: BrainCrmTools = {
   saveCrmEvent: { ...stubCoreTool('saveCrmEvent'), requiresCapability: 'configure', homeAppToolSet: { app: 'crm', set: 'write' } },
   sendCrmMessage: {...stubCoreTool('sendCrmMessage'),requiresCapability:'crm',homeAppToolSet:{app:'crm',set:'write'}},
   getCrmDelivery: {...stubCoreTool('getCrmDelivery',true),requiresCapability:'crm',homeAppToolSet:{app:'crm',set:'read'}},
+  listCrmReferenceDefinitions: stubCoreTool('listCrmReferenceDefinitions', true),
+  previewCrmReference: stubCoreTool('previewCrmReference', true),
+  findCrmReference: stubCoreTool('findCrmReference', true),
+  getCrmReferenceHistory: stubCoreTool('getCrmReferenceHistory', true),
+  assignCrmReference: stubCoreTool('assignCrmReference'),
+  saveCrmReferenceDefinition: { ...stubCoreTool('saveCrmReferenceDefinition'), requiresCapability: 'configure', homeAppToolSet: { app: 'crm', set: 'write' } },
+  replaceCrmReference: { ...stubCoreTool('replaceCrmReference'), requiresCapability: 'configure', homeAppToolSet: { app: 'crm', set: 'write' } },
+  retireCrmReference: { ...stubCoreTool('retireCrmReference'), requiresCapability: 'configure', homeAppToolSet: { app: 'crm', set: 'write' } },
+  importCrmReferences: { ...stubCoreTool('importCrmReferences'), requiresCapability: 'configure', homeAppToolSet: { app: 'crm', set: 'write' } },
+  listCrmCustomerAccounts: stubCoreTool('listCrmCustomerAccounts', true),
+  listCrmCommercialProfiles: stubCoreTool('listCrmCommercialProfiles', true),
+  resolveCrmCommercialFields: stubCoreTool('resolveCrmCommercialFields', true),
+  listCrmOperationDefinitions: stubCoreTool('listCrmOperationDefinitions', true),
+  saveCrmCustomerAccount: stubCoreTool('saveCrmCustomerAccount'),
+  saveCrmSellerProfile: { ...stubCoreTool('saveCrmSellerProfile'), requiresCapability: 'configure', homeAppToolSet: { app: 'crm', set: 'write' } },
+  acceptCrmCommercialProfile: { ...stubCoreTool('acceptCrmCommercialProfile'), requiresCapability: 'configure', homeAppToolSet: { app: 'crm', set: 'write' } },
+  proposeCrmOperationVersion: { ...stubCoreTool('proposeCrmOperationVersion'), requiresCapability: 'configure', homeAppToolSet: { app: 'crm', set: 'write' } },
+  getCrmPreparation: stubCoreTool('getCrmPreparation', true),
+  listCrmInvoices: stubCoreTool('listCrmInvoices', true),
+  prepareCrmInvoice: stubCoreTool('prepareCrmInvoice'),
+  reviseCrmPreparation: stubCoreTool('reviseCrmPreparation'),
+  markCrmPreparationReady: stubCoreTool('markCrmPreparationReady'),
+  issueCrmInvoice: { ...stubCoreTool('issueCrmInvoice'), requiresCapability: 'configure', homeAppToolSet: { app: 'crm', set: 'write' } },
+  retryCrmInvoiceIssue: { ...stubCoreTool('retryCrmInvoiceIssue'), requiresCapability: 'configure', homeAppToolSet: { app: 'crm', set: 'write' } },
+  voidCrmInvoice: { ...stubCoreTool('voidCrmInvoice'), requiresCapability: 'configure', homeAppToolSet: { app: 'crm', set: 'write' } },
+  listCrmChangeRequests: stubCoreTool('listCrmChangeRequests', true),
+  getCrmChangeRequest: stubCoreTool('getCrmChangeRequest', true),
+  listCrmEngagements: stubCoreTool('listCrmEngagements', true),
+  listCrmBillingRequests: stubCoreTool('listCrmBillingRequests', true),
+  getCrmBillingBalance: stubCoreTool('getCrmBillingBalance', true),
+  previewCrmRecurringSuccessors: stubCoreTool('previewCrmRecurringSuccessors', true),
+  saveCrmChangeRequest: stubCoreTool('saveCrmChangeRequest'),
+  submitCrmChangeRequest: stubCoreTool('submitCrmChangeRequest'),
+  withdrawCrmChangeRequest: stubCoreTool('withdrawCrmChangeRequest'),
+  updateCrmEngagementTracking: stubCoreTool('updateCrmEngagementTracking'),
+  setCrmCommercialValues: stubCoreTool('setCrmCommercialValues'),
+  commitCrmRecurringSuccessors: stubCoreTool('commitCrmRecurringSuccessors'),
+  saveCrmBillingRequest: stubCoreTool('saveCrmBillingRequest'),
+  cancelCrmBillingRequest: stubCoreTool('cancelCrmBillingRequest'),
+  recordCrmExternalInvoice: stubCoreTool('recordCrmExternalInvoice'),
+  correctCrmExternalInvoiceReference: stubCoreTool('correctCrmExternalInvoiceReference'),
 }
 
 const RETRIEVAL_TOOLS_STUB: BrainRetrievalTools = {
@@ -246,6 +287,22 @@ const READ_TOOL_NAMES = [
   'listCrmParticipation',
   'listCrmPipelines',
   'previewCrmSegment',
+  'listCrmReferenceDefinitions',
+  'previewCrmReference',
+  'findCrmReference',
+  'getCrmReferenceHistory',
+  'listCrmCustomerAccounts',
+  'listCrmCommercialProfiles',
+  'resolveCrmCommercialFields',
+  'listCrmOperationDefinitions',
+  'getCrmPreparation',
+  'listCrmInvoices',
+  'listCrmChangeRequests',
+  'getCrmChangeRequest',
+  'listCrmEngagements',
+  'listCrmBillingRequests',
+  'getCrmBillingBalance',
+  'previewCrmRecurringSuccessors',
   'listTasks',
   'listRecordings',
   'searchBrain',
@@ -289,6 +346,21 @@ const WRITE_TOOL_NAMES = [
   'updateCrmEntitlement',
   'updateCrmParticipation',
   'setDealPipelineStage',
+  'assignCrmReference',
+  'saveCrmCustomerAccount',
+  'prepareCrmInvoice',
+  'reviseCrmPreparation',
+  'markCrmPreparationReady',
+  'saveCrmChangeRequest',
+  'submitCrmChangeRequest',
+  'withdrawCrmChangeRequest',
+  'updateCrmEngagementTracking',
+  'setCrmCommercialValues',
+  'commitCrmRecurringSuccessors',
+  'saveCrmBillingRequest',
+  'cancelCrmBillingRequest',
+  'recordCrmExternalInvoice',
+  'correctCrmExternalInvoiceReference',
   'updateTask',
 ] as const
 
@@ -573,6 +645,17 @@ describe('[COMP:api/brain-mcp] authenticateBrainRequest', () => {
   it('rejects a missing Authorization header', async () => {
     const { store } = await fakeKeyStore()
     expect(await authenticateBrainRequest(reqWith(), { brainKeyStore: store })).toBeNull()
+  })
+
+  it('acts as the key issuer, and refuses the key once the issuer has left the workspace', async () => {
+    const { id, plaintext, store } = await fakeKeyStore()
+    const issuer = randomUUID()
+    const row = (await store.getByIdSystem(id))!
+    const lookup = vi.spyOn(store, 'getByIdSystem').mockResolvedValue({ ...row, credentialOwnerUserId: issuer })
+    const auth = await authenticateBrainRequest(reqWith(`Bearer ${plaintext}`), { brainKeyStore: store })
+    expect(auth?.actingUserId).toBe(issuer)
+    lookup.mockResolvedValue({ ...row, credentialOwnerUserId: null })
+    expect(await authenticateBrainRequest(reqWith(`Bearer ${plaintext}`), { brainKeyStore: store })).toBeNull()
   })
 
   it('rejects changed Brain-key context and admission evidence on retained authentication', async () => {
@@ -1982,3 +2065,38 @@ describe('[COMP:api/brain-mcp] scoped-search workspace gate', () => {
     expect(body).not.toContain('No workspace is bound to this call')
   })
 })
+
+describe('[COMP:api/brain-mcp] task responsibility parity with the core tools', () => {
+  it('exposes executor, follow-up, home and the guarded claim, and passes them to the same store command', async () => {
+    const created: Record<string, unknown>[] = []
+    const updates: Array<{ fields: Record<string, unknown>; precondition: boolean }> = []
+    const store = {
+      create: async (params: Record<string, unknown>) => { created.push(params); return { id: '44444444-4444-4444-4444-444444444444', workspaceId: params.workspaceId, title: params.title, status: 'todo', assigneeId: null, due: null, tags: [], parentId: null, externalRef: {}, attributes: {}, createdAt: new Date(), updatedAt: new Date() } },
+      update: async (_u: string, id: string, fields: Record<string, unknown>, opts?: { precondition?: unknown }) => { updates.push({ fields, precondition: !!opts?.precondition }); return { id, workspaceId: '33333333-3333-3333-3333-333333333333', title: 'T', status: 'todo', assigneeId: null, due: null, tags: [], parentId: null, externalRef: {}, attributes: {}, createdAt: new Date(), updatedAt: new Date() } },
+      getById: async () => null,
+      list: async () => [],
+    } as unknown as TaskStore
+    const core = createTaskTools(store)
+    const tools = buildBrainTools({
+      workspaceId: '33333333-3333-3333-3333-333333333333',
+      scope: 'read_write',
+      keyId: 'aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa',
+      maxClearance: null,
+      ...ALL_STUBS,
+      taskTools: { ...TASK_TOOLS_STUB, saveTask: core.saveTask, updateTask: core.updateTask },
+    })
+    const save = tools.find((t) => t.name === 'saveTask')!
+    const update = tools.find((t) => t.name === 'updateTask')!
+    for (const key of ['executor_assistant_id', 'follow_up_member_id', 'home']) {
+      expect(Object.keys(save.inputSchema)).toContain(key)
+      expect(Object.keys(update.inputSchema)).toContain(key)
+    }
+    expect(Object.keys(update.inputSchema)).toContain('if_unassigned')
+    const assistant = '55555555-5555-5555-5555-555555555555', dept = '66666666-6666-6666-6666-666666666666'
+    await save.handler({ title: 'Bridged', executor_assistant_id: assistant, home: { kind: 'department', id: dept } })
+    expect(created[0]).toMatchObject({ executorAssistantId: assistant, home: { kind: 'department', id: dept } })
+    await update.handler({ id: '44444444-4444-4444-4444-444444444444', executor_assistant_id: assistant, if_unassigned: true })
+    expect(updates[0]).toEqual({ fields: { executorAssistantId: assistant }, precondition: true })
+  })
+})
+

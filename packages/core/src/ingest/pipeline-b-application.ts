@@ -76,7 +76,12 @@ export type PipelineBFinalizationApplication = PipelineBSourceEnvelope & {
   sensitivityResult: unknown | null
 }
 
+export type PipelineBDeliveryApplication = PipelineBSourceEnvelope & {
+  command: 'delivery_commitment'
+  proposal: import('../crm/delivery-oversight.js').DeliveryProposal
+}
 export type PipelineBApplicationCommand =
+  | PipelineBDeliveryApplication
   | PipelineBEntityApplication
   | PipelineBEdgeApplication
   | PipelineBMemoryApplication
@@ -99,6 +104,6 @@ export function isPipelineBApplicationCommand(value: unknown): value is Pipeline
   if (!value || typeof value !== 'object') return false
   const command = (value as { command?: unknown }).command
   return typeof command === 'string' && [
-    'entity', 'edge', 'digest_edge', 'memory', 'digest_memory', 'task', 'episode_finalization',
+    'delivery_commitment', 'entity', 'edge', 'digest_edge', 'memory', 'digest_memory', 'task', 'episode_finalization',
   ].includes(command)
 }

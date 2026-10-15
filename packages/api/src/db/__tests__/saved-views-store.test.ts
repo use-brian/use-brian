@@ -697,7 +697,7 @@ describe('[COMP:api/saved-views-store] idempotent offline creation', () => {
     const [user, sql, params] = mockQueryWithRLS.mock.calls[0] as [string, string, unknown[]]
     expect(user).toBe(USER_ID)
     expect(sql).toContain('ON CONFLICT (id) DO NOTHING')
-    expect(params[20]).toBe(VIEW_ID)
+    expect(params[21]).toBe(VIEW_ID)
   })
   it('returns the existing page without overwriting edits or emitting creation again', async () => {
     const emit = vi.fn()

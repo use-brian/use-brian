@@ -36,6 +36,7 @@ import {
   ArrowRight,
   ExternalLink,
   FileText,
+  FlaskConical,
   Globe,
   Monitor,
   NotebookText,
@@ -66,13 +67,14 @@ import { docPagePath } from "@/lib/doc-page-url";
 import { ChatDocumentBody } from "./chat-document-viewer";
 import { PanePageBody, PaneUrlBody } from "./chat-pane-bodies";
 import { PaneBrowserBody } from "./chat-pane-browser";
+import { ResearchDetail } from "./research-detail";
 
 const CHAT_SIDE_PANE_ID = "chat-side-pane";
 
 /** A tab's visible label. */
 function paneTabLabel(
   ref: PaneRef,
-  t: { work: string; untitledPage: string; browser: string },
+  t: { work: string; untitledPage: string; browser: string; research: string },
 ): string {
   switch (ref.kind) {
     case "work":
@@ -87,6 +89,8 @@ function paneTabLabel(
       return ref.title?.trim() || hostOf(ref.url);
     case "browser":
       return ref.title?.trim() || (ref.url ? hostOf(ref.url) : t.browser);
+    case "research":
+      return t.research;
   }
 }
 
@@ -113,6 +117,8 @@ function TabIcon({ kind }: { kind: PaneRef["kind"] }) {
       return <Globe className={cls} aria-hidden />;
     case "browser":
       return <Monitor className={cls} aria-hidden />;
+    case "research":
+      return <FlaskConical className={cls} aria-hidden />;
   }
 }
 
@@ -162,6 +168,13 @@ export function ChatSidePane({
       <PanePageBody key={ref.pageId} pageId={ref.pageId} />
     ) : ref.kind === "url" ? (
       <PaneUrlBody key={ref.url} url={ref.url} title={ref.title ?? null} />
+    ) : ref.kind === "research" ? (
+      <ResearchDetail
+        key={ref.activityId}
+        workspaceId={workspaceId}
+        activityId={ref.activityId}
+        onOpenArtifact={(a) => { if (a.kind === "page") pane.open({ kind: "page", pageId: a.artifactId }) }}
+      />
     ) : ref.kind === "browser" ? (
       <PaneBrowserBody
         key={ref.browserId}

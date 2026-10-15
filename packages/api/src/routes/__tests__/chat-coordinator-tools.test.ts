@@ -10,7 +10,7 @@ const nativeNames = [
 ]
 const planNames = ['setPlan', 'updatePlanStep', 'abandonPlan']
 const supportNames = [
-  'saveFileToBrain', 'fileSearch', 'getOfficeArtifact',
+  'saveFileToBrain', 'fileSearch', 'searchFileContent', 'getOfficeArtifact',
   'openPdfEditingSession', 'reviseOfficeArtifact', 'placePdfSignature',
 ]
 const disallowed = ['webSearch', 'urlReader', 'mcpSearch', 'mcpCall', 'mcp__ocr__extract',
@@ -23,8 +23,8 @@ function tools() {
   })
   const result = new Map(native.map(tool => [tool.name, tool]))
   for (const name of [...supportNames, ...disallowed, 'spawnWorker', 'saveMemory', 'delegateDocEdit', 'saveContact']) {
-    result.set(name, { name, isReadOnly: ['getOfficeArtifact', 'fileSearch'].includes(name), requiresCapability: supportNames.includes(name)
-      ? ['saveFileToBrain', 'fileSearch'].includes(name) ? 'files' : 'office' : undefined } as Tool)
+    result.set(name, { name, isReadOnly: ['getOfficeArtifact', 'fileSearch', 'searchFileContent'].includes(name), requiresCapability: supportNames.includes(name)
+      ? ['saveFileToBrain', 'fileSearch', 'searchFileContent'].includes(name) ? 'files' : 'office' : undefined } as Tool)
   }
   for (const tool of Object.values(createPlanTools({} as PlanStore))) result.set(tool.name, tool)
   return result
@@ -55,6 +55,7 @@ describe('chat coordinator tool admission', () => {
       for (const name of nativeNames.slice(0, 4)) expect(output.has(name)).toBe(false)
       expect(output.has('saveFileToBrain')).toBe(false)
       expect(output.has('fileSearch')).toBe(false)
+      expect(output.has('searchFileContent')).toBe(false)
     }
     if (!grants.includes('office')) {
       for (const name of ['proposeOfficeEvidenceFill', 'getOfficeArtifact', 'openPdfEditingSession', 'reviseOfficeArtifact', 'placePdfSignature']) {

@@ -72,6 +72,7 @@ export function staleMarksFor(event: string, workspaceId: string): string[] {
       // Shopify families (`shopify:`, `shopify-drafts:`), which read an
       // EXTERNAL store no workspace event ever describes.
       return [
+        `delivery:${workspaceId}:`,
         `project:${workspaceId}:`,
         `tasks:${workspaceId}`,
         `crm:${workspaceId}:`,
@@ -87,13 +88,22 @@ export function staleMarksFor(event: string, workspaceId: string): string[] {
         `brain-entry:${workspaceId}:`,
         `brain-blueprint:${workspaceId}:`,
         `feed-collaboration:${workspaceId}`,
+        // Every task change (claim, follow-up, status, supersession) can move
+        // a card between work sections or out of them, and the dock's task
+        // counts move with it (project-briefs.md -> "Work" -> "Freshness").
+        `work:${workspaceId}`,
+        `home-dock:${workspaceId}`,
+        // A control, checkpoint or external report notifies the task's
+        // brain row; every tab's workbench revalidates from the server.
+        `task-execution:${workspaceId}`,
       ];
     case APPROVALS_REFRESH_EVENT:
       // The home dock's "needs you" counts move with every approval created
       // or resolved, so the Suggested badge, the Home pane and the workspace
       // root (which lands on Suggested off the same dock) all revalidate here
       // instead of through a listener of the provider's own.
-      return [`approvals:${workspaceId}`, `crm:${workspaceId}:`, `home-dock:${workspaceId}`];
+      // A resolved Goal approval also clears its "answer" work card.
+      return [`approvals:${workspaceId}`, `routine-intake:${workspaceId}`, `crm:${workspaceId}:`, `home-dock:${workspaceId}`, `work:${workspaceId}`];
     case WORKFLOW_REFRESH_EVENT:
       // The detail key is mark-stale only, never invalidate: an open editable
       // draft must not be clobbered (realtime-sync.md -> editable-draft rule).
@@ -105,6 +115,7 @@ export function staleMarksFor(event: string, workspaceId: string): string[] {
         `project:${workspaceId}:`,
         `workflow:${workspaceId}`,
         `workflow-detail:${workspaceId}:`,
+        `routine-intake:${workspaceId}`,
         `workflow-run:${workspaceId}:`,
         // A run starting or settling is a Live roster row appearing or
         // moving to "Just finished" (`live-work.md` section 3 interleaves
@@ -131,6 +142,9 @@ export function staleMarksFor(event: string, workspaceId: string): string[] {
         // (`/api/assistants` filtered to `appType='distribution'`), so a
         // brand voice created from chat reaches the Feed gate too.
         `feed-workspace:${workspaceId}`,
+        // Work cards name their executor assistant; a rename, placement or
+        // removal re-resolves them (and an executor's removal unassigns).
+        `work:${workspaceId}`,
       ];
     case "brian:organization-changed":
       return [`workspace-access:${workspaceId}:`, `organization:${workspaceId}:`, `scope-review:${workspaceId}:`];
@@ -152,6 +166,7 @@ export function staleMarksFor(event: string, workspaceId: string): string[] {
       // the Chat rail's two lists as well as the Live roster - the spine gap
       // report E named ("a `session` fan-out to chat").
       return [
+        `delivery:${workspaceId}:`,
         `live:${workspaceId}`,
         `chat-sessions:${workspaceId}`,
         `project:${workspaceId}:`,
@@ -174,7 +189,9 @@ export function staleMarksFor(event: string, workspaceId: string): string[] {
       // full page). The panels used to rely on a local refetch tick only
       // the acting tab could bump; the same-tab `requestGoalRefresh` now
       // lands here too, so one path serves both legs.
-      return [`goals:${workspaceId}`, `triage:${workspaceId}`, `goal:${workspaceId}:`, `feed-collaboration:${workspaceId}`];
+      // A hosted Goal becoming blocked or awaiting approval moves a work card
+      // into Needs you, and its resolution moves it back.
+      return [`delivery:${workspaceId}:`, `goals:${workspaceId}`, `triage:${workspaceId}`, `goal:${workspaceId}:`, `feed-collaboration:${workspaceId}`, `work:${workspaceId}`];
     case OFFICE_REFRESH_EVENT:
       // The `office` primitive: a job changed status or recorded progress.
       // The Office list (`office:<wid>:<viewer>:<view>`) and the template
@@ -225,6 +242,12 @@ export function applySpineEventToSurfaceCache(
   const drop = detail?.catchUp === true ? markSurfaceCacheStale : invalidateSurfaceCache;
   if (event === BRAIN_REFRESH_EVENT || event === WORKSPACE_IDENTITY_REFRESH_EVENT) drop(`workspace-member-directory:${workspaceId}:`);
   if (event === BRAIN_REFRESH_EVENT || event === WORKSPACE_IDENTITY_REFRESH_EVENT) drop(`page-directory:${workspaceId}:`);
+  if (event === BRAIN_REFRESH_EVENT || event === WORKSPACE_IDENTITY_REFRESH_EVENT || event === "brian:organization-changed" || event === ASSISTANT_REFRESH_EVENT) {
+    drop(`delivery:${workspaceId}:`);
+    drop(`routine-intake:${workspaceId}`);
+    drop(`engineering-history:${workspaceId}`);
+    drop(`brain-keys:${workspaceId}`);
+  }
   if (event === BRAIN_REFRESH_EVENT) {
     drop(`project:${workspaceId}:`);
     drop(`doc-media:${workspaceId}:`);
@@ -240,6 +263,11 @@ export function applySpineEventToSurfaceCache(
   }
   if (event === WORKSPACE_IDENTITY_REFRESH_EVENT || event === "brian:organization-changed") {
     // Authority changes purge even an unmounted directory/access surface.
+    // Work cards are protected content and owner routing moves with
+    // Department ownership, so a revocation evicts them, never just marks.
+    drop(`delivery:${workspaceId}:`);
+    drop(`work:${workspaceId}`);
+    drop(`task-execution:${workspaceId}`);
     drop(`live:${workspaceId}:`);
     drop(`projects:${workspaceId}`);
     drop(`project:${workspaceId}:`);
@@ -261,7 +289,8 @@ export function applySpineEventToSurfaceCache(
     drop(`office-snapshot:${workspaceId}:`);
   }
   for (const prefix of staleMarksFor(event, workspaceId)) {
-    markSurfaceCacheStale(prefix);
+    if(prefix.startsWith(`delivery:${workspaceId}:`))invalidateSurfaceCache(prefix);
+    else markSurfaceCacheStale(prefix);
   }
 }
 

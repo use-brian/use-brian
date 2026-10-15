@@ -75,6 +75,18 @@ export const WORKSPACE_FLUSH_TABLES = [
   'campaign_command_receipts',
   'campaigns',
   // Automation + approvals
+  'task_routine_intake_receipts',
+  // Delegated approval review (features/approval-review.md): receipts,
+  // attempts and support reference requests; patterns and assignments are
+  // learned/operational state; route bindings and events are per workflow.
+  'approval_delegated_resolutions',
+  'approval_review_attempts',
+  'approval_pattern_support',
+  'approval_patterns',
+  'approval_review_assignments',
+  'approval_review_attention_seen',
+  'operational_route_events',
+  'operational_route_bindings',
   'pending_approvals',
   // Human decision learning (provenance first, then domain hard state, event,
   // application). All five are learned content, never preserved audit shell.
@@ -151,11 +163,28 @@ export const WORKSPACE_FLUSH_TABLES = [
   'crm_consent_purposes',
   'crm_segments',
   'episodes',
-  // Tasks + goals
+  // Tasks + goals. Execution receipts/states/segments before their pools;
+  // states cascade with goals too, but are listed for the classifier.
   'tasks',
+  'task_execution_commands',
+  'task_execution_states',
+  'task_execution_segments',
+  'task_execution_pools',
   'goals',
   'goal_crm_event_sources', // after goals and workflow runs; causal receipt cleanup
   'goal_recipes',
+  // Saved research manifests, follow-ups and learned research lessons
+  // (features/research.md). Children before parents; the activities would
+  // also cascade with their sessions. `assistant_playbook_rules` carries a
+  // workspace_id only on research lessons, so the workspace delete removes
+  // exactly the lessons learned from this workspace's flushed follow-ups.
+  'research_feedback_revisions',
+  'research_feedback',
+  'research_artifact_links',
+  'research_activities',
+  'research_comparisons',
+  'research_improvements',
+  'assistant_playbook_rules',
   // Knowledge
   'kb_chunks',
   'knowledge_entries',

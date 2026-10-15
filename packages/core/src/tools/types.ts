@@ -167,6 +167,9 @@ export type ToolContext = {
     approverUserId: string
     toolName: string
   }
+  /** Server-stamped exact staged-write review, supplied only by authenticated
+   * native approval apply. A credential or tool input cannot construct it. */
+  approvedStagedWrite?: { approvalId: string; approverUserId: string; authSessionId: string }
   /**
    * The user's current effective timezone (IANA, e.g. 'Asia/Hong_Kong').
    * Resolved per-request in this order: (1) `X-Client-Timezone` header
@@ -609,7 +612,7 @@ const TOOL_DEFAULTS: ToolDefaults = {
   requiresConfirmation: false,
 }
 
-type ToolInput<Input extends z.ZodType> = Omit<Tool<Input>, keyof ToolDefaults> & Partial<ToolDefaults>
+export type ToolInput<Input extends z.ZodType> = Omit<Tool<Input>, keyof ToolDefaults> & Partial<ToolDefaults>
 
 export function buildTool<Input extends z.ZodType>(def: ToolInput<Input>): Tool<Input> {
   return { ...TOOL_DEFAULTS, ...def }

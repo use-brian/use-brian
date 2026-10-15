@@ -410,6 +410,10 @@ export function workflowDetailCacheKey(workspaceId: string, workflowId: string):
   return `workflow-detail:${workspaceId}${viewerSuffix()}:${workflowId}`;
 }
 
+export function routineIntakeCacheKey(workspaceId:string,id:string):string {
+  return `routine-intake:${workspaceId}${viewerSuffix()}:${id}`;
+}
+
 export function workflowRunCacheKey(workspaceId: string, runId: string): string {
   return `workflow-run:${workspaceId}${viewerSuffix()}:${runId}`;
 }
@@ -598,6 +602,31 @@ export function homeDockCacheKey(workspaceId: string): string {
 }
 
 /**
+ * The viewer-bound work projection (Chat work entry + Brief work section).
+ * Workspace first, then viewer, then scope, so `work:<wid>` stale-marks every
+ * scope after a task or approval change. Spec: project-briefs.md -> "Work".
+ */
+/** One task's execution (chat-app.md -> "Task execution workbench"). Viewer
+ *  keyed: the projection is source-filtered for the reader. */
+export function taskExecutionCacheKey(workspaceId: string, taskId: string): string {
+  return `task-execution:${workspaceId}${viewerSuffix()}:${taskId}`
+}
+
+export function deliveryCommitmentsCacheKey(workspaceId:string,scope:{kind:'personal'}|{kind:'project'|'department';id:string},cursor='',chatId=''):string {
+  return `delivery:${workspaceId}${viewerSuffix()}:${scope.kind==='personal'?'personal':`${scope.kind}:${scope.id}`}:${cursor}:${chatId}`;
+}
+export function deliveryDetailCacheKey(workspaceId:string,id:string,chatId=''):string {
+  return `delivery:${workspaceId}${viewerSuffix()}:detail:${id}:${chatId}`;
+}
+
+export function workCacheKey(
+  workspaceId: string,
+  scope: { kind: "personal" } | { kind: "department" | "project"; id: string },
+): string {
+  return `work:${workspaceId}${viewerSuffix()}:${scope.kind === "personal" ? "personal" : `${scope.kind}:${scope.id}`}`;
+}
+
+/**
  * In-memory key for the sidebar page tree (`saved` + `drafts` + teamspaces,
  * fetched in parallel by `doc-sidebar-data.tsx`).
  *
@@ -780,6 +809,11 @@ export function computerTaskCacheKey(workspaceId: string, sessionId: string): st
 
 export function projectDetailCacheKey(workspaceId: string, projectId: string): string {
   return `project:${workspaceId}${viewerSuffix()}:${projectId}`;
+}
+
+/** Whether shared Project spaces are on for the workspace (project-shared-spaces.md). */
+export function projectSharedCapabilityCacheKey(workspaceId: string): string {
+  return `project:${workspaceId}${viewerSuffix()}:shared-capability`;
 }
 
 export function homeAppSessionCacheKey(workspaceId: string, appId: string): string {
@@ -1086,4 +1120,9 @@ export function connectorReconnectCacheKey(workspaceId:string,userId:string,inst
 
 export function projectContentCacheKey(workspaceId: string, projectId: string, view: string, query: string, offset: number): string {
   return `${projectDetailCacheKey(workspaceId, projectId)}:content:${JSON.stringify([view, query, offset])}`;
+}
+
+/** Engineering originals are protected, viewer-scoped memory-only projections. */
+export function engineeringHistoryCacheKey(workspaceId: string, selection: string): string {
+  return `engineering-history:${workspaceId}${viewerSuffix()}:${selection}`;
 }

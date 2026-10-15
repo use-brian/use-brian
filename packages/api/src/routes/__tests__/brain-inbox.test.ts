@@ -330,7 +330,7 @@ describe('[COMP:api/brain-inbox-route] Brain inbox route', () => {
       'u_caller', ROW,
       { title: 'Refreshed', status: 'in_progress', due: null },
       undefined,
-      { access: ACCESS },
+      { access: ACCESS, assignment: { actorUserId: 'u_caller', origin: 'ui' } },
     )
   })
 
@@ -382,7 +382,7 @@ describe('[COMP:api/brain-inbox-route] Brain inbox route', () => {
       'u_caller', ROW,
       { assigneeId: 'member-1', attributes: { order: 3, priority: 'high' } },
       undefined,
-      { access: ACCESS },
+      { access: ACCESS, assignment: { actorUserId: 'u_caller', origin: 'ui' } },
     )
   })
 
@@ -402,7 +402,7 @@ describe('[COMP:api/brain-inbox-route] Brain inbox route', () => {
       'u_caller', ROW,
       { assigneeId: null, attributes: { order: 3 } },
       undefined,
-      { access: ACCESS },
+      { access: ACCESS, assignment: { actorUserId: 'u_caller', origin: 'ui' } },
     )
   })
 
@@ -422,7 +422,7 @@ describe('[COMP:api/brain-inbox-route] Brain inbox route', () => {
       'u_caller', ROW,
       { attributes: { priority: 'high', description: 'Deep context\n\n- [ ] step one' } },
       undefined,
-      { access: ACCESS },
+      { access: ACCESS, assignment: { actorUserId: 'u_caller', origin: 'ui' } },
     )
 
     mockGetBrainInboxRow.mockResolvedValueOnce(scopedRow('task', {
@@ -439,7 +439,7 @@ describe('[COMP:api/brain-inbox-route] Brain inbox route', () => {
       'u_caller', ROW,
       { attributes: { priority: 'high' } },
       undefined,
-      { access: ACCESS },
+      { access: ACCESS, assignment: { actorUserId: 'u_caller', origin: 'ui' } },
     )
   })
 
@@ -466,7 +466,7 @@ describe('[COMP:api/brain-inbox-route] Brain inbox route', () => {
       'u_caller', ROW,
       { attributes: { priority: 'high', description: 'Context', icon: '🚀' } },
       undefined,
-      { access: ACCESS },
+      { access: ACCESS, assignment: { actorUserId: 'u_caller', origin: 'ui' } },
     )
 
     mockGetBrainInboxRow.mockResolvedValueOnce(scopedRow('task', {
@@ -483,7 +483,7 @@ describe('[COMP:api/brain-inbox-route] Brain inbox route', () => {
       'u_caller', ROW,
       { attributes: { priority: 'high' } },
       undefined,
-      { access: ACCESS },
+      { access: ACCESS, assignment: { actorUserId: 'u_caller', origin: 'ui' } },
     )
   })
 

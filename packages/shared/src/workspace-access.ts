@@ -91,7 +91,15 @@ export type ScopeReviewKind =
   | 'session_message'|'feedback_event'|'workspace_skill_revision'
   | 'file_cache'|'file_segment'|'recording'|'transcript_segment'
   | 'entity_instance'|'blueprint_record'|'office_artifact'
-export type ScopeReviewAction = 'confirm_general'|'assign_team'|'consolidate_default'|'hold'
+export type ScopeReviewAction = 'confirm_general'|'assign_team'|'consolidate_default'|'hold'|'release'
+/** Why a held row cannot be released yet. Closed set; never names a hidden axis beyond the row's own labels. */
+export type ScopeHoldBlockedReason = 'source_removed'|'source_held'|'labels_changed'|'no_lineage'|'administrator_hold'|'not_held'
+/** Automatic re-check of a held row (docs/plans/scope-hold-recovery.md §3). Release is still by hand. */
+export type ScopeHoldRecovery = {status:'safe'}|{status:'blocked';reason:ScopeHoldBlockedReason}
+/** A release's frozen re-derivation plan: each recorded source resolved to its current head. */
+export type ScopeHoldReleasePlan = {heads:Array<{resourceKind:ScopeReviewKind;resourceId:string;version:string}>}
+/** A member's own hidden rows (D3): a count only, never content or reason. */
+export type HeldMemorySummary = {count:number;requestedAt:string|null}
 export type ScopeReviewCommand =
   | {type:'scope.review.preview';resourceKind:ScopeReviewKind;resourceIds:string[];action:ScopeReviewAction;targetTeamId:string|null;reason:string}
   | {type:'scope.review.apply'|'scope.review.cancel';reviewId:string;expectedVersion:string;payloadHash:string}
@@ -123,7 +131,7 @@ export type ScopeReviewConsolidation = {
 }
 export type ScopeReviewImpact =
   | {version:1;descendants:Array<{resourceId:string;version:string;held:boolean}>}
-  | {version:2;descendants:Array<{resourceKind:ScopeReviewKind;resourceId:string;version:string;held:boolean}>;dependents:Record<string,string>;consolidation?:ScopeReviewConsolidation}
+  | {version:2;descendants:Array<{resourceKind:ScopeReviewKind;resourceId:string;version:string;held:boolean}>;dependents:Record<string,string>;consolidation?:ScopeReviewConsolidation;release?:ScopeHoldReleasePlan}
 export type ScopeReviewCoverageFamily = {
   family:string;category:'source'|'impact'|'binding'|'job';total:string;unresolved:string;held:string
 }
@@ -132,7 +140,9 @@ export type ScopeReviewCoverage = {
 }
 export type ScopeReviewInventory = {
   validForMs:number;resourceKind:ScopeReviewKind;total:string;nextCursor:string|null;supportedKinds:ScopeReviewKind[]
-  items:Array<{id:string;version:string;held:boolean;sensitivity:string|null;compartments:string[]|null;projectIds:string[]|null;userId:string|null;assistantId:string|null;canClassify:boolean;allowedActions:ScopeReviewAction[];content:ScopeReviewContent}>
+  items:Array<{id:string;version:string;held:boolean;sensitivity:string|null;compartments:string[]|null;projectIds:string[]|null;userId:string|null;assistantId:string|null;canClassify:boolean;allowedActions:ScopeReviewAction[];content:ScopeReviewContent;recovery?:ScopeHoldRecovery}>
+  /** Open member requests to review hidden memories (D3), for the admin screen. */
+  releaseRequests?:number
   registryRevision:string;reviewedInventoryRevision:string|null;coverage:ScopeReviewCoverage
   policyRevision:string;classificationMode:'legacy'|'review'|'strict';readiness:DepartmentalReadiness;canActivateStrict:boolean
   completeCoverage:boolean;uncovered:string[];recentReviews:ScopeReviewSummary[];nextReviewCursor:string|null;selectedReview:ScopeReview|null

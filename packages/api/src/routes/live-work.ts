@@ -128,6 +128,14 @@ type SessionRosterRow = {
   assistantName: string
   assistantIconSeed: number
   assistantWorkspaceId: string
+  /**
+   * The latest turn's answering assistant (`sessions.turn_assistant_id`),
+   * resolved only inside the bound assistant's workspace; null = the bound
+   * assistant answered (or no re-addressed turn yet).
+   */
+  voiceAssistantId: string | null
+  voiceAssistantName: string | null
+  voiceAssistantIconSeed: number | null
   userId: string
   ownerName: string | null
   channelType: string
@@ -197,15 +205,20 @@ export function projectSessionRow(
     lastActiveAt: row.lastActiveAt,
     now,
   })
+  // The assistant fields name the VOICE of the latest turn, not the binding:
+  // a doc-dock or room send re-addresses per turn (§"Voice label").
+  const voice = row.voiceAssistantId && row.voiceAssistantName !== null
+    ? { id: row.voiceAssistantId, name: row.voiceAssistantName, iconSeed: row.voiceAssistantIconSeed ?? 0 }
+    : { id: row.assistantId, name: row.assistantName, iconSeed: row.assistantIconSeed }
   // The §6.1 presence allowlist, built from NAMED fields — this object IS
   // the projection boundary; full tier extends it, presence ships it as-is.
   const base: LiveSessionItem = {
     kind: 'session',
     tier,
     id: row.id,
-    assistantId: row.assistantId,
-    assistantName: row.assistantName,
-    assistantIconSeed: row.assistantIconSeed,
+    assistantId: voice.id,
+    assistantName: voice.name,
+    assistantIconSeed: voice.iconSeed,
     ownerUserId: row.userId,
     ownerName: row.ownerName,
     channelType: row.channelType,
@@ -272,6 +285,9 @@ async function fetchSessionRows(workspaceId: string): Promise<SessionRosterRow[]
             a.name                   AS "assistantName",
             COALESCE(a.icon_seed, 0) AS "assistantIconSeed",
             a.workspace_id           AS "assistantWorkspaceId",
+            v.id                     AS "voiceAssistantId",
+            v.name                   AS "voiceAssistantName",
+            v.icon_seed              AS "voiceAssistantIconSeed",
             s.user_id                AS "userId",
             u.name                   AS "ownerName",
             s.channel_type           AS "channelType",
@@ -302,6 +318,12 @@ async function fetchSessionRows(workspaceId: string): Promise<SessionRosterRow[]
             ) AS "waiting"
        FROM sessions s
        JOIN assistants a ON a.id = s.assistant_id
+       -- The latest turn's voice, only from the SAME workspace as the
+       -- binding: a voice resolved anywhere else would name an assistant
+       -- the §6-a boundary keeps off this roster.
+       LEFT JOIN assistants v ON v.id = s.turn_assistant_id
+                             AND v.id <> s.assistant_id
+                             AND v.workspace_id = a.workspace_id
        LEFT JOIN users u ON u.id = s.user_id
       WHERE a.workspace_id = $1 AND feed_draft_audience_allowed(s.id)
         -- An Office file's thread is read by the file's audience only; its

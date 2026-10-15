@@ -60,3 +60,16 @@ export function createTurnTiming(now: () => number = Date.now): TurnTiming {
   }
   return timing
 }
+
+/**
+ * Close the turn's last phase for the turn-end log. A loop that throws never
+ * reaches its `mark('loop')`, so without this the whole model run was booked
+ * as `post_ms` (2026-10-12: a 277 s research turn logged `post_ms=275957`,
+ * pointing an investigation at post-processing that took under a second).
+ * A turn that started its loop and never closed it ends that phase as `loop`.
+ */
+export function markTurnEnd(timing: TurnTiming): void {
+  const phases = timing.snapshot()
+  if ('prompt_ms' in phases && !('loop_ms' in phases)) timing.mark('loop')
+  timing.mark('post')
+}

@@ -62,7 +62,13 @@ export type BrainKeyRow = {
 /** Internal — includes the hash. Never returned from public store methods. */
 type BrainKeyRowWithHash = BrainKeyRow & {
   keyHash: string
-  credentialOwnerUserId?: string
+  /**
+   * The human the key acts as (permission model v2 D13/K2): its issuer while
+   * that person is still a workspace member, the workspace owner for a legacy
+   * key with no recorded issuer, and NULL when the issuer has left, which
+   * makes the key unusable rather than handing it to the owner.
+   */
+  credentialOwnerUserId?: string | null
   configurationSessionId?: string | null
   admittedCompartments?: string[] | null
   admittedProjectIds?: string[] | null
@@ -251,7 +257,12 @@ export function createDbBrainKeyStore(): BrainKeyStore {
                 configuration_session_id AS "configurationSessionId",
                 admitted_compartments AS "admittedCompartments",
                 admitted_project_ids AS "admittedProjectIds",
-                (SELECT owner_user_id FROM workspaces WHERE id=brain_keys.workspace_id) AS "credentialOwnerUserId"
+                CASE WHEN issuer_user_id IS NULL
+                       THEN (SELECT owner_user_id FROM workspaces WHERE id=brain_keys.workspace_id)
+                     WHEN EXISTS (SELECT 1 FROM workspace_members m
+                                   WHERE m.workspace_id=brain_keys.workspace_id AND m.user_id=brain_keys.issuer_user_id)
+                       THEN issuer_user_id
+                END AS "credentialOwnerUserId"
          FROM brain_keys
          WHERE id = $1 AND external_brain_key_current(id)
          LIMIT 1`,

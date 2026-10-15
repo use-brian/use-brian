@@ -22,6 +22,16 @@ describe('[COMP:api/migration-order] Migration filename compatibility', () => {
     expect(findAppliedMigrationRenames(new Set([previousName, currentName]))).toEqual([])
   })
 
+  it('preserves the applied file ingest bookkeeping fix beside the session turn assistant it collided with', () => {
+    const previousName = '752_file_ingest_bookkeeping_not_semantic.sql'
+    const currentName = '771_file_ingest_bookkeeping_not_semantic.sql'
+    const sessionTurnAssistant = '752_session_turn_assistant.sql'
+    expect(findAppliedMigrationRenames(new Set([previousName, sessionTurnAssistant])))
+      .toEqual([{ previousName, currentName }])
+    expect(findAppliedMigrationRenames(new Set([sessionTurnAssistant]))).toEqual([])
+    expect(findAppliedMigrationRenames(new Set([previousName, currentName]))).toEqual([])
+  })
+
   it('aliases applied migrations to their collision-free names', () => {
     const aliases = findAppliedMigrationRenames(
       new Set([
