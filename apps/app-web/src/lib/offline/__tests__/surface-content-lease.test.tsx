@@ -24,9 +24,10 @@ vi.mock("@/lib/offline/idb", () => ({
 }));
 vi.mock("@/lib/user", () => ({ getUserInfo: () => ({ id: "viewer-a", name: "n", email: "e" }) }));
 
-import { mutateSurfaceCache, readSurfaceCache, resetSurfaceCache, useCachedResource } from "@/lib/surface-cache";
+import { SurfaceCacheEvictionError, loadSurfaceCache, mutateSurfaceCache, readSurfaceCache, resetSurfaceCache, useCachedResource } from "@/lib/surface-cache";
 import {
   OFFLINE_AUTHORITY_MS,
+  isSurfaceContentExpiry,
   SURFACE_CONTENT_LEASE_MS,
   leaseSurfaceContent,
   readSurfaceContentCache,
@@ -134,5 +135,21 @@ describe("[COMP:app-web/surface-content-cache] Content lease for protected lists
     await writeSurfaceContentCache(scope, "tasks", KEY, ["Fictional future row"]);
     vi.setSystemTime(Date.now() - 120_000);
     expect(await readSurfaceContentCache(scope, "tasks", KEY, isRows)).toBeNull();
+  });
+  it("classifies a read slower than the lease as expiry, not as a failed read", async () => {
+    const slow = loadSurfaceCache(KEY, () =>
+      leaseSurfaceContent(() => new Promise<string[]>((resolve) => {
+        setTimeout(() => resolve(["Fictional late row"]), SURFACE_CONTENT_LEASE_MS + 1);
+      })),
+      { expiresInMs: surfaceContentRemaining },
+    );
+    await act(async () => { vi.advanceTimersByTime(SURFACE_CONTENT_LEASE_MS + 1); });
+    await slow;
+    const entry = readSurfaceCache<string[]>(KEY);
+    expect(entry.data).toBeUndefined();
+    expect(isSurfaceContentExpiry(entry.error)).toBe(true);
+    expect(isSurfaceContentExpiry(new SurfaceCacheEvictionError(new Error("surface_content_expired")))).toBe(true);
+    expect(isSurfaceContentExpiry(new Error("Request failed: 500"))).toBe(false);
+    expect(isSurfaceContentExpiry(new SurfaceCacheEvictionError(new Error("forbidden")))).toBe(false);
   });
 });

@@ -3697,6 +3697,8 @@ export const ja: Dictionary = {
     createDraftFailed: "下書きの作成に失敗しました: {message}",
     saveFailed: "保存できませんでした: {message}",
     unsaveFailed: "下書きへの移動に失敗しました: {message}",
+    pageListSlow: "ページ一覧の読み込みに通常より時間がかかっています。自動的に再試行しています。",
+    pageListFailed: "ページ一覧を更新できませんでした: {message}。自動的に再試行しています。",
     moveContextConfirmTitle: "ページを別のコンテキストへ移動しますか？",
     moveContextConfirm:
       "「{name}」とその配下のすべてのページは、移動先のチームスペースとプロジェクトを継承します。アクセスできるユーザーが変わる可能性があります。",

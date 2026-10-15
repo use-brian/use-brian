@@ -15,7 +15,11 @@
  *    stay up until the new ones land, never a blank frame;
  *  - after a full reload (memory cold) the tree seeds from the viewer-scoped
  *    IndexedDB copy while the network revalidates;
- *  - a key miss paints an empty tree, never another workspace's rows.
+ *  - a key miss paints an empty tree, never another workspace's rows;
+ *  - a tree read slower than the content lease reports slowness in the
+ *    translated banner (never the raw lease code), a refresh failure that
+ *    keeps the last good tree reports it translated, and the next good read
+ *    clears either banner on its own.
  */
 
 import { act } from "react";
@@ -31,8 +35,11 @@ vi.mock("next/navigation", () => ({
 vi.mock("@/components/ui/confirm-dialog", () => ({ confirmDialog: vi.fn() }));
 vi.mock("@/components/ui/prompt-dialog", () => ({ promptDialog: vi.fn() }));
 vi.mock("@/lib/i18n/client", () => ({
-  useT: () => ({ docPage: {} }),
-  format: (s: string) => s,
+  useT: () => ({
+    docPage: { pageListSlow: "Page list slow", pageListFailed: "Page list failed: {message}" },
+  }),
+  format: (s: string, vars?: Record<string, string>) =>
+    s.replace(/\{(\w+)\}/g, (_, k: string) => vars?.[k] ?? ""),
 }));
 vi.mock("@/lib/user", () => ({
   getUserInfo: () => ({ id: "u1", name: "n", email: "e" }),
@@ -118,6 +125,7 @@ function Probe() {
     teamspaces,
     homeApps,
     homeAppsLoading,
+    topError,
   } = useSidebarData();
   return (
     <div>
@@ -126,6 +134,7 @@ function Probe() {
       </span>
       <span data-testid="saved">{saved.map((r) => r.name).join(",")}</span>
       <span data-testid="ts">{teamspaces.map((t) => t.name).join(",")}</span>
+      <span data-testid="banner">{topError ?? ""}</span>
       <span data-testid="home-apps">
         {homeAppsLoading ? "loading" : homeApps.join(",")}
       </span>
@@ -310,5 +319,68 @@ describe("[COMP:app-web/sidebar-data] paints the dock and the tree from the cach
     expect(text("saved")).toBe("");
     expect(text("ts")).toBe("");
     expect(text("dock")).toBe("loading");
+  });
+  it("a read slower than the lease reports slowness, not the raw code, and a good read clears it", async () => {
+    let clock = 0;
+    const now = vi.spyOn(performance, "now").mockImplementation(() => clock);
+    try {
+      let releaseSaved: (rows: unknown) => void = () => {};
+      listViews.mockImplementation((params: { state: string }) =>
+        params.state === "saved"
+          ? new Promise((resolve) => {
+              releaseSaved = resolve;
+            })
+          : Promise.resolve([]),
+      );
+      listTeamspaces.mockResolvedValue([]);
+      let reload: () => void = () => {};
+      function Reloader() {
+        reload = useSidebarData().reloadSidebar;
+        return null;
+      }
+      await act(async () => {
+        root!.render(
+          <DocSidebarDataProvider workspaceId="w1">
+            <Probe />
+            <Reloader />
+          </DocSidebarDataProvider>,
+        );
+        await settle();
+      });
+      clock = 31_000;
+      await act(async () => {
+        releaseSaved([{ id: "late", name: "Late page" }]);
+        await settle();
+      });
+      expect(text("banner")).toBe("Page list slow");
+      expect(text("saved")).toBe("");
+
+      listViews.mockImplementation((params: { state: string }) =>
+        Promise.resolve(params.state === "saved" ? [{ id: "f1", name: "Fresh page" }] : []),
+      );
+      await act(async () => {
+        reload();
+        await settle();
+      });
+      expect(text("saved")).toBe("Fresh page");
+      expect(text("banner")).toBe("");
+
+      listViews.mockRejectedValue(new Error("Request failed: 503"));
+      await act(async () => {
+        reload();
+        await settle();
+      });
+      expect(text("saved")).toBe("Fresh page");
+      expect(text("banner")).toBe("Page list failed: Request failed: 503");
+
+      listViews.mockImplementation(() => Promise.resolve([]));
+      await act(async () => {
+        reload();
+        await settle();
+      });
+      expect(text("banner")).toBe("");
+    } finally {
+      now.mockRestore();
+    }
   });
 });

@@ -3683,6 +3683,8 @@ export const zh: Dictionary = {
     createDraftFailed: "無法建立草稿：{message}",
     saveFailed: "無法儲存：{message}",
     unsaveFailed: "無法移至草稿：{message}",
+    pageListSlow: "頁面清單的載入時間比平常久，正在自動重試。",
+    pageListFailed: "無法更新頁面清單：{message}。正在自動重試。",
     moveContextConfirmTitle: "要將頁面移至其他內容範圍嗎？",
     moveContextConfirm:
       "「{name}」及其所有子頁面將繼承目的地的團隊空間與專案。可存取這些頁面的使用者可能會改變。",

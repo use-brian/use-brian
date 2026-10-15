@@ -3667,6 +3667,8 @@ export const zhCN: Dictionary = {
     createDraftFailed: "无法创建草稿：{message}",
     saveFailed: "无法保存：{message}",
     unsaveFailed: "无法移至草稿：{message}",
+    pageListSlow: "页面列表的加载时间比平常久，正在自动重试。",
+    pageListFailed: "无法更新页面列表：{message}。正在自动重试。",
     moveContextConfirmTitle: "要将页面移至其他内容范围吗？",
     moveContextConfirm:
       "“{name}”及其所有子页面将继承目的地的团队空间与项目。可访问这些页面的用户可能会改变。",

@@ -3831,6 +3831,8 @@ export const en = {
     createDraftFailed: "Could not create draft: {message}",
     saveFailed: "Could not save: {message}",
     unsaveFailed: "Could not move to drafts: {message}",
+    pageListSlow: "Your page list is taking longer than usual to load. Retrying automatically.",
+    pageListFailed: "Couldn't refresh your page list: {message}. Retrying automatically.",
     moveContextConfirmTitle: "Move page to a different context?",
     moveContextConfirm:
       '"{name}" and every page inside it will inherit the destination Teamspace and Project. This can change who can access them.',

@@ -108,7 +108,7 @@ import { idbGet, idbSet } from "@/lib/offline/idb";
 import { dropPageFromDocTabsSession } from "@/lib/doc-tabs-session";
 import { offlineWrite, getOnline } from "@/lib/offline/offline-writes";
 import type { SidebarMove } from "./doc-sidebar";
-import { useLeasedResource } from "@/lib/offline/surface-content-cache";
+import { isSurfaceContentExpiry, useLeasedResource } from "@/lib/offline/surface-content-cache";
 
 /** localStorage key for the per-workspace recently-opened page list. */
 function recentsKey(workspaceId: string): string {
@@ -506,7 +506,10 @@ export function DocSidebarDataProvider({
   // revalidation of a stale entry would re-run on the next snapshot); it
   // keeps the last good tree and reports the error, or paints the empty tree
   // on an authoritative denial (401 / 403 / 404 evict, never fall back).
+  // The load's banner is DERIVED from its outcome (below), never written into
+  // the mutation `topError` slot, so the next good read clears it.
   const [reloadTick, setReloadTick] = useState(0);
+  const [treeRefreshError, setTreeRefreshError] = useState<string | null>(null);
   const router = useRouter();
   const reloadSidebar = useCallback(() => setReloadTick((n) => n + 1), []);
   const treeKey = workspaceId ? sidebarTreeCacheKey(workspaceId) : null;
@@ -521,6 +524,7 @@ export function DocSidebarDataProvider({
         ),
       ]);
       if (teamspacesKey) void idbSet(teamspacesKey, teamspaces);
+      setTreeRefreshError(null);
       return { saved, drafts, teamspaces };
     } catch (err) {
       if (isAuthoritativeBrainDenial(err)) return EMPTY_TREE;
@@ -528,17 +532,26 @@ export function DocSidebarDataProvider({
         ? readSurfaceCache<CachedSidebarTree>(treeKey).data
         : undefined;
       if (previous === undefined) throw err;
-      setTopError(err instanceof Error ? err.message : String(err));
+      setTreeRefreshError(err instanceof Error ? err.message : String(err));
       return previous;
     }
   });
+  // A cold-load failure (nothing to keep) is `tree.error`; the lease renewal
+  // retries it. A read slower than the content lease arrives already expired:
+  // that is slowness, not a fault, and is reported as such. A user mutation's
+  // error (`topError`) takes precedence over the load's.
   const treeError = tree.error;
-  useEffect(() => {
-    // A cold-load failure (nothing to keep) surfaces here; the hook holds it
-    // without retrying until the next `reloadSidebar()`.
-    if (treeError === undefined) return;
-    setTopError(treeError instanceof Error ? treeError.message : String(treeError));
-  }, [treeError]);
+  const treeBanner =
+    treeError !== undefined
+      ? isSurfaceContentExpiry(treeError)
+        ? t.pageListSlow
+        : format(t.pageListFailed, {
+            message: treeError instanceof Error ? treeError.message : String(treeError),
+          })
+      : treeRefreshError !== null
+        ? format(t.pageListFailed, { message: treeRefreshError })
+        : null;
+  const shownTopError = topError ?? treeBanner;
   const [diskSeed, setDiskSeed] = useState<{
     workspaceId: string;
     tree: CachedSidebarTree;
@@ -958,7 +971,7 @@ export function DocSidebarDataProvider({
       draftPruneByid,
       landingCards,
       busyNewDraft,
-      topError,
+      topError: shownTopError,
       setTopError,
       inboxOpen,
       setInboxOpen,
@@ -999,7 +1012,7 @@ export function DocSidebarDataProvider({
       draftPruneByid,
       landingCards,
       busyNewDraft,
-      topError,
+      shownTopError,
       inboxOpen,
       sidebarCollapsed,
       sidebarOpen,
