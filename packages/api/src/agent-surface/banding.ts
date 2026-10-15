@@ -27,6 +27,10 @@ export const TIER2_WRITE_BANDS: Readonly<Record<string, WriteBand>> = {
   createWorkflow: 'auto',
   updateWorkflow: 'auto',
   runWorkflow: 'approve',
+  proposeRoutineIntake: 'auto',
+  applyRoutineIntake: 'approve',
+  rejectRoutineIntake: 'approve',
+  setRoutineIntakeEnabled: 'approve',
 
   // ── Scheduling — reversible rows the user sees in the assistant detail.
   createScheduledJob: 'auto',

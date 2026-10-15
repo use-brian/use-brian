@@ -167,6 +167,9 @@ export type ToolContext = {
     approverUserId: string
     toolName: string
   }
+  /** Server-stamped exact staged-write review, supplied only by authenticated
+   * native approval apply. A credential or tool input cannot construct it. */
+  approvedStagedWrite?: { approvalId: string; approverUserId: string; authSessionId: string }
   /**
    * The user's current effective timezone (IANA, e.g. 'Asia/Hong_Kong').
    * Resolved per-request in this order: (1) `X-Client-Timezone` header

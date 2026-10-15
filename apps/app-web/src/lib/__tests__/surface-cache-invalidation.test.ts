@@ -66,6 +66,7 @@ describe("[COMP:app-web/surface-cache-invalidation] routing table", () => {
       "project:w1:",
       "workflow:w1",
       "workflow-detail:w1:",
+      "routine-intake:w1",
       "workflow-run:w1:",
       "live:w1",
     ]);

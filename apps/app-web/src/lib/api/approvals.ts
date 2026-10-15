@@ -30,6 +30,7 @@ import { publicRuntimeConfig } from "@/lib/runtime-public-config";
  * Spec: docs/architecture/features/workflow.md → Unified approvals.
  */
 
+import { decideRoutineProposal } from './routine-intake';
 import { authFetch } from "@/lib/auth-fetch";
 
 const API_URL = publicRuntimeConfig().apiUrl ?? "http://localhost:4000";
@@ -363,12 +364,18 @@ export async function respondToSkillApproval(
  *  `grantAlways` also preserves a tool invocation's persistent decision on
  *  resume; browser skill sends mint the standing block+profile grant. */
 export function respondByKind(
-  row: Pick<PendingApprovalRow, "id" | "kind">,
+  row: Pick<PendingApprovalRow, "id" | "kind"> & Partial<Pick<PendingApprovalRow,"arguments">>,
   decision: "approved" | "rejected",
   reason?: string,
   extra?: { grantAlways?: boolean; attach?: boolean; attachStepId?: string },
 ): Promise<RespondResult> {
+  if (isRoutineProposal(row)) return decideRoutineProposal(row.id,decision==='approved'?'apply':'reject',Number(row.arguments?.expectedRevision),crypto.randomUUID())
+    .then(()=>({ok:true as const,status:decision})).catch(()=>({ok:false as const,error:'routine_operation_unavailable'}));
   return isSkillApprovalKind(row.kind)
     ? respondToSkillApproval(row.id, decision, reason, extra)
     : respondToApproval(row.id, decision, reason, extra);
+}
+
+export function isRoutineProposal(row:{kind:string;arguments?:Record<string,unknown>}):boolean {
+  return row.kind==='workflow_refinement' && row.arguments?.operation==='routine_intake';
 }

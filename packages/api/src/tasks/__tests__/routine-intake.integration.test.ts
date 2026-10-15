@@ -6,7 +6,7 @@ import { getPool, getAppPool, applyRLSGucs, queryWithRLS } from '../../db/client
 import { createDbWorkflowStore, createDbWorkflowRunStore } from '../../db/workflow-store.js'
 import { captureAuthoringAuthoritySystem } from '../../context-scope/workflow-authority.js'
 import { authSessionStore } from '../../db/auth-session-store.js'
-import { applyRoutineProposal, inspectRoutineProposal, prepareRoutineProposal } from '../routine-proposals.js'
+import { applyRoutineProposal, inspectRoutineProposal, prepareRoutineProposal, rejectRoutineProposal, setRoutineIntakeEnabled } from '../routine-proposals.js'
 import { createTask, updateTask } from '../../db/tasks.js'
 import { flushWorkspaceData, WORKSPACE_FLUSH_TABLES } from '../../db/workspace-flush.js'
 import { admitRoutineRun } from '../routine-intake.js'
@@ -75,7 +75,7 @@ describe('[COMP:api/routine-intake] atomic source-backed Task admission (real PG
     const queued = await sourceRun(s)
     await s.store.update(s.actor.userId, s.workflow.id, { enabled: false })
     expect(await admitRoutineRun(queued.run.id)).toEqual({ kind: 'refused', reason: 'routine_intake_fenced' })
-    await s.store.update(s.actor.userId, s.workflow.id, { enabled: true })
+    await setRoutineIntakeEnabled(s.actor, s.workflow.id, {enabled:true,expectedRevision:1,idempotencyKey:randomUUID()})
     expect(await admitRoutineRun(queued.run.id)).toEqual({ kind: 'refused', reason: 'routine_intake_fenced' })
     const future = await sourceRun(s)
     const created = await admitRoutineRun(future.run.id)
@@ -211,7 +211,8 @@ describe('[COMP:api/routine-proposals] exact configuration and human proof (real
       .rejects.toThrow('routine_human_apply_required')
     expect(await store.update(actor.userId, workflow.id, { definition: { ...saved.definition, layout: { review: { x: 9, y: 5 } } } })).not.toBeNull()
     expect((await store.update(actor.userId, workflow.id, { enabled: false }))!.enabled).toBe(false)
-    expect((await store.update(actor.userId, workflow.id, { enabled: true }))!.enabled).toBe(true)
+    await expect(store.update(actor.userId, workflow.id, { enabled: true })).rejects.toThrow('routine_human_apply_required')
+    expect((await setRoutineIntakeEnabled(actor,workflow.id,{enabled:true,expectedRevision:1,idempotencyKey:randomUUID()})).enabled).toBe(true)
     expect((await pool.query('SELECT task_intake_revision FROM workflows WHERE id=$1', [workflow.id])).rows[0].task_intake_revision).toBe('1')
   })
 
@@ -226,6 +227,8 @@ describe('[COMP:api/routine-proposals] exact configuration and human proof (real
     await expect(applyRoutineProposal(actor, p.id, { expectedRevision: 0, idempotencyKey: randomUUID() }))
       .rejects.toMatchObject({ code: 'routine_revision_conflict' })
     expect((await inspectRoutineProposal(actor.userId, p.id)).status).toBe('pending')
+    await rejectRoutineProposal(actor,p.id,{expectedRevision:0,idempotencyKey:randomUUID()})
+    expect((await inspectRoutineProposal(actor.userId,p.id)).status).toBe('rejected')
   })
 
   it('refuses fabricated model/tool human proof and a revoked human session', async () => {
@@ -292,7 +295,7 @@ describe('[COMP:api/routine-intake] persistence, source floors and RLS (real PG)
     expect(await generation()).toBe('0')
     await store.update(actor.userId, workflow.id, { enabled: false })
     expect(await generation()).toBe('1')
-    await store.update(actor.userId, workflow.id, { enabled: true })
+    await setRoutineIntakeEnabled(actor,workflow.id,{enabled:true,expectedRevision:1,idempotencyKey:randomUUID()})
     expect(await generation()).toBe('2')
     expect(WORKSPACE_FLUSH_TABLES).toContain('task_routine_intake_receipts')
     await flushWorkspaceData(f.people.owner, f.workspaceId)

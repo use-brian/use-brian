@@ -423,7 +423,9 @@ export function approvalsRoutes(opts: UnifiedApprovalRouteOptions): Router {
         return
       }
       const { applyStagedWrite } = await import('../agent-surface/staged-write.js')
-      const outcome = await applyStagedWrite(opts.stagedWriteDeps, approval, userId)
+      const outcome = req.authSessionId
+        ? await applyStagedWrite(opts.stagedWriteDeps, approval, userId, { authSessionId:req.authSessionId })
+        : await applyStagedWrite(opts.stagedWriteDeps, approval, userId)
       if (!outcome.ok) {
         // Apply failed — leave the row pending (retryable) and surface why.
         res.status(502).json({ kind: 'staged_write', error: outcome.error })

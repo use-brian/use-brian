@@ -410,6 +410,10 @@ export function workflowDetailCacheKey(workspaceId: string, workflowId: string):
   return `workflow-detail:${workspaceId}${viewerSuffix()}:${workflowId}`;
 }
 
+export function routineIntakeCacheKey(workspaceId:string,id:string):string {
+  return `routine-intake:${workspaceId}${viewerSuffix()}:${id}`;
+}
+
 export function workflowRunCacheKey(workspaceId: string, runId: string): string {
   return `workflow-run:${workspaceId}${viewerSuffix()}:${runId}`;
 }

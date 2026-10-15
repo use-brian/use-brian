@@ -42,7 +42,8 @@ export async function requireRoutineSchema(client: Pick<PoolClient, 'query'> = g
       AND column_name='routine_intake_context')
     AND to_regprocedure('public.routine_question_route_admitted(uuid,uuid)') IS NOT NULL
     AND to_regclass('public.routine_execution_receipt_once') IS NOT NULL
-    AND to_regclass('public.routine_input_question_revision') IS NOT NULL AS ready`)).rows[0]
+    AND to_regclass('public.routine_input_question_revision') IS NOT NULL
+    AND to_regprocedure('public.stamp_new_routine_configuration()') IS NOT NULL AS ready`)).rows[0]
   if (!row?.ready) throw Object.assign(new Error('routine_schema_not_ready'), { status: 409 })
 }
 

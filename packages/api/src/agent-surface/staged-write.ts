@@ -64,6 +64,7 @@ export async function applyStagedWrite(
   deps: StagedWriteDeps,
   approval: PendingApproval,
   approverUserId: string,
+  human?: { authSessionId: string },
 ): Promise<StagedWriteOutcome> {
   // A staged write is never delegated: refuse rather than borrow the
   // owner/primary principal for a decision no human made
@@ -76,7 +77,13 @@ export async function applyStagedWrite(
   const tool = deps.rawWrites.get(toolName)
   if (!tool) return { ok: false, error: `no agent write tool named '${toolName}' is registered` }
 
-  const principal = await resolveApplyPrincipal(approval.workspaceId)
+  const routineDecision=['applyRoutineIntake','rejectRoutineIntake','setRoutineIntakeEnabled'].includes(toolName)
+  // Routine configuration never borrows another assistant's Configure grant.
+  const principal = routineDecision
+    ? approval.originatingAssistantId ? (await query<{assistantId:string;ownerUserId:string;clearance:string|null}>(
+      'SELECT id AS "assistantId", clearance, $3::uuid AS "ownerUserId" FROM assistants WHERE id=$1 AND workspace_id=$2',
+      [approval.originatingAssistantId,approval.workspaceId,approverUserId])).rows[0] : null
+    : await resolveApplyPrincipal(approval.workspaceId)
   if (!principal) return { ok: false, error: 'workspace has no assistant to bind the apply to' }
 
   let parsed: unknown
@@ -92,6 +99,7 @@ export async function applyStagedWrite(
   sensitivity.note(clearance)
   const payload = (approval.approvalPayload ?? {}) as Record<string, unknown>
   const ctx: ToolContext = {
+    ...(human?.authSessionId ? { approvedStagedWrite: { approvalId:approval.id,approverUserId,authSessionId:human.authSessionId } } : {}),
     // The approver is the acting human — RLS and audit stamp them.
     userId: approverUserId,
     assistantId: approval.originatingAssistantId ?? principal.assistantId,

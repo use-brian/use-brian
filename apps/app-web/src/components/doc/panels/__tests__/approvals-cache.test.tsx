@@ -56,6 +56,7 @@ const api = vi.hoisted(() => ({
 vi.mock("@/lib/api/approvals", () => ({
   listApprovals: (...args: unknown[]) => api.listApprovals(...args),
   listSkillApprovalDetails: (...args: unknown[]) => api.listSkillApprovalDetails(...args),
+  isRoutineProposal: (row: {kind:string;arguments?:Record<string,unknown>}) => row.kind==='workflow_refinement' && row.arguments?.operation==='routine_intake',
   isSkillApprovalKind: (kind: string) =>
     kind === "staged_skill_creation" ||
     kind === "staged_skill_update" ||

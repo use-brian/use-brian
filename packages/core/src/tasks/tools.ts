@@ -1,7 +1,7 @@
 import { z } from 'zod'
 import { extractCitations, formatStamp, type CitationIndex } from '@use-brian/shared'
 import type { AccessContext } from '../security/access-context.js'
-import { createdRowEvidence, intersectScopeGrants, resolveWriteScope, scopeEvidenceFromRows } from '../security/context-scope.js'
+import { ContextScopeAccumulator, createdRowEvidence, intersectScopeGrants, resolveWriteScope, scopeEvidenceFromRows, type ScopeEvidence } from '../security/context-scope.js'
 import { deriveContextFloor, DerivedScopeError } from '../security/derived-scope.js'
 import { provenanceSessionId } from '../tools/capability-gate.js'
 import { buildTool, type Tool, type ToolContext } from '../tools/types.js'
@@ -61,6 +61,11 @@ type TaskToolEventContext = {
 }
 
 export type TaskToolOptions = {
+  /** Contextual, inactive suggestions from rows this interaction actually read. */
+  onObserved?: (rows: readonly TaskListRow[], access: AccessContext, context: ToolContext) => Promise<{
+    proposals: readonly { id: string; workflowId: string; status: string }[]
+    scopeEvidence?: ScopeEvidence
+  }>
   /** Receives every primitive event with the originating tool context. Wire to AnalyticsLogger at boot. */
   onEvent?: (event: TaskToolEvent, ctx: TaskToolEventContext) => void
   /**
@@ -630,7 +635,10 @@ export function createTaskTools(
       if (!task || task.workspaceId !== context.workspaceId) {
         return { data: taskNotFoundMessage(input.id), isError: true }
       }
-        return { data: fullRow(task), scopeEvidence: scopeEvidenceFromRows([task]) }
+      const observed = await opts?.onObserved?.([task], ctxFor({...context, workspaceId:context.workspaceId!}), context)
+      const evidence = new ContextScopeAccumulator(scopeEvidenceFromRows([task]))
+      evidence.note(observed?.scopeEvidence)
+      return { data: { ...fullRow(task), ...(observed?.proposals.length ? {routineProposals:observed.proposals} : {}) }, scopeEvidence:evidence.evidence }
     },
   })
 
@@ -680,7 +688,10 @@ export function createTaskTools(
       )
 
       opts?.onEvent?.({ type: 'task_listed', resultCount: rows.length }, eventCtx(context))
-        return { data: rows.map(compactRow), scopeEvidence: scopeEvidenceFromRows(rows) }
+      const observed = await opts?.onObserved?.(rows, ctxFor({...context, workspaceId:context.workspaceId!}), context)
+      const evidence = new ContextScopeAccumulator(scopeEvidenceFromRows(rows))
+      evidence.note(observed?.scopeEvidence)
+      return { data: observed?.proposals.length ? { tasks:rows.map(compactRow), routineProposals:observed.proposals } : rows.map(compactRow), scopeEvidence:evidence.evidence }
     },
   })
 

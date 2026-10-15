@@ -233,6 +233,7 @@ export function skillApprovalsRoutes(opts: SkillApprovalRouteOptions): Router {
       res.status(400).json({ error: 'Approval is not a skill approval' })
       return
     }
+    if (approval.arguments?.operation==='routine_intake') { res.status(409).json({error:'routine_exact_decision_required'}); return }
     const role = await opts.workspaceStore.getRole(userId, approval.workspaceId)
     if (!role) {
       res.status(403).json({ error: 'Only workspace members can approve' })
@@ -319,6 +320,7 @@ export function skillApprovalsRoutes(opts: SkillApprovalRouteOptions): Router {
       res.status(400).json({ error: 'Approval is not a skill approval' })
       return
     }
+    if (approval.arguments?.operation==='routine_intake') { res.status(409).json({error:'routine_exact_decision_required'}); return }
     const role = await opts.workspaceStore.getRole(userId, approval.workspaceId)
     if (!role) {
       res.status(403).json({ error: 'Only workspace members can reject' })

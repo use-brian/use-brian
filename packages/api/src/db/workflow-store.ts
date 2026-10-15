@@ -78,6 +78,7 @@ const WORKFLOW_SELECT = `
   context_project_id  AS "contextProjectId",
   authoring_authority AS "authoringAuthority",
   to_jsonb(workflows)->>'task_intake_applied_by' AS "taskIntakeAppliedBy",
+  coalesce((to_jsonb(workflows)->>'task_intake_revision')::integer,0) AS "taskIntakeRevision",
   created_at          AS "createdAt",
   updated_at          AS "updatedAt"
 `
@@ -106,6 +107,7 @@ type WorkflowRow = {
   contextGroupId: string | null
   contextProjectId: string | null
   authoringAuthority: WorkflowRecord['authoringAuthority']
+  taskIntakeRevision?: number
   taskIntakeAppliedBy?: string | null
   createdAt: Date
   updatedAt: Date
@@ -141,6 +143,7 @@ function backfillStepRunSettings(
 
 function rowToWorkflow(row: WorkflowRow): WorkflowRecord {
   return {
+    taskIntakeRevision:row.taskIntakeRevision ?? 0,
     id: row.id,
     workspaceId: row.workspaceId,
     createdBy: row.createdBy,
@@ -198,6 +201,16 @@ export type WorkflowStoreHooks = {
   onChanged?: (userId: string, workspaceId: string) => void
 }
 
+const creationTransactions = new WeakMap<object, { client: PoolClient; id: string }>()
+/** Canonical compound writer. The command owns commit, release and notification. */
+export async function createWorkflowInTransaction(client: PoolClient, id: string,
+  params: Parameters<WorkflowStore['create']>[0], options?: Parameters<WorkflowStore['create']>[1]) {
+  const transaction = Object.freeze({})
+  creationTransactions.set(transaction, { client, id })
+  try { return await createDbWorkflowStore().create(params, { ...options, transaction }) }
+  finally { creationTransactions.delete(transaction) }
+}
+
 // Provenance is per call, never an identity attached to the shared store.
 export function createDbWorkflowStore(hooks?: WorkflowStoreHooks): WorkflowStore {
   const fireChanged = (userId: string, workspaceId: string): void => {
@@ -226,11 +239,13 @@ export function createDbWorkflowStore(hooks?: WorkflowStoreHooks): WorkflowStore
       contextProjectId,
       authoringAuthority,
       } = params
-      const client = await getAppPool().connect()
+      const joined = options?.transaction ? creationTransactions.get(options.transaction) : undefined
+      if (options?.transaction && !joined) throw new WorkspaceAccessError('operational_authoring_proof_required', 409)
+      const client = joined?.client ?? await getAppPool().connect()
       let schedulePublished = false
       const result = await (async () => {
         try {
-          await client.query('BEGIN')
+          if (!joined) await client.query('BEGIN')
           await applyRLSGucs(client, userId)
           const policy = await lockOperationalPolicy(client, workspaceId)
           const provenance = options?.authoring
@@ -283,12 +298,12 @@ export function createDbWorkflowStore(hooks?: WorkflowStoreHooks): WorkflowStore
                workspace_id, created_by, name, description, definition, trigger,
                webhook_slug, webhook_secret,
                model_alias, max_turns, research_mode, managed_by,
-               context_group_id, context_project_id, authoring_authority
+               context_group_id, context_project_id, authoring_authority, id
              )
              VALUES (
                $1, $2, $3, $4, $5, COALESCE($6::jsonb, '{"kind":"manual"}'::jsonb),
                $7, $8,
-               COALESCE($9, 'pro'), $10, COALESCE($11, false), $12, $13, $14, $15::jsonb
+               COALESCE($9, 'pro'), $10, COALESCE($11, false), $12, $13, $14, $15::jsonb, COALESCE($16::uuid,gen_random_uuid())
              )
              RETURNING ${WORKFLOW_SELECT}`,
             [
@@ -307,6 +322,7 @@ export function createDbWorkflowStore(hooks?: WorkflowStoreHooks): WorkflowStore
               contextGroupId ?? null,
               contextProjectId ?? null,
               JSON.stringify(authoringAuthority),
+              joined?.id ?? null,
             ],
           )
           if (policy?.setupState === 'ready' && trigger?.kind === 'schedule') {
@@ -314,13 +330,14 @@ export function createDbWorkflowStore(hooks?: WorkflowStoreHooks): WorkflowStore
             await insertWorkflowScheduleJob(client, workspaceId, inserted.rows[0].id)
             schedulePublished = true
           }
-          await client.query('COMMIT')
+          if (!joined) await client.query('COMMIT')
           return inserted
         } finally {
-          await rollbackAndRelease(client)
+          if (!joined) await rollbackAndRelease(client)
         }
       })()
       const record = rowToWorkflow(result.rows[0])
+      if (joined) return record
       if (schedulePublished) options?.onSchedulePublished?.()
       notifyWorkspaceChange(record.workspaceId, 'workflow', 'create', record.id)
       fireChanged(userId, record.workspaceId)

@@ -102,7 +102,7 @@ export function staleMarksFor(event: string, workspaceId: string): string[] {
       // root (which lands on Suggested off the same dock) all revalidate here
       // instead of through a listener of the provider's own.
       // A resolved Goal approval also clears its "answer" work card.
-      return [`approvals:${workspaceId}`, `crm:${workspaceId}:`, `home-dock:${workspaceId}`, `work:${workspaceId}`];
+      return [`approvals:${workspaceId}`, `routine-intake:${workspaceId}`, `crm:${workspaceId}:`, `home-dock:${workspaceId}`, `work:${workspaceId}`];
     case WORKFLOW_REFRESH_EVENT:
       // The detail key is mark-stale only, never invalidate: an open editable
       // draft must not be clobbered (realtime-sync.md -> editable-draft rule).
@@ -114,6 +114,7 @@ export function staleMarksFor(event: string, workspaceId: string): string[] {
         `project:${workspaceId}:`,
         `workflow:${workspaceId}`,
         `workflow-detail:${workspaceId}:`,
+        `routine-intake:${workspaceId}`,
         `workflow-run:${workspaceId}:`,
         // A run starting or settling is a Live roster row appearing or
         // moving to "Just finished" (`live-work.md` section 3 interleaves
@@ -240,6 +241,7 @@ export function applySpineEventToSurfaceCache(
   if (event === BRAIN_REFRESH_EVENT || event === WORKSPACE_IDENTITY_REFRESH_EVENT) drop(`workspace-member-directory:${workspaceId}:`);
   if (event === BRAIN_REFRESH_EVENT || event === WORKSPACE_IDENTITY_REFRESH_EVENT) drop(`page-directory:${workspaceId}:`);
   if (event === BRAIN_REFRESH_EVENT || event === WORKSPACE_IDENTITY_REFRESH_EVENT || event === "brian:organization-changed" || event === ASSISTANT_REFRESH_EVENT) {
+    drop(`routine-intake:${workspaceId}`);
     drop(`engineering-history:${workspaceId}`);
     drop(`brain-keys:${workspaceId}`);
   }

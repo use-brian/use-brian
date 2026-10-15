@@ -523,6 +523,10 @@ import { armQualifiedTaskGoal, enterAssignedExecution, readExecutionSources, res
 import { advanceRoutineIntake, answerRoutineQuestion, ensureRoutineQuestion, noteRoutinePlanningUsage, routineExecutionDeps, routineManifestScope } from './tasks/routine-execution.js'
 import { captureGoalMaterializationSource, scheduleNativeGoalTick } from './goals/materialization-source.js'
 import { readRoutineOperationCeiling } from './db/routine-intake-store.js'
+import { createRoutineTools } from './tasks/routine-tools.js'
+import { observeRoutineTasks } from './tasks/routine-observations.js'
+import { setRoutineConfigurationPreflight, RoutineConfigurationError } from './tasks/routine-proposals.js'
+import { validateCallerScopeEvidence } from './context-scope/caller-evidence.js'
 import { findActiveNativeExecutionSystem } from './db/task-execution-store.js'
 import { createTaskExecutionTools, type ControlEffects } from './tasks/execution-control.js'
 import { createExternalProgressTools } from './tasks/external-progress.js'
@@ -605,6 +609,7 @@ import { liveWorkRoutes } from './routes/live-work.js'
 import {
   workflowsRoutes,
   createValidatedDefinitionEditor,
+  preflightWorkflowDefinition,
   type ValidatedDefinitionEditor,
 } from './routes/workflows.js'
 import { modelMenuRoutes } from './routes/model-menu.js'
@@ -4175,6 +4180,7 @@ export async function bootOpenApi(opts: BootOpenApiOptions): Promise<BootResult>
   // the model relays; a near-duplicate creates it with a warning appended.
   // Spec: docs/architecture/features/task-guardrails.md
   const taskTools = createTaskTools(taskStore, {
+    onObserved: observeRoutineTasks,
     admission: createTaskAdmissionPort(),
     entityLinks: entityLinksStore,
     // Recurring work: a task created inside a workflow run takes the
@@ -4511,6 +4517,7 @@ export async function bootOpenApi(opts: BootOpenApiOptions): Promise<BootResult>
   // Saved research commands (features/research.md): one service for Brian, REST and MCP.
   const researchTools = createResearchTools()
   for (const tool of Object.values(researchTools)) allTools.set(tool.name, tool)
+  for (const tool of Object.values(createRoutineTools())) allTools.set(tool.name,tool)
   const approvalReviewTools = createApprovalReviewTools()
   for (const tool of Object.values(approvalReviewTools)) allTools.set(tool.name, tool)
 
@@ -6935,6 +6942,26 @@ export async function bootOpenApi(opts: BootOpenApiOptions): Promise<BootResult>
     listButtonBindings: (actorUserId, workspaceId, workflowId) =>
       pageActionsStore.listForWorkflow(actorUserId, workspaceId, workflowId),
   }
+  setRoutineConfigurationPreflight(async ({userId,workspaceId,configuration,sourceEvidence})=>{
+    const issues=await preflightWorkflowDefinition(configuration.definition,{userId,workspaceId},workflowsRouteOptions)
+    if (issues.length) throw new RoutineConfigurationError('routine_dependencies_unavailable')
+    const executor=configuration.definition.defaultExecutor
+    if (executor?.kind!=='assistant') return
+    const selected=await captureAuthoringAuthoritySystem({userId,workspaceId,assistantId:executor.assistantId,
+      contextGroupId:configuration.contextGroupId,contextProjectId:configuration.contextProjectId})
+    const turnScope=await resolveWorkflowAuthoringScope({userId,workspaceId,assistantId:executor.assistantId,authoringAuthority:selected,
+      contextGroupId:configuration.contextGroupId,contextProjectId:configuration.contextProjectId})
+    await validateCallerScopeEvidence(sourceEvidence,pinAccessCeiling(turnScope.access))
+    const registry=await workflowExecutorDeps.buildToolRegistry({userId,workspaceId,assistantId:executor.assistantId,turnScope})
+    const capabilities=new Set(await capabilityStore.listActive(executor.assistantId))
+    for (const name of configuration.definition.taskIntake?.permittedActions ?? []) {
+      const tool=registry.get(name)
+      if (!tool || tool.requiresCapability && !capabilities.has(tool.requiresCapability)) throw new RoutineConfigurationError('routine_dependencies_unavailable')
+    }
+    const accounts=new Set((await listUsableWorkspaceConnectors({connectorInstanceStore,connectorGrantStore,userId,workspaceId}))
+      .filter(u=>(OFFICIAL_CONNECTOR_TOOLS[u.instance.provider] ?? []).some(t=>registry.has(t.name))).map(u=>u.instance.provider))
+    if (configuration.definition.taskIntake?.requiredAccounts.some(name=>!accounts.has(name))) throw new RoutineConfigurationError('routine_dependencies_unavailable')
+  })
   app.use('/api', requireAuth(env.JWT_SECRET), workflowsRoutes(workflowsRouteOptions))
 
   // Live — the all-activity roster (docs/architecture/features/live-work.md

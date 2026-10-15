@@ -1,5 +1,7 @@
 "use client";
 
+import { RoutineChatPickup } from "@/components/workflow/routine-intake";
+
 
 import { useChatHandoff } from "@/lib/use-chat-handoff";
 import { readChatDrafts, writeChatDrafts, type RecoverableChatDraft } from "@/lib/chat-draft-recovery";
@@ -5197,6 +5199,7 @@ export function ChatSurface({ workspaceId }: { workspaceId: string }) {
             {/* A suspended askQuestion — any member with read access may
                 answer, attributed (D8); Answer/Cancel are the reader-gated
                 session routes. */}
+            {workspaceId && activeSessionId && <RoutineChatPickup workspaceId={workspaceId} sessionId={activeSessionId} />}
             {pendingQuestion && pendingQuestion.sessionId === activeSessionId && (
               <PendingQuestionPanel
                 sessionId={pendingQuestion.sessionId}
