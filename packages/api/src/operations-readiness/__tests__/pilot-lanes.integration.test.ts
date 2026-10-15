@@ -5,8 +5,9 @@ import { randomUUID } from 'node:crypto'
 import { readFile } from 'node:fs/promises'
 import { afterAll, describe, expect, it, vi } from 'vitest'
 import { z } from 'zod'
-import { WorkflowDefinitionSchema, WorkflowTriggerSchema, type ToolContext } from '@use-brian/core'
-import { getAppPool, getPool } from '../../db/client.js'
+import { OFFICIAL_CONNECTOR_TOOLS } from '@use-brian/shared/builtin-connectors'
+import { advanceWorkflowRun, createGoogleCalendarTools, syncWorkflowScheduleTrigger, WorkflowDefinitionSchema, WorkflowTriggerSchema, type GoogleCalendarApi, type ToolContext } from '@use-brian/core'
+import { getAppPool, getPool, queryWithRLS } from '../../db/client.js'
 import { getResearchActivityForViewer } from '../../db/research-store.js'
 import { briefFixture, researchSession, researchMessage, savedResearch } from '../../research/__tests__/fixture.js'
 import { beginResearchActivity, captureResearchFollowupForMessage, createResearchDeliveryDeps } from '../../research/runtime.js'
@@ -26,6 +27,9 @@ import { admitRoutineRun } from '../../tasks/routine-intake.js'
 import { inspectBrief, ensureBrief } from '../../briefs/service.js'
 import { applyDirection, setBriefSyncClientForTests } from '../../briefs/publication.js'
 import { actorOf } from '../../briefs/__tests__/fixture.js'
+import { captureAuthoringAuthoritySystem, resolveWorkflowRunScope } from '../../context-scope/workflow-authority.js'
+import { createDbJobStore } from '../../db/job-store.js'
+import { createTask } from '../../db/tasks.js'
 
 const scripts = new URL('../../../../../scripts/operations/', import.meta.url)
 const { assertLocalFixture } = await import(new URL('../../../../../scripts/crm/local-fixture.mjs', import.meta.url).href)
@@ -111,7 +115,7 @@ describe('[COMP:api/operations-v1-readiness] native disposable pilot lanes', () 
     expect((await getPoolSystem(state.poolId))?.segments).toHaveLength(before!.segments.length)
   })
 
-  it('V05 meeting preparation reads an accepted native Brief while private and unreachable context remains unknown', async () => {
+  it('V05 scheduled calendar preparation saves grounded Brief and Task work; inaccessible sources stay unknown', async () => {
     const f = await briefFixture(); setBriefSyncClientForTests(null)
     const lead = actorOf(f, f.people.lead)
     const { bindingId } = await ensureBrief(lead, { kind: 'project', id: f.projectId })
@@ -120,8 +124,49 @@ describe('[COMP:api/operations-v1-readiness] native disposable pilot lanes', () 
     const brief = await inspectBrief(actorOf(f, f.people.member), { bindingId })
     expect(JSON.stringify(brief)).toContain('Review fictional widget options')
     await expect(inspectBrief(actorOf(f, f.people.outsider), { bindingId })).rejects.toBeDefined()
-    expect(fictional.meeting.unknown).toContain('private participant history')
-    // No calendar source receipt exists here: full V05 remains blocked in the runner.
+    const task = await createTask(f.people.lead, { workspaceId: f.workspaceId, title: 'Compare fictional widget options', home: { kind: 'project', id: f.projectId } })
+    const tasks = await queryWithRLS<{ title: string }>(f.people.member, 'SELECT title FROM tasks WHERE id=$1', [task.id])
+    expect(tasks.rows).toEqual([{ title: task.title }])
+    const calendar = createGoogleCalendarTools({ listEvents: async () => ({ items: [{ id: fictional.meeting.sourceId,
+      summary: fictional.meeting.subject, start: { dateTime: '2026-10-16T10:00:00+08:00' }, end: { dateTime: '2026-10-16T10:30:00+08:00' },
+      htmlLink: 'https://calendar.example/events/fictional-meeting-1' }] }) } as unknown as GoogleCalendarApi, 'Asia/Hong_Kong')
+      .find(t => t.name === 'googleCalendarListEvents')!
+    const workflowStore = createDbWorkflowStore(), runStore = createDbWorkflowRunStore(), jobStore = createDbJobStore()
+    const authority = await captureAuthoringAuthoritySystem({ userId: f.people.lead, workspaceId: f.workspaceId,
+      assistantId: f.assistants.brian, contextGroupId: null, contextProjectId: f.projectId })
+    const workflow = await workflowStore.create({ userId: f.people.lead, workspaceId: f.workspaceId, name: 'Fictional meeting preparation',
+      definition: { startStepId: 'calendar', steps: [{ id: 'calendar', type: 'tool_call', toolName: calendar.name,
+        arguments: { calendarId: 'fictional-company-calendar', maxResults: 5 }, storeOutputAs: 'meeting' }] },
+      trigger: { kind: 'schedule', schedule: { type: 'once', datetime: '2026-10-16T09:45:00' }, timezone: 'Asia/Hong_Kong' },
+      contextGroupId: null, contextProjectId: f.projectId, authoringAuthority: authority },
+    { authoring: { kind: 'internal-human', userId: f.people.lead, assistantId: f.assistants.brian } })
+    const scheduled = await syncWorkflowScheduleTrigger({ jobStore, resolvePrimary: async () => f.assistants.brian },
+      { workflowId: workflow.id, workspaceId: f.workspaceId, userId: f.people.lead, schedule: { type: 'once', datetime: '2026-10-16T09:45:00' },
+        timezone: 'Asia/Hong_Kong', contextProjectId: f.projectId })
+    expect(scheduled).toHaveProperty('jobId')
+    const run = await runStore.createRun({ workflowId: workflow.id, workspaceId: f.workspaceId, triggeredBy: f.people.lead,
+      triggerKind: 'schedule', input: {} })
+    const deps = { workflowStore, runStore, resolvePrimary: async () => f.assistants.brian, resolveRunScope: resolveWorkflowRunScope,
+      buildToolRegistry: async () => new Map([[calendar.name, calendar]]), consultTransport: { async send(): Promise<never> { throw new Error('No model call allowed') } } }
+    expect(await advanceWorkflowRun(deps, run.id)).toMatchObject({ kind: 'completed' })
+    const completed = (await runStore.getRunSystem(run.id))!
+    expect(JSON.stringify(completed.vars.meeting)).toContain(fictional.meeting.sourceId)
+    const chat = await researchSession(f, f.people.member, f.projectId)
+    const request = await researchMessage(f, chat, 'user', 'Prepare for the admitted widget meeting', f.people.member)
+    const activity = await beginResearchActivity({ workspaceId: f.workspaceId, sessionId: chat, requestMessageId: request,
+      actorUserId: f.people.member, assistantId: f.assistants.brian, projectId: f.projectId, entry: 'explicit', runtime: { surface: 'scheduled-fixture' } })
+    const prep = `Meeting: ${fictional.meeting.subject} (${fictional.meeting.sourceId}).\nAccepted outcome: Review fictional widget options.\nTask: ${tasks.rows[0].title}.\nUnknown: ${fictional.meeting.unknown.join('; ')}.`
+    const saved = await recordResearchDelivery(createResearchDeliveryDeps(), { activity, observation: { receipts: [],
+      sources: [{ kind: 'web', ref: 'https://calendar.example/events/fictional-meeting-1', title: fictional.meeting.subject, inspected: true, readAt: new Date().toISOString() }], gaps: ['Private participant history unavailable'] },
+      finalText: prep, outputMessageId: null, requestText: 'Prepare admitted meeting' })
+    expect(saved.status).toBe('saved')
+    expect((await getResearchActivityForViewer(f.people.lead, f.workspaceId, saved.id))?.artifacts).toHaveLength(1)
+    expect(await getResearchActivityForViewer(f.people.outsider, f.workspaceId, saved.id)).toBeNull()
+    // Calendar loss stops the actual scheduled workflow before any model work.
+    const unavailable = createGoogleCalendarTools({ listEvents: async () => { throw new Error('Fictional calendar unavailable') } } as unknown as GoogleCalendarApi)
+      .find(t => t.name === calendar.name)!
+    const failed = await runStore.createRun({ workflowId: workflow.id, workspaceId: f.workspaceId, triggeredBy: f.people.lead, triggerKind: 'schedule', input: {} })
+    expect(await advanceWorkflowRun({ ...deps, buildToolRegistry: async () => new Map([[calendar.name, unavailable]]) }, failed.id)).toMatchObject({ kind: 'failed' })
   })
 
   it('V06 native routine replay creates one Task but refuses unverified mailbox events without delivery or new work', async () => {
@@ -151,11 +196,13 @@ describe('[COMP:api/operations-v1-readiness] native disposable pilot lanes', () 
 
   it('V09 four fictional materializations validate current native definition and trigger schemas without activating anything', () => {
     const bundle = preparePilotConfig()
+    const knownTools = new Set(['getTask', 'readPage', 'webSearch', 'urlReader', ...Object.values(OFFICIAL_CONNECTOR_TOOLS).flat().map(t => t.name)])
     for (const recipe of bundle.recipes) for (const binding of [fictional.company, fictional.personal]) {
       const native = materializeFixture(recipe, binding)
       expect(WorkflowDefinitionSchema.safeParse(native.definition).success).toBe(true)
       expect(WorkflowTriggerSchema.safeParse(native.trigger).success).toBe(true)
       expect(native.enabled).toBe(false)
+      for (const tool of native.definition.steps[0].tools) expect(knownTools.has(tool)).toBe(true)
       expect(WorkflowDefinitionSchema.safeParse(recipe.nativeDraft.definition).success).toBe(false)
     }
   })

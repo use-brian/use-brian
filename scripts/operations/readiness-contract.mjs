@@ -1,5 +1,5 @@
 import { createHash } from 'node:crypto'
-import { readFile, realpath, stat } from 'node:fs/promises'
+import { readFile, readdir, realpath, stat } from 'node:fs/promises'
 import { spawn } from 'node:child_process'
 import { isAbsolute, join, relative, resolve, sep } from 'node:path'
 import { CATALOGUE } from './readiness-catalogue.mjs'
@@ -45,6 +45,7 @@ async function git(root, args) {
 export async function snapshot(ossRoot, platformRoot) {
   const repos = {}
   for (const [name, root] of [['oss', ossRoot], ['platform', platformRoot]]) {
+    const canonicalRoot = await realpath(root)
     const files = {}
     const paths = (await git(root, ['ls-files', '--cached', '--others', '--exclude-standard'])).split('\n').sort()
     for (const path of paths) {
@@ -52,18 +53,36 @@ export async function snapshot(ossRoot, platformRoot) {
       const allowed = name === 'oss'
         ? /^(packages\/[^/]+\/(src|migrations)\/|apps\/[^/]+\/src\/|scripts\/|\.github\/workflows\/)/.test(path)
           || /(^|\/)(package\.json|pnpm-lock\.yaml|[^/]*config\.[^/]+)$/.test(path)
-        : /^(scripts\/|packages\/repo-checks\/src\/|docs\/architecture\/|docs\/workflow\/(component-map|operations-v1-readiness)\.md$)/.test(path)
+        : /^(scripts\/(lib\/build-context\.sh|deploy-api\.sh|vercel-submodule-bootstrap\.mjs)$|packages\/repo-checks\/src\/|docs\/workflow\/(component-map|operations-v1-readiness)\.md$)/.test(path)
+          || /^docs\/architecture\/(features\/(project-briefs|research|routine-work-intake|approval-review|engineering-history|client-delivery-oversight|tasks|goals|workflow)|platform\/deployment|foundation\/open-core-placement)\.md$/.test(path)
           || CATALOGUE.dependencies.some(d => path === d.plan) || ['package.json', 'pnpm-lock.yaml', 'vercel.json', 'turbo.json', 'pnpm-workspace.yaml'].includes(path)
       if (!allowed || !/\.(ts|tsx|js|mjs|cjs|json|sql|ya?ml|md|sh)$/.test(path)) continue
       try {
         const file = await realpath(join(root, path))
-        if (!file.startsWith(`${await realpath(root)}${sep}`)) throw new Error('source_path_escape')
+        if (!file.startsWith(`${canonicalRoot}${sep}`) || file.split(sep).some(p => p === '.env' || p.startsWith('.env.'))) throw new Error('source_path_escape')
         const info = await stat(file)
         if (!info.isFile() || info.size > 16_000_000) throw new Error('source_file_bound')
         files[path] = hash(await readFile(file))
       } catch (error) { if (error.code === 'ENOENT') files[path] = null; else throw error }
     }
-    repos[name] = { sha: await git(root, ['rev-parse', 'HEAD']), files }
+    // Package exports consume built JavaScript. Bind those bytes as well as
+    // TypeScript source, so a stale dist cannot masquerade as a current build.
+    if (name === 'oss') {
+      let count = 0
+      async function runtime(directory) {
+        for (const item of await readdir(join(root, directory), { withFileTypes: true }).catch(() => [])) {
+          if (item.isSymbolicLink()) throw new Error('runtime_path_symlink')
+          const path = `${directory}/${item.name}`
+          if (item.isDirectory()) await runtime(path)
+          else if (/\.(js|json)$/.test(item.name)) {
+            if (++count > 15_000 || (await stat(join(root, path))).size > 16_000_000) throw new Error('runtime_inventory_bound')
+            files[path] = hash(await readFile(join(root, path)))
+          }
+        }
+      }
+      for (const pkg of ['core', 'shared', 'api', 'doc-model', 'office-model', 'office-engine']) await runtime(`packages/${pkg}/dist`)
+    }
+    repos[name] = { sha: await git(root, ['rev-parse', 'HEAD']), branch: await git(root, ['rev-parse', '--abbrev-ref', 'HEAD']), files }
   }
   return { ...repos, digest: digest(repos) }
 }
@@ -102,14 +121,24 @@ export function parseVitest(suite, raw, execution, sourceDigest, proof) {
 
 export function aggregate(catalogue, receipts, source, artifacts, caseEvidence = {}) {
   validateCatalogue(catalogue)
-  const suites = Object.fromEntries(catalogue.suites.map(s => [s.file, assessSuite(s, receipts[s.file], source.digest, artifacts)]))
+  const validSource = ['oss', 'platform'].every(repo => /^[a-f0-9]{40}$/.test(source?.[repo]?.sha ?? '') && source[repo].files && Object.keys(source[repo].files).length)
+    && source.digest === digest({ oss: source.oss, platform: source.platform })
+  const suites = Object.fromEntries(catalogue.suites.map(s => {
+    const assessed = assessSuite(s, receipts[s.file], source.digest, artifacts)
+    if (!validSource || !source.oss.files[s.file]) return [s.file, { ...assessed, status: 'blocked', reasons: [...assessed.reasons, 'source_inventory_missing_or_invalid'] }]
+    return [s.file, assessed]
+  }))
   const dependencies = Object.fromEntries(catalogue.dependencies.map(d => {
     const failures = d.suites.filter(f => suites[f].status !== 'passed')
     return [d.id, { ...d, status: failures.length ? 'blocked' : 'passed', reasons: failures.map(f => `${f}:${suites[f].status}`), sourceDigest: source.digest }]
   }))
   const cases = Object.fromEntries(catalogue.cases.map(c => {
     const spec = caseEvidence[c.id]
-    return [c.id, { ...c, ...assessSuite({ minimum: 1, assertions: spec?.requiredAssertions ?? [] }, spec, source.digest, artifacts) }]
+    const assessed = assessSuite({ minimum: 1, assertions: [] }, spec, source.digest, artifacts)
+    if (assessed.status === 'passed' && !assessed.assertions.some(a => new RegExp(`\\b${c.id}\\b`).test(a.name))) {
+      assessed.status = 'failed'; assessed.reasons.push('case_assertion_identity_missing')
+    }
+    return [c.id, { ...c, ...assessed }]
   }))
   const localReady = Object.values(dependencies).every(r => r.status === 'passed') && Object.values(cases).every(r => r.status === 'passed')
   return { schema: SCHEMA, catalogueHash: digest(catalogue), source, suites, dependencies, cases,

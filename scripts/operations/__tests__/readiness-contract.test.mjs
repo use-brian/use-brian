@@ -5,9 +5,12 @@ import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { CATALOGUE } from '../readiness-catalogue.mjs'
 import { aggregate, artifact, assessSuite, digest, parseVitest, validateCatalogue, verifyArtifacts } from '../readiness-contract.mjs'
+import { optionsFrom } from '../v1-readiness.mjs'
+import { assertLocalFixture, validateAmbientDatabase } from '../../crm/local-fixture.mjs'
 
 export function completeEvidence() {
-  const source = { digest: 'source-fixture', oss: { sha: 'a'.repeat(40) }, platform: { sha: 'b'.repeat(40) } }
+  const repos = { oss: { sha: 'a'.repeat(40), files: Object.fromEntries(CATALOGUE.suites.map(s => [s.file, 'd'.repeat(64)])) }, platform: { sha: 'b'.repeat(40), files: { 'package.json': 'e'.repeat(64) } } }
+  const source = { ...repos, digest: digest(repos) }
   const proof = { path: 'evidence/fixture.json', sha256: 'c'.repeat(64), bytes: 10 }
   const artifacts = { [proof.path]: proof }
   const receipt = names => ({ status: 'passed', sourceDigest: source.digest, artifact: { ...proof }, command: ['node', '--test', 'fictional.test.mjs'],
@@ -46,6 +49,8 @@ describe('[COMP:operations/v1-readiness] source-bound evidence contract', () => 
       f => { f.receipts[CATALOGUE.suites[0].file].status = 'not_applicable' },
       f => { f.receipts[CATALOGUE.suites[0].file].status = 'green' },
       f => { delete f.cases.V07 },
+      f => { f.source.oss.sha = 'unknown' },
+      f => { delete f.source.oss.files[CATALOGUE.suites[0].file] },
     ]) {
       const f = completeEvidence(); mutate(f)
       assert.equal(run(f).exitCode, 1)
@@ -78,5 +83,14 @@ describe('[COMP:operations/v1-readiness] source-bound evidence contract', () => 
       await assert.rejects(artifact(dir, 'escape'), /escape/)
       assert.notEqual(digest({ a: 1 }), digest({ a: 2 }))
     } finally { await rm(dir, { recursive: true }); await rm(outside, { recursive: true }) }
+  })
+  it('V11 V12 refuses remote modes, credentials, unsafe ambient databases and unowned fixtures before connecting', async () => {
+    for (const args of [['--mode', 'remote', '--report-dir', '/tmp/new'], ['--report-dir', 'relative'], ['--api-url', 'https://production.example'], ['--token', 'fictional']]) {
+      assert.throws(() => optionsFrom(args))
+    }
+    for (const url of ['postgres://production.example/db', 'postgres://localhost/db?host=production.example', 'postgres://localhost/db?service=production']) {
+      assert.throws(() => validateAmbientDatabase({ DATABASE_URL: url }))
+    }
+    await assert.rejects(assertLocalFixture({}), /local-fixture/)
   })
 })

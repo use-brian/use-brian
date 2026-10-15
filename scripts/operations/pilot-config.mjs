@@ -5,7 +5,7 @@ const fields = ['installation', 'workspaceId', 'memberId', 'assistantId', 'proje
   'calendarAccount', 'schedule', 'timezone', 'meetingLeadMinutes', 'taskAllowance', 'workspaceAllowance', 'approvalSettings', 'alertSettings', 'chatId']
 const tools = {
   research: ['webSearch', 'urlReader'], administration: ['getTask'],
-  'meeting-preparation': ['getTask', 'readPage', 'gcalListEvents'], 'cos-email': ['imapListMessages', 'imapReadMessage'],
+  'meeting-preparation': ['getTask', 'readPage', 'googleCalendarListEvents'], 'cos-email': ['imapSearchMessages', 'imapGetMessage'],
 }
 const prompts = {
   research: 'Research the admitted question. Save source-backed findings through the native research artifact path. Disclose insufficient or contradictory evidence.',
@@ -24,13 +24,12 @@ export function preparePilotConfig() {
       // Native shape with unresolved values is deliberately not a postable active definition.
       nativeDraft: { name: `Operations pilot: ${lane}`, definition: { startStepId: 'review',
         defaultExecutor: { kind: 'assistant', assistantId: null },
-        steps: [{ id: 'review', type: 'assistant_call', target: { assistantId: null }, prompt: prompts[lane], tools: tools[lane],
-          deliver: { channelType: 'web', channelId: null } }] },
+        steps: [{ id: 'review', type: 'assistant_call', target: { assistantId: null }, prompt: prompts[lane], tools: tools[lane] }] },
         trigger: lane === 'research' || lane === 'administration' ? { kind: 'manual' }
           : { kind: 'schedule', schedule: null, timezone: null }, contextProjectId: null },
       unresolvedBindings: [...fields, 'planeBinding'],
-      blockers: lane === 'cos-email' ? ['native scheduled email checkpoint/deduplication and routine admission must be demonstrated (F07)']
-        : lane === 'meeting-preparation' ? ['native calendar admission and meeting-specific scheduling must be demonstrated (F07)']
+      blockers: lane === 'cos-email' ? ['native scheduled email checkpoint/deduplication and routine admission must be demonstrated (F07)', 'workflow web delivery is a no-op; source-backed Chat suggestion path must be demonstrated']
+        : lane === 'meeting-preparation' ? ['owner calendar/meeting/source/private scope and lead-time bindings; current local native scheduling/artifact acceptance required']
           : ['current actor, account/tool authority, sources and allowance require owner binding'],
       controls: {
         start: 'Human configures and reviews the exact native workflow/proposal after all blockers close; explicit human activation only.',
@@ -49,7 +48,6 @@ export function materializeFixture(recipe, binding) {
   const draft = structuredClone(recipe.nativeDraft)
   draft.definition.defaultExecutor.assistantId = binding.assistantId
   draft.definition.steps[0].target.assistantId = binding.assistantId
-  draft.definition.steps[0].deliver.channelId = binding.chatId
   if (draft.trigger.kind === 'schedule') { draft.trigger.schedule = { type: 'daily', time: '09:00' }; draft.trigger.timezone = binding.timezone }
   draft.contextProjectId = binding.projectId
   return { ...draft, enabled: false }

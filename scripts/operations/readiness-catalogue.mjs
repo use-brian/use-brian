@@ -56,7 +56,8 @@ export const CATALOGUE = {
         "packages/api/src/briefs/__tests__/work.integration.test.ts",
         "apps/app-web/src/components/briefs/__tests__/brief-work.test.tsx",
         "apps/app-web/src/components/briefs/__tests__/brief-journey.test.tsx",
-        "apps/app-web/src/lib/__tests__/suggested-landing.test.ts"
+        "apps/app-web/src/lib/__tests__/suggested-landing.test.ts",
+        "apps/app-web/src/lib/__tests__/surface-cache-invalidation.test.ts"
       ],
       "scope": "required native implementation"
     },
@@ -163,7 +164,13 @@ export const CATALOGUE = {
       ],
       "suites": [
         "packages/api/src/db/__tests__/engineering-history-store.integration.test.ts",
-        "packages/core/src/workspace-files/__tests__/engineering-archive-isolation.test.ts"
+        "packages/core/src/workspace-files/__tests__/engineering-archive-isolation.test.ts",
+        "packages/api/src/engineering-history/__tests__/service.test.ts",
+        "packages/engineering-capture/src/__tests__/cli.test.ts",
+        "packages/engineering-capture/src/__tests__/delivery.test.ts",
+        "packages/engineering-capture/src/__tests__/providers.test.ts",
+        "packages/engineering-capture/src/__tests__/setup.test.ts",
+        "packages/engineering-capture/src/__tests__/spool.test.ts"
       ],
       "scope": "archive isolation required; collector installation not_applicable (no capture required by four lanes)"
     },
@@ -1298,6 +1305,116 @@ export const CATALOGUE = {
         "CO12 refusal and empty remain distinct"
       ],
       "minimum": 10
+    },
+    {
+      "file": "apps/app-web/src/lib/__tests__/surface-cache-invalidation.test.ts",
+      "component": "app-web/brief-work",
+      "assertions": [
+        "marks the viewer-scoped module state on workspace configuration changes",
+        "maps the brain primitives to the Tasks list, every CRM region and the graph",
+        "marks the Knowledge sources list on a brain change (kb_chunk is a brain primitive)",
+        "maps the orchestration primitives to their surfaces",
+        "routes the session primitive to the Chat rail's two lists (the spine gap report E named)",
+        "marks the Live roster on every signal that changes what is running or about to",
+        "marks the Feed shell's record on a workspace rename and on an assistant change (report E's Feed gate row)",
+        "every listened event has at least one prefix, and every prefix is workspace-first",
+        "returns nothing for an event it does not know (a newer client vocabulary must not throw)",
+        "an approval change marks the home dock (the Suggested badge, Home pane and workspace root read it)",
+        "a task or approval change marks every work scope and the dock (resolved cards leave everywhere)",
+        "an authority change evicts cached work instead of keeping protected cards painted",
+        "a workspace_config change marks the Settings detail row (name, icon, purpose, roster)",
+        "BRAIN_REFRESH_EVENT makes tasks:<wid> and crm:<wid>: stale and keeps their rows",
+        "ignores an event that names a different workspace, applies the catch-up shape",
+        "a catch-up identity refresh keeps access data painted; a real one purges",
+        "GOAL_REFRESH_EVENT marks the board, the triage queue and every goal detail",
+        "OFFICE_REFRESH_EVENT marks the Office list and the template library, never an open editor's snapshot",
+        "a goal change keeps the board's rows while it revalidates, per status slot",
+        "a custom-app change marks the app strip AND every open app's session (renderable state, entry URL)",
+        "brain changes mark the entity / entry / blueprint detail keys; skill changes mark the skill editor's",
+        "[COMP:app-web/surface-cache-invalidation] purges only the changed workspace media",
+        "[COMP:app-web/surface-cache-invalidation] purges the bounded member directory on authority and profile signals",
+        "[COMP:app-web/surface-cache-invalidation] purges only the changed workspace page directory on authority signals",
+        "[COMP:app-web/surface-cache-invalidation] clears project counts on access changes while catch-up preserves the painted view"
+      ],
+      "minimum": 25
+    },
+    {
+      "file": "packages/api/src/operations-readiness/__tests__/pilot-lanes.integration.test.ts",
+      "component": "api/operations-v1-readiness",
+      "assertions": [
+        "V03 research saves a source receipt and Chat reference; a fresh chat binds follow-up and failed acquisition stays partial",
+        "V04 administration requires native approval and produces exactly one fake provider effect receipt",
+        "V04 V08 restart retains uncertain effect WIP and the original allowance without a duplicate write",
+        "V05 scheduled calendar preparation saves grounded Brief and Task work; inaccessible sources stay unknown",
+        "V06 native routine replay creates one Task but refuses unverified mailbox events without delivery or new work",
+        "V07 app-role RLS refuses cross-workspace and revoked Project research disclosure",
+        "V09 four fictional materializations validate current native definition and trigger schemas without activating anything",
+        "V11 owned fixture execution makes zero remote calls or paid model calls and only fake effects"
+      ],
+      "minimum": 8
+    },
+    {
+      "file": "packages/api/src/engineering-history/__tests__/service.test.ts",
+      "component": "api/engineering-history",
+      "assertions": [
+        "does not normalize whitespace and canonicalizes metadata key order for identity",
+        "requires native configuration without reaching any fallback"
+      ],
+      "minimum": 2
+    },
+    {
+      "file": "packages/engineering-capture/src/__tests__/cli.test.ts",
+      "component": "engineering-capture/collector",
+      "assertions": [
+        "EH05/EH12/EH13 concurrent initial hook processes retain every submission and neutral output without altering setup",
+        "EH13 package-manager symlink entrypoints run inspect-only setup and neutral hooks",
+        "EH13 missing configuration never blocks the coding application or leaks hook content",
+        "EH12 keeps a real leased worker alive while a future scheduled receipt retains WIP"
+      ],
+      "minimum": 4
+    },
+    {
+      "file": "packages/engineering-capture/src/__tests__/delivery.test.ts",
+      "component": "engineering-capture/collector",
+      "assertions": [
+        "EH12 offline failure retains original id; restart delivers only a typed archived receipt",
+        "EH08 rejects a prose success or incomplete archived receipt without deleting WIP",
+        "EH12 keeps queued acknowledgement pending rather than counting it as archived",
+        "EH12 permanent HTTP authentication denial suspends without logging provider text",
+        "EH07 held receipts suspend replay and retain the original for configuration review",
+        "EH06/EH12 changed credential/configuration suspends before replay until explicitly accepted",
+        "EH12 retry exhaustion is visible suspension with original identity retained"
+      ],
+      "minimum": 7
+    },
+    {
+      "file": "packages/engineering-capture/src/__tests__/providers.test.ts",
+      "component": "engineering-capture/collector",
+      "assertions": [
+        "EH11 has honest missing final output, interruption and unknown schema diagnostics",
+        "EH06 treats submitted author/origin claims as unverified and distinguishes documented source identity"
+      ],
+      "minimum": 2
+    },
+    {
+      "file": "packages/engineering-capture/src/__tests__/setup.test.ts",
+      "component": "engineering-capture/collector",
+      "assertions": [
+        "EH13 requires explicit scope and credential reference, rejects secret-bearing endpoint configuration"
+      ],
+      "minimum": 1
+    },
+    {
+      "file": "packages/engineering-capture/src/__tests__/spool.test.ts",
+      "component": "engineering-capture/collector",
+      "assertions": [
+        "EH05/EH12 survives restart, preserves ordering and distinguishes repeated submissions without source ids",
+        "EH05 stable provider ids reconcile replay and conflict on changed selected payload",
+        "EH12 leases are exclusive across processes/handles and expire after interrupted delivery",
+        "EH12 bounds queue/payload, preserves WIP on failures and suspends permanent denial",
+        "EH13 refuses repository-local state and never copies a credential into status"
+      ],
+      "minimum": 5
     }
   ],
   "cases": [
@@ -1359,3 +1476,9 @@ export const CATALOGUE = {
     }
   ]
 }
+
+function freeze(value) {
+  if (value && typeof value === 'object') { for (const child of Object.values(value)) freeze(child); Object.freeze(value) }
+  return value
+}
+freeze(CATALOGUE)
