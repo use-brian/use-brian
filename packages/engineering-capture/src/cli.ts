@@ -53,6 +53,6 @@ export async function runCaptureCli(args:string[]){
   throw new CaptureLocalError('capture_command_unknown')
  }finally{spool.close()}
 }
-if(process.argv[1]&&resolve(process.argv[1])===fileURLToPath(import.meta.url))void runCaptureCli(process.argv.slice(2)).catch(error=>{
+if(process.argv[1]&&await realpath(process.argv[1]).catch(()=>null)===fileURLToPath(import.meta.url))void runCaptureCli(process.argv.slice(2)).catch(error=>{
  process.stderr.write(`brian-capture: ${error instanceof CaptureLocalError?error.code:'capture_command_failed'}\n`);process.exitCode=1
 })
