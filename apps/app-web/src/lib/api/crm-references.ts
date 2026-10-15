@@ -16,7 +16,7 @@ import { authFetch } from "@/lib/auth-fetch";
 
 const API_URL = publicRuntimeConfig().apiUrl ?? "http://localhost:4000";
 
-export type CrmReferenceTargetKind = "company" | "deal";
+export type CrmReferenceTargetKind = "company" | "deal" | "account" | "invoice";
 export type CrmReferenceAssignmentMode = "native" | "manual" | "external";
 export type CrmReferenceAssignmentEvent = "explicit" | "approval" | "issue";
 export type CrmReferenceChangePolicy = "immutable" | "correctable";

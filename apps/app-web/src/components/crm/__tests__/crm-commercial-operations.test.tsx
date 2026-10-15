@@ -178,6 +178,41 @@ describe("[COMP:app-web/crm-commercial-operations] references UI", () => {
     expect(host.textContent).toContain(t.nativeNeedsCounter);
   });
 
+  it("proposes invoice numbering with a saved client code and one three-digit annual sequence", async () => {
+    api.executeCrmReferenceCommand.mockResolvedValue({ command: "save_reference_definition", record: {}, created: true, duplicate: false, emittedEventIds: [] });
+    await mount(<CrmReferenceSettings workspaceId={WORKSPACE_ID} canConfigure />);
+    await click(button(t.newDefinition));
+    await click(button(t.invoicePreset));
+    const editor = host.querySelector("[data-reference-definition-editor]")!;
+    expect(editor.querySelector("[data-reference-masked-example]")?.textContent).toBe("INV-[customer_code]-YYYY-###");
+    expect(editor.textContent).toContain(t.invoicePresetHelp);
+    expect(api.executeCrmReferenceCommand).not.toHaveBeenCalled();
+    await click(button(t.save));
+    expect(api.executeCrmReferenceCommand.mock.calls[0][1]).toMatchObject({ kind: "save_reference_definition", definition: {
+      targetKinds: ["invoice"], assignmentEvent: "issue", assignmentMode: "native", counterStart: 1,
+      partitionDimensions: ["business_year"], changePolicy: "immutable",
+      format: [{ kind: "literal", text: "INV-" }, { kind: "parent", definitionKey: "customer_code" },
+        { kind: "literal", text: "-" }, { kind: "date", part: "yyyy" }, { kind: "literal", text: "-" }, { kind: "counter", width: 3 }],
+    } });
+  });
+
+  it("requires a company-code definition before saving the invoice preset", async () => {
+    api.listCrmReferenceDefinitions.mockResolvedValue([]);
+    await mount(<CrmReferenceSettings workspaceId={WORKSPACE_ID} canConfigure />);
+    await click(button(t.newDefinition));
+    await click(button(t.invoicePreset));
+    expect(button(t.save)?.disabled).toBe(true);
+    expect(host.querySelector("[data-reference-draft-issues]")?.textContent).toContain(t.pickParent);
+    await click(button(t.clientCodePreset));
+    expect(button(t.save)?.disabled).toBe(false);
+    expect(host.querySelector("[data-reference-masked-example]")).toBeNull();
+    api.executeCrmReferenceCommand.mockResolvedValue({ command: "save_reference_definition", record: {}, created: true, duplicate: false, emittedEventIds: [] });
+    await click(button(t.save));
+    expect(api.executeCrmReferenceCommand.mock.calls[0][1]).toMatchObject({ definition: {
+      definitionKey: "client_code", targetKinds: ["company"], assignmentMode: "manual", format: null, assignmentEvent: "explicit",
+    } });
+  });
+
   it("shows which fields are frozen when an edited definition is refused", async () => {
     api.executeCrmReferenceCommand.mockRejectedValue(new CrmReferenceRequestError("conflict", 409,
       { reason: "definition_frozen", fields: ["namespaceKey", "counter"] }));

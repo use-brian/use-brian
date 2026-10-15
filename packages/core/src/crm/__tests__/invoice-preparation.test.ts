@@ -60,6 +60,19 @@ describe('[COMP:crm/invoice-preparation] decimal money, template map and documen
     expect(crmReferenceDefinitionIssues(CrmReferenceDefinitionInputSchema.parse({ ...base, targetKinds: ['deal'], assignmentEvent: 'issue' })).length).toBeGreaterThan(0)
   })
 
+  it('allows saved client codes in invoice numbers with an annual shared counter', () => {
+    const definition = CrmReferenceDefinitionInputSchema.parse({
+      definitionKey: 'invoice', label: 'Invoice', namespaceKey: 'invoices', assignmentMode: 'native',
+      targetKinds: ['invoice'], assignmentEvent: 'issue', partitionDimensions: ['business_year'],
+      format: [{ kind: 'literal', text: 'INV-' }, { kind: 'parent', definitionKey: 'client_code' },
+        { kind: 'literal', text: '-' }, { kind: 'date', part: 'yyyy' }, { kind: 'literal', text: '-' }, { kind: 'counter', width: 3 }],
+    })
+    expect(crmReferenceDefinitionIssues(definition)).toEqual([])
+    expect(crmReferenceDefinitionIssues({ ...definition, partitionDimensions: ['business_year', 'parent_target'] })).toEqual([])
+    expect(crmReferenceDefinitionIssues({ ...definition, targetKinds: ['company'], assignmentEvent: 'explicit' }))
+      .toContainEqual({ path: 'format', message: expect.stringContaining('parent company') })
+  })
+
   it('submits typed document commands and gates issue on configure plus confirmation', async () => {
     const execute = vi.fn<CrmOperationsServicePort['execute']>(async (_ctx, command) => ({ command: command.kind, record: {}, created: true, duplicate: false, emittedEventIds: [] }))
     const tools = createCrmCommercialDocumentTools({ reads: {} as CrmCommercialDocumentReadPort, service: { execute } })

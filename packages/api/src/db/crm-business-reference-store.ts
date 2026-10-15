@@ -294,13 +294,15 @@ function visibleTarget(viewer: CrmReferenceViewer, workspaceId: string, startIdx
 function targetJoin(viewer: CrmReferenceViewer, workspaceId: string, startIdx: number) {
   const entity = visibleTarget(viewer, workspaceId, startIdx, 'e')
   const account = commercialVisibility(viewer.userId, workspaceId, 'ca', entity.nextIdx)
+  const invoice = commercialVisibility(viewer.userId, workspaceId, 'ci', account.nextIdx)
   return {
     join: `LEFT JOIN entities e ON r.target_kind IN('company','deal') AND e.workspace_id=r.workspace_id AND e.id=r.target_id AND e.kind=r.target_kind
-      LEFT JOIN crm_customer_accounts ca ON r.target_kind='account' AND ca.workspace_id=r.workspace_id AND ca.id=r.target_id`,
-    sql: `((e.id IS NOT NULL AND ${entity.sql}) OR (ca.id IS NOT NULL AND ${account.sql}))`,
-    name: 'coalesce(e.display_name,ca.label)',
-    params: [...entity.params, ...account.params],
-    nextIdx: account.nextIdx,
+      LEFT JOIN crm_customer_accounts ca ON r.target_kind='account' AND ca.workspace_id=r.workspace_id AND ca.id=r.target_id
+      LEFT JOIN crm_invoices ci ON r.target_kind='invoice' AND ci.workspace_id=r.workspace_id AND ci.id=r.target_id`,
+    sql: `((e.id IS NOT NULL AND ${entity.sql}) OR (ca.id IS NOT NULL AND ${account.sql}) OR (ci.id IS NOT NULL AND ${invoice.sql}))`,
+    name: 'coalesce(e.display_name,ca.label,ci.number)',
+    params: [...entity.params, ...account.params, ...invoice.params],
+    nextIdx: invoice.nextIdx,
   }
 }
 
@@ -329,7 +331,13 @@ export function createCrmReferenceReadStore(run: Run = query as unknown as Run):
     const found = await run<{ id: string; kind: string; name: string; companyId: string | null }>(
       `SELECT ca.id,'account' AS kind,ca.label AS name,ca.company_id AS "companyId" FROM crm_customer_accounts ca
         WHERE ca.workspace_id=$1 AND ca.id=$2 AND ${account.sql}`, [workspaceId, targetId, ...account.params])
-    return found.rows[0] ?? null
+    if (found.rows[0]) return found.rows[0]
+    const invoice = commercialVisibility(viewer.userId, workspaceId, 'ci', 3)
+    const issued = await run<{ id: string; kind: string; name: string; companyId: string | null }>(
+      `SELECT ci.id,'invoice' AS kind,ci.number AS name,ca.company_id AS "companyId" FROM crm_invoices ci
+        JOIN crm_customer_accounts ca ON ca.workspace_id=ci.workspace_id AND ca.id=ci.account_id
+        WHERE ci.workspace_id=$1 AND ci.id=$2 AND ${invoice.sql}`, [workspaceId, targetId, ...invoice.params])
+    return issued.rows[0] ?? null
   }
   return {
     async listDefinitions(workspaceId, viewer, options = {}) {
@@ -361,7 +369,7 @@ export function createCrmReferenceReadStore(run: Run = query as unknown as Run):
       if (input.targetId) {
         const target = await visibleTargetRow(workspaceId, viewer, input.targetId)
         if (!target) throw new CrmOperationsError('not_found', 'The record is unavailable in your current scope.')
-        parentTargetId = target.kind === 'deal' || target.kind === 'account' ? target.companyId : null
+        parentTargetId = target.kind === 'deal' || target.kind === 'account' || target.kind === 'invoice' ? target.companyId : null
         const parentSegment = definition.format?.find((segment) => segment.kind === 'parent')
         if (parentSegment?.kind === 'parent' && parentTargetId && await visibleTargetRow(workspaceId, viewer, parentTargetId)) {
           const parent = await run<{ value: string }>(

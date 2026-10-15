@@ -46,7 +46,7 @@ type ReferenceCopy = Dictionary["crmPage"]["references"];
 
 const KEY_PATTERN = /^[a-z][a-z0-9_-]{0,62}$/;
 const UUID_PATTERN = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
-const TARGET_KINDS: readonly CrmReferenceTargetKind[] = ["company", "deal"];
+const TARGET_KINDS: readonly CrmReferenceTargetKind[] = ["company", "deal", "account", "invoice"];
 const SEGMENT_KINDS: readonly CrmReferenceSegment["kind"][] = ["literal", "date", "category", "parent", "counter"];
 const DATE_PARTS: readonly CrmReferenceDatePart[] = ["yyyy", "yy", "mm", "dd"];
 const MAX_SEGMENTS = 24;
@@ -103,7 +103,11 @@ function draftIssues(draft: CrmReferenceDefinitionInput, t: ReferenceCopy): stri
   if (draft.assignmentMode !== "native" && counters > 0) issues.push(t.onlyNativeCounter);
   if (draft.assignmentMode !== "native" && draft.partitionDimensions.length > 0) issues.push(t.onlyNativePartitions);
   const usesParent = format.some((segment) => segment.kind === "parent") || draft.partitionDimensions.includes("parent_target");
-  if (usesParent && draft.targetKinds.some((kind) => kind !== "deal")) issues.push(t.parentNeedsDeals);
+  if (usesParent && draft.targetKinds.includes("company")) issues.push(t.parentNeedsCompany);
+  if (format.some((segment) => segment.kind === "parent" && !KEY_PATTERN.test(segment.definitionKey))) issues.push(t.pickParent);
+  const invoices = draft.targetKinds.includes("invoice");
+  if ((invoices && (draft.targetKinds.length !== 1 || draft.assignmentEvent !== "issue"))
+    || (!invoices && draft.assignmentEvent === "issue")) issues.push(t.invoiceNeedsIssue);
   const usesCategory = format.some((segment) => segment.kind === "category") || draft.partitionDimensions.includes("service_category");
   if (usesCategory && draft.categories.length === 0) issues.push(t.categoriesNeeded);
   if (draft.categories.some((category) => !KEY_PATTERN.test(category.key) || !category.code.trim() || !category.label.trim())) issues.push(t.keyInvalid);
@@ -114,7 +118,7 @@ export function CrmReferenceSettings({ workspaceId, canConfigure, onOpenRecord }
   workspaceId: string;
   canConfigure: boolean;
   /** Opens a company or deal record the way the CRM surface does. */
-  onOpenRecord?: (kind: CrmReferenceTargetKind, id: string) => void;
+  onOpenRecord?: (kind: "company" | "deal", id: string) => void;
 }) {
   const t = useT().crmPage.references;
   const [definitions, setDefinitions] = useState<CrmReferenceDefinition[] | null>(null);
@@ -178,7 +182,7 @@ export function CrmReferenceSettings({ workspaceId, canConfigure, onOpenRecord }
               {canConfigure && (
                 <div className="mt-2 flex flex-wrap gap-2">
                   <Button size="sm" variant="ghost" onClick={() => { setSaved(false); setEditing({ definition }); }}><Pencil aria-hidden />{t.edit}</Button>
-                  {definition.status !== "archived" && (
+                  {definition.status !== "archived" && definition.targetKinds.some((kind) => kind === "company" || kind === "deal") && (
                     <Button size="sm" variant="ghost" onClick={() => setImporting((value) => value === definition.id ? null : definition.id)}><Upload aria-hidden />{t.importTitle}</Button>
                   )}
                 </div>
@@ -197,7 +201,7 @@ export function CrmReferenceSettings({ workspaceId, canConfigure, onOpenRecord }
 function ReferenceLookup({ workspaceId, definitions, onOpenRecord }: {
   workspaceId: string;
   definitions: CrmReferenceDefinition[];
-  onOpenRecord?: (kind: CrmReferenceTargetKind, id: string) => void;
+  onOpenRecord?: (kind: "company" | "deal", id: string) => void;
 }) {
   const t = useT().crmPage.references;
   const [query, setQuery] = useState("");
@@ -264,8 +268,8 @@ function ReferenceLookup({ workspaceId, definitions, onOpenRecord }: {
                 <span className="text-[11px] text-muted-foreground">{labels.get(reference.definitionId) ?? reference.definitionKey}</span>
                 <span className="ml-auto flex items-center gap-1">
                   <span className="text-[11px] text-muted-foreground">{t.recordKindLabels[reference.targetKind]}</span>
-                  {onOpenRecord ? (
-                    <Button size="sm" variant="ghost" aria-label={t.openRecord.replace("{name}", name)} onClick={() => onOpenRecord(reference.targetKind, reference.targetId)}>{name}</Button>
+                  {onOpenRecord && (reference.targetKind === "company" || reference.targetKind === "deal") ? (
+                    <Button size="sm" variant="ghost" aria-label={t.openRecord.replace("{name}", name)} onClick={() => onOpenRecord(reference.targetKind as "company" | "deal", reference.targetId)}>{name}</Button>
                   ) : (
                     <span className="font-medium">{name}</span>
                   )}
@@ -350,6 +354,19 @@ function DefinitionEditor({
   const update = (patch: Partial<CrmReferenceDefinitionInput>) => setDraft((current) => ({ ...current, ...patch }));
   const setSegments = (next: CrmReferenceSegment[]) => update({ format: next.length ? next : null });
 
+  function usePreset(kind: "client" | "invoice") {
+    setKeyTouched(true);
+    setDraft(kind === "client" ? {
+      ...emptyDraft(), definitionKey: "client_code", namespaceKey: "client_code", label: t.clientCodePreset,
+      assignmentMode: "manual", format: null,
+    } : {
+      ...emptyDraft(), definitionKey: "invoice_number", namespaceKey: "invoice_number", label: t.invoicePreset,
+      targetKinds: ["invoice"], assignmentEvent: "issue", partitionDimensions: ["business_year"],
+      format: [{ kind: "literal", text: "INV-" }, { kind: "parent", definitionKey: (companyDefinitions.find((item) => item.definitionKey === "client_code") ?? companyDefinitions[0])?.definitionKey ?? "" },
+        { kind: "literal", text: "-" }, { kind: "date", part: "yyyy" }, { kind: "literal", text: "-" }, { kind: "counter", width: 3 }],
+    });
+  }
+
   function setLabel(label: string) {
     if (keyTouched) { update({ label }); return; }
     const key = stableKey(label);
@@ -432,6 +449,15 @@ function DefinitionEditor({
     <div className="mb-3 rounded-xl border border-border bg-muted/20 p-3" data-reference-definition-editor>
       <div className="mb-3 text-sm font-medium">{definition ? t.editTitle.replace("{name}", definition.label) : t.newTitle}</div>
       <fieldset disabled={locked} className="space-y-4">
+        {!definition && (
+          <div>
+            <div className="flex flex-wrap gap-2">
+              <Button size="sm" variant="outline" onClick={() => usePreset("client")}>{t.clientCodePreset}</Button>
+              <Button size="sm" variant="outline" onClick={() => usePreset("invoice")}>{t.invoicePreset}</Button>
+            </div>
+            <p className="mt-1 text-xs text-muted-foreground">{t.invoicePresetHelp}</p>
+          </div>
+        )}
         <div className="grid gap-2 sm:grid-cols-3">
           <EditorInput label={t.label} value={draft.label} onChange={setLabel} />
           <EditorInput label={t.definitionKey} value={draft.definitionKey} disabled={Boolean(definition)} onChange={(value) => { setKeyTouched(true); update({ definitionKey: value.trim().toLowerCase() }); }} />
@@ -454,7 +480,7 @@ function DefinitionEditor({
         <div className="grid gap-2 sm:grid-cols-2">
           <EditorSelect label={t.assignmentMode} value={draft.assignmentMode} options={(["native", "manual", "external"] as const).map((value) => ({ value, label: t.assignmentModeLabels[value] }))}
             onChange={(value) => update({ assignmentMode: value as CrmReferenceAssignmentMode, ...(value === "native" ? {} : { partitionDimensions: [] }) })} />
-          <EditorSelect label={t.assignmentEvent} value={draft.assignmentEvent} options={(["explicit", "approval"] as const).map((value) => ({ value, label: t.assignmentEventLabels[value] }))}
+          <EditorSelect label={t.assignmentEvent} value={draft.assignmentEvent} options={(["explicit", "approval", "issue"] as const).map((value) => ({ value, label: t.assignmentEventLabels[value] }))}
             onChange={(value) => update({ assignmentEvent: value as CrmReferenceAssignmentEvent })} />
           <EditorSelect label={t.changePolicy} value={draft.changePolicy} options={(["immutable", "correctable"] as const).map((value) => ({ value, label: t.changePolicyLabels[value] }))}
             onChange={(value) => update({ changePolicy: value as CrmReferenceChangePolicy })} />

@@ -57,7 +57,7 @@ export async function createCommercialDocumentHarness(pool: pg.Pool) {
 
 export type CommercialDocumentHarness = Awaited<ReturnType<typeof createCommercialDocumentHarness>>
 
-export async function seedInvoiceWorkspace(pool: pg.Pool, harness: CommercialDocumentHarness, options: { reviewPolicy?: 'direct' | 'exact_version_review' } = {}) {
+export async function seedInvoiceWorkspace(pool: pg.Pool, harness: CommercialDocumentHarness, options: { reviewPolicy?: 'direct' | 'exact_version_review'; clientCode?: string } = {}) {
   const workspaceId = randomUUID(), owner = randomUUID(), admin = randomUUID(), member = randomUUID()
   for (const user of [owner, admin, member]) await pool.query("INSERT INTO users(id,auth_provider,auth_provider_id) VALUES($1::uuid,'test',$1::text)", [user])
   await pool.query("INSERT INTO workspaces(id,name,purpose,owner_user_id,is_personal) VALUES($1,'Fictional invoicing fixture','test',$2,false)", [workspaceId, owner])
@@ -86,9 +86,15 @@ export async function seedInvoiceWorkspace(pool: pg.Pool, harness: CommercialDoc
   const account = (await exec(owner, { kind: 'save_customer_account', account: { sellerKey: 'studio', companyId: company, label: 'Example retainer account',
     billingAddress: '1 Example Road, Example City' } })).record.account as { id: string }
 
+  if (options.clientCode) {
+    await exec(owner, { kind: 'save_reference_definition', definition: { definitionKey: 'client_code', label: 'Client code', targetKinds: ['company'],
+      assignmentMode: 'manual', namespaceKey: 'client-codes', changePolicy: 'correctable' } })
+    await exec(owner, { kind: 'assign_business_reference', definitionKey: 'client_code', target: { kind: 'company', id: company }, value: options.clientCode })
+  }
   await exec(owner, { kind: 'save_reference_definition', definition: { definitionKey: 'invoice-number', label: 'Invoice number', targetKinds: ['invoice'],
     assignmentMode: 'native', namespaceKey: 'invoice-numbers', assignmentEvent: 'issue', partitionDimensions: ['business_year'], timezone: 'Asia/Hong_Kong',
-    format: [{ kind: 'literal', text: 'INV-' }, { kind: 'date', part: 'yyyy' }, { kind: 'literal', text: '-' }, { kind: 'counter', width: 6 }], counterStart: 123 } })
+    format: [{ kind: 'literal', text: 'INV-' }, ...(options.clientCode ? [{ kind: 'parent', definitionKey: 'client_code' }, { kind: 'literal', text: '-' }] : []),
+      { kind: 'date', part: 'yyyy' }, { kind: 'literal', text: '-' }, { kind: 'counter', width: options.clientCode ? 3 : 6 }], counterStart: options.clientCode ? 1 : 123 } })
 
   const template = await admitFictionalInvoiceTemplate(harness, workspaceId, owner)
   const tokens: Record<string, string> = {

@@ -88,14 +88,14 @@ export function crmReferenceDefinitionIssues(input: CrmReferenceDefinitionInput)
   }
   const parents = format.filter((segment) => segment.kind === 'parent')
   if (parents.length > 1) issues.push({ path: 'format', message: 'A format has at most one parent segment.' })
-  if (parents.length && input.targetKinds.some((kind) => kind === 'company' || kind === 'invoice')) {
-    issues.push({ path: 'format', message: 'A parent segment requires every target kind to have a parent company (deals and accounts).' })
+  if (parents.length && input.targetKinds.includes('company')) {
+    issues.push({ path: 'format', message: 'A parent segment requires every target kind to have a parent company (deals, accounts and invoices).' })
   }
   if (parents.some((segment) => segment.kind === 'parent' && segment.definitionKey === input.definitionKey)) {
     issues.push({ path: 'format', message: 'A definition cannot reference itself as its parent.' })
   }
-  if (input.partitionDimensions.includes('parent_target') && input.targetKinds.some((kind) => kind === 'company' || kind === 'invoice')) {
-    issues.push({ path: 'partitionDimensions', message: 'parent_target partitions require every target kind to have a parent company (deals and accounts).' })
+  if (input.partitionDimensions.includes('parent_target') && input.targetKinds.includes('company')) {
+    issues.push({ path: 'partitionDimensions', message: 'parent_target partitions require every target kind to have a parent company (deals, accounts and invoices).' })
   }
   const usesCategory = format.some((segment) => segment.kind === 'category') || input.partitionDimensions.includes('service_category')
   if (usesCategory && input.categories.length === 0) {

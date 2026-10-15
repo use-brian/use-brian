@@ -3,6 +3,7 @@ import pg from 'pg'
 import { afterAll, describe, expect, it } from 'vitest'
 import type { SpreadsheetSnapshot } from '@use-brian/office-model'
 import { getAppPool, getPool } from '../../db/client.js'
+import { createCrmReferenceReadStore } from '../../db/crm-business-reference-store.js'
 import { createCommercialDocumentHarness, lines, seedInvoiceWorkspace } from './commercial-document-fixture.js'
 
 const { assertLocalFixture } = await import(new URL('../../../../../scripts/crm/local-fixture.mjs', import.meta.url).href)
@@ -19,6 +20,74 @@ async function cell(userId: string, artifactId: string, address: string) {
 type Prepared = { preparation: { id: string; version: number; state: string; officeArtifactId: string | null }; version: { questions: Array<{ fieldKey: string }>; draftReady: boolean } }
 
 describe('[COMP:crm/invoice-preparation] invoice preparation on PostgreSQL and Office', () => {
+  it('issues saved client codes with one annual sequence, fails without consuming numbers, and preserves parent snapshots', async () => {
+    const f = await seedInvoiceWorkspace(pool, harness, { clientCode: 'ACME' })
+    const reads = createCrmReferenceReadStore((sql, values) => pool.query(sql, values as unknown[]) as never)
+    async function prepare(accountId: string, dealId = f.deal) {
+      const prepared = await f.exec(f.owner, { kind: 'prepare_commercial_document', operationKey: 'invoice', accountId, dealIds: [dealId], lines: lines(1) })
+      const id = (prepared.record as Prepared).preparation.id
+      await f.exec(f.owner, { kind: 'mark_preparation_ready', preparationId: id, expectedVersion: 1 })
+      return id
+    }
+    async function issue(id: string, date: string) {
+      await f.exec(f.owner, { kind: 'issue_invoice', preparationId: id, expectedVersion: 1, issueDate: date })
+      const invoice = (await pool.query('SELECT id,number,state FROM crm_invoices WHERE workspace_id=$1 AND preparation_id=$2', [f.workspaceId, id])).rows[0]
+      const attempts = await pool.query('SELECT state,error_code,error_detail FROM crm_issue_attempts WHERE invoice_id=$1', [invoice.id])
+      expect(invoice.state, JSON.stringify(attempts.rows)).toBe('issued')
+      return invoice
+    }
+    const firstId = await prepare(f.accountId)
+    const first = await issue(firstId, '2026-01-02')
+    expect(first).toMatchObject({ number: 'INV-ACME-2026-001', state: 'issued' })
+    const firstDetail = await harness.reads.getPreparation(f.workspaceId, { userId: f.owner }, firstId) as { preparation: Prepared['preparation'] }
+    expect(await cell(f.owner, firstDetail.preparation.officeArtifactId!, 'G6')).toMatchObject({ value: first.number })
+    expect(await reads.preview(f.workspaceId, { userId: f.owner }, { definitionKey: 'invoice-number', targetId: first.id, businessDate: '2026-01-02' }))
+      .toMatchObject({ explanation: { maskedExample: 'INV-ACME-2026-###' }, partitionKey: 'year=2026', reserves: false })
+    expect(await reads.lookup(f.workspaceId, { userId: f.owner }, { q: first.number, match: 'exact', limit: 20, includeFormer: true }))
+      .toMatchObject({ references: [{ targetKind: 'invoice', targetId: first.id, value: first.number }] })
+    await pool.query("UPDATE crm_invoices SET sensitivity='confidential' WHERE id=$1", [first.id])
+    expect(await reads.lookup(f.workspaceId, { userId: f.member }, { q: first.number, match: 'exact', limit: 20, includeFormer: true }))
+      .toMatchObject({ references: [] })
+    await expect(reads.preview(f.workspaceId, { userId: f.member }, { definitionKey: 'invoice-number', targetId: first.id }))
+      .rejects.toMatchObject({ code: 'not_found' })
+
+    const secondCompany = randomUUID()
+    await pool.query(`INSERT INTO entities(id,workspace_id,kind,display_name,user_id,created_by_user_id,source,sensitivity)
+      VALUES($1,$2,'company','Beacon Example Limited',$3,$3,'manual','internal')`, [secondCompany, f.workspaceId, f.owner])
+    const secondDeal = randomUUID()
+    await pool.query(`INSERT INTO entities(id,workspace_id,kind,display_name,user_id,created_by_user_id,source,attributes,sensitivity)
+      VALUES($1,$2,'deal','Second fictional service',$3,$3,'manual',$4::jsonb,'internal')`,
+      [secondDeal, f.workspaceId, f.owner, JSON.stringify({ company_id: secondCompany })])
+    const secondAccount = (await f.exec(f.owner, { kind: 'save_customer_account', account: {
+      sellerKey: 'studio', companyId: secondCompany, label: 'Second fictional account', billingAddress: '2 Example Road',
+    } })).record.account as { id: string }
+    const secondId = await prepare(secondAccount.id, secondDeal)
+    const next = async () => (await pool.query(`SELECT p.next_value::int AS n FROM crm_number_partitions p
+      JOIN crm_number_series s ON s.id=p.series_id JOIN crm_reference_definitions d ON d.id=s.definition_id
+      WHERE p.workspace_id=$1 AND d.definition_key='invoice-number' AND p.partition_key='year=2026'`, [f.workspaceId])).rows[0].n
+    expect(await next()).toBe(2)
+    await expect(issue(secondId, '2026-01-03')).rejects.toMatchObject({ details: { reason: 'parent_reference_missing' } })
+    expect(await next()).toBe(2)
+    await expect(f.exec(f.owner, { kind: 'assign_business_reference', definitionKey: 'client_code', target: { kind: 'company', id: secondCompany }, value: 'acme' }))
+      .rejects.toMatchObject({ details: { reason: 'reference_collision' } })
+    await f.exec(f.owner, { kind: 'assign_business_reference', definitionKey: 'client_code', target: { kind: 'company', id: secondCompany }, value: 'BEACON' })
+    expect(await issue(secondId, '2026-01-03')).toMatchObject({ number: 'INV-BEACON-2026-002', state: 'issued' })
+
+    const client = (await pool.query("SELECT id,version FROM crm_business_references WHERE workspace_id=$1 AND target_id=$2 AND status='active'", [f.workspaceId, f.company])).rows[0]
+    await f.exec(f.owner, { kind: 'replace_business_reference', referenceId: client.id, expectedVersion: client.version, reason: 'Accepted fictional code correction', value: 'ACME2' })
+    expect((await pool.query('SELECT number FROM crm_invoices WHERE id=$1', [first.id])).rows[0].number).toBe('INV-ACME-2026-001')
+    expect((await pool.query('SELECT parent_snapshot FROM crm_business_references WHERE workspace_id=$1 AND target_id=$2', [f.workspaceId, first.id])).rows[0].parent_snapshot)
+      .toMatchObject({ value: 'ACME', referenceId: client.id, version: 1 })
+    const thirdId = await prepare(f.accountId)
+    expect(await issue(thirdId, '2027-01-02')).toMatchObject({ number: 'INV-ACME2-2027-001', state: 'issued' })
+
+    await f.exec(f.owner, { kind: 'import_business_references', definitionKey: 'invoice-number', partitionCounters: [{ partitionKey: 'year=2026', nextValue: 1000 }] })
+    const exhaustedId = await prepare(f.accountId)
+    await expect(issue(exhaustedId, '2026-12-31')).rejects.toMatchObject({ details: { reason: 'counter_exhausted' } })
+    expect(await next()).toBe(1000)
+    expect((await pool.query('SELECT number FROM crm_invoices WHERE preparation_id=$1', [exhaustedId])).rows[0].number).toBeNull()
+  }, 60_000)
+
   it('I1 renders an editable draft from the admitted fictional XLSX with no official number or issue date', async () => {
     const f = await seedInvoiceWorkspace(pool, harness)
     const prepared = await f.exec(f.owner, { kind: 'prepare_commercial_document', operationKey: 'invoice', accountId: f.accountId, dealIds: [f.deal],
@@ -98,7 +167,8 @@ describe('[COMP:crm/invoice-preparation] invoice preparation on PostgreSQL and O
     const references = await pool.query("SELECT printable_value FROM crm_business_references WHERE workspace_id=$1 AND target_kind='invoice'", [f.workspaceId])
     expect(references.rows).toEqual([{ printable_value: 'INV-2026-000123' }])
     const invoice = (await pool.query('SELECT id,number,state,issue_date::text AS issue_date FROM crm_invoices WHERE workspace_id=$1', [f.workspaceId])).rows[0]
-    expect(invoice).toMatchObject({ number: 'INV-2026-000123', state: 'issued', issue_date: '2026-03-31' })
+    const attempts = await pool.query('SELECT state,error_code,error_detail FROM crm_issue_attempts WHERE invoice_id=$1', [invoice.id])
+    expect(invoice, JSON.stringify(attempts.rows)).toMatchObject({ number: 'INV-2026-000123', state: 'issued', issue_date: '2026-03-31' })
     expect((await pool.query('SELECT count(*)::int AS n FROM crm_delivery_receipts WHERE workspace_id=$1', [f.workspaceId])).rows[0].n).toBe(0)
     await expect(f.exec(f.owner, { kind: 'revise_commercial_preparation', preparationId: id, expectedVersion: 1, dealIds: [f.deal], lines: lines(1) }))
       .rejects.toMatchObject({ code: 'invalid_transition' })
