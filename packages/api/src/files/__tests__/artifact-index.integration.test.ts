@@ -177,7 +177,7 @@ describeIf('[COMP:files/artifact-index] indexFileArtifact + lifecycle propagatio
     expect(resumed.segmentCount).toBe(first.segmentCount)
   })
 
-  // Migration 752. The ingest job stamps its parent AFTER publishing segments
+  // Migration 771. The ingest job stamps its parent AFTER publishing segments
   // (metadata.indexing ready, then source_episode_id). Those stamps used to
   // advance the file's scope_version, which held every segment the job had
   // just written - extracted text that no member could ever read.
