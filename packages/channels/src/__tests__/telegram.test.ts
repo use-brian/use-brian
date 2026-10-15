@@ -2237,6 +2237,31 @@ describe('[COMP:channels/telegram] capture-only with several bots in one group',
     expect(msg!.isMentioned).toBe(true)
   })
 
+  it('drops another topic\'s text even when the bot normalizes passive room posts', () => {
+    // Regression: the room path set `normalizePassive`, which skipped the
+    // sibling-topic drop, so every topic-bound bot in the group turned "hi" in
+    // one topic into a room post and posted its own room disclosure there.
+    const adapter = createTelegramAdapter({
+      token: 'test-token',
+      botUsername: 'gymbro_bot',
+      onMessage: vi.fn(),
+      config: { normalizePassive: true, requireMention: { default: true, overrides: [{ chatId: String(CHAT_ID), topicId: 222 }] } },
+    })
+    const text = (topicId: number) => ({
+      update_id: 912,
+      message: {
+        message_id: 712,
+        from: { id: 42, first_name: 'Alice' },
+        chat: { id: CHAT_ID, type: 'supergroup', is_forum: true },
+        message_thread_id: topicId,
+        date: 1700000000,
+        text: 'hi',
+      },
+    })
+    expect(adapter.parseIncoming(text(37))).toBeNull()
+    expect(adapter.parseIncoming(text(222))).not.toBeNull()
+  })
+
   it('drops the General topic of a forum chat where the bot is topic-bound', () => {
     // Deliberate: no `message_thread_id` means the General topic, which no
     // topic-bound bot claims. Documented in adapter-pattern.md.

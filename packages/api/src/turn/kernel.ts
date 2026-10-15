@@ -114,7 +114,13 @@ export type RunAssistantTurnParams = {
    * to lock (a workflow-executor turn on a run id).
    */
   lease?:
-    | { mode: 'kernel'; waitForSlot?: (sessionId: string) => Promise<boolean>; onTaken?: (token: string) => void }
+    | {
+        mode: 'kernel'
+        waitForSlot?: (sessionId: string) => Promise<boolean>
+        onTaken?: (token: string) => void
+        /** The answering assistant when it may differ from the session's binding (`startTurnLease`). */
+        assistantId?: string
+      }
     | { mode: 'held'; token: string }
     | { mode: 'none' }
   /** Throws `TurnRefusal('budget_blocked')` (or anything) to stop before the loop. */
@@ -144,6 +150,7 @@ export async function runAssistantTurn(params: RunAssistantTurnParams): Promise<
       sessionId: params.sessionId,
       admission: params.policy.admission,
       waitForSlot: lease.waitForSlot,
+      ...(lease.assistantId ? { assistantId: lease.assistantId } : {}),
     })
     if (!slot.taken) throw new TurnRefusal(slot.code)
     token = slot.token

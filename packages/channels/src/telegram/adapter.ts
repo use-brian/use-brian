@@ -554,7 +554,11 @@ export function createTelegramAdapter(options: TelegramAdapterOptions): ChannelA
     // assistants that were never addressed. The per-topic `requireMention`
     // overrides are the user's own statement of which topics a bot owns, so a
     // topic-bound bot outside its topics keeps the historical drop.
-    if (!options.config?.normalizePassive && unaddressed && isBoundToOtherTopics(chatIdStr, topicId)) return null
+    // The drop holds under `normalizePassive` too: a passive room post is the
+    // same write (a stored room message, a one-time disclosure, a brain
+    // capture), so a sibling bot that skipped it joined, announced itself in
+    // and captured every topic it did not own.
+    if (unaddressed && isBoundToOtherTopics(chatIdStr, topicId)) return null
     if (!options.config?.normalizePassive && unaddressed && !capturable) return null
 
     // Must have text or media

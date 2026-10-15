@@ -65,6 +65,9 @@ function sessionRow(overrides: Record<string, unknown> = {}) {
     assistantName: 'Brian',
     assistantIconSeed: 42,
     assistantWorkspaceId: WS,
+    voiceAssistantId: null,
+    voiceAssistantName: null,
+    voiceAssistantIconSeed: null,
     userId: CALLER,
     ownerName: 'Caller',
     channelType: 'web', anchorKind: null,
@@ -252,6 +255,44 @@ describe('[COMP:api/live-work-roster] roster route', () => {
     expect(sessionsSql).toContain(
       `pa.approval_payload->>'turnLeaseToken' = s.turn_lease_token::text`,
     )
+  })
+
+  it('resolves the turn voice only inside the binding workspace (§6-a)', async () => {
+    primeRoster([], [])
+    await request(makeApp()).get(`/api/workspaces/${WS}/live`)
+    const sessionsSql = (mockQuery.mock.calls[0][0] as string).replace(/\s+/g, ' ')
+    expect(sessionsSql).toContain(
+      'LEFT JOIN assistants v ON v.id = s.turn_assistant_id AND v.id <> s.assistant_id AND v.workspace_id = a.workspace_id',
+    )
+  })
+
+  it('a re-addressed turn is labelled with its answering assistant, not the binding', async () => {
+    const TASKMASTER = '88888888-8888-8888-8888-888888888888'
+    primeRoster(
+      [
+        sessionRow({
+          assistantName: 'Primary',
+          voiceAssistantId: TASKMASTER,
+          voiceAssistantName: 'TaskMaster',
+          voiceAssistantIconSeed: 7,
+        }),
+      ],
+      [],
+    )
+    const res = await request(makeApp()).get(`/api/workspaces/${WS}/live`)
+    const item = res.body.items[0]
+    expect(item.assistantId).toBe(TASKMASTER)
+    expect(item.assistantName).toBe('TaskMaster')
+    expect(item.assistantIconSeed).toBe(7)
+  })
+
+  it('falls back to the binding when no voice resolves', async () => {
+    primeRoster([sessionRow({ voiceAssistantId: null })], [])
+    const res = await request(makeApp()).get(`/api/workspaces/${WS}/live`)
+    const item = res.body.items[0]
+    expect(item.assistantId).toBe(ASSISTANT)
+    expect(item.assistantName).toBe('Brian')
+    expect(item.assistantIconSeed).toBe(42)
   })
 })
 

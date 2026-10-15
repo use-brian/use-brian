@@ -113,6 +113,15 @@ describe('[COMP:api/turn-lease] ownership guards', () => {
     expect(sql).toContain('gen_random_uuid()')
     expect(sql).toContain('cancel_requested_at = NULL')
     expect(sql).toContain('turn_end_reason = NULL')
+    // No answering assistant given = the binding answers.
+    expect(sql).toContain('turn_assistant_id = $2')
+    expect(mockQuery.mock.calls[0][1]).toEqual(['s-1', null])
+  })
+
+  it('startTurnLease stamps the answering assistant of a re-addressed turn', async () => {
+    mockQuery.mockResolvedValueOnce({ rows: [{ turn_lease_token: 'tok-2' }], rowCount: 1 } as never)
+    await startTurnLease('s-1', 'a-taskmaster')
+    expect(mockQuery.mock.calls[0][1]).toEqual(['s-1', 'a-taskmaster'])
   })
 
   it('touchTurnLease refreshes and reads the cancel flag in ONE statement', async () => {
