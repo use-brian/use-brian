@@ -87,6 +87,15 @@ export async function snapshot(ossRoot, platformRoot) {
   return { ...repos, digest: digest(repos) }
 }
 
+/** Retain a blocked bundle even when Git/source inventory itself is unavailable. */
+export async function captureSource(ossRoot, platformRoot) {
+  try { return { status: 'passed', source: await snapshot(ossRoot, platformRoot) } }
+  catch {
+    const repos = { oss: { sha: 'unavailable', files: {} }, platform: { sha: 'unavailable', files: {} } }
+    return { status: 'blocked', reason: 'source_inventory_unavailable', source: { ...repos, digest: digest(repos) } }
+  }
+}
+
 export async function artifact(root, path) {
   root = await realpath(root)
   if (!path || isAbsolute(path) || path.split(/[\\/]/).includes('..')) throw new Error('evidence_path_escape')

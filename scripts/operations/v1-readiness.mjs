@@ -4,7 +4,7 @@ import { isAbsolute, join, resolve } from 'node:path'
 import { fileURLToPath, pathToFileURL } from 'node:url'
 import { createLocalFixture, cleanRuntimeEnvironment, validateAmbientDatabase } from '../crm/local-fixture.mjs'
 import { CATALOGUE } from './readiness-catalogue.mjs'
-import { aggregate, artifact, command, digest, parseVitest, snapshot, verifyArtifacts } from './readiness-contract.mjs'
+import { aggregate, artifact, captureSource, command, digest, parseVitest, verifyArtifacts } from './readiness-contract.mjs'
 import { preparePilotConfig, validateInactiveConfig } from './pilot-config.mjs'
 import { inspectRelease } from './release-readiness.mjs'
 import { operatorBundle } from './operator-bundle.mjs'
@@ -93,12 +93,12 @@ export async function runReadiness(options) {
   await mkdir(join(options.reportDir, 'evidence'), { mode: 0o700 })
   const startedAt = new Date().toISOString(), receipts = {}, proofs = []
   const env = { ...cleanRuntimeEnvironment(process.env), NODE_ENV: 'test' }
-  const before = await snapshot(ossRoot, platformRoot)
+  const initialSource = await captureSource(ossRoot, platformRoot), before = initialSource.source
   const pilot = preparePilotConfig(); validateInactiveConfig(pilot)
   let harness = null, database = { status: 'not_run' }, runnerError = null
   try {
     harness = await runHarness(options.reportDir, env, before.digest, proofs)
-    if (options.mode === 'local' && harness.status === 'passed') {
+    if (options.mode === 'local' && harness.status === 'passed' && initialSource.status === 'passed') {
       database = await runNative(options.reportDir, env, before.digest, proofs, options.pgBin, receipts)
       const groups = new Map()
       for (const suite of CATALOGUE.suites.filter(s => !s.file.endsWith('.integration.test.ts'))) {
@@ -109,7 +109,8 @@ export async function runReadiness(options) {
       for (const [group, suites] of groups) Object.assign(receipts, await runGroup(suites, options.reportDir, env, before.digest, proofs, group.replaceAll('/', '-')))
     }
   } catch { runnerError = 'bounded_runner_failed'; }
-  const after = await snapshot(ossRoot, platformRoot)
+  const finalSource = await captureSource(ossRoot, platformRoot), after = finalSource.source
+  if (initialSource.status !== 'passed' || finalSource.status !== 'passed') runnerError = 'source_inventory_unavailable'
   const sourceChanged = before.digest !== after.digest
   const release = await inspectRelease(ossRoot, platformRoot, after)
   const artifactMap = await verifyArtifacts(options.reportDir, proofs)
@@ -139,7 +140,7 @@ export async function runReadiness(options) {
     const missing = deps.filter(d => report.dependencies[d].status !== 'passed')
     if (missing.length) report.cases[id] = { ...report.cases[id], status: 'blocked', reasons: [...report.cases[id].reasons, ...missing.map(d => `dependency:${d}`)] }
   }
-  report.verdicts.codeHarness = harness?.status === 'passed' && !sourceChanged ? 'passed' : 'failed'
+  report.verdicts.codeHarness = harness?.status === 'passed' && !sourceChanged && !runnerError ? 'passed' : 'failed'
   if (sourceChanged) for (const c of Object.values(report.cases)) if (c.status === 'passed') { c.status = 'blocked'; c.reasons.push('source_changed_during_run') }
   report.verdicts.localReadiness = Object.values(report.dependencies).every(d => d.status === 'passed') && Object.values(report.cases).every(c => c.status === 'passed') ? 'ready' : 'not_ready'
   report.exitCode = report.verdicts.localReadiness === 'ready' ? 0 : 1

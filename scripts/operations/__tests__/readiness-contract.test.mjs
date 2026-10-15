@@ -4,7 +4,7 @@ import { mkdtemp, writeFile, symlink, rm } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { CATALOGUE } from '../readiness-catalogue.mjs'
-import { aggregate, artifact, assessSuite, digest, parseVitest, validateCatalogue, verifyArtifacts } from '../readiness-contract.mjs'
+import { aggregate, artifact, assessSuite, captureSource, digest, parseVitest, validateCatalogue, verifyArtifacts } from '../readiness-contract.mjs'
 import { optionsFrom } from '../v1-readiness.mjs'
 import { assertLocalFixture, validateAmbientDatabase } from '../../crm/local-fixture.mjs'
 
@@ -92,5 +92,14 @@ describe('[COMP:operations/v1-readiness] source-bound evidence contract', () => 
       assert.throws(() => validateAmbientDatabase({ DATABASE_URL: url }))
     }
     await assert.rejects(assertLocalFixture({}), /local-fixture/)
+  })
+  it('V02 V14 unavailable source inventory retains an explicitly blocked snapshot', async () => {
+    const dir = await mkdtemp(join(tmpdir(), 'operations-missing-source-'))
+    try {
+      const result = await captureSource(dir, dir)
+      assert.equal(result.status, 'blocked')
+      const f = completeEvidence(); f.source = result.source
+      assert.equal(run(f).exitCode, 1)
+    } finally { await rm(dir, { recursive: true }) }
   })
 })
