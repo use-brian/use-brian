@@ -1,0 +1,9 @@
+{
+  "schema": "operations-pilot-fixture-v1",
+  "fictional": true,
+  "requiredDependencies": ["F01", "F02", "F03", "F04", "F05", "F06", "F07", "F08", "F09"],
+  "requiredCases": ["V01", "V02", "V03", "V04", "V05", "V06", "V07", "V08", "V09", "V10", "V11", "V12", "V13", "V14"],
+  "company": { "plane": "company", "targetClass": "platform", "assistantId": "00000000-0000-4000-8000-000000000101", "projectId": "00000000-0000-4000-8000-000000000102", "chatId": "fictional-company-chat", "timezone": "Asia/Hong_Kong", "mailbox": "operations@company.example" },
+  "personal": { "plane": "personal", "targetClass": "home-linux", "assistantId": "00000000-0000-4000-8000-000000000201", "projectId": "00000000-0000-4000-8000-000000000202", "chatId": "fictional-personal-chat", "timezone": "Asia/Hong_Kong", "mailbox": "person@personal.example" },
+  "meeting": { "sourceId": "fictional-meeting-1", "subject": "Widget review", "attendees": ["colleague@company.example"], "unknown": ["offline decisions", "private participant history"] }
+}
