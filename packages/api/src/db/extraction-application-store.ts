@@ -292,14 +292,16 @@ export function createExtractionApplicationStore(): DbExtractionApplicationStore
             `INSERT INTO episode_extraction_items
                (run_id,candidate_id,primitive_kind,payload_hash,dependency_ids)
              VALUES ($1,$2,$3,$4,$5)
-             ON CONFLICT (run_id,candidate_id) DO UPDATE SET
-               candidate_id=episode_extraction_items.candidate_id
+             ON CONFLICT (run_id,candidate_id) DO NOTHING
              RETURNING payload_hash AS "payloadHash",primitive_kind AS "primitiveKind"`,
             [runId, candidate.candidateId, candidate.primitiveKind,
               candidate.payloadHash, candidate.dependencyIds],
           )
-          if (row.rows[0]?.payloadHash !== candidate.payloadHash
-            || row.rows[0]?.primitiveKind !== candidate.primitiveKind) {
+          const persisted = row.rows[0] ?? (await client.query<{payloadHash:string;primitiveKind:string}>(
+            `SELECT payload_hash AS "payloadHash",primitive_kind AS "primitiveKind" FROM episode_extraction_items
+             WHERE run_id=$1 AND candidate_id=$2 FOR SHARE`, [runId,candidate.candidateId])).rows[0]
+          if (persisted?.payloadHash !== candidate.payloadHash
+            || persisted?.primitiveKind !== candidate.primitiveKind) {
             throw new ExtractionApplicationError('application_candidate_conflict')
           }
         }

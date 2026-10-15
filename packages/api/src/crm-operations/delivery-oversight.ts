@@ -1,7 +1,7 @@
 /** Canonical delivery commands bound to the existing CRM transaction.
  * [COMP:api/crm-delivery-oversight]
  */
-import { CrmOperationsError, classifyDeliveryRecognition, deliveryQuoteMatches,
+import { CrmOperationsError, classifyDeliveryRecognition, deliveryQuoteMatches, deliveryObservationSupported,
   type DeliveryCommand, type DeliveryCommitment, type DeliverySource, type DeliveryViewer } from '@use-brian/core'
 import type { CrmOperationsTransaction } from '../db/crm-operations-store.js'
 import { applyRLSGucs } from '../db/client.js'
@@ -94,6 +94,7 @@ export async function executeDeliveryCommand(tx: CrmOperationsTransaction, comma
         const input = command.observation
         const observed = await readDeliverySource(client, viewer, context.workspaceId, input.source)
         if (!observed || !deliveryQuoteMatches(input.source, observed)) unavailable()
+        if (!deliveryObservationSupported(input,observed)) invalid('The current exact evidence cannot support that delivery claim. Keep it unknown or review the source.')
         if (input.kind === 'human_report' && (observed.role !== 'human' || !observed.authorUserId)) invalid('A human report requires an authenticated native sender.')
         if (input.kind === 'observed_fact' && observed.role !== 'document' && observed.role !== 'governed') invalid('Assistant replies and human completion reports are not independently observed delivery.')
         if (input.kind === 'coverage_gap' && input.claim !== 'unknown') invalid('A visibility gap cannot diagnose delivery.')

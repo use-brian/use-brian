@@ -165,3 +165,23 @@ export type DeliveryReadPort = {
   list(viewer: DeliveryViewer, workspaceId: string, query: DeliveryListQuery): Promise<{ commitments: DeliveryCommitment[]; nextCursor: string | null }>;
   get(viewer: DeliveryViewer, workspaceId: string, id: string): Promise<DeliveryDetail | null>;
 }
+
+/** Conservative claim gate over the exact read. Missing semantics stays a gap,
+ * never a fluent diagnosis inferred from a date, Task state or connected tool. */
+export function deliveryObservationSupported(input: DeliveryObservationInput, source: DeliverySource): boolean {
+  if (!deliveryQuoteMatches(input.source,source)) return false
+  if(input.kind==='coverage_gap') return input.claim==='unknown'
+  if(input.kind==='conflict') return input.claim==='unknown' && source.role!=='assistant'
+  if(input.statement!==input.source.quote) return false
+  if(input.kind==='human_report' && (source.role!=='human' || !source.authorUserId)) return false
+  // Accepted terms establish an agreement, not execution or delivery.
+  if(input.kind==='observed_fact' && source.role!=='document') return false
+  if(input.claim==='outcome_delivered') return input.kind==='observed_fact'
+    && /\b(delivered|received|accepted outcome|acceptance receipt)\b|交付済|受領|已交付|已收妥/i.test(source.quote)
+  if(input.claim==='delay' || input.claim==='blocker') {
+    if(/\b(not|no|without)\s+(?:a\s+)?(?:delay|block|late)|遅延なし|没有延误|沒有延誤/i.test(source.quote)) return false
+    return /\b(delay(?:ed)?|blocked|blocker|missed|late|cannot deliver)\b|遅延|停滞|延誤|延误|受阻/i.test(source.quote)
+  }
+  if(input.claim==='completed') return input.kind==='human_report' && /\b(completed|finished|done)\b|完了|完成/i.test(source.quote)
+  return input.claim==='progress' || input.claim==='unknown'
+}

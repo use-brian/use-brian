@@ -3,13 +3,30 @@
  */
 import { randomUUID } from 'node:crypto'
 import { afterAll, describe, expect, it } from 'vitest'
-import { type CrmOperationsContext, type DeliveryProposal } from '@use-brian/core'
+import { processEpisode, type LLMProvider, type PipelineBEpisode, type CrmOperationsContext, type DeliveryProposal } from '@use-brian/core'
 import { getPool, getAppPool, queryWithRLS } from '../client.js'
 import { createCrmDomainEventWorker, createDbCrmDomainEventOutboxStore } from '../../crm-operations/domain-event-worker.js'
 import { createCrmOperationsService } from '../../crm-operations/service.js'
 import { createDbCrmOperationsStore } from '../crm-operations-store.js'
 import { createCrmDeliveryReadStore } from '../crm-delivery-oversight-store.js'
+import { createDbEpisodesStore } from '../episodes-store.js'
+import { createDbCrmStore } from '../crm-store.js'
+import { createDbEntitiesStore } from '../entities-store.js'
+import { createDbEntityLinksStore } from '../entity-links-store.js'
+import { createDbMemoryStore } from '../memory-store.js'
+import { createExtractionApplicationStore } from '../extraction-application-store.js'
+import { createIngestApplicationService } from '../../ingest/application-service.js'
+import { createPipelineBApplicationMutationPort } from '../../ingest/pipeline-b-application-adapter.js'
 import { briefFixture } from '../../briefs/__tests__/fixture.js'
+import { createProgrammaticCaptureStore } from '../programmatic-capture-store.js'
+import { createDbBrainKeyStore } from '../brain-keys-store.js'
+import { withExternalKeyActor } from '../external-key-admission.js'
+import { authSessionStore } from '../auth-session-store.js'
+import { createDbWorkspaceFilesStore } from '../workspace-files-store.js'
+import { createFilesApi } from '../../files/files-api.js'
+import { createEngineeringArchivePublisher } from '../../engineering-history/publisher.js'
+import { createProgrammaticCaptureRouter } from '../../ingest/programmatic-capture.js'
+import type { BrainAuth } from '../../brain-mcp/auth.js'
 import { addSessionMessage, createWorkspaceChatSession } from '../sessions.js'
 const { assertLocalFixture } = await import(new URL('../../../../../scripts/crm/local-fixture.mjs',import.meta.url).href)
 await assertLocalFixture()
@@ -86,7 +103,7 @@ describe('[COMP:api/crm-delivery-oversight] real source authority and lifecycle 
   const f=await fixture(),p=await f.message(),saved=await f.record(p.proposal),id=saved.record.id as string
   const update=await f.message('The accepted report is completed.')
   const op=randomUUID(),cmd={kind:'append_delivery_observation' as const,operationId:op,commitmentId:id,expectedVersion:1,
-   observation:{source:update.proposal.source,kind:'human_report' as const,claim:'completed' as const,statement:'Completed according to the author',workId:null}}
+   observation:{source:update.proposal.source,kind:'human_report' as const,claim:'completed' as const,statement:update.proposal.source.quote,workId:null}}
   await service.execute(f.ctx(),cmd);expect((await service.execute(f.ctx(),cmd)).duplicate).toBe(true)
   const detail=(await reads.get({userId:f.userId},f.workspaceId,id))!
   expect(detail.assessment.outcome).toBe('reported_completion');expect(detail.observations[0].reporterUserId).toBe(f.userId)
@@ -135,6 +152,62 @@ describe('[COMP:api/crm-delivery-oversight] real source authority and lifecycle 
   await expect(f.record({candidateKey:'archive',source:{kind:'episode',id:ep,revision:'1',quote:text,start:0,end:text.length},outcome:'History outcome',
    dueDate:null,companyId:f.companyId,dealId:null,taskIds:[],goalIds:[],basis:'explicit_agreement',agreeingUserId:f.userId})).rejects.toMatchObject({code:'not_found'})
   expect((await pool.query('SELECT count(*)::int n FROM crm_delivery_commitments WHERE workspace_id=$1',[f.workspaceId])).rows[0].n).toBe(0)
+ })
+ it('CO10 excludes operational descendants of a real admitted engineering archive without producing observations or advice',async()=>{
+  const f=await fixture(),actor=f.people.owner
+  await f.edge('user',actor)
+  await f.q("UPDATE workspace_access_policies SET setup_state='ready',access_mode='simple',default_department_id=$2 WHERE workspace_id=$1",[f.workspaceId,f.finance])
+  const authSession=(await authSessionStore.create(actor,{deviceLabel:'Fictional archive fixture',ipAddress:null,userAgent:null}))!
+  const captureStore=createProgrammaticCaptureStore()
+  const profile=await captureStore.createProfile({actingUserId:actor,authSessionId:authSession.id,workspaceId:f.workspaceId,name:'Fictional archive',processingMode:'archive_only',partitionBy:'session',enabled:true,
+   destination:{kind:'department',departmentId:f.finance}})
+  const rule=await captureStore.addRule({actingUserId:actor,authSessionId:authSession.id,workspaceId:f.workspaceId,profileId:profile.id,
+   rule:{filterType:'role_match',filterParams:{values:['user','assistant']},routingMode:'realtime',scopeBindingMode:'explicit',compartments:[`team:${f.finance}`]}})
+  const key=await withExternalKeyActor(actor,authSession.id,()=>createDbBrainKeyStore().create({workspaceId:f.workspaceId,actingUserId:actor,name:'Fictional capture key',scope:'read_write',maxClearance:'internal',contextGroupId:f.finance,
+   contextProjectId:null,captureAssistantId:f.assistants.brian,captureProfileId:profile.id}))
+  const auth:BrainAuth={workspaceId:f.workspaceId,keyId:key.id,scope:'read_write',maxClearance:'internal',authKind:'api_key',storeScope:'none',agentScope:'none',actingUserId:actor,captureAssistantId:f.assistants.brian,captureProfileId:profile.id}
+  const blobs=new Map<string,Buffer>()
+  const files=createFilesApi({store:createDbWorkspaceFilesStore(),bucket:'fictional-fixture',auditStore:{append:async()=>{}} as never,
+   gcs:{writeBlob:async(k:string,b:Buffer)=>{blobs.set(k,b)},readBlob:async(k:string)=>blobs.has(k)?{bytes:blobs.get(k)!}:null,deleteBlob:async(k:string)=>{blobs.delete(k)}} as never})
+  const archive=createEngineeringArchivePublisher(files)
+  const ingest=()=>{throw new Error('No live operational ingest')}
+  const capture=createProgrammaticCaptureRouter({store:captureStore,ingest:ingest as never,archive:archive.capture})
+  const text='Agreed: deliver an outcome from engineering history.'
+  const receipt=await capture(auth,{eventId:randomUUID(),content:text,sessionId:'fictional-archive-session',role:'user',metadata:{provider:'codex'}})
+  expect(receipt.deliveryStatus).toBe('archived');expect(receipt.fileId).toBeTruthy()
+  expect((await pool.query('SELECT engineering_archive_source_current($1) AS current',[receipt.archiveId])).rows[0].current).toBe(true)
+  const descendant=await createDbEpisodesStore().createEpisode(actor,{workspaceId:f.workspaceId,sourceKind:'manual_paste',sourceRef:{},contentRef:{text,fileId:receipt.fileId},occurredAt:new Date('2026-10-15T00:00:00Z'),
+   userId:null,assistantId:f.assistants.brian,createdByUserId:actor,createdByAssistantId:null,sensitivity:'internal',compartments:[`team:${f.finance}`],projectIds:[]})
+  const ep=descendant.id
+  await expect(service.execute(f.ctx(actor),{kind:'record_delivery_recognition',operationId:randomUUID(),proposal:{candidateKey:'archive-descendant',source:{kind:'episode',id:ep,revision:'1',quote:text,start:0,end:text.length},
+   outcome:'History outcome',dueDate:null,companyId:null,dealId:null,taskIds:[],goalIds:[],basis:'explicit_agreement',agreeingUserId:actor}})).rejects.toMatchObject({code:'not_found'})
+  expect((await pool.query('SELECT count(*)::int n FROM crm_delivery_commitments WHERE workspace_id=$1',[f.workspaceId])).rows[0].n).toBe(0)
+  expect((await pool.query('SELECT count(*)::int n FROM crm_delivery_observations WHERE workspace_id=$1',[f.workspaceId])).rows[0].n).toBe(0)
+ })
+ it('CO06/CO07/CO09/CO12 real source processing freezes and applies recognition once without model replay or new work',async()=>{
+  const f=await fixture(),text='Agreed: deliver the accepted report on 2026-10-20.'
+  const episodes=createDbEpisodesStore(),links=createDbEntityLinksStore()
+  const source=await episodes.createEpisode(f.userId,{workspaceId:f.workspaceId,sourceKind:'manual_paste',sourceRef:{},contentRef:{text},occurredAt:new Date('2026-10-15T00:00:00Z'),
+   userId:null,assistantId:f.assistants.brian,createdByUserId:f.userId,createdByAssistantId:null,sensitivity:'internal',compartments:[`project:${f.projectId}`],projectIds:[f.projectId]})
+  let calls=0
+  const provider={name:'fixture',models:['fixture'],createSession(){throw new Error('No sessions')},async *stream(){calls++;
+   yield {type:'text_delta',text:JSON.stringify({summary:'Existing agreement',delivery_commitments:[{candidateKey:'source-report',quote:text,outcome:'Deliver agreed report',
+    dueDate:'2026-10-20',companyId:f.companyId,dealId:null,agreeingUserId:f.userId,basis:'explicit_agreement',taskIds:[],goalIds:[]}],entities:[],edges:[],tasks:[],memories:[],ephemeral:[],tags:[]})};
+   yield {type:'message_end',stopReason:'end_turn',usage:{inputTokens:10,outputTokens:10}}
+  }} as LLMProvider
+  const store=createExtractionApplicationStore()
+  const application=createIngestApplicationService({store,episodes,mutateCandidate:createPipelineBApplicationMutationPort(),getWorkspaceRole:async()=> 'admin'})
+  const result=await processEpisode({...source,sensitivity:'internal'} as PipelineBEpisode,text,{provider,model:'fixture',classifierModel:null,episodes,
+   crm:createDbCrmStore(),entities:createDbEntitiesStore({entityLinks:links}),entityLinks:links,memories:createDbMemoryStore(),application})
+  expect(result.applicationState).toBe('complete');expect(calls).toBe(1)
+  const row=(await pool.query('SELECT id,recognition_state FROM crm_delivery_commitments WHERE source_id=$1',[source.id])).rows[0]
+  expect(row.recognition_state).toBe('needs_review') // native importer is not the agreeing speaker
+  const frozen=(await pool.query('SELECT frozen_plan,attempt_key FROM episode_extraction_runs WHERE episode_id=$1',[source.id])).rows[0]
+  await application.apply({workspaceId:f.workspaceId,actorUserId:f.userId,mutationCompartments:[`project:${f.projectId}`],projectIds:[f.projectId],attemptKey:frozen.attempt_key,plan:frozen.frozen_plan})
+  expect(calls).toBe(1)
+  expect((await pool.query('SELECT count(*)::int n FROM crm_delivery_commitments WHERE source_id=$1',[source.id])).rows[0].n).toBe(1)
+  expect((await pool.query('SELECT count(*)::int n FROM tasks WHERE workspace_id=$1',[f.workspaceId])).rows[0].n).toBe(0)
+  expect((await pool.query('SELECT count(*)::int n FROM goals WHERE workspace_id=$1',[f.workspaceId])).rows[0].n).toBe(0)
  })
  it('CO08 read-only/foreign actor and assistant missing turn authority cannot mutate',async()=>{
   const f=await fixture(),p=await f.message()

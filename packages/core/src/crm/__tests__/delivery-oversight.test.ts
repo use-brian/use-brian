@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest'
-import { assessDelivery, classifyDeliveryRecognition, DeliveryCommandSchema, deliveryQuoteMatches,
+import { assessDelivery, classifyDeliveryRecognition, DeliveryCommandSchema, deliveryQuoteMatches, deliveryObservationSupported,
   type DeliveryCommitment, type DeliveryObservation, type DeliveryProposal, type DeliverySource } from '../delivery-oversight.js'
 const id = '11111111-1111-4111-8111-111111111111'
 const other = '22222222-2222-4222-8222-222222222222'
@@ -66,6 +66,11 @@ describe('[COMP:crm/delivery-oversight] evidence policy', () => {
  it('CO07 commands reject actors, clearance, verified flags and recipients', () => {
   const command={kind:'record_delivery_recognition',operationId:id,proposal}
   for(const field of ['actor','clearance','recipient','verifiedDelivery']) expect(DeliveryCommandSchema.safeParse({...command,[field]:id}).success).toBe(false)
+ })
+ it('CO03/CO05 dates and absent updates cannot be relabelled as supported delay',()=>{
+  expect(deliveryObservationSupported({source:ref,kind:'human_report',claim:'delay',statement:quote,workId:null},source)).toBe(false)
+  expect(deliveryObservationSupported({source:ref,kind:'observed_fact',claim:'outcome_delivered',statement:quote,workId:null},{...source,role:'governed',governedAccepted:true})).toBe(false)
+  expect(deliveryObservationSupported({source:ref,kind:'human_report',claim:'blocker',statement:'Invented blocker',workId:null},source)).toBe(false)
  })
  it('CO10 archive descendants cannot match agreement evidence', () => {
   expect(deliveryQuoteMatches(ref,{...source,archive:true})).toBe(false)

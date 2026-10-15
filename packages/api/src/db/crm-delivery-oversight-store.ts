@@ -79,8 +79,9 @@ export function createCrmDeliveryReadStore(run?: Run): DeliveryReadPort {
     }
     return { list: (v,w,q) => read(v,port=>port.list(v,w,q)), get: (v,w,id) => read(v,port=>port.get(v,w,id)) }
   }
+  const executeRead: Run = run
   async function safeLinks(viewer: DeliveryViewer, workspaceId: string, row: Record<string, unknown>) {
-    const client = { query: <T extends QueryResultRow>(sql: string, values: unknown[]) => run<T>(viewer.userId, sql, values) } as PoolClient
+    const client = { query: <T extends QueryResultRow>(sql: string, values: unknown[]) => executeRead<T>(viewer.userId, sql, values) } as PoolClient
     for (const name of ['companyId', 'dealId'] as const) {
       if (row[name] && !await deliveryLinkVisible(client, viewer, workspaceId, 'entity', row[name] as string)) row[name] = null
     }
@@ -103,7 +104,7 @@ export function createCrmDeliveryReadStore(run?: Run): DeliveryReadPort {
         params.push(viewer.userId)
         work = `AND (c.user_id=$${params.length} OR c.agreeing_user_id=$${params.length})`
       }
-      const page = await queryCrmPage((sql, values) => run(viewer.userId, sql, values), {
+      const page = await queryCrmPage((sql, values) => executeRead(viewer.userId, sql, values), {
         workspaceId, resource: 'delivery-commitments', key: 'commitments', query: input,
         sql: `SELECT ${DELIVERY_COMMITMENT_COLUMNS} FROM crm_delivery_commitments c WHERE c.workspace_id=$1 AND c.recognition_state<>'superseded' AND ${scope.sql} ${work}`, params,
       })
@@ -111,19 +112,19 @@ export function createCrmDeliveryReadStore(run?: Run): DeliveryReadPort {
     },
     async get(viewer, workspaceId, id) {
       const scope = deliveryVisibility(viewer, workspaceId, 'c', 3)
-      const raw = (await run(viewer.userId, `SELECT ${DELIVERY_COMMITMENT_COLUMNS} FROM crm_delivery_commitments c WHERE c.workspace_id=$1 AND c.id=$2 AND ${scope.sql}`, [workspaceId, id, ...scope.params])).rows[0]
+      const raw = (await executeRead(viewer.userId, `SELECT ${DELIVERY_COMMITMENT_COLUMNS} FROM crm_delivery_commitments c WHERE c.workspace_id=$1 AND c.id=$2 AND ${scope.sql}`, [workspaceId, id, ...scope.params])).rows[0]
       if (!raw) return null
       const commitment = await safeLinks(viewer, workspaceId, raw)
       const obsScope = deliveryVisibility(viewer, workspaceId, 'o', 3)
-      const page = await queryCrmPage((sql, values) => run(viewer.userId, sql, values), { workspaceId, resource: `delivery-evidence:${id}`, key: 'observations', query: { limit: 20 },
+      const page = await queryCrmPage((sql, values) => executeRead(viewer.userId, sql, values), { workspaceId, resource: `delivery-evidence:${id}`, key: 'observations', query: { limit: 20 },
         sql: `SELECT ${OBSERVATION_COLUMNS},o.created_at AS "createdAt" FROM crm_delivery_observations o WHERE o.workspace_id=$1 AND o.commitment_id=$2 AND o.withdrawn_at IS NULL AND ${obsScope.sql}`, params: [workspaceId, id, ...obsScope.params] })
-      const finalEvidence = await run(viewer.userId, `SELECT o.id FROM crm_delivery_observations o WHERE o.workspace_id=$1 AND o.commitment_id=$2
+      const finalEvidence = await executeRead(viewer.userId, `SELECT o.id FROM crm_delivery_observations o WHERE o.workspace_id=$1 AND o.commitment_id=$2
         AND o.withdrawn_at IS NULL AND o.id=ANY($${obsScope.nextIdx}::uuid[]) AND ${obsScope.sql}`, [workspaceId,id,...obsScope.params,page.observations.map(v=>v.id)])
       const visibleIds = new Set(finalEvidence.rows.map(v=>v.id))
       const observations = page.observations.filter(v=>visibleIds.has(v.id)).map(observationRow)
       for (const o of observations) if (o.workId && !commitment.taskIds.includes(o.workId) && !commitment.goalIds.includes(o.workId)) o.workId = null
       // Recheck the base after evidence retrieval; no cached claim survives revocation.
-      if (!(await run(viewer.userId, `SELECT 1 FROM crm_delivery_commitments c WHERE c.workspace_id=$1 AND c.id=$2 AND c.version=$3 AND ${deliveryVisibility(viewer,workspaceId,'c',4).sql}`,
+      if (!(await executeRead(viewer.userId, `SELECT 1 FROM crm_delivery_commitments c WHERE c.workspace_id=$1 AND c.id=$2 AND c.version=$3 AND ${deliveryVisibility(viewer,workspaceId,'c',4).sql}`,
         [workspaceId,id,commitment.version,...deliveryVisibility(viewer,workspaceId,'c',4).params])).rows.length) return null
       return { commitment, observations, evidenceCursor: page.nextCursor,
         assessment: assessDelivery(commitment, observations, new Date().toISOString(), page.nextCursor !== null) } satisfies DeliveryDetail
