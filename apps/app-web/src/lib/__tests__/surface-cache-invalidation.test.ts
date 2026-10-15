@@ -80,6 +80,7 @@ describe("[COMP:app-web/surface-cache-invalidation] routing table", () => {
     // brain-detail block below).
     expect(staleMarksFor(SKILL_REFRESH_EVENT, "w1")).toContain("skills:w1");
     expect(staleMarksFor(LIVE_REFRESH_EVENT, "w1")).toEqual([
+      "delivery:w1:",
       "live:w1",
       "chat-sessions:w1",
       "project:w1:",
@@ -371,7 +372,7 @@ it.each(['brian:organization-changed', WORKSPACE_IDENTITY_REFRESH_EVENT])('[COMP
 // must disappear before source/Goal authority revalidation completes.
 describe("[COMP:app-web/client-delivery-oversight] cache revocation",()=>{
   beforeEach(()=>resetSurfaceCache());
-  it.each([BRAIN_REFRESH_EVENT,GOAL_REFRESH_EVENT,WORKSPACE_IDENTITY_REFRESH_EVENT])("evicts admitted delivery evidence on %s",async event=>{
+  it.each([BRAIN_REFRESH_EVENT,GOAL_REFRESH_EVENT,WORKSPACE_IDENTITY_REFRESH_EVENT,LIVE_REFRESH_EVENT,ASSISTANT_REFRESH_EVENT])("evicts admitted delivery evidence on %s",async event=>{
     const key="delivery:w1:detail:viewer:record";
     await loadSurfaceCache(key,async()=>({quote:"Fictional admitted evidence"}));
     applySpineEventToSurfaceCache(event,{workspaceId:"w1"},"w1");

@@ -1305,6 +1305,7 @@ export async function updateSessionMessageText(params: {
                attachments`,
     [params.messageId, params.sessionId, JSON.stringify([{ type: 'text', text: params.text }])],
   )
+  if(result.rows[0])notifySessionChange(params.sessionId)
   return result.rows[0] ?? null
 }
 

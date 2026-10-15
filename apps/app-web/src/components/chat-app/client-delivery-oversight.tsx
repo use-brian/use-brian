@@ -63,7 +63,10 @@ function DeliveryDetailPane({workspaceId,id,chatId,onClose,onDraft}:{workspaceId
   const data=useProtectedProjection(key,resource.data,()=>{
     controller.current.abort();controller.current=new AbortController();setReviewing(false);setReason('');setOutcome('');retry.current=null;
   });
-  useEffect(()=>()=>controller.current.abort(),[key]);
+  useEffect(()=>{
+    if(controller.current.signal.aborted)controller.current=new AbortController();
+    return()=>controller.current.abort();
+  },[key]);
   const time=(value:string)=>new Intl.DateTimeFormat(locale,{dateStyle:'medium',timeStyle:'short'}).format(new Date(value));
   async function apply(command:DeliveryUiCommand) {
     if(latched.current||!data||projectionRemainingMs(data)<=0)return;
@@ -87,12 +90,13 @@ function DeliveryDetailPane({workspaceId,id,chatId,onClose,onDraft}:{workspaceId
       decision,reason:reason.trim(),...(decision==='correct'?{outcome:outcome.trim()}:{} )};
     const source=data.commitment.source.quote;
     latched.current=true;setPending(true);
+    const signal=controller.current.signal;
     let accepted=false;
-    try { accepted=await confirmDialog({signal:controller.current.signal,title:t.confirmTitle,
+    try { accepted=await confirmDialog({signal,title:t.confirmTitle,
       description:format(t.confirmDescription,{outcome:decision==='correct'?outcome:data.commitment.outcome}),
       content:<blockquote className="whitespace-pre-wrap break-words text-sm">{source}</blockquote>,confirmLabel:t[decision],cancelLabel:t.cancel});
     } finally { latched.current=false;setPending(false); }
-    if(accepted&&keyRef.current===key&&!controller.current.signal.aborted)await apply(command);
+    if(accepted&&keyRef.current===key&&!signal.aborted)await apply(command);
   }
   if(!data)return <div className="space-y-2 px-2 py-3">{resource.error?<><p role="alert" className="text-sm">{t.unavailable}</p><Button className="min-h-8 max-sm:min-h-11" variant="outline" onClick={()=>void resource.refresh()}>{t.retry}</Button></>:<div aria-label={t.loading}><Skeleton className="h-20 w-full"/></div>}</div>;
   const {commitment:c,assessment:a,observations,linkedWork=[]}=data;

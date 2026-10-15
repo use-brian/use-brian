@@ -166,6 +166,7 @@ export function staleMarksFor(event: string, workspaceId: string): string[] {
       // the Chat rail's two lists as well as the Live roster - the spine gap
       // report E named ("a `session` fan-out to chat").
       return [
+        `delivery:${workspaceId}:`,
         `live:${workspaceId}`,
         `chat-sessions:${workspaceId}`,
         `project:${workspaceId}:`,
@@ -242,6 +243,7 @@ export function applySpineEventToSurfaceCache(
   if (event === BRAIN_REFRESH_EVENT || event === WORKSPACE_IDENTITY_REFRESH_EVENT) drop(`workspace-member-directory:${workspaceId}:`);
   if (event === BRAIN_REFRESH_EVENT || event === WORKSPACE_IDENTITY_REFRESH_EVENT) drop(`page-directory:${workspaceId}:`);
   if (event === BRAIN_REFRESH_EVENT || event === WORKSPACE_IDENTITY_REFRESH_EVENT || event === "brian:organization-changed" || event === ASSISTANT_REFRESH_EVENT) {
+    drop(`delivery:${workspaceId}:`);
     drop(`routine-intake:${workspaceId}`);
     drop(`engineering-history:${workspaceId}`);
     drop(`brain-keys:${workspaceId}`);

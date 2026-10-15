@@ -1,5 +1,5 @@
 // @vitest-environment jsdom
-import { act } from 'react';
+import { act,StrictMode } from 'react';
 import { createRoot, type Root } from 'react-dom/client';
 import { afterEach,beforeEach,describe,expect,it,vi } from 'vitest';
 import { ClientDeliveryOversight } from '../client-delivery-oversight';
@@ -35,7 +35,7 @@ async function change(label:string,value:string){
  await act(async()=>{Object.getOwnPropertyDescriptor(prototype,'value')!.set!.call(node,value);node.dispatchEvent(new Event('input',{bubbles:true}))});
 }
 async function view(onDraft=vi.fn(),scope:{kind:'personal'}|{kind:'project';id:string}={kind:'personal'},dict:Dictionary=en){
- await act(async()=>root.render(<I18nProvider locale="en" dict={dict}><ClientDeliveryOversight workspaceId="workspace" scope={scope} onDraft={onDraft} hideWhenEmpty={false}/></I18nProvider>));
+ await act(async()=>root.render(<StrictMode><I18nProvider locale="en" dict={dict}><ClientDeliveryOversight workspaceId="workspace" scope={scope} onDraft={onDraft} hideWhenEmpty={false}/></I18nProvider></StrictMode>));
 }
 beforeEach(()=>{vi.useFakeTimers();resetSurfaceCache();vi.clearAllMocks();f.viewer='viewer';host=document.createElement('div');document.body.append(host);root=createRoot(host);
  f.list.mockResolvedValue(protect({commitments:[commitment],nextCursor:null}));f.detail.mockResolvedValue(protect(detail));f.command.mockResolvedValue({record:{id,version:2},duplicate:false});f.confirm.mockResolvedValue(true)});
@@ -55,6 +55,7 @@ describe('[COMP:app-web/client-delivery-oversight] quiet scoped Chat pickup',()=
   await view();await open();expect(text()).toContain(en.clientDelivery.outcomes.reported_completion);expect(text()).toContain('Reported by Fictional teammate');expect(text()).toContain(en.clientDelivery.partial);expect(text()).not.toContain(en.clientDelivery.outcomes.verified_delivery);
  })
  it('CO12 correction is versioned and never applied by autosaving text',async()=>{
+  f.confirm.mockImplementation(async options=>{expect(options.signal.aborted).toBe(false);return true});
   await view();await open();await click(en.clientDelivery.review);await change(en.clientDelivery.outcomeLabel,'Clarified existing report');await change(en.clientDelivery.reason,'Clarify existing evidence');
   expect(f.command).not.toHaveBeenCalled();await click(en.clientDelivery.correct);
   expect(f.command).toHaveBeenCalledOnce();expect(f.command.mock.calls[0]).toEqual(['workspace',expect.objectContaining({kind:'review_delivery_recognition',commitmentId:id,expectedVersion:1,decision:'correct',outcome:'Clarified existing report',reason:'Clarify existing evidence'})]);
@@ -63,6 +64,25 @@ describe('[COMP:app-web/client-delivery-oversight] quiet scoped Chat pickup',()=
   f.command.mockRejectedValueOnce(new CrmReferenceRequestError('network_error',null));await view();await open();await click(en.clientDelivery.review);await change(en.clientDelivery.reason,'Existing evidence');await click(en.clientDelivery.dismiss);
   expect(text()).toContain(en.clientDelivery.uncertain);await click(en.clientDelivery.retryReview);
   expect(f.command).toHaveBeenCalledTimes(2);expect(f.command.mock.calls[1]).toEqual(f.command.mock.calls[0]);expect(f.confirm).toHaveBeenCalledOnce();
+ })
+ it('CO09 cancel and repeated clicks cannot apply a pending human review',async()=>{
+  let settle!:(value:boolean)=>void;f.confirm.mockImplementation(()=>new Promise<boolean>(resolve=>{settle=resolve}));
+  await view();await open();await click(en.clientDelivery.review);await change(en.clientDelivery.reason,'Existing evidence');
+  await click(en.clientDelivery.dismiss);await click(en.clientDelivery.dismiss);expect(f.confirm).toHaveBeenCalledOnce();expect(f.command).not.toHaveBeenCalled();
+  await act(async()=>settle(false));expect(f.command).not.toHaveBeenCalled();
+ })
+ it('CO08 pending review is aborted when its protected scope disappears',async()=>{
+  let settle!:(value:boolean)=>void;f.confirm.mockImplementation(()=>new Promise<boolean>(resolve=>{settle=resolve}));
+  await view();await open();await click(en.clientDelivery.review);await change(en.clientDelivery.reason,'Existing evidence');await click(en.clientDelivery.dismiss);
+  const signal=f.confirm.mock.calls[0][0].signal as AbortSignal;f.list.mockResolvedValue(protect({commitments:[],nextCursor:null}));
+  await view(vi.fn(),{kind:'project',id:'changed-project'});expect(signal.aborted).toBe(true);
+  await act(async()=>settle(true));expect(f.command).not.toHaveBeenCalled();
+ })
+ it('CO08 delayed old-scope evidence cannot reappear after navigation',async()=>{
+  let settle!:(value:unknown)=>void;f.detail.mockImplementation(()=>new Promise(resolve=>{settle=resolve}));
+  await view();await click(`Inspect evidence: ${commitment.outcome}`);f.list.mockResolvedValue(protect({commitments:[],nextCursor:null}));
+  await view(vi.fn(),{kind:'project',id:'changed-project'});await act(async()=>settle(protect(detail)));
+  expect(text()).not.toContain(source.quote);expect(host.querySelector('[data-testid="delivery-detail"]')).toBeNull();
  })
  it('CO08 scope navigation and viewer switches cannot retain protected detail',async()=>{
   await view();await open();f.list.mockResolvedValue(protect({commitments:[],nextCursor:null}));f.viewer='another-viewer';await view(vi.fn(),{kind:'project',id:'another-project'});

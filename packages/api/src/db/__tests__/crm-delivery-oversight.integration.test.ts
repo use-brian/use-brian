@@ -36,7 +36,7 @@ import { createFilesApi } from '../../files/files-api.js'
 import { createEngineeringArchivePublisher } from '../../engineering-history/publisher.js'
 import { createProgrammaticCaptureRouter } from '../../ingest/programmatic-capture.js'
 import type { BrainAuth } from '../../brain-mcp/auth.js'
-import { addSessionMessage, createWorkspaceChatSession } from '../sessions.js'
+import { addSessionMessage, createWorkspaceChatSession, updateSessionMessageText } from '../sessions.js'
 const { assertLocalFixture } = await import(new URL('../../../../../scripts/crm/local-fixture.mjs',import.meta.url).href)
 await assertLocalFixture()
 const pool=getPool(), reads=createCrmDeliveryReadStore(), service=createCrmOperationsService(createDbCrmOperationsStore())
@@ -348,7 +348,7 @@ describe('[COMP:api/crm-delivery-oversight] native outcome and source revision',
  })
  it('CO09 changed native text invalidates old content and supersedes it once under the new revision',async()=>{
   const f=await fixture(),p=await f.message(),saved=await f.record(p.proposal),text='Agreed: deliver the amended accepted report.'
-  await f.q('UPDATE session_messages SET content=$2::jsonb WHERE id=$1',[p.m.id,JSON.stringify([{type:'text',text}])])
+  await updateSessionMessageText({messageId:p.m.id,sessionId:f.chat.id,text})
   expect(await reads.get({userId:f.userId},f.workspaceId,saved.record.id as string)).toBeNull()
   const source=(await f.q("SELECT crm_delivery_source_snapshot($1,'session_message',$2) AS s",[f.workspaceId,p.m.id])).rows[0].s
   expect(source.version).not.toBe(p.proposal.source.revision)
