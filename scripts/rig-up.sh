@@ -312,6 +312,9 @@ END $$;
 GRANT USAGE ON SCHEMA public TO admin_fixture_app;
 GRANT SELECT, INSERT, UPDATE, DELETE ON ALL TABLES IN SCHEMA public TO admin_fixture_app;
 GRANT USAGE, SELECT ON ALL SEQUENCES IN SCHEMA public TO admin_fixture_app;
+GRANT EXECUTE ON FUNCTION crm_delivery_source_visible(uuid,text,uuid,text,uuid),
+  crm_delivery_envelope_visible(uuid,uuid,uuid,text,text[],uuid[],uuid),
+  crm_delivery_source_navigation(uuid,text,uuid,text,uuid) TO admin_fixture_app;
 ALTER ROLE admin_fixture_app SET app.current_user_id = '00000000-0000-0000-0000-000000000000';
 SQL
   fi

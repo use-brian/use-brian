@@ -246,6 +246,7 @@ describe("[COMP:app-web/surface-cache-invalidation] goal primitive and brain det
 
   it("GOAL_REFRESH_EVENT marks the board, the triage queue and every goal detail", () => {
     expect(staleMarksFor(GOAL_REFRESH_EVENT, "w1")).toEqual([
+      "delivery:w1:",
       "goals:w1",
       "triage:w1",
       "goal:w1:",
@@ -364,4 +365,16 @@ it.each(['brian:organization-changed', WORKSPACE_IDENTITY_REFRESH_EVENT])('[COMP
   expect(readSurfaceCache(keys[0]).data).toBeUndefined();
   expect(readSurfaceCache(keys[1]).data).toBeUndefined();
   expect(readSurfaceCache(keys[2]).data).toEqual(['protected title']);
+});
+
+// Delivery facts are security-sensitive; unlike editable list metadata they
+// must disappear before source/Goal authority revalidation completes.
+describe("[COMP:app-web/client-delivery-oversight] cache revocation",()=>{
+  beforeEach(()=>resetSurfaceCache());
+  it.each([BRAIN_REFRESH_EVENT,GOAL_REFRESH_EVENT,WORKSPACE_IDENTITY_REFRESH_EVENT])("evicts admitted delivery evidence on %s",async event=>{
+    const key="delivery:w1:detail:viewer:record";
+    await loadSurfaceCache(key,async()=>({quote:"Fictional admitted evidence"}));
+    applySpineEventToSurfaceCache(event,{workspaceId:"w1"},"w1");
+    expect(readSurfaceCache(key).data).toBeUndefined();
+  });
 });

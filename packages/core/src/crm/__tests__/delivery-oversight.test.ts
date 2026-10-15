@@ -72,8 +72,53 @@ describe('[COMP:crm/delivery-oversight] evidence policy', () => {
   expect(deliveryObservationSupported({source:ref,kind:'observed_fact',claim:'outcome_delivered',statement:quote,workId:null},{...source,role:'governed',governedAccepted:true})).toBe(false)
   expect(deliveryObservationSupported({source:ref,kind:'human_report',claim:'blocker',statement:'Invented blocker',workId:null},source)).toBe(false)
  })
+ it('CO04/CO05 newer outcome evidence supersedes dated issues and newer issues withhold old completion',()=>{
+  const old=observation({claim:'blocker',workId:other}),newer=observation({id:other,claim:'completed',occurredAt:'2026-10-16T00:00:00Z'})
+  expect(assessDelivery(commitment,[old,newer],newer.readAt)).toMatchObject({outcome:'reported_completion',issue:null,nextAction:null})
+  expect(assessDelivery(commitment,[{...old,occurredAt:'2026-10-17T00:00:00Z'},newer],newer.readAt)).toMatchObject({outcome:'unknown',issue:{kind:'blocker'}})
+  expect(assessDelivery(commitment,[old,{...newer,occurredAt:old.occurredAt}],source.readAt)).toMatchObject({coverage:'conflicting',issue:null,outcome:'unknown'})
+ })
+ it('CO04 unrelated outcome evidence cannot verify this commitment',()=>{
+  const text='The unrelated package was delivered.',r={...ref,quote:text,end:text.length}
+  expect(deliveryObservationSupported({source:r,kind:'observed_fact',claim:'outcome_delivered',statement:text,workId:null},{...source,...r,text,role:'document'},commitment.outcome)).toBe(false)
+ })
  it('CO10 archive descendants cannot match agreement evidence', () => {
   expect(deliveryQuoteMatches(ref,{...source,archive:true})).toBe(false)
   expect(classifyDeliveryRecognition(proposal,{...source,archive:true}).state).toBe('needs_review')
+ })
+})
+
+import { vi } from 'vitest'
+import { homeAppToolRequirements } from '@use-brian/shared'
+import { createCrmDeliveryOversightTools } from '../delivery-oversight-tools.js'
+import type { ToolContext } from '../../tools/types.js'
+describe('[COMP:crm/delivery-oversight] Brian adapter parity',()=>{
+ function setup(){
+  const reads={list:vi.fn(async()=>({commitments:[],nextCursor:null})),get:vi.fn(async()=>null),locateChatSource:vi.fn(async()=>ref)}
+  const service={execute:vi.fn(async()=>({command:'record_delivery_recognition' as const,record:{id,version:1},created:true,duplicate:false,emittedEventIds:[]}))}
+  const tools=createCrmDeliveryOversightTools({reads,service})
+  const context={workspaceId:id,userId:id,assistantId:other,sessionId:id,appId:'fixture',channelType:'web',channelId:'fixture',abortSignal:new AbortController().signal,userMessageText:quote,
+   activeCapabilities:new Set(['crm',...Object.values(tools).flatMap(homeAppToolRequirements)])} as ToolContext
+  return {reads,service,tools,context}
+ }
+ it('CO12 direct invocation and discovery share the CRM capability gate',async()=>{
+  const f=setup()
+  expect((await f.tools.listCrmDeliveryCommitments.execute({}, {...f.context,activeCapabilities:new Set()})).isError).toBe(true)
+  expect(f.reads.list).not.toHaveBeenCalled()
+  await f.tools.listCrmDeliveryCommitments.execute({scope:'personal'},f.context)
+  expect(f.reads.list).toHaveBeenCalledWith({userId:id,chatId:id},id,expect.objectContaining({limit:50,scope:'personal'}))
+ })
+ it('CO02/CO12 attended current input resolves native source, never a fabricated Episode',async()=>{
+  const f=setup(),{source:ignored,...candidate}=proposal
+  await f.tools.recordCrmDeliveryRecognition.execute({operationId:id,proposal:candidate,quote},f.context)
+  expect(f.reads.locateChatSource).toHaveBeenCalledWith({userId:id,chatId:id},id,id,quote,quote)
+  expect(f.service.execute).toHaveBeenCalledWith(expect.objectContaining({actor:{kind:'assistant',assistantId:other,userId:id,sessionId:id}}),
+   {kind:'record_delivery_recognition',operationId:id,proposal})
+ })
+ it('CO07/CO12 recognition review uses exact attended approval metadata without converting the assistant into a human',async()=>{
+  const f=setup(),input={operationId:id,commitmentId:id,expectedVersion:1,decision:'dismiss',reason:'Existing evidence review'}
+  expect(f.tools.reviewCrmDeliveryRecognition).toMatchObject({requiresConfirmation:true,confirmationMode:'durable_attended',allowPersistentApproval:false})
+  await f.tools.reviewCrmDeliveryRecognition.execute(input,{...f.context,approvedToolInvocation:{approvalId:id,approverUserId:id,toolName:'reviewCrmDeliveryRecognition'}})
+  expect(f.service.execute).toHaveBeenCalledWith(expect.objectContaining({actor:{kind:'assistant',assistantId:other,userId:id,sessionId:id},authority:expect.objectContaining({deliveryReviewApproval:{approvalId:id,approverUserId:id,toolName:'reviewCrmDeliveryRecognition'}})}),{...input,kind:'review_delivery_recognition'})
  })
 })

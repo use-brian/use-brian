@@ -4062,7 +4062,7 @@ export function chatRoutes(options: WebChatOptions): Router {
         // this also reaches the MODEL (see the sender-name resolution below):
         // without it "the user" is several people and the reply cannot tell
         // them apart.
-        senderUserId: turnPolicy.attribution ? user.id : null,
+        senderUserId: user.id, // authenticated human attribution also survives personal-source recognition
         scope: inputMessageScope,
       })
       // Reused room rows and regenerate/edit (including seeded kickoffs) are

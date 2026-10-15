@@ -127,6 +127,7 @@ import { useChatController } from "@/lib/chat/use-chat-controller";
 import { QueuedInputs } from "@/components/ui/queued-inputs";
 import { OperatorTopbar } from "@/components/operator/operator-topbar";
 import { WorkEntry } from "./work-entry";
+import { ClientDeliveryOversight } from "./client-delivery-oversight";
 import { AssistantAvatar } from "@/components/assistant-avatar";
 import { ComposerControls } from "@/components/doc/composer-controls";
 import { useChatModelTier } from "@/lib/chat-model";
@@ -4720,6 +4721,7 @@ export function ChatSurface({ workspaceId }: { workspaceId: string }) {
                 Pickup only fills the composer; the person sends. */}
             <div className="w-full">
               <WorkEntry
+                includeDelivery={view === "personal"}
                 workspaceId={workspaceId}
                 scope={pickedContextProjectId ? { kind: "project", id: pickedContextProjectId }
                   : pickedContextGroupId ? { kind: "department", id: pickedContextGroupId }
@@ -4742,6 +4744,11 @@ export function ChatSurface({ workspaceId }: { workspaceId: string }) {
           className="min-h-0 flex-1 overflow-y-auto px-4 pt-6 pb-[calc(1.5rem+var(--floating-recorder-reserve,0px))]"
         >
           <div className="mx-auto flex w-full max-w-3xl flex-col gap-5">
+            {activeSessionId && activeContextSession ? <ClientDeliveryOversight key={activeSessionId}
+              workspaceId={workspaceId} chatId={activeSessionId}
+              scope={activeContextSession.contextProjectId ? {kind:"project",id:activeContextSession.contextProjectId}
+                : activeContextSession.contextGroupId ? {kind:"department",id:activeContextSession.contextGroupId} : {kind:"personal"}}
+              onDraft={draft=>{setInput(draft);requestAnimationFrame(focusComposer)}}/> : null}
             {/* In-chat pursuit: the always-visible strip while any session
                 goal is still being worked; click jumps to the inline card. */}
             <GoalPursuitSticky

@@ -612,6 +612,13 @@ export function taskExecutionCacheKey(workspaceId: string, taskId: string): stri
   return `task-execution:${workspaceId}${viewerSuffix()}:${taskId}`
 }
 
+export function deliveryCommitmentsCacheKey(workspaceId:string,scope:{kind:'personal'}|{kind:'project'|'department';id:string},cursor='',chatId=''):string {
+  return `delivery:${workspaceId}${viewerSuffix()}:${scope.kind==='personal'?'personal':`${scope.kind}:${scope.id}`}:${cursor}:${chatId}`;
+}
+export function deliveryDetailCacheKey(workspaceId:string,id:string,chatId=''):string {
+  return `delivery:${workspaceId}${viewerSuffix()}:detail:${id}:${chatId}`;
+}
+
 export function workCacheKey(
   workspaceId: string,
   scope: { kind: "personal" } | { kind: "department" | "project"; id: string },

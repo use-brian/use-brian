@@ -72,6 +72,7 @@ export function staleMarksFor(event: string, workspaceId: string): string[] {
       // Shopify families (`shopify:`, `shopify-drafts:`), which read an
       // EXTERNAL store no workspace event ever describes.
       return [
+        `delivery:${workspaceId}:`,
         `project:${workspaceId}:`,
         `tasks:${workspaceId}`,
         `crm:${workspaceId}:`,
@@ -189,7 +190,7 @@ export function staleMarksFor(event: string, workspaceId: string): string[] {
       // lands here too, so one path serves both legs.
       // A hosted Goal becoming blocked or awaiting approval moves a work card
       // into Needs you, and its resolution moves it back.
-      return [`goals:${workspaceId}`, `triage:${workspaceId}`, `goal:${workspaceId}:`, `feed-collaboration:${workspaceId}`, `work:${workspaceId}`];
+      return [`delivery:${workspaceId}:`, `goals:${workspaceId}`, `triage:${workspaceId}`, `goal:${workspaceId}:`, `feed-collaboration:${workspaceId}`, `work:${workspaceId}`];
     case OFFICE_REFRESH_EVENT:
       // The `office` primitive: a job changed status or recorded progress.
       // The Office list (`office:<wid>:<viewer>:<view>`) and the template
@@ -262,6 +263,7 @@ export function applySpineEventToSurfaceCache(
     // Authority changes purge even an unmounted directory/access surface.
     // Work cards are protected content and owner routing moves with
     // Department ownership, so a revocation evicts them, never just marks.
+    drop(`delivery:${workspaceId}:`);
     drop(`work:${workspaceId}`);
     drop(`task-execution:${workspaceId}`);
     drop(`live:${workspaceId}:`);
@@ -285,7 +287,8 @@ export function applySpineEventToSurfaceCache(
     drop(`office-snapshot:${workspaceId}:`);
   }
   for (const prefix of staleMarksFor(event, workspaceId)) {
-    markSurfaceCacheStale(prefix);
+    if(prefix.startsWith(`delivery:${workspaceId}:`))invalidateSurfaceCache(prefix);
+    else markSurfaceCacheStale(prefix);
   }
 }
 

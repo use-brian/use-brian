@@ -16,6 +16,7 @@
  */
 import Link from "next/link";
 import { useEffect } from "react";
+import { ClientDeliveryOversight } from "./client-delivery-oversight";
 import { BriefWork } from "@/components/briefs/brief-work";
 import { useSidebarData } from "@/components/doc/doc-sidebar-data";
 import { format, useT } from "@/lib/i18n/client";
@@ -37,10 +38,11 @@ export function attentionHref(workspaceId: string, kind: ResolvedNeed["kind"]): 
   }
 }
 
-export function WorkEntry({ workspaceId, scope, onDraft }: {
+export function WorkEntry({ workspaceId, scope, onDraft, includeDelivery=true }: {
   workspaceId: string;
   scope: WorkScope;
   onDraft: (draft: string) => void;
+  includeDelivery?: boolean;
 }) {
   const t = useT().briefs.work;
   const { dock, dockLoading } = useSidebarData();
@@ -64,6 +66,7 @@ export function WorkEntry({ workspaceId, scope, onDraft }: {
         onContinueInChat={(_item, draft) => onDraft(draft)}
         hideWhenEmpty
       />
+      {includeDelivery?<ClientDeliveryOversight workspaceId={workspaceId} scope={scope} onDraft={onDraft}/>:null}
       {briefHref ? (
         <Link href={briefHref} className="inline-flex text-sm underline max-sm:min-h-11 max-sm:items-center">{t.actions.openBrief}</Link>
       ) : null}

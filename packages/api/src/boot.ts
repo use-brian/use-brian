@@ -129,7 +129,7 @@ import {
   createInternalLinkTools,
   createCrmTools,
   createCrmOperationsTools, createCrmCredentialTools, CRM_INTEGRATION_OPERATIONS, CRM_INTEGRATION_RESOURCE_CATALOG,
-  createCrmBusinessReferenceTools, createCrmCommercialContextTools, createCrmCommercialDocumentTools, createCrmGovernedRecordTools,
+  createCrmBusinessReferenceTools, createCrmCommercialContextTools, createCrmCommercialDocumentTools, createCrmGovernedRecordTools, createCrmDeliveryOversightTools,
   createAssociationTools,
   createCrmEmailDraftTools,
   createCampaignTools,
@@ -307,6 +307,7 @@ import { createDbCrmOperationsStore } from './db/crm-operations-store.js'
 import { createCrmReferenceReadStore } from './db/crm-business-reference-store.js'
 import { createCrmCommercialContextReadStore } from './db/crm-commercial-context-store.js'
 import { createCrmCommercialDocumentReadStore } from './db/crm-commercial-document-store.js'
+import { createCrmDeliveryReadStore } from './db/crm-delivery-oversight-store.js'
 import { createCrmGovernedReadStore } from './db/crm-governed-store.js'
 import { createDbCrmIntakeReadStore } from './db/crm-intake-store.js'
 import { createCampaignConversionOutboxWorker } from './campaigns/conversion-outbox.js'
@@ -4610,6 +4611,8 @@ export async function bootOpenApi(opts: BootOpenApiOptions): Promise<BootResult>
   for (const tool of Object.values(crmCommercialContextTools)) allTools.set(tool.name, tool)
   const crmCommercialDocumentTools = createCrmCommercialDocumentTools({ reads: createCrmCommercialDocumentReadStore(), service: crmOperationsService })
   for (const tool of Object.values(crmCommercialDocumentTools)) allTools.set(tool.name, tool)
+  const crmDeliveryOversightTools=createCrmDeliveryOversightTools({reads:createCrmDeliveryReadStore(),service:crmOperationsService})
+  for(const tool of Object.values(crmDeliveryOversightTools))allTools.set(tool.name,tool)
   const crmGovernedRecordTools = createCrmGovernedRecordTools({ reads: createCrmGovernedReadStore(), service: crmOperationsService })
   for (const tool of Object.values(crmGovernedRecordTools)) allTools.set(tool.name, tool)
   const crmCredentialTools = createCrmCredentialTools({
@@ -5910,7 +5913,7 @@ export async function bootOpenApi(opts: BootOpenApiOptions): Promise<BootResult>
     taskExecutionTools: { ...taskExecutionTools, ...externalProgressTools },
     researchTools,
     approvalReviewTools,
-    crmTools: { ...crmTools, ...crmOperationsTools, ...crmBusinessReferenceTools, ...crmCommercialContextTools, ...crmCommercialDocumentTools, ...crmGovernedRecordTools },
+    crmTools: { ...crmTools, ...crmOperationsTools, ...crmBusinessReferenceTools, ...crmCommercialContextTools, ...crmCommercialDocumentTools, ...crmGovernedRecordTools, ...crmDeliveryOversightTools },
     credentialTools: crmCredentialTools,
     associationTools,
     retrievalTools: brainRetrievalTools,

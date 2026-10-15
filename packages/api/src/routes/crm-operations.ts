@@ -7,6 +7,7 @@
 import { Router, type Request, type Response } from 'express'
 import { z } from 'zod'
 import {
+  DeliveryCommandSchema, DeliveryListQuerySchema, isDeliveryCommand, type DeliveryReadPort,
   AssociationPlanInputSchema,
   AssociationEventInputSchema,
   CrmConfigCommandSchema,
@@ -97,6 +98,7 @@ import { createCrmReferenceReadStore } from '../db/crm-business-reference-store.
 import { createCrmCommercialContextReadStore } from '../db/crm-commercial-context-store.js'
 import { createCrmCommercialDocumentReadStore } from '../db/crm-commercial-document-store.js'
 import { createCrmGovernedReadStore } from '../db/crm-governed-store.js'
+import { createCrmDeliveryReadStore } from '../db/crm-delivery-oversight-store.js'
 import { createCrmErpReadStore } from '../db/crm-erp-store.js'
 
 const SaveDefinitionBody = SaveCrmIntakeDefinitionCommandSchema.omit({ kind: true }).strict()
@@ -234,6 +236,7 @@ type Options = {
   referenceReads?: CrmReferenceReadPort
   commercialReads?: CrmCommercialContextReadPort
   documentReads?: CrmCommercialDocumentReadPort
+  deliveryReads?: DeliveryReadPort
   governedReads?: CrmGovernedReadPort
   erpReads?: ReturnType<typeof createCrmErpReadStore>
 }
@@ -297,7 +300,8 @@ export function crmOperationsRoutes(options: Options): Router {
       if (req.body && ['workspaceId', 'actor', 'authority'].some((key) => Object.hasOwn(req.body, key))) {
         throw new CrmOperationsError('invalid_input', 'Workspace and authority come from your session.')
       }
-      const command = isCrmBusinessReferenceCommand(req.body ?? {}) ? CrmBusinessReferenceCommandSchema.parse(req.body)
+      const command = isDeliveryCommand(req.body ?? {}) ? DeliveryCommandSchema.parse(req.body)
+        : isCrmBusinessReferenceCommand(req.body ?? {}) ? CrmBusinessReferenceCommandSchema.parse(req.body)
         : isCrmCommercialContextCommand(req.body ?? {}) ? CrmCommercialContextCommandSchema.parse(req.body)
           : isCrmCommercialDocumentCommand(req.body ?? {}) ? CrmCommercialDocumentCommandSchema.parse(req.body)
             : isCrmGovernedCommand(req.body ?? {}) ? CrmGovernedCommandSchema.parse(req.body)
@@ -308,6 +312,24 @@ export function crmOperationsRoutes(options: Options): Router {
     } catch (error) { writeError(res, error) }
   })
 
+  const deliveryReads=options.deliveryReads??createCrmDeliveryReadStore()
+  router.get('/:workspaceId/operations/delivery-commitments',async(req,res)=>{
+    const ctx=await context(req,res);if(!ctx)return
+    try {
+      const input=DeliveryListQuerySchema.parse(req.query)
+      const page=await deliveryReads.list({userId:(ctx.actor as {userId:string}).userId,chatId:input.chatId},ctx.workspaceId,input)
+      res.set('Cache-Control','no-store').json({...page,validForMs:30_000})
+    }catch(error){writeError(res,error)}
+  })
+  router.get('/:workspaceId/operations/delivery-commitments/:id',async(req,res)=>{
+    const ctx=await context(req,res);if(!ctx)return
+    try {
+      const input=z.object({chatId:z.string().uuid().optional()}).strict().parse(req.query)
+      const row=await deliveryReads.get({userId:(ctx.actor as {userId:string}).userId,chatId:input.chatId},ctx.workspaceId,z.string().uuid().parse(req.params.id))
+      if(!row)throw new CrmOperationsError('not_found','The record is unavailable in your current scope.')
+      res.set('Cache-Control','no-store').json({...row,validForMs:30_000})
+    }catch(error){writeError(res,error)}
+  })
   const referenceReads = options.referenceReads ?? createCrmReferenceReadStore()
   const viewer = (ctx: CrmOperationsContext) => ({ userId: (ctx.actor as { userId: string }).userId, canConfigure: ctx.authority.canConfigure })
   router.get('/:workspaceId/operations/reference-definitions', async (req, res) => {

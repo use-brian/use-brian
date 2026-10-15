@@ -1,6 +1,87 @@
 import type { Dictionary } from "./en";
 
 export const zh: Dictionary = {
+  clientDelivery: {
+    "title": "客戶承諾",
+    "empty": "此範圍沒有已記錄的承諾。",
+    "unavailable": "暫時無法讀取交付證據。",
+    "retry": "重試",
+    "loading": "正在讀取可查閱的證據",
+    "due": "已約定期限: {date}",
+    "inspect": "查看證據",
+    "close": "關閉詳情",
+    "askUpdate": "詢問最新情況",
+    "updateDraft": "承諾 {id} 需要甚麼最新資料？請使用可查閱的證據，並向我詢問欠缺的資料。如需要聯絡他人，我會選擇收件人。",
+    "partial": "可觀察的範圍並不完整，可能還有其他可查閱的證據。",
+    "more": "更多承諾",
+    "evidence": "協議與證據",
+    "noObservation": "暫無可觀察的執行情況。",
+    "lastKnown": "最後觀察或報告: {time}",
+    "evaluated": "證據讀取時間: {time}",
+    "reportedWho": "{name} 於 {time} 報告",
+    "unknownReporter": "報告人不詳",
+    "observedAt": "觀察時間: {time}",
+    "openSource": "開啟原始來源",
+    "excerpt": "來源摘錄",
+    "agreedBy": "協議依據的人員: {name}",
+    "linkedWork": "相關工作",
+    "executor": "執行者: {name}",
+    "followUp": "任務跟進人: {name}",
+    "notAssigned": "未指派",
+    "seeTask": "查看任務",
+    "nextAction": "查看相關工作",
+    "review": "覆核識別結果",
+    "reason": "這項解讀的理由",
+    "outcomeLabel": "現有已約定成果",
+    "recognise": "確認現有協議",
+    "correct": "修正解讀",
+    "dismiss": "駁回候選",
+    "confirmTitle": "覆核現有協議",
+    "confirmDescription": "記錄對引用證據的以下解讀: {outcome}",
+    "cancel": "取消",
+    "saveError": "未能套用覆核。請重新讀取目前證據。",
+    "uncertain": "結果未確定。請重試同一覆核以檢查收據。",
+    "retryReview": "重試同一覆核",
+    "refresh": "更新證據",
+    "workState": "工作狀態: {status}",
+    "unknownStatus": "未知",
+    "recognition": {
+      "recognised": "已識別的協議",
+      "needs_review": "需要人工覆核",
+      "dismissed": "已駁回",
+      "superseded": "已由新版取代"
+    },
+    "coverage": {
+      "observed": "已觀察的證據",
+      "reported": "人員報告的證據",
+      "partial": "僅部分可觀察",
+      "conflicting": "證據有矛盾",
+      "unobserved": "無法從可用證據觀察工作情況。"
+    },
+    "outcomes": {
+      "verified_delivery": "有證據支持成果已交付",
+      "reported_completion": "有人員報告已完成",
+      "unknown": "整體交付情況未知"
+    },
+    "evidenceKinds": {
+      "observed_fact": "觀察事實",
+      "human_report": "人員報告",
+      "coverage_gap": "可見性缺口",
+      "conflict": "矛盾證據"
+    },
+    "workStates": {
+      "todo": "待辦",
+      "in_progress": "進行中",
+      "in_review": "審核中",
+      "blocked": "受阻",
+      "done": "完成",
+      "archived": "已封存",
+      "active": "有效",
+      "running": "執行中",
+      "awaiting_approval": "等待核准",
+      "abandoned": "已終止"
+    }
+  },
   workspaceSearch: {
     savedDrafts: "已儲存的未傳送草稿",
     restoreDraft: "還原草稿",

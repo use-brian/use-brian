@@ -134,7 +134,9 @@ BEGIN
   ARRAY(SELECT jsonb_array_elements_text(s->'compartments')),ARRAY(SELECT jsonb_array_elements_text(s->'projectIds'))::uuid[],chat);
 END $$;
 REVOKE ALL ON FUNCTION crm_delivery_source_visible(uuid,text,uuid,text,uuid),crm_delivery_envelope_visible(uuid,uuid,uuid,text,text[],uuid[],uuid) FROM PUBLIC;
+DO $$ BEGIN IF EXISTS(SELECT 1 FROM pg_roles WHERE rolname='app_user') THEN
 GRANT EXECUTE ON FUNCTION crm_delivery_source_visible(uuid,text,uuid,text,uuid),crm_delivery_envelope_visible(uuid,uuid,uuid,text,text[],uuid[],uuid) TO app_user;
+END IF; END $$;
 
 ALTER TABLE crm_delivery_commitments ENABLE ROW LEVEL SECURITY;
 ALTER TABLE crm_delivery_observations ENABLE ROW LEVEL SECURITY;

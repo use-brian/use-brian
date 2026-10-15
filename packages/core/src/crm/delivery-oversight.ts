@@ -115,7 +115,9 @@ export function classifyDeliveryRecognition(proposal: DeliveryProposal, source: 
   return { state: 'recognised', reason: 'authenticated_explicit_agreement', agreeingUserId: source.authorUserId }
 }
 
+export type DeliverySourceNavigation = {type:'conversation';id:string;visibility:'workspace'|'personal'}|{type:'brain';primitive:'deals'|'files';id:string}
 export type DeliveryCommitment = {
+  sourceNavigation?:DeliverySourceNavigation|null; agreeingName?:string|null;
   id: string; workspaceId: string; candidateKey: string; source: DeliverySourceRef;
   outcome: string; dueDate: string | null; companyId: string | null; dealId: string | null;
   taskIds: string[]; goalIds: string[]; agreeingUserId: string | null;
@@ -123,6 +125,7 @@ export type DeliveryCommitment = {
   originChatId: string | null; createdAt: string; updatedAt: string;
 }
 export type DeliveryObservation = DeliveryObservationInput & {
+  sourceNavigation?:DeliverySourceNavigation|null; reporterName?:string|null;
   id: string; commitmentId: string; reporterUserId: string | null; occurredAt: string; readAt: string;
 }
 export type DeliveryAssessment = {
@@ -140,12 +143,16 @@ export function assessDelivery(commitment: DeliveryCommitment, admitted: Deliver
   partial ||= admitted.length > 20
   const reports = evidence.filter(v => v.kind === 'human_report')
   const facts = evidence.filter(v => v.kind === 'observed_fact')
-  const conflict = evidence.some(v => v.kind === 'conflict')
+  const stateEvidence=evidence.filter(v=>(v.kind==='human_report'||v.kind==='observed_fact')&&['completed','outcome_delivered','delay','blocker'].includes(v.claim))
+  const latestAt=stateEvidence.map(v=>v.occurredAt).sort().at(-1)
+  const latest=stateEvidence.filter(v=>v.occurredAt===latestAt)
+  const terminal=latest.some(v=>v.claim==='completed'||v.claim==='outcome_delivered')
+  const conflict = evidence.some(v => v.kind === 'conflict') || terminal&&latest.some(v=>v.claim==='delay'||v.claim==='blocker')
   const recognised = commitment.recognitionState === 'recognised'
-  const issueEvidence = recognised && !conflict ? evidence.find(v => (v.kind === 'observed_fact' || v.kind === 'human_report')
+  const issueEvidence = recognised && !conflict ? latest.find(v => (v.kind === 'observed_fact' || v.kind === 'human_report')
     && (v.claim === 'delay' || v.claim === 'blocker')) : undefined
-  const verified = recognised && !conflict && !partial && facts.some(v => v.claim === 'outcome_delivered')
-  const completed = recognised && !conflict && reports.some(v => v.claim === 'completed')
+  const verified = recognised && !conflict && !partial && latest.some(v => v.kind==='observed_fact' && v.claim === 'outcome_delivered')
+  const completed = recognised && !conflict && latest.some(v => v.kind==='human_report' && v.claim === 'completed')
   return {
     recognition: commitment.recognitionState,
     coverage: conflict ? 'conflicting' : partial && (facts.length || reports.length) ? 'partial'
@@ -160,15 +167,17 @@ export function assessDelivery(commitment: DeliveryCommitment, admitted: Deliver
       conflict ? 'conflicting_evidence' : null].filter((v): v is string => Boolean(v)),
   }
 }
-export type DeliveryDetail = { commitment: DeliveryCommitment; observations: DeliveryObservation[]; assessment: DeliveryAssessment; evidenceCursor: string | null }
+export type DeliveryLinkedWork = {id:string;kind:'task'|'goal';title:string;status:string;taskId:string;executorLabel:string|null;followUpLabel:string|null}
+export type DeliveryDetail = { linkedWork?:DeliveryLinkedWork[]; commitment: DeliveryCommitment; observations: DeliveryObservation[]; assessment: DeliveryAssessment; evidenceCursor: string | null }
 export type DeliveryReadPort = {
+  locateChatSource?(viewer:DeliveryViewer,workspaceId:string,sessionId:string,quote:string,expectedText:string):Promise<DeliverySourceRef|null>;
   list(viewer: DeliveryViewer, workspaceId: string, query: DeliveryListQuery): Promise<{ commitments: DeliveryCommitment[]; nextCursor: string | null }>;
   get(viewer: DeliveryViewer, workspaceId: string, id: string): Promise<DeliveryDetail | null>;
 }
 
 /** Conservative claim gate over the exact read. Missing semantics stays a gap,
  * never a fluent diagnosis inferred from a date, Task state or connected tool. */
-export function deliveryObservationSupported(input: DeliveryObservationInput, source: DeliverySource): boolean {
+export function deliveryObservationSupported(input: DeliveryObservationInput, source: DeliverySource, outcome?:string): boolean {
   if (!deliveryQuoteMatches(input.source,source)) return false
   if(input.kind==='coverage_gap') return input.claim==='unknown'
   if(input.kind==='conflict') return input.claim==='unknown' && source.role!=='assistant'
@@ -176,6 +185,11 @@ export function deliveryObservationSupported(input: DeliveryObservationInput, so
   if(input.kind==='human_report' && (source.role!=='human' || !source.authorUserId)) return false
   // Accepted terms establish an agreement, not execution or delivery.
   if(input.kind==='observed_fact' && source.role!=='document') return false
+  if(outcome&&input.claim!=='unknown') {
+    const stop=new Set(['deliver','delivery','the','and','for','with','accepted','agreed','outcome','client','provide','complete','completion'])
+    const terms=(outcome.toLowerCase().match(/[\p{L}\p{N}]{3,}/gu)??[]).filter(v=>!stop.has(v))
+    if(!terms.length||!terms.some(v=>source.quote.toLowerCase().includes(v)))return false
+  }
   if(input.claim==='outcome_delivered') return input.kind==='observed_fact'
     && /\b(delivered|received|accepted outcome|acceptance receipt)\b|交付済|受領|已交付|已收妥/i.test(source.quote)
   if(input.claim==='delay' || input.claim==='blocker') {

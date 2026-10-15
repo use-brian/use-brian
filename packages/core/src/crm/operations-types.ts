@@ -14,7 +14,7 @@ import { DeliveryCommandSchema } from './delivery-oversight.js'
 import { parseAuthoringAuthority, type AuthoringAuthority } from '../security/access-ceiling.js'
 import { APP_LOCALES } from '@use-brian/shared'
 import { campaignAttributionContextSchema } from '@use-brian/shared/campaigns'
-import { CrmCredentialDepartmentSelectionSchema, CrmIntegrationAuthoritySchema, requireCrmIntegrationOperation, type CrmIntegrationOperation } from './integration-authority.js'
+import { CrmCredentialParentSchema, CrmCredentialDepartmentSelectionSchema, CrmIntegrationAuthoritySchema, requireCrmIntegrationOperation, type CrmIntegrationOperation } from './integration-authority.js'
 import { AssociationPlanInputSchema, AssociationEventInputSchema } from '../association/domain.js'
 import { CrmConfigCommandSchema, isCrmConfigCommand } from './config-commands.js'
 import { PreviewCrmImportFileCleanupCommandSchema, ExecuteCrmImportFileCleanupCommandSchema } from './file-cleanup-types.js'
@@ -162,6 +162,9 @@ export const CrmOperationsAuthoritySchema = z.object({
   /** Set when an enrolled viewer acts through this integration credential; recorded as audit evidence. */
   viaCredentialId: CrmOperationsUuidSchema.optional(),
   nativeDelivery: CrmNativeDeliveryAuthoritySchema.optional(),
+  /** Server-stamped native evidence; never command/HTTP input. */
+  deliveryCredentialParent: CrmCredentialParentSchema.optional(),
+  deliveryReviewApproval: z.object({approvalId:CrmOperationsUuidSchema,approverUserId:CrmOperationsUuidSchema,toolName:z.literal('reviewCrmDeliveryRecognition')}).strict().optional(),
 })
 export type CrmOperationsAuthority = z.infer<typeof CrmOperationsAuthoritySchema>
 

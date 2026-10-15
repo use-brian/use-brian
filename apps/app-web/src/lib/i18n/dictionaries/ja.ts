@@ -1,6 +1,87 @@
 import type { Dictionary } from "./en";
 
 export const ja: Dictionary = {
+  clientDelivery: {
+    "title": "顧客との約束",
+    "empty": "この範囲に記録された約束はありません。",
+    "unavailable": "納品の証拠を読み取れません。",
+    "retry": "再試行",
+    "loading": "参照可能な証拠を確認中",
+    "due": "合意した期限: {date}",
+    "inspect": "証拠を確認",
+    "close": "詳細を閉じる",
+    "askUpdate": "更新情報を確認する",
+    "updateDraft": "約束 {id} について必要な更新情報を確認してください。参照可能な証拠を使い、不足する情報は私に尋ねてください。連絡が必要なら相手は私が選びます。",
+    "partial": "確認できる範囲は不完全です。他にも参照可能な証拠がある場合があります。",
+    "more": "他の約束",
+    "evidence": "合意と証拠",
+    "noObservation": "実行状況を確認できる情報はありません。",
+    "lastKnown": "最後の観測または報告: {time}",
+    "evaluated": "証拠の確認時刻: {time}",
+    "reportedWho": "{name} の報告 ({time})",
+    "unknownReporter": "報告者不明",
+    "observedAt": "観測日時: {time}",
+    "openSource": "元の情報を開く",
+    "excerpt": "情報源の抜粋",
+    "agreedBy": "合意の根拠となる人: {name}",
+    "linkedWork": "関連する作業",
+    "executor": "実行担当: {name}",
+    "followUp": "タスクのフォロー担当: {name}",
+    "notAssigned": "未割り当て",
+    "seeTask": "タスクを確認",
+    "nextAction": "関連する作業を確認",
+    "review": "認識内容をレビュー",
+    "reason": "解釈の理由",
+    "outcomeLabel": "既に合意された成果",
+    "recognise": "合意を認める",
+    "correct": "解釈を修正",
+    "dismiss": "候補を却下",
+    "confirmTitle": "既存の合意をレビュー",
+    "confirmDescription": "引用した証拠に対する次の解釈を記録します: {outcome}",
+    "cancel": "キャンセル",
+    "saveError": "レビューを適用できません。現在の証拠を再読み込みしてください。",
+    "uncertain": "結果を確認できません。同じレビューを再試行して受領記録を確認してください。",
+    "retryReview": "同じレビューを再試行",
+    "refresh": "証拠を更新",
+    "workState": "作業状況: {status}",
+    "unknownStatus": "不明",
+    "recognition": {
+      "recognised": "認識済みの合意",
+      "needs_review": "人によるレビューが必要",
+      "dismissed": "却下済み",
+      "superseded": "新しい版に置き換え済み"
+    },
+    "coverage": {
+      "observed": "観測した証拠",
+      "reported": "人から報告された証拠",
+      "partial": "一部のみ観測可能",
+      "conflicting": "証拠に矛盾があります",
+      "unobserved": "参照可能な証拠から作業状況は確認できません。"
+    },
+    "outcomes": {
+      "verified_delivery": "成果の納品を裏付ける証拠があります",
+      "reported_completion": "完了が報告されています",
+      "unknown": "全体の納品状況は不明です"
+    },
+    "evidenceKinds": {
+      "observed_fact": "観測した事実",
+      "human_report": "人による報告",
+      "coverage_gap": "可視性の不足",
+      "conflict": "矛盾する証拠"
+    },
+    "workStates": {
+      "todo": "未着手",
+      "in_progress": "進行中",
+      "in_review": "レビュー中",
+      "blocked": "対応待ち",
+      "done": "完了",
+      "archived": "アーカイブ済み",
+      "active": "有効",
+      "running": "実行中",
+      "awaiting_approval": "承認待ち",
+      "abandoned": "終了"
+    }
+  },
   workspaceSearch: {
     savedDrafts: "保存された未送信の下書き",
     restoreDraft: "下書きを復元",

@@ -4,6 +4,8 @@
 import { CrmOperationsError, classifyDeliveryRecognition, deliveryQuoteMatches, deliveryObservationSupported,
   type DeliveryCommand, type DeliveryCommitment, type DeliverySource, type DeliveryViewer } from '@use-brian/core'
 import type { CrmOperationsTransaction } from '../db/crm-operations-store.js'
+import { currentAgentAccess } from '../db/agent-access-context.js'
+import { mutationActorAccess } from '../db/access-predicate.js'
 import { applyRLSGucs } from '../db/client.js'
 import { DELIVERY_COMMITMENT_COLUMNS, deliveryCommitmentRow, deliveryLinkVisible, deliveryVisibility,
   readDeliverySource } from '../db/crm-delivery-oversight-store.js'
@@ -16,12 +18,38 @@ function assertVersion(c: DeliveryCommitment, version: number) { if (c.version !
 /** This seam admits real sources/links before receipts and writes. */
 export async function executeDeliveryCommand(tx: CrmOperationsTransaction, command: DeliveryCommand) {
   const { client, context } = tx.commercial()
-  const access = await tx.commercial().actorAccess()
+  const parent=context.authority.deliveryCredentialParent
+  let access
+  if(['brain_key','oauth_token','home_app'].includes(context.actor.kind)) {
+    const ambient=currentAgentAccess()
+    const kind=context.actor.kind
+    const reader=kind==='brain_key'?'crm_brain_parent_current':kind==='oauth_token'?'crm_oauth_parent_current':'crm_home_app_parent_current'
+    const proofCurrent=parent?.kind==='oauth_token'
+      ? await client.query<{current:boolean}>('SELECT crm_oauth_parent_current($1,$2,$3,$4,$5,$6) AS current',[parent.credentialId,parent.workspaceId,parent.userId,parent.clientId,parent.expiresAt,parent.tokenFingerprint])
+      : parent ? await client.query<{current:boolean}>(`SELECT ${reader}($1::jsonb) AS current`,[JSON.stringify(parent)]) : null
+    if(!parent||parent.kind!==kind||!('credentialId' in context.actor)||parent.credentialId!==context.actor.credentialId
+      ||parent.workspaceId!==context.workspaceId||!ambient||ambient.workspaceId!==context.workspaceId||ambient.userId!==parent.userId
+      ||ambient.compartments===undefined||ambient.mutationCompartments===undefined||ambient.projectIds===undefined
+      ||!proofCurrent?.rows[0]?.current) {
+      throw new CrmOperationsError('not_authorized','The current authenticated credential and native source ceiling are required.')
+    }
+    access=mutationActorAccess(parent.userId,context.workspaceId,{...ambient,userId:parent.userId,workspaceId:context.workspaceId,assistantId:'',assistantKind:'primary'})
+  } else access = await tx.commercial().actorAccess()
   await applyRLSGucs(client, access.userId)
-  const viewer: DeliveryViewer = { userId: access.userId, access }
+  const viewer: DeliveryViewer = { userId: access.userId, access, ...(context.actor.kind==='assistant'?{chatId:context.actor.sessionId}:{}) }
   const identity = actorColumns(context)
+  let reviewerUserId=context.actor.kind==='user'?context.actor.userId:null
   if (command.kind === 'review_delivery_recognition' && context.actor.kind !== 'user') {
-    throw new CrmOperationsError('not_authorized', 'A signed-in human reviews existing agreement evidence.')
+    const proof=context.authority.deliveryReviewApproval
+    const {kind:ignored,...input}=command
+    if(context.actor.kind!=='assistant'||!proof||proof.approverUserId!==access.userId||!(await client.query(`SELECT id FROM pending_approvals
+      WHERE id=$1 AND workspace_id=$2 AND kind='tool_invocation' AND status='approved' AND responded_by=$3
+        AND approver_user_id=$3 AND blocking_session_id=$4 AND tool_name='reviewCrmDeliveryRecognition' AND arguments=$5::jsonb
+        AND originating_assistant_id=$6 AND (expires_at IS NULL OR responded_at<=expires_at) FOR SHARE`,
+      [proof?.approvalId,context.workspaceId,access.userId,context.actor.kind==='assistant'?context.actor.sessionId:null,JSON.stringify(input),context.actor.kind==='assistant'?context.actor.assistantId:null])).rowCount) {
+      throw new CrmOperationsError('not_authorized', 'An exact attended human review approval is required for this source interpretation.')
+    }
+    reviewerUserId=proof.approverUserId
   }
   let current: DeliveryCommitment | null = null
   let source: DeliverySource
@@ -67,9 +95,11 @@ export async function executeDeliveryCommand(tx: CrmOperationsTransaction, comma
       const recognition = classifyDeliveryRecognition(proposal, source)
       // Calendar projection requires exact source evidence, never the model's date guess.
       const dueDate = proposal.dueDate && source.quote.includes(proposal.dueDate) ? proposal.dueDate : null
-      await client.query(`UPDATE crm_delivery_commitments SET recognition_state='superseded',version=version+1,updated_at=now()
-        WHERE workspace_id=$1 AND source_kind=$2 AND source_id=$3 AND candidate_key=$4 AND source_revision<>$5 AND recognition_state<>'superseded'`,
-        [context.workspaceId, source.kind, source.id, proposal.candidateKey, source.revision])
+      const superseded=await client.query(`UPDATE crm_delivery_commitments SET recognition_state='superseded',version=version+1,updated_at=now()
+        WHERE workspace_id=$1 AND source_kind=$2 AND source_id=$3 AND candidate_key=$4 AND source_revision<>$5 AND recognition_state<>'superseded'
+        RETURNING id,version,source_revision`,[context.workspaceId,source.kind,source.id,proposal.candidateKey,source.revision])
+      for(const prior of superseded.rows)await client.query(`INSERT INTO crm_delivery_history(workspace_id,commitment_id,version,operation_id,action,actor_kind,actor_id,source_revision)
+        VALUES($1,$2,$3,$4,'superseded',$5,$6,$7)`,[context.workspaceId,prior.id,prior.version,command.operationId,identity.kind,identity.id,prior.source_revision])
       commitmentId = (await client.query<{ id: string }>(`INSERT INTO crm_delivery_commitments(workspace_id,candidate_key,source_kind,source_id,source_revision,source_selector,
         outcome,due_date,company_id,deal_id,task_ids,goal_ids,agreeing_user_id,recognition_state,recognition_reason,origin_chat_id,
         user_id,assistant_id,sensitivity,compartments,project_ids,request_hash)
@@ -94,7 +124,7 @@ export async function executeDeliveryCommand(tx: CrmOperationsTransaction, comma
         const input = command.observation
         const observed = await readDeliverySource(client, viewer, context.workspaceId, input.source)
         if (!observed || !deliveryQuoteMatches(input.source, observed)) unavailable()
-        if (!deliveryObservationSupported(input,observed)) invalid('The current exact evidence cannot support that delivery claim. Keep it unknown or review the source.')
+        if (!deliveryObservationSupported(input,observed,current!.outcome)) invalid('The current exact evidence cannot support that delivery claim. Keep it unknown or review the source.')
         if (input.kind === 'human_report' && (observed.role !== 'human' || !observed.authorUserId)) invalid('A human report requires an authenticated native sender.')
         if (input.kind === 'observed_fact' && observed.role !== 'document' && observed.role !== 'governed') invalid('Assistant replies and human completion reports are not independently observed delivery.')
         if (input.kind === 'coverage_gap' && input.claim !== 'unknown') invalid('A visibility gap cannot diagnose delivery.')
@@ -124,9 +154,9 @@ export async function executeDeliveryCommand(tx: CrmOperationsTransaction, comma
     }
     const version = (await client.query<{ version: number }>('SELECT version FROM crm_delivery_commitments WHERE id=$1', [commitmentId])).rows[0]!.version
     await client.query(`INSERT INTO crm_delivery_history(workspace_id,commitment_id,version,operation_id,action,actor_kind,actor_id,reason,source_revision)
-      VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9)`, [context.workspaceId,commitmentId,version,command.operationId,action,identity.kind,identity.id,reason,source.revision])
+      VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9)`, [context.workspaceId,commitmentId,version,command.operationId,action,command.kind==='review_delivery_recognition'?'user':identity.kind,command.kind==='review_delivery_recognition'?reviewerUserId:identity.id,reason,source.revision])
     await commercialAudit(tx, context, { action: `crm.delivery_projection.${action}`, subjectKind: 'delivery_commitment', subjectId: commitmentId,
-      details: { version, sourceRevision: source.revision } })
+      details: { version, sourceRevision: source.revision, ...(command.kind==='review_delivery_recognition'?{reviewerUserId}:{}) } })
     // A content-free cache invalidation event, never a workflow trigger or alert.
     const eventId = await tx.emitDomainEvent({ eventType: 'crm.delivery_projection.changed', eventKey: `crm.delivery_projection.changed:${commitmentId}:${version}`,
       subjectKind: 'delivery_commitment', subjectId: commitmentId, payload: { commitmentId, version }, actor: context.actor, occurredAt: new Date().toISOString() })

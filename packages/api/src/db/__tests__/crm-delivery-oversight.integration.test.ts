@@ -1,9 +1,18 @@
 /** Real native CRM service and non-bypass app-role authority. Fictional fixtures.
  * [COMP:api/crm-delivery-oversight]
  */
+import express from 'express'
+import request from 'supertest'
+import { z } from 'zod'
+import { Client } from '@modelcontextprotocol/sdk/client/index.js'
+import { StreamableHTTPClientTransport } from '@modelcontextprotocol/sdk/client/streamableHttp.js'
+import { brainMcpRoutes } from '../../brain-mcp/server.js'
+import { crmOperationsRoutes } from '../../routes/crm-operations.js'
+import { createPendingApprovalsStore } from '../pending-approvals-store.js'
+import { runWithAgentAccess } from '../agent-access-context.js'
 import { randomUUID } from 'node:crypto'
 import { afterAll, describe, expect, it } from 'vitest'
-import { processEpisode, type LLMProvider, type PipelineBEpisode, type CrmOperationsContext, type DeliveryProposal } from '@use-brian/core'
+import { buildTool, createCrmDeliveryOversightTools, processEpisode, type Tool, type LLMProvider, type PipelineBEpisode, type CrmOperationsContext, type DeliveryProposal } from '@use-brian/core'
 import { getPool, getAppPool, queryWithRLS } from '../client.js'
 import { createCrmDomainEventWorker, createDbCrmDomainEventOutboxStore } from '../../crm-operations/domain-event-worker.js'
 import { createCrmOperationsService } from '../../crm-operations/service.js'
@@ -214,5 +223,139 @@ describe('[COMP:api/crm-delivery-oversight] real source authority and lifecycle 
   await expect(service.execute({...f.ctx(),authority:{...f.ctx().authority,canWrite:false}},{kind:'record_delivery_recognition',operationId:randomUUID(),proposal:p.proposal})).rejects.toMatchObject({code:'not_authorized'})
   await expect(service.execute(f.ctx(f.people.outsider),{kind:'record_delivery_recognition',operationId:randomUUID(),proposal:p.proposal})).rejects.toMatchObject({code:'not_found'})
   await expect(service.execute({...f.ctx(),actor:{kind:'assistant',assistantId:f.assistants.brian,userId:f.userId,sessionId:f.chat.id}},{kind:'record_delivery_recognition',operationId:randomUUID(),proposal:p.proposal})).rejects.toMatchObject({code:'not_authorized'})
+ })
+})
+
+
+describe('[COMP:api/crm-delivery-oversight] shared HTTP, attended tool and MCP parity',()=>{
+ it('CO01/CO03/CO04/CO05 preserves native work and bounded reported issues without treating closure as delivery',async()=>{
+  const f=await fixture(),p=await f.message(),task=randomUUID()
+  await f.q(`INSERT INTO tasks(id,workspace_id,title,status,created_by_user_id,executor_assistant_id,sensitivity,compartments,project_ids)
+    VALUES($1,$2,'Fictional report preparation','done',$3,$4,'internal',$5,$6)`,[task,f.workspaceId,f.userId,f.assistants.brian,[`project:${f.projectId}`],[f.projectId]])
+  const saved=await f.record({...p.proposal,taskIds:[task]}),id=saved.record.id as string
+  const before=(await reads.get({userId:f.userId},f.workspaceId,id))!
+  expect(before.linkedWork).toMatchObject([{id:task,status:'done',executorLabel:'Brian'}]);expect(before.assessment).toMatchObject({coverage:'unobserved',outcome:'unknown',issue:null,nextAction:null})
+  const update=await f.message('The accepted report is blocked pending the agreed input.')
+  await service.execute(f.ctx(),{kind:'append_delivery_observation',operationId:randomUUID(),commitmentId:id,expectedVersion:1,
+    observation:{source:update.proposal.source,kind:'human_report',claim:'blocker',statement:update.proposal.source.quote,workId:task}})
+  const after=(await reads.get({userId:f.userId},f.workspaceId,id))!
+  expect(after.assessment).toMatchObject({coverage:'reported',outcome:'unknown',issue:{kind:'blocker'},nextAction:{workId:task}})
+  expect(after.observations[0]).toMatchObject({reporterUserId:f.userId,reporterName:'Fictional person',sourceNavigation:{type:'conversation',id:f.chat.id}})
+  expect((await pool.query('SELECT status FROM tasks WHERE id=$1',[task])).rows[0].status).toBe('done')
+  await f.q('UPDATE session_messages SET scope_held=true WHERE id=$1',[update.m.id])
+  expect((await reads.get({userId:f.userId},f.workspaceId,id))!.assessment).toMatchObject({coverage:'unobserved',issue:null,nextAction:null})
+ })
+ it('CO06/CO08 lists at most 50 admitted records and 20 evidence references with honest cursors',async()=>{
+  const f=await fixture();let first=''
+  for(let i=0;i<51;i++){const p=await f.message(`Agreed: deliver fictional report ${i}.`);const r=await f.record(p.proposal);if(i===0)first=r.record.id as string}
+  const query={scope:'project' as const,scopeId:f.projectId,limit:50}
+  const page=await reads.list({userId:f.userId},f.workspaceId,query)
+  expect(page.commitments).toHaveLength(50);expect(page.nextCursor).toBeTruthy()
+  expect((await reads.list({userId:f.userId},f.workspaceId,{...query,cursor:page.nextCursor!})).commitments).toHaveLength(1)
+  expect((await reads.list({userId:f.people.outsider},f.workspaceId,query))).toEqual({commitments:[],nextCursor:null})
+  for(let i=0;i<21;i++){const p=await f.message(`Fictional work update ${i}.`);await service.execute(f.ctx(),{kind:'append_delivery_observation',operationId:randomUUID(),commitmentId:first,expectedVersion:i+1,
+   observation:{source:p.proposal.source,kind:'human_report',claim:'unknown',statement:p.proposal.source.quote,workId:null}})}
+  const detail=(await reads.get({userId:f.userId},f.workspaceId,first))!
+  expect(detail.observations).toHaveLength(20);expect(detail.evidenceCursor).toBeTruthy();expect(detail.assessment.partial).toBe(true)
+  expect(detail.assessment.issue).toBeNull();expect(detail.assessment.nextAction).toBeNull()
+ })
+ it('CO02/CO08 governed acceptance retains the accepted request audience as well as the native deal',async()=>{
+  const f=await fixture(),deal=randomUUID()
+  await f.q(`INSERT INTO entities(id,workspace_id,kind,display_name,created_by_user_id,source,sensitivity,compartments,project_ids)
+   VALUES($1,$2,'deal','Fictional report engagement',$3,'manual','internal',$4,$5)`,[deal,f.workspaceId,f.userId,[`project:${f.projectId}`],[f.projectId]])
+  const draft=(await service.execute(f.ctx(),{kind:'save_change_request',operationId:randomUUID(),target:{kind:'deal',id:deal},changes:{name:'Deliver the accepted report',assignReferences:[]}})).record.request as {id:string;version:number}
+  await service.execute(f.ctx(),{kind:'submit_change_request',operationId:randomUUID(),requestId:draft.id,expectedVersion:draft.version})
+  // Native request privacy can be tighter than the target engagement.
+  await f.q('UPDATE crm_change_requests SET user_id=$2 WHERE id=$1',[draft.id,f.userId])
+  const snapshot=(await pool.query("SELECT crm_delivery_source_snapshot($1,'entity',$2) AS s",[f.workspaceId,deal])).rows[0].s
+  const saved=await f.record({candidateKey:'accepted-native-terms',source:{kind:'entity',id:deal,revision:snapshot.version,quote:snapshot.text,start:0,end:snapshot.text.length},outcome:'Deliver the accepted report',dueDate:null,companyId:f.companyId,dealId:deal,taskIds:[],goalIds:[],basis:'accepted_terms',agreeingUserId:f.userId})
+  expect((await reads.get({userId:f.userId},f.workspaceId,saved.record.id as string))!.commitment.recognitionState).toBe('recognised')
+  expect(await reads.get({userId:f.people.member},f.workspaceId,saved.record.id as string)).toBeNull()
+  expect(await reads.get({userId:f.userId,chatId:f.chat.id},f.workspaceId,saved.record.id as string)).toBeNull()
+ })
+ it('CO02/CO09/CO12 exact persisted attended approval permits human interpretation and rejects changed arguments',async()=>{
+  const f=await fixture(),p=await f.message('Maybe deliver the accepted report.'),saved=await f.record(p.proposal),id=saved.record.id as string
+  const input={operationId:randomUUID(),commitmentId:id,expectedVersion:1,decision:'recognise',reason:'Interpret the existing exact agreement evidence'}
+  const tools=createCrmDeliveryOversightTools({reads,service}),approvals=createPendingApprovalsStore()
+  const approval=await approvals.createToolInvocation({workspaceId:f.workspaceId,blockingSessionId:f.chat.id,originatingAssistantId:f.assistants.brian,approverUserId:f.userId,
+   toolName:'reviewCrmDeliveryRecognition',arguments:input,approvalPayload:{allowPersistentApproval:false,displayLines:[p.proposal.source.quote]},deliveryChannelType:'web',expiresAt:new Date(Date.now()+60_000)})
+  const ctx={workspaceId:f.workspaceId,userId:f.userId,assistantId:f.assistants.brian,sessionId:f.chat.id,activeCapabilities:new Set(['crm','home_app:crm:read','home_app:crm:write'])} as never
+  const access={workspaceId:f.workspaceId,userId:f.userId,clearance:'internal',compartments:[`project:${f.projectId}`],mutationCompartments:[`project:${f.projectId}`],projectIds:[f.projectId],visibilityAssistantIds:[f.assistants.brian]}
+  const run=(args:Record<string,unknown>,proof?:object)=>runWithAgentAccess(access,()=>tools.reviewCrmDeliveryRecognition.execute(args,{...ctx as object,...(proof?{approvedToolInvocation:proof}:{})} as never))
+  expect(await run(input)).toMatchObject({isError:true,data:{error:'not_authorized'}})
+  await approvals.respond(approval.id,'approved',f.userId)
+  const proof={approvalId:approval.id,approverUserId:f.userId,toolName:'reviewCrmDeliveryRecognition'}
+  expect(await run({...input,reason:'Changed after approval'},proof)).toMatchObject({isError:true,data:{error:'not_authorized'}})
+  const approvedResult=await run(input,proof);expect(approvedResult,JSON.stringify(approvedResult)).not.toHaveProperty('isError',true)
+  expect((await reads.get({userId:f.userId},f.workspaceId,id))!.commitment).toMatchObject({recognitionState:'recognised',version:2})
+  expect((await pool.query("SELECT actor_kind,actor_id FROM crm_delivery_history WHERE commitment_id=$1 AND action='recognise'",[id])).rows).toEqual([{actor_kind:'user',actor_id:f.userId}])
+  expect(await run(input,proof)).toMatchObject({data:{duplicate:true}})
+ })
+ it('CO08/CO09/CO12 real HTTP and authenticated MCP share source authority, strict schemas, receipts and key revocation',async()=>{
+  const f=await fixture(),p=await f.message(),deliveryTools=createCrmDeliveryOversightTools({reads,service})
+  await f.edge('user',f.userId)
+  await f.q("INSERT INTO assistant_capabilities(assistant_id,capability,granted_by_user_id) SELECT $1,unnest(ARRAY['crm','home_app:crm:read','home_app:crm:write']),$2::uuid ON CONFLICT DO NOTHING",[f.assistants.brian,f.userId])
+  const key=await withExternalKeyActor(f.userId,undefined,()=>createDbBrainKeyStore().create({workspaceId:f.workspaceId,actingUserId:f.userId,name:'Fictional delivery key',scope:'read_write',maxClearance:'internal',contextGroupId:f.finance,contextProjectId:f.projectId}))
+  const tools=new Proxy(deliveryTools as Record<string,Tool>,{get(target,name){return target[name as string]??buildTool({name:String(name),description:'Unused fixture boundary',inputSchema:z.object({id:z.string().optional()}),execute:async()=>{throw new Error('Unrelated tool must not run')}})}})
+  const app=express();app.use(express.json());app.use((req,_res,next)=>{req.userId=req.get('x-test-user')??undefined;next()})
+  app.use('/api/crm',crmOperationsRoutes({service,deliveryReads:reads,readStore:{} as never,workspaceStore:{getRole:async(u:string,w:string)=>(await pool.query('SELECT role FROM workspace_members WHERE user_id=$1 AND workspace_id=$2',[u,w])).rows[0]?.role??null} as never}))
+  app.use('/api/brain/mcp',brainMcpRoutes({brainKeyStore:createDbBrainKeyStore(),memoryTools:tools as never,taskTools:tools as never,crmTools:tools as never,retrievalTools:tools as never}))
+  const server=await new Promise<import('node:http').Server>(resolve=>{const s=app.listen(0,'127.0.0.1',()=>resolve(s))}),address=server.address() as import('node:net').AddressInfo
+  const mcp=new Client({name:'fictional-delivery-fixture',version:'1'})
+  try {
+   await mcp.connect(new StreamableHTTPClientTransport(new URL(`http://127.0.0.1:${address.port}/api/brain/mcp`),{requestInit:{headers:{Authorization:`Bearer ${key.plaintext}`}}}))
+   const names=(await mcp.listTools()).tools.map(t=>t.name);expect(names).toContain('listCrmDeliveryCommitments');expect(names).toContain('recordCrmDeliveryRecognition')
+   const args={operationId:randomUUID(),proposal:p.proposal},created=await mcp.callTool({name:'recordCrmDeliveryRecognition',arguments:args})
+   expect(created.isError,JSON.stringify(created)).not.toBe(true)
+   const decode=(result:any)=>JSON.parse(result.content[0].text)
+   const data=decode(created) as {record:{id:string}},id=data.record.id
+   const base=`/api/crm/${f.workspaceId}/operations/delivery-commitments`
+   const http=await request(app).get(`${base}/${id}`).set('x-test-user',f.userId)
+   expect(http.status,JSON.stringify(http.body)).toBe(200);expect(http.headers['cache-control']).toBe('no-store');expect(http.body.commitment.id).toBe(id)
+   expect(decode(await mcp.callTool({name:'getCrmDeliveryAssessment',arguments:{commitmentId:id}}))).toMatchObject({commitment:{id}})
+   expect(decode(await mcp.callTool({name:'recordCrmDeliveryRecognition',arguments:args}))).toMatchObject({duplicate:true,record:{id}})
+   expect((await request(app).get(base).query({scope:'project',scopeId:f.projectId,limit:51}).set('x-test-user',f.userId)).status).toBe(400)
+   expect((await request(app).get(`${base}/${id}`).set('x-test-user',f.people.outsider)).status).toBe(404)
+   const review={kind:'review_delivery_recognition',operationId:randomUUID(),commitmentId:id,expectedVersion:1,decision:'correct',reason:'Correct exact admitted interpretation',outcome:'Deliver the existing report'}
+   expect((await request(app).post(`/api/crm/${f.workspaceId}/operations/commands`).set('x-test-user',f.userId).send(review)).status).toBe(200)
+   expect(await mcp.callTool({name:'reviewCrmDeliveryRecognition',arguments:{operationId:randomUUID(),commitmentId:id,expectedVersion:2,decision:'dismiss',reason:'Machine cannot human-review'}})).toMatchObject({isError:true})
+   const refreshed=await mcp.callTool({name:'refreshCrmDeliveryAssessment',arguments:{operationId:randomUUID(),commitmentId:id,expectedVersion:2}})
+   expect(refreshed.isError,JSON.stringify(refreshed)).not.toBe(true)
+   await f.q('UPDATE session_messages SET scope_held=true WHERE id=$1',[p.m.id])
+   expect((await request(app).get(`${base}/${id}`).set('x-test-user',f.userId)).status).toBe(404)
+   expect(await mcp.callTool({name:'getCrmDeliveryAssessment',arguments:{commitmentId:id}})).toMatchObject({isError:true})
+   expect(await mcp.callTool({name:'recordCrmDeliveryRecognition',arguments:args})).toMatchObject({isError:true})
+   await f.q("UPDATE brain_keys SET status='revoked' WHERE id=$1",[key.id])
+   await expect(mcp.callTool({name:'listCrmDeliveryCommitments',arguments:{scope:'project',scopeId:f.projectId,limit:50}})).rejects.toThrow()
+  } finally {await mcp.close();await new Promise<void>((resolve,reject)=>server.close(e=>e?reject(e):resolve()))}
+ })
+})
+
+
+describe('[COMP:api/crm-delivery-oversight] native outcome and source revision',()=>{
+ it('CO04 admitted outcome receipt supports delivery, parent File revocation removes that claim',async()=>{
+  const f=await fixture(),p=await f.message(),saved=await f.record(p.proposal),id=saved.record.id as string,file=randomUUID(),text='Acceptance receipt: the accepted report was delivered.'
+  await f.q(`INSERT INTO workspace_files(id,workspace_id,path,name,storage_uri,created_by_user_id,sensitivity,compartments,project_ids)
+   VALUES($1,$2,$3,'Fictional outcome receipt','fixture://receipt',$4,'internal',$5,$6)`,[file,f.workspaceId,`/${file}.txt`,f.userId,[`project:${f.projectId}`],[f.projectId]])
+  const segment=(await f.q(`INSERT INTO file_segments(workspace_id,file_id,segment_index,char_start,char_end,content,created_by_user_id,sensitivity,compartments,project_ids)
+   VALUES($1,$2,0,0,$3,$4,$5,'internal',$6,$7) RETURNING id`,[f.workspaceId,file,text.length,text,f.userId,[`project:${f.projectId}`],[f.projectId]])).rows[0].id
+  const source=(await f.q("SELECT crm_delivery_source_snapshot($1,'file_segment',$2) AS s",[f.workspaceId,segment])).rows[0].s
+  await service.execute(f.ctx(),{kind:'append_delivery_observation',operationId:randomUUID(),commitmentId:id,expectedVersion:1,
+   observation:{source:{kind:'file_segment',id:segment,revision:source.version,quote:text,start:0,end:text.length},kind:'observed_fact',claim:'outcome_delivered',statement:text,workId:null}})
+  expect((await reads.get({userId:f.userId},f.workspaceId,id))!.assessment.outcome).toBe('verified_delivery')
+  await f.q('UPDATE workspace_files SET scope_held=true WHERE id=$1',[file])
+  expect((await reads.get({userId:f.userId},f.workspaceId,id))!.assessment.outcome).toBe('unknown')
+ })
+ it('CO09 changed native text invalidates old content and supersedes it once under the new revision',async()=>{
+  const f=await fixture(),p=await f.message(),saved=await f.record(p.proposal),text='Agreed: deliver the amended accepted report.'
+  await f.q('UPDATE session_messages SET content=$2::jsonb WHERE id=$1',[p.m.id,JSON.stringify([{type:'text',text}])])
+  expect(await reads.get({userId:f.userId},f.workspaceId,saved.record.id as string)).toBeNull()
+  const source=(await f.q("SELECT crm_delivery_source_snapshot($1,'session_message',$2) AS s",[f.workspaceId,p.m.id])).rows[0].s
+  expect(source.version).not.toBe(p.proposal.source.revision)
+  const next=await f.record({...p.proposal,source:{...p.proposal.source,revision:source.version,quote:text,end:text.length},outcome:'Deliver the amended report'})
+  expect(next.record.id).not.toBe(saved.record.id)
+  expect((await reads.list({userId:f.userId},f.workspaceId,{scope:'project',scopeId:f.projectId,limit:50})).commitments.map(c=>c.id)).toEqual([next.record.id])
+  expect((await f.q('SELECT recognition_state FROM crm_delivery_commitments WHERE id=$1',[saved.record.id])).rows[0].recognition_state).toBe('superseded')
+  expect((await f.q('SELECT action FROM crm_delivery_history WHERE commitment_id=$1 ORDER BY version',[saved.record.id])).rows.map(r=>r.action)).toEqual(['recorded','superseded'])
  })
 })

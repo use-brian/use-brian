@@ -96,7 +96,7 @@ import type {
   Sensitivity,
   Tool,
   ToolContext,
-  CrmOperationsTools, CrmBusinessReferenceTools, CrmCommercialContextTools, CrmCommercialDocumentTools, CrmGovernedRecordTools,
+  CrmOperationsTools, CrmBusinessReferenceTools, CrmCommercialContextTools, CrmCommercialDocumentTools, CrmGovernedRecordTools, CrmDeliveryOversightTools,
   AssociationTools,
   Embedder,
 } from '@use-brian/core'
@@ -190,7 +190,7 @@ export type BrainCrmTools = {
   advanceDealStage: Tool
   listCrmFields: Tool
   setCrmCustomFields: Tool
-} & CrmOperationsTools & CrmBusinessReferenceTools & CrmCommercialContextTools & CrmCommercialDocumentTools & CrmGovernedRecordTools
+} & CrmOperationsTools & CrmBusinessReferenceTools & CrmCommercialContextTools & CrmCommercialDocumentTools & CrmGovernedRecordTools & Partial<CrmDeliveryOversightTools>
 
 export type BrainRetrievalTools = {
   search: Tool
@@ -492,6 +492,8 @@ const READ_TOOL_NAMES = new Set<string>([
   'listCrmBillingRequests',
   'getCrmBillingBalance',
   'previewCrmRecurringSuccessors',
+  'listCrmDeliveryCommitments',
+  'getCrmDeliveryAssessment',
   'getCrmDelivery',
   // Workspace files (read) — present only when fileTools are wired
   'fileRead',
@@ -1730,6 +1732,10 @@ export function buildBrainTools(opts: BuildOpts): BrainTool[] {
     bridgeCoreTool(opts.crmTools.reviseCrmPreparation, resolveCtx, workspaceId),
     bridgeCoreTool(opts.crmTools.markCrmPreparationReady, resolveCtx, workspaceId),
     bridgeCoreTool(opts.crmTools.listCrmChangeRequests, resolveCtx, workspaceId),
+    ...Object.entries(opts.crmTools).filter(([name])=>['listCrmDeliveryCommitments','getCrmDeliveryAssessment','refreshCrmDeliveryAssessment',
+      'recordCrmDeliveryRecognition','reviewCrmDeliveryRecognition','appendCrmDeliveryObservation','withdrawCrmDeliveryObservation'].includes(name))
+      .filter(([,tool])=>filterToolsByCapabilities(new Map([[tool.name,tool]]),opts.agentActiveCapabilities??new Set()).size>0)
+      .map(([,tool])=>bridgeCoreTool(tool,resolveCtx,workspaceId)),
     bridgeCoreTool(opts.crmTools.getCrmChangeRequest, resolveCtx, workspaceId),
     bridgeCoreTool(opts.crmTools.listCrmEngagements, resolveCtx, workspaceId),
     bridgeCoreTool(opts.crmTools.listCrmBillingRequests, resolveCtx, workspaceId),
@@ -1984,7 +1990,7 @@ export function buildBrainTools(opts: BuildOpts): BrainTool[] {
       t.name === 'listCrmSegments' || t.name === 'previewCrmSegment' ||
       t.name === 'listCrmEntitlementPlans' || t.name === 'listCrmEntitlements' ||
       t.name === 'listCrmEvents' || t.name === 'listCrmParticipation' ||
-      t.name === 'getCrmDelivery' ||
+      t.name === 'listCrmDeliveryCommitments' || t.name === 'getCrmDeliveryAssessment' || t.name === 'getCrmDelivery' ||
       t.name === 'previewCrmCredentialBindings' || t.name === 'listCrmCredentials' ||
       t.name === 'listCrmPipelines' ||
       t.name === 'listCrmReferenceDefinitions' || t.name === 'previewCrmReference' ||
@@ -2031,7 +2037,7 @@ export function buildBrainTools(opts: BuildOpts): BrainTool[] {
       t.name === 'acceptCrmCommercialProfile' || t.name === 'proposeCrmOperationVersion' ||
       t.name === 'prepareCrmInvoice' || t.name === 'reviseCrmPreparation' || t.name === 'markCrmPreparationReady' ||
       t.name === 'issueCrmInvoice' || t.name === 'retryCrmInvoiceIssue' || t.name === 'voidCrmInvoice' ||
-      t.name === 'saveCrmChangeRequest' || t.name === 'submitCrmChangeRequest' || t.name === 'withdrawCrmChangeRequest' || t.name === 'updateCrmEngagementTracking' || t.name === 'setCrmCommercialValues' || t.name === 'commitCrmRecurringSuccessors' || t.name === 'saveCrmBillingRequest' || t.name === 'cancelCrmBillingRequest' || t.name === 'recordCrmExternalInvoice' || t.name === 'correctCrmExternalInvoiceReference'
+      t.name === 'refreshCrmDeliveryAssessment' || t.name === 'recordCrmDeliveryRecognition' || t.name === 'reviewCrmDeliveryRecognition' || t.name === 'appendCrmDeliveryObservation' || t.name === 'withdrawCrmDeliveryObservation' || t.name === 'saveCrmChangeRequest' || t.name === 'submitCrmChangeRequest' || t.name === 'withdrawCrmChangeRequest' || t.name === 'updateCrmEngagementTracking' || t.name === 'setCrmCommercialValues' || t.name === 'commitCrmRecurringSuccessors' || t.name === 'saveCrmBillingRequest' || t.name === 'cancelCrmBillingRequest' || t.name === 'recordCrmExternalInvoice' || t.name === 'correctCrmExternalInvoiceReference'
     ),
     ...fileBridges.filter((t) =>
       t.name === 'fileWrite' || t.name === 'fileAppend' ||
@@ -2086,7 +2092,7 @@ export function buildBrainTools(opts: BuildOpts): BrainTool[] {
       const ctx = await resolveCtx()
       if ('error' in ctx) return text(ctx.error, true)
       const security = ctx.executionContext?.security
-      if (!security?.access.sharedAudience) return tool.handler(args)
+      if (!security || !security.access.sharedAudience && !['listCrmDeliveryCommitments','getCrmDeliveryAssessment','refreshCrmDeliveryAssessment','recordCrmDeliveryRecognition','reviewCrmDeliveryRecognition','appendCrmDeliveryObservation','withdrawCrmDeliveryObservation'].includes(tool.name)) return tool.handler(args)
       try {
         return await security.authority.execute(() =>
           runWithAgentAccess(security.access, () => tool.handler(args)))

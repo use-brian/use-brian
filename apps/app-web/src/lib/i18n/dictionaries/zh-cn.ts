@@ -12,6 +12,87 @@
 import type { Dictionary } from "./en";
 
 export const zhCN: Dictionary = {
+  clientDelivery: {
+    "title": "客户承诺",
+    "empty": "此范围没有已记录的承诺。",
+    "unavailable": "暂时无法读取交付证据。",
+    "retry": "重试",
+    "loading": "正在读取可查看的证据",
+    "due": "已约定期限: {date}",
+    "inspect": "查看证据",
+    "close": "关闭详情",
+    "askUpdate": "询问最新情况",
+    "updateDraft": "承诺 {id} 需要哪些最新资料？请使用可查看的证据，并向我询问缺少的资料。如果需要联系他人，我会选择收件人。",
+    "partial": "可观察的范围并不完整，可能还有其他可查看的证据。",
+    "more": "更多承诺",
+    "evidence": "协议与证据",
+    "noObservation": "暂无可观察的执行情况。",
+    "lastKnown": "最后观察或报告: {time}",
+    "evaluated": "证据读取时间: {time}",
+    "reportedWho": "{name} 于 {time} 报告",
+    "unknownReporter": "报告人不详",
+    "observedAt": "观察时间: {time}",
+    "openSource": "打开原始来源",
+    "excerpt": "来源摘录",
+    "agreedBy": "协议依据的人员: {name}",
+    "linkedWork": "相关工作",
+    "executor": "执行者: {name}",
+    "followUp": "任务跟进人: {name}",
+    "notAssigned": "未指派",
+    "seeTask": "查看任务",
+    "nextAction": "查看相关工作",
+    "review": "复核识别结果",
+    "reason": "这项解读的理由",
+    "outcomeLabel": "现有已约定成果",
+    "recognise": "确认现有协议",
+    "correct": "修正解读",
+    "dismiss": "驳回候选",
+    "confirmTitle": "复核现有协议",
+    "confirmDescription": "记录对引用证据的以下解读: {outcome}",
+    "cancel": "取消",
+    "saveError": "未能应用复核。请重新读取当前证据。",
+    "uncertain": "结果尚未确定。请重试同一复核以检查回执。",
+    "retryReview": "重试同一复核",
+    "refresh": "更新证据",
+    "workState": "工作状态: {status}",
+    "unknownStatus": "未知",
+    "recognition": {
+      "recognised": "已识别的协议",
+      "needs_review": "需要人工复核",
+      "dismissed": "已驳回",
+      "superseded": "已由新版取代"
+    },
+    "coverage": {
+      "observed": "已观察的证据",
+      "reported": "人员报告的证据",
+      "partial": "仅部分可观察",
+      "conflicting": "证据有矛盾",
+      "unobserved": "无法从可用证据观察工作情况。"
+    },
+    "outcomes": {
+      "verified_delivery": "有证据支持成果已交付",
+      "reported_completion": "有人员报告已完成",
+      "unknown": "整体交付情况未知"
+    },
+    "evidenceKinds": {
+      "observed_fact": "观察事实",
+      "human_report": "人员报告",
+      "coverage_gap": "可见性缺口",
+      "conflict": "矛盾证据"
+    },
+    "workStates": {
+      "todo": "待办",
+      "in_progress": "进行中",
+      "in_review": "审核中",
+      "blocked": "受阻",
+      "done": "完成",
+      "archived": "已归档",
+      "active": "有效",
+      "running": "执行中",
+      "awaiting_approval": "等待批准",
+      "abandoned": "已终止"
+    }
+  },
   workspaceSearch: {
     savedDrafts: "已保存的未发送草稿",
     restoreDraft: "恢复草稿",

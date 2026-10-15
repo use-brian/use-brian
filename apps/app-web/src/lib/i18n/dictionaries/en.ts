@@ -14,6 +14,87 @@
 import type { BuiltinToolGroupId } from "@use-brian/shared/builtin-connectors";
 
 export const en = {
+  clientDelivery: {
+    "title": "Client commitments",
+    "empty": "No commitments are recorded in this scope.",
+    "unavailable": "Delivery evidence is unavailable.",
+    "retry": "Retry",
+    "loading": "Reading admitted evidence",
+    "due": "Agreed due date: {date}",
+    "inspect": "Inspect evidence",
+    "close": "Close detail",
+    "askUpdate": "Ask for update",
+    "updateDraft": "What update is needed for commitment {id}? Use available evidence and ask me for any missing input. I will choose a recipient if we need to contact someone.",
+    "partial": "Coverage is incomplete. More admitted evidence may exist.",
+    "more": "More commitments",
+    "evidence": "Agreement and evidence",
+    "noObservation": "No execution observation is available.",
+    "lastKnown": "Last observation or report: {time}",
+    "evaluated": "Evidence read: {time}",
+    "reportedWho": "Reported by {name} on {time}",
+    "unknownReporter": "Unknown reporter",
+    "observedAt": "Observed on {time}",
+    "openSource": "Open original source",
+    "excerpt": "Source excerpt",
+    "agreedBy": "Agreement basis: {name}",
+    "linkedWork": "Linked work",
+    "executor": "Executor: {name}",
+    "followUp": "Task follow-up: {name}",
+    "notAssigned": "Unassigned",
+    "seeTask": "See the task",
+    "nextAction": "Inspect the linked work",
+    "review": "Review recognition",
+    "reason": "Reason for your interpretation",
+    "outcomeLabel": "Existing agreed outcome",
+    "recognise": "Recognise agreement",
+    "correct": "Correct interpretation",
+    "dismiss": "Dismiss candidate",
+    "confirmTitle": "Review this existing agreement",
+    "confirmDescription": "Record this interpretation of the cited evidence: {outcome}",
+    "cancel": "Cancel",
+    "saveError": "The review could not be applied. Reload the current evidence.",
+    "uncertain": "The result is uncertain. Retry the same review to inspect its receipt.",
+    "retryReview": "Retry the same review",
+    "refresh": "Refresh evidence",
+    "workState": "Work status: {status}",
+    "unknownStatus": "Unknown",
+    "recognition": {
+      "recognised": "Recognised agreement",
+      "needs_review": "Needs human review",
+      "dismissed": "Dismissed",
+      "superseded": "Superseded"
+    },
+    "coverage": {
+      "observed": "Observed evidence",
+      "reported": "Human-reported evidence",
+      "partial": "Partly observable",
+      "conflicting": "Conflicting evidence",
+      "unobserved": "Work is not observable from the available evidence."
+    },
+    "outcomes": {
+      "verified_delivery": "Outcome delivery is evidenced",
+      "reported_completion": "Completion is reported",
+      "unknown": "Overall delivery is unknown"
+    },
+    "evidenceKinds": {
+      "observed_fact": "Observed fact",
+      "human_report": "Human report",
+      "coverage_gap": "Visibility gap",
+      "conflict": "Conflicting evidence"
+    },
+    "workStates": {
+      "todo": "To do",
+      "in_progress": "In progress",
+      "in_review": "In review",
+      "blocked": "Blocked",
+      "done": "Done",
+      "archived": "Archived",
+      "active": "Active",
+      "running": "Running",
+      "awaiting_approval": "Awaiting approval",
+      "abandoned": "Abandoned"
+    }
+  },
   workspaceSearch: {
     savedDrafts: "Saved unsent drafts",
     restoreDraft: "Restore draft",
