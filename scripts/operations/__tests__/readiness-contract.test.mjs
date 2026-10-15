@@ -4,7 +4,7 @@ import { mkdtemp, writeFile, symlink, rm } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { CATALOGUE } from '../readiness-catalogue.mjs'
-import { aggregate, artifact, assessSuite, captureSource, digest, parseVitest, validateCatalogue, verifyArtifacts } from '../readiness-contract.mjs'
+import { aggregate, artifact, assessSuite, captureSource, command, digest, parseVitest, validateCatalogue, verifyArtifacts } from '../readiness-contract.mjs'
 import { optionsFrom } from '../v1-readiness.mjs'
 import { assertLocalFixture, validateAmbientDatabase } from '../../crm/local-fixture.mjs'
 
@@ -101,5 +101,10 @@ describe('[COMP:operations/v1-readiness] source-bound evidence contract', () => 
       const f = completeEvidence(); f.source = result.source
       assert.equal(run(f).exitCode, 1)
     } finally { await rm(dir, { recursive: true }) }
+  })
+  it('V02 Git diagnostics cannot contaminate machine source identity output', async () => {
+    const result = await command(process.execPath, ['-e', "process.stdout.write('source-identity'); process.stderr.write('diagnostic warning')"], { stdoutOnly: true, timeoutMs: 5000 })
+    assert.equal(result.exitCode, 0)
+    assert.equal(result.output, 'source-identity')
   })
 })

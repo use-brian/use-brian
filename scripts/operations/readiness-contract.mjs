@@ -17,7 +17,7 @@ export function validateCatalogue(catalogue) {
 }
 
 /** Bounded, shell-free child execution. No inherited credentials or stdin. */
-export function command(executable, args, { cwd, env, timeoutMs = 180_000 } = {}) {
+export function command(executable, args, { cwd, env, timeoutMs = 180_000, stdoutOnly = false } = {}) {
   const startedAt = new Date().toISOString()
   return new Promise(accept => {
     let output = '', timedOut = false, outputTruncated = false, done = false
@@ -28,7 +28,7 @@ export function command(executable, args, { cwd, env, timeoutMs = 180_000 } = {}
       accept({ command: [executable, ...args], exitCode, startedAt, endedAt: new Date().toISOString(), timedOut, outputTruncated, output, ...(error ? { error } : {}) })
     }
     const capture = b => { const s = output + b.toString(); outputTruncated ||= s.length > 2_000_000; output = s.slice(-2_000_000) }
-    child.stdout.on('data', capture); child.stderr.on('data', capture)
+    child.stdout.on('data', capture); child.stderr.on('data', b => { if (!stdoutOnly) capture(b) })
     const timer = setTimeout(() => { timedOut = true; try { process.kill(-child.pid, 'SIGKILL') } catch {} }, timeoutMs)
     child.on('error', error => finish(1, error.code ?? 'spawn_failed'))
     child.on('close', code => finish(code ?? 1))
@@ -36,7 +36,7 @@ export function command(executable, args, { cwd, env, timeoutMs = 180_000 } = {}
 }
 
 async function git(root, args) {
-  const r = await command('git', ['-C', root, ...args], { env: { PATH: process.env.PATH }, timeoutMs: 15_000 })
+  const r = await command('git', ['-C', root, ...args], { env: { PATH: process.env.PATH }, timeoutMs: 15_000, stdoutOnly: true })
   if (r.exitCode || r.outputTruncated) throw new Error('source_inventory_failed')
   return r.output.trim()
 }
