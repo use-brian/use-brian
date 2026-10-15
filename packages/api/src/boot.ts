@@ -527,7 +527,7 @@ import { readRoutineOperationCeiling } from './db/routine-intake-store.js'
 import { createRoutineTools } from './tasks/routine-tools.js'
 import { observeRoutineTasks } from './tasks/routine-observations.js'
 import { setRoutineConfigurationPreflight, RoutineConfigurationError } from './tasks/routine-proposals.js'
-import { validateCallerScopeEvidence } from './context-scope/caller-evidence.js'
+import { assertRoutineRuntimeReady } from './tasks/routine-preflight.js'
 import { findActiveNativeExecutionSystem } from './db/task-execution-store.js'
 import { createTaskExecutionTools, type ControlEffects } from './tasks/execution-control.js'
 import { createExternalProgressTools } from './tasks/external-progress.js'
@@ -6948,22 +6948,11 @@ export async function bootOpenApi(opts: BootOpenApiOptions): Promise<BootResult>
   setRoutineConfigurationPreflight(async ({userId,workspaceId,configuration,sourceEvidence})=>{
     const issues=await preflightWorkflowDefinition(configuration.definition,{userId,workspaceId},workflowsRouteOptions)
     if (issues.length) throw new RoutineConfigurationError('routine_dependencies_unavailable')
-    const executor=configuration.definition.defaultExecutor
-    if (executor?.kind!=='assistant') return
-    const selected=await captureAuthoringAuthoritySystem({userId,workspaceId,assistantId:executor.assistantId,
-      contextGroupId:configuration.contextGroupId,contextProjectId:configuration.contextProjectId})
-    const turnScope=await resolveWorkflowAuthoringScope({userId,workspaceId,assistantId:executor.assistantId,authoringAuthority:selected,
-      contextGroupId:configuration.contextGroupId,contextProjectId:configuration.contextProjectId})
-    await validateCallerScopeEvidence(sourceEvidence,pinAccessCeiling(turnScope.access))
-    const registry=await workflowExecutorDeps.buildToolRegistry({userId,workspaceId,assistantId:executor.assistantId,turnScope})
-    const capabilities=new Set(await capabilityStore.listActive(executor.assistantId))
-    for (const name of configuration.definition.taskIntake?.permittedActions ?? []) {
-      const tool=registry.get(name)
-      if (!tool || tool.requiresCapability && !capabilities.has(tool.requiresCapability)) throw new RoutineConfigurationError('routine_dependencies_unavailable')
-    }
-    const accounts=new Set((await listUsableWorkspaceConnectors({connectorInstanceStore,connectorGrantStore,userId,workspaceId}))
-      .filter(u=>(OFFICIAL_CONNECTOR_TOOLS[u.instance.provider] ?? []).some(t=>registry.has(t.name))).map(u=>u.instance.provider))
-    if (configuration.definition.taskIntake?.requiredAccounts.some(name=>!accounts.has(name))) throw new RoutineConfigurationError('routine_dependencies_unavailable')
+    await assertRoutineRuntimeReady({userId,workspaceId,configuration,sourceEvidence},{
+      buildRegistry:params=>workflowExecutorDeps.buildToolRegistry(params),
+      usableAccounts:async registry=>new Set((await listUsableWorkspaceConnectors({connectorInstanceStore,connectorGrantStore,userId,workspaceId}))
+        .filter(u=>(OFFICIAL_CONNECTOR_TOOLS[u.instance.provider] ?? []).some(t=>registry.has(t.name))).map(u=>u.instance.provider)),
+    })
   })
   app.use('/api', requireAuth(env.JWT_SECRET), workflowsRoutes(workflowsRouteOptions))
 

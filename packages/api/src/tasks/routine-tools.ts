@@ -85,7 +85,7 @@ export function createRoutineTools(): Record<'getRoutineIntake'|'proposeRoutineI
     }),
   })
   const decisionSchema = z.object({proposal_id:z.string().uuid(),expected_revision:z.number().int().nonnegative(),idempotency_key:z.string().min(8).max(200)}).strict()
-  const applyRoutineIntake = buildTool({name:'applyRoutineIntake',requiresCapability:CONFIGURE_CAPABILITY,requiresConfirmation:true,
+  const applyRoutineIntake = buildTool({name:'applyRoutineIntake',requiresCapability:CONFIGURE_CAPABILITY,requiresConfirmation:true,confirmationMode:'durable_attended',allowPersistentApproval:false,
     description:'Apply the exact routine proposal a person has reviewed. Use its proposal_id and expected_revision plus an idempotency_key. Actual human confirmation is required; credentials and delegated/learned approvals cannot activate it. Read the exact proposal first. It creates no new allowance for an existing Task.',
     inputSchema:decisionSchema,execute:(input,context)=>run(context,true,async workspaceId=>{
       const actor=humanActor(context)
@@ -93,7 +93,7 @@ export function createRoutineTools(): Record<'getRoutineIntake'|'proposeRoutineI
       return applyRoutineProposal(actor,input.proposal_id,{expectedRevision:input.expected_revision,idempotencyKey:input.idempotency_key})
     }),
   })
-  const rejectRoutineIntake = buildTool({name:'rejectRoutineIntake',requiresCapability:CONFIGURE_CAPABILITY,requiresConfirmation:true,
+  const rejectRoutineIntake = buildTool({name:'rejectRoutineIntake',requiresCapability:CONFIGURE_CAPABILITY,requiresConfirmation:true,confirmationMode:'durable_attended',allowPersistentApproval:false,
     description:'Reject the exact inactive routine proposal after human review. Pass proposal_id, expected_revision and idempotency_key. This records the human decision and activates nothing.',
     inputSchema:decisionSchema,execute:(input,context)=>run(context,true,async workspaceId=>{
       const actor=humanActor(context)
@@ -101,7 +101,7 @@ export function createRoutineTools(): Record<'getRoutineIntake'|'proposeRoutineI
       return rejectRoutineProposal(actor,input.proposal_id,{expectedRevision:input.expected_revision,idempotencyKey:input.idempotency_key})
     }),
   })
-  const toggle = buildTool({name:'setRoutineIntakeEnabled',requiresCapability:CONFIGURE_CAPABILITY,requiresConfirmation:true,
+  const toggle = buildTool({name:'setRoutineIntakeEnabled',requiresCapability:CONFIGURE_CAPABILITY,requiresConfirmation:true,confirmationMode:'durable_attended',allowPersistentApproval:false,
     description:'Enable or disable future intake for an exactly reviewed routine revision. Actual human confirmation is required. Disable stops new intake only. Existing Tasks continue under current source/tool rights, explicit pauses and their original shared allowance. Re-enable does not replay intake, clear Task pauses or refresh budgets.',
     inputSchema:z.object({workflow_id:z.string().uuid(),enabled:z.boolean(),expected_revision:z.number().int().nonnegative(),idempotency_key:z.string().min(8).max(200)}).strict(),
     execute:(input,context)=>run(context,true,async workspaceId=>{

@@ -20,7 +20,7 @@ import { notifyWorkspaceChange } from '../brain-stream/notify.js'
 import type { PoolClient } from 'pg'
 import { createWorkflowInTransaction } from '../db/workflow-store.js'
 import { findSessionById } from '../db/sessions.js'
-import { gateSessionRead } from '../routes/sessions.js'
+import { gateSessionRead } from '../session-read-authority.js'
 import { createPendingApprovalsStore } from '../db/pending-approvals-store.js'
 
 export class RoutineConfigurationError extends Error {
@@ -30,9 +30,14 @@ function fail(code: string, status = 409): never { throw new RoutineConfiguratio
 
 // The same optional dependency ports as native Workflow authoring. Production
 // installs its actual definition/source/tool/account preflight before serving.
-type RoutinePreflight = (input:{userId:string;workspaceId:string;configuration:RoutineConfiguration;authority:AuthoringAuthority;sourceEvidence:ScopeEvidence})=>Promise<void>
+export type RoutinePreflightInput = {userId:string;workspaceId:string;configuration:RoutineConfiguration;authority:AuthoringAuthority;sourceEvidence:ScopeEvidence}
+type RoutinePreflight = (input:RoutinePreflightInput)=>Promise<void>
 let routinePreflight:RoutinePreflight|undefined
-export function setRoutineConfigurationPreflight(preflight:RoutinePreflight):void {routinePreflight=preflight}
+export function setRoutineConfigurationPreflight(preflight:RoutinePreflight):()=>void {
+  const previous=routinePreflight
+  routinePreflight=preflight
+  return ()=>{routinePreflight=previous}
+}
 
 /** Supplied ONLY by a trusted authenticated route or durable tool executor. */
 export type RoutineApplyActor =

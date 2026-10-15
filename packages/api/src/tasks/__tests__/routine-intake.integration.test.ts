@@ -11,6 +11,9 @@ import { createTask, updateTask } from '../../db/tasks.js'
 import { flushWorkspaceData, WORKSPACE_FLUSH_TABLES } from '../../db/workspace-flush.js'
 import { admitRoutineRun } from '../routine-intake.js'
 import { createRule } from '../../db/task-admission-store.js'
+import { createProjectSharedStore } from '../../db/project-shared-store.js'
+import type { RoutineConfiguration } from '../../db/routine-intake-store.js'
+import { requireRoutineSchema } from '../../db/routine-intake-store.js'
 
 const { assertLocalFixture } = await import(new URL('../../../../../scripts/crm/local-fixture.mjs', import.meta.url).href)
 await assertLocalFixture()
@@ -20,6 +23,23 @@ afterAll(async () => { await getAppPool().end(); await pool.end() })
 import { setup, activate, sourceRun } from './routine-fixture.js'
 
 describe('[COMP:api/routine-intake] atomic source-backed Task admission (real PG)', () => {
+  it('I01/I10: Project home and source floors survive intake independently of Department membership',async()=>{
+    const s=await setup()
+    const config=s.configuration as RoutineConfiguration
+    config.contextProjectId=s.f.projectId
+    config.definition.taskIntake!.home={kind:'project',id:s.f.projectId}
+    await activate(s)
+    const source=await createTask(s.actor.userId,{workspaceId:s.f.workspaceId,title:'Prepare a fictional Project report',
+      home:{kind:'project',id:s.f.projectId},compartments:[`team:${s.f.finance}`,`project:${s.f.projectId}`],projectIds:[s.f.projectId],visibility:{userId:null,assistantId:null}})
+    const {run}=await sourceRun(s,source),result=await admitRoutineRun(run.id)
+    expect(result.kind).toBe('created')
+    if (result.kind!=='created') throw new Error('Project routine must create admitted tracking')
+    await s.f.edge('user',s.f.people.outsider);await s.f.edge('user',s.f.people.member)
+    expect((await queryWithRLS(s.f.people.outsider,'SELECT id FROM tasks WHERE id=$1',[result.task.id])).rows).toHaveLength(0)
+    expect((await queryWithRLS(s.f.people.member,'SELECT id FROM tasks WHERE id=$1',[result.task.id])).rows).toHaveLength(1)
+    await createProjectSharedStore().removeMember(s.f.people.lead,s.f.projectId,{kind:'user',id:s.f.people.member})
+    expect((await queryWithRLS(s.f.people.member,'SELECT id FROM tasks WHERE id=$1',[result.task.id])).rows).toHaveLength(0)
+  })
   it('creates one canonical root with the configured home/executor and actual event basis', async () => {
     const s = await setup()
     await activate(s)
@@ -243,6 +263,18 @@ describe('[COMP:api/routine-proposals] exact configuration and human proof (real
 })
 
 describe('[COMP:api/routine-intake] persistence, source floors and RLS (real PG)', () => {
+  it('I12: a missing native prerequisite fails the actual schema guard before any intake receipt can be written',async()=>{
+    const s=await setup()
+    await activate(s)
+    const client=await pool.connect()
+    try {
+      await client.query('BEGIN')
+      await client.query('ALTER FUNCTION public.stamp_new_routine_configuration() RENAME TO routine_fixture_unavailable')
+      await expect(requireRoutineSchema(client)).rejects.toMatchObject({status:409,message:'routine_schema_not_ready'})
+      expect((await client.query('SELECT id FROM task_routine_intake_receipts WHERE workspace_id=$1',[s.f.workspaceId])).rows).toHaveLength(0)
+    } finally {await client.query('ROLLBACK');client.release()}
+    await expect(requireRoutineSchema()).resolves.toBeUndefined()
+  })
   it('cannot manufacture engine receipts or routine approval rows through the non-bypass app role', async () => {
     const { workflow, actor, command } = await setup()
     const app = await getAppPool().connect()

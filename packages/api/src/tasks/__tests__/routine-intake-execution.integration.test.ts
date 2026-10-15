@@ -31,6 +31,7 @@ import { advanceRoutineIntake, answerRoutineQuestion, ensureRoutineQuestion, not
   routineExecutionDeps, routineManifestScope, verifyRoutineExecution } from '../routine-execution.js'
 import { controlExecution, type ControlEffects } from '../execution-control.js'
 import { admitRoutineRun } from '../routine-intake.js'
+import { applyRoutineProposal, prepareRoutineProposal, setRoutineIntakeEnabled } from '../routine-proposals.js'
 import { setup, activate, sourceRun } from './routine-fixture.js'
 
 const { assertLocalFixture } = await import(new URL('../../../../../scripts/crm/local-fixture.mjs', import.meta.url).href)
@@ -113,6 +114,37 @@ async function executionFixture(options: { waiting?: boolean; human?: boolean; n
 }
 
 describe('[COMP:api/routine-intake-execution] native receipt-backed entry and continuation (real PG)', () => {
+  it('I07/I12: material executor edits never retarget an existing Task or refresh its original allowance',async()=>{
+    const s=await executionFixture()
+    const result=(await s.intake())!
+    const state=(await findActiveNativeExecutionSystem({taskId:result.taskId}))!
+    const before=await getPoolSystem(state.poolId)
+    await capabilities.grant({assistantId:s.f.assistants.brian,capability:'tasks',grantedByUserId:s.actor.userId})
+    const next={...s.configuration,definition:{...s.configuration.definition,defaultExecutor:{kind:'assistant' as const,assistantId:s.f.assistants.brian}}}
+    const proposal=await prepareRoutineProposal(s.actor.userId,s.workflow.id,{configuration:next,expectedRevision:1,
+      idempotencyKey:randomUUID(),rationale:'Human-selected future executor change'})
+    await applyRoutineProposal(s.actor,proposal.id,{expectedRevision:1,idempotencyKey:randomUUID()})
+    await s.intake()
+    expect(await getTaskByIdSystem(result.taskId)).toMatchObject({executorAssistantId:s.f.assistants.ops})
+    expect(await getExecutionSystem(state.id)).toMatchObject({goalId:state.goalId,poolId:state.poolId,executor:state.executor})
+    expect(await getPoolSystem(state.poolId)).toEqual(before)
+    expect(s.planner).toHaveBeenCalledOnce()
+  })
+
+  it('I06/I12: reviewed disable/re-enable and event replay cannot clear a Task pause or renew its allowance',async()=>{
+    const s=await executionFixture({waiting:true})
+    const result=(await s.intake())!
+    const state=(await findActiveNativeExecutionSystem({taskId:result.taskId}))!
+    await controlExecution({userId:s.actor.userId,kind:'user',id:s.actor.userId,origin:'ui',human:true},s.f.workspaceId,state.id,
+      {action:'pause',expectedRevision:state.controlRevision,interventionId:randomUUID()},s.effects)
+    const paused=await getExecutionSystem(state.id),allowance=await getPoolSystem(state.poolId)
+    await setRoutineIntakeEnabled(s.actor,s.workflow.id,{enabled:false,expectedRevision:1,idempotencyKey:randomUUID()})
+    await setRoutineIntakeEnabled(s.actor,s.workflow.id,{enabled:true,expectedRevision:1,idempotencyKey:randomUUID()})
+    await s.intake()
+    expect(await getExecutionSystem(state.id)).toEqual(paused)
+    expect(await getPoolSystem(state.poolId)).toEqual(allowance)
+    expect(s.planner).not.toHaveBeenCalled();expect(s.kickoff).not.toHaveBeenCalled()
+  })
   it('I01/I09: ready entry arms the selected executor through canonical Goal writers and meters planning on one root pool', async () => {
     const s = await executionFixture()
     const result = (await s.intake())!

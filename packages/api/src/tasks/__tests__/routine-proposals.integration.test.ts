@@ -5,7 +5,7 @@ import { CONFIGURE_CAPABILITY, ContextScopeAccumulator, createTaskTools, scopeEv
 import { getPool, getAppPool, queryWithRLS, applyRLSGucs } from '../../db/client.js'
 import { createTask } from '../../db/tasks.js'
 import { applyRoutineProposal, inspectRoutineProposal, listRoutineProposals, prepareNewRoutineProposal,
-  rejectRoutineProposal } from '../routine-proposals.js'
+  rejectRoutineProposal, setRoutineConfigurationPreflight } from '../routine-proposals.js'
 import { setup } from './routine-fixture.js'
 import { createDbTaskStore } from '../../db/tasks-store.js'
 import { createDbCapabilityStore } from '../../db/capability-store.js'
@@ -20,6 +20,14 @@ import { createRoutineTools } from '../routine-tools.js'
 import { createPendingApprovalsStore } from '../../db/pending-approvals-store.js'
 import { applyStagedWrite } from '../../agent-surface/staged-write.js'
 import { createPersonalWebSession } from '../../db/sessions.js'
+import { assertRoutineRuntimeReady } from '../routine-preflight.js'
+import { buildWorkflowToolRegistry } from '../../workflow/mcp-bridge.js'
+import { createDbConnectorStore } from '../../db/connector-store.js'
+import { createDbAssistantConnectorStore } from '../../db/assistant-connector-store.js'
+import { createDbMcpSettingsStore } from '../../db/mcp-settings-store.js'
+import { createConnectorGrantStore } from '../../db/connector-grant-store.js'
+import { createConnectorInstanceStore } from '../../db/connector-instance-store.js'
+import { listUsableWorkspaceConnectors } from '../../connectors/usable-connectors.js'
 
 const { assertLocalFixture } = await import(new URL('../../../../../scripts/crm/local-fixture.mjs', import.meta.url).href)
 await assertLocalFixture()
@@ -38,6 +46,30 @@ async function proposalFixture(privateSource = false) {
 }
 
 describe('[COMP:api/routine-proposals] inactive native proposals and exact human decisions (real PG)', () => {
+  it('I02/I07: human apply checks actual selected-assistant capability, registry and connected-account availability',async()=>{
+    const s=await proposalFixture()
+    s.command.configuration.definition.taskIntake.permittedActions.push('getTask')
+    s.command.configuration.definition.taskIntake.requiredAccounts.push('unconnected-provider')
+    const firstParty=new Map(Object.values(createTaskTools(createDbTaskStore())).map(t=>[t.name,t]))
+    const connectorInstanceStore=createConnectorInstanceStore(null),connectorGrantStore=createConnectorGrantStore()
+    const restore=setRoutineConfigurationPreflight(input=>assertRoutineRuntimeReady(input,{
+      buildRegistry:params=>buildWorkflowToolRegistry({firstParty,connectorInstanceStore,connectorGrantStore,
+        connectorStore:createDbConnectorStore(null),assistantConnectorStore:createDbAssistantConnectorStore(),settingsStore:createDbMcpSettingsStore()},params),
+      usableAccounts:async()=>new Set((await listUsableWorkspaceConnectors({connectorInstanceStore,connectorGrantStore,
+        userId:s.actor.userId,workspaceId:s.f.workspaceId})).map(c=>c.instance.provider)),
+    }))
+    try {
+      const p=await s.prepare(),decision={expectedRevision:0,idempotencyKey:randomUUID()}
+      await expect(applyRoutineProposal(s.actor,p.id,decision)).rejects.toMatchObject({code:'routine_dependencies_unavailable'})
+      await createDbCapabilityStore().grant({assistantId:s.f.assistants.brian,capability:'tasks',grantedByUserId:s.actor.userId})
+      await expect(applyRoutineProposal(s.actor,p.id,decision)).rejects.toMatchObject({code:'routine_dependencies_unavailable'})
+      expect((await inspectRoutineProposal(s.actor.userId,p.id)).status).toBe('pending')
+      s.command.configuration.definition.taskIntake.requiredAccounts=[]
+      s.command.idempotencyKey=randomUUID()
+      const ready=await s.prepare()
+      expect(await applyRoutineProposal(s.actor,ready.id,{expectedRevision:0,idempotencyKey:randomUUID()})).toEqual({revision:1,replayed:false})
+    } finally {restore()}
+  })
   it('I07/I11: authenticated REST uses the exact same inactive proposal and live-human apply services',async()=>{
     const s=await setup()
     const secret=randomUUID()
@@ -94,6 +126,26 @@ describe('[COMP:api/routine-proposals] inactive native proposals and exact human
     expect((await pool.query('SELECT task_intake_applied_by FROM workflows WHERE id=$1',[p.arguments.workflowId])).rows[0].task_intake_applied_by).toBe(s.actor.userId)
     const result=await tools.getRoutineIntake.execute({proposal_id:p.id},context)
     expect(result.scopeEvidence?.sources?.map(r=>r.resourceId)).toContain(s.source.id)
+  })
+
+  it('I07/I11: attended Chat decisions require durable exact human approval and cannot reuse a changed input',async()=>{
+    const s=await proposalFixture(),tools=createRoutineTools(),store=createPendingApprovalsStore()
+    await createDbCapabilityStore().grant({assistantId:s.f.assistants.brian,capability:CONFIGURE_CAPABILITY,grantedByUserId:s.actor.userId})
+    const authVersion=(await pool.query('SELECT auth_version FROM users WHERE id=$1',[s.actor.userId])).rows[0].auth_version
+    const session=await createPersonalWebSession({assistantId:s.f.assistants.brian,userId:s.actor.userId,workspaceId:s.f.workspaceId,
+      channelType:'web',channelId:randomUUID(),appOrigin:'chat',contextGroupId:s.f.finance,contextProjectId:null},
+      {actorUserId:s.actor.userId,authSessionId:s.actor.authSessionId,authVersion})
+    const p=await s.prepare(),args={proposal_id:p.id,expected_revision:0,idempotency_key:randomUUID()}
+    for (const tool of [tools.applyRoutineIntake,tools.rejectRoutineIntake,tools.setRoutineIntakeEnabled]) {
+      expect(tool).toMatchObject({requiresConfirmation:true,confirmationMode:'durable_attended',allowPersistentApproval:false})
+    }
+    const approval=await store.createToolInvocation({workspaceId:s.f.workspaceId,blockingSessionId:session.id,originatingAssistantId:s.f.assistants.brian,
+      approverUserId:s.actor.userId,toolName:'applyRoutineIntake',arguments:args,approvalPayload:{},deliveryChannelType:'web'})
+    await store.respond(approval.id,'approved',s.actor.userId)
+    const context={userId:s.actor.userId,workspaceId:s.f.workspaceId,assistantId:s.f.assistants.brian,sessionId:session.id,channelType:'web',
+      approvedToolInvocation:{approvalId:approval.id,approverUserId:s.actor.userId,toolName:'applyRoutineIntake'}} as ToolContext
+    expect((await tools.applyRoutineIntake.execute({...args,idempotency_key:randomUUID()},context)).isError).toBe(true)
+    expect((await tools.applyRoutineIntake.execute(args,context)).data).toEqual({revision:1,replayed:false})
   })
   it('I08: actual Task reads accumulate distinct admitted cases into one inactive contextual proposal without scanning or activation', async () => {
     const s=await setup()
