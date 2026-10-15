@@ -8,6 +8,7 @@ import type {
   EntityLinksStore,
   FileSensitivity,
   WorkspaceFile,
+  WorkspaceFilePurpose,
   WorkspaceFileCreateInput,
   WorkspaceFileIndexRow,
   WorkspaceFileMetaPatch,
@@ -50,7 +51,7 @@ const INDEX_SELECT = `
 `
 
 type FileRow = {
-  purpose?: 'operational' | 'engineering_archive'
+  purpose?: WorkspaceFilePurpose
   scopeVersion: string
   id: string
   workspaceId: string
@@ -89,7 +90,7 @@ type FileRow = {
 type IndexRow = {
   userId: string | null
   assistantId: string | null
-  purpose?: 'operational' | 'engineering_archive'
+  purpose?: WorkspaceFilePurpose
   scopeVersion: string
   id: string
   workspaceId: string

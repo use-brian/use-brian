@@ -12783,6 +12783,13 @@ export const ja: Dictionary = {
     },
   },
   engineeringHistory: {
+    pendingRecovery: "待機中キャプチャの復旧",
+    pendingReview: "キャプチャ設定を削除する前に、待機中の開発イベントを配信するか、送信元の本人が明示的に破棄する必要があります。用途や範囲の変更は作業中データを保留します。端末内のデータは別に確認してください。",
+    discardPending: "自分の待機中イベントを破棄",
+    discardPendingConfirm: "このワークスペースで認証済み本人が所有する待機中の開発テキストを完全に破棄します。保存済み原本は開発履歴で管理します。送信元端末のデータは別に確認してください。",
+    pendingDiscarded: "待機中キャプチャの破棄要求が完了しました。",
+    humanAnnotation: "人による注釈",
+    programmaticAnnotation: "プログラムによる注釈",
     advancedFilters: "送信元と日時のフィルター",
     providerCodex: "Codex",
     providerClaude: "Claude Code",

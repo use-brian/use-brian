@@ -240,6 +240,7 @@ export function createProgrammaticCaptureRouter(deps: {
       )
     }
 
+    if(target.processingMode!==undefined&&!['extract','archive_only'].includes(target.processingMode))throw new ProgrammaticCaptureError('capture_target_unavailable','Capture purpose unsupported.')
     if(target.processingMode!=='archive_only' && target.intakeBinding && target.rules.some(rule=>rule.routingMode==='realtime')) throw new ProgrammaticCaptureError('capture_target_unavailable','Capture target unavailable.')
     const occurredAt = input.occurredAt ?? deps.now?.() ?? new Date()
     const metadata = input.metadata ?? {}
@@ -303,7 +304,7 @@ export function createProgrammaticCaptureRouter(deps: {
       const firesAt=decision.routing_mode==='realtime' ? (deps.now?.()??new Date())
         : decision.schedule ? computeNextRun({type:'cron',expression:decision.schedule},decision.timezone,deps.now?.()) : null
       if(!firesAt)throw new ProgrammaticCaptureError('capture_rule_invalid','Archive schedule unavailable.')
-      return deps.archive(auth,input,target,matchedRule,{sensitivity,compartments,projectIds,firesAt,realtime:decision.routing_mode==='realtime'})
+      return deps.archive(auth,input,target,matchedRule,{sensitivity:target.intakeBinding?.sensitivity??matchedRule.episodeSensitivity??sensitivity,compartments,projectIds,firesAt,realtime:decision.routing_mode==='realtime'})
     }
     const queuedEvent:QueuedProgrammaticCaptureEvent={
       eventId:input.eventId,content:input.content,occurredAt:occurredAt.toISOString(),
@@ -487,7 +488,7 @@ export function createProgrammaticBatchProcessor(deps: {
         `Programmatic batch ${batch.id} target is unavailable.`,
       )
     }
-    if(target.processingMode==='archive_only' || batch.events.some(e=>(e as {processingPurpose?:string}).processingPurpose==='archive_only'))throw new ProgrammaticCaptureError('capture_target_unavailable','Archive requires its supported-purpose publisher.')
+    if(target.processingMode!==undefined&&target.processingMode!=='extract' || batch.events.some(e=>{const p=(e as {processingPurpose?:string}).processingPurpose;return p!==undefined&&p!=='extract'}))throw new ProgrammaticCaptureError('capture_target_unavailable','Archive requires its supported-purpose publisher.')
     if(target.classificationMode==='strict'&&!['explicit','reviewed'].includes(batch.scopeBindingOrigin??'legacy')){
       throw new ProgrammaticCaptureError('capture_target_unavailable',`Programmatic batch ${batch.id} has an unresolved scope binding.`)
     }

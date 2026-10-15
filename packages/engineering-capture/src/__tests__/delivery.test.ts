@@ -6,7 +6,7 @@ import {CollectorConfigSchema} from '../setup.js'
 import {CaptureSpool} from '../spool.js'
 import {flushCapture,type CaptureTransport} from '../delivery.js'
 const dirs:string[]=[]
-function fixture(){const dir=mkdtempSync(join(tmpdir(),'engineering-delivery-'));dirs.push(dir);const config=CollectorConfigSchema.parse({version:1,provider:'codex',endpoint:'http://127.0.0.1:4100/api/brain/mcp',credentialEnv:'BRAIN_CAPTURE_FIXTURE_KEY',project:'/workspace/example-project',stateRoot:dir});const spool=new CaptureSpool(config);spool.enqueue({provider:'codex',sessionId:'fictional-session',cwd:'/workspace/example-project',role:'user',content:'original',attributionQuality:'reported_unverified'});return {config,spool}}
+function fixture(options:Record<string,unknown>={}){const dir=mkdtempSync(join(tmpdir(),'engineering-delivery-'));dirs.push(dir);const config=CollectorConfigSchema.parse({version:1,provider:'codex',endpoint:'http://127.0.0.1:4100/api/brain/mcp',credentialEnv:'BRAIN_CAPTURE_FIXTURE_KEY',project:'/workspace/example-project',stateRoot:dir,...options});const spool=new CaptureSpool(config);spool.enqueue({provider:'codex',sessionId:'fictional-session',cwd:'/workspace/example-project',role:'user',content:'original',attributionQuality:'reported_unverified'});return {config,spool}}
 const configReceipt={connectionId:'fixture-connection',contractVersion:1,receiptContractVersion:1,ready:true,processingPurpose:'archive_only',profileId:'11111111-1111-4111-8111-111111111111',profileRevision:'1',permittedEventKinds:['user','assistant'],audience:[{kind:'department',id:'fixture',label:'Engineering'}],limits:{maxEventBytes:262144,maxExportEvents:100},localEmitterObserved:false}
 const archiveReceipt={contractVersion:1,processingPurpose:'archive_only',outcome:'archived',receiptStatus:'completed',deliveryStatus:'archived',indexStatus:'ready',archiveId:'22222222-2222-4222-8222-222222222222',fileId:'22222222-2222-4222-8222-222222222222'}
 const transport=(configuration:unknown=configReceipt,receipt:unknown=archiveReceipt):CaptureTransport=>({configuration:async()=>configuration,deliver:vi.fn(async()=>receipt),close:async()=>{}})
@@ -34,4 +34,21 @@ describe('[COMP:engineering-capture/collector] typed delivery and replay',()=>{
  it('EH12 permanent HTTP authentication denial suspends without logging provider text',async()=>{
   const f=fixture();expect(await flushCapture(f.config,f.spool,async()=>{throw Object.assign(new Error('secret provider text'),{code:401})})).toMatchObject({suspended:true});expect(JSON.stringify(f.spool.status())).not.toContain('secret provider text');f.spool.close()
  })
+ it('EH07 held receipts suspend replay and retain the original for configuration review',async()=>{
+  const f=fixture();expect(await flushCapture(f.config,f.spool,async()=>transport(configReceipt,{...archiveReceipt,outcome:'duplicate',receiptStatus:'queued',deliveryStatus:'held',indexStatus:'withheld'}))).toMatchObject({suspended:true,failureCode:'capture_configuration_review_required'});expect(f.spool.status()).toMatchObject({counts:{failed:1}});f.spool.resume();expect(f.spool.next()?.payload.content).toBe('original');f.spool.close()
+ })
+
+ it('EH06/EH12 changed credential/configuration suspends before replay until explicitly accepted',async()=>{
+  const f=fixture(),id=f.spool.next()!.id
+  await flushCapture(f.config,f.spool,async()=>transport(configReceipt,{...archiveReceipt,outcome:'duplicate',receiptStatus:'queued',deliveryStatus:'pending',indexStatus:'pending'}))
+  f.spool.fail(id,'fixture_retry',true);f.spool.resume()
+  const changed=transport({...configReceipt,connectionId:'another-connection'})
+  expect(await flushCapture(f.config,f.spool,async()=>changed)).toMatchObject({suspended:true,failureCode:'capture_configuration_changed'});expect(changed.deliver).not.toHaveBeenCalled()
+  f.spool.acceptConfiguration();f.spool.resume();expect(f.spool.next()?.id).toBe(id);expect(await flushCapture(f.config,f.spool,async()=>changed)).toMatchObject({delivered:1});f.spool.close()
+ })
+ it('EH12 retry exhaustion is visible suspension with original identity retained',async()=>{
+  const f=fixture({maxRetries:1}),id=f.spool.next()!.id
+  expect(await flushCapture(f.config,f.spool,async()=>{throw new Error('offline')})).toMatchObject({suspended:true,failureCode:'capture_transport_unavailable'});expect(f.spool.status()).toMatchObject({counts:{failed:1}});f.spool.resume();expect(f.spool.next()?.id).toBe(id);f.spool.close()
+ })
+
 })

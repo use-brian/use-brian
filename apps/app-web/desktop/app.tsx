@@ -98,6 +98,7 @@ const StudioChannelsPage = lazy(() => import("@/app/w/[workspaceId]/studio/chann
 const ConnectorsPage = lazy(() => import("@/app/w/[workspaceId]/studio/connectors/page"));
 const StudioIngestRulesPage = lazy(() => import("@/app/w/[workspaceId]/studio/ingest-rules/page"));
 const StudioKnowledgePage = lazy(() => import("@/app/w/[workspaceId]/studio/knowledge/page"));
+const EngineeringHistoryPage = lazy(() => import("@/app/w/[workspaceId]/studio/programmatic-access/history/page"));
 const ProgrammaticAccessPage = lazy(() => import("@/app/w/[workspaceId]/studio/programmatic-access/page"));
 const StudioBrandPage = lazy(() => import("@/app/w/[workspaceId]/studio/brand/page"));
 const StudioMiniAppsPage = lazy(() => import("@/app/w/[workspaceId]/studio/mini-apps/page"));
@@ -293,6 +294,7 @@ export function App() {
                 <Route path="ingest-rules" element={<StudioIngestRulesPage />} />
                 <Route path="knowledge" element={<StudioKnowledgePage />} />
                 <Route path="programmatic-access" element={<ProgrammaticAccessPage />} />
+                <Route path="programmatic-access/history" element={<EngineeringHistoryPage />} />
                 <Route path="brand" element={<StudioBrandPage />} />
                 <Route path="mini-apps" element={<StudioMiniAppsPage />} />
                 <Route

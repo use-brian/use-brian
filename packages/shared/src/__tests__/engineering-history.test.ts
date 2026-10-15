@@ -7,6 +7,7 @@ describe('[COMP:shared/engineering-history] archive wire protocol',()=>{
   expect(EngineeringCaptureReceiptSchema.safeParse(receipt).success).toBe(true)
   expect(EngineeringCaptureReceiptSchema.safeParse({...receipt,contractVersion:2}).success).toBe(false)
   expect(EngineeringCaptureReceiptSchema.safeParse({...receipt,processingPurpose:'extract'}).success).toBe(false)
+  expect(EngineeringCaptureReceiptSchema.safeParse({...receipt,deliveryStatus:'archived',indexStatus:'ready'}).success).toBe(false)
  })
  it('keeps local emitter observation separate from server configuration',()=>{
   const config={connectionId:'fixture-connection',contractVersion:1,receiptContractVersion:1,processingPurpose:null,ready:false,permittedEventKinds:[],audience:[],limits:{maxEventBytes:1,maxExportEvents:1},localEmitterObserved:false}

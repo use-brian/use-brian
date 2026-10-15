@@ -1471,7 +1471,9 @@ export function buildBrainTools(opts: BuildOpts): BrainTool[] {
       'Set `captureMode: "routed"` for message-level capture governed by the ' +
       'connection\'s assistant capture profile. Routed calls require a stable ' +
       '`eventId`; a scheduled rule durably queues the event without running an ' +
-      'extraction model, then one pooled window is extracted when it flushes.',
+      'extraction model. Extraction profiles process a pooled window when it flushes. ' +
+      'Archive-only profiles preserve individual original events in native Files without operational enrichment; ' +
+      'discover getCaptureConfiguration and use structured archive receipts to verify readiness and delivery.',
     inputSchema: {
       content: z
         .string()
@@ -1947,7 +1949,7 @@ export function buildBrainTools(opts: BuildOpts): BrainTool[] {
 
   const historyTools:BrainTool[]=[]
   if(opts.captureConfiguration)historyTools.push({name:'getCaptureConfiguration',description:'Read this authenticated connection’s effective capture purpose, readiness, admitted audience and limits. Does not observe the local emitter.',inputSchema:{},
-    async handler(){try{if(opts.credentialCurrent&&!await opts.credentialCurrent())throw new EngineeringHistoryError('capture_target_unavailable');const config=await opts.captureConfiguration!();return {...text(JSON.stringify(config)),structuredContent:config}}catch{return {...text('Capture configuration unavailable.',true),structuredContent:{contractVersion:1,failureCode:'capture_target_unavailable'}}}}})
+    async handler(){try{if(opts.credentialCurrent&&!await opts.credentialCurrent())throw new EngineeringHistoryError('capture_target_unavailable');const config=await opts.captureConfiguration!();if(opts.credentialCurrent&&!await opts.credentialCurrent())throw new EngineeringHistoryError('capture_target_unavailable');return {...text(JSON.stringify(config)),structuredContent:config}}catch{return {...text('Capture configuration unavailable.',true),structuredContent:{contractVersion:1,failureCode:'capture_target_unavailable'}}}}})
   if(opts.engineeringHistory)historyTools.push({name:'engineeringHistory',description:'Explicit admitted engineering archive list/search/read/JSONL export. Originals and reported results are unverified. Write credentials may annotate, exclude or delete with expected versions and idempotency.',
     inputSchema:{...EngineeringHistoryCommandSchema.shape,action:opts.scope==='read'?z.enum(['list','search','read','export']):EngineeringHistoryCommandSchema.shape.action},
     async handler(args){try{if(opts.credentialCurrent&&!await opts.credentialCurrent())throw new EngineeringHistoryError('history_not_available',404);const ctx=await resolveCtx();if('error' in ctx)throw new EngineeringHistoryError('history_not_available',404)

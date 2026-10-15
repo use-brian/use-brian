@@ -1,5 +1,5 @@
 import {loadDepartmentSnapshot,resolveDepartmentReadGrant} from '../context-scope/department-resolver.js'
-import {write as referenceWrite} from '../context-scope/reference-predicate.js'
+import {write as referenceWrite,read as referenceRead} from '../context-scope/reference-predicate.js'
 import {runWithAgentAccess} from '../db/agent-access-context.js'
 import {assertExecutionResourceScope} from '../db/access-predicate.js'
 import {applyRLSGucs,getAppPool,rollbackAndRelease} from '../db/client.js'
@@ -54,8 +54,13 @@ export async function preflightArchiveScope(client:PoolClient,s:Pick<ArchiveSnap
   const query=<R>(sql:string,values:unknown[])=>client.query(sql,values) as unknown as Promise<{rows:R[]}>
   const loaded=await loadDepartmentSnapshot(query,input)
   access={...access,departmentRead:resolveDepartmentReadGrant(loaded.snapshot,loaded.principal,input,new Date())}
-  const admitted=referenceWrite(loaded.snapshot,{principal:loaded.principal,assistant:{kind:'assistant',id:s.assistantId},credential:{issuerUserId:s.actingUserId,cap:s.sensitivity,binding:null,scope:'read_write'}},{requestedTier:s.sensitivity,explicitGeneral:true,sources:[{id:'archive-source',workspaceId:s.workspaceId,tier:s.sensitivity,departmentIds:s.compartments.filter(k=>k.startsWith('team:')).map(k=>k.slice(5)),projectScopeIds:s.compartments.filter(k=>k.startsWith('project:')).map(k=>k.slice(8)),userId:null}]},{workspaceId:s.workspaceId,department:null,now:new Date()})
-  if(!admitted.allowed)throw new EngineeringHistoryError('capture_target_unavailable')
+  const reader={principal:loaded.principal,assistant:{kind:'assistant' as const,id:s.assistantId},credential:{issuerUserId:s.actingUserId,cap:s.sensitivity,binding:null,scope:'read_write' as const}}
+  const source={id:'archive-source',workspaceId:s.workspaceId,tier:s.sensitivity,userId:null,
+   departmentIds:s.compartments.filter(k=>k.startsWith('team:')).map(k=>k.slice(5)),
+   projectScopeIds:s.compartments.filter(k=>k.startsWith('project:')).map(k=>k.slice(8))}
+  const context={workspaceId:s.workspaceId,department:null,now:new Date()}
+  const admitted=referenceWrite(loaded.snapshot,reader,{requestedTier:s.sensitivity,explicitGeneral:true,sources:[source]},context)
+  if(!referenceRead(loaded.snapshot,reader,source,context)||!admitted.allowed)throw new EngineeringHistoryError('capture_target_unavailable')
  }
  assertExecutionResourceScope(scope,'mutation',access)
  const id='00000000-0000-0000-0000-000000000001'

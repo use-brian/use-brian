@@ -15,12 +15,13 @@ export async function archiveReceipt(auth: Pick<BrainAuth,'workspaceId'|'authKin
  const client=await getAppPool().connect()
  try {
   await client.query('BEGIN');await applyRLSGucs(client,auth.actingUserId)
-  const r=(await client.query(`SELECT r.*,e.delivery_status,e.file_id,b.fires_at FROM programmatic_capture_receipts r
+  const r=(await client.query(`SELECT r.*,e.delivery_status,e.file_id,b.fires_at,b.purpose_held FROM programmatic_capture_receipts r
    LEFT JOIN programmatic_archive_events e ON e.id=r.archive_id LEFT JOIN pending_ingest_batches b ON b.id=r.batch_id WHERE r.workspace_id=$1 AND r.principal_kind=$2 AND r.principal_id=$3 AND r.event_id=$4`,
    [auth.workspaceId,auth.authKind,auth.keyId,eventId])).rows[0]
   if(!r)return null
   if(r.processing_purpose!=='archive_only'||digest&&r.payload_digest!==digest)throw new EngineeringHistoryError('capture_event_conflict')
-  const status=r.archive_delivery_status??r.delivery_status??(r.status==='completed'?'deleted':r.status==='dropped'?'dropped':'pending')
+  const rawStatus=r.purpose_held&&r.status==='queued'?'held':r.archive_delivery_status??r.delivery_status??(r.status==='completed'?'deleted':r.status==='dropped'?'dropped':'pending')
+  const status=rawStatus==='archived'&&!r.file_id?'excluded':rawStatus
   return {contractVersion:1,processingPurpose:'archive_only',outcome:'duplicate',receiptStatus:r.status,archiveId:r.archive_id??undefined,
    fileId:r.file_id??undefined,...(r.fires_at?{firesAt:r.fires_at}:{}),deliveryStatus:status,indexStatus:status==='archived'?'ready':status==='pending'?'pending':'withheld'}
  }finally {await rollbackAndRelease(client)}
@@ -90,4 +91,27 @@ export async function recordArchiveDrop(auth:BrainAuth,eventId:string,input:Para
  const receipt=await archiveReceipt(auth,eventId,payloadDigest)
  if(!receipt)throw new EngineeringHistoryError('archive_receipt_conflict')
  return {...receipt,outcome:'dropped',profileId}
+}
+
+/** Explicit issuer-owned erasure of queued originals, never an admin content reader. */
+export async function discardOwnPendingArchives(workspaceId:string,actorId:string,idempotencyKey:string){
+ const client=await getAppPool().connect()
+ try{
+  await client.query('BEGIN');await applyRLSGucs(client,actorId)
+  await client.query('SELECT id FROM workspaces WHERE id=$1 FOR UPDATE',[workspaceId])
+  if(!(await client.query('SELECT 1 FROM workspace_members WHERE workspace_id=$1 AND user_id=$2',[workspaceId,actorId])).rowCount)throw new EngineeringHistoryError('capture_target_unavailable',404)
+  const requestDigest=createHash('sha256').update(JSON.stringify({workspaceId,actorId,action:'pending_discard'})).digest('hex'),principalRef=`user:${actorId}`
+  const prior=(await client.query('SELECT request_digest,result FROM engineering_history_commands WHERE workspace_id=$1 AND principal_ref=$2 AND idempotency_key=$3',[workspaceId,principalRef,idempotencyKey])).rows[0]
+  if(prior){if(prior.request_digest!==requestDigest)throw new EngineeringHistoryError('history_command_conflict');await client.query('COMMIT');return prior.result as {status:'discarded'}}
+  const batches=(await client.query(`SELECT b.id FROM pending_ingest_batches b JOIN programmatic_capture_receipts r ON r.batch_id=b.id
+   WHERE b.workspace_id=$1 AND b.processing_purpose='archive_only' AND b.processed_at IS NULL
+    AND r.archive_actor_id=$2 AND r.processing_purpose='archive_only' AND r.status='queued' FOR UPDATE OF b,r`,[workspaceId,actorId])).rows.map(r=>r.id)
+  await client.query(`UPDATE programmatic_capture_receipts SET status='dropped',archive_delivery_status='dropped',updated_at=now(),error=NULL
+   WHERE workspace_id=$1 AND archive_actor_id=$2 AND processing_purpose='archive_only' AND status='queued' AND batch_id=ANY($3::uuid[])`,[workspaceId,actorId,batches])
+  await client.query(`UPDATE pending_ingest_batches SET events=jsonb_build_array((events->0)-'content'),processed_at=now(),purpose_held=true,archive_claim_until=NULL,archive_claim_token=NULL
+   WHERE workspace_id=$1 AND processing_purpose='archive_only' AND id=ANY($2::uuid[])`,[workspaceId,batches])
+  await client.query(`INSERT INTO engineering_history_commands(workspace_id,actor_id,principal_ref,idempotency_key,event_id,command_kind,request_digest,result)
+   VALUES($1,$2,$3,$4,NULL,'pending_discard',$5,'{"status":"discarded"}'::jsonb)`,[workspaceId,actorId,principalRef,idempotencyKey,requestDigest])
+  await client.query('COMMIT');return {status:'discarded' as const}
+ }finally{await rollbackAndRelease(client)}
 }

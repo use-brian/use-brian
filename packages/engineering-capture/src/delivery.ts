@@ -42,6 +42,7 @@ export async function flushCapture(config:CollectorConfig,spool:CaptureSpool,con
    const receipt=EngineeringCaptureReceiptSchema.safeParse(await transport.deliver(event.payload))
    if(!receipt.success)throw new CaptureLocalError('capture_contract_unavailable')
    if(receipt.data.deliveryStatus==='archived'&&(receipt.data.indexStatus!=='ready'||!receipt.data.fileId||!receipt.data.archiveId))throw new CaptureLocalError('capture_receipt_incomplete')
+   if(receipt.data.deliveryStatus==='held')throw new CaptureLocalError('capture_configuration_review_required')
    spool.accept(event.id,receipt.data)
    if(receipt.data.deliveryStatus==='archived')delivered++
    else if(receipt.data.deliveryStatus==='pending')break
@@ -54,6 +55,6 @@ export async function flushCapture(config:CollectorConfig,spool:CaptureSpool,con
   const permanent=error instanceof CaptureLocalError&&!error.retryable||status===401||status===403
   if(event)spool.fail(event.id,code,permanent)
   else spool.updateState({lastFailure:code,...(permanent?{suspended:true}:{})})
-  return {leased:true,delivered,failureCode:code,suspended:permanent}
+  return {leased:true,delivered,failureCode:code,suspended:Boolean(spool.status().suspended)}
  }finally{await transport?.close().catch(()=>{});if(!leaseToken)spool.releaseLease(token)}
 }

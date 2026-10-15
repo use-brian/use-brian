@@ -1,7 +1,9 @@
 "use client";
 /** Native admin preset, without a second routing registry. [COMP:app-web/engineering-history] */
-import {useState} from "react";
+import {useRef,useState} from "react";
 import {useT} from "@/lib/i18n/client";
+import {confirmDialog} from "@/components/ui/confirm-dialog";
+import {discardPendingEngineeringHistory} from "@/lib/api/engineering-history";
 import {Button} from "@/components/ui/button";
 import {ContextScopePicker} from "@/components/context/context-scope-picker";
 import {Select,SelectContent,SelectItem,SelectTrigger,SelectValue} from "@/components/ui/select";
@@ -35,4 +37,13 @@ export function CaptureSetup(){const t=useT().engineeringHistory;const [provider
  {project.startsWith("/")&&/^[A-Z][A-Z0-9_]*$/.test(env)&&<div><p className="text-sm">{t.inspectSetup}</p><pre className="mt-2 whitespace-pre-wrap break-all rounded-lg bg-muted p-3 text-xs">{`brian-capture setup --provider ${provider} --endpoint ${quote(BRAIN_MCP_URL)} --credential-env ${env} --project ${quote(project)}`}</pre></div>}
  <p className="text-sm font-medium">{t.localHealth}</p><p className="text-sm text-muted-foreground">{t.localHealthHint}</p><p className="text-sm font-medium">{t.coverage}</p><p className="text-sm text-muted-foreground">{t.coverageHint}</p>
  </div></details>
+}
+
+/** A content-free self-recovery operation, separate from admin configuration. */
+export function PendingCaptureRecovery({workspaceId}:{workspaceId:string}){
+ const t=useT().engineeringHistory,[busy,setBusy]=useState(false),[state,setState]=useState<"done"|"error"|null>(null),nonce=useRef<string|null>(null);
+ async function discard(){if(!await confirmDialog({title:t.discardPending,description:t.discardPendingConfirm,confirmLabel:t.discardPending,cancelLabel:t.cancel,variant:"destructive"}))return;
+  setBusy(true);setState(null);nonce.current??=crypto.randomUUID();try{await discardPendingEngineeringHistory(workspaceId,nonce.current);nonce.current=null;invalidateSurfaceCache(`engineering-history:${workspaceId}`);setState("done")}catch{setState("error")}finally{setBusy(false)}
+ }
+ return <details className="rounded-xl border border-border bg-card p-4"><summary className="min-h-8 max-sm:min-h-11 cursor-pointer font-medium">{t.pendingRecovery}</summary><p className="mt-2 text-sm text-muted-foreground">{t.pendingReview}</p><Button className="mt-3 max-sm:min-h-11" variant="destructive" disabled={busy} onClick={()=>void discard()}>{t.discardPending}</Button>{state&&<p role="status" className="mt-2 text-sm">{state==="done"?t.pendingDiscarded:t.unavailable}</p>}</details>
 }

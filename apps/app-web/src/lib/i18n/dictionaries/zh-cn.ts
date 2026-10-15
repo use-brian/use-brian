@@ -12880,6 +12880,13 @@ export const zhCN: Dictionary = {
     },
   },
   engineeringHistory: {
+    pendingRecovery: "待处理采集恢复",
+    pendingReview: "移除采集配置前，必须完成待处理工程事件的发送，或由来源本人明确丢弃。用途或范围变更会保留 WIP 供检查。请另外检查来源电脑的数据。",
+    discardPending: "丢弃我的待处理工程事件",
+    discardPendingConfirm: "永久丢弃此工作区内由您已验证账户拥有的待处理工程文字。已完成的原始数据在工程历史中管理。来源电脑的本地数据需另行检查。",
+    pendingDiscarded: "您的待处理采集丢弃请求已完成。",
+    humanAnnotation: "人工注释",
+    programmaticAnnotation: "程序注释",
     advancedFilters: "来源和时间筛选",
     providerCodex: "Codex",
     providerClaude: "Claude Code",

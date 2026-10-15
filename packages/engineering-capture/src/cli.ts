@@ -30,7 +30,7 @@ export async function runCaptureCli(args:string[]){
    if(!configPath)throw new CaptureLocalError('capture_configuration_unavailable')
    const config=await configuration(configPath);if(config.project)config.project=await realpath(config.project)
    const input=await stdin(),observation=(config.provider==='codex'?projectCodexHook:projectClaudeCodeHook)(input)
-   const x=input as Record<string,unknown>,sessionId=observation.sessionId??''
+   const x=input as Record<string,unknown>,sessionId=observation.sessionId??(typeof x.session_id==='string'&&x.session_id.length<=200?x.session_id:'')
    if(typeof x.cwd!=='string'||!sessionId||!scopeMatches(config,await realpath(x.cwd),sessionId))return
    spool=new CaptureSpool(config);spool.diagnostic(observation)
    if(observation.event)spool.enqueue(observation.event)
@@ -47,7 +47,7 @@ export async function runCaptureCli(args:string[]){
   if(command==='worker'){
    const leaseToken=randomUUID();if(!spool.acquireLease(leaseToken))return
    const idleExitMs=Number(option(args,'idle-exit-ms')??3600000);let lastActivity=Date.now()
-   while(Date.now()-lastActivity<idleExitMs){const result=await flushCapture(config,spool,undefined,100,leaseToken);if(!result.leased||result.suspended)break;if(result.delivered)lastActivity=Date.now();if(args.includes('--once'))break;await new Promise(r=>setTimeout(r,1000))}
+   while(Date.now()-lastActivity<idleExitMs||Number(spool.status().counts.pending??0)>0){const result=await flushCapture(config,spool,undefined,100,leaseToken);if(!result.leased||result.suspended)break;if(result.delivered)lastActivity=Date.now();if(args.includes('--once'))break;await new Promise(r=>setTimeout(r,1000))}
    spool.releaseLease(leaseToken);return
   }
   throw new CaptureLocalError('capture_command_unknown')

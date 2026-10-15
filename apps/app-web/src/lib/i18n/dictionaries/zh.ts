@@ -12719,6 +12719,13 @@ export const zh: Dictionary = {
     },
   },
   engineeringHistory: {
+    pendingRecovery: "待處理擷取復原",
+    pendingReview: "移除擷取設定前，必須完成待處理工程事件的傳送，或由來源本人明確捨棄。用途或範圍變更會保留 WIP 供檢查。請另外檢查來源電腦的資料。",
+    discardPending: "捨棄我的待處理工程事件",
+    discardPendingConfirm: "永久捨棄此工作區內由您已驗證帳戶擁有的待處理工程文字。已完成的原始資料在工程歷史中管理。來源電腦的本機資料需另行檢查。",
+    pendingDiscarded: "您的待處理擷取捨棄請求已完成。",
+    humanAnnotation: "人類註解",
+    programmaticAnnotation: "程式註解",
     advancedFilters: "來源和時間篩選",
     providerCodex: "Codex",
     providerClaude: "Claude Code",

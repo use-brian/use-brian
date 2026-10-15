@@ -2,9 +2,10 @@
 import {act} from "react";
 import {createRoot,type Root} from "react-dom/client";
 import {afterEach,beforeEach,describe,expect,it,vi} from "vitest";
-const api=vi.hoisted(()=>({listEngineeringHistory:vi.fn(),readEngineeringHistory:vi.fn(),correctEngineeringHistory:vi.fn(),exportEngineeringHistory:vi.fn()}));
+const api=vi.hoisted(()=>({listEngineeringHistory:vi.fn(),readEngineeringHistory:vi.fn(),correctEngineeringHistory:vi.fn(),exportEngineeringHistory:vi.fn(),discardPendingEngineeringHistory:vi.fn()}));
 vi.mock("@/lib/api/engineering-history",()=>api);
 vi.mock("@/components/ui/confirm-dialog",()=>({confirmDialog:vi.fn(async()=>true)}));
+import {PendingCaptureRecovery} from "../capture-preset";
 import {HistoryReader} from "../history-reader";
 import {I18nProvider} from "@/lib/i18n/client";
 import {en} from "@/lib/i18n/dictionaries/en";
@@ -38,4 +39,11 @@ describe("[COMP:app-web/engineering-history] localized admitted reader",()=>{
   const input=host.querySelector<HTMLInputElement>("form input")!;await act(async()=>{Object.getOwnPropertyDescriptor(HTMLInputElement.prototype,"value")!.set!.call(input,"selected");input.dispatchEvent(new Event("input",{bubbles:true}))});
   await act(async()=>{host.querySelector("form")!.dispatchEvent(new Event("submit",{bubbles:true,cancelable:true}))});await settle();expect(api.listEngineeringHistory).toHaveBeenLastCalledWith("fixture-workspace",{query:"selected",limit:50});expect(host.textContent).not.toContain(en.engineeringHistory.create)
  });
+ it("EH10/EH14 issuer recovery reuses command identity after an uncertain response",async()=>{
+  api.discardPendingEngineeringHistory.mockRejectedValueOnce(new Error("network")).mockResolvedValue({status:"discarded"});
+  await act(async()=>root.render(<I18nProvider locale="en" dict={en}><PendingCaptureRecovery workspaceId="fixture-workspace"/></I18nProvider>));await settle();
+  await button(en.engineeringHistory.discardPending);await button(en.engineeringHistory.discardPending);
+  expect(api.discardPendingEngineeringHistory.mock.calls).toHaveLength(2);expect(api.discardPendingEngineeringHistory.mock.calls[0]).toEqual(api.discardPendingEngineeringHistory.mock.calls[1]);expect(host.textContent).toContain(en.engineeringHistory.pendingDiscarded)
+ });
+
 });

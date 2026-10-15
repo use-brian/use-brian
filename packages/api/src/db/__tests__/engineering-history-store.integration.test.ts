@@ -1,3 +1,6 @@
+import {archiveReceipt,discardOwnPendingArchives} from '../engineering-history-store.js'
+import {Client} from '@modelcontextprotocol/sdk/client/index.js'
+import {StreamableHTTPClientTransport} from '@modelcontextprotocol/sdk/client/streamableHttp.js'
 import {z} from 'zod'
 import {buildTool,workspaceFilesCtxFor} from '@use-brian/core'
 import {brainMcpRoutes} from '../../brain-mcp/server.js'
@@ -10,6 +13,7 @@ import {requireAuth} from '../../auth/middleware.js'
 import {createTokens} from '../../auth/jwt.js'
 import {createWorkspaceStore} from '../workspace-store.js'
 import {engineeringHistoryRoutes} from '../../routes/engineering-history.js'
+import {programmaticCaptureRoutes} from '../../routes/programmatic-capture.js'
 import {createEngineeringHistoryService} from '../../engineering-history/service.js'
 import {createCaptureConfigurationReader} from '../../engineering-history/configuration.js'
 import { randomUUID } from 'node:crypto'
@@ -49,14 +53,14 @@ async function fixture(ready=false){
  const auth:BrainAuth={workspaceId,keyId,scope:'read_write',maxClearance:'internal',authKind:'api_key',storeScope:'none',agentScope:'none',actingUserId:userId,captureAssistantId:assistantId,captureProfileId:profile.id}
  const ctx:FilesContext={workspaceId,userId,assistantId,assistantKind:'primary',clearance:'confidential'}
  const blobs=new Map<string,Buffer>(),audit=vi.fn(),ingest=vi.fn()
- let io=async()=>{},fail=false,lostAck=false
+ let io=async()=>{},fail=false,lostAck=false,quota=1024*1024
  const fileStore=createDbWorkspaceFilesStore(),nativeCreate=fileStore.create.bind(fileStore)
  fileStore.create=async(...args)=>{const file=await nativeCreate(...args);if(lostAck){lostAck=false;throw new Error('lost commit acknowledgement')}return file}
- const api=createFilesApi({store:fileStore,gcs:{writeBlob:async(k:string,b:Buffer)=>{if(fail)throw new Error('storage unavailable');blobs.set(k,b);await io()},readBlob:async(k:string)=>blobs.has(k)?{bytes:blobs.get(k)!}:null,deleteBlob:async(k:string)=>{blobs.delete(k)}} as never,bucket:'fixture',auditStore:{append:audit} as never})
+ const api=createFilesApi({store:fileStore,gcs:{writeBlob:async(k:string,b:Buffer)=>{if(fail)throw new Error('storage unavailable');blobs.set(k,b);await io()},readBlob:async(k:string)=>blobs.has(k)?{bytes:blobs.get(k)!}:null,deleteBlob:async(k:string)=>{blobs.delete(k)}} as never,bucket:'fixture',storageLimitBytesFor:async()=>quota,auditStore:{append:audit} as never})
  const publisher=createEngineeringArchivePublisher(api),route=createProgrammaticCaptureRouter({store,ingest,archive:publisher.capture})
  const send=(eventId=randomUUID(),content='  original\n工程 ☃\n\t')=>route(auth,{eventId,content,sessionId:'fictional-session',role:'user',metadata:{provider:'codex'}})
  return {workspaceId,userId,memberId,keyId,plaintext:issued.plaintext,profile,rule:rule!,auth,ctx,store,api,blobs,ingest,publisher,route,send,team,
-  uncertainCommit(){lostAck=true},during(fn:()=>Promise<void>){io=fn},failStorage(){fail=true},workingStorage(){fail=false}}
+  limitStorage(bytes:number){quota=bytes},uncertainCommit(){lostAck=true},during(fn:()=>Promise<void>){io=fn},failStorage(){fail=true},workingStorage(){fail=false}}
 }
 describe('[COMP:api/engineering-history] native publication and identity',()=>{
  it('EH01/EH02/EH05 publishes exact original once with stable native receipt and no extraction',async()=>{
@@ -109,6 +113,21 @@ describe('[COMP:api/engineering-history] native publication and identity',()=>{
   await f.publisher.drain((await pool.query('SELECT id FROM pending_ingest_batches WHERE workspace_id=$1',[f.workspaceId])).rows[0].id)
   const result=await f.send(id);expect(result.deliveryStatus).toBe('archived');expect(f.blobs.size).toBe(1);expect(f.ingest).not.toHaveBeenCalled()
  })
+ it('EH08 quota refusal stores no blob and preserves pending original for supported recovery',async()=>{
+  const f=await fixture(),id=randomUUID();f.limitStorage(1);await expect(f.send(id)).rejects.toThrow('archive_quota_exceeded');expect(f.blobs.size).toBe(0)
+  expect((await pool.query('SELECT events FROM pending_ingest_batches WHERE workspace_id=$1',[f.workspaceId])).rows[0].events[0].content).toContain('工程')
+  f.limitStorage(1024*1024);await f.publisher.drain((await pool.query('SELECT id FROM pending_ingest_batches WHERE workspace_id=$1',[f.workspaceId])).rows[0].id);expect((await f.send(id)).deliveryStatus).toBe('archived');expect(f.ingest).not.toHaveBeenCalled()
+ })
+ it('EH01/EH04 disabled/unconfigured and lower-clearance captures fail without fallback or publication',async()=>{
+  const f=await fixture(),configuration=createCaptureConfigurationReader(f.store,()=>true)
+  await f.store.setAssistantProfile({actingUserId:f.userId,workspaceId:f.workspaceId,assistantId:f.auth.captureAssistantId!,profileId:f.profile.id})
+  await expect(f.route({...f.auth,captureAssistantId:null},{eventId:randomUUID(),content:'Not configured',role:'user'})).rejects.toThrow()
+  await f.store.updateRule({actingUserId:f.userId,workspaceId:f.workspaceId,profileId:f.profile.id,ruleId:f.rule.id,rule:{filterType:'always',routingMode:'realtime',episodeSensitivity:'internal',scopeBindingMode:'explicit',compartments:[f.team.compartmentKey!]}})
+  await pool.query("UPDATE brain_keys SET max_clearance='public' WHERE id=$1",[f.keyId]);await expect(f.send()).rejects.toThrow();expect(await configuration({...f.auth,maxClearance:'public'})).toMatchObject({ready:false})
+  await pool.query("UPDATE brain_keys SET max_clearance='internal' WHERE id=$1",[f.keyId]);await pool.query("UPDATE department_edges SET clearance='public' WHERE department_id=$1 AND assistant_id=$2",[f.team.id,f.auth.captureAssistantId]);await expect(f.send()).rejects.toThrow()
+  await f.store.updateProfile({actingUserId:f.userId,workspaceId:f.workspaceId,profileId:f.profile.id,name:f.profile.name,enabled:false,partitionBy:'session'})
+  await expect(f.send()).rejects.toThrow();expect(await configuration(f.auth)).toMatchObject({ready:false});expect((await pool.query('SELECT id FROM workspace_files WHERE workspace_id=$1',[f.workspaceId])).rows).toEqual([]);expect(f.ingest).not.toHaveBeenCalled()
+ })
  it('EH07 old extraction SQL cannot claim archives and profile edits hold pending purpose',async()=>{
   const f=await fixture()
   await f.store.updateRule({actingUserId:f.userId,workspaceId:f.workspaceId,profileId:f.profile.id,ruleId:f.rule.id,
@@ -120,6 +139,21 @@ describe('[COMP:api/engineering-history] native publication and identity',()=>{
   await f.store.updateProfile({actingUserId:f.userId,workspaceId:f.workspaceId,profileId:f.profile.id,name:'Extraction',partitionBy:'session',enabled:true,processingMode:'extract'})
   expect((await pool.query('SELECT processing_purpose,purpose_held,scope_held FROM pending_ingest_batches WHERE workspace_id=$1',[f.workspaceId])).rows[0]).toMatchObject({processing_purpose:'archive_only',purpose_held:true,scope_held:true})
   expect(await f.publisher.drain((await pool.query('SELECT id FROM pending_ingest_batches WHERE workspace_id=$1',[f.workspaceId])).rows[0].id)).toBeNull();expect(f.ingest).not.toHaveBeenCalled()
+ })
+ it.each(['profile-disabled','rule-destination-changed','source-key-revoked'] as const)('EH03/EH07 a restarted supported worker preserves queued originals after %s',async change=>{
+  const f=await fixture();await f.store.updateRule({actingUserId:f.userId,workspaceId:f.workspaceId,profileId:f.profile.id,ruleId:f.rule.id,rule:{filterType:'always',routingMode:'scheduled',routingSchedule:'0 0 * * *',scopeBindingMode:'explicit',compartments:[f.team.compartmentKey!]}})
+  const receipt=await f.send(),batch=(await pool.query('SELECT id,events FROM pending_ingest_batches WHERE workspace_id=$1',[f.workspaceId])).rows[0]
+  if(change==='profile-disabled')await f.store.updateProfile({actingUserId:f.userId,workspaceId:f.workspaceId,profileId:f.profile.id,name:'Paused capture',partitionBy:'session',enabled:false,processingMode:'archive_only'})
+  else if(change==='rule-destination-changed'){
+   const other=await createDbWorkspaceGroupStore().createTeam(f.userId,f.workspaceId,{name:'Separate engineering',key:'separate-engineering'})
+   await f.store.updateRule({actingUserId:f.userId,workspaceId:f.workspaceId,profileId:f.profile.id,ruleId:f.rule.id,rule:{filterType:'always',routingMode:'scheduled',routingSchedule:'0 0 * * *',scopeBindingMode:'explicit',compartments:[other.compartmentKey!]}})
+  }else await pool.query("UPDATE brain_keys SET status='revoked' WHERE id=$1",[f.keyId])
+  expect(await createEngineeringArchivePublisher(f.api).drain(batch.id)).toBeNull()
+  const saved=(await pool.query('SELECT processing_purpose,processed_at,events FROM pending_ingest_batches WHERE id=$1',[batch.id])).rows[0]
+  expect(saved).toMatchObject({processing_purpose:'archive_only',processed_at:null});expect(saved.events[0].content).toBe(batch.events[0].content)
+  expect((await pool.query('SELECT count(*)::int AS n FROM programmatic_archive_events WHERE id=$1',[receipt.archiveId])).rows[0].n).toBe(0)
+  for(const table of ['episodes','memories','entities','tasks','goals','brief_bindings','research_activities','research_improvements','feed_learning_outputs'])expect((await pool.query(`SELECT count(*)::int AS n FROM ${table} WHERE workspace_id=$1`,[f.workspaceId])).rows[0].n).toBe(0)
+  expect(f.blobs.size).toBe(0);expect(f.ingest).not.toHaveBeenCalled()
  })
  it('EH10 native deletion erases projection and keeps a non-content replay tombstone',async()=>{
   const f=await fixture(),event=randomUUID(),r=await f.send(event)
@@ -262,6 +296,27 @@ describe('[COMP:api/engineering-history] native publication and identity',()=>{
   expect(exported.status).toBe(200);expect(exported.headers['x-brian-export-status']).toBe('complete');expect(JSON.parse(exported.text).id).toBe(r.archiveId)
  })
 
+ it('EH04/EH10 HTTP recovery preserves queued bytes until the actual issuer confirms a strict idempotent command',async()=>{
+  const f=await fixture();await f.store.updateRule({actingUserId:f.userId,workspaceId:f.workspaceId,profileId:f.profile.id,ruleId:f.rule.id,rule:{filterType:'always',routingMode:'scheduled',routingSchedule:'0 0 * * *',scopeBindingMode:'explicit',compartments:[f.team.compartmentKey!]}})
+  const eventId=randomUUID();await f.send(eventId)
+  const secret='fictional-history-recovery-secret',app=express(),base=`/api/workspaces/${f.workspaceId}/programmatic-capture-profiles`
+  app.use(express.json());app.use(requireAuth(secret));app.use('/api/workspaces/:workspaceId/programmatic-capture-profiles',programmaticCaptureRoutes({store:f.store,workspaceStore:createWorkspaceStore()}))
+  async function tokenFor(user:string){const session=(await pool.query("INSERT INTO auth_sessions(user_id,auth_version,device_label) VALUES($1,0,'Recovery fixture') RETURNING id",[user])).rows[0].id;return createTokens(user,secret,{id:session,authVersion:0}).accessToken}
+  const owner=await tokenFor(f.userId),other=await tokenFor(f.memberId),command=randomUUID(),body={idempotencyKey:command}
+  expect((await request(app).delete(`${base}/pending-archives`).send(body)).status).toBe(401)
+  expect((await request(app).delete(`${base}/pending-archives`).auth(other,{type:'bearer'}).send(body)).status).toBe(404)
+  const blocked=await request(app).delete(`${base}/${f.profile.id}/rules/${f.rule.id}`).auth(owner,{type:'bearer'})
+  expect(blocked.status).toBe(409);expect(blocked.body.error).toBe('capture_pending_archive_review_required')
+  expect((await archiveReceipt(f.auth,eventId))?.deliveryStatus).toBe('pending')
+  expect((await request(app).delete(`${base}/pending-archives`).auth(owner,{type:'bearer'}).send({...body,actorId:f.memberId})).status).toBe(400)
+  await pool.query("UPDATE workspace_members SET role='member' WHERE workspace_id=$1 AND user_id=$2",[f.workspaceId,f.userId])
+  expect((await request(app).get(base).auth(owner,{type:'bearer'})).status).toBe(403)
+  const discarded=await request(app).delete(`${base}/pending-archives`).auth(owner,{type:'bearer'}).send(body)
+  expect(discarded.status).toBe(200);expect(discarded.body).toEqual({status:'discarded'})
+  expect((await request(app).delete(`${base}/pending-archives`).auth(owner,{type:'bearer'}).send(body)).body).toEqual(discarded.body)
+  expect((await archiveReceipt(f.auth,eventId))?.deliveryStatus).toBe('dropped');expect(f.ingest).not.toHaveBeenCalled()
+ })
+
  it.each(['codex','claude-code'] as const)('EH11 provider fixture reaches the actual MCP transport, native publisher and exact history for %s',async provider=>{
   const f=await fixture(true),history=createEngineeringHistoryService({files:f.api,cursorSecret:'fixture-cursor-secret'}),configuration=createCaptureConfigurationReader(f.store,()=>true)
   const unused=vi.fn(async()=>{throw new Error('operational tool must not run')})
@@ -285,10 +340,50 @@ describe('[COMP:api/engineering-history] native publication and identity',()=>{
    const events=(await history.list(f.ctx)).events;expect(events).toHaveLength(2)
    expect((await history.read(f.ctx,events[0]!.id)).content).toBe('  Submitted\n工程 ☃\n')
    expect((await history.read(f.ctx,events[1]!.id)).content).toBe('\nReported result.\t ')
+   const client=new Client({name:'fixture-history-reader',version:'1'})
+   try{await client.connect(new StreamableHTTPClientTransport(new URL(config.endpoint),{requestInit:{headers:{Authorization:`Bearer ${f.plaintext}`}}}))
+    const read=await client.callTool({name:'engineeringHistory',arguments:{action:'read',eventId:events[0]!.id}});expect(read.isError).not.toBe(true);expect(read.structuredContent).toMatchObject({content:'  Submitted\n工程 ☃\n'})
+    const exported=await client.callTool({name:'engineeringHistory',arguments:{action:'export'}});expect(exported.isError).not.toBe(true);expect(exported.structuredContent).toMatchObject({count:2,status:'complete'})
+   }finally{await client.close()}
    expect(f.ingest).not.toHaveBeenCalled();expect(unused).not.toHaveBeenCalled()
   }finally{spool.close();rmSync(dir,{recursive:true,force:true});await new Promise<void>((resolve,reject)=>server.close(e=>e?reject(e):resolve()))}
  })
 
+ it('EH06 equal source sessions across keys/providers retain identity without borrowing another audience',async()=>{
+  const f=await fixture(),groups=createDbWorkspaceGroupStore(),other=await groups.createTeam(f.userId,f.workspaceId,{name:'Other engineering',key:'other-engineering'})
+  await groups.setTeamAssistant(f.userId,other.id,f.auth.captureAssistantId!,true)
+  const profile=await f.store.createProfile({actingUserId:f.userId,workspaceId:f.workspaceId,name:'Other archive',processingMode:'archive_only',partitionBy:'session',enabled:true})
+  await f.store.addRule({actingUserId:f.userId,workspaceId:f.workspaceId,profileId:profile.id,rule:{filterType:'always',routingMode:'realtime',scopeBindingMode:'explicit',compartments:[other.compartmentKey!]}})
+  const issued=await withExternalKeyActor(f.userId,undefined,()=>createDbBrainKeyStore().create({workspaceId:f.workspaceId,actingUserId:f.userId,name:'Other fixture',scope:'read_write',maxClearance:'internal',captureAssistantId:f.auth.captureAssistantId,captureProfileId:profile.id}))
+  const id=randomUUID(),first=await f.send(id,'Repeated selected text'),second=await f.route({...f.auth,keyId:issued.id,captureProfileId:profile.id},{eventId:id,content:'Repeated selected text',sessionId:'fictional-session',role:'user',subjectId:'claimed-user',metadata:{provider:'claude-code',approved:true}})
+  expect(second.archiveId).not.toBe(first.archiveId)
+  await pool.query("INSERT INTO workspace_members(workspace_id,user_id,role,clearance) VALUES($1,$2,'member','internal')",[f.workspaceId,f.memberId]);await groups.addMember(f.userId,f.team.id,f.memberId)
+  const history=createEngineeringHistoryService({files:f.api,cursorSecret:'fixture-cursor-secret'}),viewer={...f.ctx,userId:f.memberId,assistantId:undefined}
+  expect((await history.list(viewer,{sessionId:'fictional-session'})).events.map(e=>e.id)).toEqual([first.archiveId]);expect((await history.list(viewer,{keyId:issued.id})).events).toEqual([])
+  expect(await history.exportPage(viewer,{keyId:issued.id})).toMatchObject({count:0,jsonl:'',status:'complete'})
+  expect(await history.read(f.ctx,second.archiveId!)).toMatchObject({claimedSubject:'claimed-user',attributionQuality:'reported_unverified',provider:'claude-code'})
+  expect(f.ingest).not.toHaveBeenCalled()
+ })
+ it('EH10 exclusion is versioned/idempotent and prevents source replay from restoring visibility',async()=>{
+  const f=await fixture(),id=randomUUID(),r=await f.send(id),history=createEngineeringHistoryService({files:f.api,cursorSecret:'fixture-cursor-secret'}),event=await history.read(f.ctx,r.archiveId!)
+  const command={action:'exclude' as const,eventId:event.id,expectedRevision:event.revision,expectedFileVersion:event.fileVersion,idempotencyKey:randomUUID()}
+  expect(await history.execute(f.ctx,command)).toMatchObject({status:'excluded'});expect(await history.execute(f.ctx,command)).toMatchObject({status:'excluded'});expect((await history.list(f.ctx)).events).toEqual([]);expect((await f.send(id)).deliveryStatus).toBe('excluded');expect((await history.exportPage(f.ctx)).count).toBe(0)
+ })
+ it('EH04 native private File and source-user revocation withhold original search/read/export',async()=>{
+  const f=await fixture(),r=await f.send(),groups=createDbWorkspaceGroupStore(),history=createEngineeringHistoryService({files:f.api,cursorSecret:'fixture-cursor-secret'})
+  await pool.query("INSERT INTO workspace_members(workspace_id,user_id,role,clearance) VALUES($1,$2,'member','internal')",[f.workspaceId,f.memberId]);await groups.addMember(f.userId,f.team.id,f.memberId)
+  const viewer={...f.ctx,userId:f.memberId,assistantId:undefined};expect((await history.list(viewer)).events).toHaveLength(1)
+  await expect(pool.query('UPDATE workspace_files SET user_id=$2 WHERE id=$1',[r.fileId,f.userId])).rejects.toThrow('archive_original_immutable')
+  // Seed a private original for reader-policy coverage under the fixture owner.
+  // The publication/lifecycle guard above stays enforced for real writers; all
+  // graded reads still execute through the actual non-superuser native service.
+  const seed=await pool.connect();try{await seed.query('BEGIN');await seed.query('ALTER TABLE workspace_files DISABLE TRIGGER engineering_file_purpose');await seed.query('UPDATE workspace_files SET user_id=$2 WHERE id=$1',[r.fileId,f.userId]);await seed.query('ALTER TABLE workspace_files ENABLE TRIGGER engineering_file_purpose');await seed.query('COMMIT')}finally{await seed.query('ROLLBACK');seed.release()}
+  expect((await history.list(viewer)).events).toEqual([]);await expect(history.read(viewer,r.archiveId!)).rejects.toThrow();expect((await history.exportPage(viewer)).count).toBe(0)
+  await pool.query('INSERT INTO department_owners(workspace_id,department_id,user_id) VALUES($1,$2,$3)',[f.workspaceId,f.team.id,f.memberId])
+  await pool.query('DELETE FROM department_owners WHERE department_id=$1 AND user_id=$2',[f.team.id,f.userId])
+  await pool.query('DELETE FROM department_edges WHERE department_id=$1 AND user_id=$2',[f.team.id,f.userId])
+  expect((await history.list(f.ctx)).events).toEqual([]);await expect(history.read(f.ctx,r.archiveId!)).rejects.toThrow();await expect(f.send()).rejects.toThrow();expect(f.blobs.size).toBe(1)
+ })
  it('EH04 capture-assistant Department revocation blocks new capture and hides original history',async()=>{
   const f=await fixture(),r=await f.send(),configuration=createCaptureConfigurationReader(f.store,()=>true)
   await pool.query('DELETE FROM department_edges WHERE department_id=$1 AND assistant_id=$2',[f.team.id,f.auth.captureAssistantId])
@@ -296,6 +391,33 @@ describe('[COMP:api/engineering-history] native publication and identity',()=>{
   await expect(f.send()).rejects.toThrow()
   expect((await f.api.readBytes(f.ctx,r.fileId!)).ok).toBe(false)
   expect(f.ingest).not.toHaveBeenCalled()
+ })
+ it('EH07/EH10 configuration cascade cannot erase WIP; actor-owned discard is isolated and idempotent',async()=>{
+  const f=await fixture();await f.store.updateRule({actingUserId:f.userId,workspaceId:f.workspaceId,profileId:f.profile.id,ruleId:f.rule.id,rule:{filterType:'always',routingMode:'scheduled',routingSchedule:'0 0 * * *',scopeBindingMode:'explicit',compartments:[f.team.compartmentKey!]}})
+  const id=randomUUID(),queued=await f.send(id),command=randomUUID()
+  await expect(f.store.deleteRule({actingUserId:f.userId,workspaceId:f.workspaceId,profileId:f.profile.id,ruleId:f.rule.id})).rejects.toThrow('capture_pending_archive_review_required')
+  expect((await pool.query('SELECT events FROM pending_ingest_batches WHERE workspace_id=$1',[f.workspaceId])).rows[0].events[0].content).toContain('工程')
+  await pool.query("INSERT INTO workspace_members(workspace_id,user_id,role,clearance) VALUES($1,$2,'member','internal')",[f.workspaceId,f.memberId])
+  expect(await discardOwnPendingArchives(f.workspaceId,f.memberId,randomUUID())).toEqual({status:'discarded'})
+  expect((await archiveReceipt(f.auth,id))?.deliveryStatus).toBe('pending')
+  expect(await discardOwnPendingArchives(f.workspaceId,f.userId,command)).toEqual({status:'discarded'})
+  expect(await f.send(id)).toMatchObject({outcome:'duplicate',deliveryStatus:'dropped',indexStatus:'withheld'})
+  expect((await pool.query('SELECT events FROM pending_ingest_batches WHERE workspace_id=$1',[f.workspaceId])).rows[0].events[0]).not.toHaveProperty('content')
+  const nextId=randomUUID();await f.send(nextId);await discardOwnPendingArchives(f.workspaceId,f.userId,command)
+  expect((await archiveReceipt(f.auth,nextId))?.deliveryStatus).toBe('pending')
+  await discardOwnPendingArchives(f.workspaceId,f.userId,randomUUID());expect(await f.store.deleteRule({actingUserId:f.userId,workspaceId:f.workspaceId,profileId:f.profile.id,ruleId:f.rule.id})).toBe(true)
+  expect(await archiveReceipt(f.auth,id)).toMatchObject({archiveId:queued.archiveId,deliveryStatus:'dropped'})
+  expect(f.blobs.size).toBe(0);expect(f.ingest).not.toHaveBeenCalled()
+ })
+ it('EH10 completed originals keep replay identity after native batch cleanup',async()=>{
+  const f=await fixture(),id=randomUUID(),r=await f.send(id)
+  expect(await f.store.deleteRule({actingUserId:f.userId,workspaceId:f.workspaceId,profileId:f.profile.id,ruleId:f.rule.id})).toBe(true)
+  expect(await archiveReceipt(f.auth,id)).toMatchObject({archiveId:r.archiveId,fileId:r.fileId,deliveryStatus:'archived'})
+  expect((await f.api.readBytes(f.ctx,r.fileId!)).ok).toBe(true)
+ })
+ it('EH08/EH10 issuer discard during blob I/O prevents canonical publication and replay resurrection',async()=>{
+  const f=await fixture(),id=randomUUID();f.during(async()=>{await discardOwnPendingArchives(f.workspaceId,f.userId,randomUUID())})
+  await expect(f.send(id)).rejects.toThrow();expect(f.blobs.size).toBe(0);expect((await f.send(id)).deliveryStatus).toBe('dropped');expect(f.ingest).not.toHaveBeenCalled()
  })
  it('EH07 enqueue sequence preserves navigation when publication completes out of order',async()=>{
   const f=await fixture(),history=createEngineeringHistoryService({files:f.api,cursorSecret:'fixture-cursor-secret'})

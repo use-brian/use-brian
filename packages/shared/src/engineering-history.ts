@@ -16,6 +16,13 @@ export const EngineeringCaptureReceiptSchema=z.object({
  deliveryStatus:z.enum(['pending','archived','excluded','deleted','dropped','held']),indexStatus:z.enum(['pending','ready','withheld']),
  profileId:z.string().uuid().optional(),profileRevision:z.string().optional(),ruleId:z.string().uuid().optional(),
  failureCode:z.string().optional(),firesAt:z.string().datetime({offset:true}).optional(),
+}).superRefine((r,ctx)=>{
+ const valid=r.deliveryStatus==='archived'?r.receiptStatus==='completed'&&r.indexStatus==='ready'&&!!r.fileId&&!!r.archiveId&&['archived','duplicate'].includes(r.outcome)
+  :r.deliveryStatus==='pending'?['queued','processing'].includes(r.receiptStatus)&&r.indexStatus==='pending'
+  :r.deliveryStatus==='held'?r.receiptStatus==='queued'&&r.indexStatus==='withheld'
+  :r.deliveryStatus==='dropped'?r.receiptStatus==='dropped'&&r.indexStatus==='withheld'
+  :r.receiptStatus==='completed'&&r.indexStatus==='withheld'&&!!r.archiveId;
+ if(!valid)ctx.addIssue({code:'custom',message:'Inconsistent engineering receipt state'})
 })
 export type EngineeringCaptureReceipt=z.infer<typeof EngineeringCaptureReceiptSchema>
 export const EngineeringHistoryQuerySchema=z.object({

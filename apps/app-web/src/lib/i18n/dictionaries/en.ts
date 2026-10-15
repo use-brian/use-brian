@@ -13026,6 +13026,13 @@ export const en = {
     },
   },
   engineeringHistory: {
+    pendingRecovery: "Pending capture recovery",
+    pendingReview: "Queued engineering events must be delivered or explicitly discarded by their source issuer before removing their capture configuration. A purpose or scope change holds WIP for review. Review laptop WIP separately.",
+    discardPending: "Discard my queued engineering events",
+    discardPendingConfirm: "Permanently discard queued engineering text owned by your authenticated account in this workspace. Completed originals are managed in Engineering history. Review local source-machine WIP separately.",
+    pendingDiscarded: "Your pending-capture discard request completed.",
+    humanAnnotation: "Human annotation",
+    programmaticAnnotation: "Programmatic annotation",
     advancedFilters: "Source and time filters",
     providerCodex: "Codex",
     providerClaude: "Claude Code",

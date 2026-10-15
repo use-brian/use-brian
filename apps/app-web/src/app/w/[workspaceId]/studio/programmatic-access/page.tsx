@@ -27,7 +27,7 @@
  */
 
 import Link from "next/link";
-import {CapturePreset,CaptureSetup} from "@/components/engineering-history/capture-preset";
+import {CapturePreset,CaptureSetup,PendingCaptureRecovery} from "@/components/engineering-history/capture-preset";
 import {invalidateSurfaceCache} from "@/lib/surface-cache";
 import { useCallback, useState } from "react";
 import {
@@ -229,6 +229,7 @@ export default function ProgrammaticAccessPage() {
       {activeId&&<Link className="inline-flex min-h-8 max-sm:min-h-11 items-center self-start text-sm underline" href={`/w/${activeId}/studio/programmatic-access/history`}>{t.engineeringHistory.open}</Link>}
       {!adminOnly&&!cold&&activeId&&<CapturePreset workspaceId={activeId} teams={teams} projects={projects} onCreated={async()=>{setCaptureProfiles(await listCaptureProfiles(activeId))}} onError={setError}/>}
       <CaptureSetup/>
+      {activeId&&<PendingCaptureRecovery key={activeId} workspaceId={activeId}/>}
 
 
       {adminOnly && (
@@ -777,7 +778,7 @@ function CaptureProfilesSection({
       await refresh();
       invalidateSurfaceCache(`engineering-history:${workspaceId}`);
     } catch (err) {
-      onError((err as Error).message);
+      onError((err as Error).message==="capture_pending_archive_review_required"?t.engineeringHistory.pendingReview:(err as Error).message);
     } finally {
       setSaving(false);
     }
