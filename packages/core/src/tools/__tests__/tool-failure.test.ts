@@ -60,8 +60,14 @@ describe('[COMP:tools/tool-failure] page-derived output refusal', () => {
     }
   })
 
-  it('leaves other derived-scope codes as they were', () => {
-    expect(formatToolError(new DerivedScopeError('scope_source_changed'))).toBe('scope_source_changed')
+  it('gives source-change recovery without suggesting an unchanged retry', () => {
+    const failure = new DerivedScopeError('scope_source_changed')
+    for (const copy of [formatToolError(failure), describeToolFailure(failure, { tool: 'saveMemory', mutating: true })]) {
+      expect(copy).toContain('scope_source_changed')
+      expect(copy).toContain('Refresh the source context')
+      expect(copy).toContain('Do not repeat the same write unchanged')
+    }
+    expect(formatToolError(new Error('unrecognized_failure'))).toBe('unrecognized_failure')
   })
 })
 

@@ -62,6 +62,7 @@ import { resolveDirectoryConnectRow } from "@/lib/connector-directory-connect";
 import { DrivePicker, type PickedFile } from "@/components/drive-picker";
 import { ConnectorToolList, type ToolPolicy } from "@/components/connectors/connector-tool-list";
 import { ConnectorIcon } from "@/components/connectors/connector-icon";
+import { ConnectorHealthStatus } from "@/components/connectors/connector-health-status";
 import { SensitivityBadge } from "@/components/sensitivity-badge";
 import { AddConnectorMenu } from "@/components/connectors/add-connector-menu";
 import { StudioTopbarActions } from "@/components/studio/studio-topbar";
@@ -3918,10 +3919,7 @@ function ConnectorsList() {
                           {/* Built-ins skip the connected dot — always-on,
                               so the connected/available signal is noise. */}
                           {c.connected && !isBuiltinPrimitive(c) && (
-                            <span
-                              aria-hidden
-                              className="h-1.5 w-1.5 shrink-0 rounded-full bg-primary"
-                            />
+                            <ConnectorHealthStatus connector={c} compact />
                           )}
                         </button>
                       </li>
@@ -4025,9 +4023,7 @@ function ConnectorsList() {
                       </p>
                     </div>
                     {sel.connected && (
-                      <span className="shrink-0 rounded-full bg-primary/10 px-2 py-0.5 text-xs font-medium text-primary">
-                        {tc.connected}
-                      </span>
+                      <ConnectorHealthStatus connector={sel} />
                     )}
                   </div>
 
@@ -4303,9 +4299,7 @@ function ConnectorsList() {
                       </p>
                     </div>
                     {sel.connected && (
-                      <span className="shrink-0 rounded-full bg-primary/10 px-2 py-0.5 text-xs font-medium text-primary">
-                        {tc.connected}
-                      </span>
+                      <ConnectorHealthStatus connector={sel} />
                     )}
                   </div>
                   <div className="rounded-lg border border-border bg-muted/30 px-4 py-3 text-[12px] leading-relaxed text-muted-foreground">
@@ -4449,27 +4443,7 @@ function ConnectorsList() {
                       ) : null;
                     })()}
                   </div>
-                  <span
-                    className={cn(
-                      "shrink-0 rounded-full px-2 py-0.5 text-xs font-medium",
-                      sel.connected &&
-                        (sel.healthStatus === "auth_failed" || sel.healthStatus === "degraded")
-                        ? "bg-amber-500/10 text-amber-600 dark:text-amber-400"
-                        : builtin || sel.connected
-                          ? "bg-primary/10 text-primary"
-                          : "bg-muted text-muted-foreground",
-                    )}
-                  >
-                    {builtin
-                      ? tc.builtinPill
-                      : sel.connected && sel.healthStatus === "auth_failed"
-                        ? tc.reconnectNeeded
-                        : sel.connected && sel.healthStatus === "degraded"
-                          ? tc.healthDegradedPill
-                          : sel.connected
-                          ? tc.connected
-                          : tc.disconnected}
-                  </span>
+                  <ConnectorHealthStatus connector={sel} builtin={builtin} />
                 </div>
 
                 {/* Connected rows already show the description as the header

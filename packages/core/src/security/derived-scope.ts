@@ -37,14 +37,23 @@ export class DerivedScopeError extends Error {
 }
 
 /**
- * Caller-facing explanation for a refusal the caller can act on, or null when
- * the bare code is the whole story. `scope_output_not_integrated` is raised
+ * Content-free recovery for verified source refusals, or null for an unrelated
+ * failure. `scope_output_not_integrated` is raised
  * when a result derived from a page would be saved into a family whose
  * readers cannot yet enforce page ancestry (everything except workspace files
  * and their segments, migration 730): the write is refused whole, and saving
  * the result as a workspace file is the supported path.
  */
 export function describeScopeRefusal(message: string): string | null {
+  if (message === 'scope_source_changed') {
+    return 'Source context changed or is no longer available (scope_source_changed). Refresh the source context and check current access before trying again. Do not repeat the same write unchanged.'
+  }
+  if (message === 'scope_visibility_incompatible') {
+    return 'The selected sources cannot be combined under one visibility scope (scope_visibility_incompatible). Use a narrower source context or keep the sources in separate files; do not lower their protection.'
+  }
+  if (message === 'scope_evidence_missing' || message === 'scope_workspace_mismatch') {
+    return `The operation could not verify its source context (${message}). Refresh the source in the intended workspace before trying again. If this persists, report the failure instead of repeating the write.`
+  }
   if (message === 'scope_output_not_integrated' || message === 'page_derivation_output_not_integrated') {
     return 'Nothing was saved: this result was derived from a page, and page lineage can currently be kept only on workspace files. Save the result as a workspace file instead, or ask the user. Retrying the same write will fail the same way.'
   }
