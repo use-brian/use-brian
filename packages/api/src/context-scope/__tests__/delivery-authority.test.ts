@@ -720,3 +720,26 @@ describe('[COMP:api/delivery-authority] WeChat recipient binding (staff identity
       .resolves.toMatchObject({ allowed: true, source: 'member' })
   })
 })
+
+
+describe('[COMP:api/delivery-authority] one audience across group bots', () => {
+  it('uses the same restrictive group approval whichever installed bot receives it', async () => {
+    const binding = (clearance: 'internal' | 'confidential') => ({
+      version: 1 as const, channelId: '-100123', audienceType: 'group' as const,
+      clearance, compartments: [], projectIds: [], recipientUserId: null,
+      expiresAt: null, approvedByUserId: APPROVER, approvedAt: '2026-10-17T00:00:00Z',
+    })
+    const resolve = createDeliveryAudienceEnvelopeResolver({
+      integrationStore: {
+        getCredentialsForAssistantIntegrationSystem: async () => ({ config: { deliveryAudienceBindings: [binding('confidential')] } }),
+        getGroupAudienceBindingsSystem: async () => [binding('confidential'), binding('internal')],
+      } as unknown as ChannelIntegrationStore,
+      getWorkspaceRole: async () => 'admin',
+    })
+    for (const assistantId of [ASSISTANT, OTHER_ASSISTANT]) {
+      await expect(resolve({ workspaceId: WS, assistantId, userId: USER, channelType: 'telegram',
+        channelId: '-100123:topic:7', channelIntegrationId: 'installation', recipientType: 'group',
+      })).resolves.toMatchObject({ allowed: true, source: 'binding', ceiling: { clearance: 'internal', userId: '' } })
+    }
+  })
+})

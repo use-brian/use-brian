@@ -15,7 +15,8 @@
 // docs/architecture/channels/channel-user-identity.md -> "Guests in a room".
 
 import type { PoolClient } from 'pg'
-import type { ResourceScope } from '@use-brian/core'
+import { resolveGroupAudienceSystem, DeliveryAudienceUnverifiedError } from '../context-scope/delivery-authority.js'
+import { maxSensitivity, scopeGrantContains, type AccessCeiling, type ResourceScope } from '@use-brian/core'
 import { getPool, query } from '../db/client.js'
 import { addSessionMessage, readSessionById, type Session, type SessionMessage } from '../db/sessions.js'
 import { sessionKindSql, transportPolicy, type Transport } from '../session-kind.js'
@@ -86,9 +87,9 @@ export async function resolveRoomBinding(params: {
     return bound.rows.length ? { workspaceId, channelIntegrationId: params.channelIntegrationId } : null
   } catch (err) {
     // A failed lookup is not an unbound group: say so, then keep the group on
-    // its per-user path for this message rather than dropping it.
+    // an explicit failure rather than bypassing the room's audience policy.
     console.error(`[channel-room] binding lookup failed for ${params.channelType} integration ${params.channelIntegrationId}:`, err)
-    return null
+    throw err
   }
 }
 
@@ -158,13 +159,13 @@ async function insertRoom(client: PoolClient, params: ChannelRoomBinding & {
   })
   const inserted = await client.query<{ id: string }>(
     `INSERT INTO sessions (assistant_id, user_id, workspace_id, channel_type, channel_id,
-        visibility, anchor_kind, anchor_ref, effective_clearance, context_group_id, context_compartments)
-     VALUES ($1, $2, $3, $4, $5, 'workspace', 'channel', $5, $6, $7, $8)
+        visibility, anchor_kind, anchor_ref, effective_clearance, context_group_id, context_compartments, context_project_id, clearance_source)
+     VALUES ($1, $2, $3, $4, $5, 'workspace', 'channel', $5, $6, $7, $8, $9, 'anchor')
      ON CONFLICT ${sessionKindSql.channelRoomConflict()}
      DO NOTHING
      RETURNING id`,
     [params.assistantId, params.starterUserId, params.workspaceId, params.channelType, params.channelId,
-      admitted.effectiveClearance, admitted.contextGroupId, admitted.contextCompartments],
+      admitted.effectiveClearance, admitted.contextGroupId, admitted.contextCompartments, admitted.contextProjectId],
   )
   // A concurrent first message won the race: the admission receipt is
   // single-use and the conflict consumed nothing, so clear it explicitly.
@@ -176,14 +177,32 @@ async function insertRoom(client: PoolClient, params: ChannelRoomBinding & {
  * The input envelope of a room message: the ROOM's audience, whoever sent it.
  * A guest's message and a member's message are read by the same people.
  */
-export function roomInputScope(room: Session, workspaceId: string): ResourceScope {
+export function roomInputScope(room: Session, workspaceId: string, audience?: AccessCeiling): ResourceScope {
   return {
     workspaceId,
     userId: null,
     assistantId: null,
-    sensitivity: (room.effectiveClearance ?? 'internal') as ResourceScope['sensitivity'],
-    compartments: [...room.contextCompartments],
-    projectIds: room.contextProjectId ? [room.contextProjectId] : [],
+    sensitivity: audience?.clearance ?? (room.effectiveClearance ?? 'internal') as ResourceScope['sensitivity'],
+    compartments: audience ? audience.compartments ?? [] : [...room.contextCompartments],
+    projectIds: audience ? audience.projectIds ?? [] : room.contextProjectId ? [room.contextProjectId] : [],
+  }
+}
+
+/** A new group policy cannot widen the room's web readers or discard an
+ * existing history classification. Broader lateral requirements need review. */
+export async function admitRoomInputScope(room: Session, scope: ResourceScope): Promise<void> {
+  if (!scopeGrantContains(room.contextCompartments, scope.compartments)
+      || !scopeGrantContains(room.contextProjectId ? [room.contextProjectId] : [], scope.projectIds)) {
+    throw new Error('context_not_available')
+  }
+  const raised = maxSensitivity((room.effectiveClearance ?? 'internal') as ResourceScope['sensitivity'], scope.sensitivity)
+  if (raised !== room.effectiveClearance || room.clearanceSource !== 'anchor') {
+    const updated = await query<{ effectiveClearance: string }>(`UPDATE sessions SET
+      effective_clearance=CASE WHEN sensitivity_rank(effective_clearance)<sensitivity_rank($2) THEN $2 ELSE effective_clearance END,
+      clearance_source='anchor' WHERE id=$1
+      RETURNING effective_clearance AS "effectiveClearance"`, [room.id, raised])
+    room.effectiveClearance = updated.rows[0]?.effectiveClearance ?? raised
+    room.clearanceSource = 'anchor'
   }
 }
 
@@ -195,6 +214,7 @@ export function roomInputScope(room: Session, workspaceId: string): ResourceScop
  */
 export async function postToChannelRoom(params: {
   room: Session
+  inputScope?: ResourceScope
   workspaceId: string
   senderUserId: string
   senderName: string | null
@@ -202,6 +222,7 @@ export async function postToChannelRoom(params: {
   channelMessageId?: string | null
   replyToText?: string | null
 }): Promise<SessionMessage | null> {
+  if (params.inputScope) await admitRoomInputScope(params.room, params.inputScope)
   const text = params.text.trim()
   if (!text) return null
   if (params.channelMessageId) {
@@ -218,7 +239,7 @@ export async function postToChannelRoom(params: {
     replyToText: params.replyToText ?? null,
     channelMessageId: params.channelMessageId ?? null,
     senderUserId: params.senderUserId,
-    scope: roomInputScope(params.room, params.workspaceId),
+    scope: params.inputScope ?? roomInputScope(params.room, params.workspaceId),
   })
   runtime.publishSessionEvent({
     kind: 'user_message_saved',
@@ -239,9 +260,9 @@ export async function postToChannelRoom(params: {
         senderUserId: params.senderUserId,
         senderName: params.senderName,
         text,
-        effectiveClearance: params.room.effectiveClearance,
-        compartments: params.room.contextCompartments,
-        projectIds: params.room.contextProjectId ? [params.room.contextProjectId] : [],
+        effectiveClearance: params.inputScope?.sensitivity ?? params.room.effectiveClearance,
+        compartments: params.inputScope?.compartments ?? params.room.contextCompartments,
+        projectIds: params.inputScope?.projectIds ?? (params.room.contextProjectId ? [params.room.contextProjectId] : []),
         contextBindingOrigin: params.room.contextBindingOrigin ?? 'legacy',
         classificationMode: params.room.classificationMode ?? 'legacy',
       })
@@ -352,8 +373,13 @@ export async function postPassiveChannelMessage(params: {
     await params.postNotice(roomDisclosureText({ assistantName: params.assistant.name, channelType: params.channelType }))
       .catch((err: unknown) => console.error(`[${params.channelType}] room disclosure failed:`, err))
   }
+  const audience = await resolveGroupAudienceSystem({ workspaceId: binding.workspaceId,
+    assistantId: params.assistant.id, userId: params.senderUserId, channelType: params.channelType,
+    channelId: params.sessionChannelId })
+  if (!audience.allowed) throw new DeliveryAudienceUnverifiedError(audience.detail, audience.diagnostic)
   await postToChannelRoom({
     room,
+    inputScope: roomInputScope(room, binding.workspaceId, audience.ceiling),
     workspaceId: binding.workspaceId,
     senderUserId: params.senderUserId,
     senderName: params.senderName,
