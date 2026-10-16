@@ -1,6 +1,8 @@
 import { expectMentionMatches } from './incoming-event-assertions.js'
 import { dispatchIncomingMessageEvent } from '../../message-events.js'
 vi.mock('../../message-events.js', () => ({ dispatchIncomingMessageEvent: vi.fn(async () => {}) }))
+vi.mock('../../context-scope/delivery-authority.js', async (original) => ({ ...(await original<typeof import('../../context-scope/delivery-authority.js')>()), createDeliveryAudienceEnvelopeResolver: vi.fn() }))
+vi.mock('../../context-scope/resolve-turn-scope.js', async (original) => ({ ...(await original<typeof import('../../context-scope/resolve-turn-scope.js')>()), resolveLiveAccessCeilingSystem: vi.fn() }))
 // Room convergence has its own suite ([COMP:api/channel-room]); here groups stay unbound.
 vi.mock('../../channel-room/room.js', async (importOriginal) => ({
   ...(await importOriginal<typeof import('../../channel-room/room.js')>()),
@@ -3287,5 +3289,76 @@ describe('Telegram workflow provider identity', () => {
     } })
     await flushMicrotasks()
     expect(dispatchIncomingMessageEvent).not.toHaveBeenCalled()
+  })
+})
+
+
+describe('[COMP:api/telegram-byo-route] shared group upload', () => {
+  it('two addressed bot installations save and acknowledge the same provider document once', async () => {
+    const { resolveRoomBinding } = await import('../../channel-room/room.js')
+    const { findAssistantById } = await import('../../db/users.js')
+    const { createDeliveryAudienceEnvelopeResolver } = await import('../../context-scope/delivery-authority.js')
+    const { resolveLiveAccessCeilingSystem } = await import('../../context-scope/resolve-turn-scope.js')
+    vi.mocked(resolveRoomBinding).mockResolvedValue({ workspaceId: 'ws_1', channelIntegrationId: 'integ_1' })
+    const grants = { workspaceId: 'ws_1', userId: 'owner_1', clearance: 'internal' as const,
+      compartments: [], mutationCompartments: [], projectIds: [], visibilityAssistantIds: null }
+    vi.mocked(createDeliveryAudienceEnvelopeResolver).mockReturnValue(async () => ({ allowed: true, source: 'binding', ceiling: { ...grants, userId: '' } }))
+    vi.mocked(resolveLiveAccessCeilingSystem).mockResolvedValue({ ...grants, clearance: 'confidential' })
+    vi.mocked(findAssistantById).mockResolvedValue({ id: 'assistant_1', name: 'First', ownerUserId: 'owner_1',
+      workspaceId: 'ws_1', defaultModelAlias: 'standard', kind: 'standard', clearance: 'confidential', compartments: [] } as never)
+    const claimed = new Set<string>()
+    const mediaReceiptStore = { async claim(key: unknown) { const id=JSON.stringify(key); if(claimed.has(id))return false; claimed.add(id);return true }, async finish() {} }
+    const ingest = vi.fn(async () => ({ status: 'ingested', kind: 'document', episodeId: null, fileName: 'report.pdf', fileId: 'shared-file' } as const))
+    const integrationStore = makeIntegrationStore({ requireMention: false })
+    const app = createTestApp('/webhook/telegram-byo', telegramByoRoutes({ provider: {} as never,
+      systemPrompt: '', tools: new Map(), memoryStore: {} as never, capabilityStore: {} as never,
+      integrationStore: integrationStore as never, apiUrl: 'http://test',
+      linkedAccountStore: { findByProvider: async () => ({ userId: 'owner_1' }) } as never,
+      channelUserStore: {} as never,
+      ingestChannelMediaRef: ingest, mediaReceiptStore,
+    }))
+    const update = { update_id: 9901, message: { message_id: 9901, date: 1700000000,
+      from: { id: 42, first_name: 'Example' }, chat: { id: -100123, type: 'supergroup' },
+      document: { file_id: 'bot-one-id', file_name: 'report.pdf', mime_type: 'application/pdf', file_size: 42 } } }
+    try {
+      await postUpdate(app, update)
+      await vi.waitFor(() => expect(ingest).toHaveBeenCalledOnce())
+      await vi.waitFor(() => expect(adapterSendCalls.some(c => c.text?.startsWith('Saved "report.pdf"'))).toBe(true))
+      // A second bot receives a different bot-local file_id for the SAME group message.
+      const originalIntegration = await integrationStore.getByChannelForWebhook()
+      integrationStore.getByChannelForWebhook.mockResolvedValue({ ...originalIntegration, id: 'integ_2', botUsername: 'otherbot' })
+      const originalAssistant = await findAssistantById('assistant_1')
+      vi.mocked(findAssistantById).mockImplementation(async id => ({ ...originalAssistant, id }) as never)
+      mockResolveTelegramRouting.mockResolvedValue({ id: 'ca_2', channelId: 'channel_1', assistantId: 'assistant_2', externalSurfaceId: null, modelAlias: 'standard', createdAt: new Date() })
+      await postUpdate(app, { ...update, message: { ...update.message, document: { ...update.message.document, file_id: 'bot-two-id' } } })
+      await flushMicrotasks(); await flushMicrotasks()
+      expect(ingest).toHaveBeenCalledOnce()
+      expect(ingest).toHaveBeenCalledWith(expect.objectContaining({ scope: { sensitivity: 'internal', compartments: [], projectIds: [] } }))
+      expect(adapterSendCalls.filter(c => c.text?.startsWith('Saved "report.pdf"'))).toHaveLength(1)
+      // Each installation can receive an album in a different order. Its
+      // provider album id, rather than the selected base message, owns intake.
+      const album = (id: number) => ({ update_id: id, message: { ...update.message,
+        message_id: id, media_group_id: 'shared-album', document: { ...update.message.document, file_id: `album-${id}` } } })
+      await postUpdate(app, album(9910))
+      await postUpdate(app, album(9911))
+      await vi.waitFor(() => expect(ingest).toHaveBeenCalledTimes(3), { timeout: 2000 })
+      await vi.waitFor(() => expect(adapterSendCalls.filter(c => c.text?.startsWith('Saved 2 files'))).toHaveLength(1))
+      await postUpdate(app, album(9911))
+      await postUpdate(app, album(9910))
+      // Wait for the second buffered album to reach the receipt store.
+      await vi.waitFor(() => expect(chatLockCalls.filter(c => c === 'tg-byo:-100123')).toHaveLength(4), { timeout: 2000 })
+      await flushMicrotasks(); await flushMicrotasks()
+      expect(ingest).toHaveBeenCalledTimes(3)
+      expect(adapterSendCalls.filter(c => c.text?.startsWith('Saved 2 files'))).toHaveLength(1)
+      vi.mocked(resolveLiveAccessCeilingSystem).mockResolvedValue({ ...grants, clearance: 'public' })
+      const resolvedBeforeRefusal = mediaResolveCalls.length
+      await postUpdate(app, { ...update, update_id: 9902, message: { ...update.message, message_id: 9902 } })
+      await vi.waitFor(() => expect(adapterSendCalls.some(c => c.text === 'This assistant cannot read this group context.')).toBe(true))
+      expect(mediaResolveCalls).toHaveLength(resolvedBeforeRefusal)
+      expect(ingest).toHaveBeenCalledTimes(3)
+    } finally {
+      vi.mocked(resolveRoomBinding).mockResolvedValue(null)
+      vi.mocked(findAssistantById).mockResolvedValue({ id: 'assistant_1', name: 'Test Assistant', ownerUserId: 'owner_1', workspaceId: null, defaultModelAlias: 'gemini-flash', systemPrompt: null } as never)
+    }
   })
 })

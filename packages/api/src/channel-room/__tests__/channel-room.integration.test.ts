@@ -87,7 +87,9 @@ describeIf('[COMP:api/channel-room] converged rooms (database)', () => {
           WHERE workspace_id = $1 AND channel_type = $2 AND channel_id = $3 AND anchor_kind = 'channel'`,
         [W, transport, groupId])).rows
       expect(rooms).toHaveLength(1)
-      expect(rooms[0]).toMatchObject({ visibility: 'workspace', anchor_kind: 'channel', effective_clearance: 'internal' })
+      // No group audience approval exists in this fixture: the bot's Internal
+      // clearance cannot classify the group. Unapproved rooms are Public General.
+      expect(rooms[0]).toMatchObject({ visibility: 'workspace', anchor_kind: 'channel', effective_clearance: 'public' })
       const roomId = rooms[0].id
 
       const posts = (await db.query<{ sender_user_id: string; role: string; channel_message_id: string }>(

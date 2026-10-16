@@ -1,3 +1,5 @@
+import type { AccessCeiling } from '@use-brian/core'
+import { validateAudienceScopeEvidence } from '../context-scope/caller-evidence.js'
 // [COMP:api/channel-room] How a turn in a converged room differs from a
 // per-user group turn (unified-sessions §4.4, D1, D3). Pure, so every
 // transport's pipeline turn is graded by one table.
@@ -49,5 +51,20 @@ export function roomTurnShape(facts: RoomTurnFacts): RoomTurnShape {
     memoryWrites: !guest,
     attributeSenders: facts.inRoom,
     coalesce: facts.inRoom,
+  }
+}
+
+/** Read admission is separate from reply capping. The whole shared transcript
+ * is available only to a bot admitted to its audience requirements. */
+export async function mayReadGroupContext(access: AccessCeiling, audience: AccessCeiling): Promise<boolean> {
+  if (access.workspaceId !== audience.workspaceId) return false
+  try {
+    // The canonical label predicate also checks v2 Department tiers and
+    // Project admission. Flat clearance/compartment containment cannot do so.
+    await validateAudienceScopeEvidence({ sensitivity: audience.clearance,
+      compartments: audience.compartments ?? [], projectIds: audience.projectIds ?? [] }, access)
+    return true
+  } catch {
+    return false
   }
 }

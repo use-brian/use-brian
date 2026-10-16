@@ -84,3 +84,18 @@ describe('[COMP:brain/open-channel-media-deps] open intake composition', () => {
     expect(brainIngestor).toHaveBeenCalledOnce()
   })
 })
+
+
+it('[COMP:brain/open-channel-media-deps] writes the single group file as shared with the group labels', async () => {
+  const writeBytes = vi.fn(async (_ctx: unknown, _args: unknown) => ({ ok: true, value: { id: 'file', path: '/uploads/channel/file' } }))
+  const deps = createOpenChannelMediaIntakeDeps({ filesResolver: {
+    forWorkspace: async () => ({ gcs: { readBlob: async () => ({ bytes: Buffer.from('shared notes') }) } }),
+  } as never, filesApi: { writeBytes } as never, brainIngestor: vi.fn() as never })
+  await deps.ingestDocument!({ gcsKey: 'key', mime: 'text/plain', fileName: 'notes.txt', sizeBytes: 12,
+    workspaceId: 'workspace', assistantId: 'winner', actingUserId: 'owner', sensitivity: 'internal',
+    scope: { sensitivity: 'internal', compartments: ['finance'], projectIds: ['forecast'] } })
+  expect(writeBytes).toHaveBeenCalledWith(expect.objectContaining({
+    workspaceId: 'workspace', writeSensitivity: 'internal', writeCompartments: ['finance'], writeProjectIds: ['forecast'],
+  }), expect.anything())
+  expect(writeBytes.mock.calls[0]![0]).not.toHaveProperty('assistantId')
+})

@@ -34,7 +34,7 @@ export function createOpenChannelMediaIntakeDeps(infra: {
       return recordings + files < 50 ? { ok: true } : { ok: false, reason: 'daily_limit' }
     },
     ingestDocument: infra.brainIngestor
-      ? async ({ gcsKey, storageUri, mime, fileName, sizeBytes, workspaceId, assistantId, actingUserId, sensitivity }) => {
+      ? async ({ gcsKey, storageUri, mime, fileName, sizeBytes, workspaceId, assistantId, actingUserId, sensitivity, scope }) => {
           if (!assistantId) return { status: 'skipped_no_assistant' }
           if (sizeBytes != null && sizeBytes > CHANNEL_DOCUMENT_PARSE_MAX_BYTES) {
             return {
@@ -81,7 +81,7 @@ export function createOpenChannelMediaIntakeDeps(infra: {
             const effectiveMime =
               mediaMimeType ??
               (detectedFormat ? documentMimeType(detectedFormat) : mime)
-            const ctx: FilesContext = { workspaceId, userId: actingUserId, assistantId }
+            const ctx: FilesContext = { workspaceId, userId: actingUserId, ...(scope ? { clearance: scope.sensitivity, writeSensitivity: scope.sensitivity, writeCompartments: scope.compartments, writeProjectIds: scope.projectIds } : { assistantId }) }
             const stamp = new Date().toISOString().replace(/[:.]/g, '-').slice(0, 19)
             const safeName = (fileName ?? 'document').replace(/[^\p{L}\p{N}._-]+/gu, '-').slice(0, 120) || 'document'
             const stored = await infra.filesApi.writeBytes(ctx, {
@@ -112,6 +112,7 @@ export function createOpenChannelMediaIntakeDeps(infra: {
             content: text,
             occurredAt: new Date(),
             sourceLabel: 'channel-document',
+            ...(scope ? { compartments: scope.compartments, projectIds: scope.projectIds } : {}),
             sensitivity,
           })
           return { status: 'accepted', episodeId: null }

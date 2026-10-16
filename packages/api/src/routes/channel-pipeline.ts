@@ -1,8 +1,8 @@
 import { withTurnInference } from '../turn/runtime.js'
 import { PER_TURN_FILES_INDEX_CAP, PER_TURN_INDEX_CAP } from '../turn/index-caps.js'
 import { policyFor } from '../session-kind.js'
-import { roomTurnShape } from '../channel-room/turn.js'
-import { claimRoomDisclosure, claimRoomHydration, findOrCreateChannelRoom, resolveRoomBinding, roomDisclosureText, roomInputScope, roomSpeakerLabel } from '../channel-room/room.js'
+import { mayReadGroupContext, roomTurnShape } from '../channel-room/turn.js'
+import { admitRoomInputScope, claimRoomDisclosure, claimRoomHydration, findOrCreateChannelRoom, resolveRoomBinding, roomDisclosureText, roomInputScope, roomSpeakerLabel } from '../channel-room/room.js'
 import { releaseTurn, takeTurnLease, waitForTurnSlot } from '../turn/lease.js'
 import { runAssistantTurn } from '../turn/kernel.js'
 
@@ -47,6 +47,7 @@ import {
   executionToolContext,
   boundScopeSource,
   scopeEvidenceFromRows,
+  pinAccessCeiling,
 } from '@use-brian/core'
 import type { FilesApi, OutboundAttachment, RealtimeThreadTarget } from '@use-brian/core'
 import { resolveBrandContext } from '../brand/prompt-context.js'
@@ -827,11 +828,16 @@ export async function filterChannelHistoryForAudience<T extends {
   rows: readonly T[]
   group: boolean
   ceiling?: AccessCeiling
+  readerCeiling?: AccessCeiling
   validate?: (evidence: ScopeEvidence, ceiling: AccessCeiling) => Promise<unknown>
 }): Promise<T[]> {
   if (!params.group || !params.ceiling) return [...params.rows]
   const validate = params.validate ?? validateAudienceScopeEvidence
   const decisions = await Promise.all(params.rows.map(async (row) => {
+    if (params.readerCeiling) {
+      if (!boundScopeSource(row)) return false
+      try { await validate(scopeEvidenceFromRows([row]), params.readerCeiling) } catch { return false }
+    }
     if (row.channelMessageId !== null) return true
     if (!boundScopeSource(row)) return false
     try {
@@ -1152,14 +1158,6 @@ async function processChannelMessageTurn(params: ChannelPipelineParams): Promise
         return hooks.sendResponse(notice ? `${notice}\n\n${text}` : text, ...rest)
       }
     : hooks.sendResponse
-  // D16: a room is hydrated once from what the provider still shows.
-  const roomHistory = room && params.readProviderHistory && await claimRoomHydration(room.id)
-    ? await params.readProviderHistory().catch((err: unknown) => {
-        console.warn(`[${channelType}] room hydration failed; continuing without history:`, err)
-        return null
-      })
-    : null
-  const providerVisibleContext = room ? roomHistory : params.providerVisibleContext
   // Resolve credential/billing ownership before constructing execution facts.
   // It remains attribution only and never substitutes for the channel actor.
   const billingUserId = await billingPartyForAssistant({
@@ -1305,6 +1303,11 @@ async function processChannelMessageTurn(params: ChannelPipelineParams): Promise
     }
     return
   }
+  if (room && audienceEnvelope?.allowed && !(await mayReadGroupContext(pinAccessCeiling(dataTurnScope.access), audienceEnvelope.ceiling))) {
+    await hooks.sendError(new Error(CONTEXT_NOT_AVAILABLE_MESSAGE))
+    await hooks.onCleanup?.()
+    return
+  }
   const clearance = dataTurnScope.access.clearance ?? assistant.clearance
   const compartments = dataTurnScope.effectiveCompartments
   const scopeAccumulator = new ContextScopeAccumulator({
@@ -1312,13 +1315,26 @@ async function processChannelMessageTurn(params: ChannelPipelineParams): Promise
     projectIds: dataTurnScope.writeProjectIds,
   })
   const inputMessageScope = room && assistant.workspaceId
-    ? roomInputScope(room, assistant.workspaceId)
+    ? roomInputScope(room, assistant.workspaceId, audienceEnvelope?.allowed ? audienceEnvelope.ceiling : undefined)
     : sessionMessageInputScope({
         scope: dataTurnScope,
         workspaceId: assistant.workspaceId,
         userId,
         sharedAudience: !turnPolicy.context.personalMemory,
       })
+  if (room && inputMessageScope) await admitRoomInputScope(room, inputMessageScope)
+  // D16: a room is hydrated once from what the provider still shows.
+  const roomHistory = room && audienceEnvelope?.allowed
+    && await mayReadGroupContext(pinAccessCeiling(dataTurnScope.access), { ...audienceEnvelope.ceiling,
+      clearance: (room.effectiveClearance ?? 'internal') as AccessCeiling['clearance'],
+      compartments: room.contextCompartments, projectIds: room.contextProjectId ? [room.contextProjectId] : [] })
+    && params.readProviderHistory && await claimRoomHydration(room.id)
+    ? await params.readProviderHistory().catch((err: unknown) => {
+        console.warn(`[${channelType}] room hydration failed; continuing without history:`, err)
+        return null
+      })
+    : null
+  const providerVisibleContext = room ? roomHistory : params.providerVisibleContext
   const currentTurnWrite = () => turnOutputWrite({
     producer: `turn:${channelType}`,
     accumulator: scopeAccumulator,
@@ -1382,6 +1398,8 @@ async function processChannelMessageTurn(params: ChannelPipelineParams): Promise
     rows,
     group: turnPolicy.deliveryCeiling.recipientType === 'group',
     ceiling: audienceEnvelope?.allowed ? audienceEnvelope.ceiling : undefined,
+    ...(room && audienceEnvelope?.allowed ? { readerCeiling: { ...pinAccessCeiling(dataTurnScope.access), userId: '',
+      ...(dataTurnScope.access.departmentRead ? { departmentRead: { ...dataTurnScope.access.departmentRead, userId: '' } } : {}) } } : {}),
   })
 
   // Expose session ID to channel hooks (e.g., WhatsApp confirmation store)
@@ -1641,6 +1659,7 @@ async function processChannelMessageTurn(params: ChannelPipelineParams): Promise
     replyToMessageId: replyToMessageId ?? null,
     session,
     raw: replyRaw,
+    ...(room ? { readableHistory: preExistingDbMessages } : {}),
   })
   const replyResolved = storedReply ?? (
     params.realtimeThreadTarget?.contextText
@@ -1662,7 +1681,9 @@ async function processChannelMessageTurn(params: ChannelPipelineParams): Promise
     })
     .filter((t) => t.text.length > 0)
 
-  const knownTopics = await getSessionTopicLabels(session.id, 20)
+  const knownTopics = room
+    ? [...new Set(preExistingDbMessages.map(m => m.topicLabel).filter((label): label is string => Boolean(label)))].slice(-20)
+    : await getSessionTopicLabels(session.id, 20)
 
   let classification: TopicClassification | null = null
   try {
@@ -1828,7 +1849,7 @@ async function processChannelMessageTurn(params: ChannelPipelineParams): Promise
     excludeHeld: true,
     // A public audience cannot trust the durable summary because it has no
     // per-source audience evidence. Rebuild from filtered provider history.
-    fromSequence: isolatedAudience ? null : session.compactBoundarySequence,
+    fromSequence: isolatedAudience || room ? null : session.compactBoundarySequence,
   }))
   noteAutomaticScopeEvidence(
     scopeAccumulator,
@@ -1860,7 +1881,7 @@ async function processChannelMessageTurn(params: ChannelPipelineParams): Promise
     sessionMessages: dbMessages,
     timezone: userTimezone,
     senderNames: roomSenderNames,
-    session,
+    session: room ? { ...session, compactSummary: null, compactBoundarySequence: null } : session,
     tier: modelToCompactionTier(logicalModel),
     channelClass: 'messaging',
     profile: 'multi-topic',
@@ -1885,7 +1906,7 @@ async function processChannelMessageTurn(params: ChannelPipelineParams): Promise
     usageStore,
     userMessageId: userMessageRow.id,
     persistLongTermContext: !isolatedAudience && roomShape.memoryWrites,
-    persistSessionSummary: !isolatedAudience,
+    persistSessionSummary: !room && !isolatedAudience,
     compartments: dataTurnScope.writeCompartments,
     projectIds: dataTurnScope.writeProjectIds,
     authority,
@@ -2289,7 +2310,7 @@ async function processChannelMessageTurn(params: ChannelPipelineParams): Promise
       // routed assistant, so resolve that surface independently and never
       // reuse it outside this injection call.
       const turnScope = await resolveConnectorTurnScopeForChannelTurn({
-        useAssistantConnectorAuthority,
+        useAssistantConnectorAuthority: useAssistantConnectorAuthority && !room,
         dataTurnScope,
         userId,
         assistant: {

@@ -1,3 +1,5 @@
+import type { PoolClient } from 'pg'
+import type { query } from '../db/client.js'
 /** Current destination-audience authorization for restricted output. [COMP:api/delivery-authority] */
 import {
   intersectAccessCeilings,
@@ -6,7 +8,7 @@ import {
   type ScopeEvidence,
 } from '@use-brian/core'
 import { parseTopicChannelId } from '@use-brian/channels'
-import type { ChannelIntegrationStore, DeliveryAudienceBinding } from '../db/channel-integrations.js'
+import { getGroupAudienceBindingsSystem, type ChannelIntegrationStore, type DeliveryAudienceBinding } from '../db/channel-integrations.js'
 import { findSessionByChannel, findSessionById, type Session } from '../db/sessions.js'
 import { policyFor } from '../session-kind.js'
 import { findAssistantById } from '../db/users.js'
@@ -332,10 +334,27 @@ async function resolveEnvelope(
 
   const integration = await integrationForTarget(input, deps.integrationStore)
   const parsed = parseTopicChannelId(input.channelId)
-  const bindings = integration?.config?.deliveryAudienceBindings?.filter((candidate) =>
+  const candidates = integration && inferredType === 'group' && deps.integrationStore?.getGroupAudienceBindingsSystem
+    ? await deps.integrationStore.getGroupAudienceBindingsSystem(input.workspaceId, input.channelType, input.channelId)
+    : integration?.config?.deliveryAudienceBindings
+  const bindings = candidates?.filter((candidate) =>
     candidate.version === 1
     && (candidate.channelId === input.channelId || candidate.channelId === parsed.chatId),
   ) ?? []
+  return resolveApprovedBindings(input, deps, bindings)
+}
+
+/** Shared with room admission: never derive the group audience from a bot. */
+export async function resolveGroupAudienceSystem(input: DeliveryAudienceInput, client?: PoolClient): Promise<DeliveryAudienceEnvelopeDecision> {
+  const execute: typeof query | undefined = client ? (sql, values) => client.query(sql, values) : undefined
+  const bindings = await getGroupAudienceBindingsSystem(input.workspaceId, input.channelType, input.channelId, execute)
+  const deps = resolvedDependencies(client ? { getWorkspaceRole: async (userId, workspaceId) =>
+    (await client.query<{ role: 'owner' | 'admin' | 'member' }>('SELECT role FROM workspace_members WHERE workspace_id=$1 AND user_id=$2', [workspaceId, userId])).rows[0]?.role ?? null } : {})
+  return resolveApprovedBindings({ ...input, recipientType: 'group', groupSpeaker: false }, deps, bindings)
+}
+
+async function resolveApprovedBindings(input: DeliveryAudienceInput, deps: ReturnType<typeof resolvedDependencies>, bindings: DeliveryAudienceBinding[]): Promise<DeliveryAudienceEnvelopeDecision> {
+  const inferredType = input.recipientType ?? externalAudienceType(input.channelType, input.channelId)
   if (bindings.length === 0) {
     return {
       allowed: true,
