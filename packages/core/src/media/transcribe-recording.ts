@@ -35,8 +35,8 @@
  * neither idle cutoff can fire; the per-window AbortController bounds
  * total stream time instead.
  *
- * Why degeneration detect-and-retry: at temperature 0 (greedy decoding) the
- * model can lock into a repetition loop instead of transcribing — observed on
+ * Why degeneration detect-and-retry: the model can lock into a repetition
+ * loop instead of transcribing — originally observed at temperature 0 on
  * long Cantonese WhatsApp recordings (2026-07-10, both test files) in two
  * distinct shapes, so there are two detectors:
  *   1. Character-level (`stripDegenerateTail`): one line loops a short filler
@@ -50,9 +50,9 @@
  *      utterances past the audio end are dropped BEFORE the coverage math —
  *      otherwise a looping transcript "covers" the audio and gets billed.
  * On detection the looping tail is cut at the last clean utterance and the
- * window is retried (bounded per recording) with a small temperature bump +
- * an anti-repetition prompt note — greedy decoding is exactly the sticky
- * setting, so sampling usually breaks the cycle. An unrecoverable loop stops
+ * window is retried (bounded per recording) with an anti-repetition prompt
+ * note. Older models additionally get a small temperature bump; Gemini 3+
+ * omit sampling parameters on every request. An unrecoverable loop stops
  * the run and falls through to the existing coverage math: the transcript is
  * `truncated`, so the caller bills nothing (charge-on-full-coverage).
  *
@@ -65,6 +65,7 @@
  */
 
 import type { TokenUsage } from '../providers/types.js'
+import { geminiSamplingConfig } from '../providers/gemini.js'
 import {
   aiStudioTransport,
   authorizeGoogleRequest,
@@ -107,8 +108,8 @@ const DEGEN_MAX_DISTINCT_IN_WINDOW = 2
 // response consumed yet) — never mid-stream.
 const TRANSIENT_FETCH_ATTEMPTS = 3
 const TRANSIENT_FETCH_BACKOFF_MS = 2_000
-// A degenerate window is retried from its last clean utterance with this
-// temperature (greedy temperature-0 decoding is what makes loops sticky).
+// Older models receive this temperature on repetition recovery. Gemini 3+
+// keep sampling fields absent and receive the anti-repetition prompt only.
 const DEGEN_RETRY_TEMPERATURE = 0.3
 // Total nudged retries per recording — bounds the extra COGS a pathological
 // file can burn.
@@ -538,9 +539,7 @@ async function generateWindow(
       },
     ],
     generationConfig: {
-      // Greedy (0) is the fidelity default, but it is exactly what makes a
-      // repetition loop sticky — the retry samples its way out of the cycle.
-      temperature: degenNudge ? DEGEN_RETRY_TEMPERATURE : 0,
+      ...geminiSamplingConfig(model, degenNudge ? DEGEN_RETRY_TEMPERATURE : 0),
       maxOutputTokens: opts.maxOutputTokens ?? DEFAULT_MAX_OUTPUT_TOKENS,
       // Do NOT suppress thinking (`thinkingConfig: { thinkingBudget: 0 }`)
       // even though thoughts consume most of each window's output tokens on
@@ -703,7 +702,7 @@ async function transcribeUploadedRecording(
     if (degenerate) {
       degenerateWindows++
       if (reachedEnd) break
-      // Retry from the last clean utterance with the temperature nudge — but
+      // Retry from the last clean utterance with the repetition nudge — but
       // only while the retry budget lasts AND we are not spinning in place (a
       // nudged retry that added nothing hit the same wall; give up and let the
       // coverage math mark the transcript truncated → billed 0).
@@ -854,7 +853,7 @@ async function generateChunkWindow(
       },
     ],
     generationConfig: {
-      temperature: 0,
+      ...geminiSamplingConfig(model, 0),
       maxOutputTokens: opts.maxOutputTokens ?? CHUNK_MAX_OUTPUT_TOKENS,
       ...thinkingConfigFor(model),
     },

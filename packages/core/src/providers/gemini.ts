@@ -310,12 +310,21 @@ export function normalizeGeminiRequestContents(
   return cleaned.slice(0, end)
 }
 
-export function usesGemini36RequestContract(modelId: string): boolean {
+function usesGemini36RequestContract(modelId: string): boolean {
   const match = modelId.toLowerCase().match(/(?:^|\/)gemini-(\d+)(?:\.(\d+))?-/)
   if (!match) return false
   const major = Number(match[1])
   const minor = Number(match[2] ?? 0)
   return major > 3 || (major === 3 && minor >= 6)
+}
+
+/** Shared by chat and media, including recording retries. Gemini 3+ should
+ *  use provider-default sampling; newer generations reject sampling knobs.
+ *  Keep explicit overrides only for older or unrecognized model families. */
+export function geminiSamplingConfig(modelId: string, temperature?: number): { temperature?: number } {
+  const match = modelId.toLowerCase().match(/(?:^|\/)gemini-(\d+)(?:\.\d+)?-/)
+  if ((match && Number(match[1]) >= 3) || temperature === undefined) return {}
+  return { temperature }
 }
 
 function toToolDeclarations(tools: ToolDefinition[]): GeminiFunctionDeclaration[] {
@@ -630,7 +639,6 @@ function buildRequest(
   // Universal choke point: every request (stateless stream() AND stateful
   // session path) is assembled here, so enforce the input-part contract once,
   // for all of them. Drops reasoning / content-less parts that would 400.
-  const usesLatestContract = usesGemini36RequestContract(modelId)
   const safeContents = normalizeGeminiRequestContents(contents, modelId)
   const systemParts = systemContextParts(options)
 
@@ -658,12 +666,7 @@ function buildRequest(
     } : {}),
     generationConfig: {
       maxOutputTokens: options.maxTokens,
-      // Gemini 3.6+ deprecates and ignores sampling parameters; future
-      // generations reject them. Preserve the existing override only for
-      // older models whose decoding contract still supports it.
-      ...(!usesLatestContract && options.temperature !== undefined
-        ? { temperature: options.temperature }
-        : {}),
+      ...geminiSamplingConfig(modelId, options.temperature),
       // JSON output. Only when the caller asked for it AND no tools are
       // declared — Gemini rejects responseMimeType together with function
       // declarations.
