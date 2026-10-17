@@ -8,6 +8,7 @@ import { getAppPool, getPool, applyRLSGucs, queryWithRLS } from '../../db/client
 import { readCurrentScopeSources, validateDerivedWriteInputs, validateDerivedMemoryInputs, validateDerivedEntityInputs, recordDerivedResource } from '../../db/derived-scope-store.js'
 import { bindTrustedSourceRead, pinExternalSourceOperation } from '../source-store.js'
 import { createConnectorSourceRuntimeFactory } from '../source-runtime.js'
+import { createRetainedSourceAuthorityCoordinator, pinPreparedExternalSourceAuthority } from '../retained-source-authority.js'
 import { injectMcpTools } from '../../mcp/inject.js'
 import { createDbConnectorStore } from '../../db/connector-store.js'
 import { createConnectorGrantStore } from '../../db/connector-grant-store.js'
@@ -126,6 +127,7 @@ describe('[COMP:api/external-source-access] independent persisted source ACL', (
         return { execution, profile, ports, access: createSourceAccessClient(execution, profile, ports, { headers: { Authorization: `Bearer ${transportToken}` } }) }
       }
       const one = await client(first), two = await client(second), unknown = await client(unmapped), outsider = await client(foreign)
+      const retainedCoordinator = createRetainedSourceAuthorityCoordinator({ factory: createConnectorSourceRuntimeFactory({ issuer, keys, instances }), instances })
       const ui = async (session: string, fields: string) => fetch(`${source!.url}/ui/records/order-1?fields=${fields}`, { headers: { Authorization: `Bearer ${session}` } })
       expect(await (await ui('first-ui-session','cost')).json()).toEqual({ cost: '37.25' }); expect((await ui('second-ui-session','cost')).status).toBe(403)
       const read = await one.access.readMcp('readRecord', { id: 'order-1', fields: ['description','cost'] })
@@ -183,10 +185,21 @@ describe('[COMP:api/external-source-access] independent persisted source ACL', (
         await expect(one.access.authorize({ ...combined.request, operationId: randomUUID() })).rejects.toMatchObject({ code: 'source_access_denied' })
         await sourcePool.query('UPDATE grants SET actions=$2 WHERE account_id=$1', [first,actions])
         expect((await readCurrentScopeSources(app, workspace, [{ ...bound.sources[0], version: '0'.repeat(64) }])).map(row => row.state)).toEqual(['unverifiable'])
-        const oldOperationId = combined.request.operationId
+        const prepared = await retainedCoordinator.prepare(one.execution, accumulator.evidence.sources!, 'retain')
+        await expect(pinPreparedExternalSourceAuthority(app, one.execution, structuredClone(prepared))).rejects.toMatchObject({ code: 'source_access_denied' })
+        await expect(pinPreparedExternalSourceAuthority(app, two.execution, prepared)).rejects.toMatchObject({ code: 'source_access_denied' })
+        await pinPreparedExternalSourceAuthority(app, one.execution, prepared)
+        await validateDerivedWriteInputs(app, { producer: 'shared-retained-coordinator', sources: accumulator.evidence.sources! })
+        await expect(retainedCoordinator.prepare(two.execution, bound.sources, 'context')).rejects.toMatchObject({ code: 'source_access_denied' })
+        const beforeRecipient = source.counters.authorizations
+        await expect(retainedCoordinator.prepare(one.execution, bound.sources, 'context', [{ ...one.profile.subject, id: foreign }]))
+          .rejects.toMatchObject({ reason: 'caller_evidence_unavailable' })
+        expect(source.counters.authorizations).toBe(beforeRecipient)
+        const oldOperationId = prepared.operationId
         await app.query('COMMIT')
         expect((await readCurrentScopeSources(app, workspace, bound.sources)).map(row => row.state)).toEqual(['held'])
         await app.query('BEGIN'); await applyRLSGucs(app, first)
+        await expect(pinPreparedExternalSourceAuthority(app, one.execution, prepared)).rejects.toMatchObject({ code: 'source_access_denied' })
         await app.query(`SELECT set_config('app.external_source_operation_id',$1,true),set_config('app.external_source_actor_id',$2,true),
           set_config('app.external_source_assistant_id',$3,true),set_config('app.external_source_action','context',true),set_config('app.v2_assistant_id',$3,true)`, [oldOperationId,first,assistant])
         expect((await readCurrentScopeSources(app, workspace, bound.sources)).map(row => row.state)).toEqual(['held'])
@@ -294,6 +307,7 @@ describe('[COMP:api/external-source-access] independent persisted source ACL', (
       await one.access.authorize(retained(first)); await two.access.authorize(retained(second))
       await sourcePool.query("DELETE FROM grants WHERE account_id=$1 AND record_id='order-1'", [first])
       await expect(one.access.authorize(retained(first))).rejects.toMatchObject({ code: 'source_access_denied' })
+      await expect(retainedCoordinator.prepare(one.execution, retainedSources!, 'context')).rejects.toMatchObject({ code: 'source_access_denied' })
       await two.access.authorize(retained(second))
       await sourcePool.query("INSERT INTO grants(kind,account_id,record_id,fields,actions) VALUES('human',$1,'order-1',$2,$3)", [first,['description','cost'],actions])
       source.setAfterRead(async () => { await sourcePool.query("DELETE FROM grants WHERE account_id=$1 AND record_id='order-1'", [first]) })

@@ -35,7 +35,7 @@ function normalized(observation: SourceObservation): SourceObservation {
     retention: observation.retention.mode === 'released_snapshot' ? { mode: 'released_snapshot', releaseId: observation.retention.releaseId, expiresAt: observation.retention.expiresAt }
       : { mode: observation.retention.mode }, export: { model: observation.export.model, destinations: [...observation.export.destinations].sort() } }
 }
-async function nativeRecipientCeiling(subject: SourceSubject, workspaceId: string) {
+export async function resolveNativeSourceRecipientCeiling(subject: SourceSubject, workspaceId: string) {
   if (subject.kind !== 'human' || await getWorkspaceRoleSystem(subject.id, workspaceId, true) === null) denied()
   const assistant = await findAssistantById(subject.executingAssistantId)
   if (!assistant || assistant.workspaceId !== workspaceId) denied()
@@ -79,7 +79,7 @@ export async function pinExternalSourceOperation(client: PoolClient, execution: 
       const deriveDecision = deriveItem ? response.decisions.find(value => value.itemId === deriveItem.itemId && value.recipientId === recipient.recipientId) : undefined
       if (deriveItem && !deriveDecision?.allowed) denied()
       const deriveReceipt = deriveDecision?.allowed ? deriveDecision.receipt : undefined
-      const recipientCeiling = await nativeRecipientCeiling(recipient.subject, source.workspaceId)
+      const recipientCeiling = await resolveNativeSourceRecipientCeiling(recipient.subject, source.workspaceId)
       await validateCallerScopeEvidence({ sensitivity: source.sensitivity, compartments: source.compartments, projectIds: source.projectIds }, recipientCeiling)
       await getPool().query(`INSERT INTO external_source_authorizations(workspace_id,observation_id,profile_id,profile_revision,resource_revision,
         operation_id,request_digest,transaction_id,backend_pid,actor_kind,actor_id,assistant_id,recipient_kind,recipient_id,recipient_assistant_id,
@@ -110,7 +110,7 @@ export async function bindTrustedSourceRead(client: PoolClient, execution: Execu
   await proof.assertCurrent()
   const profile = await profileFor(proof.profile)
   // Native lane now; explicit bounded application-source releases must qualify separately before activation.
-  const ceiling = intersectAccessCeilings(execution.security.ceiling, await nativeRecipientCeiling(proof.profile.subject, proof.profile.workspaceId)), sources: ScopeSource[] = []
+  const ceiling = intersectAccessCeilings(execution.security.ceiling, await resolveNativeSourceRecipientCeiling(proof.profile.subject, proof.profile.workspaceId)), sources: ScopeSource[] = []
   for (const raw of binding.envelope.resources) {
     const observation = normalized(raw), sensitivity = maxSensitivity(profile.sensitivity, observation.labels.sensitivity)
     const compartments = [...new Set([...profile.compartments,...observation.labels.compartments])].sort(), projectIds = [...new Set([...profile.projectIds,...observation.labels.projectIds])].sort()

@@ -7,7 +7,7 @@ import { getAppPool, getPool, applyRLSGucs, runWithAgentAccess } from '../db/cli
 import { getWorkspaceRoleSystem } from '../db/workspace-store.js'
 import { createConnectorRuntimeAuthority } from './connector-runtime-authority.js'
 import type { createConnectorActorKeyStore } from './connector-actor-keys.js'
-import { createSourceAccessClient, type SourceAccessProfile } from './source-access.js'
+import { createSourceAccessClient, type SourceAccessProfile, type SourceAccessClient } from './source-access.js'
 import { bindTrustedSourceRead } from './source-store.js'
 import { mergeValidatedHeaders } from '../mcp/auth-headers.js'
 import { mcpToolDisplayResult } from '../mcp/client.js'
@@ -18,6 +18,8 @@ export type ConnectorSourceRuntime = {
   discover: (name: string) => Promise<McpServerConfig>
   call: (tool: string, input: Record<string, unknown>, overrides?: Record<string, string>) => Promise<unknown>
   assertCurrent: () => Promise<void>
+  /** Host-only operation proof; never exposed as a model-callable tool or serialized catalog. */
+  authorize: SourceAccessClient['authorize']
 }
 export type ConnectorSourceRuntimeFactory = (input: { workspaceId: string; instanceId: string;
   execution?: ExecutionContext; accumulator?: ContextScopeAccumulator; headers: Record<string, string> }) => Promise<ConnectorSourceRuntime | null>
@@ -91,6 +93,14 @@ export function createConnectorSourceRuntimeFactory(options: { issuer: string; k
       return { ...catalog, tools: catalog.tools.filter(tool => tool.readOnlyHint === true) }
     }
     return { execution, accumulator, assertCurrent, discover,
+      async authorize(request) {
+        await assertCurrent()
+        const access = client(), capabilities = await access.capabilities()
+        if (request.items.some(item => item.retentionMode !== 'governed') || !capabilities.retentionModes.includes('governed')) unavailable()
+        const proof = await access.authorize(request)
+        await assertCurrent()
+        return proof
+      },
       async call(tool, args, overrides) {
         const catalog = await discover('Protected source', overrides)
         if (!catalog.tools.some(candidate => candidate.name === tool)) unavailable()
