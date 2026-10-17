@@ -14,6 +14,7 @@ import {
   type MailboxSearchHit,
 } from '../base/mailbox.js'
 import { MAX_EXTERNAL_DOCUMENT_BYTES } from '../../workspace-files/attachments.js'
+import { DerivedScopeError } from '../../security/derived-scope.js'
 import type { FilesApi } from '../../workspace-files/api.js'
 import type { WorkspaceFile } from '../../workspace-files/types.js'
 import type { Tool, ToolContext } from '../types.js'
@@ -710,6 +711,21 @@ describe('[COMP:tools/imap-attachments] imapSaveAttachment (email bytes → work
     const result = await tool.execute({ messageId: 'INBOX:7', partId: '2' }, ATTACH_CTX)
     expect(result.isError).toBe(true)
     expect(result.data).toContain('quota')
+  })
+
+  it('explains a source refusal as a failed save with recovery, without blaming the mailbox login', async () => {
+    const filesApi = makeFilesApi({
+      writeBytes: vi.fn(async () => { throw new DerivedScopeError('scope_source_changed') }),
+    })
+    const { api, tool, enqueueIngest } = setup({ filesApi })
+    const result = await tool.execute({ messageId: 'INBOX:7', partId: '2' }, ATTACH_CTX)
+    expect(api.getAttachment).toHaveBeenCalledWith('INBOX:7', '2')
+    expect(result.isError).toBe(true)
+    expect(result.data).toContain('The attachment was not saved')
+    expect(result.data).toContain('scope_source_changed')
+    expect(result.data).toMatch(/refresh the source context/i)
+    expect(result.data).not.toMatch(/credentials|mailbox.*failed|file_publication_uncertain/i)
+    expect(enqueueIngest).not.toHaveBeenCalled()
   })
 
   it('still returns the saved file when the ingest enqueue fails (best-effort indexing)', async () => {
