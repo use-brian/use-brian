@@ -27,10 +27,12 @@ export type ToolUseHookContext = {
   workspaceId?: string | null
   /** Only `'remote_mcp'` today; reserves built-in / local firing sites later. */
   source: 'remote_mcp'
-  /** Remote MCP server URL — the header-override join key. */
+  /** Remote MCP destination. Transport is bound to the source callback, never joined by URL. */
   serverUrl: string
-  /** Connector grouping the model passed as `server` in `mcp_call`. */
+  /** Human connector label, retained for compatible rule/display matching. */
   serverName: string
+  /** Stable host-selected source identity, separate from its label and credential owner. */
+  sourceId?: string
   /** Canonical underlying tool name (never `'mcp_call'`). */
   toolName: string
   /** Args the tool will run with (post-`modify` value for `postToolUse`). */

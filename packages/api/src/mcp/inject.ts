@@ -797,12 +797,8 @@ export async function injectMcpTools(params: {
 
   const DISCOVERY_TIMEOUT = 8_000
 
-  // Per-URL auth headers for outbound custom-MCP requests. Execution
-  // dispatches by serverUrl alone (tool-search's mcp_call carries no
-  // per-entry credentials — see the top-level callMcpTool below), so the
-  // join key is the URL. First instance to register a URL wins, matching
-  // the by-URL discovery dedupe in addGrantedCustomMcp.
-  const headersByUrl = new Map<string, Record<string, string>>()
+  // Each discovered source owns its transport. Equal URLs do not share credentials.
+  const headersByConnector = new Map<(typeof active)[number], Record<string, string>>()
 
   async function loadAuthHeaders(instanceId: string | null | undefined): Promise<Record<string, string>> {
     if (!instanceId || !connectorInstanceStore) return {}
@@ -827,23 +823,16 @@ export async function injectMcpTools(params: {
     return callRemoteMcpTool(url, tool, input, headers)
   }
 
-  function registerAuthHeaders(url: string, headers: Record<string, string>): void {
-    if (Object.keys(headers).length > 0 && !headersByUrl.has(url)) {
-      headersByUrl.set(url, headers)
-    }
-  }
-
   const discoveredServers: Array<{
     server: McpServerConfig
     connectorUrl: string
+    instanceId: string | null
+    headers: Record<string, string>
     policy: NonNullable<RemoteSource['policy']>
   }> = []
 
-  // Resolve per-connector auth headers up front and register them in the
-  // deterministic `active` array order (stable: custom ASC, label ASC, then
-  // team-native). When two instances share a serverUrl, the winner is the
-  // first in that order, not whichever DB read resolved first — discovery
-  // and the mcp_call dispatcher then agree on one header set per URL.
+  // Resolve per-instance headers once, keeping the same selected identity on
+  // discovery and invocation even when different instances share an endpoint.
   const resolvedHeaders = await Promise.all(active.map((c) => loadAuthHeaders(c.instanceId)))
   // Reserved-namespace identity headers, built once per turn (the actor is
   // constant for the turn). Only attached to connectors that opted in, and
@@ -874,12 +863,12 @@ export async function injectMcpTools(params: {
     if (mediaTokenHeader && c.sendMediaToken) {
       merged = mergeHostConnectorIdentityHeaders(merged, mediaTokenHeader)
     }
-    registerAuthHeaders(c.url, merged ?? {})
+    headersByConnector.set(c, { ...merged })
   })
 
   const discoveries = await Promise.allSettled(
     active.map(async (connector) => {
-      const authHeaders = headersByUrl.get(connector.url) ?? {}
+      const authHeaders = headersByConnector.get(connector) ?? {}
 
       // `updatedAt` in the key: credential/URL edits bump the row's
       // updated_at, so a stale-auth discovery never outlives an edit.
@@ -894,6 +883,8 @@ export async function injectMcpTools(params: {
         return {
           server: cached,
           connectorUrl: connector.url,
+          instanceId: connector.instanceId,
+          headers: authHeaders,
           policy: {
             settingsStore: connector.policyStore,
             userId: connector.policyUserId,
@@ -920,6 +911,8 @@ export async function injectMcpTools(params: {
       return {
         server,
         connectorUrl: connector.url,
+        instanceId: connector.instanceId,
+        headers: authHeaders,
         policy: {
           settingsStore: connector.policyStore,
           userId: connector.policyUserId,
@@ -947,20 +940,21 @@ export async function injectMcpTools(params: {
   // (`keepBuiltinsDirect: true`) still gets `mcp_search` / `mcp_call`
   // here for custom MCP only — built-ins stay direct so the workflow
   // executor's per-tool `requiresConfirmation` inspection still works.
-  const remoteSources: RemoteSource[] = discoveredServers.map(({ server, connectorUrl, policy }) => ({
+  const remoteInstanceIds = new Set(discoveredServers.flatMap(source => source.instanceId ? [source.instanceId] : []))
+  const remoteSources: RemoteSource[] = discoveredServers.map(({ server, connectorUrl, instanceId, headers, policy }) => ({
     kind: 'remote' as const,
     server,
     serverUrl: connectorUrl,
-    callMcpTool: (url: string, toolName: string, input: Record<string, unknown>) =>
-      invokeRemoteMcp(url, toolName, input, headersByUrl.get(url)),
+    ...(instanceId ? { sourceId: `connector:${instanceId}` } : {}),
+    callMcpTool: (_url: string, toolName: string, input: Record<string, unknown>, overrides?: Record<string, string>) =>
+      invokeRemoteMcp(connectorUrl, toolName, input, mergeValidatedHeaders(headers, overrides)),
     policy,
   }))
 
   // Discover a custom remote MCP shared to this workspace via a grant and add
   // it to the search index. Per-instance auth credentials (bearer / custom
-  // header) are resolved off the granted instance row and joined by URL —
-  // same as the personal / team-native custom paths above. Deduped by URL so
-  // a server reachable through more than one path is indexed once. See
+  // header) stay bound to the exact instance like the personal/team-native paths.
+  // Duplicate exposure of one instance is indexed once; equal URLs stay distinct. See
   // docs/architecture/integrations/mcp.md → "Workspace connector scoping".
   async function addGrantedCustomMcp(
     url: string,
@@ -971,12 +965,11 @@ export async function injectMcpTools(params: {
     policyServerName?: string,
     config?: Record<string, unknown>,
   ): Promise<void> {
-    if (remoteSources.some((s) => s.serverUrl === url)) return
+    if (instanceId ? remoteInstanceIds.has(instanceId) : remoteSources.some(source => source.serverUrl === url)) return
     try {
       let authHeaders = mergeValidatedHeaders(await loadAuthHeaders(instanceId), preflightHeadersToRecord(config)) ?? {}
       if (actorHeaders && config?.sendActorIdentity === true) authHeaders = mergeHostConnectorIdentityHeaders(authHeaders, actorHeaders)
       if (mediaTokenHeader && config?.sendMediaToken === true) authHeaders = mergeHostConnectorIdentityHeaders(authHeaders, mediaTokenHeader)
-      registerAuthHeaders(url, authHeaders)
       const cacheKey = `${runtimeAuthority?.cacheKey ?? cacheUserId}:${assistantId}:${instanceId}:${bindingCacheKey(instanceId)}:${url}:${updatedAt?.getTime() ?? 0}`
       await runtimeAuthority?.assertCurrent()
       await assertBindingsCurrent()
@@ -996,8 +989,9 @@ export async function injectMcpTools(params: {
         kind: 'remote',
         server,
         serverUrl: url,
-        callMcpTool: (u: string, toolName: string, input: Record<string, unknown>) =>
-          invokeRemoteMcp(u, toolName, input, headersByUrl.get(u)),
+        ...(instanceId ? { sourceId: `connector:${instanceId}` } : {}),
+        callMcpTool: (_url: string, toolName: string, input: Record<string, unknown>, overrides?: Record<string, string>) =>
+          invokeRemoteMcp(url, toolName, input, mergeValidatedHeaders(authHeaders, overrides)),
         policy: {
           settingsStore,
           userId: cacheUserId,
@@ -1005,6 +999,7 @@ export async function injectMcpTools(params: {
           appLevelAssistantId: APP_LEVEL_ASSISTANT_ID,
         },
       })
+      if (instanceId) remoteInstanceIds.add(instanceId)
       console.debug(`[mcp-inject] granted custom MCP ${name}: discovered ${server.tools.length} tools`)
     } catch (err) {
       console.error(`[mcp-inject] granted custom MCP discovery failed (${name}):`, err)
@@ -2158,13 +2153,7 @@ export async function injectMcpTools(params: {
       assistantId,
       appLevelAssistantId: APP_LEVEL_ASSISTANT_ID,
       userId,
-      // The execution dispatcher — every remote mcp_call lands here with
-      // only the serverUrl, so per-connector auth joins via headersByUrl.
-      // A preflight hook may pass `overrides`, merged over the stored-
-      // credential headers (override wins, re-validated) just before the
-      // wire call. See docs/architecture/engine/tool-hooks.md.
-      callMcpTool: (serverUrl, toolName, input, overrides) =>
-        invokeRemoteMcp(serverUrl, toolName, input, mergeValidatedHeaders(headersByUrl.get(serverUrl), overrides)),
+      // The index owns each source's exact dispatcher and validated overrides.
       hooks: engineHooks,
       keepDynamicToolsDirect,
     })

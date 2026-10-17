@@ -28,7 +28,8 @@ describe('[COMP:api/connector-context] real common injector native admission', (
     let requests = 0, reads = 0, afterRead: (() => Promise<void>) | undefined
     const source = express(); source.use(express.json())
     source.all('/mcp', async (req, res) => {
-      if (req.headers.authorization !== 'Bearer fictional-native-source-transport') { res.sendStatus(401); return }
+      if (!['Bearer fictional-native-source-transport','Bearer fictional-second-source-transport'].includes(String(req.headers.authorization))) { res.sendStatus(401); return }
+      const credential = req.headers.authorization === 'Bearer fictional-native-source-transport' ? 'credential-first' : 'credential-second'
       requests++
       const server = new McpServer({ name: 'Native admission fixture', version: '1' })
       server.registerTool('readFixture', { inputSchema: {} }, async () => {
@@ -36,7 +37,7 @@ describe('[COMP:api/connector-context] real common injector native admission', (
         expect(req.headers['x-usebrian-user-id']).toBe(member)
         expect(req.headers['x-usebrian-assistant-id']).toBe(assistant)
         await afterRead?.()
-        return { content: [{ type: 'text', text: 'Fixture Department payload' }] }
+        return { content: [{ type: 'text', text: `Fixture Department payload ${credential}` }] }
       })
       const transport = new StreamableHTTPServerTransport({ sessionIdGenerator: undefined })
       res.once('close', () => { void transport.close(); void server.close() })
@@ -123,6 +124,29 @@ describe('[COMP:api/connector-context] real common injector native admission', (
       afterRead = async () => { cancelled.abort.abort() }
       await expect(cancelled.tools.get('readFixture')!.execute({}, cancelled.context)).rejects.toMatchObject({ reason: 'authority_changed', operationMayHaveExecuted: true })
       expect(reads).toBe(3)
+      afterRead = undefined
+      const secondConfig = { ...common, provider: randomUUID(), label: 'Alternative admission fixture',
+        credentials: { type: 'bearer' as const, token: 'fictional-second-source-transport' } }
+      const second = lane === 'owned'
+        ? await instances.createWorkspaceInstance({ ...secondConfig, workspaceId: workspace, compartments: [`team:${departments[0]}`], projectIds: [] })
+        : await instances.createUserInstance({ ...secondConfig, userId: owner })
+      if (lane === 'exposed') await grants.create({ actingUserId: owner, connectorInstanceId: second.id, targetType: 'workspace', targetId: workspace,
+        compartments: [`team:${departments[0]}`], projectIds: [] })
+      const sharedUrl = await inject(member)
+      const gateway = sharedUrl.tools.get('mcp_call')!
+      expect(JSON.stringify(await gateway.execute({ server: 'Alternative admission fixture', tool: 'readFixture', args: {} }, sharedUrl.context))).toContain('credential-second')
+      expect(JSON.stringify(await gateway.execute({ server: 'Native admission fixture', tool: 'readFixture', args: {} }, sharedUrl.context))).toContain('credential-first')
+      expect(reads).toBe(5)
+      expect(JSON.stringify(await sharedUrl.tools.get('mcp_search')!.execute({ query: 'readFixture', limit: 8 }, sharedUrl.context))).toContain(`connector:${second.id}`)
+      expect(JSON.stringify(await gateway.execute({ server: `connector:${second.id}`, tool: 'readFixture', args: {} }, sharedUrl.context))).toContain('credential-second')
+      await instances.update(owner, second.id, { label: 'Native admission fixture' })
+      const ambiguous = await inject(member)
+      expect(ambiguous.tools.has('readFixture')).toBe(false)
+      expect(await ambiguous.tools.get('mcp_call')!.execute({ server: 'Native admission fixture', tool: 'readFixture', args: {} }, ambiguous.context)).toMatchObject({ isError: true })
+      expect(reads).toBe(6)
+      expect(JSON.stringify(await ambiguous.tools.get('mcp_call')!.execute({ server: `connector:${second.id}`, tool: 'readFixture', args: {} }, ambiguous.context))).toContain('credential-second')
+      expect(JSON.stringify(await ambiguous.tools.get('mcp_call')!.execute({ server: `connector:${instance.id}`, tool: 'readFixture', args: {} }, ambiguous.context))).toContain('credential-first')
+      expect(reads).toBe(8)
     } finally {
       await new Promise<void>(resolve => listener.close(() => resolve()))
       await pool.query('DELETE FROM workspaces WHERE id=$1', [workspace])
