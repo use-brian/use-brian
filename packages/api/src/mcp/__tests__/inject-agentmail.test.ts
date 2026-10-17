@@ -26,11 +26,13 @@ function settingsStoreStub() {
 const INSTANCES = [
   {
     id: 'inbox-primary', provider: 'agentmail', label: 'brian@agentmail.to',
+    compartments: [], projectIds: [],
     connectedEmail: 'brian@agentmail.to', connected: true, healthStatus: 'ok',
     custom: false, url: null, createdAt: new Date('2026-08-01T00:00:00Z'),
   },
   {
     id: 'inbox-ops', provider: 'agentmail', label: 'ops@agentmail.to',
+    compartments: [], projectIds: [],
     connectedEmail: 'ops@agentmail.to', connected: true, healthStatus: 'ok',
     custom: false, url: null, createdAt: new Date('2026-08-02T00:00:00Z'),
   },

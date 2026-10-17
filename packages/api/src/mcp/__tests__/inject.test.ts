@@ -11,6 +11,13 @@
 
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest'
 
+/** Canonical store rows always carry explicit General or labelled audience arrays. */
+function explicitConnectorBindings<T extends object>(rows: T[]) {
+  return rows.map(row => ({ compartments: [], projectIds: [], ...row,
+    ...('instance' in row ? { instance: { compartments: [], projectIds: [], ...(row.instance as object) } } : {}),
+  }))
+}
+
 // Built-in connector injectors resolve their OAuth app creds via
 // getConnectorConfig and no-op when none are configured — default to
 // undefined so the no-connector path is inert regardless of the runner's
@@ -356,7 +363,7 @@ describe('[COMP:api/mcp-inject] granted custom MCP overlay', () => {
     })
     const tools = new Map()
     const connectorGrantStore = {
-      listForTargetSystem: vi.fn().mockResolvedValue([
+      listForTargetSystem: vi.fn().mockResolvedValue(explicitConnectorBindings([
         {
           grantedByUserId: 'grantor-1',
           instance: {
@@ -365,7 +372,7 @@ describe('[COMP:api/mcp-inject] granted custom MCP overlay', () => {
             custom: true, connected: true, config: {}, sensitivity: 'internal',
           },
         },
-      ]),
+      ])),
     }
     const isEnabled = vi.fn().mockResolvedValue(true)
 
@@ -429,13 +436,13 @@ describe('[COMP:api/mcp-inject] granted custom MCP overlay', () => {
       connectorStore: { list: vi.fn().mockResolvedValue([]) } as never,
       settingsStore: settingsStoreStub() as never,
       connectorGrantStore: {
-        listForTargetSystem: vi.fn().mockResolvedValue([{
+        listForTargetSystem: vi.fn().mockResolvedValue(explicitConnectorBindings([{
           grantedByUserId: 'grantor-1',
           instance: {
             id: 'ci-crm', provider: 'mcp-crm', label: 'CRM MCP',
             url: 'http://localhost:8772/mcp', custom: true, connected: true, config: {},
           },
-        }]),
+        }])),
       } as never,
       assistantTeamId: 'ws-shared',
       restrictSearchToToolNames: ['readCustomer'],
@@ -459,7 +466,7 @@ describe('[COMP:api/mcp-inject] granted custom MCP overlay', () => {
   it('skips a disconnected granted custom MCP', async () => {
     const tools = new Map()
     const connectorGrantStore = {
-      listForTargetSystem: vi.fn().mockResolvedValue([
+      listForTargetSystem: vi.fn().mockResolvedValue(explicitConnectorBindings([
         {
           grantedByUserId: 'grantor-1',
           instance: {
@@ -467,7 +474,7 @@ describe('[COMP:api/mcp-inject] granted custom MCP overlay', () => {
             url: 'http://localhost:8771/mcp', custom: true, connected: false, config: {},
           },
         },
-      ]),
+      ])),
     }
     await injectMcpTools({
       userId: 'owner-1', assistantId: 'a-1', tools,
@@ -494,13 +501,13 @@ describe('[COMP:api/mcp-inject] granted CLI MCP overlay', () => {
     ]
     const tools = new Map()
     const connectorGrantStore = {
-      listForTargetSystem: vi.fn().mockResolvedValue(instances.map((instance) => ({
+      listForTargetSystem: vi.fn().mockResolvedValue(explicitConnectorBindings(instances.map((instance) => ({
         grantedByUserId: 'grantor-1',
         instance,
-      }))),
+      })))),
     }
     const connectorInstanceStore = {
-      listByWorkspaceSystem: vi.fn().mockResolvedValue([]),
+      listByWorkspaceSystem: vi.fn().mockResolvedValue(explicitConnectorBindings([])),
       getAuthCredentialsSystem: vi.fn(async (id: string) => ({
         type: 'cli', binaryPath: '/usr/bin/node', args: [`/tmp/${id}.js`],
       })),
@@ -538,16 +545,16 @@ describe('[COMP:api/mcp-inject] granted CLI MCP overlay', () => {
       connectorStore: { list: vi.fn().mockResolvedValue([]) } as never,
       settingsStore: settingsStoreStub() as never,
       connectorGrantStore: {
-        listForTargetSystem: vi.fn().mockResolvedValue([{
+        listForTargetSystem: vi.fn().mockResolvedValue(explicitConnectorBindings([{
           grantedByUserId: 'grantor-1',
           instance: {
             id: 'cli-local', provider: 'cli', label: 'Local CRM',
             connected: true, config: {}, updatedAt: new Date(0),
           },
-        }]),
+        }])),
       } as never,
       connectorInstanceStore: {
-        listByWorkspaceSystem: vi.fn().mockResolvedValue([]),
+        listByWorkspaceSystem: vi.fn().mockResolvedValue(explicitConnectorBindings([])),
         getAuthCredentialsSystem: vi.fn().mockResolvedValue({
           type: 'cli', binaryPath: '/usr/bin/node', args: ['/tmp/local-crm.js'],
         }),
@@ -601,12 +608,12 @@ describe('[COMP:api/mcp-inject] granted CLI MCP overlay', () => {
       settingsStore: settingsStoreStub() as never,
       assistantConnectorStore: { isEnabled } as never,
       connectorGrantStore: {
-        listForTargetSystem: vi.fn().mockResolvedValue(instances.map((instance) => ({
+        listForTargetSystem: vi.fn().mockResolvedValue(explicitConnectorBindings(instances.map((instance) => ({
           grantedByUserId: 'grantor-1', instance,
-        }))),
+        })))),
       } as never,
       connectorInstanceStore: {
-        listByWorkspaceSystem: vi.fn().mockResolvedValue([]),
+        listByWorkspaceSystem: vi.fn().mockResolvedValue(explicitConnectorBindings([])),
         getAuthCredentialsSystem: vi.fn().mockResolvedValue({
           type: 'cli', binaryPath: '/usr/bin/node', args: ['/tmp/server.js'],
         }),
@@ -635,12 +642,12 @@ describe('[COMP:api/mcp-inject] granted CLI MCP overlay', () => {
       connectorStore: { list: vi.fn().mockResolvedValue([]) } as never,
       settingsStore: settingsStoreStub() as never,
       connectorGrantStore: {
-        listForTargetSystem: vi.fn().mockResolvedValue(instances.map((instance) => ({
+        listForTargetSystem: vi.fn().mockResolvedValue(explicitConnectorBindings(instances.map((instance) => ({
           grantedByUserId: 'grantor-1', instance,
-        }))),
+        })))),
       } as never,
       connectorInstanceStore: {
-        listByWorkspaceSystem: vi.fn().mockResolvedValue([]),
+        listByWorkspaceSystem: vi.fn().mockResolvedValue(explicitConnectorBindings([])),
         getAuthCredentialsSystem: vi.fn().mockResolvedValue({
           type: 'cli', binaryPath: '/usr/bin/node', args: ['/tmp/calendar.js'],
         }),
@@ -1637,10 +1644,10 @@ describe('[COMP:api/mcp-inject] grant overlay instance binding', () => {
       updateCredentialsSystem: vi.fn(),
       markHealth: vi.fn(),
       // No team-native rows — the grant overlay is the only Google source.
-      listByWorkspaceSystem: vi.fn().mockResolvedValue([]),
+      listByWorkspaceSystem: vi.fn().mockResolvedValue(explicitConnectorBindings([])),
     }
     const connectorGrantStore = {
-      listForTargetSystem: vi.fn().mockResolvedValue([
+      listForTargetSystem: vi.fn().mockResolvedValue(explicitConnectorBindings([
         {
           grantedByUserId: 'grantor-1',
           instance: {
@@ -1649,7 +1656,7 @@ describe('[COMP:api/mcp-inject] grant overlay instance binding', () => {
             connected: true, healthStatus: 'ok', config: {}, sensitivity: 'internal',
           },
         },
-      ]),
+      ])),
     }
     return { connectorStore, connectorInstanceStore, connectorGrantStore }
   }
@@ -1715,10 +1722,10 @@ describe('[COMP:api/mcp-inject] grant overlay instance binding', () => {
       getCredentialsSystem: vi.fn().mockResolvedValue({ client_id: 'google_refresh', client_secret: 'refresh-drive' }),
       updateCredentialsSystem: vi.fn(),
       markHealth: vi.fn(),
-      listByWorkspaceSystem: vi.fn().mockResolvedValue([]),
+      listByWorkspaceSystem: vi.fn().mockResolvedValue(explicitConnectorBindings([])),
     }
     const connectorGrantStore = {
-      listForTargetSystem: vi.fn().mockResolvedValue([{
+      listForTargetSystem: vi.fn().mockResolvedValue(explicitConnectorBindings([{
         grantedByUserId: 'grantor-1',
         instance: {
           id: 'ci-drive-exposed', scope: 'user', userId: 'grantor-1', workspaceId: null,
@@ -1726,7 +1733,7 @@ describe('[COMP:api/mcp-inject] grant overlay instance binding', () => {
           connected: true, healthStatus: 'ok', sensitivity: 'confidential',
           config: { driveAccessMode: 'full_drive_readonly' },
         },
-      }]),
+      }])),
     }
     const tools = new Map()
     enqueueGDriveLazyEnrichment.mockClear()
@@ -1787,10 +1794,10 @@ describe('[COMP:api/mcp-inject] grant overlay instance binding', () => {
       getCredentialsSystem: vi.fn().mockResolvedValue({ client_id: 'google_refresh', client_secret: 'refresh-drive' }),
       updateCredentialsSystem: vi.fn(),
       markHealth: vi.fn(),
-      listByWorkspaceSystem: vi.fn().mockResolvedValue([]),
+      listByWorkspaceSystem: vi.fn().mockResolvedValue(explicitConnectorBindings([])),
     }
     const connectorGrantStore = {
-      listForTargetSystem: vi.fn().mockResolvedValue([{
+      listForTargetSystem: vi.fn().mockResolvedValue(explicitConnectorBindings([{
         grantedByUserId: 'grantor-1',
         instance: {
           id: 'ci-drive-exposed', scope: 'user', userId: 'grantor-1', workspaceId: null,
@@ -1798,7 +1805,7 @@ describe('[COMP:api/mcp-inject] grant overlay instance binding', () => {
           connected: true, healthStatus: 'ok', sensitivity: 'confidential',
           config: { driveAccessMode: 'full_drive_readonly' },
         },
-      }]),
+      }])),
     }
     const tools = new Map()
     await injectMcpTools({
@@ -1825,7 +1832,7 @@ describe('[COMP:api/mcp-inject] grant overlay instance binding', () => {
 
   it('injects every exposed Gmail account and honors an exact extra-account enable switch', async () => {
     const { connectorStore, connectorInstanceStore, connectorGrantStore } = stores()
-    connectorGrantStore.listForTargetSystem.mockResolvedValue([
+    connectorGrantStore.listForTargetSystem.mockResolvedValue(explicitConnectorBindings([
       {
         grantedByUserId: 'grantor-1',
         instance: {
@@ -1842,7 +1849,7 @@ describe('[COMP:api/mcp-inject] grant overlay instance binding', () => {
           custom: false, url: null, createdAt: new Date('2026-07-02T00:00:00Z'),
         },
       },
-    ])
+    ]))
     const assistantConnectorStore = {
       isEnabled: vi.fn().mockResolvedValue(true),
     }
@@ -1914,13 +1921,13 @@ describe('[COMP:api/mcp-inject] grant overlay instance binding', () => {
     const connectorInstanceStore = {
       getCredentialsSystem: vi.fn(async (id: string) => ({ client_id: 'github_pat', client_secret: `pat-${id}` })),
       updateCredentialsSystem: vi.fn(), markHealth: vi.fn(),
-      listByWorkspaceSystem: vi.fn().mockResolvedValue([]),
+      listByWorkspaceSystem: vi.fn().mockResolvedValue(explicitConnectorBindings([])),
     }
     const connectorGrantStore = {
-      listForTargetSystem: vi.fn().mockResolvedValue([
+      listForTargetSystem: vi.fn().mockResolvedValue(explicitConnectorBindings([
         { grantedByUserId: 'grantor-1', instance: { id: 'ci-gh-primary', provider: 'github', label: 'GitHub - hinson', connected: true, healthStatus: 'ok', custom: false, url: null, createdAt: new Date('2026-07-01T00:00:00Z') } },
         { grantedByUserId: 'grantor-1', instance: { id: 'ci-gh-work', provider: 'github', label: 'GitHub - brian', connected: true, healthStatus: 'ok', custom: false, url: null, createdAt: new Date('2026-07-02T00:00:00Z') } },
-      ]),
+      ])),
     }
     const tools = new Map()
 
@@ -1954,7 +1961,7 @@ describe('[COMP:integrations/connector-health] team-native connector health gate
     return {
       connectorStore: { list: vi.fn().mockResolvedValue([]), getCredentials: vi.fn().mockResolvedValue(null) },
       connectorInstanceStore: {
-        listByWorkspaceSystem: vi.fn().mockResolvedValue([teamGithub(healthStatus)]),
+        listByWorkspaceSystem: vi.fn().mockResolvedValue(explicitConnectorBindings([teamGithub(healthStatus)])),
         getCredentialsSystem: vi.fn().mockResolvedValue({ client_id: 'github_pat', client_secret: 'pat-ws' }),
         getAuthCredentialsSystem: vi.fn().mockResolvedValue(null),
         markHealth: vi.fn(),
@@ -2008,7 +2015,7 @@ describe('[COMP:api/workspace-tool-policy-store] team-owned connector shared pol
     return {
       connectorStore: { list: vi.fn().mockResolvedValue([]), getCredentials: vi.fn().mockResolvedValue(null) },
       connectorInstanceStore: {
-        listByWorkspaceSystem: vi.fn().mockResolvedValue([teamGithub()]),
+        listByWorkspaceSystem: vi.fn().mockResolvedValue(explicitConnectorBindings([teamGithub()])),
         getCredentialsSystem: vi.fn().mockResolvedValue({ client_id: 'github_pat', client_secret: 'pat-ws' }),
         getAuthCredentialsSystem: vi.fn().mockResolvedValue(null),
         markHealth: vi.fn(),
@@ -2260,10 +2267,10 @@ describe('[COMP:api/mcp-inject] msgraph workspace overlays', () => {
       getCredentialsSystem: vi.fn(async (id: string) => ({ client_id: 'msgraph_oauth', client_secret: packed(`refresh-${id}`) })),
       updateCredentialsSystem: vi.fn(),
       markHealth: vi.fn(),
-      listByWorkspaceSystem: vi.fn().mockResolvedValue([]),
+      listByWorkspaceSystem: vi.fn().mockResolvedValue(explicitConnectorBindings([])),
     }
     const connectorGrantStore = {
-      listForTargetSystem: vi.fn().mockResolvedValue([]),
+      listForTargetSystem: vi.fn().mockResolvedValue(explicitConnectorBindings([])),
     }
     return { connectorStore, connectorInstanceStore, connectorGrantStore }
   }
@@ -2283,12 +2290,12 @@ describe('[COMP:api/mcp-inject] msgraph workspace overlays', () => {
     const diagnostics = vi.spyOn(console, 'info').mockImplementation(() => {})
     const { connectorStore, connectorInstanceStore, connectorGrantStore } = stores()
     const instance = { ...exposedInstance, label: 'PRIVATE-CONNECTOR-LABEL', compartments: ['team:product'], projectIds: ['project'] }
-    if (lane === 'owned') connectorInstanceStore.listByWorkspaceSystem.mockResolvedValue([
+    if (lane === 'owned') connectorInstanceStore.listByWorkspaceSystem.mockResolvedValue(explicitConnectorBindings([
       { ...instance, scope: 'workspace', userId: null, workspaceId: 'ws-1' },
-    ])
-    else connectorGrantStore.listForTargetSystem.mockResolvedValue([
+    ]))
+    else connectorGrantStore.listForTargetSystem.mockResolvedValue(explicitConnectorBindings([
       { grantedByUserId: 'grantor-1', instance, compartments: ['team:product'], projectIds: ['project'] },
-    ])
+    ]))
     const inject = async (mutationCompartments: string[], expectRestriction = true) => {
       const tools = new Map()
       const result = await injectMcpTools({
@@ -2312,29 +2319,28 @@ describe('[COMP:api/mcp-inject] msgraph workspace overlays', () => {
     for (const name of PROBE_TOOLS) expect(denied.has(name)).toBe(false)
     expect(msGraphTokenResolvers).toHaveLength(0)
     expect(connectorInstanceStore.getCredentialsSystem).not.toHaveBeenCalled()
-    // A turn inside the connector's department is its audience: tools load.
-    const matching = await inject(['team:product'], false)
-    for (const name of PROBE_TOOLS) expect(matching.has(name)).toBe(true)
-    expect(connectorInstanceStore.getCredentialsSystem).toHaveBeenCalled()
-    // Only the denied injection logs, once across its discovery lanes.
-    expect(diagnostics.mock.calls).toEqual(Array.from({ length: 1 }, () => [
+    // Flat scope metadata cannot replace the missing authenticated initiator.
+    const matching = await inject(['team:product'])
+    for (const name of PROBE_TOOLS) expect(matching.has(name)).toBe(false)
+    expect(connectorInstanceStore.getCredentialsSystem).not.toHaveBeenCalled()
+    expect(diagnostics.mock.calls).toEqual(Array.from({ length: 2 }, () => [
       '[mcp-inject] connector discovery scope restriction',
       { assistantId: 'a-1', workspaceId: 'ws-1', reason: 'connector_exposure_outside_execution_scope' },
     ]))
     diagnostics.mockRestore()
   })
 
-  it.each(['owned', 'exposed'] as const)('injects %s department connectors for a company-wide turn', async lane => {
+  it.each(['owned', 'exposed'] as const)('does not treat an unbound company-wide scope as native membership for %s connectors', async lane => {
     const tools = new Map()
     const diagnostics = vi.spyOn(console, 'info').mockImplementation(() => {})
     const { connectorStore, connectorInstanceStore, connectorGrantStore } = stores()
     const instance = { ...exposedInstance, compartments: ['team:product'], projectIds: ['project'] }
-    if (lane === 'owned') connectorInstanceStore.listByWorkspaceSystem.mockResolvedValue([
+    if (lane === 'owned') connectorInstanceStore.listByWorkspaceSystem.mockResolvedValue(explicitConnectorBindings([
       { ...instance, scope: 'workspace', userId: null, workspaceId: 'ws-1' },
-    ])
-    else connectorGrantStore.listForTargetSystem.mockResolvedValue([
+    ]))
+    else connectorGrantStore.listForTargetSystem.mockResolvedValue(explicitConnectorBindings([
       { grantedByUserId: 'grantor-1', instance, compartments: ['team:product'], projectIds: ['project'] },
-    ])
+    ]))
 
     const result = await injectMcpTools({
       userId: 'owner-1', assistantId: 'a-1', tools,
@@ -2346,20 +2352,20 @@ describe('[COMP:api/mcp-inject] msgraph workspace overlays', () => {
         access: { mutationCompartments: null } },
     })
 
-    for (const name of PROBE_TOOLS) expect(tools.has(name)).toBe(true)
-    expect(msGraphTokenResolvers.length).toBeGreaterThan(0)
-    expect(connectorInstanceStore.getCredentialsSystem).toHaveBeenCalled()
-    expect(result.unavailable.some(message => message.includes('execution scope'))).toBe(false)
-    expect(diagnostics).not.toHaveBeenCalled()
+    for (const name of PROBE_TOOLS) expect(tools.has(name)).toBe(false)
+    expect(msGraphTokenResolvers).toHaveLength(0)
+    expect(connectorInstanceStore.getCredentialsSystem).not.toHaveBeenCalled()
+    expect(result.unavailable.some(message => message.includes('execution scope'))).toBe(true)
+    expect(diagnostics).toHaveBeenCalledTimes(1)
     diagnostics.mockRestore()
   })
 
   it('injects Teams tools for a workspace assistant through a member-exposure grant', async () => {
     const tools = new Map()
     const { connectorStore, connectorInstanceStore, connectorGrantStore } = stores()
-    connectorGrantStore.listForTargetSystem.mockResolvedValue([
+    connectorGrantStore.listForTargetSystem.mockResolvedValue(explicitConnectorBindings([
       { grantedByUserId: 'grantor-1', instance: exposedInstance },
-    ])
+    ]))
 
     await injectMcpTools({
       userId: 'owner-1', assistantId: 'a-1', tools,
@@ -2380,9 +2386,9 @@ describe('[COMP:api/mcp-inject] msgraph workspace overlays', () => {
     // account, which may never have been exposed to this workspace.
     const tools = new Map()
     const { connectorStore, connectorInstanceStore, connectorGrantStore } = stores()
-    connectorGrantStore.listForTargetSystem.mockResolvedValue([
+    connectorGrantStore.listForTargetSystem.mockResolvedValue(explicitConnectorBindings([
       { grantedByUserId: 'grantor-1', instance: exposedInstance },
-    ])
+    ]))
 
     await injectMcpTools({
       userId: 'owner-1', assistantId: 'a-1', tools,
@@ -2403,9 +2409,9 @@ describe('[COMP:api/mcp-inject] msgraph workspace overlays', () => {
   it('announces a reconnect instead of injecting when the granted instance is dead', async () => {
     const tools = new Map()
     const { connectorStore, connectorInstanceStore, connectorGrantStore } = stores()
-    connectorGrantStore.listForTargetSystem.mockResolvedValue([
+    connectorGrantStore.listForTargetSystem.mockResolvedValue(explicitConnectorBindings([
       { grantedByUserId: 'grantor-1', instance: { ...exposedInstance, healthStatus: 'auth_failed' } },
-    ])
+    ]))
 
     const result = await injectMcpTools({
       userId: 'owner-1', assistantId: 'a-1', tools,
@@ -2430,9 +2436,9 @@ describe('[COMP:api/mcp-inject] msgraph workspace overlays', () => {
     // answered from the advert ("it has no interactive tools I can call").
     const tools = new Map()
     const { connectorStore, connectorInstanceStore, connectorGrantStore } = stores()
-    connectorGrantStore.listForTargetSystem.mockResolvedValue([
+    connectorGrantStore.listForTargetSystem.mockResolvedValue(explicitConnectorBindings([
       { grantedByUserId: 'grantor-1', instance: exposedInstance },
-    ])
+    ]))
 
     const result = await injectMcpTools({
       userId: 'owner-1', assistantId: 'a-1', tools,
@@ -2453,14 +2459,14 @@ describe('[COMP:api/mcp-inject] msgraph workspace overlays', () => {
   it('injects Teams tools for a team-native (workspace-scoped) msgraph instance', async () => {
     const tools = new Map()
     const { connectorStore, connectorInstanceStore, connectorGrantStore } = stores()
-    connectorInstanceStore.listByWorkspaceSystem.mockResolvedValue([
+    connectorInstanceStore.listByWorkspaceSystem.mockResolvedValue(explicitConnectorBindings([
       {
         id: 'ci-ms-team', scope: 'workspace', userId: null, workspaceId: 'ws-1',
         provider: 'msgraph', label: 'Company Teams', url: null, custom: false,
         connected: true, healthStatus: 'ok', config: {}, sensitivity: 'internal',
         updatedAt: new Date('2026-07-28T00:00:00Z'),
       },
-    ])
+    ]))
 
     await injectMcpTools({
       userId: 'owner-1', assistantId: 'a-1', tools,

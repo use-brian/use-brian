@@ -157,6 +157,10 @@ import {
   type KnowledgeCaptureRuleStore,
 } from '../knowledge/capture-rules.js'
 import { CONNECTOR_SCOPE_RESTRICTION } from './discovery-diagnostics.js'
+import { createConnectorRuntimeAuthority } from '../application-platform/connector-runtime-authority.js'
+import type { ToolContext } from '@use-brian/core'
+import { createHash } from 'node:crypto'
+import { AuthorityChangedError } from '../context-scope/authority-lease.js'
 import {
   connectorExposureAllowed,
   type ConnectorContextBinding,
@@ -581,11 +585,68 @@ export async function injectMcpTools(params: {
   } = params
 
   const unavailable: string[] = []
+  const originalTools = new Map(tools)
+  const runtimeActorId = contextScope?.access?.userId ?? actorIdentity?.userId
+  const pinnedBindings = new Map<string, { instanceId: string; instance: string; grant?: string }>()
+  const pinnedAuth = new Map<string, string>()
+  let bindingsInvalid = false
+  const digest = (value: unknown) => createHash('sha256').update(JSON.stringify(value)).digest('hex')
+  const instanceBinding = (instance: Record<string, unknown>) => digest([instance.id,instance.scope,instance.userId,instance.workspaceId,
+    instance.provider,instance.connected,instance.url,instance.sensitivity,instance.compartments,instance.projectIds,instance.config,
+    instance.healthStatus === 'auth_failed'])
+  const exposureBinding = (grant: Record<string, unknown>) => digest([grant.id,grant.connectorInstanceId,grant.targetType,grant.targetId,
+    grant.grantedByUserId,grant.compartments,grant.projectIds])
+  const authBinding = (headers: Record<string, string>) => digest(Object.entries(headers).sort(([left],[right]) => left.localeCompare(right)))
+  const bindingCacheKey = (id: string | null | undefined) => digest([...pinnedBindings].filter(([, binding]) => binding.instanceId === id)
+    .sort(([left],[right]) => left.localeCompare(right)))
+  function pinBinding(binding: ConnectorContextBinding) {
+    if (!assistantTeamId || !runtimeActorId || !connectorInstanceStore) return
+    const row = binding as unknown as Record<string, unknown>
+    const instance = (row.instance ?? row) as Record<string, unknown>
+    if (typeof instance.id !== 'string' || typeof row.id !== 'string') return
+    const key = `${row.instance ? 'grant' : 'instance'}:${row.id}`
+    const pinned = { instanceId: instance.id, instance: instanceBinding(instance), ...(row.instance ? { grant: exposureBinding(row) } : {}) }
+    const prior = pinnedBindings.get(key)
+    if (prior && JSON.stringify(prior) !== JSON.stringify(pinned)) bindingsInvalid = true
+    else pinnedBindings.set(key, pinned)
+  }
+  async function assertBindingsCurrent(mayHaveExecuted = false) {
+    if (bindingsInvalid) throw new AuthorityChangedError(mayHaveExecuted)
+    try {
+      const grants = [...pinnedBindings.values()].some(binding => binding.grant)
+        ? await connectorGrantStore!.listForTargetSystem('workspace', assistantTeamId!) : []
+      await Promise.all([...pinnedBindings].map(async ([key, expected]) => {
+        const current = await connectorInstanceStore!.getSystem(expected.instanceId)
+        if (!current || instanceBinding(current as unknown as Record<string, unknown>) !== expected.instance) throw new AuthorityChangedError(mayHaveExecuted)
+        if (expected.grant) {
+          const grant = grants.find(grant => `grant:${grant.id}` === key)
+          if (!grant || exposureBinding(grant as unknown as Record<string, unknown>) !== expected.grant) throw new AuthorityChangedError(mayHaveExecuted)
+        }
+      }))
+      await Promise.all([...pinnedAuth].map(async ([id, expected]) => {
+        const headers = buildConnectorAuthHeaders(await connectorInstanceStore!.getAuthCredentialsSystem(id))
+        if (authBinding(headers) !== expected) throw new AuthorityChangedError(mayHaveExecuted)
+      }))
+    } catch {
+      bindingsInvalid = true
+      throw new AuthorityChangedError(mayHaveExecuted)
+    }
+  }
+  let runtimeAuthority: Awaited<ReturnType<typeof createConnectorRuntimeAuthority>> | undefined
+  if (assistantTeamId) {
+    try {
+      runtimeAuthority = await createConnectorRuntimeAuthority({ workspaceId: assistantTeamId, assistantId,
+        initiatingUserId: runtimeActorId, identityUserId: actorIdentity?.userId })
+    } catch {
+      return { enrichConfirmation: async (_tool, input) => input, unavailable: [CONNECTOR_SCOPE_RESTRICTION], searchableSources: [] }
+    }
+  }
   // Discovery visits the same bindings in multiple lanes. Report once per
   // injection, without exposing connector identity, scope values, or counts.
   let scopeRejectionReported = false
   const exposureAllowed = (binding: ConnectorContextBinding): boolean => {
-    const allowed = connectorExposureAllowed(contextScope, binding)
+    const allowed = (runtimeAuthority?.allows(binding) ?? true) && connectorExposureAllowed(contextScope, binding)
+    if (allowed) pinBinding(binding)
     if (!allowed && !scopeRejectionReported) {
       scopeRejectionReported = true
       unavailable.push(CONNECTOR_SCOPE_RESTRICTION)
@@ -747,11 +808,23 @@ export async function injectMcpTools(params: {
     if (!instanceId || !connectorInstanceStore) return {}
     try {
       const creds = await connectorInstanceStore.getAuthCredentialsSystem(instanceId)
-      return buildConnectorAuthHeaders(creds)
+      const headers = buildConnectorAuthHeaders(creds)
+      if (runtimeActorId) {
+        const current = authBinding(headers), prior = pinnedAuth.get(instanceId)
+        if (prior && prior !== current) bindingsInvalid = true
+        else pinnedAuth.set(instanceId, current)
+      }
+      return headers
     } catch (err) {
       console.error('[mcp-inject] auth-header resolution failed:', err)
       return {}
     }
+  }
+
+  async function invokeRemoteMcp(url: string, tool: string, input: Record<string, unknown>, headers?: Record<string, string>) {
+    await runtimeAuthority?.assertCurrent()
+    await assertBindingsCurrent()
+    return callRemoteMcpTool(url, tool, input, headers)
   }
 
   function registerAuthHeaders(url: string, headers: Record<string, string>): void {
@@ -810,7 +883,9 @@ export async function injectMcpTools(params: {
 
       // `updatedAt` in the key: credential/URL edits bump the row's
       // updated_at, so a stale-auth discovery never outlives an edit.
-      const cacheKey = `${userId}:${connector.connectorId}:${connector.url}:${connector.updatedAt?.getTime() ?? 0}`
+      const cacheKey = `${runtimeAuthority?.cacheKey ?? userId}:${assistantId}:${connector.instanceId}:${bindingCacheKey(connector.instanceId)}:${connector.connectorId}:${connector.url}:${connector.updatedAt?.getTime() ?? 0}`
+      await runtimeAuthority?.assertCurrent()
+      await assertBindingsCurrent()
 
       // Check cache first
       const cached = getCachedDiscovery(cacheKey)
@@ -835,6 +910,8 @@ export async function injectMcpTools(params: {
           setTimeout(() => reject(new Error(`Discovery timeout for ${connector.name}`)), DISCOVERY_TIMEOUT),
         ),
       ])
+      await runtimeAuthority?.assertCurrent()
+      await assertBindingsCurrent()
 
       setCachedDiscovery(cacheKey, server)
       console.debug(
@@ -875,7 +952,7 @@ export async function injectMcpTools(params: {
     server,
     serverUrl: connectorUrl,
     callMcpTool: (url: string, toolName: string, input: Record<string, unknown>) =>
-      callRemoteMcpTool(url, toolName, input, headersByUrl.get(url)),
+      invokeRemoteMcp(url, toolName, input, headersByUrl.get(url)),
     policy,
   }))
 
@@ -892,12 +969,17 @@ export async function injectMcpTools(params: {
     instanceId?: string | null,
     updatedAt?: Date | null,
     policyServerName?: string,
+    config?: Record<string, unknown>,
   ): Promise<void> {
     if (remoteSources.some((s) => s.serverUrl === url)) return
     try {
-      const authHeaders = await loadAuthHeaders(instanceId)
+      let authHeaders = mergeValidatedHeaders(await loadAuthHeaders(instanceId), preflightHeadersToRecord(config)) ?? {}
+      if (actorHeaders && config?.sendActorIdentity === true) authHeaders = mergeHostConnectorIdentityHeaders(authHeaders, actorHeaders)
+      if (mediaTokenHeader && config?.sendMediaToken === true) authHeaders = mergeHostConnectorIdentityHeaders(authHeaders, mediaTokenHeader)
       registerAuthHeaders(url, authHeaders)
-      const cacheKey = `${cacheUserId}:${url}:${updatedAt?.getTime() ?? 0}`
+      const cacheKey = `${runtimeAuthority?.cacheKey ?? cacheUserId}:${assistantId}:${instanceId}:${bindingCacheKey(instanceId)}:${url}:${updatedAt?.getTime() ?? 0}`
+      await runtimeAuthority?.assertCurrent()
+      await assertBindingsCurrent()
       let server = getCachedDiscovery(cacheKey)
       if (!server) {
         server = await Promise.race([
@@ -906,6 +988,8 @@ export async function injectMcpTools(params: {
             setTimeout(() => reject(new Error(`Discovery timeout for ${name}`)), DISCOVERY_TIMEOUT),
           ),
         ])
+        await runtimeAuthority?.assertCurrent()
+        await assertBindingsCurrent()
         setCachedDiscovery(cacheKey, server)
       }
       remoteSources.push({
@@ -913,7 +997,7 @@ export async function injectMcpTools(params: {
         server,
         serverUrl: url,
         callMcpTool: (u: string, toolName: string, input: Record<string, unknown>) =>
-          callRemoteMcpTool(u, toolName, input, headersByUrl.get(u)),
+          invokeRemoteMcp(u, toolName, input, headersByUrl.get(u)),
         policy: {
           settingsStore,
           userId: cacheUserId,
@@ -1380,7 +1464,7 @@ export async function injectMcpTools(params: {
           const enabled = !assistantConnectorStore
             || await assistantConnectorStore.isEnabled(assistantId, governanceId, p)
           if (enabled) {
-            await addGrantedCustomMcp(g.instance.url, g.instance.label ?? p, g.grantedByUserId, g.instance.id, g.instance.updatedAt)
+            await addGrantedCustomMcp(g.instance.url, g.instance.label ?? p, g.grantedByUserId, g.instance.id, g.instance.updatedAt, undefined, g.instance.config)
           }
         }
         // Any other unknown provider — skipped.
@@ -2080,7 +2164,7 @@ export async function injectMcpTools(params: {
       // credential headers (override wins, re-validated) just before the
       // wire call. See docs/architecture/engine/tool-hooks.md.
       callMcpTool: (serverUrl, toolName, input, overrides) =>
-        callRemoteMcpTool(serverUrl, toolName, input, mergeValidatedHeaders(headersByUrl.get(serverUrl), overrides)),
+        invokeRemoteMcp(serverUrl, toolName, input, mergeValidatedHeaders(headersByUrl.get(serverUrl), overrides)),
       hooks: engineHooks,
       keepDynamicToolsDirect,
     })
@@ -2112,8 +2196,53 @@ export async function injectMcpTools(params: {
     )
   }
 
+  if (runtimeAuthority) {
+    const authority = runtimeAuthority
+    for (const [name, tool] of tools) {
+      if (originalTools.get(name) === tool) continue
+      const assertActor = (context: ToolContext, mayHaveExecuted = false) => {
+        const canonical = context.executionContext?.security.access
+        if (context.executionContext?.lifecycle.abortSignal.aborted || canonical && (canonical.userId !== context.userId
+          || canonical.assistantId !== context.assistantId || canonical.workspaceId !== context.workspaceId)) {
+          throw new AuthorityChangedError(mayHaveExecuted)
+        }
+        if (runtimeActorId && (context.userId !== runtimeActorId || context.assistantId !== assistantId
+          || context.workspaceId !== assistantTeamId)) throw new AuthorityChangedError(mayHaveExecuted)
+      }
+      const invoke = <T>(context: ToolContext, operation: () => Promise<T>): Promise<T> => {
+        assertActor(context)
+        const admitted = async () => {
+          await assertBindingsCurrent()
+          let result: T
+          try { result = await operation() } catch (error) { await assertBindingsCurrent(true); throw error }
+          await assertBindingsCurrent(true)
+          assertActor(context, true)
+          return result
+        }
+        return context.executionContext
+          ? context.executionContext.security.authority.execute(() => authority.execute(admitted))
+          : authority.execute(admitted)
+      }
+      tools.set(name, { ...tool,
+        execute: (input, context) => invoke(context, () => tool.execute(input, context)),
+        ...(tool.resolveConfirmation ? { resolveConfirmation: (context: ToolContext, input?: unknown) => {
+          return invoke(context, () => tool.resolveConfirmation!(context, input))
+        } } : {}),
+        ...(tool.describeConfirmation ? { describeConfirmation: (input: unknown, context: ToolContext) => {
+          return invoke(context, () => tool.describeConfirmation!(input, context))
+        } } : {}),
+      })
+    }
+    await authority.assertCurrent()
+    await assertBindingsCurrent()
+  }
   return {
-    enrichConfirmation: enricher,
+    enrichConfirmation: runtimeAuthority ? (tool, input) => runtimeAuthority!.execute(async () => {
+      await assertBindingsCurrent()
+      const enriched = await enricher(tool, input)
+      await assertBindingsCurrent()
+      return enriched
+    }) : enricher,
     unavailable,
     searchableSources,
     restrictedSearchToolNames: [...restrictedSearchToolNames],

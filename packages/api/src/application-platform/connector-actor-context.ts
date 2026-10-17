@@ -67,8 +67,10 @@ export async function mintConnectorActorAssertion(execution: ExecutionContext, r
   const current = await ports.admit(execution, binding)
   if (!current || !actorMatchesExecution(execution, current) || JSON.stringify(current) !== initial) denied()
   const finalAdmission = structuredClone(current)
-  if (!await ports.keyCurrent(key.kid)) denied()
   await execution.security.authority.assertCurrent()
+  if (execution.lifecycle.abortSignal.aborted) denied()
+  // Key liveness is the final asynchronous mint check, after other authority awaits.
+  if (!await ports.keyCurrent(key.kid)) denied()
   if (execution.lifecycle.abortSignal.aborted) denied()
   const now = Math.floor((ports.now?.() ?? Date.now()) / 1000)
   if (!Number.isSafeInteger(now) || !Number.isSafeInteger(key.notBefore) || now < key.notBefore

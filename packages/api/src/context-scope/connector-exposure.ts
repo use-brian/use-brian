@@ -50,7 +50,7 @@ export type ConnectorTurnGrant = {
   effectiveCompartments: ScopeGrant
   effectiveProjectIds: ScopeGrant
   /** Present on the canonical TurnScope. Missing preserves legacy membership reach. */
-  access?: { mutationCompartments?: ScopeGrant; departmentRead?: DepartmentReadGrant }
+  access?: { userId?: string; mutationCompartments?: ScopeGrant; departmentRead?: DepartmentReadGrant }
 }
 
 function axisAudienceAllowed(

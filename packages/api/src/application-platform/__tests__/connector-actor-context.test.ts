@@ -60,6 +60,13 @@ describe('[COMP:api/connector-actor-context] host minting and dispatch', () => {
     }
     await expect(mintConnectorActorAssertion(context, binding, request, changed)).rejects.toThrow('authority revoked')
   })
+  it('refuses a key retired during the final native authority await', async () => {
+    const context = execution(), provider = ports()
+    let keyActive = true, checks = 0
+    vi.mocked(context.security.authority.assertCurrent).mockImplementation(async () => { if (++checks === 2) keyActive = false })
+    provider.keyCurrent = async () => keyActive
+    await expect(mintConnectorActorAssertion(context, binding, request, provider)).rejects.toMatchObject({ code: 'access_unavailable' })
+  })
   it('signs the final serialized bytes after header merges and pins both actor and assistant readable IDs', async () => {
     const received: Array<{ init: RequestInit; assertion: string }> = [], verify = verifier()
     const send = createConnectorActorFetch(execution(), binding.audience, binding, ports(), { fetch: async (_url, init) => {

@@ -384,6 +384,7 @@ describe('[COMP:tools/mailbox-imap] imap injection', () => {
       createdAt: string,
     ) => ({
       grantedByUserId,
+      compartments: [], projectIds: [],
       instance: {
         id,
         provider: 'imap',
@@ -461,6 +462,7 @@ describe('[COMP:tools/mailbox-imap] imap injection', () => {
       listByWorkspaceSystem: vi.fn(async () => [
         {
           id: 'inst-imap-team', scope: 'workspace', userId: null, workspaceId: 'ws-1',
+          compartments: [], projectIds: [],
           provider: 'imap', label: 'team@harborlane.example', url: null, custom: false,
           connected: true, healthStatus: 'ok', config: {}, sensitivity: 'internal',
           createdAt: new Date('2026-07-01T00:00:00Z'),
@@ -468,6 +470,7 @@ describe('[COMP:tools/mailbox-imap] imap injection', () => {
         },
         {
           id: 'inst-imap-team-2', scope: 'workspace', userId: null, workspaceId: 'ws-1',
+          compartments: [], projectIds: [],
           provider: 'imap', label: 'ops@harborlane.example', url: null, custom: false,
           connected: true, healthStatus: 'ok', config: {}, sensitivity: 'internal',
           createdAt: new Date('2026-07-02T00:00:00Z'),
