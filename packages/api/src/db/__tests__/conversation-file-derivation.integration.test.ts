@@ -251,7 +251,7 @@ describe('[COMP:api/conversation-file-derivation] admitted conversation sources'
 
   it('upgrades a warmed source-reader chain without replacing the page or archive facades', async () => {
     const f = await fixture(false)
-    const migration = (await readFile(new URL('../../../migrations/772_conversation_file_derivation.sql', import.meta.url), 'utf8'))
+    const migration = (await readFile(new URL('../../../migrations/773_conversation_file_derivation.sql', import.meta.url), 'utf8'))
       .replace(/^BEGIN;\s*/, '').replace(/COMMIT;\s*$/, '')
     const tx = await pool.connect()
     try {
