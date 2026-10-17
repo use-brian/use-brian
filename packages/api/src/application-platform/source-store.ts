@@ -67,21 +67,28 @@ export async function pinExternalSourceOperation(client: PoolClient, execution: 
     const item = request.items.find(item => item.action === action && sourceResourceKey(item.resource) === sourceResourceKey(row.observation.resource)
       && row.observation.fields.every(field => item.fields.includes(field)) && item.retentionMode === row.observation.retention.mode)
     if (!item) denied()
+    const deriveItem = action === 'retain' ? request.items.find(candidate => candidate.action === 'derive'
+      && sourceResourceKey(candidate.resource) === sourceResourceKey(row.observation.resource)
+      && row.observation.fields.every(field => candidate.fields.includes(field)) && candidate.retentionMode === row.observation.retention.mode) : undefined
+    if (action === 'retain' && (!deriveItem || !row.observation.actions.includes('derive') || row.observation.retention.mode !== 'governed')) denied()
     if (action === 'retain' && row.observation.retention.mode === 'ephemeral') denied()
     if (row.observation.retention.mode === 'released_snapshot' && row.observation.retention.expiresAt <= Date.now()) denied()
     for (const recipient of request.recipients) {
       const decision = response.decisions.find(value => value.itemId === item.itemId && value.recipientId === recipient.recipientId)
       if (!decision?.allowed) denied()
+      const deriveDecision = deriveItem ? response.decisions.find(value => value.itemId === deriveItem.itemId && value.recipientId === recipient.recipientId) : undefined
+      if (deriveItem && !deriveDecision?.allowed) denied()
+      const deriveReceipt = deriveDecision?.allowed ? deriveDecision.receipt : undefined
       const recipientCeiling = await nativeRecipientCeiling(recipient.subject, source.workspaceId)
       await validateCallerScopeEvidence({ sensitivity: source.sensitivity, compartments: source.compartments, projectIds: source.projectIds }, recipientCeiling)
       await getPool().query(`INSERT INTO external_source_authorizations(workspace_id,observation_id,profile_id,profile_revision,resource_revision,
         operation_id,request_digest,transaction_id,backend_pid,actor_kind,actor_id,assistant_id,recipient_kind,recipient_id,recipient_assistant_id,
-        action,source_receipt,authority_fingerprint,expires_at)
-        SELECT $1,$2,$3,$4,$5,$6,$7,$8::xid8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$19,$18
+        action,source_receipt,authority_fingerprint,expires_at,derivation_receipt)
+        SELECT $1,$2,$3,$4,$5,$6,$7,$8::xid8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$19,$18,$20
         WHERE external_source_authority_fingerprint($1,$3)=$19`,
       [source.workspaceId,row.id,profile.id,profile.revision,row.resourceRevision,request.operationId,requestDigest,transaction.xid,transaction.pid,
         binding.profile.subject.kind,execution.security.access.userId,execution.assistant.id,recipient.subject.kind,recipient.subject.id,recipient.subject.executingAssistantId,
-        action,decision.receipt.id,new Date(decision.receipt.expiresAt),fingerprint])
+        action,decision.receipt.id,new Date(Math.min(decision.receipt.expiresAt,deriveReceipt?.expiresAt ?? Infinity)),fingerprint,deriveReceipt?.id ?? null])
     }
   }
   await binding.assertCurrent()
@@ -97,7 +104,7 @@ export async function pinExternalSourceOperation(client: PoolClient, execution: 
 /** Metadata is persisted/bound before any tool display conversion; every field observation enters the accumulator. */
 export async function bindTrustedSourceRead(client: PoolClient, execution: ExecutionContext, read: TrustedSourceRead, accumulator: ContextScopeAccumulator) {
   const binding = trustedSourceReadBinding(read, execution)
-  if (!binding || !(accumulator instanceof ContextScopeAccumulator)) denied()
+  if (!binding || !(accumulator instanceof ContextScopeAccumulator) || binding.envelope.resources.some(resource => resource.retention.mode !== 'governed')) denied()
   const proof = trustedSourceOperationProof(binding.proof, execution)
   if (!proof) denied()
   await proof.assertCurrent()

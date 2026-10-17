@@ -9,7 +9,7 @@ import { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js'
 import { StreamableHTTPServerTransport } from '@modelcontextprotocol/sdk/server/streamableHttp.js'
 import { authorizeConnectorRequest, handleSourceSidecar, sourceSubjectFromActor, sourceSubjectKey, sourceResourceKey,
   SOURCE_PROTOCOL_VERSION, ConnectorActorError, type ConnectorReplayConsumer, type ConnectorActorClaims, type SourceSubject, type SourceResourceRef,
-  type SourceEnvelope, type SourceAuthorizationRequest, type SourceAuthorizationResponse, type SourceCapabilities,
+  type SourceEnvelope, type SourceAction, type SourceAuthorizationRequest, type SourceAuthorizationResponse, type SourceCapabilities,
   type createConnectorActorVerifier } from '@use-brian/brian-app/connector'
 
 export const independentSourceSchema = `
@@ -61,16 +61,18 @@ export async function startIndependentSource(input: { pool: Pool; tenant: string
   function ref(record: SourceRecord): SourceResourceRef {
     return { type: record.kind, id: record.id, contentVersion: String(record.content_version), policyVersion: String(record.policy_version) }
   }
-  function evidence(record: SourceRecord, subject: SourceSubject, fields: string[]): SourceEnvelope {
+  function evidence(record: SourceRecord, subject: SourceSubject, fields: string[], actions: SourceAction[]): SourceEnvelope {
     return { version: SOURCE_PROTOCOL_VERSION, tenant, resources: [{ resource: ref(record), fields,
       labels: { sensitivity: 'confidential', compartments: record.compartments, projectIds: [] }, subjects: [subject],
-      actions: ['read','context','derive','retain','deliver','export'], retention: { mode: 'governed' }, export: { model: true, destinations: [] } }] }
+      actions, retention: { mode: 'governed' }, export: { model: true, destinations: [] } }] }
   }
   async function read(subject: SourceSubject, id: string, fields: string[]) {
     const record = await currentRecord(pool, id)
     if (!await allowed(pool, subject, record, fields, 'read')) return null
+    const grant = (await pool.query<{ actions: SourceAction[] }>('SELECT actions FROM grants WHERE kind=$1 AND account_id=$2 AND record_id=$3', [subject.kind,subject.id,id])).rows[0]
+    if (!grant) return null
     counters.reads++
-    const output = { data: Object.fromEntries(fields.map(field => [field,record.data[field]])), envelope: evidence(record, subject, fields) }
+    const output = { data: Object.fromEntries(fields.map(field => [field,record.data[field]])), envelope: evidence(record, subject, fields, grant.actions) }
     await afterRead?.()
     return output
   }
@@ -85,7 +87,7 @@ export async function startIndependentSource(input: { pool: Pool; tenant: string
           && item.retentionMode === 'governed' && await allowed(pool, caller, record, item.fields, item.action)
           && await allowed(pool, recipient.subject, record, item.fields, item.action)
         const pair = { itemId: item.itemId, recipientId: recipient.recipientId }
-        decisions.push(permitted ? { ...pair, allowed: true, receipt: { id: randomUUID(), issuedAt: Date.now(), expiresAt: Date.now() + 4_500 } }
+        decisions.push(permitted ? { ...pair, allowed: true, receipt: { id: randomUUID(), issuedAt: Date.now(), expiresAt: Date.now() + (item.action === 'derive' ? 3_000 : 4_500) } }
           : { ...pair, allowed: false })
       }
     }

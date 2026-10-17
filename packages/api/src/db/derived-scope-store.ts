@@ -31,12 +31,23 @@ async function scopeSnapshots(client: Pick<pg.ClientBase, 'query'>, workspaceId:
   return result
 }
 
+/** Context/read receipts cannot authorize durable derivatives. SQL independently guards lineage inserts. */
+async function requireExternalRetention(client: Pick<pg.PoolClient, 'query'>, evidence: DerivedWriteEvidence) {
+  const external = evidence.sources.filter(source => source.resourceKind === 'external_source')
+  if (!external.length) return
+  const rows = (await client.query<{ allowed: boolean }>(`SELECT external_source_retention_allowed(t.workspace,t.id,t.version) AS allowed
+    FROM unnest($1::uuid[],$2::uuid[],$3::text[]) AS t(workspace,id,version)`,
+    [external.map(source => source.workspaceId),external.map(source => source.resourceId),external.map(source => source.version)])).rows
+  if (rows.length !== external.length || rows.some(row => row.allowed !== true)) throw new DerivedScopeError('scope_source_changed')
+}
+
 /** Must run inside the SAME transaction as the canonical writer. */
 export async function validateDerivedMemoryInputs(
   client: Pick<pg.PoolClient, 'query'>,
   evidence: DerivedWriteEvidence,
 ): Promise<ResourceScope> {
   const floor = deriveResourceScope(evidence)
+  await requireExternalRetention(client, evidence)
   await revalidateScopeSources(client, floor.workspaceId, evidence.sources)
   return floor
 }
@@ -46,6 +57,7 @@ export async function validateDerivedEntityInputs(
   client: Pick<pg.PoolClient, 'query'>, evidence: DerivedWriteEvidence,
 ): Promise<ResourceScope> {
   const floor = deriveResourceScope(evidence)
+  await requireExternalRetention(client, evidence)
   await revalidateScopeSources(client, floor.workspaceId, evidence.sources, 'read_entity_derivation_source')
   return floor
 }
@@ -62,6 +74,7 @@ export async function validateDerivedWriteInputs(
   evidence: DerivedWriteEvidence,
 ): Promise<Pick<ResourceScope, 'workspaceId' | 'sensitivity' | 'compartments' | 'projectIds'>> {
   const labels = deriveContextFloor(evidence)
+  await requireExternalRetention(client, evidence)
   const workspaceId = evidence.sources[0]!.workspaceId
   await revalidateScopeSources(client, workspaceId, evidence.sources)
   return { workspaceId, ...labels }
@@ -181,6 +194,7 @@ export async function recordDerivedResource(
   // The output must carry every label it was derived from and must not take
   // another person's private rows anywhere else; its assistant visibility is
   // the target's own (decision D3).
+  await requireExternalRetention(client, evidence)
   const floor = deriveWriteScope(evidence, output, actorUserId)
   if (resourceScopeKey(floor) !== resourceScopeKey(output)) {
     throw new DerivedScopeError('scope_visibility_incompatible')

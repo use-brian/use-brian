@@ -5,7 +5,7 @@ import { createConnectorActorVerifier, SOURCE_PROTOCOL_VERSION,
   type SourceAuthorizationRequest } from '@use-brian/brian-app/connector'
 import { ContextScopeAccumulator, scopeEvidenceFromRows, executionToolContext, type Tool } from '@use-brian/core'
 import { getAppPool, getPool, applyRLSGucs, queryWithRLS } from '../../db/client.js'
-import { readCurrentScopeSources, validateDerivedWriteInputs } from '../../db/derived-scope-store.js'
+import { readCurrentScopeSources, validateDerivedWriteInputs, validateDerivedMemoryInputs, validateDerivedEntityInputs, recordDerivedResource } from '../../db/derived-scope-store.js'
 import { bindTrustedSourceRead, pinExternalSourceOperation } from '../source-store.js'
 import { createConnectorSourceRuntimeFactory } from '../source-runtime.js'
 import { injectMcpTools } from '../../mcp/inject.js'
@@ -142,16 +142,46 @@ describe('[COMP:api/external-source-access] independent persisted source ACL', (
         expect(scopeEvidenceFromRows(bound.sourceRows).sources).toEqual(bound.sources)
         expect(accumulator.evidence.sources).toEqual(bound.sources)
         expect((await readCurrentScopeSources(app, workspace, bound.sources)).map(row => row.state)).toEqual(['current'])
-        await validateDerivedWriteInputs(app, { producer: 'independent-source-fixture', sources: bound.sources })
+        for (const validate of [validateDerivedWriteInputs,validateDerivedMemoryInputs,validateDerivedEntityInputs]) {
+          await expect(validate(app, { producer: 'independent-source-fixture', sources: bound.sources })).rejects.toThrow('scope_source_changed')
+        }
+        await expect(recordDerivedResource(app, { producer: 'context-cannot-retain', sources: bound.sources },
+          { ...bound.sources[0], resourceKind: 'memory', resourceId: randomUUID() })).rejects.toThrow('scope_source_changed')
+        await app.query("SELECT set_config('app.external_source_action','retain',true)")
+        await expect(validateDerivedWriteInputs(app, { producer: 'no-receipt-upgrade', sources: bound.sources })).rejects.toThrow('scope_source_changed')
+        await app.query("SELECT set_config('app.external_source_action','context',true)")
+        await app.query('SAVEPOINT context_lineage')
+        await expect(app.query(`INSERT INTO scope_derivation_sources(workspace_id,derivation_id,source_kind,source_id,source_version)
+          VALUES($1,$2,'external_source',$3,$4)`, [workspace,randomUUID(),bound.sources[0].resourceId,bound.sources[0].version]))
+          .rejects.toMatchObject({ code: '42501', message: 'scope_source_changed' })
+        await app.query('ROLLBACK TO SAVEPOINT context_lineage')
         const costRead = await one.access.readHttp({ id: 'order-1', fields: ['cost'] })
         const costBound = await bindTrustedSourceRead(app, one.execution, costRead, accumulator)
         expect(costBound.sources[0].resourceId).not.toBe(bound.sources[0].resourceId)
         expect(accumulator.evidence.sources).toHaveLength(2)
         const combined = await one.access.authorize({ version: SOURCE_PROTOCOL_VERSION, operationId: randomUUID(), items: [{ itemId: randomUUID(),
-          resource: evidence.resources[0].resource, fields: ['description','cost'], action: 'context', retentionMode: 'governed' }],
+          resource: evidence.resources[0].resource, fields: ['description','cost'], action: 'retain', retentionMode: 'governed' },
+          { itemId: randomUUID(), resource: evidence.resources[0].resource, fields: ['description','cost'], action: 'derive', retentionMode: 'governed' }],
           recipients: [{ recipientId: randomUUID(), subject: one.profile.subject }] })
-        await pinExternalSourceOperation(app, one.execution, combined, accumulator.evidence.sources!, 'context')
+        await pinExternalSourceOperation(app, one.execution, combined, accumulator.evidence.sources!, 'retain')
         await validateDerivedWriteInputs(app, { producer: 'independent-field-observations', sources: accumulator.evidence.sources! })
+        await validateDerivedMemoryInputs(app, { producer: 'independent-retained-memory', sources: accumulator.evidence.sources! })
+        await validateDerivedEntityInputs(app, { producer: 'independent-retained-entity', sources: accumulator.evidence.sources! })
+        const retainItem = combined.request.items.find(item => item.action === 'retain')!, deriveItem = combined.request.items.find(item => item.action === 'derive')!
+        const retainDecision = combined.response.decisions.find(decision => decision.itemId === retainItem.itemId)!, deriveDecision = combined.response.decisions.find(decision => decision.itemId === deriveItem.itemId)!
+        if (!retainDecision.allowed || !deriveDecision.allowed) throw new Error('Fixture retained decision missing')
+        const storedReceipt = (await pool.query('SELECT source_receipt,derivation_receipt,expires_at FROM external_source_authorizations WHERE operation_id=$1 AND observation_id=$2',
+          [combined.request.operationId,bound.sources[0].resourceId])).rows[0]
+        expect(storedReceipt.source_receipt).toBe(retainDecision.receipt.id); expect(storedReceipt.derivation_receipt).toBe(deriveDecision.receipt.id)
+        expect(storedReceipt.expires_at.getTime()).toBe(Math.min(retainDecision.receipt.expiresAt,deriveDecision.receipt.expiresAt))
+        expect((await app.query('SELECT external_source_retention_allowed($1,$2,$3) AS allowed', [workspace,bound.sources[0].resourceId,bound.sources[0].version])).rows[0].allowed).toBe(true)
+        const retainOnly = await one.access.authorize({ version: SOURCE_PROTOCOL_VERSION, operationId: randomUUID(), items: [{ itemId: randomUUID(),
+          resource: evidence.resources[0].resource, fields: ['description','cost'], action: 'retain', retentionMode: 'governed' }],
+          recipients: [{ recipientId: randomUUID(), subject: one.profile.subject }] })
+        await expect(pinExternalSourceOperation(app, one.execution, retainOnly, bound.sources, 'retain')).rejects.toMatchObject({ code: 'source_access_denied' })
+        await sourcePool.query("UPDATE grants SET actions=array_remove(actions,'derive') WHERE account_id=$1", [first])
+        await expect(one.access.authorize({ ...combined.request, operationId: randomUUID() })).rejects.toMatchObject({ code: 'source_access_denied' })
+        await sourcePool.query('UPDATE grants SET actions=$2 WHERE account_id=$1', [first,actions])
         expect((await readCurrentScopeSources(app, workspace, [{ ...bound.sources[0], version: '0'.repeat(64) }])).map(row => row.state)).toEqual(['unverifiable'])
         const oldOperationId = combined.request.operationId
         await app.query('COMMIT')
