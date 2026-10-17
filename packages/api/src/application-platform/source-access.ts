@@ -31,16 +31,20 @@ export type SourceAccessClient = {
   readHttp: (input: Record<string, unknown>, retentionMode?: SourceRetentionMode) => Promise<TrustedSourceRead>
 }
 export type TrustedSourceRead = { result: CallToolResult }
-const sourceReads = new WeakMap<TrustedSourceRead, SourceEnvelope>()
-const sourceProofs = new WeakMap<SourceOperationProof, { execution: ExecutionContext; profile: SourceAccessProfile; proof: SourceOperationProof }>()
+const sourceReads = new WeakMap<TrustedSourceRead, { execution: ExecutionContext; envelope: SourceEnvelope; proof: SourceOperationProof }>()
+const sourceProofs = new WeakMap<SourceOperationProof, { execution: ExecutionContext; profile: SourceAccessProfile; proof: SourceOperationProof; assertCurrent: () => Promise<void> }>()
 /** Only the exact authenticated operation object can be pinned into a host transaction. */
 export function trustedSourceOperationProof(proof: SourceOperationProof, execution: ExecutionContext) {
   const binding = sourceProofs.get(proof)
-  return binding?.execution === execution ? structuredClone({ profile: binding.profile, proof: binding.proof }) : undefined
+  return binding?.execution === execution ? { ...structuredClone({ profile: binding.profile, proof: binding.proof }), assertCurrent: binding.assertCurrent } : undefined
 }
 /** JSON fields cannot create this binding. Persistence adapters resolve observations before any display conversion. */
 export function trustedSourceEnvelope(read: TrustedSourceRead): SourceEnvelope | undefined {
-  const envelope = sourceReads.get(read); return envelope ? structuredClone(envelope) : undefined
+  const binding = sourceReads.get(read); return binding ? structuredClone(binding.envelope) : undefined
+}
+export function trustedSourceReadBinding(read: TrustedSourceRead, execution: ExecutionContext) {
+  const binding = sourceReads.get(read)
+  return binding?.execution === execution ? { envelope: structuredClone(binding.envelope), proof: binding.proof } : undefined
 }
 function denied(): never { throw new SourceProtocolError('source_access_denied') }
 function unavailable(): never { throw new SourceProtocolError('source_unavailable') }
@@ -105,11 +109,11 @@ export function createSourceAccessClient(execution: ExecutionContext, rawProfile
         || !resource.actions.includes('read') || !resource.actions.includes('context') || !resource.export.model
         || resource.retention.mode !== retentionMode || resource.retention.mode === 'released_snapshot' && resource.retention.expiresAt <= now()) denied()
     }
-    await client.authorize({ version: SOURCE_PROTOCOL_VERSION, operationId: randomUUID(),
+    const proof = await client.authorize({ version: SOURCE_PROTOCOL_VERSION, operationId: randomUUID(),
       items: envelope.resources.map(item => ({ itemId: randomUUID(), resource: item.resource, fields: item.fields, action: 'context', retentionMode })),
       recipients: [{ recipientId: randomUUID(), subject: profile.subject }] })
     const display = structuredClone(result); delete display._meta
-    const read: TrustedSourceRead = { result: display }; sourceReads.set(read, envelope)
+    const read: TrustedSourceRead = { result: display }; sourceReads.set(read, { execution, envelope, proof })
     return read
   }
   const client: SourceAccessClient = {
@@ -122,7 +126,12 @@ export function createSourceAccessClient(execution: ExecutionContext, rawProfile
       const request = parseSourceAuthorizationRequest(raw), rawResponse = await post('authorize', request)
       const response = requireSourceAuthorization(rawResponse as SourceAuthorizationResponse, request, profile.tenant, now())
       const proof = { request, response, requestDigest: sourceAuthorizationDigest(request) }
-      sourceProofs.set(proof, { execution, profile, proof: structuredClone(proof) })
+      const saved = structuredClone(proof)
+      sourceProofs.set(proof, { execution, profile, proof: saved, assertCurrent: async () => {
+        await execution.security.authority.assertCurrent()
+        if (execution.lifecycle.abortSignal.aborted || !await minting.admit(execution, profile)) denied()
+        requireSourceAuthorization(saved.response, saved.request, profile.tenant, now())
+      } })
       return proof
     },
     async reconcile(raw) {

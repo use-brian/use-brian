@@ -3,7 +3,10 @@ import pg from 'pg'
 import { afterAll, describe, expect, it } from 'vitest'
 import { createBoundedConnectorReplayConsumer, createConnectorActorVerifier, SOURCE_PROTOCOL_VERSION,
   type SourceAuthorizationRequest } from '@use-brian/brian-app/connector'
-import { getAppPool, getPool } from '../../db/client.js'
+import { ContextScopeAccumulator, scopeEvidenceFromRows } from '@use-brian/core'
+import { getAppPool, getPool, applyRLSGucs, queryWithRLS } from '../../db/client.js'
+import { readCurrentScopeSources, validateDerivedWriteInputs } from '../../db/derived-scope-store.js'
+import { bindTrustedSourceRead, pinExternalSourceOperation } from '../source-store.js'
 import { createConnectorInstanceStore } from '../../db/connector-instance-store.js'
 import { findAssistantById } from '../../db/users.js'
 import { resolveExecutionContextSystem } from '../../context-scope/execution-context.js'
@@ -41,11 +44,11 @@ describe('[COMP:api/external-source-access] independent persisted source ACL', (
       await pool.query("INSERT INTO workspace_compartments(workspace_id,key,label,created_by,managed_by,managed_ref_id) VALUES($1,$2,'Fixture Department',$3,'team',$4)", [workspace,`team:${department}`,owner,department])
       await pool.query("INSERT INTO department_edges(workspace_id,department_id,principal_kind,assistant_id,clearance,origin) VALUES($1,$2,'assistant',$3,'confidential','store')", [workspace,department,assistant])
       for (const id of [first,second,unmapped]) await pool.query("INSERT INTO department_edges(workspace_id,department_id,principal_kind,user_id,clearance,origin) VALUES($1,$2,'user',$3,'confidential','store')", [workspace,department,id])
-      for (const id of [first,second]) await sourcePool.query("INSERT INTO accounts(kind,id) VALUES('human',$1)", [id])
+      for (const id of [first,second,foreign]) await sourcePool.query("INSERT INTO accounts(kind,id) VALUES('human',$1)", [id])
       await sourcePool.query('INSERT INTO assistants(id) VALUES($1)', [assistant])
       await sourcePool.query("INSERT INTO records(id,kind,data,compartments) VALUES('order-1','purchase',$1,$2)", [{ description: 'Fictional parts', cost: '37.25' },[`team:${department}`]])
       const actions = ['read','context','derive','retain','deliver','export','mutate']
-      for (const [id,fields] of [[first,['description','cost']],[second,['description']]] as const) await sourcePool.query("INSERT INTO grants(kind,account_id,record_id,fields,actions) VALUES('human',$1,'order-1',$2,$3)", [id,fields,actions])
+      for (const [id,fields] of [[first,['description','cost']],[second,['description']],[foreign,['description','cost']]] as const) await sourcePool.query("INSERT INTO grants(kind,account_id,record_id,fields,actions) VALUES('human',$1,'order-1',$2,$3)", [id,fields,actions])
       const issuer = `https://${randomUUID()}.installation.example`, audience = 'https://independent-source.example', transportToken = randomBytes(32).toString('base64url')
       const encryptionKey = randomBytes(32), keys = createConnectorActorKeyStore(encryptionKey), instances = createConnectorInstanceStore(encryptionKey)
       await keys.rotateSystem(issuer)
@@ -58,6 +61,11 @@ describe('[COMP:api/external-source-access] independent persisted source ACL', (
       source = await startIndependentSource({ pool: sourcePool, tenant: 'fixture-tenant', transportToken, verifyActor: verify,
         uiSessions: new Map([['first-ui-session',{ kind: 'human', id: first, executingAssistantId: assistant }],['second-ui-session',{ kind: 'human', id: second, executingAssistantId: assistant }]]) })
       await instances.update(owner, instance.id, { url: `${source.url}/mcp` })
+      const sourceProfile = (await pool.query<{ id: string }>(`INSERT INTO connector_source_profiles(workspace_id,connector_instance_id,tenant,issuer,audience,source_base_url,mcp_url,http_read_path,status,created_by_user_id)
+        VALUES($1,$2,'fixture-tenant',$3,$4,$5,$6,'/http/read','qualified',$7) RETURNING id`, [workspace,instance.id,issuer,audience,source.url,`${source.url}/mcp`,owner])).rows[0].id
+      await expect(queryWithRLS(owner, "UPDATE connector_source_profiles SET status='qualified' WHERE id=$1", [sourceProfile])).rejects.toMatchObject({ code: '42501' })
+      expect((await queryWithRLS(owner, "SELECT application_runtime_qualified($1,'connector_source') AS ready", [workspace])).rows[0].ready).toBe(false)
+      expect((await queryWithRLS(first, 'SELECT id FROM connector_source_profiles WHERE workspace_id=$1', [workspace])).rows).toEqual([])
       async function client(userId: string) {
         const execution = (await resolveExecutionContextSystem({ userId, workspaceId: workspace, assistant: (await findAssistantById(assistant))!, memberMode: 'member',
           identity: { kind: 'attended', principal: { kind: 'workspace_member', userId } }, ownership: { kind: 'workspace', workspaceId: workspace },
@@ -76,6 +84,75 @@ describe('[COMP:api/external-source-access] independent persisted source ACL', (
       expect(JSON.stringify(read.result)).toContain('37.25'); expect(read.result).not.toHaveProperty('_meta')
       const evidence = trustedSourceEnvelope(read)!
       expect(evidence.resources[0].fields).toEqual(['description','cost']); expect(trustedSourceEnvelope(structuredClone(read))).toBeUndefined()
+      const app = await getAppPool().connect(), accumulator = new ContextScopeAccumulator()
+      let retainedSources: Awaited<ReturnType<typeof bindTrustedSourceRead>>['sources']
+      try {
+        await app.query('BEGIN'); await applyRLSGucs(app, first)
+        await expect(bindTrustedSourceRead(app, one.execution, structuredClone(read), accumulator)).rejects.toMatchObject({ code: 'source_access_denied' })
+        const bound = await bindTrustedSourceRead(app, one.execution, read, accumulator)
+        retainedSources = bound.sources
+        expect(scopeEvidenceFromRows(bound.sourceRows).sources).toEqual(bound.sources)
+        expect(accumulator.evidence.sources).toEqual(bound.sources)
+        expect((await readCurrentScopeSources(app, workspace, bound.sources)).map(row => row.state)).toEqual(['current'])
+        await validateDerivedWriteInputs(app, { producer: 'independent-source-fixture', sources: bound.sources })
+        const costRead = await one.access.readHttp({ id: 'order-1', fields: ['cost'] })
+        const costBound = await bindTrustedSourceRead(app, one.execution, costRead, accumulator)
+        expect(costBound.sources[0].resourceId).not.toBe(bound.sources[0].resourceId)
+        expect(accumulator.evidence.sources).toHaveLength(2)
+        const combined = await one.access.authorize({ version: SOURCE_PROTOCOL_VERSION, operationId: randomUUID(), items: [{ itemId: randomUUID(),
+          resource: evidence.resources[0].resource, fields: ['description','cost'], action: 'context', retentionMode: 'governed' }],
+          recipients: [{ recipientId: randomUUID(), subject: one.profile.subject }] })
+        await pinExternalSourceOperation(app, one.execution, combined, accumulator.evidence.sources!, 'context')
+        await validateDerivedWriteInputs(app, { producer: 'independent-field-observations', sources: accumulator.evidence.sources! })
+        expect((await readCurrentScopeSources(app, workspace, [{ ...bound.sources[0], version: '0'.repeat(64) }])).map(row => row.state)).toEqual(['unverifiable'])
+        const oldOperationId = combined.request.operationId
+        await app.query('COMMIT')
+        expect((await readCurrentScopeSources(app, workspace, bound.sources)).map(row => row.state)).toEqual(['held'])
+        await app.query('BEGIN'); await applyRLSGucs(app, first)
+        await app.query(`SELECT set_config('app.external_source_operation_id',$1,true),set_config('app.external_source_actor_id',$2,true),
+          set_config('app.external_source_assistant_id',$3,true),set_config('app.external_source_action','context',true),set_config('app.v2_assistant_id',$3,true)`, [oldOperationId,first,assistant])
+        expect((await readCurrentScopeSources(app, workspace, bound.sources)).map(row => row.state)).toEqual(['held'])
+        const partial = await one.access.authorize({ version: SOURCE_PROTOCOL_VERSION, operationId: randomUUID(), items: [{ itemId: randomUUID(),
+          resource: evidence.resources[0].resource, fields: ['description'], action: 'context', retentionMode: 'governed' }],
+          recipients: [{ recipientId: randomUUID(), subject: one.profile.subject }] })
+        await expect(pinExternalSourceOperation(app, one.execution, partial, bound.sources, 'context')).rejects.toMatchObject({ code: 'source_access_denied' })
+        const foreignRecipient = await one.access.authorize({ version: SOURCE_PROTOCOL_VERSION, operationId: randomUUID(), items: [{ itemId: randomUUID(),
+          resource: evidence.resources[0].resource, fields: ['description','cost'], action: 'context', retentionMode: 'governed' }],
+          recipients: [{ recipientId: randomUUID(), subject: { ...one.profile.subject, id: foreign } }] })
+        await expect(pinExternalSourceOperation(app, one.execution, foreignRecipient, bound.sources, 'context')).rejects.toMatchObject({ reason: 'caller_evidence_unavailable' })
+        const retainedProof = await one.access.authorize({ version: SOURCE_PROTOCOL_VERSION, operationId: randomUUID(), items: [{ itemId: randomUUID(),
+          resource: evidence.resources[0].resource, fields: ['description','cost'], action: 'context', retentionMode: 'governed' }],
+          recipients: [{ recipientId: randomUUID(), subject: one.profile.subject }] })
+        await expect(pinExternalSourceOperation(app, one.execution, structuredClone(retainedProof), bound.sources, 'context')).rejects.toMatchObject({ code: 'source_access_denied' })
+        await pinExternalSourceOperation(app, one.execution, retainedProof, bound.sources, 'context')
+        await app.query("SELECT set_config('app.current_user_id',$1,true)", [second])
+        expect((await readCurrentScopeSources(app, workspace, bound.sources)).map(row => row.state)).toEqual(['held'])
+        await app.query("SELECT set_config('app.current_user_id',$1,true)", [first])
+        await pool.query('DELETE FROM department_edges WHERE workspace_id=$1 AND user_id=$2 AND department_id=$3', [workspace,first,department])
+        expect((await readCurrentScopeSources(app, workspace, bound.sources)).map(row => row.state)).toEqual(['held'])
+        await pool.query("INSERT INTO department_edges(workspace_id,department_id,principal_kind,user_id,clearance,origin) VALUES($1,$2,'user',$3,'confidential','store')", [workspace,department,first])
+        // Observed local contraction cannot be revived by restoring the old row.
+        expect((await readCurrentScopeSources(app, workspace, bound.sources)).map(row => row.state)).toEqual(['held'])
+        await app.query('ROLLBACK')
+        await app.query('BEGIN'); await applyRLSGucs(app, first)
+        const expiring = await one.access.authorize({ version: SOURCE_PROTOCOL_VERSION, operationId: randomUUID(), items: [{ itemId: randomUUID(),
+          resource: evidence.resources[0].resource, fields: ['description','cost'], action: 'context', retentionMode: 'governed' }],
+          recipients: [{ recipientId: randomUUID(), subject: one.profile.subject }] })
+        await pinExternalSourceOperation(app, one.execution, expiring, bound.sources, 'context')
+        expect((await readCurrentScopeSources(app, workspace, bound.sources)).map(row => row.state)).toEqual(['current'])
+        await new Promise(resolve => setTimeout(resolve, 5_100))
+        expect((await readCurrentScopeSources(app, workspace, bound.sources)).map(row => row.state)).toEqual(['held'])
+        await expect(pinExternalSourceOperation(app, one.execution, expiring, bound.sources, 'context')).rejects.toMatchObject({ code: 'source_protocol_invalid' })
+        await app.query('ROLLBACK')
+      } finally { await app.query('ROLLBACK'); app.release() }
+      for (const table of ['external_source_resources','external_source_observations','external_source_authorizations']) {
+        expect((await queryWithRLS(first, `SELECT * FROM ${table} WHERE workspace_id=$1`, [workspace])).rows).toEqual([])
+      }
+      const missing = { ...retainedSources![0], resourceId: randomUUID() }
+      expect((await readCurrentScopeSources(pool, workspace, [missing])).map(row => row.state)).toEqual(['unverifiable'])
+      await expect(pool.query('UPDATE external_source_observations SET fields=$2 WHERE id=$1', [retainedSources![0].resourceId,['description']])).rejects.toMatchObject({ code: '22023' })
+      expect((await pool.query('SELECT count(*)::int AS count FROM external_source_resources WHERE profile_id=$1', [sourceProfile])).rows[0].count).toBe(1)
+      expect((await pool.query('SELECT count(*)::int AS count FROM external_source_observations WHERE workspace_id=$1', [workspace])).rows[0].count).toBe(2)
       expect(JSON.stringify(await two.access.readMcp('readRecord', { id: 'order-1', fields: ['description'] }))).not.toContain('37.25')
       await expect(two.access.readMcp('readRecord', { id: 'order-1', fields: ['cost'] })).rejects.toMatchObject({ code: 'source_unavailable' })
       await expect(unknown.access.capabilities()).rejects.toMatchObject({ code: 'source_access_denied' })

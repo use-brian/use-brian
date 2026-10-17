@@ -27,7 +27,7 @@ type SourceRecord = { id: string; kind: string; content_version: number; policy_
 export async function startIndependentSource(input: { pool: Pool; tenant: string; transportToken: string;
   verifyActor: ReturnType<typeof createConnectorActorVerifier>; uiSessions: Map<string, SourceSubject> }) {
   const { pool, tenant } = input
-  const capabilities: SourceCapabilities = { version: SOURCE_PROTOCOL_VERSION, tenant, retentionModes: ['governed','released_snapshot','ephemeral'], fieldEvidence: true, reconciliation: true }
+  const capabilities: SourceCapabilities = { version: SOURCE_PROTOCOL_VERSION, tenant, retentionModes: ['governed'], fieldEvidence: true, reconciliation: true }
   const counters = { reads: 0, authorizations: 0, effects: 0, reconciliations: 0 }
   let afterRead: (() => Promise<void>) | undefined
   const actorKnown = async (db: Query, subject: SourceSubject) => Boolean((await db.query(

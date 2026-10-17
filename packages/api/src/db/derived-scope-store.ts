@@ -12,6 +12,25 @@ type CanonicalEvidenceRow = ResourceScope & {
   causalEntityId?: string
 }
 
+/** Keep the owner-only native snapshot function outside the app-role external statement. */
+async function scopeSnapshots(client: Pick<pg.ClientBase, 'query'>, workspaceId: string, sources: readonly ScopeSource[],
+  reader: 'read_scope_source' | 'read_entity_derivation_source' = 'read_scope_source', workflowRunId?: string) {
+  const result: Array<{ ord: number; snapshot: CanonicalEvidenceRow | null }> = []
+  for (const external of [false,true]) {
+    const group = sources.map((source,index) => ({ source,index })).filter(({ source }) => (source.resourceKind === 'external_source') === external)
+    if (group.length === 0) continue
+    const rows = external ? (await client.query<{ ord: number; snapshot: CanonicalEvidenceRow | null }>(
+      `SELECT t.ord::int AS ord,external_source_snapshot($1,t.id) AS snapshot FROM unnest($2::uuid[]) WITH ORDINALITY AS t(id,ord)`,
+      [workspaceId,group.map(({ source }) => source.resourceId)])).rows
+      : (await client.query<{ ord: number; snapshot: CanonicalEvidenceRow | null }>(
+        `SELECT t.ord::int AS ord,${workflowRunId ? 'read_workflow_validation_source($1,$4,t.kind,t.id)' : `${reader}($1,t.kind,t.id)`} AS snapshot
+          FROM unnest($2::text[],$3::uuid[]) WITH ORDINALITY AS t(kind,id,ord)`,
+        [workspaceId,group.map(({ source }) => source.resourceKind),group.map(({ source }) => source.resourceId),...(workflowRunId ? [workflowRunId] : [])])).rows
+    for (const row of rows) if (group[row.ord - 1]) result.push({ ord: group[row.ord - 1].index + 1, snapshot: row.snapshot })
+  }
+  return result
+}
+
 /** Must run inside the SAME transaction as the canonical writer. */
 export async function validateDerivedMemoryInputs(
   client: Pick<pg.PoolClient, 'query'>,
@@ -54,11 +73,12 @@ export async function validateDerivedWriteInputs(
  * transaction. Audience and consult checks judge current labels instead
  * (`readCurrentScopeSources`).
  *
- * ONE statement for every source. A round trip per source made a transcript
+ * One statement per authority profile (native and external). A round trip per source made a transcript
  * flush cost `rows x sources` round trips (45 s for eight buffered tool rounds
  * over ~100 sources on 2026-09-29). `unnest ... WITH ORDINALITY` evaluates
  * `read_scope_source`, and so takes its locks, in array order, which keeps the
- * shared sorted lock order every writer uses.
+ * shared sorted native lock order every writer uses. External observations use
+ * their separate receipt-scoped facade and never grant access to native snapshots.
  */
 async function revalidateScopeSources(
   client: Pick<pg.PoolClient, 'query'>,
@@ -71,11 +91,7 @@ async function revalidateScopeSources(
   const list=[...unique.values()].sort((a,b)=>`${a.resourceKind}:${a.resourceId}`.localeCompare(`${b.resourceKind}:${b.resourceId}`))
   for(const source of list)if(source.workspaceId!==workspaceId)throw new DerivedScopeError('scope_workspace_mismatch')
   if(list.length===0)return
-  const { rows }=await client.query<{ord:number;snapshot:CanonicalEvidenceRow|null}>(
-    `SELECT t.ord::int AS ord, ${reader}($1, t.kind, t.id) AS snapshot
-       FROM unnest($2::text[], $3::uuid[]) WITH ORDINALITY AS t(kind, id, ord)`,
-    [workspaceId,list.map(source=>source.resourceKind),list.map(source=>source.resourceId)],
-  )
+  const rows=await scopeSnapshots(client,workspaceId,list,reader)
   const byOrd=new Map(rows.map(row=>[row.ord,row.snapshot]))
   list.forEach((source,index)=>{
     const row=byOrd.get(index+1)
@@ -93,7 +109,8 @@ async function revalidateScopeSources(
  * `gone` covers delete, supersession, retraction and legacy rows: the content
  * was read under the recorded envelope, and removing it later does not make
  * that read unauthorized (scoped-context.md -> "Audience checks are per
- * source", decision D1).
+ * source", decision D1). External observations never use that historical
+ * allowance: missing, retired or changed observations are unverifiable.
  */
 export type CurrentSourceState =
   | { state: 'current'; source: ScopeSource }
@@ -105,7 +122,7 @@ export type CurrentSourceState =
   | { state: 'stale_input'; source: ScopeSource }
 
 /**
- * One round trip for every source, no transaction: an audience check couples
+ * One round trip per authority profile, no write transaction: an audience check couples
  * no write to these rows, so it needs the current envelope, not a lock held
  * across a later statement. Derived writers use `revalidateScopeSources`.
  */
@@ -119,11 +136,7 @@ export async function readCurrentScopeSources(
   const list = [...unique.values()]
   if (list.length === 0) return []
   if (list.some(source=>source.workspaceId!==workspaceId)) throw new DerivedScopeError('scope_workspace_mismatch')
-  const { rows } = await client.query<{ ord: number; snapshot: CanonicalEvidenceRow | null }>(
-    `SELECT t.ord::int AS ord, ${workflowRunId ? 'read_workflow_validation_source($1,$4,t.kind,t.id)' : 'read_scope_source($1,t.kind,t.id)'} AS snapshot
-       FROM unnest($2::text[], $3::uuid[]) WITH ORDINALITY AS t(kind, id, ord)`,
-    [workspaceId, list.map(source=>source.resourceKind), list.map(source=>source.resourceId), ...(workflowRunId ? [workflowRunId] : [])],
-  )
+  const rows = await scopeSnapshots(client,workspaceId,list,'read_scope_source',workflowRunId)
   const byOrd = new Map(rows.map(row=>[row.ord, row.snapshot]))
   return list.map((source, index): CurrentSourceState => {
     // No result row at all is a failed read, not a deleted source.
@@ -131,14 +144,16 @@ export async function readCurrentScopeSources(
     const row = byOrd.get(index + 1) ?? null
     // A CRM event snapshot is withheld (NULL) while held or retired, so its
     // absence is not proof of deletion.
-    if (!row) return source.resourceKind === 'crm_event' ? { state: 'held', source } : { state: 'gone', source }
+    if (!row) return source.resourceKind === 'external_source' ? { state: 'unverifiable', source }
+      : source.resourceKind === 'crm_event' ? { state: 'held', source } : { state: 'gone', source }
     if (row.held) return { state: 'held', source }
     if (source.resourceKind === 'crm_event' && (!row.causalEntityId
       || !unique.has(`entity:${row.causalEntityId}`))) return { state: 'unverifiable', source }
-    if (row.retractedAt || row.validTo) return { state: 'gone', source }
+    if (row.retractedAt || row.validTo) return source.resourceKind === 'external_source' ? { state: 'unverifiable', source } : { state: 'gone', source }
     if (row.version === source.version && resourceScopeKey(row) === resourceScopeKey(source)) {
       return { state: 'current', source }
     }
+    if (source.resourceKind === 'external_source') return { state: 'unverifiable', source }
     // An outbox event is immutable by nature and is the run's causal input:
     // a changed payload means the run would finish on stale input, so its
     // version must still match (scoped-context.md -> "CRM workflow input
