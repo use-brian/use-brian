@@ -10,13 +10,13 @@ describe('[COMP:core/gemini-image] native HTTP contract', () => {
     const result = await createGeminiImageProvider(aiStudioTransport('fictional-key'), fetcher).generate({ model: FEED_IMAGE_CAPABILITY.model, prompt: 'A fictional blue square', aspectRatio: '16:9', signal: AbortSignal.timeout(1000) })
     expect(fetcher).toHaveBeenCalledTimes(1)
     const [url, init] = fetcher.mock.calls[0]!
-    expect(url).toBe('https://generativelanguage.googleapis.com/v1beta/models/gemini-3.1-flash-image:generateContent')
+    expect(url).toBe('https://generativelanguage.googleapis.com/v1beta/models/gemini-nano-banana-2.1:generateContent')
     expect(init.headers['x-goog-api-key']).toBe('fictional-key')
     const generationConfig = JSON.parse(init.body).generationConfig
     expect(generationConfig).toMatchObject({ candidateCount: 1, responseModalities: ['IMAGE'], imageConfig: { imageSize: '1K', aspectRatio: '16:9' }, thinkingConfig: { thinkingLevel: 'MINIMAL', includeThoughts: false } })
     expect(generationConfig).not.toHaveProperty('responseFormat')
     expect(result).toMatchObject({ image: { mimeType: 'image/png', data: png }, responseId: 'fictional-response', usage: { inputTokens: 100, outputTokens: 1132, imageTokens: 1120, measured: true } })
-    expect(feedImageCost(FEED_IMAGE_CAPABILITY.rates, 100, 1132, 1120)).toBeCloseTo(0.067286)
+    expect(feedImageCost(FEED_IMAGE_CAPABILITY.rates, 100, 1132, 1120)).toBeCloseTo(0.03384)
   })
   it('uses Vertex endpoint and bearer token without alternate-host fallback', async () => {
     const fetcher = vi.fn().mockResolvedValue(new Response('{}', { status: 404 }))

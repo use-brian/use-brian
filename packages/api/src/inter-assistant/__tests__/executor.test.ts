@@ -2192,9 +2192,9 @@ describe('[COMP:api/inter-assistant-executor] workflow research fan-out + memory
     await callee({ ...baseParams, depth: { tier: 'deep' }, callerChannelType: 'workflow', workflowId: 'wf-1' })
 
     expect(mockRunPreflight).toHaveBeenCalledTimes(1)
-    expect(mockRunPreflight.mock.calls[0][0]).toMatchObject({ model: 'gemini-3-pro-research', researchMode: true, forceResearch: true })
+    expect(mockRunPreflight.mock.calls[0][0]).toMatchObject({ model: 'gemini-4-argon-research', researchMode: true, forceResearch: true })
     const loopArg = mockQueryLoop.mock.calls[0][0] as { model: string; systemPrompt: string }
-    expect(loopArg.model).toBe('gemini-3-pro-research')
+    expect(loopArg.model).toBe('gemini-4-argon-research')
     expect(loopArg.systemPrompt).toContain('HK SME stat: 62% adoption')
     expect(loopArg.systemPrompt).toContain('Pre-Researched Context')
   })

@@ -226,12 +226,12 @@ describe('[COMP:core/worker-manager-persist] setPersistence + spawn lifecycle', 
     const store = makeStore()
     const manager = createWorkerManager({
       provider: makeFakeProvider('done'),
-      model: 'gemini-3.1-flash-lite',
+      model: 'gemini-3.5-flash-lite',
       tools: new Map(),
     })
     manager.setPersistence({ store, sessionId: 's1', workspaceId: 'ws1' })
     manager.setResearchMode(true)
-    manager.setResearchModel('gemini-3-pro-research')
+    manager.setResearchModel('gemini-4-argon-research')
 
     manager.spawn('research this', { ...ctx, workspaceId: 'ws1' })
     await manager.waitForNext()
@@ -239,7 +239,7 @@ describe('[COMP:core/worker-manager-persist] setPersistence + spawn lifecycle', 
 
     expect(store.spawns[0]).toMatchObject({
       researchMode: true,
-      model: 'gemini-3-pro-research',
+      model: 'gemini-4-argon-research',
     })
   })
 })

@@ -2356,8 +2356,8 @@ describe('[COMP:brain/pipeline-b] extraction usage attribution', () => {
 
     await processEpisode(baseEpisode(), 'note', makeDeps({
       provider,
-      model: 'gemini-3.1-flash-lite',
-      classifierModel: 'gemini-3.1-flash-lite',
+      model: 'gemini-3.5-flash-lite',
+      classifierModel: 'gemini-3.5-flash-lite',
       modelTier: 'standard',
       providerKeySource: 'platform',
       usage: usage.store,
@@ -3430,7 +3430,7 @@ describe('[COMP:tasks/task-readiness] Pipeline B — grounded automatic task qua
       candidatesFor(2),
       makeDeps({
         provider,
-        model: 'gemini-3.1-flash-lite',
+        model: 'gemini-3.5-flash-lite',
         modelTier: 'standard',
         providerKeySource: 'platform',
         inputTokenLimit: 12000,

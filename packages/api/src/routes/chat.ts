@@ -7398,7 +7398,7 @@ export function chatRoutes(options: WebChatOptions): Router {
             },
           },
           channelType: session.channelType,
-          compactModel: 'gemini-flash',
+          compactModel: 'gemini-3.6-flash-pro',
           confirmationResolver,
           confirmationTimeoutMs: 86_400_000, // 24h for web
           // Coordinator mode: the model is told "Do NOT write any response text

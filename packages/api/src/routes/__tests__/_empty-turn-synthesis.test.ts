@@ -197,13 +197,13 @@ describe('[COMP:api/empty-turn-synthesis] composeEmptyTurnSynthesis', () => {
       channelType: 'web',
     })
     expect(result).not.toBeNull()
-    expect(result!.model).toBe('gemini-flash')
+    expect(result!.model).toBe('gemini-3.6-flash-pro')
     expect(result!.text).toContain('tiktok.com')
     expect(result!.usage).toEqual({ inputTokens: 120, outputTokens: 80 })
 
     // Verify Flash got the right model + the worker findings in the payload.
     const call = (provider.stream as ReturnType<typeof vi.fn>).mock.calls[0][0]
-    expect(call.model).toBe('gemini-flash')
+    expect(call.model).toBe('gemini-3.6-flash-pro')
     const payload = JSON.parse(call.messages[0].content)
     expect(payload.userMessage).toBe('give me the links of the video')
     expect(payload.toolEvidence).toHaveLength(1)

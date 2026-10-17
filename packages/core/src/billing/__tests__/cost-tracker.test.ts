@@ -41,6 +41,19 @@ describe('[COMP:billing/cost-tracker] isOverheadSource', () => {
 })
 
 describe('[COMP:billing/cost-tracker] calculateCost', () => {
+  it.each(['gemini-3.6-flash-standard', 'gemini-3.6-flash-pro'])('prices the refreshed %s at Flash 3.6 list rates', model => {
+    const usage = { inputTokens: 10_000, cacheReadTokens: 20_000, outputTokens: 1_000 }
+    expect(calculateCost(model, usage)).toBeCloseTo(0.0255, 10)
+    expect(calculateCost('gemini-3-flash-standard', usage)).toBeCloseTo(0.009, 10)
+  })
+
+  it('prices Argon output including thoughts and implicit cache without repricing historical Research', () => {
+    const usage = { inputTokens: 10_000, cacheReadTokens: 20_000, outputTokens: 1_000 }
+    expect(calculateCost('gemini-4-argon-research', usage)).toBeCloseTo(0.064, 10)
+    expect(calculateCost('gemini-4-argon', usage)).toBeCloseTo(0.064, 10)
+    expect(calculateCost('gemini-3-pro-research', usage)).toBeCloseTo(0.036, 10)
+  })
+
   it('prices the embedding model at input-only $0.025/M via its namespaced alias', () => {
     const usage = { inputTokens: 1_000_000, outputTokens: 0 }
     expect(calculateCost('gemini-embedding-001', usage)).toBeCloseTo(0.025, 6)

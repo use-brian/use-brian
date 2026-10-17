@@ -62,7 +62,7 @@ const clip = (s: string, max: number) => (s.length > max ? `${s.slice(0, max)}â€
 
 /**
  * Construct the judge over an injected LLM provider (boot passes the pinned
- * background model, `gemini-3.1-flash-lite`). Same injected-port pattern as
+ * background model, `gemini-3.5-flash-lite`). Same injected-port pattern as
  * `createGoalClarityAssessor`.
  */
 export function createTaskTriageJudge(deps: {

@@ -73,10 +73,19 @@ describe('[COMP:providers/gemini-session-stream] Gemini session streaming', () =
     vi.restoreAllMocks()
   })
 
-  it('streams verbatim reasoning, reply text, and tool chunks live', async () => {
+  it.each(['gemini-3.6-flash-standard', 'gemini-3.6-flash-pro', 'gemini-4-argon-research'])('records %s while sending its wire model', async model => {
+    fetchMock.mockResolvedValueOnce(sseResponse(TURN_CHUNKS))
+    const session = createGeminiProvider('test-key').createSession({ model, systemPrompt: 'sys' })
+    const chunks = await collect(session.send([{ role: 'user', content: 'Hello' }]))
+    expect(chunks[0]).toMatchObject({ type: 'message_start', model })
+    const wireModel = model === 'gemini-4-argon-research' ? 'gemini-4-argon' : 'gemini-3.6-flash'
+    expect(fetchMock.mock.calls[0][0]).toContain(`/models/${wireModel}:streamGenerateContent`)
+  })
+
+  it.each(['gemini-pro', 'gemini-4-argon-research'])('streams reasoning, reply text, and tool chunks for %s', async model => {
     fetchMock.mockResolvedValueOnce(sseResponse(TURN_CHUNKS))
     const session = createGeminiProvider('test-key').createSession({
-      model: 'gemini-pro',
+      model,
       systemPrompt: 'sys',
     })
     const msgs: Message[] = [{ role: 'user', content: [{ type: 'text', text: 'build a page' }] }]
@@ -154,7 +163,7 @@ describe('[COMP:providers/gemini-session-stream] Gemini session streaming', () =
     expect(chunks.at(-1)).toMatchObject({ type: 'message_end', stopReason: 'end_turn' })
   })
 
-  it('replays thoughtSignature on the next request and drops thought parts entirely', async () => {
+  it.each(['gemini-pro', 'gemini-4-argon-research'])('preserves signatures across %s tool turns and drops thought bodies', async model => {
     fetchMock.mockResolvedValueOnce(sseResponse(TURN_CHUNKS))
     fetchMock.mockResolvedValueOnce(
       sseResponse([
@@ -163,7 +172,7 @@ describe('[COMP:providers/gemini-session-stream] Gemini session streaming', () =
     )
 
     const session = createGeminiProvider('test-key').createSession({
-      model: 'gemini-pro',
+      model,
       systemPrompt: 'sys',
     })
 

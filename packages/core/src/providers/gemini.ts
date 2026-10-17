@@ -8,7 +8,8 @@ import type { HttpRetryWindow } from './types.js'
  * thoughtSignature) in session history.
  */
 import { debugDocumentFlow } from '../engine/document-flow-debug.js'
-import { providerAliasMap, recordedAliasIds, providerModelIds } from '@use-brian/shared/model-registry'
+import { Agent } from 'undici'
+import { providerAliasMap, recordedAliasIds, providerModelIds, registryRow } from '@use-brian/shared/model-registry'
 import type { LLMProvider, ProviderRequest, ProviderSession, SendOptions, SessionOptions, StreamChunk, Message, ContentBlock, ThinkingLevel, ToolDefinition, StopReason, TokenUsage } from './types.js'
 import type { GoogleTransport } from './google-transport.js'
 import { aiStudioTransport } from './google-transport.js'
@@ -18,14 +19,16 @@ import { systemContextParts, extractHistorySystemContext } from './system-contex
 /** Alias → real Google model id, derived from the model registry (each
  * gemini row's alias/idAliases vs its `apiModelId`). */
 const MODEL_ALIASES: Record<string, string> = providerAliasMap('gemini')
+const PREFILL_DISPATCHERS = new Map<number, Agent>()
 
 /**
  * Synthetic logical ids that share an underlying Google model with another
  * tier but must stay billable-distinct in `usage_tracking`. They run the real
  * model on the wire (via MODEL_ALIASES above) but we **record** the synthetic
  * id in `message_start` so the row classifies as the right tier:
- *   - `gemini-3-flash-standard` (MODEL_MAP.standard) — Flash 3, vs Pro.
- *   - `gemini-3-pro-research`   (MODEL_MAP.research) — Pro 3.1, vs Max + history.
+ *   - `gemini-3.6-flash-standard` (MODEL_MAP.standard) — Flash 3.6, vs Pro.
+ *   - `gemini-4-argon-research` (MODEL_MAP.research) — Argon, vs historical Research.
+ * Standard/Pro both use synthetic ids; historical synthetic ids also remain.
  * Every other model records its resolved provider id unchanged. Derived from
  * the registry rows flagged `recordAlias`.
  */
@@ -490,6 +493,12 @@ async function* streamGeminiSSE(
   const retryHttp = createGeminiHttpRetry(signal, { transport: transport.kind, model: modelId, window: httpRetryWindow })
   signal?.throwIfAborted()
   const headers = await transport.headers()
+  const responseWindowMs = registryRow(modelId)?.firstResponseTimeoutMs
+  let dispatcher = responseWindowMs ? PREFILL_DISPATCHERS.get(responseWindowMs) : undefined
+  if (responseWindowMs && !dispatcher) {
+    dispatcher = new Agent({ headersTimeout: responseWindowMs, bodyTimeout: responseWindowMs })
+    PREFILL_DISPATCHERS.set(responseWindowMs, dispatcher)
+  }
 
   // `signal` is plumbed all the way to `fetch` and survives onto the response
   // body's reader. Without this, a hung upstream call (Gemini taking >5min on
@@ -505,6 +514,9 @@ async function* streamGeminiSSE(
       headers,
       body: serialized,
       signal: attemptSignal,
+      // Node 22 declares Undici 6 types. The Undici 7 Agent remains runtime
+      // compatible; the local HTTP timeout tests exercise this bridge.
+      ...(dispatcher ? { dispatcher: dispatcher as unknown as RequestInit['dispatcher'] } : {}),
     }))
   }
 
@@ -620,14 +632,16 @@ async function* streamGeminiSSE(
  * empty-response retry which needs binary "default vs downshift." Keeping
  * this 2-level is intentional; extend only when a caller actually needs it.
  */
+function supportsGeminiThinkingConfig(modelId: string): boolean {
+  return /(^|\/)gemini-(?:3(?:\.\d+)?-(?:pro|flash)|4-argon(?:$|-))/.test(modelId.toLowerCase())
+}
+
 export function resolveGeminiThinkingLevel(
   modelId: string,
   level: ThinkingLevel | undefined,
 ): 'LOW' | 'HIGH' | undefined {
   if (!level) return undefined
-  const m = modelId.toLowerCase()
-  const isGemini3 = /(^|\/)gemini-3(?:\.\d+)?-(?:pro|flash)/.test(m)
-  if (!isGemini3) return undefined
+  if (!supportsGeminiThinkingConfig(modelId)) return undefined
   return level === 'high' ? 'HIGH' : 'LOW'
 }
 
@@ -686,15 +700,14 @@ function buildRequest(
           }
         : {}),
       ...(() => {
-        // Gemini 3 thinks on every turn regardless; `includeThoughts: true`
+        // Gemini 3 and Argon think on every turn regardless; `includeThoughts: true`
         // asks it to also return a streamable SUMMARY of that reasoning (a
         // few extra output tokens, not extra thinking) so the engine can
         // surface it as `thinking_delta` → SSE `reasoning`. Without it, the
-        // reasoning stream is empty even though the plumbing exists. Only
-        // gemini-3 supports `thinkingConfig`; older models get nothing.
+        // reasoning stream is empty even though the plumbing exists. Gemini 3 and
+        // Argon support this config; older models get nothing.
         // See docs/architecture/engine/live-streaming.md.
-        const isGemini3 = /(^|\/)gemini-3(?:\.\d+)?-(?:pro|flash)/.test(modelId.toLowerCase())
-        if (!isGemini3) return {}
+        if (!supportsGeminiThinkingConfig(modelId)) return {}
         const tl = resolveGeminiThinkingLevel(modelId, options.thinkingLevel)
         return {
           thinkingConfig: {

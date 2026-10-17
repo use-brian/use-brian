@@ -57,7 +57,7 @@ export class SkillDraftError extends Error {
 
 /** Fallback when the route doesn't resolve a tier — real procedural
  *  writing, not just extraction. */
-const DRAFT_MODEL = 'gemini-flash'
+const DRAFT_MODEL = 'gemini-3.6-flash-pro'
 
 /** Transcript caps — the route validates looser ones; these are the
  *  authoritative backstops (stateless endpoint: the client resends the

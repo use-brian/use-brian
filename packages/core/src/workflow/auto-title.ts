@@ -25,7 +25,7 @@
 import type { LLMProvider, TokenUsage } from '../providers/types.js'
 import type { StructuredSchedule } from '../scheduling/schedule.js'
 
-const AUTO_TITLE_MODEL = 'gemini-3.1-flash-lite'
+const AUTO_TITLE_MODEL = 'gemini-3.5-flash-lite'
 
 /**
  * Clean up a raw LLM-generated workflow title. Identical to the session

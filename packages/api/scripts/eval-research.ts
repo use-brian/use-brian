@@ -11,7 +11,7 @@ void runResearchEvalCli(process.argv.slice(2), { log: console.log, error: consol
   configuredAdapter: async () => {
     const apiKey = process.env.GEMINI_API_KEY
     if (!apiKey) throw new Error('GEMINI_API_KEY is not configured; collection needs the configured provider.')
-    const model = process.env.RESEARCH_EVAL_MODEL ?? 'gemini-flash'
+    const model = process.env.RESEARCH_EVAL_MODEL ?? 'gemini-3.6-flash-pro'
     const tools = createBaseTools()
     const provider = createGeminiProvider(apiKey)
     return createConfiguredProviderCollectionAdapter({

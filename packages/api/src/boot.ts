@@ -4138,7 +4138,7 @@ export async function bootOpenApi(opts: BootOpenApiOptions): Promise<BootResult>
       promotion: createMemoryToEntityPromotionStore(),
       entityMerge: { repo: createEntityMergeStore() },
       provider,
-      reclassifierModel: 'gemini-flash',
+      reclassifierModel: 'gemini-3.6-flash-pro',
       decisionRuntime,
       resolveLlm: async (workspaceId) => {
         const runtime = await resolveBackgroundRuntime(workspaceId)
@@ -4970,7 +4970,7 @@ export async function bootOpenApi(opts: BootOpenApiOptions): Promise<BootResult>
     ? {
           apiKeyEnvName: 'GOOGLE_API_KEY' as const,
           apiKey: browserGeminiKey,
-          model: env.BROWSER_USE_MODEL || 'gemini-3-flash-preview',
+          model: env.BROWSER_USE_MODEL || 'gemini-3.6-flash',
           providerKeySource: 'platform' as const,
         }
     : browserDashscopeKey
@@ -5500,7 +5500,7 @@ export async function bootOpenApi(opts: BootOpenApiOptions): Promise<BootResult>
             return {
               apiKeyEnvName: 'GOOGLE_API_KEY' as const,
               apiKey: gemini.secret,
-              model: env.BROWSER_USE_MODEL || 'gemini-3-flash-preview',
+              model: env.BROWSER_USE_MODEL || 'gemini-3.6-flash',
               providerKeySource: 'platform' as const,
               recordSpend: async (model: string, usage: TokenUsage) => {
                 await gemini.recordSpend(calculateCost(model, usage))

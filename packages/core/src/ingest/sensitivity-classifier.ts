@@ -73,7 +73,7 @@ export type SensitivityClassification = {
 
 export type SensitivityClassifierOptions = {
   provider: LLMProvider
-  /** Flash-class model id (e.g. 'gemini-flash'). */
+  /** Flash-class model id (e.g. 'gemini-3.6-flash-pro'). */
   model: string
   inputTokenLimit?: number
   maxTokens?: number

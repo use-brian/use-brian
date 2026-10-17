@@ -178,6 +178,19 @@ describe('[COMP:providers/wrappers] wrapIdleTimeout — first-deliverable vs int
     expect(out).toHaveLength(3)
   })
 
+  it('allows Argon initial reasoning beyond the ordinary prefill window', async () => {
+    const fn = wrapIdleTimeout(20, 30)(timedStream([80]))
+    const chunks = []
+    for await (const chunk of fn({ ...req, model: 'gemini-4-argon-research' })) chunks.push(chunk)
+    expect(chunks).toHaveLength(1)
+  })
+
+  it('still aborts Argon gaps after output starts', async () => {
+    const fn = wrapIdleTimeout(20, 30)(timedStream([1, 100]))
+    const drainArgon = async () => { for await (const _ of fn({ ...req, model: 'gemini-4-argon-research' })) { /* drain */ } }
+    await expect(drainArgon()).rejects.toThrow('Stream idle for 20ms')
+  })
+
   it('keeps the legacy single-window behaviour when firstChunkTimeoutMs is omitted', async () => {
     const fn = wrapIdleTimeout(40)(timedStream([200]))
     await expect(drain(fn)).rejects.toThrow(/Stream idle for 40ms/)

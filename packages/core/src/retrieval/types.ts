@@ -262,7 +262,7 @@ export type RetrievalStep = {
   name: RetrievalStepName
   /**
    * Model / attribution label per neural-search-process.md — e.g. `inference`
-   * (no LLM), `fts+ilike`, an embedding model id, or `gemini-3.1-flash-lite`
+   * (no LLM), `fts+ilike`, an embedding model id, or `gemini-3.5-flash-lite`
    * for the Layer-1 topic step.
    */
   model: string

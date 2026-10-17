@@ -374,7 +374,7 @@ export async function runProactiveCompaction(
   } = params
   const persistLongTermContext = params.persistLongTermContext !== false
   const persistSessionSummary = params.persistSessionSummary !== false
-  const compactionModel = params.model ?? 'gemini-flash'
+  const compactionModel = params.model ?? 'gemini-3.6-flash-pro'
   const guarded = <T>(operation: () => Promise<T>): Promise<T> => params.authority
     ? params.authority.execute(operation)
     : operation()

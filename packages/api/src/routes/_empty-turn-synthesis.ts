@@ -66,7 +66,7 @@ export type EmptyTurnSynthesisResult = {
   model: string
 }
 
-const SYNTHESIS_MODEL = 'gemini-flash' as const
+const SYNTHESIS_MODEL = 'gemini-3.6-flash-pro' as const
 
 /** Cap each tool result snippet — Flash needs signal, not the full payload. */
 const MAX_RESULT_SNIPPET_CHARS = 1500
@@ -209,7 +209,7 @@ export async function composeEmptyTurnSynthesis(
         model: SYNTHESIS_MODEL,
         systemPrompt: SYSTEM_PROMPT,
         messages: [{ role: 'user', content: payload }],
-        // `gemini-flash` resolves to `gemini-3-flash-preview`, which thinks on
+        // The Flash 3.6 model thinks on
         // every turn, and Gemini bills thinking tokens against `maxOutputTokens`
         // (outputTokens = candidatesTokenCount + thoughtsTokenCount). With the
         // old `maxTokens: 600` and no thinking cap, default-level thinking ate

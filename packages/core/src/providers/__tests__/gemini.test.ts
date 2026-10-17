@@ -197,6 +197,11 @@ describe('[COMP:providers/gemini-thinking] resolveGeminiThinkingLevel', () => {
     expect(resolveGeminiThinkingLevel('gemini-3-flash-preview', 'high')).toBe('HIGH')
   })
 
+  it('supports Argon thinking on raw and namespaced wire ids', () => {
+    expect(resolveGeminiThinkingLevel('gemini-4-argon', 'low')).toBe('LOW')
+    expect(resolveGeminiThinkingLevel('publishers/google/models/gemini-4-argon', 'high')).toBe('HIGH')
+  })
+
   it('returns undefined when level is unset (omits thinkingConfig)', () => {
     expect(resolveGeminiThinkingLevel('gemini-3.1-pro-preview', undefined)).toBeUndefined()
   })

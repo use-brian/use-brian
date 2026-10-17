@@ -41,7 +41,7 @@ If split: {"split":true,"tasks":["self-contained research prompt 1","..."]}
 If not: {"split":false}`
 
 const MIN_MESSAGE_LENGTH = 40
-const CLASSIFIER_MODEL = 'gemini-3.1-flash-lite'
+const CLASSIFIER_MODEL = 'gemini-3.5-flash-lite'
 
 export type SplitOptions = {
   provider: LLMProvider

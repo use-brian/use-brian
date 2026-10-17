@@ -38,9 +38,9 @@ import type { BrainEpisodeIngestor, ChatEpisodeIngestor, ChatEpisodeInput } from
 // of its own) must reference it rather than hardcode a model string — the
 // golden set (pipeline-b.golden-set.test.ts) and ingest-pipeline.md both pin
 // the extraction model to this constant, and a drifted literal misclassifies
-// the usage-tracking tier (2026-07-16: platform sites carried 'gemini-flash').
-export const EXTRACTION_MODEL = 'gemini-3-flash-standard'
-const CLASSIFIER_MODEL = 'gemini-3.1-flash-lite'
+// the usage-tracking tier (2026-07-16: platform sites carried a background id).
+export const EXTRACTION_MODEL = 'gemini-3.6-flash-standard'
+const CLASSIFIER_MODEL = 'gemini-3.5-flash-lite'
 
 /** Head of the raw text stored inline on a generic Episode's `content_ref`
  *  (matches the closed impl's manual-paste budget). */

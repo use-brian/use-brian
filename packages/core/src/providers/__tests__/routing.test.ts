@@ -105,14 +105,14 @@ describe('[COMP:providers/routing-provider] dispatch', () => {
       {
         availability,
         resolveModel: (model) =>
-          model === 'gemini-3.1-flash-lite' ? 'gpt-5.6-terra' : model,
+          model === 'gemini-3.5-flash-lite' ? 'gpt-5.6-terra' : model,
       },
     )
 
     await expect(
       text(
         routing.stream({
-          model: 'gemini-3.1-flash-lite',
+          model: 'gemini-3.5-flash-lite',
           systemPrompt: '',
           messages: [],
         }),

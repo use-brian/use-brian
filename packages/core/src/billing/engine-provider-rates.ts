@@ -19,11 +19,12 @@
  * Keep the keys in sync with `EngineId` in
  * `packages/core/src/engines/ask-engines.ts`.
  *
- * Last verified: 2026-08-07
+ * Last verified: 2026-08-07 (other engines); Gemini reverified 2026-10-17.
  * - openai ($0.055/call): `web_search` tool fee ~$30/1k calls + up to 2,048
  *   output tokens on gpt-4o ($10/M = $0.0205) + search-result input tokens.
- * - gemini ($0.045/call): Google Search grounding ~$35/1k requests + 2,048
- *   output tokens on gemini-2.5-flash ($2.50/M = $0.005).
+ * - gemini ($0.045/call): Google Search grounding $14/1k queries + 2,048
+ *   output/thinking tokens on gemini-3.8-flash ($7.50/M = $0.01536),
+ *   retaining input/search headroom. Multi-query search may exceed this estimate.
  * - perplexity ($0.005/call): Sonar ~$1/1k requests + request/response and
  *   search-context tokens at ~$1/M.
  * - claude ($0.120/call): the `web_search` server tool at ~$10/1k searches

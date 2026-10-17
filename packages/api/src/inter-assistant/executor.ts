@@ -1930,7 +1930,7 @@ export function createCalleeExecutor(options: CalleeExecutorOptions): CalleeExec
       ? MODEL_MAP.research
       : params.modelAlias
         ? MODEL_MAP[params.modelAlias] ?? MODEL_MAP.standard
-        : 'gemini-flash'
+        : 'gemini-3.6-flash-pro'
     const customLlmRuntime = calleeAssistant.workspaceId && turnOptions.resolveWorkspaceCustomLlm
       ? await turnOptions.resolveWorkspaceCustomLlm({
           workspaceId: calleeAssistant.workspaceId,

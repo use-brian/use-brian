@@ -337,7 +337,7 @@ describe('[COMP:decisions/runtime] decision composition', () => {
 
     await record(primaryAttempt)
     await record({ ...primaryAttempt, attempt: 2, outcome: 'error', disposition: undefined })
-    await record({ ...primaryAttempt, stage: 'generation', modelCatalogId: 'gemini-3.1-flash-lite', modelWireId: 'gemini-3.1-flash-lite' })
+    await record({ ...primaryAttempt, stage: 'generation', modelCatalogId: 'gemini-3.5-flash-lite', modelWireId: 'gemini-3.5-flash-lite' })
     await record({ ...primaryAttempt, workspaceId: undefined })
     await record({ ...primaryAttempt, usage: undefined })
 

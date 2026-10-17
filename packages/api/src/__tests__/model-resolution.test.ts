@@ -25,14 +25,14 @@ import {
 // 6). It runs Gemini Pro 3.1 but records the synthetic `gemini-3-pro-research`
 // id so it stays distinct from Max — and from historical Pro-3.1-as-Max rows,
 // which keep the bare `gemini-3.1-pro-preview` id and stay Max.
-const RESEARCH = 'gemini-3-pro-research'
+const RESEARCH = 'gemini-4-argon-research'
 
 // Standard chat tier moved from Flash Lite to Flash 3 on 2026-06-02. It runs
 // the same model as Pro but on a tighter tool-round budget, and carries the
-// synthetic id `gemini-3-flash-standard` so it stays billable-distinct from
+// synthetic id `gemini-3.6-flash-standard` so it stays billable-distinct from
 // Pro. Flash Lite stays the background/extraction workhorse and is still
 // classified as Standard tier for analytics.
-const STANDARD = 'gemini-3-flash-standard'
+const STANDARD = 'gemini-3.6-flash-standard'
 
 afterEach(() => {
   delete process.env.USEBRIAN_EDITION
@@ -45,7 +45,7 @@ describe('[COMP:api/model-resolution] MODEL_MAP', () => {
   })
 
   it('points Pro at the explicit Gemini Flash 3 alias', () => {
-    expect(MODEL_MAP.pro).toBe('gemini-flash-3')
+    expect(MODEL_MAP.pro).toBe('gemini-3.6-flash-pro')
   })
 
   it('points Max at the Gemini 3.8 Flash provider id (default Max model)', () => {
@@ -76,8 +76,8 @@ describe('[COMP:api/model-resolution] isResearchTier / tierForModel', () => {
   })
 
   it('classifies the standard / pro / max ids to their tiers', () => {
-    expect(tierForModel('gemini-3-flash-standard')).toBe('standard')
-    expect(tierForModel('gemini-flash-3')).toBe('pro')
+    expect(tierForModel('gemini-3.6-flash-standard')).toBe('standard')
+    expect(tierForModel('gemini-3.6-flash-pro')).toBe('pro')
     expect(tierForModel('gemini-3.8-flash')).toBe('max')
     // Superseded provider ids remain Max for historical billing rows.
     expect(tierForModel('gemini-3.6-flash')).toBe('max')
@@ -91,7 +91,7 @@ describe('[COMP:api/model-resolution] isStandardTier', () => {
   })
 
   it('still recognises Flash Lite (background workhorse) + its retired preview SKU', () => {
-    expect(isStandardTier('gemini-3.1-flash-lite')).toBe(true)
+    expect(isStandardTier('gemini-3.5-flash-lite')).toBe(true)
     expect(isStandardTier('gemini-3.1-flash-lite-preview')).toBe(true)
   })
 
@@ -99,7 +99,7 @@ describe('[COMP:api/model-resolution] isStandardTier', () => {
     // Pro shares the underlying model but records its own resolved id, so the
     // billing/tier split survives.
     expect(isStandardTier('gemini-flash')).toBe(false)
-    expect(isStandardTier('gemini-flash-3')).toBe(false)
+    expect(isStandardTier('gemini-3.6-flash-pro')).toBe(false)
     expect(isStandardTier('gemini-3-flash-preview')).toBe(false)
   })
 
@@ -110,7 +110,7 @@ describe('[COMP:api/model-resolution] isStandardTier', () => {
 
   it('STANDARD_TIER_MODELS exposes the same set', () => {
     expect(STANDARD_TIER_MODELS.has(STANDARD)).toBe(true)
-    expect(STANDARD_TIER_MODELS.has('gemini-3.1-flash-lite')).toBe(true)
+    expect(STANDARD_TIER_MODELS.has('gemini-3.5-flash-lite')).toBe(true)
     expect(STANDARD_TIER_MODELS.has('gemini-3.1-flash-lite-preview')).toBe(true)
     expect(STANDARD_TIER_MODELS.has('gemini-flash')).toBe(false)
     expect(STANDARD_TIER_MODELS.has('gemini-3-flash-preview')).toBe(false)
@@ -149,9 +149,9 @@ describe('[COMP:api/model-resolution] resolveModel', () => {
     // Free → Standard; paid → Pro (the spec default). A Max plan with no
     // explicit request still resolves to Pro, not Max.
     expect(resolveModel(undefined, 'free')).toBe(STANDARD)
-    expect(resolveModel(undefined, 'pro')).toBe('gemini-flash-3')
-    expect(resolveModel(undefined, 'max_5x')).toBe('gemini-flash-3')
-    expect(resolveModel(undefined, 'enterprise')).toBe('gemini-flash-3')
+    expect(resolveModel(undefined, 'pro')).toBe('gemini-3.6-flash-pro')
+    expect(resolveModel(undefined, 'max_5x')).toBe('gemini-3.6-flash-pro')
+    expect(resolveModel(undefined, 'enterprise')).toBe('gemini-3.6-flash-pro')
   })
 
   it('honours an explicit Standard request on a paid plan', () => {
@@ -169,7 +169,7 @@ describe('[COMP:api/model-resolution] resolveModel', () => {
   it('honours every built-in tier in OSS regardless of the persisted plan', () => {
     process.env.USEBRIAN_EDITION = 'oss'
     expect(resolveModel('standard', 'free')).toBe(STANDARD)
-    expect(resolveModel('pro', 'free')).toBe('gemini-flash-3')
+    expect(resolveModel('pro', 'free')).toBe('gemini-3.6-flash-pro')
     expect(resolveModel('max', 'free')).toBe('gemini-3.8-flash')
     expect(resolveModel('research', 'free')).toBe(RESEARCH)
   })
@@ -177,7 +177,7 @@ describe('[COMP:api/model-resolution] resolveModel', () => {
   it('honours every built-in tier in Outpost regardless of the persisted plan', () => {
     process.env.USEBRIAN_EDITION = 'outpost'
     expect(resolveModel('standard', 'free')).toBe(STANDARD)
-    expect(resolveModel('pro', 'free')).toBe('gemini-flash-3')
+    expect(resolveModel('pro', 'free')).toBe('gemini-3.6-flash-pro')
     expect(resolveModel('max', 'free')).toBe('gemini-3.8-flash')
     expect(resolveModel('research', 'free')).toBe(RESEARCH)
   })
@@ -188,7 +188,7 @@ describe('[COMP:api/model-resolution] resolveModel', () => {
   })
 
   it('routes Pro plans to the Gemini Flash 3 alias', () => {
-    expect(resolveModel('pro', 'pro', 'ok')).toBe('gemini-flash-3')
+    expect(resolveModel('pro', 'pro', 'ok')).toBe('gemini-3.6-flash-pro')
   })
 
   it('routes Max requests to the Gemini 3.8 Flash provider id', () => {
@@ -251,12 +251,12 @@ describe('[COMP:api/model-resolution] chatTierBudget', () => {
     expect(chatTierBudget({ model: STANDARD, researchMode: false }))
       .toEqual({ maxTurns: 10, maxToolCalls: 8 })
     // Flash Lite (background workhorse) classifies Standard too.
-    expect(chatTierBudget({ model: 'gemini-3.1-flash-lite', researchMode: false }))
+    expect(chatTierBudget({ model: 'gemini-3.5-flash-lite', researchMode: false }))
       .toEqual({ maxTurns: 10, maxToolCalls: 8 })
   })
 
   it('lifts the budget to 20/20 for Pro tier', () => {
-    expect(chatTierBudget({ model: 'gemini-flash-3', researchMode: false }))
+    expect(chatTierBudget({ model: 'gemini-3.6-flash-pro', researchMode: false }))
       .toEqual({ maxTurns: 20, maxToolCalls: 20 })
     expect(chatTierBudget({ model: 'gemini-3-flash-preview', researchMode: false }))
       .toEqual({ maxTurns: 20, maxToolCalls: 20 })
@@ -294,21 +294,21 @@ describe('[COMP:api/model-resolution] ensureServableModel — default falls to a
   const BOTH = new Set(['gemini', 'openai-compat:dashscope-intl'])
 
   it('keeps the model when its provider is configured', () => {
-    expect(ensureServableModel('gemini-3-flash-standard', GEMINI)).toBe('gemini-3-flash-standard')
-    expect(ensureServableModel('gemini-3-flash-standard', BOTH)).toBe('gemini-3-flash-standard')
+    expect(ensureServableModel('gemini-3.6-flash-standard', GEMINI)).toBe('gemini-3.6-flash-standard')
+    expect(ensureServableModel('gemini-3.6-flash-standard', BOTH)).toBe('gemini-3.6-flash-standard')
   })
 
   it('substitutes a configured Qwen model when the Gemini default has no provider', () => {
     // The whole point: a Qwen-only deploy resolves the Gemini tier default,
     // whose provider is absent — swap it for a configured, menu-listed model
     // rather than throwing "not configured" in the router.
-    const out = ensureServableModel('gemini-3-flash-standard', QWEN)
-    expect(out).not.toBe('gemini-3-flash-standard')
+    const out = ensureServableModel('gemini-3.6-flash-standard', QWEN)
+    expect(out).not.toBe('gemini-3.6-flash-standard')
     expect(out.startsWith('qwen') || out.startsWith('deepseek')).toBe(true)
   })
 
   it('is a no-op when nothing is configured (routing then fails loudly)', () => {
-    expect(ensureServableModel('gemini-3-flash-standard', new Set())).toBe('gemini-3-flash-standard')
+    expect(ensureServableModel('gemini-3.6-flash-standard', new Set())).toBe('gemini-3.6-flash-standard')
   })
 
   it('leaves an already-Qwen pick untouched on a Qwen deploy', () => {
@@ -322,19 +322,19 @@ describe('[COMP:api/model-resolution] ensureServableModel — default falls to a
       new Set(['gpt-5.6-luna', 'gpt-5.6-terra', 'gpt-5.6-sol', 'gpt-5.5']),
     )
 
-    expect(ensureServableModel('gemini-3-flash-standard', codex)).toBe('gpt-5.6-luna')
-    expect(ensureServableModel('gemini-flash-3', codex)).toBe('gpt-5.6-terra')
+    expect(ensureServableModel('gemini-3.6-flash-standard', codex)).toBe('gpt-5.6-luna')
+    expect(ensureServableModel('gemini-3.6-flash-pro', codex)).toBe('gpt-5.6-terra')
     expect(ensureServableModel('gemini-3.8-flash', codex)).toBe('gpt-5.6-sol')
-    expect(ensureServableModel('gemini-3-pro-research', codex)).toBe('gpt-5.5')
+    expect(ensureServableModel('gemini-4-argon-research', codex)).toBe('gpt-5.5')
   })
 
   it('serves every current Codex tier when only current models are entitled', () => {
     const codex = new MutableProviderAvailability()
     codex.setModelCatalog('openai-codex', new Set(['gpt-6-luna', 'gpt-6-sol', 'gpt-6.1-sol', 'gpt-6-astra']))
-    expect(ensureServableModel('gemini-3-flash-standard', codex)).toBe('gpt-6-luna')
-    expect(ensureServableModel('gemini-flash-3', codex)).toBe('gpt-6-sol')
+    expect(ensureServableModel('gemini-3.6-flash-standard', codex)).toBe('gpt-6-luna')
+    expect(ensureServableModel('gemini-3.6-flash-pro', codex)).toBe('gpt-6-sol')
     expect(ensureServableModel('gemini-3.8-flash', codex)).toBe('gpt-6.1-sol')
-    expect(ensureServableModel('gemini-3-pro-research', codex)).toBe('gpt-6-astra')
+    expect(ensureServableModel('gemini-4-argon-research', codex)).toBe('gpt-6-astra')
     codex.setPreferredProvider('openai-codex')
     expect(backgroundModelFor(codex)).toBe('gpt-6-luna')
     expect(providerVisionModelFor(codex, 'openai-codex')).toBe('gpt-6-luna')
@@ -349,7 +349,7 @@ describe('[COMP:api/model-resolution] ensureServableModel — default falls to a
     mixed.setModelCatalog('openai-codex', new Set(['gpt-5.6-terra', 'gpt-5.6-sol']))
     mixed.setPreferredProvider('openai-codex')
 
-    expect(ensureServableModel('gemini-flash-3', mixed)).toBe('gpt-5.6-terra')
+    expect(ensureServableModel('gemini-3.6-flash-pro', mixed)).toBe('gpt-5.6-terra')
     expect(ensureServableModel('gemini-3.8-flash', mixed)).toBe('gpt-5.6-sol')
     // A direct non-default selection remains explicit.
     expect(ensureServableModel('gpt-5.6-terra', mixed)).toBe('gpt-5.6-terra')
@@ -361,9 +361,9 @@ describe('[COMP:api/model-resolution] ensureServableModel — default falls to a
     mixed.setStaticProvider('openai-compat:dashscope-intl', true)
     mixed.setPreferredProvider('dashscope-intl')
 
-    expect(ensureServableModel('gemini-flash-3', mixed)).toBe('qwen3.7-plus')
+    expect(ensureServableModel('gemini-3.6-flash-pro', mixed)).toBe('qwen3.7-plus')
     expect(ensureServableModel('qwen3.7-plus', mixed)).toBe('qwen3.7-plus')
-    expect(ensureServableModel('gemini-3.1-flash-lite', mixed)).toBe('qwen3.5-flash')
+    expect(ensureServableModel('gemini-3.5-flash-lite', mixed)).toBe('qwen3.5-flash')
   })
 
   it('preserves all four logical tiers while DashScope serves the invocation', () => {
@@ -389,7 +389,7 @@ describe('[COMP:api/model-resolution] ensureServableModel — default falls to a
   it('never substitutes a Codex model absent from the current account catalog', () => {
     const codex = new MutableProviderAvailability()
     codex.setModelCatalog('openai-codex', new Set(['gpt-5.6-terra']))
-    expect(ensureServableModel('gemini-3-flash-standard', codex)).toBe('gpt-5.6-terra')
+    expect(ensureServableModel('gemini-3.6-flash-standard', codex)).toBe('gpt-5.6-terra')
     expect(ensureServableModel('gpt-5.6-sol', codex)).toBe('gpt-5.6-sol')
   })
 
@@ -398,14 +398,14 @@ describe('[COMP:api/model-resolution] ensureServableModel — default falls to a
   // lookup can't see them. Before this, a Qwen-only deploy fell through to a
   // metered CHAT model — a 32-token title billed at chat rates — or, at the
   // call sites that never resolved at all, hard-failed every turn with
-  // "[routing] model 'gemini-3.1-flash-lite' ... is not configured".
+  // "[routing] model 'gemini-3.5-flash-lite' ... is not configured".
   it('substitutes the Qwen BACKGROUND model, not a metered chat model', () => {
-    expect(ensureServableModel('gemini-3.1-flash-lite', QWEN)).toBe('qwen3.5-flash')
+    expect(ensureServableModel('gemini-3.5-flash-lite', QWEN)).toBe('qwen3.5-flash')
   })
 
   it('keeps the Gemini background model when Gemini is configured', () => {
-    expect(ensureServableModel('gemini-3.1-flash-lite', GEMINI)).toBe('gemini-3.1-flash-lite')
-    expect(ensureServableModel('gemini-3.1-flash-lite', BOTH)).toBe('gemini-3.1-flash-lite')
+    expect(ensureServableModel('gemini-3.5-flash-lite', GEMINI)).toBe('gemini-3.5-flash-lite')
+    expect(ensureServableModel('gemini-3.5-flash-lite', BOTH)).toBe('gemini-3.5-flash-lite')
   })
 
   it('uses the preferred provider background row in a mixed deployment', () => {
@@ -414,10 +414,10 @@ describe('[COMP:api/model-resolution] ensureServableModel — default falls to a
     mixed.setStaticProvider('openai-compat:dashscope-intl', true)
     mixed.setPreferredProvider('dashscope-intl')
 
-    expect(ensureServableModel('gemini-3.1-flash-lite', mixed)).toBe('qwen3.5-flash')
+    expect(ensureServableModel('gemini-3.5-flash-lite', mixed)).toBe('qwen3.5-flash')
 
     mixed.setPreferredProvider('gemini')
-    expect(ensureServableModel('gemini-3.1-flash-lite', mixed)).toBe('gemini-3.1-flash-lite')
+    expect(ensureServableModel('gemini-3.5-flash-lite', mixed)).toBe('gemini-3.5-flash-lite')
   })
 
   it('uses Luna rather than a higher Codex tier for preferred-provider background work', () => {
@@ -426,7 +426,7 @@ describe('[COMP:api/model-resolution] ensureServableModel — default falls to a
     mixed.setModelCatalog('openai-codex', new Set(['gpt-5.6-luna', 'gpt-5.6-sol']))
     mixed.setPreferredProvider('openai-codex')
 
-    expect(ensureServableModel('gemini-3.1-flash-lite', mixed)).toBe('gpt-5.6-luna')
+    expect(ensureServableModel('gemini-3.5-flash-lite', mixed)).toBe('gpt-5.6-luna')
   })
 
   it('tracks live Codex catalog changes and keeps available Gemini when Luna is absent', () => {
@@ -435,17 +435,17 @@ describe('[COMP:api/model-resolution] ensureServableModel — default falls to a
     mixed.setPreferredProvider('openai-codex')
 
     mixed.setModelCatalog('openai-codex', new Set(['gpt-5.6-luna', 'gpt-5.6-sol']))
-    expect(ensureServableModel('gemini-3.1-flash-lite', mixed)).toBe('gpt-5.6-luna')
+    expect(ensureServableModel('gemini-3.5-flash-lite', mixed)).toBe('gpt-5.6-luna')
 
     mixed.setModelCatalog('openai-codex', new Set(['gpt-5.6-sol']))
-    expect(ensureServableModel('gemini-3.1-flash-lite', mixed)).toBe('gemini-3.1-flash-lite')
+    expect(ensureServableModel('gemini-3.5-flash-lite', mixed)).toBe('gemini-3.5-flash-lite')
 
     mixed.setModelCatalog('openai-codex', null)
-    expect(ensureServableModel('gemini-3.1-flash-lite', mixed)).toBe('gemini-3.1-flash-lite')
+    expect(ensureServableModel('gemini-3.5-flash-lite', mixed)).toBe('gemini-3.5-flash-lite')
   })
 
   it('is a no-op for a background model when nothing is configured', () => {
-    expect(ensureServableModel('gemini-3.1-flash-lite', new Set())).toBe('gemini-3.1-flash-lite')
+    expect(ensureServableModel('gemini-3.5-flash-lite', new Set())).toBe('gemini-3.5-flash-lite')
   })
 })
 
@@ -455,12 +455,12 @@ describe('[COMP:api/model-resolution] ensureServableModel — default falls to a
 // title_update on most turns (the title itself still landed in DB).
 describe('[COMP:api/model-resolution] backgroundLatencyBudgetMs — budget follows the serving provider', () => {
   it('gives the Gemini background lane the tight budget', () => {
-    expect(backgroundLatencyBudgetMs('gemini-3.1-flash-lite')).toBe(10_000)
+    expect(backgroundLatencyBudgetMs('gemini-3.5-flash-lite')).toBe(10_000)
   })
 
   it('gives an OpenAI-compatible (DashScope) model a wider budget', () => {
     expect(backgroundLatencyBudgetMs('qwen3.5-flash')).toBeGreaterThan(
-      backgroundLatencyBudgetMs('gemini-3.1-flash-lite'),
+      backgroundLatencyBudgetMs('gemini-3.5-flash-lite'),
     )
   })
 

@@ -1,3 +1,4 @@
+import { registryRow } from '@use-brian/shared/model-registry'
 import { debugDocumentFlow } from '../engine/document-flow-debug.js'
 import type { LLMProvider, ProviderSession, SessionOptions, SendOptions, Message, StreamChunk, StreamFn, TokenUsage } from './types.js'
 import { fitMessagesToBudget, resolveInputTokenLimit, isContextOverflowError, MODEL_CONTEXT_FIT_RATIO } from './context-budget.js'
@@ -106,10 +107,11 @@ export const DEFAULT_FIRST_CHUNK_MS = 90_000
  */
 export function wrapIdleTimeout(timeoutMs: number, firstChunkTimeoutMs?: number): StreamWrapper {
   return (inner) => async function* (request) {
+    const firstWindowMs = Math.max(firstChunkTimeoutMs ?? timeoutMs, registryRow(request.model)?.firstResponseTimeoutMs ?? 0)
     const controller = new AbortController()
     const signal = request.signal ? AbortSignal.any([request.signal, controller.signal]) : controller.signal
     // Admission retries share this window; they cannot extend it or become idle replays.
-    const httpRetryWindow = { deadline: Date.now() + (firstChunkTimeoutMs ?? timeoutMs), rateLimited: false }
+    const httpRetryWindow = { deadline: Date.now() + firstWindowMs, rateLimited: false }
     const stream = inner({ ...request, signal, httpRetryWindow })
     const iterator = stream[Symbol.asyncIterator]()
     let timer: ReturnType<typeof setTimeout> | undefined
@@ -117,7 +119,7 @@ export function wrapIdleTimeout(timeoutMs: number, firstChunkTimeoutMs?: number)
     let sawReasoningChunk = false
 
     const timeoutPromise = () => {
-      const windowMs = sawFirstDeliverableChunk ? timeoutMs : (firstChunkTimeoutMs ?? timeoutMs)
+      const windowMs = sawFirstDeliverableChunk ? timeoutMs : firstWindowMs
       const phase = sawFirstDeliverableChunk
         ? ''
         : sawReasoningChunk

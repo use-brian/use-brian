@@ -57,7 +57,7 @@ If a site operation: {"research":false,"operate_site":true}
 Otherwise: {"research":false}`
 
 const MIN_MESSAGE_LENGTH = 40
-const CLASSIFIER_MODEL = 'gemini-3.1-flash-lite'
+const CLASSIFIER_MODEL = 'gemini-3.5-flash-lite'
 
 // ── CJK-aware effective length ─────────────────────────────────────
 //

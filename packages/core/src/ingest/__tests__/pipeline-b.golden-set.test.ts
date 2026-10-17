@@ -217,7 +217,7 @@ async function runExtraction(provider: LLMProvider, content: string) {
     // Keep in lockstep with EXTRACTION_MODEL in
     // packages/api/src/build-episode-ingestors.ts — the golden set must
     // eval the model prod extraction actually runs, not a sibling tier.
-    model: 'gemini-3-flash-standard',
+    model: 'gemini-3.6-flash-standard',
     crm,
     entities,
     entityLinks,

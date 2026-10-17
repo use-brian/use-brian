@@ -1526,7 +1526,7 @@ export async function executePublicTurn(
       channelType: 'api',
       // Reactive compaction on context-overflow errors —
       // matches web chat (chat.ts:1541).
-      compactModel: 'gemini-flash',
+      compactModel: 'gemini-3.6-flash-pro',
       maxTurns,
       },
       sink: { kind: 'json', onEvent: async (event) => {

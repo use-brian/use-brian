@@ -1,3 +1,4 @@
+import { registryRow } from '@use-brian/shared/model-registry'
 import { debugDocumentFlow, withDocumentFlowDebug } from './document-flow-debug.js'
 import { askQuestionSchema } from '../tools/base/ask-question.js'
 import { filterToolsByCapabilities } from '../tools/capability-gate.js'
@@ -575,7 +576,7 @@ export async function* queryLoop(options: QueryLoopOptions): AsyncGenerator<Quer
   // parent clock it was handed, so nesting composes either way.
   const watchdog = options.stallIdleMs
     ? createStallWatchdog({
-        idleMs: options.stallIdleMs,
+        idleMs: Math.max(options.stallIdleMs, (registryRow(options.model)?.firstResponseTimeoutMs ?? 0) * 2),
         parent: options.context.progress,
         label: `queryLoop model=${options.model}`,
       })

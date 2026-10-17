@@ -328,7 +328,7 @@ export async function resolveResumeOutcomeNote(
 }
 
 export function createSessionResumeReplay(deps: SessionResumeReplayDeps): SessionResumeReplay {
-  const model = deps.model ?? 'gemini-flash'
+  const model = deps.model ?? 'gemini-3.6-flash-pro'
 
   return async function replay(params: ResumeReplayParams): Promise<'completed' | 'deferred'> {
     // Inference wiring through the turn kernel's boot registration.

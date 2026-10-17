@@ -15,7 +15,7 @@ import type { LLMProvider, StreamChunk } from '../../providers/types.js'
 function makeProvider(chunks: StreamChunk[]): LLMProvider {
   return {
     name: 'mock',
-    models: ['gemini-3.1-flash-lite'],
+    models: ['gemini-3.5-flash-lite'],
     stream: async function* () {
       for (const c of chunks) yield c
     },
@@ -28,7 +28,7 @@ function makeProvider(chunks: StreamChunk[]): LLMProvider {
 function makeThrowingProvider(error: Error): LLMProvider {
   return {
     name: 'mock-throw',
-    models: ['gemini-3.1-flash-lite'],
+    models: ['gemini-3.5-flash-lite'],
     stream: async function* () {
       throw error
       // typescript needs a yield somewhere for it to be an AsyncGenerator
@@ -63,7 +63,7 @@ describe('[COMP:workflow/auto-title] sanitizeWorkflowTitle', () => {
 describe('[COMP:workflow/auto-title] generateWorkflowTitle', () => {
   it('cleans a streamed title and returns the model name', async () => {
     const provider = makeProvider([
-      { type: 'message_start', model: 'gemini-3.1-flash-lite' },
+      { type: 'message_start', model: 'gemini-3.5-flash-lite' },
       { type: 'text_delta', text: '**Morning** Pill Reminder' },
       { type: 'message_end', stopReason: 'end_turn', usage: { inputTokens: 10, outputTokens: 4 } },
     ])
@@ -73,7 +73,7 @@ describe('[COMP:workflow/auto-title] generateWorkflowTitle', () => {
       timezone: 'Asia/Hong_Kong',
     })
     expect(out.title).toBe('Morning Pill Reminder')
-    expect(out.model).toBe('gemini-3.1-flash-lite')
+    expect(out.model).toBe('gemini-3.5-flash-lite')
     expect(out.usage?.inputTokens).toBe(10)
   })
 
@@ -82,7 +82,7 @@ describe('[COMP:workflow/auto-title] generateWorkflowTitle', () => {
     // terse inputs rather than invent a longer formal alternative. The helper
     // must NOT second-guess that and overwrite with a fallback.
     const provider = makeProvider([
-      { type: 'message_start', model: 'gemini-3.1-flash-lite' },
+      { type: 'message_start', model: 'gemini-3.5-flash-lite' },
       { type: 'text_delta', text: 'Ping Me' },
       { type: 'message_end', stopReason: 'end_turn', usage: { inputTokens: 5, outputTokens: 2 } },
     ])
@@ -92,7 +92,7 @@ describe('[COMP:workflow/auto-title] generateWorkflowTitle', () => {
 
   it('returns null when the model emits nothing', async () => {
     const provider = makeProvider([
-      { type: 'message_start', model: 'gemini-3.1-flash-lite' },
+      { type: 'message_start', model: 'gemini-3.5-flash-lite' },
       { type: 'message_end', stopReason: 'end_turn', usage: { inputTokens: 5, outputTokens: 0 } },
     ])
     const out = await generateWorkflowTitle(provider, { instructions: 'one' })

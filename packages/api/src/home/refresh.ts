@@ -79,7 +79,7 @@ export async function runHomeRefresh(params: {
         payloads: getLedgerPayloadStore(),
       }).ledger,
       provider: params.provider,
-      model: params.model ?? 'gemini-flash',
+      model: params.model ?? 'gemini-3.6-flash-pro',
       systemPrompt: SYSTEM_PROMPT,
       messages: [{ role: 'user', content: buildUserMessage(params.signals) }],
       tools: new Map([['setHomeDock', setHomeDock]]),
