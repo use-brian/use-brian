@@ -4,9 +4,9 @@ import { createExecutionContext, type ScopeSource } from '@use-brian/core'
 import type { PoolClient } from 'pg'
 import { SOURCE_PROTOCOL_VERSION, type SourceAuthorizationRequest } from '@use-brian/brian-app/connector'
 vi.mock('../../db/client.js', () => ({ getPool: vi.fn() }))
-vi.mock('../source-store.js', () => ({ pinExternalSourceOperation: vi.fn(async () => {}), resolveNativeSourceRecipientCeiling: vi.fn() }))
+vi.mock('../source-store.js', () => ({ pinExternalSourceOperation: vi.fn(async () => {}), activatePinnedExternalSourceOperation: vi.fn(async () => {}), resolveNativeSourceRecipientCeiling: vi.fn() }))
 import { getPool } from '../../db/client.js'
-import { pinExternalSourceOperation, resolveNativeSourceRecipientCeiling } from '../source-store.js'
+import { activatePinnedExternalSourceOperation, pinExternalSourceOperation, resolveNativeSourceRecipientCeiling } from '../source-store.js'
 import { createRetainedSourceAuthorityCoordinator, pinPreparedExternalSourceAuthority } from '../retained-source-authority.js'
 
 // These are batching/token-contract tests. Independent source rights are exercised by the real DB/HTTP fixture.
@@ -45,6 +45,19 @@ describe('[COMP:api/external-source-access] retained source batching and token b
     vi.mocked(client.query).mockResolvedValue({ rows: [{ xid: '8',pid: 11,actor: f.userId }] } as never)
     await expect(pinPreparedExternalSourceAuthority(client, f.execution, token)).rejects.toMatchObject({ code: 'source_access_denied' })
     expect(pinExternalSourceOperation).toHaveBeenCalledTimes(3)
+    expect(activatePinnedExternalSourceOperation).not.toHaveBeenCalled()
+  })
+  it('selects previously pinned proof only in its exact original transaction', async () => {
+    const f = fixture(2), token = await f.coordinator.prepare(f.execution, f.sources, 'context')
+    const client = { query: vi.fn(async () => ({ rows: [{ xid: '7',pid: 11,actor: f.userId }] })) } as unknown as PoolClient
+    await pinPreparedExternalSourceAuthority(client, f.execution, token)
+    await pinPreparedExternalSourceAuthority(client, f.execution, token)
+    expect(pinExternalSourceOperation).toHaveBeenCalledTimes(1)
+    expect(activatePinnedExternalSourceOperation).toHaveBeenCalledTimes(1)
+    expect(vi.mocked(activatePinnedExternalSourceOperation).mock.calls[0].slice(1)).toEqual([f.execution,expect.anything(),f.sources,'context'])
+    vi.mocked(client.query).mockResolvedValue({ rows: [{ xid: '8',pid: 11,actor: f.userId }] } as never)
+    await expect(pinPreparedExternalSourceAuthority(client, f.execution, token)).rejects.toMatchObject({ code: 'source_access_denied' })
+    expect(activatePinnedExternalSourceOperation).toHaveBeenCalledTimes(1)
   })
   it('coalesces identical field checks while retaining every observation and rejecting conflicting copies', async () => {
     const f = fixture(3, true), token = await f.coordinator.prepare(f.execution, [...f.sources,f.sources[0]], 'retain')
@@ -71,11 +84,29 @@ describe('[COMP:api/external-source-access] retained source batching and token b
     f.query.mockResolvedValueOnce({ rows: [{ nodeVersion: f.sources[0].version, source: f.sources[0] }] } as never)
     await expect(f.coordinator.prepare(f.execution, [{ ...root,userId: randomUUID() }], 'context')).rejects.toMatchObject({ code: 'source_access_denied' })
     expect(f.authorize).toHaveBeenCalledTimes(1)
-    f.query.mockResolvedValueOnce({ rows: [] } as never)
-    const client = { query: vi.fn() } as unknown as PoolClient
+    const client = { query: vi.fn(async () => ({ rows: [] })) } as unknown as PoolClient
     await expect(pinPreparedExternalSourceAuthority(client, f.execution, token)).rejects.toMatchObject({ code: 'source_access_denied' })
     await expect(pinPreparedExternalSourceAuthority(client, f.execution, token)).rejects.toMatchObject({ code: 'source_access_denied' })
-    expect(client.query).not.toHaveBeenCalled()
+    expect(client.query).toHaveBeenCalledTimes(1)
+    expect(vi.mocked(client.query).mock.calls[0][0]).toContain('read_admitted_external_source_dependencies')
+  })
+  it('refuses a reused proof when transaction-visible native ancestry changes', async () => {
+    const f = fixture(1), root = { ...f.sources[0],resourceKind: 'memory',resourceId: randomUUID() }
+    f.query.mockImplementation(async (sql: string, values: unknown[]) => sql.includes('read_external_source_dependencies')
+      ? { rows: [{ nodeVersion: f.sources[0].version,source: f.sources[0] }] } as never
+      : { rows: f.rows.filter(row => (values[1] as string[]).includes(row.id)) })
+    const token = await f.coordinator.prepare(f.execution, [root], 'context')
+    let changed = false
+    const client = { query: vi.fn(async (sql: string) => sql.includes('read_admitted_external_source_dependencies')
+      ? { rows: [{ nodeVersion: changed ? '2' : '1',source: { ...f.sources[0],version: changed ? '2' : '1' } }] }
+      : { rows: [{ xid: '7',pid: 11,actor: f.userId }] }) } as unknown as PoolClient
+    await pinPreparedExternalSourceAuthority(client, f.execution, token)
+    changed = true
+    await expect(pinPreparedExternalSourceAuthority(client, f.execution, token)).rejects.toMatchObject({ code: 'source_access_denied' })
+    changed = false
+    await expect(pinPreparedExternalSourceAuthority(client, f.execution, token)).rejects.toMatchObject({ code: 'source_access_denied' })
+    expect(pinExternalSourceOperation).toHaveBeenCalledTimes(1)
+    expect(activatePinnedExternalSourceOperation).not.toHaveBeenCalled()
   })
   it('refuses missing or changed observations before network authorization', async () => {
     const f = fixture(1)

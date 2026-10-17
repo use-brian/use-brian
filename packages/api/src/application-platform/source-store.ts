@@ -91,14 +91,7 @@ export async function pinExternalSourceOperation(client: PoolClient, execution: 
         action,decision.receipt.id,new Date(Math.min(decision.receipt.expiresAt,deriveReceipt?.expiresAt ?? Infinity)),fingerprint,deriveReceipt?.id ?? null])
     }
   }
-  await binding.assertCurrent()
-  await client.query(`SELECT set_config('app.external_source_operation_id',$1,true),set_config('app.external_source_actor_id',$2,true),
-    set_config('app.external_source_assistant_id',$3,true),set_config('app.external_source_action',$4,true),set_config('app.v2_assistant_id',$3,true)`,
-  [request.operationId,execution.security.access.userId,execution.assistant.id,action])
-  const current = await client.query<{ snapshot: ScopeSource & { held: boolean } | null }>(`SELECT external_source_snapshot($1,id) AS snapshot FROM unnest($2::uuid[]) AS id`,
-    [binding.profile.workspaceId,sources.map(source => source.resourceId)])
-  if (current.rows.length !== sources.length || current.rows.some((row,index) => !row.snapshot || row.snapshot.held || row.snapshot.version !== sources[index].version
-    || resourceScopeKey(row.snapshot) !== resourceScopeKey(sources[index]))) denied()
+  await activatePinnedExternalSourceOperation(client, execution, proof, sources, action)
 }
 
 /** Metadata is persisted/bound before any tool display conversion; every field observation enters the accumulator. */
@@ -134,4 +127,32 @@ export async function bindTrustedSourceRead(client: PoolClient, execution: Execu
   const sourceRows = sources.map(source => bindScopeSource({}, source))
   accumulator.note({ sources })
   return { result: read.result, sourceRows, sources: structuredClone(sources) }
+}
+
+/** Select only existing exact-transaction receipts. Never inserts authority or calls the source. */
+export async function activatePinnedExternalSourceOperation(client: PoolClient, execution: ExecutionContext, proof: SourceOperationProof,
+  sources: readonly ScopeSource[], action: SourceAction): Promise<void> {
+  const binding = trustedSourceOperationProof(proof, execution)
+  if (!binding || execution.identity.kind !== 'attended' || sources.length === 0 || sources.length > 100
+    || sources.some(source => source.workspaceId !== binding.profile.workspaceId || source.resourceKind !== 'external_source')) denied()
+  await binding.assertCurrent()
+  const transaction = (await client.query<{ xid: string; pid: number; actor: string }>(`SELECT pg_current_xact_id()::text AS xid,pg_backend_pid() AS pid,
+    nullif(current_setting('app.current_user_id',true),'') AS actor`)).rows[0]
+  if (transaction?.actor !== execution.security.access.userId) denied()
+  const { request, requestDigest } = binding.proof
+  const receipts = (await getPool().query<{ id: string }>(`SELECT DISTINCT observation_id AS id FROM external_source_authorizations
+    WHERE workspace_id=$1 AND observation_id=ANY($2::uuid[]) AND operation_id=$3 AND request_digest=$4 AND action=$5
+      AND transaction_id=$6::xid8 AND backend_pid=$7 AND actor_kind=$8 AND actor_id=$9 AND assistant_id=$10
+      AND recipient_kind=$8 AND recipient_id=$9 AND recipient_assistant_id=$10 AND expires_at>clock_timestamp()`,
+  [binding.profile.workspaceId,sources.map(source => source.resourceId),request.operationId,requestDigest,action,transaction.xid,transaction.pid,
+    binding.profile.subject.kind,execution.security.access.userId,execution.assistant.id])).rows
+  if (sources.some(source => !receipts.some(receipt => receipt.id === source.resourceId))) denied()
+  await client.query(`SELECT set_config('app.external_source_operation_id',$1,true),set_config('app.external_source_actor_id',$2,true),
+    set_config('app.external_source_assistant_id',$3,true),set_config('app.external_source_action',$4,true),set_config('app.v2_assistant_id',$3,true)`,
+  [request.operationId,execution.security.access.userId,execution.assistant.id,action])
+  const current = await client.query<{ snapshot: ScopeSource & { held: boolean } | null }>(`SELECT external_source_snapshot($1,id) AS snapshot FROM unnest($2::uuid[]) AS id`,
+    [binding.profile.workspaceId,sources.map(source => source.resourceId)])
+  if (current.rows.length !== sources.length || current.rows.some((row,index) => !row.snapshot || row.snapshot.held || row.snapshot.version !== sources[index].version
+    || resourceScopeKey(row.snapshot) !== resourceScopeKey(sources[index]))) denied()
+  await binding.assertCurrent()
 }

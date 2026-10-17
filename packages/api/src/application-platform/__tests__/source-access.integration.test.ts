@@ -8,7 +8,7 @@ import { getAppPool, getPool, applyRLSGucs, queryWithRLS } from '../../db/client
 import { createMemory, updateMemory } from '../../db/memories.js'
 import { validateAudienceScopeEvidence, validateCallerScopeEvidence } from '../../context-scope/caller-evidence.js'
 import { readCurrentScopeSources, validateDerivedWriteInputs, validateDerivedMemoryInputs, validateDerivedEntityInputs, recordDerivedResource } from '../../db/derived-scope-store.js'
-import { bindTrustedSourceRead, pinExternalSourceOperation } from '../source-store.js'
+import { activatePinnedExternalSourceOperation, bindTrustedSourceRead, pinExternalSourceOperation } from '../source-store.js'
 import { createConnectorSourceRuntimeFactory, configureConnectorSourceRuntimeFactory } from '../source-runtime.js'
 import { readExternalSourceAncestors } from '../external-source-ancestry.js'
 import { createRetainedSourceAuthorityCoordinator, pinPreparedExternalSourceAuthority } from '../retained-source-authority.js'
@@ -137,6 +137,11 @@ describe('[COMP:api/external-source-access] independent persisted source ACL', (
       expect(JSON.stringify(read.result)).toContain('37.25'); expect(read.result).not.toHaveProperty('_meta')
       const evidence = trustedSourceEnvelope(read)!
       expect(evidence.resources[0].fields).toEqual(['description','cost']); expect(trustedSourceEnvelope(structuredClone(read))).toBeUndefined()
+      const selectionRequest: SourceAuthorizationRequest = { version: SOURCE_PROTOCOL_VERSION,operationId: randomUUID(),
+        items: [{ itemId: randomUUID(),resource: evidence.resources[0].resource,fields: ['description','cost'],action: 'context',retentionMode: 'governed' }],
+        recipients: [{ recipientId: randomUUID(),subject: one.profile.subject }] }
+      const selection = await one.access.authorize(selectionRequest)
+      const unpinnedSibling = await one.access.authorize({ ...selectionRequest,items: selectionRequest.items.map(item => ({ ...item,itemId: randomUUID() })) })
       const app = await getAppPool().connect(), accumulator = new ContextScopeAccumulator()
       let retainedSources: Awaited<ReturnType<typeof bindTrustedSourceRead>>['sources']
       try {
@@ -144,6 +149,11 @@ describe('[COMP:api/external-source-access] independent persisted source ACL', (
         await expect(bindTrustedSourceRead(app, one.execution, structuredClone(read), accumulator)).rejects.toMatchObject({ code: 'source_access_denied' })
         const bound = await bindTrustedSourceRead(app, one.execution, read, accumulator)
         retainedSources = bound.sources
+        await expect(activatePinnedExternalSourceOperation(app, one.execution, selection, bound.sources, 'context')).rejects.toMatchObject({ code: 'source_access_denied' })
+        await pinExternalSourceOperation(app, one.execution, selection, bound.sources, 'context')
+        await expect(activatePinnedExternalSourceOperation(app, one.execution, unpinnedSibling, bound.sources, 'context')).rejects.toMatchObject({ code: 'source_access_denied' })
+        await expect(activatePinnedExternalSourceOperation(app, one.execution, selection, bound.sources, 'retain')).rejects.toMatchObject({ code: 'source_access_denied' })
+        await activatePinnedExternalSourceOperation(app, one.execution, selection, bound.sources, 'context')
         expect(scopeEvidenceFromRows(bound.sourceRows).sources).toEqual(bound.sources)
         expect(accumulator.evidence.sources).toEqual(bound.sources)
         expect((await readCurrentScopeSources(app, workspace, bound.sources)).map(row => row.state)).toEqual(['current'])
@@ -237,6 +247,7 @@ describe('[COMP:api/external-source-access] independent persisted source ACL', (
         await new Promise(resolve => setTimeout(resolve, 5_100))
         expect((await readCurrentScopeSources(app, workspace, bound.sources)).map(row => row.state)).toEqual(['held'])
         await expect(pinExternalSourceOperation(app, one.execution, expiring, bound.sources, 'context')).rejects.toMatchObject({ code: 'source_protocol_invalid' })
+        await expect(activatePinnedExternalSourceOperation(app, one.execution, expiring, bound.sources, 'context')).rejects.toMatchObject({ code: 'source_protocol_invalid' })
         await app.query('ROLLBACK')
       } finally { await app.query('ROLLBACK'); app.release() }
       // Internal canonical writer transaction: source proof is still checked, not borrowed from its database owner.
@@ -247,14 +258,26 @@ describe('[COMP:api/external-source-access] independent persisted source ACL', (
         let inputs = retainedSources!
         for (let generation = 0; generation < 2; generation++) {
           const prepared = await retainedCoordinator.prepare(one.execution, inputs, 'retain')
+          const contextAuthority = await retainedCoordinator.prepare(one.execution, inputs, 'context')
+          const authorizations = source!.counters.authorizations
           await writer.query('BEGIN'); await applyRLSGucs(writer, first)
+          await pinPreparedExternalSourceAuthority(writer, one.execution, contextAuthority)
           await pinPreparedExternalSourceAuthority(writer, one.execution, prepared)
+          const receipts = (await pool.query('SELECT count(*)::int AS count FROM external_source_authorizations WHERE operation_id=ANY($1::uuid[])',
+            [[prepared.operationId,contextAuthority.operationId]])).rows[0].count
           const memory = await createMemory({ assistantId: assistant, userId: null, workspaceId: workspace,
             createdByUserId: first, summary: 'Fictional source derivative', sensitivity: 'public',
             derivation: { producer: 'retained-source-ancestry-fixture', sources: inputs } }, undefined, writer)
           retainedDerivative = { workspaceId: workspace,userId: memory.userId,assistantId: memory.assistantId,resourceKind: 'memory',resourceId: memory.id,
             version: memory.scopeVersion,sensitivity: memory.sensitivity,compartments: memory.compartments,projectIds: memory.projectIds }
           expect(await readExternalSourceAncestors(workspace, [retainedDerivative], writer)).toEqual(retainedSources)
+          // Selecting the pre-pinned context proof after the canonical write inserts no receipt and takes no source HTTP path.
+          await pinPreparedExternalSourceAuthority(writer, one.execution, contextAuthority)
+          const inTransaction = await validateCallerScopeEvidence({ sources: [retainedDerivative] }, one.execution.security.ceiling, writer)
+          expect(inTransaction.sources?.filter(source => source.resourceKind === 'external_source')).toEqual(retainedSources)
+          expect((await pool.query('SELECT count(*)::int AS count FROM external_source_authorizations WHERE operation_id=ANY($1::uuid[])',
+            [[prepared.operationId,contextAuthority.operationId]])).rows[0].count).toBe(receipts)
+          expect(source!.counters.authorizations).toBe(authorizations)
           await writer.query('COMMIT')
           firstDerivative ??= retainedDerivative
           inputs = [retainedDerivative]
@@ -301,6 +324,28 @@ describe('[COMP:api/external-source-access] independent persisted source ACL', (
           expect(await readExternalSourceAncestors(workspace, [retainedDerivative!], reader)).toEqual(retainedSources)
           await reader.query('ROLLBACK')
         } finally { await reader.query('ROLLBACK'); reader.release() }
+        // A native mutation inside this transaction must not reuse proof for the earlier ancestor set.
+        const narrowerRead = await one.access.readMcp('readRecord', { id: 'order-1',fields: ['description'] })
+        const observationTransaction = await getAppPool().connect()
+        let additionalSources: ScopeSource[]
+        try {
+          await observationTransaction.query('BEGIN'); await applyRLSGucs(observationTransaction, first)
+          additionalSources = (await bindTrustedSourceRead(observationTransaction, one.execution, narrowerRead, new ContextScopeAccumulator())).sources
+          await observationTransaction.query('COMMIT')
+        } finally { await observationTransaction.query('ROLLBACK'); observationTransaction.release() }
+        const originalAuthority = await retainedCoordinator.prepare(one.execution, [retainedDerivative!], 'context')
+        const addedAuthority = await retainedCoordinator.prepare(one.execution, additionalSources!, 'retain')
+        await writer.query('BEGIN'); await applyRLSGucs(writer, first)
+        await pinPreparedExternalSourceAuthority(writer, one.execution, originalAuthority)
+        await pinPreparedExternalSourceAuthority(writer, one.execution, addedAuthority)
+        await writer.query('SAVEPOINT ancestry_change')
+        await writer.query(`INSERT INTO scope_derivation_sources(workspace_id,derivation_id,source_kind,source_id,source_version)
+          SELECT $1,id,'external_source',$3,$4 FROM scope_derivations WHERE workspace_id=$1 AND resource_id=$2`,
+          [workspace,firstDerivative!.resourceId,additionalSources![0].resourceId,additionalSources![0].version])
+        await expect(pinPreparedExternalSourceAuthority(writer, one.execution, originalAuthority)).rejects.toMatchObject({ code: 'source_access_denied' })
+        await writer.query('ROLLBACK TO SAVEPOINT ancestry_change')
+        await expect(pinPreparedExternalSourceAuthority(writer, one.execution, originalAuthority)).rejects.toMatchObject({ code: 'source_access_denied' })
+        await writer.query('ROLLBACK')
         // Oversized ancestry is an explicit refusal, never silently truncated evidence.
         await writer.query('BEGIN'); await applyRLSGucs(writer, first)
         const wide: Array<{ id: string; version: string }> = []
@@ -323,7 +368,7 @@ describe('[COMP:api/external-source-access] independent persisted source ACL', (
       expect((await readCurrentScopeSources(pool, workspace, [missing])).map(row => row.state)).toEqual(['unverifiable'])
       await expect(pool.query('UPDATE external_source_observations SET fields=$2 WHERE id=$1', [retainedSources![0].resourceId,['description']])).rejects.toMatchObject({ code: '22023' })
       expect((await pool.query('SELECT count(*)::int AS count FROM external_source_resources WHERE profile_id=$1', [sourceProfile])).rows[0].count).toBe(1)
-      expect((await pool.query('SELECT count(*)::int AS count FROM external_source_observations WHERE workspace_id=$1', [workspace])).rows[0].count).toBe(2)
+      expect((await pool.query('SELECT count(*)::int AS count FROM external_source_observations WHERE workspace_id=$1', [workspace])).rows[0].count).toBe(3)
       const sourceRuntimeFactory = createConnectorSourceRuntimeFactory({ issuer, keys, instances })
       const inject = async (userId: string, includeExecution = true, authenticationKind: 'native_session' | 'verified_channel' = 'native_session', includeFactory = true) => {
         const actor = await client(userId, authenticationKind), scopeAccumulator = new ContextScopeAccumulator(), tools = new Map<string, Tool>()

@@ -11,11 +11,11 @@ import type { ConnectorInstanceStore } from '../db/connector-instance-store.js'
 import { buildConnectorAuthHeaders } from '../mcp/auth-headers.js'
 import type { ConnectorSourceRuntimeFactory } from './source-runtime.js'
 import type { SourceOperationProof } from './source-access.js'
-import { pinExternalSourceOperation, resolveNativeSourceRecipientCeiling } from './source-store.js'
+import { activatePinnedExternalSourceOperation, pinExternalSourceOperation, resolveNativeSourceRecipientCeiling } from './source-store.js'
 
 export type PreparedExternalSourceAuthority = Readonly<{ operationId: string }>
 type ProofBatch = { proof: SourceOperationProof; sources: ScopeSource[] }
-type Prepared = { execution: ExecutionContext; action: SourceAction; batches: ProofBatch[]; assertAncestryCurrent: () => Promise<void>; transaction?: { xid: string; pid: number } }
+type Prepared = { execution: ExecutionContext; action: SourceAction; batches: ProofBatch[]; assertAncestryCurrent: (client?: PoolClient) => Promise<void>; pinned?: boolean; transaction?: { xid: string; pid: number } }
 const prepared = new WeakMap<PreparedExternalSourceAuthority, Prepared>()
 function denied(): never { throw new SourceProtocolError('source_access_denied') }
 type ObservationRow = { id: string; version: string; profileId: string; instanceId: string; observation: SourceObservation;
@@ -26,14 +26,17 @@ export async function pinPreparedExternalSourceAuthority(client: PoolClient, exe
   const binding = prepared.get(token)
   if (!binding || binding.execution !== execution) denied()
   await execution.security.authority.assertCurrent()
-  await binding.assertAncestryCurrent()
+  await binding.assertAncestryCurrent(client)
   const transaction = (await client.query<{ xid: string; pid: number; actor: string }>(`SELECT pg_current_xact_id()::text AS xid,pg_backend_pid() AS pid,
     nullif(current_setting('app.current_user_id',true),'') AS actor`)).rows[0]
   if (transaction?.actor !== execution.security.access.userId || binding.transaction
     && (binding.transaction.xid !== transaction.xid || binding.transaction.pid !== transaction.pid)) denied()
   binding.transaction = { xid: transaction.xid, pid: transaction.pid }
-  for (const batch of binding.batches) await pinExternalSourceOperation(client, execution, batch.proof, batch.sources, binding.action)
+  for (const batch of binding.batches) {
+    await (binding.pinned ? activatePinnedExternalSourceOperation : pinExternalSourceOperation)(client, execution, batch.proof, batch.sources, binding.action)
+  }
   await execution.security.authority.assertCurrent()
+  binding.pinned = true
 }
 
 /** Resolve immutable external obligations before sending fresh source requests. */
@@ -51,9 +54,9 @@ export function createRetainedSourceAuthorityCoordinator(options: { factory: Con
         JSON.stringify([source.resourceKind,source.resourceId,source.version,resourceScopeKey(source)])))].sort())
       const ancestryKey = evidenceKey(ancestry)
       let ancestryInvalid = false
-      const assertAncestryCurrent = async () => {
+      const assertAncestryCurrent = async (client?: PoolClient) => {
         if (ancestryInvalid) denied()
-        try { if (evidenceKey(await readExternalSourceAncestors(workspaceId, nativeRoots)) !== ancestryKey) denied() }
+        try { if (evidenceKey(await readExternalSourceAncestors(workspaceId, nativeRoots, client)) !== ancestryKey) denied() }
         catch (error) { ancestryInvalid = true; throw error }
       }
       const sources = [...roots.filter(source => source.resourceKind === 'external_source'),...ancestry]
