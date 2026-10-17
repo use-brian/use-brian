@@ -23,6 +23,7 @@ import { assertExecutionResourceScope, buildAccessPredicate, buildCurrentMemberS
 import { currentAgentAccess } from './agent-access-context.js'
 import { assertAuthorshipPresent } from './authorship-guard.js'
 import { applyRLSGucs, getAppPool, getPool, query, queryGated, queryWithRLS, rollbackAndRelease } from './client.js'
+import { getApplicationTransactionBinding } from '../application-platform/execution-context.js'
 
 /**
  * `entities` store. Schema spec:
@@ -232,12 +233,21 @@ export async function createEntity(params: EntityCreateParams, transactionClient
     } catch (error) { await client.query('ROLLBACK'); throw error }
     finally { client.release() }
   }
-  params = await admitEntityCreate(transactionClient, params)
+  const application = getApplicationTransactionBinding(transactionClient)
+  if (application && (application.workspaceId !== params.workspaceId || application.actorUserId !== params.createdByUserId)) throw new Error('scope_operation_denied')
+  if (!application) params = await admitEntityCreate(transactionClient, params)
   assertAuthorshipPresent('createEntity', params.createdByUserId)
   const access = entityMutationAccess(params.createdByUserId)
   assertExecutionResourceScope({ workspaceId: params.workspaceId, userId: params.userId ?? null,
     assistantId: params.assistantId ?? null, sensitivity: params.sensitivity ?? 'internal',
     compartments: params.compartments ?? [], projectIds: params.projectIds ?? [] }, params.derivation ? 'read' : 'mutation', access)
+  if (application) {
+    if (params.derivation) throw new Error('scope_output_not_integrated')
+    const result = await transactionClient.query<EntityRow>(`SELECT ${FULL_SELECT} FROM application_create_canonical_company($1::jsonb)`,
+      [JSON.stringify({ ...params, aliases: normalizeAliasArray(params.aliases ?? []) })])
+    if (!result.rows[0]) throw new Error('scope_operation_denied')
+    return toEntity(result.rows[0])
+  }
   if (params.derivation) {
     const result = await transactionClient.query<EntityRow>(
       `SELECT ${FULL_SELECT} FROM create_source_derived_entity($1::jsonb,$2::jsonb)`,

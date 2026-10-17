@@ -12,6 +12,7 @@ import { repointTaskExecutions } from './task-execution-store.js'
 import { currentAgentAccess } from './agent-access-context.js'
 import { publishTaskLifecycle } from '../task-event-fanout.js'
 import { validateTaskResponsibility } from '../tasks/responsibility.js'
+import { getApplicationTransactionBinding } from '../application-platform/execution-context.js'
 
 const RESPONSIBILITY_SELECT = `executor_assistant_id AS "executorAssistantId", follow_up_member_id AS "followUpMemberId",
   home_kind AS "homeKind", home_id AS "homeId"`
@@ -347,9 +348,11 @@ export async function createTask(
       await client.query('BEGIN')
       await applyRLSGucs(client,userId)
     }
-    params = await admitTaskCreate(client,userId,params,taskAccess(userId,params.workspaceId,params.access))
+    const application = getApplicationTransactionBinding(client)
+    if (application && (application.workspaceId !== params.workspaceId || application.actorUserId !== userId)) throw new Error('scope_operation_denied')
+    if (!application) params = await admitTaskCreate(client,userId,params,taskAccess(userId,params.workspaceId,params.access))
     checkTaskCreate(userId,params)
-    await checkTaskProject(userId,params,client)
+    if (!application) await checkTaskProject(userId,params,client)
     const responsibility = applyResponsibilityPatch(
       { assigneeId: null, executorAssistantId: null, followUpMemberId: null, home: null },
       { assigneeId: params.assigneeId ?? null, executorAssistantId: params.executorAssistantId ?? null,
@@ -396,7 +399,9 @@ export async function createTask(
         responsibility.executorAssistantId, responsibility.followUpMemberId,
         responsibility.home?.kind ?? null, responsibility.home?.id ?? null,
       ]
-    const result = await client.query<TaskRow>(sql, values)
+    const { access: _access, writtenBy: _writtenBy, ...applicationParams } = params
+    const result = application ? await client.query<TaskRow>(`SELECT ${FULL_SELECT} FROM application_create_canonical_task($1::jsonb)`, [JSON.stringify(applicationParams)])
+      : await client.query<TaskRow>(sql, values)
     if (!result.rows[0]) throw Object.assign(new Error('The task operation is outside the current access scope.'), { code: 'scope_operation_denied' })
     task = toRecord(result.rows[0])
     if (!transactionClient) await client.query('COMMIT')

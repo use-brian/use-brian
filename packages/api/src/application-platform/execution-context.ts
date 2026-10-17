@@ -11,6 +11,16 @@ import { resolveLiveAccessCeilingSystem } from '../context-scope/resolve-turn-sc
 import { loadApplicationAuthority, type ApplicationAuthentication, type ApplicationAuthorityState } from './grant-authority.js'
 
 const bindings = new WeakMap<ExecutionContext, { authentication: ApplicationAuthentication; state: ApplicationAuthorityState }>()
+const transactionBindings = new WeakMap<PoolClient, ExecutionContext>()
+/** Canonical writers receive proof only for the exact host-bound transaction. */
+export function getApplicationTransactionBinding(client: PoolClient) {
+  const execution = transactionBindings.get(client)
+  return execution ? Object.freeze({ workspaceId: execution.security.access.workspaceId,
+    actorUserId: execution.security.access.userId, assistantId: execution.assistant.id }) : undefined
+}
+export function releaseApplicationTransactionBinding(client: PoolClient) {
+  transactionBindings.delete(client)
+}
 const intersect = (left: string[], right: string[]) => left.filter(value => right.includes(value))
 function freezeFacts(value: unknown): void {
   if (!value || typeof value !== 'object') return
@@ -101,6 +111,7 @@ export function getApplicationExecutionBinding(execution: ExecutionContext) {
 }
 
 export async function applyApplicationRLSContext(client: PoolClient, execution: ExecutionContext): Promise<boolean> {
+  transactionBindings.delete(client)
   const binding = bindings.get(execution)
   if (!binding) return false
   await execution.security.authority.assertCurrent()
@@ -111,5 +122,6 @@ export async function applyApplicationRLSContext(client: PoolClient, execution: 
     execution.assistant.id, execution.security.access.clearance, binding.authentication.home?.bindingId ?? ''])
   const result = await client.query<{ admitted: boolean }>('SELECT application_lock_workspace($1) AS admitted', [binding.state.workspaceId])
   if (result.rows[0]?.admitted !== true) throw new ApplicationPlatformError('grant_revoked', 'Application access is unavailable.')
+  transactionBindings.set(client, execution)
   return true
 }

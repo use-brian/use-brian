@@ -2,7 +2,7 @@
 import { z } from 'zod'
 import { createHash } from 'node:crypto'
 import type { PoolClient } from 'pg'
-import { bindScopeSource, parseApplicationCrmFieldDefinition, validateCrmCustomFieldValue, type ApplicationModuleDefinition, type ApplicationOperationContext,
+import { applicationAuthorityCreationScope, bindScopeSource, parseApplicationCrmFieldDefinition, validateCrmCustomFieldValue, type ApplicationModuleDefinition, type ApplicationOperationContext,
   type ScopeSource } from '@use-brian/core'
 import { ApplicationPlatformError, applicationJsonSchema, applicationResourceRefSchema, type ApplicationRecordProjection,
   type ApplicationResourceDefinition, type ApplicationResourceRef } from '@use-brian/shared'
@@ -17,6 +17,7 @@ const sourceSchema=z.object({workspaceId:z.string().uuid(),userId:z.string().uui
   held:z.boolean(),retractedAt:z.unknown().nullable(),validTo:z.unknown().nullable()})
 const readInput=z.object({type:z.enum(['company','person','deal','task','file','workspace_member']),id:z.string().uuid()}).strict()
 type Context=ApplicationOperationContext<PoolClient>
+const creations = new WeakMap<Context, { type: 'company' | 'task'; fields: string[]; scope: { sensitivity: 'public' | 'internal' | 'confidential'; compartments: string[]; projectIds: string[] } }>()
 
 const definitions:ApplicationResourceDefinition[]=[
   {typeKey:'company',origin:{kind:'native',moduleKey:'native'},schemaVersion:'1',fields:[{key:'name',label:'Name',kind:'text',required:true},{key:'domain',label:'Domain',kind:'text'}]},
@@ -113,18 +114,41 @@ async function authorizeReadResult(context: Context, result: unknown) {
     || value.fields.some(field => !current.fields.includes(field))) throw new ApplicationPlatformError('access_unavailable', 'The source changed.')
 }
 async function authorizeResult(context:Context,refs:ApplicationResourceRef[]) {
+  const application = getApplicationExecutionBinding(context.execution), creation = creations.get(context)
   for(const ref of refs) {
     const input=readInput.safeParse({type:ref.typeKey,id:ref.id})
-    if(ref.workspaceId!==context.execution.security.access.workspaceId||!input.success)throw new ApplicationPlatformError('access_unavailable','The resource is unavailable.')
-    await read(context,input.data.type,input.data.id)
+    if(ref.workspaceId!==context.execution.security.access.workspaceId||!input.success || ref.origin.kind !== 'native' || ref.origin.moduleKey !== 'native')throw new ApplicationPlatformError('access_unavailable','The resource is unavailable.')
+    if (application) {
+      if (!creation || creation.type !== ref.typeKey) throw new ApplicationPlatformError('access_unavailable','The resource is unavailable.')
+      await creationRef(context, creation.type, ref.id)
+    } else await read(context,input.data.type,input.data.id)
   }
 }
-async function authorizeCreate(context:Context) {
+async function creationRef(context: Context, type: 'company' | 'task', id: string): Promise<ApplicationResourceRef> {
+  if (!getApplicationExecutionBinding(context.execution)) return (await read(context,type,id)).ref
+  const creation = creations.get(context)
+  if (!creation || creation.type !== type) throw new ApplicationPlatformError('access_unavailable','The operation is unavailable.')
+  const value = (await context.transaction.query<{ ref: unknown }>('SELECT application_native_creation_ref($1,$2,$3) AS ref', [type,id,creation.fields])).rows[0]?.ref
+  const parsed = applicationResourceRefSchema.safeParse(value)
+  if (!parsed.success) throw new ApplicationPlatformError('access_unavailable','The resource is unavailable.')
+  return parsed.data
+}
+async function authorizeCreate(context:Context,type:'company'|'task',fields:string[]) {
   if (context.expectedVersion !== undefined) throw new ApplicationPlatformError('invalid_value', 'Creation cannot use an existing-record version.')
   const access=context.execution.security.access,labels=context.execution.security.writeDefaults
+  const application = getApplicationExecutionBinding(context.execution)
+  if (application) {
+    const scope = applicationAuthorityCreationScope(application.state.layers,
+      { workspaceId: access.workspaceId, origin: { kind: 'native', moduleKey: 'native' }, typeKey: type, id: 'new', version: 'new' }, fields, access)
+    const result = await context.transaction.query<{ admitted: boolean }>('SELECT application_native_creation_admitted($1,$2,$3,$4,$5) AS admitted',
+      [type,scope.sensitivity,scope.compartments,scope.projectIds,fields])
+    if (!result.rows[0]?.admitted) throw new ApplicationPlatformError('access_unavailable','The operation is unavailable.')
+    creations.set(context,{ type,fields,scope }); return
+  }
   const result=await context.transaction.query<{admitted:boolean}>(`SELECT member_operation_scope_allows($1,'internal',$2,true)
     AND agent_read_scope_allows('internal',$2,$3) AS admitted`,[access.workspaceId,labels.compartments,labels.projectIds])
   if(result.rows[0]?.admitted!==true)throw new ApplicationPlatformError('access_unavailable','The operation is unavailable.')
+  creations.set(context,{ type,fields,scope:{ sensitivity:'internal',compartments:[...labels.compartments],projectIds:[...labels.projectIds] } })
 }
 
 /** Deployed adapter registration; callable operations still require current authority. */
@@ -138,22 +162,26 @@ export function createCanonicalNativeApplicationModule():ApplicationModuleDefini
   queries:{get:{input:readInput,authorize:async(context,raw)=>{const input=readInput.parse(raw);await read(context,input.type,input.id)},
     execute:async(context,raw)=>{const input=readInput.parse(raw);return read(context,input.type,input.id)}, authorizeResult: authorizeReadResult}},
   commands:{create_company:{input:companyInput,eventKey:'native.company.created',
-    authorize:authorizeCreate,authorizeResult,
+    authorize:(context,raw)=>{const input=companyInput.parse(raw);return authorizeCreate(context,'company',['name',...(input.domain?['domain']:[])])},authorizeResult,
     execute:async(context,raw)=>{
       const input=companyInput.parse(raw),access=context.execution.security.access
+      const creation=creations.get(context)
+      if(!creation)throw new ApplicationPlatformError('access_unavailable','The operation is unavailable.')
       const record=await createCompany(access.userId,{...input,workspaceId:access.workspaceId,access,mergeByName:false,
-        sensitivity:'internal',compartments:[...context.execution.security.writeDefaults.compartments],projectIds:[...context.execution.security.writeDefaults.projectIds],
+        sensitivity:creation.scope.sensitivity,compartments:creation.scope.compartments,projectIds:creation.scope.projectIds,
         createdByAssistantId:context.execution.assistant.id},{client:context.transaction,afterCommit:context.afterCommit})
-      return [(await read(context,'company',record.id)).ref]
-    }},create_task:{input:taskInput,eventKey:'native.task.created',authorize:authorizeCreate,authorizeResult,
+      return [await creationRef(context,'company',record.id)]
+    }},create_task:{input:taskInput,eventKey:'native.task.created',authorize:context=>authorizeCreate(context,'task',['title']),authorizeResult,
     execute:async(context,raw)=>{
       const input=taskInput.parse(raw),access=context.execution.security.access
-      const record=await createTask(access.userId,{...input,workspaceId:access.workspaceId,access,sensitivity:'internal',
-        compartments:[...context.execution.security.writeDefaults.compartments],projectIds:[...context.execution.security.writeDefaults.projectIds],
+      const creation=creations.get(context)
+      if(!creation)throw new ApplicationPlatformError('access_unavailable','The operation is unavailable.')
+      const record=await createTask(access.userId,{...input,workspaceId:access.workspaceId,access,sensitivity:creation.scope.sensitivity,
+        compartments:creation.scope.compartments,projectIds:creation.scope.projectIds,
         createdByAssistantId:context.execution.assistant.id,writtenBy:'system'},undefined,context.transaction,{deduplicate:false})
       context.afterCommit(()=>publishTaskLifecycle({workspaceId:record.workspaceId,taskId:record.id,kind:'created',title:record.title,status:record.status,previousStatus:null,
         tags:record.tags,previousTags:null,assigneeId:record.assigneeId,previousAssigneeId:null,due:record.due,parentId:record.parentId,changedFields:[],actorId:access.userId,writtenBy:'system'}))
-      return [(await read(context,'task',record.id)).ref]
+      return [await creationRef(context,'task',record.id)]
     }},
   }}
 }

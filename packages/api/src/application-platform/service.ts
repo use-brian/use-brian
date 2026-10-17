@@ -11,7 +11,7 @@ import { runWithAgentAccess } from '../db/agent-access-context.js'
 import { lockWorkspaceModule, requireWorkspaceModuleAdmission } from '../db/workspace-modules-store.js'
 import { applyApplicationSchema, previewApplicationSchema } from './schema-changes.js'
 import type { PropertyDef } from '@use-brian/core'
-import { applyApplicationRLSContext, getApplicationExecutionBinding } from './execution-context.js'
+import { applyApplicationRLSContext, getApplicationExecutionBinding, releaseApplicationTransactionBinding } from './execution-context.js'
 import { z } from 'zod'
 import { toJsonSchemaCompat } from '@modelcontextprotocol/sdk/server/zod-json-schema-compat.js'
 
@@ -100,6 +100,7 @@ export class ApplicationPlatformService {
         if (execution.lifecycle.abortSignal.aborted) throw new ApplicationPlatformError('access_unavailable', 'The operation was cancelled.')
         commitStarted = true
         await client.query('COMMIT')
+        releaseApplicationTransactionBinding(client)
         for (const effect of effects) {
           try { effect() } catch { console.warn('[application-platform] post-commit projection failed') }
         }
@@ -117,7 +118,7 @@ export class ApplicationPlatformService {
           if (code === '42501') throw new ApplicationPlatformError('access_unavailable', 'The operation is unavailable.')
         }
         throw error
-      } finally { await rollbackAndRelease(client) }
+      } finally { releaseApplicationTransactionBinding(client); await rollbackAndRelease(client) }
     })
   }
 

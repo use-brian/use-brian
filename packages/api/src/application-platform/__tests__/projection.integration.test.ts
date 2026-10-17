@@ -87,7 +87,7 @@ describe('[COMP:api/application-auth] database application projections and live 
     return new ApplicationPlatformService([module])
   }
   async function provision(kind: 'member' | 'external_user' | 'service', fields = ['title'], parentFields?: string[], tamperMaximum = false,
-    nativeCompanyId?: string, additionalActions: string[] = [], recordIds: string[] = [recordId], selector?: ApplicationAccessGrant['selector'], oauthScope = 'read_write', compartments: string[] = []) {
+    nativeCompanyId?: string, additionalActions: string[] = [], recordIds: string[] = [recordId], selector?: ApplicationAccessGrant['selector'], oauthScope = 'read_write', compartments: string[] = [], nativeType = 'company') {
     const appId = randomUUID(), grantId = randomUUID(), parentId = parentFields ? randomUUID() : null
     let userId: string = kind === 'member' ? memberId : externalId
     if (kind === 'service') {
@@ -97,7 +97,7 @@ describe('[COMP:api/application-auth] database application projections and live 
     await pool.query(`INSERT INTO application_clients(id,workspace_id,module_key,name,client_mode,executing_assistant_id,created_by_user_id,origins)
       VALUES($1,$2,$5,'Example records client','api_client',$3,$4,ARRAY['https://frontend.example'])`, [appId, workspaceId, assistantId, ownerId, nativeCompanyId ? 'native' : 'records'])
     const grant = (id: string, readFields: string[], parentGrantId: string | null): ApplicationAccessGrant => ({
-      id, appId, workspaceId, principal: { kind, userId }, origin: nativeCompanyId ? { kind: 'native', moduleKey: 'native' } : { kind: 'generic', entityTypeId: schemaId }, typeKey: nativeCompanyId ? 'company' : 'request',
+      id, appId, workspaceId, principal: { kind, userId }, origin: nativeCompanyId ? { kind: 'native', moduleKey: 'native' } : { kind: 'generic', entityTypeId: schemaId }, typeKey: nativeCompanyId ? nativeType : 'request',
       actions: ['read', 'query', 'history', 'patch', ...additionalActions], readFields, writeFields: readFields, selector: selector ?? { kind: 'ids', ids: nativeCompanyId ? [nativeCompanyId] : recordIds },
       version: 1, status: 'active', startsAt: '2026-01-01T00:00:00.000Z', expiresAt: null, parentGrantId,
       compartments, projectIds: [], clearance: 'confidential',
@@ -366,6 +366,61 @@ describe('[COMP:api/application-auth] database application projections and live 
       .send({ idempotencyKey: 'no-create-capability', input: { name: 'Forbidden company' } })
     expect(denied.status).toBe(403); expect(denied.body.effect).toBe('none')
     expect((await pool.query("SELECT id FROM entities WHERE workspace_id=$1 AND display_name='Forbidden company'", [workspaceId])).rows).toEqual([])
+  })
+  it.each(['member','external_user','service'] as const)('creates canonical company/task rows and idempotent receipts as the real %s without substituting the credential owner', async kind => {
+    for (const type of ['company','task'] as const) {
+      const fields = type === 'company' ? ['name','domain'] : ['title'], commandKey = `create_${type}`
+      const fixture = await provision(kind, fields, undefined, false, randomUUID(), ['create',`command:${commandKey}`], [], { kind: 'self' }, 'read_write', [], type)
+      const dispatcher = new ApplicationPlatformService([createCanonicalNativeApplicationModule()]), http = express()
+      http.use('/api/applications', applicationPlatformRoutes({ service: dispatcher }))
+      const input = type === 'company' ? { name: 'Example application company', domain: 'application-company.example' } : { title: 'Example application task' }
+      const command = { idempotencyKey: randomUUID(), input }, base = `/api/applications/${fixture.appId}`
+      const catalog = await request(http).get(`${base}/catalog`).set('Authorization', `Bearer ${fixture.token}`)
+      expect(catalog.status).toBe(200)
+      expect(catalog.body.resources.find((resource: { typeKey: string }) => resource.typeKey === type)?.fields.map((field: { key: string }) => field.key)).toEqual(fields)
+      const result = await request(http).post(`${base}/commands/${commandKey}`).set('Authorization', `Bearer ${fixture.token}`).send(command)
+      expect(result.status).toBe(200); expect(result.body.resources).toHaveLength(1)
+      const ref = result.body.resources[0]
+      expect(ref).toMatchObject({ workspaceId, origin: { kind: 'native', moduleKey: 'native' }, typeKey: type, version: '1' })
+      const table = type === 'company' ? 'entities' : 'tasks'
+      const canonical = (await pool.query(`SELECT id,created_by_user_id,created_by_assistant_id FROM ${table} WHERE id=$1 AND workspace_id=$2`, [ref.id,workspaceId])).rows[0]
+      expect(canonical).toEqual({ id: ref.id, created_by_user_id: fixture.userId, created_by_assistant_id: assistantId })
+      expect((await request(http).post(`${base}/commands/${commandKey}`).set('Authorization', `Bearer ${fixture.token}`).send(command)).body).toEqual(result.body)
+      const read = await request(http).get(`${base}/records/${type}/${ref.id}`).set('Authorization', `Bearer ${fixture.token}`)
+      expect(read.status).toBe(200); expect(read.body.values).toEqual(input)
+      expect((await pool.query('SELECT id FROM application_command_audit WHERE receipt_id=$1', [result.body.id])).rows).toHaveLength(1)
+      if (kind !== 'member') expect((await pool.query('SELECT user_id FROM workspace_members WHERE workspace_id=$1 AND user_id=$2', [workspaceId,fixture.userId])).rows).toEqual([])
+    }
+  })
+  it('reviews prospective native self grants without releasing payloads and supports write-only canonical creation', async () => {
+    const fixture = await provision('service', ['name'], undefined, false, randomUUID(), ['create','command:create_company'], [], { kind: 'self' })
+    const dispatcher = new ApplicationPlatformService([createCanonicalNativeApplicationModule()]), management = new ApplicationManagementService(dispatcher)
+    const proposal = { principal: { kind: 'service', userId: fixture.userId }, origin: { kind: 'native', moduleKey: 'native' }, typeKey: 'company',
+      actions: ['create','command:create_company'], readFields: [], writeFields: ['name'], selector: { kind: 'self' }, compartments: [], projectIds: [], clearance: 'internal', parentGrantId: null, expiresAt: null }
+    expect(await management.reviewGrant(ownerId, workspaceId, fixture.appId, proposal)).toMatchObject({ proposal, canIssue: false })
+    await pool.query("UPDATE application_access_grants SET actions=ARRAY['create','command:create_company'],read_fields='{}' WHERE id=$1", [fixture.grantId])
+    const execution = await resolveApplicationExecutionContext(fixture.authentication), command = { idempotencyKey: randomUUID(), input: { name: 'Example write-only company' } }
+    const receipt = await dispatcher.command(execution, 'native', 'create_company', command)
+    expect(receipt.resources).toHaveLength(1)
+    expect(await dispatcher.command(execution, 'native', 'create_company', command)).toEqual(receipt)
+    await expect(dispatcher.query(execution, 'native', 'get', { type: 'company', id: receipt.resources[0].id })).rejects.toMatchObject({ code: 'access_unavailable' })
+    expect((await pool.query('SELECT id FROM entities WHERE id=$1 AND created_by_user_id=$2', [receipt.resources[0].id,fixture.userId])).rows).toEqual([{ id: receipt.resources[0].id }])
+  })
+  it('rejects an ungranted native field and rolls back canonical native rows when receipt audit cannot commit', async () => {
+    const fixture = await provision('service', ['name'], undefined, false, randomUUID(), ['create','command:create_company'], [], { kind: 'self' })
+    const execution = await resolveApplicationExecutionContext(fixture.authentication), dispatcher = new ApplicationPlatformService([createCanonicalNativeApplicationModule()])
+    await expect(dispatcher.command(execution, 'native', 'create_company', { idempotencyKey: randomUUID(), input: {
+      name: 'Example forbidden native field', domain: 'forbidden-field.example',
+    } })).rejects.toMatchObject({ code: 'access_unavailable' })
+    const idempotencyKey = randomUUID()
+    await pool.query("ALTER TABLE application_command_audit ADD CONSTRAINT fixture_native_audit_failure CHECK(module_key<>'native' OR operation_key<>'create_company') NOT VALID")
+    try {
+      await expect(dispatcher.command(execution, 'native', 'create_company', { idempotencyKey, input: { name: 'Example rolled back native company' } }))
+        .rejects.toMatchObject({ code: 'invalid_value', effect: 'none' })
+      expect((await pool.query("SELECT id FROM entities WHERE workspace_id=$1 AND display_name=ANY($2::text[])",
+        [workspaceId,['Example forbidden native field','Example rolled back native company']])).rows).toEqual([])
+      expect((await pool.query('SELECT id FROM application_operation_receipts WHERE workspace_id=$1 AND idempotency_key=$2', [workspaceId,idempotencyKey])).rows).toEqual([])
+    } finally { await pool.query('ALTER TABLE application_command_audit DROP CONSTRAINT fixture_native_audit_failure') }
   })
   it('withdraws a native release when the issuer loses the private-owner floor even if the recipient becomes the private owner', async () => {
     const company = await createCompany(ownerId, { name: 'Example private source', workspaceId, mergeByName: false })
