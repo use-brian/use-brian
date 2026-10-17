@@ -1,7 +1,7 @@
 import { describe, expect, it } from 'vitest'
 import { applicationQuerySchema, type ApplicationAccessGrant } from '@use-brian/shared'
 import { applicationQueryFieldCeiling, applicationAuthorityQueryFieldCeiling, assertApplicationQueryFields, assertApplicationWriteFields,
-  decideApplicationFields, decideApplicationAuthority, projectApplicationFields, type ApplicationGrantLayer, type ApplicationRecordAuthority } from '../access.js'
+  applicationAuthorityCreationScope, decideApplicationFields, decideApplicationAuthority, projectApplicationFields, type ApplicationGrantLayer, type ApplicationRecordAuthority } from '../access.js'
 
 const userId='10000000-0000-4000-8000-000000000001',appId='10000000-0000-4000-8000-000000000002',workspaceId='10000000-0000-4000-8000-000000000003'
 const resource:ApplicationRecordAuthority={ref:{workspaceId,origin:{kind:'native',moduleKey:'operations'},typeKey:'purchase',id:'request-one',version:'1'},
@@ -81,5 +81,36 @@ describe('[COMP:security/application-access] application grant ceilings',()=>{
     expect(()=>assertApplicationQueryFields(applicationQuerySchema.parse({aggregate:[{field:'cost',operation:'sum'}]}),decision)).toThrow()
     expect(applicationAuthorityQueryFieldCeiling([[{...path,current:[leaf]}]],resource.ref,['name','cost'],now).allowed).toBe(false)
     expect(applicationAuthorityQueryFieldCeiling([],resource.ref,['name'],now).allowed).toBe(false)
+  })
+  it('classifies new records from their explicit resource grant rather than unrelated resources or General defaults', () => {
+    const scoped = grant({ actions: ['create'], selector: { kind: 'self' } })
+    const other = grant({ id: appId, actions: ['create'], typeKey: 'other', compartments: ['different'] })
+    const paths = [scoped, other].map(value => ({ maximum: { version: 1 as const, grants: [value] }, current: [value] }))
+    expect(applicationAuthorityCreationScope([paths], resource.ref, ['name'], { clearance: 'internal', mutationCompartments: ['purchasing'], projectIds: [] }, now))
+      .toEqual({ sensitivity: 'internal', compartments: ['purchasing'], projectIds: [] })
+    expect(() => applicationAuthorityCreationScope([paths], resource.ref, ['name'], { clearance: 'internal', mutationCompartments: [], projectIds: [] }, now)).toThrow()
+  })
+  it('preserves an explicitly empty General leaf and refuses conflicting protected issuance maxima', () => {
+    const general = grant({ actions: ['create'], compartments: [] }), protectedGrant = { ...general, compartments: ['purchasing'] }
+    const native = { clearance: 'internal' as const, mutationCompartments: null, projectIds: null }
+    expect(applicationAuthorityCreationScope([[{ maximum: { version: 1, grants: [general] }, current: [general] }]], resource.ref, ['name'], native, now).compartments).toEqual([])
+    expect(() => applicationAuthorityCreationScope([[{ maximum: { version: 1, grants: [protectedGrant] }, current: [{ ...protectedGrant, compartments: ['different'] }] }]],
+      resource.ref, ['name'], native, now)).toThrow()
+  })
+  it('refuses ambiguous alternative classifications and disjoint delegated scopes without choosing an empty intersection', () => {
+    const first = grant({ actions: ['create'] }), second = grant({ id: appId, actions: ['create'], compartments: ['different'] })
+    const a = { maximum: { version: 1 as const, grants: [first] }, current: [first] }, b = { maximum: { version: 1 as const, grants: [second] }, current: [second] }
+    const native = { clearance: 'internal' as const, mutationCompartments: null, projectIds: null }
+    expect(() => applicationAuthorityCreationScope([[a,b]], resource.ref, ['name'], native, now)).toThrow('one explicit application scope')
+    expect(() => applicationAuthorityCreationScope([[a],[b]], resource.ref, ['name'], native, now)).toThrow()
+  })
+  it('requires complete live create/field authority and preserves Project classification', () => {
+    const value = grant({ actions: ['create'], projectIds: [userId], writeFields: ['name'] })
+    const path = { maximum: { version: 1 as const, grants: [value] }, current: [value] }
+    const native = { clearance: 'public' as const, mutationCompartments: ['purchasing'], projectIds: [userId] }
+    expect(applicationAuthorityCreationScope([[path]], resource.ref, ['name'], native, now)).toEqual({ sensitivity: 'public', compartments: ['purchasing'], projectIds: [userId] })
+    expect(() => applicationAuthorityCreationScope([[path]], resource.ref, ['cost'], native, now)).toThrow()
+    expect(() => applicationAuthorityCreationScope([[{ ...path, current: [{ ...value, status: 'revoked' }] }]], resource.ref, ['name'], native, now)).toThrow()
+    expect(() => applicationAuthorityCreationScope([[{ ...path, current: [{ ...value, actions: ['read'] }] }]], resource.ref, ['name'], native, now)).toThrow()
   })
 })

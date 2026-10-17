@@ -43,6 +43,7 @@ import {
   docEntityTypeSchema,
   cellValueSchema,
   validateDocApplicationSchema,
+  applicationAuthorityCreationScope,
 } from '@use-brian/core'
 import { getAppPool, applyRLSGucs, queryWithRLS, rollbackAndRelease } from './client.js'
 import { currentAgentAccess } from './agent-access-context.js'
@@ -574,10 +575,14 @@ export async function applyCanonicalApplicationRecordMutation(context: Applicati
   const input = canonicalApplicationRecordMutationSchema.parse(raw), access = context.execution.security.access
   const id = input.id ?? randomUUID(), data = 'data' in input ? input.data : {}
   if (Object.keys(data).length > 128) throw new ApplicationPlatformError('invalid_value', 'The change is too large.')
-  if (getApplicationExecutionBinding(context.execution)) {
+  const application = getApplicationExecutionBinding(context.execution)
+  if (application) {
+    const creation = input.operation === 'create' ? applicationAuthorityCreationScope(application.state.layers,
+      { workspaceId: access.workspaceId, origin: { kind: 'generic', entityTypeId: typeId }, typeKey: input.type, id, version: 'new' }, Object.keys(data), access)
+      : { sensitivity: 'internal', compartments: [], projectIds: [] }
     const result = await context.transaction.query<{ ref: unknown }>('SELECT application_generic_write($1,$2,$3,$4,$5,$6,$7,$8,$9) AS ref',
       [typeId, input.type, input.operation, id, 'expectedVersion' in input ? input.expectedVersion : null, JSON.stringify(data),
-        'internal', context.execution.security.writeDefaults.compartments, context.execution.security.writeDefaults.projectIds])
+        creation.sensitivity, creation.compartments, creation.projectIds])
     return applicationResourceRefSchema.parse(result.rows[0]?.ref)
   }
   const store = createDbDocEntityStore({ actorUserId: access.userId, transaction: context.transaction })

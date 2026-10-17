@@ -2,7 +2,8 @@
 import { ApplicationPlatformError, applicationGrantSchema, applicationGrantMaximumSchema, type ApplicationAccessGrant, type ApplicationGrantMaximum, type ApplicationPrincipal,
   type ApplicationQuery, type ApplicationResourceRef } from '@use-brian/shared'
 import type { ResourceScope } from '../security/derived-scope.js'
-import { canRead } from '../security/sensitivity.js'
+import { canRead, minSensitivity, type Sensitivity } from '../security/sensitivity.js'
+import { scopeGrantContains } from '../security/context-scope.js'
 
 export interface ApplicationGrantLayer {
   appId: string
@@ -120,6 +121,50 @@ function current(grant: ApplicationAccessGrant, layer: ApplicationGrantLayer, re
     && Date.parse(grant.startsAt) <= now && (grant.expiresAt === null || Date.parse(grant.expiresAt) > now)
 }
 const intersection = (left: Set<string>, right: Set<string>) => new Set([...left].filter(value => right.has(value)))
+
+/** Defaults for a new canonical row, never a substitute for current SQL admission. */
+export function applicationAuthorityCreationScope(layers: ApplicationAuthorityLayers, ref: ApplicationResourceRef, fields: readonly string[],
+  native: { clearance: Sensitivity; mutationCompartments?: string[] | null; projectIds?: string[] | null }, now = Date.now()) {
+  type Candidate = { compartments: string[]; projectIds: string[]; sensitivity: Sensitivity; writeFields: Set<string> }
+  let choices: Map<string, Candidate> | undefined
+  const appId = layers[0]?.[0]?.current[0]?.appId
+  if (!appId || layers.some(layer => layer.some(path => path.current[0]?.appId !== appId))) {
+    throw new ApplicationPlatformError('access_unavailable', 'Creation is unavailable.')
+  }
+  for (const alternatives of layers) {
+    const candidates = new Map<string, Candidate>()
+    for (const path of alternatives) {
+      const resolved = pathLayers(path)
+      if (!resolved || resolved.some(layer => !current(layer.grants[0], layer, ref, 'create', now))) continue
+      const grants = resolved.map(layer => layer.grants[0]), leaf = path.current[0], issued = path.maximum.grants[0]
+      const compartments = [...grants.reduce((keys, grant) => intersection(keys, new Set(grant.compartments)), new Set(leaf.compartments))].sort()
+      const projectIds = [...grants.reduce((keys, grant) => intersection(keys, new Set(grant.projectIds)), new Set(leaf.projectIds))].sort()
+      // Two protected leaves whose ceilings no longer overlap cannot silently
+      // manufacture a General classification. An explicit empty leaf may.
+      if (!compartments.length && leaf.compartments.length && issued.compartments.length
+        || !projectIds.length && leaf.projectIds.length && issued.projectIds.length
+        || !scopeGrantContains(native.mutationCompartments ?? null, compartments)
+        || !scopeGrantContains(native.projectIds ?? null, projectIds)) continue
+      const writeFields = grants.reduce((keys, grant) => intersection(keys, new Set(grant.writeFields)), new Set(fields))
+      const sensitivity = minSensitivity('internal', native.clearance, ...grants.map(grant => grant.clearance))
+      const key = JSON.stringify([compartments, projectIds]), prior = candidates.get(key)
+      candidates.set(key, { compartments, projectIds, sensitivity: prior ? minSensitivity(prior.sensitivity, sensitivity) : sensitivity,
+        writeFields: new Set([...(prior?.writeFields ?? []), ...writeFields]) })
+    }
+    for (const [key, candidate] of candidates) if (fields.some(field => !candidate.writeFields.has(field))) candidates.delete(key)
+    if (!choices) choices = candidates
+    else for (const [key, candidate] of choices) {
+      const next = candidates.get(key)
+      if (!next) choices.delete(key)
+      else choices.set(key, { ...candidate, sensitivity: minSensitivity(candidate.sensitivity, next.sensitivity),
+        writeFields: intersection(candidate.writeFields, next.writeFields) })
+    }
+  }
+  if (!choices?.size) throw new ApplicationPlatformError('access_unavailable', 'Creation is unavailable.')
+  if (choices.size !== 1) throw new ApplicationPlatformError('invalid_value', 'Creation requires one explicit application scope.')
+  const { writeFields: _writeFields, ...scope } = [...choices.values()][0]
+  return scope
+}
 
 /** This decides only the app ceiling. It cannot authenticate or replace native/source authority. */
 export function decideApplicationFields(layers: readonly ApplicationGrantLayer[], resource: ApplicationRecordAuthority,

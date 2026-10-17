@@ -87,7 +87,7 @@ describe('[COMP:api/application-auth] database application projections and live 
     return new ApplicationPlatformService([module])
   }
   async function provision(kind: 'member' | 'external_user' | 'service', fields = ['title'], parentFields?: string[], tamperMaximum = false,
-    nativeCompanyId?: string, additionalActions: string[] = [], recordIds: string[] = [recordId], selector?: ApplicationAccessGrant['selector'], oauthScope = 'read_write') {
+    nativeCompanyId?: string, additionalActions: string[] = [], recordIds: string[] = [recordId], selector?: ApplicationAccessGrant['selector'], oauthScope = 'read_write', compartments: string[] = []) {
     const appId = randomUUID(), grantId = randomUUID(), parentId = parentFields ? randomUUID() : null
     let userId: string = kind === 'member' ? memberId : externalId
     if (kind === 'service') {
@@ -100,13 +100,13 @@ describe('[COMP:api/application-auth] database application projections and live 
       id, appId, workspaceId, principal: { kind, userId }, origin: nativeCompanyId ? { kind: 'native', moduleKey: 'native' } : { kind: 'generic', entityTypeId: schemaId }, typeKey: nativeCompanyId ? 'company' : 'request',
       actions: ['read', 'query', 'history', 'patch', ...additionalActions], readFields, writeFields: readFields, selector: selector ?? { kind: 'ids', ids: nativeCompanyId ? [nativeCompanyId] : recordIds },
       version: 1, status: 'active', startsAt: '2026-01-01T00:00:00.000Z', expiresAt: null, parentGrantId,
-      compartments: [], projectIds: [], clearance: 'confidential',
+      compartments, projectIds: [], clearance: 'confidential',
     })
     const path = [grant(grantId, fields, parentId), ...(parentId ? [grant(parentId, parentFields!, null)] : [])]
     for (const value of [...path].reverse()) await pool.query(`INSERT INTO application_access_grants(id,app_id,workspace_id,principal_kind,principal_user_id,issued_by_user_id,
       resource_origin,resource_type,actions,read_fields,write_fields,selector,compartments,project_ids,clearance,parent_grant_id,starts_at)
-      VALUES($1,$2,$3,$4,$5,$6,$7,$13,$8,$9,$9,$10,'{}','{}','confidential',$11,$12)`,
-    [value.id, appId, workspaceId, kind, userId, ownerId, value.origin, value.actions, value.readFields, value.selector, value.parentGrantId, value.startsAt, value.typeKey])
+      VALUES($1,$2,$3,$4,$5,$6,$7,$13,$8,$9,$9,$10,$14,'{}','confidential',$11,$12)`,
+    [value.id, appId, workspaceId, kind, userId, ownerId, value.origin, value.actions, value.readFields, value.selector, value.parentGrantId, value.startsAt, value.typeKey,value.compartments])
     const maximum: ApplicationGrantMaximum = { version: 1, grants: path }
     if (kind === 'service') {
       const material = await mintApplicationCredentialSecret()
@@ -250,6 +250,21 @@ describe('[COMP:api/application-auth] database application projections and live 
     expect(receiptEffects.rows[0]).toEqual({ audit: 1, events: 1 })
     await pool.query("UPDATE application_access_grants SET status='revoked' WHERE id=$1", [fixture.grantId])
     expect((await command('record_delete', deleteInput, deleteKey)).status).toBeGreaterThanOrEqual(400)
+  })
+  it('classifies a new canonical application record with its explicit resource scope instead of General', async () => {
+    const before = (await pool.query('SELECT department_read_v2 FROM workspaces WHERE id=$1', [workspaceId])).rows[0].department_read_v2
+    await pool.query('UPDATE workspaces SET department_read_v2=false WHERE id=$1', [workspaceId])
+    try {
+      const fixture = await provision('service', ['title'], undefined, false, undefined, ['create','command:record_create'], [], { kind: 'self' }, 'read_write', ['app_scope_fixture'])
+      const execution = await resolveApplicationExecutionContext(fixture.authentication), dispatcher = new ApplicationPlatformService([createCanonicalGenericApplicationModule()])
+      const receipt = await dispatcher.command(execution, 'records', 'record_create', { idempotencyKey: randomUUID(), input: {
+        operation: 'create', type: 'request', data: { title: { kind: 'text', value: 'Explicitly classified request' } },
+      } })
+      expect((await pool.query('SELECT compartments,project_ids,sensitivity,created_by FROM entity_instances WHERE id=$1', [receipt.resources[0].id])).rows[0])
+        .toEqual({ compartments: ['app_scope_fixture'], project_ids: [], sensitivity: 'internal', created_by: fixture.userId })
+      expect((await dispatcher.query(execution, 'records', 'get', { type: 'request', id: receipt.resources[0].id }) as { values: unknown }).values)
+        .toEqual({ title: { kind: 'text', value: 'Explicitly classified request' } })
+    } finally { await pool.query('UPDATE workspaces SET department_read_v2=$2 WHERE id=$1', [workspaceId,before]) }
   })
   it('withholds a generic payload whose canonical version changes between execution and result admission', async () => {
     const record = await store.createEntity({ workspaceId, entityTypeId: schemaId, data: { title: { kind: 'text', value: 'Before change' } },
