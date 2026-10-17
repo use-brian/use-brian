@@ -14,14 +14,15 @@ type CanonicalEvidenceRow = ResourceScope & {
 
 /** Keep the owner-only native snapshot function outside the app-role external statement. */
 async function scopeSnapshots(client: Pick<pg.ClientBase, 'query'>, workspaceId: string, sources: readonly ScopeSource[],
-  reader: 'read_scope_source' | 'read_entity_derivation_source' = 'read_scope_source', workflowRunId?: string) {
+  reader: 'read_scope_source' | 'read_entity_derivation_source' = 'read_scope_source', workflowRunId?: string, requiredExternalAction?: 'context' | 'deliver') {
   const result: Array<{ ord: number; snapshot: CanonicalEvidenceRow | null }> = []
   for (const external of [false,true]) {
     const group = sources.map((source,index) => ({ source,index })).filter(({ source }) => (source.resourceKind === 'external_source') === external)
     if (group.length === 0) continue
     const rows = external ? (await client.query<{ ord: number; snapshot: CanonicalEvidenceRow | null }>(
-      `SELECT t.ord::int AS ord,external_source_snapshot($1,t.id) AS snapshot FROM unnest($2::uuid[]) WITH ORDINALITY AS t(id,ord)`,
-      [workspaceId,group.map(({ source }) => source.resourceId)])).rows
+      `SELECT t.ord::int AS ord,${requiredExternalAction ? "CASE WHEN current_setting('app.external_source_action',true)=$3 THEN external_source_snapshot($1,t.id) ELSE '{\"held\":true}'::jsonb END" : 'external_source_snapshot($1,t.id)'} AS snapshot
+        FROM unnest($2::uuid[]) WITH ORDINALITY AS t(id,ord)`,
+      [workspaceId,group.map(({ source }) => source.resourceId),...(requiredExternalAction ? [requiredExternalAction] : [])])).rows
       : (await client.query<{ ord: number; snapshot: CanonicalEvidenceRow | null }>(
         `SELECT t.ord::int AS ord,${workflowRunId ? 'read_workflow_validation_source($1,$4,t.kind,t.id)' : `${reader}($1,t.kind,t.id)`} AS snapshot
           FROM unnest($2::text[],$3::uuid[]) WITH ORDINALITY AS t(kind,id,ord)`,
@@ -144,12 +145,13 @@ export async function readCurrentScopeSources(
   workspaceId: string,
   sources: readonly ScopeSource[],
   workflowRunId?: string,
+  requiredExternalAction?: 'context' | 'deliver',
 ): Promise<CurrentSourceState[]> {
   const unique = new Map(sources.map(source=>[`${source.resourceKind}:${source.resourceId}`,source]))
   const list = [...unique.values()]
   if (list.length === 0) return []
   if (list.some(source=>source.workspaceId!==workspaceId)) throw new DerivedScopeError('scope_workspace_mismatch')
-  const rows = await scopeSnapshots(client,workspaceId,list,'read_scope_source',workflowRunId)
+  const rows = await scopeSnapshots(client,workspaceId,list,'read_scope_source',workflowRunId,requiredExternalAction)
   const byOrd = new Map(rows.map(row=>[row.ord, row.snapshot]))
   return list.map((source, index): CurrentSourceState => {
     // No result row at all is a failed read, not a deleted source.

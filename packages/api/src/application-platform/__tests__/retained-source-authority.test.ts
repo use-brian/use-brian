@@ -58,11 +58,11 @@ describe('[COMP:api/external-source-access] retained source batching and token b
   })
   it('expands native roots without losing external obligations and refuses unknown ancestry before HTTP', async () => {
     const f = fixture(1), root = { ...f.sources[0],resourceKind: 'memory',resourceId: randomUUID() }
-    f.query.mockImplementation(async (sql: string, values: unknown[]) => sql.includes('WITH RECURSIVE')
+    f.query.mockImplementation(async (sql: string, values: unknown[]) => sql.includes('read_external_source_dependencies')
       ? { rows: [{ nodeVersion: f.sources[0].version, source: f.sources[0] }] } as never
       : { rows: f.rows.filter(row => (values[1] as string[]).includes(row.id)) })
     const token = await f.coordinator.prepare(f.execution, [root], 'context')
-    expect(f.query.mock.calls[0][0]).toContain('WITH RECURSIVE lineage')
+    expect(f.query.mock.calls[0][0]).toContain('read_external_source_dependencies')
     expect(f.authorize.mock.calls[0][0].items[0].resource).toEqual(f.rows[0].observation.resource)
     f.query.mockResolvedValueOnce({ rows: [{ nodeVersion: 'missing', source: null }] } as never)
     await expect(f.coordinator.prepare(f.execution, [root], 'context')).rejects.toMatchObject({ code: 'source_access_denied' })

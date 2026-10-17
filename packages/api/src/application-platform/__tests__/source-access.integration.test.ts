@@ -5,10 +5,12 @@ import { createConnectorActorVerifier, SOURCE_PROTOCOL_VERSION,
   type SourceAuthorizationRequest } from '@use-brian/brian-app/connector'
 import { ContextScopeAccumulator, scopeEvidenceFromRows, executionToolContext, type ScopeSource, type Tool } from '@use-brian/core'
 import { getAppPool, getPool, applyRLSGucs, queryWithRLS } from '../../db/client.js'
-import { createMemory } from '../../db/memories.js'
+import { createMemory, updateMemory } from '../../db/memories.js'
+import { validateAudienceScopeEvidence, validateCallerScopeEvidence } from '../../context-scope/caller-evidence.js'
 import { readCurrentScopeSources, validateDerivedWriteInputs, validateDerivedMemoryInputs, validateDerivedEntityInputs, recordDerivedResource } from '../../db/derived-scope-store.js'
 import { bindTrustedSourceRead, pinExternalSourceOperation } from '../source-store.js'
 import { createConnectorSourceRuntimeFactory, configureConnectorSourceRuntimeFactory } from '../source-runtime.js'
+import { readExternalSourceAncestors } from '../external-source-ancestry.js'
 import { createRetainedSourceAuthorityCoordinator, pinPreparedExternalSourceAuthority } from '../retained-source-authority.js'
 import { injectMcpTools } from '../../mcp/inject.js'
 import { createDbConnectorStore } from '../../db/connector-store.js'
@@ -252,17 +254,66 @@ describe('[COMP:api/external-source-access] independent persisted source ACL', (
             derivation: { producer: 'retained-source-ancestry-fixture', sources: inputs } }, undefined, writer)
           retainedDerivative = { workspaceId: workspace,userId: memory.userId,assistantId: memory.assistantId,resourceKind: 'memory',resourceId: memory.id,
             version: memory.scopeVersion,sensitivity: memory.sensitivity,compartments: memory.compartments,projectIds: memory.projectIds }
+          expect(await readExternalSourceAncestors(workspace, [retainedDerivative], writer)).toEqual(retainedSources)
           await writer.query('COMMIT')
           firstDerivative ??= retainedDerivative
           inputs = [retainedDerivative]
         }
         const descendants = (await pool.query('SELECT count(*)::int AS count FROM scope_derivations WHERE workspace_id=$1 AND producer=$2', [workspace,'retained-source-ancestry-fixture'])).rows[0].count
         expect(descendants).toBe(2)
+        // Canonical supersession changes the head ID. The successor still owes the predecessor's source rights.
+        const predecessor = retainedDerivative!
+        const updateAuthority = await retainedCoordinator.prepare(one.execution, [predecessor], 'retain')
+        await writer.query('BEGIN'); await applyRLSGucs(writer, first)
+        await pinPreparedExternalSourceAuthority(writer, one.execution, updateAuthority)
+        const successor = await updateMemory(predecessor.resourceId, { summary: 'Fictional updated source derivative' }, one.execution.security.access, writer)
+        expect(successor).not.toBeNull(); expect(successor!.id).not.toBe(predecessor.resourceId)
+        retainedDerivative = { ...predecessor,resourceId: successor!.id,version: successor!.scopeVersion }
+        await writer.query('COMMIT')
         // Repeated historical derivations may form cycles; the metadata walk must terminate and keep the source.
         await pool.query(`INSERT INTO scope_derivation_sources(workspace_id,derivation_id,source_kind,source_id,source_version)
           SELECT $1,id,'memory',$3,$4 FROM scope_derivations WHERE workspace_id=$1 AND resource_id=$2`,
           [workspace,firstDerivative!.resourceId,retainedDerivative!.resourceId,retainedDerivative!.version])
-        await retainedCoordinator.prepare(one.execution, [retainedDerivative!], 'context')
+        // Native context/delivery boundaries must recover the source obligation themselves.
+        await expect(validateAudienceScopeEvidence({ sources: [retainedDerivative!] }, one.execution.security.ceiling))
+          .rejects.toMatchObject({ diagnostic: 'source_held' })
+        const current = await retainedCoordinator.prepare(one.execution, [retainedDerivative!], 'context')
+        await writer.query('BEGIN'); await applyRLSGucs(writer, first)
+        await pinPreparedExternalSourceAuthority(writer, one.execution, current)
+        const admitted = await validateCallerScopeEvidence({ sources: [retainedDerivative!] }, one.execution.security.ceiling, writer)
+        expect(admitted.sources?.filter(source => source.resourceKind === 'external_source')).toEqual(retainedSources)
+        await expect(validateAudienceScopeEvidence({ sources: [retainedDerivative!] }, one.execution.security.ceiling, writer))
+          .rejects.toMatchObject({ diagnostic: 'source_held' })
+        await writer.query('COMMIT')
+        const delivery = await retainedCoordinator.prepare(one.execution, [retainedDerivative!], 'deliver')
+        await writer.query('BEGIN'); await applyRLSGucs(writer, first)
+        await pinPreparedExternalSourceAuthority(writer, one.execution, delivery)
+        expect(await validateAudienceScopeEvidence({ sources: [retainedDerivative!] }, one.execution.security.ceiling, writer)).toEqual(admitted)
+        await expect(validateCallerScopeEvidence({ sources: [retainedDerivative!] }, one.execution.security.ceiling, writer))
+          .rejects.toMatchObject({ diagnostic: 'source_held' })
+        await writer.query('COMMIT')
+        const reader = await getAppPool().connect()
+        try {
+          await reader.query('BEGIN'); await applyRLSGucs(reader, first)
+          const admittedProof = await retainedCoordinator.prepare(one.execution, [retainedDerivative!], 'context')
+          await pinPreparedExternalSourceAuthority(reader, one.execution, admittedProof)
+          expect((await reader.query("SELECT has_function_privilege(current_user,'read_external_source_dependencies(uuid,text[],uuid[],text[])','EXECUTE') AS raw")).rows[0].raw).toBe(false)
+          expect(await readExternalSourceAncestors(workspace, [retainedDerivative!], reader)).toEqual(retainedSources)
+          await reader.query('ROLLBACK')
+        } finally { await reader.query('ROLLBACK'); reader.release() }
+        // Oversized ancestry is an explicit refusal, never silently truncated evidence.
+        await writer.query('BEGIN'); await applyRLSGucs(writer, first)
+        const wide: Array<{ id: string; version: string }> = []
+        for (let index = 0; index < 4096; index++) {
+          const memory = await createMemory({ assistantId: assistant,userId: null,workspaceId: workspace,createdByUserId: first,
+            summary: 'Fictional bounded-ancestry input',sensitivity: 'public' }, undefined, writer)
+          wide.push({ id: memory.id,version: memory.scopeVersion })
+        }
+        await writer.query(`INSERT INTO scope_derivation_sources(workspace_id,derivation_id,source_kind,source_id,source_version)
+          SELECT $1,d.id,'memory',s.id,s.version FROM scope_derivations d CROSS JOIN unnest($3::uuid[],$4::text[]) s(id,version)
+          WHERE d.workspace_id=$1 AND d.resource_id=$2`, [workspace,firstDerivative!.resourceId,wide.map(row => row.id),wide.map(row => row.version)])
+        await expect(readExternalSourceAncestors(workspace, [retainedDerivative!], writer)).rejects.toMatchObject({ code: 'source_access_denied' })
+        await writer.query('ROLLBACK')
         await expect(retainedCoordinator.prepare(two.execution, [retainedDerivative!], 'context')).rejects.toMatchObject({ code: 'source_access_denied' })
       } finally { await writer.query('ROLLBACK'); writer.release() }
       for (const table of ['external_source_resources','external_source_observations','external_source_authorizations']) {
@@ -349,6 +400,7 @@ describe('[COMP:api/external-source-access] independent persisted source ACL', (
       await expect(one.access.authorize(retained(first))).rejects.toMatchObject({ code: 'source_access_denied' })
       await expect(retainedCoordinator.prepare(one.execution, retainedSources!, 'context')).rejects.toMatchObject({ code: 'source_access_denied' })
       await expect(retainedCoordinator.prepare(one.execution, [retainedDerivative!], 'context')).rejects.toMatchObject({ code: 'source_access_denied' })
+      await expect(validateAudienceScopeEvidence({ sources: [retainedDerivative!] }, one.execution.security.ceiling)).rejects.toMatchObject({ diagnostic: 'source_held' })
       await two.access.authorize(retained(second))
       await sourcePool.query("INSERT INTO grants(kind,account_id,record_id,fields,actions) VALUES('human',$1,'order-1',$2,$3)", [first,['description','cost'],actions])
       source.setAfterRead(async () => { await sourcePool.query("DELETE FROM grants WHERE account_id=$1 AND record_id='order-1'", [first]) })

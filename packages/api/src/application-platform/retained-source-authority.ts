@@ -5,6 +5,7 @@ import { ContextScopeAccumulator, resourceScopeKey, scopeGrantContains, type Exe
 import { SOURCE_PROTOCOL_VERSION, SourceProtocolError, sourceSubjectKey, sourceResourceKey,
   type SourceAction, type SourceObservation, type SourceSubject } from '@use-brian/brian-app/connector'
 import { getPool } from '../db/client.js'
+import { readExternalSourceAncestors } from './external-source-ancestry.js'
 import { validateCallerScopeEvidence } from '../context-scope/caller-evidence.js'
 import type { ConnectorInstanceStore } from '../db/connector-instance-store.js'
 import { buildConnectorAuthHeaders } from '../mcp/auth-headers.js'
@@ -35,41 +36,6 @@ export async function pinPreparedExternalSourceAuthority(client: PoolClient, exe
   await execution.security.authority.assertCurrent()
 }
 
-/** Metadata only: retain every external ancestor, including obligations on historical native versions. */
-async function externalAncestors(workspaceId: string, roots: readonly ScopeSource[]) {
-  const ancestors: ScopeSource[] = []
-  for (let offset = 0; offset < roots.length; offset += 100) {
-    const part = roots.slice(offset, offset + 100)
-    const rows = (await getPool().query<{ nodeVersion: string; source: ScopeSource | null }>(`WITH RECURSIVE lineage(kind,id,version) AS (
-      SELECT * FROM unnest($2::text[],$3::uuid[],$4::text[])
-      UNION
-      SELECT next.kind,next.id,next.version FROM lineage l CROSS JOIN LATERAL (
-        SELECT s.source_kind AS kind,s.source_id AS id,s.source_version AS version FROM scope_derivations d
-          JOIN scope_derivation_sources s ON s.workspace_id=d.workspace_id AND s.derivation_id=d.id
-          WHERE d.workspace_id=$1 AND d.resource_kind=l.kind AND d.resource_id=l.id
-        UNION
-        SELECT 'workspace_file',wf.id,wf.scope_version::text FROM file_segments fs
-          JOIN workspace_files wf ON wf.id=fs.file_id AND wf.workspace_id=fs.workspace_id
-          WHERE l.kind='file_segment' AND fs.workspace_id=$1 AND fs.id=l.id
-        UNION
-        SELECT source->>'resourceKind',(source->>'resourceId')::uuid,source->>'version'
-          FROM jsonb_array_elements(CASE WHEN l.kind='workflow_run' THEN read_workflow_derivation_inputs($1,l.id) ELSE '[]'::jsonb END) input
-          CROSS JOIN LATERAL jsonb_array_elements(coalesce(input#>'{evidence,sources}','[]'::jsonb)
-            || CASE WHEN jsonb_typeof(input->'blueprintSource')='object' THEN jsonb_build_array(input->'blueprintSource') ELSE '[]'::jsonb END) source
-      ) next
-    ) SELECT l.version AS "nodeVersion",CASE WHEN o.id IS NULL THEN NULL ELSE jsonb_build_object(
-      'workspaceId',o.workspace_id,'userId',NULL,'assistantId',NULL,'resourceKind','external_source','resourceId',o.id,'version',o.version,
-      'sensitivity',o.sensitivity,'compartments',o.compartments,'projectIds',o.project_ids) END AS source
-      FROM lineage l LEFT JOIN external_source_observations o ON o.workspace_id=$1 AND o.id=l.id
-      WHERE l.kind='external_source'`, [workspaceId,part.map(source => source.resourceKind),part.map(source => source.resourceId),part.map(source => source.version)])).rows
-    for (const row of rows) {
-      if (!row.source || row.source.version !== row.nodeVersion) denied()
-      ancestors.push(row.source)
-    }
-  }
-  return ancestors
-}
-
 /** Resolve immutable external obligations before sending fresh source requests. */
 export function createRetainedSourceAuthorityCoordinator(options: { factory: ConnectorSourceRuntimeFactory; instances: ConnectorInstanceStore }) {
   return {
@@ -80,14 +46,14 @@ export function createRetainedSourceAuthorityCoordinator(options: { factory: Con
       const roots = structuredClone(rawSources)
       if (roots.some(source => source.workspaceId !== workspaceId)) denied()
       const nativeRoots = roots.filter(source => source.resourceKind !== 'external_source')
-      const ancestry = await externalAncestors(workspaceId, nativeRoots)
+      const ancestry = await readExternalSourceAncestors(workspaceId, nativeRoots)
       const evidenceKey = (values: readonly ScopeSource[]) => JSON.stringify([...new Set(values.map(source =>
         JSON.stringify([source.resourceKind,source.resourceId,source.version,resourceScopeKey(source)])))].sort())
       const ancestryKey = evidenceKey(ancestry)
       let ancestryInvalid = false
       const assertAncestryCurrent = async () => {
         if (ancestryInvalid) denied()
-        try { if (evidenceKey(await externalAncestors(workspaceId, nativeRoots)) !== ancestryKey) denied() }
+        try { if (evidenceKey(await readExternalSourceAncestors(workspaceId, nativeRoots)) !== ancestryKey) denied() }
         catch (error) { ancestryInvalid = true; throw error }
       }
       const sources = [...roots.filter(source => source.resourceKind === 'external_source'),...ancestry]

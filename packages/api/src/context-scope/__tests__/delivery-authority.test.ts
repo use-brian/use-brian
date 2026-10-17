@@ -19,6 +19,8 @@ const OTHER_USER = '88888888-8888-4888-8888-888888888888'
 
 // Current-label revalidation reads the database; these tests exercise the
 // per-source policy, so every source is reported unchanged.
+// Source ancestry is covered by the real DB/HTTP source fixture. These tests exercise native audience rules.
+vi.mock('../../application-platform/external-source-ancestry.js', () => ({ readExternalSourceAncestors: async () => [] }))
 vi.mock('../../db/client.js', () => ({ getPool: () => ({
   query: async (sql: string, params: unknown[]) => {
     if (!sql.includes('read_resource_page_dependencies') || !(params[1] as string[]).every(kind => ['memory', 'session_message'].includes(kind))) {

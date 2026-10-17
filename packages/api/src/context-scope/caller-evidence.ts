@@ -3,6 +3,7 @@ import {
   type AccessCeiling, type ResourceScope, type ScopeEvidence, type ScopeSource,
 } from '@use-brian/core'
 import { getPool } from '../db/client.js'
+import { readExternalSourceAncestors } from '../application-platform/external-source-ancestry.js'
 import { readCurrentScopeSources } from '../db/derived-scope-store.js'
 import type { PoolClient } from 'pg'
 
@@ -121,6 +122,32 @@ async function validateScopeEvidence(
   if (failure) throw unavailable(kind, failure)
   if (!sources.length) return snapshot
 
+  // A native envelope cannot erase its independently authorized source ancestry.
+  // This metadata read confers no source rights: current transaction receipts
+  // are still required by readCurrentScopeSources below.
+  const ancestryRoots = sources
+  const ancestryKey = (values: readonly ScopeSource[]) => JSON.stringify(values.map(source => [source.resourceId,source.version,resourceScopeKey(source)]).sort())
+  let originalAncestry: string
+  try {
+    const ancestors = await readExternalSourceAncestors(ceiling.workspaceId, ancestryRoots, client)
+    originalAncestry = ancestryKey(ancestors)
+    const known = new Map(sources.filter(source => source.resourceKind === 'external_source').map(source => [source.resourceId, source]))
+    for (const source of ancestors) {
+      const previous = known.get(source.resourceId)
+      if (previous && (previous.version !== source.version || resourceScopeKey(previous) !== resourceScopeKey(source))) {
+        throw unavailable(kind, 'source_unverifiable')
+      }
+      failure ??= visibilityFailure(source, ceiling) ?? labelFailure(source, ceiling)
+    }
+    if (failure) throw unavailable(kind, failure)
+    const expanded = new ContextScopeAccumulator(snapshot)
+    expanded.note({ sources: ancestors })
+    snapshot = expanded.evidence
+    sources = snapshot.sources ?? []
+  } catch (error) {
+    throw scopeEvidenceFailureOf(error) ? error : unavailable(kind, 'source_unverifiable', error)
+  }
+
   // Page receipts carry principal boundaries beyond generic labels. Resolve
   // each immutable observation; never treat a missing receipt as D1 deletion.
   const pageKinds = new Set(['page_event_changed','page_event_destination','page_live_changed','page_live_destination'])
@@ -170,7 +197,7 @@ async function validateScopeEvidence(
   // writer's rule (`revalidateScopeSources`), not the audience's.
   let states: Awaited<ReturnType<typeof readCurrentScopeSources>>
   try {
-    states = await readCurrentScopeSources(client ?? getPool(), ceiling.workspaceId, sources.filter(source=>!pageKinds.has(source.resourceKind)), workflowRunId)
+    states = await readCurrentScopeSources(client ?? getPool(), ceiling.workspaceId, sources.filter(source=>!pageKinds.has(source.resourceKind)), workflowRunId, kind === 'caller' ? 'context' : 'deliver')
   } catch (error) {
     throw unavailable(kind, 'verification_error', error)
   }
@@ -189,6 +216,13 @@ async function validateScopeEvidence(
     raised.sensitivity = maxSensitivity(raised.sensitivity ?? 'public', current.sensitivity)
     raised.compartments = [...new Set([...(raised.compartments ?? []), ...current.compartments])].sort()
     raised.projectIds = [...new Set([...(raised.projectIds ?? []), ...current.projectIds])].sort()
+  }
+  try {
+    if (ancestryKey(await readExternalSourceAncestors(ceiling.workspaceId, ancestryRoots, client)) !== originalAncestry!) {
+      throw unavailable(kind, 'source_unverifiable')
+    }
+  } catch (error) {
+    throw scopeEvidenceFailureOf(error) ? error : unavailable(kind, 'source_unverifiable', error)
   }
   return raised
 }

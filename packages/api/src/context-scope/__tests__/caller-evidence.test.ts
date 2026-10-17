@@ -5,7 +5,13 @@ import type { CurrentSourceState } from '../../db/derived-scope-store.js'
 const state = vi.hoisted(() => ({
   read: [] as ScopeSource[][],
   next: null as null | ((sources: ScopeSource[]) => CurrentSourceState[]),
+  ancestors: [] as ScopeSource[],
+  ancestryFailure: false,
 }))
+vi.mock('../../application-platform/external-source-ancestry.js', () => ({ readExternalSourceAncestors: async () => {
+  if (state.ancestryFailure) throw new Error('Metadata unavailable')
+  return state.ancestors
+} }))
 vi.mock('../../db/client.js', () => ({ getPool: () => ({ query: async (_sql: string, values: unknown[]) => ({ rows: (values[1] as string[]).map(()=>({dependencies:[]})) }) }) }))
 vi.mock('../../db/derived-scope-store.js', () => ({
   readCurrentScopeSources: async (_client: unknown, _workspaceId: string, sources: ScopeSource[]) => {
@@ -34,7 +40,7 @@ const ceiling: AccessCeiling = {
   projectIds: null, visibilityAssistantIds: null,
 }
 
-beforeEach(() => { state.read.length = 0; state.next = null })
+beforeEach(() => { state.read.length = 0; state.next = null; state.ancestors = []; state.ancestryFailure = false })
 
 describe('[COMP:api/caller-scope-evidence] per-source audience validation', () => {
   it('admits read evidence spanning two assistant partitions of the same user', async () => {
@@ -156,5 +162,42 @@ describe('[COMP:api/caller-scope-evidence] department delivery boundary',()=>{
     state.next=sources=>sources.map(s=>({state:'changed',source:s,current:{...s,compartments:['team:finance']}}))
     await expect(validateAudienceScopeEvidence({sources:[source('task',{compartments:['team:sales']})]},v2))
       .rejects.toMatchObject({diagnostic:'source_reclassified'})
+  })
+})
+
+
+describe('[COMP:api/caller-scope-evidence] independent source ancestors', () => {
+  const external = () => source('observation', { resourceKind: 'external_source', userId: null, assistantId: null })
+  it('keeps external obligations when a native root changes or disappears', async () => {
+    state.ancestors = [external()]
+    state.next = sources => sources.map(source => ({ state: source.resourceKind === 'external_source' ? 'current' : 'gone', source }))
+    const result = await validateAudienceScopeEvidence({ sources: [source('native-root')] }, ceiling)
+    expect(result.sources?.map(source => source.resourceId)).toEqual(['native-root','observation'])
+    expect(state.read.at(-1)?.map(source => source.resourceId)).toEqual(['native-root','observation'])
+  })
+  it('withholds a descendant when its independently authorized ancestor is held', async () => {
+    state.ancestors = [external()]
+    state.next = sources => sources.map(source => ({ state: source.resourceKind === 'external_source' ? 'held' : 'current', source }))
+    await expect(validateCallerScopeEvidence({ sources: [source('native-root')] }, ceiling)).rejects.toMatchObject({ diagnostic: 'source_held' })
+  })
+  it('refuses conflicting observations and failed metadata lookup before current-source checks', async () => {
+    state.ancestors = [{ ...external(), version: 'changed' }]
+    await expect(validateCallerScopeEvidence({ sources: [external()] }, ceiling)).rejects.toMatchObject({ diagnostic: 'source_unverifiable' })
+    state.ancestryFailure = true
+    await expect(validateAudienceScopeEvidence({ sources: [source('native-root')] }, ceiling)).rejects.toMatchObject({ diagnostic: 'source_unverifiable' })
+    expect(state.read).toHaveLength(0)
+  })
+  it('refuses ancestry that changes while current-source checks are running', async () => {
+    state.ancestors = [external()]
+    state.next = sources => {
+      state.ancestors = []
+      return sources.map(source => ({ state: 'current', source }))
+    }
+    await expect(validateCallerScopeEvidence({ sources: [source('native-root')] }, ceiling)).rejects.toMatchObject({ diagnostic: 'source_unverifiable' })
+  })
+  it('applies ancestor labels before checking current-source receipts', async () => {
+    state.ancestors = [{ ...external(), sensitivity: 'confidential' }]
+    await expect(validateAudienceScopeEvidence({ sources: [source('native-root')] }, ceiling)).rejects.toMatchObject({ diagnostic: 'clearance' })
+    expect(state.read).toHaveLength(0)
   })
 })
