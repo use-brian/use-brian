@@ -30,6 +30,7 @@ import {
   findSlackVisibleMessageByChannelId,
 } from '../sessions.js'
 import { query } from '../client.js'
+import { boundScopeSource } from '@use-brian/core'
 
 const mockQuery = vi.mocked(query)
 
@@ -290,6 +291,25 @@ describe('[COMP:api/sessions-route] addSessionMessage', () => {
     expect(params![0]).toBe('s_1')
     expect(params![1]).toBe('user')
     expect(params![2]).toBe(JSON.stringify([{ type: 'text', text: 'hi' }]))
+  })
+})
+
+describe('[COMP:api/sessions-route] shared transcript scope evidence', () => {
+  it('preserves a canonical room message with no user or assistant owner', async () => {
+    mockQuery.mockResolvedValueOnce({ rows: [{ id: 'room-message', sessionId: 'room', channelMessageId: '3607',
+      scopeWorkspaceId: 'workspace-1', scopeUserId: null, scopeAssistantId: null, scopeSensitivity: 'internal',
+      scopeCompartments: [], scopeProjectIds: [], scopeVersion: '1', scopeHeld: false }] } as never)
+    const [message] = await getSessionMessages('room', { excludeHeld: true })
+    expect(boundScopeSource(message)).toMatchObject({ workspaceId: 'workspace-1', userId: null, assistantId: null,
+      sensitivity: 'internal', resourceKind: 'session_message', resourceId: 'room-message' })
+  })
+
+  it('still withholds scope evidence for held or incomplete room rows', async () => {
+    const base = { id: 'room-message', sessionId: 'room', channelMessageId: '3607', scopeWorkspaceId: 'workspace-1',
+      scopeUserId: null, scopeAssistantId: null, scopeSensitivity: 'internal', scopeCompartments: [], scopeProjectIds: [], scopeVersion: '1', scopeHeld: false }
+    mockQuery.mockResolvedValueOnce({ rows: [{ ...base, scopeHeld: true }, { ...base, scopeVersion: null }] } as never)
+    const messages = await getSessionMessages('room')
+    expect(messages.map(boundScopeSource)).toEqual([undefined, undefined])
   })
 })
 

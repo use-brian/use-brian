@@ -320,7 +320,10 @@ export type JobStore = {
 export type PendingBatch = {
   id: string
   workspaceId: string
-  ruleId: string
+  /** Connector/programmatic batches retain their ingest rule parent. */
+  ruleId: string | null
+  /** Room batches have a real session parent and no ingest rule. */
+  roomSessionId?: string | null
   /** Present for assistant-addressed programmatic capture batches. */
   assistantId?: string | null
   /** Trusted partition selected by the capture profile. */

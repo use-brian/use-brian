@@ -42,6 +42,10 @@ function input(overrides: Partial<CreateExecutionContextInput> = {}): CreateExec
 }
 
 describe('[COMP:security/execution-context] validated execution context', () => {
+  it('keeps the shared audience on the tool context used by memory reads and writes', () => {
+    const execution = createExecutionContext(input({ access: { ...input().access, sharedAudience: true } }))
+    expect(executionToolContext(execution, { appId: 'chat' }).sharedAudience).toBe(true)
+  })
   it('preserves a finite empty grant and projects legacy fields once', () => {
     const execution = createExecutionContext(input())
     expect(execution.security.ceiling.compartments).toEqual([])

@@ -236,6 +236,15 @@ describe('[COMP:api/programmatic-capture] routed producer', () => {
 })
 
 describe('[COMP:api/programmatic-capture] pooled processor', () => {
+  it('refuses a session-parent batch before resolving a programmatic target', async () => {
+    const ingest = vi.fn(), captureStore = store(target([rule()]))
+    const process = createProgrammaticBatchProcessor({ store: captureStore, ingest })
+    await expect(process({ id: 'invalid', workspaceId: AUTH.workspaceId, assistantId: AUTH.captureAssistantId,
+      ruleId: null, roomSessionId: 'room', source: 'programmatic', firesAt: new Date(), createdAt: new Date(),
+      episodeSensitivity: 'internal', events: [] })).rejects.toMatchObject({ code: 'capture_target_unavailable' })
+    expect(captureStore.resolveBatchTargetSystem).not.toHaveBeenCalled()
+    expect(ingest).not.toHaveBeenCalled()
+  })
   it('refuses a held batch before resolving or invoking Pipeline B',async()=>{
     const ingest=vi.fn(),captureStore=store(target([rule()])),process=createProgrammaticBatchProcessor({store:captureStore,ingest})
     await expect(process({id:'held',workspaceId:AUTH.workspaceId,assistantId:AUTH.captureAssistantId,

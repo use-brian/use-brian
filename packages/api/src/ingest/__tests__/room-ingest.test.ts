@@ -5,7 +5,7 @@
  * the room's workspace + clearance riding the decision:
  *
  *   - hosted (`scheduledBatching`) → the post lands in the room's hourly
- *     `(rule_id=sessionId, fires_at)` digest batch, sensitivity stamped from
+ *     `(room_session_id=sessionId, fires_at)` digest batch, sensitivity stamped from
  *     the room's `effective_clearance`;
  *   - OSS (no batch drain) → an inline Episode through the injected
  *     `BrainEpisodeIngestor`, `web_chat` + `room_post` provenance, clearance
@@ -19,6 +19,12 @@ import { describe, it, expect, vi, beforeEach } from 'vitest'
 import { createRoomIngestor, ROOM_DIGEST_CRON, type RoomPostInput } from '../room-ingest.js'
 import type { BrainEpisodeInput } from '../../ingest-port.js'
 import type { appendBatchEvent as AppendBatchEvent } from '../../db/pending-ingest-batches-store.js'
+import { buildEpisodeIngestors } from '../../build-episode-ingestors.js'
+import { processEpisode } from '@use-brian/core'
+
+vi.mock('@use-brian/core', async importOriginal => ({
+  ...await importOriginal<typeof import('@use-brian/core')>(), processEpisode: vi.fn(),
+}))
 
 const NOW = new Date('2026-07-31T10:20:00Z')
 
@@ -58,8 +64,8 @@ describe('[COMP:api/room-ingest] room posts reach the rules engine (P2)', () => 
     const call = appendBatchEvent.mock.calls[0][0] as Record<string, unknown>
     expect(call).toMatchObject({
       workspaceId: 'ws-1',
-      // The rule id IS the session id — the batch key windows per room.
-      ruleId: 's-room',
+      // The durable queue references the session, never a fake DB rule.
+      roomSessionId: 's-room',
       source: 'room',
       episodeSensitivity: 'internal',
     })
@@ -100,12 +106,26 @@ describe('[COMP:api/room-ingest] room posts reach the rules engine (P2)', () => 
       workspaceId: 'ws-1',
       userId: 'u-alice',
       assistantId: 'a-1',
+      sharedAudience: true,
       content: 'Alice: decision: we ship Friday, pending the QA pass',
       sourceKind: 'web_chat',
       // `confidential` collapses to the `private` Episode row tier.
       sensitivity: 'private',
       sourceRef: { source_kind: 'web_chat', session_id: 's-room', room_post: true },
     })
+  })
+
+  it('OSS: persists room visibility separately from the sender attribution before extraction', async () => {
+    const createEpisode = vi.fn(async (_actor: string, input: Record<string, unknown>) => ({ id: 'episode', ...input }))
+    const port = buildEpisodeIngestors({ episodesStore: { createEpisode } } as never).brainEpisodeIngestor
+    const ingestor = createRoomIngestor({ brainEpisodeIngestor: port, now: () => NOW })
+    await ingestor.ingestPost(post({ compartments: ['finance'], projectIds: ['project'] }))
+    expect(createEpisode).toHaveBeenCalledWith('u-alice', expect.objectContaining({
+      userId: null, createdByUserId: 'u-alice', assistantId: 'a-1', compartments: ['finance'], projectIds: ['project'],
+    }))
+    expect(processEpisode).toHaveBeenCalledWith(expect.objectContaining({
+      userId: null, createdByUserId: 'u-alice', assistantId: 'a-1', compartments: ['finance'], projectIds: ['project'],
+    }), expect.any(String), expect.anything())
   })
 
   it('drops an empty post before the engine', async () => {

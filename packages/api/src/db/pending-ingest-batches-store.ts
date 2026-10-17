@@ -15,7 +15,8 @@ import { programmaticIntakeClient, programmaticIntakeClaims } from './programmat
 type BatchRow = {
   id: string
   workspace_id: string
-  rule_id: string
+  rule_id: string | null
+  room_session_id: string | null
   assistant_id: string | null
   partition_key: string
   source: string
@@ -34,6 +35,7 @@ function rowToBatch(row: BatchRow): PendingBatch {
     id: row.id,
     workspaceId: row.workspace_id,
     ruleId: row.rule_id,
+    roomSessionId: row.room_session_id ?? null,
     assistantId: row.assistant_id,
     partitionKey: row.partition_key,
     source: row.source,
@@ -48,14 +50,15 @@ function rowToBatch(row: BatchRow): PendingBatch {
   }
 }
 
-export function createDbBatchStore(): BatchStore {
+export function createDbBatchStore(pool?: TransactionalPool): BatchStore {
   return {
     async withClaimedBatches(limit, handler) {
-      const client = await getPool().connect()
+      const target: TransactionalPool = pool ?? getPool()
+      const client = await target.connect()
       try {
         await client.query('BEGIN')
         const result = await client.query<BatchRow>(
-          `SELECT id, workspace_id, rule_id, assistant_id, partition_key,
+          `SELECT id, workspace_id, rule_id, room_session_id, assistant_id, partition_key,
                   source, fires_at, events,
                   created_at, episode_sensitivity, compartments, project_ids,
                   scope_binding_origin, scope_held
@@ -101,7 +104,7 @@ export function createDbProgrammaticBatchStore(
           FROM pending_ingest_batches WHERE source='programmatic' AND fires_at<now() AND processed_at IS NULL AND NOT scope_held ORDER BY workspace_id`)
         await client.query('SELECT id FROM workspaces WHERE id=ANY($1::uuid[]) ORDER BY id FOR UPDATE',[workspaces.rows.map(r=>r.workspace_id)])
         const result = await client.query<BatchRow>(
-          `SELECT id, workspace_id, rule_id, assistant_id, partition_key,
+          `SELECT id, workspace_id, rule_id, room_session_id, assistant_id, partition_key,
                   source, fires_at, events,
                   created_at, episode_sensitivity, compartments, project_ids,
                   scope_binding_origin, scope_held
@@ -407,7 +410,9 @@ export async function appendProgrammaticBatchEvent(input: {
 }
 
 /**
- * Producer-side append for the ingest poller. Finds the unprocessed
+ * Room producers lock their native session in a transaction before finding
+ * and appending the hourly window; no fabricated connector rule is stored.
+ * Connector producer-side append finds the unprocessed
  * batch row for `(rule_id, fires_at)` and pushes `event` onto its
  * `events` JSONB array; creates the row if none exists. Migration 131
  * deliberately omits a `(rule_id, fires_at)` UNIQUE — the find-or-create
@@ -427,7 +432,8 @@ export async function appendProgrammaticBatchEvent(input: {
 export async function appendBatchEvent(
   input: {
     workspaceId: string
-    ruleId: string
+    ruleId?: string | null
+    roomSessionId?: string
     source: string
     firesAt: Date
     event: unknown
@@ -445,6 +451,67 @@ export async function appendBatchEvent(
   },
   pool: QueryablePool = getPool(),
 ): Promise<void> {
+  if (input.source === 'room') {
+    if (!input.roomSessionId || input.ruleId != null) throw new Error('room batch requires a session parent')
+    if (!('connect' in pool) || typeof pool.connect !== 'function') throw new Error('room batch append requires a transaction')
+    const client = await (pool as TransactionalPool).connect()
+    try {
+      await client.query('BEGIN')
+      // Lock the native parent before inspecting its window. Every producer
+      // serializes on the same session; legacy duplicate windows remain valid
+      // and can drain without destructive consolidation during the upgrade.
+      const room = await client.query<{ strict: boolean }>(
+        `SELECT COALESCE(p.classification_mode = 'strict', false) AS strict
+           FROM sessions s LEFT JOIN workspace_access_policies p ON p.workspace_id = s.workspace_id
+          WHERE s.id = $1 AND s.workspace_id = $2 FOR UPDATE OF s`,
+        [input.roomSessionId, input.workspaceId],
+      )
+      if (!room.rows[0]) throw new Error('room batch session is outside the workspace')
+      const origin = input.scopeBindingOrigin ?? 'legacy'
+      const scopeHeld = input.scopeHeld ?? (room.rows[0].strict && !['explicit', 'reviewed'].includes(origin))
+      const existing = await client.query<{ id: string }>(
+        `SELECT id FROM pending_ingest_batches
+          WHERE room_session_id = $1 AND fires_at = $2 AND processed_at IS NULL
+            AND source = 'room' AND scope_binding_origin = $3 AND scope_held = $4
+          ORDER BY created_at, id LIMIT 1`,
+        [input.roomSessionId, input.firesAt, origin, scopeHeld],
+      )
+      const eventJson = JSON.stringify([input.event])
+      const sensitivity = input.episodeSensitivity ?? 'internal'
+      const result = existing.rows[0]
+        ? await client.query<{ id: string; chars: number | string }>(
+            `UPDATE pending_ingest_batches SET
+               events = events || $2::jsonb,
+               episode_sensitivity = CASE
+                 WHEN episode_sensitivity = 'confidential' OR $3 = 'confidential' THEN 'confidential'
+                 WHEN episode_sensitivity = 'internal' OR $3 = 'internal' THEN 'internal'
+                 ELSE 'public' END,
+               compartments = ARRAY(SELECT DISTINCT unnest(compartments || $4::text[]) ORDER BY 1),
+               project_ids = ARRAY(SELECT DISTINCT unnest(project_ids || $5::uuid[]) ORDER BY 1)
+             WHERE id = $1 RETURNING id, length(events::text) AS chars`,
+            [existing.rows[0].id, eventJson, sensitivity, input.compartments ?? [], input.projectIds ?? []],
+          )
+        : await client.query<{ id: string; chars: number | string }>(
+            `INSERT INTO pending_ingest_batches
+               (workspace_id, rule_id, room_session_id, source, fires_at, events,
+                episode_sensitivity, compartments, project_ids, scope_binding_origin, scope_held)
+             VALUES ($1, NULL, $2, 'room', $3, $4::jsonb, $5, $6, $7, $8, $9)
+             RETURNING id, length(events::text) AS chars`,
+            [input.workspaceId, input.roomSessionId, input.firesAt, eventJson, sensitivity,
+              input.compartments ?? [], input.projectIds ?? [], origin, scopeHeld],
+          )
+      const row = result.rows[0]!
+      if (Number(row.chars) >= EARLY_FLUSH_CHARS) {
+        await client.query(`UPDATE pending_ingest_batches SET fires_at = now() WHERE id = $1 AND fires_at > now()`, [row.id])
+      }
+      await client.query('COMMIT')
+    } catch (error) {
+      await client.query('ROLLBACK').catch(() => {})
+      throw error
+    } finally { client.release() }
+    return
+  }
+  if (!input.ruleId || input.roomSessionId) throw new Error('connector batch requires an ingest rule parent')
   const binding = await pool.query<{ origin: 'legacy' | 'explicit' | 'reviewed' | 'held'; strict: boolean }>(
     `SELECT coalesce(r.scope_binding_origin,'explicit') AS origin,
             coalesce(p.classification_mode='strict',false) AS strict

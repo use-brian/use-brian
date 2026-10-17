@@ -2207,10 +2207,10 @@ export async function processEpisode(
     )
   }
 
-  // 6. Write memories. MemoryStore.create requires both userId + assistantId;
-  //    skip rows we cannot place.
+  // 6. MemoryStore requires an assistant partition; userId=null is the native
+  // workspace visibility of room capture, with authorship kept separately.
   const memoriesWritten: MemoryRecord[] = []
-  if (episode.userId && episode.assistantId) {
+  if (episode.assistantId && (episode.userId || episode.workspaceId)) {
     for (const ex of payload.memories) {
       try {
         // Post-Phase-4 (retire-memory-type): no `type` field. The
@@ -2223,7 +2223,7 @@ export async function processEpisode(
         const memory = await deps.memories.create({
           assistantId: episode.assistantId,
           userId: episode.userId,
-          scope: toDbScope(ex.scope ?? 'user'),
+          scope: episode.userId ? toDbScope(ex.scope ?? 'user') : 'workspace',
           tags: dedupTags(tags, ex.tags),
           summary: ex.summary,
           detail: ex.detail,
@@ -2658,12 +2658,12 @@ async function processDurableExtractionApplication(input: {
       payload: {
         ...envelope,
         command: 'memory',
-        scope: toDbScope(memory.scope ?? 'user'),
+        scope: episode.userId ? toDbScope(memory.scope ?? 'user') : 'workspace',
         tags: dedupTags(input.tags, memory.tags),
         summary: memory.summary,
         detail: memory.detail ?? null,
       } satisfies PipelineBApplicationCommand,
-      ...(!episode.userId || !episode.assistantId ? {
+      ...(!episode.assistantId || (!episode.userId && !episode.workspaceId) ? {
         terminalDisposition: 'rejected' as const,
         terminalReason: 'visibility_missing',
       } : {}),
@@ -2853,7 +2853,7 @@ async function processEngagementDigest(
           summary: describePostEngagement(platform, post),
           detail: JSON.stringify(post),
         } satisfies PipelineBApplicationCommand,
-        ...(!episode.userId || !episode.assistantId ? {
+        ...(!episode.assistantId || (!episode.userId && !episode.workspaceId) ? {
           terminalDisposition: 'rejected' as const,
           terminalReason: 'visibility_missing',
         } : {}),
@@ -2936,9 +2936,8 @@ async function processEngagementDigest(
   const memoriesWritten: MemoryRecord[] = []
   const edgesWritten: EntityLinkRecord[] = []
 
-  // Engagement memories require the visibility double — same constraint
-  // as the generic memory-write path.
-  if (episode.userId && episode.assistantId) {
+  // Workspace-visible memories retain an assistant partition and authorship.
+  if (episode.assistantId && (episode.userId || episode.workspaceId)) {
     for (const post of metrics.per_post) {
       let memory: MemoryRecord
       try {

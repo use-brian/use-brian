@@ -123,6 +123,8 @@ export type ToolContext = {
    * caller that predates the kind=app split; treated as 'standard'.
    */
   assistantKind?: 'standard' | 'app' | 'primary'
+  /** Shared turns cannot read or create a member's personal memory. */
+  sharedAudience?: boolean
   /** Additional visibility ceiling inherited by delegated execution. */
   visibilityAssistantIds?: string[] | null
   /**

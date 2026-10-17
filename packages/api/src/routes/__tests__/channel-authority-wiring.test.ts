@@ -37,6 +37,7 @@ describe('[COMP:api/channel-live-authority] exact destination authority wiring',
     expect(source).toContain('if (sessionStateStore && isIdentified && !isolatedAudience)')
     expect(source).toContain('maximumAccessCurrent: currentAudienceMaximum')
     expect(source).toContain('persistSessionSummary: !room && !isolatedAudience')
+    expect(source).toContain('persistLongTermContext: !room && !isolatedAudience && roomShape.memoryWrites')
     expect(source).toContain('getClaimsForLatestAssistantMessage(session.id, true)')
     const pendingRecordingBlock = source.match(
       /Pre-flight-confirm reply correlation[\s\S]*?Processing start/,

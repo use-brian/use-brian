@@ -2182,7 +2182,38 @@ describe('[COMP:brain/pipeline-b] processEpisode', () => {
     expect(entities.superseded).toHaveLength(0)
   })
 
-  it('skips memory writes when the Episode lacks (userId, assistantId)', async () => {
+  it.each([false, true])('keeps room memories workspace-visible with author attribution (durable=%s)', async (durable) => {
+    const ep = baseEpisode({ sourceKind: 'web_chat', userId: null, compartments: ['finance'], projectIds: ['project'] })
+    const memories = spyMemories()
+    const payload = JSON.stringify({ summary: 'Course registration.', entities: [], edges: [],
+      memories: [{ summary: 'Register before the 25th.', why_not_entity: 'dated note', why_not_task: 'remembering only' }], tags: [] })
+    const application = { apply: vi.fn(async (input: Parameters<PipelineBApplicationPort['apply']>[0]) => ({
+      id: 'room-run', workspaceId: input.workspaceId, episodeId: ep.id, attemptKey: input.attemptKey,
+      planHash: input.plan.planHash, extractionState: 'succeeded' as const, applicationState: 'complete' as const,
+      errorCode: null, counts: { pending: 0, committed: input.plan.candidates.length, already_applied: 0, held: 0, rejected: 0, failed: 0 }, items: [],
+    })) }
+    await processEpisode(ep, 'Remember registration before the 25th.', makeDeps({
+      provider: sequencedProvider([payload]), memories: memories.store,
+      ...(durable ? { application, episodes: { ...spyEpisodes().port,
+        getEpisodeByIdSystem: async () => ({ ...ep, status: 'archived', scopeVersion: '1', scopeHeld: false, extractionLocked: false }) as never,
+      } } : {}),
+    }))
+    if (durable) {
+      const memory = application.apply.mock.calls[0]![0].plan.candidates.find(candidate => candidate.primitiveKind === 'memory')!
+      expect(memory.terminalDisposition).toBeUndefined()
+      expect(memory.payload).toMatchObject({ userId: null, assistantId: ep.assistantId, createdByUserId: ep.createdByUserId,
+        scope: 'workspace', compartments: ['finance'], projectIds: ['project'] })
+    } else {
+      expect(memories.created).toHaveLength(1)
+      expect(memories.created[0]).toMatchObject({ userId: null, assistantId: ep.assistantId, createdByUserId: ep.createdByUserId,
+        scope: 'workspace', compartments: ['finance'], projectIds: ['project'] })
+    }
+  })
+
+  it.each([
+    { userId: null, assistantId: null },
+    { userId: null, workspaceId: null as unknown as string },
+  ])('skips memory writes when the Episode has no placeable visibility: %j', async (visibility) => {
     const memories = spyMemories()
     const extraction = JSON.stringify({
       summary: 'Some context.',
@@ -2194,8 +2225,7 @@ describe('[COMP:brain/pipeline-b] processEpisode', () => {
     const provider = sequencedProvider([extraction, JSON.stringify({ inferred_sensitivity: 'internal', brief_reason: 'routine' })])
     const deps = makeDeps({ provider, memories: memories.store })
 
-    // No userId / assistantId on the Episode — memory write must be skipped.
-    await processEpisode(baseEpisode({ userId: null, assistantId: null }), 'note', deps)
+    await processEpisode(baseEpisode(visibility), 'note', deps)
 
     expect(memories.created).toHaveLength(0)
   })

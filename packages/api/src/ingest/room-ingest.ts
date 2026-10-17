@@ -16,15 +16,15 @@
  *   1. Rooms have no `connector_instance`, so the rules are an in-memory
  *      per-room default set routed through the SAME `createIngestEngine`
  *      (first-match-wins, universal filters) — `always → scheduled` on an
- *      hourly digest cron. The synthetic rule id is the SESSION id, so the
- *      `(rule_id, fires_at)` batch key windows per room.
+ *      hourly digest cron. The engine-local rule id is the SESSION id; durable batches use
+ *      the distinct `(room_session_id, fires_at)` session parent.
  *   2. Extraction composes over the injected `BrainEpisodeIngestor` (the
  *      same seam brain-MCP / doc distillation use) instead of carrying its
  *      own Pipeline-B dep graph.
  *
  * Routing follows the engine decision:
  *   - `scheduled` + hosted batching → `appendBatchEvent`; the per-room
- *     `(rule_id, fires_at)` batch IS the window, drained by the batch worker
+ *     `(room_session_id, fires_at)` batch IS the window, drained by the batch worker
  *     into ONE digest Episode (the WhatsApp window precedent). Default
  *     posture — a busy hour of posts costs one extraction (§6).
  *   - `scheduled` without a batch drain (OSS) → inline single-post Episode,
@@ -180,7 +180,7 @@ export function createRoomIngestor(deps: RoomIngestorDeps): RoomIngestor {
       const event = buildIngestEvent(input)
       const origin=input.contextBindingOrigin??'legacy'
       if(input.classificationMode==='strict'&&!['explicit','reviewed'].includes(origin)){
-        await appendEvent({workspaceId:input.workspaceId,ruleId:input.sessionId,source:'room',firesAt:now(),event,
+        await appendEvent({workspaceId:input.workspaceId,roomSessionId:input.sessionId,source:'room',firesAt:now(),event,
           episodeSensitivity:clearance,compartments:input.compartments??[],projectIds:input.projectIds??[],
           scopeBindingOrigin:origin,scopeHeld:true})
         return {episodeId:null}
@@ -207,7 +207,7 @@ export function createRoomIngestor(deps: RoomIngestorDeps): RoomIngestor {
           : now()
         await appendEvent({
           workspaceId: input.workspaceId,
-          ruleId: decision.rule_id,
+          roomSessionId: input.sessionId,
           source: 'room',
           firesAt,
           event,
@@ -226,6 +226,7 @@ export function createRoomIngestor(deps: RoomIngestorDeps): RoomIngestor {
         workspaceId: input.workspaceId,
         userId: input.senderUserId,
         assistantId: input.assistantId,
+        sharedAudience: true,
         content: `${input.senderName ?? 'A teammate'}: ${text}`,
         occurredAt: now(),
         sensitivity: toEpisodeSensitivity(sensitivity),
