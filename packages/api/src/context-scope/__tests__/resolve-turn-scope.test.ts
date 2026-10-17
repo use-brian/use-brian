@@ -484,18 +484,30 @@ describe('[COMP:api/context-scope-resolver] turnOutputWrite', () => {
     expect(write).toEqual({ derivation: { producer: 'turn:web', sources: accumulator.evidence.sources } })
   })
 
-  it('stamps the session envelope, raised to the label floor, when a primary read across partitions', () => {
+  it('keeps complete ancestry with a raised transcript target when a primary reads across partitions', () => {
     // The turn's own message plus a workspace memory another assistant authored.
     const accumulator = new ContextScopeAccumulator()
     accumulator.noteSource(source({ resourceKind: 'session_message', userId: 'user-1', assistantId: 'primary-1' }))
     accumulator.noteSource(source({ resourceId: 'memory-2', userId: 'user-2', assistantId: 'other-assistant',
       sensitivity: 'confidential', compartments: ['team:finance'], projectIds: ['project-a'] }))
     expect(turnOutputWrite({ producer: 'turn:web', accumulator, envelope })).toEqual({
-      scope: {
+      derivation: { producer: 'turn:web', sources: accumulator.evidence.sources },
+      derivationTarget: {
         workspaceId: 'workspace-1', userId: 'user-1', assistantId: 'primary-1',
         sensitivity: 'confidential', compartments: ['assistant-default', 'team:finance'], projectIds: ['project-a'],
       },
     })
+  })
+
+  it('never loses external field observations among mixed native partitions', () => {
+    const accumulator = new ContextScopeAccumulator()
+    accumulator.noteSource(source({ assistantId: 'first-assistant' }))
+    accumulator.noteSource(source({ resourceId: 'memory-2', assistantId: 'second-assistant' }))
+    accumulator.noteSource(source({ resourceKind: 'external_source', resourceId: 'field-observation-1', version: 'immutable-field-observation', compartments: ['team:source'] }))
+    const write = turnOutputWrite({ producer: 'turn:external', accumulator, envelope })
+    expect(write).toMatchObject({ derivation: { producer: 'turn:external', sources: accumulator.evidence.sources },
+      derivationTarget: { compartments: ['assistant-default','team:source'] } })
+    expect('derivation' in write && write.derivation.sources).toHaveLength(3)
   })
 
   it('uses the envelope when nothing bound was read, and keeps legacy unscoped turns unchanged', () => {

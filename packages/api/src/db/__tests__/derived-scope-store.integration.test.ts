@@ -1,7 +1,8 @@
 import { randomUUID } from 'node:crypto'
 import { afterAll, describe, expect, it } from 'vitest'
 import pg from 'pg'
-import type { ScopeSource } from '@use-brian/core'
+import { ContextScopeAccumulator, type ScopeSource } from '@use-brian/core'
+import { turnOutputWrite } from '../../context-scope/resolve-turn-scope.js'
 import { createMemory, updateMemory, getMemoryById, getMemoryByIdSystem, getMemoryIndexSystem, listMemoriesWithMetrics, type Memory } from '../memories.js'
 import { getPool, getAppPool } from '../client.js'
 import { createDbMemoryStore } from '../memory-store.js'
@@ -64,6 +65,40 @@ describe('[COMP:api/derived-scope-store] actual memory writes and source races',
     expect(rows).toEqual([{ scope_held: true }, { scope_held: true }])
     await expect(addSessionMessage({ sessionId, role: 'assistant', content: 'Stale answer',
       derivation: { producer: 'turn:delegated-output', sources: [source] } })).rejects.toThrow('scope_source_changed')
+  })
+
+  it('preserves every current ancestor across assistant partitions and holds the transcript on either source change', async () => {
+    const f = await fixture(), otherAssistant = randomUUID(), sessionId = randomUUID()
+    await pool.query("INSERT INTO assistants(id,name,owner_user_id,workspace_id,kind) VALUES($1,'Second fixture assistant',$2,$3,'standard')", [otherAssistant,f.userId,f.workspaceId])
+    await pool.query("INSERT INTO sessions(id,assistant_id,user_id,channel_type,channel_id) VALUES($1::uuid,$2,$3,'web',$1::uuid::text)", [sessionId,f.assistantId,f.userId])
+    const first = await f.create({ compartments: ['finance'] }), second = await f.create({ assistantId: otherAssistant, sensitivity: 'confidential', compartments: ['product'] })
+    const accumulator = new ContextScopeAccumulator()
+    for (const source of [first, second]) accumulator.noteSource(asSource(source))
+    const target = { workspaceId: f.workspaceId, userId: f.userId, assistantId: null, sensitivity: 'public' as const, compartments: [], projectIds: [] }
+    const write = turnOutputWrite({ producer: 'turn:partition-fixture', accumulator, envelope: target })
+    expect(write).toHaveProperty('derivationTarget')
+    const message = await addSessionMessage({ sessionId, role: 'assistant', content: 'Combined fixture answer', ...write })
+    const row = (await pool.query('SELECT user_id,assistant_id,sensitivity,compartments FROM session_messages WHERE id=$1', [message.id])).rows[0]
+    expect(row).toEqual({ user_id: f.userId, assistant_id: null, sensitivity: 'confidential', compartments: ['finance','product'] })
+    const edges = (await pool.query('SELECT s.source_id FROM scope_derivation_sources s JOIN scope_derivations d ON d.id=s.derivation_id WHERE d.resource_id=$1', [message.id])).rows
+    expect(edges.map(row => row.source_id).sort()).toEqual([first.id,second.id].sort())
+    await pool.query("UPDATE memories SET summary='Changed fixture source' WHERE id=$1", [second.id])
+    expect((await pool.query('SELECT scope_held FROM session_messages WHERE id=$1', [message.id])).rows[0].scope_held).toBe(true)
+  })
+
+  it('refuses another person private source under a mixed transcript target without inserting a row', async () => {
+    const f = await fixture(), otherUser = randomUUID(), sessionId = randomUUID()
+    await pool.query('INSERT INTO users(id,auth_provider_id) VALUES($1::uuid,$1::text)', [otherUser])
+    await pool.query("INSERT INTO sessions(id,assistant_id,user_id,channel_type,channel_id) VALUES($1::uuid,$2,$3,'web',$1::uuid::text)", [sessionId,f.assistantId,f.userId])
+    const first = await f.create(), second = await f.create({ userId: otherUser })
+    const accumulator = new ContextScopeAccumulator()
+    for (const source of [first, second]) accumulator.noteSource(asSource(source))
+    const target = { workspaceId: f.workspaceId, userId: f.userId, assistantId: null, sensitivity: 'public' as const, compartments: [], projectIds: [] }
+    const write = turnOutputWrite({ producer: 'turn:private-fixture', accumulator, envelope: target })
+    expect('derivation' in write && write.derivation.sources).toHaveLength(2)
+    await expect(addSessionMessage({ sessionId, role: 'assistant', content: 'Must refuse', ...write })).rejects.toThrow('scope_visibility_incompatible')
+    expect((await pool.query('SELECT id FROM session_messages WHERE session_id=$1', [sessionId])).rows).toEqual([])
+    await expect(addSessionMessage({ sessionId, role: 'assistant', content: 'Missing ancestry', derivationTarget: target })).rejects.toThrow('session_message_scope_conflict')
   })
 
   it('still rejects partial conversation scope while accepting legacy unscoped messages', async () => {

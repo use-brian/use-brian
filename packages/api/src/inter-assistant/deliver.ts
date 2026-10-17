@@ -94,14 +94,10 @@ export async function deliverToChannel(params: DeliveryParams): Promise<ChannelD
   // workspace-channels migration (C2). See docs/architecture/channels/adapter-pattern.md.
   const channelType = params.channelType ?? 'web'
   const channelId = params.channelId ?? 'default'
-  // How a persisted relay copy is stamped. Relay evidence spans whatever the
-  // callee read, often several visibility partitions, so it certifies a
-  // derivation only when those partitions agree; otherwise the copy takes the
-  // receiving session's own audience raised to the label floor - the same
-  // rule as a turn's output (`turnOutputWrite`). Deriving one envelope from
-  // mixed partitions threw after the audience gate had already passed.
-  // The gate may raise the floor to the current labels of a changed source;
-  // relay copies are stamped from what it verified, not the pre-check copy.
+  // Relay copies keep the callee's complete ancestry under the receiving
+  // session's target audience. The writer refuses incompatible private
+  // sources; mixed assistant partitions never discard lineage. The audience
+  // gate may raise source labels, so use its verified evidence below.
   let verifiedEvidence = params.scopeEvidence
   const relayWrite = async (sessionId?: string) => {
     const evidence = verifiedEvidence

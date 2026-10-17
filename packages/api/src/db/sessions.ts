@@ -3,6 +3,7 @@ import type pg from 'pg'
 import {
   bindScopeSource,
   deriveResourceScope,
+  deriveWriteScope,
   DerivedScopeError,
   maxSensitivity,
   type DerivedWriteEvidence,
@@ -10,7 +11,7 @@ import {
   type ScopeSource,
 } from '@use-brian/core'
 import { getPool, getAppPool, applyRLSGucs, query } from './client.js'
-import { readCurrentScopeSources, recordDerivedResource, validateDerivedMemoryInputs } from './derived-scope-store.js'
+import { readCurrentScopeSources, recordDerivedResource, validateDerivedMemoryInputs, validateDerivedWriteInputs } from './derived-scope-store.js'
 import { admitAnchoredSession, admitSessionCreate, admitPersonalWebSession, type PersonalWebSessionPrincipal } from '../workspace-access/session-create-admission.js'
 import { notifyWorkspaceChange } from '../brain-stream/notify.js'
 
@@ -1536,8 +1537,10 @@ export async function addSessionMessage(params: {
   scope?: ResourceScope
   /** Complete trusted inputs for model/tool-derived rows. */
   derivation?: DerivedWriteEvidence
+  /** Host-bound transcript audience for mixed visibility inputs; never substitutes for ancestry. */
+  derivationTarget?: ResourceScope
 }, client?: Pick<pg.ClientBase, 'query'>): Promise<SessionMessage> {
-  if (params.scope && params.derivation) {
+  if (params.scope && params.derivation || params.derivationTarget && (!params.derivation || params.scope)) {
     throw new Error('session_message_scope_conflict')
   }
   const sql =
@@ -1571,7 +1574,9 @@ export async function addSessionMessage(params: {
       // carries the labels of every source it was derived from, raised to the
       // current labels of any that changed. Held sources and changed causal
       // inputs still refuse.
-      const certified = deriveResourceScope(derivation)
+      const certified = params.derivationTarget
+        ? deriveWriteScope(derivation, params.derivationTarget, params.derivationTarget.userId)
+        : deriveResourceScope(derivation)
       const states = await readCurrentScopeSources(db, certified.workspaceId, derivation.sources)
       if (states.some((state) => state.state === 'held' || state.state === 'unverifiable' || state.state === 'stale_input')) {
         throw new DerivedScopeError('scope_source_changed')
@@ -1586,7 +1591,10 @@ export async function addSessionMessage(params: {
       scope = labels
       const current = states.filter((state) => state.state === 'current').map((state) => state.source)
       derivation = current.length ? { ...derivation, sources: current } : undefined
-      if (derivation) await validateDerivedMemoryInputs(db, derivation)
+      if (derivation) {
+        if (params.derivationTarget) await validateDerivedWriteInputs(db, derivation)
+        else await validateDerivedMemoryInputs(db, derivation)
+      }
     }
     const values = [
       params.sessionId,
@@ -1618,7 +1626,7 @@ export async function addSessionMessage(params: {
       version: '1',
     }
     if (derivation) {
-      await recordDerivedResource(db, derivation, source)
+      await recordDerivedResource(db, derivation, source, params.derivationTarget?.userId)
     }
     return bindScopeSource(stored, source)
   }

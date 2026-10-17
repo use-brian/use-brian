@@ -317,7 +317,7 @@ describe('[COMP:api/inter-assistant-deliver] relay copies from mixed partitions'
     mockFindOrCreateSession.mockResolvedValue({ id: 'ses_notif' } as never)
   })
 
-  it('stamps the copy with the session audience raised to the label floor instead of a strict derivation', async () => {
+  it('keeps complete relay ancestry with the receiving session audience as a raised target', async () => {
     const read = (id: string, assistantId: string) => ({
       workspaceId: 'ws-1', userId: 'u_1', assistantId, sensitivity: 'internal' as const,
       compartments: ['team:sales'], projectIds: [], resourceKind: 'memory', resourceId: id, version: '1',
@@ -331,8 +331,9 @@ describe('[COMP:api/inter-assistant-deliver] relay copies from mixed partitions'
     })
     expect(result.delivered).toBe(true)
     const write = mockAddSessionMessage.mock.calls[0]![0] as Record<string, unknown>
-    expect(write.derivation).toBeUndefined()
-    expect(write.scope).toMatchObject({
+    expect(write.derivation).toEqual({ producer: 'delivery:relay', sources: [read('m1', 'assistant-a'), read('m2', 'assistant-b')] })
+    expect(write.scope).toBeUndefined()
+    expect(write.derivationTarget).toMatchObject({
       workspaceId: 'ws-1', userId: 'u_1', assistantId: null, sensitivity: 'internal', compartments: ['team:sales'],
     })
   })
