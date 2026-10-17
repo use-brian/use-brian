@@ -1,7 +1,7 @@
 import { describe, expect, it } from 'vitest'
 import { z } from 'zod'
 import { WORKSPACE_MODULES } from '@use-brian/shared'
-import { defineApplicationModules, type ApplicationModuleDefinition } from '../contracts.js'
+import { defineApplicationModules, validateApplicationResourceCatalog, type ApplicationModuleDefinition } from '../contracts.js'
 
 function module(key: string, dependencies: string[] = []): ApplicationModuleDefinition<unknown> {
   return { key, defaultState: 'disabled', application: { version: '1', dependencies, resources: [],
@@ -34,5 +34,22 @@ describe('[COMP:security/application-access] deployed application module registr
     first.application.resources = [{ typeKey: 'order', schemaVersion: '1', origin: { kind: 'native', moduleKey: 'one' },
       fields: [{ key: 'company', label: 'Company', kind: 'reference', targetTypeKey: 'missing' }] }]
     expect(() => defineApplicationModules([first], WORKSPACE_MODULES)).toThrow()
+  })
+  it('uses the same canonical property and owning-module checks for operation-time catalogs', () => {
+    const value = { typeKey: 'request', schemaVersion: '1', origin: { kind: 'generic' as const, entityTypeId: '10000000-0000-4000-8000-000000000001' },
+      fields: [{ key: 'title', label: 'Title', kind: 'cell' as const, property: { name: 'title', config: { kind: 'text' } } }] }
+    expect(validateApplicationResourceCatalog('one', [value])).toEqual([value])
+    expect(() => validateApplicationResourceCatalog('one', [value, value])).toThrow()
+    expect(() => validateApplicationResourceCatalog('one', [{ ...value, origin: { kind: 'native', moduleKey: 'other' } }])).toThrow()
+    expect(() => validateApplicationResourceCatalog('one', [{ ...value, fields: [{ ...value.fields[0], property: { name: 'title', config: { kind: 'formula' } } }] }])).toThrow()
+  })
+  it('binds a native CRM declaration to its canonical entity kind and custom field key', () => {
+    const definition = { id: '10000000-0000-4000-8000-000000000002', entityKind: 'company', fieldKey: 'region', label: 'Region',
+      fieldType: 'text', options: [], isRequired: false, position: 0 }
+    const resource = { typeKey: 'company', origin: { kind: 'native' as const, moduleKey: 'native' }, schemaVersion: '1',
+      fields: [{ key: 'custom.region', kind: 'crm' as const, label: 'Region', definition }] }
+    expect(validateApplicationResourceCatalog('native', [resource])).toEqual([resource])
+    expect(() => validateApplicationResourceCatalog('native', [{ ...resource, typeKey: 'person' }])).toThrow()
+    expect(() => validateApplicationResourceCatalog('native', [{ ...resource, fields: [{ ...resource.fields[0], key: 'name' }] }])).toThrow()
   })
 })

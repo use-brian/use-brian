@@ -27,6 +27,8 @@ export type ProgrammaticExecutionIdentity = {
   principal:
     | { kind: 'brain_key' | 'oauth_token' | 'home_app'; credentialId: string; actorUserId?: string }
     | { kind: 'public_share'; credentialId: string; actorUserId: string }
+    | { kind: 'application'; credentialId: string; actorUserId: string; applicationId: string;
+        subjectKind: 'member' | 'external_user' | 'service'; serviceUserId?: string }
   credentialOwnerUserId: string
 }
 
@@ -153,6 +155,13 @@ function validateIdentity(identity: ExecutionIdentity, actorUserId: string): voi
   } else if (identity.kind === 'programmatic') {
     required(identity.principal.credentialId, 'credential')
     required(identity.credentialOwnerUserId, 'credential_owner')
+    if (identity.principal.kind === 'application') {
+      required(identity.principal.applicationId, 'application')
+      if (identity.principal.actorUserId !== actorUserId) throw new Error('execution_actor_mismatch')
+      if (identity.principal.subjectKind === 'service' && identity.principal.serviceUserId !== actorUserId) {
+        throw new Error('execution_actor_mismatch')
+      }
+    }
   } else {
     required(identity.jobId, 'job')
   }

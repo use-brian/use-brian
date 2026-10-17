@@ -1,9 +1,19 @@
 import { describe, expect, it } from 'vitest'
+import { applicationResourceSchema } from '@use-brian/shared'
 import type { PropertyDef } from '../../entities/doc-types.js'
 import { applicationDecimalUnits, canonicalApplicationDecimal, validateApplicationValues,
   validateDocApplicationSchema, validateDocApplicationValues } from '../values.js'
 
 describe('[COMP:security/application-access] canonical application value admission', () => {
+  it('keeps canonical CRM custom values distinct from Doc cells and uses their existing validator', () => {
+    const definition = { id: '10000000-0000-4000-8000-000000000002', entityKind: 'company', fieldKey: 'regions', label: 'Regions',
+      fieldType: 'multi_select', options: ['north', 'south'], isRequired: false, position: 0 }
+    const schema = applicationResourceSchema.parse({ typeKey: 'company', origin: { kind: 'native', moduleKey: 'native' }, schemaVersion: '1',
+      fields: [{ key: 'custom.regions', kind: 'crm', label: 'Regions', definition }] })
+    expect(validateApplicationValues(schema, { 'custom.regions': ['south', 'north'] })).toEqual({ 'custom.regions': ['south', 'north'] })
+    expect(() => validateApplicationValues(schema, { 'custom.regions': ['unknown'] })).toThrow()
+    expect(() => validateApplicationValues(schema, { 'custom.regions': { kind: 'multi_select', value: ['north'] } })).toThrow()
+  })
   const properties: PropertyDef[] = [
     { name: 'title', config: { kind: 'text' }, required: true },
     { name: 'quantity', config: { kind: 'number', format: 'int', minimum: 1, maximum: 10 } },
@@ -52,5 +62,17 @@ describe('[COMP:security/application-access] canonical application value admissi
     expect(validateApplicationValues(schema, { cost: '0.10' })).toEqual({ cost: '0.10' })
     expect(() => validateApplicationValues(schema, { cost: 0.1 })).toThrow()
     expect(() => validateApplicationValues(schema, { cost: '0.100' })).toThrow()
+  })
+  it('preserves canonical generic cell shapes and enforces their required/range/enum rules in the common contract', () => {
+    const property: PropertyDef = { name: 'choice', required: true, config: { kind: 'multi_select', options: [{ id: '10000000-0000-4000-8000-000000000001', name: 'Example choice' }] } }
+    const schema = applicationResourceSchema.parse({ typeKey: 'request', schemaVersion: '1', origin: { kind: 'generic', entityTypeId: '10000000-0000-4000-8000-000000000002' },
+      fields: [property, properties[3]].map(value => ({ key: value.name, label: value.name, kind: 'cell', property: value })) })
+    const choice = { kind: 'multi_select', value: ['10000000-0000-4000-8000-000000000001'] }
+    const values = { choice, delivery: { kind: 'date', value: { start: '2026-01-01', end: '2026-01-03' } } }
+    expect(validateApplicationValues(schema, values)).toEqual(values)
+    for (const invalid of [{}, { choice: null }, { choice: { kind: 'multi_select', value: [] } },
+      { choice: { kind: 'multi_select', value: ['unknown'] } }, { ...values, delivery: { kind: 'date', value: { start: '2026-01-03', end: '2026-01-01' } } }]) {
+      expect(() => validateApplicationValues(schema, invalid)).toThrow()
+    }
   })
 })

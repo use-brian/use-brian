@@ -66,8 +66,15 @@ async function blockingWork(adapter: WorkspaceModuleLifecycleAdapter | undefined
 
 /** Must be the first module lock in a vertical transaction and be held through commit. */
 export async function lockWorkspaceModule(client: PoolClient, workspaceId: string, rawModuleKey: string,
-  registry: WorkspaceModuleRegistry = WORKSPACE_MODULES): Promise<WorkspaceModule> {
+  registry: WorkspaceModuleRegistry = WORKSPACE_MODULES, projection?: { kind: 'application' }): Promise<WorkspaceModule> {
   const moduleKey = requireModuleKey(rawModuleKey, registry)
+  if (projection?.kind === 'application') {
+    // This fixed metadata function independently checks the authenticated app
+    // GUCs and holds the same canonical workspace/module locks. It grants no
+    // membership, UPDATE policy, raw workspace row or business-data access.
+    const result = await client.query<WorkspaceModule>(`SELECT ${SELECT} FROM application_lock_module($1,$2)`, [workspaceId, moduleKey])
+    return record(workspaceId, moduleKey, registry, result.rows[0])
+  }
   const result = await client.query<WorkspaceModule>(
     `SELECT ${SELECT} FROM workspace_modules WHERE workspace_id=$1 AND module_key=$2 FOR SHARE`,
     [workspaceId, moduleKey])

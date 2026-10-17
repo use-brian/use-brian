@@ -20,7 +20,13 @@
 export const MANIFEST_VERSION = 1
 
 /** What an app may reach in the workspace brain. */
-export type AppDataScope = 'read' | 'read_write'
+export type AppDataScope = 'none' | 'read' | 'read_write'
+
+/** Exact module requirements; selectors and actual grants remain native authority. */
+export type AppApplicationScope = {
+  moduleKey: string
+  resources: Array<{ typeKey: string; actions: string[]; readFields: string[]; writeFields: string[] }>
+}
 
 /**
  * What an app may reach in a connected commerce store (currently Shopify).
@@ -53,6 +59,7 @@ export type AppScopes = {
    * write.
    */
   data: AppDataScope
+  application?: AppApplicationScope
   /**
    * Commerce-store access, gating the bridge's store tool list. Default
    * `'none'` — omitted entirely from a normalized manifest, so every manifest
@@ -230,7 +237,7 @@ export function parseManifest(raw: unknown): ParseManifestResult {
     const s = scopesRaw as Record<string, unknown>
     for (const key of Object.keys(s)) {
       if (
-        key !== 'data' &&
+        key !== 'data' && key !== 'application' &&
         key !== 'store' &&
         key !== 'agent' &&
         key !== 'identity' &&
@@ -239,8 +246,8 @@ export function parseManifest(raw: unknown): ParseManifestResult {
         push(`scopes.${key}`, 'is not a scope this version understands')
       }
     }
-    if (s.data !== 'read' && s.data !== 'read_write') {
-      push('scopes.data', "must be 'read' or 'read_write'")
+    if (s.data !== 'none' && s.data !== 'read' && s.data !== 'read_write') {
+      push('scopes.data', "must be 'none', 'read' or 'read_write'")
     }
     if (
       s.store !== undefined &&
@@ -257,6 +264,10 @@ export function parseManifest(raw: unknown): ParseManifestResult {
       push('scopes.identity', 'must be a boolean')
     }
     const net: string[] = []
+    const application = s.application === undefined ? undefined : parseApplicationScope(s.application, push)
+    if (s.data === 'none' && (!application || s.store === 'read' || s.store === 'write' || s.agent === 'ask')) {
+      push('scopes.data', "'none' requires an application-only profile without legacy store or agent powers")
+    }
     if (s.net !== undefined) {
       if (!Array.isArray(s.net)) {
         push('scopes.net', 'must be an array of https origins')
@@ -274,7 +285,8 @@ export function parseManifest(raw: unknown): ParseManifestResult {
       }
     }
     scopes = {
-      data: s.data === 'read_write' ? 'read_write' : 'read',
+      data: s.data === 'none' ? 'none' : s.data === 'read_write' ? 'read_write' : 'read',
+      ...(application ? { application } : {}),
       ...(s.store === 'read' || s.store === 'write' ? { store: s.store } : {}),
       ...(s.agent === 'ask' ? { agent: 'ask' as const } : {}),
       ...(s.identity === true ? { identity: true } : {}),
@@ -331,10 +343,43 @@ export function scopesExceedGrant(
   granted: AppScopes | null,
 ): boolean {
   if (!granted) return true
-  if (requested.data === 'read_write' && granted.data !== 'read_write') return true
+  const rank = { none: 0, read: 1, read_write: 2 }
+  if (rank[requested.data] > rank[granted.data]) return true
+  if (requested.application) {
+    if (requested.application.moduleKey !== granted.application?.moduleKey) return true
+    for (const resource of requested.application.resources) {
+      const previous = granted.application.resources.find(candidate => candidate.typeKey === resource.typeKey)
+      if (!previous || resource.actions.some(key => !previous.actions.includes(key))
+        || resource.readFields.some(key => !previous.readFields.includes(key)) || resource.writeFields.some(key => !previous.writeFields.includes(key))) return true
+    }
+  }
   if (storeScopeRank(requested.store) > storeScopeRank(granted.store)) return true
   if (requested.agent === 'ask' && granted.agent !== 'ask') return true
   if (requested.identity === true && granted.identity !== true) return true
   const grantedNet = new Set(granted.net ?? [])
   return (requested.net ?? []).some((origin) => !grantedNet.has(origin))
+}
+
+function parseApplicationScope(raw: unknown, push: (path: string, message: string) => void): AppApplicationScope | undefined {
+  const key = /^[a-z][a-z0-9_.-]{0,127}$/
+  const object = (value: unknown): value is Record<string, unknown> => !!value && typeof value === 'object' && !Array.isArray(value)
+  const list = (value: unknown, test: (key: string) => boolean): value is string[] => Array.isArray(value) && value.length <= 128
+    && value.every(item => typeof item === 'string' && test(item)) && new Set(value).size === value.length
+  if (!object(raw) || Object.keys(raw).some(key => !['moduleKey', 'resources'].includes(key))
+    || typeof raw.moduleKey !== 'string' || !key.test(raw.moduleKey) || !Array.isArray(raw.resources) || !raw.resources.length || raw.resources.length > 128) {
+    push('scopes.application', 'must declare one module and 1-128 exact resource requirements'); return
+  }
+  const resources: AppApplicationScope['resources'] = [], seen = new Set<string>()
+  for (const [index, resource] of raw.resources.entries()) {
+    if (!object(resource) || Object.keys(resource).some(key => !['typeKey', 'actions', 'readFields', 'writeFields'].includes(key))
+      || typeof resource.typeKey !== 'string' || !key.test(resource.typeKey) || seen.has(resource.typeKey)
+      || !list(resource.actions, value => /^(?:read|query|create|patch|delete|history|schema|command:[a-z][a-z0-9_.-]{0,127})$/.test(value)) || !resource.actions.length
+      || !list(resource.readFields, value => value.length > 0 && value.length <= 128 && !['__proto__', 'prototype', 'constructor'].includes(value))
+      || !list(resource.writeFields, value => value.length > 0 && value.length <= 128 && !['__proto__', 'prototype', 'constructor'].includes(value))) {
+      push(`scopes.application.resources[${index}]`, 'must declare unique resource/actions and exact field arrays'); return
+    }
+    seen.add(resource.typeKey)
+    resources.push({ typeKey: resource.typeKey, actions: [...resource.actions], readFields: [...resource.readFields], writeFields: [...resource.writeFields] })
+  }
+  return { moduleKey: raw.moduleKey, resources }
 }

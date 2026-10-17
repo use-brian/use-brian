@@ -28,6 +28,11 @@ describe('[COMP:brain/external-principal] external-principal discriminator', () 
     expect(isExternalPrincipal({ authProvider: 'channel', authProviderId: 'chatlink:link-1:v-9' })).toBe(true)
   })
 
+  it('recognises app service/user shadows without treating their names as teammate proof', () => {
+    expect(isExternalPrincipal({ authProvider: 'channel', authProviderId: 'app-service:app-one:service-one' })).toBe(true)
+    expect(isExternalPrincipal({ authProvider: 'channel', authProviderId: 'app-user:app-one:subject-one' })).toBe(true)
+  })
+
   it('does not treat a teammate shadow as external', () => {
     // Slack / Telegram teammate shadows are workspace non-members but are
     // genuinely team. Membership was rejected as the discriminator precisely

@@ -3,10 +3,23 @@ import { ApplicationPlatformError, applicationDecimalSchema, applicationJsonSche
   type ApplicationResourceDefinition, type ApplicationJson } from '@use-brian/shared'
 import { cellValueSchema, propertyDefSchema } from '../entities/doc-schemas.js'
 import type { CellValue, PropertyDef } from '../entities/doc-types.js'
+import { z } from 'zod'
+import { CrmRecordFieldDefinitionSchema } from '../crm/config-commands.js'
+import { validateCrmCustomFieldValue, type CrmCustomFieldDefinition } from '../crm/types.js'
 
 const systemKinds = new Set(['created_time', 'created_by', 'last_edited_time', 'last_edited_by'])
 const reserved = new Set(['__proto__', 'prototype', 'constructor'])
 function invalid(message: string): never { throw new ApplicationPlatformError('invalid_value', message) }
+
+/** Preserve the existing CRM metadata/value vocabulary in application catalogs. */
+export function parseApplicationCrmFieldDefinition(raw: Record<string, unknown>): CrmCustomFieldDefinition {
+  const { id, position, ...definition } = raw
+  const parsed = CrmRecordFieldDefinitionSchema.safeParse(definition)
+  if (!parsed.success || !z.string().uuid().safeParse(id).success || !z.number().int().min(0).safeParse(position).success) {
+    throw new ApplicationPlatformError('invalid_schema', 'A canonical CRM field is invalid.')
+  }
+  return { ...parsed.data, id: id as string, position: position as number }
+}
 
 export function canonicalApplicationDecimal(value: string, scale?: number): string {
   if (!applicationDecimalSchema.safeParse(value).success) invalid('A lossless decimal string is required.')
@@ -41,6 +54,12 @@ export function validateApplicationValues(schema: ApplicationResourceDefinition,
   const fields = new Map(schema.fields.map(field => [field.key, field]))
   const parsed = applicationJsonSchema.safeParse(input)
   if (!parsed.success || !parsed.data || Array.isArray(parsed.data) || typeof parsed.data !== 'object') invalid('Invalid record values.')
+  const canonical = schema.fields.flatMap(field => {
+    if (field.kind !== 'cell') return []
+    const property = propertyDefSchema.safeParse(field.property)
+    if (!property.success || property.data.name !== field.key) throw new ApplicationPlatformError('invalid_schema', 'A canonical property is invalid.')
+    return [property.data]
+  })
   for (const [name, value] of Object.entries(input)) {
     const field = fields.get(name)
     if (!field || reserved.has(name)) invalid('An undeclared field was supplied.')
@@ -56,10 +75,18 @@ export function validateApplicationValues(schema: ApplicationResourceDefinition,
       case 'enum': if (typeof value !== 'string' || !field.options.includes(value)) invalid('Invalid enum value.'); break
       case 'reference': case 'file': case 'person':
         if (typeof value !== 'string' || value.length === 0 || value.length > 256) invalid('Invalid reference.'); break
+      case 'cell': break // Complete canonical cell validation, including missing values, follows below.
+      case 'crm': if (!validateCrmCustomFieldValue(parseApplicationCrmFieldDefinition(field.definition), value)) invalid('Invalid canonical CRM value.'); break
     }
   }
   for (const field of schema.fields) {
     if (field.required && !field.immutable && (input[field.key] === undefined || input[field.key] === null || input[field.key] === '')) invalid('A required value is missing.')
+    if (field.kind === 'crm' && !validateCrmCustomFieldValue(parseApplicationCrmFieldDefinition(field.definition), input[field.key])) invalid('A required canonical CRM value is missing.')
+  }
+  if (canonical.length) {
+    const cells = (values: Record<string, unknown>) => Object.fromEntries(Object.entries(values)
+      .filter(([name]) => canonical.some(property => property.name === name))) as Record<string, CellValue>
+    validateDocApplicationValues(canonical, cells(input), previous ? cells(previous) : undefined)
   }
   return parsed.data
 }

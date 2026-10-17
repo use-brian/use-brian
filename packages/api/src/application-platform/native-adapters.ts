@@ -1,19 +1,21 @@
 /** Canonical CRM/task storage adapters; no copied live records. [COMP:api/application-records] */
 import { z } from 'zod'
+import { createHash } from 'node:crypto'
 import type { PoolClient } from 'pg'
-import { bindScopeSource, type ApplicationModuleDefinition, type ApplicationOperationContext,
+import { bindScopeSource, parseApplicationCrmFieldDefinition, validateCrmCustomFieldValue, type ApplicationModuleDefinition, type ApplicationOperationContext,
   type ScopeSource } from '@use-brian/core'
-import { ApplicationPlatformError, applicationJsonSchema, type ApplicationRecordProjection,
+import { ApplicationPlatformError, applicationJsonSchema, applicationResourceRefSchema, type ApplicationRecordProjection,
   type ApplicationResourceDefinition, type ApplicationResourceRef } from '@use-brian/shared'
 import { createCompany } from '../db/crm.js'
 import { getEntityById } from '../db/entities-store.js'
 import { createTask, getTaskById } from '../db/tasks.js'
 import { publishTaskLifecycle } from '../task-event-fanout.js'
+import { getApplicationExecutionBinding } from './execution-context.js'
 
 const sourceSchema=z.object({workspaceId:z.string().uuid(),userId:z.string().uuid().nullable(),assistantId:z.string().uuid().nullable(),
   sensitivity:z.enum(['public','internal','confidential']),compartments:z.array(z.string()),projectIds:z.array(z.string()),version:z.string(),
   held:z.boolean(),retractedAt:z.unknown().nullable(),validTo:z.unknown().nullable()})
-const readInput=z.object({type:z.enum(['company','person','deal','task']),id:z.string().uuid()}).strict()
+const readInput=z.object({type:z.enum(['company','person','deal','task','file','workspace_member']),id:z.string().uuid()}).strict()
 type Context=ApplicationOperationContext<PoolClient>
 
 const definitions:ApplicationResourceDefinition[]=[
@@ -21,9 +23,65 @@ const definitions:ApplicationResourceDefinition[]=[
   {typeKey:'person',origin:{kind:'native',moduleKey:'native'},schemaVersion:'1',fields:[{key:'name',label:'Name',kind:'text',required:true},{key:'email',label:'Email',kind:'text'},{key:'phone',label:'Phone',kind:'text'}]},
   {typeKey:'deal',origin:{kind:'native',moduleKey:'native'},schemaVersion:'1',fields:[{key:'name',label:'Name',kind:'text',required:true},{key:'stage',label:'Stage',kind:'text'},{key:'amount',label:'Amount',kind:'number'}]},
   {typeKey:'task',origin:{kind:'native',moduleKey:'native'},schemaVersion:'1',fields:[{key:'title',label:'Title',kind:'text',required:true},{key:'status',label:'Status',kind:'text'}]},
+  {typeKey:'file',origin:{kind:'native',moduleKey:'native'},schemaVersion:'1',fields:[{key:'name',label:'Name',kind:'text'},{key:'mimeType',label:'MIME type',kind:'text'},{key:'sizeBytes',label:'Size',kind:'number'},{key:'storageRef',label:'Storage reference',kind:'text'}]},
+  {typeKey:'workspace_member',origin:{kind:'native',moduleKey:'native'},schemaVersion:'1',fields:[{key:'id',label:'Member ID',kind:'text'}]},
 ]
+async function resources(context: Context): Promise<ApplicationResourceDefinition[]> {
+  const app = getApplicationExecutionBinding(context.execution)
+  const entries = app ? (await context.transaction.query<{ value: { typeKey: string; fields: string[]; customFields: Record<string, unknown>[] } }>('SELECT application_native_catalog() AS value')).rows.map(row => row.value)
+    : definitions.map(definition => ({ typeKey: definition.typeKey, fields: definition.fields.map(field => field.key), customFields: [] as Record<string, unknown>[] }))
+  if (!app) {
+    const custom = await context.transaction.query<{ definition: Record<string, unknown> }>(`SELECT jsonb_build_object('id',id,'entityKind',entity_kind,'fieldKey',field_key,
+      'label',label,'fieldType',field_type,'options',options,'isRequired',is_required,'position',position) AS definition
+      FROM crm_field_definitions WHERE workspace_id=$1 AND archived_at IS NULL ORDER BY position,id`, [context.execution.security.access.workspaceId])
+    for (const row of custom.rows) entries.find(entry => entry.typeKey === row.definition.entityKind)?.customFields.push(row.definition)
+  }
+  return entries.map(entry => {
+    const base = definitions.find(definition => definition.typeKey === entry.typeKey)
+    if (!base) throw new ApplicationPlatformError('invalid_schema', 'The native schema is unavailable.')
+    const custom: ApplicationResourceDefinition['fields'] = entry.customFields.map(raw => {
+      const definition = parseApplicationCrmFieldDefinition(raw)
+      return { key: `custom.${definition.fieldKey}`, label: definition.label, kind: 'crm', required: definition.isRequired,
+        definition: definition as unknown as Record<string, import('@use-brian/shared').ApplicationJson> }
+    })
+    const fields = [...base.fields.filter(field => entry.fields.includes(field.key)), ...custom]
+    return { ...base, fields, schemaVersion: `1:${createHash('sha256').update(JSON.stringify(fields)).digest('hex')}` }
+  })
+}
 async function read(context:Context,type:z.infer<typeof readInput>['type'],id:string):Promise<ApplicationRecordProjection> {
   const access=context.execution.security.access
+  const application=getApplicationExecutionBinding(context.execution)
+  if(application) {
+    const result=await context.transaction.query<{projection:unknown}>('SELECT application_native_projection($1,$2) AS projection',[type,id])
+    const parsed=z.object({values:z.record(applicationJsonSchema),source:sourceSchema}).safeParse(result.rows[0]?.projection)
+    if(!parsed.success)throw new ApplicationPlatformError('access_unavailable','The record is unavailable.')
+    const values=parsed.data.values as ApplicationRecordProjection['values']
+    const definition = (await resources(context)).find(resource => resource.typeKey === type)
+    if (!definition) throw new ApplicationPlatformError('access_unavailable', 'The schema is unavailable.')
+    for (const field of definition.fields) if (field.kind === 'crm' && Object.hasOwn(values, field.key)
+      && !validateCrmCustomFieldValue(parseApplicationCrmFieldDefinition(field.definition), values[field.key])) {
+      throw new ApplicationPlatformError('invalid_value', 'The canonical record requires review.')
+    }
+    return bindScopeSource({ref:{workspaceId:access.workspaceId,origin:{kind:'native',moduleKey:'native'},typeKey:type,id,version:parsed.data.source.version},
+      values,fields:Object.keys(values),policyVersion:`${application.state.fingerprint}:${definition.schemaVersion}`},
+    {...parsed.data.source,resourceKind:type==='task'?'task':type==='file'?'workspace_file':type==='workspace_member'?'workspace_member':'entity',resourceId:id})
+  }
+  if (type === 'file' || type === 'workspace_member') {
+    const result = type === 'workspace_member'
+      ? await context.transaction.query<{ values: unknown; source: unknown }>(`SELECT jsonb_build_object('id',m.user_id) AS values,
+        jsonb_build_object('workspaceId',m.workspace_id,'userId',NULL,'assistantId',NULL,'sensitivity','internal','compartments','[]'::jsonb,'projectIds','[]'::jsonb,
+          'version',md5(to_jsonb(m)::text),'held',false,'retractedAt',NULL,'validTo',NULL) AS source
+        FROM workspace_members m WHERE m.workspace_id=$1 AND m.user_id=$2`, [access.workspaceId,id])
+      : await context.transaction.query<{ values: unknown; source: unknown }>(`SELECT jsonb_build_object('name',f.name,'mimeType',f.mime,'sizeBytes',f.size_bytes,'storageRef',f.storage_uri) AS values,
+        read_scope_source(f.workspace_id,'workspace_file',f.id) AS source FROM workspace_files f WHERE f.workspace_id=$1 AND f.id=$2`, [access.workspaceId,id])
+    const parsedValues = z.record(applicationJsonSchema).safeParse(result.rows[0]?.values), parsedSource = sourceSchema.safeParse(result.rows[0]?.source)
+    if (!parsedValues.success || !parsedSource.success || parsedSource.data.held || parsedSource.data.retractedAt || parsedSource.data.validTo) {
+      throw new ApplicationPlatformError('access_unavailable', 'The source is unavailable.')
+    }
+    const values = parsedValues.data, source = parsedSource.data
+    return bindScopeSource({ ref: { workspaceId: access.workspaceId, origin: { kind: 'native', moduleKey: 'native' }, typeKey: type, id, version: source.version },
+      values, fields: Object.keys(values), policyVersion: 'native:1' }, { ...source, resourceKind: type === 'file' ? 'workspace_file' : 'workspace_member', resourceId: id })
+  }
   const record=type==='task'?await getTaskById(access,id,context.transaction):await getEntityById(access,id,{},context.transaction)
   if(!record||'kind'in record&&record.kind!==type)throw new ApplicationPlatformError('access_unavailable','The record is unavailable.')
   const kind=type==='task'?'task':'entity'
@@ -36,9 +94,23 @@ async function read(context:Context,type:z.infer<typeof readInput>['type'],id:st
     :type==='company'&&'displayName'in record?{name:record.displayName,domain:attrs.domain??null}
     :type==='person'&&'displayName'in record?{name:record.displayName,email:attrs.email??null,phone:attrs.phone??null}
     :'displayName'in record?{name:record.displayName,stage:attrs.stage??null,amount:attrs.amount??null}:{}
+  const definition = (await resources(context)).find(resource => resource.typeKey === type)!
+  if ('displayName' in record) for (const field of definition.fields) if (field.kind === 'crm') {
+    const custom = attrs.custom_fields && typeof attrs.custom_fields === 'object' ? attrs.custom_fields as Record<string, unknown> : {}
+    Object.assign(values, { [field.key]: custom[parseApplicationCrmFieldDefinition(field.definition).fieldKey] ?? null })
+  }
   const json=applicationJsonSchema.parse(values) as ApplicationRecordProjection['values']
   return bindScopeSource({ref:{workspaceId:access.workspaceId,origin:{kind:'native',moduleKey:'native'},typeKey:type,id,version:source.version},
-    values:json,fields:Object.keys(json),policyVersion:'native:1'},source)
+    values:json,fields:Object.keys(json),policyVersion:`native:${definition.schemaVersion}`},source)
+}
+async function authorizeReadResult(context: Context, result: unknown) {
+  const value = result as ApplicationRecordProjection, ref = applicationResourceRefSchema.safeParse(value?.ref)
+  const input = ref.success ? readInput.safeParse({ type: ref.data.typeKey, id: ref.data.id }) : null
+  if (!ref.success || !input?.success || ref.data.workspaceId !== context.execution.security.access.workspaceId
+    || ref.data.origin.kind !== 'native' || ref.data.origin.moduleKey !== 'native') throw new ApplicationPlatformError('access_unavailable', 'The source is unavailable.')
+  const current = await read(context, input.data.type, input.data.id)
+  if (current.ref.version !== value.ref.version || current.policyVersion !== value.policyVersion
+    || value.fields.some(field => !current.fields.includes(field))) throw new ApplicationPlatformError('access_unavailable', 'The source changed.')
 }
 async function authorizeResult(context:Context,refs:ApplicationResourceRef[]) {
   for(const ref of refs) {
@@ -48,6 +120,7 @@ async function authorizeResult(context:Context,refs:ApplicationResourceRef[]) {
   }
 }
 async function authorizeCreate(context:Context) {
+  if (context.expectedVersion !== undefined) throw new ApplicationPlatformError('invalid_value', 'Creation cannot use an existing-record version.')
   const access=context.execution.security.access,labels=context.execution.security.writeDefaults
   const result=await context.transaction.query<{admitted:boolean}>(`SELECT member_operation_scope_allows($1,'internal',$2,true)
     AND agent_read_scope_allows('internal',$2,$3) AS admitted`,[access.workspaceId,labels.compartments,labels.projectIds])
@@ -61,8 +134,9 @@ export function createCanonicalNativeApplicationModule():ApplicationModuleDefini
   return {key:'native',defaultState:'enabled',application:{version:'1',dependencies:[],resources:definitions,
     queries:['get'],commands:['create_company','create_task'],events:['native.company.created','native.task.created'],
     policyCapabilities:['canonical_native'],backgroundHandlers:[],uiContributions:[]},
+  resolveResources: resources,
   queries:{get:{input:readInput,authorize:async(context,raw)=>{const input=readInput.parse(raw);await read(context,input.type,input.id)},
-    execute:async(context,raw)=>{const input=readInput.parse(raw);return read(context,input.type,input.id)}}},
+    execute:async(context,raw)=>{const input=readInput.parse(raw);return read(context,input.type,input.id)}, authorizeResult: authorizeReadResult}},
   commands:{create_company:{input:companyInput,eventKey:'native.company.created',
     authorize:authorizeCreate,authorizeResult,
     execute:async(context,raw)=>{

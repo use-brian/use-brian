@@ -30,6 +30,9 @@ export type OAuthConsentRequest = {
   state: string | null
   /** Epoch seconds when this consent request is no longer valid. */
   exp: number
+  audience?: 'brain' | 'application'
+  applicationId?: string
+  applicationRevision?: string
 }
 
 export const CONSENT_REQUEST_TTL_SECONDS = 10 * 60
@@ -76,6 +79,11 @@ export function verifyConsentRequest(
     return null
   }
   if (req.exp <= Math.floor(Date.now() / 1000)) return null
+  if (req.audience !== undefined && req.audience !== 'brain' && req.audience !== 'application') return null
+  if (req.audience === 'application') {
+    if (typeof req.applicationId !== 'string' || !/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(req.applicationId)
+      || typeof req.applicationRevision !== 'string' || !/^[1-9][0-9]*$/.test(req.applicationRevision)) return null
+  } else if (req.applicationId !== undefined || req.applicationRevision !== undefined) return null
   return {
     clientId: req.clientId,
     redirectUri: req.redirectUri,
@@ -84,5 +92,7 @@ export function verifyConsentRequest(
     scope: req.scope,
     state: req.state ?? null,
     exp: req.exp,
+    ...(req.audience ? { audience: req.audience } : {}),
+    ...(req.audience === 'application' ? { applicationId: req.applicationId, applicationRevision: req.applicationRevision } : {}),
   }
 }

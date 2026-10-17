@@ -1,4 +1,13 @@
 import { createEngineeringArchivePublisher } from './engineering-history/publisher.js'
+import type { PoolClient } from 'pg'
+import type { ApplicationModuleDefinition } from '@use-brian/core'
+import { ApplicationPlatformService } from './application-platform/service.js'
+import { createCanonicalNativeApplicationModule } from './application-platform/native-adapters.js'
+import { createCanonicalGenericApplicationModule } from './application-platform/generic-adapter.js'
+import { buildHomeApplicationMcpProfile } from './application-platform/mcp.js'
+import { captureApplicationHomeBinding } from './application-platform/home-auth.js'
+import { applicationPlatformRoutes } from './routes/application-platform.js'
+import { ApplicationManagementService } from './application-platform/management.js'
 import { createEngineeringHistoryService } from './engineering-history/service.js'
 import { createCaptureConfigurationReader } from './engineering-history/configuration.js'
 import { engineeringHistoryRoutes } from './routes/engineering-history.js'
@@ -1367,6 +1376,8 @@ export interface PublicExtraRouteDeps {
 }
 
 export interface BootOpenApiOptions {
+  /** Trusted deployed open module code, composed into the existing module registry. */
+  applicationModules?: readonly ApplicationModuleDefinition<PoolClient>[]
   env: OpenApiEnv
   /** Shared self-host/hosted application integration configuration; no automatic grants. */
   externalApps?: ReturnType<typeof externalAppConfiguration>
@@ -1625,6 +1636,7 @@ export async function bootOpenApi(opts: BootOpenApiOptions): Promise<BootResult>
     // request directly even when the uploaded file itself is JSON.
     if (
       req.path === '/api/local-files'
+      || /^\/api\/applications(?:\/|$)/.test(req.path)
       || (req.method === 'PUT' && /^\/internal\/chat-archive\/media\/[^/]+\/content$/.test(req.path))
       || (req.method === 'POST' && /^\/bridge\/v1\/channels\/[^/]+\/media\/[^/]+$/.test(req.path))
       // The public CRM intake route owns a tighter 1 MiB parser. Skipping the
@@ -5905,6 +5917,7 @@ export async function bootOpenApi(opts: BootOpenApiOptions): Promise<BootResult>
               }
             },
             consumeBudget: async (appId: string) => consumeHomeAppBudget(appId),
+            applicationProfile: req => buildHomeApplicationMcpProfile(req, env.JWT_SECRET, applicationService),
           },
         }
       : {}),
@@ -5970,6 +5983,15 @@ export async function bootOpenApi(opts: BootOpenApiOptions): Promise<BootResult>
   }
 
   app.use(oauthMetadataRoutes({ apiUrl: env.API_URL, webUrl: env.APP_URL }))
+  const applicationService = new ApplicationPlatformService([
+    createCanonicalNativeApplicationModule(), createCanonicalGenericApplicationModule(), ...(opts.applicationModules ?? []),
+  ])
+  app.use('/api/applications', applicationPlatformRoutes({ service: applicationService,
+    home: { signingSecret: env.JWT_SECRET, consumeBudget: consumeHomeAppBudget },
+    oauth: { clientStore: oauthClientStore, workspaceStore, signingSecret: env.JWT_SECRET, webAppUrl: env.APP_URL,
+      requireAuth: requireAuth(env.JWT_SECRET) },
+    management: { service: new ApplicationManagementService(applicationService), requireAuth: requireAuth(env.JWT_SECRET),
+      origins: [env.APP_URL, env.AUTHED_APP_URL].filter(Boolean) as string[] } }))
   app.use('/api/brain/oauth', oauthRoutes({
     clientStore: oauthClientStore,
     authorizationStore: oauthAuthorizationStore,
@@ -6201,6 +6223,7 @@ export async function bootOpenApi(opts: BootOpenApiOptions): Promise<BootResult>
       requireAuth: requireAuth(env.JWT_SECRET),
       filesApi,
       signingSecret: env.JWT_SECRET,
+      applicationBinding: captureApplicationHomeBinding,
       apiOrigin: env.API_URL ?? '',
       // The frame lives in app-web, on a DIFFERENT origin from this API — so
       // the bundle CSP has to name it explicitly or the browser blocks it.

@@ -360,7 +360,7 @@ export interface EntityStore {
 
   // ── Entity instances CRUD ───────────────────────────────────────────
   createEntity(
-    input: Omit<EntityInstance, 'id' | 'createdAt' | 'lastEditedAt'>,
+    input: Omit<EntityInstance, 'id' | 'createdAt' | 'lastEditedAt'> & { id?: string },
     options?: DocEntityOperationOptions,
   ): Promise<EntityInstance>
   getEntity(

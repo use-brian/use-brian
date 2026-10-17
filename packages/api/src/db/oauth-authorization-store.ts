@@ -43,6 +43,9 @@ export type OAuthAuthorizationRow = {
   userId: string
   workspaceId: string
   scope: OAuthScope
+  /** Legacy mocks/rows without the discriminator retain the Brain audience only. */
+  audience?: 'brain' | 'application'
+  applicationClientId?: string | null
   createdAt: Date
   lastUsedAt: Date | null
   revokedAt: Date | null
@@ -87,6 +90,8 @@ export type OAuthAuthorizationStore = {
     scope: OAuthScope
     codeChallenge: string
     redirectUri: string
+    /** Only the explicit application audience accepts a reviewed maximum. */
+    applicationConsent?: { grantIds: string[]; maximumHash: string; clientRevision: string }
   }): Promise<{ row: OAuthAuthorizationRow; codePlaintext: string }>
 
   /**
@@ -153,6 +158,8 @@ const COLS_ROW = `
   user_id                  AS "userId",
   workspace_id             AS "workspaceId",
   scope,
+  coalesce(to_jsonb(oauth_authorizations)->>'audience','brain') AS audience,
+  (to_jsonb(oauth_authorizations)->>'application_client_id')::uuid AS "applicationClientId",
   created_at               AS "createdAt",
   last_used_at             AS "lastUsedAt",
   revoked_at               AS "revokedAt",
@@ -200,13 +207,60 @@ export function parseOAuthBearerToken(
   return { id, secret }
 }
 
-export function createDbOAuthAuthorizationStore(): OAuthAuthorizationStore {
+export type OAuthAuthorizationAudience = { audience: 'brain' } | { audience: 'application'; applicationClientId: string }
+
+/** One code/PKCE/refresh implementation, pinned to an explicit credential audience. */
+export function createDbOAuthAuthorizationStore(profile: OAuthAuthorizationAudience = { audience: 'brain' }): OAuthAuthorizationStore {
+  if (profile.audience !== 'brain' && profile.audience !== 'application'
+    || profile.audience === 'application' && !UUID_RE.test(profile.applicationClientId)) throw new Error('Invalid OAuth audience profile')
+  const applicationClientId = profile.audience === 'application' ? profile.applicationClientId : null
+  // Both pieces are enum/UUID validated above; callers cannot supply SQL vocabulary.
+  const audienceSql = (alias = '') => {
+    const row = alias ? alias.slice(0,-1) : 'oauth_authorizations'
+    return `coalesce(to_jsonb(${row})->>'audience','brain')='${profile.audience}' AND (to_jsonb(${row})->>'application_client_id') ${applicationClientId ? `='${applicationClientId}'` : 'IS NULL'}`
+  }
+  const applicationCurrentSql = () => applicationClientId
+    ? ` AND application_oauth_binding_current(oauth_authorizations.id,'${applicationClientId}'::uuid)` : ''
   return {
     async createGrantWithCode(params) {
+      if (!applicationClientId && params.applicationConsent) throw new Error('Application consent requires its application audience')
+      if (applicationClientId) {
+        const admitted = await query<{id:string}>(`SELECT id FROM application_clients WHERE id=$1 AND workspace_id=$2
+          AND oauth_client_id=$3 AND status='active' AND application_runtime_qualified(workspace_id,'application_data')`,
+        [applicationClientId,params.workspaceId,params.clientId])
+        if (!admitted.rows[0]) throw new Error('Application OAuth issuance is not qualified')
+      }
       const id = randomUUID()
       const code = mintTokenPlaintext('oac', id)
       const codeHash = await hashSecret(code.secret)
       const codeExpiresAt = new Date(Date.now() + AUTH_CODE_TTL_SECONDS * 1000)
+
+      if (applicationClientId) {
+        if (!params.applicationConsent) throw new Error('Reviewed application consent is required')
+        const consent = params.applicationConsent
+        const result = await query<OAuthAuthorizationRow>(`WITH review AS MATERIALIZED (
+            SELECT application_oauth_consent_snapshot($10,$3,$11) AS value
+          ), admitted AS MATERIALIZED (
+            SELECT value FROM review WHERE value IS NOT NULL AND value->>'clientId'=$2 AND value->>'workspaceId'=$4::text
+              AND value->>'revision'=$12 AND value->>'maximumHash'=$13 AND application_runtime_qualified($4,'application_data')
+              AND EXISTS(SELECT 1 FROM application_clients client WHERE client.id=$10 AND $9=ANY(client.redirect_uris))
+          ), revoked AS (
+            UPDATE oauth_authorizations SET revoked_at=now(),access_token_hash=NULL,refresh_token_hash=NULL,code_hash=NULL
+              WHERE client_id=$2 AND user_id=$3 AND workspace_id=$4 AND revoked_at IS NULL AND ${audienceSql()}
+                AND EXISTS(SELECT 1 FROM admitted) RETURNING id
+          ), issued AS (
+            INSERT INTO oauth_authorizations(id,client_id,user_id,workspace_id,scope,audience,application_client_id,
+              code_hash,code_expires_at,code_challenge,code_redirect_uri)
+            SELECT $1,$2,$3,$4,$5,'application',$10,$6,$7,$8,$9 FROM admitted RETURNING *
+          ), bound AS (
+            INSERT INTO application_oauth_bindings(authorization_id,app_id,workspace_id,principal_user_id,parent_grant_id,maximum_grants,maximum_hash)
+            SELECT issued.id,$10,$4,$3,(admitted.value->>'parentGrantId')::uuid,admitted.value->'maxima',admitted.value->>'maximumHash' FROM issued CROSS JOIN admitted RETURNING authorization_id
+          ) SELECT ${COLS_ROW} FROM issued oauth_authorizations WHERE EXISTS(SELECT 1 FROM bound WHERE authorization_id=oauth_authorizations.id)`,
+        [id,params.clientId,params.userId,params.workspaceId,params.scope,codeHash,codeExpiresAt,params.codeChallenge,params.redirectUri,
+          applicationClientId,consent.grantIds,consent.clientRevision,consent.maximumHash])
+        if (!result.rows[0]) throw new Error('Application consent changed or is not qualified')
+        return { row: result.rows[0], codePlaintext: code.plaintext }
+      }
 
       // Auto-revoke any prior active grant for the same (client × user ×
       // workspace) so the user sees one live row per app. Audit-preserving:
@@ -219,13 +273,13 @@ export function createDbOAuthAuthorizationStore(): OAuthAuthorizationStore {
                refresh_token_hash = NULL,
                code_hash = NULL
            WHERE client_id = $2 AND user_id = $3 AND workspace_id = $4
-             AND revoked_at IS NULL
+             AND revoked_at IS NULL AND ${audienceSql()}
            RETURNING id
          )
          INSERT INTO oauth_authorizations (
-           id, client_id, user_id, workspace_id, scope,
+           id, client_id, user_id, workspace_id, scope${applicationClientId ? ', audience, application_client_id' : ''},
            code_hash, code_expires_at, code_challenge, code_redirect_uri
-         ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
+         ) VALUES ($1, $2, $3, $4, $5${applicationClientId ? `, 'application', '${applicationClientId}'::uuid` : ''}, $6, $7, $8, $9)
          RETURNING ${COLS_ROW}`,
         [
           id,
@@ -246,7 +300,7 @@ export function createDbOAuthAuthorizationStore(): OAuthAuthorizationStore {
       const result = await query<OAuthAuthorizationWithSecrets>(
         `SELECT ${COLS_WITH_SECRETS}
          FROM oauth_authorizations
-         WHERE id = $1 AND revoked_at IS NULL
+         WHERE id = $1 AND revoked_at IS NULL AND ${audienceSql()}${applicationCurrentSql()}
          LIMIT 1`,
         [params.codeId],
       )
@@ -282,9 +336,9 @@ export function createDbOAuthAuthorizationStore(): OAuthAuthorizationStore {
              access_token_expires_at = $3,
              refresh_token_hash      = $4,
              refresh_token_expires_at = $5
-         WHERE id = $1 AND code_hash IS NOT NULL
+         WHERE id = $1 AND code_hash = $6 AND revoked_at IS NULL AND ${audienceSql()}${applicationCurrentSql()}
          RETURNING ${COLS_ROW}`,
-        [row.id, accessHash, accessExpiresAt, refreshHash, refreshExpiresAt],
+        [row.id, accessHash, accessExpiresAt, refreshHash, refreshExpiresAt, row.codeHash],
       )
       const updated = upd.rows[0]
       if (!updated) return null
@@ -302,7 +356,7 @@ export function createDbOAuthAuthorizationStore(): OAuthAuthorizationStore {
       const result = await query<OAuthAuthorizationWithSecrets>(
         `SELECT ${COLS_WITH_SECRETS}
          FROM oauth_authorizations
-         WHERE id = $1 AND revoked_at IS NULL
+         WHERE id = $1 AND revoked_at IS NULL AND ${audienceSql()}${applicationCurrentSql()}
          LIMIT 1`,
         [params.refreshId],
       )
@@ -329,7 +383,7 @@ export function createDbOAuthAuthorizationStore(): OAuthAuthorizationStore {
              refresh_token_hash       = $4,
              refresh_token_expires_at = $5,
              last_used_at             = now()
-         WHERE id = $1 AND refresh_token_hash = $6
+         WHERE id = $1 AND refresh_token_hash = $6 AND revoked_at IS NULL AND ${audienceSql()}${applicationCurrentSql()}
          RETURNING ${COLS_ROW}`,
         [row.id, accessHash, accessExpiresAt, refreshHash, refreshExpiresAt, row.refreshTokenHash],
       )
@@ -349,7 +403,7 @@ export function createDbOAuthAuthorizationStore(): OAuthAuthorizationStore {
       const result = await query<OAuthAuthorizationWithSecrets>(
         `SELECT ${COLS_WITH_SECRETS}
          FROM oauth_authorizations
-         WHERE id = $1
+         WHERE id = $1 AND ${audienceSql()}${applicationCurrentSql()}
            AND EXISTS (SELECT 1 FROM oauth_clients c WHERE c.client_id=oauth_authorizations.client_id AND c.revoked_at IS NULL)
          LIMIT 1`,
         [id],
@@ -359,7 +413,7 @@ export function createDbOAuthAuthorizationStore(): OAuthAuthorizationStore {
 
     async touchLastUsedAt(id) {
       await query(
-        `UPDATE oauth_authorizations SET last_used_at = now() WHERE id = $1`,
+        `UPDATE oauth_authorizations SET last_used_at = now() WHERE id = $1 AND ${audienceSql()}`,
         [id],
       )
     },
@@ -372,6 +426,8 @@ export function createDbOAuthAuthorizationStore(): OAuthAuthorizationStore {
                 a.user_id                  AS "userId",
                 a.workspace_id             AS "workspaceId",
                 a.scope,
+                coalesce(to_jsonb(a)->>'audience','brain') AS audience,
+                (to_jsonb(a)->>'application_client_id')::uuid AS "applicationClientId",
                 a.created_at               AS "createdAt",
                 a.last_used_at             AS "lastUsedAt",
                 a.revoked_at               AS "revokedAt",
@@ -383,7 +439,7 @@ export function createDbOAuthAuthorizationStore(): OAuthAuthorizationStore {
                 c.client_uri               AS "clientUri"
          FROM oauth_authorizations a
          JOIN oauth_clients c ON c.client_id = a.client_id
-         WHERE a.workspace_id = $1
+         WHERE a.workspace_id = $1 AND ${audienceSql('a.')}
          ORDER BY a.created_at DESC`,
         [workspaceId],
       )
@@ -398,7 +454,7 @@ export function createDbOAuthAuthorizationStore(): OAuthAuthorizationStore {
              access_token_hash  = NULL,
              refresh_token_hash = NULL,
              code_hash          = NULL
-         WHERE id = $1 AND revoked_at IS NULL
+         WHERE id = $1 AND revoked_at IS NULL AND ${audienceSql()}
          RETURNING id`,
         [id],
       )
@@ -412,12 +468,13 @@ export function createDbOAuthAuthorizationStore(): OAuthAuthorizationStore {
       captureAssistantId,
       captureProfileId,
     ) {
+      if (profile.audience !== 'brain') return false
       const result = await queryWithRLS<{ id: string }>(
         actingUserId,
         `UPDATE oauth_authorizations oa
             SET capture_assistant_id = $3,
                 capture_profile_id = $4
-          WHERE oa.id = $1 AND oa.workspace_id = $2
+          WHERE oa.id = $1 AND oa.workspace_id = $2 AND ${audienceSql('oa.')}
             AND oa.revoked_at IS NULL
             AND ($3::uuid IS NOT NULL OR $4::uuid IS NULL)
             AND (

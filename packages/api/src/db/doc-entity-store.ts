@@ -47,6 +47,11 @@ import {
 import { getAppPool, applyRLSGucs, queryWithRLS, rollbackAndRelease } from './client.js'
 import { currentAgentAccess } from './agent-access-context.js'
 import { ApplicationPlatformError } from '@use-brian/shared'
+import { applicationResourceRefSchema, type ApplicationResourceRef } from '@use-brian/shared'
+import { z } from 'zod'
+import { randomUUID } from 'node:crypto'
+import type { ApplicationOperationContext } from '@use-brian/core'
+import { getApplicationExecutionBinding } from '../application-platform/execution-context.js'
 
 // ── Row projections ────────────────────────────────────────────────────
 
@@ -413,7 +418,7 @@ export function createDbDocEntityStore(boundActor?: { actorUserId: string; trans
     async createEntity(input, options) {
       // Wire shape is checked here; canonical SQL also checks the locked declared schema.
       docEntityInstanceSchema.parse({
-        id: '00000000-0000-0000-0000-000000000000',
+        id: input.id ?? '00000000-0000-0000-0000-000000000000',
         entityTypeId: input.entityTypeId,
         workspaceId: input.workspaceId,
         data: input.data,
@@ -430,9 +435,9 @@ export function createDbDocEntityStore(boundActor?: { actorUserId: string; trans
       const result = await canonicalQuery<EntityInstanceRow>(
         actor(input.workspaceId, options, input.createdBy),
         `INSERT INTO entity_instances
-           (entity_type_id, workspace_id, data, source_app, created_by, last_edited_by,
+           (id, entity_type_id, workspace_id, data, source_app, created_by, last_edited_by,
             sensitivity, compartments, project_ids)
-         VALUES ($1, $2, $3::jsonb, $4, $5, $6, $7, $8, $9)
+         VALUES ($10, $1, $2, $3::jsonb, $4, $5, $6, $7, $8, $9)
          RETURNING ${ENTITY_INSTANCE_SELECT}`,
         [
           input.entityTypeId,
@@ -444,6 +449,7 @@ export function createDbDocEntityStore(boundActor?: { actorUserId: string; trans
           input.sensitivity ?? 'internal',
           input.compartments ?? [],
           input.projectIds ?? [],
+          input.id ?? randomUUID(),
         ],
       )
       return rowToInstance(result.rows[0])
@@ -523,12 +529,17 @@ export function createDbDocEntityStore(boundActor?: { actorUserId: string; trans
     },
 
     async deleteEntity(workspaceId, id, options) {
-      await canonicalQuery(
+      const expected = options?.expectedRecordVersion
+      if (expected !== undefined && !/^[1-9]\d*$/.test(expected)) {
+        throw new ApplicationPlatformError('record_version_conflict', 'A valid expected record version is required.')
+      }
+      const result = await canonicalQuery(
         actor(workspaceId, options),
         `DELETE FROM entity_instances
-         WHERE id = $1 AND workspace_id = $2`,
-        [id, workspaceId],
+         WHERE id = $1 AND workspace_id = $2${expected === undefined ? '' : ' AND record_version=$3::bigint'}`,
+        expected === undefined ? [id, workspaceId] : [id, workspaceId, expected],
       )
+      if (expected !== undefined && result.rowCount !== 1) throw new ApplicationPlatformError('record_version_conflict', 'The record is unavailable or its version changed.')
     },
 
     // ── Query ─────────────────────────────────────────────────────────
@@ -548,4 +559,45 @@ export function createDbDocEntityStore(boundActor?: { actorUserId: string; trans
       return {rows:selected.map(rowToInstance),...(hasMore?{nextCursor:compiled.cursorFor(selected[selected.length-1])}:{})}
     },
   }
+}
+
+export const canonicalApplicationRecordMutationSchema = z.discriminatedUnion('operation', [
+  z.object({ operation: z.literal('create'), type: z.string(), id: z.string().uuid().optional(), data: z.record(cellValueSchema) }).strict(),
+  z.object({ operation: z.literal('patch'), type: z.string(), id: z.string().uuid(), expectedVersion: z.string().regex(/^[1-9]\d*$/), data: z.record(cellValueSchema) }).strict(),
+  z.object({ operation: z.literal('delete'), type: z.string(), id: z.string().uuid(), expectedVersion: z.string().regex(/^[1-9]\d*$/) }).strict(),
+])
+export type CanonicalApplicationRecordMutation = z.infer<typeof canonicalApplicationRecordMutationSchema>
+
+/** Same store/SQL constraints for human and exact app releases; never an owner pool. */
+export async function applyCanonicalApplicationRecordMutation(context: ApplicationOperationContext<PoolClient>, typeId: string,
+  raw: CanonicalApplicationRecordMutation): Promise<ApplicationResourceRef> {
+  const input = canonicalApplicationRecordMutationSchema.parse(raw), access = context.execution.security.access
+  const id = input.id ?? randomUUID(), data = 'data' in input ? input.data : {}
+  if (Object.keys(data).length > 128) throw new ApplicationPlatformError('invalid_value', 'The change is too large.')
+  if (getApplicationExecutionBinding(context.execution)) {
+    const result = await context.transaction.query<{ ref: unknown }>('SELECT application_generic_write($1,$2,$3,$4,$5,$6,$7,$8,$9) AS ref',
+      [typeId, input.type, input.operation, id, 'expectedVersion' in input ? input.expectedVersion : null, JSON.stringify(data),
+        'internal', context.execution.security.writeDefaults.compartments, context.execution.security.writeDefaults.projectIds])
+    return applicationResourceRefSchema.parse(result.rows[0]?.ref)
+  }
+  const store = createDbDocEntityStore({ actorUserId: access.userId, transaction: context.transaction })
+  let version: string
+  if (input.operation === 'create') {
+    const record = await store.createEntity({ id, entityTypeId: typeId, workspaceId: access.workspaceId, data: input.data, sourceApp: 'api',
+      createdBy: access.userId, lastEditedBy: access.userId, sensitivity: 'internal',
+      compartments: [...context.execution.security.writeDefaults.compartments], projectIds: [...context.execution.security.writeDefaults.projectIds] })
+    version = record.recordVersion!
+  } else {
+    const record = await store.getEntity(access.workspaceId, id)
+    if (!record || record.entityTypeId !== typeId) throw new ApplicationPlatformError('access_unavailable', 'The record is unavailable.')
+    if (input.operation === 'patch') {
+      const next = await store.updateEntity(access.workspaceId, id, { data: { ...record.data, ...input.data }, lastEditedBy: access.userId },
+        { actorUserId: access.userId, expectedRecordVersion: input.expectedVersion })
+      version = next.recordVersion!
+    } else {
+      await store.deleteEntity(access.workspaceId, id, { actorUserId: access.userId, expectedRecordVersion: input.expectedVersion })
+      version = String(BigInt(record.recordVersion!) + 1n)
+    }
+  }
+  return { workspaceId: access.workspaceId, origin: { kind: 'generic', entityTypeId: typeId }, typeKey: input.type, id, version }
 }

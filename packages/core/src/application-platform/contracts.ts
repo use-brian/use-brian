@@ -1,8 +1,11 @@
 /** Deployed modules compose with the existing lifecycle registry. [COMP:security/application-access] */
 import { z } from 'zod'
+import { createHash } from 'node:crypto'
 import { ApplicationPlatformError, applicationResourceSchema, defineWorkspaceModuleRegistry,
-  type ApplicationModuleCatalog, type ApplicationResourceRef, type WorkspaceModuleDefinition, type WorkspaceModuleRegistry } from '@use-brian/shared'
+  type ApplicationModuleCatalog, type ApplicationResourceDefinition, type ApplicationResourceRef, type WorkspaceModuleDefinition, type WorkspaceModuleRegistry } from '@use-brian/shared'
 import type { ExecutionContext } from '../security/execution-context.js'
+import { propertyDefSchema } from '../entities/doc-schemas.js'
+import { validateDocApplicationSchema, parseApplicationCrmFieldDefinition } from './values.js'
 
 export interface ApplicationOperationContext<Transaction> {
   execution: ExecutionContext
@@ -17,8 +20,10 @@ export interface ApplicationRegisteredOperation<Transaction> {
   /** Resource/action-specific admission is mandatory, never inferred from registration. */
   authorize(context: ApplicationOperationContext<Transaction>, input: unknown): Promise<void>
   execute(context: ApplicationOperationContext<Transaction>, input: unknown): Promise<unknown>
+  /** Recheck returned source versions/fields where a query produces protected data. */
+  authorizeResult?(context: ApplicationOperationContext<Transaction>, result: unknown): Promise<void>
 }
-export interface ApplicationRegisteredCommand<Transaction> extends Omit<ApplicationRegisteredOperation<Transaction>, 'execute'> {
+export interface ApplicationRegisteredCommand<Transaction> extends Omit<ApplicationRegisteredOperation<Transaction>, 'execute' | 'authorizeResult'> {
   eventKey: string
   /** Receipts retain only canonical refs, never cached business payloads. */
   execute(context: ApplicationOperationContext<Transaction>, input: unknown): Promise<ApplicationResourceRef[]>
@@ -29,6 +34,36 @@ export interface ApplicationModuleDefinition<Transaction> extends WorkspaceModul
   application: ApplicationModuleCatalog
   queries: Readonly<Record<string, ApplicationRegisteredOperation<Transaction>>>
   commands: Readonly<Record<string, ApplicationRegisteredCommand<Transaction>>>
+  /** Deployed schema reader only, never a function loaded from a persisted manifest. */
+  resolveResources?(context: ApplicationOperationContext<Transaction>): Promise<ApplicationResourceDefinition[]>
+}
+
+export function validateApplicationResourceCatalog(moduleKey: string, raw: readonly ApplicationResourceDefinition[]): ApplicationResourceDefinition[] {
+  const resources = raw.map(resource => applicationResourceSchema.parse(resource))
+  if (new Set(resources.map(resource => resource.typeKey)).size !== resources.length) {
+    throw new ApplicationPlatformError('invalid_schema', 'Duplicate module resource type.')
+  }
+  for (const resource of resources) {
+    for (const field of resource.fields) if (field.kind === 'crm') {
+      const definition = parseApplicationCrmFieldDefinition(field.definition)
+      if (field.key !== `custom.${definition.fieldKey}` || resource.origin.kind !== 'native' || resource.typeKey !== definition.entityKind
+        || Boolean(field.required) !== definition.isRequired) throw new ApplicationPlatformError('invalid_schema', 'A canonical CRM field binding is invalid.')
+    }
+    const cells = resource.fields.flatMap(field => {
+      if (field.kind !== 'cell') return []
+      const property = propertyDefSchema.safeParse(field.property)
+      if (!property.success || property.data.name !== field.key) throw new ApplicationPlatformError('invalid_schema', 'A canonical property key is invalid.')
+      if (field.relationshipResolverKey && field.relationshipResolverKey !== `relation.${createHash('sha256').update(property.data.name).digest('hex')}`) {
+        throw new ApplicationPlatformError('invalid_schema', 'A canonical relationship resolver is invalid.')
+      }
+      return [property.data]
+    })
+    validateDocApplicationSchema(cells)
+    if (resource.origin.kind === 'native' && resource.origin.moduleKey !== moduleKey) {
+      throw new ApplicationPlatformError('invalid_schema', 'A native resource must name its owning module.')
+    }
+  }
+  return resources
 }
 
 /** A database row cannot register a module; callers supply deployed code definitions. */
@@ -56,14 +91,9 @@ export function defineApplicationModules<Transaction>(modules: readonly Applicat
         }
       }
     }
-    const resources = module.application.resources.map(resource => applicationResourceSchema.parse(resource))
-    if (new Set(resources.map(resource => resource.typeKey)).size !== resources.length) {
-      throw new ApplicationPlatformError('invalid_schema', 'Duplicate module resource type.')
-    }
-    for (const resource of resources) {
-      if (resource.origin.kind === 'native' && resource.origin.moduleKey !== module.key) {
-        throw new ApplicationPlatformError('invalid_schema', 'A native resource must name its owning module.')
-      }
+    const resources = validateApplicationResourceCatalog(module.key, module.application.resources)
+    if (module.resolveResources !== undefined && typeof module.resolveResources !== 'function') {
+      throw new ApplicationPlatformError('invalid_schema', 'A deployed resource reader is required.')
     }
     if (Object.values(module.commands).some(command => typeof command.authorizeResult !== 'function'
       || !module.application.events.includes(command.eventKey))) {

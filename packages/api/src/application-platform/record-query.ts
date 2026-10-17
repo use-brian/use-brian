@@ -9,7 +9,7 @@ const cursorSchema=z.object({v:z.literal(1),typeId:z.string().uuid(),schemaVersi
   values:z.array(z.union([z.null(),z.string(),z.number().finite(),z.boolean()])).max(10)}).strict()
 function invalid():never {throw new ApplicationPlatformError('invalid_value','The declared query or cursor is invalid.')}
 
-export function compileApplicationRecordQuery(schema:DocEntityType,filters:DocEntityFilter[]=[],sort:DocEntitySort[]=[],limit=50,cursor?:string) {
+export function compileApplicationRecordQuery(schema:Pick<DocEntityType,'id'|'workspaceId'|'schemaVersion'|'properties'>,filters:DocEntityFilter[]=[],sort:DocEntitySort[]=[],limit=50,cursor?:string) {
   if(filters.length>32||sort.length>8||!Number.isSafeInteger(limit)||limit<1||limit>100)invalid()
   const values:unknown[]=[schema.workspaceId,schema.id],clauses=['workspace_id = $1','entity_type_id = $2']
   const bind=(value:unknown)=>{values.push(value);return `$${values.length}`}
@@ -89,7 +89,7 @@ export function compileApplicationRecordQuery(schema:DocEntityType,filters:DocEn
   }
   const limitParameter=bind(limit+1)
   return {values,where:clauses.join(' AND '),orderBy:order.map(item=>`${item.sql} ${item.direction.toUpperCase()} NULLS LAST`).join(', '),
-    sortSelect:order.map((item,index)=>`${item.sql} AS "__sort${index}"`).join(', '),limitParameter,
+    sortSelect:order.map((item,index)=>`${item.sql}::text AS "__sort${index}"`).join(', '),limitParameter,
     cursorFor:(row:Record<string,unknown>)=>Buffer.from(JSON.stringify({v:1,typeId:schema.id,schemaVersion:schema.schemaVersion,signature,
       values:order.map((_,index)=>row[`__sort${index}`])})).toString('base64url')}
 }

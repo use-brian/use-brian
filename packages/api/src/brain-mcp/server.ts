@@ -19,9 +19,7 @@ import type { CaptureConfiguration,EngineeringHistoryCommand } from '@use-brian/
  */
 
 import { Router } from 'express'
-import { actionableInputSchema } from './actionable-input-schema.js'
-import { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js'
-import { StreamableHTTPServerTransport } from '@modelcontextprotocol/sdk/server/streamableHttp.js'
+import { serveStatelessMcp } from './stateless.js'
 import type { Tool, Embedder, AssociationTools } from '@use-brian/core'
 import type { BrainKeyStore } from '../db/brain-keys-store.js'
 import type { OAuthAuthorizationStore } from '../db/oauth-authorization-store.js'
@@ -148,10 +146,11 @@ type Options = {
       id: string
       workspaceId: string
       status: string
-      grantedScopes: { data: BrainKeyScope; store?: AppStoreScope } | null
+      grantedScopes: { data: import('@use-brian/brian-app').AppDataScope; store?: AppStoreScope } | null
       maxClearance: Sensitivity | null
     } | null>
     consumeBudget?: (appId: string) => Promise<{ allowed: boolean }>
+    applicationProfile?: (req: import('express').Request) => Promise<{ homeAppId: string; tools: import('./tools.js').BrainTool[] } | null>
   }
   storeTools?: (params: {
     workspaceId: string
@@ -177,11 +176,21 @@ export function brainMcpRoutes(opts: Options): Router {
   const router = Router()
 
   router.post('/', async (req, res) => {
+    let application: Awaited<ReturnType<NonNullable<NonNullable<Options['homeApps']>['applicationProfile']>>> = null
+    if (opts.homeApps?.applicationProfile && opts.homeApps.consumeBudget) {
+      try { application = await opts.homeApps.applicationProfile(req) } catch { /* No app capability from an unavailable authority reader. */ }
+    }
     const auth = await authenticateBrainRequest(req, {
       brainKeyStore: opts.brainKeyStore,
       authorizationStore: opts.authorizationStore,
       homeApps: opts.homeApps,
     })
+    if (!auth && application && opts.homeApps?.consumeBudget) {
+      if (!(await opts.homeApps.consumeBudget(application.homeAppId)).allowed) { res.status(429).json({ error: 'This app has used its daily budget.' }); return }
+      try { await serveStatelessMcp(req, res, application.tools) }
+      catch { if (!res.headersSent) res.status(503).json({ error: 'application_access_unavailable', retrySafe: false }) }
+      return
+    }
     if (!auth) {
       // Uniform 401 — a probe cannot tell a bad key from a revoked one. That
       // is a security property, not a reason to say nothing: the ONE message
@@ -253,8 +262,7 @@ export function brainMcpRoutes(opts: Options): Router {
         ? opts.agentTask
         : undefined
 
-    const server = new McpServer({ name: 'use-brian-brain', version: '1.0.0' })
-    for (const tool of buildBrainTools({
+    const tools = buildBrainTools({
       workspaceId: auth.workspaceId,
       scope: auth.scope,
       keyId: auth.keyId,
@@ -300,27 +308,9 @@ export function brainMcpRoutes(opts: Options): Router {
               }),
           }
         : {}),
-    })) {
-      server.registerTool(
-        tool.name,
-        // A ZodObject whose failed parse renders compact `path: message` lines
-        // (+ retry verdict) instead of the SDK default `ZodError.message` JSON
-        // blob — see ./actionable-input-schema.ts.
-        { description: tool.description, inputSchema: actionableInputSchema(tool.inputSchema, tool.name) },
-        tool.handler,
-      )
-    }
-
-    // Stateless transport — no session id issued or validated.
-    const transport = new StreamableHTTPServerTransport({ sessionIdGenerator: undefined })
-    res.on('close', () => {
-      void transport.close()
-      void server.close()
     })
-
     try {
-      await server.connect(transport)
-      await transport.handleRequest(req, res, req.body)
+      await serveStatelessMcp(req, res, [...tools, ...(application?.tools ?? [])])
     } catch (err) {
       console.error('[brain-mcp] request failed:', err)
       if (!res.headersSent) {

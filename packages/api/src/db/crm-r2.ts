@@ -11,7 +11,7 @@
  */
 
 import {
-  stitchMailboxThreads,
+  stitchMailboxThreads, validateCrmCustomFieldValue as validateCustomFieldValue,
   CRM_CUSTOM_FIELD_TYPES, CRM_CONFIG_ENTITY_KINDS, CRM_PIPELINE_STAGE_CATEGORIES, CrmOperationsError,
   type AccessContext,
   type EntityRecord,
@@ -1505,32 +1505,7 @@ export async function setCrmDealPipelineStage(input: {
   return updated ? { entity: updated, fromStageId, toStage: stage } : null
 }
 
-export function validateCustomFieldValue(
-  definition: Pick<CrmFieldDefinition, 'fieldType' | 'options' | 'isRequired'>,
-  value: unknown,
-): boolean {
-  if (value === null || value === undefined || value === '') return !definition.isRequired
-  switch (definition.fieldType) {
-    case 'text': return typeof value === 'string' && value.length <= 10_000
-    case 'number': return typeof value === 'number' && Number.isFinite(value)
-    case 'date': {
-      if (typeof value !== 'string' || !/^\d{4}-\d{2}-\d{2}$/.test(value)) return false
-      const [year, month, day] = value.split('-').map(Number)
-      const parsed = new Date(Date.UTC(year, month - 1, day))
-      return parsed.getUTCFullYear() === year
-        && parsed.getUTCMonth() === month - 1
-        && parsed.getUTCDate() === day
-    }
-    case 'boolean': return typeof value === 'boolean'
-    case 'single_select': return typeof value === 'string' && definition.options.includes(value)
-    case 'multi_select':
-      return Array.isArray(value)
-        && value.every((v) => typeof v === 'string' && definition.options.includes(v))
-    case 'entity_reference':
-      return typeof value === 'string'
-        && /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(value)
-  }
-}
+export { validateCrmCustomFieldValue as validateCustomFieldValue } from '@use-brian/core'
 
 async function customDefinitionsForWrite(ctx: AccessContext, entityKind: CrmEntityKind, client?: PoolClient): Promise<CrmFieldDefinition[]> {
   mutationActorAccess(ctx.userId, ctx.workspaceId, ctx)

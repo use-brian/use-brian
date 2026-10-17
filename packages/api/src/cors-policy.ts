@@ -7,6 +7,8 @@ export function createApiCorsMiddleware(origins: readonly string[]): RequestHand
   return (req, res, next) => {
     // These routes own their extension-only CORS, including preflight.
     if (/^\/api\/protected-browser-fill\/(resolve|complete|recover)$/.test(req.path)) { next(); return }
+    // Application origins/headers are resolved from the exact registered client.
+    if (/^\/api\/applications(?:\/|$)/.test(req.path)) { next(); return }
     const origin = req.headers.origin
     if (origin && allowedOrigins.has(origin)) {
       res.header('Access-Control-Allow-Origin', origin)

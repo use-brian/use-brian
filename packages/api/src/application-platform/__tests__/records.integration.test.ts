@@ -6,6 +6,7 @@ import type { PoolClient } from 'pg'
 import { ApplicationPlatformError } from '@use-brian/shared'
 import { ApplicationPlatformService } from '../service.js'
 import { createCanonicalNativeApplicationModule } from '../native-adapters.js'
+import { createCanonicalGenericApplicationModule } from '../generic-adapter.js'
 import { createDbDocEntityStore } from '../../db/doc-entity-store.js'
 import { applyRLSGucs, getAppPool, getPool, queryWithRLS } from '../../db/client.js'
 
@@ -152,6 +153,23 @@ describe('[COMP:api/application-records] real canonical generic record transacti
     await expect(store.queryEntities(workspaceId,schema.id,[],[{field:'quantity',direction:'desc'}],2,first.nextCursor)).rejects.toMatchObject({code:'invalid_value'})
   })
 
+  it('preserves PostgreSQL microseconds in default keyset cursors', async () => {
+    const schema = await type(), ids = [randomUUID(), randomUUID(), randomUUID()]
+    for (const [index, timestamp] of ['2026-01-01T00:00:00.123456Z', '2026-01-01T00:00:00.123455Z', '2026-01-01T00:00:00.123400Z'].entries()) {
+      await queryWithRLS(userId, `INSERT INTO entity_instances(id,workspace_id,entity_type_id,data,created_by,last_edited_by,created_at)
+        VALUES($1,$2,$3,$4,$5,$5,$6)`, [ids[index], workspaceId, schema.id, { title: { kind: 'text', value: `Precise record ${index}` } }, userId, timestamp])
+    }
+    const seen: string[] = []
+    let cursor: string | undefined
+    for (let index = 0; index < 5; index++) {
+      const page = await store.queryEntities(workspaceId, schema.id, [], [], 1, cursor)
+      seen.push(...page.rows.map(row => row.id)); cursor = page.nextCursor
+      if (index === 0) expect(Buffer.from(cursor!, 'base64url').toString('utf8')).toContain('123456')
+      if (!cursor) break
+    }
+    expect(seen).toEqual(ids)
+  })
+
   function execution(actorUserId = userId) {
     const assertCurrent = async () => {
       const current = await queryWithRLS(actorUserId, 'SELECT user_id FROM workspace_members WHERE workspace_id=$1 AND user_id=$2', [workspaceId,actorUserId])
@@ -238,6 +256,45 @@ describe('[COMP:api/application-records] real canonical generic record transacti
     expect((await create(schema.id,{title:{kind:'text',value:'Linked request'},company:{kind:'relation',value:id}})).data.company.value).toBe(id)
     const task=await service.command(context,'native','create_task',{idempotencyKey:'canonical-task',input:{title:'Review request'}})
     expect((await owner.query('SELECT title FROM tasks WHERE id=$1 AND workspace_id=$2',[task.resources[0].id,workspaceId])).rows[0].title).toBe('Review request')
+  })
+  it('uses the same generic module commands for native sessions with exact versions and canonical history', async () => {
+    const schema = await type(), id = randomUUID(), service = new ApplicationPlatformService([createCanonicalGenericApplicationModule()]), context = execution()
+    const typeKey = `record.${schema.id}`
+    const created = await service.command(context, 'records', 'record_create', { idempotencyKey: randomUUID(), input: {
+      operation: 'create', type: typeKey, id, data: { title: { kind: 'text', value: 'Native generic request' } },
+    } })
+    expect(created.resources[0]).toMatchObject({ id, version: '1' })
+    const updated = await service.command(context, 'records', 'record_patch', { idempotencyKey: randomUUID(), input: {
+      operation: 'patch', type: typeKey, id, expectedVersion: '1', data: { title: { kind: 'text', value: 'Native patched request' } },
+    } })
+    expect(updated.resources[0].version).toBe('2')
+    const history = await service.query(context, 'records', 'history', { type: typeKey, id }) as Array<{ ref: { version: string } }>
+    expect(history.map(item => item.ref.version)).toEqual(['2', '1'])
+    const input = { operation: 'delete', type: typeKey, id, expectedVersion: '2' }, idempotencyKey = randomUUID()
+    const deleted = await service.command(context, 'records', 'record_delete', { idempotencyKey, input })
+    expect(deleted.resources[0].version).toBe('3')
+    expect(await service.command(context, 'records', 'record_delete', { idempotencyKey, input })).toEqual(deleted)
+  })
+  it('uses envelope CAS for single edits and rejects conflicting or misplaced preconditions without effects', async () => {
+    const schema = await type(), service = new ApplicationPlatformService([createCanonicalGenericApplicationModule()]), context = execution()
+    const typeKey = `record.${schema.id}`, record = await create(schema.id, { title: { kind: 'text', value: 'Before' } })
+    const input = { operation: 'patch', type: typeKey, id: record.id, data: { title: { kind: 'text', value: 'After' } } }
+    await expect(service.command(context, 'records', 'record_patch', { idempotencyKey: randomUUID(), input })).rejects.toMatchObject({ code: 'invalid_value' })
+    await expect(service.command(context, 'records', 'record_patch', { idempotencyKey: randomUUID(), expectedVersion: '1', input: { ...input, expectedVersion: '2' } })).rejects.toMatchObject({ code: 'record_version_conflict' })
+    const receipt = await service.command(context, 'records', 'record_patch', { idempotencyKey: randomUUID(), expectedVersion: '1', input })
+    expect(receipt.resources[0]).toMatchObject({ id: record.id, version: '2' })
+    await expect(service.command(context, 'records', 'record_create', { idempotencyKey: randomUUID(), expectedVersion: '2', input: {
+      operation: 'create', type: typeKey, data: { title: { kind: 'text', value: 'Refused' } },
+    } })).rejects.toMatchObject({ code: 'invalid_value' })
+    await expect(service.command(context, 'records', 'record_batch', { idempotencyKey: randomUUID(), expectedVersion: '2', input: {
+      operations: [{ ...input, expectedVersion: '2' }],
+    } })).rejects.toMatchObject({ code: 'invalid_value' })
+    expect((await store.getEntity(workspaceId, record.id))?.recordVersion).toBe('2')
+    const removed = await service.command(context, 'records', 'record_delete', { idempotencyKey: randomUUID(), expectedVersion: '2', input: {
+      operation: 'delete', type: typeKey, id: record.id,
+    } })
+    expect(removed.resources[0].version).toBe('3')
+    expect(await store.getEntity(workspaceId, record.id)).toBeNull()
   })
   it.each(['application_command_audit','application_committed_events'])('rolls back every command effect when %s fails',async table=>{
     const schema=await type(),moduleKey=table==='application_command_audit'?'fixture-audit-failure':'fixture-event-failure'
