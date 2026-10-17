@@ -1,6 +1,6 @@
 /** Fresh authenticated sidecar checks. No provider ACL vocabulary and no positive cache. [COMP:api/external-source-access] */
 import { randomUUID } from 'node:crypto'
-import type { ExecutionContext } from '@use-brian/core'
+import type { ExecutionContext, McpServerConfig } from '@use-brian/core'
 import type { FetchLike } from '@modelcontextprotocol/sdk/shared/transport.js'
 import type { CallToolResult } from '@modelcontextprotocol/sdk/types.js'
 import { SOURCE_PROTOCOL_VERSION, SOURCE_TIMEOUT_MS, SourceProtocolError,
@@ -10,7 +10,7 @@ import { SOURCE_PROTOCOL_VERSION, SOURCE_TIMEOUT_MS, SourceProtocolError,
   type SourceReconcileRequest, type SourceReconcileResponse, type SourceRetentionMode, type SourceSubject } from '@use-brian/brian-app/connector'
 import type { ConnectorActorBinding, ConnectorActorMintingPorts } from './connector-actor-context.js'
 import { createConnectorActorFetch } from './connector-actor-transport.js'
-import { callRemoteMcpToolEnvelope } from '../mcp/client.js'
+import { callRemoteMcpToolEnvelope, discoverMcpServer } from '../mcp/client.js'
 
 export type SourceAccessProfile = ConnectorActorBinding & {
   /** Existing connector URL validation pins these host-owned destinations before constructing this client. */
@@ -25,6 +25,7 @@ export type SourceAccessProfile = ConnectorActorBinding & {
 export type SourceOperationProof = { request: SourceAuthorizationRequest; response: SourceAuthorizationResponse; requestDigest: string }
 export type SourceAccessClient = {
   capabilities: () => Promise<SourceCapabilities>
+  discoverMcp: (name: string) => Promise<McpServerConfig>
   authorize: (request: SourceAuthorizationRequest) => Promise<SourceOperationProof>
   reconcile: (request: SourceReconcileRequest) => Promise<SourceReconcileResponse>
   readMcp: (tool: string, input: Record<string, unknown>, retentionMode?: SourceRetentionMode) => Promise<TrustedSourceRead>
@@ -53,7 +54,9 @@ export function createSourceAccessClient(execution: ExecutionContext, rawProfile
   ports: ConnectorActorMintingPorts, options: { headers: Record<string, string>; fetch?: FetchLike; now?: () => number }): SourceAccessClient {
   const profile = structuredClone(rawProfile), headers = { ...options.headers }, now = options.now ?? Date.now
   const base = new URL(profile.sourceBaseUrl), mcp = new URL(profile.mcpUrl)
-  if (!['http:','https:'].includes(base.protocol) || base.username || base.password || base.hash || base.search
+  const protectedTransport = (url: URL) => url.protocol === 'https:' || url.protocol === 'http:' && ['127.0.0.1','[::1]'].includes(url.hostname)
+  if (!protectedTransport(base) || !protectedTransport(mcp) || base.username || base.password || base.hash || base.search
+    || mcp.username || mcp.password || mcp.hash
     || base.origin !== mcp.origin || base.pathname !== '/' && base.pathname.endsWith('/') || !/^[1-9][0-9]*$/.test(profile.bindingRevision)) unavailable()
   if (profile.httpReadPath !== undefined && (!profile.httpReadPath.startsWith('/') || profile.httpReadPath.startsWith('//')
     || /[?#\s\\]/.test(profile.httpReadPath) || new URL(profile.httpReadPath, base).origin !== base.origin)) unavailable()
@@ -121,6 +124,10 @@ export function createSourceAccessClient(execution: ExecutionContext, rawProfile
       const value = parseSourceCapabilities(await post('capabilities', { version: SOURCE_PROTOCOL_VERSION }))
       if (value.tenant !== profile.tenant) denied()
       return value
+    },
+    async discoverMcp(name) {
+      await client.capabilities()
+      return boundary(profile.mcpUrl, send => discoverMcpServer(profile.mcpUrl, name, headers, send))
     },
     async authorize(raw) {
       const request = parseSourceAuthorizationRequest(raw), rawResponse = await post('authorize', request)

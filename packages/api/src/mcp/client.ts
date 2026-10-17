@@ -51,6 +51,7 @@ export async function discoverMcpServer(
       name: t.name,
       description: t.description ?? '',
       inputSchema: t.inputSchema as Record<string, unknown>,
+      ...(typeof t.annotations?.readOnlyHint === 'boolean' ? { readOnlyHint: t.annotations.readOnlyHint } : {}),
     }))
 
     return { name, url, tools: mcpTools }
@@ -83,7 +84,7 @@ export async function callRemoteMcpTool(
   dispatchFetch?: FetchLike,
 ): Promise<unknown> {
   const result = await callRemoteMcpToolEnvelope(serverUrl, toolName, input, headers, dispatchFetch)
-  return legacyMcpDisplayResult(result)
+  return mcpToolDisplayResult(result)
 }
 
 /** Protected readers must inspect authenticated reserved metadata before compacting content. */
@@ -112,7 +113,7 @@ export async function callRemoteMcpToolEnvelope(
 }
 
 /** Compatibility display conversion. This intentionally creates no trusted source evidence. */
-function legacyMcpDisplayResult(result: CallToolResult): unknown {
+export function mcpToolDisplayResult(result: CallToolResult): unknown {
     if (result.isError) {
       const errorText = (result.content as Array<{ type: string; text?: string }>)
         ?.filter((c) => c.type === 'text')

@@ -9,6 +9,8 @@ import { captureApplicationHomeBinding } from './application-platform/home-auth.
 import { applicationPlatformRoutes } from './routes/application-platform.js'
 import { ApplicationManagementService } from './application-platform/management.js'
 import { connectorActorMetadataRoutes } from './application-platform/connector-actor-metadata.js'
+import { createConnectorActorKeyStore } from './application-platform/connector-actor-keys.js'
+import { createConnectorSourceRuntimeFactory, type ConnectorSourceRuntimeFactory } from './application-platform/source-runtime.js'
 import { createEngineeringHistoryService } from './engineering-history/service.js'
 import { createCaptureConfigurationReader } from './engineering-history/configuration.js'
 import { engineeringHistoryRoutes } from './routes/engineering-history.js'
@@ -1467,6 +1469,7 @@ export interface BootContext {
   taskStore: ReturnType<typeof createDbTaskStore>
   connectorStore: ReturnType<typeof createDbConnectorStore>
   connectorInstanceStore: ReturnType<typeof createConnectorInstanceStore>
+  connectorSourceRuntimeFactory?: ConnectorSourceRuntimeFactory
   workspaceToolPolicyStore: ReturnType<typeof createWorkspaceToolPolicyStore>
   mcpSettingsStore: ReturnType<typeof createDbMcpSettingsStore>
   assistantConnectorStore: ReturnType<typeof createDbAssistantConnectorStore>
@@ -2316,6 +2319,8 @@ export async function bootOpenApi(opts: BootOpenApiOptions): Promise<BootResult>
   const mcpSettingsStore = createDbMcpSettingsStore()
   const credKey = env.CHANNEL_CREDENTIAL_KEY ? loadChannelCredentialKey(env.CHANNEL_CREDENTIAL_KEY) : null
   const connectorInstanceStore = createConnectorInstanceStore(credKey)
+  const connectorSourceRuntimeFactory = createConnectorSourceRuntimeFactory({ issuer: env.API_URL,
+    keys: credKey ? createConnectorActorKeyStore(credKey) : undefined, instances: connectorInstanceStore })
   // Workspace-owned OAuth app credentials (migration 394) — a customer's own
   // Entra registration, resolved ahead of deployment config. See
   // docs/architecture/integrations/msgraph.md → "Auth".
@@ -5690,6 +5695,7 @@ export async function bootOpenApi(opts: BootOpenApiOptions): Promise<BootResult>
     connectorInstanceStore,
     workspaceToolPolicyStore,
     workerManager,
+    connectorSourceRuntimeFactory,
     workerRunsStore,
     knowledgeStore,
     knowledgeCaptureRuleStore,
@@ -9633,6 +9639,7 @@ export async function bootOpenApi(opts: BootOpenApiOptions): Promise<BootResult>
     generateSynthesize,
     connectorStore,
     connectorInstanceStore,
+    connectorSourceRuntimeFactory,
     workspaceToolPolicyStore,
     mcpSettingsStore,
     assistantConnectorStore,

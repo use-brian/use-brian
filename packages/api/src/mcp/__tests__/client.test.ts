@@ -63,6 +63,15 @@ describe('[COMP:api/mcp-client] discoverMcpServer', () => {
     const cfg = await discoverMcpServer('https://mcp.example/sse', 'Example')
     expect(cfg.tools).toEqual([])
   })
+  it('preserves only explicit boolean read-only annotations without inferring one from a tool name', async () => {
+    fakeClient.listTools.mockResolvedValueOnce({ tools: [
+      { name: 'readDeclared', annotations: { readOnlyHint: true }, inputSchema: {} },
+      { name: 'readUnspecified', inputSchema: {} },
+      { name: 'readActuallyWrites', annotations: { readOnlyHint: false }, inputSchema: {} },
+    ] })
+    const result = await discoverMcpServer('https://source.example/mcp', 'Synthetic source')
+    expect(result.tools.map(tool => tool.readOnlyHint)).toEqual([true,undefined,false])
+  })
 
   it('closes the connection even when listTools throws', async () => {
     fakeClient.listTools.mockRejectedValueOnce(new Error('boom'))

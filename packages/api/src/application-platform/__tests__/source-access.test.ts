@@ -74,6 +74,7 @@ describe('[COMP:api/external-source-access] authenticated sidecar coordinator', 
     const f = fixture()
     expect(() => createSourceAccessClient(f.execution, { ...f.profile, sourceBaseUrl: 'https://other.example' }, f.ports, f.options)).toThrow('source_unavailable')
     expect(() => createSourceAccessClient(f.execution, { ...f.profile, sourceBaseUrl: 'https://source.example?redirect=foreign' }, f.ports, f.options)).toThrow('source_unavailable')
+    expect(() => createSourceAccessClient(f.execution, { ...f.profile, sourceBaseUrl: 'http://source.example', mcpUrl: 'http://source.example/mcp' }, f.ports, f.options)).toThrow('source_unavailable')
     f.fetch.mockImplementation(async () => new Response(null, { status: 307, headers: { Location: 'https://other.example' } }))
     await expect(f.client.authorize(request())).rejects.toMatchObject({ code: 'source_unavailable' })
     expect(f.fetch).toHaveBeenCalledTimes(1)

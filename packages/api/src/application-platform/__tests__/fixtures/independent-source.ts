@@ -8,13 +8,14 @@ import { z } from 'zod'
 import { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js'
 import { StreamableHTTPServerTransport } from '@modelcontextprotocol/sdk/server/streamableHttp.js'
 import { authorizeConnectorRequest, handleSourceSidecar, sourceSubjectFromActor, sourceSubjectKey, sourceResourceKey,
-  SOURCE_PROTOCOL_VERSION, type ConnectorActorClaims, type SourceSubject, type SourceResourceRef,
+  SOURCE_PROTOCOL_VERSION, ConnectorActorError, type ConnectorReplayConsumer, type ConnectorActorClaims, type SourceSubject, type SourceResourceRef,
   type SourceEnvelope, type SourceAuthorizationRequest, type SourceAuthorizationResponse, type SourceCapabilities,
   type createConnectorActorVerifier } from '@use-brian/brian-app/connector'
 
 export const independentSourceSchema = `
  CREATE TABLE accounts(kind text NOT NULL,id uuid NOT NULL,active boolean NOT NULL DEFAULT true,PRIMARY KEY(kind,id));
  CREATE TABLE assistants(id uuid PRIMARY KEY,active boolean NOT NULL DEFAULT true);
+ CREATE TABLE actor_replays(key text PRIMARY KEY,expires_at bigint NOT NULL);
  CREATE TABLE records(id text PRIMARY KEY,kind text NOT NULL,content_version int NOT NULL DEFAULT 1,policy_version int NOT NULL DEFAULT 1,
    data jsonb NOT NULL,compartments text[] NOT NULL DEFAULT '{}',withdrawn boolean NOT NULL DEFAULT false);
  CREATE TABLE grants(kind text NOT NULL,account_id uuid NOT NULL,record_id text NOT NULL REFERENCES records(id),
@@ -22,13 +23,29 @@ export const independentSourceSchema = `
  CREATE TABLE commands(kind text NOT NULL,account_id uuid NOT NULL,assistant_id uuid NOT NULL,idempotency_key text NOT NULL,
    request_hash text NOT NULL,receipt text NOT NULL,record_id text NOT NULL,version int NOT NULL,PRIMARY KEY(kind,account_id,assistant_id,idempotency_key));
 `
+/** Shared atomic replay state survives another verifier/process using this same source database. */
+export function independentSourceReplayConsumer(pool: Pool, maximumEntries = 10_000): ConnectorReplayConsumer {
+  if (!Number.isSafeInteger(maximumEntries) || maximumEntries < 1 || maximumEntries > 1_000_000) throw new RangeError('Invalid replay capacity')
+  return async ({ key, expiresAt, now }) => {
+    const client = await pool.connect()
+    try {
+      await client.query('BEGIN')
+      await client.query("SELECT pg_advisory_xact_lock(hashtextextended('reference-source-actor-replay',0))")
+      await client.query('DELETE FROM actor_replays WHERE expires_at<=$1', [now])
+      if ((await client.query('SELECT key FROM actor_replays WHERE key=$1', [key])).rowCount) { await client.query('COMMIT'); return false }
+      if ((await client.query<{ count: number }>('SELECT count(*)::int AS count FROM actor_replays')).rows[0].count >= maximumEntries) throw new ConnectorActorError('assertion_unavailable')
+      await client.query('INSERT INTO actor_replays(key,expires_at) VALUES($1,$2)', [key,expiresAt])
+      await client.query('COMMIT'); return true
+    } catch (error) { await client.query('ROLLBACK'); throw error } finally { client.release() }
+  }
+}
 type Query = Pick<Pool | PoolClient, 'query'>
 type SourceRecord = { id: string; kind: string; content_version: number; policy_version: number; data: Record<string, unknown>; compartments: string[]; withdrawn: boolean }
 export async function startIndependentSource(input: { pool: Pool; tenant: string; transportToken: string;
   verifyActor: ReturnType<typeof createConnectorActorVerifier>; uiSessions: Map<string, SourceSubject> }) {
   const { pool, tenant } = input
   const capabilities: SourceCapabilities = { version: SOURCE_PROTOCOL_VERSION, tenant, retentionModes: ['governed'], fieldEvidence: true, reconciliation: true }
-  const counters = { reads: 0, authorizations: 0, effects: 0, reconciliations: 0 }
+  const counters = { reads: 0, discoveries: 0, authorizations: 0, effects: 0, reconciliations: 0 }
   let afterRead: (() => Promise<void>) | undefined
   const actorKnown = async (db: Query, subject: SourceSubject) => Boolean((await db.query(
     'SELECT 1 FROM accounts a JOIN assistants s ON s.id=$3 AND s.active WHERE a.kind=$1 AND a.id=$2 AND a.active FOR SHARE OF a,s',
@@ -138,8 +155,12 @@ export async function startIndependentSource(input: { pool: Pool; tenant: string
   app.all('/mcp', async (req, res) => {
     try {
       const { actor } = await authorizeConnectorRequest({ ...requestAuth(req), authorize: async actor => ({ allowed: await actorKnown(pool, sourceSubjectFromActor(actor)), value: null }) })
+      if (req.body?.method === 'tools/list') counters.discoveries++
       const server = new McpServer({ name: 'Independent reference source', version: '1' })
-      server.registerTool('readRecord', { inputSchema: { id: z.string(), fields: z.array(z.string()).min(1).max(256) }, annotations: { readOnlyHint: true } }, async ({ id, fields }) => {
+      const subject = sourceSubjectFromActor(actor)
+      const readableFields = (await pool.query<{ field: string }>(`SELECT DISTINCT unnest(g.fields) AS field FROM grants g JOIN records r ON r.id=g.record_id
+        WHERE g.kind=$1 AND g.account_id=$2 AND 'read'=ANY(g.actions) AND NOT r.withdrawn ORDER BY field`, [subject.kind,subject.id])).rows.map(row => row.field)
+      if (readableFields.length) server.registerTool('readRecord', { inputSchema: { id: z.string(), fields: z.array(z.enum(readableFields as [string,...string[]])).min(1).max(256) }, annotations: { readOnlyHint: true } }, async ({ id, fields }) => {
         const result = await read(sourceSubjectFromActor(actor), id, fields)
         return result ? { content: [{ type: 'text', text: JSON.stringify(result.data) }], _meta: { [SOURCE_PROTOCOL_VERSION]: result.envelope } }
           : { isError: true, content: [{ type: 'text', text: 'source_access_denied' }] }

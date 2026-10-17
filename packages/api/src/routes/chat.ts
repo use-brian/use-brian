@@ -488,6 +488,7 @@ type WebChatOptions = {
   connectorGrantStore?: import('../db/connector-grant-store.js').ConnectorGrantStore
   /** Stage 5: enables team-native connector_instance consumption (team-admin-configured tools). */
   connectorInstanceStore?: import('../db/connector-instance-store.js').ConnectorInstanceStore
+  connectorSourceRuntimeFactory?: import('../application-platform/source-runtime.js').ConnectorSourceRuntimeFactory
   /** Shared workspace tool policy (migration 312) — governs team-owned connector tool allow/ask/block. */
   workspaceToolPolicyStore?: import('../db/workspace-tool-policy-store.js').WorkspaceToolPolicyStore
   workerManager?: import('@use-brian/core').WorkerManager
@@ -5904,6 +5905,8 @@ export function chatRoutes(options: WebChatOptions): Router {
         allowKnowledgeWrites: true,
         knowledgeCaptureText: message ?? '',
         contextScope: turnScope,
+        executionContext,
+        scopeAccumulator,
         // On-demand introspection lane (ability audit §6-c/d): workspace
         // PRIMARY assistants only — these read workspace-operational state
         // (approvals / scheduled jobs / research runs / session history).

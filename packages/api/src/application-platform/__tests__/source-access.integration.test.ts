@@ -1,12 +1,17 @@
 import { createPublicKey, randomBytes, randomUUID } from 'node:crypto'
 import pg from 'pg'
 import { afterAll, describe, expect, it } from 'vitest'
-import { createBoundedConnectorReplayConsumer, createConnectorActorVerifier, SOURCE_PROTOCOL_VERSION,
+import { createConnectorActorVerifier, SOURCE_PROTOCOL_VERSION,
   type SourceAuthorizationRequest } from '@use-brian/brian-app/connector'
-import { ContextScopeAccumulator, scopeEvidenceFromRows } from '@use-brian/core'
+import { ContextScopeAccumulator, scopeEvidenceFromRows, executionToolContext, type Tool } from '@use-brian/core'
 import { getAppPool, getPool, applyRLSGucs, queryWithRLS } from '../../db/client.js'
 import { readCurrentScopeSources, validateDerivedWriteInputs } from '../../db/derived-scope-store.js'
 import { bindTrustedSourceRead, pinExternalSourceOperation } from '../source-store.js'
+import { createConnectorSourceRuntimeFactory } from '../source-runtime.js'
+import { injectMcpTools } from '../../mcp/inject.js'
+import { createDbConnectorStore } from '../../db/connector-store.js'
+import { createConnectorGrantStore } from '../../db/connector-grant-store.js'
+import { createDbMcpSettingsStore } from '../../db/mcp-settings-store.js'
 import { createConnectorInstanceStore } from '../../db/connector-instance-store.js'
 import { findAssistantById } from '../../db/users.js'
 import { resolveExecutionContextSystem } from '../../context-scope/execution-context.js'
@@ -15,7 +20,7 @@ import { createConnectorActorKeyStore } from '../connector-actor-keys.js'
 import { createConnectorActorFetch } from '../connector-actor-transport.js'
 import { createSourceAccessClient, trustedSourceEnvelope } from '../source-access.js'
 import { callRemoteMcpTool } from '../../mcp/client.js'
-import { independentSourceSchema, startIndependentSource } from './fixtures/independent-source.js'
+import { independentSourceSchema, independentSourceReplayConsumer, startIndependentSource } from './fixtures/independent-source.js'
 
 const { assertLocalFixture } = await import(new URL('../../../../../scripts/crm/local-fixture.mjs', import.meta.url).href)
 await assertLocalFixture()
@@ -34,6 +39,9 @@ describe('[COMP:api/external-source-access] independent persisted source ACL', (
     let source: Awaited<ReturnType<typeof startIndependentSource>> | undefined
     try {
       await sourcePool.query(independentSourceSchema)
+      const replay = { key: randomBytes(32).toString('base64url'), expiresAt: Math.floor(Date.now() / 1000) + 65, now: Math.floor(Date.now() / 1000) }
+      expect(await independentSourceReplayConsumer(sourcePool)(replay)).toBe(true)
+      expect(await independentSourceReplayConsumer(sourcePool)(replay)).toBe(false)
       await expect(sourcePool.query('SELECT id FROM public.users')).rejects.toMatchObject({ code: '42501' })
       for (const id of [owner,first,second,foreign,unmapped]) await pool.query("INSERT INTO users(id,auth_provider,auth_provider_id) VALUES($1::uuid,'email',$1::text)", [id])
       await pool.query("INSERT INTO workspaces(id,name,owner_user_id,department_read_v2) VALUES($1,'Source boundary fixture',$2,true)", [workspace,owner])
@@ -56,7 +64,7 @@ describe('[COMP:api/external-source-access] independent persisted source ACL', (
       const instance = await instances.createWorkspaceInstance({ workspaceId: workspace, createdBy: owner, provider: randomUUID(), label: 'Independent source fixture', custom: true,
         connected: true, compartments: [`team:${department}`], projectIds: [], credentials: { type: 'bearer', token: transportToken } })
       const verify = createConnectorActorVerifier({ issuer, audience, workspaceId: workspace, connectorInstanceId: instance.id,
-        consumeReplay: createBoundedConnectorReplayConsumer(), trustedKey: async kid => { const jwk = (await keys.publicJwks(issuer)).keys.find(key => key.kid === kid)
+        consumeReplay: independentSourceReplayConsumer(sourcePool), trustedKey: async kid => { const jwk = (await keys.publicJwks(issuer)).keys.find(key => key.kid === kid)
           return jwk ? { key: createPublicKey({ key: jwk, format: 'jwk' }) } : null } })
       source = await startIndependentSource({ pool: sourcePool, tenant: 'fixture-tenant', transportToken, verifyActor: verify,
         uiSessions: new Map([['first-ui-session',{ kind: 'human', id: first, executingAssistantId: assistant }],['second-ui-session',{ kind: 'human', id: second, executingAssistantId: assistant }]]) })
@@ -153,6 +161,38 @@ describe('[COMP:api/external-source-access] independent persisted source ACL', (
       await expect(pool.query('UPDATE external_source_observations SET fields=$2 WHERE id=$1', [retainedSources![0].resourceId,['description']])).rejects.toMatchObject({ code: '22023' })
       expect((await pool.query('SELECT count(*)::int AS count FROM external_source_resources WHERE profile_id=$1', [sourceProfile])).rows[0].count).toBe(1)
       expect((await pool.query('SELECT count(*)::int AS count FROM external_source_observations WHERE workspace_id=$1', [workspace])).rows[0].count).toBe(2)
+      const sourceRuntimeFactory = createConnectorSourceRuntimeFactory({ issuer, keys, instances })
+      const inject = async (userId: string, includeExecution = true) => {
+        const actor = await client(userId), scopeAccumulator = new ContextScopeAccumulator(), tools = new Map<string, Tool>()
+        const result = await injectMcpTools({ userId: owner, assistantId: assistant, assistantTeamId: workspace, tools,
+          connectorStore: createDbConnectorStore(encryptionKey), connectorInstanceStore: instances, connectorGrantStore: createConnectorGrantStore(),
+          settingsStore: createDbMcpSettingsStore(), connectorSourceRuntimeFactory: sourceRuntimeFactory, keepDynamicToolsDirect: true,
+          contextScope: { effectiveCompartments: actor.execution.security.access.compartments!, effectiveProjectIds: actor.execution.security.access.projectIds!, access: actor.execution.security.access },
+          actorIdentity: { channel: 'test', userId }, executionContext: includeExecution ? actor.execution : undefined, scopeAccumulator })
+        return { ...actor, scopeAccumulator, tools, result, context: { ...executionToolContext(actor.execution, { appId: 'Fixture' }), scopeAccumulator } }
+      }
+      const protectedRead = await inject(first)
+      expect(protectedRead.tools.has('readRecord')).toBe(true); expect(protectedRead.tools.has('updateRecord')).toBe(false)
+      const discovered = source.counters.discoveries
+      const protectedSecond = await inject(first)
+      expect(protectedSecond.tools.has('readRecord')).toBe(true)
+      expect(source.counters.discoveries).toBeGreaterThan(discovered)
+      const protectedOutput = await protectedRead.tools.get('mcp_call')!.execute({ server: `connector:${instance.id}`, tool: 'readRecord', args: { id: 'order-1', fields: ['description','cost'] } }, protectedRead.context)
+      expect(JSON.stringify(protectedOutput)).toContain('37.25'); expect(protectedRead.scopeAccumulator.evidence.sources).toHaveLength(1)
+      const narrowRuntime = await inject(second)
+      const narrowSearch = await narrowRuntime.tools.get('mcp_search')!.execute({ query: 'readRecord', limit: 1 }, narrowRuntime.context)
+      expect(String(narrowSearch.data)).not.toContain('cost')
+      expect(await narrowRuntime.tools.get('readRecord')!.execute({ id: 'order-1', fields: ['cost'] }, narrowRuntime.context)).toMatchObject({ isError: true })
+      expect(narrowRuntime.scopeAccumulator.evidence.sources ?? []).toEqual([])
+      expect(JSON.stringify(await narrowRuntime.tools.get('readRecord')!.execute({ id: 'order-1', fields: ['description'] }, narrowRuntime.context))).not.toContain('37.25')
+      expect(narrowRuntime.scopeAccumulator.evidence.sources).toHaveLength(1)
+      await expect(async () => protectedRead.tools.get('readRecord')!.execute({ id: 'order-1', fields: ['cost'] }, protectedSecond.context)).rejects.toMatchObject({ reason: 'authority_changed' })
+      const missingExecution = await inject(first, false), missingMapping = await inject(unmapped)
+      expect(missingExecution.tools.has('readRecord')).toBe(false); expect(missingMapping.tools.has('readRecord')).toBe(false)
+      expect(missingExecution.result.unavailable.join(' ')).toContain('Protected source access is unavailable')
+      expect(missingMapping.result.unavailable.join(' ')).toContain('Protected source access is unavailable')
+      await expect(createConnectorSourceRuntimeFactory({ issuer, instances })({ workspaceId: workspace, instanceId: instance.id, execution: one.execution,
+        accumulator: new ContextScopeAccumulator(), headers: { Authorization: `Bearer ${transportToken}` } })).rejects.toMatchObject({ code: 'source_unavailable' })
       expect(JSON.stringify(await two.access.readMcp('readRecord', { id: 'order-1', fields: ['description'] }))).not.toContain('37.25')
       await expect(two.access.readMcp('readRecord', { id: 'order-1', fields: ['cost'] })).rejects.toMatchObject({ code: 'source_unavailable' })
       await expect(unknown.access.capabilities()).rejects.toMatchObject({ code: 'source_access_denied' })
@@ -168,8 +208,8 @@ describe('[COMP:api/external-source-access] independent persisted source ACL', (
       expect(httpRead.result.structuredContent).toEqual({ cost: '37.25' })
       expect(trustedSourceEnvelope(httpRead)?.resources[0].fields).toEqual(['cost'])
       await expect(two.access.readHttp({ id: 'order-1', fields: ['cost'] })).rejects.toMatchObject({ code: 'source_access_denied' })
-      const retained = (userId: string): SourceAuthorizationRequest => ({ version: SOURCE_PROTOCOL_VERSION, operationId: randomUUID(),
-        items: [{ itemId: randomUUID(), resource: evidence.resources[0].resource, fields: ['description'], action: 'context', retentionMode: 'governed' }],
+      const retained = (userId: string, resource = evidence.resources[0].resource): SourceAuthorizationRequest => ({ version: SOURCE_PROTOCOL_VERSION, operationId: randomUUID(),
+        items: [{ itemId: randomUUID(), resource, fields: ['description'], action: 'context', retentionMode: 'governed' }],
         recipients: [{ recipientId: randomUUID(), subject: { kind: 'human', id: userId, executingAssistantId: assistant } }] })
       await one.access.authorize(retained(first)); await two.access.authorize(retained(second))
       await sourcePool.query("DELETE FROM grants WHERE account_id=$1 AND record_id='order-1'", [first])
@@ -186,8 +226,19 @@ describe('[COMP:api/external-source-access] independent persisted source ACL', (
       expect(source.counters.effects).toBe(1)
       expect(await one.access.reconcile({ version: SOURCE_PROTOCOL_VERSION, idempotencyKey: args.idempotencyKey })).toMatchObject({ state: 'applied' })
       expect(await one.access.reconcile({ version: SOURCE_PROTOCOL_VERSION, idempotencyKey: 'unknown-effect' })).toMatchObject({ state: 'not_applied' })
+      await pool.query("UPDATE connector_source_profiles SET status='pending' WHERE id=$1", [sourceProfile])
+      await expect(async () => protectedRead.tools.get('readRecord')!.execute({ id: 'order-1', fields: ['description'] }, protectedRead.context)).rejects.toMatchObject({ reason: 'authority_changed' })
+      const pendingProfile = await inject(first)
+      expect(pendingProfile.tools.has('readRecord')).toBe(false)
+      expect(pendingProfile.result.unavailable.join(' ')).toContain('Protected source access is unavailable')
+      await pool.query("UPDATE connector_source_profiles SET status='qualified' WHERE id=$1", [sourceProfile])
+      await expect(async () => protectedRead.tools.get('readRecord')!.execute({ id: 'order-1', fields: ['description'] }, protectedRead.context)).rejects.toMatchObject({ reason: 'authority_changed' })
+      const currentProfile = await inject(first)
+      expect(currentProfile.tools.has('readRecord')).toBe(true)
+      const currentObservation = trustedSourceEnvelope(await two.access.readMcp('readRecord', { id: 'order-1', fields: ['description'] }))!
+      await two.access.authorize(retained(second, currentObservation.resources[0].resource))
       await sourcePool.query("UPDATE records SET withdrawn=true WHERE id='order-1'")
-      await expect(two.access.authorize(retained(second))).rejects.toMatchObject({ code: 'source_access_denied' })
+      await expect(two.access.authorize(retained(second, currentObservation.resources[0].resource))).rejects.toMatchObject({ code: 'source_access_denied' })
       expect(await one.access.reconcile({ version: SOURCE_PROTOCOL_VERSION, idempotencyKey: args.idempotencyKey })).toMatchObject({ state: 'uncertain' })
       expect(source.counters.effects).toBe(1)
       await source.close(); source = undefined

@@ -18,7 +18,9 @@
  * See docs/architecture/integrations/mcp.md → "Runtime".
  */
 
-import type { AccessContext, CachedFile } from '@use-brian/core'
+import type { AccessContext, CachedFile, ExecutionContext, ContextScopeAccumulator } from '@use-brian/core'
+import type { ConnectorSourceRuntimeFactory, ConnectorSourceRuntime } from '../application-platform/source-runtime.js'
+import { SourceProtocolError } from '@use-brian/brian-app/connector'
 import { promoteCachedFile, wrapMcpTools, buildToolIndex, createMcpSearchTools, legacyMcpToolName, createGoogleCalendarTools, createGmailTools, createGoogleDriveTools, createGoogleDocsTools, createGoogleSheetsTools, createGoogleSlidesTools, createGDriveFilesTools, createGitHubTools, createNotionTools, createFathomTools, createShopifyTools, createWordPressTools, createSearchConsoleTools, createMsGraphTools, createKnowledgeTools, createAgentmailTools, createMailboxTools, workspaceFilesCtxFor, workspaceFilesErrorMessage, workspaceFilesGate, GOOGLE_MAPS_TOOL_NAMES } from '@use-brian/core'
 import type { Tool, McpSettingsStore, McpServerConfig, KnowledgeStoreInterface, KnowledgeRepoWriter, KnowledgeWriteCaptureRule, AuthorizedFile, GDriveFilesStore, GDriveFileKind, LocalSource, RemoteSource, EngineHooks, FilesApi, AgentmailToolApi, MailboxApi, MailboxAccountRouter } from '@use-brian/core'
 import { getGlobalEmailInboxProvider, type EmailInboxProvider } from '../agentmail/provider.js'
@@ -156,7 +158,7 @@ import {
   matchKnowledgeCaptureRules,
   type KnowledgeCaptureRuleStore,
 } from '../knowledge/capture-rules.js'
-import { CONNECTOR_SCOPE_RESTRICTION } from './discovery-diagnostics.js'
+import { CONNECTOR_SCOPE_RESTRICTION, CONNECTOR_SOURCE_RESTRICTION } from './discovery-diagnostics.js'
 import { createConnectorRuntimeAuthority } from '../application-platform/connector-runtime-authority.js'
 import type { ToolContext } from '@use-brian/core'
 import { createHash } from 'node:crypto'
@@ -571,6 +573,10 @@ export async function injectMcpTools(params: {
   emailInboxProvider?: EmailInboxProvider | null
   /** Trusted turn grant used to withhold unbounded/cross-scope connectors. */
   contextScope?: ConnectorTurnGrant
+  /** Host-only protected source adapter, current execution and exact turn accumulator. */
+  connectorSourceRuntimeFactory?: ConnectorSourceRuntimeFactory
+  executionContext?: ExecutionContext
+  scopeAccumulator?: ContextScopeAccumulator
 }): Promise<McpInjectionResult> {
   const {
     userId, assistantId, tools, connectorStore, settingsStore, assistantConnectorStore,
@@ -581,12 +587,32 @@ export async function injectMcpTools(params: {
     connectorActionAudit, assistantConnectorGrantsStore, workspaceDomain,
     keepBuiltinsDirect = false, keepDynamicToolsDirect = false, restrictSearchToToolNames,
     engineHooks, actorIdentity, filesApi, readCachedFile,
-    introspectionTools, emailInboxProvider, contextScope,
+    introspectionTools, emailInboxProvider, contextScope, connectorSourceRuntimeFactory, executionContext, scopeAccumulator,
   } = params
 
   const unavailable: string[] = []
   const originalTools = new Map(tools)
   const runtimeActorId = contextScope?.access?.userId ?? actorIdentity?.userId
+  const protectedSources = new Set<ConnectorSourceRuntime>()
+  const noteProtectedUnavailable = () => {
+    if (!unavailable.includes(CONNECTOR_SOURCE_RESTRICTION)) unavailable.push(CONNECTOR_SOURCE_RESTRICTION)
+  }
+  const sourceRuntimes = new Map<string, Promise<ConnectorSourceRuntime | null>>()
+  const sourceRuntime = (instanceId: string | null | undefined, headers: Record<string, string>) => {
+    if (!instanceId || !assistantTeamId || !connectorSourceRuntimeFactory) return Promise.resolve(null)
+    if (executionContext && (executionContext.assistant.id !== assistantId || executionContext.security.access.userId !== runtimeActorId)) throw new AuthorityChangedError()
+    let pending = sourceRuntimes.get(instanceId)
+    if (!pending) {
+      pending = connectorSourceRuntimeFactory({ instanceId, workspaceId: assistantTeamId, execution: executionContext, accumulator: scopeAccumulator, headers })
+        .then(runtime => { if (runtime) protectedSources.add(runtime); return runtime })
+        .catch(error => {
+          noteProtectedUnavailable()
+          throw error
+        })
+      sourceRuntimes.set(instanceId, pending)
+    }
+    return pending
+  }
   const pinnedBindings = new Map<string, { instanceId: string; instance: string; grant?: string }>()
   const pinnedAuth = new Map<string, string>()
   let bindingsInvalid = false
@@ -627,6 +653,7 @@ export async function injectMcpTools(params: {
         const headers = buildConnectorAuthHeaders(await connectorInstanceStore!.getAuthCredentialsSystem(id))
         if (authBinding(headers) !== expected) throw new AuthorityChangedError(mayHaveExecuted)
       }))
+      await Promise.all([...protectedSources].map(source => source.assertCurrent()))
     } catch {
       bindingsInvalid = true
       throw new AuthorityChangedError(mayHaveExecuted)
@@ -817,10 +844,11 @@ export async function injectMcpTools(params: {
     }
   }
 
-  async function invokeRemoteMcp(url: string, tool: string, input: Record<string, unknown>, headers?: Record<string, string>) {
+  async function invokeRemoteMcp(url: string, tool: string, input: Record<string, unknown>, headers?: Record<string, string>, instanceId?: string | null) {
     await runtimeAuthority?.assertCurrent()
     await assertBindingsCurrent()
-    return callRemoteMcpTool(url, tool, input, headers)
+    const source = await sourceRuntime(instanceId, headers ?? {})
+    return source ? source.call(tool, input, headers) : callRemoteMcpTool(url, tool, input, headers)
   }
 
   const discoveredServers: Array<{
@@ -875,9 +903,10 @@ export async function injectMcpTools(params: {
       const cacheKey = `${runtimeAuthority?.cacheKey ?? userId}:${assistantId}:${connector.instanceId}:${bindingCacheKey(connector.instanceId)}:${connector.connectorId}:${connector.url}:${connector.updatedAt?.getTime() ?? 0}`
       await runtimeAuthority?.assertCurrent()
       await assertBindingsCurrent()
+      const protectedSource = await sourceRuntime(connector.instanceId, authHeaders)
 
       // Check cache first
-      const cached = getCachedDiscovery(cacheKey)
+      const cached = protectedSource ? null : getCachedDiscovery(cacheKey)
       if (cached) {
         console.debug(`[mcp-inject] ${connector.name}: cache hit (${cached.tools.length} tools)`)
         return {
@@ -896,7 +925,7 @@ export async function injectMcpTools(params: {
 
       // Discover with timeout
       const server = await Promise.race([
-        discoverMcpServer(connector.url, connector.name, authHeaders),
+        protectedSource ? protectedSource.discover(connector.name) : discoverMcpServer(connector.url, connector.name, authHeaders),
         new Promise<never>((_, reject) =>
           setTimeout(() => reject(new Error(`Discovery timeout for ${connector.name}`)), DISCOVERY_TIMEOUT),
         ),
@@ -904,7 +933,7 @@ export async function injectMcpTools(params: {
       await runtimeAuthority?.assertCurrent()
       await assertBindingsCurrent()
 
-      setCachedDiscovery(cacheKey, server)
+      if (!protectedSource) setCachedDiscovery(cacheKey, server)
       console.debug(
         `[mcp-inject] ${connector.name}: discovered ${server.tools.length} tools`,
       )
@@ -927,6 +956,7 @@ export async function injectMcpTools(params: {
     if (result.status === 'fulfilled') {
       discoveredServers.push(result.value)
     } else {
+      if (result.reason instanceof SourceProtocolError) noteProtectedUnavailable()
       console.error('[mcp-inject] server discovery failed:', result.reason)
     }
   }
@@ -947,7 +977,7 @@ export async function injectMcpTools(params: {
     serverUrl: connectorUrl,
     ...(instanceId ? { sourceId: `connector:${instanceId}` } : {}),
     callMcpTool: (_url: string, toolName: string, input: Record<string, unknown>, overrides?: Record<string, string>) =>
-      invokeRemoteMcp(connectorUrl, toolName, input, mergeValidatedHeaders(headers, overrides)),
+      invokeRemoteMcp(connectorUrl, toolName, input, mergeValidatedHeaders(headers, overrides), instanceId),
     policy,
   }))
 
@@ -973,17 +1003,18 @@ export async function injectMcpTools(params: {
       const cacheKey = `${runtimeAuthority?.cacheKey ?? cacheUserId}:${assistantId}:${instanceId}:${bindingCacheKey(instanceId)}:${url}:${updatedAt?.getTime() ?? 0}`
       await runtimeAuthority?.assertCurrent()
       await assertBindingsCurrent()
-      let server = getCachedDiscovery(cacheKey)
+      const protectedSource = await sourceRuntime(instanceId, authHeaders)
+      let server = protectedSource ? null : getCachedDiscovery(cacheKey)
       if (!server) {
         server = await Promise.race([
-          discoverMcpServer(url, name, authHeaders),
+          protectedSource ? protectedSource.discover(name) : discoverMcpServer(url, name, authHeaders),
           new Promise<never>((_, reject) =>
             setTimeout(() => reject(new Error(`Discovery timeout for ${name}`)), DISCOVERY_TIMEOUT),
           ),
         ])
         await runtimeAuthority?.assertCurrent()
         await assertBindingsCurrent()
-        setCachedDiscovery(cacheKey, server)
+        if (!protectedSource) setCachedDiscovery(cacheKey, server)
       }
       remoteSources.push({
         kind: 'remote',
@@ -991,7 +1022,7 @@ export async function injectMcpTools(params: {
         serverUrl: url,
         ...(instanceId ? { sourceId: `connector:${instanceId}` } : {}),
         callMcpTool: (_url: string, toolName: string, input: Record<string, unknown>, overrides?: Record<string, string>) =>
-          invokeRemoteMcp(url, toolName, input, mergeValidatedHeaders(authHeaders, overrides)),
+          invokeRemoteMcp(url, toolName, input, mergeValidatedHeaders(authHeaders, overrides), instanceId),
         policy: {
           settingsStore,
           userId: cacheUserId,
@@ -1002,6 +1033,7 @@ export async function injectMcpTools(params: {
       if (instanceId) remoteInstanceIds.add(instanceId)
       console.debug(`[mcp-inject] granted custom MCP ${name}: discovered ${server.tools.length} tools`)
     } catch (err) {
+      if (err instanceof SourceProtocolError) noteProtectedUnavailable()
       console.error(`[mcp-inject] granted custom MCP discovery failed (${name}):`, err)
     }
   }
@@ -2190,6 +2222,9 @@ export async function injectMcpTools(params: {
     for (const [name, tool] of tools) {
       if (originalTools.get(name) === tool) continue
       const assertActor = (context: ToolContext, mayHaveExecuted = false) => {
+        if (protectedSources.size > 0 && (context.executionContext !== executionContext || context.scopeAccumulator !== scopeAccumulator)) {
+          throw new AuthorityChangedError(mayHaveExecuted)
+        }
         const canonical = context.executionContext?.security.access
         if (context.executionContext?.lifecycle.abortSignal.aborted || canonical && (canonical.userId !== context.userId
           || canonical.assistantId !== context.assistantId || canonical.workspaceId !== context.workspaceId)) {
