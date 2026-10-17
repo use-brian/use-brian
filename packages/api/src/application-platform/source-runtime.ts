@@ -43,6 +43,8 @@ export function createConnectorSourceRuntimeFactory(options: { issuer: string; k
       || execution.identity.principal.kind !== 'workspace_member' || execution.security.access.workspaceId !== input.workspaceId
       || execution.ownership.kind !== 'workspace' || execution.ownership.workspaceId !== input.workspaceId
       || await getWorkspaceRoleSystem(execution.security.access.userId, input.workspaceId, true) === null) unavailable()
+    const authenticationKind = execution.identity.principal.authenticationKind
+    if (authenticationKind !== 'native_session' && authenticationKind !== 'verified_channel') unavailable()
     const native = await createConnectorRuntimeAuthority({ workspaceId: input.workspaceId, initiatingUserId: execution.security.access.userId,
       assistantId: execution.assistant.id })
     const initialInstance = await options.instances.getSystem(input.instanceId), credentials = await options.instances.getAuthCredentialsSystem(input.instanceId)
@@ -80,7 +82,7 @@ export function createConnectorSourceRuntimeFactory(options: { issuer: string; k
       ...(profile.http_read_path ? { httpReadPath: profile.http_read_path } : {}), tenant: profile.tenant, bindingRevision: profile.revision,
       subject: { kind: 'human', id: execution.security.access.userId, executingAssistantId: execution.assistant.id } }
     const ports = { ...keys, admit: async () => { await assertCurrent(); return { bindingRevision: profile.revision,
-      actor: { kind: 'human' as const, userId: execution.security.access.userId, authenticationKind: 'native_session' as const } } } }
+      actor: { kind: 'human' as const, userId: execution.security.access.userId, authenticationKind } } } }
     const client = (overrides?: Record<string, string>) => createSourceAccessClient(execution, binding, ports, { headers: mergeValidatedHeaders(input.headers, overrides) ?? {} })
     const discover = async (name: string, overrides?: Record<string, string>) => {
       await assertCurrent()

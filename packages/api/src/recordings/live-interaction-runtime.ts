@@ -78,7 +78,7 @@ export function createLiveInteractionRuntime(deps: LiveInteractionRuntimeDeps) {
       session.assistantId !== assistant.id || assistant.workspaceId !== binding.workspaceId) throw deny()
     const resolved = await resolveExecutionContextSystem({
       userId, assistant, workspaceId: binding.workspaceId, session, sessionAuthority: session,
-      identity: { kind: 'attended', principal: { kind: 'workspace_member', userId } },
+      identity: { kind: 'attended', principal: { kind: 'workspace_member', userId, authenticationKind: 'native_session' } },
       ownership: { kind: 'workspace', workspaceId: binding.workspaceId },
       lifecycle: { abortSignal: signal, sessionId: session.id, channelType: 'web', channelId: session.channelId },
       attribution: { billingUserId: userId },

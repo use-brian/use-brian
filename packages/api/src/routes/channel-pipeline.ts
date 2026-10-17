@@ -1259,7 +1259,7 @@ async function processChannelMessageTurn(params: ChannelPipelineParams): Promise
       // an approved group also reads their own personal rows.
       sharedAudience: !turnPolicy.context.personalMemory && !(audienceEnvelope?.allowed && audienceEnvelope.ceiling.userId),
       identity: senderIsWorkspaceMember
-        ? { kind: 'attended', principal: { kind: 'workspace_member', userId } }
+        ? { kind: 'attended', principal: { kind: 'workspace_member', userId, authenticationKind: 'verified_channel' } }
         : {
             kind: 'attended',
             principal: {

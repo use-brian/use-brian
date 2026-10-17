@@ -2963,7 +2963,7 @@ export function chatRoutes(options: WebChatOptions): Router {
           : session,
         identity: {
           kind: 'attended',
-          principal: { kind: 'workspace_member', userId: user.id },
+          principal: { kind: 'workspace_member', userId: user.id, authenticationKind: 'native_session' },
         },
         ownership: assistant.workspaceId
           ? { kind: 'workspace', workspaceId: assistant.workspaceId }

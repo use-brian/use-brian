@@ -37,7 +37,7 @@ function actorMatchesExecution(execution: ExecutionContext, admission: Connector
   const { actor, delegation } = admission, identity = execution.identity, actual = execution.security.access.userId
   if (identity.kind === 'attended') return actor.kind === 'human' && actor.userId === actual
     && identity.principal.userId === actual && !delegation
-    && actor.authenticationKind === (identity.principal.kind === 'workspace_member' ? 'native_session' : 'verified_channel')
+    && actor.authenticationKind === (identity.principal.kind === 'workspace_member' ? identity.principal.authenticationKind : 'verified_channel')
   if (identity.kind === 'delegated') return actor.kind === 'human' && actor.userId === actual
     && actor.authenticationKind === 'delegation' && delegation?.effectiveActorUserId === actual
     && delegation.delegationId === identity.delegationId && identity.actorUserId === actual

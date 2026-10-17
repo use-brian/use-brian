@@ -101,7 +101,12 @@ describe('[COMP:api/external-source-access] independent persisted source ACL', (
       const verify = createConnectorActorVerifier({ issuer, audience, workspaceId: workspace, connectorInstanceId: instance.id,
         consumeReplay: independentSourceReplayConsumer(sourcePool), trustedKey: async kid => { const jwk = (await keys.publicJwks(issuer)).keys.find(key => key.kid === kid)
           return jwk ? { key: createPublicKey({ key: jwk, format: 'jwk' }) } : null } })
-      source = await startIndependentSource({ pool: sourcePool, tenant: 'fixture-tenant', transportToken, verifyActor: verify,
+      let verifiedAuthentication: string | undefined
+      source = await startIndependentSource({ pool: sourcePool, tenant: 'fixture-tenant', transportToken, verifyActor: async (assertion, request) => {
+        const actor = await verify(assertion, request)
+        verifiedAuthentication = actor.actor.kind === 'human' ? actor.actor.authenticationKind : undefined
+        return actor
+      },
         uiSessions: new Map([['first-ui-session',{ kind: 'human', id: first, executingAssistantId: assistant }],['second-ui-session',{ kind: 'human', id: second, executingAssistantId: assistant }]]) })
       await instances.update(owner, instance.id, { url: `${source.url}/mcp` })
       const sourceProfile = (await pool.query<{ id: string }>(`INSERT INTO connector_source_profiles(workspace_id,connector_instance_id,tenant,issuer,audience,source_base_url,mcp_url,http_read_path,status,created_by_user_id)
@@ -109,9 +114,9 @@ describe('[COMP:api/external-source-access] independent persisted source ACL', (
       await expect(queryWithRLS(owner, "UPDATE connector_source_profiles SET status='qualified' WHERE id=$1", [sourceProfile])).rejects.toMatchObject({ code: '42501' })
       expect((await queryWithRLS(owner, "SELECT application_runtime_qualified($1,'connector_source') AS ready", [workspace])).rows[0].ready).toBe(false)
       expect((await queryWithRLS(first, 'SELECT id FROM connector_source_profiles WHERE workspace_id=$1', [workspace])).rows).toEqual([])
-      async function client(userId: string) {
+      async function client(userId: string, authenticationKind: 'native_session' | 'verified_channel' | 'credential_attribution' | null = 'native_session') {
         const execution = (await resolveExecutionContextSystem({ userId, workspaceId: workspace, assistant: (await findAssistantById(assistant))!, memberMode: 'member',
-          identity: { kind: 'attended', principal: { kind: 'workspace_member', userId } }, ownership: { kind: 'workspace', workspaceId: workspace },
+          identity: { kind: 'attended', principal: { kind: 'workspace_member', userId, ...(authenticationKind ? { authenticationKind } : {}) } }, ownership: { kind: 'workspace', workspaceId: workspace },
           lifecycle: { sessionId: randomUUID(), sessionPersisted: false, channelId: 'fixture', channelType: 'test', abortSignal: new AbortController().signal } })).executionContext
         const native = await createConnectorRuntimeAuthority({ workspaceId: workspace, assistantId: assistant, initiatingUserId: userId })
         const ports = { ...keys, admit: async () => { await native.assertCurrent(); const current = await instances.getSystem(instance.id)
@@ -197,8 +202,8 @@ describe('[COMP:api/external-source-access] independent persisted source ACL', (
       expect((await pool.query('SELECT count(*)::int AS count FROM external_source_resources WHERE profile_id=$1', [sourceProfile])).rows[0].count).toBe(1)
       expect((await pool.query('SELECT count(*)::int AS count FROM external_source_observations WHERE workspace_id=$1', [workspace])).rows[0].count).toBe(2)
       const sourceRuntimeFactory = createConnectorSourceRuntimeFactory({ issuer, keys, instances })
-      const inject = async (userId: string, includeExecution = true) => {
-        const actor = await client(userId), scopeAccumulator = new ContextScopeAccumulator(), tools = new Map<string, Tool>()
+      const inject = async (userId: string, includeExecution = true, authenticationKind: 'native_session' | 'verified_channel' = 'native_session') => {
+        const actor = await client(userId, authenticationKind), scopeAccumulator = new ContextScopeAccumulator(), tools = new Map<string, Tool>()
         const result = await injectMcpTools({ userId: owner, assistantId: assistant, assistantTeamId: workspace, tools,
           connectorStore: createDbConnectorStore(encryptionKey), connectorInstanceStore: instances, connectorGrantStore: createConnectorGrantStore(),
           settingsStore: createDbMcpSettingsStore(), connectorSourceRuntimeFactory: sourceRuntimeFactory, keepDynamicToolsDirect: true,
@@ -222,6 +227,16 @@ describe('[COMP:api/external-source-access] independent persisted source ACL', (
       expect(JSON.stringify(await narrowRuntime.tools.get('readRecord')!.execute({ id: 'order-1', fields: ['description'] }, narrowRuntime.context))).not.toContain('37.25')
       expect(narrowRuntime.scopeAccumulator.evidence.sources).toHaveLength(1)
       await expect(async () => protectedRead.tools.get('readRecord')!.execute({ id: 'order-1', fields: ['cost'] }, protectedSecond.context)).rejects.toMatchObject({ reason: 'authority_changed' })
+      const verifiedChannel = await inject(first, true, 'verified_channel')
+      expect(JSON.stringify(await verifiedChannel.tools.get('readRecord')!.execute({ id: 'order-1', fields: ['cost'] }, verifiedChannel.context))).toContain('37.25')
+      expect(verifiedAuthentication).toBe('verified_channel')
+      for (const authenticationKind of [null, 'credential_attribution'] as const) {
+        const unverified = await client(first, authenticationKind)
+        const beforeDiscovery = source.counters.discoveries
+        await expect(sourceRuntimeFactory({ workspaceId: workspace, instanceId: instance.id, execution: unverified.execution,
+          accumulator: new ContextScopeAccumulator(), headers: { Authorization: `Bearer ${transportToken}` } })).rejects.toMatchObject({ code: 'source_unavailable' })
+        expect(source.counters.discoveries).toBe(beforeDiscovery)
+      }
       const missingExecution = await inject(first, false), missingMapping = await inject(unmapped)
       expect(missingExecution.tools.has('readRecord')).toBe(false); expect(missingMapping.tools.has('readRecord')).toBe(false)
       expect(missingExecution.result.unavailable.join(' ')).toContain('Protected source access is unavailable')

@@ -62,7 +62,7 @@ describe('production workflow context assembly', () => {
     await input.loadResponseContext(binding)
     expect(resolveTurnScopeSystem).toHaveBeenCalledTimes(2)
     expect(resolveTurnScopeSystem).toHaveBeenCalledWith(expect.objectContaining({ userId: 'actor', assistant: { ...p.assistant, compartments: [] }, workspaceId: 'workspace',
-      identity: { kind: 'attended', principal: { kind: 'workspace_member', userId: 'actor' } },
+      identity: { kind: 'attended', principal: { kind: 'workspace_member', userId: 'actor', authenticationKind: 'verified_channel' } },
     }), expect.any(Object))
     expect(first.context.executionContext).toBeDefined()
     expect(first.context.abortSignal).toBe(p.abortController.signal)

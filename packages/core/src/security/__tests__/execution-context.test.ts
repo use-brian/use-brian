@@ -71,6 +71,22 @@ describe('[COMP:security/execution-context] validated execution context', () => 
     }))).toThrow('execution_actor_mismatch')
   })
 
+  it('pins authentication provenance independently from display transport and caller mutation', () => {
+    const facts = input()
+    facts.identity = { kind: 'attended', principal: { kind: 'workspace_member', userId: 'actor-1', authenticationKind: 'verified_channel' } }
+    const execution = createExecutionContext(facts)
+    if (facts.identity.principal.kind !== 'workspace_member') throw new Error('Fixture principal mismatch')
+    facts.identity.principal.authenticationKind = 'native_session'
+    facts.identity.principal.userId = 'another-actor'
+    expect(execution.identity).toEqual({ kind: 'attended', principal: { kind: 'workspace_member', userId: 'actor-1', authenticationKind: 'verified_channel' } })
+    expect(Object.isFrozen(execution.identity)).toBe(true)
+    expect(execution.identity.kind === 'attended' && Object.isFrozen(execution.identity.principal)).toBe(true)
+    expect(execution.lifecycle.channelType).toBe('web')
+    expect(() => createExecutionContext(input({ identity: { kind: 'attended', principal: {
+      kind: 'workspace_member', userId: 'actor-1', authenticationKind: 'claimed_email' as never,
+    } } }))).toThrow('execution_context_invalid:authentication_kind')
+  })
+
   it('intersects delegated authority with the parent and never turns empty into universal', () => {
     const execution = createExecutionContext(input({
       identity: {

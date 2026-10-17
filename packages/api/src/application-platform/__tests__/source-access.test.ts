@@ -11,7 +11,7 @@ describe('[COMP:api/external-source-access] authenticated sidecar coordinator', 
   const now = 1_800_000_000_000
   function fixture() {
     const assertCurrent = vi.fn(async () => {}), controller = new AbortController()
-    const execution = createExecutionContext({ identity: { kind: 'attended', principal: { kind: 'workspace_member', userId } },
+    const execution = createExecutionContext({ identity: { kind: 'attended', principal: { kind: 'workspace_member', userId, authenticationKind: 'native_session' } },
       ownership: { kind: 'workspace', workspaceId }, access: { workspaceId, userId, assistantId, assistantKind: 'primary', clearance: 'internal',
         compartments: [], mutationCompartments: [], projectIds: [], visibilityAssistantIds: [] },
       authority: { assertCurrent, execute: async operation => operation() }, writeDefaults: { compartments: [], projectIds: [] },

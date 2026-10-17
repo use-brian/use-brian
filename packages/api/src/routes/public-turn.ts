@@ -738,7 +738,7 @@ export async function executePublicTurn(
       memberMode: fullScope ? 'assistant' : 'enforce',
       systemRead: laneReadsSystemSide(input.contextScope) || undefined,
       identity: internalScope
-        ? { kind: 'attended', principal: { kind: 'workspace_member', userId: user.id } }
+        ? { kind: 'attended', principal: { kind: 'workspace_member', userId: user.id, authenticationKind: 'credential_attribution' } }
         : {
             kind: 'programmatic',
             principal: {

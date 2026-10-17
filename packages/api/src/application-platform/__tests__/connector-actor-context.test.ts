@@ -11,7 +11,7 @@ describe('[COMP:api/connector-actor-context] host minting and dispatch', () => {
   const binding = { issuer: 'https://installation.example', audience: 'https://source.example/mcp', workspaceId, connectorInstanceId: instance }
   const key = generateKeyPairSync('ed25519'), now = 1_800_000_000
   const request = { method: 'POST', target: '/mcp', body: Buffer.from('{"method":"tools/list"}') }
-  function execution(identity: CreateExecutionContextInput['identity'] = { kind: 'attended', principal: { kind: 'workspace_member', userId } }) {
+  function execution(identity: CreateExecutionContextInput['identity'] = { kind: 'attended', principal: { kind: 'workspace_member', userId, authenticationKind: 'native_session' } }) {
     const assertCurrent = vi.fn().mockResolvedValue(undefined)
     return createExecutionContext({ identity, ownership: { kind: 'workspace', workspaceId },
       access: { workspaceId, userId, assistantId, assistantKind: 'primary', clearance: 'internal', compartments: [], mutationCompartments: [], projectIds: [], visibilityAssistantIds: [] },
@@ -43,6 +43,20 @@ describe('[COMP:api/connector-actor-context] host minting and dispatch', () => {
     const programmatic = execution({ kind: 'programmatic', principal: { kind: 'application', credentialId: randomUUID(), actorUserId: userId,
       applicationId: randomUUID(), subjectKind: 'member' }, credentialOwnerUserId: randomUUID() })
     await expect(mintConnectorActorAssertion(programmatic, binding, request, ports())).rejects.toMatchObject({ code: 'access_unavailable' })
+  })
+  it('signs verified channel provenance for members without trusting transport labels or native-session substitution', async () => {
+    const context = execution({ kind: 'attended', principal: { kind: 'workspace_member', userId, authenticationKind: 'verified_channel' } })
+    expect(context.lifecycle.channelType).toBe('web')
+    await expect(mintConnectorActorAssertion(context, binding, request, ports())).rejects.toMatchObject({ code: 'access_unavailable' })
+    const provider = ports()
+    provider.admit = async () => ({ bindingRevision: '3', actor: { kind: 'human', userId, authenticationKind: 'verified_channel' } })
+    expect((await verifier()(await mintConnectorActorAssertion(context, binding, request, provider), request)).actor)
+      .toEqual({ kind: 'human', userId, authenticationKind: 'verified_channel' })
+    for (const principal of [{ kind: 'workspace_member' as const, userId },
+      { kind: 'workspace_member' as const, userId, authenticationKind: 'credential_attribution' as const }]) {
+      await expect(mintConnectorActorAssertion(execution({ kind: 'attended', principal }), binding, request, ports()))
+        .rejects.toMatchObject({ code: 'access_unavailable' })
+    }
   })
   it('keeps system services distinct and refuses a fictitious initiating human', async () => {
     const context = execution({ kind: 'system', purpose: 'workflow', jobId: randomUUID() }), provider = ports()

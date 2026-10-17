@@ -28,7 +28,7 @@ describe('[COMP:api/connector-actor-context] real encrypted keys and MCP dispatc
   const issuer = () => `https://${randomUUID()}.installation.example`
   afterAll(async () => { await getAppPool().end(); await pool.end() })
   function execution() {
-    return createExecutionContext({ identity: { kind: 'attended', principal: { kind: 'workspace_member', userId } }, ownership: { kind: 'workspace', workspaceId },
+    return createExecutionContext({ identity: { kind: 'attended', principal: { kind: 'workspace_member', userId, authenticationKind: 'native_session' } }, ownership: { kind: 'workspace', workspaceId },
       access: { workspaceId, userId, assistantId, assistantKind: 'primary', clearance: 'internal', compartments: [], mutationCompartments: [], projectIds: [], visibilityAssistantIds: [] },
       writeDefaults: { compartments: [], projectIds: [] }, authority: { assertCurrent: async () => {}, execute: async operation => operation() },
       lifecycle: { sessionId: randomUUID(), channelId: 'fixture', channelType: 'web', abortSignal: new AbortController().signal } })
