@@ -14,6 +14,10 @@ import { connectorActorMetadataRoutes } from '../connector-actor-metadata.js'
 import { mintConnectorActorAssertion } from '../connector-actor-context.js'
 import { createConnectorActorFetch } from '../connector-actor-transport.js'
 import { callRemoteMcpTool, discoverMcpServer } from '../../mcp/client.js'
+import { resolveConnectorTurnScopeForChannelTurn } from '../../routes/channel-pipeline.js'
+import { resolveTurnScopeSystem } from '../../context-scope/resolve-turn-scope.js'
+import { connectorExposureAllowed } from '../../context-scope/connector-exposure.js'
+import { findAssistantById } from '../../db/users.js'
 
 const { assertLocalFixture } = await import(new URL('../../../../../scripts/crm/local-fixture.mjs', import.meta.url).href)
 await assertLocalFixture()
@@ -90,6 +94,52 @@ describe('[COMP:api/connector-actor-context] real encrypted keys and MCP dispatc
     const kid = randomUUID(), { x: _removed, ...incomplete } = row.public_jwk
     await expect(pool.query('INSERT INTO connector_actor_signing_keys(kid,issuer,encrypted_private_key,public_jwk) VALUES($1,$2,$3,$4)',
       [kid,issuer(),row.encrypted_private_key,{ ...incomplete,kid }])).rejects.toMatchObject({ code: '23514' })
+  })
+  it('intersects actual current sender and assistant Departments even for a broad room or legacy assistant connector setting', async () => {
+    const workspace = randomUUID(), owner = randomUUID(), member = randomUUID(), guest = randomUUID(), unassignedAdmin = randomUUID(), assistant = randomUUID(), departments = [randomUUID(),randomUUID()]
+    for (const id of [owner,member,guest,unassignedAdmin]) await pool.query("INSERT INTO users(id,auth_provider,auth_provider_id) VALUES($1::uuid,'email',$1::text)", [id])
+    try {
+      await pool.query("INSERT INTO workspaces(id,name,owner_user_id,department_read_v2) VALUES($1,'Channel actor fixture',$2,true)", [workspace,owner])
+      for (const [id,role] of [[owner,'owner'],[member,'member'],[unassignedAdmin,'admin']]) await pool.query("INSERT INTO workspace_members(workspace_id,user_id,role,clearance) VALUES($1,$2,$3,'confidential')", [workspace,id,role])
+      await pool.query("INSERT INTO assistants(id,name,workspace_id,owner_user_id,kind,clearance,compartments) VALUES($1,'Shared fixture assistant',$2,$3,'standard','confidential',NULL)", [assistant,workspace,owner])
+      for (const department of departments) {
+        await pool.query("INSERT INTO workspace_groups(id,workspace_id,name,created_by,kind,key,compartment_key) VALUES($1::uuid,$2,'Fixture Department',$3,'team',$1::text,$4)", [department,workspace,owner,`team:${department}`])
+        await pool.query("INSERT INTO workspace_compartments(workspace_id,key,label,created_by,managed_by,managed_ref_id) VALUES($1,$2,'Fixture Department',$3,'team',$4)", [workspace,`team:${department}`,owner,department])
+        await pool.query("INSERT INTO department_edges(workspace_id,department_id,principal_kind,assistant_id,clearance,origin) VALUES($1,$2,'assistant',$3,'confidential','store') ON CONFLICT DO NOTHING", [workspace,department,assistant])
+      }
+      await pool.query("INSERT INTO department_edges(workspace_id,department_id,principal_kind,user_id,clearance,origin) VALUES($1,$2,'user',$3,'confidential','store') ON CONFLICT DO NOTHING", [workspace,departments[0],member])
+      // The department owner keeps its required explicit edge. A different,
+      // unassigned workspace admin tests role-universe bypass without altering it.
+      expect((await pool.query('SELECT department_id FROM department_edges WHERE workspace_id=$1 AND user_id=$2', [workspace,unassignedAdmin])).rows).toEqual([])
+      const actualAssistant = (await findAssistantById(assistant))!
+      const memberScope = await resolveTurnScopeSystem({ userId: member, workspaceId: workspace, assistant: actualAssistant, memberMode: 'member' })
+      const broadRoom = { ...memberScope, access: { ...memberScope.access, compartments: null, mutationCompartments: null, projectIds: null,
+        departmentRead: { ...memberScope.access.departmentRead!, departments: Object.fromEntries(departments.map(id => [id,'confidential' as const])) } },
+        effectiveCompartments: null, effectiveProjectIds: null }
+      for (const v2 of [true,false]) {
+        await pool.query('UPDATE workspaces SET department_read_v2=$2 WHERE id=$1', [workspace,v2])
+        for (const useAssistantConnectorAuthority of [true,false]) {
+          const scope = await resolveConnectorTurnScopeForChannelTurn({ userId: member, workspaceId: workspace, assistant: actualAssistant,
+            session: {}, dataTurnScope: broadRoom, useAssistantConnectorAuthority })
+          expect(connectorExposureAllowed(scope, { compartments: [`team:${departments[0]}`], projectIds: [] })).toBe(true)
+          expect(connectorExposureAllowed(scope, { compartments: [`team:${departments[1]}`], projectIds: [] })).toBe(false)
+        }
+        const adminData = await resolveTurnScopeSystem({ userId: unassignedAdmin, workspaceId: workspace, assistant: actualAssistant, memberMode: 'assistant' })
+        const adminScope = await resolveConnectorTurnScopeForChannelTurn({ userId: unassignedAdmin, workspaceId: workspace, assistant: actualAssistant,
+          session: {}, dataTurnScope: adminData, useAssistantConnectorAuthority: true })
+        expect(connectorExposureAllowed(adminScope, { compartments: [`team:${departments[0]}`], projectIds: [] })).toBe(false)
+      }
+      await expect(resolveConnectorTurnScopeForChannelTurn({ userId: guest, workspaceId: workspace, assistant: actualAssistant,
+        session: {}, dataTurnScope: broadRoom, useAssistantConnectorAuthority: true })).rejects.toThrow('authority_unavailable')
+      await pool.query('DELETE FROM department_edges WHERE workspace_id=$1 AND assistant_id=$2 AND department_id=$3', [workspace,assistant,departments[0]])
+      const current = await resolveConnectorTurnScopeForChannelTurn({ userId: member, workspaceId: workspace, assistant: actualAssistant,
+        session: {}, dataTurnScope: broadRoom, useAssistantConnectorAuthority: true })
+      expect(connectorExposureAllowed(current, { compartments: [`team:${departments[0]}`], projectIds: [] })).toBe(false)
+      expect(connectorExposureAllowed(current, { compartments: [], projectIds: [] })).toBe(true)
+    } finally {
+      await pool.query('DELETE FROM workspaces WHERE id=$1', [workspace])
+      await pool.query('DELETE FROM users WHERE id=ANY($1::uuid[])', [[owner,member,guest,unassignedAdmin]])
+    }
   })
   it('verifies exact MCP initialize/discovery/call envelopes at a real local HTTP source', async () => {
     const configuredIssuer = issuer(), audience = 'https://source.example/mcp', verified: ConnectorActorClaims[] = []

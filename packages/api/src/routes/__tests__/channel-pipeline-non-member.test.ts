@@ -31,14 +31,15 @@ describe('[COMP:api/channel-pipeline/non-member-sender] non-member sender block'
     expect(block).not.toContain('resolves to the Use Brian account')
   })
 
-  it('states that assistant-authorized connector tools do not require account linking', () => {
+  it('does not promote the assistant connector setting to staff authority', () => {
     const block = buildNonMemberSenderBlock({
       channelType: 'feishu',
       senderEmail: null,
       senderName: 'Guest',
       assistantConnectorTools: true,
     })
-    expect(block).toContain('Connector tools explicitly enabled for this assistant ARE available')
-    expect(block).toContain('do not say account linking or workspace membership is required')
+    expect(block).toContain('A channel connector setting does not grant this sender staff authority')
+    expect(block).toContain('Do not use protected connectors')
+    expect(block).not.toContain('ARE available')
   })
 })

@@ -1,6 +1,7 @@
 import { withTurnInference } from '../turn/runtime.js'
 import { PER_TURN_FILES_INDEX_CAP, PER_TURN_INDEX_CAP } from '../turn/index-caps.js'
 import { policyFor } from '../session-kind.js'
+import { narrowConnectorTurnScope, resolveConnectorNativeTurnScopeSystem } from '../context-scope/connector-exposure.js'
 import { mayReadGroupContext, roomTurnShape } from '../channel-room/turn.js'
 import { admitRoomInputScope, claimRoomDisclosure, claimRoomHydration, findOrCreateChannelRoom, resolveRoomBinding, roomDisclosureText, roomInputScope, roomSpeakerLabel } from '../channel-room/room.js'
 import { releaseTurn, takeTurnLease, waitForTurnSlot } from '../turn/lease.js'
@@ -127,7 +128,6 @@ import {
   formatActiveWorkspaceContext,
   noteAutomaticScopeEvidence,
   turnOutputWrite,
-  resolveTurnScopeSystem,
   sessionMessageInputScope,
   type ResolvedTurnScope,
   type ResolveTurnScopeInput,
@@ -448,10 +448,9 @@ export type ChannelPipelineParams = AdmittedChannelMessage & {
    */
   externalGuestConnectorTools?: boolean
   /**
-   * Connector-only authority for this channel turn. `sender` preserves the
-   * ordinary member-scoped behavior; `assistant` resolves Team/Project
-   * exposure from the routed assistant while keeping every non-connector
-   * data path sender-scoped; `disabled` removes connector tools for the turn.
+   * Connector enablement for this channel. Both legacy `sender` and `assistant`
+   * settings retain the actual sender's current native Department/Project floor;
+   * `disabled` removes connector tools. A toggle cannot release staff authority.
    */
   connectorAuthority?: 'sender' | 'assistant' | 'disabled'
   /**
@@ -855,13 +854,12 @@ type ConnectorTurnScopeResolver = (
 ) => Promise<ResolvedTurnScope>
 
 /**
- * Keep the channel user's data authority separate from the routed assistant's
- * explicitly granted connector authority. The resolver parameter is a narrow
- * test seam for this security boundary; production always uses the canonical
- * TurnScope resolver.
+ * A connector toggle/room cannot replace the authenticated sender. Resolve its
+ * current native floor and retain the narrower turn/audience/credential envelope.
  */
 export async function resolveConnectorTurnScopeForChannelTurn(
   input: {
+    /** Legacy setting retained for call compatibility; it never widens authority. */
     useAssistantConnectorAuthority: boolean
     dataTurnScope: ResolvedTurnScope
     userId: string
@@ -869,16 +867,19 @@ export async function resolveConnectorTurnScopeForChannelTurn(
     workspaceId: string | null
     session: ResolveTurnScopeInput['session']
   },
-  resolveScope: ConnectorTurnScopeResolver = resolveTurnScopeSystem,
+  resolveScope: ConnectorTurnScopeResolver = resolveConnectorNativeTurnScopeSystem,
 ): Promise<ResolvedTurnScope> {
-  if (!input.useAssistantConnectorAuthority) return input.dataTurnScope
-  return resolveScope({
+  if (!input.workspaceId) return input.dataTurnScope
+  const initiator = await resolveScope({
     userId: input.userId,
     assistant: input.assistant,
     workspaceId: input.workspaceId,
     session: input.session,
-    memberMode: 'assistant',
+    memberMode: 'member',
   })
+  if (initiator.access.userId !== input.userId || initiator.access.workspaceId !== input.workspaceId
+    || initiator.access.assistantId !== input.assistant.id) throw new Error('connector_actor_mismatch')
+  return narrowConnectorTurnScope(input.dataTurnScope, initiator)
 }
 
 // ── Pipeline ─────────────────────────────────────────────────────
@@ -893,6 +894,7 @@ export function buildNonMemberSenderBlock(args: {
   channelType: string
   senderEmail: string | null
   senderName: string | null
+  /** Legacy call compatibility only. Enablement cannot create native staff authority. */
   assistantConnectorTools?: boolean
 }): string {
   const who = args.senderEmail
@@ -906,9 +908,7 @@ export function buildNonMemberSenderBlock(args: {
     `You are answering ${who}, who is NOT a member of this assistant's workspace. ` +
     'Every workspace-native read (workflows, tasks, pages, brain, contacts, deals) will come back empty or "not found" for them. ' +
     'That is an access boundary, not a missing record: do NOT report "no workflows", "no tasks", "not found" or "not visible in this workspace" as fact, do not ask them to open a different workspace, and do not retry lookups. ' +
-    (args.assistantConnectorTools
-      ? 'Connector tools explicitly enabled for this assistant ARE available in this channel. Use those tools normally, and do not say account linking or workspace membership is required to use them. '
-      : 'Do not infer connector availability from workspace membership; use only the connector tools actually present in this turn. ') +
+    'A channel connector setting does not grant this sender staff authority. Do not use protected connectors or claim that enabled assistant tools are available to them. ' +
     `If they ask about workspace-native data or ask you to act on it, tell them plainly: ${identity} ` +
     'Give both remedies: (1) a workspace admin invites that email to the workspace, or (2) they link this ' +
     `${args.channelType} account to the Use Brian account they normally use, from Settings -> Account -> Connected accounts, then re-send the message. ` +
@@ -2304,11 +2304,8 @@ async function processChannelMessageTurn(params: ChannelPipelineParams): Promise
       },
     })
     try {
-      // An external guest keeps the non-member scope resolved above for every
-      // prompt, memory, file, skill, and write path. The owner's explicit
-      // connector opt-in authorizes only the connector surface enabled for the
-      // routed assistant, so resolve that surface independently and never
-      // reuse it outside this injection call.
+      // Independently impose the actual sender's current native floor. A legacy
+      // assistant-mode toggle or room audience cannot confer staff connectors.
       const turnScope = await resolveConnectorTurnScopeForChannelTurn({
         useAssistantConnectorAuthority: useAssistantConnectorAuthority && !room,
         dataTurnScope,

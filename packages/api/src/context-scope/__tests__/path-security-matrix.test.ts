@@ -25,7 +25,7 @@ async function expectAnchors(path: string, anchors: readonly string[]): Promise<
 describe('[COMP:api/context-scope-entrypoints] execution entry-point parity', () => {
   const paths: Record<string, readonly string[]> = {
     'packages/api/src/routes/chat.ts': ['resolveTurnScopeSystem', 'scopeAccumulator', 'effectiveProjectIds'],
-    'packages/api/src/routes/channel-pipeline.ts': ['resolveTurnScopeSystem', 'contextScope: turnScope', 'effectiveProjectIds'],
+    'packages/api/src/routes/channel-pipeline.ts': ['resolveConnectorNativeTurnScopeSystem', 'contextScope: turnScope', 'effectiveProjectIds'],
     'packages/api/src/routes/public-turn.ts': ['resolveExecutionContextSystem', 'scopeAccumulator', 'effectiveProjectIds'],
     'packages/api/src/inter-assistant/executor.ts': ['resolveTurnScopeSystem', 'contextScope: turnScope', 'scopeAccumulator'],
     'packages/api/src/brain-mcp/tools.ts': ['resolveExecutionContextSystem', 'executionToolContext', 'scopeAccumulator'],
