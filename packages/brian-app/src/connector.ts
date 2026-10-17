@@ -1,5 +1,6 @@
 /** Node-only source identity verifier. Source business authority stays in its own callback. */
 import { createHash, verify, type KeyObject } from 'node:crypto'
+export * from './source.js'
 
 export const CONNECTOR_ACTOR_HEADER = 'X-UseBrian-Actor-Assertion'
 export const CONNECTOR_ACTOR_TYPE = 'ub-connector-actor+jwt'
