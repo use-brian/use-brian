@@ -95,6 +95,11 @@ export function parseSourceEnvelope(value: unknown): SourceEnvelope {
     resource(entry.resource); strings(entry.fields, 256, true)
     const labels = object(entry.labels, ['sensitivity','compartments','projectIds'])
     enumeration(labels.sensitivity, ['public','internal','confidential']); strings(labels.compartments); strings(labels.projectIds)
+    for (const label of labels.compartments) {
+      const match = /^(team|project):(.+)$/.exec(label)
+      if (!match) invalid()
+      uuid(match[2])
+    }
     labels.projectIds.forEach(uuid)
     list(entry.subjects); entry.subjects.forEach(subject); unique(entry.subjects, item => sourceSubjectKey(item as SourceSubject))
     strings(entry.actions, SOURCE_ACTIONS.length, true); entry.actions.forEach(action => enumeration(action, SOURCE_ACTIONS))

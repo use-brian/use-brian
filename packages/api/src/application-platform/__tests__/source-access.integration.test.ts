@@ -28,6 +28,41 @@ await assertLocalFixture()
 describe('[COMP:api/external-source-access] independent persisted source ACL', () => {
   const pool = getPool()
   afterAll(async () => { await getAppPool().end(); await pool.end() })
+  it('lets a personal owner delete an exposed connector without workspace trust administration or losing observation identity', async () => {
+    const workspace = randomUUID(), owner = randomUUID(), member = randomUUID(), assistant = randomUUID()
+    for (const id of [owner,member]) await pool.query("INSERT INTO users(id,auth_provider,auth_provider_id) VALUES($1::uuid,'email',$1::text)", [id])
+    try {
+      await pool.query("INSERT INTO workspaces(id,name,owner_user_id) VALUES($1,'Personal source lifecycle fixture',$2)", [workspace,owner])
+      for (const [id,role] of [[owner,'owner'],[member,'member']]) await pool.query('INSERT INTO workspace_members(workspace_id,user_id,role) VALUES($1,$2,$3)', [workspace,id,role])
+      await pool.query("INSERT INTO assistants(id,name,owner_user_id,workspace_id,kind) VALUES($1,'Lifecycle assistant',$2,$3,'standard')", [assistant,owner,workspace])
+      const instances = createConnectorInstanceStore(randomBytes(32)), instance = await instances.createUserInstance({ userId: member, createdBy: member,
+        provider: randomUUID(), label: 'Personal source fixture', url: 'https://source.example/mcp', connected: true, custom: true,
+        credentials: { type: 'bearer', token: 'fictional-private-source-token' } })
+      await createConnectorGrantStore().create({ actingUserId: member, connectorInstanceId: instance.id, targetType: 'workspace', targetId: workspace, compartments: [], projectIds: [] })
+      const profile = (await pool.query<{ id: string }>(`INSERT INTO connector_source_profiles(workspace_id,connector_instance_id,tenant,issuer,audience,source_base_url,mcp_url,status,created_by_user_id)
+        VALUES($1,$2,'lifecycle-tenant','https://brain.example','https://source.example','https://source.example','https://source.example/mcp','qualified',$3) RETURNING id`, [workspace,instance.id,owner])).rows[0].id
+      const resource = (await pool.query<{ id: string }>("INSERT INTO external_source_resources(workspace_id,profile_id,resource_type,opaque_id) VALUES($1,$2,'case','fictional-reference') RETURNING id", [workspace,profile])).rows[0].id
+      const metadata = { resource: { type: 'case', id: 'fictional-reference', contentVersion: '1', policyVersion: '1' }, fields: ['description'],
+        labels: { sensitivity: 'internal', compartments: [], projectIds: [] }, subjects: [{ kind: 'human', id: member, executingAssistantId: assistant }],
+        actions: ['read','context'], retention: { mode: 'governed' }, export: { model: true, destinations: [] } }
+      const observation = (await pool.query<{ id: string }>(`INSERT INTO external_source_observations(workspace_id,resource_id,version,content_version,policy_version,fields,observation,sensitivity,compartments,project_ids)
+        VALUES($1,$2,$3,'1','1',ARRAY['description'],$4,'internal','{}','{}') RETURNING id`, [workspace,resource,'a'.repeat(64),metadata])).rows[0].id
+      expect((await queryWithRLS(member, 'SELECT id FROM connector_source_profiles WHERE id=$1', [profile])).rows).toEqual([])
+      const project = randomUUID()
+      await pool.query("INSERT INTO workspace_projects(id,workspace_id,name,normalized_name,created_by) VALUES($1,$2,'Scope lifecycle fixture','scope lifecycle fixture',$3)", [project,workspace,owner])
+      await pool.query("INSERT INTO project_shared_scopes(project_id,workspace_id,origin,created_by) VALUES($1,$2,'created',$3)", [project,workspace,owner])
+      const beforeQuarantine = (await pool.query('SELECT external_source_authority_fingerprint($1,$2) AS fingerprint', [workspace,profile])).rows[0].fingerprint
+      await pool.query("UPDATE project_shared_scopes SET status='quarantined' WHERE project_id=$1", [project])
+      expect((await pool.query('SELECT external_source_authority_fingerprint($1,$2) AS fingerprint', [workspace,profile])).rows[0].fingerprint).not.toBe(beforeQuarantine)
+      expect(await instances.delete(member, instance.id)).toBe(true)
+      expect((await pool.query('SELECT status,connector_instance_id,original_connector_instance_id FROM connector_source_profiles WHERE id=$1', [profile])).rows[0])
+        .toEqual({ status: 'revoked', connector_instance_id: null, original_connector_instance_id: instance.id })
+      expect((await pool.query('SELECT resource_id FROM external_source_observations WHERE id=$1', [observation])).rows).toEqual([{ resource_id: resource }])
+      expect((await pool.query("SELECT read_scope_source($1,'external_source',$2) AS source", [workspace,observation])).rows[0].source).toEqual({ held: true })
+    } finally {
+      await pool.query('DELETE FROM workspaces WHERE id=$1', [workspace]); await pool.query('DELETE FROM users WHERE id=ANY($1::uuid[])', [[owner,member]])
+    }
+  })
   it('uses source canonical rights across UI/HTTP/MCP, same-department field differences, revocation, withdrawal and effect reconciliation', async () => {
     const workspace = randomUUID(), owner = randomUUID(), first = randomUUID(), second = randomUUID(), foreign = randomUUID(), unmapped = randomUUID(), assistant = randomUUID(), department = randomUUID()
     const sourceRole = `reference_${randomBytes(8).toString('hex')}`, sourceSchema = sourceRole, sourcePassword = randomBytes(32).toString('hex')
@@ -243,6 +278,16 @@ describe('[COMP:api/external-source-access] independent persisted source ACL', (
       expect(source.counters.effects).toBe(1)
       await source.close(); source = undefined
       await expect(two.access.authorize(retained(second))).rejects.toMatchObject({ code: 'source_unavailable' })
+      const evidenceCount = (await pool.query('SELECT count(*)::int AS count FROM external_source_observations WHERE workspace_id=$1', [workspace])).rows[0].count
+      expect(await instances.delete(owner, instance.id)).toBe(true)
+      expect(await instances.getSystem(instance.id)).toBeNull()
+      expect((await pool.query('SELECT connector_instance_id,original_connector_instance_id,status FROM connector_source_profiles WHERE id=$1', [sourceProfile])).rows[0])
+        .toEqual({ connector_instance_id: null, original_connector_instance_id: instance.id, status: 'revoked' })
+      expect((await pool.query('SELECT count(*)::int AS count FROM external_source_observations WHERE workspace_id=$1', [workspace])).rows[0].count).toBe(evidenceCount)
+      expect((await readCurrentScopeSources(pool, workspace, retainedSources!)).map(row => row.state)).toEqual(['held'])
+      await expect(sourceRuntimeFactory({ workspaceId: workspace, instanceId: instance.id, execution: one.execution,
+        accumulator: new ContextScopeAccumulator(), headers: {} })).rejects.toMatchObject({ code: 'source_unavailable' })
+      await expect(pool.query('UPDATE connector_source_profiles SET original_connector_instance_id=$2 WHERE id=$1', [sourceProfile,randomUUID()])).rejects.toMatchObject({ code: '22023' })
     } finally {
       await source?.close(); await sourcePool.end()
       await pool.query(`DROP SCHEMA ${sourceSchema} CASCADE`); await pool.query(`DROP ROLE ${sourceRole}`)

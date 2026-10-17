@@ -32,7 +32,7 @@ export function createConnectorSourceRuntimeFactory(options: { issuer: string; k
   return async input => {
     input = { ...input, headers: { ...input.headers } }
     const rows = (await getPool().query<ProfileRow>(`SELECT id,revision::text,status,issuer,audience,tenant,source_base_url,mcp_url,http_read_path
-      FROM connector_source_profiles WHERE workspace_id=$1 AND connector_instance_id=$2 ORDER BY created_at,id`, [input.workspaceId,input.instanceId])).rows
+      FROM connector_source_profiles WHERE workspace_id=$1 AND original_connector_instance_id=$2 ORDER BY created_at,id`, [input.workspaceId,input.instanceId])).rows
     if (rows.length === 0) return null
     const live = rows.filter(row => row.status !== 'revoked'), profile = live[0]
     if (live.length !== 1 || profile.status !== 'qualified' || profile.issuer !== options.issuer) unavailable()

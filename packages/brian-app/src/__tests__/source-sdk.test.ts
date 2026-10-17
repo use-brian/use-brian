@@ -51,6 +51,10 @@ describe('[COMP:shared/brian-app-sdk] independent source evidence and sidecar co
     expect(() => parseSourceEnvelope({ ...input, resources: [{ ...input.resources[0], retention: { mode: 'released_snapshot' } }] })).toThrow()
     expect(() => parseSourceEnvelope({ ...input, resources: [{ ...input.resources[0], retention: { mode: 'governed', releaseId: 'invented-release' } }] })).toThrow()
   })
+  it.each(['private:finance','team:unknown','project:unknown'])('refuses an unmapped or malformed native source label %s', label => {
+    const input = envelope(); input.resources[0].labels.compartments = [label]
+    expect(() => parseSourceEnvelope(input)).toThrow('source_protocol_invalid')
+  })
   it('binds authorization to each operation/resource/version/field/action/recipient', () => {
     const input = request(), digest = sourceAuthorizationDigest(input), valid = response(input)
     expect(requireSourceAuthorization(valid, input, tenant, now)).toEqual(valid)
