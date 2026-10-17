@@ -49,7 +49,7 @@ import {
   gateToolsOnActionGrants,
 } from '../safety/assert-action-allowed.js'
 import { createHealthReporter, wrapToolsWithHealthProbe, connectorReconnectNotice, classifyConnectorAuthError, type HealthReporter } from './connector-health.js'
-import { buildConnectorAuthHeaders, mergeValidatedHeaders, preflightHeadersToRecord, actorIdentityHeaders, type ActorIdentity } from './auth-headers.js'
+import { buildConnectorAuthHeaders, mergeValidatedHeaders, mergeHostConnectorIdentityHeaders, preflightHeadersToRecord, actorIdentityHeaders, type ActorIdentity } from './auth-headers.js'
 import {
   refreshGoogleAccessToken,
   unpackGoogleRefreshCredential,
@@ -775,7 +775,7 @@ export async function injectMcpTools(params: {
   // Reserved-namespace identity headers, built once per turn (the actor is
   // constant for the turn). Only attached to connectors that opted in, and
   // merged LAST so neither user config nor auth can shadow the assertion.
-  const actorHeaders = actorIdentity ? actorIdentityHeaders(actorIdentity) : null
+  const actorHeaders = actorIdentity ? actorIdentityHeaders({ ...actorIdentity, assistantId }) : null
   // Media capability token — a separate reserved header gated on its OWN opt-in
   // (`sendMediaToken`), independent of `sendActorIdentity`. It is a bearer
   // capability (possession fetches the user's latest recording), so it only
@@ -796,10 +796,10 @@ export async function injectMcpTools(params: {
     // it per call. See docs/architecture/engine/tool-hooks.md.
     let merged = mergeValidatedHeaders(resolvedHeaders[i], c.preflightHeaders)
     if (actorHeaders && c.sendActorIdentity) {
-      merged = mergeValidatedHeaders(merged, actorHeaders)
+      merged = mergeHostConnectorIdentityHeaders(merged, actorHeaders)
     }
     if (mediaTokenHeader && c.sendMediaToken) {
-      merged = mergeValidatedHeaders(merged, mediaTokenHeader)
+      merged = mergeHostConnectorIdentityHeaders(merged, mediaTokenHeader)
     }
     registerAuthHeaders(c.url, merged ?? {})
   })

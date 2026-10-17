@@ -35,7 +35,25 @@ canonical record IDs and legacy numeric shapes. Generic filters use cell values;
 sort-aware cursors bind schema/query identity. Native CRM/task adapters call the
 existing writers and source reader on a non-owner transaction.
 
-The reserved migration range is 8000-8007, corrected from 3947-3954 because the
+The reserved migration range is 8000-8009, corrected from 3947-3954 because the
 runner orders filenames lexically. Applied migrations are unchanged. No general
 app-data auth, delegated source trust, public discovery or protected retention is
 activated by these foundations. P2-P6 and the complete consumer ledger remain owed.
+
+## P3 actor protocol checkpoint
+
+The Node-only `@use-brian/brian-app/connector` export verifies exact request-bound
+Ed25519 identity with pinned keys, bounded replay and a canonical source permission
+callback. Migration 8005 stores independently generated encrypted deployment keys;
+the public well-known JWKS exposes only public material. Rotation/revoke and actual
+MCP byte signing are exercised on the guarded local fixture. The complete application
+fixture now has 74 passing cases and no skipped feature cases; the SDK has 52 cases
+and focused signer/header/MCP regressions have 135. These overlapping local checks
+do not certify the source ACL or all-consumer acceptance matrix.
+
+Protected discovery/runtime Department admission, source evidence/retention, complete
+consumer revalidation, management and reference journeys remain pending. No startup
+key generation, trust setup route or activation bypass is introduced by this checkpoint.
+Both offline frozen lockfile-only installs pass without lockfile changes. Existing
+identity opt-ins now include the stable executing-assistant header; untrusted static,
+custom-auth and dynamic header layers cannot replace reserved identity assertions.

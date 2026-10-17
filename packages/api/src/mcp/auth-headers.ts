@@ -36,6 +36,8 @@ const MAX_HEADER_VALUE_LENGTH = 8192
  * deprecation window.
  */
 export const RESERVED_HEADER_PREFIXES = ['x-usebrian-', 'x-sidanclaw-'] as const
+export const isReservedConnectorHeader = (name: string): boolean =>
+  RESERVED_HEADER_PREFIXES.some(prefix => name.toLowerCase().startsWith(prefix))
 
 export function isValidHeaderName(name: string): boolean {
   return name.length > 0 && name.length <= MAX_HEADER_NAME_LENGTH && HEADER_NAME_RE.test(name)
@@ -65,7 +67,7 @@ export function buildConnectorAuthHeaders(
       return { Authorization: `Bearer ${creds.token}` }
 
     case 'custom_header': {
-      if (typeof creds.header !== 'string' || !isValidHeaderName(creds.header)) {
+      if (typeof creds.header !== 'string' || !isValidHeaderName(creds.header) || isReservedConnectorHeader(creds.header)) {
         console.warn('[mcp-auth] rejected invalid auth header name')
         return {}
       }
@@ -112,6 +114,7 @@ export function mergeValidatedHeaders(
     for (const name of Object.keys(merged)) lowerToActual.set(name.toLowerCase(), name)
 
     for (const [name, value] of Object.entries(overrides)) {
+      if (isReservedConnectorHeader(name)) continue
       if (!isValidHeaderName(name)) {
         console.warn('[mcp-header-merge] dropped override with invalid header name')
         continue
@@ -128,6 +131,17 @@ export function mergeValidatedHeaders(
   }
 
   return Object.keys(merged).length > 0 ? merged : undefined
+}
+
+/** Host-only final identity layer. Never pass config, hook output or model arguments here. */
+export function mergeHostConnectorIdentityHeaders(base: Record<string, string> | undefined, identity: Record<string, string>): Record<string, string> {
+  const merged = { ...base }
+  for (const [name, value] of Object.entries(identity)) {
+    if (!isReservedConnectorHeader(name) || !isValidHeaderName(name) || !isValidHeaderValue(value)) continue
+    for (const old of Object.keys(merged)) if (old.toLowerCase() === name.toLowerCase()) delete merged[old]
+    merged[name] = value
+  }
+  return merged
 }
 
 /**
@@ -190,6 +204,8 @@ export type ActorIdentity = {
   email?: string | null
   /** Stable Use Brian user UUID — the key that never changes across channels. */
   userId: string
+  /** Stable executing assistant UUID, resolved by the host rather than connector config. */
+  assistantId?: string
   /**
    * Consumer-asserted organisation/tenant the actor belongs to, from the
    * public API's `claims.orgId`. Emitted as `X-UseBrian-Actor-Org` so a
@@ -243,6 +259,10 @@ export function actorIdentityHeaders(actor: ActorIdentity): Record<string, strin
   if (actor.org) {
     headers['X-UseBrian-Actor-Org'] = actor.org
     headers['X-Sidanclaw-Actor-Org'] = actor.org
+  }
+  if (actor.assistantId) {
+    headers['X-UseBrian-Assistant-Id'] = actor.assistantId
+    headers['X-Sidanclaw-Assistant-Id'] = actor.assistantId
   }
   return headers
 }

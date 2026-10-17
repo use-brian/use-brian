@@ -8,6 +8,7 @@ import { buildHomeApplicationMcpProfile } from './application-platform/mcp.js'
 import { captureApplicationHomeBinding } from './application-platform/home-auth.js'
 import { applicationPlatformRoutes } from './routes/application-platform.js'
 import { ApplicationManagementService } from './application-platform/management.js'
+import { connectorActorMetadataRoutes } from './application-platform/connector-actor-metadata.js'
 import { createEngineeringHistoryService } from './engineering-history/service.js'
 import { createCaptureConfigurationReader } from './engineering-history/configuration.js'
 import { engineeringHistoryRoutes } from './routes/engineering-history.js'
@@ -5983,6 +5984,7 @@ export async function bootOpenApi(opts: BootOpenApiOptions): Promise<BootResult>
   }
 
   app.use(oauthMetadataRoutes({ apiUrl: env.API_URL, webUrl: env.APP_URL }))
+  app.use(connectorActorMetadataRoutes(env.API_URL))
   const applicationService = new ApplicationPlatformService([
     createCanonicalNativeApplicationModule(), createCanonicalGenericApplicationModule(), ...(opts.applicationModules ?? []),
   ])

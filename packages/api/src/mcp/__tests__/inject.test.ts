@@ -813,6 +813,8 @@ describe('[COMP:api/mcp-inject] custom connector auth threading', () => {
       'X-Sidanclaw-Actor-Channel': 'web',
       'X-UseBrian-User-Id': 'u-actor-1',
       'X-Sidanclaw-User-Id': 'u-actor-1',
+      'X-UseBrian-Assistant-Id': 'a-1',
+      'X-Sidanclaw-Assistant-Id': 'a-1',
       'X-UseBrian-Actor-Id': 'ceo@corp.com',
       'X-Sidanclaw-Actor-Id': 'ceo@corp.com',
       'X-UseBrian-Actor-Email': 'ceo@corp.com',
@@ -938,6 +940,8 @@ describe('[COMP:api/mcp-inject] custom connector auth threading', () => {
       'X-Sidanclaw-Actor-Channel': 'whatsapp',
       'X-UseBrian-User-Id': 'u-media-2',
       'X-Sidanclaw-User-Id': 'u-media-2',
+      'X-UseBrian-Assistant-Id': 'a-1',
+      'X-Sidanclaw-Assistant-Id': 'a-1',
       'X-UseBrian-Actor-Id': '+15551234567',
       'X-Sidanclaw-Actor-Id': '+15551234567',
     })

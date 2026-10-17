@@ -9,6 +9,8 @@
 
 import { Client } from '@modelcontextprotocol/sdk/client/index.js'
 import { StreamableHTTPClientTransport } from '@modelcontextprotocol/sdk/client/streamableHttp.js'
+import type { StreamableHTTPClientTransportOptions } from '@modelcontextprotocol/sdk/client/streamableHttp.js'
+import type { FetchLike } from '@modelcontextprotocol/sdk/shared/transport.js'
 import type { McpServerConfig, McpToolInfo } from '@use-brian/core'
 
 const CONNECT_TIMEOUT = 10_000
@@ -22,8 +24,10 @@ const CALL_TIMEOUT = 30_000
  */
 function buildTransportOptions(
   headers?: Record<string, string>,
-): { requestInit: RequestInit } | undefined {
-  return headers && Object.keys(headers).length > 0 ? { requestInit: { headers } } : undefined
+  dispatchFetch?: FetchLike,
+): StreamableHTTPClientTransportOptions | undefined {
+  const options = headers && Object.keys(headers).length > 0 ? { requestInit: { headers } } : undefined
+  return dispatchFetch ? { ...options, fetch: dispatchFetch } : options
 }
 
 /**
@@ -33,9 +37,10 @@ export async function discoverMcpServer(
   url: string,
   name: string,
   headers?: Record<string, string>,
+  dispatchFetch?: FetchLike,
 ): Promise<McpServerConfig> {
   const client = new Client({ name: 'Use Brian', version: '1.0.0' })
-  const transport = new StreamableHTTPClientTransport(new URL(url), buildTransportOptions(headers))
+  const transport = new StreamableHTTPClientTransport(new URL(url), buildTransportOptions(headers, dispatchFetch))
 
   try {
     await client.connect(transport, { timeout: CONNECT_TIMEOUT })
@@ -74,9 +79,10 @@ export async function callRemoteMcpTool(
   toolName: string,
   input: Record<string, unknown>,
   headers?: Record<string, string>,
+  dispatchFetch?: FetchLike,
 ): Promise<unknown> {
   const client = new Client({ name: 'Use Brian', version: '1.0.0' })
-  const transport = new StreamableHTTPClientTransport(new URL(serverUrl), buildTransportOptions(headers))
+  const transport = new StreamableHTTPClientTransport(new URL(serverUrl), buildTransportOptions(headers, dispatchFetch))
 
   try {
     await client.connect(transport, { timeout: CONNECT_TIMEOUT })

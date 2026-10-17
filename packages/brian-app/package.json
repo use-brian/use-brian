@@ -9,6 +9,10 @@
     ".": {
       "types": "./dist/index.d.ts",
       "import": "./dist/index.js"
+    },
+    "./connector": {
+      "types": "./dist/connector.d.ts",
+      "import": "./dist/connector.js"
     }
   },
   "bin": {
