@@ -3,8 +3,9 @@ import pg from 'pg'
 import { afterAll, describe, expect, it } from 'vitest'
 import { createConnectorActorVerifier, SOURCE_PROTOCOL_VERSION,
   type SourceAuthorizationRequest } from '@use-brian/brian-app/connector'
-import { ContextScopeAccumulator, scopeEvidenceFromRows, executionToolContext, type Tool } from '@use-brian/core'
+import { ContextScopeAccumulator, scopeEvidenceFromRows, executionToolContext, type ScopeSource, type Tool } from '@use-brian/core'
 import { getAppPool, getPool, applyRLSGucs, queryWithRLS } from '../../db/client.js'
+import { createMemory } from '../../db/memories.js'
 import { readCurrentScopeSources, validateDerivedWriteInputs, validateDerivedMemoryInputs, validateDerivedEntityInputs, recordDerivedResource } from '../../db/derived-scope-store.js'
 import { bindTrustedSourceRead, pinExternalSourceOperation } from '../source-store.js'
 import { createConnectorSourceRuntimeFactory } from '../source-runtime.js'
@@ -236,6 +237,34 @@ describe('[COMP:api/external-source-access] independent persisted source ACL', (
         await expect(pinExternalSourceOperation(app, one.execution, expiring, bound.sources, 'context')).rejects.toMatchObject({ code: 'source_protocol_invalid' })
         await app.query('ROLLBACK')
       } finally { await app.query('ROLLBACK'); app.release() }
+      // Internal canonical writer transaction: source proof is still checked, not borrowed from its database owner.
+      const writer = await pool.connect()
+      let retainedDerivative: ScopeSource
+      let firstDerivative: ScopeSource | undefined
+      try {
+        let inputs = retainedSources!
+        for (let generation = 0; generation < 2; generation++) {
+          const prepared = await retainedCoordinator.prepare(one.execution, inputs, 'retain')
+          await writer.query('BEGIN'); await applyRLSGucs(writer, first)
+          await pinPreparedExternalSourceAuthority(writer, one.execution, prepared)
+          const memory = await createMemory({ assistantId: assistant, userId: null, workspaceId: workspace,
+            createdByUserId: first, summary: 'Fictional source derivative', sensitivity: 'public',
+            derivation: { producer: 'retained-source-ancestry-fixture', sources: inputs } }, undefined, writer)
+          retainedDerivative = { workspaceId: workspace,userId: memory.userId,assistantId: memory.assistantId,resourceKind: 'memory',resourceId: memory.id,
+            version: memory.scopeVersion,sensitivity: memory.sensitivity,compartments: memory.compartments,projectIds: memory.projectIds }
+          await writer.query('COMMIT')
+          firstDerivative ??= retainedDerivative
+          inputs = [retainedDerivative]
+        }
+        const descendants = (await pool.query('SELECT count(*)::int AS count FROM scope_derivations WHERE workspace_id=$1 AND producer=$2', [workspace,'retained-source-ancestry-fixture'])).rows[0].count
+        expect(descendants).toBe(2)
+        // Repeated historical derivations may form cycles; the metadata walk must terminate and keep the source.
+        await pool.query(`INSERT INTO scope_derivation_sources(workspace_id,derivation_id,source_kind,source_id,source_version)
+          SELECT $1,id,'memory',$3,$4 FROM scope_derivations WHERE workspace_id=$1 AND resource_id=$2`,
+          [workspace,firstDerivative!.resourceId,retainedDerivative!.resourceId,retainedDerivative!.version])
+        await retainedCoordinator.prepare(one.execution, [retainedDerivative!], 'context')
+        await expect(retainedCoordinator.prepare(two.execution, [retainedDerivative!], 'context')).rejects.toMatchObject({ code: 'source_access_denied' })
+      } finally { await writer.query('ROLLBACK'); writer.release() }
       for (const table of ['external_source_resources','external_source_observations','external_source_authorizations']) {
         expect((await queryWithRLS(first, `SELECT * FROM ${table} WHERE workspace_id=$1`, [workspace])).rows).toEqual([])
       }
@@ -308,6 +337,7 @@ describe('[COMP:api/external-source-access] independent persisted source ACL', (
       await sourcePool.query("DELETE FROM grants WHERE account_id=$1 AND record_id='order-1'", [first])
       await expect(one.access.authorize(retained(first))).rejects.toMatchObject({ code: 'source_access_denied' })
       await expect(retainedCoordinator.prepare(one.execution, retainedSources!, 'context')).rejects.toMatchObject({ code: 'source_access_denied' })
+      await expect(retainedCoordinator.prepare(one.execution, [retainedDerivative!], 'context')).rejects.toMatchObject({ code: 'source_access_denied' })
       await two.access.authorize(retained(second))
       await sourcePool.query("INSERT INTO grants(kind,account_id,record_id,fields,actions) VALUES('human',$1,'order-1',$2,$3)", [first,['description','cost'],actions])
       source.setAfterRead(async () => { await sourcePool.query("DELETE FROM grants WHERE account_id=$1 AND record_id='order-1'", [first]) })

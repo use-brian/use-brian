@@ -56,6 +56,27 @@ describe('[COMP:api/external-source-access] retained source batching and token b
     await expect(f.coordinator.prepare(f.execution, [{ ...f.sources[0],workspaceId: randomUUID() }], 'context')).rejects.toMatchObject({ code: 'source_access_denied' })
     expect(f.authorize).toHaveBeenCalledTimes(1)
   })
+  it('expands native roots without losing external obligations and refuses unknown ancestry before HTTP', async () => {
+    const f = fixture(1), root = { ...f.sources[0],resourceKind: 'memory',resourceId: randomUUID() }
+    f.query.mockImplementation(async (sql: string, values: unknown[]) => sql.includes('WITH RECURSIVE')
+      ? { rows: [{ nodeVersion: f.sources[0].version, source: f.sources[0] }] } as never
+      : { rows: f.rows.filter(row => (values[1] as string[]).includes(row.id)) })
+    const token = await f.coordinator.prepare(f.execution, [root], 'context')
+    expect(f.query.mock.calls[0][0]).toContain('WITH RECURSIVE lineage')
+    expect(f.authorize.mock.calls[0][0].items[0].resource).toEqual(f.rows[0].observation.resource)
+    f.query.mockResolvedValueOnce({ rows: [{ nodeVersion: 'missing', source: null }] } as never)
+    await expect(f.coordinator.prepare(f.execution, [root], 'context')).rejects.toMatchObject({ code: 'source_access_denied' })
+    f.query.mockResolvedValueOnce({ rows: [{ nodeVersion: 'changed', source: f.sources[0] }] } as never)
+    await expect(f.coordinator.prepare(f.execution, [root], 'context')).rejects.toMatchObject({ code: 'source_access_denied' })
+    f.query.mockResolvedValueOnce({ rows: [{ nodeVersion: f.sources[0].version, source: f.sources[0] }] } as never)
+    await expect(f.coordinator.prepare(f.execution, [{ ...root,userId: randomUUID() }], 'context')).rejects.toMatchObject({ code: 'source_access_denied' })
+    expect(f.authorize).toHaveBeenCalledTimes(1)
+    f.query.mockResolvedValueOnce({ rows: [] } as never)
+    const client = { query: vi.fn() } as unknown as PoolClient
+    await expect(pinPreparedExternalSourceAuthority(client, f.execution, token)).rejects.toMatchObject({ code: 'source_access_denied' })
+    await expect(pinPreparedExternalSourceAuthority(client, f.execution, token)).rejects.toMatchObject({ code: 'source_access_denied' })
+    expect(client.query).not.toHaveBeenCalled()
+  })
   it('refuses missing or changed observations before network authorization', async () => {
     const f = fixture(1)
     f.rows[0].version = 'changed'
