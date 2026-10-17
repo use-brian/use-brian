@@ -22,7 +22,13 @@ export type ConnectorSourceRuntime = {
   authorize: SourceAccessClient['authorize']
 }
 export type ConnectorSourceRuntimeFactory = (input: { workspaceId: string; instanceId: string;
-  execution?: ExecutionContext; accumulator?: ContextScopeAccumulator; headers: Record<string, string> }) => Promise<ConnectorSourceRuntime | null>
+  execution?: ExecutionContext; accumulator?: ContextScopeAccumulator; headers: Record<string, string>;
+  /** Host registers the absence lease so introducing protected trust invalidates legacy dispatch. */
+  onLegacyAdmission?: (assertCurrent: () => Promise<void>) => void }) => Promise<ConnectorSourceRuntime | null>
+let sharedFactory: ConnectorSourceRuntimeFactory | undefined
+/** Boot-owned composition port. This carries no positive authorization decision. */
+export function configureConnectorSourceRuntimeFactory(factory: ConnectorSourceRuntimeFactory | undefined) { sharedFactory = factory }
+export function getSharedConnectorSourceRuntimeFactory() { return sharedFactory }
 type ProfileRow = { id: string; revision: string; status: string; issuer: string; audience: string; tenant: string;
   source_base_url: string; mcp_url: string; http_read_path: string | null }
 function unavailable(): never { throw new SourceProtocolError('source_unavailable') }
@@ -35,7 +41,17 @@ export function createConnectorSourceRuntimeFactory(options: { issuer: string; k
     input = { ...input, headers: { ...input.headers } }
     const rows = (await getPool().query<ProfileRow>(`SELECT id,revision::text,status,issuer,audience,tenant,source_base_url,mcp_url,http_read_path
       FROM connector_source_profiles WHERE workspace_id=$1 AND original_connector_instance_id=$2 ORDER BY created_at,id`, [input.workspaceId,input.instanceId])).rows
-    if (rows.length === 0) return null
+    if (rows.length === 0) {
+      let invalid = false
+      input.onLegacyAdmission?.(async () => {
+        if (invalid) unavailable()
+        try {
+          if ((await getPool().query(`SELECT 1 FROM connector_source_profiles WHERE workspace_id=$1 AND original_connector_instance_id=$2 LIMIT 1`,
+            [input.workspaceId,input.instanceId])).rowCount) unavailable()
+        } catch (error) { invalid = true; throw error }
+      })
+      return null
+    }
     const live = rows.filter(row => row.status !== 'revoked'), profile = live[0]
     if (live.length !== 1 || profile.status !== 'qualified' || profile.issuer !== options.issuer) unavailable()
     const keys = options.keys

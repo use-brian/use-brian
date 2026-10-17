@@ -8,7 +8,7 @@ import { getAppPool, getPool, applyRLSGucs, queryWithRLS } from '../../db/client
 import { createMemory } from '../../db/memories.js'
 import { readCurrentScopeSources, validateDerivedWriteInputs, validateDerivedMemoryInputs, validateDerivedEntityInputs, recordDerivedResource } from '../../db/derived-scope-store.js'
 import { bindTrustedSourceRead, pinExternalSourceOperation } from '../source-store.js'
-import { createConnectorSourceRuntimeFactory } from '../source-runtime.js'
+import { createConnectorSourceRuntimeFactory, configureConnectorSourceRuntimeFactory } from '../source-runtime.js'
 import { createRetainedSourceAuthorityCoordinator, pinPreparedExternalSourceAuthority } from '../retained-source-authority.js'
 import { injectMcpTools } from '../../mcp/inject.js'
 import { createDbConnectorStore } from '../../db/connector-store.js'
@@ -29,7 +29,7 @@ await assertLocalFixture()
 
 describe('[COMP:api/external-source-access] independent persisted source ACL', () => {
   const pool = getPool()
-  afterAll(async () => { await getAppPool().end(); await pool.end() })
+  afterAll(async () => { configureConnectorSourceRuntimeFactory(undefined); await getAppPool().end(); await pool.end() })
   it('lets a personal owner delete an exposed connector without workspace trust administration or losing observation identity', async () => {
     const workspace = randomUUID(), owner = randomUUID(), member = randomUUID(), assistant = randomUUID()
     for (const id of [owner,member]) await pool.query("INSERT INTO users(id,auth_provider,auth_provider_id) VALUES($1::uuid,'email',$1::text)", [id])
@@ -274,11 +274,11 @@ describe('[COMP:api/external-source-access] independent persisted source ACL', (
       expect((await pool.query('SELECT count(*)::int AS count FROM external_source_resources WHERE profile_id=$1', [sourceProfile])).rows[0].count).toBe(1)
       expect((await pool.query('SELECT count(*)::int AS count FROM external_source_observations WHERE workspace_id=$1', [workspace])).rows[0].count).toBe(2)
       const sourceRuntimeFactory = createConnectorSourceRuntimeFactory({ issuer, keys, instances })
-      const inject = async (userId: string, includeExecution = true, authenticationKind: 'native_session' | 'verified_channel' = 'native_session') => {
+      const inject = async (userId: string, includeExecution = true, authenticationKind: 'native_session' | 'verified_channel' = 'native_session', includeFactory = true) => {
         const actor = await client(userId, authenticationKind), scopeAccumulator = new ContextScopeAccumulator(), tools = new Map<string, Tool>()
         const result = await injectMcpTools({ userId: owner, assistantId: assistant, assistantTeamId: workspace, tools,
           connectorStore: createDbConnectorStore(encryptionKey), connectorInstanceStore: instances, connectorGrantStore: createConnectorGrantStore(),
-          settingsStore: createDbMcpSettingsStore(), connectorSourceRuntimeFactory: sourceRuntimeFactory, keepDynamicToolsDirect: true,
+          settingsStore: createDbMcpSettingsStore(), connectorSourceRuntimeFactory: includeFactory ? sourceRuntimeFactory : undefined, keepDynamicToolsDirect: true,
           contextScope: { effectiveCompartments: actor.execution.security.access.compartments!, effectiveProjectIds: actor.execution.security.access.projectIds!, access: actor.execution.security.access },
           actorIdentity: { channel: 'test', userId }, executionContext: includeExecution ? actor.execution : undefined, scopeAccumulator })
         return { ...actor, scopeAccumulator, tools, result, context: { ...executionToolContext(actor.execution, { appId: 'Fixture' }), scopeAccumulator } }
@@ -291,6 +291,17 @@ describe('[COMP:api/external-source-access] independent persisted source ACL', (
       expect(source.counters.discoveries).toBeGreaterThan(discovered)
       const protectedOutput = await protectedRead.tools.get('mcp_call')!.execute({ server: `connector:${instance.id}`, tool: 'readRecord', args: { id: 'order-1', fields: ['description','cost'] } }, protectedRead.context)
       expect(JSON.stringify(protectedOutput)).toContain('37.25'); expect(protectedRead.scopeAccumulator.evidence.sources).toHaveLength(1)
+      configureConnectorSourceRuntimeFactory(sourceRuntimeFactory)
+      try {
+        const shared = await inject(first, true, 'native_session', false)
+        expect(shared.tools.has('readRecord')).toBe(true)
+        expect(JSON.stringify(await shared.tools.get('readRecord')!.execute({ id: 'order-1', fields: ['cost'] }, shared.context))).toContain('37.25')
+        const incomplete = await inject(first, false, 'native_session', false)
+        expect(incomplete.tools.has('readRecord')).toBe(false)
+        expect(incomplete.result.unavailable.join(' ')).toContain('Protected source access is unavailable')
+        configureConnectorSourceRuntimeFactory(undefined)
+        await expect(async () => shared.tools.get('readRecord')!.execute({ id: 'order-1', fields: ['cost'] }, shared.context)).rejects.toMatchObject({ reason: 'authority_changed' })
+      } finally { configureConnectorSourceRuntimeFactory(undefined) }
       const narrowRuntime = await inject(second)
       const narrowSearch = await narrowRuntime.tools.get('mcp_search')!.execute({ query: 'readRecord', limit: 1 }, narrowRuntime.context)
       expect(String(narrowSearch.data)).not.toContain('cost')

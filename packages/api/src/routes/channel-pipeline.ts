@@ -2320,6 +2320,8 @@ async function processChannelMessageTurn(params: ChannelPipelineParams): Promise
       })
       const injection = await injectMcpTools({
         userId: connectorUserId,
+        executionContext,
+        scopeAccumulator,
         assistantId: assistant.id,
         tools: allTools,
         connectorStore,

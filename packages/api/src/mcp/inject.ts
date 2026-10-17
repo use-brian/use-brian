@@ -19,7 +19,7 @@
  */
 
 import type { AccessContext, CachedFile, ExecutionContext, ContextScopeAccumulator } from '@use-brian/core'
-import type { ConnectorSourceRuntimeFactory, ConnectorSourceRuntime } from '../application-platform/source-runtime.js'
+import { getSharedConnectorSourceRuntimeFactory, type ConnectorSourceRuntimeFactory, type ConnectorSourceRuntime } from '../application-platform/source-runtime.js'
 import { SourceProtocolError } from '@use-brian/brian-app/connector'
 import { promoteCachedFile, wrapMcpTools, buildToolIndex, createMcpSearchTools, legacyMcpToolName, createGoogleCalendarTools, createGmailTools, createGoogleDriveTools, createGoogleDocsTools, createGoogleSheetsTools, createGoogleSlidesTools, createGDriveFilesTools, createGitHubTools, createNotionTools, createFathomTools, createShopifyTools, createWordPressTools, createSearchConsoleTools, createMsGraphTools, createKnowledgeTools, createAgentmailTools, createMailboxTools, workspaceFilesCtxFor, workspaceFilesErrorMessage, workspaceFilesGate, GOOGLE_MAPS_TOOL_NAMES } from '@use-brian/core'
 import type { Tool, McpSettingsStore, McpServerConfig, KnowledgeStoreInterface, KnowledgeRepoWriter, KnowledgeWriteCaptureRule, AuthorizedFile, GDriveFilesStore, GDriveFileKind, LocalSource, RemoteSource, EngineHooks, FilesApi, AgentmailToolApi, MailboxApi, MailboxAccountRouter } from '@use-brian/core'
@@ -587,9 +587,12 @@ export async function injectMcpTools(params: {
     connectorActionAudit, assistantConnectorGrantsStore, workspaceDomain,
     keepBuiltinsDirect = false, keepDynamicToolsDirect = false, restrictSearchToToolNames,
     engineHooks, actorIdentity, filesApi, readCachedFile,
-    introspectionTools, emailInboxProvider, contextScope, connectorSourceRuntimeFactory, executionContext, scopeAccumulator,
+    introspectionTools, emailInboxProvider, contextScope, connectorSourceRuntimeFactory: suppliedSourceRuntimeFactory, executionContext, scopeAccumulator,
   } = params
 
+  const connectorSourceRuntimeFactory = suppliedSourceRuntimeFactory ?? getSharedConnectorSourceRuntimeFactory()
+  const usingSharedSourceFactory = !suppliedSourceRuntimeFactory && !!connectorSourceRuntimeFactory
+  const legacySourceAuthorities = new Set<() => Promise<void>>()
   const unavailable: string[] = []
   const originalTools = new Map(tools)
   const runtimeActorId = contextScope?.access?.userId ?? actorIdentity?.userId
@@ -603,7 +606,7 @@ export async function injectMcpTools(params: {
     if (executionContext && (executionContext.assistant.id !== assistantId || executionContext.security.access.userId !== runtimeActorId)) throw new AuthorityChangedError()
     let pending = sourceRuntimes.get(instanceId)
     if (!pending) {
-      pending = connectorSourceRuntimeFactory({ instanceId, workspaceId: assistantTeamId, execution: executionContext, accumulator: scopeAccumulator, headers })
+      pending = connectorSourceRuntimeFactory({ instanceId, workspaceId: assistantTeamId, execution: executionContext, accumulator: scopeAccumulator, headers, onLegacyAdmission: check => { legacySourceAuthorities.add(check) } })
         .then(runtime => { if (runtime) protectedSources.add(runtime); return runtime })
         .catch(error => {
           noteProtectedUnavailable()
@@ -638,6 +641,10 @@ export async function injectMcpTools(params: {
   }
   async function assertBindingsCurrent(mayHaveExecuted = false) {
     if (bindingsInvalid) throw new AuthorityChangedError(mayHaveExecuted)
+    if (usingSharedSourceFactory && (protectedSources.size > 0 || legacySourceAuthorities.size > 0)
+      && getSharedConnectorSourceRuntimeFactory() !== connectorSourceRuntimeFactory) {
+      bindingsInvalid = true; throw new AuthorityChangedError(mayHaveExecuted)
+    }
     try {
       const grants = [...pinnedBindings.values()].some(binding => binding.grant)
         ? await connectorGrantStore!.listForTargetSystem('workspace', assistantTeamId!) : []
@@ -653,8 +660,10 @@ export async function injectMcpTools(params: {
         const headers = buildConnectorAuthHeaders(await connectorInstanceStore!.getAuthCredentialsSystem(id))
         if (authBinding(headers) !== expected) throw new AuthorityChangedError(mayHaveExecuted)
       }))
+      await Promise.all([...legacySourceAuthorities].map(check => check()))
       await Promise.all([...protectedSources].map(source => source.assertCurrent()))
-    } catch {
+    } catch (error) {
+      if (error instanceof SourceProtocolError) noteProtectedUnavailable()
       bindingsInvalid = true
       throw new AuthorityChangedError(mayHaveExecuted)
     }

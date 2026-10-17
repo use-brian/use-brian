@@ -13,6 +13,7 @@ import { createConnectorGrantStore } from '../../db/connector-grant-store.js'
 import { createDbMcpSettingsStore } from '../../db/mcp-settings-store.js'
 import { findAssistantById } from '../../db/users.js'
 import { resolveExecutionContextSystem } from '../../context-scope/execution-context.js'
+import { createConnectorSourceRuntimeFactory, configureConnectorSourceRuntimeFactory } from '../source-runtime.js'
 import { injectMcpTools } from '../../mcp/inject.js'
 
 const { assertLocalFixture } = await import(new URL('../../../../../scripts/crm/local-fixture.mjs', import.meta.url).href)
@@ -20,7 +21,7 @@ await assertLocalFixture()
 
 describe('[COMP:api/connector-context] real common injector native admission', () => {
   const pool = getPool()
-  afterAll(async () => { await getAppPool().end(); await pool.end() })
+  afterAll(async () => { configureConnectorSourceRuntimeFactory(undefined); await getAppPool().end(); await pool.end() })
   it.each(['owned','exposed'] as const)('shares one actual actor floor across %s discovery/cache, gateway/direct aliases and result return', async lane => {
     const workspace = randomUUID(), owner = randomUUID(), member = randomUUID(), other = randomUUID(), assistant = randomUUID(), departments = [randomUUID(),randomUUID()]
     const encryptionKey = randomBytes(32), instances = createConnectorInstanceStore(encryptionKey)
@@ -147,7 +148,24 @@ describe('[COMP:api/connector-context] real common injector native admission', (
       expect(JSON.stringify(await ambiguous.tools.get('mcp_call')!.execute({ server: `connector:${second.id}`, tool: 'readFixture', args: {} }, ambiguous.context))).toContain('credential-second')
       expect(JSON.stringify(await ambiguous.tools.get('mcp_call')!.execute({ server: `connector:${instance.id}`, tool: 'readFixture', args: {} }, ambiguous.context))).toContain('credential-first')
       expect(reads).toBe(8)
+      const issuer = 'https://installation.example'
+      configureConnectorSourceRuntimeFactory(createConnectorSourceRuntimeFactory({ issuer, instances }))
+      const legacy = await inject(member)
+      expect(JSON.stringify(await legacy.tools.get('mcp_call')!.execute({ server: `connector:${instance.id}`, tool: 'readFixture', args: {} }, legacy.context))).toContain('credential-first')
+      const beforePromotion = { reads, requests }
+      await pool.query(`INSERT INTO connector_source_profiles(workspace_id,connector_instance_id,tenant,issuer,audience,source_base_url,mcp_url,status,created_by_user_id)
+        VALUES($1,$2,'legacy-transition',$3,'https://source.example',$4,$5,'pending',$6)`, [workspace,instance.id,issuer,new URL(url).origin,url,owner])
+      await expect(legacy.tools.get('mcp_call')!.execute({ server: `connector:${instance.id}`, tool: 'readFixture', args: {} }, legacy.context))
+        .rejects.toMatchObject({ reason: 'authority_changed' })
+      expect({ reads, requests }).toEqual(beforePromotion)
+      const pending = await inject(member)
+      expect(pending.result.unavailable.join(' ')).toContain('Protected source access is unavailable')
+      configureConnectorSourceRuntimeFactory(undefined)
+      await expect(legacy.tools.get('mcp_call')!.execute({ server: `connector:${instance.id}`, tool: 'readFixture', args: {} }, legacy.context))
+        .rejects.toMatchObject({ reason: 'authority_changed' })
+
     } finally {
+      configureConnectorSourceRuntimeFactory(undefined)
       await new Promise<void>(resolve => listener.close(() => resolve()))
       await pool.query('DELETE FROM workspaces WHERE id=$1', [workspace])
       await pool.query('DELETE FROM users WHERE id=ANY($1::uuid[])', [[owner,member,other]])

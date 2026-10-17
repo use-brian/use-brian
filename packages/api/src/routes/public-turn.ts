@@ -980,6 +980,8 @@ export async function executePublicTurn(
       }
     : await applyMcpInjection({
         scope: 'public-api',
+        executionContext,
+        scopeAccumulator,
         connectorUserId,
         assistant: { id: assistant.id, workspaceId: assistant.workspaceId ?? null },
         userTimezone: owner.timezone ?? undefined,
