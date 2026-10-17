@@ -1,3 +1,5 @@
+// Interaction fixtures are unbound provider conversations; room SQL is tested separately.
+vi.mock('../../channel-room/room.js', async (original) => ({ ...(await original<typeof import('../../channel-room/room.js')>()), resolveRoomBinding: async () => null }))
 import { dispatchIncomingMessageEvent } from '../../message-events.js'
 vi.mock('../../message-events.js', () => ({ dispatchIncomingMessageEvent: vi.fn(async () => {}) }))
 import { channelQuestions } from '../channel-questions.js'

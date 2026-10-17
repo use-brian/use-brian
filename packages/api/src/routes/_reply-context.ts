@@ -28,6 +28,9 @@ export type ResolveReplyParams = {
    * replied-to text directly from the webhook without a DB lookup.
    */
   raw?: unknown
+  /** Already-authorized room rows. Never fetch an unfiltered stored quote.
+   * Provider-carried Telegram quotes remain part of the new inbound input. */
+  readableHistory?: readonly SessionMessage[]
   /**
    * Optional user-selected snippet from the client (web only today).
    * When the user highlights a phrase inside a message bubble and clicks
@@ -73,7 +76,7 @@ export async function resolveReplyText(
   }
   // Slack / WhatsApp / other messaging channels: lookup by channel_message_id.
   return applySnippet(
-    await resolveByChannelId(idStr, params.session.id),
+    await resolveByChannelId(idStr, params.session.id, params.readableHistory),
     params.clientSnippet,
   )
 }
@@ -137,8 +140,11 @@ async function resolveByUuid(
 async function resolveByChannelId(
   channelMessageId: string,
   sessionId: string,
+  readableHistory?: readonly SessionMessage[],
 ): Promise<ResolvedReply | null> {
-  const hit = await findSessionMessageByChannelId(sessionId, channelMessageId)
+  const hit = readableHistory
+    ? readableHistory.find(row => row.channelMessageId === channelMessageId)
+    : await findSessionMessageByChannelId(sessionId, channelMessageId)
   if (!hit) return null
   return makeResolved(hit, channelMessageId)
 }
