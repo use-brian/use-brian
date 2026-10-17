@@ -8,6 +8,8 @@ export type WorkspaceModuleState = typeof WORKSPACE_MODULE_STATES[number]
 export interface WorkspaceModuleDefinition {
   key: string
   defaultState: WorkspaceModuleState
+  /** Deployed application catalog; persisted settings cannot register executable code. */
+  application?: import('./application-platform.js').ApplicationModuleCatalog
   /** Optional compatibility projection for a module's pre-registry HTTP clients. */
   blockingCountCompatibility?: { field: string; blockerKey: string }
 }

@@ -908,18 +908,21 @@ async function buildCustomEntityTable(
   // an empty table rather than throw, so the rest of the page still loads.
   if (!store) return { type: 'table', columns: [], rows: [], rowAction }
 
-  const entityType = await store.getEntityType(deps.workspaceId, config.entityTypeId)
+  const entityType = await store.getEntityType(deps.workspaceId, config.entityTypeId, { actorUserId: deps.userId })
   if (!entityType) return { type: 'table', columns: [], rows: [], rowAction }
 
   const properties = entityType.properties
   const visible = config.columns ?? properties.map((p) => p.name)
-  const { rows: instances } = await store.queryEntities(
-    deps.workspaceId,
-    config.entityTypeId,
-    undefined,
-    undefined,
-    500,
-  )
+  const instances: EntityInstance[] = []
+  let cursor: string | undefined
+  // Preserve the existing 500-row view window using bounded canonical queries.
+  for (let page = 0; page < 5; page += 1) {
+    const result = await store.queryEntities(deps.workspaceId, config.entityTypeId,
+      undefined, undefined, 100, cursor, { actorUserId: deps.userId })
+    instances.push(...result.rows)
+    cursor = result.nextCursor
+    if (!cursor) break
+  }
 
   // Pre-resolve select / multi_select option ids → display names.
   const optionNames = new Map<string, string>()

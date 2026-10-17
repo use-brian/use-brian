@@ -20,3 +20,22 @@ before connecting. No provider credentials or paid model runs are needed.
 Full pre-change logs remain in `output/application-platform/baseline-20261018/`.
 Publication, production migrations, deployment activation, actual identity/source
 mapping, historical qualification and provider acceptance are operator work.
+
+## P1 foundations
+
+Strict wire/value/module contracts live in shared/core application-platform source.
+The API dispatcher composes typed module commands, current-member RLS, canonical
+writes, immutable content-free receipts, audit and committed events. Retries bind
+actor/assistant, input and idempotency key, and reauthorize current result sources.
+An uncertain COMMIT returns `outcome_uncertain`, without automatic effect replay.
+
+Migration 8002 adds generic validation, normalized opt-in uniqueness, monotonic
+revisions, saved schema reviews and current-member operation floors. It preserves
+canonical record IDs and legacy numeric shapes. Generic filters use cell values;
+sort-aware cursors bind schema/query identity. Native CRM/task adapters call the
+existing writers and source reader on a non-owner transaction.
+
+The reserved migration range is 8000-8007, corrected from 3947-3954 because the
+runner orders filenames lexically. Applied migrations are unchanged. No general
+app-data auth, delegated source trust, public discovery or protected retention is
+activated by these foundations. P2-P6 and the complete consumer ledger remain owed.

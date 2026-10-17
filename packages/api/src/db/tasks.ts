@@ -456,17 +456,16 @@ export async function createTask(
   return task
 }
 
-export async function getTaskById(ctx: AccessContext, id: string): Promise<TaskRecord | null> {
+export async function getTaskById(ctx: AccessContext, id: string, transactionClient?: pg.PoolClient): Promise<TaskRecord | null> {
   // Universal access projection (WU-4.2b) + `valid_to IS NULL` to hide
   // superseded versions. History via `getTaskHistory`.
   const ap = buildAccessPredicate(ctx, { startIdx: 1 })
-  const result = await queryWithRLS<TaskRow>(
-    ctx.userId,
-    `SELECT ${FULL_SELECT} FROM tasks
+  const sql = `SELECT ${FULL_SELECT} FROM tasks
      WHERE ${ap.sql}
-       AND id = $${ap.nextIdx} AND valid_to IS NULL AND retracted_at IS NULL AND NOT scope_held`,
-    [...ap.params, id],
-  )
+       AND id = $${ap.nextIdx} AND valid_to IS NULL AND retracted_at IS NULL AND NOT scope_held`
+  const result = transactionClient
+    ? await transactionClient.query<TaskRow>(sql,[...ap.params,id])
+    : await queryWithRLS<TaskRow>(ctx.userId,sql,[...ap.params,id])
   if (result.rows.length === 0) return null
   return toRecord(result.rows[0])
 }

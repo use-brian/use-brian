@@ -161,3 +161,4 @@ export { debugDocumentFlow } from './engine/document-flow-debug.js'
 
 export { summarizeProviderError, type ProviderErrorCategory, type ProviderErrorSummary } from './providers/provider-error-summary.js'
 export { prepareLinkedInImage } from './media/linkedin-image.js'
+export * from './application-platform/index.js'

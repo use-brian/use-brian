@@ -101,6 +101,8 @@ const textConfigSchema = z.object({ kind: z.literal('text') })
 const numberConfigSchema = z.object({
   kind: z.literal('number'),
   format: z.enum(['int', 'decimal', 'percent', 'dollar', 'comma']).optional(),
+  minimum: z.number().finite().optional(),
+  maximum: z.number().finite().optional(),
 })
 
 const selectConfigSchema = z.object({
@@ -172,6 +174,7 @@ export const propertyDefSchema: z.ZodType<PropertyDef> = z.object({
   label: shortStringSchema.optional(),
   config: propertyConfigSchema,
   required: z.boolean().optional(),
+  unique: z.boolean().optional(),
 })
 
 // ── EntityType ────────────────────────────────────────────────────────
@@ -201,7 +204,7 @@ const textCellSchema = z.object({
 
 const numberCellSchema = z.object({
   kind: z.literal('number'),
-  value: z.number().nullable(),
+  value: z.number().finite().nullable(),
 })
 
 const selectCellSchema = z.object({

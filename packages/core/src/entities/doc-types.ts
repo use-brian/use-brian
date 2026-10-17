@@ -115,6 +115,8 @@ export type PropertyConfig =
   | {
       kind: 'number'
       format?: 'int' | 'decimal' | 'percent' | 'dollar' | 'comma'
+      minimum?: number
+      maximum?: number
     }
   | { kind: 'select'; options: SelectOption[] }
   | { kind: 'multi_select'; options: SelectOption[] }
@@ -150,6 +152,8 @@ export type PropertyDef = {
   config: PropertyConfig
   /** When true, the API rejects writes that don't include a value for this property. */
   required?: boolean
+  /** Opt-in normalized uniqueness within this declared type. */
+  unique?: boolean
 }
 
 // ── EntityType record ─────────────────────────────────────────────────
@@ -255,6 +259,8 @@ export type EntityInstance = {
   createdBy: string | null
   lastEditedAt: string
   lastEditedBy: string | null
+  /** Opaque canonical revision, absent only on legacy/in-memory adapters. */
+  recordVersion?: string
 }
 
 // ── Query primitives ──────────────────────────────────────────────────
@@ -303,23 +309,32 @@ export type EntitySort = {
  * shadowing the brain-anchor `EntityStore` already in scope (see file
  * header).
  */
+export type DocEntityOperationOptions = {
+  actorUserId: string
+  expectedRecordVersion?: string
+  expectedSchemaVersion?: number
+}
+
 export interface EntityStore {
   // ── Entity types CRUD ───────────────────────────────────────────────
   createEntityType(
     input: Omit<EntityType, 'id' | 'createdAt' | 'schemaVersion'> & {
       schemaVersion?: number
     },
+    options?: DocEntityOperationOptions,
   ): Promise<EntityType>
-  getEntityType(workspaceId: string, id: string): Promise<EntityType | null>
+  getEntityType(workspaceId: string, id: string, options?: DocEntityOperationOptions): Promise<EntityType | null>
   getEntityTypeByName(
     workspaceId: string,
     name: string,
+    options?: DocEntityOperationOptions,
   ): Promise<EntityType | null>
-  listEntityTypes(workspaceId: string): Promise<EntityType[]>
+  listEntityTypes(workspaceId: string, options?: DocEntityOperationOptions): Promise<EntityType[]>
   updateEntityType(
     workspaceId: string,
     id: string,
     patch: Partial<Pick<EntityType, 'name' | 'icon' | 'properties'>>,
+    options?: DocEntityOperationOptions,
   ): Promise<EntityType>
   /**
    * Rename a property in one transaction: rewrite the `PropertyDef.name`
@@ -339,16 +354,19 @@ export interface EntityStore {
     entityTypeId: string,
     oldName: string,
     newName: string,
+    options?: DocEntityOperationOptions,
   ): Promise<EntityType>
-  deleteEntityType(workspaceId: string, id: string): Promise<void>
+  deleteEntityType(workspaceId: string, id: string, options?: DocEntityOperationOptions): Promise<void>
 
   // ── Entity instances CRUD ───────────────────────────────────────────
   createEntity(
     input: Omit<EntityInstance, 'id' | 'createdAt' | 'lastEditedAt'>,
+    options?: DocEntityOperationOptions,
   ): Promise<EntityInstance>
   getEntity(
     workspaceId: string,
     id: string,
+    options?: DocEntityOperationOptions,
   ): Promise<EntityInstance | null>
   updateEntity(
     workspaceId: string,
@@ -356,8 +374,9 @@ export interface EntityStore {
     patch: Partial<
       Pick<EntityInstance, 'data' | 'lastEditedBy' | 'sensitivity' | 'compartments' | 'projectIds'>
     >,
+    options?: DocEntityOperationOptions,
   ): Promise<EntityInstance>
-  deleteEntity(workspaceId: string, id: string): Promise<void>
+  deleteEntity(workspaceId: string, id: string, options?: DocEntityOperationOptions): Promise<void>
 
   // ── Query ───────────────────────────────────────────────────────────
   queryEntities(
@@ -367,5 +386,6 @@ export interface EntityStore {
     sort?: EntitySort[],
     limit?: number,
     cursor?: string,
+    options?: DocEntityOperationOptions,
   ): Promise<{ rows: EntityInstance[]; nextCursor?: string }>
 }

@@ -265,7 +265,7 @@ const queryEntitiesInputSchema: z.ZodType<QueryEntitiesInput> = z.object({
     .number()
     .int()
     .positive()
-    .max(500)
+    .max(100)
     .optional()
     .describe('Optional row cap. Defaults to the store\'s natural limit.'),
   cursor: z
@@ -355,7 +355,7 @@ export function createListEntityTypesTool(
       }
       try {
         const builtIns = deps.listBuiltInEntityTypes(workspaceId)
-        const userDefined = await deps.store.listEntityTypes(workspaceId)
+        const userDefined = await deps.store.listEntityTypes(workspaceId, { actorUserId: context.userId })
         const types: EntityType[] = [...builtIns, ...userDefined]
         return { data: { types } }
       } catch (err) {
@@ -458,6 +458,7 @@ export function createAddPropertyTool(
         const current = await deps.store.getEntityType(
           input.workspaceId,
           input.entityTypeId,
+          { actorUserId: context.userId },
         )
         if (!current) {
           return docNotFound('Entity type', input.entityTypeId, input.workspaceId, {
@@ -483,6 +484,7 @@ export function createAddPropertyTool(
           input.workspaceId,
           input.entityTypeId,
           { properties: [...current.properties, input.property] },
+          { actorUserId: context.userId, expectedSchemaVersion: current.schemaVersion },
         )
         return { data: { entityType: updated } }
       } catch (err) {
@@ -528,7 +530,7 @@ export function createRemovePropertyTool(
     // present must park in Approvals. Gate only on the autonomous path.
     resolveConfirmation: async (context) => !isAttendedTurn(context),
 
-    async execute(input) {
+    async execute(input, context) {
       if (isBuiltInEntityTypeId(input.entityTypeId)) {
         return builtInRejection('removeProperty', input.entityTypeId)
       }
@@ -536,6 +538,7 @@ export function createRemovePropertyTool(
         const current = await deps.store.getEntityType(
           input.workspaceId,
           input.entityTypeId,
+          { actorUserId: context.userId },
         )
         if (!current) {
           return docNotFound('Entity type', input.entityTypeId, input.workspaceId, {
@@ -559,6 +562,7 @@ export function createRemovePropertyTool(
           input.workspaceId,
           input.entityTypeId,
           { properties: remaining },
+          { actorUserId: context.userId, expectedSchemaVersion: current.schemaVersion },
         )
         return { data: { entityType: updated } }
       } catch (err) {
@@ -618,7 +622,7 @@ export function createRenamePropertyTool(
     // stays silent; the autonomous path gates.
     resolveConfirmation: async (context) => !isAttendedTurn(context),
 
-    async execute(input) {
+    async execute(input, context) {
       if (isBuiltInEntityTypeId(input.entityTypeId)) {
         return builtInRejection('renameProperty', input.entityTypeId)
       }
@@ -633,6 +637,7 @@ export function createRenamePropertyTool(
         const current = await deps.store.getEntityType(
           input.workspaceId,
           input.entityTypeId,
+          { actorUserId: context.userId },
         )
         if (!current) {
           return docNotFound('Entity type', input.entityTypeId, input.workspaceId, {
@@ -670,6 +675,7 @@ export function createRenamePropertyTool(
           input.entityTypeId,
           input.oldName,
           input.newName,
+          { actorUserId: context.userId, expectedSchemaVersion: current.schemaVersion },
         )
         return { data: { entityType: updated } }
       } catch (err) {
@@ -784,6 +790,7 @@ export function createUpdateEntityTool(
         const current = await deps.store.getEntity(
           input.workspaceId,
           input.entityId,
+          { actorUserId: context.userId },
         )
         if (!current) {
           return docNotFound('Entity', input.entityId, input.workspaceId, {
@@ -814,6 +821,7 @@ export function createUpdateEntityTool(
               projectGrant: context.assistantProjectIds,
             }),
           },
+          { actorUserId: context.userId, ...(current.recordVersion ? { expectedRecordVersion: current.recordVersion } : {}) },
         )
         return { data: { entity } }
       } catch (err) {
@@ -855,12 +863,12 @@ export function createDeleteEntityTool(
     // mass-deleting rows parks in Approvals.
     resolveConfirmation: async (context) => !isAttendedTurn(context),
 
-    async execute(input) {
+    async execute(input, context) {
       if (isBuiltInEntityTypeId(input.entityId)) {
         return builtInRejection('deleteEntity', input.entityId)
       }
       try {
-        await deps.store.deleteEntity(input.workspaceId, input.entityId)
+        await deps.store.deleteEntity(input.workspaceId, input.entityId, { actorUserId: context.userId })
         return { data: { deleted: true } }
       } catch (err) {
         return toolFailure(err, {
@@ -914,6 +922,7 @@ export function createQueryEntitiesTool(
           input.sort,
           input.limit,
           input.cursor,
+          { actorUserId: context.userId },
         )
         const scopeEvidence = scopeEvidenceFromRows(result.rows)
         context.scopeAccumulator?.note(scopeEvidence)
