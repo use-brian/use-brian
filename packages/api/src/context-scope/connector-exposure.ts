@@ -18,8 +18,9 @@ import { loadDepartmentSnapshot, resolveDepartmentReadGrant } from './department
 import { resolveTurnScopeSystem, type ResolvedTurnScope, type ResolveTurnScopeInput } from './resolve-turn-scope.js'
 
 /** Connector audience membership cannot be widened by the legacy workspace read-universe switch. */
-export async function resolveConnectorNativeTurnScopeSystem(input: ResolveTurnScopeInput): Promise<ResolvedTurnScope> {
-  const scope = await resolveTurnScopeSystem({ ...input, memberMode: 'member' })
+export async function resolveConnectorNativeTurnScopeSystem(input: ResolveTurnScopeInput,
+  resolveScope: (input: ResolveTurnScopeInput) => Promise<ResolvedTurnScope> = resolveTurnScopeSystem): Promise<ResolvedTurnScope> {
+  const scope = await resolveScope({ ...input, memberMode: 'member' })
   if (!scope.access.workspaceId) return scope
   const reader = { workspaceId: scope.access.workspaceId, userId: input.userId, assistantId: input.assistant.id,
     contextDepartment: scope.activeGroupId ?? null }

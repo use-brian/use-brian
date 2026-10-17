@@ -128,6 +128,7 @@ import {
   formatActiveWorkspaceContext,
   noteAutomaticScopeEvidence,
   turnOutputWrite,
+  resolveTurnScopeSystem,
   sessionMessageInputScope,
   type ResolvedTurnScope,
   type ResolveTurnScopeInput,
@@ -867,7 +868,7 @@ export async function resolveConnectorTurnScopeForChannelTurn(
     workspaceId: string | null
     session: ResolveTurnScopeInput['session']
   },
-  resolveScope: ConnectorTurnScopeResolver = resolveConnectorNativeTurnScopeSystem,
+  resolveScope: ConnectorTurnScopeResolver = facts => resolveConnectorNativeTurnScopeSystem(facts, resolveTurnScopeSystem),
 ): Promise<ResolvedTurnScope> {
   if (!input.workspaceId) return input.dataTurnScope
   const initiator = await resolveScope({
