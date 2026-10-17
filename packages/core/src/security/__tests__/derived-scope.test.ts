@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest'
 import { ContextScopeAccumulator, resolveWriteScope } from '../context-scope.js'
-import { deriveResourceScope, deriveWriteScope, resourceScopeKey, sourcesShareVisibility, type ScopeSource } from '../derived-scope.js'
+import { describeScopeRefusal, deriveResourceScope, deriveWriteScope, resourceScopeKey, sourcesShareVisibility, type ScopeSource } from '../derived-scope.js'
 
 const source = (overrides: Partial<ScopeSource> = {}): ScopeSource => ({
   resourceKind: 'memory', resourceId: 'source-a', version: 'v1',
@@ -10,6 +10,15 @@ const source = (overrides: Partial<ScopeSource> = {}): ScopeSource => ({
 const derive = (...sources: ScopeSource[]) => deriveResourceScope({ producer: 'consolidation', sources })
 
 describe('[COMP:security/derived-scope] complete evidence for derived content', () => {
+  it('gives content-free recovery for source refusals without diagnosing a failed connection', () => {
+    expect(describeScopeRefusal('scope_source_changed')).toMatch(/refresh.*current access/i)
+    expect(describeScopeRefusal('scope_visibility_incompatible')).toMatch(/separate files.*do not lower/i)
+    for (const code of ['scope_evidence_missing', 'scope_workspace_mismatch']) {
+      expect(describeScopeRefusal(code)).toMatch(/intended workspace.*report the failure/i)
+    }
+    expect(describeScopeRefusal('connection lost')).toBeNull()
+  })
+
   it('retains every input restriction, including an uncited previous pattern', () => {
     const inputs = [
       source({ compartments: ['team:product'], projectIds: ['project-a'] }),

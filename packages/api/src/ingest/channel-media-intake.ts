@@ -20,6 +20,8 @@ import type { Recording } from '../db/recordings-store.js'
 import { buildChannelSessionKey } from '../db/pending-recording-confirmations-store.js'
 import { isStructuredDocument } from '@use-brian/core'
 
+export type ChannelMediaScope = { sensitivity: 'public' | 'internal' | 'confidential'; compartments: string[]; projectIds: string[] }
+
 /** A normalized inbound attachment whose bytes are already in GCS. */
 export type ChannelMediaRef = {
   /** Originating channel, for provenance + metering. */
@@ -53,6 +55,7 @@ export type ChannelMediaRef = {
   /** Episode creator + COGS / surcharge attribution (the channel/workspace owner). */
   actingUserId: string
   sensitivity?: EpisodeSensitivity
+  scope?: ChannelMediaScope
   /**
    * Transcription opt-out (default: transcribe). When `false`, an audio/video
    * `recording` Episode is still anchored at the GCS key (so media-fetch can
@@ -116,6 +119,7 @@ export type ChannelMediaIntakeDeps = {
     assistantId: string | null
     actingUserId: string
     sensitivity: EpisodeSensitivity
+    scope?: ChannelMediaScope
   }) => Promise<ChannelDocumentIngestResult>
   /** Phase 6 metering. Absent → no quota enforcement. */
   checkQuota?: (ref: ChannelMediaRef) => Promise<{ ok: boolean; reason?: string }>
@@ -385,6 +389,7 @@ export async function ingestChannelMedia(
     assistantId: ref.assistantId,
     actingUserId: ref.actingUserId,
     sensitivity,
+    ...(ref.scope ? { scope: ref.scope } : {}),
   })
   switch (doc.status) {
     case 'accepted':

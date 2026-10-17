@@ -71,3 +71,26 @@ describe('[COMP:api/delivery-authority] provider-visible channel history', () =>
     expect(countsAsGroupAudienceEvidence({ channelMessageId: '4417' }, false)).toBe(true)
   })
 })
+
+
+it('[COMP:api/delivery-authority] checks a bot reader even for history visible to the human group', async () => {
+  const validate = vi.fn(async (evidence: ScopeEvidence, limit: AccessCeiling) => {
+    const source = evidence.sources![0]!
+    if (source.resourceId === 'old-confidential' && limit.clearance === 'internal') throw new Error('clearance')
+    return evidence
+  })
+  const rows = [scoped('old-confidential', 'telegram-1'), scoped('current-internal', 'telegram-2'), { id: 'unknown', channelMessageId: 'telegram-3' }]
+  const result = await filterChannelHistoryForAudience({ rows, group: true,
+    ceiling: { ...ceiling, clearance: 'confidential' }, readerCeiling: { ...ceiling, clearance: 'internal' }, validate })
+  expect(result.map(row => row.id)).toEqual(['current-internal'])
+})
+
+
+it('[COMP:api/delivery-authority] resolves stored reply context only from authorized room rows', async () => {
+  const { resolveReplyText } = await import('../_reply-context.js')
+  const params = { channelType: 'slack', session: { id: 'room' } as never, readableHistory: [
+    { channelMessageId: 'visible', role: 'assistant', content: [{ type: 'text', text: 'Allowed answer' }], topicLabel: 'Allowed topic' } as never,
+  ] }
+  await expect(resolveReplyText({ ...params, replyToMessageId: 'hidden' })).resolves.toBeNull()
+  await expect(resolveReplyText({ ...params, replyToMessageId: 'visible' })).resolves.toMatchObject({ text: 'Allowed answer' })
+})

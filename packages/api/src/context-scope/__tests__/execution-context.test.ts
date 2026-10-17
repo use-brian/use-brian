@@ -228,3 +228,14 @@ describe('[COMP:api/execution-context] trusted execution resolution', () => {
     }
   })
 })
+
+
+it('[COMP:api/execution-context] caps a higher bot to the shared room before exposing prompt and tool authority', async () => {
+  const result = await resolveExecutionContextSystem({ ...base(), sharedAudience: true,
+    maximumAccess: { workspaceId: 'workspace-1', userId: 'actor-1', clearance: 'internal',
+      compartments: [], mutationCompartments: [], projectIds: [], visibilityAssistantIds: null },
+  }, { resolveScope: async () => ({ ...scope, access: { ...scope.access, clearance: 'confidential',
+      compartments: null, mutationCompartments: null, projectIds: null } }), createLease: () => authority })
+  expect(result.executionContext.security.ceiling).toMatchObject({ clearance: 'internal', compartments: [], projectIds: [] })
+  expect(result.executionContext.security.access.sharedAudience).toBe(true)
+})

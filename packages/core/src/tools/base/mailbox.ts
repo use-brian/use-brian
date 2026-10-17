@@ -33,6 +33,7 @@ import type { FilesApi } from '../../workspace-files/api.js'
 import { MAX_EXTERNAL_DOCUMENT_BYTES } from '../../workspace-files/attachments.js'
 import { ctxFor, errorMessage, idOrPathShape, workspaceGate } from '../../workspace-files/tool-helpers.js'
 import { mailboxFailure } from './_mailbox-error.js'
+import { describeScopeRefusal } from '../../security/derived-scope.js'
 
 /** Default lookback window for searches with no explicit `since` (D12 #4). */
 export const MAILBOX_DEFAULT_WINDOW_DAYS = 90
@@ -860,6 +861,8 @@ export function createMailboxTools(
               },
             }
           } catch (err) {
+            const refusal = err instanceof Error ? describeScopeRefusal(err.message) : null
+            if (refusal) return { data: `The attachment was not saved. ${refusal}`, isError: true }
             return mailboxFailure(err, { tool: 'imapSaveAttachment', email: resolved.email, target: `attachment part \`${input.partId}\` of message \`${input.messageId}\`` })
           }
         },

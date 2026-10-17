@@ -508,6 +508,9 @@ export type ChannelIntegrationStore = {
     id: string,
   ): Promise<ChannelIntegrationWithCredentials | null>
 
+  /** Current approvals for one shared provider audience, across active bot installations. */
+  getGroupAudienceBindingsSystem?(workspaceId: string, channelType: string, channelId: string): Promise<DeliveryAudienceBinding[]>
+
   /** List integrations for a workspace's channels, RLS-gated via `channels`. */
   listForWorkspace(
     actingUserId: string,
@@ -684,8 +687,23 @@ export function pinTrustedTelegramUsernameInConfig(
   return { ...current, allowedUserIds }
 }
 
+/** No credentials are read: a provider group has one audience across its bots. */
+export async function getGroupAudienceBindingsSystem(
+  workspaceId: string, channelType: string, channelId: string,
+  execute: typeof query = query,
+): Promise<DeliveryAudienceBinding[]> {
+  const parent = parseTopicChannelId(channelId).chatId
+  const result = await execute<{ binding: DeliveryAudienceBinding }>(
+    `SELECT b AS binding FROM channel_integrations ci JOIN channels c ON c.id=ci.channel_id
+       CROSS JOIN LATERAL jsonb_array_elements(COALESCE(ci.config->'deliveryAudienceBindings','[]'::jsonb)) b
+      WHERE c.workspace_id=$1 AND ci.channel_type=$2 AND ci.status='active' AND c.status='active'
+        AND b->>'version'='1' AND b->>'channelId' IN ($3,$4)`, [workspaceId, channelType, channelId, parent])
+  return result.rows.map(row => row.binding)
+}
+
 export function createDbChannelIntegrationStore(key: Buffer): ChannelIntegrationStore {
   return {
+    getGroupAudienceBindingsSystem,
     async upsert(params) {
       const encrypted = encryptCredentials(params.credentials, key)
       // Scoped by the acting user so RLS enforces channel (workspace) access.

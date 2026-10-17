@@ -45,7 +45,7 @@ import {
   authorizeGoogleRequest,
   type GoogleTransport,
 } from '../providers/google-transport.js'
-import { usesGemini36RequestContract } from '../providers/gemini.js'
+import { geminiSamplingConfig } from '../providers/gemini.js'
 import {
   DASHSCOPE_CHUNK_PAGES,
   DASHSCOPE_RENDER_WIDTH,
@@ -233,9 +233,7 @@ async function googleGenerate(
       contents: [{ role: 'user', parts }],
       generationConfig: {
         maxOutputTokens,
-        // Gemini 3.6+ deprecates sampling overrides and future generations
-        // may reject them. Keep deterministic decoding only for older models.
-        ...(!usesGemini36RequestContract(model) ? { temperature: 0 } : {}),
+        ...geminiSamplingConfig(model, 0),
       },
     }),
     signal,
