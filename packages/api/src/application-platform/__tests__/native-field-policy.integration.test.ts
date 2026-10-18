@@ -131,9 +131,33 @@ describe('[COMP:security/native-field-policy] current canonical native field mas
         workspace_id uuid,module_key text,user_id uuid,role_key text,status text,starts_at timestamptz,expires_at timestamptz)`)
       try {
         await client.query(`INSERT INTO pg_temp.application_native_role_assignments VALUES($1,'operations',$2,'finance','active','2020-01-01',NULL)`,[workspaceId,memberId])
+        await client.query('GRANT SELECT ON pg_temp.application_native_role_assignments TO PUBLIC')
         expect((await maskOn(client,fixture))?.readFields).toEqual(['title'])
       } finally { await client.query('DROP TABLE pg_temp.application_native_role_assignments') }
     })
+  })
+  it('does not let a nested source helper replace a canonical sensitivity with temporary metadata',async () => {
+    await clearRoles();const fixture = await record();await assign();await assign('finance',ownerId)
+    fixture.row.recordVersion = (await owner.query("UPDATE entity_instances SET sensitivity='confidential' WHERE id=$1 RETURNING record_version::text",[fixture.row.id])).rows[0].record_version
+    expect(await mask(fixture)).toBeNull()
+    await asMember(memberId,async client => {
+      await client.query(`CREATE TEMP TABLE entity_instances (
+        id uuid,workspace_id uuid,entity_type_id uuid,record_version bigint,sensitivity text,compartments text[],project_ids uuid[])`)
+      try {
+        await client.query(`INSERT INTO pg_temp.entity_instances VALUES($1,$2,$3,$4,'public','{}','{}')`,[fixture.row.id,workspaceId,fixture.schema.id,fixture.row.recordVersion])
+        await client.query('GRANT SELECT ON pg_temp.entity_instances TO PUBLIC')
+        expect(await maskOn(client,fixture)).toBeNull()
+      } finally { await client.query('DROP TABLE pg_temp.entity_instances') }
+    })
+    expect((await mask(fixture,ownerId))?.readFields).toEqual(['cost','title'])
+  })
+  it('pins nested source, field and scope-floor helpers to the trusted canonical schema path',async () => {
+    const signatures = ['read_scope_source(uuid,text,uuid)','read_admitted_native_scope_snapshot(uuid,text,uuid)',
+      'application_field_projection_state(uuid,jsonb,text,uuid,text,text,text[])','workflow_evidence_envelope_visible(uuid,jsonb)']
+    const rows = await asMember(memberId,async client => (await client.query<{ proconfig: string[] }>(
+      'SELECT proconfig FROM pg_proc WHERE oid=ANY($1::regprocedure[])',[signatures])).rows)
+    expect(rows).toHaveLength(signatures.length)
+    for (const row of rows) expect(row.proconfig).toContain('search_path=pg_catalog, public, pg_temp')
   })
   it('keeps current row and execution clearance floors even for a valid finance role',async () => {
     await clearRoles();const fixture = await record();await assign()
