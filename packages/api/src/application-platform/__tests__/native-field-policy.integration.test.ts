@@ -205,6 +205,130 @@ describe('[COMP:security/native-field-policy] current canonical native field mas
     expect(sources.length).toBeGreaterThan(0)
     return (await owner.query<{ fields: string[] }>("SELECT fields FROM application_field_resources WHERE id=ANY($1::uuid[]) AND selection<>'query_domain'",[sources.map(source => source.resourceId)])).rows.map(row => row.fields)
   }
+  async function withDepartmentQueryFixture<T>(operation: (fixture: Awaited<ReturnType<typeof catalogType>>,departments: string[],project: string) => Promise<T>) {
+    const departments = [randomUUID(),randomUUID()],project = randomUUID()
+    await owner.query('UPDATE workspaces SET department_read_v2=true,project_shared_spaces=true WHERE id=$1',[workspaceId])
+    try {
+      for (const department of departments) {
+        await owner.query("INSERT INTO workspace_groups(id,workspace_id,name,created_by,kind,key,compartment_key) VALUES($1::uuid,$2,'Fictional domain Department',$3,'team',$1::text,$4)",[department,workspaceId,ownerId,`team:${department}`])
+        await owner.query("INSERT INTO workspace_compartments(workspace_id,key,label,created_by,managed_by,managed_ref_id) VALUES($1,$2,'Fictional domain Department',$3,'team',$4)",[workspaceId,`team:${department}`,ownerId,department])
+        for (const user of [memberId,otherId]) await owner.query("INSERT INTO department_edges(workspace_id,department_id,principal_kind,user_id,clearance,origin) VALUES($1,$2,'user',$3,$4,'store')",
+          [workspaceId,department,user,user === memberId && department === departments[1] ? 'internal' : 'confidential'])
+        await owner.query("INSERT INTO department_edges(workspace_id,department_id,principal_kind,assistant_id,clearance,origin) VALUES($1,$2,'assistant',$3,'confidential','store') ON CONFLICT DO NOTHING",[workspaceId,department,assistantId])
+      }
+      await owner.query("INSERT INTO workspace_projects(id,workspace_id,name,normalized_name,created_by) VALUES($1::uuid,$2,$1::text,$1::text,$3)",[project,workspaceId,ownerId])
+      await owner.query("INSERT INTO project_shared_scopes(project_id,workspace_id,origin,created_by) VALUES($1,$2,'created',$3)",[project,workspaceId,ownerId])
+      for (const user of [memberId,otherId]) await owner.query("INSERT INTO project_shared_members(workspace_id,project_id,principal_kind,user_id,origin) VALUES($1,$2,'user',$3,'invited')",[workspaceId,project,user])
+      await owner.query("INSERT INTO project_shared_members(workspace_id,project_id,principal_kind,assistant_id,origin) VALUES($1,$2,'assistant',$3,'invited')",[workspaceId,project,assistantId])
+      return await operation(await catalogType(),departments,project)
+    } finally {
+      await owner.query('UPDATE workspaces SET department_read_v2=false,project_shared_spaces=false WHERE id=$1',[workspaceId])
+      await owner.query("UPDATE project_shared_scopes SET status='quarantined' WHERE project_id=$1",[project])
+      await owner.query("UPDATE workspace_projects SET status='archived' WHERE id=$1",[project])
+      await owner.query("UPDATE workspace_groups SET status='archived' WHERE id=ANY($1::uuid[])",[departments])
+      // The creator's mandatory owner edge remains until the workspace cascade.
+      await owner.query('DELETE FROM department_edges WHERE department_id=ANY($1::uuid[]) AND user_id IS DISTINCT FROM $2',[departments,ownerId])
+    }
+  }
+  async function domainOn(client: PoolClient,fixture: Awaited<ReturnType<typeof catalogType>>,settings: Record<string,string> = {}) {
+    for (const [key,value] of Object.entries(settings)) await client.query('SELECT set_config($1,$2,true)',[key,value])
+    return (await client.query('SELECT observe_generic_native_query_domain($1,$2,$3) AS value',[workspaceId,fixture.schema.id,['title']])).rows[0].value as { sources: ScopeSource[] }
+  }
+  async function domainSnapshot(source: ScopeSource,user = memberId,settings: Record<string,string> = {}) {
+    return asMember(user,async client => {
+      for (const [key,value] of Object.entries(settings)) await client.query('SELECT set_config($1,$2,true)',[key,value])
+      return (await client.query('SELECT read_admitted_application_field_snapshot($1,$2,$3) AS value',[workspaceId,source.resourceId,source.version])).rows[0].value
+    })
+  }
+  it('binds a genuinely empty Department-v2 query to actual Department and Project bounds',async () => {
+    await withDepartmentQueryFixture(async (fixture,departments,project) => {
+      const value = await queryRecords(fixture,{ fields: ['title'],aggregate: [{ field: 'title',operation: 'count' }] })
+      expect(value.records).toEqual([]);expect(value.aggregates?.[0].value).toBe('0')
+      const source = boundScopeSources(value)[0]
+      const domain = (await owner.query(`SELECT d.domain FROM application_query_domains d JOIN application_field_resources f ON f.resource_id=d.id WHERE f.id=$1`,[source.resourceId])).rows[0].domain
+      expect(domain).toMatchObject({ kind: 'native_department_v2',tier: 2,departments: { [departments[0]]: 3,[departments[1]]: 2 },projectLabels: [project] })
+      expect(await domainSnapshot(source,otherId)).toMatchObject({ held: false })
+      // This owner has actual Department edges and read oversight, without a Project roster edge.
+      expect((await owner.query('SELECT count(*)::int AS count FROM project_shared_members WHERE project_id=$1 AND user_id=$2',[project,ownerId])).rows[0].count).toBe(0)
+      expect(await domainSnapshot(source,ownerId)).toMatchObject({ held: false })
+      await owner.query('DELETE FROM department_edges WHERE workspace_id=$1 AND user_id=$2 AND department_id=$3',[workspaceId,memberId,departments[0]])
+      expect(await domainSnapshot(source)).toMatchObject({ held: true })
+      expect(await domainSnapshot(source,otherId)).toMatchObject({ held: false })
+    })
+  })
+  it('does not replace Department-v2 combination containment with one matching Department',async () => {
+    await withDepartmentQueryFixture(async (fixture,departments) => {
+      const full = await asMember(memberId,client => domainOn(client,fixture)),source = full.sources[0]
+      expect(await domainSnapshot(source,memberId,{ 'app.v2_context_department': departments[0] })).toMatchObject({ held: true })
+      const constrained = await asMember(memberId,client => domainOn(client,fixture,{ 'app.v2_context_department': departments[0] }))
+      expect(await domainSnapshot(constrained.sources[0],otherId)).toMatchObject({ held: false })
+      expect(await domainSnapshot(constrained.sources[0],otherId,{ 'app.v2_context_department': departments[0] })).toMatchObject({ held: false })
+      expect(await domainSnapshot(constrained.sources[0],otherId,{ 'app.v2_context_department': departments[1] })).toMatchObject({ held: true })
+    })
+  })
+  it('keeps Department-v2 binding labels, Project labels and Project IDs independent',async () => {
+    await withDepartmentQueryFixture(async (fixture,departments,project) => {
+      const source = (await asMember(memberId,client => domainOn(client,fixture))).sources[0]
+      const bounds = async (source: ScopeSource) => (await owner.query(`SELECT d.domain FROM application_query_domains d JOIN application_field_resources f ON f.resource_id=d.id WHERE f.id=$1`,[source.resourceId])).rows[0].domain as { departments: Record<string,number>;projectLabels: string[] }
+      const original = await bounds(source)
+      const completeBinding = [...Object.keys(original.departments),...original.projectLabels]
+      expect(completeBinding).toEqual(expect.arrayContaining([...departments,project]))
+      expect(await domainSnapshot(source,memberId,{ 'app.v2_binding': JSON.stringify(departments) })).toMatchObject({ held: true })
+      const current = await domainSnapshot(source,memberId,{ 'app.v2_binding': JSON.stringify(completeBinding) })
+      const rebound = (await asMember(memberId,client => domainOn(client,fixture,{ 'app.v2_binding': JSON.stringify(completeBinding) }))).sources[0]
+      expect(await bounds(rebound)).toEqual(original)
+      expect(current).toMatchObject({ held: false })
+      expect(await domainSnapshot(source,memberId,{ 'app.agent_project_ids': '[]' })).toMatchObject({ held: true })
+      const constrained = (await asMember(memberId,client => domainOn(client,fixture,{ 'app.v2_binding': JSON.stringify([departments[0]]),'app.agent_project_ids': '[]' }))).sources[0]
+      expect(await domainSnapshot(constrained,otherId)).toMatchObject({ held: false })
+      await owner.query('DELETE FROM project_shared_members WHERE project_id=$1 AND user_id=$2',[project,memberId])
+      expect(await domainSnapshot(source)).toMatchObject({ held: true })
+      expect(await domainSnapshot(source,ownerId)).toMatchObject({ held: false })
+    })
+  })
+  it('matches the extra legacy assistant ceiling on Department-v2 query domains',async () => {
+    await withDepartmentQueryFixture(async (fixture) => {
+      const source = (await asMember(memberId,client => domainOn(client,fixture))).sources[0]
+      const legacy = { 'app.agent_clearance': 'internal' }
+      expect(await domainSnapshot(source,memberId,legacy)).toMatchObject({ held: true })
+      const generalOnly = (await asMember(memberId,client => domainOn(client,fixture,legacy))).sources[0]
+      expect(await domainSnapshot(generalOnly,otherId)).toMatchObject({ held: false })
+      expect(await domainSnapshot(generalOnly,memberId,legacy)).toMatchObject({ held: false })
+      // Active v2 carries the canonical assistant intersection instead of applying legacy labels again.
+      expect(await domainSnapshot(source,memberId,{ ...legacy,'app.v2_active': 'true' })).toMatchObject({ held: false })
+    })
+  })
+  it('admits a required Department-v2 context when the original domain already forces its singleton',async () => {
+    await withDepartmentQueryFixture(async (fixture,departments) => {
+      const source = (await asMember(memberId,client => domainOn(client,fixture,{ 'app.v2_binding': JSON.stringify([departments[0]]) }))).sources[0]
+      expect(await domainSnapshot(source,otherId,{ 'app.v2_context_department': departments[0] })).toMatchObject({ held: false })
+      expect(await domainSnapshot(source,otherId,{ 'app.v2_context_department': departments[1] })).toMatchObject({ held: true })
+      await owner.query("UPDATE department_edges SET clearance='internal' WHERE department_id=$1 AND user_id=$2",[departments[0],otherId])
+      expect(await domainSnapshot(source,otherId)).toMatchObject({ held: true })
+      expect(await domainSnapshot(source,memberId)).toMatchObject({ held: false })
+    })
+  })
+  it('distinguishes finite legacy bounds from an unrestricted legacy universe across Department-v2',async () => {
+    const legacyFixture = await catalogType()
+    const universe = (await asMember(memberId,client => domainOn(client,legacyFixture))).sources[0]
+    const general = (await asMember(memberId,client => domainOn(client,legacyFixture,{ 'app.agent_compartments': '[]' }))).sources[0]
+    await withDepartmentQueryFixture(async () => {
+      expect(await domainSnapshot(universe,otherId)).toMatchObject({ held: true })
+      expect(await domainSnapshot(general,otherId)).toMatchObject({ held: false })
+    })
+  })
+  it('allows an independently broader legacy reader of a finite Department-v2 domain while preserving Project restrictions',async () => {
+    await withDepartmentQueryFixture(async (fixture,departments) => {
+      const broad = (await asMember(memberId,client => domainOn(client,fixture))).sources[0]
+      const finite = (await asMember(memberId,client => domainOn(client,fixture,{ 'app.v2_binding': JSON.stringify(departments) }))).sources[0]
+      await owner.query('UPDATE workspaces SET department_read_v2=false WHERE id=$1',[workspaceId])
+      try {
+        expect(await domainSnapshot(broad,ownerId)).toMatchObject({ held: true })
+        expect(await domainSnapshot(finite,ownerId)).toMatchObject({ held: false })
+        expect(await domainSnapshot(finite,memberId)).toMatchObject({ held: true })
+      } finally { await owner.query('UPDATE workspaces SET department_read_v2=true WHERE id=$1',[workspaceId]) }
+    })
+  })
   it('returns masked query fields with exact source observations instead of a whole-row binding',async () => {
     await clearRoles();const fixture = await record(),value = await queryRecords(fixture)
     expect(value.records).toHaveLength(1);expect(value.records[0].values).toEqual({ title: { kind: 'text',value: 'Fictional request' } })
@@ -836,5 +960,23 @@ describe('[COMP:security/native-field-policy] current canonical native field mas
     expect((await mask(fixture))?.policyVersion).not.toBe(before?.policyVersion)
     await expect(owner.query("UPDATE application_native_resource_owners SET module_key='other_operations' WHERE workspace_id=$1 AND origin=$2",[workspaceId,fixture.origin]))
       .rejects.toMatchObject({ code: '22023' })
+  })
+  it('preserves Department-v2 query-domain authority through actual memory and model admission',async () => {
+    await withDepartmentQueryFixture(async (fixture,departments) => {
+      const value = await queryRecords(fixture,{ fields: ['title'],aggregate: [{ field: 'title',operation: 'count' }] })
+      const sources = boundScopeSources(value),actor = await nativeExecution()
+      const context = (execution: ExecutionContext) => ({ ...executionToolContext(execution,{ appId: 'native-domain-fixture' }),
+        scopeAccumulator: new ContextScopeAccumulator({ sources }) })
+      const memory = await asMember(memberId,client => createMemory({ workspaceId,userId: null,assistantId,sensitivity: 'internal',createdByUserId: memberId,
+        summary: 'Fictional Department domain result',derivation: { producer: 'native-domain-fixture',sources } },undefined,client))
+      expect(await getMemoryById(actor.security.access,memory.id)).not.toBeNull()
+      await expect(assertSourceModelInputAuthority(context(actor))).resolves.toBeUndefined()
+      await owner.query('DELETE FROM department_edges WHERE department_id=$1 AND user_id=$2',[departments[0],memberId])
+      expect(await getMemoryById((await nativeExecution()).security.access,memory.id)).toBeNull()
+      await expect(assertSourceModelInputAuthority(context(actor))).rejects.toMatchObject({ retrySafe: false })
+      const independent = await nativeExecution(otherId)
+      expect(await getMemoryById(independent.security.access,memory.id)).not.toBeNull()
+      await expect(assertSourceModelInputAuthority(context(independent))).resolves.toBeUndefined()
+    })
   })
 })
