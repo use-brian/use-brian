@@ -97,6 +97,8 @@ export interface ApplicationRecordProjection {
   ref: ApplicationResourceRef
   values: Record<string, ApplicationJson>
   fields: string[]
+  /** Readable declared cells observed absent; withheld cells are never listed. */
+  absentFields?: string[]
   policyVersion: string
 }
 export interface ApplicationOperationReceipt {

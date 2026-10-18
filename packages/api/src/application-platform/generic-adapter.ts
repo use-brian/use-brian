@@ -2,7 +2,7 @@
 import { z } from 'zod'
 import { createHash } from 'node:crypto'
 import type { PoolClient } from 'pg'
-import { applicationAuthorityQueryFieldCeiling, applicationAuthorityFieldCatalog, assertApplicationWriteFields, assertApplicationQueryFields, bindScopeSource, propertyDefSchema,
+import { applicationAuthorityQueryFieldCeiling, applicationAuthorityFieldCatalog, assertApplicationWriteFields, assertApplicationQueryFields, bindScopeSource,boundScopeSources,propertyDefSchema,
   type ApplicationModuleDefinition, type ApplicationOperationContext, type PropertyDef, type ScopeSource } from '@use-brian/core'
 import { ApplicationPlatformError, applicationQuerySchema, applicationResourceSchema,
   type ApplicationQuery, type ApplicationRecordProjection, type ApplicationResourceDefinition, type ApplicationResourceRef } from '@use-brian/shared'
@@ -10,7 +10,8 @@ import { createDbDocEntityStore, applyCanonicalApplicationRecordMutation, canoni
   type CanonicalApplicationRecordMutation } from '../db/doc-entity-store.js'
 import { getApplicationExecutionBinding } from './execution-context.js'
 import { compileApplicationRecordQuery } from './record-query.js'
-import { bindApplicationFieldProjection } from './field-evidence.js'
+import { bindApplicationFieldProjection,readCanonicalGenericApplicationRecord } from './field-evidence.js'
+import { readCurrentScopeSources } from '../db/derived-scope-store.js'
 
 type Context = ApplicationOperationContext<PoolClient>
 const typeKey = z.string().regex(/^[a-z][a-z0-9_.-]{0,127}$/)
@@ -64,19 +65,9 @@ function projection(context: Context, definition: ApplicationResourceDefinition,
   policyVersion: binding?.state.fingerprint ?? 'native:1' }, { ...source, resourceKind: 'entity_instance', resourceId: row.id })
 }
 async function get(context: Context, type: string, id: string): Promise<ApplicationRecordProjection> {
-  const { definition, schema } = await resource(context, type)
-  const app = getApplicationExecutionBinding(context.execution)
-  const result = app ? await context.transaction.query<Row>(`SELECT id,data,record_version::text,source
-    FROM application_generic_projection($1,$2,'read',$3)`, [schema.id, type, id])
-    : await context.transaction.query<Row>(`SELECT id,data,record_version::text,${nativeSource} AS source FROM entity_instances
-      WHERE workspace_id=$1 AND entity_type_id=$2 AND id=$3 AND NOT scope_review_state_held('entity_instance',id)`, [schema.workspaceId, schema.id, id])
-  if (!result.rows[0]) throw unavailable()
-  const row = result.rows[0]
-  const source = sourceSchema.parse(row.source)
-  const record = await bindApplicationFieldProjection(context, { ref: { workspaceId: source.workspaceId,
-    origin: definition.origin, typeKey: definition.typeKey, id: row.id, version: row.record_version },
-  values: row.data, fields: Object.keys(row.data), policyVersion: app?.state.fingerprint ?? 'native:1' })
-  readProofs.set(record, { type, schemaVersion: definition.schemaVersion, action: 'read', records: [{ id, version: record.ref.version, fields: record.fields }] })
+  const { definition } = await resource(context, type)
+  const record = await readCanonicalGenericApplicationRecord(context,definition,id)
+  readProofs.set(record,{ type,schemaVersion: definition.schemaVersion,action: 'read',records: [{ id: record.ref.id,version: record.ref.version,fields: record.fields }] })
   return record
 }
 async function query(context: Context, type: string, input: ApplicationQuery) {
@@ -157,6 +148,11 @@ async function authorizeReadResult(context: Context, result: unknown) {
   if (!proof) throw unavailable()
   const { schema } = await resource(context, proof.type)
   if (String(schema.schemaVersion) !== proof.schemaVersion) throw unavailable()
+  const sources = boundScopeSources(result)
+  if (sources.some(source => source.resourceKind === 'application_field')) {
+    const current = await readCurrentScopeSources(context.transaction,schema.workspaceId,sources)
+    if (current.some(source => source.state !== 'current')) throw unavailable()
+  }
   const expected = new Map<string, string>()
   const fields = new Map<string, Set<string>>()
   for (const record of proof.records) {

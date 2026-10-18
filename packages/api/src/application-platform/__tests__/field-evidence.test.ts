@@ -41,4 +41,16 @@ describe('[COMP:api/application-field-evidence] private capture binding', () => 
     expect(f.query).not.toHaveBeenCalled()
     expect(boundScopeSources(f.projection)).toHaveLength(1)
   })
+  it('captures readable absence together with returned values without serializing its private sources',async () => {
+    const f = fixture();f.projection.absentFields = ['cost'];f.query.mockResolvedValue(f.result)
+    const result = await bindApplicationFieldProjection(f.context,f.projection)
+    expect(f.query.mock.calls[0][1][7]).toEqual(['title','cost'])
+    expect(boundScopeSources(result)).toEqual([f.source])
+    expect(JSON.stringify(result)).not.toContain('application_field')
+  })
+  it('refuses a claimed absence for a returned field before requesting capture',async () => {
+    const f = fixture();f.projection.absentFields = ['title']
+    await expect(bindApplicationFieldProjection(f.context,f.projection)).rejects.toMatchObject({ code: 'access_unavailable' })
+    expect(f.query).not.toHaveBeenCalled()
+  })
 })
