@@ -1,9 +1,10 @@
 import { createPublicKey, randomBytes, randomUUID } from 'node:crypto'
+import { createServer } from 'node:http'
 import pg from 'pg'
 import { afterAll, describe, expect, it } from 'vitest'
 import { createConnectorActorVerifier, SOURCE_PROTOCOL_VERSION,
   type SourceAuthorizationRequest } from '@use-brian/brian-app/connector'
-import { ContextScopeAccumulator, scopeEvidenceFromRows, executionToolContext, NOOP_TURN_LEDGER, type LLMProvider, type ScopeSource, type Tool } from '@use-brian/core'
+import { ContextScopeAccumulator, scopeEvidenceFromRows, executionToolContext, NOOP_TURN_LEDGER, createOpenAICompatProvider, wrapFallback, type LLMProvider, type ScopeSource, type Tool } from '@use-brian/core'
 import { getAppPool, getPool, applyRLSGucs, queryWithRLS } from '../../db/client.js'
 import { createMemory, getMemoryById, updateMemory } from '../../db/memories.js'
 import { validateAudienceScopeEvidence, validateCallerScopeEvidence } from '../../context-scope/caller-evidence.js'
@@ -387,7 +388,7 @@ describe('[COMP:api/external-source-access] independent persisted source ACL', (
       // The real shared kernel admits model input under current source rights. This local provider incurs no model/API cost.
       const cached = await getMemoryById(one.execution.security.access, firstDerivative!.resourceId)
       expect(cached?.summary).toContain('37.25')
-      async function modelFromRetained(actor: Awaited<ReturnType<typeof client>>, includeExecution = true, input: { sources?: ScopeSource[]; content?: string } = {}) {
+      async function modelFromRetained(actor: Awaited<ReturnType<typeof client>>, includeExecution = true, input: { sources?: ScopeSource[]; content?: string; provider?: LLMProvider } = {}) {
         let sessions = 0, requests = 0
         const observed: string[] = []
         const provider: LLMProvider = { name: 'fixture',models: ['fixture-model'],
@@ -410,7 +411,7 @@ describe('[COMP:api/external-source-access] independent persisted source ACL', (
           assertModelInputAuthority: async () => {},...(!includeExecution ? { executionContext: undefined } : {}) }
         const run = () => runAssistantTurn({ sessionId: actor.execution.lifecycle.sessionId,policy: { admission: 'personal' },sink: { kind: 'return' },
           lease: { mode: 'none' },abortController: new AbortController(),
-          model: { provider,model: 'fixture-model',configuredProviders: undefined,customLlm: null },
+          model: { provider: input.provider ?? provider,model: 'fixture-model',configuredProviders: undefined,customLlm: null },
           loop: { ledger: NOOP_TURN_LEDGER,context,systemPrompt: 'Fictional model input fixture',runtimeSystemContext: input.content ?? cached!.summary,
             messages: [{ role: 'user',content: 'Report the fictional retained result.' }],tools: new Map(),maxTurns: 1 } })
         return { run,accumulator,observed,counts: () => ({ sessions,requests }) }
@@ -448,6 +449,39 @@ describe('[COMP:api/external-source-access] independent persisted source ACL', (
         expect(revoked.counts()).toEqual({ sessions: 0,requests: 0 })
         const restored = await modelFromRetained(await client(first))
         await expect(restored.run()).resolves.toMatchObject({ selection: { kind: 'text' } })
+        // Real loopback model HTTP: access loss between primary response and retry/fallback must stop the next wire request.
+        for (const failover of [false,true]) {
+          const bodies: Array<{ path: string; body: string }> = []
+          const modelServer = createServer((request,response) => {
+            void (async () => {
+              const chunks: Buffer[] = []
+              for await (const chunk of request) chunks.push(Buffer.from(chunk))
+              bodies.push({ path: request.url ?? '',body: Buffer.concat(chunks).toString('utf8') })
+              await sourcePool.query("DELETE FROM grants WHERE kind='human' AND account_id=$1 AND record_id='order-1'", [first])
+              response.writeHead(failover ? 503 : 400, { 'content-type': 'text/plain' })
+              response.end(failover ? 'Fictional provider outage' : 'Only one system message is supported')
+            })().catch(error => { response.destroy(error as Error) })
+          })
+          await new Promise<void>(resolve => modelServer.listen(0,'127.0.0.1',resolve))
+          try {
+            const address = modelServer.address()
+            if (!address || typeof address === 'string') throw new Error('Local model fixture did not bind')
+            const baseURL = `http://127.0.0.1:${address.port}`
+            const primary = createOpenAICompatProvider({ label: 'fixture-primary',baseURL: `${baseURL}/primary` })
+            const provider = failover ? wrapFallback(primary,createOpenAICompatProvider({ label: 'fixture-fallback',baseURL: `${baseURL}/fallback` })) : primary
+            const turn = await modelFromRetained(await client(first),true,{ provider })
+            await expect(turn.run()).rejects.toMatchObject({ reason: 'authority_changed',retrySafe: false })
+            expect(bodies).toHaveLength(1)
+            expect(bodies[0].path).toBe('/primary/chat/completions')
+            expect(bodies[0].body).toContain('37.25'); expect(bodies[0].body).not.toContain('assertInputAuthority')
+            await sourcePool.query("INSERT INTO grants(kind,account_id,record_id,fields,actions) VALUES('human',$1,'order-1',$2,$3)", [first,['description','cost'],actions])
+            await expect(turn.run()).rejects.toMatchObject({ reason: 'authority_changed' })
+            expect(bodies).toHaveLength(1)
+          } finally {
+            modelServer.closeAllConnections()
+            await new Promise<void>(resolve => modelServer.close(() => resolve()))
+          }
+        }
         configureConnectorSourceRuntimeFactory(sourceRuntimeFactory)
         const unwired = await modelFromRetained(await client(first)), beforeUnwired = source.counters.authorizations
         await expect(unwired.run()).rejects.toMatchObject({ reason: 'authority_changed' })

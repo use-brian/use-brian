@@ -2,6 +2,7 @@ import { registryRow } from '@use-brian/shared/model-registry'
 import { debugDocumentFlow } from '../engine/document-flow-debug.js'
 import type { LLMProvider, ProviderSession, SessionOptions, SendOptions, Message, StreamChunk, StreamFn, TokenUsage } from './types.js'
 import { fitMessagesToBudget, resolveInputTokenLimit, isContextOverflowError, MODEL_CONTEXT_FIT_RATIO } from './context-budget.js'
+import { assertInputAuthority } from './input-authority.js'
 
 /**
  * Composable stream wrappers.
@@ -804,6 +805,10 @@ export function defaultWrappers(options?: {
   verbose?: boolean
 }): StreamWrapper[] {
   return [
+    (inner) => async function* (request) {
+      await assertInputAuthority(request.assertInputAuthority)
+      yield* inner(request)
+    },
     wrapContextBudget(),
     wrapSanitizeToolNames(),
     wrapRepairToolCallArgs(),
@@ -855,9 +860,10 @@ export function wrapProvider(
           // successful stream — see gemini.ts), so re-sending trimmed messages
           // on the budget wrapper's retry is safe. The other wrappers don't
           // touch `req.messages`, so this is a no-op for them.
-          const adaptedFn: StreamFn = (req) => inner.send(req.messages, { ...sendOpts, signal: req.signal, httpRetryWindow: req.httpRetryWindow })
+          const adaptedFn: StreamFn = (req) => inner.send(req.messages, { ...sendOpts, signal: req.signal, httpRetryWindow: req.httpRetryWindow, assertInputAuthority: req.assertInputAuthority })
           const wrapped = composeWrappers(adaptedFn, ...wrappers)
           return wrapped({
+            assertInputAuthority: sendOpts?.assertInputAuthority ?? sessionOpts.assertInputAuthority,
             model: sessionOpts.model,
             systemPrompt: sessionOpts.systemPrompt,
             runtimeSystemContext: sessionOpts.runtimeSystemContext,

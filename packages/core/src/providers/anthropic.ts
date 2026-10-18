@@ -13,6 +13,7 @@
  * Spec: docs/architecture/engine/provider-abstraction.md → "Fallback wrapper".
  */
 import Anthropic from '@anthropic-ai/sdk'
+import { assertInputAuthority } from './input-authority.js'
 import { systemContextParts, extractHistorySystemContext } from './system-context.js'
 import { providerAliasMap, providerModelIds } from '@use-brian/shared/model-registry'
 import type {
@@ -241,6 +242,7 @@ async function* streamAnthropic(
     temperature?: number
     tools?: ToolDefinition[]
     signal?: AbortSignal
+    assertInputAuthority?: () => Promise<void>
   },
 ): AsyncGenerator<StreamChunk> {
   // Text-only fallback. Tools are intentionally omitted — see file header
@@ -265,7 +267,17 @@ async function* streamAnthropic(
   // Use the streaming `.create` form so we can yield text deltas as they
   // arrive. The SDK forwards `signal` to the underlying fetch — a
   // chat-route disconnect aborts the call without leaking a request.
-  const stream = await client.messages.create(
+  let inputFailure: unknown
+  const checkedClient = options.assertInputAuthority ? client.withOptions({
+    maxRetries: 0,
+    fetch: async (...args) => {
+      try { await assertInputAuthority(options.assertInputAuthority) }
+      catch (error) { inputFailure = error; throw error }
+      options.signal?.throwIfAborted()
+      return fetch(...args)
+    },
+  }) : client
+  const stream = await checkedClient.messages.create(
     {
       model: modelId,
       // Anthropic requires max_tokens (no implicit default). Cap to a
@@ -278,7 +290,7 @@ async function* streamAnthropic(
       stream: true,
     },
     { signal: options.signal },
-  )
+  ).catch(error => { if (inputFailure) throw inputFailure; throw error })
 
   let stopReason: StopReason = 'end_turn'
   let usage: TokenUsage = { inputTokens: 0, outputTokens: 0 }
@@ -362,6 +374,7 @@ export function createAnthropicProvider(options: AnthropicProviderOptions): LLMP
         temperature: request.temperature,
         tools: request.tools,
         signal: request.signal,
+        assertInputAuthority: request.assertInputAuthority,
       })
     },
 
@@ -396,6 +409,7 @@ export function createAnthropicProvider(options: AnthropicProviderOptions): LLMP
             temperature: opts.temperature,
             tools: opts.tools,
             signal: opts.signal,
+            assertInputAuthority: sendOpts?.assertInputAuthority ?? opts.assertInputAuthority,
           })
         },
       }

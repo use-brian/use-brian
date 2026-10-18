@@ -47,6 +47,7 @@ import type {
   ToolDefinition,
 } from './types.js'
 import { createAccumulator } from './accumulator.js'
+import { assertInputAuthority } from './input-authority.js'
 
 /** DashScope international (Singapore) — the wave-1 endpoint. */
 export const DASHSCOPE_INTL_BASE_URL = 'https://dashscope-intl.aliyuncs.com/compatible-mode/v1'
@@ -300,6 +301,7 @@ async function* streamCompat(
     responseFormat?: 'json'
     responseSchema?: Record<string, unknown>
     signal?: AbortSignal
+    assertInputAuthority?: () => Promise<void>
   },
   // Set by the fail-open retry below; suppresses the schema on the second try.
   omitSchema = false,
@@ -350,6 +352,8 @@ async function* streamCompat(
   }
 
   debugDocumentFlow('openai_wire', { model: recordedModel, messages, wire: ccMessages })
+  await assertInputAuthority(options.assertInputAuthority)
+  options.signal?.throwIfAborted()
   const res = await (cfg.fetchFn ?? fetch)(`${cfg.baseURL}/chat/completions`, {
     method: 'POST',
     headers: {
@@ -553,6 +557,7 @@ export function createOpenAICompatProvider(options: OpenAICompatProviderOptions)
         responseFormat: request.responseFormat,
         responseSchema: request.responseSchema,
         signal: request.signal,
+        assertInputAuthority: request.assertInputAuthority,
       })
     },
 
@@ -573,6 +578,7 @@ export function createOpenAICompatProvider(options: OpenAICompatProviderOptions)
             temperature: sessionOpts.temperature,
             thinkingLevel: sendOpts?.thinkingLevel ?? sessionOpts.thinkingLevel,
             signal: sessionOpts.signal,
+            assertInputAuthority: sendOpts?.assertInputAuthority ?? sessionOpts.assertInputAuthority,
           })
           async function* run(): AsyncGenerator<StreamChunk> {
             const acc = createAccumulator()

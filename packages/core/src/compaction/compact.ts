@@ -225,6 +225,8 @@ export type CompactionResult = {
 }
 
 export type CompactionOptions = {
+  /** Host-only input authority inherited by every provider dispatch. */
+  assertInputAuthority?: () => Promise<void>
   provider: LLMProvider
   model: string // use a cheap model (Flash)
   messages: Message[]
@@ -260,6 +262,7 @@ export async function compactConversation(options: CompactionOptions): Promise<C
 
   const response = await collectStream(
     options.provider.stream({
+      assertInputAuthority: options.assertInputAuthority,
       model: options.model,
       messages: compactMessages,
       systemPrompt: options.systemPrompt,

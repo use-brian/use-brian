@@ -55,6 +55,25 @@ describe('[COMP:engine/model-input-authority] every model boundary', () => {
     expect(p.send).toHaveBeenCalledTimes(1)
     expect(events.some(event => event.type === 'text_delta')).toBe(true)
   })
+  it('carries the native lease to physical dispatch even without source facts', async () => {
+    const p = provider(); let revoked = false
+    let physicalCheck: (() => Promise<void>) | undefined
+    const checked: LLMProvider = { ...p.value,createSession: options => {
+      physicalCheck = options.assertInputAuthority
+      return { send: () => (async function* () {
+      revoked = true
+      await options.assertInputAuthority?.()
+      yield { type: 'text_delta' as const,text: 'Unreachable fictional content' }
+    })() } } }
+    const ctx = { ...context(async () => {}),authority: {
+      assertCurrent: async () => { if (revoked) throw new Error('Native admission withdrawn') },
+      execute: async <T>(operation: () => Promise<T>) => operation(),
+    } }
+    await expect(run(checked,ctx)).rejects.toMatchObject({ reason: 'authority_changed',retrySafe: false })
+    revoked = false
+    await expect(physicalCheck!()).rejects.toMatchObject({ reason: 'authority_changed' })
+    expect(p.stream).not.toHaveBeenCalled()
+  })
   const observedSource = { workspaceId: '11111111-1111-4111-8111-111111111111',userId: null,assistantId: null,
     resourceKind: 'memory',resourceId: '22222222-2222-4222-8222-222222222222',version: '1',sensitivity: 'internal' as const,compartments: [],projectIds: [] }
   it('checks evidence added by a tool before the next provider send', async () => {

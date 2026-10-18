@@ -4,6 +4,7 @@ import { askQuestionSchema } from '../tools/base/ask-question.js'
 import { filterToolsByCapabilities } from '../tools/capability-gate.js'
 import { getHeapStatistics } from 'node:v8'
 import { renderSystemContext } from '../providers/system-context.js'
+import { isInputAuthorityError } from '../providers/input-authority.js'
 import type { LLMProvider, Message, ContentBlock, TokenUsage, AssistantResponse, SendOptions, ThinkingLevel, ToolDefinition, ToolParameter } from '../providers/types.js'
 import type { Tool, ToolContext, ToolResultMeta } from '../tools/types.js'
 import type { AwaitingApprovalEvent, ConfirmationResolver, ToolConfirmationRequest } from '../mcp/types.js'
@@ -61,15 +62,23 @@ function isUnderHeapPressure(): boolean {
 }
 
 function isAuthorityBoundaryError(error: unknown): boolean {
-  return typeof error === 'object' && error !== null
-    && (error as { reason?: unknown }).reason === 'authority_changed'
+  return isInputAuthorityError(error)
 }
 
 /** A failed input boundary cannot enter model retry, compaction or terminal fallback. */
+const invalidModelInputs = new WeakSet<object>()
 async function assertModelInputAuthority(context: ToolContext): Promise<void> {
-  if (!context.assertModelInputAuthority) return
-  try { await context.assertModelInputAuthority(context) }
+  if (!context.assertModelInputAuthority && !context.authority) return
+  const identity = context.executionContext ?? context
+  if (invalidModelInputs.has(identity)) {
+    throw Object.assign(new Error('The model context is unavailable.'), { reason: 'authority_changed' as const,retrySafe: false })
+  }
+  try {
+    await context.authority?.assertCurrent()
+    await context.assertModelInputAuthority?.(context)
+  }
   catch (error) {
+    invalidModelInputs.add(identity)
     if (isAuthorityBoundaryError(error)) throw error
     throw Object.assign(new Error('The model context is unavailable.', { cause: error }), {
       reason: 'authority_changed' as const, retrySafe: false,
@@ -712,6 +721,7 @@ async function* queryLoopCore(
   // a no-op while we wait for Cloud Run's 300s cap.
   await assertModelInputAuthority(context)
   const session = options.stateless ? null : provider.createSession({
+    assertInputAuthority: () => assertModelInputAuthority(context),
     model,
     systemPrompt,
     runtimeSystemContext,
@@ -912,12 +922,11 @@ async function* queryLoopCore(
       await assertModelInputAuthority(context)
       // Stateless: send full history via provider.stream() (no rawHistory accumulation).
       // Stateful: send only new messages via session.send() (preserves thought signatures).
-      const sendOpts: SendOptions | undefined = nextThinkingLevel || progress
-        ? {
-            ...(nextThinkingLevel ? { thinkingLevel: nextThinkingLevel } : {}),
-            ...(progress ? { progress } : {}),
-          }
-        : undefined
+      const sendOpts: SendOptions = {
+        assertInputAuthority: () => assertModelInputAuthority(context),
+        ...(nextThinkingLevel ? { thinkingLevel: nextThinkingLevel } : {}),
+        ...(progress ? { progress } : {}),
+      }
       // Ledger: record what is about to go on the wire — the delta in
       // stateful mode (recorder reconstructs full = start.messages + deltas),
       // the complete history in stateless mode.
@@ -932,6 +941,7 @@ async function* queryLoopCore(
       const modelStream = session
         ? session.send(nextMessages, sendOpts)
         : provider.stream({
+            assertInputAuthority: () => assertModelInputAuthority(context),
             model,
             systemPrompt,
             runtimeSystemContext,
@@ -1102,6 +1112,7 @@ async function* queryLoopCore(
           const compact = async () => {
             await assertModelInputAuthority(context)
             return compactConversation({
+              assertInputAuthority: () => assertModelInputAuthority(context),
               provider,
               model: options.compactModel!,
               messages: nextMessages,
@@ -2569,6 +2580,7 @@ async function* finalizeTerminalResponse(params: {
     await assertModelInputAuthority(params.context)
     const acc = createAccumulator()
     for await (const chunk of params.provider.stream({
+      assertInputAuthority: () => assertModelInputAuthority(params.context),
       model: params.model,
       systemPrompt: params.systemPrompt ?? TERMINAL_FINALIZER_SYSTEM_PROMPT,
       messages: [{

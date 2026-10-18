@@ -14,6 +14,7 @@ import type { LLMProvider, ProviderRequest, ProviderSession, SendOptions, Sessio
 import type { GoogleTransport } from './google-transport.js'
 import { aiStudioTransport } from './google-transport.js'
 import { createGeminiHttpRetry } from './gemini-http-retry.js'
+import { assertInputAuthority } from './input-authority.js'
 import { systemContextParts, extractHistorySystemContext } from './system-context.js'
 
 /** Alias → real Google model id, derived from the model registry (each
@@ -486,6 +487,7 @@ async function* streamGeminiSSE(
   signal?: AbortSignal,
   mode?: 'stateful_delta' | 'stateless_full',
   httpRetryWindow?: HttpRetryWindow,
+  checkInput?: () => Promise<void>,
 ): AsyncGenerator<GeminiStreamChunk> {
   // AI Studio and Vertex speak the same wire format; only host + auth differ,
   // and the injected transport owns both. Everything below here is identical.
@@ -509,15 +511,19 @@ async function* streamGeminiSSE(
   const send = (body: GeminiRequest) => {
     const serialized = JSON.stringify(body)
     debugDocumentFlow('gemini_wire', { model: modelId, mode, gemini: body })
-    return retryHttp(attemptSignal => fetch(url, {
-      method: 'POST',
-      headers,
-      body: serialized,
-      signal: attemptSignal,
-      // Node 22 declares Undici 6 types. The Undici 7 Agent remains runtime
-      // compatible; the local HTTP timeout tests exercise this bridge.
-      ...(dispatcher ? { dispatcher: dispatcher as unknown as RequestInit['dispatcher'] } : {}),
-    }))
+    return retryHttp(async attemptSignal => {
+      await assertInputAuthority(checkInput)
+      attemptSignal.throwIfAborted()
+      return fetch(url, {
+        method: 'POST',
+        headers,
+        body: serialized,
+        signal: attemptSignal,
+        // Node 22 declares Undici 6 types. The Undici 7 Agent remains runtime
+        // compatible; the local HTTP timeout tests exercise this bridge.
+        ...(dispatcher ? { dispatcher: dispatcher as unknown as RequestInit['dispatcher'] } : {}),
+      })
+    })
   }
 
   let response = await send(request)
@@ -873,7 +879,7 @@ export function createGeminiProvider(keyOrTransport: string | GoogleTransport | 
         { ...request, historySystemContext: extractHistorySystemContext(request.messages) },
         modelId,
       )
-      const sseStream = streamGeminiSSE(transport, modelId, geminiRequest, request.signal, 'stateless_full', request.httpRetryWindow)
+      const sseStream = streamGeminiSSE(transport, modelId, geminiRequest, request.signal, 'stateless_full', request.httpRetryWindow, request.assertInputAuthority)
 
       for await (const { chunk } of convertStreamChunks(sseStream, recordId, toolCallCounter)) {
         yield chunk
@@ -944,7 +950,7 @@ export function createGeminiProvider(keyOrTransport: string | GoogleTransport | 
           // letting it run to Cloud Run's 300s timeout.
           yield { type: 'message_start', model: recordId }
 
-          const sseStream = streamGeminiSSE(transport, modelId, geminiRequest, sendOpts?.signal ?? options.signal, 'stateful_delta', sendOpts?.httpRetryWindow)
+          const sseStream = streamGeminiSSE(transport, modelId, geminiRequest, sendOpts?.signal ?? options.signal, 'stateful_delta', sendOpts?.httpRetryWindow, sendOpts?.assertInputAuthority ?? options.assertInputAuthority)
 
           // A finish reason arrives on Gemini's final SSE chunk. Until that
           // chunk is observed the stream is incomplete, not a clean end_turn.

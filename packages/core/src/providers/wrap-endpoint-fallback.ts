@@ -70,6 +70,7 @@ import type {
 } from './types.js'
 import { createAccumulator } from './accumulator.js'
 import { extractStatus } from './wrap-fallback.js'
+import { assertInputAuthority, isInputAuthorityError } from './input-authority.js'
 
 export type EndpointFallbackReason = 'http_status' | 'network' | 'stream_error' | 'empty_stream'
 
@@ -111,6 +112,7 @@ function errorDetail(err: unknown): string {
  * configuration error the admin needs to see, and would keep hiding it.
  */
 function classify(err: unknown): EndpointFallbackEvent | null {
+  if (isInputAuthorityError(err)) return null
   const detail = errorDetail(err)
   const status = extractStatus(err)
   if (status !== null) {
@@ -184,7 +186,9 @@ export function wrapEndpointFallback(
     runPrimaryStream: () => AsyncIterable<StreamChunk>,
     runFallbackStream: () => AsyncIterable<StreamChunk>,
     onServed?: (side: 'primary' | 'fallback', chunks: StreamChunk[]) => void,
+    checkInput?: () => Promise<void>,
   ): AsyncGenerator<StreamChunk> {
+    await assertInputAuthority(checkInput)
     const result = await runPrimary(runPrimaryStream())
     if (result.kind === 'committed') {
       const served: StreamChunk[] = []
@@ -214,7 +218,9 @@ export function wrapEndpointFallback(
     // `message_start` + `message_end` in 15ms) got reported as having served
     // the turn, flipping its billing to platform and telling the user a
     // built-in model had answered.
+    await assertInputAuthority(checkInput)
     const fallbackResult = await runPrimary(runFallbackStream())
+    if (fallbackResult.kind === 'failed' && isInputAuthorityError(fallbackResult.error)) throw fallbackResult.error
     if (fallbackResult.kind === 'committed') {
       opts?.onFallback?.(decision)
       const served: StreamChunk[] = []
@@ -248,6 +254,8 @@ export function wrapEndpointFallback(
       return attempt(
         () => primary.stream(request),
         () => fallback.stream(request),
+        undefined,
+        request.assertInputAuthority,
       )
     },
 
@@ -282,6 +290,7 @@ export function wrapEndpointFallback(
           if (stickToFallback && fallbackSession) {
             const session = fallbackSession
             return (async function* () {
+              await assertInputAuthority(sendOpts?.assertInputAuthority ?? sessionOpts.assertInputAuthority)
               const served: StreamChunk[] = []
               for await (const chunk of session.send(messages, sendOpts)) {
                 served.push(chunk)
@@ -303,6 +312,7 @@ export function wrapEndpointFallback(
               record(messages, chunks)
               if (side === 'fallback') stickToFallback = true
             },
+            sendOpts?.assertInputAuthority ?? sessionOpts.assertInputAuthority,
           )
         },
       }
