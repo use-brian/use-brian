@@ -106,7 +106,10 @@ async function laneContext(scope: ResolvedTurnScope) {
     ownership: { kind: 'workspace', workspaceId: WORKSPACE },
     lifecycle: { abortSignal: new AbortController().signal, sessionId: SESSION, channelType: 'office_thread', channelId: 'c' },
     ...officeLaneExecutionBounds(lane, 'sender', deps('edit')),
-  }, { resolveScope: async () => scope, createLease: () => lease })).executionContext
+  }, { resolveScope: async () => scope, createLease: () => lease,
+    pinPolicyEpoch: async () => async () => true,
+    resolveAssistant: async () => ({ id: 'assistant', workspaceId: WORKSPACE, kind: 'primary', clearance: 'confidential', compartments: [] }),
+  })).executionContext
 }
 
 describe('[COMP:api/office-chat-lane] the turn is capped at the file', () => {

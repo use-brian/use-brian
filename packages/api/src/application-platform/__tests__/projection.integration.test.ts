@@ -141,7 +141,7 @@ describe('[COMP:api/application-auth] database application projections and live 
     expect(user).not.toBeNull()
     return { authentication: { user: user! }, appId, grantId, parentId, userId, token: `oat_${id}_${secret}` }
   }
-  it('[COMP:api/application-field-evidence] admits the same observation through each actual app and contracts only the affected reader', async () => {
+  it('[COMP:api/application-field-evidence] retains the same observation under fresh independent app authority after contraction', async () => {
     const first = await provision('member'), second = await provision('external_user'), dispatcher = service()
     const firstExecution = await resolveApplicationExecutionContext(first.authentication)
     const secondExecution = await resolveApplicationExecutionContext(second.authentication)
@@ -161,7 +161,9 @@ describe('[COMP:api/application-auth] database application projections and live 
     await expect(dispatcher.query(firstExecution,'records','field_snapshot',input)).rejects.toThrow()
     const contracted = await resolveApplicationExecutionContext(first.authentication)
     expect(await dispatcher.query(contracted,'records','field_snapshot',input)).toMatchObject({ held: true })
-    expect(await dispatcher.query(secondExecution,'records','field_snapshot',input)).toMatchObject({ held: false })
+    await expect(dispatcher.query(secondExecution,'records','field_snapshot',input)).rejects.toMatchObject({ reason: 'authority_changed' })
+    const independent = await resolveApplicationExecutionContext(second.authentication)
+    expect(await dispatcher.query(independent,'records','field_snapshot',input)).toMatchObject({ held: false })
   })
   it.each(['member', 'external_user', 'service'] as const)('enforces exact record/field projections as a real non-bypass %s', async kind => {
     const fixture = await provision(kind), execution = await resolveApplicationExecutionContext(fixture.authentication), dispatcher = service()
@@ -460,7 +462,7 @@ describe('[COMP:api/application-auth] database application projections and live 
     const execution = await resolveApplicationExecutionContext(fixture.authentication), dispatcher = new ApplicationPlatformService([createCanonicalNativeApplicationModule()])
     expect((await dispatcher.query(execution, 'native', 'get', { type: 'company', id: company.id }) as { values: unknown }).values).toEqual({ name: 'Example private source' })
     await pool.query('UPDATE entities SET user_id=$2 WHERE id=$1', [company.id,memberId])
-    await expect(dispatcher.query(execution, 'native', 'get', { type: 'company', id: company.id })).rejects.toThrow('Access changed')
+    await expect(dispatcher.query(execution, 'native', 'get', { type: 'company', id: company.id })).rejects.toMatchObject({ code: 'access_unavailable' })
     const current = await resolveApplicationExecutionContext(fixture.authentication)
     await expect(dispatcher.query(current, 'native', 'get', { type: 'company', id: company.id })).rejects.toMatchObject({ code: 'access_unavailable' })
     expect((await dispatcher.catalog(current)).resources).toEqual([])

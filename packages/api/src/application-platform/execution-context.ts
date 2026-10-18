@@ -4,7 +4,6 @@ import type { PoolClient } from 'pg'
 import { createExecutionContext, intersectAccessCeilings, maxSensitivity, minSensitivity,
   type AccessCeiling, type ExecutionContext, type Sensitivity } from '@use-brian/core'
 import { ApplicationPlatformError } from '@use-brian/shared'
-import { query } from '../db/client.js'
 import { findAssistantById } from '../db/users.js'
 import { createAuthorityLease, AuthorityChangedError } from '../context-scope/authority-lease.js'
 import { pinPolicyEpoch } from '../context-scope/policy-epoch.js'
@@ -53,20 +52,6 @@ function releaseCeiling(state: ApplicationAuthorityState): AccessCeiling {
     compartments: compartments ?? [], mutationCompartments: compartments ?? [], projectIds: projects ?? [], visibilityAssistantIds: [state.assistantId] }
 }
 
-/** Content-free live metadata. Timed edges disappearing also invalidate the lease. */
-async function metadataSnapshot(state: ApplicationAuthorityState) {
-  const result = await query<{ snapshot: unknown }>(`SELECT jsonb_build_object(
-    'workspace',jsonb_build_array(w.department_read_v2,w.project_shared_spaces),
-    'policy',(SELECT revision::text FROM workspace_access_policies WHERE workspace_id=w.id),
-    'members',(SELECT jsonb_agg(to_jsonb(m) ORDER BY m.user_id) FROM workspace_members m WHERE m.workspace_id=w.id),
-    'departments',(SELECT jsonb_agg(to_jsonb(d) ORDER BY d.id) FROM department_edges d WHERE d.workspace_id=w.id AND (d.expires_at IS NULL OR d.expires_at>statement_timestamp())),
-    'projects',(SELECT jsonb_agg(to_jsonb(p) ORDER BY p.id) FROM project_shared_members p WHERE p.workspace_id=w.id AND (p.expires_at IS NULL OR p.expires_at>statement_timestamp())),
-    'module',(SELECT to_jsonb(m) FROM workspace_modules m WHERE m.workspace_id=w.id AND m.module_key=$2)
-    ) AS snapshot FROM workspaces w WHERE w.id=$1`, [state.workspaceId, state.moduleKey])
-  if (!result.rows[0]) throw new ApplicationPlatformError('grant_revoked', 'Application access is unavailable.')
-  return result.rows[0].snapshot
-}
-
 export async function resolveApplicationExecutionContext(authentication: ApplicationAuthentication,
   options: { abortSignal?: AbortSignal; sessionId?: string; channelType?: string } = {}): Promise<ExecutionContext> {
   // Keep the authenticated objects themselves: cloning their public metadata must lose proof.
@@ -85,8 +70,7 @@ export async function resolveApplicationExecutionContext(authentication: Applica
     if (state.nativeMember) {
       ceiling = intersectAccessCeilings(ceiling, await resolveLiveAccessCeilingSystem({ userId: state.principal.userId, workspaceId: state.workspaceId, assistant, memberMode: 'member' }))
     }
-    const signature = createHash('sha256').update(JSON.stringify({ fingerprint: state.fingerprint, ceiling, assistant,
-      metadata: await metadataSnapshot(state) })).digest('hex')
+    const signature = createHash('sha256').update(JSON.stringify({ fingerprint: state.fingerprint, ceiling, assistant })).digest('hex')
     return { state, assistant, ceiling, signature }
   }
   const initial = await resolve()

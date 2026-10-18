@@ -63,6 +63,24 @@ function base() {
 }
 
 describe('[COMP:api/execution-context] trusted execution resolution', () => {
+  it('rejects a policy change across trusted ceiling construction without creating a lease', async () => {
+    let current = true
+    const createLease = vi.fn(() => authority)
+    await expect(resolveExecutionContextSystem(base(), {
+      pinPolicyEpoch: async () => async () => current,
+      resolveScope: async () => { current = false; return scope },
+      createLease,
+    })).rejects.toMatchObject({ reason: 'authority_changed' })
+    expect(createLease).not.toHaveBeenCalled()
+  })
+
+  it('resolves a current assistant inside the metadata bracket', async () => {
+    const current = { ...base().assistant, clearance: 'public' as const }
+    const resolveScope = vi.fn(async () => scope)
+    await resolveExecutionContextSystem(base(), { resolveAssistant: async () => current, resolveScope, createLease: () => authority })
+    expect(resolveScope).toHaveBeenCalledWith(expect.objectContaining({ assistant: current }), expect.anything())
+  })
+
   it('resolves scope before constructing a context and keeps empty grants finite', async () => {
     const resolveScope = vi.fn(async () => scope)
     const result = await resolveExecutionContextSystem(base(), {

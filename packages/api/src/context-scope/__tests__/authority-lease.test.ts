@@ -132,6 +132,17 @@ describe('[COMP:api/authority-lease] current authority at execution boundaries',
       await expect(lease.assertCurrent()).rejects.toMatchObject({ reason: 'authority_changed' })
     })
 
+    it('keeps a construction-pinned policy callback sticky on session leases', async () => {
+      liveSession.row = { ...base }
+      let current = true
+      const lease = createSessionAuthorityLease({ starting: initial, session: base, policyCurrent: async () => current })
+      await expect(lease.assertCurrent()).resolves.toBeUndefined()
+      current = false
+      await expect(lease.assertCurrent()).rejects.toMatchObject({ reason: 'authority_changed' })
+      current = true
+      await expect(lease.assertCurrent()).rejects.toMatchObject({ reason: 'authority_changed' })
+    })
+
     it('re-checks the assistant running the turn, not the session binding it was addressed away from', async () => {
       // Doc-dock switch / room @mention: the turn runs as another assistant,
       // and its starting ceiling was resolved for that assistant.

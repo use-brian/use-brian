@@ -380,6 +380,8 @@ describe('[COMP:api/context-scope-resolver] resolveTurnScopeSystem', () => {
       store: store(),
       resolveWorkspaceRole,
       createSessionLease,
+      pinPolicyEpoch: async () => async () => true,
+      resolveAssistant: async () => assistant,
     })
 
     expect(resolveWorkspaceRole).toHaveBeenCalledWith('external-user', 'workspace-1', true)

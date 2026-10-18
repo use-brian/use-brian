@@ -142,7 +142,7 @@ describe.sequential('[COMP:api/external-source-access] independent persisted sou
           httpReadPath: '/http/read', tenant: 'fixture-tenant', bindingRevision: '1', subject: { kind: 'human' as const, id: userId, executingAssistantId: assistant } }
         return { execution, profile, ports, access: createSourceAccessClient(execution, profile, ports, { headers: { Authorization: `Bearer ${transportToken}` } }) }
       }
-      const one = await client(first), two = await client(second), unknown = await client(unmapped), outsider = await client(foreign)
+      let one = await client(first), two = await client(second), unknown = await client(unmapped), outsider = await client(foreign)
       const retainedCoordinator = createRetainedSourceAuthorityCoordinator({ factory: createConnectorSourceRuntimeFactory({ issuer, keys, instances }), instances })
       const ui = async (session: string, fields: string) => fetch(`${source!.url}/ui/records/order-1?fields=${fields}`, { headers: { Authorization: `Bearer ${session}` } })
       expect(await (await ui('first-ui-session','cost')).json()).toEqual({ cost: '37.25' }); expect((await ui('second-ui-session','cost')).status).toBe(403)
@@ -251,6 +251,11 @@ describe.sequential('[COMP:api/external-source-access] independent persisted sou
         // Observed local contraction cannot be revived by restoring the old row.
         expect((await readCurrentScopeSources(app, workspace, bound.sources)).map(row => row.state)).toEqual(['held'])
         await app.query('ROLLBACK')
+        await expect(one.execution.security.authority.assertCurrent()).rejects.toMatchObject({ reason: 'authority_changed' })
+        // Explicit new invocations after the native policy change. A restored
+        // Department edge cannot revive any old workspace-wide epoch lease.
+        one = await client(first); two = await client(second)
+        unknown = await client(unmapped); outsider = await client(foreign)
         await app.query('BEGIN'); await applyRLSGucs(app, first)
         const expiring = await one.access.authorize({ version: SOURCE_PROTOCOL_VERSION, operationId: randomUUID(), items: [{ itemId: randomUUID(),
           resource: evidence.resources[0].resource, fields: ['description','cost'], action: 'context', retentionMode: 'governed' }],
