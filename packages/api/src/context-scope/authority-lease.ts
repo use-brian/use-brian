@@ -32,6 +32,7 @@ const leases = new AsyncLocalStorage<readonly AuthorityLease[]>()
 export function createAuthorityLease(
   starting: AccessCeiling,
   resolveCurrent: () => Promise<AccessCeiling | null>,
+  policyCurrent?: () => Promise<boolean>,
 ): AuthorityLease {
   const invocationId = randomUUID()
   const pinned = intersectAccessCeilings(starting, starting)
@@ -43,8 +44,10 @@ export function createAuthorityLease(
     async assertCurrent() {
       if (invalid) throw new AuthorityChangedError(operationMayHaveExecuted)
       try {
+        if (policyCurrent && !(await policyCurrent())) throw new AuthorityChangedError()
         const current = await resolveCurrent()
         if (!current || !accessCeilingContains(current, pinned)) invalid = true
+        if (policyCurrent && !(await policyCurrent())) invalid = true
       } catch {
         // Failure to verify is not permission. Keep underlying diagnostics out
         // of the model response and never return content from stale context.
@@ -95,6 +98,8 @@ export function createSessionAuthorityLease(input: {
   credentialCurrent?: () => Promise<boolean>
   /** Re-resolve a recipient/surface ceiling at every authority boundary. */
   maximumAccessCurrent?: () => Promise<AccessCeiling | null>
+  /** Construction-pinned native/application field and configuration metadata. */
+  policyCurrent?: () => Promise<boolean>
 }): AuthorityLease {
   const sourceRead = { visibility: input.session.visibility, mode: input.session.mode,
     effectiveClearance: input.session.effectiveClearance,
@@ -146,7 +151,7 @@ export function createSessionAuthorityLease(input: {
     return maximum
       ? intersectAccessCeilings(current, { ...maximum, userId: current.userId })
       : null
-  })
+  }, input.policyCurrent)
   const invocation = lease.snapshotSource!()
   lease.snapshotSource = () => {
     if (!input.durableSessionSource || expected.contextLockedAt === null || input.credentialCurrent || input.maximumAccessCurrent) return { ...invocation }

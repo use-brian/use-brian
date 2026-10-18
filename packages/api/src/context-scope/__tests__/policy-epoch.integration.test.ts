@@ -1,5 +1,5 @@
 import { createHash,randomUUID,randomBytes } from 'node:crypto'
-import { afterAll,beforeAll,describe,expect,it } from 'vitest'
+import { afterAll,beforeAll,describe,expect,it,vi } from 'vitest'
 import type { PoolClient } from 'pg'
 import { getAppPool,getPool,applyRLSGucs } from '../../db/client.js'
 import { runWithAgentAccess } from '../../db/agent-access-context.js'
@@ -73,15 +73,33 @@ describe('[COMP:api/policy-epoch] canonical invocation policy epochs', () => {
             'sensitivity','internal','compartments','[]'::jsonb,'projectIds','[]'::jsonb))||policy.override;
       END $$`)
     await owner.query('REVOKE ALL ON FUNCTION application_epoch_fixture_catalog_reader(uuid,jsonb,text) FROM PUBLIC')
-    for (const module of ['epoch_fixture','epoch_fixture_other']) await owner.query(`INSERT INTO application_native_field_contracts(module_key,contract_version,role_keys,metadata_reader,catalog_reader)
+    await owner.query(`CREATE SEQUENCE application_epoch_fixture_revision`)
+    await owner.query(`CREATE TABLE application_epoch_fixture_configuration (
+      workspace_id uuid PRIMARY KEY REFERENCES workspaces(id) ON DELETE CASCADE,
+      revision bigint NOT NULL DEFAULT nextval('application_epoch_fixture_revision'),state text NOT NULL DEFAULT 'initial')`)
+    await owner.query(`INSERT INTO application_epoch_fixture_configuration(workspace_id) VALUES($1)`,[workspaceId])
+    await owner.query(`CREATE FUNCTION application_epoch_fixture_configuration_changed() RETURNS trigger
+      LANGUAGE plpgsql SET search_path=pg_catalog,public,pg_temp AS $$ BEGIN
+      NEW.revision:=nextval('public.application_epoch_fixture_revision'); RETURN NEW; END $$`)
+    await owner.query(`CREATE TRIGGER application_epoch_fixture_configuration_changed BEFORE UPDATE ON application_epoch_fixture_configuration
+      FOR EACH ROW EXECUTE FUNCTION application_epoch_fixture_configuration_changed()`)
+    await owner.query(`CREATE FUNCTION application_epoch_fixture_configuration_reader(w uuid) RETURNS text
+      LANGUAGE sql SECURITY DEFINER SET search_path=pg_catalog,public,pg_temp AS $$
+      SELECT revision::text FROM public.application_epoch_fixture_configuration WHERE workspace_id=w $$`)
+    await owner.query('REVOKE ALL ON FUNCTION application_epoch_fixture_configuration_reader(uuid) FROM PUBLIC')
+    for (const module of ['epoch_fixture','epoch_fixture_other']) await owner.query(`INSERT INTO application_native_field_contracts(module_key,contract_version,role_keys,metadata_reader,catalog_reader,configuration_required,configuration_reader)
       VALUES($1,'1',ARRAY['finance','approver'],'application_epoch_fixture_reader(uuid,jsonb,text,text)'::regprocedure,
-        CASE WHEN $1='epoch_fixture' THEN 'application_epoch_fixture_catalog_reader(uuid,jsonb,text)'::regprocedure ELSE NULL END)`,[module])
+        CASE WHEN $1='epoch_fixture' THEN 'application_epoch_fixture_catalog_reader(uuid,jsonb,text)'::regprocedure ELSE NULL END,true,'application_epoch_fixture_configuration_reader(uuid)'::regprocedure)`,[module])
   })
   afterAll(async () => {
     await owner.query('DELETE FROM workspaces WHERE id=ANY($1::uuid[])',[[workspaceId,otherWorkspaceId]])
     await owner.query('DELETE FROM application_native_field_contracts WHERE module_key=ANY($1::text[])',[['epoch_fixture','epoch_fixture_other']])
     await owner.query('DROP FUNCTION application_epoch_fixture_reader(uuid,jsonb,text,text)')
     await owner.query('DROP FUNCTION application_epoch_fixture_catalog_reader(uuid,jsonb,text)')
+    await owner.query('DROP FUNCTION application_epoch_fixture_configuration_reader(uuid)')
+    await owner.query('DROP TABLE application_epoch_fixture_configuration')
+    await owner.query('DROP FUNCTION application_epoch_fixture_configuration_changed()')
+    await owner.query('DROP SEQUENCE application_epoch_fixture_revision')
     await owner.query('DROP TABLE application_epoch_fixture_metadata')
     await owner.query('DROP TABLE application_epoch_fixture_catalog')
     if (oauthClients.length) await owner.query('DELETE FROM oauth_clients WHERE client_id=ANY($1::text[])',[oauthClients])
@@ -194,4 +212,96 @@ describe('[COMP:api/policy-epoch] canonical invocation policy epochs', () => {
     const fresh = kind === 'native' ? await nativeExecution() : await resolveApplicationExecutionContext(app.authentication)
     expect((await queryRecords(fixture,{ fields: ['cost'] },fresh)).records[0].values).toEqual({ cost: { kind: 'number',value: 42 } })
   })
+  const epoch = async () => (await owner.query('SELECT read_application_policy_epoch($1,$2,$3) AS value',
+    [workspaceId,memberId,assistantId])).rows[0].value
+  const context = async (kind: 'native' | 'application',fixture: Awaited<ReturnType<typeof record>>) => kind === 'native'
+    ? nativeExecution() : resolveApplicationExecutionContext((await application(fixture,'member')).authentication)
+  async function runModel(actor: ExecutionContext,provider: LLMProvider) {
+    return runAssistantTurn({ sessionId: actor.lifecycle.sessionId,policy: { admission: 'personal' },sink: { kind: 'return' },lease: { mode: 'none' },
+      abortController: new AbortController(),model: { provider,model: 'fixture-model',configuredProviders: undefined,customLlm: null },
+      loop: { ledger: NOOP_TURN_LEDGER,context: executionToolContext(actor,{ appId: 'epoch-fixture' }),
+        systemPrompt: 'Fictional policy epoch fixture',messages: [{ role: 'user',content: 'Respond after the policy check.' }],tools: new Map(),maxTurns: 1 } })
+  }
+  const neverProvider = () => ({ name: 'fixture',models: ['fixture-model'],createSession: vi.fn(() => { throw new Error('Provider must not start') }),
+    stream: () => { throw new Error('Provider must not stream') } }) satisfies LLMProvider
+  it.each(['native','application'] as const)('C01 unchanged %s context reads exactly admitted fields',async kind => {
+    await clearRoles();const fixture = await record(),execution = await context(kind,fixture)
+    const result = await queryRecords(fixture,{ fields: ['title'] },execution)
+    expect(result.records[0].values).toEqual({ title: { kind: 'text',value: 'Fictional request' } })
+    await expect(queryRecords(fixture,{ fields: ['cost'] },execution)).rejects.toMatchObject({ code: 'access_unavailable' })
+  })
+  it('C01 ordinary generic native context needs no registered owner',async () => {
+    const schema = await store.createEntityType({ workspaceId,name: 'Fictional ordinary type',createdBy: ownerId,
+      properties: [{ name: 'title',config: { kind: 'text' } }] })
+    const row = await store.createEntity({ workspaceId,entityTypeId: schema.id,createdBy: ownerId,lastEditedBy: ownerId,sourceApp: 'api',
+      data: { title: { kind: 'text',value: 'Ordinary generic value' } } })
+    expect((await queryRecords({ schema,origin: { kind: 'generic',entityTypeId: schema.id },type: `record.${schema.id}` },{},await nativeExecution()))
+      .records[0].ref.id).toBe(row.id)
+  })
+  it.each(['native','application'] as const)('C03 %s role loss before first read starts no provider',async kind => {
+    await clearRoles();const fixture = await record();await assign('finance',ownerId);const role = await assign()
+    const execution = await context(kind,fixture),provider = neverProvider()
+    await owner.query("UPDATE application_native_role_assignments SET status='revoked' WHERE id=$1",[role])
+    await expect(queryRecords(fixture,{ fields: ['cost'] },execution)).rejects.toMatchObject({ reason: 'authority_changed' })
+    await expect(runModel(execution,provider)).rejects.toMatchObject({ retrySafe: false })
+    expect(provider.createSession).not.toHaveBeenCalled()
+    expect((await queryRecords(fixture,{},await context(kind,fixture))).records[0].fields).toEqual(['title'])
+  })
+  it.each(['start','expiry'] as const)('C04 SQL-time role %s changes authority with no metadata write',async transition => {
+    await clearRoles();const fixture = await record();await assign('finance',ownerId)
+    const role = (await owner.query(`INSERT INTO application_native_role_assignments(workspace_id,module_key,user_id,role_key,issued_by_user_id,starts_at,expires_at)
+      VALUES($1,'epoch_fixture',$2,'finance',$3,
+        CASE WHEN $4='start' THEN clock_timestamp()+interval '2 seconds' ELSE clock_timestamp()-interval '1 hour' END,
+        CASE WHEN $4='expiry' THEN clock_timestamp()+interval '2 seconds' ELSE NULL END) RETURNING id`,[workspaceId,memberId,ownerId,transition])).rows[0].id
+    const app = await application(fixture,'member')
+    const executions = [await nativeExecution(),await resolveApplicationExecutionContext(app.authentication)]
+    const before = await epoch()
+    await owner.query("SELECT pg_sleep(greatest(0,extract(epoch FROM (CASE WHEN $2='start' THEN starts_at ELSE expires_at END)-clock_timestamp()))+0.02) FROM application_native_role_assignments WHERE id=$1",[role,transition])
+    const after = await epoch()
+    expect(after.workspaceRevision).toBe(before.workspaceRevision);expect(after.timedState).not.toBe(before.timedState)
+    for (const execution of executions) await expect(queryRecords(fixture,{},execution)).rejects.toMatchObject({ reason: 'authority_changed' })
+    const fresh = await queryRecords(fixture,{},await nativeExecution())
+    expect(fresh.records[0].fields.sort()).toEqual(transition === 'start' ? ['cost','title'] : ['title'])
+  })
+  it.each(['native','application'] as const)('C05 %s configuration change/restore invalidates before data',async kind => {
+    const fixture = await record(),execution = await context(kind,fixture)
+    const before = await epoch()
+    await owner.query("UPDATE application_epoch_fixture_configuration SET state='changed' WHERE workspace_id=$1",[workspaceId])
+    await owner.query("UPDATE application_epoch_fixture_configuration SET state='initial' WHERE workspace_id=$1",[workspaceId])
+    expect((await epoch()).modules).not.toEqual(before.modules)
+    await expect(queryRecords(fixture,{},execution)).rejects.toMatchObject({ reason: 'authority_changed' })
+    expect((await queryRecords(fixture,{},await context(kind,fixture))).records).toHaveLength(1)
+  })
+  it.each(['missing','invalid_revision','invalid_acl'] as const)('C05 registered %s configuration holds old and fresh factories',async mode => {
+    const fixture = await record(),execution = await nativeExecution()
+    if (mode === 'missing') await owner.query("UPDATE application_native_field_contracts SET configuration_reader=NULL WHERE module_key='epoch_fixture'")
+    if (mode === 'invalid_revision') await owner.query(`CREATE OR REPLACE FUNCTION application_epoch_fixture_configuration_reader(w uuid) RETURNS text
+      LANGUAGE sql SECURITY DEFINER SET search_path=pg_catalog,public,pg_temp AS $$ SELECT ''::text $$`)
+    if (mode === 'invalid_acl') await owner.query('GRANT EXECUTE ON FUNCTION application_epoch_fixture_configuration_reader(uuid) TO app_user')
+    try {
+      await expect(queryRecords(fixture,{},execution)).rejects.toMatchObject({ reason: 'authority_changed' })
+      await expect(nativeExecution()).rejects.toMatchObject({ reason: 'authority_changed' })
+      const app = await application(fixture,'member')
+      await expect(resolveApplicationExecutionContext(app.authentication)).rejects.toMatchObject({ reason: 'authority_changed' })
+    } finally {
+      await owner.query('REVOKE ALL ON FUNCTION application_epoch_fixture_configuration_reader(uuid) FROM app_user')
+      await owner.query(`CREATE OR REPLACE FUNCTION application_epoch_fixture_configuration_reader(w uuid) RETURNS text
+        LANGUAGE sql SECURITY DEFINER SET search_path=pg_catalog,public,pg_temp AS $$
+        SELECT revision::text FROM public.application_epoch_fixture_configuration WHERE workspace_id=w $$`)
+      await owner.query("UPDATE application_native_field_contracts SET configuration_reader='application_epoch_fixture_configuration_reader(uuid)'::regprocedure WHERE module_key='epoch_fixture'")
+    }
+  })
+  it.each(['schema','owner','contract'] as const)('C06 %s revision invalidates both factories before first data',async change => {
+    const fixture = await record(),app = await application(fixture,'member')
+    const executions = [await nativeExecution(),await resolveApplicationExecutionContext(app.authentication)]
+    if (change === 'schema') await store.updateEntityType(workspaceId,fixture.schema.id,{ name: 'Fictional renamed schema' })
+    if (change === 'owner') {
+      await owner.query('DELETE FROM application_native_resource_owners WHERE workspace_id=$1 AND origin=$2',[workspaceId,fixture.origin])
+      await owner.query("INSERT INTO application_native_resource_owners(workspace_id,origin,resource_type,module_key) VALUES($1,$2,$3,'epoch_fixture')",[workspaceId,fixture.origin,fixture.type])
+    }
+    if (change === 'contract') await owner.query("UPDATE application_native_field_contracts SET contract_version=(contract_version::int+1)::text WHERE module_key='epoch_fixture'")
+    for (const execution of executions) await expect(queryRecords(fixture,{},execution)).rejects.toMatchObject({ reason: 'authority_changed' })
+    expect((await queryRecords(fixture,{},await nativeExecution())).records).toHaveLength(1)
+  })
+
 })

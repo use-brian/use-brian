@@ -6,7 +6,8 @@ import { createExecutionContext, intersectAccessCeilings, maxSensitivity, minSen
 import { ApplicationPlatformError } from '@use-brian/shared'
 import { query } from '../db/client.js'
 import { findAssistantById } from '../db/users.js'
-import { createAuthorityLease } from '../context-scope/authority-lease.js'
+import { createAuthorityLease, AuthorityChangedError } from '../context-scope/authority-lease.js'
+import { pinPolicyEpoch } from '../context-scope/policy-epoch.js'
 import { resolveLiveAccessCeilingSystem } from '../context-scope/resolve-turn-scope.js'
 import { loadApplicationAuthority, type ApplicationAuthentication, type ApplicationAuthorityState } from './grant-authority.js'
 
@@ -70,6 +71,11 @@ export async function resolveApplicationExecutionContext(authentication: Applica
   options: { abortSignal?: AbortSignal; sessionId?: string; channelType?: string } = {}): Promise<ExecutionContext> {
   // Keep the authenticated objects themselves: cloning their public metadata must lose proof.
   const auth = Object.freeze({ credential: authentication.credential, user: authentication.user, home: authentication.home })
+  // Bootstrap identity is metadata only. Resolve all trusted grants/ceilings again
+  // inside the epoch bracket so an intervening change cannot be attached to it.
+  const identity = await loadApplicationAuthority(auth)
+  const policyCurrent = await pinPolicyEpoch({ workspaceId: identity.workspaceId,
+    principalId: identity.principal.userId, assistantId: identity.assistantId })
   async function resolve() {
     const state = await loadApplicationAuthority(auth)
     const assistant = await findAssistantById(state.assistantId)
@@ -84,10 +90,12 @@ export async function resolveApplicationExecutionContext(authentication: Applica
     return { state, assistant, ceiling, signature }
   }
   const initial = await resolve()
+  if (initial.state.workspaceId !== identity.workspaceId || initial.state.principal.userId !== identity.principal.userId
+    || initial.state.assistantId !== identity.assistantId || !(await policyCurrent())) throw new AuthorityChangedError()
   const authority = createAuthorityLease(initial.ceiling, async () => {
     const current = await resolve()
     return current.signature === initial.signature ? current.ceiling : null
-  })
+  }, policyCurrent)
   const execution = createExecutionContext({ identity: { kind: 'programmatic', credentialOwnerUserId: initial.state.issuerUserId,
     principal: { kind: 'application', credentialId: initial.state.credentialId, applicationId: initial.state.appId,
       actorUserId: initial.state.principal.userId, subjectKind: initial.state.principal.kind, serviceUserId: initial.state.serviceUserId } },

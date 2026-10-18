@@ -15,8 +15,11 @@ import {
 import {
   createAuthorityLease,
   createSessionAuthorityLease,
+  AuthorityChangedError,
   type SessionAuthoritySnapshot,
 } from './authority-lease.js'
+import { pinPolicyEpoch } from './policy-epoch.js'
+import { findAssistantById } from '../db/users.js'
 import {
   projectRoomAudienceCeiling,
   resolveLiveAccessCeilingSystem,
@@ -24,6 +27,7 @@ import {
   type ResolveTurnScopeDeps,
   type ResolveTurnScopeInput,
   type ResolvedTurnScope,
+  type TurnScopeAssistant,
 } from './resolve-turn-scope.js'
 
 export type ResolveExecutionContextInput = ResolveTurnScopeInput & {
@@ -61,6 +65,8 @@ export type ResolvedExecutionContext = {
 }
 
 export type ResolveExecutionContextDeps = ResolveTurnScopeDeps & {
+  pinPolicyEpoch?: typeof pinPolicyEpoch
+  resolveAssistant?: (id: string) => Promise<TurnScopeAssistant | null>
   resolveScope?: typeof resolveTurnScopeSystem
   resolveLive?: typeof resolveLiveAccessCeilingSystem
   createSessionLease?: (
@@ -69,6 +75,7 @@ export type ResolveExecutionContextDeps = ResolveTurnScopeDeps & {
   createLease?: (
     starting: AccessCeiling,
     resolveCurrent: () => Promise<AccessCeiling | null>,
+    policyCurrent?: () => Promise<boolean>,
   ) => CurrentAuthorityBoundary
 }
 
@@ -123,6 +130,15 @@ export async function resolveExecutionContextSystem(
   input: ResolveExecutionContextInput,
   deps: ResolveExecutionContextDeps = {},
 ): Promise<ResolvedExecutionContext> {
+  const workspaceId = input.workspaceId ?? input.assistant.workspaceId
+  const policyCurrent = workspaceId ? await (deps.pinPolicyEpoch ?? pinPolicyEpoch)({
+    workspaceId, principalId: input.userId, assistantId: input.assistant.id,
+  }) : undefined
+  if (workspaceId) {
+    const assistant = await (deps.resolveAssistant ?? findAssistantById)(input.assistant.id)
+    if (!assistant || assistant.workspaceId !== workspaceId) throw new AuthorityChangedError()
+    input = { ...input, assistant }
+  }
   const resolveScope = deps.resolveScope ?? resolveTurnScopeSystem
   const resolveLive = deps.resolveLive ?? resolveLiveAccessCeilingSystem
   const scopeDeps: ResolveTurnScopeDeps = {
@@ -161,6 +177,7 @@ export async function resolveExecutionContextSystem(
     clientSelfMemory: input.surface?.clientSelfMemory,
   }
   const starting = boundedStartingCeiling(access, input.identity)
+  if (policyCurrent && !(await policyCurrent())) throw new AuthorityChangedError()
   const authority = input.sessionAuthority
     ? (deps.createSessionLease ?? createSessionAuthorityLease)({
         starting,
@@ -175,6 +192,7 @@ export async function resolveExecutionContextSystem(
         systemRead: input.surface?.systemRead,
         credentialCurrent: input.credentialCurrent,
         maximumAccessCurrent: input.maximumAccessCurrent,
+        policyCurrent,
       })
     : (deps.createLease ?? createAuthorityLease)(starting, async () => {
         if (input.credentialCurrent && !(await input.credentialCurrent())) return null
@@ -187,7 +205,7 @@ export async function resolveExecutionContextSystem(
         return maximum
           ? intersectAccessCeilings(current, { ...maximum, userId: current.userId })
           : null
-      })
+      }, policyCurrent)
 
   return {
     turnScope,

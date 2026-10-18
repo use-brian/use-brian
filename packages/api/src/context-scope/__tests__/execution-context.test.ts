@@ -1,8 +1,14 @@
 import { describe, expect, it, vi } from 'vitest'
 import { readFile } from 'node:fs/promises'
-import { resolveExecutionContextSystem } from '../execution-context.js'
+import { resolveExecutionContextSystem as resolveContext } from '../execution-context.js'
 import type { ResolvedTurnScope } from '../resolve-turn-scope.js'
 import type { AuthorityLease } from '../authority-lease.js'
+
+// Unit scope/identity tests inject only metadata and assistant ports. The real
+// PostgreSQL matrix exercises production factories with no authority substitutes.
+const resolveExecutionContextSystem: typeof resolveContext = (input, deps) => resolveContext(input, {
+  pinPolicyEpoch: async () => async () => true, resolveAssistant: async () => input.assistant, ...deps,
+})
 
 const authority: AuthorityLease = {
   markOperationMayHaveExecuted() {},
@@ -121,6 +127,7 @@ describe('[COMP:api/execution-context] trusted execution resolution', () => {
     })
     expect(createLease).toHaveBeenCalledWith(
       expect.objectContaining({ clearance: 'public', compartments: [], projectIds: [] }),
+      expect.any(Function),
       expect.any(Function),
     )
   })
