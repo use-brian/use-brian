@@ -7,6 +7,10 @@ import {createDbTaskStore} from '../tasks-store.js'
 import {getTaskByIdSystem,getTaskHistory} from '../tasks.js'
 import {createDbWorkspaceGroupStore} from '../workspace-group-store.js'
 import * as lifecycle from '../../task-event-fanout.js'
+import {addSessionMessage} from '../sessions.js'
+import {validateAudienceScopeEvidence} from '../../context-scope/caller-evidence.js'
+import type {ScopeSource} from '@use-brian/core'
+import {validateDerivedMemoryInputs} from '../derived-scope-store.js'
 
 // This suite asserts the legacy (pre-v2) model, which workspaces.department_read_v2=false still
 // serves as the cutover's rollback path (migration 650, decision D22); its workspaces are pinned to it.
@@ -208,6 +212,38 @@ describe('[COMP:api/task-mutation-scope] canonical task publication and reader e
     const updated=await runWithAgentAccess(f.execution(),()=>f.store.update(f.userId,parent.id,{status:'done'}))
     expect(updated).toMatchObject({status:'done'})
     expect((await f.rows()).find(row=>row.id===child.id)?.parent_id).toBe(updated!.id)
+  })
+  it('keeps an admitted task-list transcript deliverable after completing the task',async()=>{
+    const f=await fixture(),task=await f.create(),sessionId=randomUUID()
+    await pool.query("INSERT INTO sessions(id,assistant_id,user_id,channel_type,channel_id) VALUES($1::uuid,$2,$3,'feishu',$1::text)",[sessionId,f.assistantId,f.userId])
+    const read=async(kind:string,id:string)=>(await pool.query('SELECT read_scope_source($1,$2,$3) AS source',[f.workspaceId,kind,id])).rows[0].source as ScopeSource
+    const taskSource=await read('task',task.id)
+    const previous=await addSessionMessage({sessionId,role:'assistant',content:'The draft review is pending.',derivation:{producer:'turn:task-fixture',sources:[taskSource]}})
+    const transcriptSource=await read('session_message',previous.id),evidence={sources:[taskSource,transcriptSource]}
+    const ceiling={...f.access,clearance:'confidential' as const,compartments:null,mutationCompartments:null,projectIds:null,visibilityAssistantIds:null}
+    await expect(validateAudienceScopeEvidence(evidence,ceiling)).resolves.toBeDefined()
+    const updated=await f.store.update(f.userId,task.id,{status:'done'},{access:f.access})
+    expect(updated).toMatchObject({status:'done'})
+    await expect(validateAudienceScopeEvidence(evidence,ceiling)).resolves.toBeDefined()
+    expect(await read('task',task.id)).toMatchObject({version:taskSource.version,held:false})
+    expect(await read('session_message',previous.id)).toMatchObject({version:transcriptSource.version,held:false})
+    await expect(validateDerivedMemoryInputs(pool,{producer:'task-fixture',sources:[taskSource]})).rejects.toThrow('scope_source_changed')
+    await expect(addSessionMessage({sessionId,role:'assistant',content:'The review is complete.',derivation:{producer:'turn:task-fixture',sources:evidence.sources}})).resolves.toBeDefined()
+    // A later scope change must still find readers of the retired ancestor.
+    await pool.query("UPDATE tasks SET sensitivity='confidential' WHERE id=$1",[updated!.id])
+    await expect(validateAudienceScopeEvidence(evidence,ceiling)).rejects.toMatchObject({diagnostic:'source_held'})
+  })
+  it.each(['content','hold','retract','delete','successor_scope'])('still holds task-list lineage after %s changes',async(change)=>{
+    const f=await fixture(),task=await f.create(),sessionId=randomUUID()
+    await pool.query("INSERT INTO sessions(id,assistant_id,user_id,channel_type,channel_id) VALUES($1::uuid,$2,$3,'feishu',$1::text)",[sessionId,f.assistantId,f.userId])
+    const taskSource=(await pool.query("SELECT read_scope_source($1,'task',$2) AS source",[f.workspaceId,task.id])).rows[0].source as ScopeSource
+    const previous=await addSessionMessage({sessionId,role:'assistant',content:'A recorded task list.',derivation:{producer:'turn:task-fixture',sources:[taskSource]}})
+    if(change==='successor_scope')await f.store.update(f.userId,task.id,{status:'done'},{access:f.access,scope:{sensitivity:'confidential',compartments:[f.key],projectIds:[f.projectId]}})
+    else if(change==='delete')await pool.query('DELETE FROM tasks WHERE id=$1',[task.id])
+    else if(change==='content')await pool.query("UPDATE tasks SET title='Changed source body' WHERE id=$1",[task.id])
+    else if(change==='hold')await pool.query('UPDATE tasks SET scope_held=true WHERE id=$1',[task.id])
+    else await pool.query('UPDATE tasks SET retracted_at=now() WHERE id=$1',[task.id])
+    expect((await pool.query('SELECT scope_held FROM session_messages WHERE id=$1',[previous.id])).rows[0].scope_held).toBe(true)
   })
   it('repoints a hosted goal and refuses a transaction that leaves its old host retired',async()=>{
     const f=await fixture(),parent=await f.create()
