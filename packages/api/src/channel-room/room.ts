@@ -18,11 +18,12 @@ import type { PoolClient } from 'pg'
 import { resolveGroupAudienceSystem, DeliveryAudienceUnverifiedError } from '../context-scope/delivery-authority.js'
 import { maxSensitivity, scopeGrantContains, type AccessCeiling, type ResourceScope } from '@use-brian/core'
 import { getPool, query } from '../db/client.js'
-import { addSessionMessage, readSessionById, type Session, type SessionMessage } from '../db/sessions.js'
+import { readSessionById, type Session, type SessionMessage } from '../db/sessions.js'
 import { sessionKindSql, transportPolicy, type Transport } from '../session-kind.js'
 import { admitChannelRoom } from '../workspace-access/session-create-admission.js'
 import { getWorkspaceRoleSystem } from '../db/workspace-store.js'
 import { noopPublishSessionEvent, type PublishSessionEvent } from '../session-event-port.js'
+import { appendChannelRoomMessage } from './messages.js'
 
 /** The workspace that owns a group's room, through its channel integration (D15). */
 export type ChannelRoomBinding = {
@@ -225,14 +226,7 @@ export async function postToChannelRoom(params: {
   if (params.inputScope) await admitRoomInputScope(params.room, params.inputScope)
   const text = params.text.trim()
   if (!text) return null
-  if (params.channelMessageId) {
-    const seen = await query(
-      'SELECT 1 FROM session_messages WHERE session_id = $1 AND channel_message_id = $2 LIMIT 1',
-      [params.room.id, params.channelMessageId],
-    )
-    if (seen.rows.length) return null
-  }
-  const stored = await addSessionMessage({
+  const result = await appendChannelRoomMessage({
     sessionId: params.room.id,
     role: 'user',
     content: [{ type: 'text', text }],
@@ -241,6 +235,8 @@ export async function postToChannelRoom(params: {
     senderUserId: params.senderUserId,
     scope: params.inputScope ?? roomInputScope(params.room, params.workspaceId),
   })
+  if (!result.created) return null
+  const stored = result.message
   runtime.publishSessionEvent({
     kind: 'user_message_saved',
     sessionId: params.room.id,
@@ -251,8 +247,24 @@ export async function postToChannelRoom(params: {
       content: stored.content,
     },
   })
-  if (runtime.capturePost && await roomCaptureEnabled(params.room.id)) {
-    try {
+  await captureChannelRoomInput(params)
+  return stored
+}
+
+/** Both passive and addressed inputs use this after a NEW canonical append.
+ * Capture consent and classification are room-owned, never speaker-private. */
+export async function captureChannelRoomInput(params: {
+  room: Session
+  inputScope?: ResourceScope
+  workspaceId: string
+  senderUserId: string
+  senderName: string | null
+  text: string
+}): Promise<void> {
+  const text = params.text.trim()
+  if (!text) return
+  try {
+    if (runtime.capturePost && await roomCaptureEnabled(params.room.id)) {
       runtime.capturePost({
         sessionId: params.room.id,
         workspaceId: params.workspaceId,
@@ -266,11 +278,12 @@ export async function postToChannelRoom(params: {
         contextBindingOrigin: params.room.contextBindingOrigin ?? 'legacy',
         classificationMode: params.room.classificationMode ?? 'legacy',
       })
-    } catch (err) {
-      console.error('[channel-room] capture hook failed:', err)
     }
+  } catch (err) {
+    // Ambient capture is asynchronous learning, not posting admission. Keep
+    // the failure visible without discarding an already stored message.
+    console.error('[channel-room] capture hook failed:', err)
   }
-  return stored
 }
 
 /** Is brain capture on for this room (D4)? Defaults on. */

@@ -470,10 +470,10 @@ export function createProgrammaticBatchProcessor(deps: {
     if (batch.source !== 'programmatic') {
       throw new Error(`programmatic batch processor received source=${batch.source}`)
     }
-    if (!batch.assistantId) {
+    if (!batch.assistantId || !batch.ruleId || batch.roomSessionId) {
       throw new ProgrammaticCaptureError(
         'capture_target_unavailable',
-        `Programmatic batch ${batch.id} has no assistant.`,
+        `Programmatic batch ${batch.id} has no valid assistant/rule target.`,
       )
     }
     if(batch.scopeHeld)throw new ProgrammaticCaptureError('capture_target_unavailable',`Programmatic batch ${batch.id} is held for scope review.`)

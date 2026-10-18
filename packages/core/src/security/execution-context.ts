@@ -248,6 +248,7 @@ export function executionToolContext(
   | 'sessionPersisted'
   | 'workspaceId'
   | 'assistantKind'
+  | 'sharedAudience'
   | 'visibilityAssistantIds'
   | 'abortSignal'
   | 'authority'
@@ -282,6 +283,7 @@ export function executionToolContext(
     ...(execution.lifecycle.sessionPersisted === false ? { sessionPersisted: false } : {}),
     workspaceId: execution.ownership.kind === 'workspace' ? execution.ownership.workspaceId : null,
     assistantKind: access.assistantKind,
+    sharedAudience: access.sharedAudience,
     visibilityAssistantIds: access.visibilityAssistantIds,
     abortSignal: execution.lifecycle.abortSignal,
     authority: execution.security.authority,

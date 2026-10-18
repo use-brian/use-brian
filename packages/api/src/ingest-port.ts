@@ -41,6 +41,9 @@ export type BrainEpisodeInput = {
   workspaceId: string
   userId: string
   assistantId: string
+  /** Trusted room intake: visibility belongs to the workspace, attribution
+   * still uses userId. Never copy this flag from an untrusted request body. */
+  sharedAudience?: boolean
   content: string
   occurredAt: Date
   sourceLabel?: string
