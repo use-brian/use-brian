@@ -4,7 +4,7 @@ import { z } from 'zod'
 import express from 'express'
 import request from 'supertest'
 import type { PoolClient } from 'pg'
-import { ContextScopeAccumulator, executionToolContext, type ApplicationModuleDefinition, type ScopeSource } from '@use-brian/core'
+import { ContextScopeAccumulator, executionToolContext, boundScopeSources, type ApplicationModuleDefinition, type ScopeSource } from '@use-brian/core'
 import { applicationResourceSchema, type ApplicationAccessGrant, type ApplicationGrantMaximum } from '@use-brian/shared'
 import { getAppPool, getPool, queryWithRLS } from '../../db/client.js'
 import { createDbDocEntityStore } from '../../db/doc-entity-store.js'
@@ -640,6 +640,21 @@ describe('[COMP:api/application-auth] database application projections and live 
     expect(catalog.resources[0].fields.find(field => field.key === 'company')).toMatchObject({ relationshipResolverKey: resolverKey })
     const result = await dispatcher.query(execution, 'records', 'query', { type: 'request', query: {} }) as { records: Array<{ ref: { id: string } }> }
     expect(result.records.map(record => record.ref.id)).toEqual([rows[0]])
+    const sources = boundScopeSources(result)
+    const domain = (await pool.query<{ id: string }>("SELECT id FROM application_field_resources WHERE id=ANY($1::uuid[]) AND selection='query_domain'",
+      [sources.map(source => source.resourceId)])).rows[0]
+    expect(domain).toBeDefined()
+    const domainSource = sources.find(source => source.resourceId === domain.id)!
+    expect(await service().query(execution,'records','field_snapshot',{ id: domainSource.resourceId,version: domainSource.version })).toMatchObject({ held: false })
+    const empty = await dispatcher.query(execution,'records','query',{ type: 'request',query: {
+      fields: ['title'],filters: [{ field: 'title',op: 'eq',value: 'Fictional unmatched request' }],aggregate: [{ field: 'title',operation: 'count' }],
+    } }) as { records: unknown[];aggregates: Array<{ value: string }> }
+    expect(empty.records).toEqual([]);expect(empty.aggregates[0].value).toBe('0')
+    const emptySources = boundScopeSources(empty)
+    const emptyDomain = (await pool.query<{ id: string }>("SELECT id FROM application_field_resources WHERE id=ANY($1::uuid[]) AND selection='query_domain'",
+      [emptySources.map(source => source.resourceId)])).rows[0]
+    const emptyDomainSource = emptySources.find(source => source.resourceId === emptyDomain.id)!
+    expect(await service().query(execution,'records','field_snapshot',{ id: emptyDomainSource.resourceId,version: emptyDomainSource.version })).toMatchObject({ held: false })
     await expect(dispatcher.query(execution, 'records', 'get', { type: 'request', id: rows[1] })).rejects.toMatchObject({ code: 'access_unavailable' })
     const related = await dispatcher.command(execution, 'records', 'record_create', { idempotencyKey: randomUUID(), input: {
       operation: 'create', type: 'request', data: { title: { kind: 'text', value: 'New linked request' }, company: { kind: 'relation', value: company.id } },
@@ -653,6 +668,8 @@ describe('[COMP:api/application-auth] database application projections and live 
     const current = await resolveApplicationExecutionContext(fixture.authentication)
     expect((await dispatcher.catalog(current)).resources).toEqual(metadata)
     await expect(dispatcher.query(current, 'records', 'get', { type: 'request', id: rows[0] })).rejects.toMatchObject({ code: 'access_unavailable' })
+    expect(await service().query(current,'records','field_snapshot',{ id: domainSource.resourceId,version: domainSource.version })).toMatchObject({ held: true })
+    expect(await service().query(current,'records','field_snapshot',{ id: emptyDomainSource.resourceId,version: emptyDomainSource.version })).toMatchObject({ held: true })
   })
   it('projects canonical native custom metadata/values while preserving IDs and withholding hidden or archived fields', async () => {
     const company = await createCompany(ownerId, { name: 'Example custom company', workspaceId, mergeByName: false })

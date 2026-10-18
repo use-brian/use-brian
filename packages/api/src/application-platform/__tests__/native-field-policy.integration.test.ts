@@ -300,6 +300,70 @@ describe('[COMP:security/native-field-policy] current canonical native field mas
     expect((await applicationCatalog(app)).resources.find(resource => resource.typeKey === fixture.type)?.fields.map(field => field.key)).toEqual(['title'])
     expect((await owner.query('SELECT count(*)::int AS count FROM entity_instances WHERE id=$1',[id])).rows[0].count).toBe(0)
   })
+  const appQuery = async (app: Awaited<ReturnType<typeof application>>,fixture: { type: string },query: Partial<ApplicationQuery> = {}) =>
+    new ApplicationPlatformService([createCanonicalGenericApplicationModule()]).query(await resolveApplicationExecutionContext(app.authentication),
+      'records','query',{ type: fixture.type,query }) as Promise<{ records: ApplicationRecordProjection[];aggregates?: Array<{ value: string | null }> }>
+  const appFieldSnapshot = (app: Awaited<ReturnType<typeof application>>,source: ScopeSource) => asApplication(app,async client =>
+    (await client.query('SELECT read_admitted_application_field_snapshot($1,$2,$3) AS value',[workspaceId,source.resourceId,source.version])).rows[0].value)
+  it.each(['member','external_user','service'] as const)('retains an actually empty %s query under independent current authority',async kind => {
+    await clearRoles();const fixture = await catalogType(),id = randomUUID(),selector = { kind: 'ids' as const,ids: [id] }
+    const original = await application(fixture,kind,undefined,['query'],selector)
+    const result = await appQuery(original,fixture,{ fields: ['title'],aggregate: [{ field: 'title',operation: 'count' }] })
+    expect(result.records).toEqual([]);expect(result.aggregates?.[0].value).toBe('0')
+    const sources = boundScopeSources(result);expect(sources).toHaveLength(1)
+    const frozen = (await owner.query(`SELECT d.domain FROM application_query_domains d JOIN application_field_resources f ON f.resource_id=d.id
+      WHERE f.id=$1 AND f.selection='query_domain'`,[sources[0].resourceId])).rows[0].domain
+    expect(frozen).toMatchObject({ kind: 'application_selector_domain',version: 1,requiredFields: [],formula: { kind: 'application_query' } })
+    for (const identity of [original.appId,original.grantId,ownerId]) expect(JSON.stringify(frozen)).not.toContain(identity)
+    expect(JSON.stringify(result)).not.toContain('application_field')
+    expect(await appFieldSnapshot(original,sources[0])).toMatchObject({ held: false })
+    const independent = await application(fixture,kind,undefined,['query'],selector)
+    await owner.query("UPDATE application_access_grants SET status='revoked' WHERE id=$1",[original.grantId])
+    expect(await appFieldSnapshot(independent,sources[0])).toMatchObject({ held: false })
+    expect(await fieldSnapshot(sources[0],ownerId)).toMatchObject({ held: false })
+    expect(await fieldSnapshot(sources[0],otherId)).toMatchObject({ held: kind === 'member' ? false : true })
+    expect((await owner.query('SELECT count(*)::int AS count FROM entity_instances WHERE entity_type_id=$1',[fixture.schema.id])).rows[0].count).toBe(0)
+  })
+  it('preserves an empty self domain instead of replacing it with the currently observed finite IDs',async () => {
+    await clearRoles();const fixture = await catalogType(),original = await application(fixture,'external_user',undefined,['query'],{ kind: 'self' })
+    const result = await appQuery(original,fixture,{ fields: ['title'] }),source = boundScopeSources(result)[0]
+    expect(result.records).toEqual([])
+    const equivalent = await application(fixture,'external_user',undefined,['query'],{ kind: 'self' })
+    const finite = await application(fixture,'external_user',undefined,['query'],{ kind: 'ids',ids: [randomUUID()] })
+    const unrelated = await application(fixture,'service',undefined,['query'],{ kind: 'self' })
+    expect(await appFieldSnapshot(equivalent,source)).toMatchObject({ held: false })
+    expect(await appFieldSnapshot(finite,source)).toMatchObject({ held: true })
+    expect(await appFieldSnapshot(unrelated,source)).toMatchObject({ held: true })
+    expect(await fieldSnapshot(source,ownerId)).toMatchObject({ held: false })
+  })
+  it('captures an ordinary empty generic app domain without a native module owner or fake business row',async () => {
+    const schema = await store.createEntityType({ workspaceId,name: `Fictional generic query ${randomUUID()}`,createdBy: ownerId,
+      properties: [{ name: 'title',config: { kind: 'text' } },{ name: 'cost',config: { kind: 'number',format: 'decimal' } }] })
+    const fixture = { schema,origin: { kind: 'generic' as const,entityTypeId: schema.id },type: `record.${schema.id}` }
+    const app = await application(fixture,'external_user',undefined,['query'],{ kind: 'self' })
+    const result = await appQuery(app,fixture,{ fields: ['title'] }),source = boundScopeSources(result)[0]
+    expect(result.records).toEqual([]);expect(source.resourceKind).toBe('application_field')
+    expect(await appFieldSnapshot(app,source)).toMatchObject({ held: false })
+    expect(await fieldSnapshot(source,ownerId)).toMatchObject({ held: false })
+    expect((await owner.query('SELECT count(*)::int AS count FROM application_native_resource_owners WHERE workspace_id=$1 AND origin=$2',[workspaceId,fixture.origin])).rows[0].count).toBe(0)
+  })
+  it('retains empty-query predicate fields without making an unused role an evidence dependency',async () => {
+    await clearRoles();const fixture = await catalogType(),assignment = await assign();await assign('finance',ownerId);await assign('finance',otherId)
+    const app = await application(fixture,'member',undefined,['query'],{ kind: 'self' })
+    const predicate = await appQuery(app,fixture,{ fields: ['title'],filters: [{ field: 'cost',op: 'eq',value: 42 }] })
+    const ordinary = await appQuery(app,fixture,{ fields: ['title'] })
+    expect(predicate.records).toEqual([]);expect(ordinary.records).toEqual([])
+    const protectedSource = boundScopeSources(predicate)[0],ordinarySource = boundScopeSources(ordinary)[0]
+    const modelContext = { ...executionToolContext(await resolveApplicationExecutionContext(app.authentication),{ appId: 'query-domain-fixture' }),
+      scopeAccumulator: new ContextScopeAccumulator({ sources: boundScopeSources(predicate) }) }
+    await expect(assertSourceModelInputAuthority(modelContext)).resolves.toBeUndefined()
+    expect(await appFieldSnapshot(app,protectedSource)).toMatchObject({ held: false })
+    await owner.query("UPDATE application_native_role_assignments SET status='revoked' WHERE id=$1",[assignment])
+    expect(await appFieldSnapshot(app,protectedSource)).toMatchObject({ held: true })
+    expect(await appFieldSnapshot(app,ordinarySource)).toMatchObject({ held: false })
+    expect(await fieldSnapshot(protectedSource,otherId)).toMatchObject({ held: false })
+    await expect(assertSourceModelInputAuthority(modelContext)).rejects.toMatchObject({ code: 'source_unavailable',retrySafe: false })
+  })
   it('uses a declared relationship resolver for empty query metadata without serializing its anchor',async () => {
     const anchor = await record()
     const schema = await store.createEntityType({ workspaceId,name: `Fictional relationship catalog ${randomUUID()}`,createdBy: ownerId,
@@ -359,7 +423,9 @@ describe('[COMP:security/native-field-policy] current canonical native field mas
     await clearRoles();const fixture = await catalogType(),app = await application(fixture,'member',undefined,['query'],{ kind: 'self' })
     await asApplication(app,async client => {
       for (const signature of ['application_principal_query_bounds(uuid,uuid,boolean)','application_current_query_catalog(uuid,jsonb,text)',
-        'application_compile_query_catalog_domain(uuid,jsonb)','application_query_scope_cap(integer,jsonb,jsonb)']) {
+        'application_compile_query_catalog_domain(uuid,jsonb)','application_query_scope_cap(integer,jsonb,jsonb)',
+        'application_current_query_catalog_for_origin(uuid,jsonb)','application_query_anchor_reference(uuid,jsonb,text,text)',
+        'application_query_domain_state_before_selectors(uuid,jsonb,text,uuid,text[])','application_query_domain_state(uuid,jsonb,text,uuid,text[])']) {
         expect((await client.query('SELECT has_function_privilege(current_user,$1,\'EXECUTE\') AS allowed',[`public.${signature}`])).rows[0].allowed).toBe(false)
       }
     })

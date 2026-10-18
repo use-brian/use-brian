@@ -67,7 +67,7 @@ async function query(context: Context, type: string, input: ApplicationQuery) {
   if (input.cursor && input.aggregate.length) throw new ApplicationPlatformError('invalid_value', 'Aggregate queries cannot use a page cursor.')
   if (app) assertApplicationQueryFields(input, applicationAuthorityQueryFieldCeiling(app.state.layers,
     { workspaceId: schema.workspaceId, origin: definition.origin, typeKey: type, id: 'query', version: definition.schemaVersion }, schema.properties.map(property => property.name)))
-  const domainSources = await readCanonicalGenericQueryDomain(context,definition,fields)
+  const domainSources = await readCanonicalGenericQueryDomain(context,definition,fields,predicates)
   const compiled = compileApplicationRecordQuery(schema, input.filters, input.sort, input.limit, input.cursor)
   const values = [...compiled.values]
   const bind = (value: unknown) => { values.push(value); return `$${values.length}` }

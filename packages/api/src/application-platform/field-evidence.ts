@@ -41,16 +41,19 @@ export async function readCanonicalGenericApplicationRecord(context: Application
     ...(captured.data.absentFields.length ? { absentFields: captured.data.absentFields } : {}) },captured.data.sources)
 }
 
-/** A row-free native domain is captured under actual current SQL ceilings. */
+/** A row-free native/app domain is captured under actual current SQL ceilings. */
 export async function readCanonicalGenericQueryDomain(context: ApplicationOperationContext<PoolClient>,
-  definition: ApplicationResourceDefinition,fields: readonly string[]): Promise<ScopeSource[]> {
+  definition: ApplicationResourceDefinition,fields: readonly string[],predicateFields: readonly string[]): Promise<ScopeSource[]> {
   if (definition.origin.kind !== 'generic') unavailable()
   const workspaceId = context.execution.security.access.workspaceId
-  const value = (await context.transaction.query<{ value: unknown }>('SELECT observe_generic_native_query_domain($1,$2,$3) AS value',
-    [workspaceId,definition.origin.entityTypeId,[...fields]])).rows[0]?.value
+  const value = (await context.transaction.query<{ value: unknown }>('SELECT observe_generic_application_query_domain($1,$2,$3,$4,$5) AS value',
+    [workspaceId,definition.origin.entityTypeId,definition.typeKey,[...fields],[...predicateFields]])).rows[0]?.value
   // Other domain families remain unqualified; the candidate port holds empty
   // results when there is no supported canonical domain proof.
-  if (value === null) return []
+  if (value === null) {
+    if (getApplicationExecutionBinding(context.execution)) unavailable()
+    return []
+  }
   const parsed = captureSchema.safeParse(value)
   if (!parsed.success || Object.keys(parsed.data.values).length || parsed.data.sources[0].resourceKind !== 'application_field'
     || parsed.data.sources.some(source => source.workspaceId !== workspaceId)) unavailable()
