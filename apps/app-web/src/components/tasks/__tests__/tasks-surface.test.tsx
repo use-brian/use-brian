@@ -236,6 +236,17 @@ describe("[COMP:app-web/tasks-surface] current-filter select all", () => {
     expect(titleButton?.textContent).toBe("🚀Unassigned task");
   });
 
+  it("shows saved task tags in the table without hiding them behind View", async () => {
+    taskApi.fetchWorkspaceTasks.mockResolvedValue([
+      { ...rows[0], tags: ["Operations", "Needs review"] }, rows[1],
+    ]);
+    await renderSurface();
+    const tags = container!.querySelector('ul[aria-label="Tags"]');
+    expect([...tags!.querySelectorAll("li")].map((item) => item.textContent))
+      .toEqual(["Operations", "Needs review"]);
+    expect(container!.querySelectorAll('ul[aria-label="Tags"]')).toHaveLength(1);
+  });
+
   it("opens task rules from the Tasks top bar", async () => {
     await renderSurface();
 

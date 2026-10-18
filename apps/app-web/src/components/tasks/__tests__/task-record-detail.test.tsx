@@ -64,7 +64,7 @@ const row: TaskRow = {
   status: "todo",
   assigneeId: null,
   due: null,
-  tags: [],
+  tags: ["Operations", "Needs review"],
   parentId: null,
   attributes: { icon: "🚀" },
   updatedAt: "2026-08-05T01:00:00.000Z",
@@ -136,6 +136,8 @@ describe("[COMP:app-web/tasks-surface] task peek creation audit", () => {
       .toContain(new Date(SAVED_AT).toLocaleString());
     expect(container!.querySelector('[data-property="Created by"]')?.textContent)
       .toContain("Saved from a Telegram conversation.");
+    expect([...container!.querySelectorAll('ul[aria-label="Tags"] li')].map(item => item.textContent))
+      .toEqual(["Operations", "Needs review"]);
   });
 
   it("deletes with a reason and explicit active-rule consent", async () => {

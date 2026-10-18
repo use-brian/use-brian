@@ -111,6 +111,7 @@ import {
 } from "./task-cells";
 import { TaskBoard } from "./task-board";
 import { TaskRecordDetail } from "./task-record-detail";
+import { TaskTags } from "./task-tags";
 import {
   FilterBar,
   ViewOptionRow,
@@ -1354,19 +1355,22 @@ function TaskTableRow({
           !selected && "opacity-100 md:opacity-0 md:group-hover/task:opacity-100 md:group-focus-within/task:opacity-100",
         )}
       />
-      <button
-        type="button"
-        onClick={() => onOpen(row)}
-        title={t.openRecord}
-        className="flex min-w-0 items-center gap-1.5 py-1 text-left text-[13.5px] font-medium text-foreground hover:underline"
-      >
-        {icon && (
-          <span className="shrink-0 text-[15px] leading-none" aria-hidden>
-            {icon}
-          </span>
-        )}
-        <span className="truncate">{row.title}</span>
-      </button>
+      <div className="flex min-w-0 flex-col gap-1 py-1">
+        <button
+          type="button"
+          onClick={() => onOpen(row)}
+          title={t.openRecord}
+          className="flex min-w-0 items-center gap-1.5 text-left text-[13.5px] font-medium text-foreground hover:underline"
+        >
+          {icon && (
+            <span className="shrink-0 text-[15px] leading-none" aria-hidden>
+              {icon}
+            </span>
+          )}
+          <span className="truncate">{row.title}</span>
+        </button>
+        <TaskTags tags={row.tags} />
+      </div>
       <StatusCell
         value={row.status}
         onCommit={(status) => commitField(row, { status }, { status })}
@@ -1474,6 +1478,7 @@ function TaskCardRow({
           )}
           <span className="min-w-0 break-words">{row.title}</span>
         </button>
+        <TaskTags tags={row.tags} />
         <div className="flex flex-wrap items-center gap-2">
           <StatusCell
             value={row.status}

@@ -67,6 +67,7 @@ import { originClue } from "@/components/brain/source-origin";
 import { ResizablePeek } from "@/components/operator/resizable-peek";
 import { EmojiPicker } from "@/components/ui/emoji-picker";
 import { promptDialog } from "@/components/ui/prompt-dialog";
+import { TaskTags } from "./task-tags";
 
 export function TaskRecordDetail({
   workspaceId,
@@ -292,6 +293,10 @@ export function TaskRecordDetail({
             />
           </div>
         </div>
+
+        {row.tags.length > 0 && (
+          <div className="mt-3"><TaskTags tags={row.tags} /></div>
+        )}
 
         {/* Property list — the entry page's field block. */}
         <div className="mt-3 flex flex-col">

@@ -30,6 +30,7 @@ import {
 } from "@/lib/api/tasks";
 import { taskProject } from "@/lib/tasks-view";
 import { STATUS_DOT, StatusCell } from "./task-cells";
+import { TaskTags } from "./task-tags";
 import type { ContextProject } from "@/lib/api/context-scopes";
 
 const LIVE_COLUMNS: readonly TaskStatus[] = ["todo", "in_progress", "in_review", "blocked"];
@@ -151,6 +152,9 @@ export function TaskBoard({
                       )}
                       <span className="min-w-0 break-words">{row.title}</span>
                     </button>
+                    {row.tags.length > 0 && (
+                      <div className="mt-2"><TaskTags tags={row.tags} /></div>
+                    )}
                     <div className="mt-2 flex items-center gap-1.5">
                       {priority && (
                         <span

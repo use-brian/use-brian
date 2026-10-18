@@ -219,7 +219,8 @@ describe("[COMP:app-web/tasks-surface] phone row shape", () => {
       removeListener: () => {},
       dispatchEvent: () => false,
     })) as typeof window.matchMedia;
-    await loadSurfaceCache(key, async () => rows);
+    await loadSurfaceCache(key, async () => rows.map((row, index) =>
+      index === 0 ? { ...row, tags: ["Operations", "Needs review"] } : row));
     taskApi.fetchWorkspaceTasks.mockReturnValue(new Promise<TaskRow[]>(() => {}));
 
     await renderSurface();
@@ -228,6 +229,9 @@ describe("[COMP:app-web/tasks-surface] phone row shape", () => {
     expect(cards.length).toBe(2);
     expect(cards[0]!.querySelector('[role="checkbox"]')?.className).toContain("size-5");
     expect(cards[0]!.querySelector('[data-testid="status-cell"]')).toBeTruthy();
+    const taggedCard = [...cards].find(card => card.textContent?.includes(rows[0]!.title))!;
+    expect([...taggedCard.querySelectorAll('ul[aria-label="Tags"] li')].map(item => item.textContent))
+      .toEqual(["Operations", "Needs review"]);
     expect(container!.querySelector(".md\\:min-w-\\[640px\\]")).toBeTruthy();
   });
 
