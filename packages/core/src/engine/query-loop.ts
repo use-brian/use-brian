@@ -65,6 +65,18 @@ function isAuthorityBoundaryError(error: unknown): boolean {
     && (error as { reason?: unknown }).reason === 'authority_changed'
 }
 
+/** A failed input boundary cannot enter model retry, compaction or terminal fallback. */
+async function assertModelInputAuthority(context: ToolContext): Promise<void> {
+  if (!context.assertModelInputAuthority) return
+  try { await context.assertModelInputAuthority(context) }
+  catch (error) {
+    if (isAuthorityBoundaryError(error)) throw error
+    throw Object.assign(new Error('The model context is unavailable.', { cause: error }), {
+      reason: 'authority_changed' as const, retrySafe: false,
+    })
+  }
+}
+
 function hasVisibleText(text: string): boolean {
   return sanitizeUnicode(text).trim().length > 0
 }
@@ -698,6 +710,7 @@ async function* queryLoopCore(
   // `context.abortSignal` rides through to the provider's underlying `fetch`
   // so a client disconnect actually cancels in-flight HTTP, instead of being
   // a no-op while we wait for Cloud Run's 300s cap.
+  await assertModelInputAuthority(context)
   const session = options.stateless ? null : provider.createSession({
     model,
     systemPrompt,
@@ -896,6 +909,7 @@ async function* queryLoopCore(
 
     try {
       await context.authority?.assertCurrent()
+      await assertModelInputAuthority(context)
       // Stateless: send full history via provider.stream() (no rawHistory accumulation).
       // Stateful: send only new messages via session.send() (preserves thought signatures).
       const sendOpts: SendOptions | undefined = nextThinkingLevel || progress
@@ -1085,12 +1099,15 @@ async function* queryLoopCore(
         hasAttemptedReactiveCompact = true
         yield { type: 'status', message: 'Context too large, compacting...' }
         try {
-          const compact = () => compactConversation({
-            provider,
-            model: options.compactModel!,
-            messages: nextMessages,
-            systemPrompt: renderSystemContext({ systemPrompt, runtimeSystemContext }),
-          })
+          const compact = async () => {
+            await assertModelInputAuthority(context)
+            return compactConversation({
+              provider,
+              model: options.compactModel!,
+              messages: nextMessages,
+              systemPrompt: renderSystemContext({ systemPrompt, runtimeSystemContext }),
+            })
+          }
           const compactResult = context.authority
             ? await context.authority.execute(compact)
             : await compact()
@@ -1765,6 +1782,7 @@ async function* queryLoopCore(
             const fallbackResponse = yield* finalizeTerminalResponse({
               provider,
               model,
+              context,
               messages: [
                 ...terminalConversationMessages,
                 { role: 'user', content: drainPrompt },
@@ -1980,6 +1998,7 @@ async function* queryLoopCore(
         const fallbackResponse = yield* finalizeTerminalResponse({
           provider,
           model,
+          context,
           messages: terminalConversationMessages,
           evidence: terminalEvidence,
           stopReason: { code: 'terminal_tool_turn' },
@@ -2069,6 +2088,7 @@ async function* queryLoopCore(
         const fallbackResponse = yield* finalizeTerminalResponse({
           provider,
           model,
+          context,
           messages: terminalConversationMessages,
           evidence: terminalEvidence,
           stopReason: capStop,
@@ -2094,6 +2114,7 @@ async function* queryLoopCore(
       const fallbackResponse = yield* finalizeTerminalResponse({
         provider,
         model,
+        context,
         messages: terminalConversationMessages,
         evidence: terminalEvidence,
         stopReason: { code: 'max_turns' },
@@ -2535,6 +2556,7 @@ function fallbackTerminalResponse(message: string): AssistantResponse {
 async function* finalizeTerminalResponse(params: {
   provider: LLMProvider
   model: string
+  context: ToolContext
   messages: Message[]
   evidence: TerminalEvidenceItem[]
   stopReason: TerminalStopReason
@@ -2544,6 +2566,7 @@ async function* finalizeTerminalResponse(params: {
   systemPrompt?: string
 }): AsyncGenerator<QueryEvent, AssistantResponse> {
   try {
+    await assertModelInputAuthority(params.context)
     const acc = createAccumulator()
     for await (const chunk of params.provider.stream({
       model: params.model,
@@ -2588,6 +2611,7 @@ async function* finalizeTerminalResponse(params: {
     }
     console.warn('[query-loop] isolated terminal finalizer returned an invalid envelope; using static fallback')
   } catch (err) {
+    if (isAuthorityBoundaryError(err)) throw err
     console.error('[query-loop] isolated terminal finalizer failed; using static fallback:', err)
   }
 

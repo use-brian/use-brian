@@ -3,10 +3,11 @@ import pg from 'pg'
 import { afterAll, describe, expect, it } from 'vitest'
 import { createConnectorActorVerifier, SOURCE_PROTOCOL_VERSION,
   type SourceAuthorizationRequest } from '@use-brian/brian-app/connector'
-import { ContextScopeAccumulator, scopeEvidenceFromRows, executionToolContext, type ScopeSource, type Tool } from '@use-brian/core'
+import { ContextScopeAccumulator, scopeEvidenceFromRows, executionToolContext, NOOP_TURN_LEDGER, type LLMProvider, type ScopeSource, type Tool } from '@use-brian/core'
 import { getAppPool, getPool, applyRLSGucs, queryWithRLS } from '../../db/client.js'
-import { createMemory, updateMemory } from '../../db/memories.js'
+import { createMemory, getMemoryById, updateMemory } from '../../db/memories.js'
 import { validateAudienceScopeEvidence, validateCallerScopeEvidence } from '../../context-scope/caller-evidence.js'
+import { runAssistantTurn } from '../../turn/kernel.js'
 import { readCurrentScopeSources, validateDerivedWriteInputs, validateDerivedMemoryInputs, validateDerivedEntityInputs, recordDerivedResource } from '../../db/derived-scope-store.js'
 import { activatePinnedExternalSourceOperation, bindTrustedSourceRead, pinExternalSourceOperation } from '../source-store.js'
 import { createConnectorSourceRuntimeFactory, configureConnectorSourceRuntimeFactory } from '../source-runtime.js'
@@ -254,6 +255,7 @@ describe('[COMP:api/external-source-access] independent persisted source ACL', (
       const writer = await pool.connect()
       let retainedDerivative: ScopeSource
       let firstDerivative: ScopeSource | undefined
+      let privateNative: Awaited<ReturnType<typeof createMemory>>
       try {
         let inputs = retainedSources!
         for (let generation = 0; generation < 2; generation++) {
@@ -266,7 +268,7 @@ describe('[COMP:api/external-source-access] independent persisted source ACL', (
           const receipts = (await pool.query('SELECT count(*)::int AS count FROM external_source_authorizations WHERE operation_id=ANY($1::uuid[])',
             [[prepared.operationId,contextAuthority.operationId]])).rows[0].count
           const memory = await createMemory({ assistantId: assistant, userId: null, workspaceId: workspace,
-            createdByUserId: first, summary: 'Fictional source derivative', sensitivity: 'public',
+            createdByUserId: first, summary: 'Fictional source-derived cost 37.25', sensitivity: 'public',
             derivation: { producer: 'retained-source-ancestry-fixture', sources: inputs } }, undefined, writer)
           retainedDerivative = { workspaceId: workspace,userId: memory.userId,assistantId: memory.assistantId,resourceKind: 'memory',resourceId: memory.id,
             version: memory.scopeVersion,sensitivity: memory.sensitivity,compartments: memory.compartments,projectIds: memory.projectIds }
@@ -315,6 +317,10 @@ describe('[COMP:api/external-source-access] independent persisted source ACL', (
         await expect(validateCallerScopeEvidence({ sources: [retainedDerivative!] }, one.execution.security.ceiling, writer))
           .rejects.toMatchObject({ diagnostic: 'source_held' })
         await writer.query('COMMIT')
+        await writer.query('BEGIN'); await applyRLSGucs(writer, second)
+        privateNative = await createMemory({ assistantId: assistant,userId: second,workspaceId: workspace,createdByUserId: second,
+          summary: 'Fictional private native fact',sensitivity: 'public',source: 'user' }, undefined, writer)
+        await writer.query('COMMIT')
         const reader = await getAppPool().connect()
         try {
           await reader.query('BEGIN'); await applyRLSGucs(reader, first)
@@ -322,6 +328,14 @@ describe('[COMP:api/external-source-access] independent persisted source ACL', (
           await pinPreparedExternalSourceAuthority(reader, one.execution, admittedProof)
           expect((await reader.query("SELECT has_function_privilege(current_user,'read_external_source_dependencies(uuid,text[],uuid[],text[])','EXECUTE') AS raw")).rows[0].raw).toBe(false)
           expect(await readExternalSourceAncestors(workspace, [retainedDerivative!], reader)).toEqual(retainedSources)
+          const admitted = await validateCallerScopeEvidence({ sources: [retainedDerivative!] }, one.execution.security.ceiling, reader)
+          expect(admitted.sources?.filter(source => source.resourceKind === 'external_source')).toEqual(retainedSources)
+          expect((await reader.query("SELECT read_admitted_native_scope_snapshot($1,'memory',$2) AS snapshot", [workspace,privateNative!.id])).rows[0].snapshot).toEqual({ held: true })
+          const currentMetadata = (await reader.query("SELECT read_admitted_native_scope_snapshot($1,'memory',$2) AS snapshot", [workspace,retainedDerivative!.resourceId])).rows[0].snapshot
+          expect(currentMetadata.held).toBe(false); expect(JSON.stringify(currentMetadata)).not.toContain('Fictional')
+          await reader.query('SAVEPOINT foreign_observation')
+          await expect(reader.query("SELECT read_admitted_native_scope_snapshot($1,'memory',$2)", [randomUUID(),privateNative!.id])).rejects.toMatchObject({ code: '42501' })
+          await reader.query('ROLLBACK TO SAVEPOINT foreign_observation')
           await reader.query('ROLLBACK')
         } finally { await reader.query('ROLLBACK'); reader.release() }
         // A native mutation inside this transaction must not reuse proof for the earlier ancestor set.
@@ -370,6 +384,76 @@ describe('[COMP:api/external-source-access] independent persisted source ACL', (
       expect((await pool.query('SELECT count(*)::int AS count FROM external_source_resources WHERE profile_id=$1', [sourceProfile])).rows[0].count).toBe(1)
       expect((await pool.query('SELECT count(*)::int AS count FROM external_source_observations WHERE workspace_id=$1', [workspace])).rows[0].count).toBe(3)
       const sourceRuntimeFactory = createConnectorSourceRuntimeFactory({ issuer, keys, instances })
+      // The real shared kernel admits model input under current source rights. This local provider incurs no model/API cost.
+      const cached = await getMemoryById(one.execution.security.access, firstDerivative!.resourceId)
+      expect(cached?.summary).toContain('37.25')
+      async function modelFromRetained(actor: Awaited<ReturnType<typeof client>>, includeExecution = true, input: { sources?: ScopeSource[]; content?: string } = {}) {
+        let sessions = 0, requests = 0
+        const observed: string[] = []
+        const provider: LLMProvider = { name: 'fixture',models: ['fixture-model'],
+          createSession: options => {
+            sessions++; observed.push(options.runtimeSystemContext ?? '')
+            return { send: () => {
+              requests++
+              return (async function* () {
+                yield { type: 'message_start' as const,model: 'fixture-model' }
+                yield { type: 'text_delta' as const,text: 'Fictional checked result' }
+                yield { type: 'message_end' as const,stopReason: 'end_turn' as const,usage: { inputTokens: 1,outputTokens: 1 } }
+              })()
+            } }
+          },
+          stream: () => { requests++; throw new Error('Unexpected fixture model fallback') },
+        }
+        const accumulator = new ContextScopeAccumulator({ sources: input.sources ?? [firstDerivative!] })
+        const context = { ...executionToolContext(actor.execution, { appId: 'model-fixture' }),scopeAccumulator: accumulator,
+          // An optional route hook cannot replace the mandatory source boundary.
+          assertModelInputAuthority: async () => {},...(!includeExecution ? { executionContext: undefined } : {}) }
+        const run = () => runAssistantTurn({ sessionId: actor.execution.lifecycle.sessionId,policy: { admission: 'personal' },sink: { kind: 'return' },
+          lease: { mode: 'none' },abortController: new AbortController(),
+          model: { provider,model: 'fixture-model',configuredProviders: undefined,customLlm: null },
+          loop: { ledger: NOOP_TURN_LEDGER,context,systemPrompt: 'Fictional model input fixture',runtimeSystemContext: input.content ?? cached!.summary,
+            messages: [{ role: 'user',content: 'Report the fictional retained result.' }],tools: new Map(),maxTurns: 1 } })
+        return { run,accumulator,observed,counts: () => ({ sessions,requests }) }
+      }
+      configureConnectorSourceRuntimeFactory(sourceRuntimeFactory, { instances })
+      try {
+        const privateSource: ScopeSource = { workspaceId: workspace,userId: privateNative!.userId,assistantId: privateNative!.assistantId,
+          resourceKind: 'memory',resourceId: privateNative!.id,version: privateNative!.scopeVersion,sensitivity: privateNative!.sensitivity,
+          compartments: privateNative!.compartments,projectIds: privateNative!.projectIds }
+        const privateDenied = await modelFromRetained(await client(first), true, { sources: [privateSource],content: privateNative!.summary })
+        await expect(privateDenied.run()).rejects.toMatchObject({ reason: 'authority_changed' })
+        expect(privateDenied.counts()).toEqual({ sessions: 0,requests: 0 })
+        const privateAllowed = await modelFromRetained(await client(second), true, { sources: [privateSource],content: privateNative!.summary })
+        await expect(privateAllowed.run()).resolves.toMatchObject({ selection: { kind: 'text' } })
+        expect(privateAllowed.counts()).toEqual({ sessions: 1,requests: 1 })
+        const allowed = await modelFromRetained(await client(first))
+        expect((await allowed.run()).selection.kind).toBe('text')
+        expect(allowed.counts()).toEqual({ sessions: 1,requests: 1 }); expect(allowed.observed[0]).toContain('37.25')
+        expect(allowed.accumulator.evidence.sources?.filter(source => source.resourceKind === 'external_source')).toEqual(retainedSources)
+        const narrower = await modelFromRetained(await client(second))
+        await expect(narrower.run()).rejects.toMatchObject({ reason: 'authority_changed',retrySafe: false })
+        expect(narrower.counts()).toEqual({ sessions: 0,requests: 0 })
+        const missing = await modelFromRetained(await client(first), false)
+        await expect(missing.run()).rejects.toMatchObject({ reason: 'authority_changed' })
+        expect(missing.counts()).toEqual({ sessions: 0,requests: 0 })
+        const attributed = await modelFromRetained(await client(first, 'credential_attribution'))
+        await expect(attributed.run()).rejects.toMatchObject({ reason: 'authority_changed' })
+        expect(attributed.counts()).toEqual({ sessions: 0,requests: 0 })
+        const revokedActor = await client(first), revoked = await modelFromRetained(revokedActor)
+        await sourcePool.query("DELETE FROM grants WHERE kind='human' AND account_id=$1 AND record_id='order-1'", [first])
+        await expect(revoked.run()).rejects.toMatchObject({ reason: 'authority_changed' })
+        expect(revoked.counts()).toEqual({ sessions: 0,requests: 0 })
+        await sourcePool.query("INSERT INTO grants(kind,account_id,record_id,fields,actions) VALUES('human',$1,'order-1',$2,$3)", [first,['description','cost'],actions])
+        await expect(revoked.run()).rejects.toMatchObject({ reason: 'authority_changed' })
+        expect(revoked.counts()).toEqual({ sessions: 0,requests: 0 })
+        const restored = await modelFromRetained(await client(first))
+        await expect(restored.run()).resolves.toMatchObject({ selection: { kind: 'text' } })
+        configureConnectorSourceRuntimeFactory(sourceRuntimeFactory)
+        const unwired = await modelFromRetained(await client(first)), beforeUnwired = source.counters.authorizations
+        await expect(unwired.run()).rejects.toMatchObject({ reason: 'authority_changed' })
+        expect(unwired.counts()).toEqual({ sessions: 0,requests: 0 }); expect(source.counters.authorizations).toBe(beforeUnwired)
+      } finally { configureConnectorSourceRuntimeFactory(undefined) }
+
       const inject = async (userId: string, includeExecution = true, authenticationKind: 'native_session' | 'verified_channel' = 'native_session', includeFactory = true) => {
         const actor = await client(userId, authenticationKind), scopeAccumulator = new ContextScopeAccumulator(), tools = new Map<string, Tool>()
         const result = await injectMcpTools({ userId: owner, assistantId: assistant, assistantTeamId: workspace, tools,

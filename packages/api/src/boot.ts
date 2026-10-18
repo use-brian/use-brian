@@ -2321,7 +2321,7 @@ export async function bootOpenApi(opts: BootOpenApiOptions): Promise<BootResult>
   const connectorInstanceStore = createConnectorInstanceStore(credKey)
   const connectorSourceRuntimeFactory = createConnectorSourceRuntimeFactory({ issuer: env.API_URL,
     keys: credKey ? createConnectorActorKeyStore(credKey) : undefined, instances: connectorInstanceStore })
-  configureConnectorSourceRuntimeFactory(connectorSourceRuntimeFactory)
+  configureConnectorSourceRuntimeFactory(connectorSourceRuntimeFactory, { instances: connectorInstanceStore })
   // Workspace-owned OAuth app credentials (migration 394) — a customer's own
   // Entra registration, resolved ahead of deployment config. See
   // docs/architecture/integrations/msgraph.md → "Auth".

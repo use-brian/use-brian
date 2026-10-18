@@ -10,7 +10,7 @@ import { validateCallerScopeEvidence } from '../context-scope/caller-evidence.js
 import type { ConnectorInstanceStore } from '../db/connector-instance-store.js'
 import { buildConnectorAuthHeaders } from '../mcp/auth-headers.js'
 import type { ConnectorSourceRuntimeFactory } from './source-runtime.js'
-import type { SourceOperationProof } from './source-access.js'
+import { trustedSourceOperationProof, type SourceOperationProof } from './source-access.js'
 import { activatePinnedExternalSourceOperation, pinExternalSourceOperation, resolveNativeSourceRecipientCeiling } from './source-store.js'
 
 export type PreparedExternalSourceAuthority = Readonly<{ operationId: string }>
@@ -37,6 +37,19 @@ export async function pinPreparedExternalSourceAuthority(client: PoolClient, exe
   }
   await execution.security.authority.assertCurrent()
   binding.pinned = true
+}
+
+/** Freshness check for the same prepared boundary after its validation transaction; this grants no new transaction. */
+export async function assertPreparedExternalSourceAuthorityCurrent(execution: ExecutionContext, token: PreparedExternalSourceAuthority) {
+  const binding = prepared.get(token)
+  if (!binding || binding.execution !== execution || !binding.pinned) denied()
+  await execution.security.authority.assertCurrent()
+  await binding.assertAncestryCurrent()
+  for (const batch of binding.batches) {
+    const proof = trustedSourceOperationProof(batch.proof, execution)
+    if (!proof) denied()
+    await proof.assertCurrent()
+  }
 }
 
 /** Resolve immutable external obligations before sending fresh source requests. */

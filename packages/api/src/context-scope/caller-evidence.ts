@@ -197,7 +197,7 @@ async function validateScopeEvidence(
   // writer's rule (`revalidateScopeSources`), not the audience's.
   let states: Awaited<ReturnType<typeof readCurrentScopeSources>>
   try {
-    states = await readCurrentScopeSources(client ?? getPool(), ceiling.workspaceId, sources.filter(source=>!pageKinds.has(source.resourceKind)), workflowRunId, kind === 'caller' ? 'context' : 'deliver')
+    states = await readCurrentScopeSources(client ?? getPool(), ceiling.workspaceId, sources.filter(source=>!pageKinds.has(source.resourceKind)), workflowRunId, kind === 'caller' ? 'context' : 'deliver', !!client && sources.some(source => source.resourceKind === 'external_source'))
   } catch (error) {
     throw unavailable(kind, 'verification_error', error)
   }

@@ -8,6 +8,7 @@ import { getWorkspaceRoleSystem } from '../db/workspace-store.js'
 import { createConnectorRuntimeAuthority } from './connector-runtime-authority.js'
 import type { createConnectorActorKeyStore } from './connector-actor-keys.js'
 import { createSourceAccessClient, type SourceAccessProfile, type SourceAccessClient } from './source-access.js'
+import { createRetainedSourceAuthorityCoordinator } from './retained-source-authority.js'
 import { bindTrustedSourceRead } from './source-store.js'
 import { mergeValidatedHeaders } from '../mcp/auth-headers.js'
 import { mcpToolDisplayResult } from '../mcp/client.js'
@@ -26,9 +27,14 @@ export type ConnectorSourceRuntimeFactory = (input: { workspaceId: string; insta
   /** Host registers the absence lease so introducing protected trust invalidates legacy dispatch. */
   onLegacyAdmission?: (assertCurrent: () => Promise<void>) => void }) => Promise<ConnectorSourceRuntime | null>
 let sharedFactory: ConnectorSourceRuntimeFactory | undefined
+let sharedRetainedAuthority: { factory: ConnectorSourceRuntimeFactory; coordinator: ReturnType<typeof createRetainedSourceAuthorityCoordinator> } | undefined
 /** Boot-owned composition port. This carries no positive authorization decision. */
-export function configureConnectorSourceRuntimeFactory(factory: ConnectorSourceRuntimeFactory | undefined) { sharedFactory = factory }
+export function configureConnectorSourceRuntimeFactory(factory: ConnectorSourceRuntimeFactory | undefined, options?: { instances: ConnectorInstanceStore }) {
+  sharedFactory = factory
+  sharedRetainedAuthority = factory && options ? { factory,coordinator: createRetainedSourceAuthorityCoordinator({ factory,instances: options.instances }) } : undefined
+}
 export function getSharedConnectorSourceRuntimeFactory() { return sharedFactory }
+export function getSharedRetainedSourceAuthority() { return sharedRetainedAuthority }
 type ProfileRow = { id: string; revision: string; status: string; issuer: string; audience: string; tenant: string;
   source_base_url: string; mcp_url: string; http_read_path: string | null }
 function unavailable(): never { throw new SourceProtocolError('source_unavailable') }

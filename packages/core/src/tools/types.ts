@@ -41,6 +41,8 @@ export type CurrentAuthorityBoundary = {
 export type ToolContext = {
   /** Validated production execution facts; flat fields below are its compatibility projection. */
   executionContext?: ExecutionContext
+  /** Host-owned model-input admission. Nested loops pass their current context; never serialized to a model. */
+  assertModelInputAuthority?: (context: ToolContext) => Promise<void>
   userId: string
   /** Verified human actor for workspace administration. Set only by attended,
    * authenticated entrypoints; a billing owner or callee owner is not an actor. */
