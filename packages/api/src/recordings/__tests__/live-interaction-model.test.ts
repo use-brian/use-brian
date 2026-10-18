@@ -63,9 +63,11 @@ describe('[COMP:recordings/live-interaction] model adapters', () => {
   it('never publishes text from a tool-use turn and concurrent jobs have isolated histories/evidence', async () => {
     const requests: ProviderRequest[] = []
     const p = provider(async function* (r) {
-      requests.push(structuredClone({ ...r, signal: undefined }))
+      // Capture request data only; host admission and cancellation stay on r.
+      requests.push(structuredClone({ ...r, signal: undefined, assertInputAuthority: undefined }))
       const question = r.messages[0]!.content as string
       if (r.tools?.length) {
+        expect(r.assertInputAuthority).toBeTypeOf('function')
         expect(JSON.stringify(r.messages)).toContain(`evidence-${question}`)
         yield { type: 'text_delta', text: `PRIVATE PLAN ${question}` }
         yield { type: 'tool_use_start', id: `call-${question}`, name: 'readLiveTranscriptRange' }
