@@ -313,7 +313,8 @@ describe('[COMP:security/native-field-policy] current canonical native field mas
     const sources = boundScopeSources(result);expect(sources).toHaveLength(1)
     const frozen = (await owner.query(`SELECT d.domain FROM application_query_domains d JOIN application_field_resources f ON f.resource_id=d.id
       WHERE f.id=$1 AND f.selection='query_domain'`,[sources[0].resourceId])).rows[0].domain
-    expect(frozen).toMatchObject({ kind: 'application_selector_domain',version: 1,requiredFields: [],formula: { kind: 'application_query' } })
+    expect(frozen).toMatchObject({ kind: 'application_query_points',version: 1,queryPoints: [],candidates: [],
+      remaining: { kind: 'application_selector_domain',version: 1,requiredFields: [],formula: { kind: 'application_query' } } })
     for (const identity of [original.appId,original.grantId,ownerId]) expect(JSON.stringify(frozen)).not.toContain(identity)
     expect(JSON.stringify(result)).not.toContain('application_field')
     expect(await appFieldSnapshot(original,sources[0])).toMatchObject({ held: false })
@@ -363,6 +364,88 @@ describe('[COMP:security/native-field-policy] current canonical native field mas
     expect(await appFieldSnapshot(app,ordinarySource)).toMatchObject({ held: false })
     expect(await fieldSnapshot(protectedSource,otherId)).toMatchObject({ held: false })
     await expect(assertSourceModelInputAuthority(modelContext)).rejects.toMatchObject({ code: 'source_unavailable',retrySafe: false })
+  })
+  it('admits an independently readable finite query point without requiring the unused original grant ceiling',async () => {
+    await clearRoles();const fixture = await record(),app = await application(fixture,'external_user',undefined,['query'])
+    const original = await appQuery(app,fixture,{ fields: ['title'] })
+    const independent = await queryRecords(fixture,{ fields: ['title'] })
+    expect(original.records.map(row => row.ref.id)).toEqual([fixture.row.id])
+    expect(independent.records.map(row => row.ref.id)).toEqual([fixture.row.id])
+    const sources = boundScopeSources(original)
+    const domain = (await owner.query<{ id: string }>("SELECT id FROM application_field_resources WHERE id=ANY($1::uuid[]) AND selection='query_domain'",
+      [sources.map(source => source.resourceId)])).rows[0]
+    expect(domain).toBeDefined()
+    for (const source of sources.filter(source => source.resourceId !== domain.id)) expect(await fieldSnapshot(source,memberId)).toMatchObject({ held: false })
+    expect(await fieldSnapshot(sources.find(source => source.resourceId === domain.id)!,memberId)).toMatchObject({ held: false })
+  })
+  it('retains an ordinary native empty generic query without requiring a native module owner',async () => {
+    await clearRoles()
+    const schema = await store.createEntityType({ workspaceId,name: `Fictional native generic query ${randomUUID()}`,createdBy: ownerId,
+      properties: [{ name: 'title',config: { kind: 'text' } },{ name: 'cost',config: { kind: 'number',format: 'decimal' } }] })
+    const fixture = { schema,origin: { kind: 'generic' as const,entityTypeId: schema.id },type: `record.${schema.id}` }
+    const result = await queryRecords(fixture,{ fields: ['title'],aggregate: [{ field: 'title',operation: 'count' }] })
+    expect(result.records).toEqual([]);expect(result.aggregates?.[0].value).toBe('0')
+    const source = boundScopeSources(result)[0]
+    expect(source.resourceKind).toBe('application_field')
+    expect(await fieldSnapshot(source,otherId)).toMatchObject({ held: false })
+    expect((await owner.query('SELECT count(*)::int AS count FROM application_native_resource_owners WHERE workspace_id=$1 AND origin=$2',[workspaceId,fixture.origin])).rows[0].count).toBe(0)
+    await owner.query("UPDATE workspace_members SET clearance='public' WHERE workspace_id=$1 AND user_id=$2",[workspaceId,memberId])
+    try {
+      expect(await fieldSnapshot(source,memberId)).toMatchObject({ held: true })
+      expect(await fieldSnapshot(source,otherId)).toMatchObject({ held: false })
+    } finally { await owner.query("UPDATE workspace_members SET clearance='internal' WHERE workspace_id=$1 AND user_id=$2",[workspaceId,memberId]) }
+  })
+  it('keeps absent finite IDs as domain obligations while refining admitted points',async () => {
+    await clearRoles();const fixture = await record(),absent = randomUUID()
+    const app = await application(fixture,'external_user',undefined,['query'],{ kind: 'ids',ids: [fixture.row.id,absent] })
+    const result = await appQuery(app,fixture,{ fields: ['title'] }),source = boundScopeSources(result)[0]
+    expect(result.records.map(row => row.ref.id)).toEqual([fixture.row.id])
+    expect(await appFieldSnapshot(app,source)).toMatchObject({ held: false })
+    expect(await fieldSnapshot(source,memberId)).toMatchObject({ held: true })
+    expect(await fieldSnapshot(source,ownerId)).toMatchObject({ held: false })
+    const narrower = await application(fixture,'external_user',undefined,['query'])
+    expect(await appFieldSnapshot(narrower,source)).toMatchObject({ held: true })
+  })
+  it('preserves predicate-field authority on each finite point for independent readers',async () => {
+    await clearRoles();const fixture = await record(),assignment = await assign();await assign('finance',ownerId);await assign('finance',otherId)
+    const app = await application(fixture,'member',undefined,['query'])
+    const result = await appQuery(app,fixture,{ fields: ['title'],filters: [{ field: 'cost',op: 'eq',value: 42 }] })
+    expect(result.records).toHaveLength(1)
+    const source = boundScopeSources(result)[0]
+    expect(await appFieldSnapshot(app,source)).toMatchObject({ held: false })
+    await owner.query("UPDATE application_native_role_assignments SET status='revoked' WHERE id=$1",[assignment])
+    expect(await appFieldSnapshot(app,source)).toMatchObject({ held: true })
+    expect(await fieldSnapshot(source,otherId)).toMatchObject({ held: false })
+  })
+  it('rejects finite candidate ID, version and phantom drift against the original admitted read',async () => {
+    await clearRoles();const fixture = await record(),absent = randomUUID()
+    const app = await application(fixture,'external_user',undefined,['query'],{ kind: 'ids',ids: [fixture.row.id,absent] })
+    const result = await appQuery(app,fixture,{ fields: ['title'] }),source = boundScopeSources(result)[0]
+    const original = [{ id: fixture.row.id,version: fixture.row.recordVersion }]
+    await asApplication(app,async client => {
+      const valid = async (candidates: Array<{ id: string;version: string }>) => (await client.query(
+        'SELECT assert_generic_application_query_candidates($1,$2,$3,$4,$5) AS admitted',
+        [workspaceId,fixture.schema.id,source.resourceId,source.version,JSON.stringify(candidates)])).rows[0].admitted
+      expect(await valid(original)).toBe(true)
+      expect(await valid([])).toBe(false)
+      expect(await valid([{ ...original[0],version: '999' }])).toBe(false)
+      expect(await valid([...original,...original])).toBe(false)
+      await owner.query(`INSERT INTO entity_instances(id,workspace_id,entity_type_id,data,created_by,last_edited_by)
+        VALUES($1,$2,$3,'{"title":{"kind":"text","value":"Fictional late record"}}',$4,$4)`,[absent,workspaceId,fixture.schema.id,ownerId])
+      await owner.query('INSERT INTO application_native_policy_fixture_metadata(resource_id,fields) VALUES($1,$2)',[absent,JSON.stringify(fields())])
+      expect((await client.query('SELECT read_admitted_application_field_snapshot($1,$2,$3) AS value',[workspaceId,source.resourceId,source.version])).rows[0].value)
+        .toMatchObject({ held: false })
+      const current = (await client.query<{ id: string;version: string }>("SELECT id,record_version::text AS version FROM application_generic_projection($1,$2,'query',NULL)",
+        [fixture.schema.id,fixture.type])).rows
+      expect(current.map(row => row.id).sort()).toEqual([fixture.row.id,absent].sort())
+      expect(await valid(current)).toBe(false)
+    })
+    // Canonical source readers hold row locks until their transaction commits.
+    await owner.query("UPDATE entity_instances SET data=jsonb_set(data,'{title,value}',to_jsonb('Fictional changed point'::text)) WHERE id=$1",[fixture.row.id])
+    await asApplication(app,async client => {
+      expect((await client.query('SELECT assert_generic_application_query_candidates($1,$2,$3,$4,$5) AS admitted',
+        [workspaceId,fixture.schema.id,source.resourceId,source.version,JSON.stringify(original)])).rows[0].admitted).toBe(false)
+    })
   })
   it('uses a declared relationship resolver for empty query metadata without serializing its anchor',async () => {
     const anchor = await record()
@@ -425,7 +508,9 @@ describe('[COMP:security/native-field-policy] current canonical native field mas
       for (const signature of ['application_principal_query_bounds(uuid,uuid,boolean)','application_current_query_catalog(uuid,jsonb,text)',
         'application_compile_query_catalog_domain(uuid,jsonb)','application_query_scope_cap(integer,jsonb,jsonb)',
         'application_current_query_catalog_for_origin(uuid,jsonb)','application_query_anchor_reference(uuid,jsonb,text,text)',
-        'application_query_domain_state_before_selectors(uuid,jsonb,text,uuid,text[])','application_query_domain_state(uuid,jsonb,text,uuid,text[])']) {
+        'application_query_domain_state_before_selectors(uuid,jsonb,text,uuid,text[])','application_query_domain_state(uuid,jsonb,text,uuid,text[])',
+        'application_query_scope_admits_point(jsonb,jsonb)','application_refine_query_points(uuid,uuid,text,jsonb,text[])',
+        'observe_application_query_points(uuid,uuid,text,text[],text[])','application_compute_field_envelope_before_query_points(uuid,jsonb,text,uuid,text,text,text[],integer)']) {
         expect((await client.query('SELECT has_function_privilege(current_user,$1,\'EXECUTE\') AS allowed',[`public.${signature}`])).rows[0].allowed).toBe(false)
       }
     })

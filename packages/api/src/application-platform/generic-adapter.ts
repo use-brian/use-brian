@@ -95,6 +95,10 @@ async function query(context: Context, type: string, input: ApplicationQuery) {
       ${aggregateSql.length ? `,(SELECT to_jsonb(totals) FROM (SELECT ${aggregateSql.join(',')} FROM checked) totals) AS aggregates` : ''}`, values)
   const reference = z.object({ id: z.string().uuid(),version: z.string().min(1) })
   const candidateRefs = z.array(reference).max(4096).parse(result.rows[0]?.candidates)
+  if (domainSources.length && (await context.transaction.query<{ admitted: boolean }>(
+    'SELECT assert_generic_application_query_candidates($1,$2,$3,$4,$5) AS admitted',
+    [schema.workspaceId,schema.id,domainSources[0].resourceId,domainSources[0].version,JSON.stringify(candidateRefs)],
+  )).rows[0]?.admitted !== true) throw unavailable()
   const matches = z.array(reference.extend({ usesCreatedTime: z.boolean() })).max(4096).parse(result.rows[0]?.matches)
   const rows = z.array(reference.extend({ data: z.record(z.unknown()),absent_fields: z.array(z.string()) }).passthrough()).max(input.limit+1).parse(result.rows[0]?.page)
   const hasMore = rows.length > input.limit,selected = rows.slice(0,input.limit)
