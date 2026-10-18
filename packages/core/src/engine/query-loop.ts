@@ -65,20 +65,28 @@ function isAuthorityBoundaryError(error: unknown): boolean {
   return isInputAuthorityError(error)
 }
 
-/** A failed input boundary cannot enter model retry, compaction or terminal fallback. */
-const invalidModelInputs = new WeakSet<object>()
+/** A failed input/output boundary cannot revive the same model context. */
+const invalidModelContexts = new WeakSet<object>()
 async function assertModelInputAuthority(context: ToolContext): Promise<void> {
-  if (!context.assertModelInputAuthority && !context.authority) return
+  return assertModelAuthority(context, 'input')
+}
+/** The final host sink uses the same sticky boundary as streamed loop events. */
+export async function assertModelOutputAuthority(context: ToolContext): Promise<void> {
+  return assertModelAuthority(context, 'output')
+}
+async function assertModelAuthority(context: ToolContext, boundary: 'input' | 'output'): Promise<void> {
+  const check = boundary === 'input' ? context.assertModelInputAuthority : context.assertModelOutputAuthority
+  if (!check && !context.authority) return
   const identity = context.executionContext ?? context
-  if (invalidModelInputs.has(identity)) {
+  if (invalidModelContexts.has(identity)) {
     throw Object.assign(new Error('The model context is unavailable.'), { reason: 'authority_changed' as const,retrySafe: false })
   }
   try {
     await context.authority?.assertCurrent()
-    await context.assertModelInputAuthority?.(context)
+    await check?.(context)
   }
   catch (error) {
-    invalidModelInputs.add(identity)
+    invalidModelContexts.add(identity)
     if (isAuthorityBoundaryError(error)) throw error
     throw Object.assign(new Error('The model context is unavailable.', { cause: error }), {
       reason: 'authority_changed' as const, retrySafe: false,
@@ -628,7 +636,7 @@ export async function* queryLoop(options: QueryLoopOptions): AsyncGenerator<Quer
       queryLoopCore({ ...options, tools: filteredTools, context: toolContext, stallWatchdog: watchdog ?? undefined }),
     )
     for await (const event of events) {
-      await toolContext.authority?.assertCurrent()
+      await assertModelOutputAuthority(toolContext)
       yield event
     }
   } finally {

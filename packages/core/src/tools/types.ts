@@ -43,6 +43,8 @@ export type ToolContext = {
   executionContext?: ExecutionContext
   /** Host-owned model-input admission. Nested loops pass their current context; never serialized to a model. */
   assertModelInputAuthority?: (context: ToolContext) => Promise<void>
+  /** Host-owned output admission, distinct from model-input permission; never recorded or model supplied. */
+  assertModelOutputAuthority?: (context: ToolContext) => Promise<void>
   userId: string
   /** Verified human actor for workspace administration. Set only by attended,
    * authenticated entrypoints; a billing owner or callee owner is not an actor. */

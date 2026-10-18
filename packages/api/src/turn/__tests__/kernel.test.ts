@@ -81,6 +81,15 @@ describe('[COMP:api/turn-kernel] runAssistantTurn', () => {
     expect(leaseCalls.at(-1)).toBe('release')
   })
 
+  it('refuses a route output hook that replaces the invocation before final sink handling',async () => {
+    const afterLoop = vi.fn(),context = { scopeAccumulator: undefined,
+      assertModelOutputAuthority: async (current: { scopeAccumulator?: unknown }) => { current.scopeAccumulator = {} } }
+    await expect(runAssistantTurn(params('return',{ loop: { ...params('return').loop,context: context as never },
+      sink: { kind: 'return',afterLoop } }))).rejects.toMatchObject({ reason: 'authority_changed',retrySafe: false })
+    expect(afterLoop).not.toHaveBeenCalled()
+    expect(leaseCalls.at(-1)).toBe('release')
+  })
+
   it('releases the lease on an aborted turn', async () => {
     const abortController = new AbortController()
     abortController.abort()

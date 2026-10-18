@@ -1,8 +1,8 @@
-/** Fresh source permission at a model-input boundary. [COMP:api/external-source-access] */
+/** Fresh source permission at model input/output boundaries. [COMP:api/external-source-access] */
 import { ContextScopeAccumulator, type ExecutionContext, type ToolContext } from '@use-brian/core'
 import { SourceProtocolError } from '@use-brian/brian-app/connector'
 import { getAppPool, applyRLSGucs, rollbackAndRelease, runWithAgentAccess } from '../db/client.js'
-import { validateCallerScopeEvidence } from '../context-scope/caller-evidence.js'
+import { validateCallerScopeEvidence, validateAudienceScopeEvidence } from '../context-scope/caller-evidence.js'
 import { readExternalSourceAncestors } from './external-source-ancestry.js'
 import { assertPreparedExternalSourceAuthorityCurrent, pinPreparedExternalSourceAuthority } from './retained-source-authority.js'
 import { getSharedRetainedSourceAuthority } from './source-runtime.js'
@@ -14,6 +14,16 @@ function denied(): never { throw new SourceProtocolError('source_access_denied')
 
 /** No proof/allow cache: every call prepares a new source operation. Native authority stays separate. */
 export async function assertSourceModelInputAuthority(context: ToolContext): Promise<void> {
+  return assertSourceModelAuthority(context, 'context')
+}
+
+/** Input permission never substitutes for the actual recipient's delivery decision. */
+export async function assertSourceModelOutputAuthority(context: ToolContext): Promise<void> {
+  return assertSourceModelAuthority(context, 'deliver')
+}
+
+async function assertSourceModelAuthority(context: ToolContext, action: 'context' | 'deliver'): Promise<void> {
+  const validate = action === 'deliver' ? validateAudienceScopeEvidence : validateCallerScopeEvidence
   const execution = context.executionContext
   try {
     if (execution && invalid.has(execution)) denied()
@@ -32,7 +42,7 @@ export async function assertSourceModelInputAuthority(context: ToolContext): Pro
     const fields = await readApplicationFieldAncestors(workspaceId, sources)
     const external = ancestors.length > 0 || sources.some(source => source.resourceKind === 'external_source')
     if (!external && !fields.length) {
-      const current = await validateCallerScopeEvidence(evidence.evidence, execution.security.ceiling)
+      const current = await validate(evidence.evidence, execution.security.ceiling)
       await execution.security.authority.assertCurrent()
       if (JSON.stringify(accumulator.evidence) !== originalEvidence) denied()
       accumulator.note(current)
@@ -43,7 +53,7 @@ export async function assertSourceModelInputAuthority(context: ToolContext): Pro
       || (!application || external) && (execution.identity.kind !== 'attended' || execution.identity.principal.kind !== 'workspace_member')) denied()
     const wiring = external ? getSharedRetainedSourceAuthority() : undefined
     if (external && !wiring) denied()
-    const prepared = wiring ? await wiring.coordinator.prepare(execution, sources, 'context') : undefined
+    const prepared = wiring ? await wiring.coordinator.prepare(execution, sources, action) : undefined
     if (wiring && getSharedRetainedSourceAuthority() !== wiring) denied()
     const client = await getAppPool().connect()
     let raised
@@ -56,7 +66,7 @@ export async function assertSourceModelInputAuthority(context: ToolContext): Pro
         await applyRLSGucs(client, execution.security.access.userId)
         await applyApplicationRLSContext(client, execution)
         if (prepared) await pinPreparedExternalSourceAuthority(client, execution, prepared)
-        const current = await validateCallerScopeEvidence(evidence.evidence, execution.security.ceiling, client)
+        const current = await validate(evidence.evidence, execution.security.ceiling, client)
         await execution.security.authority.assertCurrent()
         if (wiring && getSharedRetainedSourceAuthority() !== wiring) denied()
         await client.query('COMMIT')

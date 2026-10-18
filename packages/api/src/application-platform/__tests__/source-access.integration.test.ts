@@ -32,9 +32,10 @@ import { independentSourceSchema, independentSourceReplayConsumer, startIndepend
 const { assertLocalFixture } = await import(new URL('../../../../../scripts/crm/local-fixture.mjs', import.meta.url).href)
 await assertLocalFixture()
 
-describe('[COMP:api/external-source-access] independent persisted source ACL', () => {
+describe.sequential('[COMP:api/external-source-access] independent persisted source ACL', () => {
   const pool = getPool()
-  afterAll(async () => { configureConnectorSourceRuntimeFactory(undefined); await getAppPool().end(); await pool.end() })
+  let protocol: AsyncGenerator<string,string,void> | undefined
+  afterAll(async () => { await protocol?.return('closed'); configureConnectorSourceRuntimeFactory(undefined); await getAppPool().end(); await pool.end() })
   it('lets a personal owner delete an exposed connector without workspace trust administration or losing observation identity', async () => {
     const workspace = randomUUID(), owner = randomUUID(), member = randomUUID(), assistant = randomUUID()
     for (const id of [owner,member]) await pool.query("INSERT INTO users(id,auth_provider,auth_provider_id) VALUES($1::uuid,'email',$1::text)", [id])
@@ -70,7 +71,16 @@ describe('[COMP:api/external-source-access] independent persisted source ACL', (
       await pool.query('DELETE FROM workspaces WHERE id=$1', [workspace]); await pool.query('DELETE FROM users WHERE id=ANY($1::uuid[])', [[owner,member]])
     }
   })
-  it('uses source canonical rights across UI/HTTP/MCP, same-department field differences, revocation, withdrawal and effect reconciliation', async () => {
+  // One persisted source installation is exercised in named sequential steps.
+  // Keep its real receipts/derivatives across steps without one oversized test
+  // or a larger timeout. Every step is required; no assertion is discarded.
+  it.each(['source receipts and immutable ancestry','live model context and delivery',
+    'physical model retry and RPC history','discovery effects and source lifecycle'])(
+    '%s',async step => {
+      protocol ??= sourceScenario()
+      expect((await protocol.next()).value).toBe(step)
+    })
+  async function* sourceScenario(): AsyncGenerator<string,string,void> {
     const workspace = randomUUID(), owner = randomUUID(), first = randomUUID(), second = randomUUID(), foreign = randomUUID(), unmapped = randomUUID(), assistant = randomUUID(), department = randomUUID()
     const sourceRole = `reference_${randomBytes(8).toString('hex')}`, sourceSchema = sourceRole, sourcePassword = randomBytes(32).toString('hex')
     // Only after the disposable marker assertion: source has its own non-bypass login and schema.
@@ -386,10 +396,11 @@ describe('[COMP:api/external-source-access] independent persisted source ACL', (
       expect((await pool.query('SELECT count(*)::int AS count FROM external_source_resources WHERE profile_id=$1', [sourceProfile])).rows[0].count).toBe(1)
       expect((await pool.query('SELECT count(*)::int AS count FROM external_source_observations WHERE workspace_id=$1', [workspace])).rows[0].count).toBe(3)
       const sourceRuntimeFactory = createConnectorSourceRuntimeFactory({ issuer, keys, instances })
+      yield 'source receipts and immutable ancestry'
       // The real shared kernel admits model input under current source rights. This local provider incurs no model/API cost.
       const cached = await getMemoryById(one.execution.security.access, firstDerivative!.resourceId)
       expect(cached?.summary).toContain('37.25')
-      async function modelFromRetained(actor: Awaited<ReturnType<typeof client>>, includeExecution = true, input: { sources?: ScopeSource[]; content?: string; provider?: LLMProvider; messages?: Message[] } = {}) {
+      async function modelFromRetained(actor: Awaited<ReturnType<typeof client>>, includeExecution = true, input: { sources?: ScopeSource[]; content?: string; provider?: LLMProvider; messages?: Message[]; onEvent?: (event: unknown) => void } = {}) {
         let sessions = 0, requests = 0
         const observed: string[] = []
         const provider: LLMProvider = { name: 'fixture',models: ['fixture-model'],
@@ -410,7 +421,7 @@ describe('[COMP:api/external-source-access] independent persisted source ACL', (
         const context = { ...executionToolContext(actor.execution, { appId: 'model-fixture' }),scopeAccumulator: accumulator,
           // An optional route hook cannot replace the mandatory source boundary.
           assertModelInputAuthority: async () => {},...(!includeExecution ? { executionContext: undefined } : {}) }
-        const run = () => runAssistantTurn({ sessionId: actor.execution.lifecycle.sessionId,policy: { admission: 'personal' },sink: { kind: 'return' },
+        const run = () => runAssistantTurn({ sessionId: actor.execution.lifecycle.sessionId,policy: { admission: 'personal' },sink: input.onEvent ? { kind: 'sse',onEvent: input.onEvent } : { kind: 'return' },
           lease: { mode: 'none' },abortController: new AbortController(),
           model: { provider: input.provider ?? provider,model: 'fixture-model',configuredProviders: undefined,customLlm: null },
           loop: { ledger: NOOP_TURN_LEDGER,context,systemPrompt: 'Fictional model input fixture',runtimeSystemContext: input.content ?? cached!.summary,
@@ -444,6 +455,28 @@ describe('[COMP:api/external-source-access] independent persisted source ACL', (
         expect((await allowed.run()).selection.kind).toBe('text')
         expect(allowed.counts()).toEqual({ sessions: 1,requests: 1 }); expect(allowed.observed[0]).toContain('37.25')
         expect(allowed.accumulator.evidence.sources?.filter(source => source.resourceKind === 'external_source')).toEqual(retainedSources)
+        const delivered: unknown[] = [];let outputRequests = 0
+        const outputProvider: LLMProvider = { name: 'fixture',models: ['fixture-model'],stream: () => { throw new Error('Unexpected output fallback') },
+          createSession: () => ({ send: () => (async function* () {
+            outputRequests++
+            yield { type: 'message_start' as const,model: 'fixture-model' }
+            yield { type: 'text_delta' as const,text: 'Fictional permitted source prefix' }
+            // Context remains authorized. The ordinary source ACL revokes only
+            // delivery, so a context recheck cannot stand in for this decision.
+            await sourcePool.query("UPDATE grants SET actions=array_remove(actions,'deliver') WHERE kind='human' AND account_id=$1 AND record_id='order-1'",[first])
+            yield { type: 'text_delta' as const,text: 'Fictional withheld source continuation' }
+            yield { type: 'message_end' as const,stopReason: 'end_turn' as const,usage: { inputTokens: 1,outputTokens: 1 } }
+          })() }) }
+        const outputTurn = await modelFromRetained(await client(first),true,{ provider: outputProvider,onEvent: event => { delivered.push(event) } })
+        await expect(outputTurn.run()).rejects.toMatchObject({ reason: 'authority_changed',retrySafe: false })
+        expect(outputRequests).toBe(1)
+        expect(JSON.stringify(delivered)).toContain('Fictional permitted source prefix')
+        expect(JSON.stringify(delivered)).not.toContain('Fictional withheld source continuation')
+        const contextAfterDeliveryLoss = await modelFromRetained(await client(first))
+        await expect(contextAfterDeliveryLoss.run()).resolves.toMatchObject({ selection: { kind: 'text' } })
+        await sourcePool.query("UPDATE grants SET actions=$2 WHERE kind='human' AND account_id=$1 AND record_id='order-1'",[first,actions])
+        await expect(outputTurn.run()).rejects.toMatchObject({ reason: 'authority_changed',retrySafe: false })
+        expect(outputRequests).toBe(1)
         const narrower = await modelFromRetained(await client(second))
         await expect(narrower.run()).rejects.toMatchObject({ reason: 'authority_changed',retrySafe: false })
         expect(narrower.counts()).toEqual({ sessions: 0,requests: 0 })
@@ -462,6 +495,7 @@ describe('[COMP:api/external-source-access] independent persisted source ACL', (
         expect(revoked.counts()).toEqual({ sessions: 0,requests: 0 })
         const restored = await modelFromRetained(await client(first))
         await expect(restored.run()).resolves.toMatchObject({ selection: { kind: 'text' } })
+        yield 'live model context and delivery'
         // Real loopback model HTTP: access loss between primary response and retry/fallback must stop the next wire request.
         for (const failover of [false,true]) {
           const bodies: Array<{ path: string; body: string }> = []
@@ -540,6 +574,7 @@ describe('[COMP:api/external-source-access] independent persisted source ACL', (
         await expect(unwired.run()).rejects.toMatchObject({ reason: 'authority_changed' })
         expect(unwired.counts()).toEqual({ sessions: 0,requests: 0 }); expect(source.counters.authorizations).toBe(beforeUnwired)
       } finally { configureConnectorSourceRuntimeFactory(undefined) }
+      yield 'physical model retry and RPC history'
 
       const inject = async (userId: string, includeExecution = true, authenticationKind: 'native_session' | 'verified_channel' = 'native_session', includeFactory = true) => {
         const actor = await client(userId, authenticationKind), scopeAccumulator = new ContextScopeAccumulator(), tools = new Map<string, Tool>()
@@ -661,5 +696,6 @@ describe('[COMP:api/external-source-access] independent persisted source ACL', (
       await pool.query(`DROP SCHEMA ${sourceSchema} CASCADE`); await pool.query(`DROP ROLE ${sourceRole}`)
       await pool.query('DELETE FROM workspaces WHERE id=$1', [workspace]); await pool.query('DELETE FROM users WHERE id=ANY($1::uuid[])', [[owner,first,second,foreign,unmapped]])
     }
-  })
+    return 'discovery effects and source lifecycle'
+  }
 })

@@ -270,6 +270,42 @@ describe('[COMP:security/native-field-policy] current canonical native field mas
     await expect(run(await nativeExecution(otherId))).resolves.toMatchObject({ selection: { kind: 'text' } })
     expect({ sessions,requests }).toEqual({ sessions: 2,requests: 2 })
   })
+  it.each(['native','application'] as const)('stops a live %s response after field-role loss without reviving the old context',async lane => {
+    await clearRoles();const fixture = await record();await assign('finance',otherId)
+    const assignment = await assign('finance',lane === 'native' ? memberId : ownerId)
+    if (lane === 'application') await assign('finance',memberId)
+    const actor = lane === 'native' ? await nativeExecution() : await resolveApplicationExecutionContext((await application(fixture,'member')).authentication)
+    const projected = await new ApplicationPlatformService([createCanonicalGenericApplicationModule()]).query(actor,'records','get',
+      { type: fixture.type,id: fixture.row.id }) as ApplicationRecordProjection
+    const accumulator = new ContextScopeAccumulator({ sources: boundScopeSources(projected) })
+    const events: unknown[] = [];let requests = 0,revoke = true
+    const provider: LLMProvider = { name: 'fixture',models: ['fixture-model'],stream: () => { throw new Error('Unexpected fixture fallback') },
+      createSession: () => ({ send: () => (async function* () {
+        requests++
+        yield { type: 'message_start' as const,model: 'fixture-model' }
+        yield { type: 'text_delta' as const,text: 'Fictional permitted prefix' }
+        if (revoke) await owner.query("UPDATE application_native_role_assignments SET status='revoked' WHERE id=$1",[assignment])
+        yield { type: 'text_delta' as const,text: 'Fictional withheld continuation' }
+        yield { type: 'message_end' as const,stopReason: 'end_turn' as const,usage: { inputTokens: 1,outputTokens: 1 } }
+      })() }) }
+    const run = (execution: ExecutionContext) => runAssistantTurn({ sessionId: execution.lifecycle.sessionId,policy: { admission: 'personal' },
+      sink: { kind: 'sse',onEvent: event => { events.push(event) } },lease: { mode: 'none' },abortController: new AbortController(),
+      model: { provider,model: 'fixture-model',configuredProviders: undefined,customLlm: null },
+      loop: { ledger: NOOP_TURN_LEDGER,context: { ...executionToolContext(execution,{ appId: 'field-output-fixture' }),scopeAccumulator: accumulator },
+        systemPrompt: 'Fictional output fixture',runtimeSystemContext: JSON.stringify(projected.values),
+        messages: [{ role: 'user',content: 'Report the fictional fields.' }],tools: new Map(),maxTurns: 1 } })
+    await expect(run(actor)).rejects.toMatchObject({ reason: 'authority_changed',retrySafe: false })
+    expect(JSON.stringify(events)).toContain('Fictional permitted prefix')
+    expect(JSON.stringify(events)).not.toContain('Fictional withheld continuation')
+    revoke = false;await assign('finance',lane === 'native' ? memberId : ownerId)
+    await expect(run(actor)).rejects.toMatchObject({ reason: 'authority_changed',retrySafe: false })
+    expect(requests).toBe(1)
+    // Independently entitled native readers keep the observation; restoring a
+    // role does not revive a rejected invocation or cause a provider retry.
+    events.length = 0
+    await expect(run(await nativeExecution(otherId))).resolves.toMatchObject({ selection: { kind: 'text' } })
+    expect(requests).toBe(2);expect(JSON.stringify(events)).toContain('Fictional withheld continuation')
+  })
   it.each(['member','external_user','service'] as const)('intersects current module and issuer fields in an actual %s application',async kind => {
     await clearRoles();const fixture = await record();const issuerRole = await assign('finance',ownerId)
     await assign();const app = await application(fixture,kind),dispatcher = new ApplicationPlatformService([createCanonicalGenericApplicationModule()])

@@ -3,7 +3,7 @@ import { z } from 'zod'
 import { ContextScopeAccumulator } from '../../security/context-scope.js'
 import { buildTool, type ToolContext } from '../../tools/types.js'
 import type { LLMProvider, StreamChunk } from '../../providers/types.js'
-import { queryLoop, type QueryEvent, type QueryLoopOptions } from '../query-loop.js'
+import { queryLoop, assertModelOutputAuthority, type QueryEvent, type QueryLoopOptions } from '../query-loop.js'
 import { NOOP_TURN_LEDGER } from '../turn-ledger.js'
 vi.mock('../../compaction/compact.js', async importOriginal => ({
   ...await importOriginal<typeof import('../../compaction/compact.js')>(),compactConversation: vi.fn(),
@@ -111,5 +111,56 @@ describe('[COMP:engine/model-input-authority] every model boundary', () => {
       tools: new Map([['observe',observe]]),maxTurns: 1,
     })).rejects.toMatchObject({ reason: 'authority_changed' })
     expect(p.send).toHaveBeenCalledTimes(1); expect(p.stream).not.toHaveBeenCalled()
+  })
+  it('checks current output authority before releasing each event and makes refusal sticky',async () => {
+    let denied = false,requests = 0
+    const observed: QueryEvent[] = []
+    const value: LLMProvider = { name: 'fixture',models: ['mock-model'],stream: () => { throw new Error('Unexpected fallback') },
+      createSession: () => ({ send: () => (async function* () {
+        requests++
+        yield { type: 'message_start' as const,model: 'mock-model' }
+        yield { type: 'text_delta' as const,text: 'Allowed prefix' }
+        denied = true
+        yield { type: 'text_delta' as const,text: 'Withheld continuation' }
+        yield { type: 'message_end' as const,stopReason: 'end_turn' as const,usage: { inputTokens: 1,outputTokens: 1 } }
+      })() }) }
+    const ctx: ToolContext = { ...context(async () => {}),executionContext: {} as NonNullable<ToolContext['executionContext']>,
+      assertModelOutputAuthority: async () => { if (denied) throw new Error('Current output unavailable') } }
+    const invoke = async () => {
+      for await (const event of queryLoop({ provider: value,model: 'mock-model',systemPrompt: 'Fictional context',messages: [{ role: 'user',content: 'Report the values' }],
+        tools: new Map(),ledger: NOOP_TURN_LEDGER,maxTurns: 1,context: ctx })) observed.push(event)
+    }
+    await expect(invoke()).rejects.toMatchObject({ reason: 'authority_changed',retrySafe: false })
+    expect(JSON.stringify(observed)).toContain('Allowed prefix')
+    expect(JSON.stringify(observed)).not.toContain('Withheld continuation')
+    denied = false
+    await expect(invoke()).rejects.toMatchObject({ reason: 'authority_changed',retrySafe: false })
+    expect(requests).toBe(1)
+    expect(compactConversation).not.toHaveBeenCalled()
+  })
+  it('passes the child accumulator to inherited output checks without releasing its response',async () => {
+    const p = provider({ tool: true }),child = provider(),childAccumulator = new ContextScopeAccumulator({ sources: [observedSource] })
+    const hook = vi.fn(async (current: ToolContext) => { if (current.scopeAccumulator === childAccumulator) throw new Error('Child output unavailable') })
+    const observe = buildTool({ name: 'observe',description: 'Run a fictional child',inputSchema: z.object({}).strict(),isReadOnly: true,isConcurrencySafe: true,
+      execute: async (_input,current) => {
+        await run(child.value,{ ...current,scopeAccumulator: childAccumulator,sessionId: 'fictional-child' })
+        return { data: { value: 'Unreachable child value' } }
+      } })
+    await expect(run(p.value,{ ...context(async () => {}),assertModelOutputAuthority: hook },{ tools: new Map([['observe',observe]]) }))
+      .rejects.toMatchObject({ reason: 'authority_changed',retrySafe: false })
+    expect(hook.mock.calls.some(([current]) => current.scopeAccumulator === childAccumulator)).toBe(true)
+    expect(child.send).toHaveBeenCalledTimes(1)
+    expect(p.send).toHaveBeenCalledTimes(1)
+  })
+  it('keeps final-sink refusal sticky before another model session can be created',async () => {
+    const p = provider();let deny = false
+    const ctx = { ...context(async () => {}),executionContext: {} as NonNullable<ToolContext['executionContext']>,
+      assertModelOutputAuthority: async () => { if (deny) throw new Error('Final output unavailable') } }
+    await run(p.value,ctx)
+    deny = true
+    await expect(assertModelOutputAuthority(ctx)).rejects.toMatchObject({ reason: 'authority_changed',retrySafe: false })
+    deny = false
+    await expect(run(p.value,ctx)).rejects.toMatchObject({ reason: 'authority_changed',retrySafe: false })
+    expect(p.createSession).toHaveBeenCalledTimes(1);expect(p.send).toHaveBeenCalledTimes(1)
   })
 })
