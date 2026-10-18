@@ -1,10 +1,11 @@
 import { createPublicKey, randomBytes, randomUUID } from 'node:crypto'
 import { createServer } from 'node:http'
+import { PassThrough, Writable } from 'node:stream'
 import pg from 'pg'
 import { afterAll, describe, expect, it } from 'vitest'
 import { createConnectorActorVerifier, SOURCE_PROTOCOL_VERSION,
   type SourceAuthorizationRequest } from '@use-brian/brian-app/connector'
-import { ContextScopeAccumulator, scopeEvidenceFromRows, executionToolContext, NOOP_TURN_LEDGER, createOpenAICompatProvider, wrapFallback, type LLMProvider, type ScopeSource, type Tool } from '@use-brian/core'
+import { ContextScopeAccumulator, scopeEvidenceFromRows, executionToolContext, NOOP_TURN_LEDGER, createOpenAICompatProvider, wrapFallback, CodexRpcPeer, createCodexAppServerProvider, type LLMProvider, type Message, type ScopeSource, type Tool } from '@use-brian/core'
 import { getAppPool, getPool, applyRLSGucs, queryWithRLS } from '../../db/client.js'
 import { createMemory, getMemoryById, updateMemory } from '../../db/memories.js'
 import { validateAudienceScopeEvidence, validateCallerScopeEvidence } from '../../context-scope/caller-evidence.js'
@@ -388,7 +389,7 @@ describe('[COMP:api/external-source-access] independent persisted source ACL', (
       // The real shared kernel admits model input under current source rights. This local provider incurs no model/API cost.
       const cached = await getMemoryById(one.execution.security.access, firstDerivative!.resourceId)
       expect(cached?.summary).toContain('37.25')
-      async function modelFromRetained(actor: Awaited<ReturnType<typeof client>>, includeExecution = true, input: { sources?: ScopeSource[]; content?: string; provider?: LLMProvider } = {}) {
+      async function modelFromRetained(actor: Awaited<ReturnType<typeof client>>, includeExecution = true, input: { sources?: ScopeSource[]; content?: string; provider?: LLMProvider; messages?: Message[] } = {}) {
         let sessions = 0, requests = 0
         const observed: string[] = []
         const provider: LLMProvider = { name: 'fixture',models: ['fixture-model'],
@@ -413,7 +414,7 @@ describe('[COMP:api/external-source-access] independent persisted source ACL', (
           lease: { mode: 'none' },abortController: new AbortController(),
           model: { provider: input.provider ?? provider,model: 'fixture-model',configuredProviders: undefined,customLlm: null },
           loop: { ledger: NOOP_TURN_LEDGER,context,systemPrompt: 'Fictional model input fixture',runtimeSystemContext: input.content ?? cached!.summary,
-            messages: [{ role: 'user',content: 'Report the fictional retained result.' }],tools: new Map(),maxTurns: 1 } })
+            messages: input.messages ?? [{ role: 'user',content: 'Report the fictional retained result.' }],tools: new Map(),maxTurns: 1 } })
         return { run,accumulator,observed,counts: () => ({ sessions,requests }) }
       }
       configureConnectorSourceRuntimeFactory(sourceRuntimeFactory, { instances })
@@ -481,6 +482,46 @@ describe('[COMP:api/external-source-access] independent persisted source ACL', (
             modelServer.closeAllConnections()
             await new Promise<void>(resolve => modelServer.close(() => resolve()))
           }
+        }
+        // Mock only model RPC. The shared kernel still consults the real independent source ACL.
+        for (const stage of ['history','schema'] as const) {
+          const inbound = new PassThrough(), frames: Array<{ id: number; method: string; params: unknown }> = []
+          const output = new Writable({ write(chunk,_encoding,done) {
+            const frame = JSON.parse(chunk.toString()) as typeof frames[number]
+            frames.push(frame)
+            void (async () => {
+              if (frame.method === 'thread/start') {
+                if (stage === 'history') await sourcePool.query("DELETE FROM grants WHERE kind='human' AND account_id=$1 AND record_id='order-1'", [first])
+                inbound.write(`${JSON.stringify({ id: frame.id,result: { thread: { id: 'fixture-thread' },model: 'fixture-model',modelProvider: 'fixture' } })}\n`)
+              } else if (frame.method === 'turn/start') {
+                await sourcePool.query("DELETE FROM grants WHERE kind='human' AND account_id=$1 AND record_id='order-1'", [first])
+                inbound.write(`${JSON.stringify({ id: frame.id,error: { code: -32602,message: 'Fictional schema rejection' } })}\n`)
+              } else {
+                inbound.write(`${JSON.stringify({ id: frame.id,result: {} })}\n`)
+              }
+              done()
+            })().catch(error => done(error as Error))
+          } })
+          const rpc = new CodexRpcPeer({ input: inbound,output })
+          try {
+            const codex = createCodexAppServerProvider({ transport: { rpc,cwd: '/tmp/local-model-fixture' },models: ['fixture-model'] })
+            const provider: LLMProvider = stage === 'schema' ? { ...codex,createSession: options => ({
+              send: (messages,sendOptions) => codex.stream({ ...options,...sendOptions,messages,responseFormat: 'json',responseSchema: { type: 'object' } }),
+            }) } : codex
+            const turn = await modelFromRetained(await client(first),true,{ provider,...(stage === 'history' ? {
+              messages: [{ role: 'assistant' as const,content: cached!.summary },{ role: 'user' as const,content: 'Current fictional request' }],
+            } : {}) })
+            await expect(turn.run()).rejects.toMatchObject({ reason: 'authority_changed',retrySafe: false })
+            expect(frames.filter(frame => frame.method === 'thread/start')).toHaveLength(1)
+            expect(frames.filter(frame => frame.method === 'thread/inject_items')).toHaveLength(0)
+            expect(frames.filter(frame => frame.method === 'turn/start')).toHaveLength(stage === 'schema' ? 1 : 0)
+            expect(JSON.stringify(frames[0])).toContain('37.25')
+            expect(JSON.stringify(frames)).not.toContain('assertInputAuthority')
+            await sourcePool.query("INSERT INTO grants(kind,account_id,record_id,fields,actions) VALUES('human',$1,'order-1',$2,$3)", [first,['description','cost'],actions])
+            await expect(turn.run()).rejects.toMatchObject({ reason: 'authority_changed' })
+            expect(frames.filter(frame => ['thread/start','thread/inject_items','turn/start'].includes(frame.method))).toHaveLength(stage === 'schema' ? 2 : 1)
+            expect(rpc.closed).toBe(false)
+          } finally { rpc.close() }
         }
         configureConnectorSourceRuntimeFactory(sourceRuntimeFactory)
         const unwired = await modelFromRetained(await client(first)), beforeUnwired = source.counters.authorizations

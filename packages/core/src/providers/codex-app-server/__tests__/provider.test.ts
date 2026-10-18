@@ -1,5 +1,5 @@
 import { withDocumentFlowDebug } from '../../../engine/document-flow-debug.js'
-import { PassThrough } from 'node:stream'
+import { PassThrough, Writable } from 'node:stream'
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import {
   missingPdfPageCompletionMarkers,
@@ -50,20 +50,15 @@ const ECHO_TOOL: ToolDefinition = {
   },
 }
 
-function createHarness(): Harness {
+function createHarness(writeGate?: (frame: RpcFrame, done: (error?: Error | null) => void) => void): Harness {
   const inbound = new PassThrough()
-  const output = new PassThrough()
   const outbound: RpcFrame[] = []
-  let buffered = ''
-  output.on('data', (chunk: Buffer) => {
-    buffered += chunk.toString('utf8')
-    let newline = buffered.indexOf('\n')
-    while (newline !== -1) {
-      outbound.push(JSON.parse(buffered.slice(0, newline)))
-      buffered = buffered.slice(newline + 1)
-      newline = buffered.indexOf('\n')
-    }
-  })
+  const output = new Writable({ write(chunk, _encoding, done) {
+    const frame = JSON.parse(chunk.toString()) as RpcFrame
+    outbound.push(frame)
+    if (writeGate) writeGate(frame,done)
+    else done()
+  } })
   return {
     peer: new CodexRpcPeer({ input: inbound, output, maxFrameBytes: 8 * 1024 * 1024 }),
     inbound,
@@ -160,6 +155,7 @@ async function collect(stream: AsyncIterable<StreamChunk>): Promise<StreamChunk[
 async function startToolTurn(
   harness: Harness,
   messages: Message[] = [{ role: 'user', content: 'Use the echo tool.' }],
+  assertInputAuthority?: () => Promise<void>,
 ): Promise<{
   session: ReturnType<ReturnType<typeof createCodexAppServerProvider>['createSession']>
   first: Promise<StreamChunk[]>
@@ -173,6 +169,7 @@ async function startToolTurn(
     model: MODEL,
     systemPrompt: 'You are Brian.',
     tools: [ECHO_TOOL],
+    assertInputAuthority,
   })
   const first = collectScoped(session.send(messages))
   const threadStart = await waitForMethod(harness, 'thread/start')
@@ -184,6 +181,95 @@ async function startToolTurn(
 }
 
 describe('[COMP:providers/codex-app-server] Codex app-server provider bridge', () => {
+  it.each([false,true])('refuses before a thread payload and keeps the refusal terminal (stateless=%s)', async stateless => {
+    const harness = createHarness(); let revoked = true
+    const provider = createCodexAppServerProvider({ transport: { rpc: harness.peer,cwd: '/tmp/brian-codex-test' },models: [MODEL] })
+    const options = { model: MODEL,systemPrompt: 'Withheld fictional context',assertInputAuthority: async () => { if (revoked) throw new Error('Grant withdrawn') } }
+    const session = provider.createSession(options)
+    const send = () => collect(stateless ? provider.stream({ ...options,messages: [{ role: 'user',content: 'Fictional input' }] }) : session.send([{ role: 'user',content: 'Fictional input' }]))
+    try {
+      await expect(send()).rejects.toMatchObject({ reason: 'authority_changed',retrySafe: false })
+      if (!stateless) {
+        revoked = false
+        await expect(send()).rejects.toMatchObject({ reason: 'authority_changed' })
+      }
+      expect(harness.outbound).toEqual([])
+      expect(harness.peer.closed).toBe(false)
+    } finally { harness.peer.close() }
+  })
+
+  it('withholds history after a grant is withdrawn during thread creation', async () => {
+    const harness = createHarness(); let revoked = false
+    const provider = createCodexAppServerProvider({ transport: { rpc: harness.peer,cwd: '/tmp/brian-codex-test' },models: [MODEL] })
+    const session = provider.createSession({ model: MODEL,systemPrompt: 'Fictional checked context',assertInputAuthority: async () => { if (revoked) throw new Error('Grant withdrawn') } })
+    try {
+      const failed = expect(collect(session.send([{ role: 'assistant',content: 'Withheld fictional history' },{ role: 'user',content: 'Current input' }])))
+        .rejects.toMatchObject({ reason: 'authority_changed' })
+      const start = await waitForMethod(harness,'thread/start')
+      revoked = true; respondToThreadStart(harness,start)
+      await failed
+      expect(harness.outbound.filter(frame => frame.method === 'thread/inject_items' || frame.method === 'turn/start')).toEqual([])
+      expect(JSON.stringify(harness.outbound)).not.toContain('Withheld fictional history')
+    } finally { harness.peer.close() }
+  })
+
+  it('rechecks each history batch and withholds later batches after withdrawal', async () => {
+    const harness = createHarness(); let revoked = false
+    const provider = createCodexAppServerProvider({ transport: { rpc: harness.peer,cwd: '/tmp/brian-codex-test' },models: [MODEL] })
+    const session = provider.createSession({ model: MODEL,systemPrompt: 'Fictional checked context',assertInputAuthority: async () => { if (revoked) throw new Error('Grant withdrawn') } })
+    try {
+      const history: Message[] = Array.from({ length: 32 },(_,n) => ({ role: 'user',content: `${n}: ${'x'.repeat(210_000)}` }))
+      const failed = expect(collect(session.send([...history,{ role: 'user',content: 'Current input' }]))).rejects.toMatchObject({ reason: 'authority_changed' })
+      respondToThreadStart(harness,await waitForMethod(harness,'thread/start'))
+      const first = await waitForMethod(harness,'thread/inject_items')
+      revoked = true; respond(harness,first,{})
+      await failed
+      expect(harness.outbound.filter(frame => frame.method === 'thread/inject_items')).toHaveLength(1)
+      expect(harness.outbound.filter(frame => frame.method === 'turn/start')).toHaveLength(0)
+    } finally { harness.peer.close() }
+  })
+
+  it('withholds structured-output retry after withdrawal instead of sending a second turn', async () => {
+    const harness = createHarness(); let revoked = false
+    const provider = createCodexAppServerProvider({ transport: { rpc: harness.peer,cwd: '/tmp/brian-codex-test' },models: [MODEL] })
+    try {
+      const failed = expect(collect(provider.stream({ model: MODEL,systemPrompt: 'Fictional checked context',messages: [{ role: 'user',content: 'Fictional input' }],responseFormat: 'json',responseSchema: { type: 'object' },
+        assertInputAuthority: async () => { if (revoked) throw new Error('Grant withdrawn') } }))).rejects.toMatchObject({ reason: 'authority_changed' })
+      respondToThreadStart(harness,await waitForMethod(harness,'thread/start'))
+      const turn = await waitForMethod(harness,'turn/start')
+      revoked = true; reject(harness,turn,-32602,'Fictional schema rejection')
+      await failed
+      expect(harness.outbound.filter(frame => frame.method === 'turn/start')).toHaveLength(1)
+      expect(JSON.stringify(harness.outbound)).not.toContain('assertInputAuthority')
+    } finally { harness.peer.close() }
+  })
+
+  it('withholds a queued parked tool result and invalidates only its own session', async () => {
+    let release!: () => void, revoked = false, resumedCheck = false
+    const harness = createHarness((frame,done) => { if (frame.method === 'fixture/barrier') release = () => done(); else done() })
+    const check = async () => {
+      if (revoked) throw new Error('Grant withdrawn')
+      if (harness.outbound.some(frame => frame.method === 'fixture/barrier')) resumedCheck = true
+    }
+    try {
+      const { session,first } = await startToolTurn(harness,undefined,check)
+      request(harness,'guarded-tool','item/tool/call',{ threadId: 'thread-1',turnId: 'turn-1',callId: 'guarded-call',tool: ECHO_TOOL.name,arguments: { text: 'Lookup' } })
+      await first
+      const barrier = harness.peer.notify('fixture/barrier',{})
+      await waitForMethod(harness,'fixture/barrier')
+      const failed = expect(collect(session.send([{ role: 'user',content: [{ type: 'tool_result',toolUseId: 'guarded-call',name: ECHO_TOOL.name,content: 'Withheld fictional cost' }] }])))
+        .rejects.toMatchObject({ reason: 'authority_changed' })
+      await vi.waitFor(() => expect(resumedCheck).toBe(true))
+      revoked = true; release(); await barrier
+      await failed
+      expect((await waitForResponse(harness,'guarded-tool')).error).toEqual({ code: -32603,message: 'Request handler failed' })
+      expect(JSON.stringify(harness.outbound)).not.toContain('Withheld fictional cost')
+      expect(harness.peer.closed).toBe(false)
+      revoked = false
+      await expect(collect(session.send([{ role: 'user',content: 'Cannot revive' }]))).rejects.toMatchObject({ reason: 'authority_changed' })
+    } finally { harness.peer.close() }
+  })
+
   it.each([false, true])('starts an isolated thread with both system sections (stateless=%s)', async (stateless) => {
     const harness = createHarness()
     const provider = createCodexAppServerProvider({
@@ -191,6 +277,7 @@ describe('[COMP:providers/codex-app-server] Codex app-server provider bridge', (
       models: [MODEL],
     })
     const options = {
+      assertInputAuthority: async () => {},
       model: MODEL,
       systemPrompt: 'You are Brian.',
       tools: [ECHO_TOOL],
@@ -431,7 +518,7 @@ describe('[COMP:providers/codex-app-server] Codex app-server provider bridge', (
   it('parks a dynamic tool request and resumes the same Codex turn with its result', async () => {
     const logs = captureDocumentFlow()
     const harness = createHarness()
-    const { session, first } = await startToolTurn(harness)
+    const { session, first } = await startToolTurn(harness,undefined,async () => {})
 
     request(harness, 'tool-request-1', 'item/tool/call', {
       threadId: 'thread-1',

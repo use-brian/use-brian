@@ -1,5 +1,6 @@
 import type { Readable, Writable } from 'node:stream'
 import { z } from 'zod'
+import { assertInputAuthority, isInputAuthorityError } from '../input-authority.js'
 import {
   InboundRpcMessageSchema,
   type InboundRpcMessage,
@@ -38,6 +39,8 @@ export type CodexRpcPeerOptions = {
 export type CodexRpcRequestOptions = {
   timeoutMs?: number
   signal?: AbortSignal
+  /** Host-only admission at the actual JSONL write, never serialized. */
+  assertInputAuthority?: () => Promise<void>
 }
 
 export class CodexProtocolError extends Error {
@@ -85,6 +88,7 @@ export class CodexRpcPeer {
   #closeHandlers = new Set<CloseHandler>()
   #writeChain: Promise<void> = Promise.resolve()
   #closedReason: Error | undefined
+  readonly #guardedResponses = new WeakMap<object, { value: unknown; check: () => Promise<void> }>()
 
   constructor(options: CodexRpcPeerOptions) {
     this.#input = options.input
@@ -119,6 +123,13 @@ export class CodexRpcPeer {
 
   get pendingRequestCount(): number {
     return this.#pending.size
+  }
+
+  /** Opaque host value: only this peer can unwrap it at a response write. */
+  guardResponse(value: unknown, check: () => Promise<void>): object {
+    const token = Object.freeze({})
+    this.#guardedResponses.set(token, { value, check })
+    return token
   }
 
   onNotification(method: string, handler: NotificationHandler): () => void {
@@ -201,7 +212,9 @@ export class CodexRpcPeer {
     })
 
     try {
-      await this.#write({ method, id, params })
+      void this.#write({ method, id, params }, options.assertInputAuthority,
+        () => this.#pending.has(id) && !options.signal?.aborted)
+        .catch(error => this.#rejectPending(id, asError(error)))
     } catch (error) {
       this.#rejectPending(id, asError(error))
     }
@@ -370,7 +383,8 @@ export class CodexRpcPeer {
     this.#activeServerRequests.add(controller)
     try {
       const result = await handler(params, controller.signal)
-      if (!this.closed) await this.#write({ id, result: result ?? null })
+      const guarded = result && typeof result === 'object' ? this.#guardedResponses.get(result) : undefined
+      if (!this.closed) await this.#write({ id, result: (guarded ? guarded.value : result) ?? null }, guarded?.check)
     } catch (error) {
       if (!this.closed) await this.#writeError(id, -32603, safeErrorMessage(error))
     } finally {
@@ -407,7 +421,7 @@ export class CodexRpcPeer {
     }
   }
 
-  #write(message: unknown): Promise<void> {
+  #write(message: unknown, check?: () => Promise<void>, isCurrent?: () => boolean): Promise<void> {
     this.#assertOpen()
     let frame: string
     try {
@@ -424,28 +438,37 @@ export class CodexRpcPeer {
       this.close(reason)
       throw reason
     }
-    this.#writeChain = this.#writeChain
-      .then(
-        () =>
-          new Promise<void>((resolve, reject) => {
-            if (this.closed) {
-              reject(this.#closedReason)
-              return
-            }
-            this.#output.write(frame, (error?: Error | null) => {
-              if (error) reject(error)
-              else resolve()
-            })
-          }),
-      )
-      .catch((error) => {
-        const reason = new CodexRpcClosedError(
-          `Codex app-server stdin write failed: ${asError(error).message}`,
-        )
-        this.close(reason)
-        throw reason
+    const attempt = this.#writeChain
+      .then(async () => {
+        this.#assertOpen()
+        if (isCurrent && !isCurrent()) throw abortError()
+        await assertInputAuthority(check)
+        this.#assertOpen()
+        if (isCurrent && !isCurrent()) throw abortError()
+        await new Promise<void>((resolve, reject) => {
+          if (this.closed) {
+            reject(this.#closedReason)
+            return
+          }
+          this.#output.write(frame, (error?: Error | null) => {
+            if (error) reject(error)
+            else resolve()
+          })
+        })
       })
-    return this.#writeChain
+    // A scoped refusal withholds one frame. Transport errors still close the
+    // peer, but one invocation's revoked grant cannot revoke other sessions.
+    this.#writeChain = attempt.catch((error) => {
+      if (isInputAuthorityError(error) || (error instanceof Error && error.name === 'AbortError')) return
+      const reason = new CodexRpcClosedError(
+        `Codex app-server stdin write failed: ${asError(error).message}`,
+      )
+      this.close(reason)
+    })
+    return attempt.catch(error => {
+      if (isInputAuthorityError(error) || (error instanceof Error && error.name === 'AbortError')) throw error
+      throw this.#closedReason ?? error
+    })
   }
 }
 
