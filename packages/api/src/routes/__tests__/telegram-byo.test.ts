@@ -609,9 +609,18 @@ describe('[COMP:api/telegram-byo-route] safe error delivery', () => {
     })).toBe(
       'Telegram is connected, but this group is not approved for workspace replies. Ask a workspace owner or admin to approve it in Studio > Channels > Group reply access.',
     )
-    expect(telegramIncomingFailureText('42', {
+  })
+
+  it('uses the shared access notice in a DM without asking users to repeat possibly saved work', () => {
+    const text = telegramIncomingFailureText('42', {
       reason: 'delivery_audience_unverified',
-    })).toBe('Sorry, something went wrong while handling that message. Please send it again.')
+      diagnostic: 'source_held',
+      message: 'Private fixture error',
+    })
+    expect(text).toContain('access to some information')
+    expect(text).toContain('they may already be saved')
+    expect(text).toContain('Check their status before repeating the request')
+    expect(text).not.toMatch(/Please send it again|Private fixture error|source_held/)
   })
 
   // 2026-09-29: an approved group was told it was "not approved" when the

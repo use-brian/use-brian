@@ -2176,6 +2176,7 @@ export function telegramIncomingFailureText(channelId: string, err: unknown): st
     if (err.detail === 'evidence_exceeds_audience') return TELEGRAM_GROUP_NEEDS_MORE_ACCESS_NOTICE
     return TELEGRAM_GROUP_NOT_APPROVED_NOTICE
   }
+  if (isDeliveryAudienceUnverifiedError(err)) return channelUserErrorText(err)
   return TELEGRAM_RETRY_NOTICE
 }
 

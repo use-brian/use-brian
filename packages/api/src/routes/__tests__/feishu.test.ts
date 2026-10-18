@@ -4,6 +4,7 @@ import { channelConfirmations } from '../channel-interactions.js'
 import express from 'express'
 import request from 'supertest'
 import { beforeEach, describe, expect, it, vi } from 'vitest'
+import { DeliveryAudienceUnverifiedError } from '../../context-scope/delivery-authority.js'
 
 const mocks = vi.hoisted(() => ({
   api: {
@@ -231,6 +232,29 @@ describe('[COMP:api/feishu-route] bridge route', () => {
     expect(cards.open).toHaveBeenCalledWith('oc_chat', 'Thinking...', { replyTo: 'om_current', replyInThread: false })
     expect(cards.finish).toHaveBeenCalledExactlyOnceWith('card_1', '**Task saved**', 2)
     expect(mocks.api.send).not.toHaveBeenCalled()
+    expect(mocks.api.recallMessage).not.toHaveBeenCalled()
+  })
+
+  it('replaces task progress with access guidance and a check-before-repeat notice', async () => {
+    let complete = false
+    mocks.processChannelMessage.mockImplementation(async ({ hooks }) => {
+      await hooks.onProcessingStart()
+      await hooks.onToolStart('t1', 'saveTask')
+      await hooks.onToolResult([{ type: 'tool_result', toolUseId: 't1', isError: false }])
+      await hooks.sendError(new DeliveryAudienceUnverifiedError(undefined, 'source_held'))
+      await hooks.onCleanup()
+      complete = true
+    })
+    const { app } = setup()
+    await request(app).post('/internal/feishu/inbound').set('X-Connector-Secret', 'shared-secret')
+      .send({ channelId: CHANNEL_ROW_ID, message: normalizedMessage() }).expect(202)
+    await vi.waitFor(() => expect(complete).toBe(true))
+    expect(mocks.api.editPost).toHaveBeenLastCalledWith('om_status', expect.stringContaining('they may already be saved'))
+    const shown = mocks.api.editPost.mock.calls.at(-1)![1] as string
+    expect(shown).toContain('Check their status before repeating the request')
+    expect(shown).not.toMatch(/Something went wrong|source_held|DeliveryAudienceUnverifiedError/)
+    expect(mocks.processChannelMessage).toHaveBeenCalledTimes(1)
+    expect(mocks.api.send).toHaveBeenCalledTimes(1)
     expect(mocks.api.recallMessage).not.toHaveBeenCalled()
   })
 
