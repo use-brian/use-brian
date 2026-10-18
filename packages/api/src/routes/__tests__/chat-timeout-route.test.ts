@@ -16,6 +16,9 @@ vi.mock('../_recovery-message.js', () => ({ composeRecoveryMessage: vi.fn() }))
 vi.mock('../_empty-turn-synthesis.js', () => ({ composeEmptyTurnSynthesis: vi.fn() }))
 vi.mock('../../db/client.js', () => ({
   query: vi.fn(async () => ({ rows: [] })),
+  // Native viewer/self reads use the actor-gated query boundary. This fixture
+  // has no database rows; authority itself is covered by the real PG suites.
+  queryGated: vi.fn(async () => ({ rows: [] })),
   // The flush writes every buffered row inside one transaction on a pool
   // client; `addSessionMessage` is mocked, so the client only sees
   // BEGIN / COMMIT / ROLLBACK.

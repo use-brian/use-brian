@@ -17,21 +17,44 @@ function unavailable(): never { throw new ApplicationPlatformError('access_unava
 
 /** Generic values and absence are selected/captured under actual native/app SQL rights. */
 export async function readCanonicalGenericApplicationRecord(context: ApplicationOperationContext<PoolClient>,
-  definition: ApplicationResourceDefinition,id: string): Promise<ApplicationRecordProjection> {
+  definition: ApplicationResourceDefinition,id: string,
+  query?: { fields: readonly string[]; expectedVersion: string }): Promise<ApplicationRecordProjection> {
   const origin = structuredClone(definition.origin),workspaceId = context.execution.security.access.workspaceId
+  const declared = new Set(definition.fields.map(field => field.key)),fields = query ? [...query.fields] : undefined
   if (origin.kind !== 'generic') unavailable()
   const captured = captureSchema.extend({ id: z.string().uuid(),recordVersion: z.string().min(1),absentFields: z.array(z.string()).max(256) }).safeParse(
-    (await context.transaction.query<{ value: unknown }>('SELECT read_generic_application_record($1,$2,$3,$4) AS value',
-      [workspaceId,origin.entityTypeId,definition.typeKey,id])).rows[0]?.value)
+    (await context.transaction.query<{ value: unknown }>(query
+      ? "SELECT read_generic_application_projection($1,$2,$3,$4,'query',$5,$5) AS value"
+      : 'SELECT read_generic_application_record($1,$2,$3,$4) AS value',
+      [workspaceId,origin.entityTypeId,definition.typeKey,id,...(fields ? [fields] : [])])).rows[0]?.value)
   if (!captured.success || captured.data.sources.some(source => source.workspaceId !== workspaceId)
+    || captured.data.id !== id.toLowerCase() || query && captured.data.recordVersion !== query.expectedVersion
     || captured.data.sources[0].resourceKind !== 'application_field'
     || new Set(captured.data.absentFields).size !== captured.data.absentFields.length
-    || captured.data.absentFields.some(field => Object.hasOwn(captured.data.values,field))) unavailable()
+    || [...Object.keys(captured.data.values),...captured.data.absentFields].some(field => !declared.has(field))
+    || captured.data.absentFields.some(field => Object.hasOwn(captured.data.values,field))
+    || fields && !isDeepStrictEqual([...fields].sort(),[...Object.keys(captured.data.values),...captured.data.absentFields].sort())) unavailable()
   const application = getApplicationExecutionBinding(context.execution)
   const policyVersion = application ? createHash('sha256').update(JSON.stringify({ application: application.state.fingerprint,field: captured.data.policyVersion })).digest('hex') : captured.data.policyVersion
   return bindScopeSources({ ref: { workspaceId,origin,typeKey: definition.typeKey,id: captured.data.id,version: captured.data.recordVersion },
     values: captured.data.values,fields: Object.keys(captured.data.values),policyVersion,
     ...(captured.data.absentFields.length ? { absentFields: captured.data.absentFields } : {}) },captured.data.sources)
+}
+
+/** A row-free native domain is captured under actual current SQL ceilings. */
+export async function readCanonicalGenericQueryDomain(context: ApplicationOperationContext<PoolClient>,
+  definition: ApplicationResourceDefinition,fields: readonly string[]): Promise<ScopeSource[]> {
+  if (definition.origin.kind !== 'generic') unavailable()
+  const workspaceId = context.execution.security.access.workspaceId
+  const value = (await context.transaction.query<{ value: unknown }>('SELECT observe_generic_native_query_domain($1,$2,$3) AS value',
+    [workspaceId,definition.origin.entityTypeId,[...fields]])).rows[0]?.value
+  // Other domain families remain unqualified; the candidate port holds empty
+  // results when there is no supported canonical domain proof.
+  if (value === null) return []
+  const parsed = captureSchema.safeParse(value)
+  if (!parsed.success || Object.keys(parsed.data.values).length || parsed.data.sources[0].resourceKind !== 'application_field'
+    || parsed.data.sources.some(source => source.workspaceId !== workspaceId)) unavailable()
+  return parsed.data.sources
 }
 
 /** Capture only the values actually returned, under the exact admitted transaction. */

@@ -3,12 +3,14 @@ import { afterAll,beforeAll,describe,expect,it } from 'vitest'
 import type { PoolClient } from 'pg'
 import { getAppPool,getPool,applyRLSGucs } from '../../db/client.js'
 import { createDbDocEntityStore } from '../../db/doc-entity-store.js'
+import { createMemory,getMemoryById,countMemories,getMemoryIndex,getMemoryStats,searchMemories } from '../../db/memories.js'
+import { readApplicationFieldAncestors } from '../field-evidence.js'
 import { defineNativeApplicationFieldPolicy,decideNativeApplicationFields,ContextScopeAccumulator,executionToolContext,NOOP_TURN_LEDGER,boundScopeSources,
   type NativeApplicationFieldFacts,type ScopeSource,type ExecutionContext,type LLMProvider } from '@use-brian/core'
 import { findAssistantById,findOrCreateUser } from '../../db/users.js'
 import { resolveExecutionContextSystem } from '../../context-scope/execution-context.js'
 import { runAssistantTurn } from '../../turn/kernel.js'
-import type { ApplicationAccessGrant,ApplicationGrantMaximum,ApplicationRecordProjection } from '@use-brian/shared'
+import type { ApplicationAccessGrant,ApplicationGrantMaximum,ApplicationRecordProjection,ApplicationQuery } from '@use-brian/shared'
 import { createDbOAuthClientStore } from '../../db/oauth-client-store.js'
 import { hashSecret } from '../../db/api-key-store.js'
 import { authenticateApplicationCredential,mintApplicationCredentialSecret } from '../credentials.js'
@@ -47,20 +49,42 @@ describe('[COMP:security/native-field-policy] current canonical native field mas
         IF NOT FOUND THEN RETURN NULL; END IF;
         SELECT * INTO schema FROM entity_types WHERE id=r.entity_type_id AND workspace_id=w;
         SELECT * INTO policy FROM application_native_policy_fixture_metadata WHERE resource_id=r.id;
-        RETURN jsonb_build_object('moduleKey','operations','origin',o,'typeKey','record.'||schema.id,'schemaVersion',schema.schema_version::text,
+        RETURN jsonb_build_object('moduleKey',(SELECT module_key FROM application_native_resource_owners WHERE workspace_id=w AND origin=o AND resource_type=t),
+          'origin',o,'typeKey','record.'||schema.id,'schemaVersion',schema.schema_version::text,
           'policyVersion',policy.policy_version,'recordVersion',r.record_version::text,
           'fieldKeys',(SELECT jsonb_agg(p->'name' ORDER BY p->>'name') FROM jsonb_array_elements(schema.properties) p),
           'fields',policy.fields,'source',read_scope_source(w,'entity_instance',r.id));
       END $$`)
     await owner.query('REVOKE ALL ON FUNCTION application_native_policy_fixture_reader(uuid,jsonb,text,text) FROM PUBLIC')
-    for (const module of ['operations','other_operations']) await owner.query(`INSERT INTO application_native_field_contracts(module_key,contract_version,role_keys,metadata_reader)
-      VALUES($1,'1',ARRAY['finance','approver'],'application_native_policy_fixture_reader(uuid,jsonb,text,text)'::regprocedure)`,[module])
+    await owner.query(`CREATE TABLE application_native_policy_fixture_catalog (
+      type_id uuid PRIMARY KEY REFERENCES entity_types(id) ON DELETE CASCADE,fields jsonb NOT NULL,
+      policy_version text NOT NULL DEFAULT '1',override jsonb NOT NULL DEFAULT '{}')`)
+    await owner.query(`CREATE FUNCTION application_native_policy_fixture_catalog_reader(w uuid,o jsonb,t text) RETURNS jsonb
+      LANGUAGE plpgsql SECURITY DEFINER SET search_path=pg_catalog,public,pg_temp AS $$
+      DECLARE schema entity_types; policy application_native_policy_fixture_catalog;
+      BEGIN
+        SELECT * INTO schema FROM entity_types WHERE workspace_id=w AND id=(o->>'entityTypeId')::uuid;
+        IF NOT FOUND THEN RETURN NULL; END IF;
+        SELECT * INTO policy FROM application_native_policy_fixture_catalog WHERE type_id=schema.id;
+        IF NOT FOUND THEN RETURN NULL; END IF;
+        RETURN jsonb_build_object('moduleKey',(SELECT module_key FROM application_native_resource_owners WHERE workspace_id=w AND origin=o AND resource_type=t),
+          'origin',o,'typeKey','record.'||schema.id,'schemaVersion',schema.schema_version::text,
+          'policyVersion',policy.policy_version,'fieldKeys',(SELECT jsonb_agg(p->'name' ORDER BY p->>'name') FROM jsonb_array_elements(schema.properties) p),
+          'fields',policy.fields,'scope',jsonb_build_object('workspaceId',w,'userId',NULL,'assistantId',NULL,
+            'sensitivity','internal','compartments','[]'::jsonb,'projectIds','[]'::jsonb))||policy.override;
+      END $$`)
+    await owner.query('REVOKE ALL ON FUNCTION application_native_policy_fixture_catalog_reader(uuid,jsonb,text) FROM PUBLIC')
+    for (const module of ['operations','other_operations']) await owner.query(`INSERT INTO application_native_field_contracts(module_key,contract_version,role_keys,metadata_reader,catalog_reader)
+      VALUES($1,'1',ARRAY['finance','approver'],'application_native_policy_fixture_reader(uuid,jsonb,text,text)'::regprocedure,
+        CASE WHEN $1='operations' THEN 'application_native_policy_fixture_catalog_reader(uuid,jsonb,text)'::regprocedure ELSE NULL END)`,[module])
   })
   afterAll(async () => {
     await owner.query('DELETE FROM workspaces WHERE id=ANY($1::uuid[])',[[workspaceId,otherWorkspaceId]])
     await owner.query('DELETE FROM application_native_field_contracts WHERE module_key=ANY($1::text[])',[['operations','other_operations']])
     await owner.query('DROP FUNCTION application_native_policy_fixture_reader(uuid,jsonb,text,text)')
+    await owner.query('DROP FUNCTION application_native_policy_fixture_catalog_reader(uuid,jsonb,text)')
     await owner.query('DROP TABLE application_native_policy_fixture_metadata')
+    await owner.query('DROP TABLE application_native_policy_fixture_catalog')
     if (oauthClients.length) await owner.query('DELETE FROM oauth_clients WHERE client_id=ANY($1::text[])',[oauthClients])
     await owner.query('DELETE FROM users WHERE id=ANY($1::uuid[])',[userIds])
     await getAppPool().end();await owner.end()
@@ -71,17 +95,22 @@ describe('[COMP:security/native-field-policy] current canonical native field mas
       { key: 'cost',read: [['finance']],write: [['finance'],['approver']],releaseReadTo: [],releaseWriteTo: [] },
     ]
   }
-  async function record(includeCost = true) {
+  async function catalogType(module = 'operations') {
     const schema = await store.createEntityType({ workspaceId,name: `Fictional purchases ${randomUUID()}`,createdBy: ownerId,
       properties: [{ name: 'title',config: { kind: 'text' } },{ name: 'cost',config: { kind: 'number',format: 'decimal' } }] })
+    const origin = { kind: 'generic' as const,entityTypeId: schema.id },type = `record.${schema.id}`
+    await owner.query('INSERT INTO application_native_resource_owners(workspace_id,origin,resource_type,module_key) VALUES($1,$2,$3,$4)',[workspaceId,origin,type,module])
+    await owner.query('INSERT INTO application_native_policy_fixture_catalog(type_id,fields) VALUES($1,$2)',[schema.id,JSON.stringify(fields())])
+    return { schema,origin,type }
+  }
+  async function record(includeCost = true,module = 'operations') {
+    const catalog = await catalogType(module),{ schema } = catalog
     const row = await store.createEntity({ workspaceId,entityTypeId: schema.id,createdBy: ownerId,lastEditedBy: ownerId,sourceApp: 'api',
       data: { title: { kind: 'text',value: 'Fictional request' },...(includeCost ? { cost: { kind: 'number' as const,value: 42 } } : {}) } })
     const recordVersion = row.recordVersion
     if (!recordVersion) throw new Error('The canonical fixture requires its persisted record version.')
-    const origin = { kind: 'generic' as const,entityTypeId: schema.id },type = `record.${schema.id}`
-    await owner.query("INSERT INTO application_native_resource_owners(workspace_id,origin,resource_type,module_key) VALUES($1,$2,$3,'operations')",[workspaceId,origin,type])
     await owner.query('INSERT INTO application_native_policy_fixture_metadata(resource_id,fields) VALUES($1,$2)',[row.id,JSON.stringify(fields())])
-    return { schema,row: { ...row,recordVersion },origin,type }
+    return { ...catalog,row: { ...row,recordVersion } }
   }
   async function asMember<T>(userId: string,operation: (client: PoolClient) => Promise<T>) {
     const client = await getAppPool().connect()
@@ -102,6 +131,10 @@ describe('[COMP:security/native-field-policy] current canonical native field mas
       VALUES($1,$2,$3,$4,$5,$6,$7) RETURNING id`,[workspace,module,user,role,ownerId,starts,expires])).rows[0].id as string
   }
   async function clearRoles() { await owner.query('DELETE FROM application_native_role_assignments WHERE workspace_id=ANY($1::uuid[])',[[workspaceId,otherWorkspaceId]]) }
+  const catalogOn = async (client: PoolClient,fixture: Awaited<ReturnType<typeof catalogType>>,type = fixture.type) =>
+    (await client.query('SELECT read_native_application_field_catalog($1,$2,$3) AS value',[workspaceId,fixture.origin,type])).rows[0].value as
+      { moduleKey: string;schemaVersion: string;policyVersion: string;readFields: string[];writeFields: string[] } | null
+  const catalogMask = (fixture: Awaited<ReturnType<typeof catalogType>>,user = memberId) => asMember(user,client => catalogOn(client,fixture))
   async function capture(fixture: Awaited<ReturnType<typeof record>>,selected: string[],user = memberId,
     origin = fixture.origin,type = fixture.type) {
     return asMember(user,async client => (await client.query('SELECT observe_application_field_projection($1,$2,$3,$4,$5,$6,$7,$8) AS value',
@@ -116,7 +149,7 @@ describe('[COMP:security/native-field-policy] current canonical native field mas
       ownership: { kind: 'workspace',workspaceId },lifecycle: { sessionId: randomUUID(),sessionPersisted: false,
         channelId: 'native-field-fixture',channelType: 'test',abortSignal: new AbortController().signal } })).executionContext
   }
-  async function application(fixture: Awaited<ReturnType<typeof record>>,kind: 'member' | 'external_user' | 'service',parentIssuer?: string) {
+  async function application(fixture: Awaited<ReturnType<typeof record>>,kind: 'member' | 'external_user' | 'service',parentIssuer?: string,actions: ApplicationAccessGrant['actions'] = ['read','query','history','patch']) {
     const appId = randomUUID(),grantId = randomUUID(),parentId = parentIssuer ? randomUUID() : null
     let userId: string = kind === 'member' ? memberId : externalId
     if (kind === 'service') {
@@ -127,7 +160,7 @@ describe('[COMP:security/native-field-policy] current canonical native field mas
     await owner.query(`INSERT INTO application_clients(id,workspace_id,module_key,name,client_mode,executing_assistant_id,created_by_user_id,origins)
       VALUES($1,$2,'records','Fictional policy client','api_client',$3,$4,ARRAY['https://frontend.example'])`,[appId,workspaceId,assistantId,ownerId])
     const grant = (id: string,parentGrantId: string | null): ApplicationAccessGrant => ({ id,appId,workspaceId,principal: { kind,userId },origin: fixture.origin,typeKey: fixture.type,
-      actions: ['read','query','history','patch'],readFields: ['title','cost'],writeFields: ['title','cost'],selector: { kind: 'ids',ids: [fixture.row.id] },
+      actions,readFields: ['title','cost'],writeFields: ['title','cost'],selector: { kind: 'ids',ids: [fixture.row.id] },
       version: 1,status: 'active',startsAt: '2020-01-01T00:00:00.000Z',expiresAt: null,parentGrantId,compartments: [],projectIds: [],clearance: 'confidential' })
     const path = [grant(grantId,parentId),...(parentId ? [grant(parentId,null)] : [])]
     for (const value of [...path].reverse()) await owner.query(`INSERT INTO application_access_grants(id,app_id,workspace_id,principal_kind,principal_user_id,issued_by_user_id,
@@ -157,6 +190,229 @@ describe('[COMP:security/native-field-policy] current canonical native field mas
     expect(user).not.toBeNull()
     return { authentication: { user: user! },appId,grantId,parentId,userId }
   }
+  async function queryRecords(fixture: Awaited<ReturnType<typeof catalogType>>,query: Partial<ApplicationQuery> = {},execution?: ExecutionContext) {
+    return new ApplicationPlatformService([createCanonicalGenericApplicationModule()]).query(execution ?? await nativeExecution(),'records','query',
+      { type: fixture.type,query }) as Promise<{ records: ApplicationRecordProjection[];aggregates?: Array<{ field: string;operation: string;value: string | null }>;nextCursor?: string }>
+  }
+  async function addRecord(fixture: Awaited<ReturnType<typeof catalogType>>,title: string,cost = 8,policy = fields()) {
+    const row = await store.createEntity({ workspaceId,entityTypeId: fixture.schema.id,createdBy: ownerId,lastEditedBy: ownerId,sourceApp: 'api',
+      data: { title: { kind: 'text',value: title },cost: { kind: 'number',value: cost } } })
+    await owner.query('INSERT INTO application_native_policy_fixture_metadata(resource_id,fields) VALUES($1,$2)',[row.id,JSON.stringify(policy)])
+    return row
+  }
+  async function observedFields(value: object) {
+    const sources = boundScopeSources(value).filter(source => source.resourceKind === 'application_field')
+    expect(sources.length).toBeGreaterThan(0)
+    return (await owner.query<{ fields: string[] }>("SELECT fields FROM application_field_resources WHERE id=ANY($1::uuid[]) AND selection<>'query_domain'",[sources.map(source => source.resourceId)])).rows.map(row => row.fields)
+  }
+  it('returns masked query fields with exact source observations instead of a whole-row binding',async () => {
+    await clearRoles();const fixture = await record(),value = await queryRecords(fixture)
+    expect(value.records).toHaveLength(1);expect(value.records[0].values).toEqual({ title: { kind: 'text',value: 'Fictional request' } })
+    expect(value.records[0].fields).toEqual(['title']);expect(value.records[0].absentFields).toBeUndefined()
+    expect(await observedFields(value)).toEqual([['title']])
+    await assign();const narrow = await queryRecords(fixture,{ fields: ['title'] })
+    expect(narrow.records[0].values).not.toHaveProperty('cost');expect(await observedFields(narrow)).toEqual([['title']])
+  })
+  it.each(['filter','sort','aggregate','output'] as const)('refuses a forbidden query %s field even when the title predicate matches nothing',async operation => {
+    await clearRoles();const fixture = await record()
+    const query: Partial<ApplicationQuery> = { filters: [{ field: 'title',op: 'eq',value: 'No fictional match' }] }
+    if (operation === 'filter') query.filters!.push({ field: 'cost',op: 'eq',value: 42 })
+    if (operation === 'sort') query.sort = [{ field: 'cost',direction: 'asc' }]
+    if (operation === 'aggregate') query.aggregate = [{ field: 'cost',operation: 'sum' }]
+    if (operation === 'output') query.fields = ['cost']
+    await expect(queryRecords(fixture,query)).rejects.toMatchObject({ code: 'access_unavailable' })
+  })
+  it('retains predicate observations when a permitted nonempty domain produces no matches',async () => {
+    await clearRoles();const fixture = await record(),value = await queryRecords(fixture,{ fields: ['title'],filters: [{ field: 'title',op: 'eq',value: 'No fictional match' }] })
+    expect(value.records).toEqual([]);expect(await observedFields(value)).toEqual([['title']])
+  })
+  it('keeps readable query absence separate from withheld fields and records the absence dependency',async () => {
+    await clearRoles();const fixture = await record(false);await assign()
+    const value = await queryRecords(fixture,{ fields: ['cost'] })
+    expect(value.records[0].values).toEqual({});expect(value.records[0].fields).toEqual([]);expect(value.records[0].absentFields).toEqual(['cost'])
+    expect(await observedFields(value)).toEqual([['cost']])
+  })
+  it('includes every aggregate contributor beyond the returned page and rechecks its field authority',async () => {
+    await clearRoles();const fixture = await record(),second = await addRecord(fixture,'Second fictional request',8),role = await assign();await assign('finance',otherId)
+    const value = await queryRecords(fixture,{ fields: ['title'],limit: 1,aggregate: [{ field: 'cost',operation: 'sum' }] })
+    expect(value.records).toHaveLength(1);expect(value.nextCursor).toBeDefined();expect(value.aggregates).toEqual([{ field: 'cost',operation: 'sum',value: '50' }])
+    const sources = boundScopeSources(value).filter(source => source.resourceKind === 'application_field')
+    expect(sources).toHaveLength(3);expect((await observedFields(value)).every(fields => fields.includes('cost'))).toBe(true)
+    expect((await owner.query("SELECT resource_id FROM application_field_resources WHERE id=ANY($1::uuid[]) AND selection<>'query_domain'",[sources.map(source => source.resourceId)])).rows.map(row => row.resource_id).sort())
+      .toEqual([fixture.row.id,second.id].sort())
+    await owner.query("UPDATE application_native_role_assignments SET status='revoked' WHERE id=$1",[role])
+    for (const source of sources) { expect(await fieldSnapshot(source)).toMatchObject({ held: true });expect(await fieldSnapshot(source,otherId)).toMatchObject({ held: false }) }
+  })
+  it('does not require an aggregate-only field on a record excluded by a readable predicate',async () => {
+    await clearRoles();const fixture = await record(),stricter = fields();stricter[1].read = [['approver']]
+    await addRecord(fixture,'Excluded fictional request',99,stricter);await assign()
+    const value = await queryRecords(fixture,{ fields: ['title'],filters: [{ field: 'title',op: 'eq',value: 'Fictional request' }],aggregate: [{ field: 'cost',operation: 'sum' }] })
+    expect(value.aggregates?.[0].value).toBe('42');expect(value.records).toHaveLength(1)
+    expect((await observedFields(value)).sort((a,b) => a.length-b.length)).toEqual([['title'],['cost','title']])
+  })
+  it('uses canonical system cells only when readable and retains implicit ordering evidence',async () => {
+    await clearRoles();const fixture = await record()
+    await store.updateEntityType(workspaceId,fixture.schema.id,{ properties: [...fixture.schema.properties,{ name: 'created',config: { kind: 'created_time' } }] })
+    const policy = [...fields(),{ key: 'created',read: [['finance']],write: [['finance']],releaseReadTo: [],releaseWriteTo: [] }]
+    await owner.query('UPDATE application_native_policy_fixture_metadata SET fields=$2 WHERE resource_id=$1',[fixture.row.id,JSON.stringify(policy)])
+    await owner.query('UPDATE application_native_policy_fixture_catalog SET fields=$2 WHERE type_id=$1',[fixture.schema.id,JSON.stringify(policy)])
+    await addRecord(fixture,'Second fictional request',8,policy)
+    const narrow = await queryRecords(fixture,{ fields: ['title'],limit: 1 })
+    expect(narrow.nextCursor).toBeDefined()
+    expect(JSON.parse(Buffer.from(narrow.nextCursor!,'base64url').toString()).values[0]).toBeNull()
+    expect((await observedFields(narrow)).some(fields => fields.includes('created'))).toBe(false)
+    await assign();const wide = await queryRecords(fixture,{ fields: ['title'],limit: 1 })
+    expect(JSON.parse(Buffer.from(wide.nextCursor!,'base64url').toString()).values[0]).not.toBeNull()
+    expect((await observedFields(wide)).every(fields => fields.includes('created'))).toBe(true)
+    const row = await new ApplicationPlatformService([createCanonicalGenericApplicationModule()]).query(await nativeExecution(),'records','get',
+      { type: fixture.type,id: fixture.row.id }) as ApplicationRecordProjection
+    expect(row.values.created).toMatchObject({ kind: 'created_time',value: expect.any(String) })
+    expect(row.absentFields ?? []).not.toContain('created')
+  })
+  it('captures managed author identity as an original member reference and holds it after membership loss',async () => {
+    await clearRoles();const fixture = await catalogType()
+    await store.updateEntityType(workspaceId,fixture.schema.id,{ properties: [...fixture.schema.properties,{ name: 'author',config: { kind: 'created_by' } }] })
+    const policy = [...fields(),{ key: 'author',read: [],write: [],releaseReadTo: [],releaseWriteTo: [] }]
+    await owner.query('UPDATE application_native_policy_fixture_catalog SET fields=$2 WHERE type_id=$1',[fixture.schema.id,JSON.stringify(policy)])
+    const row = await createDbDocEntityStore({ actorUserId: otherId }).createEntity({ workspaceId,entityTypeId: fixture.schema.id,createdBy: otherId,lastEditedBy: otherId,
+      sourceApp: 'api',data: { title: { kind: 'text',value: 'Fictional authored request' } } })
+    await owner.query('INSERT INTO application_native_policy_fixture_metadata(resource_id,fields) VALUES($1,$2)',[row.id,JSON.stringify(policy)])
+    const dispatcher = new ApplicationPlatformService([createCanonicalGenericApplicationModule()])
+    const value = await dispatcher.query(await nativeExecution(),'records','get',{ type: fixture.type,id: row.id }) as ApplicationRecordProjection
+    expect(value.values.author).toEqual({ kind: 'created_by',value: otherId })
+    const sources = boundScopeSources(value).filter(source => source.resourceKind === 'application_field')
+    expect(sources).toHaveLength(2)
+    expect((await owner.query('SELECT resource_id FROM application_field_resources WHERE id=ANY($1::uuid[])',[sources.map(source => source.resourceId)])).rows.map(row => row.resource_id).sort())
+      .toEqual([row.id,otherId].sort())
+    await owner.query('DELETE FROM workspace_members WHERE workspace_id=$1 AND user_id=$2',[workspaceId,otherId])
+    try {
+      expect(await fieldSnapshot(sources[0])).toMatchObject({ held: true })
+      await expect(dispatcher.query(await nativeExecution(),'records','get',{ type: fixture.type,id: row.id })).rejects.toMatchObject({ code: 'access_unavailable' })
+    } finally { await owner.query("INSERT INTO workspace_members(workspace_id,user_id,role,clearance) VALUES($1,$2,'member','internal')",[workspaceId,otherId]) }
+  })
+  it.each(['member','external_user','service'] as const)('uses actual query-only %s authority without inventing read permission',async kind => {
+    await clearRoles();const fixture = await record(),app = await application(fixture,kind,undefined,['query'])
+    const execution = await resolveApplicationExecutionContext(app.authentication)
+    const result = await queryRecords(fixture,{ fields: ['title'],filters: [{ field: 'title',op: 'eq',value: 'Fictional request' }] },execution)
+    expect(result.records.map(row => row.ref.id)).toEqual([fixture.row.id]);expect(await observedFields(result)).toEqual([['title']])
+    await expect(new ApplicationPlatformService([createCanonicalGenericApplicationModule()]).query(execution,'records','get',
+      { type: fixture.type,id: fixture.row.id })).rejects.toMatchObject({ code: 'access_unavailable' })
+    await expect(queryRecords(fixture,{ aggregate: [{ field: 'cost',operation: 'sum' }] },await resolveApplicationExecutionContext(app.authentication)))
+      .rejects.toMatchObject({ code: 'access_unavailable' })
+  })
+  it('rechecks a query field role after execution before returning its aggregate',async () => {
+    await clearRoles();const fixture = await record(),role = await assign();await assign('finance',otherId)
+    const base = createCanonicalGenericApplicationModule(),query = base.queries.query
+    const dispatcher = new ApplicationPlatformService([{ ...base,queries: { ...base.queries,query: { ...query,execute: async (context,input) => {
+      const result = await query.execute(context,input)
+      await owner.query("UPDATE application_native_role_assignments SET status='revoked' WHERE id=$1",[role]);return result
+    } } } }])
+    await expect(dispatcher.query(await nativeExecution(),'records','query',{ type: fixture.type,query: { aggregate: [{ field: 'cost',operation: 'sum' }] } }))
+      .rejects.toMatchObject({ code: 'access_unavailable' })
+    expect((await queryRecords(fixture,{ aggregate: [{ field: 'cost',operation: 'sum' }] },await nativeExecution(otherId))).aggregates?.[0].value).toBe('42')
+  })
+  it('binds a genuinely empty native query and count to an immutable domain without a business-row substitute',async () => {
+    await clearRoles();const fixture = await catalogType(),value = await queryRecords(fixture,{ fields: ['title'],aggregate: [{ field: 'title',operation: 'count' }] })
+    expect(value.records).toEqual([]);expect(value.aggregates).toEqual([{ field: 'title',operation: 'count',value: '0' }])
+    const sources = boundScopeSources(value);expect(sources).toHaveLength(1);expect(sources[0].resourceKind).toBe('application_field')
+    expect((await owner.query('SELECT selection,resource_id,fields FROM application_field_resources WHERE id=$1',[sources[0].resourceId])).rows[0])
+      .toMatchObject({ selection: 'query_domain',fields: ['title'] })
+    expect((await owner.query('SELECT count(*)::int AS count FROM entity_instances WHERE entity_type_id=$1',[fixture.schema.id])).rows[0].count).toBe(0)
+    expect(await fieldSnapshot(sources[0],otherId)).toMatchObject({ held: false })
+    expect(await fieldSnapshot(sources[0],ownerId)).toMatchObject({ held: false })
+  })
+  it.each(['app.agent_compartments','app.agent_project_ids'])('refuses a narrower empty-domain reader at %s despite readable General catalog metadata',async setting => {
+    await clearRoles();const fixture = await catalogType(),value = await queryRecords(fixture,{ fields: ['title'] }),source = boundScopeSources(value)[0]
+    await asMember(memberId,async client => {
+      await client.query('SELECT set_config($1,$2,true)',[setting,'[]'])
+      expect(await catalogOn(client,fixture)).not.toBeNull()
+      expect((await client.query('SELECT read_admitted_application_field_snapshot($1,$2,$3) AS value',[workspaceId,source.resourceId,source.version])).rows[0].value)
+        .toMatchObject({ held: true })
+    })
+    expect(await fieldSnapshot(source,otherId)).toMatchObject({ held: false })
+  })
+  it('contracts an empty aggregate domain after field-role loss while another actual member retains access',async () => {
+    await clearRoles();const fixture = await catalogType(),role = await assign();await assign('finance',otherId)
+    const value = await queryRecords(fixture,{ aggregate: [{ field: 'cost',operation: 'sum' }] }),source = boundScopeSources(value)[0]
+    expect(value.records).toEqual([]);expect(value.aggregates?.[0].value).toBeNull()
+    await owner.query("UPDATE application_native_role_assignments SET status='revoked' WHERE id=$1",[role])
+    expect(await fieldSnapshot(source)).toMatchObject({ held: true })
+    expect(await fieldSnapshot(source,otherId)).toMatchObject({ held: false })
+  })
+  it('preserves empty-domain ancestry through a real memory write and contracts the current reader independently',async () => {
+    await clearRoles();const fixture = await catalogType(),role = await assign();await assign('finance',otherId)
+    const value = await queryRecords(fixture,{ aggregate: [{ field: 'cost',operation: 'sum' }] }),sources = boundScopeSources(value)
+    const derive = () => asMember(memberId,client => createMemory({ workspaceId,userId: null,assistantId,sensitivity: 'internal',createdByUserId: memberId,
+      summary: 'Fictional empty-domain aggregate',derivation: { producer: 'query-domain-fixture',sources } },undefined,client))
+    const memory = await derive()
+    const ordinary = await asMember(memberId,client => createMemory({ workspaceId,userId: null,assistantId,sensitivity: 'internal',createdByUserId: memberId,summary: 'Fictional ordinary control' },undefined,client))
+    const memorySource: ScopeSource = { workspaceId,userId: memory.userId,assistantId: memory.assistantId,sensitivity: memory.sensitivity,
+      compartments: memory.compartments,projectIds: memory.projectIds,resourceKind: 'memory',resourceId: memory.id,version: memory.scopeVersion }
+    expect(await readApplicationFieldAncestors(workspaceId,[memorySource])).toEqual(sources)
+    const access = (await nativeExecution()).security.access
+    expect(await getMemoryById(access,memory.id)).not.toBeNull()
+    expect((await getMemoryIndex(access)).map(row => row.id)).toContain(memory.id)
+    expect(await countMemories(access)).toBe(2)
+    expect(await getMemoryById({ ...access,systemRead: true },memory.id)).toBeNull()
+    expect(await getMemoryById({ ...access,systemRead: true },ordinary.id)).not.toBeNull()
+    await owner.query("UPDATE application_native_role_assignments SET status='revoked' WHERE id=$1",[role])
+    expect(await getMemoryById((await nativeExecution()).security.access,memory.id)).toBeNull()
+    expect((await getMemoryIndex((await nativeExecution()).security.access)).map(row => row.id)).toEqual([ordinary.id])
+    expect(await countMemories((await nativeExecution()).security.access)).toBe(1)
+    expect((await getMemoryStats((await nativeExecution()).security.access)).total).toBe(1)
+    expect(await searchMemories((await nativeExecution()).security.access,{ searchQuery: 'Fictional empty-domain' })).toEqual([])
+    expect(await asMember(memberId,async client => (await client.query('SELECT summary FROM memories WHERE id=$1',[memory.id])).rows)).toEqual([])
+    expect(await getMemoryById((await nativeExecution(otherId)).security.access,memory.id)).not.toBeNull()
+    expect(await countMemories((await nativeExecution(otherId)).security.access)).toBe(2)
+    await expect(derive()).rejects.toThrow('scope_source_changed')
+    expect((await owner.query('SELECT count(*)::int AS count FROM memories WHERE workspace_id=$1 AND summary=$2',[workspaceId,'Fictional empty-domain aggregate'])).rows[0].count).toBe(1)
+  })
+  it('reads canonical memory values despite a caller-owned temporary memory table on the same backend',async () => {
+    await clearRoles();const fixture = await catalogType();await assign()
+    const result = await queryRecords(fixture,{ aggregate: [{ field: 'cost',operation: 'sum' }] }),sources = boundScopeSources(result)
+    const memory = await asMember(memberId,client => createMemory({ workspaceId,userId: null,assistantId,sensitivity: 'internal',createdByUserId: memberId,
+      summary: 'Fictional canonical memory',derivation: { producer: 'query-domain-fixture',sources } },undefined,client))
+    const access = (await nativeExecution()).security.access,pool = getAppPool()
+    const backend = await asMember(memberId,async client => {
+      await client.query('CREATE TEMP TABLE memories (LIKE public.memories)')
+      await client.query('INSERT INTO pg_temp.memories SELECT * FROM public.memories WHERE id=$1',[memory.id])
+      await client.query('UPDATE pg_temp.memories SET summary=$2 WHERE id=$1',[memory.id,'Fictional counterfeit memory'])
+      expect((await client.query('SELECT summary FROM memories WHERE id=$1',[memory.id])).rows[0].summary).toBe('Fictional counterfeit memory')
+      return (await client.query<{ id: number }>('SELECT pg_backend_pid() AS id')).rows[0].id
+    })
+    const probes: Array<Promise<number>> = []
+    const onAcquire = (client: PoolClient) => { probes.push(client.query<{ id: number }>('SELECT pg_backend_pid() AS id').then(value => value.rows[0].id)) }
+    pool.on('acquire',onAcquire)
+    try {
+      const value = await getMemoryById(access,memory.id)
+      expect(await Promise.all(probes)).toEqual([backend])
+      expect(value?.summary).toBe('Fictional canonical memory')
+    } finally {
+      pool.off('acquire',onAcquire)
+      const client = await pool.connect()
+      try { await client.query('DROP TABLE IF EXISTS pg_temp.memories') } finally { client.release() }
+    }
+  })
+  it('checks empty-domain authority before model session creation and keeps an independently entitled reader usable',async () => {
+    await clearRoles();const fixture = await catalogType(),role = await assign();await assign('finance',otherId)
+    const value = await queryRecords(fixture,{ aggregate: [{ field: 'cost',operation: 'sum' }] })
+    const accumulator = new ContextScopeAccumulator({ sources: boundScopeSources(value) })
+    let sessions = 0
+    const provider: LLMProvider = { name: 'fixture',models: ['fixture-model'],createSession: () => {
+      sessions++;return { send: () => (async function* () {
+        yield { type: 'message_start' as const,model: 'fixture-model' };yield { type: 'text_delta' as const,text: 'Fictional checked empty-domain result' }
+        yield { type: 'message_end' as const,stopReason: 'end_turn' as const,usage: { inputTokens: 1,outputTokens: 1 } }
+      })() }
+    },stream: () => { throw new Error('Unexpected fixture provider fallback') } }
+    const run = (actor: ExecutionContext) => runAssistantTurn({ sessionId: actor.lifecycle.sessionId,policy: { admission: 'personal' },sink: { kind: 'return' },lease: { mode: 'none' },
+      abortController: new AbortController(),model: { provider,model: 'fixture-model',configuredProviders: undefined,customLlm: null },
+      loop: { ledger: NOOP_TURN_LEDGER,context: { ...executionToolContext(actor,{ appId: 'query-domain-fixture' }),scopeAccumulator: accumulator },
+        systemPrompt: 'Fictional empty-domain policy fixture',runtimeSystemContext: JSON.stringify(value),messages: [{ role: 'user',content: 'Report the fictional total.' }],tools: new Map(),maxTurns: 1 } })
+    const actor = await nativeExecution();await expect(run(actor)).resolves.toMatchObject({ selection: { kind: 'text' } });expect(sessions).toBe(1)
+    await owner.query("UPDATE application_native_role_assignments SET status='revoked' WHERE id=$1",[role])
+    await expect(run(actor)).rejects.toMatchObject({ retrySafe: false });expect(sessions).toBe(1)
+    await expect(run(await nativeExecution(otherId))).resolves.toMatchObject({ selection: { kind: 'text' } });expect(sessions).toBe(2)
+  })
   it('uses deployed ownership and the current canonical schema across app aliases without returning business values',async () => {
     await clearRoles();const fixture = await record(),value = await mask(fixture)
     expect(value).toMatchObject({ moduleKey: 'operations',schemaVersion: String(fixture.schema.schemaVersion),recordVersion: fixture.row.recordVersion,
@@ -167,6 +423,124 @@ describe('[COMP:security/native-field-policy] current canonical native field mas
     // The assurance harness grants SELECT after migration. RLS still reveals
     // no registry rows through that deliberately over-granted raw table path.
     expect(await asMember(memberId,async client => (await client.query('SELECT * FROM application_native_resource_owners')).rows)).toEqual([])
+  })
+  it('resolves current catalog fields for a genuinely empty type without a business-row substitute',async () => {
+    await clearRoles();const fixture = await catalogType(),narrow = await catalogMask(fixture)
+    expect(narrow).toMatchObject({ moduleKey: 'operations',schemaVersion: String(fixture.schema.schemaVersion),readFields: ['title'],writeFields: ['title'] })
+    expect(narrow?.policyVersion).toMatch(/^[a-f0-9]{64}$/)
+    expect(await asMember(memberId,client => catalogOn(client,fixture,'portal_alias'))).toEqual(narrow)
+    expect((await owner.query('SELECT count(*)::int AS count FROM entity_instances WHERE entity_type_id=$1',[fixture.schema.id])).rows[0].count).toBe(0)
+    expect(narrow).not.toHaveProperty('recordVersion');expect(narrow).not.toHaveProperty('values')
+    await assign();expect((await catalogMask(fixture))?.readFields).toEqual(['cost','title'])
+    expect((await catalogMask(fixture))?.writeFields).toEqual(['title'])
+    await assign('approver');expect((await catalogMask(fixture))?.writeFields).toEqual(['cost','title'])
+  })
+  it('contracts an empty catalog on the same connection while another legitimate member retains its role',async () => {
+    await clearRoles();const fixture = await catalogType(),assignment = await assign();await assign('finance',otherId)
+    await asMember(memberId,async client => {
+      expect((await catalogOn(client,fixture))?.readFields).toContain('cost')
+      await owner.query("UPDATE application_native_role_assignments SET status='revoked' WHERE id=$1",[assignment])
+      expect((await catalogOn(client,fixture))?.readFields).toEqual(['title'])
+    })
+    expect((await catalogMask(fixture,otherId))?.readFields).toContain('cost')
+  })
+  it('holds a registered missing catalog rather than looking for a usable business row',async () => {
+    await clearRoles();const fixture = await record(true,'other_operations')
+    expect(await catalogMask(fixture)).toBeNull()
+    expect((await mask(fixture))?.readFields).toEqual(['title'])
+  })
+  it('does not remove a configured catalog to recover weaker per-record admission',async () => {
+    await clearRoles();const fixture = await record()
+    await expect(owner.query("UPDATE application_native_field_contracts SET catalog_reader=NULL WHERE module_key='operations'")).rejects.toMatchObject({ code: '22023' })
+    expect((await catalogMask(fixture))?.readFields).toEqual(['title'])
+  })
+  it('keeps the compiled catalog role floor when a record-specific policy attempts to weaken it',async () => {
+    await clearRoles();const fixture = await record(),weaker = fields()
+    weaker[1].read = [];weaker[1].write = []
+    await owner.query('UPDATE application_native_policy_fixture_metadata SET fields=$2 WHERE resource_id=$1',[fixture.row.id,JSON.stringify(weaker)])
+    expect(await mask(fixture)).toMatchObject({ readFields: ['title'],writeFields: ['title'] })
+    await assign();expect(await mask(fixture)).toMatchObject({ readFields: ['cost','title'],writeFields: ['title'] })
+    await assign('approver');expect((await mask(fixture))?.writeFields).toEqual(['cost','title'])
+  })
+  it.each(['external_user','service'] as const)('keeps the catalog release floor for an actual %s despite a wider record policy',async kind => {
+    await clearRoles();const fixture = await record(),weaker = fields()
+    weaker[1].read = [];weaker[1].write = []
+    weaker[1].releaseReadTo = ['external_user','service'];weaker[1].releaseWriteTo = ['external_user','service']
+    await owner.query('UPDATE application_native_policy_fixture_metadata SET fields=$2 WHERE resource_id=$1',[fixture.row.id,JSON.stringify(weaker)])
+    await assign('finance',ownerId);await assign('approver',ownerId)
+    const app = await application(fixture,kind),dispatcher = new ApplicationPlatformService([createCanonicalGenericApplicationModule()])
+    const result = await dispatcher.query(await resolveApplicationExecutionContext(app.authentication),'records','get',
+      { type: fixture.type,id: fixture.row.id }) as ApplicationRecordProjection
+    expect(result.fields).toEqual(['title']);expect(result.values).not.toHaveProperty('cost')
+    expect(boundScopeSources(result)).not.toHaveLength(0)
+    expect((await owner.query('SELECT read_fields FROM application_access_grants WHERE id=$1',[app.grantId])).rows[0].read_fields).toContain('cost')
+  })
+  it('holds an oversized composed role policy instead of truncating either floor',async () => {
+    await clearRoles();const fixture = await record(),recordFields = fields(),catalogFields = fields()
+    const roles = ['finance','approver','reviewer','auditor']
+    const clauses = Array.from({ length: 16 },(_,mask) => roles.filter((_,index) => mask & (1 << index)))
+    recordFields[1].read = clauses.slice(0,8);catalogFields[1].read = clauses.slice(8)
+    await owner.query("UPDATE application_native_field_contracts SET role_keys=$1 WHERE module_key='operations'",[roles])
+    try {
+      await owner.query('UPDATE application_native_policy_fixture_metadata SET fields=$2 WHERE resource_id=$1',[fixture.row.id,JSON.stringify(recordFields)])
+      await owner.query('UPDATE application_native_policy_fixture_catalog SET fields=$2 WHERE type_id=$1',[fixture.schema.id,JSON.stringify(catalogFields)])
+      expect(await mask(fixture)).toBeNull()
+    } finally {
+      await owner.query('UPDATE application_native_policy_fixture_metadata SET fields=$2 WHERE resource_id=$1',[fixture.row.id,JSON.stringify(fields())])
+      await owner.query('UPDATE application_native_policy_fixture_catalog SET fields=$2 WHERE type_id=$1',[fixture.schema.id,JSON.stringify(fields())])
+      await owner.query("UPDATE application_native_field_contracts SET role_keys=ARRAY['finance','approver'] WHERE module_key='operations'")
+    }
+  })
+  it.each(['PUBLIC','assurance_app'] as const)('rejects catalog execution grants to %s at registration and use',async grantee => {
+    await clearRoles();const fixture = await catalogType()
+    await owner.query(`GRANT EXECUTE ON FUNCTION application_native_policy_fixture_catalog_reader(uuid,jsonb,text) TO ${grantee}`)
+    try {
+      expect(await catalogMask(fixture)).toBeNull()
+      await expect(owner.query("UPDATE application_native_field_contracts SET contract_version='2' WHERE module_key='operations'")).rejects.toMatchObject({ code: '22023' })
+    } finally { await owner.query(`REVOKE ALL ON FUNCTION application_native_policy_fixture_catalog_reader(uuid,jsonb,text) FROM ${grantee}`) }
+    expect((await catalogMask(fixture))?.readFields).toEqual(['title'])
+  })
+  it.each(['PUBLIC','assurance_app'])('holds a record metadata port with a non-owner EXECUTE grant to %s at registration and use',async grantee => {
+    await clearRoles();const fixture = await record()
+    await owner.query(`GRANT EXECUTE ON FUNCTION application_native_policy_fixture_reader(uuid,jsonb,text,text) TO ${grantee}`)
+    try {
+      expect(await mask(fixture)).toBeNull()
+      await expect(owner.query("UPDATE application_native_field_contracts SET contract_version='2' WHERE module_key='operations'")).rejects.toMatchObject({ code: '22023' })
+    } finally { await owner.query(`REVOKE ALL ON FUNCTION application_native_policy_fixture_reader(uuid,jsonb,text,text) FROM ${grantee}`) }
+  })
+  it('resolves the empty catalog from canonical schemas despite a caller-created temporary metadata table',async () => {
+    await clearRoles();const fixture = await catalogType()
+    const wide = fields().map(field => ({ ...field,read: [] }))
+    await asMember(memberId,async client => {
+      await client.query("CREATE TEMP TABLE application_native_policy_fixture_catalog(type_id uuid PRIMARY KEY,fields jsonb NOT NULL,policy_version text DEFAULT '1',override jsonb DEFAULT '{}') ON COMMIT DROP")
+      await client.query('INSERT INTO application_native_policy_fixture_catalog(type_id,fields) VALUES($1,$2)',[fixture.schema.id,JSON.stringify(wide)])
+      await client.query('GRANT SELECT ON application_native_policy_fixture_catalog TO PUBLIC')
+      expect((await catalogOn(client,fixture))?.readFields).toEqual(['title'])
+    })
+  })
+  it.each(['missing','unknown-role','invalid-release','extra-payload','wrong-schema','wrong-origin','wrong-workspace'])(
+    'refuses a malformed %s schema catalog without selecting a business record',async kind => {
+      await clearRoles();const fixture = await catalogType(),policy = fields();let override: Record<string,unknown> = {}
+      if (kind === 'missing') policy.pop()
+      if (kind === 'unknown-role') policy[1].read = [['invented']]
+      if (kind === 'invalid-release') policy[1].releaseReadTo = ['invented']
+      if (kind === 'extra-payload') override = { values: { cost: 42 } }
+      if (kind === 'wrong-schema') override = { schemaVersion: '0' }
+      if (kind === 'wrong-origin') override = { origin: { kind: 'generic',entityTypeId: randomUUID() } }
+      if (kind === 'wrong-workspace') override = { scope: { workspaceId: otherWorkspaceId,userId: null,assistantId: null,sensitivity: 'internal',compartments: [],projectIds: [] } }
+      await owner.query('UPDATE application_native_policy_fixture_catalog SET fields=$2,override=$3 WHERE type_id=$1',[fixture.schema.id,JSON.stringify(policy),override])
+      expect(await catalogMask(fixture)).toBeNull()
+    })
+  it('checks the current catalog scope and refuses native fallback for an application GUC',async () => {
+    await clearRoles();const fixture = await catalogType()
+    await owner.query('UPDATE application_native_policy_fixture_catalog SET override=$2 WHERE type_id=$1',[fixture.schema.id,
+      { scope: { workspaceId,userId: null,assistantId: null,sensitivity: 'confidential',compartments: [],projectIds: [] } }])
+    expect(await catalogMask(fixture)).toBeNull()
+    expect((await catalogMask(fixture,ownerId))?.readFields).toEqual(['title'])
+    await asMember(ownerId,async client => {
+      await client.query("SELECT set_config('app.application_id',$1,true)",[randomUUID()])
+      expect(await catalogOn(client,fixture)).toBeNull()
+    })
   })
   it('checks current member/module roles and keeps read/write conjunctions distinct',async () => {
     await clearRoles();const fixture = await record()

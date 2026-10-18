@@ -1,11 +1,14 @@
 import { describe, it, expect, vi, beforeEach } from 'vitest'
 
-vi.mock('../client.js', () => ({
-  query: vi.fn(),
+vi.mock('../client.js', () => {
+  const query = vi.fn()
+  return {
+  query,
+  queryGated: (_context: unknown,...args: unknown[]) => query(...args),
   queryWithRLS: vi.fn(),
   getPool: vi.fn(),
   applyRLSGucs: vi.fn(),
-}))
+} })
 
 import {
   createMemory,

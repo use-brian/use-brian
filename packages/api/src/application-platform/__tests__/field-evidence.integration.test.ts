@@ -154,6 +154,14 @@ describe('[COMP:api/application-field-evidence] canonical field observations thr
     const source: ScopeSource = { workspaceId,userId: memory.userId,assistantId: memory.assistantId,sensitivity: memory.sensitivity,
       compartments: memory.compartments,projectIds: memory.projectIds,resourceKind: 'memory',resourceId: memory.id,version: memory.scopeVersion }
     expect(await readApplicationFieldAncestors(workspaceId,[source])).toEqual(captured.sources)
+    expect(await asMember(memberId,async client => (await client.query('SELECT application_memory_field_ancestry_allows($1,$2,$3) AS allowed',
+      [workspaceId,memory.id,memory.scopeVersion])).rows[0].allowed)).toBe(true)
+    const ownerClient = await owner.connect()
+    try {
+      await ownerClient.query('BEGIN');await applyRLSGucs(ownerClient,memberId)
+      expect((await ownerClient.query('SELECT application_memory_field_ancestry_allows($1,$2,$3) AS allowed',
+        [workspaceId,memory.id,memory.scopeVersion])).rows[0].allowed).toBe(false)
+    } finally { await ownerClient.query('ROLLBACK');ownerClient.release() }
     await expect(validateCallerScopeEvidence({ sources: [source] },(await execution()).security.ceiling)).rejects.toMatchObject({ diagnostic: 'source_unverifiable' })
     await asMember(memberId,async client => expect((await validateCallerScopeEvidence({ sources: [source] },(await execution()).security.ceiling,client)).sources).toContainEqual(captured.sources[0]))
     await expect(owner.query('DELETE FROM scope_derivation_sources WHERE source_kind=$1 AND source_id=$2', ['application_field',captured.sources[0].resourceId])).rejects.toMatchObject({ code: '42501' })

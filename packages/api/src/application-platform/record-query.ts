@@ -70,6 +70,7 @@ export function compileApplicationRecordQuery(schema:Pick<DocEntityType,'id'|'wo
   })
   order.push({sql:'created_at',cast:'timestamptz',direction:'desc'},{sql:'id::text',cast:'text',direction:'desc'})
   const signature=createHash('sha256').update(JSON.stringify({filters,sort})).digest('hex')
+  const predicateWhere=clauses.join(' AND ')
   if(cursor) {
     let raw:unknown
     try {raw=JSON.parse(Buffer.from(cursor,'base64url').toString('utf8'))}catch {
@@ -88,7 +89,7 @@ export function compileApplicationRecordQuery(schema:Pick<DocEntityType,'id'|'wo
     clauses.push(after.length?`(${after.join(' OR ')})`:'false')
   }
   const limitParameter=bind(limit+1)
-  return {values,where:clauses.join(' AND '),orderBy:order.map(item=>`${item.sql} ${item.direction.toUpperCase()} NULLS LAST`).join(', '),
+  return {values,where:clauses.join(' AND '),predicateWhere,orderBy:order.map(item=>`${item.sql} ${item.direction.toUpperCase()} NULLS LAST`).join(', '),
     sortSelect:order.map((item,index)=>`${item.sql}::text AS "__sort${index}"`).join(', '),limitParameter,
     cursorFor:(row:Record<string,unknown>)=>Buffer.from(JSON.stringify({v:1,typeId:schema.id,schemaVersion:schema.schemaVersion,signature,
       values:order.map((_,index)=>row[`__sort${index}`])})).toString('base64url')}
