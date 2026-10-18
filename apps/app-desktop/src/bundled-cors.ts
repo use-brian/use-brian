@@ -15,11 +15,17 @@ export function shouldBridgeBundledCors(input: {
 
 export function bridgeBundledCorsHeaders(
   headers: Record<string, string[]> = {},
+  options: { includeCredentials?: boolean } = {},
 ): Record<string, string[]> {
   const next = { ...headers };
   for (const key of Object.keys(next)) {
-    if (key.toLowerCase() === "access-control-allow-origin") delete next[key];
+    const name = key.toLowerCase();
+    if (
+      name === "access-control-allow-origin" ||
+      (options.includeCredentials !== undefined && name === "access-control-allow-credentials")
+    ) delete next[key];
   }
   next["Access-Control-Allow-Origin"] = ["null"];
+  if (options.includeCredentials) next["Access-Control-Allow-Credentials"] = ["true"];
   return next;
 }

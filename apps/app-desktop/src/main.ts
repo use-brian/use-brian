@@ -2689,7 +2689,8 @@ function installSessionPolicies(): void {
 
     // A file:// renderer has the opaque Origin `null`. Keep webSecurity enabled,
     // but bridge CORS only in bundled mode and only for the configured API. A
-    // preflight may not carry a webContentsId, so that field is not a safe gate.
+    // preflight may not carry frame identity. Its headers only negotiate the
+    // method; credentialed actual replies still require the trusted top frame.
     targetSession().webRequest.onHeadersReceived((details, callback) => {
       if (
         shouldBridgeBundledCors({
@@ -2698,8 +2699,21 @@ function installSessionPolicies(): void {
           apiUrl: policyCfg.apiUrl,
         })
       ) {
+        const appWindow = [mainWindow, desktopChatWindow].find((win) =>
+          win && !win.isDestroyed() && !win.webContents.isDestroyed() &&
+          details.webContentsId === win.webContents.id &&
+          win.webContents.getURL().split(/[?#]/, 1)[0] === pathToFileURL(BUNDLE_INDEX).href);
+        const trustedFrame = Boolean(appWindow && details.frame === appWindow.webContents.mainFrame);
+        const unidentifiedPreflight = details.method === "OPTIONS" && details.frame === undefined &&
+          details.webContentsId === undefined && details.webContents === undefined;
         callback({
-          responseHeaders: bridgeBundledCorsHeaders(details.responseHeaders),
+          responseHeaders: bridgeBundledCorsHeaders(details.responseHeaders, {
+            // Match the preload's local-target flag without granting cookie
+            // reads to opaque Home app subframes or gateway windows.
+            includeCredentials: policyCfg.target === "local"
+              ? policyCfg === cfg && (trustedFrame || unidentifiedPreflight)
+              : undefined,
+          }),
         });
         return;
       }
