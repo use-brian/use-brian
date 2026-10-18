@@ -76,7 +76,7 @@ export async function resolveApplicationExecutionContext(authentication: Applica
     if (!assistant || assistant.workspaceId !== state.workspaceId) throw new ApplicationPlatformError('grant_revoked', 'Application access is unavailable.')
     let ceiling = releaseCeiling(state)
     ceiling = { ...ceiling, clearance: minSensitivity(ceiling.clearance, assistant.clearance, state.clearanceCap ?? 'confidential') }
-    if (state.principal.kind === 'member') {
+    if (state.nativeMember) {
       ceiling = intersectAccessCeilings(ceiling, await resolveLiveAccessCeilingSystem({ userId: state.principal.userId, workspaceId: state.workspaceId, assistant, memberMode: 'member' }))
     }
     const signature = createHash('sha256').update(JSON.stringify({ fingerprint: state.fingerprint, ceiling, assistant,

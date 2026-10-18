@@ -15,6 +15,7 @@ export interface ApplicationAuthorityState {
   moduleKey: string
   assistantId: string
   principal: ApplicationPrincipal
+  nativeMember: boolean
   credentialId: string
   issuerUserId: string
   readOnly: boolean
@@ -87,8 +88,12 @@ export async function loadApplicationAuthority(auth: ApplicationAuthentication):
   if (layers.some(layer => !layer.length)) denied()
   const principal: ApplicationPrincipal = user ? { kind: user.principalKind, userId: user.userId }
     : home ? { kind: 'member', userId: home.userId } : { kind: 'service', userId: credential!.subjectUserId }
-  const fingerprint = createHash('sha256').update(JSON.stringify({ appId, workspaceId, revision: app.revision, principal, layers })).digest('hex')
-  return { appId, workspaceId, moduleKey: app.moduleKey, assistantId: app.assistantId, principal, layers, fingerprint,
+  const membership = await query<{ nativeMember: boolean }>(`SELECT EXISTS(SELECT 1 FROM workspace_members
+    WHERE workspace_id=$1 AND user_id=$2) AS "nativeMember"`, [workspaceId, principal.userId])
+  const nativeMember = membership.rows[0]?.nativeMember
+  if (typeof nativeMember !== 'boolean' || principal.kind === 'member' && !nativeMember) denied()
+  const fingerprint = createHash('sha256').update(JSON.stringify({ appId, workspaceId, revision: app.revision, principal, nativeMember, layers })).digest('hex')
+  return { appId, workspaceId, moduleKey: app.moduleKey, assistantId: app.assistantId, principal, nativeMember, layers, fingerprint,
     credentialId: credential?.id ?? user?.authorizationId ?? home!.bindingId, issuerUserId: credential?.issuerUserId ?? app.createdBy,
     readOnly: user?.scope === 'read' || home?.readOnly === true,
     ...(home?.maxClearance ? { clearanceCap: home.maxClearance } : {}),

@@ -624,7 +624,10 @@ describe('[COMP:api/application-auth] database application projections and live 
       { kind: 'relationship', resolverKey, anchorId: company.id })
     const dispatcher = new ApplicationPlatformService([createCanonicalGenericApplicationModule()])
     const before = await resolveApplicationExecutionContext(fixture.authentication)
-    expect((await dispatcher.catalog(before)).resources).toEqual([])
+    const metadata = (await dispatcher.catalog(before)).resources
+    expect(metadata).toHaveLength(1)
+    expect(metadata[0].fields.find(field => field.key === 'company')).toMatchObject({ relationshipResolverKey: resolverKey })
+    await expect(dispatcher.query(before, 'records', 'get', { type: 'request', id: rows[0] })).rejects.toMatchObject({ code: 'access_unavailable' })
     const anchorGrant = randomUUID()
     await pool.query(`INSERT INTO application_access_grants(id,app_id,workspace_id,principal_kind,principal_user_id,issued_by_user_id,
       resource_origin,resource_type,actions,read_fields,write_fields,selector,compartments,project_ids,clearance,starts_at)
@@ -648,7 +651,8 @@ describe('[COMP:api/application-auth] database application projections and live 
     await pool.query("UPDATE application_access_grants SET status='revoked' WHERE id=$1", [anchorGrant])
     await expect(dispatcher.query(execution, 'records', 'get', { type: 'request', id: rows[0] })).rejects.toThrow('Access changed')
     const current = await resolveApplicationExecutionContext(fixture.authentication)
-    expect((await dispatcher.catalog(current)).resources).toEqual([])
+    expect((await dispatcher.catalog(current)).resources).toEqual(metadata)
+    await expect(dispatcher.query(current, 'records', 'get', { type: 'request', id: rows[0] })).rejects.toMatchObject({ code: 'access_unavailable' })
   })
   it('projects canonical native custom metadata/values while preserving IDs and withholding hidden or archived fields', async () => {
     const company = await createCompany(ownerId, { name: 'Example custom company', workspaceId, mergeByName: false })
