@@ -5,7 +5,7 @@ import pg from 'pg'
 import { afterAll, describe, expect, it } from 'vitest'
 import { createConnectorActorVerifier, SOURCE_PROTOCOL_VERSION,
   type SourceAuthorizationRequest } from '@use-brian/brian-app/connector'
-import { ContextScopeAccumulator, scopeEvidenceFromRows, executionToolContext, NOOP_TURN_LEDGER, createOpenAICompatProvider, wrapFallback, CodexRpcPeer, createCodexAppServerProvider, type LLMProvider, type Message, type ScopeSource, type Tool } from '@use-brian/core'
+import { ContextScopeAccumulator, bindScopeSources, scopeEvidenceFromRows, executionToolContext, NOOP_TURN_LEDGER, createOpenAICompatProvider, wrapFallback, CodexRpcPeer, createCodexAppServerProvider, type LLMProvider, type Message, type ScopeSource, type Tool } from '@use-brian/core'
 import { getAppPool, getPool, applyRLSGucs, queryWithRLS } from '../../db/client.js'
 import { createMemory, getMemoryById, updateMemory } from '../../db/memories.js'
 import { validateAudienceScopeEvidence, validateCallerScopeEvidence } from '../../context-scope/caller-evidence.js'
@@ -422,6 +422,18 @@ describe('[COMP:api/external-source-access] independent persisted source ACL', (
         const privateSource: ScopeSource = { workspaceId: workspace,userId: privateNative!.userId,assistantId: privateNative!.assistantId,
           resourceKind: 'memory',resourceId: privateNative!.id,version: privateNative!.scopeVersion,sensitivity: privateNative!.sensitivity,
           compartments: privateNative!.compartments,projectIds: privateNative!.projectIds }
+        const compound = bindScopeSources({ total: '37.25' },[firstDerivative!,...retainedSources!])
+        const compoundSources = scopeEvidenceFromRows([compound]).sources!
+        expect(compoundSources).toEqual([firstDerivative!,...retainedSources!])
+        const compoundAllowed = await modelFromRetained(await client(first),true,{ sources: compoundSources })
+        await expect(compoundAllowed.run()).resolves.toMatchObject({ selection: { kind: 'text' } })
+        expect(compoundAllowed.counts()).toEqual({ sessions: 1,requests: 1 })
+        const divided = bindScopeSources({ total: '37.25' },[...compoundSources,privateSource])
+        for (const userId of [first,second]) {
+          const withheld = await modelFromRetained(await client(userId),true,{ sources: scopeEvidenceFromRows([divided]).sources! })
+          await expect(withheld.run()).rejects.toMatchObject({ reason: 'authority_changed',retrySafe: false })
+          expect(withheld.counts()).toEqual({ sessions: 0,requests: 0 })
+        }
         const privateDenied = await modelFromRetained(await client(first), true, { sources: [privateSource],content: privateNative!.summary })
         await expect(privateDenied.run()).rejects.toMatchObject({ reason: 'authority_changed' })
         expect(privateDenied.counts()).toEqual({ sessions: 0,requests: 0 })

@@ -1,7 +1,7 @@
 import type { AccessContext } from './access-context.js'
 import { isSensitivity, maxSensitivity, type Sensitivity } from './sensitivity.js'
 import { deriveContextFloor, type ScopeSource } from './derived-scope.js'
-import { boundScopeSource } from './source-evidence.js'
+import { boundScopeSources } from './source-evidence.js'
 
 /** A finite set is a ceiling; null is the universe grant. */
 export type ScopeGrant = string[] | null
@@ -170,15 +170,15 @@ export function scopeEvidenceFromRows(rows: readonly unknown[]): ScopeEvidence {
   const accumulator = new ContextScopeAccumulator()
   const seen = new Set<object>()
   const visit = (value: unknown): void => {
+    if (!value || typeof value !== 'object' || seen.has(value)) return
+    seen.add(value)
+    // Note in read order: a newer version supersedes its pointer while the
+    // accumulator retains the earlier labels. Arrays may also carry evidence.
+    for (const source of boundScopeSources(value)) accumulator.noteSource(source)
     if (Array.isArray(value)) {
       for (const entry of value) visit(entry)
       return
     }
-    if (!value || typeof value !== 'object') return
-    if (seen.has(value)) return
-    seen.add(value)
-    const source = boundScopeSource(value)
-    if (source) accumulator.noteSource(source)
     const row = value as {
       sensitivity?: unknown
       compartments?: unknown

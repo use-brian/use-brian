@@ -1,5 +1,5 @@
 import { describe, expect, it, vi } from 'vitest'
-import { bindScopeSource, type AccessCeiling, type ScopeEvidence } from '@use-brian/core'
+import { bindScopeSource, bindScopeSources, boundScopeSources, type AccessCeiling, type ScopeEvidence } from '@use-brian/core'
 import { countsAsGroupAudienceEvidence, filterChannelHistoryForAudience } from '../channel-pipeline.js'
 
 const ceiling: AccessCeiling = {
@@ -27,6 +27,26 @@ function scoped(id: string, channelMessageId: string | null) {
 }
 
 describe('[COMP:api/delivery-authority] provider-visible channel history', () => {
+  it('passes every contributor to both reader and audience admission', async () => {
+    const row = scoped('compound-history',null), first = boundScopeSources(row)[0]
+    bindScopeSources(row,[{ ...first,resourceKind: 'external_source',resourceId: 'independent-field-observation' }])
+    const validate = vi.fn(async (evidence: ScopeEvidence) => evidence)
+    await expect(filterChannelHistoryForAudience({ rows: [row],group: true,ceiling,readerCeiling: ceiling,validate })).resolves.toEqual([row])
+    expect(validate).toHaveBeenCalledTimes(2)
+    for (const [evidence] of validate.mock.calls) expect(evidence.sources?.map(source => source.resourceId))
+      .toEqual(['compound-history','independent-field-observation'])
+  })
+
+  it('withholds the whole history row when one bound contributor is refused', async () => {
+    const row = scoped('compound-history',null), first = boundScopeSources(row)[0]
+    bindScopeSources(row,[{ ...first,resourceKind: 'external_source',resourceId: 'refused-field-observation' }])
+    const validate = vi.fn(async (evidence: ScopeEvidence) => {
+      if (evidence.sources?.some(source => source.resourceId === 'refused-field-observation')) throw new Error('Source unavailable')
+      return evidence
+    })
+    await expect(filterChannelHistoryForAudience({ rows: [row],group: true,ceiling,validate })).resolves.toEqual([])
+  })
+
   it('keeps audience-owned rows but validates every hidden result', async () => {
     const validate = vi.fn(async (evidence: ScopeEvidence) => {
       const ids = (evidence.sources ?? []).map((source) => source.resourceId)

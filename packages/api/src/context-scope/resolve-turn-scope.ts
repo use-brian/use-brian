@@ -7,7 +7,7 @@
  */
 
 import {
-  boundScopeSource,
+  boundScopeSources,
   canonicalScopeGrant,
   pinAccessCeiling,intersectAccessCeilings,
   ContextScopeAccumulator,
@@ -544,10 +544,10 @@ export function noteAutomaticScopeEvidence(
 ): void {
   // These rows come directly from access-filtered readers. Never recurse into
   // arbitrary content looking for canonical IDs or accept model citations.
-  const sources = rows.flatMap(row => {
-    if (!row || typeof row !== 'object' || boundScopeSource(row)) return []
+  for (const row of rows) {
+    accumulator.note(scopeEvidenceFromRows([row]))
+    if (!row || typeof row !== 'object' || boundScopeSources(row).length) continue
     const source = (row as { scopeSource?: ScopeSource }).scopeSource
-    return source ? [source] : []
-  })
-  accumulator.note({ ...scopeEvidenceFromRows(rows), ...(sources.length ? { sources } : {}) })
+    if (source) accumulator.noteSource(source)
+  }
 }

@@ -46,7 +46,7 @@ import {
   buildEmailDraftAnchorPrompt, formatActiveEmailDraftContext, formatAssistantQuestion,
   createTurnOutputCollector,
   executionToolContext,
-  boundScopeSource,
+  boundScopeSources,
   scopeEvidenceFromRows,
   pinAccessCeiling,
 } from '@use-brian/core'
@@ -835,11 +835,11 @@ export async function filterChannelHistoryForAudience<T extends {
   const validate = params.validate ?? validateAudienceScopeEvidence
   const decisions = await Promise.all(params.rows.map(async (row) => {
     if (params.readerCeiling) {
-      if (!boundScopeSource(row)) return false
+      if (!boundScopeSources(row).length) return false
       try { await validate(scopeEvidenceFromRows([row]), params.readerCeiling) } catch { return false }
     }
     if (row.channelMessageId !== null) return true
-    if (!boundScopeSource(row)) return false
+    if (!boundScopeSources(row).length) return false
     try {
       await validate(scopeEvidenceFromRows([row]), params.ceiling!)
       return true

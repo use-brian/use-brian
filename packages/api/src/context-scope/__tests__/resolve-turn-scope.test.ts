@@ -9,12 +9,30 @@ import {
   resolveLiveAccessCeilingSystem,
   sessionMessageInputScope,
   turnOutputWrite,
+  noteAutomaticScopeEvidence,
   type TurnScopeAssistant,
 } from '../resolve-turn-scope.js'
-import { ContextScopeAccumulator, type ResourceScope, type ScopeSource } from '@use-brian/core'
+import { ContextScopeAccumulator, bindScopeSource, bindScopeSources, type ResourceScope, type ScopeSource } from '@use-brian/core'
 
 const TEAM_ID = '11111111-1111-4111-8111-111111111111'
 const PROJECT_ID = '22222222-2222-4222-8222-222222222222'
+
+describe('[COMP:api/context-scope-resolver] automatic canonical evidence', () => {
+  const source = (id: string): ScopeSource => ({ workspaceId: 'fixture-workspace',resourceKind: 'memory',resourceId: id,version: '1',
+    userId: null,assistantId: null,sensitivity: 'internal',compartments: [],projectIds: [] })
+  it('preserves bound contributors alongside a legacy reader source instead of replacing them', () => {
+    const accumulator = new ContextScopeAccumulator()
+    noteAutomaticScopeEvidence(accumulator,[bindScopeSource({ summary: 'Fictional fact' },source('bound-source')),
+      { summary: 'Legacy fictional fact',scopeSource: source('legacy-source') }])
+    expect(accumulator.evidence.sources).toEqual([source('bound-source'),source('legacy-source')])
+  })
+  it('keeps all aggregate contributors and ignores a conflicting source-shaped content property', () => {
+    const accumulator = new ContextScopeAccumulator()
+    const result = bindScopeSources({ total: 2,scopeSource: source('forged-property') },[source('first-contributor'),source('second-contributor')])
+    noteAutomaticScopeEvidence(accumulator,[result])
+    expect(accumulator.evidence.sources).toEqual([source('first-contributor'),source('second-contributor')])
+  })
+})
 
 const assistant: TurnScopeAssistant = {
   id: 'assistant-1',
