@@ -18,7 +18,10 @@ export async function readExternalSourceAncestors(workspaceId: string, rawRoots:
   for (let offset = 0; offset < roots.length; offset += 100) {
     const part = roots.slice(offset, offset + 100).filter(source => source.resourceKind !== 'external_source')
     if (!part.length) continue
-    const rows = (await (client ?? getPool()).query<{ nodeVersion: string; source: ScopeSource | null }>(`SELECT node_version AS "nodeVersion",source FROM ${client ? 'read_admitted_external_source_dependencies' : 'read_external_source_dependencies'}($1,$2,$3,$4)`, [workspaceId,part.map(source => source.resourceKind),part.map(source => source.resourceId),part.map(source => source.version)])).rows
+    let rows: Array<{ nodeVersion: string; source: ScopeSource | null }>
+    try {
+      rows = (await (client ?? getPool()).query<{ nodeVersion: string; source: ScopeSource | null }>(`SELECT node_version AS "nodeVersion",source FROM ${client ? 'read_admitted_external_source_dependencies' : 'read_external_source_dependencies'}($1,$2,$3,$4)`, [workspaceId,part.map(source => source.resourceKind),part.map(source => source.resourceId),part.map(source => source.version)])).rows
+    } catch { denied() }
     for (const row of rows) {
       const source = observationSource.safeParse(row.source)
       if (!source.success || source.data.workspaceId !== workspaceId || source.data.version !== row.nodeVersion) denied()

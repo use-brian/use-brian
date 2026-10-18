@@ -6,6 +6,8 @@ import { validateCallerScopeEvidence } from '../context-scope/caller-evidence.js
 import { readExternalSourceAncestors } from './external-source-ancestry.js'
 import { assertPreparedExternalSourceAuthorityCurrent, pinPreparedExternalSourceAuthority } from './retained-source-authority.js'
 import { getSharedRetainedSourceAuthority } from './source-runtime.js'
+import { readApplicationFieldAncestors } from './field-evidence.js'
+import { applyApplicationRLSContext, getApplicationExecutionBinding, releaseApplicationTransactionBinding } from './execution-context.js'
 
 const invalid = new WeakSet<ExecutionContext>()
 function denied(): never { throw new SourceProtocolError('source_access_denied') }
@@ -27,35 +29,42 @@ export async function assertSourceModelInputAuthority(context: ToolContext): Pro
     const workspaceId = execution.security.access.workspaceId
     if (sources.some(source => source.workspaceId !== workspaceId)) denied()
     const ancestors = await readExternalSourceAncestors(workspaceId, sources)
-    if (!ancestors.length && !sources.some(source => source.resourceKind === 'external_source')) {
+    const fields = await readApplicationFieldAncestors(workspaceId, sources)
+    const external = ancestors.length > 0 || sources.some(source => source.resourceKind === 'external_source')
+    if (!external && !fields.length) {
       const current = await validateCallerScopeEvidence(evidence.evidence, execution.security.ceiling)
       await execution.security.authority.assertCurrent()
       if (JSON.stringify(accumulator.evidence) !== originalEvidence) denied()
       accumulator.note(current)
       return
     }
-    if (execution.ownership.kind !== 'workspace' || execution.identity.kind !== 'attended'
-      || execution.identity.principal.kind !== 'workspace_member' || execution.security.access.sharedAudience) denied()
-    const wiring = getSharedRetainedSourceAuthority()
-    if (!wiring) denied()
-    const prepared = await wiring.coordinator.prepare(execution, sources, 'context')
-    if (getSharedRetainedSourceAuthority() !== wiring) denied()
+    const application = getApplicationExecutionBinding(execution)
+    if (execution.ownership.kind !== 'workspace' || execution.security.access.sharedAudience
+      || (!application || external) && (execution.identity.kind !== 'attended' || execution.identity.principal.kind !== 'workspace_member')) denied()
+    const wiring = external ? getSharedRetainedSourceAuthority() : undefined
+    if (external && !wiring) denied()
+    const prepared = wiring ? await wiring.coordinator.prepare(execution, sources, 'context') : undefined
+    if (wiring && getSharedRetainedSourceAuthority() !== wiring) denied()
     const client = await getAppPool().connect()
     let raised
     try {
       raised = await runWithAgentAccess(execution.security.access, async () => {
         await client.query('BEGIN')
+        const role = await client.query(`SELECT r.rolsuper OR r.rolbypassrls OR c.relowner=r.oid AS bypass
+          FROM pg_catalog.pg_roles r JOIN pg_catalog.pg_class c ON c.oid='entity_instances'::regclass WHERE r.rolname=current_user`)
+        if (role.rows[0]?.bypass !== false) denied()
         await applyRLSGucs(client, execution.security.access.userId)
-        await pinPreparedExternalSourceAuthority(client, execution, prepared)
+        await applyApplicationRLSContext(client, execution)
+        if (prepared) await pinPreparedExternalSourceAuthority(client, execution, prepared)
         const current = await validateCallerScopeEvidence(evidence.evidence, execution.security.ceiling, client)
         await execution.security.authority.assertCurrent()
-        if (getSharedRetainedSourceAuthority() !== wiring) denied()
+        if (wiring && getSharedRetainedSourceAuthority() !== wiring) denied()
         await client.query('COMMIT')
         return current
       })
-    } finally { await rollbackAndRelease(client) }
-    await assertPreparedExternalSourceAuthorityCurrent(execution, prepared)
-    if (getSharedRetainedSourceAuthority() !== wiring || JSON.stringify(accumulator.evidence) !== originalEvidence) denied()
+    } finally { releaseApplicationTransactionBinding(client); await rollbackAndRelease(client) }
+    if (prepared) await assertPreparedExternalSourceAuthorityCurrent(execution, prepared)
+    if (wiring && getSharedRetainedSourceAuthority() !== wiring || JSON.stringify(accumulator.evidence) !== originalEvidence) denied()
     accumulator.note(raised)
   } catch (error) {
     if (execution) invalid.add(execution)

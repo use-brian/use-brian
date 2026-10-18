@@ -14,12 +14,17 @@ type CanonicalEvidenceRow = ResourceScope & {
 
 /** Keep the owner-only native snapshot function outside the app-role external statement. */
 async function scopeSnapshots(client: Pick<pg.ClientBase, 'query'>, workspaceId: string, sources: readonly ScopeSource[],
-  reader: 'read_scope_source' | 'read_entity_derivation_source' = 'read_scope_source', workflowRunId?: string, requiredExternalAction?: 'context' | 'deliver', admittedNative = false) {
+  reader: 'read_scope_source' | 'read_entity_derivation_source' = 'read_scope_source', workflowRunId?: string, requiredExternalAction?: 'context' | 'deliver', admittedNative = false, recordedFields = false) {
   const result: Array<{ ord: number; snapshot: CanonicalEvidenceRow | null }> = []
-  for (const external of [false,true]) {
-    const group = sources.map((source,index) => ({ source,index })).filter(({ source }) => (source.resourceKind === 'external_source') === external)
+  for (const profile of ['native','field','external'] as const) {
+    const group = sources.map((source,index) => ({ source,index })).filter(({ source }) =>
+      (source.resourceKind === 'external_source' ? 'external' : source.resourceKind === 'application_field' ? 'field' : 'native') === profile)
     if (group.length === 0) continue
-    const rows = external ? (await client.query<{ ord: number; snapshot: CanonicalEvidenceRow | null }>(
+    const rows = profile === 'field' ? (await client.query<{ ord: number; snapshot: CanonicalEvidenceRow | null }>(
+      `SELECT t.ord::int AS ord,${recordedFields ? 'read_admitted_application_field_snapshot($1,t.id,t.version)' : "read_entity_derivation_source($1,'application_field',t.id)"} AS snapshot
+       FROM unnest($2::uuid[],$3::text[]) WITH ORDINALITY AS t(id,version,ord)`,
+      [workspaceId,group.map(({ source }) => source.resourceId),group.map(({ source }) => source.version)])).rows
+      : profile === 'external' ? (await client.query<{ ord: number; snapshot: CanonicalEvidenceRow | null }>(
       `SELECT t.ord::int AS ord,${requiredExternalAction ? "CASE WHEN current_setting('app.external_source_action',true)=$3 THEN external_source_snapshot($1,t.id) ELSE '{\"held\":true}'::jsonb END" : 'external_source_snapshot($1,t.id)'} AS snapshot
         FROM unnest($2::uuid[]) WITH ORDINALITY AS t(id,ord)`,
       [workspaceId,group.map(({ source }) => source.resourceId),...(requiredExternalAction ? [requiredExternalAction] : [])])).rows
@@ -105,7 +110,7 @@ async function revalidateScopeSources(
   const list=[...unique.values()].sort((a,b)=>`${a.resourceKind}:${a.resourceId}`.localeCompare(`${b.resourceKind}:${b.resourceId}`))
   for(const source of list)if(source.workspaceId!==workspaceId)throw new DerivedScopeError('scope_workspace_mismatch')
   if(list.length===0)return
-  const rows=await scopeSnapshots(client,workspaceId,list,reader)
+  const rows=await scopeSnapshots(client,workspaceId,list,reader,undefined,undefined,list.some(source=>source.resourceKind==='application_field'))
   const byOrd=new Map(rows.map(row=>[row.ord,row.snapshot]))
   list.forEach((source,index)=>{
     const row=byOrd.get(index+1)
@@ -152,7 +157,7 @@ export async function readCurrentScopeSources(
   const list = [...unique.values()]
   if (list.length === 0) return []
   if (list.some(source=>source.workspaceId!==workspaceId)) throw new DerivedScopeError('scope_workspace_mismatch')
-  const rows = await scopeSnapshots(client,workspaceId,list,'read_scope_source',workflowRunId,requiredExternalAction,admittedNative)
+  const rows = await scopeSnapshots(client,workspaceId,list,'read_scope_source',workflowRunId,requiredExternalAction,admittedNative,true)
   const byOrd = new Map(rows.map(row=>[row.ord, row.snapshot]))
   return list.map((source, index): CurrentSourceState => {
     // No result row at all is a failed read, not a deleted source.
@@ -160,7 +165,7 @@ export async function readCurrentScopeSources(
     const row = byOrd.get(index + 1) ?? null
     // A CRM event snapshot is withheld (NULL) while held or retired, so its
     // absence is not proof of deletion.
-    if (!row) return source.resourceKind === 'external_source' ? { state: 'unverifiable', source }
+    if (!row) return source.resourceKind === 'external_source' || source.resourceKind === 'application_field' ? { state: 'unverifiable', source }
       : source.resourceKind === 'crm_event' ? { state: 'held', source } : { state: 'gone', source }
     if (row.held) return { state: 'held', source }
     if (source.resourceKind === 'crm_event' && (!row.causalEntityId
@@ -201,6 +206,11 @@ export async function recordDerivedResource(
   const floor = deriveWriteScope(evidence, output, actorUserId)
   if (resourceScopeKey(floor) !== resourceScopeKey(output)) {
     throw new DerivedScopeError('scope_visibility_incompatible')
+  }
+  if (evidence.sources.some(source => source.resourceKind === 'application_field')) {
+    await client.query('SELECT record_admitted_application_field_derivation($1,$2,$3,$4,$5,$6)',
+      [output.workspaceId,output.resourceKind,output.resourceId,output.version,evidence.producer,JSON.stringify(evidence.sources)])
+    return
   }
   await client.query(`INSERT INTO workspace_access_policies(workspace_id) VALUES($1) ON CONFLICT DO NOTHING`, [output.workspaceId])
   const { rows } = await client.query<{ id: string }>(

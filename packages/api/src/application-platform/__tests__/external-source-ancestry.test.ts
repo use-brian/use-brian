@@ -44,4 +44,9 @@ describe('[COMP:api/external-source-access] immutable ancestry metadata contract
     f.query.mockResolvedValueOnce({ rows: [{ nodeVersion: '1',source: f.source },{ nodeVersion: '2',source: { ...f.source,version: '2' } }] })
     await expect(readExternalSourceAncestors(f.workspaceId, [f.root])).rejects.toMatchObject({ code: 'source_access_denied' })
   })
+  it('returns the typed non-disclosing refusal for a database ancestry failure', async () => {
+    const f = fixture()
+    f.query.mockRejectedValueOnce(new Error('private ancestry storage detail'))
+    await expect(readExternalSourceAncestors(f.workspaceId,[f.root])).rejects.toMatchObject({ code: 'source_access_denied' })
+  })
 })

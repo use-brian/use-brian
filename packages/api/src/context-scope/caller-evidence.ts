@@ -4,6 +4,7 @@ import {
 } from '@use-brian/core'
 import { getPool } from '../db/client.js'
 import { readExternalSourceAncestors } from '../application-platform/external-source-ancestry.js'
+import { readApplicationFieldAncestors } from '../application-platform/field-evidence.js'
 import { readCurrentScopeSources } from '../db/derived-scope-store.js'
 import type { PoolClient } from 'pg'
 
@@ -128,7 +129,12 @@ async function validateScopeEvidence(
   const ancestryRoots = sources
   const ancestryKey = (values: readonly ScopeSource[]) => JSON.stringify(values.map(source => [source.resourceId,source.version,resourceScopeKey(source)]).sort())
   let originalAncestry: string
+  let originalFieldAncestry: string
   try {
+    const fieldAncestors = await readApplicationFieldAncestors(ceiling.workspaceId, ancestryRoots, client)
+    originalFieldAncestry = ancestryKey(fieldAncestors)
+    if (fieldAncestors.length && !client) throw unavailable(kind, 'source_unverifiable')
+    for (const source of fieldAncestors) failure ??= visibilityFailure(source, ceiling) ?? labelFailure(source, ceiling)
     const ancestors = await readExternalSourceAncestors(ceiling.workspaceId, ancestryRoots, client)
     originalAncestry = ancestryKey(ancestors)
     const known = new Map(sources.filter(source => source.resourceKind === 'external_source').map(source => [source.resourceId, source]))
@@ -141,7 +147,7 @@ async function validateScopeEvidence(
     }
     if (failure) throw unavailable(kind, failure)
     const expanded = new ContextScopeAccumulator(snapshot)
-    expanded.note({ sources: ancestors })
+    expanded.note({ sources: [...fieldAncestors,...ancestors] })
     snapshot = expanded.evidence
     sources = snapshot.sources ?? []
   } catch (error) {
@@ -197,7 +203,7 @@ async function validateScopeEvidence(
   // writer's rule (`revalidateScopeSources`), not the audience's.
   let states: Awaited<ReturnType<typeof readCurrentScopeSources>>
   try {
-    states = await readCurrentScopeSources(client ?? getPool(), ceiling.workspaceId, sources.filter(source=>!pageKinds.has(source.resourceKind)), workflowRunId, kind === 'caller' ? 'context' : 'deliver', !!client && sources.some(source => source.resourceKind === 'external_source'))
+    states = await readCurrentScopeSources(client ?? getPool(), ceiling.workspaceId, sources.filter(source=>!pageKinds.has(source.resourceKind)), workflowRunId, kind === 'caller' ? 'context' : 'deliver', !!client && sources.some(source => source.resourceKind === 'external_source' || source.resourceKind === 'application_field'))
   } catch (error) {
     throw unavailable(kind, 'verification_error', error)
   }
@@ -219,6 +225,9 @@ async function validateScopeEvidence(
   }
   try {
     if (ancestryKey(await readExternalSourceAncestors(ceiling.workspaceId, ancestryRoots, client)) !== originalAncestry!) {
+      throw unavailable(kind, 'source_unverifiable')
+    }
+    if (ancestryKey(await readApplicationFieldAncestors(ceiling.workspaceId, ancestryRoots, client)) !== originalFieldAncestry!) {
       throw unavailable(kind, 'source_unverifiable')
     }
   } catch (error) {

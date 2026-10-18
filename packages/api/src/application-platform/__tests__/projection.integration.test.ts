@@ -4,7 +4,7 @@ import { z } from 'zod'
 import express from 'express'
 import request from 'supertest'
 import type { PoolClient } from 'pg'
-import type { ApplicationModuleDefinition } from '@use-brian/core'
+import { ContextScopeAccumulator, executionToolContext, type ApplicationModuleDefinition, type ScopeSource } from '@use-brian/core'
 import { applicationResourceSchema, type ApplicationAccessGrant, type ApplicationGrantMaximum } from '@use-brian/shared'
 import { getAppPool, getPool, queryWithRLS } from '../../db/client.js'
 import { createDbDocEntityStore } from '../../db/doc-entity-store.js'
@@ -26,6 +26,7 @@ import { ApplicationManagementService } from '../management.js'
 import { requireAuth } from '../../auth/middleware.js'
 import { authSessionStore } from '../../db/auth-session-store.js'
 import { createTokens } from '../../auth/jwt.js'
+import { assertSourceModelInputAuthority } from '../model-source-authority.js'
 
 const { assertLocalFixture } = await import(new URL('../../../../../scripts/crm/local-fixture.mjs', import.meta.url).href)
 await assertLocalFixture()
@@ -64,7 +65,7 @@ describe('[COMP:api/application-auth] database application projections and live 
     const module: ApplicationModuleDefinition<PoolClient> = { key: 'records', defaultState: 'enabled', application: {
       version: '1', dependencies: [], resources: [{ typeKey: 'request', origin: { kind: 'generic', entityTypeId: schemaId }, schemaVersion: '1',
         fields: [{ key: 'title', kind: 'text', label: 'Title' }, { key: 'cost', kind: 'number', label: 'Cost' }] }],
-      queries: ['get', 'raw', 'metadata', 'module_state'], commands: ['verify'], events: ['request.checked'], policyCapabilities: ['canonical_generic'], backgroundHandlers: [], uiContributions: [],
+      queries: ['get', 'raw', 'metadata', 'module_state', 'field_capture', 'field_snapshot'], commands: ['verify'], events: ['request.checked'], policyCapabilities: ['canonical_generic'], backgroundHandlers: [], uiContributions: [],
     }, resolveResources: async ({ transaction }) => {
       const result = await transaction.query<{ resource: unknown }>("SELECT application_generic_catalog('request') AS resource")
       return result.rows.map(row => applicationResourceSchema.parse(row.resource))
@@ -82,6 +83,15 @@ describe('[COMP:api/application-auth] database application projections and live 
       raw: { input, authorize: async () => {}, execute: async ({ transaction }) => (await transaction.query('SELECT data FROM entity_instances WHERE entity_type_id=$1', [schemaId])).rows },
       metadata: { input, authorize: async () => {}, execute: async ({ transaction }) => (await transaction.query("SELECT created_at,created_by,last_edited_at,last_edited_by FROM application_generic_projection($1,'request','read',$2)", [schemaId, recordId])).rows },
       module_state: { input, authorize: async () => {}, execute: async ({ transaction }) => (await transaction.query("SELECT state FROM application_lock_module($1,'records')", [workspaceId])).rows },
+      field_capture: { input, authorize: async () => {}, execute: async ({ transaction }, raw) => {
+        const parsed = input.parse(raw)
+        return (await transaction.query('SELECT observe_application_field_projection($1,$2,$3,$4,$5,$6,$7,$8) AS value',
+          [workspaceId,{ kind: 'generic', entityTypeId: schemaId },'request',parsed.id ?? recordId,'1','read',null,parsed.requiredFields])).rows[0].value
+      } },
+      field_snapshot: { input: z.object({ id: z.string().uuid(), version: z.string() }).strict(), authorize: async () => {}, execute: async ({ transaction }, raw) => {
+        const parsed = raw as { id: string; version: string }
+        return (await transaction.query('SELECT read_admitted_application_field_snapshot($1,$2,$3) AS value', [workspaceId,parsed.id,parsed.version])).rows[0].value
+      } },
     }, commands: { verify: { input: z.object({}).strict(), eventKey: 'request.checked', authorize: async () => {}, authorizeResult: async () => {},
       execute: async () => { throw new Error('Disabled module executed new work') } } } }
     return new ApplicationPlatformService([module])
@@ -131,6 +141,28 @@ describe('[COMP:api/application-auth] database application projections and live 
     expect(user).not.toBeNull()
     return { authentication: { user: user! }, appId, grantId, parentId, userId, token: `oat_${id}_${secret}` }
   }
+  it('[COMP:api/application-field-evidence] admits the same observation through each actual app and contracts only the affected reader', async () => {
+    const first = await provision('member'), second = await provision('external_user'), dispatcher = service()
+    const firstExecution = await resolveApplicationExecutionContext(first.authentication)
+    const secondExecution = await resolveApplicationExecutionContext(second.authentication)
+    const captured = await dispatcher.query(firstExecution,'records','field_capture',{ requiredFields: ['title'] }) as {
+      values: unknown; sources: Array<{ resourceId: string; version: string }>; policyVersion: string
+    }
+    const same = await dispatcher.query(secondExecution,'records','field_capture',{ requiredFields: ['title'] }) as typeof captured
+    expect(captured.values).toEqual({ title: { kind: 'text', value: 'Visible request' } })
+    expect(same).toEqual(captured)
+    const input = { id: captured.sources[0].resourceId, version: captured.sources[0].version }
+    expect(await dispatcher.query(secondExecution,'records','field_snapshot',input)).toMatchObject({ held: false })
+    const modelContext = { ...executionToolContext(secondExecution,{ appId: 'field-fixture' }),
+      scopeAccumulator: new ContextScopeAccumulator({ sources: captured.sources as ScopeSource[] }) }
+    await expect(assertSourceModelInputAuthority(modelContext)).resolves.toBeUndefined()
+    await expect(dispatcher.query(secondExecution,'records','field_capture',{ requiredFields: ['cost'] })).rejects.toMatchObject({ code: 'access_unavailable' })
+    await pool.query("UPDATE application_access_grants SET read_fields='{}' WHERE id=$1", [first.grantId])
+    await expect(dispatcher.query(firstExecution,'records','field_snapshot',input)).rejects.toThrow()
+    const contracted = await resolveApplicationExecutionContext(first.authentication)
+    expect(await dispatcher.query(contracted,'records','field_snapshot',input)).toMatchObject({ held: true })
+    expect(await dispatcher.query(secondExecution,'records','field_snapshot',input)).toMatchObject({ held: false })
+  })
   it.each(['member', 'external_user', 'service'] as const)('enforces exact record/field projections as a real non-bypass %s', async kind => {
     const fixture = await provision(kind), execution = await resolveApplicationExecutionContext(fixture.authentication), dispatcher = service()
     const result = await dispatcher.query(execution, 'records', 'get', {})

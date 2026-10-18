@@ -7,7 +7,9 @@ const state = vi.hoisted(() => ({
   next: null as null | ((sources: ScopeSource[]) => CurrentSourceState[]),
   ancestors: [] as ScopeSource[],
   ancestryFailure: false,
+  fields: [] as ScopeSource[],
 }))
+vi.mock('../../application-platform/field-evidence.js', () => ({ readApplicationFieldAncestors: async () => state.fields }))
 vi.mock('../../application-platform/external-source-ancestry.js', () => ({ readExternalSourceAncestors: async () => {
   if (state.ancestryFailure) throw new Error('Metadata unavailable')
   return state.ancestors
@@ -40,7 +42,7 @@ const ceiling: AccessCeiling = {
   projectIds: null, visibilityAssistantIds: null,
 }
 
-beforeEach(() => { state.read.length = 0; state.next = null; state.ancestors = []; state.ancestryFailure = false })
+beforeEach(() => { state.read.length = 0; state.next = null; state.ancestors = []; state.ancestryFailure = false; state.fields = [] })
 
 describe('[COMP:api/caller-scope-evidence] per-source audience validation', () => {
   it('admits read evidence spanning two assistant partitions of the same user', async () => {
@@ -199,5 +201,26 @@ describe('[COMP:api/caller-scope-evidence] independent source ancestors', () => 
     state.ancestors = [{ ...external(), sensitivity: 'confidential' }]
     await expect(validateAudienceScopeEvidence({ sources: [source('native-root')] }, ceiling)).rejects.toMatchObject({ diagnostic: 'clearance' })
     expect(state.read).toHaveLength(0)
+  })
+})
+
+describe('[COMP:api/caller-scope-evidence] native field ancestry', () => {
+  const client = { query: async (_sql: string, values: unknown[]) => ({ rows: (values[1] as string[]).map(() => ({ dependencies: [] })) }) }
+  it('refuses field evidence on the owner metadata path even when labels fit', async () => {
+    state.fields = [source('field', { resourceKind: 'application_field' })]
+    await expect(validateCallerScopeEvidence({ sources: [source('native-root')] }, ceiling))
+      .rejects.toMatchObject({ diagnostic: 'source_unverifiable' })
+    expect(state.read).toHaveLength(0)
+  })
+  it('keeps admitted original target fields alongside a native root', async () => {
+    state.fields = [source('field', { resourceKind: 'application_field' }), source('original-target', { resourceKind: 'application_field' })]
+    const result = await validateCallerScopeEvidence({ sources: [source('native-root')] }, ceiling, client as never)
+    expect(result.sources?.map(source => source.resourceId)).toEqual(['native-root','field','original-target'])
+  })
+  it('rejects a field ancestry change during current-source validation', async () => {
+    state.fields = [source('field', { resourceKind: 'application_field' })]
+    state.next = sources => { state.fields = []; return sources.map(source => ({ state: 'current', source })) }
+    await expect(validateAudienceScopeEvidence({ sources: [source('native-root')] }, ceiling, client as never))
+      .rejects.toMatchObject({ diagnostic: 'source_unverifiable' })
   })
 })

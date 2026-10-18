@@ -10,6 +10,7 @@ import { createDbDocEntityStore, applyCanonicalApplicationRecordMutation, canoni
   type CanonicalApplicationRecordMutation } from '../db/doc-entity-store.js'
 import { getApplicationExecutionBinding } from './execution-context.js'
 import { compileApplicationRecordQuery } from './record-query.js'
+import { bindApplicationFieldProjection } from './field-evidence.js'
 
 type Context = ApplicationOperationContext<PoolClient>
 const typeKey = z.string().regex(/^[a-z][a-z0-9_.-]{0,127}$/)
@@ -70,7 +71,11 @@ async function get(context: Context, type: string, id: string): Promise<Applicat
     : await context.transaction.query<Row>(`SELECT id,data,record_version::text,${nativeSource} AS source FROM entity_instances
       WHERE workspace_id=$1 AND entity_type_id=$2 AND id=$3 AND NOT scope_review_state_held('entity_instance',id)`, [schema.workspaceId, schema.id, id])
   if (!result.rows[0]) throw unavailable()
-  const record = projection(context, definition, result.rows[0])
+  const row = result.rows[0]
+  const source = sourceSchema.parse(row.source)
+  const record = await bindApplicationFieldProjection(context, { ref: { workspaceId: source.workspaceId,
+    origin: definition.origin, typeKey: definition.typeKey, id: row.id, version: row.record_version },
+  values: row.data, fields: Object.keys(row.data), policyVersion: app?.state.fingerprint ?? 'native:1' })
   readProofs.set(record, { type, schemaVersion: definition.schemaVersion, action: 'read', records: [{ id, version: record.ref.version, fields: record.fields }] })
   return record
 }
@@ -125,9 +130,10 @@ async function history(context: Context, input: z.infer<typeof historyInput>) {
   if (getApplicationExecutionBinding(context.execution)) {
     const result = await context.transaction.query(`SELECT record_version::text,schema_version::text,data,source
       FROM application_generic_history($1,$2,$3,$4,$5)`, [schema.id, input.type, input.id, input.beforeVersion ?? null, input.limit])
-    const records = result.rows.map(row => bindScopeSource({ ref: { ...current.ref, version: row.record_version }, schemaVersion: row.schema_version,
-      values: row.data, fields: Object.keys(row.data), policyVersion: current.policyVersion },
-    { ...sourceSchema.parse(row.source), resourceKind: 'entity_instance', resourceId: input.id }))
+    const records = []
+    for (const row of result.rows) records.push(await bindApplicationFieldProjection(context,
+      { ref: { ...current.ref, version: row.record_version }, schemaVersion: row.schema_version,
+        values: row.data, fields: Object.keys(row.data), policyVersion: current.policyVersion }, 'history'))
     readProofs.set(records, { type: input.type, schemaVersion: String(schema.schemaVersion), action: 'history', historyInput: input, records: [{ id: input.id, version: current.ref.version }] })
     return records
   }
@@ -135,8 +141,12 @@ async function history(context: Context, input: z.infer<typeof historyInput>) {
     WHERE workspace_id=$1 AND entity_instance_id=$2 AND ($3::bigint IS NULL OR record_version<$3) ORDER BY record_version DESC LIMIT $4`,
   [schema.workspaceId, input.id, input.beforeVersion ?? null, input.limit])
   const declared = new Set(schema.properties.map(property => property.name))
-  const records = result.rows.map(row => ({ ref: { ...current.ref, version: row.record_version }, schemaVersion: row.schema_version,
-    values: Object.fromEntries(Object.entries(row.data).filter(([key]) => declared.has(key))), policyVersion: current.policyVersion }))
+  const records = []
+  for (const row of result.rows) {
+    const values = Object.fromEntries(Object.entries(row.data).filter(([key]) => declared.has(key))) as ApplicationRecordProjection['values']
+    records.push(await bindApplicationFieldProjection(context, { ref: { ...current.ref, version: row.record_version }, schemaVersion: row.schema_version,
+      values, fields: Object.keys(values), policyVersion: current.policyVersion }, 'history'))
+  }
   readProofs.set(records, { type: input.type, schemaVersion: String(schema.schemaVersion), action: 'history', historyInput: input, records: [{ id: input.id, version: current.ref.version }] })
   return records
 }

@@ -2,7 +2,7 @@
 import { z } from 'zod'
 import { createHash } from 'node:crypto'
 import type { PoolClient } from 'pg'
-import { applicationAuthorityCreationScope, bindScopeSource, parseApplicationCrmFieldDefinition, validateCrmCustomFieldValue, type ApplicationModuleDefinition, type ApplicationOperationContext,
+import { applicationAuthorityCreationScope, parseApplicationCrmFieldDefinition, validateCrmCustomFieldValue, type ApplicationModuleDefinition, type ApplicationOperationContext,
   type ScopeSource } from '@use-brian/core'
 import { ApplicationPlatformError, applicationJsonSchema, applicationResourceRefSchema, type ApplicationRecordProjection,
   type ApplicationResourceDefinition, type ApplicationResourceRef } from '@use-brian/shared'
@@ -11,6 +11,7 @@ import { getEntityById } from '../db/entities-store.js'
 import { createTask, getTaskById } from '../db/tasks.js'
 import { publishTaskLifecycle } from '../task-event-fanout.js'
 import { getApplicationExecutionBinding } from './execution-context.js'
+import { bindApplicationFieldProjection } from './field-evidence.js'
 
 const sourceSchema=z.object({workspaceId:z.string().uuid(),userId:z.string().uuid().nullable(),assistantId:z.string().uuid().nullable(),
   sensitivity:z.enum(['public','internal','confidential']),compartments:z.array(z.string()),projectIds:z.array(z.string()),version:z.string(),
@@ -63,9 +64,8 @@ async function read(context:Context,type:z.infer<typeof readInput>['type'],id:st
       && !validateCrmCustomFieldValue(parseApplicationCrmFieldDefinition(field.definition), values[field.key])) {
       throw new ApplicationPlatformError('invalid_value', 'The canonical record requires review.')
     }
-    return bindScopeSource({ref:{workspaceId:access.workspaceId,origin:{kind:'native',moduleKey:'native'},typeKey:type,id,version:parsed.data.source.version},
-      values,fields:Object.keys(values),policyVersion:`${application.state.fingerprint}:${definition.schemaVersion}`},
-    {...parsed.data.source,resourceKind:type==='task'?'task':type==='file'?'workspace_file':type==='workspace_member'?'workspace_member':'entity',resourceId:id})
+    return bindApplicationFieldProjection(context, {ref:{workspaceId:access.workspaceId,origin:{kind:'native',moduleKey:'native'},typeKey:type,id,version:parsed.data.source.version},
+      values,fields:Object.keys(values),policyVersion:`${application.state.fingerprint}:${definition.schemaVersion}`})
   }
   if (type === 'file' || type === 'workspace_member') {
     const result = type === 'workspace_member'
@@ -80,8 +80,8 @@ async function read(context:Context,type:z.infer<typeof readInput>['type'],id:st
       throw new ApplicationPlatformError('access_unavailable', 'The source is unavailable.')
     }
     const values = parsedValues.data, source = parsedSource.data
-    return bindScopeSource({ ref: { workspaceId: access.workspaceId, origin: { kind: 'native', moduleKey: 'native' }, typeKey: type, id, version: source.version },
-      values, fields: Object.keys(values), policyVersion: 'native:1' }, { ...source, resourceKind: type === 'file' ? 'workspace_file' : 'workspace_member', resourceId: id })
+    return bindApplicationFieldProjection(context, { ref: { workspaceId: access.workspaceId, origin: { kind: 'native', moduleKey: 'native' }, typeKey: type, id, version: source.version },
+      values, fields: Object.keys(values), policyVersion: 'native:1' })
   }
   const record=type==='task'?await getTaskById(access,id,context.transaction):await getEntityById(access,id,{},context.transaction)
   if(!record||'kind'in record&&record.kind!==type)throw new ApplicationPlatformError('access_unavailable','The record is unavailable.')
@@ -101,8 +101,8 @@ async function read(context:Context,type:z.infer<typeof readInput>['type'],id:st
     Object.assign(values, { [field.key]: custom[parseApplicationCrmFieldDefinition(field.definition).fieldKey] ?? null })
   }
   const json=applicationJsonSchema.parse(values) as ApplicationRecordProjection['values']
-  return bindScopeSource({ref:{workspaceId:access.workspaceId,origin:{kind:'native',moduleKey:'native'},typeKey:type,id,version:source.version},
-    values:json,fields:Object.keys(json),policyVersion:`native:${definition.schemaVersion}`},source)
+  return bindApplicationFieldProjection(context, {ref:{workspaceId:access.workspaceId,origin:{kind:'native',moduleKey:'native'},typeKey:type,id,version:source.version},
+    values:json,fields:Object.keys(json),policyVersion:`native:${definition.schemaVersion}`})
 }
 async function authorizeReadResult(context: Context, result: unknown) {
   const value = result as ApplicationRecordProjection, ref = applicationResourceRefSchema.safeParse(value?.ref)
