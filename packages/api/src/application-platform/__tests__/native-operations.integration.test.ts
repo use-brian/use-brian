@@ -3,13 +3,13 @@ import { randomUUID } from 'node:crypto'
 import { afterAll, beforeAll, describe, expect, it } from 'vitest'
 import { z } from 'zod'
 import type { PoolClient } from 'pg'
-import { boundScopeSources, type ApplicationModuleDefinition, type TaskRecord, type TaskUpdateFields,type CompanyUpdateFields,type ContactUpdateFields,type DealUpdateFields } from '@use-brian/core'
+import { boundScopeSources, type ApplicationModuleDefinition, type TaskRecord, type TaskUpdateFields,type CompanyUpdateFields,type ContactUpdateFields,type DealUpdateFields,type EntityCreateParams,type EntityUpdateFields,type EntitySupersedePatch } from '@use-brian/core'
 import { ApplicationPlatformError } from '@use-brian/shared'
 import { applyRLSGucs, getAppPool, getPool } from '../../db/client.js'
 import { bindTaskClosedHook, createTask, getTaskById, resolveTaskById, updateTask } from '../../db/tasks.js'
 import { createCompany,createContact,createDeal,getDealById,listDeals,updateCompany,updateContact,updateDeal,setDealStage } from '../../db/crm.js'
 import { createCrmFieldDefinition,updateCrmCustomFields } from '../../db/crm-r2.js'
-import { updateEntity } from '../../db/entities-store.js'
+import { createEntity, supersedeEntity, updateEntity } from '../../db/entities-store.js'
 import { findAssistantById } from '../../db/users.js'
 import { resolveExecutionContextSystem } from '../../context-scope/execution-context.js'
 import { ApplicationPlatformService } from '../service.js'
@@ -202,6 +202,29 @@ describe('[COMP:api/application-records] canonical native operation composition'
     await expect(service.command(identity,module.key,'rename_pair',command)).rejects.toMatchObject({ code: 'access_unavailable' })
     expect(await getTaskById({ ...access,userId: readerId },committed.resources[0].id)).not.toBeNull()
     expect((await owner.query('SELECT count(*)::int AS count FROM application_command_audit WHERE receipt_id=$1',[committed.id])).rows[0].count).toBe(1)
+  })
+  it.each([
+    {unexpected:true},{createdByUserId:'forged-creation-metadata'},{displayName:42},{attributes:[]},
+    {attributes:{invalid:NaN}},{attributes:{invalid:Infinity}},{verifiedAt:new Date('invalid')},{sensitivity:'undeclared'},
+  ])('Q04 refuses an invalid raw canonical entity patch frame without changing storage: %j',async fields => {
+    const value=await createCompany(userId,{workspaceId,name:`Fictional frame ${randomUUID()}`,access,mergeByName:false})
+    const before=(await owner.query('SELECT display_name,attributes,scope_version::text AS version FROM entities WHERE id=$1',[value.id])).rows[0]
+    await expect(updateEntity(userId,value.id,fields as EntityUpdateFields,access)).rejects.toMatchObject({code:'invalid_value'})
+    expect((await owner.query('SELECT display_name,attributes,scope_version::text AS version FROM entities WHERE id=$1',[value.id])).rows[0]).toEqual(before)
+  })
+  it.each([{unexpected:true},{id:'caller-forged-id'},{aliases:[17]},{source:'undeclared'},{attributes:{invalid:NaN}},{displayName:'   '}])
+  ('Q04 refuses an invalid raw canonical entity create frame without a row: %j',async fields => {
+    const before=(await owner.query('SELECT count(*)::int AS count FROM entities WHERE workspace_id=$1',[workspaceId])).rows[0].count
+    await expect(createEntity({kind:'company',displayName:'Fictional invalid frame',workspaceId,createdByUserId:userId,source:'user',...fields} as EntityCreateParams))
+      .rejects.toMatchObject({code:'invalid_value'})
+    expect((await owner.query('SELECT count(*)::int AS count FROM entities WHERE workspace_id=$1',[workspaceId])).rows[0].count).toBe(before)
+  })
+  it.each([{unexpected:true},{attributes:{invalid:Infinity}},{displayName:42}])
+  ('Q04 refuses an invalid raw canonical supersession frame without retiring its source: %j',async fields => {
+    const value=await createCompany(userId,{workspaceId,name:`Fictional successor ${randomUUID()}`,access,mergeByName:false})
+    const before=(await owner.query('SELECT display_name,attributes,valid_to,superseded_by,scope_version::text AS version FROM entities WHERE id=$1',[value.id])).rows[0]
+    await expect(supersedeEntity(userId,value.id,{attributes:{},...fields} as EntitySupersedePatch)).rejects.toMatchObject({code:'invalid_value'})
+    expect((await owner.query('SELECT display_name,attributes,valid_to,superseded_by,scope_version::text AS version FROM entities WHERE id=$1',[value.id])).rows[0]).toEqual(before)
   })
   it('Q04/Q05 preserves an exact native decimal amount through canonical creation, get and list',async () => {
     const amount='9007199254740993.123456789012345678'

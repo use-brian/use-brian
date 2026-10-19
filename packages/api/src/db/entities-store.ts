@@ -15,10 +15,11 @@ import type {
   EntityUpdateFields,
   GetEntityOpts,
 } from '@use-brian/core'
-import { decodeCrmAmount, maxSensitivity, unionScopeRequirements } from '@use-brian/core'
+import { ENTITY_SOURCES, decodeCrmAmount, maxSensitivity, unionScopeRequirements } from '@use-brian/core'
 import type { Sensitivity } from '@use-brian/core'
 import type pg from 'pg'
-import { ApplicationPlatformError } from '@use-brian/shared'
+import { z } from 'zod'
+import { ApplicationPlatformError, applicationJsonSchema } from '@use-brian/shared'
 import { clientCompartment } from '@use-brian/core'
 import { assertExecutionResourceScope, buildAccessPredicate, buildCurrentMemberSourcePredicate } from './access-predicate.js'
 import { currentAgentAccess } from './agent-access-context.js'
@@ -102,6 +103,35 @@ const COMPACT_SELECT = `
   workspace_id AS "workspaceId",
   source
 `
+
+// Input validation checks shape only. Trusted derivation authority stays on the
+// original objects and is still verified by the existing admission boundary.
+const entityNameInput = z.string().min(1).max(8192).refine(value => value.trim().length > 0)
+const entityJsonAttributes = z.record(applicationJsonSchema)
+const entityScopeInput = { sensitivity:z.enum(['public','internal','confidential']).optional(),
+  compartments:z.array(z.string()).optional(),projectIds:z.array(z.string()).optional() }
+const entityCreateInput = z.object({kind:z.string().min(1),displayName:entityNameInput,workspaceId:z.string(),createdByUserId:z.string(),
+  source:z.enum(ENTITY_SOURCES),userId:z.string().nullable().optional(),assistantId:z.string().nullable().optional(),
+  canonicalId:z.string().nullable().optional(),...entityScopeInput,
+  // Explicit null destinations retain the canonical mode-admission error.
+  compartments:entityScopeInput.compartments.nullable(),projectIds:entityScopeInput.projectIds.nullable(),
+  attributes:entityJsonAttributes.optional(),aliases:z.array(z.string()).optional(),
+  createdByAssistantId:z.string().nullable().optional(),sourceEpisodeId:z.string().nullable().optional(),sourceSessionId:z.string().nullable().optional(),
+  explicitGeneral:z.boolean().optional(),derivation:z.custom<object>(value => value !== null && typeof value === 'object' && !Array.isArray(value)).optional(),
+}).strict()
+const entityPatchInput = z.object({displayName:entityNameInput.optional(),canonicalId:z.string().nullable().optional(),
+  attributes:entityJsonAttributes.optional(),sensitivity:entityScopeInput.sensitivity,
+  verifiedByUserId:z.string().nullable().optional(),verifiedAt:z.date().nullable().optional(),
+  inheritCompartments:z.array(z.string()).optional(),inheritProjectIds:z.array(z.string()).optional(),
+}).strict()
+const entitySuccessorInput = z.object({attributes:entityJsonAttributes,displayName:entityNameInput.optional(),canonicalId:z.string().nullable().optional(),
+  ...entityScopeInput,sourceEpisodeId:z.string().nullable().optional(),source:z.enum(ENTITY_SOURCES).optional(),
+}).strict()
+function assertEntityInputFrame(schema:z.ZodTypeAny,value:unknown):void {
+  let valid=false
+  try {valid=schema.safeParse(value).success} catch { /* Cyclic/non-JSON values are invalid input too. */ }
+  if (!valid) throw new ApplicationPlatformError('invalid_value','The canonical entity input is invalid.')
+}
 
 const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i
 
@@ -225,6 +255,7 @@ function entitySourceGuard(actorUserId: string, access: AccessContext | undefine
 export async function createEntity(params: EntityCreateParams, transactionClient?: pg.PoolClient): Promise<EntityRecord> {
   // Fail fast, before any connection or admission read (WU-4.5).
   assertAuthorshipPresent('createEntity', params.createdByUserId)
+  assertEntityInputFrame(entityCreateInput,params)
   if (!transactionClient) {
     const client = await getAppPool().connect()
     try {
@@ -1193,6 +1224,7 @@ export async function updateEntity(
   actorUserId: string, id: string, fields: EntityUpdateFields, access?: AccessContext,
   transactionClient?: pg.PoolClient, operation?: { expectedVersion?: string; fieldIntent?: readonly string[] },
 ): Promise<EntityRecord | null> {
+  assertEntityInputFrame(entityPatchInput,fields)
   await assertNativeEntityFieldWrites(actorUserId, id, fields, transactionClient, operation?.fieldIntent)
   if (operation?.fieldIntent === undefined) return updateEntityMutation(actorUserId, id, fields, access, transactionClient, operation)
   const client = transactionClient ?? await getAppPool().connect()
@@ -1370,6 +1402,7 @@ export async function supersedeEntity(
   patch: EntitySupersedePatch,
   transactionClient?: pg.PoolClient,
 ): Promise<EntityRecord | null> {
+  assertEntityInputFrame(entitySuccessorInput,patch)
   const access = entityMutationAccess(actorUserId)
   const ownedClient = transactionClient ? null : await getAppPool().connect()
   const client = transactionClient ?? ownedClient!
