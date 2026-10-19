@@ -284,7 +284,7 @@ export async function createEntity(params: EntityCreateParams, transactionClient
     compartments: params.compartments ?? [], projectIds: params.projectIds ?? [] }, params.derivation ? 'read' : 'mutation', access)
   if (application) {
     if (params.derivation) throw new Error('scope_output_not_integrated')
-    const result = await transactionClient.query<EntityRow>(`SELECT ${FULL_SELECT} FROM application_create_canonical_company($1::jsonb)`,
+    const result = await transactionClient.query<EntityRow>(`SELECT ${FULL_SELECT} FROM application_create_canonical_crm_entity($1::jsonb)`,
       [JSON.stringify({ ...params, aliases: normalizeAliasArray(params.aliases ?? []) })])
     if (!result.rows[0]) throw new Error('scope_operation_denied')
     return toEntity(result.rows[0])

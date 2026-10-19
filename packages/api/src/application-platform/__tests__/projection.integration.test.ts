@@ -5,7 +5,7 @@ import express from 'express'
 import request from 'supertest'
 import type { PoolClient } from 'pg'
 import { ContextScopeAccumulator, executionToolContext, boundScopeSources, type ApplicationModuleDefinition, type ScopeSource } from '@use-brian/core'
-import { applicationResourceSchema, type ApplicationAccessGrant, type ApplicationGrantMaximum } from '@use-brian/shared'
+import { applicationResourceSchema, type ApplicationAccessGrant, type ApplicationGrantMaximum, type ApplicationJson } from '@use-brian/shared'
 import { getAppPool, getPool, queryWithRLS } from '../../db/client.js'
 import { consumeHomeAppBudget } from '../../db/home-apps-store.js'
 import { createDbDocEntityStore } from '../../db/doc-entity-store.js'
@@ -435,6 +435,73 @@ describe('[COMP:api/application-auth] database application projections and live 
       expect((await pool.query('SELECT id FROM application_command_audit WHERE receipt_id=$1', [result.body.id])).rows).toHaveLength(1)
       if (kind !== 'member') expect((await pool.query('SELECT user_id FROM workspace_members WHERE workspace_id=$1 AND user_id=$2', [workspaceId,fixture.userId])).rows).toEqual([])
     }
+  })
+  it.each(['member','external_user','service'] as const)('Q03/Q04/Q05 creates canonical contact and deal rows through the real %s application principal',async kind => {
+    for (const type of ['person','deal'] as const) {
+      const fields=type==='person'?['name','email']:['name','stage','amount'],commandKey=type==='person'?'create_contact':'create_deal'
+      const fixture=await provision(kind,fields,undefined,false,randomUUID(),['create',`command:${commandKey}`],[],{kind:'self'},'read_write',[],type)
+      const execution=await resolveApplicationExecutionContext(fixture.authentication),dispatcher=new ApplicationPlatformService([createCanonicalNativeApplicationModule()])
+      const input: Record<string,string>=type==='person'?{name:'Fictional application contact',email:'contact@native.example'}:{stage:'lead',amount:'9007199254740993.000000000000000001'}
+      const command={idempotencyKey:randomUUID(),input},http=express()
+      http.use('/api/applications',applicationPlatformRoutes({service:dispatcher}))
+      const before=(await pool.query('SELECT count(*)::int AS count FROM entities WHERE workspace_id=$1 AND created_by_user_id=$2 AND kind=$3',[workspaceId,fixture.userId,type])).rows[0].count
+      const responses=await Promise.all([0,1].map(()=>request(http).post(`/api/applications/${fixture.appId}/commands/${commandKey}`).set('Authorization',`Bearer ${fixture.token}`).send(command)))
+      expect(responses.map(response=>response.status)).toEqual([200,200]);expect(responses[1].body).toEqual(responses[0].body)
+      const receipt=responses[0].body
+      expect((await pool.query('SELECT count(*)::int AS count FROM entities WHERE workspace_id=$1 AND created_by_user_id=$2 AND kind=$3',[workspaceId,fixture.userId,type])).rows[0].count).toBe(before+1)
+      expect(receipt.resources).toHaveLength(1);const ref=receipt.resources[0]
+      expect(ref).toMatchObject({workspaceId,origin:{kind:'native',moduleKey:'native'},typeKey:type,version:'1'})
+      expect((await pool.query('SELECT id,kind,created_by_user_id,created_by_assistant_id FROM entities WHERE id=$1 AND workspace_id=$2',[ref.id,workspaceId])).rows)
+        .toEqual([{id:ref.id,kind:type,created_by_user_id:fixture.userId,created_by_assistant_id:assistantId}])
+      const projection=await dispatcher.query(execution,'native','get',{type,id:ref.id}) as {values:unknown}
+      expect(projection.values).toEqual(type==='person'?input:{name:'Deal',...input})
+      expect(await dispatcher.command(execution,'native',commandKey,command)).toEqual(receipt)
+      expect((await pool.query('SELECT id FROM application_command_audit WHERE receipt_id=$1',[receipt.id])).rows).toHaveLength(1)
+      expect((await pool.query('SELECT event_key,resources FROM application_committed_events WHERE receipt_id=$1',[receipt.id])).rows).toEqual([{event_key:type==='person'?'native.contact.created':'native.deal.created',resources:receipt.resources}])
+      if(kind!=='member') expect((await pool.query('SELECT user_id FROM workspace_members WHERE workspace_id=$1 AND user_id=$2',[workspaceId,fixture.userId])).rows).toEqual([])
+    }
+  })
+  it.each(['person','deal'] as const)('Q03/Q05/Q06 replays a write-only canonical %s creation without a readable DTO and refuses revoked rights',async type => {
+    const fields=type==='person'?['name']:['name','stage'],commandKey=type==='person'?'create_contact':'create_deal'
+    const fixture=await provision('service',fields,undefined,false,randomUUID(),['create',`command:${commandKey}`],[],{kind:'self'},'read_write',[],type)
+    await pool.query("UPDATE application_access_grants SET actions=ARRAY['create',$2::text],read_fields='{}' WHERE id=$1",[fixture.grantId,`command:${commandKey}`])
+    const execution=await resolveApplicationExecutionContext(fixture.authentication),dispatcher=new ApplicationPlatformService([createCanonicalNativeApplicationModule()])
+    const input: Record<string,string>=type==='person'?{name:'Fictional write-only contact'}:{stage:'lead'}
+    const command={idempotencyKey:randomUUID(),input}
+    const receipt=await dispatcher.command(execution,'native',commandKey,command)
+    expect(await dispatcher.command(execution,'native',commandKey,command)).toEqual(receipt)
+    await expect(dispatcher.query(execution,'native','get',{type,id:receipt.resources[0].id})).rejects.toMatchObject({code:'access_unavailable'})
+    await pool.query("UPDATE application_access_grants SET write_fields='{}' WHERE id=$1",[fixture.grantId])
+    const current=await resolveApplicationExecutionContext(fixture.authentication)
+    await expect(dispatcher.command(current,'native',commandKey,command)).rejects.toMatchObject({code:'access_unavailable'})
+    expect((await pool.query('SELECT id FROM entities WHERE id=$1',[receipt.resources[0].id])).rows).toEqual([{id:receipt.resources[0].id}])
+  })
+  it.each(['person','deal'] as const)('Q04 refuses original invalid canonical %s application creation frames without effects',async type => {
+    const fields=type==='person'?['name','email']:['name','stage','amount'],key=type==='person'?'create_contact':'create_deal'
+    const fixture=await provision('service',fields,undefined,false,randomUUID(),['create',`command:${key}`],[],{kind:'self'},'read_write',[],type)
+    const execution=await resolveApplicationExecutionContext(fixture.authentication),dispatcher=new ApplicationPlatformService([createCanonicalNativeApplicationModule()])
+    const before=(await pool.query('SELECT count(*)::int AS count FROM entities WHERE workspace_id=$1 AND created_by_user_id=$2',[workspaceId,fixture.userId])).rows[0].count
+    const frames:Record<string,ApplicationJson>[]=type==='person'?[{name:'Fictional unknown field',unexpected_key:true},{name:42},{name:'Fictional invalid email type',email:12}]
+      :[{stage:'lead',unexpected_key:true},{stage:'invented'},{stage:'lead',amount:'1e8'}]
+    for(const frame of frames) await expect(dispatcher.command(execution,'native',key,{idempotencyKey:randomUUID(),input:frame})).rejects.toMatchObject({code:'invalid_value',effect:'none'})
+    expect((await pool.query('SELECT count(*)::int AS count FROM entities WHERE workspace_id=$1 AND created_by_user_id=$2',[workspaceId,fixture.userId])).rows[0].count).toBe(before)
+  })
+  it.each(['person','deal'] as const)('Q05/Q06 rolls back canonical %s application creation on audit failure and retries exactly once',async type => {
+    const fields=type==='person'?['name']:['name','stage'],key=type==='person'?'create_contact':'create_deal'
+    const fixture=await provision('service',fields,undefined,false,randomUUID(),['create',`command:${key}`],[],{kind:'self'},'read_write',[],type)
+    const execution=await resolveApplicationExecutionContext(fixture.authentication),dispatcher=new ApplicationPlatformService([createCanonicalNativeApplicationModule()])
+    const input:Record<string,string>=type==='person'?{name:'Fictional rolled-back contact'}:{stage:'lead'},command={idempotencyKey:randomUUID(),input}
+    const before=(await pool.query('SELECT count(*)::int AS count FROM entities WHERE workspace_id=$1 AND created_by_user_id=$2',[workspaceId,fixture.userId])).rows[0].count
+    await pool.query(`ALTER TABLE application_command_audit ADD CONSTRAINT native_creator_audit_fixture CHECK(module_key<>'native' OR operation_key<>'${key}') NOT VALID`)
+    try {
+      await expect(dispatcher.command(execution,'native',key,command)).rejects.toMatchObject({code:'invalid_value',effect:'none'})
+      expect((await pool.query('SELECT count(*)::int AS count FROM entities WHERE workspace_id=$1 AND created_by_user_id=$2',[workspaceId,fixture.userId])).rows[0].count).toBe(before)
+      expect((await pool.query('SELECT id FROM application_operation_receipts WHERE workspace_id=$1 AND idempotency_key=$2',[workspaceId,command.idempotencyKey])).rows).toEqual([])
+    } finally {await pool.query('ALTER TABLE application_command_audit DROP CONSTRAINT native_creator_audit_fixture')}
+    const receipt=await dispatcher.command(execution,'native',key,command)
+    expect(await dispatcher.command(execution,'native',key,command)).toEqual(receipt)
+    expect((await pool.query('SELECT count(*)::int AS count FROM entities WHERE workspace_id=$1 AND created_by_user_id=$2',[workspaceId,fixture.userId])).rows[0].count).toBe(before+1)
+    expect((await pool.query('SELECT id FROM application_command_audit WHERE receipt_id=$1',[receipt.id])).rows).toHaveLength(1)
   })
   it('reviews prospective native self grants without releasing payloads and supports write-only canonical creation', async () => {
     const fixture = await provision('service', ['name'], undefined, false, randomUUID(), ['create','command:create_company'], [], { kind: 'self' })

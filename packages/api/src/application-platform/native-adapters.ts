@@ -2,11 +2,11 @@
 import { z } from 'zod'
 import { createHash } from 'node:crypto'
 import type { PoolClient } from 'pg'
-import { applicationAuthorityCreationScope, parseApplicationCrmFieldDefinition, validateCrmCustomFieldValue, type ApplicationModuleDefinition, type ApplicationOperationContext,
+import { crmAmountSchema, applicationAuthorityCreationScope, parseApplicationCrmFieldDefinition, validateCrmCustomFieldValue, type ApplicationModuleDefinition, type ApplicationOperationContext,
   type ScopeSource } from '@use-brian/core'
 import { ApplicationPlatformError, applicationJsonSchema, applicationResourceRefSchema, type ApplicationRecordProjection,
   type ApplicationResourceDefinition, type ApplicationResourceRef } from '@use-brian/shared'
-import { createCompany } from '../db/crm.js'
+import { createCompany,createContact,createDeal } from '../db/crm.js'
 import { getEntityById } from '../db/entities-store.js'
 import { createTask, getTaskById } from '../db/tasks.js'
 import { publishTaskLifecycle } from '../task-event-fanout.js'
@@ -18,7 +18,7 @@ const sourceSchema=z.object({workspaceId:z.string().uuid(),userId:z.string().uui
   held:z.boolean(),retractedAt:z.unknown().nullable(),validTo:z.unknown().nullable()})
 const readInput=z.object({type:z.enum(['company','person','deal','task','file','workspace_member']),id:z.string().uuid()}).strict()
 type Context=ApplicationOperationContext<PoolClient>
-const creations = new WeakMap<Context, { type: 'company' | 'task'; fields: string[]; scope: { sensitivity: 'public' | 'internal' | 'confidential'; compartments: string[]; projectIds: string[] } }>()
+const creations = new WeakMap<Context, { type: 'company' | 'person' | 'deal' | 'task'; fields: string[]; scope: { sensitivity: 'public' | 'internal' | 'confidential'; compartments: string[]; projectIds: string[] } }>()
 
 const definitions:ApplicationResourceDefinition[]=[
   {typeKey:'company',origin:{kind:'native',moduleKey:'native'},schemaVersion:'1',fields:[{key:'name',label:'Name',kind:'text',required:true},{key:'domain',label:'Domain',kind:'text'}]},
@@ -126,7 +126,7 @@ async function authorizeResult(context:Context,refs:ApplicationResourceRef[]) {
     } else await read(context,input.data.type,input.data.id)
   }
 }
-async function creationRef(context: Context, type: 'company' | 'task', id: string): Promise<ApplicationResourceRef> {
+async function creationRef(context: Context, type: 'company' | 'person' | 'deal' | 'task', id: string): Promise<ApplicationResourceRef> {
   if (!getApplicationExecutionBinding(context.execution)) return (await read(context,type,id)).ref
   const creation = creations.get(context)
   if (!creation || creation.type !== type) throw new ApplicationPlatformError('access_unavailable','The operation is unavailable.')
@@ -135,7 +135,7 @@ async function creationRef(context: Context, type: 'company' | 'task', id: strin
   if (!parsed.success) throw new ApplicationPlatformError('access_unavailable','The resource is unavailable.')
   return parsed.data
 }
-async function authorizeCreate(context:Context,type:'company'|'task',fields:string[]) {
+async function authorizeCreate(context:Context,type:'company'|'person'|'deal'|'task',fields:string[]) {
   if (context.expectedVersion !== undefined) throw new ApplicationPlatformError('invalid_value', 'Creation cannot use an existing-record version.')
   const access=context.execution.security.access,labels=context.execution.security.writeDefaults
   const application = getApplicationExecutionBinding(context.execution)
@@ -156,9 +156,11 @@ async function authorizeCreate(context:Context,type:'company'|'task',fields:stri
 /** Deployed adapter registration; callable operations still require current authority. */
 export function createCanonicalNativeApplicationModule():ApplicationModuleDefinition<PoolClient> {
   const companyInput=z.object({name:z.string().min(1).max(256),domain:z.string().max(256).nullable().optional()}).strict()
+  const contactInput=z.object({name:z.string().min(1).max(256),email:z.string().max(320).nullable().optional(),phone:z.string().max(100).nullable().optional()}).strict()
+  const dealInput=z.object({stage:z.enum(['lead','qualified','proposal','negotiation','won','lost']).optional(),amount:crmAmountSchema.nullable().optional()}).strict()
   const taskInput=z.object({title:z.string().min(1).max(1024)}).strict()
   return {key:'native',defaultState:'enabled',application:{version:'1',dependencies:[],resources:definitions,
-    queries:['get'],commands:['create_company','create_task'],events:['native.company.created','native.task.created'],
+    queries:['get'],commands:['create_company','create_contact','create_deal','create_task'],events:['native.company.created','native.contact.created','native.deal.created','native.task.created'],
     policyCapabilities:['canonical_native'],backgroundHandlers:[],uiContributions:[]},
   resolveResources: resources,
   queries:{get:{input:readInput,authorize:async(context,raw)=>{const input=readInput.parse(raw);await read(context,input.type,input.id)},
@@ -173,6 +175,24 @@ export function createCanonicalNativeApplicationModule():ApplicationModuleDefini
         sensitivity:creation.scope.sensitivity,compartments:creation.scope.compartments,projectIds:creation.scope.projectIds,
         createdByAssistantId:context.execution.assistant.id},{client:context.transaction,afterCommit:context.afterCommit})
       return [await creationRef(context,'company',record.id)]
+    }},create_contact:{input:contactInput,eventKey:'native.contact.created',
+    authorize:(context,raw)=>{const input=contactInput.parse(raw);return authorizeCreate(context,'person',['name',...(input.email?['email']:[]),...(input.phone?['phone']:[])])},authorizeResult,
+    execute:async(context,raw)=>{
+      const input=contactInput.parse(raw),access=context.execution.security.access,creation=creations.get(context)
+      if(!creation) throw new ApplicationPlatformError('access_unavailable','The operation is unavailable.')
+      const record=await createContact(access.userId,{...input,workspaceId:access.workspaceId,access,
+        sensitivity:creation.scope.sensitivity,compartments:creation.scope.compartments,projectIds:creation.scope.projectIds,
+        createdByAssistantId:context.execution.assistant.id},undefined,{client:context.transaction,afterCommit:context.afterCommit})
+      return [await creationRef(context,'person',record.id)]
+    }},create_deal:{input:dealInput,eventKey:'native.deal.created',
+    authorize:(context,raw)=>{const input=dealInput.parse(raw);return authorizeCreate(context,'deal',['name','stage',...(input.amount!=null?['amount']:[])])},authorizeResult,
+    execute:async(context,raw)=>{
+      const input=dealInput.parse(raw),access=context.execution.security.access,creation=creations.get(context)
+      if(!creation) throw new ApplicationPlatformError('access_unavailable','The operation is unavailable.')
+      const record=await createDeal(access.userId,{...input,workspaceId:access.workspaceId,access,
+        sensitivity:creation.scope.sensitivity,compartments:creation.scope.compartments,projectIds:creation.scope.projectIds,
+        createdByAssistantId:context.execution.assistant.id},undefined,{client:context.transaction,afterCommit:context.afterCommit})
+      return [await creationRef(context,'deal',record.id)]
     }},create_task:{input:taskInput,eventKey:'native.task.created',authorize:context=>authorizeCreate(context,'task',['title']),authorizeResult,
     execute:async(context,raw)=>{
       const input=taskInput.parse(raw),access=context.execution.security.access

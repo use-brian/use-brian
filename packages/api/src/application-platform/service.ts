@@ -84,7 +84,7 @@ export class ApplicationPlatformService {
     return this.transaction(execution,client => applyApplicationGovernance(client,execution,input),true)
   }
 
-  private async transaction<T>(execution: ExecutionContext, operation: (client: PoolClient, afterCommit: (effect: () => void) => void) => Promise<T>, effectful = false): Promise<T> {
+  private async transaction<T>(execution: ExecutionContext, operation: (client: PoolClient, afterCommit: (effect: () => void) => void) => Promise<T>, effectful = false, commandLock?: string): Promise<T> {
     if (execution.ownership.kind !== 'workspace' || execution.ownership.workspaceId !== execution.security.access.workspaceId
       || execution.lifecycle.abortSignal.aborted) throw new ApplicationPlatformError('access_unavailable', 'The application is unavailable.')
     if (execution.identity.kind === 'programmatic' && execution.identity.principal.kind === 'application'
@@ -99,6 +99,12 @@ export class ApplicationPlatformService {
         const role = await client.query(`SELECT r.rolsuper OR r.rolbypassrls OR pg_has_role(r.oid,c.relowner,'USAGE') AS bypass
           FROM pg_catalog.pg_roles r JOIN pg_catalog.pg_class c ON c.oid='entity_instances'::regclass WHERE r.rolname=current_user`)
         if (role.rows[0]?.bypass !== false) throw new ApplicationPlatformError('access_unavailable', 'A non-owner application role is required.')
+        // A duplicate waits before holding the workspace/source locks needed by its winner.
+        if (commandLock) {
+          await client.query('SELECT pg_advisory_xact_lock(hashtextextended($1,0))', [commandLock])
+          await execution.security.authority.assertCurrent()
+          if (execution.lifecycle.abortSignal.aborted) throw new ApplicationPlatformError('access_unavailable', 'The operation was cancelled.')
+        }
         await applyRLSGucs(client, execution.security.access.userId)
         const application = await applyApplicationRLSContext(client, execution)
         if (!application) {
@@ -171,6 +177,7 @@ export class ApplicationPlatformService {
       principal: application.state.principal, serviceUserId: application.state.serviceUserId ?? null, assistant: execution.assistant }
       : { identity: execution.identity, assistant: execution.assistant, actorUserId })
     const requestHash = hash({ input: input.data, expectedVersion: command.data.expectedVersion ?? null })
+    const identity = [workspaceId, moduleKey, commandKey, actorKey, command.data.idempotencyKey]
     return this.transaction(execution, async (transaction, afterCommit) => {
       const context: ApplicationOperationContext<PoolClient> = { execution, transaction, afterCommit,
         idempotencyKey: command.data.idempotencyKey,
@@ -179,8 +186,6 @@ export class ApplicationPlatformService {
       const state = await lockWorkspaceModule(transaction, workspaceId, moduleKey, this.registry.workspaceModules, application ? { kind: 'application' } : undefined)
       if (application) await transaction.query("SELECT set_config('app.application_command_key',$1,true)", [commandKey])
       await handler.authorize(context, input.data)
-      const identity = [workspaceId, moduleKey, commandKey, actorKey, command.data.idempotencyKey]
-      await transaction.query('SELECT pg_advisory_xact_lock(hashtextextended($1,0))', [hash(identity)])
       const existing = await transaction.query<{ id: string; request_hash: string; resources: ApplicationResourceRef[] }>(
         `SELECT id,request_hash,resources FROM application_operation_receipts
          WHERE workspace_id=$1 AND module_key=$2 AND operation_key=$3 AND actor_key=$4 AND idempotency_key=$5`, identity)
@@ -204,6 +209,6 @@ export class ApplicationPlatformService {
       await transaction.query(`INSERT INTO application_committed_events(receipt_id,workspace_id,module_key,event_key,resources)
         VALUES($1,$2,$3,$4,$5)`, [id,workspaceId,moduleKey,handler.eventKey,JSON.stringify(resources)])
       return { id, idempotencyKey: command.data.idempotencyKey, effect: 'committed', resources }
-    }, true)
+    }, true, hash(identity))
   }
 }
