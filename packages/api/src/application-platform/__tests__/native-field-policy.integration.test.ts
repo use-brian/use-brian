@@ -29,15 +29,15 @@ await assertLocalFixture()
 // decisions are production SQL under a separate login with no owner/RLS bypass.
 describe('[COMP:security/native-field-policy] current canonical native field masks', () => {
   const owner = getPool(),workspaceId = randomUUID(),otherWorkspaceId = randomUUID()
-  const ownerId = randomUUID(),memberId = randomUUID(),otherId = randomUUID(),assistantId = randomUUID(),externalId = randomUUID(),adminId = randomUUID()
-  const userIds: string[] = [ownerId,memberId,otherId,externalId,adminId],oauthClients: string[] = []
+  const ownerId = randomUUID(),memberId = randomUUID(),otherId = randomUUID(),assistantId = randomUUID(),externalId = randomUUID(),adminId = randomUUID(),fixtureWriterId = randomUUID()
+  const userIds: string[] = [ownerId,memberId,otherId,externalId,adminId,fixtureWriterId],oauthClients: string[] = []
   const store = createDbDocEntityStore({ actorUserId: ownerId })
   beforeAll(async () => {
     for (const id of userIds) await owner.query("INSERT INTO users(id,auth_provider,auth_provider_id) VALUES($1::uuid,'email',$1::text)",[id])
     for (const id of [workspaceId,otherWorkspaceId]) {
       await owner.query("INSERT INTO workspaces(id,name,owner_user_id,department_read_v2) VALUES($1,'Fictional field policy workspace',$2,false)",[id,ownerId])
-      for (const [user,role] of [[ownerId,'owner'],[memberId,'member'],[otherId,'member'],[adminId,'admin']]) await owner.query(
-        'INSERT INTO workspace_members(workspace_id,user_id,role,clearance) VALUES($1,$2,$3,$4)',[id,user,role,role === 'owner' || role === 'admin' ? 'confidential' : 'internal'])
+      for (const [user,role] of [[ownerId,'owner'],[memberId,'member'],[otherId,'member'],[adminId,'admin'],[fixtureWriterId,'member']]) await owner.query(
+        'INSERT INTO workspace_members(workspace_id,user_id,role,clearance) VALUES($1,$2,$3,$4)',[id,user,role,role === 'owner' || role === 'admin' || user === fixtureWriterId ? 'confidential' : 'internal'])
     }
     await owner.query("INSERT INTO assistants(id,name,owner_user_id,workspace_id,kind,clearance) VALUES($1,'Fictional policy assistant',$2,$3,'primary','confidential')",[assistantId,ownerId,workspaceId])
     await owner.query(`CREATE TABLE application_native_policy_fixture_metadata (
@@ -75,9 +75,31 @@ describe('[COMP:security/native-field-policy] current canonical native field mas
             'sensitivity','internal','compartments','[]'::jsonb,'projectIds','[]'::jsonb))||policy.override;
       END $$`)
     await owner.query('REVOKE ALL ON FUNCTION application_native_policy_fixture_catalog_reader(uuid,jsonb,text) FROM PUBLIC')
+    await owner.query(`CREATE FUNCTION application_native_writer_fixture_reader(w uuid,o jsonb,t text,i text) RETURNS jsonb
+      LANGUAGE plpgsql SECURITY DEFINER SET search_path=pg_catalog,public,pg_temp AS $$
+      DECLARE r public.entity_instances; schema public.entity_types; policy public.application_native_policy_fixture_catalog;
+      BEGIN
+        SELECT * INTO r FROM public.entity_instances WHERE workspace_id=w AND id=i::uuid AND entity_type_id=(o->>'entityTypeId')::uuid;
+        IF NOT FOUND THEN RETURN NULL; END IF;
+        SELECT * INTO schema FROM public.entity_types WHERE id=r.entity_type_id AND workspace_id=w;
+        SELECT * INTO policy FROM public.application_native_policy_fixture_catalog WHERE type_id=schema.id;
+        RETURN jsonb_build_object('moduleKey','writer_operations','origin',o,'typeKey','record.'||schema.id,
+          'schemaVersion',schema.schema_version::text,'policyVersion',policy.policy_version,'recordVersion',r.record_version::text,
+          'fieldKeys',(SELECT jsonb_agg(p->'name' ORDER BY p->>'name') FROM jsonb_array_elements(schema.properties) p),
+          'fields',policy.fields,'source',public.read_scope_source(w,'entity_instance',r.id));
+      END $$`)
+    await owner.query('REVOKE ALL ON FUNCTION application_native_writer_fixture_reader(uuid,jsonb,text,text) FROM PUBLIC')
+    await owner.query(`INSERT INTO application_native_field_contracts(module_key,contract_version,role_keys,metadata_reader,catalog_reader)
+      VALUES('writer_operations','1',ARRAY['finance','approver'],'application_native_writer_fixture_reader(uuid,jsonb,text,text)'::regprocedure,
+        'application_native_policy_fixture_catalog_reader(uuid,jsonb,text)'::regprocedure)`)
     for (const module of ['operations','other_operations']) await owner.query(`INSERT INTO application_native_field_contracts(module_key,contract_version,role_keys,metadata_reader,catalog_reader)
       VALUES($1,'1',ARRAY['finance','approver'],'application_native_policy_fixture_reader(uuid,jsonb,text,text)'::regprocedure,
         CASE WHEN $1='operations' THEN 'application_native_policy_fixture_catalog_reader(uuid,jsonb,text)'::regprocedure ELSE NULL END)`,[module])
+    // This real member has explicit field roles solely for subsequent synthetic
+    // record provisioning. Test principals never inherit its authority.
+    for (const role of ['finance','approver']) await owner.query(`INSERT INTO application_native_role_assignments
+      (workspace_id,module_key,user_id,role_key,issued_by_user_id,starts_at) VALUES($1,'operations',$2,$3,$4,'2020-01-01T00:00:00Z')`,
+      [workspaceId,fixtureWriterId,role,ownerId])
     await owner.query(`CREATE FUNCTION application_native_policy_fixture_domain(w uuid,o jsonb,t text) RETURNS jsonb
       LANGUAGE sql SECURITY DEFINER SET search_path=pg_catalog,public,pg_temp AS $$
       SELECT public.application_compile_query_catalog_domain(w,public.application_current_query_catalog(w,o,t)) $$`)
@@ -116,7 +138,8 @@ describe('[COMP:security/native-field-policy] current canonical native field mas
   })
   afterAll(async () => {
     await owner.query('DELETE FROM workspaces WHERE id=ANY($1::uuid[])',[[workspaceId,otherWorkspaceId]])
-    await owner.query('DELETE FROM application_native_field_contracts WHERE module_key=ANY($1::text[])',[['operations','other_operations']])
+    await owner.query('DELETE FROM application_native_field_contracts WHERE module_key=ANY($1::text[])',[['operations','other_operations','writer_operations']])
+    await owner.query('DROP FUNCTION application_native_writer_fixture_reader(uuid,jsonb,text,text)')
     await owner.query('DROP FUNCTION application_native_policy_fixture_reader(uuid,jsonb,text,text)')
     await owner.query('DROP FUNCTION application_native_policy_fixture_catalog_reader(uuid,jsonb,text)')
     await owner.query('DROP FUNCTION application_native_policy_fixture_domain(uuid,jsonb,text)')
@@ -136,22 +159,40 @@ describe('[COMP:security/native-field-policy] current canonical native field mas
       { key: 'cost',read: [['finance']],write: [['finance'],['approver']],releaseReadTo: [],releaseWriteTo: [] },
     ]
   }
-  async function catalogType(module = 'operations') {
+  async function catalogType(module = 'operations', claim = true) {
     const schema = await store.createEntityType({ workspaceId,name: `Fictional purchases ${randomUUID()}`,createdBy: ownerId,
       properties: [{ name: 'title',config: { kind: 'text' } },{ name: 'cost',config: { kind: 'number',format: 'decimal' } }] })
     const origin = { kind: 'generic' as const,entityTypeId: schema.id },type = `record.${schema.id}`
-    await owner.query('INSERT INTO application_native_resource_owners(workspace_id,origin,resource_type,module_key) VALUES($1,$2,$3,$4)',[workspaceId,origin,type,module])
-    await owner.query('INSERT INTO application_native_policy_fixture_catalog(type_id,fields) VALUES($1,$2)',[schema.id,JSON.stringify(fields())])
-    return { schema,origin,type }
+    const catalog = { schema,origin,type }
+    if (claim) await claimCatalog(catalog,module)
+    return catalog
+  }
+  async function claimCatalog(catalog: { schema: { id: string }; origin: { kind: 'generic'; entityTypeId: string }; type: string }, module: string) {
+    await owner.query('INSERT INTO application_native_resource_owners(workspace_id,origin,resource_type,module_key) VALUES($1,$2,$3,$4)',[workspaceId,catalog.origin,catalog.type,module])
+    await owner.query('INSERT INTO application_native_policy_fixture_catalog(type_id,fields) VALUES($1,$2)',[catalog.schema.id,JSON.stringify(fields())])
   }
   async function record(includeCost = true,module = 'operations') {
-    const catalog = await catalogType(module),{ schema } = catalog
+    const catalog = await catalogType(module,false),{ schema } = catalog
     const row = await store.createEntity({ workspaceId,entityTypeId: schema.id,createdBy: ownerId,lastEditedBy: ownerId,sourceApp: 'api',
       data: { title: { kind: 'text',value: 'Fictional request' },...(includeCost ? { cost: { kind: 'number' as const,value: 42 } } : {}) } })
     const recordVersion = row.recordVersion
     if (!recordVersion) throw new Error('The canonical fixture requires its persisted record version.')
+    await claimCatalog(catalog,module)
     await owner.query('INSERT INTO application_native_policy_fixture_metadata(resource_id,fields) VALUES($1,$2)',[row.id,JSON.stringify(fields())])
     return { ...catalog,row: { ...row,recordVersion } }
+  }
+  async function writerRecord() {
+    // Guarded synthetic provisioning occurs before the deployed module claims
+    // this schema. Every tested operation then uses the real canonical writer.
+    const schema = await store.createEntityType({ workspaceId, name: `Fictional writer records ${randomUUID()}`, createdBy: ownerId,
+      properties: [{ name: 'title', config: { kind: 'text' } }, { name: 'cost', config: { kind: 'number', format: 'decimal' } }] })
+    const row = await store.createEntity({ workspaceId, entityTypeId: schema.id, createdBy: ownerId, lastEditedBy: ownerId, sourceApp: 'api',
+      data: { title: { kind: 'text', value: 'Fictional protected record' }, cost: { kind: 'number', value: 42 } } })
+    const origin = { kind: 'generic' as const, entityTypeId: schema.id }, type = `record.${schema.id}`
+    await owner.query("INSERT INTO application_native_resource_owners(workspace_id,origin,resource_type,module_key) VALUES($1,$2,$3,'writer_operations')", [workspaceId, origin, type])
+    await owner.query('INSERT INTO application_native_policy_fixture_catalog(type_id,fields) VALUES($1,$2)', [schema.id, JSON.stringify(fields().map(field => field.key === 'cost' ? { ...field, write: [['approver']] } : field))])
+    if (!row.recordVersion) throw new Error('The canonical writer fixture requires its persisted version.')
+    return { schema, origin, type, row: { ...row, recordVersion: row.recordVersion } }
   }
   async function asMember<T>(userId: string,operation: (client: PoolClient) => Promise<T>) {
     const client = await getAppPool().connect()
@@ -171,7 +212,7 @@ describe('[COMP:security/native-field-policy] current canonical native field mas
     return (await owner.query(`INSERT INTO application_native_role_assignments(workspace_id,module_key,user_id,role_key,issued_by_user_id,starts_at,expires_at)
       VALUES($1,$2,$3,$4,$5,$6,$7) RETURNING id`,[workspace,module,user,role,ownerId,starts,expires])).rows[0].id as string
   }
-  async function clearRoles() { await owner.query('DELETE FROM application_native_role_assignments WHERE workspace_id=ANY($1::uuid[])',[[workspaceId,otherWorkspaceId]]) }
+  async function clearRoles() { await owner.query('DELETE FROM application_native_role_assignments WHERE workspace_id=ANY($1::uuid[]) AND user_id<>$2',[[workspaceId,otherWorkspaceId],fixtureWriterId]) }
   it('Q02 projects the actual legacy generic store getter before exposing native protected fields', async () => {
     await clearRoles()
     const fixture = await record(), legacy = createDbDocEntityStore({ actorUserId: memberId })
@@ -221,9 +262,71 @@ describe('[COMP:security/native-field-policy] current canonical native field mas
       .rejects.toMatchObject({ code: 'access_unavailable' })
     expect((await owner.query('SELECT data,record_version::text AS version FROM entity_instances WHERE id=$1', [fixture.row.id])).rows[0])
       .toMatchObject({ data: fixture.row.data, version: fixture.row.recordVersion })
+    await assign('finance')
     await assign('approver')
+    expect((await mask(fixture))?.writeFields).toContain('cost')
     expect((await legacy.updateEntity(workspaceId, fixture.row.id, patch, { actorUserId: memberId, expectedRecordVersion: fixture.row.recordVersion })).recordVersion)
       .toBe(String(BigInt(fixture.row.recordVersion) + 1n))
+  })
+  it('Q04 checks native create fields for a member and owner while supporting write-only creation', async () => {
+    await clearRoles()
+    const fixture = await writerRecord(), legacy = createDbDocEntityStore({ actorUserId: memberId })
+    const input = { workspaceId, entityTypeId: fixture.schema.id, createdBy: memberId, lastEditedBy: memberId, sourceApp: 'api' as const,
+      data: { title: { kind: 'text' as const, value: 'Fictional new request' }, cost: { kind: 'number' as const, value: 50 } } }
+    await expect(legacy.createEntity(input)).rejects.toMatchObject({ code: 'access_unavailable' })
+    await expect(store.createEntity({ ...input, createdBy: ownerId, lastEditedBy: ownerId })).rejects.toMatchObject({ code: 'access_unavailable' })
+    expect((await owner.query('SELECT id FROM entity_instances WHERE entity_type_id=$1', [fixture.schema.id])).rows).toHaveLength(1)
+    await assign('approver', memberId, 'writer_operations')
+    expect((await catalogMask(fixture))?.writeFields).toContain('cost')
+    const created = await legacy.createEntity(input)
+    expect(created.recordVersion).toBe('1')
+    expect(created.data).toEqual({ title: input.data.title })
+    expect((await owner.query('SELECT data FROM entity_instances WHERE id=$1', [created.id])).rows[0].data).toEqual(input.data)
+  })
+  it('Q04 preserves hidden cells on a legacy partial patch and projects the committed response', async () => {
+    await clearRoles()
+    const fixture = await writerRecord(), legacy = createDbDocEntityStore({ actorUserId: memberId })
+    expect((await mask(fixture))?.writeFields).toEqual(['title'])
+    const changed = await legacy.updateEntity(workspaceId, fixture.row.id, { data: { title: { kind: 'text', value: 'Edited visible title' } }, lastEditedBy: memberId },
+      { actorUserId: memberId, expectedRecordVersion: fixture.row.recordVersion! })
+    expect(changed.data).toEqual({ title: { kind: 'text', value: 'Edited visible title' } })
+    expect((await owner.query('SELECT data FROM entity_instances WHERE id=$1', [fixture.row.id])).rows[0].data.cost).toEqual(fixture.row.data.cost)
+    await assign('approver', memberId, 'writer_operations')
+    expect((await asMember(memberId, client => maskOn(client, fixture, fixture.type, changed.recordVersion)))?.writeFields).toContain('cost')
+    const written = await legacy.updateEntity(workspaceId, fixture.row.id, { data: { cost: { kind: 'number', value: 57 } }, lastEditedBy: memberId },
+      { actorUserId: memberId, expectedRecordVersion: changed.recordVersion! })
+    expect(written.data).toEqual(changed.data)
+    expect(written.recordVersion).toBe(String(BigInt(changed.recordVersion!) + 1n))
+  })
+  it('Q04 applies the same current write mask to raw SQL and whole-record deletion', async () => {
+    await clearRoles()
+    const fixture = await writerRecord(), legacy = createDbDocEntityStore({ actorUserId: memberId })
+    await expect(asMember(memberId, client => client.query("UPDATE entity_instances SET data=jsonb_set(data,'{cost,value}','80'::jsonb) WHERE id=$1", [fixture.row.id])))
+      .rejects.toMatchObject({ code: '42501' })
+    await expect(legacy.deleteEntity(workspaceId, fixture.row.id, { actorUserId: memberId, expectedRecordVersion: fixture.row.recordVersion! }))
+      .rejects.toMatchObject({ code: 'access_unavailable' })
+    expect((await owner.query('SELECT data,record_version::text AS version FROM entity_instances WHERE id=$1', [fixture.row.id])).rows[0])
+      .toMatchObject({ data: fixture.row.data, version: fixture.row.recordVersion })
+    await assign('approver', memberId, 'writer_operations')
+    await legacy.deleteEntity(workspaceId, fixture.row.id, { actorUserId: memberId, expectedRecordVersion: fixture.row.recordVersion! })
+    expect((await owner.query('SELECT id FROM entity_instances WHERE id=$1', [fixture.row.id])).rows).toEqual([])
+  })
+  it('Q04 rolls back canonical creation when its committed response cannot satisfy the current record policy', async () => {
+    await clearRoles()
+    const fixture = await writerRecord(), id = randomUUID(), legacy = createDbDocEntityStore({ actorUserId: memberId })
+    await assign('finance', memberId, 'writer_operations')
+    await owner.query(`UPDATE application_native_field_contracts SET metadata_reader='application_native_policy_fixture_reader(uuid,jsonb,text,text)'::regprocedure
+      WHERE module_key='writer_operations'`)
+    try {
+      await expect(legacy.createEntity({ id, workspaceId, entityTypeId: fixture.schema.id, createdBy: memberId, lastEditedBy: memberId, sourceApp: 'api',
+        data: { title: { kind: 'text', value: 'Fictional held response' }, cost: { kind: 'number', value: 91 } } }))
+        .rejects.toMatchObject({ code: 'access_unavailable' })
+      expect((await owner.query('SELECT id FROM entity_instances WHERE id=$1', [id])).rows).toEqual([])
+      expect((await owner.query('SELECT record_version FROM application_record_revisions WHERE entity_instance_id=$1', [id])).rows).toEqual([])
+    } finally {
+      await owner.query(`UPDATE application_native_field_contracts SET metadata_reader='application_native_writer_fixture_reader(uuid,jsonb,text,text)'::regprocedure
+        WHERE module_key='writer_operations'`)
+    }
   })
   const catalogOn = async (client: PoolClient,fixture: Awaited<ReturnType<typeof catalogType>>,type = fixture.type) =>
     (await client.query('SELECT read_native_application_field_catalog($1,$2,$3) AS value',[workspaceId,fixture.origin,type])).rows[0].value as
@@ -483,9 +586,16 @@ describe('[COMP:security/native-field-policy] current canonical native field mas
       expect(await valid([])).toBe(false)
       expect(await valid([{ ...original[0],version: '999' }])).toBe(false)
       expect(await valid([...original,...original])).toBe(false)
-      await owner.query(`INSERT INTO entity_instances(id,workspace_id,entity_type_id,data,created_by,last_edited_by)
-        VALUES($1,$2,$3,'{"title":{"kind":"text","value":"Fictional late record"}}',$4,$4)`,[absent,workspaceId,fixture.schema.id,ownerId])
-      await owner.query('INSERT INTO application_native_policy_fixture_metadata(resource_id,fields) VALUES($1,$2)',[absent,JSON.stringify(fields())])
+    })
+    // A genuinely independent native writer creates the formerly absent point.
+    // Do not replace the app actor inside its active execution context.
+    await owner.query('INSERT INTO application_native_policy_fixture_metadata(resource_id,fields) VALUES($1,$2)',[absent,JSON.stringify(fields())])
+    await createDbDocEntityStore({ actorUserId: fixtureWriterId }).createEntity({ id: absent,workspaceId,entityTypeId: fixture.schema.id,
+      createdBy: fixtureWriterId,lastEditedBy: fixtureWriterId,sourceApp: 'api',data: { title: { kind: 'text',value: 'Fictional late record' } } })
+    await asApplication(app,async client => {
+      const valid = async (candidates: Array<{ id: string;version: string }>) => (await client.query(
+        'SELECT assert_generic_application_query_candidates($1,$2,$3,$4,$5) AS admitted',
+        [workspaceId,fixture.schema.id,source.resourceId,source.version,JSON.stringify(candidates)])).rows[0].admitted
       expect((await client.query('SELECT read_admitted_application_field_snapshot($1,$2,$3) AS value',[workspaceId,source.resourceId,source.version])).rows[0].value)
         .toMatchObject({ held: false })
       const current = (await client.query<{ id: string;version: string }>("SELECT id,record_version::text AS version FROM application_generic_projection($1,$2,'query',NULL)",
@@ -494,7 +604,7 @@ describe('[COMP:security/native-field-policy] current canonical native field mas
       expect(await valid(current)).toBe(false)
     })
     // Canonical source readers hold row locks until their transaction commits.
-    await owner.query("UPDATE entity_instances SET data=jsonb_set(data,'{title,value}',to_jsonb('Fictional changed point'::text)) WHERE id=$1",[fixture.row.id])
+    await asMember(ownerId,client => client.query("UPDATE entity_instances SET data=jsonb_set(data,'{title,value}',to_jsonb('Fictional changed point'::text)) WHERE id=$1",[fixture.row.id]))
     await asApplication(app,async client => {
       expect((await client.query('SELECT assert_generic_application_query_candidates($1,$2,$3,$4,$5) AS admitted',
         [workspaceId,fixture.schema.id,source.resourceId,source.version,JSON.stringify(original)])).rows[0].admitted).toBe(false)
@@ -669,9 +779,10 @@ describe('[COMP:security/native-field-policy] current canonical native field mas
     }
   })
   async function addRecord(fixture: Awaited<ReturnType<typeof catalogType>>,title: string,cost = 8,policy = fields()) {
-    const row = await store.createEntity({ workspaceId,entityTypeId: fixture.schema.id,createdBy: ownerId,lastEditedBy: ownerId,sourceApp: 'api',
+    const id = randomUUID()
+    await owner.query('INSERT INTO application_native_policy_fixture_metadata(resource_id,fields) VALUES($1,$2)',[id,JSON.stringify(policy)])
+    const row = await createDbDocEntityStore({ actorUserId: fixtureWriterId }).createEntity({ id,workspaceId,entityTypeId: fixture.schema.id,createdBy: fixtureWriterId,lastEditedBy: fixtureWriterId,sourceApp: 'api',
       data: { title: { kind: 'text',value: title },cost: { kind: 'number',value: cost } } })
-    await owner.query('INSERT INTO application_native_policy_fixture_metadata(resource_id,fields) VALUES($1,$2)',[row.id,JSON.stringify(policy)])
     return row
   }
   async function observedFields(value: object) {
@@ -872,9 +983,10 @@ describe('[COMP:security/native-field-policy] current canonical native field mas
     await store.updateEntityType(workspaceId,fixture.schema.id,{ properties: [...fixture.schema.properties,{ name: 'author',config: { kind: 'created_by' } }] })
     const policy = [...fields(),{ key: 'author',read: [],write: [],releaseReadTo: [],releaseWriteTo: [] }]
     await owner.query('UPDATE application_native_policy_fixture_catalog SET fields=$2 WHERE type_id=$1',[fixture.schema.id,JSON.stringify(policy)])
-    const row = await createDbDocEntityStore({ actorUserId: otherId }).createEntity({ workspaceId,entityTypeId: fixture.schema.id,createdBy: otherId,lastEditedBy: otherId,
+    const id = randomUUID()
+    await owner.query('INSERT INTO application_native_policy_fixture_metadata(resource_id,fields) VALUES($1,$2)',[id,JSON.stringify(policy)])
+    const row = await createDbDocEntityStore({ actorUserId: otherId }).createEntity({ id,workspaceId,entityTypeId: fixture.schema.id,createdBy: otherId,lastEditedBy: otherId,
       sourceApp: 'api',data: { title: { kind: 'text',value: 'Fictional authored request' } } })
-    await owner.query('INSERT INTO application_native_policy_fixture_metadata(resource_id,fields) VALUES($1,$2)',[row.id,JSON.stringify(policy)])
     const dispatcher = new ApplicationPlatformService([createCanonicalGenericApplicationModule()])
     const value = await dispatcher.query(await nativeExecution(),'records','get',{ type: fixture.type,id: row.id }) as ApplicationRecordProjection
     expect(value.values.author).toEqual({ kind: 'created_by',value: otherId })

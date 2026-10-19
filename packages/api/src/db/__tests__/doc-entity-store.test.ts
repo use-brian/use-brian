@@ -119,13 +119,17 @@ const store = createDbDocEntityStore({ actorUserId: USER_ID })
 
 // SQL-shape fixture only. Admission itself is covered by the guarded real
 // application/native-field integration matrix, not these database doubles.
-function canonicalReadFixture(options: { missing?: boolean; missingSchema?: boolean } = {}) {
+function canonicalReadFixture(options: { missing?: boolean; missingSchema?: boolean; changes?: DocEntityInstance['data'] } = {}) {
   clientResponder = text => {
     if (text.includes('pg_catalog.pg_roles')) return { rows: [{ bypass: false }], rowCount: 1 }
+    if (text.trim().startsWith('INSERT INTO entity_instances') || text.trim().startsWith('UPDATE entity_instances')) {
+      return { rows: options.missing ? [] : [entityInstanceRow({ recordVersion: '1' })], rowCount: options.missing ? 0 : 1 }
+    }
+    if (text.trim().startsWith('DELETE FROM entity_instances')) return { rows: [], rowCount: 1 }
     if (text.includes('FROM public.entity_types')) return { rows: options.missingSchema ? [] : [entityTypeRow()], rowCount: options.missingSchema ? 0 : 1 }
     if (text.includes('FROM public.entity_instances')) return { rows: options.missing ? [] : [entityInstanceRow({ recordVersion: '1' })], rowCount: options.missing ? 0 : 1 }
     if (text.includes('read_generic_application_record(')) return { rows: [{ value: {
-      id: ENTITY_ID, recordVersion: '1', values: entityInstanceRow().data, absentFields: ['genre'], policyVersion: 'a'.repeat(64),
+      id: ENTITY_ID, recordVersion: '1', values: { ...entityInstanceRow().data, ...options.changes }, absentFields: ['genre'], policyVersion: 'a'.repeat(64),
       sources: [{ workspaceId: WORKSPACE_ID, resourceKind: 'application_field', resourceId: ENTITY_ID, version: 'fixture-version',
         userId: null, assistantId: null, sensitivity: 'internal', compartments: [], projectIds: [] }],
     } }], rowCount: 1 }
@@ -443,10 +447,7 @@ describe('[COMP:api/doc-entity-store] renameProperty', () => {
 
 describe('[COMP:api/doc-entity-store] EntityInstance CRUD', () => {
   it('createEntity inserts with the JSONB data column', async () => {
-    mockQueryWithRLS.mockResolvedValueOnce({
-      rows: [entityInstanceRow()],
-      rowCount: 1,
-    } as never)
+    canonicalReadFixture()
 
     const created = await store.createEntity({
       entityTypeId: ENTITY_TYPE_ID,
@@ -462,7 +463,7 @@ describe('[COMP:api/doc-entity-store] EntityInstance CRUD', () => {
 
     expect(created.id).toBe(ENTITY_ID)
     expect(created.data.title).toEqual({ kind: 'text', value: 'Inception' })
-    const [, sql, params] = mockQueryWithRLS.mock.calls[0] as [string, string, unknown[]]
+    const { text: sql, values: params } = clientQueries.find(query => query.text.trim().startsWith('INSERT INTO entity_instances'))! as { text: string; values: unknown[] }
     expect(sql).toContain('INSERT INTO entity_instances')
     expect(params[0]).toBe(ENTITY_TYPE_ID)
     expect(params[1]).toBe(WORKSPACE_ID)
@@ -505,17 +506,14 @@ describe('[COMP:api/doc-entity-store] EntityInstance CRUD', () => {
   })
 
   it('updateEntity emits jsonb cast + bumps last_edited_at', async () => {
-    mockQueryWithRLS.mockResolvedValueOnce({
-      rows: [entityInstanceRow()],
-      rowCount: 1,
-    } as never)
+    canonicalReadFixture({ changes: { title: { kind: 'text', value: 'Dune' } } })
     await store.updateEntity(WORKSPACE_ID, ENTITY_ID, {
       data: { title: { kind: 'text', value: 'Dune' } },
       lastEditedBy: USER_ID,
     })
-    const [, sql, params] = mockQueryWithRLS.mock.calls[0] as [string, string, unknown[]]
+    const { text: sql, values: params } = clientQueries.find(query => query.text.trim().startsWith('UPDATE entity_instances'))! as { text: string; values: unknown[] }
     expect(sql).toContain('UPDATE entity_instances')
-    expect(sql).toContain('data = $1::jsonb')
+    expect(sql).toContain('data = data || $1::jsonb')
     expect(sql).toContain('last_edited_at = now()')
     expect(JSON.parse(params[0] as string)).toEqual({
       title: { kind: 'text', value: 'Dune' },
@@ -523,16 +521,16 @@ describe('[COMP:api/doc-entity-store] EntityInstance CRUD', () => {
   })
 
   it('updateEntity throws when row is missing', async () => {
-    mockQueryWithRLS.mockResolvedValueOnce({ rows: [], rowCount: 0 } as never)
+    canonicalReadFixture({ missing: true })
     await expect(
       store.updateEntity(WORKSPACE_ID, ENTITY_ID, { lastEditedBy: USER_ID }),
     ).rejects.toMatchObject({ code: 'access_unavailable' })
   })
 
   it('deleteEntity emits the DELETE scoped to workspace', async () => {
-    mockQueryWithRLS.mockResolvedValueOnce({ rows: [], rowCount: 1 } as never)
+    canonicalReadFixture()
     await store.deleteEntity(WORKSPACE_ID, ENTITY_ID)
-    const [, sql, params] = mockQueryWithRLS.mock.calls[0] as [string, string, unknown[]]
+    const { text: sql, values: params } = clientQueries.find(query => query.text.trim().startsWith('DELETE FROM entity_instances'))! as { text: string; values: unknown[] }
     expect(sql).toContain('DELETE FROM entity_instances')
     expect(params).toEqual([ENTITY_ID, WORKSPACE_ID])
   })

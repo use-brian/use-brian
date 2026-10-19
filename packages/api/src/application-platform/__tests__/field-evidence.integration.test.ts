@@ -103,6 +103,7 @@ describe('[COMP:api/application-field-evidence] canonical field observations thr
   })
   it('cannot mint field evidence from caller-created temporary canonical rows',async () => {
     const fixture = await record()
+    const observationsBefore = (await owner.query('SELECT * FROM application_field_resources WHERE workspace_id=$1 AND resource_id=$2 ORDER BY id', [workspaceId,fixture.row.id])).rows
     await owner.query("UPDATE entity_instances SET sensitivity='confidential' WHERE id=$1",[fixture.row.id])
     const raw = (await owner.query('SELECT to_jsonb(r) AS row FROM public.entity_instances r WHERE r.id=$1',[fixture.row.id])).rows[0].row
     await asMember(memberId,async client => {
@@ -119,7 +120,7 @@ describe('[COMP:api/application-field-evidence] canonical field observations thr
         await client.query('ROLLBACK TO SAVEPOINT forged_field_capture')
       } finally { await client.query('DROP TABLE pg_temp.entity_instances') }
     })
-    expect((await owner.query('SELECT id FROM application_field_resources WHERE workspace_id=$1 AND resource_id=$2',[workspaceId,fixture.row.id])).rows).toEqual([])
+    expect((await owner.query('SELECT * FROM application_field_resources WHERE workspace_id=$1 AND resource_id=$2 ORDER BY id',[workspaceId,fixture.row.id])).rows).toEqual(observationsBefore)
     const legitimate = await capture({ ...fixture,row: { ...fixture.row,recordVersion: String(raw.record_version) } },['title'],ownerId)
     expect(legitimate.values).toEqual({ title: { kind: 'text',value: 'Fictional title' } })
   })

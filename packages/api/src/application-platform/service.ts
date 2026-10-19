@@ -113,7 +113,9 @@ export class ApplicationPlatformService {
             throw new ApplicationPlatformError('record_version_conflict', 'The record or its declared uniqueness changed. Refresh before retrying.')
           }
           if (code === '22023' || code === '23514' || code === '22P02') {
-            throw new ApplicationPlatformError('invalid_value', 'The declared operation constraints were not satisfied.')
+            const refusal = new ApplicationPlatformError('invalid_value', 'The declared operation constraints were not satisfied.')
+            Object.defineProperty(refusal, 'cause', { value: error })
+            throw refusal
           }
           if (code === '42501') throw new ApplicationPlatformError('access_unavailable', 'The operation is unavailable.')
         }
