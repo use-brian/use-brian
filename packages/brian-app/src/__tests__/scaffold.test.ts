@@ -28,6 +28,24 @@ beforeAll(()=>{
   // Only installed third-party tooling/types. All Brian code is unpacked from local tarballs.
   symlinkSync(dirname(createRequire(resolve(root,'../shared/package.json')).resolve('zod/package.json')),join(temporary,'node_modules/zod'))
   writeFileSync(join(temporary,'package.json'),JSON.stringify({type:'module'}))
+  // Packing, compiling and running generated projects is fixture setup, outside per-assertion timing.
+  for(const profile of ['native','connector'] as const){
+    const directory=join(temporary,profile)
+    run(process.execPath,[join(temporary,'node_modules/@use-brian/brian-app/bin/brian-app.js'),'scaffold','--profile',profile,directory])
+    run('npm',['run','build'],directory)
+    const contractOutput=run('npm',['run','contract'],directory)
+    ;(evidence.generated as Record<string,unknown>)[profile]={compiled:true,contractOutput,files:Object.fromEntries(Object.keys(scaffoldFiles(profile)).map(path=>[path,digest(join(directory,path))]))}
+    if(profile==='native'){
+      const cli=join(temporary,'node_modules/@use-brian/brian-app/bin/brian-app.js')
+      const generated=(evidence.generated as Record<string,Record<string,unknown>>)[profile]
+      generated.lints=[run(process.execPath,[cli,directory]),run(process.execPath,[cli,'lint',directory])]
+      // A real external type error must remain visible through packed canonical declarations.
+      writeFileSync(join(directory,'src/invalid.ts'),`import type {ApplicationCommand} from '@use-brian/brian-app/application'; const command:ApplicationCommand={idempotencyKey:'x',expectedVersion:12,input:{}};`)
+      try { run(process.execPath,[tool('typescript/bin/tsc'),'-p',join(directory,'tsconfig.json')]); generated.invalidTypeOutput='' }
+      catch(error) { generated.invalidTypeOutput=String((error as {stdout?:unknown}).stdout) }
+      rmSync(join(directory,'src/invalid.ts'))
+    }
+  }
 },120000)
 afterAll(()=>{
   if(temporary && process.env.BRIAN_SDK_CONFORMANCE_EVIDENCE){
@@ -52,19 +70,13 @@ assert.ok(graph.every(path=>!path.includes('/core/')&&!path.includes('/shared/')
   })
   it.each(['native','connector']as const)('K05 compiles/runs %s outside the workspace using only packed public profiles',profile=>{
     const directory=join(temporary,profile)
-    run(process.execPath,[join(temporary,'node_modules/@use-brian/brian-app/bin/brian-app.js'),'scaffold','--profile',profile,directory])
-    run('npm',['run','build'],directory)
-    const contractOutput=run('npm',['run','contract'],directory);expect(contractOutput).toContain('unconfigured boundary: unavailable')
-    ;(evidence.generated as Record<string,unknown>)[profile]={compiled:true,contractOutput,files:Object.fromEntries(Object.keys(scaffoldFiles(profile)).map(path=>[path,digest(join(directory,path))]))}
+    const generated=(evidence.generated as Record<string,Record<string,unknown>>)[profile]
+    expect(generated.compiled).toBe(true)
+    expect(generated.contractOutput).toContain('unconfigured boundary: unavailable')
     expect(readFileSync(join(directory,'src',profile==='native'?'module.ts':'source.ts'),'utf8')).toContain('@use-brian/brian-app/')
-    if(profile==='native'){
-      const cli=join(temporary,'node_modules/@use-brian/brian-app/bin/brian-app.js')
-      expect(run(process.execPath,[cli,directory])).toContain('Example application')
-      expect(run(process.execPath,[cli,'lint',directory])).toContain('Example application')
-      // A real external type error must remain visible through packed canonical declarations.
-      writeFileSync(join(directory,'src/invalid.ts'),`import type {ApplicationCommand} from '@use-brian/brian-app/application'; const command:ApplicationCommand={idempotencyKey:'x',expectedVersion:12,input:{}};`)
-      expect(()=>run(process.execPath,[tool('typescript/bin/tsc'),'-p',join(directory,'tsconfig.json')])).toThrow()
-      rmSync(join(directory,'src/invalid.ts'))
+    if(profile==='native') {
+      for(const output of generated.lints as string[])expect(output).toContain('Example application')
+      expect(generated.invalidTypeOutput).toContain('TS2322')
     }
   })
   it('K06 validates deterministic templates and refuses traversal, symlinks, unknown profiles and overwrites',()=>{
