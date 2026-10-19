@@ -66,9 +66,9 @@ export type EntityInstance = {
   workspaceId: string;
   data: Record<string, CellValue>;
   sourceApp: string;
-  createdAt: string;
+  createdAt: string | null;
   createdBy: string | null;
-  lastEditedAt: string;
+  lastEditedAt: string | null;
   lastEditedBy: string | null;
 };
 

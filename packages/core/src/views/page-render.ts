@@ -18,6 +18,7 @@
  */
 
 import type { Block, Page } from './blocks.js'
+import { bindScopeSources,boundScopeSources } from '../security/source-evidence.js'
 import type {
   A2UIWidget,
   BarChartWidget,
@@ -267,5 +268,6 @@ export async function renderPage(page: Page, deps: BindingDeps): Promise<ViewPay
     direction: 'column',
     children,
   }
-  return { a2ui: '0.8', root }
+  bindScopeSources(root,children.flatMap(child => boundScopeSources(child)))
+  return bindScopeSources({ a2ui: '0.8', root },boundScopeSources(root))
 }

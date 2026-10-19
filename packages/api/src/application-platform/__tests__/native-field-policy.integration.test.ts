@@ -7,7 +7,7 @@ import { createDbDocEntityStore } from '../../db/doc-entity-store.js'
 import { createMemory,getMemoryById,countMemories,getMemoryIndex,getMemoryStats,searchMemories } from '../../db/memories.js'
 import { readApplicationFieldAncestors } from '../field-evidence.js'
 import { defineNativeApplicationFieldPolicy,decideNativeApplicationFields,ContextScopeAccumulator,executionToolContext,NOOP_TURN_LEDGER,boundScopeSources,createDocEntityTools,
-  type NativeApplicationFieldFacts,type ScopeSource,type ExecutionContext,type LLMProvider } from '@use-brian/core'
+  buildPayload,renderPage,type NativeApplicationFieldFacts,type ScopeSource,type ExecutionContext,type LLMProvider } from '@use-brian/core'
 import { findAssistantById,findOrCreateUser } from '../../db/users.js'
 import { resolveExecutionContextSystem } from '../../context-scope/execution-context.js'
 import { runAssistantTurn } from '../../turn/kernel.js'
@@ -253,6 +253,78 @@ describe('[COMP:security/native-field-policy] current canonical native field mas
       expect(await fieldSnapshot(source, memberId)).toMatchObject({ held: true })
       expect(await fieldSnapshot(source, otherId)).toMatchObject({ held: false })
     }
+  })
+  it('Q02 withholds undeclared managed metadata from every actual legacy generic read and write response', async () => {
+    await clearRoles()
+    const fixture = await writerRecord(),legacy = createDbDocEntityStore({ actorUserId: memberId })
+    const assertMetadata = (value: unknown) => expect(value).toMatchObject({ createdAt: null,lastEditedAt: null,createdBy: null,lastEditedBy: null })
+    assertMetadata(await legacy.getEntity(workspaceId,fixture.row.id))
+    assertMetadata((await legacy.queryEntities(workspaceId,fixture.schema.id)).rows[0])
+    assertMetadata(await legacy.updateEntity(workspaceId,fixture.row.id,{ data: { title: { kind: 'text',value: 'Fictional metadata-safe patch' } },lastEditedBy: memberId }))
+    assertMetadata(await legacy.createEntity({ workspaceId,entityTypeId: fixture.schema.id,sourceApp: 'api',createdBy: memberId,lastEditedBy: memberId,
+      data: { title: { kind: 'text',value: 'Fictional metadata-safe creation' } } }))
+  })
+  it('Q02 exposes legacy managed metadata only through an actually readable declared system cell', async () => {
+    await clearRoles()
+    const schema = await store.createEntityType({ workspaceId,name: `Fictional managed metadata ${randomUUID()}`,createdBy: ownerId,properties: [
+      { name: 'title',config: { kind: 'text' } },{ name: 'created',config: { kind: 'created_time' } },
+      { name: 'edited',config: { kind: 'last_edited_time' } },{ name: 'author',config: { kind: 'created_by' } },{ name: 'editor',config: { kind: 'last_edited_by' } },
+    ] })
+    const row = await store.createEntity({ workspaceId,entityTypeId: schema.id,sourceApp: 'api',createdBy: ownerId,lastEditedBy: ownerId,
+      data: { title: { kind: 'text',value: 'Fictional managed metadata' } } })
+    const origin = { kind: 'generic' as const,entityTypeId: schema.id },type = `record.${schema.id}`
+    await owner.query("INSERT INTO application_native_resource_owners(workspace_id,origin,resource_type,module_key) VALUES($1,$2,$3,'writer_operations')",[workspaceId,origin,type])
+    await owner.query('INSERT INTO application_native_policy_fixture_catalog(type_id,fields) VALUES($1,$2)',[schema.id,JSON.stringify(schema.properties.map(property => ({
+      key: property.name,read: property.name === 'title' ? [] : [['finance']],write: property.name === 'title' ? [] : [['finance']],releaseReadTo: [],releaseWriteTo: [],
+    })))])
+    const legacy = createDbDocEntityStore({ actorUserId: memberId })
+    const hidden = await legacy.getEntity(workspaceId,row.id)
+    expect(hidden?.data).toEqual({ title: { kind: 'text',value: 'Fictional managed metadata' } })
+    expect(hidden).toMatchObject({ createdAt: null,lastEditedAt: null,createdBy: null,lastEditedBy: null })
+    await assign('finance',memberId,'writer_operations')
+    const readable = (await legacy.getEntity(workspaceId,row.id))!
+    expect(readable.data.created.kind).toBe('created_time')
+    expect(new Date(readable.createdAt!).getTime()).toBe(new Date(readable.data.created.value as string).getTime())
+    expect(new Date(readable.lastEditedAt!).getTime()).toBe(new Date(readable.data.edited.value as string).getTime())
+    expect(readable.createdBy).toBe(ownerId);expect(readable.lastEditedBy).toBe(ownerId)
+  })
+  it('Q02 carries actual custom-view query obligations through the final payload for independent readers', async () => {
+    await clearRoles()
+    const fixture = await record(),assignment = await assign();await assign('finance',otherId)
+    const unused = new Proxy({}, { get: () => { throw new Error('The generic view must not call unrelated stores.') } }) as never
+    const deps = { userId: memberId,workspaceId,docEntityStore: createDbDocEntityStore({ actorUserId: memberId }),
+      taskStore: unused,crmStore: unused,workflowRunStore: unused,workspaceDirectory: unused }
+    const binding = { entity: 'custom' as const,entityTypeId: fixture.schema.id,viewType: 'table' as const }
+    const payload = await buildPayload(binding,deps)
+    const sources = boundScopeSources(payload)
+    expect(sources.length).toBeGreaterThanOrEqual(2)
+    expect(boundScopeSources(payload.root)).toEqual(sources)
+    expect(JSON.stringify(payload)).not.toContain('application_field')
+    const rendered = await renderPage({ blocks: [{ kind: 'data',id: randomUUID(),binding }] },deps)
+    expect(boundScopeSources(rendered)).toEqual(sources)
+    expect(boundScopeSources(rendered.root)).toEqual(sources)
+    await owner.query("UPDATE application_native_role_assignments SET status='revoked' WHERE id=$1",[assignment])
+    let protectedObservations = 0
+    for (const source of sources) {
+      const fields = (await owner.query('SELECT fields FROM application_field_resources WHERE id=$1',[source.resourceId])).rows[0].fields as string[]
+      const consumedCost = fields.includes('cost'); if (consumedCost) protectedObservations += 1
+      // A domain with no consumed protected field retains its structural rights.
+      expect(await fieldSnapshot(source,memberId)).toMatchObject({ held: consumedCost })
+      expect(await fieldSnapshot(source,otherId)).toMatchObject({ held: false })
+    }
+    expect(protectedObservations).toBeGreaterThan(0)
+  })
+  it('Q02 preserves an actual empty custom-table query observation through page rendering', async () => {
+    await clearRoles()
+    const fixture = await catalogType(),unused = new Proxy({}, { get: () => { throw new Error('The generic view must not call unrelated stores.') } }) as never
+    const rendered = await renderPage({ blocks: [{ kind: 'data',id: randomUUID(),binding: {
+      entity: 'custom',entityTypeId: fixture.schema.id,viewType: 'table',
+    } }] },{ userId: memberId,workspaceId,docEntityStore: createDbDocEntityStore({ actorUserId: memberId }),
+      taskStore: unused,crmStore: unused,workflowRunStore: unused,workspaceDirectory: unused })
+    const sources = boundScopeSources(rendered)
+    expect(sources).toHaveLength(1);expect(boundScopeSources(rendered.root)).toEqual(sources)
+    expect(await fieldSnapshot(sources[0],memberId)).toMatchObject({ held: false })
+    expect(JSON.stringify(rendered)).not.toContain('application_field')
   })
   it('Q04 enforces the native field write set at the actual legacy canonical generic writer', async () => {
     await clearRoles()

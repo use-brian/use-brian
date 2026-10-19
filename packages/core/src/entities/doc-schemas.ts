@@ -330,9 +330,9 @@ export const entityInstanceSchema: z.ZodType<EntityInstance> = z.object({
   sensitivity: z.enum(['public', 'internal', 'confidential']).optional(),
   compartments: z.array(z.string().min(1)).optional(),
   projectIds: z.array(idSchema).optional(),
-  createdAt: z.string().min(1).max(64),
+  createdAt: z.string().min(1).max(64).nullable(),
   createdBy: idSchema.nullable(),
-  lastEditedAt: z.string().min(1).max(64),
+  lastEditedAt: z.string().min(1).max(64).nullable(),
   lastEditedBy: idSchema.nullable(),
 })
 

@@ -147,6 +147,19 @@ function rowToInstance(row: EntityInstanceRow): DocEntityInstance {
   }
 }
 
+/** Managed metadata cannot form a second serialization path around cell masks. */
+function projectedInstance(row: Omit<EntityInstanceRow, 'data'>,schema: DocEntityType,projection: import('@use-brian/shared').ApplicationRecordProjection): DocEntityInstance {
+  const instance = rowToInstance({ ...row,data: projection.values as Record<string,CellValue> })
+  const readable = new Set(projection.fields)
+  const visible = (kind: PropertyDef['config']['kind']) => schema.properties.some(property => property.config.kind === kind && readable.has(property.name))
+  return bindScopeSources({ ...instance,
+    createdAt: visible('created_time') ? instance.createdAt : null,
+    lastEditedAt: visible('last_edited_time') ? instance.lastEditedAt : null,
+    createdBy: visible('created_by') ? instance.createdBy : null,
+    lastEditedBy: visible('last_edited_by') ? instance.lastEditedBy : null,
+  },boundScopeSources(projection))
+}
+
 // ── Factory ───────────────────────────────────────────────────────────
 
 /**
@@ -201,7 +214,7 @@ export function createDbDocEntityStore(boundActor?: { actorUserId: string; trans
     if (!schemas.rows[0]) throw new ApplicationPlatformError('access_unavailable', 'The schema is unavailable.')
     const projection = await readCanonicalGenericRecord({ transaction: client, workspaceId: row.workspaceId }, canonicalGenericResource(rowToType(schemas.rows[0])), row.id)
     if (projection.ref.version !== row.recordVersion) throw new ApplicationPlatformError('access_unavailable', 'The record changed.')
-    return bindScopeSources(rowToInstance({ ...row, data: projection.values as Record<string, CellValue> }), boundScopeSources(projection))
+    return projectedInstance(row,rowToType(schemas.rows[0]),projection)
   }
   return {
     // ── EntityType CRUD ───────────────────────────────────────────────
@@ -597,7 +610,7 @@ export function createDbDocEntityStore(boundActor?: { actorUserId: string; trans
         const rows = result.records.map(record => {
           const row = byId.get(record.ref.id)
           if (!row || row.recordVersion !== record.ref.version) throw new ApplicationPlatformError('access_unavailable', 'The record changed.')
-          return bindScopeSources(rowToInstance({ ...row, data: record.values as Record<string, CellValue> }), boundScopeSources(record))
+          return projectedInstance(row,rowToType(schemas.rows[0]),record)
         })
         const sources = boundScopeSources(result)
         bindScopeSources(rows, sources)

@@ -253,11 +253,11 @@ export type EntityInstance = {
   sensitivity?: 'public' | 'internal' | 'confidential'
   compartments?: string[]
   projectIds?: string[]
-  /** ISO-8601 from `entity_instances.created_at`. */
-  createdAt: string
+  /** ISO-8601 only when a declared creation cell is readable; otherwise null. */
+  createdAt: string | null
   /** `users.id` — null on system-created rows (e.g. ingest workers). */
   createdBy: string | null
-  lastEditedAt: string
+  lastEditedAt: string | null
   lastEditedBy: string | null
   /** Opaque canonical revision, absent only on legacy/in-memory adapters. */
   recordVersion?: string

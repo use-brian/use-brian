@@ -157,6 +157,13 @@ describe('[COMP:views/bindings] custom entity table', () => {
     expect(row.created).toMatchObject({ type: 'date', format: 'datetime' })
   })
 
+  it('renders a withheld managed timestamp as an empty cell', async () => {
+    const payload = await buildPayload({ entity: 'custom',entityTypeId: 'et1',viewType: 'table' },
+      deps(mockStore(ENTITY_TYPE,[{ ...INSTANCE,createdAt: null,lastEditedAt: null,createdBy: null,lastEditedBy: null }])))
+    expect((payload.root as TableWidget).rows[0].created).toBeNull()
+    expect(JSON.stringify(payload)).not.toContain('Invalid Date')
+  })
+
   it('honors a columns subset', async () => {
     const payload = await buildPayload(
       { entity: 'custom', entityTypeId: 'et1', viewType: 'table', columns: ['title', 'rating'] },

@@ -12,6 +12,8 @@
  * [COMP:views/bindings]
  */
 
+import { bindScopeSources, boundScopeSources } from '../security/source-evidence.js'
+import type { ScopeSource } from '../security/derived-scope.js'
 import type {
   CompanyListRow,
   ContactListRow,
@@ -829,9 +831,9 @@ function customCell(
 ): A2UIRowValue {
   switch (prop.config.kind) {
     case 'created_time':
-      return dateCell(new Date(instance.createdAt), 'datetime')
+      return instance.createdAt === null ? null : dateCell(new Date(instance.createdAt), 'datetime')
     case 'last_edited_time':
-      return dateCell(new Date(instance.lastEditedAt), 'datetime')
+      return instance.lastEditedAt === null ? null : dateCell(new Date(instance.lastEditedAt), 'datetime')
     case 'created_by':
       return instance.createdBy
         ? personCell(instance.createdBy, memberMap.get(instance.createdBy))
@@ -914,12 +916,15 @@ async function buildCustomEntityTable(
   const properties = entityType.properties
   const visible = config.columns ?? properties.map((p) => p.name)
   const instances: EntityInstance[] = []
+  const sources: ScopeSource[] = []
   let cursor: string | undefined
   // Preserve the existing 500-row view window using bounded canonical queries.
   for (let page = 0; page < 5; page += 1) {
     const result = await store.queryEntities(deps.workspaceId, config.entityTypeId,
       undefined, undefined, 100, cursor, { actorUserId: deps.userId })
     instances.push(...result.rows)
+    sources.push(...boundScopeSources(result))
+    for (const row of result.rows) sources.push(...boundScopeSources(row))
     cursor = result.nextCursor
     if (!cursor) break
   }
@@ -962,7 +967,7 @@ async function buildCustomEntityTable(
     return out
   })
 
-  return { type: 'table', columns: customColumns(properties, visible), rows, rowAction }
+  return bindScopeSources({ type: 'table', columns: customColumns(properties, visible), rows, rowAction },sources)
 }
 
 // ── Public dispatcher ─────────────────────────────────────────────────
@@ -1003,5 +1008,5 @@ export async function buildPayload(
       root = await buildCustomEntityTable(config, deps)
       break
   }
-  return { a2ui: '0.8', root }
+  return bindScopeSources({ a2ui: '0.8', root },boundScopeSources(root))
 }
