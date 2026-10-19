@@ -340,6 +340,7 @@ describe('[COMP:api/crm-integration-auth] Actual command and joined resource iso
   })
   it('bounds member profiles to one workspace and records field-only audited edits with stale-write protection', async () => {
     const f = await fixture(), other = await fixture()
+    await pool.query("INSERT INTO crm_field_definitions(workspace_id,entity_kind,field_key,label,field_type) VALUES($1,'person','private_field','Fictional private field','text')",[f.workspaceId])
     await pool.query(`UPDATE entities SET canonical_id='member@example.test', attributes=$3::jsonb
       WHERE workspace_id=$1 AND id=$2`, [f.workspaceId, f.contactId, JSON.stringify({
       email: 'member@example.test', phone: '+852 2000 0000', private_note: 'must remain private',

@@ -8,7 +8,7 @@ import { ApplicationPlatformError } from '@use-brian/shared'
 import { applyRLSGucs, getAppPool, getPool } from '../../db/client.js'
 import { bindTaskClosedHook, createTask, getTaskById, resolveTaskById, updateTask } from '../../db/tasks.js'
 import { createCompany,createContact,createDeal,getDealById,listDeals,updateCompany,updateContact,updateDeal,setDealStage } from '../../db/crm.js'
-import { createCrmFieldDefinition,updateCrmCustomFields,setCrmArchived,setCrmDealPipelineStage,getCrmConfig,addCrmDealParticipant,removeCrmDealParticipant } from '../../db/crm-r2.js'
+import { createCrmFieldDefinition,archiveCrmFieldDefinition,updateCrmCustomFields,setCrmArchived,setCrmDealPipelineStage,getCrmConfig,addCrmDealParticipant,removeCrmDealParticipant } from '../../db/crm-r2.js'
 import { createEntity, supersedeEntity, updateEntity } from '../../db/entities-store.js'
 import { createDbCrmOperationsStore } from '../../db/crm-operations-store.js'
 import { createCrmOperationsService } from '../../crm-operations/service.js'
@@ -227,6 +227,134 @@ describe('[COMP:api/application-records] canonical native operation composition'
     const before=(await owner.query('SELECT display_name,attributes,valid_to,superseded_by,scope_version::text AS version FROM entities WHERE id=$1',[value.id])).rows[0]
     await expect(supersedeEntity(userId,value.id,{attributes:{},...fields} as EntitySupersedePatch)).rejects.toMatchObject({code:'invalid_value'})
     expect((await owner.query('SELECT display_name,attributes,valid_to,superseded_by,scope_version::text AS version FROM entities WHERE id=$1',[value.id])).rows[0]).toEqual(before)
+  })
+  it.each([
+    {label:'company domain scalar',kind:'company',attributes:{domain:17}},
+    {label:'company tags array',kind:'company',attributes:{tags:'invented'}},
+    {label:'contact email scalar',kind:'person',attributes:{email:{invented:true}}},
+    {label:'contact phone scalar',kind:'person',attributes:{phone:17}},
+    {label:'contact company UUID',kind:'person',attributes:{company_id:'not-a-uuid'}},
+    {label:'deal stage enum',kind:'deal',attributes:{stage:'invented'}},
+    {label:'negative deal decimal',kind:'deal',attributes:{amount:'-1'}},
+    {label:'exponent deal decimal',kind:'deal',attributes:{amount:'1e8'}},
+    {label:'deal decimal shape',kind:'deal',attributes:{amount:false}},
+    {label:'deal invalid close date',kind:'deal',attributes:{close_date:'2026-02-30'}},
+    {label:'deal company UUID',kind:'deal',attributes:{company_id:'not-a-uuid'}},
+    {label:'deal contact UUID',kind:'deal',attributes:{contact_id:'not-a-uuid'}},
+  ].flatMap(value => ['entity writer','raw nonowner SQL'].map(writer => ({...value,writer}))))
+  ('Q04 refuses invalid $label through the $writer without changing its canonical version',async ({kind,attributes,writer}) => {
+    const value=kind==='company'?await createCompany(userId,{workspaceId,name:`Fictional value ${randomUUID()}`,access,mergeByName:false})
+      :kind==='person'?await createContact(userId,{workspaceId,name:'Fictional value contact',access}):await createDeal(userId,{workspaceId,amount:12,access})
+    const before=(await owner.query('SELECT attributes,scope_version::text AS version FROM entities WHERE id=$1',[value.id])).rows[0]
+    const patch={...before.attributes,...attributes}
+    if(writer==='entity writer') await expect(updateEntity(userId,value.id,{attributes:patch},access)).rejects.toThrow('invalid_value')
+    else {
+      const transaction=await client()
+      try {await expect(transaction.query('UPDATE entities SET attributes=$2::jsonb WHERE id=$1',[value.id,patch])).rejects.toMatchObject({code:'22023'})}
+      finally {await transaction.query('ROLLBACK');transaction.release()}
+    }
+    expect((await owner.query('SELECT attributes,scope_version::text AS version FROM entities WHERE id=$1',[value.id])).rows[0]).toEqual(before)
+  })
+  it.each([{kind:'company',attributes:{domain:17}},{kind:'person',attributes:{email:[]}},
+    {kind:'deal',attributes:{stage:'invented'}},{kind:'deal',attributes:{amount:'-1'}}])
+  ('Q04 refuses malformed native $kind attributes during raw canonical creation',async ({kind,attributes}) => {
+    const before=(await owner.query('SELECT count(*)::int AS count FROM entities WHERE workspace_id=$1',[workspaceId])).rows[0].count
+    await expect(createEntity({kind,displayName:'Fictional invalid business value',workspaceId,createdByUserId:userId,source:'user',attributes} as EntityCreateParams))
+      .rejects.toThrow('invalid_value')
+    expect((await owner.query('SELECT count(*)::int AS count FROM entities WHERE workspace_id=$1',[workspaceId])).rows[0].count).toBe(before)
+  })
+  it.each([
+    {fieldType:'text' as const,value:17,options:[]},
+    {fieldType:'number' as const,value:'1',options:[]},
+    {fieldType:'date' as const,value:'2026-02-30',options:[]},
+    {fieldType:'boolean' as const,value:0,options:[]},
+    {fieldType:'single_select' as const,value:'undeclared',options:['accepted']},
+    {fieldType:'multi_select' as const,value:['accepted','undeclared'],options:['accepted']},
+    {fieldType:'entity_reference' as const,value:'not-a-uuid',options:['company']},
+  ])('Q04 enforces current custom $fieldType values below raw nonowner SQL',async ({fieldType,value,options}) => {
+    const record=await createDeal(userId,{workspaceId,access}),fieldKey=`validation_${fieldType}`
+    const definition=await createCrmFieldDefinition({userId,workspaceId,entityKind:'deal',fieldKey,label:'Fictional value vocabulary',fieldType,options})
+    const before=(await owner.query('SELECT attributes,scope_version::text AS version FROM entities WHERE id=$1',[record.id])).rows[0]
+    const transaction=await client()
+    try {
+      await expect(transaction.query("UPDATE entities SET attributes=jsonb_set(attributes,'{custom_fields}',$2::jsonb) WHERE id=$1",[record.id,{[fieldKey]:value}]))
+        .rejects.toMatchObject({code:'22023'})
+      await transaction.query('ROLLBACK')
+      expect((await owner.query('SELECT attributes,scope_version::text AS version FROM entities WHERE id=$1',[record.id])).rows[0]).toEqual(before)
+    } finally {
+      await transaction.query('ROLLBACK');transaction.release()
+      await owner.query('DELETE FROM crm_field_definitions WHERE id=$1 AND workspace_id=$2',[definition!.id,workspaceId])
+    }
+  })
+  it('Q04 rejects an undeclared custom key below the raw entity writer',async () => {
+    const record=await createDeal(userId,{workspaceId,access})
+    await expect(updateEntity(userId,record.id,{attributes:{stage:'lead',custom_fields:{undeclared:'value'}}},access)).rejects.toThrow('invalid_value')
+    expect((await owner.query("SELECT attributes ? 'custom_fields' AS present FROM entities WHERE id=$1",[record.id])).rows[0].present).toBe(false)
+  })
+  it('Q04 enforces required custom values on raw create and replacement without partial effects',async () => {
+    const record=await createDeal(userId,{workspaceId,access}),fieldKey='validation_required'
+    const definition=await createCrmFieldDefinition({userId,workspaceId,entityKind:'deal',fieldKey,label:'Fictional required value',fieldType:'text',isRequired:true})
+    try {
+      await expect(createEntity({kind:'deal',displayName:'Fictional missing required value',workspaceId,createdByUserId:userId,source:'user',attributes:{stage:'lead'}}))
+        .rejects.toThrow('invalid_value')
+      expect((await owner.query("SELECT id FROM entities WHERE workspace_id=$1 AND display_name='Fictional missing required value'",[workspaceId])).rows).toEqual([])
+      await updateEntity(userId,record.id,{attributes:{stage:'lead',custom_fields:{[fieldKey]:'accepted'}}},access)
+      const before=(await owner.query('SELECT attributes,scope_version::text AS version FROM entities WHERE id=$1',[record.id])).rows[0]
+      await expect(updateEntity(userId,record.id,{attributes:{stage:'lead',custom_fields:{}}},access)).rejects.toThrow('invalid_value')
+      expect((await owner.query('SELECT attributes,scope_version::text AS version FROM entities WHERE id=$1',[record.id])).rows[0]).toEqual(before)
+    } finally {await owner.query('DELETE FROM crm_field_definitions WHERE id=$1 AND workspace_id=$2',[definition!.id,workspaceId])}
+  })
+  it('Q04 retains archived custom values while refusing edits and deletion through raw replacements',async () => {
+    const record=await createDeal(userId,{workspaceId,access}),fieldKey='validation_archived'
+    const definition=await createCrmFieldDefinition({userId,workspaceId,entityKind:'deal',fieldKey,label:'Fictional archived value',fieldType:'text'})
+    try {
+      await updateCrmCustomFields({ctx:access,entityId:record.id,values:{[fieldKey]:'original'}})
+      await archiveCrmFieldDefinition(userId,workspaceId,definition!.id)
+      const attributes=(await owner.query('SELECT attributes FROM entities WHERE id=$1',[record.id])).rows[0].attributes
+      expect(await updateEntity(userId,record.id,{displayName:'Fictional retained historical value',attributes},access)).toMatchObject({id:record.id})
+      const before=(await owner.query('SELECT attributes,scope_version::text AS version FROM entities WHERE id=$1',[record.id])).rows[0]
+      for(const custom_fields of [{[fieldKey]:'edited'},{}]) {
+        await expect(updateEntity(userId,record.id,{attributes:{...attributes,custom_fields}},access)).rejects.toThrow('invalid_value')
+        expect((await owner.query('SELECT attributes,scope_version::text AS version FROM entities WHERE id=$1',[record.id])).rows[0]).toEqual(before)
+      }
+    } finally {await owner.query('DELETE FROM crm_field_definitions WHERE id=$1 AND workspace_id=$2',[definition!.id,workspaceId])}
+  })
+  it.each(['organisation_name','position','mailing_address'])
+  ('Q04 preserves the compiled native profile text contract for %s below raw writers',async fieldKey => {
+    const value=await createContact(userId,{workspaceId,name:'Fictional native profile',access})
+    expect(await updateEntity(userId,value.id,{attributes:{custom_fields:{[fieldKey]:'Fictional profile text'}}},access)).toMatchObject({id:value.id})
+    const before=(await owner.query('SELECT attributes,scope_version::text AS version FROM entities WHERE id=$1',[value.id])).rows[0]
+    for(const invalid of [17,'x'.repeat(fieldKey==='mailing_address'?601:201)]) {
+      await expect(updateEntity(userId,value.id,{attributes:{custom_fields:{[fieldKey]:invalid}}},access)).rejects.toThrow('invalid_value')
+      expect((await owner.query('SELECT attributes,scope_version::text AS version FROM entities WHERE id=$1',[value.id])).rows[0]).toEqual(before)
+    }
+  })
+  it('Q04 refuses an already unsafe native amount number at raw canonical creation',async () => {
+    const before=(await owner.query('SELECT count(*)::int AS count FROM entities WHERE workspace_id=$1',[workspaceId])).rows[0].count
+    await expect(createEntity({kind:'deal',displayName:'Fictional unsafe amount',workspaceId,createdByUserId:userId,source:'user',attributes:{stage:'lead',amount:9007199254740992}}))
+      .rejects.toMatchObject({code:'invalid_value'})
+    expect((await owner.query('SELECT count(*)::int AS count FROM entities WHERE workspace_id=$1',[workspaceId])).rows[0].count).toBe(before)
+  })
+  it('Q04 refuses an already unsafe native amount number before a raw canonical patch commits',async () => {
+    const value=await createDeal(userId,{workspaceId,amount:12,access})
+    const before=(await owner.query('SELECT attributes,scope_version::text AS version FROM entities WHERE id=$1',[value.id])).rows[0]
+    await expect(updateEntity(userId,value.id,{attributes:{stage:'lead',amount:9007199254740992}},access)).rejects.toMatchObject({code:'invalid_value'})
+    expect((await owner.query('SELECT attributes,scope_version::text AS version FROM entities WHERE id=$1',[value.id])).rows[0]).toEqual(before)
+  })
+  it('Q04 refuses an already unsafe native amount before raw canonical supersession',async () => {
+    const value=await createDeal(userId,{workspaceId,amount:12,access})
+    const before=(await owner.query('SELECT attributes,valid_to,superseded_by,scope_version::text AS version FROM entities WHERE id=$1',[value.id])).rows[0]
+    const count=(await owner.query('SELECT count(*)::int AS count FROM entities WHERE workspace_id=$1',[workspaceId])).rows[0].count
+    await expect(supersedeEntity(userId,value.id,{attributes:{stage:'lead',amount:9007199254740992}})).rejects.toMatchObject({code:'invalid_value'})
+    expect((await owner.query('SELECT attributes,valid_to,superseded_by,scope_version::text AS version FROM entities WHERE id=$1',[value.id])).rows[0]).toEqual(before)
+    expect((await owner.query('SELECT count(*)::int AS count FROM entities WHERE workspace_id=$1',[workspaceId])).rows[0].count).toBe(count)
+  })
+  it('Q03/Q04 does not reveal a private native kind while refusing an unsafe amount input',async () => {
+    const value=await createDeal(userId,{workspaceId,amount:12,access})
+    await owner.query('UPDATE entities SET user_id=$2 WHERE id=$1',[value.id,userId])
+    const before=(await owner.query('SELECT attributes,scope_version::text AS version FROM entities WHERE id=$1',[value.id])).rows[0]
+    expect(await updateEntity(readerId,value.id,{attributes:{stage:'lead',amount:9007199254740992}},{...access,userId:readerId})).toBeNull()
+    expect((await owner.query('SELECT attributes,scope_version::text AS version FROM entities WHERE id=$1',[value.id])).rows[0]).toEqual(before)
   })
   it.each(['catalog stage','registered stage','primary participant removal'] as const)
   ('Q04/Q05 keeps untouched numeric JSON exact through the legacy %s writer',async operation => {

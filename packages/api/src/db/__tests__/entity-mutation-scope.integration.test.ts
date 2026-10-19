@@ -327,6 +327,7 @@ describe('[COMP:api/entity-mutation-scope] canonical entity writers', () => {
     await pool.query('UPDATE crm_pipelines SET archived_at=now() WHERE id=$1',[f.pipelineId])
     expect(await setCrmDealPipelineStage({ctx:f.ctx,entityId:f.deal.id,stageId:f.stageId})).toBeNull()
     await pool.query('UPDATE crm_pipelines SET archived_at=NULL WHERE id=$1',[f.pipelineId])
+    await pool.query("INSERT INTO crm_field_definitions(workspace_id,entity_kind,field_key,label,field_type) VALUES($1,'deal','approval_note','Fictional approval note','text')",[f.workspaceId])
     await pool.query("UPDATE crm_pipeline_stages SET required_fields=ARRAY['approval_note'] WHERE id=$1",[f.stageId])
     await expect(setCrmDealPipelineStage({ctx:f.ctx,entityId:f.deal.id,stageId:f.stageId})).rejects.toThrow('Required fields are missing: approval_note')
     expect(await f.stored()).toEqual(before)

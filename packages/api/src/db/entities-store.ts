@@ -252,10 +252,17 @@ function entitySourceGuard(actorUserId: string, access: AccessContext | undefine
   return { sql: `${execution.sql} AND ${member.sql}`, params: [...execution.params, ...member.params], nextIdx: member.nextIdx }
 }
 
+/** Numeric JSON cannot recover an unsafe integer; SQL numeric input keeps its original text separately. */
+function hasUnsafeNativeAmount(attributes:Record<string,unknown>|undefined):boolean {
+  const amount=attributes?.amount
+  return typeof amount==='number' && Number.isInteger(amount) && !Number.isSafeInteger(amount)
+}
+
 export async function createEntity(params: EntityCreateParams, transactionClient?: pg.PoolClient): Promise<EntityRecord> {
   // Fail fast, before any connection or admission read (WU-4.5).
   assertAuthorshipPresent('createEntity', params.createdByUserId)
   assertEntityInputFrame(entityCreateInput,params)
+  if(params.kind==='deal' && hasUnsafeNativeAmount(params.attributes)) throw new ApplicationPlatformError('invalid_value','Use an exact decimal string for this native amount.')
   if (!transactionClient) {
     const client = await getAppPool().connect()
     try {
@@ -1225,6 +1232,15 @@ export async function updateEntity(
   transactionClient?: pg.PoolClient, operation?: { expectedVersion?: string; fieldIntent?: readonly string[] },
 ): Promise<EntityRecord | null> {
   assertEntityInputFrame(entityPatchInput,fields)
+  if(hasUnsafeNativeAmount(fields.attributes) && !transactionClient) {
+    const client=await getAppPool().connect()
+    try {
+      await client.query('BEGIN');await applyRLSGucs(client,actorUserId)
+      const result=await updateEntity(actorUserId,id,fields,access,client,operation)
+      await client.query('COMMIT');return result
+    } catch(error) {await client.query('ROLLBACK').catch(()=>{});throw error}
+    finally {client.release()}
+  }
   await assertNativeEntityFieldWrites(actorUserId, id, fields, transactionClient, operation?.fieldIntent)
   if (operation?.fieldIntent === undefined) return updateEntityMutation(actorUserId, id, fields, access, transactionClient, operation)
   const client = transactionClient ?? await getAppPool().connect()
@@ -1259,6 +1275,14 @@ async function updateEntityMutation(
   operation?: { expectedVersion?: string; fieldIntent?: readonly string[] },
 ): Promise<EntityRecord | null> {
   access = entityMutationAccess(actorUserId, access)
+  if(hasUnsafeNativeAmount(fields.attributes)) {
+    if(!transactionClient) throw new Error('A canonical amount check requires its source transaction.')
+    const guard=entitySourceGuard(actorUserId,access,'mutation',2)
+    const source=(await transactionClient.query<{kind:string}>(`SELECT kind FROM entities WHERE id=$1 AND valid_to IS NULL
+      AND retracted_at IS NULL AND NOT scope_held AND ${guard.sql} FOR UPDATE`,[id,...guard.params])).rows[0]
+    if(!source) return null
+    if(source.kind==='deal') throw new ApplicationPlatformError('invalid_value','Use an exact decimal string for this native amount.')
+  }
   if (operation?.expectedVersion !== undefined) {
     if (!/^[1-9]\d*$/.test(operation.expectedVersion)) throw new ApplicationPlatformError('record_version_conflict','A valid expected source version is required.')
     if (!transactionClient) {
@@ -1431,6 +1455,7 @@ export async function supersedeEntity(
         return null
       }
       const old = toEntity(oldRes.rows[0])
+      if(old.kind==='deal' && hasUnsafeNativeAmount(patch.attributes)) throw new ApplicationPlatformError('invalid_value','Use an exact decimal string for this native amount.')
       if (destination?.workspace_id !== old.workspaceId) throw new Error('scope_workspace_mismatch')
       const nextSensitivity = maxSensitivity(old.sensitivity, patch.sensitivity ?? old.sensitivity)
       if (patch.sensitivity !== undefined && patch.sensitivity !== nextSensitivity) {

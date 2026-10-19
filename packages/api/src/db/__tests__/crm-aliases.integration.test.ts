@@ -32,9 +32,9 @@ describe('[COMP:crm/native-aliases] real native storage and CRM retrieval', () =
 
   it('teaches, retries, searches, edits, and removes an alias on one stable contact', async () => {
     const f = await workspace()
-    const company = await store.createCompany({ ...f, name: 'Example Works' })
-    const contact = await store.createContact({ ...f, name: 'Morgan Vale', email: 'morgan@example.com', phone: '+1 202 555 0142', companyId: company.id, tags: ['partner'] })
-    const deal = await store.createDeal({ ...f, contactId: contact.id, companyId: company.id })
+    const company = await store.createCompany({ userId:f.userId,workspaceId:f.workspaceId,access:f.access, name: 'Example Works' })
+    const contact = await store.createContact({ userId:f.userId,workspaceId:f.workspaceId,access:f.access, name: 'Morgan Vale', email: 'morgan@example.com', phone: '+1 202 555 0142', companyId: company.id, tags: ['partner'] })
+    const deal = await store.createDeal({ userId:f.userId,workspaceId:f.workspaceId,access:f.access, contactId: contact.id, companyId: company.id })
     for (const alias of ['  Momo  ', 'MOMO']) {
       const result = await aliases.noteAlias!.execute({ entity_id: contact.id, alias }, f.context)
       expect(result.isError).not.toBe(true)
@@ -57,8 +57,8 @@ describe('[COMP:crm/native-aliases] real native storage and CRM retrieval', () =
 
   it('round-trips company and deal aliases through canonical CRM projections', async () => {
     const f = await workspace()
-    const company = await store.createCompany({ ...f, name: 'Example Industries' })
-    const deal = await store.createDeal({ ...f, companyId: company.id })
+    const company = await store.createCompany({ userId:f.userId,workspaceId:f.workspaceId,access:f.access, name: 'Example Industries' })
+    const deal = await store.createDeal({ userId:f.userId,workspaceId:f.workspaceId,access:f.access, companyId: company.id })
     await addEntityAlias(f.userId, company.id, 'EI', f.access)
     await addEntityAlias(f.userId, deal.id, 'Renewal project', f.access)
     expect(await store.getCompanyById(f.access, company.id)).toMatchObject({ name: 'Example Industries', aliases: ['ei'] })
@@ -71,8 +71,8 @@ describe('[COMP:crm/native-aliases] real native storage and CRM retrieval', () =
 
   it('refuses visible identity conflicts without merging or renaming records', async () => {
     const f = await workspace()
-    const first = await store.createContact({ ...f, name: 'Morgan Vale' })
-    const second = await store.createContact({ ...f, name: 'Momo' })
+    const first = await store.createContact({ userId:f.userId,workspaceId:f.workspaceId,access:f.access, name: 'Morgan Vale' })
+    const second = await store.createContact({ userId:f.userId,workspaceId:f.workspaceId,access:f.access, name: 'Momo' })
     expect(await addEntityAlias(f.userId, first.id, 'Momo', f.access)).toEqual({ kind: 'conflict', conflictingEntityId: second.id })
     expect(await store.getContactById(f.access, first.id)).toMatchObject({ name: 'Morgan Vale', aliases: [] })
     expect(await store.listContacts(f.access, {})).toHaveLength(2)
@@ -83,13 +83,13 @@ describe('[COMP:crm/native-aliases] real native storage and CRM retrieval', () =
     const other = await workspace()
     await pool.query(`INSERT INTO workspace_members (workspace_id,user_id,role) VALUES ($1,$2,'member')`, [other.workspaceId, f.userId])
     const outside = await store.createContact({ userId: f.userId, workspaceId: other.workspaceId, name: 'Outside Record' })
-    const secret = await store.createContact({ ...f, name: 'Private Record', sensitivity: 'confidential' })
+    const secret = await store.createContact({ userId:f.userId,workspaceId:f.workspaceId,access:f.access, name: 'Private Record', sensitivity: 'confidential' })
     for (const id of [outside.id, secret.id]) {
       expect(await addEntityAlias(f.userId, id, 'Blocked', f.access)).toEqual({ kind: 'not_found' })
       expect(await removeEntityAlias(f.userId, id, 'Blocked', f.access)).toBeNull()
     }
     // Hidden name conflicts must not disclose the hidden record's id.
-    const visible = await store.createContact({ ...f, name: 'Visible Record' })
+    const visible = await store.createContact({ userId:f.userId,workspaceId:f.workspaceId,access:f.access, name: 'Visible Record' })
     expect(await addEntityAlias(f.userId, visible.id, 'Private Record', f.access)).toMatchObject({ kind: 'ok' })
     expect(await store.listContacts(f.access, { query: 'Private Record' })).toEqual([expect.objectContaining({ id: visible.id })])
     expect(await pool.query('SELECT id FROM entities WHERE id = ANY($1::uuid[]) AND cardinality(aliases) > 0', [[outside.id, secret.id]])).toMatchObject({ rowCount: 0 })

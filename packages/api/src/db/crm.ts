@@ -76,11 +76,11 @@ export class CrmPersonIdentityConflictError extends Error {
  * Updates are IN PLACE (`updateEntity`) so the entity id — and therefore
  * every inbound and outbound edge — stays valid. Canonical source versions
  * support optimistic edits; historical revision projection is tracked separately.
- * Frozen-v1 constraints that used to live in
- * DB CHECKs / triggers (stage enum, amount ≥ 0, same-workspace FK) are now
- * enforced here; their error messages keep the old `deals_stage_check` /
- * `deals_amount_check` / "same workspace" tokens so callers and tests that
- * matched them still match.
+ * Typed writers validate business values and current relationship authority.
+ * Canonical entities additionally enforce known native/custom value constraints
+ * below raw and typed writers (migration 8035). Current target authority remains
+ * a separate canonical admission check. Legacy typed errors retain their
+ * `deals_stage_check` / `deals_amount_check` / "same workspace" tokens.
  */
 
 const VALID_STAGES: readonly DealStage[] = [

@@ -31,6 +31,7 @@ async function fixture() {
   await pool.query('INSERT INTO users(id,auth_provider_id) VALUES($1::uuid,$1::text)',[userId])
   await pool.query("INSERT INTO workspaces(id,name,owner_user_id) VALUES($1,'Privacy fixture',$2)",[workspaceId,userId])
   await pool.query("INSERT INTO workspace_members(workspace_id,user_id,role) VALUES($1,$2,'owner')",[workspaceId,userId])
+  await pool.query("INSERT INTO crm_field_definitions(workspace_id,entity_kind,field_key,label,field_type) VALUES($1,'person','reference','Fictional reference','text')",[workspaceId])
   for(const [id,name,email] of [[contactId,'Subject person',ownEmail],[otherId,'Unrelated person',otherEmail]])
     await pool.query("INSERT INTO entities(id,workspace_id,kind,display_name,canonical_id,created_by_user_id,source,attributes) VALUES($1,$2,'person',$3,$4,$5,'manual',$6)",[id,workspaceId,name,email,userId,JSON.stringify({email,custom_fields:{reference:'subject fixture'}})])
   const context:CrmOperationsContext={workspaceId,actor:{kind:'user',userId},authority:{role:'owner',canWrite:true,canConfigure:true,trustedIdentitySources:[]}}
