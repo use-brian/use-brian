@@ -1,13 +1,15 @@
 import { createHash,randomUUID,randomBytes } from 'node:crypto'
 import { afterAll,beforeAll,describe,expect,it } from 'vitest'
 import type { PoolClient } from 'pg'
+import { z } from 'zod'
+import { ApplicationPlatformError } from '@use-brian/shared'
 import { getAppPool,getPool,applyRLSGucs } from '../../db/client.js'
 import { runWithAgentAccess } from '../../db/agent-access-context.js'
 import { createDbDocEntityStore } from '../../db/doc-entity-store.js'
 import { createMemory,getMemoryById,countMemories,getMemoryIndex,getMemoryStats,searchMemories } from '../../db/memories.js'
 import { readApplicationFieldAncestors } from '../field-evidence.js'
 import { defineNativeApplicationFieldPolicy,decideNativeApplicationFields,ContextScopeAccumulator,executionToolContext,NOOP_TURN_LEDGER,boundScopeSources,createDocEntityTools,
-  buildPayload,renderPage,type NativeApplicationFieldFacts,type ScopeSource,type ExecutionContext,type LLMProvider } from '@use-brian/core'
+  buildPayload,renderPage,type NativeApplicationFieldFacts,type ScopeSource,type ExecutionContext,type LLMProvider,type ApplicationModuleDefinition } from '@use-brian/core'
 import { findAssistantById,findOrCreateUser } from '../../db/users.js'
 import { resolveExecutionContextSystem } from '../../context-scope/execution-context.js'
 import { runAssistantTurn } from '../../turn/kernel.js'
@@ -438,6 +440,163 @@ describe('[COMP:security/native-field-policy] current canonical native field mas
     } finally {
       await owner.query(`UPDATE application_native_field_contracts SET metadata_reader='application_native_writer_fixture_reader(uuid,jsonb,text,text)'::regprocedure
         WHERE module_key='writer_operations'`)
+    }
+  })
+  it('Q02/Q04 refuses a native hidden-field assignment even when its value is unchanged', async () => {
+    await clearRoles()
+    const fixture = await record(),legacy = createDbDocEntityStore({ actorUserId: memberId })
+    for (const value of [42,43]) await expect(legacy.updateEntity(workspaceId,fixture.row.id,{ data: { cost: { kind: 'number',value } },lastEditedBy: memberId },
+      { actorUserId: memberId,expectedRecordVersion: fixture.row.recordVersion })).rejects.toMatchObject({ code: 'access_unavailable' })
+    expect((await owner.query('SELECT data,record_version::text AS version FROM entity_instances WHERE id=$1',[fixture.row.id])).rows[0])
+      .toEqual({ data: fixture.row.data,version: fixture.row.recordVersion })
+    // Reading cost never turns a title-only patch into a cost write.
+    await assign('finance')
+    const service = new ApplicationPlatformService([createCanonicalGenericApplicationModule()])
+    const changed = await service.command(await nativeExecution(),'records','record_patch',{ idempotencyKey: randomUUID(),expectedVersion: fixture.row.recordVersion,input: {
+      operation: 'patch',type: fixture.type,id: fixture.row.id,data: { title: { kind: 'text',value: 'Fictional visible-field-only patch' } },
+    } })
+    expect(changed.resources[0].version).toBe('2')
+    expect((await owner.query('SELECT data FROM entity_instances WHERE id=$1',[fixture.row.id])).rows[0].data.cost).toEqual(fixture.row.data.cost)
+  })
+  it('Q06 reauthorizes a saved native generic receipt under current fields in a fresh invocation', async () => {
+    await clearRoles()
+    const fixture = await record(),assignment = await assign();await assign('approver');await assign('finance',otherId)
+    const service = new ApplicationPlatformService([createCanonicalGenericApplicationModule()])
+    const command = { idempotencyKey: randomUUID(),expectedVersion: fixture.row.recordVersion,input: {
+      operation: 'patch',type: fixture.type,id: fixture.row.id,data: { cost: { kind: 'number',value: 50 } },
+    } }
+    const committed = await service.command(await nativeExecution(),'records','record_patch',command)
+    expect(committed.resources[0].version).toBe('2')
+    const observed = await service.query(await nativeExecution(),'records','get',{ type: fixture.type,id: fixture.row.id }) as ApplicationRecordProjection
+    const sources = boundScopeSources(observed)
+    expect(sources.length).toBeGreaterThan(0)
+    await owner.query("UPDATE application_native_role_assignments SET status='revoked' WHERE id=$1",[assignment])
+    await expect(service.command(await nativeExecution(),'records','record_patch',command)).rejects.toMatchObject({ code: 'access_unavailable' })
+    for (const source of sources) {
+      expect(await fieldSnapshot(source,memberId)).toMatchObject({ held: true })
+      expect(await fieldSnapshot(source,otherId)).toMatchObject({ held: false })
+    }
+    expect((await owner.query('SELECT data,record_version::text AS version FROM entity_instances WHERE id=$1',[fixture.row.id])).rows[0])
+      .toMatchObject({ data: { cost: { kind: 'number',value: 50 } },version: '2' })
+    await assign('finance')
+    expect((await service.command(await nativeExecution(),'records','record_patch',command)).id).toBe(committed.id)
+    await owner.query(`INSERT INTO scope_resource_states(workspace_id,resource_kind,resource_id,resource_version,review_state,classification_revision,holding_reason)
+      SELECT $1,'entity_instance',$2,read_scope_review_source($1,'entity_instance',$2)->>'version','held',1,'Fictional current review hold'`,[workspaceId,fixture.row.id])
+    try {
+      await expect(service.command(await nativeExecution(),'records','record_patch',command)).rejects.toMatchObject({ code: 'access_unavailable' })
+    } finally {
+      await owner.query("DELETE FROM scope_resource_states WHERE workspace_id=$1 AND resource_kind='entity_instance' AND resource_id=$2",[workspaceId,fixture.row.id])
+    }
+    expect((await owner.query('SELECT count(*)::int AS count FROM application_command_audit WHERE receipt_id=$1',[committed.id])).rows[0].count).toBe(1)
+    expect((await owner.query('SELECT count(*)::int AS count FROM application_committed_events WHERE receipt_id=$1',[committed.id])).rows[0].count).toBe(1)
+  })
+  const approvalInput = z.object({ type: z.string(),ids: z.tuple([z.string().uuid(),z.string().uuid()]),
+    versions: z.tuple([z.string().regex(/^[1-9]\d*$/),z.string().regex(/^[1-9]\d*$/)]) }).strict()
+  function approvalModule(afterWrites?: () => Promise<void>): ApplicationModuleDefinition<PoolClient> {
+    // Trusted deployed fixture code composes production handlers. No manifest,
+    // client input or runtime JSON supplies a handler or authority function.
+    const base = createCanonicalGenericApplicationModule(),batch = base.commands.record_batch
+    const operations = (raw: unknown) => {
+      const input = approvalInput.parse(raw)
+      return { operations: input.ids.map((id,index) => ({ operation: 'patch' as const,type: input.type,id,
+        expectedVersion: input.versions[index],data: { title: { kind: 'text' as const,value: 'Fictional approved request' },cost: { kind: 'number' as const,value: 50 } } })) }
+    }
+    return { ...base,application: { ...base.application,commands: [...base.application.commands,'approve_pair'] },
+      commands: { ...base.commands,approve_pair: { input: approvalInput,eventKey: 'records.changed',
+        authorize: (context,raw) => batch.authorize(context,operations(raw)),
+        execute: async (context,raw) => {
+          const input = approvalInput.parse(raw)
+          for (const id of input.ids) {
+            const value = await base.queries.get.execute(context,{ type: input.type,id }) as ApplicationRecordProjection
+            await base.queries.get.authorizeResult!(context,value)
+            if ((value.values.title as { value?: unknown } | undefined)?.value !== 'Fictional request') {
+              throw new ApplicationPlatformError('invalid_value','The current record state does not allow approval.')
+            }
+          }
+          // Each canonical write locks and compares the exact version validated
+          // above. A later-row conflict rolls back earlier rows and revisions.
+          const refs = await batch.execute(context,operations(raw))
+          await afterWrites?.()
+          return refs
+        },authorizeResult: batch.authorizeResult,
+      } } }
+  }
+  async function approvalFixture(secondTitle = 'Fictional request') {
+    await clearRoles()
+    const fixture = await record(),second = await addRecord(fixture,secondTitle,42)
+    for (const user of [ownerId,memberId]) { await assign('finance',user);await assign('approver',user) }
+    await assign('finance',otherId)
+    const ids: [string,string] = [fixture.row.id,second.id]
+    const app = await application(fixture,'member',undefined,['read','query','patch','command:approve_pair'],{ kind: 'ids',ids })
+    const command = { idempotencyKey: randomUUID(),input: { type: fixture.type,ids,
+      versions: [fixture.row.recordVersion,second.recordVersion!] as [string,string] } }
+    return { fixture,second,app,command,execution: () => resolveApplicationExecutionContext(app.authentication) }
+  }
+  async function unchangedApproval(value: Awaited<ReturnType<typeof approvalFixture>>,key: string) {
+    const rows = (await owner.query('SELECT id,data,record_version::text AS version FROM entity_instances WHERE id=ANY($1::uuid[])',[value.command.input.ids])).rows
+    for (const row of rows) expect(row).toMatchObject({ version: '1',data: { cost: { kind: 'number',value: 42 } } })
+    expect(rows).toHaveLength(2)
+    expect((await owner.query('SELECT id FROM application_operation_receipts WHERE idempotency_key=$1',[key])).rows).toEqual([])
+    expect((await owner.query('SELECT entity_instance_id FROM application_record_revisions WHERE entity_instance_id=ANY($1::uuid[]) AND record_version>1',[value.command.input.ids])).rows).toEqual([])
+  }
+  it('Q06 commits an app-bound named semantic pair once and reauthorizes replay without exposing cached results',async () => {
+    const value = await approvalFixture(),service = new ApplicationPlatformService([approvalModule()])
+    // Possession of the semantic command does not release the generic writer.
+    await expect(service.command(await value.execution(),'records','record_patch',{ idempotencyKey: randomUUID(),input: {
+      operation: 'patch',type: value.fixture.type,id: value.fixture.row.id,expectedVersion: '1',data: { cost: { kind: 'number',value: 51 } },
+    } })).rejects.toMatchObject({ code: 'access_unavailable' })
+    const committed = await service.command(await value.execution(),'records','approve_pair',value.command)
+    expect(committed.resources.map(ref => ref.version)).toEqual(['2','2'])
+    const replay = await service.command(await value.execution(),'records','approve_pair',value.command)
+    expect(replay).toEqual(committed)
+    const stored = (await owner.query('SELECT resources::text FROM application_operation_receipts WHERE id=$1',[committed.id])).rows[0].resources
+    expect(stored).not.toContain('Fictional approved');expect(stored).not.toContain('cost')
+    for (const table of ['application_command_audit','application_committed_events']) {
+      expect((await owner.query(`SELECT count(*)::int AS count FROM ${table} WHERE receipt_id=$1`,[committed.id])).rows[0].count).toBe(1)
+    }
+    const observed = await service.query(await value.execution(),'records','get',{ type: value.fixture.type,id: value.fixture.row.id }) as ApplicationRecordProjection
+    await owner.query("UPDATE application_native_role_assignments SET status='revoked' WHERE workspace_id=$1 AND module_key='operations' AND user_id=$2 AND role_key='finance'",[workspaceId,memberId])
+    await expect(service.command(await value.execution(),'records','approve_pair',value.command)).rejects.toMatchObject({ code: 'access_unavailable' })
+    for (const source of boundScopeSources(observed)) {
+      expect(await fieldSnapshot(source,memberId)).toMatchObject({ held: true })
+      expect(await fieldSnapshot(source,otherId)).toMatchObject({ held: false })
+    }
+    expect((await owner.query('SELECT record_version::text AS version FROM entity_instances WHERE id=ANY($1::uuid[])',[value.command.input.ids])).rows.map(row => row.version)).toEqual(['2','2'])
+  })
+  it.each(['state','cas'] as const)('Q06 rolls back an app-bound semantic pair on a second-record %s refusal',async reason => {
+    const value = await approvalFixture(reason === 'state' ? 'Fictional already decided' : undefined),service = new ApplicationPlatformService([approvalModule()])
+    if (reason === 'cas') value.command.input.versions[1] = '999'
+    await expect(service.command(await value.execution(),'records','approve_pair',value.command)).rejects.toMatchObject({ code: reason === 'cas' ? 'record_version_conflict' : 'invalid_value' })
+    await unchangedApproval(value,value.command.idempotencyKey)
+    const first = (await owner.query('SELECT data FROM entity_instances WHERE id=$1',[value.fixture.row.id])).rows[0].data
+    expect(first).toEqual(value.fixture.row.data)
+  })
+  it('Q06 rolls back both app-bound semantic writes when native field authority contracts before commit',async () => {
+    const value = await approvalFixture(),reader = new ApplicationPlatformService([createCanonicalGenericApplicationModule()])
+    const observed = await reader.query(await nativeExecution(otherId),'records','get',{ type: value.fixture.type,id: value.fixture.row.id }) as ApplicationRecordProjection
+    let writesReached = false
+    const service = new ApplicationPlatformService([approvalModule(async () => {
+      writesReached = true
+      await owner.query("UPDATE application_native_role_assignments SET status='revoked' WHERE workspace_id=$1 AND module_key='operations' AND user_id=$2 AND role_key='finance'",[workspaceId,memberId])
+    })])
+    await expect(service.command(await value.execution(),'records','approve_pair',value.command)).rejects.toMatchObject({ code: 'access_unavailable' })
+    expect(writesReached).toBe(true)
+    await unchangedApproval(value,value.command.idempotencyKey)
+    for (const source of boundScopeSources(observed)) expect(await fieldSnapshot(source,otherId)).toMatchObject({ held: false })
+    expect((await reader.query(await nativeExecution(otherId),'records','get',{ type: value.fixture.type,id: value.fixture.row.id }) as ApplicationRecordProjection).values.cost)
+      .toEqual({ kind: 'number',value: 42 })
+  })
+  it('Q05/Q06 permits one concurrent app-bound semantic pair outcome and one audit/outbox',async () => {
+    const value = await approvalFixture(),service = new ApplicationPlatformService([approvalModule()])
+    const commands = [value.command,{ ...value.command,idempotencyKey: randomUUID() }]
+    const result = await Promise.allSettled(commands.map(async command => service.command(await value.execution(),'records','approve_pair',command)))
+    expect(result.filter(item => item.status === 'fulfilled')).toHaveLength(1)
+    const refused = result.find(item => item.status === 'rejected')
+    expect(refused?.status === 'rejected' && ['record_version_conflict','invalid_value'].includes(refused.reason.code)).toBe(true)
+    const receipts = (await owner.query('SELECT id FROM application_operation_receipts WHERE idempotency_key=ANY($1::text[])',[commands.map(command => command.idempotencyKey)])).rows
+    expect(receipts).toHaveLength(1)
+    for (const table of ['application_command_audit','application_committed_events']) {
+      expect((await owner.query(`SELECT count(*)::int AS count FROM ${table} WHERE receipt_id=$1`,[receipts[0].id])).rows[0].count).toBe(1)
     }
   })
   const catalogOn = async (client: PoolClient,fixture: Awaited<ReturnType<typeof catalogType>>,type = fixture.type) =>

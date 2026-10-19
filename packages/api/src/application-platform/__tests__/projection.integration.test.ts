@@ -7,6 +7,7 @@ import type { PoolClient } from 'pg'
 import { ContextScopeAccumulator, executionToolContext, boundScopeSources, type ApplicationModuleDefinition, type ScopeSource } from '@use-brian/core'
 import { applicationResourceSchema, type ApplicationAccessGrant, type ApplicationGrantMaximum } from '@use-brian/shared'
 import { getAppPool, getPool, queryWithRLS } from '../../db/client.js'
+import { consumeHomeAppBudget } from '../../db/home-apps-store.js'
 import { createDbDocEntityStore } from '../../db/doc-entity-store.js'
 import { createDbOAuthClientStore } from '../../db/oauth-client-store.js'
 import { findOrCreateUser } from '../../db/users.js'
@@ -174,7 +175,7 @@ describe('[COMP:api/application-auth] database application projections and live 
     expect(await dispatcher.query(execution, 'records', 'metadata', {})).toEqual([{ created_at: null, created_by: null, last_edited_at: null, last_edited_by: null }])
     await expect(dispatcher.query(execution, 'records', 'get', { requiredFields: ['cost'] })).rejects.toMatchObject({ code: 'access_unavailable' })
     const http = express(); http.use(createApiCorsMiddleware(['https://host.example']))
-    http.use('/api/applications', applicationPlatformRoutes({ service: dispatcher }))
+    http.use('/api/applications', applicationPlatformRoutes({ service: dispatcher,home: { signingSecret: 'fictional-home-origin-fixture',consumeBudget: consumeHomeAppBudget } }))
     const base = `/api/applications/${fixture.appId}`
     const read = await request(http).get(`${base}/records/request/${recordId}`).set('Authorization', `Bearer ${fixture.token}`)
     expect(read.status).toBe(200); expect(read.body).toEqual(result)
@@ -184,6 +185,7 @@ describe('[COMP:api/application-auth] database application projections and live 
       input: { type: 'object', properties: { id: { type: 'string', format: 'uuid' } } },
     } })
     expect(catalog.body.operationSchemas.commands).toEqual({})
+    expect((await request(http).get(`${base}/catalog`).set('Origin','null').set('Authorization',`Bearer ${fixture.token}`)).status).toBe(403)
     const spoof = await request(http).post(`${base}/queries/get`).set('Authorization', `Bearer ${fixture.token}`).send({ userId: ownerId, roles: ['owner'] })
     expect(spoof.status).toBe(400)
     expect((await request(http).get(`${base}/catalog`).set('Authorization', `Bearer ${fixture.token}`).set('X-UseBrian-User-Authorization', 'Bearer fictional-user')).status).toBe(401)

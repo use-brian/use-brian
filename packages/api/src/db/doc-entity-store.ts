@@ -566,12 +566,16 @@ export function createDbDocEntityStore(boundActor?: { actorUserId: string; trans
       const versionClause = expected === undefined ? '' : ` AND record_version = $${idx}::bigint`
       if (expected !== undefined) values.push(expected)
       return canonicalTransaction(actor(workspaceId, options), async client => {
+        const previousIntent = (await client.query<{ value: string | null }>("SELECT current_setting('app.application_native_write_intent',true) AS value")).rows[0]?.value
+        await client.query("SELECT set_config('app.application_native_write_intent',$1,true)",
+          [JSON.stringify({ id: id.toLowerCase(),fields: Object.keys(patch.data ?? {}) })])
         const result = await client.query<Omit<EntityInstanceRow, 'data'>>(
           `UPDATE entity_instances SET ${sets.join(', ')}
            WHERE id = $${idIndex} AND workspace_id = $${workspaceIndex}${versionClause}
            RETURNING ${ENTITY_INSTANCE_METADATA_SELECT}`,
           values,
         )
+        await client.query("SELECT set_config('app.application_native_write_intent',$1,true)",[previousIntent ?? ''])
         if (!result.rows[0]) {
           throw new ApplicationPlatformError(expected === undefined ? 'access_unavailable' : 'record_version_conflict',
             'The record is unavailable or its version changed.')
@@ -655,7 +659,7 @@ export async function applyCanonicalApplicationRecordMutation(context: Applicati
     const record = await store.getEntity(access.workspaceId, id)
     if (!record || record.entityTypeId !== typeId) throw new ApplicationPlatformError('access_unavailable', 'The record is unavailable.')
     if (input.operation === 'patch') {
-      const next = await store.updateEntity(access.workspaceId, id, { data: { ...record.data, ...input.data }, lastEditedBy: access.userId },
+      const next = await store.updateEntity(access.workspaceId, id, { data: input.data, lastEditedBy: access.userId },
         { actorUserId: access.userId, expectedRecordVersion: input.expectedVersion })
       version = next.recordVersion!
     } else {

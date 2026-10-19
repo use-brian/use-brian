@@ -21,7 +21,7 @@ function bearer(value: unknown): string | null {
   return value.slice(7)
 }
 
-export async function authenticateApplicationRequest(req: Request, appId: string, home?: ApplicationHomeAuthenticationOptions): Promise<ExecutionContext> {
+export async function authenticateApplicationRequest(req: Request, appId: string, home?: ApplicationHomeAuthenticationOptions, requiredProfile?: 'home'): Promise<ExecutionContext> {
   const bridgeHeader = req.headers.authorization
   if (home && typeof bridgeHeader === 'string' && /^Bearer [A-Za-z0-9_-]+\.[A-Za-z0-9_-]+$/.test(bridgeHeader) && bridgeHeader.length <= 8192) {
     if (req.headers['x-usebrian-user-authorization'] !== undefined) throw new ApplicationPlatformError('authentication_required', 'Application authentication is required.')
@@ -31,6 +31,7 @@ export async function authenticateApplicationRequest(req: Request, appId: string
     const signal = new AbortController(); req.once('aborted', () => signal.abort())
     return resolveApplicationExecutionContext({ home: proof }, { abortSignal: signal.signal })
   }
+  if (requiredProfile === 'home') throw new ApplicationPlatformError('authentication_required', 'A current signed Home binding is required.')
   const token = bearer(req.headers.authorization)
   const delegatedHeader = req.headers['x-usebrian-user-authorization']
   if (!token) throw new ApplicationPlatformError('authentication_required', 'Application authentication is required.')

@@ -115,6 +115,35 @@ describe('[COMP:api/application-auth] existing Home bridge application binding',
     expect((await store.getEntity(workspaceId, recordId))?.data.cost).toEqual({ kind: 'number', value: 25 })
     expect((await pool.query('SELECT daily_used FROM workspace_home_apps WHERE id=$1', [homeId])).rows[0].daily_used).toBe(5)
   })
+  it('Q08 admits opaque Home HTTP origins only with the exact signed binding and charges the existing budget once',async () => {
+    const active = await binding(),before = (await pool.query('SELECT daily_used FROM workspace_home_apps WHERE id=$1',[homeId])).rows[0].daily_used
+    const catalogPath = `/api/applications/${appId}/catalog`
+    const preflight = await request(http).options(catalogPath).set('Origin','null').set('Access-Control-Request-Method','GET')
+      .set('Access-Control-Request-Headers','authorization')
+    expect(preflight.status).toBe(204);expect(preflight.headers['access-control-allow-origin']).toBe('null')
+    expect(preflight.headers['access-control-allow-credentials']).toBeUndefined()
+    expect((await pool.query('SELECT daily_used FROM workspace_home_apps WHERE id=$1',[homeId])).rows[0].daily_used).toBe(before)
+    const catalog = await request(http).get(catalogPath).set('Origin','null').set('Authorization',`Bearer ${active.token}`)
+    expect(catalog.status).toBe(200);expect(catalog.headers['access-control-allow-origin']).toBe('null')
+    expect(catalog.headers['cache-control']).toBe('no-store')
+    expect(catalog.body.resources[0].fields.map((field: { key: string }) => field.key)).toEqual(['title'])
+    expect((await pool.query('SELECT daily_used FROM workspace_home_apps WHERE id=$1',[homeId])).rows[0].daily_used).toBe(before+1)
+    const schema = await request(http).get(`/api/applications/${appId}/schemas/request`).set('Origin','null').set('Authorization',`Bearer ${active.token}`)
+    expect(schema.status).toBe(200);expect(schema.body).toEqual(catalog.body.resources[0])
+    expect((await pool.query('SELECT daily_used FROM workspace_home_apps WHERE id=$1',[homeId])).rows[0].daily_used).toBe(before+2)
+    const oldAudience = mintBridgeToken({ appId: homeId,workspaceId,userId: viewerId,scope: 'none',maxClearance: null,secret })
+    const wrongHome = mintBridgeToken({ appId: randomUUID(),workspaceId,userId: viewerId,scope: 'none',applicationBindingId: active.id,maxClearance: null,secret })
+    for (const token of [nativeToken,oldAudience,wrongHome,active.token+'x']) {
+      const refusal = await request(http).get(catalogPath).set('Origin','null').set('Authorization',`Bearer ${token}`)
+      expect(refusal.status).toBe(401);expect(refusal.body).toMatchObject({ error: 'authentication_required',effect: 'none',retrySafe: false })
+    }
+    expect((await request(http).get(catalogPath).set('Origin','https://unregistered.example').set('Authorization',`Bearer ${active.token}`)).status).toBe(403)
+    expect((await request(http).get(catalogPath).set('Origin','null').set('Authorization',`Bearer ${active.token}`)
+      .set('X-UseBrian-User-Authorization',`Bearer ${nativeToken}`)).status).toBe(401)
+    expect((await pool.query('SELECT daily_used FROM workspace_home_apps WHERE id=$1',[homeId])).rows[0].daily_used).toBe(before+2)
+    const withoutHome = express();withoutHome.use('/api/applications',applicationPlatformRoutes({ service }))
+    expect((await request(withoutHome).options(catalogPath).set('Origin','null').set('Access-Control-Request-Method','GET')).status).toBe(403)
+  })
   it('invalidates running and renewed Home proofs after consent/state contraction and enforces the shared daily budget', async () => {
     const active = await binding(), proof = (await authenticateApplicationHome(active.token, appId, secret))!
     const execution = await resolveApplicationExecutionContext({ home: proof })

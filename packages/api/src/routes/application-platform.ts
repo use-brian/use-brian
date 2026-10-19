@@ -1,6 +1,7 @@
 /** One thin transport over the canonical application dispatcher. [COMP:api/application-auth] */
 import express, { Router, type NextFunction, type Request, type RequestHandler, type Response } from 'express'
 import { z } from 'zod'
+import type { ExecutionContext } from '@use-brian/core'
 import { ApplicationPlatformError, applicationCommandSchema } from '@use-brian/shared'
 import { query } from '../db/client.js'
 import { AuthorityChangedError } from '../context-scope/authority-lease.js'
@@ -28,6 +29,7 @@ async function originAllowed(appId: string, origin: string) {
 }
 export function applicationPlatformRoutes(options: ApplicationRoutesOptions): Router {
   const router = Router()
+  const homeRequests = new WeakMap<Request, ExecutionContext>()
   router.use(express.json({ limit: '256kb' }))
   const management = options.management
   if (management) {
@@ -86,16 +88,32 @@ export function applicationPlatformRoutes(options: ApplicationRoutesOptions): Ro
       const origin = req.headers.origin
       if (origin !== undefined) {
         res.vary('Origin')
-        const consent = req.path === '/consent' && options.oauth
-        const allowed = consent ? origin === new URL(options.oauth!.webAppUrl).origin : await originAllowed(req.params.appId, origin)
-        if (!allowed) { res.status(403).json({ error: 'access_unavailable', effect: 'none', retrySafe: false }); return }
+        if (origin === 'null') {
+          const client = options.home && (await query<{ home: boolean }>(`SELECT client_mode='home_app' AS home
+            FROM application_clients WHERE id=$1 AND status='active'`,[req.params.appId])).rows[0]
+          if (!client || !client.home) { res.status(403).json({ error: 'access_unavailable', effect: 'none', retrySafe: false }); return }
+          if (req.method !== 'OPTIONS') {
+            // Opaque browser origins require the existing signed Home audience,
+            // not another credential profile. Reuse only within this request;
+            // the canonical service still rechecks current authority at each boundary.
+            homeRequests.set(req,await authenticateApplicationRequest(req,String(req.params.appId),options.home,'home'))
+          }
+        } else {
+          const consent = req.path === '/consent' && options.oauth
+          const allowed = consent ? origin === new URL(options.oauth!.webAppUrl).origin : await originAllowed(req.params.appId, origin)
+          if (!allowed) { res.status(403).json({ error: 'access_unavailable', effect: 'none', retrySafe: false }); return }
+        }
         res.set('Access-Control-Allow-Origin', origin)
         res.set('Access-Control-Allow-Headers', 'Authorization, Content-Type, X-UseBrian-User-Authorization')
         res.set('Access-Control-Allow-Methods', 'GET, POST, OPTIONS')
       }
       if (req.method === 'OPTIONS') { res.sendStatus(204); return }
       next()
-    } catch { res.status(503).json({ error: 'access_unavailable', effect: 'none', retrySafe: false }) }
+    } catch (error) {
+      const status = error instanceof ApplicationHomeBudgetExceeded ? 429 : error instanceof ApplicationPlatformError
+        ? error.code === 'authentication_required' ? 401 : 403 : 503
+      res.status(status).json({ error: error instanceof ApplicationPlatformError ? error.code : 'access_unavailable',effect: 'none',retrySafe: false })
+    }
   })
   if (options.oauth) {
     const oauth = options.oauth
@@ -119,7 +137,7 @@ export function applicationPlatformRoutes(options: ApplicationRoutesOptions): Ro
     return async (req: Request, res: Response) => {
       let committed = false
       try {
-        const execution = await authenticateApplicationRequest(req, String(req.params.appId), options.home)
+        const execution = homeRequests.get(req) ?? await authenticateApplicationRequest(req, String(req.params.appId), options.home)
         const result = await operation(req, execution)
         committed = effectful
         await execution.security.authority.assertCurrent()
@@ -142,7 +160,7 @@ export function applicationPlatformRoutes(options: ApplicationRoutesOptions): Ro
   router.get('/:appId/catalog', endpoint((_req, execution) => options.service.catalog(execution)))
   router.post('/:appId/mcp', async (req, res) => {
     try {
-      const execution = await authenticateApplicationRequest(req, String(req.params.appId), options.home)
+      const execution = homeRequests.get(req) ?? await authenticateApplicationRequest(req, String(req.params.appId), options.home)
       await serveStatelessMcp(req, res, await buildApplicationMcpTools(options.service, execution), 'use-brian-application')
     } catch (error) {
       if (res.headersSent) return
