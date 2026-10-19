@@ -1,4 +1,15 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
+
+// These unit fixtures replace database/scope ports and have no canonical policy
+// metadata. Keep their fixture assistant and inject only metadata construction;
+// actual current assistants/epochs are enforced by the complete real SQL matrix.
+vi.mock('../../context-scope/execution-context.js', async importOriginal => {
+  const actual = await importOriginal<typeof import('../../context-scope/execution-context.js')>()
+  return { ...actual,resolveExecutionContextSystem: (input: Parameters<typeof actual.resolveExecutionContextSystem>[0],
+    deps: Parameters<typeof actual.resolveExecutionContextSystem>[1] = {}) => actual.resolveExecutionContextSystem(input,{
+      ...deps,pinPolicyEpoch: async () => async () => true,resolveAssistant: async () => input.assistant,
+    }) }
+})
 import express from 'express'
 import request from 'supertest'
 
