@@ -1451,12 +1451,14 @@ export async function setCrmArchived(input: {
   archived: boolean
 }, transactionClient?: PoolClient): Promise<EntityRecord | null> {
   if (!transactionClient) return runCrmWriteTransaction(input.ctx.userId, tx => setCrmArchived(input, tx.client))
+  const fieldIntent=['archivedAt']
+  await assertNativeEntityFieldWrites(input.ctx.userId,input.entityId,{},transactionClient,fieldIntent)
   const old = await readCrmMutationSource(input.ctx, input.entityId, ['person', 'company', 'deal'], transactionClient)
   if (!old) return null
-  const attributes = { ...old.attributes }
+  const attributes:Record<string,unknown> = {}
   if (input.archived) attributes.crm_archived_at = new Date().toISOString()
   else delete attributes.crm_archived_at
-  return updateEntity(input.ctx.userId, input.entityId, { attributes }, input.ctx, transactionClient)
+  return updateEntity(input.ctx.userId, input.entityId, { attributes }, input.ctx, transactionClient,{fieldIntent})
 }
 
 export async function setCrmDealPipelineStage(input: {
@@ -1465,6 +1467,8 @@ export async function setCrmDealPipelineStage(input: {
   stageId: string
 }, transactionClient?: PoolClient): Promise<{ entity: EntityRecord; fromStageId: string | null; toStage: CrmPipelineStage } | null> {
   if (!transactionClient) return runCrmWriteTransaction(input.ctx.userId, tx => setCrmDealPipelineStage(input, tx.client))
+  const fieldIntent=['pipelineId','pipelineStageId','stage']
+  await assertNativeEntityFieldWrites(input.ctx.userId,input.entityId,{},transactionClient,fieldIntent)
   const entity = await readCrmMutationSource(input.ctx, input.entityId, ['deal'], transactionClient)
   if (!entity) return null
   const selected = await transactionClient.query<ConfigStageRow>(
@@ -1496,12 +1500,11 @@ export async function setCrmDealPipelineStage(input: {
   const legacy = stage.legacyKey
     ?? (stage.category === 'won' ? 'won' : stage.category === 'lost' ? 'lost' : 'lead')
   const attributes = {
-    ...entity.attributes,
     pipeline_id: stage.pipelineId,
     pipeline_stage_id: stage.id,
     stage: legacy,
   }
-  const updated = await updateEntity(input.ctx.userId, input.entityId, { attributes }, input.ctx, transactionClient)
+  const updated = await updateEntity(input.ctx.userId, input.entityId, { attributes }, input.ctx, transactionClient,{fieldIntent})
   return updated ? { entity: updated, fromStageId, toStage: stage } : null
 }
 
@@ -1745,9 +1748,7 @@ export async function removeCrmDealParticipant(input: {
     )
     if (!result.rows[0]) { await client.query('ROLLBACK'); return false }
     if (deal.attributes.contact_id === input.contactId) {
-      const attributes = { ...deal.attributes }
-      delete attributes.contact_id
-      if (!await updateEntity(input.ctx.userId, input.dealId, { attributes }, input.ctx, client)) {
+      if (!await updateEntity(input.ctx.userId, input.dealId, { attributes:{} }, input.ctx, client,{fieldIntent:['contactId']})) {
         await client.query('ROLLBACK'); return false
       }
     }

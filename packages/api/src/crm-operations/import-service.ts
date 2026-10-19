@@ -1093,11 +1093,10 @@ export function createCrmProductionImportService(deps: {
         await updateEntity(attributionUserId, entityId, {
           displayName: values.name,
           attributes: {
-            ...entity.attributes,
             ...(values.currencyCode ? { currency_code: values.currencyCode.toUpperCase() } : {}),
             ...(values.source ? { source: values.source } : {}),
           },
-        }, access, transaction.client)
+        }, access, transaction.client,{fieldIntent:['name',...(values.currencyCode?['currencyCode']:[]),...(values.source?['source']:[])]})
       }
     }
 

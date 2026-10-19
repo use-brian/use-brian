@@ -8,8 +8,10 @@ import { ApplicationPlatformError } from '@use-brian/shared'
 import { applyRLSGucs, getAppPool, getPool } from '../../db/client.js'
 import { bindTaskClosedHook, createTask, getTaskById, resolveTaskById, updateTask } from '../../db/tasks.js'
 import { createCompany,createContact,createDeal,getDealById,listDeals,updateCompany,updateContact,updateDeal,setDealStage } from '../../db/crm.js'
-import { createCrmFieldDefinition,updateCrmCustomFields } from '../../db/crm-r2.js'
+import { createCrmFieldDefinition,updateCrmCustomFields,setCrmArchived,setCrmDealPipelineStage,getCrmConfig,addCrmDealParticipant,removeCrmDealParticipant } from '../../db/crm-r2.js'
 import { createEntity, supersedeEntity, updateEntity } from '../../db/entities-store.js'
+import { createDbCrmOperationsStore } from '../../db/crm-operations-store.js'
+import { createCrmOperationsService } from '../../crm-operations/service.js'
 import { findAssistantById } from '../../db/users.js'
 import { resolveExecutionContextSystem } from '../../context-scope/execution-context.js'
 import { ApplicationPlatformService } from '../service.js'
@@ -226,6 +228,60 @@ describe('[COMP:api/application-records] canonical native operation composition'
     await expect(supersedeEntity(userId,value.id,{attributes:{},...fields} as EntitySupersedePatch)).rejects.toMatchObject({code:'invalid_value'})
     expect((await owner.query('SELECT display_name,attributes,valid_to,superseded_by,scope_version::text AS version FROM entities WHERE id=$1',[value.id])).rows[0]).toEqual(before)
   })
+  it.each(['catalog stage','registered stage','primary participant removal'] as const)
+  ('Q04/Q05 keeps untouched numeric JSON exact through the legacy %s writer',async operation => {
+    const contact=await createContact(userId,{workspaceId,name:'Fictional precision contact',access})
+    const deal=await createDeal(userId,{workspaceId,contactId:contact.id,amount:'123.456789012345678',access})
+    const exact='9007199254740993.123456789012345678',connection=await client()
+    try {await connection.query("UPDATE entities SET attributes=jsonb_set(attributes,'{precision_guard}',to_jsonb($2::numeric)) WHERE id=$1",[deal.id,exact]);await connection.query('COMMIT')}
+    finally {await connection.query('ROLLBACK');connection.release()}
+    if(operation==='primary participant removal') {
+      await addCrmDealParticipant({ctx:access,dealId:deal.id,contactId:contact.id,isPrimary:true})
+      expect(await removeCrmDealParticipant({ctx:access,dealId:deal.id,contactId:contact.id})).toBe(true)
+    } else {
+      const config=await getCrmConfig(userId,workspaceId),pipeline=config.pipelines[0],stage=pipeline.stages.find(value => value.legacyKey==='won')!
+      if(operation==='catalog stage') expect(await setCrmDealPipelineStage({ctx:access,entityId:deal.id,stageId:stage.id})).toMatchObject({entity:{id:deal.id}})
+      else {
+        const transaction=await client()
+        try {
+          const service=createCrmOperationsService(createDbCrmOperationsStore(getAppPool(),transaction))
+          const context={workspaceId,actor:{kind:'user' as const,userId},authority:{role:'owner' as const,canWrite:true,canConfigure:true,trustedIdentitySources:[]}}
+          const command={kind:'set_deal_pipeline_stage' as const,dealId:deal.id,pipelineId:pipeline.id,stageId:stage.id}
+          const committed=await service.execute(context,command)
+          expect(committed.emittedEventIds).toHaveLength(1)
+          expect((await service.execute(context,command)).duplicate).toBe(true)
+          expect((await transaction.query('SELECT id FROM crm_domain_event_outbox WHERE workspace_id=$1 AND subject_id=$2',[workspaceId,deal.id])).rows)
+            .toEqual([{id:committed.emittedEventIds[0]}])
+          await transaction.query('COMMIT')
+        } finally {await transaction.query('ROLLBACK');transaction.release()}
+      }
+    }
+    expect((await owner.query("SELECT attributes->>'precision_guard' AS exact,attributes->>'amount' AS amount FROM entities WHERE id=$1",[deal.id])).rows[0])
+      .toEqual({exact,amount:'123.456789012345678'})
+  })
+  it('Q05/Q06 rolls back a real nonowner registered stage when its outbox insert fails',async () => {
+    const deal=await createDeal(userId,{workspaceId,amount:'123.000000000000000001',access}),config=await getCrmConfig(userId,workspaceId)
+    const pipeline=config.pipelines[0],stage=pipeline.stages.find(value => value.legacyKey==='won')!
+    const before=(await owner.query('SELECT attributes,scope_version::text AS version FROM entities WHERE id=$1',[deal.id])).rows[0]
+    await owner.query(`CREATE FUNCTION native_operation_outbox_fixture() RETURNS trigger LANGUAGE plpgsql AS $$ BEGIN
+      IF NEW.subject_id='${deal.id}'::uuid THEN RAISE EXCEPTION 'Fictional outbox storage refusal';END IF;RETURN NEW;END $$;
+      CREATE TRIGGER native_operation_outbox_fixture BEFORE INSERT ON crm_domain_event_outbox FOR EACH ROW EXECUTE FUNCTION native_operation_outbox_fixture()`)
+    const transaction=await client()
+    try {
+      const service=createCrmOperationsService(createDbCrmOperationsStore(getAppPool(),transaction))
+      await expect(service.execute({workspaceId,actor:{kind:'user',userId},authority:{role:'owner',canWrite:true,canConfigure:true,trustedIdentitySources:[]}},
+        {kind:'set_deal_pipeline_stage',dealId:deal.id,pipelineId:pipeline.id,stageId:stage.id})).rejects.toThrow('Fictional outbox storage refusal')
+      await transaction.query('ROLLBACK')
+      expect((await owner.query('SELECT attributes,scope_version::text AS version FROM entities WHERE id=$1',[deal.id])).rows[0]).toEqual(before)
+      for(const table of ['crm_activities','crm_domain_event_outbox','association_audit_log','workspace_audit_log']) {
+        const key=table==='crm_activities'?'entity_id':'subject_id'
+        expect((await owner.query(`SELECT id FROM ${table} WHERE workspace_id=$1 AND ${key}=$2`,[workspaceId,deal.id])).rows).toEqual([])
+      }
+    } finally {
+      await transaction.query('ROLLBACK');transaction.release()
+      await owner.query('DROP TRIGGER native_operation_outbox_fixture ON crm_domain_event_outbox;DROP FUNCTION native_operation_outbox_fixture()')
+    }
+  })
   it('Q04/Q05 preserves an exact native decimal amount through canonical creation, get and list',async () => {
     const amount='9007199254740993.123456789012345678'
     const value=await createDeal(userId,{workspaceId,amount:amount as unknown as number,access})
@@ -279,13 +335,14 @@ describe('[COMP:api/application-records] canonical native operation composition'
         LANGUAGE sql IMMUTABLE SECURITY DEFINER SET search_path=pg_catalog,public,pg_temp AS $$
           SELECT '[{"key":"name","read":[],"write":[],"releaseReadTo":["external_user","service"],"releaseWriteTo":["service"]},
             {"key":"domain","read":[],"write":[],"releaseReadTo":["external_user","service"],"releaseWriteTo":["service"]},
+            {"key":"archivedAt","read":[],"write":[],"releaseReadTo":[],"releaseWriteTo":[]},
             {"key":"tags","read":[],"write":[],"releaseReadTo":[],"releaseWriteTo":[]},
             {"key":"externalRef","read":[],"write":[],"releaseReadTo":[],"releaseWriteTo":[]},
             {"key":"custom.cost","read":[["finance"]],"write":[["finance"]],"releaseReadTo":[],"releaseWriteTo":[]}]'::jsonb $$;
         REVOKE ALL ON FUNCTION native_operation_field_fixture_rules() FROM PUBLIC;
         CREATE FUNCTION native_operation_field_fixture_keys(w uuid) RETURNS jsonb
         LANGUAGE sql SECURITY DEFINER SET search_path=pg_catalog,public,pg_temp AS $$
-          SELECT to_jsonb(ARRAY['name','domain','tags','externalRef']||ARRAY(SELECT 'custom.'||field_key FROM public.crm_field_definitions
+          SELECT to_jsonb(ARRAY['name','domain','tags','externalRef','archivedAt']||ARRAY(SELECT 'custom.'||field_key FROM public.crm_field_definitions
             WHERE workspace_id=w AND entity_kind='company' AND archived_at IS NULL ORDER BY field_key)) $$;
         REVOKE ALL ON FUNCTION native_operation_field_fixture_keys(uuid) FROM PUBLIC;
         CREATE FUNCTION native_operation_field_fixture_reader(w uuid,o jsonb,t text,i text) RETURNS jsonb
@@ -340,6 +397,17 @@ describe('[COMP:api/application-records] canonical native operation composition'
     }
     const reader={...access,userId:readerId}
     async function snapshot(id:string) {return (await owner.query('SELECT attributes,scope_version::text AS version FROM entities WHERE id=$1',[id])).rows[0]}
+    it('Q04/Q05 archives and restores a protected native company without touching a hidden exact value',async () => {
+      const value=await company(),cost='9007199254740993.123456789012345678',reader={...access,userId:readerId}
+      await member(userId,connection => connection.query("UPDATE entities SET attributes=jsonb_set(attributes,'{custom_fields,cost}',to_jsonb($2::numeric)) WHERE id=$1",[value.id,cost]))
+      const before=(await owner.query('SELECT scope_version::text AS version FROM entities WHERE id=$1',[value.id])).rows[0].version
+      const invocation=await execution()
+      expect(await setCrmArchived({ctx:reader,entityId:value.id,archived:true})).toMatchObject({id:value.id})
+      expect((await owner.query("SELECT attributes ? 'crm_archived_at' AS archived,attributes->'custom_fields'->>'cost' AS cost FROM entities WHERE id=$1",[value.id])).rows[0]).toEqual({archived:true,cost})
+      expect(await setCrmArchived({ctx:reader,entityId:value.id,archived:false})).toMatchObject({id:value.id})
+      expect((await owner.query("SELECT attributes ? 'crm_archived_at' AS archived,attributes->'custom_fields'->>'cost' AS cost,scope_version::text AS version FROM entities WHERE id=$1",[value.id])).rows[0]).toEqual({archived:false,cost,version:String(BigInt(before)+2n)})
+      await expect(invocation.security.authority.assertCurrent()).resolves.toBeUndefined()
+    })
     it.each([43,42])('Q04 refuses a protected native custom write of %s, including an equal hidden value',async cost => {
       const value=await company(),before=await snapshot(value.id)
       const mask=await member(readerId,async connection => (await connection.query('SELECT read_native_application_field_mask($1,$2,$3,$4,$5) AS value',

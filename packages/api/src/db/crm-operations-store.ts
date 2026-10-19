@@ -43,7 +43,7 @@ import { crmEvidenceRequestHash, resolveCrmEvidenceReplay, type CrmEvidenceReque
 import { executeCrmConfigCommand } from './crm-config-commands.js'
 import type { CrmConfigCommand } from '@use-brian/core'
 import { readCrmMutationSource } from './crm.js'
-import { updateEntity } from './entities-store.js'
+import { assertNativeEntityFieldWrites,updateEntity } from './entities-store.js'
 import { currentAgentAccess, runWithAgentAccess } from './agent-access-context.js'
 import { admitCrmIntegrationBinding } from '../crm-operations/integration-department-authority.js'
 import { readCrmIntakeAuthority } from '../crm-operations/intake-department-authority.js'
@@ -1581,6 +1581,8 @@ function createTransaction(client: PoolClient, context: CrmOperationsContext, ef
 
     async setDealPipelineStage(params) {
       const access = await stageActorAccess(client, context)
+      const fieldIntent=['pipelineId','pipelineStageId','stage']
+      await assertNativeEntityFieldWrites(access.userId,params.dealId,{},client,fieldIntent)
       const source = await readCrmMutationSource(access, params.dealId, ['deal'], client)
       if (!source) return null
       const project = (entity: typeof source) => ({ id: entity.id, name: entity.displayName,
@@ -1643,8 +1645,8 @@ function createTransaction(client: PoolClient, context: CrmOperationsContext, ef
       const legacyStage = stage.legacyStage
         ?? (stage.category === 'won' ? 'won' : stage.category === 'lost' ? 'lost' : 'lead')
       const updated = await updateEntity(access.userId, params.dealId, { attributes: {
-        ...deal.attributes, pipeline_id: params.pipelineId, pipeline_stage_id: params.stageId, stage: legacyStage,
-      } }, access, client)
+        pipeline_id: params.pipelineId, pipeline_stage_id: params.stageId, stage: legacyStage,
+      } }, access, client,{fieldIntent})
       const updatedDeal = updated ? project(updated) : null
       if (!updatedDeal) return null
       await client.query(
@@ -1707,18 +1709,26 @@ function createTransaction(client: PoolClient, context: CrmOperationsContext, ef
       }
     },
     async emitDomainEvent(params) {
-      const result = await client.query<{ id: string }>(
+      await client.query("SELECT pg_advisory_xact_lock(hashtextextended('crm-domain-event:'||$1::text||':'||$2::text,0))",[workspaceId,params.eventKey])
+      const existing=await client.query<{id:string}>(
+        'SELECT id FROM crm_domain_event_outbox WHERE workspace_id=$1 AND event_key=$2',
+        [workspaceId,params.eventKey])
+      if(existing.rows[0]) return existing.rows[0].id
+      await client.query(
         `INSERT INTO crm_domain_event_outbox (
            workspace_id,event_type,event_key,subject_kind,subject_id,payload,
            actor_kind,occurred_at
-         ) VALUES ($1,$2,$3,$4,$5,$6::jsonb,$7,$8)
-         ON CONFLICT (workspace_id,event_key) DO UPDATE SET event_key=EXCLUDED.event_key
-         RETURNING id`,
+         ) VALUES ($1,$2,$3,$4,$5,$6::jsonb,$7,$8)`,
         [workspaceId, params.eventType, params.eventKey, params.subjectKind,
           params.subjectId, JSON.stringify(params.payload), params.actor.kind,
           params.occurredAt],
       )
-      return result.rows[0]!.id
+      // The restrictive STABLE scope reader sees new rows in the next statement.
+      const result=await client.query<{id:string}>(
+        'SELECT id FROM crm_domain_event_outbox WHERE workspace_id=$1 AND event_key=$2',
+        [workspaceId,params.eventKey])
+      if(!result.rows[0]) throw new CrmOperationsError('not_authorized','The committed event is unavailable in the current scope.')
+      return result.rows[0].id
     },
   }
 }
