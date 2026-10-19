@@ -113,6 +113,27 @@ describe('[COMP:security/native-field-policy] current canonical native field mas
         FOR EACH ROW EXECUTE FUNCTION application_native_policy_fixture_configuration_changed();
       CREATE TRIGGER application_native_fixture_record_configuration AFTER INSERT OR UPDATE OR DELETE ON application_native_policy_fixture_metadata
         FOR EACH ROW EXECUTE FUNCTION application_native_policy_fixture_configuration_changed()`)
+    await owner.query(`CREATE FUNCTION application_native_deletion_fixture_reader(w uuid,o jsonb,t text,i text) RETURNS jsonb
+      LANGUAGE plpgsql SECURITY DEFINER SET search_path=pg_catalog,public,pg_temp AS $$
+      DECLARE r public.entity_instances;d public.application_record_tombstones;s public.entity_types;policy public.application_native_policy_fixture_metadata;source jsonb;version text;
+      BEGIN
+        SELECT * INTO r FROM public.entity_instances WHERE workspace_id=w AND id=i::uuid AND entity_type_id=(o->>'entityTypeId')::uuid;
+        IF r.id IS NOT NULL THEN source:=public.read_scope_source(w,'entity_instance',r.id);version:=r.record_version::text;
+        ELSE
+          SELECT * INTO d FROM public.application_record_tombstones WHERE workspace_id=w AND id=i::uuid AND entity_type_id=(o->>'entityTypeId')::uuid;
+          IF d.id IS NULL THEN RETURN NULL; END IF;
+          source:=public.read_application_generic_tombstone_source(w,d.entity_type_id,d.id);version:=d.record_version::text;
+        END IF;
+        SELECT * INTO s FROM public.entity_types WHERE workspace_id=w AND id=(o->>'entityTypeId')::uuid;
+        SELECT * INTO policy FROM public.application_native_policy_fixture_metadata WHERE resource_id=i::uuid;
+        RETURN jsonb_build_object('moduleKey','deletion_operations','origin',o,'typeKey','record.'||s.id,'schemaVersion',s.schema_version::text,
+          'policyVersion',policy.policy_version,'recordVersion',version,'fieldKeys',(SELECT jsonb_agg(p->'name' ORDER BY p->>'name') FROM jsonb_array_elements(s.properties) p),
+          'fields',policy.fields,'source',source);
+      END $$`)
+    await owner.query('REVOKE ALL ON FUNCTION application_native_deletion_fixture_reader(uuid,jsonb,text,text) FROM PUBLIC')
+    await owner.query(`INSERT INTO application_native_field_contracts(module_key,contract_version,role_keys,metadata_reader,catalog_reader,configuration_required,configuration_reader)
+      VALUES('deletion_operations','1',ARRAY['finance','approver'],'application_native_deletion_fixture_reader(uuid,jsonb,text,text)'::regprocedure,
+        'application_native_policy_fixture_catalog_reader(uuid,jsonb,text)'::regprocedure,true,'application_native_policy_fixture_configuration(uuid)'::regprocedure)`)
     await owner.query(`CREATE FUNCTION application_native_writer_fixture_reader(w uuid,o jsonb,t text,i text) RETURNS jsonb
       LANGUAGE plpgsql SECURITY DEFINER SET search_path=pg_catalog,public,pg_temp AS $$
       DECLARE r public.entity_instances; schema public.entity_types; policy public.application_native_policy_fixture_catalog;
@@ -176,8 +197,9 @@ describe('[COMP:security/native-field-policy] current canonical native field mas
   })
   afterAll(async () => {
     await owner.query('DELETE FROM workspaces WHERE id=ANY($1::uuid[])',[[workspaceId,otherWorkspaceId]])
-    await owner.query('DELETE FROM application_native_field_contracts WHERE module_key=ANY($1::text[])',[['operations','other_operations','writer_operations']])
+    await owner.query('DELETE FROM application_native_field_contracts WHERE module_key=ANY($1::text[])',[['operations','other_operations','writer_operations','deletion_operations']])
     await owner.query('DROP FUNCTION application_native_writer_fixture_reader(uuid,jsonb,text,text)')
+    await owner.query('DROP FUNCTION application_native_deletion_fixture_reader(uuid,jsonb,text,text)')
     await owner.query('DROP FUNCTION application_native_policy_fixture_reader(uuid,jsonb,text,text)')
     await owner.query('DROP FUNCTION application_native_policy_fixture_catalog_reader(uuid,jsonb,text)')
     await owner.query('DROP FUNCTION application_native_policy_fixture_domain(uuid,jsonb,text)')
@@ -195,7 +217,7 @@ describe('[COMP:security/native-field-policy] current canonical native field mas
     await owner.query('DELETE FROM users WHERE id=ANY($1::uuid[])',[userIds])
     await getAppPool().end();await owner.end()
   })
-  function fields() {
+  function fields(): Array<{key:string;read:string[][];write:string[][];releaseReadTo:string[];releaseWriteTo:string[]}> {
     return [
       { key: 'title',read: [],write: [],releaseReadTo: ['external_user','service'],releaseWriteTo: ['service'] },
       { key: 'cost',read: [['finance']],write: [['finance'],['approver']],releaseReadTo: [],releaseWriteTo: [] },
@@ -250,7 +272,7 @@ describe('[COMP:security/native-field-policy] current canonical native field mas
     (await client.query('SELECT read_native_application_field_mask($1,$2,$3,$4,$5) AS value',[workspaceId,fixture.origin,type,fixture.row.id,version])).rows[0].value as
       { moduleKey: string;schemaVersion: string;recordVersion: string;policyVersion: string;readFields: string[];writeFields: string[] } | null
   const mask = async (fixture: Awaited<ReturnType<typeof record>>,userId = memberId) => asMember(userId,client => maskOn(client,fixture))
-  async function assign(role = 'finance',user = memberId,module = 'operations',workspace = workspaceId,starts = '2020-01-01T00:00:00Z',expires: string | null = null) {
+  async function assign(role = 'finance',user: string = memberId,module = 'operations',workspace = workspaceId,starts = '2020-01-01T00:00:00Z',expires: string | null = null) {
     return (await owner.query(`INSERT INTO application_native_role_assignments(workspace_id,module_key,user_id,role_key,issued_by_user_id,starts_at,expires_at)
       VALUES($1,$2,$3,$4,$5,$6,$7) RETURNING id`,[workspace,module,user,role,ownerId,starts,expires])).rows[0].id as string
   }
@@ -2295,6 +2317,94 @@ describe('[COMP:security/native-field-policy] current canonical native field mas
         const recovery=await request(http.http).post(`${http.base}/governance/reviews/${review.id}/apply`).set('Authorization',`Bearer ${http.token}`).send({})
         expect(recovery.status).toBe(200);expect(recovery.body).toMatchObject({id:review.id,kind:'assign_role',applied:true})
       } finally {await value.cleanup()}
+    })
+  })
+
+  describe('[COMP:api/application-records] current protected deletion recovery',() => {
+    const module='deletion_operations'
+    const deletePolicy=() => fields().map(field => ({...field,releaseWriteTo:['external_user','service']}))
+    const dispatcher=() => new ApplicationPlatformService([createCanonicalGenericApplicationModule()])
+    async function deleteRoles(user:string) {await assign('finance',user,module);await assign('approver',user,module)}
+    const command=(fixture:Awaited<ReturnType<typeof record>>) => ({idempotencyKey:randomUUID(),input:{type:fixture.type,operation:'delete',id:fixture.row.id,expectedVersion:fixture.row.recordVersion}})
+    it('Q06 recovers a protected native deletion only through its retained current policy and deleted field floor',async () => {
+      await clearRoles();const fixture=await record(true,module,[],deletePolicy()),service=dispatcher()
+      await deleteRoles(memberId);await deleteRoles(otherId)
+      const observation=await capture(fixture,['title','cost'])
+      const request=command(fixture),receipt=await service.command(await nativeExecution(),'records','record_delete',request)
+      expect(receipt.resources).toHaveLength(1);expect(receipt.resources[0].version).toBe(String(BigInt(fixture.row.recordVersion)+1n))
+      expect((await owner.query('SELECT id FROM entity_instances WHERE id=$1',[fixture.row.id])).rows).toEqual([])
+      expect(await fieldSnapshot(observation.sources[0])).toMatchObject({held:true})
+      expect(await fieldSnapshot(observation.sources[0],otherId)).toMatchObject({held:true})
+      expect(await asMember(memberId,async client => (await client.query('SELECT id FROM application_record_tombstones WHERE id=$1',[fixture.row.id])).rows)).toEqual([])
+      await expect(asMember(memberId,client => client.query('SELECT read_application_generic_tombstone_source($1,$2,$3)',[workspaceId,fixture.schema.id,fixture.row.id])))
+        .rejects.toMatchObject({code:'42501'})
+      expect(await service.command(await nativeExecution(),'records','record_delete',request)).toEqual(receipt)
+      await owner.query("UPDATE application_native_role_assignments SET status='revoked' WHERE workspace_id=$1 AND module_key=$2 AND user_id=$3 AND role_key='finance'",[workspaceId,module,memberId])
+      await expect(service.command(await nativeExecution(),'records','record_delete',request)).rejects.toMatchObject({code:'access_unavailable'})
+      expect(await asMember(otherId,async client => (await client.query("SELECT application_generic_receipt_allows($1,$2,$3,'delete') AS admitted",[fixture.schema.id,fixture.type,fixture.row.id])).rows[0].admitted)).toBe(true)
+      await assign('finance',memberId,module)
+      expect(await service.command(await nativeExecution(),'records','record_delete',request)).toEqual(receipt)
+      const known=(await owner.query('SELECT deleted_fields FROM application_record_tombstones WHERE id=$1',[fixture.row.id])).rows[0].deleted_fields
+      await owner.query('UPDATE application_record_tombstones SET deleted_fields=NULL WHERE id=$1',[fixture.row.id])
+      await expect(service.command(await nativeExecution(),'records','record_delete',request)).rejects.toMatchObject({code:'access_unavailable'})
+      await owner.query('UPDATE application_record_tombstones SET deleted_fields=$2 WHERE id=$1',[fixture.row.id,known])
+      expect(await service.command(await nativeExecution(),'records','record_delete',request)).toEqual(receipt)
+      expect((await owner.query('SELECT count(*)::int AS count FROM application_command_audit WHERE receipt_id=$1',[receipt.id])).rows[0].count).toBe(1)
+      expect((await owner.query('SELECT count(*)::int AS count FROM application_committed_events WHERE receipt_id=$1',[receipt.id])).rows[0].count).toBe(1)
+      expect((await owner.query('SELECT resources::text AS resources FROM application_operation_receipts WHERE id=$1',[receipt.id])).rows[0].resources).not.toContain('Fictional request')
+    })
+    it.each(['member','external_user','service'] as const)('Q03/Q06 keeps protected %s deletion and replay behind every current issuer floor',async kind => {
+      await clearRoles();const fixture=await record(true,module,[],deletePolicy()),service=dispatcher()
+      await deleteRoles(ownerId);if(kind==='member')await deleteRoles(memberId)
+      const app=await application(fixture,kind,undefined,['read','query','delete','command:record_delete'])
+      const request=command(fixture),receipt=await service.command(await resolveApplicationExecutionContext(app.authentication),'records','record_delete',request)
+      expect(await service.command(await resolveApplicationExecutionContext(app.authentication),'records','record_delete',request)).toEqual(receipt)
+      await owner.query("UPDATE application_native_role_assignments SET status='revoked' WHERE workspace_id=$1 AND module_key=$2 AND user_id=$3 AND role_key='finance'",[workspaceId,module,ownerId])
+      await expect(service.command(await resolveApplicationExecutionContext(app.authentication),'records','record_delete',request)).rejects.toMatchObject({code:'access_unavailable'})
+      expect((await owner.query('SELECT id FROM entity_instances WHERE id=$1',[fixture.row.id])).rows).toEqual([])
+      expect((await owner.query('SELECT count(*)::int AS count FROM application_command_audit WHERE receipt_id=$1',[receipt.id])).rows[0].count).toBe(1)
+    })
+    it('Q06 refuses protected deletion without retained current per-record metadata instead of falling back to a broader catalog',async () => {
+      await clearRoles();const fixture=await record(),service=dispatcher()
+      await assign('finance');await assign('approver')
+      const request=command(fixture)
+      await expect(service.command(await nativeExecution(),'records','record_delete',request)).rejects.toMatchObject({code:'access_unavailable'})
+      expect((await owner.query('SELECT id FROM entity_instances WHERE id=$1',[fixture.row.id])).rows).toHaveLength(1)
+      expect((await owner.query('SELECT id FROM application_record_tombstones WHERE id=$1',[fixture.row.id])).rows).toEqual([])
+      expect((await owner.query('SELECT id FROM application_operation_receipts WHERE idempotency_key=$1',[request.idempotencyKey])).rows).toEqual([])
+    })
+    it.each(['external_user','service'] as const)('Q03/Q04 requires protected deleted-field release eligibility for a nonmember %s',async kind => {
+      await clearRoles();const fixture=await record(true,module),service=dispatcher();await deleteRoles(ownerId)
+      const app=await application(fixture,kind,undefined,['read','query','delete','command:record_delete'])
+      await expect(service.command(await resolveApplicationExecutionContext(app.authentication),'records','record_delete',command(fixture))).rejects.toMatchObject({code:'access_unavailable'})
+      expect((await owner.query('SELECT id FROM entity_instances WHERE id=$1',[fixture.row.id])).rows).toHaveLength(1)
+    })
+    it('Q03/Q04 refuses protected deletion when the exact app action exceeds a current issuer field floor',async () => {
+      await clearRoles();const fixture=await record(true,module,[],deletePolicy()),service=dispatcher()
+      await assign('approver',ownerId,module)
+      const app=await application(fixture,'service',undefined,['read','query','delete','command:record_delete'])
+      await expect(service.command(await resolveApplicationExecutionContext(app.authentication),'records','record_delete',command(fixture))).rejects.toMatchObject({code:'access_unavailable'})
+      expect((await owner.query('SELECT id FROM entity_instances WHERE id=$1',[fixture.row.id])).rows).toHaveLength(1)
+    })
+    it('Q03/Q04 retains a genuine member floor behind a protected external delete profile',async () => {
+      await clearRoles();const fixture=await record(true,module,[],deletePolicy()),service=dispatcher();await deleteRoles(ownerId)
+      await owner.query("INSERT INTO workspace_members(workspace_id,user_id,role,clearance) VALUES($1,$2,'member','internal')",[workspaceId,externalId])
+      try {
+        const app=await application(fixture,'external_user',undefined,['read','query','delete','command:record_delete'])
+        await expect(service.command(await resolveApplicationExecutionContext(app.authentication),'records','record_delete',command(fixture))).rejects.toMatchObject({code:'access_unavailable'})
+        expect((await owner.query('SELECT id FROM entity_instances WHERE id=$1',[fixture.row.id])).rows).toHaveLength(1)
+        await deleteRoles(externalId)
+        expect(await service.command(await resolveApplicationExecutionContext(app.authentication),'records','record_delete',command(fixture))).toMatchObject({effect:'committed'})
+      } finally {await owner.query('DELETE FROM workspace_members WHERE workspace_id=$1 AND user_id=$2',[workspaceId,externalId])}
+    })
+    it('Q01/Q03 retains every parent issuer floor on a protected delete instead of borrowing the child issuer role',async () => {
+      await clearRoles();const fixture=await record(true,module,[],deletePolicy()),service=dispatcher()
+      await deleteRoles(ownerId);await deleteRoles(memberId);await assign('approver',adminId,module)
+      const app=await application(fixture,'member',adminId,['read','query','delete','command:record_delete'])
+      await expect(service.command(await resolveApplicationExecutionContext(app.authentication),'records','record_delete',command(fixture))).rejects.toMatchObject({code:'access_unavailable'})
+      expect((await owner.query('SELECT id FROM entity_instances WHERE id=$1',[fixture.row.id])).rows).toHaveLength(1)
+      await assign('finance',adminId,module)
+      expect(await service.command(await resolveApplicationExecutionContext(app.authentication),'records','record_delete',command(fixture))).toMatchObject({effect:'committed'})
     })
   })
 
