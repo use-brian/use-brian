@@ -17,7 +17,7 @@ import { assertExecutionResourceScope, buildAccessPredicate, buildCurrentMemberS
 import { assertAuthorshipPresent } from './authorship-guard.js'
 import { applyRLSGucs, getAppPool, query, queryGated, queryWithRLS } from './client.js'
 import { emitCrmRelationEdge, emitEdgeFireAndForget, superseedCrmRelationEdge } from './edge-hooks.js'
-import { createEntity, updateEntity } from './entities-store.js'
+import { assertNativeEntityFieldWrites, createEntity, updateEntity } from './entities-store.js'
 import {
   bindImportedCrmIdentity,
   resolveCrmPersonIdentity,
@@ -522,6 +522,8 @@ export async function updateCompany(
 ): Promise<CompanyRecord | null> {
   validateCrmBusiness(crmCompanyPatch,fields)
   if (!transactionClient) return runCrmWriteTransaction(userId,tx => updateCompany(userId,id,fields,access,tx.client,scope,{...operation,afterCommit:tx.afterCommit}))
+  const fieldIntent = Object.keys(fields).filter(key => (fields as Record<string, unknown>)[key] !== undefined)
+  await assertNativeEntityFieldWrites(userId,id,{},transactionClient,fieldIntent)
   const old=await typedMutationSource(userId,id,'company',access,transactionClient)
   if (!old) return null
   const a = { ...old.attributes }
@@ -538,7 +540,7 @@ export async function updateCompany(
     sensitivity: scope?.sensitivity === undefined ? undefined : maxSensitivity(old.sensitivity, scope.sensitivity),
     inheritCompartments: scope?.compartments,
     inheritProjectIds: scope?.projectIds,
-  }, dedupeAccessContext(userId, old.workspaceId, access), transactionClient,operation)
+  }, dedupeAccessContext(userId, old.workspaceId, access), transactionClient,{...operation,fieldIntent})
   if (!e) return null
   return companyFromEntity(e)
 }
@@ -796,6 +798,8 @@ export async function updateContact(
 ): Promise<ContactRecord | null> {
   validateCrmBusiness(crmContactPatch,fields)
   if (!transactionClient) return runCrmWriteTransaction(userId,tx => updateContact(userId,id,fields,entityLinks,access,tx.client,scope,tx.afterCommit,operation))
+  const fieldIntent = Object.keys(fields).filter(key => (fields as Record<string, unknown>)[key] !== undefined)
+  await assertNativeEntityFieldWrites(userId,id,{},transactionClient,fieldIntent)
   const old=await typedMutationSource(userId,id,'person',access,transactionClient)
   if (!old) return null
   const company = await readCrmReference(userId, old.workspaceId, fields.companyId, 'company', access, transactionClient)
@@ -814,7 +818,7 @@ export async function updateContact(
     sensitivity: inherited.sensitivity,
     inheritCompartments: inherited.compartments,
     inheritProjectIds: inherited.projectIds,
-  }, dedupeAccessContext(userId, old.workspaceId, access), transactionClient,operation)
+  }, dedupeAccessContext(userId, old.workspaceId, access), transactionClient,{...operation,fieldIntent})
   if (!e) return null
   if (fields.companyId !== undefined) {
     const project = () => repointGraphEdge(entityLinks, userId, {
@@ -1007,6 +1011,8 @@ export async function updateDeal(
   assertNonNegativeAmount(fields.amount)
   validateCrmBusiness(crmDealPatch,fields)
   if (!transactionClient) return runCrmWriteTransaction(userId,tx => updateDeal(userId,id,fields,entityLinks,access,tx.client,scope,{...operation,afterCommit:tx.afterCommit}))
+  const fieldIntent = Object.keys(fields).filter(key => (fields as Record<string, unknown>)[key] !== undefined)
+  await assertNativeEntityFieldWrites(userId,id,{},transactionClient,fieldIntent)
   const old=await typedMutationSource(userId,id,'deal',access,transactionClient)
   if (!old) return null
   const company = await readCrmReference(userId, old.workspaceId, fields.companyId, 'company', access, transactionClient)
@@ -1033,7 +1039,7 @@ export async function updateDeal(
     },
     dedupeAccessContext(userId, old.workspaceId, access),
     transactionClient,
-    operation,
+    {...operation,fieldIntent},
   )
   if (!e) return null
 
@@ -1074,6 +1080,8 @@ export async function setDealStage(
   assertValidStage(stage)
   if (stage===undefined) throw new ApplicationPlatformError('invalid_value','A canonical deal stage is required.')
   if (!transactionClient) return runCrmWriteTransaction(userId,tx => setDealStage(userId,id,stage,access,tx.client,scope,operation))
+  const fieldIntent = ['stage']
+  await assertNativeEntityFieldWrites(userId,id,{},transactionClient,fieldIntent)
   const old=await typedMutationSource(userId,id,'deal',access,transactionClient)
   if (!old) return null
   const a = { ...old.attributes, stage }
@@ -1088,7 +1096,7 @@ export async function setDealStage(
     },
     dedupeAccessContext(userId, old.workspaceId, access),
     transactionClient,
-    operation,
+    {...operation,fieldIntent},
   )
   if (!e) return null
   return dealFromEntity(e)

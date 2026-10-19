@@ -8,6 +8,8 @@ import { ApplicationPlatformError } from '@use-brian/shared'
 import { applyRLSGucs, getAppPool, getPool } from '../../db/client.js'
 import { bindTaskClosedHook, createTask, getTaskById, resolveTaskById, updateTask } from '../../db/tasks.js'
 import { createCompany,createContact,createDeal,updateCompany,updateContact,updateDeal,setDealStage } from '../../db/crm.js'
+import { createCrmFieldDefinition,updateCrmCustomFields } from '../../db/crm-r2.js'
+import { updateEntity } from '../../db/entities-store.js'
 import { findAssistantById } from '../../db/users.js'
 import { resolveExecutionContextSystem } from '../../context-scope/execution-context.js'
 import { ApplicationPlatformService } from '../service.js'
@@ -201,4 +203,142 @@ describe('[COMP:api/application-records] canonical native operation composition'
     expect(await getTaskById({ ...access,userId: readerId },committed.resources[0].id)).not.toBeNull()
     expect((await owner.query('SELECT count(*)::int AS count FROM application_command_audit WHERE receipt_id=$1',[committed.id])).rows[0].count).toBe(1)
   })
+  describe('[COMP:security/native-field-policy] canonical native CRM write admission',() => {
+    const nativeOrigin={kind:'native',moduleKey:'native'}
+    beforeAll(async () => {
+      await owner.query(`CREATE SEQUENCE native_operation_field_fixture_seq;
+        CREATE TABLE native_operation_field_fixture_epochs(workspace_id uuid PRIMARY KEY,revision bigint NOT NULL);
+        CREATE FUNCTION native_operation_field_fixture_revision(w uuid) RETURNS text
+        LANGUAGE sql SECURITY DEFINER SET search_path=pg_catalog,public,pg_temp AS $$
+          SELECT coalesce((SELECT revision::text FROM public.native_operation_field_fixture_epochs WHERE workspace_id=w),'0') $$;
+        REVOKE ALL ON FUNCTION native_operation_field_fixture_revision(uuid) FROM PUBLIC;
+        CREATE FUNCTION native_operation_field_fixture_changed() RETURNS trigger
+        LANGUAGE plpgsql SECURITY DEFINER SET search_path=pg_catalog,public,pg_temp AS $$
+        DECLARE w uuid;BEGIN w:=CASE WHEN TG_OP='DELETE' THEN OLD.workspace_id ELSE NEW.workspace_id END;
+          INSERT INTO public.native_operation_field_fixture_epochs(workspace_id,revision) VALUES(w,nextval('public.native_operation_field_fixture_seq'))
+            ON CONFLICT(workspace_id) DO UPDATE SET revision=nextval('public.native_operation_field_fixture_seq');RETURN NULL;END $$;
+        REVOKE ALL ON FUNCTION native_operation_field_fixture_changed() FROM PUBLIC;
+        CREATE TRIGGER native_operation_field_fixture_configuration AFTER INSERT OR UPDATE OR DELETE ON public.crm_field_definitions
+          FOR EACH ROW EXECUTE FUNCTION native_operation_field_fixture_changed();
+        CREATE FUNCTION native_operation_field_fixture_rules() RETURNS jsonb
+        LANGUAGE sql IMMUTABLE SECURITY DEFINER SET search_path=pg_catalog,public,pg_temp AS $$
+          SELECT '[{"key":"name","read":[],"write":[],"releaseReadTo":["external_user","service"],"releaseWriteTo":["service"]},
+            {"key":"domain","read":[],"write":[],"releaseReadTo":["external_user","service"],"releaseWriteTo":["service"]},
+            {"key":"tags","read":[],"write":[],"releaseReadTo":[],"releaseWriteTo":[]},
+            {"key":"externalRef","read":[],"write":[],"releaseReadTo":[],"releaseWriteTo":[]},
+            {"key":"custom.cost","read":[["finance"]],"write":[["finance"]],"releaseReadTo":[],"releaseWriteTo":[]}]'::jsonb $$;
+        REVOKE ALL ON FUNCTION native_operation_field_fixture_rules() FROM PUBLIC;
+        CREATE FUNCTION native_operation_field_fixture_keys(w uuid) RETURNS jsonb
+        LANGUAGE sql SECURITY DEFINER SET search_path=pg_catalog,public,pg_temp AS $$
+          SELECT to_jsonb(ARRAY['name','domain','tags','externalRef']||ARRAY(SELECT 'custom.'||field_key FROM public.crm_field_definitions
+            WHERE workspace_id=w AND entity_kind='company' AND archived_at IS NULL ORDER BY field_key)) $$;
+        REVOKE ALL ON FUNCTION native_operation_field_fixture_keys(uuid) FROM PUBLIC;
+        CREATE FUNCTION native_operation_field_fixture_reader(w uuid,o jsonb,t text,i text) RETURNS jsonb
+        LANGUAGE plpgsql SECURITY DEFINER SET search_path=pg_catalog,public,pg_temp AS $$
+        DECLARE source jsonb;BEGIN
+          IF o<>'{"kind":"native","moduleKey":"native"}'::jsonb OR t<>'company' THEN RETURN NULL;END IF;
+          source:=public.read_scope_source(w,'entity',i::uuid);
+          RETURN jsonb_build_object('moduleKey','native','origin',o,'typeKey',t,'schemaVersion',public.native_operation_field_fixture_revision(w),
+            'policyVersion','1','recordVersion',source->>'version','fieldKeys',public.native_operation_field_fixture_keys(w),
+            'fields',public.native_operation_field_fixture_rules(),'source',source);END $$;
+        REVOKE ALL ON FUNCTION native_operation_field_fixture_reader(uuid,jsonb,text,text) FROM PUBLIC;
+        CREATE FUNCTION native_operation_field_fixture_catalog(w uuid,o jsonb,t text) RETURNS jsonb
+        LANGUAGE plpgsql SECURITY DEFINER SET search_path=pg_catalog,public,pg_temp AS $$
+        BEGIN
+          IF o<>'{"kind":"native","moduleKey":"native"}'::jsonb OR t<>'company' THEN RETURN NULL;END IF;
+          RETURN jsonb_build_object('moduleKey','native','origin',o,'typeKey',t,'schemaVersion',public.native_operation_field_fixture_revision(w),
+            'policyVersion','1','fieldKeys',public.native_operation_field_fixture_keys(w),'fields',public.native_operation_field_fixture_rules(),
+            'scope',jsonb_build_object('workspaceId',w,'userId',NULL,'assistantId',NULL,'sensitivity','internal','compartments','[]'::jsonb,'projectIds','[]'::jsonb));END $$;
+        REVOKE ALL ON FUNCTION native_operation_field_fixture_catalog(uuid,jsonb,text) FROM PUBLIC`)
+      await createCrmFieldDefinition({userId,workspaceId,entityKind:'company',fieldKey:'cost',label:'Fictional cost',fieldType:'number'})
+      await owner.query(`INSERT INTO application_native_field_contracts(module_key,contract_version,role_keys,metadata_reader,catalog_reader,configuration_required,configuration_reader)
+        VALUES('native','1',ARRAY['finance'],'native_operation_field_fixture_reader(uuid,jsonb,text,text)'::regprocedure,
+          'native_operation_field_fixture_catalog(uuid,jsonb,text)'::regprocedure,true,'native_operation_field_fixture_revision(uuid)'::regprocedure)`)
+      await owner.query("INSERT INTO application_native_resource_owners(workspace_id,origin,resource_type,module_key) VALUES($1,$2,'company','native')",[workspaceId,nativeOrigin])
+      // The provisioning actor has an explicit current field role; tested
+      // ordinary readers never inherit owner status or that assignment.
+      await owner.query("INSERT INTO application_native_role_assignments(workspace_id,module_key,user_id,role_key,issued_by_user_id) VALUES($1,'native',$2,'finance',$2)",[workspaceId,userId])
+    })
+    afterAll(async () => {
+      await owner.query("DELETE FROM application_native_resource_owners WHERE workspace_id=$1 AND module_key='native'",[workspaceId])
+      await owner.query("DELETE FROM application_native_role_assignments WHERE workspace_id=$1 AND module_key='native'",[workspaceId])
+      await owner.query("DELETE FROM application_native_field_contracts WHERE module_key='native'")
+      await owner.query('DROP TRIGGER native_operation_field_fixture_configuration ON crm_field_definitions')
+      await owner.query('DROP FUNCTION native_operation_field_fixture_reader(uuid,jsonb,text,text)')
+      await owner.query('DROP FUNCTION native_operation_field_fixture_catalog(uuid,jsonb,text)')
+      await owner.query('DROP FUNCTION native_operation_field_fixture_keys(uuid)')
+      await owner.query('DROP FUNCTION native_operation_field_fixture_rules()')
+      await owner.query('DROP FUNCTION native_operation_field_fixture_revision(uuid)')
+      await owner.query('DROP FUNCTION native_operation_field_fixture_changed()')
+      await owner.query('DROP TABLE native_operation_field_fixture_epochs')
+      await owner.query('DROP SEQUENCE native_operation_field_fixture_seq')
+    })
+    async function company() {
+      const value=await createCompany(userId,{workspaceId,name:`Fictional protected company ${randomUUID()}`,access,mergeByName:false})
+      await updateCrmCustomFields({ctx:access,entityId:value.id,values:{cost:42}})
+      return value
+    }
+    async function member<T>(actor:string,operation:(client:PoolClient)=>Promise<T>) {
+      const connection=await getAppPool().connect()
+      try {await connection.query('BEGIN');await applyRLSGucs(connection,actor);const value=await operation(connection);await connection.query('COMMIT');return value}
+      finally {await connection.query('ROLLBACK');connection.release()}
+    }
+    const reader={...access,userId:readerId}
+    async function snapshot(id:string) {return (await owner.query('SELECT attributes,scope_version::text AS version FROM entities WHERE id=$1',[id])).rows[0]}
+    it.each([43,42])('Q04 refuses a protected native custom write of %s, including an equal hidden value',async cost => {
+      const value=await company(),before=await snapshot(value.id)
+      const mask=await member(readerId,async connection => (await connection.query('SELECT read_native_application_field_mask($1,$2,$3,$4,$5) AS value',
+        [workspaceId,nativeOrigin,'company',value.id,before.version])).rows[0].value)
+      expect(mask.writeFields).not.toContain('custom.cost')
+      await expect(updateCrmCustomFields({ctx:reader,entityId:value.id,values:{cost}})).rejects.toMatchObject({code:'access_unavailable'})
+      expect(await snapshot(value.id)).toEqual(before)
+    })
+    it('Q04 refuses protected native fields through the canonical raw entity writer',async () => {
+      const value=await company(),before=await snapshot(value.id)
+      await expect(updateEntity(readerId,value.id,{attributes:{...before.attributes,custom_fields:{cost:43}}},reader)).rejects.toMatchObject({code:'access_unavailable'})
+      expect(await snapshot(value.id)).toEqual(before)
+    })
+    it('Q04 keeps actual nonowner raw SQL behind the same protected native field boundary',async () => {
+      const value=await company(),before=await snapshot(value.id)
+      await expect(member(readerId,async connection => (await connection.query("UPDATE entities SET attributes=jsonb_set(attributes,'{custom_fields,cost}','43') WHERE id=$1",[value.id])).rowCount))
+        .rejects.toMatchObject({code:'42501'})
+      expect(await snapshot(value.id)).toEqual(before)
+    })
+    it('Q04 refuses a raw equal attribute replacement without typed partial intent',async () => {
+      const value=await company(),before=await snapshot(value.id)
+      await expect(member(readerId,async connection => (await connection.query('UPDATE entities SET attributes=attributes WHERE id=$1',[value.id])).rowCount))
+        .rejects.toMatchObject({code:'42501'})
+      expect(await snapshot(value.id)).toEqual(before)
+    })
+    it.each(['aliases=aliases',"aliases=ARRAY['Fictional alias']"])('Q04 refuses undeclared canonical alias fields through raw SQL: %s',async assignment => {
+      const value=await company(),before=await snapshot(value.id)
+      await expect(member(readerId,async connection => (await connection.query(`UPDATE entities SET ${assignment} WHERE id=$1`,[value.id])).rowCount))
+        .rejects.toMatchObject({code:'42501'})
+      expect(await snapshot(value.id)).toEqual(before)
+    })
+    it('Q04 does not let a spoofed allowed partial intent hide an actual hidden-field change',async () => {
+      const value=await company(),before=await snapshot(value.id)
+      await expect(member(readerId,async connection => {
+        await connection.query("SELECT set_config('app.native_entity_write_intent',$1,true)",[JSON.stringify({workspaceId,typeKey:'company',id:value.id,fields:['domain']})])
+        return (await connection.query("UPDATE entities SET attributes=jsonb_set(attributes,'{custom_fields,cost}','43') WHERE id=$1",[value.id])).rowCount
+      })).rejects.toMatchObject({code:'42501'})
+      expect(await snapshot(value.id)).toEqual(before)
+    })
+    it('Q04 scopes partial intent to its exact native record, including equal assignments',async () => {
+      const value=await company(),before=await snapshot(value.id)
+      await expect(member(readerId,async connection => {
+        await connection.query("SELECT set_config('app.native_entity_write_intent',$1,true)",[JSON.stringify({workspaceId,typeKey:'company',id:randomUUID(),fields:['domain']})])
+        return (await connection.query('UPDATE entities SET attributes=attributes WHERE id=$1',[value.id])).rowCount
+      })).rejects.toMatchObject({code:'42501'})
+      expect(await snapshot(value.id)).toEqual(before)
+    })
+    it('Q04/Q05 lets a typed allowed native domain edit preserve an unreadable custom field and source identity',async () => {
+      const value=await company(),before=await snapshot(value.id)
+      expect(await updateCompany(readerId,value.id,{domain:'native-fields.example'},reader)).toMatchObject({id:value.id,domain:'native-fields.example'})
+      const after=await snapshot(value.id)
+      expect(after.attributes.custom_fields).toEqual({cost:42})
+      expect(after.version).toBe(String(BigInt(before.version)+1n))
+    })
+  })
+
 })

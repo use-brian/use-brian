@@ -11,6 +11,7 @@ const entities = vi.hoisted(() => ({
   getEntityById: vi.fn(),
   getEntityByIdSystem: vi.fn(),
   updateEntity: vi.fn(),
+  assertNativeEntityFieldWrites: vi.fn(),
 }))
 const identity = vi.hoisted(() => ({
   bindImportedCrmIdentity: vi.fn(),

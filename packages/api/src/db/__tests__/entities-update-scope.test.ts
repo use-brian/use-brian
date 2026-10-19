@@ -22,6 +22,7 @@ vi.mock('../client.js', () => ({
   query: vi.fn(async () => ({ rows: [], rowCount: 0 })),
   queryGated: vi.fn(async () => ({ rows: [], rowCount: 0 })),
   queryWithRLS: vi.fn(async (userId: string, text: string, values?: unknown[]) => {
+    if (text.includes('application_native_entity_field_writes_allowed')) return {rows:[{allowed:true}],rowCount:1}
     rlsQueries.push({ userId, text, values })
     return { rows: rlsRows, rowCount: rlsRows.length }
   }),

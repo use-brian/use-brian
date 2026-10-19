@@ -23,7 +23,7 @@ import type { PoolClient } from 'pg'
 import { buildAccessPredicate, buildCurrentMemberSourcePredicate, mutationActorAccess } from './access-predicate.js'
 import { applyRLSGucs, getAppPool, getPool, query, queryGated, queryWithRLS } from './client.js'
 import { crmReferenceScope, prepareCrmParticipantMutation, readCrmMutationSource, readCrmReference, runCrmWriteTransaction, updateDeal } from './crm.js'
-import { getEntityById, updateEntity } from './entities-store.js'
+import { assertNativeEntityFieldWrites, getEntityById, updateEntity } from './entities-store.js'
 
 export const CRM_FIELD_TYPES = CRM_CUSTOM_FIELD_TYPES
 export type CrmFieldType = (typeof CRM_FIELD_TYPES)[number]
@@ -1572,6 +1572,8 @@ export async function updateCrmCustomFields(input: {
   if (!transactionClient) {
     return runCrmWriteTransaction(input.ctx.userId, tx => updateCrmCustomFields(input, tx.client))
   }
+  const fieldIntent = Object.keys(input.values).map(key => `custom.${key}`)
+  await assertNativeEntityFieldWrites(input.ctx.userId,input.entityId,{},transactionClient,fieldIntent)
   const old = await readCrmMutationSource(input.ctx, input.entityId, ['person', 'company', 'deal'], transactionClient)
   if (!old) return null
   const { definitions, references } = await validateCustomFieldWrite({
@@ -1597,7 +1599,7 @@ export async function updateCrmCustomFields(input: {
   return updateEntity(input.ctx.userId, input.entityId, {
     attributes, sensitivity: inherited.sensitivity,
     inheritCompartments: inherited.compartments, inheritProjectIds: inherited.projectIds,
-  }, input.ctx, transactionClient)
+  }, input.ctx, transactionClient, {fieldIntent})
 }
 
 export type CrmDealParticipant = {

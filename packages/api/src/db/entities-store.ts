@@ -1174,13 +1174,55 @@ export async function listEntities(
  * clearance and private-user visibility using the bound authenticated actor,
  * including legacy user-only callers and owner-pool composed transactions.
  */
+/** Restriction-only field admission; ordinary row/scope admission remains mandatory. */
+export async function assertNativeEntityFieldWrites(
+  actorUserId: string, id: string, fields: EntityUpdateFields,
+  transactionClient?: pg.PoolClient, fieldIntent?: readonly string[],
+): Promise<void> {
+  if (fields.displayName === undefined && fields.canonicalId === undefined && fields.attributes === undefined && !fieldIntent?.length) return
+  const sql = 'SELECT application_native_entity_field_writes_allowed($1,$2::jsonb,$3::text[]) AS allowed'
+  const values = [id, JSON.stringify(fields), fieldIntent ?? null]
+  const result = transactionClient ? await transactionClient.query<{ allowed: boolean }>(sql, values)
+    : await queryWithRLS<{ allowed: boolean }>(actorUserId, sql, values)
+  if (result.rows[0]?.allowed !== true) throw new ApplicationPlatformError('access_unavailable', 'The current native write fields are unavailable.')
+}
+
 export async function updateEntity(
+  actorUserId: string, id: string, fields: EntityUpdateFields, access?: AccessContext,
+  transactionClient?: pg.PoolClient, operation?: { expectedVersion?: string; fieldIntent?: readonly string[] },
+): Promise<EntityRecord | null> {
+  await assertNativeEntityFieldWrites(actorUserId, id, fields, transactionClient, operation?.fieldIntent)
+  if (operation?.fieldIntent === undefined) return updateEntityMutation(actorUserId, id, fields, access, transactionClient, operation)
+  const client = transactionClient ?? await getAppPool().connect()
+  let previous = ''
+  try {
+    if (!transactionClient) { await client.query('BEGIN'); await applyRLSGucs(client, actorUserId) }
+    const source = (await client.query<{ workspace_id: string; kind: string }>(
+      'SELECT workspace_id,kind FROM entities WHERE id=$1', [id])).rows[0]
+    if (!source) { if (!transactionClient) await client.query('COMMIT'); return null }
+    previous = (await client.query<{ intent: string | null }>(
+      "SELECT current_setting('app.native_entity_write_intent',true) AS intent")).rows[0]?.intent ?? ''
+    await client.query("SELECT set_config('app.native_entity_write_intent',$1,true)", [JSON.stringify({
+      workspaceId: source.workspace_id, typeKey: source.kind, id, fields: operation.fieldIntent,
+    })])
+    const result = await updateEntityMutation(actorUserId, id, fields, access, client, operation)
+    await client.query("SELECT set_config('app.native_entity_write_intent',$1,true)", [previous])
+    if (!transactionClient) await client.query('COMMIT')
+    return result
+  } catch (error) {
+    if (!transactionClient) await client.query('ROLLBACK').catch(() => {})
+    else await client.query("SELECT set_config('app.native_entity_write_intent',$1,true)", [previous]).catch(() => {})
+    throw error
+  } finally { if (!transactionClient) client.release() }
+}
+
+async function updateEntityMutation(
   actorUserId: string,
   id: string,
   fields: EntityUpdateFields,
   access?: AccessContext,
   transactionClient?: pg.PoolClient,
-  operation?: { expectedVersion?: string },
+  operation?: { expectedVersion?: string; fieldIntent?: readonly string[] },
 ): Promise<EntityRecord | null> {
   access = entityMutationAccess(actorUserId, access)
   if (operation?.expectedVersion !== undefined) {

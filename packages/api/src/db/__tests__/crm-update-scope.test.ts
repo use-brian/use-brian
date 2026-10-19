@@ -14,6 +14,7 @@ vi.mock('../client.js', () => ({
 }))
 
 vi.mock('../entities-store.js', () => ({
+  assertNativeEntityFieldWrites: vi.fn(),
   createEntity: vi.fn(),
   getEntityById: vi.fn(),
   getEntityByIdSystem: vi.fn(),
