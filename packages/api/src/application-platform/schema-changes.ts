@@ -9,6 +9,12 @@ import { createDbDocEntityStore } from '../db/doc-entity-store.js'
 function actorKey(execution:ExecutionContext) {
   return createHash('sha256').update(JSON.stringify({identity:execution.identity,assistant:execution.assistant})).digest('hex')
 }
+async function governanceRevision(client:PoolClient,execution:ExecutionContext,typeId:string) {
+  const result=await client.query<{ revision: string }>('SELECT application_schema_governance_revision($1,$2,$3) AS revision',
+    [execution.security.access.workspaceId,typeId,execution.assistant.id])
+  if (!/^[0-9a-f]{64}$/.test(result.rows[0]?.revision ?? '')) throw new ApplicationPlatformError('access_unavailable','The schema governance is unavailable.')
+  return result.rows[0].revision
+}
 async function scan(client:PoolClient,workspaceId:string,typeId:string,properties:PropertyDef[]) {
   const hash=createHash('sha256'),ids:string[]=[]
   let cursor:string|undefined,records=0,invalid=0
@@ -30,25 +36,31 @@ export async function previewApplicationSchema(client:PoolClient,execution:Execu
   const properties=rawProperties.map(property=>propertyDefSchema.parse(property));validateDocApplicationSchema(properties)
   const {workspaceId,userId}=execution.security.access
   await client.query('SELECT id FROM entity_types WHERE id=$1 AND workspace_id=$2 FOR SHARE',[typeId,workspaceId])
+  const authorityRevision=await governanceRevision(client,execution,typeId)
   const canonical=createDbDocEntityStore({actorUserId:userId,transaction:client}),schema=await canonical.getEntityType(workspaceId,typeId)
   if(!schema)throw new ApplicationPlatformError('access_unavailable','The schema is unavailable.')
   if(schema.schemaVersion!==expectedVersion)throw new ApplicationPlatformError('schema_version_conflict','The schema changed. Refresh the preview.')
   const state=await scan(client,workspaceId,typeId,properties),id=randomUUID()
   await client.query(`INSERT INTO application_schema_change_reviews
-    (id,workspace_id,entity_type_id,actor_user_id,actor_key,expected_schema_version,proposed_properties,record_set_hash,invalid_records)
-    VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9)`,[id,workspaceId,typeId,userId,actorKey(execution),expectedVersion,JSON.stringify(properties),state.hash,state.invalid])
+    (id,workspace_id,entity_type_id,actor_user_id,actor_key,expected_schema_version,proposed_properties,record_set_hash,invalid_records,review_assistant_id,reviewed_authority_revision)
+    VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11)`,[id,workspaceId,typeId,userId,actorKey(execution),expectedVersion,JSON.stringify(properties),state.hash,state.invalid,execution.assistant.id,authorityRevision])
   return {id,entityTypeId:typeId,expectedSchemaVersion:expectedVersion,before:schema.properties,proposed:properties,
     affectedRecords:state.records,invalidRecords:state.invalid,canApply:state.invalid===0}
 }
 export async function applyApplicationSchema(client:PoolClient,execution:ExecutionContext,previewId:string) {
   const {workspaceId,userId}=execution.security.access
-  const result=await client.query<{entity_type_id:string;expected_schema_version:number;proposed_properties:PropertyDef[];record_set_hash:string;invalid_records:number;applied_version:number|null;expired:boolean}>(
+  const result=await client.query<{entity_type_id:string;expected_schema_version:number;proposed_properties:PropertyDef[];record_set_hash:string;invalid_records:number;applied_version:number|null;expired:boolean;review_assistant_id:string|null;reviewed_authority_revision:string|null;applied_authority_revision:string|null}>(
     `SELECT *,expires_at<=now() AS expired FROM application_schema_change_reviews
       WHERE id=$1 AND workspace_id=$2 AND actor_user_id=$3 AND actor_key=$4 FOR UPDATE`,[previewId,workspaceId,userId,actorKey(execution)])
   const review=result.rows[0]
   if(!review)throw new ApplicationPlatformError('access_unavailable','The schema review is unavailable.')
   const canonical=createDbDocEntityStore({actorUserId:userId,transaction:client})
   await client.query('SELECT id FROM entity_types WHERE id=$1 AND workspace_id=$2 FOR UPDATE',[review.entity_type_id,workspaceId])
+  const authorityRevision=await governanceRevision(client,execution,review.entity_type_id)
+  if(review.review_assistant_id!==execution.assistant.id || !(review.applied_version===null ? review.reviewed_authority_revision : review.applied_authority_revision)
+    || authorityRevision!==(review.applied_version===null ? review.reviewed_authority_revision : review.applied_authority_revision)) {
+    throw new ApplicationPlatformError('schema_version_conflict','The reviewed authority changed. Refresh the preview.')
+  }
   const schema=await canonical.getEntityType(workspaceId,review.entity_type_id)
   if(!schema)throw new ApplicationPlatformError('access_unavailable','The schema is unavailable.')
   if(review.applied_version!==null)return {entityTypeId:schema.id,schemaVersion:review.applied_version,applied:true}

@@ -319,6 +319,7 @@ describe('[COMP:api/policy-epoch] canonical invocation policy epochs', () => {
   })
   it.each(['schema','owner','contract'] as const)('C06 %s revision invalidates both factories before first data',async change => {
     const fixture = await record(),app = await application(fixture,'member')
+    if (change === 'schema') { await assign('finance',ownerId);await assign('approver',ownerId) }
     const executions = [await nativeExecution(),await resolveApplicationExecutionContext(app.authentication)]
     if (change === 'schema') await store.updateEntityType(workspaceId,fixture.schema.id,{ name: 'Fictional renamed schema' })
     if (change === 'owner') {

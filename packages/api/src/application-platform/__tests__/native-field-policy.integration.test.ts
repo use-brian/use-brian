@@ -9,7 +9,7 @@ import { createDbDocEntityStore } from '../../db/doc-entity-store.js'
 import { createMemory,getMemoryById,countMemories,getMemoryIndex,getMemoryStats,searchMemories } from '../../db/memories.js'
 import { readApplicationFieldAncestors } from '../field-evidence.js'
 import { defineNativeApplicationFieldPolicy,decideNativeApplicationFields,ContextScopeAccumulator,executionToolContext,NOOP_TURN_LEDGER,boundScopeSources,createDocEntityTools,
-  buildPayload,renderPage,type NativeApplicationFieldFacts,type ScopeSource,type ExecutionContext,type LLMProvider,type ApplicationModuleDefinition } from '@use-brian/core'
+  buildPayload,renderPage,type NativeApplicationFieldFacts,type ScopeSource,type ExecutionContext,type LLMProvider,type ApplicationModuleDefinition,type PropertyDef } from '@use-brian/core'
 import { findAssistantById,findOrCreateUser } from '../../db/users.js'
 import { resolveExecutionContextSystem } from '../../context-scope/execution-context.js'
 import { runAssistantTurn } from '../../turn/kernel.js'
@@ -161,26 +161,26 @@ describe('[COMP:security/native-field-policy] current canonical native field mas
       { key: 'cost',read: [['finance']],write: [['finance'],['approver']],releaseReadTo: [],releaseWriteTo: [] },
     ]
   }
-  async function catalogType(module = 'operations', claim = true) {
+  async function catalogType(module = 'operations', claim = true, extraProperties: PropertyDef[] = [], policy = fields()) {
     const schema = await store.createEntityType({ workspaceId,name: `Fictional purchases ${randomUUID()}`,createdBy: ownerId,
-      properties: [{ name: 'title',config: { kind: 'text' } },{ name: 'cost',config: { kind: 'number',format: 'decimal' } }] })
+      properties: [{ name: 'title',config: { kind: 'text' } },{ name: 'cost',config: { kind: 'number',format: 'decimal' } },...extraProperties] })
     const origin = { kind: 'generic' as const,entityTypeId: schema.id },type = `record.${schema.id}`
     const catalog = { schema,origin,type }
-    if (claim) await claimCatalog(catalog,module)
+    if (claim) await claimCatalog(catalog,module,policy)
     return catalog
   }
-  async function claimCatalog(catalog: { schema: { id: string }; origin: { kind: 'generic'; entityTypeId: string }; type: string }, module: string) {
+  async function claimCatalog(catalog: { schema: { id: string }; origin: { kind: 'generic'; entityTypeId: string }; type: string }, module: string, policy = fields()) {
     await owner.query('INSERT INTO application_native_resource_owners(workspace_id,origin,resource_type,module_key) VALUES($1,$2,$3,$4)',[workspaceId,catalog.origin,catalog.type,module])
-    await owner.query('INSERT INTO application_native_policy_fixture_catalog(type_id,fields) VALUES($1,$2)',[catalog.schema.id,JSON.stringify(fields())])
+    await owner.query('INSERT INTO application_native_policy_fixture_catalog(type_id,fields) VALUES($1,$2)',[catalog.schema.id,JSON.stringify(policy)])
   }
-  async function record(includeCost = true,module = 'operations') {
-    const catalog = await catalogType(module,false),{ schema } = catalog
+  async function record(includeCost = true,module = 'operations',extraProperties: PropertyDef[] = [],policy = fields()) {
+    const catalog = await catalogType(module,false,extraProperties,policy),{ schema } = catalog
     const row = await store.createEntity({ workspaceId,entityTypeId: schema.id,createdBy: ownerId,lastEditedBy: ownerId,sourceApp: 'api',
       data: { title: { kind: 'text',value: 'Fictional request' },...(includeCost ? { cost: { kind: 'number' as const,value: 42 } } : {}) } })
     const recordVersion = row.recordVersion
     if (!recordVersion) throw new Error('The canonical fixture requires its persisted record version.')
-    await claimCatalog(catalog,module)
-    await owner.query('INSERT INTO application_native_policy_fixture_metadata(resource_id,fields) VALUES($1,$2)',[row.id,JSON.stringify(fields())])
+    await claimCatalog(catalog,module,policy)
+    await owner.query('INSERT INTO application_native_policy_fixture_metadata(resource_id,fields) VALUES($1,$2)',[row.id,JSON.stringify(policy)])
     return { ...catalog,row: { ...row,recordVersion } }
   }
   async function writerRecord() {
@@ -440,6 +440,71 @@ describe('[COMP:security/native-field-policy] current canonical native field mas
     } finally {
       await owner.query(`UPDATE application_native_field_contracts SET metadata_reader='application_native_writer_fixture_reader(uuid,jsonb,text,text)'::regprocedure
         WHERE module_key='writer_operations'`)
+    }
+  })
+  it.each(['preview','patch','delete'] as const)('Q07 refuses a protected native schema %s without current field governance even for an owner',async operation => {
+    await clearRoles()
+    const fixture = await record(),schemaOwner = createDbDocEntityStore({ actorUserId: ownerId })
+    const properties = fixture.schema.properties.map(property => property.name === 'cost'
+      ? { ...property,config: { kind: 'number' as const,format: 'decimal' as const,minimum: 43 } } : property)
+    const attempt = async () => operation === 'preview'
+      ? new ApplicationPlatformService([createCanonicalGenericApplicationModule()]).previewSchema(await nativeExecution(ownerId),fixture.schema.id,1,properties)
+      : operation === 'patch' ? schemaOwner.updateEntityType(workspaceId,fixture.schema.id,{ properties: fixture.schema.properties.map(property => property.name === 'cost'
+        ? { ...property,config: { kind: 'number' as const,format: 'decimal' as const,maximum: 100 } } : property) },{ actorUserId: ownerId,expectedSchemaVersion: 1 })
+      : schemaOwner.deleteEntityType(workspaceId,fixture.schema.id,{ actorUserId: ownerId })
+    await expect(attempt()).rejects.toMatchObject({ code: 'access_unavailable' })
+    expect((await owner.query('SELECT schema_version AS version FROM entity_types WHERE id=$1',[fixture.schema.id])).rows).toEqual([{ version: 1 }])
+    expect((await owner.query('SELECT data,record_version::text AS version FROM entity_instances WHERE id=$1',[fixture.row.id])).rows[0])
+      .toEqual({ data: fixture.row.data,version: fixture.row.recordVersion })
+    expect((await owner.query('SELECT id FROM application_schema_change_reviews WHERE entity_type_id=$1',[fixture.schema.id])).rows).toEqual([])
+  })
+  const schemaWithCostMaximum = (fixture: Awaited<ReturnType<typeof record>>) => fixture.schema.properties.map(property =>
+    property.name === 'cost' ? { ...property,config: { kind: 'number' as const,format: 'decimal' as const,maximum: 100 } } : property)
+  it('Q07 permits current protected schema governance and recovers its applied review without rewriting record identity or values',async () => {
+    await clearRoles();const fixture = await record(),service = new ApplicationPlatformService([createCanonicalGenericApplicationModule()])
+    await assign('finance',ownerId);await assign('approver',ownerId)
+    const preview = await service.previewSchema(await nativeExecution(ownerId),fixture.schema.id,1,schemaWithCostMaximum(fixture))
+    expect(preview).toMatchObject({ affectedRecords: 1,invalidRecords: 0,canApply: true,before: fixture.schema.properties })
+    const applied = await service.applySchema(await nativeExecution(ownerId),preview.id)
+    expect(applied).toMatchObject({ entityTypeId: fixture.schema.id,schemaVersion: 2,applied: true })
+    expect(await service.applySchema(await nativeExecution(ownerId),preview.id)).toEqual(applied)
+    expect((await owner.query('SELECT id,data,record_version::text AS version FROM entity_instances WHERE id=$1',[fixture.row.id])).rows[0])
+      .toEqual({ id: fixture.row.id,data: fixture.row.data,version: fixture.row.recordVersion })
+    await createDbDocEntityStore({ actorUserId: ownerId }).deleteEntityType(workspaceId,fixture.schema.id,{ actorUserId: ownerId })
+    expect((await owner.query('SELECT id FROM entity_instances WHERE id=$1',[fixture.row.id])).rows).toEqual([])
+    expect((await owner.query('SELECT resource_type FROM application_native_resource_owners WHERE workspace_id=$1 AND origin=$2',[workspaceId,fixture.origin])).rows).toEqual([])
+  })
+  it('Q07 requires a new protected schema review after role withdrawal and restore even under a fresh invocation',async () => {
+    await clearRoles();const fixture = await record(),service = new ApplicationPlatformService([createCanonicalGenericApplicationModule()])
+    await assign('finance',ownerId);const role = await assign('approver',ownerId)
+    const preview = await service.previewSchema(await nativeExecution(ownerId),fixture.schema.id,1,schemaWithCostMaximum(fixture))
+    await owner.query("UPDATE application_native_role_assignments SET status='revoked' WHERE id=$1",[role])
+    await expect(service.applySchema(await nativeExecution(ownerId),preview.id)).rejects.toMatchObject({ code: 'access_unavailable' })
+    await assign('approver',ownerId)
+    await expect(service.applySchema(await nativeExecution(ownerId),preview.id)).rejects.toMatchObject({ code: 'schema_version_conflict' })
+    expect((await owner.query('SELECT schema_version FROM entity_types WHERE id=$1',[fixture.schema.id])).rows[0].schema_version).toBe(1)
+    expect((await owner.query('SELECT applied_version FROM application_schema_change_reviews WHERE id=$1',[preview.id])).rows[0].applied_version).toBeNull()
+    const fresh = await service.previewSchema(await nativeExecution(ownerId),fixture.schema.id,1,schemaWithCostMaximum(fixture))
+    expect(await service.applySchema(await nativeExecution(ownerId),fresh.id)).toMatchObject({ schemaVersion: 2,applied: true })
+  })
+  it('Q07 intersects every protected record policy before schema preview instead of treating catalog governance as row authority',async () => {
+    await clearRoles()
+    await owner.query("UPDATE application_native_field_contracts SET role_keys=ARRAY['finance','approver','auditor'] WHERE module_key='operations'")
+    try {
+      const fixture = await record(),service = new ApplicationPlatformService([createCanonicalGenericApplicationModule()])
+      await assign('finance',ownerId);await assign('approver',ownerId)
+      const policy = fields().map(field => field.key === 'cost' ? { ...field,write: [['auditor']] } : field)
+      await owner.query('UPDATE application_native_policy_fixture_metadata SET fields=$2 WHERE resource_id=$1',[fixture.row.id,JSON.stringify(policy)])
+      await expect(service.previewSchema(await nativeExecution(ownerId),fixture.schema.id,1,schemaWithCostMaximum(fixture)))
+        .rejects.toMatchObject({ code: 'access_unavailable' })
+      await expect(createDbDocEntityStore({ actorUserId: ownerId }).updateEntityType(workspaceId,fixture.schema.id,{ properties: schemaWithCostMaximum(fixture) }))
+        .rejects.toMatchObject({ code: 'access_unavailable' })
+      await assign('auditor',ownerId)
+      expect(await service.previewSchema(await nativeExecution(ownerId),fixture.schema.id,1,schemaWithCostMaximum(fixture)))
+        .toMatchObject({ affectedRecords: 1,invalidRecords: 0,canApply: true })
+    } finally {
+      await owner.query("DELETE FROM application_native_role_assignments WHERE workspace_id=$1 AND module_key='operations' AND role_key='auditor'",[workspaceId])
+      await owner.query("UPDATE application_native_field_contracts SET role_keys=ARRAY['finance','approver'] WHERE module_key='operations'")
     }
   })
   it('Q02/Q04 refuses a native hidden-field assignment even when its value is unchanged', async () => {
@@ -1231,11 +1296,9 @@ describe('[COMP:security/native-field-policy] current canonical native field mas
     expect((await observedFields(value)).sort((a,b) => a.length-b.length)).toEqual([['title'],['cost','title']])
   })
   it('uses canonical system cells only when readable and retains implicit ordering evidence',async () => {
-    await clearRoles();const fixture = await record()
-    await store.updateEntityType(workspaceId,fixture.schema.id,{ properties: [...fixture.schema.properties,{ name: 'created',config: { kind: 'created_time' } }] })
+    await clearRoles()
     const policy = [...fields(),{ key: 'created',read: [['finance']],write: [['finance']],releaseReadTo: [],releaseWriteTo: [] }]
-    await owner.query('UPDATE application_native_policy_fixture_metadata SET fields=$2 WHERE resource_id=$1',[fixture.row.id,JSON.stringify(policy)])
-    await owner.query('UPDATE application_native_policy_fixture_catalog SET fields=$2 WHERE type_id=$1',[fixture.schema.id,JSON.stringify(policy)])
+    const fixture = await record(true,'operations',[{ name: 'created',config: { kind: 'created_time' } }],policy)
     await addRecord(fixture,'Second fictional request',8,policy)
     const narrow = await queryRecords(fixture,{ fields: ['title'],limit: 1 })
     expect(narrow.nextCursor).toBeDefined()
@@ -1250,10 +1313,9 @@ describe('[COMP:security/native-field-policy] current canonical native field mas
     expect(row.absentFields ?? []).not.toContain('created')
   })
   it('captures managed author identity as an original member reference and holds it after membership loss',async () => {
-    await clearRoles();const fixture = await catalogType()
-    await store.updateEntityType(workspaceId,fixture.schema.id,{ properties: [...fixture.schema.properties,{ name: 'author',config: { kind: 'created_by' } }] })
+    await clearRoles()
     const policy = [...fields(),{ key: 'author',read: [],write: [],releaseReadTo: [],releaseWriteTo: [] }]
-    await owner.query('UPDATE application_native_policy_fixture_catalog SET fields=$2 WHERE type_id=$1',[fixture.schema.id,JSON.stringify(policy)])
+    const fixture = await catalogType('operations',true,[{ name: 'author',config: { kind: 'created_by' } }],policy)
     const id = randomUUID()
     await owner.query('INSERT INTO application_native_policy_fixture_metadata(resource_id,fields) VALUES($1,$2)',[id,JSON.stringify(policy)])
     const row = await createDbDocEntityStore({ actorUserId: otherId }).createEntity({ id,workspaceId,entityTypeId: fixture.schema.id,createdBy: otherId,lastEditedBy: otherId,

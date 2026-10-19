@@ -169,15 +169,20 @@ function projectedInstance(row: Omit<EntityInstanceRow, 'data'>,schema: DocEntit
 export function createDbDocEntityStore(boundActor?: { actorUserId: string; transaction?: PoolClient }): DocEntityStore {
   let transactionRole: Promise<void> | undefined
   async function canonicalQuery<T extends QueryResultRow>(userId: string, text: string, values?: unknown[]): Promise<QueryResult<T>> {
-    if (!boundActor?.transaction) return queryWithRLS<T>(userId,text,values)
-    const client = boundActor.transaction
-    transactionRole ??= client.query(`SELECT r.rolsuper OR r.rolbypassrls OR c.relowner=r.oid AS bypass
-      FROM pg_catalog.pg_roles r JOIN pg_catalog.pg_class c ON c.oid='entity_instances'::regclass WHERE r.rolname=current_user`).then(result => {
-      if (result.rows[0]?.bypass !== false) throw new ApplicationPlatformError('access_unavailable', 'A non-owner application transaction is required.')
-    })
-    await transactionRole
-    await applyRLSGucs(client,userId)
-    return client.query<T>(text,values)
+    try {
+      if (!boundActor?.transaction) return await queryWithRLS<T>(userId,text,values)
+      const client = boundActor.transaction
+      transactionRole ??= client.query(`SELECT r.rolsuper OR r.rolbypassrls OR pg_has_role(r.oid,c.relowner,'USAGE') AS bypass
+        FROM pg_catalog.pg_roles r JOIN pg_catalog.pg_class c ON c.oid='entity_instances'::regclass WHERE r.rolname=current_user`).then(result => {
+        if (result.rows[0]?.bypass !== false) throw new ApplicationPlatformError('access_unavailable', 'A non-owner application transaction is required.')
+      })
+      await transactionRole
+      await applyRLSGucs(client,userId)
+      return await client.query<T>(text,values)
+    } catch (error) {
+      if ((error as { code?: string }).code === '42501') throw new ApplicationPlatformError('access_unavailable','The schema is unavailable.')
+      throw error
+    }
   }
   function actor(workspaceId: string, options?: DocEntityOperationOptions, creator?: string | null): string {
     const ambient = currentAgentAccess()
@@ -446,6 +451,7 @@ export function createDbDocEntityStore(boundActor?: { actorUserId: string; trans
         return rowToType(updated.rows[0])
       } catch (err) {
         if (ownTransaction) await client.query('ROLLBACK').catch(() => {})
+        if ((err as { code?: string }).code === '42501') throw new ApplicationPlatformError('access_unavailable','The schema is unavailable.')
         throw err
       } finally {
         if (ownTransaction) await rollbackAndRelease(client)
