@@ -21,6 +21,7 @@ import { createCrmOperationsService } from '../../crm-operations/service.js'
 import { findAssistantById } from '../../db/users.js'
 import { resolveExecutionContextSystem } from '../../context-scope/execution-context.js'
 import { ApplicationPlatformService } from '../service.js'
+import { createCanonicalNativeApplicationModule } from '../native-adapters.js'
 
 const { assertLocalFixture } = await import(new URL('../../../../../scripts/crm/local-fixture.mjs', import.meta.url).href)
 await assertLocalFixture()
@@ -56,6 +57,20 @@ describe('[COMP:api/application-records] canonical native operation composition'
       ownership: { kind: 'workspace', workspaceId }, lifecycle: { sessionId: randomUUID(), sessionPersisted: false,
         channelId: 'native-operation-fixture', channelType: 'test', abortSignal: new AbortController().signal } })).executionContext
   }
+  it('Q02 captures selected native values under the actual member while refusing an owner-pool read',async()=>{
+    const value=await createEntity({workspaceId,kind:'company',displayName:'Fictional selected native member fields',
+      aliases:['Fictional member alias'],attributes:{tags:['member-tag'],external_ref:{provider:'fictional',id:'member-reference'}},
+      createdByUserId:userId,source:'user'})
+    const dispatcher=new ApplicationPlatformService([createCanonicalNativeApplicationModule()])
+    const projection=await dispatcher.query(await execution(),'native','get',{type:'company',id:value.id,
+      fields:['name','tags','aliases','externalRef','createdAt','updatedAt']}) as {values:Record<string,unknown>;fields:string[]}
+    expect(projection.values).toMatchObject({name:value.displayName,tags:['member-tag'],aliases:['fictional member alias'],
+      externalRef:{provider:'fictional',id:'member-reference'},createdAt:value.createdAt.toISOString(),updatedAt:value.updatedAt.toISOString()})
+    expect(boundScopeSources(projection)).toEqual(expect.arrayContaining([expect.objectContaining({resourceKind:'application_field',workspaceId})]))
+    const empty=await dispatcher.query(await execution(),'native','get',{type:'company',id:value.id,fields:[]}) as {values:unknown;fields:string[]}
+    expect(empty.values).toEqual({});expect(empty.fields).toEqual([]);expect(boundScopeSources(empty).length).toBeGreaterThan(0)
+    expect((await owner.query('SELECT read_native_application_record($1,$2,$3,$4) AS value',[workspaceId,'company',value.id,['name']])).rows[0].value).toBeNull()
+  })
   it('Q05 rolls back task supersession, child and Goal links without early lifecycle effects', async () => {
     const parent = await task(), child = await task('Fictional linked child',parent.id)
     const goal = (await owner.query(`INSERT INTO goals(workspace_id,host_type,host_id,outcome,done_when,means,status,created_by_user_id,confirmed_at)

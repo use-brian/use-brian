@@ -20,6 +20,14 @@ describe('[COMP:shared/application-platform] application wire boundaries', () =>
     expect(applicationResourceSchema.safeParse({ ...resource, fields: [{ ...field, options: ['open', 'open'] }] }).success).toBe(false)
     expect(applicationResourceSchema.safeParse({ ...resource, fields: [{ key: 'amount', label: 'Amount', kind: 'number', minimum: 10, maximum: 1 }] }).success).toBe(false)
   })
+  it('declares bounded native JSON arrays/objects as inert field values without runtime code',()=>{
+    const base={typeKey:'company',origin:ref.origin,schemaVersion:'1'}
+    const tags={key:'tags',label:'Tags',kind:'json',shape:'array',items:'text',maxItems:64,maxItemLength:100}
+    expect(applicationResourceSchema.safeParse({...base,fields:[tags,{key:'externalRef',label:'External reference',kind:'json',shape:'object'}]}).success).toBe(true)
+    for(const patch of [{shape:'execute'},{maxItems:0},{maxItemLength:8193},{items:'sql'},{validator:'SELECT secret'}]) {
+      expect(applicationResourceSchema.safeParse({...base,fields:[{...tags,...patch}]}).success).toBe(false)
+    }
+  })
   it('caps query and batch vocabulary and refuses unknown operators/SQL', () => {
     expect(applicationQuerySchema.parse({}).limit).toBe(50)
     for (const input of [{ limit: 101 }, { limit: 0 }, { sql: 'SELECT *' }, { filters: [{ field: 'cost', op: 'execute', value: 1 }] }]) {

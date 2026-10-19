@@ -75,6 +75,13 @@ export function validateApplicationValues(schema: ApplicationResourceDefinition,
       case 'enum': if (typeof value !== 'string' || !field.options.includes(value)) invalid('Invalid enum value.'); break
       case 'reference': case 'file': case 'person':
         if (typeof value !== 'string' || value.length === 0 || value.length > 256) invalid('Invalid reference.'); break
+      case 'json':
+        if (field.shape === 'array') {
+          if (!Array.isArray(value) || field.maxItems !== undefined && value.length > field.maxItems) invalid('Invalid native array value.')
+          if (field.items === 'text' && value.some(item => typeof item !== 'string'
+            || field.maxItemLength !== undefined && item.length > field.maxItemLength)) invalid('Invalid native array item.')
+        } else if (typeof value !== 'object' || Array.isArray(value)) invalid('Invalid native object value.')
+        break
       case 'cell': break // Complete canonical cell validation, including missing values, follows below.
       case 'crm': if (!validateCrmCustomFieldValue(parseApplicationCrmFieldDefinition(field.definition), value)) invalid('Invalid canonical CRM value.'); break
     }

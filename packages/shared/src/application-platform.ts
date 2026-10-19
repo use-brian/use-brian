@@ -65,6 +65,9 @@ export const applicationFieldSchema = z.discriminatedUnion('kind', [
   z.object({ ...commonField, kind: z.literal('file') }).strict(),
   z.object({ ...commonField, kind: z.literal('person') }).strict(),
   z.object({ ...commonField, kind: z.literal('cell'), property: z.lazy(() => z.record(applicationJsonSchema)), relationshipResolverKey: key.optional() }).strict(),
+  z.object({ ...commonField, kind: z.literal('json'), shape: z.enum(['array','object']),
+    items: z.literal('text').optional(), maxItems: z.number().int().min(1).max(256).optional(),
+    maxItemLength: z.number().int().min(1).max(8192).optional() }).strict(),
   z.object({ ...commonField, kind: z.literal('crm'), definition: z.lazy(() => z.record(applicationJsonSchema)) }).strict(),
 ])
 export const applicationResourceSchema = z.object({
@@ -87,6 +90,10 @@ export const applicationResourceSchema = z.object({
     }
     if (field.kind === 'enum' && new Set(field.options).size !== field.options.length) {
       ctx.addIssue({ code: 'custom', path: ['fields', index, 'options'], message: 'Duplicate enum option' })
+    }
+    if (field.kind === 'json' && (field.shape === 'object' && (field.items !== undefined || field.maxItems !== undefined || field.maxItemLength !== undefined)
+      || field.maxItemLength !== undefined && field.items !== 'text')) {
+      ctx.addIssue({ code: 'custom', path: ['fields', index], message: 'Invalid native JSON bounds' })
     }
     if (field.kind === 'number' && field.minimum !== undefined && field.maximum !== undefined && field.minimum > field.maximum) {
       ctx.addIssue({ code: 'custom', path: ['fields', index], message: 'Invalid numeric bounds' })

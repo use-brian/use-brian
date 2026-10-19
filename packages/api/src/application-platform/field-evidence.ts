@@ -59,6 +59,24 @@ export async function readCanonicalGenericRecord(context: CanonicalGenericReadCo
     ...(captured.data.absentFields.length ? { absentFields: captured.data.absentFields } : {}) },captured.data.sources)
 }
 
+/** Canonical native values are selected and captured before crossing the SQL boundary. */
+export async function readCanonicalNativeRecord(context:CanonicalGenericReadContext,
+  definition:ApplicationResourceDefinition,id:string,fields?:readonly string[]):Promise<ApplicationRecordProjection> {
+  if(definition.origin.kind!=='native' || definition.origin.moduleKey!=='native') unavailable()
+  const captured=captureSchema.extend({id:z.string().uuid(),recordVersion:z.string().min(1)}).safeParse(
+    (await context.transaction.query<{value:unknown}>('SELECT read_native_application_record($1,$2,$3,$4) AS value',
+      [context.workspaceId,definition.typeKey,id,fields?[...fields]:null])).rows[0]?.value)
+  if(!captured.success || captured.data.id!==id.toLowerCase() || captured.data.sources[0].resourceKind!=='application_field'
+    || captured.data.sources.some(source=>source.workspaceId!==context.workspaceId)
+    || Object.keys(captured.data.values).some(field=>!definition.fields.some(candidate=>candidate.key===field))
+    || fields && !isDeepStrictEqual([...fields].sort(),Object.keys(captured.data.values).sort())) unavailable()
+  const policyVersion=context.applicationFingerprint
+    ? createHash('sha256').update(JSON.stringify({application:context.applicationFingerprint,field:captured.data.policyVersion})).digest('hex')
+    :captured.data.policyVersion
+  return bindScopeSources({ref:{workspaceId:context.workspaceId,origin:definition.origin,typeKey:definition.typeKey,id:captured.data.id,version:captured.data.recordVersion},
+    values:captured.data.values,fields:Object.keys(captured.data.values),policyVersion},captured.data.sources)
+}
+
 /** A row-free native/app domain is captured under actual current SQL ceilings. */
 export async function readCanonicalGenericQueryDomain(context: CanonicalGenericReadContext,
   definition: ApplicationResourceDefinition,fields: readonly string[],predicateFields: readonly string[]): Promise<ScopeSource[]> {

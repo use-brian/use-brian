@@ -14,6 +14,18 @@ describe('[COMP:security/application-access] canonical application value admissi
     expect(() => validateApplicationValues(schema, { 'custom.regions': ['unknown'] })).toThrow()
     expect(() => validateApplicationValues(schema, { 'custom.regions': { kind: 'multi_select', value: ['north'] } })).toThrow()
   })
+  it('preserves native array/object shapes and refuses cross-shape or excessive values',()=>{
+    const schema=applicationResourceSchema.parse({typeKey:'company',schemaVersion:'1',origin:{kind:'native',moduleKey:'native'},fields:[
+      {key:'tags',label:'Tags',kind:'json',shape:'array',items:'text',maxItems:2,maxItemLength:8},
+      {key:'externalRef',label:'External reference',kind:'json',shape:'object'},
+    ]})
+    const values={tags:['north','south'],externalRef:{provider:'fictional',id:'record-1'}}
+    expect(validateApplicationValues(schema,values)).toEqual(values)
+    for(const input of [{tags:'north'},{tags:['north',12]},{tags:['one','two','three']},{tags:['too-long-value']},{externalRef:[]},{externalRef:'fictional'}]) {
+      expect(()=>validateApplicationValues(schema,input)).toThrow()
+    }
+    expect(()=>validateApplicationValues(schema,{externalRef:{run:()=>1}})).toThrow()
+  })
   const properties: PropertyDef[] = [
     { name: 'title', config: { kind: 'text' }, required: true },
     { name: 'quantity', config: { kind: 'number', format: 'int', minimum: 1, maximum: 10 } },
