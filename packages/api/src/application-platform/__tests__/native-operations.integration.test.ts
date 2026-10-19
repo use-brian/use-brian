@@ -66,6 +66,16 @@ describe('[COMP:api/application-records] canonical native operation composition'
       ownership: { kind: 'workspace', workspaceId }, lifecycle: { sessionId: randomUUID(), sessionPersisted: false,
         channelId: 'native-operation-fixture', channelType: 'test', abortSignal: new AbortController().signal } })).executionContext
   }
+  it('Q02 queries native CRM under the actual member and rejects an owner-pool query catalog',async()=>{
+    const name=`Fictional native member query ${randomUUID()}`,value=await createCompany(userId,{workspaceId,name,access,mergeByName:false})
+    const dispatcher=new ApplicationPlatformService([createCanonicalNativeApplicationModule()])
+    const result=await dispatcher.query(await execution(),'native','query',{type:'company',query:{fields:['name'],filters:[{field:'name',op:'eq',value:name}]}}) as {records:Array<{ref:{id:string};values:unknown}>}
+    expect(result.records).toEqual([expect.objectContaining({ref:expect.objectContaining({id:value.id}),values:{name}})])
+    expect(boundScopeSources(result).length).toBeGreaterThan(1)
+    const connection=await owner.connect();try{await connection.query('BEGIN');await applyRLSGucs(connection,userId)
+      expect((await connection.query("SELECT application_native_query_catalog($1,'company') AS value",[workspaceId])).rows[0].value).toBeNull()
+    }finally{await connection.query('ROLLBACK');connection.release()}
+  })
   it('Q02 captures selected native values under the actual member while refusing an owner-pool read',async()=>{
     const value=await createEntity({workspaceId,kind:'company',displayName:'Fictional selected native member fields',
       aliases:['Fictional member alias'],attributes:{tags:['member-tag'],external_ref:{provider:'fictional',id:'member-reference'}},
@@ -988,6 +998,21 @@ describe('[COMP:api/application-records] canonical native operation composition'
       await expect(dispatcher.command(await resolveApplicationExecutionContext(fixture.authentication),'native',key,command)).rejects.toMatchObject({code:'access_unavailable'})
       expect((await owner.query('SELECT id FROM entities WHERE id=$1',[first.resources[0].id])).rows).toEqual([{id:first.resources[0].id}])
       if(kind!=='member') expect((await owner.query('SELECT user_id FROM workspace_members WHERE workspace_id=$1 AND user_id=$2',[workspaceId,fixture.actor])).rows).toEqual([])
+    })
+    it('Q02/Q03 applies current protected native member fields before query predicates and refuses a missing revision reader',async()=>{
+      const value=await company(),dispatcher=new ApplicationPlatformService([createCanonicalNativeApplicationModule()])
+      const name=(await owner.query('SELECT display_name FROM entities WHERE id=$1',[value.id])).rows[0].display_name
+      const input={type:'company',query:{fields:['name'],filters:[{field:'name',op:'eq',value:name}]}}
+      const read=(identity:Awaited<ReturnType<typeof execution>>,body:unknown)=>dispatcher.query(identity,'native','query',body)
+      expect((await read(await execution(),input) as {records:unknown[]}).records).toHaveLength(1)
+      const lower=(await resolveExecutionContextSystem({userId:readerId,workspaceId,assistant:(await findAssistantById(assistantId))!,memberMode:'member',
+        identity:{kind:'attended',principal:{kind:'workspace_member',userId:readerId,authenticationKind:'native_session'}},ownership:{kind:'workspace',workspaceId},
+        lifecycle:{sessionId:randomUUID(),sessionPersisted:false,channelId:'native-query-fixture',channelType:'test',abortSignal:new AbortController().signal}})).executionContext
+      await expect(read(lower,{type:'company',query:{fields:['name'],filters:[{field:'custom.cost',op:'gt',value:100}]}})).rejects.toMatchObject({code:'access_unavailable'})
+      const original=(await owner.query("SELECT configuration_reader::text AS reader FROM application_native_field_contracts WHERE module_key='native'")).rows[0].reader
+      await owner.query("UPDATE application_native_field_contracts SET configuration_reader=NULL WHERE module_key='native'")
+      try{await expect(execution()).rejects.toMatchObject({name:'AuthorityChangedError'})}
+      finally{await owner.query("UPDATE application_native_field_contracts SET configuration_reader=$1::regprocedure WHERE module_key='native'",[original])}
     })
     async function setCreatorPolicy(options:{finance?:boolean;point?:boolean}) {
       const rules=(await owner.query('SELECT native_operation_field_fixture_rules() AS rules')).rows[0].rules

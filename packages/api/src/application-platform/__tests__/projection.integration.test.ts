@@ -143,6 +143,78 @@ describe('[COMP:api/application-auth] database application projections and live 
     expect(user).not.toBeNull()
     return { authentication: { user: user! }, appId, grantId, parentId, userId, token: `oat_${id}_${secret}` }
   }
+  it('Q02 consumes native output fields only for selected rows while proving predicates for all candidates',async()=>{
+    const ids:string[]=[]
+    for(const amount of ['100','0'])ids.push((await createEntity({workspaceId,kind:'deal',displayName:'Fictional native selected output',attributes:{stage:'lead',amount},createdByUserId:ownerId,source:'user'})).id)
+    const fixture=await provision('service',['amount'],undefined,false,ids[0],[],ids,{kind:'ids',ids},'read_write',[],'deal')
+    const existing=(await pool.query('SELECT credential_id,maximum_grant FROM application_credential_grants WHERE app_id=$1 AND grant_id=$2',[fixture.appId,fixture.grantId])).rows[0]
+    const grant={...existing.maximum_grant.grants[0],id:randomUUID(),readFields:['name'],writeFields:[],selector:{kind:'ids',ids:[ids[0]]}}
+    await pool.query(`INSERT INTO application_access_grants(id,app_id,workspace_id,principal_kind,principal_user_id,issued_by_user_id,resource_origin,resource_type,actions,read_fields,write_fields,selector,clearance,compartments,project_ids,starts_at)
+      VALUES($1,$2,$3,'service',$4,$5,$6,'deal',$7,$8,'{}',$9,'confidential','{}','{}',$10)`,[grant.id,fixture.appId,workspaceId,fixture.userId,ownerId,grant.origin,grant.actions,grant.readFields,grant.selector,grant.startsAt])
+    await pool.query('INSERT INTO application_credential_grants(credential_id,app_id,workspace_id,grant_id,maximum_grant) VALUES($1,$2,$3,$4,$5)',[existing.credential_id,fixture.appId,workspaceId,grant.id,{version:1,grants:[grant]}])
+    const authentication={credential:(await authenticateApplicationCredential(fixture.token,fixture.appId,loadApplicationCredentialStateSystem))!},dispatcher=new ApplicationPlatformService([createCanonicalNativeApplicationModule()])
+    const result=await dispatcher.query(await resolveApplicationExecutionContext(authentication),'native','query',{type:'deal',query:{fields:['name'],filters:[{field:'amount',op:'gt',value:'50'}]}}) as {records:Array<{ref:{id:string};values:unknown}>}
+    expect(result.records).toEqual([expect.objectContaining({ref:expect.objectContaining({id:ids[0]}),values:{name:'Fictional native selected output'}})])
+    await expect(dispatcher.query(await resolveApplicationExecutionContext(authentication),'native','query',{type:'deal',query:{fields:['name'],filters:[{field:'amount',op:'lt',value:'50'}]}})).rejects.toMatchObject({code:'access_unavailable'})
+  })
+  it('Q02 paginates native numeric ties and nulls without loss or duplicates and binds the cursor to its declared query',async()=>{
+    const amounts=['9007199254740993.000000000000000002','9007199254740993.000000000000000001','9007199254740993.000000000000000002',null],ids:string[]=[]
+    for(const amount of amounts) ids.push((await createEntity({workspaceId,kind:'deal',displayName:'Fictional native page',attributes:{stage:'lead',amount},createdByUserId:ownerId,source:'user'})).id)
+    const fixture=await provision('service',['name','amount'],undefined,false,ids[0],[],ids,{kind:'ids',ids},'read_write',[],'deal')
+    const dispatcher=new ApplicationPlatformService([createCanonicalNativeApplicationModule()]),execution=await resolveApplicationExecutionContext(fixture.authentication)
+    const input={fields:['amount'],sort:[{field:'amount',direction:'asc' as const}],limit:2}
+    const first=await dispatcher.query(execution,'native','query',{type:'deal',query:input}) as {records:Array<{ref:{id:string};values:{amount:string|null}}> ;nextCursor:string}
+    const second=await dispatcher.query(execution,'native','query',{type:'deal',query:{...input,cursor:first.nextCursor}}) as typeof first
+    const records=[...first.records,...second.records]
+    expect(records.map(row=>row.values.amount)).toEqual([amounts[1],amounts[0],amounts[2],null]);expect(new Set(records.map(row=>row.ref.id))).toEqual(new Set(ids))
+    expect(second.nextCursor).toBeUndefined()
+    const malformed=JSON.parse(Buffer.from(first.nextCursor,'base64url').toString('utf8'));malformed.values[0]='not-a-decimal'
+    await expect(dispatcher.query(execution,'native','query',{type:'deal',query:{...input,cursor:Buffer.from(JSON.stringify(malformed)).toString('base64url')}})).rejects.toMatchObject({code:'invalid_value'})
+    await expect(dispatcher.query(execution,'native','query',{type:'deal',query:{...input,sort:[{field:'amount',direction:'desc'}],cursor:first.nextCursor}})).rejects.toMatchObject({code:'invalid_value'})
+    const total=await dispatcher.query(execution,'native','query',{type:'deal',query:{fields:[],limit:1,aggregate:[{field:'amount',operation:'sum'},{field:'amount',operation:'count'}]}}) as {records:unknown[];aggregates:unknown}
+    expect(total.records).toHaveLength(1);expect(total.aggregates).toEqual([{field:'amount',operation:'sum',value:'27021597764222979.000000000000000005'},{field:'amount',operation:'count',value:'3'}])
+  })
+  it.each(['member','external_user','service'] as const)('Q02 queries native exact decimal predicates and totals through the real %s factory',async kind=>{
+    const value=await createEntity({workspaceId,kind:'deal',displayName:'Fictional exact native query',attributes:{stage:'lead',amount:'9007199254740993.123456789012345678'},createdByUserId:ownerId,source:'user'})
+    const fixture=await provision(kind,['name','amount'],undefined,false,value.id,[],[value.id],undefined,'read_write',[],'deal')
+    const dispatcher=new ApplicationPlatformService([createCanonicalNativeApplicationModule()]),execution=await resolveApplicationExecutionContext(fixture.authentication)
+    const result=await dispatcher.query(execution,'native','query',{type:'deal',query:{fields:['name'],filters:[{field:'amount',op:'gt',value:'9007199254740993'}],aggregate:[{field:'amount',operation:'sum'}]}}) as {records:Array<{ref:{id:string};values:unknown}>;aggregates:unknown}
+    expect(result.records).toEqual([expect.objectContaining({ref:expect.objectContaining({id:value.id}),values:{name:value.displayName}})])
+    expect(result.aggregates).toEqual([{field:'amount',operation:'sum',value:'9007199254740993.123456789012345678'}])
+    expect(boundScopeSources(result).length).toBeGreaterThan(1)
+  })
+  it.each(['filter','sort','sum','count','exists'] as const)('Q02 refuses a hidden native %s field before evaluating the query',async use=>{
+    const value=await createEntity({workspaceId,kind:'deal',displayName:'Fictional hidden native predicate',attributes:{stage:'lead',amount:'42'},createdByUserId:ownerId,source:'user'})
+    const fixture=await provision('service',['name'],undefined,false,value.id,[],[value.id],undefined,'read_write',[],'deal')
+    const query={fields:['name'],...(use==='filter'?{filters:[{field:'amount',op:'gt',value:'100'}]}:use==='exists'?{filters:[{field:'amount',op:'neq',value:null}]}:use==='sort'?{sort:[{field:'amount',direction:'asc'}]}:{aggregate:[{field:'amount',operation:use}]})}
+    const dispatcher=new ApplicationPlatformService([createCanonicalNativeApplicationModule()])
+    await expect(dispatcher.query(await resolveApplicationExecutionContext(fixture.authentication),'native','query',{type:'deal',query})).rejects.toMatchObject({code:'access_unavailable'})
+  })
+  it('Q02 captures a native empty query and invalidates it when an absent released candidate appears',async()=>{
+    const id=randomUUID(),fixture=await provision('service',['name'],undefined,false,id),dispatcher=new ApplicationPlatformService([createCanonicalNativeApplicationModule()])
+    const result=await dispatcher.query(await resolveApplicationExecutionContext(fixture.authentication),'native','query',{type:'company',query:{fields:['name']}}) as {records:unknown[]}
+    expect(result.records).toEqual([]);expect(boundScopeSources(result).length).toBeGreaterThan(0)
+    const source=boundScopeSources(result)[0]
+    const base=createCanonicalNativeApplicationModule();const snapshots=new ApplicationPlatformService([{...base,application:{...base.application!,queries:[...base.application!.queries,'field_snapshot']},queries:{...base.queries,field_snapshot:{input:z.object({id:z.string().uuid(),version:z.string()}),authorize:async()=>{},execute:async({transaction},raw)=>{const input=raw as {id:string;version:string};return(await transaction.query('SELECT read_admitted_application_field_snapshot($1,$2,$3) AS value',[workspaceId,input.id,input.version])).rows[0].value}}}}])
+    const snapshot=async(auth=fixture.authentication)=>snapshots.query(await resolveApplicationExecutionContext(auth),'native','field_snapshot',{id:source.resourceId,version:source.version})
+    expect(await snapshot()).toMatchObject({held:false})
+    await pool.query("INSERT INTO entities(id,workspace_id,kind,display_name,source,created_by_user_id) VALUES($1,$2,'company','Fictional formerly absent candidate','user',$3)",[id,workspaceId,ownerId])
+    expect(await snapshot()).toMatchObject({held:true})
+  })
+  it('Q02 keeps native query evidence reader independent and captures predicates for excluded candidates',async()=>{
+    const value=await createEntity({workspaceId,kind:'deal',displayName:'Fictional excluded native candidate',attributes:{stage:'lead',amount:'42'},createdByUserId:ownerId,source:'user'})
+    const a=await provision('service',['name','amount'],undefined,false,value.id,[],[value.id],undefined,'read_write',[],'deal'),b=await provision('service',['name','amount'],undefined,false,value.id,[],[value.id],undefined,'read_write',[],'deal')
+    const base=createCanonicalNativeApplicationModule(),dispatcher=new ApplicationPlatformService([{...base,application:{...base.application!,queries:[...base.application!.queries,'field_snapshot']},queries:{...base.queries,field_snapshot:{input:z.object({id:z.string().uuid(),version:z.string()}),authorize:async()=>{},execute:async({transaction},raw)=>{const input=raw as {id:string;version:string};return(await transaction.query('SELECT read_admitted_application_field_snapshot($1,$2,$3) AS value',[workspaceId,input.id,input.version])).rows[0].value}}}}])
+    const query={type:'deal',query:{fields:['name'],filters:[{field:'amount',op:'gt',value:'100'}]}}
+    const result=await dispatcher.query(await resolveApplicationExecutionContext(a.authentication),'native','query',query) as {records:unknown[]};expect(result.records).toEqual([])
+    const sources=boundScopeSources(result);expect(sources.length).toBeGreaterThan(1)
+    const snapshot=async(fixture:typeof a,source= sources[0])=>dispatcher.query(await resolveApplicationExecutionContext(fixture.authentication),'native','field_snapshot',{id:source.resourceId,version:source.version})
+    for(const source of sources) expect(await snapshot(b,source)).toMatchObject({held:false})
+    await pool.query("UPDATE application_access_grants SET read_fields=ARRAY['name'] WHERE id=$1",[a.grantId])
+    expect(await snapshot(a)).toMatchObject({held:true});expect(await snapshot(b)).toMatchObject({held:false})
+    await pool.query("UPDATE entities SET attributes=attributes||'{\"amount\":\"142\"}' WHERE id=$1",[value.id])
+    expect(await snapshot(b)).toMatchObject({held:true})
+  })
   it('Q02 reads selected canonical native tags, aliases and external references without coercion',async()=>{
     const value=await createEntity({workspaceId,kind:'company',displayName:'Fictional structured native fields',aliases:['fictional structured alias'],
       attributes:{tags:['fictional-tag'],external_ref:{provider:'fictional',id:'fictional-record'}},createdByUserId:ownerId,source:'user'})
