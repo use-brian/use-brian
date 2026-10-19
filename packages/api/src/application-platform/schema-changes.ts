@@ -1,10 +1,18 @@
 /** Saved generic schema reviews over canonical rows. [COMP:api/application-records] */
 import { createHash, randomUUID } from 'node:crypto'
 import type { PoolClient } from 'pg'
+import { z } from 'zod'
 import { propertyDefSchema, validateDocApplicationSchema, validateDocApplicationValues,
   type CellValue, type ExecutionContext, type PropertyDef } from '@use-brian/core'
 import { ApplicationPlatformError } from '@use-brian/shared'
 import { createDbDocEntityStore } from '../db/doc-entity-store.js'
+
+/** Shared management/MCP declarations; canonical PropertyDef remains authoritative. */
+export const applicationSchemaPreviewInput = z.object({ typeId: z.string().uuid(),expectedVersion: z.number().int().positive(),
+  properties: z.array(propertyDefSchema).max(128) }).strict()
+export const applicationSchemaApplyInput = z.object({ previewId: z.string().uuid() }).strict()
+export type ApplicationSchemaPreviewInput = z.infer<typeof applicationSchemaPreviewInput>
+export type ApplicationSchemaApplyInput = z.infer<typeof applicationSchemaApplyInput>
 
 function actorKey(execution:ExecutionContext) {
   return createHash('sha256').update(JSON.stringify({identity:execution.identity,assistant:execution.assistant})).digest('hex')

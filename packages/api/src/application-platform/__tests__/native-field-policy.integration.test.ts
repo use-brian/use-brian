@@ -1,6 +1,8 @@
 import { createHash,randomUUID,randomBytes } from 'node:crypto'
 import { afterAll,beforeAll,describe,expect,it } from 'vitest'
 import type { PoolClient } from 'pg'
+import express from 'express'
+import request from 'supertest'
 import { z } from 'zod'
 import { ApplicationPlatformError } from '@use-brian/shared'
 import { getAppPool,getPool,applyRLSGucs } from '../../db/client.js'
@@ -21,6 +23,12 @@ import { loadApplicationCredentialStateSystem } from '../auth-store.js'
 import { authenticateApplicationOAuth } from '../oauth-auth.js'
 import { applyApplicationRLSContext,releaseApplicationTransactionBinding,resolveApplicationExecutionContext } from '../execution-context.js'
 import { ApplicationPlatformService } from '../service.js'
+import { ApplicationManagementService } from '../management.js'
+import { applicationPlatformRoutes } from '../../routes/application-platform.js'
+import { authSessionStore } from '../../db/auth-session-store.js'
+import { createTokens } from '../../auth/jwt.js'
+import { requireAuth } from '../../auth/middleware.js'
+import { buildNativeApplicationSchemaMcpTools } from '../mcp.js'
 import { createCanonicalGenericApplicationModule } from '../generic-adapter.js'
 import { assertSourceModelInputAuthority } from '../model-source-authority.js'
 
@@ -458,6 +466,16 @@ describe('[COMP:security/native-field-policy] current canonical native field mas
       .toEqual({ data: fixture.row.data,version: fixture.row.recordVersion })
     expect((await owner.query('SELECT id FROM application_schema_change_reviews WHERE entity_type_id=$1',[fixture.schema.id])).rows).toEqual([])
   })
+  it('Q02 keeps an empty legacy schema patch inside the actual current catalog projection',async () => {
+    await clearRoles();const fixture=await record(),legacy=createDbDocEntityStore({ actorUserId: ownerId })
+    expect((await legacy.getEntityType(workspaceId,fixture.schema.id))?.properties.map(property => property.name)).toEqual(['title'])
+    const unchanged=await legacy.updateEntityType(workspaceId,fixture.schema.id,{})
+    expect(unchanged.properties.map(property => property.name)).toEqual(['title'])
+    expect(unchanged.schemaVersion).toBe(1)
+    expect((await owner.query('SELECT schema_version FROM entity_types WHERE id=$1',[fixture.schema.id])).rows[0].schema_version).toBe(1)
+    await assign('finance',ownerId)
+    expect((await legacy.updateEntityType(workspaceId,fixture.schema.id,{})).properties.map(property => property.name)).toEqual(['title','cost'])
+  })
   const schemaWithCostMaximum = (fixture: Awaited<ReturnType<typeof record>>) => fixture.schema.properties.map(property =>
     property.name === 'cost' ? { ...property,config: { kind: 'number' as const,format: 'decimal' as const,maximum: 100 } } : property)
   it('Q07 permits current protected schema governance and recovers its applied review without rewriting record identity or values',async () => {
@@ -506,6 +524,133 @@ describe('[COMP:security/native-field-policy] current canonical native field mas
       await owner.query("DELETE FROM application_native_role_assignments WHERE workspace_id=$1 AND module_key='operations' AND role_key='auditor'",[workspaceId])
       await owner.query("UPDATE application_native_field_contracts SET role_keys=ARRAY['finance','approver'] WHERE module_key='operations'")
     }
+  })
+  it('Q04/Q07 holds protected schema governance when an independently required field reference disappears',async () => {
+    await clearRoles()
+    const policy=[...fields(),{ key: 'reviewer',read: [],write: [],releaseReadTo: [],releaseWriteTo: [] }]
+    const catalog=await catalogType('operations',false,[{ name: 'reviewer',config: { kind: 'person' } }],policy)
+    const row=await store.createEntity({ workspaceId,entityTypeId: catalog.schema.id,createdBy: ownerId,lastEditedBy: ownerId,sourceApp: 'api',data: {
+      title: { kind: 'text',value: 'Fictional referenced request' },cost: { kind: 'number',value: 42 },reviewer: { kind: 'person',value: otherId },
+    } })
+    await claimCatalog(catalog,'operations',policy)
+    await owner.query('INSERT INTO application_native_policy_fixture_metadata(resource_id,fields) VALUES($1,$2)',[row.id,JSON.stringify(policy)])
+    await assign('finance',ownerId);await assign('approver',ownerId)
+    const fixture={ ...catalog,row },service=new ApplicationPlatformService([createCanonicalGenericApplicationModule()])
+    const get=() => nativeExecution(ownerId).then(execution => service.query(execution,'records','get',{ type: fixture.type,id: row.id })) as Promise<ApplicationRecordProjection>
+    expect((await get()).values.reviewer).toEqual({ kind: 'person',value: otherId })
+    await owner.query('DELETE FROM workspace_members WHERE workspace_id=$1 AND user_id=$2',[workspaceId,otherId])
+    try {
+      await expect(get()).rejects.toMatchObject({ code: 'access_unavailable' })
+      await expect(service.previewSchema(await nativeExecution(ownerId),catalog.schema.id,1,catalog.schema.properties))
+        .rejects.toMatchObject({ code: 'access_unavailable' })
+      await expect(store.updateEntityType(workspaceId,catalog.schema.id,{ properties: catalog.schema.properties }))
+        .rejects.toMatchObject({ code: 'access_unavailable' })
+      expect((await owner.query('SELECT id FROM application_schema_change_reviews WHERE entity_type_id=$1',[catalog.schema.id])).rows).toEqual([])
+      expect((await owner.query('SELECT schema_version FROM entity_types WHERE id=$1',[catalog.schema.id])).rows[0].schema_version).toBe(1)
+    } finally {
+      await owner.query("INSERT INTO workspace_members(workspace_id,user_id,role,clearance) VALUES($1,$2,'member','internal')",[workspaceId,otherId])
+    }
+    expect((await get()).values.reviewer).toEqual({ kind: 'person',value: otherId })
+    expect(await service.previewSchema(await nativeExecution(ownerId),catalog.schema.id,1,catalog.schema.properties))
+      .toMatchObject({ affectedRecords: 1,invalidRecords: 0,canApply: true })
+  })
+  const schemaManagementSecret = 'fictional-native-schema-management-secret'
+  async function schemaManagementHttp(actor = ownerId) {
+    const service = new ApplicationPlatformService([createCanonicalGenericApplicationModule()])
+    const session = await authSessionStore.create(actor,{ deviceLabel: 'Fictional native schema browser',userAgent: 'Fictional schema fixture',ipAddress: '127.0.0.1' })
+    const token = createTokens(actor,schemaManagementSecret,session!).accessToken
+    const http=express();http.use(express.json());http.use('/api/applications',applicationPlatformRoutes({ service,
+      management: { service: new ApplicationManagementService(service),requireAuth: requireAuth(schemaManagementSecret),origins: ['https://host.example'] } }))
+    return { service,http,token,base: `/api/applications/workspaces/${workspaceId}` }
+  }
+  const schemaMcpReply = (response: { text: string;body: unknown }) => {
+    const line=response.text.split('\n').find(line => line.startsWith('data: '))
+    return line ? JSON.parse(line.slice(6)) : response.body
+  }
+  function schemaMcp(value: Awaited<ReturnType<typeof schemaManagementHttp>>,method: string,params?: unknown) {
+    return request(value.http).post(`${value.base}/schema-mcp`).set('Authorization',`Bearer ${value.token}`)
+      .set('Accept','application/json, text/event-stream').set('MCP-Protocol-Version','2025-11-25')
+      .send({ jsonrpc: '2.0',id: 1,method,...(params ? { params } : {}) })
+  }
+  describe('[COMP:api/application-auth] native schema management adapters',() => {
+    it('Q07/Q08 serves reviewed schema HTTP mutations only through the current native session and canonical governance',async () => {
+      await clearRoles();const fixture=await record(),value=await schemaManagementHttp()
+      await assign('finance',ownerId);await assign('approver',ownerId)
+      const path=`${value.base}/schemas/${fixture.schema.id}/preview`,body={ expectedVersion: 1,properties: schemaWithCostMaximum(fixture) }
+      await expect(new ApplicationManagementService(value.service,owner).previewSchema(ownerId,workspaceId,fixture.schema.id,body))
+        .rejects.toMatchObject({ code: 'access_unavailable' })
+      await expect(new ApplicationPlatformService([createCanonicalGenericApplicationModule()],owner).previewSchema(
+        await nativeExecution(ownerId),fixture.schema.id,1,body.properties)).rejects.toMatchObject({ code: 'access_unavailable' })
+      expect((await request(value.http).post(path).set('Authorization',`Bearer ${value.token}`).send({ ...body,userId: memberId })).status).toBe(400)
+      expect((await request(value.http).post(path).set('Origin','https://unregistered.example').set('Authorization',`Bearer ${value.token}`).send(body)).status).toBe(403)
+      const preview=await request(value.http).post(path).set('Origin','https://host.example').set('Authorization',`Bearer ${value.token}`).send(body)
+      expect(preview.status).toBe(200);expect(preview.body).toMatchObject({ entityTypeId: fixture.schema.id,affectedRecords: 1,invalidRecords: 0,canApply: true })
+      const applied=await request(value.http).post(`${value.base}/schema-reviews/${preview.body.id}/apply`).set('Authorization',`Bearer ${value.token}`).send({})
+      expect(applied.status).toBe(200);expect(applied.body).toEqual({ entityTypeId: fixture.schema.id,schemaVersion: 2,applied: true })
+      const replay=await request(value.http).post(`${value.base}/schema-reviews/${preview.body.id}/apply`).set('Authorization',`Bearer ${value.token}`).send({})
+      expect(replay.status).toBe(200);expect(replay.body).toEqual(applied.body)
+      expect((await owner.query('SELECT data,record_version::text AS version FROM entity_instances WHERE id=$1',[fixture.row.id])).rows[0])
+        .toEqual({ data: fixture.row.data,version: fixture.row.recordVersion })
+    })
+    it('Q07/Q08 refuses schema HTTP governance for an unentitled owner, a member, or an application audience',async () => {
+      await clearRoles();const fixture=await record(),value=await schemaManagementHttp(),member=await schemaManagementHttp(memberId)
+      const path=`${value.base}/schemas/${fixture.schema.id}/preview`,body={ expectedVersion: 1,properties: schemaWithCostMaximum(fixture) }
+      expect((await request(value.http).post(path).set('Authorization',`Bearer ${value.token}`).send(body)).status).toBe(403)
+      expect((await request(member.http).post(path).set('Authorization',`Bearer ${member.token}`).send(body)).status).toBe(403)
+      const app=await application(fixture,'member')
+      // This is a genuine current application OAuth proof, not a fabricated token.
+      const execution=await resolveApplicationExecutionContext(app.authentication)
+      expect(() => buildNativeApplicationSchemaMcpTools(value.service,execution)).toThrow('Native schema management authentication is required.')
+      for (const token of [app.token,(await application(fixture,'service')).token]) {
+        expect((await request(value.http).post(path).set('Authorization',`Bearer ${token}`).send(body)).status).toBe(401)
+      }
+      expect((await owner.query('SELECT schema_version FROM entity_types WHERE id=$1',[fixture.schema.id])).rows[0].schema_version).toBe(1)
+      expect((await owner.query('SELECT id FROM application_schema_change_reviews WHERE entity_type_id=$1',[fixture.schema.id])).rows).toEqual([])
+    })
+    it('Q02/Q07 withholds native management preview counts after an awaited role contraction while an independent reader remains entitled',async () => {
+      await clearRoles();const fixture=await record(),role=await assign('finance',ownerId)
+      await assign('approver',ownerId);await assign('finance',otherId)
+      const reader=new ApplicationPlatformService([createCanonicalGenericApplicationModule()])
+      const observed=await reader.query(await nativeExecution(otherId),'records','get',{ type: fixture.type,id: fixture.row.id }) as ApplicationRecordProjection
+      let readCompleted=false
+      class ContractingSchemaService extends ApplicationPlatformService {
+        override async previewSchema(...args: Parameters<ApplicationPlatformService['previewSchema']>) {
+          const result=await super.previewSchema(...args)
+          readCompleted=true
+          await owner.query("UPDATE application_native_role_assignments SET status='revoked' WHERE id=$1",[role])
+          return result
+        }
+      }
+      const management=new ApplicationManagementService(new ContractingSchemaService([createCanonicalGenericApplicationModule()]))
+      await expect(management.previewSchema(ownerId,workspaceId,fixture.schema.id,{ expectedVersion: 1,properties: schemaWithCostMaximum(fixture) }))
+        .rejects.toMatchObject({ reason: 'authority_changed' })
+      expect(readCompleted).toBe(true)
+      for (const source of boundScopeSources(observed)) {
+        expect(await fieldSnapshot(source,ownerId)).toMatchObject({ held: true })
+        expect(await fieldSnapshot(source,otherId)).toMatchObject({ held: false })
+      }
+      expect((await owner.query('SELECT schema_version FROM entity_types WHERE id=$1',[fixture.schema.id])).rows[0].schema_version).toBe(1)
+    })
+    it('Q07/Q08 uses the real native schema MCP transport and reconciles an applied review after its policy epoch invalidates the old invocation',async () => {
+      await clearRoles();const fixture=await record(),value=await schemaManagementHttp()
+      await assign('finance',ownerId);await assign('approver',ownerId)
+      const list=await schemaMcp(value,'tools/list')
+      expect(list.status).toBe(200);expect(schemaMcpReply(list).result.tools.map((tool: { name: string }) => tool.name))
+        .toEqual(['applicationSchemaPreview','applicationSchemaApply'])
+      const preview=await schemaMcp(value,'tools/call',{ name: 'applicationSchemaPreview',arguments: { typeId: fixture.schema.id,expectedVersion: 1,properties: schemaWithCostMaximum(fixture) } })
+      const previewResult=schemaMcpReply(preview).result
+      expect(previewResult.isError).toBeUndefined()
+      const review=JSON.parse(previewResult.content[0].text)
+      expect(review).toMatchObject({ entityTypeId: fixture.schema.id,affectedRecords: 1,canApply: true })
+      const call={ name: 'applicationSchemaApply',arguments: { previewId: review.id } }
+      const applied=await schemaMcp(value,'tools/call',call),ack=schemaMcpReply(applied).result
+      expect(ack.isError).toBe(true)
+      expect(JSON.parse(ack.content[0].text)).toMatchObject({ error: 'grant_revoked',effect: 'committed',retrySafe: false })
+      const recovered=await schemaMcp(value,'tools/call',call),result=schemaMcpReply(recovered).result
+      expect(result.isError).toBeUndefined()
+      expect(JSON.parse(result.content[0].text)).toEqual({ entityTypeId: fixture.schema.id,schemaVersion: 2,applied: true })
+      expect((await owner.query('SELECT schema_version FROM entity_types WHERE id=$1',[fixture.schema.id])).rows[0].schema_version).toBe(2)
+    })
   })
   it('Q02/Q04 refuses a native hidden-field assignment even when its value is unchanged', async () => {
     await clearRoles()
@@ -712,7 +857,7 @@ describe('[COMP:security/native-field-policy] current canonical native field mas
       await owner.query('INSERT INTO application_credential_grants(credential_id,app_id,workspace_id,grant_id,maximum_grant) VALUES($1,$2,$3,$4,$5)',[material.id,appId,workspaceId,grantId,maximum])
       const credential = await authenticateApplicationCredential(material.token,appId,loadApplicationCredentialStateSystem)
       expect(credential).not.toBeNull()
-      return { authentication: { credential: credential! },appId,grantId,parentId,userId }
+      return { authentication: { credential: credential! },appId,grantId,parentId,userId,token: material.token }
     }
     const client = await createDbOAuthClientStore().register({ clientName: 'Fictional field portal',clientUri: 'https://portal.example',redirectUris: ['https://portal.example/callback'],tokenEndpointAuthMethod: 'none' })
     oauthClients.push(client.clientId)
@@ -724,7 +869,7 @@ describe('[COMP:security/native-field-policy] current canonical native field mas
       VALUES($1,$2,$3,$4,$5,$6)`,[id,appId,workspaceId,userId,grantId,JSON.stringify([maximum])])
     const user = await authenticateApplicationOAuth(`oat_${id}_${secret}`,appId)
     expect(user).not.toBeNull()
-    return { authentication: { user: user! },appId,grantId,parentId,userId }
+    return { authentication: { user: user! },appId,grantId,parentId,userId,token: `oat_${id}_${secret}` }
   }
   async function queryRecords(fixture: Awaited<ReturnType<typeof catalogType>>,query: Partial<ApplicationQuery> = {},execution?: ExecutionContext) {
     return new ApplicationPlatformService([createCanonicalGenericApplicationModule()]).query(execution ?? await nativeExecution(),'records','query',

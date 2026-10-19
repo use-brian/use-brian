@@ -263,15 +263,13 @@ describe('[COMP:api/doc-entity-store] EntityType CRUD', () => {
   })
 
   it('updateEntityType with no patch returns the current row', async () => {
-    mockQueryWithRLS.mockResolvedValueOnce({
-      rows: [entityTypeRow()],
-      rowCount: 1,
-    } as never)
+    canonicalReadFixture()
     const t = await store.updateEntityType(WORKSPACE_ID, ENTITY_TYPE_ID, {})
     expect(t.id).toBe(ENTITY_TYPE_ID)
-    const [, sql] = mockQueryWithRLS.mock.calls[0] as [string, string, unknown[]]
-    // No-op falls back to a plain SELECT.
+    const sql = clientQueries.find(query => query.text.includes('FROM public.entity_types'))!.text
     expect(sql).toContain('SELECT')
+    expect(clientQueries.some(query => query.text.includes('read_generic_application_catalog_state'))).toBe(true)
+    expect(clientQueries.some(query => query.text.trim().startsWith('UPDATE'))).toBe(false)
   })
 
   it('updateEntityType throws when row is missing', async () => {

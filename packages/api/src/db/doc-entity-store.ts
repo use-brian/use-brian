@@ -331,21 +331,14 @@ export function createDbDocEntityStore(boundActor?: { actorUserId: string; trans
       }
 
       if (sets.length === 0) {
-        // No-op — read back the current row so the API contract is
-        // consistent (always returns the EntityType, never null on a
-        // round-trip update).
-        const cur = await canonicalQuery<EntityTypeRow>(
-          actor(workspaceId, options),
-          `SELECT ${ENTITY_TYPE_SELECT} FROM entity_types
-           WHERE id = $1 AND workspace_id = $2`,
-          [id, workspaceId],
-        )
-        if (!cur.rows[0]) {
-          throw new Error(
-            `updateEntityType: entity_type ${id} not found in workspace ${workspaceId}`,
-          )
-        }
-        return rowToType(cur.rows[0])
+        // A read-only update returns the same current catalog projection as
+        // getEntityType, including fields consumed by later legacy callers.
+        return canonicalTransaction(actor(workspaceId,options),async client => {
+          const current = await client.query<EntityTypeRow>(
+            `SELECT ${ENTITY_TYPE_SELECT} FROM public.entity_types WHERE id=$1 AND workspace_id=$2`,[id,workspaceId])
+          if (!current.rows[0]) throw new ApplicationPlatformError('access_unavailable','The schema is unavailable.')
+          return projectCanonicalType(client,current.rows[0])
+        })
       }
 
       values.push(id, workspaceId)

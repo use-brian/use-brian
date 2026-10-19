@@ -1,5 +1,6 @@
 /** Native app preparation and recovery; registration confers no data rights. [COMP:api/application-auth] */
 import type { Pool, PoolClient } from 'pg'
+import { randomUUID } from 'node:crypto'
 import { ApplicationPlatformError, applicationClientInputSchema, applicationCredentialInputSchema, applicationGrantInputSchema, type ApplicationGrantInput } from '@use-brian/shared'
 import { z } from 'zod'
 import { applyRLSGucs, getAppPool, rollbackAndRelease } from '../db/client.js'
@@ -9,10 +10,15 @@ import { runWithAgentAccess } from '../db/agent-access-context.js'
 import { resolveLiveAccessCeilingSystem } from '../context-scope/resolve-turn-scope.js'
 import type { ApplicationPlatformService } from './service.js'
 import { mintApplicationCredentialSecret } from './credentials.js'
+import { resolveExecutionContextSystem } from '../context-scope/execution-context.js'
+import { applicationSchemaPreviewInput } from './schema-changes.js'
+import { buildNativeApplicationSchemaMcpTools } from './mcp.js'
 
 const clientColumns = `id,workspace_id AS "workspaceId",module_key AS "moduleKey",name,client_mode AS mode,
   origins,redirect_uris AS "redirectUris",home_app_id AS "homeAppId",oauth_client_id AS "oauthClientId",executing_assistant_id AS "executingAssistantId",
   status,grant_revision::text AS revision,created_at AS "createdAt"`
+const schemaAssistantInput = z.object({ assistantId: z.string().uuid().optional() }).strict()
+const schemaPreviewBody = applicationSchemaPreviewInput.omit({ typeId: true }).extend(schemaAssistantInput.shape).strict()
 export class ApplicationManagementService {
   constructor(private readonly applications: ApplicationPlatformService, private readonly pool: Pool = getAppPool()) {}
 
@@ -21,7 +27,7 @@ export class ApplicationManagementService {
     let committing = false
     try {
       await client.query('BEGIN')
-      const role = await client.query(`SELECT r.rolsuper OR r.rolbypassrls OR c.relowner=r.oid AS bypass
+      const role = await client.query(`SELECT r.rolsuper OR r.rolbypassrls OR pg_has_role(r.oid,c.relowner,'USAGE') AS bypass
         FROM pg_catalog.pg_roles r JOIN pg_catalog.pg_class c ON c.oid='application_clients'::regclass WHERE r.rolname=current_user`)
       if (role.rows[0]?.bypass !== false) throw new ApplicationPlatformError('access_unavailable', 'A non-owner application role is required.')
       await applyRLSGucs(client, actorId)
@@ -38,6 +44,44 @@ export class ApplicationManagementService {
       if (['22023','23514','22P02'].includes((error as { code?: string }).code ?? '')) throw new ApplicationPlatformError('invalid_value', 'The requested authority is invalid.')
       throw error
     } finally { await rollbackAndRelease(client) }
+  }
+
+  private async nativeSchemaExecution(actorId: string,workspaceId: string,assistantId?: string,signal?: AbortSignal) {
+    const selected = await this.transaction(actorId,workspaceId,async client => {
+      const result=await client.query<{ id: string }>(`SELECT id FROM assistants WHERE workspace_id=$1
+        AND ($2::uuid IS NULL AND kind='primary' OR id=$2) AND assistant_placement_visible($3,id) ORDER BY id LIMIT 1`,
+        [workspaceId,assistantId ?? null,actorId])
+      if (!result.rows[0]) throw new ApplicationPlatformError('access_unavailable','The management assistant is unavailable.')
+      return result.rows[0].id
+    })
+    const assistant=await findAssistantById(selected)
+    if (!assistant || assistant.workspaceId!==workspaceId) throw new ApplicationPlatformError('access_unavailable','The management assistant is unavailable.')
+    return (await resolveExecutionContextSystem({ userId: actorId,workspaceId,assistant,memberMode: 'member',
+      identity: { kind: 'attended',principal: { kind: 'workspace_member',userId: actorId,authenticationKind: 'native_session' } },
+      ownership: { kind: 'workspace',workspaceId },lifecycle: { sessionId: randomUUID(),sessionPersisted: false,
+        channelId: 'native-application-management',channelType: 'web',abortSignal: signal ?? new AbortController().signal } })).executionContext
+  }
+
+  /** Native-session adapters only. Brian callers retain their original ExecutionContext in the MCP builder. */
+  async previewSchema(actorId: string,workspaceId: string,typeId: string,rawInput: unknown,signal?: AbortSignal) {
+    const input=schemaPreviewBody.safeParse(rawInput)
+    if (!input.success || !z.string().uuid().safeParse(typeId).success) throw new ApplicationPlatformError('invalid_value','The schema proposal is invalid.')
+    const execution=await this.nativeSchemaExecution(actorId,workspaceId,input.data.assistantId,signal)
+    const preview=await this.applications.previewSchema(execution,typeId,input.data.expectedVersion,input.data.properties)
+    await execution.security.authority.assertCurrent()
+    return preview
+  }
+
+  async applySchema(actorId: string,workspaceId: string,previewId: string,rawInput: unknown,signal?: AbortSignal) {
+    const input=schemaAssistantInput.safeParse(rawInput)
+    if (!input.success || !z.string().uuid().safeParse(previewId).success) throw new ApplicationPlatformError('invalid_value','The schema review is invalid.')
+    return this.applications.applySchema(await this.nativeSchemaExecution(actorId,workspaceId,input.data.assistantId,signal),previewId)
+  }
+
+  async schemaMcpTools(actorId: string,workspaceId: string,rawSelection: unknown,signal?: AbortSignal) {
+    const selection=schemaAssistantInput.safeParse(rawSelection)
+    if (!selection.success) throw new ApplicationPlatformError('invalid_value','The management assistant selection is invalid.')
+    return buildNativeApplicationSchemaMcpTools(this.applications,await this.nativeSchemaExecution(actorId,workspaceId,selection.data.assistantId,signal))
   }
 
   list(actorId: string, workspaceId: string) {

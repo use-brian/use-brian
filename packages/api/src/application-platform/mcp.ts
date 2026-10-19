@@ -11,6 +11,7 @@ import { query } from '../db/client.js'
 import { parseBridgeToken } from '../home-apps/tokens.js'
 import { authenticateApplicationHome } from './home-auth.js'
 import { resolveApplicationExecutionContext } from './execution-context.js'
+import { applicationSchemaPreviewInput,applicationSchemaApplyInput,type ApplicationSchemaPreviewInput,type ApplicationSchemaApplyInput } from './schema-changes.js'
 
 /** Resolve only signed Home binding metadata before entering the common service. */
 export async function buildHomeApplicationMcpProfile(req: Request, secret: string, service: ApplicationPlatformService) {
@@ -27,10 +28,8 @@ export async function buildHomeApplicationMcpProfile(req: Request, secret: strin
   return { homeAppId: home.homeAppId, tools: await buildApplicationMcpTools(service, execution) }
 }
 
-export async function buildApplicationMcpTools(service: ApplicationPlatformService, execution: ExecutionContext): Promise<BrainTool[]> {
-  const catalog = await service.catalog(execution), binding = getApplicationExecutionBinding(execution)
-  if (!binding) throw new ApplicationPlatformError('authentication_required', 'Application authentication is required.')
-  const invoke = (operation: (input: Record<string, unknown>) => Promise<unknown>, effectful = false): BrainTool['handler'] => async input => {
+function applicationMcpInvoker(execution: ExecutionContext) {
+  return (operation: (input: Record<string, unknown>) => Promise<unknown>, effectful = false): BrainTool['handler'] => async input => {
     let committed = false
     try {
       await execution.security.authority.assertCurrent()
@@ -46,6 +45,12 @@ export async function buildApplicationMcpTools(service: ApplicationPlatformServi
         retrySafe: error instanceof ApplicationPlatformError && error.retrySafe && !committed }) }] }
     }
   }
+}
+
+export async function buildApplicationMcpTools(service: ApplicationPlatformService, execution: ExecutionContext): Promise<BrainTool[]> {
+  const catalog = await service.catalog(execution), binding = getApplicationExecutionBinding(execution)
+  if (!binding) throw new ApplicationPlatformError('authentication_required', 'Application authentication is required.')
+  const invoke = applicationMcpInvoker(execution)
   const tools: BrainTool[] = [{ name: 'applicationCatalog', description: 'Read the current bound application resource and operation catalog. This does not grant authority.',
     inputSchema: {}, handler: invoke(() => service.catalog(execution)) }]
   if (catalog.queries.length) tools.push({ name: 'applicationQuery', description: 'Invoke a registered query of this application. Use its current declared resource fields and typed input.',
@@ -55,4 +60,22 @@ export async function buildApplicationMcpTools(service: ApplicationPlatformServi
     inputSchema: { commandKey: z.enum(catalog.commands as [string, ...string[]]), command: applicationCommandSchema },
     handler: invoke(input => service.command(execution, binding.state.moduleKey, String(input.commandKey), applicationCommandSchema.parse(input.command)), true) })
   return tools
+}
+
+/** Native human management profile; app/legacy programmatic audiences acquire no governance. */
+export function buildNativeApplicationSchemaMcpTools(service: ApplicationPlatformService,execution: ExecutionContext): BrainTool[] {
+  if (getApplicationExecutionBinding(execution) || execution.identity.kind !== 'attended'
+    || execution.identity.principal.kind !== 'workspace_member' || execution.surface.readOnly) {
+    throw new ApplicationPlatformError('authentication_required','Native schema management authentication is required.')
+  }
+  const invoke = applicationMcpInvoker(execution)
+  return [{ name: 'applicationSchemaPreview',description: 'Preview a native schema change under current governance. Review the exact proposal and validity before applying.',
+    inputSchema: applicationSchemaPreviewInput.shape,handler: invoke(input => {
+      const value: ApplicationSchemaPreviewInput=applicationSchemaPreviewInput.parse(input)
+      return service.previewSchema(execution,value.typeId,value.expectedVersion,value.properties)
+    }) },{ name: 'applicationSchemaApply',description: 'Apply an actor-bound reviewed schema change once. Reconcile committed or uncertain effects using the same review in a fresh invocation.',
+    inputSchema: applicationSchemaApplyInput.shape,handler: invoke(input => {
+      const value: ApplicationSchemaApplyInput=applicationSchemaApplyInput.parse(input)
+      return service.applySchema(execution,value.previewId)
+    },true) }]
 }
