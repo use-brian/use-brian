@@ -18,6 +18,8 @@ import {
 } from '../entities/index.js'
 import {
   DEAL_STAGES,
+  crmAmountSchema,
+  type CrmAmount,
   type CompanyListRow,
   type CompanyRecord,
   type ContactListRow,
@@ -442,7 +444,7 @@ function compactDeal(row: DealListRow): {
   contact_id: string | null
   company_id: string | null
   stage: DealStage
-  amount: number | null
+  amount: CrmAmount | null
   close_date: string | null
   updated_at: string
 } {
@@ -468,7 +470,7 @@ function fullDeal(row: DealRecord): {
   contact_id: string | null
   company_id: string | null
   stage: DealStage
-  amount: number | null
+  amount: CrmAmount | null
   close_date: string | null
   external_ref: Record<string, unknown>
   created_at: string
@@ -1084,7 +1086,7 @@ export function createCrmTools(
         contact_id: idShape.optional(),
         company_id: idShape.optional(),
         stage: stageEnum.optional().describe('Defaults to `lead`.'),
-        amount: z.number().nonnegative().optional().describe('Decimal dollars (e.g. 50000 for $50k).'),
+        amount: crmAmountSchema.optional().describe('Nonnegative decimal amount. Use a decimal string for exact precision, especially large amounts.'),
         close_date: dateOnlyShape.optional().describe('Expected close date, YYYY-MM-DD.'),
         tags: tagShape.optional(),
         external_ref: externalRefShape.optional(),
@@ -1210,7 +1212,7 @@ export function createCrmTools(
       id: idShape,
       contact_id: idShape.nullable().optional(),
       company_id: idShape.nullable().optional(),
-      amount: z.number().nonnegative().nullable().optional(),
+      amount: crmAmountSchema.nullable().optional(),
       close_date: dateOnlyShape.nullable().optional(),
       external_ref: externalRefShape.optional(),
       links: explicitLinksField,

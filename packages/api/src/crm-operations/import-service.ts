@@ -11,6 +11,7 @@ import { beginAssociationCreation, crmSegmentReadScope } from '../association/so
 
 import { createHash, randomUUID } from 'node:crypto'
 import { z } from 'zod'
+import { crmAmountSchema } from '@use-brian/core'
 import type { Pool, PoolClient } from 'pg'
 import type {
   AccessContext,
@@ -470,7 +471,7 @@ function validateMappedRow(
   const add = (code: string, message: string, field?: string) => errors.push({ row: row.row, code, message, ...(field ? { field } : {}) })
   if (row.malformedReason) add('malformed_csv', 'The CSV record is malformed.')
   if (kind !== 'operations' && !values.name) add('required_field', 'Name is required.', 'name')
-  if (values.amount !== undefined && (!Number.isFinite(Number(values.amount)) || Number(values.amount) < 0)) {
+  if (values.amount !== undefined && values.amount !== '' && !crmAmountSchema.safeParse(values.amount).success) {
     add('invalid_number', 'Amount must be a non-negative number.', 'amount')
   }
   if (values.closeDate !== undefined && !/^\d{4}-\d{2}-\d{2}$/.test(values.closeDate)) {
@@ -1082,7 +1083,7 @@ export function createCrmProductionImportService(deps: {
         contactId: values.contactId,
         companyId: values.companyId,
         stage: legacyStage,
-        amount: values.amount ? Number(values.amount) : undefined,
+        amount: values.amount || undefined,
         closeDate: values.closeDate ? new Date(`${values.closeDate}T00:00:00Z`) : undefined,
         externalRef: { import_key: importKey, import_job_id: job.id, row_number: row.row },
       }, deps.entityLinks, transaction)

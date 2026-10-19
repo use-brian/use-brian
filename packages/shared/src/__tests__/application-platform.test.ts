@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest'
 import { ApplicationPlatformError, applicationClientInputSchema, applicationCommandSchema, applicationDecimalSchema,
-  applicationGrantInputSchema, applicationQuerySchema, applicationResourceRefSchema, applicationResourceSchema } from '../application-platform.js'
+  applicationDecimalAdd, applicationDecimalCompare, applicationDecimalText, applicationGrantInputSchema, applicationQuerySchema, applicationResourceRefSchema, applicationResourceSchema } from '../application-platform.js'
 
 describe('[COMP:shared/application-platform] application wire boundaries', () => {
   const ref = { workspaceId: '10000000-0000-4000-8000-000000000001', origin: { kind: 'native', moduleKey: 'operations' },
@@ -29,6 +29,15 @@ describe('[COMP:shared/application-platform] application wire boundaries', () =>
   it('preserves lossless decimals and rejects exponent, whitespace and non-finite inputs', () => {
     expect(applicationDecimalSchema.parse('12345678901234567890.123456789012345678')).toBe('12345678901234567890.123456789012345678')
     for (const value of ['1e2', ' 1', '01', 'NaN', '1.1234567890123456789', 1.2]) expect(applicationDecimalSchema.safeParse(value).success).toBe(false)
+  })
+  it('adds and compares decimals exactly and expands finite numeric JSON exponent spellings', () => {
+    expect(applicationDecimalAdd('9007199254740993.123456789012345678','0.000000000000000001')).toBe('9007199254740993.123456789012345679')
+    expect(applicationDecimalAdd('0.1','0.2')).toBe('0.3')
+    expect(applicationDecimalAdd('-12.30','12.3')).toBe('0')
+    expect(applicationDecimalCompare('9007199254740993','9007199254740992')).toBe(1)
+    expect(applicationDecimalCompare('1.00',1)).toBe(0)
+    expect(applicationDecimalText(1e-7)).toBe('0.0000001')
+    for (const value of [9007199254740992,Infinity,'1e2','1.1234567890123456789']) expect(() => applicationDecimalText(value)).toThrow()
   })
   it('requires semantic idempotency and JSON input without provider code', () => {
     expect(applicationCommandSchema.safeParse({ input: {}, idempotencyKey: '' }).success).toBe(false)

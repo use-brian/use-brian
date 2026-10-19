@@ -32,7 +32,7 @@ export type CrmDealRow = {
   /** The deal entity's display name (e.g. "Deal - Acme"). */
   name: string;
   stage: DealStage;
-  amount: number | null;
+  amount: number | string | null;
   /** Calendar date `YYYY-MM-DD`, or null (crm.md decision 4). */
   closeDate: string | null;
   contactId: string | null;

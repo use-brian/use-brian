@@ -142,6 +142,14 @@ describe('[COMP:api/application-auth] database application projections and live 
     expect(user).not.toBeNull()
     return { authentication: { user: user! }, appId, grantId, parentId, userId, token: `oat_${id}_${secret}` }
   }
+  it('Q04 keeps a canonical JSON numeric deal amount lossless across an actual application projection',async () => {
+    const id=randomUUID(),amount='9007199254740993.123456789012345678'
+    await pool.query(`INSERT INTO entities(id,workspace_id,kind,display_name,attributes,created_by_user_id,source)
+      VALUES($1,$2,'deal','Fictional precise deal',jsonb_build_object('stage','lead','amount',$3::numeric),$4,'user')`,[id,workspaceId,amount,ownerId])
+    const fixture=await provision('service',['amount'],undefined,false,id,[],[id],undefined,'read_write',[],'deal')
+    const execution=await resolveApplicationExecutionContext(fixture.authentication),dispatcher=new ApplicationPlatformService([createCanonicalNativeApplicationModule()])
+    expect((await dispatcher.query(execution,'native','get',{type:'deal',id}) as {values:Record<string,unknown>}).values).toEqual({amount})
+  })
   it('[COMP:api/application-field-evidence] retains the same observation under fresh independent app authority after contraction', async () => {
     const first = await provision('member'), second = await provision('external_user'), dispatcher = service()
     const firstExecution = await resolveApplicationExecutionContext(first.authentication)

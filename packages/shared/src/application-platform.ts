@@ -7,6 +7,40 @@ const version = z.string().min(1).max(128)
 const fieldKey = z.string().min(1).max(128).refine(value => !['__proto__', 'prototype', 'constructor'].includes(value))
 export const applicationDecimalSchema = z.string().max(96).regex(/^-?(?:0|[1-9]\d*)(?:\.\d{1,18})?$/)
 
+/** Decimal text for arithmetic. Numbers use their JSON spelling, never toFixed. */
+export function applicationDecimalText(value: string | number): string {
+  if (typeof value === 'number' && (!Number.isFinite(value) || Number.isInteger(value) && !Number.isSafeInteger(value))) {
+    throw new ApplicationPlatformError('invalid_value', 'An unsafe numeric amount requires a decimal string.')
+  }
+  let text = String(value)
+  if (typeof value === 'number' && text.includes('e')) {
+    const match = /^(-?)(\d+)(?:\.(\d+))?e([+-]?\d+)$/.exec(text)
+    if (!match) throw new ApplicationPlatformError('invalid_value', 'Invalid decimal amount.')
+    const digits = match[2] + (match[3] ?? ''), point = match[2].length + Number(match[4])
+    text = match[1] + (point <= 0 ? '0.' + '0'.repeat(-point) + digits
+      : point >= digits.length ? digits + '0'.repeat(point-digits.length) : digits.slice(0,point) + '.' + digits.slice(point))
+  }
+  if (!applicationDecimalSchema.safeParse(text).success) throw new ApplicationPlatformError('invalid_value', 'Invalid decimal amount.')
+  return text
+}
+function applicationDecimalInteger(value: string | number): bigint {
+  const text = applicationDecimalText(value), negative = text.startsWith('-')
+  const [whole,fraction = ''] = (negative ? text.slice(1) : text).split('.')
+  const units = BigInt(whole + fraction.padEnd(18,'0'))
+  return negative ? -units : units
+}
+/** Exact addition at the shared decimal scale; no currency rounding is implied. */
+export function applicationDecimalAdd(left: string | number, right: string | number): string {
+  const sum = applicationDecimalInteger(left) + applicationDecimalInteger(right), negative = sum < 0n
+  const digits = (negative ? -sum : sum).toString().padStart(19,'0'), fraction = digits.slice(-18).replace(/0+$/,'')
+  const result = (negative ? '-' : '') + digits.slice(0,-18) + (fraction ? '.' + fraction : '')
+  return applicationDecimalText(result)
+}
+export function applicationDecimalCompare(left: string | number, right: string | number): -1 | 0 | 1 {
+  const a = applicationDecimalInteger(left), b = applicationDecimalInteger(right)
+  return a < b ? -1 : a > b ? 1 : 0
+}
+
 export const applicationOriginSchema = z.discriminatedUnion('kind', [
   z.object({ kind: z.literal('native'), moduleKey: key }).strict(),
   z.object({ kind: z.literal('generic'), entityTypeId: z.string().uuid() }).strict(),

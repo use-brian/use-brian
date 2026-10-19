@@ -600,7 +600,7 @@ function dealCell(
     case 'stage':
       return statusBadge(row.stage, dealStageTone(row.stage))
     case 'amount':
-      return numberCell(row.amount, 'currency', 'USD')
+      return typeof row.amount === 'string' ? row.amount : numberCell(row.amount, 'currency', 'USD')
     case 'close_date':
       return dateCell(row.closeDate, 'absolute')
     case 'updated_at':

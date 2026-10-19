@@ -21,7 +21,7 @@ import type {
   DealStage,
   EntityLinksStore,
 } from '@use-brian/core'
-import { EntityMergeError, UndoMergeError, mergeEntities, undoMerge, CrmConfigCommandSchema, CrmOperationsError, type CrmConfigCommand } from '@use-brian/core'
+import { crmAmountSchema, EntityMergeError, UndoMergeError, mergeEntities, undoMerge, CrmConfigCommandSchema, CrmOperationsError, type CrmConfigCommand } from '@use-brian/core'
 import type { WorkspaceStore } from '../db/workspace-store.js'
 import { resolveWorkspaceViewpoint } from '../db/workspace-viewpoint.js'
 import {
@@ -177,7 +177,7 @@ function publicRecord(row: CrmRecordRow) {
     ...common,
     kind: 'deal' as const,
     stage: LEGACY_STAGES.has(a.stage as DealStage) ? a.stage as DealStage : 'lead',
-    amount: finiteNumber(a.amount) ?? null,
+    amount: a.amount == null ? null : crmAmountSchema.parse(a.amount),
     closeDate: typeof a.close_date === 'string' ? a.close_date : null,
     contactId: typeof a.contact_id === 'string' ? a.contact_id : null,
     companyId: typeof a.company_id === 'string' ? a.company_id : null,
@@ -379,10 +379,7 @@ export function crmRoutes({
         ? stageConfig.legacyKey as DealStage
         : stageConfig?.category === 'won' ? 'won'
           : stageConfig?.category === 'lost' ? 'lost' : 'lead'
-      const amount = finiteNumber(body.amount)
-      if (amount !== undefined && amount !== null && amount < 0) {
-        throw new Error('amount must be greater than or equal to 0')
-      }
+      const amount = body.amount == null ? body.amount : crmAmountSchema.parse(body.amount)
       const close = nullableText(body.closeDate, 10)
       const record = await createDeal(ctx.userId, {
         workspaceId: ctx.workspaceId,
@@ -713,9 +710,7 @@ export function crmRoutes({
           const contact = await getEntityById(member.ctx, contactId)
           if (!contact || contact.kind !== 'person') throw new Error('contactId must reference a visible contact in this workspace')
         }
-        const amount = hasOwn(body, 'amount') ? finiteNumber(body.amount) : undefined
-        if (hasOwn(body, 'amount') && amount === undefined) throw new Error('amount must be a finite number or null')
-        if (amount !== undefined && amount !== null && amount < 0) throw new Error('amount must be greater than or equal to 0')
+        const amount = hasOwn(body, 'amount') ? body.amount === null ? null : crmAmountSchema.parse(body.amount) : undefined
         const closeDate = patchDate(body, 'closeDate')
         const needsTypedUpdate = companyId !== undefined
           || amount !== undefined || closeDate !== undefined

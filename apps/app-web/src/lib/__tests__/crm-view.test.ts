@@ -12,6 +12,7 @@ import type {
 } from "@/lib/api/crm";
 import { crmCollectionSearch } from "@/lib/api/crm";
 import {
+  addCrmAmounts,
   appendCrmPage,
   applyContactFilters,
   applyDealFilters,
@@ -518,6 +519,14 @@ describe("[COMP:app-web/crm-board] Deal board grouping", () => {
     expect(groups[1].rows).toHaveLength(0);
   });
 
+  it("preserves exact amounts in display, stage totals and sorting", () => {
+    const amount = "9007199254740993.123456789012345678";
+    expect(formatAmount(amount,"USD")).toBe(`USD ${amount}`);
+    expect(addCrmAmounts(amount,"0.000000000000000001")).toBe("9007199254740993.123456789012345679");
+    const rows = [deal({id:"precise",amount}),deal({id:"lower",amount:"9007199254740993.123456789012345677"})];
+    const sorted = sortDeals(rows,"amount","asc");
+    expect(sorted.map(row => row.id)).toEqual(["lower","precise"]);
+  });
   it("formatAmount always makes currency explicit", () => {
     expect(formatAmount(950)).toBe("USD 950");
     expect(formatAmount(12_500, "EUR")).toBe("EUR 12.5k");

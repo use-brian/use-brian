@@ -7,7 +7,7 @@ import { boundScopeSources, type ApplicationModuleDefinition, type TaskRecord, t
 import { ApplicationPlatformError } from '@use-brian/shared'
 import { applyRLSGucs, getAppPool, getPool } from '../../db/client.js'
 import { bindTaskClosedHook, createTask, getTaskById, resolveTaskById, updateTask } from '../../db/tasks.js'
-import { createCompany,createContact,createDeal,updateCompany,updateContact,updateDeal,setDealStage } from '../../db/crm.js'
+import { createCompany,createContact,createDeal,getDealById,listDeals,updateCompany,updateContact,updateDeal,setDealStage } from '../../db/crm.js'
 import { createCrmFieldDefinition,updateCrmCustomFields } from '../../db/crm-r2.js'
 import { updateEntity } from '../../db/entities-store.js'
 import { findAssistantById } from '../../db/users.js'
@@ -202,6 +202,28 @@ describe('[COMP:api/application-records] canonical native operation composition'
     await expect(service.command(identity,module.key,'rename_pair',command)).rejects.toMatchObject({ code: 'access_unavailable' })
     expect(await getTaskById({ ...access,userId: readerId },committed.resources[0].id)).not.toBeNull()
     expect((await owner.query('SELECT count(*)::int AS count FROM application_command_audit WHERE receipt_id=$1',[committed.id])).rows[0].count).toBe(1)
+  })
+  it('Q04/Q05 preserves an exact native decimal amount through canonical creation, get and list',async () => {
+    const amount='9007199254740993.123456789012345678'
+    const value=await createDeal(userId,{workspaceId,amount:amount as unknown as number,access})
+    expect(value.amount).toBe(amount)
+    const dispatcher=new ApplicationPlatformService([(await import('../native-adapters.js')).createCanonicalNativeApplicationModule()])
+    expect((await dispatcher.query(await execution(),'native','get',{type:'deal',id:value.id}) as {values:Record<string,unknown>}).values.amount).toBe(amount)
+    expect((await getDealById(access,value.id))?.amount).toBe(amount)
+    expect((await listDeals(access,{})).find(row => row.id===value.id)?.amount).toBe(amount)
+    expect((await owner.query("SELECT attributes->>'amount' AS amount FROM entities WHERE id=$1",[value.id])).rows[0].amount).toBe(amount)
+  })
+  it('Q04/Q05 preserves an exact decimal patch, source identity and version',async () => {
+    const before=await createDeal(userId,{workspaceId,amount:12,access}),amount='9007199254740993.000000000000000001'
+    const prior=(await owner.query('SELECT scope_version::text AS version FROM entities WHERE id=$1',[before.id])).rows[0].version
+    expect(await updateDeal(userId,before.id,{amount:amount as unknown as number},undefined,access)).toMatchObject({id:before.id,amount})
+    expect((await getDealById(access,before.id))?.amount).toBe(amount)
+    expect((await owner.query('SELECT scope_version::text AS version FROM entities WHERE id=$1',[before.id])).rows[0].version).toBe(String(BigInt(prior)+1n))
+  })
+  it.each(['1e8','-1','NaN','01.2','1.1234567890123456789',9007199254740992])('Q04 refuses an invalid or already unsafe native amount: %s',async amount => {
+    const before=await createDeal(userId,{workspaceId,amount:12,access})
+    await expect(updateDeal(userId,before.id,{amount:amount as unknown as number},undefined,access)).rejects.toMatchObject({code:'invalid_value'})
+    expect((await getDealById(access,before.id))?.amount).toBe(12)
   })
   describe('[COMP:security/native-field-policy] canonical native CRM write admission',() => {
     const nativeOrigin={kind:'native',moduleKey:'native'}

@@ -23,7 +23,7 @@ const creations = new WeakMap<Context, { type: 'company' | 'task'; fields: strin
 const definitions:ApplicationResourceDefinition[]=[
   {typeKey:'company',origin:{kind:'native',moduleKey:'native'},schemaVersion:'1',fields:[{key:'name',label:'Name',kind:'text',required:true},{key:'domain',label:'Domain',kind:'text'}]},
   {typeKey:'person',origin:{kind:'native',moduleKey:'native'},schemaVersion:'1',fields:[{key:'name',label:'Name',kind:'text',required:true},{key:'email',label:'Email',kind:'text'},{key:'phone',label:'Phone',kind:'text'}]},
-  {typeKey:'deal',origin:{kind:'native',moduleKey:'native'},schemaVersion:'1',fields:[{key:'name',label:'Name',kind:'text',required:true},{key:'stage',label:'Stage',kind:'text'},{key:'amount',label:'Amount',kind:'number'}]},
+  {typeKey:'deal',origin:{kind:'native',moduleKey:'native'},schemaVersion:'1',fields:[{key:'name',label:'Name',kind:'text',required:true},{key:'stage',label:'Stage',kind:'text'},{key:'amount',label:'Amount',kind:'decimal',scale:18}]},
   {typeKey:'task',origin:{kind:'native',moduleKey:'native'},schemaVersion:'1',fields:[{key:'title',label:'Title',kind:'text',required:true},{key:'status',label:'Status',kind:'text'}]},
   {typeKey:'file',origin:{kind:'native',moduleKey:'native'},schemaVersion:'1',fields:[{key:'name',label:'Name',kind:'text'},{key:'mimeType',label:'MIME type',kind:'text'},{key:'sizeBytes',label:'Size',kind:'number'},{key:'storageRef',label:'Storage reference',kind:'text'}]},
   {typeKey:'workspace_member',origin:{kind:'native',moduleKey:'native'},schemaVersion:'1',fields:[{key:'id',label:'Member ID',kind:'text'}]},
@@ -100,6 +100,8 @@ async function read(context:Context,type:z.infer<typeof readInput>['type'],id:st
     const custom = attrs.custom_fields && typeof attrs.custom_fields === 'object' ? attrs.custom_fields as Record<string, unknown> : {}
     Object.assign(values, { [field.key]: custom[parseApplicationCrmFieldDefinition(field.definition).fieldKey] ?? null })
   }
+  if (type === 'deal') Object.assign(values, { amount: (await context.transaction.query<{ amount: string | null }>(
+    "SELECT attributes->>'amount' AS amount FROM entities WHERE workspace_id=$1 AND id=$2", [access.workspaceId,id])).rows[0]?.amount ?? null })
   const json=applicationJsonSchema.parse(values) as ApplicationRecordProjection['values']
   return bindApplicationFieldProjection(context, {ref:{workspaceId:access.workspaceId,origin:{kind:'native',moduleKey:'native'},typeKey:type,id,version:source.version},
     values:json,fields:Object.keys(json),policyVersion:`native:${definition.schemaVersion}`})

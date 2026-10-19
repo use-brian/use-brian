@@ -80,6 +80,17 @@ const row = (index: number) => [`Fixture ${index}`, `fixture${index}@example.com
 
 describe('[COMP:crm/production-import] Atomic rows and serialized chunk recovery', () => {
   afterAll(async () => { await Promise.all([pool.end(), getPool().end()]) })
+  it('Q04 imports an exact deal amount without a floating-point intermediate or duplicate retry',async () => {
+    const f=await fixture(),amount='9007199254740993.123456789012345678'
+    const job=await f.job(['name','amount'],[['Fictional precise import',amount]],'deal')
+    const service=importer()
+    expect(await service.resume(f.context,job.id)).toMatchObject({status:'completed',succeededRows:1,failedRows:0})
+    const rows=(await pool.query("SELECT attributes->>'amount' AS amount FROM entities WHERE workspace_id=$1 AND kind='deal'",[f.workspaceId])).rows
+    expect(rows).toEqual([{amount}])
+    const before=await f.counts()
+    expect(await service.resume(f.context,job.id)).toMatchObject({status:'completed',succeededRows:1})
+    expect(await f.counts()).toEqual(before)
+  })
   it('rolls back a failed row including custom fields, stable bindings and evidence, and emits only committed graph projections', async () => {
     const f = await fixture(), companyId = await f.entity('company', 'Fixture company')
     await pool.query(`INSERT INTO crm_field_definitions (workspace_id,entity_kind,field_key,label,field_type)

@@ -15,9 +15,18 @@
  * `packages/api/src/db/crm-store.ts`.
  */
 
+import { z } from 'zod'
+import { applicationDecimalSchema, applicationDecimalText } from '@use-brian/shared'
 import type { AccessContext } from '../security/access-context.js'
 import type { Sensitivity } from '../security/sensitivity.js'
 import type { StableExternalIdentity } from '../decision-learning/types.js'
+
+/** Exact decimals remain strings; legacy finite numbers retain their shape. */
+export const crmAmountSchema = z.union([
+  z.number().finite().nonnegative().refine(value => { try { applicationDecimalText(value); return true } catch { return false } }),
+  applicationDecimalSchema.refine(value => !value.startsWith('-') || !/[1-9]/.test(value)),
+])
+export type CrmAmount = z.infer<typeof crmAmountSchema>
 
 export const DEAL_STAGES = ['lead', 'qualified', 'proposal', 'negotiation', 'won', 'lost'] as const
 export type DealStage = (typeof DEAL_STAGES)[number]
@@ -158,7 +167,7 @@ export type DealRecord = {
   contactId: string | null
   companyId: string | null
   stage: DealStage
-  amount: number | null
+  amount: CrmAmount | null
   closeDate: Date | null
   externalRef: CrmExternalRef
   sensitivity?: Sensitivity
@@ -186,7 +195,7 @@ export type DealUpdateFields = {
   /** Pass `null` to clear; omit to leave unchanged. */
   companyId?: string | null
   /** Pass `null` to clear; omit to leave unchanged. */
-  amount?: number | null
+  amount?: CrmAmount | null
   /** Pass `null` to clear; omit to leave unchanged. */
   closeDate?: Date | null
   externalRef?: CrmExternalRef
@@ -293,7 +302,7 @@ export type CrmStore = {
     contactId?: string | null
     companyId?: string | null
     stage?: DealStage
-    amount?: number | null
+    amount?: CrmAmount | null
     closeDate?: Date | null
     externalRef?: CrmExternalRef
     /** Fresh-insert sensitivity tier; omitted → store default (`internal`). Research saves pass `public`. */

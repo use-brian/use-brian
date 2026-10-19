@@ -3,13 +3,14 @@ import type {
   CompanyListFilters, CompanyListRow, CompanyRecord, CompanyUpdateFields,
   ContactListFilters, ContactListRow, ContactRecord, ContactUpdateFields,
   CrmExternalRef,
+  CrmAmount,
   DealListFilters, DealListRow, DealRecord, DealStage, DealUpdateFields,
   EntityLinksStore,
   EntityRecord,
   Sensitivity,
   StableExternalIdentity,
 } from '@use-brian/core'
-import { maxSensitivity, unionScopeRequirements } from '@use-brian/core'
+import { crmAmountSchema, maxSensitivity, unionScopeRequirements } from '@use-brian/core'
 import type pg from 'pg'
 import { z } from 'zod'
 import { ApplicationPlatformError,applicationJsonSchema } from '@use-brian/shared'
@@ -96,7 +97,7 @@ const crmContactPatch = z.object({ name: crmName.optional(),email: z.string().ma
   phone: z.string().max(100).nullable().optional(),companyId: z.string().uuid().nullable().optional(),
   tags: crmTags.optional(),externalRef: crmExternalRef.optional() }).strict()
 const crmDealPatch = z.object({ contactId: z.string().uuid().nullable().optional(),companyId: z.string().uuid().nullable().optional(),
-  amount: z.number().finite().nonnegative().nullable().optional(),closeDate: z.date().nullable().optional(),externalRef: crmExternalRef.optional() }).strict()
+  amount: crmAmountSchema.nullable().optional(),closeDate: z.date().nullable().optional(),externalRef: crmExternalRef.optional() }).strict()
 function validateCrmBusiness(schema: z.ZodTypeAny,raw: unknown): void {
   if (!schema.safeParse(raw).success) throw new ApplicationPlatformError('invalid_value','The canonical CRM values are invalid.')
 }
@@ -257,8 +258,8 @@ function assertValidStage(stage: DealStage | undefined): void {
     throw new ApplicationPlatformError('invalid_value',`deals_stage_check: invalid deal stage "${stage}"`)
   }
 }
-function assertNonNegativeAmount(amount: number | null | undefined): void {
-  if (amount != null && (typeof amount!=='number' || !Number.isFinite(amount) || amount<0)) {
+function assertNonNegativeAmount(amount: CrmAmount | null | undefined): void {
+  if (amount != null && (!crmAmountSchema.safeParse(amount).success)) {
     throw new ApplicationPlatformError('invalid_value','deals_amount_check: amount must be greater than or equal to 0')
   }
 }
@@ -320,7 +321,7 @@ function dealFromEntity(e: EntityRecord): DealRecord {
     contactId: attrStr(a, 'contact_id'),
     companyId: attrStr(a, 'company_id'),
     stage: (attrStr(a, 'stage') as DealStage) ?? 'lead',
-    amount: typeof amount === 'number' ? amount : amount != null ? Number(amount) : null,
+    amount: amount == null ? null : crmAmountSchema.parse(amount),
     closeDate: typeof closeDate === 'string' ? new Date(closeDate) : null,
     externalRef: attrRef(a),
     sensitivity: e.sensitivity, compartments: e.compartments, projectIds: e.projectIds,
@@ -843,7 +844,7 @@ const DEAL_SELECT = `
   e.attributes->>'contact_id' AS "contactId",
   e.attributes->>'company_id' AS "companyId",
   COALESCE(e.attributes->>'stage', 'lead') AS stage,
-  e.attributes->>'amount' AS amount,
+  e.attributes->'amount' AS amount,
   (e.attributes->>'close_date')::date AS "closeDate",
   e.attributes->'external_ref' AS "externalRef",
   e.sensitivity, e.compartments, e.project_ids AS "projectIds",
@@ -853,14 +854,14 @@ function toDealRow(row: DealRow): DealRecord {
   return {
     ...row,
     aliases: row.aliases ?? [],
-    amount: row.amount === null ? null : Number(row.amount),
+    amount: row.amount === null ? null : crmAmountSchema.parse(row.amount),
     externalRef: row.externalRef ?? {},
   }
 }
 
 function dealAttributes(p: {
   contactId?: string | null; companyId?: string | null
-  stage?: DealStage; amount?: number | null; closeDate?: Date | null; externalRef?: CrmExternalRef
+  stage?: DealStage; amount?: CrmAmount | null; closeDate?: Date | null; externalRef?: CrmExternalRef
 }): Record<string, unknown> {
   const a: Record<string, unknown> = { stage: p.stage ?? 'lead' }
   if (p.contactId) a.contact_id = p.contactId
@@ -879,7 +880,7 @@ export async function createDeal(
     contactId?: string | null
     companyId?: string | null
     stage?: DealStage
-    amount?: number | null
+    amount?: CrmAmount | null
     closeDate?: Date | null
     externalRef?: CrmExternalRef
     sensitivity?: Sensitivity

@@ -1,3 +1,4 @@
+import { crmAmountSchema } from '@use-brian/core'
 /**
  * Q5 Views routes — saved-views CRUD + per-entity primitive read routes
  * + ad-hoc payload rendering + direct-write endpoints used by board-drop
@@ -2373,7 +2374,7 @@ export function viewsRoutes(opts: ViewsRouteOptions): Router {
       stage: z.enum(DEAL_STAGES).optional(),
       contactId: z.string().uuid().nullable().optional(),
       companyId: z.string().uuid().nullable().optional(),
-      amount: z.number().nullable().optional(),
+      amount: crmAmountSchema.nullable().optional(),
       closeDate: z.union([z.string(), z.null()]).optional(),
     })
     .strict()

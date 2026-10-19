@@ -1,5 +1,7 @@
 export {
   DEAL_STAGES,
+  crmAmountSchema,
+  type CrmAmount,
   type DealStage,
   type CrmExternalRef,
   CRM_CUSTOM_FIELD_TYPES,
