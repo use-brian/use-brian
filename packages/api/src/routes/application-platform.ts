@@ -79,6 +79,20 @@ export function applicationPlatformRoutes(options: ApplicationRoutesOptions): Ro
         res.status(code==='authentication_required' ? 401 : code==='invalid_value' ? 400 : 403).json({ error: code,effect: 'none',retrySafe: false })
       }
     })
+    router.get(`${base}/governance/catalog`,manage((req,actor,workspace) => management.service.governanceCatalog(actor,workspace,req.query,requestSignal(req))))
+    router.post(`${base}/governance/preview`,manage((req,actor,workspace) => management.service.previewGovernance(actor,workspace,req.body,requestSignal(req))))
+    router.post(`${base}/governance/reviews/:reviewId/apply`,manage((req,actor,workspace) => management.service.applyGovernance(actor,workspace,String(req.params.reviewId),req.body,requestSignal(req))))
+    router.post(`${base}/governance/mcp`,async (req,res) => {
+      if (!req.userId) {res.status(401).json({error:'authentication_required'});return}
+      try {
+        const tools=await management.service.governanceMcpTools(req.userId,String(req.params.workspaceId),req.query,requestSignal(req))
+        await serveStatelessMcp(req,res,tools,'use-brian-native-module-governance')
+      } catch (error) {
+        if (res.headersSent) return
+        const code=error instanceof ApplicationPlatformError ? error.code : error instanceof AuthorityChangedError ? 'grant_revoked' : 'access_unavailable'
+        res.status(code==='authentication_required'?401:code==='invalid_value'?400:403).json({error:code,effect:'none',retrySafe:false})
+      }
+    })
     router.get(`${base}/clients`, manage((_req, actor, workspace) => management.service.list(actor, workspace)))
     router.post(`${base}/clients`, manage((req, actor, workspace) => {
       if (req.body?.workspaceId !== workspace) throw new ApplicationPlatformError('invalid_value', 'The application workspace is invalid.')

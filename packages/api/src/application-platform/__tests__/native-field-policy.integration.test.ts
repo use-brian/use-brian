@@ -85,6 +85,34 @@ describe('[COMP:security/native-field-policy] current canonical native field mas
             'sensitivity','internal','compartments','[]'::jsonb,'projectIds','[]'::jsonb))||policy.override;
       END $$`)
     await owner.query('REVOKE ALL ON FUNCTION application_native_policy_fixture_catalog_reader(uuid,jsonb,text) FROM PUBLIC')
+    await owner.query(`CREATE SEQUENCE application_native_policy_fixture_configuration_seq;
+      CREATE TABLE application_native_policy_fixture_configuration_epochs(workspace_id uuid PRIMARY KEY,revision bigint NOT NULL);
+      CREATE FUNCTION application_native_policy_fixture_configuration(w uuid) RETURNS text
+      LANGUAGE sql SECURITY DEFINER SET search_path=pg_catalog,public,pg_temp AS $$
+        SELECT coalesce((SELECT revision::text FROM public.application_native_policy_fixture_configuration_epochs WHERE workspace_id=w),'0') $$;
+      REVOKE ALL ON FUNCTION application_native_policy_fixture_configuration(uuid) FROM PUBLIC;
+      CREATE FUNCTION application_native_policy_fixture_configuration_changed() RETURNS trigger
+      LANGUAGE plpgsql SECURITY DEFINER SET search_path=pg_catalog,public,pg_temp AS $$
+      DECLARE item jsonb;w uuid;
+      BEGIN
+        item:=CASE WHEN TG_OP='DELETE' THEN to_jsonb(OLD) ELSE to_jsonb(NEW) END;
+        IF TG_TABLE_NAME='application_native_policy_fixture_catalog' THEN
+          SELECT t.workspace_id INTO w FROM public.entity_types t WHERE t.id=(item->>'type_id')::uuid;
+        ELSE
+          SELECT r.workspace_id INTO w FROM public.entity_instances r WHERE r.id=(item->>'resource_id')::uuid;
+        END IF;
+        IF w IS NOT NULL THEN
+          INSERT INTO public.application_native_policy_fixture_configuration_epochs(workspace_id,revision)
+            VALUES(w,nextval('public.application_native_policy_fixture_configuration_seq'))
+            ON CONFLICT(workspace_id) DO UPDATE SET revision=nextval('public.application_native_policy_fixture_configuration_seq');
+        END IF;
+        RETURN NULL;
+      END $$;
+      REVOKE ALL ON FUNCTION application_native_policy_fixture_configuration_changed() FROM PUBLIC;
+      CREATE TRIGGER application_native_fixture_catalog_configuration AFTER INSERT OR UPDATE OR DELETE ON application_native_policy_fixture_catalog
+        FOR EACH ROW EXECUTE FUNCTION application_native_policy_fixture_configuration_changed();
+      CREATE TRIGGER application_native_fixture_record_configuration AFTER INSERT OR UPDATE OR DELETE ON application_native_policy_fixture_metadata
+        FOR EACH ROW EXECUTE FUNCTION application_native_policy_fixture_configuration_changed()`)
     await owner.query(`CREATE FUNCTION application_native_writer_fixture_reader(w uuid,o jsonb,t text,i text) RETURNS jsonb
       LANGUAGE plpgsql SECURITY DEFINER SET search_path=pg_catalog,public,pg_temp AS $$
       DECLARE r public.entity_instances; schema public.entity_types; policy public.application_native_policy_fixture_catalog;
@@ -159,6 +187,10 @@ describe('[COMP:security/native-field-policy] current canonical native field mas
     await owner.query('DROP FUNCTION application_native_policy_fixture_scope_union(jsonb,jsonb)')
     await owner.query('DROP TABLE application_native_policy_fixture_metadata')
     await owner.query('DROP TABLE application_native_policy_fixture_catalog')
+    await owner.query('DROP FUNCTION application_native_policy_fixture_configuration(uuid)')
+    await owner.query('DROP FUNCTION application_native_policy_fixture_configuration_changed()')
+    await owner.query('DROP TABLE application_native_policy_fixture_configuration_epochs')
+    await owner.query('DROP SEQUENCE application_native_policy_fixture_configuration_seq')
     if (oauthClients.length) await owner.query('DELETE FROM oauth_clients WHERE client_id=ANY($1::text[])',[oauthClients])
     await owner.query('DELETE FROM users WHERE id=ANY($1::uuid[])',[userIds])
     await getAppPool().end();await owner.end()
@@ -2043,4 +2075,227 @@ describe('[COMP:security/native-field-policy] current canonical native field mas
       await expect(assertSourceModelInputAuthority(context(independent))).resolves.toBeUndefined()
     })
   })
+  describe('[COMP:api/application-governance] current native role and owner reviews',() => {
+    async function governed(roles=true,expires:string|null=null) {
+      const module=`governance_${randomBytes(6).toString('hex')}`
+      await owner.query(`INSERT INTO application_native_field_contracts(module_key,contract_version,role_keys,metadata_reader,catalog_reader,configuration_required,configuration_reader)
+        VALUES($1,'1',ARRAY['finance','approver'],'application_native_policy_fixture_reader(uuid,jsonb,text,text)'::regprocedure,
+          'application_native_policy_fixture_catalog_reader(uuid,jsonb,text)'::regprocedure,true,'application_native_policy_fixture_configuration(uuid)'::regprocedure)`,[module])
+      const fixture=await record(true,module),service=new ApplicationPlatformService([createCanonicalGenericApplicationModule()])
+      if (roles) {await assign('finance',ownerId,module,workspaceId,'2020-01-01T00:00:00Z',expires);await assign('approver',ownerId,module)}
+      const catalog=() => nativeExecution(ownerId).then(execution => service.governanceCatalog(execution,{moduleKey:module}))
+      const preview=async (operation:unknown) => service.previewGovernance(await nativeExecution(ownerId),{moduleKey:module,expectedRevision:(await catalog()).revision,operation})
+      const grant=(user=memberId,end:string|null=null) => ({kind:'assign_role',userId:user,roleKey:'finance',startsAt:'2020-01-01T00:00:00Z',expiresAt:end})
+      const cleanup=async () => {
+        await owner.query('DELETE FROM application_native_governance_reviews WHERE workspace_id=$1 AND module_key=$2',[workspaceId,module])
+        await owner.query('DELETE FROM application_native_resource_owners WHERE workspace_id=$1 AND module_key=$2',[workspaceId,module])
+        await owner.query('DELETE FROM application_native_role_assignments WHERE workspace_id=$1 AND module_key=$2',[workspaceId,module])
+        await owner.query('DELETE FROM application_native_field_contracts WHERE module_key=$1',[module])
+      }
+      return {module,fixture,service,catalog,preview,grant,cleanup}
+    }
+    it('Q03/Q07 gives an owner no missing field role or self-grant and keeps raw governance tables private',async () => {
+      const value=await governed(false)
+      try {
+        await expect(value.catalog()).rejects.toMatchObject({code:'access_unavailable'})
+        await expect(value.service.previewGovernance(await nativeExecution(ownerId),{moduleKey:value.module,expectedRevision:'a'.repeat(64),operation:value.grant(ownerId)}))
+          .rejects.toMatchObject({code:'access_unavailable'})
+        await expect(asMember(ownerId,client => client.query(`INSERT INTO application_native_role_assignments(workspace_id,module_key,user_id,role_key,issued_by_user_id)
+          VALUES($1,$2,$3,'finance',$3)`,[workspaceId,value.module,ownerId]))).rejects.toMatchObject({code:'42501'})
+        expect((await owner.query('SELECT id FROM application_native_governance_reviews WHERE module_key=$1',[value.module])).rows).toEqual([])
+      } finally {await value.cleanup()}
+    })
+    it('Q07 applies one current bounded role delegation and content-free event exactly once',async () => {
+      const value=await governed()
+      try {
+        const before=await nativeExecution(ownerId),review=await value.preview(value.grant())
+        const outcome=await value.service.applyGovernance(await nativeExecution(ownerId),{reviewId:review.id})
+        expect(outcome).toMatchObject({id:review.id,moduleKey:value.module,kind:'assign_role',applied:true,version:'1'})
+        await expect(before.security.authority.assertCurrent()).rejects.toMatchObject({reason:'authority_changed'})
+        expect(await value.service.applyGovernance(await nativeExecution(ownerId),{reviewId:review.id})).toEqual(outcome)
+        expect((await owner.query('SELECT count(*)::int AS count FROM application_native_governance_events WHERE review_id=$1',[review.id])).rows[0].count).toBe(1)
+        expect(JSON.stringify((await owner.query('SELECT proposal,outcome FROM application_native_governance_reviews WHERE id=$1',[review.id])).rows[0])).not.toContain('Fictional request')
+        const current=await value.service.query(await nativeExecution(memberId),'records','get',{type:value.fixture.type,id:value.fixture.row.id}) as ApplicationRecordProjection
+        expect(current.values.cost).toEqual({kind:'number',value:42})
+        expect((await owner.query('SELECT id,record_version::text AS version FROM entity_instances WHERE id=$1',[value.fixture.row.id])).rows[0])
+          .toEqual({id:value.fixture.row.id,version:value.fixture.row.recordVersion})
+      } finally {await value.cleanup()}
+    })
+    it('Q07 refuses unknown role vocabulary, code upload, nonmember targets and self lifetime widening',async () => {
+      const end=new Date(Date.now()+60_000).toISOString(),value=await governed(true,end)
+      try {
+        await expect(value.preview({...value.grant(),roleKey:'invented'})).rejects.toMatchObject({code:'access_unavailable'})
+        await expect(value.preview({...value.grant(),code:'unregistered handler'})).rejects.toMatchObject({code:'invalid_value'})
+        await expect(value.preview(value.grant(externalId,end))).rejects.toMatchObject({code:'access_unavailable'})
+        await expect(value.preview(value.grant(ownerId))).rejects.toMatchObject({code:'access_unavailable'})
+        expect(await value.preview(value.grant(memberId,new Date(Date.now()+20_000).toISOString()))).toMatchObject({canApply:true})
+      } finally {await value.cleanup()}
+    })
+    it('Q07 invalidates a review after a real role change and restore and requires fresh preview',async () => {
+      const value=await governed()
+      try {
+        const review=await value.preview(value.grant())
+        const role=(await owner.query("SELECT id FROM application_native_role_assignments WHERE workspace_id=$1 AND module_key=$2 AND user_id=$3 AND role_key='approver'",[workspaceId,value.module,ownerId])).rows[0].id
+        await owner.query("UPDATE application_native_role_assignments SET expires_at=now()+interval '1 hour' WHERE id=$1",[role])
+        await owner.query('UPDATE application_native_role_assignments SET expires_at=NULL WHERE id=$1',[role])
+        await expect(value.service.applyGovernance(await nativeExecution(ownerId),{reviewId:review.id})).rejects.toMatchObject({code:'record_version_conflict'})
+        expect((await owner.query('SELECT id FROM application_native_role_assignments WHERE workspace_id=$1 AND module_key=$2 AND user_id=$3',[workspaceId,value.module,memberId])).rows).toEqual([])
+        const fresh=await value.preview(value.grant())
+        expect(await value.service.applyGovernance(await nativeExecution(ownerId),{reviewId:fresh.id})).toMatchObject({applied:true})
+      } finally {await value.cleanup()}
+    })
+    it('Q06/Q07 rolls back role, applied review and event together on an event-store refusal',async () => {
+      const value=await governed()
+      try {
+        const review=await value.preview(value.grant())
+        await owner.query(`ALTER TABLE application_native_governance_events ADD CONSTRAINT governance_fixture_refusal CHECK(module_key<>'${value.module}')`)
+        try {
+          await expect(value.service.applyGovernance(await nativeExecution(ownerId),{reviewId:review.id})).rejects.toMatchObject({code:'invalid_value'})
+          expect((await owner.query('SELECT outcome FROM application_native_governance_reviews WHERE id=$1',[review.id])).rows[0].outcome).toBeNull()
+          expect((await owner.query('SELECT id FROM application_native_role_assignments WHERE workspace_id=$1 AND module_key=$2 AND user_id=$3',[workspaceId,value.module,memberId])).rows).toEqual([])
+          expect((await owner.query('SELECT review_id FROM application_native_governance_events WHERE review_id=$1',[review.id])).rows).toEqual([])
+        } finally {await owner.query('ALTER TABLE application_native_governance_events DROP CONSTRAINT governance_fixture_refusal')}
+        expect(await value.service.applyGovernance(await nativeExecution(ownerId),{reviewId:review.id})).toMatchObject({applied:true})
+      } finally {await value.cleanup()}
+    })
+    it('Q07 previews and applies only a restrictive deployed owner binding without preview epoch or payload effects',async () => {
+      const value=await governed()
+      try {
+        const next=await catalogType(value.module,false),row=await store.createEntity({workspaceId,entityTypeId:next.schema.id,sourceApp:'api',createdBy:ownerId,lastEditedBy:ownerId,
+          data:{title:{kind:'text',value:'Fictional owner-bound record'},cost:{kind:'number',value:42}}})
+        await owner.query('INSERT INTO application_native_policy_fixture_catalog(type_id,fields) VALUES($1,$2)',[next.schema.id,JSON.stringify(fields())])
+        await owner.query('INSERT INTO application_native_policy_fixture_metadata(resource_id,fields) VALUES($1,$2)',[row.id,JSON.stringify(fields())])
+        const invocation=await nativeExecution(ownerId),review=await value.preview({kind:'bind_owner',entityTypeId:next.schema.id})
+        await expect(invocation.security.authority.assertCurrent()).resolves.toBeUndefined()
+        expect((await owner.query('SELECT resource_type FROM application_native_resource_owners WHERE workspace_id=$1 AND origin=$2',[workspaceId,next.origin])).rows).toEqual([])
+        const applied=await value.service.applyGovernance(await nativeExecution(ownerId),{reviewId:review.id})
+        expect(applied).toMatchObject({kind:'bind_owner',resourceId:next.schema.id,applied:true})
+        expect(await value.service.applyGovernance(await nativeExecution(ownerId),{reviewId:review.id})).toEqual(applied)
+        const current=await createDbDocEntityStore({actorUserId:memberId}).getEntity(workspaceId,row.id)
+        expect(current?.data).toEqual({title:{kind:'text',value:'Fictional owner-bound record'}})
+        await expect(value.preview({kind:'bind_owner',entityTypeId:next.schema.id})).rejects.toMatchObject({code:'access_unavailable'})
+        expect((await owner.query('SELECT data,record_version::text AS version FROM entity_instances WHERE id=$1',[row.id])).rows[0]).toEqual({data:row.data,version:row.recordVersion})
+      } finally {await value.cleanup()}
+    })
+    it('Q02/Q07 withholds a pending role change after contraction while an independent native reader still succeeds',async () => {
+      const value=await governed()
+      try {
+        await assign('finance',otherId,value.module)
+        const review=await value.preview(value.grant()),old=await nativeExecution(ownerId)
+        await owner.query("UPDATE application_native_role_assignments SET status='revoked' WHERE workspace_id=$1 AND module_key=$2 AND user_id=$3 AND role_key='finance'",[workspaceId,value.module,ownerId])
+        await expect(value.service.applyGovernance(old,{reviewId:review.id})).rejects.toMatchObject({reason:'authority_changed'})
+        await expect(value.service.applyGovernance(await nativeExecution(ownerId),{reviewId:review.id})).rejects.toMatchObject({code:'access_unavailable'})
+        expect((await createDbDocEntityStore({actorUserId:otherId}).getEntity(workspaceId,value.fixture.row.id))?.data.cost).toEqual({kind:'number',value:42})
+        expect((await owner.query('SELECT outcome FROM application_native_governance_reviews WHERE id=$1',[review.id])).rows[0].outcome).toBeNull()
+      } finally {await value.cleanup()}
+    })
+    it('Q07 enumerates assignment IDs and versions in bounded current-governance pages',async () => {
+      const value=await governed()
+      try {
+        const ids:string[]=[]
+        for (let index=0;index<102;index++) ids.push(await assign('finance',memberId,value.module))
+        const first=await value.catalog()
+        expect(first.roleAssignments).toHaveLength(100);expect(first.nextCursor).not.toBeNull()
+        const second=await value.service.governanceCatalog(await nativeExecution(ownerId),{moduleKey:value.module,afterId:first.nextCursor})
+        expect(second.roleAssignments).toHaveLength(4);expect(second.nextCursor).toBeNull()
+        expect(new Set([...first.roleAssignments,...second.roleAssignments].map(row => row.id)).size).toBe(104)
+        expect([...first.roleAssignments,...second.roleAssignments].filter(row => ids.includes(row.id))).toHaveLength(102)
+        expect(JSON.stringify(first)).not.toContain('Fictional request')
+      } finally {await value.cleanup()}
+    })
+    it('Q07 applies one versioned role revocation under concurrency and supports current review recovery',async () => {
+      const value=await governed()
+      try {
+        const assignment=await assign('finance',memberId,value.module)
+        expect((await value.catalog()).roleAssignments.find(row => row.id===assignment)).toMatchObject({userId:memberId,roleKey:'finance',version:'1',status:'active'})
+        const operation={kind:'revoke_role',assignmentId:assignment,expectedVersion:'1'},first=await value.preview(operation),second=await value.preview(operation)
+        const contexts=await Promise.all([nativeExecution(ownerId),nativeExecution(ownerId)])
+        const outcomes=await Promise.allSettled([first,second].map((review,index) => value.service.applyGovernance(contexts[index],{reviewId:review.id})))
+        expect(outcomes.filter(result => result.status==='fulfilled')).toHaveLength(1)
+        expect((await owner.query('SELECT status,version::text AS version FROM application_native_role_assignments WHERE id=$1',[assignment])).rows[0]).toEqual({status:'revoked',version:'2'})
+        const committed=outcomes.find(result => result.status==='fulfilled')
+        if (committed?.status!=='fulfilled') throw new Error('A canonical revocation must commit.')
+        expect(await value.service.applyGovernance(await nativeExecution(ownerId),{reviewId:committed.value.id})).toEqual(committed.value)
+        expect((await owner.query('SELECT count(*)::int AS count FROM application_native_governance_events WHERE module_key=$1',[value.module])).rows[0].count).toBe(1)
+      } finally {await value.cleanup()}
+    })
+    it('Q07 allows explicit self revocation without returning or caching a lost field allowance',async () => {
+      const value=await governed()
+      try {
+        const assignment=(await owner.query("SELECT id FROM application_native_role_assignments WHERE workspace_id=$1 AND module_key=$2 AND user_id=$3 AND role_key='finance'",[workspaceId,value.module,ownerId])).rows[0].id
+        const review=await value.preview({kind:'revoke_role',assignmentId:assignment,expectedVersion:'1'})
+        expect(await value.service.applyGovernance(await nativeExecution(ownerId),{reviewId:review.id})).toMatchObject({kind:'revoke_role',applied:true})
+        expect((await createDbDocEntityStore({actorUserId:ownerId}).getEntity(workspaceId,value.fixture.row.id))?.data.cost).toBeUndefined()
+        await expect(value.service.applyGovernance(await nativeExecution(ownerId),{reviewId:review.id})).rejects.toMatchObject({code:'access_unavailable'})
+      } finally {await value.cleanup()}
+    })
+    it('Q07 rejects a reviewed change after private configuration changes and restores through its complete monotonic port',async () => {
+      const value=await governed()
+      try {
+        await assign('finance',otherId,value.module)
+        const review=await value.preview(value.grant()),invocation=await nativeExecution(ownerId)
+        const before=(await owner.query('SELECT application_native_policy_fixture_configuration($1) AS revision',[workspaceId])).rows[0].revision
+        await owner.query("UPDATE application_native_policy_fixture_catalog SET policy_version='2' WHERE type_id=$1",[value.fixture.schema.id])
+        await owner.query("UPDATE application_native_policy_fixture_catalog SET policy_version='1' WHERE type_id=$1",[value.fixture.schema.id])
+        const current=(await owner.query('SELECT application_native_policy_fixture_configuration($1) AS revision',[workspaceId])).rows[0].revision
+        expect(BigInt(current)).toBeGreaterThan(BigInt(before))
+        await expect(invocation.security.authority.assertCurrent()).rejects.toMatchObject({reason:'authority_changed'})
+        await expect(value.service.applyGovernance(await nativeExecution(ownerId),{reviewId:review.id})).rejects.toMatchObject({code:'record_version_conflict'})
+        expect((await createDbDocEntityStore({actorUserId:otherId}).getEntity(workspaceId,value.fixture.row.id))?.data.cost).toEqual({kind:'number',value:42})
+        expect(await value.catalog()).toMatchObject({moduleKey:value.module})
+        expect((await owner.query('SELECT outcome FROM application_native_governance_reviews WHERE id=$1',[review.id])).rows[0].outcome).toBeNull()
+      } finally {await value.cleanup()}
+    })
+    it('Q07 keeps missing private configuration ports held at actual native governance use',async () => {
+      const value=await governed()
+      try {
+        await owner.query('UPDATE application_native_field_contracts SET configuration_required=true,configuration_reader=NULL WHERE module_key=$1',[value.module])
+        await expect(asMember(ownerId,client => client.query('SELECT read_native_application_governance_catalog($1,$2,$3)',[workspaceId,assistantId,value.module])))
+          .rejects.toMatchObject({code:'42501'})
+        expect((await owner.query('SELECT id FROM application_native_governance_reviews WHERE module_key=$1',[value.module])).rows).toEqual([])
+        await owner.query("UPDATE application_native_field_contracts SET configuration_required=true,configuration_reader='application_native_policy_fixture_configuration(uuid)'::regprocedure WHERE module_key=$1",[value.module])
+        expect(await value.catalog()).toMatchObject({moduleKey:value.module,roleKeys:['finance','approver']})
+      } finally {await value.cleanup()}
+    })
+    it('Q07 makes SQL-time role expiry stale a pending review without a metadata write',async () => {
+      const value=await governed(true,new Date(Date.now()+4_000).toISOString())
+      try {
+        await assign('finance',otherId,value.module)
+        const operation=value.grant(memberId,new Date(Date.now()+3_000).toISOString()),review=await value.preview(operation),execution=await nativeExecution(ownerId)
+        const before=(await owner.query('SELECT revision::text AS revision FROM application_policy_workspace_epochs WHERE workspace_id=$1',[workspaceId])).rows[0].revision
+        await new Promise(resolve => setTimeout(resolve,4_100))
+        expect((await owner.query('SELECT revision::text AS revision FROM application_policy_workspace_epochs WHERE workspace_id=$1',[workspaceId])).rows[0].revision).toBe(before)
+        await expect(value.service.applyGovernance(execution,{reviewId:review.id})).rejects.toMatchObject({reason:'authority_changed'})
+        await expect(value.service.applyGovernance(await nativeExecution(ownerId),{reviewId:review.id})).rejects.toMatchObject({code:'access_unavailable'})
+        expect((await createDbDocEntityStore({actorUserId:otherId}).getEntity(workspaceId,value.fixture.row.id))?.data.cost).toEqual({kind:'number',value:42})
+        expect((await owner.query('SELECT outcome FROM application_native_governance_reviews WHERE id=$1',[review.id])).rows[0].outcome).toBeNull()
+      } finally {await value.cleanup()}
+    })
+    it('Q07/Q08 uses the real native HTTP and MCP governance profile without promoting app credentials',async () => {
+      const value=await governed()
+      try {
+        const http=await schemaManagementHttp(),catalog=await request(http.http).get(`${http.base}/governance/catalog`).query({moduleKey:value.module}).set('Authorization',`Bearer ${http.token}`)
+        expect(catalog.status).toBe(200);expect(catalog.body.roleKeys).toEqual(['finance','approver'])
+        const body={moduleKey:value.module,expectedRevision:catalog.body.revision,operation:value.grant()}
+        expect((await request(http.http).post(`${http.base}/governance/preview`).set('Origin','https://unregistered.example').set('Authorization',`Bearer ${http.token}`).send(body)).status).toBe(403)
+        const app=await application(value.fixture,'member')
+        expect((await request(http.http).post(`${http.base}/governance/preview`).set('Authorization',`Bearer ${app.token}`).send(body)).status).toBe(401)
+        await expect(value.service.governanceCatalog(await resolveApplicationExecutionContext(app.authentication),{moduleKey:value.module})).rejects.toMatchObject({code:'authentication_required'})
+        const mcp=(method:string,params?:unknown) => request(http.http).post(`${http.base}/governance/mcp`).query({moduleKey:value.module}).set('Authorization',`Bearer ${http.token}`)
+          .set('Accept','application/json, text/event-stream').set('MCP-Protocol-Version','2025-11-25').send({jsonrpc:'2.0',id:1,method,...(params?{params}:{})})
+        const tools=schemaMcpReply(await mcp('tools/list'))
+        expect(JSON.stringify(tools)).toContain('applicationGovernancePreview');expect(JSON.stringify(tools)).toContain('finance')
+        const refreshed=schemaMcpReply(await mcp('tools/call',{name:'applicationGovernanceCatalog',arguments:{}}))
+        body.expectedRevision=JSON.parse(refreshed.result.content[0].text).revision
+        const proposal=schemaMcpReply(await mcp('tools/call',{name:'applicationGovernancePreview',arguments:body}))
+        const review=JSON.parse(proposal.result.content[0].text)
+        expect(review).toMatchObject({canApply:true})
+        const applied=schemaMcpReply(await mcp('tools/call',{name:'applicationGovernanceApply',arguments:{reviewId:review.id}}))
+        expect(JSON.parse(applied.result.content[0].text)).toMatchObject({error:'grant_revoked',effect:'committed',retrySafe:false})
+        const recovery=await request(http.http).post(`${http.base}/governance/reviews/${review.id}/apply`).set('Authorization',`Bearer ${http.token}`).send({})
+        expect(recovery.status).toBe(200);expect(recovery.body).toMatchObject({id:review.id,kind:'assign_role',applied:true})
+      } finally {await value.cleanup()}
+    })
+  })
+
 })

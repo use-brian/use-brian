@@ -9,6 +9,7 @@ import { ApplicationPlatformError, WORKSPACE_MODULES, applicationCommandSchema, 
 import { applyRLSGucs, getAppPool, rollbackAndRelease } from '../db/client.js'
 import { runWithAgentAccess } from '../db/agent-access-context.js'
 import { lockWorkspaceModule, requireWorkspaceModuleAdmission } from '../db/workspace-modules-store.js'
+import { applyApplicationGovernance,previewApplicationGovernance,readApplicationGovernanceCatalog } from './governance.js'
 import { applyApplicationSchema, previewApplicationSchema } from './schema-changes.js'
 import type { PropertyDef } from '@use-brian/core'
 import { applyApplicationRLSContext, getApplicationExecutionBinding, releaseApplicationTransactionBinding } from './execution-context.js'
@@ -71,6 +72,16 @@ export class ApplicationPlatformService {
   applySchema(execution: ExecutionContext, previewId: string) {
     if (execution.surface.readOnly) throw new ApplicationPlatformError('access_unavailable', 'The operation is unavailable.')
     return this.transaction(execution, client => applyApplicationSchema(client,execution,previewId), true)
+  }
+
+  governanceCatalog(execution:ExecutionContext,input:unknown) {
+    return this.transaction(execution,client => readApplicationGovernanceCatalog(client,execution,input))
+  }
+  previewGovernance(execution:ExecutionContext,input:unknown) {
+    return this.transaction(execution,client => previewApplicationGovernance(client,execution,input))
+  }
+  applyGovernance(execution:ExecutionContext,input:unknown) {
+    return this.transaction(execution,client => applyApplicationGovernance(client,execution,input),true)
   }
 
   private async transaction<T>(execution: ExecutionContext, operation: (client: PoolClient, afterCommit: (effect: () => void) => void) => Promise<T>, effectful = false): Promise<T> {

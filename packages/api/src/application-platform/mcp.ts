@@ -11,6 +11,7 @@ import { query } from '../db/client.js'
 import { parseBridgeToken } from '../home-apps/tokens.js'
 import { authenticateApplicationHome } from './home-auth.js'
 import { resolveApplicationExecutionContext } from './execution-context.js'
+import { applicationGovernanceCatalogInput,applicationGovernancePreviewInput,applicationGovernanceApplyInput,assertNativeApplicationGovernance,type ApplicationGovernancePreviewInput,type ApplicationGovernanceApplyInput } from './governance.js'
 import { applicationSchemaPreviewInput,applicationSchemaApplyInput,type ApplicationSchemaPreviewInput,type ApplicationSchemaApplyInput } from './schema-changes.js'
 
 /** Resolve only signed Home binding metadata before entering the common service. */
@@ -78,4 +79,20 @@ export function buildNativeApplicationSchemaMcpTools(service: ApplicationPlatfor
       const value: ApplicationSchemaApplyInput=applicationSchemaApplyInput.parse(input)
       return service.applySchema(execution,value.previewId)
     },true) }]
+}
+
+/** One module selection supplies the actual enumerable role vocabulary. */
+export async function buildNativeApplicationGovernanceMcpTools(service:ApplicationPlatformService,execution:ExecutionContext,moduleKey:string):Promise<BrainTool[]> {
+  assertNativeApplicationGovernance(execution)
+  const catalog=await service.governanceCatalog(execution,{moduleKey}),invoke=applicationMcpInvoker(execution)
+  const assignment=applicationGovernancePreviewInput.shape.operation.options[0].extend({roleKey:catalog.roleKeys.length
+    ? z.enum(catalog.roleKeys as [string,...string[]]) : z.never()})
+  const preview=applicationGovernancePreviewInput.extend({moduleKey:z.literal(moduleKey),operation:z.discriminatedUnion('kind',[
+    assignment,applicationGovernancePreviewInput.shape.operation.options[1],applicationGovernancePreviewInput.shape.operation.options[2]])})
+  return [{name:'applicationGovernanceCatalog',description:'Read the current native module role vocabulary and review revision. This grants no data or role authority.',
+    inputSchema:{afterId:applicationGovernanceCatalogInput.shape.afterId},handler:invoke(input => service.governanceCatalog(execution,{moduleKey,afterId:input.afterId}))},
+  {name:'applicationGovernancePreview',description:'Preview one exact native role or restrictive owner operation under current governance and delegation limits.',
+    inputSchema:preview.shape,handler:invoke(input => {const value:ApplicationGovernancePreviewInput=preview.parse(input);return service.previewGovernance(execution,value)})},
+  {name:'applicationGovernanceApply',description:'Apply the same actor-bound native governance review once. Reconcile committed or uncertain effects in a fresh invocation.',
+    inputSchema:applicationGovernanceApplyInput.shape,handler:invoke(input => {const value:ApplicationGovernanceApplyInput=applicationGovernanceApplyInput.parse(input);return service.applyGovernance(execution,value)},true)}]
 }
