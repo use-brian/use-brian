@@ -33,7 +33,7 @@ describe('[COMP:api/application-records] compound query authority under real pri
     await owner.query('DELETE FROM users WHERE id=ANY($1::uuid[])', [[ownerId, memberId]])
     await getAppPool().end(); await owner.end()
   })
-  async function records() {
+  async function records(createdBy = ownerId, linked = true) {
     const targetSchema = await store.createEntityType({ workspaceId, name: `Fictional anchors ${randomUUID()}`, createdBy: ownerId,
       properties: [{ name: 'title', config: { kind: 'text' } }] })
     const target = await store.createEntity({ workspaceId, entityTypeId: targetSchema.id, createdBy: ownerId, lastEditedBy: ownerId,
@@ -41,8 +41,11 @@ describe('[COMP:api/application-records] compound query authority under real pri
     const schema = await store.createEntityType({ workspaceId, name: `Fictional requests ${randomUUID()}`, createdBy: ownerId,
       properties: [{ name: 'title', config: { kind: 'text' } },
         { name: 'parent', config: { kind: 'relation', targetEntityTypeRef: { kind: 'user_defined', entityTypeId: targetSchema.id } } }] })
-    const row = await store.createEntity({ workspaceId, entityTypeId: schema.id, createdBy: ownerId, lastEditedBy: ownerId,
-      sourceApp: 'api', data: { title: { kind: 'text', value: 'Fictional request' }, parent: { kind: 'relation', value: target.id } } })
+    const author = createDbDocEntityStore({ actorUserId: createdBy })
+    const row = await author.createEntity({ workspaceId, entityTypeId: schema.id, createdBy, lastEditedBy: createdBy,
+      sourceApp: 'api', data: { title: { kind: 'text', value: 'Fictional request' }, parent: { kind: 'relation', value: linked ? target.id : null } } })
+    await store.createEntity({ workspaceId, entityTypeId: schema.id, createdBy: ownerId, lastEditedBy: ownerId,
+      sourceApp: 'api', data: { title: { kind: 'text', value: 'Unreleased fictional request' }, parent: { kind: 'relation', value: target.id } } })
     return { schema, targetSchema, target, row, type: `record.${schema.id}`, origin: { kind: 'generic' as const, entityTypeId: schema.id },
       resolver: `relation.${createHash('sha256').update('parent').digest('hex')}` }
   }
@@ -131,5 +134,19 @@ describe('[COMP:api/application-records] compound query authority under real pri
     await owner.query("UPDATE entity_instances SET sensitivity='confidential' WHERE id=$1", [fixture.target.id])
     expect(await snapshot(source)).toMatchObject({ held: true })
     expect(await snapshot(source, ownerId)).toMatchObject({ held: false })
+  })
+  it.each([{ selection: 'self' as const }, { selection: 'relationship' as const }])(
+    'Q01 keeps an ID excluded by the compound $selection as an original absence obligation', async ({ selection }) => {
+      const fixture = await records(selection === 'self' ? memberId : ownerId, selection !== 'relationship')
+      const app = await application(fixture, ['ids', selection]), result = await query(fixture, app)
+      expect(result.records).toEqual([])
+      const source = await domain(result)
+      expect(await snapshot(source)).toMatchObject({ held: true })
+      expect(await snapshot(source, ownerId)).toMatchObject({ held: false })
+    })
+  it('Q01 requires an independent anchor release for a finite relationship path', async () => {
+    const fixture = await records(), app = await application(fixture, ['ids', 'relationship'])
+    await owner.query("UPDATE application_access_grants SET status='revoked' WHERE id=$1", [app.anchorGrantId])
+    await expect(query(fixture, app)).rejects.toThrow()
   })
 })
