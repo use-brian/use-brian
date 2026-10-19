@@ -211,6 +211,57 @@ describe('[COMP:api/application-auth] database application projections and live 
     const execution=await resolveApplicationExecutionContext(fixture.authentication),dispatcher=new ApplicationPlatformService([createCanonicalNativeApplicationModule()])
     expect((await dispatcher.catalog(execution)).resources.find(resource=>resource.typeKey===type)?.fields.map(field=>field.key).sort()).toEqual([...fields].sort())
   })
+  it('Q02 pins a lossless native decimal capture to its current builtin codec identity',async()=>{
+    const value=await createEntity({workspaceId,kind:'deal',displayName:'Fictional codec identity source',attributes:{stage:'lead',amount:'9007199254740993.000000000000000001'},createdByUserId:ownerId,source:'user'})
+    const fixture=await provision('service',['amount'],undefined,false,value.id,[],[value.id],undefined,'read_write',[],'deal')
+    const dispatcher=new ApplicationPlatformService([createCanonicalNativeApplicationModule()])
+    const projection=await dispatcher.query(await resolveApplicationExecutionContext(fixture.authentication),'native','get',{type:'deal',id:value.id,fields:['amount']}) as {values:unknown}
+    expect(projection.values).toEqual({amount:'9007199254740993.000000000000000001'})
+    const source=boundScopeSources(projection)[0]
+    const identity=(await pool.query(`SELECT r.field_identity,application_field_digest(jsonb_build_object('origin',r.origin,'type',r.type_key,
+      'fields',jsonb_build_array(jsonb_build_object('key','amount','kind','builtin','version',2)))) AS expected FROM application_field_resources r WHERE r.id=$1`,[source.resourceId])).rows[0]
+    expect(identity.field_identity).toBe(identity.expected)
+  })
+  it('Q02 holds old native codec observations for independent readers while unchanged fields remain current',async()=>{
+    const value=await createEntity({workspaceId,kind:'deal',displayName:'Fictional immutable codec source',attributes:{stage:'lead',amount:'9007199254740993.000000000000000001'},createdByUserId:ownerId,source:'user'})
+    const fixtures=await Promise.all([0,1].map(()=>provision('service',['name','amount'],undefined,false,value.id,[],[value.id],undefined,'read_write',[],'deal')))
+    const base=createCanonicalNativeApplicationModule(),snapshotInput=z.object({id:z.string().uuid(),version:z.string()}).strict()
+    const dispatcher=new ApplicationPlatformService([{...base,application:{...base.application!,queries:[...base.application!.queries,'field_snapshot']},queries:{...base.queries,
+      field_snapshot:{input:snapshotInput,authorize:async()=>{},execute:async({transaction},raw)=>{const input=snapshotInput.parse(raw);return (await transaction.query(
+        'SELECT read_admitted_application_field_snapshot($1,$2,$3) AS value',[workspaceId,input.id,input.version])).rows[0].value}}}}])
+    const signature='public.application_field_projection_state_before_module_policy(uuid,jsonb,text,uuid,text,text,text[])'
+    const definition=(await pool.query('SELECT pg_get_functiondef($1::regprocedure) AS definition',[signature])).rows[0].definition as string
+    const revised="'kind','builtin','version',CASE WHEN p_type='deal' AND field='amount' THEN 2 ELSE 1 END"
+    const legacy=definition.replace(revised,"'kind','builtin','version',1")
+    let oldAmount:ScopeSource|undefined,oldName:ScopeSource|undefined,oldArtifact:unknown
+    try {
+      // Local migration fixture: only the historical codec metadata changes.
+      // Current actor, grant, row/scope and every ACL function remain genuine.
+      await pool.query(legacy)
+      const execution=await resolveApplicationExecutionContext(fixtures[0].authentication)
+      const amountProjection=await dispatcher.query(execution,'native','get',{type:'deal',id:value.id,fields:['amount']})
+      const nameProjection=await dispatcher.query(execution,'native','get',{type:'deal',id:value.id,fields:['name']})
+      if(!amountProjection || typeof amountProjection!=='object' || !nameProjection || typeof nameProjection!=='object') throw new Error('Canonical native fixture projections are unavailable.')
+      oldAmount=boundScopeSources(amountProjection)[0]
+      oldName=boundScopeSources(nameProjection)[0]
+      oldArtifact=(await pool.query('SELECT r.field_identity,o.record_version,o.policy_version FROM application_field_resources r JOIN application_field_observations o ON o.resource_id=r.id WHERE r.id=$1 AND o.version=$2',[oldAmount.resourceId,oldAmount.version])).rows[0]
+    } finally {await pool.query(definition)}
+    expect(oldAmount).toBeDefined();expect(oldName).toBeDefined()
+    const rowVersion=(await pool.query('SELECT scope_version::text AS version FROM entities WHERE id=$1',[value.id])).rows[0].version
+    expect(rowVersion).toBe('1')
+    let currentIdentity:string|undefined
+    for(const fixture of fixtures) {
+      const execution=await resolveApplicationExecutionContext(fixture.authentication)
+      expect(await dispatcher.query(execution,'native','field_snapshot',{id:oldAmount!.resourceId,version:oldAmount!.version})).toMatchObject({held:true})
+      expect(await dispatcher.query(execution,'native','field_snapshot',{id:oldName!.resourceId,version:oldName!.version})).toMatchObject({held:false})
+      const fresh=await dispatcher.query(execution,'native','get',{type:'deal',id:value.id,fields:['amount']}) as {values:unknown}
+      expect(fresh.values).toEqual({amount:'9007199254740993.000000000000000001'})
+      expect(boundScopeSources(fresh)[0].resourceId).not.toBe(oldAmount!.resourceId)
+      if(currentIdentity) expect(boundScopeSources(fresh)[0].resourceId).toBe(currentIdentity)
+      else currentIdentity=boundScopeSources(fresh)[0].resourceId
+    }
+    expect((await pool.query('SELECT r.field_identity,o.record_version,o.policy_version FROM application_field_resources r JOIN application_field_observations o ON o.resource_id=r.id WHERE r.id=$1 AND o.version=$2',[oldAmount!.resourceId,oldAmount!.version])).rows[0]).toEqual(oldArtifact)
+  })
   it('Q04 keeps a canonical JSON numeric deal amount lossless across an actual application projection',async () => {
     const id=randomUUID(),amount='9007199254740993.123456789012345678'
     await pool.query(`INSERT INTO entities(id,workspace_id,kind,display_name,attributes,created_by_user_id,source)
