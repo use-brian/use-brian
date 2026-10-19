@@ -51,6 +51,14 @@ describe('[COMP:shared/brian-app-sdk] application client', () => {
     fetch.mockImplementation(async()=>new Response('not json'))
     await expect(client.command('change',{idempotencyKey:'once',input:{}})).rejects.toMatchObject({code:'invalid_response',effect:'uncertain'})
   })
+  it('K02 makes response-body cancellation and schema-port pre-abort explicit',async()=>{
+    const abort=new AbortController(), fetch=vi.fn(async()=>({ok:true,status:200,json:async()=>{abort.abort();throw new Error('private stream failure')}} as Response))
+    const preview=vi.fn(),apply=vi.fn(), client=createApplicationClient({appId:app,transport:createFetchTransport({apiOrigin:origin,fetch,credential:async()=>oauth}),schemas:{preview,apply}})
+    await expect(client.command('change',{idempotencyKey:'once',input:{}},{signal:abort.signal})).rejects.toMatchObject({code:'cancelled',cancelled:true,effect:'uncertain'})
+    await expect(client.applySchema({idempotencyKey:'once',input:{}},{signal:abort.signal})).rejects.toMatchObject({code:'cancelled',effect:'none'})
+    await expect(client.previewSchema({},{signal:abort.signal})).rejects.toMatchObject({code:'cancelled',effect:'none'})
+    expect(preview).not.toHaveBeenCalled();expect(apply).not.toHaveBeenCalled()
+  })
   it.each(['sk_app_secret','native.jwt.token','cookie=value','oat_bad\r\nInjected: true'])('K03 rejects non-app browser credential %s',async token=>{
     const fetch=vi.fn(); const client=createApplicationClient({appId:app,transport:createFetchTransport({apiOrigin:origin,fetch,credential:async()=>token})})
     await expect(client.catalog()).rejects.toMatchObject({code:'authentication_required'});expect(fetch).not.toHaveBeenCalled()

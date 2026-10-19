@@ -98,3 +98,6 @@ the platform repository; OSS guide: `docs/applications/sdk.md`. R2 route complet
 R3 retained evidence/cache integration, R5b management, R5c real reference journeys,
 R6 qualification and all publication, production setup, trust provisioning, live
 provider QA and independent-source adoption remain owed.
+
+Cancellation while consuming an effect response remains uncertain. Already-aborted
+schema operations never invoke their injected deployment port.

@@ -1,5 +1,6 @@
 import { beforeAll, afterAll, describe, expect, it } from 'vitest'
 import { execFileSync } from 'node:child_process'
+import { createHash } from 'node:crypto'
 import { mkdtempSync, mkdirSync, readFileSync, realpathSync, rmSync, symlinkSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { dirname, join, resolve } from 'node:path'
@@ -8,6 +9,8 @@ import { createRequire } from 'node:module'
 import { scaffold, scaffoldFiles } from '../scaffold.js'
 const root=resolve(dirname(fileURLToPath(import.meta.url)),'../..'), require=createRequire(import.meta.url)
 let temporary:string
+const evidence:Record<string,unknown>={generated:{}}
+const digest=(path:string)=>createHash('sha256').update(readFileSync(path)).digest('hex')
 const tool=(name:string)=>require.resolve(name)
 const run=(command:string,args:string[],cwd=temporary)=>execFileSync(command,args,{cwd,encoding:'utf8',stdio:'pipe',env:{...process.env,NO_COLOR:'1'}})
 beforeAll(()=>{
@@ -26,7 +29,14 @@ beforeAll(()=>{
   symlinkSync(dirname(createRequire(resolve(root,'../shared/package.json')).resolve('zod/package.json')),join(temporary,'node_modules/zod'))
   writeFileSync(join(temporary,'package.json'),JSON.stringify({type:'module'}))
 },120000)
-afterAll(()=>{if(temporary)rmSync(temporary,{recursive:true,force:true})})
+afterAll(()=>{
+  if(temporary && process.env.BRIAN_SDK_CONFORMANCE_EVIDENCE){
+    const path=process.env.BRIAN_SDK_CONFORMANCE_EVIDENCE
+    mkdirSync(dirname(path),{recursive:true})
+    writeFileSync(path,JSON.stringify({...evidence,packedSha256:digest(join(temporary,'kit.tgz')),exports:Object.keys(JSON.parse(readFileSync(join(temporary,'node_modules/@use-brian/brian-app/package.json'),'utf8')).exports)},null,2)+'\n')
+  }
+  if(temporary)rmSync(temporary,{recursive:true,force:true})
+})
 describe('[COMP:shared/brian-app-sdk] packed exports and scaffolds',()=>{
   it('K01 executes the packed browser graph without Node globals or server/runtime root imports',()=>{
     writeFileSync(join(temporary,'browser.mjs'),`import vm from 'node:vm';import {readFileSync} from 'node:fs';import assert from 'node:assert/strict';import {webcrypto} from 'node:crypto';
@@ -38,13 +48,14 @@ const client=sdk.createApplicationClient({appId:'00000000-0000-4000-8000-0000000
 assert.equal((await client.catalog()).evidence.source,'proof');assert.equal((await sdk.createApplicationSignIn({apiOrigin:'https://brain.example',appId:'00000000-0000-4000-8000-000000000001',clientId:'public',redirectUri:'https://portal.example/callback'}).begin()).authorizationUrl.includes('code_challenge_method=S256'),true);
 assert.ok(graph.every(path=>!path.includes('/core/')&&!path.includes('/shared/')&&!path.includes('/module.js')&&!path.includes('/connector.js')));console.log(JSON.stringify({graph,nodeGlobals:false}));`)
     const output=run(process.execPath,['--experimental-vm-modules','browser.mjs'])
-    expect(JSON.parse(output).graph.map((p:string)=>p.split('/').pop()).sort()).toEqual(['application.js','sign-in.js','transport.js'])
+    evidence.browserGraph=JSON.parse(output);expect(JSON.parse(output).graph.map((p:string)=>p.split('/').pop()).sort()).toEqual(['application.js','sign-in.js','transport.js'])
   })
   it.each(['native','connector']as const)('K05 compiles/runs %s outside the workspace using only packed public profiles',profile=>{
     const directory=join(temporary,profile)
     run(process.execPath,[join(temporary,'node_modules/@use-brian/brian-app/bin/brian-app.js'),'scaffold','--profile',profile,directory])
     run('npm',['run','build'],directory)
-    expect(run('npm',['run','contract'],directory)).toContain('unconfigured boundary: unavailable')
+    const contractOutput=run('npm',['run','contract'],directory);expect(contractOutput).toContain('unconfigured boundary: unavailable')
+    ;(evidence.generated as Record<string,unknown>)[profile]={compiled:true,contractOutput,files:Object.fromEntries(Object.keys(scaffoldFiles(profile)).map(path=>[path,digest(join(directory,path))]))}
     expect(readFileSync(join(directory,'src',profile==='native'?'module.ts':'source.ts'),'utf8')).toContain('@use-brian/brian-app/')
     if(profile==='native'){
       const cli=join(temporary,'node_modules/@use-brian/brian-app/bin/brian-app.js')

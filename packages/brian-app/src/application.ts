@@ -27,13 +27,13 @@ export function createFetchTransport(options: HttpTransportOptions & {
 }
 function segment(value: string): string {
   if (typeof value !== 'string' || !value || value === '.' || value === '..' || /[\u0000-\u001f\u007f]/.test(value)) throw new ApplicationSdkError('invalid_value')
-  return encodeURIComponent(value)
+  try { return encodeURIComponent(value) } catch { throw new ApplicationSdkError('invalid_value') }
 }
 export function createApplicationClient(options: { appId: string; transport: ApplicationTransport; schemas?: ApplicationSchemaPorts }) {
-  const base = `/api/applications/${appIdentifier(options.appId)}`
+  const appId = appIdentifier(options.appId), base = `/api/applications/${appId}`
   const send = <T>(method: 'GET' | 'POST', path: string, body: unknown, call: ApplicationCallOptions = {}, effectful = false): Promise<T> => {
     if (call.signal?.aborted) return Promise.reject(new ApplicationSdkError('cancelled', 'none', false, undefined, true))
-    return options.transport({ appId: options.appId, method, path: base + path, body, effectful, signal: call.signal }) as Promise<T>
+    return options.transport({ appId, method, path: base + path, body, effectful, signal: call.signal }) as Promise<T>
   }
   return {
     catalog: (call?: ApplicationCallOptions) => send<ApplicationCatalog>('GET', '/catalog', undefined, call),
@@ -44,8 +44,8 @@ export function createApplicationClient(options: { appId: string; transport: App
       send<T>('GET', `/records/${segment(type)}/${segment(id)}/history${beforeVersion === undefined ? '' : `?beforeVersion=${encodeURIComponent(beforeVersion)}`}`, undefined, call),
     registeredQuery: <T = unknown>(key: string, input: ApplicationJson, call?: ApplicationCallOptions) => send<T>('POST', `/queries/${segment(key)}`, input, call),
     command: <T = ApplicationOperationReceipt>(key: string, command: ApplicationCommand, call?: ApplicationCallOptions) => send<T>('POST', `/commands/${segment(key)}`, command, call, true),
-    previewSchema: (input: ApplicationJson, call?: ApplicationCallOptions) => options.schemas ? options.schemas.preview(input, call) : Promise.reject(new ApplicationSdkError('operation_not_available')),
-    applySchema: (input: ApplicationCommand, call?: ApplicationCallOptions) => options.schemas ? options.schemas.apply(input, call) : Promise.reject(new ApplicationSdkError('operation_not_available')),
+    previewSchema: (input: ApplicationJson, call?: ApplicationCallOptions) => call?.signal?.aborted ? Promise.reject(new ApplicationSdkError('cancelled', 'none', false, undefined, true)) : options.schemas ? options.schemas.preview(input, call) : Promise.reject(new ApplicationSdkError('operation_not_available')),
+    applySchema: (input: ApplicationCommand, call?: ApplicationCallOptions) => call?.signal?.aborted ? Promise.reject(new ApplicationSdkError('cancelled', 'none', false, undefined, true)) : options.schemas ? options.schemas.apply(input, call) : Promise.reject(new ApplicationSdkError('operation_not_available')),
   }
 }
 export type ApplicationClient = ReturnType<typeof createApplicationClient>

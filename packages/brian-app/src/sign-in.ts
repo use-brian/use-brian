@@ -10,7 +10,8 @@ function base64url(bytes: Uint8Array): string {
 }
 export function createApplicationSignIn(options: ApplicationSignInOptions) {
   const origin = apiOrigin(options.apiOrigin), app = appIdentifier(options.appId)
-  const redirect = new URL(options.redirectUri)
+  let redirect: URL
+  try { redirect = new URL(options.redirectUri) } catch { throw new ApplicationSdkError('invalid_value') }
   apiOrigin(redirect.origin)
   if (redirect.username || redirect.password || redirect.hash || redirect.search || !options.clientId
     || options.scope !== undefined && !['read','read_write'].includes(options.scope)) throw new ApplicationSdkError('invalid_value')

@@ -31,9 +31,9 @@ export function appOAuthToken(token: unknown): string {
 }
 const safeCodes = new Set(['invalid_schema','invalid_value','schema_version_conflict','record_version_conflict',
   'operation_not_available','access_unavailable','authentication_required','grant_revoked','source_unavailable','outcome_uncertain'])
-export async function readResponse(response: Response, effectful: boolean): Promise<unknown> {
+export async function readResponse(response: Response, effectful: boolean, signal?: AbortSignal): Promise<unknown> {
   let body: unknown
-  try { body = await response.json() } catch { throw new ApplicationSdkError('invalid_response', effectful ? 'uncertain' : 'none') }
+  try { body = await response.json() } catch { throw new ApplicationSdkError(signal?.aborted ? 'cancelled' : 'invalid_response', effectful ? 'uncertain' : 'none', false, response.status, !!signal?.aborted) }
   if (!response.ok) {
     const value = body && typeof body === 'object' ? body as Record<string, unknown> : {}
     const code = typeof value.error === 'string' && safeCodes.has(value.error) ? value.error as ApplicationErrorCode : 'access_unavailable'
@@ -65,6 +65,8 @@ export function httpTransport(options: HttpTransportOptions,
       const cancelled = request.signal?.aborted === true
       throw new ApplicationSdkError(cancelled ? 'cancelled' : 'transport_unavailable', request.effectful ? 'uncertain' : 'none', false, undefined, cancelled)
     }
-    return readResponse(response, request.effectful)
+    const result = await readResponse(response, request.effectful, request.signal)
+    if (request.signal?.aborted) throw new ApplicationSdkError('cancelled', request.effectful ? 'uncertain' : 'none', false, response.status, true)
+    return result
   }
 }
