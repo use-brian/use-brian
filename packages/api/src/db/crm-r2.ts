@@ -881,8 +881,9 @@ function entityToCrmRecordRow(entity: EntityRecord): CrmRecordRow {
 export async function getCrmR2Record(
   ctx: AccessContext,
   entityId: string,
+  transactionClient?: PoolClient,
 ): Promise<CrmRecordRow | null> {
-  const entity = await getEntityById(ctx, entityId)
+  const entity = transactionClient ? await getEntityById(ctx, entityId, {}, transactionClient) : await getEntityById(ctx, entityId)
   if (!entity || !['person', 'company', 'deal'].includes(entity.kind)) return null
   return entityToCrmRecordRow(entity)
 }
@@ -1659,21 +1660,20 @@ export async function addCrmDealParticipant(input: {
   contactId: string
   role?: string | null
   isPrimary?: boolean
-}): Promise<boolean> {
+}, transactionClient?: PoolClient): Promise<boolean> {
   if (input.isPrimary) {
     return setCrmDealPrimaryContact({
       ctx: input.ctx,
       dealId: input.dealId,
       contactId: input.contactId,
       ...(input.role !== undefined ? { role: input.role } : {}),
-    })
+    }, transactionClient)
   }
-  const client = await getAppPool().connect()
+  const client = transactionClient ?? await getAppPool().connect()
   try {
-    await client.query('BEGIN')
-    await applyRLSGucs(client, input.ctx.userId)
+    if (!transactionClient) { await client.query('BEGIN'); await applyRLSGucs(client, input.ctx.userId) }
     const deal = await prepareCrmParticipantMutation(input.ctx, input.dealId, input.contactId, client)
-    if (!deal) { await client.query('ROLLBACK'); return false }
+    if (!deal) { if (!transactionClient) await client.query('ROLLBACK'); return false }
     await client.query(
       `INSERT INTO crm_deal_contacts
          (workspace_id, deal_id, contact_id, role, is_primary, created_by)
@@ -1683,13 +1683,13 @@ export async function addCrmDealParticipant(input: {
       [input.ctx.workspaceId, input.dealId, input.contactId, input.role ?? null,
         false, input.ctx.userId],
     )
-    await client.query('COMMIT')
+    if (!transactionClient) await client.query('COMMIT')
     return true
   } catch (err) {
-    await client.query('ROLLBACK').catch(() => {})
+    if (!transactionClient) await client.query('ROLLBACK').catch(() => {})
     throw err
   } finally {
-    client.release()
+    if (!transactionClient) client.release()
   }
 }
 
@@ -1700,17 +1700,17 @@ export async function setCrmDealPrimaryContact(input: {
   dealId: string
   contactId: string | null
   role?: string | null
-}): Promise<boolean> {
-  const client = await getAppPool().connect()
+}, transactionClient?: PoolClient): Promise<boolean> {
+  const client = transactionClient ?? await getAppPool().connect()
   try {
-    await client.query('BEGIN')
-    await applyRLSGucs(client, input.ctx.userId)
-    if (!await prepareCrmParticipantMutation(input.ctx, input.dealId, input.contactId, client)) {
-      await client.query('ROLLBACK'); return false
+    if (!transactionClient) { await client.query('BEGIN'); await applyRLSGucs(client, input.ctx.userId) }
+    await assertNativeEntityFieldWrites(input.ctx.userId, input.dealId, {}, client, ['contactId'])
+    const source = await prepareCrmParticipantMutation(input.ctx, input.dealId, input.contactId, client)
+    if (!source) { if (!transactionClient) await client.query('ROLLBACK'); return false }
+    if ((source.attributes.contact_id ?? null) !== input.contactId) {
+      const deal = await updateDeal(input.ctx.userId, input.dealId, { contactId: input.contactId }, undefined, input.ctx, client)
+      if (!deal) { if (!transactionClient) await client.query('ROLLBACK'); return false }
     }
-    const deal = await updateDeal(input.ctx.userId, input.dealId,
-      { contactId: input.contactId }, undefined, input.ctx, client)
-    if (!deal) { await client.query('ROLLBACK'); return false }
     await client.query(
       `UPDATE crm_deal_contacts
           SET is_primary = false
@@ -1729,13 +1729,13 @@ export async function setCrmDealPrimaryContact(input: {
           input.ctx.userId, input.role !== undefined],
       )
     }
-    await client.query('COMMIT')
+    if (!transactionClient) await client.query('COMMIT')
     return true
   } catch (err) {
-    await client.query('ROLLBACK').catch(() => {})
+    if (!transactionClient) await client.query('ROLLBACK').catch(() => {})
     throw err
   } finally {
-    client.release()
+    if (!transactionClient) client.release()
   }
 }
 
@@ -1743,28 +1743,27 @@ export async function removeCrmDealParticipant(input: {
   ctx: AccessContext
   dealId: string
   contactId: string
-}): Promise<boolean> {
-  const client = await getAppPool().connect()
+}, transactionClient?: PoolClient): Promise<boolean> {
+  const client = transactionClient ?? await getAppPool().connect()
   try {
-    await client.query('BEGIN')
-    await applyRLSGucs(client, input.ctx.userId)
+    if (!transactionClient) { await client.query('BEGIN'); await applyRLSGucs(client, input.ctx.userId) }
     const deal = await prepareCrmParticipantMutation(input.ctx, input.dealId, input.contactId, client)
-    if (!deal) { await client.query('ROLLBACK'); return false }
+    if (!deal) { if (!transactionClient) await client.query('ROLLBACK'); return false }
     const result = await client.query<{ contactId: string }>(
       `DELETE FROM crm_deal_contacts
         WHERE workspace_id=$1 AND deal_id=$2 AND contact_id=$3 RETURNING contact_id AS "contactId"`,
       [input.ctx.workspaceId, input.dealId, input.contactId],
     )
-    if (!result.rows[0]) { await client.query('ROLLBACK'); return false }
+    if (!result.rows[0]) { if (!transactionClient) await client.query('ROLLBACK'); return false }
     if (deal.attributes.contact_id === input.contactId) {
       if (!await updateEntity(input.ctx.userId, input.dealId, { attributes:{} }, input.ctx, client,{fieldIntent:['contactId']})) {
-        await client.query('ROLLBACK'); return false
+        if (!transactionClient) await client.query('ROLLBACK'); return false
       }
     }
-    await client.query('COMMIT')
+    if (!transactionClient) await client.query('COMMIT')
     return true
-  } catch (error) { await client.query('ROLLBACK').catch(() => {}); throw error }
-  finally { client.release() }
+  } catch (error) { if (!transactionClient) await client.query('ROLLBACK').catch(() => {}); throw error }
+  finally { if (!transactionClient) client.release() }
 }
 
 export type CrmActivity = {

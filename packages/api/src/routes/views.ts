@@ -1,4 +1,5 @@
 import { crmAmountSchema } from '@use-brian/core'
+import { applicationJsonSchema } from '@use-brian/shared'
 /**
  * Q5 Views routes — saved-views CRUD + per-entity primitive read routes
  * + ad-hoc payload rendering + direct-write endpoints used by board-drop
@@ -2298,7 +2299,8 @@ export function viewsRoutes(opts: ViewsRouteOptions): Router {
   // PATCH /contacts/:id — name/email/phone/companyId/tags.
   const contactPatchSchema = z
     .object({
-      name: z.string().min(1).max(512).optional(),
+      customFields: z.record(applicationJsonSchema).optional(),
+      name: z.string().trim().min(1).max(256).optional(),
       email: z.string().nullable().optional(),
       phone: z.string().nullable().optional(),
       companyId: z.string().uuid().nullable().optional(),
@@ -2335,7 +2337,8 @@ export function viewsRoutes(opts: ViewsRouteOptions): Router {
   // PATCH /companies/:id — name/domain/tags.
   const companyPatchSchema = z
     .object({
-      name: z.string().min(1).max(512).optional(),
+      customFields: z.record(applicationJsonSchema).optional(),
+      name: z.string().trim().min(1).max(256).optional(),
       domain: z.string().nullable().optional(),
       tags: z.array(z.string().min(1)).optional(),
     })
@@ -2371,6 +2374,7 @@ export function viewsRoutes(opts: ViewsRouteOptions): Router {
   // appear in one patch, `updateDeal` lands first, then `setDealStage`.
   const dealPatchSchema = z
     .object({
+      customFields: z.record(applicationJsonSchema).optional(),
       stage: z.enum(DEAL_STAGES).optional(),
       contactId: z.string().uuid().nullable().optional(),
       companyId: z.string().uuid().nullable().optional(),
@@ -2393,6 +2397,7 @@ export function viewsRoutes(opts: ViewsRouteOptions): Router {
 
     const id = req.params.id
     const dealUpdate: Parameters<CrmStore['updateDeal']>[2] = {}
+    if (parsed.data.customFields !== undefined) dealUpdate.customFields = parsed.data.customFields
     if (parsed.data.contactId !== undefined) dealUpdate.contactId = parsed.data.contactId
     if (parsed.data.companyId !== undefined) dealUpdate.companyId = parsed.data.companyId
     if (parsed.data.amount !== undefined) dealUpdate.amount = parsed.data.amount
@@ -2516,8 +2521,9 @@ export function viewsRoutes(opts: ViewsRouteOptions): Router {
   })
 
   const contactCreateSchema = workspaceScopedBody.extend({
-    name: z.string().min(1).max(512).optional(),
-  })
+    customFields: z.record(applicationJsonSchema).optional(),
+    name: z.string().trim().min(1).max(256).optional(),
+  }).strict()
   router.post('/contacts', async (req, res) => {
     const ctx = await requireWorkspace(req, res)
     if (!ctx) return
@@ -2528,6 +2534,7 @@ export function viewsRoutes(opts: ViewsRouteOptions): Router {
     const created = await opts.crmStore.createContact({
       userId: ctx.userId,
       workspaceId: ctx.workspaceId,
+      ...(parsed.data.customFields !== undefined ? { customFields: parsed.data.customFields } : {}),
       name: parsed.data.name ?? DEFAULT_CONTACT_NAME,
     })
     res.status(201).json({
@@ -2542,8 +2549,9 @@ export function viewsRoutes(opts: ViewsRouteOptions): Router {
   })
 
   const companyCreateSchema = workspaceScopedBody.extend({
-    name: z.string().min(1).max(512).optional(),
-  })
+    customFields: z.record(applicationJsonSchema).optional(),
+    name: z.string().trim().min(1).max(256).optional(),
+  }).strict()
   router.post('/companies', async (req, res) => {
     const ctx = await requireWorkspace(req, res)
     if (!ctx) return
@@ -2554,6 +2562,7 @@ export function viewsRoutes(opts: ViewsRouteOptions): Router {
     const created = await opts.crmStore.createCompany({
       userId: ctx.userId,
       workspaceId: ctx.workspaceId,
+      ...(parsed.data.customFields !== undefined ? { customFields: parsed.data.customFields } : {}),
       name: parsed.data.name ?? DEFAULT_COMPANY_NAME,
     })
     res.status(201).json({
@@ -2566,8 +2575,9 @@ export function viewsRoutes(opts: ViewsRouteOptions): Router {
   })
 
   const dealCreateSchema = workspaceScopedBody.extend({
+    customFields: z.record(applicationJsonSchema).optional(),
     stage: z.enum(DEAL_STAGES).optional(),
-  })
+  }).strict()
   router.post('/deals', async (req, res) => {
     const ctx = await requireWorkspace(req, res)
     if (!ctx) return
@@ -2578,6 +2588,7 @@ export function viewsRoutes(opts: ViewsRouteOptions): Router {
     const created = await opts.crmStore.createDeal({
       userId: ctx.userId,
       workspaceId: ctx.workspaceId,
+      ...(parsed.data.customFields !== undefined ? { customFields: parsed.data.customFields } : {}),
       stage: (parsed.data.stage as DealStage | undefined) ?? 'lead',
     })
     res.status(201).json({

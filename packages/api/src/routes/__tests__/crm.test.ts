@@ -15,6 +15,7 @@ vi.mock('../../db/workspace-viewpoint.js', () => ({
   resolveWorkspaceViewpoint: vi.fn(),
 }))
 vi.mock('../../db/crm.js', () => ({
+  runCrmWriteTransaction: vi.fn(async (_userId, write) => write({ client: { query: vi.fn() }, afterCommit: (effect: () => void) => effect() })),
   createCompany: vi.fn(),
   createContact: vi.fn(),
   createDeal: vi.fn(),
@@ -294,8 +295,8 @@ describe('[COMP:api/crm-r2-route] CRM R2 route authority', () => {
           stages: [{ id: 'stage-lead', pipelineId: 'pipeline-default', name: 'Lead', legacyKey: 'lead', category: 'open', position: 0, probability: 10, requiredFields: [] }],
         },
         {
-          id: 'pipeline-renewals', name: 'Renewals', isDefault: false, position: 1,
-          stages: [{ id: 'stage-review', pipelineId: 'pipeline-renewals', name: 'Review', legacyKey: null, category: 'open', position: 0, probability: 65, requiredFields: [] }],
+          id: 'cccccccc-cccc-4ccc-8ccc-cccccccccccc', name: 'Renewals', isDefault: false, position: 1,
+          stages: [{ id: 'bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb', pipelineId: 'cccccccc-cccc-4ccc-8ccc-cccccccccccc', name: 'Review', legacyKey: null, category: 'open', position: 0, probability: 65, requiredFields: [] }],
         },
       ],
     } as never)
@@ -307,7 +308,7 @@ describe('[COMP:api/crm-r2-route] CRM R2 route authority', () => {
 
     const response = await request(makeApp())
       .post(`/api/crm/${WS}/records`)
-      .send({ kind: 'deal', name: 'Annual renewal', pipelineStageId: 'stage-review', currencyCode: 'eur' })
+      .send({ kind: 'deal', name: 'Annual renewal', pipelineStageId: 'bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb', currencyCode: 'eur' })
 
     expect(response.status).toBe(201)
     expect(updateEntity).toHaveBeenCalledWith(
@@ -315,17 +316,19 @@ describe('[COMP:api/crm-r2-route] CRM R2 route authority', () => {
       'deal-1',
       expect.objectContaining({
         attributes: expect.objectContaining({
-          pipeline_id: 'pipeline-renewals',
-          pipeline_stage_id: 'stage-review',
+          pipeline_id: 'cccccccc-cccc-4ccc-8ccc-cccccccccccc',
+          pipeline_stage_id: 'bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb',
           currency_code: 'EUR',
         }),
       }),
       CTX,
+      expect.objectContaining({ query: expect.any(Function) }),
+      { fieldIntent: ['name', 'pipelineId', 'pipelineStageId', 'currencyCode'] },
     )
     expect(appendCrmActivity).toHaveBeenCalledWith(expect.objectContaining({
       entityId: 'deal-1',
       activityType: 'field_change',
-    }))
+    }), expect.objectContaining({ query: expect.any(Function) }))
     expect(validateCrmCustomFieldValues).toHaveBeenCalledWith({
       ctx: CTX,
       entityKind: 'deal',
@@ -517,6 +520,7 @@ describe('[COMP:api/crm-record-http] canonical CRM record HTTP boundary', () => 
     vi.mocked(getCrmR2Record)
       .mockResolvedValueOnce(beforeContact)
       .mockResolvedValueOnce(afterContact)
+      .mockResolvedValueOnce(afterContact)
     vi.mocked(updateContact).mockResolvedValue({ id: 'contact-1' } as never)
     vi.mocked(getEntityById).mockResolvedValue({
       id: 'contact-1', kind: 'person', attributes: afterContact.attributes,
@@ -534,12 +538,15 @@ describe('[COMP:api/crm-record-http] canonical CRM record HTTP boundary', () => 
       { email: 'new@example.test' },
       undefined,
       CTX,
+      expect.objectContaining({ query: expect.any(Function) }),
+      undefined,
+      expect.any(Function),
     )
     expect(appendCrmActivity).toHaveBeenCalledTimes(1)
     expect(appendCrmActivity).toHaveBeenCalledWith(expect.objectContaining({
       entityId: 'contact-1',
       metadata: { field: 'email', before: 'old@example.test', after: 'new@example.test' },
-    }))
+    }), expect.objectContaining({ query: expect.any(Function) }))
   })
 
   it('clears a deal primary contact through the atomic participant boundary', async () => {
@@ -556,6 +563,7 @@ describe('[COMP:api/crm-record-http] canonical CRM record HTTP boundary', () => 
     vi.mocked(getCrmR2Record)
       .mockResolvedValueOnce(beforeDeal)
       .mockResolvedValueOnce(afterDeal)
+      .mockResolvedValueOnce(afterDeal)
     vi.mocked(setCrmDealPrimaryContact).mockResolvedValue(true)
     vi.mocked(updateDeal).mockResolvedValue({ id: 'deal-1' } as never)
     vi.mocked(getEntityById).mockResolvedValue({
@@ -569,13 +577,14 @@ describe('[COMP:api/crm-record-http] canonical CRM record HTTP boundary', () => 
     expect(response.status).toBe(200)
     expect(setCrmDealPrimaryContact).toHaveBeenCalledWith({
       ctx: CTX, dealId: 'deal-1', contactId: null,
-    })
+    }, expect.objectContaining({ query: expect.any(Function) }))
     expect(updateDeal).toHaveBeenCalledWith(
       CTX.userId, 'deal-1', { contactId: null }, undefined, CTX,
+      expect.objectContaining({ query: expect.any(Function) }), undefined, { afterCommit: expect.any(Function) },
     )
     expect(appendCrmActivity).toHaveBeenCalledWith(expect.objectContaining({
       metadata: { field: 'contactId', before: 'contact-1', after: null },
-    }))
+    }), expect.objectContaining({ query: expect.any(Function) }))
   })
 
   it.each(['add','remove'] as const)('returns an actionable content-free scope refusal for participant %s',async operation=>{

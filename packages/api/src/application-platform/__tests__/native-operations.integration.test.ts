@@ -1,5 +1,10 @@
 /** Native canonical transaction composition, not a substitute CRM/task store. */
 import { randomUUID } from 'node:crypto'
+import express from 'express'
+import request from 'supertest'
+import { viewsRoutes, type ViewsRouteOptions } from '../../routes/views.js'
+import { crmRoutes } from '../../routes/crm.js'
+import { createWorkspaceStore } from '../../db/workspace-store.js'
 import { afterAll, beforeAll, describe, expect, it } from 'vitest'
 import { z } from 'zod'
 import type { PoolClient } from 'pg'
@@ -356,6 +361,122 @@ describe('[COMP:api/application-records] canonical native operation composition'
     const before=(await owner.query('SELECT attributes,scope_version::text AS version FROM entities WHERE id=$1',[value.id])).rows[0]
     expect(await updateEntity(readerId,value.id,{attributes:{stage:'lead',amount:9007199254740992}},{...access,userId:readerId})).toBeNull()
     expect((await owner.query('SELECT attributes,scope_version::text AS version FROM entities WHERE id=$1',[value.id])).rows[0]).toEqual(before)
+  })
+  function crmHttp() {
+    const app=express();app.use(express.json());app.use((req,_res,next)=>{(req as typeof req & {userId:string}).userId=userId;next()})
+    app.use('/api/crm',crmRoutes({workspaceStore:createWorkspaceStore()}));return app
+  }
+  it('Q04/Q05 rolls back a real CRM HTTP create when a later owner field is invalid',async () => {
+    const name=`Fictional atomic HTTP create ${randomUUID()}`
+    const count=(await owner.query('SELECT count(*)::int AS count FROM entities WHERE workspace_id=$1',[workspaceId])).rows[0].count
+    const response=await request(crmHttp()).post(`/api/crm/${workspaceId}/records`).send({kind:'deal',name,ownerId:'invalid-identifier',amount:'12.25'})
+    expect(response.status).toBe(400)
+    expect((await owner.query('SELECT id FROM entities WHERE workspace_id=$1 AND display_name=$2',[workspaceId,name])).rows).toEqual([])
+    expect((await owner.query('SELECT count(*)::int AS count FROM entities WHERE workspace_id=$1',[workspaceId])).rows[0].count).toBe(count)
+  })
+  it('Q04/Q05 rolls back an earlier typed amount patch when a later CRM HTTP currency field refuses',async () => {
+    const deal=await createDeal(userId,{workspaceId,access,amount:'12.25'})
+    const before=(await owner.query('SELECT attributes,scope_version::text AS version FROM entities WHERE id=$1',[deal.id])).rows[0]
+    const response=await request(crmHttp()).patch(`/api/crm/${workspaceId}/records/${deal.id}`).send({amount:'23.75',currencyCode:'$$$'})
+    expect(response.status).toBe(400)
+    expect((await owner.query('SELECT attributes,scope_version::text AS version FROM entities WHERE id=$1',[deal.id])).rows[0]).toEqual(before)
+  })
+  it('Q04/Q05 rolls back a real CRM HTTP creation when its activity insert fails',async () => {
+    const name=`Fictional atomic HTTP activity ${randomUUID()}`
+    await owner.query(`CREATE FUNCTION native_operation_http_activity_fixture() RETURNS trigger LANGUAGE plpgsql AS $$ BEGIN
+      IF NEW.workspace_id='${workspaceId}'::uuid THEN RAISE EXCEPTION 'Fictional activity storage refusal';END IF;RETURN NEW;END $$;
+      CREATE TRIGGER native_operation_http_activity_fixture BEFORE INSERT ON crm_activities FOR EACH ROW EXECUTE FUNCTION native_operation_http_activity_fixture()`)
+    try {
+      const response=await request(crmHttp()).post(`/api/crm/${workspaceId}/records`).send({kind:'company',name})
+      expect(response.status).toBe(400)
+      expect((await owner.query('SELECT id FROM entities WHERE workspace_id=$1 AND display_name=$2',[workspaceId,name])).rows).toEqual([])
+      expect((await owner.query('SELECT id FROM crm_activities WHERE workspace_id=$1 AND summary=$2',[workspaceId,'CRM record created'])).rows).toEqual([])
+    } finally {await owner.query('DROP TRIGGER native_operation_http_activity_fixture ON crm_activities;DROP FUNCTION native_operation_http_activity_fixture()')}
+  })
+  it.each(['archive','custom','pipeline'] as const)('Q04/Q05 rolls back the actual CRM %s route and its source version when activity storage fails',async operation => {
+    const field=operation==='custom'?await createCrmFieldDefinition({userId,workspaceId,entityKind:'company',fieldKey:'http_rollback_custom',label:'Fictional HTTP rollback custom',fieldType:'text'}):null
+    const value=operation==='pipeline'?await createDeal(userId,{workspaceId,access,amount:'12.25'}):await createCompany(userId,{workspaceId,name:`Fictional secondary HTTP ${randomUUID()}`,access,mergeByName:false,
+      ...(operation==='custom'?{customFields:{http_rollback_custom:'before'}}:{})})
+    const config=operation==='pipeline'?await getCrmConfig(userId,workspaceId):null
+    const before=(await owner.query('SELECT attributes,scope_version::text AS version FROM entities WHERE id=$1',[value.id])).rows[0]
+    await owner.query(`CREATE FUNCTION native_operation_http_activity_fixture() RETURNS trigger LANGUAGE plpgsql AS $$ BEGIN
+      IF NEW.workspace_id='${workspaceId}'::uuid THEN RAISE EXCEPTION 'Fictional activity storage refusal';END IF;RETURN NEW;END $$;
+      CREATE TRIGGER native_operation_http_activity_fixture BEFORE INSERT ON crm_activities FOR EACH ROW EXECUTE FUNCTION native_operation_http_activity_fixture()`)
+    try {
+      const app=request(crmHttp()),base=`/api/crm/${workspaceId}/records/${value.id}`
+      const response=operation==='archive'?await app.post(`${base}/archive`).send({}):operation==='custom'?await app.patch(`${base}/custom-fields`).send({values:{http_rollback_custom:'after'}})
+        :await app.patch(`${base}/pipeline-stage`).send({stageId:config!.pipelines[0].stages.find(stage=>stage.legacyKey==='won')!.id})
+      expect(response.status).toBeGreaterThanOrEqual(400)
+      expect((await owner.query('SELECT attributes,scope_version::text AS version FROM entities WHERE id=$1',[value.id])).rows[0]).toEqual(before)
+      expect((await owner.query('SELECT id FROM crm_activities WHERE entity_id=$1',[value.id])).rows).toEqual([])
+    } finally {
+      await owner.query('DROP TRIGGER native_operation_http_activity_fixture ON crm_activities;DROP FUNCTION native_operation_http_activity_fixture()')
+      if(field) await owner.query('DELETE FROM crm_field_definitions WHERE id=$1',[field.id])
+    }
+  })
+  it.each(['unknown','invalid-type','overlong'] as const)('Q04 refuses an original CRM HTTP creation frame: %s',async invalid => {
+    const body=invalid==='unknown'?{unexpected_key:true}:invalid==='invalid-type'?{domain:{secret:'unaccepted'}}:{name:'x'.repeat(257)}
+    const count=(await owner.query('SELECT count(*)::int AS count FROM entities WHERE workspace_id=$1',[workspaceId])).rows[0].count
+    const response=await request(crmHttp()).post(`/api/crm/${workspaceId}/records`).send({kind:'company',name:'Fictional original frame',...body})
+    expect(response.status).toBe(400)
+    expect((await owner.query('SELECT count(*)::int AS count FROM entities WHERE workspace_id=$1',[workspaceId])).rows[0].count).toBe(count)
+  })
+  it('Q04 preserves every admitted CRM HTTP tag and refuses an overlong patch without truncation',async () => {
+    const tags=Array.from({length:64},(_,index)=>`fictional-tag-${index}`)
+    const created=await request(crmHttp()).post(`/api/crm/${workspaceId}/records`).send({kind:'company',name:`Fictional full tags ${randomUUID()}`,tags})
+    expect(created.status).toBe(201)
+    expect((await owner.query("SELECT attributes->'tags' AS tags FROM entities WHERE id=$1",[created.body.id])).rows[0].tags).toEqual(tags)
+    const before=(await owner.query('SELECT attributes,scope_version::text AS version FROM entities WHERE id=$1',[created.body.id])).rows[0]
+    const patched=await request(crmHttp()).patch(`/api/crm/${workspaceId}/records/${created.body.id}`).send({domain:'x'.repeat(321)})
+    expect(patched.status).toBe(400)
+    expect((await owner.query('SELECT attributes,scope_version::text AS version FROM entities WHERE id=$1',[created.body.id])).rows[0]).toEqual(before)
+  })
+  it('Q04 rolls back every real CRM mapped-row batch member when a later original frame refuses',async () => {
+    const count=(await owner.query('SELECT count(*)::int AS count FROM entities WHERE workspace_id=$1',[workspaceId])).rows[0].count
+    const response=await request(crmHttp()).post(`/api/crm/${workspaceId}/import`).send({records:[{kind:'company',name:`Fictional first batch ${randomUUID()}`},{kind:'company',name:'Fictional refused batch',unknown_field:true}]})
+    expect(response.status).toBe(400);expect(response.body.created).toBe(0)
+    expect((await owner.query('SELECT count(*)::int AS count FROM entities WHERE workspace_id=$1',[workspaceId])).rows[0].count).toBe(count)
+  })
+  it('Q04/Q05 commits a real CRM mapped-row batch once with only committed record IDs',async () => {
+    const names=[`Fictional first committed batch ${randomUUID()}`,`Fictional second committed batch ${randomUUID()}`]
+    const response=await request(crmHttp()).post(`/api/crm/${workspaceId}/import`).send({records:names.map(name=>({kind:'company',name}))})
+    expect(response.status).toBe(207);expect(response.body).toMatchObject({created:2,failed:0})
+    const rows=(await owner.query('SELECT id FROM entities WHERE workspace_id=$1 AND display_name=ANY($2::text[]) ORDER BY id',[workspaceId,names])).rows
+    expect(rows).toHaveLength(2);expect(response.body.results.map((row:{id:string})=>row.id).sort()).toEqual(rows.map(row=>row.id))
+  })
+  it('Q04/Q05 commits a real CRM HTTP combined custom patch on the existing company ID and one revision',async () => {
+    const value=await createCompany(userId,{workspaceId,name:`Fictional HTTP combined ${randomUUID()}`,access,mergeByName:false})
+    const definition=await createCrmFieldDefinition({userId,workspaceId,entityKind:'company',fieldKey:'http_required',label:'Fictional HTTP requirement',fieldType:'text',isRequired:true})
+    try {
+      const version=(await owner.query('SELECT scope_version::text AS version FROM entities WHERE id=$1',[value.id])).rows[0].version
+      const response=await request(crmHttp()).patch(`/api/crm/${workspaceId}/records/${value.id}`).send({domain:'http.example',customFields:{http_required:'accepted'}})
+      expect(response.status).toBe(200)
+      expect((await owner.query("SELECT id,attributes->>'domain' AS domain,attributes->'custom_fields' AS custom,scope_version::text AS version FROM entities WHERE id=$1",[value.id])).rows[0])
+        .toEqual({id:value.id,domain:'http.example',custom:{http_required:'accepted'},version:String(BigInt(version)+1n)})
+    } finally {await owner.query('DELETE FROM crm_field_definitions WHERE id=$1',[definition!.id])}
+  })
+  it('Q05 synchronizes the real CRM HTTP primary participant with one canonical deal edit',async () => {
+    const first=await createContact(userId,{workspaceId,name:'Fictional first HTTP participant',access}),second=await createContact(userId,{workspaceId,name:'Fictional second HTTP participant',access})
+    const deal=await createDeal(userId,{workspaceId,contactId:first.id,access})
+    const version=(await owner.query('SELECT scope_version::text AS version FROM entities WHERE id=$1',[deal.id])).rows[0].version
+    const response=await request(crmHttp()).patch(`/api/crm/${workspaceId}/records/${deal.id}`).send({contactId:second.id})
+    expect(response.status).toBe(200)
+    expect((await owner.query("SELECT id,attributes->>'contact_id' AS contact,scope_version::text AS version FROM entities WHERE id=$1",[deal.id])).rows[0])
+      .toEqual({id:deal.id,contact:second.id,version:String(BigInt(version)+1n)})
+    expect((await owner.query('SELECT contact_id AS contact FROM crm_deal_contacts WHERE deal_id=$1 AND is_primary',[deal.id])).rows).toEqual([{contact:second.id}])
+  })
+  it.each(['company','person','deal'] as const)('Q04 sends actual legacy view %s initial custom values to the canonical writer',async kind => {
+    const definition=await createCrmFieldDefinition({userId,workspaceId,entityKind:kind,fieldKey:'view_required',label:'Fictional view requirement',fieldType:'text',isRequired:true})
+    try {
+      const app=express();app.use(express.json());app.use((req,_res,next)=>{(req as typeof req & {userId:string}).userId=userId;next()})
+      app.use('/api',viewsRoutes({workspaceStore:createWorkspaceStore(),crmStore:createDbCrmStore(),savedViewStore:{},taskStore:{},workflowRunStore:{},workspaceDirectory:{},softDeleteStore:{}} as ViewsRouteOptions))
+      const route=kind==='company'?'companies':kind==='person'?'contacts':'deals'
+      const body={workspaceId,...(kind==='deal'?{}:{name:`Fictional required view ${randomUUID()}`}),customFields:{view_required:'accepted'}}
+      const response=await request(app).post(`/api/${route}`).send(body)
+      expect(response.status).toBe(201)
+      expect((await owner.query("SELECT attributes->'custom_fields' AS custom,scope_version::text AS version FROM entities WHERE id=$1",[response.body.id])).rows[0]).toEqual({custom:{view_required:'accepted'},version:'1'})
+      expect((await request(app).post(`/api/${route}`).send({...body,unknown_original_key:true})).status).toBe(400)
+    } finally {await owner.query('DELETE FROM crm_field_definitions WHERE id=$1',[definition!.id])}
   })
   it.each(['company','person','deal'] as const)
   ('Q04/Q05 creates canonical %s required custom values in the initial row',async kind => {

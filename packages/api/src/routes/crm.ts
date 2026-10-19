@@ -11,9 +11,11 @@
  */
 
 import { Router } from 'express'
+import type { CrmWriteTransaction } from '../db/crm.js'
 import { resolveCrmDestination, previewCrmDestination } from '../crm-operations/creation-destination.js'
 import type { Request, Response } from 'express'
 import { z } from 'zod'
+import { applicationJsonSchema } from '@use-brian/shared'
 import type {
   AccessContext,
   CrmEmailDraftStore,
@@ -25,6 +27,7 @@ import { crmAmountSchema, EntityMergeError, UndoMergeError, mergeEntities, undoM
 import type { WorkspaceStore } from '../db/workspace-store.js'
 import { resolveWorkspaceViewpoint } from '../db/workspace-viewpoint.js'
 import {
+  runCrmWriteTransaction,
   createCompany,
   createContact,
   createDeal,
@@ -212,7 +215,8 @@ function patchText(
   if (typeof body[key] !== 'string') throw new Error(`${key} must be text or null`)
   const value = body[key].trim()
   if (!value) return null
-  return value.slice(0, max)
+  if (value.length > max) throw new Error(`${key} exceeds its maximum length`)
+  return value
 }
 
 function patchTags(body: Record<string, unknown>): string[] | undefined {
@@ -220,7 +224,7 @@ function patchTags(body: Record<string, unknown>): string[] | undefined {
   if (!Array.isArray(body.tags) || body.tags.some((tag) => typeof tag !== 'string')) {
     throw new Error('tags must be an array of text values')
   }
-  return stringArray(body.tags, 20)
+  return z.array(z.string().max(100)).max(64).parse(body.tags)
 }
 
 function patchDate(body: Record<string, unknown>, key: string): Date | null | undefined {
@@ -323,7 +327,18 @@ export function crmRoutes({
   async function createRecord(
     ctx: AccessContext,
     body: Record<string, unknown>,
+    transaction?: CrmWriteTransaction,
   ): Promise<{ id: string; kind: CrmEntityKind }> {
+    if (!transaction) return runCrmWriteTransaction(ctx.userId, tx => createRecord(ctx, body, tx))
+    const common = z.object({ kind: z.enum(['person','contact','company','deal']), name: z.string().trim().min(1).max(256),
+      ownerId: z.string().uuid().nullable().optional(), destination: z.unknown().optional(),
+      customFields: z.record(applicationJsonSchema).optional() })
+    const shape = body?.kind === 'company' ? common.extend({ domain: z.string().max(320).nullable().optional(), tags: z.array(z.string().max(100)).max(64).optional() })
+      : body?.kind === 'person' || body?.kind === 'contact' ? common.extend({ email: z.string().max(320).nullable().optional(),phone: z.string().max(100).nullable().optional(),
+        companyId: z.string().uuid().nullable().optional(),tags: z.array(z.string().max(100)).max(64).optional() })
+      : common.extend({ contactId: z.string().uuid().nullable().optional(),companyId: z.string().uuid().nullable().optional(),amount: crmAmountSchema.nullable().optional(),
+        closeDate: z.string().max(10).nullable().optional(),pipelineStageId: z.string().uuid().optional(),currencyCode: z.string().regex(/^[a-z]{3}$/i).optional(),source: z.string().max(100).nullable().optional() })
+    shape.strict().parse(body)
     const destination = await resolveCrmDestination(ctx.userId, ctx.workspaceId, body.destination)
     const rawKind = body.kind
     const kind: CrmEntityKind | null = rawKind === 'contact'
@@ -354,9 +369,9 @@ export function crmRoutes({
         email: nullableText(body.email, 320),
         phone: nullableText(body.phone, 100),
         companyId: nullableText(body.companyId, 100),
-        tags: stringArray(body.tags, 20),
+        tags: body.tags as string[] | undefined,
         access: ctx,
-      }, entityLinks)
+      }, entityLinks, transaction)
       id = record.id
     } else if (kind === 'company') {
       const record = await createCompany(ctx.userId, {
@@ -365,9 +380,9 @@ export function crmRoutes({
         ...destination,
         name,
         domain: nullableText(body.domain, 320),
-        tags: stringArray(body.tags, 20),
+        tags: body.tags as string[] | undefined,
         access: ctx,
-      })
+      }, transaction)
       id = record.id
     } else {
       const defaultPipeline = config.pipelines.find((p) => p.isDefault) ?? config.pipelines[0]
@@ -375,6 +390,7 @@ export function crmRoutes({
       const requestedPipeline = requestedStage
         ? config.pipelines.find((pipeline) => pipeline.stages.some((stage) => stage.id === requestedStage))
         : undefined
+      if (requestedStage && !requestedPipeline) throw new Error('The selected pipeline stage is unavailable')
       const selectedPipeline = requestedPipeline ?? defaultPipeline
       const stageConfig = selectedPipeline?.stages.find((s) => s.id === requestedStage)
         ?? selectedPipeline?.stages[0]
@@ -383,7 +399,7 @@ export function crmRoutes({
         : stageConfig?.category === 'won' ? 'won'
           : stageConfig?.category === 'lost' ? 'lost' : 'lead'
       const amount = body.amount == null ? body.amount : crmAmountSchema.parse(body.amount)
-      const close = nullableText(body.closeDate, 10)
+      const close = patchDate(body, 'closeDate')
       const record = await createDeal(ctx.userId, {
         workspaceId: ctx.workspaceId,
         ...(customFields?{customFields}:{}),
@@ -393,35 +409,34 @@ export function crmRoutes({
         companyId: nullableText(body.companyId, 100),
         stage: legacyStage,
         amount,
-        closeDate: close ? new Date(`${close}T00:00:00Z`) : null,
-      }, entityLinks)
+        closeDate: close ?? null,
+      }, entityLinks, transaction)
       id = record.id
-      const entity = await getEntityById(ctx, id)
+      const entity = await getEntityById(ctx, id, {}, transaction.client)
       if (entity) {
         const attributes = {
-          ...entity.attributes,
           pipeline_id: selectedPipeline?.id,
           pipeline_stage_id: stageConfig?.id,
           currency_code: (text(body.currencyCode, 3) ?? 'USD').toUpperCase(),
           ...(text(body.ownerId, 100) ? { owner_id: text(body.ownerId, 100) } : {}),
           ...(text(body.source, 100) ? { source: text(body.source, 100) } : {}),
         }
-        await updateEntity(ctx.userId, id, { displayName: name, attributes }, ctx)
+        await updateEntity(ctx.userId, id, { displayName: name, attributes }, ctx, transaction.client,
+          { fieldIntent: ['name','pipelineId','pipelineStageId','currencyCode',...(hasOwn(attributes,'owner_id') ? ['ownerId'] : []),...(hasOwn(attributes,'source') ? ['source'] : [])] })
         if (record.contactId) {
           await addCrmDealParticipant({
             ctx, dealId: id, contactId: record.contactId, isPrimary: true,
-          })
+          }, transaction.client)
         }
       }
     }
 
-    const entity = await getEntityById(ctx, id)
+    const entity = await getEntityById(ctx, id, {}, transaction.client)
     if (entity) {
       const attributes: Record<string, unknown> = {
-        ...entity.attributes,
         ...(text(body.ownerId, 100) ? { owner_id: text(body.ownerId, 100) } : {}),
       }
-      await updateEntity(ctx.userId, id, { attributes }, ctx)
+      if (kind !== 'deal' && Object.keys(attributes).length) await updateEntity(ctx.userId, id, { attributes }, ctx, transaction.client, { fieldIntent: ['ownerId'] })
     }
     await appendCrmActivity({
       access: ctx,
@@ -431,8 +446,8 @@ export function crmRoutes({
       activityType: 'field_change',
       summary: 'CRM record created',
       metadata: { action: 'create', kind },
-    })
-    void notifyBrainInboxChange(ctx.workspaceId, kind === 'person' ? 'contact' : kind, id, 'create')
+    }, transaction.client)
+    transaction.afterCommit(() => { void notifyBrainInboxChange(ctx.workspaceId, kind === 'person' ? 'contact' : kind, id, 'create') })
     return { id, kind }
   }
 
@@ -650,15 +665,15 @@ export function crmRoutes({
     const member = await memberContext(req as never, res)
     if (!member) return
     try {
-      const before = await getCrmR2Record(member.ctx, req.params.entityId)
+      const result = await runCrmWriteTransaction(member.ctx.userId, async transaction => {
+      const before = await getCrmR2Record(member.ctx, req.params.entityId, transaction.client)
       if (!before) {
-        res.status(404).json({ error: 'Record not found' })
-        return
+        return null
       }
       const body = req.body && typeof req.body === 'object' && !Array.isArray(req.body)
         ? req.body as Record<string, unknown>
         : {}
-      const common = new Set(['name', 'ownerId'])
+      const common = new Set(['name', 'ownerId', 'customFields'])
       const kindFields = before.kind === 'person'
         ? ['email', 'phone', 'companyId', 'tags']
         : before.kind === 'company'
@@ -667,13 +682,9 @@ export function crmRoutes({
       const allowed = new Set([...common, ...kindFields])
       const unknown = Object.keys(body).filter((key) => !allowed.has(key))
       if (unknown.length > 0) throw new Error(`Unsupported fields for this record: ${unknown.join(', ')}`)
-      if (Object.keys(body).length === 0) {
-        const bundle = await readRecordBundle(member.ctx, before.id)
-        if (!bundle) throw new Error('Record is no longer available')
-        res.json(bundle)
-        return
-      }
+      if (Object.keys(body).length === 0) return before.id
 
+      const customFields = hasOwn(body, 'customFields') ? z.record(applicationJsonSchema).parse(body.customFields) : undefined
       const name = patchText(body, 'name', 256)
       if (hasOwn(body, 'name') && !name) throw new Error('name cannot be empty')
       const ownerId = patchText(body, 'ownerId', 100)
@@ -684,7 +695,7 @@ export function crmRoutes({
       if (before.kind === 'person') {
         const companyId = patchText(body, 'companyId', 100)
         if (companyId) {
-          const company = await getEntityById(member.ctx, companyId)
+          const company = await getEntityById(member.ctx, companyId, {}, transaction.client)
           if (!company || company.kind !== 'company') throw new Error('companyId must reference a visible company in this workspace')
         }
         const updated = await updateContact(member.ctx.userId, before.id, {
@@ -693,36 +704,40 @@ export function crmRoutes({
           ...(hasOwn(body, 'phone') ? { phone: patchText(body, 'phone', 100) } : {}),
           ...(companyId !== undefined ? { companyId } : {}),
           ...(hasOwn(body, 'tags') ? { tags: patchTags(body) } : {}),
-        }, entityLinks, member.ctx)
+          ...(customFields !== undefined ? { customFields } : {}),
+        }, entityLinks, member.ctx, transaction.client, undefined, transaction.afterCommit)
         if (!updated) throw new Error('Record is no longer available')
       } else if (before.kind === 'company') {
         const updated = await updateCompany(member.ctx.userId, before.id, {
           ...(name !== undefined ? { name: name as string } : {}),
           ...(hasOwn(body, 'domain') ? { domain: patchText(body, 'domain', 320) } : {}),
           ...(hasOwn(body, 'tags') ? { tags: patchTags(body) } : {}),
-        }, member.ctx)
+          ...(customFields !== undefined ? { customFields } : {}),
+        }, member.ctx, transaction.client, undefined, { afterCommit: transaction.afterCommit })
         if (!updated) throw new Error('Record is no longer available')
       } else {
         const companyId = patchText(body, 'companyId', 100)
         const contactId = patchText(body, 'contactId', 100)
         if (companyId) {
-          const company = await getEntityById(member.ctx, companyId)
+          const company = await getEntityById(member.ctx, companyId, {}, transaction.client)
           if (!company || company.kind !== 'company') throw new Error('companyId must reference a visible company in this workspace')
         }
         if (contactId) {
-          const contact = await getEntityById(member.ctx, contactId)
+          const contact = await getEntityById(member.ctx, contactId, {}, transaction.client)
           if (!contact || contact.kind !== 'person') throw new Error('contactId must reference a visible contact in this workspace')
         }
         const amount = hasOwn(body, 'amount') ? body.amount === null ? null : crmAmountSchema.parse(body.amount) : undefined
         const closeDate = patchDate(body, 'closeDate')
-        const needsTypedUpdate = companyId !== undefined
-          || amount !== undefined || closeDate !== undefined
+        const needsTypedUpdate = companyId !== undefined || contactId !== undefined
+          || amount !== undefined || closeDate !== undefined || customFields !== undefined
         if (needsTypedUpdate) {
           const updated = await updateDeal(member.ctx.userId, before.id, {
             ...(companyId !== undefined ? { companyId } : {}),
+            ...(contactId !== undefined ? { contactId } : {}),
             ...(amount !== undefined ? { amount } : {}),
             ...(closeDate !== undefined ? { closeDate } : {}),
-          }, entityLinks, member.ctx)
+            ...(customFields !== undefined ? { customFields } : {}),
+          }, entityLinks, member.ctx, transaction.client, undefined, { afterCommit: transaction.afterCommit })
           if (!updated) throw new Error('Record is no longer available')
         }
         if (contactId !== undefined) {
@@ -730,18 +745,14 @@ export function crmRoutes({
             ctx: member.ctx,
             dealId: before.id,
             contactId,
-          })
+          }, transaction.client)
           if (!primaryUpdated) throw new Error('Record relationship is no longer available')
-          // The transaction above owns relational consistency. The typed
-          // helper repairs the graph projection through its existing lane.
-          const repaired = await updateDeal(member.ctx.userId, before.id, { contactId }, entityLinks, member.ctx)
-          if (!repaired) throw new Error('Record is no longer available')
         }
       }
 
-      const currentEntity = await getEntityById(member.ctx, before.id)
+      const currentEntity = await getEntityById(member.ctx, before.id, {}, transaction.client)
       if (!currentEntity) throw new Error('Record is no longer available')
-      const attributes = { ...currentEntity.attributes }
+      const attributes: Record<string, unknown> = {}
       if (ownerId !== undefined) {
         if (ownerId) attributes.owner_id = ownerId
         else delete attributes.owner_id
@@ -771,14 +782,14 @@ export function crmRoutes({
         const updated = await updateEntity(member.ctx.userId, before.id, {
           ...(before.kind === 'deal' && name !== undefined ? { displayName: name as string } : {}),
           attributes,
-        }, member.ctx)
+        }, member.ctx, transaction.client, { fieldIntent: [...(ownerId !== undefined ? ['ownerId'] : []), ...(before.kind === 'deal' ? Object.keys(body).filter(key => ['name','currencyCode','source','winLossReason'].includes(key)) : [])] })
         if (!updated) throw new Error('Record is no longer available')
       }
 
-      const bundle = await readRecordBundle(member.ctx, before.id)
-      if (!bundle) throw new Error('Record is no longer available')
+      const after = await getCrmR2Record(member.ctx, before.id, transaction.client)
+      if (!after) throw new Error('Record is no longer available')
       const beforePublic = publicRecord(before) as unknown as Record<string, unknown>
-      const afterPublic = bundle.record as unknown as Record<string, unknown>
+      const afterPublic = publicRecord(after) as unknown as Record<string, unknown>
       const changedFields = Object.keys(body).filter((field) => !sameValue(beforePublic[field], afterPublic[field]))
       for (const field of changedFields) {
         await appendCrmActivity({
@@ -789,12 +800,17 @@ export function crmRoutes({
           activityType: 'field_change',
           summary: `CRM ${field} updated`,
           metadata: { field, before: beforePublic[field] ?? null, after: afterPublic[field] ?? null },
-        })
+        }, transaction.client)
       }
       if (changedFields.length > 0) {
-        void notifyBrainInboxChange(member.ctx.workspaceId,
-          before.kind === 'person' ? 'contact' : before.kind, before.id, 'update')
+        transaction.afterCommit(() => { void notifyBrainInboxChange(member.ctx.workspaceId,
+          before.kind === 'person' ? 'contact' : before.kind, before.id, 'update') })
       }
+      return before.id
+      })
+      if (!result) { res.status(404).json({ error: 'Record not found' }); return }
+      const bundle = await readRecordBundle(member.ctx, result)
+      if (!bundle) throw new Error('Record is no longer available')
       res.json(bundle)
     } catch (err) {
       if (respondToScopeRefusal(err, res)) return
@@ -805,25 +821,22 @@ export function crmRoutes({
   router.post('/:workspaceId/import', async (req, res) => {
     const member = await memberContext(req as never, res)
     if (!member) return
-    const records = Array.isArray(req.body?.records) ? req.body.records : null
-    if (!records || records.length === 0 || records.length > 500) {
-      res.status(400).json({ error: 'records must contain between 1 and 500 mapped rows' })
-      return
+    const input = z.object({records:z.array(z.record(applicationJsonSchema)).min(1).max(100)}).strict().safeParse(req.body)
+    if (!input.success) { res.status(400).json({error:'records must contain between 1 and 100 valid mapped rows'}); return }
+    try {
+      const results = await runCrmWriteTransaction(member.ctx.userId, async transaction => {
+        const rows: Array<{row:number;id:string}> = []
+        for (let index=0;index<input.data.records.length;index++) {
+          const created=await createRecord(member.ctx,input.data.records[index],transaction)
+          rows.push({row:index+1,id:created.id})
+        }
+        return rows
+      })
+      res.status(207).json({created:results.length,failed:0,results})
+    } catch (error) {
+      if (respondToScopeRefusal(error,res)) return
+      res.status(400).json({error:error instanceof Error ? error.message : String(error),created:0})
     }
-    const results: Array<{ row: number; id?: string; error?: string }> = []
-    for (let i = 0; i < records.length; i++) {
-      try {
-        const created = await createRecord(member.ctx, records[i] as Record<string, unknown>)
-        results.push({ row: i + 1, id: created.id })
-      } catch (err) {
-        results.push({ row: i + 1, error: err instanceof Error ? err.message : String(err) })
-      }
-    }
-    res.status(207).json({
-      created: results.filter((r) => r.id).length,
-      failed: results.filter((r) => r.error).length,
-      results,
-    })
   })
 
   router.get('/:workspaceId/export', async (req, res) => {
@@ -854,70 +867,48 @@ export function crmRoutes({
       const member = await memberContext(req as never, res)
       if (!member) return
       try {
-        const updated = await setCrmArchived({
-          ctx: member.ctx,
-          entityId: req.params.entityId,
-          archived: action === 'archive',
+        const updated = await runCrmWriteTransaction(member.ctx.userId, async transaction => {
+          const value = await setCrmArchived({ctx:member.ctx,entityId:req.params.entityId,archived:action==='archive'},transaction.client)
+          if (!value) return null
+          await appendCrmActivity({access:member.ctx,userId:member.ctx.userId,workspaceId:member.ctx.workspaceId,entityId:value.id,
+            activityType:'field_change',summary:action==='archive'?'CRM record archived':'CRM record restored',
+            metadata:{field:'crm_archived_at',action}},transaction.client)
+          transaction.afterCommit(() => { void notifyBrainInboxChange(member.ctx.workspaceId,
+            value.kind==='person'?'contact':value.kind as 'company'|'deal',value.id,'update') })
+          return value.id
         })
-        if (!updated) {
-          res.status(404).json({ error: 'Record not found' })
-          return
-        }
-        await appendCrmActivity({
-          access: member.ctx,
-          userId: member.ctx.userId,
-          workspaceId: member.ctx.workspaceId,
-          entityId: updated.id,
-          activityType: 'field_change',
-          summary: action === 'archive' ? 'CRM record archived' : 'CRM record restored',
-          metadata: { field: 'crm_archived_at', action },
-        })
-        void notifyBrainInboxChange(member.ctx.workspaceId,
-          updated.kind === 'person' ? 'contact' : updated.kind as 'company' | 'deal',
-          updated.id, 'update')
-        res.json({ ok: true })
-      } catch (error) {
-        if (!respondToScopeRefusal(error, res)) throw error
+        if (!updated) {res.status(404).json({error:'Record not found'});return}
+        res.json({ok:true})
+      } catch(error) {
+        if (respondToScopeRefusal(error,res)) return
+        res.status(400).json({error:error instanceof Error?error.message:String(error)})
       }
     })
   }
 
-  router.patch('/:workspaceId/records/:entityId/custom-fields', async (req, res) => {
-    const member = await memberContext(req as never, res)
+  router.patch('/:workspaceId/records/:entityId/custom-fields', async (req,res) => {
+    const member=await memberContext(req as never,res)
     if (!member) return
-    const values = req.body?.values
-    if (!values || typeof values !== 'object' || Array.isArray(values)) {
-      res.status(400).json({ error: 'values must be an object' })
-      return
-    }
+    const parsed=z.object({values:z.record(applicationJsonSchema)}).strict().safeParse(req.body)
+    if (!parsed.success) {res.status(400).json({error:'values must be an object of declared custom values'});return}
+    const values=parsed.data.values
     try {
-      const before = await getEntityById(member.ctx, req.params.entityId)
-      const updated = await updateCrmCustomFields({
-        ctx: member.ctx,
-        entityId: req.params.entityId,
-        values: values as Record<string, unknown>,
+      const updated=await runCrmWriteTransaction(member.ctx.userId,async transaction => {
+        const before=await getEntityById(member.ctx,req.params.entityId,{},transaction.client)
+        const value=await updateCrmCustomFields({ctx:member.ctx,entityId:req.params.entityId,values},transaction.client)
+        if (!value) return null
+        const beforeValues=before?.attributes.custom_fields as Record<string,unknown>|undefined
+        const afterValues=value.attributes.custom_fields as Record<string,unknown>|undefined
+        const pick=(source:Record<string,unknown>|undefined)=>Object.fromEntries(Object.keys(values).filter(key=>source && Object.hasOwn(source,key)).map(key=>[key,source![key]]))
+        await appendCrmActivity({access:member.ctx,userId:member.ctx.userId,workspaceId:member.ctx.workspaceId,entityId:value.id,
+          activityType:'field_change',summary:'Custom fields updated',metadata:{fields:Object.keys(values),before:pick(beforeValues),after:pick(afterValues)}},transaction.client)
+        return value
       })
-      if (!updated) {
-        res.status(404).json({ error: 'Record not found' })
-        return
-      }
-      await appendCrmActivity({
-        access: member.ctx,
-        userId: member.ctx.userId,
-        workspaceId: member.ctx.workspaceId,
-        entityId: updated.id,
-        activityType: 'field_change',
-        summary: 'Custom fields updated',
-        metadata: {
-          fields: Object.keys(values),
-          before: before?.attributes.custom_fields ?? {},
-          after: updated.attributes.custom_fields ?? {},
-        },
-      })
-      res.json({ ok: true, customFields: updated.attributes.custom_fields ?? {} })
-    } catch (err) {
-      if (respondToScopeRefusal(err, res)) return
-      res.status(400).json({ error: err instanceof Error ? err.message : String(err) })
+      if (!updated) {res.status(404).json({error:'Record not found'});return}
+      res.json({ok:true,customFields:updated.attributes.custom_fields??{}})
+    } catch(error) {
+      if (respondToScopeRefusal(error,res)) return
+      res.status(400).json({error:error instanceof Error?error.message:String(error)})
     }
   })
 
@@ -957,29 +948,16 @@ export function crmRoutes({
         res.json({ ok: true, stageId, operation: output })
         return
       }
-      const changed = await setCrmDealPipelineStage({
-        ctx: member.ctx,
-        entityId: req.params.entityId,
-        stageId,
+      const changed = await runCrmWriteTransaction(member.ctx.userId,async transaction => {
+        const value=await setCrmDealPipelineStage({ctx:member.ctx,entityId:req.params.entityId,stageId},transaction.client)
+        if (!value) return null
+        await appendCrmActivity({access:member.ctx,userId:member.ctx.userId,workspaceId:member.ctx.workspaceId,entityId:value.entity.id,
+          activityType:'stage_change',summary:`Deal moved to ${value.toStage.name}`,
+          metadata:{fromStageId:value.fromStageId,toStageId:value.toStage.id,toStageName:value.toStage.name}},transaction.client)
+        return value.toStage.id
       })
-      if (!changed) {
-        res.status(404).json({ error: 'Deal or stage not found' })
-        return
-      }
-      await appendCrmActivity({
-        access: member.ctx,
-        userId: member.ctx.userId,
-        workspaceId: member.ctx.workspaceId,
-        entityId: changed.entity.id,
-        activityType: 'stage_change',
-        summary: `Deal moved to ${changed.toStage.name}`,
-        metadata: {
-          fromStageId: changed.fromStageId,
-          toStageId: changed.toStage.id,
-          toStageName: changed.toStage.name,
-        },
-      })
-      res.json({ ok: true, stageId: changed.toStage.id })
+      if (!changed) {res.status(404).json({error:'Deal or stage not found'});return}
+      res.json({ok:true,stageId:changed})
     } catch (err) {
       if (respondToScopeRefusal(err, res)) return
       res.status(409).json({ error: err instanceof Error ? err.message : String(err) })

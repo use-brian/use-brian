@@ -228,6 +228,9 @@ export async function prepareCrmParticipantMutation(
   if (!deal) return null
   const contact = await readCrmReference(ctx.userId, ctx.workspaceId, contactId, 'person', actor, client)
   const inherited = crmReferenceScope(deal, [contact])
+  if (inherited.sensitivity === deal.sensitivity
+    && inherited.compartments.every(value => deal.compartments?.includes(value))
+    && inherited.projectIds.every(value => deal.projectIds?.includes(value))) return deal
   return updateEntity(ctx.userId, dealId, {
     sensitivity: inherited.sensitivity,
     inheritCompartments: inherited.compartments,
