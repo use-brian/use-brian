@@ -15,7 +15,7 @@ import type {
   EntityUpdateFields,
   GetEntityOpts,
 } from '@use-brian/core'
-import { maxSensitivity, unionScopeRequirements } from '@use-brian/core'
+import { decodeCrmAmount, maxSensitivity, unionScopeRequirements } from '@use-brian/core'
 import type { Sensitivity } from '@use-brian/core'
 import type pg from 'pg'
 import { ApplicationPlatformError } from '@use-brian/shared'
@@ -65,6 +65,7 @@ const FULL_SELECT = `
   canonical_id AS "canonicalId",
   aliases,
   attributes,
+  attributes->>'amount' AS "nativeAmountText",
   sensitivity,
   compartments,
   project_ids AS "projectIds",
@@ -111,6 +112,7 @@ type EntityRow = {
   canonicalId: string | null
   aliases: string[] | null
   attributes: Record<string, unknown> | null
+  nativeAmountText?: string | null
   sensitivity: string
   compartments: string[]
   projectIds: string[]
@@ -143,7 +145,7 @@ function toEntity(row: EntityRow): EntityRecord {
     displayName: row.displayName,
     canonicalId: row.canonicalId,
     aliases: row.aliases ?? [],
-    attributes: row.attributes ?? {},
+    attributes: row.kind === 'deal' && row.attributes?.amount != null ? { ...row.attributes, amount: decodeCrmAmount(row.attributes.amount,row.nativeAmountText) } : row.attributes ?? {},
     sensitivity: row.sensitivity as Sensitivity,
     compartments: row.compartments ?? [],
     projectIds: row.projectIds ?? [],
@@ -1259,8 +1261,13 @@ async function updateEntityMutation(
     values.push(fields.canonicalId)
   }
   if (fields.attributes !== undefined) {
-    sets.push(`attributes = $${idx++}::jsonb`)
-    values.push(JSON.stringify(fields.attributes))
+    if (operation?.fieldIntent !== undefined) {
+      sets.push(`attributes = application_merge_native_entity_attributes(entities.attributes,$${idx++}::jsonb,$${idx++}::text[])`)
+      values.push(JSON.stringify(fields.attributes),operation.fieldIntent)
+    } else {
+      sets.push(`attributes = $${idx++}::jsonb`)
+      values.push(JSON.stringify(fields.attributes))
+    }
   }
   if (fields.sensitivity !== undefined) {
     sets.push(`sensitivity = CASE WHEN sensitivity_rank($${idx}) > sensitivity_rank(sensitivity) THEN $${idx} ELSE sensitivity END`)

@@ -10,7 +10,7 @@ import type {
   Sensitivity,
   StableExternalIdentity,
 } from '@use-brian/core'
-import { crmAmountSchema, maxSensitivity, unionScopeRequirements } from '@use-brian/core'
+import { decodeCrmAmount, crmAmountSchema, maxSensitivity, unionScopeRequirements } from '@use-brian/core'
 import type pg from 'pg'
 import { z } from 'zod'
 import { ApplicationPlatformError,applicationJsonSchema } from '@use-brian/shared'
@@ -836,7 +836,7 @@ export async function updateContact(
 // ── Deals ────────────────────────────────────────────────────────────
 
 type DealRow = Omit<DealRecord, 'amount' | 'externalRef'> & {
-  amount: string | number | null; externalRef: CrmExternalRef | null
+  amount: string | number | null; amountText?: string | null; externalRef: CrmExternalRef | null
 }
 const DEAL_SELECT = `
   e.id, e.id AS "entityId", e.workspace_id AS "workspaceId",
@@ -845,16 +845,18 @@ const DEAL_SELECT = `
   e.attributes->>'company_id' AS "companyId",
   COALESCE(e.attributes->>'stage', 'lead') AS stage,
   e.attributes->'amount' AS amount,
+  e.attributes->>'amount' AS "amountText",
   (e.attributes->>'close_date')::date AS "closeDate",
   e.attributes->'external_ref' AS "externalRef",
   e.sensitivity, e.compartments, e.project_ids AS "projectIds",
   e.created_at AS "createdAt", e.updated_at AS "updatedAt"`
 
 function toDealRow(row: DealRow): DealRecord {
+  const {amountText,...record}=row
   return {
-    ...row,
+    ...record,
     aliases: row.aliases ?? [],
-    amount: row.amount === null ? null : crmAmountSchema.parse(row.amount),
+    amount: decodeCrmAmount(row.amount,amountText),
     externalRef: row.externalRef ?? {},
   }
 }

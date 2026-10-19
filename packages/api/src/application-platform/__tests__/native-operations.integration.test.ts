@@ -213,6 +213,16 @@ describe('[COMP:api/application-records] canonical native operation composition'
     expect((await listDeals(access,{})).find(row => row.id===value.id)?.amount).toBe(amount)
     expect((await owner.query("SELECT attributes->>'amount' AS amount FROM entities WHERE id=$1",[value.id])).rows[0].amount).toBe(amount)
   })
+  it('Q04/Q05 preserves original numeric precision on native deal reads and unrelated partial edits',async () => {
+    const value=await createDeal(userId,{workspaceId,amount:12,access}),amount='9007199254740993.123456789012345678'
+    const connection=await client()
+    try {await connection.query("UPDATE entities SET attributes=jsonb_set(attributes,'{amount}',to_jsonb($2::numeric)) WHERE id=$1",[value.id,amount]);await connection.query('COMMIT')}
+    finally {await connection.query('ROLLBACK');connection.release()}
+    expect((await getDealById(access,value.id))?.amount).toBe(amount)
+    expect((await listDeals(access,{})).find(row => row.id===value.id)?.amount).toBe(amount)
+    expect(await updateDeal(userId,value.id,{externalRef:{fictional:'preserved'}},undefined,access)).toMatchObject({id:value.id,amount})
+    expect((await owner.query("SELECT attributes->>'amount' AS amount FROM entities WHERE id=$1",[value.id])).rows[0].amount).toBe(amount)
+  })
   it('Q04/Q05 preserves an exact decimal patch, source identity and version',async () => {
     const before=await createDeal(userId,{workspaceId,amount:12,access}),amount='9007199254740993.000000000000000001'
     const prior=(await owner.query('SELECT scope_version::text AS version FROM entities WHERE id=$1',[before.id])).rows[0].version
@@ -353,6 +363,14 @@ describe('[COMP:api/application-records] canonical native operation composition'
         return (await connection.query('UPDATE entities SET attributes=attributes WHERE id=$1',[value.id])).rowCount
       })).rejects.toMatchObject({code:'42501'})
       expect(await snapshot(value.id)).toEqual(before)
+    })
+    it('Q04/Q05 preserves an untouched hidden JSON numeric field exactly during an allowed native partial edit',async () => {
+      const value=await company(),cost='9007199254740993.123456789012345678'
+      await member(userId,connection => connection.query("UPDATE entities SET attributes=jsonb_set(attributes,'{custom_fields,cost}',to_jsonb($2::numeric)) WHERE id=$1",[value.id,cost]))
+      const before=(await owner.query("SELECT attributes->'custom_fields'->>'cost' AS cost,scope_version::text AS version FROM entities WHERE id=$1",[value.id])).rows[0]
+      expect(await updateCompany(readerId,value.id,{domain:'precise-partial.example'},reader)).toMatchObject({id:value.id,domain:'precise-partial.example'})
+      const after=(await owner.query("SELECT attributes->'custom_fields'->>'cost' AS cost,scope_version::text AS version FROM entities WHERE id=$1",[value.id])).rows[0]
+      expect(before.cost).toBe(cost);expect(after.cost).toBe(cost);expect(after.version).toBe(String(BigInt(before.version)+1n))
     })
     it('Q04/Q05 lets a typed allowed native domain edit preserve an unreadable custom field and source identity',async () => {
       const value=await company(),before=await snapshot(value.id)

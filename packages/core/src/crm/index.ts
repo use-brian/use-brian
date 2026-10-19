@@ -1,6 +1,7 @@
 export {
   DEAL_STAGES,
   crmAmountSchema,
+  decodeCrmAmount,
   type CrmAmount,
   type DealStage,
   type CrmExternalRef,

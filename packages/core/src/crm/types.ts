@@ -16,7 +16,7 @@
  */
 
 import { z } from 'zod'
-import { applicationDecimalSchema, applicationDecimalText } from '@use-brian/shared'
+import { applicationDecimalSchema, applicationDecimalText, applicationDecimalCompare } from '@use-brian/shared'
 import type { AccessContext } from '../security/access-context.js'
 import type { Sensitivity } from '../security/sensitivity.js'
 import type { StableExternalIdentity } from '../decision-learning/types.js'
@@ -27,6 +27,16 @@ export const crmAmountSchema = z.union([
   applicationDecimalSchema.refine(value => !value.startsWith('-') || !/[1-9]/.test(value)),
 ])
 export type CrmAmount = z.infer<typeof crmAmountSchema>
+
+/** Original SQL decimal text recovers precision before a rounded JSON number can escape. */
+export function decodeCrmAmount(value: unknown, originalText?: string | null): CrmAmount | null {
+  if (value === null || value === undefined) return null
+  if (typeof value === 'number' && originalText !== undefined && originalText !== null) {
+    if (crmAmountSchema.safeParse(value).success && applicationDecimalCompare(value,originalText) === 0) return value
+    return crmAmountSchema.parse(originalText)
+  }
+  return crmAmountSchema.parse(value)
+}
 
 export const DEAL_STAGES = ['lead', 'qualified', 'proposal', 'negotiation', 'won', 'lost'] as const
 export type DealStage = (typeof DEAL_STAGES)[number]
