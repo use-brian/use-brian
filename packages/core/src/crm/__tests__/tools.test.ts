@@ -17,7 +17,7 @@ type FakeData = {
 function makeFakeStore(): CrmStore & { data: FakeData } {
   const data: FakeData = { companies: [], contacts: [], deals: [], customFields: new Map() }
   let next = 100
-  const newId = (prefix: string) => `${prefix}-${String(next++).padStart(8, '0')}-0000-0000-0000-000000000000`.slice(0, 36)
+  const newId = (prefix: string) => `${prefix}-0000-4000-8000-${String(next++).padStart(12, '0')}`
 
   const store: CrmStore & { data: FakeData } = {
     data,
@@ -623,23 +623,21 @@ describe('[COMP:tools/crm-deals] saveDeal / getDeal / listDeals / updateDeal / a
       id: '11111111-1111-1111-1111-111111111111',
       stage: 'won',
     } as unknown)
-    // Zod with no explicit `.strict()` is non-strict by default — extra keys are stripped.
-    // The proof of "no stage" is that the executed update path does not change stage:
-    expect(parsed.success).toBe(true)
+    expect(parsed.success).toBe(false)
     // Belt-and-braces: assert the schema's known keys do NOT include stage.
     const shape = (tools.updateDeal.inputSchema as unknown as { _def: { schema: { shape: Record<string, unknown> } } })._def.schema?.shape
       ?? (tools.updateDeal.inputSchema as unknown as { shape: Record<string, unknown> }).shape
     if (shape) expect(Object.keys(shape)).not.toContain('stage')
   })
 
-  it('updateDeal stage change has no effect (stage stripped or absent)', async () => {
+  it('updateDeal refuses an unknown stage key without applying neighboring edits', async () => {
     const { tools, store, contactId } = await seed()
     await tools.saveDeal.execute({ contact_id: contactId, stage: 'lead' }, ctx)
     const id = store.data.deals[0].id
-    // Pass an extra `stage` field; Zod strips it. The deal stays in 'lead'.
-    await tools.updateDeal.execute({ id, amount: 1234, stage: 'won' } as unknown as { id: string; amount: number }, ctx)
+    const result = await tools.updateDeal.execute({ id, amount: 1234, stage: 'won' } as unknown as { id: string; amount: number }, ctx)
+    expect(result.isError).toBe(true)
     expect(store.data.deals[0].stage).toBe('lead')
-    expect(store.data.deals[0].amount).toBe(1234)
+    expect(store.data.deals[0].amount).toBe(null)
   })
 
   it('advanceDealStage updates stage and emits deal_stage_advanced', async () => {
@@ -749,7 +747,8 @@ describe('[COMP:crm/cross-entity] cross-entity filters', () => {
   it('lists the typed field vocabulary and writes only valid stable keys', async () => {
     const store = makeFakeStore()
     const tools = createCrmTools(store)
-    await tools.saveDeal.execute({ stage: 'lead' }, ctx)
+    const company = await store.createCompany({ userId: ctx.userId, workspaceId: WS_A, name: 'Fictional field fixture' })
+    await tools.saveDeal.execute({ company_id: company.id, stage: 'lead' }, ctx)
     const dealId = store.data.deals[0].id
 
     const catalog = await tools.listCrmFields.execute({ entity_kind: 'deal' }, ctx)
@@ -881,5 +880,40 @@ describe('[COMP:crm/tools] native alias guidance and readback', () => {
     expect(result.data).toContain('updates keep the same id')
     expect(result.data).not.toContain('NEW id')
     expect(result.data).not.toContain('supersedes')
+  })
+})
+
+
+describe('[COMP:crm/tools] canonical mutation input frames', () => {
+  const id = '11111111-1111-4111-8111-111111111111'
+  it.each(['saveCompany', 'saveContact', 'saveDeal', 'updateCompany', 'updateContact', 'updateDeal', 'advanceDealStage'] as const)(
+    '%s refuses unknown fields before any store mutation', async toolName => {
+      const store = makeFakeStore()
+      const spies = ['createCompany', 'createContact', 'createDeal', 'updateCompany', 'updateContact', 'updateDeal', 'setDealStage'].map(method => vi.spyOn(store, method as 'createCompany'))
+      const tools = createCrmTools(store)
+      const input = toolName === 'saveDeal' ? { company_id: id } : toolName === 'advanceDealStage' ? { id, stage: 'lead' } : toolName.startsWith('save') ? { name: 'Fictional record' } : { id, name: 'Fictional record' }
+      const result = await tools[toolName].execute({ ...input, unexpected_field: true }, ctx)
+      expect(result.isError).toBe(true)
+      for (const spy of spies) expect(spy).not.toHaveBeenCalled()
+    },
+  )
+  it.each(['Company', 'Contact', 'Deal'] as const)('passes initial %s custom values in the canonical create call', async kind => {
+    const store = makeFakeStore()
+    const method = `create${kind}` as const
+    const spy = vi.spyOn(store, method).mockResolvedValue({ id, entityId: id } as never)
+    const tools = createCrmTools(store)
+    const result = await tools[`save${kind}`].execute({ ...(kind === 'Deal' ? { company_id: id } : { name: 'Fictional record' }), custom_fields: { required_text: 'Initial value' } }, ctx)
+    expect(result.isError).toBeFalsy()
+    expect(spy).toHaveBeenCalledWith(expect.objectContaining({ customFields: { required_text: 'Initial value' } }))
+  })
+  it.each(['Company', 'Contact', 'Deal'] as const)('passes combined %s custom values in one canonical update call', async kind => {
+    const store = makeFakeStore()
+    const method = `update${kind}` as const
+    const spy = vi.spyOn(store, method).mockResolvedValue({ id, entityId: id } as never)
+    const tools = createCrmTools(store)
+    const result = await tools[`update${kind}`].execute({ id, ...(kind === 'Deal' ? { amount: '1.25' } : { name: 'Fictional record' }), custom_fields: { required_text: 'Updated value' } }, ctx)
+    expect(result.isError).toBeFalsy()
+    expect(spy).toHaveBeenCalledTimes(1)
+    expect(spy.mock.calls[0][2]).toMatchObject({ customFields: { required_text: 'Updated value' } })
   })
 })

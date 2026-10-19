@@ -109,6 +109,8 @@ export type CompanyListFilters = {
 }
 
 export type CompanyUpdateFields = {
+  /** Current declared custom keys, committed with the typed business patch. */
+  customFields?: Record<string, unknown>
   name?: string
   /** Pass `null` to clear; omit to leave unchanged. */
   domain?: string | null
@@ -151,6 +153,8 @@ export type ContactListFilters = {
 }
 
 export type ContactUpdateFields = {
+  /** Current declared custom keys, committed with the typed business patch. */
+  customFields?: Record<string, unknown>
   name?: string
   /** Pass `null` to clear; omit to leave unchanged. */
   email?: string | null
@@ -200,6 +204,8 @@ export type DealListFilters = {
 }
 
 export type DealUpdateFields = {
+  /** Current declared custom keys, committed with the typed business patch. */
+  customFields?: Record<string, unknown>
   /** Pass `null` to clear; omit to leave unchanged. */
   contactId?: string | null
   /** Pass `null` to clear; omit to leave unchanged. */
@@ -216,6 +222,8 @@ export type DealUpdateFields = {
 export type CrmStore = {
   // Companies
   createCompany(params: {
+    /** Initial current custom values; required values belong in this insert. */
+    customFields?: Record<string, unknown>
     userId: string
     workspaceId: string
     name: string
@@ -260,6 +268,8 @@ export type CrmStore = {
 
   // Contacts
   createContact(params: {
+    /** Initial current custom values; required values belong in this insert. */
+    customFields?: Record<string, unknown>
     userId: string
     workspaceId: string
     name: string
@@ -306,6 +316,8 @@ export type CrmStore = {
 
   // Deals
   createDeal(params: {
+    /** Initial current custom values; required values belong in this insert. */
+    customFields?: Record<string, unknown>
     userId: string
     workspaceId: string
     access?: AccessContext

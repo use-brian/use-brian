@@ -80,6 +80,17 @@ const row = (index: number) => [`Fixture ${index}`, `fixture${index}@example.com
 
 describe('[COMP:crm/production-import] Atomic rows and serialized chunk recovery', () => {
   afterAll(async () => { await Promise.all([pool.end(), getPool().end()]) })
+  it.each(['company','contact','deal'] as const)('Q04 imports required %s custom values before its first entity insert and replays once',async kind => {
+    const f=await fixture(),entityKind=kind==='contact'?'person':kind
+    await pool.query("INSERT INTO crm_field_definitions(workspace_id,entity_kind,field_key,label,field_type,is_required) VALUES($1,$2,'required_initial','Fictional import requirement','text',true)",[f.workspaceId,entityKind])
+    const job=await f.job(['name','custom:required_initial'],[['Fictional required import','accepted']],kind),service=importer()
+    expect(await service.resume(f.context,job.id)).toMatchObject({status:'completed',succeededRows:1,failedRows:0})
+    const rows=(await pool.query("SELECT attributes->'custom_fields' AS custom FROM entities WHERE workspace_id=$1 AND kind=$2",[f.workspaceId,entityKind])).rows
+    expect(rows).toEqual([{custom:{required_initial:'accepted'}}])
+    const before=await f.counts()
+    expect(await service.resume(f.context,job.id)).toMatchObject({status:'completed',succeededRows:1,failedRows:0})
+    expect(await f.counts()).toEqual(before)
+  })
   it('Q04 imports an exact deal amount without a floating-point intermediate or duplicate retry',async () => {
     const f=await fixture(),amount='9007199254740993.123456789012345678'
     const job=await f.job(['name','amount'],[['Fictional precise import',amount]],'deal')

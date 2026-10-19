@@ -92,12 +92,12 @@ const crmName = z.string().min(1).max(256).refine(value => value.trim().length >
 const crmTags = z.array(z.string().max(100)).max(64)
 const crmExternalRef = z.record(applicationJsonSchema)
 const crmCompanyPatch = z.object({ name: crmName.optional(),domain: z.string().max(320).nullable().optional(),
-  tags: crmTags.optional(),externalRef: crmExternalRef.optional() }).strict()
+  tags: crmTags.optional(),externalRef: crmExternalRef.optional(),customFields:z.record(applicationJsonSchema).optional() }).strict()
 const crmContactPatch = z.object({ name: crmName.optional(),email: z.string().max(320).nullable().optional(),
   phone: z.string().max(100).nullable().optional(),companyId: z.string().uuid().nullable().optional(),
-  tags: crmTags.optional(),externalRef: crmExternalRef.optional() }).strict()
+  tags: crmTags.optional(),externalRef: crmExternalRef.optional(),customFields:z.record(applicationJsonSchema).optional() }).strict()
 const crmDealPatch = z.object({ contactId: z.string().uuid().nullable().optional(),companyId: z.string().uuid().nullable().optional(),
-  amount: crmAmountSchema.nullable().optional(),closeDate: z.date().nullable().optional(),externalRef: crmExternalRef.optional() }).strict()
+  amount: crmAmountSchema.nullable().optional(),closeDate: z.date().nullable().optional(),externalRef: crmExternalRef.optional(),customFields:z.record(applicationJsonSchema).optional() }).strict()
 function validateCrmBusiness(schema: z.ZodTypeAny,raw: unknown): void {
   if (!schema.safeParse(raw).success) throw new ApplicationPlatformError('invalid_value','The canonical CRM values are invalid.')
 }
@@ -109,6 +109,20 @@ function validateCrmCreation(schema: z.AnyZodObject,raw: object,extra: readonly 
   }
   validateCrmBusiness(schema,Object.fromEntries(keys.map(key => [key,(raw as Record<string,unknown>)[key]])))
 }
+function crmMutationFieldIntent(fields:object):string[] {
+  return Object.entries(fields).flatMap(([key,value])=>value===undefined?[]:key==='customFields'
+    ?Object.keys(value as Record<string,unknown>).map(field=>`custom.${field}`):[key])
+}
+async function initialCrmCustomValues(userId:string,workspaceId:string,entityKind:'company'|'person'|'deal',values:Record<string,unknown>|undefined,
+  standardFields:readonly string[],access:AccessContext,client:pg.PoolClient) {
+  if(values===undefined) return {values:undefined,references:[] as EntityRecord[]}
+  return (await import('./crm-r2.js')).prepareCrmInitialCustomFields({ctx:access,entityKind,values,standardFields},client)
+}
+async function combinedCrmCustomValues(userId:string,id:string,values:Record<string,unknown>|undefined,access:AccessContext,client:pg.PoolClient) {
+  if(values===undefined) return undefined
+  return (await import('./crm-r2.js')).prepareCrmCustomFieldPatch({ctx:access,entityId:id,values},client)
+}
+
 type CrmMutationOptions = { expectedVersion?: string;afterCommit?: CrmWriteTransaction['afterCommit'] }
 async function typedMutationSource(userId: string,id: string,kind: string,access: AccessContext|undefined,client: pg.PoolClient) {
   if (access) return readCrmMutationSource(access,id,[kind],client)
@@ -348,11 +362,12 @@ function toCompanyRow(row: CompanyRow): CompanyRecord {
 }
 
 function companyAttributes(p: {
-  domain?: string | null; tags?: string[]; externalRef?: CrmExternalRef
+  domain?: string | null; tags?: string[]; externalRef?: CrmExternalRef; customFields?: Record<string,unknown>
 }): Record<string, unknown> {
   const a: Record<string, unknown> = { tags: p.tags ?? [] }
   if (p.domain) a.domain = p.domain
   if (p.externalRef && Object.keys(p.externalRef).length) a.external_ref = p.externalRef
+  if(p.customFields!==undefined) a.custom_fields=p.customFields
   return a
 }
 
@@ -363,7 +378,7 @@ export async function createCompany(
     name: string
     domain?: string | null
     tags?: string[]
-    externalRef?: CrmExternalRef
+    externalRef?: CrmExternalRef; customFields?: Record<string,unknown>
     sensitivity?: Sensitivity
     explicitGeneral?: boolean
     compartments?: string[]
@@ -384,6 +399,7 @@ export async function createCompany(
 ): Promise<CompanyRecord> {
   validateCrmCreation(crmCompanyPatch.required({name:true}),params,['mergeByName'])
   assertAuthorshipPresent('createCompany', userId)
+  if(params.customFields!==undefined && !transaction) return runCrmWriteTransaction(userId,tx=>createCompany(userId,params,tx))
   const access = dedupeAccessContext(userId, params.workspaceId, params.access)
   assertExecutionResourceScope({ workspaceId: params.workspaceId, userId: null, assistantId: null,
     sensitivity: params.sensitivity ?? 'internal', compartments: params.compartments ?? [], projectIds: params.projectIds ?? [] }, 'mutation', access)
@@ -408,30 +424,36 @@ export async function createCompany(
   )
   if (existing.rows[0] && params.mergeByName !== false) {
     const merged = await mergeCompanyFields(userId, existing.rows[0].id, {
-      domain: params.domain ?? null, tags: params.tags, externalRef: params.externalRef,
+      domain: params.domain ?? null, tags: params.tags, externalRef: params.externalRef,customFields:params.customFields,
     }, { compartments: params.compartments ?? [], projectIds: params.projectIds ?? [], sensitivity: params.sensitivity ?? 'internal' }, access, transaction)
     if (merged) return merged
   }
 
+  const custom=params.customFields===undefined?{values:undefined,references:[] as EntityRecord[]}:
+    await initialCrmCustomValues(userId,params.workspaceId,'company',params.customFields,['name','tags',...(params.domain?['domain']:[]),
+      ...(params.externalRef && Object.keys(params.externalRef).length?['externalRef']:[])],access,transaction!.client)
+  const destination=crmReferenceScope({userId:null,assistantId:null,sensitivity:params.sensitivity??'internal',
+    compartments:params.compartments,projectIds:params.projectIds},custom.references,undefined,true)
   const entity = await createEntity({
     kind: 'company',
     displayName: params.name,
     canonicalId: params.domain ?? null,
-    attributes: companyAttributes(params),
-    sensitivity: params.sensitivity ?? 'internal',
+    attributes: companyAttributes({...params,customFields:custom.values}),
+    sensitivity: destination.sensitivity,
     workspaceId: params.workspaceId,
     // Workspace-scoped: a company is a company-wide fact, not the property of
     // whoever happened to type it. Visibility must NOT copy authorship —
     // `createdByUserId` below carries who wrote it. See migration 423.
-    userId: null,
+    userId: destination.userId,
+    assistantId: destination.assistantId,
     createdByUserId: userId,
     createdByAssistantId: params.createdByAssistantId ?? null,
     source: params.source ?? 'user',
     sourceEpisodeId: params.sourceEpisodeId ?? null,
     sourceSessionId: params.sourceSessionId ?? null,
     explicitGeneral: params.explicitGeneral,
-    compartments: params.compartments ?? [],
-    projectIds: params.projectIds ?? [],
+    compartments: destination.compartments,
+    projectIds: destination.projectIds,
   }, transaction?.client)
   return companyFromEntity(entity)
 }
@@ -439,7 +461,7 @@ export async function createCompany(
 async function mergeCompanyFields(
   userId: string,
   id: string,
-  incoming: { domain?: string | null; tags?: string[]; externalRef?: CrmExternalRef },
+  incoming: { domain?: string | null; tags?: string[]; externalRef?: CrmExternalRef; customFields?: Record<string,unknown> },
   scope: { compartments: string[]; projectIds: string[]; sensitivity?: Sensitivity },
   access?: AccessContext,
   transaction?: CrmWriteTransaction,
@@ -458,6 +480,7 @@ async function mergeCompanyFields(
   if (incoming.externalRef && Object.keys(incoming.externalRef).length > 0) {
     fields.externalRef = { ...cur.externalRef, ...incoming.externalRef }
   }
+  if(incoming.customFields!==undefined) fields.customFields=incoming.customFields
   const scopeAdds = scope.compartments.some((value) => !cur.compartments?.includes(value))
     || scope.projectIds.some((value) => !cur.projectIds?.includes(value))
   if (Object.keys(fields).length === 0 && !scopeAdds && sensitivity === entity.sensitivity) return cur
@@ -523,24 +546,28 @@ export async function updateCompany(
 ): Promise<CompanyRecord | null> {
   validateCrmBusiness(crmCompanyPatch,fields)
   if (!transactionClient) return runCrmWriteTransaction(userId,tx => updateCompany(userId,id,fields,access,tx.client,scope,{...operation,afterCommit:tx.afterCommit}))
-  const fieldIntent = Object.keys(fields).filter(key => (fields as Record<string, unknown>)[key] !== undefined)
+  const fieldIntent = crmMutationFieldIntent(fields)
   await assertNativeEntityFieldWrites(userId,id,{},transactionClient,fieldIntent)
   const old=await typedMutationSource(userId,id,'company',access,transactionClient)
   if (!old) return null
+  const custom=await combinedCrmCustomValues(userId,id,fields.customFields,dedupeAccessContext(userId,old.workspaceId,access),transactionClient)
+  if(fields.customFields!==undefined && !custom) return null
+  const inherited=crmReferenceScope(old,custom?.references??[],scope)
   const a = { ...old.attributes }
   if (fields.domain !== undefined) {
     if (fields.domain) a.domain = fields.domain; else delete a.domain
   }
   if (fields.tags !== undefined) a.tags = fields.tags
   if (fields.externalRef !== undefined) a.external_ref = fields.externalRef
+  if(custom) a.custom_fields=custom.values
 
   const e = await updateEntity(userId, id, {
     displayName: fields.name,
     canonicalId: fields.domain !== undefined ? (fields.domain ?? null) : undefined,
     attributes: a,
-    sensitivity: scope?.sensitivity === undefined ? undefined : maxSensitivity(old.sensitivity, scope.sensitivity),
-    inheritCompartments: scope?.compartments,
-    inheritProjectIds: scope?.projectIds,
+    sensitivity: inherited.sensitivity,
+    inheritCompartments: inherited.compartments,
+    inheritProjectIds: inherited.projectIds,
   }, dedupeAccessContext(userId, old.workspaceId, access), transactionClient,{...operation,fieldIntent})
   if (!e) return null
   return companyFromEntity(e)
@@ -568,13 +595,14 @@ function toContactRow(row: ContactRow): ContactRecord {
 
 function contactAttributes(p: {
   email?: string | null; phone?: string | null; companyId?: string | null
-  tags?: string[]; externalRef?: CrmExternalRef
+  tags?: string[]; externalRef?: CrmExternalRef; customFields?: Record<string,unknown>
 }): Record<string, unknown> {
   const a: Record<string, unknown> = { tags: p.tags ?? [] }
   if (p.email) a.email = p.email
   if (p.phone) a.phone = p.phone
   if (p.companyId) a.company_id = p.companyId
   if (p.externalRef && Object.keys(p.externalRef).length) a.external_ref = p.externalRef
+  if(p.customFields!==undefined) a.custom_fields=p.customFields
   return a
 }
 
@@ -587,7 +615,7 @@ export async function createContact(
     phone?: string | null
     companyId?: string | null
     tags?: string[]
-    externalRef?: CrmExternalRef
+    externalRef?: CrmExternalRef; customFields?: Record<string,unknown>
     stableIdentity?: StableExternalIdentity
     sensitivity?: Sensitivity
     explicitGeneral?: boolean
@@ -638,7 +666,7 @@ export async function createContact(
         phone: params.phone ?? null,
         companyId: params.companyId ?? null,
         tags: params.tags,
-        externalRef: params.externalRef,
+        externalRef: params.externalRef,customFields:params.customFields,
       }, entityLinks, access, {
         compartments: params.compartments ?? [],
         projectIds: params.projectIds ?? [],
@@ -650,25 +678,30 @@ export async function createContact(
 
   }
 
+  const custom=await initialCrmCustomValues(userId,params.workspaceId,'person',params.customFields,
+    ['name','tags',...(params.email?['email']:[]),...(params.phone?['phone']:[]),...(params.companyId?['companyId']:[]),
+      ...(params.externalRef && Object.keys(params.externalRef).length?['externalRef']:[])],access,transaction.client)
+  const customDestination=crmReferenceScope(destination,custom.references,undefined,true)
+  params={...params,...customDestination}
   const entity = await createEntity({
     kind: 'person',
     displayName: params.name,
     canonicalId: params.email ?? null,
-    attributes: contactAttributes(params),
-    sensitivity: params.sensitivity ?? 'internal',
+    attributes: contactAttributes({...params,customFields:custom.values}),
+    sensitivity: customDestination.sensitivity,
     workspaceId: params.workspaceId,
     // Authorship does not determine visibility. Admitted relationship
     // sources can independently require a private destination.
-    userId: destination.userId,
-    assistantId: destination.assistantId,
+    userId: customDestination.userId,
+    assistantId: customDestination.assistantId,
     createdByUserId: userId,
     createdByAssistantId: params.createdByAssistantId ?? null,
     source: params.source ?? 'user',
     sourceEpisodeId: params.sourceEpisodeId ?? null,
     sourceSessionId: params.sourceSessionId ?? null,
     explicitGeneral: params.explicitGeneral,
-    compartments: params.compartments ?? [],
-    projectIds: params.projectIds ?? [],
+    compartments: customDestination.compartments,
+    projectIds: customDestination.projectIds,
   }, transaction?.client)
 
   if (params.companyId) {
@@ -701,7 +734,7 @@ async function mergeContactFields(
   id: string,
   incoming: {
     email?: string | null; phone?: string | null; companyId?: string | null
-    tags?: string[]; externalRef?: CrmExternalRef
+    tags?: string[]; externalRef?: CrmExternalRef; customFields?: Record<string,unknown>
   },
   entityLinks?: EntityLinksStore,
   access?: AccessContext,
@@ -724,6 +757,7 @@ async function mergeContactFields(
   if (incoming.externalRef && Object.keys(incoming.externalRef).length > 0) {
     fields.externalRef = { ...cur.externalRef, ...incoming.externalRef }
   }
+  if(incoming.customFields!==undefined) fields.customFields=incoming.customFields
   const scopeAdds = scope.compartments.some((value) => !cur.compartments?.includes(value))
     || scope.projectIds.some((value) => !cur.projectIds?.includes(value))
   if (Object.keys(fields).length === 0 && !scopeAdds && sensitivity === entity.sensitivity) return cur
@@ -799,18 +833,21 @@ export async function updateContact(
 ): Promise<ContactRecord | null> {
   validateCrmBusiness(crmContactPatch,fields)
   if (!transactionClient) return runCrmWriteTransaction(userId,tx => updateContact(userId,id,fields,entityLinks,access,tx.client,scope,tx.afterCommit,operation))
-  const fieldIntent = Object.keys(fields).filter(key => (fields as Record<string, unknown>)[key] !== undefined)
+  const fieldIntent = crmMutationFieldIntent(fields)
   await assertNativeEntityFieldWrites(userId,id,{},transactionClient,fieldIntent)
   const old=await typedMutationSource(userId,id,'person',access,transactionClient)
   if (!old) return null
+  const custom=await combinedCrmCustomValues(userId,id,fields.customFields,dedupeAccessContext(userId,old.workspaceId,access),transactionClient)
+  if(fields.customFields!==undefined && !custom) return null
   const company = await readCrmReference(userId, old.workspaceId, fields.companyId, 'company', access, transactionClient)
-  const inherited = crmReferenceScope(old, [company], scope)
+  const inherited = crmReferenceScope(old, [company,...(custom?.references??[])], scope)
   const a = { ...old.attributes }
   if (fields.email !== undefined) { if (fields.email) a.email = fields.email; else delete a.email }
   if (fields.phone !== undefined) { if (fields.phone) a.phone = fields.phone; else delete a.phone }
   if (fields.companyId !== undefined) { if (fields.companyId) a.company_id = fields.companyId; else delete a.company_id }
   if (fields.tags !== undefined) a.tags = fields.tags
   if (fields.externalRef !== undefined) a.external_ref = fields.externalRef
+  if(custom) a.custom_fields=custom.values
 
   const e = await updateEntity(userId, id, {
     displayName: fields.name,
@@ -863,7 +900,7 @@ function toDealRow(row: DealRow): DealRecord {
 
 function dealAttributes(p: {
   contactId?: string | null; companyId?: string | null
-  stage?: DealStage; amount?: CrmAmount | null; closeDate?: Date | null; externalRef?: CrmExternalRef
+  stage?: DealStage; amount?: CrmAmount | null; closeDate?: Date | null; externalRef?: CrmExternalRef; customFields?: Record<string,unknown>
 }): Record<string, unknown> {
   const a: Record<string, unknown> = { stage: p.stage ?? 'lead' }
   if (p.contactId) a.contact_id = p.contactId
@@ -871,6 +908,7 @@ function dealAttributes(p: {
   if (p.amount != null) a.amount = p.amount
   if (p.closeDate) a.close_date = p.closeDate.toISOString().slice(0, 10)
   if (p.externalRef && Object.keys(p.externalRef).length) a.external_ref = p.externalRef
+  if(p.customFields!==undefined) a.custom_fields=p.customFields
   return a
 }
 
@@ -884,7 +922,7 @@ export async function createDeal(
     stage?: DealStage
     amount?: CrmAmount | null
     closeDate?: Date | null
-    externalRef?: CrmExternalRef
+    externalRef?: CrmExternalRef; customFields?: Record<string,unknown>
     sensitivity?: Sensitivity
     explicitGeneral?: boolean
     compartments?: string[]
@@ -908,8 +946,11 @@ export async function createDeal(
   if (!transaction) return runCrmWriteTransaction(userId, tx => createDeal(userId, params, entityLinks, tx))
   const contact = await readCrmReference(userId, params.workspaceId, params.contactId, 'person', access, transaction?.client)
   const company = await readCrmReference(userId, params.workspaceId, params.companyId, 'company', access, transaction?.client)
+  const custom=await initialCrmCustomValues(userId,params.workspaceId,'deal',params.customFields,
+    ['name','stage',...(params.contactId?['contactId']:[]),...(params.companyId?['companyId']:[]),...(params.amount!=null?['amount']:[]),
+      ...(params.closeDate?['closeDate']:[]),...(params.externalRef && Object.keys(params.externalRef).length?['externalRef']:[])],access,transaction.client)
   const destination = crmReferenceScope({ userId: null, assistantId: null,
-    sensitivity: params.sensitivity ?? 'internal', compartments: params.compartments, projectIds: params.projectIds }, [contact, company], undefined, true)
+    sensitivity: params.sensitivity ?? 'internal', compartments: params.compartments, projectIds: params.projectIds }, [contact, company,...custom.references], undefined, true)
   params = { ...params, ...destination }
   assertExecutionResourceScope({ workspaceId: params.workspaceId, userId: destination.userId, assistantId: destination.assistantId,
     sensitivity: params.sensitivity!, compartments: params.compartments!, projectIds: params.projectIds! }, 'mutation', access)
@@ -918,7 +959,7 @@ export async function createDeal(
   const entity = await createEntity({
     kind: 'deal',
     displayName,
-    attributes: dealAttributes(params),
+    attributes: dealAttributes({...params,customFields:custom.values}),
     sensitivity: params.sensitivity ?? 'internal',
     workspaceId: params.workspaceId,
     // Preserve reference privacy independently of authorship.
@@ -1014,13 +1055,15 @@ export async function updateDeal(
   assertNonNegativeAmount(fields.amount)
   validateCrmBusiness(crmDealPatch,fields)
   if (!transactionClient) return runCrmWriteTransaction(userId,tx => updateDeal(userId,id,fields,entityLinks,access,tx.client,scope,{...operation,afterCommit:tx.afterCommit}))
-  const fieldIntent = Object.keys(fields).filter(key => (fields as Record<string, unknown>)[key] !== undefined)
+  const fieldIntent = crmMutationFieldIntent(fields)
   await assertNativeEntityFieldWrites(userId,id,{},transactionClient,fieldIntent)
   const old=await typedMutationSource(userId,id,'deal',access,transactionClient)
   if (!old) return null
+  const custom=await combinedCrmCustomValues(userId,id,fields.customFields,dedupeAccessContext(userId,old.workspaceId,access),transactionClient)
+  if(fields.customFields!==undefined && !custom) return null
   const company = await readCrmReference(userId, old.workspaceId, fields.companyId, 'company', access, transactionClient)
   const contact = await readCrmReference(userId, old.workspaceId, fields.contactId, 'person', access, transactionClient)
-  const inherited = crmReferenceScope(old, [company, contact], scope)
+  const inherited = crmReferenceScope(old, [company, contact,...(custom?.references??[])], scope)
 
   const a = { ...old.attributes }
   if (fields.contactId !== undefined) { if (fields.contactId) a.contact_id = fields.contactId; else delete a.contact_id }
@@ -1030,6 +1073,7 @@ export async function updateDeal(
     if (fields.closeDate) a.close_date = fields.closeDate.toISOString().slice(0, 10); else delete a.close_date
   }
   if (fields.externalRef !== undefined) a.external_ref = fields.externalRef
+  if(custom) a.custom_fields=custom.values
 
   const e = await updateEntity(
     userId,

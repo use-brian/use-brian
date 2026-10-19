@@ -331,6 +331,7 @@ export function crmRoutes({
       : CRM_KINDS.has(rawKind as CrmEntityKind) ? rawKind as CrmEntityKind : null
     const name = text(body.name, 256)
     if (!kind || !name) throw new Error('kind and name are required')
+    if(hasOwn(body,'customFields') && (!body.customFields || typeof body.customFields!=='object' || Array.isArray(body.customFields))) throw new Error('customFields must be a declared value object')
     const customFields = body.customFields && typeof body.customFields === 'object'
       && !Array.isArray(body.customFields)
       ? body.customFields as Record<string, unknown>
@@ -347,6 +348,7 @@ export function crmRoutes({
     if (kind === 'person') {
       const record = await createContact(ctx.userId, {
         workspaceId: ctx.workspaceId,
+        ...(customFields?{customFields}:{}),
         ...destination,
         name,
         email: nullableText(body.email, 320),
@@ -359,6 +361,7 @@ export function crmRoutes({
     } else if (kind === 'company') {
       const record = await createCompany(ctx.userId, {
         workspaceId: ctx.workspaceId,
+        ...(customFields?{customFields}:{}),
         ...destination,
         name,
         domain: nullableText(body.domain, 320),
@@ -383,6 +386,7 @@ export function crmRoutes({
       const close = nullableText(body.closeDate, 10)
       const record = await createDeal(ctx.userId, {
         workspaceId: ctx.workspaceId,
+        ...(customFields?{customFields}:{}),
         ...destination,
         access: ctx,
         contactId: nullableText(body.contactId, 100),
@@ -417,7 +421,6 @@ export function crmRoutes({
         ...entity.attributes,
         ...(text(body.ownerId, 100) ? { owner_id: text(body.ownerId, 100) } : {}),
       }
-      if (customFields) attributes.custom_fields = customFields
       await updateEntity(ctx.userId, id, { attributes }, ctx)
     }
     await appendCrmActivity({

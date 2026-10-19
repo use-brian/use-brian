@@ -20,6 +20,7 @@ import {
   type CrmOperationsCommandResult,
 } from '@use-brian/core'
 import type { PoolClient } from 'pg'
+import { ApplicationPlatformError } from '@use-brian/shared'
 import { buildAccessPredicate, buildCurrentMemberSourcePredicate, mutationActorAccess } from './access-predicate.js'
 import { applyRLSGucs, getAppPool, getPool, query, queryGated, queryWithRLS } from './client.js'
 import { crmReferenceScope, prepareCrmParticipantMutation, readCrmMutationSource, readCrmReference, runCrmWriteTransaction, updateDeal } from './crm.js'
@@ -1539,10 +1540,10 @@ async function validateCustomFieldWrite(input: CustomFieldWrite, transactionClie
     const definition = byKey.get(key)
     if (!definition) {
       const valid = definitions.map((field) => field.fieldKey).join(', ') || '(none configured)'
-      throw new Error(`Unknown custom field '${key}'. Valid fields: ${valid}. Call listCrmFields before retrying.`)
+      throw new ApplicationPlatformError('invalid_value',`Unknown custom field '${key}'. Valid fields: ${valid}. Call listCrmFields before retrying.`)
     }
     if (!validateCustomFieldValue(definition, value)) {
-      throw new Error(`Invalid ${definition.fieldType} value for custom field '${key}'`)
+      throw new ApplicationPlatformError('invalid_value',`Invalid ${definition.fieldType} value for custom field '${key}'`)
     }
     if (definition.fieldType === 'entity_reference' && value !== null && value !== undefined && value !== '') {
       const target = await readCrmReference(input.ctx.userId, input.ctx.workspaceId, value as string, definition.options, input.ctx, transactionClient)
@@ -1556,7 +1557,7 @@ async function validateCustomFieldWrite(input: CustomFieldWrite, transactionClie
   if (input.requireAll) {
     for (const definition of definitions.filter((field) => field.isRequired)) {
       if (!validateCustomFieldValue(definition, input.values[definition.fieldKey])) {
-        throw new Error(`Required custom field is missing: '${definition.fieldKey}'`)
+        throw new ApplicationPlatformError('invalid_value',`Required custom field is missing: '${definition.fieldKey}'`)
       }
     }
   }
@@ -1567,42 +1568,50 @@ export async function validateCrmCustomFieldValues(input: CustomFieldWrite, tran
   return (await validateCustomFieldWrite(input, transactionClient)).definitions
 }
 
+/** Canonical initial custom values; this restriction is never row-creation authority. */
+export async function prepareCrmInitialCustomFields(input:CustomFieldWrite & {standardFields:readonly string[]},client:PoolClient) {
+  mutationActorAccess(input.ctx.userId,input.ctx.workspaceId,input.ctx)
+  const fields=[...input.standardFields,...Object.keys(input.values).map(key=>`custom.${key}`)]
+  const admitted=await client.query<{allowed:boolean}>('SELECT application_native_entity_creation_fields_allowed($1,$2,$3) AS allowed',
+    [input.ctx.workspaceId,input.entityKind,fields])
+  if(admitted.rows[0]?.allowed!==true) throw new ApplicationPlatformError('access_unavailable','The current native creation fields are unavailable.')
+  const {references}=await validateCustomFieldWrite({...input,requireAll:true},client)
+  const values=Object.fromEntries(Object.entries(input.values).filter(([,value])=>value!==null && value!==undefined && value!==''))
+  return {values,references}
+}
+
+/** Re-read the actual locked source; callers cannot supply their own source snapshot. */
+export async function prepareCrmCustomFieldPatch(input:{ctx:AccessContext;entityId:string;values:Record<string,unknown>},client:PoolClient) {
+  const fieldIntent=Object.keys(input.values).map(key=>`custom.${key}`)
+  await assertNativeEntityFieldWrites(input.ctx.userId,input.entityId,{},client,fieldIntent)
+  const entity=await readCrmMutationSource(input.ctx,input.entityId,['person','company','deal'],client)
+  if(!entity) return null
+  const {definitions,references}=await validateCustomFieldWrite({ctx:input.ctx,entityKind:entity.kind as CrmEntityKind,values:input.values},client)
+  const current=entity.attributes.custom_fields
+  const values=current && typeof current==='object' && !Array.isArray(current)?{...(current as Record<string,unknown>)}:{}
+  for(const [key,value] of Object.entries(input.values)) {
+    if(value===null || value===undefined || value==='') delete values[key]
+    else values[key]=value
+  }
+  for(const definition of definitions.filter(field=>field.isRequired)) {
+    if(!validateCustomFieldValue(definition,values[definition.fieldKey])) throw new ApplicationPlatformError('invalid_value',`Required custom field is missing: '${definition.fieldKey}'`)
+  }
+  return {entity,values,references,fieldIntent}
+}
+
 export async function updateCrmCustomFields(input: {
   ctx: AccessContext
   entityId: string
   values: Record<string, unknown>
 }, transactionClient?: PoolClient): Promise<EntityRecord | null> {
-  if (!transactionClient) {
-    return runCrmWriteTransaction(input.ctx.userId, tx => updateCrmCustomFields(input, tx.client))
-  }
-  const fieldIntent = Object.keys(input.values).map(key => `custom.${key}`)
-  await assertNativeEntityFieldWrites(input.ctx.userId,input.entityId,{},transactionClient,fieldIntent)
-  const old = await readCrmMutationSource(input.ctx, input.entityId, ['person', 'company', 'deal'], transactionClient)
-  if (!old) return null
-  const { definitions, references } = await validateCustomFieldWrite({
-    ctx: input.ctx,
-    entityKind: old.kind as CrmEntityKind,
-    values: input.values,
-  }, transactionClient)
-  const current = old.attributes.custom_fields
-  const custom = current && typeof current === 'object' && !Array.isArray(current)
-    ? { ...(current as Record<string, unknown>) }
-    : {}
-  for (const [key, value] of Object.entries(input.values)) {
-    if (value === null || value === undefined || value === '') delete custom[key]
-    else custom[key] = value
-  }
-  for (const definition of definitions.filter((field) => field.isRequired)) {
-    if (!validateCustomFieldValue(definition, custom[definition.fieldKey])) {
-      throw new Error(`Required custom field is missing: '${definition.fieldKey}'`)
-    }
-  }
-  const attributes = { ...old.attributes, custom_fields: custom }
-  const inherited = crmReferenceScope(old, references)
-  return updateEntity(input.ctx.userId, input.entityId, {
-    attributes, sensitivity: inherited.sensitivity,
-    inheritCompartments: inherited.compartments, inheritProjectIds: inherited.projectIds,
-  }, input.ctx, transactionClient, {fieldIntent})
+  if(!transactionClient) return runCrmWriteTransaction(input.ctx.userId,tx=>updateCrmCustomFields(input,tx.client))
+  const prepared=await prepareCrmCustomFieldPatch(input,transactionClient)
+  if(!prepared) return null
+  const inherited=crmReferenceScope(prepared.entity,prepared.references)
+  return updateEntity(input.ctx.userId,input.entityId,{
+    attributes:{...prepared.entity.attributes,custom_fields:prepared.values},sensitivity:inherited.sensitivity,
+    inheritCompartments:inherited.compartments,inheritProjectIds:inherited.projectIds,
+  },input.ctx,transactionClient,{fieldIntent:prepared.fieldIntent})
 }
 
 export type CrmDealParticipant = {

@@ -1015,6 +1015,8 @@ export function createCrmProductionImportService(deps: {
       assistantKind: 'primary',
       clearance: 'confidential',
     }
+    const customValues = customValuesFor(values, customCatalog)
+    let customApplied=false
     const importKey = `${job.id}:${row.row}`
     let entityId = await findImportedEntity(context.workspaceId, importKey, transaction.client)
     const resultRefs: ImportResultRef[] = []
@@ -1046,12 +1048,15 @@ export function createCrmProductionImportService(deps: {
           companyId: values.companyId,
           tags: [...new Set([...currentTags, ...(tags ?? [])])],
           externalRef: { ...currentExternalRef, ...externalRef },
+          customFields:customValues,
         }, deps.entityLinks, access, transaction.client, undefined, transaction.afterCommit)
         if (!record) throw new Error('The trusted email contact is no longer available.')
         entityId = record.id
+        customApplied=true
       } else {
         const record = await createContact(attributionUserId, {
           workspaceId: context.workspaceId,
+          customFields:customValues,
           name: values.name,
           email: values.email,
           phone: values.phone,
@@ -1062,10 +1067,12 @@ export function createCrmProductionImportService(deps: {
           access,
         }, deps.entityLinks, transaction)
         entityId = record.id
+        customApplied=true
       }
     } else if (!entityId && job.entityKind === 'company') {
       const record = await createCompany(attributionUserId, {
         workspaceId: context.workspaceId,
+          customFields:customValues,
         name: values.name,
         domain: values.domain,
         tags: values.tags?.split(/[|;]/).map((tag) => tag.trim()).filter(Boolean),
@@ -1073,12 +1080,14 @@ export function createCrmProductionImportService(deps: {
         access,
       }, transaction)
       entityId = record.id
+        customApplied=true
     } else if (!entityId && job.entityKind === 'deal') {
       const legacyStage = ['lead', 'qualified', 'proposal', 'negotiation', 'won', 'lost'].includes(values.stage)
         ? values.stage as 'lead' | 'qualified' | 'proposal' | 'negotiation' | 'won' | 'lost'
         : 'lead'
       const record = await createDeal(attributionUserId, {
         workspaceId: context.workspaceId,
+          customFields:customValues,
         access,
         contactId: values.contactId,
         companyId: values.companyId,
@@ -1088,6 +1097,7 @@ export function createCrmProductionImportService(deps: {
         externalRef: { import_key: importKey, import_job_id: job.id, row_number: row.row },
       }, deps.entityLinks, transaction)
       entityId = record.id
+        customApplied=true
       const entity = await getEntityById(access, entityId, {}, transaction.client)
       if (entity) {
         await updateEntity(attributionUserId, entityId, {
@@ -1100,8 +1110,7 @@ export function createCrmProductionImportService(deps: {
       }
     }
 
-    const customValues = customValuesFor(values, customCatalog)
-    if (entityId && Object.keys(customValues).length > 0) {
+    if (entityId && !customApplied && Object.keys(customValues).length > 0) {
       await updateCrmCustomFields({ ctx: access, entityId, values: customValues }, transaction.client)
     }
 
