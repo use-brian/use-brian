@@ -124,4 +124,16 @@ describe('[COMP:shared/brian-app-sdk] independent source evidence and sidecar co
       decisions: [{ itemId: input.items[0].itemId, recipientId: input.recipients[0].recipientId, allowed: false }],
     })
   })
+  it('refuses missing reconciliation capability before any effect port is reached', async () => {
+    const fixture = sidecar('reconcile', { version: 'ub.source.v1', idempotencyKey: 'synthetic-once' }), reconcile = vi.fn()
+    await expect(handleSourceSidecar(fixture.input, { capabilities: async () => ({ ...capabilities, reconciliation: false }),
+      authorize: vi.fn(), reconcile })).rejects.toMatchObject({ code: 'source_unavailable' })
+    expect(reconcile).not.toHaveBeenCalled()
+  })
+  it('rejects an allowed decision without an explicit current receipt', async () => {
+    const input = request(), valid = response(input)
+    const decision = valid.decisions[0]
+    expect(() => parseSourceAuthorizationResponse({ ...valid, decisions: [{ itemId: decision.itemId, recipientId: decision.recipientId, allowed: true }] }, input, tenant, now)).toThrow('source_protocol_invalid')
+  })
+
 })

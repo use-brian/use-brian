@@ -59,7 +59,7 @@ assert.ok(graph.every(path=>!path.includes('/core/')&&!path.includes('/shared/')
   it('K06 validates deterministic templates and refuses traversal, symlinks, unknown profiles and overwrites',()=>{
     expect(scaffoldFiles('native')).toEqual(scaffoldFiles('native'));expect(scaffoldFiles('connector')).toEqual(scaffoldFiles('connector'))
     expect(()=>scaffoldFiles('unknown'as never)).toThrow('Unknown scaffold profile')
-    expect(()=>scaffold('native',join(temporary,'x/../escape'))).toThrow('Unsafe')
+    expect(()=>scaffold('native',`${temporary}/x/../escape`)).toThrow('Unsafe')
     const occupied=join(temporary,'occupied');mkdirSync(occupied);writeFileSync(join(occupied,'keep'),'existing')
     expect(()=>scaffold('native',occupied)).toThrow('empty');expect(readFileSync(join(occupied,'keep'),'utf8')).toBe('existing')
     const link=join(temporary,'link');symlinkSync(occupied,link);expect(()=>scaffold('connector',link)).toThrow('Unsafe')

@@ -119,4 +119,11 @@ describe('[COMP:shared/brian-app-sdk] source actor verifier', () => {
     authorize.mockResolvedValue({ allowed: true, value: { id: 'source-order', fields: ['title'] } })
     expect((await authorizeConnectorRequest({ ...base, assertion: token(claims()), authenticateTransport: async () => true })).value).toEqual({ id: 'source-order', fields: ['title'] })
   })
+  it('keeps an unavailable independent source ACL unavailable after valid actor verification', async () => {
+    const authorize = vi.fn(async () => { throw new Error('private source ACL unavailable') })
+    await expect(authorizeConnectorRequest({ assertion: token(claims()), request, verifyActor: verifier(),
+      authenticateTransport: async () => true, authorize })).rejects.toMatchObject({ code: 'assertion_unavailable' })
+    expect(authorize).toHaveBeenCalledTimes(1)
+  })
+
 })

@@ -9,6 +9,7 @@
  * Exit codes: 0 clean (advisory findings still print), 1 schema violation.
  */
 
+import { scaffold, type ScaffoldProfile } from './scaffold.js'
 import { readdirSync, readFileSync, statSync } from 'node:fs'
 import { join, relative, sep } from 'node:path'
 import {
@@ -40,7 +41,19 @@ function walk(root: string, dir = root, out: BundleFile[] = []): BundleFile[] {
 }
 
 function main(): void {
-  const root = process.argv[2] ?? process.cwd()
+  const args = process.argv.slice(2)
+  if (args[0] === 'scaffold') {
+    try {
+      if (args.length !== 4 || args[1] !== '--profile') throw new Error('Usage: brian-app scaffold --profile native|connector <directory>')
+      scaffold(args[2] as ScaffoldProfile, args[3])
+      console.log(`Created ${args[2]} scaffold`)
+    } catch (error) { console.error((error as Error).message); process.exitCode = 1 }
+    return
+  }
+  if (args.length > (args[0] === 'lint' ? 2 : 1)) {
+    console.error('Usage: brian-app [lint] <bundle-directory>'); process.exitCode = 1; return
+  }
+  const root = (args[0] === 'lint' ? args[1] : args[0]) ?? process.cwd()
 
   let manifestJson: unknown
   try {

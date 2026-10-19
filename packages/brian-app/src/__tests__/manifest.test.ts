@@ -337,3 +337,12 @@ describe('[COMP:shared/brian-app-lint] scopes.store', () => {
     )
   })
 })
+
+
+describe('[COMP:shared/brian-app-sdk] scaffold consent contract', () => {
+  it('does not turn a registered command declaration into broader consent', () => {
+    const scope = { data: 'none' as const, application: { moduleKey: 'example_module', resources: [{ typeKey: 'example_record', actions: ['read','command:change'], readFields: ['title'], writeFields: ['title'] }] } }
+    expect(parseManifest({ manifestVersion: 1, name: 'Example application', scopes: scope }).ok).toBe(true)
+    expect(scopesExceedGrant({ ...scope, application: { ...scope.application, resources: [{ ...scope.application.resources[0], actions: ['read','command:change','command:delete'] }] } }, scope)).toBe(true)
+  })
+})
