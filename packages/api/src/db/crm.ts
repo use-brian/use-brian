@@ -11,6 +11,8 @@ import type {
 } from '@use-brian/core'
 import { maxSensitivity, unionScopeRequirements } from '@use-brian/core'
 import type pg from 'pg'
+import { z } from 'zod'
+import { ApplicationPlatformError,applicationJsonSchema } from '@use-brian/shared'
 import { assertExecutionResourceScope, buildAccessPredicate, buildCurrentMemberSourcePredicate, mutationActorAccess } from './access-predicate.js'
 import { assertAuthorshipPresent } from './authorship-guard.js'
 import { applyRLSGucs, getAppPool, query, queryGated, queryWithRLS } from './client.js'
@@ -71,8 +73,9 @@ export class CrmPersonIdentityConflictError extends Error {
  * one release.
  *
  * Updates are IN PLACE (`updateEntity`) so the entity id — and therefore
- * every inbound and outbound edge — stays valid. CRM field history is not
- * preserved (plan decision D5). Frozen-v1 constraints that used to live in
+ * every inbound and outbound edge — stays valid. Canonical source versions
+ * support optimistic edits; historical revision projection is tracked separately.
+ * Frozen-v1 constraints that used to live in
  * DB CHECKs / triggers (stage enum, amount ≥ 0, same-workspace FK) are now
  * enforced here; their error messages keep the old `deals_stage_check` /
  * `deals_amount_check` / "same workspace" tokens so callers and tests that
@@ -82,6 +85,35 @@ export class CrmPersonIdentityConflictError extends Error {
 const VALID_STAGES: readonly DealStage[] = [
   'lead', 'qualified', 'proposal', 'negotiation', 'won', 'lost',
 ]
+
+// The canonical writer owns the business vocabulary; route parsers only adapt it.
+const crmName = z.string().min(1).max(256).refine(value => value.trim().length > 0)
+const crmTags = z.array(z.string().max(100)).max(64)
+const crmExternalRef = z.record(applicationJsonSchema)
+const crmCompanyPatch = z.object({ name: crmName.optional(),domain: z.string().max(320).nullable().optional(),
+  tags: crmTags.optional(),externalRef: crmExternalRef.optional() }).strict()
+const crmContactPatch = z.object({ name: crmName.optional(),email: z.string().max(320).nullable().optional(),
+  phone: z.string().max(100).nullable().optional(),companyId: z.string().uuid().nullable().optional(),
+  tags: crmTags.optional(),externalRef: crmExternalRef.optional() }).strict()
+const crmDealPatch = z.object({ contactId: z.string().uuid().nullable().optional(),companyId: z.string().uuid().nullable().optional(),
+  amount: z.number().finite().nonnegative().nullable().optional(),closeDate: z.date().nullable().optional(),externalRef: crmExternalRef.optional() }).strict()
+function validateCrmBusiness(schema: z.ZodTypeAny,raw: unknown): void {
+  if (!schema.safeParse(raw).success) throw new ApplicationPlatformError('invalid_value','The canonical CRM values are invalid.')
+}
+function validateCrmCreation(schema: z.AnyZodObject,raw: object,extra: readonly string[] = []): void {
+  const operational=['workspaceId','access','sensitivity','explicitGeneral','compartments','projectIds','source','sourceEpisodeId','sourceSessionId','createdByAssistantId',...extra]
+  const keys=Object.keys(schema.shape)
+  if (Object.keys(raw).some(key => !keys.includes(key) && !operational.includes(key))) {
+    throw new ApplicationPlatformError('invalid_value','The canonical CRM input contains an unknown field.')
+  }
+  validateCrmBusiness(schema,Object.fromEntries(keys.map(key => [key,(raw as Record<string,unknown>)[key]])))
+}
+type CrmMutationOptions = { expectedVersion?: string;afterCommit?: CrmWriteTransaction['afterCommit'] }
+async function typedMutationSource(userId: string,id: string,kind: string,access: AccessContext|undefined,client: pg.PoolClient) {
+  if (access) return readCrmMutationSource(access,id,[kind],client)
+  const initial=await updateEntity(userId,id,{},undefined,client)
+  return initial ? readCrmMutationSource(dedupeAccessContext(userId,initial.workspaceId),id,[kind],client) : null
+}
 
 // ── Shared helpers ───────────────────────────────────────────────────
 
@@ -222,12 +254,12 @@ function clampListLimit(limit: number | undefined): number {
 
 function assertValidStage(stage: DealStage | undefined): void {
   if (stage !== undefined && !VALID_STAGES.includes(stage)) {
-    throw new Error(`deals_stage_check: invalid deal stage "${stage}"`)
+    throw new ApplicationPlatformError('invalid_value',`deals_stage_check: invalid deal stage "${stage}"`)
   }
 }
 function assertNonNegativeAmount(amount: number | null | undefined): void {
-  if (amount != null && amount < 0) {
-    throw new Error('deals_amount_check: amount must be greater than or equal to 0')
+  if (amount != null && (typeof amount!=='number' || !Number.isFinite(amount) || amount<0)) {
+    throw new ApplicationPlatformError('invalid_value','deals_amount_check: amount must be greater than or equal to 0')
   }
 }
 
@@ -349,6 +381,7 @@ export async function createCompany(
   },
   transaction?: CrmWriteTransaction,
 ): Promise<CompanyRecord> {
+  validateCrmCreation(crmCompanyPatch.required({name:true}),params,['mergeByName'])
   assertAuthorshipPresent('createCompany', userId)
   const access = dedupeAccessContext(userId, params.workspaceId, params.access)
   assertExecutionResourceScope({ workspaceId: params.workspaceId, userId: null, assistantId: null,
@@ -485,11 +518,12 @@ export async function updateCompany(
   access?: AccessContext,
   transactionClient?: pg.PoolClient,
   scope?: { compartments: string[]; projectIds: string[]; sensitivity?: Sensitivity },
+  operation?: CrmMutationOptions,
 ): Promise<CompanyRecord | null> {
-  // The canonical no-op read binds the actor and current member scope even
-  // when this adapter is composed into an owner-pool transaction.
-  const old = await updateEntity(userId, id, {}, access, transactionClient)
-  if (!old || old.kind !== 'company') return null
+  validateCrmBusiness(crmCompanyPatch,fields)
+  if (!transactionClient) return runCrmWriteTransaction(userId,tx => updateCompany(userId,id,fields,access,tx.client,scope,{...operation,afterCommit:tx.afterCommit}))
+  const old=await typedMutationSource(userId,id,'company',access,transactionClient)
+  if (!old) return null
   const a = { ...old.attributes }
   if (fields.domain !== undefined) {
     if (fields.domain) a.domain = fields.domain; else delete a.domain
@@ -504,7 +538,7 @@ export async function updateCompany(
     sensitivity: scope?.sensitivity === undefined ? undefined : maxSensitivity(old.sensitivity, scope.sensitivity),
     inheritCompartments: scope?.compartments,
     inheritProjectIds: scope?.projectIds,
-  }, dedupeAccessContext(userId, old.workspaceId, access), transactionClient)
+  }, dedupeAccessContext(userId, old.workspaceId, access), transactionClient,operation)
   if (!e) return null
   return companyFromEntity(e)
 }
@@ -568,6 +602,7 @@ export async function createContact(
   entityLinks?: EntityLinksStore,
   transaction?: CrmWriteTransaction,
 ): Promise<ContactRecord> {
+  validateCrmCreation(crmContactPatch.required({name:true}),params,['stableIdentity'])
   assertAuthorshipPresent('createContact', userId)
   const access = dedupeAccessContext(userId, params.workspaceId, params.access)
   assertExecutionResourceScope({ workspaceId: params.workspaceId, userId: null, assistantId: null,
@@ -757,11 +792,12 @@ export async function updateContact(
   transactionClient?: pg.PoolClient,
   scope?: { compartments: string[]; projectIds: string[]; sensitivity?: Sensitivity },
   afterCommit?: CrmWriteTransaction['afterCommit'],
+  operation?: CrmMutationOptions,
 ): Promise<ContactRecord | null> {
-  // The canonical no-op read binds the actor and current member scope even
-  // when this adapter is composed into an owner-pool transaction.
-  const old = await updateEntity(userId, id, {}, access, transactionClient)
-  if (!old || old.kind !== 'person') return null
+  validateCrmBusiness(crmContactPatch,fields)
+  if (!transactionClient) return runCrmWriteTransaction(userId,tx => updateContact(userId,id,fields,entityLinks,access,tx.client,scope,tx.afterCommit,operation))
+  const old=await typedMutationSource(userId,id,'person',access,transactionClient)
+  if (!old) return null
   const company = await readCrmReference(userId, old.workspaceId, fields.companyId, 'company', access, transactionClient)
   const inherited = crmReferenceScope(old, [company], scope)
   const a = { ...old.attributes }
@@ -778,7 +814,7 @@ export async function updateContact(
     sensitivity: inherited.sensitivity,
     inheritCompartments: inherited.compartments,
     inheritProjectIds: inherited.projectIds,
-  }, dedupeAccessContext(userId, old.workspaceId, access), transactionClient)
+  }, dedupeAccessContext(userId, old.workspaceId, access), transactionClient,operation)
   if (!e) return null
   if (fields.companyId !== undefined) {
     const project = () => repointGraphEdge(entityLinks, userId, {
@@ -857,9 +893,10 @@ export async function createDeal(
   entityLinks?: EntityLinksStore,
   transaction?: CrmWriteTransaction,
 ): Promise<DealRecord> {
-  assertAuthorshipPresent('createDeal', userId)
   assertValidStage(params.stage)
   assertNonNegativeAmount(params.amount)
+  validateCrmCreation(crmDealPatch.extend({stage:z.enum(['lead','qualified','proposal','negotiation','won','lost']).optional()}),params)
+  assertAuthorshipPresent('createDeal', userId)
   const access = mutationActorAccess(userId, params.workspaceId, params.access)
   if (!transaction) return runCrmWriteTransaction(userId, tx => createDeal(userId, params, entityLinks, tx))
   const contact = await readCrmReference(userId, params.workspaceId, params.contactId, 'person', access, transaction?.client)
@@ -965,12 +1002,13 @@ export async function updateDeal(
   access?: AccessContext,
   transactionClient?: pg.PoolClient,
   scope?: { compartments: string[]; projectIds: string[]; sensitivity?: Sensitivity },
+  operation?: CrmMutationOptions,
 ): Promise<DealRecord | null> {
   assertNonNegativeAmount(fields.amount)
-  // The canonical no-op read binds the actor and current member scope even
-  // when this adapter is composed into an owner-pool transaction.
-  const old = await updateEntity(userId, id, {}, access, transactionClient)
-  if (!old || old.kind !== 'deal') return null
+  validateCrmBusiness(crmDealPatch,fields)
+  if (!transactionClient) return runCrmWriteTransaction(userId,tx => updateDeal(userId,id,fields,entityLinks,access,tx.client,scope,{...operation,afterCommit:tx.afterCommit}))
+  const old=await typedMutationSource(userId,id,'deal',access,transactionClient)
+  if (!old) return null
   const company = await readCrmReference(userId, old.workspaceId, fields.companyId, 'company', access, transactionClient)
   const contact = await readCrmReference(userId, old.workspaceId, fields.contactId, 'person', access, transactionClient)
   const inherited = crmReferenceScope(old, [company, contact], scope)
@@ -995,9 +1033,11 @@ export async function updateDeal(
     },
     dedupeAccessContext(userId, old.workspaceId, access),
     transactionClient,
+    operation,
   )
   if (!e) return null
 
+  const project=() => {
   if (fields.companyId !== undefined) {
     repointGraphEdge(entityLinks, userId, {
       sourceEntityId: id, targetEntityId: fields.companyId ?? null,
@@ -1015,6 +1055,9 @@ export async function updateDeal(
       compartments: e.compartments, projectIds: e.projectIds, assistantId: e.assistantId,
     })
   }
+  }
+  if (operation?.afterCommit) operation.afterCommit(project)
+  else project()
   return dealFromEntity(e)
 }
 
@@ -1026,12 +1069,13 @@ export async function setDealStage(
   access?: AccessContext,
   transactionClient?: pg.PoolClient,
   scope?: { compartments: string[]; projectIds: string[]; sensitivity?: Sensitivity },
+  operation?: CrmMutationOptions,
 ): Promise<DealRecord | null> {
   assertValidStage(stage)
-  // The canonical no-op read binds the actor and current member scope even
-  // when this adapter is composed into an owner-pool transaction.
-  const old = await updateEntity(userId, id, {}, access, transactionClient)
-  if (!old || old.kind !== 'deal') return null
+  if (stage===undefined) throw new ApplicationPlatformError('invalid_value','A canonical deal stage is required.')
+  if (!transactionClient) return runCrmWriteTransaction(userId,tx => setDealStage(userId,id,stage,access,tx.client,scope,operation))
+  const old=await typedMutationSource(userId,id,'deal',access,transactionClient)
+  if (!old) return null
   const a = { ...old.attributes, stage }
   const e = await updateEntity(
     userId,
@@ -1044,6 +1088,7 @@ export async function setDealStage(
     },
     dedupeAccessContext(userId, old.workspaceId, access),
     transactionClient,
+    operation,
   )
   if (!e) return null
   return dealFromEntity(e)

@@ -3,11 +3,11 @@ import { randomUUID } from 'node:crypto'
 import { afterAll, beforeAll, describe, expect, it } from 'vitest'
 import { z } from 'zod'
 import type { PoolClient } from 'pg'
-import { boundScopeSources, type ApplicationModuleDefinition, type TaskRecord, type TaskUpdateFields } from '@use-brian/core'
+import { boundScopeSources, type ApplicationModuleDefinition, type TaskRecord, type TaskUpdateFields,type CompanyUpdateFields,type ContactUpdateFields,type DealUpdateFields } from '@use-brian/core'
 import { ApplicationPlatformError } from '@use-brian/shared'
 import { applyRLSGucs, getAppPool, getPool } from '../../db/client.js'
 import { bindTaskClosedHook, createTask, getTaskById, resolveTaskById, updateTask } from '../../db/tasks.js'
-import { createCompany, updateCompany } from '../../db/crm.js'
+import { createCompany,createContact,createDeal,updateCompany,updateContact,updateDeal,setDealStage } from '../../db/crm.js'
 import { findAssistantById } from '../../db/users.js'
 import { resolveExecutionContextSystem } from '../../context-scope/execution-context.js'
 import { ApplicationPlatformService } from '../service.js'
@@ -97,6 +97,72 @@ describe('[COMP:api/application-records] canonical native operation composition'
     const before = await task()
     await expect(updateTask(userId,before.id,fields as TaskUpdateFields,undefined,{ access })).rejects.toMatchObject({ code: 'invalid_value' })
     expect((await owner.query('SELECT valid_to,superseded_by FROM tasks WHERE id=$1',[before.id])).rows[0]).toEqual({ valid_to: null,superseded_by: null })
+  })
+  it('Q05 serializes canonical CRM attribute merges and keeps business changes outside metadata epochs',async () => {
+    const company=await createCompany(userId,{workspaceId,name:`Fictional merge ${randomUUID()}`,access,mergeByName:false})
+    const invocation=await execution()
+    const before=(await owner.query('SELECT scope_version::text AS version FROM entities WHERE id=$1',[company.id])).rows[0].version
+    const results=await Promise.all([
+      updateCompany(userId,company.id,{domain:'fictional.example'},access),
+      updateCompany(userId,company.id,{tags:['fictional-category']},access),
+    ])
+    expect(results.every(value => value?.id===company.id)).toBe(true)
+    const current=(await owner.query('SELECT attributes,scope_version::text AS version FROM entities WHERE id=$1',[company.id])).rows[0]
+    expect(current.attributes).toMatchObject({domain:'fictional.example',tags:['fictional-category']})
+    expect(current.version).toBe(String(BigInt(before)+2n))
+    await expect(invocation.security.authority.assertCurrent()).resolves.toBeUndefined()
+  })
+  it('Q05 admits one canonical CRM CAS edit and preserves its ID and references on stale refusal',async () => {
+    const company=await createCompany(userId,{workspaceId,name:`Fictional CAS ${randomUUID()}`,access,mergeByName:false})
+    const contact=await createContact(userId,{workspaceId,name:'Fictional linked contact',companyId:company.id,access})
+    const before=(await owner.query('SELECT scope_version::text AS version FROM entities WHERE id=$1',[company.id])).rows[0].version
+    const outcomes=await Promise.allSettled(['Fictional CAS first','Fictional CAS second'].map(name =>
+      updateCompany(userId,company.id,{name},access,undefined,undefined,{expectedVersion:before})))
+    expect(outcomes.filter(outcome => outcome.status==='fulfilled')).toHaveLength(1)
+    const denied=outcomes.find(outcome => outcome.status==='rejected')
+    expect(denied?.status==='rejected' && denied.reason.code).toBe('record_version_conflict')
+    const current=(await owner.query('SELECT id,scope_version::text AS version FROM entities WHERE id=$1',[company.id])).rows[0]
+    expect(current).toEqual({id:company.id,version:String(BigInt(before)+1n)})
+    expect((await owner.query("SELECT attributes->>'company_id' AS company FROM entities WHERE id=$1",[contact.id])).rows[0].company).toBe(company.id)
+    await expect(updateCompany(userId,company.id,{domain:'stale.example'},access,undefined,undefined,{expectedVersion:before})).rejects.toMatchObject({code:'record_version_conflict'})
+    expect((await owner.query("SELECT attributes ? 'domain' AS present FROM entities WHERE id=$1",[company.id])).rows[0].present).toBe(false)
+  })
+  it('Q04 refuses immutable and invalid create keys through every typed canonical CRM writer',async () => {
+    const invalid=await Promise.allSettled([
+      createCompany(userId,{workspaceId,name:'Fictional creation',access,immutableId:randomUUID()} as Parameters<typeof createCompany>[1]),
+      createContact(userId,{workspaceId,name:'Fictional creation',access,phone:17} as unknown as Parameters<typeof createContact>[1]),
+      createDeal(userId,{workspaceId,access,stage:'invented'} as unknown as Parameters<typeof createDeal>[1]),
+    ])
+    expect(invalid.every(outcome => outcome.status==='rejected' && outcome.reason.code==='invalid_value')).toBe(true)
+    expect((await owner.query("SELECT id FROM entities WHERE workspace_id=$1 AND display_name='Fictional creation'",[workspaceId])).rows).toEqual([])
+  })
+  it('Q05 serializes the legacy stage writer with canonical field patches',async () => {
+    const deal=await createDeal(userId,{workspaceId,access})
+    const version=(await owner.query('SELECT scope_version::text AS version FROM entities WHERE id=$1',[deal.id])).rows[0].version
+    await Promise.all([setDealStage(userId,deal.id,'won',access),updateDeal(userId,deal.id,{amount:42},undefined,access)])
+    expect((await owner.query("SELECT attributes->>'stage' AS stage,attributes->>'amount' AS amount FROM entities WHERE id=$1",[deal.id])).rows[0]).toEqual({stage:'won',amount:'42'})
+    await expect(setDealStage(userId,deal.id,'lost',access,undefined,undefined,{expectedVersion:version})).rejects.toMatchObject({code:'record_version_conflict'})
+  })
+  it.each([
+    { kind: 'company',fields: { invented: 'unregistered field' } },
+    { kind: 'company',fields: { name: '' } },
+    { kind: 'company',fields: { domain: 17 } },
+    { kind: 'company',fields: { tags: ['valid',17] } },
+    { kind: 'person',fields: { phone: { invalid: 'object' } } },
+    { kind: 'person',fields: { companyId: 'not-a-uuid' } },
+    { kind: 'deal',fields: { amount: Number.POSITIVE_INFINITY } },
+    { kind: 'deal',fields: { closeDate: new Date('not-a-date') } },
+    { kind: 'deal',fields: { stage: 'won' } },
+  ])('Q04 refuses invalid canonical CRM $kind patch before changing storage: $fields',async ({kind,fields}) => {
+    const company=await createCompany(userId,{workspaceId,name:`Fictional validation ${randomUUID()}`,access,mergeByName:false})
+    const record=kind==='company' ? company : kind==='person' ? await createContact(userId,{workspaceId,name:'Fictional contact',access})
+      : await createDeal(userId,{workspaceId,companyId:company.id,access})
+    const before=(await owner.query('SELECT display_name,attributes,scope_version::text FROM entities WHERE id=$1',[record.id])).rows[0]
+    const write=kind==='company' ? () => updateCompany(userId,record.id,fields as CompanyUpdateFields,access)
+      : kind==='person' ? () => updateContact(userId,record.id,fields as ContactUpdateFields,undefined,access)
+      : () => updateDeal(userId,record.id,fields as DealUpdateFields,undefined,access)
+    await expect(write()).rejects.toMatchObject({code:'invalid_value'})
+    expect((await owner.query('SELECT display_name,attributes,scope_version::text FROM entities WHERE id=$1',[record.id])).rows[0]).toEqual(before)
   })
   it('Q06 commits a registered multi-task command and its receipt/audit/outbox exactly once, with complete rollback on refusal', async () => {
     const first = await task(), second = await task(), input = z.object({ ids: z.array(z.string().uuid()).length(2),versions: z.array(z.string()).length(2),title: z.string().min(1) }).strict()

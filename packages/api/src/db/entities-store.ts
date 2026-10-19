@@ -18,6 +18,7 @@ import type {
 import { maxSensitivity, unionScopeRequirements } from '@use-brian/core'
 import type { Sensitivity } from '@use-brian/core'
 import type pg from 'pg'
+import { ApplicationPlatformError } from '@use-brian/shared'
 import { clientCompartment } from '@use-brian/core'
 import { assertExecutionResourceScope, buildAccessPredicate, buildCurrentMemberSourcePredicate } from './access-predicate.js'
 import { currentAgentAccess } from './agent-access-context.js'
@@ -1179,8 +1180,26 @@ export async function updateEntity(
   fields: EntityUpdateFields,
   access?: AccessContext,
   transactionClient?: pg.PoolClient,
+  operation?: { expectedVersion?: string },
 ): Promise<EntityRecord | null> {
   access = entityMutationAccess(actorUserId, access)
+  if (operation?.expectedVersion !== undefined) {
+    if (!/^[1-9]\d*$/.test(operation.expectedVersion)) throw new ApplicationPlatformError('record_version_conflict','A valid expected source version is required.')
+    if (!transactionClient) {
+      const client=await getAppPool().connect()
+      try {
+        await client.query('BEGIN');await applyRLSGucs(client,actorUserId)
+        const updated=await updateEntity(actorUserId,id,fields,access,client,operation)
+        await client.query('COMMIT');return updated
+      } catch (error) { await client.query('ROLLBACK').catch(()=>{});throw error }
+      finally { client.release() }
+    }
+    const guard=entitySourceGuard(actorUserId,access,'mutation',2)
+    const current=await transactionClient.query<{ version: string }>(`SELECT scope_version::text AS version FROM entities
+      WHERE id=$1 AND valid_to IS NULL AND retracted_at IS NULL AND NOT scope_held AND ${guard.sql} FOR UPDATE`,[id,...guard.params])
+    if (!current.rows[0]) return null
+    if (current.rows[0].version!==operation.expectedVersion) throw new ApplicationPlatformError('record_version_conflict','The canonical source version changed.')
+  }
   if (access) assertExecutionResourceScope({ workspaceId: access.workspaceId,
     userId: null, assistantId: null, sensitivity: 'public',
     compartments: fields.inheritCompartments ?? [], projectIds: fields.inheritProjectIds ?? [] }, 'mutation', access)
