@@ -1,6 +1,8 @@
 import { isDeepStrictEqual } from 'node:util'
+import { z } from 'zod'
+import { ApplicationPlatformError, applicationJsonSchema } from '@use-brian/shared'
 import { admitTaskCreate } from '../workspace-access/task-create-admission.js'
-import { applyResponsibilityPatch, bindScopeSource, executorChanged, maxSensitivity, unionScopeRequirements } from '@use-brian/core'
+import { applyResponsibilityPatch, bindScopeSource, executorChanged, maxSensitivity, unionScopeRequirements, TASK_STATUSES } from '@use-brian/core'
 import type { AccessContext, EntityLinksStore, Sensitivity, TaskHome, TaskListFilters, TaskListRow, TaskRecord, TaskRecordStatus, TaskResponsibility, TaskUpdateFields, TaskWriteActor, TaskStore, TaskAssignmentProvenance } from '@use-brian/core'
 import type pg from 'pg'
 import { assertExecutionResourceScope, buildAccessPredicate } from './access-predicate.js'
@@ -559,6 +561,7 @@ export async function listTasks(ctx: AccessContext, filters: TaskListFilters): P
 }
 
 type OldTaskRow = {
+  scope_version: string
   workspace_id: string
   title: string
   status: TaskRecordStatus
@@ -656,17 +659,17 @@ const LIVE_TASK_ID_CTE = `WITH RECURSIVE chain AS (
 export async function resolveTaskById(
   ctx: AccessContext,
   id: string,
+  transactionClient?: pg.PoolClient,
 ): Promise<TaskRecord | null> {
   const ap = buildAccessPredicate(ctx, { startIdx: 2 })
-  const result = await queryWithRLS<TaskRow>(
-    ctx.userId,
-    `${LIVE_TASK_ID_CTE}
+  const sql = `${LIVE_TASK_ID_CTE}
      SELECT ${FULL_SELECT} FROM tasks
       WHERE ${ap.sql}
         AND id = (SELECT id FROM chain WHERE valid_to IS NULL LIMIT 1)
-        AND retracted_at IS NULL AND NOT scope_held`,
-    [id, ...ap.params],
-  )
+        AND retracted_at IS NULL AND NOT scope_held`
+  const result = transactionClient
+    ? await transactionClient.query<TaskRow>(sql,[id,...ap.params])
+    : await queryWithRLS<TaskRow>(ctx.userId,sql,[id,...ap.params])
   return result.rows.length === 0 ? null : toRecord(result.rows[0])
 }
 
@@ -723,17 +726,42 @@ export function bindTaskClosedHook(hook: TaskClosedHook | null): void {
  * without a supersession write. Tool-layer also guards this; the DB-layer
  * check is defense-in-depth.
  */
+/** Fixed canonical writer composition; no transaction ownership transfer. */
+export interface CanonicalTaskWriteTransaction {
+  client: pg.PoolClient
+  afterCommit(effect: () => void): void
+}
+const canonicalTaskPatchSchema = z.object({
+  title: z.string().min(1).max(1024).refine(value => value.trim().length > 0).optional(),
+  status: z.enum(TASK_STATUSES).optional(),
+  assigneeId: z.string().uuid().nullable().optional(), executorAssistantId: z.string().uuid().nullable().optional(),
+  followUpMemberId: z.string().uuid().nullable().optional(),
+  home: z.object({ kind: z.enum(['department','project']), id: z.string().uuid() }).strict().nullable().optional(),
+  due: z.date().nullable().optional(), tags: z.array(z.string()).optional(),
+  parentId: z.string().uuid().nullable().optional(), externalRef: z.record(applicationJsonSchema).optional(),
+  attributes: z.record(applicationJsonSchema).optional(), dependsOn: z.array(z.string().uuid()).optional(),
+}).strict()
 export async function updateTask(
   userId: string,
   id: string,
   fields: TaskUpdateFields,
   entityLinks?: EntityLinksStore,
   opts?: Parameters<TaskStore['update']>[3],
+  transaction?: CanonicalTaskWriteTransaction,
 ): Promise<TaskRecord | null> {
-  const readOnly=Object.keys(fields).length===0
-  const client = await getAppPool().connect()
+  if (!canonicalTaskPatchSchema.safeParse(fields).success) throw new ApplicationPlatformError('invalid_value','The task patch is invalid.')
+  if (opts?.expectedVersion !== undefined && !/^[1-9]\d*$/.test(opts.expectedVersion)) {
+    throw new ApplicationPlatformError('record_version_conflict','A valid expected task version is required.')
+  }
+  const readOnly=Object.keys(fields).length===0, own = !transaction
+  const client = transaction?.client ?? await getAppPool().connect()
   try {
-    await client.query('BEGIN')
+    if (own) await client.query('BEGIN')
+    if (transaction) {
+      const role = await client.query(`SELECT r.rolsuper OR r.rolbypassrls OR pg_has_role(r.oid,c.relowner,'USAGE') AS bypass
+        FROM pg_catalog.pg_roles r JOIN pg_catalog.pg_class c ON c.oid='public.tasks'::regclass WHERE r.rolname=current_user`)
+      if (role.rows[0]?.bypass !== false) throw new ApplicationPlatformError('access_unavailable','A non-owner canonical task transaction is required.')
+    }
     await applyRLSGucs(client,userId)
     try {
       // Forward-resolve a superseded input id to its live head (see header)
@@ -745,7 +773,7 @@ export async function updateTask(
         [id],
       )
       if (liveRes.rows.length === 0) {
-        await client.query('ROLLBACK')
+        if (own) await client.query('ROLLBACK')
         return null
       }
       let liveId = liveRes.rows[0].id
@@ -760,7 +788,7 @@ export async function updateTask(
       if(readOnly){
         const current=await client.query<TaskRow>(`SELECT ${FULL_SELECT} FROM tasks
           WHERE id=$1 AND valid_to IS NULL AND retracted_at IS NULL AND NOT scope_held AND ${ap.sql} AND ${memberScope}`,[liveId,...ap.params])
-        await client.query('COMMIT')
+        if (own) await client.query('COMMIT')
         return current.rows[0]?toRecord(current.rows[0]):null
       }
 
@@ -772,7 +800,7 @@ export async function updateTask(
         `${LIVE_TASK_ID_CTE} SELECT id FROM chain WHERE valid_to IS NULL LIMIT 1`, [liveId])
       if (relocked.rows[0]) liveId = relocked.rows[0].id
       const oldRes = await client.query<OldTaskRow>(
-        `SELECT workspace_id, title, status, assignee_id, due, tags, parent_id, external_ref, attributes,
+        `SELECT scope_version::text, workspace_id, title, status, assignee_id, due, tags, parent_id, external_ref, attributes,
                 sensitivity, compartments, project_ids,
                 user_id, assistant_id, source, source_episode_id,
                 source_session_id, created_by_assistant_id, source_start_ms,
@@ -782,10 +810,13 @@ export async function updateTask(
         [liveId,...ap.params],
       )
       if (oldRes.rows.length === 0) {
-        await client.query('ROLLBACK')
+        if (own) await client.query('ROLLBACK')
         return null
       }
       const old = oldRes.rows[0]
+      if (opts?.expectedVersion !== undefined && (liveId !== id || old.scope_version !== opts.expectedVersion)) {
+        throw new ApplicationPlatformError('record_version_conflict','The task changed. Refresh before retrying.')
+      }
 
       // Responsibility (migration 753): the executor is one slot, contact and
       // home are independent. A precondition (the guarded claim) runs on the
@@ -797,7 +828,7 @@ export async function updateTask(
       }
       if (opts?.precondition?.({ ...before, status: old.status, workspaceId: old.workspace_id }) === 'noop') {
         const current = await client.query<TaskRow>(`SELECT ${FULL_SELECT} FROM tasks WHERE id=$1`, [liveId])
-        await client.query('COMMIT')
+        if (own) await client.query('COMMIT')
         return current.rows[0] ? toRecord(current.rows[0]) : null
       }
       const after = applyResponsibilityPatch(before, {
@@ -842,14 +873,14 @@ export async function updateTask(
            user_id, assistant_id, source, source_episode_id,
            source_session_id, created_by_assistant_id, source_start_ms,
            created_by_user_id, valid_from, valid_to, superseded_by,
-           executor_assistant_id, follow_up_member_id, home_kind, home_id
+           executor_assistant_id, follow_up_member_id, home_kind, home_id, scope_version
          )
          SELECT $1, $2, $3, $4, $5, $6, $7, $8::jsonb, $9::jsonb,
                  $10, $11::text[], $12::uuid[],
                  $13, $14, $15, $16,
                  $17, $18, $19,
                  $20, now(), NULL, NULL,
-                 $21, $22, $23, $24
+                 $21, $22, $23, $24, $25::bigint
          WHERE EXISTS(SELECT 1 FROM workspace_members WHERE workspace_id=$1 AND user_id=$20)
            AND (effective_member_team_compartments($20,$1) IS NULL
              OR $11::text[] <@ effective_member_team_compartments($20,$1))
@@ -891,6 +922,7 @@ export async function updateTask(
           after.followUpMemberId,
           after.home?.kind ?? null,
           after.home?.id ?? null,
+          String(BigInt(old.scope_version)+1n),
         ],
       )
       const newRow = insertRes.rows[0]
@@ -955,54 +987,57 @@ export async function updateTask(
         })
       }
 
-      await client.query('COMMIT')
+      if (own) await client.query('COMMIT')
       const newTask = toRecord(newRow)
-      if (reassigned && newTask.parentId === null) executorChangeHook?.(newTask, before, userId, opts?.assignment)
-      if ((newTask.status === 'done' || newTask.status === 'archived') && old.status !== newTask.status) taskClosedHook?.(newTask, old.status)
+      const publish = () => {
+        if (reassigned && newTask.parentId === null) executorChangeHook?.(newTask, before, userId, opts?.assignment)
+        if ((newTask.status === 'done' || newTask.status === 'archived') && old.status !== newTask.status) taskClosedHook?.(newTask, old.status)
 
-      // Workflow task-event emit — fire-and-forget after COMMIT. The old
-      // row (already read for the supersession write) supplies the
-      // before-snapshot; the producer derives the action set from the
-      // diff. [COMP:api/task-event-fanout]
-      publishTaskLifecycle({
-        workspaceId: newTask.workspaceId,
-        taskId: newTask.id,
-        kind: 'updated',
-        title: newTask.title,
-        status: newTask.status,
-        previousStatus: old.status,
-        tags: newTask.tags,
-        previousTags: old.tags ?? [],
-        assigneeId: newTask.assigneeId,
-        previousAssigneeId: old.assignee_id,
-        due: newTask.due,
-        parentId: newTask.parentId,
-        changedFields: diffChangedFields(old, newTask, fields),
-        actorId: userId,
-        writtenBy: opts?.writtenBy,
-      })
-
-      // Fire-and-forget `depends_on` edges from the new (active) task
-      // id → each depended-on target. v1 append-only — does not remove
-      // or rewrite edges pointing at the pre-supersession id.
-      if (entityLinks && fields.dependsOn && fields.dependsOn.length > 0) {
-        void emitDependsOnEdges(entityLinks, userId, {
-          sourceTaskId: newTask.id,
-          dependsOnTaskIds: fields.dependsOn,
+        // Workflow task-event emit — fire-and-forget after COMMIT. The old
+        // row (already read for the supersession write) supplies the
+        // before-snapshot; the producer derives the action set from the
+        // diff. [COMP:api/task-event-fanout]
+        publishTaskLifecycle({
           workspaceId: newTask.workspaceId,
-          source: 'user',
-          userId,
-          compartments: newTask.compartments,
-          projectIds: newTask.projectIds,
+          taskId: newTask.id,
+          kind: 'updated',
+          title: newTask.title,
+          status: newTask.status,
+          previousStatus: old.status,
+          tags: newTask.tags,
+          previousTags: old.tags ?? [],
+          assigneeId: newTask.assigneeId,
+          previousAssigneeId: old.assignee_id,
+          due: newTask.due,
+          parentId: newTask.parentId,
+          changedFields: diffChangedFields(old, newTask, fields),
+          actorId: userId,
+          writtenBy: opts?.writtenBy,
         })
+
+        // Fire-and-forget `depends_on` edges from the new (active) task
+        // id → each depended-on target. v1 append-only — does not remove
+        // or rewrite edges pointing at the pre-supersession id.
+        if (entityLinks && fields.dependsOn && fields.dependsOn.length > 0) {
+          void emitDependsOnEdges(entityLinks, userId, {
+            sourceTaskId: newTask.id,
+            dependsOnTaskIds: fields.dependsOn,
+            workspaceId: newTask.workspaceId,
+            source: 'user',
+            userId,
+            compartments: newTask.compartments,
+            projectIds: newTask.projectIds,
+          })
+        }
       }
+      if (transaction) transaction.afterCommit(publish); else publish()
       return newTask
     } catch (err) {
-      await client.query('ROLLBACK')
+      if (own) await client.query('ROLLBACK')
       throw err
     }
   } finally {
-    await rollbackAndRelease(client)
+    if (own) await rollbackAndRelease(client)
   }
 }
 

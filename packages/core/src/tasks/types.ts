@@ -229,6 +229,8 @@ export type TaskStore = {
     id: string,
     fields: TaskUpdateFields,
     opts?: {
+      /** Compare the locked canonical source version; stale predecessor IDs conflict. */
+      expectedVersion?: string
       writtenBy?: TaskWriteActor
       /** Trusted human assignment behind this write, if any. */
       assignment?: TaskAssignmentProvenance
