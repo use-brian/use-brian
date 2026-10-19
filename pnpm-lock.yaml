@@ -724,6 +724,12 @@ importers:
       '@types/node':
         specifier: ^20.19.39
         version: 20.19.43
+      '@use-brian/core':
+        specifier: workspace:*
+        version: link:../core
+      '@use-brian/shared':
+        specifier: workspace:*
+        version: link:../shared
       typescript:
         specifier: ^5.7
         version: 5.9.3

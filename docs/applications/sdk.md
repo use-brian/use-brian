@@ -20,3 +20,8 @@ ports explicitly refuse. R3 owns retained evidence/client cache integration, R5b
 management, R5c reference journeys and R6 runtime qualification. Source identity
 mapping/trust, retention support and adoption require independent source work.
 Publication, real installations and activation remain owed.
+
+The browser client/auth phase is implemented with a memory-only popup PKCE proof,
+exact-source/origin/app callback checks and the existing signed Home token handoff.
+Use `./module` only on the server for service/delegated credentials; the browser
+profile accepts only app OAuth tokens. No automatic effect retry is implemented.
