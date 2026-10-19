@@ -5,6 +5,7 @@ import request from 'supertest'
 import { viewsRoutes, type ViewsRouteOptions } from '../../routes/views.js'
 import { crmRoutes } from '../../routes/crm.js'
 import { createWorkspaceStore } from '../../db/workspace-store.js'
+import { createDbWorkspaceGroupStore } from '../../db/workspace-group-store.js'
 import { afterAll, beforeAll, describe, expect, it } from 'vitest'
 import { z } from 'zod'
 import type { PoolClient } from 'pg'
@@ -13,7 +14,7 @@ import { ApplicationPlatformError,type ApplicationJson } from '@use-brian/shared
 import { applyRLSGucs, getAppPool, getPool } from '../../db/client.js'
 import { bindTaskClosedHook, createTask, getTaskById, resolveTaskById, updateTask } from '../../db/tasks.js'
 import { createCompany,createContact,createDeal,getDealById,listDeals,updateCompany,updateContact,updateDeal,setDealStage } from '../../db/crm.js'
-import { createCrmFieldDefinition,archiveCrmFieldDefinition,updateCrmCustomFields,setCrmArchived,setCrmDealPipelineStage,getCrmConfig,addCrmDealParticipant,removeCrmDealParticipant } from '../../db/crm-r2.js'
+import { createCrmPipeline,createCrmStage,createCrmFieldDefinition,archiveCrmFieldDefinition,updateCrmCustomFields,setCrmArchived,setCrmDealPipelineStage,getCrmConfig,addCrmDealParticipant,removeCrmDealParticipant } from '../../db/crm-r2.js'
 import { createEntity, supersedeEntity, updateEntity } from '../../db/entities-store.js'
 import { createDbCrmStore } from '../../db/crm-store.js'
 import { createDbCrmOperationsStore } from '../../db/crm-operations-store.js'
@@ -78,6 +79,161 @@ describe('[COMP:api/application-records] canonical native operation composition'
     const empty=await dispatcher.query(await execution(),'native','get',{type:'company',id:value.id,fields:[]}) as {values:unknown;fields:string[]}
     expect(empty.values).toEqual({});expect(empty.fields).toEqual([]);expect(boundScopeSources(empty).length).toBeGreaterThan(0)
     expect((await owner.query('SELECT read_native_application_record($1,$2,$3,$4) AS value',[workspaceId,'company',value.id,['name']])).rows[0].value).toBeNull()
+  })
+  it('Q02 refuses the canonical native read port on an owner connection even with a real member GUC',async()=>{
+    const value=await createCompany(userId,{workspaceId,name:'Fictional owner connection boundary',access,mergeByName:false})
+    const privileged=await owner.connect()
+    try {
+      await privileged.query('BEGIN');await applyRLSGucs(privileged,userId)
+      expect((await privileged.query('SELECT read_native_application_record($1,$2,$3,$4) AS value',[workspaceId,'company',value.id,['name']])).rows[0].value).toBeNull()
+    } finally {await privileged.query('ROLLBACK');privileged.release()}
+  })
+  it.each([
+    {kind:'person',field:'company_id',target:'missing'},
+    {kind:'deal',field:'company_id',target:'missing'},
+    {kind:'deal',field:'contact_id',target:'missing'},
+    {kind:'person',field:'company_id',target:'wrong_kind'},
+    {kind:'deal',field:'contact_id',target:'wrong_kind'},
+    {kind:'person',field:'company_id',target:'archived'},
+    {kind:'deal',field:'contact_id',target:'archived'},
+    {kind:'person',field:'company_id',target:'foreign_workspace'},
+    {kind:'deal',field:'contact_id',target:'foreign_workspace'},
+  ] as const)('Q04 refuses a raw canonical $kind $field assignment to a $target target',async({kind,field,target})=>{
+    const source=await createEntity({workspaceId,kind,displayName:'Fictional raw relationship source',createdByUserId:userId,source:'user'})
+    let targetId:string=randomUUID(),foreign:string|undefined
+    if(target!=='missing') {
+      let targetWorkspace:string=workspaceId
+      if(target==='foreign_workspace') {
+        foreign=randomUUID();targetWorkspace=foreign
+        await owner.query("INSERT INTO workspaces(id,name,owner_user_id) VALUES($1,'Fictional other relationship workspace',$2)",[foreign,userId])
+        await owner.query("INSERT INTO workspace_members(workspace_id,user_id,role,clearance) VALUES($1,$2,'owner','confidential')",[foreign,userId])
+      }
+      const targetKind=target==='wrong_kind'?(field==='company_id'?'person':'company'):(field==='company_id'?'company':'person')
+      targetId=(await createEntity({workspaceId:targetWorkspace,kind:targetKind,displayName:'Fictional raw relationship target',
+        attributes:target==='archived'?{crm_archived_at:new Date().toISOString()}:{},createdByUserId:userId,source:'user'})).id
+    }
+    const before=(await owner.query('SELECT attributes,scope_version::text AS version FROM entities WHERE id=$1',[source.id])).rows[0],connection=await client()
+    try {
+      await expect(connection.query('UPDATE entities SET attributes=jsonb_set(attributes,ARRAY[$2],to_jsonb($3::text)) WHERE id=$1',[source.id,field,targetId])).rejects.toMatchObject({code:'42501'})
+    } finally {await connection.query('ROLLBACK');connection.release();if(foreign) await owner.query('DELETE FROM workspaces WHERE id=$1',[foreign])}
+    expect((await owner.query('SELECT attributes,scope_version::text AS version FROM entities WHERE id=$1',[source.id])).rows[0]).toEqual(before)
+  })
+  it.each(['created_by_user_id','created_by_assistant_id','created_at','id'] as const)(
+    'Q04 refuses raw rewrites of canonical native managed identity: %s',async field=>{
+    const value=await createCompany(userId,{workspaceId,name:`Fictional immutable native identity ${randomUUID()}`,access,mergeByName:false})
+    const before=(await owner.query('SELECT id,created_by_user_id,created_by_assistant_id,created_at,scope_version::text AS version FROM entities WHERE id=$1',[value.id])).rows[0]
+    const assignment=field==='created_by_user_id'?readerId:field==='created_by_assistant_id'?assistantId:field==='created_at'?'2000-01-01T00:00:00.000Z':randomUUID()
+    const connection=await client()
+    try {await expect(connection.query(`UPDATE entities SET ${field}=$2 WHERE id=$1`,[value.id,assignment])).rejects.toMatchObject({code:'42501'})}
+    finally {await connection.query('ROLLBACK');connection.release()}
+    expect((await owner.query('SELECT id,created_by_user_id,created_by_assistant_id,created_at,scope_version::text AS version FROM entities WHERE id=$1',[value.id])).rows[0]).toEqual(before)
+  })
+  it.each(['sensitivity','private'] as const)('Q04 refuses a raw relationship that would publish a target %s floor',async floor=>{
+    const target=await createEntity({workspaceId,kind:'company',displayName:'Fictional protected relationship target',createdByUserId:userId,
+      source:'user',...(floor==='sensitivity'?{sensitivity:'confidential' as const}:{userId})})
+    const source=await createContact(userId,{workspaceId,name:'Fictional broader relationship source',access}),connection=await client()
+    const before=(await owner.query('SELECT attributes,scope_version::text AS version FROM entities WHERE id=$1',[source.id])).rows[0]
+    try {await expect(connection.query("UPDATE entities SET attributes=jsonb_set(attributes,'{company_id}',to_jsonb($2::text)) WHERE id=$1",[source.id,target.id])).rejects.toMatchObject({code:'42501'})}
+    finally {await connection.query('ROLLBACK');connection.release()}
+    expect((await owner.query('SELECT attributes,scope_version::text AS version FROM entities WHERE id=$1',[source.id])).rows[0]).toEqual(before)
+  })
+  it('Q04/Q05 permits a current raw relationship with its complete scope and refuses later declassification',async()=>{
+    const target=await createEntity({workspaceId,kind:'company',displayName:'Fictional scoped raw target',createdByUserId:userId,source:'user',sensitivity:'confidential',userId})
+    const source=await createEntity({workspaceId,kind:'person',displayName:'Fictional scoped raw source',createdByUserId:userId,source:'user',sensitivity:'confidential',userId})
+    const connection=await client()
+    try {await connection.query("UPDATE entities SET attributes=jsonb_set(attributes,'{company_id}',to_jsonb($2::text)) WHERE id=$1",[source.id,target.id]);await connection.query('COMMIT')}
+    finally {await connection.query('ROLLBACK');connection.release()}
+    const before=(await owner.query('SELECT attributes,sensitivity,scope_version::text AS version FROM entities WHERE id=$1',[source.id])).rows[0]
+    expect(before.attributes.company_id).toBe(target.id)
+    const other=await client()
+    try {await expect(other.query("UPDATE entities SET sensitivity='internal' WHERE id=$1",[source.id])).rejects.toMatchObject({code:'42501'})}
+    finally {await other.query('ROLLBACK');other.release()}
+    expect((await owner.query('SELECT attributes,sensitivity,scope_version::text AS version FROM entities WHERE id=$1',[source.id])).rows[0]).toEqual(before)
+  })
+  it('Q04 refuses an unregistered member owner reference at the canonical raw writer',async()=>{
+    const source=await createCompany(userId,{workspaceId,name:'Fictional raw member owner source',access,mergeByName:false}),connection=await client()
+    try {await expect(connection.query("UPDATE entities SET attributes=jsonb_set(attributes,'{owner_id}',to_jsonb($2::text)) WHERE id=$1",[source.id,randomUUID()])).rejects.toMatchObject({code:'42501'})}
+    finally {await connection.query('ROLLBACK');connection.release()}
+    expect((await owner.query('SELECT attributes FROM entities WHERE id=$1',[source.id])).rows[0].attributes).not.toHaveProperty('owner_id')
+  })
+  it.each(['pipeline_id','pipeline_stage_id'] as const)('Q04 refuses missing native configuration references: %s',async field=>{
+    const source=await createDeal(userId,{workspaceId,access}),connection=await client()
+    try {await expect(connection.query('UPDATE entities SET attributes=jsonb_set(attributes,ARRAY[$2],to_jsonb($3::text)) WHERE id=$1',[source.id,field,randomUUID()])).rejects.toMatchObject({code:'42501'})}
+    finally {await connection.query('ROLLBACK');connection.release()}
+    expect((await owner.query('SELECT attributes FROM entities WHERE id=$1',[source.id])).rows[0].attributes).not.toHaveProperty(field)
+  })
+  it('Q04 refuses an inconsistent canonical pipeline and stage pair',async()=>{
+    await getCrmConfig(userId,workspaceId)
+    const first=await createCrmPipeline({workspaceId,userId,name:'Fictional first raw pipeline'}),second=await createCrmPipeline({workspaceId,userId,name:'Fictional second raw pipeline'})
+    const stage=(await createCrmStage({workspaceId,userId,pipelineId:second.id,name:'Fictional raw stage',category:'open',probability:25}))!
+    const source=await createDeal(userId,{workspaceId,access}),connection=await client()
+    try {await expect(connection.query("UPDATE entities SET attributes=attributes||jsonb_build_object('pipeline_id',$2::text,'pipeline_stage_id',$3::text) WHERE id=$1",[source.id,first.id,stage.id])).rejects.toMatchObject({code:'42501'})}
+    finally {await connection.query('ROLLBACK');connection.release()}
+    expect((await owner.query('SELECT attributes FROM entities WHERE id=$1',[source.id])).rows[0].attributes).not.toHaveProperty('pipeline_id')
+  })
+  it.each(['missing','wrong_kind'] as const)('Q04 validates current custom reference targets below raw writers: %s',async mode=>{
+    const definition=await createCrmFieldDefinition({workspaceId,userId,entityKind:'company',fieldKey:`raw_ref_${mode}`,label:'Fictional raw relation',fieldType:'entity_reference',options:['company']})
+    if(!definition) throw new Error('Fictional raw reference definition was not created.')
+    const source=await createCompany(userId,{workspaceId,name:'Fictional raw custom source',access,mergeByName:false})
+    const target=mode==='missing'?randomUUID():(await createContact(userId,{workspaceId,name:'Fictional wrong custom target',access})).id
+    const connection=await client()
+    try {
+      await expect(connection.query("UPDATE entities SET attributes=attributes||jsonb_build_object('custom_fields',jsonb_build_object($2::text,$3::text)) WHERE id=$1",[source.id,definition.fieldKey,target])).rejects.toMatchObject({code:'42501'})
+    } finally {await connection.query('ROLLBACK');connection.release();await archiveCrmFieldDefinition(userId,workspaceId,definition.id)}
+  })
+  it('Q04/Q05 retains an archived custom reference privacy floor without blocking unrelated partial edits',async()=>{
+    const definition=await createCrmFieldDefinition({workspaceId,userId,entityKind:'company',fieldKey:'archived_raw_ref',label:'Fictional archived reference',fieldType:'entity_reference',options:['company']})
+    if(!definition) throw new Error('Fictional archived reference definition was not created.')
+    const target=await createCompany(userId,{workspaceId,name:'Fictional confidential retained target',sensitivity:'confidential',access,mergeByName:false})
+    const source=await createCompany(userId,{workspaceId,name:'Fictional archived reference source',customFields:{[definition.fieldKey]:target.id},access,mergeByName:false})
+    await archiveCrmFieldDefinition(userId,workspaceId,definition.id)
+    expect(await updateCompany(userId,source.id,{domain:'fictional.example'},access)).toMatchObject({id:source.id,domain:'fictional.example'})
+    const before=(await owner.query('SELECT attributes,sensitivity,scope_version::text AS version FROM entities WHERE id=$1',[source.id])).rows[0]
+    expect(before.sensitivity).toBe('confidential');expect(before.attributes.custom_fields[definition.fieldKey]).toBe(target.id)
+    const connection=await client()
+    try {await expect(connection.query("UPDATE entities SET sensitivity='internal' WHERE id=$1",[source.id])).rejects.toMatchObject({code:'42501'})}
+    finally {await connection.query('ROLLBACK');connection.release()}
+    expect((await owner.query('SELECT attributes,sensitivity,scope_version::text AS version FROM entities WHERE id=$1',[source.id])).rows[0]).toEqual(before)
+  })
+  it('Q05 preserves an untouched archived reference during a typed unrelated partial edit',async()=>{
+    const company=await createCompany(userId,{workspaceId,name:'Fictional archived relationship target',access,mergeByName:false})
+    const source=await createContact(userId,{workspaceId,name:'Fictional retained relationship source',companyId:company.id,access})
+    await setCrmArchived({ctx:access,entityId:company.id,archived:true})
+    expect(await updateContact(userId,source.id,{phone:'555-0199'},undefined,access)).toMatchObject({id:source.id,phone:'555-0199',companyId:company.id})
+  })
+  it('Q04 refuses moving a canonical native row between two otherwise authorized workspaces',async()=>{
+    const foreign=randomUUID(),value=await createCompany(userId,{workspaceId,name:'Fictional fixed workspace source',access,mergeByName:false})
+    await owner.query("INSERT INTO workspaces(id,name,owner_user_id) VALUES($1,'Fictional writable other workspace',$2)",[foreign,userId])
+    await owner.query("INSERT INTO workspace_members(workspace_id,user_id,role,clearance) VALUES($1,$2,'owner','confidential')",[foreign,userId])
+    const connection=await client()
+    try {await expect(connection.query('UPDATE entities SET workspace_id=$2 WHERE id=$1',[value.id,foreign])).rejects.toMatchObject({code:'42501'})}
+    finally {await connection.query('ROLLBACK');connection.release();await owner.query('DELETE FROM workspaces WHERE id=$1',[foreign])}
+    expect((await owner.query('SELECT workspace_id FROM entities WHERE id=$1',[value.id])).rows[0].workspace_id).toBe(workspaceId)
+  })
+  it.each([['Unnormalized alias'],[' alias'],['alias','alias'],[null]].map(aliases=>({aliases})))('Q04 refuses invalid raw canonical aliases: $aliases',async({aliases})=>{
+    const value=await createCompany(userId,{workspaceId,name:'Fictional raw aliases',access,mergeByName:false}),connection=await client()
+    try {await expect(connection.query('UPDATE entities SET aliases=$2::text[] WHERE id=$1',[value.id,aliases])).rejects.toMatchObject({code:'22023'})}
+    finally {await connection.query('ROLLBACK');connection.release()}
+    expect((await owner.query('SELECT aliases FROM entities WHERE id=$1',[value.id])).rows[0].aliases).toEqual([])
+  })
+  it('Q03/Q04 preserves assigned legacy Department membership for native relationship writes',async()=>{
+    const groups=createDbWorkspaceGroupStore(),team=await groups.createTeam(userId,workspaceId,{name:'Fictional reference Department',key:'fictional-reference-department'})
+    await groups.addMember(userId,team.id,readerId)
+    const projectId=randomUUID();await owner.query("INSERT INTO workspace_projects(id,workspace_id,name,normalized_name,created_by) VALUES($1,$2,'Fictional relation project','fictional relation project',$3)",[projectId,workspaceId,userId])
+    const before=(await owner.query('SELECT team_scope_mode FROM workspace_members WHERE workspace_id=$1 AND user_id=$2',[workspaceId,readerId])).rows[0].team_scope_mode
+    await owner.query("UPDATE workspace_members SET team_scope_mode='assigned' WHERE workspace_id=$1 AND user_id=$2",[workspaceId,readerId])
+    try {
+      const target=await createCompany(userId,{workspaceId,name:'Fictional classified Department company',sensitivity:'confidential',compartments:[team.compartmentKey!],projectIds:[projectId]})
+      const probe=await getAppPool().connect()
+      try {
+        await probe.query('BEGIN');await applyRLSGucs(probe,readerId)
+        // The legacy native write is valid; the independent derived-payload
+        // reader still requires Project membership and must remain held.
+        expect((await probe.query("SELECT read_admitted_native_scope_snapshot($1,'entity',$2) AS scope",[workspaceId,target.id])).rows[0].scope).toEqual({held:true})
+      } finally {await probe.query('ROLLBACK');probe.release()}
+      const contact=await createContact(readerId,{workspaceId,name:'Fictional Department contact',companyId:target.id})
+      expect(contact).toMatchObject({companyId:target.id,sensitivity:'confidential',compartments:[team.compartmentKey!],projectIds:[projectId]})
+    } finally {await owner.query('UPDATE workspace_members SET team_scope_mode=$3 WHERE workspace_id=$1 AND user_id=$2',[workspaceId,readerId,before])}
   })
   it('Q05 rolls back task supersession, child and Goal links without early lifecycle effects', async () => {
     const parent = await task(), child = await task('Fictional linked child',parent.id)
