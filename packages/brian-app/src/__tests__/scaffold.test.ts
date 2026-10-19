@@ -1,0 +1,71 @@
+import { beforeAll, afterAll, describe, expect, it } from 'vitest'
+import { execFileSync } from 'node:child_process'
+import { mkdtempSync, mkdirSync, readFileSync, realpathSync, rmSync, symlinkSync, writeFileSync } from 'node:fs'
+import { tmpdir } from 'node:os'
+import { dirname, join, resolve } from 'node:path'
+import { fileURLToPath } from 'node:url'
+import { createRequire } from 'node:module'
+import { scaffold, scaffoldFiles } from '../scaffold.js'
+const root=resolve(dirname(fileURLToPath(import.meta.url)),'../..'), require=createRequire(import.meta.url)
+let temporary:string
+const tool=(name:string)=>require.resolve(name)
+const run=(command:string,args:string[],cwd=temporary)=>execFileSync(command,args,{cwd,encoding:'utf8',stdio:'pipe',env:{...process.env,NO_COLOR:'1'}})
+beforeAll(()=>{
+  temporary=mkdtempSync(join(realpathSync(tmpdir()),'brian-sdk-packed-'))
+  run(process.execPath,[tool('typescript/bin/tsc'),'-p',join(root,'tsconfig.json')])
+  run('pnpm',['pack','--out',join(temporary,'kit.tgz')],root)
+  for(const [name,path]of [['brian-app',root],['shared',resolve(root,'../shared')],['core',resolve(root,'../core')]]){
+    const destination=join(temporary,'node_modules/@use-brian',name);mkdirSync(destination,{recursive:true})
+    const archive=join(temporary,`${name}.tgz`)
+    if(name!=='brian-app')run('pnpm',['pack','--out',archive],path)
+    run('tar',['-xzf',name==='brian-app'?join(temporary,'kit.tgz'):archive,'--strip-components=1','-C',destination])
+  }
+  mkdirSync(join(temporary,'node_modules/@types'),{recursive:true})
+  symlinkSync(dirname(tool('@types/node/package.json')),join(temporary,'node_modules/@types/node'))
+  // Only installed third-party tooling/types. All Brian code is unpacked from local tarballs.
+  symlinkSync(dirname(createRequire(resolve(root,'../shared/package.json')).resolve('zod/package.json')),join(temporary,'node_modules/zod'))
+  writeFileSync(join(temporary,'package.json'),JSON.stringify({type:'module'}))
+},120000)
+afterAll(()=>{if(temporary)rmSync(temporary,{recursive:true,force:true})})
+describe('[COMP:shared/brian-app-sdk] packed exports and scaffolds',()=>{
+  it('K01 executes the packed browser graph without Node globals or server/runtime root imports',()=>{
+    writeFileSync(join(temporary,'browser.mjs'),`import vm from 'node:vm';import {readFileSync} from 'node:fs';import assert from 'node:assert/strict';import {webcrypto} from 'node:crypto';
+const graph=[];const context=vm.createContext({URL,URLSearchParams,TextEncoder,Uint8Array,AbortController,Response,crypto:webcrypto,btoa,setTimeout,clearTimeout,fetch:async()=>new Response(JSON.stringify({version:'opaque',fields:['title'],evidence:{source:'proof'}}))});
+const cache=new Map();async function load(url){if(cache.has(url))return cache.get(url);const source=readFileSync(new URL(url),'utf8');graph.push(url);const m=new vm.SourceTextModule(source,{context,identifier:url});cache.set(url,m);await m.link(async(specifier,ref)=>{assert.ok(specifier.startsWith('./'),specifier);return load(new URL(specifier,ref.identifier).href)});return m}
+const module=await load(import.meta.resolve('@use-brian/brian-app/application'));await module.evaluate();const sdk=module.namespace;
+assert.equal(vm.runInContext('typeof process+typeof Buffer+typeof require+typeof localStorage',context),'undefinedundefinedundefinedundefined');
+const client=sdk.createApplicationClient({appId:'00000000-0000-4000-8000-000000000001',transport:sdk.createFetchTransport({apiOrigin:'https://brain.example',credential:async()=>'oat_00000000-0000-4000-8000-000000000001_sssssssssssssssssssssssssssssssssssssssssss'})});
+assert.equal((await client.catalog()).evidence.source,'proof');assert.equal((await sdk.createApplicationSignIn({apiOrigin:'https://brain.example',appId:'00000000-0000-4000-8000-000000000001',clientId:'public',redirectUri:'https://portal.example/callback'}).begin()).authorizationUrl.includes('code_challenge_method=S256'),true);
+assert.ok(graph.every(path=>!path.includes('/core/')&&!path.includes('/shared/')&&!path.includes('/module.js')&&!path.includes('/connector.js')));console.log(JSON.stringify({graph,nodeGlobals:false}));`)
+    const output=run(process.execPath,['--experimental-vm-modules','browser.mjs'])
+    expect(JSON.parse(output).graph.map((p:string)=>p.split('/').pop()).sort()).toEqual(['application.js','sign-in.js','transport.js'])
+  })
+  it.each(['native','connector']as const)('K05 compiles/runs %s outside the workspace using only packed public profiles',profile=>{
+    const directory=join(temporary,profile)
+    run(process.execPath,[join(temporary,'node_modules/@use-brian/brian-app/bin/brian-app.js'),'scaffold','--profile',profile,directory])
+    run('npm',['run','build'],directory)
+    expect(run('npm',['run','contract'],directory)).toContain('unconfigured boundary: unavailable')
+    expect(readFileSync(join(directory,'src',profile==='native'?'module.ts':'source.ts'),'utf8')).toContain('@use-brian/brian-app/')
+    if(profile==='native'){
+      const cli=join(temporary,'node_modules/@use-brian/brian-app/bin/brian-app.js')
+      expect(run(process.execPath,[cli,directory])).toContain('Example application')
+      expect(run(process.execPath,[cli,'lint',directory])).toContain('Example application')
+      // A real external type error must remain visible through packed canonical declarations.
+      writeFileSync(join(directory,'src/invalid.ts'),`import type {ApplicationCommand} from '@use-brian/brian-app/application'; const command:ApplicationCommand={idempotencyKey:'x',expectedVersion:12,input:{}};`)
+      expect(()=>run(process.execPath,[tool('typescript/bin/tsc'),'-p',join(directory,'tsconfig.json')])).toThrow()
+      rmSync(join(directory,'src/invalid.ts'))
+    }
+  })
+  it('K06 validates deterministic templates and refuses traversal, symlinks, unknown profiles and overwrites',()=>{
+    expect(scaffoldFiles('native')).toEqual(scaffoldFiles('native'));expect(scaffoldFiles('connector')).toEqual(scaffoldFiles('connector'))
+    expect(()=>scaffoldFiles('unknown'as never)).toThrow('Unknown scaffold profile')
+    expect(()=>scaffold('native',join(temporary,'x/../escape'))).toThrow('Unsafe')
+    const occupied=join(temporary,'occupied');mkdirSync(occupied);writeFileSync(join(occupied,'keep'),'existing')
+    expect(()=>scaffold('native',occupied)).toThrow('empty');expect(readFileSync(join(occupied,'keep'),'utf8')).toBe('existing')
+    const link=join(temporary,'link');symlinkSync(occupied,link);expect(()=>scaffold('connector',link)).toThrow('Unsafe')
+    for(const profile of ['native','connector']as const){
+      const directory=join(temporary,`${profile}-deterministic`);scaffold(profile,directory)
+      for(const[path,body]of Object.entries(scaffoldFiles(profile)))expect(readFileSync(join(directory,path),'utf8')).toBe(body)
+    }
+  })
+})
