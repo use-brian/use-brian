@@ -1,5 +1,5 @@
 /** Native canonical transaction composition, not a substitute CRM/task store. */
-import { randomUUID } from 'node:crypto'
+import { randomUUID, randomBytes } from 'node:crypto'
 import express from 'express'
 import request from 'supertest'
 import { viewsRoutes, type ViewsRouteOptions } from '../../routes/views.js'
@@ -9,7 +9,7 @@ import { afterAll, beforeAll, describe, expect, it } from 'vitest'
 import { z } from 'zod'
 import type { PoolClient } from 'pg'
 import { createCrmTools, executionToolContext, boundScopeSources, type ApplicationModuleDefinition, type TaskRecord, type TaskUpdateFields,type CompanyUpdateFields,type ContactUpdateFields,type DealUpdateFields,type EntityCreateParams,type EntityUpdateFields,type EntitySupersedePatch } from '@use-brian/core'
-import { ApplicationPlatformError } from '@use-brian/shared'
+import { ApplicationPlatformError,type ApplicationJson } from '@use-brian/shared'
 import { applyRLSGucs, getAppPool, getPool } from '../../db/client.js'
 import { bindTaskClosedHook, createTask, getTaskById, resolveTaskById, updateTask } from '../../db/tasks.js'
 import { createCompany,createContact,createDeal,getDealById,listDeals,updateCompany,updateContact,updateDeal,setDealStage } from '../../db/crm.js'
@@ -19,6 +19,12 @@ import { createDbCrmStore } from '../../db/crm-store.js'
 import { createDbCrmOperationsStore } from '../../db/crm-operations-store.js'
 import { createCrmOperationsService } from '../../crm-operations/service.js'
 import { findAssistantById } from '../../db/users.js'
+import { createDbOAuthClientStore } from '../../db/oauth-client-store.js'
+import { hashSecret } from '../../db/api-key-store.js'
+import { authenticateApplicationCredential,mintApplicationCredentialSecret } from '../credentials.js'
+import { authenticateApplicationOAuth } from '../oauth-auth.js'
+import { loadApplicationCredentialStateSystem } from '../auth-store.js'
+import { resolveApplicationExecutionContext } from '../execution-context.js'
 import { resolveExecutionContextSystem } from '../../context-scope/execution-context.js'
 import { ApplicationPlatformService } from '../service.js'
 import { createCanonicalNativeApplicationModule } from '../native-adapters.js'
@@ -29,6 +35,7 @@ await assertLocalFixture()
 describe('[COMP:api/application-records] canonical native operation composition', () => {
   const owner = getPool(), workspaceId = randomUUID(), userId = randomUUID(), readerId = randomUUID(), assistantId = randomUUID()
   const access = { workspaceId, userId, assistantId, assistantKind: 'primary' as const }
+  const fixtureUsers:string[]=[userId,readerId],fixtureOAuthClients:string[]=[]
   beforeAll(async () => {
     for (const id of [userId,readerId]) await owner.query('INSERT INTO users(id,auth_provider_id) VALUES($1::uuid,$1::text)', [id])
     await owner.query("INSERT INTO workspaces(id,name,owner_user_id,department_read_v2) VALUES($1,'Fictional native operations',$2,false)", [workspaceId,userId])
@@ -39,7 +46,8 @@ describe('[COMP:api/application-records] canonical native operation composition'
   afterAll(async () => {
     bindTaskClosedHook(null)
     await owner.query('DELETE FROM workspaces WHERE id=$1', [workspaceId])
-    await owner.query('DELETE FROM users WHERE id=ANY($1::uuid[])', [[userId,readerId]])
+    if(fixtureOAuthClients.length) await owner.query('DELETE FROM oauth_clients WHERE client_id=ANY($1::text[])',[fixtureOAuthClients])
+    await owner.query('DELETE FROM users WHERE id=ANY($1::uuid[])', [fixtureUsers])
     await getAppPool().end(); await owner.end()
   })
   const version = (task: TaskRecord) => boundScopeSources(task)[0].version!
@@ -674,40 +682,60 @@ describe('[COMP:api/application-records] canonical native operation composition'
           FOR EACH ROW EXECUTE FUNCTION native_operation_field_fixture_changed();
         CREATE FUNCTION native_operation_field_fixture_rules() RETURNS jsonb
         LANGUAGE sql IMMUTABLE SECURITY DEFINER SET search_path=pg_catalog,public,pg_temp AS $$
-          SELECT '[{"key":"name","read":[],"write":[],"releaseReadTo":["external_user","service"],"releaseWriteTo":["service"]},
-            {"key":"domain","read":[],"write":[],"releaseReadTo":["external_user","service"],"releaseWriteTo":["service"]},
+          SELECT '[{"key":"name","read":[],"write":[],"releaseReadTo":["external_user","service"],"releaseWriteTo":["external_user","service"]},
+            {"key":"domain","read":[],"write":[],"releaseReadTo":["external_user","service"],"releaseWriteTo":["external_user","service"]},
             {"key":"archivedAt","read":[],"write":[],"releaseReadTo":[],"releaseWriteTo":[]},
             {"key":"tags","read":[],"write":[],"releaseReadTo":[],"releaseWriteTo":[]},
             {"key":"externalRef","read":[],"write":[],"releaseReadTo":[],"releaseWriteTo":[]},
             {"key":"custom.cost","read":[["finance"]],"write":[["finance"]],"releaseReadTo":[],"releaseWriteTo":[]}]'::jsonb $$;
         REVOKE ALL ON FUNCTION native_operation_field_fixture_rules() FROM PUBLIC;
+        CREATE TABLE native_operation_field_fixture_config(workspace_id uuid PRIMARY KEY,rules jsonb,point_requires_finance boolean NOT NULL DEFAULT false);
+        CREATE TRIGGER native_operation_field_fixture_policy_configuration AFTER INSERT OR UPDATE OR DELETE ON public.native_operation_field_fixture_config
+          FOR EACH ROW EXECUTE FUNCTION native_operation_field_fixture_changed();
+        CREATE FUNCTION native_operation_field_fixture_rules_for(w uuid) RETURNS jsonb
+        LANGUAGE sql SECURITY DEFINER SET search_path=pg_catalog,public,pg_temp AS $$
+          SELECT coalesce((SELECT rules FROM public.native_operation_field_fixture_config WHERE workspace_id=w),public.native_operation_field_fixture_rules()) $$;
+        REVOKE ALL ON FUNCTION native_operation_field_fixture_rules_for(uuid) FROM PUBLIC;
         CREATE FUNCTION native_operation_field_fixture_keys(w uuid) RETURNS jsonb
         LANGUAGE sql SECURITY DEFINER SET search_path=pg_catalog,public,pg_temp AS $$
           SELECT to_jsonb(ARRAY['name','domain','tags','externalRef','archivedAt']||ARRAY(SELECT 'custom.'||field_key FROM public.crm_field_definitions
             WHERE workspace_id=w AND entity_kind='company' AND archived_at IS NULL ORDER BY field_key)) $$;
         REVOKE ALL ON FUNCTION native_operation_field_fixture_keys(uuid) FROM PUBLIC;
+        CREATE FUNCTION native_operation_field_fixture_keys_for(w uuid,t text) RETURNS jsonb
+        LANGUAGE sql SECURITY DEFINER SET search_path=pg_catalog,public,pg_temp AS $$
+          SELECT CASE t WHEN 'company' THEN public.native_operation_field_fixture_keys(w)
+            WHEN 'person' THEN '["name","email","phone"]'::jsonb WHEN 'deal' THEN '["name","stage","amount"]'::jsonb END $$;
+        REVOKE ALL ON FUNCTION native_operation_field_fixture_keys_for(uuid,text) FROM PUBLIC;
+        CREATE FUNCTION native_operation_field_fixture_rules_type(w uuid,t text) RETURNS jsonb
+        LANGUAGE sql SECURITY DEFINER SET search_path=pg_catalog,public,pg_temp AS $$
+          SELECT CASE WHEN t='company' THEN public.native_operation_field_fixture_rules_for(w)
+            ELSE (SELECT jsonb_agg(jsonb_build_object('key',field,'read','[]'::jsonb,'write','[]'::jsonb,
+              'releaseReadTo','["external_user","service"]'::jsonb,'releaseWriteTo','["external_user","service"]'::jsonb) ORDER BY position)
+              FROM jsonb_array_elements_text(public.native_operation_field_fixture_keys_for(w,t)) WITH ORDINALITY fields(field,position)) END $$;
+        REVOKE ALL ON FUNCTION native_operation_field_fixture_rules_type(uuid,text) FROM PUBLIC;
         CREATE FUNCTION native_operation_field_fixture_reader(w uuid,o jsonb,t text,i text) RETURNS jsonb
         LANGUAGE plpgsql SECURITY DEFINER SET search_path=pg_catalog,public,pg_temp AS $$
         DECLARE source jsonb;BEGIN
-          IF o<>'{"kind":"native","moduleKey":"native"}'::jsonb OR t<>'company' THEN RETURN NULL;END IF;
+          IF o<>'{"kind":"native","moduleKey":"native"}'::jsonb OR t NOT IN('company','person','deal') THEN RETURN NULL;END IF;
+          IF NOT EXISTS(SELECT 1 FROM public.entities WHERE workspace_id=w AND id=i::uuid AND kind=t) THEN RETURN NULL;END IF;
           source:=public.read_scope_source(w,'entity',i::uuid);
           RETURN jsonb_build_object('moduleKey','native','origin',o,'typeKey',t,'schemaVersion',public.native_operation_field_fixture_revision(w),
-            'policyVersion','1','recordVersion',source->>'version','fieldKeys',public.native_operation_field_fixture_keys(w),
-            'fields',CASE WHEN source->>'userId' IS NOT NULL THEN jsonb_set(public.native_operation_field_fixture_rules(),'{0,write}','[["finance"]]'::jsonb) ELSE public.native_operation_field_fixture_rules() END,'source',source);END $$;
+            'policyVersion','1','recordVersion',source->>'version','fieldKeys',public.native_operation_field_fixture_keys_for(w,t),
+            'fields',CASE WHEN source->>'userId' IS NOT NULL OR coalesce((SELECT point_requires_finance FROM public.native_operation_field_fixture_config WHERE workspace_id=w),false) THEN jsonb_set(public.native_operation_field_fixture_rules_type(w,t),'{0,write}','[["finance"]]'::jsonb) ELSE public.native_operation_field_fixture_rules_type(w,t) END,'source',source);END $$;
         REVOKE ALL ON FUNCTION native_operation_field_fixture_reader(uuid,jsonb,text,text) FROM PUBLIC;
         CREATE FUNCTION native_operation_field_fixture_catalog(w uuid,o jsonb,t text) RETURNS jsonb
         LANGUAGE plpgsql SECURITY DEFINER SET search_path=pg_catalog,public,pg_temp AS $$
         BEGIN
-          IF o<>'{"kind":"native","moduleKey":"native"}'::jsonb OR t<>'company' THEN RETURN NULL;END IF;
+          IF o<>'{"kind":"native","moduleKey":"native"}'::jsonb OR t NOT IN('company','person','deal') THEN RETURN NULL;END IF;
           RETURN jsonb_build_object('moduleKey','native','origin',o,'typeKey',t,'schemaVersion',public.native_operation_field_fixture_revision(w),
-            'policyVersion','1','fieldKeys',public.native_operation_field_fixture_keys(w),'fields',public.native_operation_field_fixture_rules(),
+            'policyVersion','1','fieldKeys',public.native_operation_field_fixture_keys_for(w,t),'fields',public.native_operation_field_fixture_rules_type(w,t),
             'scope',jsonb_build_object('workspaceId',w,'userId',NULL,'assistantId',NULL,'sensitivity','internal','compartments','[]'::jsonb,'projectIds','[]'::jsonb));END $$;
         REVOKE ALL ON FUNCTION native_operation_field_fixture_catalog(uuid,jsonb,text) FROM PUBLIC`)
       await createCrmFieldDefinition({userId,workspaceId,entityKind:'company',fieldKey:'cost',label:'Fictional cost',fieldType:'number'})
       await owner.query(`INSERT INTO application_native_field_contracts(module_key,contract_version,role_keys,metadata_reader,catalog_reader,configuration_required,configuration_reader)
         VALUES('native','1',ARRAY['finance'],'native_operation_field_fixture_reader(uuid,jsonb,text,text)'::regprocedure,
           'native_operation_field_fixture_catalog(uuid,jsonb,text)'::regprocedure,true,'native_operation_field_fixture_revision(uuid)'::regprocedure)`)
-      await owner.query("INSERT INTO application_native_resource_owners(workspace_id,origin,resource_type,module_key) VALUES($1,$2,'company','native')",[workspaceId,nativeOrigin])
+      await owner.query("INSERT INTO application_native_resource_owners(workspace_id,origin,resource_type,module_key) SELECT $1,$2,type,'native' FROM unnest(ARRAY['company','person','deal']) type",[workspaceId,nativeOrigin])
       // The provisioning actor has an explicit current field role; tested
       // ordinary readers never inherit owner status or that assignment.
       await owner.query("INSERT INTO application_native_role_assignments(workspace_id,module_key,user_id,role_key,issued_by_user_id) VALUES($1,'native',$2,'finance',$2)",[workspaceId,userId])
@@ -719,7 +747,11 @@ describe('[COMP:api/application-records] canonical native operation composition'
       await owner.query('DROP TRIGGER native_operation_field_fixture_configuration ON crm_field_definitions')
       await owner.query('DROP FUNCTION native_operation_field_fixture_reader(uuid,jsonb,text,text)')
       await owner.query('DROP FUNCTION native_operation_field_fixture_catalog(uuid,jsonb,text)')
+      await owner.query('DROP FUNCTION native_operation_field_fixture_rules_type(uuid,text)')
+      await owner.query('DROP FUNCTION native_operation_field_fixture_keys_for(uuid,text)')
       await owner.query('DROP FUNCTION native_operation_field_fixture_keys(uuid)')
+      await owner.query('DROP FUNCTION native_operation_field_fixture_rules_for(uuid)')
+      await owner.query('DROP TABLE native_operation_field_fixture_config')
       await owner.query('DROP FUNCTION native_operation_field_fixture_rules()')
       await owner.query('DROP FUNCTION native_operation_field_fixture_revision(uuid)')
       await owner.query('DROP FUNCTION native_operation_field_fixture_changed()')
@@ -738,6 +770,140 @@ describe('[COMP:api/application-records] canonical native operation composition'
     }
     const reader={...access,userId:readerId}
     async function snapshot(id:string) {return (await owner.query('SELECT attributes,scope_version::text AS version FROM entities WHERE id=$1',[id])).rows[0]}
+    async function protectedCreator(kind:'member'|'external_user'|'service',principalId?:string,type:'company'|'person'|'deal'='company') {
+      const appId=randomUUID(),grantId=randomUUID()
+      const fields=type==='company'?['name','domain']:type==='person'?['name','email','phone']:['name','stage','amount']
+      const key=type==='company'?'create_company':type==='person'?'create_contact':'create_deal'
+      let actor=principalId??readerId
+      if(kind!=='member' && !principalId) {
+        actor=randomUUID();fixtureUsers.push(actor)
+        await owner.query('INSERT INTO users(id,auth_provider,auth_provider_id) VALUES($1,$2,$3)',[actor,kind==='service'?'channel':'email',
+          kind==='service'?`app-service:${appId}:${randomUUID()}`:`fictional-${randomUUID()}@example.com`])
+      }
+      await owner.query(`INSERT INTO application_clients(id,workspace_id,module_key,name,client_mode,executing_assistant_id,created_by_user_id)
+        VALUES($1,$2,'native','Fictional protected creator','api_client',$3,$4)`,[appId,workspaceId,assistantId,userId])
+      await owner.query(`INSERT INTO application_access_grants(id,app_id,workspace_id,principal_kind,principal_user_id,issued_by_user_id,
+        resource_origin,resource_type,actions,read_fields,write_fields,selector,compartments,project_ids,clearance,starts_at)
+        VALUES($1,$2,$3,$4,$5,$6,'{"kind":"native","moduleKey":"native"}',$7,$8,'{}',$9,
+        '{"kind":"self"}','{}','{}','confidential',now()-interval '1 hour')`,[grantId,appId,workspaceId,kind,actor,userId,type,['create',`command:${key}`],fields])
+      const current=(await owner.query('SELECT * FROM application_access_grants WHERE id=$1',[grantId])).rows[0]
+      const maximum={version:1,grants:[{id:grantId,appId,workspaceId,principal:{kind,userId:actor},origin:nativeOrigin,typeKey:type,
+        actions:current.actions,readFields:[],writeFields:fields,selector:{kind:'self'},version:1,status:'active',
+        startsAt:current.starts_at.toISOString(),expiresAt:null,parentGrantId:null,compartments:[],projectIds:[],clearance:'confidential'}]}
+      if(kind==='service') {
+        const secret=await mintApplicationCredentialSecret()
+        await owner.query(`INSERT INTO application_api_credentials(id,app_id,workspace_id,issued_by_user_id,subject_user_id,name,credential_kind,secret_hash,parent_grant_id,expires_at)
+          VALUES($1,$2,$3,$4,$5,'Fictional protected key','service',$6,$7,now()+interval '1 hour')`,[secret.id,appId,workspaceId,userId,actor,secret.secretHash,grantId])
+        await owner.query('INSERT INTO application_credential_grants(credential_id,app_id,workspace_id,grant_id,maximum_grant) VALUES($1,$2,$3,$4,$5)',[secret.id,appId,workspaceId,grantId,maximum])
+        const credential=await authenticateApplicationCredential(secret.token,appId,loadApplicationCredentialStateSystem)
+        expect(credential).not.toBeNull();return {appId,grantId,actor,authentication:{credential:credential!}}
+      }
+      const client=await createDbOAuthClientStore().register({clientName:'Fictional protected client',clientUri:'https://portal.example',redirectUris:['https://portal.example/callback'],tokenEndpointAuthMethod:'none'})
+      fixtureOAuthClients.push(client.clientId);await owner.query('UPDATE application_clients SET oauth_client_id=$2 WHERE id=$1',[appId,client.clientId])
+      const id=randomUUID(),secret=randomBytes(32).toString('base64url')
+      await owner.query(`INSERT INTO oauth_authorizations(id,client_id,user_id,workspace_id,scope,audience,application_client_id,access_token_hash,access_token_expires_at)
+        VALUES($1,$2,$3,$4,'read_write','application',$5,$6,now()+interval '1 hour')`,[id,client.clientId,actor,workspaceId,appId,await hashSecret(secret)])
+      await owner.query('INSERT INTO application_oauth_bindings(authorization_id,app_id,workspace_id,principal_user_id,parent_grant_id,maximum_grants) VALUES($1,$2,$3,$4,$5,$6)',[id,appId,workspaceId,actor,grantId,JSON.stringify([maximum])])
+      const user=await authenticateApplicationOAuth(`oat_${id}_${secret}`,appId);expect(user).not.toBeNull()
+      return {appId,grantId,actor,authentication:{user:user!}}
+    }
+    it.each((['member','external_user','service'] as const).flatMap(kind=>(['company','person','deal'] as const).map(type=>({kind,type}))))(
+      'Q03/Q05 creates and replays a protected canonical $type as the actual $kind',async({kind,type})=>{
+      const fixture=await protectedCreator(kind,undefined,type),dispatcher=new ApplicationPlatformService([createCanonicalNativeApplicationModule()])
+      const key=type==='company'?'create_company':type==='person'?'create_contact':'create_deal'
+      const amount='9007199254740993.000000000000000001'
+      const input:Record<string,ApplicationJson>=type==='company'?{name:`Fictional protected company ${randomUUID()}`,domain:'fictional.example'}
+        :type==='person'?{name:`Fictional protected contact ${randomUUID()}`,email:'fictional@example.com',phone:'555-0100'}
+        :{stage:'qualified',amount}
+      const command={idempotencyKey:randomUUID(),input},invocation=await resolveApplicationExecutionContext(fixture.authentication)
+      const raced=await Promise.all([0,1].map(async()=>dispatcher.command(await resolveApplicationExecutionContext(fixture.authentication),'native',key,command)))
+      await expect(invocation.security.authority.assertCurrent()).resolves.toBeUndefined()
+      const first=raced[0];expect(raced[1]).toEqual(first)
+      expect(first.resources).toHaveLength(1);expect(first.resources[0].version).toBe('1')
+      const record=(await owner.query('SELECT created_by_user_id,created_by_assistant_id,attributes FROM entities WHERE id=$1',[first.resources[0].id])).rows[0]
+      expect(record).toMatchObject({created_by_user_id:fixture.actor,created_by_assistant_id:assistantId,
+        attributes:type==='company'?{domain:'fictional.example'}:type==='person'?{email:'fictional@example.com',phone:'555-0100'}:{stage:'qualified',amount}})
+      expect(record.attributes).not.toHaveProperty('tags')
+      expect(await dispatcher.command(await resolveApplicationExecutionContext(fixture.authentication),'native',key,command)).toEqual(first)
+      expect((await owner.query('SELECT resources FROM application_operation_receipts WHERE id=$1',[first.id])).rows[0].resources).toEqual(first.resources)
+      expect((await owner.query('SELECT count(*)::int AS count FROM application_committed_events WHERE receipt_id=$1',[first.id])).rows[0].count).toBe(1)
+      await expect(dispatcher.query(await resolveApplicationExecutionContext(fixture.authentication),'native','get',{type,id:first.resources[0].id,fields:['name']})).rejects.toMatchObject({code:'access_unavailable'})
+      await owner.query("UPDATE application_access_grants SET write_fields='{}' WHERE id=$1",[fixture.grantId])
+      await expect(dispatcher.command(await resolveApplicationExecutionContext(fixture.authentication),'native',key,command)).rejects.toMatchObject({code:'access_unavailable'})
+      expect((await owner.query('SELECT id FROM entities WHERE id=$1',[first.resources[0].id])).rows).toEqual([{id:first.resources[0].id}])
+      if(kind!=='member') expect((await owner.query('SELECT user_id FROM workspace_members WHERE workspace_id=$1 AND user_id=$2',[workspaceId,fixture.actor])).rows).toEqual([])
+    })
+    async function setCreatorPolicy(options:{finance?:boolean;point?:boolean}) {
+      const rules=(await owner.query('SELECT native_operation_field_fixture_rules() AS rules')).rows[0].rules
+      if(options.finance) rules[0].write=[['finance']]
+      await owner.query(`INSERT INTO native_operation_field_fixture_config(workspace_id,rules,point_requires_finance) VALUES($1,$2,$3)
+        ON CONFLICT(workspace_id) DO UPDATE SET rules=excluded.rules,point_requires_finance=excluded.point_requires_finance`,
+        [workspaceId,JSON.stringify(rules),options.point??false])
+    }
+    async function clearCreatorPolicy() {await owner.query('DELETE FROM native_operation_field_fixture_config WHERE workspace_id=$1',[workspaceId])}
+    async function creatorRole(actor:string) {
+      return (await owner.query(`INSERT INTO application_native_role_assignments(workspace_id,module_key,user_id,role_key,issued_by_user_id)
+        VALUES($1,'native',$2,'finance',$3) RETURNING id`,[workspaceId,actor,userId])).rows[0].id as string
+    }
+    const creatorCommand=()=>({idempotencyKey:randomUUID(),input:{name:`Fictional bounded native creation ${randomUUID()}`}})
+    async function absentCreator(command:ReturnType<typeof creatorCommand>) {
+      expect((await owner.query('SELECT id FROM entities WHERE workspace_id=$1 AND display_name=$2',[workspaceId,command.input.name])).rows).toEqual([])
+      expect((await owner.query('SELECT id FROM application_operation_receipts WHERE idempotency_key=$1',[command.idempotencyKey])).rows).toEqual([])
+    }
+    it('Q03/Q05 refuses a protected application create at a stricter actual native point',async()=>{
+      const fixture=await protectedCreator('member'),dispatcher=new ApplicationPlatformService([createCanonicalNativeApplicationModule()]),command=creatorCommand()
+      await setCreatorPolicy({point:true})
+      try {
+        await expect(dispatcher.command(await resolveApplicationExecutionContext(fixture.authentication),'native','create_company',command)).rejects.toMatchObject({code:'access_unavailable'})
+        await absentCreator(command)
+      } finally {await clearCreatorPolicy()}
+    })
+    it('Q03/Q05 admits a stricter actual native point only with the current member role and stops revoked replay',async()=>{
+      const fixture=await protectedCreator('member'),dispatcher=new ApplicationPlatformService([createCanonicalNativeApplicationModule()]),command=creatorCommand()
+      await setCreatorPolicy({point:true});const role=await creatorRole(readerId)
+      try {
+        const receipt=await dispatcher.command(await resolveApplicationExecutionContext(fixture.authentication),'native','create_company',command)
+        expect(receipt.resources[0].version).toBe('1')
+        await owner.query("UPDATE application_native_role_assignments SET status='revoked' WHERE id=$1",[role])
+        await expect(dispatcher.command(await resolveApplicationExecutionContext(fixture.authentication),'native','create_company',command)).rejects.toMatchObject({code:'access_unavailable'})
+        expect((await owner.query('SELECT id FROM entities WHERE workspace_id=$1 AND display_name=$2',[workspaceId,command.input.name])).rows.map(row=>row.id)).toEqual([receipt.resources[0].id])
+      } finally {await owner.query('DELETE FROM application_native_role_assignments WHERE id=$1',[role]);await clearCreatorPolicy()}
+    })
+    it('Q03/Q06 rolls back protected creation when the current issuer role contracts after the canonical insert',async()=>{
+      await setCreatorPolicy({finance:true})
+      const fixture=await protectedCreator('service'),command=creatorCommand(),base=createCanonicalNativeApplicationModule();let inserted=false
+      const role=(await owner.query("SELECT id FROM application_native_role_assignments WHERE workspace_id=$1 AND module_key='native' AND user_id=$2 AND role_key='finance' AND status='active'",[workspaceId,userId])).rows[0].id
+      const dispatcher=new ApplicationPlatformService([{...base,commands:{...base.commands,create_company:{...base.commands.create_company,
+        execute:async(context,raw)=>{const result=await base.commands.create_company.execute(context,raw);inserted=true;
+          await owner.query("UPDATE application_native_role_assignments SET status='revoked' WHERE id=$1",[role]);return result}}}}])
+      try {
+        await expect(dispatcher.command(await resolveApplicationExecutionContext(fixture.authentication),'native','create_company',command)).rejects.toMatchObject({code:'access_unavailable'})
+        expect(inserted).toBe(true);await absentCreator(command)
+      } finally {await creatorRole(userId);await clearCreatorPolicy()}
+    })
+    it('Q03 retains the native member role floor behind a protected external profile',async()=>{
+      await setCreatorPolicy({finance:true})
+      const fixture=await protectedCreator('external_user',readerId),dispatcher=new ApplicationPlatformService([createCanonicalNativeApplicationModule()]),command=creatorCommand()
+      let role:string|undefined
+      try {
+        await expect(dispatcher.command(await resolveApplicationExecutionContext(fixture.authentication),'native','create_company',command)).rejects.toMatchObject({code:'access_unavailable'})
+        await absentCreator(command)
+        role=await creatorRole(readerId)
+        expect((await dispatcher.command(await resolveApplicationExecutionContext(fixture.authentication),'native','create_company',command)).resources).toHaveLength(1)
+      } finally {if(role) await owner.query('DELETE FROM application_native_role_assignments WHERE id=$1',[role]);await clearCreatorPolicy()}
+    })
+    it('Q07 holds protected creators on unverified configuration and invalidates an invocation across restore',async()=>{
+      const fixture=await protectedCreator('service'),dispatcher=new ApplicationPlatformService([createCanonicalNativeApplicationModule()]),command=creatorCommand()
+      const previous=await resolveApplicationExecutionContext(fixture.authentication)
+      await owner.query("UPDATE application_native_field_contracts SET configuration_reader=NULL WHERE module_key='native'")
+      try {
+        await expect(resolveApplicationExecutionContext(fixture.authentication)).rejects.toThrow('Access changed')
+        await expect(dispatcher.command(previous,'native','create_company',command)).rejects.toThrow('Access changed')
+        await absentCreator(command)
+      } finally {await owner.query("UPDATE application_native_field_contracts SET configuration_reader='native_operation_field_fixture_revision(uuid)'::regprocedure WHERE module_key='native'")}
+      await expect(previous.security.authority.assertCurrent()).rejects.toThrow('Access changed')
+      expect((await dispatcher.command(await resolveApplicationExecutionContext(fixture.authentication),'native','create_company',command)).resources).toHaveLength(1)
+    })
     it('Q04/Q05 refuses creation when the actual private native point is stricter than its catalog',async () => {
       const before=(await owner.query('SELECT count(*)::int AS count FROM entities WHERE workspace_id=$1',[workspaceId])).rows[0].count
       await expect(createEntity({kind:'company',displayName:'Fictional private point',workspaceId,createdByUserId:readerId,userId:readerId,source:'user',attributes:{}}))
