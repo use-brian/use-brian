@@ -119,14 +119,15 @@ const store = createDbDocEntityStore({ actorUserId: USER_ID })
 
 // SQL-shape fixture only. Admission itself is covered by the guarded real
 // application/native-field integration matrix, not these database doubles.
-function canonicalReadFixture(options: { missing?: boolean; missingSchema?: boolean; changes?: DocEntityInstance['data'] } = {}) {
+function canonicalReadFixture(options: { missing?: boolean; missingSchema?: boolean; changes?: DocEntityInstance['data']; schemaRows?: unknown[] } = {}) {
   clientResponder = text => {
     if (text.includes('pg_catalog.pg_roles')) return { rows: [{ bypass: false }], rowCount: 1 }
     if (text.trim().startsWith('INSERT INTO entity_instances') || text.trim().startsWith('UPDATE entity_instances')) {
       return { rows: options.missing ? [] : [entityInstanceRow({ recordVersion: '1' })], rowCount: options.missing ? 0 : 1 }
     }
     if (text.trim().startsWith('DELETE FROM entity_instances')) return { rows: [], rowCount: 1 }
-    if (text.includes('FROM public.entity_types')) return { rows: options.missingSchema ? [] : [entityTypeRow()], rowCount: options.missingSchema ? 0 : 1 }
+    if (text.includes('FROM public.entity_types')) return { rows: options.missingSchema ? [] : options.schemaRows ?? [entityTypeRow()], rowCount: options.missingSchema ? 0 : options.schemaRows?.length ?? 1 }
+    if (text.includes('read_generic_application_catalog_state(')) return { rows: [{ value: { schemaVersion: '1',fields: SAMPLE_PROPERTIES.map(property => property.name) } }],rowCount: 1 }
     if (text.includes('FROM public.entity_instances')) return { rows: options.missing ? [] : [entityInstanceRow({ recordVersion: '1' })], rowCount: options.missing ? 0 : 1 }
     if (text.includes('read_generic_application_record(')) return { rows: [{ value: {
       id: ENTITY_ID, recordVersion: '1', values: { ...entityInstanceRow().data, ...options.changes }, absentFields: ['genre'], policyVersion: 'a'.repeat(64),
@@ -201,44 +202,37 @@ describe('[COMP:api/doc-entity-store] EntityType CRUD', () => {
     expect(mockQueryWithRLS).not.toHaveBeenCalled()
   })
 
-  it('getEntityType returns the row', async () => {
-    mockQueryWithRLS.mockResolvedValueOnce({
-      rows: [entityTypeRow()],
-      rowCount: 1,
-    } as never)
+  it('getEntityType returns the projected row', async () => {
+    canonicalReadFixture()
     const t = await store.getEntityType(WORKSPACE_ID, ENTITY_TYPE_ID)
     expect(t?.id).toBe(ENTITY_TYPE_ID)
-    const [, sql, params] = mockQueryWithRLS.mock.calls[0] as [string, string, unknown[]]
-    expect(sql).toContain('SELECT')
-    expect(sql).toContain('FROM entity_types')
-    expect(params).toEqual([ENTITY_TYPE_ID, WORKSPACE_ID])
+    const query = clientQueries.find(query => query.text.includes('FROM public.entity_types'))!
+    expect(query.text).toContain('SELECT')
+    expect(query.text).toContain('FROM public.entity_types')
+    expect(query.values).toEqual([ENTITY_TYPE_ID, WORKSPACE_ID])
+    expect(clientQueries.some(query => query.text.includes('read_generic_application_catalog_state'))).toBe(true)
   })
 
   it('getEntityType returns null when missing', async () => {
-    mockQueryWithRLS.mockResolvedValueOnce({ rows: [], rowCount: 0 } as never)
+    canonicalReadFixture({ missingSchema: true })
     expect(await store.getEntityType(WORKSPACE_ID, ENTITY_TYPE_ID)).toBeNull()
   })
 
   it('getEntityTypeByName uses the (workspace, name) UNIQUE constraint', async () => {
-    mockQueryWithRLS.mockResolvedValueOnce({
-      rows: [entityTypeRow()],
-      rowCount: 1,
-    } as never)
+    canonicalReadFixture()
     const t = await store.getEntityTypeByName(WORKSPACE_ID, 'Movie')
     expect(t?.name).toBe('Movie')
-    const [, sql, params] = mockQueryWithRLS.mock.calls[0] as [string, string, unknown[]]
-    expect(sql).toContain('workspace_id = $1 AND name = $2')
-    expect(params).toEqual([WORKSPACE_ID, 'Movie'])
+    const query = clientQueries.find(query => query.text.includes('FROM public.entity_types'))!
+    expect(query.text).toContain('workspace_id=$1 AND name=$2')
+    expect(query.values).toEqual([WORKSPACE_ID, 'Movie'])
   })
 
-  it('listEntityTypes returns all rows for the workspace', async () => {
-    mockQueryWithRLS.mockResolvedValueOnce({
-      rows: [entityTypeRow(), entityTypeRow({ id: 'other', name: 'Recipe' })],
-      rowCount: 2,
-    } as never)
+  it('listEntityTypes projects all rows for the workspace', async () => {
+    canonicalReadFixture({ schemaRows: [entityTypeRow(),entityTypeRow({ id: 'other',name: 'Recipe' })] })
     const list = await store.listEntityTypes(WORKSPACE_ID)
     expect(list).toHaveLength(2)
     expect(list[0].name).toBe('Movie')
+    expect(clientQueries.filter(query => query.text.includes('read_generic_application_catalog_state'))).toHaveLength(2)
   })
 
   it('updateEntityType bumps schema_version when properties change', async () => {
@@ -555,7 +549,8 @@ describe('[COMP:api/doc-entity-store] declared query admission', () => {
 })
 
 describe('[COMP:api/doc-entity-store] RLS routing', () => {
-  it('every read/write goes through queryWithRLS with the authenticated actor', async () => {
+  it('every read/write binds the authenticated actor on its RLS path', async () => {
+    canonicalReadFixture()
     mockQueryWithRLS.mockResolvedValue({
       rows: [entityTypeRow()],
       rowCount: 1,
@@ -567,5 +562,7 @@ describe('[COMP:api/doc-entity-store] RLS routing', () => {
     for (const call of mockQueryWithRLS.mock.calls) {
       expect(call[0]).toBe(USER_ID)
     }
+    expect(applyRLSGucs).toHaveBeenCalledTimes(2)
+    for (const call of vi.mocked(applyRLSGucs).mock.calls) expect(call).toEqual([fakeClient,USER_ID])
   })
 })

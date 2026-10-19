@@ -5,7 +5,7 @@ import { applicationAuthorityFieldCatalog, applicationAuthorityQueryFieldCeiling
   type ApplicationModuleDefinition, type ApplicationOperationContext, type PropertyDef } from '@use-brian/core'
 import { ApplicationPlatformError, applicationQuerySchema, applicationResourceSchema,
   type ApplicationQuery, type ApplicationRecordProjection, type ApplicationResourceDefinition, type ApplicationResourceRef } from '@use-brian/shared'
-import { createDbDocEntityStore, applyCanonicalApplicationRecordMutation, canonicalApplicationRecordMutationSchema,
+import { applyCanonicalApplicationRecordMutation, canonicalApplicationRecordMutationSchema,
   type CanonicalApplicationRecordMutation } from '../db/doc-entity-store.js'
 import { getApplicationExecutionBinding } from './execution-context.js'
 import { canonicalGenericResource,queryCanonicalGenericRecords } from './generic-reader.js'
@@ -31,8 +31,11 @@ async function resources(context: Context, type?: string): Promise<ApplicationRe
     const result = await context.transaction.query<{ resource: unknown }>('SELECT application_generic_catalog($1) AS resource', [type ?? null])
     return result.rows.map(row => applicationResourceSchema.parse(row.resource))
   }
-  const store = createDbDocEntityStore({ actorUserId: context.execution.security.access.userId, transaction: context.transaction })
-  return (await store.listEntityTypes(context.execution.security.access.workspaceId)).map(canonicalGenericResource).filter(resource => !type || resource.typeKey === type)
+  // Complete schema metadata remains internal to canonical validation. Public
+  // legacy catalogs project separately; SQL authorizes actual values/predicates.
+  const schemas = await context.transaction.query<{ id: string;schemaVersion: number;properties: PropertyDef[] }>(
+    'SELECT id,schema_version AS "schemaVersion",properties FROM public.entity_types WHERE workspace_id=$1', [context.execution.security.access.workspaceId])
+  return schemas.rows.map(canonicalGenericResource).filter(resource => !type || resource.typeKey === type)
 }
 async function resource(context: Context, type: string) {
   const matches = await resources(context, type)
@@ -79,12 +82,12 @@ async function history(context: Context, input: z.infer<typeof historyInput>) {
       { ref: { ...current.ref, version: row.record_version }, schemaVersion: row.schema_version,
         values: row.data, fields: Object.keys(row.data), policyVersion: current.policyVersion }, 'history'))
     readProofs.set(records, { type: input.type, schemaVersion: String(schema.schemaVersion), action: 'history', historyInput: input, records: [{ id: input.id, version: current.ref.version }] })
-    return records
+    return bindScopeSources(records,records.flatMap(record => boundScopeSources(record)))
   }
   const result = await context.transaction.query(`SELECT record_version::text,schema_version::text,data FROM application_record_revisions
     WHERE workspace_id=$1 AND entity_instance_id=$2 AND ($3::bigint IS NULL OR record_version<$3) ORDER BY record_version DESC LIMIT $4`,
   [schema.workspaceId, input.id, input.beforeVersion ?? null, input.limit])
-  const declared = new Set(schema.properties.map(property => property.name))
+  const declared = new Set([...current.fields,...(current.absentFields ?? [])])
   const records = []
   for (const row of result.rows) {
     const values = Object.fromEntries(Object.entries(row.data).filter(([key]) => declared.has(key))) as ApplicationRecordProjection['values']
@@ -92,7 +95,7 @@ async function history(context: Context, input: z.infer<typeof historyInput>) {
       values, fields: Object.keys(values), policyVersion: current.policyVersion }, 'history'))
   }
   readProofs.set(records, { type: input.type, schemaVersion: String(schema.schemaVersion), action: 'history', historyInput: input, records: [{ id: input.id, version: current.ref.version }] })
-  return records
+  return bindScopeSources(records,records.flatMap(record => boundScopeSources(record)))
 }
 
 async function authorizeReadResult(context: Context, result: unknown) {

@@ -326,6 +326,46 @@ describe('[COMP:security/native-field-policy] current canonical native field mas
     expect(await fieldSnapshot(sources[0],memberId)).toMatchObject({ held: false })
     expect(JSON.stringify(rendered)).not.toContain('application_field')
   })
+  it('Q02 projects every actual legacy schema discovery path through the current native catalog', async () => {
+    await clearRoles()
+    const fixture = await record(),legacy = createDbDocEntityStore({ actorUserId: memberId })
+    expect((await legacy.getEntityType(workspaceId,fixture.schema.id))?.properties.map(property => property.name)).toEqual(['title'])
+    expect((await legacy.getEntityTypeByName(workspaceId,fixture.schema.name))?.properties.map(property => property.name)).toEqual(['title'])
+    expect((await legacy.listEntityTypes(workspaceId)).find(type => type.id === fixture.schema.id)?.properties.map(property => property.name)).toEqual(['title'])
+    await assign('finance')
+    expect((await legacy.getEntityType(workspaceId,fixture.schema.id))?.properties.map(property => property.name)).toEqual(['title','cost'])
+  })
+  it('Q02 projects actual native history and retains its private wrapper observations for independent readers', async () => {
+    await clearRoles()
+    const fixture = await record(),service = new ApplicationPlatformService([createCanonicalGenericApplicationModule()])
+    const input = { type: fixture.type,id: fixture.row.id }
+    const hidden = await service.query(await nativeExecution(),'records','history',input) as ApplicationRecordProjection[]
+    expect(hidden).toHaveLength(1);expect(hidden[0].values).toEqual({ title: fixture.row.data.title })
+    const assignment = await assign();await assign('finance',otherId)
+    const readable = await service.query(await nativeExecution(),'records','history',input) as ApplicationRecordProjection[]
+    expect(readable[0].values).toEqual(fixture.row.data)
+    const sources = boundScopeSources(readable)
+    expect(sources.length).toBeGreaterThan(0)
+    await owner.query("UPDATE application_native_role_assignments SET status='revoked' WHERE id=$1",[assignment])
+    for (const source of sources) {
+      expect(await fieldSnapshot(source,memberId)).toMatchObject({ held: true })
+      expect(await fieldSnapshot(source,otherId)).toMatchObject({ held: false })
+    }
+  })
+  it('Q07 holds direct legacy reads and writes when required private configuration is unavailable', async () => {
+    await clearRoles()
+    const fixture = await writerRecord(),legacy = createDbDocEntityStore({ actorUserId: memberId })
+    await owner.query("UPDATE application_native_field_contracts SET configuration_required=true,configuration_reader=NULL WHERE module_key='writer_operations'")
+    try {
+      await expect(legacy.getEntity(workspaceId,fixture.row.id)).rejects.toMatchObject({ code: 'access_unavailable' })
+      await expect(legacy.getEntityType(workspaceId,fixture.schema.id)).rejects.toMatchObject({ code: 'access_unavailable' })
+      await expect(legacy.queryEntities(workspaceId,fixture.schema.id)).rejects.toMatchObject({ code: 'access_unavailable' })
+      await expect(legacy.updateEntity(workspaceId,fixture.row.id,{ data: { title: { kind: 'text',value: 'Fictional unverified policy write' } },lastEditedBy: memberId }))
+        .rejects.toMatchObject({ code: 'access_unavailable' })
+      expect((await owner.query('SELECT data,record_version::text AS version FROM entity_instances WHERE id=$1',[fixture.row.id])).rows[0])
+        .toEqual({ data: fixture.row.data,version: fixture.row.recordVersion })
+    } finally { await owner.query("UPDATE application_native_field_contracts SET configuration_required=false WHERE module_key='writer_operations'") }
+  })
   it('Q04 enforces the native field write set at the actual legacy canonical generic writer', async () => {
     await clearRoles()
     const fixture = await record(), legacy = createDbDocEntityStore({ actorUserId: memberId })

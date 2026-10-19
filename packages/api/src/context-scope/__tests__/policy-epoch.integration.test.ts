@@ -120,18 +120,25 @@ describe('[COMP:api/policy-epoch] canonical invocation policy epochs', () => {
       { key: 'cost',read: [['finance']],write: [['finance'],['approver']],releaseReadTo: [],releaseWriteTo: [] },
     ]
   }
-  async function catalogType(module = 'epoch_fixture') {
+  async function catalogType(module = 'epoch_fixture',claim = true) {
     const schema = await store.createEntityType({ workspaceId,name: `Fictional purchases ${randomUUID()}`,createdBy: ownerId,
       properties: [{ name: 'title',config: { kind: 'text' } },{ name: 'cost',config: { kind: 'number',format: 'decimal' } }] })
     const origin = { kind: 'generic' as const,entityTypeId: schema.id },type = `record.${schema.id}`
-    await owner.query('INSERT INTO application_native_resource_owners(workspace_id,origin,resource_type,module_key) VALUES($1,$2,$3,$4)',[workspaceId,origin,type,module])
-    await owner.query('INSERT INTO application_epoch_fixture_catalog(type_id,fields) VALUES($1,$2)',[schema.id,JSON.stringify(fields())])
-    return { schema,origin,type }
+    const catalog = { schema,origin,type }
+    if (claim) await claimCatalog(catalog,module)
+    return catalog
+  }
+  async function claimCatalog(catalog: { schema: { id: string };origin: { kind: 'generic';entityTypeId: string };type: string },module: string) {
+    await owner.query('INSERT INTO application_native_resource_owners(workspace_id,origin,resource_type,module_key) VALUES($1,$2,$3,$4)',[workspaceId,catalog.origin,catalog.type,module])
+    await owner.query('INSERT INTO application_epoch_fixture_catalog(type_id,fields) VALUES($1,$2)',[catalog.schema.id,JSON.stringify(fields())])
   }
   async function record(includeCost = true,module = 'epoch_fixture') {
-    const catalog = await catalogType(module),{ schema } = catalog
+    const catalog = await catalogType(module,false),{ schema } = catalog
     const row = await store.createEntity({ workspaceId,entityTypeId: schema.id,createdBy: ownerId,lastEditedBy: ownerId,sourceApp: 'api',
       data: { title: { kind: 'text',value: 'Fictional request' },...(includeCost ? { cost: { kind: 'number' as const,value: 42 } } : {}) } })
+    // Establish existing synthetic data before attaching its protected module.
+    // The owner principal receives no implicit field role from this setup.
+    await claimCatalog(catalog,module)
     const recordVersion = row.recordVersion
     if (!recordVersion) throw new Error('The canonical fixture requires its persisted record version.')
     await owner.query('INSERT INTO application_epoch_fixture_metadata(resource_id,fields) VALUES($1,$2)',[row.id,JSON.stringify(fields())])
@@ -284,6 +291,7 @@ describe('[COMP:api/policy-epoch] canonical invocation policy epochs', () => {
   })
   it.each(['missing','invalid_revision','invalid_acl'] as const)('C05 registered %s configuration holds old and fresh factories',async mode => {
     const fixture = await record(),execution = await nativeExecution()
+    expect((await store.getEntity(workspaceId,fixture.row.id))?.data.title).toEqual(fixture.row.data.title)
     if (mode === 'missing') await owner.query("UPDATE application_native_field_contracts SET configuration_reader=NULL WHERE module_key='epoch_fixture'")
     if (mode === 'invalid_revision') await owner.query(`CREATE OR REPLACE FUNCTION application_epoch_fixture_configuration_reader(w uuid) RETURNS text
       LANGUAGE sql SECURITY DEFINER SET search_path=pg_catalog,public,pg_temp AS $$ SELECT ''::text $$`)
@@ -293,6 +301,14 @@ describe('[COMP:api/policy-epoch] canonical invocation policy epochs', () => {
       await expect(nativeExecution()).rejects.toMatchObject({ reason: 'authority_changed' })
       const app = await application(fixture,'member')
       await expect(resolveApplicationExecutionContext(app.authentication)).rejects.toMatchObject({ reason: 'authority_changed' })
+      // The same real private monotonic port also restricts legacy callers
+      // that do not construct an assistant invocation around their SQL read.
+      await expect(store.getEntity(workspaceId,fixture.row.id)).rejects.toMatchObject({ code: 'access_unavailable' })
+      await expect(store.getEntityType(workspaceId,fixture.schema.id)).rejects.toMatchObject({ code: 'access_unavailable' })
+      await expect(store.queryEntities(workspaceId,fixture.schema.id)).rejects.toMatchObject({ code: 'access_unavailable' })
+      await expect(store.updateEntity(workspaceId,fixture.row.id,{ data: { title: { kind: 'text',value: 'Fictional held configuration patch' } },lastEditedBy: ownerId }))
+        .rejects.toMatchObject({ code: 'access_unavailable' })
+      expect((await owner.query('SELECT record_version::text AS version FROM entity_instances WHERE id=$1',[fixture.row.id])).rows[0].version).toBe(fixture.row.recordVersion)
     } finally {
       await owner.query('REVOKE ALL ON FUNCTION application_epoch_fixture_configuration_reader(uuid) FROM app_user')
       await owner.query(`CREATE OR REPLACE FUNCTION application_epoch_fixture_configuration_reader(w uuid) RETURNS text

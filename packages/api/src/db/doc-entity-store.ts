@@ -216,6 +216,15 @@ export function createDbDocEntityStore(boundActor?: { actorUserId: string; trans
     if (projection.ref.version !== row.recordVersion) throw new ApplicationPlatformError('access_unavailable', 'The record changed.')
     return projectedInstance(row,rowToType(schemas.rows[0]),projection)
   }
+  async function projectCanonicalType(client: PoolClient,row: EntityTypeRow): Promise<DocEntityType> {
+    const catalog = z.object({ schemaVersion: z.string(),fields: z.array(z.string()).max(128) }).strict().safeParse(
+      (await client.query<{ value: unknown }>('SELECT read_generic_application_catalog_state($1,$2) AS value',[row.workspaceId,row.id])).rows[0]?.value)
+    if (!catalog.success || catalog.data.schemaVersion !== String(row.schemaVersion)) {
+      throw new ApplicationPlatformError('access_unavailable','The schema is unavailable.')
+    }
+    const keys = new Set(catalog.data.fields)
+    return { ...rowToType(row),properties: row.properties.filter(property => keys.has(property.name)) }
+  }
   return {
     // ── EntityType CRUD ───────────────────────────────────────────────
 
@@ -259,34 +268,26 @@ export function createDbDocEntityStore(boundActor?: { actorUserId: string; trans
     },
 
     async getEntityType(workspaceId, id, options) {
-      const result = await canonicalQuery<EntityTypeRow>(
-        actor(workspaceId, options),
-        `SELECT ${ENTITY_TYPE_SELECT} FROM entity_types
-         WHERE id = $1 AND workspace_id = $2`,
-        [id, workspaceId],
-      )
-      return result.rows[0] ? rowToType(result.rows[0]) : null
+      return canonicalTransaction(actor(workspaceId,options),async client => {
+        const result = await client.query<EntityTypeRow>(`SELECT ${ENTITY_TYPE_SELECT} FROM public.entity_types WHERE id=$1 AND workspace_id=$2`,[id,workspaceId])
+        return result.rows[0] ? projectCanonicalType(client,result.rows[0]) : null
+      })
     },
 
     async getEntityTypeByName(workspaceId, name, options) {
-      const result = await canonicalQuery<EntityTypeRow>(
-        actor(workspaceId, options),
-        `SELECT ${ENTITY_TYPE_SELECT} FROM entity_types
-         WHERE workspace_id = $1 AND name = $2`,
-        [workspaceId, name],
-      )
-      return result.rows[0] ? rowToType(result.rows[0]) : null
+      return canonicalTransaction(actor(workspaceId,options),async client => {
+        const result = await client.query<EntityTypeRow>(`SELECT ${ENTITY_TYPE_SELECT} FROM public.entity_types WHERE workspace_id=$1 AND name=$2`,[workspaceId,name])
+        return result.rows[0] ? projectCanonicalType(client,result.rows[0]) : null
+      })
     },
 
     async listEntityTypes(workspaceId, options) {
-      const result = await canonicalQuery<EntityTypeRow>(
-        actor(workspaceId, options),
-        `SELECT ${ENTITY_TYPE_SELECT} FROM entity_types
-         WHERE workspace_id = $1
-         ORDER BY created_at DESC, id DESC`,
-        [workspaceId],
-      )
-      return result.rows.map(rowToType)
+      return canonicalTransaction(actor(workspaceId,options),async client => {
+        const result = await client.query<EntityTypeRow>(`SELECT ${ENTITY_TYPE_SELECT} FROM public.entity_types WHERE workspace_id=$1 ORDER BY created_at DESC,id DESC`,[workspaceId])
+        const types: DocEntityType[] = []
+        for (const row of result.rows) types.push(await projectCanonicalType(client,row))
+        return types
+      })
     },
 
     async updateEntityType(workspaceId, id, patch, options) {
