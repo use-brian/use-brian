@@ -172,6 +172,35 @@ describe('[COMP:security/native-field-policy] current canonical native field mas
       VALUES($1,$2,$3,$4,$5,$6,$7) RETURNING id`,[workspace,module,user,role,ownerId,starts,expires])).rows[0].id as string
   }
   async function clearRoles() { await owner.query('DELETE FROM application_native_role_assignments WHERE workspace_id=ANY($1::uuid[])',[[workspaceId,otherWorkspaceId]]) }
+  it('Q02 projects the actual legacy generic store getter before exposing native protected fields', async () => {
+    await clearRoles()
+    const fixture = await record(), legacy = createDbDocEntityStore({ actorUserId: memberId })
+    const visible = await legacy.getEntity(workspaceId, fixture.row.id)
+    expect(visible?.data).toEqual({ title: { kind: 'text', value: 'Fictional request' } })
+    await assign()
+    expect((await legacy.getEntity(workspaceId, fixture.row.id))?.data.cost).toEqual({ kind: 'number', value: 42 })
+  })
+  it('Q02 refuses a hidden native predicate at the actual legacy generic query store', async () => {
+    await clearRoles()
+    const fixture = await record(), legacy = createDbDocEntityStore({ actorUserId: memberId })
+    await expect(legacy.queryEntities(workspaceId, fixture.schema.id, [{ field: 'cost', op: 'eq', value: 42 }]))
+      .rejects.toMatchObject({ code: 'access_unavailable' })
+    await assign()
+    expect((await legacy.queryEntities(workspaceId, fixture.schema.id, [{ field: 'cost', op: 'eq', value: 42 }])).rows.map(row => row.id))
+      .toEqual([fixture.row.id])
+  })
+  it('Q04 enforces the native field write set at the actual legacy canonical generic writer', async () => {
+    await clearRoles()
+    const fixture = await record(), legacy = createDbDocEntityStore({ actorUserId: memberId })
+    const patch = { data: { ...fixture.row.data, cost: { kind: 'number' as const, value: 50 } }, lastEditedBy: memberId }
+    await expect(legacy.updateEntity(workspaceId, fixture.row.id, patch, { actorUserId: memberId, expectedRecordVersion: fixture.row.recordVersion }))
+      .rejects.toMatchObject({ code: 'access_unavailable' })
+    expect((await owner.query('SELECT data,record_version::text AS version FROM entity_instances WHERE id=$1', [fixture.row.id])).rows[0])
+      .toMatchObject({ data: fixture.row.data, version: fixture.row.recordVersion })
+    await assign('approver')
+    expect((await legacy.updateEntity(workspaceId, fixture.row.id, patch, { actorUserId: memberId, expectedRecordVersion: fixture.row.recordVersion })).recordVersion)
+      .toBe(String(BigInt(fixture.row.recordVersion) + 1n))
+  })
   const catalogOn = async (client: PoolClient,fixture: Awaited<ReturnType<typeof catalogType>>,type = fixture.type) =>
     (await client.query('SELECT read_native_application_field_catalog($1,$2,$3) AS value',[workspaceId,fixture.origin,type])).rows[0].value as
       { moduleKey: string;schemaVersion: string;policyVersion: string;readFields: string[];writeFields: string[] } | null
