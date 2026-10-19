@@ -29,7 +29,8 @@
  */
 
 import type { PoolClient, QueryResult, QueryResultRow } from 'pg'
-import { compileApplicationRecordQuery } from '../application-platform/record-query.js'
+import { canonicalGenericResource, queryCanonicalGenericRecords } from '../application-platform/generic-reader.js'
+import { readCanonicalGenericRecord } from '../application-platform/field-evidence.js'
 import type {
   DocEntityInstance,
   DocEntityStore,
@@ -44,10 +45,12 @@ import {
   cellValueSchema,
   validateDocApplicationSchema,
   applicationAuthorityCreationScope,
+  bindScopeSources,
+  boundScopeSources,
 } from '@use-brian/core'
 import { getAppPool, applyRLSGucs, queryWithRLS, rollbackAndRelease } from './client.js'
 import { currentAgentAccess } from './agent-access-context.js'
-import { ApplicationPlatformError } from '@use-brian/shared'
+import { ApplicationPlatformError, applicationQuerySchema } from '@use-brian/shared'
 import { applicationResourceRefSchema, type ApplicationResourceRef } from '@use-brian/shared'
 import { z } from 'zod'
 import { randomUUID } from 'node:crypto'
@@ -82,6 +85,9 @@ const ENTITY_INSTANCE_SELECT = `
   last_edited_by  AS "lastEditedBy",
   record_version::text AS "recordVersion"
 `
+// Metadata retains the legacy wire shape; protected values come only from the
+// canonical field reader, never from this SQL selection.
+const ENTITY_INSTANCE_METADATA_SELECT = ENTITY_INSTANCE_SELECT.replace('  data,\n', '')
 
 type EntityTypeRow = {
   id: string
@@ -168,6 +174,22 @@ export function createDbDocEntityStore(boundActor?: { actorUserId: string; trans
       throw new ApplicationPlatformError('access_unavailable', 'The resource is unavailable.')
     }
     return actorUserId
+  }
+  async function canonicalRead<T>(userId: string, operation: (client: PoolClient) => Promise<T>): Promise<T> {
+    const client = boundActor?.transaction ?? await getAppPool().connect(), own = !boundActor?.transaction
+    try {
+      if (own) await client.query('BEGIN')
+      const role = await client.query(`SELECT r.rolsuper OR r.rolbypassrls OR pg_has_role(r.oid,c.relowner,'USAGE') AS bypass
+        FROM pg_catalog.pg_roles r JOIN pg_catalog.pg_class c ON c.oid='public.entity_instances'::regclass WHERE r.rolname=current_user`)
+      if (role.rows[0]?.bypass !== false) throw new ApplicationPlatformError('access_unavailable', 'A non-owner application transaction is required.')
+      await applyRLSGucs(client, userId)
+      const value = await operation(client)
+      if (own) await client.query('COMMIT')
+      return value
+    } catch (error) {
+      if ((error as { code?: string }).code === '42501') throw new ApplicationPlatformError('access_unavailable', 'The record is unavailable.')
+      throw error
+    } finally { if (own) await rollbackAndRelease(client) }
   }
   return {
     // ── EntityType CRUD ───────────────────────────────────────────────
@@ -457,13 +479,19 @@ export function createDbDocEntityStore(boundActor?: { actorUserId: string; trans
     },
 
     async getEntity(workspaceId, id, options) {
-      const result = await canonicalQuery<EntityInstanceRow>(
-        actor(workspaceId, options),
-        `SELECT ${ENTITY_INSTANCE_SELECT} FROM entity_instances
-         WHERE id = $1 AND workspace_id = $2`,
-        [id, workspaceId],
-      )
-      return result.rows[0] ? rowToInstance(result.rows[0]) : null
+      return canonicalRead(actor(workspaceId, options), async client => {
+        const result = await client.query<Omit<EntityInstanceRow, 'data'>>(
+          `SELECT ${ENTITY_INSTANCE_METADATA_SELECT} FROM public.entity_instances
+           WHERE id=$1 AND workspace_id=$2 AND NOT scope_review_state_held('entity_instance',id)`, [id, workspaceId])
+        const row = result.rows[0]
+        if (!row) return null
+        const schemas = await client.query<EntityTypeRow>(`SELECT ${ENTITY_TYPE_SELECT} FROM public.entity_types WHERE workspace_id=$1 AND id=$2`,
+          [workspaceId, row.entityTypeId])
+        if (!schemas.rows[0]) throw new ApplicationPlatformError('access_unavailable', 'The schema is unavailable.')
+        const projection = await readCanonicalGenericRecord({ transaction: client, workspaceId }, canonicalGenericResource(rowToType(schemas.rows[0])), id)
+        if (projection.ref.version !== row.recordVersion) throw new ApplicationPlatformError('access_unavailable', 'The record changed.')
+        return bindScopeSources(rowToInstance({ ...row, data: projection.values as Record<string, CellValue> }), boundScopeSources(projection))
+      })
     },
 
     async updateEntity(workspaceId, id, patch, options) {
@@ -546,18 +574,25 @@ export function createDbDocEntityStore(boundActor?: { actorUserId: string; trans
     // ── Query ─────────────────────────────────────────────────────────
 
     async queryEntities(workspaceId, entityTypeId, filters, sort, limit, cursor, options) {
-      const actorUserId = actor(workspaceId,options)
-      const schema = await canonicalQuery<EntityTypeRow>(actorUserId,
-        `SELECT ${ENTITY_TYPE_SELECT} FROM entity_types WHERE workspace_id=$1 AND id=$2`,[workspaceId,entityTypeId])
-      if (!schema.rows[0]) return {rows:[]}
-      const cap = limit ?? 50
-      const compiled=compileApplicationRecordQuery(rowToType(schema.rows[0]),filters,sort,cap,cursor)
-      const result=await canonicalQuery<EntityInstanceRow>(actorUserId,
-        `SELECT ${ENTITY_INSTANCE_SELECT}, ${compiled.sortSelect} FROM entity_instances
-          WHERE ${compiled.where} ORDER BY ${compiled.orderBy} LIMIT ${compiled.limitParameter}`,compiled.values)
-      const hasMore=result.rows.length>cap
-      const selected=hasMore?result.rows.slice(0,cap):result.rows
-      return {rows:selected.map(rowToInstance),...(hasMore?{nextCursor:compiled.cursorFor(selected[selected.length-1])}:{})}
+      return canonicalRead(actor(workspaceId, options), async client => {
+        const schemas = await client.query<EntityTypeRow>(`SELECT ${ENTITY_TYPE_SELECT} FROM public.entity_types WHERE workspace_id=$1 AND id=$2`, [workspaceId, entityTypeId])
+        if (!schemas.rows[0]) throw new ApplicationPlatformError('access_unavailable', 'The schema is unavailable.')
+        const definition = canonicalGenericResource(rowToType(schemas.rows[0]))
+        const query = applicationQuerySchema.safeParse({ filters, sort, limit, cursor })
+        if (!query.success) throw new ApplicationPlatformError('invalid_value', 'The declared query is invalid.')
+        const { result } = await queryCanonicalGenericRecords({ transaction: client, workspaceId }, definition, query.data)
+        const metadata = await client.query<Omit<EntityInstanceRow, 'data'>>(`SELECT ${ENTITY_INSTANCE_METADATA_SELECT} FROM public.entity_instances
+          WHERE workspace_id=$1 AND entity_type_id=$2 AND id=ANY($3::uuid[])`, [workspaceId, entityTypeId, result.records.map(record => record.ref.id)])
+        const byId = new Map(metadata.rows.map(row => [row.id, row]))
+        const rows = result.records.map(record => {
+          const row = byId.get(record.ref.id)
+          if (!row || row.recordVersion !== record.ref.version) throw new ApplicationPlatformError('access_unavailable', 'The record changed.')
+          return bindScopeSources(rowToInstance({ ...row, data: record.values as Record<string, CellValue> }), boundScopeSources(record))
+        })
+        const sources = boundScopeSources(result)
+        bindScopeSources(rows, sources)
+        return bindScopeSources({ rows, ...(result.nextCursor ? { nextCursor: result.nextCursor } : {}) }, sources)
+      })
     },
   }
 }

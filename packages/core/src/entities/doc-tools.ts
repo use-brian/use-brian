@@ -924,7 +924,7 @@ export function createQueryEntitiesTool(
           input.cursor,
           { actorUserId: context.userId },
         )
-        const scopeEvidence = scopeEvidenceFromRows(result.rows)
+        const scopeEvidence = scopeEvidenceFromRows([result])
         context.scopeAccumulator?.note(scopeEvidence)
         return {
           data: {

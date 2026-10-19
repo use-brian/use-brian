@@ -1,17 +1,15 @@
 /** Deployed operations over the canonical generic record store. [COMP:api/application-records] */
 import { z } from 'zod'
-import { createHash } from 'node:crypto'
-import { isDeepStrictEqual } from 'node:util'
 import type { PoolClient } from 'pg'
-import { applicationAuthorityQueryFieldCeiling, applicationAuthorityFieldCatalog, assertApplicationWriteFields, assertApplicationQueryFields, bindScopeSources,boundScopeSources,propertyDefSchema,
-  type ApplicationModuleDefinition, type ApplicationOperationContext, type PropertyDef, type ScopeSource } from '@use-brian/core'
+import { applicationAuthorityFieldCatalog, applicationAuthorityQueryFieldCeiling, assertApplicationQueryFields, assertApplicationWriteFields, bindScopeSources,boundScopeSources,propertyDefSchema,
+  type ApplicationModuleDefinition, type ApplicationOperationContext, type PropertyDef } from '@use-brian/core'
 import { ApplicationPlatformError, applicationQuerySchema, applicationResourceSchema,
   type ApplicationQuery, type ApplicationRecordProjection, type ApplicationResourceDefinition, type ApplicationResourceRef } from '@use-brian/shared'
 import { createDbDocEntityStore, applyCanonicalApplicationRecordMutation, canonicalApplicationRecordMutationSchema,
   type CanonicalApplicationRecordMutation } from '../db/doc-entity-store.js'
 import { getApplicationExecutionBinding } from './execution-context.js'
-import { compileApplicationRecordQuery } from './record-query.js'
-import { bindApplicationFieldProjection,readCanonicalGenericApplicationRecord,readCanonicalGenericQueryDomain } from './field-evidence.js'
+import { canonicalGenericResource,queryCanonicalGenericRecords } from './generic-reader.js'
+import { bindApplicationFieldProjection,readCanonicalGenericApplicationRecord,canonicalGenericReadContext } from './field-evidence.js'
 import { readCurrentScopeSources } from '../db/derived-scope-store.js'
 
 type Context = ApplicationOperationContext<PoolClient>
@@ -27,18 +25,14 @@ const deleteInput = canonicalApplicationRecordMutationSchema.options[2].partial(
 const readProofs = new WeakMap<object, { type: string; schemaVersion: string; action: 'read' | 'query' | 'history';
   records: Array<{ id: string; version: string; fields?: string[] }>; requiredFields?: string[]; historyInput?: z.infer<typeof historyInput> }>()
 
-function canonicalResource(schema: { id: string; schemaVersion: number; properties: PropertyDef[] }): ApplicationResourceDefinition {
-  return applicationResourceSchema.parse({ typeKey: `record.${schema.id}`, origin: { kind: 'generic', entityTypeId: schema.id },
-    schemaVersion: String(schema.schemaVersion), fields: schema.properties.map(property => ({ key: property.name, label: property.name, kind: 'cell', property,
-      ...(property.config.kind === 'relation' ? { relationshipResolverKey: `relation.${createHash('sha256').update(property.name).digest('hex')}` } : {}) })) })
-}
+
 async function resources(context: Context, type?: string): Promise<ApplicationResourceDefinition[]> {
   if (getApplicationExecutionBinding(context.execution)) {
     const result = await context.transaction.query<{ resource: unknown }>('SELECT application_generic_catalog($1) AS resource', [type ?? null])
     return result.rows.map(row => applicationResourceSchema.parse(row.resource))
   }
   const store = createDbDocEntityStore({ actorUserId: context.execution.security.access.userId, transaction: context.transaction })
-  return (await store.listEntityTypes(context.execution.security.access.workspaceId)).map(canonicalResource).filter(resource => !type || resource.typeKey === type)
+  return (await store.listEntityTypes(context.execution.security.access.workspaceId)).map(canonicalGenericResource).filter(resource => !type || resource.typeKey === type)
 }
 async function resource(context: Context, type: string) {
   const matches = await resources(context, type)
@@ -58,80 +52,21 @@ async function get(context: Context, type: string, id: string): Promise<Applicat
   return record
 }
 async function query(context: Context, type: string, input: ApplicationQuery) {
-  const { definition, schema } = await resource(context, type)
-  const app = getApplicationExecutionBinding(context.execution)
-  const predicates = [...new Set(input.filters.map(filter => filter.field))]
-  const postFields = [...new Set([...input.sort.map(sort => sort.field),...input.aggregate.map(item => item.field)])]
-  const fields = [...new Set([...(input.fields ?? []),...predicates,...postFields])]
-  if (fields.some(field => !schema.properties.some(property => property.name === field))) throw unavailable()
-  if (input.cursor && input.aggregate.length) throw new ApplicationPlatformError('invalid_value', 'Aggregate queries cannot use a page cursor.')
-  if (app) assertApplicationQueryFields(input, applicationAuthorityQueryFieldCeiling(app.state.layers,
-    { workspaceId: schema.workspaceId, origin: definition.origin, typeKey: type, id: 'query', version: definition.schemaVersion }, schema.properties.map(property => property.name)))
-  const domainSources = await readCanonicalGenericQueryDomain(context,definition,fields,predicates)
-  const compiled = compileApplicationRecordQuery(schema, input.filters, input.sort, input.limit, input.cursor)
-  const values = [...compiled.values]
-  const bind = (value: unknown) => { values.push(value); return `$${values.length}` }
-  const candidatePort = `read_generic_application_query_candidates($1,$2,${bind(type)},${bind(predicates)}::text[],${bind(fields)}::text[])`
-  const postCheck = `require_application_query_fields(read_fields,${bind(postFields)}::text[])`
-  const aggregateSql = input.aggregate.map((item, index) => {
-    const property = schema.properties.find(property => property.name === item.field)
-    if (!property || ['files', 'multi_select', 'date'].includes(property.config.kind)
-      || item.operation === 'sum' && property.config.kind !== 'number') throw new ApplicationPlatformError('invalid_value', 'The declared aggregate is invalid.')
-    const field = `data->${bind(item.field)}::text->>'value'`
-    const expression = property.config.kind === 'number' ? `(${field})::numeric` : field
-    return `${item.operation}(${expression})::text AS "aggregate${index}"`
-  })
-  // Materialize field admission before evaluating predicates, then validate
-  // sort/aggregate dependencies only on matching records. All candidates and
-  // matches are consumed even when the returned page is shorter.
-  const result = await context.transaction.query(`WITH candidates AS MATERIALIZED (SELECT * FROM ${candidatePort}),
-    filtered AS MATERIALIZED (SELECT * FROM candidates r WHERE ${compiled.predicateWhere}),
-    checked AS MATERIALIZED (SELECT * FROM filtered WHERE ${postCheck}),
-    page AS MATERIALIZED (SELECT *,record_version::text AS version,${compiled.sortSelect} FROM checked r
-      WHERE ${compiled.where} ORDER BY ${compiled.orderBy} LIMIT ${compiled.limitParameter})
-    SELECT (SELECT coalesce(jsonb_agg(to_jsonb(page)),'[]') FROM page) AS page,
-      (SELECT coalesce(jsonb_agg(jsonb_build_object('id',id,'version',record_version::text)),'[]') FROM candidates) AS candidates,
-      (SELECT coalesce(jsonb_agg(jsonb_build_object('id',id,'version',record_version::text,'usesCreatedTime',created_at IS NOT NULL)),'[]') FROM checked) AS matches
-      ${aggregateSql.length ? `,(SELECT to_jsonb(totals) FROM (SELECT ${aggregateSql.join(',')} FROM checked) totals) AS aggregates` : ''}`, values)
-  const reference = z.object({ id: z.string().uuid(),version: z.string().min(1) })
-  const candidateRefs = z.array(reference).max(4096).parse(result.rows[0]?.candidates)
-  if (domainSources.length && (await context.transaction.query<{ admitted: boolean }>(
-    'SELECT assert_generic_application_query_candidates($1,$2,$3,$4,$5) AS admitted',
-    [schema.workspaceId,schema.id,domainSources[0].resourceId,domainSources[0].version,JSON.stringify(candidateRefs)],
-  )).rows[0]?.admitted !== true) throw unavailable()
-  const matches = z.array(reference.extend({ usesCreatedTime: z.boolean() })).max(4096).parse(result.rows[0]?.matches)
-  const rows = z.array(reference.extend({ data: z.record(z.unknown()),absent_fields: z.array(z.string()) }).passthrough()).max(input.limit+1).parse(result.rows[0]?.page)
-  const hasMore = rows.length > input.limit,selected = rows.slice(0,input.limit)
-  const selectedById = new Map(selected.map(row => [row.id,row]))
-  const matchingById = new Map(matches.map(row => [row.id,row]))
-  const sources: ScopeSource[] = [...domainSources],recordsById = new Map<string,ApplicationRecordProjection>()
-  for (const candidate of candidateRefs) {
-    const selectedRow = selectedById.get(candidate.id),match = matchingById.get(candidate.id)
-    const used = new Set(predicates)
-    if (match) {
-      postFields.forEach(field => used.add(field))
-      if (match.usesCreatedTime) schema.properties.filter(property => property.config.kind === 'created_time').forEach(property => used.add(property.name))
-    }
-    const outputFields = selectedRow ? input.fields ?? [...Object.keys(selectedRow.data),...selectedRow.absent_fields] : []
-    outputFields.forEach(field => used.add(field))
-    const capture = await readCanonicalGenericApplicationRecord(context,definition,candidate.id,{ fields: [...used].sort(),expectedVersion: candidate.version })
-    sources.push(...boundScopeSources(capture))
-    if (selectedRow) {
-      const outputValues = Object.fromEntries(Object.entries(capture.values).filter(([field]) => outputFields.includes(field)))
-      const expectedValues = Object.fromEntries(Object.entries(selectedRow.data).filter(([field]) => outputFields.includes(field)))
-      if (!isDeepStrictEqual(outputValues,expectedValues) || selectedRow.version !== candidate.version) throw unavailable()
-      const absentFields = (capture.absentFields ?? []).filter(field => outputFields.includes(field))
-      recordsById.set(candidate.id,bindScopeSources({ ref: capture.ref,values: outputValues,fields: Object.keys(outputValues),
-        policyVersion: capture.policyVersion,...(absentFields.length ? { absentFields } : {}) },boundScopeSources(capture)))
-    }
+  const { definition } = await resource(context, type)
+  const application = getApplicationExecutionBinding(context.execution)
+  if (application) {
+    const ref = { workspaceId: context.execution.security.access.workspaceId, origin: definition.origin, typeKey: type, id: 'query', version: definition.schemaVersion }
+    const fields = definition.fields.map(field => field.key)
+    const catalog = applicationAuthorityFieldCatalog(application.state.layers, ref, 'query', fields, [])
+    // The pure ceiling validates complete query paths. Its conservative field
+    // intersection is not candidate authority: SQL proves field coverage over
+    // the structural domain, allowing overlapping releases to union fields.
+    const paths = applicationAuthorityQueryFieldCeiling(application.state.layers, ref, fields)
+    assertApplicationQueryFields(input, { ...catalog, allowed: catalog.allowed && paths.allowed })
   }
-  const records = selected.map(row => { const record = recordsById.get(row.id);if (!record) throw unavailable();return record })
-  const aggregates = aggregateSql.length ? input.aggregate.map((item,index) => ({ ...item,
-    value: z.string().nullable().parse(result.rows[0].aggregates[`aggregate${index}`]) })) : undefined
-  const output = bindScopeSources({ records,...(hasMore ? { nextCursor: compiled.cursorFor(selected[selected.length-1]) } : {}),
-    ...(aggregates ? { aggregates } : {}) },sources)
-  readProofs.set(output,{ type,schemaVersion: definition.schemaVersion,action: 'query',records: candidateRefs })
-  return output
+  const { result, candidates } = await queryCanonicalGenericRecords(canonicalGenericReadContext(context), definition, input)
+  readProofs.set(result,{ type,schemaVersion: definition.schemaVersion,action: 'query',records: candidates })
+  return result
 }
 async function history(context: Context, input: z.infer<typeof historyInput>) {
   const current = await get(context, input.type, input.id)

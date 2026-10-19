@@ -47,6 +47,7 @@ vi.mock('../client.js', () => ({
 }))
 
 import { createDbDocEntityStore } from '../doc-entity-store.js'
+import { boundScopeSources } from '@use-brian/core'
 import { applyRLSGucs, queryWithRLS } from '../client.js'
 import type {
   DocEntityInstance,
@@ -115,6 +116,22 @@ beforeEach(() => {
 })
 
 const store = createDbDocEntityStore({ actorUserId: USER_ID })
+
+// SQL-shape fixture only. Admission itself is covered by the guarded real
+// application/native-field integration matrix, not these database doubles.
+function canonicalReadFixture(options: { missing?: boolean; missingSchema?: boolean } = {}) {
+  clientResponder = text => {
+    if (text.includes('pg_catalog.pg_roles')) return { rows: [{ bypass: false }], rowCount: 1 }
+    if (text.includes('FROM public.entity_types')) return { rows: options.missingSchema ? [] : [entityTypeRow()], rowCount: options.missingSchema ? 0 : 1 }
+    if (text.includes('FROM public.entity_instances')) return { rows: options.missing ? [] : [entityInstanceRow({ recordVersion: '1' })], rowCount: options.missing ? 0 : 1 }
+    if (text.includes('read_generic_application_record(')) return { rows: [{ value: {
+      id: ENTITY_ID, recordVersion: '1', values: entityInstanceRow().data, absentFields: ['genre'], policyVersion: 'a'.repeat(64),
+      sources: [{ workspaceId: WORKSPACE_ID, resourceKind: 'application_field', resourceId: ENTITY_ID, version: 'fixture-version',
+        userId: null, assistantId: null, sensitivity: 'internal', compartments: [], projectIds: [] }],
+    } }], rowCount: 1 }
+    return { rows: [], rowCount: 0 }
+  }
+}
 
 describe('[COMP:api/doc-entity-store] EntityType CRUD', () => {
   it('createEntityType inserts with default schemaVersion=1', async () => {
@@ -473,16 +490,17 @@ describe('[COMP:api/doc-entity-store] EntityInstance CRUD', () => {
   })
 
   it('getEntity returns the row', async () => {
-    mockQueryWithRLS.mockResolvedValueOnce({
-      rows: [entityInstanceRow()],
-      rowCount: 1,
-    } as never)
+    canonicalReadFixture()
     const e = await store.getEntity(WORKSPACE_ID, ENTITY_ID)
     expect(e?.id).toBe(ENTITY_ID)
+    expect(e?.data).toEqual(entityInstanceRow().data)
+    expect(boundScopeSources(e!)).toMatchObject([{ resourceKind: 'application_field', version: 'fixture-version' }])
+    expect(applyRLSGucs).toHaveBeenCalledWith(fakeClient, USER_ID)
+    expect(clientQueries.find(query => query.text.includes('FROM public.entity_instances'))?.text).not.toContain('  data,')
   })
 
   it('getEntity returns null when missing', async () => {
-    mockQueryWithRLS.mockResolvedValueOnce({ rows: [], rowCount: 0 } as never)
+    canonicalReadFixture({ missing: true })
     expect(await store.getEntity(WORKSPACE_ID, ENTITY_ID)).toBeNull()
   })
 
@@ -521,18 +539,19 @@ describe('[COMP:api/doc-entity-store] EntityInstance CRUD', () => {
 })
 
 describe('[COMP:api/doc-entity-store] declared query admission', () => {
-  it('returns no records for an unavailable schema without probing its records', async () => {
-    mockQueryWithRLS.mockResolvedValueOnce({rows:[],rowCount:0} as never)
-    expect(await store.queryEntities(WORKSPACE_ID,ENTITY_TYPE_ID)).toEqual({rows:[]})
-    expect(mockQueryWithRLS).toHaveBeenCalledTimes(1)
+  it('refuses an unavailable schema without probing its records or inventing empty evidence', async () => {
+    canonicalReadFixture({ missingSchema: true })
+    await expect(store.queryEntities(WORKSPACE_ID,ENTITY_TYPE_ID)).rejects.toMatchObject({ code: 'access_unavailable' })
+    expect(clientQueries.some(query => query.text.includes('FROM public.entity_instances'))).toBe(false)
+    expect(clientQueries.some(query => query.text.includes('read_generic_application_query_candidates'))).toBe(false)
   })
   it('refuses an undeclared filter before issuing the record query', async () => {
-    mockQueryWithRLS.mockResolvedValueOnce({rows:[entityTypeRow()],rowCount:1} as never)
+    canonicalReadFixture()
     await expect(store.queryEntities(WORKSPACE_ID,ENTITY_TYPE_ID,[{field:"title'; DROP TABLE records; --",op:'eq',value:'x'}])).rejects.toMatchObject({code:'invalid_value'})
-    expect(mockQueryWithRLS).toHaveBeenCalledTimes(1)
+    expect(clientQueries.some(query => query.text.includes('read_generic_application_query_candidates'))).toBe(false)
   })
   it('refuses a cursor that belongs to another query', async () => {
-    mockQueryWithRLS.mockResolvedValueOnce({rows:[entityTypeRow()],rowCount:1} as never)
+    canonicalReadFixture()
     await expect(store.queryEntities(WORKSPACE_ID,ENTITY_TYPE_ID,undefined,undefined,50,'invalid')).rejects.toMatchObject({code:'invalid_value'})
   })
 })

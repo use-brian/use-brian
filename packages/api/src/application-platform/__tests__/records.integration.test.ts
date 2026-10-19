@@ -153,8 +153,8 @@ describe('[COMP:api/application-records] real canonical generic record transacti
     await expect(store.queryEntities(workspaceId,schema.id,[],[{field:'quantity',direction:'desc'}],2,first.nextCursor)).rejects.toMatchObject({code:'invalid_value'})
   })
 
-  it('preserves PostgreSQL microseconds in default keyset cursors', async () => {
-    const schema = await type(), ids = [randomUUID(), randomUUID(), randomUUID()]
+  it('preserves PostgreSQL microseconds in keyset cursors when creation metadata is readable', async () => {
+    const schema = await type([title, { name: 'created', config: { kind: 'created_time' } }]), ids = [randomUUID(), randomUUID(), randomUUID()]
     for (const [index, timestamp] of ['2026-01-01T00:00:00.123456Z', '2026-01-01T00:00:00.123455Z', '2026-01-01T00:00:00.123400Z'].entries()) {
       await queryWithRLS(userId, `INSERT INTO entity_instances(id,workspace_id,entity_type_id,data,created_by,last_edited_by,created_at)
         VALUES($1,$2,$3,$4,$5,$5,$6)`, [ids[index], workspaceId, schema.id, { title: { kind: 'text', value: `Precise record ${index}` } }, userId, timestamp])
@@ -168,6 +168,19 @@ describe('[COMP:api/application-records] real canonical generic record transacti
       if (!cursor) break
     }
     expect(seen).toEqual(ids)
+  })
+  it('does not use undeclared creation metadata in legacy query order or cursors', async () => {
+    const schema = await type(), ids = [randomUUID(), randomUUID()].sort().reverse()
+    for (const [index, id] of ids.entries()) {
+      await queryWithRLS(userId, `INSERT INTO entity_instances(id,workspace_id,entity_type_id,data,created_by,last_edited_by,created_at)
+        VALUES($1,$2,$3,$4,$5,$5,$6)`, [id, workspaceId, schema.id, { title: { kind: 'text', value: 'Fictional ordered record' } },
+        userId, index === 0 ? '2026-01-01T00:00:00Z' : '2026-02-01T00:00:00Z'])
+    }
+    const first = await store.queryEntities(workspaceId, schema.id, [], [], 1)
+    expect(first.rows.map(row => row.id)).toEqual([ids[0]])
+    expect(JSON.parse(Buffer.from(first.nextCursor!, 'base64url').toString('utf8')).values).toEqual([null, ids[0]])
+    const next = await store.queryEntities(workspaceId, schema.id, [], [], 1, first.nextCursor)
+    expect(next.rows.map(row => row.id)).toEqual([ids[1]])
   })
 
   function execution(actorUserId = userId) {

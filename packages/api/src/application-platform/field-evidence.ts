@@ -15,11 +15,30 @@ const captureSchema = z.object({ values: z.record(applicationJsonSchema), source
   policyVersion: z.string().regex(/^[a-f0-9]{64}$/) }).strict()
 function unavailable(): never { throw new ApplicationPlatformError('access_unavailable', 'The source is unavailable.') }
 
+/** The SQL connection, not this descriptor, authenticates and authorizes the reader. */
+export interface CanonicalGenericReadContext {
+  transaction: PoolClient
+  workspaceId: string
+  applicationFingerprint?: string
+}
+export function canonicalGenericReadContext(context: ApplicationOperationContext<PoolClient>): CanonicalGenericReadContext {
+  const application = getApplicationExecutionBinding(context.execution)
+  return { transaction: context.transaction, workspaceId: context.execution.security.access.workspaceId,
+    ...(application ? { applicationFingerprint: application.state.fingerprint } : {}) }
+}
+
 /** Generic values and absence are selected/captured under actual native/app SQL rights. */
 export async function readCanonicalGenericApplicationRecord(context: ApplicationOperationContext<PoolClient>,
   definition: ApplicationResourceDefinition,id: string,
   query?: { fields: readonly string[]; expectedVersion: string }): Promise<ApplicationRecordProjection> {
-  const origin = structuredClone(definition.origin),workspaceId = context.execution.security.access.workspaceId
+  return readCanonicalGenericRecord(canonicalGenericReadContext(context),definition,id,query)
+}
+
+/** Shared native/application SQL capture; no execution-context fabrication for legacy readers. */
+export async function readCanonicalGenericRecord(context: CanonicalGenericReadContext,
+  definition: ApplicationResourceDefinition,id: string,
+  query?: { fields: readonly string[]; expectedVersion: string }): Promise<ApplicationRecordProjection> {
+  const origin = structuredClone(definition.origin),workspaceId = context.workspaceId
   const declared = new Set(definition.fields.map(field => field.key)),fields = query ? [...query.fields] : undefined
   if (origin.kind !== 'generic') unavailable()
   const captured = captureSchema.extend({ id: z.string().uuid(),recordVersion: z.string().min(1),absentFields: z.array(z.string()).max(256) }).safeParse(
@@ -34,26 +53,20 @@ export async function readCanonicalGenericApplicationRecord(context: Application
     || [...Object.keys(captured.data.values),...captured.data.absentFields].some(field => !declared.has(field))
     || captured.data.absentFields.some(field => Object.hasOwn(captured.data.values,field))
     || fields && !isDeepStrictEqual([...fields].sort(),[...Object.keys(captured.data.values),...captured.data.absentFields].sort())) unavailable()
-  const application = getApplicationExecutionBinding(context.execution)
-  const policyVersion = application ? createHash('sha256').update(JSON.stringify({ application: application.state.fingerprint,field: captured.data.policyVersion })).digest('hex') : captured.data.policyVersion
+  const policyVersion = context.applicationFingerprint ? createHash('sha256').update(JSON.stringify({ application: context.applicationFingerprint,field: captured.data.policyVersion })).digest('hex') : captured.data.policyVersion
   return bindScopeSources({ ref: { workspaceId,origin,typeKey: definition.typeKey,id: captured.data.id,version: captured.data.recordVersion },
     values: captured.data.values,fields: Object.keys(captured.data.values),policyVersion,
     ...(captured.data.absentFields.length ? { absentFields: captured.data.absentFields } : {}) },captured.data.sources)
 }
 
 /** A row-free native/app domain is captured under actual current SQL ceilings. */
-export async function readCanonicalGenericQueryDomain(context: ApplicationOperationContext<PoolClient>,
+export async function readCanonicalGenericQueryDomain(context: CanonicalGenericReadContext,
   definition: ApplicationResourceDefinition,fields: readonly string[],predicateFields: readonly string[]): Promise<ScopeSource[]> {
   if (definition.origin.kind !== 'generic') unavailable()
-  const workspaceId = context.execution.security.access.workspaceId
+  const workspaceId = context.workspaceId
   const value = (await context.transaction.query<{ value: unknown }>('SELECT observe_generic_application_query_domain($1,$2,$3,$4,$5) AS value',
     [workspaceId,definition.origin.entityTypeId,definition.typeKey,[...fields],[...predicateFields]])).rows[0]?.value
-  // Other domain families remain unqualified; the candidate port holds empty
-  // results when there is no supported canonical domain proof.
-  if (value === null) {
-    if (getApplicationExecutionBinding(context.execution)) unavailable()
-    return []
-  }
+  if (value === null) unavailable()
   const parsed = captureSchema.safeParse(value)
   if (!parsed.success || Object.keys(parsed.data.values).length || parsed.data.sources[0].resourceKind !== 'application_field'
     || parsed.data.sources.some(source => source.workspaceId !== workspaceId)) unavailable()

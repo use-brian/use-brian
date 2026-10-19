@@ -6,7 +6,7 @@ import { runWithAgentAccess } from '../../db/agent-access-context.js'
 import { createDbDocEntityStore } from '../../db/doc-entity-store.js'
 import { createMemory,getMemoryById,countMemories,getMemoryIndex,getMemoryStats,searchMemories } from '../../db/memories.js'
 import { readApplicationFieldAncestors } from '../field-evidence.js'
-import { defineNativeApplicationFieldPolicy,decideNativeApplicationFields,ContextScopeAccumulator,executionToolContext,NOOP_TURN_LEDGER,boundScopeSources,
+import { defineNativeApplicationFieldPolicy,decideNativeApplicationFields,ContextScopeAccumulator,executionToolContext,NOOP_TURN_LEDGER,boundScopeSources,createDocEntityTools,
   type NativeApplicationFieldFacts,type ScopeSource,type ExecutionContext,type LLMProvider } from '@use-brian/core'
 import { findAssistantById,findOrCreateUser } from '../../db/users.js'
 import { resolveExecutionContextSystem } from '../../context-scope/execution-context.js'
@@ -188,6 +188,30 @@ describe('[COMP:security/native-field-policy] current canonical native field mas
     await assign()
     expect((await legacy.queryEntities(workspaceId, fixture.schema.id, [{ field: 'cost', op: 'eq', value: 42 }])).rows.map(row => row.id))
       .toEqual([fixture.row.id])
+  })
+  it('Q02 retains empty predicate evidence through the actual legacy store and Brain tool for independent readers', async () => {
+    await clearRoles()
+    const fixture = await record(), assignment = await assign()
+    await assign('finance', otherId)
+    const legacy = createDbDocEntityStore({ actorUserId: memberId })
+    const filters = [{ field: 'cost', op: 'eq' as const, value: 999 }]
+    const result = await legacy.queryEntities(workspaceId, fixture.schema.id, filters)
+    expect(result.rows).toEqual([])
+    const sources = boundScopeSources(result)
+    expect(sources.length).toBeGreaterThanOrEqual(2)
+    expect(boundScopeSources(result.rows)).toEqual(sources)
+    const tools = createDocEntityTools({ store: legacy, workspaceId, currentUserId: memberId, listBuiltInEntityTypes: () => [] })
+    const context = { ...executionToolContext(await nativeExecution(), { appId: 'legacy-query-fixture' }), scopeAccumulator: new ContextScopeAccumulator() }
+    const response = await tools.queryEntities.execute(tools.queryEntities.inputSchema.parse({ workspaceId, entityTypeId: fixture.schema.id, filters }), context)
+    expect(response.data).toMatchObject({ rows: [] })
+    expect(response.scopeEvidence?.sources).toEqual(expect.arrayContaining(sources))
+    expect(context.scopeAccumulator.evidence.sources).toEqual(expect.arrayContaining(sources))
+    for (const source of sources) expect(await fieldSnapshot(source, memberId)).toMatchObject({ held: false })
+    await owner.query("UPDATE application_native_role_assignments SET status='revoked' WHERE id=$1", [assignment])
+    for (const source of sources) {
+      expect(await fieldSnapshot(source, memberId)).toMatchObject({ held: true })
+      expect(await fieldSnapshot(source, otherId)).toMatchObject({ held: false })
+    }
   })
   it('Q04 enforces the native field write set at the actual legacy canonical generic writer', async () => {
     await clearRoles()
