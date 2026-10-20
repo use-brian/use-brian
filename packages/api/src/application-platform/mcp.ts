@@ -96,3 +96,16 @@ export async function buildNativeApplicationGovernanceMcpTools(service:Applicati
   {name:'applicationGovernanceApply',description:'Apply the same actor-bound native governance review once. Reconcile committed or uncertain effects in a fresh invocation.',
     inputSchema:applicationGovernanceApplyInput.shape,handler:invoke(input => {const value:ApplicationGovernanceApplyInput=applicationGovernanceApplyInput.parse(input);return service.applyGovernance(execution,value)},true)}]
 }
+
+import { applicationManagementCommandSchema,type ApplicationManagementService } from './management.js'
+
+/** Native human/Brian governance over the identical management command dispatcher. [COMP:api/application-management] */
+export function buildNativeApplicationManagementMcpTools(service:ApplicationManagementService,execution:ExecutionContext):BrainTool[] {
+  assertNativeApplicationGovernance(execution)
+  const actorId=execution.security.access.userId,workspaceId=execution.security.access.workspaceId
+  const invoke=applicationMcpInvoker(execution)
+  return [{name:'applicationManagementOverview',description:'Read your current application registration, exact grant/credential metadata, source availability and unqualified readiness. Never returns secrets or private source payloads.',
+    inputSchema:{appId:z.string().uuid().optional()},handler:invoke(input=>service.overview(actorId,workspaceId,{...input,assistantId:execution.assistant.id}))},
+    {name:'applicationManage',description:'Use the same native reviewed management commands as the human panel. Preview first and apply only an explicitly confirmed review. Uncertain writes require reconciliation, never automatic retry. Credential delivery returns a human-only link, never credential material.',
+    inputSchema:{command:applicationManagementCommandSchema},handler:invoke(input=>service.executeCommand(actorId,workspaceId,input.command,{audience:'brian',assistantId:execution.assistant.id}),true)}]
+}

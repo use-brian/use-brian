@@ -1,5 +1,8 @@
 /** Native app preparation and recovery; registration confers no data rights. [COMP:api/application-auth] */
 import type { Pool, PoolClient } from 'pg'
+import type { ApplicationManagementOverview } from '@use-brian/shared'
+import { projectionLifetime } from '../workspace-access/projection-lifetime.js'
+import { createDbDocEntityStore } from '../db/doc-entity-store.js'
 import { randomUUID } from 'node:crypto'
 import { ApplicationPlatformError, applicationClientInputSchema, applicationCredentialInputSchema, applicationGrantInputSchema, type ApplicationGrantInput } from '@use-brian/shared'
 import { z } from 'zod'
@@ -13,14 +16,101 @@ import { mintApplicationCredentialSecret } from './credentials.js'
 import { resolveExecutionContextSystem } from '../context-scope/execution-context.js'
 import { applicationSchemaPreviewInput } from './schema-changes.js'
 import { applicationGovernanceCatalogInput,applicationGovernanceModuleInput,applicationGovernancePreviewInput,applicationGovernanceApplyInput } from './governance.js'
-import { buildNativeApplicationSchemaMcpTools,buildNativeApplicationGovernanceMcpTools } from './mcp.js'
+import { buildNativeApplicationSchemaMcpTools,buildNativeApplicationGovernanceMcpTools,buildNativeApplicationManagementMcpTools } from './mcp.js'
 
 const clientColumns = `id,workspace_id AS "workspaceId",module_key AS "moduleKey",name,client_mode AS mode,
   origins,redirect_uris AS "redirectUris",home_app_id AS "homeAppId",oauth_client_id AS "oauthClientId",executing_assistant_id AS "executingAssistantId",
   status,grant_revision::text AS revision,created_at AS "createdAt"`
 const schemaAssistantInput = z.object({ assistantId: z.string().uuid().optional() }).strict()
 const schemaPreviewBody = applicationSchemaPreviewInput.omit({ typeId: true }).extend(schemaAssistantInput.shape).strict()
+
+/** One command vocabulary for the native human and Brian management adapters. */
+export const applicationManagementCommandSchema = z.discriminatedUnion('kind', [
+ z.object({kind:z.literal('register'),input:applicationClientInputSchema.innerType().omit({workspaceId:true})}).strict(),
+ z.object({kind:z.literal('status'),appId:z.string().uuid(),status:z.enum(['active','suspended','revoked'])}).strict(),
+ z.object({kind:z.literal('grant.review'),appId:z.string().uuid(),input:applicationGrantInputSchema}).strict(),
+ z.object({kind:z.literal('grant.apply'),appId:z.string().uuid(),reviewId:z.string().uuid()}).strict(),
+ z.object({kind:z.literal('grant.revoke'),appId:z.string().uuid(),grantId:z.string().uuid()}).strict(),
+ z.object({kind:z.literal('service.prepare'),appId:z.string().uuid(),input:z.object({name:z.string().min(1).max(128),idempotencyKey:z.string().uuid()}).strict()}).strict(),
+ z.object({kind:z.literal('credential.review'),appId:z.string().uuid(),input:applicationCredentialInputSchema}).strict(),
+ z.object({kind:z.literal('credential.deliver'),appId:z.string().uuid(),reviewId:z.string().uuid()}).strict(),
+ z.object({kind:z.literal('credential.revoke'),appId:z.string().uuid(),credentialId:z.string().uuid()}).strict(),
+ z.object({kind:z.literal('schema.preview'),schemaId:z.string().uuid(),input:schemaPreviewBody}).strict(),
+ z.object({kind:z.literal('schema.apply'),reviewId:z.string().uuid(),input:schemaAssistantInput}).strict(),
+ z.object({kind:z.literal('governance.catalog'),input:applicationGovernanceCatalogInput.extend(schemaAssistantInput.shape).strict()}).strict(),
+ z.object({kind:z.literal('governance.preview'),input:applicationGovernancePreviewInput.extend(schemaAssistantInput.shape).strict()}).strict(),
+ z.object({kind:z.literal('governance.apply'),reviewId:z.string().uuid(),input:schemaAssistantInput}).strict(),
+])
+
 export class ApplicationManagementService {
+  /** Bounded metadata only. All record/field policy remains in the existing canonical readers. */
+  async overview(actorId:string,workspaceId:string,rawSelection:unknown = {}):Promise<ApplicationManagementOverview> {
+    const selection=z.object({appId:z.string().uuid().optional(),assistantId:z.string().uuid().optional()}).strict().safeParse(rawSelection)
+    if(!selection.success)throw new ApplicationPlatformError('invalid_value','The management selection is invalid.')
+    const execution=await this.nativeSchemaExecution(actorId,workspaceId,selection.data.assistantId)
+    const clients=await this.list(actorId,workspaceId)
+    const appId=selection.data.appId ?? clients[0]?.id ?? null
+    if(appId&&!clients.some(app=>app.id===appId))throw new ApplicationPlatformError('access_unavailable','The application is unavailable.')
+    const metadata=await this.transaction(actorId,workspaceId,async client=>{
+      const validity=await projectionLifetime(client,workspaceId,actorId)
+      const sources=(await client.query<{id:string;connectorInstanceId:string;status:string;revision:string}>(`SELECT id,original_connector_instance_id AS "connectorInstanceId",status,revision::text
+        FROM connector_source_profiles WHERE workspace_id=$1 ORDER BY id LIMIT 100`,[workspaceId])).rows
+      return {validForMs:validity,sources}
+    })
+    const grants=appId?await this.listGrants(actorId,workspaceId,appId):[]
+    const credentials=appId?await this.listCredentials(actorId,workspaceId,appId):[]
+    let schemas:ApplicationManagementOverview['schemas']={state:'unavailable',items:[]}
+    try {
+      const items=await this.transaction(actorId,workspaceId,client=>runWithAgentAccess(execution.security.access,async()=>{
+        await applyRLSGucs(client,actorId)
+        await client.query("SELECT set_config('app.application_assistant_id',$1,true),set_config('app.v2_assistant_id',$1,true)",[execution.assistant.id])
+        return createDbDocEntityStore({actorUserId:actorId,transaction:client}).listEntityTypes(workspaceId)
+      }))
+      schemas={state:'available',items:items.map(({id,name,schemaVersion,properties})=>({id,name,schemaVersion,properties}))}
+    } catch(error) { if(!(error instanceof ApplicationPlatformError)||error.code!=='access_unavailable')throw error }
+    await execution.security.authority.assertCurrent()
+    // Revalidate native administration after all independently awaited readers.
+    await this.transaction(actorId,workspaceId,async()=>undefined)
+    const base=`/w/${encodeURIComponent(workspaceId)}`
+    return {workspaceId,actor:{userId:actorId,assistantId:execution.assistant.id},validForMs:metadata.validForMs,
+      readiness:{qualified:false,reason:'consumer_qualification_incomplete',legacyReview:'unavailable',canActivate:false},
+      modules:[...this.applications.registry.applications.keys()].sort(),clients,selectedAppId:appId,grants,credentials,schemas,
+      sources:{state:metadata.sources.length?'available':'unavailable',items:metadata.sources.map(source=>({...source,mappingStatus:'unavailable',keyStatus:'deployment_managed',retentionStatus:'unavailable'}))},
+      links:{miniApps:`${base}/studio/mini-apps`,connectors:`${base}/studio/connectors`,programmaticAccess:`${base}/studio/programmatic-access`,access:`${base}/organization?tab=access`}}
+  }
+
+  async executeCommand(actorId:string,workspaceId:string,raw:unknown,delivery:{audience:'human'|'brian';assistantId?:string}={audience:'human'}):Promise<unknown> {
+    const parsed=applicationManagementCommandSchema.safeParse(raw)
+    if(!parsed.success)throw new ApplicationPlatformError('invalid_value','The management command is invalid.')
+    const command=parsed.data
+    const assistant=delivery.assistantId?{assistantId:delivery.assistantId}:{}
+    switch(command.kind) {
+      case 'register':return this.create(actorId,{...command.input,workspaceId})
+      case 'status':return this.setStatus(actorId,workspaceId,command.appId,command.status)
+      case 'grant.review':return this.reviewGrant(actorId,workspaceId,command.appId,command.input)
+      case 'grant.apply':return this.applyGrantReview(actorId,workspaceId,command.appId,command.reviewId)
+      case 'grant.revoke':return this.revokeGrant(actorId,workspaceId,command.appId,command.grantId)
+      case 'service.prepare':return this.prepareServiceSubject(actorId,workspaceId,command.appId,command.input)
+      case 'credential.review':return this.reviewCredential(actorId,workspaceId,command.appId,command.input)
+      case 'credential.deliver':{
+        if(delivery.audience==='human')return this.applyCredentialReview(actorId,workspaceId,command.appId,command.reviewId)
+        await this.listCredentials(actorId,workspaceId,command.appId)
+        return {nativeDeliveryRequired:true,reviewId:command.reviewId,link:`/w/${encodeURIComponent(workspaceId)}/studio/programmatic-access?application=${encodeURIComponent(command.appId)}&credentialReview=${encodeURIComponent(command.reviewId)}`}
+      }
+      case 'credential.revoke':return this.revokeCredential(actorId,workspaceId,command.appId,command.credentialId)
+      case 'schema.preview':return this.previewSchema(actorId,workspaceId,command.schemaId,{...command.input,...assistant})
+      case 'schema.apply':return this.applySchema(actorId,workspaceId,command.reviewId,{...command.input,...assistant})
+      case 'governance.catalog':return this.governanceCatalog(actorId,workspaceId,{...command.input,...assistant})
+      case 'governance.preview':return this.previewGovernance(actorId,workspaceId,{...command.input,...assistant})
+      case 'governance.apply':return this.applyGovernance(actorId,workspaceId,command.reviewId,{...command.input,...assistant})
+    }
+  }
+  async managementMcpTools(actorId:string,workspaceId:string,rawSelection:unknown={}) {
+    const selection=schemaAssistantInput.safeParse(rawSelection)
+    if(!selection.success)throw new ApplicationPlatformError('invalid_value','The management assistant selection is invalid.')
+    return buildNativeApplicationManagementMcpTools(this,await this.nativeSchemaExecution(actorId,workspaceId,selection.data.assistantId))
+  }
+
   constructor(private readonly applications: ApplicationPlatformService, private readonly pool: Pool = getAppPool()) {}
 
   private async transaction<T>(actorId: string, workspaceId: string, operation: (client: PoolClient) => Promise<T>, effectful = false): Promise<T> {
@@ -145,6 +235,9 @@ export class ApplicationManagementService {
 
   setStatus(actorId: string, workspaceId: string, appId: string, status: 'active' | 'suspended' | 'revoked') {
     return this.transaction(actorId, workspaceId, async client => {
+      const current=await client.query<{status:string;qualified:boolean}>(`SELECT status,application_runtime_qualified(workspace_id,'application_data') AS qualified FROM application_clients WHERE id=$1 AND workspace_id=$2 FOR UPDATE`,[appId,workspaceId])
+      if(!current.rows[0]) throw new ApplicationPlatformError('access_unavailable','The application is unavailable.')
+      if(status==='active'&&current.rows[0].status!=='active'&&!current.rows[0].qualified) throw new ApplicationPlatformError('operation_not_available','Application runtime qualification is incomplete.')
       const result = await client.query(`UPDATE application_clients SET status=$3 WHERE id=$1 AND workspace_id=$2
         AND (status<>'revoked' OR $3='revoked') RETURNING ${clientColumns}`, [appId, workspaceId, status])
       if (!result.rows[0]) throw new ApplicationPlatformError('access_unavailable', 'The application is unavailable.')
@@ -155,9 +248,12 @@ export class ApplicationManagementService {
   }
 
   listGrants(actorId: string, workspaceId: string, appId: string) {
-    return this.transaction(actorId, workspaceId, async client => (await client.query(`SELECT id,principal_kind AS "principalKind",principal_user_id AS "principalUserId",
+    return this.transaction(actorId, workspaceId, async client => {
+      if(!(await client.query('SELECT id FROM application_clients WHERE workspace_id=$1 AND id=$2',[workspaceId,appId])).rows[0]) throw new ApplicationPlatformError('access_unavailable','The application is unavailable.')
+      return (await client.query(`SELECT id,principal_kind AS "principalKind",principal_user_id AS "principalUserId",
       resource_origin AS origin,resource_type AS "typeKey",actions,read_fields AS "readFields",write_fields AS "writeFields",selector,
-      status,version::text AS version,expires_at AS "expiresAt" FROM application_access_grants WHERE workspace_id=$1 AND app_id=$2 ORDER BY id`, [workspaceId, appId])).rows)
+      status,version::text AS version,starts_at AS "startsAt",expires_at AS "expiresAt",parent_grant_id AS "parentGrantId",compartments,project_ids AS "projectIds",clearance FROM application_access_grants WHERE workspace_id=$1 AND app_id=$2 ORDER BY id`, [workspaceId, appId])).rows
+    })
   }
 
   private async withReleaseAuthority<T>(client: PoolClient, actorId: string, workspaceId: string, appId: string, operation: () => Promise<T>) {
@@ -200,9 +296,12 @@ export class ApplicationManagementService {
   }
 
   listCredentials(actorId: string, workspaceId: string, appId: string) {
-    return this.transaction(actorId, workspaceId, async client => (await client.query(`SELECT id,name,credential_kind AS kind,subject_user_id AS "serviceUserId",
+    return this.transaction(actorId, workspaceId, async client => {
+      if(!(await client.query('SELECT id FROM application_clients WHERE workspace_id=$1 AND id=$2',[workspaceId,appId])).rows[0]) throw new ApplicationPlatformError('access_unavailable','The application is unavailable.')
+      return (await client.query(`SELECT id,name,credential_kind AS kind,subject_user_id AS "serviceUserId",
       status,expires_at AS "expiresAt",last_used_at AS "lastUsedAt",version::text AS version FROM application_api_credentials
-      WHERE workspace_id=$1 AND app_id=$2 ORDER BY created_at,id`, [workspaceId, appId])).rows)
+      WHERE workspace_id=$1 AND app_id=$2 ORDER BY created_at,id`, [workspaceId, appId])).rows
+    })
   }
 
   async prepareServiceSubject(actorId: string, workspaceId: string, appId: string, rawInput: unknown) {
