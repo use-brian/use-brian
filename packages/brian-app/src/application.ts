@@ -1,6 +1,7 @@
 /** Application browser profile. Canonical wire imports are erased. [COMP:shared/brian-app-sdk] */
 import type { ApplicationCommand, ApplicationJson, ApplicationModuleCatalog, ApplicationOperationReceipt,
   ApplicationQuery, ApplicationRecordProjection, ApplicationResourceDefinition } from '@use-brian/shared'
+import type { PropertyDef } from '@use-brian/core'
 import { ApplicationSdkError, appIdentifier, appOAuthToken, httpTransport, type ApplicationTransport,
   type HttpTransportOptions } from './transport.js'
 export { ApplicationSdkError } from './transport.js'
@@ -15,10 +16,18 @@ export interface ApplicationCatalog extends Pick<ApplicationModuleCatalog, 'vers
   operationSchemas: { queries: Record<string, unknown>; commands: Record<string, unknown> }
 }
 export interface ApplicationCallOptions { signal?: AbortSignal }
-/** Deployment-owned ports until the canonical R2 route contract is frozen. No guessed URL. */
+export interface ApplicationSchemaPreviewInput {
+  typeId: string; expectedVersion: number; properties: PropertyDef[]; assistantId?: string
+}
+export interface ApplicationSchemaApplyInput { previewId: string; assistantId?: string }
+export interface ApplicationSchemaPreviewResult {
+  id: string; entityTypeId: string; expectedSchemaVersion: number; before: PropertyDef[]; proposed: PropertyDef[]
+  affectedRecords: number; invalidRecords: number; canApply: boolean
+}
+export interface ApplicationSchemaApplyResult { entityTypeId: string; schemaVersion: number; applied: boolean }
 export interface ApplicationSchemaPorts {
-  preview(input: ApplicationJson, options?: ApplicationCallOptions): Promise<unknown>
-  apply(input: ApplicationCommand, options?: ApplicationCallOptions): Promise<unknown>
+  preview(input: ApplicationSchemaPreviewInput, options?: ApplicationCallOptions): Promise<ApplicationSchemaPreviewResult>
+  apply(input: ApplicationSchemaApplyInput, options?: ApplicationCallOptions): Promise<ApplicationSchemaApplyResult>
 }
 export function createFetchTransport(options: HttpTransportOptions & {
   credential: (appId: string) => Promise<string | null>
@@ -44,8 +53,8 @@ export function createApplicationClient(options: { appId: string; transport: App
       send<T>('GET', `/records/${segment(type)}/${segment(id)}/history${beforeVersion === undefined ? '' : `?beforeVersion=${encodeURIComponent(beforeVersion)}`}`, undefined, call),
     registeredQuery: <T = unknown>(key: string, input: ApplicationJson, call?: ApplicationCallOptions) => send<T>('POST', `/queries/${segment(key)}`, input, call),
     command: <T = ApplicationOperationReceipt>(key: string, command: ApplicationCommand, call?: ApplicationCallOptions) => send<T>('POST', `/commands/${segment(key)}`, command, call, true),
-    previewSchema: (input: ApplicationJson, call?: ApplicationCallOptions) => call?.signal?.aborted ? Promise.reject(new ApplicationSdkError('cancelled', 'none', false, undefined, true)) : options.schemas ? options.schemas.preview(input, call) : Promise.reject(new ApplicationSdkError('operation_not_available')),
-    applySchema: (input: ApplicationCommand, call?: ApplicationCallOptions) => call?.signal?.aborted ? Promise.reject(new ApplicationSdkError('cancelled', 'none', false, undefined, true)) : options.schemas ? options.schemas.apply(input, call) : Promise.reject(new ApplicationSdkError('operation_not_available')),
+    previewSchema: (input: ApplicationSchemaPreviewInput, call?: ApplicationCallOptions) => call?.signal?.aborted ? Promise.reject(new ApplicationSdkError('cancelled', 'none', false, undefined, true)) : options.schemas ? options.schemas.preview(input, call) : Promise.reject(new ApplicationSdkError('operation_not_available')),
+    applySchema: (input: ApplicationSchemaApplyInput, call?: ApplicationCallOptions) => call?.signal?.aborted ? Promise.reject(new ApplicationSdkError('cancelled', 'none', false, undefined, true)) : options.schemas ? options.schemas.apply(input, call) : Promise.reject(new ApplicationSdkError('operation_not_available')),
   }
 }
 export type ApplicationClient = ReturnType<typeof createApplicationClient>

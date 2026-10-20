@@ -28,6 +28,18 @@ beforeAll(()=>{
   // Only installed third-party tooling/types. All Brian code is unpacked from local tarballs.
   symlinkSync(dirname(createRequire(resolve(root,'../shared/package.json')).resolve('zod/package.json')),join(temporary,'node_modules/zod'))
   writeFileSync(join(temporary,'package.json'),JSON.stringify({type:'module'}))
+  writeFileSync(join(temporary,'native-schema.mjs'),`import assert from 'node:assert/strict';
+import {createNativeSchemaPorts} from '@use-brian/brian-app/module';
+import {createApplicationClient} from '@use-brian/brian-app/application';
+const workspaceId='00000000-0000-4000-8000-000000000002',typeId='00000000-0000-4000-8000-000000000001';
+const preview={id:typeId,entityTypeId:typeId,expectedSchemaVersion:1,before:[],proposed:[],affectedRecords:0,invalidRecords:0,canApply:true};
+const calls=[];const schemas=createNativeSchemaPorts({apiOrigin:'https://brain.example',workspaceId,fetch:async(url,init)=>{calls.push({url:String(url),body:JSON.parse(init.body)});return new Response(JSON.stringify(calls.length===1?preview:{entityTypeId:typeId,schemaVersion:2,applied:true}))}});
+const client=createApplicationClient({appId:typeId,transport:async()=>{throw Error('app transport must not carry native authority')},schemas});
+const review=await client.previewSchema({typeId,expectedVersion:1,properties:[]});assert.deepEqual(review,preview);
+assert.deepEqual(await client.applySchema({previewId:review.id}),{entityTypeId:typeId,schemaVersion:2,applied:true});
+assert.deepEqual(calls,[{url:'https://brain.example/api/applications/workspaces/'+workspaceId+'/schemas/'+typeId+'/preview',body:{expectedVersion:1,properties:[]}},{url:'https://brain.example/api/applications/workspaces/'+workspaceId+'/schema-reviews/'+typeId+'/apply',body:{}}]);
+console.log(JSON.stringify({nativeSchemaRoutes:true,reviewPreserved:true,applicationTransportUsed:false}));`)
+  evidence.nativeSchema=JSON.parse(run(process.execPath,['native-schema.mjs']))
   // Packing, compiling and running generated projects is fixture setup, outside per-assertion timing.
   for(const profile of ['native','connector'] as const){
     const directory=join(temporary,profile)
@@ -78,6 +90,9 @@ assert.ok(graph.every(path=>!path.includes('/core/')&&!path.includes('/shared/')
       for(const output of generated.lints as string[])expect(output).toContain('Example application')
       expect(generated.invalidTypeOutput).toContain('TS2322')
     }
+  })
+  it('K02 executes native schema preview/apply through packed public profiles',()=>{
+    expect(evidence.nativeSchema).toEqual({nativeSchemaRoutes:true,reviewPreserved:true,applicationTransportUsed:false})
   })
   it('K06 validates deterministic templates and refuses traversal, symlinks, unknown profiles and overwrites',()=>{
     expect(scaffoldFiles('native')).toEqual(scaffoldFiles('native'));expect(scaffoldFiles('connector')).toEqual(scaffoldFiles('connector'))

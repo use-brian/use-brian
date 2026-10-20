@@ -49,9 +49,31 @@ Helpers map to `/api/applications/:appId`: `catalog`, `schemas/:type`,
 `records/:type/:id`, `records/:type/query`, `records/:type/:id/history`,
 `queries/:queryKey` (registered input), and `commands/:commandKey` (shared
 idempotency/version/input envelope). Query defaults/types are the shared wire
-contract. Schema preview/apply uses explicit `schemas` deployment ports while R2
-freezes its route contract; absent ports fail `operation_not_available` without
-sending a guessed request. No helper computes permission from a grant.
+contract. Schema governance uses explicit native-management `schemas` ports;
+absent ports fail `operation_not_available`. Application credentials never become
+native schema authority. No helper computes permission from a grant.
+
+In a trusted Node deployment, supply an authenticated native-management fetch:
+
+```ts
+import { createNativeSchemaPorts } from '@use-brian/brian-app/module'
+const schemas = createNativeSchemaPorts({ apiOrigin: 'https://brain.example',
+  workspaceId, fetch: authenticatedNativeManagementFetch })
+const review = await schemas.preview({ typeId, expectedVersion: 1, properties, assistantId }, { signal })
+if (review.canApply) await schemas.apply({ previewId: review.id, assistantId }, { signal })
+```
+
+These ports also implement `createApplicationClient({ appId, transport, schemas })`.
+Preview calls `POST /api/applications/workspaces/:workspaceId/schemas/:typeId/preview`
+with `{ expectedVersion, properties, assistantId? }`; apply calls
+`POST .../schema-reviews/:previewId/apply` with `{ assistantId? }`. Properties use
+the canonical core `PropertyDef` type; schema versions are numeric, while record
+versions remain opaque strings. Preserve review metadata and validity counts.
+The server authenticates the native actor and selects a visible assistant; the SDK
+does not send user IDs or roles. Keep the authenticated fetch in the trusted
+deployment, outside static application bundles. Review creation and apply both
+persist state; interruption is uncertain and does not trigger a retry. Reconcile
+the same saved review under fresh current authority before deciding what to do.
 
 `ApplicationSdkError` exposes `code`, `effect`, `retrySafe`, `status` and
 `cancelled`. Returned objects are preserved intact; there is no persistent cache,
@@ -77,6 +99,9 @@ Home bridge token via `ub:ready`/`ub:token` and checks parent-window identity,
 exact host/API origin and Home/workspace binding. Call `dispose()` on unmount;
 pending requests fail explicitly. Backend qualification still holds binding
 issuance unavailable. Never substitute a native JWT or service key.
+Opaque Home Origin `null` is admitted by the backend only for an active Home
+client using the signed Home profile. The SDK never overrides Origin. Budget
+denial preserves status 429 and safe effect/retry metadata without retrying.
 
 Service/delegated credentials belong only in Node `./module`. A delegated
 credential requires app-bound user OAuth in `X-UseBrian-User-Authorization`; it
@@ -94,7 +119,7 @@ that does not persist it. A valid Brian assertion proves identity, never busines
 permission. Reconcile uncertain effects; never retry automatically.
 
 The dedicated spec is `docs/architecture/features/application-platform-sdk.md` in
-the platform repository; OSS guide: `docs/applications/sdk.md`. R2 route completion,
+the platform repository; OSS guide: `docs/applications/sdk.md`. R2 runtime QA,
 R3 retained evidence/cache integration, R5b management, R5c real reference journeys,
 R6 qualification and all publication, production setup, trust provisioning, live
 provider QA and independent-source adoption remain owed.

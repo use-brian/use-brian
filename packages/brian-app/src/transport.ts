@@ -44,7 +44,7 @@ async function readResponse(response: Response, effectful: boolean, signal?: Abo
 }
 /** Internal shared implementation; browser exports expose only app-bound credentials. */
 export function httpTransport(options: HttpTransportOptions,
-  headers: (request: ApplicationRequest) => Promise<Record<string, string>>): ApplicationTransport {
+  headers: (request: ApplicationRequest) => Promise<Record<string, string>>, profile: 'application' | 'workspace' = 'application'): ApplicationTransport {
   const origin = apiOrigin(options.apiOrigin), fetcher = options.fetch ?? globalThis.fetch
   return async request => {
     appIdentifier(request.appId)
@@ -54,7 +54,7 @@ export function httpTransport(options: HttpTransportOptions,
     catch (error) { if (error instanceof ApplicationSdkError) throw error; throw new ApplicationSdkError('authentication_required') }
     try { body = request.body === undefined ? undefined : JSON.stringify(request.body) } catch { throw new ApplicationSdkError('invalid_value') }
     if (request.signal?.aborted) throw new ApplicationSdkError('cancelled', 'none', false, undefined, true)
-    const prefix = `/api/applications/${request.appId}/`
+    const prefix = profile === 'workspace' ? `/api/applications/workspaces/${request.appId}/` : `/api/applications/${request.appId}/`
     if (!request.path.startsWith(prefix) || /[\r\n#]/.test(request.path)
       || new URL(request.path, origin).pathname.indexOf(prefix) !== 0) throw new ApplicationSdkError('invalid_value')
     let response: Response

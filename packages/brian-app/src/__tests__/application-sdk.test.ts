@@ -1,7 +1,7 @@
 import { describe, it, expect, vi } from 'vitest'
 import { webcrypto, createHash } from 'node:crypto'
 import { createApplicationClient, createFetchTransport, createApplicationSignIn, createHomeApplicationTransport, ApplicationSdkError } from '../application.js'
-import { createServiceTransport } from '../module.js'
+import { createNativeSchemaPorts, createServiceTransport } from '../module.js'
 const app = '00000000-0000-4000-8000-000000000001', workspace = '00000000-0000-4000-8000-000000000002', home = '00000000-0000-4000-8000-000000000003'
 const origin = 'https://brain.example', oauth = `oat_${app}_${'s'.repeat(43)}`
 const reply = (body: unknown, status = 200) => new Response(JSON.stringify(body), { status })
@@ -20,12 +20,14 @@ describe('[COMP:shared/brian-app-sdk] application client', () => {
     expect(init).toMatchObject({ method: 'POST', signal, cache: 'no-store', credentials: 'same-origin', redirect: 'error', headers: { Authorization: `Bearer ${oauth}` } })
     expect(JSON.parse(String(init.body))).toEqual(command)
     expect(JSON.parse(String(fetch.mock.calls[3][1]!.body))).toEqual(query)
-    await expect(client.previewSchema({})).rejects.toMatchObject({code:'operation_not_available'})
-    await expect(client.applySchema(command)).rejects.toMatchObject({code:'operation_not_available'})
+    await expect(client.previewSchema({typeId:home,expectedVersion:1,properties:[]})).rejects.toMatchObject({code:'operation_not_available'})
+    await expect(client.applySchema({previewId:home})).rejects.toMatchObject({code:'operation_not_available'})
     expect(fetch).toHaveBeenCalledTimes(7)
-    const preview=vi.fn(async input=>input),apply=vi.fn(async input=>input), configured=createApplicationClient({appId:app,transport,schemas:{preview,apply}})
-    expect(await configured.previewSchema({expectedVersion:'v1'})).toEqual({expectedVersion:'v1'})
-    expect(await configured.applySchema(command)).toEqual(command)
+    const previewResult={id:home,entityTypeId:home,expectedSchemaVersion:1,before:[],proposed:[],affectedRecords:0,invalidRecords:0,canApply:true}
+    const applied={entityTypeId:home,schemaVersion:2,applied:true}
+    const preview=vi.fn(async()=>previewResult),apply=vi.fn(async()=>applied), configured=createApplicationClient({appId:app,transport,schemas:{preview,apply}})
+    expect(await configured.previewSchema({typeId:home,expectedVersion:1,properties:[]})).toBe(previewResult)
+    expect(await configured.applySchema({previewId:home})).toBe(applied)
   })
   it.each(['access_unavailable','source_unavailable','outcome_uncertain','grant_revoked'])('K02 surfaces safe typed %s without a write retry', async code => {
     const fetch = vi.fn(async () => reply({ error: code, effect: 'uncertain', retrySafe: true, secret: 'private exception' }, 403))
@@ -55,8 +57,8 @@ describe('[COMP:shared/brian-app-sdk] application client', () => {
     const abort=new AbortController(), fetch=vi.fn(async()=>({ok:true,status:200,json:async()=>{abort.abort();throw new Error('private stream failure')}} as Response))
     const preview=vi.fn(),apply=vi.fn(), client=createApplicationClient({appId:app,transport:createFetchTransport({apiOrigin:origin,fetch,credential:async()=>oauth}),schemas:{preview,apply}})
     await expect(client.command('change',{idempotencyKey:'once',input:{}},{signal:abort.signal})).rejects.toMatchObject({code:'cancelled',cancelled:true,effect:'uncertain'})
-    await expect(client.applySchema({idempotencyKey:'once',input:{}},{signal:abort.signal})).rejects.toMatchObject({code:'cancelled',effect:'none'})
-    await expect(client.previewSchema({},{signal:abort.signal})).rejects.toMatchObject({code:'cancelled',effect:'none'})
+    await expect(client.applySchema({previewId:home},{signal:abort.signal})).rejects.toMatchObject({code:'cancelled',effect:'none'})
+    await expect(client.previewSchema({typeId:home,expectedVersion:1,properties:[]},{signal:abort.signal})).rejects.toMatchObject({code:'cancelled',effect:'none'})
     expect(preview).not.toHaveBeenCalled();expect(apply).not.toHaveBeenCalled()
   })
   it.each(['sk_app_secret','native.jwt.token','cookie=value','oat_bad\r\nInjected: true'])('K03 rejects non-app browser credential %s',async token=>{
@@ -104,6 +106,47 @@ describe('[COMP:shared/brian-app-sdk] authentication adapters',()=>{
     const frame={parent,addEventListener:(_name:string,fn:(e:MessageEvent)=>void)=>listeners.add(fn),removeEventListener:(_name:string,fn:(e:MessageEvent)=>void)=>listeners.delete(fn)} as unknown as Window
     return{frame,parent,listeners,emit:(data:unknown,source:unknown=parent,eventOrigin=origin)=>{for(const listener of [...listeners])listener({data,source,origin:eventOrigin} as MessageEvent)}}
   }
+  it('K02 uses the native schema routes and canonical review envelopes without app credentials',async()=>{
+    const preview={id:home,entityTypeId:app,expectedSchemaVersion:7,before:[],proposed:[],affectedRecords:12,invalidRecords:2,canApply:false}
+    const applied={entityTypeId:app,schemaVersion:8,applied:true}
+    const nativeFetch=vi.fn(async()=>reply(preview)),appTransport=vi.fn()
+    const schemas=createNativeSchemaPorts({apiOrigin:origin,workspaceId:workspace,fetch:nativeFetch})
+    const client=createApplicationClient({appId:app,transport:appTransport,schemas}),signal=new AbortController().signal
+    expect(await client.previewSchema({typeId:app,expectedVersion:7,properties:[],assistantId:home},{signal})).toEqual(preview)
+    nativeFetch.mockImplementation(async()=>reply(applied))
+    expect(await client.applySchema({previewId:home,assistantId:home},{signal})).toEqual(applied)
+    expect(nativeFetch.mock.calls.map(([url])=>String(url))).toEqual([
+      `${origin}/api/applications/workspaces/${workspace}/schemas/${app}/preview`,
+      `${origin}/api/applications/workspaces/${workspace}/schema-reviews/${home}/apply`])
+    expect(nativeFetch.mock.calls.map(([,init])=>JSON.parse(String(init!.body)))).toEqual([
+      {expectedVersion:7,properties:[],assistantId:home},{assistantId:home}])
+    for(const [,init]of nativeFetch.mock.calls)expect(init).toMatchObject({method:'POST',signal,cache:'no-store',credentials:'same-origin',redirect:'error',headers:{'Content-Type':'application/json'}})
+    expect(appTransport).not.toHaveBeenCalled()
+  })
+  it('K02 keeps native schema cancellation, uncertain writes and review reconciliation explicit',async()=>{
+    const fetch=vi.fn(async()=>{throw new Error('private native session detail')})
+    const schemas=createNativeSchemaPorts({apiOrigin:origin,workspaceId:workspace,fetch})
+    await expect(schemas.preview({typeId:app,expectedVersion:1,properties:[]})).rejects.toMatchObject({code:'transport_unavailable',effect:'uncertain',retrySafe:false})
+    const abort=new AbortController();abort.abort()
+    await expect(schemas.apply({previewId:home},{signal:abort.signal})).rejects.toMatchObject({code:'cancelled',effect:'none'})
+    expect(fetch).toHaveBeenCalledTimes(1)
+    fetch.mockImplementation(async()=>reply({error:'schema_version_conflict',effect:'none',retrySafe:false},409))
+    await expect(schemas.apply({previewId:home})).rejects.toMatchObject({code:'schema_version_conflict',effect:'none',status:409,retrySafe:false})
+    expect(fetch).toHaveBeenCalledTimes(2)
+    expect(()=>createNativeSchemaPorts({apiOrigin:origin,workspaceId:'../escape',fetch})).toThrow(ApplicationSdkError)
+    await expect(schemas.apply({previewId:'../escape'})).rejects.toMatchObject({code:'invalid_value'})
+    expect(fetch).toHaveBeenCalledTimes(2)
+  })
+  it('K03 preserves signed Home budget denial without a retry or Origin override',async()=>{
+    const f=fakeFrame(),fetch=vi.fn(async()=>reply({error:'access_unavailable',effect:'none',retrySafe:false},429))
+    const bridge=createHomeApplicationTransport({apiOrigin:origin,hostOrigin:origin,appId:app,homeAppId:home,workspaceId:workspace,window:f.frame,fetch})
+    const pending=createApplicationClient({appId:app,transport:bridge.transport}).catalog()
+    f.emit({type:'ub:token',token:'opaque.signature',apiOrigin:origin,appId:home,workspaceId:workspace})
+    await expect(pending).rejects.toMatchObject({code:'access_unavailable',effect:'none',status:429,retrySafe:false})
+    expect(fetch).toHaveBeenCalledTimes(1)
+    expect(fetch.mock.calls[0][1]!.headers).toEqual({Authorization:'Bearer opaque.signature'})
+    bridge.dispose()
+  })
   it('K03 accepts Home tokens only from exact parent/host/Home/workspace/API binding and disposes pending calls',async()=>{
     const f=fakeFrame(),fetch=vi.fn(async()=>reply({fields:['title']}))
     const bridge=createHomeApplicationTransport({apiOrigin:origin,hostOrigin:origin,appId:app,homeAppId:home,workspaceId:workspace,window:f.frame,fetch})
