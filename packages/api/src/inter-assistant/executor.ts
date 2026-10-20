@@ -1757,62 +1757,6 @@ export function createCalleeExecutor(options: CalleeExecutorOptions): CalleeExec
     const userMessageSource = boundScopeSource(userMessageRow)
     if (userMessageSource) scopeAccumulator.noteSource(userMessageSource)
 
-    const messages: Message[] = []
-    if (params.sessionKey) {
-      const priorRows = await getSessionMessages(session.id, {
-        fromSequence: session.compactBoundarySequence,
-        excludeHeld: true,
-      })
-      noteAutomaticScopeEvidence(scopeAccumulator, priorRows)
-      const compacted = await executeWithCurrentAuthority(() => runProactiveCompaction({
-        sessionMessages: priorRows,
-        timezone: calleeActor.timezone || 'UTC',
-        session,
-        tier: 'standard',
-        channelClass: 'cron',
-        profile: 'multi-topic',
-        unconditional: true,
-        provider: backgroundLlmRuntime?.provider ?? options.provider,
-        model: backgroundLlmRuntime?.selector,
-        inputTokenLimit: backgroundLlmRuntime?.inputTokenLimit,
-        modelTier: 'standard',
-        providerKeySource: backgroundLlmRuntime?.providerKeySource ?? 'platform',
-        systemPrompt: fullSystemPrompt,
-        assistantId: params.calleeAssistantId,
-        userId: calleeActorUserId,
-        ownerId: calleeActorUserId,
-        channelType: 'assistant-call',
-        memoryStore: options.memoryStore,
-        episodicStore: options.episodicStore,
-        analytics: options.analytics,
-        usageStore: options.usageStore,
-        userMessageId: userMessageRow.id,
-        // Company-brain ingest — materialize a compacted-window Episode so a
-        // scheduled job / persistent workflow step feeds the brain. No-op
-        // unless both a workspace and an ingestor are present.
-        workspaceId: calleeAssistant.workspaceId ?? undefined,
-        chatEpisodeIngestor: options.chatEpisodeIngestor,
-      }))
-      messages.push(...compacted.messages)
-    } else {
-      messages.push({ role: 'user', content: userContent })
-    }
-
-    // Research-depth budget — a step's `depth` (or a scheduled job's, via its
-    // one-step workflow) raises the turn / tool-call caps above the modest
-    // default and may arm an explicit wall-clock. Absent →
-    // ASSISTANT_CALL_DEFAULT_BUDGET (15 turns, no wall-clock unless
-    // `ASSISTANT_CALL_TIMEOUT_MS` sets one).
-    const budget = resolveResearchBudget(params.depth, ASSISTANT_CALL_DEFAULT_BUDGET)
-    // Raw live-stream accumulation — kept ONLY as the wall-clock-timeout
-    // partialOutput (operator-facing, never delivered). The returned consult
-    // text is selected from finalised turn references instead: deltas re-stream on
-    // empty-turn retries and include text the turn-boundary leak sanitiser
-    // strips, so summing them duplicates/leaks (the 2026-07-02 "No recorded
-    // GitHub activity" ×3 triplication, run 26d50608). See
-    // docs/architecture/channels/inter-assistant.md → "Final-text assembly".
-    let responseText = ''
-    const turnOutput = createTurnOutputCollector({ format: 'compact' })
     const abortController = new AbortController()
     // The delegated turn's own invocation is the source a browser task (or
     // any other source-bound child) is pinned to. Without it the task has no
@@ -1866,6 +1810,65 @@ export function createCalleeExecutor(options: CalleeExecutorOptions): CalleeExec
       resolveScope: async () => turnScope,
       createSessionLease: () => ambientAuthority,
     })
+
+    const messages: Message[] = []
+    if (params.sessionKey) {
+      const priorRows = await getSessionMessages(session.id, {
+        fromSequence: session.compactBoundarySequence,
+        excludeHeld: true,
+      })
+      noteAutomaticScopeEvidence(scopeAccumulator, priorRows)
+      const compacted = await executeWithCurrentAuthority(() => runProactiveCompaction({
+        modelContext: { execution: executionContext, accumulator: scopeAccumulator },
+        authority: executionContext.security.authority,
+        sessionMessages: priorRows,
+        timezone: calleeActor.timezone || 'UTC',
+        session,
+        tier: 'standard',
+        channelClass: 'cron',
+        profile: 'multi-topic',
+        unconditional: true,
+        provider: backgroundLlmRuntime?.provider ?? options.provider,
+        model: backgroundLlmRuntime?.selector,
+        inputTokenLimit: backgroundLlmRuntime?.inputTokenLimit,
+        modelTier: 'standard',
+        providerKeySource: backgroundLlmRuntime?.providerKeySource ?? 'platform',
+        systemPrompt: fullSystemPrompt,
+        assistantId: params.calleeAssistantId,
+        userId: calleeActorUserId,
+        ownerId: calleeActorUserId,
+        channelType: 'assistant-call',
+        memoryStore: options.memoryStore,
+        episodicStore: options.episodicStore,
+        analytics: options.analytics,
+        usageStore: options.usageStore,
+        userMessageId: userMessageRow.id,
+        // Company-brain ingest — materialize a compacted-window Episode so a
+        // scheduled job / persistent workflow step feeds the brain. No-op
+        // unless both a workspace and an ingestor are present.
+        workspaceId: calleeAssistant.workspaceId ?? undefined,
+        chatEpisodeIngestor: options.chatEpisodeIngestor,
+      }))
+      messages.push(...compacted.messages)
+    } else {
+      messages.push({ role: 'user', content: userContent })
+    }
+
+    // Research-depth budget — a step's `depth` (or a scheduled job's, via its
+    // one-step workflow) raises the turn / tool-call caps above the modest
+    // default and may arm an explicit wall-clock. Absent →
+    // ASSISTANT_CALL_DEFAULT_BUDGET (15 turns, no wall-clock unless
+    // `ASSISTANT_CALL_TIMEOUT_MS` sets one).
+    const budget = resolveResearchBudget(params.depth, ASSISTANT_CALL_DEFAULT_BUDGET)
+    // Raw live-stream accumulation — kept ONLY as the wall-clock-timeout
+    // partialOutput (operator-facing, never delivered). The returned consult
+    // text is selected from finalised turn references instead: deltas re-stream on
+    // empty-turn retries and include text the turn-boundary leak sanitiser
+    // strips, so summing them duplicates/leaks (the 2026-07-02 "No recorded
+    // GitHub activity" ×3 triplication, run 26d50608). See
+    // docs/architecture/channels/inter-assistant.md → "Final-text assembly".
+    let responseText = ''
+    const turnOutput = createTurnOutputCollector({ format: 'compact' })
     // Liveness, not wall-clock (2026-08-19). The step is bounded by cost
     // (`budget.maxTurns` / `maxToolCalls`) and by the query loop's stall
     // watchdog (`stallIdleMs`: no provider chunk / tool activity / loop event

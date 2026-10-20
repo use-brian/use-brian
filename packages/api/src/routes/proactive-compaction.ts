@@ -22,6 +22,8 @@ import {
   fitMessagesToBudget, resolveInputTokenLimit, MODEL_CONTEXT_FIT_RATIO,
   isContextOverflowError,
   sanitize as sanitizeAnalytics,
+  ContextScopeAccumulator, executionToolContext, scopeEvidenceFromRows,
+  boundScopeSources, bindScopeSources,
 } from '@use-brian/core'
 import type {
   Message, LLMProvider, MemoryStore, AnalyticsLogger,
@@ -29,6 +31,7 @@ import type {
   EpisodicStore, EpisodicMemoryRecord, UsageStore,
   SessionStateStore,
   CurrentAuthorityBoundary,
+  ExecutionContext,
 } from '@use-brian/core'
 import {
   setCompactSummaryAndBoundary, toStampedMessages, findSessionById,
@@ -46,6 +49,7 @@ import type { Session, SessionMessage } from '../db/sessions.js'
 import { recordOverheadUsage } from './_overhead-usage.js'
 import type { ChatEpisodeIngestor } from '../ingest-port.js'
 import { isAuthorityChangedError } from '../context-scope/authority-lease.js'
+import { assertSourceModelInputAuthority } from '../application-platform/model-source-authority.js'
 
 /**
  * Hard cap on the persisted `sessions.compact_summary` text. Acts as a
@@ -314,6 +318,8 @@ export type ProactiveCompactionParams = {
   persistSessionSummary?: boolean
   /** Sticky live turn authority for every derived read/write boundary. */
   authority?: CurrentAuthorityBoundary
+  /** The already-resolved R1 actor and complete host-owned model evidence. */
+  modelContext?: { execution: ExecutionContext; accumulator: ContextScopeAccumulator }
 }
 
 export type ProactiveCompactionResult = {
@@ -375,11 +381,36 @@ export async function runProactiveCompaction(
   const persistLongTermContext = params.persistLongTermContext !== false
   const persistSessionSummary = params.persistSessionSummary !== false
   const compactionModel = params.model ?? 'gemini-3.6-flash-pro'
-  const guarded = <T>(operation: () => Promise<T>): Promise<T> => params.authority
-    ? params.authority.execute(operation)
-    : operation()
+  const binding = params.modelContext
+  const modelContext = binding ? {
+    ...executionToolContext(binding.execution, { appId: 'Use Brian' }),
+    scopeAccumulator: binding.accumulator,
+  } : undefined
+  const assertModelInput = async () => {
+    if (!modelContext) {
+      if (sessionMessages.some((row) => boundScopeSources(row).length > 0)) {
+        throw Object.assign(new Error('The model context is unavailable.'), { reason: 'authority_changed', retrySafe: false })
+      }
+      return
+    }
+    if (params.modelContext !== binding || binding!.execution !== modelContext.executionContext
+      || binding!.accumulator !== modelContext.scopeAccumulator
+      || !(modelContext.scopeAccumulator instanceof ContextScopeAccumulator)) {
+      throw Object.assign(new Error('The model context is unavailable.'), { reason: 'authority_changed', retrySafe: false })
+    }
+    await modelContext.executionContext!.security.authority.assertCurrent()
+    await assertSourceModelInputAuthority(modelContext)
+  }
+  if (modelContext) modelContext.scopeAccumulator.note(scopeEvidenceFromRows(sessionMessages))
+  const guarded = async <T>(operation: () => Promise<T>): Promise<T> => {
+    await assertModelInput()
+    const result = await (params.authority ? params.authority.execute(operation) : operation())
+    await assertModelInput()
+    return result
+  }
 
   await params.authority?.assertCurrent()
+  await assertModelInput()
 
   const breaker = params.circuitBreaker ?? defaultCompactionBreaker
   const sessionId = session.id
@@ -497,19 +528,19 @@ export async function runProactiveCompaction(
     // yet saved via saveMemory. Runs regex + cheap LLM pass.
     // Best-effort: extraction failure must not block compaction, except
     // authority loss, which always aborts the turn.
-    if (persistLongTermContext) {
+    if (persistLongTermContext && modelContext) {
       try {
-        // System-level read — pre-compaction extraction runs across the
-        // entire memory set for the (assistant, user) pair, so it uses
-        // the privileged-service-exception path (no per-viewer
-        // projection).
-        const existingIndex = await guarded(() => memoryStore.getIndexSystem(assistantId, userId))
+        const existingIndex = await guarded(() => memoryStore.getIndex(modelContext.executionContext!.security.access))
+        modelContext.scopeAccumulator.note(scopeEvidenceFromRows(existingIndex))
+        await assertModelInput()
         const existingSummaries = existingIndex.map((m) => m.summary)
         const extracted = await guarded(() => extractMemoriesBeforeCompaction({
           provider,
           model: compactionModel,
           messages: compactableForLLM,
           existingMemories: existingSummaries,
+          assertInputAuthority: assertModelInput,
+          sourceEvidence: modelContext.scopeAccumulator.evidence.sources,
         }))
         for (const fact of extracted.facts) {
           // Post-Phase-4 (retire-memory-type): no `type` field on the
@@ -525,6 +556,11 @@ export async function runProactiveCompaction(
             sensitivity: 'internal',
             createdByUserId: userId,
             createdByAssistantId: assistantId,
+            workspaceId: modelContext.executionContext!.security.access.workspaceId,
+            compartments: modelContext.scopeAccumulator.compartments,
+            projectIds: modelContext.scopeAccumulator.projectIds,
+            derivation: { producer: 'compaction:extraction', sources: modelContext.scopeAccumulator.evidence.sources ?? [] },
+            derivationTarget: { userId, assistantId: modelContext.executionContext!.assistant.kind === 'primary' ? null : assistantId },
           }))
         }
         if (extracted.facts.length > 0) {
@@ -557,6 +593,7 @@ export async function runProactiveCompaction(
       systemPrompt,
       profile,
       channelClass,
+      assertInputAuthority: assertModelInput,
     }))
     await guarded(() => recordOverheadUsage({
       usageStore, userId: ownerId, actorUserId: userId,
@@ -665,7 +702,10 @@ export async function runProactiveCompaction(
         housekeepingStats = await houseKeepEpisodic({
           episodicStore, memoryStore,
           sessionId, assistantId, userId,
-          authority: params.authority,
+          authority: {
+            assertCurrent: async () => { await params.authority?.assertCurrent(); await assertModelInput() },
+            execute: guarded,
+          },
         })
       } catch (err) {
         if (isAuthorityChangedError(err)) throw err
@@ -735,7 +775,7 @@ export async function runProactiveCompaction(
     // tail repaired (in case the split broke a tool_use / tool_result
     // pair across the boundary).
     const compactedMessages: Message[] = [
-      { role: 'system', content: summaryText },
+      bindScopeSources({ role: 'system', content: summaryText }, boundScopeSources(compactResult.boundaryMessage)),
       ...ensureToolResultPairing(stampedRecent),
     ]
 

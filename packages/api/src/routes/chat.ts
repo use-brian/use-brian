@@ -4338,6 +4338,7 @@ export function chatRoutes(options: WebChatOptions): Router {
       // loop.
       await assertDeliveryAudience()
       const compactionResult = await runProactiveCompaction({
+        modelContext: { execution: executionContext, accumulator: scopeAccumulator },
         sessionMessages: dbMessages,
         timezone: user.timezone ?? 'UTC',
         senderNames: sharedSenderNames,

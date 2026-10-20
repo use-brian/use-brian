@@ -8,8 +8,9 @@
 
 import type { Message, LLMProvider, TokenUsage } from '../providers/types.js'
 import { collectStream } from '../providers/accumulator.js'
-import { assertInputAuthority } from '../providers/input-authority.js'
+import { assertInputAuthority, isInputAuthorityError } from '../providers/input-authority.js'
 import { bindScopeSources, boundScopeSources } from '../security/source-evidence.js'
+import type { ScopeSource } from '../security/derived-scope.js'
 /**
  * Output shape for `extractMemoriesBeforeCompaction`. Moved here from
  * the (now-retired) regex pattern-extractor as part of Q9's `extractPatterns`
@@ -542,6 +543,9 @@ If there are no new facts that pass the ladder, return an empty array: [].
 Respond with ONLY the JSON array, no other text.`
 
 export type PreCompactionExtractionOptions = {
+  /** Host-only authority and admitted index observations, never model arguments. */
+  assertInputAuthority?: () => Promise<void>
+  sourceEvidence?: readonly ScopeSource[]
   provider: LLMProvider
   model: string
   messages: Message[]
@@ -570,6 +574,10 @@ export type PreCompactionExtractionResult = {
 export async function extractMemoriesBeforeCompaction(
   options: PreCompactionExtractionOptions,
 ): Promise<PreCompactionExtractionResult> {
+  const sources = [
+    ...options.messages.flatMap((message) => boundScopeSources(message)),
+    ...structuredClone(options.sourceEvidence ?? []),
+  ]
   // Collect all user message text
   const userText = options.messages
     .filter((m) => m.role === 'user')
@@ -581,7 +589,7 @@ export async function extractMemoriesBeforeCompaction(
     .join('\n')
 
   if (userText.trim().length === 0) {
-    return { facts: [], usage: null, model: null }
+    return bindScopeSources({ facts: [], usage: null, model: null }, sources)
   }
 
   // v2 (Q9): regex Phase 1 retired. Pre-compaction extraction is now
@@ -601,8 +609,10 @@ export async function extractMemoriesBeforeCompaction(
         : '(none)',
     )
 
+    await assertInputAuthority(options.assertInputAuthority)
     const response = await collectStream(
       options.provider.stream({
+        assertInputAuthority: options.assertInputAuthority,
         model: options.model,
         messages: [
           ...options.messages,
@@ -612,6 +622,7 @@ export async function extractMemoriesBeforeCompaction(
         maxTokens: 1_000,
       }),
     )
+    await assertInputAuthority(options.assertInputAuthority)
     servedModel = response.model || options.model
 
     usage = response.usage
@@ -634,7 +645,8 @@ export async function extractMemoriesBeforeCompaction(
           confidence: 0.6,
         }))
     }
-  } catch {
+  } catch (error) {
+    if (isInputAuthorityError(error)) throw error
     // LLM extraction is best-effort — regex facts are still returned.
     // `usage` may have been set before a JSON-parse failure; we keep it
     // so the caller still attributes the tokens we did consume.
@@ -651,5 +663,6 @@ export async function extractMemoriesBeforeCompaction(
     merged.push(fact)
   }
 
-  return { facts: merged, usage, model: usage ? servedModel ?? options.model : null }
+  for (const fact of merged) bindScopeSources(fact, sources)
+  return bindScopeSources({ facts: merged, usage, model: usage ? servedModel ?? options.model : null }, sources)
 }

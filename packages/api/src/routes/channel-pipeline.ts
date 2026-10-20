@@ -1879,6 +1879,7 @@ async function processChannelMessageTurn(params: ChannelPipelineParams): Promise
   }
   if (!(await deliveryAudienceAdmitsTurn())) return
   const compactionResult = await runProactiveCompaction({
+    modelContext: { execution: executionContext, accumulator: scopeAccumulator },
     sessionMessages: dbMessages,
     timezone: userTimezone,
     senderNames: roomSenderNames,

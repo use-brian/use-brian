@@ -1,7 +1,7 @@
 import { describe, it, expect, vi } from 'vitest'
 import { bindScopeSources, boundScopeSources } from '../../security/source-evidence.js'
 import type { ScopeSource } from '../../security/derived-scope.js'
-import { compactConversation, estimateTokens, needsCompaction, compactionThreshold, COMPACT_THRESHOLDS, getIdleCompactionLevel, createCompactionCircuitBreaker, parseMultiTopicOutput, modelToCompactionTier, CHANNEL_CLASS_MULTIPLIER } from '../compact.js'
+import { compactConversation, extractMemoriesBeforeCompaction, estimateTokens, needsCompaction, compactionThreshold, COMPACT_THRESHOLDS, getIdleCompactionLevel, createCompactionCircuitBreaker, parseMultiTopicOutput, modelToCompactionTier, CHANNEL_CLASS_MULTIPLIER } from '../compact.js'
 import type { LLMProvider, Message, StreamFn } from '../../providers/types.js'
 
 describe('[COMP:compaction/full] failed-attempt preservation prompt', () => {
@@ -293,6 +293,31 @@ describe('[COMP:compaction/full] trusted evidence transport', () => {
       .mockRejectedValueOnce(new Error('source_access_denied'))
     await expect(compactConversation({
       provider: provider(), model: 'fixture', messages: [], systemPrompt: '', assertInputAuthority,
+    })).rejects.toMatchObject({ reason: 'authority_changed', retrySafe: false })
+    expect(assertInputAuthority).toHaveBeenCalledTimes(2)
+  })
+
+  it('retains every message and admitted memory-index source on extracted facts', async () => {
+    const messageSource = source('message-field'), indexSource = source('index-field')
+    const extractionProvider = provider()
+    extractionProvider.stream = async function* () {
+      yield { type: 'text_delta', text: '[{"type":"preference","summary":"Fictional preference"}]' }
+    }
+    const result = await extractMemoriesBeforeCompaction({
+      provider: extractionProvider, model: 'fixture', existingMemories: ['Fictional prior fact'],
+      sourceEvidence: [indexSource], messages: [bindScopeSources({ role: 'user', content: 'Fictional input' }, [messageSource])],
+    })
+    expect(result.facts).toHaveLength(1)
+    expect(boundScopeSources(result)).toEqual([messageSource, indexSource])
+    expect(boundScopeSources(result.facts[0])).toEqual([messageSource, indexSource])
+  })
+
+  it('does not swallow an authority refusal as best-effort extraction failure', async () => {
+    const assertInputAuthority = vi.fn(async () => {}).mockResolvedValueOnce(undefined)
+      .mockRejectedValueOnce(new Error('source_access_denied'))
+    await expect(extractMemoriesBeforeCompaction({
+      provider: provider(), model: 'fixture', existingMemories: [],
+      messages: [{ role: 'user', content: 'Fictional input' }], assertInputAuthority,
     })).rejects.toMatchObject({ reason: 'authority_changed', retrySafe: false })
     expect(assertInputAuthority).toHaveBeenCalledTimes(2)
   })

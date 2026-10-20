@@ -1349,6 +1349,7 @@ export async function executePublicTurn(
   noteAutomaticScopeEvidence(scopeAccumulator, dbMessages)
   await assertDeliveryAudience()
   const compactionResult = await runProactiveCompaction({
+    modelContext: { execution: executionContext, accumulator: scopeAccumulator },
     sessionMessages: dbMessages,
     timezone: owner.timezone ?? 'UTC',
     session,

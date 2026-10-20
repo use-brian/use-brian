@@ -168,7 +168,7 @@ function bindStoredMessageScope(row: ScopedSessionMessageRow): SessionMessage {
     scopeWorkspaceId, scopeUserId, scopeAssistantId, scopeSensitivity,
     scopeCompartments, scopeProjectIds, scopeVersion, scopeHeld, ...message
   } = row
-  if (scopeWorkspaceId && scopeAssistantId && scopeSensitivity && scopeCompartments
+  if (scopeWorkspaceId && scopeSensitivity && scopeCompartments
     && scopeProjectIds && scopeVersion && scopeHeld === false) {
     return bindScopeSource(message, {
       workspaceId: scopeWorkspaceId, userId: scopeUserId, assistantId: scopeAssistantId,
