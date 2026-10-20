@@ -100,7 +100,7 @@ describe('[COMP:api/application-auth] database application projections and live 
     return new ApplicationPlatformService([module])
   }
   async function provision(kind: 'member' | 'external_user' | 'service', fields = ['title'], parentFields?: string[], tamperMaximum = false,
-    nativeCompanyId?: string, additionalActions: string[] = [], recordIds: string[] = [recordId], selector?: ApplicationAccessGrant['selector'], oauthScope = 'read_write', compartments: string[] = [], nativeType = 'company',memberActor?:string) {
+    nativeCompanyId?: string, additionalActions: string[] = [], recordIds: string[] = [recordId], selector?: ApplicationAccessGrant['selector'], oauthScope = 'read_write', compartments: string[] = [], nativeType = 'company',memberActor?:string,nativeIssuer=ownerId,nativeAssistant=assistantId) {
     const appId = randomUUID(), grantId = randomUUID(), parentId = parentFields ? randomUUID() : null
     let userId: string = kind === 'member' ? memberActor??memberId : externalId
     if (kind === 'service') {
@@ -108,7 +108,7 @@ describe('[COMP:api/application-auth] database application projections and live 
       users.push(userId)
     }
     await pool.query(`INSERT INTO application_clients(id,workspace_id,module_key,name,client_mode,executing_assistant_id,created_by_user_id,origins)
-      VALUES($1,$2,$5,'Example records client','api_client',$3,$4,ARRAY['https://frontend.example'])`, [appId, workspaceId, assistantId, ownerId, nativeCompanyId ? 'native' : 'records'])
+      VALUES($1,$2,$5,'Example records client','api_client',$3,$4,ARRAY['https://frontend.example'])`, [appId, workspaceId, nativeAssistant, nativeIssuer, nativeCompanyId ? 'native' : 'records'])
     const grant = (id: string, readFields: string[], parentGrantId: string | null): ApplicationAccessGrant => ({
       id, appId, workspaceId, principal: { kind, userId }, origin: nativeCompanyId ? { kind: 'native', moduleKey: 'native' } : { kind: 'generic', entityTypeId: schemaId }, typeKey: nativeCompanyId ? nativeType : 'request',
       actions: ['read', 'query', 'history', 'patch', ...additionalActions], readFields, writeFields: readFields, selector: selector ?? { kind: 'ids', ids: nativeCompanyId ? [nativeCompanyId] : recordIds },
@@ -119,13 +119,13 @@ describe('[COMP:api/application-auth] database application projections and live 
     for (const value of [...path].reverse()) await pool.query(`INSERT INTO application_access_grants(id,app_id,workspace_id,principal_kind,principal_user_id,issued_by_user_id,
       resource_origin,resource_type,actions,read_fields,write_fields,selector,compartments,project_ids,clearance,parent_grant_id,starts_at)
       VALUES($1,$2,$3,$4,$5,$6,$7,$13,$8,$9,$9,$10,$14,'{}','confidential',$11,$12)`,
-    [value.id, appId, workspaceId, kind, userId, ownerId, value.origin, value.actions, value.readFields, value.selector, value.parentGrantId, value.startsAt, value.typeKey,value.compartments])
+    [value.id, appId, workspaceId, kind, userId, nativeIssuer, value.origin, value.actions, value.readFields, value.selector, value.parentGrantId, value.startsAt, value.typeKey,value.compartments])
     const maximum: ApplicationGrantMaximum = { version: 1, grants: path }
     if (kind === 'service') {
       const material = await mintApplicationCredentialSecret()
       await pool.query(`INSERT INTO application_api_credentials(id,app_id,workspace_id,issued_by_user_id,subject_user_id,name,credential_kind,secret_hash,parent_grant_id,expires_at)
         VALUES($1,$2,$3,$4,$5,'Example scoped service','service',$6,$7,now()+interval '1 hour')`,
-      [material.id, appId, workspaceId, ownerId, userId, material.secretHash, grantId])
+      [material.id, appId, workspaceId, nativeIssuer, userId, material.secretHash, grantId])
       await pool.query(`INSERT INTO application_credential_grants(credential_id,app_id,workspace_id,grant_id,maximum_grant) VALUES($1,$2,$3,$4,$5)`,
         [material.id, appId, workspaceId, grantId, tamperMaximum ? { version: 1, grants: [{ ...path[0], parentGrantId: null, readFields: ['title', 'cost', 'invented'] }] } : maximum])
       const credential = await authenticateApplicationCredential(material.token, appId, loadApplicationCredentialStateSystem)
@@ -144,6 +144,119 @@ describe('[COMP:api/application-auth] database application projections and live 
     expect(user).not.toBeNull()
     return { authentication: { user: user! }, appId, grantId, parentId, userId, token: `oat_${id}_${secret}` }
   }
+  function nativeQuerySnapshots() {
+    const base = createCanonicalNativeApplicationModule()
+    return new ApplicationPlatformService([{
+      ...base,
+      application: { ...base.application!, queries: [...base.application!.queries, 'query_snapshot'] },
+      queries: {
+        ...base.queries,
+        query_snapshot: {
+          input: z.object({ id: z.string().uuid(), version: z.string() }),
+          authorize: async () => {},
+          execute: async ({ transaction }, raw) => {
+            const input = raw as { id: string; version: string }
+            return (await transaction.query('SELECT read_admitted_application_field_snapshot($1,$2,$3) AS value',
+              [workspaceId,input.id,input.version])).rows[0].value
+          },
+        },
+      },
+    }])
+  }
+  it('Q02 holds an incomplete former native domain without rewriting its observation or canonical point',async()=>{
+    const value=await createEntity({workspaceId,kind:'company',displayName:'Fictional former native domain',attributes:{},createdByUserId:ownerId,source:'user'})
+    const fixture=await provision('service',['name'],undefined,false,value.id),base=createCanonicalNativeApplicationModule()
+    const dispatcher=new ApplicationPlatformService([{
+      ...base,
+      application:{...base.application!,queries:[...base.application!.queries,'former_domain','query_snapshot']},
+      queries:{...base.queries,
+        former_domain:{input:z.object({}).strict(),authorize:async()=>{},execute:async({transaction})=>
+          (await transaction.query("SELECT observe_native_application_query_domain($1,'company',ARRAY['name']::text[],'{}'::text[]) AS value",[workspaceId])).rows[0].value},
+        query_snapshot:{input:z.object({id:z.string().uuid(),version:z.string()}),authorize:async()=>{},execute:async({transaction},raw)=>{
+          const input=raw as {id:string;version:string}
+          return(await transaction.query('SELECT read_admitted_application_field_snapshot($1,$2,$3) AS value',[workspaceId,input.id,input.version])).rows[0].value
+        }},
+      },
+    }])
+    const point=await dispatcher.query(await resolveApplicationExecutionContext(fixture.authentication),'native','get',{type:'company',id:value.id,fields:['name']})
+    const pointSource=boundScopeSources(point as object)[0]
+    const names=[['application_query_domain_state','application_query_domain_state_before_native_visibility','uuid,jsonb,text,uuid,text[]'],
+      ['observe_native_application_query_domain','observe_native_application_query_domain_before_visibility','uuid,text,text[],text[]']] as const
+    const definitions=await Promise.all(names.map(async([current,former,args])=>({current,
+      restored:(await pool.query('SELECT pg_get_functiondef($1::regprocedure) AS definition',[`public.${current}(${args})`])).rows[0].definition as string,
+      former:(await pool.query('SELECT pg_get_functiondef($1::regprocedure) AS definition',[`public.${former}(${args})`])).rows[0].definition.replace(former,current) as string})))
+    let source:ScopeSource|undefined,artifact:unknown
+    const readArtifact=async()=> (await pool.query(`SELECT d.domain,d.identity,o.record_version,o.policy_version
+      FROM application_field_resources r JOIN application_query_domains d ON d.id=r.resource_id
+      JOIN application_field_observations o ON o.resource_id=r.id WHERE r.id=$1 AND o.version=$2`,[source!.resourceId,source!.version])).rows[0]
+    try {
+      for(const definition of definitions)await pool.query(definition.former)
+      const captured=await dispatcher.query(await resolveApplicationExecutionContext(fixture.authentication),'native','former_domain',{}) as {sources:ScopeSource[]}
+      source=captured.sources[0];artifact=await readArtifact()
+      expect(artifact).toMatchObject({domain:{kind:'native_query_domain_v1'}})
+    } finally {for(const definition of definitions)await pool.query(definition.restored)}
+    expect(await dispatcher.query(await resolveApplicationExecutionContext(fixture.authentication),'native','query_snapshot',{id:source!.resourceId,version:source!.version})).toMatchObject({held:true})
+    expect(await dispatcher.query(await resolveApplicationExecutionContext(fixture.authentication),'native','query_snapshot',{id:pointSource.resourceId,version:pointSource.version})).toMatchObject({held:false})
+    expect(await readArtifact()).toEqual(artifact)
+    expect((await pool.query('SELECT scope_version::text AS version FROM entities WHERE id=$1',[value.id])).rows[0].version).toBe('1')
+  })
+  it('Q02 refuses a cursor from the former native domain format without a source or field codec change',async()=>{
+    const ids:string[]=[]
+    for(const name of ['Fictional first domain page','Fictional second domain page'])ids.push((await createEntity({workspaceId,kind:'company',displayName:name,attributes:{},createdByUserId:ownerId,source:'user'})).id)
+    const fixture=await provision('service',['name'],undefined,false,ids[0],[],ids,{kind:'ids',ids}),dispatcher=new ApplicationPlatformService([createCanonicalNativeApplicationModule()])
+    const definition=(await pool.query("SELECT pg_get_functiondef('public.application_native_query_catalog(uuid,text)'::regprocedure) AS definition")).rows[0].definition as string
+    const former=definition.replace('native-query-schema-v3','native-query-schema-v2');expect(former).not.toBe(definition)
+    const query={fields:['name'],sort:[{field:'name',direction:'asc'}],limit:1};let cursor:string|undefined
+    try {
+      await pool.query(former)
+      cursor=(await dispatcher.query(await resolveApplicationExecutionContext(fixture.authentication),'native','query',{type:'company',query}) as {nextCursor?:string}).nextCursor
+      expect(cursor).toBeDefined()
+    } finally {await pool.query(definition)}
+    await expect(dispatcher.query(await resolveApplicationExecutionContext(fixture.authentication),'native','query',{type:'company',query:{...query,cursor}})).rejects.toMatchObject({code:'invalid_value'})
+    expect((await pool.query('SELECT DISTINCT scope_version::text AS version FROM entities WHERE id=ANY($1::uuid[])',[ids])).rows).toEqual([{version:'1'}])
+  })
+  it.each(['issuer-private','assistant'] as const)('Q02 keeps empty native query evidence inside its original %s visibility domain',async boundary=>{
+    const id=randomUUID(),otherIssuer=randomUUID(),otherAssistant=randomUUID()
+    await pool.query("INSERT INTO users(id,auth_provider,auth_provider_id) VALUES($1::uuid,'email',$1::text)",[otherIssuer]);users.push(otherIssuer)
+    await pool.query("INSERT INTO workspace_members(workspace_id,user_id,role,clearance) VALUES($1,$2,'owner','confidential')",[workspaceId,otherIssuer])
+    await pool.query("INSERT INTO assistants(id,name,owner_user_id,workspace_id,kind,clearance) VALUES($1,'Fictional visibility assistant',$2,$3,'standard','confidential')",[otherAssistant,ownerId,workspaceId])
+    const a=await provision('member',['name'],undefined,false,id,[],[id],undefined,'read_write',[],'company',ownerId)
+    const b=await provision('member',['name'],undefined,false,id,[],[id],undefined,'read_write',[],'company',ownerId,boundary==='issuer-private'?otherIssuer:ownerId,boundary==='assistant'?otherAssistant:assistantId)
+    const dispatcher=nativeQuerySnapshots(),query={type:'company',query:{fields:['name']}}
+    const first=await dispatcher.query(await resolveApplicationExecutionContext(a.authentication),'native','query',query) as {records:unknown[]}
+    const second=await dispatcher.query(await resolveApplicationExecutionContext(b.authentication),'native','query',query) as {records:unknown[]}
+    expect(first.records).toEqual([]);expect(second.records).toEqual([])
+    const sourceA=boundScopeSources(first)[0],sourceB=boundScopeSources(second)[0]
+    const snapshot=async(fixture:typeof a,source:typeof sourceA)=>dispatcher.query(await resolveApplicationExecutionContext(fixture.authentication),'native','query_snapshot',{id:source.resourceId,version:source.version})
+    expect(await snapshot(a,sourceA)).toMatchObject({held:false});expect(await snapshot(b,sourceB)).toMatchObject({held:false})
+    await pool.query(`INSERT INTO entities(id,workspace_id,kind,display_name,source,created_by_user_id,user_id,assistant_id)
+      VALUES($1,$2,'company','Fictional visibility-scoped candidate','user',$3,$4,$5)`,[id,workspaceId,ownerId,boundary==='issuer-private'?ownerId:null,boundary==='assistant'?assistantId:null])
+    expect((await dispatcher.query(await resolveApplicationExecutionContext(a.authentication),'native','query',query) as {records:unknown[]}).records).toHaveLength(1)
+    expect((await dispatcher.query(await resolveApplicationExecutionContext(b.authentication),'native','query',query) as {records:unknown[]}).records).toEqual([])
+    expect(await snapshot(a,sourceA)).toMatchObject({held:true})
+    expect(await snapshot(b,sourceB)).toMatchObject({held:false})
+    // The second reader's unavailable lookup cannot certify the first reader's
+    // former private/assistant-domain absence after a candidate appears there.
+    expect(await snapshot(b,sourceA)).toMatchObject({held:true})
+    expect(sourceA.resourceId).not.toBe(sourceB.resourceId)
+  })
+  it('Q02 gives finite public native points one identity across unused fields and independent issuer/assistant ceilings',async()=>{
+    const value=await createEntity({workspaceId,kind:'company',displayName:'Fictional canonical public point',attributes:{domain:'public.example'},createdByUserId:ownerId,source:'user'})
+    const otherIssuer=randomUUID(),otherAssistant=randomUUID()
+    await pool.query("INSERT INTO users(id,auth_provider,auth_provider_id) VALUES($1::uuid,'email',$1::text)",[otherIssuer]);users.push(otherIssuer)
+    await pool.query("INSERT INTO workspace_members(workspace_id,user_id,role,clearance) VALUES($1,$2,'owner','confidential')",[workspaceId,otherIssuer])
+    await pool.query("INSERT INTO assistants(id,name,owner_user_id,workspace_id,kind,clearance) VALUES($1,'Fictional independent point reader',$2,$3,'standard','confidential')",[otherAssistant,ownerId,workspaceId])
+    const a=await provision('member',['name','domain'],undefined,false,value.id,[],[value.id],undefined,'read_write',[],'company',ownerId)
+    const b=await provision('member',['name'],undefined,false,value.id,[],[value.id],undefined,'read_write',[],'company',ownerId,otherIssuer,otherAssistant)
+    const dispatcher=nativeQuerySnapshots(),query={type:'company',query:{fields:['name']}}
+    const one=await dispatcher.query(await resolveApplicationExecutionContext(a.authentication),'native','query',query) as {records:unknown[]}
+    const two=await dispatcher.query(await resolveApplicationExecutionContext(b.authentication),'native','query',query) as {records:unknown[]}
+    expect(one.records).toHaveLength(1);expect(two.records).toHaveLength(1)
+    const sourceA=boundScopeSources(one)[0],sourceB=boundScopeSources(two)[0]
+    expect(sourceA).toEqual(sourceB)
+    await pool.query("UPDATE application_access_grants SET read_fields=ARRAY['domain'] WHERE id=$1",[a.grantId])
+    expect(await dispatcher.query(await resolveApplicationExecutionContext(b.authentication),'native','query_snapshot',{id:sourceA.resourceId,version:sourceA.version})).toMatchObject({held:false})
+  })
   it.each((['member','external_user','service'] as const).flatMap(kind=>([
     {label:'numeric',amount:12},{label:'decimal string',amount:'12'},
     {label:'exact decimal',amount:'9007199254740993.000000000000000001'},
