@@ -21,6 +21,8 @@
  * [COMP:app-web/offline-write-queue]
  */
 
+import type { OfflineWriteAuthority } from "./application-write-authority";
+
 /** A single queued non-Yjs mutation. `payload` is the serializable args the
  *  replay executor needs to re-issue the call. */
 export interface QueuedWrite {
@@ -39,6 +41,10 @@ export interface QueuedWrite {
   enqueuedAt: number;
   /** Replay attempts so far (for dead-lettering poison ops). */
   attempts: number;
+  /** Original native caller partition; absent historical entries remain held. */
+  authority?: OfflineWriteAuthority;
+  /** Persisted before dispatch so a lost response cannot become a blind retry. */
+  effect?: "pending" | "uncertain";
 }
 
 /** Optional per-field merge for `merge`-coalesced ops (e.g. entity patches). */
@@ -60,7 +66,8 @@ export function enqueueWrite(
 ): QueuedWrite[] {
   if (op.coalesceKey !== null) {
     const idx = queue.findIndex(
-      (q) => q.coalesceKey === op.coalesceKey && q.kind === op.kind,
+      (q) => q.coalesceKey === op.coalesceKey && q.kind === op.kind
+        && q.effect !== "uncertain" && JSON.stringify(q.authority) === JSON.stringify(op.authority),
     );
     if (idx !== -1) {
       const existing = queue[idx];
@@ -115,6 +122,7 @@ export async function replayQueue(
 
   for (let i = 0; i < items.length; i++) {
     const op = items[i];
+    if (op.effect === "uncertain") return { flushed, remaining: items.slice(i), dead };
     try {
       await execute(op);
       flushed.push(op);

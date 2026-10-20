@@ -10,13 +10,28 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
 
 const data = vi.hoisted(() => new Map<string, unknown>());
+vi.mock("@/lib/user", () => ({ getUserInfo: () => ({ id: "viewer-fixture" }) }));
 vi.mock("../idb", () => ({
   idbGet: async (key: string) => data.get(key) ?? null,
   idbUpdate: async (key: string, fn: (v: unknown) => unknown) => {
     const next = fn(data.get(key) ?? null); data.set(key, next); return next;
   },
 }));
-vi.mock("../offline-pages", () => ({ readLocalPage: async () => null, patchLocalPage: async () => {} }));
+vi.mock("../offline-pages", () => ({ readLocalPage: async () => null, readCachedPage: async () => null, patchLocalPage: async () => {} }));
+// This suite isolates manager/coalescing behavior. The application authority
+// suite exercises the actual live-admission and pinned-session transport.
+vi.mock("../application-write-authority", async () => {
+  const { renameView } = await import("@/lib/api/views");
+  const authority = { viewerId: "viewer-fixture", workspaceId: "workspace-fixture", applicationId: "native", apiOrigin: "https://api.example" };
+  return {
+    currentOfflineWriteAuthority: () => authority,
+    sameOfflineWriteAuthority: (a: unknown, b: unknown) => JSON.stringify(a) === JSON.stringify(b),
+    offlineWriteQueueKey: () => "offline:write-queue:fixture",
+    offlineWriteUnavailable: () => new Error("Unavailable"),
+    prepareQueuedMetadataWrite: async (op: { payload: { id: string; name: string } }) =>
+      () => renameView(op.payload.id, op.payload.name),
+  };
+});
 
 vi.mock("@/lib/api/views", () => ({
   renameView: vi.fn(async () => ({ renamed: true })),
