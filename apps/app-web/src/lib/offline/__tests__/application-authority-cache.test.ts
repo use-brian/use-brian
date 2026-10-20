@@ -25,7 +25,7 @@ vi.mock("../idb", () => ({
 }));
 
 import { getValidAccessToken } from "@/lib/auth-fetch";
-import { currentOfflineWriteAuthority, offlineWriteQueueKey } from "../application-write-authority";
+import { currentOfflineWriteAuthority, offlineWriteQueueKey, pinOfflineWriteSession, offlinePageDocumentKey } from "../application-write-authority";
 import { flushWriteQueue, offlineWrite, readPendingWrites, setOnline } from "../offline-writes";
 
 const pageId = "00000000-0000-4000-8000-000000000002";
@@ -50,6 +50,30 @@ beforeEach(() => {
 });
 
 describe("[COMP:app-web/application-authority-cache] actual native outbox replay", () => {
+  it("pins page transport headers and refuses foreign endpoints or later identities", async () => {
+    const authority = currentOfflineWriteAuthority()!;
+    const session = await pinOfflineWriteSession(authority);
+    await expect(session.request("https://other.example/api/views")).rejects.toThrow();
+    expect(fetch).not.toHaveBeenCalled();
+    await session.request(`/api/views/${pageId}`, { headers: { Authorization: "Bearer different" } });
+    expect(new Headers(vi.mocked(fetch).mock.calls[0][1]?.headers).get("Authorization")).toBe(`Bearer ${session.bearer()}`);
+    fixture.userId = "viewer-b";
+    expect(() => session.bearer()).toThrow();
+    await expect(session.request(`/api/views/${pageId}`)).rejects.toThrow();
+    expect(fetch).toHaveBeenCalledTimes(1);
+  });
+
+  it("partitions Yjs storage without adopting the old shared document database", () => {
+    const first = offlinePageDocumentKey(pageId);
+    expect(first).not.toBe(`doc-page-${pageId}`);
+    fixture.userId = "viewer-b";
+    expect(offlinePageDocumentKey(pageId)).not.toBe(first);
+    fixture.userId = "viewer-a"; fixture.origin = "https://other.example";
+    expect(offlinePageDocumentKey(pageId)).not.toBe(first);
+    fixture.origin = "https://api.example"; fixture.workspaceId = "another-workspace";
+    expect(offlinePageDocumentKey(pageId)).not.toBe(first);
+  });
+
   it("does not dispatch an online edit after identity changes during the outbox read", async () => {
     setOnline(true);
     fixture.afterStorageRead = () => { fixture.userId = "viewer-b"; };

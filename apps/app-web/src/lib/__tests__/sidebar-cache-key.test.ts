@@ -17,7 +17,8 @@
 
 import { beforeEach, describe, expect, it, vi } from "vitest";
 
-const user = vi.hoisted(() => ({ id: null as string | null }));
+const user = vi.hoisted(() => ({ id: null as string | null, apiOrigin: "http://api.example" }));
+vi.mock("@/lib/runtime-public-config", () => ({ publicRuntimeConfig: () => ({ apiUrl: user.apiOrigin }) }));
 vi.mock("@/lib/user", () => ({
   getUserInfo: () => (user.id ? { id: user.id, name: "n", email: "e" } : null),
 }));
@@ -81,17 +82,23 @@ describe("[COMP:app-web/offline-pages] sidebar cache keys carry the viewer", () 
   beforeEach(() => {
     store.clear();
     user.id = null;
+    user.apiOrigin = "http://api.example";
+    window.history.replaceState({}, "", "/w/w1/p/page");
     authFetchMock.mockReset();
     setOnline(true);
   });
 
-  it("builds `sidebar:<kind>:<wid>:<viewer>` and never a viewer-less key", () => {
+  it("partitions every sidebar family by deployment, viewer, workspace and native app", () => {
     user.id = "u1";
-    expect(sidebarCacheKey("saved", "w1")).toBe("sidebar:saved:w1:u1");
-    expect(sidebarCacheKey("drafts", "w1")).toBe("sidebar:drafts:w1:u1");
-    expect(sidebarCacheKey("teamspaces", "w1")).toBe("sidebar:teamspaces:w1:u1");
+    const first = sidebarCacheKey("saved", "w1");
+    expect(first).toContain(encodeURIComponent(user.apiOrigin));
+    expect(first).toContain("u1:w1:native");
+    expect(sidebarCacheKey("drafts", "w1")).not.toBe(first);
+    expect(sidebarCacheKey("teamspaces", "w1")).not.toBe(first);
     user.id = "u2";
-    expect(sidebarCacheKey("saved", "w1")).toBe("sidebar:saved:w1:u2");
+    expect(sidebarCacheKey("saved", "w1")).not.toBe(first);
+    user.id = "u1"; user.apiOrigin = "http://other.example";
+    expect(sidebarCacheKey("saved", "w1")).not.toBe(first);
     user.id = null;
     expect(sidebarCacheKey("saved", "w1")).toBeNull();
   });
@@ -102,7 +109,7 @@ describe("[COMP:app-web/offline-pages] sidebar cache keys carry the viewer", () 
     authFetchMock.mockResolvedValue(okResponse([row("p1", "Only u1 may see this")]));
     const online = await listViews({ workspaceId: "w1", state: "saved" });
     expect(online.map((r) => r.name)).toEqual(["Only u1 may see this"]);
-    expect(store.has("sidebar:saved:w1:u1")).toBe(true);
+    expect(store.has(sidebarCacheKey("saved", "w1")!)).toBe(true);
     expect(store.has("sidebar:saved:w1")).toBe(false);
 
     // u2 opens the same workspace on the same device, offline: the disk tier
@@ -136,7 +143,8 @@ describe("[COMP:app-web/offline-pages] sidebar cache keys carry the viewer", () 
 
   it("evicts the viewer's disk copy on an authoritative denial", async () => {
     user.id = "u1";
-    store.set("sidebar:saved:w1:u1", [row("p1", "Stale")]);
+    const key = sidebarCacheKey("saved", "w1")!;
+    store.set(key, [row("p1", "Stale")]);
     authFetchMock.mockResolvedValue({
       ok: false,
       status: 403,
@@ -144,6 +152,15 @@ describe("[COMP:app-web/offline-pages] sidebar cache keys carry the viewer", () 
       json: async () => ({}),
     });
     await expect(listViews({ workspaceId: "w1", state: "saved" })).rejects.toThrow(/HTTP 403/);
-    expect(store.has("sidebar:saved:w1:u1")).toBe(false);
+    expect(store.has(key)).toBe(false);
+  });
+  it("does not adopt a cached sidebar from a different deployment or historical shared key", async () => {
+    user.id = "u1";
+    authFetchMock.mockResolvedValue(okResponse([row("p1", "Fictional scoped row")]));
+    await listViews({ workspaceId: "w1", state: "saved" });
+    store.set("sidebar:saved:w1:u1", [row("old", "Historical row")]);
+    user.apiOrigin = "http://other.example"; setOnline(false);
+    expect(await listViews({ workspaceId: "w1", state: "saved" })).toEqual([]);
+    expect(await readCachedSidebarTree("w1")).toBeNull();
   });
 });

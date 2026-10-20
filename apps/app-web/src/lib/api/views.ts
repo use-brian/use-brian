@@ -1,10 +1,12 @@
 import { publicRuntimeConfig } from "@/lib/runtime-public-config";
+import { currentOfflineWriteAuthority, sameOfflineWriteAuthority, pinOfflineWriteSession,
+  offlineWriteUnavailable, type PinnedOfflineSession } from "@/lib/offline/application-write-authority";
 /**
  * SDK for the Notion-redesign Views surface (apps/web).
  *
  * Thin typed wrappers around the page-model routes in
- * `packages/api/src/routes/views.ts` (migration 184). All calls go
- * through `authFetch` so token refresh is handled transparently.
+ * `packages/api/src/routes/views.ts` (migration 184). Ordinary reads use
+ * `authFetch`; authored page replay pins its original native session.
  *
  * Wire types are declared locally rather than imported from
  * `@use-brian/core` — the core barrel pulls in `skills/loader` which
@@ -1365,38 +1367,47 @@ export type DraftInput = {
 };
 
 export async function createDraft(params: DraftInput): Promise<ViewMetadata> {
+  const authority = currentOfflineWriteAuthority(params.workspaceId);
+  if (!authority) throw offlineWriteUnavailable();
+  const input = { ...structuredClone(params), id: params.id ?? crypto.randomUUID() };
   const { getOnline } = await import("@/lib/offline/offline-writes");
   const { createLocalPage, readLocalPage, cachePage } = await import("@/lib/offline/offline-pages");
-  const input = { ...params, id: params.id ?? crypto.randomUUID() };
+  if (!sameOfflineWriteAuthority(authority, currentOfflineWriteAuthority(authority.workspaceId))) throw offlineWriteUnavailable();
   if (!getOnline() || (typeof navigator !== "undefined" && !navigator.onLine)
-      || (input.nestParentId && await readLocalPage(input.nestParentId))) {
-    return createLocalPage(input);
+      || (input.nestParentId && await readLocalPage(input.nestParentId, input.workspaceId))) {
+    return createLocalPage(input, authority);
   }
+  const session = await pinOfflineWriteSession(authority);
   try {
-    const view = await createDraftOnServer(input);
-    await cachePage(view);
+    const view = await createDraftOnServer(input, session);
+    session.assertCurrent();
+    await cachePage(view, authority);
+    session.assertCurrent();
     return view;
   } catch (error) {
-    // A lost response may already have created the page. Retry the SAME UUID.
+    // A lost response may already have created the page. Keep its original
+    // identity/UUID and uncertainty; reconnect must not repeat that effect.
     if (error instanceof TypeError || /^HTTP 5\d\d/.test(String((error as Error).message))) {
-      return createLocalPage(input);
+      return createLocalPage(input, authority, "uncertain");
     }
     throw error;
   }
 }
 
 /** Older APIs ignore unknown create fields, so verify support before replay. */
-export async function supportsOfflinePageIds(workspaceId: string): Promise<boolean> {
-  const res = await authFetch(`${API_URL}/api/workspaces/${workspaceId}/views/offline-capabilities`);
+export async function supportsOfflinePageIds(workspaceId: string, session?: PinnedOfflineSession): Promise<boolean> {
+  const path = `/api/workspaces/${workspaceId}/views/offline-capabilities`;
+  const res = session ? await session.request(path) : await authFetch(`${API_URL}${path}`);
   if (!res.ok) return false;
   const body = await res.json() as { clientAssignedPageIds?: boolean };
   return body.clientAssignedPageIds === true;
 }
 
 /** Network-only executor; the outbox calls this without re-enqueueing. */
-export async function createDraftOnServer(params: DraftInput): Promise<ViewMetadata> {
-  const res = await authFetch(
-    `${API_URL}/api/workspaces/${params.workspaceId}/views/draft`,
+export async function createDraftOnServer(params: DraftInput, session?: PinnedOfflineSession): Promise<ViewMetadata> {
+  const path = `/api/workspaces/${params.workspaceId}/views/draft`;
+  const res = await (session ? session.request : (path: string, init?: RequestInit) => authFetch(`${API_URL}${path}`, init))(
+    path,
     {
       method: "POST",
       headers: { "content-type": "application/json" },
@@ -1415,7 +1426,12 @@ export async function createDraftOnServer(params: DraftInput): Promise<ViewMetad
       }),
     },
   );
-  return json<ViewMetadata>(res);
+  const view = await json<ViewMetadata>(res);
+  if (session) {
+    session.assertCurrent();
+    if (view.id !== params.id || view.workspaceId !== session.authority.workspaceId || view.createdBy !== session.authority.viewerId) throw offlineWriteUnavailable();
+  }
+  return view;
 }
 
 /**
@@ -1428,13 +1444,17 @@ export async function createDraftOnServer(params: DraftInput): Promise<ViewMetad
  */
 export async function commitPageCreatedEvent(
   viewId: string,
+  session?: PinnedOfflineSession,
 ): Promise<{ committed: boolean }> {
-  const res = await authFetch(`${API_URL}/api/views/${viewId}/commit-created`, {
+  const path = `/api/views/${viewId}/commit-created`;
+  const res = await (session ? session.request : (path: string, init?: RequestInit) => authFetch(`${API_URL}${path}`, init))(path, {
     method: "POST",
     headers: { "content-type": "application/json" },
     body: "{}",
   });
-  return json<{ committed: boolean }>(res);
+  const result = await json<{ committed: boolean }>(res);
+  if (session) { session.assertCurrent(); if (typeof result.committed !== "boolean") throw offlineWriteUnavailable(); }
+  return result;
 }
 
 // ── Reparent / reorder ────────────────────────────────────────────────

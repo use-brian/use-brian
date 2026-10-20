@@ -103,3 +103,43 @@ export async function prepareQueuedMetadataWrite(op: QueuedWrite): Promise<() =>
       || !("workspaceId" in result) || result.workspaceId !== authority.workspaceId) throw offlineWriteUnavailable();
   };
 }
+
+/** One native invocation's bearer, never a reusable authorization receipt. */
+export type PinnedOfflineSession = {
+  readonly authority: Readonly<OfflineWriteAuthority>;
+  assertCurrent: () => void;
+  bearer: () => string;
+  request: (path: string, init?: RequestInit) => Promise<Response>;
+};
+
+/** Bind refresh, fetch and reconnect callbacks to the intent's original actor. */
+export async function pinOfflineWriteSession(raw: OfflineWriteAuthority): Promise<PinnedOfflineSession> {
+  const authority = Object.freeze(structuredClone(raw));
+  if (!sameOfflineWriteAuthority(authority, currentOfflineWriteAuthority(authority.workspaceId))) throw offlineWriteUnavailable();
+  const token = await getValidAccessToken();
+  const assertCurrent = () => {
+    if (!token || tokenSubject(token) !== authority.viewerId
+      || !sameOfflineWriteAuthority(authority, currentOfflineWriteAuthority(authority.workspaceId))) throw offlineWriteUnavailable();
+  };
+  assertCurrent();
+  const credentials = usesGatewayCredentials() ? "include" : "omit";
+  return Object.freeze({ authority, assertCurrent,
+    bearer: () => { assertCurrent(); return token!; },
+    request: async (path: string, init?: RequestInit) => {
+      assertCurrent();
+      const url = new URL(`${authority.apiOrigin}${path}`);
+      if (!path.startsWith("/api/") || url.origin !== new URL(authority.apiOrigin).origin) throw offlineWriteUnavailable();
+      const headers = new Headers(init?.headers);
+      headers.set("Authorization", `Bearer ${token}`);
+      const response = await fetch(url.href, { ...init, headers, credentials, redirect: "error", cache: "no-store" });
+      assertCurrent();
+      return response;
+    },
+  });
+}
+
+/** Local routing/isolation metadata only; computing a key grants no read access. */
+export function offlinePageDocumentKey(pageId: string, authority: OfflineWriteAuthority | null = currentOfflineWriteAuthority()): string | null {
+  return authority ? `doc-page-v2:${[authority.apiOrigin, authority.viewerId, authority.workspaceId,
+    authority.applicationId, pageId].map(encodeURIComponent).join(":")}` : null;
+}
