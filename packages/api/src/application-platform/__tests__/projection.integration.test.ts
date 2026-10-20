@@ -144,6 +144,46 @@ describe('[COMP:api/application-auth] database application projections and live 
     expect(user).not.toBeNull()
     return { authentication: { user: user! }, appId, grantId, parentId, userId, token: `oat_${id}_${secret}` }
   }
+  async function historicalNativeAttributes(id:string,attributes:Record<string,unknown>) {
+    const fixture=await pool.connect()
+    try {
+      // This guarded disposable fixture models rows written before value guards.
+      // All real source, field and actor admission remains enabled during reads.
+      await fixture.query('BEGIN')
+      await fixture.query('ALTER TABLE entities DISABLE TRIGGER application_native_entity_values')
+      await fixture.query('UPDATE entities SET attributes=$2 WHERE id=$1',[id,attributes])
+      await fixture.query('ALTER TABLE entities ENABLE TRIGGER application_native_entity_values')
+      await fixture.query('COMMIT')
+    } finally {await fixture.query('ROLLBACK');fixture.release()}
+  }
+  it.each(['member','external_user','service'] as const)('Q02 evaluates only selected native codec values for the actual %s reader',async kind=>{
+    const value=await createEntity({workspaceId,kind:'company',displayName:'Fictional selected historical codec',attributes:{},createdByUserId:ownerId,source:'user'})
+    await historicalNativeAttributes(value.id,{crm_archived_at:'invalid historical timestamp'})
+    const fixture=await provision(kind,['name','archivedAt'],undefined,false,value.id),dispatcher=new ApplicationPlatformService([createCanonicalNativeApplicationModule()])
+    const execution=await resolveApplicationExecutionContext(fixture.authentication)
+    expect((await dispatcher.query(execution,'native','get',{type:'company',id:value.id,fields:['name']}) as {values:unknown}).values).toEqual({name:value.displayName})
+    expect((await dispatcher.query(execution,'native','get',{type:'company',id:value.id,fields:[]}) as {values:unknown}).values).toEqual({})
+    const result=await dispatcher.query(execution,'native','query',{type:'company',query:{fields:['name'],aggregate:[{field:'name',operation:'count'}]}}) as {records:Array<{ref:{id:string}}>;aggregates:unknown}
+    expect(result.records.map(row=>row.ref.id)).toEqual([value.id]);expect(result.aggregates).toEqual([{field:'name',operation:'count',value:'1'}])
+    expect(boundScopeSources(result).length).toBeGreaterThan(1)
+    await expect(dispatcher.query(execution,'native','get',{type:'company',id:value.id,fields:['archivedAt']})).rejects.toMatchObject({code:'invalid_value'})
+    await expect(dispatcher.query(execution,'native','query',{type:'company',query:{fields:['name'],sort:[{field:'archivedAt',direction:'asc'}]}})).rejects.toMatchObject({code:'invalid_value'})
+  })
+  it.each((['member','external_user','service'] as const).flatMap(kind=>([
+    {type:'company',field:'tags',attributes:{tags:{malformed:true}},valid:[]},
+    {type:'deal',field:'stage',attributes:{stage:'unsupported historical value'},valid:'lead'},
+  ] as const).map(value=>({...value,kind}))))('Q02 validates consumed historical $type field $field before predicate evaluation for $kind',async({kind,type,field,attributes,valid})=>{
+    const value=await createEntity({workspaceId,kind:type,displayName:'Fictional historical typed value',attributes:{},createdByUserId:ownerId,source:'user'})
+    await historicalNativeAttributes(value.id,attributes)
+    const fixture=await provision(kind,['name',field],undefined,false,value.id,[],[value.id],undefined,'read_write',[],type),dispatcher=new ApplicationPlatformService([createCanonicalNativeApplicationModule()])
+    const execution=await resolveApplicationExecutionContext(fixture.authentication)
+    expect((await dispatcher.query(execution,'native','get',{type,id:value.id,fields:['name']}) as {values:unknown}).values).toEqual({name:value.displayName})
+    const result=await dispatcher.query(execution,'native','query',{type,query:{fields:['name']}}) as {records:Array<{ref:{id:string}}>}
+    expect(result.records.map(row=>row.ref.id)).toEqual([value.id])
+    await expect(dispatcher.query(execution,'native','get',{type,id:value.id,fields:[field]})).rejects.toMatchObject({code:'invalid_value'})
+    await expect(dispatcher.query(execution,'native','query',{type,query:{fields:['name'],filters:[{field,op:'eq',value:valid}]}})).rejects.toMatchObject({code:'invalid_value'})
+    await expect(dispatcher.query(execution,'native','query',{type,query:{fields:[field]}})).rejects.toMatchObject({code:'invalid_value'})
+  })
   it.each((['member','external_user','service'] as const).flatMap(kind=>(['company','person'] as const).map(type=>({kind,type}))))('Q02/Q03 retains the actual $kind application ceiling through a legacy $type getter',async({kind,type})=>{
     const value=await createEntity({workspaceId,kind:type,displayName:'Fictional legacy application point',attributes:type==='company'?{domain:'fictional.example'}:{email:'fictional@example.com',phone:'555-0100'},createdByUserId:ownerId,source:'user'})
     const fields=['name',...(type==='company'?['domain']:['email','phone','companyId']),'aliases','tags','externalRef','createdAt','updatedAt']

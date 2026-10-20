@@ -2,7 +2,7 @@
 import { z } from 'zod'
 import { createHash } from 'node:crypto'
 import type { PoolClient } from 'pg'
-import { crmAmountSchema, applicationAuthorityCreationScope, parseApplicationCrmFieldDefinition, validateCrmCustomFieldValue, type ApplicationModuleDefinition, type ApplicationOperationContext } from '@use-brian/core'
+import { crmAmountSchema, applicationAuthorityCreationScope, parseApplicationCrmFieldDefinition, type ApplicationModuleDefinition, type ApplicationOperationContext } from '@use-brian/core'
 import { ApplicationPlatformError, applicationResourceRefSchema, applicationQuerySchema, type ApplicationRecordProjection,
   type ApplicationResourceDefinition, type ApplicationResourceRef } from '@use-brian/shared'
 import { createCompany,createContact,createDeal } from '../db/crm.js'
@@ -49,10 +49,6 @@ async function read(context:Context,type:z.infer<typeof readInput>['type'],id:st
     throw new ApplicationPlatformError('access_unavailable','The record is unavailable.')
   }
   const projection=await readCanonicalNativeRecord(canonicalGenericReadContext(context),definition,id,fields)
-  for(const field of definition.fields) if(field.kind==='crm' && Object.hasOwn(projection.values,field.key)
-    && !validateCrmCustomFieldValue(parseApplicationCrmFieldDefinition(field.definition),projection.values[field.key])) {
-    throw new ApplicationPlatformError('invalid_value','The canonical record requires review.')
-  }
   return projection
 }
 async function query(context:Context,raw:z.infer<typeof queryInput>) {

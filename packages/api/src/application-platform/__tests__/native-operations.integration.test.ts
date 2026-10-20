@@ -73,6 +73,24 @@ describe('[COMP:api/application-records] canonical native operation composition'
     expect(record?.createdAt).toEqual(value.createdAt);expect(record?.updatedAt).toEqual(value.updatedAt)
     expect(boundScopeSources(record!)).toEqual(expect.arrayContaining([expect.objectContaining({resourceKind:'application_field',workspaceId})]))
   })
+  it.each(['company','person','deal'] as const)('Q02 excludes unselected malformed native %s slots before actual member reads and queries',async type=>{
+    const value=await createEntity({workspaceId,kind:type,displayName:`Fictional native selected ${randomUUID()}`,attributes:{},createdByUserId:userId,source:'user'})
+    const fixture=await owner.connect()
+    try {
+      await fixture.query('BEGIN');await fixture.query('ALTER TABLE entities DISABLE TRIGGER application_native_entity_values')
+      await fixture.query('UPDATE entities SET attributes=$2 WHERE id=$1',[value.id,{crm_archived_at:'invalid historical timestamp'}])
+      await fixture.query('ALTER TABLE entities ENABLE TRIGGER application_native_entity_values');await fixture.query('COMMIT')
+    } finally {await fixture.query('ROLLBACK');fixture.release()}
+    const dispatcher=new ApplicationPlatformService([createCanonicalNativeApplicationModule()]),context=await execution()
+    const record=await dispatcher.query(context,'native','get',{type,id:value.id,fields:['name']}) as {values:unknown}
+    expect(record.values).toEqual({name:value.displayName});expect(boundScopeSources(record).length).toBeGreaterThan(0)
+    expect((await dispatcher.query(context,'native','get',{type,id:value.id,fields:[]}) as {values:unknown}).values).toEqual({})
+    const result=await dispatcher.query(context,'native','query',{type,query:{fields:['name'],filters:[{field:'name',op:'eq',value:value.displayName}]}}) as {records:Array<{ref:{id:string}}>}
+    expect(result.records.map(row=>row.ref.id)).toEqual([value.id])
+    await expect(dispatcher.query(context,'native','get',{type,id:value.id,fields:['archivedAt']})).rejects.toMatchObject({code:'invalid_value'})
+    const legacy=type==='company'?await getCompanyById(access,value.id):type==='person'?await getContactById(access,value.id):null
+    if(type!=='deal')expect(legacy?.id).toBe(value.id)
+  })
   it('Q02 queries native CRM under the actual member and rejects an owner-pool query catalog',async()=>{
     const name=`Fictional native member query ${randomUUID()}`,value=await createCompany(userId,{workspaceId,name,access,mergeByName:false})
     const dispatcher=new ApplicationPlatformService([createCanonicalNativeApplicationModule()])

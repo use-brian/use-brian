@@ -3,7 +3,7 @@ import { createHash } from 'node:crypto'
 import { z } from 'zod'
 import { bindScopeSources, validateApplicationValues, parseApplicationCrmFieldDefinition, type ScopeSource } from '@use-brian/core'
 import { ApplicationPlatformError, applicationJsonSchema, type ApplicationQuery, type ApplicationResourceDefinition, type ApplicationFieldDefinition, type ApplicationRecordProjection } from '@use-brian/shared'
-import type { CanonicalGenericReadContext } from './field-evidence.js'
+import { validateCanonicalNativeValues, type CanonicalGenericReadContext } from './field-evidence.js'
 
 const unavailable=()=>new ApplicationPlatformError('access_unavailable','The resource is unavailable.')
 function invalid():never {throw new ApplicationPlatformError('invalid_value','The declared query or cursor is invalid.')}
@@ -103,14 +103,22 @@ export async function queryCanonicalNativeRecords(context:CanonicalGenericReadCo
     [context.workspaceId,definition.typeKey,fields,consumed])).rows[0]?.value)
   if(!domain.success||Object.keys(domain.data.values).length||domain.data.sources[0].resourceKind!=='application_field'
     ||domain.data.sources.some(source=>source.workspaceId!==context.workspaceId))throw unavailable()
-  const identity=domain.data.sources[0],port=`read_native_application_query_candidates($1,$2,${compiled.bind(consumed)}::text[],${compiled.bind(identity.resourceId)}::uuid,${compiled.bind(identity.version)}::text)`
-  const result=(await context.transaction.query(`WITH candidates AS MATERIALIZED (SELECT * FROM ${port}),
+  const identity=domain.data.sources[0]
+  // Capture and validate every consumed field before evaluating any predicate,
+  // sort or aggregate. SQL expressions receive only these admitted snapshots.
+  const candidates=z.array(row).max(4096).parse((await context.transaction.query(
+    'SELECT * FROM read_native_application_query_candidates($1,$2,$3,$4,$5)',
+    [context.workspaceId,definition.typeKey,consumed,identity.resourceId,identity.version])).rows)
+  for(const candidate of candidates)validateCanonicalNativeValues(definition,candidate.data)
+  const candidateValues=compiled.bind(JSON.stringify(candidates))
+  const result=(await context.transaction.query(`WITH candidates AS MATERIALIZED (
+    SELECT * FROM jsonb_to_recordset(${candidateValues}::jsonb) AS captured(id uuid,data jsonb,record_version text,sources jsonb,policy_version text)),
     filtered AS MATERIALIZED (SELECT * FROM candidates WHERE ${compiled.predicate}),
     page AS MATERIALIZED (SELECT *,${compiled.sort} FROM filtered WHERE ${compiled.after} ORDER BY ${compiled.order} LIMIT ${compiled.limit})
-    SELECT (SELECT coalesce(jsonb_agg(to_jsonb(page)),'[]') FROM page) AS page,
-     (SELECT coalesce(jsonb_agg(to_jsonb(candidates)),'[]') FROM candidates) AS candidates
+    SELECT $1::uuid AS workspace_id,$2::text AS type_key,(SELECT coalesce(jsonb_agg(to_jsonb(page)),'[]') FROM page) AS page
      ${compiled.aggregates.length?`,(SELECT to_jsonb(totals) FROM (SELECT ${compiled.aggregates.join(',')} FROM filtered) totals) AS aggregates`:''}`,compiled.values)).rows[0]
-  const candidates=z.array(row).max(4096).parse(result?.candidates),page=z.array(row).max(input.limit+1).parse(result?.page)
+  if(result?.workspace_id!==context.workspaceId||result?.type_key!==definition.typeKey)throw unavailable()
+  const page=z.array(row).max(input.limit+1).parse(result?.page)
   const sources:ScopeSource[]=[...domain.data.sources,...candidates.flatMap(candidate=>candidate.sources)]
   if(sources.some(source=>source.workspaceId!==context.workspaceId))throw unavailable()
   const records:ApplicationRecordProjection[]=[],selected=page.slice(0,input.limit)
@@ -123,6 +131,7 @@ export async function queryCanonicalNativeRecords(context:CanonicalGenericReadCo
     const value=byId.get(candidate.id)
     if(!value||output.some(field=>!Object.hasOwn(value.data,field))||Object.keys(value.data).length!==output.length
       ||value.sources.some(source=>source.workspaceId!==context.workspaceId))throw unavailable()
+    validateCanonicalNativeValues(definition,value.data)
     const policyVersion=context.applicationFingerprint?createHash('sha256').update(JSON.stringify({application:context.applicationFingerprint,field:value.policy_version})).digest('hex'):value.policy_version
     const record=bindScopeSources({ref:{workspaceId:context.workspaceId,origin:definition.origin,typeKey:definition.typeKey,id:candidate.id,version:candidate.record_version},
       values:value.data,fields:Object.keys(value.data),policyVersion},value.sources)

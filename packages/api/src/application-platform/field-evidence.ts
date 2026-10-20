@@ -3,7 +3,7 @@ import { isDeepStrictEqual } from 'node:util'
 import { createHash } from 'node:crypto'
 import { z } from 'zod'
 import type { PoolClient } from 'pg'
-import { bindScopeSources, boundScopeSources, resourceScopeKey, type ApplicationOperationContext, type ScopeSource } from '@use-brian/core'
+import { bindScopeSources, boundScopeSources, resourceScopeKey, validateApplicationValues, type ApplicationOperationContext, type ScopeSource } from '@use-brian/core'
 import { ApplicationPlatformError, applicationJsonSchema, type ApplicationRecordProjection,type ApplicationResourceDefinition } from '@use-brian/shared'
 import { getPool } from '../db/client.js'
 import { getApplicationExecutionBinding } from './execution-context.js'
@@ -60,6 +60,12 @@ export async function readCanonicalGenericRecord(context: CanonicalGenericReadCo
 }
 
 /** Canonical native values are selected and captured before crossing the SQL boundary. */
+/** Validate only values actually selected; reading immutable metadata is allowed. */
+export function validateCanonicalNativeValues(definition:ApplicationResourceDefinition,values:ApplicationRecordProjection['values']):void {
+  validateApplicationValues({...definition,fields:definition.fields.filter(field=>Object.hasOwn(values,field.key))
+    .map(field=>({...field,immutable:false}))},values)
+}
+
 export async function readCanonicalNativeRecord(context:CanonicalGenericReadContext,
   definition:ApplicationResourceDefinition,id:string,fields?:readonly string[]):Promise<ApplicationRecordProjection> {
   if(definition.origin.kind!=='native' || definition.origin.moduleKey!=='native') unavailable()
@@ -70,6 +76,7 @@ export async function readCanonicalNativeRecord(context:CanonicalGenericReadCont
     || captured.data.sources.some(source=>source.workspaceId!==context.workspaceId)
     || Object.keys(captured.data.values).some(field=>!definition.fields.some(candidate=>candidate.key===field))
     || fields && !isDeepStrictEqual([...fields].sort(),Object.keys(captured.data.values).sort())) unavailable()
+  validateCanonicalNativeValues(definition,captured.data.values)
   const policyVersion=context.applicationFingerprint
     ? createHash('sha256').update(JSON.stringify({application:context.applicationFingerprint,field:captured.data.policyVersion})).digest('hex')
     :captured.data.policyVersion
