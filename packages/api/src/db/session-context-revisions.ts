@@ -17,7 +17,7 @@ import { applyApplicationRLSContext, releaseApplicationTransactionBinding } from
 import { assertPreparedExternalSourceAuthorityCurrent, pinPreparedExternalSourceAuthority,
   type PreparedExternalSourceAuthority } from '../application-platform/retained-source-authority.js'
 
-export type SessionContextKind = 'session_state' | 'episodic_memory' | 'compact_summary'
+export type SessionContextKind = 'session_state' | 'episodic_memory' | 'compact_summary' | 'message_annotation'
 export type SessionContextRevision = {
   id: string; parentId: string; sessionId: string; source: ScopeSource; content: Record<string, unknown>
   userId: string; assistantId: string; createdAt: Date; lastAccessedAt: Date; accessCount: number; survivalCount: number
@@ -96,7 +96,7 @@ async function transaction<T>(authority: SessionContextAuthority, sources: reado
 
 /** Discover immutable metadata only. Historical plaintext is never selected. */
 export async function readSessionContextRevisions(sessionId: string, kind: SessionContextKind,
-  authority?: SessionContextAuthority, options?: { includePromoted?: boolean }): Promise<SessionContextRevision[]> {
+  authority?: SessionContextAuthority, options?: { includePromoted?: boolean; parentId?: string }): Promise<SessionContextRevision[]> {
   if (!authority) return []
   requireAuthority(authority)
   await authority.execution.security.authority.assertCurrent()
@@ -108,9 +108,10 @@ export async function readSessionContextRevisions(sessionId: string, kind: Sessi
     FROM session_context_scope_revisions r JOIN sessions s ON s.workspace_id=r.workspace_id AND s.id=r.session_id
     LEFT JOIN session_state st ON r.parent_kind='session_state' AND st.id=r.parent_id AND st.scope_revision_id=r.id AND st.session_id=r.session_id
     LEFT JOIN episodic_memories e ON r.parent_kind='episodic_memory' AND e.id=r.parent_id AND e.scope_revision_id=r.id AND e.session_id=r.session_id
-    WHERE r.workspace_id=$1 AND r.session_id=$2 AND r.parent_kind=$3
-      AND (st.id IS NOT NULL OR e.id IS NOT NULL AND ($4::boolean OR e.promoted_memory_id IS NULL) OR r.parent_kind='compact_summary' AND s.compact_scope_revision_id=r.id)
-    ORDER BY r.id`, [workspaceId,sessionId,kind,options?.includePromoted === true])).rows
+    LEFT JOIN session_message_annotation_heads annotation ON r.parent_kind='message_annotation' AND annotation.message_id=r.parent_id AND annotation.scope_revision_id=r.id AND annotation.workspace_id=r.workspace_id AND annotation.session_id=r.session_id
+    WHERE r.workspace_id=$1 AND r.session_id=$2 AND r.parent_kind=$3 AND ($5::uuid IS NULL OR r.parent_id=$5)
+      AND (annotation.message_id IS NOT NULL OR st.id IS NOT NULL OR e.id IS NOT NULL AND ($4::boolean OR e.promoted_memory_id IS NULL) OR r.parent_kind='compact_summary' AND s.compact_scope_revision_id=r.id)
+    ORDER BY r.id`, [workspaceId,sessionId,kind,options?.includePromoted === true,options?.parentId ?? null])).rows
   const rows: SessionContextRevision[] = []
   for (const candidate of candidates) {
     if (!candidate.source || candidate.source.resourceKind !== 'session_context_revision' || (candidate.source as ScopeSource & { held?: boolean }).held !== false) continue
@@ -152,6 +153,15 @@ export async function writeSessionContextRevision(input: {
   accumulated.note(authority.accumulator.evidence)
   if (!input.derivation) missing()
   accumulated.note({ sources: input.derivation.sources })
+  if (input.kind==='message_annotation') {
+    if (!input.parentId) missing()
+    const native=(await getPool().query<{source:ScopeSource & {held?:boolean}}>(`SELECT read_scope_source($1,'session_message',id) AS source
+      FROM session_messages WHERE workspace_id=$1 AND session_id=$2 AND id=$3`,
+      [execution.security.access.workspaceId,input.sessionId,input.parentId])).rows[0]?.source
+    if (!native || native.held!==false) changed()
+    const {workspaceId,userId,assistantId,sensitivity,compartments,projectIds,resourceKind,resourceId,version}=native
+    accumulated.noteSource({workspaceId,userId,assistantId,sensitivity,compartments,projectIds,resourceKind,resourceId,version})
+  }
   const evidence: DerivedWriteEvidence = { producer: input.derivation.producer, sources: accumulated.evidence.sources ?? [] }
   deriveWriteScope(evidence, { workspaceId: execution.security.access.workspaceId, userId: execution.security.access.userId,
     assistantId: null, sensitivity: 'public', compartments: [], projectIds: [] }, execution.security.access.userId)
@@ -171,6 +181,9 @@ export async function writeSessionContextRevision(input: {
     if (input.kind === 'compact_summary') {
       const current = (await client.query<{ cursor: number | null }>('SELECT compact_boundary_sequence AS cursor FROM sessions WHERE id=$1',[input.sessionId])).rows[0]
       if (!current || current.cursor !== input.expectedCursor) return null
+    } else if (input.kind==='message_annotation') {
+      const previous=(await client.query<{revision:string}>('SELECT scope_revision_id AS revision FROM session_message_annotation_heads WHERE message_id=$1 AND session_id=$2 FOR UPDATE',[parentId,input.sessionId])).rows[0]
+      if (previous ? previous.revision!==input.expectedRevision : input.expectedRevision!==undefined) return null
     } else if (input.parentId) {
       const table = input.kind === 'session_state' ? 'session_state' : 'episodic_memories'
       const previous = (await client.query<{ revision: string | null }>(`SELECT scope_revision_id AS revision FROM ${table} WHERE id=$1 AND session_id=$2 FOR UPDATE`, [parentId,input.sessionId])).rows[0]
@@ -202,6 +215,10 @@ export async function writeSessionContextRevision(input: {
     } else if (input.kind === 'episodic_memory') {
       await client.query(`INSERT INTO episodic_memories(id,user_id,assistant_id,session_id,topic_label,summary,message_span,scope_revision_id)
         VALUES($1,$2,$3,$4,'','','{}',$5)`,[parentId,target.createdBy,target.assistant,input.sessionId,id])
+    } else if (input.kind==='message_annotation') {
+      await client.query(`INSERT INTO session_message_annotation_heads(message_id,workspace_id,session_id,scope_revision_id)
+        VALUES($1,$2,$3,$4) ON CONFLICT(message_id) DO UPDATE SET scope_revision_id=EXCLUDED.scope_revision_id`,
+        [parentId,scope.workspaceId,input.sessionId,id])
     } else {
       await client.query(`UPDATE sessions SET compact_summary=NULL,compact_scope_revision_id=$2,compact_boundary_sequence=$3,
         compaction_count=compaction_count+1,last_compacted_at=now() WHERE id=$1`,[input.sessionId,id,payload.boundarySequence])
