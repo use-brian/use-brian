@@ -76,7 +76,7 @@ export class ApplicationManagementService {
       readiness:{qualified:false,reason:'consumer_qualification_incomplete',legacyReview:'unavailable',canActivate:false},
       modules:[...this.applications.registry.applications.keys()].sort(),clients,selectedAppId:appId,grants,credentials,schemas,
       sources:{state:metadata.sources.length?'available':'unavailable',items:metadata.sources.map(source=>({...source,mappingStatus:'unavailable',keyStatus:'deployment_managed',retentionStatus:'unavailable'}))},
-      links:{miniApps:`${base}/studio/mini-apps`,connectors:`${base}/studio/connectors`,programmaticAccess:`${base}/studio/programmatic-access`,access:`${base}/organization?tab=access`}}
+      links:{miniApps:`${base}/studio/mini-apps`,connectors:`${base}/studio/connectors`,programmaticAccess:`${base}/studio/programmatic-access`,access:`${base}/organization?section=access`}}
   }
 
   async executeCommand(actorId:string,workspaceId:string,raw:unknown,delivery:{audience:'human'|'brian';assistantId?:string}={audience:'human'}):Promise<unknown> {

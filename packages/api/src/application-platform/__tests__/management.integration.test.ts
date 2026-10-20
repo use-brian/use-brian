@@ -48,7 +48,7 @@ describe('[COMP:api/application-management] native human and Brian management',(
  })
  it('M01 binds actual native actor/assistant and refuses app audience or unregistered origins',async()=>{
   const response=await request(http).get(`${base}/management`).set('Authorization',`Bearer ${tokens.get(actorId)}`).query({appId})
-  expect(response.status).toBe(200);expect(response.body.actor).toEqual({userId:actorId,assistantId});expect(response.body.clients.some((c:any)=>c.id===appId)).toBe(true)
+  expect(response.status).toBe(200);expect(response.body.actor).toEqual({userId:actorId,assistantId});expect(response.body.links.access).toBe(`/w/${workspaceId}/organization?section=access`);expect(response.body.clients.some((c:any)=>c.id===appId)).toBe(true)
   expect((await command({kind:'status',appId,status:'suspended'}).set('Origin','https://foreign.example')).status).toBe(403)
   expect((await request(http).get(`${base}/management`).query({actorId:foreignId}).set('Authorization',`Bearer ${tokens.get(actorId)}`)).status).toBe(400)
  })

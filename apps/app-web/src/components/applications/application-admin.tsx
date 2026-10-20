@@ -16,7 +16,7 @@ import { confirmDialog } from '@/components/ui/confirm-dialog';
 
 type Surface='apps'|'credentials'|'sources'|'access'|'all';
 type Copy=ReturnType<typeof useT>['applicationManagement'];
-const fieldClass='min-h-11 w-full rounded-md border border-border bg-background px-3 py-2 text-sm';
+const fieldClass='min-h-8 max-sm:min-h-11 w-full rounded-md border border-border bg-background px-3 py-2 text-sm';
 const pretty=(value:unknown)=>JSON.stringify(value,null,2);
 export function ApplicationManagement({surface='all',targetUserId}:{surface?:Surface;targetUserId?:string}){
  const {workspaceId,me}=useWorkspaceContext();
@@ -68,7 +68,7 @@ function ManagementPanel({workspaceId,viewerId,appId,onSelect,surface,targetUser
  const show=(area:Surface)=>surface===area||surface==='all';
  if(!data)return <section className="my-4 rounded-xl border p-4" aria-label={t.title}><h2>{t.title}</h2><p role="status">{resource.error?t.unavailable:t.loading}</p><Button onClick={()=>void resource.refresh()}>{t.retry}</Button></section>;
  const selected=data.clients.find(client=>client.id===data.selectedAppId);
- return <section className="my-4 min-w-0 space-y-4 [&_button]:min-h-11 rounded-xl border border-border p-4" aria-label={t.title}>
+ return <section className="my-4 min-w-0 space-y-4 max-sm:[&_button]:min-h-11 rounded-xl border border-border p-4" aria-label={t.title}>
   <h2 className="text-lg font-semibold">{t.title}</h2>
   <p role="status" className="text-sm">{t.unqualified}</p>
   <p className="break-all text-xs">{t.identity}: {data.actor.userId} / {data.actor.assistantId}</p>
@@ -85,7 +85,7 @@ function ManagementPanel({workspaceId,viewerId,appId,onSelect,surface,targetUser
   {show('access')&&<GovernanceEditor key={data.selectedAppId} t={t} workspaceId={workspaceId} modules={data.modules} targetUserId={targetUserId??viewerId} busy={busy} submit={command=>void run(command,'governance')}/>}
   {show('sources')&&<><h3>{t.sources}</h3><p>{t.sourceUnavailable}</p><Metadata title={t.sources} items={data.sources.items} empty={t.empty}/><a className="underline" href={data.links.connectors}>{t.sources}</a></>}
   <p>{t.legacyUnavailable}</p><a className="underline" href={data.links.access}>{t.access}</a>
-  {review&&<div className="space-y-2 rounded-lg border p-3"><h3>{t.exactReview}</h3><pre className="max-h-72 overflow-auto whitespace-pre-wrap break-all text-xs">{pretty(review.value)}</pre><Button disabled={busy||!review.enabled} onClick={()=>void confirmed(review.command,review.value)}>{t.apply}</Button><Button onClick={()=>setReview(null)}>{t.cancel}</Button>{!review.enabled&&<p>{t.unqualified}</p>}</div>}
+  {review&&<div className="space-y-2 rounded-lg bg-muted/40 p-3"><h3>{t.exactReview}</h3><pre className="max-h-72 overflow-auto whitespace-pre-wrap break-all text-xs">{pretty(review.value)}</pre><Button disabled={busy||!review.enabled} onClick={()=>void confirmed(review.command,review.value)}>{t.apply}</Button><Button onClick={()=>setReview(null)}>{t.cancel}</Button>{!review.enabled&&<p>{t.unqualified}</p>}</div>}
   {receipt&&<div><h3>{t.receipt}</h3><pre className="max-h-56 overflow-auto whitespace-pre-wrap break-all text-xs">{pretty(receipt)}</pre></div>}
   {secret&&<div><h3>{t.secret}</h3><p>{t.secretOnce}</p><code className="break-all">{secret}</code><Button onClick={()=>setSecret(null)}>{t.close}</Button></div>}
   {message&&<div role="status"><p>{t[message]}</p><Button onClick={()=>{purge();void resource.refresh();}}>{message==='uncertain'?t.reconcile:t.retry}</Button></div>}
