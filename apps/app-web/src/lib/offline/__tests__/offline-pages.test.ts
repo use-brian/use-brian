@@ -111,15 +111,15 @@ describe("[COMP:app-web/offline-pages] durable offline creation", () => {
   it("coalesces a rename while a local page is waiting even if the network is up", async () => {
     await createLocalPage({ id, workspaceId: wid });
     setOnline(true);
-    const exec = vi.fn();
     for (const name of ["First title", "Final title"]) {
-      await offlineWrite({ kind: "view.rename", coalesceKey: `rename:${id}`, payload: { id, name }, exec });
+      await offlineWrite({ kind: "view.rename", coalesceKey: `rename:${id}`, payload: { id, name } });
     }
     expect((await getView(id)).name).toBe("Final title");
     expect((await listViews({ workspaceId: wid, state: "draft" }))[0].name).toBe("Final title");
-    expect(exec).not.toHaveBeenCalled();
+    expect(request).not.toHaveBeenCalled();
     await flushWriteQueue();
     expect(authFetch).not.toHaveBeenCalled(); // create must finish first
+    expect(request).not.toHaveBeenCalled();
   });
 
   it("uses identical seed structs on both sides so templates do not duplicate", async () => {

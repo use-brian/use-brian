@@ -1180,13 +1180,24 @@ export async function unsaveView(viewId: string): Promise<ViewMetadata> {
 export async function renameView(
   viewId: string,
   name: string,
+  session?: PinnedOfflineSession,
 ): Promise<ViewMetadata> {
-  const res = await authFetch(`${API_URL}/api/saved-views/${viewId}`, {
+  const path = `/api/saved-views/${encodeURIComponent(viewId)}`;
+  const res = await (session ? session.request(path, {
     method: "PATCH",
     headers: { "content-type": "application/json" },
     body: JSON.stringify({ name }),
-  });
-  return json<ViewMetadata>(res);
+  }) : authFetch(`${API_URL}${path}`, {
+    method: "PATCH", headers: { "content-type": "application/json" },
+    body: JSON.stringify({ name }),
+  }));
+  if (session && res.status !== 200) throw offlineWriteUnavailable();
+  const result = await json<ViewMetadata>(res);
+  if (session) {
+    session.assertCurrent();
+    if (result.id !== viewId || result.workspaceId !== session.authority.workspaceId) throw offlineWriteUnavailable();
+  }
+  return result;
 }
 
 /**
@@ -1197,13 +1208,24 @@ export async function renameView(
 export async function setViewIcon(
   viewId: string,
   icon: string | null,
+  session?: PinnedOfflineSession,
 ): Promise<ViewMetadata> {
-  const res = await authFetch(`${API_URL}/api/saved-views/${viewId}`, {
+  const path = `/api/saved-views/${encodeURIComponent(viewId)}`;
+  const res = await (session ? session.request(path, {
     method: "PATCH",
     headers: { "content-type": "application/json" },
     body: JSON.stringify({ icon }),
-  });
-  return json<ViewMetadata>(res);
+  }) : authFetch(`${API_URL}${path}`, {
+    method: "PATCH", headers: { "content-type": "application/json" },
+    body: JSON.stringify({ icon }),
+  }));
+  if (session && res.status !== 200) throw offlineWriteUnavailable();
+  const result = await json<ViewMetadata>(res);
+  if (session) {
+    session.assertCurrent();
+    if (result.id !== viewId || result.workspaceId !== session.authority.workspaceId) throw offlineWriteUnavailable();
+  }
+  return result;
 }
 
 /**
@@ -1215,13 +1237,24 @@ export async function setViewIcon(
 export async function setViewFullWidth(
   viewId: string,
   fullWidth: boolean,
+  session?: PinnedOfflineSession,
 ): Promise<ViewMetadata> {
-  const res = await authFetch(`${API_URL}/api/saved-views/${viewId}`, {
+  const path = `/api/saved-views/${encodeURIComponent(viewId)}`;
+  const res = await (session ? session.request(path, {
     method: "PATCH",
     headers: { "content-type": "application/json" },
     body: JSON.stringify({ fullWidth }),
-  });
-  return json<ViewMetadata>(res);
+  }) : authFetch(`${API_URL}${path}`, {
+    method: "PATCH", headers: { "content-type": "application/json" },
+    body: JSON.stringify({ fullWidth }),
+  }));
+  if (session && res.status !== 200) throw offlineWriteUnavailable();
+  const result = await json<ViewMetadata>(res);
+  if (session) {
+    session.assertCurrent();
+    if (result.id !== viewId || result.workspaceId !== session.authority.workspaceId) throw offlineWriteUnavailable();
+  }
+  return result;
 }
 
 /**
@@ -1284,13 +1317,24 @@ export async function ingestViewToBrain(viewId: string): Promise<void> {
 export async function setViewClearance(
   viewId: string,
   clearance: "public" | "internal" | "confidential",
+  session?: PinnedOfflineSession,
 ): Promise<ViewMetadata> {
-  const res = await authFetch(`${API_URL}/api/saved-views/${viewId}`, {
+  const path = `/api/saved-views/${encodeURIComponent(viewId)}`;
+  const res = await (session ? session.request(path, {
     method: "PATCH",
     headers: { "content-type": "application/json" },
     body: JSON.stringify({ clearance }),
-  });
-  return json<ViewMetadata>(res);
+  }) : authFetch(`${API_URL}${path}`, {
+    method: "PATCH", headers: { "content-type": "application/json" },
+    body: JSON.stringify({ clearance }),
+  }));
+  if (session && res.status !== 200) throw offlineWriteUnavailable();
+  const result = await json<ViewMetadata>(res);
+  if (session) {
+    session.assertCurrent();
+    if (result.id !== viewId || result.workspaceId !== session.authority.workspaceId) throw offlineWriteUnavailable();
+  }
+  return result;
 }
 
 /**

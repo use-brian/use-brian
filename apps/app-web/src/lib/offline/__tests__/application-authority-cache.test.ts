@@ -7,7 +7,7 @@ const fixture = vi.hoisted(() => ({
 }));
 vi.mock("@/lib/user", () => ({ getUserInfo: () => ({ id: fixture.userId }) }));
 vi.mock("@/lib/runtime-public-config", () => ({ publicRuntimeConfig: () => ({ apiUrl: fixture.origin }) }));
-vi.mock("@/lib/auth-fetch", () => ({ getValidAccessToken: vi.fn(async () =>
+vi.mock("@/lib/auth-fetch", () => ({ authFetch: vi.fn(() => { throw new Error("Unexpected unpinned transport"); }), getValidAccessToken: vi.fn(async () =>
   `header.${btoa(JSON.stringify({ sub: fixture.userId }))}.signature`) }));
 vi.mock("../offline-pages", () => ({ readLocalPage: async () => null, readCachedPage: async () => null,
   patchLocalPage: async () => {} }));
@@ -33,7 +33,7 @@ const response = (value: unknown, status = 200) => new Response(JSON.stringify(v
 function queuedKey() { return offlineWriteQueueKey(currentOfflineWriteAuthority()!); }
 async function enqueue(name = "Fictional title") {
   await offlineWrite({ kind: "view.rename", coalesceKey: `rename:${pageId}`,
-    payload: { id: pageId, name }, exec: async () => {} });
+    payload: { id: pageId, name } });
 }
 function liveServer() {
   return vi.fn(async (_url: string, init?: RequestInit) => init?.method === "PATCH"
@@ -77,17 +77,16 @@ describe("[COMP:app-web/application-authority-cache] actual native outbox replay
   it("does not dispatch an online edit after identity changes during the outbox read", async () => {
     setOnline(true);
     fixture.afterStorageRead = () => { fixture.userId = "viewer-b"; };
-    const exec = vi.fn(async () => {});
     await expect(offlineWrite({ kind: "view.rename", coalesceKey: null,
-      payload: { id: pageId, name: "Fictional title" }, exec })).rejects.toThrow();
-    expect(exec).not.toHaveBeenCalled();
+      payload: { id: pageId, name: "Fictional title" } })).rejects.toThrow();
+    expect(fetch).not.toHaveBeenCalled();
   });
 
   it.each([
     ["view.icon", { icon: "📄" }], ["view.fullWidth", { fullWidth: true }],
     ["view.clearance", { clearance: "internal" }],
   ])("replays %s through the canonical metadata writer", async (kind, fields) => {
-    await offlineWrite({ kind, coalesceKey: null, payload: { id: pageId, ...fields }, exec: async () => {} });
+    await offlineWrite({ kind, coalesceKey: null, payload: { id: pageId, ...fields } });
     await flushWriteQueue();
     expect(vi.mocked(fetch).mock.calls[1][1]?.body).toBe(JSON.stringify(fields));
     expect(await readPendingWrites()).toEqual([]);
@@ -230,5 +229,123 @@ describe("[COMP:app-web/application-authority-cache] actual native outbox replay
     await secondTab.flushWriteQueue(); release(); await first;
     expect(vi.mocked(fetch).mock.calls.filter(([, init]) => init?.method === "PATCH")).toHaveLength(1);
     expect(await readPendingWrites()).toEqual([]);
+  });
+});
+
+
+describe("[COMP:app-web/application-authority-cache] pinned online metadata effects", () => {
+  it("uses the canonical SDK with a durable uncertainty marker before an online effect", async () => {
+    setOnline(true);
+    const onResult = vi.fn();
+    const optimistic = vi.fn();
+    vi.stubGlobal("fetch", vi.fn(async (_url: string, init?: RequestInit) => {
+      if (init?.method === "PATCH") {
+        const entries = JSON.parse(fixture.data.get(queuedKey()) as string);
+        expect(entries).toMatchObject([{ effect: "uncertain", payload: { id: pageId, name: "Online title" } }]);
+      }
+      return response({ id: pageId, workspaceId: fixture.workspaceId, name: "Online title" });
+    }));
+    await offlineWrite({ kind: "view.rename", coalesceKey: `rename:${pageId}`,
+      payload: { id: pageId, name: "Online title" }, onResult, optimistic });
+    expect(fetch).toHaveBeenCalledTimes(2);
+    const [read, write] = vi.mocked(fetch).mock.calls;
+    expect(read[0]).toContain(`/api/views/${pageId}`);
+    expect(write[0]).toContain(`/api/saved-views/${pageId}`);
+    expect(write[1]).toMatchObject({ method: "PATCH", redirect: "error", cache: "no-store", credentials: "omit" });
+    expect(new Headers(write[1]?.headers).get("Authorization")).toBe(new Headers(read[1]?.headers).get("Authorization"));
+    expect(onResult).toHaveBeenCalledWith(expect.objectContaining({ id: pageId, name: "Online title" }));
+    expect(optimistic).not.toHaveBeenCalled();
+    expect(await readPendingWrites()).toEqual([]);
+  });
+
+  it("does not dispatch an online mutation when its durable claim cannot be saved", async () => {
+    setOnline(true); fixture.storageFailure = true;
+    await expect(offlineWrite({ kind: "view.rename", coalesceKey: null,
+      payload: { id: pageId, name: "Retain intent" } })).rejects.toThrow("quota");
+    expect(fetch).toHaveBeenCalledTimes(1);
+    expect(vi.mocked(fetch).mock.calls[0][1]?.method).not.toBe("PATCH");
+  });
+
+  it("keeps an online lost response uncertain across reload without sending another mutation", async () => {
+    setOnline(true);
+    vi.stubGlobal("fetch", vi.fn(async (_url: string, init?: RequestInit) => {
+      if (init?.method === "PATCH") throw new TypeError("response lost after possible commit");
+      return response({ id: pageId, workspaceId: fixture.workspaceId });
+    }));
+    await expect(offlineWrite({ kind: "view.rename", coalesceKey: null,
+      payload: { id: pageId, name: "Possible commit" } })).rejects.toThrow();
+    expect((await readPendingWrites())[0].effect).toBe("uncertain");
+    vi.resetModules(); const reloaded = await import("../offline-writes");
+    await reloaded.flushWriteQueue();
+    expect(fetch).toHaveBeenCalledTimes(2);
+    expect((await reloaded.readPendingWrites())[0].effect).toBe("uncertain");
+  });
+
+  it("does not refresh or reissue an online unauthorized mutation", async () => {
+    setOnline(true);
+    vi.stubGlobal("fetch", vi.fn(async (_url: string, init?: RequestInit) => init?.method === "PATCH"
+      ? response({}, 401) : response({ id: pageId, workspaceId: fixture.workspaceId })));
+    await expect(offlineWrite({ kind: "view.rename", coalesceKey: null,
+      payload: { id: pageId, name: "Original actor" } })).rejects.toThrow();
+    await flushWriteQueue();
+    expect(fetch).toHaveBeenCalledTimes(2);
+    expect(getValidAccessToken).toHaveBeenCalledOnce();
+    expect((await readPendingWrites())[0].effect).toBe("uncertain");
+  });
+
+  it("keeps the original account's uncertainty when identity changes after a possible online effect", async () => {
+    setOnline(true); const key = queuedKey(); const onResult = vi.fn();
+    vi.stubGlobal("fetch", vi.fn(async (_url: string, init?: RequestInit) => {
+      if (init?.method === "PATCH") fixture.userId = "viewer-b";
+      return response({ id: pageId, workspaceId: fixture.workspaceId });
+    }));
+    await expect(offlineWrite({ kind: "view.rename", coalesceKey: null,
+      payload: { id: pageId, name: "Original account" }, onResult })).rejects.toThrow();
+    expect(onResult).not.toHaveBeenCalled();
+    expect(await readPendingWrites()).toEqual([]);
+    expect(JSON.parse(fixture.data.get(key) as string)).toMatchObject([{ authority: { viewerId: "viewer-a" }, effect: "uncertain" }]);
+    fixture.userId = "viewer-a"; await flushWriteQueue();
+    expect(fetch).toHaveBeenCalledTimes(2);
+  });
+
+  it("holds an online transport success whose acknowledgement names a different page", async () => {
+    setOnline(true);
+    vi.stubGlobal("fetch", vi.fn(async (_url: string, init?: RequestInit) => response({
+      id: init?.method === "PATCH" ? "00000000-0000-4000-8000-000000000009" : pageId,
+      workspaceId: fixture.workspaceId,
+    })));
+    await expect(offlineWrite({ kind: "view.rename", coalesceKey: null,
+      payload: { id: pageId, name: "Wrong acknowledgement" } })).rejects.toThrow();
+    await flushWriteQueue();
+    expect(fetch).toHaveBeenCalledTimes(2);
+    expect((await readPendingWrites())[0].effect).toBe("uncertain");
+  });
+
+  it("preserves a second tab's newer edit while the first online mutation is in flight", async () => {
+    setOnline(true);
+    let release!: () => void; let signal!: () => void;
+    const blocked = new Promise<void>((resolve) => { release = resolve; });
+    const started = new Promise<void>((resolve) => { signal = resolve; });
+    let patches = 0;
+    vi.stubGlobal("fetch", vi.fn(async (_url: string, init?: RequestInit) => {
+      if (init?.method === "PATCH" && ++patches === 1) { signal(); await blocked; }
+      return response({ id: pageId, workspaceId: fixture.workspaceId });
+    }));
+    const first = offlineWrite({ kind: "view.rename", coalesceKey: `rename:${pageId}`,
+      payload: { id: pageId, name: "First title" } });
+    await started;
+    vi.resetModules(); const secondTab = await import("../offline-writes"); secondTab.setOnline(true);
+    const optimistic = vi.fn();
+    await secondTab.offlineWrite({ kind: "view.rename", coalesceKey: `rename:${pageId}`,
+      payload: { id: pageId, name: "Second title" }, optimistic });
+    expect(patches).toBe(1); expect(optimistic).toHaveBeenCalledOnce();
+    expect(await secondTab.readPendingWrites()).toMatchObject([
+      { payload: { name: "First title" }, effect: "uncertain" },
+      { payload: { name: "Second title" }, effect: "pending" },
+    ]);
+    release(); await first;
+    expect(await secondTab.readPendingWrites()).toMatchObject([{ payload: { name: "Second title" }, effect: "pending" }]);
+    await secondTab.flushWriteQueue();
+    expect(patches).toBe(2); expect(await secondTab.readPendingWrites()).toEqual([]);
   });
 });

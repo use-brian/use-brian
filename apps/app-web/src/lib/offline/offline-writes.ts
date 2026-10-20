@@ -7,8 +7,8 @@
  * Yjs + `y-indexeddb`; this covers the metadata writes around them.
  *
  * While the `online` flag (kept fresh by `use-offline-sync`) is up,
- * `offlineWrite` runs the SDK call directly — identical to calling it inline.
- * Offline, it queues.
+ * `offlineWrite` uses the same pinned canonical metadata executor and durable
+ * uncertainty claim as replay. Offline, it queues pending intent.
  *
  * Metadata includes locally-created pages. Their durable creation outbox
  * registers pages before this queue replays. Failed writes remain pending.
@@ -16,6 +16,7 @@
  * [COMP:app-web/offline-writes]
  */
 
+import type { ViewMetadata } from "@/lib/api/views";
 import { idbGet, idbUpdate } from "./idb";
 import { getUserInfo } from "@/lib/user";
 import { enqueueWrite, serializeQueue, parseQueue, type QueuedWrite } from "./write-queue";
@@ -96,27 +97,25 @@ function randomId(): string {
   }
 }
 
-export interface OfflineWriteSpec<R> {
+export interface OfflineWriteSpec {
   /** Op kind (must have a canonical metadata replay route). */
   kind: string;
   /** Coalesce key, or null to keep individually. */
   coalesceKey: string | null;
   /** Serializable args the replay executor needs. */
   payload: unknown;
-  /** The live SDK call (used online). */
-  exec: () => Promise<R>;
   /** Apply the server result (online). */
-  onResult?: (result: R) => void;
+  onResult?: (result: ViewMetadata) => void;
   /** Apply an optimistic local update (offline — there's no server result). */
   optimistic?: () => void;
 }
 
 /**
- * Run a write now (online) — calling `exec` then `onResult`, propagating
- * errors so the caller's existing try/catch surfaces them — OR, when offline,
+ * Run a pinned, durably claimed write now (online), then call `onResult`,
+ * propagating errors to the existing UI boundary; OR, when offline,
  * enqueue it for replay and apply the optimistic update without throwing.
  */
-export async function offlineWrite<R>(spec: OfflineWriteSpec<R>): Promise<void> {
+export async function offlineWrite(spec: OfflineWriteSpec): Promise<void> {
   const authorUserId = getUserInfo()?.id;
   const initialAuthority = currentOfflineWriteAuthority();
   const queuedPayload = structuredClone(spec.payload);
@@ -133,9 +132,28 @@ export async function offlineWrite<R>(spec: OfflineWriteSpec<R>): Promise<void> 
   }
   const pendingForPage = payload?.id && queue.some((op) => (op.payload as { id?: string })?.id === payload.id);
   if (online && !local && !pendingForPage) {
-    const result = await spec.exec();
-    if (authorUserId === getUserInfo()?.id && (sameOfflineWriteAuthority(authority, currentOfflineWriteAuthority(authority?.workspaceId))
-      || !authority && !currentOfflineWriteAuthority())) spec.onResult?.(result);
+    if (!authority || !key || authority.viewerId !== authorUserId) throw offlineWriteUnavailable();
+    const op: QueuedWrite = { id: randomId(), kind: spec.kind, coalesceKey: spec.coalesceKey,
+      payload: queuedPayload, enqueuedAt: Date.now(), attempts: 0, authority, effect: "pending" };
+    const dispatch = await prepareQueuedMetadataWrite(op);
+    // Online effects need the same durable uncertainty boundary as replay.
+    // No arbitrary closure can refresh into another actor after admission.
+    const claimed = { ...op, effect: "uncertain" as const };
+    let acquired = false;
+    await updateQueue(key, current => {
+      if (current.some(value => (value.payload as { id?: string })?.id === payload.id)) {
+        return enqueueWrite(current, op);
+      }
+      acquired = true;
+      return [...current, claimed];
+    });
+    if (!acquired) {
+      if (sameOfflineWriteAuthority(authority, currentOfflineWriteAuthority(authority.workspaceId))) spec.optimistic?.();
+      return;
+    }
+    const result = await dispatch();
+    await updateQueue(key, current => current.filter(value => JSON.stringify(value) !== JSON.stringify(claimed)));
+    if (sameOfflineWriteAuthority(authority, currentOfflineWriteAuthority(authority.workspaceId))) spec.onResult?.(result);
     return;
   }
   if (!authority || !key || authority.viewerId !== authorUserId

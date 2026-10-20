@@ -69,10 +69,8 @@ import {
   deleteView,
   getView,
   listViews,
-  renameView,
   reparentView,
   saveView,
-  setViewIcon,
   unsaveView,
   type ViewListRow,
   type ViewMetadata,
@@ -731,7 +729,6 @@ export function DocSidebarDataProvider({
           kind: "view.rename",
           coalesceKey: `view.rename:${id}`,
           payload: { id, name: next },
-          exec: () => renameView(id, next),
           onResult: (updated) => patchActiveView(id, () => updated),
           optimistic: () => patchActiveView(id, (v) => ({ ...v, name: next })),
         });
@@ -755,7 +752,6 @@ export function DocSidebarDataProvider({
           kind: "view.rename",
           coalesceKey: `view.rename:${id}`,
           payload: { id, name },
-          exec: () => renameView(id, name),
           onResult: (updated) => patchActiveView(id, () => updated),
           optimistic: () => patchActiveView(id, (v) => ({ ...v, name })),
         });
@@ -867,7 +863,6 @@ export function DocSidebarDataProvider({
           kind: "view.icon",
           coalesceKey: `view.icon:${id}`,
           payload: { id, icon },
-          exec: () => setViewIcon(id, icon),
           onResult: (updated) => patchActiveView(id, () => updated),
           optimistic: () => patchActiveView(id, (v) => ({ ...v, icon })),
         });

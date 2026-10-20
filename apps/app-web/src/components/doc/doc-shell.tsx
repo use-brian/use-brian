@@ -69,8 +69,6 @@ import {
   derivePageIcon,
   getView,
   deleteView,
-  setViewClearance,
-  setViewFullWidth,
   setPageLinkedRecording,
   listCustomPageTemplates,
   getCustomPageTemplate,
@@ -979,7 +977,6 @@ export function DocShell({ workspaceId, assistantId }: ShellProps) {
         kind: "view.fullWidth",
         coalesceKey: `view.fullWidth:${id}`,
         payload: { id, fullWidth: next },
-        exec: () => setViewFullWidth(id, next),
         onResult: (updated) => {
           if (activeView?.id === id) setActiveView(updated);
         },
@@ -1009,7 +1006,6 @@ export function DocShell({ workspaceId, assistantId }: ShellProps) {
         kind: "view.clearance",
         coalesceKey: `view.clearance:${id}`,
         payload: { id, clearance: next },
-        exec: () => setViewClearance(id, next),
         onResult: (updated) => {
           if (activeView?.id === id) setActiveView(updated);
         },

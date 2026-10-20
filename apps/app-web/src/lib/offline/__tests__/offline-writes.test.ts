@@ -60,72 +60,49 @@ function pendingCount(): number {
 describe("[COMP:app-web/offline-writes] offlineWrite", () => {
   beforeEach(() => {
     vi.clearAllMocks();
+    data.clear();
     setOnline(true);
   });
 
-  it("online: runs exec directly and applies the result, queueing nothing", async () => {
-    const exec = vi.fn(async () => "server-result");
-    const onResult = vi.fn();
-    const optimistic = vi.fn();
-    await offlineWrite({
-      kind: "view.rename",
-      coalesceKey: "rename:v1",
-      payload: { id: "v1", name: "A" },
-      exec,
-      onResult,
-      optimistic,
-    });
-    expect(exec).toHaveBeenCalledTimes(1);
-    expect(onResult).toHaveBeenCalledWith("server-result");
-    expect(optimistic).not.toHaveBeenCalled();
-    expect(pendingCount()).toBe(0);
+  it("online: uses the canonical executor and applies its result", async () => {
+    const onResult = vi.fn(); const optimistic = vi.fn();
+    await offlineWrite({ kind: "view.rename", coalesceKey: "rename:v1",
+      payload: { id: "v1", name: "A" }, onResult, optimistic });
+    expect(renameView).toHaveBeenCalledWith("v1", "A");
+    expect(onResult).toHaveBeenCalledWith({ renamed: true });
+    expect(optimistic).not.toHaveBeenCalled(); expect(pendingCount()).toBe(0);
   });
 
-  it("online: propagates exec errors to the caller (no silent queueing)", async () => {
-    const exec = vi.fn(async () => {
-      throw new Error("boom");
-    });
-    await expect(
-      offlineWrite({
-        kind: "view.rename",
-        coalesceKey: null,
-        payload: {},
-        exec,
-      }),
-    ).rejects.toThrow("boom");
-    expect(pendingCount()).toBe(0);
-  });
-
-  it("offline: queues the write, applies the optimistic update, and never calls exec", async () => {
-    setOnline(false);
-    const exec = vi.fn(async () => "unused");
-    const optimistic = vi.fn();
-    await offlineWrite({
-      kind: "view.rename",
-      coalesceKey: "rename:v2",
-      payload: { id: "v2", name: "Offline title" },
-      exec,
-      optimistic,
-    });
-    expect(exec).not.toHaveBeenCalled();
-    expect(optimistic).toHaveBeenCalledTimes(1);
-    expect(pendingCount()).toBe(1);
-  });
-
-  it("flushWriteQueue replays the queued op through the real SDK executor", async () => {
-    // The op queued by the previous test is still pending (module-level queue).
-    expect(pendingCount()).toBe(1);
-    setOnline(true);
+  it("online: propagates the canonical executor's error and holds the uncertain effect", async () => {
+    vi.mocked(renameView).mockRejectedValueOnce(new Error("boom"));
+    await expect(offlineWrite({ kind: "view.rename", coalesceKey: null,
+      payload: { id: "v1", name: "A" } })).rejects.toThrow("boom");
     await flushWriteQueue();
-    expect(renameView).toHaveBeenCalledWith("v2", "Offline title");
-    expect(pendingCount()).toBe(0);
+    expect(renameView).toHaveBeenCalledOnce(); expect(pendingCount()).toBe(1);
+  });
+
+  it("offline: queues the write and applies the optimistic update before transport", async () => {
+    setOnline(false); const optimistic = vi.fn();
+    await offlineWrite({ kind: "view.rename", coalesceKey: "rename:v2",
+      payload: { id: "v2", name: "Offline title" }, optimistic });
+    expect(renameView).not.toHaveBeenCalled();
+    expect(optimistic).toHaveBeenCalledOnce(); expect(pendingCount()).toBe(1);
+  });
+
+  it("flushWriteQueue replays the queued op through the canonical SDK executor", async () => {
+    setOnline(false);
+    await offlineWrite({ kind: "view.rename", coalesceKey: "rename:v2",
+      payload: { id: "v2", name: "Offline title" } });
+    expect(pendingCount()).toBe(1); setOnline(true); await flushWriteQueue();
+    expect(renameView).toHaveBeenCalledWith("v2", "Offline title"); expect(pendingCount()).toBe(0);
   });
 });
 
 describe("[COMP:app-web/offline-writes] replay races", () => {
+  beforeEach(() => { data.clear(); vi.clearAllMocks(); setOnline(false); });
   it("keeps a newer coalesced edit made while replay is in flight", async () => {
     setOnline(false);
-    const write = (name: string) => offlineWrite({ kind: "view.rename", coalesceKey: "rename:race", payload: { id: "race", name }, exec: async () => {} });
+    const write = (name: string) => offlineWrite({ kind: "view.rename", coalesceKey: "rename:race", payload: { id: "race", name } });
     await write("old");
     vi.mocked(renameView).mockImplementationOnce(async () => { await write("new"); return {} as never; });
     await flushWriteQueue();
@@ -136,7 +113,7 @@ describe("[COMP:app-web/offline-writes] replay races", () => {
   });
   it("does not drop edits after repeated server failures", async () => {
     setOnline(false);
-    await offlineWrite({ kind: "view.rename", coalesceKey: null, payload: { id: "keep", name: "Retain" }, exec: async () => {} });
+    await offlineWrite({ kind: "view.rename", coalesceKey: null, payload: { id: "keep", name: "Retain" } });
     vi.mocked(renameView).mockRejectedValue(new Error("offline"));
     for (let n = 0; n < 7; n++) await flushWriteQueue();
     expect(pendingCount()).toBe(1);
