@@ -295,6 +295,7 @@ export const OFFICIAL_CONNECTOR_TOOLS: Record<string, BuiltinConnectorTool[]> = 
     { name: 'fileWrite',   description: 'Create or overwrite a file in the workspace',                  classification: 'write',       defaultPolicy: 'ask' },
     { name: 'fileAppend',  description: 'Append content to an existing workspace file',                  classification: 'write',       defaultPolicy: 'ask' },
     { name: 'fileRead',    description: 'Read a workspace file',                                         classification: 'read',        defaultPolicy: 'allow' },
+    { name: 'fileReadBytes', description: 'Download exact workspace file bytes as base64 with a checksum (up to 10 MiB)', classification: 'read', defaultPolicy: 'allow' },
     { name: 'fileSearch',  description: 'Search workspace files by title, summary, tag, or filename',    classification: 'read',        defaultPolicy: 'allow' },
     { name: 'fileSetMeta', description: 'Update title, summary, tags, or sensitivity on a file',         classification: 'write',       defaultPolicy: 'ask' },
     // saveFileToBrain defaults to allow (not ask): the user explicitly asked
@@ -303,6 +304,7 @@ export const OFFICIAL_CONNECTOR_TOOLS: Record<string, BuiltinConnectorTool[]> = 
     // Mirrors requiresConfirmation:false in core/src/workspace-files/tools.ts.
     { name: 'saveFileToBrain', description: 'Save an uploaded attachment to the workspace as a file, preserving the original', classification: 'write', defaultPolicy: 'allow' },
     { name: 'saveFileBytes', description: 'Save a file from raw bytes (base64) to the workspace, preserving the original', classification: 'write', defaultPolicy: 'ask' },
+    { name: 'saveChatMedia', description: 'Save a stored chat-archive attachment into workspace files', classification: 'write', defaultPolicy: 'allow' },
     { name: 'sendFile',    description: 'Attach a workspace file to the reply as a downloadable document', classification: 'read',       defaultPolicy: 'allow' },
     // renderPdf defaults to allow like saveFileToBrain: the user explicitly
     // asked for a PDF, the tool writes only inside the workspace (a taken path
@@ -658,9 +660,11 @@ export const BOOT_INJECTED_BUILTIN_TOOLS: Record<string, readonly string[]> = {
     'fileWrite',
     'fileAppend',
     'fileRead',
+    'fileReadBytes',
     'fileSearch',
     'fileSetMeta',
     'saveFileToBrain',
+    'saveChatMedia',
     'sendFile',
     'renderPdf',
     'fileDelete',

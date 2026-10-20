@@ -221,11 +221,13 @@ const FILE_TOOLS_STUB: BrainFileTools = {
   fileWrite: stubCoreTool('fileWrite'),
   fileAppend: stubCoreTool('fileAppend'),
   fileRead: stubCoreTool('fileRead', true),
+  fileReadBytes: stubCoreTool('fileReadBytes', true),
   fileSearch: stubCoreTool('fileSearch', true),
   fileSetMeta: stubCoreTool('fileSetMeta'),
   fileDelete: stubCoreTool('fileDelete'),
   saveFileToBrain: stubCoreTool('saveFileToBrain'),
   saveFileBytes: stubCoreTool('saveFileBytes'),
+  saveChatMedia: stubCoreTool('saveChatMedia'),
 }
 
 const BRAND_TOOLS_STUB: BrainBrandTools = {
@@ -273,6 +275,7 @@ function textBody(result: { content: Array<{ type: string; text?: string }> }): 
 
 const READ_TOOL_NAMES = [
   'fileRead',
+  'fileReadBytes',
   'getBrand',
   'fileSearch',
   'getCompany',
@@ -347,6 +350,7 @@ const WRITE_TOOL_NAMES = [
   'saveBrandDraft',
   'saveFileBytes',
   'saveFileToBrain',
+  'saveChatMedia',
   'saveMemory',
   'saveTask',
   'setCrmCustomFields',
@@ -554,7 +558,7 @@ describe('[COMP:api/brain-mcp] buildBrainTools — scope gating', () => {
       ...noFiles,
     })
     const names = tools.map((t) => t.name)
-    for (const fileName of ['fileRead', 'fileSearch', 'fileWrite', 'fileAppend', 'fileSetMeta', 'fileDelete']) {
+    for (const fileName of ['fileRead', 'fileReadBytes', 'fileSearch', 'fileWrite', 'fileAppend', 'fileSetMeta', 'fileDelete', 'saveChatMedia']) {
       expect(names).not.toContain(fileName)
     }
     // The non-file surface is unaffected — memory/task/CRM/retrieval still present.
@@ -569,10 +573,37 @@ describe('[COMP:api/brain-mcp] buildBrainTools — scope gating', () => {
     })
     const names = tools.map((t) => t.name)
     expect(names).toContain('fileRead')
+    expect(names).toContain('fileReadBytes')
     expect(names).toContain('fileSearch')
-    for (const writeName of ['fileWrite', 'fileAppend', 'fileSetMeta', 'fileDelete']) {
+    for (const writeName of ['fileWrite', 'fileAppend', 'fileSetMeta', 'fileDelete', 'saveChatMedia']) {
       expect(names).not.toContain(writeName)
     }
+  })
+
+  it('bridges archived-media promotion only when configured and write-scoped', () => {
+    const options = { workspaceId: 'ws', scope: 'read_write' as const, keyId: 'k', maxClearance: null, ...ALL_STUBS }
+    expect(buildBrainTools(options).map(t => t.name)).toContain('saveChatMedia')
+    const { saveChatMedia: _omitted, ...fileTools } = FILE_TOOLS_STUB
+    expect(buildBrainTools({ ...options, fileTools }).map(t => t.name)).not.toContain('saveChatMedia')
+  })
+
+  it.each(['read', 'read_write'] as const)('withholds exported bytes if a %s credential is revoked during the read', async (scope) => {
+    let credentialCurrent = true
+    const fileReadBytes = buildTool({
+      name: 'fileReadBytes', description: 'binary export fixture', isReadOnly: true,
+      inputSchema: z.object({ file: z.string() }),
+      async execute() {
+        credentialCurrent = false
+        return { data: { encoding: 'base64', base64: 'cHJpdmF0ZQ==' } }
+      },
+    })
+    const tools = buildBrainTools({ workspaceId: 'ws', scope, keyId: 'key', maxClearance: null,
+      credentialCurrent: async () => credentialCurrent,
+      ...ALL_STUBS, fileTools: { ...FILE_TOOLS_STUB, fileReadBytes } })
+    const result = await tools.find(t => t.name === 'fileReadBytes')!.handler({ file: '/photo.jpg' })
+    expect(credentialCurrent).toBe(false)
+    expect(result.isError).toBe(true)
+    expect(textBody(result)).not.toContain('cHJpdmF0ZQ==')
   })
 })
 
@@ -2110,4 +2141,3 @@ describe('[COMP:api/brain-mcp] task responsibility parity with the core tools', 
     expect(updates[0]).toEqual({ fields: { executorAssistantId: assistant }, precondition: true })
   })
 })
-

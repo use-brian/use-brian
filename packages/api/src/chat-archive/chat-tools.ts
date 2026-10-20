@@ -14,6 +14,7 @@
  */
 
 import { z } from 'zod'
+import { rawArchiveProviderMessageId } from './normalize.js'
 import { buildTool, toolFailure, type Tool } from '@use-brian/core'
 import { CHAT_ARCHIVE_CHANNELS_TOOL, CHAT_ARCHIVE_SEARCH_TOOL } from './tool-catalog.js'
 import type { MessageStoreClient } from './message-store-client.js'
@@ -81,6 +82,14 @@ export function createChatArchiveTools(deps: ChatArchiveToolDeps): Tool[] {
           data: {
             hits: result.hits.map((hit) => ({
               ...hit,
+              // The store needs a chat-scoped Telegram namespace; consumers
+              // retain the provider's original ids and the archive row UUID.
+              provider_message_id: typeof hit.provider_message_id === 'string'
+                ? rawArchiveProviderMessageId(hit.source, hit.conversation_id, hit.provider_message_id)
+                : hit.provider_message_id,
+              reply_to_provider_id: typeof hit.reply_to_provider_id === 'string'
+                ? rawArchiveProviderMessageId(hit.source, hit.conversation_id, hit.reply_to_provider_id)
+                : hit.reply_to_provider_id,
               // Handed back ready to reuse, so narrowing a follow-up search does
               // not require the model to reassemble the pair itself — and cannot
               // accidentally pair a conversation id with the wrong account.

@@ -37,8 +37,8 @@ import type { ChannelQuestionStore } from '../workflow/channel-questions.js'
  *      resolves the sender, runs the query loop.
  */
 
-import { Router } from 'express'
-import { createTelegramAdapter, createTelegramApi, verifyTelegramWebhook, validateTelegramCredentials, describeTelegramDownloadFailure, TELEGRAM_BOT_DOWNLOAD_LIMIT_BYTES } from '@use-brian/channels'
+import { Router, type Request, type Response } from 'express'
+import { createTelegramAdapter, createTelegramApi, verifyTelegramWebhook, validateTelegramCredentials, describeTelegramDownloadFailure, TelegramApiError, TELEGRAM_BOT_DOWNLOAD_LIMIT_BYTES } from '@use-brian/channels'
 import type { IncomingMessage, TelegramAdapterConfig, RequireMentionConfig, ChatSeenEvent } from '@use-brian/channels'
 import { findAssistantById, findUserById } from '../db/users.js'
 import { getWorkspaceMembershipWithClearanceSystem, getWorkspaceRoleSystem } from '../db/workspace-store.js'
@@ -72,6 +72,9 @@ import { admitChannelMessage } from './channel-message-admission.js'
 import { channelUserErrorText } from './_channel-error-text.js'
 import { isDeliveryAudienceUnverifiedError } from '../context-scope/delivery-authority.js'
 import { cacheInboundImage } from './channel-file-cache.js'
+import { mediaByteLimit, type ChatArchiveLiveMedia } from '../chat-archive/live-media.js'
+import { archiveUnroutedInbound, resolveChatArchiveInstanceId } from '../chat-archive/live-writer.js'
+import { archiveProviderMessageId } from '../chat-archive/normalize.js'
 import { billingPartyForAssistant } from '../billing-party.js'
 import { buildFileContentBlocks } from './route-helpers.js'
 import { handleConnectCommand } from './_connect-command.js'
@@ -119,8 +122,13 @@ const DECISION_LABELS: Record<string, string> = {
   allow: 'Allowed', deny: 'Denied', always_allow: 'Always allowed', always_deny: 'Always denied',
 }
 
+type TelegramMediaDownload = Awaited<ReturnType<ReturnType<typeof createTelegramAdapter>['downloadMedia']>>
+type TelegramMediaDownloads = Map<string, Promise<TelegramMediaDownload>>
+
 type TelegramByoRouteOptions = {
   discussionStore?: TelegramDiscussionStore
+  /** Original media is staged before provider-message archive capture, independently of reply routing. */
+  archiveMedia?: ChatArchiveLiveMedia
   questionStore?: ChannelQuestionStore
   /** Servable background-lane model, resolved at boot; forwarded to the
    * channel pipeline so its background calls work without a Google key. */
@@ -346,12 +354,28 @@ export function telegramByoRoutes(options: TelegramByoRouteOptions): Router {
   }
   type MediaGroupEntry = {
     rawMessages: RawTelegramGroupMessage[]
-    timer: ReturnType<typeof setTimeout>
+    mediaDownloads: TelegramMediaDownloads
+    archivedMessageIds: Set<string>
+    pendingArchiveCaptures: number
+    timer?: ReturnType<typeof setTimeout>
   }
   const mediaGroupBuffers = new Map<string, MediaGroupEntry>()
   const MEDIA_GROUP_BUFFER_MS = 500
 
   router.post<{ channelId: string }>('/:channelId', async (req, res) => {
+    const releaseAlbumCaptures: Array<() => void> = []
+    try {
+      await processWebhook(req, res, releaseAlbumCaptures)
+    } finally {
+      for (const release of releaseAlbumCaptures) release()
+    }
+  })
+
+  async function processWebhook(
+    req: Request<{ channelId: string }>,
+    res: Response,
+    releaseAlbumCaptures: Array<() => void>,
+  ): Promise<void> {
     // URL slug semantics:
     //   - Post channel-integrations-split: workspace `channels` id.
     //   - Legacy (pre-split): assistant id baked into the Telegram-side
@@ -442,11 +466,95 @@ export function telegramByoRoutes(options: TelegramByoRouteOptions): Router {
     // Workflow events observe provider messages, not conversational callbacks
     // or the later album/reassembly callbacks. This pass never sends replies.
     const eventConfig = (integration.config ?? {}) as ChannelIntegrationConfig
-    const eventIncoming = createTelegramAdapter({
+    const eventAdapter = createTelegramAdapter({
       token: credentials.bot_token,
       botUsername: integration.botUsername ?? undefined,
       config: { normalizePassive: true, discussionChatIds },
-    }).parseIncoming(req.body)
+    })
+    const eventIncoming = eventAdapter.parseIncoming(req.body)
+    const mediaDownloads: TelegramMediaDownloads = new Map()
+    let archiveInboundAlreadyPersisted = false
+    // Register an in-flight album member before downloading it. An earlier
+    // member's 500ms timer must wait until this handler enrolls the member in
+    // the conversational buffer or exits, including post-staging routing waits.
+    const archiveAlbumKey = options.archiveMedia && eventIncoming && threadMessage?.media_group_id
+      ? `${integration.channelId}:${threadMessage.chat?.id}:${threadMessage.message_thread_id ?? 0}:${threadMessage.sender_chat?.id ?? threadMessage.from?.id}:${threadMessage.media_group_id}`
+      : null
+    let preparingAlbum: MediaGroupEntry | undefined
+    if (archiveAlbumKey) {
+      preparingAlbum = mediaGroupBuffers.get(archiveAlbumKey)
+      if (!preparingAlbum) {
+        preparingAlbum = { rawMessages: [], mediaDownloads: new Map(), archivedMessageIds: new Set(), pendingArchiveCaptures: 0 }
+        mediaGroupBuffers.set(archiveAlbumKey, preparingAlbum)
+      }
+      preparingAlbum.pendingArchiveCaptures++
+      const pendingAlbum = preparingAlbum
+      releaseAlbumCaptures.push(() => {
+        pendingAlbum.pendingArchiveCaptures--
+        if (!pendingAlbum.pendingArchiveCaptures && !pendingAlbum.rawMessages.length && !pendingAlbum.timer
+          && mediaGroupBuffers.get(archiveAlbumKey) === pendingAlbum) {
+          mediaGroupBuffers.delete(archiveAlbumKey)
+        }
+      })
+    }
+    if (options.archiveMedia && eventIncoming) {
+      // Account archive capture precedes conversational gates. In particular,
+      // each album update has its own provider id; a later merged turn cannot
+      // represent all of its attachments in the single-media append contract.
+      const workspaceId = channel.workspaceId
+      const owner = await query<{ ownerUserId: string }>(
+        'SELECT owner_user_id AS "ownerUserId" FROM workspaces WHERE id = $1',
+        [workspaceId],
+      )
+      const ownerUserId = owner.rows[0]?.ownerUserId
+      if (ownerUserId) {
+        if (eventIncoming.mediaType) {
+          eventIncoming.archiveMediaAvailability = 'missing'
+          if (eventIncoming.mediaUrl && eventIncoming.messageId) {
+            const kind = eventIncoming.mediaType === 'photo' ? 'image'
+              : eventIncoming.mediaType === 'voice' || eventIncoming.mediaType === 'audio' ? 'voice'
+                : eventIncoming.mediaType === 'video' ? 'video' : 'file'
+            const mime = eventIncoming.mediaMime
+              ?? (eventIncoming.mediaType === 'voice' ? 'audio/ogg; codecs=opus' : 'application/octet-stream')
+            eventIncoming.mediaName ??= `${eventIncoming.mediaType}_${eventIncoming.messageId}`
+              + (kind === 'image' ? '.jpg' : '')
+            try {
+              const limit = Math.min(TELEGRAM_BOT_DOWNLOAD_LIMIT_BYTES, mediaByteLimit(kind))
+              if ((eventIncoming.mediaSizeBytes ?? 0) > limit) throw new Error('telegram_archive_media_over_limit')
+              const instanceId = await resolveChatArchiveInstanceId({
+                source: 'telegram', ownerUserId, workspaceId,
+                connectorInstanceId: integration.connectorInstanceId,
+                assistantId: '', assistantName: '', conversationId: eventIncoming.channelId,
+              })
+              if (!instanceId) throw new Error('telegram_archive_binding_unavailable')
+              const download = eventAdapter.downloadMedia(eventIncoming.mediaUrl, { mimeHint: mime })
+              mediaDownloads.set(eventIncoming.mediaUrl, download)
+              const media = await download
+              if (media.buffer.length > limit) throw new Error('telegram_archive_media_over_limit')
+              eventIncoming.archiveMediaRef = await options.archiveMedia.storeBuffer({
+                workspaceId, instanceId, ownerUserId, source: 'telegram',
+                providerMessageId: archiveProviderMessageId(
+                  'telegram', eventIncoming.channelId, eventIncoming.messageId,
+                ), kind,
+                filename: eventIncoming.mediaName, mime: media.mime, bytes: media.buffer,
+              })
+              eventIncoming.mediaSizeBytes = media.buffer.length
+              eventIncoming.archiveMediaAvailability = undefined
+            } catch {
+              // Provider failures can contain token-bearing download URLs.
+              // Keep an explicit unavailable asset without logging those URLs.
+              eventIncoming.archiveMediaAvailability = 'failed'
+              console.warn('[telegram-byo] archive media staging failed; recording unavailable attachment')
+            }
+          }
+        }
+        await archiveUnroutedInbound({
+          source: 'telegram', workspaceId, connectorInstanceId: integration.connectorInstanceId,
+          conversationId: eventIncoming.channelId, message: eventIncoming,
+        })
+        archiveInboundAlreadyPersisted = true
+      }
+    }
     if (eventIncoming && eventIncoming.userId !== String(integration.botUserId ?? '')) {
       const raw = eventIncoming.raw as { from?: { username?: string }; sender_chat?: unknown; chat?: { type?: string } }
       const chatSender = !!raw.sender_chat || raw.chat?.type === 'channel'
@@ -607,7 +715,7 @@ export function telegramByoRoutes(options: TelegramByoRouteOptions): Router {
       // timer (e.g. the GM Bro 5:33 PM business-card media group, where
       // both photos vanished entirely from `session_messages`).
       onMessage: (msg) => {
-        handleIncoming(msg).catch((err) => {
+        handleIncoming(msg, undefined, undefined, mediaDownloads, archiveInboundAlreadyPersisted).catch((err) => {
           reportIncomingFailure('message', msg.channelId, err)
         })
       },
@@ -860,7 +968,13 @@ export function telegramByoRoutes(options: TelegramByoRouteOptions): Router {
     // wiring above can reference it before its declaration. Closes over
     // the bound aliases, `ownerId`, `channelId`, `credentials`,
     // `tgConfig`, and `adapter` from the enclosing request scope.
-    async function handleIncoming(incoming: IncomingMessage, actionData?: string, workflowCallback?: { data: string; messageId: string }): Promise<void> {
+    async function handleIncoming(
+      incoming: IncomingMessage,
+      actionData?: string,
+      workflowCallback?: { data: string; messageId: string },
+      preparedDownloads: TelegramMediaDownloads = mediaDownloads,
+      inboundArchived = false,
+    ): Promise<void> {
       // 4b. Sender access. A blocklist match is a hard denial. An allowlist
       //     match is carried through identity resolution because it is also an
       //     explicit conversation-only guest grant in private DMs and groups.
@@ -1282,6 +1396,8 @@ export function telegramByoRoutes(options: TelegramByoRouteOptions): Router {
             && integrationConfig.allowGuestConnectorTools === true,
           archiveConnectorInstanceId: boundIntegration.connectorInstanceId,
           ...options,
+          mediaDownloads: preparedDownloads,
+          archiveInboundAlreadyPersisted: inboundArchived,
           interactionScope,
           workflowCallback,
           conversationalAnswer: actionData !== undefined,
@@ -1308,11 +1424,21 @@ export function telegramByoRoutes(options: TelegramByoRouteOptions): Router {
       const key = `${integration.channelId}:${incomingMsg.chat?.id}:${incomingMsg.message_thread_id ?? 0}:${incomingMsg.sender_chat?.id ?? incomingMsg.from?.id}:${groupId}`
       const existing = mediaGroupBuffers.get(key)
       const rawMessages = existing?.rawMessages ?? []
+      const groupDownloads = existing?.mediaDownloads ?? new Map()
+      for (const [fileId, download] of mediaDownloads) groupDownloads.set(fileId, download)
+      const archivedMessageIds = existing?.archivedMessageIds ?? new Set<string>()
+      if (archiveInboundAlreadyPersisted && eventIncoming?.messageId) archivedMessageIds.add(eventIncoming.messageId)
       rawMessages.push(incomingMsg)
       if (existing?.timer) clearTimeout(existing.timer)
 
-      const timer = setTimeout(() => {
+      const flush = () => {
+        const entry = mediaGroupBuffers.get(key)
+        if (entry?.pendingArchiveCaptures) {
+          entry.timer = setTimeout(flush, MEDIA_GROUP_BUFFER_MS)
+          return
+        }
         mediaGroupBuffers.delete(key)
+        rawMessages.sort((a, b) => a.message_id - b.message_id)
         // Synthesize a merged IncomingMessage from the accumulated raw
         // messages. The first message carries the caption (Telegram
         // convention); every message contributes one media file.
@@ -1378,12 +1504,15 @@ export function telegramByoRoutes(options: TelegramByoRouteOptions): Router {
           mediaSizeBytes: undefined,
           files,
         }
-        handleIncoming(merged).catch((err) => {
+        handleIncoming(merged, undefined, undefined, groupDownloads,
+          rawMessages.every((message) => archivedMessageIds.has(String(message.message_id))),
+        ).catch((err) => {
           reportIncomingFailure('media group', merged.channelId, err)
         })
-      }, MEDIA_GROUP_BUFFER_MS)
-
-      mediaGroupBuffers.set(key, { rawMessages, timer })
+      }
+      const timer = setTimeout(flush, MEDIA_GROUP_BUFFER_MS)
+      if (existing) existing.timer = timer
+      else mediaGroupBuffers.set(key, { rawMessages, mediaDownloads: groupDownloads, archivedMessageIds, pendingArchiveCaptures: 0, timer })
       return
     }
 
@@ -1392,7 +1521,7 @@ export function telegramByoRoutes(options: TelegramByoRouteOptions): Router {
     // route through `handleIncoming` (see comment on the `onMessage` field
     // above for the prior bug this replaces).
     adapter.handleWebhook(req.body)
-  })
+  }
 
   return router
 }
@@ -1425,6 +1554,8 @@ type ProcessMessageParams = {
   /** Explicit per-integration opt-in for connector tools on that guest lane. */
   externalGuestConnectorTools: boolean
   archiveConnectorInstanceId?: string | null
+  archiveInboundAlreadyPersisted?: boolean
+  mediaDownloads?: TelegramMediaDownloads
   provider: LLMProvider
   configuredProviders?: import('@use-brian/shared/model-registry').ProviderAvailability
   resolveWorkspaceCustomLlm?: import('../custom-llm-runtime.js').WorkspaceCustomLlmResolver
@@ -1497,7 +1628,7 @@ async function processMessage(params: ProcessMessageParams): Promise<void> {
     externalGuestConnectorTools,
   } = params
 
-  // Admission must precede ALL media side effects, including the hosted audio
+  // Admission must precede brain-intake media side effects, including the hosted audio
   // lane. Use the common interpreter so native conversational choices retain
   // precedence over labels that happen to look like workflow commands.
   const abortController = new AbortController()
@@ -1786,9 +1917,11 @@ async function processMessage(params: ProcessMessageParams): Promise<void> {
       // docs/architecture/media/transcription.md → "The download leg".
       let voice: { buffer: Buffer; mime: string } | undefined
       try {
-        voice = await adapter.downloadVoice(incoming.mediaUrl)
+        voice = await (params.mediaDownloads?.get(incoming.mediaUrl) ?? adapter.downloadVoice(incoming.mediaUrl))
       } catch (err) {
-        console.error('[telegram-byo] voice download failed:', err)
+        console.error('[telegram-byo] voice download failed:', {
+          kind: 'media_download_failed', telegramErrorCode: err instanceof TelegramApiError && typeof err.errorCode === 'number' ? err.errorCode : undefined,
+        })
         transcribeFailure = describeTelegramDownloadFailure(err)
       }
       if (voice) try {
@@ -1875,7 +2008,7 @@ async function processMessage(params: ProcessMessageParams): Promise<void> {
     try {
       const downloads = await Promise.all(
         incoming.files.map((f) =>
-          adapter.downloadMedia(f.url, { mimeHint: f.mimeType }),
+          params.mediaDownloads?.get(f.url) ?? adapter.downloadMedia(f.url, { mimeHint: f.mimeType }),
         ),
       )
       const cacheIds = await Promise.all(
@@ -1898,7 +2031,9 @@ async function processMessage(params: ProcessMessageParams): Promise<void> {
       mediaContentBlocks = built.contentBlocks
       attachmentContext = built.attachmentContext
     } catch (err) {
-      console.error('[telegram-byo] media-group download/parse failed:', err)
+      console.error('[telegram-byo] media-group download/parse failed:', {
+        kind: 'media_download_or_parse_failed', telegramErrorCode: err instanceof TelegramApiError && typeof err.errorCode === 'number' ? err.errorCode : undefined,
+      })
     }
   } else if (
     incoming.mediaUrl &&
@@ -1906,9 +2041,9 @@ async function processMessage(params: ProcessMessageParams): Promise<void> {
     incoming.mediaType !== 'voice'
   ) {
     try {
-      const dl = await adapter.downloadMedia(incoming.mediaUrl, {
+      const dl = await (params.mediaDownloads?.get(incoming.mediaUrl) ?? adapter.downloadMedia(incoming.mediaUrl, {
         mimeHint: incoming.mediaMime,
-      })
+      }))
       const fileName = incoming.mediaName ?? dl.name
       const cacheId = await cacheImage({ buffer: dl.buffer, mime: dl.mime, fileName })
       const built = await buildFileContentBlocks([
@@ -1917,7 +2052,9 @@ async function processMessage(params: ProcessMessageParams): Promise<void> {
       mediaContentBlocks = built.contentBlocks
       attachmentContext = built.attachmentContext
     } catch (err) {
-      console.error('[telegram-byo] media download/parse failed:', err)
+      console.error('[telegram-byo] media download/parse failed:', {
+        kind: 'media_download_or_parse_failed', telegramErrorCode: err instanceof TelegramApiError && typeof err.errorCode === 'number' ? err.errorCode : undefined,
+      })
     }
   }
 
@@ -2016,6 +2153,7 @@ async function processMessage(params: ProcessMessageParams): Promise<void> {
     replyRaw,
     incomingChannelMessageId: incoming.messageId ?? null,
     archiveIncoming: incoming,
+    archiveInboundAlreadyPersisted: params.archiveInboundAlreadyPersisted,
     archiveConnectorInstanceId: params.archiveConnectorInstanceId,
     modelAlias: assistant.defaultModelAlias,
     adaptiveResearchEnabled: true,

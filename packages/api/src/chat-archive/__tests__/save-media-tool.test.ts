@@ -40,6 +40,24 @@ const context = {
 } as never
 
 describe('[COMP:tools/chat-archive-save-media] saveChatMedia', () => {
+  it('gives programmatic callers a binary download step instead of unavailable channel tools', async () => {
+    const tool = createSaveChatMediaTool({ client: fakeClient(), filesApi: fakeFilesApi() })
+    const result = await tool.execute({ sha256: SHA }, { ...context as object, channelType: 'programmatic' } as never)
+    expect(result.isError).toBeFalsy()
+    expect(result.data).toMatchObject({ next: expect.stringContaining('fileReadBytes') })
+    expect((result.data as { next: string }).next).not.toMatch(/sendFile|ingestFile/)
+  })
+
+  it('enforces Files tool policy before reading or downloading archived bytes', async () => {
+    const client = fakeClient()
+    const filesApi = fakeFilesApi()
+    const tool = createSaveChatMediaTool({ client, filesApi, resolvePolicy: async () => 'block' })
+    expect((await tool.execute({ sha256: SHA }, context)).isError).toBe(true)
+    expect(client.downloadMedia).not.toHaveBeenCalled()
+    expect(filesApi.stat).not.toHaveBeenCalled()
+    expect(filesApi.writeBytes).not.toHaveBeenCalled()
+  })
+
   it('binds the owner from tool context, never from model input', async () => {
     const client = fakeClient()
     const tool = createSaveChatMediaTool({ client, filesApi: fakeFilesApi() })

@@ -4702,8 +4702,9 @@ export async function bootOpenApi(opts: BootOpenApiOptions): Promise<BootResult>
   let brainFileTools:
     | Pick<
         ReturnType<typeof createFileTools>,
-        'fileWrite' | 'fileAppend' | 'fileRead' | 'fileSearch' | 'fileSetMeta' | 'fileDelete' | 'saveFileToBrain' | 'saveFileBytes'
+        'fileWrite' | 'fileAppend' | 'fileRead' | 'fileReadBytes' | 'fileSearch' | 'fileSetMeta' | 'fileDelete' | 'saveFileToBrain' | 'saveFileBytes'
       >
+        & { saveChatMedia?: Tool }
     | null = null
   let fileIngestor: unknown = null
   if (filesBlobClient) {
@@ -4839,6 +4840,7 @@ export async function bootOpenApi(opts: BootOpenApiOptions): Promise<BootResult>
     allTools.set('fileWrite', fileTools.fileWrite)
     allTools.set('fileAppend', fileTools.fileAppend)
     allTools.set('fileRead', fileTools.fileRead)
+    allTools.set('fileReadBytes', fileTools.fileReadBytes)
     allTools.set('fileSearch', fileTools.fileSearch)
     allTools.set('fileSetMeta', fileTools.fileSetMeta)
     allTools.set('fileDelete', fileTools.fileDelete)
@@ -4889,17 +4891,19 @@ export async function bootOpenApi(opts: BootOpenApiOptions): Promise<BootResult>
     // which is why it registers here and not with the read-only archive
     // tools at their earlier block.
     if (messageStoreClient) {
-      allTools.set('saveChatMedia', createSaveChatMediaTool({ client: messageStoreClient, filesApi }))
+      allTools.set('saveChatMedia', createSaveChatMediaTool({ client: messageStoreClient, filesApi, resolvePolicy: resolveFilesToolPolicy }))
     }
     brainFileTools = {
       fileWrite: fileTools.fileWrite,
       fileAppend: fileTools.fileAppend,
       fileRead: fileTools.fileRead,
+      fileReadBytes: fileTools.fileReadBytes,
       fileSearch: fileTools.fileSearch,
       fileSetMeta: fileTools.fileSetMeta,
       fileDelete: fileTools.fileDelete,
       saveFileToBrain: fileTools.saveFileToBrain,
       saveFileBytes: fileTools.saveFileBytes,
+      saveChatMedia: allTools.get('saveChatMedia'),
     }
 
     // Direct file ingest is open: store the original bytes, derive text, then
@@ -9942,6 +9946,7 @@ export async function bootOpenApi(opts: BootOpenApiOptions): Promise<BootResult>
     // JWT guard. All gated on the integration store (CHANNEL_CREDENTIAL_KEY).
     if (integrationStore) {
       app.use('/webhook/telegram', telegramByoRoutes({
+        archiveMedia: chatArchiveLiveMedia,
         questionStore: channelQuestionStore,
         backgroundModel,
         decisionRuntime,

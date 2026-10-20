@@ -60,3 +60,5 @@ export { buildWorkspaceFilesContext } from './context-builder.js'
 export { promoteCachedFile, cachedFileBytes } from './promote.js'
 
 export { buildUploadPolicyBlock } from './upload-policy-block.js'
+
+export { createSaveChatMediaTool, CHAT_ARCHIVE_SAVE_MEDIA_TOOL, MAX_SAVE_CHAT_MEDIA_BYTES, type SaveChatMediaDeps } from './save-chat-media.js'

@@ -2,7 +2,7 @@
 
 import { describe, expect, it } from 'vitest'
 import type { IncomingMessage } from '@use-brian/channels'
-import { normalizeInboundChatMessage, normalizeOutboundChatMessage } from '../normalize.js'
+import { archiveProviderMessageId, rawArchiveProviderMessageId, normalizeInboundChatMessage, normalizeOutboundChatMessage } from '../normalize.js'
 
 function incoming(overrides: Partial<IncomingMessage> = {}): IncomingMessage {
   return {
@@ -33,6 +33,34 @@ describe('[COMP:api/chat-archive-live-capture] normalizer', () => {
       reply_to_provider_id: 'wx-0',
       raw_provider_blob: null,
     })
+  })
+
+  it('namespaces Telegram ids by base chat consistently across inbound, outbound and replies', () => {
+    const first = normalizeInboundChatMessage({ source: 'telegram', message: incoming({
+      channelId: '-100101:topic:7', messageId: '1', replyToMessageId: '2',
+    }) })
+    const second = normalizeInboundChatMessage({ source: 'telegram', message: incoming({
+      channelId: '-100202:topic:7', messageId: '1', replyToMessageId: '2',
+    }) })
+    const outbound = normalizeOutboundChatMessage({ source: 'telegram',
+      conversationId: '-100101:topic:9', providerMessageId: '2', replyToProviderId: '1',
+      assistantId: 'a1', assistantName: 'Example Assistant', text: 'reply',
+    })
+    expect(first.provider_message_id).toBe('telegram:v1:-100101:1')
+    expect(second.provider_message_id).toBe('telegram:v1:-100202:1')
+    expect(first.reply_to_provider_id).toBe(outbound.provider_message_id)
+    expect(outbound.reply_to_provider_id).toBe(first.provider_message_id)
+    expect(archiveProviderMessageId('telegram', '-100101:discussion:23', '1')).toBe(first.provider_message_id)
+    expect(archiveProviderMessageId('slack', '-100101', '1')).toBe('1')
+  })
+
+  it('round trips namespaced Telegram ids while preserving legacy, foreign and malformed archive ids', () => {
+    const id = archiveProviderMessageId('telegram', '-100101:topic:7', 'session:example')
+    expect(rawArchiveProviderMessageId('telegram', '-100101', id)).toBe('session:example')
+    expect(rawArchiveProviderMessageId('telegram', '-100101', '1')).toBe('1')
+    expect(rawArchiveProviderMessageId('telegram', '-100202', id)).toBe(id)
+    expect(rawArchiveProviderMessageId('slack', '-100101', id)).toBe(id)
+    expect(rawArchiveProviderMessageId('telegram', '-100101', 'telegram:v1:-100101:%ZZ')).toBe('telegram:v1:-100101:%ZZ')
   })
 
   it('stores the sender display name so the agent can search by name', () => {
