@@ -88,6 +88,7 @@ describe('[COMP:api/application-records] canonical native operation composition'
     try {
       await fixture.query('BEGIN');await fixture.query('ALTER TABLE entities DISABLE TRIGGER application_native_entity_values')
       await fixture.query('UPDATE entities SET attributes=$2 WHERE id=$1',[value.id,{tags:null,external_ref:null}])
+      await fixture.query('SET CONSTRAINTS ALL IMMEDIATE')
       await fixture.query('ALTER TABLE entities ENABLE TRIGGER application_native_entity_values');await fixture.query('COMMIT')
     } finally {await fixture.query('ROLLBACK');fixture.release()}
     const result=type==='company'?await getCompanyById(access,value.id):await getContactById(access,value.id)
@@ -119,6 +120,7 @@ describe('[COMP:api/application-records] canonical native operation composition'
     try {
       await fixture.query('BEGIN');await fixture.query('ALTER TABLE entities DISABLE TRIGGER application_native_entity_values')
       await fixture.query('UPDATE entities SET attributes=$2 WHERE id=$1',[value.id,{crm_archived_at:'invalid historical timestamp'}])
+      await fixture.query('SET CONSTRAINTS ALL IMMEDIATE')
       await fixture.query('ALTER TABLE entities ENABLE TRIGGER application_native_entity_values');await fixture.query('COMMIT')
     } finally {await fixture.query('ROLLBACK');fixture.release()}
     const dispatcher=new ApplicationPlatformService([createCanonicalNativeApplicationModule()]),context=await execution()
@@ -1241,6 +1243,67 @@ describe('[COMP:api/application-records] canonical native operation composition'
         expect((await capture(readerId,currentVersion)).values).toEqual({'custom.ancestry_target':derived.id})
         expect(await member(readerId,async client=>(await client.query('SELECT read_admitted_application_field_snapshot($1,$2,$3) AS value',[workspaceId,source.resourceId,source.version])).rows[0].value)).toMatchObject({held:false})
       }finally{if(roleB)await owner.query('DELETE FROM application_native_role_assignments WHERE id=$1',[roleB]);if(revoked)await creatorRole(userId);await clearCreatorPolicy();await archiveCrmFieldDefinition(userId,workspaceId,definition.id)}
+    })
+    it.each((['store','sql'] as const).flatMap(lane=>[
+      ...(['company','person','deal'] as const).map(type=>({lane,type,owned:true})),
+      ...(['person','deal'] as const).map(type=>({lane,type,owned:false})),
+    ]))('Q03/Q04 keeps input-field authority for a raw $lane $type write with owner registration $owned',async({lane,type,owned})=>{
+      if(!owned)await owner.query('DELETE FROM application_native_resource_owners WHERE workspace_id=$1 AND origin=$2 AND resource_type=$3',[workspaceId,nativeOrigin,type])
+      let roleB:string|undefined,revoked=false
+      try{
+        const {source}=await fieldDerivedCompany()
+        const derived=await createEntity({workspaceId,kind:type,displayName:'Fictional raw source derivative',attributes:{},createdByUserId:userId,source:'user',
+          userId:source.userId,assistantId:source.assistantId,sensitivity:source.sensitivity,compartments:[...source.compartments],projectIds:[...source.projectIds],
+          derivation:{producer:'fictional-raw-source-derivation',sources:[source]}})
+        ancestryFixtureIds.push(derived.id)
+        const edit=(actor:string,name:string)=>lane==='store'
+          ? updateEntity(actor,derived.id,{displayName:name},{...access,userId:actor})
+          : member(actor,async client=>(await client.query('UPDATE entities SET display_name=$2,updated_at=clock_timestamp() WHERE id=$1 RETURNING id,display_name AS "displayName"',[derived.id,name])).rows[0])
+        expect(await edit(userId,'Fictional initially admitted raw edit')).toMatchObject({id:derived.id,displayName:'Fictional initially admitted raw edit'})
+        const before=await snapshot(derived.id),historyBefore=(await owner.query("SELECT count(*)::int AS count FROM brain_row_versions WHERE primitive='entity' AND row_id=$1",[derived.id])).rows[0].count
+        roleB=await creatorRole(readerId)
+        const roleA=(await owner.query("SELECT id FROM application_native_role_assignments WHERE workspace_id=$1 AND module_key='native' AND user_id=$2 AND role_key='finance' AND status='active'",[workspaceId,userId])).rows[0].id
+        await owner.query("UPDATE application_native_role_assignments SET status='revoked' WHERE id=$1",[roleA]);revoked=true
+        const held=await member(userId,async client=>(await client.query('SELECT read_admitted_application_field_snapshot($1,$2,$3) AS value',[workspaceId,source.resourceId,source.version])).rows[0].value)
+        expect(held===null||held.held===true).toBe(true)
+        await expect(edit(userId,'Fictional refused raw edit')).rejects.toMatchObject({code:lane==='store'?'access_unavailable':'42501'})
+        expect(await snapshot(derived.id)).toEqual(before)
+        expect((await owner.query("SELECT count(*)::int AS count FROM brain_row_versions WHERE primitive='entity' AND row_id=$1",[derived.id])).rows[0].count).toBe(historyBefore)
+        expect(await edit(readerId,'Fictional independently admitted raw edit')).toMatchObject({id:derived.id,displayName:'Fictional independently admitted raw edit'})
+        expect((await snapshot(derived.id)).version).toBe((BigInt(before.version)+1n).toString())
+        expect((await owner.query("SELECT count(*)::int AS count FROM scope_derivations d JOIN scope_derivation_sources i ON i.derivation_id=d.id WHERE d.workspace_id=$1 AND d.resource_kind='entity' AND d.resource_id=$2 AND i.source_kind='application_field' AND i.source_id=$3",[workspaceId,derived.id,source.resourceId])).rows[0].count).toBeGreaterThan(0)
+      }finally{
+        if(roleB)await owner.query('DELETE FROM application_native_role_assignments WHERE id=$1',[roleB])
+        if(revoked)await creatorRole(userId)
+        if(!owned)await owner.query("INSERT INTO application_native_resource_owners(workspace_id,origin,resource_type,module_key) VALUES($1,$2,$3,'native')",[workspaceId,nativeOrigin,type])
+      }
+    })
+    it.each([true,false])('Q03/Q06 rechecks native input roles at commit with owner registration %s',async owned=>{
+      if(!owned)await owner.query('DELETE FROM application_native_resource_owners WHERE workspace_id=$1 AND origin=$2 AND resource_type=$3',[workspaceId,nativeOrigin,'person'])
+      let roleB:string|undefined,revoked=false
+      try {
+        const {source}=await fieldDerivedCompany()
+        const derived=await createEntity({workspaceId,kind:'person',displayName:'Fictional deferred source derivative',attributes:{},createdByUserId:userId,source:'user',
+          userId:source.userId,assistantId:source.assistantId,sensitivity:source.sensitivity,compartments:[...source.compartments],projectIds:[...source.projectIds],
+          derivation:{producer:'fictional-deferred-source-derivation',sources:[source]}})
+        ancestryFixtureIds.push(derived.id);roleB=await creatorRole(readerId)
+        const before=await snapshot(derived.id),historyBefore=(await owner.query("SELECT count(*)::int AS count FROM brain_row_versions WHERE primitive='entity' AND row_id=$1",[derived.id])).rows[0].count
+        const roleA=(await owner.query("SELECT id FROM application_native_role_assignments WHERE workspace_id=$1 AND module_key='native' AND user_id=$2 AND role_key='finance' AND status='active'",[workspaceId,userId])).rows[0].id
+        let updated=false
+        await expect(member(userId,async client=>{
+          expect((await client.query('UPDATE entities SET display_name=$2,updated_at=clock_timestamp() WHERE id=$1 RETURNING id',[derived.id,'Fictional deferred refusal'])).rows[0]).toEqual({id:derived.id});updated=true
+          await owner.query("UPDATE application_native_role_assignments SET status='revoked' WHERE id=$1",[roleA]);revoked=true
+        })).rejects.toMatchObject({code:'42501'})
+        expect(updated).toBe(true);expect(revoked).toBe(true)
+        expect(await snapshot(derived.id)).toEqual(before)
+        expect((await owner.query("SELECT count(*)::int AS count FROM brain_row_versions WHERE primitive='entity' AND row_id=$1",[derived.id])).rows[0].count).toBe(historyBefore)
+        expect((await member(readerId,async client=>(await client.query('UPDATE entities SET display_name=$2,updated_at=clock_timestamp() WHERE id=$1 RETURNING id',[derived.id,'Fictional independent deferred edit'])).rows[0])).id).toBe(derived.id)
+        expect((await snapshot(derived.id)).version).toBe((BigInt(before.version)+1n).toString())
+      } finally {
+        if(roleB)await owner.query('DELETE FROM application_native_role_assignments WHERE id=$1',[roleB])
+        if(revoked)await creatorRole(userId)
+        if(!owned)await owner.query("INSERT INTO application_native_resource_owners(workspace_id,origin,resource_type,module_key) VALUES($1,$2,$3,'native')",[workspaceId,nativeOrigin,'person'])
+      }
     })
     it('Q02/Q03/Q05 edits an admitted field-derived company and retains current ancestor roles across native writers',async()=>{
       const {source,derived}=await fieldDerivedCompany()
