@@ -1,3 +1,4 @@
+import { houseKeepEpisodic } from '../../routes/proactive-compaction.js'
 import { createCalleeExecutor } from '../../inter-assistant/executor.js'
 import { createDbMemoryStore } from '../../db/memory-store.js'
 import { createDbCapabilityStore } from '../../db/capability-store.js'
@@ -179,6 +180,44 @@ describe.sequential('[COMP:api/application-persistence] actual transcript persis
     expect(retained).toMatchObject([{content:{summary:'Fictional governed episode'}}])
     expect(boundScopeSources(retained[0])).toEqual([original])
     expect(await store.listBySession(f.session.id,second)).toEqual([])
+  })
+
+  it('propagates a typed retention refusal after an admitted episode read and keeps an independent promoter usable', async () => {
+    fixture=await persistentContextFixture('confidential')
+    const f=fixture;independent=await persistentSourceFixture(f)
+    const store=createDbEpisodicStore(),setup=await f.modelContext()
+    bindSessionContextRetainedAuthority(setup.execution,(execution,sources,action)=>independent!.coordinator.prepare(execution,sources,action))
+    const row=await store.create({sessionId:f.session.id,userId:f.ownerId,assistantId:f.assistantId,
+      topicLabel:'fictional-retain-race',summary:'Fictional retained topic',messageSpan:{fromSequence:1,toSequence:2,turnCount:2},authority:setup,
+      derivation:{producer:'fixture:retain-race',sources:[independent.root]}})
+    await store.fetchByTopic({sessionId:f.session.id,topicLabel:row.topicLabel,authority:setup})
+    await store.incrementSurvivalCount([row.id],setup)
+    await store.incrementSurvivalCount([row.id],setup)
+    const native=await f.modelContext()
+    const cold=await store.create({sessionId:f.session.id,userId:f.ownerId,assistantId:f.assistantId,
+      topicLabel:'fictional-independent-cold',summary:'Fictional cold native episode',messageSpan:{fromSequence:1,toSequence:3,turnCount:3},authority:native,
+      derivation:{producer:'fixture:native-cold-after-retain',sources:(await f.history()).flatMap(boundScopeSources)}})
+    const original=boundScopeSources(row)[0],first=await f.modelContext()
+    let revoked=false
+    bindSessionContextRetainedAuthority(first.execution,async(execution,sources,action)=>{
+      if(action==='retain'&&!revoked){
+        revoked=true
+        await independent!.pool.query("DELETE FROM grants WHERE kind='human' AND account_id=$1",[f.ownerId])
+      }
+      return independent!.coordinator.prepare(execution,sources,action)
+    })
+    await expect(houseKeepEpisodic({episodicStore:store,memoryStore:createDbMemoryStore(),sessionId:f.session.id,
+      assistantId:f.assistantId,userId:f.ownerId,contextAuthority:first})).rejects.toMatchObject({reason:'authority_changed',retrySafe:false})
+    expect(revoked).toBe(true)
+    expect((await f.pool.query('SELECT id FROM episodic_memories WHERE id=$1',[cold.id])).rows).toHaveLength(1)
+    expect((await f.pool.query("SELECT id FROM memories WHERE workspace_id=$1 AND source='episodic-graduation'",[f.workspaceId])).rows).toHaveLength(0)
+    expect((await f.pool.query('SELECT promoted_memory_id,survival_count FROM episodic_memories WHERE id=$1',[row.id])).rows[0]).toEqual({promoted_memory_id:null,survival_count:2})
+    const second=await f.modelContext(f.secondId)
+    bindSessionContextRetainedAuthority(second.execution,(execution,sources,action)=>independent!.coordinator.prepare(execution,sources,action))
+    expect(await houseKeepEpisodic({episodicStore:store,memoryStore:createDbMemoryStore(),sessionId:f.session.id,
+      assistantId:f.assistantId,userId:f.secondId,contextAuthority:second})).toEqual({promoted:1,evicted:1,kept:0})
+    expect((await f.pool.query("SELECT created_by_user_id FROM memories WHERE workspace_id=$1 AND source='episodic-graduation'",[f.workspaceId])).rows).toEqual([{created_by_user_id:f.secondId}])
+    expect((await f.pool.query("SELECT read_scope_source($1,'session_context_revision',$2) AS source",[f.workspaceId,original.resourceId])).rows[0].source).toMatchObject({version:original.version,held:false})
   })
 
   it('uses the actual Brian commitment tools and formatter with the same canonical execution', async () => {

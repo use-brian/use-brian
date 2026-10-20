@@ -1,3 +1,4 @@
+import { SourceProtocolError } from '@use-brian/brian-app/connector'
 import { createMemory } from './memories.js'
 /** Immutable session-context storage. [COMP:api/application-persistence] */
 import { randomUUID } from 'node:crypto'
@@ -35,50 +36,62 @@ function requireAuthority(authority: SessionContextAuthority | undefined): Sessi
 }
 async function transaction<T>(authority: SessionContextAuthority, sources: readonly ScopeSource[], action: 'context' | 'retain',
   owner: boolean, run: (client: PoolClient) => Promise<T>, writeSessionId?: string, writeWorkspace = false): Promise<T> {
-  const { execution, accumulator } = requireAuthority(authority), before = JSON.stringify(accumulator.evidence)
-  await execution.security.authority.assertCurrent()
-  if (execution.lifecycle.abortSignal.aborted || sources.some(source => source.workspaceId !== execution.security.access.workspaceId)) changed()
-  const external = sources.some(source => source.resourceKind === 'external_source')
-    || (await readExternalSourceAncestors(execution.security.access.workspaceId, sources)).length > 0
-  const wiring = getSharedRetainedSourceAuthority(), host = retainedHosts.get(execution)
-  const prepare = host ?? (wiring ? (e: ExecutionContext, s: readonly ScopeSource[], a: 'context' | 'retain') => wiring.coordinator.prepare(e,s,a) : undefined)
-  if (external && !prepare) changed()
-  const contextProof = external ? await prepare!(execution, sources, 'context') : undefined
-  const prepared = external && action==='retain' ? await prepare!(execution, sources, 'retain') : undefined
-  const client = await (owner ? getPool() : getAppPool()).connect()
-  let result: T
   try {
-    result = await runWithAgentAccess(execution.security.access, async () => {
-      await client.query('BEGIN')
-      if (!owner) {
-        const role = (await client.query<{ bypass: boolean }>(`SELECT r.rolsuper OR r.rolbypassrls OR pg_has_role(r.oid,c.relowner,'USAGE') AS bypass
-          FROM pg_roles r JOIN pg_class c ON c.oid='session_context_revision_contents'::regclass WHERE r.rolname=current_user`)).rows[0]
-        if (role?.bypass !== false) changed()
-      }
-      await applyRLSGucs(client, execution.security.access.userId)
-      await applyApplicationRLSContext(client, execution)
-      // Promotion locks the workspace before parent/source rows. NO KEY UPDATE
-      // remains compatible with the trusted source pin's separate FK insert;
-      // createMemory upgrades after those pin inserts have committed.
-      if (writeWorkspace) await client.query('SELECT id FROM workspaces WHERE id=$1 FOR NO KEY UPDATE', [execution.security.access.workspaceId])
-      // Take the publication lock before any native source reader takes a
-      // parent SHARE lock. Two simultaneous upgrades otherwise deadlock.
-      if(writeSessionId)await client.query('SELECT id FROM sessions WHERE id=$1 FOR UPDATE',[writeSessionId])
-      if (contextProof) await pinPreparedExternalSourceAuthority(client, execution, contextProof)
-      await validateCallerScopeEvidence({ sources: [...sources] }, execution.security.ceiling, client)
-      if (prepared) await pinPreparedExternalSourceAuthority(client, execution, prepared)
-      const value = await run(client)
-      await execution.security.authority.assertCurrent()
-      if (execution.lifecycle.abortSignal.aborted || JSON.stringify(accumulator.evidence) !== before
-        || host !== retainedHosts.get(execution) || !host && wiring !== getSharedRetainedSourceAuthority()) changed()
-      await client.query('COMMIT')
-      return value
-    })
-  } finally { releaseApplicationTransactionBinding(client); await rollbackAndRelease(client) }
-  if (contextProof) await assertPreparedExternalSourceAuthorityCurrent(execution, contextProof)
-  if (prepared) await assertPreparedExternalSourceAuthorityCurrent(execution, prepared)
-  await execution.security.authority.assertCurrent()
-  return result
+    const { execution, accumulator } = requireAuthority(authority), before = JSON.stringify(accumulator.evidence)
+    await execution.security.authority.assertCurrent()
+    if (execution.lifecycle.abortSignal.aborted || sources.some(source => source.workspaceId !== execution.security.access.workspaceId)) changed()
+    const external = sources.some(source => source.resourceKind === 'external_source')
+      || (await readExternalSourceAncestors(execution.security.access.workspaceId, sources)).length > 0
+    const wiring = getSharedRetainedSourceAuthority(), host = retainedHosts.get(execution)
+    const prepare = host ?? (wiring ? (e: ExecutionContext, s: readonly ScopeSource[], a: 'context' | 'retain') => wiring.coordinator.prepare(e,s,a) : undefined)
+    if (external && !prepare) changed()
+    const contextProof = external ? await prepare!(execution, sources, 'context') : undefined
+    const prepared = external && action==='retain' ? await prepare!(execution, sources, 'retain') : undefined
+    const client = await (owner ? getPool() : getAppPool()).connect()
+    let result: T
+    try {
+      result = await runWithAgentAccess(execution.security.access, async () => {
+        await client.query('BEGIN')
+        if (!owner) {
+          const role = (await client.query<{ bypass: boolean }>(`SELECT r.rolsuper OR r.rolbypassrls OR pg_has_role(r.oid,c.relowner,'USAGE') AS bypass
+            FROM pg_roles r JOIN pg_class c ON c.oid='session_context_revision_contents'::regclass WHERE r.rolname=current_user`)).rows[0]
+          if (role?.bypass !== false) changed()
+        }
+        await applyRLSGucs(client, execution.security.access.userId)
+        await applyApplicationRLSContext(client, execution)
+        // Promotion locks the workspace before parent/source rows. NO KEY UPDATE
+        // remains compatible with the trusted source pin's separate FK insert;
+        // createMemory upgrades after those pin inserts have committed.
+        if (writeWorkspace) await client.query('SELECT id FROM workspaces WHERE id=$1 FOR NO KEY UPDATE', [execution.security.access.workspaceId])
+        // Take the publication lock before any native source reader takes a
+        // parent SHARE lock. Two simultaneous upgrades otherwise deadlock.
+        if(writeSessionId)await client.query('SELECT id FROM sessions WHERE id=$1 FOR UPDATE',[writeSessionId])
+        if (contextProof) await pinPreparedExternalSourceAuthority(client, execution, contextProof)
+        await validateCallerScopeEvidence({ sources: [...sources] }, execution.security.ceiling, client)
+        if (prepared) await pinPreparedExternalSourceAuthority(client, execution, prepared)
+        const value = await run(client)
+        await execution.security.authority.assertCurrent()
+        if (execution.lifecycle.abortSignal.aborted || JSON.stringify(accumulator.evidence) !== before
+          || host !== retainedHosts.get(execution) || !host && wiring !== getSharedRetainedSourceAuthority()) changed()
+        await client.query('COMMIT')
+        return value
+      })
+    } finally { releaseApplicationTransactionBinding(client); await rollbackAndRelease(client) }
+    if (contextProof) await assertPreparedExternalSourceAuthorityCurrent(execution, contextProof)
+    if (prepared) await assertPreparedExternalSourceAuthorityCurrent(execution, prepared)
+    await execution.security.authority.assertCurrent()
+    return result
+  } catch (error) {
+    if (error instanceof SourceProtocolError) {
+      if (error.code === 'source_access_denied') changed()
+      // Unavailability, malformed proof and uncertain source effects must not
+      // become a normal storage failure. Preserve their code and retry policy.
+      throw Object.assign(error, { reason: 'authority_changed' as const })
+    }
+    if (typeof error === 'object' && error !== null && 'reason' in error
+      && error.reason === 'caller_evidence_unavailable') changed()
+    throw error
+  }
 }
 
 /** Discover immutable metadata only. Historical plaintext is never selected. */
