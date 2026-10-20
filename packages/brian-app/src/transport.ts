@@ -43,6 +43,20 @@ async function readResponse(response: Response, effectful: boolean, signal?: Abo
   return body
 }
 /** Internal shared implementation; browser exports expose only app-bound credentials. */
+function resolveHeaders(request: ApplicationRequest,
+  load: (request: ApplicationRequest) => Promise<Record<string, string>>): Promise<Record<string, string>> {
+  const signal = request.signal
+  if (!signal) return load(request)
+  return new Promise((resolve, reject) => {
+    const cleanup = () => signal.removeEventListener('abort', cancel)
+    const cancel = () => { cleanup(); reject(new ApplicationSdkError('cancelled', 'none', false, undefined, true)) }
+    signal.addEventListener('abort', cancel, { once: true })
+    if (signal.aborted) { cancel(); return }
+    let pending: Promise<Record<string, string>>
+    try { pending = load(request) } catch (error) { cleanup(); reject(error); return }
+    pending.then(value => { cleanup(); resolve(value) }, error => { cleanup(); reject(error) })
+  })
+}
 export function httpTransport(options: HttpTransportOptions,
   headers: (request: ApplicationRequest) => Promise<Record<string, string>>, profile: 'application' | 'workspace' = 'application'): ApplicationTransport {
   const origin = apiOrigin(options.apiOrigin), fetcher = options.fetch ?? globalThis.fetch
@@ -50,7 +64,7 @@ export function httpTransport(options: HttpTransportOptions,
     appIdentifier(request.appId)
     if (request.signal?.aborted) throw new ApplicationSdkError('cancelled', 'none', false, undefined, true)
     let authorization: Record<string,string>, body: string | undefined
-    try { authorization = await headers(request) }
+    try { authorization = await resolveHeaders(request, headers) }
     catch (error) { if (error instanceof ApplicationSdkError) throw error; throw new ApplicationSdkError('authentication_required') }
     try { body = request.body === undefined ? undefined : JSON.stringify(request.body) } catch { throw new ApplicationSdkError('invalid_value') }
     if (request.signal?.aborted) throw new ApplicationSdkError('cancelled', 'none', false, undefined, true)

@@ -1,7 +1,7 @@
 /** Server profile. Canonical registration is injected by the deployed Brian host. [COMP:shared/brian-app-sdk] */
 import process from 'node:process'
 import { ApplicationSdkError, appIdentifier, appOAuthToken, httpTransport, type ApplicationFetch, type ApplicationTransport, type HttpTransportOptions } from './transport.js'
-import type { ApplicationSchemaPorts, ApplicationSchemaPreviewResult, ApplicationSchemaApplyResult } from './application.js'
+import type { ApplicationCallOptions, ApplicationSchemaPorts, ApplicationSchemaPreviewResult, ApplicationSchemaApplyResult } from './application.js'
 export type { ApplicationModuleDefinition, ApplicationOperationContext, ApplicationRegisteredOperation,
   ApplicationRegisteredCommand, defineApplicationModules } from '@use-brian/core'
 
@@ -27,11 +27,11 @@ export function createNativeSchemaPorts(options: HttpTransportOptions & { worksp
 
 /** A delegated user is always validated app-bound OAuth, never an arbitrary ID. */
 export function createServiceTransport(options: HttpTransportOptions & {
-  credential: () => Promise<{ kind: 'service'; token: string } | { kind: 'delegated'; token: string; userAuthorization: string }>
+  credential: (call?: ApplicationCallOptions) => Promise<{ kind: 'service'; token: string } | { kind: 'delegated'; token: string; userAuthorization: string }>
 }): ApplicationTransport {
   if (!process.versions.node) throw new ApplicationSdkError('operation_not_available')
-  return httpTransport(options, async (): Promise<Record<string,string>> => {
-    const credential = await options.credential()
+  return httpTransport(options, async (request): Promise<Record<string,string>> => {
+    const credential = await options.credential({ signal: request.signal })
     if (!credential || !/^sk_app_[A-Za-z0-9_-]+$/.test(credential.token)) throw new ApplicationSdkError('authentication_required')
     if (credential.kind === 'service' && !('userAuthorization' in credential)) return { Authorization: `Bearer ${credential.token}` }
     if (credential.kind === 'delegated') return { Authorization: `Bearer ${credential.token}`,

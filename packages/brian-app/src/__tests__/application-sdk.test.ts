@@ -1,5 +1,6 @@
 import { describe, it, expect, vi } from 'vitest'
 import { webcrypto, createHash } from 'node:crypto'
+import { setImmediate as flush } from 'node:timers/promises'
 import { createApplicationClient, createFetchTransport, createApplicationSignIn, createHomeApplicationTransport, ApplicationSdkError } from '../application.js'
 import { createNativeSchemaPorts, createServiceTransport } from '../module.js'
 const app = '00000000-0000-4000-8000-000000000001', workspace = '00000000-0000-4000-8000-000000000002', home = '00000000-0000-4000-8000-000000000003'
@@ -71,6 +72,31 @@ describe('[COMP:shared/brian-app-sdk] application client', () => {
     await expect(client.previewSchema({typeId:home,expectedVersion:1,properties:[]},{signal:abort.signal})).rejects.toMatchObject({code:'cancelled',effect:'none'})
     expect(preview).not.toHaveBeenCalled();expect(apply).not.toHaveBeenCalled()
   })
+  it.each(['browser','service','delegated'] as const)('K02 cancels pending %s credentials before dispatch and ignores their late outcome',async profile=>{
+    const abort=new AbortController(),fetch=vi.fn()
+    let start!:()=>void,release!:()=>void,fail!:(error:Error)=>void,received:AbortSignal|undefined
+    const ready=new Promise<void>(resolve=>{start=resolve})
+    const credential=new Promise<void>((resolve,reject)=>{release=resolve;fail=reject})
+    const supply=async(call?:{signal?:AbortSignal})=>{received=call?.signal;start();await credential}
+    const transport=profile==='browser'
+      ?createFetchTransport({apiOrigin:origin,fetch,credential:async(_app,call)=>{await supply(call);return oauth}})
+      :createServiceTransport({apiOrigin:origin,fetch,credential:async call=>{
+        await supply(call)
+        return profile==='delegated'?{kind:'delegated',token:'sk_app_fixture',userAuthorization:oauth}:{kind:'service',token:'sk_app_fixture'}
+      }})
+    let settled=false
+    const pending=createApplicationClient({appId:app,transport}).command('change',{idempotencyKey:'once',input:{}},{signal:abort.signal}).catch(error=>{settled=true;return error})
+    await ready;abort.abort();await flush()
+    const promptly=settled
+    if(profile==='delegated')fail(new Error('private credential rejection'))
+    else release()
+    const error=await pending;await flush()
+    expect(promptly).toBe(true)
+    expect(received).toBe(abort.signal)
+    expect(error).toMatchObject({code:'cancelled',effect:'none',cancelled:true,retrySafe:false})
+    expect(String(error)).not.toContain('private credential rejection')
+    expect(fetch).not.toHaveBeenCalled()
+  })
   it.each(['sk_app_secret','native.jwt.token','cookie=value','oat_bad\r\nInjected: true'])('K03 rejects non-app browser credential %s',async token=>{
     const fetch=vi.fn(); const client=createApplicationClient({appId:app,transport:createFetchTransport({apiOrigin:origin,fetch,credential:async()=>token})})
     await expect(client.catalog()).rejects.toMatchObject({code:'authentication_required'});expect(fetch).not.toHaveBeenCalled()
@@ -85,6 +111,41 @@ describe('[COMP:shared/brian-app-sdk] application client', () => {
   })
 })
 describe('[COMP:shared/brian-app-sdk] authentication adapters',()=>{
+  it('K03 cannot revive a cancelled login while its PKCE digest is pending',async()=>{
+    const fetch=vi.fn(),login=createApplicationSignIn({appId:app,clientId:'public',apiOrigin:origin,redirectUri:'https://portal.example/callback',crypto:webcrypto as unknown as Crypto,fetch})
+    const opening=login.begin();login.cancel()
+    await expect(opening).rejects.toMatchObject({code:'cancelled',effect:'none',cancelled:true})
+    expect(fetch).not.toHaveBeenCalled()
+  })
+  it('K03 keeps the newest login when an earlier PKCE digest completes late',async()=>{
+    const releases:Array<()=>Promise<void>>=[]
+    const crypto={getRandomValues:webcrypto.getRandomValues.bind(webcrypto),subtle:{digest:(algorithm:AlgorithmIdentifier,bytes:BufferSource)=>{
+      const digest=webcrypto.subtle.digest(algorithm,bytes as ArrayBuffer)
+      return new Promise<ArrayBuffer>(resolve=>{releases.push(async()=>{resolve(await digest)})})
+    }}} as unknown as Crypto
+    const fetch=vi.fn(async()=>reply({token_type:'Bearer',access_token:oauth,expires_in:300}))
+    const login=createApplicationSignIn({appId:app,clientId:'public',apiOrigin:origin,redirectUri:'https://portal.example/callback',crypto,fetch})
+    const first=login.begin().catch(error=>error),second=login.begin()
+    await releases[1]();const latest=await second;await releases[0]()
+    expect(await first).toMatchObject({code:'cancelled',effect:'none'})
+    const state=new URL(latest.authorizationUrl).searchParams.get('state')
+    expect(await login.complete(`https://portal.example/callback?code=synthetic-code&state=${state}`)).toMatchObject({accessToken:oauth})
+    expect(fetch).toHaveBeenCalledTimes(1)
+  })
+  it.each(['signal','cancel'] as const)('K03 withholds a login token after %s during response-body consumption',async mode=>{
+    let start!:()=>void,release!:(value:unknown)=>void,fail!:(error:Error)=>void
+    const ready=new Promise<void>(resolve=>{start=resolve})
+    const body=new Promise<unknown>((resolve,reject)=>{release=resolve;fail=reject})
+    const fetch=vi.fn(async()=>({ok:true,status:200,json:()=>{start();return body}} as Response))
+    const login=createApplicationSignIn({appId:app,clientId:'public',apiOrigin:origin,redirectUri:'https://portal.example/callback',crypto:webcrypto as unknown as Crypto,fetch})
+    const {authorizationUrl}=await login.begin(),state=new URL(authorizationUrl).searchParams.get('state'),abort=new AbortController()
+    const completing=login.complete(`https://portal.example/callback?code=synthetic-code&state=${state}`,{signal:abort.signal})
+    await ready
+    if(mode==='signal'){abort.abort();release({token_type:'Bearer',access_token:oauth,expires_in:300})}
+    else {login.cancel();fail(new Error('private token response failure'))}
+    await expect(completing).rejects.toMatchObject({code:'cancelled',effect:'none',cancelled:true,retrySafe:false})
+    expect(fetch).toHaveBeenCalledTimes(1)
+  })
   it('K03 uses app-audience S256/consent and a one-use exact redirect/state verifier',async()=>{
     const fetch=vi.fn(async()=>reply({access_token:oauth,token_type:'Bearer',expires_in:3600}))
     const login=createApplicationSignIn({apiOrigin:origin,appId:app,clientId:'registered-app',redirectUri:'https://portal.example/callback',crypto:webcrypto as Crypto,fetch})

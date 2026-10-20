@@ -35,9 +35,9 @@ export interface ApplicationSchemaPorts {
   apply(input: ApplicationSchemaApplyInput, options?: ApplicationCallOptions): Promise<ApplicationSchemaApplyResult>
 }
 export function createFetchTransport(options: HttpTransportOptions & {
-  credential: (appId: string) => Promise<string | null>
+  credential: (appId: string, call?: ApplicationCallOptions) => Promise<string | null>
 }): ApplicationTransport {
-  return httpTransport(options, async request => ({ Authorization: `Bearer ${appOAuthToken(await options.credential(request.appId))}` }))
+  return httpTransport(options, async request => ({ Authorization: `Bearer ${appOAuthToken(await options.credential(request.appId, { signal: request.signal }))}` }))
 }
 function segment(value: string): string {
   if (typeof value !== 'string' || !value || value === '.' || value === '..' || /[\u0000-\u001f\u007f]/.test(value)) throw new ApplicationSdkError('invalid_value')

@@ -83,6 +83,11 @@ optimistic permission widening or automatic retry. After dispatch, a disconnecte
 or cancelled write is uncertain. Reconcile using its idempotency key/receipt
 before deciding to retry. HTTP error bodies and transport exception details are
 never included in SDK errors.
+Credential suppliers receive optional call options containing the operation's
+AbortSignal. Cancellation while waiting for browser, service or delegated
+credentials rejects promptly before dispatch with effect `none`. Late credential
+results are ignored; no authentication or operation is retried automatically.
+Existing suppliers may continue to ignore the optional call options.
 
 Standalone login uses `createApplicationSignIn`: keep the originating page alive,
 open a popup, call `begin({ popup })`, and navigate that popup to `authorizationUrl`.
@@ -94,6 +99,9 @@ exact redirect/state/PKCE proof through the existing app-bound token route.
 its one-use proof. Full-page navigation discards this memory-only proof, so use a
 popup or a trusted server-side session adapter. Native sign-in/consent handles
 same-origin sessions. Login alone supplies no records.
+Starting another login or calling `cancel()` invalidates an earlier pending PKCE
+generation. Late digests cannot replace the newest proof, and a cancelled or
+superseded exchange cannot return a token after response-body decoding.
 
 Home uses `createHomeApplicationTransport({ appId, homeAppId, workspaceId,
 apiOrigin, hostOrigin, window })`; its `transport` requests the existing signed

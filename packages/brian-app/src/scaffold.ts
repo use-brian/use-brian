@@ -24,7 +24,7 @@ export function registerNativeModule<T>(register: typeof defineApplicationModule
 }
 `
 const nativeBrowser = `import { createApplicationClient, createFetchTransport, createHomeApplicationTransport } from '@use-brian/brian-app/application'
-export function standalone(appId: string, apiOrigin: string, appOAuth: () => Promise<string | null>) {
+export function standalone(appId: string, apiOrigin: string, appOAuth: Parameters<typeof createFetchTransport>[0]['credential']) {
   return createApplicationClient({ appId, transport: createFetchTransport({ apiOrigin, credential: appOAuth }) })
 }
 export function home(options: Parameters<typeof createHomeApplicationTransport>[0]) {

@@ -16,20 +16,23 @@ export function createApplicationSignIn(options: ApplicationSignInOptions) {
   if (redirect.username || redirect.password || redirect.hash || redirect.search || !options.clientId
     || options.scope !== undefined && !['read','read_write'].includes(options.scope)) throw new ApplicationSdkError('invalid_value')
   const crypto = options.crypto ?? globalThis.crypto, fetcher = options.fetch ?? globalThis.fetch
-  let pending: { verifier: string; state: string; expires: number; popup?: Window } | undefined
+  let generation = 0
+  let pending: { verifier: string; state: string; expires: number; popup?: Window; generation: number } | undefined
   return {
     async begin(call: { popup?: Window } = {}): Promise<{ authorizationUrl: string }> {
+      const current = ++generation
       pending = undefined
       const verifier = base64url(crypto.getRandomValues(new Uint8Array(32)))
       const state = base64url(crypto.getRandomValues(new Uint8Array(32)))
       const challenge = base64url(new Uint8Array(await crypto.subtle.digest('SHA-256', new TextEncoder().encode(verifier))))
-      pending = { verifier, state, expires: Date.now() + 5 * 60_000, popup: call.popup }
+      if (current !== generation) throw new ApplicationSdkError('cancelled', 'none', false, undefined, true)
+      pending = { verifier, state, expires: Date.now() + 5 * 60_000, popup: call.popup, generation: current }
       const url = new URL(`/api/applications/${app}/authorize`, origin)
       url.search = new URLSearchParams({ response_type: 'code', client_id: options.clientId, redirect_uri: options.redirectUri,
         code_challenge: challenge, code_challenge_method: 'S256', scope: options.scope ?? 'read', state }).toString()
       return { authorizationUrl: url.toString() }
     },
-    cancel() { pending = undefined },
+    cancel() { generation++; pending = undefined },
     async completeFromMessage(event: MessageEvent, call: { signal?: AbortSignal } = {}) {
       const data = event.data as Record<string, unknown> | null
       if (!pending?.popup || event.source !== pending.popup || event.origin !== redirect.origin || !data
@@ -52,10 +55,18 @@ export function createApplicationSignIn(options: ApplicationSignInOptions) {
         response = await fetcher(new URL(`/api/applications/${app}/token`, origin), { method: 'POST', credentials: 'same-origin', cache: 'no-store', redirect: 'error',
           signal: call.signal, headers: { 'Content-Type': 'application/x-www-form-urlencoded' }, body: new URLSearchParams({ grant_type: 'authorization_code',
             code, code_verifier: proof.verifier, redirect_uri: options.redirectUri, client_id: options.clientId }).toString() })
-      } catch { throw new ApplicationSdkError(call.signal?.aborted ? 'cancelled' : 'transport_unavailable', 'none', false, undefined, !!call.signal?.aborted) }
+      } catch {
+        const cancelled = call.signal?.aborted === true || proof.generation !== generation
+        throw new ApplicationSdkError(cancelled ? 'cancelled' : 'transport_unavailable', 'none', false, undefined, cancelled)
+      }
+      if (call.signal?.aborted || proof.generation !== generation) throw new ApplicationSdkError('cancelled', 'none', false, response.status, true)
       if (!response.ok) throw new ApplicationSdkError('oauth_denied', 'none', false, response.status)
       let body: Record<string, unknown>
-      try { body = await response.json() as Record<string, unknown> } catch { throw new ApplicationSdkError('invalid_response') }
+      try { body = await response.json() as Record<string, unknown> } catch {
+        if (call.signal?.aborted || proof.generation !== generation) throw new ApplicationSdkError('cancelled', 'none', false, response.status, true)
+        throw new ApplicationSdkError('invalid_response')
+      }
+      if (call.signal?.aborted || proof.generation !== generation) throw new ApplicationSdkError('cancelled', 'none', false, response.status, true)
       if (!body || body.token_type !== 'Bearer' || !Number.isFinite(body.expires_in) || Number(body.expires_in) <= 0
         || body.refresh_token !== undefined && (typeof body.refresh_token !== 'string' || !/^ort_[A-Za-z0-9_-]+$/.test(body.refresh_token))) throw new ApplicationSdkError('invalid_response')
       return { accessToken: appOAuthToken(body.access_token), expiresIn: Number(body.expires_in),
