@@ -13,6 +13,10 @@ import { loadApplicationAuthority, type ApplicationAuthentication, type Applicat
 
 const bindings = new WeakMap<ExecutionContext, { authentication: ApplicationAuthentication; state: ApplicationAuthorityState }>()
 const transactionBindings = new WeakMap<PoolClient, ExecutionContext>()
+// Shallow narrowing preserves this private token; JSON/clones cannot mint proof.
+const applicationAccessToken = Symbol('application-access-context')
+const applicationAccessExecutions = new WeakMap<object, ExecutionContext>()
+
 /** Canonical writers receive proof only for the exact host-bound transaction. */
 export function getApplicationTransactionBinding(client: PoolClient) {
   const execution = transactionBindings.get(client)
@@ -39,8 +43,16 @@ export function runWithApplicationReadTransaction<T>(client:PoolClient,execution
   })
 }
 /** A retained asynchronous callback cannot reuse a released host transaction. */
-export function currentApplicationReadTransaction(access:{workspaceId:string;userId:string}) {
-  const current=readTransactions.getStore();if(!current)return undefined
+export function currentApplicationReadTransaction(access:{workspaceId:string;userId:string;applicationBound?:true}) {
+  const current=readTransactions.getStore()
+  const token=(access as {[applicationAccessToken]?:object})[applicationAccessToken]
+  if (access.applicationBound!==undefined || token!==undefined) {
+    if (!current || access.applicationBound!==true || !token
+      || applicationAccessExecutions.get(token)!==current.execution) {
+      throw new ApplicationPlatformError('access_unavailable','The transaction is unavailable.')
+    }
+  }
+  if(!current)return undefined
   const workspaceId=access.workspaceId,userId=access.userId
   const assertLive=()=>{
     const bound=getApplicationTransactionBinding(current.client)
@@ -111,11 +123,14 @@ export async function resolveApplicationExecutionContext(authentication: Applica
     const current = await resolve()
     return current.signature === initial.signature ? current.ceiling : null
   }, policyCurrent)
+  const accessToken = Object.freeze({})
+  const applicationAccess = { ...initial.ceiling, assistantId: initial.assistant.id,
+    assistantKind: initial.assistant.kind, applicationBound: true as const, [applicationAccessToken]: accessToken }
   const execution = createExecutionContext({ identity: { kind: 'programmatic', credentialOwnerUserId: initial.state.issuerUserId,
     principal: { kind: 'application', credentialId: initial.state.credentialId, applicationId: initial.state.appId,
       actorUserId: initial.state.principal.userId, subjectKind: initial.state.principal.kind, serviceUserId: initial.state.serviceUserId } },
   ownership: { kind: 'workspace', workspaceId: initial.state.workspaceId },
-  access: { ...initial.ceiling, assistantId: initial.assistant.id, assistantKind: initial.assistant.kind },
+  access: applicationAccess,
   writeDefaults: { compartments: [], projectIds: [] }, authority,
   lifecycle: { abortSignal: options.abortSignal ?? new AbortController().signal, sessionId: options.sessionId ?? randomUUID(),
     channelType: options.channelType ?? 'application', channelId: initial.state.appId, sessionPersisted: false },
@@ -124,6 +139,7 @@ export async function resolveApplicationExecutionContext(authentication: Applica
     execution.security.writeDefaults, execution.security.provenance, execution.surface, execution.attribution]) freezeFacts(facts)
   Object.freeze(execution.security.authority)
   bindings.set(execution, { authentication: auth, state: initial.state })
+  applicationAccessExecutions.set(accessToken, execution)
   return execution
 }
 

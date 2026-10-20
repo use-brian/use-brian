@@ -144,6 +144,33 @@ describe('[COMP:api/application-auth] database application projections and live 
     expect(user).not.toBeNull()
     return { authentication: { user: user! }, appId, grantId, parentId, userId, token: `oat_${id}_${secret}` }
   }
+  it.each(['member','external_user','service'] as const)('Q03 refuses remembered %s application access outside its genuine host frame',async kind=>{
+    const value=await createEntity({workspaceId,kind:'company',displayName:'Fictional remembered application access',attributes:{domain:'unreleased.example'},createdByUserId:ownerId,source:'user'})
+    const fixture=await provision(kind,['name'],undefined,false,value.id),callbacks:Array<()=>Promise<unknown>>=[]
+    const base=createCanonicalNativeApplicationModule(),dispatcher=new ApplicationPlatformService([{...base,application:{...base.application!,queries:[...base.application!.queries,'remember_access']},queries:{...base.queries,remember_access:{input:z.object({}).strict(),authorize:async()=>{},execute:async({execution})=>{
+      const access=execution.security.access,copy={...access},serialized=JSON.parse(JSON.stringify(access)) as typeof access
+      callbacks.push(()=>getCompanyById(access,value.id),()=>getCompanyById(copy,value.id),()=>getCompanyById(serialized,value.id))
+      return {remembered:true}
+    }}}}])
+    expect(await dispatcher.query(await resolveApplicationExecutionContext(fixture.authentication),'native','remember_access',{})).toEqual({remembered:true})
+    expect(callbacks).toHaveLength(3)
+    for(const callback of callbacks)await expect(callback()).rejects.toMatchObject({code:'access_unavailable'})
+  })
+  it('Q03 refuses an older application access context inside an independently authenticated broader execution',async()=>{
+    const value=await createEntity({workspaceId,kind:'company',displayName:'Fictional cross-application access provenance',attributes:{domain:'current.example'},createdByUserId:ownerId,source:'user'})
+    const fields=['name','domain','aliases','tags','externalRef','createdAt','updatedAt']
+    const a=await provision('member',['name'],undefined,false,value.id),b=await provision('member',fields,undefined,false,value.id)
+    let remembered:(()=>Promise<unknown>)|undefined
+    const base=createCanonicalNativeApplicationModule(),dispatcher=new ApplicationPlatformService([{...base,application:{...base.application!,queries:[...base.application!.queries,'remember_old','use_current','serialized_access']},queries:{...base.queries,
+      remember_old:{input:z.object({}).strict(),authorize:async()=>{},execute:async({execution})=>{const copy={...execution.security.access};remembered=()=>getCompanyById(copy,value.id);return {remembered:true}}},
+      use_current:{input:z.object({}).strict(),authorize:async()=>{},execute:async({execution})=>{expect(remembered).toBeDefined();await expect(remembered!()).rejects.toMatchObject({code:'access_unavailable'});return getCompanyById(execution.security.access,value.id)}},
+      serialized_access:{input:z.object({}).strict(),authorize:async()=>{},execute:({execution})=>getCompanyById(JSON.parse(JSON.stringify(execution.security.access)),value.id)}
+    }}])
+    await dispatcher.query(await resolveApplicationExecutionContext(a.authentication),'native','remember_old',{})
+    const current=await resolveApplicationExecutionContext(b.authentication)
+    expect(await dispatcher.query(current,'native','use_current',{})).toMatchObject({id:value.id,domain:'current.example'})
+    await expect(dispatcher.query(current,'native','serialized_access',{})).rejects.toMatchObject({code:'access_unavailable'})
+  })
   async function historicalNativeAttributes(id:string,attributes:Record<string,unknown>) {
     const fixture=await pool.connect()
     try {
