@@ -44,6 +44,16 @@ describe('[COMP:shared/brian-app-sdk] application client', () => {
     await expect(client.catalog()).rejects.toMatchObject({effect:'none',retrySafe:true})
     expect(fetch).toHaveBeenCalledTimes(2)
   })
+  it('K02 preserves the query page, opaque cursor and lossless aggregate envelope',async()=>{
+    const page={records:[{ref:{workspaceId:workspace,origin:{kind:'native',moduleKey:'example_module'},typeKey:'deal',id:home,version:'opaque/v1'},values:{amount:'123456789.123456789'},fields:['amount'],absentFields:[],policyVersion:'policy/v1'}],nextCursor:'opaque/page',aggregates:[{field:'amount',operation:'sum',value:'123456789.123456789'}],sourceEvidence:{id:'query-proof'}}
+    const transport=vi.fn(async()=>page),client=createApplicationClient({appId:app,transport})
+    const result=await client.query('deal',{fields:['amount'],filters:[],sort:[],aggregate:[{field:'amount',operation:'sum'}],limit:10})
+    expect(result).toBe(page)
+    expect(result.records[0].ref.version).toBe('opaque/v1')
+    expect(result.nextCursor).toBe('opaque/page')
+    expect(result.aggregates?.[0].value).toBe('123456789.123456789')
+    expect(transport).toHaveBeenCalledTimes(1)
+  })
   it('K02 treats disconnected, malformed and cancelled writes after dispatch as uncertain; pre-abort sends nothing', async()=>{
     const abort=new AbortController(), fetch=vi.fn(async()=>{abort.abort();throw new Error('private')})
     const client=createApplicationClient({appId:app,transport:createFetchTransport({apiOrigin:origin,fetch,credential:async()=>oauth})})

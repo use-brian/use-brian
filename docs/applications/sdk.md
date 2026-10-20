@@ -49,7 +49,9 @@ Helpers map to `/api/applications/:appId`: `catalog`, `schemas/:type`,
 `records/:type/:id`, `records/:type/query`, `records/:type/:id/history`,
 `queries/:queryKey` (registered input), and `commands/:commandKey` (shared
 idempotency/version/input envelope). Query defaults/types are the shared wire
-contract. Schema governance uses explicit native-management `schemas` ports;
+contract. Query results retain the page envelope (`records`, optional `nextCursor`
+and aggregate entries with lossless string or null values), including all evidence.
+Schema governance uses explicit native-management `schemas` ports;
 absent ports fail `operation_not_available`. Application credentials never become
 native schema authority. No helper computes permission from a grant.
 

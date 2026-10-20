@@ -16,6 +16,11 @@ export interface ApplicationCatalog extends Pick<ApplicationModuleCatalog, 'vers
   operationSchemas: { queries: Record<string, unknown>; commands: Record<string, unknown> }
 }
 export interface ApplicationCallOptions { signal?: AbortSignal }
+export interface ApplicationQueryResult {
+  records: ApplicationRecordProjection[]
+  nextCursor?: string
+  aggregates?: Array<ApplicationQuery['aggregate'][number] & { value: string | null }>
+}
 export interface ApplicationSchemaPreviewInput {
   typeId: string; expectedVersion: number; properties: PropertyDef[]; assistantId?: string
 }
@@ -48,7 +53,7 @@ export function createApplicationClient(options: { appId: string; transport: App
     catalog: (call?: ApplicationCallOptions) => send<ApplicationCatalog>('GET', '/catalog', undefined, call),
     schema: (type: string, call?: ApplicationCallOptions) => send<ApplicationResourceDefinition>('GET', `/schemas/${segment(type)}`, undefined, call),
     get: <T = ApplicationRecordProjection>(type: string, id: string, call?: ApplicationCallOptions) => send<T>('GET', `/records/${segment(type)}/${segment(id)}`, undefined, call),
-    query: <T = ApplicationRecordProjection[]>(type: string, query: ApplicationQuery, call?: ApplicationCallOptions) => send<T>('POST', `/records/${segment(type)}/query`, query, call),
+    query: <T = ApplicationQueryResult>(type: string, query: ApplicationQuery, call?: ApplicationCallOptions) => send<T>('POST', `/records/${segment(type)}/query`, query, call),
     history: <T = ApplicationRecordProjection[]>(type: string, id: string, beforeVersion?: string, call?: ApplicationCallOptions) =>
       send<T>('GET', `/records/${segment(type)}/${segment(id)}/history${beforeVersion === undefined ? '' : `?beforeVersion=${encodeURIComponent(beforeVersion)}`}`, undefined, call),
     registeredQuery: <T = unknown>(key: string, input: ApplicationJson, call?: ApplicationCallOptions) => send<T>('POST', `/queries/${segment(key)}`, input, call),

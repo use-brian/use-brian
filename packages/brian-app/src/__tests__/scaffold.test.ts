@@ -44,12 +44,16 @@ console.log(JSON.stringify({nativeSchemaRoutes:true,reviewPreserved:true,applica
   for(const profile of ['native','connector'] as const){
     const directory=join(temporary,profile)
     run(process.execPath,[join(temporary,'node_modules/@use-brian/brian-app/bin/brian-app.js'),'scaffold','--profile',profile,directory])
+    if(profile==='native')writeFileSync(join(directory,'src/query-example.ts'),`import type {ApplicationClient,ApplicationQueryResult,ApplicationSchemaPorts} from '@use-brian/brian-app/application';
+export async function page(client:ApplicationClient):Promise<ApplicationQueryResult>{const result=await client.query('deal',{fields:['amount'],filters:[],sort:[],aggregate:[],limit:1});const amount:string|null|undefined=result.aggregates?.[0].value;const cursor:string|undefined=result.nextCursor;return {...result,records:result.records};}
+export function preview(schemas:ApplicationSchemaPorts){return schemas.preview({typeId:'00000000-0000-4000-8000-000000000001',expectedVersion:1,properties:[]});}`)
     run('npm',['run','build'],directory)
     const contractOutput=run('npm',['run','contract'],directory)
     ;(evidence.generated as Record<string,unknown>)[profile]={compiled:true,contractOutput,files:Object.fromEntries(Object.keys(scaffoldFiles(profile)).map(path=>[path,digest(join(directory,path))]))}
     if(profile==='native'){
       const cli=join(temporary,'node_modules/@use-brian/brian-app/bin/brian-app.js')
       const generated=(evidence.generated as Record<string,Record<string,unknown>>)[profile]
+      generated.typedConsumerSha256=digest(join(directory,'src/query-example.ts'))
       generated.lints=[run(process.execPath,[cli,directory]),run(process.execPath,[cli,'lint',directory])]
       // A real external type error must remain visible through packed canonical declarations.
       writeFileSync(join(directory,'src/invalid.ts'),`import type {ApplicationCommand} from '@use-brian/brian-app/application'; const command:ApplicationCommand={idempotencyKey:'x',expectedVersion:12,input:{}};`)
