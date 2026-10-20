@@ -13,7 +13,7 @@
  */
 
 import { describe, it, expect, vi } from 'vitest'
-import { bindScopeSource } from '../../security/source-evidence.js'
+import { bindScopeSource, boundScopeSources } from '../../security/source-evidence.js'
 import {
   runSkillUmbrellaPass,
   clusterByEmbedding,
@@ -222,7 +222,7 @@ describe('[COMP:consolidation/skill-umbrella] trigger gates', () => {
 
 describe('[COMP:consolidation/skill-umbrella] departmental model boundaries', () => {
   function department(skill: UmbrellaSkill, compartment: string): UmbrellaSkill {
-    return bindScopeSource(skill, {
+    return bindScopeSource({ ...skill }, {
       workspaceId: skill.workspaceId,
       userId: 'user-1',
       assistantId: 'assistant-1',
@@ -234,6 +234,48 @@ describe('[COMP:consolidation/skill-umbrella] departmental model boundaries', ()
       version: '1',
     })
   }
+
+  it('holds conflicting revision observations before embeddings without discarding either binding', async () => {
+    const skill = makeSkill({ rowId: 'conflicted' })
+    bindScopeSource(skill, { ...boundScopeSources(skill)[0], compartments: ['finance'] })
+    const getEmbeddings = vi.fn(async () => [])
+    const callModel = vi.fn(async () => '')
+    const result = await runSkillUmbrellaPass({
+      workspaceId: 'ws-1', workspaceCreatedAt: WS_CREATED,
+      store: makeStore({ async listCuratorEligible() { return [skill] } }),
+      digestStore: makeDigest(), getEmbeddings, callModel, minSkillCount: 1, now: () => NOW,
+    })
+    expect(getEmbeddings).not.toHaveBeenCalled()
+    expect(callModel).not.toHaveBeenCalled()
+    expect(result.actions).toContainEqual({
+      kind: 'skipped', reason: 'scope_source_changed', memberRowIds: ['conflicted'],
+    })
+    expect(boundScopeSources(skill)).toHaveLength(2)
+  })
+
+  it('passes every independent trusted ancestor to the canonical write guard', async () => {
+    const skills = ['one', 'two'].map((rowId) => {
+      const skill = department(makeSkill({ rowId, description: 'Shared reporting procedure' }), 'finance')
+      return bindScopeSource(skill, {
+        ...boundScopeSources(skill)[0], resourceKind: 'workspace_file',
+        resourceId: 'shared-source', version: '7', projectIds: ['project-a'],
+      })
+    })
+    const patchUmbrella = vi.fn<SkillUmbrellaStore['patchUmbrella']>(async () => {})
+    await runSkillUmbrellaPass({
+      workspaceId: 'ws-1', workspaceCreatedAt: WS_CREATED,
+      store: makeStore({ async listCuratorEligible() { return skills }, patchUmbrella }),
+      digestStore: makeDigest(), getEmbeddings: async (texts) => texts.map(() => vec('a')),
+      callModel: async () => JSON.stringify({
+        move: 'MERGE_INTO_EXISTING', target_skill_id: 'one', patched_content: 'Combined',
+        absorbed_member_ids: ['two'], rationale: 'Shared procedure',
+      }),
+      minSkillCount: 2, now: () => NOW,
+    })
+    expect(patchUmbrella).toHaveBeenCalledOnce()
+    const evidence = patchUmbrella.mock.calls[0][1].derivation
+    expect(evidence.sources).toEqual(skills.flatMap((skill) => boundScopeSources(skill)))
+  })
 
   it('does not combine small departments to reach the umbrella threshold', async () => {
     const skills = [
