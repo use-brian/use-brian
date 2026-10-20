@@ -13,7 +13,7 @@ import type {
 import { bindScopeSources, boundScopeSources, DEAL_STAGES, validApplicationDate, decodeCrmAmount, crmAmountSchema, maxSensitivity, unionScopeRequirements } from '@use-brian/core'
 import type pg from 'pg'
 import { z } from 'zod'
-import { queryLegacyCanonicalCrmBatch,readLegacyCanonicalCrmPoint } from './crm-reader.js'
+import { mapCanonicalCrmRows,queryLegacyCanonicalCrmSql,queryLegacyCanonicalCrmBatch,readLegacyCanonicalCrmPoint } from './crm-reader.js'
 import { currentApplicationReadTransaction,getApplicationTransactionBinding } from '../application-platform/execution-context.js'
 import { currentAgentAccess } from './agent-access-context.js'
 import { canonicalNativeAmountEncoding } from '../application-platform/field-evidence.js'
@@ -95,13 +95,25 @@ const VALID_STAGES: readonly DealStage[] = [
 const crmName = z.string().min(1).max(256).refine(value => value.trim().length > 0)
 const crmTags = z.array(z.string().max(100)).max(64)
 const crmExternalRef = z.record(applicationJsonSchema)
-export const crmCompanyPatch = z.object({ name: crmName.optional(),domain: z.string().max(320).nullable().optional(),
-  tags: crmTags.optional(),externalRef: crmExternalRef.optional(),customFields:z.record(applicationJsonSchema).optional() }).strict()
-const crmContactPatch = z.object({ name: crmName.optional(),email: z.string().max(320).nullable().optional(),
-  phone: z.string().max(100).nullable().optional(),companyId: z.string().uuid().nullable().optional(),
-  tags: crmTags.optional(),externalRef: crmExternalRef.optional(),customFields:z.record(applicationJsonSchema).optional() }).strict()
-const crmDealPatch = z.object({ contactId: z.string().uuid().nullable().optional(),companyId: z.string().uuid().nullable().optional(),
-  amount: crmAmountSchema.nullable().optional(),closeDate: z.date().nullable().optional(),externalRef: crmExternalRef.optional(),customFields:z.record(applicationJsonSchema).optional() }).strict()
+const crmCommonPatch = z.object({
+  aliases: z.array(z.string().min(1).max(200)).optional(),
+  tags: crmTags.optional(), externalRef: crmExternalRef.optional(),
+  ownerId: z.string().uuid().nullable().optional(), archivedAt: z.string().datetime({offset:true}).nullable().optional(),
+  customFields: z.record(applicationJsonSchema).optional(),
+})
+export const crmCompanyPatch = crmCommonPatch.extend({name: crmName.optional(),domain: z.string().max(320).nullable().optional()}).strict()
+export const crmContactPatch = crmCommonPatch.extend({name: crmName.optional(),email: z.string().max(320).nullable().optional(),
+  phone: z.string().max(100).nullable().optional(),companyId: z.string().uuid().nullable().optional()}).strict()
+export const crmDealPatch = crmCommonPatch.extend({name: crmName.optional(),stage:z.enum(DEAL_STAGES).optional(),
+  contactId:z.string().uuid().nullable().optional(),companyId:z.string().uuid().nullable().optional(),
+  amount:crmAmountSchema.nullable().optional(),closeDate:z.date().nullable().optional(),
+  pipelineId:z.string().uuid().nullable().optional(),pipelineStageId:z.string().uuid().nullable().optional(),
+  currencyCode:z.string().regex(/^[A-Z]{3}$/).nullable().optional(),source:z.string().max(100).nullable().optional(),
+  winLossReason:z.string().max(2000).nullable().optional(),probability:z.number().finite().min(0).max(100).nullable().optional(),
+}).strict()
+export type CanonicalCrmType = 'company'|'person'|'deal'
+export type CanonicalCrmPatch = CompanyUpdateFields|ContactUpdateFields|DealUpdateFields
+const canonicalCrmSchema = (type:CanonicalCrmType) => type==='company'?crmCompanyPatch:type==='person'?crmContactPatch:crmDealPatch
 function validateCrmBusiness(schema: z.ZodTypeAny,raw: unknown): void {
   if (!schema.safeParse(raw).success) throw new ApplicationPlatformError('invalid_value','The canonical CRM values are invalid.')
 }
@@ -405,36 +417,28 @@ export async function createCompany(
   },
   transaction?: CrmWriteTransaction,
 ): Promise<CompanyRecord> {
-  validateCrmCreation(crmCompanyPatch.required({name:true}),params,['mergeByName'])
+  validateCrmCreation(crmCompanyPatch.pick({name:true,domain:true,tags:true,externalRef:true,customFields:true}).required({name:true}),params,['mergeByName'])
   assertAuthorshipPresent('createCompany', userId)
-  if(params.customFields!==undefined && !transaction) return runCrmWriteTransaction(userId,tx=>createCompany(userId,params,tx))
   const access = dedupeAccessContext(userId, params.workspaceId, params.access)
+  const bound=currentApplicationReadTransaction(access)
+  if(bound&&transaction?.client!==bound.client)throw new ApplicationPlatformError('access_unavailable','The transaction is unavailable.')
+  if(!transaction)return runCrmWriteTransaction(userId,tx=>createCompany(userId,params,tx))
   assertExecutionResourceScope({ workspaceId: params.workspaceId, userId: null, assistantId: null,
     sensitivity: params.sensitivity ?? 'internal', compartments: params.compartments ?? [], projectIds: params.projectIds ?? [] }, 'mutation', access)
 
-  // Upsert-by-name: dedupe against a live company entity in the workspace
-  // — but only among rows the caller can read (see dedupeAccessContext).
-  const ap = buildAccessPredicate(
-    access,
-    { startIdx: 3, operation: 'mutation' },
-  )
-  const member = buildCurrentMemberSourcePredicate(userId, { alias: 'entities', startIdx: ap.nextIdx })
-  if (transaction) await transaction.client.query('SELECT pg_advisory_xact_lock(hashtextextended($1,0))', [JSON.stringify(['crm-company', params.workspaceId, params.name.toLowerCase()])])
-  const run = transaction ? transaction.client.query.bind(transaction.client) : <T extends pg.QueryResultRow>(sql: string, values: unknown[]) => queryWithRLS<T>(userId, sql, values)
-  const existing = await run<{ id: string }>(
-    `SELECT id FROM entities
-      WHERE workspace_id = $1 AND kind = 'company'
-        AND lower(display_name) = lower($2)
-        AND valid_to IS NULL AND retracted_at IS NULL AND NOT scope_held
-        AND ${ap.sql} AND ${member.sql}
-      ORDER BY created_at ASC LIMIT 1`,
-    [params.workspaceId, params.name, ...ap.params, ...member.params],
-  )
-  if (existing.rows[0] && params.mergeByName !== false) {
-    const merged = await mergeCompanyFields(userId, existing.rows[0].id, {
-      domain: params.domain ?? null, tags: params.tags, externalRef: params.externalRef,customFields:params.customFields,
-    }, { compartments: params.compartments ?? [], projectIds: params.projectIds ?? [], sensitivity: params.sensitivity ?? 'internal' }, access, transaction)
-    if (merged) return merged
+  // Consumed names and ordering fields are admitted before any comparison;
+  // the candidate evaluator sees captured values in this exact transaction.
+  if(params.mergeByName!==false) {
+    const ap=buildAccessPredicate(access,{startIdx:3,operation:'mutation'})
+    const member=buildCurrentMemberSourcePredicate(userId,{alias:'entities',startIdx:ap.nextIdx})
+    await transaction.client.query('SELECT pg_advisory_xact_lock(hashtextextended($1,0))',[JSON.stringify(['crm-company',params.workspaceId,params.name.toLowerCase()])])
+    const existing=await queryLegacyCanonicalCrmSql<{id:string}>(access,[{type:'company',fields:['name','createdAt']}],
+      `SELECT id FROM entities WHERE workspace_id=$1 AND kind='company' AND lower(display_name)=lower($2)
+        AND valid_to IS NULL AND retracted_at IS NULL AND NOT scope_held AND ${ap.sql} AND ${member.sql}
+        ORDER BY created_at ASC LIMIT 1`,[params.workspaceId,params.name,...ap.params,...member.params],transaction.client)
+    if(existing.rows[0])return mergeCompanyFields(userId,existing.rows[0].id,{
+      domain:params.domain??null,tags:params.tags,externalRef:params.externalRef,customFields:params.customFields,
+    },{compartments:params.compartments??[],projectIds:params.projectIds??[],sensitivity:params.sensitivity??'internal'},access,transaction)
   }
 
   const custom=params.customFields===undefined?{values:undefined,references:[] as EntityRecord[]}:
@@ -471,14 +475,14 @@ async function mergeCompanyFields(
   id: string,
   incoming: { domain?: string | null; tags?: string[]; externalRef?: CrmExternalRef; customFields?: Record<string,unknown> },
   scope: { compartments: string[]; projectIds: string[]; sensitivity?: Sensitivity },
-  access?: AccessContext,
-  transaction?: CrmWriteTransaction,
-): Promise<CompanyRecord | null> {
-  const entity = await updateEntity(userId, id, {}, access, transaction?.client)
-  if (!entity || entity.kind !== 'company') return null
-  assertExecutionResourceScope({ ...entity, compartments: entity.compartments ?? [], projectIds: entity.projectIds ?? [] }, 'mutation', access)
-  const cur = companyFromEntity(entity)
-  const sensitivity = maxSensitivity(entity.sensitivity, scope.sensitivity ?? 'public')
+  access: AccessContext,
+  transaction: CrmWriteTransaction,
+): Promise<CompanyRecord> {
+  const point=await readLegacyCanonicalCrmPoint(access,'company',id,legacyCompanyFields,transaction.client)
+  if(!point)throw new ApplicationPlatformError('access_unavailable','The company result is unavailable.')
+  assertExecutionResourceScope(point.scope,'mutation',access)
+  const cur=bindScopeSources({...legacyPointRecord(point),domain:z.string().nullable().parse(point.projection.values.domain),tags:legacyCrmTags.parse(point.projection.values.tags)},point.sources)
+  const sensitivity=maxSensitivity(point.scope.sensitivity,scope.sensitivity??'public')
   const fields: CompanyUpdateFields = {}
   if (incoming.domain && incoming.domain !== cur.domain) fields.domain = incoming.domain
   if (incoming.tags && incoming.tags.length > 0) {
@@ -491,8 +495,15 @@ async function mergeCompanyFields(
   if(incoming.customFields!==undefined) fields.customFields=incoming.customFields
   const scopeAdds = scope.compartments.some((value) => !cur.compartments?.includes(value))
     || scope.projectIds.some((value) => !cur.projectIds?.includes(value))
-  if (Object.keys(fields).length === 0 && !scopeAdds && sensitivity === entity.sensitivity) return cur
-  return updateCompany(userId, id, fields, access, transaction?.client, { ...scope, sensitivity })
+  if(Object.keys(fields).length===0&&!scopeAdds&&sensitivity===point.scope.sensitivity) {
+    const current=await readLegacyCanonicalCrmPoint(access,'company',id,legacyCompanyFields,transaction.client)
+    if(!current||current.projection.ref.version!==point.projection.ref.version)throw new ApplicationPlatformError('access_unavailable','The company source changed.')
+    assertExecutionResourceScope(current.scope,'mutation',access)
+    return bindScopeSources(cur,current.sources)
+  }
+  const result=await updateCompany(userId,id,fields,access,transaction.client,{...scope,sensitivity},{expectedVersion:point.projection.ref.version,afterCommit:transaction.afterCommit})
+  if(!result)throw new ApplicationPlatformError('access_unavailable','The company result is unavailable.')
+  return result
 }
 
 const legacyCompanyFields=['name','domain','aliases','tags','externalRef','createdAt','updatedAt'] as const
@@ -530,14 +541,14 @@ export async function listCompanies(ctx: AccessContext, filters: CompanyListFilt
   const limit = clampListLimit(filters.limit)
   values.push(limit)
 
-  const result = await queryGated<CompanyRow>(
-    ctx,
+  const result = await queryLegacyCanonicalCrmSql<CompanyRow>(
+    ctx,[{type:'company',fields:legacyCompanyFields}],
     `SELECT ${COMPANY_SELECT} FROM entities e
       WHERE ${wheres.join(' AND ')}
       ORDER BY e.updated_at DESC LIMIT $${idx}`,
     values,
   )
-  return result.rows.map(toCompanyRow)
+  return mapCanonicalCrmRows(result.rows,toCompanyRow)
 }
 
 /**
@@ -553,8 +564,8 @@ const companyPatchStateSchema=z.object({workspaceId:z.string().uuid(),id:z.strin
   compartments:z.array(z.string()),projectIds:z.array(z.string().uuid()),
 }).passthrough()}).strict()
 /** Metadata admission is shared by precise legacy editing and reference-only commands. */
-export async function authorizeCanonicalCompanyPatch(userId:string,id:string,fields:CompanyUpdateFields,client:pg.PoolClient,access?:AccessContext) {
-  validateCrmBusiness(crmCompanyPatch,fields)
+export async function authorizeCanonicalCrmPatch(userId:string,type:CanonicalCrmType,id:string,fields:CanonicalCrmPatch,client:pg.PoolClient,access?:AccessContext) {
+  validateCrmBusiness(canonicalCrmSchema(type),fields)
   const binding=getApplicationTransactionBinding(client),agent=currentAgentAccess()
   const workspace=access?.workspaceId??binding?.workspaceId??agent?.workspaceId
   const viewer=access??(workspace?dedupeAccessContext(userId,workspace):undefined)
@@ -564,7 +575,7 @@ export async function authorizeCanonicalCompanyPatch(userId:string,id:string,fie
   bound?.assertLive()
   if((await client.query<{actor:string}>("SELECT current_setting('app.current_user_id',true) AS actor")).rows[0]?.actor!==userId)throw new ApplicationPlatformError('access_unavailable','The actor is unavailable.')
   bound?.assertLive()
-  const raw=(await client.query<{value:unknown}>('SELECT application_company_patch_state($1,$2) AS value',[id,crmMutationFieldIntent(fields)])).rows[0]?.value
+  const raw=(await client.query<{value:unknown}>('SELECT application_crm_patch_state($1,$2,$3) AS value',[type,id,crmMutationFieldIntent(fields)])).rows[0]?.value
   bound?.assertLive()
   if(raw==null)return null
   const state=companyPatchStateSchema.parse(raw),actor=dedupeAccessContext(userId,state.workspaceId,viewer)
@@ -579,23 +590,31 @@ export async function authorizeCanonicalCompanyPatch(userId:string,id:string,fie
   if(checked.rows[0]?.admitted!==true)throw new ApplicationPlatformError('access_unavailable','The source is unavailable.')
   return state
 }
-/** One canonical company writer; no protected before/after DTO crosses this port. */
-export async function patchCanonicalCompanyFields(userId:string,id:string,fields:CompanyUpdateFields,client:pg.PoolClient,access?:AccessContext,
+/** One canonical CRM writer; no protected before/after DTO crosses this port. */
+export async function patchCanonicalCrmFields(userId:string,type:CanonicalCrmType,id:string,fields:CanonicalCrmPatch,client:pg.PoolClient,access?:AccessContext,
   operation?:CrmMutationOptions,scope?:{compartments:string[];projectIds:string[];sensitivity?:Sensitivity}) {
-  const before=await authorizeCanonicalCompanyPatch(userId,id,fields,client,access)
+  const before=await authorizeCanonicalCrmPatch(userId,type,id,fields,client,access)
   if(!before)return null
   let value:unknown
-  try{value=(await client.query<{value:unknown}>('SELECT application_patch_canonical_company($1,$2,$3,$4) AS value',[id,fields,operation?.expectedVersion??before.version,scope??null])).rows[0]?.value}
+  try{value=(await client.query<{value:unknown}>('SELECT application_patch_canonical_crm($1,$2,$3,$4,$5) AS value',[type,id,{...fields,...('closeDate' in fields&&fields.closeDate instanceof Date?{closeDate:fields.closeDate.toISOString().slice(0,10)}:{})},operation?.expectedVersion??before.version,scope??null])).rows[0]?.value}
   catch(error){
     const code=(error as {code?:string}).code
     if(['40001','40P01','23505'].includes(code??''))throw new ApplicationPlatformError('record_version_conflict','The canonical source version changed.')
     if(['22023','23514','22P02'].includes(code??''))throw new ApplicationPlatformError('invalid_value','The canonical CRM values are invalid.')
-    if(code==='42501')throw new ApplicationPlatformError('access_unavailable','The company is unavailable.')
+    if(code==='42501')throw new ApplicationPlatformError('access_unavailable','The record is unavailable.')
     throw error
   }
-  const ref=applicationResourceRefSchema.parse(value),after=await authorizeCanonicalCompanyPatch(userId,id,fields,client,access)
-  if(!after||ref.workspaceId!==after.workspaceId||ref.id!==id.toLowerCase()||ref.typeKey!=='company'||ref.origin.kind!=='native'||ref.origin.moduleKey!=='native'||ref.version!==after.version)throw new ApplicationPlatformError('access_unavailable','The source changed.')
+  const ref=applicationResourceRefSchema.parse(value),after=await authorizeCanonicalCrmPatch(userId,type,id,fields,client,access)
+  if(!after||ref.workspaceId!==after.workspaceId||ref.id!==id.toLowerCase()||ref.typeKey!==type||ref.origin.kind!=='native'||ref.origin.moduleKey!=='native'||ref.version!==after.version)throw new ApplicationPlatformError('access_unavailable','The source changed.')
   return ref
+}
+/** Backward-compatible company ports use the same canonical writer. */
+export function authorizeCanonicalCompanyPatch(userId:string,id:string,fields:CompanyUpdateFields,client:pg.PoolClient,access?:AccessContext) {
+  return authorizeCanonicalCrmPatch(userId,'company',id,fields,client,access)
+}
+export function patchCanonicalCompanyFields(userId:string,id:string,fields:CompanyUpdateFields,client:pg.PoolClient,access?:AccessContext,
+ operation?:CrmMutationOptions,scope?:{compartments:string[];projectIds:string[];sensitivity?:Sensitivity}) {
+ return patchCanonicalCrmFields(userId,'company',id,fields,client,access,operation,scope)
 }
 export async function updateCompany(
   userId:string,id:string,fields:CompanyUpdateFields,access?:AccessContext,transactionClient?:pg.PoolClient,
@@ -680,11 +699,13 @@ export async function createContact(
   entityLinks?: EntityLinksStore,
   transaction?: CrmWriteTransaction,
 ): Promise<ContactRecord> {
-  validateCrmCreation(crmContactPatch.required({name:true}),params,['stableIdentity'])
+  validateCrmCreation(crmContactPatch.pick({name:true,email:true,phone:true,companyId:true,tags:true,externalRef:true,customFields:true}).required({name:true}),params,['stableIdentity'])
   assertAuthorshipPresent('createContact', userId)
   const access = dedupeAccessContext(userId, params.workspaceId, params.access)
   assertExecutionResourceScope({ workspaceId: params.workspaceId, userId: null, assistantId: null,
     sensitivity: params.sensitivity ?? 'internal', compartments: params.compartments ?? [], projectIds: params.projectIds ?? [] }, 'mutation', access)
+  const bound=currentApplicationReadTransaction(access)
+  if(bound&&transaction?.client!==bound.client)throw new ApplicationPlatformError('access_unavailable','The transaction is unavailable.')
   if (!transaction) return runCrmWriteTransaction(userId, tx => createContact(userId, params, entityLinks, tx))
   const company = await readCrmReference(userId, params.workspaceId, params.companyId, 'company', access, transaction?.client)
   const destination = crmReferenceScope({ userId: null, assistantId: null,
@@ -703,7 +724,7 @@ export async function createContact(
       ? await resolveCrmPersonIdentity(params.workspaceId, params.stableIdentity, transaction.client)
       : await resolveCrmPersonIdentity(params.workspaceId, params.stableIdentity)
     if (resolution.status === 'conflict') {
-      const visible = await Promise.all(resolution.entityIds.map(id => updateEntity(userId, id, {}, access, transaction?.client)))
+      const visible = await Promise.all(resolution.entityIds.map(id => readLegacyCanonicalCrmPoint(access,'person',id,[],transaction.client)))
       if (visible.some(row => !row)) throw Object.assign(new Error('The identity cannot be used in the current scope.'), { code: 'scope_operation_denied' })
       throw new CrmPersonIdentityConflictError(resolution.entityIds)
     }
@@ -783,16 +804,18 @@ async function mergeContactFields(
     email?: string | null; phone?: string | null; companyId?: string | null
     tags?: string[]; externalRef?: CrmExternalRef; customFields?: Record<string,unknown>
   },
-  entityLinks?: EntityLinksStore,
-  access?: AccessContext,
-  scope: { compartments: string[]; projectIds: string[]; sensitivity?: Sensitivity } = { compartments: [], projectIds: [] },
-  transaction?: CrmWriteTransaction,
-): Promise<ContactRecord | null> {
-  const entity = await updateEntity(userId, id, {}, access, transaction?.client)
-  if (!entity || entity.kind !== 'person') return null
-  assertExecutionResourceScope({ ...entity, compartments: entity.compartments ?? [], projectIds: entity.projectIds ?? [] }, 'mutation', access)
-  const cur = contactFromEntity(entity)
-  const sensitivity = maxSensitivity(entity.sensitivity, scope.sensitivity ?? 'public')
+  entityLinks: EntityLinksStore | undefined,
+  access: AccessContext,
+  scope: { compartments: string[]; projectIds: string[]; sensitivity?: Sensitivity },
+  transaction: CrmWriteTransaction,
+): Promise<ContactRecord> {
+  const point=await readLegacyCanonicalCrmPoint(access,'person',id,legacyContactFields,transaction.client)
+  if(!point)throw Object.assign(new Error('The identity cannot be used in the current scope.'),{code:'scope_operation_denied'})
+  assertExecutionResourceScope(point.scope,'mutation',access)
+  const cur=bindScopeSources({...legacyPointRecord(point),email:z.string().nullable().parse(point.projection.values.email),
+    phone:z.string().nullable().parse(point.projection.values.phone),companyId:z.string().uuid().nullable().parse(point.projection.values.companyId),
+    tags:legacyCrmTags.parse(point.projection.values.tags)},point.sources)
+  const sensitivity=maxSensitivity(point.scope.sensitivity,scope.sensitivity??'public')
   const fields: ContactUpdateFields = {}
   if (incoming.email && incoming.email !== cur.email) fields.email = incoming.email
   if (incoming.phone && incoming.phone !== cur.phone) fields.phone = incoming.phone
@@ -807,8 +830,15 @@ async function mergeContactFields(
   if(incoming.customFields!==undefined) fields.customFields=incoming.customFields
   const scopeAdds = scope.compartments.some((value) => !cur.compartments?.includes(value))
     || scope.projectIds.some((value) => !cur.projectIds?.includes(value))
-  if (Object.keys(fields).length === 0 && !scopeAdds && sensitivity === entity.sensitivity) return cur
-  return updateContact(userId, id, fields, entityLinks, access, transaction?.client, { ...scope, sensitivity }, transaction?.afterCommit)
+  if(Object.keys(fields).length===0&&!scopeAdds&&sensitivity===point.scope.sensitivity) {
+    const current=await readLegacyCanonicalCrmPoint(access,'person',id,legacyContactFields,transaction.client)
+    if(!current||current.projection.ref.version!==point.projection.ref.version)throw new ApplicationPlatformError('access_unavailable','The contact source changed.')
+    assertExecutionResourceScope(current.scope,'mutation',access)
+    return bindScopeSources(cur,current.sources)
+  }
+  const result=await updateContact(userId,id,fields,entityLinks,access,transaction.client,{...scope,sensitivity},transaction.afterCommit,{expectedVersion:point.projection.ref.version})
+  if(!result)throw Object.assign(new Error('The identity cannot be used in the current scope.'),{code:'scope_operation_denied'})
+  return result
 }
 
 export async function getContactById(ctx: AccessContext, id: string): Promise<ContactRecord | null> {
@@ -850,65 +880,39 @@ export async function listContacts(ctx: AccessContext, filters: ContactListFilte
   const limit = clampListLimit(filters.limit)
   values.push(limit)
 
-  const result = await queryGated<ContactRow>(
-    ctx,
+  const result = await queryLegacyCanonicalCrmSql<ContactRow>(
+    ctx,[{type:'person',fields:[...legacyContactFields,'self']}],
     `SELECT ${CONTACT_SELECT} FROM entities e
       WHERE ${wheres.join(' AND ')}
       ORDER BY e.updated_at DESC LIMIT $${idx}`,
     values,
   )
-  return result.rows.map(toContactRow)
+  return mapCanonicalCrmRows(result.rows,toContactRow)
 }
 
 /** `access`: see `updateCompany` — write-path viewer projection. */
 export async function updateContact(
-  userId: string,
-  id: string,
-  fields: ContactUpdateFields,
-  entityLinks?: EntityLinksStore,
-  access?: AccessContext,
-  transactionClient?: pg.PoolClient,
-  scope?: { compartments: string[]; projectIds: string[]; sensitivity?: Sensitivity },
-  afterCommit?: CrmWriteTransaction['afterCommit'],
-  operation?: CrmMutationOptions,
-): Promise<ContactRecord | null> {
-  validateCrmBusiness(crmContactPatch,fields)
-  if (!transactionClient) return runCrmWriteTransaction(userId,tx => updateContact(userId,id,fields,entityLinks,access,tx.client,scope,tx.afterCommit,operation))
-  const fieldIntent = crmMutationFieldIntent(fields)
-  await assertNativeEntityFieldWrites(userId,id,{},transactionClient,fieldIntent)
-  const old=await typedMutationSource(userId,id,'person',access,transactionClient)
-  if (!old) return null
-  const custom=await combinedCrmCustomValues(userId,id,fields.customFields,dedupeAccessContext(userId,old.workspaceId,access),transactionClient)
-  if(fields.customFields!==undefined && !custom) return null
-  const company = await readCrmReference(userId, old.workspaceId, fields.companyId, 'company', access, transactionClient)
-  const inherited = crmReferenceScope(old, [company,...(custom?.references??[])], scope)
-  const a = { ...old.attributes }
-  if (fields.email !== undefined) { if (fields.email) a.email = fields.email; else delete a.email }
-  if (fields.phone !== undefined) { if (fields.phone) a.phone = fields.phone; else delete a.phone }
-  if (fields.companyId !== undefined) { if (fields.companyId) a.company_id = fields.companyId; else delete a.company_id }
-  if (fields.tags !== undefined) a.tags = fields.tags
-  if (fields.externalRef !== undefined) a.external_ref = fields.externalRef
-  if(custom) a.custom_fields=custom.values
-
-  const e = await updateEntity(userId, id, {
-    displayName: fields.name,
-    canonicalId: fields.email !== undefined ? (fields.email ?? null) : undefined,
-    attributes: a,
-    sensitivity: inherited.sensitivity,
-    inheritCompartments: inherited.compartments,
-    inheritProjectIds: inherited.projectIds,
-  }, dedupeAccessContext(userId, old.workspaceId, access), transactionClient,{...operation,fieldIntent})
-  if (!e) return null
-  if (fields.companyId !== undefined) {
-    const project = () => repointGraphEdge(entityLinks, userId, {
-      sourceEntityId: id, targetEntityId: fields.companyId ?? null,
-      edgeType: 'works_at', workspaceId: old.workspaceId,
-      compartments: e.compartments, projectIds: e.projectIds, assistantId: e.assistantId,
-    })
-    if (afterCommit) afterCommit(project)
-    else project()
-  }
-  return contactFromEntity(e)
+ userId:string,id:string,fields:ContactUpdateFields,entityLinks?:EntityLinksStore,access?:AccessContext,
+ transactionClient?:pg.PoolClient,scope?:{compartments:string[];projectIds:string[];sensitivity?:Sensitivity},
+ afterCommit?:CrmWriteTransaction['afterCommit'],operation?:CrmMutationOptions,
+):Promise<ContactRecord|null> {
+ validateCrmBusiness(crmContactPatch,fields)
+ if(!transactionClient)return runCrmWriteTransaction(userId,tx=>updateContact(userId,id,fields,entityLinks,access,tx.client,scope,tx.afterCommit,operation))
+ const before=await authorizeCanonicalCrmPatch(userId,'person',id,fields,transactionClient,access)
+ if(!before)return null
+ const actor=dedupeAccessContext(userId,before.workspaceId,access)
+ if(!await readLegacyCanonicalCrmPoint(actor,'person',id,legacyContactFields,transactionClient))throw new ApplicationPlatformError('access_unavailable','The contact result is unavailable.')
+ const ref=await patchCanonicalCrmFields(userId,'person',id,fields,transactionClient,actor,operation,scope)
+ if(!ref)return null
+ const point=await readLegacyCanonicalCrmPoint(actor,'person',id,legacyContactFields,transactionClient)
+ if(!point||point.projection.ref.version!==ref.version)throw new ApplicationPlatformError('access_unavailable','The source changed.')
+ const record=bindScopeSources({...legacyPointRecord(point),email:z.string().nullable().parse(point.projection.values.email),
+  phone:z.string().nullable().parse(point.projection.values.phone),companyId:z.string().uuid().nullable().parse(point.projection.values.companyId),
+  tags:legacyCrmTags.parse(point.projection.values.tags)},point.sources)
+ if(fields.companyId!==undefined){const effect=()=>repointGraphEdge(entityLinks,userId,{sourceEntityId:id,targetEntityId:fields.companyId??null,
+  edgeType:'works_at',workspaceId:before.workspaceId,compartments:record.compartments,projectIds:record.projectIds})
+  if(afterCommit)afterCommit(effect);else effect()}
+ return record
 }
 
 // ── Deals ────────────────────────────────────────────────────────────
@@ -981,7 +985,7 @@ export async function createDeal(
 ): Promise<DealRecord> {
   assertValidStage(params.stage)
   assertNonNegativeAmount(params.amount)
-  validateCrmCreation(crmDealPatch.extend({stage:z.enum(['lead','qualified','proposal','negotiation','won','lost']).optional()}),params)
+  validateCrmCreation(crmDealPatch.pick({contactId:true,companyId:true,stage:true,amount:true,closeDate:true,externalRef:true,customFields:true}),params)
   assertAuthorshipPresent('createDeal', userId)
   const access = mutationActorAccess(userId, params.workspaceId, params.access)
   if (!transaction) return runCrmWriteTransaction(userId, tx => createDeal(userId, params, entityLinks, tx))
@@ -1040,6 +1044,9 @@ const legacyDealFields = ['name','aliases','contactId','companyId','stage','amou
 export async function getDealById(ctx: AccessContext, id: string): Promise<DealRecord | null> {
   const point = await readLegacyCanonicalCrmPoint(ctx, 'deal', id, legacyDealFields)
   if (!point) return null
+  return dealFromLegacyPoint(point)
+}
+function dealFromLegacyPoint(point:NonNullable<Awaited<ReturnType<typeof readLegacyCanonicalCrmPoint>>>):DealRecord {
   const values = z.object({contactId:z.string().uuid().nullable(),companyId:z.string().uuid().nullable(),
     stage:z.enum(DEAL_STAGES).nullable(),amount:z.string().nullable(),closeDate:z.string().nullable()}).parse(point.projection.values)
   const encoding = canonicalNativeAmountEncoding(point.projection)
@@ -1078,122 +1085,57 @@ export async function listDeals(ctx: AccessContext, filters: DealListFilters): P
   const limit = clampListLimit(filters.limit)
   values.push(limit)
 
-  const result = await queryGated<DealRow>(
-    ctx,
+  const result = await queryLegacyCanonicalCrmSql<DealRow>(
+    ctx,[{type:'deal',fields:legacyDealFields}],
     `SELECT ${DEAL_SELECT} FROM entities e
       WHERE ${wheres.join(' AND ')}
       ORDER BY e.updated_at DESC LIMIT $${idx}`,
     values,
   )
-  return result.rows.map(toDealRow)
+  return mapCanonicalCrmRows(result.rows,toDealRow)
 }
 
 /** `access`: see `updateCompany` — write-path viewer projection. */
 export async function updateDeal(
-  userId: string,
-  id: string,
-  fields: DealUpdateFields,
-  entityLinks?: EntityLinksStore,
-  access?: AccessContext,
-  transactionClient?: pg.PoolClient,
-  scope?: { compartments: string[]; projectIds: string[]; sensitivity?: Sensitivity },
-  operation?: CrmMutationOptions,
-): Promise<DealRecord | null> {
-  assertNonNegativeAmount(fields.amount)
-  validateCrmBusiness(crmDealPatch,fields)
-  if (!transactionClient) return runCrmWriteTransaction(userId,tx => updateDeal(userId,id,fields,entityLinks,access,tx.client,scope,{...operation,afterCommit:tx.afterCommit}))
-  const fieldIntent = crmMutationFieldIntent(fields)
-  await assertNativeEntityFieldWrites(userId,id,{},transactionClient,fieldIntent)
-  const old=await typedMutationSource(userId,id,'deal',access,transactionClient)
-  if (!old) return null
-  const custom=await combinedCrmCustomValues(userId,id,fields.customFields,dedupeAccessContext(userId,old.workspaceId,access),transactionClient)
-  if(fields.customFields!==undefined && !custom) return null
-  const company = await readCrmReference(userId, old.workspaceId, fields.companyId, 'company', access, transactionClient)
-  const contact = await readCrmReference(userId, old.workspaceId, fields.contactId, 'person', access, transactionClient)
-  const inherited = crmReferenceScope(old, [company, contact,...(custom?.references??[])], scope)
-
-  const a = { ...old.attributes }
-  if (fields.contactId !== undefined) { if (fields.contactId) a.contact_id = fields.contactId; else delete a.contact_id }
-  if (fields.companyId !== undefined) { if (fields.companyId) a.company_id = fields.companyId; else delete a.company_id }
-  if (fields.amount !== undefined) { if (fields.amount != null) a.amount = fields.amount; else delete a.amount }
-  if (fields.closeDate !== undefined) {
-    if (fields.closeDate) a.close_date = fields.closeDate.toISOString().slice(0, 10); else delete a.close_date
-  }
-  if (fields.externalRef !== undefined) a.external_ref = fields.externalRef
-  if(custom) a.custom_fields=custom.values
-
-  const e = await updateEntity(
-    userId,
-    id,
-    {
-      attributes: a,
-      sensitivity: inherited.sensitivity,
-      inheritCompartments: inherited.compartments,
-      inheritProjectIds: inherited.projectIds,
-    },
-    dedupeAccessContext(userId, old.workspaceId, access),
-    transactionClient,
-    {...operation,fieldIntent},
-  )
-  if (!e) return null
-
-  const project=() => {
-  if (fields.companyId !== undefined) {
-    repointGraphEdge(entityLinks, userId, {
-      sourceEntityId: id, targetEntityId: fields.companyId ?? null,
-      edgeType: 'engagement_of', workspaceId: old.workspaceId,
-      compartments: e.compartments, projectIds: e.projectIds, assistantId: e.assistantId,
-    })
-  }
-  if (entityLinks && fields.contactId !== undefined && fields.contactId) {
-    // represents is inbound (contact → deal); append a fresh edge (the
-    // FK truth lives in attributes, so the edge is graph-only).
-    void emitEdgeFireAndForget(entityLinks, userId, {
-      sourceKind: 'entity', sourceId: fields.contactId,
-      targetKind: 'entity', targetId: id,
-      edgeType: 'represents', workspaceId: old.workspaceId, source: 'user', userId,
-      compartments: e.compartments, projectIds: e.projectIds, assistantId: e.assistantId,
-    })
-  }
-  }
-  if (operation?.afterCommit) operation.afterCommit(project)
-  else project()
-  return dealFromEntity(e)
+ userId:string,id:string,fields:DealUpdateFields,entityLinks?:EntityLinksStore,access?:AccessContext,
+ transactionClient?:pg.PoolClient,scope?:{compartments:string[];projectIds:string[];sensitivity?:Sensitivity},operation?:CrmMutationOptions,
+):Promise<DealRecord|null> {
+ assertNonNegativeAmount(fields.amount);validateCrmBusiness(crmDealPatch.omit({stage:true}),fields)
+ if(!transactionClient)return runCrmWriteTransaction(userId,tx=>updateDeal(userId,id,fields,entityLinks,access,tx.client,scope,{...operation,afterCommit:tx.afterCommit}))
+ const before=await authorizeCanonicalCrmPatch(userId,'deal',id,fields,transactionClient,access)
+ if(!before)return null
+ const actor=dedupeAccessContext(userId,before.workspaceId,access)
+ if(!await readLegacyCanonicalCrmPoint(actor,'deal',id,legacyDealFields,transactionClient))throw new ApplicationPlatformError('access_unavailable','The deal result is unavailable.')
+ const ref=await patchCanonicalCrmFields(userId,'deal',id,fields,transactionClient,actor,operation,scope)
+ if(!ref)return null
+ const point=await readLegacyCanonicalCrmPoint(actor,'deal',id,legacyDealFields,transactionClient)
+ if(!point||point.projection.ref.version!==ref.version)throw new ApplicationPlatformError('access_unavailable','The source changed.')
+ const record=dealFromLegacyPoint(point)
+ const effect=()=>{
+  if(fields.companyId!==undefined)repointGraphEdge(entityLinks,userId,{sourceEntityId:id,targetEntityId:fields.companyId??null,
+   edgeType:'engagement_of',workspaceId:before.workspaceId,compartments:record.compartments,projectIds:record.projectIds})
+  if(entityLinks&&fields.contactId)void emitEdgeFireAndForget(entityLinks,userId,{sourceKind:'entity',sourceId:fields.contactId,targetKind:'entity',targetId:id,
+   edgeType:'represents',workspaceId:before.workspaceId,source:'user',userId,compartments:record.compartments,projectIds:record.projectIds})
+ }
+ if(operation?.afterCommit)operation.afterCommit(effect);else effect()
+ return record
 }
 
-/** `access`: see `updateCompany` — write-path viewer projection. */
-export async function setDealStage(
-  userId: string,
-  id: string,
-  stage: DealStage,
-  access?: AccessContext,
-  transactionClient?: pg.PoolClient,
-  scope?: { compartments: string[]; projectIds: string[]; sensitivity?: Sensitivity },
-  operation?: CrmMutationOptions,
-): Promise<DealRecord | null> {
-  assertValidStage(stage)
-  if (stage===undefined) throw new ApplicationPlatformError('invalid_value','A canonical deal stage is required.')
-  if (!transactionClient) return runCrmWriteTransaction(userId,tx => setDealStage(userId,id,stage,access,tx.client,scope,operation))
-  const fieldIntent = ['stage']
-  await assertNativeEntityFieldWrites(userId,id,{},transactionClient,fieldIntent)
-  const old=await typedMutationSource(userId,id,'deal',access,transactionClient)
-  if (!old) return null
-  const a = { ...old.attributes, stage }
-  const e = await updateEntity(
-    userId,
-    id,
-    {
-      attributes: a,
-      sensitivity: scope?.sensitivity === undefined ? undefined : maxSensitivity(old.sensitivity, scope.sensitivity),
-      inheritCompartments: scope?.compartments,
-      inheritProjectIds: scope?.projectIds,
-    },
-    dedupeAccessContext(userId, old.workspaceId, access),
-    transactionClient,
-    {...operation,fieldIntent},
-  )
-  if (!e) return null
-  return dealFromEntity(e)
+/** Legacy stage changes compose the same canonical typed deal command. */
+export async function setDealStage(userId:string,id:string,stage:DealStage,access?:AccessContext,transactionClient?:pg.PoolClient,
+ scope?:{compartments:string[];projectIds:string[];sensitivity?:Sensitivity},operation?:CrmMutationOptions):Promise<DealRecord|null> {
+ assertValidStage(stage)
+ if(stage===undefined)throw new ApplicationPlatformError('invalid_value','A canonical deal stage is required.')
+ if(!transactionClient)return runCrmWriteTransaction(userId,tx=>setDealStage(userId,id,stage,access,tx.client,scope,operation))
+ const before=await authorizeCanonicalCrmPatch(userId,'deal',id,{stage},transactionClient,access)
+ if(!before)return null
+ const actor=dedupeAccessContext(userId,before.workspaceId,access)
+ if(!await readLegacyCanonicalCrmPoint(actor,'deal',id,legacyDealFields,transactionClient))throw new ApplicationPlatformError('access_unavailable','The deal result is unavailable.')
+ const ref=await patchCanonicalCrmFields(userId,'deal',id,{stage},transactionClient,actor,operation,scope)
+ if(!ref)return null
+ const point=await readLegacyCanonicalCrmPoint(actor,'deal',id,legacyDealFields,transactionClient)
+ if(!point||point.projection.ref.version!==ref.version)throw new ApplicationPlatformError('access_unavailable','The source changed.')
+ return dealFromLegacyPoint(point)
 }
 
 // ── Relation label resolution (Phase 1 — Notion-feel) ────────────────

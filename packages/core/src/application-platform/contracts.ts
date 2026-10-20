@@ -59,6 +59,9 @@ export function validateApplicationResourceCatalog(moduleKey: string, raw: reado
       return [property.data]
     })
     validateDocApplicationSchema(cells)
+    if (resource.origin.kind === 'native' && (resource.fields.some(field => field.unique === true) || cells.some(property => property.unique === true))) {
+      throw new ApplicationPlatformError('invalid_schema', 'Canonical native schemas do not support declared unique fields.')
+    }
     if (resource.origin.kind === 'native' && resource.origin.moduleKey !== moduleKey) {
       throw new ApplicationPlatformError('invalid_schema', 'A native resource must name its owning module.')
     }

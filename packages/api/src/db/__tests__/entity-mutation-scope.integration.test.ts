@@ -26,7 +26,7 @@ const { assertLocalFixture } = await import(new URL('../../../../../scripts/crm/
 await assertLocalFixture()
 const pool = getPool()
 
-async function fixture() {
+async function fixture(canonicalCrm = false) {
   const workspaceId = randomUUID(), userId = randomUUID(), assistantId = randomUUID(), projectId = randomUUID()
   await pool.query('INSERT INTO users(id,auth_provider_id) VALUES($1::uuid,$1::text)', [userId])
   await pool.query("INSERT INTO workspaces(id,name,owner_user_id,department_read_v2) VALUES($1,'Entity mutation fixture',$2,false)", [workspaceId, userId])
@@ -42,7 +42,7 @@ async function fixture() {
   const key = team.compartmentKey!
   const params: EntityCreateParams = { kind: 'person', displayName: 'Fictional person', workspaceId,
     userId: null, assistantId: null, createdByUserId: userId, source: 'user',
-    aliases: ['fixture-alias'], attributes: { role: 'Coordinator' }, sensitivity: 'internal',
+    aliases: ['fixture-alias'], attributes: canonicalCrm ? {} : { role: 'Coordinator' }, sensitivity: 'internal',
     compartments: [key], projectIds: [projectId] }
   const entity = await createEntity(params)
   const access: AccessContext = { workspaceId, userId, assistantId, assistantKind: 'primary',
@@ -55,8 +55,8 @@ async function fixture() {
   return { workspaceId, userId, member, groups, team, assistantId, projectId, key, params, entity, access, execution, stored }
 }
 
-async function customFixture() {
-  const f=await fixture(),ctx={...f.access,mutationCompartments:null}
+async function customFixture(canonicalCrm = false) {
+  const f=await fixture(canonicalCrm),ctx={...f.access,mutationCompartments:null}
   const deal=await createDeal(f.userId,{workspaceId:f.workspaceId})
   await pool.query(`INSERT INTO crm_field_definitions(workspace_id,entity_kind,field_key,label,field_type,options)
     VALUES($1,'deal','related_record','Related record','entity_reference','["person","company","deal"]'),
@@ -65,11 +65,26 @@ async function customFixture() {
   return {...f,ctx,deal,stored}
 }
 
-async function stageFixture() {
-  const f=await customFixture(),pipelineId=randomUUID(),stageId=randomUUID()
+async function stageFixture(canonicalCrm = false) {
+  const f=await customFixture(canonicalCrm),pipelineId=randomUUID(),stageId=randomUUID()
   await pool.query("INSERT INTO crm_pipelines(id,workspace_id,name) VALUES($1,$2,'Fixture pipeline')",[pipelineId,f.workspaceId])
   await pool.query("INSERT INTO crm_pipeline_stages(id,workspace_id,pipeline_id,name,category,position) VALUES($1,$2,$3,'Approved','won',0)",[stageId,f.workspaceId,pipelineId])
   return {...f,pipelineId,stageId}
+}
+
+
+async function linkAdmittedParticipantFixture(
+  f: Awaited<ReturnType<typeof fixture>>, dealId: string, contactIds: string[], role: string | null = null,
+) {
+  const client=await getAppPool().connect()
+  try {
+    await client.query('BEGIN');await applyRLSGucs(client,f.userId)
+    for(const contactId of contactIds) await client.query(
+      'INSERT INTO crm_deal_contacts(workspace_id,deal_id,contact_id,role,created_by) VALUES($1,$2,$3,$4,$5)',
+      [f.workspaceId,dealId,contactId,role,f.userId],
+    )
+    await client.query('COMMIT')
+  } finally {await client.query('ROLLBACK');client.release()}
 }
 
 async function semanticSource(
@@ -98,12 +113,12 @@ describe('[COMP:api/entity-mutation-scope] canonical entity writers', () => {
     if(restriction==='department') await pool.query('UPDATE entities SET compartments=$2 WHERE id=$1',[f.deal.id,[f.key]])
     if(restriction==='clearance') await pool.query("UPDATE entities SET sensitivity='confidential' WHERE id=$1",[f.deal.id])
     expect(await appendCrmActivity({userId:f.member,workspaceId:f.workspaceId,access,entityId:target,activityType:'note',summary:'Refused',sourceKind:'fixture',sourceId:'once'})).toBeNull()
-    expect(await listCrmTimeline({ctx:access,entityId:target})).toBeNull()
+    await expect(listCrmTimeline({ctx:access,entityId:target})).rejects.toMatchObject({code:'access_unavailable'})
     expect((await pool.query('SELECT summary FROM crm_activities WHERE workspace_id=$1',[f.workspaceId])).rows).toEqual([{summary:'Protected history'}])
   })
 
   it('allows activity reads through read reach but requires mutation reach for appending',async()=>{
-    const f=await fixture(),input={userId:f.userId,workspaceId:f.workspaceId,entityId:f.entity.id,activityType:'note' as const,summary:'Authorized history'}
+    const f=await fixture(true),input={userId:f.userId,workspaceId:f.workspaceId,entityId:f.entity.id,activityType:'note' as const,summary:'Authorized history'}
     await expect(appendCrmActivity({...input,access:f.access})).rejects.toMatchObject({code:'scope_operation_denied'})
     const row=await appendCrmActivity({...input,access:{...f.access,mutationCompartments:[f.key]}})
     expect(await listCrmTimeline({ctx:f.access,entityId:f.entity.id})).toEqual([row])
@@ -129,13 +144,13 @@ describe('[COMP:api/entity-mutation-scope] canonical entity writers', () => {
     await pool.query('DELETE FROM workspace_members WHERE workspace_id=$1 AND user_id=$2',[f.workspaceId,f.member])
     try {
       expect(await appendCrmActivity({userId:f.member,workspaceId:f.workspaceId,entityId:f.deal.id,activityType:'note',summary:'Refused'},client)).toBeNull()
-      expect(await listCrmTimeline({ctx:{...f.ctx,userId:f.member},entityId:f.deal.id})).toBeNull()
+      await expect(listCrmTimeline({ctx:{...f.ctx,userId:f.member},entityId:f.deal.id})).rejects.toMatchObject({code:'access_unavailable'})
       expect((await pool.query('SELECT id FROM crm_activities WHERE workspace_id=$1',[f.workspaceId])).rows).toEqual([])
     } finally {client.release()}
   })
 
   it('excludes held source history from stage-velocity aggregates',async()=>{
-    const f=await stageFixture()
+    const f=await stageFixture(true)
     for(const occurredAt of [new Date('2026-01-01T00:00:00Z'),new Date('2026-01-03T00:00:00Z')]) await appendCrmActivity({userId:f.userId,workspaceId:f.workspaceId,entityId:f.deal.id,activityType:'stage_change',occurredAt,metadata:{toStageId:f.stageId}})
     const before=await getCrmReport(f.ctx)
     expect(before.stageVelocityDays.find(row=>row.stageId===f.stageId)).toMatchObject({samples:1,medianDays:2})
@@ -430,36 +445,58 @@ describe('[COMP:api/entity-mutation-scope] canonical entity writers', () => {
   })
 
   it('projects only live authorized participants from legacy broader deal relationships',async()=>{
-    const f=await fixture(),ctx={...f.access,userId:f.member,compartments:[],mutationCompartments:[],projectIds:[]}
+    const f=await fixture(true),ctx={...f.access,userId:f.member,compartments:[],mutationCompartments:[],projectIds:[]}
     const deal=await createDeal(f.userId,{workspaceId:f.workspaceId})
     const visible=await createContact(f.userId,{workspaceId:f.workspaceId,name:'Visible participant',email:'visible@example.test'})
-    const candidates=[visible.id]
+    const candidates=[visible.id],restrictions:Array<{id:string;boundary:string}>=[]
     for(const boundary of ['department','held','private','clearance','retired','retracted','self']) {
-      const contact=await createEntity({...f.params,displayName:'Hidden participant',canonicalId:'hidden@example.test',attributes:boundary==='self'?{self:true}:{},projectIds:[],
-        compartments:boundary==='department'?[f.key]:[],userId:boundary==='self'?f.member:boundary==='private'?f.userId:null,sensitivity:boundary==='clearance'?'confidential':'internal'})
-      if(boundary==='held') await pool.query('UPDATE entities SET scope_held=true WHERE id=$1',[contact.id])
-      if(boundary==='retired') await pool.query('UPDATE entities SET valid_to=now() WHERE id=$1',[contact.id])
-      if(boundary==='retracted') await pool.query('UPDATE entities SET retracted_at=now() WHERE id=$1',[contact.id])
-      candidates.push(contact.id)
+      const contact=await createEntity({...f.params,displayName:'Hidden participant',canonicalId:'hidden@example.test',attributes:{},projectIds:[],
+        compartments:[],userId:null,sensitivity:'internal'})
+      candidates.push(contact.id);restrictions.push({id:contact.id,boundary})
     }
-    for(const contactId of candidates) await pool.query('INSERT INTO crm_deal_contacts(workspace_id,deal_id,contact_id,role,created_by) VALUES($1,$2,$3,$4,$5)',[f.workspaceId,deal.id,contactId,'Member',f.userId])
-    expect(await listCrmDealParticipants(ctx,deal.id)).toEqual([{contactId:visible.id,role:'Member',isPrimary:false,name:'Visible participant',email:'visible@example.test'}])
+    await linkAdmittedParticipantFixture(f,deal.id,candidates,'Member')
+    const control=await createDeal(f.userId,{workspaceId:f.workspaceId})
+    await linkAdmittedParticipantFixture(f,control.id,[visible.id],'Member')
+    const expectedVisible=[{contactId:visible.id,role:'Member',isPrimary:false,name:'Visible participant',email:'visible@example.test'}]
+    expect(await listCrmDealParticipants(ctx,control.id)).toEqual(expectedVisible)
+    for(const {id,boundary} of restrictions) {
+      if(boundary==='department') await pool.query('UPDATE entities SET compartments=$2 WHERE id=$1',[id,[f.key]])
+      if(boundary==='held') await pool.query('UPDATE entities SET scope_held=true WHERE id=$1',[id])
+      if(boundary==='private') await pool.query('UPDATE entities SET user_id=$2 WHERE id=$1',[id,f.userId])
+      if(boundary==='clearance') await pool.query("UPDATE entities SET sensitivity='confidential' WHERE id=$1",[id])
+      if(boundary==='retired') await pool.query('UPDATE entities SET valid_to=now() WHERE id=$1',[id])
+      if(boundary==='retracted') await pool.query('UPDATE entities SET retracted_at=now() WHERE id=$1',[id])
+      if(boundary==='self') await pool.query("UPDATE entities SET user_id=$2,attributes=jsonb_build_object('self',true) WHERE id=$1",[id,f.member])
+    }
+    const beforeRefusal=(await pool.query('SELECT deal_id,contact_id,role,is_primary FROM crm_deal_contacts WHERE workspace_id=$1 ORDER BY deal_id,contact_id',[f.workspaceId])).rows
+    await expect(listCrmDealParticipants(ctx,deal.id)).rejects.toMatchObject({code:'access_unavailable'})
+    expect((await pool.query('SELECT deal_id,contact_id,role,is_primary FROM crm_deal_contacts WHERE workspace_id=$1 ORDER BY deal_id,contact_id',[f.workspaceId])).rows).toEqual(beforeRefusal)
+    expect(await listCrmDealParticipants(ctx,control.id)).toEqual(expectedVisible)
     await pool.query('UPDATE entities SET compartments=$2 WHERE id=$1',[deal.id,[f.key]])
-    expect(await listCrmDealParticipants(ctx,deal.id)).toBeNull()
+    await expect(listCrmDealParticipants(ctx,deal.id)).rejects.toMatchObject({code:'access_unavailable'})
     await pool.query('UPDATE entities SET compartments=$2,scope_held=true WHERE id=$1',[deal.id,[]])
-    expect(await listCrmDealParticipants(ctx,deal.id)).toBeNull()
+    await expect(listCrmDealParticipants(ctx,deal.id)).rejects.toMatchObject({code:'access_unavailable'})
   })
 
   it('rechecks participant member reach instead of trusting a stale broad read context',async()=>{
-    const f=await fixture(),ctx={...f.access,userId:f.member,mutationCompartments:null}
+    const f=await fixture(true),ctx={...f.access,userId:f.member,mutationCompartments:null}
     await f.groups.addMember(f.userId,f.team.id,f.member)
-    const contact=await createContact(f.userId,{workspaceId:f.workspaceId,name:'Scoped participant',compartments:[f.key]})
+    await pool.query('INSERT INTO workspace_project_members(project_id,user_id) VALUES($1,$2)',[f.projectId,f.member])
+    const contact=await createContact(f.userId,{workspaceId:f.workspaceId,name:'Scoped participant'})
     const deal=await createDeal(f.userId,{workspaceId:f.workspaceId})
-    // A legacy general deal may reference a restricted person without inherited labels.
-    await pool.query('INSERT INTO crm_deal_contacts(workspace_id,deal_id,contact_id,created_by) VALUES($1,$2,$3,$4)',[f.workspaceId,deal.id,contact.id,f.userId])
+    await linkAdmittedParticipantFixture(f,deal.id,[contact.id])
+    // The General relationship predates this contact-scope contraction.
+    await pool.query('UPDATE entities SET compartments=$2 WHERE id=$1',[contact.id,[f.key]])
     expect(await listCrmDealParticipants(ctx,deal.id)).toHaveLength(1)
+    const visible=await createContact(f.userId,{workspaceId:f.workspaceId,name:'Current General participant'})
+    const control=await createDeal(f.userId,{workspaceId:f.workspaceId})
+    await linkAdmittedParticipantFixture(f,control.id,[visible.id])
     await f.groups.removeMember(f.userId,f.team.id,f.member)
-    expect(await listCrmDealParticipants(ctx,deal.id)).toEqual([])
+    const beforeRefusal=(await pool.query('SELECT deal_id,contact_id,role,is_primary FROM crm_deal_contacts WHERE workspace_id=$1 ORDER BY deal_id,contact_id',[f.workspaceId])).rows
+    await expect(listCrmDealParticipants(ctx,deal.id)).rejects.toMatchObject({code:'access_unavailable'})
+    expect((await pool.query('SELECT deal_id,contact_id,role,is_primary FROM crm_deal_contacts WHERE workspace_id=$1 ORDER BY deal_id,contact_id',[f.workspaceId])).rows).toEqual(beforeRefusal)
+    expect(await listCrmDealParticipants({...ctx,compartments:[],mutationCompartments:[],projectIds:[]},control.id))
+      .toEqual([{contactId:visible.id,role:null,isPrimary:false,name:'Current General participant',email:null}])
   })
 
   it.each(['department','held','private','foreign','clearance','read-only'] as const)('refuses %s secondary participant mutations without altering the deal',async boundary=>{
@@ -673,7 +710,7 @@ describe('[COMP:api/entity-mutation-scope] canonical entity writers', () => {
   })
 
   it.each(['missing','department','held','private','foreign'] as const)('refuses a %s relationship without editing the source',async boundary=>{
-    const f=await fixture(),client=await pool.connect()
+    const f=await fixture(),client=await getAppPool().connect()
     const contact=await createEntity({...f.params,compartments:[],projectIds:[]})
     let targetId: string=randomUUID()
     if(boundary!=='missing') {
@@ -684,7 +721,9 @@ describe('[COMP:api/entity-mutation-scope] canonical entity writers', () => {
     }
     try {
       await client.query('BEGIN')
-      await expect(updateContact(f.member,contact.id,{phone:'555-0199',companyId:targetId},undefined,undefined,client)).rejects.toMatchObject({code:'scope_operation_denied'})
+      await applyRLSGucs(client,f.member)
+      // The unmapped source attribute holds the full DTO before target validation.
+      await expect(updateContact(f.member,contact.id,{phone:'555-0199',companyId:targetId},undefined,undefined,client)).rejects.toMatchObject({code:'access_unavailable'})
       await client.query('COMMIT')
     } finally {await client.query('ROLLBACK');client.release()}
     expect((await pool.query('SELECT attributes,compartments FROM entities WHERE id=$1',[contact.id])).rows).toEqual([{attributes:{role:'Coordinator'},compartments:[]}])
@@ -694,6 +733,7 @@ describe('[COMP:api/entity-mutation-scope] canonical entity writers', () => {
     const f=await fixture()
     await f.groups.addMember(f.userId,f.team.id,f.member)
     await pool.query("UPDATE workspace_members SET clearance='confidential' WHERE workspace_id=$1 AND user_id=$2",[f.workspaceId,f.member])
+    await pool.query('INSERT INTO workspace_project_members(project_id,user_id) VALUES($1,$2)',[f.projectId,f.member])
     const company=await createCompany(f.userId,{workspaceId:f.workspaceId,name:'Reference fixture',sensitivity:'confidential',compartments:[f.key],projectIds:[f.projectId]})
     const contact=await createContact(f.member,{workspaceId:f.workspaceId,name:'Related person',companyId:company.id})
     expect(contact).toMatchObject({companyId:company.id,sensitivity:'confidential',compartments:[f.key],projectIds:[f.projectId]})
@@ -722,31 +762,42 @@ describe('[COMP:api/entity-mutation-scope] canonical entity writers', () => {
   })
 
   it('admits uncommitted references on the supplied transaction and rejects wrong visible kinds',async()=>{
-    const f=await fixture(),client=await pool.connect()
+    const f=await fixture(true),client=await getAppPool().connect()
     try {
       await client.query('BEGIN')
+      await applyRLSGucs(client,f.userId)
       const company=await createCompany(f.userId,{workspaceId:f.workspaceId,name:'Uncommitted company'}, {client,afterCommit:()=>{}})
       const deal=await createDeal(f.userId,{workspaceId:f.workspaceId,companyId:company.id},undefined,{client,afterCommit:()=>{}})
       expect(deal.name).toBe('Deal - Uncommitted company')
       await expect(createDeal(f.userId,{workspaceId:f.workspaceId,contactId:company.id},undefined,{client,afterCommit:()=>{}})).rejects.toThrow('non-self CRM person')
-      await expect(updateContact(f.userId,f.entity.id,{companyId:f.entity.id},undefined,undefined,client)).rejects.toThrow('CRM company')
-      await client.query('ROLLBACK')
-    } finally {client.release()}
+      const person=await createContact(f.userId,{workspaceId:f.workspaceId,name:'Uncommitted person'},undefined,{client,afterCommit:()=>{}})
+      await expect(updateContact(f.userId,person.id,{companyId:person.id},undefined,undefined,client)).rejects.toMatchObject({code:'access_unavailable'})
+    } finally {await client.query('ROLLBACK');client.release()}
     expect((await pool.query("SELECT count(*)::int AS count FROM entities WHERE workspace_id=$1 AND kind='deal'",[f.workspaceId])).rows).toEqual([{count:0}])
+    expect((await pool.query("SELECT id FROM entities WHERE workspace_id=$1 AND display_name='Uncommitted person'",[f.workspaceId])).rows).toEqual([])
   })
 
   it.each(['department','held','private','clearance'] as const)('does not reuse a %s company through owner-pool deduplication',async boundary=>{
-    const f=await fixture(),client=await pool.connect()
+    const f=await fixture(),ownerClient=await pool.connect(),client=await getAppPool().connect()
     if(boundary!=='department') await f.groups.addMember(f.userId,f.team.id,f.member)
     const hidden=await createEntity({...f.params,kind:'company',displayName:'Company fixture',userId:boundary==='private'?f.userId:null,sensitivity:boundary==='clearance'?'confidential':'internal'})
     if(boundary==='held') await pool.query('UPDATE entities SET scope_held=true WHERE id=$1',[hidden.id])
     try {
+      await ownerClient.query('BEGIN')
+      await applyRLSGucs(ownerClient,f.member)
+      await expect(createCompany(f.member,{workspaceId:f.workspaceId,name:'Company fixture'}, {client:ownerClient,afterCommit:()=>{}})).rejects.toMatchObject({code:'access_unavailable'})
+      await ownerClient.query('ROLLBACK')
+      expect((await pool.query("SELECT id FROM entities WHERE workspace_id=$1 AND kind='company'",[f.workspaceId])).rows).toEqual([{id:hidden.id}])
       await client.query('BEGIN')
+      await applyRLSGucs(client,f.member)
       const result=await createCompany(f.member,{workspaceId:f.workspaceId,name:'Company fixture'}, {client,afterCommit:()=>{}})
       expect(result.id).not.toBe(hidden.id)
       expect(result).toMatchObject({sensitivity:'internal',compartments:[]})
       await client.query('COMMIT')
-    } finally {await client.query('ROLLBACK');client.release()}
+    } finally {
+      await ownerClient.query('ROLLBACK');await client.query('ROLLBACK')
+      ownerClient.release();client.release()
+    }
     expect((await pool.query('SELECT attributes,valid_to FROM entities WHERE id=$1',[hidden.id])).rows).toEqual([{attributes:{role:'Coordinator'},valid_to:null}])
   })
 
@@ -824,31 +875,27 @@ describe('[COMP:api/entity-mutation-scope] canonical entity writers', () => {
       displayName: 'Typed fixture', attributes: { stage: 'lead', phone: '555-0100', amount: 10 } })
     // Canonical full-DTO reads require actual Project membership too; the
     // explicit projectIds array is a ceiling and never a grant.
-    if(kind==='company')await pool.query('INSERT INTO workspace_project_members(project_id,user_id) VALUES($1,$2)',[f.projectId,f.member])
-    const client = await (kind==='company'?getAppPool():pool).connect()
+    await pool.query('INSERT INTO workspace_project_members(project_id,user_id) VALUES($1,$2)',[f.projectId,f.member])
+    const client = await getAppPool().connect()
     const explicit = { ...f.access, userId: f.member, mutationCompartments: [f.key] }
     const edit = async(access?: AccessContext) => {
-      if(kind==='company'){
-        await client.query('BEGIN');await applyRLSGucs(client,f.member)
-        try{const result=await updateCompany(f.member,record.id,{name:'Revised'},access,client);await client.query('COMMIT');return result}
-        finally{await client.query('ROLLBACK')}
-      }
-      return kind === 'contact' ? updateContact(f.member, record.id, { phone: '555-0101' }, undefined, access, client)
-        : kind === 'deal' ? updateDeal(f.member, record.id, { amount: 20 }, undefined, access, client)
-        : setDealStage(f.member, record.id, 'won', access, client)
+      await client.query('BEGIN');await applyRLSGucs(client,f.member)
+      try {
+        const result=kind === 'company' ? await updateCompany(f.member,record.id,{name:'Revised'},access,client)
+          : kind === 'contact' ? await updateContact(f.member, record.id, { phone: '555-0101' }, undefined, access, client)
+          : kind === 'deal' ? await updateDeal(f.member, record.id, { amount: 20 }, undefined, access, client)
+          : await setDealStage(f.member, record.id, 'won', access, client)
+        await client.query('COMMIT');return result
+      } finally {await client.query('ROLLBACK')}
     }
     try {
-      if(kind!=='company')await client.query('BEGIN')
       expect(await edit()).toBeNull()
       expect(await edit(explicit)).toBeNull()
       expect(await runWithAgentAccess({ ...f.execution([f.key]), userId: f.member }, () => edit())).toBeNull()
-      if(kind!=='company')await client.query('COMMIT')
       await f.groups.addMember(f.userId, f.team.id, f.member)
-      if(kind!=='company')await client.query('BEGIN')
       const changed = await edit(explicit)
       expect(changed).not.toBeNull()
       expect(changed).toMatchObject(kind === 'company' ? { name: 'Revised' } : kind === 'contact' ? { phone: '555-0101' } : kind === 'deal' ? { amount: 20 } : { stage: 'won' })
-      if(kind!=='company')await client.query('COMMIT')
       if(kind==='company'){
         const before=(await pool.query('SELECT scope_version FROM entities WHERE id=$1',[record.id])).rows[0].scope_version
         await pool.query('DELETE FROM workspace_project_members WHERE project_id=$1 AND user_id=$2',[f.projectId,f.member])
@@ -865,7 +912,9 @@ describe('[COMP:api/entity-mutation-scope] canonical entity writers', () => {
       await pool.query('UPDATE entities SET user_id=NULL WHERE id=$1', [record.id])
       await pool.query('DELETE FROM workspace_group_members WHERE group_id=$1 AND user_id=$2', [f.team.id, f.member])
       expect(await edit(explicit)).toBeNull()
-      await expect(edit(f.access)).rejects.toMatchObject({ code: 'scope_operation_denied' })
+      const beforeSubstitution=(await pool.query('SELECT attributes,scope_version FROM entities WHERE id=$1',[record.id])).rows
+      await expect(edit(f.access)).rejects.toMatchObject({ code: kind==='company'?'scope_operation_denied':'access_unavailable' })
+      expect((await pool.query('SELECT attributes,scope_version FROM entities WHERE id=$1',[record.id])).rows).toEqual(beforeSubstitution)
     } finally { await client.query('ROLLBACK'); client.release() }
   })
 

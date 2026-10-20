@@ -1,38 +1,34 @@
+import { readCurrentScopeSources } from './derived-scope-store.js'
+import { captureLegacyCanonicalTaskCandidates,LEGACY_TASK_FULL_FIELDS } from './task-reader.js'
 import { isDeepStrictEqual } from 'node:util'
 import { z } from 'zod'
-import { ApplicationPlatformError, applicationJsonSchema } from '@use-brian/shared'
+import { ApplicationPlatformError, applicationJsonSchema, applicationResourceRefSchema } from '@use-brian/shared'
 import { admitTaskCreate } from '../workspace-access/task-create-admission.js'
-import { applyResponsibilityPatch, bindScopeSource, executorChanged, maxSensitivity, unionScopeRequirements, TASK_STATUSES } from '@use-brian/core'
+import { applyResponsibilityPatch, boundScopeSources, bindScopeSource, executorChanged, maxSensitivity, unionScopeRequirements, TASK_STATUSES } from '@use-brian/core'
 import type { AccessContext, EntityLinksStore, Sensitivity, TaskHome, TaskListFilters, TaskListRow, TaskRecord, TaskRecordStatus, TaskResponsibility, TaskUpdateFields, TaskWriteActor, TaskStore, TaskAssignmentProvenance } from '@use-brian/core'
 import type pg from 'pg'
 import { assertExecutionResourceScope, buildAccessPredicate } from './access-predicate.js'
 import { assertAuthorshipPresent } from './authorship-guard.js'
-import { applyRLSGucs, getAppPool, query, queryGated, queryWithRLS, rollbackAndRelease } from './client.js'
+import { applyRLSGucs, getAppPool, query, queryWithRLS, rollbackAndRelease } from './client.js'
 import { emitDependsOnEdges, emitMentionedEdges } from './edge-hooks.js'
 import { abandonGoalsForHostTaskSystem } from './goals.js'
-import { repointTaskExecutions } from './task-execution-store.js'
 import { currentAgentAccess } from './agent-access-context.js'
 import { publishTaskLifecycle } from '../task-event-fanout.js'
 import { validateTaskResponsibility } from '../tasks/responsibility.js'
 import { getApplicationTransactionBinding } from '../application-platform/execution-context.js'
+import { listLegacyCanonicalTasks,readLegacyCanonicalTask,readLegacyCanonicalTaskHistory,listLegacyCanonicalRecordingTasks } from './task-reader.js'
 
 const RESPONSIBILITY_SELECT = `executor_assistant_id AS "executorAssistantId", follow_up_member_id AS "followUpMemberId",
   home_kind AS "homeKind", home_id AS "homeId"`
 
 const FULL_SELECT = `
-  id, workspace_id as "workspaceId", title, status,
+  id, logical_id AS "logicalId", workspace_id as "workspaceId", title, status,
   assignee_id as "assigneeId", ${RESPONSIBILITY_SELECT}, due, tags,
   parent_id as "parentId", external_ref as "externalRef", attributes,
   sensitivity, compartments, project_ids as "projectIds", user_id AS "userId", assistant_id AS "assistantId", scope_version::text AS "scopeVersion",
   created_at as "createdAt", updated_at as "updatedAt"
 `
 
-const COMPACT_SELECT = `
-  id, workspace_id as "workspaceId", title, status,
-  assignee_id as "assigneeId", ${RESPONSIBILITY_SELECT}, due, tags,
-  parent_id as "parentId", attributes, sensitivity, compartments,
-  project_ids as "projectIds", user_id AS "userId", assistant_id AS "assistantId", scope_version::text AS "scopeVersion", updated_at as "updatedAt"
-`
 
 type ResponsibilityRow = {
   executorAssistantId: string | null
@@ -45,6 +41,7 @@ const homeOf = (row: Pick<ResponsibilityRow, 'homeKind' | 'homeId'>): TaskHome |
   row.homeKind && row.homeId ? { kind: row.homeKind, id: row.homeId } : null
 
 type TaskRow = ResponsibilityRow & {
+  logicalId: string
   id: string
   workspaceId: string
   title: string
@@ -65,24 +62,6 @@ type TaskRow = ResponsibilityRow & {
   updatedAt: Date
 }
 
-type CompactRow = ResponsibilityRow & {
-  id: string
-  workspaceId: string
-  title: string
-  status: TaskRecordStatus
-  assigneeId: string | null
-  due: Date | null
-  tags: string[]
-  parentId: string | null
-  attributes: Record<string, unknown>
-  sensitivity: Sensitivity
-  compartments: string[]
-  projectIds: string[]
-  userId:string|null
-  assistantId:string|null
-  scopeVersion:string
-  updatedAt: Date
-}
 
 function bindTaskSource<T extends object>(value:T,row:Pick<TaskRow,'id'|'workspaceId'|'userId'|'assistantId'|'scopeVersion'|'sensitivity'|'compartments'|'projectIds'>):T {
   return bindScopeSource(value,{resourceKind:'task',resourceId:row.id,workspaceId:row.workspaceId,
@@ -109,6 +88,7 @@ function checkTaskCreate(userId:string,params:Parameters<typeof createTask>[1]):
 function toRecord(row: TaskRow): TaskRecord {
   return bindTaskSource({
     id: row.id,
+    logicalId: row.logicalId,
     workspaceId: row.workspaceId,
     title: row.title,
     status: row.status,
@@ -129,26 +109,6 @@ function toRecord(row: TaskRow): TaskRecord {
   },row)
 }
 
-function toListRow(row: CompactRow): TaskListRow {
-  return bindTaskSource({
-    id: row.id,
-    workspaceId: row.workspaceId,
-    title: row.title,
-    status: row.status,
-    assigneeId: row.assigneeId,
-    executorAssistantId: row.executorAssistantId,
-    followUpMemberId: row.followUpMemberId,
-    home: homeOf(row),
-    due: row.due,
-    tags: row.tags,
-    parentId: row.parentId,
-    attributes: row.attributes ?? {},
-    sensitivity: row.sensitivity,
-    compartments: row.compartments ?? [],
-    projectIds: row.projectIds ?? [],
-    updatedAt: row.updatedAt,
-  },row)
-}
 
 /**
  * Idempotency window for task creation. A retry or double-fire of the same
@@ -222,9 +182,10 @@ async function findTaskDuplicateInTransaction(userId: string, coords: Parameters
   await checkTaskProject(userId,coords,client)
   // Relationship writes are not represented by the row, so never swallow them.
   if (coords.title === PLACEHOLDER_TASK_TITLE||coords.dependsOn?.length||coords.linkedEntityIds?.length) return null
+  const captured=await captureLegacyCanonicalTaskCandidates(access,[...LEGACY_TASK_FULL_FIELDS,'createdByUserId','createdByAssistantId','source','sourceSessionId','sourceEpisodeId','sourceStartMs'],client)
   const ap=buildAccessPredicate(access,{startIdx:24,operation:'mutation'})
-  const result = await client.query<TaskRow>(
-    `SELECT ${FULL_SELECT} FROM tasks
+  const result = await client.query<{id:string}>(
+    `SELECT id FROM tasks
       WHERE workspace_id=$1 AND title=$2 AND status=$3 AND parent_id IS NOT DISTINCT FROM $4
         AND valid_to IS NULL AND retracted_at IS NULL AND NOT scope_held
         AND created_at > now() - ($5 || ' seconds')::interval
@@ -237,7 +198,7 @@ async function findTaskDuplicateInTransaction(userId: string, coords: Parameters
         AND tags=$13::text[] AND attributes=$14::jsonb AND external_ref=$15::jsonb
         AND created_by_user_id=$16 AND created_by_assistant_id IS NOT DISTINCT FROM $17::uuid
         AND source=$18 AND jsonb_build_array(source_session_id,source_episode_id,source_start_ms)=$19::jsonb
-        AND ${ap.sql}
+        AND ${ap.sql} AND id=ANY($${ap.nextIdx}::uuid[])
         AND context_scope_allows_current_principal(workspace_id,sensitivity,compartments,project_ids)
         AND EXISTS(SELECT 1 FROM workspace_members wm WHERE wm.workspace_id=tasks.workspace_id
           AND wm.user_id=$16 AND sensitivity_rank(tasks.sensitivity)<=sensitivity_rank(wm.clearance))
@@ -250,8 +211,10 @@ async function findTaskDuplicateInTransaction(userId: string, coords: Parameters
       coords.tags??[],JSON.stringify(coords.attributes??{}),JSON.stringify(coords.externalRef??{}),
       userId,coords.createdByAssistantId??null,coords.source??'user',
       JSON.stringify([coords.sourceSessionId??null,coords.sourceEpisodeId??null,coords.sourceStartMs??null]),
-      coords.executorAssistantId??null,coords.followUpMemberId??null,coords.home?.kind??null,coords.home?.id??null,...ap.params])
-  return result.rows[0] ? toRecord(result.rows[0]) : null
+      coords.executorAssistantId??null,coords.followUpMemberId??null,coords.home?.kind??null,coords.home?.id??null,...ap.params,captured.map(candidate=>candidate.id)])
+  const duplicate=result.rows[0]?await getTaskById(access,result.rows[0].id,client):null
+  if((await readCurrentScopeSources(client,coords.workspaceId,boundScopeSources(captured))).some(source=>source.state!=='current'))throw new ApplicationPlatformError('access_unavailable','The duplicate source changed.')
+  return duplicate
 }
 
 /**
@@ -343,6 +306,12 @@ export async function createTask(
   // Other universal columns (sensitivity, source, valid_from) take
   // their schema defaults from migration 128.
   assertAuthorshipPresent('createTask', userId)
+  const creationKeys=Object.keys(canonicalTaskPatchSchema.shape)
+  const metadataKeys=['workspaceId','expectedPolicyRevision','sensitivity','visibility','access','compartments','projectIds','source','sourceSessionId','sourceEpisodeId','sourceStartMs','createdByAssistantId','linkedEntityIds','writtenBy']
+  if(Object.keys(params).some(key=>!creationKeys.includes(key)&&!metadataKeys.includes(key))
+    ||!canonicalTaskPatchSchema.required({title:true}).safeParse(Object.fromEntries(creationKeys.map(key=>[key,(params as unknown as Record<string,unknown>)[key]]))).success) {
+    throw new ApplicationPlatformError('invalid_value','The canonical task creation values are invalid.')
+  }
   const client = transactionClient ?? await getAppPool().connect()
   let task: TaskRecord
   try {
@@ -464,103 +433,15 @@ export async function createTask(
 }
 
 export async function getTaskById(ctx: AccessContext, id: string, transactionClient?: pg.PoolClient): Promise<TaskRecord | null> {
-  // Universal access projection (WU-4.2b) + `valid_to IS NULL` to hide
-  // superseded versions. History via `getTaskHistory`.
-  const ap = buildAccessPredicate(ctx, { startIdx: 1 })
-  const sql = `SELECT ${FULL_SELECT} FROM tasks
-     WHERE ${ap.sql}
-       AND id = $${ap.nextIdx} AND valid_to IS NULL AND retracted_at IS NULL AND NOT scope_held`
-  const result = transactionClient
-    ? await transactionClient.query<TaskRow>(sql,[...ap.params,id])
-    : await queryWithRLS<TaskRow>(ctx.userId,sql,[...ap.params,id])
-  if (result.rows.length === 0) return null
-  return toRecord(result.rows[0])
+  return readLegacyCanonicalTask(ctx,id,transactionClient)
 }
 
 export async function listTasks(ctx: AccessContext, filters: TaskListFilters): Promise<TaskListRow[]> {
-  // `valid_to IS NULL` filter hides superseded versions. Index
-  // `idx_tasks_valid` (migration 128) covers this predicate.
-  const ap = buildAccessPredicate(ctx, { startIdx: 1 })
-  const wheres: string[] = [ap.sql, 'valid_to IS NULL', 'retracted_at IS NULL', 'NOT scope_held']
-  const values: unknown[] = [...ap.params]
-  let idx = ap.nextIdx
-
-  if (filters.assigneeId) {
-    wheres.push(`assignee_id = $${idx}`)
-    values.push(filters.assigneeId)
-    idx++
-  }
-  if (filters.executorAssistantId) {
-    wheres.push(`executor_assistant_id = $${idx}`)
-    values.push(filters.executorAssistantId)
-    idx++
-  }
-  if (filters.followUpMemberId) {
-    wheres.push(`follow_up_member_id = $${idx}`)
-    values.push(filters.followUpMemberId)
-    idx++
-  }
-  if (filters.status) {
-    if (Array.isArray(filters.status)) {
-      wheres.push(`status = ANY($${idx})`)
-      values.push(filters.status)
-    } else {
-      wheres.push(`status = $${idx}`)
-      values.push(filters.status)
-    }
-    idx++
-  } else if (!filters.includeArchived) {
-    wheres.push(`status <> 'archived'`)
-  }
-  if (filters.dueBefore) {
-    wheres.push(`due IS NOT NULL AND due < $${idx}`)
-    values.push(filters.dueBefore)
-    idx++
-  }
-  if (filters.dueAfter) {
-    wheres.push(`due IS NOT NULL AND due > $${idx}`)
-    values.push(filters.dueAfter)
-    idx++
-  }
-  if (filters.tag) {
-    wheres.push(`$${idx} = ANY(tags)`)
-    values.push(filters.tag)
-    idx++
-  }
-  if (filters.projectId !== undefined) {
-    if (filters.projectId === null) {
-      wheres.push('cardinality(project_ids) = 0')
-    } else {
-      wheres.push(`project_ids = ARRAY[$${idx}::uuid]`)
-      values.push(filters.projectId)
-      idx++
-    }
-  }
-  if (filters.parentId) {
-    wheres.push(`parent_id = $${idx}`)
-    values.push(filters.parentId)
-    idx++
-  }
-
-  // DB-layer clamp is 500 for the Tasks operator surface's flat browse
-  // (`GET /api/brain/tasks`); the model-facing `listTasks` tool keeps its
-  // own zod clamp at 100 so chat payloads stay small (tasks.md → "Operator
-  // surface").
-  const limit = Math.min(Math.max(filters.limit ?? 25, 1), 500)
-  values.push(limit)
-
-  const result = await queryGated<CompactRow>(
-    ctx,
-    `SELECT ${COMPACT_SELECT} FROM tasks
-     WHERE ${wheres.join(' AND ')}
-     ORDER BY updated_at DESC
-     LIMIT $${idx}`,
-    values,
-  )
-  return result.rows.map(toListRow)
+  return listLegacyCanonicalTasks(ctx,filters)
 }
 
 type OldTaskRow = {
+  logical_id: string
   scope_version: string
   workspace_id: string
   title: string
@@ -576,12 +457,6 @@ type OldTaskRow = {
   project_ids: string[]
   user_id: string | null
   assistant_id: string | null
-  source: string
-  source_episode_id: string | null
-  source_session_id: string | null
-  created_by_assistant_id: string | null
-  /** Migration 334 — carried through supersession, see the INSERT below. */
-  source_start_ms: number | null
   /** Migration 753 — responsibility, carried through supersession. */
   executor_assistant_id: string | null
   follow_up_member_id: string | null
@@ -656,21 +531,8 @@ const LIVE_TASK_ID_CTE = `WITH RECURSIVE chain AS (
  * anchor for days, while every edit rotates the live id, so their task gate
  * must compare resolved heads rather than raw ids.
  */
-export async function resolveTaskById(
-  ctx: AccessContext,
-  id: string,
-  transactionClient?: pg.PoolClient,
-): Promise<TaskRecord | null> {
-  const ap = buildAccessPredicate(ctx, { startIdx: 2 })
-  const sql = `${LIVE_TASK_ID_CTE}
-     SELECT ${FULL_SELECT} FROM tasks
-      WHERE ${ap.sql}
-        AND id = (SELECT id FROM chain WHERE valid_to IS NULL LIMIT 1)
-        AND retracted_at IS NULL AND NOT scope_held`
-  const result = transactionClient
-    ? await transactionClient.query<TaskRow>(sql,[id,...ap.params])
-    : await queryWithRLS<TaskRow>(ctx.userId,sql,[id,...ap.params])
-  return result.rows.length === 0 ? null : toRecord(result.rows[0])
+export async function resolveTaskById(ctx:AccessContext,id:string,transactionClient?:pg.PoolClient):Promise<TaskRecord|null> {
+  return readLegacyCanonicalTask(ctx,id,transactionClient,true)
 }
 
 type ExecutorChangeHook = (task: TaskRecord, previous: TaskResponsibility, actorUserId: string, assignment?: TaskAssignmentProvenance) => void
@@ -732,7 +594,7 @@ export interface CanonicalTaskWriteTransaction {
   afterCommit(effect: () => void): void
 }
 const canonicalTaskPatchSchema = z.object({
-  title: z.string().min(1).max(1024).refine(value => value.trim().length > 0).optional(),
+  title: z.string().min(1).max(512).refine(value => value.trim().length > 0).optional(),
   status: z.enum(TASK_STATUSES).optional(),
   assigneeId: z.string().uuid().nullable().optional(), executorAssistantId: z.string().uuid().nullable().optional(),
   followUpMemberId: z.string().uuid().nullable().optional(),
@@ -741,6 +603,37 @@ const canonicalTaskPatchSchema = z.object({
   parentId: z.string().uuid().nullable().optional(), externalRef: z.record(applicationJsonSchema).optional(),
   attributes: z.record(applicationJsonSchema).optional(), dependsOn: z.array(z.string().uuid()).optional(),
 }).strict()
+/** Metadata admission for native commands; no before-image crosses this port. */
+export async function authorizeCanonicalTaskPatch(userId:string,workspaceId:string,id:string,fields:TaskUpdateFields,client:pg.PoolClient,access?:AccessContext) {
+ if(!canonicalTaskPatchSchema.safeParse(fields).success)throw new ApplicationPlatformError('invalid_value','The task patch is invalid.')
+ const actor=taskAccess(userId,workspaceId,access)
+ const current=(await client.query<{value:unknown}>('SELECT application_task_patch_state($1,$2,$3) AS value',[workspaceId,id,Object.keys(fields).filter(key=>key!=='dependsOn')])).rows[0]?.value
+ if(current==null)return null
+ const state=z.object({workspaceId:z.string().uuid(),id:z.string().uuid(),physicalId:z.string().uuid(),version:z.string().regex(/^[1-9]\d*$/),
+  scope:z.object({workspaceId:z.string().uuid(),userId:z.string().uuid().nullable(),assistantId:z.string().uuid().nullable(),sensitivity:z.enum(['public','internal','confidential']),
+   compartments:z.array(z.string()),projectIds:z.array(z.string().uuid())}).passthrough()}).parse(current)
+ if(state.workspaceId!==workspaceId)throw new ApplicationPlatformError('access_unavailable','The task is unavailable.')
+ assertExecutionResourceScope(state.scope,'mutation',actor)
+ return state
+}
+export async function patchCanonicalTaskFields(userId:string,workspaceId:string,id:string,fields:TaskUpdateFields,client:pg.PoolClient,access?:AccessContext,
+ operation?:{expectedVersion?:string;scope?:import('@use-brian/core').TaskWriteScope}) {
+ const before=await authorizeCanonicalTaskPatch(userId,workspaceId,id,fields,client,access)
+ if(!before)return null
+ let value:unknown
+ try{value=(await client.query<{value:unknown}>('SELECT application_patch_canonical_task($1,$2,$3,$4,$5) AS value',[workspaceId,id,fields,operation?.expectedVersion??before.version,operation?.scope??null])).rows[0]?.value}
+ catch(error){const code=(error as {code?:string}).code
+  if(['40001','40P01','23505'].includes(code??''))throw new ApplicationPlatformError('record_version_conflict','The task changed. Refresh before retrying.')
+  if(['22023','23514','22P02'].includes(code??''))throw new ApplicationPlatformError('invalid_value','The task values are invalid.')
+  if(code==='42501')throw new ApplicationPlatformError('access_unavailable','The task is unavailable.')
+  throw error
+ }
+ const parsed=applicationResourceRefSchema.extend({physicalId:z.string().uuid()}).parse(value)
+ const {physicalId,...ref}=parsed
+ const after=await authorizeCanonicalTaskPatch(userId,workspaceId,physicalId,fields,client,access)
+ if(!after||after.id!==ref.id||after.version!==ref.version)throw new ApplicationPlatformError('access_unavailable','The task changed.')
+ return {ref,physicalId}
+}
 export async function updateTask(
   userId: string,
   id: string,
@@ -786,10 +679,9 @@ export async function updateTask(
         AND (effective_member_team_compartments(current_setting('app.current_user_id')::uuid,workspace_id) IS NULL
           OR compartments <@ effective_member_team_compartments(current_setting('app.current_user_id')::uuid,workspace_id))`
       if(readOnly){
-        const current=await client.query<TaskRow>(`SELECT ${FULL_SELECT} FROM tasks
-          WHERE id=$1 AND valid_to IS NULL AND retracted_at IS NULL AND NOT scope_held AND ${ap.sql} AND ${memberScope}`,[liveId,...ap.params])
+        const current=await readLegacyCanonicalTask(access,liveId,client)
         if (own) await client.query('COMMIT')
-        return current.rows[0]?toRecord(current.rows[0]):null
+        return current
       }
 
       await client.query('SELECT id FROM workspaces WHERE id=$1 FOR UPDATE',[liveRes.rows[0].workspaceId])
@@ -799,11 +691,14 @@ export async function updateTask(
       const relocked = await client.query<{ id: string }>(
         `${LIVE_TASK_ID_CTE} SELECT id FROM chain WHERE valid_to IS NULL LIMIT 1`, [liveId])
       if (relocked.rows[0]) liveId = relocked.rows[0].id
+      // The legacy writer returns and consumes the complete task DTO. Admit
+      // that exact snapshot before reading its body or running a precondition.
+      const admittedBefore=await readLegacyCanonicalTask(access,liveId,client)
+      if(!admittedBefore){if(own)await client.query('ROLLBACK');return null}
       const oldRes = await client.query<OldTaskRow>(
-        `SELECT scope_version::text, workspace_id, title, status, assignee_id, due, tags, parent_id, external_ref, attributes,
+        `SELECT logical_id, scope_version::text, workspace_id, title, status, assignee_id, due, tags, parent_id, external_ref, attributes,
                 sensitivity, compartments, project_ids,
-                user_id, assistant_id, source, source_episode_id,
-                source_session_id, created_by_assistant_id, source_start_ms,
+                user_id, assistant_id,
                 executor_assistant_id, follow_up_member_id, home_kind, home_id
          FROM tasks WHERE id = $1 AND valid_to IS NULL AND retracted_at IS NULL AND NOT scope_held
            AND ${ap.sql} AND ${memberScope} FOR UPDATE`,
@@ -827,9 +722,9 @@ export async function updateTask(
         home: old.home_kind && old.home_id ? { kind: old.home_kind, id: old.home_id } : null,
       }
       if (opts?.precondition?.({ ...before, status: old.status, workspaceId: old.workspace_id }) === 'noop') {
-        const current = await client.query<TaskRow>(`SELECT ${FULL_SELECT} FROM tasks WHERE id=$1`, [liveId])
+        const current=await readLegacyCanonicalTask(access,liveId,client)
         if (own) await client.query('COMMIT')
-        return current.rows[0] ? toRecord(current.rows[0]) : null
+        return current
       }
       const after = applyResponsibilityPatch(before, {
         assigneeId: fields.assigneeId, executorAssistantId: fields.executorAssistantId,
@@ -866,98 +761,13 @@ export async function updateTask(
         projectIds: nextProjectIds, privateUserId: nextUserId, privateAssistantId: nextAssistantId,
       }, before, after)
 
-      const insertRes = await client.query<TaskRow>(
-        `INSERT INTO tasks (
-           workspace_id, title, status, assignee_id, due, tags, parent_id, external_ref, attributes,
-           sensitivity, compartments, project_ids,
-           user_id, assistant_id, source, source_episode_id,
-           source_session_id, created_by_assistant_id, source_start_ms,
-           created_by_user_id, valid_from, valid_to, superseded_by,
-           executor_assistant_id, follow_up_member_id, home_kind, home_id, scope_version
-         )
-         SELECT $1, $2, $3, $4, $5, $6, $7, $8::jsonb, $9::jsonb,
-                 $10, $11::text[], $12::uuid[],
-                 $13, $14, $15, $16,
-                 $17, $18, $19,
-                 $20, now(), NULL, NULL,
-                 $21, $22, $23, $24, $25::bigint
-         WHERE EXISTS(SELECT 1 FROM workspace_members WHERE workspace_id=$1 AND user_id=$20)
-           AND (effective_member_team_compartments($20,$1) IS NULL
-             OR $11::text[] <@ effective_member_team_compartments($20,$1))
-         RETURNING ${FULL_SELECT}`,
-        [
-          old.workspace_id,
-          newTitle,
-          newStatus,
-          newAssigneeId,
-          newDue,
-          newTags,
-          newParentId,
-          JSON.stringify(newExternalRef),
-          JSON.stringify(newAttributes),
-          nextSensitivity,
-          nextCompartments,
-          nextProjectIds,
-          nextUserId,
-          nextAssistantId,
-          old.source,
-          old.source_episode_id,
-          // Provenance anchors carry forward through supersession — the
-          // originating conversation/assistant stays answerable after edits
-          // (matches updateMemory). created_by_user_id re-stamps the editor.
-          old.source_session_id,
-          old.created_by_assistant_id,
-          // The moment in the recording (migration 338) is provenance too, and
-          // it MUST be carried: omitting it defaults the new version to NULL,
-          // so any ordinary edit — a status tick, a due date — silently strips
-          // the task's pointer into the audio while leaving
-          // `source_episode_id` intact. The task then claims to come from a
-          // recording but no longer knows where in it, and the brief's
-          // "@ 47:21" seek link dies. This is the same wholesale-overwrite trap
-          // that put the moment in a column instead of `attributes` in the
-          // first place; the column only helps if the supersede carries it.
-          old.source_start_ms,
-          userId,
-          after.executorAssistantId,
-          after.followUpMemberId,
-          after.home?.kind ?? null,
-          after.home?.id ?? null,
-          String(BigInt(old.scope_version)+1n),
-        ],
-      )
-      const newRow = insertRes.rows[0]
-      if (!newRow) throw Object.assign(new Error('The task operation is outside the current access scope.'), { code: 'scope_operation_denied' })
-
-      await client.query(
-        `UPDATE tasks SET valid_to = now(), superseded_by = $1
-         WHERE id = $2 AND valid_to IS NULL`,
-        [newRow.id, liveId],
-      )
-
-      // Repoint active children to the new parent so the active sub-task
-      // tree stays coherent. The parent-workspace-match trigger fires on
-      // each child here and sees the just-inserted new row (same
-      // transaction, so visible to subsequent statements) and validates
-      // against its workspace_id, which carried forward from `old`.
-      const childAccess=buildAccessPredicate(access,{startIdx:3,operation:'mutation'})
-      await client.query(
-        `UPDATE tasks SET parent_id = $1
-         WHERE parent_id = $2 AND valid_to IS NULL AND retracted_at IS NULL AND NOT scope_held
-           AND ${childAccess.sql} AND ${memberScope}`,
-        [newRow.id, liveId,...childAccess.params],
-      )
-
-      // Repoint any goal hosted on this task to the new id (mirrors the
-      // child repoint above). A task's auto-drafted goal binds by host_id;
-      // supersession would otherwise orphan it, so host_id always tracks the
-      // live task id. No-op (0 rows) when the task has no hosted goal.
-      await client.query(
-        `UPDATE goals SET host_id = $1
-         WHERE host_type = 'task' AND host_id = $2`,
-        [newRow.id, liveId],
-      )
-      // Resumable execution follows the same lineage (native and external lanes).
-      await repointTaskExecutions(client, liveId, newRow.id)
+      const {dependsOn: _dependsOn,...canonicalFields}=fields
+      const written=await patchCanonicalTaskFields(userId,old.workspace_id,liveId,canonicalFields,client,access,
+        {expectedVersion:old.scope_version,scope:{sensitivity:nextSensitivity,compartments:nextCompartments,projectIds:nextProjectIds,
+          visibility:{userId:nextUserId,assistantId:nextAssistantId}}})
+      if(!written)throw new ApplicationPlatformError('access_unavailable','The task is unavailable.')
+      const newTask=await readLegacyCanonicalTask(access,written.physicalId,client)
+      if(!newTask)throw new ApplicationPlatformError('access_unavailable','The task is unavailable.')
 
       // Host-lifecycle cascade: a task that just went terminal is no longer
       // assignable, so its DRAFT goals go with it — a "your assistant could
@@ -970,7 +780,7 @@ export async function updateTask(
       // NEW id because the repoint just moved the binding there.
       // See docs/architecture/features/goals.md → "Host-lifecycle cascade".
       if (newStatus === 'done' || newStatus === 'archived') {
-        await abandonGoalsForHostTaskSystem(newRow.id, 'host_task_closed', {
+        await abandonGoalsForHostTaskSystem(newTask.id, 'host_task_closed', {
           draftsOnly: true,
           exec: client,
         })
@@ -981,14 +791,13 @@ export async function updateTask(
       // cascade", "Executor-gated triage").
       const reassigned = executorChanged(before, after)
       if (reassigned) {
-        await abandonGoalsForHostTaskSystem(newRow.id, 'executor_changed', {
+        await abandonGoalsForHostTaskSystem(newTask.id, 'executor_changed', {
           draftsOnly: true,
           exec: client,
         })
       }
 
       if (own) await client.query('COMMIT')
-      const newTask = toRecord(newRow)
       const publish = () => {
         if (reassigned && newTask.parentId === null) executorChangeHook?.(newTask, before, userId, opts?.assignment)
         if ((newTask.status === 'done' || newTask.status === 'archived') && old.status !== newTask.status) taskClosedHook?.(newTask, old.status)
@@ -1091,19 +900,8 @@ export async function findTasksByExternalRefSystem(
  * does not authorize a more restricted successor. Held and retracted bodies
  * remain excluded. UNION prevents repeated traversal of the same version.
  */
-export async function getTaskHistory(ctx: AccessContext, id: string): Promise<TaskRecord[]> {
-  // Classification can change between versions. Filter each returned row;
-  // authorization of one lineage anchor is never authority over the chain.
-  const ap=buildAccessPredicate(ctx,{startIdx:2})
-  const result=await queryWithRLS<TaskRow>(ctx.userId,
-    `WITH RECURSIVE chain(id,superseded_by) AS (
-      SELECT id,superseded_by FROM tasks WHERE id=$1
-      UNION
-      SELECT t.id,t.superseded_by FROM tasks t JOIN chain c ON t.id=c.superseded_by OR t.superseded_by=c.id
-    ) SELECT ${FULL_SELECT} FROM tasks
-      WHERE id IN(SELECT id FROM chain) AND ${ap.sql} AND NOT scope_held AND retracted_at IS NULL
-      ORDER BY valid_from ASC`,[id,...ap.params])
-  return result.rows.map(toRecord)
+export async function getTaskHistory(ctx:AccessContext,id:string):Promise<TaskRecord[]> {
+  return readLegacyCanonicalTaskHistory(ctx,id)
 }
 
 /**
@@ -1150,21 +948,6 @@ export type RecordingTaskRow = {
  * commitment the model failed to timestamp is still a commitment, and hiding it
  * would make the rail quietly lie about what the meeting agreed to.
  */
-export async function listTasksBySourceEpisode(
-  ctx: AccessContext,
-  episodeId: string,
-): Promise<RecordingTaskRow[]> {
-  const ap = buildAccessPredicate(ctx, { startIdx: 1 })
-  const result = await queryGated<RecordingTaskRow>(
-    ctx,
-    `SELECT id, title, status,
-            assignee_id as "assigneeId",
-            source_start_ms as "sourceStartMs",
-            (verified_by_user_id IS NOT NULL) as "verified"
-     FROM tasks
-     WHERE ${ap.sql} AND valid_to IS NULL AND retracted_at IS NULL AND NOT scope_held AND source_episode_id = $${ap.nextIdx}
-     ORDER BY source_start_ms ASC NULLS LAST, created_at ASC`,
-    [...ap.params, episodeId],
-  )
-  return result.rows
+export async function listTasksBySourceEpisode(ctx:AccessContext,episodeId:string):Promise<RecordingTaskRow[]> {
+  return listLegacyCanonicalRecordingTasks(ctx,episodeId)
 }

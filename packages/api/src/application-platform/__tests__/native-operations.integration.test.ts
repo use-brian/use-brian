@@ -51,6 +51,15 @@ describe('[COMP:api/application-records] canonical native operation composition'
     await owner.query('DELETE FROM users WHERE id=ANY($1::uuid[])', [fixtureUsers])
     await getAppPool().end(); await owner.end()
   })
+  // Retire exact synthetic rows before removing their temporary field catalog.
+  // Immutable custom values/history remain intact; later all-candidate DTO reads
+  // must not consume an intentionally unregistered leftover fixture key.
+  async function retireCustomFixtureDefinition(fieldId:string) {
+    await owner.query(`UPDATE entities e SET scope_held=true FROM crm_field_definitions f
+      WHERE f.id=$1 AND f.workspace_id=$2 AND e.workspace_id=f.workspace_id AND e.kind=f.entity_kind
+      AND NOT e.scope_held AND e.attributes->'custom_fields' ? f.field_key`,[fieldId,workspaceId])
+    await owner.query('DELETE FROM crm_field_definitions WHERE id=$1 AND workspace_id=$2',[fieldId,workspaceId])
+  }
   const version = (task: TaskRecord) => boundScopeSources(task)[0].version!
   const task = (title = `Fictional operation ${randomUUID()}`, parentId?: string) => createTask(userId, { workspaceId, title, parentId, access })
   async function client() {
@@ -123,6 +132,7 @@ describe('[COMP:api/application-records] canonical native operation composition'
       await fixture.query('SET CONSTRAINTS ALL IMMEDIATE')
       await fixture.query('ALTER TABLE entities ENABLE TRIGGER application_native_entity_values');await fixture.query('COMMIT')
     } finally {await fixture.query('ROLLBACK');fixture.release()}
+    try {
     const dispatcher=new ApplicationPlatformService([createCanonicalNativeApplicationModule()]),context=await execution()
     const record=await dispatcher.query(context,'native','get',{type,id:value.id,fields:['name']}) as {values:unknown}
     expect(record.values).toEqual({name:value.displayName});expect(boundScopeSources(record).length).toBeGreaterThan(0)
@@ -132,6 +142,11 @@ describe('[COMP:api/application-records] canonical native operation composition'
     await expect(dispatcher.query(context,'native','get',{type,id:value.id,fields:['archivedAt']})).rejects.toMatchObject({code:'invalid_value'})
     const legacy=type==='company'?await getCompanyById(access,value.id):type==='person'?await getContactById(access,value.id):null
     if(type!=='deal')expect(legacy?.id).toBe(value.id)
+    } finally {
+      const cleanup=await getAppPool().connect()
+      try {await cleanup.query('BEGIN');await applyRLSGucs(cleanup,userId);await cleanup.query("UPDATE entities SET attributes=attributes-'crm_archived_at' WHERE id=$1",[value.id]);await cleanup.query('COMMIT')}
+      finally {await cleanup.query('ROLLBACK');cleanup.release()}
+    }
   })
   it('Q02 queries native CRM under the actual member and rejects an owner-pool query catalog',async()=>{
     const name=`Fictional native member query ${randomUUID()}`,value=await createCompany(userId,{workspaceId,name,access,mergeByName:false})
@@ -462,7 +477,12 @@ describe('[COMP:api/application-records] canonical native operation composition'
     expect((await owner.query('SELECT resources::text FROM application_operation_receipts WHERE id=$1',[committed.id])).rows[0].resources).not.toContain('Fictional committed pair')
     // Replay is governed by current native visibility; another actual member
     // retains access to the same source after this caller loses its audience.
-    await owner.query('UPDATE tasks SET user_id=$2 WHERE id=$1',[committed.resources[0].id,readerId])
+    const reclassification=await getAppPool().connect()
+    try {
+      await reclassification.query('BEGIN');await applyRLSGucs(reclassification,readerId)
+      await reclassification.query('UPDATE tasks SET user_id=$2 WHERE id=$1',[committed.resources[0].id,readerId])
+      await reclassification.query('COMMIT')
+    }finally{await reclassification.query('ROLLBACK');reclassification.release()}
     await expect(service.command(identity,module.key,'rename_pair',command)).rejects.toMatchObject({ code: 'access_unavailable' })
     expect(await getTaskById({ ...access,userId: readerId },committed.resources[0].id)).not.toBeNull()
     expect((await owner.query('SELECT count(*)::int AS count FROM application_command_audit WHERE receipt_id=$1',[committed.id])).rows[0].count).toBe(1)
@@ -545,7 +565,7 @@ describe('[COMP:api/application-records] canonical native operation composition'
       expect((await owner.query('SELECT attributes,scope_version::text AS version FROM entities WHERE id=$1',[record.id])).rows[0]).toEqual(before)
     } finally {
       await transaction.query('ROLLBACK');transaction.release()
-      await owner.query('DELETE FROM crm_field_definitions WHERE id=$1 AND workspace_id=$2',[definition!.id,workspaceId])
+      await retireCustomFixtureDefinition(definition!.id)
     }
   })
   it('Q04 rejects an undeclared custom key below the raw entity writer',async () => {
@@ -564,7 +584,7 @@ describe('[COMP:api/application-records] canonical native operation composition'
       const before=(await owner.query('SELECT attributes,scope_version::text AS version FROM entities WHERE id=$1',[record.id])).rows[0]
       await expect(updateEntity(userId,record.id,{attributes:{stage:'lead',custom_fields:{}}},access)).rejects.toThrow('invalid_value')
       expect((await owner.query('SELECT attributes,scope_version::text AS version FROM entities WHERE id=$1',[record.id])).rows[0]).toEqual(before)
-    } finally {await owner.query('DELETE FROM crm_field_definitions WHERE id=$1 AND workspace_id=$2',[definition!.id,workspaceId])}
+    } finally {await retireCustomFixtureDefinition(definition!.id)}
   })
   it('Q04 retains archived custom values while refusing edits and deletion through raw replacements',async () => {
     const record=await createDeal(userId,{workspaceId,access}),fieldKey='validation_archived'
@@ -579,7 +599,7 @@ describe('[COMP:api/application-records] canonical native operation composition'
         await expect(updateEntity(userId,record.id,{attributes:{...attributes,custom_fields}},access)).rejects.toThrow('invalid_value')
         expect((await owner.query('SELECT attributes,scope_version::text AS version FROM entities WHERE id=$1',[record.id])).rows[0]).toEqual(before)
       }
-    } finally {await owner.query('DELETE FROM crm_field_definitions WHERE id=$1 AND workspace_id=$2',[definition!.id,workspaceId])}
+    } finally {await retireCustomFixtureDefinition(definition!.id)}
   })
   it.each(['organisation_name','position','mailing_address'])
   ('Q04 preserves the compiled native profile text contract for %s below raw writers',async fieldKey => {
@@ -667,7 +687,7 @@ describe('[COMP:api/application-records] canonical native operation composition'
       expect((await owner.query('SELECT id FROM crm_activities WHERE entity_id=$1',[value.id])).rows).toEqual([])
     } finally {
       await owner.query('DROP TRIGGER native_operation_http_activity_fixture ON crm_activities;DROP FUNCTION native_operation_http_activity_fixture()')
-      if(field) await owner.query('DELETE FROM crm_field_definitions WHERE id=$1',[field.id])
+      if(field) await retireCustomFixtureDefinition(field.id)
     }
   })
   it.each(['unknown','invalid-type','overlong'] as const)('Q04 refuses an original CRM HTTP creation frame: %s',async invalid => {
@@ -700,23 +720,32 @@ describe('[COMP:api/application-records] canonical native operation composition'
     const rows=(await owner.query('SELECT id FROM entities WHERE workspace_id=$1 AND display_name=ANY($2::text[]) ORDER BY id',[workspaceId,names])).rows
     expect(rows).toHaveLength(2);expect(response.body.results.map((row:{id:string})=>row.id).sort()).toEqual(rows.map(row=>row.id))
   })
+  it('Q04/Q05 preserves distinct canonical IDs for explicit same-name mapped company rows',async()=>{
+    const name=`Fictional explicit company identity ${randomUUID()}`
+    const existing=await createCompany(userId,{workspaceId,name,access,mergeByName:false})
+    const response=await request(crmHttp()).post(`/api/crm/${workspaceId}/import`).send({records:[{kind:'company',name},{kind:'company',name}]})
+    expect(response.status).toBe(207);expect(response.body).toMatchObject({created:2,failed:0})
+    const ids=response.body.results.map((row:{id:string})=>row.id)
+    expect(new Set(ids).size).toBe(2);expect(ids).not.toContain(existing.id)
+    expect((await owner.query('SELECT id FROM entities WHERE workspace_id=$1 AND display_name=$2 ORDER BY id',[workspaceId,name])).rows.map(row=>row.id).sort()).toEqual([existing.id,...ids].sort())
+  })
   it('Q04/Q05 commits a real CRM HTTP combined custom patch on the existing company ID and one revision',async () => {
     const value=await createCompany(userId,{workspaceId,name:`Fictional HTTP combined ${randomUUID()}`,access,mergeByName:false})
     const definition=await createCrmFieldDefinition({userId,workspaceId,entityKind:'company',fieldKey:'http_required',label:'Fictional HTTP requirement',fieldType:'text',isRequired:true})
     try {
       const version=(await owner.query('SELECT scope_version::text AS version FROM entities WHERE id=$1',[value.id])).rows[0].version
       const response=await request(crmHttp()).patch(`/api/crm/${workspaceId}/records/${value.id}`).send({domain:'http.example',customFields:{http_required:'accepted'}})
-      expect(response.status).toBe(200)
+      expect(response.status,JSON.stringify(response.body)).toBe(200)
       expect((await owner.query("SELECT id,attributes->>'domain' AS domain,attributes->'custom_fields' AS custom,scope_version::text AS version FROM entities WHERE id=$1",[value.id])).rows[0])
         .toEqual({id:value.id,domain:'http.example',custom:{http_required:'accepted'},version:String(BigInt(version)+1n)})
-    } finally {await owner.query('DELETE FROM crm_field_definitions WHERE id=$1',[definition!.id])}
+    } finally {await retireCustomFixtureDefinition(definition!.id)}
   })
   it('Q05 synchronizes the real CRM HTTP primary participant with one canonical deal edit',async () => {
     const first=await createContact(userId,{workspaceId,name:'Fictional first HTTP participant',access}),second=await createContact(userId,{workspaceId,name:'Fictional second HTTP participant',access})
     const deal=await createDeal(userId,{workspaceId,contactId:first.id,access})
     const version=(await owner.query('SELECT scope_version::text AS version FROM entities WHERE id=$1',[deal.id])).rows[0].version
     const response=await request(crmHttp()).patch(`/api/crm/${workspaceId}/records/${deal.id}`).send({contactId:second.id})
-    expect(response.status).toBe(200)
+    expect(response.status,JSON.stringify(response.body)).toBe(200)
     expect((await owner.query("SELECT id,attributes->>'contact_id' AS contact,scope_version::text AS version FROM entities WHERE id=$1",[deal.id])).rows[0])
       .toEqual({id:deal.id,contact:second.id,version:String(BigInt(version)+1n)})
     expect((await owner.query('SELECT contact_id AS contact FROM crm_deal_contacts WHERE deal_id=$1 AND is_primary',[deal.id])).rows).toEqual([{contact:second.id}])
@@ -732,7 +761,7 @@ describe('[COMP:api/application-records] canonical native operation composition'
       expect(response.status).toBe(201)
       expect((await owner.query("SELECT attributes->'custom_fields' AS custom,scope_version::text AS version FROM entities WHERE id=$1",[response.body.id])).rows[0]).toEqual({custom:{view_required:'accepted'},version:'1'})
       expect((await request(app).post(`/api/${route}`).send({...body,unknown_original_key:true})).status).toBe(400)
-    } finally {await owner.query('DELETE FROM crm_field_definitions WHERE id=$1',[definition!.id])}
+    } finally {await retireCustomFixtureDefinition(definition!.id)}
   })
   it.each(['company','person','deal'] as const)
   ('Q04/Q05 creates canonical %s required custom values in the initial row',async kind => {
@@ -744,7 +773,7 @@ describe('[COMP:api/application-records] canonical native operation composition'
         :await createDeal(userId,{workspaceId,amount:'12.000000000000000001',access,customFields} as Parameters<typeof createDeal>[1])
       expect((await owner.query("SELECT attributes->'custom_fields' AS custom,scope_version::text AS version FROM entities WHERE id=$1",[value.id])).rows[0])
         .toEqual({custom:customFields,version:'1'})
-    } finally {await owner.query('DELETE FROM crm_field_definitions WHERE id=$1 AND workspace_id=$2',[definition!.id,workspaceId])}
+    } finally {await retireCustomFixtureDefinition(definition!.id)}
   })
   it.each(['company','person','deal'] as const)
   ('Q04/Q05 applies canonical %s business and required custom edits in one version',async kind => {
@@ -767,7 +796,7 @@ describe('[COMP:api/application-records] canonical native operation composition'
         :()=>updateDeal(userId,value.id,invalid as DealUpdateFields,undefined,access)
       await expect(write()).rejects.toMatchObject({code:'invalid_value'})
       expect((await owner.query('SELECT attributes,scope_version::text AS version FROM entities WHERE id=$1',[value.id])).rows[0]).toEqual(before)
-    } finally {await owner.query('DELETE FROM crm_field_definitions WHERE id=$1 AND workspace_id=$2',[definition!.id,workspaceId])}
+    } finally {await retireCustomFixtureDefinition(definition!.id)}
   })
   it.each(['company','person','deal'] as const)('Q04/Q05 joins initial %s custom-reference privacy and refuses a hidden target without partial creation',async kind => {
     const target=await createEntity({workspaceId,kind:'company',displayName:`Fictional private reference ${randomUUID()}`,userId,createdByUserId:userId,source:'user',attributes:{}})
@@ -783,7 +812,7 @@ describe('[COMP:api/application-records] canonical native operation composition'
       const count=(await owner.query('SELECT count(*)::int AS count FROM entities WHERE workspace_id=$1',[workspaceId])).rows[0].count
       await expect(create(hidden.id)).rejects.toMatchObject({code:'scope_operation_denied'})
       expect((await owner.query('SELECT count(*)::int AS count FROM entities WHERE workspace_id=$1',[workspaceId])).rows[0].count).toBe(count)
-    } finally {await owner.query('DELETE FROM crm_field_definitions WHERE id=$1 AND workspace_id=$2',[definition!.id,workspaceId])}
+    } finally {await retireCustomFixtureDefinition(definition!.id)}
   })
   it('Q04/Q05 keeps one company identity and one revision when upserting newly required custom values',async () => {
     const name=`Fictional required upsert ${randomUUID()}`,value=await createCompany(userId,{workspaceId,name,access})
@@ -793,7 +822,7 @@ describe('[COMP:api/application-records] canonical native operation composition'
       expect(await createCompany(userId,{workspaceId,name,domain:'upsert.example',access,customFields:{upsert_required:'accepted'}})).toMatchObject({id:value.id,domain:'upsert.example'})
       expect((await owner.query("SELECT id,attributes->'custom_fields' AS custom,scope_version::text AS version FROM entities WHERE workspace_id=$1 AND display_name=$2",[workspaceId,name])).rows)
         .toEqual([{id:value.id,custom:{upsert_required:'accepted'},version:String(BigInt(before)+1n)}])
-    } finally {await owner.query('DELETE FROM crm_field_definitions WHERE id=$1 AND workspace_id=$2',[definition!.id,workspaceId])}
+    } finally {await retireCustomFixtureDefinition(definition!.id)}
   })
   it.each(['company','person','deal'] as const)('Q04 executes the actual %s tool with required initial custom values and refuses a malformed retry',async kind => {
     const company=kind==='deal'?await createCompany(userId,{workspaceId,name:`Fictional tool relation ${randomUUID()}`,access,mergeByName:false}):null
@@ -808,7 +837,7 @@ describe('[COMP:api/application-records] canonical native operation composition'
       const before=(await owner.query('SELECT count(*)::int AS count FROM entities WHERE workspace_id=$1',[workspaceId])).rows[0].count
       expect((await tool.execute({...input,unknown_business_key:true},context)).isError).toBe(true)
       expect((await owner.query('SELECT count(*)::int AS count FROM entities WHERE workspace_id=$1',[workspaceId])).rows[0].count).toBe(before)
-    } finally {await owner.query('DELETE FROM crm_field_definitions WHERE id=$1 AND workspace_id=$2',[definition!.id,workspaceId])}
+    } finally {await retireCustomFixtureDefinition(definition!.id)}
   })
   it.each(['catalog stage','registered stage','primary participant removal'] as const)
   ('Q04/Q05 keeps untouched numeric JSON exact through the legacy %s writer',async operation => {
@@ -898,6 +927,7 @@ describe('[COMP:api/application-records] canonical native operation composition'
   })
   describe('[COMP:security/native-field-policy] canonical native CRM write admission',() => {
     const ancestryFixtureIds:string[]=[]
+    let ancestryTargetDefinition:Awaited<ReturnType<typeof createCrmFieldDefinition>>=null
     afterEach(async()=>{
       // Keep immutable evidence, but retire temporary source graphs from later schema/query fixtures.
       if(ancestryFixtureIds.length)await owner.query('UPDATE entities SET scope_held=true WHERE workspace_id=$1 AND id=ANY($2::uuid[])',[workspaceId,ancestryFixtureIds.splice(0)])
@@ -926,6 +956,7 @@ describe('[COMP:api/application-records] canonical native operation composition'
             {"key":"tags","read":[],"write":[],"releaseReadTo":[],"releaseWriteTo":[]},
             {"key":"externalRef","read":[],"write":[],"releaseReadTo":[],"releaseWriteTo":[]},
             {"key":"custom.cost","read":[["finance"]],"write":[["finance"]],"releaseReadTo":[],"releaseWriteTo":[]},
+            {"key":"custom.ancestry_target","read":[],"write":[],"releaseReadTo":[],"releaseWriteTo":[]},
             {"key":"aliases","read":[],"write":[["finance"]],"releaseReadTo":[],"releaseWriteTo":[]},
             {"key":"createdAt","read":[],"write":[["finance"]],"releaseReadTo":[],"releaseWriteTo":[]},
             {"key":"updatedAt","read":[],"write":[["finance"]],"releaseReadTo":[],"releaseWriteTo":[]}]'::jsonb $$;
@@ -973,6 +1004,7 @@ describe('[COMP:api/application-records] canonical native operation composition'
             'scope',jsonb_build_object('workspaceId',w,'userId',NULL,'assistantId',NULL,'sensitivity','internal','compartments','[]'::jsonb,'projectIds','[]'::jsonb));END $$;
         REVOKE ALL ON FUNCTION native_operation_field_fixture_catalog(uuid,jsonb,text) FROM PUBLIC`)
       await createCrmFieldDefinition({userId,workspaceId,entityKind:'company',fieldKey:'cost',label:'Fictional cost',fieldType:'number'})
+      ancestryTargetDefinition=await createCrmFieldDefinition({userId,workspaceId,entityKind:'company',fieldKey:'ancestry_target',label:'Fictional ancestry target',fieldType:'entity_reference',options:['company']})
       await owner.query(`INSERT INTO application_native_field_contracts(module_key,contract_version,role_keys,metadata_reader,catalog_reader,configuration_required,configuration_reader)
         VALUES('native','1',ARRAY['finance'],'native_operation_field_fixture_reader(uuid,jsonb,text,text)'::regprocedure,
           'native_operation_field_fixture_catalog(uuid,jsonb,text)'::regprocedure,true,'native_operation_field_fixture_revision(uuid)'::regprocedure)`)
@@ -1219,11 +1251,9 @@ describe('[COMP:api/application-records] canonical native operation composition'
       }finally{if(revoked)await creatorRole(userId)}
     })
     it('Q02/Q03 rechecks current relationship target ancestry as well as the retained original target',async()=>{
-      const definition=await createCrmFieldDefinition({userId,workspaceId,entityKind:'company',fieldKey:'ancestry_target',label:'Fictional ancestry target',fieldType:'entity_reference',options:['company']})
-      if(!definition)throw new Error('Fictional ancestry reference definition was not created')
-      const rules=(await owner.query('SELECT native_operation_field_fixture_rules() AS value')).rows[0].value
-      rules.push({key:'custom.ancestry_target',read:[],write:[],releaseReadTo:[],releaseWriteTo:[]})
-      await owner.query('INSERT INTO native_operation_field_fixture_config(workspace_id,rules) VALUES($1,$2)',[workspaceId,JSON.stringify(rules)])
+      // Relationship tests use a canonically provisioned initial field. The
+      // intentionally partial policy here cannot authorize schema governance.
+      if(!ancestryTargetDefinition)throw new Error('Fictional ancestry reference definition was not created')
       let roleA:string|undefined,roleB:string|undefined,revoked=false
       try{
         const {derived}=await fieldDerivedCompany(),originalTarget=await company()
@@ -1242,7 +1272,7 @@ describe('[COMP:api/application-records] canonical native operation composition'
         await expect(capture(userId,currentVersion)).rejects.toMatchObject({code:'42501'})
         expect((await capture(readerId,currentVersion)).values).toEqual({'custom.ancestry_target':derived.id})
         expect(await member(readerId,async client=>(await client.query('SELECT read_admitted_application_field_snapshot($1,$2,$3) AS value',[workspaceId,source.resourceId,source.version])).rows[0].value)).toMatchObject({held:false})
-      }finally{if(roleB)await owner.query('DELETE FROM application_native_role_assignments WHERE id=$1',[roleB]);if(revoked)await creatorRole(userId);await clearCreatorPolicy();await archiveCrmFieldDefinition(userId,workspaceId,definition.id)}
+      }finally{if(roleB)await owner.query('DELETE FROM application_native_role_assignments WHERE id=$1',[roleB]);if(revoked)await creatorRole(userId);await clearCreatorPolicy()}
     })
     it.each((['store','sql'] as const).flatMap(lane=>[
       ...(['company','person','deal'] as const).map(type=>({lane,type,owned:true})),

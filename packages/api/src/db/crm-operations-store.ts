@@ -25,7 +25,7 @@ import {
   type CrmSegmentPredicate,
   type AccessContext,
 } from '@use-brian/core'
-import { getPool } from './client.js'
+import { applyRLSGucs,getAppPool,getPool,rollbackAndRelease } from './client.js'
 import { associationProviderInheritance, associationCheckoutInheritance, assertAssociationCheckoutParent, admitAssociationSourceScope, beginAssociationCreation, assertAssociationOrderAuthority, loadAssociationOrderScope } from '../association/source-scope.js'
 import type { AssociationActor } from '@use-brian/core'
 import { readCrmPrivacyPolicy, saveCrmPrivacyPolicy } from '../crm-operations/privacy-policy.js'
@@ -342,6 +342,8 @@ export type CrmCommercialTransaction = {
 }
 
 export type CrmOperationsStore = {
+  /** Protected catalog commands retain the actual non-owner native principal. */
+  configurationTransaction?<T>(context:CrmOperationsContext,fn:(tx:CrmOperationsTransaction)=>Promise<T>):Promise<T>
   transaction<T>(
     context: CrmOperationsContext,
     fn: (tx: CrmOperationsTransaction) => Promise<T>,
@@ -1734,7 +1736,42 @@ function createTransaction(client: PoolClient, context: CrmOperationsContext, ef
 }
 
 export function createDbCrmOperationsStore(pool: Pool = getPool(), transactionClient?: PoolClient): CrmOperationsStore {
-  return {
+  const store:CrmOperationsStore = {
+    async configurationTransaction(context,fn) {
+      // This is only a restrictive transport probe, never a data/role admission.
+      // A binding racing this probe is still enforced by the canonical SQL guard.
+      const probe=transactionClient??await pool.connect()
+      let protectedCatalog:boolean
+      try {
+        protectedCatalog=(await probe.query<{protected:boolean}>('SELECT application_native_crm_configuration_protected($1) AS protected',[context.workspaceId])).rows[0]?.protected===true
+      } finally {if(!transactionClient)probe.release()}
+      if(!protectedCatalog)return store.transaction(context,fn)
+      const actor=context.actor
+      if(!['user','assistant','workflow','import'].includes(actor.kind)||!('userId' in actor)||!actor.userId) {
+        throw new CrmOperationsError('not_authorized','Protected configuration requires a current native principal.')
+      }
+      const client=transactionClient??await getAppPool().connect(),effects:Array<()=>void>=[]
+      try {
+        if(!transactionClient){await client.query('BEGIN');await applyRLSGucs(client,actor.userId)}
+        else if((await client.query<{actor:string}>("SELECT current_setting('app.current_user_id',true) AS actor")).rows[0]?.actor!==actor.userId) {
+          throw new CrmOperationsError('not_authorized','The configuration transaction actor is unavailable.')
+        }
+        const role=(await client.query<{bypass:boolean}>(`SELECT r.rolsuper OR r.rolbypassrls OR pg_has_role(r.oid,c.relowner,'USAGE') AS bypass
+          FROM pg_roles r JOIN pg_class c ON c.oid='public.application_native_field_contracts'::regclass WHERE r.rolname=current_user`)).rows[0]
+        if(role?.bypass!==false)throw new CrmOperationsError('not_authorized','Protected configuration requires a non-owner transaction.')
+        await stageActorAccess(client,context)
+        await beginAssociationCreation(client,context.workspaceId)
+        const result=await fn(createTransaction(client,context,effects))
+        if(!transactionClient)await client.query('COMMIT')
+        if(!transactionClient)for(const effect of effects)effect()
+        return result
+      } catch(error) {
+        if((error as {code?:string}).code==='42501'||error instanceof WorkspaceAccessError||(error as {code?:string}).code==='scope_operation_denied') {
+          throw new CrmOperationsError('not_authorized','The current configuration authority is unavailable.')
+        }
+        throw error
+      } finally {if(!transactionClient)await rollbackAndRelease(client)}
+    },
     async transaction(context, fn) {
       const client = transactionClient ?? await pool.connect()
       const effects: Array<() => void> = []
@@ -1791,6 +1828,7 @@ export function createDbCrmOperationsStore(pool: Pool = getPool(), transactionCl
       }
     },
   }
+  return store
 }
 
 export function crmOperationsActorAssistantId(actor: CrmOperationsActor): string | null {

@@ -14,7 +14,7 @@ const source=z.object({workspaceId:z.string().uuid(),userId:z.string().uuid().nu
   resourceKind:z.enum(['application_field','external_source']),resourceId:z.string().uuid(),version:z.string().min(1),
   sensitivity:z.enum(['public','internal','confidential']),compartments:z.array(z.string()),projectIds:z.array(z.string().uuid())}).strict()
 const capture=z.object({values:z.record(applicationJsonSchema),sources:z.array(source).min(1),policyVersion:z.string().regex(/^[a-f0-9]{64}$/)}).strict()
-const row=z.object({id:z.string().uuid(),data:z.record(applicationJsonSchema),record_version:z.string().min(1),sources:z.array(source).min(1),policy_version:z.string().regex(/^[a-f0-9]{64}$/)}).passthrough()
+const row=z.object({legacy_attributes_complete:z.boolean().nullable().optional(),logical_id:z.string().uuid().nullable().optional(),value_encodings:z.object({amount:z.enum(['number','string','null','invalid']).optional()}).strict().optional(),id:z.string().uuid(),data:z.record(applicationJsonSchema),record_version:z.string().min(1),sources:z.array(source).min(1),policy_version:z.string().regex(/^[a-f0-9]{64}$/)}).passthrough()
 function scalar(field:ApplicationFieldDefinition):'numeric'|'boolean'|'timestamptz'|'text'|'jsonb' {
   if(field.kind==='number'||field.kind==='decimal')return 'numeric'
   if(field.kind==='timestamp')return 'timestamptz'
@@ -119,10 +119,10 @@ export async function runCanonicalNativeQueryFrame<T>(context:CanonicalGenericRe
 }
 
 /** Query catalogs are selected by the same current SQL domain as evaluation. */
-export async function readCanonicalNativeQueryDefinition(context:CanonicalGenericReadContext,type:string):Promise<ApplicationResourceDefinition> {
+export async function readCanonicalNativeQueryDefinition(context:CanonicalGenericReadContext,type:string,completeTemplate=false):Promise<ApplicationResourceDefinition> {
   context.assertLive?.()
   const entry=z.object({typeKey:z.literal(type),fields:z.array(z.string()),customFields:z.array(z.record(z.unknown())),schemaVersion:z.string().optional()}).strict().safeParse(
-    (await runCanonicalReadLease(context,()=>context.transaction.query<{value:unknown}>('SELECT application_native_query_catalog($1,$2) AS value',[context.workspaceId,type]))).rows[0]?.value)
+    (await runCanonicalReadLease(context,()=>context.transaction.query<{value:unknown}>(completeTemplate?'SELECT application_native_query_template_catalog($1,$2) AS value':'SELECT application_native_query_catalog($1,$2) AS value',[context.workspaceId,type]))).rows[0]?.value)
   context.assertLive?.()
   const base=canonicalNativeResourceDefinitions().find(definition=>definition.typeKey===type)
   if(!entry.success||!base)throw unavailable()
@@ -139,7 +139,7 @@ export async function queryCanonicalNativeRecords(context:CanonicalGenericReadCo
   return runCanonicalNativeQueryFrame(context,()=>queryNativeRecordsInFrame(context,definition,input))
 }
 async function queryNativeRecordsInFrame(context:CanonicalGenericReadContext,definition:ApplicationResourceDefinition,input:ApplicationQuery) {
-  if(definition.origin.kind!=='native'||definition.origin.moduleKey!=='native'||!['company','person','deal'].includes(definition.typeKey))throw unavailable()
+  if(definition.origin.kind!=='native'||definition.origin.moduleKey!=='native'||!['company','person','deal','task'].includes(definition.typeKey))throw unavailable()
   const consumed=[...new Set([...input.filters.map(item=>item.field),...input.sort.map(item=>item.field),...input.aggregate.map(item=>item.field)])].sort()
   const output=input.fields??definition.fields.map(field=>field.key),fields=[...new Set([...output,...consumed])].sort()
   if(new Set(output).size!==output.length||fields.some(field=>!definition.fields.some(item=>item.key===field)))throw unavailable()
@@ -158,7 +158,7 @@ async function queryNativeRecordsInFrame(context:CanonicalGenericReadContext,def
   for(const candidate of candidates)validateCanonicalNativeValues(definition,candidate.data)
   const candidateValues=compiled.bind(JSON.stringify(candidates))
   const result=(await runCanonicalReadLease(context,()=>context.transaction.query(`WITH candidates AS MATERIALIZED (
-    SELECT * FROM jsonb_to_recordset(${candidateValues}::jsonb) AS captured(id uuid,data jsonb,record_version text,sources jsonb,policy_version text)),
+    SELECT * FROM jsonb_to_recordset(${candidateValues}::jsonb) AS captured(id uuid,data jsonb,record_version text,sources jsonb,policy_version text,logical_id uuid)),
     filtered AS MATERIALIZED (SELECT * FROM candidates WHERE ${compiled.predicate}),
     page AS MATERIALIZED (SELECT *,${compiled.sort} FROM filtered WHERE ${compiled.after} ORDER BY ${compiled.order} LIMIT ${compiled.limit})
     SELECT $1::uuid AS workspace_id,$2::text AS type_key,(SELECT coalesce(jsonb_agg(to_jsonb(page)),'[]') FROM page) AS page
@@ -179,11 +179,32 @@ async function queryNativeRecordsInFrame(context:CanonicalGenericReadContext,def
       ||value.sources.some(source=>source.workspaceId!==context.workspaceId))throw unavailable()
     validateCanonicalNativeValues(definition,value.data)
     const policyVersion=context.applicationFingerprint?createHash('sha256').update(JSON.stringify({application:context.applicationFingerprint,field:value.policy_version})).digest('hex'):value.policy_version
-    const record=bindScopeSources({ref:{workspaceId:context.workspaceId,origin:definition.origin,typeKey:definition.typeKey,id:candidate.id,version:candidate.record_version},
+    const record=bindScopeSources({ref:{workspaceId:context.workspaceId,origin:definition.origin,typeKey:definition.typeKey,id:definition.typeKey==='task'?(candidate.logical_id??(()=>{throw unavailable()})()):candidate.id,version:candidate.record_version},
       values:value.data,fields:Object.keys(value.data),policyVersion},value.sources)
     records.push(record);sources.push(...value.sources)
   }
   const aggregates=compiled.aggregates.length?input.aggregate.map((item,index)=>({...item,value:z.string().nullable().parse(result.aggregates[`aggregate${index}`])})):undefined
   const unique=[...new Map(sources.map(source=>[`${source.resourceKind}:${source.resourceId}:${source.version}`,source])).values()]
   return bindScopeSources({records,...(page.length>input.limit?{nextCursor:compiled.cursorFor(page[input.limit-1])}:{}),...(aggregates?{aggregates}:{})},unique)
+}
+
+
+/** Complete selected snapshots for compiled legacy query templates. No raw payload crosses this port. */
+export async function captureCanonicalNativeQueryCandidates(context:CanonicalGenericReadContext,definition:ApplicationResourceDefinition,fields:readonly string[]) {
+  if(definition.origin.kind!=='native'||definition.origin.moduleKey!=='native'||!['company','person','deal','task'].includes(definition.typeKey)
+    ||new Set(fields).size!==fields.length||fields.some(key=>!definition.fields.some(field=>field.key===key)))throw unavailable()
+  const domain=capture.safeParse((await runCanonicalReadLease(context,()=>context.transaction.query<{value:unknown}>(
+    'SELECT observe_native_application_query_domain($1,$2,$3,$3) AS value',[context.workspaceId,definition.typeKey,[...fields].sort()]))).rows[0]?.value)
+  if(!domain.success||Object.keys(domain.data.values).length||domain.data.sources[0].resourceKind!=='application_field'
+    ||domain.data.sources.some(source=>source.workspaceId!==context.workspaceId))throw unavailable()
+  const identity=domain.data.sources[0]
+  const candidates=z.array(row).max(4096).parse((await runCanonicalReadLease(context,()=>context.transaction.query(
+    'SELECT * FROM read_native_application_query_candidates($1,$2,$3,$4,$5)',
+    [context.workspaceId,definition.typeKey,[...fields].sort(),identity.resourceId,identity.version]))).rows)
+  for(const candidate of candidates) {
+    if(candidate.sources.some(source=>source.workspaceId!==context.workspaceId)
+      ||!fields.every(field=>Object.hasOwn(candidate.data,field))||Object.keys(candidate.data).length!==fields.length)throw unavailable()
+    validateCanonicalNativeValues(definition,candidate.data)
+  }
+  return bindScopeSources(candidates,[...domain.data.sources,...candidates.flatMap(candidate=>candidate.sources)])
 }

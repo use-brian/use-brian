@@ -409,6 +409,8 @@ describe('[COMP:api/application-auth] database application projections and live 
       await fixture.query('BEGIN')
       await fixture.query('ALTER TABLE entities DISABLE TRIGGER application_native_entity_values')
       await fixture.query('UPDATE entities SET attributes=$2 WHERE id=$1',[id,attributes])
+      // Flush canonical deferred history/source guards before this fixture DDL.
+      await fixture.query('SET CONSTRAINTS ALL IMMEDIATE')
       await fixture.query('ALTER TABLE entities ENABLE TRIGGER application_native_entity_values')
       await fixture.query('COMMIT')
     } finally {await fixture.query('ROLLBACK');fixture.release()}
@@ -614,7 +616,7 @@ describe('[COMP:api/application-auth] database application projections and live 
     const value=await createEntity({workspaceId,kind:type,canonicalId:canonical,displayName:'Fictional fallback codec evidence',attributes:{},createdByUserId:ownerId,source:'user'})
     const fixtures=await Promise.all([0,1].map(()=>provision('service',[field,'name'],undefined,false,value.id,[],[value.id],undefined,'read_write',[],type)))
     const base=createCanonicalNativeApplicationModule(),dispatcher=new ApplicationPlatformService([{...base,application:{...base.application!,queries:[...base.application!.queries,'field_snapshot']},queries:{...base.queries,field_snapshot:{input:z.object({id:z.string().uuid(),version:z.string()}),authorize:async()=>{},execute:async({transaction},raw)=>{const input=raw as {id:string;version:string};return(await transaction.query('SELECT read_admitted_application_field_snapshot($1,$2,$3) AS value',[workspaceId,input.id,input.version])).rows[0].value}}}}])
-    const signature='public.application_native_builtin_field_revision(text,text)',codecSignature='public.application_native_entity_values(text,jsonb)'
+    const signature='public.application_native_builtin_field_revision(text,text)',codecSignature='public.application_native_entity_values_before_completion(text,jsonb)'
     const definition=(await pool.query('SELECT pg_get_functiondef($1::regprocedure) AS definition',[signature])).rows[0].definition as string
     const codec=(await pool.query('SELECT pg_get_functiondef($1::regprocedure) AS definition',[codecSignature])).rows[0].definition as string
     const revised="WHEN p_type='company' AND p_field='domain' OR p_type='person' AND p_field='email' THEN 2",legacy=definition.replace(revised,revised.replace('THEN 2','THEN 1'))
@@ -1470,7 +1472,9 @@ describe('[COMP:api/application-auth] database application projections and live 
     expect(row.ref.id).toBe(company.id)
     expect(row.values).toEqual({ name: 'Example custom company', 'custom.region': 'Northern', 'custom.channels': ['partner', 'direct'] })
     await pool.query("UPDATE crm_field_definitions SET archived_at=now() WHERE workspace_id=$1 AND field_key='region'", [workspaceId])
-    const next = await dispatcher.query(execution, 'native', 'get', { type: 'company', id: company.id }) as { values: Record<string, unknown> }
+    await expect(dispatcher.query(execution, 'native', 'get', { type: 'company', id: company.id })).rejects.toThrow('Access changed')
+    const afterArchive = await resolveApplicationExecutionContext(fixture.authentication)
+    const next = await dispatcher.query(afterArchive, 'native', 'get', { type: 'company', id: company.id }) as { values: Record<string, unknown> }
     expect(next.values).not.toHaveProperty('custom.region'); expect(next.values).not.toHaveProperty('custom.private_cost')
     expect((await pool.query("SELECT attributes->'custom_fields'->>'private_cost' AS cost FROM entities WHERE id=$1", [company.id])).rows[0].cost).toBe('750')
   })

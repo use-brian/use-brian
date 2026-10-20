@@ -3,15 +3,20 @@ import pg from 'pg'
 
 /**
  * Integration test for createDbTaskStore + the tasks RLS / trigger surface
- * defined in migration 113. Requires a local PostgreSQL database named
- * `Use Brian` with that migration applied. Skips silently when the DB is
- * unavailable.
+ * defined in migration 113. The maintained disposable fixture is mandatory
+ * when BRIAN_ASSURANCE_FIXTURE is supplied; fixture failures never skip cases.
+ * The historical optional local-database mode is retained outside that fixture.
  */
 
 let pool: pg.Pool | undefined
 
 async function canConnect(): Promise<boolean> {
-  const p = new pg.Pool({ database: 'sidanclaw', connectionTimeoutMillis: 2000 })
+  const guarded=Boolean(process.env.BRIAN_ASSURANCE_FIXTURE)
+  if(guarded) {
+    const {assertLocalFixture}=await import(new URL('../../../../../scripts/crm/local-fixture.mjs',import.meta.url).href)
+    await assertLocalFixture()
+  }
+  const p = new pg.Pool(guarded?{connectionString:process.env.DATABASE_URL,connectionTimeoutMillis:2000}:{database:'sidanclaw',connectionTimeoutMillis:2000})
   try {
     const client = await p.connect()
     try {
@@ -21,8 +26,9 @@ async function canConnect(): Promise<boolean> {
     }
     pool = p
     return true
-  } catch {
+  } catch(error) {
     await p.end().catch(() => {})
+    if(guarded)throw error
     return false
   }
 }
@@ -321,14 +327,13 @@ describeIf('[COMP:api/tasks-store] tasks store + RLS (integration)', () => {
   })
 
   describe('RLS isolation', () => {
-    // RLS isolation cannot be exercised when the test connects as a Postgres
-    // SUPERUSER (the typical local-dev role). Superusers bypass RLS even with
-    // FORCE ROW LEVEL SECURITY enabled. Production runs as a non-superuser, so
-    // the policy does enforce — verified manually with `SET ROLE` in psql. The
-    // crm-store integration suite has the same limitation. To run these tests
-    // against a real RLS gate, connect as a role without rolsuper or
-    // rolbypassrls.
-    it.skip('user A in workspace W1 cannot see tasks in workspace W2 (skipped under superuser)', async () => {
+    beforeAll(async () => {
+      const {getAppPool}=await import('../client.js')
+      const result=await getAppPool().query<{rolsuper:boolean;rolbypassrls:boolean}>(
+        'SELECT rolsuper,rolbypassrls FROM pg_roles WHERE rolname=current_user')
+      expect(result.rows[0]).toEqual({rolsuper:false,rolbypassrls:false})
+    })
+    it('user A in workspace W1 cannot see tasks in workspace W2', async () => {
       const client = await pool!.connect()
       let userA: string, userB: string, w1: string, w2: string
       try {
@@ -348,16 +353,17 @@ describeIf('[COMP:api/tasks-store] tasks store + RLS (integration)', () => {
       // userA should see W1's task and NOT W2's.
       const aList = await store.list({ workspaceId: w1, userId: userA, assistantId: userA, assistantKind: 'standard' }, {})
       expect(aList.map((r) => r.id)).toContain(tA.id)
-      const aListW2 = await store.list({ workspaceId: w2, userId: userA, assistantId: userA, assistantKind: 'standard' }, {})
-      expect(aListW2.map((r) => r.id)).not.toContain(tB.id)
-      expect(aListW2).toHaveLength(0)
+      // A workspace with no native membership has no admitted query domain.
+      // Refuse rather than manufacturing a source-free empty result.
+      await expect(store.list({ workspaceId: w2, userId: userA, assistantId: userA, assistantKind: 'standard' }, {}))
+        .rejects.toMatchObject({code:'access_unavailable'})
 
       // RLS hides W2's task from userA's getById too.
       const aGetW2 = await store.getById({ workspaceId: w2, userId: userA, assistantId: userA, assistantKind: 'standard' }, tB.id)
       expect(aGetW2).toBeNull()
     })
 
-    it.skip('user in BOTH workspaces sees tasks from each (skipped under superuser)', async () => {
+    it('user in BOTH workspaces sees tasks from each', async () => {
       const client = await pool!.connect()
       let userBoth: string, w1: string, w2: string
       try {
@@ -463,38 +469,20 @@ describeIf('[COMP:tasks/supersession] tasks bi-temporal supersession (integratio
     try {
       editorUserId = await makeUser(editorClient)
       await addMember(editorClient, workspaceId, editorUserId)
-      // Stamp universal cols on the original row directly so we can verify
-      // they survive the supersession copy-forward.
-      const c = editorClient
-      await c.query(
-        `UPDATE tasks SET sensitivity = 'restricted', source = 'extracted',
-                          user_id = NULL, assistant_id = NULL,
-                          source_episode_id = $1
-         WHERE workspace_id = $2`,
-        ['11111111-1111-1111-1111-111111111111', workspaceId],
-      )
+      await editorClient.query("UPDATE workspace_members SET clearance='confidential' WHERE workspace_id=$1",[workspaceId])
     } finally {
       editorClient.release()
     }
 
-    const t1 = await store.create({ userId, workspaceId, title: 'Seed' })
-    // Re-stamp cols on this just-created row before updating.
-    const stamp = await pool!.connect()
-    try {
-      await stamp.query(
-        `UPDATE tasks SET sensitivity = 'restricted', source = 'extracted',
-                          source_episode_id = $1
-         WHERE id = $2`,
-        ['11111111-1111-1111-1111-111111111111', t1.id],
-      )
-    } finally {
-      stamp.release()
-    }
+    // Provenance is immutable after creation. Seed the original universal
+    // values through the real create port, then prove they survive an edit.
+    const t1 = await store.create({userId,workspaceId,title:'Seed',sensitivity:'confidential',source:'extracted',
+      sourceEpisodeId:'11111111-1111-1111-1111-111111111111'})
 
     const t2 = await store.update(editorUserId, t1.id, { title: 'Edited' })
     expect(t2).not.toBeNull()
     const newRaw = await rawRow(t2!.id)
-    expect(newRaw!.sensitivity).toBe('restricted')
+    expect(newRaw!.sensitivity).toBe('confidential')
     expect(newRaw!.source).toBe('extracted')
     expect(newRaw!.source_episode_id).toBe('11111111-1111-1111-1111-111111111111')
     expect(newRaw!.created_by_user_id).toBe(editorUserId)

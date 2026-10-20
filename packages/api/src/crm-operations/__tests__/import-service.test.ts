@@ -1,22 +1,31 @@
 import { createHash } from 'node:crypto'
 import { beforeEach, describe, expect, it, vi } from 'vitest'
 import type { CrmOperationsContext, FilesApi } from '@use-brian/core'
+import { CrmOperationsError } from '@use-brian/core'
 
-const mocks = vi.hoisted(() => ({ query: vi.fn(), createContact: vi.fn(), updateContact: vi.fn() }))
+const mocks = vi.hoisted(() => ({ query: vi.fn(), createContact: vi.fn(), updateContact: vi.fn(),
+  transactionQuery: vi.fn(), connect: vi.fn(), release: vi.fn(), applyRLSGucs: vi.fn(), lockCredential: vi.fn(), readCredential: vi.fn() }))
 
-vi.mock('../../db/client.js', () => ({ query: mocks.query, getPool: () => ({
+vi.mock('../../db/client.js', () => {const pool={
   // Department scope probes see a legacy workspace; v2 import floors are proven against real PostgreSQL.
   query: async (sql: string) => sql.includes('department_read_v2 AS v2') ? { rows: [{ v2: false }] } : { rows: [] },
-  connect: async () => ({
-  release: () => {},
-  query: (sql: string, values: unknown[]) => {
+  connect: async () => { const connectionId = mocks.connect.mock.calls.length; mocks.connect(connectionId); return {
+  release: () => mocks.release(connectionId),
+  query: async (sql: string, values: unknown[]) => {
+    const intercepted = await mocks.transactionQuery(sql, values, connectionId)
+    if (intercepted !== undefined) return intercepted
+    if (sql.startsWith('SELECT id,created_by_user_id AS "userId",')) return { rows: [{ userId: '22222222-2222-4222-8222-222222222222', active: true }] }
+    if(sql.includes('pg_catalog.pg_roles'))return Promise.resolve({rows:[{bypass:false}]})
+    if(sql.includes("nullif(current_setting('app.current_user_id'"))return Promise.resolve({rows:[{userId:'22222222-2222-4222-8222-222222222222'}]})
     if (/^(BEGIN|COMMIT|ROLLBACK|SAVEPOINT|RELEASE SAVEPOINT)/.test(sql) || sql.includes("set_config('app.system_bypass'") || sql.includes('pg_advisory_xact_lock')) return Promise.resolve({ rows: [] })
     if (sql.startsWith('SELECT 1 FROM workspace_modules WHERE workspace_id=$1 AND module_key=$2 FOR SHARE')) return Promise.resolve({ rows: [] })
     if (sql.startsWith('SELECT id FROM workspaces WHERE id=$1 AND department_read_v2 FOR UPDATE')) return Promise.resolve({ rows: [] })
     if (sql.includes('SELECT role FROM workspace_members')) return Promise.resolve({ rows: [{ role: 'admin' }] })
     return mocks.query(sql, values)
   },
-}) }) }))
+} } };return {query:mocks.query,getPool:()=>pool,getAppPool:()=>pool,applyRLSGucs:mocks.applyRLSGucs} })
+vi.mock('../../db/crm-integration-store.js', () => ({ lockCrmIntegrationCredential: mocks.lockCredential, readCrmIntegrationCredential: mocks.readCredential }))
+vi.mock('../../db/crm-reader.js',()=>({queryLegacyCanonicalCrmSql:async(_access:unknown,_templates:unknown,sql:string,values:unknown[],client:{query:(sql:string,values:unknown[])=>Promise<unknown>})=>client.query(sql,values)}))
 vi.mock('../../db/crm.js', () => ({
   createContact: mocks.createContact,
   createCompany: vi.fn(),
@@ -79,13 +88,226 @@ function job(status: 'ready' | 'paused' | 'completed', overrides: Record<string,
 
 describe('[COMP:crm/production-import] production CRM import', () => {
   beforeEach(() => {
-    vi.clearAllMocks()
+    vi.resetAllMocks()
     readBytes.mockResolvedValue({ ok: true, value: { file: { id: fileId }, bytes } })
     mocks.createContact.mockResolvedValue({ id: entityId })
     mocks.updateContact.mockResolvedValue({ id: entityId })
     operations.execute.mockResolvedValue({
       command: 'record_consent', record: { id: entityId }, created: true, duplicate: false, emittedEventIds: [],
     })
+  })
+
+  function cancellationService(overrides: Parameters<typeof createCrmProductionImportService>[0] = {
+    operationsForTransaction: () => operations as never,
+  }) {
+    let cancelled = false
+    mocks.query.mockImplementation(async (sql: string) => {
+      if (sql.includes('FROM crm_import_jobs WHERE')) return { rows: [job('ready', {
+        status: cancelled ? 'cancelled' : 'ready',
+      })] }
+      if (sql.includes("UPDATE crm_import_jobs SET status='cancelled'")) cancelled = true
+      return { rows: [] }
+    })
+    return createCrmProductionImportService(overrides)
+  }
+  const admissionSql = 'SELECT id FROM workspaces WHERE id=$1 AND department_read_v2 FOR UPDATE'
+  const credentialPrecheckSql = 'SELECT id,created_by_user_id AS "userId",'
+  const statementTimeout = () => Object.assign(new Error('canceling statement due to statement timeout'), { code: '57014' })
+
+  it.each(['module', 'workspace'])('retries one rolled-back %s admission wait with fresh job and member checks', async (gate) => {
+    const service = cancellationService()
+    const trace: string[] = []
+    mocks.connect.mockImplementation((id: number) => trace.push(`connect:${id}`))
+    mocks.release.mockImplementation((id: number) => trace.push(`release:${id}`))
+    const selectedGate = gate === 'workspace' ? admissionSql
+      : 'SELECT 1 FROM workspace_modules WHERE workspace_id=$1 AND module_key=$2 FOR SHARE'
+    mocks.transactionQuery.mockImplementation(async (sql: string, _values: unknown[], connectionId: number) => {
+      trace.push(`${connectionId}:${sql}`)
+      if (connectionId === 0 && sql === selectedGate) throw statementTimeout()
+    })
+    const originalContext = structuredClone(context)
+    await expect(service.cancel(context, jobId)).resolves.toMatchObject({ id: jobId, status: 'cancelled' })
+    expect(context).toEqual(originalContext)
+    expect(mocks.connect).toHaveBeenCalledTimes(2)
+    expect(mocks.release.mock.calls).toEqual([[0], [1]])
+    expect(trace.indexOf('release:0')).toBeLessThan(trace.indexOf('connect:1'))
+    const secondMemberChecks = mocks.transactionQuery.mock.calls.filter(([sql, , id]) => id === 1 && String(sql).includes('SELECT role FROM workspace_members'))
+    expect(secondMemberChecks).toHaveLength(2)
+    const secondCalls = mocks.transactionQuery.mock.calls.filter(([, , id]) => id === 1).map(([sql]) => String(sql))
+    expect(secondCalls.findIndex((sql) => sql.includes('SELECT role FROM workspace_members'))).toBeLessThan(secondCalls.indexOf(admissionSql))
+    const secondMemberSql = secondCalls.filter((sql) => sql.includes('SELECT role FROM workspace_members'))
+    expect(secondMemberSql[0]).not.toContain('FOR SHARE')
+    expect(secondMemberSql[1]).toContain('FOR SHARE')
+    expect(mocks.query.mock.calls.filter(([sql]) => String(sql).includes('FROM crm_import_jobs WHERE'))).toHaveLength(4)
+    expect(mocks.query.mock.calls.filter(([sql]) => String(sql).includes("UPDATE crm_import_jobs SET status='cancelled'"))).toHaveLength(1)
+    expect(mocks.transactionQuery.mock.calls.filter(([sql]) => sql === 'ROLLBACK')).toHaveLength(1)
+    expect(mocks.transactionQuery.mock.calls.filter(([sql]) => sql === 'COMMIT')).toHaveLength(1)
+    expect(mocks.applyRLSGucs.mock.calls.every(([, actor]) => actor === userId)).toBe(true)
+    expect(operations.execute).not.toHaveBeenCalled()
+  })
+
+  it('stops after a second admission timeout and exposes that original database error', async () => {
+    const service = cancellationService()
+    const errors = [statementTimeout(), statementTimeout()]
+    mocks.transactionQuery.mockImplementation(async (sql: string, _values: unknown[], id: number) => {
+      if (sql === admissionSql) throw errors[id]
+    })
+    await expect(service.cancel(context, jobId)).rejects.toBe(errors[1])
+    expect(mocks.connect).toHaveBeenCalledTimes(2)
+    expect(mocks.release).toHaveBeenCalledTimes(2)
+    expect(mocks.transactionQuery.mock.calls.filter(([sql]) => sql === 'ROLLBACK')).toHaveLength(2)
+    expect(mocks.query.mock.calls.filter(([sql]) => String(sql).includes("UPDATE crm_import_jobs SET status='cancelled'"))).toHaveLength(0)
+  })
+
+  it.each([
+    ['57014', 'canceling statement due to user request'],
+    ['57014', 'another database cancellation'],
+    ['57015', 'canceling statement due to statement timeout'],
+  ])('does not retry admission failure %s with message %s', async (code, message) => {
+    const service = cancellationService()
+    const error = Object.assign(new Error(message), { code })
+    mocks.transactionQuery.mockImplementation(async (sql: string) => { if (sql === admissionSql) throw error })
+    await expect(service.cancel(context, jobId)).rejects.toBe(error)
+    expect(mocks.connect).toHaveBeenCalledTimes(1)
+    expect(mocks.release).toHaveBeenCalledTimes(1)
+    expect(mocks.query.mock.calls.filter(([sql]) => String(sql).includes("UPDATE crm_import_jobs SET status='cancelled'"))).toHaveLength(0)
+  })
+
+  it('does not retry an admission timeout when rollback cannot be confirmed', async () => {
+    const service = cancellationService()
+    const error = statementTimeout()
+    mocks.transactionQuery.mockImplementation(async (sql: string) => {
+      if (sql === admissionSql) throw error
+      if (sql === 'ROLLBACK') throw new Error('Connection lost during rollback.')
+    })
+    await expect(service.cancel(context, jobId)).rejects.toBe(error)
+    expect(mocks.connect).toHaveBeenCalledTimes(1)
+    expect(mocks.release).toHaveBeenCalledTimes(1)
+    expect(mocks.transactionQuery.mock.calls.filter(([sql]) => sql === 'COMMIT')).toHaveLength(0)
+  })
+
+  it.each(['business', 'commit', 'member'])('does not retry a statement timeout during %s', async (phase) => {
+    const service = cancellationService()
+    const error = statementTimeout()
+    mocks.transactionQuery.mockImplementation(async (sql: string) => {
+      if (phase === 'business' && sql.includes("UPDATE crm_import_jobs SET status='cancelled'")
+        || phase === 'commit' && sql === 'COMMIT'
+        || phase === 'member' && sql.includes('SELECT role FROM workspace_members')) throw error
+    })
+    await expect(service.cancel(context, jobId)).rejects.toBe(error)
+    expect(mocks.connect).toHaveBeenCalledTimes(1)
+    expect(mocks.release).toHaveBeenCalledTimes(1)
+    expect(mocks.transactionQuery.mock.calls.filter(([sql]) => sql === 'ROLLBACK')).toHaveLength(1)
+  })
+
+  it('refuses revoked membership before the second blocking admission', async () => {
+    const service = cancellationService()
+    mocks.transactionQuery.mockImplementation(async (sql: string, _values: unknown[], id: number) => {
+      if (id === 0 && sql === admissionSql) throw statementTimeout()
+      if (id === 1 && sql.includes('SELECT role FROM workspace_members')) return { rows: [] }
+    })
+    await expect(service.cancel(context, jobId)).rejects.toMatchObject({ code: 'not_authorized' })
+    expect(mocks.connect).toHaveBeenCalledTimes(2)
+    expect(mocks.transactionQuery.mock.calls.filter(([sql, , id]) => id === 1 && sql === admissionSql)).toHaveLength(0)
+    expect(mocks.query.mock.calls.filter(([sql]) => String(sql).includes("UPDATE crm_import_jobs SET status='cancelled'"))).toHaveLength(0)
+  })
+
+  it('rechecks job visibility before connecting for the fresh cancellation attempt', async () => {
+    const service = cancellationService()
+    mocks.query.mockResolvedValueOnce({ rows: [job('ready')] }).mockResolvedValueOnce({ rows: [] })
+    mocks.transactionQuery.mockImplementation(async (sql: string) => { if (sql === admissionSql) throw statementTimeout() })
+    await expect(service.cancel(context, jobId)).rejects.toMatchObject({ code: 'not_found' })
+    expect(mocks.connect).toHaveBeenCalledTimes(1)
+    expect(mocks.release).toHaveBeenCalledTimes(1)
+    expect(mocks.transactionQuery.mock.calls.filter(([sql]) => sql === 'COMMIT')).toHaveLength(0)
+  })
+
+  it('refuses a changed key issuer instead of substituting an actor on retry', async () => {
+    const issuer = vi.fn().mockResolvedValueOnce({ rows: [{ userId }] })
+      .mockResolvedValueOnce({ rows: [{ userId: entityId }] })
+    const service = cancellationService({ operationsForTransaction: () => operations as never, pool: { query: issuer } as never })
+    mocks.transactionQuery.mockImplementation(async (sql: string) => { if (sql === admissionSql) throw statementTimeout() })
+    const keyContext: CrmOperationsContext = { ...context, actor: { kind: 'integration_key', credentialId: confirmationKey },
+      authority: { ...context.authority, integration: { credentialId: confirmationKey,
+        grants: [{ operation: 'crm.imports.write', selectors: {} }] } } }
+    await expect(service.cancel(keyContext, jobId)).rejects.toMatchObject({ code: 'not_authorized' })
+    expect(issuer).toHaveBeenCalledTimes(2)
+    expect(mocks.connect).toHaveBeenCalledTimes(1)
+    expect(mocks.lockCredential).not.toHaveBeenCalled()
+    expect(mocks.applyRLSGucs.mock.calls.every(([, actor]) => actor === userId)).toBe(true)
+  })
+
+  it.each(['missing', 'revoked', 'expired', 'issuer'])('refuses %s key metadata before a repeated blocking admission', async (state) => {
+    const issuer = vi.fn().mockResolvedValue({ rows: [{ userId }] })
+    const service = cancellationService({ operationsForTransaction: () => operations as never, pool: { query: issuer } as never })
+    mocks.transactionQuery.mockImplementation(async (sql: string, _values: unknown[], id: number) => {
+      if (id === 0 && sql === admissionSql) throw statementTimeout()
+      if (id === 1 && sql.startsWith(credentialPrecheckSql)) return { rows: state === 'missing' ? []
+        : [{ userId: state === 'issuer' ? entityId : userId, active: state === 'issuer' }] }
+    })
+    const keyContext: CrmOperationsContext = { ...context, actor: { kind: 'integration_key', credentialId: confirmationKey },
+      authority: { ...context.authority, integration: { credentialId: confirmationKey,
+        grants: [{ operation: 'crm.imports.write', selectors: {} }] } } }
+    await expect(service.cancel(keyContext, jobId)).rejects.toMatchObject({ code: 'not_authorized' })
+    expect(mocks.readCredential).not.toHaveBeenCalled()
+    expect(mocks.lockCredential).not.toHaveBeenCalled()
+    expect(mocks.transactionQuery.mock.calls.filter(([sql, , id]) => id === 1 && sql === admissionSql)).toHaveLength(0)
+    expect(mocks.release.mock.calls).toEqual([[0], [1]])
+  })
+
+  it.each(['member', 'key'])('retains locked %s renewal after a successful refusal-only retry precheck', async (actor) => {
+    const issuer = vi.fn().mockResolvedValue({ rows: [{ userId }] })
+    const service = cancellationService({ operationsForTransaction: () => operations as never, pool: { query: issuer } as never })
+    mocks.transactionQuery.mockImplementation(async (sql: string, _values: unknown[], id: number) => {
+      if (id === 0 && sql === admissionSql) throw statementTimeout()
+      if (actor === 'member' && id === 1 && sql.includes('SELECT role FROM workspace_members') && sql.includes('FOR SHARE')) return { rows: [] }
+    })
+    const grants = [{ operation: 'crm.imports.write' as const, selectors: {} }]
+    mocks.lockCredential.mockRejectedValue(new CrmOperationsError('credential_revoked', 'Credential revoked after precheck.'))
+    const current: CrmOperationsContext = actor === 'member' ? context
+      : { ...context, actor: { kind: 'integration_key', credentialId: confirmationKey },
+        authority: { ...context.authority, integration: { credentialId: confirmationKey, grants } } }
+    await expect(service.cancel(current, jobId)).rejects.toMatchObject({ code: 'not_authorized' })
+    expect(mocks.connect).toHaveBeenCalledTimes(2)
+    expect(mocks.transactionQuery.mock.calls.filter(([sql, , id]) => id === 1 && sql === admissionSql)).toHaveLength(1)
+    expect(mocks.query.mock.calls.filter(([sql]) => String(sql).includes("UPDATE crm_import_jobs SET status='cancelled'"))).toHaveLength(0)
+    if (actor === 'key') {
+      expect(mocks.readCredential).not.toHaveBeenCalled()
+      expect(mocks.lockCredential).toHaveBeenCalledTimes(1)
+      const secondQueries = mocks.transactionQuery.mock.calls.filter(([, , id]) => id === 1).map(([sql]) => String(sql))
+      expect(secondQueries.findIndex((sql) => sql.startsWith(credentialPrecheckSql))).toBeLessThan(secondQueries.indexOf(admissionSql))
+      expect(secondQueries.find((sql) => sql.startsWith(credentialPrecheckSql))).not.toMatch(/FOR (SHARE|UPDATE)/)
+    }
+    expect(mocks.release.mock.calls).toEqual([[0], [1]])
+  })
+
+  it('admits an independent current key only after full locked renewal and commit renewal', async () => {
+    const issuer = vi.fn().mockResolvedValue({ rows: [{ userId }] })
+    const service = cancellationService({ operationsForTransaction: () => operations as never, pool: { query: issuer } as never })
+    const grants = [{ operation: 'crm.imports.write' as const, selectors: {} }]
+    let cancelled = false
+    mocks.query.mockImplementation(async (sql: string) => {
+      if (sql.includes('FROM crm_import_jobs WHERE')) return { rows: [job('ready', {
+        stagedFileId: null, sourceId: entityId, integrationCredentialId: confirmationKey,
+        integrationGrants: grants, status: cancelled ? 'cancelled' : 'ready',
+      })] }
+      if (sql.includes("UPDATE crm_import_jobs SET status='cancelled'")) cancelled = true
+      return { rows: [] }
+    })
+    mocks.transactionQuery.mockImplementation(async (sql: string, _values: unknown[], id: number) => {
+      if (id === 0 && sql === admissionSql) throw statementTimeout()
+    })
+    mocks.lockCredential.mockImplementation(async () => {
+      expect(mocks.transactionQuery.mock.calls.filter(([sql, , id]) => id === 1 && sql === admissionSql)).toHaveLength(1)
+      return { workspaceId, credentialId: confirmationKey, grants }
+    })
+    const current: CrmOperationsContext = { ...context, actor: { kind: 'integration_key', credentialId: confirmationKey },
+      authority: { ...context.authority, integration: { credentialId: confirmationKey, grants } } }
+    await expect(service.cancel(current, jobId)).resolves.toMatchObject({ status: 'cancelled' })
+    expect(mocks.readCredential).not.toHaveBeenCalled()
+    expect(mocks.lockCredential).toHaveBeenCalledTimes(2)
+    expect(mocks.query.mock.calls.filter(([sql]) => String(sql).includes("UPDATE crm_import_jobs SET status='cancelled'"))).toHaveLength(1)
+    expect(mocks.release.mock.calls).toEqual([[0], [1]])
   })
 
   it('dry-runs the full staged file without creating database rows', async () => {
@@ -351,7 +573,6 @@ describe('[COMP:crm/production-import] production CRM import', () => {
         id: 'chunk', status: 'running',
         inputHash: createHash('sha256').update(JSON.stringify([cells])).digest('hex'),
       }] })
-      .mockResolvedValueOnce({ rows: [] })
       .mockResolvedValueOnce({ rows: [] })
       .mockResolvedValueOnce({ rows: [] })
       .mockResolvedValueOnce({ rows: [] })

@@ -1,4 +1,4 @@
-import type { CrmStore, EntityLinksStore } from '@use-brian/core'
+import { bindScopeSources,boundScopeSources,type CrmStore,type EntityLinksStore } from '@use-brian/core'
 import {
   createCompany, getCompanyById, listCompanies, updateCompany,
   createContact, getContactById, listContacts, updateContact,
@@ -6,17 +6,15 @@ import {
   batchLabels,
   readCrmMutationSource, runCrmWriteTransaction,
 } from './crm.js'
-import { appendCrmActivity, getCrmConfig, updateCrmCustomFields } from './crm-r2.js'
-import { getEntityById } from './entities-store.js'
+import { appendCrmActivity, getCrmConfig,getCrmR2Record, updateCrmCustomFields } from './crm-r2.js'
 
 /**
  * Create a CrmStore backed by PostgreSQL.
  * Adapts the SQL helpers in `crm.ts` to the core `CrmStore` interface.
  *
- * All operations route through `queryWithRLS(userId, ...)` so the
- * `*_workspace_member` RLS policies enforce workspace isolation. The SQL
- * also filters by `workspace_id` explicitly — RLS is the second layer of
- * defense.
+ * Reads reuse canonical current native/application field and source ports.
+ * Writers retain their actual authenticated transaction and native operation
+ * checks; every SQL path is restricted to its workspace.
  *
  * WU-1.7 — the optional `entityLinks` dependency wires the edge-write
  * hooks: `createContact` / `createDeal` emit `works_at` / `engagement_of`
@@ -85,16 +83,16 @@ export function createDbCrmStore(deps: { entityLinks?: EntityLinksStore } = {}):
         : config.fields
     },
     async getCustomFields(ctx, entityId) {
-      const entity = await getEntityById(ctx, entityId)
+      const entity = await getCrmR2Record(ctx, entityId)
       if (!entity || !['person', 'company', 'deal'].includes(entity.kind)) return null
       const current = entity.attributes.custom_fields
-      return {
+      return bindScopeSources({
         id: entity.id,
         entityKind: entity.kind as 'person' | 'company' | 'deal',
         values: current && typeof current === 'object' && !Array.isArray(current)
           ? current as Record<string, unknown>
           : {},
-      }
+      },boundScopeSources(entity))
     },
     async setCustomFields(ctx, entityId, values) {
       return runCrmWriteTransaction(ctx.userId, async tx => {

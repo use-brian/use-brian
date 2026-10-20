@@ -1720,7 +1720,7 @@ export function viewsRoutes(opts: ViewsRouteOptions): Router {
     if (!view) return notFound(res, 'View not found')
     const page = await opts.savedViewStore.getPage(userId, view.id)
     try {
-      const rendered = await renderPublicPage(opts, view.workspaceId, page ?? { blocks: [] }, view.id)
+      const rendered = await renderPublicPage(opts, view.workspaceId, page ?? { blocks: [] }, view.id,{kind:'preview',userId})
       res.json({
         title: view.name,
         icon: view.icon ?? null,

@@ -31,10 +31,11 @@ import type {
 import { AssociationPromotionImportSchema, AssociationSourceMembershipImportSchema, AssociationSourceOrderImportSchema, CrmOperationsError, actorAuditIdentity, type AssociationActor } from '@use-brian/core'
 import { createCompany, createContact, createDeal, updateContact, type CrmWriteTransaction } from '../db/crm.js'
 import { updateCrmCustomFields } from '../db/crm-r2.js'
-import { getEntityById, updateEntity } from '../db/entities-store.js'
-import { getPool, query } from '../db/client.js'
+import { updateEntity } from '../db/entities-store.js'
+import { applyRLSGucs, getAppPool, getPool, query } from '../db/client.js'
+import { queryLegacyCanonicalCrmSql } from '../db/crm-reader.js'
 import { lockCrmIntegrationCredential, type CrmIntegrationPrincipal } from '../db/crm-integration-store.js'
-import { runWithAgentAccess } from '../db/agent-access-context.js'
+import { currentAgentAccess, runWithAgentAccess } from '../db/agent-access-context.js'
 import { parseCsv } from '../linkedin-import/csv.js'
 import { createCrmImportSources, type CrmImportSources } from '../db/crm-import-sources.js'
 import { importGrantSnapshot, requireImportCeiling, requireImportOperation, requireImportRowAuthority } from './import-authority.js'
@@ -190,6 +191,13 @@ type ImportCustomDefinition = {
 }
 
 type ImportServiceContext = CrmOperationsContext
+
+/** Only a rolled-back, pre-business cancellation admission may produce this. */
+class ImportAdmissionWaitTimeout extends Error {
+  constructor(readonly originalError: unknown, readonly actorUserId: string) {
+    super('Import cancellation admission timed out before business execution.')
+  }
+}
 
 const IMPORT_RESULT_KINDS = [
   'contact', 'company', 'deal', 'consent', 'suppression', 'entitlement',
@@ -701,15 +709,27 @@ export function createCrmProductionImportService(deps: {
   async function importTransaction<T>(context: ImportServiceContext,
     run: (current: ImportServiceContext, client: PoolClient, effects: Array<() => void>) => Promise<T>,
     waitForWorkspace = false,
+    expectedActorUserId?: string,
   ): Promise<T> {
-    const client = await (deps.pool ?? getPool()).connect()
+    // Only verified actor/issuer metadata uses the owner metadata pool.
+    let actorUserId: string
+    if(context.actor.kind==='user')actorUserId=context.actor.userId
+    else if(context.actor.kind==='integration_key') {
+      const issuer=await (deps.pool??getPool()).query<{userId:string|null}>(
+        'SELECT created_by_user_id AS "userId" FROM crm_integration_credentials WHERE workspace_id=$1 AND id=$2',
+        [context.workspaceId,context.actor.credentialId])
+      if(!issuer.rows[0]?.userId)throw new CrmOperationsError('not_authorized','Current import credential issuer is required.')
+      actorUserId=issuer.rows[0].userId
+    }else throw new CrmOperationsError('not_authorized','Current import actor is required.')
+    if (expectedActorUserId !== undefined && actorUserId !== expectedActorUserId) {
+      throw new CrmOperationsError('not_authorized', 'The import actor changed before cancellation admission.')
+    }
+    const client = await getAppPool().connect()
     const effects: Array<() => void> = []
     let result: T
     let integration: CrmIntegrationPrincipal | undefined
-    try {
-      await client.query('BEGIN')
-      await beginAssociationCreation(client, context.workspaceId, !waitForWorkspace)
-      await client.query(`SELECT set_config('app.system_bypass','true',true)`)
+    let admissionTimeout: unknown
+    const renewAuthority = async () => {
       if (context.actor.kind === 'user') {
         const member = await client.query<{ role: string }>(`SELECT role FROM workspace_members
           WHERE workspace_id=$1 AND user_id=$2 FOR SHARE`, [context.workspaceId, context.actor.userId])
@@ -726,7 +746,43 @@ export function createCrmProductionImportService(deps: {
         requireImportCeiling(integration,
           context.authority.integration ? importGrantSnapshot(context.authority.integration) : undefined)
       }
-      const execute = () => run(context, client, effects)
+    }
+    try {
+      await client.query('BEGIN')
+      const role=await client.query<{bypass:boolean}>(`SELECT r.rolsuper OR r.rolbypassrls OR pg_has_role(r.oid,c.relowner,'USAGE') AS bypass
+        FROM pg_catalog.pg_roles r JOIN pg_catalog.pg_class c ON c.oid='entities'::regclass WHERE r.rolname=session_user`)
+      if(role.rows[0]?.bypass!==false)throw new CrmOperationsError('not_authorized','A non-owner import data role is required.')
+      await applyRLSGucs(client,actorUserId)
+      // Refusal-only metadata checks cannot acquire transitive parent/department locks.
+      if (expectedActorUserId !== undefined) {
+        if (context.actor.kind === 'user') {
+          const member = await client.query(`SELECT role FROM workspace_members
+            WHERE workspace_id=$1 AND user_id=$2`, [context.workspaceId, actorUserId])
+          if (!member.rows[0]) throw new CrmOperationsError('not_authorized', 'Current workspace membership is required for imports.')
+        } else if (context.actor.kind === 'integration_key') {
+          const credential = await client.query<{ userId: string | null; active: boolean }>(
+            `SELECT id,created_by_user_id AS "userId",
+              revoked_at IS NULL AND expires_at>clock_timestamp() AS active
+              FROM crm_integration_credentials WHERE workspace_id=$1 AND id=$2`,
+            [context.workspaceId, context.actor.credentialId])
+          if (credential.rows[0]?.active !== true || credential.rows[0].userId !== actorUserId) {
+            throw new CrmOperationsError('not_authorized', 'The import credential is no longer active for its original issuer.')
+          }
+        }
+      }
+      try {
+        await beginAssociationCreation(client, context.workspaceId, !waitForWorkspace)
+      } catch (error) {
+        const databaseError = error as { code?: string; message?: string }
+        if (waitForWorkspace && databaseError?.code === '57014'
+          && databaseError.message === 'canceling statement due to statement timeout') admissionTimeout = error
+        throw error
+      }
+      await renewAuthority()
+      const execute = async () => {
+        await applyRLSGucs(client, actorUserId)
+        return run(context, client, effects)
+      }
       result = integration?.departmentRead ? await runWithAgentAccess({ workspaceId: context.workspaceId,
         userId: integration.departmentRead.userId, departmentRead: integration.departmentRead,
         clearance: 'confidential', compartments: null, ...integration.executionLimits }, execute) : await execute()
@@ -738,7 +794,11 @@ export function createCrmProductionImportService(deps: {
       }
       await client.query('COMMIT')
     } catch (error) {
-      await client.query('ROLLBACK').catch(() => undefined)
+      let rolledBack = false
+      try { await client.query('ROLLBACK'); rolledBack = true } catch { /* No retry without confirmed rollback. */ }
+      if (admissionTimeout !== undefined && admissionTimeout === error && rolledBack && effects.length === 0) {
+        throw new ImportAdmissionWaitTimeout(error, actorUserId)
+      }
       if ((error as { code?: string })?.code === '55P03') throw new CrmOperationsError('conflict', 'Import job is already processing.', { reason: 'import_processing' })
       throw error
     } finally { client.release() }
@@ -791,16 +851,28 @@ export function createCrmProductionImportService(deps: {
     if (requested.length === 0) return new Map()
     if (input.entityKind === 'operations') throw new Error('Operations-only imports cannot map custom entity fields.')
     const entityKind = input.entityKind === 'contact' ? 'person' : input.entityKind
-    const result = await (client ? client.query.bind(client) : query)<{
+    if (!client) return importTransaction(context, (current, transactionClient) => customCatalogFor(current, input, transactionClient))
+    const actor = (await client.query<{ userId: string | null }>(
+      "SELECT nullif(current_setting('app.current_user_id',true),'') AS \"userId\"",
+    )).rows[0]?.userId ?? undefined
+    const ambient = currentAgentAccess()
+    if (!isUuid(actor) || context.actor.kind === 'user' && context.actor.userId !== actor
+      || ambient?.workspaceId !== undefined && ambient.workspaceId !== context.workspaceId
+      || ambient?.userId !== undefined && ambient.userId !== actor) {
+      throw new CrmOperationsError('not_authorized', 'Current import schema actor is required.')
+    }
+    const access: AccessContext = { ...ambient, workspaceId: context.workspaceId, userId: actor!,
+      assistantId: '', assistantKind: 'primary', clearance: ambient?.clearance ?? 'confidential' }
+    const result = await queryLegacyCanonicalCrmSql<{
       fieldKey: string
       fieldType: ImportCustomDefinition['fieldType']
       options: unknown
-    }>(
+    }>(access, [],
       `SELECT field_key AS "fieldKey",field_type AS "fieldType",options
          FROM crm_field_definitions
         WHERE workspace_id=$1 AND entity_kind=$2 AND archived_at IS NULL
           AND field_key=ANY($3::text[])`,
-      [context.workspaceId, entityKind, requested],
+      [context.workspaceId, entityKind, requested], client,
     )
     const catalog = new Map(result.rows.map((field) => [field.fieldKey, {
       fieldKey: field.fieldKey,
@@ -966,31 +1038,31 @@ export function createCrmProductionImportService(deps: {
     return jobProjection(existing)
   }
 
-  async function findImportedEntity(workspaceId: string, importKey: string, client: PoolClient): Promise<string | null> {
-    const found = await client.query<{ id: string }>(
-      `SELECT id FROM entities
-        WHERE workspace_id=$1 AND valid_to IS NULL
-          AND attributes->'external_ref'->>'import_key'=$2
-        ORDER BY created_at LIMIT 1`,
-      [workspaceId, importKey],
-    )
-    return found.rows[0]?.id ?? null
+  async function findImportedEntity(access: AccessContext, kind: CrmImportEntityKind, importKey: string, client: PoolClient): Promise<string | null> {
+    if(kind==='operations')return null
+    const type=kind==='contact'?'person':kind
+    const found=await queryLegacyCanonicalCrmSql<{id:string}>(access,[{type,fields:['externalRef','createdAt']}],
+      `SELECT id FROM entities WHERE workspace_id=$1 AND kind=$3 AND valid_to IS NULL
+        AND attributes->'external_ref'->>'import_key'=$2 ORDER BY created_at,id LIMIT 1`,
+      [access.workspaceId,importKey,type],client)
+    return found.rows[0]?.id??null
   }
 
   async function findUniqueTrustedEmailContact(
-    workspaceId: string,
+    access: AccessContext,
     email: string,
     client: PoolClient,
   ): Promise<{ id: string; attributes: Record<string, unknown> } | null> {
     const normalized = email.trim().toLowerCase()
-    await client.query('SELECT pg_advisory_xact_lock(hashtextextended($1,0))', [JSON.stringify(['crm-intake-identity', workspaceId, 'email', normalized])])
-    const found = await client.query<{ id: string; attributes: Record<string, unknown> }>(
+    await client.query('SELECT pg_advisory_xact_lock(hashtextextended($1,0))', [JSON.stringify(['crm-intake-identity', access.workspaceId, 'email', normalized])])
+    const found = await queryLegacyCanonicalCrmSql<{ id: string; attributes: Record<string, unknown> }>(access,
+      [{type:'person',fields:['email','archivedAt','tags','externalRef','createdAt']}],
       `SELECT id,attributes FROM entities
         WHERE workspace_id=$1 AND kind='person' AND valid_to IS NULL
           AND retracted_at IS NULL AND NOT (attributes ? 'crm_archived_at')
           AND lower(btrim(COALESCE(NULLIF(btrim(attributes->>'email'),''),canonical_id,'')))=$2
-        ORDER BY created_at,id LIMIT 2 FOR UPDATE`,
-      [workspaceId, normalized],
+        ORDER BY created_at,id LIMIT 2`,
+      [access.workspaceId, normalized],client,
     )
     if (found.rows.length > 1) throw new CrmOperationsError('conflict', 'Multiple live contacts match this email; review is required.', { reason: 'identity_review_required' })
     return found.rows[0] ?? null
@@ -1009,6 +1081,7 @@ export function createCrmProductionImportService(deps: {
     requireImportRowAuthority(context, job.entityKind, values, job.mapping.trustedIdentitySource)
     const attributionUserId = context.actor.kind === 'user' ? context.actor.userId : await sources().attributionUser(context, transaction.client)
     const access: AccessContext = {
+      ...currentAgentAccess(),
       workspaceId: context.workspaceId,
       userId: attributionUserId,
       assistantId: '',
@@ -1018,7 +1091,7 @@ export function createCrmProductionImportService(deps: {
     const customValues = customValuesFor(values, customCatalog)
     let customApplied=false
     const importKey = `${job.id}:${row.row}`
-    let entityId = await findImportedEntity(context.workspaceId, importKey, transaction.client)
+    let entityId = await findImportedEntity(access, job.entityKind, importKey, transaction.client)
     const resultRefs: ImportResultRef[] = []
     if (!entityId && job.entityKind === 'contact') {
       let stableIdentity: StableExternalIdentity | undefined
@@ -1032,7 +1105,7 @@ export function createCrmProductionImportService(deps: {
       const tags = values.tags?.split(/[|;]/).map((tag) => tag.trim()).filter(Boolean)
       const externalRef = { import_key: importKey, import_job_id: job.id, row_number: row.row }
       const trustedMatch = !stableIdentity && job.mapping.trustedIdentitySource && values.email
-        ? await findUniqueTrustedEmailContact(context.workspaceId, values.email, transaction.client)
+        ? await findUniqueTrustedEmailContact(access, values.email, transaction.client)
         : null
       if (trustedMatch) {
         const currentTags = Array.isArray(trustedMatch.attributes.tags)
@@ -1072,6 +1145,7 @@ export function createCrmProductionImportService(deps: {
     } else if (!entityId && job.entityKind === 'company') {
       const record = await createCompany(attributionUserId, {
         workspaceId: context.workspaceId,
+        mergeByName: false,
           customFields:customValues,
         name: values.name,
         domain: values.domain,
@@ -1098,16 +1172,14 @@ export function createCrmProductionImportService(deps: {
       }, deps.entityLinks, transaction)
       entityId = record.id
         customApplied=true
-      const entity = await getEntityById(access, entityId, {}, transaction.client)
-      if (entity) {
-        await updateEntity(attributionUserId, entityId, {
-          displayName: values.name,
-          attributes: {
-            ...(values.currencyCode ? { currency_code: values.currencyCode.toUpperCase() } : {}),
-            ...(values.source ? { source: values.source } : {}),
-          },
-        }, access, transaction.client,{fieldIntent:['name',...(values.currencyCode?['currencyCode']:[]),...(values.source?['source']:[])]})
-      }
+      const enriched=await updateEntity(attributionUserId, entityId, {
+        displayName: values.name,
+        attributes: {
+          ...(values.currencyCode ? { currency_code: values.currencyCode.toUpperCase() } : {}),
+          ...(values.source ? { source: values.source } : {}),
+        },
+      }, access, transaction.client,{fieldIntent:['name',...(values.currencyCode?['currencyCode']:[]),...(values.source?['source']:[])]})
+      if(!enriched)throw new Error('The created import deal is no longer available.')
     }
 
     if (entityId && !customApplied && Object.keys(customValues).length > 0) {
@@ -1357,22 +1429,30 @@ export function createCrmProductionImportService(deps: {
   }
 
   async function cancel(context: ImportServiceContext, jobId: string): Promise<CrmImportJob> {
-    requireImportOperation(context, 'crm.imports.write')
-    if (!await readableJob(context, jobId)) throw new CrmOperationsError('not_found', 'Import job was not found.')
-    return importTransaction(context, async (current, client) => {
-      context = current
-      const original = await loadJob(context.workspaceId, jobId, client)
-      if (!original) throw new CrmOperationsError('not_found', 'Import job was not found.')
-      jobContext(context, original, 'write')
-      await client.query(
-        `UPDATE crm_import_jobs SET status='cancelled'
-          WHERE workspace_id=$1 AND id=$2 AND status NOT IN ('completed','cancelled')`,
-        [context.workspaceId, jobId],
-      )
-      const job = await loadJob(context.workspaceId, jobId, client)
-      if (!job) throw new Error('Import job was not found.')
-      return jobProjection(job)
-    }, true)
+    let expectedActorUserId: string | undefined
+    for (let attempt = 0; ; attempt += 1) {
+      requireImportOperation(context, 'crm.imports.write')
+      if (!await readableJob(context, jobId)) throw new CrmOperationsError('not_found', 'Import job was not found.')
+      try {
+        return await importTransaction(context, async (current, client) => {
+          const original = await loadJob(current.workspaceId, jobId, client)
+          if (!original) throw new CrmOperationsError('not_found', 'Import job was not found.')
+          jobContext(current, original, 'write')
+          await client.query(
+            `UPDATE crm_import_jobs SET status='cancelled'
+              WHERE workspace_id=$1 AND id=$2 AND status NOT IN ('completed','cancelled')`,
+            [current.workspaceId, jobId],
+          )
+          const job = await loadJob(current.workspaceId, jobId, client)
+          if (!job) throw new Error('Import job was not found.')
+          return jobProjection(job)
+        }, true, expectedActorUserId)
+      } catch (error) {
+        if (!(error instanceof ImportAdmissionWaitTimeout)) throw error
+        if (attempt > 0) throw error.originalError
+        expectedActorUserId = error.actorUserId
+      }
+    }
   }
 
   /**

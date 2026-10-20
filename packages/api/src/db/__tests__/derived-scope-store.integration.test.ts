@@ -4,7 +4,8 @@ import pg from 'pg'
 import { ContextScopeAccumulator, type ScopeSource } from '@use-brian/core'
 import { turnOutputWrite } from '../../context-scope/resolve-turn-scope.js'
 import { createMemory, updateMemory, getMemoryById, getMemoryByIdSystem, getMemoryIndexSystem, listMemoriesWithMetrics, type Memory } from '../memories.js'
-import { getPool, getAppPool } from '../client.js'
+import { getPool, getAppPool, queryWithRLS } from '../client.js'
+import { runWithAgentAccess } from '../agent-access-context.js'
 import { createDbMemoryStore } from '../memory-store.js'
 import { runLightConsolidation, runREMConsolidation, runDeepConsolidation } from '@use-brian/core'
 import { getSoulContext, writeScopedSummary } from '../scoped-summary-store.js'
@@ -133,6 +134,8 @@ describe('[COMP:api/derived-scope-store] actual memory writes and source races',
     ['knowledge_entry','knowledge_entries'],['kb_chunk','kb_chunks'],
   ].flatMap(([kind,table])=>['reclassify','hold','delete'].map(change=>[kind,table,change])))('invalidates canonical %s snapshots after %s source %s',async(kind,table,change)=>{
     const f=await fixture(),id=randomUUID()
+    if(kind==='task'&&change==='reclassify')await pool.query(
+      "UPDATE workspace_members SET clearance='confidential' WHERE workspace_id=$1 AND user_id=$2",[f.workspaceId,f.userId])
     const base={id,workspace_id:f.workspaceId,sensitivity:'confidential',compartments:['finance'],project_ids:[f.projectId]}
     const visibility=kind==='knowledge_entry'?{}:{user_id:f.userId,assistant_id:f.assistantId}
     let content:Record<string,unknown>
@@ -153,6 +156,9 @@ describe('[COMP:api/derived-scope-store] actual memory writes and source races',
     expect(derived).toMatchObject({sensitivity:'confidential',compartments:['finance'],projectIds:[f.projectId]})
     if(change==='delete')await pool.query(`DELETE FROM ${table} WHERE id=$1`,[id])
     else if(change==='hold')await pool.query(`UPDATE ${table} SET scope_held=true WHERE id=$1`,[id])
+    else if(kind==='task')expect(await runWithAgentAccess({workspaceId:f.workspaceId,userId:f.userId,
+      clearance:'confidential',compartments:null,mutationCompartments:null,projectIds:null,visibilityAssistantIds:[f.assistantId]},
+    ()=>queryWithRLS(f.userId,`UPDATE ${table} SET compartments=ARRAY['product'] WHERE id=$1`,[id]))).toMatchObject({rowCount:1})
     else await pool.query(`UPDATE ${table} SET compartments=ARRAY['product'] WHERE id=$1`,[id])
     expect(await getMemoryByIdSystem(derived.id)).toBeNull()
     await expect(f.create({derivation:{producer:'stale-source-test',sources:[snapshot]}})).rejects.toThrow('scope_source_changed')

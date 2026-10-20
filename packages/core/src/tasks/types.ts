@@ -66,6 +66,8 @@ export type TaskExternalRef = Record<string, unknown>
 export type TaskAttributes = Record<string, unknown>
 
 export type TaskRecord = {
+  /** Stable canonical lineage identity. Legacy id continues to name the physical version. */
+  logicalId?: string
   id: string
   workspaceId: string
   title: string
@@ -97,7 +99,7 @@ export type TaskRecord = {
  */
 export type TaskListRow = Pick<
   TaskRecord,
-  'id' | 'workspaceId' | 'title' | 'status' | 'assigneeId' | 'executorAssistantId' | 'followUpMemberId' | 'home' | 'due' | 'tags' | 'parentId' | 'attributes' | 'sensitivity' | 'compartments' | 'projectIds' | 'updatedAt'
+  'id' | 'logicalId' | 'workspaceId' | 'title' | 'status' | 'assigneeId' | 'executorAssistantId' | 'followUpMemberId' | 'home' | 'due' | 'tags' | 'parentId' | 'attributes' | 'sensitivity' | 'compartments' | 'projectIds' | 'updatedAt'
 >
 
 export type TaskListFilters = {

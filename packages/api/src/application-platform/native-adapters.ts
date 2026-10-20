@@ -2,11 +2,11 @@
 import { z } from 'zod'
 import { createHash } from 'node:crypto'
 import type { PoolClient } from 'pg'
-import { crmAmountSchema, applicationAuthorityCreationScope, parseApplicationCrmFieldDefinition, type ApplicationModuleDefinition, type ApplicationOperationContext } from '@use-brian/core'
-import { ApplicationPlatformError, applicationResourceRefSchema, applicationQuerySchema, type ApplicationRecordProjection,
+import { applicationAuthorityCreationScope, parseApplicationCrmFieldDefinition, type ApplicationModuleDefinition, type ApplicationOperationContext } from '@use-brian/core'
+import { ApplicationPlatformError, applicationJsonSchema as importedJsonSchema, applicationResourceRefSchema, applicationQuerySchema, type ApplicationRecordProjection,
   type ApplicationResourceDefinition, type ApplicationResourceRef } from '@use-brian/shared'
-import { crmCompanyPatch,authorizeCanonicalCompanyPatch,patchCanonicalCompanyFields,createCompany,createContact,createDeal } from '../db/crm.js'
-import { createTask } from '../db/tasks.js'
+import { crmCompanyPatch,crmContactPatch,crmDealPatch,authorizeCanonicalCrmPatch,patchCanonicalCrmFields,type CanonicalCrmType,type CanonicalCrmPatch } from '../db/crm.js'
+import { createTask,authorizeCanonicalTaskPatch,patchCanonicalTaskFields } from '../db/tasks.js'
 import { publishTaskLifecycle } from '../task-event-fanout.js'
 import { getApplicationExecutionBinding } from './execution-context.js'
 import { canonicalGenericReadContext, readCanonicalNativeRecord } from './field-evidence.js'
@@ -16,11 +16,12 @@ import { boundScopeSources } from '@use-brian/core'
 import { readCurrentScopeSources } from '../db/derived-scope-store.js'
 
 const readInput=z.object({type:z.enum(['company','person','deal','task','file','workspace_member']),id:z.string().uuid(),fields:z.array(z.string().min(1).max(256)).max(256).refine(fields=>new Set(fields).size===fields.length).optional()}).strict()
-const queryInput=z.object({type:z.enum(['company','person','deal']),query:applicationQuerySchema}).strict()
+const queryInput=z.object({type:z.enum(['company','person','deal','task']),query:applicationQuerySchema}).strict()
 type Context=ApplicationOperationContext<PoolClient>
 const creations = new WeakMap<Context, { type: 'company' | 'person' | 'deal' | 'task'; fields: string[]; scope: { sensitivity: 'public' | 'internal' | 'confidential'; compartments: string[]; projectIds: string[] } }>()
-const companyPatches=new WeakMap<Context,Array<{id:string;patch:import('@use-brian/core').CompanyUpdateFields}>>()
+const crmPatches=new WeakMap<Context,Array<{type:CanonicalCrmType;id:string;patch:CanonicalCrmPatch}>>()
 
+const taskPatches=new WeakMap<Context,{id:string;patch:import('@use-brian/core').TaskUpdateFields}>()
 const definitions=canonicalNativeResourceDefinitions()
 async function resources(context: Context, queryType?: string): Promise<ApplicationResourceDefinition[]> {
   const app = getApplicationExecutionBinding(context.execution)
@@ -46,6 +47,7 @@ async function resources(context: Context, queryType?: string): Promise<Applicat
   })
 }
 async function read(context:Context,type:z.infer<typeof readInput>['type'],id:string,fields?:readonly string[]):Promise<ApplicationRecordProjection> {
+  if(type==='task'){const logical=(await context.transaction.query<{id:string|null}>('SELECT application_native_task_identity($1,$2) AS id',[context.execution.security.access.workspaceId,id])).rows[0]?.id;if(!logical)throw new ApplicationPlatformError('access_unavailable','The task is unavailable.');id=logical}
   const definition=(await resources(context)).find(resource=>resource.typeKey===type)
   if(!definition || fields?.some(field=>!definition.fields.some(candidate=>candidate.key===field))) {
     throw new ApplicationPlatformError('access_unavailable','The record is unavailable.')
@@ -85,13 +87,33 @@ async function authorizeResult(context:Context,refs:ApplicationResourceRef[]) {
     } else await read(context,input.data.type,input.data.id)
   }
 }
-async function authorizeCompanyPatchResult(context:Context,refs:ApplicationResourceRef[]) {
-  const inputs=companyPatches.get(context),actor=context.execution.security.access
-  if(!inputs||refs.length!==inputs.length||new Set(refs.map(ref=>ref.id)).size!==refs.length)throw new ApplicationPlatformError('access_unavailable','The companies are unavailable.')
-  for(const ref of refs){const input=inputs.find(item=>item.id===ref.id)
-    if(!input||ref.workspaceId!==actor.workspaceId||ref.typeKey!=='company'||ref.origin.kind!=='native'||ref.origin.moduleKey!=='native'
-      ||!await authorizeCanonicalCompanyPatch(actor.userId,input.id,input.patch,context.transaction,actor))throw new ApplicationPlatformError('access_unavailable','The company is unavailable.')
+async function authorizeCrmPatchResult(context:Context,refs:ApplicationResourceRef[]) {
+  const inputs=crmPatches.get(context),actor=context.execution.security.access
+  if(!inputs||refs.length!==inputs.length||new Set(refs.map(ref=>`${ref.typeKey}:${ref.id}`)).size!==refs.length)throw new ApplicationPlatformError('access_unavailable','The records are unavailable.')
+  for(const ref of refs){const input=inputs.find(item=>item.id===ref.id&&item.type===ref.typeKey)
+    if(!input||ref.workspaceId!==actor.workspaceId||ref.origin.kind!=='native'||ref.origin.moduleKey!=='native'
+      ||!await authorizeCanonicalCrmPatch(actor.userId,input.type,input.id,input.patch,context.transaction,actor))throw new ApplicationPlatformError('access_unavailable','The record is unavailable.')
   }
+}
+function patchFields(patch:Record<string,unknown>) {
+ return Object.entries(patch).flatMap(([key,value])=>value===undefined?[]:key==='customFields'?Object.keys(value as object).map(field=>`custom.${field}`):[key])
+}
+async function authorizePatches(context:Context,inputs:Array<{type:CanonicalCrmType;id:string;patch:CanonicalCrmPatch}>) {
+ const actor=context.execution.security.access
+ for(const input of [...inputs].sort((a,b)=>`${a.type}:${a.id}`.localeCompare(`${b.type}:${b.id}`))) {
+  if(!await authorizeCanonicalCrmPatch(actor.userId,input.type,input.id,input.patch,context.transaction,actor))throw new ApplicationPlatformError('access_unavailable','The record is unavailable.')
+ }
+ crmPatches.set(context,inputs)
+}
+async function executePatches(context:Context,inputs:Array<{type:CanonicalCrmType;id:string;patch:CanonicalCrmPatch;expectedVersion?:string}>) {
+ const actor=context.execution.security.access,refs:ApplicationResourceRef[]=[]
+ for(const input of inputs){const expectedVersion=input.expectedVersion??context.expectedVersion
+  if(expectedVersion===undefined)throw new ApplicationPlatformError('invalid_value','A canonical source version is required.')
+  const ref=await patchCanonicalCrmFields(actor.userId,input.type,input.id,input.patch,context.transaction,actor,{expectedVersion})
+  if(!ref)throw new ApplicationPlatformError('access_unavailable','The record is unavailable.')
+  refs.push(ref)
+ }
+ return refs
 }
 async function creationRef(context: Context, type: 'company' | 'person' | 'deal' | 'task', id: string): Promise<ApplicationResourceRef> {
   if (!getApplicationExecutionBinding(context.execution)) return (await read(context,type,id)).ref
@@ -122,78 +144,111 @@ async function authorizeCreate(context:Context,type:'company'|'person'|'deal'|'t
 
 /** Deployed adapter registration; callable operations still require current authority. */
 export function createCanonicalNativeApplicationModule():ApplicationModuleDefinition<PoolClient> {
-  const companyInput=z.object({name:z.string().min(1).max(256),domain:z.string().max(256).nullable().optional()}).strict()
-  const contactInput=z.object({name:z.string().min(1).max(256),email:z.string().max(320).nullable().optional(),phone:z.string().max(100).nullable().optional()}).strict()
-  const dealInput=z.object({stage:z.enum(['lead','qualified','proposal','negotiation','won','lost']).optional(),amount:crmAmountSchema.nullable().optional()}).strict()
-  const companyPatch=z.object({id:z.string().uuid().transform(id=>id.toLowerCase()),patch:crmCompanyPatch.refine(value=>Object.entries(value).some(([key,item])=>item!==undefined&&(key!=='customFields'||Object.keys(item??{}).length>0)))}).strict()
-  const companyPatchInput=companyPatch
-  const companyBatchInput=z.object({patches:z.array(companyPatch.extend({expectedVersion:z.string().min(1).max(256)})).min(1).max(100).refine(items=>new Set(items.map(item=>item.id)).size===items.length)}).strict()
-  const taskInput=z.object({title:z.string().min(1).max(1024)}).strict()
-  return {key:'native',defaultState:'enabled',application:{version:'1',dependencies:[],resources:definitions,
-    queries:['get','query'],commands:['create_company','create_contact','create_deal','create_task','patch_company','patch_companies'],events:['native.company.patched','native.company.created','native.contact.created','native.deal.created','native.task.created'],
-    policyCapabilities:['canonical_native'],backgroundHandlers:[],uiContributions:[]},
-  resolveResources: resources,
-  queries:{query:{input:queryInput,authorize:async(context,raw)=>{const input=queryInput.parse(raw);if(!(await resources(context,input.type)).length)throw new ApplicationPlatformError('access_unavailable','The resource is unavailable.')},
-    execute:(context,raw)=>query(context,queryInput.parse(raw)),authorizeResult:authorizeQueryResult},get:{input:readInput,authorize:async(context,raw)=>{const input=readInput.parse(raw);await read(context,input.type,input.id,input.fields)},
-    execute:async(context,raw)=>{const input=readInput.parse(raw);return read(context,input.type,input.id,input.fields)}, authorizeResult: authorizeReadResult}},
-  commands:{patch_company:{input:companyPatchInput,eventKey:'native.company.patched',authorize:async(context,raw)=>{
-    const input=companyPatchInput.parse(raw),actor=context.execution.security.access
-    if(!await authorizeCanonicalCompanyPatch(actor.userId,input.id,input.patch,context.transaction,actor))throw new ApplicationPlatformError('access_unavailable','The company is unavailable.')
-    companyPatches.set(context,[input])
-  },execute:async(context,raw)=>{
-    if(context.expectedVersion===undefined)throw new ApplicationPlatformError('invalid_value','A canonical source version is required.')
-    const input=companyPatchInput.parse(raw),actor=context.execution.security.access
-    const ref=await patchCanonicalCompanyFields(actor.userId,input.id,input.patch,context.transaction,actor,{expectedVersion:context.expectedVersion})
-    if(!ref)throw new ApplicationPlatformError('access_unavailable','The company is unavailable.')
-    return [ref]
-  },authorizeResult:authorizeCompanyPatchResult},patch_companies:{input:companyBatchInput,eventKey:'native.company.patched',authorize:async(context,raw)=>{
-    if(context.expectedVersion!==undefined)throw new ApplicationPlatformError('invalid_value','Each company needs its own source version.')
-    const input=companyBatchInput.parse(raw),actor=context.execution.security.access
-    for(const patch of [...input.patches].sort((a,b)=>a.id.localeCompare(b.id)))if(!await authorizeCanonicalCompanyPatch(actor.userId,patch.id,patch.patch,context.transaction,actor))throw new ApplicationPlatformError('access_unavailable','The company is unavailable.')
-    companyPatches.set(context,input.patches)
-  },execute:async(context,raw)=>{
-    const input=companyBatchInput.parse(raw),actor=context.execution.security.access,refs:ApplicationResourceRef[]=[]
-    for(const patch of input.patches){const ref=await patchCanonicalCompanyFields(actor.userId,patch.id,patch.patch,context.transaction,actor,{expectedVersion:patch.expectedVersion});if(!ref)throw new ApplicationPlatformError('access_unavailable','The company is unavailable.');refs.push(ref)}
-    return refs
-  },authorizeResult:authorizeCompanyPatchResult},create_company:{input:companyInput,eventKey:'native.company.created',
-    authorize:(context,raw)=>{const input=companyInput.parse(raw);return authorizeCreate(context,'company',['name',...(input.domain?['domain']:[])])},authorizeResult,
-    execute:async(context,raw)=>{
-      const input=companyInput.parse(raw),access=context.execution.security.access
-      const creation=creations.get(context)
-      if(!creation)throw new ApplicationPlatformError('access_unavailable','The operation is unavailable.')
-      const record=await createCompany(access.userId,{...input,workspaceId:access.workspaceId,access,mergeByName:false,
-        sensitivity:creation.scope.sensitivity,compartments:creation.scope.compartments,projectIds:creation.scope.projectIds,
-        createdByAssistantId:context.execution.assistant.id},{client:context.transaction,afterCommit:context.afterCommit})
-      return [await creationRef(context,'company',record.id)]
-    }},create_contact:{input:contactInput,eventKey:'native.contact.created',
-    authorize:(context,raw)=>{const input=contactInput.parse(raw);return authorizeCreate(context,'person',['name',...(input.email?['email']:[]),...(input.phone?['phone']:[])])},authorizeResult,
-    execute:async(context,raw)=>{
-      const input=contactInput.parse(raw),access=context.execution.security.access,creation=creations.get(context)
-      if(!creation) throw new ApplicationPlatformError('access_unavailable','The operation is unavailable.')
-      const record=await createContact(access.userId,{...input,workspaceId:access.workspaceId,access,
-        sensitivity:creation.scope.sensitivity,compartments:creation.scope.compartments,projectIds:creation.scope.projectIds,
-        createdByAssistantId:context.execution.assistant.id},undefined,{client:context.transaction,afterCommit:context.afterCommit})
-      return [await creationRef(context,'person',record.id)]
-    }},create_deal:{input:dealInput,eventKey:'native.deal.created',
-    authorize:(context,raw)=>{const input=dealInput.parse(raw);return authorizeCreate(context,'deal',['name','stage',...(input.amount!=null?['amount']:[])])},authorizeResult,
-    execute:async(context,raw)=>{
-      const input=dealInput.parse(raw),access=context.execution.security.access,creation=creations.get(context)
-      if(!creation) throw new ApplicationPlatformError('access_unavailable','The operation is unavailable.')
-      const record=await createDeal(access.userId,{...input,workspaceId:access.workspaceId,access,
-        sensitivity:creation.scope.sensitivity,compartments:creation.scope.compartments,projectIds:creation.scope.projectIds,
-        createdByAssistantId:context.execution.assistant.id},undefined,{client:context.transaction,afterCommit:context.afterCommit})
-      return [await creationRef(context,'deal',record.id)]
-    }},create_task:{input:taskInput,eventKey:'native.task.created',authorize:context=>authorizeCreate(context,'task',['title']),authorizeResult,
-    execute:async(context,raw)=>{
-      const input=taskInput.parse(raw),access=context.execution.security.access
-      const creation=creations.get(context)
-      if(!creation)throw new ApplicationPlatformError('access_unavailable','The operation is unavailable.')
-      const record=await createTask(access.userId,{...input,workspaceId:access.workspaceId,access,sensitivity:creation.scope.sensitivity,
-        compartments:creation.scope.compartments,projectIds:creation.scope.projectIds,
-        createdByAssistantId:context.execution.assistant.id,writtenBy:'system'},undefined,context.transaction,{deduplicate:false})
-      context.afterCommit(()=>publishTaskLifecycle({workspaceId:record.workspaceId,taskId:record.id,kind:'created',title:record.title,status:record.status,previousStatus:null,
-        tags:record.tags,previousTags:null,assigneeId:record.assigneeId,previousAssigneeId:null,due:record.due,parentId:record.parentId,changedFields:[],actorId:access.userId,writtenBy:'system'}))
-      return [await creationRef(context,'task',record.id)]
-    }},
+ const id=z.string().uuid().transform(value=>value.toLowerCase()),version=z.string().regex(/^[1-9]\d*$/)
+ const companyInput=crmCompanyPatch.required({name:true}).omit({archivedAt:true})
+ const contactInput=crmContactPatch.required({name:true}).omit({archivedAt:true})
+ const dealInput=crmDealPatch.omit({archivedAt:true}).extend({closeDate:z.string().date().nullable().optional()})
+ const companyPatch=z.object({id,patch:crmCompanyPatch.refine(value=>patchFields(value).length>0)}).strict()
+ const contactPatch=z.object({id,patch:crmContactPatch.refine(value=>patchFields(value).length>0)}).strict()
+ const dealPatch=z.object({id,patch:crmDealPatch.extend({closeDate:z.string().date().nullable().optional()}).refine(value=>patchFields(value).length>0)}).strict()
+ const taskInput=z.object({title:z.string().min(1).max(512).refine(value=>value.trim().length>0),status:z.enum(['todo','in_progress','in_review','blocked','done','archived']).optional(),
+  assigneeId:id.nullable().optional(),executorAssistantId:id.nullable().optional(),followUpMemberId:id.nullable().optional(),
+  home:z.object({kind:z.enum(['department','project']),id}).strict().nullable().optional(),due:z.string().datetime({offset:true}).nullable().optional(),
+  tags:z.array(z.string()).optional(),parentId:id.nullable().optional(),
+  externalRef:z.record(importedJsonSchema).optional(),attributes:z.record(importedJsonSchema).optional()}).strict()
+ const taskPatchInput=z.object({id,patch:taskInput.partial().refine(value=>Object.keys(value).length>0)}).strict()
+ const taskPatch=(raw:unknown)=>{const input=taskPatchInput.parse(raw);const {due,...rest}=input.patch;return{id:input.id,patch:{...rest,...(due!==undefined?{due:due===null?null:new Date(due)}:{})}}}
+ const batchInput=z.object({patches:z.array(companyPatch.extend({expectedVersion:version})).min(1).max(100)
+  .refine(items=>new Set(items.map(item=>item.id)).size===items.length)}).strict()
+ const mixedPatch=z.discriminatedUnion('type',[
+  companyPatch.extend({type:z.literal('company'),expectedVersion:version}),contactPatch.extend({type:z.literal('person'),expectedVersion:version}),
+  dealPatch.extend({type:z.literal('deal'),expectedVersion:version})])
+ const mixedInput=z.object({patches:z.array(mixedPatch).min(1).max(100).refine(items=>new Set(items.map(item=>`${item.type}:${item.id}`)).size===items.length)}).strict()
+ const customInput=z.object({type:z.enum(['company','person','deal']),id,values:z.record(importedJsonSchema).refine(value=>Object.keys(value).length>0)}).strict()
+ const archiveInput=z.object({type:z.enum(['company','person','deal']),id,archived:z.boolean()}).strict()
+ const stageInput=z.object({id,stage:z.enum(['lead','qualified','proposal','negotiation','won','lost'])}).strict()
+ const moveInput=z.object({id,stageId:id}).strict()
+ const relationInput=z.discriminatedUnion('type',[
+  z.object({type:z.literal('person'),id,field:z.literal('companyId'),targetId:id.nullable()}).strict(),
+  z.object({type:z.literal('deal'),id,field:z.enum(['companyId','contactId']),targetId:id.nullable()}).strict()])
+ const participantInput=z.object({id,contactId:id,role:z.string().max(200).nullable().optional(),isPrimary:z.boolean().optional()}).strict()
+ const removeParticipantInput=z.object({id,contactId:id}).strict()
+ const primaryContactInput=z.object({id,contactId:id.nullable(),role:z.string().max(200).nullable().optional()}).strict()
+ const participantCommand=(operation:'add'|'remove'|'primary',schema:z.ZodType)=>{
+  const commandInput=new WeakMap<Context,{id:string;contactId:string|null;role?:string|null;isPrimary?:boolean}>()
+  const input=(raw:unknown)=>schema.parse(raw) as {id:string;contactId:string|null;role?:string|null;isPrimary?:boolean}
+  const authorize=async(context:Context,raw:unknown)=>{const value=input(raw),actor=context.execution.security.access
+   if(!await authorizeCanonicalCrmPatch(actor.userId,'deal',value.id,{},context.transaction,actor))throw new ApplicationPlatformError('access_unavailable','The deal is unavailable.')
+   const fields=['participants',...(operation!=='add'||value.isPrimary?['contactId']:[])]
+   if(!(await context.transaction.query<{value:unknown}>('SELECT application_crm_patch_state($1,$2,$3) AS value',['deal',value.id,fields])).rows[0]?.value)throw new ApplicationPlatformError('access_unavailable','The relationship is unavailable.')
+   commandInput.set(context,value)
+  }
+  return{input:schema,eventKey:'native.deal.participants_changed',authorize,execute:async(context:Context,raw:unknown)=>{
+   if(context.expectedVersion===undefined)throw new ApplicationPlatformError('invalid_value','A canonical source version is required.')
+   const value=input(raw),actor=context.execution.security.access
+   return[applicationResourceRefSchema.parse((await context.transaction.query<{value:unknown}>(
+    'SELECT application_mutate_canonical_deal_participant($1,$2,$3,$4,$5,$6,$7) AS value',[actor.workspaceId,value.id,value.contactId,operation,value.role??null,value.isPrimary??false,context.expectedVersion])).rows[0]?.value)]
+  },authorizeResult:async(context:Context,refs:ApplicationResourceRef[])=>{const value=commandInput.get(context)
+   if(!value||refs.length!==1||refs[0].id!==value.id||refs[0].typeKey!=='deal'||refs[0].workspaceId!==context.execution.security.access.workspaceId||refs[0].origin.kind!=='native'||refs[0].origin.moduleKey!=='native')throw new ApplicationPlatformError('access_unavailable','The relationship is unavailable.')
+   await authorize(context,value)
   }}
+ }
+ const toPatch=(type:CanonicalCrmType,input:{id:string;patch:unknown})=>{const patch=input.patch as Record<string,unknown>;return{type,id:input.id,patch:{...patch,...(typeof patch.closeDate==='string'?{closeDate:new Date(patch.closeDate)}:{})} as CanonicalCrmPatch}}
+ const command=(schema:z.ZodType,adapt:(raw:unknown)=>Array<{type:CanonicalCrmType;id:string;patch:CanonicalCrmPatch;expectedVersion?:string}>,eventKey='native.record.patched')=>({
+  input:schema,eventKey,authorize:(context:Context,raw:unknown)=>{const inputs=adapt(raw);if(inputs.some(input=>input.expectedVersion!==undefined)&&context.expectedVersion!==undefined)throw new ApplicationPlatformError('invalid_value','Each record needs its own source version.');return authorizePatches(context,inputs)},
+  execute:(context:Context,raw:unknown)=>executePatches(context,adapt(raw)),authorizeResult:authorizeCrmPatchResult,
+ })
+ const createCrm=(type:CanonicalCrmType,schema:z.AnyZodObject,eventKey:string)=>({input:schema,eventKey,authorize:(context:Context,raw:unknown)=>{
+  const input=schema.parse(raw),fields=patchFields(input)
+  if(type==='deal'){if(!fields.includes('name'))fields.push('name');if(!fields.includes('stage'))fields.push('stage')}
+  return authorizeCreate(context,type,fields)
+ },authorizeResult,execute:async(context:Context,raw:unknown)=>{
+  const input=schema.parse(raw),access=context.execution.security.access,creation=creations.get(context)
+  if(!creation)throw new ApplicationPlatformError('access_unavailable','The operation is unavailable.')
+  const value=(await context.transaction.query<{ref:unknown}>('SELECT application_create_canonical_crm_ref($1,$2,$3) AS ref',[type,input,{...creation.scope,workspaceId:access.workspaceId,createdByAssistantId:context.execution.assistant.id}])).rows[0]?.ref
+  return [applicationResourceRefSchema.parse(value)]
+ }})
+ const commands:ApplicationModuleDefinition<PoolClient>['commands']={
+  add_deal_participant:participantCommand('add',participantInput),remove_deal_participant:participantCommand('remove',removeParticipantInput),set_primary_contact:participantCommand('primary',primaryContactInput),
+  patch_task:{input:taskPatchInput,eventKey:'native.task.patched',authorize:async(context,raw)=>{const input=taskPatch(raw),actor=context.execution.security.access
+   if(!await authorizeCanonicalTaskPatch(actor.userId,actor.workspaceId,input.id,input.patch,context.transaction,actor))throw new ApplicationPlatformError('access_unavailable','The task is unavailable.')
+   taskPatches.set(context,input)
+  },execute:async(context,raw)=>{if(context.expectedVersion===undefined)throw new ApplicationPlatformError('invalid_value','A canonical source version is required.')
+   const input=taskPatch(raw),actor=context.execution.security.access,result=await patchCanonicalTaskFields(actor.userId,actor.workspaceId,input.id,input.patch,context.transaction,actor,{expectedVersion:context.expectedVersion})
+   if(!result)throw new ApplicationPlatformError('access_unavailable','The task is unavailable.')
+   return[result.ref]
+  },authorizeResult:async(context,refs)=>{const input=taskPatches.get(context),actor=context.execution.security.access
+   if(!input||refs.length!==1||refs[0].workspaceId!==actor.workspaceId||refs[0].typeKey!=='task'||refs[0].origin.kind!=='native'||refs[0].origin.moduleKey!=='native')throw new ApplicationPlatformError('access_unavailable','The task is unavailable.')
+   const state=await authorizeCanonicalTaskPatch(actor.userId,actor.workspaceId,input.id,input.patch,context.transaction,actor)
+   if(!state||state.id!==refs[0].id)throw new ApplicationPlatformError('access_unavailable','The task is unavailable.')
+  }},
+  patch_company:command(companyPatch,raw=>[toPatch('company',companyPatch.parse(raw))],'native.company.patched'),
+  patch_contact:command(contactPatch,raw=>[toPatch('person',contactPatch.parse(raw))],'native.contact.patched'),
+  patch_deal:command(dealPatch,raw=>[toPatch('deal',dealPatch.parse(raw))],'native.deal.patched'),
+  patch_companies:command(batchInput,raw=>{const input=batchInput.parse(raw);return input.patches.map(item=>({...toPatch('company',item),expectedVersion:item.expectedVersion}))},'native.company.patched'),
+  patch_records:command(mixedInput,raw=>mixedInput.parse(raw).patches.map(item=>({...toPatch(item.type,item),expectedVersion:item.expectedVersion}))),
+  set_custom_fields:command(customInput,raw=>{const input=customInput.parse(raw);return[{type:input.type,id:input.id,patch:{customFields:input.values}}]}),
+  archive_record:command(archiveInput,raw=>{const input=archiveInput.parse(raw);return[{type:input.type,id:input.id,patch:{archivedAt:input.archived?new Date().toISOString():null}}]},'native.record.archived'),
+  set_deal_stage:command(stageInput,raw=>{const input=stageInput.parse(raw);return[{type:'deal',id:input.id,patch:{stage:input.stage}}]},'native.deal.stage_changed'),
+  move_deal:command(moveInput,raw=>{const input=moveInput.parse(raw);return[{type:'deal',id:input.id,patch:{pipelineStageId:input.stageId}}]},'native.deal.stage_changed'),
+  set_relationship:command(relationInput,raw=>{const input=relationInput.parse(raw);return[{type:input.type,id:input.id,patch:{[input.field]:input.targetId}}]},'native.record.relationship_changed'),
+  create_company:createCrm('company',companyInput,'native.company.created'),create_contact:createCrm('person',contactInput,'native.contact.created'),
+  create_deal:createCrm('deal',dealInput,'native.deal.created'),
+  create_task:{input:taskInput,eventKey:'native.task.created',authorize:(context,raw)=>authorizeCreate(context,'task',patchFields(taskInput.parse(raw))),authorizeResult,
+   execute:async(context,raw)=>{const input=taskInput.parse(raw),{due,...taskValues}=input,access=context.execution.security.access,creation=creations.get(context)
+    if(!creation)throw new ApplicationPlatformError('access_unavailable','The operation is unavailable.')
+    const record=await createTask(access.userId,{...taskValues,...(due!==undefined?{due:due===null?null:new Date(due)}:{}),workspaceId:access.workspaceId,access,...creation.scope,
+     createdByAssistantId:context.execution.assistant.id,writtenBy:'system'},undefined,context.transaction,{deduplicate:false})
+    context.afterCommit(()=>publishTaskLifecycle({workspaceId:record.workspaceId,taskId:record.id,kind:'created',title:record.title,status:record.status,previousStatus:null,
+     tags:record.tags,previousTags:null,assigneeId:record.assigneeId,previousAssigneeId:null,due:record.due,parentId:record.parentId,changedFields:[],actorId:access.userId,writtenBy:'system'}))
+    return [await creationRef(context,'task',record.id)]
+   }},
+ }
+ return {key:'native',defaultState:'enabled',application:{version:'2',dependencies:[],resources:definitions,
+  queries:['get','query'],commands:Object.keys(commands),events:[...new Set(Object.values(commands).map(command=>command.eventKey))],
+  policyCapabilities:['canonical_native'],backgroundHandlers:[],uiContributions:[]},resolveResources:resources,commands,
+  queries:{query:{input:queryInput,authorize:async(context,raw)=>{const input=queryInput.parse(raw);if(!(await resources(context,input.type)).length)throw new ApplicationPlatformError('access_unavailable','The resource is unavailable.')},
+   execute:(context,raw)=>query(context,queryInput.parse(raw)),authorizeResult:authorizeQueryResult},get:{input:readInput,authorize:async(context,raw)=>{const input=readInput.parse(raw);await read(context,input.type,input.id,input.fields)},
+   execute:async(context,raw)=>{const input=readInput.parse(raw);return read(context,input.type,input.id,input.fields)},authorizeResult:authorizeReadResult}},
+ }
 }

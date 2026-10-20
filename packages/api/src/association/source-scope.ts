@@ -323,13 +323,33 @@ export async function loadAssociationOrderScope(
 ): Promise<{ scope: ResourceScope; sources: ScopeSource[] }> {
   const ids = [...new Set(contactIds.map(id => id.toLowerCase()))].sort()
   if (!ids.length) throw new DerivedScopeError('scope_evidence_missing')
+  // PostgreSQL checks referenced function privileges even in an unchosen CASE.
+  // This metadata decision only selects a fixed query; the private literal
+  // checks the current profile/capability again before its exact point lookup.
+  const privateProfile = `has_function_privilege(current_user,'public.read_scope_source(uuid,text,uuid)','EXECUTE')
+AND NOT EXISTS (SELECT 1 FROM unnest(ARRAY[
+  'app.current_user_id','app.application_id','app.application_credential_id','app.application_oauth_id',
+  'app.application_assistant_id','app.application_home_binding_id','app.application_command_key',
+  'app.public_share_root','app.public_share_mode','app.public_share_token_hash',
+  'app.agent_workspace_id','app.agent_actor_id','app.agent_clearance','app.agent_compartments',
+  'app.agent_mutation_compartments','app.agent_project_ids','app.agent_visibility_assistants','app.agent_shared_audience',
+  'app.v2_active','app.v2_assistant_id','app.v2_context_department','app.v2_binding','app.v2_cap'
+]) AS profile(setting) WHERE nullif(current_setting(profile.setting,true),'') IS NOT NULL)`
+  const privateMetadata = (await client.query<{ privateLineageMetadata: boolean }>(
+    `SELECT ${privateProfile} AS "privateLineageMetadata"`)).rows[0]?.privateLineageMetadata === true
+  const reader = privateMetadata
+    ? `CASE WHEN ${privateProfile} THEN read_scope_source($1, 'entity', source_id)
+         ELSE read_admitted_native_scope_snapshot($1, 'entity', source_id) END`
+    : "read_admitted_native_scope_snapshot($1, 'entity', source_id)"
   const { rows } = await client.query<{ snapshot: Source | null }>(
-    `SELECT read_scope_source($1, 'entity', source_id) AS snapshot
+    `SELECT jsonb_build_object('resourceKind','entity','resourceId',source_id)
+         || ${reader} AS snapshot
        FROM unnest($2::uuid[]) AS source_id ORDER BY source_id`, [workspaceId, ids])
   if (rows.length !== ids.length) throw new DerivedScopeError('scope_evidence_missing')
   const sources = rows.map(({ snapshot }, i): ScopeSource => {
     if (!snapshot || snapshot.resourceKind !== 'entity' || snapshot.resourceId !== ids[i]
       || snapshot.workspaceId !== workspaceId || snapshot.held !== false
+      || typeof snapshot.version !== 'string' || snapshot.version.length === 0
       || snapshot.validTo !== null || snapshot.retractedAt !== null) {
       throw new DerivedScopeError('scope_source_changed')
     }

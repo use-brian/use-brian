@@ -112,6 +112,8 @@ async function memberTransaction<T>(pool: Pool, workspaceId: string, userId: str
     return result
   } catch (error) {
     await client.query('ROLLBACK').catch(() => undefined)
+    if((error as {code?:string}).code==='42501')throw new WorkspaceModuleError('not_authorized','Current module governance is unavailable.')
+    if((error as {code?:string}).code==='40001')throw new WorkspaceModuleError('stale_module_version','Module authority changed; reload before trying again.')
     throw error
   } finally { client.release() }
 }
@@ -146,6 +148,7 @@ export function createWorkspaceModulesStore(pool: Pool = getPool(), memberPool: 
         throw new WorkspaceModuleError('invalid_input', 'A known action and a nonnegative expectedVersion are required')
       }
       const result = await memberTransaction(memberPool, workspaceId, userId, true, async (client) => {
+        await client.query('SELECT application_prepare_native_module_lifecycle($1,$2,$3,$4,$5)',[workspaceId,moduleKey,input.action,input.expectedVersion,registry[moduleKey].defaultState])
         let result = await client.query<WorkspaceModule>(
           `SELECT ${SELECT} FROM workspace_modules WHERE workspace_id=$1 AND module_key=$2 FOR UPDATE`,
           [workspaceId, moduleKey])
@@ -179,7 +182,10 @@ export function createWorkspaceModulesStore(pool: Pool = getPool(), memberPool: 
         }
         const state = input.action === 'enable' ? 'enabled'
           : input.action === 'request_disable' && blocked > 0 ? 'draining' : 'disabled'
-        if (state === current.state) return { module: current, changed: false, blockingWork: blockers }
+        if (state === current.state) {
+          await client.query('SELECT application_finish_native_module_lifecycle($1,$2)',[workspaceId,moduleKey])
+          return { module: current, changed: false, blockingWork: blockers }
+        }
         const changed = await client.query<WorkspaceModule>(
           `UPDATE workspace_modules SET state=$3,version=version+1,updated_at=now(),updated_by_user_id=$4,
              enabled_at=CASE WHEN $3='enabled' THEN now() ELSE enabled_at END,
@@ -191,6 +197,7 @@ export function createWorkspaceModulesStore(pool: Pool = getPool(), memberPool: 
         await client.query(`INSERT INTO workspace_audit_log (workspace_id,actor_user_id,event_type,subject_id,details)
           VALUES ($1,$2,'workspace.module_changed',$1,$3)`, [workspaceId, userId,
           { moduleKey, action: input.action, from: current.state, to: state, version: module.version }])
+        await client.query('SELECT application_finish_native_module_lifecycle($1,$2)',[workspaceId,moduleKey])
         return { module, changed: true, blockingWork: blockers }
       })
       if (result.changed) notifyWorkspaceChange(workspaceId, 'workspace_config', 'update')

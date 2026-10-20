@@ -109,12 +109,16 @@ export type CompanyListFilters = {
 }
 
 export type CompanyUpdateFields = {
+  aliases?: string[]
+  tags?: string[]
+  ownerId?: string | null
+  archivedAt?: string | null
+
   /** Current declared custom keys, committed with the typed business patch. */
   customFields?: Record<string, unknown>
   name?: string
   /** Pass `null` to clear; omit to leave unchanged. */
   domain?: string | null
-  tags?: string[]
   externalRef?: CrmExternalRef
 }
 
@@ -153,6 +157,11 @@ export type ContactListFilters = {
 }
 
 export type ContactUpdateFields = {
+  aliases?: string[]
+  tags?: string[]
+  ownerId?: string | null
+  archivedAt?: string | null
+
   /** Current declared custom keys, committed with the typed business patch. */
   customFields?: Record<string, unknown>
   name?: string
@@ -162,7 +171,6 @@ export type ContactUpdateFields = {
   phone?: string | null
   /** Pass `null` to clear; omit to leave unchanged. */
   companyId?: string | null
-  tags?: string[]
   externalRef?: CrmExternalRef
 }
 
@@ -204,6 +212,19 @@ export type DealListFilters = {
 }
 
 export type DealUpdateFields = {
+  name?: string
+  stage?: DealStage
+  pipelineId?: string | null
+  pipelineStageId?: string | null
+  currencyCode?: string | null
+  source?: string | null
+  winLossReason?: string | null
+  probability?: number | null
+  aliases?: string[]
+  tags?: string[]
+  ownerId?: string | null
+  archivedAt?: string | null
+
   /** Current declared custom keys, committed with the typed business patch. */
   customFields?: Record<string, unknown>
   /** Pass `null` to clear; omit to leave unchanged. */

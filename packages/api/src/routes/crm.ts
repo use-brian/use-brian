@@ -328,8 +328,9 @@ export function crmRoutes({
     ctx: AccessContext,
     body: Record<string, unknown>,
     transaction?: CrmWriteTransaction,
+    mergeCompanyByName = true,
   ): Promise<{ id: string; kind: CrmEntityKind }> {
-    if (!transaction) return runCrmWriteTransaction(ctx.userId, tx => createRecord(ctx, body, tx))
+    if (!transaction) return runCrmWriteTransaction(ctx.userId, tx => createRecord(ctx, body, tx, mergeCompanyByName))
     const common = z.object({ kind: z.enum(['person','contact','company','deal']), name: z.string().trim().min(1).max(256),
       ownerId: z.string().uuid().nullable().optional(), destination: z.unknown().optional(),
       customFields: z.record(applicationJsonSchema).optional() })
@@ -376,6 +377,7 @@ export function crmRoutes({
     } else if (kind === 'company') {
       const record = await createCompany(ctx.userId, {
         workspaceId: ctx.workspaceId,
+        mergeByName: mergeCompanyByName,
         ...(customFields?{customFields}:{}),
         ...destination,
         name,
@@ -827,7 +829,7 @@ export function crmRoutes({
       const results = await runCrmWriteTransaction(member.ctx.userId, async transaction => {
         const rows: Array<{row:number;id:string}> = []
         for (let index=0;index<input.data.records.length;index++) {
-          const created=await createRecord(member.ctx,input.data.records[index],transaction)
+          const created=await createRecord(member.ctx,input.data.records[index],transaction,false)
           rows.push({row:index+1,id:created.id})
         }
         return rows

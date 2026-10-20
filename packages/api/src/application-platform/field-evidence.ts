@@ -71,7 +71,7 @@ export async function readCanonicalGenericRecord(context: CanonicalGenericReadCo
 /** Validate only values actually selected; reading immutable metadata is allowed. */
 export function validateCanonicalNativeValues(definition:ApplicationResourceDefinition,values:ApplicationRecordProjection['values']):void {
   validateApplicationValues({...definition,fields:definition.fields.filter(field=>Object.hasOwn(values,field.key))
-    .map(field=>({...field,immutable:false}))},values)
+    .map(field=>({...field,immutable:false,...(field.kind==='crm'&&values[field.key]===null?{required:false,definition:{...field.definition,isRequired:false}}:{})}))},values)
 }
 
 type NativeAmountEncoding = 'number' | 'string' | 'null' | 'invalid'
@@ -171,4 +171,40 @@ export async function readApplicationFieldAncestors(workspaceId: string, rawRoot
     }
   }
   return [...sources.values()]
+}
+
+const nativeTaskHistoryParents=new WeakMap<ApplicationRecordProjection,string|null>()
+/** Legacy metadata is available only from an admitted parentId history capture. */
+export function canonicalNativeTaskHistoryPhysicalParent(projection:ApplicationRecordProjection):string|null {
+  if(!nativeTaskHistoryParents.has(projection))unavailable()
+  return nativeTaskHistoryParents.get(projection)!
+}
+
+/** Exact physical history under its original floor and current logical task rights. */
+export async function readCanonicalNativeTaskHistoryRecord(context:CanonicalGenericReadContext,
+  definition:ApplicationResourceDefinition,physicalId:string,fields:readonly string[],expectedVersion?:string):Promise<ApplicationRecordProjection> {
+  if(definition.origin.kind!=='native'||definition.origin.moduleKey!=='native'||definition.typeKey!=='task'
+    ||new Set(fields).size!==fields.length||fields.some(field=>!definition.fields.some(candidate=>candidate.key===field)))unavailable()
+  const captured=captureSchema.extend({id:z.string().uuid(),logicalId:z.string().uuid(),recordVersion:z.string().min(1),physicalParentId:z.string().uuid().nullable().optional()}).safeParse(
+    (await runCanonicalReadLease(context,()=>context.transaction.query<{value:unknown}>('SELECT read_native_application_task_history($1,$2,$3,$4) AS value',
+      [context.workspaceId,physicalId,[...fields],expectedVersion??null]))).rows[0]?.value)
+  if(!captured.success||captured.data.id!==physicalId.toLowerCase()||expectedVersion!==undefined&&captured.data.recordVersion!==expectedVersion||captured.data.sources[0].resourceKind!=='application_field'
+    ||captured.data.sources.some(source=>source.workspaceId!==context.workspaceId)
+    ||!isDeepStrictEqual([...fields].sort(),Object.keys(captured.data.values).sort()))unavailable()
+  validateCanonicalNativeValues(definition,captured.data.values)
+  const policyVersion=context.applicationFingerprint?createHash('sha256').update(JSON.stringify({application:context.applicationFingerprint,field:captured.data.policyVersion})).digest('hex'):captured.data.policyVersion
+  if(fields.includes('parentId')!==Object.hasOwn(captured.data,'physicalParentId'))unavailable()
+  const projection=bindScopeSources({ref:{workspaceId:context.workspaceId,origin:definition.origin,typeKey:'task',id:physicalId,version:captured.data.recordVersion},
+    values:captured.data.values,fields:[...fields],policyVersion},captured.data.sources)
+  if(fields.includes('parentId'))nativeTaskHistoryParents.set(projection,captured.data.physicalParentId!)
+  return projection
+}
+
+/** History collection/absence evidence uses history authority without a query grant. */
+export async function readCanonicalNativeTaskHistoryDomain(context:CanonicalGenericReadContext,id:string,fields:readonly string[]):Promise<ScopeSource[]> {
+  const captured=captureSchema.safeParse((await runCanonicalReadLease(context,()=>context.transaction.query<{value:unknown}>(
+    'SELECT observe_native_application_task_history_domain($1,$2,$3) AS value',[context.workspaceId,id,[...fields]]))).rows[0]?.value)
+  if(!captured.success||Object.keys(captured.data.values).length||captured.data.sources[0].resourceKind!=='application_field'
+    ||captured.data.sources.some(source=>source.workspaceId!==context.workspaceId))unavailable()
+  return captured.data.sources
 }

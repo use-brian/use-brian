@@ -81,7 +81,8 @@ describe('[COMP:api/workspace-modules] Actual lifecycle and admission transactio
       // Rehearse the actual additive migration on its pre-migration schema
       // inside a rollback-only transaction owned exclusively by this fixture.
       await client.query(`DROP TRIGGER workspaces_provision_modules ON workspaces;
-        DROP FUNCTION public.provision_workspace_modules(); DROP TABLE workspace_modules`)
+        DROP FUNCTION public.provision_workspace_modules();
+        DROP FUNCTION IF EXISTS public.application_lock_module(uuid,text); DROP TABLE workspace_modules`)
       const migration = await readFile(new URL('../../../migrations/497_workspace_modules.sql', import.meta.url), 'utf8')
       await client.query(migration.replace(/^BEGIN;$/m, '').replace(/^COMMIT;$/m, ''))
       expect((await client.query('SELECT state,version,updated_by_user_id FROM workspace_modules WHERE workspace_id=$1', [f.workspaceId])).rows)
