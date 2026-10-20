@@ -13,7 +13,7 @@ import { getAppPool, getPool } from '../../db/client.js'
 import { addSessionMessage, getSessionMessages, toStampedMessages } from '../../db/sessions.js'
 import { createDbSessionStateStore } from '../../db/session-state-store.js'
 import { createDbEpisodicStore } from '../../db/episodic-store.js'
-import { writeSessionContextRevision, sessionContextGeneration, bindSessionContextRetainedAuthority } from '../../db/session-context-revisions.js'
+import { writeSessionContextRevision, sessionContextGeneration, bindSessionContextRetainedAuthority, readSessionContextRevisions } from '../../db/session-context-revisions.js'
 import { assertSourceModelInputAuthority } from '../model-source-authority.js'
 import { persistentContextFixture } from './fixtures/persistent-context.js'
 import { persistentSourceFixture } from './fixtures/persistent-source.js'
@@ -154,6 +154,31 @@ describe.sequential('[COMP:api/application-persistence] actual transcript persis
     bindSessionContextRetainedAuthority(other.execution,(execution,sources,action)=>independent!.coordinator.prepare(execution,sources,action))
     expect(await store.listOpenBySession(f.session.id,other)).toMatchObject([{id:row.id,summary:'Fictional independent content'}])
     expect((await f.pool.query('SELECT id,payload_sha256 FROM session_context_scope_revisions WHERE workspace_id=$1',[f.workspaceId])).rows).toEqual(original)
+  })
+
+  it('promotes governed external episodes without blocking source pins and preserves independent retained readers', async () => {
+    fixture=await persistentContextFixture('confidential')
+    const f=fixture;independent=await persistentSourceFixture(f)
+    const store=createDbEpisodicStore(),authority=await f.modelContext()
+    bindSessionContextRetainedAuthority(authority.execution,(execution,sources,action)=>independent!.coordinator.prepare(execution,sources,action))
+    const row=await store.create({sessionId:f.session.id,userId:f.ownerId,assistantId:f.assistantId,
+      topicLabel:'fictional-external-topic',summary:'Fictional governed episode',messageSpan:{fromSequence:1,toSequence:2,turnCount:2},authority,
+      derivation:{producer:'fixture:external-promotion',sources:[independent.root]}})
+    await store.fetchByTopic({sessionId:f.session.id,topicLabel:row.topicLabel,authority})
+    await store.incrementSurvivalCount([row.id],authority)
+    await store.incrementSurvivalCount([row.id],authority)
+    const original=boundScopeSources(row)[0],published=await store.promote!(row.id,authority)
+    expect(published.created).toBe(true)
+    expect((await f.pool.query('SELECT promoted_memory_id FROM episodic_memories WHERE id=$1',[row.id])).rows[0].promoted_memory_id).toBe(published.memoryId)
+    await independent.pool.query("DELETE FROM grants WHERE kind='human' AND account_id=$1",[f.ownerId])
+    await expect(store.promote!(row.id,authority)).rejects.toThrow('scope_source_changed')
+    const second=await f.modelContext(f.secondId)
+    bindSessionContextRetainedAuthority(second.execution,(execution,sources,action)=>independent!.coordinator.prepare(execution,sources,action))
+    expect(await store.promote!(row.id,second)).toEqual({memoryId:published.memoryId,created:false})
+    const retained=await readSessionContextRevisions(f.session.id,'episodic_memory',second,{includePromoted:true})
+    expect(retained).toMatchObject([{content:{summary:'Fictional governed episode'}}])
+    expect(boundScopeSources(retained[0])).toEqual([original])
+    expect(await store.listBySession(f.session.id,second)).toEqual([])
   })
 
   it('uses the actual Brian commitment tools and formatter with the same canonical execution', async () => {

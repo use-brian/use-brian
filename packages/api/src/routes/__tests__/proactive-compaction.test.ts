@@ -210,111 +210,19 @@ function makeMemoryStore(): MemoryStore {
   } as unknown as MemoryStore
 }
 
-describe('[COMP:api/proactive-compaction] houseKeepEpisodic — episodic lifecycle', () => {
-  it('evicts rows with access_count == 0', async () => {
-    const cold = record({ id: 'cold', accessCount: 0, survivalCount: 0 })
-    const store = makeEpisodicStore([cold])
-    const memStore = makeMemoryStore()
-
-    const stats = await houseKeepEpisodic({
-      episodicStore: store, memoryStore: memStore,
+describe('[COMP:api/proactive-compaction] episodic housekeeping authority', () => {
+  // Evict/keep/promote, complete derivation, rollback and concurrency positives
+  // now execute against real guarded SQL in attended-consumers integration.
+  it('refuses housekeeping without canonical authority before reading counters or writing', async () => {
+    const store = makeEpisodicStore([record({ id: 'fictional-episode', accessCount: 4, survivalCount: 2 })])
+    const memoryStore = makeMemoryStore()
+    await expect(houseKeepEpisodic({ episodicStore: store, memoryStore,
       sessionId: 's1', assistantId: 'a1', userId: 'u1',
-    })
-
-    expect(stats).toEqual({ promoted: 0, evicted: 1, kept: 0 })
-    expect(store.deleteById).toHaveBeenCalledWith('cold')
-    expect(memStore.create).not.toHaveBeenCalled()
-    expect(store.incrementSurvivalCount).toHaveBeenCalledWith([])
-  })
-
-  it('promotes rows that reach survival_count + 1 >= threshold (3)', async () => {
-    // survival_count=2 + 1 = 3 → crosses threshold
-    const mature = record({ id: 'mature', topicLabel: 'japan trip', summary: 'User planning 5-day Tokyo trip...', accessCount: 4, survivalCount: 2 })
-    const store = makeEpisodicStore([mature])
-    const memStore = makeMemoryStore()
-
-    const stats = await houseKeepEpisodic({
-      episodicStore: store, memoryStore: memStore,
-      sessionId: 's1', assistantId: 'a1', userId: 'u1',
-    })
-
-    expect(stats).toEqual({ promoted: 1, evicted: 0, kept: 0 })
-    expect(memStore.create).toHaveBeenCalledWith(expect.objectContaining({
-      scope: 'shared',
-      source: 'episodic-graduation',
-      summary: 'Recurring topic: japan trip',
-      detail: 'User planning 5-day Tokyo trip...',
-      tags: ['episodic-graduation', 'japan trip'],
-      assistantId: 'a1',
-      userId: 'u1',
-      sourceSessionId: 's1',
-    }))
-    expect(store.deleteById).toHaveBeenCalledWith('mature')
-  })
-
-  it('bumps survival_count for rows that are accessed but not yet mature', async () => {
-    const young = record({ id: 'young', accessCount: 1, survivalCount: 0 })
-    const store = makeEpisodicStore([young])
-    const memStore = makeMemoryStore()
-
-    const stats = await houseKeepEpisodic({
-      episodicStore: store, memoryStore: memStore,
-      sessionId: 's1', assistantId: 'a1', userId: 'u1',
-    })
-
-    expect(stats).toEqual({ promoted: 0, evicted: 0, kept: 1 })
-    expect(store.incrementSurvivalCount).toHaveBeenCalledWith(['young'])
+    })).rejects.toMatchObject({ reason: 'authority_changed' })
+    expect(store.listBySession).not.toHaveBeenCalled()
     expect(store.deleteById).not.toHaveBeenCalled()
-    expect(memStore.create).not.toHaveBeenCalled()
-  })
-
-  it('keeps the episodic row when promotion write fails — retried next compaction', async () => {
-    const mature = record({ id: 'mature', accessCount: 3, survivalCount: 5 })
-    const store = makeEpisodicStore([mature])
-    const memStore = makeMemoryStore()
-    ;(memStore.create as ReturnType<typeof vi.fn>).mockRejectedValueOnce(new Error('DB down'))
-
-    const stats = await houseKeepEpisodic({
-      episodicStore: store, memoryStore: memStore,
-      sessionId: 's1', assistantId: 'a1', userId: 'u1',
-    })
-
-    expect(stats).toEqual({ promoted: 0, evicted: 0, kept: 0 })
-    expect(store.deleteById).not.toHaveBeenCalled()   // never deletes if memory write fails
-  })
-
-  it('handles a mixed batch: evict, promote, keep all in one pass', async () => {
-    const rows = [
-      record({ id: 'cold', accessCount: 0, survivalCount: 1 }),
-      record({ id: 'young', accessCount: 2, survivalCount: 0 }),
-      record({ id: 'mature', accessCount: 5, survivalCount: 2 }),
-    ]
-    const store = makeEpisodicStore(rows)
-    const memStore = makeMemoryStore()
-
-    const stats = await houseKeepEpisodic({
-      episodicStore: store, memoryStore: memStore,
-      sessionId: 's1', assistantId: 'a1', userId: 'u1',
-    })
-
-    expect(stats).toEqual({ promoted: 1, evicted: 1, kept: 1 })
-    expect(store.incrementSurvivalCount).toHaveBeenCalledWith(['young'])
-    expect(store.deleteById).toHaveBeenCalledWith('cold')
-    expect(store.deleteById).toHaveBeenCalledWith('mature')
-    expect(memStore.create).toHaveBeenCalledTimes(1)
-  })
-
-  it('returns zero stats on an empty session', async () => {
-    const store = makeEpisodicStore([])
-    const memStore = makeMemoryStore()
-
-    const stats = await houseKeepEpisodic({
-      episodicStore: store, memoryStore: memStore,
-      sessionId: 's1', assistantId: 'a1', userId: 'u1',
-    })
-
-    expect(stats).toEqual({ promoted: 0, evicted: 0, kept: 0 })
-    expect(store.incrementSurvivalCount).toHaveBeenCalledWith([])
+    expect(store.incrementSurvivalCount).not.toHaveBeenCalled()
+    expect(memoryStore.create).not.toHaveBeenCalled()
   })
 })
 

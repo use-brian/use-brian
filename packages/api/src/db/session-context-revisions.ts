@@ -1,3 +1,4 @@
+import { createMemory } from './memories.js'
 /** Immutable session-context storage. [COMP:api/application-persistence] */
 import { randomUUID } from 'node:crypto'
 import type { PoolClient } from 'pg'
@@ -33,7 +34,7 @@ function requireAuthority(authority: SessionContextAuthority | undefined): Sessi
   return authority
 }
 async function transaction<T>(authority: SessionContextAuthority, sources: readonly ScopeSource[], action: 'context' | 'retain',
-  owner: boolean, run: (client: PoolClient) => Promise<T>, writeSessionId?: string): Promise<T> {
+  owner: boolean, run: (client: PoolClient) => Promise<T>, writeSessionId?: string, writeWorkspace = false): Promise<T> {
   const { execution, accumulator } = requireAuthority(authority), before = JSON.stringify(accumulator.evidence)
   await execution.security.authority.assertCurrent()
   if (execution.lifecycle.abortSignal.aborted || sources.some(source => source.workspaceId !== execution.security.access.workspaceId)) changed()
@@ -56,6 +57,10 @@ async function transaction<T>(authority: SessionContextAuthority, sources: reado
       }
       await applyRLSGucs(client, execution.security.access.userId)
       await applyApplicationRLSContext(client, execution)
+      // Promotion locks the workspace before parent/source rows. NO KEY UPDATE
+      // remains compatible with the trusted source pin's separate FK insert;
+      // createMemory upgrades after those pin inserts have committed.
+      if (writeWorkspace) await client.query('SELECT id FROM workspaces WHERE id=$1 FOR NO KEY UPDATE', [execution.security.access.workspaceId])
       // Take the publication lock before any native source reader takes a
       // parent SHARE lock. Two simultaneous upgrades otherwise deadlock.
       if(writeSessionId)await client.query('SELECT id FROM sessions WHERE id=$1 FOR UPDATE',[writeSessionId])
@@ -78,7 +83,7 @@ async function transaction<T>(authority: SessionContextAuthority, sources: reado
 
 /** Discover immutable metadata only. Historical plaintext is never selected. */
 export async function readSessionContextRevisions(sessionId: string, kind: SessionContextKind,
-  authority?: SessionContextAuthority): Promise<SessionContextRevision[]> {
+  authority?: SessionContextAuthority, options?: { includePromoted?: boolean }): Promise<SessionContextRevision[]> {
   if (!authority) return []
   requireAuthority(authority)
   await authority.execution.security.authority.assertCurrent()
@@ -91,8 +96,8 @@ export async function readSessionContextRevisions(sessionId: string, kind: Sessi
     LEFT JOIN session_state st ON r.parent_kind='session_state' AND st.id=r.parent_id AND st.scope_revision_id=r.id AND st.session_id=r.session_id
     LEFT JOIN episodic_memories e ON r.parent_kind='episodic_memory' AND e.id=r.parent_id AND e.scope_revision_id=r.id AND e.session_id=r.session_id
     WHERE r.workspace_id=$1 AND r.session_id=$2 AND r.parent_kind=$3
-      AND (st.id IS NOT NULL OR e.id IS NOT NULL OR r.parent_kind='compact_summary' AND s.compact_scope_revision_id=r.id)
-    ORDER BY r.id`, [workspaceId,sessionId,kind])).rows
+      AND (st.id IS NOT NULL OR e.id IS NOT NULL AND ($4::boolean OR e.promoted_memory_id IS NULL) OR r.parent_kind='compact_summary' AND s.compact_scope_revision_id=r.id)
+    ORDER BY r.id`, [workspaceId,sessionId,kind,options?.includePromoted === true])).rows
   const rows: SessionContextRevision[] = []
   for (const candidate of candidates) {
     if (!candidate.source || candidate.source.resourceKind !== 'session_context_revision' || (candidate.source as ScopeSource & { held?: boolean }).held !== false) continue
@@ -216,4 +221,42 @@ export async function mutateSessionContextParents(authority: SessionContextAutho
     const result = await client.query(`${prefix} WHERE scope_revision_id=ANY($1::uuid[]) RETURNING id`,[rows.map(row=>row.id)])
     return result.rowCount ?? 0
   })
+}
+
+/** Canonical episode promotion; only admitted immutable payloads reach the writer. */
+export async function promoteSessionContextEpisode(parentId: string, inputAuthority: SessionContextAuthority): Promise<{ memoryId: string; created: boolean }> {
+  const authority = requireAuthority(inputAuthority), { execution } = authority
+  if (execution.lifecycle.sessionPersisted === false || execution.surface.readOnly) changed()
+  const row = (await readSessionContextRevisions(execution.lifecycle.sessionId ?? '', 'episodic_memory', authority, { includePromoted: true }))
+    .find(candidate => candidate.parentId === parentId)
+  if (!row) changed()
+  const { topicLabel, summary } = row.content
+  if (typeof topicLabel !== 'string' || !topicLabel || typeof summary !== 'string' || !summary) changed()
+  const accumulated = new ContextScopeAccumulator(execution.security.provenance)
+  accumulated.note(authority.accumulator.evidence)
+  accumulated.note({ sources: boundScopeSources(row) })
+  const derivation: DerivedWriteEvidence = { producer: 'compaction:episodic-promotion', sources: accumulated.evidence.sources ?? [] }
+  const result = await transaction(authority, derivation.sources, 'retain', true, async client => {
+    const current = (await client.query<{ revision: string; promoted: string | null; access: number; survival: number }>(`SELECT scope_revision_id AS revision,promoted_memory_id AS promoted,access_count AS access,survival_count AS survival
+      FROM episodic_memories WHERE id=$1 AND session_id=$2 FOR UPDATE`, [parentId,execution.lifecycle.sessionId])).rows[0]
+    if (!current || current.revision !== row.id) changed()
+    if (current.promoted) return { memoryId: current.promoted, created: false }
+    if (current.access < 1 || current.survival + 1 < 3) changed()
+    const allowed = (await client.query<{ allowed: boolean }>('SELECT session_context_revision_allowed($1,$2) AS allowed', [row.source.workspaceId,row.id])).rows[0]?.allowed
+    if (allowed !== true) changed()
+    const memory = await createMemory({
+      workspaceId: row.source.workspaceId, assistantId: execution.assistant.id,
+      userId: row.source.userId, derivationTarget: { userId: row.source.userId, assistantId: row.source.assistantId },
+      summary: `Recurring topic: ${topicLabel}`, detail: summary,
+      scope: row.source.userId ? 'private' : 'shared', sensitivity: row.source.sensitivity,
+      compartments: row.source.compartments, projectIds: row.source.projectIds,
+      source: 'episodic-graduation', sourceSessionId: row.sessionId, tags: ['episodic-graduation',topicLabel],
+      confidence: 0.7, createdByUserId: execution.security.access.userId, createdByAssistantId: execution.assistant.id,
+      derivation,
+    }, undefined, client)
+    await client.query('UPDATE episodic_memories SET promoted_memory_id=$2 WHERE id=$1 AND scope_revision_id=$3', [parentId,memory.id,row.id])
+    return { memoryId: memory.id, created: true }
+  }, execution.lifecycle.sessionId, true)
+  authority.accumulator.note({ sources: boundScopeSources(row) })
+  return result
 }

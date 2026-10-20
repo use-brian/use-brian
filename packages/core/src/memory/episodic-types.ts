@@ -38,7 +38,8 @@ export type EpisodicMemoryRecord = {
    * evicted (access_count==0) or promoted. Starts at 0, bumped each time
    * compaction's housekeeping pass keeps the row. At the promotion
    * threshold it graduates to `memories` as a `context`-type row with
-   * source='episodic-graduation' and the episodic row is deleted.
+   * source='episodic-graduation'. Its certified source is retained while the
+   * episodic row is retired from active recall.
    * See docs/context-engine/compaction.md → "Episodic lifecycle".
    */
   survivalCount: number
@@ -100,11 +101,13 @@ export type EpisodicStore = {
   listBySession(sessionId: string, authority?: SessionContextAuthority): Promise<EpisodicMemoryRecord[]>
 
   /**
-   * Hard-delete an episodic row by id. Called by the housekeeping
-   * pass for evictions (access_count==0) and after successful
-   * promotions to long-term memories.
+   * Hard-delete an admitted cold episodic row for eviction. Promotion uses
+   * the separate atomic retirement port and never deletes its source.
    */
   deleteById(id: string, authority?: SessionContextAuthority): Promise<void>
+
+  /** Canonical atomic publication/retirement; no plaintext copy/delete fallback. */
+  promote?(id: string, authority: SessionContextAuthority): Promise<{ memoryId: string; created: boolean }>
 
   /**
    * Bulk-increment the `survival_count` of the given rows by 1. Called

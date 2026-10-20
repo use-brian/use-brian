@@ -1,3 +1,4 @@
+import { promoteSessionContextEpisode } from './session-context-revisions.js'
 import { bindScopeSources,boundScopeSources,type EpisodicStore,type EpisodicMemoryRecord } from '@use-brian/core'
 import {
   createEpisodicMemory,
@@ -33,6 +34,7 @@ function toRecord(r: EpisodicMemoryRow): EpisodicMemoryRecord {
  */
 export function createDbEpisodicStore(): EpisodicStore {
   return {
+    promote: promoteSessionContextEpisode,
     async create(params) {
       const row = await createEpisodicMemory(params)
       return toRecord(row)

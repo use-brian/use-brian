@@ -31,7 +31,7 @@ import type {
   EpisodicStore, EpisodicMemoryRecord, UsageStore,
   SessionStateStore,
   CurrentAuthorityBoundary,
-  ExecutionContext,
+  ExecutionContext, SessionContextAuthority,
 } from '@use-brian/core'
 import {
   setCompactSummaryAndBoundary, readCompactSummary, toStampedMessages,
@@ -698,7 +698,7 @@ export async function runProactiveCompaction(
       try {
         housekeepingStats = await houseKeepEpisodic({
           episodicStore, memoryStore,
-          sessionId, assistantId, userId,
+          sessionId, assistantId, userId, contextAuthority: binding,
           authority: {
             assertCurrent: async () => { await params.authority?.assertCurrent(); await assertModelInput() },
             execute: guarded,
@@ -706,7 +706,7 @@ export async function runProactiveCompaction(
         })
       } catch (err) {
         if (isAuthorityChangedError(err)) throw err
-        console.error('[compaction] episodic housekeeping failed:', err)
+        console.error('[compaction] episodic housekeeping failed')
       }
     }
 
@@ -716,7 +716,7 @@ export async function runProactiveCompaction(
     if (persistLongTermContext && sessionStateStore) {
       try {
         const cutoff = new Date(Date.now() - SESSION_STATE_RESOLVED_TTL_MS)
-        const purged = await guarded(() => sessionStateStore.purgeResolvedOlderThan(sessionId, cutoff))
+        const purged = await guarded(() => sessionStateStore.purgeResolvedOlderThan(sessionId, cutoff, binding))
         if (purged > 0) {
           analytics?.logEvent({
             userId, assistantId, sessionId,
@@ -726,7 +726,7 @@ export async function runProactiveCompaction(
         }
       } catch (err) {
         if (isAuthorityChangedError(err)) throw err
-        console.error('[compaction] session-state decay failed:', err)
+        console.error('[compaction] session-state decay failed')
       }
     }
 
@@ -738,6 +738,7 @@ export async function runProactiveCompaction(
             userId, assistantId, sessionId,
             topicLabel: ep.topicLabel,
             summary: ep.summary,
+            authority: binding, derivation: { producer: 'compaction:episodic-memory', sources: boundScopeSources(ep) },
             messageSpan: {
               fromSequence: ep.messageSpan.fromSequence,
               toSequence: ep.messageSpan.toSequence,
@@ -746,7 +747,7 @@ export async function runProactiveCompaction(
           }))
         } catch (err) {
           if (isAuthorityChangedError(err)) throw err
-          console.error('[compaction] Failed to persist episodic row for topic', ep.topicLabel, err)
+          console.error('[compaction] Failed to persist episodic row')
         }
       }
       analytics?.logEvent({
@@ -851,6 +852,7 @@ type HouseKeepParams = {
   sessionId: string
   assistantId: string
   userId: string
+  contextAuthority?: SessionContextAuthority
   authority?: CurrentAuthorityBoundary
 }
 
@@ -872,8 +874,8 @@ type HouseKeepStats = {
  * Promotions write a `context`-type memory with source
  * 'episodic-graduation' carrying the episodic row's own summary as
  * `detail`. The summary itself is derived so the memory index stays
- * scannable. The original episodic row is deleted after successful
- * memory creation so the topic doesn't live in both tiers.
+ * scannable. The original episodic parent/payload remain as certified ancestry while
+ * retirement removes the topic from active episodic recall.
  *
  * Idempotent-on-failure: per-row errors are logged and skipped so
  * a single bad row never blocks the rest of the pass.
@@ -883,9 +885,24 @@ type HouseKeepStats = {
 export async function houseKeepEpisodic(
   params: HouseKeepParams,
 ): Promise<HouseKeepStats> {
-  const guarded = async <T>(operation: () => Promise<T>): Promise<T> =>
-    params.authority ? params.authority.execute(operation) : operation()
-  const rows = await guarded(() => params.episodicStore.listBySession(params.sessionId))
+  const context = params.contextAuthority
+  if (!context) throw Object.assign(new DerivedScopeError('scope_evidence_missing'), { reason: 'authority_changed' as const, retrySafe: false })
+  const guarded = async <T>(operation: () => Promise<T>): Promise<T> => {
+    await context.execution.security.authority.assertCurrent()
+    try {
+      const value = await (params.authority ?? context.execution.security.authority).execute(operation)
+      await context.execution.security.authority.assertCurrent()
+      return value
+    } catch (error) {
+      if (error instanceof DerivedScopeError) throw Object.assign(error, { reason: 'authority_changed' as const, retrySafe: false })
+      throw error
+    }
+  }
+  const rows = await guarded(() => params.episodicStore.listBySession(params.sessionId, context))
+  // Each deterministic maturity decision consumes only its own admitted row.
+  // Siblings are not model inputs or ancestors of one another's publication.
+  // The canonical promoter still includes the complete actual turn closure.
+  await context.execution.security.authority.assertCurrent()
   const toEvict: EpisodicMemoryRecord[] = []
   const toPromote: EpisodicMemoryRecord[] = []
   const toKeep: EpisodicMemoryRecord[] = []
@@ -900,31 +917,17 @@ export async function houseKeepEpisodic(
     }
   }
 
-  // Promote: write memory first, delete episodic on success. If the
-  // memory write fails we deliberately keep the episodic row so the
-  // content isn't lost — next compaction will retry the promotion.
+  // Publication and retirement are one canonical transaction. Retain the
+  // original certified parent/payload so the new memory's source stays current.
   let promoted = 0
   for (const row of toPromote) {
     try {
-      await guarded(() => params.memoryStore.create({
-        assistantId: params.assistantId,
-        userId: params.userId,
-        scope: 'shared',
-        summary: `Recurring topic: ${row.topicLabel}`,
-        detail: row.summary,
-        confidence: 0.7,
-        source: 'episodic-graduation',
-        sourceSessionId: params.sessionId,
-        tags: ['episodic-graduation', row.topicLabel],
-        sensitivity: 'internal',
-        createdByUserId: params.userId,
-        createdByAssistantId: params.assistantId,
-      }))
-      await guarded(() => params.episodicStore.deleteById(row.id))
-      promoted++
+      if (!params.episodicStore.promote) throw new DerivedScopeError('scope_evidence_missing')
+      const result = await guarded(() => params.episodicStore.promote!(row.id, context))
+      if (result.created) promoted++
     } catch (err) {
-      if (isAuthorityChangedError(err)) throw err
-      console.error('[compaction] Failed to promote episodic row', row.id, err)
+      if (err instanceof DerivedScopeError || isAuthorityChangedError(err)) throw Object.assign(err, { reason: 'authority_changed' as const, retrySafe: false })
+      console.error('[compaction] Failed to promote episodic row')
     }
   }
 
@@ -933,20 +936,20 @@ export async function houseKeepEpisodic(
   let evicted = 0
   for (const row of toEvict) {
     try {
-      await guarded(() => params.episodicStore.deleteById(row.id))
+      await guarded(() => params.episodicStore.deleteById(row.id, context))
       evicted++
     } catch (err) {
       if (isAuthorityChangedError(err)) throw err
-      console.error('[compaction] Failed to evict episodic row', row.id, err)
+      console.error('[compaction] Failed to evict episodic row')
     }
   }
 
   // Bump survival on kept rows (batched).
   try {
-    await guarded(() => params.episodicStore.incrementSurvivalCount(toKeep.map((r) => r.id)))
+    await guarded(() => params.episodicStore.incrementSurvivalCount(toKeep.map((r) => r.id), context))
   } catch (err) {
     if (isAuthorityChangedError(err)) throw err
-    console.error('[compaction] Failed to bump survival_count:', err)
+    console.error('[compaction] Failed to bump survival_count')
   }
 
   return { promoted, evicted, kept: toKeep.length }

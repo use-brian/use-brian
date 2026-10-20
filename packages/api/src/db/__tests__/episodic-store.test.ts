@@ -3,7 +3,7 @@
 import { beforeEach,describe,it,expect,vi } from 'vitest'
 import { bindScopeSource,boundScopeSources,createExecutionContext,ContextScopeAccumulator } from '@use-brian/core'
 import type { SessionContextRevision } from '../session-context-revisions.js'
-vi.mock('../session-context-revisions.js',()=>({readSessionContextRevisions:vi.fn(),writeSessionContextRevision:vi.fn(),mutateSessionContextParents:vi.fn()}))
+vi.mock('../session-context-revisions.js',async importOriginal=>({...await importOriginal<typeof import('../session-context-revisions.js')>(),readSessionContextRevisions:vi.fn(),writeSessionContextRevision:vi.fn(),mutateSessionContextParents:vi.fn()}))
 import { readSessionContextRevisions,writeSessionContextRevision,mutateSessionContextParents } from '../session-context-revisions.js'
 import { createDbEpisodicStore } from '../episodic-store.js'
 const store=createDbEpisodicStore(),read=vi.mocked(readSessionContextRevisions),write=vi.mocked(writeSessionContextRevision),mutate=vi.mocked(mutateSessionContextParents)
