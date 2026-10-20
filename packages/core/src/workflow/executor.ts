@@ -878,7 +878,7 @@ export async function advanceWorkflowRun(
 
   let toolRegistry: WorkflowToolRegistry
   try {
-    toolRegistry = await deps.buildToolRegistry({
+    const discover = () => deps.buildToolRegistry({
       workspaceId: run.workspaceId,
       assistantId: toolAssistantId,
       // Scheduled / wait-wakeup runs have `run.triggeredBy === null`; fall
@@ -887,11 +887,12 @@ export async function advanceWorkflowRun(
       userId: run.triggeredBy ?? workflow.createdBy,
       turnScope: runtimeScope?.turnScope,
     })
+    toolRegistry = await (executeWithAuthority ? executeWithAuthority(discover) : discover())
   } catch (err) {
     if (deps.abortSignal?.aborted) return cancelRun()
     const error: ExecutorError = {
       message: `Failed to build tool registry: ${err instanceof Error ? err.message : String(err)}`,
-      reason: 'tool_registry_failed',
+      reason: toExecutorError(err)?.reason ?? 'tool_registry_failed',
     }
     await markRunFailed(deps, run, '<unknown>', error, 'failed', undefined, workflow)
     return failOutcome(runId, '<unknown>', error, 0)
