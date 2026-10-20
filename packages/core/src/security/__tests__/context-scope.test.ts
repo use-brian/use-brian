@@ -124,3 +124,46 @@ describe('[COMP:security/context-scope] a created row is not a read source', () 
     expect(created).toMatchObject({ sensitivity: 'confidential', compartments: ['team:a'], projectIds: ['p-1'] })
   })
 })
+
+
+describe('[COMP:security/context-scope] immutable observations survive accumulation', () => {
+  const source = (resourceKind: string, version: string): ScopeSource => ({
+    workspaceId: 'w-1', userId: null, assistantId: null, sensitivity: 'internal',
+    compartments: ['team:alpha'], projectIds: [], resourceKind, resourceId: 'source-1', version,
+  })
+
+  it.each(['application_field', 'external_source', 'session_context_revision'])(
+    'holds conflicting exact %s observations without replacing prior evidence', resourceKind => {
+      const accumulator = new ContextScopeAccumulator({ sources: [source(resourceKind, '1')] })
+      const prior = accumulator.evidence
+      expect(() => accumulator.noteSource(source(resourceKind, '2'))).toThrow('scope_source_changed')
+      expect(accumulator.evidence).toEqual(prior)
+    },
+  )
+
+  it('refuses a conflicting immutable envelope even at the same version', () => {
+    const input = source('external_source', '1')
+    const accumulator = new ContextScopeAccumulator({ sources: [input] })
+    const prior = accumulator.evidence
+    expect(() => accumulator.noteSource({ ...input, compartments: [] })).toThrow('scope_source_changed')
+    expect(accumulator.evidence).toEqual(prior)
+  })
+
+  it('validates an earlier item before a later duplicate can overwrite it', () => {
+    const accumulator = new ContextScopeAccumulator({ sources: [source('workspace_file', '1')] })
+    const prior = accumulator.evidence
+    expect(() => accumulator.note({ sources: [
+      { ...source('workspace_file', '2'), version: '' }, source('workspace_file', '2'),
+    ] })).toThrow('scope_evidence_missing')
+    expect(accumulator.evidence).toEqual(prior)
+  })
+
+  it('preserves earlier native labels within the same batch while advancing the current pointer', () => {
+    const accumulator = new ContextScopeAccumulator()
+    accumulator.note({ sources: [source('workspace_file', '1'), {
+      ...source('workspace_file', '2'), compartments: [],
+    }] })
+    expect(accumulator.evidence.sources?.map(item => item.version)).toEqual(['2'])
+    expect(accumulator.compartments).toEqual(['team:alpha'])
+  })
+})
