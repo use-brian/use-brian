@@ -30,6 +30,12 @@ export function canonicalGenericReadContext(context: ApplicationOperationContext
     ...(application ? { applicationFingerprint: application.state.fingerprint } : {}) }
 }
 
+/** Host liveness brackets the actual transport, including rejected SQL. */
+async function readWithCanonicalLease<T>(context:CanonicalGenericReadContext,operation:()=>Promise<T>):Promise<T> {
+  context.assertLive?.()
+  try{return await operation()}finally{context.assertLive?.()}
+}
+
 /** Generic values and absence are selected/captured under actual native/app SQL rights. */
 export async function readCanonicalGenericApplicationRecord(context: ApplicationOperationContext<PoolClient>,
   definition: ApplicationResourceDefinition,id: string,
@@ -45,10 +51,10 @@ export async function readCanonicalGenericRecord(context: CanonicalGenericReadCo
   const declared = new Set(definition.fields.map(field => field.key)),fields = query ? [...query.fields] : undefined
   if (origin.kind !== 'generic') unavailable()
   const captured = captureSchema.extend({ id: z.string().uuid(),recordVersion: z.string().min(1),absentFields: z.array(z.string()).max(256) }).safeParse(
-    (await context.transaction.query<{ value: unknown }>(query
+    (await readWithCanonicalLease(context,()=>context.transaction.query<{ value: unknown }>(query
       ? "SELECT read_generic_application_projection($1,$2,$3,$4,'query',$5,$5) AS value"
       : 'SELECT read_generic_application_record($1,$2,$3,$4) AS value',
-      [workspaceId,origin.entityTypeId,definition.typeKey,id,...(fields ? [fields] : [])])).rows[0]?.value)
+      [workspaceId,origin.entityTypeId,definition.typeKey,id,...(fields ? [fields] : [])]))).rows[0]?.value)
   if (!captured.success || captured.data.sources.some(source => source.workspaceId !== workspaceId)
     || captured.data.id !== id.toLowerCase() || query && captured.data.recordVersion !== query.expectedVersion
     || captured.data.sources[0].resourceKind !== 'application_field'
@@ -84,8 +90,8 @@ export async function readCanonicalNativeRecord(context:CanonicalGenericReadCont
   if(definition.origin.kind!=='native' || definition.origin.moduleKey!=='native') unavailable()
   const captured=captureSchema.extend({id:z.string().uuid(),recordVersion:z.string().min(1),
     valueEncodings:z.object({amount:z.enum(['number','string','null','invalid']).optional()}).strict().optional()}).safeParse(
-    (await context.transaction.query<{value:unknown}>('SELECT read_native_application_record($1,$2,$3,$4) AS value',
-      [context.workspaceId,definition.typeKey,id,fields?[...fields]:null])).rows[0]?.value)
+    (await readWithCanonicalLease(context,()=>context.transaction.query<{value:unknown}>('SELECT read_native_application_record($1,$2,$3,$4) AS value',
+      [context.workspaceId,definition.typeKey,id,fields?[...fields]:null]))).rows[0]?.value)
   if(!captured.success || captured.data.id!==id.toLowerCase() || captured.data.sources[0].resourceKind!=='application_field'
     || captured.data.sources.some(source=>source.workspaceId!==context.workspaceId)
     || Object.keys(captured.data.values).some(field=>!definition.fields.some(candidate=>candidate.key===field))
@@ -105,10 +111,11 @@ export async function readCanonicalNativeRecord(context:CanonicalGenericReadCont
 /** A row-free native/app domain is captured under actual current SQL ceilings. */
 export async function readCanonicalGenericQueryDomain(context: CanonicalGenericReadContext,
   definition: ApplicationResourceDefinition,fields: readonly string[],predicateFields: readonly string[]): Promise<ScopeSource[]> {
-  if (definition.origin.kind !== 'generic') unavailable()
+  const origin=definition.origin
+  if (origin.kind !== 'generic') unavailable()
   const workspaceId = context.workspaceId
-  const value = (await context.transaction.query<{ value: unknown }>('SELECT observe_generic_application_query_domain($1,$2,$3,$4,$5) AS value',
-    [workspaceId,definition.origin.entityTypeId,definition.typeKey,[...fields],[...predicateFields]])).rows[0]?.value
+  const value = (await readWithCanonicalLease(context,()=>context.transaction.query<{ value: unknown }>('SELECT observe_generic_application_query_domain($1,$2,$3,$4,$5) AS value',
+    [workspaceId,origin.entityTypeId,definition.typeKey,[...fields],[...predicateFields]]))).rows[0]?.value
   if (value === null) unavailable()
   const parsed = captureSchema.safeParse(value)
   if (!parsed.success || Object.keys(parsed.data.values).length || parsed.data.sources[0].resourceKind !== 'application_field'
@@ -121,6 +128,7 @@ export async function bindApplicationFieldProjection<T extends ApplicationRecord
   context: ApplicationOperationContext<PoolClient>, projection: T,
   selection: 'read' | 'history' = 'read',
 ): Promise<T> {
+  const lease=canonicalGenericReadContext(context)
   const snapshot = structuredClone(projection), ref = snapshot.ref
   const absentFields = snapshot.absentFields ?? []
   if (ref.workspaceId !== context.execution.security.access.workspaceId
@@ -128,10 +136,10 @@ export async function bindApplicationFieldProjection<T extends ApplicationRecord
     || snapshot.fields.length !== new Set(snapshot.fields).size
     || !isDeepStrictEqual([...snapshot.fields].sort(), Object.keys(snapshot.values).sort())
     || new Set(absentFields).size !== absentFields.length || absentFields.some(field => Object.hasOwn(snapshot.values,field))) unavailable()
-  const captured = captureSchema.safeParse((await context.transaction.query<{ value: unknown }>(
+  const captured = captureSchema.safeParse((await readWithCanonicalLease(lease,()=>context.transaction.query<{ value: unknown }>(
     'SELECT observe_application_field_projection($1,$2,$3,$4,$5,$6,$7,$8) AS value',
     [ref.workspaceId,ref.origin,ref.typeKey,ref.id,ref.version,selection,selection === 'history' ? ref.version : null,[...snapshot.fields,...absentFields]],
-  )).rows[0]?.value)
+  ))).rows[0]?.value)
   if (!captured.success || !isDeepStrictEqual(projection,snapshot) || boundScopeSources(projection).length > 0
     || !isDeepStrictEqual(captured.data.values, snapshot.values)
     || captured.data.sources.some(source => source.workspaceId !== ref.workspaceId)

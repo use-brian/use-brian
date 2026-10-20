@@ -36,7 +36,7 @@ export async function readLegacyCanonicalCrmPoint(access:AccessContext,type:'com
       bound?.assertLive()
       const definition=canonicalNativeResourceDefinitions().find(resource=>resource.typeKey===type)
       if(!definition)throw new ApplicationPlatformError('access_unavailable','The record is unavailable.')
-      const context={transaction:client,workspaceId:access.workspaceId}
+      const context={transaction:client,workspaceId:access.workspaceId,...(bound?{assertLive:bound.assertLive}:{})}
       let identity
       try{identity=await readCanonicalNativeRecord(context,definition,id,[]);await assertPointScopes(client,access,boundScopeSources(identity))}catch(error){
         if(error instanceof ApplicationPlatformError&&error.code==='access_unavailable'||(error as {code?:string}).code==='scope_operation_denied')return null

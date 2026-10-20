@@ -18,7 +18,7 @@ import { loadApplicationCredentialStateSystem } from '../auth-store.js'
 import { authenticateApplicationOAuth } from '../oauth-auth.js'
 import { getApplicationExecutionBinding, resolveApplicationExecutionContext,runWithApplicationReadTransaction } from '../execution-context.js'
 import { ApplicationPlatformService } from '../service.js'
-import { canonicalGenericReadContext } from '../field-evidence.js'
+import { canonicalGenericReadContext,readCanonicalNativeRecord,readCanonicalGenericRecord,readCanonicalGenericQueryDomain,bindApplicationFieldProjection } from '../field-evidence.js'
 import { createCanonicalNativeApplicationModule } from '../native-adapters.js'
 import { createCanonicalGenericApplicationModule } from '../generic-adapter.js'
 import { batchLabels,createCompany,getCompanyById,getContactById,getDealById } from '../../db/crm.js'
@@ -502,6 +502,53 @@ describe('[COMP:api/application-auth] database application projections and live 
       expect(pids).toEqual([physical.rows[0].pid,physical.rows[0].pid])
       await expect(dispatcher.query(execution,'native','legacy_frame',{})).rejects.toMatchObject({code:'access_unavailable'})
     } finally {await connection.query('ROLLBACK');connection.release()}
+  })
+  it.each((['native_point','generic_point','generic_domain','generic_capture'] as const).flatMap(kind=>(['expired','in_flight'] as const).map(mode=>({kind,mode}))))(
+    'Q02/Q03 refuses an $mode canonical $kind lease before another actual app can lend its pooled connection',async({kind,mode})=>{
+    const native=kind==='native_point'
+    const rows=native?await Promise.all(['first','second'].map(label=>createEntity({workspaceId,kind:'company',displayName:`Fictional lease ${label}`,attributes:{},createdByUserId:ownerId,source:'user'}))):[]
+    const firstId=native?rows[0].id:recordId,targetId=native?rows[1].id:otherId,field=native?'name':'title'
+    const a=await provision('service',[field],undefined,false,native?firstId:undefined,[],[firstId])
+    const b=await provision('service',[field],undefined,false,native?targetId:undefined,[],[targetId])
+    const executionA=await resolveApplicationExecutionContext(a.authentication),executionB=await resolveApplicationExecutionContext(b.authentication)
+    const base=native?createCanonicalNativeApplicationModule():createCanonicalGenericApplicationModule()
+    const projection=kind==='generic_capture'?structuredClone(await new ApplicationPlatformService([base]).query(executionB,base.key,'get',{type:'request',id:targetId})):undefined
+    const connection=await getAppPool().connect();let pause=false,retained:(()=>Promise<unknown>)|undefined,pending:Promise<unknown>|undefined
+    let requestedRead!:()=>void,resumeSql!:()=>void
+    const requested=new Promise<void>(resolve=>{requestedRead=resolve}),resumed=new Promise<void>(resolve=>{resumeSql=resolve})
+    const sqlPort=kind==='native_point'?'read_native_application_record(':kind==='generic_point'?'read_generic_application_record(':kind==='generic_capture'?'observe_application_field_projection(':'observe_generic_application_query_domain('
+    // Only transport scheduling/release is controlled. All SQL and authority
+    // execute unchanged on this actual non-owner connection.
+    const client={query:async(sql:string,values?:unknown[])=>{
+      if(pause&&sql.includes(sqlPort)){pause=false;requestedRead();await resumed}
+      return connection.query(sql,values)
+    },release:()=>{}} as unknown as PoolClient
+    const reader=async(context:Parameters<typeof canonicalGenericReadContext>[0])=>{
+      const captured=canonicalGenericReadContext(context),definition=(await base.resolveResources!(context)).find(value=>value.typeKey===(native?'company':'request'))!
+      expect(definition).toBeDefined()
+      return ()=>kind==='native_point'?readCanonicalNativeRecord(captured,definition,targetId,[field]):kind==='generic_point'
+        ?readCanonicalGenericRecord(captured,definition,targetId):kind==='generic_capture'
+          ?bindApplicationFieldProjection(context,projection as Awaited<ReturnType<typeof readCanonicalGenericRecord>>):readCanonicalGenericQueryDomain(captured,definition,[field],[])
+    }
+    const dispatcher=new ApplicationPlatformService([{...base,application:{...base.application!,queries:[...base.application!.queries,'capture_read_lease','resume_read_lease']},queries:{...base.queries,
+      capture_read_lease:{input:z.object({}).strict(),authorize:async()=>{},execute:async context=>{
+        retained=await reader(context)
+        if(mode==='in_flight'){pause=true;pending=retained();void pending.catch(()=>{});await requested}
+        else expect(await base.queries.get.execute(context,{type:native?'company':'request',id:firstId,...(native?{fields:[field]}:{})})).toMatchObject({ref:{id:firstId}})
+        return []
+      }},resume_read_lease:{input:z.object({}).strict(),authorize:async()=>{},execute:async context=>{
+        expect(retained).toBeDefined()
+        if(mode==='in_flight'){resumeSql();await expect(pending!).rejects.toMatchObject({code:'access_unavailable'})}
+        else await expect(retained!()).rejects.toMatchObject({code:'access_unavailable'})
+        const fresh=await reader(context),result=await fresh()
+        if(kind==='generic_domain')expect((result as unknown[]).length).toBeGreaterThan(0)
+        else expect(result).toMatchObject({ref:{id:targetId}})
+        return result
+      }}}}],{connect:async()=>client} as unknown as Pool)
+    try {
+      expect(await dispatcher.query(executionA,base.key,'capture_read_lease',{})).toEqual([])
+      await dispatcher.query(executionB,base.key,'resume_read_lease',{})
+    }finally{resumeSql();await pending?.catch(()=>{});await connection.query('ROLLBACK');connection.release()}
   })
   it('Q02/Q08 preserves narrower shared-audience and v2 ceilings for a genuine owner-member application legacy getter',async()=>{
     const previous=(await pool.query('SELECT department_read_v2 AS value FROM workspaces WHERE id=$1',[workspaceId])).rows[0].value
