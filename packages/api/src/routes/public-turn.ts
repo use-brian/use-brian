@@ -1165,6 +1165,7 @@ export async function executePublicTurn(
     if (deps.sessionStateStore) {
       try {
         sessionStateBlock = await buildSessionStateBlock({
+          authority: { execution: executionContext, accumulator: scopeAccumulator },
           store: deps.sessionStateStore,
           sessionId: session.id,
         })

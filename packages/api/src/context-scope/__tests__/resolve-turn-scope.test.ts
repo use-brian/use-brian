@@ -501,7 +501,18 @@ describe('[COMP:api/context-scope-resolver] turnOutputWrite', () => {
     accumulator.noteSource(source({ resourceKind: 'session_message', userId: 'user-1', assistantId: 'primary-1' }))
     accumulator.noteSource(source({ resourceId: 'memory-2' }))
     const write = turnOutputWrite({ producer: 'turn:web', accumulator, envelope })
-    expect(write).toEqual({ derivation: { producer: 'turn:web', sources: accumulator.evidence.sources } })
+    expect(write).toEqual({ derivation: { producer: 'turn:web', sources: accumulator.evidence.sources },
+      derivationTarget: envelope })
+  })
+
+  it('retains the declared personal target and its labels when every input is workspace-wide', () => {
+    const accumulator = new ContextScopeAccumulator()
+    accumulator.noteSource(source({ resourceId: 'workspace-input-1', sensitivity: 'confidential', compartments: ['team:source'] }))
+    accumulator.noteSource(source({ resourceId: 'workspace-input-2' }))
+    expect(turnOutputWrite({ producer: 'turn:delegated-input', accumulator, envelope })).toEqual({
+      derivation: { producer: 'turn:delegated-input', sources: accumulator.evidence.sources },
+      derivationTarget: { ...envelope, sensitivity: 'confidential', compartments: ['assistant-default', 'team:source'] },
+    })
   })
 
   it('keeps complete ancestry with a raised transcript target when a primary reads across partitions', () => {

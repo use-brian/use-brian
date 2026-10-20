@@ -12,9 +12,9 @@ import { assertInputAuthority, isInputAuthorityError } from '../providers/input-
  *   { "upserts": [{ "key", "summary", "detail"? }, ...],
  *     "resolves": [{ "key" }, ...] }
  *
- * The caller invokes this fire-and-forget after a `turn_complete` event so
- * commitments the model forgot to track with `trackCommitment` are caught
- * before the next turn starts. Deduped against `openCommitments` so
+ * Actual persistent hosts await this inside the current turn lease after the
+ * primary loop, so commitments missed by `trackCommitment` are caught before
+ * the next turn starts. Deduped against `openCommitments` so
  * unchanged rows don't get re-upserted.
  *
  * On any failure (provider error, non-JSON output, schema mismatch) the

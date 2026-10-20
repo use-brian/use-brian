@@ -50,8 +50,13 @@ async function assertSourceModelAuthority(context: ToolContext, action: 'context
       return
     }
     const application = getApplicationExecutionBinding(execution)
+    // Native delegated consumers keep their actual member/parent ceiling and
+    // still pass non-owner session/source admission below. This exception does
+    // not apply to application, field or independent-source profiles.
+    const nativeDelegated = persistent && !external && fields.length === 0 && !application
+      && execution.identity.kind === 'delegated'
     if (execution.ownership.kind !== 'workspace' || execution.security.access.sharedAudience && (external || fields.length>0)
-      || (!application || external) && (execution.identity.kind !== 'attended' || execution.identity.principal.kind !== 'workspace_member')) denied()
+      || !nativeDelegated && (!application || external) && (execution.identity.kind !== 'attended' || execution.identity.principal.kind !== 'workspace_member')) denied()
     const wiring = external ? getSharedRetainedSourceAuthority() : undefined
     if (external && !wiring) denied()
     const prepared = wiring ? await wiring.coordinator.prepare(execution, sources, action) : undefined

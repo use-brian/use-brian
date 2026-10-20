@@ -1,5 +1,5 @@
 import { randomUUID } from 'node:crypto'
-import { ContextScopeAccumulator, type ResourceScope, type Sensitivity } from '@use-brian/core'
+import { ContextScopeAccumulator, pinAccessCeiling, type ExecutionIdentity, type ResourceScope, type Sensitivity } from '@use-brian/core'
 import { getAppPool, getPool } from '../../../db/client.js'
 import { createMemory } from '../../../db/memories.js'
 import { findAssistantById } from '../../../db/users.js'
@@ -22,16 +22,21 @@ export async function persistentContextFixture(clearance: Sensitivity = 'interna
   await pool.query("INSERT INTO assistants(id,name,owner_user_id,workspace_id,kind,clearance) VALUES($1,'Context fixture assistant',$2,$3,'primary','confidential')", [assistantId, ownerId, workspaceId])
   const envelope: ResourceScope = { workspaceId, userId: null, assistantId: null, sensitivity: clearance, compartments: [], projectIds: [] }
   const session = await createWorkspaceChatSession({ assistantId, starterUserId: ownerId, workspaceId, effectiveClearance: clearance, authenticatedHuman: true })
-  async function execution(userId = ownerId, currentSession: Session = session) {
+  async function execution(userId = ownerId, currentSession: Session = session, identity?: ExecutionIdentity) {
     return (await resolveExecutionContextSystem({
       userId, workspaceId, assistant: (await findAssistantById(assistantId))!, memberMode: 'member',
       sharedAudience: true, session: currentSession, sessionAuthority: currentSession,
-      identity: { kind: 'attended', principal: { kind: 'workspace_member', userId, authenticationKind: 'native_session' } },
+      identity: identity ?? { kind: 'attended', principal: { kind: 'workspace_member', userId, authenticationKind: 'native_session' } },
       ownership: { kind: 'workspace', workspaceId }, lifecycle: {
         sessionId: currentSession.id, sessionPersisted: true, channelId: currentSession.channelId,
         channelType: currentSession.channelType, abortSignal: new AbortController().signal,
       },
     })).executionContext
+  }
+  async function delegatedExecution(userId = ownerId) {
+    const parent = await execution(userId)
+    return execution(userId, session, { kind: 'delegated', actorUserId: userId,
+      delegationId: 'synthetic-delegated-context', parentCeiling: pinAccessCeiling(parent.security.access) })
   }
   async function history() {
     const existing = await getSessionMessages(session.id, { excludeHeld: true })
@@ -51,5 +56,5 @@ export async function persistentContextFixture(clearance: Sensitivity = 'interna
     await pool.query('DELETE FROM workspaces WHERE id=$1', [workspaceId])
     await pool.query('DELETE FROM users WHERE id=ANY($1::uuid[])', [[ownerId, firstId, secondId]])
   }
-  return { pool, workspaceId, ownerId, firstId, secondId, assistantId, session, envelope, execution, history, memory, modelContext, cleanup }
+  return { pool, workspaceId, ownerId, firstId, secondId, assistantId, session, envelope, execution, delegatedExecution, history, memory, modelContext, cleanup }
 }

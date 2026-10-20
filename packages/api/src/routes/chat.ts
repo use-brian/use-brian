@@ -1,3 +1,5 @@
+import { bindScopeSources } from '@use-brian/core'
+import { runTurnSessionStateDiff } from '../turn/session-state.js'
 import { withTurnInference } from '../turn/runtime.js'
 import { PER_TURN_FILES_INDEX_CAP, PER_TURN_INDEX_CAP } from '../turn/index-caps.js'
 import { dispatchPersistedWebInput } from './_incoming-chat-event.js'
@@ -27,7 +29,7 @@ import {
 } from '../resolve-session-pins.js'
 import { getSelfEntityId } from '../db/memories.js'
 import { getRecording, type Recording } from '../db/recordings-store.js'
-import { isConnectionDropError, isEndpointUnreachableError, streamErrorCode, buildMemoryContext, voicePlatformFromDraftTitle, measureDocContext, createMemoryTools, createSelfProfileTool, createMemoryRecallBuffer, createSkillInvocationBuffer, createRetrievalTools, createSessionStateTools, buildSessionStateBlock, runSessionStateDiff, buildActivePlanBlock, createPlanTools, seedPlanFromTasks, calculateCost, sanitize, shouldInline, ensureToolResultPairing, stripUnsignedToolUses, modelRequiresToolSignatures, elideStaleDocToolResults, synthesizeMissingToolResults, createConfirmationResolver, interpretConfirmationEvent, runPreflight, buildPreflightPrompt, runMemoryNudge, collectStream, classifyTopic, fetchEpisodicContext, transcribeFirstAudio, voiceUnavailableNote, TRANSCRIPTION_DISABLED_REASON, probePdfPageCount, estimateDistillTokens, PDF_CONFIRM_PAGE_THRESHOLD, DASHSCOPE_RENDER_WIDTH, filterToolsByCapabilities, modelToCompactionTier, buildWorkspaceFilesContext, buildUploadPolicyBlock, SensitivityAccumulator, CompartmentAccumulator, ContextScopeAccumulator, AttachmentCollector, runLocalMatchCheck, sanitizeTitle, AUTO_TITLE_AI_MIN_CHARS, COORDINATOR_BASE_ADDENDUM, COORDINATOR_RESEARCH_ADDENDUM, buildDocSupervisorSkillBlock, buildAmbientDocSkillBlock, detectOperateSiteIntent, EvidenceAccumulator, matchesDisputedFigure, buildDisputeContextNote, parsePresentedDocumentInput, latestWorkflowProposalReceipt, buildTool, prepareSlashCommand, resolveNativeSlashCommand, buildSlashCommandBlock, buildWorkflowSlashCommandBlock, buildEmailDraftAnchorPrompt, formatActiveEmailDraftContext, type PresentedDocumentInput, type MediaBackend } from '@use-brian/core'
+import { isConnectionDropError, isEndpointUnreachableError, streamErrorCode, buildMemoryContext, voicePlatformFromDraftTitle, measureDocContext, createMemoryTools, createSelfProfileTool, createMemoryRecallBuffer, createSkillInvocationBuffer, createRetrievalTools, createSessionStateTools, buildSessionStateBlock, buildActivePlanBlock, createPlanTools, seedPlanFromTasks, calculateCost, sanitize, shouldInline, ensureToolResultPairing, stripUnsignedToolUses, modelRequiresToolSignatures, elideStaleDocToolResults, synthesizeMissingToolResults, createConfirmationResolver, interpretConfirmationEvent, runPreflight, buildPreflightPrompt, runMemoryNudge, collectStream, classifyTopic, fetchEpisodicContext, transcribeFirstAudio, voiceUnavailableNote, TRANSCRIPTION_DISABLED_REASON, probePdfPageCount, estimateDistillTokens, PDF_CONFIRM_PAGE_THRESHOLD, DASHSCOPE_RENDER_WIDTH, filterToolsByCapabilities, modelToCompactionTier, buildWorkspaceFilesContext, buildUploadPolicyBlock, SensitivityAccumulator, CompartmentAccumulator, ContextScopeAccumulator, AttachmentCollector, runLocalMatchCheck, sanitizeTitle, AUTO_TITLE_AI_MIN_CHARS, COORDINATOR_BASE_ADDENDUM, COORDINATOR_RESEARCH_ADDENDUM, buildDocSupervisorSkillBlock, buildAmbientDocSkillBlock, detectOperateSiteIntent, EvidenceAccumulator, matchesDisputedFigure, buildDisputeContextNote, parsePresentedDocumentInput, latestWorkflowProposalReceipt, buildTool, prepareSlashCommand, resolveNativeSlashCommand, buildSlashCommandBlock, buildWorkflowSlashCommandBlock, buildEmailDraftAnchorPrompt, formatActiveEmailDraftContext, type PresentedDocumentInput, type MediaBackend } from '@use-brian/core'
 import { classifySession, policyFor, sessionPolicy } from '../session-kind.js'
 import { abortLocalTurn, precheckTurnAdmission, registerTurnAbort, releaseTurn, takeTurnLease, unregisterTurnAbort, waitForTurnSlot, TURN_SLOT_WAIT_TIMEOUT_MS } from '../turn/lease.js'
 import { runAssistantTurn, turnUsageIdentity } from '../turn/kernel.js'
@@ -4695,6 +4697,7 @@ export function chatRoutes(options: WebChatOptions): Router {
       if (options.episodicStore && classification) {
         try {
           episodicContext = await fetchEpisodicContext({
+            authority: { execution: executionContext, accumulator: scopeAccumulator },
             store: options.episodicStore,
             sessionId: session.id,
             classification,
@@ -4711,6 +4714,7 @@ export function chatRoutes(options: WebChatOptions): Router {
       if (options.sessionStateStore) {
         try {
           sessionStateBlock = await buildSessionStateBlock({
+            authority: { execution: executionContext, accumulator: scopeAccumulator },
             store: options.sessionStateStore,
             sessionId: session.id,
           })
@@ -7488,7 +7492,43 @@ export function chatRoutes(options: WebChatOptions): Router {
           // section 6). See docs/architecture/engine/mid-turn-input.md.
           turnInbox: turnInbox.port,
           },
-          sink: { kind: 'sse', onEvent: async (event) => {
+          sink: { kind: 'sse', afterLoop: async () => {
+            await flushBufferedTurns('[Tool did not return a result. Treat as failed and do not retry.]')
+            if (!options.sessionStateStore) return
+            try {
+              const result = await runTurnSessionStateDiff({
+                authority: { execution: executionContext, accumulator: scopeAccumulator },
+                provider: backgroundProvider, model: backgroundModel, store: options.sessionStateStore,
+                userMessage: bindScopeSources<Message>({ role: 'user', content: userMessageText }, storedUserSource ? [storedUserSource] : []),
+                assistantTurns: pendingAssistantTurns,
+              })
+              options.analytics?.logEvent({
+                userId: user.id, assistantId: assistant.id, sessionId: session.id,
+                eventName: result.errorMessage ? 'session_state_diff_failed' : 'session_state_diff_pass',
+                channelType: 'web',
+                metadata: {
+                  upserts: result.upserts,
+                  resolves: result.resolves,
+                  failed: Boolean(result.errorMessage),
+                },
+              })
+              await authority.execute(() => recordOverheadUsage({
+                usageStore: options.usageStore,
+                userId: user.id,
+                assistantId: assistant.id,
+                sessionId: session.id,
+                userMessageId: storedUserMsg.id,
+                model: result.model,
+                usage: result.usage,
+                source: 'overhead:session-state-diff',
+                triggerKey: 'session_state_diff',
+                ...backgroundUsageAttribution,
+              }))
+            } catch (err) {
+              if (isAuthorityChangedError(err) || isDeliveryAudienceUnverifiedError(err)) throw err
+              console.debug('[chat] session-state diff unavailable')
+            }
+          }, onEvent: async (event) => {
           await assertDeliveryAudience()
           researchObserver?.observe(event)
 
@@ -8267,65 +8307,6 @@ export function chatRoutes(options: WebChatOptions): Router {
           }
         }
 
-        // Session-state diff pass. Watches
-        // the last exchange for commitments the model forgot to track with
-        // `trackCommitment`, and auto-resolves ones it forgot to close. See
-        // docs/architecture/context-engine/session-state.md.
-        if (options.sessionStateStore) {
-          const stateStore = options.sessionStateStore
-          const diffRecentTurns: Message[] = []
-          // Last user message + last assistant turn's text — enough to
-          // infer commitment deltas without ballooning the Standard-tier call.
-          const assistantLastText = pendingAssistantTurns
-            .flatMap((t) => t.content)
-            .filter((b): b is { type: 'text'; text: string } => b.type === 'text')
-            .map((b) => b.text)
-            .join('\n')
-          if (assistantLastText) {
-            diffRecentTurns.push(
-              { role: 'user', content: userMessageText },
-              { role: 'assistant', content: assistantLastText },
-            )
-          }
-          try {
-            const open = await authority.execute(() => stateStore.listOpenBySession(session.id))
-            const result = await authority.execute(() => runSessionStateDiff({
-                provider: backgroundProvider,
-                model: backgroundModel,
-                sessionId: session.id,
-                userId: user.id,
-                assistantId: assistant.id,
-                store: stateStore,
-                recentTurns: diffRecentTurns,
-                openCommitments: open,
-              }))
-            options.analytics?.logEvent({
-              userId: user.id, assistantId: assistant.id, sessionId: session.id,
-              eventName: result.errorMessage ? 'session_state_diff_failed' : 'session_state_diff_pass',
-              channelType: 'web',
-              metadata: {
-                upserts: result.upserts,
-                resolves: result.resolves,
-                error: result.errorMessage ? sanitize(result.errorMessage) : undefined,
-              },
-            })
-            await authority.execute(() => recordOverheadUsage({
-              usageStore: options.usageStore,
-              userId: user.id,
-              assistantId: assistant.id,
-              sessionId: session.id,
-              userMessageId: storedUserMsg.id,
-              model: result.model,
-              usage: result.usage,
-              source: 'overhead:session-state-diff',
-              triggerKey: 'session_state_diff',
-              ...backgroundUsageAttribution,
-            }))
-          } catch (err) {
-            if (isAuthorityChangedError(err) || isDeliveryAudienceUnverifiedError(err)) throw err
-            console.debug('[chat] session-state diff failed:', err)
-          }
-        }
 
         // Memory nudge: judge utility of any getMemory calls.
         // Records usage as `overhead:nudge` once the judge call returns.

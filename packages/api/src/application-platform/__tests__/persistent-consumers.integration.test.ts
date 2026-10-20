@@ -1,3 +1,9 @@
+import { createCalleeExecutor } from '../../inter-assistant/executor.js'
+import { createDbMemoryStore } from '../../db/memory-store.js'
+import { createDbCapabilityStore } from '../../db/capability-store.js'
+import { buildDeliveryConversationStateBlock, ContextScopeAccumulator } from '@use-brian/core'
+import { runTurnSessionStateDiff } from '../../turn/session-state.js'
+import type { ContentBlock, LLMProvider, Message } from '@use-brian/core'
 import { afterAll, afterEach, describe, expect, it, vi } from 'vitest'
 import { randomBytes } from 'node:crypto'
 import pg from 'pg'
@@ -195,6 +201,157 @@ describe.sequential('[COMP:api/application-persistence] actual transcript persis
       store,recentTurns,openCommitments:await store.listOpenBySession(f.session.id,other),authority:other,
       assertInputAuthority:()=>assertSourceModelInputAuthority(otherContext)})
     expect(stream).toHaveBeenCalledTimes(2)
+  })
+
+  it('runs the actual API differ with complete turn ancestry and only the final substantive response', async () => {
+    fixture = await persistentContextFixture()
+    const f = fixture, authority = await f.modelContext(), history = await f.history(), store = createDbSessionStateStore()
+    const prior = await f.memory('Fictional consumed context')
+    const source = (await f.pool.query<{ source: ScopeSource }>("SELECT read_scope_source($1,'memory',$2) AS source", [f.workspaceId, prior.id])).rows[0].source
+    authority.accumulator.noteSource(source)
+    const userMessage = bindScopeSources<Message>({ role: 'user', content: 'Fictional current request' }, boundScopeSources(history.at(-1)!))
+    const requests: string[] = []
+    const stream: StreamFn = async function* (request) {
+      requests.push(JSON.stringify(request.messages))
+      yield { type: 'text_delta', text: '{"upserts":[{"key":"Fictional API key","summary":"Fictional API commitment"}],"resolves":[]}' }
+    }
+    const provider: LLMProvider = { name: 'deterministic-context-fixture', models: ['fixture'], stream,
+      createSession() { throw new Error('Stateless fixture expected') } }
+    const result = await runTurnSessionStateDiff({ authority, provider, model: 'fixture', store, userMessage,
+      assistantTurns: [
+        { content: [{ type: 'text', text: 'Fictional private narration' }, { type: 'tool_use', id: 'fixture-read', name: 'getMemory', input: {} }] },
+        { content: [{ type: 'text', text: 'Fictional final response' }] },
+      ] })
+    expect(result.upserts).toBe(1)
+    expect(requests).toHaveLength(1)
+    expect(requests[0]).toContain('Fictional final response')
+    expect(requests[0]).not.toContain('Fictional private narration')
+    const rows = await store.listOpenBySession(f.session.id, authority)
+    expect(rows).toMatchObject([{ key: 'Fictional API key', summary: 'Fictional API commitment' }])
+    const inputs = (await f.pool.query(`SELECT s.source_id FROM scope_derivation_sources s JOIN scope_derivations d
+      ON d.id=s.derivation_id AND d.workspace_id=s.workspace_id WHERE d.workspace_id=$1 AND d.resource_kind='session_context_revision'
+      AND d.resource_id=$2 ORDER BY s.source_id`, [f.workspaceId, boundScopeSources(rows[0])[0].resourceId])).rows.map(row => row.source_id)
+    expect(inputs).toContain(prior.id)
+    expect(inputs).toContain(history.at(-1)!.id)
+  })
+
+  it('refuses the actual API differ before reading response content after member contraction', async () => {
+    fixture = await persistentContextFixture()
+    const f = fixture, authority = await f.modelContext(f.firstId), history = await f.history(), store = createDbSessionStateStore()
+    const userMessage = bindScopeSources<Message>({ role: 'user', content: 'Fictional request' }, boundScopeSources(history.at(-1)!))
+    const inspect = vi.fn((): ContentBlock[] => [{ type: 'text', text: 'Fictional held response' }])
+    const stream = vi.fn<StreamFn>(async function* () { yield { type: 'text_delta', text: '{"upserts":[],"resolves":[]}' } })
+    const provider: LLMProvider = { name: 'deterministic-context-fixture', models: ['fixture'], stream,
+      createSession() { throw new Error('Stateless fixture expected') } }
+    await f.pool.query("UPDATE workspace_members SET clearance='public' WHERE workspace_id=$1 AND user_id=$2", [f.workspaceId, f.firstId])
+    await expect(runTurnSessionStateDiff({ authority, provider, model: 'fixture', store, userMessage,
+      assistantTurns: [{ get content() { return inspect() } }] })).rejects.toMatchObject({ reason: 'authority_changed' })
+    expect(inspect).not.toHaveBeenCalled()
+    expect(stream).not.toHaveBeenCalled()
+    const other = await f.modelContext(f.secondId)
+    expect((await runTurnSessionStateDiff({ authority: other, provider, model: 'fixture', store, userMessage,
+      assistantTurns: [{ content: [{ type: 'text', text: 'Fictional current response' }] }] })).upserts).toBe(0)
+    expect(stream).toHaveBeenCalledOnce()
+  })
+
+  it('discards the API diff after contraction during generation without publishing a revision', async () => {
+    fixture = await persistentContextFixture()
+    const f = fixture, authority = await f.modelContext(f.firstId), history = await f.history(), store = createDbSessionStateStore()
+    const userMessage = bindScopeSources<Message>({ role: 'user', content: 'Fictional request' }, boundScopeSources(history.at(-1)!))
+    const stream = vi.fn<StreamFn>(async function* () {
+      yield { type: 'text_delta', text: '{"upserts":[{"key":"Fictional withdrawn key","summary":"Fictional rejected content"}],"resolves":[]}' }
+      await f.pool.query("UPDATE workspace_members SET clearance='public' WHERE workspace_id=$1 AND user_id=$2", [f.workspaceId, f.firstId])
+    })
+    const provider: LLMProvider = { name: 'deterministic-context-fixture', models: ['fixture'], stream,
+      createSession() { throw new Error('Stateless fixture expected') } }
+    await expect(runTurnSessionStateDiff({ authority, provider, model: 'fixture', store, userMessage,
+      assistantTurns: [{ content: [{ type: 'text', text: 'Fictional rejected response' }] }] })).rejects.toMatchObject({ reason: 'authority_changed' })
+    expect(stream).toHaveBeenCalledOnce()
+    expect((await f.pool.query('SELECT count(*)::int AS n FROM session_context_scope_revisions WHERE workspace_id=$1', [f.workspaceId])).rows[0].n).toBe(0)
+    expect((await f.pool.query('SELECT count(*)::int AS n FROM session_state WHERE session_id=$1', [f.session.id])).rows[0].n).toBe(0)
+  })
+
+  it('holds an unbound API diff input without formatting or provider dispatch', async () => {
+    fixture = await persistentContextFixture()
+    const f = fixture, authority = await f.modelContext(), store = createDbSessionStateStore()
+    const inspect = vi.fn((): ContentBlock[] => [{ type: 'text', text: 'Fictional unbound content' }])
+    const stream = vi.fn<StreamFn>(async function* () { yield { type: 'text_delta', text: '{"upserts":[],"resolves":[]}' } })
+    const provider: LLMProvider = { name: 'deterministic-context-fixture', models: ['fixture'], stream,
+      createSession() { throw new Error('Stateless fixture expected') } }
+    await expect(runTurnSessionStateDiff({ authority, provider, model: 'fixture', store,
+      userMessage: { role: 'user', content: 'Fictional unbound input' },
+      assistantTurns: [{ get content() { return inspect() } }] })).rejects.toThrow('scope_evidence_missing')
+    expect(inspect).not.toHaveBeenCalled()
+    expect(stream).not.toHaveBeenCalled()
+  })
+
+  it('admits only current native delegated commitment context without borrowing its session creator', async () => {
+    fixture = await persistentContextFixture()
+    const f = fixture, store = createDbSessionStateStore(), history = await f.history(), authority = await f.modelContext()
+    await store.upsert({ sessionId: f.session.id, userId: f.ownerId, assistantId: f.assistantId,
+      key: 'Fictional delegated key', summary: 'Fictional delegated commitment', source: 'tool', authority,
+      derivation: { producer: 'fixture:delegated-prior', sources: history.flatMap(boundScopeSources) } })
+    const current = { execution: await f.delegatedExecution(f.firstId), accumulator: new ContextScopeAccumulator() }
+    expect(current.execution.identity).toMatchObject({ kind: 'delegated', actorUserId: f.firstId })
+    expect(current.execution.security.access.userId).not.toBe(f.session.userId)
+    const block = await buildDeliveryConversationStateBlock({ store, authority: current, sessions: [{ sessionId: f.session.id }] })
+    expect(block).toContain('Fictional delegated commitment')
+    await expect(assertSourceModelInputAuthority({ ...executionToolContext(current.execution, { appId: 'fixture' }),
+      scopeAccumulator: current.accumulator })).resolves.toBeUndefined()
+    await f.pool.query("UPDATE workspace_members SET clearance='public' WHERE workspace_id=$1 AND user_id=$2", [f.workspaceId, f.firstId])
+    await expect(assertSourceModelInputAuthority({ ...executionToolContext(current.execution, { appId: 'fixture' }),
+      scopeAccumulator: current.accumulator })).rejects.toMatchObject({ reason: 'authority_changed' })
+    const second = { execution: await f.delegatedExecution(f.secondId), accumulator: new ContextScopeAccumulator() }
+    expect(await buildDeliveryConversationStateBlock({ store, authority: second, sessions: [{ sessionId: f.session.id }] })).toContain('Fictional delegated commitment')
+    await expect(assertSourceModelInputAuthority({ ...executionToolContext(second.execution, { appId: 'fixture' }),
+      scopeAccumulator: second.accumulator })).resolves.toBeUndefined()
+    independent = await persistentSourceFixture(f)
+    const external = { execution: await f.delegatedExecution(), accumulator: new ContextScopeAccumulator() }
+    external.accumulator.noteSource(independent.root)
+    await expect(assertSourceModelInputAuthority({ ...executionToolContext(external.execution, { appId: 'fixture' }),
+      scopeAccumulator: external.accumulator })).rejects.toMatchObject({ code: 'source_access_denied' })
+    expect(await independent.independentlyAuthorized()).toBe(true)
+  })
+
+  it('injects healthy delivery commitments through the actual delegated executor and real source admission', async () => {
+    fixture = await persistentContextFixture()
+    const f = fixture, store = createDbSessionStateStore(), history = await f.history(), authority = await f.modelContext()
+    const tracked = await store.upsert({ sessionId: f.session.id, userId: f.ownerId, assistantId: f.assistantId,
+      key: 'Fictional delivery key', summary: 'Fictional delivery commitment', detail: 'Fictional delivery detail', source: 'tool', authority,
+      derivation: { producer: 'fixture:delivery-prior', sources: history.flatMap(boundScopeSources) } })
+    // The workspace primary can read this workspace conversation. A standard
+    // assistant's narrower native visibility is not widened by this bridge.
+    const calleeId = f.assistantId
+    const prompts: string[] = []
+    const answer: StreamFn = async function* () {
+      yield { type: 'message_start', model: 'gemini-3.6-flash-pro' }
+      yield { type: 'text_delta', text: 'Fictional delegated report' }
+      yield { type: 'message_end', stopReason: 'end_turn', usage: { inputTokens: 1, outputTokens: 1 } }
+    }
+    const provider: LLMProvider = { name: 'deterministic-context-fixture', models: ['gemini-3.6-flash-pro'], stream: answer,
+      createSession(options) {
+        prompts.push(options.systemPrompt)
+        return { send: () => answer({ model: options.model, systemPrompt: options.systemPrompt, messages: [] }) }
+      } }
+    const execute = createCalleeExecutor({ provider, tools: new Map(), memoryStore: createDbMemoryStore(),
+      capabilityStore: createDbCapabilityStore(), sessionStateStore: store })
+    const parent = await f.execution(f.firstId)
+    const result = await execute({ callerUserId: f.firstId, callerAssistantId: f.assistantId,
+      callerAccessCeiling: parent.security.ceiling, calleeAssistantId: calleeId, expectedWorkspaceId: f.workspaceId,
+      callerSessionId: f.session.id, question: 'Fictional delivery state request',
+      deliverTarget: { channelType: 'web', channelId: f.session.channelId } })
+    expect(result).toBe('Fictional delegated report')
+    expect(prompts).toHaveLength(1)
+    expect(prompts[0]).toContain('# Open commitments (delivery conversation)')
+    expect(prompts[0]).toContain('`Fictional delivery key`')
+    expect(prompts[0]).toContain('Fictional delivery detail')
+    const consumed = (await f.pool.query(`SELECT d.resource_id,s.source_id FROM scope_derivations d
+      JOIN scope_derivation_sources s ON s.derivation_id=d.id AND s.workspace_id=d.workspace_id
+      JOIN session_messages m ON m.id=d.resource_id JOIN sessions ss ON ss.id=m.session_id
+      WHERE d.workspace_id=$1 AND d.resource_kind='session_message' AND ss.assistant_id=$2
+        AND s.source_kind='session_context_revision' AND s.source_id=$3`,
+    [f.workspaceId, calleeId, boundScopeSources(tracked)[0].resourceId])).rows
+    expect(consumed.length).toBeGreaterThan(0)
   })
 
   it('publishes exactly one compaction pointer and no orphan revision when cursor claims race', async () => {

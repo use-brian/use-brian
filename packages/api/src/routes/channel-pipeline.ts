@@ -1,3 +1,5 @@
+import { bindScopeSources } from '@use-brian/core'
+import { runTurnSessionStateDiff } from '../turn/session-state.js'
 import { withTurnInference } from '../turn/runtime.js'
 import { PER_TURN_FILES_INDEX_CAP, PER_TURN_INDEX_CAP } from '../turn/index-caps.js'
 import { policyFor } from '../session-kind.js'
@@ -31,7 +33,7 @@ import { createTurnLedger } from '../ledger/recorder.js'
 import { getLedgerPayloadStore } from '../ledger/runtime.js'
 import {
   buildMemoryContext, createMemoryTools, createSessionStateTools,
-  buildSessionStateBlock, runSessionStateDiff,
+  buildSessionStateBlock,
   synthesizeMissingToolResults,
   collectStream, calculateCost, runPreflight, buildPreflightPrompt,
   runMemoryNudge, sanitize as sanitizeAnalytics, createConfirmationResolver,
@@ -92,7 +94,7 @@ import type {
   AnalyticsLogger, McpSettingsStore, KnowledgeStoreInterface, GDriveFilesStore,
   ConfirmationResolver, Message, TopicClassification, ClassifierRecentTurn,
   EpisodicStore, CapabilityStore, TokenUsage, ToolResultMeta,
-  SessionStateStore, SessionStateRecord, CrmEmailDraftStore,
+  SessionStateStore, CrmEmailDraftStore,
   AccessCeiling, ScopeEvidence,
 } from '@use-brian/core'
 
@@ -1977,6 +1979,7 @@ async function processChannelMessageTurn(params: ChannelPipelineParams): Promise
   if (!isolatedAudience && episodicStore && classification) {
     try {
       episodicContext = await fetchEpisodicContext({
+        authority: { execution: executionContext, accumulator: scopeAccumulator },
         store: episodicStore,
         sessionId: session.id,
         classification,
@@ -1991,6 +1994,7 @@ async function processChannelMessageTurn(params: ChannelPipelineParams): Promise
   if (sessionStateStore && !isolatedAudience) {
     try {
       sessionStateBlock = await buildSessionStateBlock({
+        authority: { execution: executionContext, accumulator: scopeAccumulator },
         store: sessionStateStore,
         sessionId: session.id,
       })
@@ -2841,7 +2845,49 @@ async function processChannelMessageTurn(params: ChannelPipelineParams): Promise
         ? { maxTurns: tierBudget.maxTurns, maxToolCalls: tierBudget.maxToolCalls }
         : {}),
       },
-      sink: { kind: 'adapter', onEvent: async (event) => {
+      sink: { kind: 'adapter', afterLoop: async () => {
+        await flushBufferedTurns('[Tool did not return a result. Treat as failed and do not retry.]')
+        if (!sessionStateStore || !isIdentified || isolatedAudience) return
+        try {
+          const result = await runTurnSessionStateDiff({
+            authority: { execution: executionContext, accumulator: scopeAccumulator },
+            provider: backgroundProvider, model: backgroundLaneModel, store: sessionStateStore,
+            userMessage: bindScopeSources<Message>({ role: 'user', content: messageText }, storedUserSource ? [storedUserSource] : []),
+            assistantTurns: pendingAssistantTurns,
+          })
+          analytics?.logEvent({
+            userId, assistantId: assistant.id, sessionId: session.id,
+            eventName: result.errorMessage ? 'session_state_diff_failed' : 'session_state_diff_pass',
+            channelType,
+            metadata: {
+              upserts: result.upserts,
+              resolves: result.resolves,
+              failed: Boolean(result.errorMessage),
+            },
+          })
+          // Same billing split as every other overhead row on this path: the
+          // workspace pays, the channel user is recorded as the actor. This
+          // pair used to pass the bare `userId`, which billed a (possibly
+          // shadow) channel user for an auxiliary call they never asked for
+          // and split one turn's overhead across two payers.
+          await recordOverheadUsage({
+            usageStore,
+            userId: billingUserId,
+            actorUserId: userId,
+            assistantId: assistant.id,
+            sessionId: session.id,
+            userMessageId: userMessageRow.id,
+            model: result.model,
+            usage: result.usage,
+            source: 'overhead:session-state-diff',
+            triggerKey: 'session_state_diff',
+            ...backgroundUsageAttribution,
+          })
+        } catch (err) {
+          if (isAuthorityChangedError(err) || isDeliveryAudienceUnverifiedError(err)) throw err
+          console.debug(`[${channelType}] session-state diff unavailable`)
+        }
+      }, onEvent: async (event) => {
       await assertDeliveryAudience()
       turnOutput.observe(event)
       researchObserver?.observe(event)
@@ -3226,70 +3272,6 @@ async function processChannelMessageTurn(params: ChannelPipelineParams): Promise
     await flushBufferedTurns('[Tool did not return a result. Treat as failed and do not retry.]')
     await settleResearch(turnLoopResult.finalText ?? '', abortController.signal.aborted)
 
-    // ── Session-state diff pass (fire-and-forget safety net) ──
-    // See docs/architecture/context-engine/session-state.md.
-    if (sessionStateStore && isIdentified && !isolatedAudience) {
-      const stateStore = sessionStateStore
-      const diffRecentTurns: Message[] = []
-      const assistantLastText = pendingAssistantTurns
-        .flatMap((t) => t.content)
-        .filter((b): b is { type: 'text'; text: string } => b.type === 'text')
-        .map((b) => b.text)
-        .join('\n')
-      if (assistantLastText) {
-        diffRecentTurns.push(
-          { role: 'user', content: messageText },
-          { role: 'assistant', content: assistantLastText },
-        )
-      }
-      stateStore
-        .listOpenBySession(session.id)
-        .then((open: SessionStateRecord[]) =>
-          runSessionStateDiff({
-            provider: backgroundProvider,
-            // Standard tier per docs/architecture/platform/cost-and-pricing.md
-            // → Model routing (extraction / classification / structured-output bucket).
-            model: backgroundLaneModel,
-            sessionId: session.id,
-            userId,
-            assistantId: assistant.id,
-            store: stateStore,
-            recentTurns: diffRecentTurns,
-            openCommitments: open,
-          }),
-        )
-        .then((result) => {
-          analytics?.logEvent({
-            userId, assistantId: assistant.id, sessionId: session.id,
-            eventName: result.errorMessage ? 'session_state_diff_failed' : 'session_state_diff_pass',
-            channelType,
-            metadata: {
-              upserts: result.upserts,
-              resolves: result.resolves,
-              error: result.errorMessage ? sanitizeAnalytics(result.errorMessage) : undefined,
-            },
-          })
-          // Same billing split as every other overhead row on this path: the
-          // workspace pays, the channel user is recorded as the actor. This
-          // pair used to pass the bare `userId`, which billed a (possibly
-          // shadow) channel user for an auxiliary call they never asked for
-          // and split one turn's overhead across two payers.
-          return recordOverheadUsage({
-            usageStore,
-            userId: billingUserId,
-            actorUserId: userId,
-            assistantId: assistant.id,
-            sessionId: session.id,
-            userMessageId: userMessageRow.id,
-            model: result.model,
-            usage: result.usage,
-            source: 'overhead:session-state-diff',
-            triggerKey: 'session_state_diff',
-            ...backgroundUsageAttribution,
-          })
-        })
-        .catch((err) => console.debug(`[${channelType}] session-state diff failed:`, err))
-    }
 
     // ── Memory nudge (identified users only) ──
     // Records usage as `overhead:nudge` once the judge call returns. Fire-and-

@@ -1643,6 +1643,61 @@ export function createCalleeExecutor(options: CalleeExecutorOptions): CalleeExec
       }
     }
 
+    const abortController = new AbortController()
+    // The delegated turn's own invocation is the source a browser task (or
+    // any other source-bound child) is pinned to. Without it the task has no
+    // source and is refused outright (`profile_authority_denied`); with it the
+    // child renews only while this invocation's leases still hold.
+    const ambientInvocationId = randomUUID()
+    const ambientAuthority = {
+      assertCurrent: assertCurrentAuthority,
+      execute: executeWithCurrentAuthority,
+      snapshotSource: () => ({ version: 1 as const, kind: 'invocation' as const, invocationId: ambientInvocationId }),
+    }
+    const { executionContext } = await resolveExecutionContextSystem({
+      userId: calleeActorUserId,
+      assistant: calleeAssistant,
+      workspaceId: calleeAssistant.workspaceId,
+      session,
+      identity: externalClient
+        ? {
+            kind: 'programmatic',
+            principal: {
+              kind: 'brain_key',
+              credentialId: externalClient.key.id,
+              actorUserId: calleeActorUserId,
+            },
+            credentialOwnerUserId: calleeOwnerUserId,
+          }
+        : {
+            kind: 'delegated',
+            actorUserId: calleeActorUserId,
+            delegationId: params.workflowRunId ?? session.id,
+            parentCeiling: pinAccessCeiling(turnScope.access),
+          },
+      ownership: calleeAssistant.workspaceId
+        ? { kind: 'workspace', workspaceId: calleeAssistant.workspaceId }
+        : { kind: 'personal', ownerUserId: calleeOwnerUserId },
+      lifecycle: {
+        abortSignal: abortController.signal,
+        sessionId: session.id,
+        channelType: 'assistant-call',
+        channelId: params.callerAssistantId,
+      },
+      surface: externalClient?.clientSelfMemory
+        ? { clientSelfMemory: externalClient.clientSelfMemory }
+        : undefined,
+      attribution: {
+        billingUserId: calleeOwnerUserId,
+        ...(externalClient ? { credentialOwnerUserId: calleeOwnerUserId } : {}),
+      },
+      sessionAuthority: session,
+    }, {
+      resolveScope: async () => turnScope,
+      createSessionLease: () => ambientAuthority,
+    })
+
+
     // Delivery-conversation commitments (read-only bridge). A consult that
     // delivers into a user channel is a continuation of that conversation, so
     // it reads the `# Open commitments` rows the interactive assistant(s)
@@ -1660,6 +1715,7 @@ export function createCalleeExecutor(options: CalleeExecutorOptions): CalleeExec
         })
         if (conversationSessions.length > 0) {
           const block = await buildDeliveryConversationStateBlock({
+            authority: { execution: executionContext, accumulator: scopeAccumulator },
             store: options.sessionStateStore,
             sessions: conversationSessions.map((s) => ({
               sessionId: s.id,
@@ -1757,59 +1813,6 @@ export function createCalleeExecutor(options: CalleeExecutorOptions): CalleeExec
     const userMessageSource = boundScopeSource(userMessageRow)
     if (userMessageSource) scopeAccumulator.noteSource(userMessageSource)
 
-    const abortController = new AbortController()
-    // The delegated turn's own invocation is the source a browser task (or
-    // any other source-bound child) is pinned to. Without it the task has no
-    // source and is refused outright (`profile_authority_denied`); with it the
-    // child renews only while this invocation's leases still hold.
-    const ambientInvocationId = randomUUID()
-    const ambientAuthority = {
-      assertCurrent: assertCurrentAuthority,
-      execute: executeWithCurrentAuthority,
-      snapshotSource: () => ({ version: 1 as const, kind: 'invocation' as const, invocationId: ambientInvocationId }),
-    }
-    const { executionContext } = await resolveExecutionContextSystem({
-      userId: calleeActorUserId,
-      assistant: calleeAssistant,
-      workspaceId: calleeAssistant.workspaceId,
-      session,
-      identity: externalClient
-        ? {
-            kind: 'programmatic',
-            principal: {
-              kind: 'brain_key',
-              credentialId: externalClient.key.id,
-              actorUserId: calleeActorUserId,
-            },
-            credentialOwnerUserId: calleeOwnerUserId,
-          }
-        : {
-            kind: 'delegated',
-            actorUserId: calleeActorUserId,
-            delegationId: params.workflowRunId ?? session.id,
-            parentCeiling: pinAccessCeiling(turnScope.access),
-          },
-      ownership: calleeAssistant.workspaceId
-        ? { kind: 'workspace', workspaceId: calleeAssistant.workspaceId }
-        : { kind: 'personal', ownerUserId: calleeOwnerUserId },
-      lifecycle: {
-        abortSignal: abortController.signal,
-        sessionId: session.id,
-        channelType: 'assistant-call',
-        channelId: params.callerAssistantId,
-      },
-      surface: externalClient?.clientSelfMemory
-        ? { clientSelfMemory: externalClient.clientSelfMemory }
-        : undefined,
-      attribution: {
-        billingUserId: calleeOwnerUserId,
-        ...(externalClient ? { credentialOwnerUserId: calleeOwnerUserId } : {}),
-      },
-      sessionAuthority: session,
-    }, {
-      resolveScope: async () => turnScope,
-      createSessionLease: () => ambientAuthority,
-    })
 
     const messages: Message[] = []
     if (params.sessionKey) {

@@ -15,7 +15,6 @@ import {
   maxSensitivity,
   scopeEvidenceFromRows,
   scopeGrantContains,
-  sourcesShareVisibility,
   type DerivedWriteEvidence,
   type Sensitivity,
   type TurnScope,
@@ -118,7 +117,7 @@ export function turnOutputWrite(params: {
   envelope: ResourceScope | undefined
 }): { derivation: DerivedWriteEvidence; derivationTarget?: ResourceScope } | { scope: ResourceScope } {
   const sources = params.accumulator.evidence.sources ?? []
-  if (!params.envelope || (sources.length > 0 && sourcesShareVisibility(sources))) {
+  if (!params.envelope) {
     return { derivation: { producer: params.producer, sources } }
   }
   const envelope = params.envelope

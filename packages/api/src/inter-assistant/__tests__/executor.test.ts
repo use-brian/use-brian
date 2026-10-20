@@ -1,3 +1,4 @@
+import type { SessionStateRecord } from '@use-brian/core'
 /**
  * Unit tests for the cross-assistant (callee) executor.
  * Component tag: [COMP:api/inter-assistant-executor].
@@ -2685,7 +2686,7 @@ describe('[COMP:api/inter-assistant-executor] delivery-conversation commitments 
   const wsCallee = { ...calleeAssistant, workspaceId: 'ws-1', name: 'Brian' }
   const deliverTarget = { channelType: 'telegram' as const, channelId: '-100123:topic:2' }
 
-  function stateStore(rowsBySession: Record<string, Array<Record<string, unknown>>>) {
+  function stateStore(rowsBySession: Record<string, SessionStateRecord[]>) {
     return {
       upsert: vi.fn(),
       resolve: vi.fn(),
@@ -2694,13 +2695,17 @@ describe('[COMP:api/inter-assistant-executor] delivery-conversation commitments 
       purgeResolvedOlderThan: vi.fn(),
     }
   }
-  function row(key: string, summary: string, detail: string | null = null) {
+  function row(key: string, summary: string, detail: string | null = null): SessionStateRecord {
     const t = new Date()
+    // This historical unit fixture has no canonical reader binding. It must
+    // remain held; the healthy positive case now runs through the real SQL
+    // adapter, executor and source decision in persistent-consumers.
     return {
       id: `id-${key}`, sessionId: 'trainer-sess', userId: 'owner-1', assistantId: 'trainer-1',
       key, status: 'open', summary, detail, source: 'tool', createdAt: t, updatedAt: t, resolvedAt: null,
     }
   }
+
   function calleeWith(store: ReturnType<typeof stateStore> | undefined) {
     return createCalleeExecutor({
       provider: {} as never,
@@ -2722,7 +2727,7 @@ describe('[COMP:api/inter-assistant-executor] delivery-conversation commitments 
     yieldsText('report')
   })
 
-  it('injects the delivery conversation\'s open commitments (bodies included) into the callee prompt', async () => {
+  it('holds unbound historical delivery rows while forwarding the exact canonical context', async () => {
     mockListConversationSessions.mockResolvedValueOnce([
       { id: 'trainer-sess', assistantId: 'trainer-1', assistantName: 'Health Personal Trainer' },
     ])
@@ -2739,11 +2744,14 @@ describe('[COMP:api/inter-assistant-executor] delivery-conversation commitments 
     expect(mockListConversationSessions).toHaveBeenCalledWith(
       expect.objectContaining({ workspaceId: 'ws-1', channelType: 'telegram', channelId: '-100123:topic:2' }),
     )
-    expect(store.listRecentBySession).toHaveBeenCalledWith('trainer-sess', expect.any(Number))
+    expect(store.listRecentBySession).toHaveBeenCalledWith('trainer-sess', expect.any(Number), expect.objectContaining({
+      execution: mockQueryLoop.mock.calls[0][0].context.executionContext,
+      accumulator: mockQueryLoop.mock.calls[0][0].context.scopeAccumulator,
+    }))
     const sp = systemPromptOf()
-    expect(sp).toContain('# Open commitments (delivery conversation)')
-    expect(sp).toContain('`diet:2026-08-17`')
-    expect(sp).toContain('squat 5x5 @ 80kg')
+    expect(sp).not.toContain('# Open commitments (delivery conversation)')
+    expect(sp).not.toContain('`diet:2026-08-17`')
+    expect(sp).not.toContain('squat 5x5 @ 80kg')
     // The per-run # Context (date, memory) rides the trusted runtime channel,
     // never the cacheable stable prompt the commitments block sits in.
     expect(sp).not.toContain('# Context')
@@ -2778,7 +2786,10 @@ describe('[COMP:api/inter-assistant-executor] delivery-conversation commitments 
     yieldsText('report')
     const empty = stateStore({ 'trainer-sess': [] })
     await calleeWith(empty)({ ...baseParams, callerChannelType: 'workflow', deliverTarget })
-    expect(empty.listRecentBySession).toHaveBeenCalledWith('trainer-sess', expect.any(Number))
+    expect(empty.listRecentBySession).toHaveBeenCalledWith('trainer-sess', expect.any(Number), expect.objectContaining({
+      execution: mockQueryLoop.mock.calls[0][0].context.executionContext,
+      accumulator: mockQueryLoop.mock.calls[0][0].context.scopeAccumulator,
+    }))
     expect(systemPromptOf()).not.toContain('# Open commitments (delivery conversation)')
   })
 
