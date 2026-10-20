@@ -1,5 +1,7 @@
 "use client";
 
+import { ApplicationManagement } from '@/components/applications/application-admin';
+
 
 import { publicRuntimeConfig } from "@/lib/runtime-public-config";
 /**
@@ -5581,5 +5583,5 @@ function ConnectorsList() {
 // the Add menu render as the list's intro row.
 
 export default function ConnectorsPage() {
-  return <ConnectorsList />;
+  return <><ApplicationManagement surface="sources"/><ConnectorsList /></>;
 }

@@ -76,7 +76,7 @@ describe('[COMP:api/application-management] native human and Brian management',(
   finally {await owner.query("UPDATE workspace_members SET role='owner' WHERE workspace_id=$1 AND user_id=$2",[workspaceId,actorId])}
  })
  it('M02 human and Brian revocations use the same canonical audit and stay idempotent',async()=>{
-  const ids=[randomUUID(),randomUUID()]
+  const ids:string[]=[randomUUID(),randomUUID()]
   for(const id of ids)await owner.query(`INSERT INTO application_access_grants(id,app_id,workspace_id,principal_kind,principal_user_id,issued_by_user_id,resource_origin,resource_type,actions,read_fields,write_fields,selector,compartments,project_ids,clearance)
    VALUES($1,$2,$3,'member',$4,$4,$5,'request',ARRAY['read'],ARRAY['title'],'{}',$6,'{}','{}','internal')`,[id,appId,workspaceId,actorId,{kind:'generic',entityTypeId:schemaId},{kind:'ids',ids:[recordId]}])
   const revoked=await command({kind:'grant.revoke',appId,grantId:ids[0]});expect(revoked.body.revoked,JSON.stringify(revoked.body)).toBe(true)
