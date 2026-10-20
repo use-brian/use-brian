@@ -445,7 +445,7 @@ describe('[COMP:workflow/goal-seeker] goal driver tick', () => {
     expect(h.ticks).toEqual([])
   })
 
-  it.each(['workflow_authority_unavailable','authority_changed','context_not_available','caller_evidence_unavailable'])('blocks %s from a failed workflow instead of rearming a replacement',async reason=>{
+  it.each(['workflow_authority_unavailable','authority_changed','context_not_available','caller_evidence_unavailable','goal_host_write_unavailable'])('blocks %s from a failed workflow instead of rearming a replacement',async reason=>{
     const error=Object.assign(new Error('Execution access changed'),{reason})
     const {driver,h}=makeDriver({overrides:{dispatchRun:async()=>{throw error}}})
     await expect(driver.tickGoal('g1')).rejects.toBe(error)

@@ -79,7 +79,7 @@ export function isGoalAuthorityFailure(error: unknown): boolean {
   const failure = error as { code?: unknown; reason?: unknown; message?: unknown }
   return [failure.code,failure.reason,failure.message].some(value =>
     value === 'goal_source_scope_unavailable' || value === 'workflow_authority_unavailable'
-      || value === 'goal_authority_unavailable'
+      || value === 'goal_authority_unavailable' || value === 'goal_host_write_unavailable'
       || value === 'authority_changed' || value === 'context_not_available'
       || value === 'caller_evidence_unavailable')
 }
