@@ -1,9 +1,10 @@
 import { createHash, randomBytes, randomUUID } from 'node:crypto'
+import { AsyncLocalStorage } from 'node:async_hooks'
 import { afterAll, beforeAll, describe, expect, it } from 'vitest'
 import { z } from 'zod'
 import express from 'express'
 import request from 'supertest'
-import type { PoolClient } from 'pg'
+import type { Pool,PoolClient } from 'pg'
 import { ContextScopeAccumulator, executionToolContext, boundScopeSources, type ApplicationModuleDefinition, type ScopeSource } from '@use-brian/core'
 import { applicationResourceSchema, type ApplicationAccessGrant, type ApplicationGrantMaximum, type ApplicationJson } from '@use-brian/shared'
 import { getAppPool, getPool, queryWithRLS } from '../../db/client.js'
@@ -15,11 +16,11 @@ import { hashSecret } from '../../db/api-key-store.js'
 import { authenticateApplicationCredential, mintApplicationCredentialSecret } from '../credentials.js'
 import { loadApplicationCredentialStateSystem } from '../auth-store.js'
 import { authenticateApplicationOAuth } from '../oauth-auth.js'
-import { getApplicationExecutionBinding, resolveApplicationExecutionContext } from '../execution-context.js'
+import { getApplicationExecutionBinding, resolveApplicationExecutionContext,runWithApplicationReadTransaction } from '../execution-context.js'
 import { ApplicationPlatformService } from '../service.js'
 import { createCanonicalNativeApplicationModule } from '../native-adapters.js'
 import { createCanonicalGenericApplicationModule } from '../generic-adapter.js'
-import { createCompany } from '../../db/crm.js'
+import { createCompany,getCompanyById,getContactById } from '../../db/crm.js'
 import { createEntity } from '../../db/entities-store.js'
 import { updateCrmCustomFields } from '../../db/crm-r2.js'
 import { applicationPlatformRoutes } from '../../routes/application-platform.js'
@@ -99,9 +100,9 @@ describe('[COMP:api/application-auth] database application projections and live 
     return new ApplicationPlatformService([module])
   }
   async function provision(kind: 'member' | 'external_user' | 'service', fields = ['title'], parentFields?: string[], tamperMaximum = false,
-    nativeCompanyId?: string, additionalActions: string[] = [], recordIds: string[] = [recordId], selector?: ApplicationAccessGrant['selector'], oauthScope = 'read_write', compartments: string[] = [], nativeType = 'company') {
+    nativeCompanyId?: string, additionalActions: string[] = [], recordIds: string[] = [recordId], selector?: ApplicationAccessGrant['selector'], oauthScope = 'read_write', compartments: string[] = [], nativeType = 'company',memberActor?:string) {
     const appId = randomUUID(), grantId = randomUUID(), parentId = parentFields ? randomUUID() : null
-    let userId: string = kind === 'member' ? memberId : externalId
+    let userId: string = kind === 'member' ? memberActor??memberId : externalId
     if (kind === 'service') {
       userId = (await findOrCreateUser({ authProvider: 'channel', authProviderId: `app-service:${appId}:${randomUUID()}`, name: 'Example service' })).user.id
       users.push(userId)
@@ -143,6 +144,130 @@ describe('[COMP:api/application-auth] database application projections and live 
     expect(user).not.toBeNull()
     return { authentication: { user: user! }, appId, grantId, parentId, userId, token: `oat_${id}_${secret}` }
   }
+  it.each((['member','external_user','service'] as const).flatMap(kind=>(['company','person'] as const).map(type=>({kind,type}))))('Q02/Q03 retains the actual $kind application ceiling through a legacy $type getter',async({kind,type})=>{
+    const value=await createEntity({workspaceId,kind:type,displayName:'Fictional legacy application point',attributes:type==='company'?{domain:'fictional.example'}:{email:'fictional@example.com',phone:'555-0100'},createdByUserId:ownerId,source:'user'})
+    const fields=['name',...(type==='company'?['domain']:['email','phone','companyId']),'aliases','tags','externalRef','createdAt','updatedAt']
+    const full=await provision(kind,fields,undefined,false,value.id,[],[value.id],undefined,'read_write',[],type),narrow=await provision(kind,['name'],undefined,false,value.id,[],[value.id],undefined,'read_write',[],type)
+    let retained:(()=>Promise<unknown>)|undefined
+    const getter=type==='company'?getCompanyById:getContactById,base=createCanonicalNativeApplicationModule()
+    const dispatcher=new ApplicationPlatformService([{...base,application:{...base.application!,queries:[...base.application!.queries,'legacy_get','legacy_spoof','legacy_narrow']},queries:{...base.queries,
+      legacy_get:{input:z.object({id:z.string().uuid()}),authorize:async()=>{},execute:({execution},raw)=>{
+        const resume=AsyncLocalStorage.snapshot(),id=(raw as {id:string}).id;retained=()=>resume(()=>getter(execution.security.access,id));return getter(execution.security.access,id)}},
+      legacy_narrow:{input:z.object({id:z.string().uuid()}),authorize:async()=>{},execute:({execution},raw)=>getter({...execution.security.access,clearance:'public'},(raw as {id:string}).id)},
+      legacy_spoof:{input:z.object({id:z.string().uuid()}),authorize:async()=>{},execute:({execution},raw)=>getter({...execution.security.access,userId:ownerId},(raw as {id:string}).id)}}}])
+    const record=await dispatcher.query(await resolveApplicationExecutionContext(full.authentication),'native','legacy_get',{id:value.id}) as {id:string}
+    expect(record).toMatchObject({id:value.id,...(type==='company'?{domain:'fictional.example'}:{email:'fictional@example.com',phone:'555-0100'})});expect(boundScopeSources(record).length).toBeGreaterThan(0)
+    expect(retained).toBeDefined();await expect(retained!()).rejects.toMatchObject({code:'access_unavailable'})
+    expect(await dispatcher.query(await resolveApplicationExecutionContext(full.authentication),'native','legacy_narrow',{id:value.id})).toBeNull()
+    await expect(dispatcher.query(await resolveApplicationExecutionContext(narrow.authentication),'native','legacy_get',{id:value.id})).rejects.toMatchObject({code:'access_unavailable'})
+    await expect(dispatcher.query(await resolveApplicationExecutionContext(full.authentication),'native','legacy_spoof',{id:value.id})).rejects.toMatchObject({code:'access_unavailable'})
+  })
+  it('Q02/Q03 refuses an in-flight legacy getter before it can borrow another actual application transaction',async()=>{
+    const value=await createEntity({workspaceId,kind:'company',displayName:'Fictional in-flight native point',attributes:{domain:'private.example'},createdByUserId:ownerId,source:'user'})
+    const fields=['name','domain','aliases','tags','externalRef','createdAt','updatedAt'],narrow=await provision('member',['name'],undefined,false,value.id),broad=await provision('member',fields,undefined,false,value.id)
+    const a=await resolveApplicationExecutionContext(narrow.authentication),b=await resolveApplicationExecutionContext(broad.authentication)
+    let signalRequested!:()=>void,resumeSql!:()=>void
+    const requested=new Promise<void>(resolve=>{signalRequested=resolve}),resumed=new Promise<void>(resolve=>{resumeSql=resolve})
+    const connection=await getAppPool().connect();let pause=true,pending:Promise<unknown>|undefined
+    // The real SQL/ACL and result run unchanged. Delay dispatch of one requested
+    // value read to model transport scheduling across two committed host frames.
+    const client={query:async(sql:string,values?:unknown[])=>{
+      if(pause&&sql.includes('read_native_application_record(')&&Array.isArray(values?.[3])&&values[3].length){pause=false;signalRequested();await resumed}
+      return connection.query(sql,values)
+    },release:()=>{}} as unknown as PoolClient
+    const base=createCanonicalNativeApplicationModule(),dispatcher=new ApplicationPlatformService([{...base,application:{...base.application!,queries:[...base.application!.queries,'start_unawaited','resume_broader']},queries:{...base.queries,
+      start_unawaited:{input:z.object({}).strict(),authorize:async()=>{},execute:async({execution})=>{pending=getCompanyById(execution.security.access,value.id);await requested;return {started:true}}},
+      resume_broader:{input:z.object({}).strict(),authorize:async()=>{},execute:async({execution})=>{expect(pending).toBeDefined();resumeSql();await expect(pending!).rejects.toMatchObject({code:'access_unavailable'});return getCompanyById(execution.security.access,value.id)}}}}],{connect:async()=>client} as unknown as Pool)
+    try {
+      expect(await dispatcher.query(a,'native','start_unawaited',{})).toEqual({started:true})
+      expect(await dispatcher.query(b,'native','resume_broader',{})).toMatchObject({id:value.id,domain:'private.example'})
+    } finally {resumeSql();await pending?.catch(()=>{});await connection.query('ROLLBACK');connection.release()}
+  })
+  it('Q02/Q03 permanently expires a read lease across real pooled-client reuse and rejects a different genuine frame',async()=>{
+    const value=await createEntity({workspaceId,kind:'company',displayName:'Fictional pooled native read',attributes:{},createdByUserId:ownerId,source:'user'})
+    const fields=['name','domain','aliases','tags','externalRef','createdAt','updatedAt'],fixture=await provision('member',fields,undefined,false,value.id)
+    const execution=await resolveApplicationExecutionContext(fixture.authentication),other=await resolveApplicationExecutionContext(fixture.authentication)
+    expect(other).not.toBe(execution)
+    const connection=await getAppPool().connect(),physical=await connection.query<{pid:number}>('SELECT pg_backend_pid() AS pid'),pids:number[]=[]
+    // One real nonowner database connection; only pool release is deferred until
+    // fixture cleanup so separate committed host transactions reuse the same client.
+    const client={query:connection.query.bind(connection),release:()=>{}} as unknown as PoolClient
+    const poolView={connect:async()=>client} as unknown as Pool
+    let retained:(()=>Promise<unknown>)|undefined
+    const base=createCanonicalNativeApplicationModule(),dispatcher=new ApplicationPlatformService([{...base,application:{...base.application!,queries:[...base.application!.queries,'legacy_reuse','legacy_frame']},queries:{...base.queries,
+      legacy_reuse:{input:z.object({}).strict(),authorize:async()=>{},execute:async({execution,transaction})=>{
+        pids.push((await transaction.query<{pid:number}>('SELECT pg_backend_pid() AS pid')).rows[0].pid)
+        if(retained)await expect(retained()).rejects.toMatchObject({code:'access_unavailable'})
+        const resume=AsyncLocalStorage.snapshot();retained=()=>resume(()=>getCompanyById(execution.security.access,value.id))
+        return getCompanyById(execution.security.access,value.id)
+      }},legacy_frame:{input:z.object({}).strict(),authorize:async()=>{},execute:({transaction})=>runWithApplicationReadTransaction(transaction,other,()=>getCompanyById(other.security.access,value.id))}}}],poolView)
+    try {
+      expect(await dispatcher.query(execution,'native','legacy_reuse',{})).toMatchObject({id:value.id})
+      expect(await dispatcher.query(execution,'native','legacy_reuse',{})).toMatchObject({id:value.id})
+      expect(pids).toEqual([physical.rows[0].pid,physical.rows[0].pid])
+      await expect(dispatcher.query(execution,'native','legacy_frame',{})).rejects.toMatchObject({code:'access_unavailable'})
+    } finally {await connection.query('ROLLBACK');connection.release()}
+  })
+  it('Q02/Q08 preserves narrower shared-audience and v2 ceilings for a genuine owner-member application legacy getter',async()=>{
+    const previous=(await pool.query('SELECT department_read_v2 AS value FROM workspaces WHERE id=$1',[workspaceId])).rows[0].value
+    await pool.query('UPDATE workspaces SET department_read_v2=true WHERE id=$1',[workspaceId])
+    try {
+      const value=await createEntity({workspaceId,kind:'company',displayName:'Fictional private native point',attributes:{},userId:ownerId,createdByUserId:ownerId,source:'user'})
+      const fields=['name','domain','aliases','tags','externalRef','createdAt','updatedAt'],fixture=await provision('member',fields,undefined,false,value.id,[],[value.id],undefined,'read_write',[],'company',ownerId)
+      const base=createCanonicalNativeApplicationModule(),dispatcher=new ApplicationPlatformService([{...base,application:{...base.application!,queries:[...base.application!.queries,'legacy_private']},queries:{...base.queries,legacy_private:{input:z.object({ceiling:z.enum(['normal','shared','department'])}),authorize:async()=>{},execute:({execution},raw)=>{
+        const ceiling=(raw as {ceiling:string}).ceiling,access=execution.security.access,grant=access.departmentRead
+        if(!grant)throw new Error('The genuine v2 native member ceiling is unavailable.')
+        return getCompanyById({...access,...(ceiling==='shared'?{sharedAudience:true}:ceiling==='department'?{departmentRead:{...grant,base:'public' as const,
+          departments:Object.fromEntries(Object.keys(grant.departments).map(key=>[key,'public' as const])),cap:'public' as const}}:{})},value.id)
+      }}}}])
+      const execution=await resolveApplicationExecutionContext(fixture.authentication)
+      expect(await dispatcher.query(execution,'native','legacy_private',{ceiling:'normal'})).toMatchObject({id:value.id})
+      expect(await dispatcher.query(execution,'native','legacy_private',{ceiling:'shared'})).toBeNull()
+      expect(await dispatcher.query(execution,'native','legacy_private',{ceiling:'department'})).toBeNull()
+    } finally {await pool.query('UPDATE workspaces SET department_read_v2=$2 WHERE id=$1',[workspaceId,previous])}
+  })
+  it.each([{type:'company',field:'domain',canonical:'fallback.example'},{type:'person',field:'email',canonical:'fallback@example.com'}] as const)('Q02 holds former native $field codec evidence without rewriting its source or observations',async({type,field,canonical})=>{
+    const value=await createEntity({workspaceId,kind:type,canonicalId:canonical,displayName:'Fictional fallback codec evidence',attributes:{},createdByUserId:ownerId,source:'user'})
+    const fixtures=await Promise.all([0,1].map(()=>provision('service',[field,'name'],undefined,false,value.id,[],[value.id],undefined,'read_write',[],type)))
+    const base=createCanonicalNativeApplicationModule(),dispatcher=new ApplicationPlatformService([{...base,application:{...base.application!,queries:[...base.application!.queries,'field_snapshot']},queries:{...base.queries,field_snapshot:{input:z.object({id:z.string().uuid(),version:z.string()}),authorize:async()=>{},execute:async({transaction},raw)=>{const input=raw as {id:string;version:string};return(await transaction.query('SELECT read_admitted_application_field_snapshot($1,$2,$3) AS value',[workspaceId,input.id,input.version])).rows[0].value}}}}])
+    const signature='public.application_native_builtin_field_revision(text,text)',codecSignature='public.application_native_entity_values(text,jsonb)'
+    const definition=(await pool.query('SELECT pg_get_functiondef($1::regprocedure) AS definition',[signature])).rows[0].definition as string
+    const codec=(await pool.query('SELECT pg_get_functiondef($1::regprocedure) AS definition',[codecSignature])).rows[0].definition as string
+    const revised="WHEN p_type='company' AND p_field='domain' OR p_type='person' AND p_field='email' THEN 2",legacy=definition.replace(revised,revised.replace('THEN 2','THEN 1'))
+    expect(legacy).not.toBe(definition)
+    const oldCodec=codec.replace("'domain',coalesce(attrs->>'domain',payload->>'canonical_id')","'domain',attrs->'domain'").replace("'email',coalesce(attrs->>'email',payload->>'canonical_id')","'email',attrs->'email'")
+    expect(oldCodec).not.toBe(codec)
+    let old:ScopeSource|undefined,oldName:ScopeSource|undefined,artifact:unknown
+    try{await pool.query(legacy);await pool.query(oldCodec)
+      const result=await dispatcher.query(await resolveApplicationExecutionContext(fixtures[0].authentication),'native','get',{type,id:value.id,fields:[field]}) as {values:unknown}
+      expect(result.values).toEqual({[field]:null});old=boundScopeSources(result)[0]
+      const name=await dispatcher.query(await resolveApplicationExecutionContext(fixtures[0].authentication),'native','get',{type,id:value.id,fields:['name']})
+      if(!name||typeof name!=='object')throw new Error('Native codec fixture is unavailable.');oldName=boundScopeSources(name)[0]
+      artifact=(await pool.query('SELECT r.field_identity,o.record_version,o.policy_version FROM application_field_resources r JOIN application_field_observations o ON o.resource_id=r.id WHERE r.id=$1 AND o.version=$2',[old.resourceId,old.version])).rows[0]
+    }finally{await pool.query(codec);await pool.query(definition)}
+    for(const fixture of fixtures){const execution=await resolveApplicationExecutionContext(fixture.authentication)
+      expect(await dispatcher.query(execution,'native','field_snapshot',{id:old!.resourceId,version:old!.version})).toMatchObject({held:true})
+      expect(await dispatcher.query(execution,'native','field_snapshot',{id:oldName!.resourceId,version:oldName!.version})).toMatchObject({held:false})
+      expect((await dispatcher.query(execution,'native','get',{type,id:value.id,fields:[field]}) as {values:unknown}).values).toEqual({[field]:canonical})
+    }
+    expect((await pool.query('SELECT scope_version::text AS version FROM entities WHERE id=$1',[value.id])).rows[0].version).toBe('1')
+    expect((await pool.query('SELECT r.field_identity,o.record_version,o.policy_version FROM application_field_resources r JOIN application_field_observations o ON o.resource_id=r.id WHERE r.id=$1 AND o.version=$2',[old!.resourceId,old!.version])).rows[0]).toEqual(artifact)
+  })
+  it('Q02 binds native cursors to codec metadata even when field shapes and business versions are unchanged',async()=>{
+    const ids:string[]=[]
+    for(const canonicalId of ['first.example','second.example'])ids.push((await createEntity({workspaceId,kind:'company',canonicalId,displayName:'Fictional native cursor codec',attributes:{},createdByUserId:ownerId,source:'user'})).id)
+    const fixture=await provision('service',['name','domain'],undefined,false,ids[0],[],ids,{kind:'ids',ids}),dispatcher=new ApplicationPlatformService([createCanonicalNativeApplicationModule()])
+    const signature='public.application_native_builtin_field_revision(text,text)',definition=(await pool.query('SELECT pg_get_functiondef($1::regprocedure) AS definition',[signature])).rows[0].definition as string
+    const revised="WHEN p_type='company' AND p_field='domain' OR p_type='person' AND p_field='email' THEN 2",legacy=definition.replace(revised,revised.replace('THEN 2','THEN 1'))
+    expect(legacy).not.toBe(definition)
+    const query={fields:['name'],sort:[{field:'domain',direction:'asc'}],limit:1};let cursor:string|undefined
+    try{await pool.query(legacy)
+      const result=await dispatcher.query(await resolveApplicationExecutionContext(fixture.authentication),'native','query',{type:'company',query}) as {nextCursor?:string}
+      cursor=result.nextCursor;expect(cursor).toBeDefined()
+    }finally{await pool.query(definition)}
+    await expect(dispatcher.query(await resolveApplicationExecutionContext(fixture.authentication),'native','query',{type:'company',query:{...query,cursor}})).rejects.toMatchObject({code:'invalid_value'})
+    expect((await pool.query('SELECT DISTINCT scope_version::text AS version FROM entities WHERE id=ANY($1::uuid[])',[ids])).rows).toEqual([{version:'1'}])
+  })
   it('Q02 consumes native output fields only for selected rows while proving predicates for all candidates',async()=>{
     const ids:string[]=[]
     for(const amount of ['100','0'])ids.push((await createEntity({workspaceId,kind:'deal',displayName:'Fictional native selected output',attributes:{stage:'lead',amount},createdByUserId:ownerId,source:'user'})).id)
@@ -301,10 +426,11 @@ describe('[COMP:api/application-auth] database application projections and live 
     const dispatcher=new ApplicationPlatformService([{...base,application:{...base.application!,queries:[...base.application!.queries,'field_snapshot']},queries:{...base.queries,
       field_snapshot:{input:snapshotInput,authorize:async()=>{},execute:async({transaction},raw)=>{const input=snapshotInput.parse(raw);return (await transaction.query(
         'SELECT read_admitted_application_field_snapshot($1,$2,$3) AS value',[workspaceId,input.id,input.version])).rows[0].value}}}}])
-    const signature='public.application_field_projection_state_before_module_policy(uuid,jsonb,text,uuid,text,text,text[])'
+    const signature='public.application_native_builtin_field_revision(text,text)'
     const definition=(await pool.query('SELECT pg_get_functiondef($1::regprocedure) AS definition',[signature])).rows[0].definition as string
-    const revised="'kind','builtin','version',CASE WHEN p_type='deal' AND field='amount' THEN 2 ELSE 1 END"
-    const legacy=definition.replace(revised,"'kind','builtin','version',1")
+    const revised="WHEN p_type='deal' AND p_field='amount' THEN 2"
+    expect(definition).toContain(revised)
+    const legacy=definition.replace(revised,"WHEN p_type='deal' AND p_field='amount' THEN 1")
     let oldAmount:ScopeSource|undefined,oldName:ScopeSource|undefined,oldArtifact:unknown
     try {
       // Local migration fixture: only the historical codec metadata changes.

@@ -11,6 +11,7 @@ import { publishTaskLifecycle } from '../task-event-fanout.js'
 import { getApplicationExecutionBinding } from './execution-context.js'
 import { canonicalGenericReadContext, readCanonicalNativeRecord } from './field-evidence.js'
 import { queryCanonicalNativeRecords } from './native-reader.js'
+import { canonicalNativeResourceDefinitions } from './native-resources.js'
 import { boundScopeSources } from '@use-brian/core'
 import { readCurrentScopeSources } from '../db/derived-scope-store.js'
 
@@ -19,44 +20,10 @@ const queryInput=z.object({type:z.enum(['company','person','deal']),query:applic
 type Context=ApplicationOperationContext<PoolClient>
 const creations = new WeakMap<Context, { type: 'company' | 'person' | 'deal' | 'task'; fields: string[]; scope: { sensitivity: 'public' | 'internal' | 'confidential'; compartments: string[]; projectIds: string[] } }>()
 
-const commonCrmFields:ApplicationResourceDefinition['fields']=[
-  {key:'aliases',label:'Aliases',kind:'json',shape:'array',items:'text',maxItemLength:200},
-  {key:'tags',label:'Tags',kind:'json',shape:'array',items:'text',maxItems:64,maxItemLength:100},
-  {key:'externalRef',label:'External reference',kind:'json',shape:'object'},
-  {key:'ownerId',label:'Owner',kind:'person'},
-  {key:'archivedAt',label:'Archived at',kind:'timestamp'},
-  {key:'createdAt',label:'Created at',kind:'timestamp',immutable:true},
-  {key:'updatedAt',label:'Updated at',kind:'timestamp',immutable:true},
-]
-const definitions:ApplicationResourceDefinition[]=[
-  {typeKey:'company',origin:{kind:'native',moduleKey:'native'},schemaVersion:'2',fields:[
-    {key:'name',label:'Name',kind:'text',required:true,maxLength:256},{key:'domain',label:'Domain',kind:'text',maxLength:320},...commonCrmFields]},
-  {typeKey:'person',origin:{kind:'native',moduleKey:'native'},schemaVersion:'2',fields:[
-    {key:'name',label:'Name',kind:'text',required:true,maxLength:256},{key:'email',label:'Email',kind:'text',maxLength:320},
-    {key:'phone',label:'Phone',kind:'text',maxLength:100},{key:'companyId',label:'Company',kind:'reference',targetTypeKey:'company'},
-    {key:'custom.organisation_name',label:'Organisation',kind:'text',maxLength:200},
-    {key:'custom.position',label:'Position',kind:'text',maxLength:200},
-    {key:'custom.mailing_address',label:'Mailing address',kind:'text',maxLength:600},...commonCrmFields]},
-  {typeKey:'deal',origin:{kind:'native',moduleKey:'native'},schemaVersion:'2',fields:[
-    {key:'name',label:'Name',kind:'text',required:true,maxLength:256},
-    {key:'stage',label:'Stage',kind:'enum',options:['lead','qualified','proposal','negotiation','won','lost']},
-    {key:'amount',label:'Amount',kind:'decimal',scale:18},
-    {key:'companyId',label:'Company',kind:'reference',targetTypeKey:'company'},
-    {key:'contactId',label:'Contact',kind:'reference',targetTypeKey:'person'},
-    {key:'closeDate',label:'Close date',kind:'text',maxLength:10},
-    {key:'pipelineId',label:'Pipeline ID',kind:'text',maxLength:36},
-    {key:'pipelineStageId',label:'Pipeline stage ID',kind:'text',maxLength:36},
-    {key:'currencyCode',label:'Currency',kind:'text',maxLength:3},
-    {key:'source',label:'Source',kind:'text',maxLength:100},
-    {key:'winLossReason',label:'Win or loss reason',kind:'text',maxLength:2000},
-    {key:'probability',label:'Probability',kind:'number',minimum:0,maximum:100},...commonCrmFields]},
-  {typeKey:'task',origin:{kind:'native',moduleKey:'native'},schemaVersion:'1',fields:[{key:'title',label:'Title',kind:'text',required:true},{key:'status',label:'Status',kind:'text'}]},
-  {typeKey:'file',origin:{kind:'native',moduleKey:'native'},schemaVersion:'1',fields:[{key:'name',label:'Name',kind:'text'},{key:'mimeType',label:'MIME type',kind:'text'},{key:'sizeBytes',label:'Size',kind:'number'},{key:'storageRef',label:'Storage reference',kind:'text'}]},
-  {typeKey:'workspace_member',origin:{kind:'native',moduleKey:'native'},schemaVersion:'1',fields:[{key:'id',label:'Member ID',kind:'text'}]},
-]
+const definitions=canonicalNativeResourceDefinitions()
 async function resources(context: Context, queryType?: string): Promise<ApplicationResourceDefinition[]> {
   const app = getApplicationExecutionBinding(context.execution)
-  const entries = queryType ? (await context.transaction.query<{value:{typeKey:string;fields:string[];customFields:Record<string,unknown>[]}}>('SELECT application_native_query_catalog($1,$2) AS value',[context.execution.security.access.workspaceId,queryType])).rows.flatMap(row=>row.value?[row.value]:[]) : app ? (await context.transaction.query<{ value: { typeKey: string; fields: string[]; customFields: Record<string, unknown>[] } }>('SELECT application_native_catalog() AS value')).rows.map(row => row.value)
+  const entries:Array<{typeKey:string;fields:string[];customFields:Record<string,unknown>[];schemaVersion?:string}> = queryType ? (await context.transaction.query<{value:{typeKey:string;fields:string[];customFields:Record<string,unknown>[]}}>('SELECT application_native_query_catalog($1,$2) AS value',[context.execution.security.access.workspaceId,queryType])).rows.flatMap(row=>row.value?[row.value]:[]) : app ? (await context.transaction.query<{ value: { typeKey: string; fields: string[]; customFields: Record<string, unknown>[] } }>('SELECT application_native_catalog() AS value')).rows.map(row => row.value)
     : definitions.map(definition => ({ typeKey: definition.typeKey, fields: definition.fields.map(field => field.key), customFields: [] as Record<string, unknown>[] }))
   if (!app && !queryType) {
     const custom = await context.transaction.query<{ definition: Record<string, unknown> }>(`SELECT jsonb_build_object('id',id,'entityKind',entity_kind,'fieldKey',field_key,
@@ -73,7 +40,7 @@ async function resources(context: Context, queryType?: string): Promise<Applicat
         definition: definition as unknown as Record<string, import('@use-brian/shared').ApplicationJson> }
     })
     const fields = [...base.fields.filter(field => entry.fields.includes(field.key) && !custom.some(configured => configured.key === field.key)), ...custom]
-    return { ...base, fields, schemaVersion: `1:${createHash('sha256').update(JSON.stringify(fields)).digest('hex')}` }
+    return { ...base, fields, schemaVersion: `${entry.schemaVersion??'1'}:${createHash('sha256').update(JSON.stringify(fields)).digest('hex')}` }
   })
 }
 async function read(context:Context,type:z.infer<typeof readInput>['type'],id:string,fields?:readonly string[]):Promise<ApplicationRecordProjection> {

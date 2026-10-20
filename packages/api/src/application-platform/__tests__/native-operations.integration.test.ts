@@ -13,7 +13,7 @@ import { createCrmTools, executionToolContext, boundScopeSources, type Applicati
 import { ApplicationPlatformError,type ApplicationJson } from '@use-brian/shared'
 import { applyRLSGucs, getAppPool, getPool } from '../../db/client.js'
 import { bindTaskClosedHook, createTask, getTaskById, resolveTaskById, updateTask } from '../../db/tasks.js'
-import { createCompany,createContact,createDeal,getDealById,listDeals,updateCompany,updateContact,updateDeal,setDealStage } from '../../db/crm.js'
+import { createCompany,createContact,createDeal,getCompanyById,getContactById,getDealById,listDeals,updateCompany,updateContact,updateDeal,setDealStage } from '../../db/crm.js'
 import { createCrmPipeline,createCrmStage,createCrmFieldDefinition,archiveCrmFieldDefinition,updateCrmCustomFields,setCrmArchived,setCrmDealPipelineStage,getCrmConfig,addCrmDealParticipant,removeCrmDealParticipant } from '../../db/crm-r2.js'
 import { createEntity, supersedeEntity, updateEntity } from '../../db/entities-store.js'
 import { createDbCrmStore } from '../../db/crm-store.js'
@@ -66,6 +66,13 @@ describe('[COMP:api/application-records] canonical native operation composition'
       ownership: { kind: 'workspace', workspaceId }, lifecycle: { sessionId: randomUUID(), sessionPersisted: false,
         channelId: 'native-operation-fixture', channelType: 'test', abortSignal: new AbortController().signal } })).executionContext
   }
+  it.each([{type:'company',field:'domain',canonical:'fictional.example'},{type:'person',field:'email',canonical:'fictional@example.com'}] as const)('Q02 preserves the canonical $field fallback and field evidence through legacy get',async({type,field,canonical})=>{
+    const value=await createEntity({workspaceId,kind:type,canonicalId:canonical,displayName:'Fictional native point fallback',attributes:{},createdByUserId:userId,source:'user'})
+    const record=type==='company'?await getCompanyById(access,value.id):await getContactById(access,value.id)
+    expect(record).toMatchObject({id:value.id,entityId:value.id,workspaceId,name:value.displayName,[field]:canonical,aliases:[],tags:[],externalRef:{}})
+    expect(record?.createdAt).toEqual(value.createdAt);expect(record?.updatedAt).toEqual(value.updatedAt)
+    expect(boundScopeSources(record!)).toEqual(expect.arrayContaining([expect.objectContaining({resourceKind:'application_field',workspaceId})]))
+  })
   it('Q02 queries native CRM under the actual member and rejects an owner-pool query catalog',async()=>{
     const name=`Fictional native member query ${randomUUID()}`,value=await createCompany(userId,{workspaceId,name,access,mergeByName:false})
     const dispatcher=new ApplicationPlatformService([createCanonicalNativeApplicationModule()])

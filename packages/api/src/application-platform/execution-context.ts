@@ -1,5 +1,6 @@
 /** App authentication enters the existing immutable context and sticky lease. [COMP:api/application-auth] */
 import { createHash, randomUUID } from 'node:crypto'
+import { AsyncLocalStorage } from 'node:async_hooks'
 import type { PoolClient } from 'pg'
 import { createExecutionContext, intersectAccessCeilings, maxSensitivity, minSensitivity,
   type AccessCeiling, type ExecutionContext, type Sensitivity } from '@use-brian/core'
@@ -20,6 +21,36 @@ export function getApplicationTransactionBinding(client: PoolClient) {
 }
 export function releaseApplicationTransactionBinding(client: PoolClient) {
   transactionBindings.delete(client)
+}
+const readTransactions=new AsyncLocalStorage<{client:PoolClient;execution:ExecutionContext;lease:{active:boolean}}>()
+/** Legacy native reads must retain the genuine application's exact SQL ceiling. */
+export function runWithApplicationReadTransaction<T>(client:PoolClient,execution:ExecutionContext,operation:()=>Promise<T>):Promise<T> {
+  const app=getApplicationExecutionBinding(execution),bound=getApplicationTransactionBinding(client)
+  if(!app) {
+    if(readTransactions.getStore())throw new ApplicationPlatformError('access_unavailable','The transaction is unavailable.')
+    return operation()
+  }
+  if(transactionBindings.get(client)!==execution||!bound||bound.workspaceId!==execution.security.access.workspaceId||bound.actorUserId!==execution.security.access.userId) {
+    throw new ApplicationPlatformError('access_unavailable','The transaction is unavailable.')
+  }
+  const lease={active:true}
+  return readTransactions.run(Object.freeze({client,execution,lease}),async()=>{
+    try{return await operation()}finally{lease.active=false}
+  })
+}
+/** A retained asynchronous callback cannot reuse a released host transaction. */
+export function currentApplicationReadTransaction(access:{workspaceId:string;userId:string}) {
+  const current=readTransactions.getStore();if(!current)return undefined
+  const workspaceId=access.workspaceId,userId=access.userId
+  const assertLive=()=>{
+    const bound=getApplicationTransactionBinding(current.client)
+    if(readTransactions.getStore()!==current||!current.lease.active||transactionBindings.get(current.client)!==current.execution
+      ||!bound||bound.workspaceId!==workspaceId||bound.actorUserId!==userId) {
+      throw new ApplicationPlatformError('access_unavailable','The transaction is unavailable.')
+    }
+  }
+  assertLive()
+  return Object.freeze({client:current.client,execution:current.execution,assertLive})
 }
 const intersect = (left: string[], right: string[]) => left.filter(value => right.includes(value))
 function freezeFacts(value: unknown): void {

@@ -10,9 +10,10 @@ import type {
   Sensitivity,
   StableExternalIdentity,
 } from '@use-brian/core'
-import { decodeCrmAmount, crmAmountSchema, maxSensitivity, unionScopeRequirements } from '@use-brian/core'
+import { bindScopeSources, decodeCrmAmount, crmAmountSchema, maxSensitivity, unionScopeRequirements } from '@use-brian/core'
 import type pg from 'pg'
 import { z } from 'zod'
+import { readLegacyCanonicalCrmPoint } from './crm-reader.js'
 import { ApplicationPlatformError,applicationJsonSchema } from '@use-brian/shared'
 import { assertExecutionResourceScope, buildAccessPredicate, buildCurrentMemberSourcePredicate, mutationActorAccess } from './access-predicate.js'
 import { assertAuthorshipPresent } from './authorship-guard.js'
@@ -490,17 +491,21 @@ async function mergeCompanyFields(
   return updateCompany(userId, id, fields, access, transaction?.client, { ...scope, sensitivity })
 }
 
+const legacyCompanyFields=['name','domain','aliases','tags','externalRef','createdAt','updatedAt'] as const
+const legacyContactFields=['name','email','phone','companyId','aliases','tags','externalRef','createdAt','updatedAt'] as const
+const legacyCrmCommon=z.object({name:z.string(),aliases:z.array(z.string()),tags:z.array(z.string()),externalRef:z.record(applicationJsonSchema),
+  createdAt:z.string().datetime(),updatedAt:z.string().datetime()})
+function legacyPointRecord(point:NonNullable<Awaited<ReturnType<typeof readLegacyCanonicalCrmPoint>>>) {
+  const values=legacyCrmCommon.parse(point.projection.values),{ref}=point.projection
+  return {id:ref.id,entityId:ref.id,workspaceId:ref.workspaceId,name:values.name,aliases:values.aliases,tags:values.tags,externalRef:values.externalRef,
+    createdAt:new Date(values.createdAt),updatedAt:new Date(values.updatedAt),sensitivity:point.scope.sensitivity,
+    compartments:point.scope.compartments,projectIds:point.scope.projectIds}
+}
 export async function getCompanyById(ctx: AccessContext, id: string): Promise<CompanyRecord | null> {
-  const ap = buildAccessPredicate(ctx, { alias: 'e', startIdx: 1 })
-  const result = await queryWithRLS<CompanyRow>(
-    ctx.userId,
-    `SELECT ${COMPANY_SELECT} FROM entities e
-      WHERE ${ap.sql} AND e.kind = 'company'
-        AND e.id = $${ap.nextIdx} AND e.valid_to IS NULL`,
-    [...ap.params, id],
-  )
-  if (result.rows.length === 0) return null
-  return toCompanyRow(result.rows[0])
+  const point=await readLegacyCanonicalCrmPoint(ctx,'company',id,legacyCompanyFields)
+  if(!point)return null
+  const domain=z.string().nullable().parse(point.projection.values.domain)
+  return bindScopeSources({...legacyPointRecord(point),domain},point.sources)
 }
 
 export async function listCompanies(ctx: AccessContext, filters: CompanyListFilters): Promise<CompanyListRow[]> {
@@ -768,16 +773,10 @@ async function mergeContactFields(
 }
 
 export async function getContactById(ctx: AccessContext, id: string): Promise<ContactRecord | null> {
-  const ap = buildAccessPredicate(ctx, { alias: 'e', startIdx: 1 })
-  const result = await queryWithRLS<ContactRow>(
-    ctx.userId,
-    `SELECT ${CONTACT_SELECT} FROM entities e
-      WHERE ${ap.sql} AND e.kind = 'person'
-        AND e.id = $${ap.nextIdx} AND e.valid_to IS NULL`,
-    [...ap.params, id],
-  )
-  if (result.rows.length === 0) return null
-  return toContactRow(result.rows[0])
+  const point=await readLegacyCanonicalCrmPoint(ctx,'person',id,legacyContactFields)
+  if(!point)return null
+  const values=z.object({email:z.string().nullable(),phone:z.string().nullable(),companyId:z.string().uuid().nullable()}).parse(point.projection.values)
+  return bindScopeSources({...legacyPointRecord(point),...values},point.sources)
 }
 
 export async function listContacts(ctx: AccessContext, filters: ContactListFilters): Promise<ContactListRow[]> {

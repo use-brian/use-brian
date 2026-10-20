@@ -12,7 +12,7 @@ import { lockWorkspaceModule, requireWorkspaceModuleAdmission } from '../db/work
 import { applyApplicationGovernance,previewApplicationGovernance,readApplicationGovernanceCatalog } from './governance.js'
 import { applyApplicationSchema, previewApplicationSchema } from './schema-changes.js'
 import type { PropertyDef } from '@use-brian/core'
-import { applyApplicationRLSContext, getApplicationExecutionBinding, releaseApplicationTransactionBinding } from './execution-context.js'
+import { applyApplicationRLSContext, getApplicationExecutionBinding, runWithApplicationReadTransaction, releaseApplicationTransactionBinding } from './execution-context.js'
 import { z } from 'zod'
 import { toJsonSchemaCompat } from '@modelcontextprotocol/sdk/server/zod-json-schema-compat.js'
 
@@ -112,7 +112,7 @@ export class ApplicationPlatformService {
             [execution.security.access.workspaceId, execution.security.access.userId])
           if (!member.rows[0]) throw new ApplicationPlatformError('access_unavailable', 'The application is unavailable.')
         }
-        const value = await operation(client, effect => effects.push(effect))
+        const value = await runWithApplicationReadTransaction(client,execution,()=>operation(client, effect => effects.push(effect)))
         await execution.security.authority.assertCurrent()
         if (execution.lifecycle.abortSignal.aborted) throw new ApplicationPlatformError('access_unavailable', 'The operation was cancelled.')
         commitStarted = true
