@@ -558,12 +558,11 @@ describe("[COMP:app-web/live-roster-cache] Live roster and Inbox cache keys", ()
     expect(text).toContain("inboxCacheKey(workspaceId)");
     expect(text).toContain('from "@/lib/surface-prefetch"');
     expect(text).not.toMatch(/`inbox:\$\{/);
-    // No refetch listener of its own: the panel neither imports the spine
-    // event nor subscribes to anything but Escape-to-close.
+    // The controlled Dialog owns dismissal; inbox-panel-cache.test.tsx
+    // exercises actual Escape behavior on desktop and phone. The panel must
+    // not add its own refetch or duplicate Escape listener.
     expect(text).not.toContain('from "@/lib/inbox-refresh-events"');
-    expect(text.match(/addEventListener\(([^,]+),/g) ?? []).toEqual([
-      'addEventListener("keydown",',
-    ]);
+    expect(text.match(/addEventListener\(([^,]+),/g) ?? []).toEqual([]);
   });
 });
 
