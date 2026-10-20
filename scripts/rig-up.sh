@@ -339,6 +339,16 @@ SQL
   say "launcher pid $launcher_pid (log: ${LOG#"$ROOT/"})"
 fi
 
+# BEGIN administrative management predicate grant
+# Both fresh and warm administrative boots converge here after role creation.
+# Match the one canonical app_user predicate grant; never inherit the role.
+if [ "$ADMIN_ONLY" = 1 ]; then
+  docker exec -i "$CONTAINER" psql -U "$RIG_DB_USER" -d "$RIG_DB_NAME" -v ON_ERROR_STOP=1 -q <<'SQL'
+GRANT EXECUTE ON FUNCTION application_memory_field_ancestry_allows(uuid,uuid,text) TO admin_fixture_app;
+SQL
+fi
+# END administrative management predicate grant
+
 # ── readiness: the port, then a real database round-trip ────────────────────
 # "Up is not alive": /health is registered before the pool is used and answers
 # with Postgres down. The owner-session mint is the cheapest call that proves

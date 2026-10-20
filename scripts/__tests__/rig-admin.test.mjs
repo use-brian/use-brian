@@ -120,3 +120,43 @@ describe('[COMP:platform/local-rig] persistent runtime process ownership',()=>{
     }finally{try{process.kill(-child.pid,'SIGKILL')}catch{}rmSync(directory,{recursive:true,force:true})}
   })
 })
+
+
+describe('[COMP:platform/local-rig] independent management predicate bootstrap', () => {
+  function managementBootstrap() {
+    const rig = readFileSync(new URL('../rig-up.sh', import.meta.url), 'utf8')
+    const begin = rig.indexOf('# BEGIN administrative management predicate grant')
+    const end = rig.indexOf('# END administrative management predicate grant')
+    assert.ok(begin > rig.indexOf('mint_only=1'))
+    assert.ok(end > begin)
+    assert.ok(end < rig.indexOf('# ── readiness:'))
+    return rig.slice(begin, end)
+  }
+  it('grants exactly the canonical memory predicate, without a broad role grant', () => {
+    const block = managementBootstrap()
+    const canonical = readFileSync(new URL('../../packages/api/migrations/8015_application_query_fields.sql', import.meta.url), 'utf8')
+    const signature = 'application_memory_field_ancestry_allows(uuid,uuid,text)'
+    assert.ok([...canonical.matchAll(/GRANT EXECUTE ON FUNCTION ([\s\S]*?) TO app_user;/g)].some(match => match[1].includes(signature)))
+    assert.equal((block.match(/GRANT EXECUTE ON FUNCTION/g) || []).length, 1)
+    assert.ok(block.includes(`GRANT EXECUTE ON FUNCTION ${signature} TO admin_fixture_app;`))
+    assert.doesNotMatch(block, /ON ALL FUNCTIONS|BYPASSRLS|GRANT app_user|refresh_admin_read_grants/)
+  })
+  it('runs on each administrative pass, but never invokes Docker in ordinary mode', async () => {
+    const {writeFileSync,chmodSync,existsSync} = await import('node:fs')
+    const dir = mkdtempSync(join(tmpdir(), 'management-bootstrap-'))
+    try {
+      const trace=join(dir,'argv'),sql=join(dir,'sql'),docker=join(dir,'docker')
+      writeFileSync(docker, '#!/bin/sh\nprintf "%s\\n" "$@" >"$TRACE"\ncat >"$SQL_TRACE"\n')
+      chmodSync(docker,0o700)
+      const env={PATH:`${dir}:/usr/bin:/bin`,TRACE:trace,SQL_TRACE:sql,CONTAINER:'fixture-container',RIG_DB_USER:'fixture-owner',RIG_DB_NAME:'fixture-db'}
+      let run=spawnSync('/bin/bash',['-c',managementBootstrap()],{env:{...env,ADMIN_ONLY:'0'},encoding:'utf8'})
+      assert.equal(run.status,0,run.stderr);assert.equal(existsSync(trace),false)
+      for (const _ of ['fresh','warm']) {
+        run=spawnSync('/bin/bash',['-c',managementBootstrap()],{env:{...env,ADMIN_ONLY:'1'},encoding:'utf8'})
+        assert.equal(run.status,0,run.stderr)
+        assert.deepEqual(readFileSync(trace,'utf8').trim().split('\n'),['exec','-i','fixture-container','psql','-U','fixture-owner','-d','fixture-db','-v','ON_ERROR_STOP=1','-q'])
+        assert.equal(readFileSync(sql,'utf8').trim(),'GRANT EXECUTE ON FUNCTION application_memory_field_ancestry_allows(uuid,uuid,text) TO admin_fixture_app;')
+      }
+    } finally {rmSync(dir,{recursive:true,force:true})}
+  })
+})
