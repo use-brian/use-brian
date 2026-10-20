@@ -6,7 +6,7 @@ import express from 'express'
 import request from 'supertest'
 import type { Pool,PoolClient } from 'pg'
 import { ContextScopeAccumulator, executionToolContext, boundScopeSources, type ApplicationModuleDefinition, type ScopeSource } from '@use-brian/core'
-import { applicationResourceSchema, type ApplicationAccessGrant, type ApplicationGrantMaximum, type ApplicationJson } from '@use-brian/shared'
+import { applicationQuerySchema, applicationResourceSchema, type ApplicationAccessGrant, type ApplicationGrantMaximum, type ApplicationJson } from '@use-brian/shared'
 import { getAppPool, getPool, queryWithRLS } from '../../db/client.js'
 import { consumeHomeAppBudget } from '../../db/home-apps-store.js'
 import { createDbDocEntityStore } from '../../db/doc-entity-store.js'
@@ -21,6 +21,8 @@ import { ApplicationPlatformService } from '../service.js'
 import { canonicalGenericReadContext,readCanonicalNativeRecord,readCanonicalGenericRecord,readCanonicalGenericQueryDomain,bindApplicationFieldProjection } from '../field-evidence.js'
 import { createCanonicalNativeApplicationModule } from '../native-adapters.js'
 import { createCanonicalGenericApplicationModule } from '../generic-adapter.js'
+import { queryCanonicalGenericRecords } from '../generic-reader.js'
+import { queryCanonicalNativeRecords } from '../native-reader.js'
 import { batchLabels,createCompany,getCompanyById,getContactById,getDealById } from '../../db/crm.js'
 import { createEntity } from '../../db/entities-store.js'
 import { updateCrmCustomFields } from '../../db/crm-r2.js'
@@ -548,6 +550,46 @@ describe('[COMP:api/application-auth] database application projections and live 
     try {
       expect(await dispatcher.query(executionA,base.key,'capture_read_lease',{})).toEqual([])
       await dispatcher.query(executionB,base.key,'resume_read_lease',{})
+    }finally{resumeSql();await pending?.catch(()=>{});await connection.query('ROLLBACK');connection.release()}
+  })
+  it.each([{kind:'generic_empty'},{kind:'native_validation'}] as const)(
+    'Q02/Q03 checks an expired compiled $kind query before returning another live host result or error',async({kind})=>{
+    const native=kind==='native_validation'
+    const row=native?await createEntity({workspaceId,kind:'company',displayName:'Fictional query lease',attributes:{tags:[]},createdByUserId:ownerId,source:'user'}):undefined
+    const id=row?.id??randomUUID(),fields=native?['name','tags']:['title']
+    if(row)await historicalNativeAttributes(row.id,{tags:[17]})
+    const a=await provision('service',fields,undefined,false,native?id:undefined,[],[id]),b=await provision('service',fields,undefined,false,native?id:undefined,[],[id])
+    const executionA=await resolveApplicationExecutionContext(a.authentication),executionB=await resolveApplicationExecutionContext(b.authentication)
+    const base=native?createCanonicalNativeApplicationModule():createCanonicalGenericApplicationModule()
+    const input=applicationQuerySchema.parse(native?{fields:['name'],filters:[{field:'tags',op:'eq',value:[]}]}:{fields:['title']})
+    const connection=await getAppPool().connect();let pause=false,delayed=false,pending:Promise<unknown>|undefined
+    let requestedRead!:()=>void,resumeSql!:()=>void
+    const requested=new Promise<void>(resolve=>{requestedRead=resolve}),resumed=new Promise<void>(resolve=>{resumeSql=resolve})
+    const port=native?'read_native_application_query_candidates(':'read_generic_application_query_candidates('
+    const client={query:async(sql:string,values?:unknown[])=>{
+      if(pause&&sql.includes(port)){pause=false;delayed=true;requestedRead();await resumed}
+      return connection.query(sql,values)
+    },release:()=>{}} as unknown as PoolClient
+    const run=async(context:Parameters<typeof canonicalGenericReadContext>[0])=>{
+      const captured=canonicalGenericReadContext(context),definition=(await base.resolveResources!(context)).find(value=>value.typeKey===(native?'company':'request'))!
+      return native?queryCanonicalNativeRecords(captured,definition,input):(await queryCanonicalGenericRecords(captured,definition,input)).result
+    }
+    const dispatcher=new ApplicationPlatformService([{...base,application:{...base.application!,queries:[...base.application!.queries,'start_query_lease','finish_query_lease']},queries:{...base.queries,
+      start_query_lease:{input:z.object({}).strict(),authorize:async()=>{},execute:async context=>{
+        pause=true;pending=run(context);void pending.then(requestedRead,requestedRead);await requested
+        expect(delayed).toBe(true);return {started:true}
+      }},finish_query_lease:{input:z.object({}).strict(),authorize:async()=>{},execute:async context=>{
+        resumeSql();await expect(pending!).rejects.toMatchObject({code:'access_unavailable'})
+        if(native){
+          await expect(run(context)).rejects.toMatchObject({code:'invalid_value'})
+          return base.queries.get.execute(context,{type:'company',id,fields:['name']})
+        }
+        const current=await run(context);expect(current).toMatchObject({records:[]});expect(boundScopeSources(current as object).length).toBeGreaterThan(0);return current
+      }}}}],{connect:async()=>client} as unknown as Pool)
+    try {
+      expect(await dispatcher.query(executionA,base.key,'start_query_lease',{})).toEqual({started:true})
+      const current=await dispatcher.query(executionB,base.key,'finish_query_lease',{})
+      expect(current).toMatchObject(native?{ref:{id},values:{name:'Fictional query lease'}}:{records:[]})
     }finally{resumeSql();await pending?.catch(()=>{});await connection.query('ROLLBACK');connection.release()}
   })
   it('Q02/Q08 preserves narrower shared-audience and v2 ceilings for a genuine owner-member application legacy getter',async()=>{

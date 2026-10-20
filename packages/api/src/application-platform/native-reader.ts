@@ -5,7 +5,7 @@ import { createHash } from 'node:crypto'
 import { z } from 'zod'
 import { bindScopeSources, validateApplicationValues, parseApplicationCrmFieldDefinition, type ScopeSource } from '@use-brian/core'
 import { ApplicationPlatformError, applicationJsonSchema, type ApplicationQuery, type ApplicationResourceDefinition, type ApplicationFieldDefinition, type ApplicationRecordProjection } from '@use-brian/shared'
-import { validateCanonicalNativeValues, type CanonicalGenericReadContext } from './field-evidence.js'
+import { runCanonicalReadLease, validateCanonicalNativeValues, type CanonicalGenericReadContext } from './field-evidence.js'
 import { canonicalNativeResourceDefinitions } from './native-resources.js'
 
 const unavailable=()=>new ApplicationPlatformError('access_unavailable','The resource is unavailable.')
@@ -103,7 +103,7 @@ export async function runCanonicalNativeQueryFrame<T>(context:CanonicalGenericRe
   const parent=nativeQueryFrames.getStore()
   if(parent?.client===context.transaction) {
     if(!parent.active)throw unavailable()
-    const result=await operation();context.assertLive?.();if(!parent.active)throw unavailable();return result
+    const result=await runCanonicalReadLease(context,operation);context.assertLive?.();if(!parent.active)throw unavailable();return result
   }
   let release!:()=>void
   const tail=new Promise<void>(resolve=>{release=resolve}),previous=nativeQueryQueues.get(context.transaction)??Promise.resolve()
@@ -111,7 +111,7 @@ export async function runCanonicalNativeQueryFrame<T>(context:CanonicalGenericRe
   const frame={client:context.transaction,active:true}
   try {
     await previous;context.assertLive?.()
-    const result=await nativeQueryFrames.run(frame,operation);context.assertLive?.();return result
+    const result=await runCanonicalReadLease(context,()=>nativeQueryFrames.run(frame,operation));context.assertLive?.();return result
   }finally{
     frame.active=false;release()
     if(nativeQueryQueues.get(context.transaction)===tail)nativeQueryQueues.delete(context.transaction)
@@ -122,7 +122,7 @@ export async function runCanonicalNativeQueryFrame<T>(context:CanonicalGenericRe
 export async function readCanonicalNativeQueryDefinition(context:CanonicalGenericReadContext,type:string):Promise<ApplicationResourceDefinition> {
   context.assertLive?.()
   const entry=z.object({typeKey:z.literal(type),fields:z.array(z.string()),customFields:z.array(z.record(z.unknown())),schemaVersion:z.string().optional()}).strict().safeParse(
-    (await context.transaction.query<{value:unknown}>('SELECT application_native_query_catalog($1,$2) AS value',[context.workspaceId,type])).rows[0]?.value)
+    (await runCanonicalReadLease(context,()=>context.transaction.query<{value:unknown}>('SELECT application_native_query_catalog($1,$2) AS value',[context.workspaceId,type]))).rows[0]?.value)
   context.assertLive?.()
   const base=canonicalNativeResourceDefinitions().find(definition=>definition.typeKey===type)
   if(!entry.success||!base)throw unavailable()
@@ -145,32 +145,32 @@ async function queryNativeRecordsInFrame(context:CanonicalGenericReadContext,def
   if(new Set(output).size!==output.length||fields.some(field=>!definition.fields.some(item=>item.key===field)))throw unavailable()
   if(input.cursor&&input.aggregate.length)invalid()
   const compiled=compileNativeApplicationQuery(context.workspaceId,definition,input)
-  const domain=capture.safeParse((await context.transaction.query<{value:unknown}>('SELECT observe_native_application_query_domain($1,$2,$3,$4) AS value',
-    [context.workspaceId,definition.typeKey,fields,consumed])).rows[0]?.value)
+  const domain=capture.safeParse((await runCanonicalReadLease(context,()=>context.transaction.query<{value:unknown}>('SELECT observe_native_application_query_domain($1,$2,$3,$4) AS value',
+    [context.workspaceId,definition.typeKey,fields,consumed]))).rows[0]?.value)
   if(!domain.success||Object.keys(domain.data.values).length||domain.data.sources[0].resourceKind!=='application_field'
     ||domain.data.sources.some(source=>source.workspaceId!==context.workspaceId))throw unavailable()
   const identity=domain.data.sources[0]
   // Capture and validate every consumed field before evaluating any predicate,
   // sort or aggregate. SQL expressions receive only these admitted snapshots.
-  const candidates=z.array(row).max(4096).parse((await context.transaction.query(
+  const candidates=z.array(row).max(4096).parse((await runCanonicalReadLease(context,()=>context.transaction.query(
     'SELECT * FROM read_native_application_query_candidates($1,$2,$3,$4,$5)',
-    [context.workspaceId,definition.typeKey,consumed,identity.resourceId,identity.version])).rows)
+    [context.workspaceId,definition.typeKey,consumed,identity.resourceId,identity.version]))).rows)
   for(const candidate of candidates)validateCanonicalNativeValues(definition,candidate.data)
   const candidateValues=compiled.bind(JSON.stringify(candidates))
-  const result=(await context.transaction.query(`WITH candidates AS MATERIALIZED (
+  const result=(await runCanonicalReadLease(context,()=>context.transaction.query(`WITH candidates AS MATERIALIZED (
     SELECT * FROM jsonb_to_recordset(${candidateValues}::jsonb) AS captured(id uuid,data jsonb,record_version text,sources jsonb,policy_version text)),
     filtered AS MATERIALIZED (SELECT * FROM candidates WHERE ${compiled.predicate}),
     page AS MATERIALIZED (SELECT *,${compiled.sort} FROM filtered WHERE ${compiled.after} ORDER BY ${compiled.order} LIMIT ${compiled.limit})
     SELECT $1::uuid AS workspace_id,$2::text AS type_key,(SELECT coalesce(jsonb_agg(to_jsonb(page)),'[]') FROM page) AS page
-     ${compiled.aggregates.length?`,(SELECT to_jsonb(totals) FROM (SELECT ${compiled.aggregates.join(',')} FROM filtered) totals) AS aggregates`:''}`,compiled.values)).rows[0]
+     ${compiled.aggregates.length?`,(SELECT to_jsonb(totals) FROM (SELECT ${compiled.aggregates.join(',')} FROM filtered) totals) AS aggregates`:''}`,compiled.values))).rows[0]
   if(result?.workspace_id!==context.workspaceId||result?.type_key!==definition.typeKey)throw unavailable()
   const page=z.array(row).max(input.limit+1).parse(result?.page)
   const sources:ScopeSource[]=[...domain.data.sources,...candidates.flatMap(candidate=>candidate.sources)]
   if(sources.some(source=>source.workspaceId!==context.workspaceId))throw unavailable()
   const records:ApplicationRecordProjection[]=[],selected=page.slice(0,input.limit)
-  const projected=z.array(row.omit({record_version:true})).max(input.limit).parse((await context.transaction.query(
+  const projected=z.array(row.omit({record_version:true})).max(input.limit).parse((await runCanonicalReadLease(context,()=>context.transaction.query(
     'SELECT * FROM read_native_application_query_records($1,$2,$3,$4,$5,$6,$7)',
-    [context.workspaceId,definition.typeKey,selected.map(item=>item.id),selected.map(item=>item.record_version),[...output].sort(),identity.resourceId,identity.version])).rows)
+    [context.workspaceId,definition.typeKey,selected.map(item=>item.id),selected.map(item=>item.record_version),[...output].sort(),identity.resourceId,identity.version]))).rows)
   const byId=new Map(projected.map(item=>[item.id,item]))
   if(projected.length!==selected.length||byId.size!==projected.length)throw unavailable()
   for(const candidate of selected) {

@@ -31,7 +31,7 @@ export function canonicalGenericReadContext(context: ApplicationOperationContext
 }
 
 /** Host liveness brackets the actual transport, including rejected SQL. */
-async function readWithCanonicalLease<T>(context:CanonicalGenericReadContext,operation:()=>Promise<T>):Promise<T> {
+export async function runCanonicalReadLease<T>(context:CanonicalGenericReadContext,operation:()=>Promise<T>):Promise<T> {
   context.assertLive?.()
   try{return await operation()}finally{context.assertLive?.()}
 }
@@ -51,7 +51,7 @@ export async function readCanonicalGenericRecord(context: CanonicalGenericReadCo
   const declared = new Set(definition.fields.map(field => field.key)),fields = query ? [...query.fields] : undefined
   if (origin.kind !== 'generic') unavailable()
   const captured = captureSchema.extend({ id: z.string().uuid(),recordVersion: z.string().min(1),absentFields: z.array(z.string()).max(256) }).safeParse(
-    (await readWithCanonicalLease(context,()=>context.transaction.query<{ value: unknown }>(query
+    (await runCanonicalReadLease(context,()=>context.transaction.query<{ value: unknown }>(query
       ? "SELECT read_generic_application_projection($1,$2,$3,$4,'query',$5,$5) AS value"
       : 'SELECT read_generic_application_record($1,$2,$3,$4) AS value',
       [workspaceId,origin.entityTypeId,definition.typeKey,id,...(fields ? [fields] : [])]))).rows[0]?.value)
@@ -90,7 +90,7 @@ export async function readCanonicalNativeRecord(context:CanonicalGenericReadCont
   if(definition.origin.kind!=='native' || definition.origin.moduleKey!=='native') unavailable()
   const captured=captureSchema.extend({id:z.string().uuid(),recordVersion:z.string().min(1),
     valueEncodings:z.object({amount:z.enum(['number','string','null','invalid']).optional()}).strict().optional()}).safeParse(
-    (await readWithCanonicalLease(context,()=>context.transaction.query<{value:unknown}>('SELECT read_native_application_record($1,$2,$3,$4) AS value',
+    (await runCanonicalReadLease(context,()=>context.transaction.query<{value:unknown}>('SELECT read_native_application_record($1,$2,$3,$4) AS value',
       [context.workspaceId,definition.typeKey,id,fields?[...fields]:null]))).rows[0]?.value)
   if(!captured.success || captured.data.id!==id.toLowerCase() || captured.data.sources[0].resourceKind!=='application_field'
     || captured.data.sources.some(source=>source.workspaceId!==context.workspaceId)
@@ -114,7 +114,7 @@ export async function readCanonicalGenericQueryDomain(context: CanonicalGenericR
   const origin=definition.origin
   if (origin.kind !== 'generic') unavailable()
   const workspaceId = context.workspaceId
-  const value = (await readWithCanonicalLease(context,()=>context.transaction.query<{ value: unknown }>('SELECT observe_generic_application_query_domain($1,$2,$3,$4,$5) AS value',
+  const value = (await runCanonicalReadLease(context,()=>context.transaction.query<{ value: unknown }>('SELECT observe_generic_application_query_domain($1,$2,$3,$4,$5) AS value',
     [workspaceId,origin.entityTypeId,definition.typeKey,[...fields],[...predicateFields]]))).rows[0]?.value
   if (value === null) unavailable()
   const parsed = captureSchema.safeParse(value)
@@ -136,7 +136,7 @@ export async function bindApplicationFieldProjection<T extends ApplicationRecord
     || snapshot.fields.length !== new Set(snapshot.fields).size
     || !isDeepStrictEqual([...snapshot.fields].sort(), Object.keys(snapshot.values).sort())
     || new Set(absentFields).size !== absentFields.length || absentFields.some(field => Object.hasOwn(snapshot.values,field))) unavailable()
-  const captured = captureSchema.safeParse((await readWithCanonicalLease(lease,()=>context.transaction.query<{ value: unknown }>(
+  const captured = captureSchema.safeParse((await runCanonicalReadLease(lease,()=>context.transaction.query<{ value: unknown }>(
     'SELECT observe_application_field_projection($1,$2,$3,$4,$5,$6,$7,$8) AS value',
     [ref.workspaceId,ref.origin,ref.typeKey,ref.id,ref.version,selection,selection === 'history' ? ref.version : null,[...snapshot.fields,...absentFields]],
   ))).rows[0]?.value)

@@ -5,7 +5,7 @@ import { z } from 'zod'
 import { bindScopeSources, boundScopeSources, propertyDefSchema, type PropertyDef, type ScopeSource } from '@use-brian/core'
 import { ApplicationPlatformError, applicationResourceSchema, type ApplicationQuery, type ApplicationRecordProjection, type ApplicationResourceDefinition } from '@use-brian/shared'
 import { compileApplicationRecordQuery } from './record-query.js'
-import { readCanonicalGenericRecord, readCanonicalGenericQueryDomain, type CanonicalGenericReadContext } from './field-evidence.js'
+import { runCanonicalReadLease, readCanonicalGenericRecord, readCanonicalGenericQueryDomain, type CanonicalGenericReadContext } from './field-evidence.js'
 
 const unavailable = () => new ApplicationPlatformError('access_unavailable', 'The resource is unavailable.')
 
@@ -15,6 +15,9 @@ export function canonicalGenericResource(schema: { id: string; schemaVersion: nu
       ...(property.config.kind === 'relation' ? { relationshipResolverKey: `relation.${createHash('sha256').update(property.name).digest('hex')}` } : {}) })) })
 }
 export async function queryCanonicalGenericRecords(context: CanonicalGenericReadContext, definition: ApplicationResourceDefinition, input: ApplicationQuery) {
+  return runCanonicalReadLease(context,()=>queryGenericRecordsInLease(context,definition,input))
+}
+async function queryGenericRecordsInLease(context: CanonicalGenericReadContext, definition: ApplicationResourceDefinition, input: ApplicationQuery) {
   if (definition.origin.kind !== 'generic') throw unavailable()
   const type = definition.typeKey
   const schema = { id: definition.origin.entityTypeId, workspaceId: context.workspaceId, schemaVersion: Number(definition.schemaVersion),
@@ -46,7 +49,7 @@ export async function queryCanonicalGenericRecords(context: CanonicalGenericRead
   // Materialize field admission before evaluating predicates, then validate
   // sort/aggregate dependencies only on matching records. All candidates and
   // matches are consumed even when the returned page is shorter.
-  const result = await context.transaction.query(`WITH candidates AS MATERIALIZED (SELECT * FROM ${candidatePort}),
+  const result = await runCanonicalReadLease(context,()=>context.transaction.query(`WITH candidates AS MATERIALIZED (SELECT * FROM ${candidatePort}),
     filtered AS MATERIALIZED (SELECT * FROM candidates r WHERE ${compiled.predicateWhere}),
     checked AS MATERIALIZED (SELECT * FROM filtered WHERE ${postCheck}),
     page AS MATERIALIZED (SELECT *,record_version::text AS version,${compiled.sortSelect} FROM checked r
@@ -54,13 +57,13 @@ export async function queryCanonicalGenericRecords(context: CanonicalGenericRead
     SELECT (SELECT coalesce(jsonb_agg(to_jsonb(page)),'[]') FROM page) AS page,
       (SELECT coalesce(jsonb_agg(jsonb_build_object('id',id,'version',record_version::text)),'[]') FROM candidates) AS candidates,
       (SELECT coalesce(jsonb_agg(jsonb_build_object('id',id,'version',record_version::text,'usesCreatedTime',created_at IS NOT NULL)),'[]') FROM checked) AS matches
-      ${aggregateSql.length ? `,(SELECT to_jsonb(totals) FROM (SELECT ${aggregateSql.join(',')} FROM checked) totals) AS aggregates` : ''}`, values)
+      ${aggregateSql.length ? `,(SELECT to_jsonb(totals) FROM (SELECT ${aggregateSql.join(',')} FROM checked) totals) AS aggregates` : ''}`, values))
   const reference = z.object({ id: z.string().uuid(),version: z.string().min(1) })
   const candidateRefs = z.array(reference).max(4096).parse(result.rows[0]?.candidates)
-  if (domainSources.length && (await context.transaction.query<{ admitted: boolean }>(
+  if (domainSources.length && (await runCanonicalReadLease(context,()=>context.transaction.query<{ admitted: boolean }>(
     'SELECT assert_generic_application_query_candidates($1,$2,$3,$4,$5) AS admitted',
     [schema.workspaceId,schema.id,domainSources[0].resourceId,domainSources[0].version,JSON.stringify(candidateRefs)],
-  )).rows[0]?.admitted !== true) throw unavailable()
+  ))).rows[0]?.admitted !== true) throw unavailable()
   const matches = z.array(reference.extend({ usesCreatedTime: z.boolean() })).max(4096).parse(result.rows[0]?.matches)
   const rows = z.array(reference.extend({ data: z.record(z.unknown()),absent_fields: z.array(z.string()) }).passthrough()).max(input.limit+1).parse(result.rows[0]?.page)
   const hasMore = rows.length > input.limit,selected = rows.slice(0,input.limit)
