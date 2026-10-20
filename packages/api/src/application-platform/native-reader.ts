@@ -1,9 +1,12 @@
 /** Canonical native query evaluation after SQL field/domain admission. [COMP:api/application-records] */
+import { AsyncLocalStorage } from 'node:async_hooks'
+import type { PoolClient } from 'pg'
 import { createHash } from 'node:crypto'
 import { z } from 'zod'
 import { bindScopeSources, validateApplicationValues, parseApplicationCrmFieldDefinition, type ScopeSource } from '@use-brian/core'
 import { ApplicationPlatformError, applicationJsonSchema, type ApplicationQuery, type ApplicationResourceDefinition, type ApplicationFieldDefinition, type ApplicationRecordProjection } from '@use-brian/shared'
 import { validateCanonicalNativeValues, type CanonicalGenericReadContext } from './field-evidence.js'
+import { canonicalNativeResourceDefinitions } from './native-resources.js'
 
 const unavailable=()=>new ApplicationPlatformError('access_unavailable','The resource is unavailable.')
 function invalid():never {throw new ApplicationPlatformError('invalid_value','The declared query or cursor is invalid.')}
@@ -92,7 +95,50 @@ export function compileNativeApplicationQuery(workspaceId:string,definition:Appl
     cursorFor:(value:Record<string,unknown>)=>{const encoded=Buffer.from(JSON.stringify({v:1,signature,values:order.map((_,index)=>value[`__sort${index}`])})).toString('base64url');if(encoded.length>4096)invalid();return encoded}}
 }
 
+const nativeQueryFrames=new AsyncLocalStorage<{client:PoolClient;active:boolean}>()
+const nativeQueryQueues=new WeakMap<PoolClient,Promise<void>>()
+/** Serialize private data frames; nested compiled evaluation retains one live frame. */
+export async function runCanonicalNativeQueryFrame<T>(context:CanonicalGenericReadContext,operation:()=>Promise<T>):Promise<T> {
+  context.assertLive?.()
+  const parent=nativeQueryFrames.getStore()
+  if(parent?.client===context.transaction) {
+    if(!parent.active)throw unavailable()
+    const result=await operation();context.assertLive?.();if(!parent.active)throw unavailable();return result
+  }
+  let release!:()=>void
+  const tail=new Promise<void>(resolve=>{release=resolve}),previous=nativeQueryQueues.get(context.transaction)??Promise.resolve()
+  nativeQueryQueues.set(context.transaction,tail)
+  const frame={client:context.transaction,active:true}
+  try {
+    await previous;context.assertLive?.()
+    const result=await nativeQueryFrames.run(frame,operation);context.assertLive?.();return result
+  }finally{
+    frame.active=false;release()
+    if(nativeQueryQueues.get(context.transaction)===tail)nativeQueryQueues.delete(context.transaction)
+  }
+}
+
+/** Query catalogs are selected by the same current SQL domain as evaluation. */
+export async function readCanonicalNativeQueryDefinition(context:CanonicalGenericReadContext,type:string):Promise<ApplicationResourceDefinition> {
+  context.assertLive?.()
+  const entry=z.object({typeKey:z.literal(type),fields:z.array(z.string()),customFields:z.array(z.record(z.unknown())),schemaVersion:z.string().optional()}).strict().safeParse(
+    (await context.transaction.query<{value:unknown}>('SELECT application_native_query_catalog($1,$2) AS value',[context.workspaceId,type])).rows[0]?.value)
+  context.assertLive?.()
+  const base=canonicalNativeResourceDefinitions().find(definition=>definition.typeKey===type)
+  if(!entry.success||!base)throw unavailable()
+  const custom:ApplicationResourceDefinition['fields']=entry.data.customFields.map(raw=>{
+    const definition=parseApplicationCrmFieldDefinition(raw)
+    return {key:`custom.${definition.fieldKey}`,label:definition.label,kind:'crm',required:definition.isRequired,
+      definition:definition as unknown as Record<string,import('@use-brian/shared').ApplicationJson>}
+  })
+  const fields=[...base.fields.filter(field=>entry.data.fields.includes(field.key)&&!custom.some(configured=>configured.key===field.key)),...custom]
+  return {...base,fields,schemaVersion:`${entry.data.schemaVersion??'1'}:${createHash('sha256').update(JSON.stringify(fields)).digest('hex')}`}
+}
+
 export async function queryCanonicalNativeRecords(context:CanonicalGenericReadContext,definition:ApplicationResourceDefinition,input:ApplicationQuery) {
+  return runCanonicalNativeQueryFrame(context,()=>queryNativeRecordsInFrame(context,definition,input))
+}
+async function queryNativeRecordsInFrame(context:CanonicalGenericReadContext,definition:ApplicationResourceDefinition,input:ApplicationQuery) {
   if(definition.origin.kind!=='native'||definition.origin.moduleKey!=='native'||!['company','person','deal'].includes(definition.typeKey))throw unavailable()
   const consumed=[...new Set([...input.filters.map(item=>item.field),...input.sort.map(item=>item.field),...input.aggregate.map(item=>item.field)])].sort()
   const output=input.fields??definition.fields.map(field=>field.key),fields=[...new Set([...output,...consumed])].sort()

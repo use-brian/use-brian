@@ -10,7 +10,7 @@ import { createTask } from '../db/tasks.js'
 import { publishTaskLifecycle } from '../task-event-fanout.js'
 import { getApplicationExecutionBinding } from './execution-context.js'
 import { canonicalGenericReadContext, readCanonicalNativeRecord } from './field-evidence.js'
-import { queryCanonicalNativeRecords } from './native-reader.js'
+import { queryCanonicalNativeRecords, readCanonicalNativeQueryDefinition } from './native-reader.js'
 import { canonicalNativeResourceDefinitions } from './native-resources.js'
 import { boundScopeSources } from '@use-brian/core'
 import { readCurrentScopeSources } from '../db/derived-scope-store.js'
@@ -23,7 +23,8 @@ const creations = new WeakMap<Context, { type: 'company' | 'person' | 'deal' | '
 const definitions=canonicalNativeResourceDefinitions()
 async function resources(context: Context, queryType?: string): Promise<ApplicationResourceDefinition[]> {
   const app = getApplicationExecutionBinding(context.execution)
-  const entries:Array<{typeKey:string;fields:string[];customFields:Record<string,unknown>[];schemaVersion?:string}> = queryType ? (await context.transaction.query<{value:{typeKey:string;fields:string[];customFields:Record<string,unknown>[]}}>('SELECT application_native_query_catalog($1,$2) AS value',[context.execution.security.access.workspaceId,queryType])).rows.flatMap(row=>row.value?[row.value]:[]) : app ? (await context.transaction.query<{ value: { typeKey: string; fields: string[]; customFields: Record<string, unknown>[] } }>('SELECT application_native_catalog() AS value')).rows.map(row => row.value)
+  if(queryType)return [await readCanonicalNativeQueryDefinition(canonicalGenericReadContext(context),queryType)]
+  const entries:Array<{typeKey:string;fields:string[];customFields:Record<string,unknown>[];schemaVersion?:string}> = app ? (await context.transaction.query<{ value: { typeKey: string; fields: string[]; customFields: Record<string, unknown>[] } }>('SELECT application_native_catalog() AS value')).rows.map(row => row.value)
     : definitions.map(definition => ({ typeKey: definition.typeKey, fields: definition.fields.map(field => field.key), customFields: [] as Record<string, unknown>[] }))
   if (!app && !queryType) {
     const custom = await context.transaction.query<{ definition: Record<string, unknown> }>(`SELECT jsonb_build_object('id',id,'entityKind',entity_kind,'fieldKey',field_key,

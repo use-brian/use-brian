@@ -12,6 +12,7 @@ import type { TaskStore } from '../../tasks/types.js'
 import type { WorkflowRunStore } from '../../workflow/types.js'
 import type { WorkspaceDirectoryStore } from '../../workspace/types.js'
 import { buildPayload, type BindingDeps } from '../bindings.js'
+import { bindScopeSources,boundScopeSources } from '../../security/source-evidence.js'
 import { viewPayloadSchema } from '../a2ui.js'
 
 const WORKSPACE_ID = '00000000-0000-0000-0000-000000000001'
@@ -207,6 +208,31 @@ function deps(): BindingDeps {
 }
 
 describe('[COMP:views/bindings] buildPayload', () => {
+  it('splits 200 mixed deal relation labels into bounded batches without losing references',async()=>{
+    const directory=deps(),base=(await directory.crmStore.listDeals({workspaceId:WORKSPACE_ID,userId:USER_ID,assistantId:'',assistantKind:'primary'},{}))[0],batches:number[]=[]
+    directory.crmStore.listDeals=async()=>Array.from({length:100},(_,index)=>({...base,id:`deal-${index}`,companyId:`company-${index}`,contactId:`contact-${index}`}))
+    directory.crmStore.batchLabels=async(_ctx,requests)=>{
+      const refs=requests.flatMap(request=>request.ids.map(id=>[`${request.entity}:${id}`,`Fictional ${id}`] as const));batches.push(refs.length)
+      expect(refs.length).toBeLessThanOrEqual(100);return new Map(refs)
+    }
+    const payload=await buildPayload({entity:'deals',viewType:'table',columns:['company','contact']},directory)
+    expect(batches).toEqual([100,100]);expect(payload.root.type).toBe('table')
+    if(payload.root.type!=='table')throw new Error('expected table')
+    expect(payload.root.rows).toHaveLength(100)
+    expect(payload.root.rows[99].company).toMatchObject({label:'Fictional company-99'});expect(payload.root.rows[99].contact).toMatchObject({label:'Fictional contact-99'})
+  })
+  it.each(['contacts/table','deals/table','deals/board'] as const)('retains canonical label evidence through the actual %s payload adapter',async mode=>{
+    const source={workspaceId:WORKSPACE_ID,userId:null,assistantId:null,resourceKind:'application_field' as const,
+      resourceId:'00000000-0000-0000-0000-000000000005',version:'label-observation-v1',sensitivity:'internal' as const,compartments:[],projectIds:[]}
+    const directory=deps(),labels=bindScopeSources(new Map([['company:company-ref','Fictional label']]),[source])
+    directory.crmStore.batchLabels=async()=>labels
+    directory.crmStore.listContacts=async()=>[{id:'contact-ref',entityId:'contact-ref',workspaceId:WORKSPACE_ID,name:'Fictional contact',email:null,phone:null,companyId:'company-ref',tags:[],externalRef:{},aliases:[],createdAt:new Date(),updatedAt:new Date()}]
+    const base=await directory.crmStore.listDeals({workspaceId:WORKSPACE_ID,userId:USER_ID,assistantId:'',assistantKind:'primary'},{});
+    directory.crmStore.listDeals=async()=>base.map(row=>({...row,companyId:'company-ref'}))
+    const payload=await buildPayload(mode==='contacts/table'?{entity:'contacts',viewType:'table',columns:['name','company']}:mode==='deals/table'?{entity:'deals',viewType:'table',columns:['name','company']}:{entity:'deals',viewType:'board',groupBy:'stage',columns:['name','company']},directory)
+    expect(boundScopeSources(payload)).toEqual([source]);expect(boundScopeSources(payload.root)).toEqual([source])
+  })
+
   it('produces a valid A2UI v0.8 envelope for tasks/table', async () => {
     const payload = await buildPayload({ entity: 'tasks', viewType: 'table' }, deps())
     expect(payload.a2ui).toBe('0.8')

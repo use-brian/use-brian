@@ -18,9 +18,10 @@ import { loadApplicationCredentialStateSystem } from '../auth-store.js'
 import { authenticateApplicationOAuth } from '../oauth-auth.js'
 import { getApplicationExecutionBinding, resolveApplicationExecutionContext,runWithApplicationReadTransaction } from '../execution-context.js'
 import { ApplicationPlatformService } from '../service.js'
+import { canonicalGenericReadContext } from '../field-evidence.js'
 import { createCanonicalNativeApplicationModule } from '../native-adapters.js'
 import { createCanonicalGenericApplicationModule } from '../generic-adapter.js'
-import { createCompany,getCompanyById,getContactById,getDealById } from '../../db/crm.js'
+import { batchLabels,createCompany,getCompanyById,getContactById,getDealById } from '../../db/crm.js'
 import { createEntity } from '../../db/entities-store.js'
 import { updateCrmCustomFields } from '../../db/crm-r2.js'
 import { applicationPlatformRoutes } from '../../routes/application-platform.js'
@@ -144,6 +145,104 @@ describe('[COMP:api/application-auth] database application projections and live 
     expect(user).not.toBeNull()
     return { authentication: { user: user! }, appId, grantId, parentId, userId, token: `oat_${id}_${secret}` }
   }
+  function legacyLabelsService() {
+    const base=createCanonicalNativeApplicationModule()
+    return new ApplicationPlatformService([{...base,application:{...base.application!,queries:[...base.application!.queries,'legacy_labels','label_snapshot']},queries:{...base.queries,
+      legacy_labels:{input:z.object({entity:z.enum(['company','contact','deal']),ids:z.array(z.string().uuid()),narrow:z.enum(['none','public','shared','department']).default('none'),badCeiling:z.enum(['none','nonarray','invalidscope']).default('none')}),authorize:async()=>{},execute:async({execution,transaction},raw)=>{
+        const input=raw as {entity:'company'|'contact'|'deal';ids:string[];narrow:string;badCeiling:string},access=execution.security.access
+        if(input.badCeiling!=='none')await transaction.query("SELECT set_config('app.native_query_data_ceilings',$1,true)",[input.badCeiling==='nonarray'?'{}':JSON.stringify([{workspaceId,typeKey:input.entity==='contact'?'person':input.entity,ids:null,tier:99,compartments:null,projectIds:null,departmentRead:null,privateUserId:access.userId,assistants:null}])])
+        const before=(await transaction.query("SELECT current_setting('app.native_query_data_ceilings',true) AS value")).rows[0].value??''
+        const result=await batchLabels({...access,...(input.narrow==='public'?{clearance:'public' as const}:input.narrow==='shared'?{sharedAudience:true}:input.narrow==='department'&&access.departmentRead?{departmentRead:{...access.departmentRead,base:'public' as const,departments:{},cap:'public' as const}}:{})},[{entity:input.entity,ids:input.ids}])
+        expect((await transaction.query("SELECT current_setting('app.native_query_data_ceilings',true) AS value")).rows[0].value??'').toBe(before)
+        return result
+      }},label_snapshot:{input:z.object({id:z.string().uuid(),version:z.string()}),authorize:async()=>{},execute:async({transaction},raw)=>{
+        const input=raw as {id:string;version:string};return(await transaction.query('SELECT read_admitted_application_field_snapshot($1,$2,$3) AS value',[workspaceId,input.id,input.version])).rows[0].value
+      }}}}])
+  }
+  it.each((['member','external_user','service'] as const).flatMap(kind=>(['company','person','deal'] as const).map(type=>({kind,type}))))('Q02/Q03 canonicalizes actual $kind legacy $type label queries and consumed fields',async({kind,type})=>{
+    const value=await createEntity({workspaceId,kind:type,displayName:'Fictional scoped label',attributes:{},createdByUserId:ownerId,source:'user'})
+    const entity=type==='person'?'contact':type,fields=type==='deal'?[]:['name'],fixture=await provision(kind,fields,undefined,false,value.id,[],[value.id],undefined,'read_write',[],type)
+    const unreleased=await createEntity({workspaceId,kind:type,displayName:'Fictional unreleased label',attributes:{},createdByUserId:ownerId,source:'user'})
+    const dispatcher=legacyLabelsService(),args={entity,ids:[value.id,unreleased.id]},result=await dispatcher.query(await resolveApplicationExecutionContext(fixture.authentication),'native','legacy_labels',args) as Map<string,string>
+    expect(result.get(`${entity}:${value.id}`)).toBe(type==='deal'?`Deal #${value.id.slice(0,8)}`:'Fictional scoped label')
+    expect(result.size).toBe(1)
+    expect(boundScopeSources(result).some(source=>source.resourceKind==='application_field')).toBe(true)
+    const narrowed=dispatcher.query(await resolveApplicationExecutionContext(fixture.authentication),'native','legacy_labels',{...args,narrow:'public'})
+    if(kind==='member')await expect(narrowed).rejects.toMatchObject({code:'access_unavailable'})
+    else expect(await narrowed).toEqual(new Map())
+    if(type!=='deal') {
+      const hidden=await provision(kind,[],undefined,false,value.id,[],[value.id],undefined,'read_write',[],type)
+      await expect(dispatcher.query(await resolveApplicationExecutionContext(hidden.authentication),'native','legacy_labels',args)).rejects.toMatchObject({code:'access_unavailable'})
+    }
+  })
+  it('Q03 refuses a canonical query context on a physical transaction other than its genuine host',async()=>{
+    const value=await createEntity({workspaceId,kind:'company',displayName:'Fictional exact query host',attributes:{},createdByUserId:ownerId,source:'user'})
+    const fixture=await provision('service',['name'],undefined,false,value.id),base=createCanonicalNativeApplicationModule()
+    const dispatcher=new ApplicationPlatformService([{...base,application:{...base.application!,queries:[...base.application!.queries,'exact_query_host']},queries:{...base.queries,exact_query_host:{input:z.object({}).strict(),authorize:async()=>{},execute:async context=>{
+      expect(canonicalGenericReadContext(context).transaction).toBe(context.transaction)
+      const other=await getAppPool().connect()
+      try{expect(()=>canonicalGenericReadContext({...context,transaction:other})).toThrow(expect.objectContaining({code:'access_unavailable'}))}
+      finally{other.release()}
+      return []
+    }}}}])
+    await dispatcher.query(await resolveApplicationExecutionContext(fixture.authentication),'native','exact_query_host',{})
+  })
+  it('Q02/Q03 isolates parallel native query data restrictions on one genuine application transaction',async()=>{
+    const first=await createEntity({workspaceId,kind:'company',displayName:'Fictional first parallel label',attributes:{},createdByUserId:ownerId,source:'user'})
+    const second=await createEntity({workspaceId,kind:'company',displayName:'Fictional second parallel label',attributes:{},createdByUserId:ownerId,source:'user'})
+    const fixture=await provision('service',['name'],undefined,false,first.id,[],[first.id],{kind:'ids',ids:[first.id,second.id]})
+    const base=createCanonicalNativeApplicationModule(),query=base.queries.query
+    const dispatcher=new ApplicationPlatformService([{...base,application:{...base.application!,queries:[...base.application!.queries,'parallel_labels']},queries:{...base.queries,parallel_labels:{input:z.object({}).strict(),authorize:async()=>{},execute:async context=>{
+      const results=await Promise.all([
+        batchLabels(context.execution.security.access,[{entity:'company',ids:[first.id]}]),
+        batchLabels(context.execution.security.access,[{entity:'company',ids:[second.id]}]),
+        query.execute(context,{type:'company',query:{fields:['name'],filters:[],sort:[],aggregate:[],limit:50}}),
+      ])
+      expect([...results[0] as Map<string,string>]).toEqual([[`company:${first.id}`,first.displayName]])
+      expect([...results[1] as Map<string,string>]).toEqual([[`company:${second.id}`,second.displayName]])
+      expect((results[2] as {records:Array<{ref:{id:string}}>}).records.map(row=>row.ref.id).sort()).toEqual([first.id,second.id].sort())
+      expect((await context.transaction.query("SELECT current_setting('app.native_query_data_ceilings',true) AS value")).rows[0].value??'').toBe('')
+      return results[0]
+    }}}}])
+    await dispatcher.query(await resolveApplicationExecutionContext(fixture.authentication),'native','parallel_labels',{})
+  })
+  it.each(['nonarray','invalidscope'])('Q02/Q07 holds a malformed private native query ceiling: %s',async badCeiling=>{
+    const value=await createEntity({workspaceId,kind:'company',displayName:'Fictional restricted query',attributes:{},createdByUserId:ownerId,source:'user'})
+    const fixture=await provision('service',['name'],undefined,false,value.id)
+    await expect(legacyLabelsService().query(await resolveApplicationExecutionContext(fixture.authentication),'native','legacy_labels',{entity:'company',ids:[value.id],badCeiling})).rejects.toMatchObject({code:'access_unavailable'})
+  })
+  it('Q02 keeps an independently authorized legacy label reader current after another reader contracts',async()=>{
+    const value=await createEntity({workspaceId,kind:'company',displayName:'Fictional independent label',attributes:{domain:'fictional.example'},createdByUserId:ownerId,source:'user'})
+    const a=await provision('service',['name','domain'],undefined,false,value.id),b=await provision('service',['name'],undefined,false,value.id),dispatcher=legacyLabelsService()
+    const first=await dispatcher.query(await resolveApplicationExecutionContext(a.authentication),'native','legacy_labels',{entity:'company',ids:[value.id]}) as Map<string,string>
+    const source=boundScopeSources(first)[0]
+    await pool.query("UPDATE application_access_grants SET read_fields=ARRAY['domain'] WHERE id=$1",[a.grantId])
+    expect(await dispatcher.query(await resolveApplicationExecutionContext(b.authentication),'native','label_snapshot',{id:source.resourceId,version:source.version})).toMatchObject({held:false})
+    expect((await dispatcher.query(await resolveApplicationExecutionContext(b.authentication),'native','legacy_labels',{entity:'company',ids:[value.id]}) as Map<string,string>).get(`company:${value.id}`)).toBe('Fictional independent label')
+    await expect(dispatcher.query(await resolveApplicationExecutionContext(a.authentication),'native','legacy_labels',{entity:'company',ids:[value.id]})).rejects.toMatchObject({code:'access_unavailable'})
+  })
+  it('Q02/Q03 binds empty legacy label evidence to requested IDs without consuming unrelated names',async()=>{
+    const absent=randomUUID(),value=await createEntity({workspaceId,kind:'company',displayName:'Fictional requested label',attributes:{},createdByUserId:ownerId,source:'user'})
+    const fixture=await provision('member',['name'],undefined,false,value.id,[],[value.id],{kind:'ids',ids:[value.id,absent]})
+    const dispatcher=legacyLabelsService(),execution=await resolveApplicationExecutionContext(fixture.authentication)
+    const before=await dispatcher.query(execution,'native','legacy_labels',{entity:'company',ids:[absent]}) as Map<string,string>
+    expect(before.size).toBe(0);const sources=boundScopeSources(before);expect(sources.length).toBeGreaterThan(0)
+    const domain=sources[0]
+    await pool.query("INSERT INTO entities SELECT (jsonb_populate_record(NULL::entities,to_jsonb(e)||jsonb_build_object('id',$2::uuid))).* FROM entities e WHERE e.id=$1",[value.id,absent])
+    expect(await dispatcher.query(await resolveApplicationExecutionContext(fixture.authentication),'native','label_snapshot',{id:domain.resourceId,version:domain.version})).toMatchObject({held:true})
+  })
+  it('Q02/Q08 keeps legacy label shared-audience and Department caps inside genuine native owner-member application queries',async()=>{
+    const previous=(await pool.query('SELECT department_read_v2 AS value FROM workspaces WHERE id=$1',[workspaceId])).rows[0].value
+    await pool.query('UPDATE workspaces SET department_read_v2=true WHERE id=$1',[workspaceId])
+    try {
+      const value=await createEntity({workspaceId,kind:'company',displayName:'Fictional private label',attributes:{},userId:ownerId,createdByUserId:ownerId,source:'user'})
+      const fixture=await provision('member',['name'],undefined,false,value.id,[],[value.id],undefined,'read_write',[],'company',ownerId),dispatcher=legacyLabelsService()
+      for(const narrow of ['none','shared','department']) {
+        const result=await dispatcher.query(await resolveApplicationExecutionContext(fixture.authentication),'native','legacy_labels',{entity:'company',ids:[value.id],narrow}) as Map<string,string>
+        expect(result.size).toBe(narrow==='none'?1:0)
+      }
+    }finally{await pool.query('UPDATE workspaces SET department_read_v2=$2 WHERE id=$1',[workspaceId,previous])}
+  })
   function nativeQuerySnapshots() {
     const base = createCanonicalNativeApplicationModule()
     return new ApplicationPlatformService([{

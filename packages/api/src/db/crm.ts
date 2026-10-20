@@ -10,10 +10,10 @@ import type {
   Sensitivity,
   StableExternalIdentity,
 } from '@use-brian/core'
-import { bindScopeSources, DEAL_STAGES, validApplicationDate, decodeCrmAmount, crmAmountSchema, maxSensitivity, unionScopeRequirements } from '@use-brian/core'
+import { bindScopeSources, boundScopeSources, DEAL_STAGES, validApplicationDate, decodeCrmAmount, crmAmountSchema, maxSensitivity, unionScopeRequirements } from '@use-brian/core'
 import type pg from 'pg'
 import { z } from 'zod'
-import { readLegacyCanonicalCrmPoint } from './crm-reader.js'
+import { queryLegacyCanonicalCrmBatch,readLegacyCanonicalCrmPoint } from './crm-reader.js'
 import { canonicalNativeAmountEncoding } from '../application-platform/field-evidence.js'
 import { ApplicationPlatformError,applicationJsonSchema } from '@use-brian/shared'
 import { assertExecutionResourceScope, buildAccessPredicate, buildCurrentMemberSourcePredicate, mutationActorAccess } from './access-predicate.js'
@@ -1169,28 +1169,17 @@ export async function batchLabels(
   ctx: AccessContext,
   requests: { entity: 'company' | 'contact' | 'deal'; ids: string[] }[],
 ): Promise<Map<string, string>> {
-  const out = new Map<string, string>()
-  await Promise.all(requests.map((req) => resolveLabels(ctx, req.entity, req.ids, out)))
-  return out
-}
-
-async function resolveLabels(
-  ctx: AccessContext,
-  entity: 'company' | 'contact' | 'deal',
-  ids: string[],
-  out: Map<string, string>,
-): Promise<void> {
-  if (ids.length === 0) return
-  const kind = entity === 'company' ? 'company' : entity === 'contact' ? 'person' : 'deal'
-  const ap = buildAccessPredicate(ctx, { alias: 'e', startIdx: 1 })
-  const result = await queryGated<{ id: string; name: string }>(
-    ctx,
-    `SELECT e.id, e.display_name AS name FROM entities e
-      WHERE ${ap.sql} AND e.kind = $${ap.nextIdx}
-        AND e.valid_to IS NULL AND e.id = ANY($${ap.nextIdx + 1}::uuid[])`,
-    [...ap.params, kind, ids],
-  )
-  for (const row of result.rows) {
-    out.set(`${entity}:${row.id}`, entity === 'deal' ? `Deal #${row.id.slice(0, 8)}` : row.name)
+  const parsed=z.array(z.object({entity:z.enum(['company','contact','deal']),ids:z.array(z.string().uuid()).max(100)}).strict()).max(100).safeParse(requests)
+  if(!parsed.success)throw new ApplicationPlatformError('invalid_value','The declared label batch is invalid.')
+  const groups=new Map<'company'|'contact'|'deal',Set<string>>()
+  for(const request of parsed.data){const ids=groups.get(request.entity)??new Set<string>();for(const id of request.ids)ids.add(id);groups.set(request.entity,ids)}
+  if([...groups.values()].reduce((count,ids)=>count+ids.size,0)>100)throw new ApplicationPlatformError('invalid_value','The batch is too large.')
+  const out=new Map<string,string>(),entries=[...groups].filter(([,ids])=>ids.size)
+  if(!entries.length)return out
+  const results=await queryLegacyCanonicalCrmBatch(ctx,entries.map(([entity,ids])=>({type:entity==='contact'?'person':entity,
+    input:{fields:entity==='deal'?[]:['name'],filters:[],sort:[],aggregate:[],limit:100},ids:[...ids]})))
+  for(const [index,[entity]]of entries.entries())for(const row of results[index].records) {
+    out.set(`${entity}:${row.ref.id}`,entity==='deal'?`Deal #${row.ref.id.slice(0,8)}`:z.string().parse(row.values.name))
   }
+  return bindScopeSources(out,boundScopeSources(results))
 }

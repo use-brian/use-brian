@@ -13,7 +13,7 @@ import { createCrmTools, executionToolContext, boundScopeSources, type Applicati
 import { ApplicationPlatformError,type ApplicationJson } from '@use-brian/shared'
 import { applyRLSGucs, getAppPool, getPool } from '../../db/client.js'
 import { bindTaskClosedHook, createTask, getTaskById, resolveTaskById, updateTask } from '../../db/tasks.js'
-import { createCompany,createContact,createDeal,getCompanyById,getContactById,getDealById,listDeals,updateCompany,updateContact,updateDeal,setDealStage } from '../../db/crm.js'
+import { batchLabels,createCompany,createContact,createDeal,getCompanyById,getContactById,getDealById,listDeals,updateCompany,updateContact,updateDeal,setDealStage } from '../../db/crm.js'
 import { createCrmPipeline,createCrmStage,createCrmFieldDefinition,archiveCrmFieldDefinition,updateCrmCustomFields,setCrmArchived,setCrmDealPipelineStage,getCrmConfig,addCrmDealParticipant,removeCrmDealParticipant } from '../../db/crm-r2.js'
 import { createEntity, supersedeEntity, updateEntity } from '../../db/entities-store.js'
 import { createDbCrmStore } from '../../db/crm-store.js'
@@ -66,6 +66,15 @@ describe('[COMP:api/application-records] canonical native operation composition'
       ownership: { kind: 'workspace', workspaceId }, lifecycle: { sessionId: randomUUID(), sessionPersisted: false,
         channelId: 'native-operation-fixture', channelType: 'test', abortSignal: new AbortController().signal } })).executionContext
   }
+  it('Q02/Q08 preserves mixed native member labels, canonical evidence, duplicate groups and the bounded batch limit',async()=>{
+    const company=await createCompany(userId,{workspaceId,name:'Fictional native label company',access}),contact=await createContact(userId,{workspaceId,name:'Fictional native label contact',access}),deal=await createDeal(userId,{workspaceId,access})
+    const labels=await batchLabels(access,[{entity:'company',ids:[company.id,company.id]},{entity:'company',ids:[company.id]},{entity:'contact',ids:[contact.id]},{entity:'deal',ids:[deal.id]},{entity:'deal',ids:[]}])
+    expect([...labels]).toEqual([[`company:${company.id}`,company.name],[`contact:${contact.id}`,contact.name],[`deal:${deal.id}`,`Deal #${deal.id.slice(0,8)}`]])
+    expect(boundScopeSources(labels).some(source=>source.resourceKind==='application_field')).toBe(true)
+    const empty=await batchLabels(access,[{entity:'company',ids:[randomUUID()]}]);expect(empty.size).toBe(0);expect(boundScopeSources(empty).length).toBeGreaterThan(0)
+    await expect(batchLabels(access,[{entity:'company',ids:Array.from({length:100},()=>randomUUID())},{entity:'contact',ids:[randomUUID()]}])).rejects.toMatchObject({code:'invalid_value'})
+    await expect(batchLabels(access,[{entity:'company',ids:Array.from({length:101},()=>randomUUID())}])).rejects.toMatchObject({code:'invalid_value'})
+  })
   it.each([{type:'company',field:'domain',canonical:'fictional.example'},{type:'person',field:'email',canonical:'fictional@example.com'}] as const)('Q02 preserves the canonical $field fallback and field evidence through legacy get',async({type,field,canonical})=>{
     const value=await createEntity({workspaceId,kind:type,canonicalId:canonical,displayName:'Fictional native point fallback',attributes:{},createdByUserId:userId,source:'user'})
     const record=type==='company'?await getCompanyById(access,value.id):await getContactById(access,value.id)

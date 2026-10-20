@@ -524,7 +524,7 @@ async function buildContactsTable(
       ])
     }
   }
-  return {
+  return bindScopeSources({
     type: 'table',
     columns: columns.map((field) => ({
       field,
@@ -537,7 +537,7 @@ async function buildContactsTable(
       return out
     }),
     rowAction: { id: 'open-entity', params: { entity: 'contacts' } },
-  }
+  },[...boundScopeSources(rows),...rows.flatMap(row=>boundScopeSources(row)),...boundScopeSources(labelMap)])
 }
 
 // ── Companies bindings ────────────────────────────────────────────────
@@ -633,7 +633,16 @@ async function resolveDealLabels(
     if (ids.length > 0) requests.push({ entity: 'contact', ids })
   }
   if (requests.length === 0) return new Map()
-  return deps.crmStore.batchLabels(bindingCtx(deps), requests)
+  const refs=requests.flatMap(request=>request.ids.map(id=>({entity:request.entity,id}))),labels=new Map<string,string>()
+  const sources:import('../security/derived-scope.js').ScopeSource[]=[]
+  for(let offset=0;offset<refs.length;offset+=100) {
+    const batch=refs.slice(offset,offset+100),groups:typeof requests=[]
+    for(const entity of ['company','contact'] as const){const ids=batch.filter(ref=>ref.entity===entity).map(ref=>ref.id);if(ids.length)groups.push({entity,ids})}
+    const result=await deps.crmStore.batchLabels(bindingCtx(deps),groups)
+    for(const [key,label]of result)labels.set(key,label)
+    sources.push(...boundScopeSources(result))
+  }
+  return bindScopeSources(labels,sources)
 }
 
 async function buildDealsTable(
@@ -647,7 +656,7 @@ async function buildDealsTable(
     companyId: config.filters?.companyId,
   })
   const labelMap = await resolveDealLabels(rows, columns, deps)
-  return {
+  return bindScopeSources({
     type: 'table',
     columns: columns.map((field) => ({
       field,
@@ -657,7 +666,7 @@ async function buildDealsTable(
     })),
     rows: rows.map((r) => buildDealRow(r, columns, labelMap)),
     rowAction: { id: 'open-entity', params: { entity: 'deals' } },
-  }
+  },[...boundScopeSources(rows),...rows.flatMap(row=>boundScopeSources(row)),...boundScopeSources(labelMap)])
 }
 
 async function buildDealsBoard(
@@ -684,7 +693,7 @@ async function buildDealsBoard(
     title: s,
     cards: cardsByStage[s],
   }))
-  return {
+  return bindScopeSources({
     type: 'board',
     groupBy: 'stage',
     columns: boardColumns,
@@ -696,7 +705,7 @@ async function buildDealsBoard(
         { type: 'text', text: '{{amount}}', variant: 'caption' },
       ],
     },
-  }
+  },[...boundScopeSources(rows),...rows.flatMap(row=>boundScopeSources(row)),...boundScopeSources(labelMap)])
 }
 
 // ── Workflow runs bindings ────────────────────────────────────────────

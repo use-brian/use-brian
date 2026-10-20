@@ -6,7 +6,7 @@ import type { PoolClient } from 'pg'
 import { bindScopeSources, boundScopeSources, resourceScopeKey, validateApplicationValues, type ApplicationOperationContext, type ScopeSource } from '@use-brian/core'
 import { ApplicationPlatformError, applicationJsonSchema, type ApplicationRecordProjection,type ApplicationResourceDefinition } from '@use-brian/shared'
 import { getPool } from '../db/client.js'
-import { getApplicationExecutionBinding } from './execution-context.js'
+import { currentApplicationReadTransaction,getApplicationExecutionBinding } from './execution-context.js'
 
 const sourceSchema = z.object({ workspaceId: z.string().uuid(), userId: z.string().uuid().nullable(), assistantId: z.string().uuid().nullable(),
   resourceKind: z.enum(['application_field','external_source']), resourceId: z.string().uuid(), version: z.string().min(1),
@@ -20,10 +20,13 @@ export interface CanonicalGenericReadContext {
   transaction: PoolClient
   workspaceId: string
   applicationFingerprint?: string
+  /** Private live-host check; never serialized as resource metadata or authority. */
+  assertLive?:()=>void
 }
 export function canonicalGenericReadContext(context: ApplicationOperationContext<PoolClient>): CanonicalGenericReadContext {
-  const application = getApplicationExecutionBinding(context.execution)
-  return { transaction: context.transaction, workspaceId: context.execution.security.access.workspaceId,
+  const application = getApplicationExecutionBinding(context.execution),bound=currentApplicationReadTransaction(context.execution.security.access)
+  if(bound&&bound.client!==context.transaction)throw new ApplicationPlatformError('access_unavailable','The transaction is unavailable.')
+  return { ...(bound?{assertLive:bound.assertLive}:{}),transaction: context.transaction, workspaceId: context.execution.security.access.workspaceId,
     ...(application ? { applicationFingerprint: application.state.fingerprint } : {}) }
 }
 
