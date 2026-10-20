@@ -520,6 +520,7 @@ import { type GoalDeliver } from './goals/writeback.js'
 import {
   tryClaimGoalForTick,
   transitionRunningGoalStatusSystem,
+  claimGoalRollupTerminalSystem,
   getGoalByIdSystem,
   updateGoalSystem,
   getGoalAwaitingEventSystem,
@@ -1894,6 +1895,7 @@ export async function bootOpenApi(opts: BootOpenApiOptions): Promise<BootResult>
   // metering).
   const goalRollup = createGoalRollupRunner({
     goalStore,
+    claimTerminal: claimGoalRollupTerminalSystem,
     deliverGoalDone: (goal) => deliverGoalTerminal(goal, 'done', null),
   })
   // Task autopilot v2 (task-goal-autopilot.md §8): a top-level task create no

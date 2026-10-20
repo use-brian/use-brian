@@ -441,6 +441,49 @@ export async function transitionRunningGoalStatusSystem(
   return transitioned
 }
 
+/** Claim one structural completion without reviving a cancelled/edited Goal.
+ * This compares evaluated material; it is not current source authorization. */
+export async function claimGoalRollupTerminalSystem(goal: GoalRecord): Promise<boolean> {
+  if (!goal.confirmedAt) return false
+  const material = {
+    workspaceId: goal.workspaceId,
+    createdByUserId: goal.createdByUserId,
+    parentGoalId: goal.parentGoalId,
+    recipeId: goal.recipeId,
+    host: goal.host,
+    outcome: goal.outcome,
+    doneWhen: goal.doneWhen,
+    means: goal.means,
+    budget: goal.budget,
+    policy: goal.policy,
+    originSessionId: goal.originSessionId,
+    contextGroupId: goal.contextGroupId,
+    contextProjectId: goal.contextProjectId,
+    authoringAuthority: goal.authoringAuthority ?? null,
+    brief: goal.brief ?? null,
+    completionClaim: goal.completionClaim ?? null,
+  }
+  const result = await query<{ workspaceId: string }>(
+    `UPDATE goals SET status='done',blocker_reason=NULL,updated_at=now()
+      WHERE id=$1 AND workspace_id=$2 AND status='active' AND confirmed_at IS NOT NULL
+        AND jsonb_build_object(
+          'workspaceId',workspace_id,'createdByUserId',created_by_user_id,
+          'parentGoalId',parent_goal_id,'recipeId',recipe_id,
+          'host',CASE WHEN host_type IS NULL THEN NULL ELSE jsonb_build_object('type',host_type,'id',host_id) END,
+          'outcome',outcome,'doneWhen',done_when,'means',COALESCE(means,'{}'::jsonb),
+          'budget',COALESCE(budget,'{}'::jsonb),'policy',COALESCE(policy,'{}'::jsonb),
+          'originSessionId',origin_session_id,'contextGroupId',context_group_id,
+          'contextProjectId',context_project_id,'authoringAuthority',authoring_authority,
+          'brief',brief,'completionClaim',completion_claim
+        )=$3::jsonb
+      RETURNING workspace_id AS "workspaceId"`,
+    [goal.id,goal.workspaceId,JSON.stringify(material)],
+  )
+  const claimed = (result.rowCount ?? 0) === 1
+  if (claimed) notifyGoalChange(result.rows[0].workspaceId,'update',goal.id)
+  return claimed
+}
+
 /** Update a goal's curated fields and/or confirm it (autopilot §4). `confirm:
  *  true` sets `confirmed_at = now()` (arming a draft); `outcome` / `doneWhen` /
  *  `brief` let the creator amend the drafted detail (§8 triage edits); `means`

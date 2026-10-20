@@ -40,6 +40,8 @@ import { buildGoalResolvers, finishGoal } from './writeback.js'
 
 export type GoalRollupDeps = {
   goalStore: GoalStore
+  /** Atomic active/configuration ownership, not a source-access allow. */
+  claimTerminal: (evaluated: GoalRecord) => Promise<boolean>
   /** Deliver the terminal message to the goal's creator (no silent
    *  termination, §7). Best-effort; the runner swallows its rejection so a
    *  delivery failure never wedges the rollup. Wired in boot to the workspace
@@ -58,19 +60,34 @@ export type GoalRollupRunner = {
 
 export function createGoalRollupRunner(deps: GoalRollupDeps): GoalRollupRunner {
   const { goalStore, deliverGoalDone } = deps
+  const evaluatedGoals = new WeakMap<GoalRecord, GoalRecord>()
 
   const rollupDeps: RollupDeps = {
     // Skip DRAFT (unconfirmed) goals — an auto-drafted goal is inert until the
     // creator confirms it (autopilot §4), so a guessed done_when never
     // auto-completes a task structurally.
     goalsForHost: async (host) =>
-      (await goalStore.listByHostSystem(host)).filter((g) => g.confirmedAt !== null),
-    resolversFor: (goal) => buildGoalResolvers(goal, goalStore),
+      (await goalStore.listByHostSystem(host)).filter((g) => g.confirmedAt !== null)
+        .map((goal) => structuredClone(goal)),
+    resolversFor: (goal) => {
+      // Retain the configuration actually evaluated, not a mutable alias that
+      // could be widened while a resolver awaits. This is not an allow cache.
+      const evaluated = structuredClone(goal)
+      evaluatedGoals.set(goal, evaluated)
+      return buildGoalResolvers(evaluated, goalStore)
+    },
     // The rollup only ever completes a goal (it never blocks one), so the
     // terminal is always `done`; `finishGoal` does the status + host write-back
     // + delivery, shared with the acting loop.
-    complete: (goal) =>
-      finishGoal(goal, 'done', null, { goalStore, deliver: (g) => deliverGoalDone(g) }),
+    complete: (goal) => {
+      const evaluated = evaluatedGoals.get(goal)
+      if (!evaluated) throw new Error('Goal acceptance snapshot is unavailable.')
+      return finishGoal(evaluated, 'done', null, {
+        goalStore,
+        claimTerminal: () => deps.claimTerminal(evaluated),
+        deliver: (g) => deliverGoalDone(g),
+      })
+    },
   }
 
   const rollup = (host: GoalHostRef) => rollupHost(host, rollupDeps)

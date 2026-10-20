@@ -463,6 +463,7 @@ describeIf('[COMP:goals/rollup-runner] the runner completes a met goal and deliv
     const delivered: string[] = []
     const runner = runnerMod.createGoalRollupRunner({
       goalStore: goalStoreMod.createDbGoalStore(),
+      claimTerminal: goals.claimGoalRollupTerminalSystem,
       deliverGoalDone: async (g) => {
         delivered.push(g.id)
       },
