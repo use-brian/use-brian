@@ -5,10 +5,11 @@ import { query, queryWithRLS, runWithAgentAccess } from '../db/client.js'
 import { findAssistantById } from '../db/users.js'
 import { resolveOperationCeilingsSystem } from '../db/workspace-store.js'
 import { resolveLiveAccessCeilingSystem, resolveTurnScopeSystem, type ResolvedTurnScope } from './resolve-turn-scope.js'
-import { createAuthorityLease, executeWithCurrentAuthority, runWithAuthorityLease } from './authority-lease.js'
+import { AuthorityChangedError, createAuthorityLease, executeWithCurrentAuthority, runWithAuthorityLease } from './authority-lease.js'
 import { createDbWorkflowRunStore, readWorkflowRunInTransaction } from '../db/workflow-store.js'
 import { parseWorkflowCopyEvidence, readWorkflowInputEvidence } from './workflow-input-evidence.js'
 import { validateCallerScopeEvidence } from './caller-evidence.js'
+import { pinPolicyEpoch } from './policy-epoch.js'
 
 type GoalBinding = { id: string; contextGroupId: string | null; contextProjectId: string | null; authoringAuthority: AuthoringAuthority }
 type StoredAuthority = {
@@ -262,6 +263,22 @@ async function resolveWorkflowRunSnapshot(params: {
 
 /** Each advance owns a sticky lease, shared by its parallel steps and nested tools. */
 export async function resolveWorkflowRunScope(params: Parameters<typeof resolveWorkflowRunSnapshot>[0], client?: PoolClient) {
+  let policyCurrent: () => Promise<boolean>
+  try {
+    // A supplied owner transaction already has the private metadata privilege.
+    // Keep its reads on that client; an app-client denial never falls back.
+    const privatePort = client && (await client.query<{ allowed: boolean }>(
+      "SELECT has_function_privilege(current_user,'public.read_application_policy_epoch(uuid,uuid,uuid)','EXECUTE') AS allowed",
+    )).rows[0]?.allowed === true
+    policyCurrent = await pinPolicyEpoch({
+      workspaceId: params.workspaceId, principalId: params.userId, assistantId: params.assistantId,
+    }, client ? async identity => (await client.query<{ snapshot: unknown }>(
+      privatePort ? 'SELECT public.read_application_policy_epoch($1,$2,$3) AS snapshot'
+        : 'SELECT public.read_workflow_policy_epoch($1,$2,$3,$4) AS snapshot',
+      privatePort ? [identity.workspaceId, identity.principalId, identity.assistantId]
+        : [identity.workspaceId, params.run.id, identity.principalId, identity.assistantId],
+    )).rows[0]?.snapshot : undefined)
+  } catch { throw unavailable() }
   const resolved = await resolveWorkflowRunSnapshot(params,client)
   const authorityQuery: typeof query = client ? (sql, values) => client.query(sql, values) : query
   const sourceAvailable = async () => {
@@ -295,6 +312,7 @@ export async function resolveWorkflowRunScope(params: Parameters<typeof resolveW
     combined.note(persistedScopeEvidence)
     initialScopeEvidence = combined.evidence
   } catch { throw unavailable() }
+  if (!await policyCurrent()) throw new AuthorityChangedError()
   const lease = createAuthorityLease(pinAccessCeiling(resolved.turnScope.access), async () => {
     const actor = (await authorityQuery<{ actor: string | null }>(
       `SELECT COALESCE(r.triggered_by,w.created_by) AS actor FROM workflow_runs r
@@ -341,7 +359,7 @@ export async function resolveWorkflowRunScope(params: Parameters<typeof resolveW
     } catch {
       return null
     }
-  })
+  }, policyCurrent)
   const invocation = lease.snapshotSource!()
   const durableSource = AuthoritySourceSchema.parse({ version:1,kind:'workflow',invocationId:invocation.invocationId,
     runId:params.run.id,workspaceId:params.workspaceId,authorityUserId:params.userId,executingAssistantId:params.assistantId,
@@ -399,6 +417,14 @@ export async function resolveWorkflowRunScope(params: Parameters<typeof resolveW
 /** Sticky authority for the goal driver's non-workflow work and delivery. */
 export async function resolveGoalAuthoritySystem(goal: GoalRecord) {
   if (!goal.createdByUserId) throw goalUnavailable()
+  const authoring = parseAuthoringAuthority(goal.authoringAuthority)
+  if (!authoring) throw goalUnavailable()
+  let policyCurrent: () => Promise<boolean>
+  try {
+    policyCurrent = await pinPolicyEpoch({
+      workspaceId: goal.workspaceId, principalId: goal.createdByUserId, assistantId: authoring.assistantId,
+    })
+  } catch { throw goalUnavailable() }
   let saved: Awaited<ReturnType<typeof resolveSavedAuthoringCeiling>>
   try {
     saved = await resolveSavedAuthoringCeiling(
@@ -413,6 +439,7 @@ export async function resolveGoalAuthoritySystem(goal: GoalRecord) {
     'SELECT id FROM tasks WHERE id=$1 AND workspace_id=$2 AND valid_to IS NULL AND retracted_at IS NULL AND NOT scope_held',
     [goal.host.id, goal.workspaceId])).rows.length === 1
   if (!await runWithAgentAccess(saved.ceiling, taskSourcesCurrent)) throw goalUnavailable()
+  if (!await policyCurrent()) throw new AuthorityChangedError()
   const lease = createAuthorityLease(saved.ceiling, async () => {
     if (!await runWithAgentAccess(saved.ceiling, taskSourcesCurrent)) return null
     const row = (await query<{
@@ -436,7 +463,7 @@ export async function resolveGoalAuthoritySystem(goal: GoalRecord) {
     } catch {
       return null
     }
-  })
+  }, policyCurrent)
   return {
     ceiling:saved.ceiling,
     executeWithAuthority:<T>(operation:()=>Promise<T>):Promise<T> =>
