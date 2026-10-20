@@ -1,4 +1,5 @@
 import { describe, it, expect, vi, beforeEach } from 'vitest'
+import { bindScopeSources, boundScopeSources } from '@use-brian/core'
 
 // Mock the pg client before importing the sessions module
 vi.mock('../client.js', () => ({
@@ -23,6 +24,7 @@ import {
   listSessionsByChannelForWorkspaceSystem,
   getSessionTranscriptForWorkspaceSystem,
   toStampedMessages,
+  coalesceConsecutiveUserMessages,
   buildSlackSessionChannelId,
   providerChannelIdFromSession,
   getPreferredChannel,
@@ -591,6 +593,32 @@ describe('[COMP:api/sessions-route] toStampedMessages speaker attribution', () =
     const blocks = msg.content as Array<{ type?: string; text?: string }>
     return blocks.find((b) => b.type === 'text')?.text ?? ''
   }
+
+  it('preserves trusted field and independent-source bindings through timestamp formatting', () => {
+    const sources = ['application_field', 'external_source'].map((resourceKind) => ({
+      workspaceId: 'workspace-fixture', userId: null, assistantId: null,
+      sensitivity: 'confidential' as const, compartments: ['finance'], projectIds: [],
+      resourceKind, resourceId: resourceKind, version: '1',
+    }))
+    const source = bindScopeSources(row({ senderUserId: 'u1' }), sources)
+    const [message] = toStampedMessages([source], 'UTC')
+    expect(boundScopeSources(message)).toEqual(sources)
+    expect(boundScopeSources(JSON.parse(JSON.stringify(message)))).toEqual([])
+  })
+
+  it('coalesces complete retained observations and excludes content omitted by the cap', () => {
+    const inputs = ['old', 'first', 'second'].map((resourceId) => bindScopeSources({
+      role: 'user', content: resourceId,
+    }, [{
+      workspaceId: 'workspace-fixture', userId: null, assistantId: null,
+      sensitivity: 'internal', compartments: [], projectIds: [],
+      resourceKind: 'session_message', resourceId, version: '1',
+    }]))
+    const [message] = coalesceConsecutiveUserMessages(inputs, { maxMerged: 2 })
+    expect(boundScopeSources(message)).toEqual(inputs.slice(1).flatMap(boundScopeSources))
+    expect(JSON.stringify(message.content)).not.toContain('old')
+    expect(boundScopeSources(inputs[0])).toHaveLength(1)
+  })
 
   it('stamps time only when no sender map is supplied (personal sessions)', () => {
     const [msg] = toStampedMessages([row({ senderUserId: 'u1' })], 'UTC')

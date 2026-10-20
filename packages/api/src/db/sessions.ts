@@ -2,6 +2,8 @@ import { classifySession, sessionKindSql } from '../session-kind.js'
 import type pg from 'pg'
 import {
   bindScopeSource,
+  bindScopeSources,
+  boundScopeSources,
   deriveResourceScope,
   deriveWriteScope,
   DerivedScopeError,
@@ -1422,7 +1424,7 @@ export function toStampedMessages(
       ...base,
       content: [{ type: 'text', text: prefix }, ...content],
     }
-  })
+  }).map((message, index) => bindScopeSources(message, boundScopeSources(dbMessages[index])))
 }
 
 /**
@@ -1497,13 +1499,13 @@ export function coalesceConsecutiveUserMessages<
       group = group.slice(omitted)
     }
     const blocks = group.flatMap((g) => toBlocks(g.content))
-    out.push({
+    out.push(bindScopeSources({
       ...m,
       content: [
         ...(omitted > 0 ? [{ type: 'text', text: omittedNote }] : []),
         ...blocks,
       ],
-    })
+    }, group.flatMap((message) => boundScopeSources(message))))
     i = j
   }
   return out

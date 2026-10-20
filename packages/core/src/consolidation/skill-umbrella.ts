@@ -183,7 +183,7 @@ export type SkillCuratorAction =
         | 'commit_failed'
         | 'recent_undo'
         | 'malformed_llm_output'
-        | 'scope_evidence_missing'
+        | DerivedScopeError['code']
       memberRowIds: string[]
       detail?: string
     }

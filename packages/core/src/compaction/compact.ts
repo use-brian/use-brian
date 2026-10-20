@@ -8,6 +8,8 @@
 
 import type { Message, LLMProvider, TokenUsage } from '../providers/types.js'
 import { collectStream } from '../providers/accumulator.js'
+import { assertInputAuthority } from '../providers/input-authority.js'
+import { bindScopeSources, boundScopeSources } from '../security/source-evidence.js'
 /**
  * Output shape for `extractMemoriesBeforeCompaction`. Moved here from
  * the (now-retired) regex pattern-extractor as part of Q9's `extractPatterns`
@@ -251,6 +253,7 @@ export type CompactionOptions = {
  * pointer to the episodic store.
  */
 export async function compactConversation(options: CompactionOptions): Promise<CompactionResult> {
+  const sources = options.messages.flatMap((message) => boundScopeSources(message))
   const profile: CompactionProfile = options.profile ?? 'linear'
   const prompt = COMPACT_PROMPTS[profile]
   const tokensBefore = estimateTokens(options.messages)
@@ -260,6 +263,7 @@ export async function compactConversation(options: CompactionOptions): Promise<C
     { role: 'user', content: prompt },
   ]
 
+  await assertInputAuthority(options.assertInputAuthority)
   const response = await collectStream(
     options.provider.stream({
       assertInputAuthority: options.assertInputAuthority,
@@ -269,6 +273,8 @@ export async function compactConversation(options: CompactionOptions): Promise<C
       maxTokens: SUMMARY_MAX_TOKENS,
     }),
   )
+
+  await assertInputAuthority(options.assertInputAuthority)
 
   const summary = response.content
     .filter((b) => b.type === 'text')
@@ -301,9 +307,11 @@ export async function compactConversation(options: CompactionOptions): Promise<C
     content: boundaryText,
   }
 
+  bindScopeSources(boundaryMessage, sources)
+  for (const episode of episodes ?? []) bindScopeSources(episode, sources)
   const tokensAfter = estimateTokens([boundaryMessage])
 
-  return {
+  return bindScopeSources({
     summary,
     boundaryMessage,
     tokensBefore,
@@ -311,7 +319,7 @@ export async function compactConversation(options: CompactionOptions): Promise<C
     usage: response.usage,
     model: response.model || options.model,
     episodes,
-  }
+  }, sources)
 }
 
 // ── Multi-topic output parser ──────────────────────────────────
