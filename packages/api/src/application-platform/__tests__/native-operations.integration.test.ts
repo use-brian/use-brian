@@ -73,6 +73,37 @@ describe('[COMP:api/application-records] canonical native operation composition'
     expect(record?.createdAt).toEqual(value.createdAt);expect(record?.updatedAt).toEqual(value.updatedAt)
     expect(boundScopeSources(record!)).toEqual(expect.arrayContaining([expect.objectContaining({resourceKind:'application_field',workspaceId})]))
   })
+  it.each(['company','person'] as const)('Q02/Q08 preserves admitted historical null containers in the legacy %s DTO',async type=>{
+    const value=await createEntity({workspaceId,kind:type,displayName:'Fictional nullable legacy containers',attributes:{},createdByUserId:userId,source:'user'})
+    const fixture=await owner.connect()
+    try {
+      await fixture.query('BEGIN');await fixture.query('ALTER TABLE entities DISABLE TRIGGER application_native_entity_values')
+      await fixture.query('UPDATE entities SET attributes=$2 WHERE id=$1',[value.id,{tags:null,external_ref:null}])
+      await fixture.query('ALTER TABLE entities ENABLE TRIGGER application_native_entity_values');await fixture.query('COMMIT')
+    } finally {await fixture.query('ROLLBACK');fixture.release()}
+    const result=type==='company'?await getCompanyById(access,value.id):await getContactById(access,value.id)
+    expect(result).toMatchObject({id:value.id,tags:[],externalRef:{}})
+    expect(boundScopeSources(result!)).toEqual(expect.arrayContaining([expect.objectContaining({resourceKind:'application_field',workspaceId})]))
+    expect((await owner.query('SELECT attributes FROM entities WHERE id=$1',[value.id])).rows[0].attributes).toEqual({tags:null,external_ref:null})
+  })
+  it.each([
+    {label:'safe numeric',amount:12,expected:12},
+    {label:'string',amount:'12',expected:'12'},
+    {label:'exact decimal',amount:'9007199254740993.000000000000000001',expected:'9007199254740993.000000000000000001'},
+    {label:'historical numeric',amount:12,storedNumeric:'9007199254740993.000000000000000001',expected:'9007199254740993.000000000000000001'},
+    {label:'admitted null',amount:null,expected:null,historicalNull:true},
+  ])('Q02/Q05 preserves canonical legacy deal encoding and evidence for $label amounts',async value=>{
+    const deal=value.historicalNull
+      ? await createEntity({workspaceId,kind:'deal',displayName:'Fictional historical nullable deal',attributes:{},createdByUserId:userId,source:'user'})
+      : await createDeal(userId,{workspaceId,access,amount:value.amount,stage:'proposal',closeDate:new Date('2026-03-18')})
+    if(value.storedNumeric)await owner.query("UPDATE entities SET attributes=jsonb_set(attributes,'{amount}',to_jsonb($2::numeric)) WHERE id=$1",[deal.id,value.storedNumeric])
+    const source=(await owner.query('SELECT created_at,updated_at FROM entities WHERE id=$1',[deal.id])).rows[0]
+    const result=await getDealById(access,deal.id)
+    expect(result).toMatchObject({id:deal.id,entityId:deal.id,workspaceId,amount:value.expected,stage:value.historicalNull?'lead':'proposal',companyId:null,contactId:null,closeDate:value.historicalNull?null:new Date('2026-03-18')})
+    expect(result?.createdAt).toEqual(source.created_at);expect(result?.updatedAt).toEqual(source.updated_at)
+    expect(Object.hasOwn(result!,'tags')).toBe(false)
+    expect(boundScopeSources(result!)).toEqual(expect.arrayContaining([expect.objectContaining({resourceKind:'application_field',workspaceId})]))
+  })
   it.each(['company','person','deal'] as const)('Q02 excludes unselected malformed native %s slots before actual member reads and queries',async type=>{
     const value=await createEntity({workspaceId,kind:type,displayName:`Fictional native selected ${randomUUID()}`,attributes:{},createdByUserId:userId,source:'user'})
     const fixture=await owner.connect()

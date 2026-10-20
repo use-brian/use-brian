@@ -59,17 +59,28 @@ export async function readCanonicalGenericRecord(context: CanonicalGenericReadCo
     ...(captured.data.absentFields.length ? { absentFields: captured.data.absentFields } : {}) },captured.data.sources)
 }
 
-/** Canonical native values are selected and captured before crossing the SQL boundary. */
 /** Validate only values actually selected; reading immutable metadata is allowed. */
 export function validateCanonicalNativeValues(definition:ApplicationResourceDefinition,values:ApplicationRecordProjection['values']):void {
   validateApplicationValues({...definition,fields:definition.fields.filter(field=>Object.hasOwn(values,field.key))
     .map(field=>({...field,immutable:false}))},values)
 }
 
+type NativeAmountEncoding = 'number' | 'string' | 'null' | 'invalid'
+const nativeAmountEncodings = new WeakMap<ApplicationRecordProjection, NativeAmountEncoding>()
+/** Private selected-value format, never a grant or a serialized projection field. */
+export function canonicalNativeAmountEncoding(projection: ApplicationRecordProjection): Exclude<NativeAmountEncoding, 'invalid'> {
+  const encoding = nativeAmountEncodings.get(projection)
+  if (encoding === undefined) unavailable()
+  if (encoding === 'invalid') throw new ApplicationPlatformError('invalid_value', 'The canonical amount requires review.')
+  return encoding
+}
+
+/** Canonical native values are selected and captured before crossing the SQL boundary. */
 export async function readCanonicalNativeRecord(context:CanonicalGenericReadContext,
   definition:ApplicationResourceDefinition,id:string,fields?:readonly string[]):Promise<ApplicationRecordProjection> {
   if(definition.origin.kind!=='native' || definition.origin.moduleKey!=='native') unavailable()
-  const captured=captureSchema.extend({id:z.string().uuid(),recordVersion:z.string().min(1)}).safeParse(
+  const captured=captureSchema.extend({id:z.string().uuid(),recordVersion:z.string().min(1),
+    valueEncodings:z.object({amount:z.enum(['number','string','null','invalid']).optional()}).strict().optional()}).safeParse(
     (await context.transaction.query<{value:unknown}>('SELECT read_native_application_record($1,$2,$3,$4) AS value',
       [context.workspaceId,definition.typeKey,id,fields?[...fields]:null])).rows[0]?.value)
   if(!captured.success || captured.data.id!==id.toLowerCase() || captured.data.sources[0].resourceKind!=='application_field'
@@ -80,8 +91,12 @@ export async function readCanonicalNativeRecord(context:CanonicalGenericReadCont
   const policyVersion=context.applicationFingerprint
     ? createHash('sha256').update(JSON.stringify({application:context.applicationFingerprint,field:captured.data.policyVersion})).digest('hex')
     :captured.data.policyVersion
-  return bindScopeSources({ref:{workspaceId:context.workspaceId,origin:definition.origin,typeKey:definition.typeKey,id:captured.data.id,version:captured.data.recordVersion},
+  const projection = bindScopeSources({ref:{workspaceId:context.workspaceId,origin:definition.origin,typeKey:definition.typeKey,id:captured.data.id,version:captured.data.recordVersion},
     values:captured.data.values,fields:Object.keys(captured.data.values),policyVersion},captured.data.sources)
+  if (definition.typeKey === 'deal' && Object.hasOwn(captured.data.values, 'amount') && captured.data.valueEncodings?.amount) {
+    nativeAmountEncodings.set(projection, captured.data.valueEncodings.amount)
+  }
+  return projection
 }
 
 /** A row-free native/app domain is captured under actual current SQL ceilings. */

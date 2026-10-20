@@ -20,7 +20,7 @@ import { getApplicationExecutionBinding, resolveApplicationExecutionContext,runW
 import { ApplicationPlatformService } from '../service.js'
 import { createCanonicalNativeApplicationModule } from '../native-adapters.js'
 import { createCanonicalGenericApplicationModule } from '../generic-adapter.js'
-import { createCompany,getCompanyById,getContactById } from '../../db/crm.js'
+import { createCompany,getCompanyById,getContactById,getDealById } from '../../db/crm.js'
 import { createEntity } from '../../db/entities-store.js'
 import { updateCrmCustomFields } from '../../db/crm-r2.js'
 import { applicationPlatformRoutes } from '../../routes/application-platform.js'
@@ -144,6 +144,22 @@ describe('[COMP:api/application-auth] database application projections and live 
     expect(user).not.toBeNull()
     return { authentication: { user: user! }, appId, grantId, parentId, userId, token: `oat_${id}_${secret}` }
   }
+  it.each((['member','external_user','service'] as const).flatMap(kind=>([
+    {label:'numeric',amount:12},{label:'decimal string',amount:'12'},
+    {label:'exact decimal',amount:'9007199254740993.000000000000000001'},
+  ] as const).map(value=>({...value,kind}))))('Q02/Q03 retains a complete canonical legacy deal DTO for $kind with $label amount',async({kind,amount})=>{
+    const value=await createEntity({workspaceId,kind:'deal',displayName:'Fictional legacy canonical deal',aliases:['fictional deal alias'],attributes:{stage:'proposal',amount,close_date:'2026-03-18',external_ref:{provider:'fictional',id:'native-deal-ref'}},createdByUserId:ownerId,source:'user'})
+    const fields=['name','aliases','contactId','companyId','stage','amount','closeDate','externalRef','createdAt','updatedAt']
+    const full=await provision(kind,fields,undefined,false,value.id,[],[value.id],undefined,'read_write',[],'deal')
+    const narrow=await provision(kind,fields.filter(field=>field!=='amount'),undefined,false,value.id,[],[value.id],undefined,'read_write',[],'deal')
+    const base=createCanonicalNativeApplicationModule(),dispatcher=new ApplicationPlatformService([{...base,application:{...base.application!,queries:[...base.application!.queries,'legacy_deal']},queries:{...base.queries,legacy_deal:{input:z.object({}).strict(),authorize:async()=>{},execute:({execution})=>getDealById(execution.security.access,value.id)}}}])
+    const result=await dispatcher.query(await resolveApplicationExecutionContext(full.authentication),'native','legacy_deal',{}) as NonNullable<Awaited<ReturnType<typeof getDealById>>>
+    expect(result).toMatchObject({id:value.id,entityId:value.id,name:value.displayName,aliases:['fictional deal alias'],stage:'proposal',amount,companyId:null,contactId:null,closeDate:new Date('2026-03-18'),externalRef:{provider:'fictional',id:'native-deal-ref'}})
+    expect(result.createdAt).toEqual(value.createdAt);expect(result.updatedAt).toEqual(value.updatedAt)
+    expect(Object.hasOwn(result,'tags')).toBe(false)
+    expect(boundScopeSources(result)).toEqual(expect.arrayContaining([expect.objectContaining({resourceKind:'application_field',workspaceId})]))
+    await expect(dispatcher.query(await resolveApplicationExecutionContext(narrow.authentication),'native','legacy_deal',{})).rejects.toMatchObject({code:'access_unavailable'})
+  })
   it.each(['member','external_user','service'] as const)('Q03 refuses remembered %s application access outside its genuine host frame',async kind=>{
     const value=await createEntity({workspaceId,kind:'company',displayName:'Fictional remembered application access',attributes:{domain:'unreleased.example'},createdByUserId:ownerId,source:'user'})
     const fixture=await provision(kind,['name'],undefined,false,value.id),callbacks:Array<()=>Promise<unknown>>=[]

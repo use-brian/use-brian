@@ -10,10 +10,11 @@ import type {
   Sensitivity,
   StableExternalIdentity,
 } from '@use-brian/core'
-import { bindScopeSources, decodeCrmAmount, crmAmountSchema, maxSensitivity, unionScopeRequirements } from '@use-brian/core'
+import { bindScopeSources, DEAL_STAGES, validApplicationDate, decodeCrmAmount, crmAmountSchema, maxSensitivity, unionScopeRequirements } from '@use-brian/core'
 import type pg from 'pg'
 import { z } from 'zod'
 import { readLegacyCanonicalCrmPoint } from './crm-reader.js'
+import { canonicalNativeAmountEncoding } from '../application-platform/field-evidence.js'
 import { ApplicationPlatformError,applicationJsonSchema } from '@use-brian/shared'
 import { assertExecutionResourceScope, buildAccessPredicate, buildCurrentMemberSourcePredicate, mutationActorAccess } from './access-predicate.js'
 import { assertAuthorshipPresent } from './authorship-guard.js'
@@ -493,11 +494,12 @@ async function mergeCompanyFields(
 
 const legacyCompanyFields=['name','domain','aliases','tags','externalRef','createdAt','updatedAt'] as const
 const legacyContactFields=['name','email','phone','companyId','aliases','tags','externalRef','createdAt','updatedAt'] as const
-const legacyCrmCommon=z.object({name:z.string(),aliases:z.array(z.string()),tags:z.array(z.string()),externalRef:z.record(applicationJsonSchema),
+const legacyCrmTags=z.array(z.string()).nullable().transform(value=>value??[])
+const legacyCrmCommon=z.object({name:z.string(),aliases:z.array(z.string()),externalRef:z.record(applicationJsonSchema).nullable().transform(value=>value??{}),
   createdAt:z.string().datetime(),updatedAt:z.string().datetime()})
 function legacyPointRecord(point:NonNullable<Awaited<ReturnType<typeof readLegacyCanonicalCrmPoint>>>) {
   const values=legacyCrmCommon.parse(point.projection.values),{ref}=point.projection
-  return {id:ref.id,entityId:ref.id,workspaceId:ref.workspaceId,name:values.name,aliases:values.aliases,tags:values.tags,externalRef:values.externalRef,
+  return {id:ref.id,entityId:ref.id,workspaceId:ref.workspaceId,name:values.name,aliases:values.aliases,externalRef:values.externalRef,
     createdAt:new Date(values.createdAt),updatedAt:new Date(values.updatedAt),sensitivity:point.scope.sensitivity,
     compartments:point.scope.compartments,projectIds:point.scope.projectIds}
 }
@@ -505,7 +507,7 @@ export async function getCompanyById(ctx: AccessContext, id: string): Promise<Co
   const point=await readLegacyCanonicalCrmPoint(ctx,'company',id,legacyCompanyFields)
   if(!point)return null
   const domain=z.string().nullable().parse(point.projection.values.domain)
-  return bindScopeSources({...legacyPointRecord(point),domain},point.sources)
+  return bindScopeSources({...legacyPointRecord(point),domain,tags:legacyCrmTags.parse(point.projection.values.tags)},point.sources)
 }
 
 export async function listCompanies(ctx: AccessContext, filters: CompanyListFilters): Promise<CompanyListRow[]> {
@@ -776,7 +778,7 @@ export async function getContactById(ctx: AccessContext, id: string): Promise<Co
   const point=await readLegacyCanonicalCrmPoint(ctx,'person',id,legacyContactFields)
   if(!point)return null
   const values=z.object({email:z.string().nullable(),phone:z.string().nullable(),companyId:z.string().uuid().nullable()}).parse(point.projection.values)
-  return bindScopeSources({...legacyPointRecord(point),...values},point.sources)
+  return bindScopeSources({...legacyPointRecord(point),...values,tags:legacyCrmTags.parse(point.projection.values.tags)},point.sources)
 }
 
 export async function listContacts(ctx: AccessContext, filters: ContactListFilters): Promise<ContactListRow[]> {
@@ -997,17 +999,23 @@ export async function createDeal(
   return dealFromEntity(entity)
 }
 
+const legacyDealFields = ['name','aliases','contactId','companyId','stage','amount','closeDate','externalRef','createdAt','updatedAt'] as const
 export async function getDealById(ctx: AccessContext, id: string): Promise<DealRecord | null> {
-  const ap = buildAccessPredicate(ctx, { alias: 'e', startIdx: 1 })
-  const result = await queryWithRLS<DealRow>(
-    ctx.userId,
-    `SELECT ${DEAL_SELECT} FROM entities e
-      WHERE ${ap.sql} AND e.kind = 'deal'
-        AND e.id = $${ap.nextIdx} AND e.valid_to IS NULL`,
-    [...ap.params, id],
-  )
-  if (result.rows.length === 0) return null
-  return toDealRow(result.rows[0])
+  const point = await readLegacyCanonicalCrmPoint(ctx, 'deal', id, legacyDealFields)
+  if (!point) return null
+  const values = z.object({contactId:z.string().uuid().nullable(),companyId:z.string().uuid().nullable(),
+    stage:z.enum(DEAL_STAGES).nullable(),amount:z.string().nullable(),closeDate:z.string().nullable()}).parse(point.projection.values)
+  const encoding = canonicalNativeAmountEncoding(point.projection)
+  if ((values.amount === null) !== (encoding === 'null')) {
+    throw new ApplicationPlatformError('access_unavailable', 'The source changed.')
+  }
+  const amount = values.amount === null ? null : encoding === 'number'
+    ? decodeCrmAmount(Number(values.amount), values.amount) : crmAmountSchema.parse(values.amount)
+  if (values.closeDate !== null && (values.closeDate.length !== 10 || !validApplicationDate(values.closeDate))) {
+    throw new ApplicationPlatformError('invalid_value', 'The canonical close date requires review.')
+  }
+  return bindScopeSources({...legacyPointRecord(point),contactId:values.contactId,companyId:values.companyId,
+    stage:values.stage ?? 'lead',amount,closeDate:values.closeDate === null ? null : new Date(values.closeDate)},point.sources)
 }
 
 export async function listDeals(ctx: AccessContext, filters: DealListFilters): Promise<DealListRow[]> {

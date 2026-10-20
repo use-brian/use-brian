@@ -21,7 +21,7 @@ async function assertPointScopes(client:PoolClient,access:AccessContext,sources:
     AS scope(workspace_id uuid,user_id uuid,assistant_id uuid,sensitivity text,compartments text[],project_ids uuid[])`,[...predicate.params,JSON.stringify(scopes)])
   if(result.rows[0]?.admitted!==true)throw new ApplicationPlatformError('access_unavailable','The source is unavailable.')
 }
-export async function readLegacyCanonicalCrmPoint(access:AccessContext,type:'company'|'person',id:string,fields:readonly string[]) {
+export async function readLegacyCanonicalCrmPoint(access:AccessContext,type:'company'|'person'|'deal',id:string,fields:readonly string[]) {
   const bound=currentApplicationReadTransaction(access)
   return runWithAgentAccess({...access,clearance:access.clearance??'confidential',compartments:access.compartments,
     visibilityAssistantIds:access.visibilityAssistantIds??(access.assistantKind==='primary'?null:[access.assistantId])},async()=>{
