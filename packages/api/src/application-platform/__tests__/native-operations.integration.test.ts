@@ -6,10 +6,10 @@ import { viewsRoutes, type ViewsRouteOptions } from '../../routes/views.js'
 import { crmRoutes } from '../../routes/crm.js'
 import { createWorkspaceStore } from '../../db/workspace-store.js'
 import { createDbWorkspaceGroupStore } from '../../db/workspace-group-store.js'
-import { afterAll, beforeAll, describe, expect, it } from 'vitest'
+import { afterAll, afterEach, beforeAll, describe, expect, it } from 'vitest'
 import { z } from 'zod'
 import type { PoolClient } from 'pg'
-import { createCrmTools, executionToolContext, boundScopeSources, type ApplicationModuleDefinition, type TaskRecord, type TaskUpdateFields,type CompanyUpdateFields,type ContactUpdateFields,type DealUpdateFields,type EntityCreateParams,type EntityUpdateFields,type EntitySupersedePatch } from '@use-brian/core'
+import { createCrmTools, executionToolContext, boundScopeSources, type ApplicationModuleDefinition, type ScopeSource, type TaskRecord, type TaskUpdateFields,type CompanyUpdateFields,type ContactUpdateFields,type DealUpdateFields,type EntityCreateParams,type EntityUpdateFields,type EntitySupersedePatch } from '@use-brian/core'
 import { ApplicationPlatformError,type ApplicationJson } from '@use-brian/shared'
 import { applyRLSGucs, getAppPool, getPool } from '../../db/client.js'
 import { bindTaskClosedHook, createTask, getTaskById, resolveTaskById, updateTask } from '../../db/tasks.js'
@@ -895,6 +895,11 @@ describe('[COMP:api/application-records] canonical native operation composition'
     expect((await getDealById(access,before.id))?.amount).toBe(12)
   })
   describe('[COMP:security/native-field-policy] canonical native CRM write admission',() => {
+    const ancestryFixtureIds:string[]=[]
+    afterEach(async()=>{
+      // Keep immutable evidence, but retire temporary source graphs from later schema/query fixtures.
+      if(ancestryFixtureIds.length)await owner.query('UPDATE entities SET scope_held=true WHERE workspace_id=$1 AND id=ANY($2::uuid[])',[workspaceId,ancestryFixtureIds.splice(0)])
+    })
     const nativeOrigin={kind:'native',moduleKey:'native'}
     beforeAll(async () => {
       await owner.query(`CREATE SEQUENCE native_operation_field_fixture_seq;
@@ -1139,6 +1144,126 @@ describe('[COMP:api/application-records] canonical native operation composition'
         expect((await dispatcher.command(await resolveApplicationExecutionContext(fixture.authentication),'native','patch_company',command)).resources[0].version).toBe((BigInt(before.version)+1n).toString())
         expect((await snapshot(value.id)).attributes.custom_fields.cost).toBe(43)
       } finally {if(role)await owner.query('DELETE FROM application_native_role_assignments WHERE id=$1',[role]);await clearCreatorPolicy()}
+    })
+    async function fieldDerivedCompany(){
+      const parent=await company(),parentVersion=(await snapshot(parent.id)).version
+      const source=await member(userId,async client=>{
+        const value=(await client.query("SELECT observe_application_field_projection($1,$2,$3,$4,$5,'read',NULL,$6) AS value",
+          [workspaceId,nativeOrigin,'company',parent.id,parentVersion,['custom.cost']])).rows[0].value
+        expect(value.values).toEqual({'custom.cost':42});return value.sources[0] as ScopeSource
+      })
+      expect(source).toMatchObject({resourceKind:'application_field',workspaceId})
+      const derived=await createEntity({workspaceId,kind:'company',displayName:'Fictional field-derived company',attributes:{},createdByUserId:userId,source:'user',
+        userId:source.userId,assistantId:source.assistantId,sensitivity:source.sensitivity,compartments:[...source.compartments],projectIds:[...source.projectIds],
+        derivation:{producer:'fictional-native-derivation',sources:[source]}})
+      ancestryFixtureIds.push(derived.id)
+      return {source,derived}
+    }
+    it.each(['point','query'] as const)('Q02/Q03 refuses a field-derived company %s after input role contraction and keeps an independent native reader',async kind=>{
+      const {source,derived}=await fieldDerivedCompany(),roleB=await creatorRole(readerId);let revoked=false
+      const roleA=(await owner.query("SELECT id FROM application_native_role_assignments WHERE workspace_id=$1 AND module_key='native' AND user_id=$2 AND role_key='finance' AND status='active'",[workspaceId,userId])).rows[0].id
+      const load=(actor:typeof access)=>kind==='point'?getCompanyById(actor,derived.id):batchLabels(actor,[{entity:'company',ids:[derived.id]}])
+      try{
+        const initial=await load(access)
+        if(kind==='point')expect(initial).toMatchObject({id:derived.id,name:'Fictional field-derived company'})
+        else expect(initial).toEqual(new Map([[`company:${derived.id}`,'Fictional field-derived company']]))
+        await owner.query("UPDATE application_native_role_assignments SET status='revoked' WHERE id=$1",[roleA]);revoked=true
+        const denied=await member(userId,async client=>(await client.query('SELECT read_admitted_application_field_snapshot($1,$2,$3) AS value',[workspaceId,source.resourceId,source.version])).rows[0].value)
+        expect(denied===null||denied.held===true).toBe(true)
+        const unavailable=await load(access).catch(error=>{expect(error).toMatchObject({code:'access_unavailable'});return null})
+        expect(unavailable).toBeNull()
+        const independent=await load(reader)
+        if(kind==='point')expect(independent).toMatchObject({id:derived.id,name:'Fictional field-derived company'})
+        else expect(independent).toEqual(new Map([[`company:${derived.id}`,'Fictional field-derived company']]))
+      }finally{await owner.query('DELETE FROM application_native_role_assignments WHERE id=$1',[roleB]);if(revoked)await creatorRole(userId)}
+    })
+    it('Q02/Q03 refuses direct field capture and retained evidence for a field-derived company after input role contraction',async()=>{
+      const {derived}=await fieldDerivedCompany(),roleB=await creatorRole(readerId);let revoked=false
+      const roleA=(await owner.query("SELECT id FROM application_native_role_assignments WHERE workspace_id=$1 AND module_key='native' AND user_id=$2 AND role_key='finance' AND status='active'",[workspaceId,userId])).rows[0].id
+      const recordVersion=(await snapshot(derived.id)).version
+      const capture=(actor:string)=>member(actor,async client=>(await client.query("SELECT observe_application_field_projection($1,$2,'company',$3,$4,'read',NULL,ARRAY['name']) AS value",[workspaceId,nativeOrigin,derived.id,recordVersion])).rows[0].value)
+      try{
+        const original=await capture(userId),source=original.sources[0] as ScopeSource
+        expect(original.values).toEqual({name:'Fictional field-derived company'})
+        await owner.query("UPDATE application_native_role_assignments SET status='revoked' WHERE id=$1",[roleA]);revoked=true
+        const held=await member(userId,async client=>(await client.query('SELECT read_admitted_application_field_snapshot($1,$2,$3) AS value',[workspaceId,source.resourceId,source.version])).rows[0].value)
+        expect(held===null||held.held===true).toBe(true)
+        await expect(capture(userId)).rejects.toMatchObject({code:'42501'})
+        expect((await capture(readerId)).values).toEqual(original.values)
+        expect(await member(readerId,async client=>(await client.query('SELECT read_admitted_application_field_snapshot($1,$2,$3) AS value',[workspaceId,source.resourceId,source.version])).rows[0].value)).toMatchObject({held:false})
+      }finally{await owner.query('DELETE FROM application_native_role_assignments WHERE id=$1',[roleB]);if(revoked)await creatorRole(userId)}
+    })
+    it.each(['selected','raw'] as const)('Q02/Q03 retains the %s native input footprint for a derived company',async kind=>{
+      const parent=await company(),parentVersion=(await snapshot(parent.id)).version
+      const source:ScopeSource=await member(userId,async client=>kind==='selected'
+        ? (await client.query("SELECT observe_application_field_projection($1,$2,'company',$3,$4,'read',NULL,ARRAY['name']) AS value",[workspaceId,nativeOrigin,parent.id,parentVersion])).rows[0].value.sources[0]
+        : {...(await client.query("SELECT read_admitted_native_scope_snapshot($1,'entity',$2) AS value",[workspaceId,parent.id])).rows[0].value,resourceKind:'entity',resourceId:parent.id})
+      const derived=await createEntity({workspaceId,kind:'company',displayName:'Fictional footprint derivative',attributes:{},createdByUserId:userId,source:'user',
+        userId:source.userId,assistantId:source.assistantId,sensitivity:source.sensitivity,compartments:[...source.compartments],projectIds:[...source.projectIds],derivation:{producer:'fictional-footprint-derivation',sources:[source]}})
+      ancestryFixtureIds.push(derived.id)
+      const roleA=(await owner.query("SELECT id FROM application_native_role_assignments WHERE workspace_id=$1 AND module_key='native' AND user_id=$2 AND role_key='finance' AND status='active'",[workspaceId,userId])).rows[0].id
+      let revoked=false
+      try{
+        expect(await getCompanyById(access,derived.id)).toMatchObject({id:derived.id})
+        await owner.query("UPDATE application_native_role_assignments SET status='revoked' WHERE id=$1",[roleA]);revoked=true
+        const result=await getCompanyById(access,derived.id).catch(error=>{expect(error).toMatchObject({code:'access_unavailable'});return null})
+        if(kind==='selected'){
+          expect(result).toMatchObject({id:derived.id,name:'Fictional footprint derivative'})
+          expect(await updateCompany(userId,derived.id,{name:'Fictional selected footprint edit'},access)).toMatchObject({id:derived.id})
+        }else{
+          expect(result).toBeNull()
+          expect(await updateCompany(userId,derived.id,{name:'Fictional raw footprint refusal'},access)).toBeNull()
+        }
+      }finally{if(revoked)await creatorRole(userId)}
+    })
+    it('Q02/Q03 rechecks current relationship target ancestry as well as the retained original target',async()=>{
+      const definition=await createCrmFieldDefinition({userId,workspaceId,entityKind:'company',fieldKey:'ancestry_target',label:'Fictional ancestry target',fieldType:'entity_reference',options:['company']})
+      if(!definition)throw new Error('Fictional ancestry reference definition was not created')
+      const rules=(await owner.query('SELECT native_operation_field_fixture_rules() AS value')).rows[0].value
+      rules.push({key:'custom.ancestry_target',read:[],write:[],releaseReadTo:[],releaseWriteTo:[]})
+      await owner.query('INSERT INTO native_operation_field_fixture_config(workspace_id,rules) VALUES($1,$2)',[workspaceId,JSON.stringify(rules)])
+      let roleA:string|undefined,roleB:string|undefined,revoked=false
+      try{
+        const {derived}=await fieldDerivedCompany(),originalTarget=await company()
+        const referring=await createEntity({workspaceId,kind:'company',displayName:'Fictional referring company',attributes:{custom_fields:{ancestry_target:originalTarget.id}},createdByUserId:userId,source:'user'})
+        ancestryFixtureIds.push(referring.id)
+        const capture=(actor:string,v:string)=>member(actor,async client=>(await client.query("SELECT observe_application_field_projection($1,$2,'company',$3,$4,'read',NULL,ARRAY['custom.ancestry_target']) AS value",[workspaceId,nativeOrigin,referring.id,v])).rows[0].value)
+        const original=await capture(userId,(await snapshot(referring.id)).version),source=original.sources[0] as ScopeSource
+        expect(original.values).toEqual({'custom.ancestry_target':originalTarget.id})
+        expect(await updateCompany(userId,referring.id,{customFields:{ancestry_target:derived.id}},access)).toMatchObject({id:referring.id})
+        const currentVersion=(await snapshot(referring.id)).version
+        roleB=await creatorRole(readerId)
+        roleA=(await owner.query("SELECT id FROM application_native_role_assignments WHERE workspace_id=$1 AND module_key='native' AND user_id=$2 AND role_key='finance' AND status='active'",[workspaceId,userId])).rows[0].id
+        await owner.query("UPDATE application_native_role_assignments SET status='revoked' WHERE id=$1",[roleA]);revoked=true
+        const held=await member(userId,async client=>(await client.query('SELECT read_admitted_application_field_snapshot($1,$2,$3) AS value',[workspaceId,source.resourceId,source.version])).rows[0].value)
+        expect(held===null||held.held===true).toBe(true)
+        await expect(capture(userId,currentVersion)).rejects.toMatchObject({code:'42501'})
+        expect((await capture(readerId,currentVersion)).values).toEqual({'custom.ancestry_target':derived.id})
+        expect(await member(readerId,async client=>(await client.query('SELECT read_admitted_application_field_snapshot($1,$2,$3) AS value',[workspaceId,source.resourceId,source.version])).rows[0].value)).toMatchObject({held:false})
+      }finally{if(roleB)await owner.query('DELETE FROM application_native_role_assignments WHERE id=$1',[roleB]);if(revoked)await creatorRole(userId);await clearCreatorPolicy();await archiveCrmFieldDefinition(userId,workspaceId,definition.id)}
+    })
+    it('Q02/Q03/Q05 edits an admitted field-derived company and retains current ancestor roles across native writers',async()=>{
+      const {source,derived}=await fieldDerivedCompany()
+      const roleB=await creatorRole(readerId);let revoked=false
+      const roleA=(await owner.query("SELECT id FROM application_native_role_assignments WHERE workspace_id=$1 AND module_key='native' AND user_id=$2 AND role_key='finance' AND status='active'",[workspaceId,userId])).rows[0].id
+      try {
+        expect(await getCompanyById(access,derived.id)).toMatchObject({id:derived.id,name:'Fictional field-derived company'})
+        const before=await snapshot(derived.id)
+        expect(await updateCompany(userId,derived.id,{name:'Fictional edited derivative'},access)).toMatchObject({id:derived.id,name:'Fictional edited derivative'})
+        const after=await snapshot(derived.id);expect(after.version).toBe((BigInt(before.version)+1n).toString())
+        await owner.query("UPDATE application_native_role_assignments SET status='revoked' WHERE id=$1",[roleA]);revoked=true
+        const denied=await member(userId,async client=>(await client.query('SELECT read_admitted_application_field_snapshot($1,$2,$3) AS value',[workspaceId,source.resourceId,source.version])).rows[0].value)
+        expect(denied===null||denied.held===true).toBe(true)
+        const unavailable=await getCompanyById(access,derived.id).catch(error=>{expect(error).toMatchObject({code:'access_unavailable'});return null})
+        expect(unavailable).toBeNull()
+        expect(await updateCompany(userId,derived.id,{name:'Fictional refused derivative'},access)).toBeNull()
+        expect(await snapshot(derived.id)).toEqual(after)
+        expect(await getCompanyById(reader,derived.id)).toMatchObject({id:derived.id,name:'Fictional edited derivative'})
+        expect(await updateCompany(readerId,derived.id,{name:'Fictional independently edited derivative'},reader)).toMatchObject({id:derived.id,name:'Fictional independently edited derivative'})
+        expect((await snapshot(derived.id)).version).toBe((BigInt(before.version)+2n).toString())
+        expect((await owner.query("SELECT count(*)::int AS count FROM brain_row_versions WHERE primitive='entity' AND row_id=$1",[derived.id])).rows[0].count).toBe(2)
+        expect((await owner.query("SELECT count(*)::int AS count FROM scope_derivations d JOIN scope_derivation_sources i ON i.derivation_id=d.id WHERE d.workspace_id=$1 AND d.resource_kind='entity' AND d.resource_id=$2 AND i.source_kind='application_field' AND i.source_id=$3",[workspaceId,derived.id,source.resourceId])).rows[0].count).toBeGreaterThan(0)
+      }finally{await owner.query('DELETE FROM application_native_role_assignments WHERE id=$1',[roleB]);if(revoked)await creatorRole(userId)}
     })
     it('Q05 races independent canonical company commands with one valid version outcome and one history/audit/outbox set',async()=>{
       const value=await company(),before=await snapshot(value.id),a=await protectedCreator('service',undefined,'company',value.id,['name']),b=await protectedCreator('service',undefined,'company',value.id,['name'])
