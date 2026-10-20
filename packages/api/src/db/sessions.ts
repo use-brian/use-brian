@@ -8,6 +8,7 @@ import {
   deriveWriteScope,
   DerivedScopeError,
   maxSensitivity,
+  resourceScopeKey,
   type DerivedWriteEvidence,
   type ResourceScope,
   type ScopeSource,
@@ -16,6 +17,42 @@ import { getPool, getAppPool, applyRLSGucs, query } from './client.js'
 import { readCurrentScopeSources, recordDerivedResource, validateDerivedMemoryInputs, validateDerivedWriteInputs } from './derived-scope-store.js'
 import { admitAnchoredSession, admitSessionCreate, admitPersonalWebSession, type PersonalWebSessionPrincipal } from '../workspace-access/session-create-admission.js'
 import { notifyWorkspaceChange } from '../brain-stream/notify.js'
+
+/**
+ * Read immutable obligations in the writer's transaction, before D1 can remove
+ * their native carrier. Owner-only metadata facades reveal no content or allow
+ * decision; an app connection must use its admitted facades instead.
+ */
+async function transcriptAncestorSources(db: Pick<pg.ClientBase, 'query'>,
+  workspaceId: string, roots: readonly ScopeSource[]): Promise<ScopeSource[]> {
+  const permissions = (await db.query<{ external: boolean; field: boolean }>(
+    `SELECT has_function_privilege(current_user,'read_external_source_dependencies(uuid,text[],uuid[],text[])','EXECUTE') AS external,
+      has_function_privilege(current_user,'read_application_field_dependencies(uuid,text[],uuid[],text[])','EXECUTE') AS field`,
+  )).rows[0]
+  const external = permissions?.external ? 'read_external_source_dependencies' : 'read_admitted_external_source_dependencies'
+  const field = permissions?.field ? 'read_application_field_dependencies' : 'read_admitted_application_field_dependencies'
+  const sources = new Map<string, ScopeSource>()
+  for (let offset = 0; offset < roots.length; offset += 100) {
+    const part = roots.slice(offset, offset + 100)
+    const rows = (await db.query<{ kind: string; nodeVersion: string; source: ScopeSource | null }>(
+      `SELECT 'external_source' AS kind,node_version AS "nodeVersion",source FROM ${external}($1,$2,$3,$4)
+       UNION ALL SELECT 'application_field',node_version,source FROM ${field}($1,$2,$3,$4)`,
+      [workspaceId, part.map(source => source.resourceKind), part.map(source => source.resourceId), part.map(source => source.version)],
+    )).rows
+    for (const row of rows) {
+      const source = row.source
+      if (!source || source.workspaceId !== workspaceId || source.resourceKind !== row.kind || source.version !== row.nodeVersion) {
+        throw new DerivedScopeError('scope_source_changed')
+      }
+      const key = `${source.resourceKind}:${source.resourceId}`, previous = sources.get(key)
+      if (previous && (previous.version !== source.version || resourceScopeKey(previous) !== resourceScopeKey(source))) {
+        throw new DerivedScopeError('scope_source_changed')
+      }
+      sources.set(key, source)
+    }
+  }
+  return [...sources.values()]
+}
 
 /**
  * Store-seam emitter for the `session` workspace primitive (Live roster —
@@ -1194,11 +1231,32 @@ export async function getSessionMessages(
      */
     excludeHeld?: boolean
   },
+  /** Host-owned current app transaction; its source receipts never travel on the wire. */
+  admittedClient?: pg.PoolClient,
 ): Promise<SessionMessage[]> {
   const conditions = ['session_id = $1']
   const values: unknown[] = [sessionId]
   let paramIdx = 2
   if (opts?.excludeHeld) conditions.push('scope_held IS NOT TRUE')
+  if (admittedClient) {
+    const role = (await admittedClient.query<{ bypass: boolean }>(`SELECT r.rolsuper OR r.rolbypassrls OR pg_has_role(r.oid,c.relowner,'USAGE') AS bypass
+      FROM pg_roles r JOIN pg_class c ON c.oid='session_messages'::regclass WHERE r.rolname=current_user`)).rows[0]
+    if (role?.bypass !== false) throw new DerivedScopeError('scope_source_changed')
+    // These facades authenticate the actual SQL actor. Evaluate them before
+    // protected text selection/ranking; an expired/missing receipt never allows.
+    conditions.push(`scope_held=false
+      AND NOT EXISTS(SELECT 1 FROM read_admitted_application_field_dependencies(workspace_id,ARRAY['session_message'],ARRAY[id],ARRAY[scope_version::text]) d
+        WHERE d.source IS NULL OR d.source->>'version' IS DISTINCT FROM d.node_version)
+      AND NOT EXISTS(SELECT 1 FROM read_admitted_external_source_dependencies(workspace_id,ARRAY['session_message'],ARRAY[id],ARRAY[scope_version::text]) d
+        WHERE d.source IS NULL OR d.source->>'version' IS DISTINCT FROM d.node_version
+          OR external_source_snapshot(workspace_id,(d.source->>'resourceId')::uuid)->>'held' IS DISTINCT FROM 'false')`)
+  } else {
+    // The owner pool has no actor or live external/field proof. Its historical
+    // native read cannot turn independent observations into ordinary text.
+    conditions.push(`(workspace_id IS NULL OR (
+      NOT EXISTS(SELECT 1 FROM read_application_field_dependencies(workspace_id,ARRAY['session_message'],ARRAY[id],ARRAY[scope_version::text]))
+      AND NOT EXISTS(SELECT 1 FROM read_external_source_dependencies(workspace_id,ARRAY['session_message'],ARRAY[id],ARRAY[scope_version::text]))))`)
+  }
 
   if (opts?.afterSequence !== undefined) {
     conditions.push(`sequence_num > $${paramIdx}`)
@@ -1215,7 +1273,8 @@ export async function getSessionMessages(
   const limitClause = opts?.limit ? `LIMIT $${paramIdx}` : ''
   if (opts?.limit) values.push(opts.limit)
 
-  const result = await query<ScopedSessionMessageRow>(
+  const execute = admittedClient ? <T extends pg.QueryResultRow>(sql: string, params: unknown[]) => admittedClient.query<T>(sql, params) : query
+  const result = await execute<ScopedSessionMessageRow>(
     `SELECT id, session_id as "sessionId", role, content,
             sequence_num as "sequenceNum", created_at as "createdAt",
             reply_to_text as "replyToText",
@@ -1566,16 +1625,23 @@ export async function addSessionMessage(params: {
                attachments`
 
   const write = async (db: Pick<pg.ClientBase, 'query'>): Promise<SessionMessage> => {
-    let derivation = params.derivation
+    let derivation = params.derivation ? structuredClone(params.derivation) : undefined
     let scope = params.scope
     if (derivation) {
+      // Validate/detach the original input before any asynchronous metadata read.
+      const originalFloor = params.derivationTarget
+        ? deriveWriteScope(derivation, params.derivationTarget, params.derivationTarget.userId)
+        : deriveResourceScope(derivation)
+      const ancestors = await transcriptAncestorSources(db, originalFloor.workspaceId, derivation.sources)
+      derivation = { ...derivation, sources: [...derivation.sources, ...ancestors] }
       // A transcript row records what was SAID, not a derived fact. A source
       // the turn itself edited or removed (list then close a task, forget a
       // memory) must not block saving a reply the user already received
       // (decision D1): lineage keeps only still-current sources, while the row
       // carries the labels of every source it was derived from, raised to the
-      // current labels of any that changed. Held sources and changed causal
-      // inputs still refuse.
+      // current labels of any that changed. Independent field/query/external
+      // obligations were expanded above and cannot disappear with that native
+      // row. Held sources and changed causal inputs still refuse.
       const certified = params.derivationTarget
         ? deriveWriteScope(derivation, params.derivationTarget, params.derivationTarget.userId)
         : deriveResourceScope(derivation)
