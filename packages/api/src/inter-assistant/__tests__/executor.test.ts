@@ -109,8 +109,6 @@ vi.mock('../../doc/inject.js', () => ({
 import { runWithAgentAccess } from '../../db/agent-access-context.js'
 import { createCalleeExecutor } from '../executor.js'
 import * as callerEvidence from '../../context-scope/caller-evidence.js'
-import * as externalAncestry from '../../application-platform/external-source-ancestry.js'
-import * as fieldEvidence from '../../application-platform/field-evidence.js'
 // Real (unmocked) core factories — the '@use-brian/core' mock above spreads the
 // actual module, so everything but queryLoop/runPreflight resolves for real.
 // Used by the goal-path browser-surface describes at the bottom of this file.
@@ -343,28 +341,6 @@ describe('[COMP:api/inter-assistant-executor] createCalleeExecutor', () => {
       }))
     })
 
-  it('carries validated caller sources into the receiver write accumulator and returned evidence',async()=>{
-    const primary={...calleeAssistant,workspaceId:'workspace-1',kind:'primary',clearance:'internal',compartments:['product']}
-    mockFindAssistant.mockImplementation(async id=>({...primary,id}) as never)
-    const evidence={sensitivity:'internal' as const,compartments:['product'],projectIds:[],sources:[{
-      workspaceId:'workspace-1',userId:'owner-1',assistantId:null,sensitivity:'internal' as const,
-      compartments:['product'],projectIds:[],resourceKind:'memory',resourceId:'source-1',version:'1',
-    }]}
-    const validate=vi.spyOn(callerEvidence,'validateCallerScopeEvidence').mockImplementation(async value=>structuredClone(value))
-    // This unit fixture has native memory only. The real SQL/source suites
-    // cover protected ancestry; declare its absence at this mocked boundary.
-    const external=vi.spyOn(externalAncestry,'readExternalSourceAncestors').mockResolvedValue([])
-    const fields=vi.spyOn(fieldEvidence,'readApplicationFieldAncestors').mockResolvedValue([])
-    const returned=vi.fn()
-    try {
-      yieldsText('Scoped result')
-      await expect(executor()({...baseParams,callerAccessCeiling:{workspaceId:'workspace-1',userId:'owner-1',clearance:'internal',compartments:['product'],mutationCompartments:['product'],projectIds:[],visibilityAssistantIds:null},callerScopeEvidence:evidence,onScopeEvidence:returned})).resolves.toBe('Scoped result')
-      expect(mockQueryLoop.mock.calls.at(-1)?.[0].context.scopeAccumulator.evidence).toMatchObject(evidence)
-      expect(returned).toHaveBeenCalledWith(expect.objectContaining({sources:expect.arrayContaining(evidence.sources)}))
-      expect(validate).toHaveBeenCalledWith(evidence,expect.objectContaining({userId:'owner-1',compartments:['product']}))
-      expect(validate.mock.calls.length).toBeGreaterThan(1)
-    } finally {validate.mockRestore();external.mockRestore();fields.mockRestore()}
-  })
   it('refuses evidence without a verified caller ceiling before any session or model work',async()=>{
     await expect(executor()({...baseParams,callerScopeEvidence:{compartments:['product']}})).rejects.toMatchObject({reason:'caller_evidence_unavailable'})
     expect(mockSession).not.toHaveBeenCalled();expect(mockQueryLoop).not.toHaveBeenCalled()

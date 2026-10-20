@@ -1,3 +1,4 @@
+import { readPersistentSessionContextAncestors } from '../db/session-context-ancestry.js'
 import {
   ContextScopeAccumulator, intersectAccessCeilings, maxSensitivity, scopeGrantContains, resourceScopeKey, RANK, isSensitivity,
   type AccessCeiling, type ResourceScope, type ScopeEvidence, type ScopeSource,
@@ -123,6 +124,20 @@ async function validateScopeEvidence(
   if (failure) throw unavailable(kind, failure)
   if (!sources.length) return snapshot
   if (!client && sources.some(source=>source.resourceKind==='session_context_revision')) throw unavailable(kind,'source_unverifiable')
+  // Cached native refs retain every immutable context parent. Discovery is
+  // metadata only; the caller must still provide a real admitted transaction.
+  let persistentAncestry:string
+  const persistentKey=(values:readonly ScopeSource[])=>JSON.stringify(values.map(source=>[source.resourceId,source.version,resourceScopeKey(source)]).sort())
+  try {
+    const persistent=await readPersistentSessionContextAncestors(ceiling.workspaceId,sources,client)
+    persistentAncestry=persistentKey(persistent)
+    if(persistent.length && !client)throw unavailable(kind,'source_unverifiable')
+    const expanded=new ContextScopeAccumulator(snapshot)
+    expanded.note({sources:persistent});snapshot=expanded.evidence;sources=snapshot.sources ?? []
+    for(const source of persistent)failure ??= visibilityFailure(source,ceiling) ?? labelFailure(source,ceiling)
+    if(failure)throw unavailable(kind,failure)
+  } catch(error){throw scopeEvidenceFailureOf(error) ? error : unavailable(kind,'source_unverifiable',error)}
+
 
   // A native envelope cannot erase its independently authorized source ancestry.
   // This metadata read confers no source rights: current transaction receipts
@@ -225,6 +240,7 @@ async function validateScopeEvidence(
     raised.projectIds = [...new Set([...(raised.projectIds ?? []), ...current.projectIds])].sort()
   }
   try {
+    if(persistentKey(await readPersistentSessionContextAncestors(ceiling.workspaceId,ancestryRoots,client))!==persistentAncestry!) throw unavailable(kind,'source_unverifiable')
     if (ancestryKey(await readExternalSourceAncestors(ceiling.workspaceId, ancestryRoots, client)) !== originalAncestry!) {
       throw unavailable(kind, 'source_unverifiable')
     }

@@ -1,3 +1,4 @@
+import { readPersistentSessionContextAncestors } from '../db/session-context-ancestry.js'
 /** Fresh source permission at model input/output boundaries. [COMP:api/external-source-access] */
 import { ContextScopeAccumulator, type ExecutionContext, type ToolContext } from '@use-brian/core'
 import { SourceProtocolError } from '@use-brian/brian-app/connector'
@@ -30,7 +31,7 @@ async function assertSourceModelAuthority(context: ToolContext, action: 'context
     const accumulated = context.scopeAccumulator?.evidence
     const evidence = new ContextScopeAccumulator(execution?.security.provenance)
     evidence.note(accumulated)
-    const sources = evidence.evidence.sources ?? []
+    let sources = evidence.evidence.sources ?? []
     if (!sources.length) return
     const accumulator = context.scopeAccumulator
     if (!execution || !(accumulator instanceof ContextScopeAccumulator)) denied()
@@ -38,6 +39,8 @@ async function assertSourceModelAuthority(context: ToolContext, action: 'context
     await execution.security.authority.assertCurrent()
     const workspaceId = execution.security.access.workspaceId
     if (sources.some(source => source.workspaceId !== workspaceId)) denied()
+    evidence.note({sources:await readPersistentSessionContextAncestors(workspaceId,sources)})
+    sources=evidence.evidence.sources ?? []
     const ancestors = await readExternalSourceAncestors(workspaceId, sources)
     const fields = await readApplicationFieldAncestors(workspaceId, sources)
     const external = ancestors.length > 0 || sources.some(source => source.resourceKind === 'external_source')

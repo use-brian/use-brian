@@ -9,9 +9,12 @@ import { afterAll, afterEach, describe, expect, it, vi } from 'vitest'
 import { randomBytes } from 'node:crypto'
 import pg from 'pg'
 import { z } from 'zod'
-import { boundScopeSources, bindScopeSources, executionToolContext, createSessionStateTools, buildSessionStateBlock, runSessionStateDiff, type ScopeSource, type StreamFn } from '@use-brian/core'
-import { getAppPool, getPool } from '../../db/client.js'
-import { addSessionMessage, getSessionMessages, toStampedMessages } from '../../db/sessions.js'
+import { classifyTopic, boundScopeSources, bindScopeSources, executionToolContext, createSessionStateTools, buildSessionStateBlock, runSessionStateDiff, type ScopeSource, type ScopeEvidence, type StreamFn } from '@use-brian/core'
+import { getAppPool, getPool, applyRLSGucs, runWithAgentAccess } from '../../db/client.js'
+import { applyApplicationRLSContext, releaseApplicationTransactionBinding } from '../execution-context.js'
+import { validateCallerScopeEvidence } from '../../context-scope/caller-evidence.js'
+import { createMemory } from '../../db/memories.js'
+import { createWorkspaceChatSession, addSessionMessage, getSessionMessages, toStampedMessages } from '../../db/sessions.js'
 import { createDbSessionStateStore } from '../../db/session-state-store.js'
 import { createDbEpisodicStore } from '../../db/episodic-store.js'
 import { writeSessionContextRevision, sessionContextGeneration, bindSessionContextRetainedAuthority, readSessionContextRevisions } from '../../db/session-context-revisions.js'
@@ -27,6 +30,74 @@ describe.sequential('[COMP:api/application-persistence] actual transcript persis
   let independent: Awaited<ReturnType<typeof persistentSourceFixture>> | undefined
   afterEach(async () => { await independent?.cleanup(); independent = undefined; await fixture?.cleanup(); fixture = undefined })
   afterAll(async () => { await getAppPool().end(); await getPool().end() })
+
+  it('rechecks a cached native memory persistent parent from another current destination session',async()=>{
+    fixture=await persistentContextFixture()
+    const f=fixture,setup=await f.modelContext(),history=await f.history(),store=createDbEpisodicStore()
+    const episode=await store.create({sessionId:f.session.id,userId:f.ownerId,assistantId:f.assistantId,
+      topicLabel:'fictional retained topic',summary:'Fictional retained context',messageSpan:{fromSequence:1,toSequence:3,turnCount:3},authority:setup,
+      derivation:{producer:'fixture:cached-native-parent',sources:history.flatMap(boundScopeSources)}})
+    await f.pool.query('UPDATE episodic_memories SET access_count=1,survival_count=2 WHERE id=$1',[episode.id])
+    const promoted=await store.promote!(episode.id,setup)
+    const source=(await f.pool.query<{source:ScopeSource}>("SELECT read_scope_source($1,'memory',$2) AS source",[f.workspaceId,promoted.memoryId])).rows[0].source
+    const target=await createWorkspaceChatSession({workspaceId:f.workspaceId,assistantId:f.assistantId,starterUserId:f.ownerId,effectiveClearance:'internal',authenticatedHuman:true})
+    const wideTarget=await createWorkspaceChatSession({workspaceId:f.workspaceId,assistantId:f.assistantId,starterUserId:f.ownerId,effectiveClearance:'confidential',authenticatedHuman:true})
+    const currentMessage=await addSessionMessage({sessionId:target.id,role:'user',content:[{type:'text',text:'Fictional current request'}],scope:f.envelope})
+    const stream=vi.fn<StreamFn>(async function*(){yield{type:'text_delta',text:'{"topic_label":"fictional retained topic","state":"resume","confidence":0.9}'}})
+    const provider:LLMProvider={name:'fixture',models:['fixture'],stream,createSession(){throw new Error('Unused synthetic provider session')}}
+    async function current(userId:typeof f.firstId,session:typeof f.session){return{execution:await f.execution(userId,session),accumulator:new ContextScopeAccumulator()}}
+    async function classify(authority:Awaited<ReturnType<typeof current>>){
+      const context={...executionToolContext(authority.execution,{appId:'fixture'}),scopeAccumulator:authority.accumulator}
+      return classifyTopic(bindScopeSources({provider,model:'fixture',recentUserTurns:[{text:'Fictional retained context',topicLabel:'fictional retained topic'}],
+        currentMessage:'Fictional current request',knownTopicsThisSession:['fictional retained topic'],replyToText:null,authority,
+        assertInputAuthority:()=>assertSourceModelInputAuthority(context)},[source,...boundScopeSources(currentMessage)]))
+    }
+    expect(await classify(await current(f.firstId,target))).toMatchObject({topic_label:'fictional retained topic'})
+    expect(stream).toHaveBeenCalledOnce()
+    const metadataReader=await getAppPool().connect(),metadataExecution=await f.execution(f.firstId,target)
+    try {await runWithAgentAccess(metadataExecution.security.access,async()=>{
+      await metadataReader.query('BEGIN');await applyRLSGucs(metadataReader,f.firstId);await applyApplicationRLSContext(metadataReader,metadataExecution)
+      expect((await metadataReader.query(`SELECT has_function_privilege(current_user,'application_scope_lineage(uuid,text[],uuid[],text[])','EXECUTE') AS raw,
+        has_function_privilege(current_user,'read_scope_source(uuid,text,uuid)','EXECUTE') AS owner,
+        has_function_privilege(current_user,'read_admitted_session_context_dependencies(uuid,text[],uuid[],text[])','EXECUTE') AS admitted`)).rows[0]).toEqual({raw:false,owner:false,admitted:true})
+      const rows=(await metadataReader.query('SELECT * FROM read_admitted_session_context_dependencies($1,$2,$3,$4)',[f.workspaceId,['memory'],[promoted.memoryId],['1']])).rows
+      expect(rows).toHaveLength(1);expect(rows[0].source).toMatchObject({resourceKind:'session_context_revision',held:false,version:'1'})
+      expect(rows[0].source).not.toHaveProperty('content')
+      await metadataReader.query('SAVEPOINT invalid_version')
+      await expect(metadataReader.query('SELECT * FROM read_admitted_session_context_dependencies($1,$2,$3,$4)',[f.workspaceId,['session_context_revision'],[rows[0].source.resourceId],['2']])).rejects.toMatchObject({code:'42501'})
+      await metadataReader.query('ROLLBACK TO SAVEPOINT invalid_version')
+    })}finally{releaseApplicationTransactionBinding(metadataReader);await metadataReader.query('ROLLBACK');metadataReader.release()}
+    await f.pool.query("UPDATE sessions SET effective_clearance='confidential' WHERE id=$1",[f.session.id])
+    const denied=await current(f.firstId,target)
+    expect(await readSessionContextRevisions(f.session.id,'episodic_memory',denied,{includePromoted:true})).toEqual([])
+    expect((await f.pool.query("SELECT read_scope_source($1,'memory',$2) AS source",[f.workspaceId,promoted.memoryId])).rows[0].source).toEqual(source)
+    await expect(classify(denied)).rejects.toMatchObject({reason:'authority_changed',retrySafe:false})
+    expect(stream).toHaveBeenCalledOnce()
+    expect(await classify(await current(f.secondId,wideTarget))).toMatchObject({topic_label:'fictional retained topic'})
+    expect(stream).toHaveBeenCalledTimes(2)
+    expect((await f.pool.query("SELECT read_scope_source($1,'memory',$2) AS source",[f.workspaceId,promoted.memoryId])).rows[0].source).toEqual(source)
+  })
+
+  it('rejects an uncommitted native descendant after its source session contracts in the same transaction',async()=>{
+    fixture=await persistentContextFixture()
+    const f=fixture,history=await f.history(),episode=await createDbEpisodicStore().create({sessionId:f.session.id,userId:f.ownerId,assistantId:f.assistantId,
+      topicLabel:'fictional transaction topic',summary:'Fictional transaction context',messageSpan:{fromSequence:1,toSequence:3,turnCount:3},authority:await f.modelContext(),
+      derivation:{producer:'fixture:transaction-parent',sources:history.flatMap(boundScopeSources)}})
+    const target=await createWorkspaceChatSession({workspaceId:f.workspaceId,assistantId:f.assistantId,starterUserId:f.ownerId,effectiveClearance:'internal',authenticatedHuman:true})
+    const execution=await f.execution(f.firstId,target),writer=await f.pool.connect()
+    try { await runWithAgentAccess(execution.security.access,async()=>{
+      await writer.query('BEGIN')
+      await applyRLSGucs(writer,f.firstId);await applyApplicationRLSContext(writer,execution)
+      const memory=await createMemory({workspaceId:f.workspaceId,userId:null,assistantId:f.assistantId,summary:'Fictional uncommitted derivative',sensitivity:'internal',createdByUserId:f.firstId,
+        derivation:{producer:'fixture:uncommitted-native',sources:boundScopeSources(episode)}},undefined,writer)
+      const source=(await writer.query<{source:ScopeSource}>("SELECT read_scope_source($1,'memory',$2) AS source",[f.workspaceId,memory.id])).rows[0].source
+      expect((await f.pool.query('SELECT id FROM memories WHERE id=$1',[memory.id])).rowCount).toBe(0)
+      const admitted=await validateCallerScopeEvidence({sources:[source]},execution.security.ceiling,writer)
+      expect(admitted.sources).toContainEqual(expect.objectContaining({resourceKind:'session_context_revision',resourceId:boundScopeSources(episode)[0].resourceId}))
+      await writer.query("UPDATE sessions SET effective_clearance='confidential' WHERE id=$1",[f.session.id])
+      await expect(validateCallerScopeEvidence({sources:[source]},execution.security.ceiling,writer)).rejects.toMatchObject({reason:'caller_evidence_unavailable',retrySafe:false})
+    }) } finally {releaseApplicationTransactionBinding(writer);await writer.query('ROLLBACK');writer.release()}
+  })
 
   it('holds uncertified historical commitments before actual store retrieval and key computation', async () => {
     fixture = await persistentContextFixture()
@@ -375,6 +446,28 @@ describe.sequential('[COMP:api/application-persistence] actual transcript persis
     await expect(assertSourceModelInputAuthority({ ...executionToolContext(external.execution, { appId: 'fixture' }),
       scopeAccumulator: external.accumulator })).rejects.toMatchObject({ code: 'source_access_denied' })
     expect(await independent.independentlyAuthorized()).toBe(true)
+  })
+
+  it('carries actual private caller evidence through a delegated consult accumulator, returned evidence and canonical transcript',async()=>{
+    fixture=await persistentContextFixture();const f=fixture,parent=await f.execution(f.firstId)
+    const memory=await createMemory({workspaceId:f.workspaceId,userId:f.firstId,assistantId:f.assistantId,createdByUserId:f.firstId,summary:'Fictional private caller evidence',sensitivity:'internal'})
+    const snapshot=(await f.pool.query<{source:ScopeSource & {held:boolean}}>("SELECT read_scope_source($1,'memory',$2) AS source",[f.workspaceId,memory.id])).rows[0].source
+    expect(snapshot.held).toBe(false)
+    const source:ScopeSource={workspaceId:f.workspaceId,userId:f.firstId,assistantId:null,sensitivity:'internal',compartments:[],projectIds:[],resourceKind:'memory',resourceId:memory.id,version:memory.scopeVersion}
+    expect(snapshot).toMatchObject(source)
+    const answer:StreamFn=async function*(){yield{type:'message_start',model:'gemini-3.6-flash-pro'};yield{type:'text_delta',text:'Fictional private consult result'};yield{type:'message_end',stopReason:'end_turn',usage:{inputTokens:1,outputTokens:1}}}
+    const provider:LLMProvider={name:'fixture',models:['gemini-3.6-flash-pro'],stream:answer,createSession(options){return{send:()=>answer({model:options.model,systemPrompt:options.systemPrompt,messages:[]})}}}
+    const returned:ScopeEvidence[]=[],execute=createCalleeExecutor({provider,tools:new Map(),memoryStore:createDbMemoryStore(),capabilityStore:createDbCapabilityStore()})
+    expect(await execute({callerUserId:f.firstId,callerAssistantId:f.assistantId,callerAccessCeiling:parent.security.ceiling,
+      callerScopeEvidence:{sources:[source]},onScopeEvidence:evidence=>{returned.push(evidence)},calleeAssistantId:f.assistantId,
+      expectedWorkspaceId:f.workspaceId,callerSessionId:f.session.id,question:memory.summary})).toBe('Fictional private consult result')
+    expect(returned).toContainEqual(expect.objectContaining({sources:expect.arrayContaining([source])}))
+    const rows=(await f.pool.query(`SELECT m.id,s.user_id,s.visibility FROM session_messages m JOIN sessions s ON s.id=m.session_id
+      JOIN scope_derivations d ON d.resource_kind='session_message' AND d.resource_id=m.id AND d.workspace_id=$1
+      JOIN scope_derivation_sources edge ON edge.workspace_id=d.workspace_id AND edge.derivation_id=d.id
+      WHERE m.role='assistant' AND edge.source_kind='memory' AND edge.source_id=$2`,[f.workspaceId,memory.id])).rows
+    expect(rows.length).toBeGreaterThan(0)
+    for(const row of rows)expect(row).toMatchObject({user_id:f.firstId,visibility:'personal'})
   })
 
   it('injects healthy delivery commitments through the actual delegated executor and real source admission', async () => {
