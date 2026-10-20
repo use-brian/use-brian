@@ -315,7 +315,7 @@ export async function lockCrmConfiguration(client: PoolClient, workspaceId: stri
   if (isolation.rows[0]?.transaction_isolation !== 'read committed') {
     throw new CrmOperationsError('invalid_input', 'CRM configuration requires a READ COMMITTED transaction so allocation rechecks see commits after a lock wait.')
   }
-  await client.query("SELECT pg_advisory_xact_lock(hashtextextended('crm-config:' || $1::text, 0))", [workspaceId])
+  await client.query('SELECT application_lock_canonical_crm_configuration($1)',[workspaceId])
 }
 
 export async function lockCrmConfigurationMember(client: PoolClient, workspaceId: string, userId: string | null): Promise<void> {

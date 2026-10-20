@@ -5,7 +5,7 @@ import type { PoolClient } from 'pg'
 import { crmAmountSchema, applicationAuthorityCreationScope, parseApplicationCrmFieldDefinition, type ApplicationModuleDefinition, type ApplicationOperationContext } from '@use-brian/core'
 import { ApplicationPlatformError, applicationResourceRefSchema, applicationQuerySchema, type ApplicationRecordProjection,
   type ApplicationResourceDefinition, type ApplicationResourceRef } from '@use-brian/shared'
-import { createCompany,createContact,createDeal } from '../db/crm.js'
+import { crmCompanyPatch,authorizeCanonicalCompanyPatch,patchCanonicalCompanyFields,createCompany,createContact,createDeal } from '../db/crm.js'
 import { createTask } from '../db/tasks.js'
 import { publishTaskLifecycle } from '../task-event-fanout.js'
 import { getApplicationExecutionBinding } from './execution-context.js'
@@ -19,6 +19,7 @@ const readInput=z.object({type:z.enum(['company','person','deal','task','file','
 const queryInput=z.object({type:z.enum(['company','person','deal']),query:applicationQuerySchema}).strict()
 type Context=ApplicationOperationContext<PoolClient>
 const creations = new WeakMap<Context, { type: 'company' | 'person' | 'deal' | 'task'; fields: string[]; scope: { sensitivity: 'public' | 'internal' | 'confidential'; compartments: string[]; projectIds: string[] } }>()
+const companyPatches=new WeakMap<Context,Array<{id:string;patch:import('@use-brian/core').CompanyUpdateFields}>>()
 
 const definitions=canonicalNativeResourceDefinitions()
 async function resources(context: Context, queryType?: string): Promise<ApplicationResourceDefinition[]> {
@@ -84,6 +85,14 @@ async function authorizeResult(context:Context,refs:ApplicationResourceRef[]) {
     } else await read(context,input.data.type,input.data.id)
   }
 }
+async function authorizeCompanyPatchResult(context:Context,refs:ApplicationResourceRef[]) {
+  const inputs=companyPatches.get(context),actor=context.execution.security.access
+  if(!inputs||refs.length!==inputs.length||new Set(refs.map(ref=>ref.id)).size!==refs.length)throw new ApplicationPlatformError('access_unavailable','The companies are unavailable.')
+  for(const ref of refs){const input=inputs.find(item=>item.id===ref.id)
+    if(!input||ref.workspaceId!==actor.workspaceId||ref.typeKey!=='company'||ref.origin.kind!=='native'||ref.origin.moduleKey!=='native'
+      ||!await authorizeCanonicalCompanyPatch(actor.userId,input.id,input.patch,context.transaction,actor))throw new ApplicationPlatformError('access_unavailable','The company is unavailable.')
+  }
+}
 async function creationRef(context: Context, type: 'company' | 'person' | 'deal' | 'task', id: string): Promise<ApplicationResourceRef> {
   if (!getApplicationExecutionBinding(context.execution)) return (await read(context,type,id)).ref
   const creation = creations.get(context)
@@ -116,15 +125,37 @@ export function createCanonicalNativeApplicationModule():ApplicationModuleDefini
   const companyInput=z.object({name:z.string().min(1).max(256),domain:z.string().max(256).nullable().optional()}).strict()
   const contactInput=z.object({name:z.string().min(1).max(256),email:z.string().max(320).nullable().optional(),phone:z.string().max(100).nullable().optional()}).strict()
   const dealInput=z.object({stage:z.enum(['lead','qualified','proposal','negotiation','won','lost']).optional(),amount:crmAmountSchema.nullable().optional()}).strict()
+  const companyPatch=z.object({id:z.string().uuid().transform(id=>id.toLowerCase()),patch:crmCompanyPatch.refine(value=>Object.entries(value).some(([key,item])=>item!==undefined&&(key!=='customFields'||Object.keys(item??{}).length>0)))}).strict()
+  const companyPatchInput=companyPatch
+  const companyBatchInput=z.object({patches:z.array(companyPatch.extend({expectedVersion:z.string().min(1).max(256)})).min(1).max(100).refine(items=>new Set(items.map(item=>item.id)).size===items.length)}).strict()
   const taskInput=z.object({title:z.string().min(1).max(1024)}).strict()
   return {key:'native',defaultState:'enabled',application:{version:'1',dependencies:[],resources:definitions,
-    queries:['get','query'],commands:['create_company','create_contact','create_deal','create_task'],events:['native.company.created','native.contact.created','native.deal.created','native.task.created'],
+    queries:['get','query'],commands:['create_company','create_contact','create_deal','create_task','patch_company','patch_companies'],events:['native.company.patched','native.company.created','native.contact.created','native.deal.created','native.task.created'],
     policyCapabilities:['canonical_native'],backgroundHandlers:[],uiContributions:[]},
   resolveResources: resources,
   queries:{query:{input:queryInput,authorize:async(context,raw)=>{const input=queryInput.parse(raw);if(!(await resources(context,input.type)).length)throw new ApplicationPlatformError('access_unavailable','The resource is unavailable.')},
     execute:(context,raw)=>query(context,queryInput.parse(raw)),authorizeResult:authorizeQueryResult},get:{input:readInput,authorize:async(context,raw)=>{const input=readInput.parse(raw);await read(context,input.type,input.id,input.fields)},
     execute:async(context,raw)=>{const input=readInput.parse(raw);return read(context,input.type,input.id,input.fields)}, authorizeResult: authorizeReadResult}},
-  commands:{create_company:{input:companyInput,eventKey:'native.company.created',
+  commands:{patch_company:{input:companyPatchInput,eventKey:'native.company.patched',authorize:async(context,raw)=>{
+    const input=companyPatchInput.parse(raw),actor=context.execution.security.access
+    if(!await authorizeCanonicalCompanyPatch(actor.userId,input.id,input.patch,context.transaction,actor))throw new ApplicationPlatformError('access_unavailable','The company is unavailable.')
+    companyPatches.set(context,[input])
+  },execute:async(context,raw)=>{
+    if(context.expectedVersion===undefined)throw new ApplicationPlatformError('invalid_value','A canonical source version is required.')
+    const input=companyPatchInput.parse(raw),actor=context.execution.security.access
+    const ref=await patchCanonicalCompanyFields(actor.userId,input.id,input.patch,context.transaction,actor,{expectedVersion:context.expectedVersion})
+    if(!ref)throw new ApplicationPlatformError('access_unavailable','The company is unavailable.')
+    return [ref]
+  },authorizeResult:authorizeCompanyPatchResult},patch_companies:{input:companyBatchInput,eventKey:'native.company.patched',authorize:async(context,raw)=>{
+    if(context.expectedVersion!==undefined)throw new ApplicationPlatformError('invalid_value','Each company needs its own source version.')
+    const input=companyBatchInput.parse(raw),actor=context.execution.security.access
+    for(const patch of [...input.patches].sort((a,b)=>a.id.localeCompare(b.id)))if(!await authorizeCanonicalCompanyPatch(actor.userId,patch.id,patch.patch,context.transaction,actor))throw new ApplicationPlatformError('access_unavailable','The company is unavailable.')
+    companyPatches.set(context,input.patches)
+  },execute:async(context,raw)=>{
+    const input=companyBatchInput.parse(raw),actor=context.execution.security.access,refs:ApplicationResourceRef[]=[]
+    for(const patch of input.patches){const ref=await patchCanonicalCompanyFields(actor.userId,patch.id,patch.patch,context.transaction,actor,{expectedVersion:patch.expectedVersion});if(!ref)throw new ApplicationPlatformError('access_unavailable','The company is unavailable.');refs.push(ref)}
+    return refs
+  },authorizeResult:authorizeCompanyPatchResult},create_company:{input:companyInput,eventKey:'native.company.created',
     authorize:(context,raw)=>{const input=companyInput.parse(raw);return authorizeCreate(context,'company',['name',...(input.domain?['domain']:[])])},authorizeResult,
     execute:async(context,raw)=>{
       const input=companyInput.parse(raw),access=context.execution.security.access

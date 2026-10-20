@@ -65,7 +65,7 @@ function entity(over: Partial<EntityRecord> = {}): EntityRecord {
 
 beforeEach(() => {
   vi.resetAllMocks()
-  transactionClient.query.mockResolvedValue({rows:[{id:'e-1'}],rowCount:1})
+  transactionClient.query.mockImplementation(async(sql:string)=>({rows:[sql==='SHOW transaction_isolation'?{transaction_isolation:'read committed'}:{id:'e-1'}],rowCount:1}))
 })
 
 describe('[COMP:crm/update] CRM source authority threading', () => {
@@ -96,9 +96,18 @@ describe('[COMP:crm/update] CRM source authority threading', () => {
   })
 
   it('propagates a mutation refusal after an authorized source read', async () => {
-    vi.mocked(updateEntity).mockResolvedValueOnce(entity({ kind: 'company' })).mockResolvedValueOnce(entity({ kind: 'company' })).mockResolvedValueOnce(null)
-    expect(await updateCompany('u-viewer', 'e-1', { name: 'X' }, CTX)).toBeNull()
+    vi.mocked(updateEntity).mockResolvedValueOnce(entity()).mockResolvedValueOnce(entity()).mockResolvedValueOnce(null)
+    expect(await updateContact('u-viewer', 'e-1', { name: 'X' }, undefined, CTX)).toBeNull()
     expect(vi.mocked(updateEntity).mock.calls[1]![3]).toBe(CTX)
+  })
+
+  it('refuses an absent company transaction actor without raw mutation fallback',async()=>{
+    await expect(updateCompany('u-viewer','e-1',{name:'X'},CTX)).rejects.toMatchObject({code:'access_unavailable'})
+    expect(updateEntity).not.toHaveBeenCalled()
+    expect(getEntityById).not.toHaveBeenCalled()
+    expect(getEntityByIdSystem).not.toHaveBeenCalled()
+    expect(transactionClient.query).toHaveBeenCalledWith('ROLLBACK')
+    expect(transactionClient.query).not.toHaveBeenCalledWith('COMMIT')
   })
 
   it('threads explicit access through both stage operations', async () => {
@@ -110,7 +119,7 @@ describe('[COMP:crm/update] CRM source authority threading', () => {
   })
 
   it('uses the shared correction client for the source read and write', async () => {
-    const client = { query: vi.fn(async () => ({rows:[{id:'e-1'}],rowCount:1})) } as never
+    const client = { query: vi.fn(async(sql:string) => ({rows:[sql==='SHOW transaction_isolation'?{transaction_isolation:'read committed'}:{id:'e-1'}],rowCount:1})) } as never
     vi.mocked(updateEntity).mockResolvedValueOnce(entity({ kind: 'deal', attributes: { stage: 'lead', amount: 50000 } }))
       .mockResolvedValueOnce(entity({ kind: 'deal', attributes: { stage: 'lead', amount: 50000 } }))
       .mockResolvedValueOnce(entity({ kind: 'deal', attributes: { stage: 'won', amount: 50000 } }))

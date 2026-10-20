@@ -23,13 +23,15 @@ async function assertPointScopes(client:PoolClient,access:AccessContext,sources:
     AS scope(workspace_id uuid,user_id uuid,assistant_id uuid,sensitivity text,compartments text[],project_ids uuid[])`,[...predicate.params,JSON.stringify(scopes)])
   if(result.rows[0]?.admitted!==true)throw new ApplicationPlatformError('access_unavailable','The source is unavailable.')
 }
-export async function readLegacyCanonicalCrmPoint(access:AccessContext,type:'company'|'person'|'deal',id:string,fields:readonly string[]) {
+export async function readLegacyCanonicalCrmPoint(access:AccessContext,type:'company'|'person'|'deal',id:string,fields:readonly string[],transactionClient?:PoolClient) {
   const bound=currentApplicationReadTransaction(access)
+  if(bound&&transactionClient&&bound.client!==transactionClient)throw new ApplicationPlatformError('access_unavailable','The transaction is unavailable.')
   return runWithAgentAccess({...access,clearance:access.clearance??'confidential',compartments:access.compartments,
     visibilityAssistantIds:access.visibilityAssistantIds??(access.assistantKind==='primary'?null:[access.assistantId])},async()=>{
-    const client=bound?.client??await getAppPool().connect(),own=!bound
+    const client=transactionClient??bound?.client??await getAppPool().connect(),own=!transactionClient&&!bound
     try {
       if(own){await client.query('BEGIN');await applyRLSGucs(client,access.userId)}
+      if(transactionClient&&!bound&&(await client.query<{actor:string}>("SELECT current_setting('app.current_user_id',true) AS actor")).rows[0]?.actor!==access.userId)throw new ApplicationPlatformError('access_unavailable','The actor is unavailable.')
       await bound?.execution.security.authority.assertCurrent()
       bound?.assertLive()
       const definition=canonicalNativeResourceDefinitions().find(resource=>resource.typeKey===type)

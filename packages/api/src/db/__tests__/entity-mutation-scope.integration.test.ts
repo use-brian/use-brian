@@ -1,7 +1,7 @@
 import { randomUUID } from 'node:crypto'
 import { afterAll, describe, expect, it } from 'vitest'
 import type { AccessContext, EntityCreateParams, CrmOperationsContext } from '@use-brian/core'
-import { getAppPool, getPool } from '../client.js'
+import { applyRLSGucs, getAppPool, getPool } from '../client.js'
 import { runWithAgentAccess } from '../agent-access-context.js'
 import {
 // This suite asserts the legacy (pre-v2) model, which workspaces.department_read_v2=false still
@@ -822,25 +822,40 @@ describe('[COMP:api/entity-mutation-scope] canonical entity writers', () => {
     const f = await fixture()
     const record = await createEntity({ ...f.params, kind: kind === 'company' ? 'company' : kind === 'contact' ? 'person' : 'deal',
       displayName: 'Typed fixture', attributes: { stage: 'lead', phone: '555-0100', amount: 10 } })
-    const client = await pool.connect()
+    // Canonical full-DTO reads require actual Project membership too; the
+    // explicit projectIds array is a ceiling and never a grant.
+    if(kind==='company')await pool.query('INSERT INTO workspace_project_members(project_id,user_id) VALUES($1,$2)',[f.projectId,f.member])
+    const client = await (kind==='company'?getAppPool():pool).connect()
     const explicit = { ...f.access, userId: f.member, mutationCompartments: [f.key] }
-    const edit = (access?: AccessContext) => kind === 'company'
-      ? updateCompany(f.member, record.id, { name: 'Revised' }, access, client)
-      : kind === 'contact' ? updateContact(f.member, record.id, { phone: '555-0101' }, undefined, access, client)
-      : kind === 'deal' ? updateDeal(f.member, record.id, { amount: 20 }, undefined, access, client)
-      : setDealStage(f.member, record.id, 'won', access, client)
+    const edit = async(access?: AccessContext) => {
+      if(kind==='company'){
+        await client.query('BEGIN');await applyRLSGucs(client,f.member)
+        try{const result=await updateCompany(f.member,record.id,{name:'Revised'},access,client);await client.query('COMMIT');return result}
+        finally{await client.query('ROLLBACK')}
+      }
+      return kind === 'contact' ? updateContact(f.member, record.id, { phone: '555-0101' }, undefined, access, client)
+        : kind === 'deal' ? updateDeal(f.member, record.id, { amount: 20 }, undefined, access, client)
+        : setDealStage(f.member, record.id, 'won', access, client)
+    }
     try {
-      await client.query('BEGIN')
+      if(kind!=='company')await client.query('BEGIN')
       expect(await edit()).toBeNull()
       expect(await edit(explicit)).toBeNull()
       expect(await runWithAgentAccess({ ...f.execution([f.key]), userId: f.member }, () => edit())).toBeNull()
-      await client.query('COMMIT')
+      if(kind!=='company')await client.query('COMMIT')
       await f.groups.addMember(f.userId, f.team.id, f.member)
-      await client.query('BEGIN')
+      if(kind!=='company')await client.query('BEGIN')
       const changed = await edit(explicit)
       expect(changed).not.toBeNull()
       expect(changed).toMatchObject(kind === 'company' ? { name: 'Revised' } : kind === 'contact' ? { phone: '555-0101' } : kind === 'deal' ? { amount: 20 } : { stage: 'won' })
-      await client.query('COMMIT')
+      if(kind!=='company')await client.query('COMMIT')
+      if(kind==='company'){
+        const before=(await pool.query('SELECT scope_version FROM entities WHERE id=$1',[record.id])).rows[0].scope_version
+        await pool.query('DELETE FROM workspace_project_members WHERE project_id=$1 AND user_id=$2',[f.projectId,f.member])
+        await expect(edit(explicit)).rejects.toMatchObject({code:'access_unavailable'})
+        expect((await pool.query('SELECT scope_version FROM entities WHERE id=$1',[record.id])).rows[0].scope_version).toBe(before)
+        await pool.query('INSERT INTO workspace_project_members(project_id,user_id) VALUES($1,$2)',[f.projectId,f.member])
+      }
       await pool.query("UPDATE entities SET sensitivity='confidential' WHERE id=$1", [record.id])
       expect(await edit(explicit)).toBeNull()
       await pool.query("UPDATE entities SET sensitivity='internal',scope_held=true WHERE id=$1", [record.id])

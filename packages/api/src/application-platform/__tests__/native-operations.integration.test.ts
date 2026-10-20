@@ -918,7 +918,10 @@ describe('[COMP:api/application-records] canonical native operation composition'
             {"key":"archivedAt","read":[],"write":[],"releaseReadTo":[],"releaseWriteTo":[]},
             {"key":"tags","read":[],"write":[],"releaseReadTo":[],"releaseWriteTo":[]},
             {"key":"externalRef","read":[],"write":[],"releaseReadTo":[],"releaseWriteTo":[]},
-            {"key":"custom.cost","read":[["finance"]],"write":[["finance"]],"releaseReadTo":[],"releaseWriteTo":[]}]'::jsonb $$;
+            {"key":"custom.cost","read":[["finance"]],"write":[["finance"]],"releaseReadTo":[],"releaseWriteTo":[]},
+            {"key":"aliases","read":[],"write":[["finance"]],"releaseReadTo":[],"releaseWriteTo":[]},
+            {"key":"createdAt","read":[],"write":[["finance"]],"releaseReadTo":[],"releaseWriteTo":[]},
+            {"key":"updatedAt","read":[],"write":[["finance"]],"releaseReadTo":[],"releaseWriteTo":[]}]'::jsonb $$;
         REVOKE ALL ON FUNCTION native_operation_field_fixture_rules() FROM PUBLIC;
         CREATE TABLE native_operation_field_fixture_config(workspace_id uuid PRIMARY KEY,rules jsonb,point_requires_finance boolean NOT NULL DEFAULT false);
         CREATE TRIGGER native_operation_field_fixture_policy_configuration AFTER INSERT OR UPDATE OR DELETE ON public.native_operation_field_fixture_config
@@ -929,7 +932,7 @@ describe('[COMP:api/application-records] canonical native operation composition'
         REVOKE ALL ON FUNCTION native_operation_field_fixture_rules_for(uuid) FROM PUBLIC;
         CREATE FUNCTION native_operation_field_fixture_keys(w uuid) RETURNS jsonb
         LANGUAGE sql SECURITY DEFINER SET search_path=pg_catalog,public,pg_temp AS $$
-          SELECT to_jsonb(ARRAY['name','domain','tags','externalRef','archivedAt']||ARRAY(SELECT 'custom.'||field_key FROM public.crm_field_definitions
+          SELECT to_jsonb(ARRAY['name','domain','tags','externalRef','archivedAt','aliases','createdAt','updatedAt']||ARRAY(SELECT 'custom.'||field_key FROM public.crm_field_definitions
             WHERE workspace_id=w AND entity_kind='company' AND archived_at IS NULL ORDER BY field_key)) $$;
         REVOKE ALL ON FUNCTION native_operation_field_fixture_keys(uuid) FROM PUBLIC;
         CREATE FUNCTION native_operation_field_fixture_keys_for(w uuid,t text) RETURNS jsonb
@@ -1001,10 +1004,11 @@ describe('[COMP:api/application-records] canonical native operation composition'
     }
     const reader={...access,userId:readerId}
     async function snapshot(id:string) {return (await owner.query('SELECT attributes,scope_version::text AS version FROM entities WHERE id=$1',[id])).rows[0]}
-    async function protectedCreator(kind:'member'|'external_user'|'service',principalId?:string,type:'company'|'person'|'deal'='company') {
+    async function protectedCreator(kind:'member'|'external_user'|'service',principalId?:string,type:'company'|'person'|'deal'='company',patchTarget?:string|readonly string[],patchFields?:string[],patchCommand='patch_company',readFields:string[]=[]) {
       const appId=randomUUID(),grantId=randomUUID()
-      const fields=type==='company'?['name','domain']:type==='person'?['name','email','phone']:['name','stage','amount']
-      const key=type==='company'?'create_company':type==='person'?'create_contact':'create_deal'
+      const fields=patchFields??(type==='company'?['name','domain']:type==='person'?['name','email','phone']:['name','stage','amount'])
+      const key=patchTarget?patchCommand:type==='company'?'create_company':type==='person'?'create_contact':'create_deal'
+      const selector=patchTarget?{kind:'ids' as const,ids:typeof patchTarget==='string'?[patchTarget]:[...patchTarget]}:{kind:'self' as const}
       let actor=principalId??readerId
       if(kind!=='member' && !principalId) {
         actor=randomUUID();fixtureUsers.push(actor)
@@ -1015,11 +1019,11 @@ describe('[COMP:api/application-records] canonical native operation composition'
         VALUES($1,$2,'native','Fictional protected creator','api_client',$3,$4)`,[appId,workspaceId,assistantId,userId])
       await owner.query(`INSERT INTO application_access_grants(id,app_id,workspace_id,principal_kind,principal_user_id,issued_by_user_id,
         resource_origin,resource_type,actions,read_fields,write_fields,selector,compartments,project_ids,clearance,starts_at)
-        VALUES($1,$2,$3,$4,$5,$6,'{"kind":"native","moduleKey":"native"}',$7,$8,'{}',$9,
-        '{"kind":"self"}','{}','{}','confidential',now()-interval '1 hour')`,[grantId,appId,workspaceId,kind,actor,userId,type,['create',`command:${key}`],fields])
+        VALUES($1,$2,$3,$4,$5,$6,'{"kind":"native","moduleKey":"native"}',$7,$8,$11,$9,
+        $10::jsonb,'{}','{}','confidential',now()-interval '1 hour')`,[grantId,appId,workspaceId,kind,actor,userId,type,[patchTarget?'patch':'create',`command:${key}`,...(readFields.length?['read']:[])],fields,selector,readFields])
       const current=(await owner.query('SELECT * FROM application_access_grants WHERE id=$1',[grantId])).rows[0]
       const maximum={version:1,grants:[{id:grantId,appId,workspaceId,principal:{kind,userId:actor},origin:nativeOrigin,typeKey:type,
-        actions:current.actions,readFields:[],writeFields:fields,selector:{kind:'self'},version:1,status:'active',
+        actions:current.actions,readFields,writeFields:fields,selector,version:1,status:'active',
         startsAt:current.starts_at.toISOString(),expiresAt:null,parentGrantId:null,compartments:[],projectIds:[],clearance:'confidential'}]}
       if(kind==='service') {
         const secret=await mintApplicationCredentialSecret()
@@ -1038,6 +1042,170 @@ describe('[COMP:api/application-records] canonical native operation composition'
       const user=await authenticateApplicationOAuth(`oat_${id}_${secret}`,appId);expect(user).not.toBeNull()
       return {appId,grantId,actor,authentication:{user:user!}}
     }
+    it.each(['member','external_user','service'] as const)('Q03/Q05/Q06 patches a protected company with a write-only actual %s release and replays references once',async kind=>{
+      const value=await company(),before=await snapshot(value.id),fixture=await protectedCreator(kind,undefined,'company',value.id,['name'])
+      const dispatcher=new ApplicationPlatformService([createCanonicalNativeApplicationModule()])
+      const epoch=(await owner.query('SELECT revision::text AS value FROM application_policy_workspace_epochs WHERE workspace_id=$1',[workspaceId])).rows[0].value
+      const command={idempotencyKey:randomUUID(),expectedVersion:before.version,input:{id:value.id,patch:{name:'Fictional patched canonical company'}}}
+      const result=await dispatcher.command(await resolveApplicationExecutionContext(fixture.authentication),'native','patch_company',command)
+      expect(result.resources).toEqual([{workspaceId,origin:nativeOrigin,typeKey:'company',id:value.id,version:(BigInt(before.version)+1n).toString()}])
+      expect(JSON.stringify(result)).not.toContain('Fictional patched canonical company')
+      expect(await dispatcher.command(await resolveApplicationExecutionContext(fixture.authentication),'native','patch_company',command)).toEqual(result)
+      const stored=(await owner.query('SELECT display_name,attributes,scope_version::text AS version FROM entities WHERE id=$1',[value.id])).rows[0]
+      expect(stored).toMatchObject({display_name:'Fictional patched canonical company',attributes:{custom_fields:{cost:42}},version:result.resources[0].version})
+      const history=(await owner.query("SELECT before_image FROM brain_row_versions WHERE workspace_id=$1 AND primitive='entity' AND row_id=$2 AND before_image->>'scope_version'=$3",[workspaceId,value.id,before.version])).rows
+      expect(history).toHaveLength(1);expect(history[0].before_image).toMatchObject({id:value.id,display_name:value.name,attributes:{custom_fields:{cost:42}}})
+      expect((await owner.query('SELECT count(*)::int AS count FROM application_command_audit WHERE receipt_id=$1',[result.id])).rows[0].count).toBe(1)
+      expect((await owner.query('SELECT count(*)::int AS count FROM application_committed_events WHERE receipt_id=$1',[result.id])).rows[0].count).toBe(1)
+      expect((await owner.query('SELECT revision::text AS value FROM application_policy_workspace_epochs WHERE workspace_id=$1',[workspaceId])).rows[0].value).toBe(epoch)
+      await owner.query("UPDATE application_access_grants SET status='revoked' WHERE id=$1",[fixture.grantId])
+      await expect((async()=>dispatcher.command(await resolveApplicationExecutionContext(fixture.authentication),'native','patch_company',command))()).rejects.toMatchObject({code:'grant_revoked'})
+      expect(await snapshot(value.id)).toEqual({attributes:stored.attributes,version:stored.version})
+    })
+    it.each(['member','external_user','service'] as const)('Q03/Q04 patches only a released domain without requiring name access for actual %s',async kind=>{
+      const value=await company(),before=await snapshot(value.id),fixture=await protectedCreator(kind,undefined,'company',value.id,['domain'])
+      const result=await new ApplicationPlatformService([createCanonicalNativeApplicationModule()]).command(await resolveApplicationExecutionContext(fixture.authentication),'native','patch_company',{
+        idempotencyKey:randomUUID(),expectedVersion:before.version,input:{id:value.id,patch:{domain:'revised.example'}}})
+      const stored=(await owner.query('SELECT display_name,attributes FROM entities WHERE id=$1',[value.id])).rows[0]
+      expect(stored.display_name).toBe(value.name);expect(stored.attributes).toMatchObject({domain:'revised.example',custom_fields:{cost:42}})
+      expect(result.resources[0]).toMatchObject({id:value.id,version:(BigInt(before.version)+1n).toString()})
+    })
+    it.each([null,''] as const)('Q04/Q05 retains canonical legacy domain-clear storage for %s',async domain=>{
+      const value=await company();await updateCompany(userId,value.id,{domain:'previous.example'},access)
+      const result=await updateCompany(userId,value.id,{domain},access)
+      expect(result?.domain).toBe(domain)
+      const stored=(await owner.query('SELECT canonical_id,attributes FROM entities WHERE id=$1',[value.id])).rows[0]
+      expect(stored.canonical_id).toBe(domain);expect(stored.attributes).not.toHaveProperty('domain');expect(stored.attributes.custom_fields.cost).toBe(42)
+    })
+    it.each([null,''] as const)('Q04/Q05 deletes only a cleared canonical optional custom value for %s',async cleared=>{
+      const value=await company(),before=await snapshot(value.id)
+      expect(await updateCompany(userId,value.id,{customFields:{cost:cleared}},access)).toMatchObject({id:value.id})
+      const stored=await snapshot(value.id);expect(stored.attributes.custom_fields).not.toHaveProperty('cost')
+      expect(stored.version).toBe((BigInt(before.version)+1n).toString())
+    })
+    it('Q04 refuses the full legacy company DTO before effects under a write-only patch release',async()=>{
+      const value=await company(),before=await snapshot(value.id),fixture=await protectedCreator('service',undefined,'company',value.id,['name']),base=createCanonicalNativeApplicationModule(),key=randomUUID()
+      let legacyRejected=false
+      const dispatcher=new ApplicationPlatformService([{...base,commands:{...base.commands,patch_company:{...base.commands.patch_company,execute:async(context)=>{
+        const actor=context.execution.security.access
+        try {await updateCompany(actor.userId,value.id,{name:'Fictional unavailable DTO'},actor,context.transaction)}
+        catch(error){legacyRejected=(error as {code?:string}).code==='access_unavailable';throw error}
+        throw new Error('Legacy DTO accepted an unavailable read')
+      }}}}])
+      await expect(dispatcher.command(await resolveApplicationExecutionContext(fixture.authentication),'native','patch_company',{
+        idempotencyKey:key,expectedVersion:before.version,input:{id:value.id,patch:{name:'Fictional unavailable DTO'}}})).rejects.toMatchObject({code:'access_unavailable'})
+      expect(legacyRejected).toBe(true);expect(await snapshot(value.id)).toEqual(before)
+      expect((await owner.query("SELECT id FROM brain_row_versions WHERE primitive='entity' AND row_id=$1 AND before_image->>'scope_version'=$2",[value.id,before.version])).rows).toEqual([])
+      expect((await owner.query('SELECT id FROM application_operation_receipts WHERE workspace_id=$1 AND idempotency_key=$2',[workspaceId,key])).rows).toEqual([])
+    })
+    it('Q05 versions a same-value semantic company patch and captures its previous observable timestamp once',async()=>{
+      const value=await company(),before=await snapshot(value.id),fixture=await protectedCreator('service',undefined,'company',value.id,['name'])
+      const previous=(await owner.query('SELECT updated_at FROM entities WHERE id=$1',[value.id])).rows[0].updated_at
+      const result=await new ApplicationPlatformService([createCanonicalNativeApplicationModule()]).command(await resolveApplicationExecutionContext(fixture.authentication),'native','patch_company',{
+        idempotencyKey:randomUUID(),expectedVersion:before.version,input:{id:value.id,patch:{name:value.name}}})
+      expect(result.resources[0].version).toBe((BigInt(before.version)+1n).toString())
+      const history=(await owner.query("SELECT before_image FROM brain_row_versions WHERE primitive='entity' AND row_id=$1 AND before_image->>'scope_version'=$2",[value.id,before.version])).rows
+      expect(history).toHaveLength(1);expect(new Date(history[0].before_image.updated_at)).toEqual(previous)
+      expect((await owner.query('SELECT display_name,updated_at FROM entities WHERE id=$1',[value.id])).rows[0]).toMatchObject({display_name:value.name,updated_at:expect.any(Date)})
+      expect((await owner.query('SELECT updated_at>$2 AS advanced FROM entities WHERE id=$1',[value.id,previous])).rows[0].advanced).toBe(true)
+    })
+    it('Q03/Q06 rolls back a company patch after the actual member field role contracts following the write',async()=>{
+      const value=await company(),before=await snapshot(value.id),role=await creatorRole(readerId)
+      await setCreatorPolicy({point:true})
+      const fixture=await protectedCreator('member',readerId,'company',value.id,['name']),base=createCanonicalNativeApplicationModule(),key=randomUUID();let wrote=false
+      const dispatcher=new ApplicationPlatformService([{...base,commands:{...base.commands,patch_company:{...base.commands.patch_company,execute:async(context,raw)=>{
+        const result=await base.commands.patch_company.execute(context,raw);wrote=true
+        await owner.query("UPDATE application_native_role_assignments SET status='revoked' WHERE id=$1",[role]);return result
+      }}}}])
+      try {
+        await expect(dispatcher.command(await resolveApplicationExecutionContext(fixture.authentication),'native','patch_company',{
+          idempotencyKey:key,expectedVersion:before.version,input:{id:value.id,patch:{name:'Fictional contracted patch'}}})).rejects.toMatchObject({code:'access_unavailable'})
+        expect(wrote).toBe(true);expect(await snapshot(value.id)).toEqual(before)
+        expect((await owner.query("SELECT id FROM brain_row_versions WHERE primitive='entity' AND row_id=$1 AND before_image->>'scope_version'=$2",[value.id,before.version])).rows).toEqual([])
+        expect((await owner.query('SELECT id FROM application_operation_receipts WHERE workspace_id=$1 AND idempotency_key=$2',[workspaceId,key])).rows).toEqual([])
+      } finally {await owner.query('DELETE FROM application_native_role_assignments WHERE id=$1',[role]);await clearCreatorPolicy()}
+    })
+    it('Q03 retains the actual member custom-field floor behind an external company patch profile',async()=>{
+      const rules=(await owner.query('SELECT native_operation_field_fixture_rules() AS rules')).rows[0].rules
+      rules.find((field:{key:string})=>field.key==='custom.cost').releaseWriteTo=['external_user']
+      await owner.query('INSERT INTO native_operation_field_fixture_config(workspace_id,rules) VALUES($1,$2)',[workspaceId,JSON.stringify(rules)])
+      const value=await company(),before=await snapshot(value.id),fixture=await protectedCreator('external_user',readerId,'company',value.id,['custom.cost'])
+      const dispatcher=new ApplicationPlatformService([createCanonicalNativeApplicationModule()]),command={idempotencyKey:randomUUID(),expectedVersion:before.version,input:{id:value.id,patch:{customFields:{cost:43}}}}
+      let role:string|undefined
+      try {
+        await expect(dispatcher.command(await resolveApplicationExecutionContext(fixture.authentication),'native','patch_company',command)).rejects.toMatchObject({code:'access_unavailable'})
+        expect(await snapshot(value.id)).toEqual(before)
+        role=await creatorRole(readerId)
+        expect((await dispatcher.command(await resolveApplicationExecutionContext(fixture.authentication),'native','patch_company',command)).resources[0].version).toBe((BigInt(before.version)+1n).toString())
+        expect((await snapshot(value.id)).attributes.custom_fields.cost).toBe(43)
+      } finally {if(role)await owner.query('DELETE FROM application_native_role_assignments WHERE id=$1',[role]);await clearCreatorPolicy()}
+    })
+    it('Q05 races independent canonical company commands with one valid version outcome and one history/audit/outbox set',async()=>{
+      const value=await company(),before=await snapshot(value.id),a=await protectedCreator('service',undefined,'company',value.id,['name']),b=await protectedCreator('service',undefined,'company',value.id,['name'])
+      const dispatcher=new ApplicationPlatformService([createCanonicalNativeApplicationModule()]),keys=[randomUUID(),randomUUID()]
+      const results=await Promise.allSettled([a,b].map(async(fixture,index)=>dispatcher.command(await resolveApplicationExecutionContext(fixture.authentication),'native','patch_company',{
+        idempotencyKey:keys[index],expectedVersion:before.version,input:{id:value.id,patch:{name:`Fictional race ${index}`}}})))
+      expect(results.filter(result=>result.status==='fulfilled')).toHaveLength(1)
+      expect(results.filter(result=>result.status==='rejected')).toEqual([expect.objectContaining({reason:expect.objectContaining({code:'record_version_conflict'})})])
+      expect((await snapshot(value.id)).version).toBe((BigInt(before.version)+1n).toString())
+      expect((await owner.query("SELECT count(*)::int AS count FROM brain_row_versions WHERE primitive='entity' AND row_id=$1 AND before_image->>'scope_version'=$2",[value.id,before.version])).rows[0].count).toBe(1)
+      const receipts=(await owner.query('SELECT id FROM application_operation_receipts WHERE workspace_id=$1 AND idempotency_key=ANY($2::text[])',[workspaceId,keys])).rows
+      expect(receipts).toHaveLength(1)
+      for(const table of ['application_command_audit','application_committed_events'])expect((await owner.query(`SELECT count(*)::int AS count FROM ${table} WHERE receipt_id=$1`,[receipts[0].id])).rows[0].count).toBe(1)
+    })
+    it('Q06 rolls back a company patch history and business row when its registered command fails after the write',async()=>{
+      const value=await company(),before=await snapshot(value.id),fixture=await protectedCreator('service',undefined,'company',value.id,['name']),base=createCanonicalNativeApplicationModule(),key=randomUUID()
+      const dispatcher=new ApplicationPlatformService([{...base,commands:{...base.commands,patch_company:{...base.commands.patch_company,execute:async(context,raw)=>{
+        await base.commands.patch_company.execute(context,raw);throw new Error('Fictional command rollback')
+      }}}}])
+      await expect(dispatcher.command(await resolveApplicationExecutionContext(fixture.authentication),'native','patch_company',{
+        idempotencyKey:key,expectedVersion:before.version,input:{id:value.id,patch:{name:'Fictional rolled-back patch'}}})).rejects.toThrow('Fictional command rollback')
+      expect(await snapshot(value.id)).toEqual(before)
+      expect((await owner.query("SELECT count(*)::int AS count FROM brain_row_versions WHERE primitive='entity' AND row_id=$1 AND before_image->>'scope_version'=$2",[value.id,before.version])).rows[0].count).toBe(0)
+      expect((await owner.query('SELECT id FROM application_operation_receipts WHERE workspace_id=$1 AND idempotency_key=$2',[workspaceId,key])).rows).toEqual([])
+    })
+    it('Q06 commits and replays one bounded multi-company command using canonical writers and one reference-only operation',async()=>{
+      const rows=await Promise.all([company(),company()]),before=await Promise.all(rows.map(row=>snapshot(row.id)))
+      const fixture=await protectedCreator('service',undefined,'company',rows.map(row=>row.id),['name'],'patch_companies'),dispatcher=new ApplicationPlatformService([createCanonicalNativeApplicationModule()])
+      const command={idempotencyKey:randomUUID(),input:{patches:rows.map((row,index)=>({id:row.id,expectedVersion:before[index].version,patch:{name:`Fictional batch ${index}`}}))}}
+      const result=await dispatcher.command(await resolveApplicationExecutionContext(fixture.authentication),'native','patch_companies',command)
+      expect(result.resources.map(ref=>ref.id)).toEqual(rows.map(row=>row.id))
+      expect(await dispatcher.command(await resolveApplicationExecutionContext(fixture.authentication),'native','patch_companies',command)).toEqual(result)
+      for(const [index,row]of rows.entries()){
+        expect(await snapshot(row.id)).toMatchObject({attributes:{custom_fields:{cost:42}},version:(BigInt(before[index].version)+1n).toString()})
+        expect((await owner.query("SELECT count(*)::int AS count FROM brain_row_versions WHERE primitive='entity' AND row_id=$1 AND before_image->>'scope_version'=$2",[row.id,before[index].version])).rows[0].count).toBe(1)
+      }
+      expect(JSON.stringify(result)).not.toContain('Fictional batch')
+      for(const table of ['application_command_audit','application_committed_events'])expect((await owner.query(`SELECT count(*)::int AS count FROM ${table} WHERE receipt_id=$1`,[result.id])).rows[0].count).toBe(1)
+    })
+    it('Q06 rolls back earlier canonical company changes and history after a later batch version conflict',async()=>{
+      const rows=await Promise.all([company(),company()]),before=await Promise.all(rows.map(row=>snapshot(row.id))),key=randomUUID()
+      const fixture=await protectedCreator('service',undefined,'company',rows.map(row=>row.id),['name'],'patch_companies'),dispatcher=new ApplicationPlatformService([createCanonicalNativeApplicationModule()])
+      await expect(dispatcher.command(await resolveApplicationExecutionContext(fixture.authentication),'native','patch_companies',{idempotencyKey:key,input:{patches:rows.map((row,index)=>({
+        id:row.id,expectedVersion:index===1?'999999999':before[index].version,patch:{name:'Fictional uncommitted batch'}}))}})).rejects.toMatchObject({code:'record_version_conflict'})
+      for(const [index,row]of rows.entries()){
+        expect(await snapshot(row.id)).toEqual(before[index])
+        expect((await owner.query("SELECT count(*)::int AS count FROM brain_row_versions WHERE primitive='entity' AND row_id=$1 AND before_image->>'scope_version'=$2",[row.id,before[index].version])).rows[0].count).toBe(0)
+      }
+      expect((await owner.query('SELECT id FROM application_operation_receipts WHERE workspace_id=$1 AND idempotency_key=$2',[workspaceId,key])).rows).toEqual([])
+    })
+    it('Q04/Q06 refuses duplicate, empty, oversized and scalar-version company batches before effects',async()=>{
+      const value=await company(),before=await snapshot(value.id),fixture=await protectedCreator('service',undefined,'company',value.id,['name'],'patch_companies'),dispatcher=new ApplicationPlatformService([createCanonicalNativeApplicationModule()])
+      const patch={id:value.id,expectedVersion:before.version,patch:{name:'Fictional bounded patch'}}
+      for(const patches of [[],[patch,patch],Array.from({length:101},()=>({...patch,id:randomUUID()}))])await expect(dispatcher.command(await resolveApplicationExecutionContext(fixture.authentication),'native','patch_companies',{
+        idempotencyKey:randomUUID(),input:{patches}})).rejects.toMatchObject({code:'invalid_value'})
+      await expect(dispatcher.command(await resolveApplicationExecutionContext(fixture.authentication),'native','patch_companies',{
+        idempotencyKey:randomUUID(),expectedVersion:before.version,input:{patches:[patch]}})).rejects.toMatchObject({code:'invalid_value'})
+      expect(await snapshot(value.id)).toEqual(before)
+    })
+    it('Q03/Q06 retains an independent company reader after the command issuer contracts',async()=>{
+      const value=await company(),before=await snapshot(value.id),a=await protectedCreator('service',undefined,'company',value.id,['name']),b=await protectedCreator('service',undefined,'company',value.id,['name'],'patch_company',['name'])
+      const dispatcher=new ApplicationPlatformService([createCanonicalNativeApplicationModule()]),command={idempotencyKey:randomUUID(),expectedVersion:before.version,input:{id:value.id,patch:{name:'Fictional independently readable patch'}}}
+      await dispatcher.command(await resolveApplicationExecutionContext(a.authentication),'native','patch_company',command)
+      await owner.query("UPDATE application_access_grants SET status='revoked' WHERE id=$1",[a.grantId])
+      expect(await dispatcher.query(await resolveApplicationExecutionContext(b.authentication),'native','get',{type:'company',id:value.id,fields:['name']})).toMatchObject({values:{name:'Fictional independently readable patch'}})
+      await expect((async()=>dispatcher.command(await resolveApplicationExecutionContext(a.authentication),'native','patch_company',command))()).rejects.toMatchObject({code:'grant_revoked'})
+    })
     it.each((['member','external_user','service'] as const).flatMap(kind=>(['company','person','deal'] as const).map(type=>({kind,type}))))(
       'Q03/Q05 creates and replays a protected canonical $type as the actual $kind',async({kind,type})=>{
       const fixture=await protectedCreator(kind,undefined,type),dispatcher=new ApplicationPlatformService([createCanonicalNativeApplicationModule()])
