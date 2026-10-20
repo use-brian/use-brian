@@ -1,166 +1,47 @@
-import { query } from './client.js'
-import type { EpisodicMessageSpan } from '@use-brian/core'
-
-export type EpisodicMemoryRow = {
-  id: string
-  userId: string
-  assistantId: string
-  sessionId: string
-  topicLabel: string
-  summary: string
-  messageSpan: EpisodicMessageSpan
-  entityRefs: unknown[] | null
-  createdAt: Date
-  lastAccessedAt: Date
-  accessCount: number
-  survivalCount: number
+import { z } from 'zod'
+import { DerivedScopeError,bindScopeSources,boundScopeSources,type EpisodicStore,type EpisodicMemoryRecord,type SessionContextAuthority } from '@use-brian/core'
+import { readSessionContextRevisions,writeSessionContextRevision,mutateSessionContextParents,type SessionContextRevision } from './session-context-revisions.js'
+export type EpisodicMemoryRow = EpisodicMemoryRecord
+const payload=z.object({topicLabel:z.string().min(1),summary:z.string().min(1),messageSpan:z.object({
+  fromSequence:z.number().int().nonnegative(),toSequence:z.number().int().nonnegative(),turnCount:z.number().int().nonnegative(),fromMsgId:z.string().optional(),toMsgId:z.string().optional()}).strict(),
+  entityRefs:z.array(z.unknown()).nullable()}).strict()
+function record(row:SessionContextRevision):EpisodicMemoryRow {
+  const value=payload.parse(row.content)
+  return bindScopeSources({...value,id:row.parentId,sessionId:row.sessionId,userId:row.userId,assistantId:row.assistantId,
+    createdAt:row.createdAt,lastAccessedAt:row.lastAccessedAt,accessCount:row.accessCount,survivalCount:row.survivalCount},boundScopeSources(row))
 }
-
-const SELECT = `
-  id,
-  user_id as "userId",
-  assistant_id as "assistantId",
-  session_id as "sessionId",
-  topic_label as "topicLabel",
-  summary,
-  message_span as "messageSpan",
-  entity_refs as "entityRefs",
-  created_at as "createdAt",
-  last_accessed_at as "lastAccessedAt",
-  access_count as "accessCount",
-  survival_count as "survivalCount"
-`
-
-export async function createEpisodicMemory(params: {
-  userId: string
-  assistantId: string
-  sessionId: string
-  topicLabel: string
-  summary: string
-  messageSpan: EpisodicMessageSpan
-  entityRefs?: unknown[]
-}): Promise<EpisodicMemoryRow> {
-  const result = await query<EpisodicMemoryRow>(
-    `INSERT INTO episodic_memories
-       (user_id, assistant_id, session_id, topic_label, summary, message_span, entity_refs)
-     VALUES ($1, $2, $3, $4, $5, $6, $7)
-     RETURNING ${SELECT}`,
-    [
-      params.userId,
-      params.assistantId,
-      params.sessionId,
-      params.topicLabel,
-      params.summary,
-      JSON.stringify(params.messageSpan),
-      params.entityRefs ? JSON.stringify(params.entityRefs) : null,
-    ],
-  )
-  return result.rows[0]
+export async function createEpisodicMemory(params:Parameters<EpisodicStore['create']>[0]):Promise<EpisodicMemoryRow> {
+  const content={topicLabel:params.topicLabel,summary:params.summary,messageSpan:params.messageSpan,entityRefs:params.entityRefs??null}
+  payload.parse(content)
+  const row=await writeSessionContextRevision({sessionId:params.sessionId,kind:'episodic_memory',content,authority:params.authority,derivation:params.derivation})
+  if(!row)throw new DerivedScopeError('scope_source_changed')
+  return record(row)
 }
-
-/**
- * Fetch rows for (session, topic_label) ordered newest-accessed first.
- * Bumps last_accessed_at + access_count on the returned rows.
- */
-export async function fetchEpisodicByTopic(params: {
-  sessionId: string
-  topicLabel: string
-  limit?: number
-}): Promise<EpisodicMemoryRow[]> {
-  const limit = params.limit ?? 3
-  const result = await query<EpisodicMemoryRow>(
-    `UPDATE episodic_memories
-        SET last_accessed_at = now(),
-            access_count = access_count + 1
-      WHERE id IN (
-        SELECT id FROM episodic_memories
-         WHERE session_id = $1 AND topic_label = $2
-         ORDER BY last_accessed_at DESC
-         LIMIT $3
-      )
-     RETURNING ${SELECT}`,
-    [params.sessionId, params.topicLabel, limit],
-  )
-  // Preserve newest-first ordering that the inner SELECT applied.
-  return result.rows.sort(
-    (a, b) => b.lastAccessedAt.getTime() - a.lastAccessedAt.getTime(),
-  )
+export async function fetchEpisodicByTopic(params:Parameters<EpisodicStore['fetchByTopic']>[0]):Promise<EpisodicMemoryRow[]> {
+  const rows=(await readSessionContextRevisions(params.sessionId,'episodic_memory',params.authority))
+    .filter(row=>record(row).topicLabel===params.topicLabel)
+    .sort((a,b)=>b.lastAccessedAt.getTime()-a.lastAccessedAt.getTime()).slice(0,Math.max(0,params.limit??3))
+  if(rows.length)await mutateSessionContextParents(params.authority,'episodic_memory',rows,'access')
+  return rows.map(row=>{const value=record(row);value.lastAccessedAt=new Date();value.accessCount+=1;return value})
 }
-
-export async function fetchEpisodicBySession(params: {
-  sessionId: string
-  limit?: number
-}): Promise<EpisodicMemoryRow[]> {
-  const limit = params.limit ?? 50
-  const result = await query<EpisodicMemoryRow>(
-    `SELECT ${SELECT}
-     FROM episodic_memories
-     WHERE session_id = $1
-     ORDER BY created_at DESC
-     LIMIT $2`,
-    [params.sessionId, limit],
-  )
-  return result.rows
+export async function fetchEpisodicBySession(params:Parameters<EpisodicStore['fetchBySession']>[0]):Promise<EpisodicMemoryRow[]> {
+  return (await readSessionContextRevisions(params.sessionId,'episodic_memory',params.authority)).map(record)
+    .sort((a,b)=>b.createdAt.getTime()-a.createdAt.getTime()).slice(0,Math.max(0,params.limit??50))
 }
-
-/**
- * Enumerate distinct topic labels in a session, newest first by
- * most-recent episode creation.
- */
-export async function listEpisodicTopicsBySession(params: {
-  sessionId: string
-  limit?: number
-}): Promise<string[]> {
-  const limit = params.limit ?? 20
-  const result = await query<{ topicLabel: string }>(
-    `SELECT topic_label as "topicLabel"
-     FROM (
-       SELECT topic_label, MAX(created_at) AS last_created
-       FROM episodic_memories
-       WHERE session_id = $1
-       GROUP BY topic_label
-       ORDER BY last_created DESC
-       LIMIT $2
-     ) t`,
-    [params.sessionId, limit],
-  )
-  return result.rows.map((r) => r.topicLabel)
+export async function listEpisodicTopicsBySession(params:Parameters<EpisodicStore['listTopicsBySession']>[0]):Promise<string[]> {
+  const rows=(await readSessionContextRevisions(params.sessionId,'episodic_memory',params.authority)).map(record)
+    .sort((a,b)=>b.createdAt.getTime()-a.createdAt.getTime())
+  return [...new Set(rows.map(row=>row.topicLabel))].slice(0,Math.max(0,params.limit??20))
 }
-
-/**
- * Fetch every episodic row for a session without bumping access
- * counters. Used by the compaction housekeeping pass to decide which
- * rows to evict, promote, or keep.
- */
-export async function listEpisodicBySession(
-  sessionId: string,
-): Promise<EpisodicMemoryRow[]> {
-  const result = await query<EpisodicMemoryRow>(
-    `SELECT ${SELECT}
-     FROM episodic_memories
-     WHERE session_id = $1
-     ORDER BY created_at ASC`,
-    [sessionId],
-  )
-  return result.rows
+export async function listEpisodicBySession(sessionId:string,authority?:SessionContextAuthority):Promise<EpisodicMemoryRow[]> {
+  return (await readSessionContextRevisions(sessionId,'episodic_memory',authority)).map(record).sort((a,b)=>a.createdAt.getTime()-b.createdAt.getTime())
 }
-
-export async function deleteEpisodicById(id: string): Promise<void> {
-  await query(`DELETE FROM episodic_memories WHERE id = $1`, [id])
+export async function deleteEpisodicById(id:string,authority?:SessionContextAuthority):Promise<void> {
+  const rows=await readSessionContextRevisions(authority?.execution.lifecycle.sessionId??'','episodic_memory',authority)
+  await mutateSessionContextParents(authority,'episodic_memory',rows.filter(row=>row.parentId===id),'delete')
 }
-
-/**
- * Bulk-increment survival_count by 1 for the given rows. No-op for
- * an empty id list so the caller doesn't have to guard.
- */
-export async function incrementEpisodicSurvivalCount(
-  ids: string[],
-): Promise<void> {
-  if (ids.length === 0) return
-  await query(
-    `UPDATE episodic_memories
-        SET survival_count = survival_count + 1
-      WHERE id = ANY($1::uuid[])`,
-    [ids],
-  )
+export async function incrementEpisodicSurvivalCount(ids:string[],authority?:SessionContextAuthority):Promise<void> {
+  if(!ids.length)return
+  const rows=await readSessionContextRevisions(authority?.execution.lifecycle.sessionId??'','episodic_memory',authority)
+  await mutateSessionContextParents(authority,'episodic_memory',rows.filter(row=>ids.includes(row.parentId)),'survive')
 }

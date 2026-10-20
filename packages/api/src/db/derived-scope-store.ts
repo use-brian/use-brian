@@ -165,7 +165,7 @@ export async function readCurrentScopeSources(
     const row = byOrd.get(index + 1) ?? null
     // A CRM event snapshot is withheld (NULL) while held or retired, so its
     // absence is not proof of deletion.
-    if (!row) return source.resourceKind === 'external_source' || source.resourceKind === 'application_field' ? { state: 'unverifiable', source }
+    if (!row) return source.resourceKind === 'external_source' || source.resourceKind === 'application_field' || source.resourceKind === 'session_context_revision' ? { state: 'unverifiable', source }
       : source.resourceKind === 'crm_event' ? { state: 'held', source } : { state: 'gone', source }
     if (row.held) return { state: 'held', source }
     if (source.resourceKind === 'crm_event' && (!row.causalEntityId
@@ -248,4 +248,4 @@ export async function recordDerivedResource(
 }
 
 /** Output families whose readers enforce page ancestry. */
-const PAGE_LINEAGE_OUTPUT_KINDS = new Set(['workspace_file', 'file_segment'])
+const PAGE_LINEAGE_OUTPUT_KINDS = new Set(['workspace_file', 'file_segment', 'session_context_revision'])

@@ -1,3 +1,13 @@
+import type { ExecutionContext } from '../security/execution-context.js'
+import type { ContextScopeAccumulator } from '../security/context-scope.js'
+import type { DerivedWriteEvidence } from '../security/derived-scope.js'
+
+/** Existing canonical host objects, never serialized tool/model input. */
+export type SessionContextAuthority = Readonly<{
+  execution: ExecutionContext
+  accumulator: ContextScopeAccumulator
+}>
+
 /**
  * Session-state memory tier.
  *
@@ -54,6 +64,8 @@ export type SessionStateStore = {
     summary: string
     detail?: string | null
     source: SessionStateSource
+    authority?: SessionContextAuthority
+    derivation?: DerivedWriteEvidence
   }): Promise<SessionStateRecord>
 
   /**
@@ -66,13 +78,15 @@ export type SessionStateStore = {
     sessionId: string
     key: string
     source: SessionStateSource
+    authority?: SessionContextAuthority
+    derivation?: DerivedWriteEvidence
   }): Promise<SessionStateRecord | null>
 
   /**
    * Fetch all open rows for a session, newest `updated_at` first. Used by
    * the retrieval formatter (every turn) and by the diff pass (for dedup).
    */
-  listOpenBySession(sessionId: string): Promise<SessionStateRecord[]>
+  listOpenBySession(sessionId: string, authority?: SessionContextAuthority): Promise<SessionStateRecord[]>
 
   /**
    * Fetch all rows for a session (any status), newest `updated_at` first.
@@ -82,6 +96,7 @@ export type SessionStateStore = {
   listRecentBySession(
     sessionId: string,
     limit?: number,
+    authority?: SessionContextAuthority,
   ): Promise<SessionStateRecord[]>
 
   /**
@@ -92,5 +107,6 @@ export type SessionStateStore = {
   purgeResolvedOlderThan(
     sessionId: string,
     olderThan: Date,
+    authority?: SessionContextAuthority,
   ): Promise<number>
 }

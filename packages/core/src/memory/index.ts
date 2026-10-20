@@ -38,6 +38,7 @@ export type {
   SessionStateRecord,
   SessionStateStatus,
   SessionStateSource,
+  SessionContextAuthority,
 } from './session-state-types.js'
 export { buildSessionStateBlock, buildDeliveryConversationStateBlock } from './session-state-context.js'
 export type {

@@ -41,7 +41,8 @@ async function assertSourceModelAuthority(context: ToolContext, action: 'context
     const ancestors = await readExternalSourceAncestors(workspaceId, sources)
     const fields = await readApplicationFieldAncestors(workspaceId, sources)
     const external = ancestors.length > 0 || sources.some(source => source.resourceKind === 'external_source')
-    if (!external && !fields.length) {
+    const persistent = sources.some(source=>source.resourceKind==='session_context_revision')
+    if (!external && !fields.length && !persistent) {
       const current = await validate(evidence.evidence, execution.security.ceiling)
       await execution.security.authority.assertCurrent()
       if (JSON.stringify(accumulator.evidence) !== originalEvidence) denied()
@@ -49,7 +50,7 @@ async function assertSourceModelAuthority(context: ToolContext, action: 'context
       return
     }
     const application = getApplicationExecutionBinding(execution)
-    if (execution.ownership.kind !== 'workspace' || execution.security.access.sharedAudience
+    if (execution.ownership.kind !== 'workspace' || execution.security.access.sharedAudience && (external || fields.length>0)
       || (!application || external) && (execution.identity.kind !== 'attended' || execution.identity.principal.kind !== 'workspace_member')) denied()
     const wiring = external ? getSharedRetainedSourceAuthority() : undefined
     if (external && !wiring) denied()

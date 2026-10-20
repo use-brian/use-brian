@@ -122,6 +122,7 @@ async function validateScopeEvidence(
   }, ceiling)
   if (failure) throw unavailable(kind, failure)
   if (!sources.length) return snapshot
+  if (!client && sources.some(source=>source.resourceKind==='session_context_revision')) throw unavailable(kind,'source_unverifiable')
 
   // A native envelope cannot erase its independently authorized source ancestry.
   // This metadata read confers no source rights: current transaction receipts
@@ -203,7 +204,7 @@ async function validateScopeEvidence(
   // writer's rule (`revalidateScopeSources`), not the audience's.
   let states: Awaited<ReturnType<typeof readCurrentScopeSources>>
   try {
-    states = await readCurrentScopeSources(client ?? getPool(), ceiling.workspaceId, sources.filter(source=>!pageKinds.has(source.resourceKind)), workflowRunId, kind === 'caller' ? 'context' : 'deliver', !!client && sources.some(source => source.resourceKind === 'external_source' || source.resourceKind === 'application_field'))
+    states = await readCurrentScopeSources(client ?? getPool(), ceiling.workspaceId, sources.filter(source=>!pageKinds.has(source.resourceKind)), workflowRunId, kind === 'caller' ? 'context' : 'deliver', !!client && sources.some(source => source.resourceKind === 'external_source' || source.resourceKind === 'application_field' || source.resourceKind === 'session_context_revision'))
   } catch (error) {
     throw unavailable(kind, 'verification_error', error)
   }

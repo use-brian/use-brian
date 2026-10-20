@@ -1,155 +1,65 @@
-import type {
-  SessionStateSource,
-  SessionStateStatus,
-} from '@use-brian/core'
-import { query } from './client.js'
+import { z } from 'zod'
+import { DerivedScopeError, bindScopeSources, boundScopeSources,
+  type SessionStateSource, type SessionStateStatus, type SessionStateStore, type SessionContextAuthority } from '@use-brian/core'
+import { readSessionContextRevisions, writeSessionContextRevision, mutateSessionContextParents, sessionContextGeneration,
+  type SessionContextRevision } from './session-context-revisions.js'
 
 export type SessionStateRow = {
-  id: string
-  sessionId: string
-  userId: string
-  assistantId: string
-  key: string
-  status: SessionStateStatus
-  summary: string
-  detail: string | null
-  source: SessionStateSource
-  createdAt: Date
-  updatedAt: Date
-  resolvedAt: Date | null
+  id: string; sessionId: string; userId: string; assistantId: string; key: string; status: SessionStateStatus
+  summary: string; detail: string | null; source: SessionStateSource; createdAt: Date; updatedAt: Date; resolvedAt: Date | null
 }
-
-const SELECT = `
-  id,
-  session_id   as "sessionId",
-  user_id      as "userId",
-  assistant_id as "assistantId",
-  key,
-  status,
-  summary,
-  detail,
-  source,
-  created_at  as "createdAt",
-  updated_at  as "updatedAt",
-  resolved_at as "resolvedAt"
-`
-
-export async function upsertSessionState(params: {
-  sessionId: string
-  userId: string
-  assistantId: string
-  key: string
-  summary: string
-  detail: string | null
-  source: SessionStateSource
-}): Promise<SessionStateRow> {
-  // ON CONFLICT (session_id, key): reopen any resolved row (status='open',
-  // resolved_at=NULL), bump updated_at, and apply the provenance rule for
-  // summary/detail — see docs/architecture/context-engine/session-state.md
-  // "Provenance rule on conflicting writes".
-  //
-  // Rule: when the incoming write is `source='diff-pass'` but the existing
-  // row was last written by `source='tool'`, preserve the existing
-  // summary + detail. The tool path is authoritative; a background Flash
-  // inference cannot destroy what the model explicitly committed. Any
-  // other combination (tool over anything, diff-pass over diff-pass,
-  // fresh insert) writes normally.
-  const result = await query<SessionStateRow>(
-    `INSERT INTO session_state
-       (session_id, user_id, assistant_id, key, status, summary, detail, source)
-     VALUES ($1, $2, $3, $4, 'open', $5, $6, $7)
-     ON CONFLICT (session_id, key) DO UPDATE SET
-       status      = 'open',
-       summary     = CASE
-                       WHEN EXCLUDED.source = 'diff-pass' AND session_state.source = 'tool'
-                         THEN session_state.summary
-                       ELSE EXCLUDED.summary
-                     END,
-       detail      = CASE
-                       WHEN EXCLUDED.source = 'diff-pass' AND session_state.source = 'tool'
-                         THEN session_state.detail
-                       ELSE EXCLUDED.detail
-                     END,
-       source      = EXCLUDED.source,
-       updated_at  = now(),
-       resolved_at = NULL
-     RETURNING ${SELECT}`,
-    [
-      params.sessionId,
-      params.userId,
-      params.assistantId,
-      params.key,
-      params.summary,
-      params.detail,
-      params.source,
-    ],
-  )
-  return result.rows[0]
+const payload = z.object({ key: z.string().min(1).max(200),status: z.enum(['open','resolved','cancelled']),summary: z.string().min(1).max(400),
+  detail: z.string().max(8000).nullable(),source: z.enum(['tool','diff-pass','scheduler']),createdAt: z.number(),updatedAt: z.number(),resolvedAt: z.number().nullable() }).strict()
+function record(row: SessionContextRevision): SessionStateRow {
+  const value=payload.parse(row.content)
+  return bindScopeSources({ ...value,id: row.parentId,sessionId: row.sessionId,userId: row.userId,assistantId: row.assistantId,
+    createdAt: new Date(value.createdAt),updatedAt: new Date(value.updatedAt),resolvedAt: value.resolvedAt===null?null:new Date(value.resolvedAt) },boundScopeSources(row))
 }
-
-export async function resolveSessionState(params: {
-  sessionId: string
-  key: string
-  source: SessionStateSource
-}): Promise<SessionStateRow | null> {
-  const result = await query<SessionStateRow>(
-    `UPDATE session_state
-        SET status      = 'resolved',
-            source      = $3,
-            updated_at  = now(),
-            resolved_at = now()
-      WHERE session_id = $1
-        AND key = $2
-        AND status = 'open'
-     RETURNING ${SELECT}`,
-    [params.sessionId, params.key, params.source],
-  )
-  return result.rows[0] ?? null
+function writeProof(params: { authority?: SessionContextAuthority; derivation?: unknown }) {
+  if (!params.authority || !params.derivation) throw new DerivedScopeError('scope_evidence_missing')
 }
-
-export async function listOpenSessionState(
-  sessionId: string,
-): Promise<SessionStateRow[]> {
-  const result = await query<SessionStateRow>(
-    `SELECT ${SELECT}
-       FROM session_state
-      WHERE session_id = $1
-        AND status = 'open'
-      ORDER BY updated_at DESC`,
-    [sessionId],
-  )
-  return result.rows
+export async function upsertSessionState(params: Parameters<SessionStateStore['upsert']>[0]): Promise<SessionStateRow> {
+  writeProof(params)
+  const expectedGeneration=await sessionContextGeneration(params.sessionId)
+  const existing=(await readSessionContextRevisions(params.sessionId,'session_state',params.authority)).find(row=>record(row).key===params.key)
+  const old=existing?record(existing):undefined,now=Date.now()
+  // Preserve tool-authored content only for the established tool -> diff rule.
+  // Reopening still depends on both the old key/content and the new inputs.
+  const keep=old?.source==='tool' && params.source==='diff-pass'
+  const content={ key: params.key,status: 'open',summary: keep?old.summary:params.summary,
+    detail: keep?old.detail:params.detail??null,source: params.source,createdAt: old?.createdAt.getTime()??now,updatedAt: now,resolvedAt: null }
+  payload.parse(content)
+  const row=await writeSessionContextRevision({ sessionId: params.sessionId,kind: 'session_state',content,expectedGeneration,authority: params.authority,
+    derivation: { ...params.derivation!,sources: [...params.derivation!.sources,...(existing?boundScopeSources(existing):[])] },
+    ...(existing?{parentId: existing.parentId,expectedRevision: existing.id}:{}) })
+  if (!row) throw new DerivedScopeError('scope_source_changed')
+  return record(row)
 }
-
-export async function listRecentSessionState(
-  sessionId: string,
-  limit = 50,
-): Promise<SessionStateRow[]> {
-  const result = await query<SessionStateRow>(
-    `SELECT ${SELECT}
-       FROM session_state
-      WHERE session_id = $1
-      ORDER BY
-        CASE WHEN status = 'open' THEN 0 ELSE 1 END,
-        updated_at DESC
-      LIMIT $2`,
-    [sessionId, limit],
-  )
-  return result.rows
+export async function resolveSessionState(params: Parameters<SessionStateStore['resolve']>[0]): Promise<SessionStateRow | null> {
+  writeProof(params)
+  const expectedGeneration=await sessionContextGeneration(params.sessionId)
+  const existing=(await readSessionContextRevisions(params.sessionId,'session_state',params.authority)).find(row=>{
+    const old=record(row);return old.key===params.key && old.status==='open'
+  })
+  if (!existing) return null
+  const now=Date.now(),content={ ...existing.content,status: 'resolved',source: params.source,updatedAt: now,resolvedAt: now }
+  const row=await writeSessionContextRevision({ sessionId: params.sessionId,kind: 'session_state',parentId: existing.parentId,
+    expectedRevision: existing.id,content,expectedGeneration,authority: params.authority,
+    derivation: { ...params.derivation!,sources: [...params.derivation!.sources,...boundScopeSources(existing)] } })
+  if (!row) throw new DerivedScopeError('scope_source_changed')
+  return record(row)
 }
-
-export async function purgeResolvedSessionState(
-  sessionId: string,
-  olderThan: Date,
-): Promise<number> {
-  const result = await query<{ id: string }>(
-    `DELETE FROM session_state
-      WHERE session_id = $1
-        AND status <> 'open'
-        AND resolved_at IS NOT NULL
-        AND resolved_at < $2
-     RETURNING id`,
-    [sessionId, olderThan],
-  )
-  return result.rowCount ?? result.rows.length
+export async function listOpenSessionState(sessionId: string, authority?: SessionContextAuthority): Promise<SessionStateRow[]> {
+  return (await readSessionContextRevisions(sessionId,'session_state',authority)).map(record).filter(row=>row.status==='open')
+    .sort((a,b)=>b.updatedAt.getTime()-a.updatedAt.getTime())
+}
+export async function listRecentSessionState(sessionId: string, limit=50, authority?: SessionContextAuthority): Promise<SessionStateRow[]> {
+  return (await readSessionContextRevisions(sessionId,'session_state',authority)).map(record)
+    .sort((a,b)=>Number(b.status==='open')-Number(a.status==='open') || b.updatedAt.getTime()-a.updatedAt.getTime()).slice(0,Math.max(0,limit))
+}
+export async function purgeResolvedSessionState(sessionId: string, olderThan: Date, authority?: SessionContextAuthority): Promise<number> {
+  const rows=(await readSessionContextRevisions(sessionId,'session_state',authority)).filter(row=>{
+    const value=record(row);return value.status!=='open' && value.resolvedAt!==null && value.resolvedAt<olderThan
+  })
+  return mutateSessionContextParents(authority,'session_state',rows,'delete')
 }

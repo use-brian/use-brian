@@ -1,3 +1,6 @@
+import type { SessionContextAuthority } from './session-state-types.js'
+import type { DerivedWriteEvidence } from '../security/derived-scope.js'
+
 /**
  * Short-term / episodic memory tier.
  *
@@ -54,6 +57,8 @@ export type EpisodicStore = {
     summary: string
     messageSpan: EpisodicMessageSpan
     entityRefs?: unknown[]
+    authority?: SessionContextAuthority
+    derivation?: DerivedWriteEvidence
   }): Promise<EpisodicMemoryRecord>
 
   /**
@@ -65,6 +70,7 @@ export type EpisodicStore = {
     sessionId: string
     topicLabel: string
     limit?: number
+    authority?: SessionContextAuthority
   }): Promise<EpisodicMemoryRecord[]>
 
   /**
@@ -73,6 +79,7 @@ export type EpisodicStore = {
   fetchBySession(params: {
     sessionId: string
     limit?: number
+    authority?: SessionContextAuthority
   }): Promise<EpisodicMemoryRecord[]>
 
   /**
@@ -82,6 +89,7 @@ export type EpisodicStore = {
   listTopicsBySession(params: {
     sessionId: string
     limit?: number
+    authority?: SessionContextAuthority
   }): Promise<string[]>
 
   /**
@@ -89,19 +97,19 @@ export type EpisodicStore = {
    * counters. Used by the compaction housekeeping pass to decide which
    * rows to evict, promote, or keep.
    */
-  listBySession(sessionId: string): Promise<EpisodicMemoryRecord[]>
+  listBySession(sessionId: string, authority?: SessionContextAuthority): Promise<EpisodicMemoryRecord[]>
 
   /**
    * Hard-delete an episodic row by id. Called by the housekeeping
    * pass for evictions (access_count==0) and after successful
    * promotions to long-term memories.
    */
-  deleteById(id: string): Promise<void>
+  deleteById(id: string, authority?: SessionContextAuthority): Promise<void>
 
   /**
    * Bulk-increment the `survival_count` of the given rows by 1. Called
    * by the housekeeping pass for rows that were neither evicted nor
    * promoted in the current compaction. No-op when the list is empty.
    */
-  incrementSurvivalCount(ids: string[]): Promise<void>
+  incrementSurvivalCount(ids: string[], authority?: SessionContextAuthority): Promise<void>
 }
