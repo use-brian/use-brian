@@ -42,4 +42,44 @@ describe('[COMP:app-web/application-admin] canonical management panels',()=>{
   await act(async()=>apply.click());expect(host.textContent).not.toContain('Fictional app');expect(host.querySelector('form')).toBeNull();expect(mocks.fetch.mock.calls.filter(([,init])=>init?.method==='POST')).toHaveLength(1);expect(reads).toBeGreaterThan(1);
  });
  it('M06 cancels an open confirmation when authority changes',async()=>{await render();await click(en.applicationManagement.revoke);mocks.fetch.mockReturnValue(new Promise(()=>{}));await act(async()=>window.dispatchEvent(new CustomEvent(WORKSPACE_IDENTITY_REFRESH_EVENT,{detail:{workspaceId:'workspace-fixture'}})));expect(document.querySelector('[role="alertdialog"]')).toBeNull();expect(mocks.fetch.mock.calls.filter(([,init])=>init?.method==='POST')).toHaveLength(0);});
+ it('M06 keeps mutation controls locked after failed reconciliation and unlocks only after a fresh read',async()=>{
+  let attempted=false,allowRead=false;
+  mocks.fetch.mockImplementation(async(_url:string,init?:RequestInit)=>{
+   if(init?.method==='POST'){attempted=true;throw new Error('connection_lost');}
+   return attempted&&!allowRead?response({error:'unavailable'},503):response(fixture());
+  });
+  await render();await click(en.applicationManagement.suspend);await click(en.applicationManagement.apply);
+  await click(en.applicationManagement.reconcile);
+  expect(host.textContent).toContain(en.applicationManagement.uncertain);
+  const suspend=[...host.querySelectorAll<HTMLButtonElement>('button')].find(b=>b.textContent===en.applicationManagement.suspend)!;
+  expect(suspend.disabled).toBe(true);
+  expect(mocks.fetch.mock.calls.filter(([,init])=>init?.method==='POST')).toHaveLength(1);
+  allowRead=true;await click(en.applicationManagement.reconcile);
+  expect(host.textContent).not.toContain(en.applicationManagement.uncertain);
+  expect(suspend.disabled).toBe(false);
+ });
+ it('M01/M06 reads and renews the governance catalog only through the protected overview',async()=>{
+  const overview=fixture();overview.governance={state:'available',moduleKey:'records',catalog:{moduleKey:'records',revision:'a'.repeat(64),roleKeys:['fictional-editor'],operations:['assign_role'],nativeResourceTypes:[],ownedNativeResourceTypes:[],configurationRevision:null,configurationOperations:[],roleAssignments:[],nextCursor:null}};
+  mocks.fetch.mockImplementation(async(_url:string,init?:RequestInit)=>init?.method==='POST'?response({id:'review-fixture',canApply:true,proposal:JSON.parse(String(init.body)).input.operation}):response(overview));
+  await render('en',en,'access');expect(host.textContent).toContain('fictional-editor');
+  expect(mocks.fetch.mock.calls.every(([,init])=>init?.method!=='POST')).toBe(true);
+  const initial=JSON.parse(host.querySelector('textarea')!.value);expect(Number.isFinite(Date.parse(initial.startsAt))).toBe(true);
+  await act(async()=>host.querySelector('form')!.dispatchEvent(new Event('submit',{bubbles:true,cancelable:true})));
+  expect(host.textContent).toContain('review-fixture');
+  overview.governance={...overview.governance,catalog:{...overview.governance.catalog!,revision:'b'.repeat(64),roleKeys:['fictional-reviewer']}};
+  await act(async()=>window.dispatchEvent(new Event('focus')));
+  expect(host.textContent).not.toContain('review-fixture');
+  expect(host.querySelector('textarea')!.value).toContain('fictional-reviewer');
+  expect(mocks.fetch.mock.calls.filter(([,init])=>init?.method==='POST')).toHaveLength(1);
+ });
+ it('M06 drops role metadata with an expired overview while a refresh is unavailable',async()=>{
+  vi.useFakeTimers({toFake:['setTimeout','clearTimeout','Date','performance']});
+  try {
+   const overview=fixture();overview.validForMs=100;overview.governance={state:'available',moduleKey:'records',catalog:{moduleKey:'records',revision:'a'.repeat(64),roleKeys:['fictional-expiring-role'],operations:[],nativeResourceTypes:[],ownedNativeResourceTypes:[],configurationRevision:null,configurationOperations:[],roleAssignments:[],nextCursor:null}};
+   mocks.fetch.mockResolvedValueOnce(response(overview)).mockReturnValue(new Promise(()=>{}));
+   await render('en',en,'access');expect(host.textContent).toContain('fictional-expiring-role');
+   await act(async()=>vi.advanceTimersByTime(150));expect(host.textContent).not.toContain('fictional-expiring-role');expect(host.querySelector('form')).toBeNull();
+  } finally {vi.useRealTimers();}
+ });
+
 });

@@ -45,7 +45,7 @@ export const applicationManagementCommandSchema = z.discriminatedUnion('kind', [
 export class ApplicationManagementService {
   /** Bounded metadata only. All record/field policy remains in the existing canonical readers. */
   async overview(actorId:string,workspaceId:string,rawSelection:unknown = {}):Promise<ApplicationManagementOverview> {
-    const selection=z.object({appId:z.string().uuid().optional(),assistantId:z.string().uuid().optional()}).strict().safeParse(rawSelection)
+    const selection=z.object({appId:z.string().uuid().optional(),moduleKey:z.string().min(1).max(128).optional(),assistantId:z.string().uuid().optional()}).strict().safeParse(rawSelection)
     if(!selection.success)throw new ApplicationPlatformError('invalid_value','The management selection is invalid.')
     const execution=await this.nativeSchemaExecution(actorId,workspaceId,selection.data.assistantId)
     const clients=await this.list(actorId,workspaceId)
@@ -68,13 +68,20 @@ export class ApplicationManagementService {
       }))
       schemas={state:'available',items:items.map(({id,name,schemaVersion,properties})=>({id,name,schemaVersion,properties}))}
     } catch(error) { if(!(error instanceof ApplicationPlatformError)||error.code!=='access_unavailable')throw error }
+    const modules=[...this.applications.registry.applications.keys()].sort()
+    const moduleKey=selection.data.moduleKey ?? clients.find(app=>app.id===appId)?.moduleKey ?? modules[0] ?? null
+    if(moduleKey&&!modules.includes(moduleKey))throw new ApplicationPlatformError('invalid_value','The management module is invalid.')
+    let governance:NonNullable<ApplicationManagementOverview['governance']>={state:'unavailable',moduleKey,catalog:null}
+    if(moduleKey)try {
+      governance={state:'available',moduleKey,catalog:await this.applications.governanceCatalog(execution,{moduleKey})}
+    } catch(error) { if(!(error instanceof ApplicationPlatformError)||error.code!=='access_unavailable')throw error }
     await execution.security.authority.assertCurrent()
     // Revalidate native administration after all independently awaited readers.
     await this.transaction(actorId,workspaceId,async()=>undefined)
     const base=`/w/${encodeURIComponent(workspaceId)}`
     return {workspaceId,actor:{userId:actorId,assistantId:execution.assistant.id},validForMs:metadata.validForMs,
       readiness:{qualified:false,reason:'consumer_qualification_incomplete',legacyReview:'unavailable',canActivate:false},
-      modules:[...this.applications.registry.applications.keys()].sort(),clients,selectedAppId:appId,grants,credentials,schemas,
+      modules,governance,clients,selectedAppId:appId,grants,credentials,schemas,
       sources:{state:metadata.sources.length?'available':'unavailable',items:metadata.sources.map(source=>({...source,mappingStatus:'unavailable',keyStatus:'deployment_managed',retentionStatus:'unavailable'}))},
       links:{miniApps:`${base}/studio/mini-apps`,connectors:`${base}/studio/connectors`,programmaticAccess:`${base}/studio/programmatic-access`,access:`${base}/organization?section=access`}}
   }

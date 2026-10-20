@@ -48,7 +48,7 @@ describe('[COMP:api/application-management] native human and Brian management',(
  })
  it('M01 binds actual native actor/assistant and refuses app audience or unregistered origins',async()=>{
   const response=await request(http).get(`${base}/management`).set('Authorization',`Bearer ${tokens.get(actorId)}`).query({appId})
-  expect(response.status).toBe(200);expect(response.body.actor).toEqual({userId:actorId,assistantId});expect(response.body.links.access).toBe(`/w/${workspaceId}/organization?section=access`);expect(response.body.clients.some((c:any)=>c.id===appId)).toBe(true)
+  expect(response.status).toBe(200);expect(response.body.governance).toMatchObject({state:'unavailable',moduleKey:'records',catalog:null});expect(response.body.actor).toEqual({userId:actorId,assistantId});expect(response.body.links.access).toBe(`/w/${workspaceId}/organization?section=access`);expect(response.body.clients.some((c:any)=>c.id===appId)).toBe(true)
   expect((await command({kind:'status',appId,status:'suspended'}).set('Origin','https://foreign.example')).status).toBe(403)
   expect((await request(http).get(`${base}/management`).query({actorId:foreignId}).set('Authorization',`Bearer ${tokens.get(actorId)}`)).status).toBe(400)
  })
@@ -103,6 +103,27 @@ describe('[COMP:api/application-management] native human and Brian management',(
  it('M03 invalid or expired human delivery never regenerates or replays a secret',async()=>{
   const reviewId=randomUUID()
   for(let n=0;n<2;n++){const response=await command({kind:'credential.deliver',appId,reviewId});expect(response.status).not.toBe(200);expect(response.body).not.toHaveProperty('secret')}
+ })
+ it('M03 consumed synthetic receipts return no previous secret and mint no replacement',async()=>{
+  // Fixture bootstrap represents historical consumed state, not qualified issuance.
+  // The actual native route, RLS, SQL apply function and qualification gate remain active.
+  const grantId=randomUUID(),credentialId=randomUUID(),reviewId=randomUUID();
+  const prepared=await command({kind:'service.prepare',appId,input:{name:'Fictional replay service',idempotencyKey:randomUUID()}});expect(prepared.status).toBe(200);const serviceUserId=prepared.body.serviceUserId;
+  await owner.query(`INSERT INTO application_access_grants(id,app_id,workspace_id,principal_kind,principal_user_id,issued_by_user_id,resource_origin,resource_type,actions,read_fields,write_fields,selector,compartments,project_ids,clearance)
+   VALUES($1,$2,$3,'service',$7,$4,$5,'request',ARRAY['read'],ARRAY['title'],'{}',$6,'{}','{}','internal')`,[grantId,appId,workspaceId,actorId,{kind:'generic',entityTypeId:schemaId},{kind:'ids',ids:[recordId]},serviceUserId]);
+  const storedHash='scrypt$synthetic-unusable-fixture';
+  await owner.query(`INSERT INTO application_api_credentials(id,app_id,workspace_id,issued_by_user_id,subject_user_id,name,credential_kind,secret_hash,parent_grant_id,expires_at)
+   VALUES($1,$2,$3,$4,$7,'Fictional consumed credential','service',$5,$6,now()+interval '1 hour')`,[credentialId,appId,workspaceId,actorId,storedHash,grantId,serviceUserId]);
+  await owner.query(`INSERT INTO application_credential_reviews(id,workspace_id,app_id,actor_user_id,proposal,authority_hash,consumed_credential_id)
+   VALUES($1,$2,$3,$4,'{}',repeat('0',64),$5)`,[reviewId,workspaceId,appId,actorId,credentialId]);
+  for(let attempt=0;attempt<2;attempt++){
+   const reply=await command({kind:'credential.deliver',appId,reviewId});
+   expect(reply.status).toBe(200);expect(reply.body).toEqual({credentialId,secretAvailable:false});
+  }
+  const denied=await command({kind:'credential.deliver',appId,reviewId},memberId);expect(denied.status).toBe(403);expect(denied.body).not.toHaveProperty('credentialId');
+  const persisted=await owner.query('SELECT secret_hash FROM application_api_credentials WHERE id=$1',[credentialId]);expect(persisted.rows).toEqual([{secret_hash:storedHash}]);
+  expect((await owner.query('SELECT count(*)::int AS count FROM application_api_credentials WHERE app_id=$1',[appId])).rows[0].count).toBe(1);
+  expect((await owner.query("SELECT application_runtime_qualified($1,'application_data') AS qualified",[workspaceId])).rows[0].qualified).toBe(false);
  })
  it('M03 preparation creates a distinct named service without enrolling it as staff',async()=>{
   const key=randomUUID(),body={kind:'service.prepare',appId,input:{name:'Fictional service principal',idempotencyKey:key}},a=await command(body),b=await tool(body)

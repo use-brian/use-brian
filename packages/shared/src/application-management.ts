@@ -10,6 +10,7 @@ export interface ApplicationManagementOverview {
  readiness:{qualified:false;reason:'consumer_qualification_incomplete';legacyReview:'unavailable';canActivate:false};
  modules:string[];clients:ManagedApplication[];selectedAppId:string|null;grants:ManagedGrant[];credentials:ManagedCredential[];
  schemas:{state:'available'|'unavailable';items:ManagedSchema[]};sources:{state:'available'|'unavailable';items:ManagedSource[]};
+ governance?:{state:'available'|'unavailable';moduleKey:string|null;catalog:ManagementGovernanceCatalog|null};
  links:{miniApps:string;connectors:string;programmaticAccess:string;access:string};
 }
 export type ApplicationManagementCommand =
