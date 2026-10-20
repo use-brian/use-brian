@@ -4,6 +4,13 @@ import { createLlmDecisionProvider } from '../adapters/llm.js'
 import { decisionRequest, llmProviderWithJson } from './fixtures.js'
 
 describe('[COMP:decisions/llm] constrained LLM adapter', () => {
+  it('preserves a provider authority refusal without transport reclassification', async () => {
+    const refusal = Object.assign(new Error('Synthetic provider authority refusal'), { reason: 'authority_changed', retrySafe: false })
+    const llm = llmProviderWithJson({})
+    llm.stream = async function* () { throw refusal }
+    await expect(createLlmDecisionProvider({ provider: llm }).evaluate(decisionRequest())).rejects.toBe(refusal)
+  })
+
   it('compiles questions to one constrained call and keeps unavailable uncertainty honest', async () => {
     const calls: ProviderRequest[] = []
     const provider = createLlmDecisionProvider({

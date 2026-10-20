@@ -1,3 +1,4 @@
+import { assertInputAuthority, isInputAuthorityError } from '../../providers/input-authority.js'
 /** TypeSafe System One / Jev decision adapter. [COMP:decisions/typesafe] */
 
 import type {
@@ -210,6 +211,7 @@ export function createTypeSafeDecisionProvider(options: {
     id: 'typesafe',
     capabilities,
     async evaluate(request): Promise<DecisionResponse> {
+      await assertInputAuthority(request.assertInputAuthority)
       assertDecisionCapabilities(request, capabilities)
       if (request.signal?.aborted) throw new DecisionProviderError('cancelled', 'decision call cancelled')
       if (request.deadlineAt !== undefined && request.deadlineAt <= Date.now()) {
@@ -238,12 +240,14 @@ export function createTypeSafeDecisionProvider(options: {
             signal: controller.signal,
           })
         } catch (error) {
+          if (isInputAuthorityError(error)) throw error
           if (controller.signal.aborted) {
             const kind = request.signal?.aborted ? 'cancelled' : 'timeout'
             throw new DecisionProviderError(kind, kind === 'cancelled' ? 'decision call cancelled' : 'decision deadline exhausted', { dispatched: true, cause: error })
           }
           throw new DecisionProviderError('transport', 'TypeSafe transport failed', { dispatched: true, cause: error })
         }
+        await assertInputAuthority(request.assertInputAuthority)
         if (wire.status < 200 || wire.status >= 300) throw statusFailure(wire)
         const body = asRecord(wire.body, 'response')
         const model = typeof body.model === 'string' ? body.model : request.model.wireId

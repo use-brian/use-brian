@@ -20,6 +20,14 @@ function mockProvider(response: string): LLMProvider {
 }
 
 describe('[COMP:memory/topic-classifier] classifyTopic', () => {
+  it('propagates a wrapped provider authority refusal rather than an uncategorized fallback', async () => {
+    const refusal = Object.assign(new Error('Synthetic provider refused current input'), { reason: 'authority_changed', retrySafe: false })
+    const provider = mockProvider('unused')
+    provider.stream = async function* () { throw new Error('Synthetic provider wrapper', { cause: refusal }) }
+    await expect(classifyTopic({ provider, model: 'mock', recentUserTurns: [], replyToText: null,
+      currentMessage: 'Fictional request', knownTopicsThisSession: [] })).rejects.toMatchObject({ cause: refusal })
+  })
+
   it('accepts a terminal exact known-label decision without an LLM call', async () => {
     let llmCalls = 0
     const llm = mockProvider('{"topic_label":"wrong","state":"shift","confidence":1}')

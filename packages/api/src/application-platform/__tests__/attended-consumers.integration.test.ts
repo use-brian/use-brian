@@ -3,10 +3,12 @@ import { writeSessionContextRevision, sessionContextGeneration } from '../../db/
 import { createDbEpisodicStore } from '../../db/episodic-store.js'
 import { addSessionMessage, findSessionById, readCompactSummary } from '../../db/sessions.js'
 import { afterAll, afterEach, describe, expect, it, vi } from 'vitest'
-import { boundScopeSources, createCompactionCircuitBreaker, type LLMProvider, type StreamFn } from '@use-brian/core'
+import { DecisionAdapterRegistry, executeDecisionCascade, createTypeSafeDecisionProvider, type TopicClassifierOptions, bindScopeSources, executionToolContext, classifyTopic, boundScopeSources, createCompactionCircuitBreaker, type LLMProvider, type StreamFn } from '@use-brian/core'
 import { getAppPool, getPool } from '../../db/client.js'
 import { createDbMemoryStore } from '../../db/memory-store.js'
 import { houseKeepEpisodic, runProactiveCompaction } from '../../routes/proactive-compaction.js'
+import { createDecisionRuntime } from '../../decision-runtime.js'
+import { assertSourceModelInputAuthority } from '../model-source-authority.js'
 import { persistentContextFixture } from './fixtures/persistent-context.js'
 
 const { assertLocalFixture } = await import(new URL('../../../../../scripts/crm/local-fixture.mjs', import.meta.url).href)
@@ -32,6 +34,227 @@ describe.sequential('[COMP:api/application-persistence] current attended compact
       circuitBreaker: createCompactionCircuitBreaker(),
     })
   }
+
+
+  it('refuses withdrawn topic-classifier inputs before provider dispatch and keeps a second reader usable', async () => {
+    fixture = await persistentContextFixture()
+    const f = fixture, history = await f.history(), sources = history.flatMap(boundScopeSources)
+    const first = await f.modelContext(f.firstId)
+    const stream = vi.fn<StreamFn>(async function* () {
+      yield { type: 'text_delta', text: '{"topic_label":"fictional earlier request","state":"resume","confidence":0.9}' }
+    })
+    function options(current: typeof first) {
+      const context = { ...executionToolContext(current.execution, { appId: 'fixture' }), scopeAccumulator: current.accumulator }
+      return bindScopeSources({ provider: provider(stream), model: 'fixture',
+        recentUserTurns: [{ text: 'Fictional earlier request', topicLabel: 'fictional earlier request' }],
+        replyToText: 'Fictional earlier response', currentMessage: 'Fictional current request',
+        knownTopicsThisSession: ['fictional earlier request'], authority: current,
+        assertInputAuthority: () => assertSourceModelInputAuthority(context),
+      }, sources)
+    }
+    await f.pool.query("UPDATE workspace_members SET clearance='public' WHERE workspace_id=$1 AND user_id=$2", [f.workspaceId, f.firstId])
+    await expect(classifyTopic(options(first))).rejects.toMatchObject({ reason: 'authority_changed', retrySafe: false })
+    expect(stream).not.toHaveBeenCalled()
+    const second = await f.modelContext(f.secondId)
+    const result = await classifyTopic(options(second))
+    expect(result).toMatchObject({ topic_label: 'fictional earlier request', state: 'resume', confidence: 0.9 })
+    expect(stream).toHaveBeenCalledOnce()
+    expect(boundScopeSources(result)).toEqual(sources)
+    expect((await f.history()).flatMap(boundScopeSources)).toEqual(sources)
+  })
+
+
+  async function topicOptions(f: NonNullable<typeof fixture>, stream: StreamFn, userId = f.ownerId) {
+    const history = await f.history(), current = await f.modelContext(userId)
+    const context = { ...executionToolContext(current.execution, { appId: 'fixture' }), scopeAccumulator: current.accumulator }
+    const sources = history.flatMap(boundScopeSources)
+    const text = (row: typeof history[number]) => (row.content as Array<{ type: string; text: string }>).filter(block => block.type === 'text').map(block => block.text).join(' ')
+    const options = bindScopeSources<TopicClassifierOptions>({ provider: provider(stream), model: 'fixture',
+      recentUserTurns: [{ text: text(history[0]), topicLabel: text(history[0]).toLowerCase() }],
+      replyToText: text(history[1]), currentMessage: text(history[2]),
+      knownTopicsThisSession: [text(history[0]).toLowerCase(), text(history[1]).toLowerCase()], authority: current,
+      assertInputAuthority: () => assertSourceModelInputAuthority(context),
+    }, sources)
+    return { options, current, sources }
+  }
+
+  it('requires both private input evidence and a current host check before formatting classifier text', async () => {
+    fixture = await persistentContextFixture()
+    const stream = vi.fn<StreamFn>(async function* () { yield { type: 'text_delta', text: 'unused' } })
+    const { options, sources } = await topicOptions(fixture, stream)
+    await expect(classifyTopic({ ...options })).rejects.toThrow('scope_evidence_missing')
+    const missingCheck = bindScopeSources({ ...options, assertInputAuthority: undefined }, sources)
+    await expect(classifyTopic(missingCheck)).rejects.toThrow('scope_evidence_missing')
+    await expect(classifyTopic(bindScopeSources({ ...options, authority: undefined }, sources))).rejects.toThrow('scope_evidence_missing')
+    expect(stream).not.toHaveBeenCalled()
+  })
+
+  it('does not expose an LLM topic after authority changes during the actual provider response', async () => {
+    fixture = await persistentContextFixture()
+    const f = fixture
+    const stream = vi.fn<StreamFn>(async function* (request) {
+      expect(request.assertInputAuthority).toBeTypeOf('function')
+      await f.pool.query("UPDATE workspace_members SET clearance='public' WHERE workspace_id=$1 AND user_id=$2", [f.workspaceId, f.firstId])
+      yield { type: 'text_delta', text: '{"topic_label":"fictional held result","state":"shift","confidence":0.8}' }
+    })
+    const { options, sources } = await topicOptions(f, stream, f.firstId)
+    await expect(classifyTopic(options)).rejects.toMatchObject({ reason: 'authority_changed', retrySafe: false })
+    expect(stream).toHaveBeenCalledOnce()
+    expect((await f.history()).flatMap(boundScopeSources)).toEqual(sources)
+  })
+
+  it('passes the current check into a provider retry and refuses its second dispatch', async () => {
+    fixture = await persistentContextFixture()
+    const f = fixture
+    let dispatches = 0
+    const stream = vi.fn<StreamFn>(async function* (request) {
+      dispatches++
+      await f.pool.query("UPDATE workspace_members SET clearance='public' WHERE workspace_id=$1 AND user_id=$2", [f.workspaceId, f.firstId])
+      await request.assertInputAuthority!()
+      dispatches++
+      yield { type: 'text_delta', text: 'unreachable synthetic retry' }
+    })
+    const { options } = await topicOptions(f, stream, f.firstId)
+    await expect(classifyTopic(options)).rejects.toMatchObject({ reason: 'authority_changed', retrySafe: false })
+    expect(dispatches).toBe(1)
+  })
+
+  it.each(['provider', 'parse'] as const)('keeps complete input ancestry on a healthy %s fallback', async (failure) => {
+    fixture = await persistentContextFixture()
+    const stream = vi.fn<StreamFn>(async function* () {
+      if (failure === 'provider') throw new Error('Synthetic provider unavailable')
+      yield { type: 'text_delta', text: 'Synthetic malformed response' }
+    })
+    const { options, sources } = await topicOptions(fixture, stream)
+    const result = await classifyTopic(options)
+    expect(result).toMatchObject({ topic_label: '(uncategorized)', confidence: 0 })
+    expect(boundScopeSources(result)).toEqual(sources)
+    expect(stream).toHaveBeenCalledOnce()
+  })
+
+  function topicRuntime(llm: LLMProvider, transport: Parameters<typeof createTypeSafeDecisionProvider>[0]['transport']) {
+    const adapters = new DecisionAdapterRegistry()
+    adapters.register('typesafe', () => createTypeSafeDecisionProvider({ apiKey: 'fixture-key', transport }))
+    return createDecisionRuntime({ llmProvider: llm, defaultLlmModel: 'fixture', adapters,
+      resolveRoute: () => ({ mode: 'hybrid', primaryModelId: 'typesafe-jev-1.13', allowSyntheticProfile: true,
+        profile: { id: 'fixture-topic', version: '1', mode: 'hybrid', operationId: 'memory.topic', operationVersion: '1',
+          stateVersion: '1', questionVersion: '1', modelCatalogId: 'typesafe-jev-1.13', modelWireId: 'jev-1.13.0',
+          evaluationSegment: 'global', status: 'approved', evidence: 'synthetic', totalTimeoutMs: 5000, primaryTimeoutMs: 3000, maxAttempts: 2 } }),
+    })
+  }
+  const topicResponse = () => ({ status: 200, body: { model: 'jev-1.13.0', answers: {
+    state: { type: 'choice', choice: 'resume', confidence: 0.9, probabilities: { continue: 0.05, shift: 0.03, resume: 0.9, 'cross-topic': 0.02 } },
+    topic: { type: 'choice', choice: 'fictional earlier request', confidence: 0.9, probabilities: { 'fictional earlier request': 0.9, 'fictional earlier response': 0.05, __new_topic__: 0.03, __uncategorized__: 0.02 } },
+  } } })
+
+  it('keeps full topic input ancestry through the actual API runtime and primary decision adapter', async () => {
+    fixture = await persistentContextFixture()
+    const stream = vi.fn<StreamFn>(async function* () { yield { type: 'text_delta', text: 'unused' } })
+    const { options, sources } = await topicOptions(fixture, stream)
+    const transport = vi.fn(async (request) => {
+      expect(JSON.stringify(request.body)).not.toContain('assertInputAuthority')
+      expect(JSON.stringify(request.body)).toContain('fictional earlier response')
+      return topicResponse()
+    })
+    options.decisionRuntime = topicRuntime(options.provider, transport)
+    const result = await classifyTopic(options)
+    expect(result).toMatchObject({ topic_label: 'fictional earlier request', state: 'resume' })
+    expect(boundScopeSources(result)).toEqual(sources)
+    expect(transport).toHaveBeenCalledOnce()
+    expect(stream).not.toHaveBeenCalled()
+  })
+
+  it('refuses a primary decision after a real grant change instead of dispatching an LLM fallback', async () => {
+    fixture = await persistentContextFixture()
+    const f = fixture, stream = vi.fn<StreamFn>(async function* () { yield { type: 'text_delta', text: 'unused' } })
+    const { options } = await topicOptions(f, stream, f.firstId)
+    const transport = vi.fn(async () => {
+      await f.pool.query("UPDATE workspace_members SET clearance='public' WHERE workspace_id=$1 AND user_id=$2", [f.workspaceId, f.firstId])
+      return topicResponse()
+    })
+    options.decisionRuntime = topicRuntime(options.provider, transport)
+    await expect(classifyTopic(options)).rejects.toMatchObject({ reason: 'authority_changed', retrySafe: false })
+    expect(transport).toHaveBeenCalledOnce()
+    expect(stream).not.toHaveBeenCalled()
+    const other = await topicOptions(f, stream, f.secondId)
+    other.options.decisionRuntime = topicRuntime(other.options.provider, async () => topicResponse())
+    expect(await classifyTopic(other.options)).toMatchObject({ topic_label: 'fictional earlier request', state: 'resume' })
+    expect(stream).not.toHaveBeenCalled()
+  })
+
+
+  it('waits for an in-flight real authority check after a primary deadline before any recovery', async () => {
+    fixture = await persistentContextFixture()
+    const f = fixture, current = await f.modelContext(f.firstId), sources = (await f.history()).flatMap(boundScopeSources)
+    current.accumulator.note({ sources })
+    const context = { ...executionToolContext(current.execution, { appId: 'fixture' }), scopeAccumulator: current.accumulator }
+    let enter!: () => void, release!: () => void, checks = 0, completed = false
+    const entered = new Promise<void>(resolve => { enter = resolve })
+    const pendingCheck = new Promise<void>(resolve => { release = resolve })
+    const complete = vi.fn(async () => ({ result: 'synthetic fallback', providerId: 'fixture', model: { catalogId: 'fixture', wireId: 'fixture' } }))
+    const decision = executeDecisionCascade({ request: { runId: 'fixture-topic-deadline',
+      operation: { id: 'fixture.topic.deadline', version: '1', stateVersion: '1', questionVersion: '1' },
+      model: { catalogId: 'fixture', wireId: 'fixture' }, state: { message: 'Fictional current request' },
+      questions: [{ kind: 'choice', id: 'topic', prompt: 'Choose the fictional topic.', options: [{ value: 'fictional' }] }],
+    }, operation: {
+      assertInputAuthority: async () => {
+        checks++
+        if (checks === 3) { enter(); await pendingCheck }
+        await assertSourceModelInputAuthority(context)
+      },
+      decide: () => ({ kind: 'complete' as const, result: 'fictional' }), validateResult: value => value,
+      safeFailure: () => 'synthetic default', completeWithLlm: complete,
+    }, route: { mode: 'hybrid', allowSyntheticProfile: true,
+      primary: { id: 'fixture-decision', capabilities: { primitives: ['choice'], batch: true, maxOptions: 4, maxQuestions: 4,
+        maxRubricLevels: 4, maxInputTokens: 1000, uncertainty: ['unavailable'] },
+        evaluate: async request => {
+          await request.assertInputAuthority!()
+          return { providerId: 'fixture-decision', model: request.model,
+            answers: [{ questionId: 'topic', kind: 'choice', value: 'fictional', evidence: { source: 'unavailable' } }] }
+        } },
+      profile: { id: 'fixture-deadline', version: '1', mode: 'hybrid', operationId: 'fixture.topic.deadline', operationVersion: '1',
+        stateVersion: '1', questionVersion: '1', modelCatalogId: 'fixture', modelWireId: 'fixture', evaluationSegment: 'global',
+        status: 'approved', evidence: 'synthetic', totalTimeoutMs: 5000, primaryTimeoutMs: 20, maxAttempts: 2 },
+    } }).then(value => { completed = true; return { value } }, error => { completed = true; return { error } })
+    await entered
+    // Deliberately cross only this new synthetic transport's deadline; the ACL
+    // result below still comes from actual SQL and the canonical execution.
+    await new Promise(resolve => setTimeout(resolve, 80))
+    const whilePending = { checks, completed, fallback: complete.mock.calls.length }
+    try {
+      await f.pool.query("UPDATE workspace_members SET clearance='public' WHERE workspace_id=$1 AND user_id=$2", [f.workspaceId, f.firstId])
+    } finally { release() }
+    const outcome = await decision
+    expect(whilePending).toEqual({ checks: 3, completed: false, fallback: 0 })
+    expect(outcome).toMatchObject({ error: { reason: 'authority_changed', retrySafe: false } })
+    expect(complete).not.toHaveBeenCalled()
+  })
+
+
+  it('rechecks actual API decision authority after asynchronous outcome recording before return', async () => {
+    fixture = await persistentContextFixture()
+    const f = fixture, current = await f.modelContext(f.firstId), history = await f.history()
+    current.accumulator.note({ sources: history.flatMap(boundScopeSources) })
+    const context = { ...executionToolContext(current.execution, { appId: 'fixture' }), scopeAccumulator: current.accumulator }
+    let outcomes = 0
+    const runtime = createDecisionRuntime({ llmProvider: provider(async function* () {}), defaultLlmModel: 'fixture',
+      onOutcome: async () => {
+        outcomes++
+        await f.pool.query("UPDATE workspace_members SET clearance='public' WHERE workspace_id=$1 AND user_id=$2", [f.workspaceId, f.firstId])
+      },
+    })
+    await expect(runtime.run({ request: { runId: 'fixture-topic-outcome',
+      operation: { id: 'fixture.topic', version: '1', stateVersion: '1', questionVersion: '1' },
+      state: { message: 'Fictional current request' },
+      questions: [{ kind: 'choice', id: 'topic', prompt: 'Choose the fictional topic.', options: [{ value: 'fictional' }] }],
+    }, operation: {
+      assertInputAuthority: () => assertSourceModelInputAuthority(context),
+      decide: () => ({ kind: 'complete', result: 'fictional' }), validateResult: result => result,
+      safeFailure: () => 'synthetic fallback',
+      completeWithLlm: async () => ({ result: 'fictional', providerId: 'fixture', model: { catalogId: 'fixture', wireId: 'fixture' } }),
+    } })).rejects.toMatchObject({ reason: 'authority_changed', retrySafe: false })
+    expect(outcomes).toBe(1)
+  })
 
   it('retains nullable shared message evidence through actual replay and in-memory compaction', async () => {
     fixture = await persistentContextFixture()

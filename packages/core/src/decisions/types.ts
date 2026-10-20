@@ -108,6 +108,8 @@ export type DecisionRequest = {
   state: JsonValue
   questions: DecisionQuestion[]
   signal?: AbortSignal
+  /** Trusted host callback, omitted from every provider wire representation. */
+  assertInputAuthority?: () => Promise<void>
   /** Absolute Unix milliseconds. */
   deadlineAt?: number
 }

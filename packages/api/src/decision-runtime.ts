@@ -8,6 +8,7 @@
  */
 
 import {
+  assertInputAuthority,
   calculateCost,
   DecisionAdapterRegistry,
   DecisionProviderError,
@@ -278,6 +279,7 @@ export function createDecisionRuntime(
     configuredAdapterIds: () => adapters.ids(),
     resolveRoute: async (context) => routeResolver(context),
     async observe<T>(runOptions: DecisionObservationRunOptions<T>): Promise<DecisionObservationResult<T>> {
+      await assertInputAuthority(runOptions.operation.assertInputAuthority)
       const routeContext: DecisionRouteContext = {
         ...(runOptions.workspaceId ? { workspaceId: runOptions.workspaceId } : {}),
         kind: 'observation',
@@ -320,6 +322,7 @@ export function createDecisionRuntime(
       })
     },
     async run<T>(runOptions: DecisionRuntimeRunOptions<T>): Promise<DecisionCascadeResult<T>> {
+      await assertInputAuthority(runOptions.operation.assertInputAuthority)
       const routeContext: DecisionRouteContext = {
         ...(runOptions.workspaceId ? { workspaceId: runOptions.workspaceId } : {}),
         kind: 'execution',
@@ -384,6 +387,7 @@ export function createDecisionRuntime(
         attempts: result.attempts,
         ...(result.failureKind ? { failureKind: result.failureKind } : {}),
       })
+      await assertInputAuthority(runOptions.operation.assertInputAuthority)
       return result
     },
   }
