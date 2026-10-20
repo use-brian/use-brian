@@ -1,5 +1,7 @@
 import { describe, it, expect, beforeAll, afterAll, beforeEach } from 'vitest'
-import pg from 'pg'
+import type pg from 'pg'
+import { getAppPool, getPool, queryWithRLS } from '../client.js'
+import { captureAuthoringAuthoritySystem } from '../../context-scope/workflow-authority.js'
 import {
   rollupGoals,
   rollupHost,
@@ -7,41 +9,40 @@ import {
   type RollupDeps,
   type RollupGoalDeps,
   type DoneWhenResolvers,
+  type GoalCreateParams,
 } from '@use-brian/core'
 
 /**
- * Integration test for the goals store + the task host adapter (rollup
- * end-to-end). Requires a local PostgreSQL `Use Brian` with migration
- * `285_goals.sql` applied. Skips silently when the DB / table is unavailable.
+ * Guarded disposable-PG integration for the Goal store and native lifecycle.
+ * Never selects a personal database or silently skips missing fixture state.
  *
  * [COMP:goals/store] [COMP:goals/host-task]
  */
-
-let pool: pg.Pool | undefined
-
-async function canConnect(): Promise<boolean> {
-  const p = new pg.Pool({ database: 'sidanclaw', connectionTimeoutMillis: 2000 })
-  try {
-    const client = await p.connect()
-    try {
-      await client.query('SELECT 1 FROM goals LIMIT 1')
-    } finally {
-      client.release()
-    }
-    pool = p
-    return true
-  } catch {
-    await p.end().catch(() => {})
-    return false
-  }
-}
-
-const ok = await canConnect()
-const describeIf = ok ? describe : describe.skip
+const { assertLocalFixture } = await import(
+  new URL('../../../../../scripts/crm/local-fixture.mjs', import.meta.url).href
+)
+await assertLocalFixture()
+const pool = getPool()
+const workspaceAssistants = new Map<string, string>()
 
 afterAll(async () => {
-  if (pool) await pool.end()
+  await getAppPool().end()
+  await pool.end()
 })
+
+/** Exercise the real authoring capture; drafts deliberately remain unbound. */
+async function createAuthoredGoal(params: GoalCreateParams) {
+  const goals = await import('../goals.js')
+  if (params.confirmed === false) return goals.createGoal(params)
+  const assistantId = workspaceAssistants.get(params.workspaceId)
+  if (!assistantId || !params.createdByUserId) throw new Error('Missing synthetic Goal actor')
+  const authoringAuthority = await captureAuthoringAuthoritySystem({
+    workspaceId: params.workspaceId,
+    userId: params.createdByUserId,
+    assistantId,
+  })
+  return goals.createGoal({ ...params, authoringAuthority })
+}
 
 async function makeUser(client: pg.PoolClient): Promise<string> {
   const r = await client.query(
@@ -52,11 +53,19 @@ async function makeUser(client: pg.PoolClient): Promise<string> {
 }
 async function makeWorkspace(client: pg.PoolClient, ownerId: string): Promise<string> {
   const r = await client.query(
-    `INSERT INTO workspaces (id, name, purpose, owner_user_id, is_personal)
-     VALUES (gen_random_uuid(), 'goals-test-ws', 'test', $1, false) RETURNING id`,
+    `INSERT INTO workspaces (id, name, purpose, owner_user_id, is_personal, department_read_v2)
+     VALUES (gen_random_uuid(), 'Synthetic Goal workspace', 'test', $1, false, false) RETURNING id`,
     [ownerId],
   )
-  return r.rows[0].id
+  const workspaceId: string = r.rows[0].id
+  const assistant = await client.query<{ id: string }>(
+    `INSERT INTO assistants (id, name, owner_user_id, workspace_id, kind, clearance, compartments)
+     VALUES (gen_random_uuid(), 'Synthetic Goal assistant', $1, $2, 'primary', 'confidential', NULL)
+     RETURNING id`,
+    [ownerId, workspaceId],
+  )
+  workspaceAssistants.set(workspaceId, assistant.rows[0].id)
+  return workspaceId
 }
 async function addMember(client: pg.PoolClient, workspaceId: string, userId: string): Promise<void> {
   await client.query(
@@ -70,17 +79,16 @@ type GoalsMod = typeof import('../goals.js')
 type TasksMod = typeof import('../tasks.js')
 type HostMod = typeof import('../../goals/host-task.js')
 
-describeIf('[COMP:goals/store] goals store (integration)', () => {
+describe('[COMP:goals/store] goals store (integration)', () => {
   let goals: GoalsMod
   beforeAll(async () => {
-    process.env.DATABASE_URL ??= 'postgres:///sidanclaw'
     goals = await import('../goals.js')
   })
 
   let userId: string
   let workspaceId: string
   beforeEach(async () => {
-    const c = await pool!.connect()
+    const c = await pool.connect()
     try {
       userId = await makeUser(c)
       workspaceId = await makeWorkspace(c, userId)
@@ -91,7 +99,7 @@ describeIf('[COMP:goals/store] goals store (integration)', () => {
   })
 
   it('create + getByIdSystem round trip (host + done_when preserved)', async () => {
-    const g = await goals.createGoal({
+    const g = await createAuthoredGoal({
       workspaceId,
       outcome: 'ship the thing',
       doneWhen: { kind: 'subtasks' },
@@ -106,15 +114,36 @@ describeIf('[COMP:goals/store] goals store (integration)', () => {
     expect(got?.budget).toEqual({ maxIterations: 10, deadline: '2026-12-31T00:00:00.000Z' })
   })
 
+  it('uses the real non-owner application role and isolates Goal reads by membership', async () => {
+    const g = await createAuthoredGoal({ workspaceId, outcome: 'Synthetic scoped Goal', doneWhen: { kind: 'subtasks' }, createdByUserId: userId })
+    const role = (await queryWithRLS(userId, `SELECT
+      (SELECT rolsuper FROM pg_roles WHERE rolname=current_user) AS superuser,
+      (SELECT rolbypassrls FROM pg_roles WHERE rolname=current_user) AS bypass,
+      (SELECT relowner=(SELECT oid FROM pg_roles WHERE rolname=current_user) FROM pg_class WHERE oid='goals'::regclass) AS owns_goals,
+      row_security_active('goals'::regclass) AS rls`)).rows[0]
+    expect(role).toMatchObject({ superuser: false, bypass: false, owns_goals: false, rls: true })
+    expect((await goals.getGoalById(userId, g.id))?.id).toBe(g.id)
+    const c = await pool.connect()
+    let outsiderId: string
+    try { outsiderId = await makeUser(c) } finally { c.release() }
+    expect(await goals.getGoalById(outsiderId, g.id)).toBeNull()
+    expect(g.authoringAuthority).toMatchObject({ ceiling: { userId, workspaceId }, assistantId: workspaceAssistants.get(workspaceId) })
+  })
+
+  it('refuses a confirmed Goal without its real authoring authority', async () => {
+    await expect(goals.createGoal({ workspaceId, outcome: 'Synthetic missing-authority Goal', doneWhen: { kind: 'subtasks' }, createdByUserId: userId }))
+      .rejects.toMatchObject({ reason: 'goal_authority_unavailable' })
+  })
+
   it('a self-hosted goal stores a null host', async () => {
-    const g = await goals.createGoal({ workspaceId, outcome: 'grow MRR', doneWhen: { kind: 'query', query: { predicate: { mrr_gte: 50000 } } }, createdByUserId: userId })
+    const g = await createAuthoredGoal({ workspaceId, outcome: 'grow MRR', doneWhen: { kind: 'query', query: { predicate: { mrr_gte: 50000 } } }, createdByUserId: userId })
     const got = await goals.getGoalByIdSystem(g.id)
     expect(got?.host).toBeNull()
   })
 
   it('rejects a half-specified host (host_pairing CHECK)', async () => {
     await expect(
-      pool!.query(
+      pool.query(
         `INSERT INTO goals (workspace_id, host_type, outcome, done_when) VALUES ($1, 'task', 'x', '{}'::jsonb)`,
         [workspaceId],
       ),
@@ -122,9 +151,9 @@ describeIf('[COMP:goals/store] goals store (integration)', () => {
   })
 
   it('rejects a cross-workspace sub-goal (parent_workspace guard)', async () => {
-    const parent = await goals.createGoal({ workspaceId, outcome: 'parent', doneWhen: { kind: 'subtasks' }, createdByUserId: userId })
+    const parent = await createAuthoredGoal({ workspaceId, outcome: 'parent', doneWhen: { kind: 'subtasks' }, createdByUserId: userId })
     // a second workspace owned by the same user
-    const c = await pool!.connect()
+    const c = await pool.connect()
     let otherWs: string
     try {
       otherWs = await makeWorkspace(c, userId)
@@ -133,40 +162,39 @@ describeIf('[COMP:goals/store] goals store (integration)', () => {
       c.release()
     }
     await expect(
-      goals.createGoal({ workspaceId: otherWs, outcome: 'child', doneWhen: { kind: 'subtasks' }, parentGoalId: parent.id, createdByUserId: userId }),
+      createAuthoredGoal({ workspaceId: otherWs, outcome: 'child', doneWhen: { kind: 'subtasks' }, parentGoalId: parent.id, createdByUserId: userId }),
     ).rejects.toThrow(/same workspace/)
   })
 
   it('countOpenSubGoalsSystem counts non-terminal children', async () => {
-    const parent = await goals.createGoal({ workspaceId, outcome: 'p', doneWhen: { kind: 'subtasks' }, createdByUserId: userId })
-    const c1 = await goals.createGoal({ workspaceId, outcome: 'c1', doneWhen: { kind: 'subtasks' }, parentGoalId: parent.id, createdByUserId: userId })
-    await goals.createGoal({ workspaceId, outcome: 'c2', doneWhen: { kind: 'subtasks' }, parentGoalId: parent.id, createdByUserId: userId })
+    const parent = await createAuthoredGoal({ workspaceId, outcome: 'p', doneWhen: { kind: 'subtasks' }, createdByUserId: userId })
+    const c1 = await createAuthoredGoal({ workspaceId, outcome: 'c1', doneWhen: { kind: 'subtasks' }, parentGoalId: parent.id, createdByUserId: userId })
+    await createAuthoredGoal({ workspaceId, outcome: 'c2', doneWhen: { kind: 'subtasks' }, parentGoalId: parent.id, createdByUserId: userId })
     expect(await goals.countOpenSubGoalsSystem(parent.id)).toBe(2)
     await goals.setGoalStatusSystem(c1.id, 'done')
     expect(await goals.countOpenSubGoalsSystem(parent.id)).toBe(1)
   })
 
   it('setStatusSystem records a blocker reason', async () => {
-    const g = await goals.createGoal({ workspaceId, outcome: 'x', doneWhen: { kind: 'subtasks' }, createdByUserId: userId })
+    const g = await createAuthoredGoal({ workspaceId, outcome: 'x', doneWhen: { kind: 'subtasks' }, createdByUserId: userId })
     const updated = await goals.setGoalStatusSystem(g.id, 'blocked', 'max_iterations')
     expect(updated?.status).toBe('blocked')
     expect(updated?.blockerReason).toBe('max_iterations')
   })
 })
 
-describeIf('[COMP:goals/host-task] rollup end-to-end (goal on a task host)', () => {
+describe('[COMP:goals/host-task] rollup end-to-end (goal on a task host)', () => {
   let goals: GoalsMod
   let tasks: TasksMod
   let host: HostMod
   beforeAll(async () => {
-    process.env.DATABASE_URL ??= 'postgres:///sidanclaw'
     goals = await import('../goals.js')
     tasks = await import('../tasks.js')
     host = await import('../../goals/host-task.js')
   })
 
   it('a goal hosted on a task completes when its sub-tasks close, and closes the task', async () => {
-    const c = await pool!.connect()
+    const c = await pool.connect()
     let userId: string
     let workspaceId: string
     try {
@@ -182,7 +210,7 @@ describeIf('[COMP:goals/host-task] rollup end-to-end (goal on a task host)', () 
     const sub1 = await tasks.createTask(userId, { workspaceId, title: 's1', parentId: parent.id })
     const sub2 = await tasks.createTask(userId, { workspaceId, title: 's2', parentId: parent.id })
 
-    const goal = await goals.createGoal({
+    const goal = await createAuthoredGoal({
       workspaceId,
       outcome: 'finish the parent task',
       doneWhen: { kind: 'subtasks' },
@@ -223,7 +251,7 @@ describeIf('[COMP:goals/host-task] rollup end-to-end (goal on a task host)', () 
     expect(r2).toEqual([{ goalId: goal.id, met: true }])
     expect((await goals.getGoalByIdSystem(goal.id))?.status).toBe('done')
 
-    const activeParent = await pool!.query<{ status: string }>(
+    const activeParent = await pool.query<{ status: string }>(
       `SELECT status FROM tasks WHERE valid_to IS NULL AND title = $1`,
       [parentTitle],
     )
@@ -231,15 +259,14 @@ describeIf('[COMP:goals/host-task] rollup end-to-end (goal on a task host)', () 
   })
 })
 
-describeIf('[COMP:goals/rollup] self-hosted goal over sub-goals (integration)', () => {
+describe('[COMP:goals/rollup] self-hosted goal over sub-goals (integration)', () => {
   let goals: GoalsMod
   beforeAll(async () => {
-    process.env.DATABASE_URL ??= 'postgres:///sidanclaw'
     goals = await import('../goals.js')
   })
 
   it('a self-hosted goal completes when its sub-goals close', async () => {
-    const c = await pool!.connect()
+    const c = await pool.connect()
     let userId: string
     let workspaceId: string
     try {
@@ -250,9 +277,9 @@ describeIf('[COMP:goals/rollup] self-hosted goal over sub-goals (integration)', 
       c.release()
     }
 
-    const parent = await goals.createGoal({ workspaceId, outcome: 'self-hosted objective', doneWhen: { kind: 'subtasks' }, createdByUserId: userId })
-    const sub1 = await goals.createGoal({ workspaceId, outcome: 'sg1', doneWhen: { kind: 'subtasks' }, parentGoalId: parent.id, createdByUserId: userId })
-    const sub2 = await goals.createGoal({ workspaceId, outcome: 'sg2', doneWhen: { kind: 'subtasks' }, parentGoalId: parent.id, createdByUserId: userId })
+    const parent = await createAuthoredGoal({ workspaceId, outcome: 'self-hosted objective', doneWhen: { kind: 'subtasks' }, createdByUserId: userId })
+    const sub1 = await createAuthoredGoal({ workspaceId, outcome: 'sg1', doneWhen: { kind: 'subtasks' }, parentGoalId: parent.id, createdByUserId: userId })
+    const sub2 = await createAuthoredGoal({ workspaceId, outcome: 'sg2', doneWhen: { kind: 'subtasks' }, parentGoalId: parent.id, createdByUserId: userId })
 
     // Self-hosted acceptance: `subtasks` resolves to "no open sub-goals".
     const selfDeps: RollupGoalDeps = {
@@ -279,17 +306,16 @@ describeIf('[COMP:goals/rollup] self-hosted goal over sub-goals (integration)', 
   })
 })
 
-describeIf('[COMP:goals/recipe-store] recipe persistence + instantiation link (integration)', () => {
+describe('[COMP:goals/recipe-store] recipe persistence + instantiation link (integration)', () => {
   let goals: GoalsMod
   let recipes: typeof import('../goal-recipes.js')
   beforeAll(async () => {
-    process.env.DATABASE_URL ??= 'postgres:///sidanclaw'
     goals = await import('../goals.js')
     recipes = await import('../goal-recipes.js')
   })
 
   it('persists a recipe, then instantiates a goal whose recipe_id links back to it', async () => {
-    const c = await pool!.connect()
+    const c = await pool.connect()
     let userId: string
     let workspaceId: string
     try {
@@ -313,7 +339,7 @@ describeIf('[COMP:goals/recipe-store] recipe persistence + instantiation link (i
 
     // Instantiate (core) -> create the goal -> the FK link holds.
     const params = instantiateGoalRecipe(recipe, { workspaceId, vars: { account: 'Acme' }, createdByUserId: userId })
-    const goal = await goals.createGoal(params)
+    const goal = await createAuthoredGoal(params)
     expect(goal.outcome).toBe('Close the Acme deal')
     expect(goal.recipeId).toBe(recipe.id)
     const got = await goals.getGoalByIdSystem(goal.id)
@@ -322,11 +348,10 @@ describeIf('[COMP:goals/recipe-store] recipe persistence + instantiation link (i
   })
 })
 
-describeIf('[COMP:goals/host-readonly] goal on a non-task host (query-driven)', () => {
+describe('[COMP:goals/host-readonly] goal on a non-task host (query-driven)', () => {
   let goals: GoalsMod
   let host: HostMod
   beforeAll(async () => {
-    process.env.DATABASE_URL ??= 'postgres:///sidanclaw'
     goals = await import('../goals.js')
     host = await import('../../goals/host-task.js')
   })
@@ -334,7 +359,7 @@ describeIf('[COMP:goals/host-readonly] goal on a non-task host (query-driven)', 
   const NON_TASK_HOSTS = ['entity', 'page', 'workflow'] as const
   for (const hostType of NON_TASK_HOSTS) {
     it(`a goal on a ${hostType} host reaches done via a query predicate; the host is not mutated`, async () => {
-      const c = await pool!.connect()
+      const c = await pool.connect()
       let userId: string
       let workspaceId: string
       try {
@@ -346,7 +371,7 @@ describeIf('[COMP:goals/host-readonly] goal on a non-task host (query-driven)', 
       }
 
       const hostId = '00000000-0000-0000-0000-0000000000aa'
-      const goal = await goals.createGoal({
+      const goal = await createAuthoredGoal({
         workspaceId,
         outcome: `drive the ${hostType}`,
         doneWhen: { kind: 'query', query: { predicate: { ready: true } } },
@@ -379,17 +404,16 @@ describeIf('[COMP:goals/host-readonly] goal on a non-task host (query-driven)', 
   }
 })
 
-describeIf('[COMP:goals/rollup-runner] the task-close hook fires the structural rollup', () => {
+describe('[COMP:goals/rollup-runner] the task-close hook fires the structural rollup', () => {
   let tasks: TasksMod
   let tasksStore: typeof import('../tasks-store.js')
   beforeAll(async () => {
-    process.env.DATABASE_URL ??= 'postgres:///sidanclaw'
     tasks = await import('../tasks.js')
     tasksStore = await import('../tasks-store.js')
   })
 
   it('fires onTaskTerminal with the parent host on a sub-task close, and not otherwise', async () => {
-    const c = await pool!.connect()
+    const c = await pool.connect()
     let userId: string
     let workspaceId: string
     try {
@@ -424,13 +448,12 @@ describeIf('[COMP:goals/rollup-runner] the task-close hook fires the structural 
   })
 })
 
-describeIf('[COMP:goals/rollup-runner] the runner completes a met goal and delivers (no silent termination)', () => {
+describe('[COMP:goals/rollup-runner] the runner completes a met goal and delivers (no silent termination)', () => {
   let goals: GoalsMod
   let tasks: TasksMod
   let goalStoreMod: typeof import('../goals-store.js')
   let runnerMod: typeof import('../../goals/rollup-runner.js')
   beforeAll(async () => {
-    process.env.DATABASE_URL ??= 'postgres:///sidanclaw'
     goals = await import('../goals.js')
     tasks = await import('../tasks.js')
     goalStoreMod = await import('../goals-store.js')
@@ -438,7 +461,7 @@ describeIf('[COMP:goals/rollup-runner] the runner completes a met goal and deliv
   })
 
   it('rolls a task-hosted goal to done, closes the host task, and delivers exactly once', async () => {
-    const c = await pool!.connect()
+    const c = await pool.connect()
     let userId: string
     let workspaceId: string
     try {
@@ -452,7 +475,7 @@ describeIf('[COMP:goals/rollup-runner] the runner completes a met goal and deliv
     const title = `runner-${Date.now()}-${Math.round(performance.now())}`
     const parent = await tasks.createTask(userId, { workspaceId, title })
     const sub = await tasks.createTask(userId, { workspaceId, title: 'child', parentId: parent.id })
-    const goal = await goals.createGoal({
+    const goal = await createAuthoredGoal({
       workspaceId,
       outcome: 'finish the parent task',
       doneWhen: { kind: 'subtasks' },
@@ -483,7 +506,7 @@ describeIf('[COMP:goals/rollup-runner] the runner completes a met goal and deliv
     expect((await goals.getGoalByIdSystem(goal.id))?.status).toBe('done')
     expect(delivered).toEqual([goal.id])
 
-    const activeParent = await pool!.query<{ status: string }>(
+    const activeParent = await pool.query<{ status: string }>(
       `SELECT status FROM tasks WHERE valid_to IS NULL AND title = $1`,
       [title],
     )
@@ -491,14 +514,13 @@ describeIf('[COMP:goals/rollup-runner] the runner completes a met goal and deliv
   })
 })
 
-describeIf('[COMP:goals/auto-draft] task-autopilot auto-draft + done detection', () => {
+describe('[COMP:goals/auto-draft] task-autopilot auto-draft + done detection', () => {
   let goals: GoalsMod
   let tasks: TasksMod
   let tasksStore: typeof import('../tasks-store.js')
   let writeback: typeof import('../../goals/writeback.js')
   let goalStoreMod: typeof import('../goals-store.js')
   beforeAll(async () => {
-    process.env.DATABASE_URL ??= 'postgres:///sidanclaw'
     goals = await import('../goals.js')
     tasks = await import('../tasks.js')
     tasksStore = await import('../tasks-store.js')
@@ -507,7 +529,7 @@ describeIf('[COMP:goals/auto-draft] task-autopilot auto-draft + done detection',
   })
 
   it('drafts an unconfirmed goal WITH a brief only when the judge passes (§8); hostTaskDone flips true once the task closes; confirm arms it', async () => {
-    const c = await pool!.connect()
+    const c = await pool.connect()
     let userId: string
     let workspaceId: string
     try {
@@ -528,12 +550,13 @@ describeIf('[COMP:goals/auto-draft] task-autopilot auto-draft + done detection',
       judgeReason: 'Research and drafting fit the assistant.',
     }
     const judged: string[] = []
+    const pendingDrafts: Promise<void>[] = []
     const store = tasksStore.createDbTaskStore({
       onTaskCreate: (task, uid) => {
-        void (async () => {
+        const draft = (async () => {
           judged.push(task.title)
           if (!task.title.includes('research')) return // judge fail → no draft
-          await goals.createGoal({
+          await createAuthoredGoal({
             workspaceId: task.workspaceId,
             host: { type: 'task', id: task.id },
             outcome: `A vendor comparison for: ${task.title}`,
@@ -543,6 +566,9 @@ describeIf('[COMP:goals/auto-draft] task-autopilot auto-draft + done detection',
             brief,
           })
         })()
+        // Keep the hook's void contract while surfacing failures at the await below.
+        void draft.catch(() => {})
+        pendingDrafts.push(draft)
       },
     })
 
@@ -551,7 +577,7 @@ describeIf('[COMP:goals/auto-draft] task-autopilot auto-draft + done detection',
     const top = await store.create({ userId, workspaceId, title })
     const human = await store.create({ userId, workspaceId, title: `sign-contract-${stamp}` })
     const sub = await store.create({ userId, workspaceId, title: 'child', parentId: top.id })
-    await new Promise((r) => setTimeout(r, 100)) // let the fire-and-forget drafts settle
+    await Promise.all(pendingDrafts)
 
     // Judge pass → exactly one DRAFT goal carrying the brief; judge fail → no
     // goal at all; a sub-task never reaches the judge.
@@ -559,6 +585,7 @@ describeIf('[COMP:goals/auto-draft] task-autopilot auto-draft + done detection',
     expect(hostGoals).toHaveLength(1)
     const goal = hostGoals[0]
     expect(goal.confirmedAt).toBeNull()
+    expect(goal.authoringAuthority).toBeNull()
     expect(goal.host).toEqual({ type: 'task', id: top.id })
     expect(goal.brief).toEqual(brief)
     expect(await goals.listGoalsByHostSystem({ type: 'task', id: human.id })).toHaveLength(0)
@@ -585,14 +612,17 @@ describeIf('[COMP:goals/auto-draft] task-autopilot auto-draft + done detection',
     // may also carry §8 brief edits — they persist.
     await goals.setGoalStatusSystem(goal.id, 'blocked', 'unconfirmed_needs_clarification')
     const editedBrief = { ...brief, verification: 'At least three vendors compared.' }
-    const confirmed = await goals.updateGoalSystem(goal.id, { confirm: true, brief: editedBrief })
+    const authoringAuthority = await captureAuthoringAuthoritySystem({
+      workspaceId, userId, assistantId: workspaceAssistants.get(workspaceId)!,
+    })
+    const confirmed = await goals.updateGoalSystem(goal.id, { confirm: true, brief: editedBrief, authoringAuthority })
     expect(confirmed?.confirmedAt).not.toBeNull()
     expect(confirmed?.status).toBe('active') // un-blocked → ready to spin up
     expect(confirmed?.brief).toEqual(editedBrief)
   })
 
   it('an edit to a hosted task repoints its goal so host_id tracks the live id', async () => {
-    const c = await pool!.connect()
+    const c = await pool.connect()
     let userId: string
     let workspaceId: string
     try {
@@ -606,7 +636,7 @@ describeIf('[COMP:goals/auto-draft] task-autopilot auto-draft + done detection',
     // Draft a goal on a top-level task, as boot's auto-draft does.
     const title = `repoint-${Date.now()}-${Math.round(performance.now())}`
     const top = await tasks.createTask(userId, { workspaceId, title })
-    const goal = await goals.createGoal({
+    const goal = await createAuthoredGoal({
       workspaceId,
       host: { type: 'task', id: top.id },
       outcome: `Complete: ${title}`,
@@ -627,15 +657,14 @@ describeIf('[COMP:goals/auto-draft] task-autopilot auto-draft + done detection',
   })
 })
 
-describeIf('[COMP:goals/brief] triage brief persistence (§8)', () => {
+describe('[COMP:goals/brief] triage brief persistence (§8)', () => {
   let goals: GoalsMod
   beforeAll(async () => {
-    process.env.DATABASE_URL ??= 'postgres:///sidanclaw'
     goals = await import('../goals.js')
   })
 
   it('round-trips the brief through create, read, and updateGoalSystem edits; explicit goals carry none', async () => {
-    const c = await pool!.connect()
+    const c = await pool.connect()
     let userId: string
     let workspaceId: string
     try {
@@ -651,7 +680,7 @@ describeIf('[COMP:goals/brief] triage brief persistence (§8)', () => {
       approach: 'Search the brain, then write the page.',
       judgeReason: 'Research fits the assistant.',
     }
-    const drafted = await goals.createGoal({
+    const drafted = await createAuthoredGoal({
       workspaceId,
       outcome: 'A comparison page exists',
       doneWhen: { kind: 'query', query: { predicate: { hostTaskDone: true } } },
@@ -668,7 +697,7 @@ describeIf('[COMP:goals/brief] triage brief persistence (§8)', () => {
     expect(updated?.brief).toEqual(edited)
 
     // A goal created without a brief (setGoal path) stays brief-less.
-    const explicit = await goals.createGoal({
+    const explicit = await createAuthoredGoal({
       workspaceId,
       outcome: 'An explicit goal',
       doneWhen: { kind: 'subtasks' },
@@ -678,17 +707,16 @@ describeIf('[COMP:goals/brief] triage brief persistence (§8)', () => {
   })
 })
 
-describeIf('[COMP:goals/host-cascade] host-lifecycle cascade (integration)', () => {
+describe('[COMP:goals/host-cascade] host-lifecycle cascade (integration)', () => {
   let goals: GoalsMod
   let tasks: TasksMod
   beforeAll(async () => {
-    process.env.DATABASE_URL ??= 'postgres:///sidanclaw'
     goals = await import('../goals.js')
     tasks = await import('../tasks.js')
   })
 
   async function seed(): Promise<{ userId: string; workspaceId: string }> {
-    const c = await pool!.connect()
+    const c = await pool.connect()
     try {
       const userId = await makeUser(c)
       const workspaceId = await makeWorkspace(c, userId)
@@ -705,7 +733,7 @@ describeIf('[COMP:goals/host-cascade] host-lifecycle cascade (integration)', () 
     taskId: string,
     opts: { confirmed?: boolean } = {},
   ) {
-    return goals.createGoal({
+    return createAuthoredGoal({
       workspaceId,
       host: { type: 'task', id: taskId },
       outcome: `Work the task ${taskId}`,
@@ -733,7 +761,7 @@ describeIf('[COMP:goals/host-cascade] host-lifecycle cascade (integration)', () 
     expect(before.map((g) => g.id).sort()).toEqual([draft.id, keptDraft.id].sort())
 
     // The soft delete the brain-inbox DELETE lane performs, then the cascade.
-    const c = await pool!.connect()
+    const c = await pool.connect()
     try {
       await c.query(`UPDATE tasks SET valid_to = now() WHERE id = $1 AND valid_to IS NULL`, [
         doomed.id,
@@ -807,13 +835,12 @@ describeIf('[COMP:goals/host-cascade] host-lifecycle cascade (integration)', () 
   })
 })
 
-describeIf('[COMP:goals/verifier] verify-termination wiring (integration)', () => {
+describe('[COMP:goals/verifier] verify-termination wiring (integration)', () => {
   let goals: GoalsMod
   let writeback: typeof import('../../goals/writeback.js')
   let goalStoreMod: typeof import('../goals-store.js')
   let core: typeof import('@use-brian/core')
   beforeAll(async () => {
-    process.env.DATABASE_URL ??= 'postgres:///sidanclaw'
     goals = await import('../goals.js')
     writeback = await import('../../goals/writeback.js')
     goalStoreMod = await import('../goals-store.js')
@@ -821,7 +848,7 @@ describeIf('[COMP:goals/verifier] verify-termination wiring (integration)', () =
   })
 
   it('a {kind:verify} goal: round-trips the store; verifiedDone flips false→true only once the marker is stamped, and the evaluator follows', async () => {
-    const c = await pool!.connect()
+    const c = await pool.connect()
     let userId: string
     let workspaceId: string
     try {
@@ -832,7 +859,7 @@ describeIf('[COMP:goals/verifier] verify-termination wiring (integration)', () =
       c.release()
     }
 
-    const goal = await goals.createGoal({
+    const goal = await createAuthoredGoal({
       workspaceId,
       outcome: 'Draft and send the launch announcement',
       doneWhen: { kind: 'verify' },
