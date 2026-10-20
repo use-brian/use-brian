@@ -1,3 +1,6 @@
+import { boundScopeSources } from '../security/source-evidence.js'
+import { DerivedScopeError } from '../security/derived-scope.js'
+import type { SessionContextAuthority } from './session-state-types.js'
 /**
  * Episodic-memory retrieval + system-prompt formatting.
  *
@@ -29,6 +32,7 @@ export type FetchEpisodicContextOptions = {
   sessionId: string
   classification: TopicClassification | null
   tokenBudget?: number
+  authority?: SessionContextAuthority
 }
 
 export async function fetchEpisodicContext(
@@ -46,6 +50,7 @@ export async function fetchEpisodicContext(
   if (c.state === 'resume') {
     rows = await opts.store.fetchByTopic({
       sessionId: opts.sessionId,
+      ...(opts.authority ? { authority: opts.authority } : {}),
       topicLabel: c.topic_label,
       limit: 3,
     })
@@ -53,6 +58,7 @@ export async function fetchEpisodicContext(
     // cross-topic
     const active = await opts.store.fetchByTopic({
       sessionId: opts.sessionId,
+      ...(opts.authority ? { authority: opts.authority } : {}),
       topicLabel: c.topic_label,
       limit: 2,
     })
@@ -61,6 +67,7 @@ export async function fetchEpisodicContext(
     for (const label of related.slice(0, 2)) {
       const r = await opts.store.fetchByTopic({
         sessionId: opts.sessionId,
+      ...(opts.authority ? { authority: opts.authority } : {}),
         topicLabel: label,
         limit: 1,
       })
@@ -68,6 +75,12 @@ export async function fetchEpisodicContext(
     }
   }
 
+  if (opts.authority) {
+    if (rows.some(row => !boundScopeSources(row).some(source => source.resourceKind === 'session_context_revision'))) {
+      throw new DerivedScopeError('scope_evidence_missing')
+    }
+    opts.authority.accumulator.note({ sources: rows.flatMap(row => boundScopeSources(row)) })
+  }
   if (rows.length === 0) return null
 
   // Format. Trim to budget by dropping oldest rows first (rows are

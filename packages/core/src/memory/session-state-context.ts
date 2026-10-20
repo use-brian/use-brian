@@ -1,3 +1,5 @@
+import { boundScopeSources } from '../security/source-evidence.js'
+import { DerivedScopeError } from '../security/derived-scope.js'
 /**
  * Session-state retrieval + system-prompt formatting.
  *
@@ -19,6 +21,7 @@
 import type {
   SessionStateRecord,
   SessionStateStore,
+  SessionContextAuthority,
 } from './session-state-types.js'
 
 const ROUGH_CHARS_PER_TOKEN = 4
@@ -30,6 +33,7 @@ export type BuildSessionStateBlockOptions = {
   sessionId: string
   /** Defaults to 1000. */
   tokenBudget?: number
+  authority?: SessionContextAuthority
   /**
    * Injected so tests can pin the clock — resolved rows render a
    * "(resolved HH:MM)" suffix relative to this reference.
@@ -48,10 +52,15 @@ export async function buildSessionStateBlock(
   const budget = opts.tokenBudget ?? DEFAULT_TOKEN_BUDGET
   const now = opts.now ?? new Date()
 
-  const recent = await opts.store.listRecentBySession(
-    opts.sessionId,
-    DEFAULT_RECENT_LIMIT,
-  )
+  const recent = opts.authority
+    ? await opts.store.listRecentBySession(opts.sessionId, DEFAULT_RECENT_LIMIT, opts.authority)
+    : await opts.store.listRecentBySession(opts.sessionId, DEFAULT_RECENT_LIMIT)
+  if (opts.authority) {
+    if (recent.some(row => !boundScopeSources(row).some(source => source.resourceKind === 'session_context_revision'))) {
+      throw new DerivedScopeError('scope_evidence_missing')
+    }
+    opts.authority.accumulator.note({ sources: recent.flatMap(row => boundScopeSources(row)) })
+  }
   if (recent.length === 0) return null
 
   const open = recent.filter((r) => r.status === 'open')
@@ -87,6 +96,7 @@ export type BuildDeliveryConversationStateBlockOptions = {
   sessions: DeliveryConversationSession[]
   /** Defaults to 1000. */
   tokenBudget?: number
+  authority?: SessionContextAuthority
   now?: Date
 }
 
@@ -112,10 +122,15 @@ export async function buildDeliveryConversationStateBlock(
 
   const groups: Array<{ label: string | null; rows: SessionStateRecord[] }> = []
   for (const session of opts.sessions) {
-    const recent = await opts.store.listRecentBySession(
-      session.sessionId,
-      DEFAULT_RECENT_LIMIT,
-    )
+    const recent = opts.authority
+      ? await opts.store.listRecentBySession(session.sessionId, DEFAULT_RECENT_LIMIT, opts.authority)
+      : await opts.store.listRecentBySession(session.sessionId, DEFAULT_RECENT_LIMIT)
+    if (opts.authority) {
+      if (recent.some(row => !boundScopeSources(row).some(source => source.resourceKind === 'session_context_revision'))) {
+        throw new DerivedScopeError('scope_evidence_missing')
+      }
+      opts.authority.accumulator.note({ sources: recent.flatMap(row => boundScopeSources(row)) })
+    }
     if (recent.length === 0) continue
     groups.push({
       label: session.assistantName?.trim() || null,

@@ -1,3 +1,6 @@
+import { boundScopeSources } from '../security/source-evidence.js'
+import { DerivedScopeError } from '../security/derived-scope.js'
+import { assertInputAuthority, isInputAuthorityError } from '../providers/input-authority.js'
 /**
  * Post-turn session-state diff pass.
  *
@@ -25,6 +28,7 @@ import { collectStream } from '../providers/accumulator.js'
 import type {
   SessionStateRecord,
   SessionStateStore,
+  SessionContextAuthority,
 } from './session-state-types.js'
 
 const DIFF_PROMPT_PREAMBLE = `You are a session-state differ. Your job is to spot multi-turn commitments that a companion assistant is expected to remember across turns, and to flip already-tracked commitments to resolved when the user confirms completion or cancels them.
@@ -65,6 +69,8 @@ export type RunSessionStateDiffOptions = {
    * → "Diff-pass filters"). Pass an empty array if not available.
    */
   activeJobIds?: string[]
+  authority?: SessionContextAuthority
+  assertInputAuthority?: () => Promise<void>
 }
 
 /**
@@ -141,6 +147,16 @@ export async function runSessionStateDiff(
     return { upserts: 0, resolves: 0, usage: null, model: null }
   }
 
+  if (opts.authority) {
+    if (typeof opts.assertInputAuthority !== 'function') throw new DerivedScopeError('scope_evidence_missing')
+    if (opts.openCommitments.some(row => !boundScopeSources(row).some(source => source.resourceKind === 'session_context_revision'))
+      || opts.recentTurns.some(turn => boundScopeSources(turn).length === 0)) throw new DerivedScopeError('scope_evidence_missing')
+    opts.authority.accumulator.note({ sources: [...opts.openCommitments, ...opts.recentTurns].flatMap(row => boundScopeSources(row)) })
+  }
+  await assertInputAuthority(opts.assertInputAuthority)
+  const derivation = opts.authority ? structuredClone({ producer: 'session_state:diff-pass',
+    sources: opts.authority.accumulator.evidence.sources ?? [] }) : undefined
+
   const openList = opts.openCommitments.length > 0
     ? opts.openCommitments
         .map(
@@ -164,6 +180,7 @@ export async function runSessionStateDiff(
     let attemptUsage: TokenUsage | null = null
     let attemptModel: string | null = null
     try {
+      await assertInputAuthority(opts.assertInputAuthority)
       const response = await collectStream(
         opts.provider.stream({
           model: opts.model,
@@ -174,8 +191,10 @@ export async function runSessionStateDiff(
           ],
           maxTokens: 1_000,
           temperature: 0.1,
+          assertInputAuthority: opts.assertInputAuthority,
         }),
       )
+      await assertInputAuthority(opts.assertInputAuthority)
       attemptUsage = response.usage
       attemptModel = response.model || opts.model
 
@@ -195,6 +214,7 @@ export async function runSessionStateDiff(
         model: attemptModel,
       }
     } catch (err) {
+      if (isInputAuthorityError(err)) throw err
       return {
         parsed: null,
         usage: attemptUsage,
@@ -257,6 +277,7 @@ export async function runSessionStateDiff(
     }
 
     try {
+      await assertInputAuthority(opts.assertInputAuthority)
       await opts.store.upsert({
         sessionId: opts.sessionId,
         userId: opts.userId,
@@ -265,9 +286,11 @@ export async function runSessionStateDiff(
         summary: u.summary,
         detail: u.detail ?? null,
         source: 'diff-pass',
+        ...(opts.authority ? { authority: opts.authority, derivation } : {}),
       })
       upsertCount += 1
-    } catch {
+    } catch (error) {
+      if (isInputAuthorityError(error)) throw error
       // Individual row failure shouldn't abort the rest of the diff.
     }
   }
@@ -278,13 +301,16 @@ export async function runSessionStateDiff(
     if (!openByKey.has(r.key)) continue
 
     try {
+      await assertInputAuthority(opts.assertInputAuthority)
       const resolved = await opts.store.resolve({
         sessionId: opts.sessionId,
         key: r.key,
         source: 'diff-pass',
+        ...(opts.authority ? { authority: opts.authority, derivation } : {}),
       })
       if (resolved) resolveCount += 1
-    } catch {
+    } catch (error) {
+      if (isInputAuthorityError(error)) throw error
       // Per-row, non-fatal.
     }
   }

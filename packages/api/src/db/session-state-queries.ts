@@ -1,4 +1,5 @@
 import { z } from 'zod'
+import { getPool } from './client.js'
 import { DerivedScopeError, bindScopeSources, boundScopeSources,
   type SessionStateSource, type SessionStateStatus, type SessionStateStore, type SessionContextAuthority } from '@use-brian/core'
 import { readSessionContextRevisions, writeSessionContextRevision, mutateSessionContextParents, sessionContextGeneration,
@@ -18,10 +19,23 @@ function record(row: SessionContextRevision): SessionStateRow {
 function writeProof(params: { authority?: SessionContextAuthority; derivation?: unknown }) {
   if (!params.authority || !params.derivation) throw new DerivedScopeError('scope_evidence_missing')
 }
+/** Key mutation needs complete absence/identity proof, not a filtered list.
+ * IDs are metadata discovery only. No protected key is inspected until every
+ * potential parent has passed its current independent source admission. */
+async function admittedKeyDomain(sessionId: string, authority: SessionContextAuthority | undefined): Promise<SessionContextRevision[]> {
+  if (!authority) throw new DerivedScopeError('scope_evidence_missing')
+  await authority.execution.security.authority.assertCurrent()
+  const parents=(await getPool().query<{id:string}>(`SELECT p.id FROM session_state p JOIN sessions s ON s.id=p.session_id
+    WHERE s.id=$1 AND s.workspace_id=$2`,[sessionId,authority.execution.security.access.workspaceId])).rows
+  const admitted=await readSessionContextRevisions(sessionId,'session_state',authority)
+  const ids=new Set(admitted.map(row=>row.parentId))
+  if(parents.some(parent=>!ids.has(parent.id)))throw new DerivedScopeError('scope_source_changed')
+  return admitted
+}
 export async function upsertSessionState(params: Parameters<SessionStateStore['upsert']>[0]): Promise<SessionStateRow> {
   writeProof(params)
   const expectedGeneration=await sessionContextGeneration(params.sessionId)
-  const existing=(await readSessionContextRevisions(params.sessionId,'session_state',params.authority)).find(row=>record(row).key===params.key)
+  const existing=(await admittedKeyDomain(params.sessionId,params.authority)).find(row=>record(row).key===params.key)
   const old=existing?record(existing):undefined,now=Date.now()
   // Preserve tool-authored content only for the established tool -> diff rule.
   // Reopening still depends on both the old key/content and the new inputs.
@@ -38,7 +52,7 @@ export async function upsertSessionState(params: Parameters<SessionStateStore['u
 export async function resolveSessionState(params: Parameters<SessionStateStore['resolve']>[0]): Promise<SessionStateRow | null> {
   writeProof(params)
   const expectedGeneration=await sessionContextGeneration(params.sessionId)
-  const existing=(await readSessionContextRevisions(params.sessionId,'session_state',params.authority)).find(row=>{
+  const existing=(await admittedKeyDomain(params.sessionId,params.authority)).find(row=>{
     const old=record(row);return old.key===params.key && old.status==='open'
   })
   if (!existing) return null

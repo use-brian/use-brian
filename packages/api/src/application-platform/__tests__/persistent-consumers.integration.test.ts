@@ -1,7 +1,8 @@
-import { afterAll, afterEach, describe, expect, it } from 'vitest'
+import { afterAll, afterEach, describe, expect, it, vi } from 'vitest'
 import { randomBytes } from 'node:crypto'
 import pg from 'pg'
-import { boundScopeSources, executionToolContext, type ScopeSource } from '@use-brian/core'
+import { z } from 'zod'
+import { boundScopeSources, bindScopeSources, executionToolContext, createSessionStateTools, buildSessionStateBlock, runSessionStateDiff, type ScopeSource, type StreamFn } from '@use-brian/core'
 import { getAppPool, getPool } from '../../db/client.js'
 import { addSessionMessage, getSessionMessages, toStampedMessages } from '../../db/sessions.js'
 import { createDbSessionStateStore } from '../../db/session-state-store.js'
@@ -39,6 +40,9 @@ describe.sequential('[COMP:api/application-persistence] actual transcript persis
     const store = createDbSessionStateStore()
     expect(await store.listOpenBySession(f.session.id, authority)).toEqual([])
     expect(await store.listRecentBySession(f.session.id, 50, authority)).toEqual([])
+    const sources=(await f.history()).flatMap(boundScopeSources)
+    await expect(store.upsert({sessionId:f.session.id,userId:f.ownerId,assistantId:f.assistantId,key:'Fictional new key',summary:'Fictional new content',source:'tool',authority,derivation:{producer:'fixture:uncertified-key-domain',sources}})).rejects.toThrow('scope_source_changed')
+    await expect(store.resolve({sessionId:f.session.id,key:'Fictional protected commitment',source:'tool',authority,derivation:{producer:'fixture:uncertified-key-resolution',sources}})).rejects.toThrow('scope_source_changed')
   })
 
   it('holds uncertified episodic labels before topic enumeration, filtering and retrieval', async () => {
@@ -135,10 +139,62 @@ describe.sequential('[COMP:api/application-persistence] actual transcript persis
     const original=(await f.pool.query('SELECT id,payload_sha256 FROM session_context_scope_revisions WHERE workspace_id=$1',[f.workspaceId])).rows
     await independent.pool.query("DELETE FROM grants WHERE kind='human' AND account_id=$1",[f.ownerId])
     expect(await store.listOpenBySession(f.session.id,authority)).toEqual([])
+    const nativeHistory=await f.history(),fresh=await f.modelContext()
+    bindSessionContextRetainedAuthority(fresh.execution,(execution,sources,action)=>independent!.coordinator.prepare(execution,sources,action))
+    await expect(store.upsert({sessionId:f.session.id,userId:f.ownerId,assistantId:f.assistantId,key:row.key,summary:'Fictional replacement without source access',source:'tool',authority:fresh,
+      derivation:{producer:'fixture:hidden-key-collision',sources:nativeHistory.flatMap(boundScopeSources)}})).rejects.toThrow('scope_source_changed')
+    expect((await f.pool.query('SELECT count(*)::int AS n FROM session_state WHERE session_id=$1',[f.session.id])).rows[0].n).toBe(1)
     const other=await f.modelContext(f.secondId)
     bindSessionContextRetainedAuthority(other.execution,(execution,sources,action)=>independent!.coordinator.prepare(execution,sources,action))
     expect(await store.listOpenBySession(f.session.id,other)).toMatchObject([{id:row.id,summary:'Fictional independent content'}])
     expect((await f.pool.query('SELECT id,payload_sha256 FROM session_context_scope_revisions WHERE workspace_id=$1',[f.workspaceId])).rows).toEqual(original)
+  })
+
+  it('uses the actual Brian commitment tools and formatter with the same canonical execution', async () => {
+    fixture=await persistentContextFixture()
+    const f=fixture,authority=await f.modelContext(),history=await f.history(),store=createDbSessionStateStore()
+    authority.accumulator.note({sources:history.flatMap(boundScopeSources)})
+    const context={...executionToolContext(authority.execution,{appId:'fixture'}),scopeAccumulator:authority.accumulator}
+    const tools=createSessionStateTools(store)
+    await tools.trackCommitment.execute({key:'Fictional tool key',summary:'Fictional tool commitment',detail:'Fictional tool detail'},context)
+    expect(await buildSessionStateBlock({store,sessionId:f.session.id,authority})).toContain('Fictional tool detail')
+    expect(authority.accumulator.evidence.sources?.some(source=>source.resourceKind==='session_context_revision')).toBe(true)
+    await tools.resolveCommitment.execute({key:'Fictional tool key'},context)
+    expect(await store.listOpenBySession(f.session.id,authority)).toEqual([])
+    expect(await store.listRecentBySession(f.session.id,50,authority)).toMatchObject([{status:'resolved'}])
+  })
+
+  it('guards the actual diff model and writer with current inputs and keeps another member usable', async () => {
+    fixture=await persistentContextFixture()
+    const f=fixture,history=await f.history(),store=createDbSessionStateStore(),authority=await f.modelContext(f.firstId)
+    const stream=vi.fn<StreamFn>(async function*(){
+      yield {type:'text_delta',text:'{"upserts":[{"key":"Fictional diff key","summary":"Fictional diff commitment"}],"resolves":[]}'}
+      yield {type:'message_end',stopReason:'end_turn',usage:{inputTokens:1,outputTokens:1}}
+    })
+    const provider={name:'fixture',models:['fixture'],stream,createSession(){throw new Error('Unused fixture session')}}
+    const recentTurns=toStampedMessages(history,'UTC').map(message=>{
+      const content=typeof message.content==='string'?message.content
+        :z.array(z.object({type:z.literal('text'),text:z.string()})).parse(message.content).map(block=>block.text).join('\n')
+      return bindScopeSources({role:message.role,content},boundScopeSources(message))
+    })
+    await expect(runSessionStateDiff({provider,model:'fixture',sessionId:f.session.id,userId:f.firstId,assistantId:f.assistantId,
+      store,recentTurns,openCommitments:[],authority})).rejects.toThrow('scope_evidence_missing')
+    expect(stream).not.toHaveBeenCalled()
+    const context={...executionToolContext(authority.execution,{appId:'fixture'}),scopeAccumulator:authority.accumulator}
+    const result=await runSessionStateDiff({provider,model:'fixture',sessionId:f.session.id,userId:f.firstId,assistantId:f.assistantId,
+      store,recentTurns,openCommitments:[],authority,assertInputAuthority:()=>assertSourceModelInputAuthority(context)})
+    expect(result.upserts).toBe(1)
+    const open=await store.listOpenBySession(f.session.id,authority)
+    expect(open).toMatchObject([{key:'Fictional diff key'}])
+    await f.pool.query("UPDATE workspace_members SET clearance='public' WHERE workspace_id=$1 AND user_id=$2",[f.workspaceId,f.firstId])
+    await expect(runSessionStateDiff({provider,model:'fixture',sessionId:f.session.id,userId:f.firstId,assistantId:f.assistantId,
+      store,recentTurns,openCommitments:open,authority,assertInputAuthority:()=>assertSourceModelInputAuthority(context)})).rejects.toMatchObject({reason:'authority_changed'})
+    expect(stream).toHaveBeenCalledOnce()
+    const other=await f.modelContext(f.secondId),otherContext={...executionToolContext(other.execution,{appId:'fixture'}),scopeAccumulator:other.accumulator}
+    await runSessionStateDiff({provider,model:'fixture',sessionId:f.session.id,userId:f.secondId,assistantId:f.assistantId,
+      store,recentTurns,openCommitments:await store.listOpenBySession(f.session.id,other),authority:other,
+      assertInputAuthority:()=>assertSourceModelInputAuthority(otherContext)})
+    expect(stream).toHaveBeenCalledTimes(2)
   })
 
   it('publishes exactly one compaction pointer and no orphan revision when cursor claims race', async () => {
