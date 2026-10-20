@@ -98,11 +98,11 @@ function composeMessage(
   params: Parameters<ApprovalDeliveryDispatcher>[0],
   deepLink: string,
 ): string {
-  // Tool arguments are run content derived under the run's scope, and a push
+  // Workflow/tool names and arguments are protected run metadata, and a push
   // destination is chosen by recency, not by who may read that scope. They
   // stay on the authorized web page this message links to.
   return [
-    `🔐 *${params.workflowName}* asks to run \`${params.toolName}\`.`,
+    '🔐 A workflow action needs your approval.',
     ``,
     ...(params.recentTarget ? [`Approve or reject on the web: ${deepLink}`] : [
       `Reply with \`approve ${params.approvalId.slice(0, 8)}\` or \`reject ${params.approvalId.slice(0, 8)}\`,`,
