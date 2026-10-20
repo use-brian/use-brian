@@ -140,6 +140,17 @@ export type EmitAuditEvent = (event: WorkflowAuditEvent) => Promise<void> | void
  * class: a `web` target, a missing channel integration, or a push error all
  * surface as a typed non-`delivered` status rather than looking like success.
  */
+/** Provider acknowledgements only. No message text or credential material. */
+type DeliveryReceipt = {
+  channelId: string
+  /** Observed completed provider calls; zero does not prove no dispatch. */
+  attemptedMessages: number
+  messageIds: string[]
+  effect: 'none' | 'partial' | 'complete' | 'unknown'
+  /** No-effect proof only; any new attempt must still reauthorize. */
+  retrySafe: boolean
+}
+
 export type DeliveryOutcome =
   | {
       status: 'delivered'
@@ -154,6 +165,7 @@ export type DeliveryOutcome =
       messageId?: string
       /** Explicit generated-output publication consent used for this send. */
       publicationApprovalId?: string
+      receipt?: DeliveryReceipt
       /**
        * Thread-reply resolution for a `deliver.thread` step: `applied` — the
        * parent message id resolved and the push was a thread reply;
@@ -186,7 +198,7 @@ export type DeliveryOutcome =
       /** Coarse audience diagnosis only; never source names or policy identifiers. */
       detail?: DeliveryAudienceDenialDetail
     }
-  | { status: 'failed'; channelType: string; error: string }
+  | { status: 'failed'; channelType: string; error: string; receipt?: DeliveryReceipt }
 
 /** Safe, coarse audience diagnoses shared by the authorizer and delivery outcomes. */
 export type DeliveryAudienceDenialDetail =

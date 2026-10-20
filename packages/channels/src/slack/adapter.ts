@@ -298,6 +298,9 @@ export function createSlackAdapter(options: SlackAdapterOptions): ChannelAdapter
       for (const chunk of chunks) {
         if (!chunk.trim()) continue
         const result = await api.postMessage(channelId, chunk, { threadTs: opts?.threadTs })
+        if (typeof result.ts !== 'string' || !result.ts.trim()) {
+          throw new Error('Slack message acknowledgement is unavailable')
+        }
         lastTs = result.ts
       }
 
