@@ -1,3 +1,4 @@
+import { readSessionContextRevisions, writeSessionContextRevision, type SessionContextRevision } from './session-context-revisions.js'
 import { classifySession, sessionKindSql } from '../session-kind.js'
 import type pg from 'pg'
 import {
@@ -12,6 +13,7 @@ import {
   type DerivedWriteEvidence,
   type ResourceScope,
   type ScopeSource,
+  type SessionContextAuthority,
 } from '@use-brian/core'
 import { getPool, getAppPool, applyRLSGucs, query } from './client.js'
 import { readCurrentScopeSources, recordDerivedResource, validateDerivedMemoryInputs, validateDerivedWriteInputs } from './derived-scope-store.js'
@@ -94,6 +96,7 @@ export type Session = {
    */
   appOrigin: string | null
   status: string
+  /** Deprecated scalar slot; semantic reads require readCompactSummary. Always null in native DTOs. */
   compactSummary: string | null
   compactionCount: number
   /**
@@ -436,7 +439,7 @@ async function insertSession(params: CreateSessionParams, execute: typeof query,
          AND visibility=$6
        RETURNING id, assistant_id as "assistantId", user_id as "userId",
                channel_type as "channelType", channel_id as "channelId",
-               app_id as "appId", app_origin as "appOrigin", status, compact_summary as "compactSummary",
+               app_id as "appId", app_origin as "appOrigin", status, NULL::text as "compactSummary",
                compaction_count as "compactionCount",
                compact_boundary_sequence as "compactBoundarySequence", title,
                downgrade_notice_sent as "downgradeNoticeSent",
@@ -479,7 +482,7 @@ async function insertSession(params: CreateSessionParams, execute: typeof query,
        SET last_active_at = now()
      RETURNING id, assistant_id as "assistantId", user_id as "userId",
                channel_type as "channelType", channel_id as "channelId",
-               app_id as "appId", app_origin as "appOrigin", status, compact_summary as "compactSummary",
+               app_id as "appId", app_origin as "appOrigin", status, NULL::text as "compactSummary",
                compaction_count as "compactionCount",
                compact_boundary_sequence as "compactBoundarySequence", title,
                downgrade_notice_sent as "downgradeNoticeSent",
@@ -531,7 +534,7 @@ export async function findSessionByChannel(params: {
   const result = await query<Session>(
     `SELECT id, assistant_id as "assistantId", user_id as "userId",
             channel_type as "channelType", channel_id as "channelId",
-            app_id as "appId", app_origin as "appOrigin", status, compact_summary as "compactSummary",
+            app_id as "appId", app_origin as "appOrigin", status, NULL::text as "compactSummary",
             compaction_count as "compactionCount",
             compact_boundary_sequence as "compactBoundarySequence", title,
             downgrade_notice_sent as "downgradeNoticeSent",
@@ -631,7 +634,7 @@ async function createTransientBrainSession(params: {
       WHERE a.id = $1
      RETURNING id, assistant_id as "assistantId", user_id as "userId",
                channel_type as "channelType", channel_id as "channelId",
-               app_id as "appId", app_origin as "appOrigin", status, compact_summary as "compactSummary",
+               app_id as "appId", app_origin as "appOrigin", status, NULL::text as "compactSummary",
                compaction_count as "compactionCount",
                compact_boundary_sequence as "compactBoundarySequence", title,
                downgrade_notice_sent as "downgradeNoticeSent",
@@ -663,7 +666,7 @@ export async function readSessionById(id: string): Promise<Session | null> {
   const result = await query<Session>(
     `SELECT id, assistant_id as "assistantId", user_id as "userId",
             channel_type as "channelType", channel_id as "channelId",
-            app_id as "appId", app_origin as "appOrigin", status, compact_summary as "compactSummary",
+            app_id as "appId", app_origin as "appOrigin", status, NULL::text as "compactSummary",
             compaction_count as "compactionCount",
             compact_boundary_sequence as "compactBoundarySequence", title,
             downgrade_notice_sent as "downgradeNoticeSent",
@@ -1073,38 +1076,55 @@ export async function sweepStuckSessions(
   }))
 }
 
-/**
- * Atomically write the compact summary text, advance the boundary cursor,
- * and bump compaction_count. The UPDATE is gated on the expected current
- * cursor value so two turns racing to compact the same session don't
- * clobber each other — the loser sees rowCount === 0 and must discard its
- * summary + reload.
- *
- * `newCursor` is the sequence_num of the FIRST recent (non-compactable)
- * row, matching the loader's inclusive `fromSequence` semantics.
- * `expectedCurrentCursor` is the `compact_boundary_sequence` value the
- * caller read at the start of the turn (null = never compacted).
- *
- * Returns true when the row was updated, false when the guard failed
- * (concurrent compaction landed first).
- */
+/** Exact admitted compact-summary payload; its trusted binding is process-private. */
+export type SessionCompactSummary = { id: string; summary: string; boundarySequence: number }
+
+function compactAuthorityChanged(): never {
+  throw Object.assign(new DerivedScopeError('scope_source_changed'), { reason: 'authority_changed' as const, retrySafe: false })
+}
+function compactRecord(row: SessionContextRevision): SessionCompactSummary {
+  const { summary, boundarySequence } = row.content
+  if (typeof summary !== 'string' || typeof boundarySequence !== 'number'
+    || !Number.isSafeInteger(boundarySequence) || boundarySequence < 0) compactAuthorityChanged()
+  return bindScopeSources({ id: row.id, summary, boundarySequence }, boundScopeSources(row))
+}
+
+/** No scalar fallback, and no source access derived from a session DTO. */
+export async function readCompactSummary(sessionId: string, authority?: SessionContextAuthority): Promise<SessionCompactSummary | null> {
+  if (!authority) return null
+  if (authority.execution.lifecycle.sessionId !== sessionId) compactAuthorityChanged()
+  try {
+    const rows = await readSessionContextRevisions(sessionId, 'compact_summary', authority)
+    if (rows.length > 1) compactAuthorityChanged()
+    if (rows.length === 1) {
+      const record = compactRecord(rows[0])
+      authority.accumulator.note({ sources: boundScopeSources(record) })
+      return record
+    }
+    // Content-free presence metadata distinguishes a never-compacted session
+    // from held current/historical content. It grants no payload access.
+    await authority.execution.security.authority.assertCurrent()
+    const marker = (await query<{ present: boolean; cursor: number | null }>(`SELECT
+      (compact_scope_revision_id IS NOT NULL OR compact_summary IS NOT NULL) AS present,
+      compact_boundary_sequence AS cursor FROM sessions WHERE id=$1`, [sessionId])).rows[0]
+    await authority.execution.security.authority.assertCurrent()
+    if (!marker || marker.present || marker.cursor !== null) compactAuthorityChanged()
+    return null
+  } catch (error) {
+    if (error instanceof DerivedScopeError) throw Object.assign(error, { reason: 'authority_changed' as const, retrySafe: false })
+    throw error
+  }
+}
+
+/** Pointer, cursor, immutable payload and complete source receipt commit together. */
 export async function setCompactSummaryAndBoundary(
-  sessionId: string,
-  summary: string,
-  newCursor: number,
-  expectedCurrentCursor: number | null,
-): Promise<boolean> {
-  const result = await query(
-    `UPDATE sessions
-     SET compact_summary = $1,
-         compact_boundary_sequence = $2,
-         compaction_count = compaction_count + 1,
-         last_compacted_at = now()
-     WHERE id = $3
-       AND compact_boundary_sequence IS NOT DISTINCT FROM $4`,
-    [summary, newCursor, sessionId, expectedCurrentCursor],
-  )
-  return (result.rowCount ?? 0) > 0
+  sessionId: string, summary: string, newCursor: number, expectedCurrentCursor: number | null,
+  context?: { authority: SessionContextAuthority; derivation: DerivedWriteEvidence },
+): Promise<SessionCompactSummary | null> {
+  const row = await writeSessionContextRevision({ sessionId, kind: 'compact_summary',
+    content: { summary, boundarySequence: newCursor }, expectedCursor: expectedCurrentCursor,
+    authority: context?.authority, derivation: context?.derivation })
+  return row ? compactRecord(row) : null
 }
 
 /**

@@ -23,7 +23,7 @@ import {
   isContextOverflowError,
   sanitize as sanitizeAnalytics,
   ContextScopeAccumulator, executionToolContext, scopeEvidenceFromRows,
-  boundScopeSources, bindScopeSources,
+  boundScopeSources, bindScopeSources, DerivedScopeError,
 } from '@use-brian/core'
 import type {
   Message, LLMProvider, MemoryStore, AnalyticsLogger,
@@ -34,7 +34,7 @@ import type {
   ExecutionContext,
 } from '@use-brian/core'
 import {
-  setCompactSummaryAndBoundary, toStampedMessages, findSessionById,
+  setCompactSummaryAndBoundary, readCompactSummary, toStampedMessages,
 } from '../db/sessions.js'
 
 /**
@@ -370,7 +370,7 @@ export async function runProactiveCompaction(
   params: ProactiveCompactionParams,
 ): Promise<ProactiveCompactionResult> {
   const {
-    sessionMessages, timezone, senderNames, assistantVoices, session,
+    sessionMessages: suppliedRows, timezone, senderNames, assistantVoices, session,
     tier, provider, systemPrompt,
     assistantId, userId, ownerId, channelType,
     memoryStore, episodicStore, sessionStateStore, analytics,
@@ -378,6 +378,7 @@ export async function runProactiveCompaction(
     usageStore, userMessageId,
     workspaceId, chatEpisodeIngestor,
   } = params
+  let sessionMessages = suppliedRows
   const persistLongTermContext = params.persistLongTermContext !== false
   const persistSessionSummary = params.persistSessionSummary !== false
   const compactionModel = params.model ?? 'gemini-3.6-flash-pro'
@@ -401,15 +402,25 @@ export async function runProactiveCompaction(
     await modelContext.executionContext!.security.authority.assertCurrent()
     await assertSourceModelInputAuthority(modelContext)
   }
-  if (modelContext) modelContext.scopeAccumulator.note(scopeEvidenceFromRows(sessionMessages))
   const guarded = async <T>(operation: () => Promise<T>): Promise<T> => {
     await assertModelInput()
-    const result = await (params.authority ? params.authority.execute(operation) : operation())
-    await assertModelInput()
-    return result
+    try {
+      const result = await (params.authority ? params.authority.execute(operation) : operation())
+      await assertModelInput()
+      return result
+    } catch (error) {
+      if (error instanceof DerivedScopeError) throw Object.assign(error, { reason: 'authority_changed' as const, retrySafe: false })
+      throw error
+    }
   }
 
   await params.authority?.assertCurrent()
+  const priorSummary = persistSessionSummary ? await readCompactSummary(session.id, binding) : null
+  if (priorSummary) sessionMessages = suppliedRows.filter(row => row.sequenceNum >= priorSummary.boundarySequence)
+  else if (persistSessionSummary && binding && session.compactBoundarySequence !== null) {
+    throw Object.assign(new DerivedScopeError('scope_source_changed'), { reason: 'authority_changed' as const, retrySafe: false })
+  }
+  if (modelContext) modelContext.scopeAccumulator.note(scopeEvidenceFromRows(sessionMessages))
   await assertModelInput()
 
   const breaker = params.circuitBreaker ?? defaultCompactionBreaker
@@ -425,12 +436,9 @@ export async function runProactiveCompaction(
   // model sees prior context on every turn. `findRecentSplit` treats
   // role='system' as a non-anchor, so a prepended system row at index 0
   // never gets chosen as the tail anchor.
-  const summaryPrepended = persistSessionSummary
-    && typeof session.compactSummary === 'string'
-    && session.compactSummary.length > 0
-  const summaryOffset = summaryPrepended ? 1 : 0
-  const stampedWithSummary: Message[] = summaryPrepended
-    ? [{ role: 'system', content: session.compactSummary as string }, ...stamped]
+  const summaryPrepended = priorSummary !== null
+  const stampedWithSummary: Message[] = priorSummary
+    ? [bindScopeSources({ role: 'system', content: priorSummary.summary }, boundScopeSources(priorSummary)), ...stamped]
     : stamped
 
   // 3. Fast path: no compaction needed — return the pass-through with
@@ -480,34 +488,22 @@ export async function runProactiveCompaction(
   }
 
   try {
-    // 4. Split on the stamped-with-summary array. Because stamped is
-    // 1:1 with sessionMessages, `splitIdx - summaryOffset` maps cleanly
-    // back to a DB row index — no reference-set tricks required.
-    //
-    // findRecentSplit always anchors on a plain user TEXT message, so
-    // the split never falls between an assistant tool_use and its user
-    // tool_result pair (which is a "user with only tool_result" row,
-    // not a plain user text). That means pairing each half separately
-    // below is safe — no cross-boundary repair is ever needed.
-    const splitIdx = findRecentSplit(stampedWithSummary, {
+    // 4. Split only real DB rows. A prepended summary must not change the
+    // current-user anchor, unconditional head snap or sequence-number mapping.
+    const firstRecentDbIdx = findRecentSplit(stamped, {
       tailBudgetTokens: recentTailBudgetTokens(tier, channelClass),
     })
-    const firstRecentDbIdx = Math.max(0, splitIdx - summaryOffset)
 
     const stampedCompactable = stamped.slice(0, firstRecentDbIdx)
     const stampedRecent = stamped.slice(firstRecentDbIdx)
 
-    // Exclude the prepended summary from the LLM-facing compactable
-    // slice. We never passed it into `stampedCompactable` in the first
-    // place (summary lives only in stampedWithSummary[0]), so this is
-    // just the stamped compactable directly. Kept as its own name to
-    // make the "don't summarize a summary" intent visible at the call
-    // site.
-    const compactableForLLM = stampedCompactable
+    // The prior certified summary represents older, no-longer-loaded rows.
+    // Preserve its content and evidence without treating it as a DB anchor.
+    const compactableForLLM = priorSummary ? [stampedWithSummary[0], ...stampedCompactable] : stampedCompactable
 
     // Degenerate: nothing new to summarize. Return the pass-through
     // unchanged — no boundary update, no LLM spend.
-    if (compactableForLLM.length === 0) {
+    if (stampedCompactable.length === 0) {
       const passthrough = summaryPrepended
         ? [stampedWithSummary[0], ...ensureToolResultPairing(stamped)]
         : ensureToolResultPairing(stamped)
@@ -620,15 +616,15 @@ export async function runProactiveCompaction(
     // fails (someone else compacted the same session between our read
     // and write), discard our summary and fall through with the
     // pass-through — the other compaction already trimmed the history.
-    const claimed = persistSessionSummary
+    const published = persistSessionSummary
       ? await guarded(() => setCompactSummaryAndBoundary(
-          sessionId,
-          summaryText,
-          newCursor,
-          session.compactBoundarySequence,
+          sessionId, summaryText, newCursor, priorSummary?.boundarySequence ?? null,
+          binding ? { authority: binding, derivation: {
+            producer: 'compaction:session-summary', sources: boundScopeSources(compactResult.boundaryMessage),
+          } } : undefined,
         ))
-      : true
-    if (!claimed) {
+      : null
+    if (persistSessionSummary && !published) {
       console.warn(`[compaction] lost race for session ${sessionId} (cursor moved by concurrent turn)`)
       analytics?.logEvent({
         userId, assistantId, sessionId,
@@ -641,12 +637,13 @@ export async function runProactiveCompaction(
       // Reload the session to pick up the winner's summary; re-prepend
       // and return as pass-through. We skip episodic persistence too
       // since the winner has already done it.
-      const refreshed = await guarded(() => findSessionById(sessionId))
-      const refreshedSummary = refreshed?.compactSummary ?? null
-      const pairedAll = ensureToolResultPairing(stamped)
-      const messagesForFallback: Message[] = refreshedSummary
-        ? [{ role: 'system', content: refreshedSummary }, ...pairedAll]
-        : pairedAll
+      const winner = await guarded(() => readCompactSummary(sessionId, binding))
+      if (!winner) throw Object.assign(new DerivedScopeError('scope_source_changed'), { reason: 'authority_changed' as const, retrySafe: false })
+      const winnerTail = stamped.filter((_, index) => sessionMessages[index].sequenceNum >= winner.boundarySequence)
+      const pairedAll = ensureToolResultPairing(winnerTail)
+      const messagesForFallback: Message[] = [
+        bindScopeSources({ role: 'system', content: winner.summary }, boundScopeSources(winner)), ...pairedAll,
+      ]
       return { messages: messagesForFallback, compacted: false, episodes: [] }
     }
 
@@ -775,7 +772,7 @@ export async function runProactiveCompaction(
     // tail repaired (in case the split broke a tool_use / tool_result
     // pair across the boundary).
     const compactedMessages: Message[] = [
-      bindScopeSources({ role: 'system', content: summaryText }, boundScopeSources(compactResult.boundaryMessage)),
+      bindScopeSources({ role: 'system', content: summaryText }, boundScopeSources(published ?? compactResult.boundaryMessage)),
       ...ensureToolResultPairing(stampedRecent),
     ]
 
@@ -844,7 +841,8 @@ function extractSummaryText(content: Message['content']): string {
  */
 function capSummary(text: string, maxChars: number): string {
   if (text.length <= maxChars) return text
-  return text.slice(0, maxChars) + '\n\n[summary truncated at cap]'
+  const marker = '\n\n[summary truncated at cap]'
+  return text.slice(0, Math.max(0, maxChars - marker.length)) + marker.slice(0, maxChars)
 }
 
 type HouseKeepParams = {

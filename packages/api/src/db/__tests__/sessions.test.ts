@@ -20,6 +20,7 @@ import {
   truncateMessagesFrom,
   getSessionMessages,
   setCompactSummaryAndBoundary,
+  readCompactSummary,
   listSessionsForWorkspaceSystem,
   listSessionsByChannelForWorkspaceSystem,
   getSessionTranscriptForWorkspaceSystem,
@@ -322,31 +323,21 @@ describe('[COMP:api/sessions-route] getSessionMessages with fromSequence', () =>
   })
 })
 
-describe('[COMP:api/sessions-route] setCompactSummaryAndBoundary', () => {
-  it('writes summary + cursor atomically and returns true on rowCount=1', async () => {
-    mockQuery.mockResolvedValueOnce({ rows: [], rowCount: 1 } as never)
-    const claimed = await setCompactSummaryAndBoundary('s_1', 'compacted text', 510, 499)
-    const [sql, params] = mockQuery.mock.calls[0]
-    expect(sql).toContain('compact_summary = $1')
-    expect(sql).toContain('compact_boundary_sequence = $2')
-    expect(sql).toContain('compaction_count = compaction_count + 1')
-    expect(sql).toContain('last_compacted_at = now()')
-    expect(sql).toContain('compact_boundary_sequence IS NOT DISTINCT FROM $4')
-    expect(params).toEqual(['compacted text', 510, 's_1', 499])
-    expect(claimed).toBe(true)
+describe('[COMP:api/sessions-route] certified compact summary boundary', () => {
+  // Successful publication, null-cursor CAS and actual loser/winner semantics
+  // run against real SQL in attended-consumers. These unit calls have no
+  // canonical execution or reader binding and must not authorize persistence.
+  it('refuses an unbound summary publication before any SQL', async () => {
+    await expect(setCompactSummaryAndBoundary('s_1', 'Fictional summary', 510, 499)).rejects.toThrow('scope_evidence_missing')
+    expect(mockQuery).not.toHaveBeenCalled()
   })
-
-  it('returns false when the concurrency guard fails (rowCount=0)', async () => {
-    mockQuery.mockResolvedValueOnce({ rows: [], rowCount: 0 } as never)
-    const claimed = await setCompactSummaryAndBoundary('s_1', 'text', 510, 499)
-    expect(claimed).toBe(false)
+  it('does not treat a null cursor as permission to publish without authority', async () => {
+    await expect(setCompactSummaryAndBoundary('s_1', 'Fictional summary', 42, null)).rejects.toThrow('scope_evidence_missing')
+    expect(mockQuery).not.toHaveBeenCalled()
   })
-
-  it('passes null as the expected cursor for never-compacted sessions', async () => {
-    mockQuery.mockResolvedValueOnce({ rows: [], rowCount: 1 } as never)
-    await setCompactSummaryAndBoundary('s_1', 'text', 42, null)
-    const [, params] = mockQuery.mock.calls[0]
-    expect(params).toEqual(['text', 42, 's_1', null])
+  it('withholds unscoped summary reads without selecting plaintext', async () => {
+    expect(await readCompactSummary('s_1')).toBeNull()
+    expect(mockQuery).not.toHaveBeenCalled()
   })
 })
 
