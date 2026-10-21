@@ -256,42 +256,47 @@ export async function writeSessionContextRevision(input: {
   expectedCursor?: number | null; expectedGeneration?: string
 }): Promise<SessionContextRevision | null> {
   const authority = requireAuthority(input.authority), { execution } = authority
+  // Snapshot semantic inputs before the first await. The original live
+  // authority is not serializable and must remain the canonical instance.
+  const command = structuredClone({ sessionId: input.sessionId, parentId: input.parentId, kind: input.kind,
+    content: input.content, derivation: input.derivation, expectedRevision: input.expectedRevision,
+    expectedCursor: input.expectedCursor, expectedGeneration: input.expectedGeneration })
   // Target session is a real persisted invocation, but read sources may be
   // different sessions authorized under the same canonical actor.
-  if (execution.lifecycle.sessionPersisted === false || execution.lifecycle.sessionId !== input.sessionId || execution.surface.readOnly) changed()
+  if (execution.lifecycle.sessionPersisted === false || execution.lifecycle.sessionId !== command.sessionId || execution.surface.readOnly) changed()
   const accumulated = new ContextScopeAccumulator(execution.security.provenance)
   accumulated.note(authority.accumulator.evidence)
-  if (!input.derivation) missing()
-  accumulated.note({ sources: input.derivation.sources })
-  if (input.kind==='message_annotation') {
-    if (!input.parentId) missing()
+  if (!command.derivation) missing()
+  accumulated.note({ sources: command.derivation.sources })
+  if (command.kind==='message_annotation') {
+    if (!command.parentId) missing()
     const native=(await getPool().query<{source:ScopeSource & {held?:boolean}}>(`SELECT read_scope_source($1,'session_message',id) AS source
       FROM session_messages WHERE workspace_id=$1 AND session_id=$2 AND id=$3`,
-      [execution.security.access.workspaceId,input.sessionId,input.parentId])).rows[0]?.source
+      [execution.security.access.workspaceId,command.sessionId,command.parentId])).rows[0]?.source
     if (!native || native.held!==false) changed()
     const {workspaceId,userId,assistantId,sensitivity,compartments,projectIds,resourceKind,resourceId,version}=native
     accumulated.noteSource({workspaceId,userId,assistantId,sensitivity,compartments,projectIds,resourceKind,resourceId,version})
   }
-  const evidence: DerivedWriteEvidence = { producer: input.derivation.producer, sources: accumulated.evidence.sources ?? [] }
+  const evidence: DerivedWriteEvidence = { producer: command.derivation.producer, sources: accumulated.evidence.sources ?? [] }
   deriveWriteScope(evidence, { workspaceId: execution.security.access.workspaceId, userId: execution.security.access.userId,
     assistantId: null, sensitivity: 'public', compartments: [], projectIds: [] }, execution.security.access.userId)
   const ancestors = [...await readExternalSourceAncestors(execution.security.access.workspaceId,evidence.sources),
     ...await readApplicationFieldAncestors(execution.security.access.workspaceId,evidence.sources)]
   const all = new ContextScopeAccumulator({ sources: [...evidence.sources,...ancestors] })
   evidence.sources = all.evidence.sources ?? []
-  const payload = structuredClone(input.content), parentId = input.parentId ?? randomUUID(), id = randomUUID()
+  const payload = structuredClone(command.content), parentId = command.parentId ?? randomUUID(), id = randomUUID()
   const stored = await transaction(authority,evidence.sources,'retain',false,async client => {
     const result=(await client.query<{value:{source:ScopeSource;createdAt:string;userId:string;assistantId:string}|null}>(
       'SELECT publish_native_session_context_revision($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11) AS value',
-      [execution.security.access.workspaceId,input.sessionId,input.kind,input.kind==='compact_summary'?input.sessionId:parentId,id,
-       payload,evidence.producer,JSON.stringify(evidence.sources),input.expectedRevision??null,input.expectedGeneration??null,input.expectedCursor??null])).rows[0]?.value
+      [execution.security.access.workspaceId,command.sessionId,command.kind,command.kind==='compact_summary'?command.sessionId:parentId,id,
+       payload,evidence.producer,JSON.stringify(evidence.sources),command.expectedRevision??null,command.expectedGeneration??null,command.expectedCursor??null])).rows[0]?.value
     if(!result)return null
     const source=result.source
     if(source.workspaceId!==execution.security.access.workspaceId||source.resourceKind!=='session_context_revision'||source.resourceId!==id||source.version!=='1')changed()
     const createdAt=new Date(result.createdAt)
-    return bindScopeSource({id,parentId:input.kind==='compact_summary'?input.sessionId:parentId,sessionId:input.sessionId,source,content:payload,
+    return bindScopeSource({id,parentId:command.kind==='compact_summary'?command.sessionId:parentId,sessionId:command.sessionId,source,content:payload,
       userId:result.userId,assistantId:result.assistantId,createdAt,lastAccessedAt:createdAt,accessCount:0,survivalCount:0},source)
-  },input.sessionId)
+  },command.sessionId)
   if (stored) authority.accumulator.note({ sources: boundScopeSources(stored) })
   return stored
 }
