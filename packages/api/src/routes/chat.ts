@@ -34,7 +34,7 @@ import {
 import { getSelfEntityId } from '../db/memories.js'
 import { getRecording, type Recording } from '../db/recordings-store.js'
 import { isConnectionDropError, isEndpointUnreachableError, streamErrorCode, buildMemoryContext, voicePlatformFromDraftTitle, measureDocContext, createMemoryTools, createSelfProfileTool, createMemoryRecallBuffer, createSkillInvocationBuffer, createRetrievalTools, createSessionStateTools, buildSessionStateBlock, buildActivePlanBlock, createPlanTools, seedPlanFromTasks, calculateCost, sanitize, shouldInline, ensureToolResultPairing, stripUnsignedToolUses, modelRequiresToolSignatures, elideStaleDocToolResults, synthesizeMissingToolResults, createConfirmationResolver, interpretConfirmationEvent, runPreflight, buildPreflightPrompt, runMemoryNudge, collectStream, classifyTopic, fetchEpisodicContext, transcribeFirstAudio, voiceUnavailableNote, TRANSCRIPTION_DISABLED_REASON, probePdfPageCount, estimateDistillTokens, PDF_CONFIRM_PAGE_THRESHOLD, DASHSCOPE_RENDER_WIDTH, filterToolsByCapabilities, modelToCompactionTier, buildWorkspaceFilesContext, buildUploadPolicyBlock, SensitivityAccumulator, CompartmentAccumulator, ContextScopeAccumulator, AttachmentCollector, runLocalMatchCheck, sanitizeTitle, AUTO_TITLE_AI_MIN_CHARS, COORDINATOR_BASE_ADDENDUM, COORDINATOR_RESEARCH_ADDENDUM, buildDocSupervisorSkillBlock, buildAmbientDocSkillBlock, detectOperateSiteIntent, EvidenceAccumulator, matchesDisputedFigure, buildDisputeContextNote, parsePresentedDocumentInput, latestWorkflowProposalReceipt, buildTool, prepareSlashCommand, resolveNativeSlashCommand, buildSlashCommandBlock, buildWorkflowSlashCommandBlock, buildEmailDraftAnchorPrompt, formatActiveEmailDraftContext, type PresentedDocumentInput, type MediaBackend } from '@use-brian/core'
-import { classifySession, policyFor, sessionPolicy } from '../session-kind.js'
+import { classifySession, isPersonalChat, policyFor, sessionPolicy } from '../session-kind.js'
 import { abortLocalTurn, precheckTurnAdmission, registerTurnAbort, releaseTurn, takeTurnLease, unregisterTurnAbort, waitForTurnSlot, TURN_SLOT_WAIT_TIMEOUT_MS } from '../turn/lease.js'
 import { runAssistantTurn, turnUsageIdentity } from '../turn/kernel.js'
 import { resolveTurnBilling } from '../turn/billing.js'
@@ -2059,6 +2059,11 @@ export async function runSessionResume(
   return { status: 'completed' }
 }
 
+/** A client may narrow chat admission to its own personal conversation. */
+export function mayUsePersonalChatSession(session: Parameters<typeof classifySession>[0] & { userId: string }, userId: string): boolean {
+  return session.userId === userId && isPersonalChat(classifySession(session))
+}
+
 /**
  * Web chat API route.
  * POST /api/chat { message, sessionId?, model? }
@@ -2077,7 +2082,7 @@ export function chatRoutes(options: WebChatOptions): Router {
   router.post('/', async (req, res) => {
     // Inference wiring through the turn kernel's boot registration.
     const turnOptions = withTurnInference(options)
-    const { message: rawMessage, sessionId: requestedSessionId, model: requestedModel, fileIds, attachedRecordingIds, truncateFromMessageId, timezone: clientTimezone, assistantId: requestedAssistantId, replyTo, channelId: requestedChannelId, mode: requestedMode, docViewId: requestedDocViewId, docAnchorBlockId: requestedDocAnchorBlockId, docActiveThemeId: requestedActiveThemeId, workspaceId: requestedWorkspaceId, appOrigin: requestedAppOrigin, contextGroupId: requestedContextGroupId, contextProjectId: requestedContextProjectId, followupChips: requestedFollowupChips, viewingSkillRowId: requestedViewingSkillRowId, viewingBrainEntry: requestedViewingBrainEntry, kbSourceId: requestedKbSourceId, meteredProfileId, meteredToolRounds, meteredAccepted, ask: requestedAsk, roomResponseGroup: rawRoomResponseGroup, steer: requestedSteer, inputId: requestedInputId, midTurn: requestedMidTurn, researchActivityId: requestedResearchActivityId } = req.body as {
+    const { message: rawMessage, sessionId: requestedSessionId, model: requestedModel, fileIds, attachedRecordingIds, truncateFromMessageId, timezone: clientTimezone, assistantId: requestedAssistantId, replyTo, channelId: requestedChannelId, mode: requestedMode, docViewId: requestedDocViewId, docAnchorBlockId: requestedDocAnchorBlockId, docActiveThemeId: requestedActiveThemeId, workspaceId: requestedWorkspaceId, appOrigin: requestedAppOrigin, sessionAudience: requestedSessionAudience, contextGroupId: requestedContextGroupId, contextProjectId: requestedContextProjectId, followupChips: requestedFollowupChips, viewingSkillRowId: requestedViewingSkillRowId, viewingBrainEntry: requestedViewingBrainEntry, kbSourceId: requestedKbSourceId, meteredProfileId, meteredToolRounds, meteredAccepted, ask: requestedAsk, roomResponseGroup: rawRoomResponseGroup, steer: requestedSteer, inputId: requestedInputId, midTurn: requestedMidTurn, researchActivityId: requestedResearchActivityId } = req.body as {
       /**
        * A saved research result the member is explicitly following up on
        * (research card). Resolved under the member's own access; an unknown
@@ -2153,6 +2158,8 @@ export function chatRoutes(options: WebChatOptions): Router {
       /** Requesting app-web surface. `presentDocument` is admitted only for
        *  the full Chat operator app, whose client renders its payload. */
       appOrigin?: string
+      /** Narrow this request to an owned personal web conversation. Never changes visibility. */
+      sessionAudience?: 'personal'
       /**
        * Doc-surface anchor: the id of the page open in `apps/app-web`.
        * On a doc assistant it is passed to `injectDocTools` as the
@@ -2226,6 +2233,14 @@ export function chatRoutes(options: WebChatOptions): Router {
        * docs/architecture/features/follow-up-questions.md.
        */
       followupChips?: boolean
+    }
+    if (requestedSessionAudience !== undefined && requestedSessionAudience !== 'personal') {
+      res.status(400).json({ code: 'invalid_session_audience', error: 'Unsupported session audience constraint.' })
+      return
+    }
+    if (requestedSessionAudience === 'personal' && (!req.userId || !req.authSessionId || req.authVersion === undefined)) {
+      res.status(401).json({ code: 'personal_session_auth_required', error: 'Sign in to start a personal chat.' })
+      return
     }
     let requestedRoomResponseGroup: RoomResponseGroupRequest | null = null
     let roomResponseGroupInvalid = false
@@ -2681,7 +2696,7 @@ export function chatRoutes(options: WebChatOptions): Router {
         const rawOrigin = typeof (req.body as { appOrigin?: unknown })?.appOrigin === 'string' // session-kind-exempt: request body field, not a session row
           ? (req.body as { appOrigin: string }).appOrigin
           : null
-        const appOrigin = rawOrigin && KNOWN_ORIGINS.has(rawOrigin) ? rawOrigin : null
+        const appOrigin = requestedSessionAudience === 'personal' ? 'chat' : rawOrigin && KNOWN_ORIGINS.has(rawOrigin) ? rawOrigin : null
         const createSession = appOrigin === 'chat' && req.userId && req.authSessionId && req.authVersion !== undefined // session-kind-exempt: the requested surface of a new chat, not a session row
           ? (params: Parameters<typeof findOrCreateSession>[0]) => createPersonalWebSession({ ...params, workspaceId: assistant.workspaceId },
             { actorUserId: req.userId!, authSessionId: req.authSessionId!, authVersion: req.authVersion! })
@@ -2700,6 +2715,17 @@ export function chatRoutes(options: WebChatOptions): Router {
             : {}),
         })
         isNewSession = true
+      }
+
+      if (requestedSessionAudience === 'personal' && !mayUsePersonalChatSession(session, user.id)) {
+        sendEvent('error', { code: 'personal_session_required', error: 'This chat requires your own personal conversation. Start a new chat.' })
+        options.analytics?.logEvent({
+          userId: user.id, assistantId: assistant.id, sessionId: session.id,
+          eventName: 'chat_setup_error', channelType: 'web',
+          metadata: { error_type: sanitize('personal_session_required'), stage: sanitize('session_binding') },
+        })
+        res.end()
+        return
       }
 
       if (

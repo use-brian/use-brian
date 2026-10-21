@@ -1,6 +1,6 @@
 import { describe, it, expect, vi } from 'vitest'
 import { readFileSync } from 'node:fs'
-import { appAssistantForbidsResearch, appAssistantForbidsCoordinator, isAdaptiveResearchEligible, isUserBlocked, sanitizeTitle, buildActivePageInstruction, buildActiveRecordingInstruction, recordingParticipantsUpdatedReceipt, buildViewingSkillBlock, createUpdateViewedSkillTool, workspaceSkillRevision, resolveStickyChannelId, isAppSurface, attachUserVisibleContext, settleInlineToolApproval, buildAttachedRecordingContext, buildUnscopedFileAttachmentInstruction, mayOfferWorkspaceChatHandoff, turnInputAdmission, liveTurnAdmission, SSE_KEEPALIVE_INTERVAL_MS, filterBrainSurfaceTools } from '../chat.js'
+import { chatRoutes, mayUsePersonalChatSession, appAssistantForbidsResearch, appAssistantForbidsCoordinator, isAdaptiveResearchEligible, isUserBlocked, sanitizeTitle, buildActivePageInstruction, buildActiveRecordingInstruction, recordingParticipantsUpdatedReceipt, buildViewingSkillBlock, createUpdateViewedSkillTool, workspaceSkillRevision, resolveStickyChannelId, isAppSurface, attachUserVisibleContext, settleInlineToolApproval, buildAttachedRecordingContext, buildUnscopedFileAttachmentInstruction, mayOfferWorkspaceChatHandoff, turnInputAdmission, liveTurnAdmission, SSE_KEEPALIVE_INTERVAL_MS, filterBrainSurfaceTools } from '../chat.js'
 import { policyFor } from '../../session-kind.js'
 import type { ConfirmationResolver, Message, Tool, ToolContext } from '@use-brian/core'
 import type { PendingApproval, PendingApprovalsStore } from '../../db/pending-approvals-store.js'
@@ -57,6 +57,53 @@ describe('[COMP:api/brain-entry-edit] transient Brain tool policy', () => {
       scopedOpenEntry: false,
       allowBrainUpdate: false,
     }).keys()]).toEqual(['search', 'inspectRowProvenance'])
+  })
+})
+
+describe('[COMP:api/chat-route] personal-only session admission', () => {
+  const personal = { userId: 'user-1', visibility: 'personal', channelType: 'web', anchorKind: null, appOrigin: 'chat' }
+
+  it("admits only the acting human's unanchored personal web conversation", () => {
+    expect(mayUsePersonalChatSession(personal, 'user-1')).toBe(true)
+    expect(mayUsePersonalChatSession({ ...personal, visibility: 'owner' }, 'user-1')).toBe(true)
+    expect(mayUsePersonalChatSession(personal, 'user-2')).toBe(false)
+    for (const row of [
+      { visibility: 'workspace' },
+      { anchorKind: 'doc_thread' },
+      { anchorKind: 'office_file' },
+      { mode: 'draft' },
+      { channelType: 'telegram' },
+      { channelType: 'workflow' },
+      { appOrigin: 'doc' },
+    ]) expect(mayUsePersonalChatSession({ ...personal, ...row }, 'user-1')).toBe(false)
+  })
+
+  it('rejects an unsupported audience or missing native authentication at the actual route boundary', async () => {
+    const route = chatRoutes({} as never).stack.find(layer => layer.route?.path === '/')!.route!.stack[0].handle
+    for (const [principal, audience, status, code] of [
+      [{}, 'workspace', 400, 'invalid_session_audience'],
+      [{}, 'personal', 401, 'personal_session_auth_required'],
+      [{ userId: 'user-1' }, 'personal', 401, 'personal_session_auth_required'],
+      [{ userId: 'user-1', authSessionId: 'auth-1' }, 'personal', 401, 'personal_session_auth_required'],
+    ] as const) {
+      const response = { status: vi.fn(), json: vi.fn() }
+      response.status.mockReturnValue(response)
+      await route({ body: { message: 'Use my browser', sessionAudience: audience }, ...principal } as never, response as never, vi.fn())
+      expect(response.status).toHaveBeenCalledWith(status)
+      expect(response.json).toHaveBeenCalledWith(expect.objectContaining({ code }))
+    }
+  })
+
+  it('enforces the narrowing constraint before turn execution for ID and sticky-channel resumes', () => {
+    const source = readFileSync(new URL('../chat.ts', import.meta.url), 'utf8')
+    const gate = source.indexOf("requestedSessionAudience === 'personal' && !mayUsePersonalChatSession(session, user.id)")
+    expect(gate).toBeGreaterThan(source.indexOf('session = await findSessionById(requestedSessionId)'))
+    expect(gate).toBeGreaterThan(source.indexOf('session = await findSessionByChannel({'))
+    expect(gate).toBeLessThan(source.indexOf('const resolvedExecution = await resolveExecutionContextSystem({'))
+    expect(source.slice(0, gate)).toContain("const appOrigin = requestedSessionAudience === 'personal' ? 'chat'")
+    const validation = source.slice(source.indexOf("if (requestedSessionAudience !== undefined"), source.indexOf('let requestedRoomResponseGroup:'))
+    expect(validation).toContain("requestedSessionAudience !== 'personal'")
+    expect(validation).toContain('!req.userId || !req.authSessionId || req.authVersion === undefined')
   })
 })
 

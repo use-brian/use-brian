@@ -158,7 +158,7 @@ export function serveBrowserAssistant(port: AssistantPort, deps: {
       const response = await deps.fetch(`${deps.apiUrl}/api/chat`, {
         method: 'POST', signal: current.controller.signal, headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ workspaceId: deps.workspaceId, assistantId: request.assistantId, sessionId: request.sessionId,
-          appOrigin: 'chat', message: browserAssistantMessage(request, profile.name) }),
+          appOrigin: 'chat', sessionAudience: 'personal', message: browserAssistantMessage(request, profile.name) }),
       });
       if (!response.ok || !response.body || !response.headers.get('content-type')?.includes('text/event-stream')) throw new Error('chat_unavailable');
       const reader = response.body.getReader(); const decoder = new TextDecoder(); const buffer = createSSEBuffer();

@@ -394,7 +394,7 @@ function isWebRoom(kind: SessionKind): boolean {
  * makes it a room with one human: it gets the room surfaces while its
  * audience, memory and billing stay personal.
  */
-function isPersonalChat(kind: SessionKind): boolean {
+export function isPersonalChat(kind: SessionKind): boolean {
   return kind.audience === 'personal' && kind.anchor.kind === 'none' && kind.transport === 'web'
     && kind.lane === 'conversation' && kind.surface !== 'doc'
 }
