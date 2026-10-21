@@ -144,3 +144,63 @@ describe('[COMP:brain/ingest-batch-worker] createBatchWorker', () => {
     expect(worker.isRunning).toBe(false)
   })
 })
+
+function deferred<T>() {
+  let resolve!: (value: T) => void
+  const promise = new Promise<T>(done => { resolve = done })
+  return { promise, resolve }
+}
+
+describe('[COMP:brain/ingest-batch-worker] stop and restart admission', () => {
+  beforeEach(() => { vi.useFakeTimers() })
+  afterEach(() => { vi.useRealTimers() })
+
+  it('does not process batches when a claim callback arrives after stop', async () => {
+    const entered = deferred<void>(), release = deferred<void>(), done = deferred<void>(), marked = vi.fn(async () => {})
+    const store: BatchStore = { async withClaimedBatches(_limit, handler) {
+      entered.resolve(); await release.promise
+      const value = await handler([makeBatch()], marked); done.resolve(); return value
+    } }
+    const processBatch = vi.fn(async () => {}), worker = createBatchWorker({ store, processBatch })
+    try {
+      worker.start(); await entered.promise; worker.stop(); release.resolve(); await done.promise
+      expect(processBatch).not.toHaveBeenCalled()
+      expect(marked).not.toHaveBeenCalled()
+    } finally { release.resolve(); worker.stop() }
+  })
+
+  it('marks an already dispatched batch processed while leaving the next batch untouched', async () => {
+    const entered = deferred<void>(), release = deferred<void>(), done = deferred<void>(), marked = vi.fn(async () => {})
+    const store: BatchStore = { async withClaimedBatches(_limit, handler) {
+      const value = await handler([makeBatch({ id: 'first' }), makeBatch({ id: 'second' })], marked)
+      done.resolve(); return value
+    } }
+    const processBatch = vi.fn(async () => { entered.resolve(); await release.promise }), worker = createBatchWorker({ store, processBatch })
+    try {
+      worker.start(); await entered.promise; worker.stop(); release.resolve(); await done.promise
+      expect(processBatch).toHaveBeenCalledExactlyOnceWith(expect.objectContaining({ id: 'first' }))
+      expect(marked).toHaveBeenCalledExactlyOnceWith('first')
+    } finally { release.resolve(); worker.stop() }
+  })
+
+  it('waits for an old claim callback then drains afresh on restart', async () => {
+    const entered = deferred<void>(), release = deferred<void>(), marked = vi.fn(async () => {})
+    let claims = 0
+    const store: BatchStore = { async withClaimedBatches(_limit, handler) {
+      claims++
+      const id = claims === 1 ? 'old' : 'fresh'
+      if (claims === 1) { entered.resolve(); await release.promise }
+      return handler([makeBatch({ id })], marked)
+    } }
+    const processBatch = vi.fn(async () => {}), worker = createBatchWorker({ store, processBatch })
+    try {
+      worker.start(); await entered.promise; worker.stop(); worker.start()
+      await vi.advanceTimersByTimeAsync(0)
+      expect(claims).toBe(1)
+      release.resolve(); await vi.advanceTimersByTimeAsync(0)
+      expect(claims).toBe(2)
+      expect(processBatch).toHaveBeenCalledExactlyOnceWith(expect.objectContaining({ id: 'fresh' }))
+      expect(marked).toHaveBeenCalledExactlyOnceWith('fresh')
+    } finally { release.resolve(); worker.stop() }
+  })
+})
