@@ -130,7 +130,7 @@ import {
 } from '../context-scope/delivery-authority.js'
 import { createWorkflowPublicationAuthorizer, type AuthorizeWorkflowPublication } from '../workflow/publication-consent.js'
 import { loadDecisionPlaybookContext } from '../decision-learning/playbook-context.js'
-import { renderCharterBlock, resolveCharter } from '@use-brian/shared'
+import { renderCharterBlock, resolveCharter, sanitizeDeliveryText } from '@use-brian/shared'
 import {
   applyPublicResearchToolCeiling,
   resolveApiKeyClientPrincipal,
@@ -1863,14 +1863,8 @@ export function createCalleeExecutor(options: CalleeExecutorOptions): CalleeExec
     // ASSISTANT_CALL_DEFAULT_BUDGET (15 turns, no wall-clock unless
     // `ASSISTANT_CALL_TIMEOUT_MS` sets one).
     const budget = resolveResearchBudget(params.depth, ASSISTANT_CALL_DEFAULT_BUDGET)
-    // Raw live-stream accumulation — kept ONLY as the wall-clock-timeout
-    // partialOutput (operator-facing, never delivered). The returned consult
-    // text is selected from finalised turn references instead: deltas re-stream on
-    // empty-turn retries and include text the turn-boundary leak sanitiser
-    // strips, so summing them duplicates/leaks (the 2026-07-02 "No recorded
-    // GitHub activity" ×3 triplication, run 26d50608). See
-    // docs/architecture/channels/inter-assistant.md → "Final-text assembly".
-    let responseText = ''
+    // Timeout diagnostics use the same finalized-turn selection as replies.
+    // Unfinished deltas and narration alongside tool calls are not retained.
     const turnOutput = createTurnOutputCollector({ format: 'compact' })
     // Liveness, not wall-clock (2026-08-19). The step is bounded by cost
     // (`budget.maxTurns` / `maxToolCalls`) and by the query loop's stall
@@ -2261,9 +2255,7 @@ export function createCalleeExecutor(options: CalleeExecutorOptions): CalleeExec
             }
           }
         }
-        if (event.type === 'text_delta') {
-          responseText += event.text
-        } else if (event.type === 'error' && isStalledError(event.error)) {
+        if (event.type === 'error' && isStalledError(event.error)) {
           // The stall watchdog fired: typed below as a timeout-class exit
           // (progress timeout), carrying the partial text.
           stalledError = event.error
@@ -2474,12 +2466,16 @@ export function createCalleeExecutor(options: CalleeExecutorOptions): CalleeExec
         throw err
       }
       await assertCurrentAuthority()
+      const selectedPartial = turnOutput.select()
+      const partialOutput = selectedPartial.kind === 'text'
+        ? sanitizeDeliveryText(selectedPartial.text).trim() || undefined
+        : undefined
       if (timedOut) {
         throw Object.assign(
           new Error(
             `assistant_call step exceeded its explicit ${wallClockMs}ms wall-clock budget and was aborted`,
           ),
-          { reason: 'timeout', partialOutput: responseText.trim() || undefined },
+          { reason: 'timeout', partialOutput },
         )
       }
       if (stalledError || isStalledError(err)) {
@@ -2488,7 +2484,7 @@ export function createCalleeExecutor(options: CalleeExecutorOptions): CalleeExec
           new Error(
             `assistant_call step ${stall.message} (idle window ${Math.round(stallIdleMs / 1000)}s) and was aborted`,
           ),
-          { reason: 'timeout', partialOutput: responseText.trim() || undefined },
+          { reason: 'timeout', partialOutput },
         )
       }
       throw err
