@@ -1,5 +1,9 @@
+import {generateAttendedSessionTitle} from './attended-session-title.js'
+import {readSessionTitle} from '../db/session-title-store.js'
+import {authSessionStore} from '../db/auth-session-store.js'
+import {assertSourceModelInputAuthority} from '../application-platform/model-source-authority.js'
 import { publishNativeSessionMessageBatch } from '../db/session-message-publication.js'
-import { classifyAttendedSessionMessage, classifyAttendedResearchMessage, readAttendedSessionHistory } from './attended-session-context.js'
+import { classifyAttendedSessionMessage, classifyAttendedResearchMessage, readAttendedSessionHistory, attendedSessionTurnCount } from './attended-session-context.js'
 import type { PoolClient } from 'pg'
 import { withSessionMessagePublication } from '../db/session-context-revisions.js'
 import { createAttendedDeliveryAudienceAuthorizer } from '../context-scope/attended-audience.js'
@@ -2347,6 +2351,7 @@ export function chatRoutes(options: WebChatOptions): Router {
 
     try {
       const jwtUserId = (req as { userId?: string }).userId
+      const credentialClaims = jwtUserId ? Object.freeze({userId:jwtUserId,sessionId:req.authSessionId,authVersion:req.authVersion}) : undefined
       const user = await resolveUser(jwtUserId)
       if (!user) {
         sendEvent('error', { error: 'User not found' })
@@ -2940,6 +2945,8 @@ export function chatRoutes(options: WebChatOptions): Router {
           transport: classifySession(session).transport,
         },
         attribution: { billingUserId: user.id },
+        credentialCurrent: credentialClaims ? () => credentialClaims.userId === user.id
+          ? authSessionStore.validateAccess(credentialClaims) : Promise.resolve(false) : undefined,
         sessionAuthority: session,
         ...(officeLane ? officeLaneExecutionBounds(officeLane, user.id, officeLaneDeps) : {}),
       })
@@ -4554,6 +4561,9 @@ export function chatRoutes(options: WebChatOptions): Router {
         feedTurnContext.learningCoverage = feedPromptContext?.dimensions.memory.coverage ?? { state: 'failed', eligible: 0, retrieved: 0, reviewed: 0, limits: ['source_read_failed'] }
       }
 
+      const voiceTitle = nativeTranscriptAuthority && classifySession(session).anchor.kind === 'feed_draft'
+        ? await readSessionTitle(session.id,nativeTranscriptAuthority) : null
+      if(voiceTitle)await assertSourceModelInputAuthority({...executionToolContext(executionContext,{appId:'native-session-voice-title'}),scopeAccumulator})
       const memoryContext = buildMemoryContext({
         soul,
         identityMemories: identityMemories.map((m) => ({ id: m.id, summary: m.summary, detail: m.detail })),
@@ -4574,7 +4584,7 @@ export function chatRoutes(options: WebChatOptions): Router {
         // platform's rules. Tuning chat / ordinary sessions pass null and
         // see every rule, platform-labelled.
         voiceTargetPlatform:
-          classifySession(session).anchor.kind === 'feed_draft' ? voicePlatformFromDraftTitle(session.title) : null,
+          classifySession(session).anchor.kind === 'feed_draft' ? voicePlatformFromDraftTitle(voiceTitle?.title) : null,
         teamPurpose,
         assistantName: assistant.name,
         selfEntityId,
@@ -8654,14 +8664,14 @@ export function chatRoutes(options: WebChatOptions): Router {
       // title as an auto-generated placeholder to replace (isPlaceholderTitle —
       // open default false), or every ~10 human turns. The NULL check is robust
       // against tool-use inflating the message count.
-      const needsFirstTitle = !session.title || isPlaceholderTitle(session.title)
+      const currentTitle = nativeTranscriptAuthority ? await readSessionTitle(session.id,nativeTranscriptAuthority) : null
+      const needsFirstTitle = !currentTitle || isPlaceholderTitle(currentTitle.title)
       const isNotification = classifySession(session).anchor.kind === 'inbox'
-      let shouldTitle = needsFirstTitle && !isNotification
-      if (!shouldTitle && !isNotification) {
-        const msgCount = await authority.execute(() => countSessionTurns(session.id))
-        // Count only 'user' role messages that are actual human messages
-        // (tool_result messages are also role=user, but this is a rough heuristic)
-        const turnCount = Math.floor(msgCount / 2)
+      let shouldTitle = needsFirstTitle && !isNotification && !currentTitle?.manual
+      if (!shouldTitle && !isNotification && !currentTitle?.manual) {
+        const turnCount = nativeTranscriptAuthority
+          ? await attendedSessionTurnCount(nativeTranscriptAuthority,dbMessages)
+          : Math.floor(await authority.execute(() => countSessionTurns(session.id)) / 2)
         shouldTitle = turnCount > 1 && turnCount % 10 === 0
       }
       if (shouldTitle) {
@@ -8671,14 +8681,15 @@ export function chatRoutes(options: WebChatOptions): Router {
         const autoTitleModel = backgroundModel
         const autoTitle = (async () => {
           try {
-            // Reload messages from DB so we get the assistant response that was
-            // just flushed — the in-memory `messages` array is stale.
-            const freshDbMessages = await authority.execute(() => getSessionMessages(session.id, { limit: 10, excludeHeld: true }))
-            const freshMessages: Message[] = freshDbMessages.map((m) => ({
-              role: m.role as 'user' | 'assistant' | 'system',
-              content: m.content as Message['content'],
-            }))
-            const titleResult = await authority.execute(() => generateTitle(backgroundProvider, freshMessages, autoTitleModel))
+            const titleResult = nativeTranscriptAuthority
+              ? await generateAttendedSessionTitle({authority:nativeTranscriptAuthority,provider:backgroundProvider,model:autoTitleModel,channelPrefix:getTitleChannelPrefix})
+              : await (async()=>{
+                const freshDbMessages = await authority.execute(() => getSessionMessages(session.id, { limit: 10, excludeHeld: true }))
+                const freshMessages: Message[] = freshDbMessages.map((m) => ({
+                  role: m.role as 'user' | 'assistant' | 'system', content: m.content as Message['content'],
+                }))
+                return {...await authority.execute(() => generateTitle(backgroundProvider, freshMessages, autoTitleModel)),written:false}
+              })()
             // generateTitle returns `title: null` when it can't produce a
             // meaningful title (empty excerpt, model returned blank). Keep the
             // existing title in that case — overwriting with a generic fallback
@@ -8699,16 +8710,11 @@ export function chatRoutes(options: WebChatOptions): Router {
               })
               return
             }
-            // Preserve any channel prefix the host kept on the title (e.g. a
-            // bracketed channel discriminator) so downstream filters keep
-            // working after auto-title rewrites it. getTitleChannelPrefix
-            // returns null in the open build. We only re-prefix when the model
-            // didn't already include one.
-            const channelPrefix = getTitleChannelPrefix(session.title)
-            const finalTitle = channelPrefix && !titleResult.title.startsWith('[')
-              ? `${channelPrefix} ${titleResult.title}`
-              : titleResult.title
-            const written = await authority.execute(() => updateSessionTitle(session.id, finalTitle))
+            // The native generator has already committed its current, scoped
+            // title. Other constructors retain their separately tracked path.
+            const finalTitle = titleResult.title
+            const written = nativeTranscriptAuthority ? titleResult.written
+              : await authority.execute(() => updateSessionTitle(session.id, finalTitle))
             if (written && !res.writableEnded) {
               await assertDeliveryAudience()
               sendEvent('title_update', { sessionId: session.id, title: finalTitle })

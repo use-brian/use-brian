@@ -1,6 +1,6 @@
 /** Current native attended history and annotations. [COMP:api/application-persistence] */
-import {bindScopeSources,boundScopeSources,classifyTopic,classifyResearchIntent,DerivedScopeError,executionToolContext,
- type ResearchClassifyOptions,type ResearchClassifyResult,type TopicClassifierOptions,type SessionContextAuthority,type TopicClassification} from '@use-brian/core'
+import {ContextScopeAccumulator,bindScopeSources,boundScopeSources,classifyTopic,classifyResearchIntent,DerivedScopeError,executionToolContext,
+ type ResearchClassifyOptions,type ResearchClassifyResult,type TopicClassifierOptions,type SessionContextAuthority,type ScopeSource,type TopicClassification} from '@use-brian/core'
 import {getPool} from '../db/client.js'
 import {readAdmittedSessionQuery} from '../db/session-query-reader.js'
 import {writeSessionMessageAnnotation} from '../db/session-message-annotations.js'
@@ -47,18 +47,32 @@ export async function classifyAttendedSessionMessage(input:{
  return{classification,reply,history}
 }
 
+const historyTurnCounts=new WeakMap<readonly SessionMessage[],{workspaceId:string;sessionId:string;count:number;sources:readonly ScopeSource[]}>()
+/** Data snapshot only. Every use still requires the original current field/query/source admission. */
+export async function attendedSessionTurnCount(authority:SessionContextAuthority,history:readonly SessionMessage[]):Promise<number>{
+ const snapshot=historyTurnCounts.get(history),{execution}=authority
+ if(!snapshot||snapshot.workspaceId!==execution.security.access.workspaceId||snapshot.sessionId!==execution.lifecycle.sessionId)throw new DerivedScopeError('scope_evidence_missing')
+ const accumulator=new ContextScopeAccumulator(execution.security.provenance)
+ accumulator.note({sources:[...snapshot.sources]})
+ await assertSourceModelInputAuthority({...executionToolContext(execution,{appId:'native-session-title-count'}),scopeAccumulator:accumulator})
+ return snapshot.count
+}
+
 /** Capture before filtering/formatting, retaining complete query obligations even for an empty window. */
 export async function readAttendedSessionHistory(authority:SessionContextAuthority,sessionId:string,fromSequence?:number|null,throughSequence?:number):Promise<SessionMessage[]> {
  const high=throughSequence??(await getPool().query<{sequence:number}>(
   'SELECT coalesce(max(sequence_num),0)::int AS sequence FROM session_messages WHERE workspace_id=$1 AND session_id=$2',
   [authority.execution.security.access.workspaceId,sessionId])).rows[0].sequence
  const query=await readAdmittedSessionQuery({sessionId,throughSequence:high,authority})
+ const count=query.history.filter(row=>row.role==='user'&&!(Array.isArray(row.content)&&row.content.some(block=>
+  typeof block==='object'&&block!==null&&'type' in block&&block.type==='tool_result'))).length
  const annotations=new Map(query.annotations.map(row=>[row.id,row]))
  const history=query.history.filter(row=>fromSequence==null||row.sequenceNum>=fromSequence).map(row=>{
   const annotation=annotations.get(row.id)
   return bindScopeSources({...row,topicLabel:annotation?.topicLabel??null,topicConfidence:annotation?.topicConfidence??null,replyToText:annotation?.replyToText??null},
    [...boundScopeSources(row),...(annotation?boundScopeSources(annotation):[])])
  })
+ historyTurnCounts.set(history,{workspaceId:authority.execution.security.access.workspaceId,sessionId,count,sources:structuredClone(boundScopeSources(query))})
  return bindScopeSources(history,boundScopeSources(query))
 }
 

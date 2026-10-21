@@ -4,15 +4,17 @@ import { nativeSessionQueryContextSources } from '../application-platform/sessio
 import {ContextScopeAccumulator,intersectAccessCeilings,type AccessCeiling,type ExecutionContext,type ScopeEvidence,type ScopeSource} from '@use-brian/core'
 import type {ChannelIntegrationStore} from '../db/channel-integrations.js'
 import {getAppPool,getPool,applyRLSGucs,rollbackAndRelease,runWithAgentAccess} from '../db/client.js'
-import {applyApplicationRLSContext,releaseApplicationTransactionBinding} from '../application-platform/execution-context.js'
+import {applyApplicationRLSContext,releaseApplicationTransactionBinding,getApplicationExecutionBinding} from '../application-platform/execution-context.js'
 import {getSharedRetainedSourceAuthority} from '../application-platform/source-runtime.js'
 import {readApplicationFieldAncestors} from '../application-platform/field-evidence.js'
 import {readExternalSourceAncestors} from '../application-platform/external-source-ancestry.js'
 import {readPersistentSessionContextAncestors} from '../db/session-context-ancestry.js'
 import {pinPreparedExternalSourceAuthority,assertPreparedExternalSourceAuthorityCurrent,type PreparedExternalSourceAuthority} from '../application-platform/retained-source-authority.js'
 import {validateAudienceScopeEvidence,validateCallerScopeEvidence,scopeEvidenceFailureOf} from './caller-evidence.js'
-import {createDeliveryAudienceAuthorizer,DeliveryAudienceUnverifiedError,type AuthorizeDeliveryAudience} from './delivery-authority.js'
-import {isWebTransport} from '../session-kind.js'
+import {createDeliveryAudienceAuthorizer,createDeliveryAudienceEnvelopeResolver,DeliveryAudienceUnverifiedError,type AuthorizeDeliveryAudience} from './delivery-authority.js'
+import {isWebTransport,policyFor} from '../session-kind.js'
+import {findSessionById} from '../db/sessions.js'
+import {findAssistantById} from '../db/users.js'
 
 type Prepare=(execution:ExecutionContext,sources:readonly ScopeSource[],action:'context'|'deliver')=>Promise<PreparedExternalSourceAuthority>
 type Options={integrationStore?:ChannelIntegrationStore;prepareSource?:Prepare}
@@ -102,9 +104,42 @@ export async function validateAttendedAudienceEvidence(execution:ExecutionContex
 /** Existing destination resolution, with a current original-actor SQL validator. */
 export function createAttendedDeliveryAudienceAuthorizer(execution:ExecutionContext,options:Options={}):AuthorizeDeliveryAudience{
  const dependencies={...options}
- return input=>createDeliveryAudienceAuthorizer({integrationStore:dependencies.integrationStore,
-  validateEvidence:(evidence,recipient)=>validateAttendedAudienceEvidence(execution,evidence,recipient,{
-   ...(dependencies.prepareSource?{prepareSource:dependencies.prepareSource}:{}),
-   directHumanSource:isWebTransport(input.channelType)||input.recipientType==='individual',
-  })})(input)
+ const envelope=createDeliveryAudienceEnvelopeResolver({integrationStore:dependencies.integrationStore})
+ return async input=>{
+  const pinned=structuredClone(input),actor=execution.security.access.userId
+  const fallback=()=>createDeliveryAudienceAuthorizer({integrationStore:dependencies.integrationStore,
+   validateEvidence:(evidence,recipient)=>validateAttendedAudienceEvidence(execution,evidence,recipient,{
+    ...(dependencies.prepareSource?{prepareSource:dependencies.prepareSource}:{}),
+    directHumanSource:isWebTransport(pinned.channelType)||pinned.recipientType==='individual',
+   })})(pinned)
+  if(!isWebTransport(pinned.channelType)||pinned.sessionId!==execution.lifecycle.sessionId
+   ||execution.lifecycle.sessionPersisted===false||execution.security.access.sharedAudience
+   ||execution.identity.kind!=='attended'||execution.identity.principal.kind!=='workspace_member'
+   ||execution.identity.principal.userId!==actor||pinned.userId!==actor||pinned.workspaceId!==execution.security.access.workspaceId
+   ||pinned.assistantId!==execution.assistant.id||getApplicationExecutionBinding(execution)
+   ||pinned.recipientType==='group'||pinned.recipientMode&&pinned.recipientMode!=='member')return fallback()
+  try{
+   await execution.security.authority.assertCurrent()
+   const session=await findSessionById(pinned.sessionId!)
+   if(!session)return{allowed:false,reason:'delivery_audience_unverified',diagnostic:'session_missing'}
+   if(policyFor(session).deliveryCeiling.ceiling!=='owner'||session.userId!==actor||session.appOrigin!=='chat'
+    ||session.channelType!==pinned.channelType||session.channelId!==pinned.channelId)return fallback()
+   const owner=await findAssistantById(session.assistantId)
+   if(!owner||owner.workspaceId!==pinned.workspaceId)return{allowed:false,reason:'delivery_audience_unverified',diagnostic:'session_assistant_missing'}
+   // Resolve both actual constraints afresh. Their intersection admits only
+   // evidence that fits BOTH the original sink and the current recipient.
+   const sink=await envelope({...pinned,userId:session.userId}),recipient=await envelope(pinned)
+   if(!sink.allowed)return sink
+   if(!recipient.allowed)return recipient
+   if(sink.ceiling.userId!==actor||recipient.ceiling.userId!==actor)return{allowed:false,reason:'delivery_audience_unverified',diagnostic:'binding_recipient_conflict'}
+   const ceiling=intersectAccessCeilings(sink.ceiling,recipient.ceiling)
+   const evidence=await validateAttendedAudienceEvidence(execution,pinned.scopeEvidence??{},ceiling,{
+    ...(dependencies.prepareSource?{prepareSource:dependencies.prepareSource}:{}),directHumanSource:true,
+   })
+   await execution.security.authority.assertCurrent()
+   return{allowed:true,evidence}
+  }catch(error){
+   return{allowed:false,reason:'delivery_audience_unverified',diagnostic:scopeEvidenceFailureOf(error)??'verification_error'}
+  }
+ }
 }

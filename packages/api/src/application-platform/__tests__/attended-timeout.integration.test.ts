@@ -1,3 +1,7 @@
+import {ContextScopeAccumulator} from '@use-brian/core'
+import {findAssistantById} from '../../db/users.js'
+import {resolveExecutionContextSystem} from '../../context-scope/execution-context.js'
+import {publishSessionTitle} from '../../db/session-title-store.js'
 import {Socket} from 'node:net'
 import {z} from 'zod'
 import {buildTool,boundScopeSources,type Tool} from '@use-brian/core'
@@ -38,7 +42,7 @@ describe.sequential('[COMP:api/application-persistence] [COMP:api/turn-lease] ac
  let fixture:Fixture|undefined
  afterEach(async()=>{await fixture?.cleanup();fixture=undefined;vi.restoreAllMocks()})
  afterAll(async()=>{await getAppPool().end();await getPool().end()})
- async function setup(){
+ async function setup(options:{title?:'proved'|'none'|'legacy'}={}){
   const recoveryCalls=vi.spyOn(recovery,'composeRecoveryMessage'),synthesisCalls=vi.spyOn(emptyTurn,'composeEmptyTurnSynthesis'),diagnostics=vi.spyOn(console,'info')
   fixture=await persistentContextFixture();const f=fixture
   // A real synthetic Pro account supplies the existing twenty-round budget.
@@ -48,7 +52,16 @@ describe.sequential('[COMP:api/application-persistence] [COMP:api/turn-lease] ac
   if(!auth)throw new Error('Missing actual authentication session')
   const session=await createPersonalWebSession({assistantId:f.assistantId,userId:f.ownerId,workspaceId:f.workspaceId,channelType:'web',channelId:crypto.randomUUID(),appOrigin:'chat'},
    {actorUserId:f.ownerId,authSessionId:auth.id,authVersion:auth.authVersion})
-  await f.pool.query("UPDATE sessions SET title='Fictional existing title' WHERE id=$1",[session.id])
+  if(options.title==='legacy')await f.pool.query("UPDATE sessions SET title='Fictional existing title' WHERE id=$1",[session.id])
+  else if(options.title!=='none'){
+   const execution=(await resolveExecutionContextSystem({userId:f.ownerId,workspaceId:f.workspaceId,assistant:(await findAssistantById(f.assistantId))!,
+    sharedAudience:false,session,sessionAuthority:session,memberMode:'member',identity:{kind:'attended',principal:{kind:'workspace_member',userId:f.ownerId,authenticationKind:'native_session'}},
+    ownership:{kind:'workspace',workspaceId:f.workspaceId},lifecycle:{sessionId:session.id,sessionPersisted:true,channelType:'web',channelId:session.channelId,abortSignal:new AbortController().signal},
+    credentialCurrent:()=>authSessionStore.validateAccess({userId:f.ownerId,sessionId:auth.id,authVersion:auth.authVersion})})).executionContext
+   const authority={execution,accumulator:new ContextScopeAccumulator()},input=await readAdmittedSessionQuery({sessionId:session.id,throughSequence:0,authority})
+   expect(await publishSessionTitle({sessionId:session.id,title:'Fictional existing title',manual:false,expectedRevision:null,authority,
+    derivation:{producer:'fixture:existing-admitted-title',sources:boundScopeSources(input)}})).not.toBeNull()
+  }
   const extraTools=new Map<string,Tool>()
   const scripts:Script[]=[];let calls=0,sessions=0,signal:AbortSignal|undefined,background:LLMProvider['stream']|undefined
   const bus:Publication[]=[],committedObservations:Promise<boolean>[]=[],memoryIds:string[]=[]
@@ -59,7 +72,8 @@ describe.sequential('[COMP:api/application-persistence] [COMP:api/turn-lease] ac
     return(async function*(){await script.before?.();for(const chunk of script.chunks??[])yield chunk;await script.after?.();if(script.error)throw script.error})()
    }};return providerSession},
   }
-  const app=express();app.use(express.json());app.use((req,_res,next)=>{req.userId=f.ownerId;req.authSessionId=auth.id;req.authVersion=auth.authVersion;next()})
+  let activeRequest:express.Request|undefined
+  const app=express();app.use(express.json());app.use((req,_res,next)=>{activeRequest=req;req.userId=f.ownerId;req.authSessionId=auth.id;req.authVersion=auth.authVersion;next()})
   app.use('/chat',chatRoutes({provider,systemPrompt:'Fictional local timeout fixture',tools:extraTools,memoryStore:createDbMemoryStore(),
    capabilityStore:createDbCapabilityStore(),pendingApprovalsStore:createPendingApprovalsStore(),publishSessionEvent:event=>{
     bus.push(event)
@@ -75,7 +89,7 @@ describe.sequential('[COMP:api/application-persistence] [COMP:api/turn-lease] ac
     memoryIds.push(memory.id);scripts.push({chunks:toolChunks(index,memory.id)})
    }
   }
-  return{f,session,scripts,bus,extraTools,send,stop,rows,tools,committedObservations,memoryIds,recoveryCalls,synthesisCalls,diagnostics,calls:()=>calls,sessions:()=>sessions,signal:()=>signal,setBackground:(stream:LLMProvider['stream'])=>{background=stream}}
+  return{f,session,auth,getRequest:()=>activeRequest,setAuth:(value:{id:string;authVersion:number})=>{auth.id=value.id;auth.authVersion=value.authVersion},scripts,bus,extraTools,send,stop,rows,tools,committedObservations,memoryIds,recoveryCalls,synthesisCalls,diagnostics,calls:()=>calls,sessions:()=>sessions,signal:()=>signal,setBackground:(stream:LLMProvider['stream'])=>{background=stream}}
  }
  type Current=Awaited<ReturnType<typeof setup>>
  async function closed(current:Current,text:string,toolTurns=0){
@@ -244,7 +258,7 @@ describe.sequential('[COMP:api/application-persistence] [COMP:api/turn-lease] ac
  })
  it('ignores an in-flight real heartbeat response after release and stops the timer before auto-title',async()=>{
   const interval=vi.spyOn(globalThis,'setInterval'),clear=vi.spyOn(globalThis,'clearInterval')
-  const current=await setup();let paused:Socket|undefined,heartbeat:ReturnType<typeof setInterval>|undefined,titleCalls=0
+  const current=await setup({title:'none'});let paused:Socket|undefined,heartbeat:ReturnType<typeof setInterval>|undefined,titleCalls=0
   let ready!:()=>void,failed!:(error:Error)=>void
   const socketReady=new Promise<void>((resolve,reject)=>{ready=resolve;failed=reject})
   const pause=(client:PoolClient)=>{
@@ -252,7 +266,6 @@ describe.sequential('[COMP:api/application-persistence] [COMP:api/turn-lease] ac
    if(!(socket instanceof Socket)){failed(new Error('Expected actual disposable PostgreSQL TCP socket'));return}
    paused=socket;socket.pause();ready()
   }
-  await current.f.pool.query("UPDATE sessions SET title='' WHERE id=$1",[current.session.id])
   current.scripts.push({before:async()=>{
    const before=(await current.f.pool.query<{epoch:string}>('SELECT extract(epoch FROM turn_heartbeat_at)::text AS epoch FROM sessions WHERE id=$1',[current.session.id])).rows[0].epoch
    const index=interval.mock.calls.findIndex(([,ms])=>ms===TURN_HEARTBEAT_INTERVAL_MS)
@@ -310,5 +323,76 @@ describe.sequential('[COMP:api/application-persistence] [COMP:api/turn-lease] ac
   expect((await current.rows()).filter(row=>row.role==='assistant')).toEqual([])
   expect(response.text).not.toContain('timed out')
   expect(current.recoveryCalls).not.toHaveBeenCalled();expect(current.synthesisCalls).not.toHaveBeenCalled()
+ })
+ it('publishes a real browser title event only after the immutable current title commits',async()=>{
+  const current=await setup({title:'none'});let titleCalls=0
+  current.setBackground(async function*(input){
+   if(input.maxTokens===32){titleCalls++;yield* textChunks('Fictional scoped browser title');return}
+   yield* textChunks('{"topic_label":"fictional title input","state":"continue","confidence":0.9}')
+  })
+  current.scripts.push({chunks:textChunks('Fictional admitted browser response')})
+  const response=await current.send(),events=frames(response.text)
+  expect(events.filter(event=>event.event==='error'),response.text).toEqual([])
+  expect(events.filter(event=>event.event==='title_update')).toMatchObject([{data:{sessionId:current.session.id,title:'Fictional scoped browser title'}}])
+  expect(titleCalls).toBe(1)
+  const title=(await current.f.pool.query(`SELECT h.scope_revision_id,c.content FROM session_title_heads h
+   JOIN session_context_revision_contents c ON c.workspace_id=h.workspace_id AND c.revision_id=h.scope_revision_id WHERE h.session_id=$1`,[current.session.id])).rows[0]
+  expect(title.content).toEqual({title:'Fictional scoped browser title',manual:false})
+  expect((await current.f.pool.query('SELECT title FROM sessions WHERE id=$1',[current.session.id])).rows).toEqual([{title:null}])
+  const edges=(await current.f.pool.query(`SELECT edge.source_kind FROM scope_derivations d JOIN scope_derivation_sources edge
+   ON edge.workspace_id=d.workspace_id AND edge.derivation_id=d.id WHERE d.workspace_id=$1 AND d.resource_id=$2`,[current.f.workspaceId,title.scope_revision_id])).rows
+  expect(edges.some(edge=>edge.source_kind==='application_field')).toBe(true)
+ })
+ it('holds generated title output after original device revocation and accepts a separate current device',async()=>{
+  const current=await setup({title:'none'}),oldId=current.auth.id,other=await authSessionStore.create(current.f.ownerId,{deviceLabel:'Fictional independent device',userAgent:'Fixture',ipAddress:'127.0.0.1'})
+  if(!other)throw new Error('Missing actual independent authentication session')
+  let titleCalls=0
+  current.setBackground(async function*(input){
+   if(input.maxTokens===32){
+    titleCalls++;expect(await authSessionStore.revokeForUser(current.f.ownerId,oldId)).toBe(true)
+    // Mutation of the request carrier cannot retarget the original native
+    // invocation's already pinned, verified credential claims.
+    const active=current.getRequest();if(!active)throw new Error('Missing actual request carrier')
+    active.authSessionId=other.id;active.authVersion=other.authVersion
+    yield* textChunks('Fictional revoked device title');return
+   }
+   yield* textChunks('{"topic_label":"fictional device input","state":"continue","confidence":0.9}')
+  })
+  current.scripts.push({chunks:textChunks('Fictional response before device revocation')})
+  const denied=await current.send()
+  expect(titleCalls).toBe(1);expect(frames(denied.text).filter(event=>event.event==='title_update')).toEqual([])
+  expect((await current.f.pool.query('SELECT scope_revision_id FROM session_title_heads WHERE session_id=$1',[current.session.id])).rows).toEqual([])
+  current.setAuth(other)
+  current.setBackground(async function*(input){
+   if(input.maxTokens===32){yield* textChunks('Fictional independent browser title');return}
+   yield* textChunks('{"topic_label":"fictional current device","state":"continue","confidence":0.9}')
+  })
+  current.scripts.push({chunks:textChunks('Fictional current independent response')})
+  const allowed=await current.send()
+  expect(frames(allowed.text).filter(event=>event.event==='error'),allowed.text).toEqual([])
+  expect(frames(allowed.text).filter(event=>event.event==='title_update')).toMatchObject([{data:{title:'Fictional independent browser title'}}])
+ })
+ it('does not turn title-provider tool narration into a real browser title event or persisted fallback',async()=>{
+  const current=await setup({title:'none'})
+  current.setBackground(async function*(input){
+   if(input.maxTokens===32){
+    yield{type:'message_start',model:'fixture'};yield{type:'text_delta',text:'Fictional private title narration'}
+    yield{type:'tool_use_start',id:'fictional-title-plan',name:'fictionalTool'};yield{type:'tool_use_delta',id:'fictional-title-plan',input:'{}'};yield{type:'tool_use_end',id:'fictional-title-plan'}
+    yield{type:'message_end',stopReason:'tool_use',usage};return
+   }
+   yield* textChunks('{"topic_label":"fictional title narration","state":"continue","confidence":0.9}')
+  })
+  current.scripts.push({chunks:textChunks('Fictional ordinary browser response')})
+  const response=await current.send()
+  expect(frames(response.text).filter(event=>event.event==='error'),response.text).toEqual([])
+  expect(frames(response.text).filter(event=>event.event==='title_update')).toEqual([])
+  expect((await current.f.pool.query('SELECT scope_revision_id FROM session_title_heads WHERE session_id=$1',[current.session.id])).rows).toEqual([])
+  expect(response.text).not.toContain('Fictional private title narration')
+ })
+ it('completes first-title publication after seventeen actual tool pairs at the original deadline',async()=>{
+  const current=await setup({title:'none'});await current.tools(17)
+  current.scripts.push({chunks:[{type:'text_delta',text:'Fictional first-title partial'}],error:new Error('Stream idle 30000ms')})
+  const response=await current.send();await closed(current,response.text,17)
+  expect(frames(response.text).filter(event=>event.event==='title_update')).toHaveLength(1)
  })
 })
