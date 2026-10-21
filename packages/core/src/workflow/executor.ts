@@ -2805,40 +2805,8 @@ async function markRunFailed(
     error,
   })
   if (workflow) {
-    await attemptFailureDelivery(deps, run, workflow, stepId, error, status, outcome)
+    await attemptFailureDelivery(deps, run, workflow, stepId, status)
   }
-}
-
-function normalizedFailureReason(error: ExecutorError): string {
-  const candidate = typeof error.reason === 'string' ? error.reason : 'workflow_error'
-  const normalized = candidate
-    .trim()
-    .toLowerCase()
-    .replace(/[^a-z0-9._-]+/g, '_')
-    .replace(/^_+|_+$/g, '')
-    .slice(0, 80)
-  return normalized || 'workflow_error'
-}
-
-function failureStateLines(outcome: WorkflowRunOutcome | null | undefined): string[] {
-  const state = outcome?.state
-  const coverage = state?.coverage
-  let coverageLine = 'Coverage: unavailable'
-  if (coverage && typeof coverage === 'object' && !Array.isArray(coverage)) {
-    const record = coverage as Record<string, unknown>
-    const expected = typeof record.expected === 'number' ? record.expected : null
-    const valid = typeof record.valid === 'number' ? record.valid : null
-    const ratio = typeof record.ratio === 'number' ? record.ratio : null
-    if (expected !== null && valid !== null && expected >= 0 && valid >= 0) {
-      const ratioText = ratio !== null && Number.isFinite(ratio)
-        ? ` (${Math.round(Math.max(0, Math.min(1, ratio)) * 100)}%)`
-        : ''
-      coverageLine = `Coverage: ${valid}/${expected}${ratioText}`
-    }
-  }
-  const scorecard = state?.scorecardWritten
-  const scorecardLine = `Scorecard written: ${scorecard === true ? 'yes' : scorecard === false ? 'no' : 'unknown'}`
-  return [coverageLine, scorecardLine]
 }
 
 function failureReplyTarget(
@@ -2911,9 +2879,7 @@ async function attemptFailureDelivery(
   run: WorkflowRunRecord,
   workflow: WorkflowRecord,
   stepId: string,
-  error: ExecutorError,
   status: 'failed' | 'timeout',
-  outcome?: WorkflowRunOutcome | null,
 ): Promise<void> {
   const target: WorkflowDelivery | undefined = workflow.definition.failureDelivery
   if (!target || !deps.deliverToChannel) return
@@ -2922,13 +2888,11 @@ async function attemptFailureDelivery(
     const assistantId = await deps.resolvePrimary(run.workspaceId)
     if (!assistantId) return
 
-    const text = sanitizeDeliveryText([
-      `Workflow "${workflow.name}" ${status}.`,
-      `Failed step: ${stepId}`,
-      `Error: ${normalizedFailureReason(error)}`,
-      ...failureStateLines(outcome),
-      `Run: ${run.id}`,
-    ].join('\n'))
+    // A notification target is not authority to publish workflow metadata.
+    // Full names, reasons and outcome details remain on the admitted run view.
+    const text = sanitizeDeliveryText(
+      `A workflow run ${status}. Review the run in the web app before retrying.\nRun: ${run.id}`,
+    )
 
     let delivery: DeliveryOutcome
     if ('replyToTrigger' in target) {
