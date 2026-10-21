@@ -30,7 +30,7 @@
  * docs/architecture/platform/sensitivity.md.
  */
 
-import {bindScopeSource,bindScopeSources,boundScopeSources,DerivedScopeError,type ScopeSource,type AccessContext,type Sensitivity} from '@use-brian/core'
+import {bindScopeSources,boundScopeSources,DerivedScopeError,type ScopeSource,type AccessContext,type Sensitivity} from '@use-brian/core'
 import type { KnowledgeLifecycleAction, KnowledgeWriteActor } from '@use-brian/core'
 import { query, getPool, getAppPool, applyRLSGucs, rollbackAndRelease } from './client.js'
 import { randomUUID } from 'node:crypto'
@@ -143,21 +143,23 @@ const ENTRY_COLUMNS = `
   created_by AS "createdBy", created_at AS "createdAt", updated_at AS "updatedAt"
 ` as const
 
-/**
- * Column list for clearance-scoped reads. Expects the table aliased as `ke`.
- * `related_ids` is replaced with a subquery that drops any id whose entry is
- * above the caller's clearance — otherwise a public-cleared caller reading a
- * public entry learns UUIDs of confidential siblings via the related array.
- *
- * `$clearanceIdx` is the 1-based parameter position of the clearance value
- * in the enclosing query.
- */
+
 /** Canonical metadata from the same SQL snapshot as the selected payload. */
-function knowledgeSourceColumns(alias = ''): string {
+function knowledgeSourceExpression(alias: '' | 'ke' | 'ke2' = ''): string {
   const p = alias ? `${alias}.` : ''
   return `jsonb_build_object('workspaceId',${p}workspace_id,'userId',NULL,'assistantId',NULL,
     'sensitivity',${p}sensitivity,'compartments',${p}compartments,'projectIds',${p}project_ids,
-    'resourceKind','knowledge_entry','resourceId',${p}id,'version',${p}scope_version::text) AS "__knowledgeScopeSource"`
+    'resourceKind','knowledge_entry','resourceId',${p}id,'version',${p}scope_version::text)`
+}
+
+/** Only trusted canonical predicates are composed here, never request values. */
+function knowledgeProjectedSources(predicate: string): string {
+  return `(SELECT coalesce(jsonb_agg(${knowledgeSourceExpression('ke2')} ORDER BY ke2.id),'[]'::jsonb)
+    FROM knowledge_entries ke2 WHERE ${predicate})`
+}
+
+function knowledgeSourceColumns(alias: '' | 'ke' | 'ke2' = '', contributors = "'[]'::jsonb"): string {
+  return `${knowledgeSourceExpression(alias)} AS "__knowledgeScopeSource", ${contributors} AS "__knowledgeProjectionSources"`
 }
 
 /** Native viewer proof is the actual non-owner transaction, never the owner pool. */
@@ -172,12 +174,23 @@ async function queryKnowledgeViewer<T extends QueryResultRow>(ctx: AccessContext
     try {
       await client.query('BEGIN')
       await applyRLSGucs(client,ctx.userId)
-      const result=await client.query<T & {__knowledgeScopeSource?:ScopeSource}>(
-        sql.replace(/\bFROM\s+knowledge_entries\b/gi,'FROM public.knowledge_entries'),params)
+      // Materialize the actual RLS-visible native domain before protected
+      // predicates/aggregates. A misconfigured owner connection admits no rows.
+      const relation=`knowledge_viewer_rows AS MATERIALIZED (SELECT * FROM public.knowledge_entries
+        WHERE workspace_id=nullif(current_setting('app.agent_workspace_id',true),'')::uuid
+          AND pg_catalog.row_security_active('public.knowledge_entries'::regclass)
+          AND NOT EXISTS(SELECT 1 FROM pg_catalog.pg_roles r JOIN pg_catalog.pg_class c ON c.oid='public.knowledge_entries'::regclass
+            WHERE r.rolname=current_user AND (r.rolsuper OR r.rolbypassrls OR pg_catalog.pg_has_role(r.oid,c.relowner,'USAGE'))))`
+      const result=await client.query<T & {__knowledgeScopeSource?:ScopeSource;__knowledgeProjectionSources?:ScopeSource[]}>(
+        `WITH ${relation} ${sql.replace(/\bFROM\s+knowledge_entries\b/gi,'FROM knowledge_viewer_rows')}`,params)
       for(const row of result.rows){
-        const source=row.__knowledgeScopeSource
+        const source=row.__knowledgeScopeSource,contributors=row.__knowledgeProjectionSources
         delete row.__knowledgeScopeSource
-        if(sourceRows){if(!source)throw new DerivedScopeError('scope_evidence_missing');bindScopeSource(row,source)}
+        delete row.__knowledgeProjectionSources
+        if(sourceRows){
+          if(!source||!Array.isArray(contributors))throw new DerivedScopeError('scope_evidence_missing')
+          bindScopeSources(row,[source,...contributors])
+        }
       }
       if(sourceRows)bindScopeSources(result.rows,result.rows.flatMap(row=>boundScopeSources(row)))
       await client.query('COMMIT')
@@ -186,16 +199,26 @@ async function queryKnowledgeViewer<T extends QueryResultRow>(ctx: AccessContext
   })
 }
 
-function entryColumnsClearanceScoped(clearanceIdx: number, relatedScopeSql = ''): string {
+/**
+ * Column list for clearance-scoped reads. Expects the table aliased as `ke`.
+ * `related_ids` is replaced with a subquery that drops any id whose entry is
+ * above the caller's clearance — otherwise a public-cleared caller reading a
+ * public entry learns UUIDs of confidential siblings via the related array.
+ *
+ * `$clearanceIdx` is the 1-based parameter position of the clearance value
+ * in the enclosing query.
+ */
+function entryColumnsClearanceScoped(clearanceIdx: number, relatedScopeSql = '', otherContributors = "'[]'::jsonb"): string {
+  const relatedPredicate=`ke2.id = ANY(ke.related_ids) AND ke2.workspace_id = ke.workspace_id
+    AND sensitivity_rank(ke2.sensitivity) <= sensitivity_rank($${clearanceIdx}) ${relatedScopeSql}`
+  const contributors=`${knowledgeProjectedSources(relatedPredicate)} || (${otherContributors})`
   return `
-    ke.id, ke.workspace_id AS "workspaceId", ${knowledgeSourceColumns('ke')},
+    ke.id, ke.workspace_id AS "workspaceId", ${knowledgeSourceColumns('ke',contributors)},
     ke.path, ke.title, ke.summary, ke.content, ke.tags,
     COALESCE((
       SELECT array_agg(ke2.id)
       FROM knowledge_entries ke2
-      WHERE ke2.id = ANY(ke.related_ids)
-        AND sensitivity_rank(ke2.sensitivity) <= sensitivity_rank($${clearanceIdx})
-        ${relatedScopeSql}
+      WHERE ${relatedPredicate}
     ), ARRAY[]::uuid[]) AS "relatedIds",
     ke.sensitivity, ke.compartments, ke.project_ids AS "projectIds", ke.metadata,
     ke.source_id AS "sourceId", ke.source_sha AS "sourceSha",
@@ -550,14 +573,11 @@ export function createDbKnowledgeStore(): KnowledgeStore {
         if (appliesDenylist(ctx)) params.push(ctx.assistantId)
         const scope = contentScopeProjection(ctx, params.length + 1)
         params.push(...scope.params)
+        const childPredicate=`ke2.workspace_id = ke.workspace_id AND ke2.path LIKE ke.path || '/%'
+          AND sensitivity_rank(ke2.sensitivity) <= sensitivity_rank($2) ${denyKe2} ${scope.sql('ke2')}`
         const result = await queryKnowledgeViewer<KnowledgeEntry & { childCount: string }>(ctx,
-          `SELECT ${entryColumnsClearanceScoped(2, scope.sql('ke2'))},
-                  (SELECT COUNT(*) FROM knowledge_entries ke2
-                   WHERE ke2.workspace_id = ke.workspace_id
-                     AND ke2.path LIKE ke.path || '/%'
-                     AND sensitivity_rank(ke2.sensitivity) <= sensitivity_rank($2)
-                     ${denyKe2}
-                     ${scope.sql('ke2')}) AS "childCount"
+          `SELECT ${entryColumnsClearanceScoped(2, scope.sql('ke2'),knowledgeProjectedSources(childPredicate))},
+                  (SELECT COUNT(*) FROM knowledge_entries ke2 WHERE ${childPredicate}) AS "childCount"
            FROM knowledge_entries ke
            WHERE ke.workspace_id = $1 AND ke.path NOT LIKE '%/%'
              AND sensitivity_rank(ke.sensitivity) <= sensitivity_rank($2)
@@ -576,14 +596,11 @@ export function createDbKnowledgeStore(): KnowledgeStore {
       if (appliesDenylist(ctx)) childParams.push(ctx.assistantId)
       const childScope = contentScopeProjection(ctx, childParams.length + 1)
       childParams.push(...childScope.params)
+      const childPredicate=`ke2.workspace_id = ke.workspace_id AND ke2.path LIKE ke.path || '/%'
+        AND sensitivity_rank(ke2.sensitivity) <= sensitivity_rank($3) ${denyKe2} ${childScope.sql('ke2')}`
       const result = await queryKnowledgeViewer<KnowledgeEntry & { childCount: string }>(ctx,
-        `SELECT ${entryColumnsClearanceScoped(3, childScope.sql('ke2'))},
-                (SELECT COUNT(*) FROM knowledge_entries ke2
-                 WHERE ke2.workspace_id = ke.workspace_id
-                   AND ke2.path LIKE ke.path || '/%'
-                   AND sensitivity_rank(ke2.sensitivity) <= sensitivity_rank($3)
-                   ${denyKe2}
-                   ${childScope.sql('ke2')}) AS "childCount"
+        `SELECT ${entryColumnsClearanceScoped(3, childScope.sql('ke2'),knowledgeProjectedSources(childPredicate))},
+                (SELECT COUNT(*) FROM knowledge_entries ke2 WHERE ${childPredicate}) AS "childCount"
          FROM knowledge_entries ke
          WHERE ke.workspace_id = $1
            AND ke.path LIKE $2 || '%'
@@ -891,6 +908,8 @@ export function createDbKnowledgeStore(): KnowledgeStore {
       const params: unknown[] = [ctx.workspaceId, clearance, limit]
       const scope = contentScopeProjection(ctx, 4)
       params.push(...scope.params)
+      const relatedPredicate=`ke2.id = ANY(ke.related_ids) AND ke2.workspace_id = ke.workspace_id
+        AND sensitivity_rank(ke2.sensitivity) <= sensitivity_rank($2) ${scope.sql('ke2')}`
       const result = await queryKnowledgeViewer<{
         id: string
         title: string
@@ -901,15 +920,12 @@ export function createDbKnowledgeStore(): KnowledgeStore {
         relatedIds: string[]
       }>(ctx,
         `SELECT
-           ${knowledgeSourceColumns('ke')}, ke.id, ke.title, ke.path, ke.sensitivity, ke.compartments,
+           ${knowledgeSourceColumns('ke',knowledgeProjectedSources(relatedPredicate))}, ke.id, ke.title, ke.path, ke.sensitivity, ke.compartments,
            ke.project_ids AS "projectIds",
            COALESCE((
              SELECT array_agg(ke2.id)
              FROM knowledge_entries ke2
-             WHERE ke2.id = ANY(ke.related_ids)
-               AND ke2.workspace_id = ke.workspace_id
-               AND sensitivity_rank(ke2.sensitivity) <= sensitivity_rank($2)
-               ${scope.sql('ke2')}
+             WHERE ${relatedPredicate}
            ), ARRAY[]::uuid[]) AS "relatedIds"
          FROM knowledge_entries ke
          WHERE ke.workspace_id = $1

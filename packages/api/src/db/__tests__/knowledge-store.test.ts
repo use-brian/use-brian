@@ -46,7 +46,7 @@ const ctxFor = (workspaceId: string, clearance?: 'public' | 'internal' | 'confid
 function projected<T extends object>(row:T,id:string,sensitivity:Sensitivity) {
   const source:ScopeSource={workspaceId:'t1',userId:null,assistantId:null,sensitivity,
     compartments:[],projectIds:[],resourceKind:'knowledge_entry',resourceId:id,version:'1'}
-  return {...row,__knowledgeScopeSource:source}
+  return {...row,__knowledgeScopeSource:source,__knowledgeProjectionSources:[]}
 }
 
 beforeEach(() => {
