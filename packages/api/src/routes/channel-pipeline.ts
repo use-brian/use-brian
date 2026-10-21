@@ -1,3 +1,7 @@
+import { getPool } from '../db/client.js'
+import type { PoolClient } from 'pg'
+import { withSessionMessagePublication } from '../db/session-context-revisions.js'
+import { createAttendedDeliveryAudienceAuthorizer } from '../context-scope/attended-audience.js'
 import { bindScopeSources } from '@use-brian/core'
 import { runTurnSessionStateDiff } from '../turn/session-state.js'
 import { withTurnInference } from '../turn/runtime.js'
@@ -1238,7 +1242,7 @@ async function processChannelMessageTurn(params: ChannelPipelineParams): Promise
     externalGuest: params.externalGuest === true,
     memberMode,
   })
-  const authorizeDeliveryAudience = createDeliveryAudienceAuthorizer({
+  let authorizeDeliveryAudience = createDeliveryAudienceAuthorizer({
     integrationStore: params.channelIntegrationStore,
   })
   const resolveDeliveryAudienceEnvelope = createDeliveryAudienceEnvelopeResolver({
@@ -1388,11 +1392,23 @@ async function processChannelMessageTurn(params: ChannelPipelineParams): Promise
       })
     : null
   const providerVisibleContext = room ? roomHistory : params.providerVisibleContext
-  const currentTurnWrite = () => turnOutputWrite({
-    producer: `turn:${channelType}`,
-    accumulator: scopeAccumulator,
-    envelope: inputMessageScope,
+  const nativeTranscriptAuthority = executionContext.ownership.kind === 'workspace'
+    && executionContext.identity.kind === 'attended'
+    && executionContext.identity.principal.kind === 'workspace_member'
+    ? { execution: executionContext, accumulator: scopeAccumulator } : undefined
+  const currentTurnWrite = () => ({
+    ...turnOutputWrite({
+      producer: `turn:${channelType}`,
+      accumulator: scopeAccumulator,
+      envelope: inputMessageScope,
+    }),
+    ...(nativeTranscriptAuthority ? { authority: nativeTranscriptAuthority } : {}),
   })
+  if (nativeTranscriptAuthority) {
+    authorizeDeliveryAudience = createAttendedDeliveryAudienceAuthorizer(executionContext, {
+      integrationStore: params.channelIntegrationStore,
+    })
+  }
   const authority = executionContext.security.authority
   const assertDeliveryAudience = async (): Promise<void> => {
     await authority.assertCurrent()
@@ -2612,20 +2628,54 @@ async function processChannelMessageTurn(params: ChannelPipelineParams): Promise
       }
       return -1
     })()
-    for (let turnIdx = 0; turnIdx < pendingAssistantTurns.length; turnIdx++) {
-      const turn = pendingAssistantTurns[turnIdx]
-      if (turn.content.length === 0) continue
-      const assistantRow = await addSessionMessage({
-        sessionId: session.id,
-        role: 'assistant',
-        content: turn.content,
-        // Stamp draft-session author so peer viewers see who drove
-        // the turn that produced this assistant message.
-        senderUserId: senderUserId ?? null,
-        attachments: turnIdx === lastContentIdx && attachments?.length ? attachments : undefined,
-        ...currentTurnWrite(),
-      })
-      lastFlushedAssistantRowId = assistantRow.id
+    const batchWrite = currentTurnWrite()
+    const savedTurns: Array<{ row: Awaited<ReturnType<typeof addSessionMessage>>; content: ContentBlock[] }> = []
+    const publish = async (tx: PoolClient) => {
+      for (let turnIdx = 0; turnIdx < pendingAssistantTurns.length; turnIdx++) {
+        const turn = pendingAssistantTurns[turnIdx]
+        if (turn.content.length === 0) continue
+        const assistantRow = await addSessionMessage({
+          sessionId: session.id,
+          role: 'assistant',
+          content: turn.content,
+          // Stamp draft-session author so peer viewers see who drove
+          // the turn that produced this assistant message.
+          senderUserId: senderUserId ?? null,
+          attachments: turnIdx === lastContentIdx && attachments?.length ? attachments : undefined,
+          ...batchWrite,
+        }, tx)
+        savedTurns.push({ row: assistantRow, content: turn.content })
+        const missing = synthesizeMissingToolResults(turn.content, turn.toolResults, reason)
+        const allResults = [...turn.toolResults, ...missing]
+        if (allResults.length > 0) {
+          await addSessionMessage({
+            sessionId: session.id,
+            role: 'user',
+            content: allResults,
+            ...batchWrite,
+          }, tx)
+        }
+      }
+    }
+    await authority.execute(async () => {
+      if (nativeTranscriptAuthority && 'derivation' in batchWrite) {
+        return withSessionMessagePublication(nativeTranscriptAuthority, batchWrite.derivation.sources, publish)
+      }
+      const tx = await getPool().connect()
+      try {
+        await tx.query('BEGIN')
+        await publish(tx)
+        await tx.query('COMMIT')
+      } catch (error) {
+        await tx.query('ROLLBACK').catch(() => {})
+        throw error
+      } finally {
+        tx.release()
+      }
+    })
+    if (savedTurns.length) await assertDeliveryAudience()
+    for (const saved of savedTurns) {
+      lastFlushedAssistantRowId = saved.row.id
       // Streaming channels surface the persisted row so the client
       // can attach actions (regenerate, copy, thumbs-up) and so
       // collaborative channels can mirror the assistant turn to peer
@@ -2633,20 +2683,10 @@ async function processChannelMessageTurn(params: ChannelPipelineParams): Promise
       // text) fire this once per buffered turn that has content.
       // Final-only channels leave the hook unimplemented.
       await hooks.onAssistantMessageSaved?.({
-        id: assistantRow.id,
-        sequenceNum: assistantRow.sequenceNum,
-        content: turn.content,
+        id: saved.row.id,
+        sequenceNum: saved.row.sequenceNum,
+        content: saved.content,
       })
-      const missing = synthesizeMissingToolResults(turn.content, turn.toolResults, reason)
-      const allResults = [...turn.toolResults, ...missing]
-      if (allResults.length > 0) {
-        await addSessionMessage({
-          sessionId: session.id,
-          role: 'user',
-          content: allResults,
-          ...currentTurnWrite(),
-        })
-      }
     }
   }
 

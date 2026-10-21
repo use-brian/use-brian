@@ -37,11 +37,13 @@ function requireAuthority(authority: SessionContextAuthority | undefined): Sessi
   return authority
 }
 async function transaction<T>(authority: SessionContextAuthority, sources: readonly ScopeSource[], action: 'context' | 'retain',
-  owner: boolean, run: (client: PoolClient) => Promise<T>, writeSessionId?: string): Promise<T> {
+  owner: boolean, run: (client: PoolClient) => Promise<T>, writeSessionId?: string, stoppedTurnToken?:string): Promise<T> {
   try {
     const { execution, accumulator } = requireAuthority(authority), before = JSON.stringify(accumulator.evidence)
     await execution.security.authority.assertCurrent()
-    if (execution.lifecycle.abortSignal.aborted || sources.some(source => source.workspaceId !== execution.security.access.workspaceId)) changed()
+    const finalizing=!!stoppedTurnToken&&!owner&&action==='retain'&&!!writeSessionId
+      &&execution.identity.kind==='attended'&&execution.identity.principal.kind==='workspace_member'
+    if (execution.lifecycle.abortSignal.aborted&&!finalizing || sources.some(source => source.workspaceId !== execution.security.access.workspaceId)) changed()
     const external = sources.some(source => source.resourceKind === 'external_source')
       || (await readExternalSourceAncestors(execution.security.access.workspaceId, sources)).length > 0
     const wiring = getSharedRetainedSourceAuthority(), host = retainedHosts.get(execution)
@@ -62,6 +64,11 @@ async function transaction<T>(authority: SessionContextAuthority, sources: reado
           if (role?.bypass !== false) changed()
         }
         await applyRLSGucs(client, execution.security.access.userId)
+        // Native publication needs the exact original assistant even with the
+        // legacy department policy. The v2 flag remains unchanged.
+        if (execution.identity.kind === 'attended' && execution.identity.principal.kind === 'workspace_member') {
+          await client.query("SELECT set_config('app.v2_assistant_id',$1,true)", [execution.assistant.id])
+        }
         // Native admission takes workspace SHARE locks too. Pin that row before
         // any source/parent reader can lock a session: a reader holding a session
         // while waiting for promotion's workspace lock otherwise forms a cycle.
@@ -71,6 +78,11 @@ async function transaction<T>(authority: SessionContextAuthority, sources: reado
         else await client.query(owner
           ? 'SELECT id FROM workspaces WHERE id=$1 FOR NO KEY UPDATE'
           : 'SELECT id FROM workspaces WHERE id=$1 FOR SHARE', [execution.security.access.workspaceId])
+        if (finalizing) {
+          const held=(await client.query<{token:string|null;lastToken:string|null;status:string;reason:string|null}>("SELECT turn_lease_token::text AS token,last_turn_lease_token::text AS \"lastToken\",status,turn_end_reason AS reason FROM sessions WHERE workspace_id=$1 AND id=$2 FOR UPDATE",[execution.security.access.workspaceId,writeSessionId])).rows[0]
+          if(!held||held.lastToken!==stoppedTurnToken
+            ||!(held.token===stoppedTurnToken&&held.status==='running'||held.token===null&&held.reason==='stopped_by_user'))changed()
+        }
         await applyApplicationRLSContext(client, execution)
         // Take the publication lock before any native source reader takes a
         // parent SHARE lock. Two simultaneous upgrades otherwise deadlock.
@@ -80,7 +92,7 @@ async function transaction<T>(authority: SessionContextAuthority, sources: reado
         if (prepared) await pinPreparedExternalSourceAuthority(client, execution, prepared)
         const value = await run(client)
         await execution.security.authority.assertCurrent()
-        if (execution.lifecycle.abortSignal.aborted || JSON.stringify(accumulator.evidence) !== before
+        if (execution.lifecycle.abortSignal.aborted&&!finalizing || JSON.stringify(accumulator.evidence) !== before
           || host !== retainedHosts.get(execution) || !host && wiring !== getSharedRetainedSourceAuthority()) changed()
         await client.query('COMMIT')
         return value
@@ -177,13 +189,13 @@ export async function readSessionQueryFrame<T>(authority:SessionContextAuthority
 const messagePublications=new WeakMap<object,{authority:SessionContextAuthority}>()
 /** Atomic native transcript batch; the callback never receives an owner connection. */
 export async function withSessionMessagePublication<T>(authority:SessionContextAuthority,sources:readonly ScopeSource[],
- run:(client:PoolClient)=>Promise<T>):Promise<T>{
+ run:(client:PoolClient)=>Promise<T>,options?:{stoppedTurnToken?:string}):Promise<T>{
  const {execution}=requireAuthority(authority)
  if(execution.lifecycle.sessionPersisted===false||execution.identity.kind!=='attended'||execution.identity.principal.kind!=='workspace_member')changed()
  return transaction(authority,structuredClone(sources),'retain',false,async client=>{
   messagePublications.set(client,{authority})
   try{return await run(client)}finally{messagePublications.delete(client)}
- },execution.lifecycle.sessionId)
+ },execution.lifecycle.sessionId,options?.stoppedTurnToken)
 }
 /** A JSON descriptor, owner transaction or retained callback cannot mint a live frame. */
 export function assertSessionMessagePublicationFrame(client:object,authority:SessionContextAuthority):void{

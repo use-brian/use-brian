@@ -33,6 +33,13 @@ export async function validateAttendedAudienceEvidence(execution:ExecutionContex
   const fields=await readApplicationFieldAncestors(workspaceId,sources),external=await readExternalSourceAncestors(workspaceId,sources)
   evidence.note({sources:[...fields,...external]});sources=evidence.evidence.sources??[]
   const anonymous=recipient.userId==='',hasExternal=sources.some(source=>source.resourceKind==='external_source')
+  // The existing native validator already checks current ordinary source
+  // envelopes. Field, context and independent-source evidence requires the
+  // bound non-owner transaction below; no admission result is cached.
+  if(!fields.length&&!external.length&&!sources.some(source=>['application_field','external_source','session_context_revision'].includes(source.resourceKind))){
+   const current=await validateAudienceScopeEvidence(evidence.evidence,recipient)
+   await execution.security.authority.assertCurrent();return current
+  }
   if(anonymous){
    if(hasExternal)denied()
    const ids=[...new Set(sources.filter(source=>source.resourceKind==='application_field').map(source=>source.resourceId))]

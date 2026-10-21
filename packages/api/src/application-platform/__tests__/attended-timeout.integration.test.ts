@@ -1,4 +1,7 @@
 import {Socket} from 'node:net'
+import {z} from 'zod'
+import {buildTool,boundScopeSources,type Tool} from '@use-brian/core'
+import {readAdmittedSessionQuery} from '../../db/session-query-reader.js'
 import type {PoolClient} from 'pg'
 import express from 'express'
 import request from 'supertest'
@@ -46,6 +49,7 @@ describe.sequential('[COMP:api/application-persistence] [COMP:api/turn-lease] ac
   const session=await createPersonalWebSession({assistantId:f.assistantId,userId:f.ownerId,workspaceId:f.workspaceId,channelType:'web',channelId:crypto.randomUUID(),appOrigin:'chat'},
    {actorUserId:f.ownerId,authSessionId:auth.id,authVersion:auth.authVersion})
   await f.pool.query("UPDATE sessions SET title='Fictional existing title' WHERE id=$1",[session.id])
+  const extraTools=new Map<string,Tool>()
   const scripts:Script[]=[];let calls=0,sessions=0,signal:AbortSignal|undefined,background:LLMProvider['stream']|undefined
   const bus:Publication[]=[],committedObservations:Promise<boolean>[]=[],memoryIds:string[]=[]
   const provider:LLMProvider={name:'fictional-timeout',models:['fixture'],
@@ -56,7 +60,7 @@ describe.sequential('[COMP:api/application-persistence] [COMP:api/turn-lease] ac
    }};return providerSession},
   }
   const app=express();app.use(express.json());app.use((req,_res,next)=>{req.userId=f.ownerId;req.authSessionId=auth.id;req.authVersion=auth.authVersion;next()})
-  app.use('/chat',chatRoutes({provider,systemPrompt:'Fictional local timeout fixture',tools:new Map(),memoryStore:createDbMemoryStore(),
+  app.use('/chat',chatRoutes({provider,systemPrompt:'Fictional local timeout fixture',tools:extraTools,memoryStore:createDbMemoryStore(),
    capabilityStore:createDbCapabilityStore(),pendingApprovalsStore:createPendingApprovalsStore(),publishSessionEvent:event=>{
     bus.push(event)
     if(event.kind==='assistant_message_saved')committedObservations.push(f.pool.query('SELECT id FROM session_messages WHERE id=$1',[event.payload.id]).then(result=>result.rows.length===1))
@@ -71,7 +75,7 @@ describe.sequential('[COMP:api/application-persistence] [COMP:api/turn-lease] ac
     memoryIds.push(memory.id);scripts.push({chunks:toolChunks(index,memory.id)})
    }
   }
-  return{f,session,scripts,bus,send,stop,rows,tools,committedObservations,memoryIds,recoveryCalls,synthesisCalls,diagnostics,calls:()=>calls,sessions:()=>sessions,signal:()=>signal,setBackground:(stream:LLMProvider['stream'])=>{background=stream}}
+  return{f,session,scripts,bus,extraTools,send,stop,rows,tools,committedObservations,memoryIds,recoveryCalls,synthesisCalls,diagnostics,calls:()=>calls,sessions:()=>sessions,signal:()=>signal,setBackground:(stream:LLMProvider['stream'])=>{background=stream}}
  }
  type Current=Awaited<ReturnType<typeof setup>>
  async function closed(current:Current,text:string,toolTurns=0){
@@ -90,6 +94,30 @@ describe.sequential('[COMP:api/application-persistence] [COMP:api/turn-lease] ac
   const lease=(await current.f.pool.query('SELECT status,turn_lease_token FROM sessions WHERE id=$1',[current.session.id])).rows[0]
   expect(lease).toMatchObject({status:'idle',turn_lease_token:null})
  }
+ it('preserves actual query-tool field ancestry on every committed web transcript pair',async()=>{
+  const current=await setup();let originalSources:ReturnType<typeof boundScopeSources>=[]
+  current.extraTools.set('fixtureReadSession',buildTool({name:'fixtureReadSession',description:'Read current fixture history',inputSchema:z.object({read:z.literal(true)}),isReadOnly:true,isConcurrencySafe:true,
+   async execute(_input,context){
+    if(!context.executionContext||!context.scopeAccumulator)throw new Error('Missing actual turn authority')
+    const high=(await current.f.pool.query<{sequence:number}>('SELECT coalesce(max(sequence_num),0)::int AS sequence FROM session_messages WHERE session_id=$1',[context.sessionId])).rows[0].sequence
+    const result=await readAdmittedSessionQuery({sessionId:context.sessionId,throughSequence:high,authority:{execution:context.executionContext,accumulator:context.scopeAccumulator}})
+    originalSources=boundScopeSources(result)
+    return {ok:true,data:{history:result.history.map(row=>({id:row.id,content:row.content}))}}
+   }}))
+  current.scripts.push({chunks:[{type:'message_start',model:'fixture'},{type:'tool_use_start',id:'fictional-query-call',name:'fixtureReadSession'},
+   {type:'tool_use_delta',id:'fictional-query-call',input:'{"read":true}'},{type:'tool_use_end',id:'fictional-query-call'},{type:'message_end',stopReason:'tool_use',usage}]},
+   {chunks:textChunks('Fictional current query answer')})
+  const response=await current.send(),rows=await current.rows()
+  expect(frames(response.text).filter(frame=>frame.event==='error'),response.text).toEqual([])
+  expect(originalSources.some(source=>source.resourceKind==='application_field'),JSON.stringify(rows)).toBe(true)
+  const pair=rows.filter(row=>row.content.some(block=>block.type==='tool_use'||block.type==='tool_result'))
+  expect(pair).toHaveLength(2)
+  for(const row of pair){
+   const sources=(await current.f.pool.query<{source_id:string;source_version:string}>(`SELECT edge.source_id,edge.source_version FROM scope_derivations d JOIN scope_derivation_sources edge ON edge.workspace_id=d.workspace_id AND edge.derivation_id=d.id WHERE d.workspace_id=$1 AND d.resource_kind='session_message' AND d.resource_id=$2 AND edge.source_kind='application_field'`,[current.f.workspaceId,row.id])).rows
+   for(const original of originalSources.filter(source=>source.resourceKind==='application_field'))expect(sources).toContainEqual({source_id:original.resourceId,source_version:original.version})
+  }
+  expect(await Promise.all(current.committedObservations)).not.toContain(false)
+ })
  it('persists and streams one explicit closure for an actual zero-turn provider failure',async()=>{
   const current=await setup(),response=await current.send();expect(response.status,response.text).toBe(200);await closed(current,response.text)
  })

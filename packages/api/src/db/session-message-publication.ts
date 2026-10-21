@@ -12,12 +12,21 @@ const scope=z.object({workspaceId:z.string().uuid(),userId:z.string().uuid().nul
 const message=payload.extend({id:z.string().uuid(),sessionId:z.string().uuid(),sequenceNum:z.number().int().positive(),createdAt:z.string().datetime({offset:true}),replyToText:z.null(),topicLabel:z.null(),topicConfidence:z.null()}).strict()
 export type NativeSessionMessageInput={sessionId:string;role:string;content:unknown;channelMessageId?:string|null;senderUserId?:string|null;senderAssistantId?:string|null;attachments?:SessionMessageAttachment[];
  replyToText?:string|null;topicLabel?:string|null;topicConfidence?:number|null;derivation:DerivedWriteEvidence;derivationTarget?:ResourceScope;authority:SessionContextAuthority}
+/** Match JSON's absent optional object keys; retain every other value for strict validation. */
+function transcriptJson(value:unknown):unknown {
+ if(Array.isArray(value))return value.map(transcriptJson)
+ if(value&&typeof value==='object'&&(Object.getPrototypeOf(value)===Object.prototype||Object.getPrototypeOf(value)===null)) {
+  return Object.fromEntries(Object.entries(value).filter(([,item])=>item!==undefined).map(([key,item])=>[key,transcriptJson(item)]))
+ }
+ return value
+}
 export async function publishNativeSessionMessage(input:NativeSessionMessageInput,client?:Pick<pg.ClientBase,'query'>):Promise<SessionMessage>{
  const {authority}=input,{execution}=authority
  if(execution.lifecycle.sessionId!==input.sessionId||execution.lifecycle.sessionPersisted===false
+  ||input.senderAssistantId!=null&&input.senderAssistantId!==execution.assistant.id
   ||[input.replyToText,input.topicLabel,input.topicConfidence].some(value=>value!==undefined&&value!==null))throw new DerivedScopeError('scope_evidence_missing')
  const evidence=structuredClone(input.derivation),target=input.derivationTarget?deriveWriteScope(evidence,input.derivationTarget,execution.security.access.userId):deriveResourceScope(evidence)
- const value=payload.parse({role:input.role,content:input.content,channelMessageId:input.channelMessageId??null,senderUserId:input.senderUserId??null,senderAssistantId:input.senderAssistantId??null,attachments:input.attachments??[]})
+ const value=payload.parse({role:input.role,content:transcriptJson(input.content),channelMessageId:input.channelMessageId??null,senderUserId:input.senderUserId??null,senderAssistantId:input.senderAssistantId??null,attachments:input.attachments??[]})
  const write=async(db:Pick<pg.ClientBase,'query'>)=>{
   assertSessionMessagePublicationFrame(db,authority);await execution.security.authority.assertCurrent()
   let result:unknown

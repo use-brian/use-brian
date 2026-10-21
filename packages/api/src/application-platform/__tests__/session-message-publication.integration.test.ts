@@ -1,7 +1,7 @@
 import {afterAll,afterEach,describe,expect,it} from 'vitest'
 import {boundScopeSources} from '@use-brian/core'
 import {applyRLSGucs,getAppPool,getPool,rollbackAndRelease,runWithAgentAccess} from '../../db/client.js'
-import {addSessionMessage,createWorkspaceChatSession} from '../../db/sessions.js'
+import {addSessionMessage,createWorkspaceChatSession,startTurnLease,releaseTurnLease} from '../../db/sessions.js'
 import {bindSessionContextRetainedAuthority,withSessionMessagePublication} from '../../db/session-context-revisions.js'
 import {persistentSourceFixture} from './fixtures/persistent-source.js'
 import {readAdmittedSessionQuery} from '../../db/session-query-reader.js'
@@ -160,6 +160,18 @@ describe.sequential('[COMP:api/application-persistence] actual field-aware nativ
    await expect(client.query('SELECT publish_native_session_message($1,$2,$3,$4,$5,$6)',[f.workspaceId,f.session.id,
     {role:'assistant',content:params.content,channelMessageId:null,senderUserId:null,senderAssistantId:null,attachments:[]},params.derivation.producer,JSON.stringify([source]),f.envelope])).rejects.toMatchObject({code:'22023',message:'scope_evidence_missing'})
   })}finally{await rollbackAndRelease(client)}
+  expect((await f.pool.query('SELECT count(*)::int AS count FROM session_messages WHERE session_id=$1',[f.session.id])).rows[0].count).toBe(3)
+ })
+ it.each(['wrong-token','released','successor','finished-successor'] as const)('rejects stopped publication after an actual %s lease state',async state=>{
+  fixture=await persistentContextFixture();const f=fixture,{authority,sources,params}=await prepared()
+  const token=await startTurnLease(f.session.id,f.assistantId)
+  if(state==='released')await releaseTurnLease(f.session.id,'completed',token)
+  if(state==='successor'||state==='finished-successor'){
+   const successor=await startTurnLease(f.session.id,f.assistantId)
+   if(state==='finished-successor')await releaseTurnLease(f.session.id,'stopped_by_user',successor)
+  }
+  await expect(withSessionMessagePublication(authority,sources,client=>addSessionMessage(params,client),
+   {stoppedTurnToken:state==='wrong-token'?crypto.randomUUID():token})).rejects.toThrow('scope_source_changed')
   expect((await f.pool.query('SELECT count(*)::int AS count FROM session_messages WHERE session_id=$1',[f.session.id])).rows[0].count).toBe(3)
  })
 })

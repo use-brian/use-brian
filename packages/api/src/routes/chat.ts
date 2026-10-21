@@ -1,3 +1,6 @@
+import type { PoolClient } from 'pg'
+import { withSessionMessagePublication } from '../db/session-context-revisions.js'
+import { createAttendedDeliveryAudienceAuthorizer } from '../context-scope/attended-audience.js'
 import { bindScopeSources } from '@use-brian/core'
 import { runTurnSessionStateDiff } from '../turn/session-state.js'
 import { withTurnInference } from '../turn/runtime.js'
@@ -3032,12 +3035,21 @@ export function chatRoutes(options: WebChatOptions): Router {
         userId: user.id,
         sharedAudience: !policyFor(session).context.personalMemory,
       })
-      const currentTurnWrite = () => turnOutputWrite({
-        producer: 'turn:web',
-        accumulator: scopeAccumulator,
-        envelope: inputMessageScope,
+      const nativeTranscriptAuthority = executionContext.ownership.kind === 'workspace'
+        && executionContext.identity.kind === 'attended'
+        && executionContext.identity.principal.kind === 'workspace_member'
+        ? { execution: executionContext, accumulator: scopeAccumulator } : undefined
+      const currentTurnWrite = () => ({
+        ...turnOutputWrite({
+          producer: 'turn:web',
+          accumulator: scopeAccumulator,
+          envelope: inputMessageScope,
+        }),
+        ...(nativeTranscriptAuthority ? { authority: nativeTranscriptAuthority } : {}),
       })
-      const authorizeDeliveryAudience = createDeliveryAudienceAuthorizer()
+      const authorizeDeliveryAudience = nativeTranscriptAuthority
+        ? createAttendedDeliveryAudienceAuthorizer(executionContext)
+        : createDeliveryAudienceAuthorizer()
       const assertDeliveryAudience = (): Promise<void> => turnTiming.time('audience_check', async () => {
         await authority.assertCurrent()
         const decision = await authorizeDeliveryAudience({
@@ -6943,76 +6955,84 @@ export function chatRoutes(options: WebChatOptions): Router {
           attachments: typeof outboundAttachments
         }
         const savedTurns: SavedTurn[] = []
+        const batchWrite = currentTurnWrite()
+        const publish = async (tx: PoolClient) => {
+          for (let turnIdx = 0; turnIdx < pendingAssistantTurns.length; turnIdx++) {
+            const turn = pendingAssistantTurns[turnIdx]
+            // Pure empty response (safety filter / MAX_TOKENS with zero
+            // content). Nothing to persist for this turn — the loop just
+            // exits without appending a blank message.
+            if (turn.content.length === 0) continue
+
+            // `app` assistants (doc / feed) author their own soul and are
+            // never served the FOLLOW_UP_QUESTIONS_ADDENDUM — but the model
+            // can still *volunteer* a `<followup>[...]</followup>` chip tag,
+            // and once it's persisted raw it (1) renders as literal text on
+            // these surfaces and (2) re-teaches itself via history replay on
+            // the next turn. Strip it from text blocks before it lands in
+            // session_messages. See
+            // docs/architecture/features/follow-up-questions.md → "app surfaces".
+            //
+            // Same defense for the confabulated `<comment-thread-reply pageId=…>`
+            // wrapper a doc assistant sometimes invents around a comment-thread
+            // reply (no prompt defines it) — left raw it renders as tag soup
+            // and leaks an internal page UUID on the comment surfaces.
+            // See docs/architecture/features/doc-comments.md → "Reply routing".
+            const content =
+              assistant.kind === 'app'
+                ? turn.content
+                    .map((block) =>
+                      block.type === 'text'
+                        ? { ...block, text: stripCommentThreadReplyTag(stripFollowUps(block.text)) }
+                        : block,
+                    )
+                    .filter((block) => !(block.type === 'text' && block.text.length === 0))
+                : turn.content
+            // The turn was nothing but a chip tag (no real answer / tool calls).
+            if (content.length === 0) continue
+
+            const isLast = turnIdx === lastNonEmptyIdx
+            const attachments = isLast && outboundAttachments.length > 0 ? outboundAttachments : []
+            const storedAssistantMsg = await addSessionMessage({
+              sessionId: session.id,
+              role: 'assistant',
+              content,
+              // The ANSWERING assistant (T9) — in a multi-assistant room this
+              // may differ from the session's binding; per-reply avatars and
+              // foreign-voice assembly labels read it.
+              senderAssistantId: assistant.id,
+              attachments: attachments.length > 0 ? attachments : undefined,
+              ...batchWrite,
+            }, tx)
+            savedTurns.push({ stored: storedAssistantMsg, isLast, attachments })
+
+            // Synthesise stubs for any tool_use in this turn's content that
+            // the executor failed to produce a real result for.
+            const missing = synthesizeMissingToolResults(
+              turn.content,
+              turn.toolResults,
+              synthesisReason,
+            )
+            const allResults = [...turn.toolResults, ...missing]
+            if (allResults.length > 0) {
+              await addSessionMessage({
+                sessionId: session.id,
+                role: 'user',
+                content: allResults,
+                ...batchWrite,
+              }, tx)
+            }
+          }
+        }
         await authority.execute(async () => {
+          if (nativeTranscriptAuthority && 'derivation' in batchWrite) {
+            return withSessionMessagePublication(nativeTranscriptAuthority, batchWrite.derivation.sources, publish,
+              abortController.signal.aborted && turnLeaseToken ? { stoppedTurnToken: turnLeaseToken } : undefined)
+          }
           const tx = await getPool().connect()
           try {
             await tx.query('BEGIN')
-            for (let turnIdx = 0; turnIdx < pendingAssistantTurns.length; turnIdx++) {
-              const turn = pendingAssistantTurns[turnIdx]
-              // Pure empty response (safety filter / MAX_TOKENS with zero
-              // content). Nothing to persist for this turn — the loop just
-              // exits without appending a blank message.
-              if (turn.content.length === 0) continue
-
-              // `app` assistants (doc / feed) author their own soul and are
-              // never served the FOLLOW_UP_QUESTIONS_ADDENDUM — but the model
-              // can still *volunteer* a `<followup>[...]</followup>` chip tag,
-              // and once it's persisted raw it (1) renders as literal text on
-              // these surfaces and (2) re-teaches itself via history replay on
-              // the next turn. Strip it from text blocks before it lands in
-              // session_messages. See
-              // docs/architecture/features/follow-up-questions.md → "app surfaces".
-              //
-              // Same defense for the confabulated `<comment-thread-reply pageId=…>`
-              // wrapper a doc assistant sometimes invents around a comment-thread
-              // reply (no prompt defines it) — left raw it renders as tag soup
-              // and leaks an internal page UUID on the comment surfaces.
-              // See docs/architecture/features/doc-comments.md → "Reply routing".
-              const content =
-                assistant.kind === 'app'
-                  ? turn.content
-                      .map((block) =>
-                        block.type === 'text'
-                          ? { ...block, text: stripCommentThreadReplyTag(stripFollowUps(block.text)) }
-                          : block,
-                      )
-                      .filter((block) => !(block.type === 'text' && block.text.length === 0))
-                  : turn.content
-              // The turn was nothing but a chip tag (no real answer / tool calls).
-              if (content.length === 0) continue
-
-              const isLast = turnIdx === lastNonEmptyIdx
-              const attachments = isLast && outboundAttachments.length > 0 ? outboundAttachments : []
-              const storedAssistantMsg = await addSessionMessage({
-                sessionId: session.id,
-                role: 'assistant',
-                content,
-                // The ANSWERING assistant (T9) — in a multi-assistant room this
-                // may differ from the session's binding; per-reply avatars and
-                // foreign-voice assembly labels read it.
-                senderAssistantId: assistant.id,
-                attachments: attachments.length > 0 ? attachments : undefined,
-                ...currentTurnWrite(),
-              }, tx)
-              savedTurns.push({ stored: storedAssistantMsg, isLast, attachments })
-
-              // Synthesise stubs for any tool_use in this turn's content that
-              // the executor failed to produce a real result for.
-              const missing = synthesizeMissingToolResults(
-                turn.content,
-                turn.toolResults,
-                synthesisReason,
-              )
-              const allResults = [...turn.toolResults, ...missing]
-              if (allResults.length > 0) {
-                await addSessionMessage({
-                  sessionId: session.id,
-                  role: 'user',
-                  content: allResults,
-                  ...currentTurnWrite(),
-                }, tx)
-              }
-            }
+            await publish(tx)
             await tx.query('COMMIT')
           } catch (error) {
             await tx.query('ROLLBACK').catch(() => {})
