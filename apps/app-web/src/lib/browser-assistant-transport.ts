@@ -1,10 +1,11 @@
+import type { IdentityWorkspace, IdentityPickerLabels } from '@use-brian/chat-ui';
 import { z } from 'zod';
 import { createSSEBuffer, parseSSEStream } from '@use-brian/chat-ui';
 
 const pageSchema = z.object({ url: z.string().url().max(4096).refine(v => /^https?:\/\//.test(v)), title: z.string().max(500), text: z.string().max(12000), capturedAt: z.string().datetime() }).strict();
 const sendSchema = z.object({ type: z.literal('send'), id: z.string().min(1).max(128), text: z.string().trim().min(1).max(16000), assistantId: z.string().min(1).max(128), sessionId: z.string().min(1).max(128).optional(), browserProfileId: z.string().min(1).max(128), page: pageSchema.optional() }).strict();
 type ChatSend = z.infer<typeof sendSchema>;
-type Account = { id: string; name: string; email: string };
+type Account = { id: string; name: string; email: string; avatarUrl?: string };
 
 export type AssistantPort = {
   postMessage(message: unknown): void;
@@ -29,8 +30,14 @@ export function serveBrowserAssistant(port: AssistantPort, deps: {
   workspaceName: string;
   isCurrentUser?: () => boolean;
   appearance?: () => unknown;
+  pickerLabels?: () => IdentityPickerLabels;
+  workspaceManagement?: {
+    directory: () => Promise<IdentityWorkspace[]>;
+    list: () => Promise<IdentityWorkspace[]>;
+    select: (id: string) => void;
+  };
   accountManagement?: {
-    directory: () => { current: Account; accounts: Account[] };
+    directory: () => { current: Account; accounts: Account[]; canManageAccounts?: boolean };
     act: (action: 'add' | 'switch', accountId?: string) => void;
     profiles: () => Promise<Array<{ id: string; name: string; ownerUserId: string; defaultBackend: string }>>;
     pair: (profileId: string, signal: AbortSignal, current: () => boolean) => Promise<boolean>;
@@ -50,16 +57,20 @@ export function serveBrowserAssistant(port: AssistantPort, deps: {
   const hello = async () => {
     if (deps.isCurrentUser?.() === false) { port.disconnect(); return; }
     const assistants = await deps.assistants();
+    const workspaces = await deps.workspaceManagement?.directory().catch(() => []);
     post({ type: 'hello', userId: deps.userId, workspaceId: deps.workspaceId, workspaceName: deps.workspaceName,
       assistants: assistants.map(({ id, name, iconSeed }) => ({ id, name, ...(iconSeed !== undefined ? { iconSeed } : {}) })),
       ...(deps.appearance ? { appearance: deps.appearance() } : {}),
-      ...(deps.accountManagement ? { accountDirectory: deps.accountManagement.directory() } : {}) });
+      ...(deps.accountManagement ? { accountDirectory: deps.accountManagement.directory() } : {}),
+      ...(deps.pickerLabels ? { identityPickerLabels: deps.pickerLabels() } : {}),
+      ...(workspaces ? { workspaceDirectory: { active: { id: deps.workspaceId, name: deps.workspaceName, ...workspaces.filter(w => w.id === deps.workspaceId).map(({ iconSeed, iconUrl }) => ({ iconSeed, iconUrl }))[0] }, workspaces: workspaces.map(({ id, name, iconSeed, iconUrl, pickerPinnedAt, pickerHiddenAt, pickerLastOpenedAt }) => ({ id, name, iconSeed, iconUrl, pickerPinnedAt, pickerHiddenAt, pickerLastOpenedAt })) } } : {}) });
   };
   const handle = async (raw: unknown) => {
     if (disposed) return;
     if (deps.isCurrentUser?.() === false) { port.disconnect(); return; }
     const account = deps.accountManagement;
     const action = z.union([
+      z.object({ type: z.literal('workspace-action'), workspaceId: z.string().min(1).max(128) }).strict(),
       z.object({ type: z.literal('account-action'), action: z.literal('add') }).strict(),
       z.object({ type: z.literal('account-action'), action: z.literal('switch'), accountId: z.string().min(1).max(128) }).strict(),
       z.object({ type: z.literal('account-profiles'), id: z.string().min(1).max(128) }).strict(),
@@ -68,13 +79,23 @@ export function serveBrowserAssistant(port: AssistantPort, deps: {
       z.object({ type: z.literal('account-browsers') }).strict(),
     ]).safeParse(raw);
     if (action.success) {
-      if (!account) return;
       const value = action.data;
+      if (value.type === 'workspace-action') {
+        if (running || !deps.workspaceManagement) { post({ type: 'account-error', code: 'busy' }); return; }
+        try {
+          const rows = await deps.workspaceManagement.list();
+          if (disposed || deps.isCurrentUser?.() === false || !rows.some(w => w.id === value.workspaceId)) throw new Error('not_authorized');
+          deps.workspaceManagement.select(value.workspaceId);
+        } catch { post({ type: 'account-error', code: 'account_unavailable' }); }
+        return;
+      }
+      if (!account) return;
       if (value.type === 'account-cancel') {
         if (accountRequest?.id === value.id) { accountRequest.controller.abort(); accountRequest = undefined; }
         return;
       }
       if (value.type === 'account-action') {
+        if (account.directory().canManageAccounts === false) return;
         if (running) { post({ type: 'account-error', code: 'busy' }); return; }
         if (value.action === 'switch' && !account.directory().accounts.some(a => a.id === value.accountId)) return;
         try { account.act(value.action, value.action === 'switch' ? value.accountId : undefined); }

@@ -109,3 +109,46 @@ describe('[COMP:ext/account-switching] current-account recovery', () => {
     expect(await h.service.blocked()).toBe(true)
   })
 })
+
+describe('[COMP:ext/account-switching] workspace handoff', () => {
+  function workspaces(h: ReturnType<typeof harness>) {
+    h.brokers[0].hello.workspaceDirectory = { active: { id: 'workspace-1', name: 'First workspace' }, workspaces: [ { id: 'workspace-1', name: 'First workspace' }, { id: 'workspace-2', name: 'Second workspace' } ] }
+    return h
+  }
+  it('requires a published workspace and binds resumption to its exact account and workspace', async () => {
+    const h = workspaces(harness())
+    await h.service.panel({ type: 'workspace-switch', workspaceId: 'unknown' })
+    expect(h.deps.beforeSwitch).not.toHaveBeenCalled()
+    await h.service.panel({ type: 'workspace-switch', workspaceId: 'workspace-2' })
+    expect(h.brokers[0].port.postMessage).toHaveBeenLastCalledWith({ type: 'workspace-action', workspaceId: 'workspace-2' })
+    expect(h.deps.reset).toHaveBeenCalledOnce()
+    const wrongUser = broker(second, undefined, 'workspace-2'), wrongWorkspace = broker(first, undefined, 'workspace-3')
+    for (const b of [wrongUser, wrongWorkspace]) { h.brokers.push(b); h.service.hello(b) }
+    await settle()
+    expect(wrongUser.port.postMessage).not.toHaveBeenCalled(); expect(wrongWorkspace.port.postMessage).not.toHaveBeenCalled()
+    const target = broker(first, undefined, 'workspace-2'); h.brokers.push(target); h.service.hello(target); await settle()
+    expect(target.port.postMessage).toHaveBeenLastCalledWith(expect.objectContaining({ type: 'account-profiles' }))
+  })
+  it('limits current-account recovery to the displayed workspace', async () => {
+    const h = workspaces(harness()); await h.service.panel({ type: 'account-connect' }); await settle()
+    const other = broker(first, undefined, 'workspace-2'); h.brokers.push(other); h.service.hello(other); await settle()
+    expect(other.port.postMessage).not.toHaveBeenCalled()
+  })
+  it('allows workspace selection in an edition without saved account auth', async () => {
+    const h = workspaces(harness()); (h.brokers[0].hello.accountDirectory as any).canManageAccounts = false
+    await h.service.panel({ type: 'account-add' }); await begin(h)
+    expect(h.deps.beforeSwitch).not.toHaveBeenCalled()
+    await h.service.panel({ type: 'workspace-switch', workspaceId: 'workspace-2' })
+    expect(h.brokers[0].port.postMessage).toHaveBeenLastCalledWith({ type: 'workspace-action', workspaceId: 'workspace-2' })
+  })
+  it('publishes only bounded display fields, safe images and preference timestamps', async () => {
+    const h = workspaces(harness()); const raw = h.brokers[0].hello.workspaceDirectory as any
+    raw.workspaces = [{ id: 'workspace-2', name: 'Second workspace', iconUrl: 'javascript:alert(1)', iconSeed: 42, pickerLastOpenedAt: 'not-a-date', token: 'PRIVATE' }]
+    ;(h.brokers[0].hello.accountDirectory as any).current.avatarUrl = 'data:text/html,PRIVATE'
+    const status = await h.service.status()
+    expect(status.workspaceDirectory?.workspaces).toEqual([{ id: 'workspace-2', name: 'Second workspace', iconSeed: 42 }])
+    expect(JSON.stringify(status)).not.toMatch(/PRIVATE|javascript:/)
+    raw.active.id = 'another-workspace'
+    expect((await h.service.status()).workspaceDirectory).toBeNull()
+  })
+})

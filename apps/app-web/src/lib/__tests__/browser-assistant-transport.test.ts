@@ -141,3 +141,34 @@ describe('[COMP:app-web/browser-assistant-transport] canonical account managemen
     await settle(); expect(h.accountManagement.act).not.toHaveBeenCalled(); expect(h.accountManagement.profiles).not.toHaveBeenCalled(); expect(h.accountManagement.pair).not.toHaveBeenCalled();
   });
 });
+
+function workspacesHarness(isCurrentUser = () => true) {
+  const h = harness(); let receive: (value: unknown) => void = () => {};
+  const rows = [{ id: 'workspace-1', name: 'Example', iconSeed: 42 }, { id: 'workspace-2', name: 'Second workspace', apiSecret: 'PRIVATE' }];
+  const workspaceManagement = { directory: vi.fn(async () => rows), list: vi.fn(async () => rows), select: vi.fn() };
+  const service = serveBrowserAssistant({ postMessage: h.postMessage, disconnect: vi.fn(), onMessage: { addListener: fn => { receive = fn; } }, onDisconnect: { addListener: vi.fn() } }, { ...h.deps, isCurrentUser, workspaceManagement });
+  return { ...h, send: (value: unknown) => receive(value), service, workspaceManagement };
+}
+describe('[COMP:app-web/browser-assistant-transport] canonical workspace switching', () => {
+  it('publishes workspace identity and icons without API-only fields', async () => {
+    const h = workspacesHarness(); await h.service.hello();
+    expect(h.postMessage).toHaveBeenCalledWith(expect.objectContaining({ workspaceDirectory: { active: { id: 'workspace-1', name: 'Example', iconSeed: 42 }, workspaces: [{ id: 'workspace-1', name: 'Example', iconSeed: 42 }, { id: 'workspace-2', name: 'Second workspace' }] } }));
+    expect(JSON.stringify(h.postMessage.mock.calls)).not.toContain('PRIVATE');
+  });
+  it('refreshes membership before navigation and rejects removed or unknown workspaces', async () => {
+    const h = workspacesHarness(); await h.service.hello();
+    h.workspaceManagement.list.mockResolvedValue([{ id: 'workspace-1', name: 'Example' }]);
+    h.send({ type: 'workspace-action', workspaceId: 'workspace-2' }); await settle();
+    expect(h.workspaceManagement.select).not.toHaveBeenCalled();
+    h.send({ type: 'workspace-action', workspaceId: 'workspace-1', url: 'https://other.example.com' }); await settle();
+    expect(h.workspaceManagement.list).toHaveBeenCalledTimes(1);
+    h.send({ type: 'workspace-action', workspaceId: 'workspace-1' }); await settle();
+    expect(h.workspaceManagement.select).toHaveBeenCalledWith('workspace-1');
+  });
+  it('rechecks the signed-in account after delayed membership validation', async () => {
+    let current = true, release = () => {}; const h = workspacesHarness(() => current);
+    h.workspaceManagement.list.mockImplementation(async () => { await new Promise<void>(resolve => { release = resolve; }); return [{ id: 'workspace-2', name: 'Second workspace' }]; });
+    h.send({ type: 'workspace-action', workspaceId: 'workspace-2' }); await settle(); current = false; release(); await settle();
+    expect(h.workspaceManagement.select).not.toHaveBeenCalled();
+  });
+})

@@ -63,8 +63,9 @@ export function installAssistantChat(deps: {
   const eligible = async () => {
     const identity = await deps.identity()
     if (!identity || !deps.ready()) return null
-    const activeAccount = (await accounts?.status())?.accountDirectory?.current.id
-    if (activeAccount && activeAccount !== identity.userId) return null
+    const active = await accounts?.status()
+    if (active?.accountDirectory?.current.id && active.accountDirectory.current.id !== identity.userId) return null
+    if (active?.workspaceDirectory?.active.id && active.workspaceDirectory.active.id !== identity.workspaceId) return null
     return [...brokers].reverse().find(b => b.hello.userId === identity.userId && b.hello.workspaceId === identity.workspaceId) ?? null
   }
   const status = async (panel: chrome.runtime.Port) => {

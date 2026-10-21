@@ -73,3 +73,9 @@ export {
 
 export { AssistantAvatar, getIconColor } from './AssistantAvatar.js'
 export { CHAT_THEME_TOKENS, readChatAppearance, applyChatAppearance, type ChatAppearance } from './appearance.js'
+
+export { TeamAvatar } from './TeamAvatar.js'
+export { UserAvatar } from './UserAvatar.js'
+export { Popover, PopoverContent, PopoverTrigger } from './Popover.js'
+export { WorkspacePickerTrigger, IdentityAccountSection, IdentityWorkspaceSection, IdentityMenuAction, type IdentityAccount, type IdentityWorkspace, type IdentityPickerLabels } from './IdentityPicker.js'
+export { organizeWorkspacePicker, usesScalableWorkspacePicker, type WorkspacePickerItem } from './workspace-picker.js'

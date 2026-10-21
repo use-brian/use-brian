@@ -11,6 +11,7 @@
    source (the Calendar's `grid-cols-7` was the first to have no overlap and
    collapsed to one column). */
 @source "../../../../packages/views-renderer/src";
+@source "../../../../packages/chat-ui/src";
 
 /* The `custom` palette — an AI-generated theme whose core tokens are injected as
    a <style> at runtime (see lib/theme.tsx) — opts into branded navigation,

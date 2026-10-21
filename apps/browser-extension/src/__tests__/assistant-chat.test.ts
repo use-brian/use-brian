@@ -169,3 +169,22 @@ describe('[COMP:ext/assistant-chat] sign-in changed outside the extension', () =
     vi.unstubAllGlobals()
   })
 })
+
+describe('[COMP:ext/assistant-chat] workspace isolation', () => {
+  it('invalidates shared evidence on a workspace handoff and refuses the previous workspace pairing', async () => {
+    const h = harness(true), page = { url: 'https://example.com', title: 'Example', text: 'OLD_WORKSPACE_CONTEXT', capturedAt: new Date().toISOString() }
+    const hello = { ...accountHello(), workspaceDirectory: { active: { id: 'workspace-1', name: 'First workspace' }, workspaces: [{ id: 'workspace-1', name: 'First workspace' }, { id: 'workspace-2', name: 'Second workspace' }] } }
+    h.external.emit(h.broker); h.broker.onMessage.emit(hello); h.internal.emit(h.panel); await settleAccounts()
+    h.deps.readPage.mockResolvedValue(page); h.panel.onMessage.emit({ type: 'read-page' }); await settleAccounts()
+    h.panel.onMessage.emit({ type: 'workspace-switch', workspaceId: 'workspace-2' }); await settleAccounts()
+    expect(h.deps.stop).toHaveBeenCalled(); expect(h.panel.postMessage).toHaveBeenCalledWith({ type: 'identity-reset' })
+    const newer = { ...h.broker, onMessage: event(), onDisconnect: event(), postMessage: vi.fn() }
+    h.external.emit(newer); newer.onMessage.emit({ ...hello, workspaceId: 'workspace-2', workspaceDirectory: { ...hello.workspaceDirectory, active: { id: 'workspace-2', name: 'Second workspace' } } }); await settleAccounts()
+    h.panel.onMessage.emit({ type: 'account-cancel' }); await settleAccounts()
+    h.panel.onMessage.emit({ type: 'send', id: 'new-turn', text: 'Summarize', assistantId: 'assistant-1', page }); await settleAccounts()
+    expect(h.broker.postMessage).not.toHaveBeenCalledWith(expect.objectContaining({ type: 'send' }))
+    expect(newer.postMessage).not.toHaveBeenCalledWith(expect.objectContaining({ type: 'send' }))
+    expect(h.panel.postMessage).toHaveBeenCalledWith(expect.objectContaining({ type: 'status', connected: false }))
+    vi.unstubAllGlobals()
+  })
+})

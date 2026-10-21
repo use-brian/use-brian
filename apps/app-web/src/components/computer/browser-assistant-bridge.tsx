@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect } from 'react';
+import { useEffect, useRef } from 'react';
 import { readChatAppearance } from '@use-brian/chat-ui';
 import { authFetch, getAccessToken } from '@/lib/auth-fetch';
 import { listWorkspaceAssistants } from '@/lib/api/views';
@@ -8,6 +8,9 @@ import { listBrowserProfiles, pairBrowserExtension } from '@/lib/api/computer';
 import { publicRuntimeConfig } from '@/lib/runtime-public-config';
 import { useWorkspaceContext } from '@/lib/workspace-context';
 import { getUserInfo } from '@/lib/user';
+import { fetchWorkspaces, useWorkspaceFetch, useWorkspaces, updateWorkspace } from '@/contexts/workspace-context';
+import { updateWorkspacePickerPreferences } from '@/lib/api/workspaces';
+import { useT } from '@/lib/i18n/client';
 import { getAccountsDir } from '@/lib/accounts';
 import { primaryAuthUrl } from '@/lib/primary-auth';
 import { resetSurfaceCache } from '@/lib/surface-cache';
@@ -17,6 +20,10 @@ import { serveBrowserAssistant, type AssistantPort } from '@/lib/browser-assista
 /** First-party authenticated transport for the extension side panel. */
 export function BrowserAssistantBridge() {
   const { workspaceId, name, me } = useWorkspaceContext();
+  const { workspaces } = useWorkspaces();
+  const workspaceRows = useRef(workspaces); workspaceRows.current = workspaces;
+  useWorkspaceFetch(publicRuntimeConfig().apiUrl);
+  const pickerLabels = useT().workspaceSwitcher;
   useEffect(() => {
     const runtime = (globalThis as { chrome?: { runtime?: { connect?: (id: string, options: { name: string }) => AssistantPort; lastError?: unknown } } }).chrome?.runtime;
     const config = publicRuntimeConfig();
@@ -46,15 +53,26 @@ export function BrowserAssistantBridge() {
           apiUrl: config.apiUrl || 'http://localhost:4000', workspaceId, workspaceName: name, userId: me.id,
           isCurrentUser,
           appearance: () => readChatAppearance(document.documentElement),
-          ...(primaryAuthUrl() ? { accountManagement: {
+          pickerLabels: () => ({ searchPlaceholder: pickerLabels.searchPlaceholder, empty: pickerLabels.empty, addAnotherAccount: pickerLabels.addAnotherAccount, switchAccountAria: pickerLabels.switchAccountAria, switcherAriaLabel: pickerLabels.switcherAriaLabel }),
+          workspaceManagement: {
+            directory: async () => workspaceRows.current.length ? workspaceRows.current : fetchWorkspaces(config.apiUrl),
+            list: () => fetchWorkspaces(config.apiUrl),
+            select: id => {
+              if (!isCurrentUser()) return;
+              updateWorkspace(id, { pickerLastOpenedAt: new Date().toISOString() });
+              void updateWorkspacePickerPreferences(id, { opened: true }).catch(() => undefined);
+              window.location.assign(`/w/${encodeURIComponent(id)}`);
+            },
+          },
+          accountManagement: {
             directory: () => {
               const user = getUserInfo();
-              const current = { id: me.id!, name: user?.name ?? "", email: user?.email ?? "" };
+              const current = { id: me.id!, name: user?.name ?? "", email: user?.email ?? "", ...(user?.avatarUrl ? { avatarUrl: user.avatarUrl } : {}) };
               const accounts = getAccountsDir().filter(a => a.id !== current.id).slice(0, 7);
-              return { current, accounts: [current, ...accounts].map(({ id, name, email }) => ({ id, name, email })) };
+              return { current, canManageAccounts: !!primaryAuthUrl(), accounts: [current, ...accounts].map(({ id, name, email, avatarUrl }) => ({ id, name, email, ...(avatarUrl ? { avatarUrl } : {}) })) };
             },
             act: (action: 'add' | 'switch', accountId?: string) => {
-              if (!isCurrentUser()) return;
+              if (!isCurrentUser() || !primaryAuthUrl()) return;
               resetSurfaceCache();
               const url = new URL(action === 'add' ? '/login' : '/api/auth/switch-account-and-return', primaryAuthUrl()!);
               if (action === 'add') url.searchParams.set('addAccount', '1');
@@ -70,7 +88,7 @@ export function BrowserAssistantBridge() {
               return await pairViaExtension({ extensionId: config.browserExtensionId, relayUrl: pairing.relayUrl, pairingToken: pairing.pairingToken, send: chromeMessenger() }) === 'paired';
             },
             openBrowsers: () => { if (isCurrentUser()) window.location.assign(`/w/${encodeURIComponent(workspaceId)}/computer/profiles`); },
-          } } : {}),
+          },
           fetch: async (url, init) => {
             // A second account can sign in without remounting this layout.
             // Never let a stale workspace port adopt that account's cookies.
@@ -92,6 +110,6 @@ export function BrowserAssistantBridge() {
     return () => { closed = true; clearTimeout(retry); clearInterval(heartbeat); appearanceObserver.disconnect();
       if (appearanceFrame !== undefined) cancelAnimationFrame(appearanceFrame);
       service?.dispose(); port?.disconnect(); };
-  }, [workspaceId, name, me.id]);
+  }, [workspaceId, name, me.id, pickerLabels]);
   return null;
 }

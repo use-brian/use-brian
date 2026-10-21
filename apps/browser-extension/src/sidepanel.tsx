@@ -1,11 +1,12 @@
 import { useEffect, useRef, useState, type ComponentProps } from 'react'
 import { createRoot } from 'react-dom/client'
-import { AssistantAvatar, ChatComposer, ChatMarkdown, applyChatAppearance } from '@use-brian/chat-ui'
+import { AssistantAvatar, ChatComposer, ChatMarkdown, applyChatAppearance, Popover, PopoverContent, WorkspacePickerTrigger, IdentityAccountSection, IdentityWorkspaceSection, IdentityMenuAction, organizeWorkspacePicker, usesScalableWorkspacePicker, type IdentityAccount, type IdentityWorkspace, type IdentityPickerLabels } from '@use-brian/chat-ui'
 import remarkGfm from 'remark-gfm'
 import { ArrowUp, Check, ChevronDown, Copy, Globe, Plus, Settings2, Square, X } from 'lucide-react'
 import type { PageEvidence } from './assistant-chat.js'
 
-type Account = { id: string; name: string; email: string }
+type Account = IdentityAccount
+const defaultPickerLabels: IdentityPickerLabels = { searchPlaceholder: 'Search workspaces...', empty: 'No workspaces found', addAnotherAccount: 'Add another account', switchAccountAria: 'Switch to {email}', switcherAriaLabel: 'Switch workspace: {name}' }
 type AccountSetup = { waiting: true; profiles?: Array<{ id: string; name: string }>; workspaceName?: string; pairing?: boolean }
 type Assistant = { id: string; name: string; iconSeed?: number | null }
 type Message = { id: string; role: 'user' | 'assistant'; text: string; assistant?: Assistant; page?: PageEvidence }
@@ -44,7 +45,12 @@ const markdownComponents = {
 }
 
 export function BrowserAssistantPanel() {
-  const [accountDirectory, setAccountDirectory] = useState<{ current: Account; accounts: Account[] } | null>(null)
+  const [accountDirectory, setAccountDirectory] = useState<{ current: Account; accounts: Account[]; canManageAccounts?: boolean } | null>(null)
+  const [pickerOpen, setPickerOpen] = useState(false)
+  const [workspaceQuery, setWorkspaceQuery] = useState('')
+  const [workspaceDirectory, setWorkspaceDirectory] = useState<{ active: IdentityWorkspace; workspaces: IdentityWorkspace[] } | null>(null)
+  const [pickerLabels, setPickerLabels] = useState(defaultPickerLabels)
+  const displayedWorkspace = useRef<string | undefined>(undefined)
   const [accountSetup, setAccountSetup] = useState<AccountSetup | null>(null)
   const boundIdentity = useRef<string | undefined>(undefined)
   const displayedAccount = useRef<string | undefined>(undefined)
@@ -72,7 +78,7 @@ export function BrowserAssistantPanel() {
   }
   const clear = () => { session.current = undefined; setMessages([]); setPage(undefined); setReview(false); setError('') }
   const resetIdentity = () => {
-    clear(); setDraft(''); setConnected(false); setWorkspace(''); setAssistants([]); selected.current = null; setAssistant(null)
+    clear(); setDraft(''); setPickerOpen(false); setConnected(false); setWorkspace(''); setAssistants([]); selected.current = null; setAssistant(null)
     setRunning(false); setReading(false); setActivity(''); request.current = null
   }
   const connect = () => {
@@ -96,6 +102,11 @@ export function BrowserAssistantPanel() {
         const identity = message.identity ? `${message.identity.userId}:${message.identity.workspaceId}` : undefined
         if (identity && boundIdentity.current && identity !== boundIdentity.current) resetIdentity()
         if (identity) boundIdentity.current = identity
+        const workspaceId = message.workspaceDirectory?.active?.id
+        if (workspaceId && displayedWorkspace.current && workspaceId !== displayedWorkspace.current) resetIdentity()
+        if (workspaceId) displayedWorkspace.current = workspaceId
+        setWorkspaceDirectory(message.workspaceDirectory ?? null)
+        setPickerLabels(message.identityPickerLabels ?? defaultPickerLabels)
         setAccountDirectory(message.accountDirectory ?? null)
         setAccountSetup(message.accountSetup ?? null)
         setConnected(message.connected === true)
@@ -143,6 +154,8 @@ export function BrowserAssistantPanel() {
     if (node) node.scrollTop = node.scrollHeight
   }, [messages, activity])
 
+  useEffect(() => { if (!pickerOpen) setWorkspaceQuery('') }, [pickerOpen])
+
   const submit = () => {
     const text = draft.trim()
     if (!text || !connected || running || !assistant || accountSetup) return
@@ -161,24 +174,30 @@ export function BrowserAssistantPanel() {
   const stop = () => send({ type: 'stop' })
   const manageAccount = (message: unknown) => {
     setError(''); send(message)
-    document.getElementById('account-picker')?.removeAttribute('open')
+    setPickerOpen(false)
   }
+
+  const searchableWorkspaces = usesScalableWorkspacePicker(workspaceDirectory?.workspaces.length ?? 0)
+  const groupedWorkspaces = organizeWorkspacePicker(workspaceDirectory?.workspaces ?? [], workspaceQuery)
+  const workspaceRows = searchableWorkspaces ? [...groupedWorkspaces.pinned, ...groupedWorkspaces.recent, ...groupedWorkspaces.all] : workspaceDirectory?.workspaces ?? []
 
   return <div data-chat-surface className="extension-chat @container/chat-reading bg-background text-foreground">
     <header className="panel-header">
-      {accountDirectory ? <details id="account-picker" className="account-picker" inert={running || reading}>
-        <summary aria-label={`Accounts: ${accountDirectory.current.name || accountDirectory.current.email}`}>
-          <span className="account-initial">{(accountDirectory.current.name || accountDirectory.current.email).slice(0, 1).toUpperCase()}</span>
-          <span className="account-label">{accountDirectory.current.name || accountDirectory.current.email}</span><ChevronDown size={12} />
-        </summary>
-        <div className="account-options"><p>Brian accounts</p>{accountDirectory.accounts.map(account => <button key={account.id} type="button" disabled={running || reading || accountSetup?.pairing || account.id === accountDirectory.current.id}
-          onClick={() => manageAccount({ type: 'account-switch', accountId: account.id })}>
-          <span><strong>{account.name || account.email}</strong><small>{account.email}</small></span>{account.id === accountDirectory.current.id ? <Check size={14} /> : null}
-        </button>)}
-          <button type="button" disabled={running || reading || accountSetup?.pairing} onClick={() => manageAccount({ type: 'account-add' })}><Plus size={14} />Add another account</button>
-          <p>Switching changes the account in your other Brian tabs too.</p>
-        </div>
-      </details> : <span className="chat-heading">Chat</span>}
+      {accountDirectory ? <Popover open={pickerOpen} onOpenChange={setPickerOpen}>
+        <WorkspacePickerTrigger workspace={workspaceDirectory?.active ?? { id: 'workspace', name: workspace || accountDirectory.current.name || 'Brian' }} open={pickerOpen}
+          label={pickerLabels.switcherAriaLabel.replaceAll('{name}', workspaceDirectory?.active.name ?? workspace)} className="min-w-0 flex-1 justify-start"
+          disabled={running || reading || accountSetup?.pairing} />
+        <PopoverContent role="menu" side="bottom" align="start" sideOffset={8} className="w-[min(20rem,calc(100vw-1rem))] gap-3 p-3">
+          <div className="px-1"><div className="font-semibold text-sm truncate">{workspaceDirectory?.active.name ?? workspace}</div></div>
+          <IdentityAccountSection accounts={accountDirectory.canManageAccounts === false ? [accountDirectory.current] : accountDirectory.accounts} activeId={accountDirectory.current.id} onSwitch={id => manageAccount({ type: 'account-switch', accountId: id })}
+            switchLabel={account => pickerLabels.switchAccountAria.replaceAll('{email}', account.email)} />
+          {workspaceDirectory ? <IdentityWorkspaceSection workspaces={workspaceRows} activeId={workspaceDirectory.active.id} onSelect={id => { if (id !== workspaceDirectory.active.id) manageAccount({ type: 'workspace-switch', workspaceId: id }); else setPickerOpen(false) }}
+            searchable={searchableWorkspaces} query={workspaceQuery} onQueryChange={setWorkspaceQuery} searchLabel={pickerLabels.searchPlaceholder} emptyLabel={pickerLabels.empty} /> : null}
+          <div className="border-t border-border" />
+          {accountDirectory.canManageAccounts !== false ? <IdentityMenuAction onClick={() => manageAccount({ type: 'account-add' })}>{pickerLabels.addAnotherAccount}</IdentityMenuAction> : null}
+          <p className="px-2 text-[11px] text-muted-foreground">Switching changes the account in your other Brian tabs too.</p>
+        </PopoverContent>
+      </Popover> : <span className="chat-heading">Chat</span>}
       <span className="header-status" title={connected ? workspace : 'Open Brian to connect'} aria-label={connected ? `Connected: ${workspace}` : 'Not connected'} data-connected={connected} />
       <div className="header-actions">
         <button type="button" className="icon-button" title="Stop browser task" aria-label="Stop browser task" onClick={stop}><Square size={14} /></button>

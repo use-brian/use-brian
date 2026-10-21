@@ -3,7 +3,7 @@ export const CHAT_THEME_TOKENS = [
   '--background', '--foreground', '--secondary', '--secondary-foreground',
   '--muted', '--muted-foreground', '--accent', '--accent-foreground',
   '--border', '--input', '--ring', '--popover', '--popover-foreground',
-  '--primary', '--destructive', '--font-rocknroll',
+  '--primary', '--primary-foreground', '--card', '--card-foreground', '--destructive', '--font-rocknroll',
 ] as const
 
 export type ChatAppearance = { dark: boolean; tokens: Partial<Record<typeof CHAT_THEME_TOKENS[number], string>> }

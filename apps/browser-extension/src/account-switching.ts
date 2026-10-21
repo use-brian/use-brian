@@ -1,18 +1,43 @@
+import type { IdentityWorkspace, IdentityPickerLabels } from '@use-brian/chat-ui'
+
 /** Account credentials stay in the app. Only a bounded redirect intent lives here. */
 export type AccountBroker = { port: chrome.runtime.Port; hello: Record<string, unknown> }
-type Account = { id: string; name: string; email: string }
-type Intent = { origin: string; previousUserId: string; accountId?: string; createdAt: number }
+type Account = { id: string; name: string; email: string; avatarUrl?: string }
+type Intent = { origin: string; previousUserId: string; accountId?: string; workspaceId?: string; createdAt: number }
 type Profile = { id: string; name: string }
 const KEY = 'assistantAccountIntent'
 const TTL = 10 * 60_000
 const bounded = (value: unknown, max = 128): value is string => typeof value === 'string' && value.length > 0 && value.length <= max
 function directory(broker: AccountBroker) {
-  const raw = broker.hello.accountDirectory as { current?: Account; accounts?: Account[] } | undefined
+  const raw = broker.hello.accountDirectory as { current?: Account; accounts?: Account[]; canManageAccounts?: boolean } | undefined
   if (!raw || !bounded(raw.current?.id) || !Array.isArray(raw.accounts) || raw.accounts.length > 8) return null
-  const clean = (a: Account): Account | null => a && bounded(a.id) && typeof a.name === 'string' && a.name.length <= 200 && typeof a.email === 'string' && a.email.length <= 320 ? { id: a.id, name: a.name, email: a.email } : null
+  const clean = (a: Account): Account | null => a && bounded(a.id) && typeof a.name === 'string' && a.name.length <= 200 && typeof a.email === 'string' && a.email.length <= 320 ? { id: a.id, name: a.name, email: a.email, ...(publicImage(a.avatarUrl) ? { avatarUrl: a.avatarUrl } : {}) } : null
   const current = clean(raw.current)
   if (!current || current.id !== broker.hello.userId) return null
-  return { current, accounts: raw.accounts.map(clean).filter((a): a is Account => !!a) }
+  return { current, ...(raw.canManageAccounts === false ? { canManageAccounts: false } : {}), accounts: raw.accounts.map(clean).filter((a): a is Account => !!a) }
+}
+function publicImage(value: unknown): value is string {
+  if (!bounded(value, 2048)) return false
+  try { const url = new URL(value); return url.protocol === 'https:' || (url.protocol === 'http:' && ['localhost', '127.0.0.1', '[::1]'].includes(url.hostname)) } catch { return false }
+}
+function workspaceDirectory(broker: AccountBroker) {
+  const raw = broker.hello.workspaceDirectory as { active?: IdentityWorkspace; workspaces?: IdentityWorkspace[] } | undefined
+  if (!raw || !bounded(raw.active?.id) || raw.active.id !== broker.hello.workspaceId || !Array.isArray(raw.workspaces) || raw.workspaces.length > 1000) return null
+  const clean = (w: IdentityWorkspace): IdentityWorkspace | null => {
+    if (!w || !bounded(w.id) || !bounded(w.name, 200)) return null
+    const item: IdentityWorkspace = { id: w.id, name: w.name }
+    if (Number.isSafeInteger(w.iconSeed)) item.iconSeed = w.iconSeed
+    if (publicImage(w.iconUrl)) item.iconUrl = w.iconUrl
+    for (const key of ['pickerPinnedAt', 'pickerHiddenAt', 'pickerLastOpenedAt'] as const) if (bounded(w[key], 64) && Number.isFinite(Date.parse(w[key]!))) item[key] = w[key]
+    return item
+  }
+  const active = clean(raw.active)
+  return active ? { active, workspaces: raw.workspaces.map(clean).filter((w): w is IdentityWorkspace => !!w) } : null
+}
+function pickerLabels(broker: AccountBroker): IdentityPickerLabels | undefined {
+  const raw = broker.hello.identityPickerLabels as IdentityPickerLabels | undefined
+  const keys = ['searchPlaceholder', 'empty', 'addAnotherAccount', 'switchAccountAria', 'switcherAriaLabel'] as const
+  return raw && keys.every(key => bounded(raw[key], 500)) ? Object.fromEntries(keys.map(key => [key, raw[key]])) as IdentityPickerLabels : undefined
 }
 export function installAccountSwitching(deps: {
   store: Pick<chrome.storage.StorageArea, 'get' | 'set' | 'remove'>
@@ -32,13 +57,13 @@ export function installAccountSwitching(deps: {
   const read = async (prune = false): Promise<Intent | null> => {
     const raw = (await deps.store.get(KEY))[KEY] as Intent | undefined
     if (!raw) return null
-    if (!bounded(raw.origin, 2048) || !bounded(raw.previousUserId) || (raw.accountId !== undefined && !bounded(raw.accountId)) || !Number.isFinite(raw.createdAt) || now() - raw.createdAt < 0 || now() - raw.createdAt > TTL) {
+    if (!bounded(raw.origin, 2048) || !bounded(raw.previousUserId) || (raw.accountId !== undefined && !bounded(raw.accountId)) || (raw.workspaceId !== undefined && !bounded(raw.workspaceId)) || !Number.isFinite(raw.createdAt) || now() - raw.createdAt < 0 || now() - raw.createdAt > TTL) {
       if (prune) { await deps.store.remove(KEY); pending = undefined }
       return null
     }
     return raw
   }
-  const matches = (intent: Intent, broker: AccountBroker) => broker.port.sender?.origin === intent.origin && (intent.accountId ? broker.hello.userId === intent.accountId : broker.hello.userId !== intent.previousUserId)
+  const matches = (intent: Intent, broker: AccountBroker) => broker.port.sender?.origin === intent.origin && (!intent.workspaceId || broker.hello.workspaceId === intent.workspaceId) && (intent.accountId ? broker.hello.userId === intent.accountId : broker.hello.userId !== intent.previousUserId)
   const managementBroker = async () => {
     const origin = await deps.appOrigin()
     return [...deps.brokers()].reverse().find(b => (!origin || b.port.sender?.origin === origin) && directory(b))
@@ -58,12 +83,12 @@ export function installAccountSwitching(deps: {
     blocked: async () => changing || !!await read(),
     status: async () => {
       const broker = await managementBroker()
-      return { ...(broker ? { accountDirectory: directory(broker) } : {}), accountSetup: await read() ? { waiting: true, ...(pending?.profiles ? { profiles: pending.profiles, workspaceName: String(pending.broker.hello.workspaceName ?? ''), pairing: pending.pairing === true } : {}) } : null }
+      return { ...(broker ? { accountDirectory: directory(broker), workspaceDirectory: workspaceDirectory(broker), identityPickerLabels: pickerLabels(broker) } : {}), accountSetup: await read() ? { waiting: true, ...(pending?.profiles ? { profiles: pending.profiles, workspaceName: String(pending.broker.hello.workspaceName ?? ''), pairing: pending.pairing === true } : {}) } : null }
     },
     hello: (broker: AccountBroker) => { void exclusive(() => resume(broker)) },
     disconnected: (broker: AccountBroker) => { if (pending?.broker === broker) pending = undefined },
     panel: async (message: Record<string, unknown>): Promise<boolean> => {
-      if (!['account-add', 'account-switch', 'account-connect', 'account-pair', 'account-cancel', 'account-retry', 'account-browsers'].includes(String(message.type))) return false
+      if (!['account-add', 'account-switch', 'workspace-switch', 'account-connect', 'account-pair', 'account-cancel', 'account-retry', 'account-browsers'].includes(String(message.type))) return false
       await exclusive(async () => {
         try {
           await read(true)
@@ -89,15 +114,18 @@ export function installAccountSwitching(deps: {
           if (pending?.pairing) throw new Error('pairing_in_progress')
           const broker = await managementBroker(), dir = broker && directory(broker)
           if (!broker || !dir) throw new Error('account_unavailable')
+          if (['account-add', 'account-switch'].includes(String(message.type)) && dir.canManageAccounts === false) throw new Error('account_unavailable')
+          if (message.type === 'workspace-switch' && (!bounded(message.workspaceId) || !workspaceDirectory(broker)?.workspaces.some(w => w.id === message.workspaceId))) throw new Error('account_unavailable')
           if (message.type === 'account-switch' && (!bounded(message.accountId) || !dir.accounts.some(a => a.id === message.accountId) || message.accountId === dir.current.id)) throw new Error('account_unavailable')
           changing = true
           await deps.beforeSwitch()
           deps.reset()
           await cancel()
-          const intent: Intent = { origin: broker.port.sender!.origin!, previousUserId: dir.current.id, createdAt: now(), ...(message.type === 'account-switch' ? { accountId: String(message.accountId) } : message.type === 'account-connect' ? { accountId: dir.current.id } : {}) }
+          const intent: Intent = { origin: broker.port.sender!.origin!, previousUserId: dir.current.id, createdAt: now(), ...(message.type === 'account-switch' ? { accountId: String(message.accountId) } : message.type === 'account-connect' ? { accountId: dir.current.id, workspaceId: String(broker.hello.workspaceId) } : message.type === 'workspace-switch' ? { accountId: dir.current.id, workspaceId: String(message.workspaceId) } : {}) }
           await deps.store.set({ [KEY]: intent })
           deps.publish({ type: 'account-setup', setup: { waiting: true } })
           if (message.type === 'account-connect') { await resume(broker); return }
+          if (message.type === 'workspace-switch') { post(broker, { type: 'workspace-action', workspaceId: intent.workspaceId }); return }
           post(broker, { type: 'account-action', action: message.type === 'account-add' ? 'add' : 'switch', ...(intent.accountId ? { accountId: intent.accountId } : {}) })
         } catch (error) {
           deps.publish({ type: 'account-error', code: (error as { code?: string }).code === 'protected_fill_denied' ? 'protected_fill_denied' : (error as Error).message })

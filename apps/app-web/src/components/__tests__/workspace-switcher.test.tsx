@@ -13,7 +13,7 @@
  * follow.
  */
 
-import { act, createContext, useContext, type ReactNode } from "react";
+import { act, type ReactNode } from "react";
 import { createRoot, type Root } from "react-dom/client";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
@@ -74,49 +74,7 @@ vi.mock("@/components/settings-modal/settings-modal", () => ({
   SettingsModal: () => null,
   OPEN_SETTINGS_EVENT: "brian:open-settings",
 }));
-// A minimal popover: the trigger toggles `open`, the content renders only
-// while open. Enough to exercise the first-open paint without base-ui.
-vi.mock("@/components/ui/popover", () => {
-  const Ctx = createContext<{ open: boolean; onOpenChange: (o: boolean) => void }>({
-    open: false,
-    onOpenChange: () => {},
-  });
-  return {
-    Popover: ({
-      open,
-      onOpenChange,
-      children,
-    }: {
-      open: boolean;
-      onOpenChange: (o: boolean) => void;
-      children: ReactNode;
-    }) => <Ctx.Provider value={{ open, onOpenChange }}>{children}</Ctx.Provider>,
-    PopoverTrigger: ({
-      children,
-      ...props
-    }: {
-      children: ReactNode;
-      [key: string]: unknown;
-    }) => {
-      const ctx = useContext(Ctx);
-      const { ref: _ref, ...rest } = props as { ref?: unknown };
-      return (
-        <button
-          type="button"
-          data-testid="trigger"
-          {...(rest as Record<string, unknown>)}
-          onClick={() => ctx.onOpenChange(!ctx.open)}
-        >
-          {children}
-        </button>
-      );
-    },
-    PopoverContent: ({ children }: { children: ReactNode; [key: string]: unknown }) => {
-      const ctx = useContext(Ctx);
-      return ctx.open ? <div data-testid="content">{children}</div> : null;
-    },
-  };
-});
+
 
 import {
   __resetWorkspaceCacheForTest,
@@ -158,12 +116,12 @@ describe("[COMP:app-web/workspace-switcher] paints the shared workspace list", (
 
   async function open() {
     await act(async () => {
-      container!.querySelector<HTMLButtonElement>('[data-testid="trigger"]')!.click();
+      container!.querySelector<HTMLButtonElement>('[data-workspace-switcher-trigger]')!.click();
       await settle();
     });
   }
 
-  const content = () => container!.querySelector('[data-testid="content"]');
+  const content = () => document.querySelector('[data-slot="popover-content"]');
   const rowNames = () =>
     Array.from(content()!.querySelectorAll('ul li button[role="menuitem"] span.flex-1')).map(
       (el) => el.textContent,

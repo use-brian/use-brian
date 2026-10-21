@@ -1,4 +1,4 @@
-import { readFileSync, writeFileSync } from 'node:fs'
+import { readFileSync, writeFileSync, readdirSync } from 'node:fs'
 import { dirname, join } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { build } from 'esbuild'
@@ -9,7 +9,8 @@ const require = createRequire(import.meta.url)
 /** Compile the canonical app theme and chat primitives locally for MV3. */
 export async function buildSidepanel(root) {
   const cssSource = `@import "${require.resolve('tailwindcss/index.css')}"; @import "../../packages/chat-ui/src/theme.css"; @import "../../packages/chat-ui/src/appearance.css";`
-  const source = readFileSync(join(root, 'src/sidepanel.tsx'), 'utf8')
+  const shared = join(root, '../../packages/chat-ui/src')
+  const source = [readFileSync(join(root, 'src/sidepanel.tsx'), 'utf8'), ...readdirSync(shared).filter(name => name.endsWith('.tsx')).map(name => readFileSync(join(shared, name), 'utf8'))].join('\n')
   const compiler = await compile(cssSource, {
     base: root, onDependency: () => {},
   })
