@@ -1,5 +1,5 @@
 /** Native browser title readers and authored commands. [COMP:api/application-persistence] */
-import {ContextScopeAccumulator,DerivedScopeError,boundScopeSources,executionToolContext,type SessionContextAuthority} from '@use-brian/core'
+import {ContextScopeAccumulator,DerivedScopeError,bindScopeSources,boundScopeSources,executionToolContext,type SessionContextAuthority} from '@use-brian/core'
 import {isAuthorityChangedError} from '../context-scope/authority-lease.js'
 import {authSessionStore,type AuthTokenClaims} from '../db/auth-session-store.js'
 import {findSessionById} from '../db/sessions.js'
@@ -35,11 +35,14 @@ export async function resolveSessionTitleAuthority(input:{claims:NativeClaims|nu
  await execution.security.authority.assertCurrent()
  return{execution,accumulator:new ContextScopeAccumulator(execution.security.provenance)}
 }
-export async function readCurrentSessionTitle(input:{claims:NativeClaims|null;sessionId:string}){
+async function prepareCurrentSessionTitle(input:{claims:NativeClaims|null;sessionId:string}){
  const command=structuredClone(input),authority=await resolveSessionTitleAuthority({...command,readOnly:true})
  const title=await readSessionTitle(command.sessionId,authority)
  await assertSourceModelOutputAuthority({...executionToolContext(authority.execution,{appId:'native-session-title-read'}),scopeAccumulator:authority.accumulator})
- return title
+ return{authority,title}
+}
+export async function readCurrentSessionTitle(input:{claims:NativeClaims|null;sessionId:string}){
+ return(await prepareCurrentSessionTitle(input)).title
 }
 /** A fresh human-authored title does not adopt any held legacy title bytes. */
 export async function renameCurrentSessionTitle(input:{claims:NativeClaims|null;sessionId:string;title:string}){
@@ -55,13 +58,44 @@ export async function renameCurrentSessionTitle(input:{claims:NativeClaims|null;
  return title
 }
 
-/** Held/absent revision metadata grants no bytes and no client allow token. */
-export async function sessionTitleProjection(input:{claims:NativeClaims|null;sessionId:string}):Promise<{title:string|null;titleRevisionId:string|null}>{
+type TitleProjection=Readonly<{title:string|null;titleRevisionId:string|null}>
+const projectionAuthorities=new WeakMap<TitleProjection,SessionContextAuthority|null>()
+function heldTitleProjection():TitleProjection{
+ const projection=Object.freeze({title:null,titleRevisionId:null})
+ projectionAuthorities.set(projection,null);return projection
+}
+/** Immutable value identity is private and grants no reusable admission. */
+export async function sessionTitleProjection(input:{claims:NativeClaims|null;sessionId:string}):Promise<TitleProjection>{
  try{
-  const current=await readCurrentSessionTitle(input)
-  return{title:current?.title??null,titleRevisionId:current?.revisionId??null}
+  const{authority,title}=await prepareCurrentSessionTitle(input)
+  if(!title)return heldTitleProjection()
+  const projection=bindScopeSources(Object.freeze({title:title.title,titleRevisionId:title.revisionId}),boundScopeSources(title))
+  projectionAuthorities.set(projection,authority);return projection
  }catch(error){
-  if(error instanceof DerivedScopeError||isAuthorityChangedError(error))return{title:null,titleRevisionId:null}
+  if(error instanceof DerivedScopeError||isAuthorityChangedError(error))return heldTitleProjection()
   throw error
  }
+}
+/** Original per-row authority and sources are checked again at the actual collection boundary. */
+export async function sessionTitleProjections(input:{claims:NativeClaims|null;sessionIds:readonly string[]}):Promise<Map<string,TitleProjection>>{
+ const command=structuredClone(input),prepared:Array<{id:string;projection:TitleProjection}>=[]
+ // Finish each row's frame before opening another. An unrelated blocked row
+ // must not consume every connection needed for current source admission.
+ for(const id of command.sessionIds)prepared.push({id,projection:await sessionTitleProjection({claims:command.claims,sessionId:id})})
+ const result=new Map<string,TitleProjection>()
+ for(const{id,projection}of prepared){
+  if(!projectionAuthorities.has(projection))denied()
+  const authority=projectionAuthorities.get(projection)
+  if(!authority){result.set(id,projection);continue}
+  try{
+   const current=await readSessionTitle(id,authority)
+   if(!current||current.revisionId!==projection.titleRevisionId){result.set(id,heldTitleProjection());continue}
+   await assertSourceModelOutputAuthority({...executionToolContext(authority.execution,{appId:'native-session-title-list-output'}),scopeAccumulator:authority.accumulator})
+   result.set(id,projection)
+  }catch(error){
+   if(error instanceof DerivedScopeError||isAuthorityChangedError(error)){result.set(id,heldTitleProjection());continue}
+   throw error
+  }
+ }
+ return result
 }

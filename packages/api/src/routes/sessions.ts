@@ -1,4 +1,4 @@
-import {pinSessionTitleClaims,sessionTitleProjection,renameCurrentSessionTitle} from './session-title-authority.js'
+import {pinSessionTitleClaims,sessionTitleProjection,sessionTitleProjections,renameCurrentSessionTitle} from './session-title-authority.js'
 import {DerivedScopeError} from '@use-brian/core'
 import {isAuthorityChangedError} from '../context-scope/authority-lease.js'
 import { z } from 'zod'
@@ -370,7 +370,7 @@ export function sessionRoutes(opts: SessionRouteOptions = {}): Router {
         now,
       }).readable)
 
-      const titles=new Map(await Promise.all(readable.map(async s=>[s.id,await sessionTitleProjection({claims:titleClaims,sessionId:s.id})] as const)))
+      const titles=await sessionTitleProjections({claims:titleClaims,sessionIds:readable.map(s=>s.id)})
       res.json(readable.map((s) => ({
         id: s.id,
         title: titles.get(s.id)?.title ?? 'New Chat',
@@ -509,7 +509,7 @@ export function sessionRoutes(opts: SessionRouteOptions = {}): Router {
           console.warn('[sessions] room human count failed (rooms stay mention-gated):', err)
           return new Map<string, number>()
         })
-      const titles=new Map(await Promise.all(visible.map(async s=>[s.id,await sessionTitleProjection({claims:titleClaims,sessionId:s.id})] as const)))
+      const titles=await sessionTitleProjections({claims:titleClaims,sessionIds:visible.map(s=>s.id)})
       res.json(visible.map((s) => ({
         id: s.id,
         title: titles.get(s.id)?.title ?? 'New Chat',

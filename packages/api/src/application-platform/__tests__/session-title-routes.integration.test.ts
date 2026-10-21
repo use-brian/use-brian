@@ -108,6 +108,54 @@ describe.sequential('[COMP:api/application-persistence] actual browser title DTO
   const title=await readCurrentSessionTitle({claims:{userId:c.f.secondId,sessionId:device.id,authVersion:device.authVersion},sessionId:thread.sessionId})
   expect(title).toMatchObject({title:renamed.body.title,manual:true,revisionId:renamed.body.titleRevisionId})
  })
+ it('rechecks an earlier title after a second real list row blocks and the first source is withdrawn',async()=>{
+  const c=await setup(),authority=await resolveSessionTitleAuthority({claims:c.claims,sessionId:c.session.id,readOnly:false})
+  await readAdmittedSessionQuery({sessionId:c.session.id,throughSequence:0,topicThroughSequence:0,authority})
+  const memory=await c.f.memory('Fictional list title source',c.f.ownerId)
+  const admitted=await createDbMemoryStore().getById(authority.execution.security.access,memory.id);expect(admitted).not.toBeNull()
+  authority.accumulator.note({sources:boundScopeSources(admitted!)})
+  const first=await publishSessionTitle({sessionId:c.session.id,title:'Fictional revoked list title',manual:false,expectedRevision:null,authority,
+   derivation:{producer:'fixture:list-output-race',sources:authority.accumulator.evidence.sources??[]}});expect(first).not.toBeNull()
+  const other=await createPersonalWebSession({assistantId:c.f.assistantId,userId:c.f.ownerId,workspaceId:c.f.workspaceId,channelType:'web',channelId:crypto.randomUUID(),appOrigin:'chat'},
+   {actorUserId:c.f.ownerId,authSessionId:c.auth.id,authVersion:c.auth.authVersion})
+  const second=await renameCurrentSessionTitle({claims:c.claims,sessionId:other.id,title:'Fictional independent list title'});expect(second).not.toBeNull()
+  // The first projection is selected before the deliberately blocked row.
+  await c.f.pool.query("UPDATE sessions SET last_active_at=clock_timestamp()+interval '1 second' WHERE id=$1",[c.session.id])
+  const blocker=await c.f.pool.connect();await blocker.query('BEGIN')
+  const pid=(await blocker.query<{pid:number}>('SELECT pg_backend_pid() AS pid')).rows[0].pid
+  await blocker.query('SELECT scope_revision_id FROM session_title_heads WHERE session_id=$1 FOR UPDATE',[other.id])
+  const pending=c.list().then(response=>response)
+  let response:Awaited<typeof pending>|undefined
+  try{
+   const deadline=Date.now()+5000
+   let blocked=false
+   while(Date.now()<deadline){
+    blocked=(await c.f.pool.query<{blocked:boolean}>(`SELECT EXISTS(SELECT 1 FROM pg_stat_activity
+     WHERE datname=current_database() AND state='active' AND query LIKE 'SELECT read_session_title_revision%'
+      AND wait_event_type='Lock' AND $1=ANY(pg_blocking_pids(pid))) AS blocked`,[pid])).rows[0].blocked
+    if(blocked)break
+    await new Promise(resolve=>setTimeout(resolve,25))
+   }
+   expect(blocked).toBe(true)
+   // Wait for the unblocked local row's SQL work to finish. The only
+   // remaining active request query must be the deliberately blocked head.
+   let quiet=0
+   while(quiet<8&&Date.now()<deadline){
+    const active=(await c.f.pool.query<{n:number}>(`SELECT count(*)::int AS n FROM pg_stat_activity
+     WHERE datname=current_database() AND backend_type='client backend' AND state='active'
+      AND pid<>$1 AND wait_event_type IS DISTINCT FROM 'Lock' AND query NOT LIKE '%pg_stat_activity%'`,[pid])).rows[0].n
+    quiet=active===0?quiet+1:0
+    await new Promise(resolve=>setTimeout(resolve,25))
+   }
+   expect(quiet).toBe(8)
+   await c.f.pool.query('UPDATE memories SET scope_held=true WHERE id=$1',[memory.id])
+  }finally{await blocker.query('ROLLBACK');blocker.release();response=await pending}
+  expect(response.status,JSON.stringify(response.body)).toBe(200)
+  const rows=response.body as Array<{id:string;title:string;titleRevisionId:string|null}>
+  expect(rows.find(row=>row.id===c.session.id)).toMatchObject({title:'New Chat',titleRevisionId:null})
+  expect(JSON.stringify(response.body)).not.toContain(first!.title)
+  expect(rows.find(row=>row.id===other.id)).toMatchObject({title:second!.title,titleRevisionId:second!.revisionId})
+ })
  it('pins original middleware claims and authored command before any asynchronous boundary',async()=>{
   const c=await setup(),carrier={userId:c.f.ownerId,authSessionId:c.auth.id,authVersion:c.auth.authVersion}
   const claims=pinSessionTitleClaims(carrier)!
