@@ -10,7 +10,7 @@ export async function tryNativeInvocationEvidence(execution:ExecutionContext,evi
  if(execution.ownership.kind!=='workspace'||execution.identity.kind!=='attended'||execution.identity.principal.kind!=='workspace_member'
   ||execution.identity.principal.userId!==actor||getApplicationExecutionBinding(execution)
   ||recipient.workspaceId!==workspaceId||recipient.userId!==''&&recipient.userId!==actor
-  ||!roots.length||roots.length>100||!roots.some(root=>root.resourceKind==='application_field')
+  ||!roots.length||roots.length>100||!roots.some(root=>root.resourceKind==='application_field'||root.resourceKind==='session_context_revision')
   ||roots.some(root=>!['application_field','session_message','session_context_revision','memory'].includes(root.resourceKind)))return null
  const anonymous=recipient.userId===''
  const ceiling=intersectAccessCeilings(execution.security.ceiling,{...recipient,userId:actor,mutationCompartments:[],visibilityAssistantIds:execution.security.ceiling.visibilityAssistantIds})
