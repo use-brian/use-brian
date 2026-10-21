@@ -84,11 +84,15 @@ describe('[COMP:api/external-source-access] retained source batching and token b
     f.query.mockResolvedValueOnce({ rows: [{ nodeVersion: f.sources[0].version, source: f.sources[0] }] } as never)
     await expect(f.coordinator.prepare(f.execution, [{ ...root,userId: randomUUID() }], 'context')).rejects.toMatchObject({ code: 'source_access_denied' })
     expect(f.authorize).toHaveBeenCalledTimes(1)
-    const client = { query: vi.fn(async () => ({ rows: [] })) } as unknown as PoolClient
+    const client = { query: vi.fn(async (sql: string) => sql.includes('read_admitted_external_source_dependencies')
+      ? { rows: [] } : { rows: [{ xid: '7',pid: 11,actor: f.userId }] }) } as unknown as PoolClient
     await expect(pinPreparedExternalSourceAuthority(client, f.execution, token)).rejects.toMatchObject({ code: 'source_access_denied' })
     await expect(pinPreparedExternalSourceAuthority(client, f.execution, token)).rejects.toMatchObject({ code: 'source_access_denied' })
-    expect(client.query).toHaveBeenCalledTimes(1)
-    expect(vi.mocked(client.query).mock.calls[0][0]).toContain('read_admitted_external_source_dependencies')
+    expect(client.query).toHaveBeenCalledTimes(2)
+    expect(vi.mocked(client.query).mock.calls[0][0]).toContain('pg_current_xact_id')
+    expect(vi.mocked(client.query).mock.calls[1][0]).toContain('read_admitted_external_source_dependencies')
+    expect(pinExternalSourceOperation).toHaveBeenCalledTimes(1)
+    expect(activatePinnedExternalSourceOperation).not.toHaveBeenCalled()
   })
   it('refuses a reused proof when transaction-visible native ancestry changes', async () => {
     const f = fixture(1), root = { ...f.sources[0],resourceKind: 'memory',resourceId: randomUUID() }
@@ -106,7 +110,9 @@ describe('[COMP:api/external-source-access] retained source batching and token b
     changed = false
     await expect(pinPreparedExternalSourceAuthority(client, f.execution, token)).rejects.toMatchObject({ code: 'source_access_denied' })
     expect(pinExternalSourceOperation).toHaveBeenCalledTimes(1)
-    expect(activatePinnedExternalSourceOperation).not.toHaveBeenCalled()
+    // The existing receipt must be active before the actual admitted ancestry
+    // can be checked. Its refusal poisons this token even after SQL rollback.
+    expect(activatePinnedExternalSourceOperation).toHaveBeenCalledTimes(1)
   })
   it('refuses missing or changed observations before network authorization', async () => {
     const f = fixture(1)

@@ -26,7 +26,8 @@ export async function pinPreparedExternalSourceAuthority(client: PoolClient, exe
   const binding = prepared.get(token)
   if (!binding || binding.execution !== execution) denied()
   await execution.security.authority.assertCurrent()
-  await binding.assertAncestryCurrent(client)
+  // Metadata integrity confers no rights; actual admission follows receipt activation.
+  await binding.assertAncestryCurrent()
   const transaction = (await client.query<{ xid: string; pid: number; actor: string }>(`SELECT pg_current_xact_id()::text AS xid,pg_backend_pid() AS pid,
     nullif(current_setting('app.current_user_id',true),'') AS actor`)).rows[0]
   if (transaction?.actor !== execution.security.access.userId || binding.transaction
@@ -35,6 +36,7 @@ export async function pinPreparedExternalSourceAuthority(client: PoolClient, exe
   for (const batch of binding.batches) {
     await (binding.pinned ? activatePinnedExternalSourceOperation : pinExternalSourceOperation)(client, execution, batch.proof, batch.sources, binding.action)
   }
+  await binding.assertAncestryCurrent(client)
   await execution.security.authority.assertCurrent()
   binding.pinned = true
 }

@@ -58,7 +58,7 @@ async function assertSourceModelAuthority(context: ToolContext, action: 'context
     // not apply to application, field or independent-source profiles.
     const nativeDelegated = persistent && !external && fields.length === 0 && !application
       && execution.identity.kind === 'delegated'
-    if (execution.ownership.kind !== 'workspace' || execution.security.access.sharedAudience && (external || fields.length>0)
+    if (execution.ownership.kind !== 'workspace' || execution.security.access.sharedAudience && external
       || !nativeDelegated && (!application || external) && (execution.identity.kind !== 'attended' || execution.identity.principal.kind !== 'workspace_member')) denied()
     const wiring = external ? getSharedRetainedSourceAuthority() : undefined
     if (external && !wiring) denied()
@@ -73,6 +73,7 @@ async function assertSourceModelAuthority(context: ToolContext, action: 'context
           FROM pg_catalog.pg_roles r JOIN pg_catalog.pg_class c ON c.oid='entity_instances'::regclass WHERE r.rolname=current_user`)
         if (role.rows[0]?.bypass !== false) denied()
         await applyRLSGucs(client, execution.security.access.userId)
+        await client.query('SELECT id FROM workspaces WHERE id=$1 FOR SHARE',[workspaceId])
         await applyApplicationRLSContext(client, execution)
         if (prepared) await pinPreparedExternalSourceAuthority(client, execution, prepared)
         const current = await validate(evidence.evidence, execution.security.ceiling, client)

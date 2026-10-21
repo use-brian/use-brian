@@ -21,7 +21,8 @@ async function scopeSnapshots(client: Pick<pg.ClientBase, 'query'>, workspaceId:
       (source.resourceKind === 'external_source' ? 'external' : source.resourceKind === 'application_field' ? 'field' : 'native') === profile)
     if (group.length === 0) continue
     const rows = profile === 'field' ? (await client.query<{ ord: number; snapshot: CanonicalEvidenceRow | null }>(
-      `SELECT t.ord::int AS ord,${recordedFields ? 'read_admitted_application_field_snapshot($1,t.id,t.version)' : "read_entity_derivation_source($1,'application_field',t.id)"} AS snapshot
+      recordedFields ? 'SELECT ord,snapshot FROM read_native_session_field_snapshots($1,$2,$3)'
+        : `SELECT t.ord::int AS ord,read_entity_derivation_source($1,'application_field',t.id) AS snapshot
        FROM unnest($2::uuid[],$3::text[]) WITH ORDINALITY AS t(id,version,ord)`,
       [workspaceId,group.map(({ source }) => source.resourceId),group.map(({ source }) => source.version)])).rows
       : profile === 'external' ? (await client.query<{ ord: number; snapshot: CanonicalEvidenceRow | null }>(

@@ -157,7 +157,7 @@ export async function readApplicationFieldAncestors(workspaceId: string, rawRoot
   for (let offset = 0; offset < roots.length; offset += 100) {
     const part = roots.slice(offset, offset + 100)
     const rows = (await (client ?? getPool()).query<{ nodeVersion: string; source: unknown }>(
-      `SELECT node_version AS "nodeVersion",source FROM ${client ? 'read_admitted_application_field_dependencies' : 'read_application_field_dependencies'}($1,$2,$3,$4)`,
+      `SELECT node_version AS "nodeVersion",source FROM ${client ? 'read_native_session_field_dependencies' : 'read_application_field_dependencies'}($1,$2,$3,$4)`,
       [workspaceId,part.map(source => source.resourceKind),part.map(source => source.resourceId),part.map(source => source.version)],
     )).rows
     for (const row of rows) {

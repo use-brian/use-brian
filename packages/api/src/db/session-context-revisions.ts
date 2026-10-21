@@ -29,7 +29,7 @@ export function bindSessionContextRetainedAuthority(execution: ExecutionContext,
   retainedHosts.set(execution, prepare)
 }
 function missing(): never { throw new DerivedScopeError('scope_evidence_missing') }
-function changed(): never { throw new DerivedScopeError('scope_source_changed') }
+function changed(cause?:unknown): never { throw Object.assign(new DerivedScopeError('scope_source_changed'),cause===undefined?{}:{cause}) }
 function requireAuthority(authority: SessionContextAuthority | undefined): SessionContextAuthority {
   if (!authority?.execution || !(authority.accumulator instanceof ContextScopeAccumulator)) missing()
   return authority
@@ -63,13 +63,14 @@ async function transaction<T>(authority: SessionContextAuthority, sources: reado
         // while waiting for promotion's workspace lock otherwise forms a cycle.
         // NO KEY UPDATE permits the trusted source pin's separate FK insert;
         // createMemory upgrades only after those pin inserts have committed.
-        await client.query(owner
+        if(writeSessionId&&!owner)await client.query('SELECT lock_native_session_context_publication($1,$2)',[execution.security.access.workspaceId,writeSessionId])
+        else await client.query(owner
           ? 'SELECT id FROM workspaces WHERE id=$1 FOR NO KEY UPDATE'
           : 'SELECT id FROM workspaces WHERE id=$1 FOR SHARE', [execution.security.access.workspaceId])
         await applyApplicationRLSContext(client, execution)
         // Take the publication lock before any native source reader takes a
         // parent SHARE lock. Two simultaneous upgrades otherwise deadlock.
-        if(writeSessionId)await client.query('SELECT id FROM sessions WHERE id=$1 FOR UPDATE',[writeSessionId])
+        if(writeSessionId&&owner)await client.query('SELECT id FROM sessions WHERE id=$1 FOR UPDATE',[writeSessionId])
         if (contextProof) await pinPreparedExternalSourceAuthority(client, execution, contextProof)
         await validateCallerScopeEvidence({ sources: [...sources] }, execution.security.ceiling, client)
         if (prepared) await pinPreparedExternalSourceAuthority(client, execution, prepared)
@@ -87,15 +88,60 @@ async function transaction<T>(authority: SessionContextAuthority, sources: reado
     return result
   } catch (error) {
     if (error instanceof SourceProtocolError) {
-      if (error.code === 'source_access_denied') changed()
+      if (error.code === 'source_access_denied') changed(error)
       // Unavailability, malformed proof and uncertain source effects must not
       // become a normal storage failure. Preserve their code and retry policy.
       throw Object.assign(error, { reason: 'authority_changed' as const })
     }
     if (typeof error === 'object' && error !== null && 'reason' in error
-      && error.reason === 'caller_evidence_unavailable') changed()
+      && error.reason === 'caller_evidence_unavailable') changed(error)
     throw error
   }
+}
+
+/** Internal current-reader frame for original session queries, including empty collections. */
+export async function readSessionQueryFrame<T>(authority:SessionContextAuthority,rawRoots:readonly ScopeSource[],
+ capture:(client:PoolClient)=>Promise<{value:T;sources:readonly ScopeSource[]}>):Promise<T> {
+ const {execution}=requireAuthority(authority),roots=structuredClone(rawRoots)
+ await execution.security.authority.assertCurrent()
+ const wiring=getSharedRetainedSourceAuthority(),host=retainedHosts.get(execution)
+ const prepare=host??(wiring?((e:ExecutionContext,s:readonly ScopeSource[],a:'context'|'retain')=>wiring.coordinator.prepare(e,s,a)):undefined)
+ const admittedRoots:ScopeSource[]=[]
+ for(const root of roots){
+  if(root.workspaceId!==execution.security.access.workspaceId)changed()
+  if(!(await readExternalSourceAncestors(root.workspaceId,[root])).length&&root.resourceKind!=='external_source')continue
+  if(!prepare)changed()
+  try{await prepare(execution,[root],'context');admittedRoots.push(root)}
+  catch(error){if(!(error instanceof SourceProtocolError)||error.code!=='source_access_denied')throw error}
+ }
+ // One real source operation binds all admitted roots; separate operation IDs
+ // must never replace one another's transaction-scoped source pins.
+ const proof=admittedRoots.length?await prepare!(execution,admittedRoots,'context'):undefined
+ const assertWiring=()=>{if(host!==retainedHosts.get(execution)||!host&&wiring!==getSharedRetainedSourceAuthority())changed()}
+ assertWiring()
+ const captured=await transaction(authority,[],'context',false,async client=>{
+  if(proof)await pinPreparedExternalSourceAuthority(client,execution,proof)
+  const result=await capture(client)
+  await validateCallerScopeEvidence({sources:[...result.sources]},execution.security.ceiling,client)
+  assertWiring()
+  return result
+ })
+ if(proof){
+  // The acquisition frame may consume a short receipt's lifetime. A fresh
+  // source decision plus real SQL revalidation qualifies the return value;
+  // expired acquisition permission is never treated as current authority.
+  const currentProof=await prepare!(execution,admittedRoots,'context')
+  assertWiring()
+  await transaction(authority,[],'context',false,async client=>{
+   await pinPreparedExternalSourceAuthority(client,execution,currentProof)
+   await validateCallerScopeEvidence({sources:[...captured.sources]},execution.security.ceiling,client)
+   assertWiring()
+  })
+  await assertPreparedExternalSourceAuthorityCurrent(execution,currentProof)
+ }
+ assertWiring();await execution.security.authority.assertCurrent()
+ const value=captured.value
+ return value
 }
 
 /** Discover immutable metadata only. Historical plaintext is never selected. */
@@ -174,63 +220,17 @@ export async function writeSessionContextRevision(input: {
   const all = new ContextScopeAccumulator({ sources: [...evidence.sources,...ancestors] })
   evidence.sources = all.evidence.sources ?? []
   const payload = structuredClone(input.content), parentId = input.parentId ?? randomUUID(), id = randomUUID()
-  const stored = await transaction(authority,evidence.sources,'retain',true,async client => {
-    const target = (await client.query<{ target: ResourceScope & { createdBy: string; assistant: string } | null }>(
-      'SELECT session_context_parent_snapshot($1,$2) AS target', [execution.security.access.workspaceId,input.sessionId])).rows[0]?.target
-    if (!target) changed()
-    // Serialize logical key updates and compaction publication at the parent.
-    const generation=(await client.query<{generation:string}>('SELECT session_context_generation::text AS generation FROM sessions WHERE id=$1 FOR UPDATE',[input.sessionId])).rows[0]?.generation
-    if(input.expectedGeneration!==undefined && generation!==input.expectedGeneration)return null
-    if(input.kind==='session_state' && !input.parentId && input.expectedGeneration===undefined)missing()
-    if (input.kind === 'compact_summary') {
-      const current = (await client.query<{ cursor: number | null }>('SELECT compact_boundary_sequence AS cursor FROM sessions WHERE id=$1',[input.sessionId])).rows[0]
-      if (!current || current.cursor !== input.expectedCursor) return null
-    } else if (input.kind==='message_annotation') {
-      const previous=(await client.query<{revision:string}>('SELECT scope_revision_id AS revision FROM session_message_annotation_heads WHERE message_id=$1 AND session_id=$2 FOR UPDATE',[parentId,input.sessionId])).rows[0]
-      if (previous ? previous.revision!==input.expectedRevision : input.expectedRevision!==undefined) return null
-    } else if (input.parentId) {
-      const table = input.kind === 'session_state' ? 'session_state' : 'episodic_memories'
-      const previous = (await client.query<{ revision: string | null }>(`SELECT scope_revision_id AS revision FROM ${table} WHERE id=$1 AND session_id=$2 FOR UPDATE`, [parentId,input.sessionId])).rows[0]
-      if (!previous || previous.revision !== input.expectedRevision) return null
-    }
-    // Explicit current native-parent admission precedes every derivative; the
-    // owner connection alone confers no member/source authority.
-    for (const source of evidence.sources) {
-      const name = source.resourceKind === 'external_source' ? 'external_source_snapshot($1,$2)'
-        : source.resourceKind === 'application_field' ? 'read_admitted_application_field_snapshot($1,$2,$3)'
-        : 'read_admitted_native_scope_snapshot($1,$2,$3)'
-      const current = (await client.query<{ source: ScopeSource & { held?: boolean } }>(`SELECT ${name} AS source`,
-        source.resourceKind === 'application_field' ? [source.workspaceId,source.resourceId,source.version]
-          : source.resourceKind === 'external_source' ? [source.workspaceId,source.resourceId]
-          : [source.workspaceId,source.resourceKind,source.resourceId])).rows[0]?.source
-      if (!current || current.held !== false || current.version !== source.version) changed()
-    }
-    await validateDerivedWriteInputs(client,evidence)
-    const scope = deriveWriteScope(evidence,target,execution.security.access.userId)
-    const source: ScopeSource = { ...scope,resourceKind: 'session_context_revision',resourceId: id,version: '1' }
-    await client.query(`INSERT INTO session_context_scope_revisions(id,workspace_id,session_id,parent_kind,parent_id,user_id,assistant_id,sensitivity,compartments,project_ids,payload_sha256)
-      VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,encode(sha256(convert_to($11::jsonb::text,'UTF8')),'hex'))`,
-      [id,scope.workspaceId,input.sessionId,input.kind,input.kind==='compact_summary'?input.sessionId:parentId,scope.userId,scope.assistantId,scope.sensitivity,scope.compartments,scope.projectIds,JSON.stringify(payload)])
-    await client.query('INSERT INTO session_context_revision_contents(workspace_id,revision_id,content) VALUES($1,$2,$3)',[scope.workspaceId,id,payload])
-    if (input.kind === 'session_state') {
-      await client.query(`INSERT INTO session_state(id,session_id,user_id,assistant_id,key,status,summary,detail,source,scope_revision_id)
-        VALUES($1::uuid,$2,$3,$4,$1::uuid::text,'open','',NULL,'tool',$5)
-        ON CONFLICT(id) DO UPDATE SET scope_revision_id=EXCLUDED.scope_revision_id,updated_at=now()`, [parentId,input.sessionId,target.createdBy,target.assistant,id])
-    } else if (input.kind === 'episodic_memory') {
-      await client.query(`INSERT INTO episodic_memories(id,user_id,assistant_id,session_id,topic_label,summary,message_span,scope_revision_id)
-        VALUES($1,$2,$3,$4,'','','{}',$5)`,[parentId,target.createdBy,target.assistant,input.sessionId,id])
-    } else if (input.kind==='message_annotation') {
-      await client.query(`INSERT INTO session_message_annotation_heads(message_id,workspace_id,session_id,scope_revision_id)
-        VALUES($1,$2,$3,$4) ON CONFLICT(message_id) DO UPDATE SET scope_revision_id=EXCLUDED.scope_revision_id`,
-        [parentId,scope.workspaceId,input.sessionId,id])
-    } else {
-      await client.query(`UPDATE sessions SET compact_summary=NULL,compact_scope_revision_id=$2,compact_boundary_sequence=$3,
-        compaction_count=compaction_count+1,last_compacted_at=now() WHERE id=$1`,[input.sessionId,id,payload.boundarySequence])
-    }
-    await client.query('UPDATE sessions SET session_context_generation=session_context_generation+1 WHERE id=$1',[input.sessionId])
-    await recordDerivedResource(client,evidence,source,execution.security.access.userId)
-    return bindScopeSource({ id,parentId: input.kind==='compact_summary'?input.sessionId:parentId,sessionId: input.sessionId,source,content: payload,
-      userId: target.createdBy,assistantId: target.assistant,createdAt: new Date(),lastAccessedAt: new Date(),accessCount: 0,survivalCount: 0 },source)
+  const stored = await transaction(authority,evidence.sources,'retain',false,async client => {
+    const result=(await client.query<{value:{source:ScopeSource;createdAt:string;userId:string;assistantId:string}|null}>(
+      'SELECT publish_native_session_context_revision($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11) AS value',
+      [execution.security.access.workspaceId,input.sessionId,input.kind,input.kind==='compact_summary'?input.sessionId:parentId,id,
+       payload,evidence.producer,JSON.stringify(evidence.sources),input.expectedRevision??null,input.expectedGeneration??null,input.expectedCursor??null])).rows[0]?.value
+    if(!result)return null
+    const source=result.source
+    if(source.workspaceId!==execution.security.access.workspaceId||source.resourceKind!=='session_context_revision'||source.resourceId!==id||source.version!=='1')changed()
+    const createdAt=new Date(result.createdAt)
+    return bindScopeSource({id,parentId:input.kind==='compact_summary'?input.sessionId:parentId,sessionId:input.sessionId,source,content:payload,
+      userId:result.userId,assistantId:result.assistantId,createdAt,lastAccessedAt:createdAt,accessCount:0,survivalCount:0},source)
   },input.sessionId)
   if (stored) authority.accumulator.note({ sources: boundScopeSources(stored) })
   return stored
