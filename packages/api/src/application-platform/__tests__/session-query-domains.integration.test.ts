@@ -113,7 +113,7 @@ describe.sequential('[COMP:api/application-persistence] [COMP:api/application-fi
   expect(readBack.annotations).toMatchObject([{id:last.id,topicLabel:'fictional query topic'}]);expect(readBack.history.at(-1)?.topicLabel).toBeNull()
  })
  it('holds a source-denied history point before payload while an independent authorized reader remains usable',async()=>{
-  fixture=await persistentContextFixture();const f=fixture,plain=await f.history()
+  fixture=await persistentContextFixture('confidential');const f=fixture,plain=await f.history()
   independent=await persistentSourceFixture(f);const derived=await independent.writeTranscript()
   const original=(await f.pool.query('SELECT id,version,observation FROM external_source_observations WHERE workspace_id=$1 ORDER BY id',[f.workspaceId])).rows
   const first=await f.modelContext();bindSessionContextRetainedAuthority(first.execution,(execution,sources,action)=>independent!.coordinator.prepare(execution,sources,action))
@@ -148,7 +148,7 @@ describe.sequential('[COMP:api/application-persistence] [COMP:api/application-fi
   expect((await f.pool.query('SELECT message_id FROM session_message_annotation_heads WHERE workspace_id=$1',[f.workspaceId])).rows).toEqual([])
  })
  it.each([false,true])('requires a fresh source decision after actual acquisition receipt expiry (withdrawn=%s)',async withdrawn=>{
-  fixture=await persistentContextFixture();const f=fixture;await f.history();independent=await persistentSourceFixture(f)
+  fixture=await persistentContextFixture('confidential');const f=fixture;await f.history();independent=await persistentSourceFixture(f)
   const derived=await independent.writeTranscript(),authority=await f.modelContext();let preparations=0
   bindSessionContextRetainedAuthority(authority.execution,async(execution,sources,action)=>{
    preparations++
@@ -192,7 +192,7 @@ describe.sequential('[COMP:api/application-persistence] [COMP:api/application-fi
   expect((await f.pool.query('SELECT version FROM application_field_observations WHERE workspace_id=$1 AND resource_id=$2',[f.workspaceId,source.resourceId])).rows).toContainEqual({version:source.version})
  })
  it('retains actual revision-source ancestry on a field-backed annotation and holds it after independent source withdrawal',async()=>{
-  fixture=await persistentContextFixture();const f=fixture,history=await f.history(),target=history.at(-1)!
+  fixture=await persistentContextFixture('confidential');const f=fixture,history=await f.history(),target=history.at(-1)!
   independent=await persistentSourceFixture(f);const derived=await independent.writeTranscript(),authority=await f.modelContext()
   bindSessionContextRetainedAuthority(authority.execution,(execution,sources,action)=>independent!.coordinator.prepare(execution,sources,action))
   const admitted=await readAdmittedSessionQuery({sessionId:f.session.id,throughSequence:derived.sequenceNum,topicThroughSequence:target.sequenceNum-1,authority})
@@ -220,5 +220,14 @@ describe.sequential('[COMP:api/application-persistence] [COMP:api/application-fi
  it('refuses owner-bypass payload capture instead of treating the system connection as a reader',async()=>{
   fixture=await persistentContextFixture();const f=fixture
   await expect(f.pool.query('SELECT value FROM read_native_application_session_history($1,$2,$3)',[f.workspaceId,f.session.id,0])).rejects.toThrow('access_unavailable')
+ })
+
+ it('holds a confidential independent carrier at the actual internal shared-session floor',async()=>{
+  fixture=await persistentContextFixture();const f=fixture,plain=await f.history();independent=await persistentSourceFixture(f)
+  const carrier=await independent.writeTranscript(),authority=await f.modelContext();let checks=0
+  bindSessionContextRetainedAuthority(authority.execution,(execution,sources,action)=>{checks++;return independent!.coordinator.prepare(execution,sources,action)})
+  const result=await readAdmittedSessionQuery({sessionId:f.session.id,throughSequence:carrier.sequenceNum,authority})
+  expect(result.history.map(row=>row.id)).toEqual(plain.map(row=>row.id));expect(JSON.stringify(result)).not.toContain('Fictional independently sourced reply')
+  expect(checks).toBe(0);expect(await independent.independentlyAuthorized()).toBe(true)
  })
 })

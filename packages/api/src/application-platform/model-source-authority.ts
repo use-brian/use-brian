@@ -1,6 +1,7 @@
+import { nativeSessionQueryContextSources } from './session-query-context.js'
 import { readPersistentSessionContextAncestors } from '../db/session-context-ancestry.js'
 /** Fresh source permission at model input/output boundaries. [COMP:api/external-source-access] */
-import { ContextScopeAccumulator, type ExecutionContext, type ToolContext } from '@use-brian/core'
+import { ContextScopeAccumulator, type ExecutionContext, type ScopeSource, type ToolContext } from '@use-brian/core'
 import { SourceProtocolError } from '@use-brian/brian-app/connector'
 import { getAppPool, applyRLSGucs, rollbackAndRelease, runWithAgentAccess } from '../db/client.js'
 import { validateCallerScopeEvidence, validateAudienceScopeEvidence } from '../context-scope/caller-evidence.js'
@@ -45,7 +46,10 @@ async function assertSourceModelAuthority(context: ToolContext, action: 'context
     const fields = await readApplicationFieldAncestors(workspaceId, sources)
     const external = ancestors.length > 0 || sources.some(source => source.resourceKind === 'external_source')
     const persistent = sources.some(source=>source.resourceKind==='session_context_revision')
-    if (!external && !fields.length && !persistent) {
+    const wiring = getSharedRetainedSourceAuthority()
+    const prepare = wiring ? ((e: ExecutionContext, roots: readonly ScopeSource[], requested: 'context' | 'deliver') => wiring.coordinator.prepare(e, roots, requested)) : undefined
+    const cohort = fields.length ? await nativeSessionQueryContextSources(execution, sources, prepare) : { sources, independent: false }
+    if (!external && !fields.length && !persistent && !cohort.independent) {
       const current = await validate(evidence.evidence, execution.security.ceiling)
       await execution.security.authority.assertCurrent()
       if (JSON.stringify(accumulator.evidence) !== originalEvidence) denied()
@@ -60,9 +64,12 @@ async function assertSourceModelAuthority(context: ToolContext, action: 'context
       && execution.identity.kind === 'delegated'
     if (execution.ownership.kind !== 'workspace' || execution.security.access.sharedAudience && external
       || !nativeDelegated && (!application || external) && (execution.identity.kind !== 'attended' || execution.identity.principal.kind !== 'workspace_member')) denied()
-    const wiring = external ? getSharedRetainedSourceAuthority() : undefined
-    if (external && !wiring) denied()
-    const prepared = wiring ? await wiring.coordinator.prepare(execution, sources, action) : undefined
+    if ((external || cohort.independent) && !prepare) denied()
+    // Query context covers the complete original cohort. Only the original
+    // consumed evidence asks for delivery; candidates do not become outputs.
+    const contextProof = (external && action === 'context' || cohort.independent)
+      ? await prepare!(execution, cohort.sources, 'context') : undefined
+    const prepared = external && action === 'deliver' ? await prepare!(execution, sources, 'deliver') : undefined
     if (wiring && getSharedRetainedSourceAuthority() !== wiring) denied()
     const client = await getAppPool().connect()
     let raised
@@ -75,6 +82,10 @@ async function assertSourceModelAuthority(context: ToolContext, action: 'context
         await applyRLSGucs(client, execution.security.access.userId)
         await client.query('SELECT id FROM workspaces WHERE id=$1 FOR SHARE',[workspaceId])
         await applyApplicationRLSContext(client, execution)
+        if (contextProof) {
+          await pinPreparedExternalSourceAuthority(client, execution, contextProof)
+          if (action === 'deliver') await validateCallerScopeEvidence(evidence.evidence, execution.security.ceiling, client)
+        }
         if (prepared) await pinPreparedExternalSourceAuthority(client, execution, prepared)
         const current = await validate(evidence.evidence, execution.security.ceiling, client)
         await execution.security.authority.assertCurrent()
@@ -83,6 +94,7 @@ async function assertSourceModelAuthority(context: ToolContext, action: 'context
         return current
       })
     } finally { releaseApplicationTransactionBinding(client); await rollbackAndRelease(client) }
+    if (contextProof) await assertPreparedExternalSourceAuthorityCurrent(execution, contextProof)
     if (prepared) await assertPreparedExternalSourceAuthorityCurrent(execution, prepared)
     if (wiring && getSharedRetainedSourceAuthority() !== wiring || JSON.stringify(accumulator.evidence) !== originalEvidence) denied()
     accumulator.note(raised)

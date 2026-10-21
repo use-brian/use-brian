@@ -1,3 +1,4 @@
+import { readNativeSessionEvidence } from '../application-platform/native-session-evidence.js'
 import { readPersistentSessionContextAncestors } from '../db/session-context-ancestry.js'
 import {
   ContextScopeAccumulator, intersectAccessCeilings, maxSensitivity, scopeGrantContains, resourceScopeKey, RANK, isSensitivity,
@@ -124,6 +125,25 @@ async function validateScopeEvidence(
   if (failure) throw unavailable(kind, failure)
   if (!sources.length) return snapshot
   if (!client && sources.some(source=>source.resourceKind==='session_context_revision')) throw unavailable(kind,'source_unverifiable')
+  // The closed native facade performs the same current checks in one SQL
+  // statement. Mixed families and workflow-run profiles retain the original
+  // validator below, including independent source and Page admission.
+  if (client && !workflowRunId) {
+    try {
+      const native = await readNativeSessionEvidence(client, ceiling.workspaceId, sources)
+      if (native) {
+        const expanded = new ContextScopeAccumulator(snapshot)
+        expanded.note(native.evidence)
+        for (const source of [...native.evidence.sources ?? [], ...native.current]) {
+          failure ??= visibilityFailure(source, ceiling) ?? labelFailure(source, ceiling)
+        }
+        if (failure) throw unavailable(kind, failure)
+        for (const current of native.current) expanded.note({ sensitivity: current.sensitivity,
+          compartments: current.compartments, projectIds: current.projectIds })
+        return expanded.evidence
+      }
+    } catch (error) { throw scopeEvidenceFailureOf(error) ? error : unavailable(kind, 'source_unverifiable', error) }
+  }
   // Cached native refs retain every immutable context parent. Discovery is
   // metadata only; the caller must still provide a real admitted transaction.
   let persistentAncestry:string

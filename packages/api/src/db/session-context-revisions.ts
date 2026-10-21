@@ -1,10 +1,12 @@
+import { nativeSessionQueryContextSources } from '../application-platform/session-query-context.js'
+import { z } from 'zod'
 import { SourceProtocolError } from '@use-brian/brian-app/connector'
 import { createMemory } from './memories.js'
 /** Immutable session-context storage. [COMP:api/application-persistence] */
 import { randomUUID } from 'node:crypto'
 import type { PoolClient } from 'pg'
 import {
-  ContextScopeAccumulator, DerivedScopeError, bindScopeSource, boundScopeSources, deriveWriteScope,
+  ContextScopeAccumulator, DerivedScopeError, bindScopeSource, boundScopeSources, deriveWriteScope, intersectAccessCeilings, RANK, scopeGrantContains,
   type DerivedWriteEvidence, type ExecutionContext, type ResourceScope, type ScopeSource, type SessionContextAuthority,
 } from '@use-brian/core'
 import { applyRLSGucs, getAppPool, getPool, rollbackAndRelease, runWithAgentAccess } from './client.js'
@@ -44,8 +46,10 @@ async function transaction<T>(authority: SessionContextAuthority, sources: reado
       || (await readExternalSourceAncestors(execution.security.access.workspaceId, sources)).length > 0
     const wiring = getSharedRetainedSourceAuthority(), host = retainedHosts.get(execution)
     const prepare = host ?? (wiring ? (e: ExecutionContext, s: readonly ScopeSource[], a: 'context' | 'retain') => wiring.coordinator.prepare(e,s,a) : undefined)
-    if (external && !prepare) changed()
-    const contextProof = external ? await prepare!(execution, sources, 'context') : undefined
+    const fields = await readApplicationFieldAncestors(execution.security.access.workspaceId, sources)
+    const cohort = fields.length ? await nativeSessionQueryContextSources(execution, sources, prepare) : { sources, independent: false }
+    if ((external || cohort.independent) && !prepare) changed()
+    const contextProof = external || cohort.independent ? await prepare!(execution, cohort.sources, 'context') : undefined
     const prepared = external && action==='retain' ? await prepare!(execution, sources, 'retain') : undefined
     const client = await (owner ? getPool() : getAppPool()).connect()
     let result: T
@@ -99,6 +103,22 @@ async function transaction<T>(authority: SessionContextAuthority, sources: reado
   }
 }
 
+const queryFloor=z.object({workspaceId:z.string().uuid(),userId:z.string().uuid().nullable(),assistantId:z.null(),
+ sensitivity:z.enum(['public','internal','confidential']),compartments:z.array(z.string()),projectIds:z.array(z.string().uuid())}).strict()
+async function pinNativeSessionQueryFloor(authority:SessionContextAuthority,client:PoolClient){
+ const {execution}=authority,actor=execution.security.access.userId,workspaceId=execution.security.access.workspaceId
+ const floor=queryFloor.parse((await client.query<{scope:unknown}>('SELECT read_native_session_query_floor($1,$2) AS scope',[workspaceId,execution.lifecycle.sessionId])).rows[0]?.scope)
+ if(floor.workspaceId!==workspaceId||floor.userId!==null&&floor.userId!==actor)changed()
+ if(floor.userId===null&&execution.security.access.sharedAudience){
+  const maximum={workspaceId,userId:actor,clearance:floor.sensitivity,compartments:floor.compartments,mutationCompartments:[],
+   projectIds:floor.projectIds,visibilityAssistantIds:execution.security.ceiling.visibilityAssistantIds}
+  const bounded=intersectAccessCeilings(execution.security.ceiling,maximum)
+  await runWithAgentAccess({...execution.security.access,...bounded,sharedAudience:true},()=>applyRLSGucs(client,actor))
+  return floor
+ }
+ return null
+}
+
 /** Internal current-reader frame for original session queries, including empty collections. */
 export async function readSessionQueryFrame<T>(authority:SessionContextAuthority,rawRoots:readonly ScopeSource[],
  capture:(client:PoolClient)=>Promise<{value:T;sources:readonly ScopeSource[]}>):Promise<T> {
@@ -106,10 +126,18 @@ export async function readSessionQueryFrame<T>(authority:SessionContextAuthority
  await execution.security.authority.assertCurrent()
  const wiring=getSharedRetainedSourceAuthority(),host=retainedHosts.get(execution)
  const prepare=host??(wiring?((e:ExecutionContext,s:readonly ScopeSource[],a:'context'|'retain')=>wiring.coordinator.prepare(e,s,a)):undefined)
- const admittedRoots:ScopeSource[]=[]
+ // Discover immutable metadata only. Native-only reads need no additional
+ // floor transaction; their acquisition frame applies it before any payload.
+ const externalRoots:ScopeSource[]=[]
  for(const root of roots){
   if(root.workspaceId!==execution.security.access.workspaceId)changed()
-  if(!(await readExternalSourceAncestors(root.workspaceId,[root])).length&&root.resourceKind!=='external_source')continue
+  if(root.resourceKind==='external_source'||(await readExternalSourceAncestors(root.workspaceId,[root])).length)externalRoots.push(root)
+ }
+ const floor=externalRoots.length?await transaction(authority,[],'context',false,client=>pinNativeSessionQueryFloor(authority,client)):null
+ const admittedRoots:ScopeSource[]=[]
+ for(const root of externalRoots){
+  if(floor&&(root.userId!==null||RANK[root.sensitivity]>RANK[floor.sensitivity]
+   ||!scopeGrantContains(floor.compartments,root.compartments)||!scopeGrantContains(floor.projectIds,root.projectIds)))continue
   if(!prepare)changed()
   try{await prepare(execution,[root],'context');admittedRoots.push(root)}
   catch(error){if(!(error instanceof SourceProtocolError)||error.code!=='source_access_denied')throw error}
@@ -120,6 +148,7 @@ export async function readSessionQueryFrame<T>(authority:SessionContextAuthority
  const assertWiring=()=>{if(host!==retainedHosts.get(execution)||!host&&wiring!==getSharedRetainedSourceAuthority())changed()}
  assertWiring()
  const captured=await transaction(authority,[],'context',false,async client=>{
+  await pinNativeSessionQueryFloor(authority,client)
   if(proof)await pinPreparedExternalSourceAuthority(client,execution,proof)
   const result=await capture(client)
   await validateCallerScopeEvidence({sources:[...result.sources]},execution.security.ceiling,client)
@@ -133,6 +162,7 @@ export async function readSessionQueryFrame<T>(authority:SessionContextAuthority
   const currentProof=await prepare!(execution,admittedRoots,'context')
   assertWiring()
   await transaction(authority,[],'context',false,async client=>{
+   await pinNativeSessionQueryFloor(authority,client)
    await pinPreparedExternalSourceAuthority(client,execution,currentProof)
    await validateCallerScopeEvidence({sources:[...captured.sources]},execution.security.ceiling,client)
    assertWiring()
@@ -142,6 +172,22 @@ export async function readSessionQueryFrame<T>(authority:SessionContextAuthority
  assertWiring();await execution.security.authority.assertCurrent()
  const value=captured.value
  return value
+}
+
+const messagePublications=new WeakMap<object,{authority:SessionContextAuthority}>()
+/** Atomic native transcript batch; the callback never receives an owner connection. */
+export async function withSessionMessagePublication<T>(authority:SessionContextAuthority,sources:readonly ScopeSource[],
+ run:(client:PoolClient)=>Promise<T>):Promise<T>{
+ const {execution}=requireAuthority(authority)
+ if(execution.lifecycle.sessionPersisted===false||execution.identity.kind!=='attended'||execution.identity.principal.kind!=='workspace_member')changed()
+ return transaction(authority,structuredClone(sources),'retain',false,async client=>{
+  messagePublications.set(client,{authority})
+  try{return await run(client)}finally{messagePublications.delete(client)}
+ },execution.lifecycle.sessionId)
+}
+/** A JSON descriptor, owner transaction or retained callback cannot mint a live frame. */
+export function assertSessionMessagePublicationFrame(client:object,authority:SessionContextAuthority):void{
+ if(messagePublications.get(client)?.authority!==authority)missing()
 }
 
 /** Discover immutable metadata only. Historical plaintext is never selected. */

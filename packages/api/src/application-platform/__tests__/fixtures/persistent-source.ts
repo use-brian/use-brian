@@ -111,6 +111,6 @@ export async function persistentSourceFixture(f: Awaited<ReturnType<typeof persi
       } catch (error) { await tx.query('ROLLBACK'); throw error }
       finally { tx.release() }
     }
-    return { root, observations, pool, coordinator, independentlyAuthorized, writeTranscript, readTranscript, cleanup }
+    return { root, observations, pool, coordinator, factory, instances, independentlyAuthorized, writeTranscript, readTranscript, cleanup }
   } catch (error) { await cleanup(); throw error }
 }

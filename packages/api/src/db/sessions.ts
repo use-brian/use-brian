@@ -1,3 +1,4 @@
+import { publishNativeSessionMessage } from './session-message-publication.js'
 import { readSessionContextRevisions, writeSessionContextRevision, type SessionContextRevision } from './session-context-revisions.js'
 import { classifySession, sessionKindSql } from '../session-kind.js'
 import type pg from 'pg'
@@ -1620,10 +1621,13 @@ export async function addSessionMessage(params: {
   derivation?: DerivedWriteEvidence
   /** Host-bound transcript audience for mixed visibility inputs; never substitutes for ancestry. */
   derivationTarget?: ResourceScope
+  /** Actual canonical native invocation for field-aware transcript publication. */
+  authority?: SessionContextAuthority
 }, client?: Pick<pg.ClientBase, 'query'>): Promise<SessionMessage> {
   if (params.scope && params.derivation || params.derivationTarget && (!params.derivation || params.scope)) {
     throw new Error('session_message_scope_conflict')
   }
+  if(params.authority&&params.derivation)return publishNativeSessionMessage({...params,derivation:params.derivation,authority:params.authority},client)
   const sql =
     `INSERT INTO session_messages
        (session_id, role, content, sequence_num,

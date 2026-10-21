@@ -8,7 +8,7 @@ import { z } from 'zod'
 import { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js'
 import { StreamableHTTPServerTransport } from '@modelcontextprotocol/sdk/server/streamableHttp.js'
 import { authorizeConnectorRequest, handleSourceSidecar, sourceSubjectFromActor, sourceSubjectKey, sourceResourceKey,
-  SOURCE_PROTOCOL_VERSION, ConnectorActorError, type ConnectorReplayConsumer, type ConnectorActorClaims, type SourceSubject, type SourceResourceRef,
+  SOURCE_PROTOCOL_VERSION, ConnectorActorError, SourceProtocolError, type ConnectorReplayConsumer, type ConnectorActorClaims, type SourceSubject, type SourceResourceRef,
   type SourceEnvelope, type SourceAction, type SourceAuthorizationRequest, type SourceAuthorizationResponse, type SourceCapabilities,
   type createConnectorActorVerifier } from '@use-brian/brian-app/connector'
 
@@ -137,7 +137,11 @@ export async function startIndependentSource(input: { pool: Pool; tenant: string
           return { version: SOURCE_PROTOCOL_VERSION, tenant, state: 'applied', receipt: command.receipt }
         },
       }); res.json(result)
-    } catch { res.status(403).json({ error: 'source_unavailable' }) }
+    } catch (error) {
+      // An infrastructure/ACL-store outage is unknown, never a negative grant.
+      const refused=error instanceof ConnectorActorError||error instanceof SourceProtocolError&&error.code==='source_access_denied'
+      res.status(refused?403:503).json({error:refused?'source_access_denied':'source_unavailable'})
+    }
   })
   app.get('/ui/records/:id', async (req, res) => {
     const subject = input.uiSessions.get(String(req.headers.authorization ?? '').replace(/^Bearer /,''))
