@@ -1,14 +1,17 @@
+import { authFetch } from "../auth-fetch";
+import { fetchLatestSession, listSessionsForAssistants, listWorkspaceSessions, listAuditSessions, getChatSessionSummary } from "../api/sessions";
+import { PERSONAL_CHAT_POLICY } from "../chat-session-policy";
+vi.mock("../auth-fetch", () => ({ authFetch: vi.fn() }));
 /**
- * Pure-logic tests for `lib/api/sessions.ts`.
+ * Pure logic and transport-mapping tests for `lib/api/sessions.ts`.
  *
- * Network calls aren't exercised (vitest in app-web is no-DOM
- * unit-only — see vitest.config.ts). Limit coverage to the helper
- * that the floating-chat resume effect calls on every history row.
+ * Provider transports are isolated here. Canonical title authority is
+ * exercised with real JWTs and non-owner SQL in the API integration suite.
  *
  * [COMP:app-web/sessions-sdk]
  */
 
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi, afterEach } from "vitest";
 import {
   extractMessageText,
   extractPresentedDocuments,
@@ -286,4 +289,31 @@ describe("[COMP:app-web/sessions-sdk] stripCommentThreadReplyTag", () => {
       "Working.",
     );
   });
+});
+
+
+describe("[COMP:app-web/sessions-sdk] admitted title revision transport", () => {
+  afterEach(() => vi.mocked(authFetch).mockReset());
+  const row = (titleRevisionId: string | null) => ({
+    id: "fictional-session", title: titleRevisionId ? "Fictional current title" : "New Chat",
+    titleRevisionId, channelId: "fictional-channel", lastActive: "2026-10-21T00:00:00.000Z",
+    assistantId: "fictional-assistant", appOrigin: "chat", policy: PERSONAL_CHAT_POLICY,
+  });
+  for (const revision of ["opaque-current-revision", null]) {
+    it(`preserves ${revision === null ? "held null" : "current opaque"} revision identity through every actual title mapping`, async () => {
+      vi.mocked(authFetch).mockImplementation(async input => new Response(JSON.stringify(
+        /sessions\/fictional-session$/.test(String(input)) ? row(revision) : [row(revision)],
+      ), { status: 200, headers: { "Content-Type": "application/json" } }));
+      const opts = {workspaceId: "fictional-workspace", assistantId: "fictional-assistant"};
+      const values = [
+        await fetchLatestSession({...opts, appOrigin: "chat"}),
+        ...(await listSessionsForAssistants({...opts, assistantIds: [opts.assistantId]})),
+        ...(await listWorkspaceSessions(opts)),
+        ...(await listAuditSessions(opts)),
+        await getChatSessionSummary("fictional-session"),
+      ];
+      expect(values).toHaveLength(5);
+      for (const value of values) expect(value).toMatchObject({titleRevisionId: revision, title: row(revision).title});
+    });
+  }
 });

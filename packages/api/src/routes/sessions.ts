@@ -1,3 +1,6 @@
+import {pinSessionTitleClaims,sessionTitleProjection,renameCurrentSessionTitle} from './session-title-authority.js'
+import {DerivedScopeError} from '@use-brian/core'
+import {isAuthorityChangedError} from '../context-scope/authority-lease.js'
 import { z } from 'zod'
 import { WorkspaceAccessError } from '../workspace-access/policy.js'
 import { SSE_MAX_LIFETIME_MS } from './brain-stream.js'
@@ -7,7 +10,7 @@ import { createSessionStreamAuthority } from '../session-stream-authority.js'
 import { guardFeedStream } from '../content-planning/source-authority.js'
 import { Router } from 'express'
 import { findOrCreateUser, getDefaultAssistant, getUserAssistant, getUserProfilesByIds, getWorkspacePrimaryAssistant } from '../db/users.js'
-import { addSessionMessage, countSessionHumans, createPersonalWebSession, createWorkspaceChatSession, findSessionByChannel, findSessionById, getSessionMessageById, getSessionMessages, readSessionById, rebindSessionAssistant, renameSession, updateSessionMessageText } from '../db/sessions.js'
+import { addSessionMessage, countSessionHumans, createPersonalWebSession, createWorkspaceChatSession, findSessionByChannel, findSessionById, getSessionMessageById, getSessionMessages, readSessionById, rebindSessionAssistant, updateSessionMessageText } from '../db/sessions.js'
 import { isWorkspaceAdmin, setRoomCapture } from '../channel-room/room.js'
 import { mayAssistantAnswerInRoom, DOC_DOCK_RESUME_ROW } from './_room-binding.js'
 import { query } from '../db/client.js'
@@ -202,6 +205,8 @@ export function sessionRoutes(opts: SessionRouteOptions = {}): Router {
   }))
 
   router.get('/', async (req, res) => {
+    const titleClaims=pinSessionTitleClaims(req)
+    res.setHeader('Cache-Control','no-store')
     try {
       const jwtUserId = (req as { userId?: string }).userId
       const user = await resolveUser(jwtUserId)
@@ -301,7 +306,7 @@ export function sessionRoutes(opts: SessionRouteOptions = {}): Router {
         effectiveClearance: string | null; contextCompartments: string[] | null
         anchorKind: string | null
       }>(
-        `SELECT s.id, s.title, s.channel_id as "channelId",
+        `SELECT s.id, NULL::text AS title, s.channel_id as "channelId",
                 s.last_active_at as "lastActiveAt", s.status,
                 s.app_origin as "appOrigin",
                 s.anchor_kind as "anchorKind",
@@ -365,9 +370,11 @@ export function sessionRoutes(opts: SessionRouteOptions = {}): Router {
         now,
       }).readable)
 
+      const titles=new Map(await Promise.all(readable.map(async s=>[s.id,await sessionTitleProjection({claims:titleClaims,sessionId:s.id})] as const)))
       res.json(readable.map((s) => ({
         id: s.id,
-        title: s.title ?? 'New Chat',
+        title: titles.get(s.id)?.title ?? 'New Chat',
+        titleRevisionId: titles.get(s.id)?.titleRevisionId ?? null,
         channelId: s.channelId,
         lastActive: s.lastActiveAt,
         // The minting surface (or null pre-migration). The Chat app's rail
@@ -415,6 +422,8 @@ export function sessionRoutes(opts: SessionRouteOptions = {}): Router {
    * Spec: docs/architecture/features/chat-app.md → "Workspace view".
    */
   router.get('/workspace', async (req, res) => {
+    const titleClaims=pinSessionTitleClaims(req)
+    res.setHeader('Cache-Control','no-store')
     try {
       const jwtUserId = (req as { userId?: string }).userId
       const user = await resolveUser(jwtUserId)
@@ -446,7 +455,7 @@ export function sessionRoutes(opts: SessionRouteOptions = {}): Router {
         channelType: string; anchorKind: string; roomCapture: boolean
         appOrigin: string | null
       }>(
-        `SELECT s.id, s.title, s.channel_id AS "channelId",
+        `SELECT s.id, NULL::text AS title, s.channel_id AS "channelId",
                 s.channel_type AS "channelType", s.anchor_kind AS "anchorKind",
                 s.app_origin AS "appOrigin",
                 s.room_capture AS "roomCapture",
@@ -500,9 +509,11 @@ export function sessionRoutes(opts: SessionRouteOptions = {}): Router {
           console.warn('[sessions] room human count failed (rooms stay mention-gated):', err)
           return new Map<string, number>()
         })
+      const titles=new Map(await Promise.all(visible.map(async s=>[s.id,await sessionTitleProjection({claims:titleClaims,sessionId:s.id})] as const)))
       res.json(visible.map((s) => ({
         id: s.id,
-        title: s.title ?? 'New Chat',
+        title: titles.get(s.id)?.title ?? 'New Chat',
+        titleRevisionId: titles.get(s.id)?.titleRevisionId ?? null,
         channelId: s.channelId,
         lastActive: s.lastActiveAt,
         status: s.status,
@@ -793,6 +804,8 @@ export function sessionRoutes(opts: SessionRouteOptions = {}): Router {
    * tuple has never been used. Channel type defaults to 'web'.
    */
   router.get('/by-channel', async (req, res) => {
+    const titleClaims=pinSessionTitleClaims(req)
+    res.setHeader('Cache-Control','no-store')
     try {
       const jwtUserId = (req as { userId?: string }).userId
       const user = await resolveUser(jwtUserId)
@@ -821,12 +834,14 @@ export function sessionRoutes(opts: SessionRouteOptions = {}): Router {
       })
       if (!session) { res.status(404).json({ error: 'No session' }); return }
 
+      const title=await sessionTitleProjection({claims:titleClaims,sessionId:session.id})
       res.json({
         id: session.id,
         assistantId: session.assistantId,
         channelType: session.channelType,
         channelId: session.channelId,
-        title: session.title,
+        title: title.title,
+        titleRevisionId: title.titleRevisionId,
         lastActive: session.lastActiveAt,
       })
     } catch (err) {
@@ -846,6 +861,8 @@ export function sessionRoutes(opts: SessionRouteOptions = {}): Router {
    * without touching `last_active_at`.
    */
   router.get('/:id', async (req, res) => {
+    const titleClaims=pinSessionTitleClaims(req)
+    res.setHeader('Cache-Control','no-store')
     try {
       const jwtUserId = (req as { userId?: string }).userId
       const user = await resolveUser(jwtUserId)
@@ -865,9 +882,11 @@ export function sessionRoutes(opts: SessionRouteOptions = {}): Router {
       const starter = kind.audience === 'workspace'
         ? (await getUserProfilesByIds([session.userId])).get(session.userId) ?? null
         : null
+      const title=await sessionTitleProjection({claims:titleClaims,sessionId:session.id})
       res.json({
         id: session.id,
-        title: session.title ?? 'New Chat',
+        title: title.title ?? 'New Chat',
+        titleRevisionId: title.titleRevisionId,
         channelId: session.channelId,
         lastActive: session.lastActiveAt,
         status: session.status,
@@ -899,6 +918,8 @@ export function sessionRoutes(opts: SessionRouteOptions = {}): Router {
    * Sets title_manually_set so the auto-titler doesn't overwrite it.
    */
   router.patch('/:id', async (req, res) => {
+    const titleClaims=pinSessionTitleClaims(req)
+    res.setHeader('Cache-Control','no-store')
     try {
       const sessionId = req.params.id
       const { title } = req.body as { title?: string }
@@ -973,9 +994,11 @@ export function sessionRoutes(opts: SessionRouteOptions = {}): Router {
         return
       }
 
-      await renameSession(sessionId, trimmed)
-      res.json({ ok: true, title: trimmed })
+      const published=await renameCurrentSessionTitle({claims:titleClaims,sessionId,title:trimmed})
+      if(!published){res.status(409).json({error:'Session title changed'});return}
+      res.json({ ok: true, title: published.title, titleRevisionId: published.revisionId })
     } catch (err) {
+      if(err instanceof DerivedScopeError||isAuthorityChangedError(err)){res.status(403).json({error:'Session title unavailable'});return}
       console.error('Session rename error:', err)
       res.status(500).json({ error: 'Failed to rename session' })
     }

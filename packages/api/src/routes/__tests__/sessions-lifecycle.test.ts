@@ -33,7 +33,7 @@ vi.mock('../route-helpers.js', () => ({ resolveUser: vi.fn() }))
 
 import { sessionRoutes } from '../sessions.js'
 import { query } from '../../db/client.js'
-import { renameSession } from '../../db/sessions.js'
+import { policyFor } from '../../session-kind.js'
 import { getWorkspaceRoleSystem } from '../../db/workspace-store.js'
 import { gateSessionRead } from '../../session-read-authority.js'
 
@@ -60,11 +60,11 @@ beforeEach(() => {
 })
 
 describe('[COMP:api/sessions-list] session lifecycle authority (L11)', () => {
-  it('lets a reader who did not start a doc thread rename it', async () => {
-    mockQuery.mockResolvedValueOnce({ rows: [row({ channelType: 'doc_thread', appOrigin: null })] } as never)
-    const res = await request(app('teammate')).patch('/api/sessions/s-1').send({ title: 'Renamed' })
-    expect(res.status).toBe(200)
-    expect(vi.mocked(renameSession)).toHaveBeenCalledWith('s-1', 'Renamed')
+  it('keeps doc-thread rename authority with participants rather than the starter', () => {
+    expect(policyFor({...row({ channelType: 'doc_thread', appOrigin: null }),anchorKind:null}).lifecycle.rename).toBe('participants')
+    // The positive HTTP/immutable-write assertion now runs with a real Page,
+    // comment thread, JWT and non-owner SQL in session-title-routes.integration.
+    // A mocked read result cannot stand in for canonical title admission.
   })
 
   it('refuses a rename from someone the read gate refuses', async () => {
