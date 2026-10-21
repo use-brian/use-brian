@@ -13,6 +13,7 @@
 
 import type { AccessContext } from '../security/access-context.js'
 import type { Sensitivity } from '../security/sensitivity.js'
+import type { SessionContextAuthority } from '../memory/session-state-types.js'
 
 export type KnowledgeSearchResult = {
   id: string
@@ -44,7 +45,7 @@ export type KnowledgeEntryDetail = {
 export type KnowledgeStoreInterface = {
   search(ctx: AccessContext, query: string, limit?: number): Promise<KnowledgeSearchResult[]>
   listByPath(ctx: AccessContext, pathPrefix: string): Promise<KnowledgeSearchResult[]>
-  getById(ctx: AccessContext, id: string): Promise<KnowledgeEntryDetail | null>
+  getById(ctx: AccessContext, id: string, authority?: SessionContextAuthority): Promise<KnowledgeEntryDetail | null>
   create(params: {
     workspaceId: string
     path: string

@@ -292,6 +292,8 @@ export function createKnowledgeTools(
             projectIds: context.projectIds,
           },
           input.id,
+          context.executionContext && context.scopeAccumulator
+            ? {execution:context.executionContext,accumulator:context.scopeAccumulator} : undefined,
         )
         if (!entry) {
           return {
@@ -339,6 +341,8 @@ export function createKnowledgeTools(
         projectIds: context.projectIds,
       },
       id,
+      context.executionContext && context.scopeAccumulator
+        ? {execution:context.executionContext,accumulator:context.scopeAccumulator} : undefined,
     )
   }
 

@@ -123,6 +123,15 @@ async function transaction<T>(authority: SessionContextAuthority, sources: reado
   }
 }
 
+/** Current retained read using the original lease and the complete canonical validator.
+ * The callback receives exactly the non-owner transaction carrying fresh source pins.
+ * No session query floor or serialized source identifier can create this authority.
+ */
+export function readRetainedContextFrame<T>(authority:SessionContextAuthority,sources:readonly ScopeSource[],
+ capture:(client:PoolClient)=>Promise<T>):Promise<T>{
+ return transaction(authority,structuredClone(sources),'context',false,capture)
+}
+
 const queryFloor=z.object({workspaceId:z.string().uuid(),userId:z.string().uuid().nullable(),assistantId:z.null(),
  sensitivity:z.enum(['public','internal','confidential']),compartments:z.array(z.string()),projectIds:z.array(z.string().uuid())}).strict()
 async function pinNativeSessionQueryFloor(authority:SessionContextAuthority,client:PoolClient){

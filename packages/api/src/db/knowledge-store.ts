@@ -30,13 +30,15 @@
  * docs/architecture/platform/sensitivity.md.
  */
 
-import {bindScopeSources,boundScopeSources,DerivedScopeError,type ScopeSource,type AccessContext,type Sensitivity} from '@use-brian/core'
+import {bindScopeSources,boundScopeSources,DerivedScopeError,type ScopeSource,type AccessContext,type Sensitivity,type SessionContextAuthority,pinAccessCeiling,intersectAccessCeilings} from '@use-brian/core'
 import type { KnowledgeLifecycleAction, KnowledgeWriteActor } from '@use-brian/core'
 import { query, getPool, getAppPool, applyRLSGucs, rollbackAndRelease } from './client.js'
 import { randomUUID } from 'node:crypto'
 import type { PoolClient, QueryResultRow } from 'pg'
 import { currentAgentAccess,runWithAgentAccess } from './agent-access-context.js'
 import {currentApplicationReadTransaction} from '../application-platform/execution-context.js'
+import {readRetainedContextFrame} from './session-context-revisions.js'
+import {validateCallerScopeEvidence} from '../context-scope/caller-evidence.js'
 import { readAdmissionPolicy } from '../workspace-access/admission-policy-read.js'
 import { admitKnowledgeWrite, lockKnowledgePrior, admitKnowledgeSourceConfiguration, type KnowledgeSourceBindingInput, type KnowledgeConfigureAuthority } from '../workspace-access/knowledge-create-admission.js'
 import { WorkspaceAccessError } from '../workspace-access/policy.js'
@@ -163,7 +165,7 @@ function knowledgeSourceColumns(alias: '' | 'ke' | 'ke2' = '', contributors = "'
 }
 
 /** Native viewer proof is the actual non-owner transaction, never the owner pool. */
-async function queryKnowledgeViewer<T extends QueryResultRow>(ctx: AccessContext,sql: string,params?: unknown[],sourceRows = true) {
+async function queryKnowledgeViewer<T extends QueryResultRow>(ctx: AccessContext,sql: string,params?: unknown[],sourceRows = true,metadataOnly=false,point?:KnowledgePointFrame) {
   // A genuine or serialized application binding cannot become a native read.
   if (currentApplicationReadTransaction(ctx) || ctx.systemRead || !ctx.userId) throw new DerivedScopeError('scope_evidence_missing')
   return runWithAgentAccess({workspaceId:ctx.workspaceId,userId:ctx.userId,
@@ -174,10 +176,41 @@ async function queryKnowledgeViewer<T extends QueryResultRow>(ctx: AccessContext
     try {
       await client.query('BEGIN')
       await applyRLSGucs(client,ctx.userId)
+      const result=await queryKnowledgeRows<T>(client,sql,params,sourceRows,metadataOnly,point)
+      await client.query('COMMIT')
+      return result
+    }finally{await rollbackAndRelease(client)}
+  })
+}
+
+/** Retained history is metadata, never permission to synthesize missing observations. */
+function knowledgeDerivationExists(alias:'ke'|'ke2'|'knowledge_entries',currentVersion=false):string{
+ return `EXISTS(SELECT 1 FROM public.scope_derivations d WHERE d.workspace_id=${alias}.workspace_id
+   AND d.resource_kind='knowledge_entry' AND d.resource_id=${alias}.id
+   ${currentVersion?`AND d.resource_version=${alias}.scope_version::text`:''})`
+}
+function knowledgeCurrentEvidenceComplete(alias:'ke'|'ke2'|'knowledge_entries'):string{
+ return `(NOT ${knowledgeDerivationExists(alias)} OR ${knowledgeDerivationExists(alias,true)})`
+}
+
+type KnowledgePointFrame={sources:readonly ScopeSource[];requiresNoDerivation?:boolean}
+
+/** Only a real viewer transaction may select or compute Knowledge payloads. */
+async function queryKnowledgeRows<T extends QueryResultRow>(client:PoolClient,sql:string,params:unknown[]|undefined,sourceRows=true,metadataOnly=false,point?:KnowledgePointFrame){
+      let pointFloor=''
+      if(point){
+        const roots=point.sources.filter(source=>source.resourceKind==='knowledge_entry')
+        const count=params?.length??0
+        params=[...params??[],roots.map(source=>source.resourceId),roots.map(source=>source.version)]
+        pointFloor=` AND (knowledge_entries.id,knowledge_entries.scope_version::text) IN (
+          SELECT id,version FROM unnest($${count+1}::uuid[],$${count+2}::text[]) AS admitted(id,version))`
+        pointFloor+=` AND ${knowledgeCurrentEvidenceComplete('knowledge_entries')}`
+        if(point.requiresNoDerivation)pointFloor+=` AND NOT ${knowledgeDerivationExists('knowledge_entries')}`
+      }
       // Materialize the actual RLS-visible native domain before protected
       // predicates/aggregates. A misconfigured owner connection admits no rows.
-      const relation=`knowledge_viewer_rows AS MATERIALIZED (SELECT * FROM public.knowledge_entries
-        WHERE workspace_id=nullif(current_setting('app.agent_workspace_id',true),'')::uuid
+      const relation=`knowledge_viewer_rows AS MATERIALIZED (SELECT ${metadataOnly?'id,workspace_id,sensitivity,compartments,project_ids,scope_version,related_ids,source_id':'*'} FROM public.knowledge_entries
+        WHERE workspace_id=nullif(current_setting('app.agent_workspace_id',true),'')::uuid ${pointFloor}
           AND pg_catalog.row_security_active('public.knowledge_entries'::regclass)
           AND NOT EXISTS(SELECT 1 FROM pg_catalog.pg_roles r JOIN pg_catalog.pg_class c ON c.oid='public.knowledge_entries'::regclass
             WHERE r.rolname=current_user AND (r.rolsuper OR r.rolbypassrls OR pg_catalog.pg_has_role(r.oid,c.relowner,'USAGE'))))`
@@ -193,10 +226,54 @@ async function queryKnowledgeViewer<T extends QueryResultRow>(ctx: AccessContext
         }
       }
       if(sourceRows)bindScopeSources(result.rows,result.rows.flatMap(row=>boundScopeSources(row)))
-      await client.query('COMMIT')
       return result
-    }finally{await rollbackAndRelease(client)}
-  })
+}
+
+/** Canonical point metadata confers no current source rights. */
+async function queryKnowledgePoint(ctx:AccessContext,where:string,params:unknown[],relatedScopeSql:string,
+ authority?:SessionContextAuthority){
+ if(currentApplicationReadTransaction(ctx)||ctx.systemRead||!ctx.userId)throw new DerivedScopeError('scope_evidence_missing')
+ ctx=structuredClone(ctx);params=structuredClone(params)
+ if(authority){
+  const execution=authority.execution
+  if(execution.identity.kind!=='attended'||execution.identity.principal.kind!=='workspace_member'
+   ||execution.security.access.userId!==ctx.userId||execution.security.access.workspaceId!==ctx.workspaceId
+   ||execution.assistant.id!==ctx.assistantId)throw new DerivedScopeError('scope_evidence_missing')
+  await execution.security.authority.assertCurrent()
+ }
+ const related=knowledgeRelatedPredicate(3,relatedScopeSql)
+ // The same canonical predicates select both the related projection and its
+ // source obligations. Only metadata is discovered before current admission.
+ const metadata=await queryKnowledgeViewer<{id:string;requiresAuthority:boolean;evidenceComplete:boolean}>(ctx,
+  `SELECT ke.id,(${knowledgeDerivationExists('ke')} OR EXISTS(SELECT 1 FROM knowledge_entries ke2
+     WHERE ${related} AND ${knowledgeDerivationExists('ke2')})) AS "requiresAuthority",
+   (${knowledgeCurrentEvidenceComplete('ke')} AND NOT EXISTS(SELECT 1 FROM knowledge_entries ke2
+     WHERE ${related} AND NOT ${knowledgeCurrentEvidenceComplete('ke2')})) AS "evidenceComplete",
+   ${knowledgeSourceColumns('ke',knowledgeProjectedSources(related))} ${where}`,params,true,true)
+ const candidate=metadata.rows[0]
+ if(!candidate||candidate.evidenceComplete!==true)return{rows:[]}
+ const sources=boundScopeSources(candidate),root=sources.find(source=>source.resourceId===candidate.id&&source.resourceKind==='knowledge_entry')
+ if(!root)throw new DerivedScopeError('scope_evidence_missing')
+ if(candidate.requiresAuthority&&!authority)return{rows:[]}
+ const values=[...params,candidate.id,root.version]
+ const currentWhere=where.replace(/LIMIT 1\s*$/,'')+` AND ke.id=$${params.length+1}::uuid AND ke.scope_version::text=$${params.length+2} LIMIT 1`
+ const statement=`SELECT ${entryColumnsClearanceScoped(3,relatedScopeSql)} ${currentWhere}`
+ if(!authority)return queryKnowledgeViewer<KnowledgeEntry>(ctx,statement,values,true,false,{sources,requiresNoDerivation:true})
+ return readRetainedContextFrame(authority,sources,async client=>{
+  const requested=pinAccessCeiling({...authority.execution.security.access,
+    ...Object.fromEntries(Object.entries(ctx).filter(([,value])=>value!==undefined))})
+  const ceiling=intersectAccessCeilings(authority.execution.security.ceiling,requested)
+  await runWithAgentAccess({...authority.execution.security.access,...ceiling},()=>applyRLSGucs(client,ctx.userId))
+  await validateCallerScopeEvidence({sources:[...sources]},ceiling,client)
+  const result=await queryKnowledgeRows<KnowledgeEntry>(client,statement,values,true,false,{sources})
+  await validateCallerScopeEvidence({sources:[...sources]},ceiling,client)
+  return result
+ })
+}
+
+function knowledgeRelatedPredicate(clearanceIdx:number,relatedScopeSql:string):string{
+ return `ke2.id = ANY(ke.related_ids) AND ke2.workspace_id = ke.workspace_id
+    AND sensitivity_rank(ke2.sensitivity) <= sensitivity_rank($${clearanceIdx}) ${relatedScopeSql}`
 }
 
 /**
@@ -209,8 +286,7 @@ async function queryKnowledgeViewer<T extends QueryResultRow>(ctx: AccessContext
  * in the enclosing query.
  */
 function entryColumnsClearanceScoped(clearanceIdx: number, relatedScopeSql = '', otherContributors = "'[]'::jsonb"): string {
-  const relatedPredicate=`ke2.id = ANY(ke.related_ids) AND ke2.workspace_id = ke.workspace_id
-    AND sensitivity_rank(ke2.sensitivity) <= sensitivity_rank($${clearanceIdx}) ${relatedScopeSql}`
+  const relatedPredicate=knowledgeRelatedPredicate(clearanceIdx,relatedScopeSql)
   const contributors=`${knowledgeProjectedSources(relatedPredicate)} || (${otherContributors})`
   return `
     ke.id, ke.workspace_id AS "workspaceId", ${knowledgeSourceColumns('ke',contributors)},
@@ -306,7 +382,7 @@ export type KnowledgeStore = {
   // `ctx.clearance === undefined` is treated as passthrough ('confidential').
   search(ctx: AccessContext, queryStr: string, limit?: number): Promise<KnowledgeEntry[]>
   listByPath(ctx: AccessContext, pathPrefix: string): Promise<KnowledgeEntry[]>
-  getById(ctx: AccessContext, id: string): Promise<KnowledgeEntry | null>
+  getById(ctx: AccessContext, id: string, authority?: SessionContextAuthority): Promise<KnowledgeEntry | null>
   getByPath(ctx: AccessContext, path: string): Promise<KnowledgeEntry | null>
   listSummaries(ctx: AccessContext): Promise<Array<{ id: string; path: string; summary: string | null; sensitivity: Sensitivity; compartments: string[]; projectIds: string[] }>>
   /**
@@ -628,7 +704,7 @@ export function createDbKnowledgeStore(): KnowledgeStore {
       return [...indexEntry.rows.map((r) => bindScopeSources({ ...r, childCount: 0 },boundScopeSources(r))), ...children]
     },
 
-    async getById(ctx, id) {
+    async getById(ctx, id, authority) {
       const clearance = ctx.clearance ?? DEFAULT_CLEARANCE
       // Support both full UUID and prefix lookup. Workspace_id scope is
       // applied here too — a viewer in workspace A must not read entries
@@ -638,16 +714,13 @@ export function createDbKnowledgeStore(): KnowledgeStore {
       if (appliesDenylist(ctx)) params.push(ctx.assistantId)
       const scope = contentScopeProjection(ctx, params.length + 1)
       params.push(...scope.params)
-      const result = await queryKnowledgeViewer<KnowledgeEntry>(ctx,
-        `SELECT ${entryColumnsClearanceScoped(3, scope.sql('ke2'))} FROM knowledge_entries ke
+      const result = await queryKnowledgePoint(ctx,` FROM knowledge_entries ke
          WHERE ke.id::text LIKE $1 || '%'
            AND ke.workspace_id = $2
            AND sensitivity_rank(ke.sensitivity) <= sensitivity_rank($3)
            ${deny}
            ${scope.sql('ke')}
-         LIMIT 1`,
-        params,
-      )
+         LIMIT 1`,params,scope.sql('ke2'),authority)
       return result.rows[0] ?? null
     },
 
