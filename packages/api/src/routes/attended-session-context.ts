@@ -1,6 +1,6 @@
 /** Current native attended history and annotations. [COMP:api/application-persistence] */
-import {bindScopeSources,boundScopeSources,classifyTopic,DerivedScopeError,executionToolContext,
- type TopicClassifierOptions,type SessionContextAuthority,type TopicClassification} from '@use-brian/core'
+import {bindScopeSources,boundScopeSources,classifyTopic,classifyResearchIntent,DerivedScopeError,executionToolContext,
+ type ResearchClassifyOptions,type ResearchClassifyResult,type TopicClassifierOptions,type SessionContextAuthority,type TopicClassification} from '@use-brian/core'
 import {getPool} from '../db/client.js'
 import {readAdmittedSessionQuery} from '../db/session-query-reader.js'
 import {writeSessionMessageAnnotation} from '../db/session-message-annotations.js'
@@ -48,8 +48,8 @@ export async function classifyAttendedSessionMessage(input:{
 }
 
 /** Capture before filtering/formatting, retaining complete query obligations even for an empty window. */
-export async function readAttendedSessionHistory(authority:SessionContextAuthority,sessionId:string,fromSequence?:number|null):Promise<SessionMessage[]> {
- const high=(await getPool().query<{sequence:number}>(
+export async function readAttendedSessionHistory(authority:SessionContextAuthority,sessionId:string,fromSequence?:number|null,throughSequence?:number):Promise<SessionMessage[]> {
+ const high=throughSequence??(await getPool().query<{sequence:number}>(
   'SELECT coalesce(max(sequence_num),0)::int AS sequence FROM session_messages WHERE workspace_id=$1 AND session_id=$2',
   [authority.execution.security.access.workspaceId,sessionId])).rows[0].sequence
  const query=await readAdmittedSessionQuery({sessionId,throughSequence:high,authority})
@@ -60,4 +60,28 @@ export async function readAttendedSessionHistory(authority:SessionContextAuthori
    [...boundScopeSources(row),...(annotation?boundScopeSources(annotation):[])])
  })
  return bindScopeSources(history,boundScopeSources(query))
+}
+
+/** Assess only an authored current row and the complete admitted original body cohort. */
+export async function classifyAttendedResearchMessage(input:{
+ authority:SessionContextAuthority;session:Session;message:SessionMessage;
+ provider:ResearchClassifyOptions['provider'];model:string;decisionRuntime?:ResearchClassifyOptions['decisionRuntime'];
+}):Promise<ResearchClassifyResult>{
+ const {authority,session,message}=input
+ if(message.sessionId!==session.id||message.role!=='user')throw new DerivedScopeError('scope_evidence_missing')
+ const query=await readAdmittedSessionQuery({sessionId:session.id,throughSequence:message.sequenceNum,topicThroughSequence:0,authority})
+ const current=query.history.find(row=>row.id===message.id)
+ if(!current)throw new DerivedScopeError('scope_source_changed')
+ const text=(row:SessionMessage)=>typeof row.content==='string'?row.content:Array.isArray(row.content)?row.content.flatMap(block=>
+  typeof block==='object'&&block!==null&&'type' in block&&block.type==='text'&&'text' in block&&typeof block.text==='string'?[block.text]:[]).join(' ').trim():''
+ const recent=query.history.filter(row=>row.sequenceNum<message.sequenceNum&&(row.role==='user'||row.role==='assistant'))
+  .filter(row=>!(row.role==='assistant'&&Array.isArray(row.content)&&row.content.some(block=>
+   typeof block==='object'&&block!==null&&'type' in block&&block.type==='tool_use')))
+  .map(row=>({role:row.role as 'user'|'assistant',text:text(row)})).filter(row=>row.text.trim().length>0).slice(-6)
+ const context={...executionToolContext(authority.execution,{appId:'native-session-research'}),scopeAccumulator:authority.accumulator}
+ const options=bindScopeSources<ResearchClassifyOptions>({provider:input.provider,model:input.model,decisionRuntime:input.decisionRuntime,
+  message:text(current),recentConversation:recent,authority,signal:authority.execution.lifecycle.abortSignal,
+  assertInputAuthority:()=>assertSourceModelInputAuthority(context),workspaceId:authority.execution.security.access.workspaceId,
+  runId:'research-intent-'+message.id},boundScopeSources(query))
+ return classifyResearchIntent(options)
 }

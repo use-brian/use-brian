@@ -15,8 +15,10 @@ describe.sequential('[COMP:api/application-persistence] actual attended channel 
  let fixture:Awaited<ReturnType<typeof persistentContextFixture>>|undefined
  afterEach(async()=>{await fixture?.cleanup();fixture=undefined})
  afterAll(async()=>{await getAppPool().end();await getPool().end()})
- async function setup(){
+ async function setup(input:{adaptive?:boolean;withdrawDuringAssessment?:boolean}={}){
   fixture=await persistentContextFixture();const f=fixture
+  if(input.adaptive)await f.pool.query("UPDATE workspaces SET plan='pro' WHERE id=$1",[f.workspaceId])
+  const assessmentInputs:string[]=[],assessmentAuthored:boolean[]=[]
   const assistant=await findAssistantById(f.assistantId);if(!assistant)throw new Error('Missing actual fixture assistant')
   const sourceSets:ScopeSource[][]=[],saved:string[]=[],responses:string[]=[],errors:Error[]=[],committed:boolean[]=[]
   const sessionRef:{id?:string}={}
@@ -35,16 +37,37 @@ describe.sequential('[COMP:api/application-persistence] actual attended channel 
    [{type:'message_start',model:'fixture'},{type:'text_delta',text:'Fictional admitted channel response'},{type:'message_end',stopReason:'end_turn',usage}]]
   let sends=0,backgroundText:string|undefined='Fictional title'
   const provider:LLMProvider={name:'fictional-channel',models:['fixture'],
-   async *stream(){yield{type:'message_start',model:'fixture'};if(backgroundText)yield{type:'text_delta',text:backgroundText};yield{type:'message_end',stopReason:'end_turn',usage}},
+   async *stream(options){
+    const serialized=JSON.stringify(options.messages)
+    if(options.maxTokens===128&&serialized.includes('recentConversation')){
+     assessmentInputs.push(serialized)
+     assessmentAuthored.push((await f.pool.query("SELECT id FROM session_messages WHERE session_id=$1 AND role='user'",[sessionRef.id])).rows.length===1)
+     if(input.withdrawDuringAssessment)await f.pool.query('DELETE FROM workspace_members WHERE workspace_id=$1 AND user_id=$2',[f.workspaceId,f.ownerId])
+     yield{type:'message_start',model:'fixture'};yield{type:'text_delta',text:'{"research":false}'};yield{type:'message_end',stopReason:'end_turn',usage};return
+    }
+    yield{type:'message_start',model:'fixture'};if(backgroundText)yield{type:'text_delta',text:backgroundText};yield{type:'message_end',stopReason:'end_turn',usage}
+   },
    createSession(){return{send(_messages:Message[]){return(async function*(){for(const chunk of scripts[sends++]??[])yield chunk})()}}}}
   const hooks:ChannelHooks={async onConfirmationRequired(){throw new Error('Unexpected fixture confirmation')},async sendResponse(text){responses.push(text)},async sendError(error){errors.push(error)},
    async onAssistantMessageSaved(message){saved.push(message.id);committed.push((await f.pool.query('SELECT id FROM session_messages WHERE id=$1',[message.id])).rows.length===1)}}
   const run=()=>processChannelMessage({userId:f.ownerId,ownerId:f.ownerId,assistant,isIdentified:true,channelType:'telegram',channelId:'15550001111',isGroupChat:false,
-   senderUserId:f.ownerId,messageText:'Fictional channel input',userContentBlocks:[{type:'text',text:'Fictional channel input'}],modelAlias:undefined,
+   senderUserId:f.ownerId,messageText:input.adaptive?'Compare the fictional options using several independent sources and explain their current differences.':'Fictional channel input',
+   userContentBlocks:[{type:'text',text:input.adaptive?'Compare the fictional options using several independent sources and explain their current differences.':'Fictional channel input'}],modelAlias:undefined,adaptiveResearchEnabled:input.adaptive,
    abortController:new AbortController(),provider,systemPrompt:'Fictional local channel fixture',tools:new Map([[tool.name,tool]]),memoryStore:createDbMemoryStore(),
    capabilityStore:createDbCapabilityStore(),hooks,sessionRef})
-  return{f,run,sessionRef,sourceSets,saved,responses,errors,committed,disableBackgroundText:()=>{backgroundText=undefined}}
+  return{f,run,sessionRef,sourceSets,saved,responses,errors,committed,assessmentInputs,assessmentAuthored,mainSends:()=>sends,disableBackgroundText:()=>{backgroundText=undefined}}
  }
+ it('assesses the actual channel request only after authored input is stored and admitted',async()=>{
+  const current=await setup({adaptive:true});await current.run()
+  expect(current.errors).toEqual([]);expect(current.assessmentInputs).toHaveLength(1);expect(current.assessmentAuthored).toEqual([true])
+  expect(current.responses.join(' ')).toContain('Fictional admitted channel response')
+ })
+ it('does not enter the main channel provider after actual assessment authority is withdrawn',async()=>{
+  const current=await setup({adaptive:true,withdrawDuringAssessment:true})
+  await expect(current.run()).rejects.toMatchObject({reason:'authority_changed',retrySafe:false})
+  expect(current.assessmentInputs).toHaveLength(1);expect(current.assessmentAuthored).toEqual([true]);expect(current.mainSends()).toBe(0)
+  expect(current.responses).toEqual([]);expect(current.saved).toEqual([])
+ })
  it('retains original query field observations and announces only committed channel pairs',async()=>{
   const current=await setup();await current.run()
   expect(current.errors).toEqual([]);expect(current.responses.join(' ')).toContain('Fictional admitted channel response')

@@ -2,7 +2,7 @@ import {runAssistantTurn} from '../../turn/kernel.js'
 import {validateAttendedAudienceEvidence} from '../../context-scope/attended-audience.js'
 import {afterAll,afterEach,describe,expect,it} from 'vitest'
 import {boundScopeSources,ContextScopeAccumulator,executionToolContext,NOOP_TURN_LEDGER,type QueryEvent,type LLMProvider} from '@use-brian/core'
-import {classifyAttendedSessionMessage,readAttendedSessionHistory} from '../../routes/attended-session-context.js'
+import {classifyAttendedSessionMessage,classifyAttendedResearchMessage,readAttendedSessionHistory} from '../../routes/attended-session-context.js'
 import {readSessionMessageAnnotation} from '../../db/session-message-annotations.js'
 import {getAppPool,getPool} from '../../db/client.js'
 import {readAdmittedSessionQuery} from '../../db/session-query-reader.js'
@@ -80,6 +80,38 @@ describe.sequential('[COMP:api/application-persistence] actual admitted reply hi
   const turn=await sinkTurn('internal',true)
   await expect(turn.run()).rejects.toMatchObject({reason:'authority_changed',retrySafe:false})
   expect(turn.seen).toHaveLength(1)
+ })
+ function researchProvider(before?:()=>Promise<void>):LLMProvider{return{name:'fictional-research',models:['fixture'],createSession(){throw new Error('Unexpected fixture query session')},async *stream(){
+  await before?.();yield{type:'message_start',model:'fixture'};yield{type:'text_delta',text:JSON.stringify({research:true,reason:'fictional evidence request'})}
+  yield{type:'message_end',stopReason:'end_turn',usage:{inputTokens:3,outputTokens:2}}
+ }}}
+ async function researchInput(){
+  const {f,rows}=await setup(),message=rows.at(-1)!
+  await f.pool.query('UPDATE session_messages SET content=$2 WHERE id=$1',[message.id,JSON.stringify([{type:'text',text:'Compare the fictional options using several independent sources and explain their current differences.'}])])
+  return{f,message}
+ }
+ it('preserves actual authored body and history observations through research assessment',async()=>{
+  const {f,message}=await researchInput(),authority=await f.modelContext(f.firstId)
+  const result=await classifyAttendedResearchMessage({authority,session:f.session,message,provider:researchProvider(),model:'fixture'})
+  expect(result.research).toBe(true)
+  expect(boundScopeSources(result)).toEqual(expect.arrayContaining(authority.accumulator.evidence.sources??[]))
+  expect(boundScopeSources(result).some(source=>source.resourceKind==='application_field')).toBe(true)
+ })
+ it('refuses withdrawn assessment input before provider dispatch and keeps a current reader usable',async()=>{
+  const {f,message}=await researchInput(),authority=await f.modelContext(f.firstId);let calls=0
+  const provider=researchProvider(async()=>{calls++})
+  await f.pool.query("UPDATE workspace_members SET clearance='public' WHERE workspace_id=$1 AND user_id=$2",[f.workspaceId,f.firstId])
+  await expect(classifyAttendedResearchMessage({authority,session:f.session,message,provider,model:'fixture'})).rejects.toMatchObject({reason:'authority_changed'})
+  expect(calls).toBe(0)
+  const second=await f.modelContext(f.secondId)
+  expect((await classifyAttendedResearchMessage({authority:second,session:f.session,message,provider,model:'fixture'})).research).toBe(true)
+  expect(calls).toBe(1)
+ })
+ it('does not turn research assessment revocation during output into ordinary fallback',async()=>{
+  const {f,message}=await researchInput(),authority=await f.modelContext(f.firstId)
+  await expect(classifyAttendedResearchMessage({authority,session:f.session,message,model:'fixture',provider:researchProvider(async()=>{
+   await f.pool.query('DELETE FROM workspace_members WHERE workspace_id=$1 AND user_id=$2',[f.workspaceId,f.firstId])
+  })})).rejects.toMatchObject({reason:'authority_changed',retrySafe:false})
  })
  function classifierProvider(before?:()=>Promise<void>):LLMProvider{return{name:'fictional-topic',models:['fixture'],createSession(){throw new Error('Unexpected fixture query session')},async *stream(){
   await before?.();yield{type:'message_start',model:'fixture'};yield{type:'text_delta',text:JSON.stringify({topic_label:'Fictional admitted topic',state:'continue',confidence:0.9})};

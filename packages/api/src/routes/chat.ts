@@ -1,4 +1,4 @@
-import { classifyAttendedSessionMessage, readAttendedSessionHistory } from './attended-session-context.js'
+import { classifyAttendedSessionMessage, classifyAttendedResearchMessage, readAttendedSessionHistory } from './attended-session-context.js'
 import type { PoolClient } from 'pg'
 import { withSessionMessagePublication } from '../db/session-context-revisions.js'
 import { createAttendedDeliveryAudienceAuthorizer } from '../context-scope/attended-audience.js'
@@ -2486,13 +2486,9 @@ export function chatRoutes(options: WebChatOptions): Router {
         providerKeySource: backgroundLlmRuntime?.providerKeySource ?? 'platform' as const,
       }
 
-      // Adaptive research runs before normal session resolution so a denied
-      // research turn does not create an empty thread. Resolve an EXISTING
-      // thread read-only here only when the classifier will run, authorize it
-      // with the same session gate as the main path, and cache its transcript
-      // for the topic classifier below. New chats correctly have no history.
-      // This is what makes the classifier's "follow-ups are OFF" rule real
-      // (2026-08-09 Snapio valuation-multiple incident).
+      // Eligibility and explicit quota denial precede session creation. Actual
+      // assessment waits for this request's canonical execution and admitted
+      // authored/history query; no owner-read transcript reaches a provider.
       const adaptiveResearchEligible =
         !researchMode &&
         !!message &&
@@ -2503,44 +2499,6 @@ export function chatRoutes(options: WebChatOptions): Router {
           assistantKind: assistant.kind,
           researchPlanGate: deploymentCapabilities().researchPlanGate,
         })
-      let adaptiveSessionId: string | null = null
-      let adaptiveDbMessages: SessionMessage[] = []
-      let adaptiveRecentConversation: Array<{ role: 'user' | 'assistant'; text: string }> = []
-      if (adaptiveResearchEligible) {
-        let adaptiveSession = requestedSessionId
-          ? await findSessionById(requestedSessionId)
-          : undefined
-        const adaptiveStickyChannelId = resolveStickyChannelId(requestedChannelId, requestedSessionId)
-        if (!adaptiveSession && adaptiveStickyChannelId) {
-          adaptiveSession = await findSessionByChannel({
-            assistantId: assistant.id,
-            userId: user.id,
-            channelType: 'web',
-            channelId: adaptiveStickyChannelId,
-          })
-        }
-        if (
-          adaptiveSession?.assistantId === assistant.id &&
-          !(await gateSessionRead(user.id, adaptiveSession))
-        ) {
-          adaptiveSessionId = adaptiveSession.id
-          adaptiveDbMessages = await getSessionMessages(adaptiveSession.id, { excludeHeld: true })
-          adaptiveRecentConversation = adaptiveDbMessages
-            .filter((m) => m.role === 'user' || m.role === 'assistant')
-            .filter((m) => !(
-              m.role === 'assistant' &&
-              Array.isArray(m.content) &&
-              (m.content as Array<{ type?: string }>).some((block) => block.type === 'tool_use')
-            ))
-            .map((m) => ({
-              role: m.role as 'user' | 'assistant',
-              text: extractPlainText(m.content as Message['content']).trim(),
-            }))
-            .filter((turn) => turn.text.length > 0)
-            .slice(-6)
-        }
-      }
-
       // Adaptive research entry. When the request didn't pin a mode, run a
       // cheap Gemini-Flash-Lite classifier to decide whether this message
       // warrants research mode. If yes, flip `researchMode = true` so the
@@ -2551,9 +2509,8 @@ export function chatRoutes(options: WebChatOptions): Router {
       // (doc/feed — research mode strips the very authoring tools they
       // need, so silent auto-entry would break their core job).
       //
-      // The LLM call happens here; usage gets recorded later, once the
-      // session + user message rows exist for attribution. We carry the
-      // classifier result through `adaptiveResearchOverhead`.
+      // Assessment runs below after canonical session and authored-input
+      // admission. Its usage is recorded through `adaptiveResearchOverhead`.
       // Operate-site override (docs/architecture/engine/coordinator-pattern.md
       // → "Adaptive entry and the operate-site override"): a request to open /
       // browse / log into / act on ONE named site or URL must keep the normal
@@ -2573,34 +2530,6 @@ export function chatRoutes(options: WebChatOptions): Router {
         usage: TokenUsage | null
         reason: string | null
       } | null = null
-      if (
-        adaptiveResearchEligible &&
-        message
-      ) {
-        const { classifyResearchIntent } = await import('@use-brian/core')
-        const adaptive = await classifyResearchIntent({
-          provider: backgroundProvider,
-          message,
-          model: backgroundModel,
-          recentConversation: adaptiveRecentConversation,
-          decisionRuntime: options.decisionRuntime,
-          workspaceId: assistant.workspaceId ?? undefined,
-        }).catch(() => ({ research: false, operateSite: false, reason: null, usage: null, model: null }))
-        adaptiveResearchOverhead = {
-          model: adaptive.model,
-          usage: adaptive.usage,
-          reason: adaptive.reason,
-        }
-        operateSiteIntent = operateSiteIntent || adaptive.operateSite
-        if (adaptive.research) {
-          researchMode = true
-          // `phase` is a stable, client-localizable code; `message` stays for
-          // non-web consumers and logs. The web client renders a research
-          // banner off `phase` (see chat-experience.tsx `case "status"`).
-          sendEvent('status', { phase: 'research_detected', message: 'Detected deep-research intent…' })
-        }
-      }
-
       // Research-mode quota gate (mig 185_workspace_research_quota).
       //
       // `mode: 'research'` is the brain empty-state's deep-research entry
@@ -2615,11 +2544,11 @@ export function chatRoutes(options: WebChatOptions): Router {
       // tolerant — a counter-write failure can't deny a turn the gate
       // already approved, but it also won't double-count on retry.
       let researchUsedAfter: number | null = null
-      if (researchMode) {
+      const admitResearchQuota = async (): Promise<boolean> => {
         if (!assistant.workspaceId) {
           sendEvent('error', { error: 'Research mode requires a workspace assistant' })
           res.end()
-          return
+          return false
         }
         const used = await getWorkspaceResearchUsed(assistant.workspaceId)
         const researchPlanGate = deploymentCapabilities().researchPlanGate
@@ -2640,7 +2569,7 @@ export function chatRoutes(options: WebChatOptions): Router {
             quota: FREE_RESEARCH_QUOTA,
           })
           res.end()
-          return
+          return false
         }
         researchUsedAfter = await incrementWorkspaceResearchUsed(assistant.workspaceId)
         // Tell the frontend the new count + remaining so the chrome can
@@ -2650,7 +2579,9 @@ export function chatRoutes(options: WebChatOptions): Router {
           quota: FREE_RESEARCH_QUOTA,
           isPaid,
         })
+        return true
       }
+      if (researchMode && !(await admitResearchQuota())) return
 
       // Q20 blocklist (permissions.md §Per-assistant user blocklist): if the
       // inbound author is in this assistant's blocked_user_ids, the assistant
@@ -3987,6 +3918,36 @@ export function chatRoutes(options: WebChatOptions): Router {
             scope: inputMessageScope,
           })
         : undefined
+      // Assess after the original canonical invocation and authored input exist.
+      // Quota races retain this real request and its denial in the same thread.
+      if (
+        adaptiveResearchEligible &&
+        message
+      ) {
+        if (!nativeTranscriptAuthority || !earlyStoredUserMsg) {
+          throw Object.assign(new Error('The assessment context is unavailable.'), { reason: 'authority_changed', retrySafe: false })
+        }
+        const adaptive = await classifyAttendedResearchMessage({
+          authority: nativeTranscriptAuthority, session, message: earlyStoredUserMsg,
+          provider: backgroundProvider, model: backgroundModel, decisionRuntime: options.decisionRuntime,
+        })
+        adaptiveResearchOverhead = {
+          model: adaptive.model,
+          usage: adaptive.usage,
+          reason: adaptive.reason,
+        }
+        operateSiteIntent = operateSiteIntent || adaptive.operateSite
+        if (adaptive.research) {
+          if (!(await authority.execute(admitResearchQuota))) return
+          await assertDeliveryAudience()
+          researchMode = true
+          // `phase` is a stable, client-localizable code; `message` stays for
+          // non-web consumers and logs. The web client renders a research
+          // banner off `phase` (see chat-experience.tsx `case "status"`).
+          sendEvent('status', { phase: 'research_detected', message: 'Detected deep-research intent…' })
+        }
+      }
+
       const nativeClassification = nativeTranscriptAuthority && earlyStoredUserMsg
         ? await classifyAttendedSessionMessage({
             authority: nativeTranscriptAuthority, session, message: earlyStoredUserMsg,
@@ -4008,8 +3969,6 @@ export function chatRoutes(options: WebChatOptions): Router {
 
       const preExistingDbMessages = nativeClassification && earlyStoredUserMsg
         ? nativeClassification.history.filter(row => row.sequenceNum < earlyStoredUserMsg.sequenceNum)
-        : adaptiveSessionId === session.id
-        ? adaptiveDbMessages
         : await getSessionMessages(session.id, { excludeHeld: true })
       const recentUserTurns: ClassifierRecentTurn[] = preExistingDbMessages
         .filter((m) => m.role === 'user' && Array.isArray(m.content))

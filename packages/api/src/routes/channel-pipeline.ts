@@ -1,4 +1,5 @@
-import { classifyAttendedSessionMessage, readAttendedSessionHistory } from './attended-session-context.js'
+import { isInputAuthorityError } from '@use-brian/core'
+import { classifyAttendedSessionMessage, classifyAttendedResearchMessage, readAttendedSessionHistory } from './attended-session-context.js'
 import { getPool } from '../db/client.js'
 import type { PoolClient } from 'pg'
 import { withSessionMessagePublication } from '../db/session-context-revisions.js'
@@ -1555,12 +1556,53 @@ async function processChannelMessageTurn(params: ChannelPipelineParams): Promise
     }))
   }
 
+  // Persist authored input before deriving native topic/reply annotations.
+  let classification: TopicClassification | null = null
+  let replyResolved: Awaited<ReturnType<typeof resolveReplyText>> | { text: string; fromAssistant: boolean } | null = null
+  const persistUserMessage = (client?: Parameters<typeof addSessionMessage>[1]) =>
+    addSessionMessage({
+      sessionId: session.id,
+      role: 'user',
+      content: userContentBlocks,
+      replyToText: replyResolved?.text ?? null,
+      topicLabel: classification?.topic_label ?? null,
+      topicConfidence: classification?.confidence ?? null,
+      channelMessageId:
+        incomingChannelMessageId !== undefined && incomingChannelMessageId !== null
+          ? String(incomingChannelMessageId)
+          : null,
+      // Per-message author for collaborative draft sessions. Other
+      // channels and personal sessions pass null/undefined.
+      // A room attributes every row to its sender (one session, many people).
+      senderUserId: roomShape.attributeSenders ? userId : senderUserId ?? null,
+      scope: inputMessageScope,
+    }, client)
+  const persistInboundMessage = async () => params.archiveIncoming && !params.archiveInboundAlreadyPersisted
+    ? await persistInboundChatArchive({
+        source: channelType,
+        // `billingUserId`, not `ownerId`: the archive's `LiveArchiveContext`
+        // declares `ownerUserId: string`, and on a workspace-owned assistant
+        // `ownerId` is NULL. It survives that today (the binding resolves off
+        // `workspaceId`, and `connector_instance.created_by` / the outbox's
+        // `owner_user_id` are both nullable) — but it was writing a null into a
+        // field typed non-null, and the workspace owner is the correct value.
+        ownerUserId: billingUserId,
+        workspaceId: assistant.workspaceId,
+        connectorInstanceId: params.archiveConnectorInstanceId,
+        assistantId: assistant.id,
+        assistantName: assistant.name,
+        conversationId: channelId,
+        message: params.archiveIncoming,
+      }, persistUserMessage)
+    : await persistUserMessage()
+  const earlyUserMessageRow = nativeTranscriptAuthority ? await persistInboundMessage() : undefined
+
   // Load the pre-turn transcript once and reuse it for adaptive research +
   // topic classification. Follow-up detection needs actual dialogue, not an
   // isolated current sentence (2026-08-09 Snapio incident on web; channels
   // share the same classifier contract).
   const preExistingDbMessages = nativeTranscriptAuthority
-    ? await readAttendedSessionHistory(nativeTranscriptAuthority, session.id)
+    ? await readAttendedSessionHistory(nativeTranscriptAuthority, session.id, undefined, earlyUserMessageRow ? earlyUserMessageRow.sequenceNum - 1 : undefined)
     : await filterHistoryForAudience(await getSessionMessages(session.id, { excludeHeld: true }))
   const adaptiveRecentConversation = preExistingDbMessages
     .filter((m) => m.role === 'user' || m.role === 'assistant')
@@ -1604,7 +1646,12 @@ async function processChannelMessageTurn(params: ChannelPipelineParams): Promise
   ) {
     try {
       const { classifyResearchIntent } = await import('@use-brian/core')
-      const adaptive = await classifyResearchIntent({
+      const adaptive = nativeTranscriptAuthority && earlyUserMessageRow
+        ? await classifyAttendedResearchMessage({
+            authority: nativeTranscriptAuthority, session, message: earlyUserMessageRow,
+            provider: backgroundProvider, model: backgroundLaneModel, decisionRuntime: params.decisionRuntime,
+          })
+        : await classifyResearchIntent({
         provider: backgroundProvider,
         message: messageText,
         model: backgroundLaneModel,
@@ -1617,6 +1664,7 @@ async function processChannelMessageTurn(params: ChannelPipelineParams): Promise
         adaptiveResearchActive = true
       }
     } catch (err) {
+      if (nativeTranscriptAuthority || isInputAuthorityError(err)) throw err
       console.warn(`[${channelType}] adaptive-research classifier failed:`, err)
     }
   }
@@ -1671,7 +1719,7 @@ async function processChannelMessageTurn(params: ChannelPipelineParams): Promise
     // that no longer exists. Same rule the store applies to embedding and
     // extraction failures — see brian-message-store docs/architecture.md
     // → "Failure behavior".
-    if (params.archiveIncoming && !params.archiveInboundAlreadyPersisted) {
+    if (params.archiveIncoming && !params.archiveInboundAlreadyPersisted && !earlyUserMessageRow) {
       try {
         await appendInboundChatArchive({
           source: channelType,
@@ -1719,46 +1767,6 @@ async function processChannelMessageTurn(params: ChannelPipelineParams): Promise
   // justification. See Q9 of the design thread + the `chatEpisodeIngestor`
   // wiring in apps/api/src/index.ts.
 
-  // Persist authored input before deriving native topic/reply annotations.
-  let classification: TopicClassification | null = null
-  let replyResolved: Awaited<ReturnType<typeof resolveReplyText>> | { text: string; fromAssistant: boolean } | null = null
-  const persistUserMessage = (client?: Parameters<typeof addSessionMessage>[1]) =>
-    addSessionMessage({
-      sessionId: session.id,
-      role: 'user',
-      content: userContentBlocks,
-      replyToText: replyResolved?.text ?? null,
-      topicLabel: classification?.topic_label ?? null,
-      topicConfidence: classification?.confidence ?? null,
-      channelMessageId:
-        incomingChannelMessageId !== undefined && incomingChannelMessageId !== null
-          ? String(incomingChannelMessageId)
-          : null,
-      // Per-message author for collaborative draft sessions. Other
-      // channels and personal sessions pass null/undefined.
-      // A room attributes every row to its sender (one session, many people).
-      senderUserId: roomShape.attributeSenders ? userId : senderUserId ?? null,
-      scope: inputMessageScope,
-    }, client)
-  const persistInboundMessage = async () => params.archiveIncoming && !params.archiveInboundAlreadyPersisted
-    ? await persistInboundChatArchive({
-        source: channelType,
-        // `billingUserId`, not `ownerId`: the archive's `LiveArchiveContext`
-        // declares `ownerUserId: string`, and on a workspace-owned assistant
-        // `ownerId` is NULL. It survives that today (the binding resolves off
-        // `workspaceId`, and `connector_instance.created_by` / the outbox's
-        // `owner_user_id` are both nullable) — but it was writing a null into a
-        // field typed non-null, and the workspace owner is the correct value.
-        ownerUserId: billingUserId,
-        workspaceId: assistant.workspaceId,
-        connectorInstanceId: params.archiveConnectorInstanceId,
-        assistantId: assistant.id,
-        assistantName: assistant.name,
-        conversationId: channelId,
-        message: params.archiveIncoming,
-      }, persistUserMessage)
-    : await persistUserMessage()
-  const earlyUserMessageRow = nativeTranscriptAuthority ? await persistInboundMessage() : undefined
   const nativeClassification = nativeTranscriptAuthority && earlyUserMessageRow
     ? await classifyAttendedSessionMessage({
         authority: nativeTranscriptAuthority, session, message: earlyUserMessageRow,

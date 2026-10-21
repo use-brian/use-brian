@@ -65,7 +65,7 @@ describe.sequential('[COMP:api/application-persistence] [COMP:api/turn-lease] ac
     bus.push(event)
     if(event.kind==='assistant_message_saved')committedObservations.push(f.pool.query('SELECT id FROM session_messages WHERE id=$1',[event.payload.id]).then(result=>result.rows.length===1))
    }}))
-  const send=()=>request(app).post('/chat').send({sessionId:session.id,assistantId:f.assistantId,workspaceId:f.workspaceId,message:'Fictional timeout input',mode:'default',model:'pro'})
+  const send=(input:{adaptive?:boolean;message?:string;mode?:'research'|'default';sessionId?:string}={})=>request(app).post('/chat').send({sessionId:input.sessionId??session.id,assistantId:f.assistantId,workspaceId:f.workspaceId,message:input.message??'Fictional timeout input',mode:input.mode??(input.adaptive?undefined:'default'),model:'pro'})
   const stop=()=>request(app).post('/chat/stop').send({sessionId:session.id})
   const rows=async()=>(await f.pool.query<{id:string;role:string;content:ContentBlock[];senderAssistantId:string|null}>(
    'SELECT id,role,content,sender_assistant_id AS "senderAssistantId" FROM session_messages WHERE session_id=$1 ORDER BY sequence_num',[session.id])).rows
@@ -94,6 +94,74 @@ describe.sequential('[COMP:api/application-persistence] [COMP:api/turn-lease] ac
   const lease=(await current.f.pool.query('SELECT status,turn_lease_token FROM sessions WHERE id=$1',[current.session.id])).rows[0]
   expect(lease).toMatchObject({status:'idle',turn_lease_token:null})
  }
+ it('assesses actual web input only after authored storage and current history admission',async()=>{
+  const current=await setup(),authored:boolean[]=[],inputs:string[]=[]
+  current.setBackground(async function*(input){
+   const serialized=JSON.stringify(input.messages)
+   if(input.maxTokens===128&&serialized.includes('recentConversation')){
+    inputs.push(serialized);authored.push((await current.rows()).some(row=>row.role==='user'))
+    yield* textChunks('{"research":false}');return
+   }
+   yield* textChunks('{"topic_label":"fictional assessment","state":"continue","confidence":0.9}')
+  })
+  current.scripts.push({chunks:textChunks('Fictional admitted assessment response')})
+  const response=await current.send({adaptive:true,message:'Compare the fictional options using several independent sources and explain their current differences.'})
+  expect(frames(response.text).filter(frame=>frame.event==='error'),response.text).toEqual([])
+  expect(inputs).toHaveLength(1);expect(authored).toEqual([true]);expect(current.sessions()).toBe(1)
+  expect(response.text).toContain('Fictional admitted assessment response')
+ })
+ it('does not enter the main web provider after assessment authority is withdrawn',async()=>{
+  const current=await setup();let assessments=0
+  current.setBackground(async function*(input){
+   if(input.maxTokens===128&&JSON.stringify(input.messages).includes('recentConversation')){
+    assessments++;expect((await current.rows()).some(row=>row.role==='user')).toBe(true)
+    await current.f.pool.query('DELETE FROM workspace_members WHERE workspace_id=$1 AND user_id=$2',[current.f.workspaceId,current.f.ownerId])
+    yield* textChunks('{"research":false}');return
+   }
+   yield* textChunks('{"topic_label":"fictional assessment","state":"continue","confidence":0.9}')
+  })
+  const response=await current.send({adaptive:true,message:'Compare the fictional options using several independent sources and explain their current differences.'})
+  expect(assessments).toBe(1);expect(current.sessions()).toBe(0);expect(current.calls()).toBe(0)
+  expect(frames(response.text).filter(frame=>frame.event==='error')).toHaveLength(1)
+  expect(current.bus.filter(event=>event.kind==='assistant_message_saved')).toEqual([])
+ })
+ it('preserves explicit quota denial before creating a new web thread',async()=>{
+  const current=await setup()
+  await current.f.pool.query("UPDATE workspaces SET plan='free',research_used_count=5 WHERE id=$1",[current.f.workspaceId])
+  const before=(await current.f.pool.query('SELECT id FROM sessions WHERE workspace_id=$1',[current.f.workspaceId])).rows
+  const response=await current.send({mode:'research',sessionId:crypto.randomUUID()})
+  expect(frames(response.text).some(frame=>frame.event==='research_quota_exhausted')).toBe(true)
+  expect((await current.f.pool.query('SELECT id FROM sessions WHERE workspace_id=$1',[current.f.workspaceId])).rows).toEqual(before)
+  expect(current.sessions()).toBe(0);expect(await current.rows()).toEqual([])
+ })
+ it('admits one automatic research slot after current web assessment',async()=>{
+  const current=await setup();let assessments=0
+  current.setBackground(async function*(input){
+   if(input.maxTokens===128&&JSON.stringify(input.messages).includes('recentConversation')){assessments++;yield* textChunks('{"research":true}');return}
+   yield* textChunks('{"topic_label":"fictional assessment","state":"continue","confidence":0.9}')
+  })
+  current.scripts.push({chunks:textChunks('Fictional admitted research response')})
+  const response=await current.send({adaptive:true,message:'Compare the fictional options using several independent sources and explain their current differences.'})
+  expect(frames(response.text).filter(frame=>frame.event==='error'),response.text).toEqual([])
+  expect(assessments).toBe(1);expect(current.sessions()).toBe(1)
+  expect(frames(response.text).filter(frame=>frame.event==='research_quota')).toHaveLength(1)
+  expect((await current.f.pool.query('SELECT research_used_count FROM workspaces WHERE id=$1',[current.f.workspaceId])).rows[0].research_used_count).toBe(1)
+ })
+ it('keeps an authored web request when automatic assessment loses its quota race',async()=>{
+  const current=await setup()
+  await current.f.pool.query("UPDATE workspaces SET plan='free',research_used_count=4 WHERE id=$1",[current.f.workspaceId])
+  current.setBackground(async function*(input){
+   if(input.maxTokens===128&&JSON.stringify(input.messages).includes('recentConversation')){
+    await current.f.pool.query('UPDATE workspaces SET research_used_count=5 WHERE id=$1',[current.f.workspaceId])
+    yield* textChunks('{"research":true}');return
+   }
+   yield* textChunks('{"topic_label":"fictional assessment","state":"continue","confidence":0.9}')
+  })
+  const response=await current.send({adaptive:true,message:'Compare the fictional options using several independent sources and explain their current differences.'})
+  expect(frames(response.text).some(frame=>frame.event==='research_quota_exhausted'),response.text).toBe(true)
+  expect(current.sessions()).toBe(0);expect((await current.rows()).filter(row=>row.role==='user')).toHaveLength(1)
+  expect((await current.f.pool.query('SELECT research_used_count FROM workspaces WHERE id=$1',[current.f.workspaceId])).rows[0].research_used_count).toBe(5)
+ })
  it('preserves actual query-tool field ancestry on every committed web transcript pair',async()=>{
   const current=await setup();let originalSources:ReturnType<typeof boundScopeSources>=[]
   current.extraTools.set('fixtureReadSession',buildTool({name:'fixtureReadSession',description:'Read current fixture history',inputSchema:z.object({read:z.literal(true)}),isReadOnly:true,isConcurrencySafe:true,
