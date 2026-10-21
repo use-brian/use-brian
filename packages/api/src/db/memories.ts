@@ -680,7 +680,8 @@ export async function getMemoryById(ctx: AccessContext, id: string): Promise<Mem
  */
 export async function getMemoryByIdSystem(id: string): Promise<Memory | null> {
   const result = await query<Memory>(
-    `SELECT ${MEMORY_SELECT} FROM memories WHERE id = $1 AND valid_to IS NULL AND NOT scope_held`,
+    `SELECT ${MEMORY_SELECT} FROM memories WHERE id = $1 AND valid_to IS NULL AND NOT scope_held
+       AND public.application_memory_unproven_ancestry_allows(workspace_id,id,scope_version::text)`,
     [id],
   )
   return result.rows[0] ?? null
@@ -1027,6 +1028,7 @@ export async function getMemoryIndexSystem(
      FROM memories
      WHERE ${systemAssistantScopeSql('assistant_id', 'workspace_id', 1)} AND user_id = $2
        AND valid_to IS NULL AND NOT scope_held
+       AND public.application_memory_unproven_ancestry_allows(workspace_id,id,scope_version::text)
        AND NOT EXISTS(SELECT 1 FROM memory_summary_slots slot WHERE slot.memory_id=memories.id)
        AND confidence > 0
      ORDER BY updated_at DESC`,
@@ -2027,6 +2029,7 @@ export async function getWorkspaceMemoryIndexSystem(
      FROM memories
      WHERE ${systemAssistantScopeSql('assistant_id', 'workspace_id', 1)} AND workspace_id = $2
        AND valid_to IS NULL AND NOT scope_held
+       AND public.application_memory_unproven_ancestry_allows(workspace_id,id,scope_version::text)
        AND NOT EXISTS(SELECT 1 FROM memory_summary_slots slot WHERE slot.memory_id=memories.id)
        AND confidence > 0
        ${excludeExternalPrincipalsSql('memories.user_id')}

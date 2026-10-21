@@ -6,7 +6,7 @@ import { buildDeliveryConversationStateBlock, ContextScopeAccumulator } from '@u
 import { runTurnSessionStateDiff } from '../../turn/session-state.js'
 import type { ContentBlock, LLMProvider, Message } from '@use-brian/core'
 import { afterAll, afterEach, describe, expect, it, vi } from 'vitest'
-import { randomBytes } from 'node:crypto'
+import { randomBytes, randomUUID } from 'node:crypto'
 import pg from 'pg'
 import { z } from 'zod'
 import { classifyTopic, boundScopeSources, bindScopeSources, executionToolContext, createSessionStateTools, buildSessionStateBlock, runSessionStateDiff, type ScopeSource, type ScopeEvidence, type StreamFn } from '@use-brian/core'
@@ -30,6 +30,118 @@ describe.sequential('[COMP:api/application-persistence] actual transcript persis
   let independent: Awaited<ReturnType<typeof persistentSourceFixture>> | undefined
   afterEach(async () => { await independent?.cleanup(); independent = undefined; await fixture?.cleanup(); fixture = undefined })
   afterAll(async () => { await getAppPool().end(); await getPool().end() })
+
+  it('ignores caller temporary tables when admitting canonical context metadata and payload',async()=>{
+    fixture=await persistentContextFixture();const f=fixture,history=await f.history()
+    const episode=await createDbEpisodicStore().create({sessionId:f.session.id,userId:f.ownerId,assistantId:f.assistantId,
+      topicLabel:'fictional canonical context',summary:'Fictional canonical context',messageSpan:{fromSequence:1,toSequence:3,turnCount:3},authority:await f.modelContext(),
+      derivation:{producer:'fixture:canonical-schema-path',sources:history.flatMap(boundScopeSources)}})
+    const actualId=boundScopeSources(episode)[0].resourceId,forgedId=randomUUID(),execution=await f.execution(f.firstId),client=await getAppPool().connect()
+    expect((await f.pool.query('SELECT id FROM public.session_context_scope_revisions WHERE id=$1',[forgedId])).rows).toEqual([])
+    try{await runWithAgentAccess(execution.security.access,async()=>{
+      await client.query('BEGIN');await applyRLSGucs(client,f.firstId);await applyApplicationRLSContext(client,execution)
+      const configurations=(await client.query<{proname:string;proconfig:string[]}>(`SELECT proname,proconfig FROM pg_catalog.pg_proc
+        WHERE pronamespace='public'::regnamespace AND (proname LIKE 'session_context_%' OR proname LIKE 'guard_session_context_%'
+         OR proname=ANY($1::text[]))`,[['scope_source_table','hold_scope_descendants','read_scope_source','purge_session_context_parent',
+          'session_personal_audience','session_workspace_audience','session_project_audience','read_admitted_native_scope_snapshot',
+          'read_entity_derivation_source','read_session_context_revision','validate_session_context_revision_pair','guard_episodic_promotion',
+          'guard_session_message_annotation_head','purge_session_message_annotations','read_admitted_session_context_dependencies',
+          'application_memory_field_ancestry_allows','application_memory_unproven_ancestry_allows']])).rows
+      expect(configurations).toHaveLength(25)
+      for(const configuration of configurations)expect(configuration.proconfig,configuration.proname).toContain('search_path=pg_catalog, public, pg_temp')
+      await client.query('CREATE TEMP TABLE session_context_scope_revisions AS SELECT * FROM public.session_context_scope_revisions WITH NO DATA')
+      await client.query('CREATE TEMP TABLE session_context_revision_contents AS SELECT * FROM public.session_context_revision_contents WITH NO DATA')
+      await client.query(`INSERT INTO pg_temp.session_context_scope_revisions
+        (id,workspace_id,session_id,parent_kind,parent_id,user_id,assistant_id,sensitivity,compartments,project_ids,scope_version,scope_held,payload_sha256)
+        VALUES($1,$2,$3,'compact_summary',$3,NULL,NULL,'internal','{}','{}',1,false,repeat('0',64))`,[forgedId,f.workspaceId,f.session.id])
+      await client.query('INSERT INTO pg_temp.session_context_revision_contents(workspace_id,revision_id,content) VALUES($1,$2,$3)',
+        [f.workspaceId,forgedId,{summary:'Fictional untrusted temporary payload',boundarySequence:1}])
+      const forged=(await client.query("SELECT read_admitted_native_scope_snapshot($1,'session_context_revision',$2) AS source",[f.workspaceId,forgedId])).rows[0].source
+      const forgedPayload=(await client.query('SELECT read_session_context_revision($1,$2) AS content',[f.workspaceId,forgedId])).rows[0].content
+      const actual=(await client.query("SELECT read_admitted_native_scope_snapshot($1,'session_context_revision',$2) AS source",[f.workspaceId,actualId])).rows[0].source
+      const actualPayload=(await client.query('SELECT read_session_context_revision($1,$2) AS content',[f.workspaceId,actualId])).rows[0].content
+      expect(forged).toMatchObject({held:true})
+      expect(forgedPayload).toBeNull()
+      expect(actual).toMatchObject({held:false,resourceId:actualId})
+      expect(actualPayload).toMatchObject({summary:'Fictional canonical context'})
+    })}finally{releaseApplicationTransactionBinding(client);await client.query('ROLLBACK');client.release()}
+  })
+
+  it('withholds context-backed memory before actual payload, search, index, ranking and counts while a second reader remains usable',async()=>{
+    fixture=await persistentContextFixture()
+    const f=fixture,history=await f.history(),episodes=createDbEpisodicStore(),authority=await f.modelContext()
+    const episode=await episodes.create({sessionId:f.session.id,userId:f.ownerId,assistantId:f.assistantId,topicLabel:'fictional memory-reader topic',summary:'Fictional retained memory-reader detail',
+      messageSpan:{fromSequence:1,toSequence:3,turnCount:3},authority,derivation:{producer:'fixture:actual-memory-reader',sources:history.flatMap(boundScopeSources)}})
+    await f.pool.query('UPDATE episodic_memories SET access_count=1,survival_count=2 WHERE id=$1',[episode.id])
+    const promoted=await episodes.promote!(episode.id,authority),memories=createDbMemoryStore()
+    const original=(await f.pool.query("SELECT read_scope_source($1,'memory',$2) AS source",[f.workspaceId,promoted.memoryId])).rows[0].source
+    const target=await createWorkspaceChatSession({workspaceId:f.workspaceId,assistantId:f.assistantId,starterUserId:f.ownerId,effectiveClearance:'internal',authenticatedHuman:true})
+    const wideTarget=await createWorkspaceChatSession({workspaceId:f.workspaceId,assistantId:f.assistantId,starterUserId:f.ownerId,effectiveClearance:'confidential',authenticatedHuman:true})
+    async function reader(userId:typeof f.firstId,session:typeof f.session){
+      const execution=await f.execution(userId,session)
+      const context={...executionToolContext(execution,{appId:'fixture'}),workspaceId:f.workspaceId,assistantKind:execution.assistant.kind}
+      return{body:await memories.getById(context,promoted.memoryId),index:await memories.getIndex(context),
+        search:await memories.search(context,{query:'fictional'}),prefix:await memories.search(context,{query:'',idPrefix:promoted.memoryId.slice(0,12)}),
+        ranked:await memories.getIndexRanked!(context,50),count:await memories.count(context)}
+    }
+    const before=await reader(f.firstId,target)
+    expect(before.body).toMatchObject({id:promoted.memoryId})
+    for(const rows of [before.index,before.search,before.prefix,before.ranked.rows])expect(rows).toContainEqual(expect.objectContaining({id:promoted.memoryId}))
+    expect(before.count).toBe(1);expect(before.ranked.totalCount).toBe(1)
+    await f.pool.query("UPDATE sessions SET effective_clearance='confidential' WHERE id=$1",[f.session.id])
+    const denied=await reader(f.firstId,target)
+    expect(denied.body).toBeNull()
+    for(const rows of [denied.index,denied.search,denied.prefix,denied.ranked.rows])expect(rows).toEqual([])
+    expect(denied.count).toBe(0);expect(denied.ranked.totalCount).toBe(0)
+    const rawExecution=await f.execution(f.firstId,target),raw=await getAppPool().connect()
+    try{await runWithAgentAccess(rawExecution.security.access,async()=>{
+      await raw.query('BEGIN');await applyRLSGucs(raw,f.firstId);await applyApplicationRLSContext(raw,rawExecution)
+      expect((await raw.query('SELECT count(*)::int AS count FROM memories WHERE workspace_id=$1',[f.workspaceId])).rows).toEqual([{count:0}])
+      expect((await raw.query("SELECT summary FROM memories WHERE id=$1 AND summary LIKE 'Recurring%'",[promoted.memoryId])).rows).toEqual([])
+    })}finally{releaseApplicationTransactionBinding(raw);await raw.query('ROLLBACK');raw.release()}
+    const second=await reader(f.secondId,wideTarget)
+    expect(second.body).toMatchObject({id:promoted.memoryId})
+    for(const rows of [second.index,second.search,second.prefix,second.ranked.rows])expect(rows).toContainEqual(expect.objectContaining({id:promoted.memoryId}))
+    expect(second.count).toBe(1);expect(second.ranked.totalCount).toBe(1)
+    expect((await f.pool.query("SELECT read_scope_source($1,'memory',$2) AS source",[f.workspaceId,promoted.memoryId])).rows[0].source).toEqual(original)
+  })
+
+  it('holds protected memory in unproved system projections while ordinary native entries remain usable',async()=>{
+    fixture=await persistentContextFixture();const f=fixture,history=await f.history(),episodes=createDbEpisodicStore(),authority=await f.modelContext()
+    const episode=await episodes.create({sessionId:f.session.id,userId:f.ownerId,assistantId:f.assistantId,topicLabel:'fictional system topic',summary:'Fictional protected system context',
+      messageSpan:{fromSequence:1,toSequence:3,turnCount:3},authority,derivation:{producer:'fixture:system-parent',sources:history.flatMap(boundScopeSources)}})
+    await f.pool.query('UPDATE episodic_memories SET access_count=1,survival_count=2 WHERE id=$1',[episode.id])
+    const promoted=await episodes.promote!(episode.id,authority),memories=createDbMemoryStore(),first=await f.modelContext(f.firstId)
+    const retained=(await readSessionContextRevisions(f.session.id,'episodic_memory',first,{includePromoted:true}))[0]
+    expect(retained).toBeTruthy()
+    const writer=await f.pool.connect();let privateId:string
+    try{privateId=await runWithAgentAccess(first.execution.security.access,async()=>{
+      await writer.query('BEGIN');await applyRLSGucs(writer,f.firstId);await applyApplicationRLSContext(writer,first.execution)
+      await validateCallerScopeEvidence({sources:boundScopeSources(retained)},first.execution.security.ceiling,writer)
+      const memory=await createMemory({workspaceId:f.workspaceId,userId:f.firstId,assistantId:f.assistantId,createdByUserId:f.firstId,summary:'Fictional private protected context',sensitivity:'internal',
+        derivationTarget:{userId:f.firstId,assistantId:null},derivation:{producer:'fixture:private-system-parent',sources:boundScopeSources(retained)}},undefined,writer)
+      await writer.query('COMMIT');return memory.id
+    })}finally{releaseApplicationTransactionBinding(writer);await writer.query('ROLLBACK');writer.release()}
+    const nativeShared=await f.memory('Fictional native shared content'),nativePrivate=await createMemory({workspaceId:f.workspaceId,userId:f.firstId,assistantId:f.assistantId,createdByUserId:f.firstId,summary:'Fictional native private content',sensitivity:'internal'})
+    const ordinary={...executionToolContext(first.execution,{appId:'fixture'}),workspaceId:f.workspaceId,assistantKind:first.execution.assistant.kind},unproved={...ordinary,systemRead:true}
+    expect(await memories.getById(ordinary,promoted.memoryId)).toMatchObject({id:promoted.memoryId})
+    expect(await memories.getById(ordinary,privateId)).toMatchObject({id:privateId})
+    for(const id of [promoted.memoryId,privateId]){
+      expect(await memories.getById(unproved,id)).toBeNull()
+      expect(await memories.getByIdSystem!(id)).toBeNull()
+    }
+    for(const id of [nativeShared.id,nativePrivate.id])expect(await memories.getByIdSystem!(id)).toMatchObject({id})
+    const expected=[nativeShared.id,nativePrivate.id].sort()
+    expect((await memories.getIndex(unproved)).map(row=>row.id).sort()).toEqual(expected)
+    expect((await memories.search(unproved,{query:'fictional'})).map(row=>row.id).sort()).toEqual(expected)
+    const ranked=await memories.getIndexRanked!(unproved,50)
+    expect(ranked.rows.map(row=>row.id).sort()).toEqual(expected);expect(ranked.totalCount).toBe(2);expect(await memories.count(unproved)).toBe(2)
+    expect((await memories.getIndexSystem!(f.assistantId,f.firstId)).map(row=>row.id)).toEqual([nativePrivate.id])
+    expect((await memories.getWorkspaceIndexSystem!(f.assistantId,f.workspaceId)).map(row=>row.id).sort()).toEqual(expected)
+    expect((await getAppPool().query(`SELECT has_function_privilege(current_user,'application_memory_field_ancestry_before_context(uuid,uuid,text)','EXECUTE') AS previous,
+      has_function_privilege(current_user,'application_memory_unproven_ancestry_allows(uuid,uuid,text)','EXECUTE') AS private,
+      has_function_privilege(current_user,'application_memory_field_ancestry_allows(uuid,uuid,text)','EXECUTE') AS current`)).rows[0]).toEqual({previous:false,private:false,current:true})
+  })
 
   it('rechecks a cached native memory persistent parent from another current destination session',async()=>{
     fixture=await persistentContextFixture()
