@@ -31,7 +31,17 @@ describe.sequential('[COMP:api/application-persistence] actual knowledge project
   if(projection==='child count')expect(row).toMatchObject({childCount:1})
   else expect(row).toMatchObject({relatedIds:[c.child.id]})
   const sources=boundScopeSources(row!)
-  expect(sources.map(source=>source.resourceId).sort()).toEqual([c.parent.id,c.child.id].sort())
+  expect(sources.filter(source=>source.resourceKind==='knowledge_entry').map(source=>source.resourceId).sort()).toEqual([c.parent.id,c.child.id].sort())
+  if(projection==='point relation')expect(sources).toHaveLength(2)
+  else{
+   const fields=sources.filter(source=>source.resourceKind==='application_field')
+   expect(fields).toHaveLength(3);expect(sources).toHaveLength(5)
+   const observations=(await c.f.pool.query(`SELECT r.selection,r.resource_id FROM application_field_resources r
+    JOIN application_field_observations o ON o.workspace_id=r.workspace_id AND o.resource_id=r.id
+    WHERE r.workspace_id=$1 AND r.id=ANY($2::uuid[]) AND r.type_key='knowledge_entry'`,[c.f.workspaceId,fields.map(source=>source.resourceId)])).rows
+   expect(observations.filter(row=>row.selection==='query').map(row=>row.resource_id).sort()).toEqual([c.parent.id,c.child.id].sort())
+   expect(observations.filter(row=>row.selection==='query_domain')).toHaveLength(1)
+  }
   expect(sources).toEqual(expect.arrayContaining([expect.objectContaining({resourceId:c.child.id,version:(await c.source(c.child.id)).version,sensitivity:'confidential'})]))
   expect(scopeEvidenceFromRows([row]).sensitivity).toBe('confidential')
  })

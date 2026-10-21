@@ -132,6 +132,47 @@ export function readRetainedContextFrame<T>(authority:SessionContextAuthority,so
  return transaction(authority,structuredClone(sources),'context',false,capture)
 }
 
+/** Current native query frame. Physical metadata grants nothing: only genuine
+ * source denials exclude candidates, and one fresh operation pins the admitted
+ * cohort after native lock waits. Original caller/lease validation brackets it.
+ */
+export async function readRetainedQueryFrame<T>(authority:SessionContextAuthority,rawRoots:readonly ScopeSource[],
+ capture:(client:PoolClient)=>Promise<{value:T;sources:readonly ScopeSource[]}>):Promise<T>{
+ const {execution}=requireAuthority(authority),roots=structuredClone(rawRoots)
+ await execution.security.authority.assertCurrent()
+ if(roots.some(root=>root.workspaceId!==execution.security.access.workspaceId))changed()
+ const wiring=getSharedRetainedSourceAuthority(),host=retainedHosts.get(execution)
+ const prepare=host??(wiring?((e:ExecutionContext,s:readonly ScopeSource[],a:'context'|'retain')=>wiring.coordinator.prepare(e,s,a)):undefined)
+ const admitted:ScopeSource[]=[]
+ for(const root of roots){
+  if(root.resourceKind!=='external_source'&&!(await readExternalSourceAncestors(root.workspaceId,[root])).length)continue
+  if(!prepare)changed()
+  try{await prepare(execution,[root],'context');admitted.push(root)}
+  catch(error){if(!(error instanceof SourceProtocolError)||error.code!=='source_access_denied')throw error}
+ }
+ const assertWiring=()=>{if(host!==retainedHosts.get(execution)||!host&&wiring!==getSharedRetainedSourceAuthority())changed()}
+ const captured=await transaction(authority,[],'context',false,async client=>{
+  assertWiring()
+  const proof=admitted.length?await prepare!(execution,admitted,'context'):undefined
+  if(proof)await pinPreparedExternalSourceAuthority(client,execution,proof)
+  const result=await capture(client)
+  await validateCallerScopeEvidence({sources:[...result.sources]},execution.security.ceiling,client)
+  assertWiring();return result
+ })
+ if(admitted.length){
+  let current:PreparedExternalSourceAuthority|undefined
+  await transaction(authority,[],'context',false,async client=>{
+   assertWiring();current=await prepare!(execution,admitted,'context')
+   await pinPreparedExternalSourceAuthority(client,execution,current)
+   await validateCallerScopeEvidence({sources:[...captured.sources]},execution.security.ceiling,client)
+   assertWiring()
+  })
+  if(!current)changed()
+  await assertPreparedExternalSourceAuthorityCurrent(execution,current)
+ }
+ assertWiring();await execution.security.authority.assertCurrent();return captured.value
+}
+
 const queryFloor=z.object({workspaceId:z.string().uuid(),userId:z.string().uuid().nullable(),assistantId:z.null(),
  sensitivity:z.enum(['public','internal','confidential']),compartments:z.array(z.string()),projectIds:z.array(z.string().uuid())}).strict()
 async function pinNativeSessionQueryFloor(authority:SessionContextAuthority,client:PoolClient){

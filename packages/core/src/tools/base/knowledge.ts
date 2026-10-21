@@ -191,9 +191,10 @@ export function createKnowledgeTools(
           },
           input.query,
           10,
+          ...(context.executionContext&&context.scopeAccumulator?[{execution:context.executionContext,accumulator:context.scopeAccumulator}] as const:[] as const),
         )
         if (results.length === 0) {
-          return { data: 'No knowledge entries found for this query. Try browseKnowledge to explore the knowledge base structure.' }
+          return { data: 'No knowledge entries found for this query. Try browseKnowledge to explore the knowledge base structure.',scopeEvidence:scopeEvidenceFromRows([results]) }
         }
         return {
           data: results.map((r) => ({
@@ -203,7 +204,7 @@ export function createKnowledgeTools(
             summary: r.summary,
             tags: r.tags,
           })),
-          scopeEvidence: scopeEvidenceFromRows(results),
+          scopeEvidence: scopeEvidenceFromRows([results]),
         }
       } catch (err) {
         return toolFailure(err, {
@@ -242,9 +243,10 @@ export function createKnowledgeTools(
             projectIds: context.projectIds,
           },
           input.path ?? '',
+          ...(context.executionContext&&context.scopeAccumulator?[{execution:context.executionContext,accumulator:context.scopeAccumulator}] as const:[] as const),
         )
         if (entries.length === 0) {
-          return { data: input.path ? `No entries found at path "${input.path}".` : 'The knowledge base is empty.' }
+          return { data: input.path ? `No entries found at path "${input.path}".` : 'The knowledge base is empty.',scopeEvidence:scopeEvidenceFromRows([entries]) }
         }
         return {
           data: entries.map((r) => ({
@@ -253,7 +255,7 @@ export function createKnowledgeTools(
             title: r.title,
             summary: r.summary,
           })),
-          scopeEvidence: scopeEvidenceFromRows(entries),
+          scopeEvidence: scopeEvidenceFromRows([entries]),
         }
       } catch (err) {
         return toolFailure(err, {

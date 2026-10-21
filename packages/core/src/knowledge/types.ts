@@ -43,8 +43,8 @@ export type KnowledgeEntryDetail = {
 }
 
 export type KnowledgeStoreInterface = {
-  search(ctx: AccessContext, query: string, limit?: number): Promise<KnowledgeSearchResult[]>
-  listByPath(ctx: AccessContext, pathPrefix: string): Promise<KnowledgeSearchResult[]>
+  search(ctx: AccessContext, query: string, limit?: number, authority?: SessionContextAuthority): Promise<KnowledgeSearchResult[]>
+  listByPath(ctx: AccessContext, pathPrefix: string, authority?: SessionContextAuthority): Promise<KnowledgeSearchResult[]>
   getById(ctx: AccessContext, id: string, authority?: SessionContextAuthority): Promise<KnowledgeEntryDetail | null>
   create(params: {
     workspaceId: string
