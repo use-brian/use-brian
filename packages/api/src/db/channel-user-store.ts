@@ -287,9 +287,18 @@ export async function resolveChannelUser(
       [cached.userId],
     )
     if (result.rows[0]) {
-      return { user: result.rows[0], isIdentified: cached.email !== null }
+      const user = result.rows[0]
+      // An email-bearing shadow is still an unmatched identity. Recheck it
+      // promptly so a provider correction or later signup can reach the real
+      // account instead of retaining the original mismatch for 24 hours.
+      const refreshFeishuShadow = provider === 'feishu'
+        && user.authProvider === 'channel'
+        && Date.now() - cached.cachedAt.getTime() >= 5 * 60 * 1000
+      if (!refreshFeishuShadow) {
+        return { user, isIdentified: cached.email !== null }
+      }
     }
-    // User was deleted — fall through to re-resolve
+    // Deleted users and provisional Feishu shadows fall through to re-resolve.
   }
 
   // 2. Fetch profile from provider
