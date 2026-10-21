@@ -1,3 +1,4 @@
+import {takeTurnLease} from '../../turn/lease.js'
 import {afterAll,afterEach,describe,expect,it} from 'vitest'
 import {boundScopeSources} from '@use-brian/core'
 import {applyRLSGucs,getAppPool,getPool,rollbackAndRelease,runWithAgentAccess} from '../../db/client.js'
@@ -160,6 +161,44 @@ describe.sequential('[COMP:api/application-persistence] actual field-aware nativ
    await expect(client.query('SELECT publish_native_session_message($1,$2,$3,$4,$5,$6)',[f.workspaceId,f.session.id,
     {role:'assistant',content:params.content,channelMessageId:null,senderUserId:null,senderAssistantId:null,attachments:[]},params.derivation.producer,JSON.stringify([source]),f.envelope])).rejects.toMatchObject({code:'22023',message:'scope_evidence_missing'})
   })}finally{await rollbackAndRelease(client)}
+  expect((await f.pool.query('SELECT count(*)::int AS count FROM session_messages WHERE session_id=$1',[f.session.id])).rows[0].count).toBe(3)
+ })
+ it('refuses the owner database role at the native turn-token gate',async()=>{
+  fixture=await persistentContextFixture();const f=fixture,{authority}=await prepared(),client=await getPool().connect()
+  const slot=await takeTurnLease({sessionId:f.session.id,admission:'room',assistantId:f.assistantId})
+  if(!slot.taken)throw new Error('Expected the actual native turn slot')
+  try{await runWithAgentAccess(authority.execution.security.access,async()=>{
+   await client.query('BEGIN');await applyRLSGucs(client,f.ownerId)
+   await expect(client.query('SELECT native_session_turn_publication_allowed($1,$2,$3,false)',[f.workspaceId,f.session.id,slot.token]))
+    .rejects.toMatchObject({code:'42501',message:'scope_operation_denied'})
+  })}finally{await rollbackAndRelease(client)}
+ })
+ it('publishes buffered rows only under their actual active normal turn token',async()=>{
+  fixture=await persistentContextFixture();const f=fixture,{authority,sources,params}=await prepared()
+  const slot=await takeTurnLease({sessionId:f.session.id,admission:'room',assistantId:f.assistantId})
+  if(!slot.taken)throw new Error('Expected the actual native turn slot')
+  const token=slot.token
+  const actual=(await f.pool.query('SELECT status,turn_lease_token,last_turn_lease_token FROM sessions WHERE id=$1',[f.session.id])).rows[0]
+  expect(actual).toMatchObject({status:'running',turn_lease_token:token,last_turn_lease_token:token})
+  const row=await withSessionMessagePublication(authority,sources,async client=>{
+   // Ordinary RLS still denies an UPDATE-lock read of the shared parent.
+   expect((await client.query('SELECT id FROM sessions WHERE id=$1 FOR UPDATE',[f.session.id])).rows).toEqual([])
+   return addSessionMessage(params,client)
+  },{turnToken:token})
+  expect(row.sequenceNum).toBe(4)
+ })
+ it.each(['wrong-token','released','successor','finished-successor'] as const)('rejects normal buffered publication after an actual %s lease state',async state=>{
+  fixture=await persistentContextFixture();const f=fixture,{authority,sources,params}=await prepared()
+  const slot=await takeTurnLease({sessionId:f.session.id,admission:'room',assistantId:f.assistantId})
+  if(!slot.taken)throw new Error('Expected the actual native turn slot')
+  const token=slot.token
+  if(state==='released')await releaseTurnLease(f.session.id,'completed',token)
+  if(state==='successor'||state==='finished-successor'){
+   const successor=await startTurnLease(f.session.id,f.assistantId)
+   if(state==='finished-successor')await releaseTurnLease(f.session.id,'completed',successor)
+  }
+  await expect(withSessionMessagePublication(authority,sources,client=>addSessionMessage(params,client),
+   {turnToken:state==='wrong-token'?crypto.randomUUID():token})).rejects.toThrow('scope_source_changed')
   expect((await f.pool.query('SELECT count(*)::int AS count FROM session_messages WHERE session_id=$1',[f.session.id])).rows[0].count).toBe(3)
  })
  it.each(['wrong-token','released','successor','finished-successor'] as const)('rejects stopped publication after an actual %s lease state',async state=>{

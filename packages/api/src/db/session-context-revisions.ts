@@ -37,7 +37,7 @@ function requireAuthority(authority: SessionContextAuthority | undefined): Sessi
   return authority
 }
 async function transaction<T>(authority: SessionContextAuthority, sources: readonly ScopeSource[], action: 'context' | 'retain',
-  owner: boolean, run: (client: PoolClient) => Promise<T>, writeSessionId?: string, stoppedTurnToken?:string): Promise<T> {
+  owner: boolean, run: (client: PoolClient) => Promise<T>, writeSessionId?: string, stoppedTurnToken?:string, activeTurnToken?:string): Promise<T> {
   try {
     const { execution, accumulator } = requireAuthority(authority), before = JSON.stringify(accumulator.evidence)
     await execution.security.authority.assertCurrent()
@@ -78,10 +78,10 @@ async function transaction<T>(authority: SessionContextAuthority, sources: reado
         else await client.query(owner
           ? 'SELECT id FROM workspaces WHERE id=$1 FOR NO KEY UPDATE'
           : 'SELECT id FROM workspaces WHERE id=$1 FOR SHARE', [execution.security.access.workspaceId])
-        if (finalizing) {
-          const held=(await client.query<{token:string|null;lastToken:string|null;status:string;reason:string|null}>("SELECT turn_lease_token::text AS token,last_turn_lease_token::text AS \"lastToken\",status,turn_end_reason AS reason FROM sessions WHERE workspace_id=$1 AND id=$2 FOR UPDATE",[execution.security.access.workspaceId,writeSessionId])).rows[0]
-          if(!held||held.lastToken!==stoppedTurnToken
-            ||!(held.token===stoppedTurnToken&&held.status==='running'||held.token===null&&held.reason==='stopped_by_user'))changed()
+        if (finalizing || activeTurnToken) {
+          const admitted=(await client.query<{allowed:boolean}>('SELECT native_session_turn_publication_allowed($1,$2,$3,$4) AS allowed',
+            [execution.security.access.workspaceId,writeSessionId,activeTurnToken??stoppedTurnToken,finalizing])).rows[0]?.allowed
+          if(admitted!==true)changed()
         }
         await applyApplicationRLSContext(client, execution)
         // Take the publication lock before any native source reader takes a
@@ -189,13 +189,15 @@ export async function readSessionQueryFrame<T>(authority:SessionContextAuthority
 const messagePublications=new WeakMap<object,{authority:SessionContextAuthority}>()
 /** Atomic native transcript batch; the callback never receives an owner connection. */
 export async function withSessionMessagePublication<T>(authority:SessionContextAuthority,sources:readonly ScopeSource[],
- run:(client:PoolClient)=>Promise<T>,options?:{stoppedTurnToken?:string}):Promise<T>{
+ run:(client:PoolClient)=>Promise<T>,options?:{turnToken?:string;stoppedTurnToken?:string}):Promise<T>{
  const {execution}=requireAuthority(authority)
+ const turnToken=options?.turnToken,stoppedTurnToken=options?.stoppedTurnToken
+ if(turnToken&&stoppedTurnToken)changed()
  if(execution.lifecycle.sessionPersisted===false||execution.identity.kind!=='attended'||execution.identity.principal.kind!=='workspace_member')changed()
  return transaction(authority,structuredClone(sources),'retain',false,async client=>{
   messagePublications.set(client,{authority})
   try{return await run(client)}finally{messagePublications.delete(client)}
- },execution.lifecycle.sessionId,options?.stoppedTurnToken)
+ },execution.lifecycle.sessionId,stoppedTurnToken,turnToken)
 }
 /** A JSON descriptor, owner transaction or retained callback cannot mint a live frame. */
 export function assertSessionMessagePublicationFrame(client:object,authority:SessionContextAuthority):void{

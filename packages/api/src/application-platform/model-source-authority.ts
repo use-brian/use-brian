@@ -1,3 +1,4 @@
+import {tryNativeInvocationEvidence} from '../context-scope/native-invocation-evidence.js'
 import { nativeSessionQueryContextSources } from './session-query-context.js'
 import { readPersistentSessionContextAncestors } from '../db/session-context-ancestry.js'
 /** Fresh source permission at model input/output boundaries. [COMP:api/external-source-access] */
@@ -40,6 +41,13 @@ async function assertSourceModelAuthority(context: ToolContext, action: 'context
     await execution.security.authority.assertCurrent()
     const workspaceId = execution.security.access.workspaceId
     if (sources.some(source => source.workspaceId !== workspaceId)) denied()
+    const native=await tryNativeInvocationEvidence(execution,evidence.evidence,execution.security.ceiling,action==='deliver'?'audience':'caller')
+    if(native){
+      await execution.security.authority.assertCurrent()
+      if(JSON.stringify(accumulator.evidence)!==originalEvidence)denied()
+      accumulator.note(native);return
+    }
+
     evidence.note({sources:await readPersistentSessionContextAncestors(workspaceId,sources)})
     sources=evidence.evidence.sources ?? []
     const ancestors = await readExternalSourceAncestors(workspaceId, sources)
@@ -88,7 +96,7 @@ async function assertSourceModelAuthority(context: ToolContext, action: 'context
         }
         if (prepared) await pinPreparedExternalSourceAuthority(client, execution, prepared)
         const current = await validate(evidence.evidence, execution.security.ceiling, client)
-        await execution.security.authority.assertCurrent()
+        // A read-only proof is checked again after COMMIT below.
         if (wiring && getSharedRetainedSourceAuthority() !== wiring) denied()
         await client.query('COMMIT')
         return current

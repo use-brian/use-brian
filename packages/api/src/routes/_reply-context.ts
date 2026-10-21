@@ -1,3 +1,4 @@
+import { bindScopeSources, boundScopeSources } from '@use-brian/core'
 /**
  * Shared reply-text resolver for the four channel routes.
  *
@@ -24,12 +25,12 @@ export type ResolveReplyParams = {
   replyToMessageId: string | number | null | undefined
   session: Session
   /**
-   * Optional raw channel payload — Telegram uses this to read the
-   * replied-to text directly from the webhook without a DB lookup.
+   * Legacy raw channel payload. A supplied admitted history always takes
+   * precedence and never falls back to a webhook quote.
    */
   raw?: unknown
-  /** Already-authorized room rows. Never fetch an unfiltered stored quote.
-   * Provider-carried Telegram quotes remain part of the new inbound input. */
+  /** Admitted rows and query observations. Missing targets never trigger a
+   * raw database or provider-quote fallback on any transport. */
   readableHistory?: readonly SessionMessage[]
   /**
    * Optional user-selected snippet from the client (web only today).
@@ -65,6 +66,13 @@ export async function resolveReplyText(
   const idStr = String(params.replyToMessageId)
   if (!idStr || idStr === 'null') return null
 
+  if (params.readableHistory !== undefined) {
+    const hit = params.readableHistory.find(row => row.sessionId === params.session.id
+      && (params.channelType === 'web' ? row.id === idStr : row.channelMessageId === idStr))
+    const reply = hit ? applySnippet(makeResolved(hit, idStr), params.clientSnippet) : null
+    return reply ? bindScopeSources(reply, [...boundScopeSources(reply), ...boundScopeSources(params.readableHistory)]) : null
+  }
+
   if (params.channelType === 'telegram') {
     return resolveTelegramReply(params.raw, idStr)
   }
@@ -97,7 +105,7 @@ function applySnippet(
   if (!resolved) return resolved
   const trimmed = snippet?.trim()
   if (!trimmed) return resolved
-  return { ...resolved, text: trimmed }
+  return bindScopeSources({ ...resolved, text: trimmed }, boundScopeSources(resolved))
 }
 
 function resolveTelegramReply(raw: unknown, idStr: string): ResolvedReply | null {
@@ -152,12 +160,12 @@ async function resolveByChannelId(
 function makeResolved(msg: SessionMessage, messageId: string): ResolvedReply | null {
   const text = extractMessageText(msg.content)
   if (!text) return null
-  return {
+  return bindScopeSources({
     text,
     messageId,
     fromAssistant: msg.role === 'assistant',
     topicLabel: msg.topicLabel,
-  }
+  }, boundScopeSources(msg))
 }
 
 function extractMessageText(content: unknown): string {

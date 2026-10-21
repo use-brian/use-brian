@@ -1,3 +1,4 @@
+import { classifyAttendedSessionMessage, readAttendedSessionHistory } from './attended-session-context.js'
 import type { PoolClient } from 'pg'
 import { withSessionMessagePublication } from '../db/session-context-revisions.js'
 import { createAttendedDeliveryAudienceAuthorizer } from '../context-scope/attended-audience.js'
@@ -3051,7 +3052,8 @@ export function chatRoutes(options: WebChatOptions): Router {
         ? createAttendedDeliveryAudienceAuthorizer(executionContext)
         : createDeliveryAudienceAuthorizer()
       const assertDeliveryAudience = (): Promise<void> => turnTiming.time('audience_check', async () => {
-        await authority.assertCurrent()
+        // The native authorizer owns the same original lease at entry and return.
+        if (!nativeTranscriptAuthority) await authority.assertCurrent()
         const decision = await authorizeDeliveryAudience({
           workspaceId: assistant.workspaceId ?? '',
           assistantId: assistant.id,
@@ -3974,18 +3976,39 @@ export function chatRoutes(options: WebChatOptions): Router {
         }
       }
 
+      // Authored input precedes generated annotation. The current typed query
+      // binds both this row and the historical classifier/reply inputs.
+      const earlyStoredUserMsg = nativeTranscriptAuthority
+        ? prePersistedUserMsg ?? await addSessionMessage({
+            sessionId: session.id,
+            role: 'user',
+            content: userContentBlocks.length > 0 ? userContentBlocks : [{ type: 'text', text: userMessageText }],
+            senderUserId: user.id,
+            scope: inputMessageScope,
+          })
+        : undefined
+      const nativeClassification = nativeTranscriptAuthority && earlyStoredUserMsg
+        ? await classifyAttendedSessionMessage({
+            authority: nativeTranscriptAuthority, session, message: earlyStoredUserMsg,
+            provider: backgroundProvider, model: backgroundModel, decisionRuntime: options.decisionRuntime,
+            reply: { channelType: 'web', replyToMessageId: replyTo?.id ?? null, clientSnippet: replyTo?.text },
+          })
+        : undefined
+
       // ── Reply resolution + topic classification ────────────────
       // Resolve the replied-to message text (if any) and classify the
       // current turn's topic. Classifier input: recent user turns, known
       // topics in the session, the reply target's text as a strong prior.
-      const replyResolved = await resolveReplyText({
+      const replyResolved = nativeClassification ? nativeClassification.reply : await resolveReplyText({
         channelType: 'web',
         replyToMessageId: replyTo?.id ?? null,
         session,
         clientSnippet: replyTo?.text,
       })
 
-      const preExistingDbMessages = adaptiveSessionId === session.id
+      const preExistingDbMessages = nativeClassification && earlyStoredUserMsg
+        ? nativeClassification.history.filter(row => row.sequenceNum < earlyStoredUserMsg.sequenceNum)
+        : adaptiveSessionId === session.id
         ? adaptiveDbMessages
         : await getSessionMessages(session.id, { excludeHeld: true })
       const recentUserTurns: ClassifierRecentTurn[] = preExistingDbMessages
@@ -4002,27 +4025,29 @@ export function chatRoutes(options: WebChatOptions): Router {
         })
         .filter((t) => t.text.length > 0)
 
-      const knownTopics = await getSessionTopicLabels(session.id, 20)
+      const knownTopics = nativeClassification ? [] : await getSessionTopicLabels(session.id, 20)
 
-      let classification: TopicClassification | null = null
-      try {
-        classification = await classifyTopic({
-          provider: backgroundProvider,
-          // Background lane — a per-turn classifier is exactly the invisible
-          // work cost-and-pricing.md → "Standard-tier routing" pins to Flash
-          // Lite (its sibling classifiers already do). Had drifted onto the
-          // Flash 3 chat alias at 2x the rate.
-          model: backgroundModel,
-          recentUserTurns,
-          replyToText: replyResolved?.text ?? null,
-          currentMessage: userMessageText,
-          knownTopicsThisSession: knownTopics,
-          decisionRuntime: options.decisionRuntime,
-          workspaceId: assistant.workspaceId ?? undefined,
-          runId: `memory-topic-${session.id}-${Date.now()}`,
-        })
-      } catch (err) {
-        console.error('[chat] topic classifier failed:', err)
+      let classification: TopicClassification | null = nativeClassification?.classification ?? null
+      if (!nativeClassification) {
+        try {
+          classification = await classifyTopic({
+            provider: backgroundProvider,
+            // Background lane — a per-turn classifier is exactly the invisible
+            // work cost-and-pricing.md → "Standard-tier routing" pins to Flash
+            // Lite (its sibling classifiers already do). Had drifted onto the
+            // Flash 3 chat alias at 2x the rate.
+            model: backgroundModel,
+            recentUserTurns,
+            replyToText: replyResolved?.text ?? null,
+            currentMessage: userMessageText,
+            knownTopicsThisSession: knownTopics,
+            decisionRuntime: options.decisionRuntime,
+            workspaceId: assistant.workspaceId ?? undefined,
+            runId: `memory-topic-${session.id}-${Date.now()}`,
+          })
+        } catch (err) {
+          console.error('[chat] topic classifier failed:', err)
+        }
       }
 
       // Execution-plan lifecycle (anti-leak). Reuse the topic-classifier
@@ -4061,7 +4086,7 @@ export function chatRoutes(options: WebChatOptions): Router {
       // waiting for the slot — reuse it instead of inserting twice.
       let researchActivity: ResearchActivity | null = null
       let researchObserver: ReturnType<typeof createResearchTurnObserver> | null = null
-      const storedUserMsg = prePersistedUserMsg ?? await addSessionMessage({
+      const storedUserMsg = earlyStoredUserMsg ?? prePersistedUserMsg ?? await addSessionMessage({
         sessionId: session.id,
         role: 'user',
         content: userContentBlocks.length > 0
@@ -4279,10 +4304,12 @@ export function chatRoutes(options: WebChatOptions): Router {
       // "Provider signatures".
       // `fromSequence` skips rows already compacted into the most recent
       // boundary; null (never compacted) loads full history.
-      const dbMessages = await getSessionMessages(session.id, {
-        fromSequence: session.compactBoundarySequence,
-        excludeHeld: true,
-      })
+      const dbMessages = nativeTranscriptAuthority
+        ? await readAttendedSessionHistory(nativeTranscriptAuthority, session.id, session.compactBoundarySequence)
+        : await getSessionMessages(session.id, {
+            fromSequence: session.compactBoundarySequence,
+            excludeHeld: true,
+          })
       noteAutomaticScopeEvidence(scopeAccumulator, dbMessages)
       const workflowProposalReceipt = latestWorkflowProposalReceipt(dbMessages)
 
@@ -7027,7 +7054,7 @@ export function chatRoutes(options: WebChatOptions): Router {
         await authority.execute(async () => {
           if (nativeTranscriptAuthority && 'derivation' in batchWrite) {
             return withSessionMessagePublication(nativeTranscriptAuthority, batchWrite.derivation.sources, publish,
-              abortController.signal.aborted && turnLeaseToken ? { stoppedTurnToken: turnLeaseToken } : undefined)
+              turnLeaseToken ? abortController.signal.aborted ? { stoppedTurnToken: turnLeaseToken } : { turnToken: turnLeaseToken } : undefined)
           }
           const tx = await getPool().connect()
           try {
@@ -7512,7 +7539,7 @@ export function chatRoutes(options: WebChatOptions): Router {
           // section 6). See docs/architecture/engine/mid-turn-input.md.
           turnInbox: turnInbox.port,
           },
-          sink: { kind: 'sse', afterLoop: async () => {
+          sink: { kind: 'sse', ...(nativeTranscriptAuthority ? { assertOutputAuthority: assertDeliveryAudience } : {}), afterLoop: async () => {
             await flushBufferedTurns('[Tool did not return a result. Treat as failed and do not retry.]')
             if (!options.sessionStateStore) return
             try {
@@ -7549,7 +7576,7 @@ export function chatRoutes(options: WebChatOptions): Router {
               console.debug('[chat] session-state diff unavailable')
             }
           }, onEvent: async (event) => {
-          await assertDeliveryAudience()
+          if (!nativeTranscriptAuthority) await assertDeliveryAudience()
           researchObserver?.observe(event)
 
           if (event.type === 'text_delta') {

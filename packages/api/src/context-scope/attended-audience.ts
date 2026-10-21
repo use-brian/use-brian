@@ -1,3 +1,4 @@
+import {tryNativeInvocationEvidence} from './native-invocation-evidence.js'
 import { nativeSessionQueryContextSources } from '../application-platform/session-query-context.js'
 /** Native attended recipient admission. [COMP:api/application-persistence] [COMP:api/delivery-authority] */
 import {ContextScopeAccumulator,intersectAccessCeilings,type AccessCeiling,type ExecutionContext,type ScopeEvidence,type ScopeSource} from '@use-brian/core'
@@ -27,7 +28,12 @@ export async function validateAttendedAudienceEvidence(execution:ExecutionContex
   await execution.security.authority.assertCurrent()
   let sources=evidence.evidence.sources??[]
   if(sources.some(source=>source.workspaceId!==workspaceId))denied()
-  if(!sources.length)return validateAudienceScopeEvidence(evidence.evidence,recipient)
+  if(!sources.length){
+   const current=await validateAudienceScopeEvidence(evidence.evidence,recipient)
+   await execution.security.authority.assertCurrent();return current
+  }
+  const native=await tryNativeInvocationEvidence(execution,evidence.evidence,recipient,'audience')
+  if(native){await execution.security.authority.assertCurrent();return native}
   evidence.note({sources:await readPersistentSessionContextAncestors(workspaceId,sources)})
   sources=evidence.evidence.sources??[]
   const fields=await readApplicationFieldAncestors(workspaceId,sources),external=await readExternalSourceAncestors(workspaceId,sources)
@@ -81,7 +87,9 @@ export async function validateAttendedAudienceEvidence(execution:ExecutionContex
    }
    if(prepared)await pinPreparedExternalSourceAuthority(client,execution,prepared)
    const admitted=await validateAudienceScopeEvidence(evidence.evidence,recipient,client)
-   await execution.security.authority.assertCurrent();assertWiring();await client.query('COMMIT');return admitted
+   // This transaction is read-only. The current lease is checked again on
+   // return, after COMMIT and current source-proof checks.
+   assertWiring();await client.query('COMMIT');return admitted
   })}finally{releaseApplicationTransactionBinding(client);await rollbackAndRelease(client)}
   if(contextProof)await assertPreparedExternalSourceAuthorityCurrent(execution,contextProof)
   if(prepared)await assertPreparedExternalSourceAuthorityCurrent(execution,prepared)

@@ -88,13 +88,16 @@ function labelFailure(
   return null
 }
 
+function validateScopeEvidence(evidence:ScopeEvidence,ceiling:AccessCeiling,kind:'caller'|'audience',client:Pick<PoolClient,'query'>|undefined,workflowRunId:string|undefined,nativeOnly:true):Promise<ScopeEvidence|null>
+function validateScopeEvidence(evidence:ScopeEvidence,ceiling:AccessCeiling,kind:'caller'|'audience',client?:Pick<PoolClient,'query'>,workflowRunId?:string,nativeOnly?:false):Promise<ScopeEvidence>
 async function validateScopeEvidence(
   evidence: ScopeEvidence,
   ceiling: AccessCeiling,
   kind: 'caller' | 'audience',
   client?: Pick<PoolClient, 'query'>,
   workflowRunId?: string,
-): Promise<ScopeEvidence> {
+  nativeOnly = false,
+): Promise<ScopeEvidence|null> {
   let failure: ScopeEvidenceFailure | null = null
   let snapshot: ScopeEvidence
   try {
@@ -123,7 +126,7 @@ async function validateScopeEvidence(
     projectIds: snapshot.projectIds ?? [],
   }, ceiling)
   if (failure) throw unavailable(kind, failure)
-  if (!sources.length) return snapshot
+  if (!sources.length) return nativeOnly ? null : snapshot
   if (!client && sources.some(source=>source.resourceKind==='session_context_revision')) throw unavailable(kind,'source_unverifiable')
   // The closed native facade performs the same current checks in one SQL
   // statement. Mixed families and workflow-run profiles retain the original
@@ -144,6 +147,7 @@ async function validateScopeEvidence(
       }
     } catch (error) { throw scopeEvidenceFailureOf(error) ? error : unavailable(kind, 'source_unverifiable', error) }
   }
+  if (nativeOnly) return null
   // Cached native refs retain every immutable context parent. Discovery is
   // metadata only; the caller must still provide a real admitted transaction.
   let persistentAncestry:string
@@ -281,4 +285,9 @@ export async function validateCallerScopeEvidence(evidence: ScopeEvidence, ceili
 /** Final output evidence checked against the current destination audience. */
 export async function validateAudienceScopeEvidence(evidence: ScopeEvidence, ceiling: AccessCeiling, client?: Pick<PoolClient, 'query'>): Promise<ScopeEvidence> {
   return validateScopeEvidence(evidence, ceiling, 'audience', client)
+}
+
+/** Closed native proof only; an unsupported closure must take the original full path. */
+export async function tryValidateNativeScopeEvidence(evidence:ScopeEvidence,ceiling:AccessCeiling,client:Pick<PoolClient,'query'>,kind:'caller'|'audience'):Promise<ScopeEvidence|null>{
+ return validateScopeEvidence(evidence,ceiling,kind,client,undefined,true)
 }
