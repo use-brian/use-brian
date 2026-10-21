@@ -22,6 +22,8 @@ import { parseManifest } from '@use-brian/brian-app'
 import { findOrCreateSession } from '../../db/sessions.js'
 import { authenticateApplicationHome } from '../../application-platform/home-auth.js'
 import { mintBridgeToken } from '../../home-apps/tokens.js'
+import { createWorkspaceStore,type WorkspacePickerPreferenceUpdate } from '../../db/workspace-store.js'
+import { ApplicationManagementService } from '../../application-platform/management.js'
 import { assertSourceModelInputAuthority } from '../../application-platform/model-source-authority.js'
 
 const { assertLocalFixture } = await import(new URL('../../../../../scripts/crm/local-fixture.mjs',import.meta.url).href)
@@ -493,6 +495,139 @@ describe('[COMP:api/policy-epoch] canonical invocation policy epochs', () => {
     await owner.query("UPDATE workspace_access_policies SET classification_mode='legacy' WHERE workspace_id=$1",[workspaceId])
     await expect(beforeConfiguration.security.authority.assertCurrent()).rejects.toMatchObject({ reason: 'authority_changed' })
     await expect((await nativeExecution()).security.authority.assertCurrent()).resolves.toBeUndefined()
+  })
+  it.each(['native','application'] as const)('C10 %s navigation preferences and existing member admission preserve current reads',async kind => {
+    const fixture = await record(),app = await application(fixture,'member'),workspaces = createWorkspaceStore()
+    // Complete any genuine first admission before pinning the invocation.
+    await workspaces.ensureMemberSystem(workspaceId,memberId)
+    const execution = kind === 'native' ? await nativeExecution() : await resolveApplicationExecutionContext(app.authentication)
+    const before = await epoch()
+    const navigationUpdates: readonly WorkspacePickerPreferenceUpdate[] = [{ pinned: true },{ hidden: true },{ opened: true },{ hidden: false },{ pinned: false }]
+    for (const preferences of navigationUpdates) {
+      expect(await workspaces.updatePickerPreferences(memberId,workspaceId,preferences)).not.toBeNull()
+      expect(await epoch()).toEqual(before)
+      await expect(execution.security.authority.assertCurrent()).resolves.toBeUndefined()
+      expect((await queryRecords(fixture,{ fields: ['title'] },execution)).records[0].values.title)
+        .toEqual({ kind: 'text',value: 'Fictional request' })
+    }
+    expect((await workspaces.ensureMemberSystem(workspaceId,memberId)).userId).toBe(memberId)
+    expect(await epoch()).toEqual(before)
+    await expect(execution.security.authority.assertCurrent()).resolves.toBeUndefined()
+    expect((await queryRecords(fixture,{ fields: ['title'] },execution)).records).toHaveLength(1)
+  })
+  it('C10 management spanning a real picker update keeps its current native lease',async () => {
+    const workspaces = createWorkspaceStore()
+    await workspaces.ensureMemberSystem(workspaceId,ownerId)
+    const service = new ApplicationPlatformService([createCanonicalGenericApplicationModule()])
+    class NavigationDuringManagementRead extends ApplicationManagementService {
+      override async list(actor: string,workspace: string) {
+        const clients = await super.list(actor,workspace)
+        // This actual store write occurs after overview constructs its real native
+        // context, and before its unchanged final lease/administrator checks.
+        expect(await workspaces.updatePickerPreferences(actor,workspace,{ opened: true })).not.toBeNull()
+        await workspaces.ensureMemberSystem(workspace,actor)
+        return clients
+      }
+    }
+    const before = await epoch(),overview = await new NavigationDuringManagementRead(service).overview(ownerId,workspaceId)
+    expect(overview.actor).toEqual({ userId: ownerId,assistantId })
+    expect(overview.readiness.qualified).toBe(false)
+    expect(await epoch()).toEqual(before)
+  })
+  it.each([
+    ['role',"role='admin'",'role'],
+    ['clearance',"clearance='confidential'",'clearance'],
+    ['compartments',"compartments=ARRAY['fixture:policy']::text[]",'compartments'],
+    ['drafting','can_draft=NOT can_draft','can_draft'],
+    ['team scope',"team_scope_mode='assigned'",'team_scope_mode'],
+    ['member identity','id=gen_random_uuid()','id'],
+    ['membership metadata',"joined_at=joined_at+interval '1 second'",'joined_at'],
+  ])('C10 member %s changes and restoration still invalidate both factories',async (_name,assignment,column) => {
+    const fixture = await record(),app = await application(fixture,'member')
+    const original = (await owner.query('SELECT * FROM workspace_members WHERE workspace_id=$1 AND user_id=$2',[workspaceId,memberId])).rows[0]
+    const executions = [await nativeExecution(),await resolveApplicationExecutionContext(app.authentication)],before = await epoch()
+    // Assignment/column names are a closed test table, never user SQL.
+    try {
+      await owner.query(`UPDATE workspace_members SET ${assignment} WHERE workspace_id=$1 AND user_id=$2`,[workspaceId,memberId])
+      expect((await epoch()).workspaceRevision).not.toBe(before.workspaceRevision)
+      for (const execution of executions) await expect(queryRecords(fixture,{ fields: ['title'] },execution))
+        .rejects.toMatchObject({ reason: 'authority_changed' })
+    } finally {
+      await owner.query(`UPDATE workspace_members SET ${column}=$3 WHERE workspace_id=$1 AND user_id=$2`,[workspaceId,memberId,original[column]])
+    }
+    // Restoring the same authority does not revive a refused invocation.
+    for (const execution of executions) await expect(execution.security.authority.assertCurrent())
+      .rejects.toMatchObject({ reason: 'authority_changed' })
+    for (const fresh of [await nativeExecution(),await resolveApplicationExecutionContext(app.authentication)]) {
+      expect((await queryRecords(fixture,{ fields: ['title'] },fresh)).records).toHaveLength(1)
+    }
+  })
+  it('C10 member home Department change and restoration keep epoch rejection sticky',async () => {
+    const department = randomUUID()
+    await owner.query("INSERT INTO workspace_groups(id,workspace_id,name,created_by,kind,key,compartment_key) VALUES($1::uuid,$2,'Fictional policy Department',$3,'team',$1::text,$4)",
+      [department,workspaceId,ownerId,`team:${department}`])
+    const fixture = await record(),app = await application(fixture,'member')
+    const executions = [await nativeExecution(),await resolveApplicationExecutionContext(app.authentication)],before = await epoch()
+    try {
+      await owner.query('UPDATE workspace_members SET home_department_id=$3 WHERE workspace_id=$1 AND user_id=$2',[workspaceId,memberId,department])
+      expect((await epoch()).workspaceRevision).not.toBe(before.workspaceRevision)
+      for (const execution of executions) await expect(execution.security.authority.assertCurrent()).rejects.toMatchObject({ reason: 'authority_changed' })
+    } finally {
+      await owner.query('UPDATE workspace_members SET home_department_id=NULL WHERE workspace_id=$1 AND user_id=$2',[workspaceId,memberId])
+      // The workspace fixture's afterAll cascade removes this Department.
+      // Department rows obey the product's archive-only lifecycle.
+    }
+    for (const execution of executions) await expect(execution.security.authority.assertCurrent()).rejects.toMatchObject({ reason: 'authority_changed' })
+    expect((await queryRecords(fixture,{ fields: ['title'] },await nativeExecution())).records).toHaveLength(1)
+  })
+  it.each(['insert','delete','replace'] as const)('C10 member %s remains revision-sensitive',async change => {
+    const user = randomUUID();userIds.push(user)
+    await owner.query("INSERT INTO users(id,auth_provider,auth_provider_id) VALUES($1::uuid,'email',$1::text)",[user])
+    if (change !== 'insert') await createWorkspaceStore().ensureMemberSystem(workspaceId,user)
+    const fixture = await record(),app = await application(fixture,'member')
+    const executions = [await nativeExecution(),await resolveApplicationExecutionContext(app.authentication)],before = await epoch()
+    try {
+      if (change !== 'insert') await owner.query('DELETE FROM workspace_members WHERE workspace_id=$1 AND user_id=$2',[workspaceId,user])
+      if (change !== 'delete') await createWorkspaceStore().ensureMemberSystem(workspaceId,user)
+      expect((await epoch()).workspaceRevision).not.toBe(before.workspaceRevision)
+      for (const execution of executions) await expect(queryRecords(fixture,{ fields: ['title'] },execution))
+        .rejects.toMatchObject({ reason: 'authority_changed' })
+      expect((await queryRecords(fixture,{ fields: ['title'] },await nativeExecution())).records).toHaveLength(1)
+    } finally {
+      await owner.query('DELETE FROM workspace_members WHERE workspace_id=$1 AND user_id=$2',[workspaceId,user])
+    }
+  })
+  it('C10 a future member authority column is not silently excluded from epochs',async () => {
+    // Disposable-schema evolution proves the comparison excludes only the three
+    // named navigation fields rather than an allowlist of current authority.
+    await owner.query('ALTER TABLE workspace_members ADD COLUMN application_epoch_fixture_authority text')
+    try {
+      const fixture = await record(),app = await application(fixture,'member')
+      const executions = [await nativeExecution(),await resolveApplicationExecutionContext(app.authentication)],before = await epoch()
+      await owner.query("UPDATE workspace_members SET application_epoch_fixture_authority='changed' WHERE workspace_id=$1 AND user_id=$2",[workspaceId,memberId])
+      expect((await epoch()).workspaceRevision).not.toBe(before.workspaceRevision)
+      for (const execution of executions) await expect(execution.security.authority.assertCurrent()).rejects.toMatchObject({ reason: 'authority_changed' })
+      await owner.query('UPDATE workspace_members SET application_epoch_fixture_authority=NULL WHERE workspace_id=$1 AND user_id=$2',[workspaceId,memberId])
+      for (const execution of executions) await expect(execution.security.authority.assertCurrent()).rejects.toMatchObject({ reason: 'authority_changed' })
+      expect((await queryRecords(fixture,{ fields: ['title'] },await nativeExecution())).records).toHaveLength(1)
+    } finally { await owner.query('ALTER TABLE workspace_members DROP COLUMN application_epoch_fixture_authority') }
+  })
+  it('C10 management spanning a real administrator loss still refuses before return',async () => {
+    const service = new ApplicationPlatformService([createCanonicalGenericApplicationModule()])
+    class AdministrationChangesDuringRead extends ApplicationManagementService {
+      override async list(actor: string,workspace: string) {
+        const clients = await super.list(actor,workspace)
+        await owner.query("UPDATE workspace_members SET role='member' WHERE workspace_id=$1 AND user_id=$2",[workspace,actor])
+        return clients
+      }
+    }
+    try {
+      await expect(new AdministrationChangesDuringRead(service).overview(ownerId,workspaceId))
+        .rejects.toMatchObject({ code: 'access_unavailable' })
+    } finally {
+      await owner.query("UPDATE workspace_members SET role='owner' WHERE workspace_id=$1 AND user_id=$2",[workspaceId,ownerId])
+    }
+    expect((await new ApplicationManagementService(service).overview(ownerId,workspaceId)).readiness.qualified).toBe(false)
   })
   it('C12 runtime/tampered metadata and owner fallback cannot mint authority; issuance stays disabled',async () => {
     const fixture = await record(),execution = await nativeExecution(),app = await application(fixture,'member')
