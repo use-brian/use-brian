@@ -18,7 +18,7 @@ const source = readFileSync(fileURLToPath(new URL('../channel-pipeline.ts', impo
 describe('[COMP:api/channel-pipeline-audience-refusal] pre-generation audience refusals always reply', () => {
   it('gates compaction and processing start through the replying helper', () => {
     const helperCalls = source.match(/if \(!\(await deliveryAudienceAdmitsTurn\(\)\)\) return/g) ?? []
-    expect(helperCalls.length).toBe(2)
+    expect(helperCalls.length).toBe(3)
     const beforeCompaction = source.slice(0, source.indexOf('await runProactiveCompaction('))
     expect(beforeCompaction).toMatch(/if \(!\(await deliveryAudienceAdmitsTurn\(\)\)\) return\s*\n\s*const compactionResult/)
   })

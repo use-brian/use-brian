@@ -209,7 +209,7 @@ export function deliverChannelResponse(
  * The pipeline calls both in order; channels opt in to whichever fits.
  */
 export type ChannelHooks = {
-  /** Called once before the query loop starts. Start typing indicators here. */
+  /** Called once after admission, before classification and context setup. */
   onProcessingStart?(): Promise<void>
 
   /** Called on `status` events from the query loop (e.g., "Researching..."). */
@@ -887,6 +887,32 @@ export async function resolveConnectorTurnScopeForChannelTurn(
 
 // ── Pipeline ─────────────────────────────────────────────────────
 
+type ChannelSpeakerAccount = {
+  provenance: 'registered' | 'shadow' | 'unknown'
+  name: string | null
+  email: string | null
+}
+
+/**
+ * Account facts safe to present to the model and opted-in connectors. A
+ * cached channel profile email does not prove a registered sign-in account.
+ * See channel-user-identity.md, "Non-member senders".
+ */
+export function resolveChannelSpeakerAccount(user: {
+  authProvider: string | null
+  name: string | null
+  email: string | null
+} | null | undefined): ChannelSpeakerAccount {
+  const provenance = user?.authProvider === 'channel'
+    ? 'shadow'
+    : ['email', 'google', 'oidc'].includes(user?.authProvider ?? '') ? 'registered' : 'unknown'
+  return {
+    provenance,
+    name: provenance === 'registered' || !user?.name?.includes('@') ? user?.name ?? null : null,
+    email: provenance === 'registered' ? user?.email ?? null : null,
+  }
+}
+
 /**
  * Private-runtime block for a sender who is not a member of the assistant's
  * workspace. Model-facing (system channel), never delivered verbatim; keeps
@@ -895,17 +921,17 @@ export async function resolveConnectorTurnScopeForChannelTurn(
  */
 export function buildNonMemberSenderBlock(args: {
   channelType: string
-  senderEmail: string | null
-  senderName: string | null
+  senderAccount: ChannelSpeakerAccount
   /** Legacy call compatibility only. Enablement cannot create native staff authority. */
   assistantConnectorTools?: boolean
 }): string {
-  const who = args.senderEmail
-    ? `${args.senderName ? `${args.senderName} <${args.senderEmail}>` : args.senderEmail}`
-    : (args.senderName ?? 'this sender')
-  const identity = args.senderEmail
-    ? `Their ${args.channelType} account resolves to the Use Brian account ${args.senderEmail}, and that account is not a member of this workspace.`
-    : `Their ${args.channelType} account could not be matched to a member of this workspace.`
+  const { provenance, email: accountEmail, name: senderName } = args.senderAccount
+  const who = accountEmail
+    ? `${senderName ? `${senderName} <${accountEmail}>` : accountEmail}`
+    : (senderName ?? 'this sender')
+  const identity = provenance === 'registered'
+    ? `Their ${args.channelType} account resolves to ${accountEmail ? `the registered Use Brian account ${accountEmail}` : 'a registered Use Brian account'}, and that account is not a member of this workspace.`
+    : `Their ${args.channelType} account could not be matched to a member of this workspace. ${provenance === 'shadow' ? 'It is represented by a channel-only identity, not a verified Use Brian sign-in account.' : 'Its Use Brian sign-in identity has not been verified.'}`
   return (
     '# Sender is not a workspace member\n\n' +
     `You are answering ${who}, who is NOT a member of this assistant's workspace. ` +
@@ -913,8 +939,11 @@ export function buildNonMemberSenderBlock(args: {
     'That is an access boundary, not a missing record: do NOT report "no workflows", "no tasks", "not found" or "not visible in this workspace" as fact, do not ask them to open a different workspace, and do not retry lookups. ' +
     'A channel connector setting does not grant this sender staff authority. Do not use protected connectors or claim that enabled assistant tools are available to them. ' +
     `If they ask about workspace-native data or ask you to act on it, tell them plainly: ${identity} ` +
-    'Give both remedies: (1) a workspace admin invites that email to the workspace, or (2) they link this ' +
-    `${args.channelType} account to the Use Brian account they normally use, from Settings -> Account -> Connected accounts, then re-send the message. ` +
+    (provenance === 'registered' ? '' : 'Do not disclose a channel profile email, present it as their Use Brian sign-in account, or tell an admin to invite it. ') +
+    'Give verified linking as the primary remedy: sign in to the Use Brian account they normally use, then link this ' +
+    `${args.channelType} account from Settings -> Account -> Connected accounts and re-send the message. ` +
+    'The linked account must be a workspace member; linking does not itself grant membership. ' +
+    'An alternative is for a workspace admin to invite their confirmed actual Use Brian sign-in email. Ask them to confirm that email rather than guessing from a channel profile. ' +
     'Everything they say in this chat is still answerable from what they provide here.'
   )
 }
@@ -1037,6 +1066,23 @@ export async function processChannelMessage(params: ChannelPipelineParams): Prom
   // Split-admission routes have already sent handled replies. A stopped turn
   // must not re-enter admission or start conversational work after media intake.
   if (params.admittedAnswerContext?.kind === 'handled' || params.abortController.signal.aborted) return
+  const transportHooks = params.hooks
+  let processingStarted = false
+  let cleanupCalled = false
+  const hooks: ChannelHooks = {
+    ...transportHooks,
+    async onProcessingStart() {
+      // A provider can create its status before failing its start request.
+      // Even that partial start belongs to this invocation's cleanup.
+      processingStarted = true
+      await transportHooks.onProcessingStart?.()
+    },
+    async onCleanup() {
+      if (cleanupCalled) return
+      cleanupCalled = true
+      await transportHooks.onCleanup?.()
+    },
+  }
   const messageId = params.incomingMessage?.messageId ?? params.incomingChannelMessageId
   const unregister = params.interactionScope ? channelConfirmations.registerTurn(
     params.interactionScope, params.abortController, {
@@ -1050,9 +1096,13 @@ export async function processChannelMessage(params: ChannelPipelineParams): Prom
     },
   ) : undefined
   try {
-    await processChannelMessageTurn(params)
+    await processChannelMessageTurn({ ...params, hooks })
   } finally {
-    unregister?.()
+    try {
+      if (processingStarted) await hooks.onCleanup?.()
+    } finally {
+      unregister?.()
+    }
   }
 }
 
@@ -1448,6 +1498,14 @@ async function processChannelMessageTurn(params: ChannelPipelineParams): Promise
       await clearDowngradeNotice(session.id)
     }
   }
+  // Progress starts only after native authority, audience and budget admission,
+  // but before any auxiliary model call or context/tool preparation.
+  if (abortController.signal.aborted) return
+  if (!(await deliveryAudienceAdmitsTurn())) return
+  if (abortController.signal.aborted) return
+  await hooks.onProcessingStart?.()
+  if (abortController.signal.aborted) return
+
   const backgroundLlmRuntime = assistant.workspaceId && params.resolveWorkspaceCustomLlm
     ? await params.resolveWorkspaceCustomLlm({
         workspaceId: assistant.workspaceId,
@@ -1647,6 +1705,7 @@ async function processChannelMessageTurn(params: ChannelPipelineParams): Promise
   //    the incoming user message row carries the topic label and reply
   //    text). See docs/architecture/context-engine/compaction.md.
   const channelUser = await findUserById(userId)
+  const speakerAccount = resolveChannelSpeakerAccount(channelUser)
   const anchorTimezone = channelUser?.timezone ?? 'UTC'
   // Slack/WhatsApp/etc. have no live tz header. Inherit presence from
   // the most recent fresh web observation; fall back to anchor when
@@ -1692,6 +1751,7 @@ async function processChannelMessageTurn(params: ChannelPipelineParams): Promise
   try {
     classification = await classifyTopic({
       provider: backgroundProvider,
+      signal: abortController.signal,
       // Background lane (see the chat.ts counterpart) — Flash Lite per
       // cost-and-pricing.md → "Standard-tier routing", not the Flash 3
       // chat alias this had drifted onto.
@@ -1707,6 +1767,7 @@ async function processChannelMessageTurn(params: ChannelPipelineParams): Promise
   } catch (err) {
     console.error(`[${channelType}] topic classifier failed:`, err)
   }
+  if (abortController.signal.aborted) return
 
   // ── Persist inbound message (with topic label + reply context) ──
   const persistUserMessage = (client?: Parameters<typeof addSessionMessage>[1]) =>
@@ -2121,8 +2182,9 @@ async function processChannelMessageTurn(params: ChannelPipelineParams): Promise
     // all that teammate's. See layer-1-system-prompt.md → "Speaker identity".
     // `actorChannelId` (Slack `U…`, Telegram handle/id, Feishu/Lark open id, WhatsApp number) rides
     // along so "what is my Slack id" is answered as fact, not guessed.
+    // Account email comes only from the registered-provenance snapshot.
     speakerIdentity: isIdentified && !isolatedAudience
-      ? speakerIdentityFromUser(channelUser, { type: channelType, id: actorChannelId ?? null, displayName: actorDisplayName })
+      ? speakerIdentityFromUser(speakerAccount, { type: channelType, id: actorChannelId ?? null, displayName: actorDisplayName })
       : null,
     memoryContext,
     workspaceFilesContext,
@@ -2189,8 +2251,7 @@ async function processChannelMessageTurn(params: ChannelPipelineParams): Promise
       privateRuntimeContextParts.push(
         buildNonMemberSenderBlock({
           channelType,
-          senderEmail: channelUser?.email ?? null,
-          senderName: channelUser?.name ?? null,
+          senderAccount: speakerAccount,
           assistantConnectorTools: connectorToolsAllowed && useAssistantConnectorAuthority,
         }),
       )
@@ -2351,12 +2412,14 @@ async function processChannelMessageTurn(params: ChannelPipelineParams): Promise
         // Actor identity for opted-in connectors. `actorChannelId` is the
         // channel-native id captured from the inbound webhook by the channel
         // route (Slack user id / Telegram @handle / Feishu-Lark open id / WhatsApp phone); email +
-        // userId come from the resolved channel user. Server-resolved, never
-        // model output. See docs/architecture/engine/tool-hooks.md.
+        // userId come from the resolved channel user. Only a registered account
+        // contributes an email; a cached shadow profile is not account proof.
+        // Server-resolved, never model output. See
+        // docs/architecture/engine/tool-hooks.md.
         actorIdentity: {
           channel: channelType,
           id: actorChannelId ?? null,
-          email: channelUser?.email ?? null,
+          email: speakerAccount.email,
           userId,
           // Short-lived, user-scoped media capability token. Emitted only to
           // connectors the user granted media access (`sendMediaToken`); lets
@@ -2493,9 +2556,8 @@ async function processChannelMessageTurn(params: ChannelPipelineParams): Promise
     }
   }
 
-  // ── Processing start ──
+  // ── Pre-generation audience recheck ──
   if (!(await deliveryAudienceAdmitsTurn())) return
-  await hooks.onProcessingStart?.()
 
   const confirmationResolver = createConfirmationResolver()
 
