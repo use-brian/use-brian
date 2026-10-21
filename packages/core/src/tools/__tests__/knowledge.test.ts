@@ -267,7 +267,8 @@ describe('[COMP:tools/knowledge] createKnowledgeTools', () => {
       expect(mockStore.create).toHaveBeenCalledWith(expect.objectContaining({
         path: 'research/offers/student',
         sensitivity: 'public',
-      }))
+        actorId:ctx.userId,writtenBy:'system',derivation:{producer:'tool:addKnowledgeEntry',sources:[]},
+      }),undefined)
     })
 
     it('rejects an unmatched rule id and an out-of-scope path', async () => {
@@ -301,7 +302,7 @@ describe('[COMP:tools/knowledge] createKnowledgeTools', () => {
       )
 
       expect(result.data).toMatchObject({ id: 'new1', path: 'docs/new', sensitivity: 'internal' })
-      expect(mockStore.create).toHaveBeenCalledWith(expect.objectContaining({ workspaceId: 't1', sensitivity: 'internal' }))
+      expect(mockStore.create).toHaveBeenCalledWith(expect.objectContaining({ workspaceId: 't1', sensitivity: 'internal', actorId:ctx.userId,writtenBy:'system',derivation:{producer:'tool:addKnowledgeEntry',sources:[]} }),undefined)
     })
 
     it('stamps the entry at the accumulator max when it exceeds the requested tier', async () => {
@@ -317,7 +318,7 @@ describe('[COMP:tools/knowledge] createKnowledgeTools', () => {
         { ...ctx, sensitivity: accumulator },
       )
 
-      expect(mockStore.create).toHaveBeenCalledWith(expect.objectContaining({ sensitivity: 'confidential' }))
+      expect(mockStore.create).toHaveBeenCalledWith(expect.objectContaining({ sensitivity: 'confidential', actorId:ctx.userId,writtenBy:'system',derivation:{producer:'tool:addKnowledgeEntry',sources:[]} }),undefined)
     })
 
     it('stamps research-mode findings public despite internal brain-first reads', async () => {
@@ -335,7 +336,7 @@ describe('[COMP:tools/knowledge] createKnowledgeTools', () => {
         { ...ctx, sensitivity: accumulator, researchMode: true },
       )
 
-      expect(mockStore.create).toHaveBeenCalledWith(expect.objectContaining({ sensitivity: 'public' }))
+      expect(mockStore.create).toHaveBeenCalledWith(expect.objectContaining({ sensitivity: 'public', actorId:ctx.userId,writtenBy:'system',derivation:{producer:'tool:addKnowledgeEntry',sources:[]} }),undefined)
     })
 
     it('keeps confidential a hard floor even in research mode', async () => {
@@ -351,7 +352,7 @@ describe('[COMP:tools/knowledge] createKnowledgeTools', () => {
         { ...ctx, sensitivity: accumulator, researchMode: true },
       )
 
-      expect(mockStore.create).toHaveBeenCalledWith(expect.objectContaining({ sensitivity: 'confidential' }))
+      expect(mockStore.create).toHaveBeenCalledWith(expect.objectContaining({ sensitivity: 'confidential', actorId:ctx.userId,writtenBy:'system',derivation:{producer:'tool:addKnowledgeEntry',sources:[]} }),undefined)
     })
 
     it('a create rejected by the source carries its reason verdict', async () => {

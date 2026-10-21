@@ -14,6 +14,8 @@
 import type { AccessContext } from '../security/access-context.js'
 import type { Sensitivity } from '../security/sensitivity.js'
 import type { SessionContextAuthority } from '../memory/session-state-types.js'
+import type {DerivedWriteEvidence} from '../security/derived-scope.js'
+import type {KnowledgeWriteActor} from '../workflow/knowledge-event-trigger.js'
 
 export type KnowledgeSearchResult = {
   id: string
@@ -57,7 +59,10 @@ export type KnowledgeStoreInterface = {
     compartments?: string[]
     projectIds?: string[]
     createdBy?: string | null
-  }): Promise<{ id: string; path: string }>
+    actorId?: string | null
+    writtenBy?: KnowledgeWriteActor
+    derivation?: DerivedWriteEvidence
+  }, authority?:SessionContextAuthority): Promise<{ id: string; path: string; sensitivity?:Sensitivity }>
   listSummaries(ctx: AccessContext): Promise<Array<{ id: string; path: string; summary: string | null; sensitivity: Sensitivity; compartments?: string[]; projectIds?: string[] }>>
   /**
    * Body-only update of a MANUAL entry (repo-synced entries go through the

@@ -30,7 +30,7 @@
  * docs/architecture/platform/sensitivity.md.
  */
 
-import {bindScopeSources,boundScopeSources,DerivedScopeError,type ScopeSource,type AccessContext,type Sensitivity,type SessionContextAuthority,pinAccessCeiling,intersectAccessCeilings} from '@use-brian/core'
+import {ContextScopeAccumulator,deriveWriteScope,resourceScopeKey,type DerivedWriteEvidence,bindScopeSources,boundScopeSources,DerivedScopeError,type ScopeSource,type AccessContext,type Sensitivity,type SessionContextAuthority,pinAccessCeiling,intersectAccessCeilings} from '@use-brian/core'
 import type { KnowledgeLifecycleAction, KnowledgeWriteActor } from '@use-brian/core'
 import { query, getPool, getAppPool, applyRLSGucs, rollbackAndRelease } from './client.js'
 import { z } from 'zod'
@@ -38,7 +38,7 @@ import { randomUUID } from 'node:crypto'
 import type { PoolClient, QueryResultRow } from 'pg'
 import { currentAgentAccess,runWithAgentAccess } from './agent-access-context.js'
 import {currentApplicationReadTransaction} from '../application-platform/execution-context.js'
-import {readRetainedContextFrame,readRetainedQueryFrame} from './session-context-revisions.js'
+import {writeRetainedContextFrame,readRetainedContextFrame,readRetainedQueryFrame} from './session-context-revisions.js'
 import {validateCallerScopeEvidence} from '../context-scope/caller-evidence.js'
 import { readAdmissionPolicy } from '../workspace-access/admission-policy-read.js'
 import { admitKnowledgeWrite, lockKnowledgePrior, admitKnowledgeSourceConfiguration, type KnowledgeSourceBindingInput, type KnowledgeConfigureAuthority } from '../workspace-access/knowledge-create-admission.js'
@@ -46,6 +46,7 @@ import { WorkspaceAccessError } from '../workspace-access/policy.js'
 import { captureKnowledgeSyncAuthority, knowledgeSyncCapture, admitKnowledgeSync } from '../workspace-access/knowledge-sync-admission.js'
 import { publishKnowledgeLifecycle } from '../knowledge-event-fanout.js'
 import {readNativeKnowledgeSource,type KnowledgeSourceProjection} from './knowledge-source-reader.js'
+import {validateDerivedWriteInputs,recordDerivedResource} from './derived-scope-store.js'
 
 // ── Types ──────────────────────────────────────────────────────
 
@@ -565,6 +566,7 @@ export type KnowledgeStore = {
 
   create(params: {
     expectedPolicyRevision?: string
+    derivation?:DerivedWriteEvidence
     workspaceId: string; path: string; title: string
     summary?: string | null; content: string; tags?: string[]; sensitivity: Sensitivity
     /** Compartment set (MLS category axis) to stamp on the row. Default '{}'. */
@@ -580,7 +582,7 @@ export type KnowledgeStore = {
     writtenBy?: KnowledgeWriteActor
     /** Authenticated acting user; required in ready mode (or ambient actor). Legacy falls back to createdBy. */
     actorId?: string | null
-  }): Promise<KnowledgeEntry>
+  }, authority?:SessionContextAuthority): Promise<KnowledgeEntry>
   upsertByPath(params: {
     expectedPolicyRevision?: string
     workspaceId: string; path: string; title: string
@@ -881,11 +883,12 @@ export function createDbKnowledgeStore(): KnowledgeStore {
       return result.rows[0] ?? null
     },
 
-    async create(params) {
-      const result = await knowledgeWrite(params.workspaceId, params.actorId ?? params.createdBy, async (client, ready, actor) => {
-        if (ready) {
-          params = await admitKnowledgeWrite(client, actor, params)
-        }
+    async create(params,authority) {
+      params=structuredClone(params)
+      if(!authority&&(params.derivation||params.writtenBy==='system'))throw new DerivedScopeError('scope_evidence_missing')
+      let derivedFloor:KnowledgeSourceBindingInput|undefined
+      const write=async(client:PoolClient,ready:boolean,actor:string)=>{
+        if(ready)params=await admitKnowledgeWrite(client,actor,params,undefined,derivedFloor)
         return client.query<KnowledgeEntry>(
           `INSERT INTO knowledge_entries
              (workspace_id, path, title, summary, content, tags, sensitivity, metadata, source_id, source_sha, created_by, compartments, project_ids)
@@ -900,10 +903,39 @@ export function createDbKnowledgeStore(): KnowledgeStore {
             params.projectIds ?? [],
           ],
         )
-      })
-      const row = result.rows[0]
-      emitLifecycle(row, 'created', params.writtenBy, params.actorId ?? params.createdBy ?? null)
-      return row
+      }
+      const result=authority?await(async()=>{
+        const {execution,accumulator}=authority
+        if(!(accumulator instanceof ContextScopeAccumulator)||execution.security.access.workspaceId!==params.workspaceId
+          ||params.createdBy!==execution.security.access.userId||params.actorId&&params.actorId!==execution.security.access.userId
+          ||params.sourceId!=null||params.sourceSha!=null||!params.derivation)throw new DerivedScopeError('scope_evidence_missing')
+        const consumed=new ContextScopeAccumulator(execution.security.provenance);consumed.note(accumulator.evidence)
+        const sources=consumed.evidence.sources??[],key=(values:readonly ScopeSource[])=>JSON.stringify(values.map(source=>
+          [source.resourceKind,source.resourceId,source.version,resourceScopeKey(source)]).sort())
+        if(!sources.length||key(sources)!==key(params.derivation.sources))throw new DerivedScopeError('scope_evidence_missing')
+        const derivation:DerivedWriteEvidence={producer:params.derivation.producer,sources}
+        return writeRetainedContextFrame(authority,sources,async client=>{
+          const floor=await validateDerivedWriteInputs(client,derivation,'read_entity_derivation_source')
+          const derived=deriveWriteScope(derivation,{workspaceId:params.workspaceId,userId:null,assistantId:null,
+            sensitivity:params.sensitivity,compartments:params.compartments??[],projectIds:params.projectIds??[]},execution.security.access.userId)
+          derivedFloor={sensitivity:floor.sensitivity,compartments:floor.compartments,projectIds:floor.projectIds}
+          params={...params,sensitivity:derived.sensitivity,compartments:derived.compartments,projectIds:derived.projectIds}
+          const policy=await readAdmissionPolicy(client,params.workspaceId),created=await write(client,policy?.setupState==='ready',execution.security.access.userId)
+          const row=created.rows[0]
+          const root=(await client.query<{source:ScopeSource}>("SELECT read_entity_derivation_source($1,'knowledge_entry',$2) AS source",[params.workspaceId,row.id])).rows[0]?.source
+          if(!root||root.resourceId!==row.id||root.version!==row.scopeVersion)throw new DerivedScopeError('scope_evidence_missing')
+          await recordDerivedResource(client,derivation,root,execution.security.access.userId)
+          return created
+        })
+      })():await knowledgeWrite(params.workspaceId,params.actorId??params.createdBy,write)
+      const row=result.rows[0]
+      emitLifecycle(row,'created',params.writtenBy,params.actorId??params.createdBy??null)
+      if(!authority)return row
+      try{
+        const current=await createDbKnowledgeStore().getById(authority.execution.security.access,row.id,authority)
+        if(!current)throw new DerivedScopeError('scope_source_changed')
+        return current
+      }catch(error){throw Object.assign(error instanceof Error?error:new Error('scope_source_changed'),{retrySafe:false,operationMayHaveExecuted:true})}
     },
 
     async upsertByPath(params, syncAuthority) {

@@ -22,7 +22,7 @@ import type {
 } from '../../knowledge/types.js'
 import { unifiedDiffLines } from '../../knowledge/text-diff.js'
 import { RANK, researchWriteFloor, type Sensitivity } from '../../security/sensitivity.js'
-import { resolveWriteScope, scopeEvidenceFromRows } from '../../security/context-scope.js'
+import { ContextScopeAccumulator, resolveWriteScope, scopeEvidenceFromRows } from '../../security/context-scope.js'
 
 export type KnowledgeToolOptions = {
   /** Whether any sync source is connected for this workspace. */
@@ -541,6 +541,8 @@ export function createKnowledgeTools(
       }
 
       try {
+        const consumed=new ContextScopeAccumulator(context.executionContext?.security.provenance)
+        consumed.note(context.scopeAccumulator?.evidence)
         const entry = await store.create({
           workspaceId: context.workspaceId,
           path: input.path,
@@ -551,9 +553,15 @@ export function createKnowledgeTools(
           compartments: writeStamp.compartments,
           projectIds: writeStamp.projectIds,
           createdBy: context.userId,
-        })
-        return { data: { id: entry.id, path: entry.path, sensitivity: stamp, message: 'Knowledge entry created.' } }
+          actorId:context.userId,writtenBy:'system',
+          derivation:{producer:'tool:addKnowledgeEntry',sources:consumed.evidence.sources??[]},
+        },context.executionContext&&context.scopeAccumulator?{execution:context.executionContext,accumulator:context.scopeAccumulator}:undefined)
+        return { data: { id: entry.id, path: entry.path, sensitivity: entry.sensitivity??stamp, message: 'Knowledge entry created.' },scopeEvidence:scopeEvidenceFromRows([entry]) }
       } catch (err) {
+        if(typeof err==='object'&&err!==null&&'operationMayHaveExecuted'in err&&err.operationMayHaveExecuted===true){
+          return{isError:true,meta:{retrySafe:false,operationMayHaveExecuted:true},
+            data:'Knowledge creation may have committed, but current access could not be confirmed. Do not repeat the write. Check the existing entry with current access before deciding what to do next.'}
+        }
         return toolFailure(err, {
           tool: 'addKnowledgeEntry',
           target: `path "${input.path}"`,

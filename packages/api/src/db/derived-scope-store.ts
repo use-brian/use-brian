@@ -79,11 +79,12 @@ export async function validateDerivedEntityInputs(
 export async function validateDerivedWriteInputs(
   client: Pick<pg.PoolClient, 'query'>,
   evidence: DerivedWriteEvidence,
+  nativeReader:'read_scope_source'|'read_entity_derivation_source'='read_scope_source',
 ): Promise<Pick<ResourceScope, 'workspaceId' | 'sensitivity' | 'compartments' | 'projectIds'>> {
   const labels = deriveContextFloor(evidence)
   await requireExternalRetention(client, evidence)
   const workspaceId = evidence.sources[0]!.workspaceId
-  await revalidateScopeSources(client, workspaceId, evidence.sources)
+  await revalidateScopeSources(client, workspaceId, evidence.sources,nativeReader)
   return { workspaceId, ...labels }
 }
 
@@ -207,6 +208,11 @@ export async function recordDerivedResource(
   const floor = deriveWriteScope(evidence, output, actorUserId)
   if (resourceScopeKey(floor) !== resourceScopeKey(output)) {
     throw new DerivedScopeError('scope_visibility_incompatible')
+  }
+  if(output.resourceKind==='knowledge_entry'&&evidence.sources.some(source=>source.resourceKind==='application_field')){
+    await client.query('SELECT record_admitted_knowledge_entry_derivation($1,$2,$3,$4,$5)',
+      [output.workspaceId,output.resourceId,output.version,evidence.producer,JSON.stringify(evidence.sources)])
+    return
   }
   if (evidence.sources.some(source => source.resourceKind === 'application_field')) {
     await client.query('SELECT record_admitted_application_field_derivation($1,$2,$3,$4,$5,$6)',

@@ -37,7 +37,8 @@ function requireAuthority(authority: SessionContextAuthority | undefined): Sessi
   return authority
 }
 async function transaction<T>(authority: SessionContextAuthority, sources: readonly ScopeSource[], action: 'context' | 'retain',
-  owner: boolean, run: (client: PoolClient) => Promise<T>, writeSessionId?: string, stoppedTurnToken?:string, activeTurnToken?:string): Promise<T> {
+  owner: boolean, run: (client: PoolClient) => Promise<T>, writeSessionId?: string, stoppedTurnToken?:string, activeTurnToken?:string,nativeMutation=false): Promise<T> {
+  let publicationAttempted=false
   try {
     const { execution, accumulator } = requireAuthority(authority), before = JSON.stringify(accumulator.evidence)
     await execution.security.authority.assertCurrent()
@@ -75,9 +76,12 @@ async function transaction<T>(authority: SessionContextAuthority, sources: reado
         // NO KEY UPDATE permits the trusted source pin's separate FK insert;
         // createMemory upgrades only after those pin inserts have committed.
         if(writeSessionId&&!owner)await client.query('SELECT lock_native_session_context_publication($1,$2)',[execution.security.access.workspaceId,writeSessionId])
-        else await client.query(owner
-          ? 'SELECT id FROM workspaces WHERE id=$1 FOR NO KEY UPDATE'
-          : 'SELECT id FROM workspaces WHERE id=$1 FOR SHARE', [execution.security.access.workspaceId])
+        else {
+          const locked=await client.query(owner||nativeMutation
+            ? 'SELECT id FROM workspaces WHERE id=$1 FOR NO KEY UPDATE'
+            : 'SELECT id FROM workspaces WHERE id=$1 FOR SHARE',[execution.security.access.workspaceId])
+          if(nativeMutation&&locked.rows.length!==1)changed()
+        }
         if (finalizing || activeTurnToken) {
           const admitted=(await client.query<{allowed:boolean}>('SELECT native_session_turn_publication_allowed($1,$2,$3,$4) AS allowed',
             [execution.security.access.workspaceId,writeSessionId,activeTurnToken??stoppedTurnToken,finalizing])).rows[0]?.allowed
@@ -98,6 +102,7 @@ async function transaction<T>(authority: SessionContextAuthority, sources: reado
         await execution.security.authority.assertCurrent()
         if (execution.lifecycle.abortSignal.aborted&&!finalizing || JSON.stringify(accumulator.evidence) !== before
           || host !== retainedHosts.get(execution) || !host && wiring !== getSharedRetainedSourceAuthority()) changed()
+        if(nativeMutation)publicationAttempted=true
         await client.query('COMMIT')
         return value
       })
@@ -107,6 +112,7 @@ async function transaction<T>(authority: SessionContextAuthority, sources: reado
     await execution.security.authority.assertCurrent()
     return result
   } catch (error) {
+    if(nativeMutation&&publicationAttempted)throw Object.assign(error instanceof Error?error:new Error('scope_source_changed'),{retrySafe:false,operationMayHaveExecuted:true})
     const sql = error as { code?: unknown; message?: unknown } | null
     if (sql && ['P0001','42501','22023'].includes(String(sql.code)) && sql.message === 'scope_source_changed') {
       throw Object.assign(new DerivedScopeError('scope_source_changed'), { cause: error })
@@ -130,6 +136,16 @@ async function transaction<T>(authority: SessionContextAuthority, sources: reado
 export function readRetainedContextFrame<T>(authority:SessionContextAuthority,sources:readonly ScopeSource[],
  capture:(client:PoolClient)=>Promise<T>):Promise<T>{
  return transaction(authority,structuredClone(sources),'context',false,capture)
+}
+
+/** Native durable publication uses the original retained operation and non-owner connection. */
+export function writeRetainedContextFrame<T>(authority:SessionContextAuthority,sources:readonly ScopeSource[],
+ publish:(client:PoolClient)=>Promise<T>):Promise<T>{
+ const {execution}=requireAuthority(authority)
+ if(execution.identity.kind!=='attended'||execution.identity.principal.kind!=='workspace_member'
+  ||execution.ownership.kind!=='workspace'||execution.surface.readOnly||execution.surface.systemRead
+  ||execution.lifecycle.abortSignal.aborted)missing()
+ return transaction(authority,structuredClone(sources),'retain',false,publish,undefined,undefined,undefined,true)
 }
 
 /** Current native query frame. Physical metadata grants nothing: only genuine
