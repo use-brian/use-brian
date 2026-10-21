@@ -34,9 +34,11 @@ const commands = new CommandQueue()
 
 // ── Consent prompt: a small extension window with Allow / Deny ──
 
+let controlHadTask = false
 let pendingConsent: ((res: { allowed: boolean }) => void) | null = null
 
 async function promptForConsent(options: ConsentPromptOptions): Promise<ConsentOutcome> {
+  controlHadTask = true
   const activeTab = await activeTabForConsent((options) => chrome.windows.getLastFocused(options))
   // An unattachable page is NOT a refusal. Reporting it as one told users they
   // had declined a prompt never shown, and sent the assistant chasing a consent
@@ -158,11 +160,14 @@ async function startClient(): Promise<void> {
  */
 async function applyPairing(req: PairRequest): Promise<void> {
   return pairingWrite(async () => {
+    if (req.automatic && (gate.currentTab() !== null || pendingConsent)) throw new Error('busy')
     if (req.pairingToken?.trim()) await protectedFill.allowCredential(req.pairingToken.trim(), 'browser-ext-pair')
+    if (req.automatic && (gate.currentTab() !== null || pendingConsent)) throw new Error('busy')
     if (req.pairingToken?.trim()) {
       const before = pairedChatIdentity((await getStored('sessionToken')) ?? (await getStored('pairingToken')), 0)
       const after = pairedChatIdentity(req.pairingToken.trim(), 0)
       if (JSON.stringify(before) !== JSON.stringify(after)) {
+        controlHadTask = false
         assistantChat?.invalidate()
         client.sendEvent('stopped')
         client.stop()
@@ -613,11 +618,11 @@ chrome.runtime.onMessageExternal.addListener((message, sender, sendResponse) => 
     sendResponse({ ok: false, error: 'origin_not_allowed' })
     return undefined
   }
-  const msg = message as { type?: string; relayUrl?: string; pairingToken?: string }
+  const msg = message as { type?: string; relayUrl?: string; pairingToken?: string; automatic?: boolean }
   if (msg.type === 'pair') {
     void (async () => {
       try {
-        await applyPairing({ relayUrl: msg.relayUrl, pairingToken: msg.pairingToken })
+        await applyPairing({ relayUrl: msg.relayUrl, pairingToken: msg.pairingToken, automatic: msg.automatic === true })
         await chrome.storage.local.set({ assistantAppOrigin: sender.origin })
         sendResponse({ ok: true })
       } catch { sendResponse({ok:false, error:'Protected fill unavailable', code:'protected_fill_denied'}) }
@@ -655,6 +660,26 @@ assistantChat = installAssistantChat({
   identity: async () => pairedChatIdentity((await getStored('sessionToken')) ?? (await getStored('pairingToken'))),
   ready: () => client.getState() === 'ready',
   accountStore: chrome.storage.session,
+  installationId: async () => {
+    const saved = await getStored('assistantBrowserInstallation')
+    if (saved && /^[a-f0-9-]{36}$/.test(saved)) return saved
+    const id = crypto.randomUUID()
+    await chrome.storage.local.set({ assistantBrowserInstallation: id })
+    return id
+  },
+  beforeAutomaticConnect: async () => {
+    if (await protectedFill.locked()) throw denied()
+    if (gate.currentTab() !== null || pendingConsent) throw new Error('busy')
+  },
+  controlState: async () => {
+    if (pendingConsent) return { phase: 'waiting' }
+    if (gate.isStopped()) return { phase: controlHadTask ? 'stopped' : 'idle' }
+    const tabId = gate.currentTab()
+    if (tabId === null) return { phase: 'idle' }
+    const tab = await chrome.tabs.get(tabId).catch(() => null)
+    if (!tab?.url || !attachabilityOf(tab.url)) return { phase: 'idle' }
+    return { phase: 'active', host: hostOf(tab.url) }
+  },
   appOrigin: () => getStored('assistantAppOrigin'),
   beforeAccountSwitch: async () => {
     if (await protectedFill.locked()) throw denied()

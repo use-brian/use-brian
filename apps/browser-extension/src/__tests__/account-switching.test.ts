@@ -152,3 +152,53 @@ describe('[COMP:ext/account-switching] workspace handoff', () => {
     expect((await h.service.status()).workspaceDirectory).toBeNull()
   })
 })
+
+function automaticHarness() {
+  const h = harness(); h.brokers[0].hello.automaticBrowser = true;
+  const installationId = vi.fn(async () => '10000000-0000-4000-8000-000000000001');
+  const beforeAutomaticConnect = vi.fn(async () => {});
+  const service = installAccountSwitching({ ...h.deps, installationId, beforeAutomaticConnect });
+  return { ...h, service, installationId, beforeAutomaticConnect };
+}
+describe('[COMP:ext/account-switching] automatic extension chat setup', () => {
+  it('connects on panel admission with no profile list, code or pairing click', async () => {
+    const h = automaticHarness(); await h.service.ensureConnection(); await h.service.ensureConnection();
+    expect(h.brokers[0].port.postMessage).toHaveBeenCalledOnce();
+    const message = (h.brokers[0].port.postMessage as ReturnType<typeof vi.fn>).mock.calls[0][0];
+    expect(message).toMatchObject({ type: 'browser-connect', installationId: await h.installationId() });
+    h.service.receive(h.brokers[0], { type: 'browser-connected', id: message.id, profileId: 'private-extension-profile' }); await settle();
+    expect(await h.service.blocked()).toBe(false); await h.service.ensureConnection();
+    expect(h.brokers[0].port.postMessage).not.toHaveBeenCalledWith(expect.objectContaining({ type: 'account-profiles' }));
+    expect(h.brokers[0].port.postMessage).toHaveBeenCalledTimes(2); // connect + cancellation of its request owner
+  });
+  it('does not retry failed automatic setup on status polls; Retry is explicit', async () => {
+    const h = automaticHarness(); await h.service.ensureConnection();
+    const message = (h.brokers[0].port.postMessage as ReturnType<typeof vi.fn>).mock.calls[0][0];
+    h.service.receive(h.brokers[0], { type: 'account-error', id: message.id }); await settle();
+    await h.service.ensureConnection(); expect(h.brokers[0].port.postMessage).toHaveBeenCalledOnce();
+    expect((await h.service.status()).accountSetup).toMatchObject({ automatic: true, failed: true, pairing: false });
+    await h.service.panel({ type: 'account-retry' });
+    expect(h.brokers[0].port.postMessage).toHaveBeenLastCalledWith(expect.objectContaining({ type: 'browser-connect' }));
+  });
+  it('does not interrupt a live website task on passive panel open', async () => {
+    const h = automaticHarness(); h.beforeAutomaticConnect.mockRejectedValue(new Error('busy'));
+    await h.service.ensureConnection(); await h.service.ensureConnection();
+    expect(h.brokers[0].port.postMessage).not.toHaveBeenCalled(); expect(h.deps.beforeSwitch).not.toHaveBeenCalled(); expect(h.deps.reset).not.toHaveBeenCalled();
+  });
+  it('rebinds the new authenticated app port after a page reload', async () => {
+    const h = automaticHarness(); await h.service.ensureConnection();
+    const message = (h.brokers[0].port.postMessage as ReturnType<typeof vi.fn>).mock.calls[0][0];
+    h.service.receive(h.brokers[0], { type: 'browser-connected', id: message.id, profileId: 'profile' }); await settle();
+    h.service.disconnected(h.brokers[0]); await h.service.ensureConnection();
+    expect(h.brokers[0].port.postMessage).toHaveBeenLastCalledWith(expect.objectContaining({ type: 'browser-connect' }));
+  });
+})
+
+it('[COMP:ext/account-switching] allows missing-identity recovery only after explicit Retry', async () => {
+  const h = automaticHarness(); await h.service.ensureConnection();
+  const message = (h.brokers[0].port.postMessage as ReturnType<typeof vi.fn>).mock.calls[0][0];
+  h.service.receive(h.brokers[0], { type: 'account-error', id: message.id, code: 'browser_identity_changed' }); await settle();
+  await h.service.ensureConnection(); expect(h.brokers[0].port.postMessage).toHaveBeenCalledOnce();
+  await h.service.panel({ type: 'account-retry' });
+  expect(h.brokers[0].port.postMessage).toHaveBeenLastCalledWith(expect.objectContaining({ type: 'browser-connect', resetMissing: true }));
+});

@@ -60,3 +60,8 @@ button:disabled { cursor:default; }
 .account-profile-list button { display:flex; width:100%; justify-content:flex-start; overflow-wrap:anywhere; text-align:left; }
 
 .account-setup .text-button { min-height:44px; }
+
+.browser-control-card { display:flex; flex:none; align-items:center; gap:8px; padding:8px 12px; border-bottom:1px solid var(--border); font-size:12px; color:var(--muted-foreground); }
+.browser-control-card>span { min-width:0; flex:1; overflow-wrap:anywhere; }
+.browser-control-card[data-control-phase="active"] { color:var(--foreground); background:var(--muted); }
+.browser-control-card .text-button { min-width:44px; min-height:44px; }

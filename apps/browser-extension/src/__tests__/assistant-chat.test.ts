@@ -10,12 +10,12 @@ import { readablePageNames } from '@use-brian/browser-control/snapshot.js'
 const identity = { userId: 'user-1', workspaceId: 'workspace-1', browserProfileId: 'profile-1' }
 function token(extra = {}) { return `header.${btoa(JSON.stringify({ ...identity, kind: 'browser-ext-session', exp: 2000, ...extra }))}.signature` }
 function event() { const listeners: Array<(...args: any[]) => void> = []; return { addListener: (f: (...args: any[]) => void) => listeners.push(f), emit: (...args: any[]) => listeners.forEach(f => f(...args)) } }
-function harness(accounts = false) {
+function harness(accounts = false, withControl = false) {
   const external = event(), internal = event()
   vi.stubGlobal('chrome', { runtime: { id: 'extension-id', getURL: (p: string) => `chrome-extension://extension-id/${p}`, onConnectExternal: external, onConnect: internal }, storage: { onChanged: event() } })
   const stored: Record<string, unknown> = {}
   const store = { get: async () => ({ ...stored }), set: async (value: object) => { Object.assign(stored, value) }, remove: async (key: string | string[]) => { for (const k of Array.isArray(key) ? key : [key]) delete stored[k] } }
-  const deps = { ...(accounts ? { accountStore: store as unknown as chrome.storage.StorageArea } : {}), identity: vi.fn(async () => identity), ready: () => true, readPage: vi.fn(), pageStillCurrent: async () => true, stop: vi.fn(async () => {}), matches: () => ['https://app.usebrian.ai/*'] }
+  const deps = { ...(withControl ? { controlState: vi.fn(async (): Promise<{ phase: 'active' | 'stopped'; host?: string }> => ({ phase: 'active', host: 'example.com' })) } : {}), ...(accounts ? { accountStore: store as unknown as chrome.storage.StorageArea } : {}), identity: vi.fn(async () => identity), ready: () => true, readPage: vi.fn(), pageStillCurrent: async () => true, stop: vi.fn(async () => {}), matches: () => ['https://app.usebrian.ai/*'] }
   installAssistantChat(deps)
   const port = (name: string, sender: object) => ({ name, sender, postMessage: vi.fn(), disconnect: vi.fn(), onMessage: event(), onDisconnect: event() })
   const broker = port('brian-assistant-chat', { origin: 'https://app.usebrian.ai', frameId: 0 })
@@ -188,3 +188,15 @@ describe('[COMP:ext/assistant-chat] workspace isolation', () => {
     vi.unstubAllGlobals()
   })
 })
+
+
+describe('[COMP:ext/assistant-chat] authoritative browser control status', () => {
+  it('updates Stop immediately from the task gate rather than waiting for a poll', async () => {
+    const h = harness(false, true); h.external.emit(h.broker); h.broker.onMessage.emit({ type: 'hello', ...identity, assistants: [] }); h.internal.emit(h.panel); await settleAccounts();
+    h.panel.postMessage.mockClear(); h.deps.controlState!.mockResolvedValue({ phase: 'stopped' });
+    h.panel.onMessage.emit({ type: 'stop' }); await settleAccounts();
+    expect(h.deps.stop).toHaveBeenCalledOnce();
+    expect(h.panel.postMessage).toHaveBeenCalledWith(expect.objectContaining({ type: 'status', control: { phase: 'stopped' } }));
+    vi.unstubAllGlobals();
+  });
+});

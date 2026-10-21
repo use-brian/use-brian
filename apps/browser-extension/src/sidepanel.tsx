@@ -7,7 +7,7 @@ import type { PageEvidence } from './assistant-chat.js'
 
 type Account = IdentityAccount
 const defaultPickerLabels: IdentityPickerLabels = { searchPlaceholder: 'Search workspaces...', empty: 'No workspaces found', addAnotherAccount: 'Add another account', switchAccountAria: 'Switch to {email}', switcherAriaLabel: 'Switch workspace: {name}' }
-type AccountSetup = { waiting: true; profiles?: Array<{ id: string; name: string }>; workspaceName?: string; pairing?: boolean }
+type AccountSetup = { waiting: true; profiles?: Array<{ id: string; name: string }>; workspaceName?: string; pairing?: boolean; automatic?: boolean; failed?: boolean }
 type Assistant = { id: string; name: string; iconSeed?: number | null }
 type Message = { id: string; role: 'user' | 'assistant'; text: string; assistant?: Assistant; page?: PageEvidence }
 const errors: Record<string, string> = {
@@ -19,6 +19,9 @@ const errors: Record<string, string> = {
   account_switching: 'Finish switching accounts before sending or sharing a page.',
   account_changed: 'The active account changed. The previous chat was stopped.',
   account_unavailable: 'Account setup could not finish. Retry, or open Brian to check your sign-in.',
+  browser_identity_changed: 'This browser connection was removed or its access changed. Retry can set up a missing private connection. Existing access rules still apply.',
+  browser_connection_busy: 'This browser identity is connected elsewhere. End that connection, then retry.',
+  browser_connect_failed: 'This browser could not connect. Check your connection and retry.',
   pairing_in_progress: 'The browser profile is connecting. Wait for it to finish.',
   stopped: 'Stopped before sending or sharing. No new request was started.',
   protected_fill_denied: 'Finish protected fill cleanup in extension Settings before sharing this page.',
@@ -55,6 +58,7 @@ export function BrowserAssistantPanel() {
   const boundIdentity = useRef<string | undefined>(undefined)
   const displayedAccount = useRef<string | undefined>(undefined)
   const [connected, setConnected] = useState(false)
+  const [control, setControl] = useState<{ phase: 'idle' | 'waiting' | 'active' | 'stopped'; host?: string }>({ phase: 'idle' })
   const [workspace, setWorkspace] = useState('')
   const [assistants, setAssistants] = useState<Assistant[]>([])
   const [assistant, setAssistant] = useState<Assistant | null>(null)
@@ -110,6 +114,7 @@ export function BrowserAssistantPanel() {
         setAccountDirectory(message.accountDirectory ?? null)
         setAccountSetup(message.accountSetup ?? null)
         setConnected(message.connected === true)
+        if (['idle', 'waiting', 'active', 'stopped'].includes(message.control?.phase)) setControl({ phase: message.control.phase, ...(typeof message.control.host === 'string' ? { host: message.control.host } : {}) })
         setWorkspace(typeof message.workspaceName === 'string' ? message.workspaceName : '')
         if (message.appearance) applyChatAppearance(document.documentElement, message.appearance)
         if (Array.isArray(message.assistants)) {
@@ -132,7 +137,7 @@ export function BrowserAssistantPanel() {
         }
         if (message.event === 'tool_start') {
           setMessages(rows => rows.map(row => row.id === message.id ? { ...row, text: '' } : row))
-          setActivity('Working...'); if (data.name === 'askQuestion') setReview(true)
+          setActivity(({ browserNavigate: 'Opening the page...', browserSnapshot: 'Reading the page...', browserClick: 'Acting on the page...', browserType: 'Typing in the page...', browserFillForm: 'Filling in the form...', browserSwitchTab: 'Switching tabs...' } as Record<string, string>)[data.name] ?? 'Working...'); if (data.name === 'askQuestion') setReview(true)
         }
         if (message.event === 'tool_confirmation_required') { setReview(true); setActivity('Waiting for your approval') }
         if (message.event === 'error') setError(typeof data.error === 'string' ? data.error : 'The turn could not finish. Open the full chat for details.')
@@ -146,7 +151,7 @@ export function BrowserAssistantPanel() {
   }
   useEffect(() => {
     connect()
-    const poll = setInterval(() => send({ type: 'status' }), 5000)
+    const poll = setInterval(() => send({ type: 'status' }), 2000)
     return () => { clearInterval(poll); const previous = port.current; port.current = null; previous?.disconnect() }
   }, [])
   useEffect(() => {
@@ -206,6 +211,12 @@ export function BrowserAssistantPanel() {
       </div>
     </header>
 
+    {control.phase !== 'idle' ? <div className="browser-control-card" role="status" data-control-phase={control.phase}>
+      <Globe size={15} aria-hidden />
+      <span>{control.phase === 'waiting' ? 'Waiting for tab permission' : control.phase === 'active' ? `Browser control: ${control.host || 'this tab'}` : 'Browser control stopped'}</span>
+      {control.phase !== 'stopped' ? <button type="button" className="text-button" onClick={stop}>Stop</button> : null}
+    </div> : null}
+
     <div ref={transcript} className="transcript" role="log" aria-label="Conversation">
       {!messages.length && !accountSetup ? <div data-chat-greeting className="welcome"><h2>What would you like to work on?</h2></div> : null}
       {messages.map(message => message.role === 'user' ? <div key={message.id} className="user-row"><div data-brian-chat-user>
@@ -220,17 +231,17 @@ export function BrowserAssistantPanel() {
 
     <footer className="composer-area">
       {accountSetup ? <div className="account-setup" role="status">
-        {accountSetup.profiles ? <>
+        {accountSetup.automatic ? <p>{accountSetup.failed ? 'This browser could not connect. Check your sign-in and retry.' : 'Connecting this browser to your workspace...'}</p> : accountSetup.profiles ? <>
           <p>{accountSetup.pairing ? 'Connecting browser profile...' : `Choose your local browser profile${accountSetup.workspaceName ? ` in ${accountSetup.workspaceName}` : ''}.`}</p>
           <div className="account-profile-list">{accountSetup.profiles.map(profile => <button className="text-button" key={profile.id} disabled={accountSetup.pairing} onClick={() => manageAccount({ type: 'account-pair', profileId: profile.id })}><Globe size={14} />Connect {profile.name}</button>)}</div>
           {!accountSetup.profiles.length ? <button className="text-button" onClick={() => manageAccount({ type: 'account-browsers' })}>Create a local profile in Browsers</button> : null}
-        </> : <p>Finish signing in and choose a workspace in Brian. Then select your browser profile here.</p>}
-        {!accountSetup.pairing ? <div><button className="text-button" onClick={openBrian}>Open Brian</button><button className="text-button" onClick={() => manageAccount({ type: 'account-retry' })}>Refresh profiles</button><button className="text-button" onClick={() => manageAccount({ type: 'account-cancel' })}>Cancel account setup</button></div> : null}
+        </> : <p>Finish signing in to Brian. This browser will connect automatically.</p>}
+        {!accountSetup.pairing ? <div><button className="text-button" onClick={openBrian}>Open Brian</button><button className="text-button" onClick={() => manageAccount({ type: 'account-retry' })}>Retry connection</button><button className="text-button" onClick={() => manageAccount({ type: 'account-cancel' })}>Cancel account setup</button></div> : null}
       </div> : null}
-      {!connected && !accountSetup ? <div className="connection-note" role="status"><p>{accountDirectory ? "Keep a signed-in Brian workspace tab open and connect this account to your local browser profile." : "Keep a signed-in Brian workspace tab open and pair this extension in Browsers."}</p><div>
+      {!connected && !accountSetup ? <div className="connection-note" role="status"><p>{accountDirectory ? "Keep a signed-in Brian workspace tab open. This browser connects automatically." : "Sign in to Brian and choose a workspace. This browser connects automatically."}</p><div>
         <button className="text-button" onClick={openBrian}>Open Brian</button>
-        {accountDirectory ? <button className="text-button" onClick={() => manageAccount({ type: 'account-connect' })}>Connect this account</button> : null}
-        <button className="text-button" onClick={connect}>Retry connection</button>
+
+        <button className="text-button" onClick={() => { if (accountDirectory) manageAccount({ type: 'account-connect' }); else connect() }}>Retry connection</button>
       </div></div> : null}
       {error ? <p className="error-note" role="alert">{error}</p> : null}
       {!accountSetup ? <>

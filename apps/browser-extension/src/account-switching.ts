@@ -3,7 +3,7 @@ import type { IdentityWorkspace, IdentityPickerLabels } from '@use-brian/chat-ui
 /** Account credentials stay in the app. Only a bounded redirect intent lives here. */
 export type AccountBroker = { port: chrome.runtime.Port; hello: Record<string, unknown> }
 type Account = { id: string; name: string; email: string; avatarUrl?: string }
-type Intent = { origin: string; previousUserId: string; accountId?: string; workspaceId?: string; createdAt: number }
+type Intent = { origin: string; previousUserId: string; accountId?: string; workspaceId?: string; resetMissing?: boolean; createdAt: number }
 type Profile = { id: string; name: string }
 const KEY = 'assistantAccountIntent'
 const TTL = 10 * 60_000
@@ -46,10 +46,15 @@ export function installAccountSwitching(deps: {
   beforeSwitch: () => Promise<void>
   reset: () => void
   publish: (message: unknown) => void
+  installationId?: () => Promise<string>
+  currentProfile?: (broker: AccountBroker) => Promise<string | undefined>
+  beforeAutomaticConnect?: () => Promise<void>
   now?: () => number
 }) {
   let changing = false
-  let pending: { broker: AccountBroker; id: string; userId: string; workspaceId: unknown; profiles?: Profile[]; pairing?: boolean } | undefined
+  let pending: { broker: AccountBroker; id: string; userId: string; workspaceId: unknown; profiles?: Profile[]; pairing?: boolean; automatic?: boolean; failed?: boolean; failure?: string } | undefined
+  const attempted = new Set<string>()
+  const targetKey = (broker: AccountBroker) => `${broker.port.sender?.origin}/${broker.hello.userId}/${broker.hello.workspaceId}`
   let lane: Promise<unknown> = Promise.resolve()
   const now = deps.now ?? Date.now
   const post = (broker: AccountBroker, value: unknown) => { try { broker.port.postMessage(value) } catch { /* reconnect can resume the intent */ } }
@@ -57,7 +62,7 @@ export function installAccountSwitching(deps: {
   const read = async (prune = false): Promise<Intent | null> => {
     const raw = (await deps.store.get(KEY))[KEY] as Intent | undefined
     if (!raw) return null
-    if (!bounded(raw.origin, 2048) || !bounded(raw.previousUserId) || (raw.accountId !== undefined && !bounded(raw.accountId)) || (raw.workspaceId !== undefined && !bounded(raw.workspaceId)) || !Number.isFinite(raw.createdAt) || now() - raw.createdAt < 0 || now() - raw.createdAt > TTL) {
+    if (!bounded(raw.origin, 2048) || !bounded(raw.previousUserId) || (raw.accountId !== undefined && !bounded(raw.accountId)) || (raw.workspaceId !== undefined && !bounded(raw.workspaceId)) || (raw.resetMissing !== undefined && typeof raw.resetMissing !== 'boolean') || !Number.isFinite(raw.createdAt) || now() - raw.createdAt < 0 || now() - raw.createdAt > TTL) {
       if (prune) { await deps.store.remove(KEY); pending = undefined }
       return null
     }
@@ -72,7 +77,16 @@ export function installAccountSwitching(deps: {
     const intent = await read(true)
     if (!intent || !matches(intent, broker) || !directory(broker) || !bounded(broker.hello.workspaceId) || pending?.broker === broker) return
     pending = { broker, id: crypto.randomUUID(), userId: String(broker.hello.userId), workspaceId: broker.hello.workspaceId }
-    post(broker, { type: 'account-profiles', id: pending.id })
+    if (broker.hello.automaticBrowser === true && deps.installationId) {
+      const attempt = pending
+      attempted.add(targetKey(broker))
+      attempt.automatic = true; attempt.pairing = true
+      deps.publish({ type: 'account-setup', setup: { waiting: true, automatic: true, pairing: true } })
+      try {
+        const installationId = await deps.installationId(), currentProfileId = await deps.currentProfile?.(broker)
+        post(broker, { type: 'browser-connect', id: attempt.id, installationId, ...(currentProfileId ? { currentProfileId } : {}), ...(intent.resetMissing ? { resetMissing: true } : {}) })
+      } catch { attempt.pairing = false; attempt.failed = true; deps.publish({ type: 'account-error', code: 'account_unavailable' }) }
+    } else post(broker, { type: 'account-profiles', id: pending.id })
   }
   const cancel = async () => {
     if (pending) post(pending.broker, { type: 'account-cancel', id: pending.id })
@@ -80,13 +94,24 @@ export function installAccountSwitching(deps: {
     deps.publish({ type: 'account-setup', setup: null })
   }
   return {
+    ensureConnection: () => exclusive(async () => {
+      if (await read()) return
+      const broker = await managementBroker(), dir = broker && directory(broker)
+      if (!broker || !dir || broker.hello.automaticBrowser !== true || !deps.installationId || attempted.has(targetKey(broker))) return
+      attempted.add(targetKey(broker))
+      try {
+        await deps.beforeAutomaticConnect?.()
+        await deps.store.set({ [KEY]: { origin: broker.port.sender!.origin!, previousUserId: dir.current.id, accountId: dir.current.id, workspaceId: broker.hello.workspaceId, createdAt: now() } })
+        await resume(broker)
+      } catch (error) { deps.publish({ type: 'account-error', code: (error as { code?: string }).code === 'protected_fill_denied' ? 'protected_fill_denied' : 'busy' }) }
+    }),
     blocked: async () => changing || !!await read(),
     status: async () => {
       const broker = await managementBroker()
-      return { ...(broker ? { accountDirectory: directory(broker), workspaceDirectory: workspaceDirectory(broker), identityPickerLabels: pickerLabels(broker) } : {}), accountSetup: await read() ? { waiting: true, ...(pending?.profiles ? { profiles: pending.profiles, workspaceName: String(pending.broker.hello.workspaceName ?? ''), pairing: pending.pairing === true } : {}) } : null }
+      return { ...(broker ? { accountDirectory: directory(broker), workspaceDirectory: workspaceDirectory(broker), identityPickerLabels: pickerLabels(broker) } : {}), accountSetup: await read() ? { waiting: true, ...(pending?.automatic ? { automatic: true, pairing: pending.pairing === true, failed: pending.failed === true } : {}), ...(pending?.profiles ? { profiles: pending.profiles, workspaceName: String(pending.broker.hello.workspaceName ?? ''), pairing: pending.pairing === true } : {}) } : null }
     },
     hello: (broker: AccountBroker) => { void exclusive(() => resume(broker)) },
-    disconnected: (broker: AccountBroker) => { if (pending?.broker === broker) pending = undefined },
+    disconnected: (broker: AccountBroker) => { attempted.delete(targetKey(broker)); if (pending?.broker === broker) pending = undefined },
     panel: async (message: Record<string, unknown>): Promise<boolean> => {
       if (!['account-add', 'account-switch', 'workspace-switch', 'account-connect', 'account-pair', 'account-cancel', 'account-retry', 'account-browsers'].includes(String(message.type))) return false
       await exclusive(async () => {
@@ -95,6 +120,10 @@ export function installAccountSwitching(deps: {
           if (message.type === 'account-cancel') { if (pending?.pairing) throw new Error('pairing_in_progress'); await cancel(); return }
           if (message.type === 'account-retry') {
             if (pending?.pairing) throw new Error('pairing_in_progress')
+            if (pending?.automatic && pending.failure === 'browser_identity_changed') {
+              const intent = await read(true)
+              if (intent) await deps.store.set({ [KEY]: { ...intent, resetMissing: true } })
+            }
             if (pending) post(pending.broker, { type: 'account-cancel', id: pending.id })
             pending = undefined
             for (const broker of deps.brokers()) await resume(broker)
@@ -134,22 +163,24 @@ export function installAccountSwitching(deps: {
       return true
     },
     receive: (broker: AccountBroker, message: Record<string, unknown>) => {
-      if (!['account-profiles', 'account-paired', 'account-error'].includes(String(message.type))) return false
+      if (!['account-profiles', 'account-paired', 'browser-connected', 'account-error'].includes(String(message.type))) return false
       void exclusive(async () => {
         const intent = await read(true)
         if (intent && !pending && message.type === 'account-error' && broker.port.sender?.origin === intent.origin && broker.hello.userId === intent.previousUserId) {
           await cancel(); deps.publish({ type: 'account-error', code: 'account_unavailable' }); return
         }
         if (!intent || !pending || pending.broker !== broker || pending.id !== message.id || !matches(intent, broker) || pending.userId !== broker.hello.userId || pending.workspaceId !== broker.hello.workspaceId) return
-        if (message.type === 'account-profiles') {
+        if (message.type === 'browser-connected' && pending.automatic && bounded(message.profileId)) {
+          await cancel()
+        } else if (message.type === 'account-profiles') {
           if (!Array.isArray(message.profiles) || message.profiles.length > 200 || !message.profiles.every(p => p && bounded(p.id) && bounded(p.name, 200))) return
           pending.profiles = message.profiles.map(p => ({ id: p.id, name: p.name }))
           deps.publish({ type: 'account-setup', setup: { waiting: true, profiles: pending.profiles, workspaceName: broker.hello.workspaceName } })
         } else if (message.type === 'account-paired' && message.ok === true) {
           await cancel()
         } else {
-          pending.pairing = false
-          deps.publish({ type: 'account-error', code: 'account_unavailable' })
+          pending.pairing = false; pending.failed = true; pending.failure = typeof message.code === 'string' ? message.code : undefined
+          deps.publish({ type: 'account-error', code: ['browser_identity_changed', 'browser_connection_busy', 'browser_connect_failed'].includes(String(message.code)) ? message.code : 'account_unavailable' })
         }
       }).catch(() => deps.publish({ type: 'account-error', code: 'account_unavailable' }))
       return true

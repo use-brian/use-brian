@@ -38,6 +38,8 @@ export function serveBrowserAssistant(port: AssistantPort, deps: {
   };
   accountManagement?: {
     directory: () => { current: Account; accounts: Account[]; canManageAccounts?: boolean };
+    connect?: (installationId: string, currentProfileId: string | undefined, signal: AbortSignal, current: () => boolean, resetMissing?: boolean) => Promise<string>;
+    prepare?: (profileId: string, assistantId: string, current: () => boolean) => Promise<void>;
     act: (action: 'add' | 'switch', accountId?: string) => void;
     profiles: () => Promise<Array<{ id: string; name: string; ownerUserId: string; defaultBackend: string }>>;
     pair: (profileId: string, signal: AbortSignal, current: () => boolean) => Promise<boolean>;
@@ -45,6 +47,7 @@ export function serveBrowserAssistant(port: AssistantPort, deps: {
   };
 }) {
   let disposed = false;
+  let automaticProfileId: string | undefined;
   let accountRequest: { id: string; controller: AbortController } | undefined;
   let running: { id: string; controller: AbortController; sessionId?: string; stopped: boolean } | null = null;
   const post = (message: unknown) => {
@@ -61,6 +64,7 @@ export function serveBrowserAssistant(port: AssistantPort, deps: {
     post({ type: 'hello', userId: deps.userId, workspaceId: deps.workspaceId, workspaceName: deps.workspaceName,
       assistants: assistants.map(({ id, name, iconSeed }) => ({ id, name, ...(iconSeed !== undefined ? { iconSeed } : {}) })),
       ...(deps.appearance ? { appearance: deps.appearance() } : {}),
+      ...(deps.accountManagement?.connect ? { automaticBrowser: true } : {}),
       ...(deps.accountManagement ? { accountDirectory: deps.accountManagement.directory() } : {}),
       ...(deps.pickerLabels ? { identityPickerLabels: deps.pickerLabels() } : {}),
       ...(workspaces ? { workspaceDirectory: { active: { id: deps.workspaceId, name: deps.workspaceName, ...workspaces.filter(w => w.id === deps.workspaceId).map(({ iconSeed, iconUrl }) => ({ iconSeed, iconUrl }))[0] }, workspaces: workspaces.map(({ id, name, iconSeed, iconUrl, pickerPinnedAt, pickerHiddenAt, pickerLastOpenedAt }) => ({ id, name, iconSeed, iconUrl, pickerPinnedAt, pickerHiddenAt, pickerLastOpenedAt })) } } : {}) });
@@ -70,6 +74,7 @@ export function serveBrowserAssistant(port: AssistantPort, deps: {
     if (deps.isCurrentUser?.() === false) { port.disconnect(); return; }
     const account = deps.accountManagement;
     const action = z.union([
+      z.object({ type: z.literal('browser-connect'), id: z.string().min(1).max(128), installationId: z.string().uuid(), currentProfileId: z.string().min(1).max(128).optional(), resetMissing: z.boolean().optional() }).strict(),
       z.object({ type: z.literal('workspace-action'), workspaceId: z.string().min(1).max(128) }).strict(),
       z.object({ type: z.literal('account-action'), action: z.literal('add') }).strict(),
       z.object({ type: z.literal('account-action'), action: z.literal('switch'), accountId: z.string().min(1).max(128) }).strict(),
@@ -107,7 +112,11 @@ export function serveBrowserAssistant(port: AssistantPort, deps: {
       const request = { id: value.id, controller: new AbortController() }; accountRequest = request;
       const current = () => accountRequest === request && !request.controller.signal.aborted && !disposed && deps.isCurrentUser?.() !== false;
       try {
-        if (value.type === 'account-profiles') {
+        if (value.type === 'browser-connect') {
+          if (running || !account.connect) throw new Error('busy');
+          const profileId = await account.connect(value.installationId, value.currentProfileId, request.controller.signal, current, value.resetMissing === true);
+          if (current()) { automaticProfileId = profileId; post({ type: 'browser-connected', id: value.id, profileId }); }
+        } else if (value.type === 'account-profiles') {
           const profiles = await account.profiles();
           if (current()) post({ type: 'account-profiles', id: value.id, profiles: profiles.filter(p => p.ownerUserId === deps.userId && p.defaultBackend === 'local').map(({ id, name }) => ({ id, name })) });
         } else {
@@ -116,7 +125,7 @@ export function serveBrowserAssistant(port: AssistantPort, deps: {
           const ok = await account.pair(value.profileId, request.controller.signal, current);
           if (current()) post({ type: 'account-paired', id: value.id, ok });
         }
-      } catch { if (current()) post({ type: 'account-error', id: value.id, code: 'account_unavailable' }); }
+      } catch (error) { if (current()) post({ type: 'account-error', id: value.id, code: ['browser_identity_changed', 'browser_connection_busy', 'browser_connect_failed'].includes((error as Error).message) ? (error as Error).message : 'account_unavailable' }); }
       return;
     }
     const stop = z.object({ type: z.literal('stop'), id: z.string() }).strict().safeParse(raw);
@@ -141,6 +150,11 @@ export function serveBrowserAssistant(port: AssistantPort, deps: {
       const [assistants, profile] = await Promise.all([deps.assistants(), deps.profile(request.browserProfileId)]);
       if (disposed || current.stopped) { post({ type: 'complete', id: request.id }); return; }
       if (!assistants.some(a => a.id === request.assistantId) || !profile || profile.ownerUserId !== deps.userId || profile.defaultBackend !== 'local') throw new Error('not_authorized');
+      if (automaticProfileId) {
+        if (request.browserProfileId !== automaticProfileId) throw new Error('not_authorized');
+        await deps.accountManagement?.prepare?.(request.browserProfileId, request.assistantId, () => !disposed && !current.stopped && deps.isCurrentUser?.() !== false);
+      }
+      if (disposed || current.stopped || deps.isCurrentUser?.() === false) throw new Error('account_changed');
       const response = await deps.fetch(`${deps.apiUrl}/api/chat`, {
         method: 'POST', signal: current.controller.signal, headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ workspaceId: deps.workspaceId, assistantId: request.assistantId, sessionId: request.sessionId,

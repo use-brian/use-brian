@@ -4,7 +4,7 @@ import { useEffect, useRef } from 'react';
 import { readChatAppearance } from '@use-brian/chat-ui';
 import { authFetch, getAccessToken } from '@/lib/auth-fetch';
 import { listWorkspaceAssistants } from '@/lib/api/views';
-import { listBrowserProfiles, pairBrowserExtension } from '@/lib/api/computer';
+import { listBrowserProfiles, pairBrowserExtension, createBrowserProfile, updateBrowserProfile, getBrowserExtensionStatus } from '@/lib/api/computer';
 import { publicRuntimeConfig } from '@/lib/runtime-public-config';
 import { useWorkspaceContext } from '@/lib/workspace-context';
 import { getUserInfo } from '@/lib/user';
@@ -15,6 +15,7 @@ import { getAccountsDir } from '@/lib/accounts';
 import { primaryAuthUrl } from '@/lib/primary-auth';
 import { resetSurfaceCache } from '@/lib/surface-cache';
 import { chromeMessenger, pairViaExtension } from '@/lib/browser-extension-bridge';
+import { automaticExtensionBrowser } from '@/lib/automatic-extension-browser';
 import { serveBrowserAssistant, type AssistantPort } from '@/lib/browser-assistant-transport';
 
 /** First-party authenticated transport for the extension side panel. */
@@ -23,7 +24,9 @@ export function BrowserAssistantBridge() {
   const { workspaces } = useWorkspaces();
   const workspaceRows = useRef(workspaces); workspaceRows.current = workspaces;
   useWorkspaceFetch(publicRuntimeConfig().apiUrl);
-  const pickerLabels = useT().workspaceSwitcher;
+  const dictionary = useT();
+  const pickerLabels = dictionary.workspaceSwitcher;
+  const browserLabel = dictionary.computer.profiles.extensionBrowser;
   useEffect(() => {
     const runtime = (globalThis as { chrome?: { runtime?: { connect?: (id: string, options: { name: string }) => AssistantPort; lastError?: unknown } } }).chrome?.runtime;
     const config = publicRuntimeConfig();
@@ -49,6 +52,19 @@ export function BrowserAssistantBridge() {
       if (closed || !getAccessToken()) return;
       try {
         port = runtime!.connect!(config.browserExtensionId, { name: 'brian-assistant-chat' });
+        const automaticBrowser = automaticExtensionBrowser({
+          userId: me.id!, workspaceId, label: browserLabel, storage: window.localStorage,
+          list: async () => (await listBrowserProfiles(workspaceId)).profiles,
+          create: browserName => createBrowserProfile({ workspaceId, name: browserName, scope: 'owner', defaultBackend: 'local', localControlMode: 'task_tabs' }),
+          enable: (id, enabledAssistantIds) => updateBrowserProfile(id, { enabledAssistantIds }),
+          status: id => getBrowserExtensionStatus(workspaceId, id),
+          pair: async (id, signal, current) => {
+            if (!current() || !isCurrentUser()) return false;
+            const pairing = await pairBrowserExtension(workspaceId, id, signal);
+            if (!pairing || !current() || !isCurrentUser()) return false;
+            return await pairViaExtension({ extensionId: config.browserExtensionId, relayUrl: pairing.relayUrl, pairingToken: pairing.pairingToken, automatic: true, send: chromeMessenger() }) === 'paired';
+          },
+        });
         service = serveBrowserAssistant(port, {
           apiUrl: config.apiUrl || 'http://localhost:4000', workspaceId, workspaceName: name, userId: me.id,
           isCurrentUser,
@@ -65,6 +81,8 @@ export function BrowserAssistantBridge() {
             },
           },
           accountManagement: {
+            connect: automaticBrowser.connect,
+            prepare: automaticBrowser.prepare,
             directory: () => {
               const user = getUserInfo();
               const current = { id: me.id!, name: user?.name ?? "", email: user?.email ?? "", ...(user?.avatarUrl ? { avatarUrl: user.avatarUrl } : {}) };
@@ -110,6 +128,6 @@ export function BrowserAssistantBridge() {
     return () => { closed = true; clearTimeout(retry); clearInterval(heartbeat); appearanceObserver.disconnect();
       if (appearanceFrame !== undefined) cancelAnimationFrame(appearanceFrame);
       service?.dispose(); port?.disconnect(); };
-  }, [workspaceId, name, me.id, pickerLabels]);
+  }, [workspaceId, name, me.id, pickerLabels, browserLabel]);
   return null;
 }

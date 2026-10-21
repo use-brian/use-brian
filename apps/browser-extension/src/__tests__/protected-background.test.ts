@@ -28,6 +28,7 @@ vi.mock('../executor.js', async importOriginal => ({
 vi.mock('../task-gate.js', () => ({TaskGate:class {constructor() {return mocks.gate}},CONSENT_PROMPT_TIMEOUT_MS:1000}))
 let data:Record<string,any>
 let messages: any
+let externalMessages: any
 const token = `x.${btoa(JSON.stringify({kind:'browser-ext-session',userId:'u',workspaceId:'w',browserProfileId:'p',exp:Date.now()/1000+600}))}.x`
 const request = {workspaceId:'w',sessionId:'s',taskId:'t',browserProfileId:'p',destinationOrigin:'https://destination.example',items:[{referenceId:'a'.repeat(43),ref:'@e1'}]}
 beforeEach(async () => {
@@ -36,8 +37,8 @@ beforeEach(async () => {
   const sessionData:Record<string,unknown> = {}
   const event=()=>({addListener:vi.fn()})
   vi.stubGlobal('chrome',{
-    runtime:{id:'id',getURL:(s:string)=>`chrome-extension://id/${s}`,getManifest:()=>({}),
-      onMessage:{addListener:(fn:any)=>{messages=fn}},onMessageExternal:event(),onConnect:event(),onConnectExternal:event()},
+    runtime:{id:'id',getURL:(s:string)=>`chrome-extension://id/${s}`,getManifest:()=>({externally_connectable:{matches:['https://app.example/*']}}),
+      onMessage:{addListener:(fn:any)=>{messages=fn}},onMessageExternal:{addListener:(fn:any)=>{externalMessages=fn}},onConnect:event(),onConnectExternal:event()},
     sidePanel:{setPanelBehavior:vi.fn(async()=>{})},
     storage:{onChanged:event(),session:{
       get:vi.fn(async(key:string)=>({[key]:sessionData[key]})),
@@ -512,3 +513,15 @@ describe('[COMP:ext/account-switching] explicit disconnect', () => {
     expect(mocks.gate.stop).toHaveBeenCalled()
   })
 })
+
+
+describe('[COMP:ext/account-switching] automatic binding preserves a live task', () => {
+  it('refuses automatic rebinding before altering credentials or browser control', async () => {
+    const respond = vi.fn();
+    externalMessages({ type: 'pair', automatic: true, pairingToken: token }, { origin: 'https://app.example' }, respond);
+    await vi.waitFor(() => expect(respond).toHaveBeenCalled());
+    expect(respond).toHaveBeenCalledWith(expect.objectContaining({ ok: false }));
+    expect(data.sessionToken).toBe(token); expect(data.pairingToken).toBeUndefined();
+    expect(mocks.gate.stop).not.toHaveBeenCalled(); expect(mocks.executor.detach).not.toHaveBeenCalled();
+  });
+});

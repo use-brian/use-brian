@@ -144,7 +144,7 @@ describe('[COMP:app-web/browser-assistant-transport] canonical account managemen
 
 function workspacesHarness(isCurrentUser = () => true) {
   const h = harness(); let receive: (value: unknown) => void = () => {};
-  const rows = [{ id: 'workspace-1', name: 'Example', iconSeed: 42 }, { id: 'workspace-2', name: 'Second workspace', apiSecret: 'PRIVATE' }];
+  const rows: Array<{ id: string; name: string; iconSeed?: number; apiSecret?: string }> = [{ id: 'workspace-1', name: 'Example', iconSeed: 42 }, { id: 'workspace-2', name: 'Second workspace', apiSecret: 'PRIVATE' }];
   const workspaceManagement = { directory: vi.fn(async () => rows), list: vi.fn(async () => rows), select: vi.fn() };
   const service = serveBrowserAssistant({ postMessage: h.postMessage, disconnect: vi.fn(), onMessage: { addListener: fn => { receive = fn; } }, onDisconnect: { addListener: vi.fn() } }, { ...h.deps, isCurrentUser, workspaceManagement });
   return { ...h, send: (value: unknown) => receive(value), service, workspaceManagement };
@@ -172,3 +172,42 @@ describe('[COMP:app-web/browser-assistant-transport] canonical workspace switchi
     expect(h.workspaceManagement.select).not.toHaveBeenCalled();
   });
 })
+
+function automaticTransportHarness() {
+  const h = accountsHarness(); let receive: (value: unknown) => void = () => {};
+  const management = { ...h.accountManagement, connect: vi.fn(async (_installation: string, _profile: string | undefined, _signal: AbortSignal, _current: () => boolean) => 'profile-1'), prepare: vi.fn(async () => {}) };
+  const service = serveBrowserAssistant({ postMessage: h.postMessage, disconnect: vi.fn(), onMessage: { addListener: fn => { receive = fn; } }, onDisconnect: { addListener: vi.fn() } }, { ...h.deps, accountManagement: management });
+  return { ...h, service, management, send: (value: unknown) => receive(value) };
+}
+const connectRequest = { type: 'browser-connect', id: 'automatic-request', installationId: '10000000-0000-4000-8000-000000000001' };
+describe('[COMP:app-web/browser-assistant-transport] automatic browser identity', () => {
+  it('advertises automatic setup and acknowledges it without returning credentials', async () => {
+    const h = automaticTransportHarness(); await h.service.hello();
+    expect(h.postMessage).toHaveBeenCalledWith(expect.objectContaining({ automaticBrowser: true }));
+    h.send(connectRequest); await settle();
+    expect(h.postMessage).toHaveBeenLastCalledWith({ type: 'browser-connected', id: connectRequest.id, profileId: 'profile-1' });
+    expect(JSON.stringify(h.postMessage.mock.calls)).not.toMatch(/pairingToken|accessToken/);
+  });
+  it('validates the install identifier and rejects arbitrary connection fields', async () => {
+    const h = automaticTransportHarness();
+    h.send({ ...connectRequest, installationId: 'arbitrary' }); h.send({ ...connectRequest, url: 'https://other.example.com' }); await settle();
+    expect(h.management.connect).not.toHaveBeenCalled();
+  });
+  it('fences delayed automatic setup after cancellation', async () => {
+    const h = automaticTransportHarness(); let release = () => {}; const mutate = vi.fn();
+    h.management.connect.mockImplementation(async (_id, _profile, _signal, current) => { await new Promise<void>(resolve => { release = resolve; }); if (current()) mutate(); return 'profile-1'; });
+    h.send(connectRequest); await settle(); h.send({ type: 'account-cancel', id: connectRequest.id }); release(); await settle();
+    expect(mutate).not.toHaveBeenCalled(); expect(h.postMessage).not.toHaveBeenCalledWith(expect.objectContaining({ type: 'browser-connected' }));
+  });
+  it('delegates only the validated selected assistant before an explicit chat POST', async () => {
+    const h = automaticTransportHarness(); h.send(connectRequest); await settle(); h.send(request); await settle();
+    expect(h.management.prepare).toHaveBeenCalledWith('profile-1', 'assistant-1', expect.any(Function));
+    expect(h.wire).toHaveBeenCalledOnce();
+    const other = automaticTransportHarness(); other.send(connectRequest); await settle(); other.send({ ...request, assistantId: 'unknown' }); await settle();
+    expect(other.management.prepare).not.toHaveBeenCalled(); expect(other.wire).not.toHaveBeenCalled();
+  });
+  it('fails before posting if private profile authority changed', async () => {
+    const h = automaticTransportHarness(); h.send(connectRequest); await settle(); h.management.prepare.mockRejectedValue(new Error('browser_identity_changed')); h.send(request); await settle();
+    expect(h.wire).not.toHaveBeenCalled(); expect(h.postMessage).toHaveBeenCalledWith(expect.objectContaining({ type: 'failure' }));
+  });
+});

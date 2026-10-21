@@ -151,6 +151,7 @@ export async function pairViaExtension(opts: {
   extensionId?: string;
   relayUrl: string;
   pairingToken: string;
+  automatic?: boolean;
   send: ExtensionMessenger | null;
 }): Promise<ExtensionPairResult> {
   const extensionId = opts.extensionId ?? EXTENSION_ID;
@@ -159,6 +160,7 @@ export async function pairViaExtension(opts: {
     type: "pair",
     relayUrl: opts.relayUrl,
     pairingToken: opts.pairingToken,
+    ...(opts.automatic ? { automatic: true } : {}),
   });
   if (response === null) return "not_installed";
   return response.ok === true ? "paired" : "refused";

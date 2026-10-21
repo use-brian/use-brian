@@ -37,6 +37,9 @@ export function installAssistantChat(deps: {
   accountStore?: Pick<chrome.storage.StorageArea, 'get' | 'set' | 'remove'>
   appOrigin?: () => Promise<string | null>
   beforeAccountSwitch?: () => Promise<void>
+  installationId?: () => Promise<string>
+  beforeAutomaticConnect?: () => Promise<void>
+  controlState?: () => Promise<{ phase: 'idle' | 'waiting' | 'active' | 'stopped'; host?: string }>
 }) {
   const brokers = new Set<Broker>()
   const panels = new Set<chrome.runtime.Port>()
@@ -55,6 +58,9 @@ export function installAssistantChat(deps: {
     for (const panel of panels) post(panel, { type: 'identity-reset' })
   }
   const accounts = deps.accountStore ? installAccountSwitching({
+    installationId: deps.installationId,
+    beforeAutomaticConnect: async () => { if (pending) throw new Error('busy'); await deps.beforeAutomaticConnect?.() },
+    currentProfile: async broker => { const identity = await deps.identity(); return deps.ready() && identity && identity.userId === broker.hello.userId && identity.workspaceId === broker.hello.workspaceId ? identity.browserProfileId : undefined },
     store: deps.accountStore, brokers: () => [...brokers],
     appOrigin: deps.appOrigin ?? (async () => null),
     beforeSwitch: async () => { if (pending) throw new Error('busy'); await (deps.beforeAccountSwitch ?? deps.stop)() },
@@ -69,8 +75,9 @@ export function installAssistantChat(deps: {
     return [...brokers].reverse().find(b => b.hello.userId === identity.userId && b.hello.workspaceId === identity.workspaceId) ?? null
   }
   const status = async (panel: chrome.runtime.Port) => {
+    await accounts?.ensureConnection()
     const broker = await eligible()
-    post(panel, { type: 'status', ...(await accounts?.status()), connected: !!broker, ...(broker ? { identity: { userId: broker.hello.userId, workspaceId: broker.hello.workspaceId }, workspaceName: broker.hello.workspaceName, assistants: broker.hello.assistants, appearance: broker.hello.appearance } : {}) })
+    post(panel, { type: 'status', ...(await accounts?.status()), ...(deps.controlState ? { control: await deps.controlState() } : {}), connected: !!broker, ...(broker ? { identity: { userId: broker.hello.userId, workspaceId: broker.hello.workspaceId }, workspaceName: broker.hello.workspaceName, assistants: broker.hello.assistants, appearance: broker.hello.appearance } : {}) })
   }
   const refresh = () => { for (const panel of panels) void status(panel) }
   chrome.storage.onChanged.addListener(refresh)
@@ -152,7 +159,7 @@ export function installAssistantChat(deps: {
           if (request?.panel === panel) {
             post(request.broker.port, { type: 'stop', id: request.id })
           }
-          await deps.stop(); return
+          await deps.stop(); await status(panel); return
         }
         if (await accounts?.blocked()) throw new Error('account_switching')
         if (message?.type === 'read-page') {
@@ -161,7 +168,7 @@ export function installAssistantChat(deps: {
           const page = await deps.readPage()
           if (admission !== generation) throw new Error('stopped')
           sharedPages.set(panel, page)
-          post(panel, { type: 'page', page }); return
+          post(panel, { type: 'page', page }); await status(panel); return
         }
         if (message?.type === 'open-chat') {
           const broker = await eligible()
