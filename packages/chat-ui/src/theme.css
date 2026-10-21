@@ -1,0 +1,250 @@
+/* Canonical app theme and chat typography shared with standalone chat surfaces. */
+@custom-variant dark (&:is(.dark *));
+
+:root {
+  /* App UI font stack (legacy variable name — the old layout shipped Google's
+     RocknRoll_One under it; no Google Font is loaded now). The NATIVE OS UI font
+     leads (SF Pro on macOS / Segoe UI on Windows / system-ui elsewhere) so Latin
+     text reads like a native app — Notion-style — with REAL weights instead of
+     PingFang's synthesised faux-bold. Per-glyph fallback then hands CJK glyphs
+     (absent from SF Pro) to PingFang TC / JhengHei / Noto Sans TC, so Chinese +
+     Japanese still render correctly. This was previously PingFang-first, which
+     made Latin UI text render in PingFang's heavier Median master (font-weight
+     450 rounds up to PingFang's 500) and look off; leading with the OS font fixes
+     both the style and the weight. */
+  --font-rocknroll: -apple-system, BlinkMacSystemFont, "Segoe UI", system-ui,
+    "PingFang TC", "Microsoft JhengHei", "Noto Sans TC", sans-serif;
+  /* JetBrains Mono ships without CJK glyphs. Keep it first for code, then use
+     the same known-safe system/CJK stack as body text before the browser's
+     generic monospace fallback. Some desktop font setups resolve bare
+     `monospace` through a font with a broken CJK cmap, which makes intact
+     Chinese clipboard text render as one-for-one substituted glyphs. */
+  --font-code: var(--font-jetbrains-mono, ui-monospace), var(--font-rocknroll), ui-monospace,
+    monospace;
+  /* Heading / title display face — same stack as the body so headings, page
+     titles, and editor H1–H4 stay in one type system. (Aliased; both lead with
+     the OS UI font, which also gives Latin headings genuine heavy weights.) */
+  --font-display: var(--font-rocknroll);
+  /* To-do checkmark, as a MASK (not an image): the shape lives here, the ink
+     comes from `--primary-foreground` at the use site, so one glyph serves every
+     palette and both themes. Used by the editor's task list and the read-only
+     public body — see the task-list block below. It is a SHAPE, not a colour, so
+     it belongs in this palette-independent root and NOT in a themed token block:
+     when it was defined under `[data-palette="custom"]` the var resolved empty on
+     every other palette, `mask-image` fell back to `none`, and the tick `<span>`
+     painted as an opaque `--primary-foreground` square that hid the whole
+     checkbox on any checked row. */
+  --doc-check-tick: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 16 16'%3E%3Cpath d='M3.5 8.4l3 3 6-6.4' fill='none' stroke='%23000' stroke-width='2.2' stroke-linecap='round' stroke-linejoin='round'/%3E%3C/svg%3E");
+}
+
+@theme inline {
+  --color-background: var(--background);
+  --color-foreground: var(--foreground);
+  --font-sans: var(--font-rocknroll);
+  --font-heading: var(--font-rocknroll);
+  --font-mono: var(--font-code);
+  --color-sidebar-ring: var(--sidebar-ring);
+  --color-sidebar-border: var(--sidebar-border);
+  --color-sidebar-accent-foreground: var(--sidebar-accent-foreground);
+  --color-sidebar-accent: var(--sidebar-accent);
+  --color-sidebar-primary-foreground: var(--sidebar-primary-foreground);
+  --color-sidebar-primary: var(--sidebar-primary);
+  --color-sidebar-foreground: var(--sidebar-foreground);
+  --color-sidebar: var(--sidebar);
+  --color-ring: var(--ring);
+  --color-input: var(--input);
+  --color-border: var(--border);
+  --color-destructive: var(--destructive);
+  --color-accent-foreground: var(--accent-foreground);
+  --color-accent: var(--accent);
+  --color-accent-2: var(--accent-2);
+  --color-muted-foreground: var(--muted-foreground);
+  --color-muted: var(--muted);
+  --color-secondary-foreground: var(--secondary-foreground);
+  --color-secondary: var(--secondary);
+  --color-primary-foreground: var(--primary-foreground);
+  --color-primary: var(--primary);
+  --color-action-foreground: var(--action-foreground);
+  --color-action: var(--action);
+  --color-popover-foreground: var(--popover-foreground);
+  --color-popover: var(--popover);
+  --color-card-foreground: var(--card-foreground);
+  --color-card: var(--card);
+  --radius-sm: calc(var(--radius) * 0.6);
+  --radius-md: calc(var(--radius) * 0.8);
+  --radius-lg: var(--radius);
+  --radius-xl: calc(var(--radius) * 1.4);
+}
+
+/* ============================================================================
+   PALETTE SYSTEM
+   The DEFAULT palette is EXACT NOTION (warm grey + Notion blue) — the bare
+   `:root` / `.dark` below. The only other palette is `custom`: a workspace-
+   shared, AI-generated theme whose tokens are injected as a <style> at runtime
+   (see lib/theme.tsx), keyed to `data-palette="custom"` on <html>. The visual
+   TREATMENTS (active-row pill, sidebar wash, text selection) are token-driven
+   (--nav-active-*, --sidebar-surface-image, --selection-2). Filled actions use
+   the palette's neutral foreground/background contrast pair via --action*, so
+   an accent colour never takes over the interface as a field of CTA pills.
+   Palettes: notion (default) · custom (AI-generated).
+   ============================================================================ */
+
+/* ── Notion (default) — light. Authentic Notion: white page, warm-grey sidebar
+   #F7F7F5, warm-black #37352F text, Notion blue #2383E2. ── */
+:root {
+  --background: #FFFFFF;
+  --foreground: #37352F;
+  --card: #FFFFFF;
+  --card-foreground: #37352F;
+  --popover: #FFFFFF;
+  --popover-foreground: #37352F;
+  --primary: #2383E2;
+  --primary-foreground: #FFFFFF;
+  --action: var(--foreground);
+  --action-foreground: var(--background);
+  --secondary: #F1F1EF;
+  --secondary-foreground: #37352F;
+  --muted: #F7F6F3;
+  --muted-foreground: #787774;
+  --accent: #EFEFEE;
+  --accent-foreground: #37352F;
+  /* `--accent-2` = the duotone companion. For Notion it equals `--primary`, so
+     gradients/selection collapse to a single Notion blue (no second hue). */
+  --accent-2: #2383E2;
+  --destructive: #EB5757;
+  --border: #EDEDEC;
+  --input: #EDEDEC;
+  --ring: #2383E2;
+  --radius: 0.75rem;
+  /* Notion-style reading measure for non-full-width doc pages (~720px).
+     Applied via `.doc-page-content` in @layer components. Palette-agnostic. */
+  --doc-content-width: 45rem;
+  --sidebar: #F7F7F5;
+  --sidebar-foreground: #37352F;
+  --sidebar-primary: #2383E2;
+  --sidebar-primary-foreground: #FFFFFF;
+  --sidebar-accent: #EAEAE8;
+  --sidebar-accent-foreground: #37352F;
+  --sidebar-border: #E9E9E7;
+  --sidebar-ring: #2383E2;
+
+  /* Treatment tokens — DEFAULT = flat (Notion). Brand palettes override below. */
+  /* Active/selected pill — intentionally a touch STRONGER than the hover wash
+     (`--sidebar-accent`). A faint grey reads fine as a transient hover, but as an
+     always-on selected pill it blends into the sidebar, so the active nav item /
+     page row looks un-highlighted. Token-relative (mix the accent toward the
+     foreground) so it adapts to light + dark; the custom palette overrides this
+     with its gradient below. */
+  --nav-active-bg: color-mix(in srgb, var(--sidebar-accent) 90%, var(--sidebar-foreground) 10%);
+  --nav-active-fg: var(--sidebar-accent-foreground);
+  --nav-active-glow: none;
+  --sidebar-surface-image: none;
+  --selection-2: var(--primary);
+}
+
+/* ── Notion (default) — dark. #191919 page, #202020 sidebar, 81%-white text. ──
+   Brand blue is RETUNED for dark (NOT the light-page #2383E2): that saturated
+   blue is both off-cohesion against the warm-grey dark surfaces and misses WCAG
+   AA on them — white-on-#2383E2 ≈ 3.9:1 (the user-message bubble + CTA labels)
+   and #2383E2-as-text ≈ 4.0:1 on #252525 (the "Thinking…"/tool-timeline accents).
+   We use Notion's OWN dark-mode blue #529CCA, which reads ~5:1 as accent
+   text/icons on these surfaces, and flip --primary-foreground to a deep navy for
+   the compact accent fills that remain. Actions use the neutral --action pair,
+   which follows foreground/background automatically. --accent-2 tracks primary
+   (Notion's duotone collapses to one hue), and ring/sidebar accents move with it.
+   Light keeps the authentic #2383E2 (see :root). ── */
+.dark {
+  --background: #191919;
+  --foreground: #D4D4D4;
+  --card: #1F1F1F;
+  --card-foreground: #D4D4D4;
+  --popover: #252525;
+  --popover-foreground: #D4D4D4;
+  --primary: #529CCA;
+  --primary-foreground: #0A1A24;
+  --secondary: #2F2F2F;
+  --secondary-foreground: #D4D4D4;
+  --muted: #2F2F2F;
+  --muted-foreground: #979797;
+  --accent: #2F2F2F;
+  --accent-foreground: #D4D4D4;
+  --accent-2: #529CCA;
+  --destructive: #EB5757;
+  --border: #2F2F2F;
+  --input: #2F2F2F;
+  --ring: #529CCA;
+  --sidebar: #202020;
+  --sidebar-foreground: #D4D4D4;
+  --sidebar-primary: #529CCA;
+  --sidebar-primary-foreground: #FFFFFF;
+  --sidebar-accent: #2F2F2F;
+  --sidebar-accent-foreground: #FFFFFF;
+  --sidebar-border: #2F2F2F;
+  --sidebar-ring: #529CCA;
+}
+
+/* ── Markdown prose styling for chat / comment messages ──────────
+   Ported verbatim from apps/web's globals.css so the doc chat
+   (FloatingChat) and the in-doc comment threads (CommentThreadBody)
+   render the assistant's markdown — bold, lists, inline code, links —
+   identically to the main app. Tailwind Preflight strips list bullets
+   and paragraph margins, so without these rules the `.chat-markdown`
+   wrapper those components already reference is a no-op. Theme-token
+   colours keep it correct in app-web's light-default + dark themes. */
+.chat-markdown p { margin: 0.375rem 0; font-weight: 450; }
+.chat-markdown p:first-child { margin-top: 0; }
+.chat-markdown p:last-child { margin-bottom: 0; }
+.chat-markdown ul, .chat-markdown ol { margin: 0.5rem 0; padding-left: 1.5rem; }
+.chat-markdown li { margin: 0.25rem 0; font-weight: 450; }
+.chat-markdown ul { list-style-type: disc; }
+.chat-markdown ol { list-style-type: decimal; }
+.chat-markdown strong { font-weight: 650; color: var(--foreground); }
+.chat-markdown em { font-style: italic; }
+.chat-markdown h1, .chat-markdown h2, .chat-markdown h3 {
+  font-weight: 650; margin: 0.75rem 0 0.375rem;
+  font-family: var(--font-rocknroll), ui-sans-serif, system-ui, sans-serif;
+  color: var(--foreground);
+}
+.chat-markdown h1 { font-size: 1.25em; }
+.chat-markdown h2 { font-size: 1.125em; }
+.chat-markdown h3 { font-size: 1em; }
+.chat-markdown code {
+  font-size: 0.85em; padding: 0.15em 0.35em;
+  background: var(--muted); border-radius: 0.25rem;
+  font-family: var(--font-code);
+}
+.chat-markdown pre {
+  margin: 0.5rem 0; padding: 0.75rem 1rem;
+  background: var(--muted); border-radius: 0.5rem;
+  overflow-x: auto; font-size: 0.85em;
+}
+.chat-markdown pre code {
+  padding: 0; background: none; border-radius: 0;
+}
+.chat-markdown a {
+  color: var(--primary); text-decoration: underline;
+  text-underline-offset: 2px;
+}
+.chat-markdown blockquote {
+  border-left: 3px solid var(--border); padding-left: 0.75rem;
+  margin: 0.5rem 0; color: var(--muted-foreground);
+}
+/* GFM tables (remark-gfm consumers — the brain entry reader). Preflight
+   leaves <table> unstyled, so without these a synced KB spec's tables
+   render as a borderless text blob. Token-driven, wrapped scroll on
+   overflow via the display:block table. */
+.chat-markdown table {
+  display: block; overflow-x: auto;
+  margin: 0.75rem 0; border-collapse: collapse;
+  font-size: 0.875em; line-height: 1.45;
+}
+.chat-markdown th, .chat-markdown td {
+  border: 1px solid var(--border);
+  padding: 0.375rem 0.625rem;
+  text-align: left; vertical-align: top;
+}
+.chat-markdown th {
+  background: var(--muted); font-weight: 600;
+  color: var(--foreground);
+}
+.chat-markdown tr:nth-child(even) td { background: color-mix(in srgb, var(--muted) 35%, transparent); }

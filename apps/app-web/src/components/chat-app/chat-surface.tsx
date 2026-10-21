@@ -4260,6 +4260,7 @@ export function ChatSurface({ workspaceId }: { workspaceId: string }) {
       ) : null}
     <div
       ref={mentions.containerRef}
+      data-brian-chat-composer
       className={cn(
         "relative rounded-xl border border-border bg-background shadow-sm",
         "focus-within:border-ring [&_:focus-visible]:shadow-none",
@@ -4285,6 +4286,8 @@ export function ChatSurface({ workspaceId }: { workspaceId: string }) {
         </button>)}
       </details>}
       <ChatComposer
+        appearance="app"
+        sendButtonTone={canQueueMidTurn ? "secondary" : "primary"}
         value={input}
         onChange={setInput}
         onKeyDown={(event) => {
@@ -4595,6 +4598,7 @@ export function ChatSurface({ workspaceId }: { workspaceId: string }) {
           chat.state.isStreaming || mirrorStopAvailable ? (
             <button
               type="button"
+              data-brian-chat-action="stop"
               onClick={chat.state.isStreaming ? handleAbort : stopActiveTurn}
               aria-label={tChat.abort}
               title={tChat.abort}
@@ -4914,7 +4918,7 @@ export function ChatSurface({ workspaceId }: { workspaceId: string }) {
                       ) : null}
                     </div>
                   ) : m.text ? (
-                    <div className="max-w-[85%] rounded-2xl rounded-br-md bg-secondary px-3.5 py-2 text-[14px] leading-[1.5] break-words whitespace-pre-wrap text-secondary-foreground shadow-sm">
+                    <div data-brian-chat-user className="max-w-[85%] rounded-2xl rounded-br-md bg-secondary px-3.5 py-2 text-[14px] leading-[1.5] break-words whitespace-pre-wrap text-secondary-foreground shadow-sm">
                       {m.text}
                     </div>
                   ) : null}
@@ -4983,7 +4987,7 @@ export function ChatSurface({ workspaceId }: { workspaceId: string }) {
                       />
                     ) : null}
                     {m.text ? (
-                      <div className={MARKDOWN_CLS}>
+                      <div data-brian-chat-answer className={MARKDOWN_CLS}>
                         <ChatMarkdown
                           text={m.text}
                           components={CHAT_MARKDOWN_COMPONENTS}
@@ -5089,7 +5093,7 @@ export function ChatSurface({ workspaceId }: { workspaceId: string }) {
                     startedAt={turnStartedAt}
                   />
                   {chat.state.streamingText ? (
-                    <div className={MARKDOWN_CLS}>
+                    <div data-brian-chat-answer className={MARKDOWN_CLS}>
                       <ChatMarkdown
                         text={chat.state.streamingText}
                         components={CHAT_MARKDOWN_COMPONENTS}
@@ -5145,7 +5149,7 @@ export function ChatSurface({ workspaceId }: { workspaceId: string }) {
                     </span>
                   )}
                   {remoteText ? (
-                    <div className={MARKDOWN_CLS}>
+                    <div data-brian-chat-answer className={MARKDOWN_CLS}>
                       <ChatMarkdown
                         text={remoteText}
                         components={CHAT_MARKDOWN_COMPONENTS}

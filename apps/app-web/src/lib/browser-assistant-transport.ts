@@ -23,9 +23,10 @@ export function serveBrowserAssistant(port: AssistantPort, deps: {
   fetch: (url: string, init?: RequestInit) => Promise<Response>;
   profile: (id: string) => Promise<{ name: string; defaultBackend: string; ownerUserId: string } | null>;
   userId: string;
-  assistants: () => Promise<Array<{ id: string; name: string }>>;
+  assistants: () => Promise<Array<{ id: string; name: string; iconSeed?: number | null }>>;
   workspaceName: string;
   isCurrentUser?: () => boolean;
+  appearance?: () => unknown;
 }) {
   let disposed = false;
   let running: { id: string; controller: AbortController; sessionId?: string; stopped: boolean } | null = null;
@@ -39,7 +40,9 @@ export function serveBrowserAssistant(port: AssistantPort, deps: {
   const hello = async () => {
     if (deps.isCurrentUser?.() === false) { port.disconnect(); return; }
     const assistants = await deps.assistants();
-    post({ type: 'hello', userId: deps.userId, workspaceId: deps.workspaceId, workspaceName: deps.workspaceName, assistants: assistants.map(({ id, name }) => ({ id, name })) });
+    post({ type: 'hello', userId: deps.userId, workspaceId: deps.workspaceId, workspaceName: deps.workspaceName,
+      assistants: assistants.map(({ id, name, iconSeed }) => ({ id, name, ...(iconSeed !== undefined ? { iconSeed } : {}) })),
+      ...(deps.appearance ? { appearance: deps.appearance() } : {}) });
   };
   const handle = async (raw: unknown) => {
     if (disposed) return;
@@ -103,5 +106,7 @@ export function serveBrowserAssistant(port: AssistantPort, deps: {
     }
   };
   port.onDisconnect.addListener(dispose);
-  return { hello, dispose };
+  return { hello, dispose, publishAppearance: () => {
+    if (deps.appearance) post({ type: 'appearance', appearance: deps.appearance() });
+  } };
 }

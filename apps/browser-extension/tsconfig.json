@@ -3,9 +3,19 @@
   "compilerOptions": {
     "outDir": "dist",
     "rootDir": "src",
-    "lib": ["ES2023", "DOM"],
-    "types": ["chrome"]
+    "lib": [
+      "ES2023",
+      "DOM"
+    ],
+    "types": [
+      "chrome"
+    ],
+    "jsx": "react-jsx"
   },
-  "include": ["src"],
-  "exclude": ["src/**/__tests__/**"]
+  "include": [
+    "src"
+  ],
+  "exclude": [
+    "src/**/__tests__/**"
+  ]
 }

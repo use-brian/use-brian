@@ -4,7 +4,7 @@
   "private": true,
   "type": "module",
   "scripts": {
-    "build": "pnpm --filter @use-brian/browser-control build && rm -rf dist && tsc -p tsconfig.chromium.json && node scripts/assemble.mjs",
+    "build": "pnpm --filter @use-brian/browser-control build && pnpm --filter @use-brian/chat-ui build && rm -rf dist && tsc -p tsconfig.chromium.json && node scripts/assemble.mjs",
     "build:firefox": "pnpm --filter @use-brian/browser-control build && rm -rf dist-firefox && tsc -p tsconfig.firefox.json && node scripts/assemble-firefox.mjs",
     "typecheck": "tsc --noEmit",
     "test": "vitest run"
@@ -14,9 +14,20 @@
     "@types/node": "^20.19.39",
     "jsdom": "^29.1.1",
     "typescript": "^5.7",
-    "vitest": "^3"
+    "vitest": "^3",
+    "esbuild": "^0.27.7",
+    "@tailwindcss/node": "4.2.2",
+    "@types/react": "^19",
+    "@types/react-dom": "^19",
+    "tailwindcss": "4.2.2"
   },
   "dependencies": {
-    "@use-brian/browser-control": "workspace:*"
+    "@use-brian/browser-control": "workspace:*",
+    "@use-brian/chat-ui": "workspace:*",
+    "react": "19.2.4",
+    "react-dom": "19.2.4",
+    "react-markdown": "^10.1.0",
+    "remark-gfm": "^4.0.1",
+    "lucide-react": "^1.7.0"
   }
 }

@@ -34,11 +34,12 @@ function sourceFiles(appRoot) {
       if (entry === '__tests__') continue
       const full = join(dir, entry)
       if (statSync(full).isDirectory()) walk(full, typescriptOnly)
-      else if (!typescriptOnly || entry.endsWith('.ts')) files.push(full)
+      else if (!typescriptOnly || /\.(tsx?|css)$/.test(entry)) files.push(full)
     }
   }
   walk(join(appRoot, 'src'))
   walk(join(appRoot, '../../packages/browser-control/src'))
+  walk(join(appRoot, '../../packages/chat-ui/src'))
   walk(join(appRoot, 'static'), false)
   return files
 }

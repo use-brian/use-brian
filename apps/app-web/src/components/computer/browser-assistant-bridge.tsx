@@ -1,6 +1,7 @@
 "use client";
 
 import { useEffect } from 'react';
+import { readChatAppearance } from '@use-brian/chat-ui';
 import { authFetch, getAccessToken } from '@/lib/auth-fetch';
 import { listWorkspaceAssistants } from '@/lib/api/views';
 import { listBrowserProfiles } from '@/lib/api/computer';
@@ -20,6 +21,13 @@ export function BrowserAssistantBridge() {
     let heartbeat: ReturnType<typeof setInterval> | undefined;
     let port: AssistantPort | undefined;
     let service: ReturnType<typeof serveBrowserAssistant> | undefined;
+    let appearanceFrame: number | undefined;
+    const appearanceObserver = new MutationObserver(() => {
+      if (appearanceFrame !== undefined) return;
+      appearanceFrame = requestAnimationFrame(() => { appearanceFrame = undefined; service?.publishAppearance(); });
+    });
+    appearanceObserver.observe(document.documentElement, { attributes: true, attributeFilter: ['class', 'style', 'data-palette'] });
+    appearanceObserver.observe(document.head, { childList: true, subtree: true, characterData: true });
     const isCurrentUser = () => {
       const token = getAccessToken();
       try { return JSON.parse(atob(token!.split('.')[1].replace(/-/g, '+').replace(/_/g, '/'))).sub === me.id; }
@@ -32,6 +40,7 @@ export function BrowserAssistantBridge() {
         service = serveBrowserAssistant(port, {
           apiUrl: config.apiUrl || 'http://localhost:4000', workspaceId, workspaceName: name, userId: me.id,
           isCurrentUser,
+          appearance: () => readChatAppearance(document.documentElement),
           fetch: async (url, init) => {
             // A second account can sign in without remounting this layout.
             // Never let a stale workspace port adopt that account's cookies.
@@ -50,7 +59,9 @@ export function BrowserAssistantBridge() {
       } catch { if (!closed) retry = setTimeout(connect, 10_000); }
     }
     connect();
-    return () => { closed = true; clearTimeout(retry); clearInterval(heartbeat); service?.dispose(); port?.disconnect(); };
+    return () => { closed = true; clearTimeout(retry); clearInterval(heartbeat); appearanceObserver.disconnect();
+      if (appearanceFrame !== undefined) cancelAnimationFrame(appearanceFrame);
+      service?.dispose(); port?.disconnect(); };
   }, [workspaceId, name, me.id]);
   return null;
 }

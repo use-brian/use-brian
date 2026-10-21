@@ -1,14 +1,7 @@
 <!doctype html>
 <html lang="en">
-<head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1"><meta name="color-scheme" content="light dark"><title>Brian assistant</title><link rel="stylesheet" href="sidepanel.css"></head>
+<head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1"><meta name="color-scheme" content="light dark"><title>Brian assistant</title><link rel="stylesheet" href="app-chat.css"><link rel="stylesheet" href="sidepanel.css"></head>
 <body>
-  <header><img src="icon-32.png" width="30" height="30" alt=""><strong>Brian</strong><span class="spacer"></span><button id="new-chat" title="New chat">New chat</button><button id="settings" aria-label="Extension settings">⚙</button></header>
-  <p id="connection" role="status">Connecting to your assistant...</p>
-  <div id="recovery" hidden><p>Keep a signed-in Brian workspace tab open and pair this extension in Browsers.</p><button id="open-app">Open Brian</button><button id="retry">Retry connection</button></div>
-  <details id="assistant-picker"><summary id="assistant-name">Choose assistant</summary><div id="assistants"></div></details>
-  <section class="page"><div class="page-head"><strong>Website context</strong><button id="share-page">Share current page</button></div><p class="muted">Brian uses your authorized Brain context. Share a page to add website evidence to your next message.</p><div id="page-preview" hidden><a id="page-url" target="_blank" rel="noreferrer"></a><pre id="page-text"></pre><button id="clear-page">Remove page</button></div></section>
-  <main id="messages" role="log" aria-label="Conversation"><p class="empty">Ask about this page, connect it to your company knowledge, or ask Brian to work in your browser.</p></main>
-  <div id="activity" role="status"></div><div id="review" hidden><p>This step needs your review in the full chat.</p><button id="review-chat">Review in Brian</button></div><p id="error" role="alert" hidden></p>
-  <form id="composer"><label class="sr-only" for="message">Message your assistant</label><textarea id="message" rows="3" placeholder="Ask your assistant..."></textarea><div class="compose-actions"><span class="muted">Browser actions require Allow.</span><button type="button" id="stop">Stop</button><button class="primary" id="send" type="submit">Send</button></div></form>
+  <div id="root"></div>
   <script type="module" src="sidepanel.js"></script>
 </body></html>

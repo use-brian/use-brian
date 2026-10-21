@@ -47,7 +47,7 @@ export function installAssistantChat(deps: {
   }
   const status = async (panel: chrome.runtime.Port) => {
     const broker = await eligible()
-    post(panel, { type: 'status', connected: !!broker, ...(broker ? { workspaceName: broker.hello.workspaceName, assistants: broker.hello.assistants } : {}) })
+    post(panel, { type: 'status', connected: !!broker, ...(broker ? { workspaceName: broker.hello.workspaceName, assistants: broker.hello.assistants, appearance: broker.hello.appearance } : {}) })
   }
   const refresh = () => { for (const panel of panels) void status(panel) }
   chrome.storage.onChanged.addListener(refresh)
@@ -64,6 +64,11 @@ export function installAssistantChat(deps: {
         if (typeof message.userId !== 'string' || typeof message.workspaceId !== 'string' || !Array.isArray(message.assistants) || message.assistants.length > 200) return
         broker.hello = message
         brokers.add(broker)
+        refresh()
+        return
+      }
+      if (message.type === 'appearance' && brokers.has(broker)) {
+        broker.hello.appearance = message.appearance
         refresh()
         return
       }

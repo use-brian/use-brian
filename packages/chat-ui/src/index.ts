@@ -70,3 +70,6 @@ export {
   type ComposerEnterIntent,
   type HighlightRange,
 } from './ChatComposer.js'
+
+export { AssistantAvatar, getIconColor } from './AssistantAvatar.js'
+export { CHAT_THEME_TOKENS, readChatAppearance, applyChatAppearance, type ChatAppearance } from './appearance.js'

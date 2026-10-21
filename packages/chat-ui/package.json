@@ -9,7 +9,9 @@
     ".": {
       "types": "./dist/index.d.ts",
       "default": "./dist/index.js"
-    }
+    },
+    "./appearance.css": "./src/appearance.css",
+    "./theme.css": "./src/theme.css"
   },
   "scripts": {
     "build": "tsc",

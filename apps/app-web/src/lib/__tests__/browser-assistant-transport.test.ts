@@ -20,6 +20,16 @@ describe('[COMP:app-web/browser-assistant-transport] authenticated extension cha
     expect(h.postMessage).toHaveBeenCalledWith({ type: 'hello', userId: 'user-1', workspaceId: 'workspace-1', workspaceName: 'Example', assistants: [{ id: 'assistant-1', name: 'Assistant' }] });
     expect(JSON.stringify(h.postMessage.mock.calls)).not.toMatch(/token|authorization/i);
   });
+  it('publishes live appearance and deterministic avatar seeds through the same identity-bound port', async () => {
+    const h = harness();
+    const appearance = vi.fn(() => ({ dark: false, tokens: { '--background': '#ffffff' } }));
+    const service = serveBrowserAssistant({ postMessage: h.postMessage, disconnect: vi.fn(), onMessage: { addListener: vi.fn() }, onDisconnect: { addListener: vi.fn() } }, { ...h.deps, appearance, assistants: async () => [{ id: 'assistant-1', name: 'Assistant', iconSeed: 42 }] });
+    await service.hello();
+    expect(h.postMessage).toHaveBeenCalledWith(expect.objectContaining({ appearance: appearance(), assistants: [{ id: 'assistant-1', name: 'Assistant', iconSeed: 42 }] }));
+    appearance.mockReturnValue({ dark: true, tokens: { '--background': '#191919' } });
+    service.publishAppearance();
+    expect(h.postMessage).toHaveBeenLastCalledWith({ type: 'appearance', appearance: appearance() });
+  });
   it('uses the canonical workspace assistant chat and filters private reasoning', async () => {
     const h = harness(); h.send(request); await settle();
     const [url, init] = (h.wire as ReturnType<typeof vi.fn>).mock.calls[0];

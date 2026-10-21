@@ -98,12 +98,16 @@ describe('[COMP:ext/assistant-chat] rounded extension artwork', () => {
     try {
       for (const dir of ['src', 'static']) mkdirSync(join(app, dir), { recursive: true })
       mkdirSync(join(temp, 'src/packages/browser-control/src'), { recursive: true })
+      mkdirSync(join(temp, 'src/packages/chat-ui/src'), { recursive: true })
       writeFileSync(join(app, 'src/background.ts'), '// fixture')
       writeFileSync(join(app, 'static/manifest.json'), '{}')
       writeFileSync(join(app, 'static/sidepanel.css'), 'body { color: black }')
       const before = computeSourceHash(app)
       writeFileSync(join(app, 'static/sidepanel.css'), 'body { color: white }')
-      expect(computeSourceHash(app)).not.toBe(before)
+      const after = computeSourceHash(app)
+      expect(after).not.toBe(before)
+      writeFileSync(join(temp, 'src/packages/chat-ui/src/theme.css'), ':root { --background: white }')
+      expect(computeSourceHash(app)).not.toBe(after)
     } finally { rmSync(temp, { recursive: true, force: true }) }
   })
   it('has transparent corners and preserves the creature at every size', () => {

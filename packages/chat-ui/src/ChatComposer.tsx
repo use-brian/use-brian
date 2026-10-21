@@ -171,6 +171,10 @@ export type ChatComposerProps = {
   rowClassName?: string
   /** Class for the built-in Send button. */
   sendButtonClassName?: string
+  /** Opt into the shared app/extension chat presentation. */
+  appearance?: 'app'
+  /** Preserve the subdued action used for queued messages during a turn. */
+  sendButtonTone?: 'primary' | 'secondary'
   /** Override the Send button label. */
   sendLabel?: ReactNode
   /**
@@ -435,6 +439,7 @@ export function ChatComposer(props: ChatComposerProps) {
             (props.value.trim().length === 0 && !props.allowEmptySend)
           }
           className={props.sendButtonClassName}
+          data-brian-chat-action={props.appearance === 'app' ? (props.sendButtonTone === 'secondary' ? 'secondary' : 'send') : undefined}
           data-testid="chat-composer-send"
         >
           {props.sendLabel ?? 'Send'}

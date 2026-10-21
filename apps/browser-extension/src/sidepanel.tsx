@@ -1,0 +1,197 @@
+import { useEffect, useRef, useState, type ComponentProps } from 'react'
+import { createRoot } from 'react-dom/client'
+import { AssistantAvatar, ChatComposer, ChatMarkdown, applyChatAppearance } from '@use-brian/chat-ui'
+import remarkGfm from 'remark-gfm'
+import { ArrowUp, Check, ChevronDown, Copy, Globe, Plus, Settings2, Square, X } from 'lucide-react'
+import type { PageEvidence } from './assistant-chat.js'
+
+type Assistant = { id: string; name: string; iconSeed?: number | null }
+type Message = { id: string; role: 'user' | 'assistant'; text: string; assistant?: Assistant; page?: PageEvidence }
+const errors: Record<string, string> = {
+  page_changed: 'The page changed or its shared excerpt expired. Share the current page again, then send.',
+  different_task_tab: 'Brian is already working in another tab. Stop that task before sharing this tab.',
+  no_eligible_tab: 'Open a regular website tab to share its context. Private and browser settings tabs are excluded.',
+  consent_denied: 'Page sharing was declined. Press Share current page to request permission again.',
+  busy: 'Another chat is still running. Wait for it to finish or press Stop.',
+  stopped: 'Stopped before sending or sharing. No new request was started.',
+  protected_fill_denied: 'Finish protected fill cleanup in extension Settings before sharing this page.',
+}
+const fallbackError = 'The connection or page read failed. Open Brian, check the chat, then retry. No action was repeated.'
+
+function CodeBlock({ children }: ComponentProps<'pre'>) {
+  const pre = useRef<HTMLPreElement>(null)
+  const [copied, setCopied] = useState(false)
+  const timer = useRef<ReturnType<typeof setTimeout> | undefined>(undefined)
+  useEffect(() => () => clearTimeout(timer.current), [])
+  return <div data-chat-code-block className="group/codeblock relative min-w-0">
+    <button className="code-copy" type="button" aria-label={copied ? 'Copied' : 'Copy code'} onClick={() => {
+      void navigator.clipboard.writeText(pre.current?.textContent?.replace(/\n$/, '') ?? '').then(() => {
+        setCopied(true); clearTimeout(timer.current); timer.current = setTimeout(() => setCopied(false), 1600)
+      }).catch(() => undefined)
+    }}>{copied ? <Check size={14} /> : <Copy size={14} />}</button>
+    <pre ref={pre}>{children}</pre>
+  </div>
+}
+const markdownComponents = {
+  pre: CodeBlock,
+  a: ({ children, href }: ComponentProps<'a'>) => <a href={href} target="_blank" rel="noopener noreferrer">{children}</a>,
+}
+
+export function BrowserAssistantPanel() {
+  const [connected, setConnected] = useState(false)
+  const [workspace, setWorkspace] = useState('')
+  const [assistants, setAssistants] = useState<Assistant[]>([])
+  const [assistant, setAssistant] = useState<Assistant | null>(null)
+  const selected = useRef<Assistant | null>(null)
+  const [messages, setMessages] = useState<Message[]>([])
+  const [draft, setDraft] = useState('')
+  const [page, setPage] = useState<PageEvidence | undefined>()
+  const [activity, setActivity] = useState('')
+  const [error, setError] = useState('')
+  const [review, setReview] = useState(false)
+  const [running, setRunning] = useState(false)
+  const [reading, setReading] = useState(false)
+  const port = useRef<chrome.runtime.Port | null>(null)
+  const request = useRef<string | null>(null)
+  const session = useRef<string | undefined>(undefined)
+  const transcript = useRef<HTMLDivElement>(null)
+
+  const send = (message: unknown) => {
+    try { port.current?.postMessage(message) }
+    catch { setConnected(false); setError('Connection lost. Keep Brian open and retry. No message was resent.') }
+  }
+  const clear = () => { session.current = undefined; setMessages([]); setPage(undefined); setReview(false); setError('') }
+  const connect = () => {
+    port.current?.disconnect()
+    const next = chrome.runtime.connect({ name: 'brian-assistant-panel' })
+    port.current = next
+    next.onDisconnect.addListener(() => {
+      if (port.current !== next) return
+      setConnected(false); setRunning(false); setReading(false); request.current = null
+      setError('Connection lost. Check the full chat before retrying an action.')
+    })
+    next.onMessage.addListener(message => {
+      if (port.current !== next) return
+      if (message.type === 'status') {
+        setConnected(message.connected === true)
+        setWorkspace(typeof message.workspaceName === 'string' ? message.workspaceName : '')
+        if (message.appearance) applyChatAppearance(document.documentElement, message.appearance)
+        if (Array.isArray(message.assistants)) {
+          const roster: Assistant[] = message.assistants.filter((a: Assistant) => typeof a?.id === 'string' && typeof a?.name === 'string')
+          setAssistants(roster)
+          const current = roster.find(a => a.id === selected.current?.id) ?? roster[0] ?? null
+          if (selected.current?.id !== current?.id) clear()
+          selected.current = current; setAssistant(current)
+        }
+        return
+      }
+      if (message.type === 'page') { setPage(message.page); setReading(false); setActivity(''); return }
+      if (message.id && message.id !== request.current) return
+      if (message.type === 'event') {
+        const data = message.data ?? {}
+        if (message.event === 'session') session.current = data.sessionId
+        if (message.event === 'text_delta' && typeof data.text === 'string') {
+          setMessages(rows => rows.map(row => row.id === message.id ? { ...row, text: row.text + data.text } : row))
+          setActivity('')
+        }
+        if (message.event === 'tool_start') {
+          setMessages(rows => rows.map(row => row.id === message.id ? { ...row, text: '' } : row))
+          setActivity('Working...'); if (data.name === 'askQuestion') setReview(true)
+        }
+        if (message.event === 'tool_confirmation_required') { setReview(true); setActivity('Waiting for your approval') }
+        if (message.event === 'error') setError(typeof data.error === 'string' ? data.error : 'The turn could not finish. Open the full chat for details.')
+        return
+      }
+      if (message.type === 'complete' || message.type === 'failure') {
+        request.current = null; setRunning(false); setReading(false); setActivity('')
+        if (message.type === 'failure') setError(errors[message.code] ?? fallbackError)
+      }
+    })
+  }
+  useEffect(() => {
+    connect()
+    const poll = setInterval(() => send({ type: 'status' }), 5000)
+    return () => { clearInterval(poll); const previous = port.current; port.current = null; previous?.disconnect() }
+  }, [])
+  useEffect(() => {
+    const node = transcript.current
+    if (node) node.scrollTop = node.scrollHeight
+  }, [messages, activity])
+
+  const submit = () => {
+    const text = draft.trim()
+    if (!text || !connected || running || !assistant) return
+    const id = crypto.randomUUID(); request.current = id
+    setMessages(rows => [...rows, { id: `${id}-user`, role: 'user', text, page }, { id, role: 'assistant', text: '', assistant }])
+    setError(''); setReview(false); setRunning(true); setActivity('Thinking...')
+    send({ type: 'send', id, text, assistantId: assistant.id, sessionId: session.current, page })
+    setDraft(''); setPage(undefined)
+  }
+  const choose = (next: Assistant) => {
+    if (running) return
+    selected.current = next; setAssistant(next); clear()
+    document.getElementById('assistant-picker')?.removeAttribute('open')
+  }
+  const stop = () => send({ type: 'stop' })
+
+  return <div data-chat-surface className="extension-chat @container/chat-reading bg-background text-foreground">
+    <header className="panel-header">
+      <span className="chat-heading">Chat</span>
+      <span className="header-status" title={connected ? workspace : 'Open Brian to connect'} aria-label={connected ? `Connected: ${workspace}` : 'Not connected'} data-connected={connected} />
+      <div className="header-actions">
+        <button type="button" className="icon-button" title="Stop browser task" aria-label="Stop browser task" onClick={stop}><Square size={14} /></button>
+        <button type="button" className="icon-button" disabled={running} title="New chat" aria-label="New chat" onClick={clear}><Plus size={16} /></button>
+        <button type="button" className="icon-button" title="Extension settings" aria-label="Extension settings" onClick={() => { void chrome.windows.create({ url: chrome.runtime.getURL('popup.html'), type: 'popup', width: 380, height: 720 }) }}><Settings2 size={16} /></button>
+      </div>
+    </header>
+
+    <div ref={transcript} className="transcript" role="log" aria-label="Conversation">
+      {!messages.length ? <div data-chat-greeting className="welcome"><h2>What would you like to work on?</h2></div> : null}
+      {messages.map(message => message.role === 'user' ? <div key={message.id} className="user-row"><div data-brian-chat-user>
+        {message.text}{message.page ? <a className="shared-page-receipt" href={message.page.url} target="_blank" rel="noreferrer"><Globe size={12} />{message.page.title || message.page.url}</a> : null}
+      </div></div> : message.text ? <div key={message.id} className="assistant-row">
+        <AssistantAvatar id={message.assistant?.id ?? 'assistant'} name={message.assistant?.name ?? 'Assistant'} iconSeed={message.assistant?.iconSeed ?? undefined} size="sm" />
+        <div className="answer-column"><div data-brian-chat-answer className="chat-markdown text-foreground"><ChatMarkdown text={message.text} components={markdownComponents} remarkPlugins={[remarkGfm]} /></div></div>
+      </div> : null)}
+      {activity ? <div role="status" className="chat-activity">{activity}</div> : null}
+      {review ? <div className="review-note"><p>This step needs your review in the full chat.</p><button type="button" className="text-button" onClick={() => send({ type: 'open-chat', sessionId: session.current })}>Review in Brian</button></div> : null}
+    </div>
+
+    <footer className="composer-area">
+      {!connected ? <div className="connection-note" role="status"><p>Keep a signed-in Brian workspace tab open and pair this extension in Browsers.</p><div>
+        <button className="text-button" onClick={() => { void chrome.storage.local.get('assistantAppOrigin').then(stored => chrome.tabs.create({ url: stored.assistantAppOrigin || 'https://app.usebrian.ai' })) }}>Open Brian</button>
+        <button className="text-button" onClick={connect}>Retry connection</button>
+      </div></div> : null}
+      {error ? <p className="error-note" role="alert">{error}</p> : null}
+      <div className="context-band"><span className="brain-context" title={workspace || 'Brain context'}>Brain{workspace ? ` · ${workspace}` : ''}</span>
+        <button type="button" className="context-button" disabled={!connected || running || reading} onClick={() => { setReading(true); setError(''); send({ type: 'read-page' }) }}><Globe size={14} />{reading ? 'Reading page...' : 'Share page'}</button>
+      </div>
+      {page ? <details className="page-context"><summary><Globe size={13} /><span>{page.title || page.url}</span><ChevronDown size={13} /></summary>
+        <a href={page.url} target="_blank" rel="noreferrer">{page.url}</a><pre>{page.text}</pre><button type="button" className="text-button" onClick={() => setPage(undefined)}><X size={12} />Remove page</button>
+      </details> : null}
+      <div data-brian-chat-composer>
+        <ChatComposer appearance="app" value={draft} onChange={setDraft} onSend={submit}
+          sendDisabled={!connected || !assistant || running} placeholder="Ask a question or give Brian a task" textareaId="message"
+          rowClassName="grid grid-cols-[auto_minmax(0,1fr)_auto] items-center gap-x-0.5 gap-y-1 px-2 pb-2"
+          textareaClassName="col-span-3 col-start-1 row-start-1 w-full min-w-0 max-h-[min(240px,30dvh)] resize-none overflow-y-auto bg-transparent px-1.5 pt-3 pb-2 text-[16px] leading-6 outline-none placeholder:text-muted-foreground focus-visible:shadow-none"
+          slotPreInput={<div className="composer-toolbar col-span-2 col-start-1 row-start-2">
+            <details id="assistant-picker" className="assistant-picker" inert={running}>
+              <summary title={assistant?.name || 'Choose assistant'} aria-label={assistant ? `Switch assistant: ${assistant.name}` : 'Choose assistant'}>
+                {assistant ? <AssistantAvatar id={assistant.id} name={assistant.name} iconSeed={assistant.iconSeed ?? undefined} size="xs" /> : <span className="avatar-placeholder" />}
+                <span>{assistant?.name || 'Choose assistant'}</span><ChevronDown size={13} />
+              </summary>
+              <div className="assistant-options">{assistants.map(item => <button key={item.id} type="button" onClick={() => choose(item)}><AssistantAvatar id={item.id} name={item.name} iconSeed={item.iconSeed ?? undefined} size="xs" /><span>{item.name}</span>{assistant?.id === item.id ? <Check size={13} /> : null}</button>)}</div>
+            </details>
+          </div>}
+          sendButtonClassName={`col-start-3 row-start-2${running ? ' hidden' : ''}`}
+          sendLabel={<ArrowUp size={18} aria-label="Send message" />}
+          slotPostInput={running ? <button className="col-start-3 row-start-2" data-brian-chat-action="stop" type="button" aria-label="Stop" title="Stop" onClick={stop}><Square size={14} fill="currentColor" /></button> : null}
+        />
+      </div>
+      <p className="composer-hint">Page sharing and browser actions use your permissions.</p>
+    </footer>
+  </div>
+}
+
+const root = typeof document === 'undefined' ? null : document.getElementById('root')
+if (root) createRoot(root).render(<BrowserAssistantPanel />)
