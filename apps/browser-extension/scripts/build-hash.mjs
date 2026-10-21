@@ -29,17 +29,17 @@ const APP_ROOT = join(dirname(fileURLToPath(import.meta.url)), '..')
  */
 function sourceFiles(appRoot) {
   const files = []
-  const walk = (dir) => {
+  const walk = (dir, typescriptOnly = true) => {
     for (const entry of readdirSync(dir).sort()) {
       if (entry === '__tests__') continue
       const full = join(dir, entry)
-      if (statSync(full).isDirectory()) walk(full)
-      else if (entry.endsWith('.ts')) files.push(full)
+      if (statSync(full).isDirectory()) walk(full, typescriptOnly)
+      else if (!typescriptOnly || entry.endsWith('.ts')) files.push(full)
     }
   }
   walk(join(appRoot, 'src'))
   walk(join(appRoot, '../../packages/browser-control/src'))
-  files.push(join(appRoot, 'static', 'manifest.json'))
+  walk(join(appRoot, 'static'), false)
   return files
 }
 

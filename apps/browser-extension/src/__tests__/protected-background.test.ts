@@ -37,8 +37,9 @@ beforeEach(async () => {
   const event=()=>({addListener:vi.fn()})
   vi.stubGlobal('chrome',{
     runtime:{id:'id',getURL:(s:string)=>`chrome-extension://id/${s}`,getManifest:()=>({}),
-      onMessage:{addListener:(fn:any)=>{messages=fn}},onMessageExternal:event()},
-    storage:{session:{
+      onMessage:{addListener:(fn:any)=>{messages=fn}},onMessageExternal:event(),onConnect:event(),onConnectExternal:event()},
+    sidePanel:{setPanelBehavior:vi.fn(async()=>{})},
+    storage:{onChanged:event(),session:{
       get:vi.fn(async(key:string)=>({[key]:sessionData[key]})),
       set:vi.fn(async(v:any)=>{Object.assign(sessionData,v)}),
     },local:{

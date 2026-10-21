@@ -6,7 +6,7 @@ import { parseFormFields, formFieldOperation, type FillFormResult } from './fill
  * snapshot only — anything older returns `stale_ref` and the agent must
  * re-snapshot.
  */
-import { buildSnapshot, type BuiltSnapshot, type CdpAXNode } from './snapshot.js'
+import { buildSnapshot, readablePageNames, type BuiltSnapshot, type CdpAXNode } from './snapshot.js'
 import { RESTRICTED_TAB_MESSAGE } from './tab-eligibility.js'
 import { ACTION_CURSOR_BEFORE_CAPTURE, buildActionCursorArmExpression, buildActionCursorMoveExpression, type ActionCursorKind } from './action-cursor.js'
 
@@ -855,6 +855,16 @@ export class TabExecutor {
     const tabId = this.mustTab()
     const tab = await this.platform.tabs.get(tabId)
     return { url: tab.url ?? '', title: tab.title ?? '' }
+  }
+
+  /** Read-only context sharing leaves navigation and action refs untouched. */
+  async readPageContext(): Promise<{ url: string; title: string; nodes: Array<{ role: string; name: string }> }> {
+    const tabId = this.mustTab()
+    const before = await this.currentUrl()
+    const tree = await this.cdp<{ nodes: CdpAXNode[] }>(tabId, 'Accessibility.getFullAXTree')
+    const after = await this.currentUrl()
+    if (this.attachedTabId !== tabId || before.url !== after.url) throw new ExecutorError('The page changed while sharing. Share it again.', 'page_changed')
+    return { ...after, nodes: readablePageNames(tree.nodes) }
   }
 
   /**

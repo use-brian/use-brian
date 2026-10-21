@@ -26,6 +26,7 @@ import { isTabControlPreapproved } from './consent-preapproval.js'
 import type { LocalControlMode } from './protocol.js'
 
 import { ProtectedFill, denied } from './protected-fill.js'
+import { installAssistantChat, pairedChatIdentity, pageEvidence } from './assistant-chat.js'
 
 const protectedFill = new ProtectedFill(chrome.storage.local)
 const executor = new TabExecutor()
@@ -589,6 +590,7 @@ chrome.runtime.onMessageExternal.addListener((message, sender, sendResponse) => 
     void (async () => {
       try {
         await applyPairing({ relayUrl: msg.relayUrl, pairingToken: msg.pairingToken })
+        await chrome.storage.local.set({ assistantAppOrigin: sender.origin })
         sendResponse({ ok: true })
       } catch { sendResponse({ok:false, error:'Protected fill unavailable', code:'protected_fill_denied'}) }
     })()
@@ -621,4 +623,35 @@ chrome.runtime.onMessageExternal.addListener((message, sender, sendResponse) => 
   return undefined
 })
 
+installAssistantChat({
+  identity: async () => pairedChatIdentity((await getStored('sessionToken')) ?? (await getStored('pairingToken'))),
+  ready: () => client.getState() === 'ready',
+  matches: pairingMatches,
+  stop: async () => {
+    const stopped = stopTask()
+    client.sendEvent('stopped')
+    await stopped
+  },
+  pageStillCurrent: async page => {
+    const active = await activeTabForConsent(options => chrome.windows.getLastFocused(options))
+    return !gate.isStopped() && !await protectedFill.locked() && active?.id === gate.currentTab() && active?.url === page.url
+  },
+  readPage: () => commands.run(async check => {
+    if (await protectedFill.locked()) throw denied()
+    check()
+    const active = await activeTabForConsent(options => chrome.windows.getLastFocused(options))
+    if (active?.id == null || active.incognito || !attachabilityOf(active.url)) throw new Error('no_eligible_tab')
+    if (gate.currentTab() !== null && gate.currentTab() !== active.id) throw new Error('different_task_tab')
+    const tabId = await gate.requireTab('task_tabs')
+    check()
+    if (tabId !== active.id) throw new Error('page_changed')
+    await attachToEligibleTab(tabId, check)
+    const snapshot = await executor.readPageContext()
+    check()
+    if (snapshot.url !== active.url) throw new Error('page_changed')
+    return pageEvidence(snapshot)
+  }),
+})
+
+void chrome.sidePanel.setPanelBehavior({ openPanelOnActionClick: true })
 void startClient()
