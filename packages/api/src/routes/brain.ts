@@ -35,6 +35,12 @@ import type {
 } from '@use-brian/core'
 
 import { TASK_STATUSES as TASK_RECORD_STATUSES } from '@use-brian/core'
+import {boundScopeSources,executionToolContext,DerivedScopeError} from '@use-brian/core'
+import {pinSessionTitleClaims} from './session-title-authority.js'
+import {resolveNativeWorkspaceReadAuthority} from './native-workspace-read-authority.js'
+import {assertSourceModelOutputAuthority} from '../application-platform/model-source-authority.js'
+import {isAuthorityChangedError} from '../context-scope/authority-lease.js'
+import {SourceProtocolError} from '@use-brian/brian-app/connector'
 import { query } from '../db/client.js'
 import { listCompanies, listContacts, listDeals } from '../db/crm.js'
 import { listTasks as listWorkspaceTasks } from '../db/tasks.js'
@@ -1442,6 +1448,8 @@ export function brainRoutes(deps: {
    * gets a 404 indistinguishable from a missing row.
    */
   router.get('/knowledge/:id', async (req, res) => {
+    res.setHeader('Cache-Control','no-store')
+    const claims=pinSessionTitleClaims(req),entryId=req.params.id
     const userId = (req as { userId?: string }).userId
     if (!userId) {
       res.status(401).json({ error: 'Unauthorized' })
@@ -1464,30 +1472,29 @@ export function brainRoutes(deps: {
       return
     }
 
+    const controller=new AbortController(),abort=()=>controller.abort()
+    req.once('aborted',abort)
     try {
-      const entry = await knowledgeStore.getById(ctx, req.params.id)
+      const authority=await resolveNativeWorkspaceReadAuthority({claims,workspaceId,selectedAssistantId,abortSignal:controller.signal})
+      const nativeCtx=authority.execution.security.access
+      const entry = await knowledgeStore.getById(nativeCtx, entryId,authority)
       if (!entry || entry.workspaceId !== ctx.workspaceId) {
         res.status(404).json({ error: 'Not found' })
         return
       }
-      // Entry-reader enrichment: resolve `related_ids` to display refs
-      // (wikilink navigation + the rail's related list) and the owning
-      // source row (provenance card). Both are best-effort — a resolution
-      // failure degrades the reader, it doesn't 500 the read.
+      // Both relations and source provenance are protected projections.
+      // Unavailable proof cannot become an ordinary empty relation or a
+      // missing-source card. Authoritative empty results keep their evidence.
       const [related, source] = await Promise.all([
         (entry.relatedIds?.length ?? 0) > 0
-          ? knowledgeStore.listByIds(ctx, entry.relatedIds).catch((err) => {
-              console.error('[brain] knowledge related resolution failed:', err)
-              return []
-            })
+          ? knowledgeStore.listByIds(nativeCtx, entry.relatedIds,authority)
           : Promise.resolve([]),
         entry.sourceId
-          ? knowledgeStore.getSource(entry.sourceId).catch((err) => {
-              console.error('[brain] knowledge source fetch failed:', err)
-              return null
-            })
+          ? knowledgeStore.getSource(entry.sourceId)
           : Promise.resolve(null),
       ])
+      authority.accumulator.note({sources:[...boundScopeSources(entry),...boundScopeSources(related)]})
+      await assertSourceModelOutputAuthority({...executionToolContext(authority.execution,{appId:'native-brain-knowledge-read'}),scopeAccumulator:authority.accumulator})
       res.status(200).json({
         id: entry.id,
         path: entry.path,
@@ -1514,9 +1521,12 @@ export function brainRoutes(deps: {
           : null,
       })
     } catch (err) {
+      if(err instanceof DerivedScopeError||isAuthorityChangedError(err)||err instanceof SourceProtocolError&&err.code==='source_access_denied'){
+        res.status(404).json({error:'Not found'});return
+      }
       console.error('[brain] knowledge fetch failed:', err)
-      res.status(500).json({ error: 'Internal error' })
-    }
+      res.status(err instanceof SourceProtocolError?503:500).json({ error: 'Internal error' })
+    } finally {req.off('aborted',abort)}
   })
 
   return router
