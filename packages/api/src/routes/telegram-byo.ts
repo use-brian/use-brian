@@ -1,3 +1,4 @@
+import { hasTelegramWorkspaceConversationBinding, telegramConfiguredConversation } from '../telegram-conversation-admission.js'
 import { runChannelMediaReceipt, type ChannelMediaReceiptStore } from '../ingest/channel-media-receipt.js'
 import { createDeliveryAudienceEnvelopeResolver } from '../context-scope/delivery-authority.js'
 import { resolveLiveAccessCeilingSystem } from '../context-scope/resolve-turn-scope.js'
@@ -334,11 +335,14 @@ export function telegramByoRoutes(options: TelegramByoRouteOptions): Router {
     message_id: number
     chat?: { id: number; type: string; is_forum?: boolean }
     from?: { id: number }
+    reply_to_message?: RawTelegramGroupMessage
     sender_chat?: { id: number; title?: string }
     is_automatic_forward?: boolean
     message_thread_id?: number
     caption?: string
     text?: string
+    entities?: Array<{ type: string; offset: number; length: number }>
+    caption_entities?: Array<{ type: string; offset: number; length: number }>
     media_group_id?: string
     photo?: Array<{ file_id: string }>
     document?: { file_id: string; mime_type?: string; file_name?: string; file_size?: number }
@@ -422,6 +426,35 @@ export function telegramByoRoutes(options: TelegramByoRouteOptions): Router {
     const channel = await getChannelForWebhook(integration.channelId)
     if (!channel || channel.status !== 'active') return
 
+    let botUsername = integration.botUsername
+    if (!botUsername) {
+      try {
+        const info = await validateTelegramCredentials(credentials.bot_token)
+        botUsername = info.botUsername
+        options.integrationStore.setBotUsername(integration.id, botUsername).catch((err) => {
+          console.error('[telegram-byo] bot_username backfill persist failed:', err)
+        })
+      } catch (err) {
+        console.error('[telegram-byo] bot_username backfill via getMe failed:', err)
+      }
+    }
+
+    const storedConfig = (integration.config ?? {}) as ChannelIntegrationConfig
+
+    // Translate the stored JSONB config into the adapter's structured
+    // `RequireMentionConfig` so per-chat/topic overrides are respected inside
+    // `parseMessage`. Non-mention fields (ackReaction, etc.) pass through.
+    const baseRequireMention = storedConfig.requireMention ?? true
+    const requireMentionResolved: RequireMentionConfig = storedConfig.requireMentionOverrides?.length
+      ? {
+          default: baseRequireMention,
+          overrides: storedConfig.requireMentionOverrides.map((o) => ({
+            chatId: o.chatId,
+            topicId: o.topicId ?? null,
+          })),
+        }
+      : baseRequireMention
+
     // ChatFullInfo, not Update.chat, carries linked_chat_id. Resolve it for
     // nested discussion replies (including callbacks) on every request: no
     // warm-process history or stale link cache is required. On lookup failure
@@ -439,15 +472,58 @@ export function telegramByoRoutes(options: TelegramByoRouteOptions): Router {
       }
     }
 
+    // One ingress decision protects every content sink, including events-only
+    // installations. Explicit invocation admits this message, never ambient
+    // traffic or a quoted root from an unowned conversation.
+    const providerMessage = threadUpdate.message ?? threadUpdate.channel_post
+    const explicitAdapter = createTelegramAdapter({ token: credentials.bot_token,
+      botUsername: botUsername ?? undefined, config: { requireMention: true, normalizePassive: true, discussionChatIds } })
+    const explicitlyAddressed = (message: RawTelegramGroupMessage) => {
+      // Bare commands are delivered to co-resident bots too. Outside an
+      // owned conversation only a self-qualified command, mention or reply
+      // authorizes this installation; the ordinary parser remains unchanged.
+      const content = message.text ?? message.caption ?? ''
+      const qualified = (entity: { type: string; offset: number; length: number }) =>
+        entity.type !== 'bot_command' || content.slice(entity.offset, entity.offset + entity.length).includes('@')
+      const parsed = explicitAdapter.parseIncoming({ message: { ...message, media_group_id: undefined,
+        entities: message.entities?.filter(qualified), caption_entities: message.caption_entities?.filter(qualified) } })
+      return parsed !== null && !parsed.captureOnly
+    }
+    let conversationOwned = true
+    let updateAdmitted = true
+    if (threadMessage?.chat && threadMessage.chat.type !== 'private') {
+      const chatId = String(threadMessage.chat.id)
+      const topicId = threadMessage.chat.is_forum ? threadMessage.message_thread_id : undefined
+      const scope = telegramConfiguredConversation(storedConfig, chatId, topicId)
+      const discussionRoot = threadMessage.is_automatic_forward ? threadMessage.message_id
+        : threadMessage.reply_to_message?.is_automatic_forward ? threadMessage.reply_to_message.message_id
+        : discussionChatIds.includes(chatId) ? threadMessage.message_thread_id : undefined
+      const conversationId = topicId != null ? `${chatId}:topic:${topicId}`
+        : discussionRoot != null ? `${chatId}:discussion:${discussionRoot}` : chatId
+      conversationOwned = scope === 'owned'
+      if (scope === 'unbound') {
+        try {
+          conversationOwned = await hasTelegramWorkspaceConversationBinding(channel.workspaceId, chatId, conversationId, topicId)
+        } catch (err) {
+          console.error('[telegram-byo] conversation ownership lookup failed; dropping update:', err)
+          return
+        }
+      }
+      updateAdmitted = conversationOwned || !!threadUpdate.callback_query || explicitlyAddressed(threadMessage)
+      // Albums can carry their sole mention on a later member. Until then
+      // retain only the ephemeral bot/conversation/sender-scoped buffer.
+      if (!updateAdmitted && !providerMessage?.media_group_id) return
+    }
+
     // Workflow events observe provider messages, not conversational callbacks
     // or the later album/reassembly callbacks. This pass never sends replies.
     const eventConfig = (integration.config ?? {}) as ChannelIntegrationConfig
     const eventIncoming = createTelegramAdapter({
       token: credentials.bot_token,
-      botUsername: integration.botUsername ?? undefined,
-      config: { normalizePassive: true, discussionChatIds },
+      botUsername: botUsername ?? undefined,
+      config: { requireMention: requireMentionResolved, normalizePassive: true, discussionChatIds },
     }).parseIncoming(req.body)
-    if (eventIncoming && eventIncoming.userId !== String(integration.botUserId ?? '')) {
+    if (updateAdmitted && eventIncoming && eventIncoming.userId !== String(integration.botUserId ?? '')) {
       const raw = eventIncoming.raw as { from?: { username?: string }; sender_chat?: unknown; chat?: { type?: string } }
       const chatSender = !!raw.sender_chat || raw.chat?.type === 'channel'
       const matches = (entry: string) => {
@@ -518,43 +594,12 @@ export function telegramByoRoutes(options: TelegramByoRouteOptions): Router {
       workspaceId: assistant.workspaceId ?? null,
     })
 
-    // 4. Build a per-request adapter with this integration's bot token.
-    //    botUsername is required for group @mention detection; legacy rows
-    //    predate the column so self-heal by calling getMe once and
-    //    persisting the result before constructing the adapter.
-    let botUsername = integration.botUsername
-    if (!botUsername) {
-      try {
-        const info = await validateTelegramCredentials(credentials.bot_token)
-        botUsername = info.botUsername
-        options.integrationStore.setBotUsername(integration.id, botUsername).catch((err) => {
-          console.error('[telegram-byo] bot_username backfill persist failed:', err)
-        })
-      } catch (err) {
-        console.error('[telegram-byo] bot_username backfill via getMe failed:', err)
-      }
-    }
-
-    const storedConfig = (integration.config ?? {}) as ChannelIntegrationConfig
-
-    // Translate the stored JSONB config into the adapter's structured
-    // `RequireMentionConfig` so per-chat/topic overrides are respected inside
-    // `parseMessage`. Non-mention fields (ackReaction, etc.) pass through.
-    const baseRequireMention = storedConfig.requireMention ?? true
-    const requireMentionResolved: RequireMentionConfig = storedConfig.requireMentionOverrides?.length
-      ? {
-          default: baseRequireMention,
-          overrides: storedConfig.requireMentionOverrides.map((o) => ({
-            chatId: o.chatId,
-            topicId: o.topicId ?? null,
-          })),
-        }
-      : baseRequireMention
+    // 4. Build the per-request chat adapter after workspace admission.
     const discussionStore = options.discussionStore ?? createTelegramDiscussionStore()
-    // Persist before suppression/address gates, including privacy-mode reply snapshots.
+    // Only owned conversations may import surrounding discussion snapshots.
     // A storage failure drops the update, never silently fabricates source context.
     try {
-      await observeTelegramDiscussion(discussionStore, integration.id, req.body)
+      if (conversationOwned && updateAdmitted) await observeTelegramDiscussion(discussionStore, integration.id, req.body)
     } catch (err) {
       console.error('[telegram-byo] discussion context persistence failed:', err)
       return
@@ -861,6 +906,8 @@ export function telegramByoRoutes(options: TelegramByoRouteOptions): Router {
     // the bound aliases, `ownerId`, `channelId`, `credentials`,
     // `tgConfig`, and `adapter` from the enclosing request scope.
     async function handleIncoming(incoming: IncomingMessage, actionData?: string, workflowCallback?: { data: string; messageId: string }): Promise<void> {
+      if (!conversationOwned) incoming = { ...incoming, replyToMessageId: undefined,
+        raw: { ...(incoming.raw as object), reply_to_message: undefined } }
       // 4b. Sender access. A blocklist match is a hard denial. An allowlist
       //     match is carried through identity resolution because it is also an
       //     explicit conversation-only guest grant in private DMs and groups.
@@ -1290,7 +1337,7 @@ export function telegramByoRoutes(options: TelegramByoRouteOptions): Router {
             : undefined,
           questionStore: options.questionStore,
           integrationId: boundIntegration.id,
-          discussionStore,
+          discussionStore: conversationOwned ? discussionStore : { ...discussionStore, read: async () => null },
         })
       })
     }
@@ -1320,6 +1367,7 @@ export function telegramByoRoutes(options: TelegramByoRouteOptions): Router {
         // Telegram attaches it to whichever item the user typed it under.
         // Prefer an addressed member so one captioned file isn't demoted to
         // capture-only by its uncaptioned neighbours.
+        if (!conversationOwned && !rawMessages.some(explicitlyAddressed)) return
         const parsedMembers = rawMessages
           .map((m) => adapter.parseIncoming({ message: { ...m, media_group_id: undefined } }))
           .filter((p): p is IncomingMessage => p !== null)

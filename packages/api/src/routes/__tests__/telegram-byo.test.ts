@@ -1,3 +1,5 @@
+import { hasTelegramWorkspaceConversationBinding } from '../../telegram-conversation-admission.js'
+vi.mock('../../telegram-conversation-admission.js', async original => ({ ...await original<typeof import('../../telegram-conversation-admission.js')>(), hasTelegramWorkspaceConversationBinding: vi.fn(async () => true) }))
 import { expectMentionMatches } from './incoming-event-assertions.js'
 import { dispatchIncomingMessageEvent } from '../../message-events.js'
 vi.mock('../../message-events.js', () => ({ dispatchIncomingMessageEvent: vi.fn(async () => {}) }))
@@ -446,6 +448,7 @@ function flushMicrotasks(): Promise<void> {
 }
 
 beforeEach(() => {
+  vi.mocked(hasTelegramWorkspaceConversationBinding).mockReset().mockResolvedValue(true)
   discussionStore.savePost.mockClear()
   discussionStore.saveRoot.mockClear()
   discussionStore.read.mockReset().mockResolvedValue(null)
@@ -3361,4 +3364,128 @@ describe('[COMP:api/telegram-byo-route] shared group upload', () => {
       vi.mocked(findAssistantById).mockResolvedValue({ id: 'assistant_1', name: 'Test Assistant', ownerUserId: 'owner_1', workspaceId: null, defaultModelAlias: 'gemini-flash', systemPrompt: null } as never)
     }
   })
+})
+
+
+describe('[COMP:api/telegram-byo-route] workspace ingress admission', () => {
+  function app(config: Record<string, unknown> = {}) {
+    return createTestApp('/webhook/telegram-byo', telegramByoRoutes({
+      provider: {} as never, systemPrompt: '', tools: new Map(), memoryStore: {} as never,
+      integrationStore: makeIntegrationStore(config) as never, capabilityStore: {} as never, apiUrl: 'http://test',
+    }))
+  }
+  const message = (fields: Record<string, unknown> = {}) => ({ message_id: 6600, date: 1,
+    from: { id: 42 }, chat: { id: -100, type: 'supergroup', is_forum: true }, message_thread_id: 898,
+    text: 'private room chatter', ...fields })
+  function expectNoCapture() {
+    expect(dispatchIncomingMessageEvent).not.toHaveBeenCalled()
+    expect(discussionStore.saveRoot).not.toHaveBeenCalled()
+    expect(discussionStore.savePost).not.toHaveBeenCalled()
+    expect(pipelineCalls).toHaveLength(0)
+    expect(mediaDownloadCalls).toHaveLength(0)
+    expect(mediaResolveCalls).toHaveLength(0)
+    expect(adapterSendCalls).toHaveLength(0)
+  }
+  beforeEach(() => vi.mocked(dispatchIncomingMessageEvent).mockClear())
+  it.each([{}, { document: { file_id: 'foreign-doc', file_name: 'secret.pdf' } },
+    { audio: { file_id: 'foreign-audio', duration: 120 } }])('drops foreign topic text/media before all content sinks (%j)', async fields => {
+    await postUpdate(app({ requireMentionOverrides: [{ chatId: '-100', topicId: 134 }] }), { message: message(fields) })
+    await flushMicrotasks(); expectNoCapture()
+    expect(hasTelegramWorkspaceConversationBinding).not.toHaveBeenCalled()
+  })
+  it('drops unbound foreign workspace traffic regardless of matching clearance or global mention policy', async () => {
+    vi.mocked(hasTelegramWorkspaceConversationBinding).mockResolvedValue(false)
+    await postUpdate(app({ requireMention: false }), { message: message() })
+    await flushMicrotasks(); expectNoCapture()
+    expect(hasTelegramWorkspaceConversationBinding).toHaveBeenCalledWith('ws_1', '-100', '-100:topic:898', 898)
+  })
+  it('fails closed when ownership metadata is unavailable', async () => {
+    vi.mocked(hasTelegramWorkspaceConversationBinding).mockRejectedValue(new Error('offline'))
+    await postUpdate(app(), { message: message() }); await flushMicrotasks(); expectNoCapture()
+  })
+  it('does not save foreign broadcast posts or automatic discussion roots', async () => {
+    vi.mocked(hasTelegramWorkspaceConversationBinding).mockResolvedValue(false)
+    await postUpdate(app(), { channel_post: message({ chat: { id: -100, type: 'channel' }, message_thread_id: undefined }) })
+    await postUpdate(app(), { message: message({ chat: { id: -100, type: 'supergroup' }, message_thread_id: undefined,
+      is_automatic_forward: true }) })
+    await flushMicrotasks(); expectNoCapture()
+  })
+  it('preserves same-workspace owned passive workflow events even when chat is disabled', async () => {
+    const { getChannelForWebhook } = await import('../../db/channels-store.js')
+    vi.mocked(getChannelForWebhook).mockResolvedValueOnce({ workspaceId: 'ws_1', status: 'active', enabledCapabilities: [] } as never)
+    await postUpdate(app(), { message: message() }); await flushMicrotasks()
+    expect(dispatchIncomingMessageEvent).toHaveBeenCalledOnce()
+    expect(pipelineCalls).toHaveLength(0)
+  })
+  it('still enforces topic ownership for events-only channels', async () => {
+    const { getChannelForWebhook } = await import('../../db/channels-store.js')
+    vi.mocked(getChannelForWebhook).mockResolvedValueOnce({ workspaceId: 'ws_1', status: 'active', enabledCapabilities: [] } as never)
+    await postUpdate(app({ requireMentionOverrides: [{ chatId: '-100', topicId: 134 }] }), { message: message() })
+    await flushMicrotasks(); expectNoCapture()
+  })
+  it('explicit self mention admits only that input, without importing a foreign reply snapshot', async () => {
+    vi.mocked(hasTelegramWorkspaceConversationBinding).mockResolvedValue(false)
+    const instance = app()
+    await postUpdate(instance, { message: message({ text: '@testbot help', entities: [{ type: 'mention', offset: 0, length: 8 }],
+      reply_to_message: { message_id: 99, text: 'foreign source text', is_automatic_forward: true } }) })
+    await flushMicrotasks(); await flushMicrotasks()
+    expect(dispatchIncomingMessageEvent).toHaveBeenCalledOnce()
+    expect(pipelineCalls).toHaveLength(1)
+    expect((pipelineCalls[0].replyRaw as { reply_to_message?: unknown })?.reply_to_message).toBeUndefined()
+    expect(discussionStore.saveRoot).not.toHaveBeenCalled()
+    vi.mocked(dispatchIncomingMessageEvent).mockClear(); pipelineCalls.length = 0; adapterSendCalls.length = 0
+    await postUpdate(instance, { message: message() }); await flushMicrotasks(); expectNoCapture()
+  })
+  it('buffers foreign albums without any persistent effects unless a member explicitly invokes this bot', async () => {
+    vi.mocked(hasTelegramWorkspaceConversationBinding).mockResolvedValue(false)
+    await postUpdate(app(), { message: message({ media_group_id: 'foreign-album', text: undefined,
+      document: { file_id: 'foreign-doc', file_name: 'secret.pdf' } }) })
+    await new Promise(resolve => setTimeout(resolve, 650)); expectNoCapture()
+  })
+  it('preserves #432 explicit album invocation when the mention is on its second member', async () => {
+    const instance = app({ requireMentionOverrides: [{ chatId: '-100', topicId: 134 }] })
+    for (const [index, caption] of [[0, ''], [1, '@testbot inspect these']] as const) {
+      await postUpdate(instance, { message: message({ message_id: 6700 + index, text: undefined,
+        media_group_id: 'explicit-album', document: { file_id: `doc-${index}`, file_name: `part-${index}.pdf` },
+        caption, caption_entities: caption ? [{ type: 'mention', offset: 0, length: 8 }] : [] }) })
+    }
+    await new Promise(resolve => setTimeout(resolve, 700))
+    expect(pipelineCalls).toHaveLength(1)
+    expect(pipelineCalls[0].incomingMessage?.files).toHaveLength(2)
+  })
+
+  it('does not treat an unqualified group command as permission to capture into a foreign workspace', async () => {
+    vi.mocked(hasTelegramWorkspaceConversationBinding).mockResolvedValue(false)
+    await postUpdate(app(), { message: message({ text: '/ask remember this', entities: [{ type: 'bot_command', offset: 0, length: 4 }] }) })
+    await flushMicrotasks(); expectNoCapture()
+  })
+  it('honors a self-qualified command outside its owned topics', async () => {
+    await postUpdate(app({ requireMentionOverrides: [{ chatId: '-100', topicId: 134 }] }), {
+      message: message({ text: '/ask@testbot help', entities: [{ type: 'bot_command', offset: 0, length: 12 }] }) })
+    await flushMicrotasks(); await flushMicrotasks()
+    expect(pipelineCalls).toHaveLength(1)
+    expect(dispatchIncomingMessageEvent).toHaveBeenCalledOnce()
+  })
+  it('valid foreign-discussion callbacks retain their choice without importing ambient discussion context', async () => {
+    vi.mocked(hasTelegramWorkspaceConversationBinding).mockResolvedValue(false)
+    linkedDiscussionChatId = -200
+    const instance = app()
+    const source = message({ chat: { id: -100, type: 'supergroup' }, message_thread_id: 30,
+      text: '@testbot choose', entities: [{ type: 'mention', offset: 0, length: 8 }] })
+    pipelineQuestion = { question: 'Choose', options: ['A'] }
+    await postUpdate(instance, { message: source }); await flushMicrotasks(); await flushMicrotasks()
+    const action = adapterSendCalls.flatMap(msg => msg.actions ?? []).find(action => 'data' in action)
+    if (!action || !('data' in action)) throw new Error('Expected choice callback')
+    pipelineQuestion = undefined
+    await postUpdate(instance, { callback_query: { id: 'foreign-click', from: { id: 42 }, data: action.data,
+      message: { ...source, text: 'Choose', from: { id: 999999, is_bot: true } } } })
+    await flushMicrotasks(); await flushMicrotasks()
+    expect(hasTelegramWorkspaceConversationBinding).toHaveBeenCalledTimes(2)
+    expect(hasTelegramWorkspaceConversationBinding).toHaveBeenLastCalledWith('ws_1', '-100', '-100:discussion:30', undefined)
+    expect(pipelineCalls).toHaveLength(2)
+    expect(pipelineCalls.at(-1)?.messageText).toBe('A')
+    expect(discussionStore.read).not.toHaveBeenCalled()
+    expect(discussionStore.saveRoot).not.toHaveBeenCalled()
+  })
+
 })
