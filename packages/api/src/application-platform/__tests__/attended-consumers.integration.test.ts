@@ -389,6 +389,9 @@ describe.sequential('[COMP:api/application-persistence] current attended compact
     try {
       await setup.query('BEGIN')
       await setup.query('ALTER TABLE sessions DISABLE TRIGGER session_context_summary_pair')
+      // Keep the other real validators immediate so their pending events
+      // cannot block restoring the same historical-fixture guard below.
+      await setup.query('SET CONSTRAINTS ALL IMMEDIATE')
       await setup.query("UPDATE sessions SET compact_scope_revision_id=NULL,compact_summary='Fictional held legacy summary' WHERE id=$1", [f.session.id])
       await setup.query('ALTER TABLE sessions ENABLE TRIGGER session_context_summary_pair')
       await setup.query('COMMIT')

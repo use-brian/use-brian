@@ -142,6 +142,7 @@ async function pinNativeSessionQueryFloor(authority:SessionContextAuthority,clie
 /** Internal current-reader frame for original session queries, including empty collections. */
 export async function readSessionQueryFrame<T>(authority:SessionContextAuthority,rawRoots:readonly ScopeSource[],
  capture:(client:PoolClient)=>Promise<{value:T;sources:readonly ScopeSource[]}>):Promise<T> {
+ try{
  const {execution}=requireAuthority(authority),roots=structuredClone(rawRoots)
  await execution.security.authority.assertCurrent()
  const wiring=getSharedRetainedSourceAuthority(),host=retainedHosts.get(execution)
@@ -197,6 +198,15 @@ export async function readSessionQueryFrame<T>(authority:SessionContextAuthority
  assertWiring();await execution.security.authority.assertCurrent()
  const value=captured.value
  return value
+ }catch(error){
+  // Stored-entry transactions keep their holding normalization. A query
+  // caller still receives the authentic current source protocol refusal.
+  const cause=error instanceof DerivedScopeError&&error.code==='scope_source_changed'&&'cause'in error?error.cause:undefined
+  if(cause instanceof SourceProtocolError&&cause.code==='source_access_denied'){
+   throw Object.assign(cause,{reason:'authority_changed' as const,retrySafe:false})
+  }
+  throw error
+ }
 }
 
 const messagePublications=new WeakMap<object,{authority:SessionContextAuthority}>()

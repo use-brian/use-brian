@@ -161,7 +161,7 @@ describe.sequential('[COMP:api/application-persistence] [COMP:api/application-fi
    return independent!.coordinator.prepare(execution,sources,action)
   })
   const result=readAdmittedSessionQuery({sessionId:f.session.id,throughSequence:derived.sequenceNum,authority})
-  if(withdrawn)await expect(result).rejects.toMatchObject({code:'source_access_denied'})
+  if(withdrawn)await expect(result).rejects.toMatchObject({code:'source_access_denied',reason:'authority_changed',retrySafe:false})
   else expect((await result).history.map(row=>row.id)).toContain(derived.id)
   expect(preparations).toBe(3)
   expect((await f.pool.query('SELECT id FROM session_context_scope_revisions WHERE workspace_id=$1',[f.workspaceId])).rows).toEqual([])
