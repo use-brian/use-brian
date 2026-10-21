@@ -13841,7 +13841,7 @@ export const ja: Dictionary = {
     screenMicComputerAudio: "画面 + マイク + コンピューター音声",
     windowAndMic: "ウィンドウ + マイク",
     windowMicComputerAudio: "ウィンドウ + マイク + コンピューター音声",
-    screenCaptureFailed: "画面録画を開始できませんでした。システム設定で画面収録の権限を確認して、もう一度お試しください。",
+    screenCaptureFailed: "画面録画を開始できませんでした。画面またはウィンドウを選び直して、もう一度お試しください。",
     streamToPage: "文字起こしと議事録をページにライブ配信",
     liveDestinationLabel: "会議ページの保存先",
     liveDestinationSearch: "ページを検索...",
@@ -13886,8 +13886,10 @@ export const ja: Dictionary = {
     pauseStopped:
       "1時間一時停止されていたため、この録音は停止して端末に保存しました。新しく録音するには録音ボタンを押してください。",
     micDenied: "マイクへのアクセスがブロックされています。ブラウザの設定で許可してからもう一度お試しください。",
-    systemAudioFailed:
-      "コンピューター音声へのアクセスがブロックされているか、利用できません。システム設定で Use Brian にコンピューター音声の録音を許可してから、もう一度お試しください。",
+    systemAudioFailed: "コンピューターの音声を開始できませんでした。再試行するか、コンピューターの音声を含める設定をオフにしてマイクのみを録音してください。",
+    captureAccessDenied: "録音へのアクセスが拒否されました。システム設定でアプリの録音権限を確認して、もう一度お試しください。",
+    captureStreamFailed: "録音ストリームを開始できませんでした。もう一度お試しください。",
+    audioMixerFailed: "マイクとコンピューターの音声を合成できませんでした。Use Brian を再起動して、もう一度お試しください。",
     captureFailed: "録音に失敗しました。もう一度お試しください。",
     voiceFailed: "ボイスメッセージを送信できませんでした。もう一度お試しください。",
     dismiss: "閉じる",
@@ -14199,6 +14201,7 @@ export const ja: Dictionary = {
       },
     },
     profiles: {
+      extensionBrowser: "このブラウザ",
       title: "ブラウザプロフィール",
       description:
         "プロフィールは、アシスタントが使うブラウザの身元を管理します。クラウドのログイン状態を保存する場合はリモート、自分のブラウザをペアリングする場合はローカルを選びます。新しいプロフィールは自分専用です。",

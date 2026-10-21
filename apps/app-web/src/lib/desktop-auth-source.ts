@@ -125,6 +125,11 @@ export interface DesktopBridge {
    * omit it, preserving microphone-only capture during version skew.
    */
   systemAudioCapture?: boolean;
+  /** New shells bind one display-media grant to this top-level app frame. */
+  prepareDisplayCapture?: (intent:
+    | { kind: "audio"; includeSystemAudio: true }
+    | { kind: "screen" | "window"; sourceId: string; includeSystemAudio: boolean }
+  ) => Promise<void>;
   /**
    * The shell can list window sources for a specific-window screen capture
    * (`listCaptureSources` + `setCaptureSource`). Old shells omit it and the

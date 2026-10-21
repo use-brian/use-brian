@@ -13772,7 +13772,7 @@ export const zh: Dictionary = {
     screenMicComputerAudio: "屏幕 + 麦克风 + 电脑音频",
     windowAndMic: "窗口 + 麦克风",
     windowMicComputerAudio: "窗口 + 麦克风 + 电脑音频",
-    screenCaptureFailed: "无法开始屏幕录制。请在系统设置中检查屏幕录制权限，然后重试。",
+    screenCaptureFailed: "無法啟動螢幕錄影。請重新選擇螢幕或視窗後重試。",
     streamToPage: "将逐字稿和会议笔记实时传送到页面",
     liveDestinationLabel: "会议页面目标位置",
     liveDestinationSearch: "搜索页面...",
@@ -13814,8 +13814,10 @@ export const zh: Dictionary = {
     autoStopped: "每次录音上限为2小时。前半部分已保存在此设备上,新的录音已自动开始。",
     pauseStopped: "这段录音已暂停1小时,已停止并保存在此设备上。按录音按钮可开始新的录音。",
     micDenied: "麦克风访问被阻止。请在浏览器设置中允许后重试。",
-    systemAudioFailed:
-      "电脑音频访问被阻止或不可用。请在系统设置中允许 Use Brian 录制电脑音频,然后重试。",
+    systemAudioFailed: "無法啟動電腦音訊。請重試，或關閉「包含電腦音訊」以僅錄製麥克風。",
+    captureAccessDenied: "錄音存取被拒絕。請在系統設定中檢查應用程式的錄音權限，然後重試。",
+    captureStreamFailed: "無法啟動錄音串流。請重試。",
+    audioMixerFailed: "無法混合麥克風和電腦音訊。請重新啟動 Use Brian 後重試。",
     captureFailed: "录音失败,请重试。",
     voiceFailed: "语音消息发送失败,请重试。",
     dismiss: "关闭",
@@ -14120,6 +14122,7 @@ export const zh: Dictionary = {
       },
     },
     profiles: {
+      extensionBrowser: "此瀏覽器",
       title: "瀏覽器身分",
       description:
         "瀏覽器身分決定助理使用哪個瀏覽環境。選擇遠端可儲存雲端登入狀態；選擇本機則可配對你自己的瀏覽器。新身分預設只有你能使用。",

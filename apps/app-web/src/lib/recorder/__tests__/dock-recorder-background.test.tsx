@@ -9,7 +9,7 @@ import { memorySpoolStore, type SpoolSessionMeta, type SpoolStore } from "../rec
 import type { LiveRecordingPage } from "@/lib/api/recordings";
 
 (globalThis as unknown as { IS_REACT_ACT_ENVIRONMENT: boolean }).IS_REACT_ACT_ENVIRONMENT = true;
-const mocks = vi.hoisted(() => ({ createEngine: vi.fn(), interactionRequest: vi.fn(), startInteraction: vi.fn(), uploadVoiceClip: vi.fn(), store: null as SpoolStore | null }));
+const mocks = vi.hoisted(() => ({ desktopBridge: vi.fn(), createEngine: vi.fn(), interactionRequest: vi.fn(), startInteraction: vi.fn(), uploadVoiceClip: vi.fn(), store: null as SpoolStore | null }));
 vi.mock("@/lib/live-interaction/api", () => ({ interactionRequest: mocks.interactionRequest }));
 vi.mock("@/lib/live-interaction/capture", () => ({ startInteractionCapture: mocks.startInteraction }));
 vi.mock("../recorder-engine", () => ({ createRecorderEngine: mocks.createEngine }));
@@ -19,7 +19,7 @@ vi.mock("../recorder-spool", async (original) => ({
 }));
 vi.mock("../webm-duration", () => ({ patchRecordingBlob: async (blob: Blob) => blob }));
 vi.mock("../voice-clip", () => ({ uploadVoiceClip: mocks.uploadVoiceClip }));
-vi.mock("@/lib/desktop-auth-source", () => ({ desktopBridge: () => undefined }));
+vi.mock("@/lib/desktop-auth-source", () => ({ desktopBridge: mocks.desktopBridge }));
 
 function deferred<T>() {
   let resolve!: (value: T) => void;
@@ -86,6 +86,32 @@ describe("[COMP:app-web/dock-recorder] non-blocking saves", () => {
     vi.useRealTimers();
     vi.resetAllMocks();
     vi.unstubAllGlobals();
+  });
+
+  it("does not let a cancelled preparation reset a newer arming attempt", async () => {
+    const oldMicrophone = deferred<void>();
+    const newerCapture = deferred<RecorderEngine>();
+    const engine = makeEngine();
+    mocks.createEngine.mockReset();
+    mocks.createEngine.mockImplementationOnce(async (opts) => {
+      await oldMicrophone.promise;
+      await opts.beforeDisplayCapture();
+      return engine;
+    }).mockImplementationOnce(() => newerCapture.promise);
+    const prepareDisplayCapture = vi.fn().mockResolvedValue(undefined);
+    mocks.desktopBridge.mockReturnValue({ systemAudioCapture: true, prepareDisplayCapture });
+    await render();
+    act(() => api.setIncludeComputerAudio(true));
+    await act(async () => { api.onPressStart(); api.onPressEnd(); });
+    expect(api.phase.kind).toBe("arming");
+    act(() => api.discard());
+    await act(async () => { api.onPressStart(); api.onPressEnd(); });
+    await act(async () => oldMicrophone.resolve());
+    expect(api.phase.kind).toBe("arming");
+    expect(api.notice).toBeNull();
+    expect(prepareDisplayCapture).not.toHaveBeenCalled();
+    await act(async () => newerCapture.resolve(engine));
+    expect(api.phase.kind).toBe("latched");
   });
 
   it("keeps unavailable interaction off and records normally without starting an interaction session", async () => {

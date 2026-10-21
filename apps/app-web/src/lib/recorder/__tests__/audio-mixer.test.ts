@@ -2,6 +2,8 @@ import { describe, expect, it, vi } from "vitest";
 import {
   ScreenCaptureCancelledError,
   SystemAudioCaptureError,
+  captureFailureDiagnostic,
+  captureFailureNotice,
   acquireCaptureAudio,
 } from "../audio-mixer";
 
@@ -56,11 +58,56 @@ function fakeContext(output: MediaStream) {
 }
 
 describe("[COMP:app-web/recorder-engine] Capture audio mixer", () => {
+  it("awaits shell preparation immediately before display media", async () => {
+    const order: string[] = [];
+    const mic = fakeTrack("audio");
+    let ready!: () => void;
+    const preparation = new Promise<void>((resolve) => { ready = resolve; });
+    const failure = new DOMException("Could not start video source", "NotReadableError");
+    const pending = acquireCaptureAudio({ includeSystemAudio: true,
+      beforeDisplayCapture: async () => { order.push("prepare"); await preparation; },
+      mediaDevices: {
+        getUserMedia: async () => { order.push("microphone"); return fakeStream([mic]); },
+        getDisplayMedia: async () => { order.push("display"); throw failure; },
+      },
+    });
+    await Promise.resolve(); await Promise.resolve();
+    expect(order).toEqual(["microphone", "prepare"]);
+    ready();
+    const error = await pending.catch((error: unknown) => error);
+    expect(order).toEqual(["microphone", "prepare", "display"]);
+    expect(error).toMatchObject({ stage: "capture-stream", cause: failure });
+    expect(captureFailureNotice(error)).toBe("captureStreamFailed");
+    expect(captureFailureDiagnostic(error)).toEqual({ stage: "capture-stream", reason: "start-failed", errorName: "NotReadableError", errorMessage: failure.message });
+    expect(mic.stop).toHaveBeenCalledOnce();
+  });
+
+  it("cleans up a cancelled preparation without opening display capture", async () => {
+    const mic = fakeTrack("audio"); const getDisplayMedia = vi.fn();
+    await expect(acquireCaptureAudio({ includeSystemAudio: true,
+      beforeDisplayCapture: async () => { throw new ScreenCaptureCancelledError(); },
+      mediaDevices: { getUserMedia: async () => fakeStream([mic]), getDisplayMedia },
+    })).rejects.toBeInstanceOf(ScreenCaptureCancelledError);
+    expect(mic.stop).toHaveBeenCalledOnce();
+    expect(getDisplayMedia).not.toHaveBeenCalled();
+  });
+
+  it("distinguishes access denial, missing audio and mixer failures", () => {
+    const cause = new DOMException("denied", "NotAllowedError");
+    expect(captureFailureNotice(new SystemAudioCaptureError("capture", { cause, stage: "capture-stream" })))
+      .toBe("captureAccessDenied");
+    expect(captureFailureNotice(new SystemAudioCaptureError("missing audio"))).toBe("systemAudioFailed");
+    expect(captureFailureNotice(new SystemAudioCaptureError("mixer", { cause, stage: "mixer" })))
+      .toBe("audioMixerFailed");
+  });
+
   it("keeps browser capture microphone-only and never requests display media", async () => {
     const microphone = fakeStream([fakeTrack("audio")]);
     const getDisplayMedia = vi.fn();
+    const beforeDisplayCapture = vi.fn();
     const result = await acquireCaptureAudio({
       includeSystemAudio: false,
+      beforeDisplayCapture,
       mediaDevices: {
         getUserMedia: vi.fn(async () => microphone),
         getDisplayMedia,
@@ -73,6 +120,7 @@ describe("[COMP:app-web/recorder-engine] Capture audio mixer", () => {
     expect(result.inputStreams).toEqual([microphone]);
     expect(result.includesSystemAudio).toBe(false);
     expect(getDisplayMedia).not.toHaveBeenCalled();
+    expect(beforeDisplayCapture).not.toHaveBeenCalled();
   });
 
   it("drops display video and mixes mic + computer playback into one output track", async () => {

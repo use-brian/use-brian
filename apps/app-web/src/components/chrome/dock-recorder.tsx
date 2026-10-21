@@ -713,11 +713,17 @@ export function DockRecorderNotice({ rec, className }: { rec: DockRecorderApi; c
                 ? t.micDenied
                 : notice.kind === "systemAudioFailed"
                   ? t.systemAudioFailed
-                  : notice.kind === "screenCaptureFailed"
-                    ? t.screenCaptureFailed
-                    : notice.kind === "voiceFailed"
-                      ? t.voiceFailed
-                      : t.captureFailed;
+                  : notice.kind === "captureAccessDenied"
+                    ? t.captureAccessDenied
+                    : notice.kind === "captureStreamFailed"
+                      ? t.captureStreamFailed
+                      : notice.kind === "audioMixerFailed"
+                        ? t.audioMixerFailed
+                        : notice.kind === "screenCaptureFailed"
+                          ? t.screenCaptureFailed
+                          : notice.kind === "voiceFailed"
+                            ? t.voiceFailed
+                            : t.captureFailed;
   return (
     <div className={cn("space-y-1.5", className)}>
       {activeSave ? (

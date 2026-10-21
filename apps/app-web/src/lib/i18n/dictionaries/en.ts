@@ -14095,7 +14095,7 @@ export const en = {
     screenMicComputerAudio: "Screen + mic + computer audio",
     windowAndMic: "Window + mic",
     windowMicComputerAudio: "Window + mic + computer audio",
-    screenCaptureFailed: "Screen recording could not start. Check screen recording permission in your system settings, then try again.",
+    screenCaptureFailed: "Screen recording could not start. Choose the screen or window again and retry.",
     streamToPage: "Stream transcript and notes to a page",
     liveDestinationLabel: "Meeting page destination",
     liveDestinationSearch: "Search pages...",
@@ -14140,8 +14140,10 @@ export const en = {
     pauseStopped:
       "This recording was paused for an hour, so it was stopped and saved on this device. Press the record button to start a new one.",
     micDenied: "Microphone access is blocked. Allow it in your browser settings and try again.",
-    systemAudioFailed:
-      "Computer audio access is blocked or unavailable. Allow Use Brian to record computer audio in your system settings, then try again.",
+    systemAudioFailed: "Computer audio could not start. Try again, or turn off Include computer audio to record the microphone only.",
+    captureAccessDenied: "Recording access was denied. Check the app recording permissions in your system settings, then try again.",
+    captureStreamFailed: "The recording stream could not start. Please try again.",
+    audioMixerFailed: "The microphone and computer audio could not be combined. Restart Use Brian and try again.",
     captureFailed: "Recording failed. Please try again.",
     voiceFailed: "We could not send the voice message. Please try again.",
     dismiss: "Dismiss",
@@ -14457,6 +14459,7 @@ export const en = {
       },
     },
     profiles: {
+      extensionBrowser: "This browser",
       title: "Browser profiles",
       description:
         "Profiles control which browser identity an assistant uses. Choose Remote to save cloud sign-ins or Local to pair your own browser. New profiles are private to you; sharing is an explicit downgrade.",

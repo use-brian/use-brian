@@ -46,7 +46,8 @@ import { createRecorderEngine, type RecorderEngine } from "./recorder-engine";
 import {
   ScreenCaptureCancelledError,
   ScreenCaptureError,
-  SystemAudioCaptureError,
+  captureFailureDiagnostic,
+  captureFailureNotice,
 } from "./audio-mixer";
 import {
   LIVE_SESSION_GRACE_MS,
@@ -256,6 +257,9 @@ export type RecorderNotice =
         | "pauseStopped"
         | "denied"
         | "systemAudioFailed"
+        | "captureAccessDenied"
+        | "captureStreamFailed"
+        | "audioMixerFailed"
         | "screenCaptureFailed"
         | "failed"
         | "voiceFailed";
@@ -671,6 +675,12 @@ export function useDockRecorder(opts: {
               // signal, while the confirmed id owns the shell's next one-shot
               // display-media grant. Cancel is a changed mind: idle, no notice.
               let source = captureSourceRef.current;
+              let selectedSourceId: string | null = null;
+              const bridge = desktopBridge();
+              const includeSystemAudio = shouldCaptureComputerAudio(
+                bridge?.systemAudioCapture,
+                includeComputerAudioRef.current,
+              );
               if (
                 source !== "mic" &&
                 desktopBridge()?.captureSourcePicker === true &&
@@ -682,14 +692,15 @@ export function useDockRecorder(opts: {
                   return;
                 }
                 source = selection.source;
+                selectedSourceId = selection.id;
                 captureSourceRef.current = selection.source;
                 setCaptureSourceState(selection.source);
                 try {
-                  const grantSource = desktopBridge()?.setCaptureSource;
-                  if (!grantSource) {
+                  const grantSource = bridge?.setCaptureSource;
+                  if (!grantSource && !bridge?.prepareDisplayCapture) {
                     throw new Error("The desktop capture-source grant is unavailable");
                   }
-                  grantSource(selection.id);
+                  if (!bridge?.prepareDisplayCapture) grantSource?.(selection.id);
                 } catch (cause) {
                   throw new ScreenCaptureError("The selected source could not be granted", {
                     cause,
@@ -709,16 +720,27 @@ export function useDockRecorder(opts: {
               if (attempt !== armAttemptRef.current || phaseRef.current.kind !== "arming") return;
               let interactionPending: ReturnType<typeof startInteractionCapture> | null = null;
               const armedEngine = await createRecorderEngine({
+                ...(bridge?.prepareDisplayCapture && (includeSystemAudio || source !== "mic")
+                  ? { beforeDisplayCapture: async () => {
+                      if (attempt !== armAttemptRef.current || phaseRef.current.kind !== "arming") {
+                        throw new ScreenCaptureCancelledError();
+                      }
+                      const intent = source === "mic"
+                        ? { kind: "audio" as const, includeSystemAudio: true as const }
+                        : { kind: source, sourceId: selectedSourceId ?? "", includeSystemAudio };
+                      await bridge.prepareDisplayCapture!(intent);
+                      if (attempt !== armAttemptRef.current || phaseRef.current.kind !== "arming") {
+                        throw new ScreenCaptureCancelledError();
+                      }
+                    } }
+                  : {}),
                 interactionEnabled: interactionEnabledRef.current,
                 onInteractionGap: () => livePage?.onInteractionGap?.(),
                 // New macOS/Windows shells advertise this capability, but
                 // the device-local split-button choice owns whether THIS
                 // capture uses it. OFF bypasses getDisplayMedia completely.
                 // Old shells and browsers stay mic-only during version skew.
-                includeSystemAudio: shouldCaptureComputerAudio(
-                  desktopBridge()?.systemAudioCapture,
-                  includeComputerAudioRef.current,
-                ),
+                includeSystemAudio,
                 // Screen capture keeps the display video track. In browsers
                 // (no shell loopback promise) display audio is opportunistic:
                 // mixed when the user's pick grants it, ordinary when absent.
@@ -776,19 +798,14 @@ export function useDockRecorder(opts: {
               }
               dispatchRef.current({ type: "armed" });
             } catch (err) {
+              // A cancelled acquisition can reject after a newer press owns
+              // the controller. It must not reset that new capture to idle.
+              if (attempt !== armAttemptRef.current) return;
               // A dismissed screen picker is a changed mind, not a failure —
               // return to idle silently.
               if (!(err instanceof ScreenCaptureCancelledError)) {
-                setNotice({
-                  kind:
-                    err instanceof ScreenCaptureError
-                      ? "screenCaptureFailed"
-                      : err instanceof SystemAudioCaptureError
-                        ? "systemAudioFailed"
-                        : err instanceof DOMException && err.name === "NotAllowedError"
-                          ? "denied"
-                          : "failed",
-                });
+                console.warn("[recorder] Capture start failed", captureFailureDiagnostic(err));
+                setNotice({ kind: captureFailureNotice(err) });
               }
               dispatchRef.current({ type: "arm-failed" });
             }

@@ -25,10 +25,17 @@
  * [COMP:app-web/recorder-engine]
  */
 
+type CaptureFailureStage = "capture-stream" | "system-audio" | "mixer";
+
 export class SystemAudioCaptureError extends Error {
-  constructor(message: string, options?: { cause?: unknown }) {
+  readonly stage: CaptureFailureStage;
+  readonly reason: "permission-denied" | "start-failed";
+  constructor(message: string, options?: { cause?: unknown; stage?: CaptureFailureStage }) {
     super(message, options);
     this.name = "SystemAudioCaptureError";
+    this.stage = options?.stage ?? "system-audio";
+    this.reason = this.stage !== "mixer" && options?.cause instanceof DOMException && options.cause.name === "NotAllowedError"
+      ? "permission-denied" : "start-failed";
   }
 }
 
@@ -38,6 +45,31 @@ export class ScreenCaptureError extends Error {
     super(message, options);
     this.name = "ScreenCaptureError";
   }
+}
+
+/** Local diagnostics only: bounded error metadata, never media or source ids. */
+export function captureFailureDiagnostic(error: unknown) {
+  const cause = error instanceof Error && error.cause instanceof Error ? error.cause : error;
+  return {
+    stage: error instanceof SystemAudioCaptureError ? error.stage
+      : error instanceof ScreenCaptureError ? "capture-stream" : "microphone",
+    reason: error instanceof SystemAudioCaptureError ? error.reason : "start-failed",
+    errorName: cause instanceof Error ? cause.name : "UnknownError",
+    errorMessage: cause instanceof Error ? cause.message.slice(0, 500) : "Capture failed",
+  };
+}
+
+export function captureFailureNotice(error: unknown):
+  | "screenCaptureFailed" | "captureAccessDenied" | "captureStreamFailed"
+  | "audioMixerFailed" | "systemAudioFailed" | "denied" | "failed" {
+  if (error instanceof ScreenCaptureError) return "screenCaptureFailed";
+  if (error instanceof SystemAudioCaptureError) {
+    if (error.reason === "permission-denied") return "captureAccessDenied";
+    if (error.stage === "capture-stream") return "captureStreamFailed";
+    if (error.stage === "mixer") return "audioMixerFailed";
+    return "systemAudioFailed";
+  }
+  return error instanceof DOMException && error.name === "NotAllowedError" ? "denied" : "failed";
 }
 
 /**
@@ -103,6 +135,8 @@ export async function acquireCaptureAudio(opts: {
   captureScreen?: boolean;
   /** Mix display audio when granted; its absence is ordinary (browsers). */
   opportunisticDisplayAudio?: boolean;
+  /** Prepare a new shell's one-shot grant immediately before display acquisition. */
+  beforeDisplayCapture?: () => Promise<void>;
   mediaDevices?: CaptureMediaDevices;
   createAudioContext?: () => AudioContext;
   /** Injectable for node tests; production combines tracks via MediaStream. */
@@ -127,10 +161,12 @@ export async function acquireCaptureAudio(opts: {
 
   let display: MediaStream | null = null;
   let context: AudioContext | null = null;
+  let stage: CaptureFailureStage = "capture-stream";
   try {
     if (typeof mediaDevices.getDisplayMedia !== "function") {
       throw new Error("display media is unavailable");
     }
+    await opts.beforeDisplayCapture?.();
     try {
       display = await mediaDevices.getDisplayMedia(DISPLAY_CONSTRAINTS);
     } catch (cause) {
@@ -157,6 +193,7 @@ export async function acquireCaptureAudio(opts: {
     }
 
     // ── audio expectation fork ─────────────────────────────────────────
+    stage = "system-audio";
     const displayAudio = display
       .getAudioTracks()
       .filter((track) => track.readyState !== "ended");
@@ -180,6 +217,7 @@ export async function acquireCaptureAudio(opts: {
     let mixedStream: MediaStream | null = null;
     let analyser: AnalyserNode | null = null;
     if (mixSystemAudio) {
+      stage = "mixer";
       context = (opts.createAudioContext ?? (() => new AudioContext()))();
       if (context.state === "suspended") await context.resume();
       if (context.state === "closed" || context.state === "suspended") {
@@ -249,6 +287,6 @@ export async function acquireCaptureAudio(opts: {
     if (captureScreen && !opts.includeSystemAudio) {
       throw new ScreenCaptureError("Could not capture the screen", { cause });
     }
-    throw new SystemAudioCaptureError("Could not capture computer audio", { cause });
+    throw new SystemAudioCaptureError("Could not capture computer audio", { cause, stage });
   }
 }

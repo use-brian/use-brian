@@ -42,11 +42,13 @@ import {
   Notification,
   nativeImage,
   desktopCapturer,
+  webContents,
   nativeTheme,
   type Event,
   type Cookie,
   type IpcMainInvokeEvent,
   type MenuItemConstructorOptions,
+  type WebFrameMain,
 } from "electron";
 // electron-updater is CommonJS; its named exports are lazy getters that Node's
 // ESM-CJS interop cannot statically detect, so a named import (`import {
@@ -148,8 +150,10 @@ import {
 } from "./desktop-chat.js";
 import {
   captureSourceSnapshot,
+  CapturePreparations,
   isTrustedCaptureOrigin,
-  selectPrimaryDisplaySource,
+  parseDisplayCaptureIntent,
+  resolveDisplayCapture,
 } from "./system-audio-policy.js";
 import { windowsAppUserModelId } from "./app-identity.js";
 import { buildAppMenu } from "./menu.js";
@@ -367,6 +371,7 @@ let pendingUseBrianPrompt: string | null = null;
 let pendingNearbyUseBrian = false;
 /** Renderer-picked capture source for the NEXT display-media grant (one-shot). */
 let requestedCaptureSourceId: string | null = null;
+const capturePreparations = new CapturePreparations<WebFrameMain>();
 /** The isolated, shared-session browser used for an interactive deployment gateway. */
 let gatewayWindow: BrowserWindow | null = null;
 /** One gateway login at a time; concurrent challenged requests wait for this result. */
@@ -1756,6 +1761,7 @@ async function activateTarget(
     lastAssistantId = null;
     lastLocalMintAt = 0;
     requestedCaptureSourceId = null;
+    capturePreparations.clear();
     pendingUseBrianPrompt = null;
     pendingNearbyUseBrian = false;
     accessReauthorizationNeeded = false;
@@ -2790,51 +2796,49 @@ function installSessionPolicies(): void {
       }
     });
 
-    // Remote-meeting recording: app-web requests display media only to obtain
-    // the computer's playback stream. getDisplayMedia requires video, so grant
-    // the primary display + audible loopback; the renderer stops the video
-    // track immediately and mixes only mic + playback into MediaRecorder.
-    //
-    // The origin check is the privilege boundary. Bundled file:// is allowed
-    // only when a packaged renderer is actually active; arbitrary web content
-    // can never turn this shell into a whole-computer audio tap.
+    // Chromium still requires video for getDisplayMedia. Audio-only intent
+    // grants the app's own frame, avoiding a physical screen startup entirely.
+    // Explicit video capture keeps the selected screen/window source.
     targetSession().setDisplayMediaRequestHandler((request, callback) => {
+      const frame = request.frame;
+      const owner = frame ? webContents.fromFrame(frame) : null;
       const trusted = isTrustedCaptureOrigin(
         request.securityOrigin,
         policyCfg.appOrigin,
         bundledAvailable(),
       );
-      if (!trusted || !request.audioRequested || !request.videoRequested) {
+      if (!trusted || !frame || frame !== frame.top || !owner ||
+          !isCurrentAccountSender(owner.id) || !request.audioRequested || !request.videoRequested) {
         callback({});
         return;
       }
-      // A renderer-picked source (the specific-window capture) wins for ONE
-      // grant, then clears — a later computer-audio-only capture must never
-      // silently record last week's picked window.
+      const preparation = capturePreparations.take(owner.id, frame);
+      if (preparation.kind === "denied") {
+        console.warn("[capture] Missing or stale capture preparation");
+        callback({});
+        return;
+      }
       const pickedId = requestedCaptureSourceId;
       requestedCaptureSourceId = null;
-      void desktopCapturer
-        .getSources({
-          types: pickedId ? ["window", "screen"] : ["screen"],
+      const intent = preparation.kind === "prepared" ? preparation.intent
+        : { kind: "legacy" as const, sourceId: pickedId };
+      void resolveDisplayCapture({
+        intent,
+        frame,
+        primaryDisplayId: screen.getPrimaryDisplay().id,
+        getSources: (types) => desktopCapturer.getSources({
+          types,
           thumbnailSize: { width: 0, height: 0 },
           fetchWindowIcons: false,
-        })
-        .then((sources) => {
-          const source =
-            (pickedId ? sources.find((candidate) => candidate.id === pickedId) : undefined) ??
-            selectPrimaryDisplaySource(sources, screen.getPrimaryDisplay().id);
-          if (!source) {
-            callback({});
-            return;
-          }
-          // `loopback` leaves local playback audible. `loopbackWithMute`
-          // would make the remote meeting disappear from the user's speakers.
-          // Loopback is WHOLE-SYSTEM output: per-application audio isolation
-          // is not exposed by Chromium/Electron, so a window pick still
-          // carries all computer audio (the renderer copy says so).
-          callback({ video: source, audio: "loopback" });
-        })
-        .catch(() => callback({}));
+        }),
+      }).then((grant) => callback(grant)).catch((cause: unknown) => {
+        console.warn("[capture] Source grant failed", {
+          kind: intent.kind,
+          errorName: cause instanceof Error ? cause.name : "UnknownError",
+          errorMessage: cause instanceof Error ? cause.message.slice(0, 500) : "Capture source unavailable",
+        });
+        callback({});
+      });
     });
 
 }
@@ -4323,6 +4327,15 @@ if (!gotLock) {
     return sources
       .filter((source) => source.name.trim().length > 0)
       .map(captureSourceSnapshot);
+  });
+  ipcMain.handle("Use Brian:prepare-display-capture", (event, value: unknown) => {
+    const frame = event.senderFrame;
+    if (changingTarget || !frame || frame !== event.sender.mainFrame ||
+        !isCurrentAccountSender(event.sender.id) ||
+        !isTrustedCaptureOrigin(frame.url, cfg.appOrigin, bundledAvailable())) {
+      throw new Error("Capture preparation is unavailable for this frame");
+    }
+    capturePreparations.prepare(event.sender.id, frame, parseDisplayCaptureIntent(value));
   });
   ipcMain.on("Use Brian:set-capture-source", (_event, id: unknown) => {
     requestedCaptureSourceId = typeof id === "string" && id.length > 0 ? id : null;
