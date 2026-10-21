@@ -1,8 +1,10 @@
 import {randomUUID} from 'node:crypto'
 import {afterAll,afterEach,describe,expect,it} from 'vitest'
-import {boundScopeSources,type ScopeSource} from '@use-brian/core'
+import {boundScopeSources,executionToolContext,type ScopeSource} from '@use-brian/core'
 import type {PoolClient} from 'pg'
 import {getAppPool,getPool,rollbackAndRelease,runWithAgentAccess,applyRLSGucs} from '../../db/client.js'
+import {createDbMemoryStore} from '../../db/memory-store.js'
+import {assertSourceModelInputAuthority} from '../model-source-authority.js'
 import {addSessionMessage} from '../../db/sessions.js'
 import {writeSessionContextRevision} from '../../db/session-context-revisions.js'
 import {readAdmittedSessionQuery} from '../../db/session-query-reader.js'
@@ -130,6 +132,37 @@ describe.sequential('[COMP:api/application-persistence] native metadata equivale
   fixture=await persistentContextFixture();const f=fixture,memory=await f.memory('Fictional private metadata helper'),db=await getAppPool().connect()
   try{await expect(db.query('SELECT * FROM application_scope_source_edges($1,$2,$3,$4)',[f.workspaceId,'memory',memory.id,'1'])).rejects.toMatchObject({code:'42501'})
    await expect(db.query('SELECT * FROM scope_source_ancestors_before_browser_profile($1,$2,$3)',[f.workspaceId,'memory',memory.id])).rejects.toMatchObject({code:'42501'})
+   await expect(db.query("SELECT application_session_eval_scope_current($1,$2,$3,$4,'{}'::jsonb)",[f.workspaceId,'memory',memory.id,'1'])).rejects.toMatchObject({code:'42501'})
   }finally{db.release()}
+ })
+ it('falls back from a simple Memory leaf after a real SQL kernel extension adds a held source',async()=>{
+  fixture=await persistentContextFixture();const f=fixture;await f.history()
+  const memory=await f.memory('Fictional leaf memory'),dependency=await f.memory('Fictional held extension source')
+  await f.pool.query('UPDATE memories SET scope_held=true WHERE id=$1',[dependency.id])
+  const authority=await f.modelContext(f.firstId),query=await readAdmittedSessionQuery({sessionId:f.session.id,throughSequence:3,authority})
+  const row=await createDbMemoryStore().getById(authority.execution.security.access,memory.id)
+  if(!row)throw new Error('Missing actual leaf memory')
+  const roots=boundScopeSources(row),root=roots[0],sources=[...boundScopeSources(query),...roots],before=structuredClone(sources)
+  authority.accumulator.note({sources})
+  const context={...executionToolContext(authority.execution,{appId:'fixture'}),scopeAccumulator:authority.accumulator}
+  const lineage=async()=>(await f.pool.query('SELECT * FROM application_scope_lineage($1,ARRAY[$2::text],ARRAY[$3::uuid],ARRAY[$4::text])',[f.workspaceId,'memory',memory.id,root.version])).rows
+  expect(await lineage()).toEqual([{kind:'memory',id:memory.id,version:root.version}])
+  await expect(assertSourceModelInputAuthority(context)).resolves.toBeUndefined()
+  const original=(await f.pool.query("SELECT pg_get_functiondef(p.oid) AS definition,p.prosrc AS body FROM pg_proc p WHERE p.oid='public.application_scope_source_edges(uuid,text,uuid,text)'::regprocedure")).rows[0]
+  const version=(await f.pool.query('SELECT scope_version::text AS version FROM memories WHERE id=$1',[dependency.id])).rows[0].version
+  try{
+   // Same SQL extension mechanism as R2; current native admission remains real.
+   await f.pool.query(`CREATE OR REPLACE FUNCTION public.application_scope_source_edges(w uuid,k text,i uuid,v text)
+    RETURNS TABLE(kind text,id uuid,version text) LANGUAGE sql SECURITY DEFINER SET search_path=pg_catalog,public,pg_temp AS $fixture_edges$
+    ${original.body}
+    UNION SELECT 'memory','${dependency.id}'::uuid,'${version}'::text
+     WHERE w='${f.workspaceId}'::uuid AND k='memory' AND i='${memory.id}'::uuid
+    $fixture_edges$`)
+   expect(await lineage()).toEqual(expect.arrayContaining([{kind:'memory',id:memory.id,version:root.version},{kind:'memory',id:dependency.id,version}]))
+   await expect(assertSourceModelInputAuthority(context)).rejects.toMatchObject({reason:'authority_changed'})
+   expect(sources).toEqual(before)
+  }finally{await f.pool.query(original.definition)}
+  const fresh=await f.modelContext(f.firstId);fresh.accumulator.note({sources})
+  await expect(assertSourceModelInputAuthority({...executionToolContext(fresh.execution,{appId:'fixture'}),scopeAccumulator:fresh.accumulator})).resolves.toBeUndefined()
  })
 })

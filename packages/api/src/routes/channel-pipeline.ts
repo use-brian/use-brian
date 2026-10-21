@@ -1,3 +1,4 @@
+import { publishNativeSessionMessageBatch } from '../db/session-message-publication.js'
 import { isInputAuthorityError } from '@use-brian/core'
 import { classifyAttendedSessionMessage, classifyAttendedResearchMessage, readAttendedSessionHistory } from './attended-session-context.js'
 import { getPool } from '../db/client.js'
@@ -2655,29 +2656,46 @@ async function processChannelMessageTurn(params: ChannelPipelineParams): Promise
     const batchWrite = currentTurnWrite()
     const savedTurns: Array<{ row: Awaited<ReturnType<typeof addSessionMessage>>; content: ContentBlock[] }> = []
     const publish = async (tx: PoolClient) => {
+      const nativeRows: Array<Parameters<typeof publishNativeSessionMessageBatch>[0]['messages'][number]> = []
+      const nativeSaved = new Map<number, ContentBlock[]>()
       for (let turnIdx = 0; turnIdx < pendingAssistantTurns.length; turnIdx++) {
         const turn = pendingAssistantTurns[turnIdx]
         if (turn.content.length === 0) continue
-        const assistantRow = await addSessionMessage({
-          sessionId: session.id,
-          role: 'assistant',
-          content: turn.content,
-          // Stamp draft-session author so peer viewers see who drove
-          // the turn that produced this assistant message.
-          senderUserId: senderUserId ?? null,
-          attachments: turnIdx === lastContentIdx && attachments?.length ? attachments : undefined,
-          ...batchWrite,
-        }, tx)
-        savedTurns.push({ row: assistantRow, content: turn.content })
+        if(nativeTranscriptAuthority && 'derivation' in batchWrite){
+          nativeSaved.set(nativeRows.length,turn.content)
+          nativeRows.push({role:'assistant',content:turn.content,senderUserId:senderUserId??null,
+            attachments:turnIdx===lastContentIdx&&attachments?.length?attachments:undefined})
+        } else {
+          const assistantRow = await addSessionMessage({
+            sessionId: session.id,
+            role: 'assistant',
+            content: turn.content,
+            // Stamp draft-session author so peer viewers see who drove
+            // the turn that produced this assistant message.
+            senderUserId: senderUserId ?? null,
+            attachments: turnIdx === lastContentIdx && attachments?.length ? attachments : undefined,
+            ...batchWrite,
+          }, tx)
+          savedTurns.push({ row: assistantRow, content: turn.content })
+        }
         const missing = synthesizeMissingToolResults(turn.content, turn.toolResults, reason)
         const allResults = [...turn.toolResults, ...missing]
         if (allResults.length > 0) {
-          await addSessionMessage({
+          if(nativeTranscriptAuthority && 'derivation' in batchWrite)nativeRows.push({role:'user',content:allResults})
+          else await addSessionMessage({
             sessionId: session.id,
             role: 'user',
             content: allResults,
             ...batchWrite,
           }, tx)
+        }
+      }
+      if(nativeRows.length&&nativeTranscriptAuthority&&'derivation' in batchWrite){
+        const rows=await publishNativeSessionMessageBatch({sessionId:session.id,messages:nativeRows,
+          derivation:batchWrite.derivation,derivationTarget:batchWrite.derivationTarget,authority:nativeTranscriptAuthority},tx)
+        for(const [index,row] of rows.entries()){
+          const content=nativeSaved.get(index)
+          if(content)savedTurns.push({row,content})
         }
       }
     }

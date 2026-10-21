@@ -1,3 +1,4 @@
+import { publishNativeSessionMessageBatch } from '../db/session-message-publication.js'
 import { classifyAttendedSessionMessage, classifyAttendedResearchMessage, readAttendedSessionHistory } from './attended-session-context.js'
 import type { PoolClient } from 'pg'
 import { withSessionMessagePublication } from '../db/session-context-revisions.js'
@@ -6969,6 +6970,8 @@ export function chatRoutes(options: WebChatOptions): Router {
         const savedTurns: SavedTurn[] = []
         const batchWrite = currentTurnWrite()
         const publish = async (tx: PoolClient) => {
+          const nativeRows: Array<Parameters<typeof publishNativeSessionMessageBatch>[0]['messages'][number]> = []
+          const nativeSaved = new Map<number, { isLast: boolean; attachments: typeof outboundAttachments }>()
           for (let turnIdx = 0; turnIdx < pendingAssistantTurns.length; turnIdx++) {
             const turn = pendingAssistantTurns[turnIdx]
             // Pure empty response (safety filter / MAX_TOKENS with zero
@@ -7005,18 +7008,24 @@ export function chatRoutes(options: WebChatOptions): Router {
 
             const isLast = turnIdx === lastNonEmptyIdx
             const attachments = isLast && outboundAttachments.length > 0 ? outboundAttachments : []
-            const storedAssistantMsg = await addSessionMessage({
-              sessionId: session.id,
-              role: 'assistant',
-              content,
-              // The ANSWERING assistant (T9) — in a multi-assistant room this
-              // may differ from the session's binding; per-reply avatars and
-              // foreign-voice assembly labels read it.
-              senderAssistantId: assistant.id,
-              attachments: attachments.length > 0 ? attachments : undefined,
-              ...batchWrite,
-            }, tx)
-            savedTurns.push({ stored: storedAssistantMsg, isLast, attachments })
+            if (nativeTranscriptAuthority && 'derivation' in batchWrite) {
+              nativeSaved.set(nativeRows.length, { isLast, attachments })
+              nativeRows.push({role:'assistant',content,senderAssistantId:assistant.id,
+                attachments:attachments.length>0?attachments:undefined})
+            } else {
+              const storedAssistantMsg = await addSessionMessage({
+                sessionId: session.id,
+                role: 'assistant',
+                content,
+                // The ANSWERING assistant (T9) — in a multi-assistant room this
+                // may differ from the session's binding; per-reply avatars and
+                // foreign-voice assembly labels read it.
+                senderAssistantId: assistant.id,
+                attachments: attachments.length > 0 ? attachments : undefined,
+                ...batchWrite,
+              }, tx)
+              savedTurns.push({ stored: storedAssistantMsg, isLast, attachments })
+            }
 
             // Synthesise stubs for any tool_use in this turn's content that
             // the executor failed to produce a real result for.
@@ -7027,12 +7036,21 @@ export function chatRoutes(options: WebChatOptions): Router {
             )
             const allResults = [...turn.toolResults, ...missing]
             if (allResults.length > 0) {
-              await addSessionMessage({
+              if (nativeTranscriptAuthority && 'derivation' in batchWrite) nativeRows.push({role:'user',content:allResults})
+              else await addSessionMessage({
                 sessionId: session.id,
                 role: 'user',
                 content: allResults,
                 ...batchWrite,
               }, tx)
+            }
+          }
+          if (nativeRows.length && nativeTranscriptAuthority && 'derivation' in batchWrite) {
+            const rows=await publishNativeSessionMessageBatch({sessionId:session.id,messages:nativeRows,
+              derivation:batchWrite.derivation,derivationTarget:batchWrite.derivationTarget,authority:nativeTranscriptAuthority},tx)
+            for (const [index,stored] of rows.entries()) {
+              const metadata=nativeSaved.get(index)
+              if(metadata)savedTurns.push({stored,...metadata})
             }
           }
         }
