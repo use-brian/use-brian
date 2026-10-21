@@ -1,4 +1,5 @@
 import { isTrustedPairingOrigin } from './pairing.js'
+import { installAccountSwitching, type AccountBroker } from './account-switching.js'
 
 export type ChatIdentity = { userId: string; workspaceId: string; browserProfileId: string }
 export type PageEvidence = { url: string; title: string; text: string; capturedAt: string }
@@ -22,7 +23,7 @@ export function pageEvidence(snapshot: { url: string; title: string; nodes: Arra
   return { url: snapshot.url.slice(0, 4096), title: snapshot.title.slice(0, 500), text: text.slice(0, PAGE_TEXT_LIMIT), capturedAt: new Date().toISOString() }
 }
 
-type Broker = { port: chrome.runtime.Port; hello: Record<string, unknown> }
+type Broker = AccountBroker
 type Request = { id: string; panel: chrome.runtime.Port; broker: Broker; identity: ChatIdentity; sessionId?: string }
 
 /** Ports carry chat data only. No credentials or general HTTP/browser RPC. */
@@ -33,21 +34,42 @@ export function installAssistantChat(deps: {
   pageStillCurrent: (page: PageEvidence) => Promise<boolean>
   stop: () => Promise<void>
   matches: () => string[]
-}): void {
+  accountStore?: Pick<chrome.storage.StorageArea, 'get' | 'set' | 'remove'>
+  appOrigin?: () => Promise<string | null>
+  beforeAccountSwitch?: () => Promise<void>
+}) {
   const brokers = new Set<Broker>()
   const panels = new Set<chrome.runtime.Port>()
   const sharedPages = new Map<chrome.runtime.Port, PageEvidence>()
   let pending: Request | null = null
   let generation = 0
   const post = (port: chrome.runtime.Port, message: unknown) => { try { port.postMessage(message) } catch { /* disconnected */ } }
+  const invalidate = () => {
+    generation++
+    if (pending) {
+      post(pending.broker.port, { type: 'stop', id: pending.id })
+      post(pending.panel, { type: 'failure', id: pending.id, code: 'account_changed' })
+      pending = null
+    }
+    sharedPages.clear()
+    for (const panel of panels) post(panel, { type: 'identity-reset' })
+  }
+  const accounts = deps.accountStore ? installAccountSwitching({
+    store: deps.accountStore, brokers: () => [...brokers],
+    appOrigin: deps.appOrigin ?? (async () => null),
+    beforeSwitch: async () => { if (pending) throw new Error('busy'); await (deps.beforeAccountSwitch ?? deps.stop)() },
+    reset: invalidate, publish: message => { for (const panel of panels) post(panel, message) },
+  }) : null
   const eligible = async () => {
     const identity = await deps.identity()
     if (!identity || !deps.ready()) return null
+    const activeAccount = (await accounts?.status())?.accountDirectory?.current.id
+    if (activeAccount && activeAccount !== identity.userId) return null
     return [...brokers].reverse().find(b => b.hello.userId === identity.userId && b.hello.workspaceId === identity.workspaceId) ?? null
   }
   const status = async (panel: chrome.runtime.Port) => {
     const broker = await eligible()
-    post(panel, { type: 'status', connected: !!broker, ...(broker ? { workspaceName: broker.hello.workspaceName, assistants: broker.hello.assistants, appearance: broker.hello.appearance } : {}) })
+    post(panel, { type: 'status', ...(await accounts?.status()), connected: !!broker, ...(broker ? { identity: { userId: broker.hello.userId, workspaceId: broker.hello.workspaceId }, workspaceName: broker.hello.workspaceName, assistants: broker.hello.assistants, appearance: broker.hello.appearance } : {}) })
   }
   const refresh = () => { for (const panel of panels) void status(panel) }
   chrome.storage.onChanged.addListener(refresh)
@@ -64,9 +86,11 @@ export function installAssistantChat(deps: {
         if (typeof message.userId !== 'string' || typeof message.workspaceId !== 'string' || !Array.isArray(message.assistants) || message.assistants.length > 200) return
         broker.hello = message
         brokers.add(broker)
+        accounts?.hello(broker)
         refresh()
         return
       }
+      if (accounts?.receive(broker, message)) return
       if (message.type === 'appearance' && brokers.has(broker)) {
         broker.hello.appearance = message.appearance
         refresh()
@@ -92,6 +116,7 @@ export function installAssistantChat(deps: {
     })
     port.onDisconnect.addListener(() => {
       brokers.delete(broker)
+      accounts?.disconnected(broker)
       if (pending?.broker === broker) {
         post(pending.panel, { type: 'failure', id: pending.id, code: 'app_disconnected' })
         pending = null
@@ -118,6 +143,7 @@ export function installAssistantChat(deps: {
     panel.onMessage.addListener(message => {
       const admission = generation
       void (async () => {
+        if (message && typeof message === 'object' && await accounts?.panel(message)) return
         if (message?.type === 'status') { await status(panel); return }
         if (message?.type === 'stop') {
           generation++
@@ -127,6 +153,7 @@ export function installAssistantChat(deps: {
           }
           await deps.stop(); return
         }
+        if (await accounts?.blocked()) throw new Error('account_switching')
         if (message?.type === 'read-page') {
           if (!await eligible()) throw new Error('app_disconnected')
           if (admission !== generation) throw new Error('stopped')
@@ -166,4 +193,5 @@ export function installAssistantChat(deps: {
         code: typeof error?.code === 'string' ? error.code : error instanceof Error ? error.message : 'unavailable' }))
     })
   })
+  return { invalidate, refresh }
 }

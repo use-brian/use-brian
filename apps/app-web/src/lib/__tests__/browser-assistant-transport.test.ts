@@ -84,3 +84,60 @@ describe('[COMP:app-web/browser-assistant-transport] authenticated extension cha
     expect(h.postMessage).not.toHaveBeenCalled();
   });
 });
+
+function accountsHarness(isCurrentUser = () => true) {
+  const h = harness(); let receive: (value: unknown) => void = () => {};
+  const postMessage = vi.fn();
+  const directory = () => ({ current: { id: 'user-1', name: 'First account', email: 'first@example.com' }, accounts: [ { id: 'user-1', name: 'First account', email: 'first@example.com' }, { id: 'user-2', name: 'Second account', email: 'second@example.com' } ] });
+  const accountManagement = { directory, act: vi.fn(), profiles: vi.fn(async () => [
+    { id: 'local', name: 'Work browser', ownerUserId: 'user-1', defaultBackend: 'local' },
+    { id: 'cloud', name: 'Cloud browser', ownerUserId: 'user-1', defaultBackend: 'cloud' },
+    { id: 'other', name: 'Other browser', ownerUserId: 'user-2', defaultBackend: 'local' },
+  ]), pair: vi.fn(async (_id: string, _signal: AbortSignal, _current: () => boolean) => true), openBrowsers: vi.fn() };
+  const service = serveBrowserAssistant({ postMessage, disconnect: vi.fn(), onMessage: { addListener: fn => { receive = fn; } }, onDisconnect: { addListener: vi.fn() } }, { ...h.deps, isCurrentUser, accountManagement });
+  return { ...h, postMessage, send: (value: unknown) => receive(value), service, accountManagement };
+}
+describe('[COMP:app-web/browser-assistant-transport] canonical account management', () => {
+  it('advertises saved identities without reading or exporting auth credentials', async () => {
+    const h = accountsHarness(); await h.service.hello();
+    expect(h.postMessage).toHaveBeenCalledWith(expect.objectContaining({ accountDirectory: h.accountManagement.directory() }));
+    expect(JSON.stringify(h.postMessage.mock.calls)).not.toMatch(/refreshToken|accessToken|Authorization/);
+  });
+  it('delegates only known saved-account switches and add-account intent', async () => {
+    const h = accountsHarness();
+    h.send({ type: 'account-action', action: 'switch', accountId: 'unknown' });
+    h.send({ type: 'account-action', action: 'switch', accountId: 'user-2', url: 'https://other.example.com' });
+    await settle(); expect(h.accountManagement.act).not.toHaveBeenCalled();
+    h.send({ type: 'account-action', action: 'switch', accountId: 'user-2' });
+    h.send({ type: 'account-action', action: 'add' }); await settle();
+    expect(h.accountManagement.act.mock.calls).toEqual([['switch', 'user-2'], ['add', undefined]]);
+    expect(h.wire).not.toHaveBeenCalled();
+  });
+  it('returns only owned local profiles and never forwards server profile secrets', async () => {
+    const h = accountsHarness(); h.send({ type: 'account-profiles', id: 'request-1' }); await settle();
+    expect(h.postMessage).toHaveBeenLastCalledWith({ type: 'account-profiles', id: 'request-1', profiles: [{ id: 'local', name: 'Work browser' }] });
+  });
+  it('rechecks ownership and local backend before minting a fresh pairing', async () => {
+    for (const change of [{ ownerUserId: 'user-2' }, { defaultBackend: 'cloud' }]) {
+      const h = accountsHarness(); h.deps.profile.mockResolvedValue({ name: 'Work browser', ownerUserId: 'user-1', defaultBackend: 'local', ...change });
+      h.send({ type: 'account-pair', id: 'request-1', profileId: 'profile-1' }); await settle();
+      expect(h.accountManagement.pair).not.toHaveBeenCalled();
+    }
+    const h = accountsHarness(); h.send({ type: 'account-pair', id: 'request-1', profileId: 'profile-1' }); await settle();
+    expect(h.accountManagement.pair).toHaveBeenCalledWith('profile-1', expect.any(AbortSignal), expect.any(Function));
+    expect(h.postMessage).toHaveBeenLastCalledWith({ type: 'account-paired', id: 'request-1', ok: true });
+  });
+  it('cancels a delayed pairing before it can reach the one-click channel', async () => {
+    const h = accountsHarness(); let release = () => {}; const wait = new Promise<void>(resolve => { release = resolve; });
+    const mutate = vi.fn();
+    h.accountManagement.pair.mockImplementation(async (_id, _signal, current) => { await wait; if (current()) mutate(); return current(); });
+    h.send({ type: 'account-pair', id: 'request-1', profileId: 'profile-1' }); await settle();
+    h.send({ type: 'account-cancel', id: 'request-1' }); release(); await settle();
+    expect(mutate).not.toHaveBeenCalled(); expect(h.postMessage).not.toHaveBeenCalledWith(expect.objectContaining({ type: 'account-paired' }));
+  });
+  it('rejects stale app identity before navigation, profile listing or pairing', async () => {
+    const h = accountsHarness(() => false);
+    for (const message of [{ type: 'account-action', action: 'add' }, { type: 'account-profiles', id: 'r' }, { type: 'account-pair', id: 'r', profileId: 'p' }]) h.send(message);
+    await settle(); expect(h.accountManagement.act).not.toHaveBeenCalled(); expect(h.accountManagement.profiles).not.toHaveBeenCalled(); expect(h.accountManagement.pair).not.toHaveBeenCalled();
+  });
+});

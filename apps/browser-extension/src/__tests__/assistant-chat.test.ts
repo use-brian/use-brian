@@ -10,10 +10,12 @@ import { readablePageNames } from '@use-brian/browser-control/snapshot.js'
 const identity = { userId: 'user-1', workspaceId: 'workspace-1', browserProfileId: 'profile-1' }
 function token(extra = {}) { return `header.${btoa(JSON.stringify({ ...identity, kind: 'browser-ext-session', exp: 2000, ...extra }))}.signature` }
 function event() { const listeners: Array<(...args: any[]) => void> = []; return { addListener: (f: (...args: any[]) => void) => listeners.push(f), emit: (...args: any[]) => listeners.forEach(f => f(...args)) } }
-function harness() {
+function harness(accounts = false) {
   const external = event(), internal = event()
   vi.stubGlobal('chrome', { runtime: { id: 'extension-id', getURL: (p: string) => `chrome-extension://extension-id/${p}`, onConnectExternal: external, onConnect: internal }, storage: { onChanged: event() } })
-  const deps = { identity: async () => identity, ready: () => true, readPage: vi.fn(), pageStillCurrent: async () => true, stop: vi.fn(async () => {}), matches: () => ['https://app.usebrian.ai/*'] }
+  const stored: Record<string, unknown> = {}
+  const store = { get: async () => ({ ...stored }), set: async (value: object) => { Object.assign(stored, value) }, remove: async (key: string | string[]) => { for (const k of Array.isArray(key) ? key : [key]) delete stored[k] } }
+  const deps = { ...(accounts ? { accountStore: store as unknown as chrome.storage.StorageArea } : {}), identity: vi.fn(async () => identity), ready: () => true, readPage: vi.fn(), pageStillCurrent: async () => true, stop: vi.fn(async () => {}), matches: () => ['https://app.usebrian.ai/*'] }
   installAssistantChat(deps)
   const port = (name: string, sender: object) => ({ name, sender, postMessage: vi.fn(), disconnect: vi.fn(), onMessage: event(), onDisconnect: event() })
   const broker = port('brian-assistant-chat', { origin: 'https://app.usebrian.ai', frameId: 0 })
@@ -120,5 +122,50 @@ describe('[COMP:ext/assistant-chat] rounded extension artwork', () => {
       expect(pixels[(Math.floor(size / 2) * size + Math.floor(size / 2)) * 4 + 3]).toBe(255)
       expect(decodePng(roundIcon(bytes)).pixels).toEqual(pixels)
     }
+  })
+})
+
+const settleAccounts = async () => { for (let i = 0; i < 150; i++) await Promise.resolve() }
+function accountHello() {
+  return { type: 'hello', ...identity, assistants: [{ id: 'assistant-1', name: 'Assistant' }], accountDirectory: {
+    current: { id: 'user-1', name: 'First account', email: 'first@example.com' },
+    accounts: [{ id: 'user-1', name: 'First account', email: 'first@example.com' }, { id: 'user-2', name: 'Second account', email: 'second@example.com' }],
+  } }
+}
+describe('[COMP:ext/assistant-chat] account isolation', () => {
+  it('discards the previously shared website evidence before an account handoff', async () => {
+    const h = harness(true), page = { url: 'https://example.com', title: 'Example page', text: 'OLD_ACCOUNT_CONTEXT', capturedAt: new Date().toISOString() }
+    h.external.emit(h.broker); h.broker.onMessage.emit(accountHello()); h.internal.emit(h.panel); await settleAccounts()
+    h.deps.readPage.mockResolvedValue(page); h.panel.onMessage.emit({ type: 'read-page' }); await settleAccounts()
+    expect(h.panel.postMessage).toHaveBeenCalledWith({ type: 'page', page })
+    h.panel.onMessage.emit({ type: 'account-switch', accountId: 'user-2' }); await settleAccounts()
+    expect(h.deps.stop).toHaveBeenCalled(); expect(h.panel.postMessage).toHaveBeenCalledWith({ type: 'identity-reset' })
+    h.panel.onMessage.emit({ type: 'account-cancel' }); await settleAccounts()
+    h.panel.onMessage.emit({ type: 'send', id: 'new-turn', text: 'Summarize', assistantId: 'assistant-1', page }); await settleAccounts()
+    expect(h.panel.postMessage).toHaveBeenCalledWith({ type: 'failure', id: 'new-turn', code: 'page_changed' })
+    expect(h.broker.postMessage).not.toHaveBeenCalledWith(expect.objectContaining({ type: 'send', page }))
+    vi.unstubAllGlobals()
+  })
+  it('requires a running chat to finish or be stopped before changing accounts', async () => {
+    const h = harness(true); h.external.emit(h.broker); h.broker.onMessage.emit(accountHello()); h.internal.emit(h.panel); await settleAccounts()
+    h.panel.onMessage.emit({ type: 'send', id: 'running-turn', text: 'Hello', assistantId: 'assistant-1' }); await settleAccounts()
+    h.panel.onMessage.emit({ type: 'account-switch', accountId: 'user-2' }); await settleAccounts()
+    expect(h.panel.postMessage).toHaveBeenCalledWith({ type: 'account-error', code: 'busy' })
+    expect(h.broker.postMessage).not.toHaveBeenCalledWith(expect.objectContaining({ type: 'account-action' }))
+    vi.unstubAllGlobals()
+  })
+})
+
+describe('[COMP:ext/assistant-chat] sign-in changed outside the extension', () => {
+  it('does not use the old pairing when the current app directory belongs to another user', async () => {
+    const h = harness(true); h.external.emit(h.broker); h.broker.onMessage.emit(accountHello()); h.internal.emit(h.panel); await settleAccounts()
+    const newer = { ...h.broker, onMessage: event(), onDisconnect: event(), postMessage: vi.fn() }
+    h.external.emit(newer)
+    newer.onMessage.emit({ ...accountHello(), userId: 'user-2', workspaceId: 'workspace-2', accountDirectory: { current: { id: 'user-2', name: 'Second account', email: 'second@example.com' }, accounts: [{ id: 'user-2', name: 'Second account', email: 'second@example.com' }] } })
+    await settleAccounts(); h.panel.onMessage.emit({ type: 'read-page' }); await settleAccounts()
+    expect(h.deps.readPage).not.toHaveBeenCalled()
+    expect(h.panel.postMessage).toHaveBeenCalledWith(expect.objectContaining({ type: 'status', connected: false }))
+    expect(h.panel.postMessage).toHaveBeenCalledWith(expect.objectContaining({ type: 'failure', code: 'app_disconnected' }))
+    vi.unstubAllGlobals()
   })
 })

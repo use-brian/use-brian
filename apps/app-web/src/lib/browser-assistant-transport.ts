@@ -4,6 +4,8 @@ import { createSSEBuffer, parseSSEStream } from '@use-brian/chat-ui';
 const pageSchema = z.object({ url: z.string().url().max(4096).refine(v => /^https?:\/\//.test(v)), title: z.string().max(500), text: z.string().max(12000), capturedAt: z.string().datetime() }).strict();
 const sendSchema = z.object({ type: z.literal('send'), id: z.string().min(1).max(128), text: z.string().trim().min(1).max(16000), assistantId: z.string().min(1).max(128), sessionId: z.string().min(1).max(128).optional(), browserProfileId: z.string().min(1).max(128), page: pageSchema.optional() }).strict();
 type ChatSend = z.infer<typeof sendSchema>;
+type Account = { id: string; name: string; email: string };
+
 export type AssistantPort = {
   postMessage(message: unknown): void;
   disconnect(): void;
@@ -27,8 +29,16 @@ export function serveBrowserAssistant(port: AssistantPort, deps: {
   workspaceName: string;
   isCurrentUser?: () => boolean;
   appearance?: () => unknown;
+  accountManagement?: {
+    directory: () => { current: Account; accounts: Account[] };
+    act: (action: 'add' | 'switch', accountId?: string) => void;
+    profiles: () => Promise<Array<{ id: string; name: string; ownerUserId: string; defaultBackend: string }>>;
+    pair: (profileId: string, signal: AbortSignal, current: () => boolean) => Promise<boolean>;
+    openBrowsers: () => void;
+  };
 }) {
   let disposed = false;
+  let accountRequest: { id: string; controller: AbortController } | undefined;
   let running: { id: string; controller: AbortController; sessionId?: string; stopped: boolean } | null = null;
   const post = (message: unknown) => {
     if (deps.isCurrentUser?.() === false) { port.disconnect(); return; }
@@ -42,10 +52,52 @@ export function serveBrowserAssistant(port: AssistantPort, deps: {
     const assistants = await deps.assistants();
     post({ type: 'hello', userId: deps.userId, workspaceId: deps.workspaceId, workspaceName: deps.workspaceName,
       assistants: assistants.map(({ id, name, iconSeed }) => ({ id, name, ...(iconSeed !== undefined ? { iconSeed } : {}) })),
-      ...(deps.appearance ? { appearance: deps.appearance() } : {}) });
+      ...(deps.appearance ? { appearance: deps.appearance() } : {}),
+      ...(deps.accountManagement ? { accountDirectory: deps.accountManagement.directory() } : {}) });
   };
   const handle = async (raw: unknown) => {
     if (disposed) return;
+    if (deps.isCurrentUser?.() === false) { port.disconnect(); return; }
+    const account = deps.accountManagement;
+    const action = z.union([
+      z.object({ type: z.literal('account-action'), action: z.literal('add') }).strict(),
+      z.object({ type: z.literal('account-action'), action: z.literal('switch'), accountId: z.string().min(1).max(128) }).strict(),
+      z.object({ type: z.literal('account-profiles'), id: z.string().min(1).max(128) }).strict(),
+      z.object({ type: z.literal('account-pair'), id: z.string().min(1).max(128), profileId: z.string().min(1).max(128) }).strict(),
+      z.object({ type: z.literal('account-cancel'), id: z.string().min(1).max(128) }).strict(),
+      z.object({ type: z.literal('account-browsers') }).strict(),
+    ]).safeParse(raw);
+    if (action.success) {
+      if (!account) return;
+      const value = action.data;
+      if (value.type === 'account-cancel') {
+        if (accountRequest?.id === value.id) { accountRequest.controller.abort(); accountRequest = undefined; }
+        return;
+      }
+      if (value.type === 'account-action') {
+        if (running) { post({ type: 'account-error', code: 'busy' }); return; }
+        if (value.action === 'switch' && !account.directory().accounts.some(a => a.id === value.accountId)) return;
+        try { account.act(value.action, value.action === 'switch' ? value.accountId : undefined); }
+        catch { post({ type: 'account-error', code: 'account_unavailable' }); }
+        return;
+      }
+      if (value.type === 'account-browsers') { account.openBrowsers(); return; }
+      accountRequest?.controller.abort();
+      const request = { id: value.id, controller: new AbortController() }; accountRequest = request;
+      const current = () => accountRequest === request && !request.controller.signal.aborted && !disposed && deps.isCurrentUser?.() !== false;
+      try {
+        if (value.type === 'account-profiles') {
+          const profiles = await account.profiles();
+          if (current()) post({ type: 'account-profiles', id: value.id, profiles: profiles.filter(p => p.ownerUserId === deps.userId && p.defaultBackend === 'local').map(({ id, name }) => ({ id, name })) });
+        } else {
+          const profile = await deps.profile(value.profileId);
+          if (!current() || !profile || profile.ownerUserId !== deps.userId || profile.defaultBackend !== 'local') throw new Error('not_authorized');
+          const ok = await account.pair(value.profileId, request.controller.signal, current);
+          if (current()) post({ type: 'account-paired', id: value.id, ok });
+        }
+      } catch { if (current()) post({ type: 'account-error', id: value.id, code: 'account_unavailable' }); }
+      return;
+    }
     const stop = z.object({ type: z.literal('stop'), id: z.string() }).strict().safeParse(raw);
     if (stop.success) {
       if (!running || running.id !== stop.data.id) return;
@@ -99,7 +151,7 @@ export function serveBrowserAssistant(port: AssistantPort, deps: {
   };
   port.onMessage.addListener(raw => { void handle(raw); });
   const dispose = () => {
-    disposed = true;
+    disposed = true; accountRequest?.controller.abort(); accountRequest = undefined;
     if (running) {
       running.stopped = true;
       if (running.sessionId) { void stopSession(running.sessionId).catch(() => undefined); running.controller.abort(); }

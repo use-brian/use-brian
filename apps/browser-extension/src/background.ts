@@ -81,6 +81,11 @@ function hostOf(url: string): string {
 
 const gate = new TaskGate({ prompt: promptForConsent })
 let relayWasReady = false
+let assistantChat: ReturnType<typeof installAssistantChat> | undefined
+let pairingWrites: Promise<unknown> = Promise.resolve()
+function pairingWrite<T>(fn: () => Promise<T>): Promise<T> {
+  const result = pairingWrites.then(fn); pairingWrites = result.catch(() => undefined); return result
+}
 
 async function stopTask(): Promise<void> {
   protectedFill.approve(false)
@@ -110,11 +115,14 @@ const client = new RelayClient({
   getToken: async () => (await getStored('sessionToken')) ?? (await getStored('pairingToken')),
   getBuild: () => readBuildStamp(),
   capabilities: { protectedFillV1: true },
-  onSessionToken: async (token) => {
+  onSessionToken: token => pairingWrite(async () => {
+    const active = pairedChatIdentity((await getStored('sessionToken')) ?? (await getStored('pairingToken')), 0)
+    const incoming = pairedChatIdentity(token, 0)
+    if (!active || !incoming || JSON.stringify(active) !== JSON.stringify(incoming)) return
     await protectedFill.allowCredential(token, 'browser-ext-session')
     await chrome.storage.local.set({ sessionToken: token })
     await chrome.storage.local.remove('pairingToken')
-  },
+  }),
   onCommand: (cmd) => {
     // Enqueue at receipt, so Stop invalidates the actual waiting generation.
     // An outer promise chain here would let stale commands enqueue AFTER Stop.
@@ -132,6 +140,7 @@ const client = new RelayClient({
       // authorize the next task as configured.
       void clearTask(gate.endTask())
     }
+    assistantChat?.refresh()
     void chrome.action.setBadgeText({ text: state === 'ready' ? 'ON' : '' })
     void chrome.action.setBadgeBackgroundColor({ color: '#16a34a' })
   },
@@ -148,12 +157,25 @@ async function startClient(): Promise<void> {
  * session instead of wiping it.
  */
 async function applyPairing(req: PairRequest): Promise<void> {
-  if (req.pairingToken?.trim()) await protectedFill.allowCredential(req.pairingToken.trim(), 'browser-ext-pair')
-  const { set, remove } = credentialsForConfigure(req)
-  if (Object.keys(set).length > 0) await chrome.storage.local.set(set)
-  if (remove.length > 0) await chrome.storage.local.remove(remove)
-  client.stop()
-  await startClient()
+  return pairingWrite(async () => {
+    if (req.pairingToken?.trim()) await protectedFill.allowCredential(req.pairingToken.trim(), 'browser-ext-pair')
+    if (req.pairingToken?.trim()) {
+      const before = pairedChatIdentity((await getStored('sessionToken')) ?? (await getStored('pairingToken')), 0)
+      const after = pairedChatIdentity(req.pairingToken.trim(), 0)
+      if (JSON.stringify(before) !== JSON.stringify(after)) {
+        assistantChat?.invalidate()
+        client.sendEvent('stopped')
+        client.stop()
+        await stopTask()
+        await commands.run(async () => undefined)
+      }
+    }
+    const { set, remove } = credentialsForConfigure(req)
+    if (Object.keys(set).length > 0) await chrome.storage.local.set(set)
+    if (remove.length > 0) await chrome.storage.local.remove(remove)
+    client.stop()
+    await startClient()
+  })
 }
 
 function pairingMatches(): string[] {
@@ -543,9 +565,15 @@ chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
     })()
     return true // async sendResponse
   } else if (msg.type === 'disconnect') {
-    void chrome.storage.local.remove(['sessionToken', 'pairingToken'])
-    client.stop()
-    sendResponse({ ok: true })
+    void pairingWrite(async () => {
+      assistantChat?.invalidate()
+      client.sendEvent('stopped')
+      client.stop()
+      await stopTask()
+      await commands.run(async () => undefined)
+      await chrome.storage.local.remove(['sessionToken', 'pairingToken'])
+    }).then(() => sendResponse({ ok: true }), () => sendResponse({ ok: false }))
+    return true
   } else if (msg.type === 'status') {
     void (async () => {
       sendResponse({
@@ -623,9 +651,18 @@ chrome.runtime.onMessageExternal.addListener((message, sender, sendResponse) => 
   return undefined
 })
 
-installAssistantChat({
+assistantChat = installAssistantChat({
   identity: async () => pairedChatIdentity((await getStored('sessionToken')) ?? (await getStored('pairingToken'))),
   ready: () => client.getState() === 'ready',
+  accountStore: chrome.storage.session,
+  appOrigin: () => getStored('assistantAppOrigin'),
+  beforeAccountSwitch: async () => {
+    if (await protectedFill.locked()) throw denied()
+    client.sendEvent('stopped')
+    client.stop()
+    await stopTask()
+    await commands.run(async () => undefined)
+  },
   matches: pairingMatches,
   stop: async () => {
     const stopped = stopTask()

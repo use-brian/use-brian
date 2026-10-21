@@ -5,6 +5,8 @@ import remarkGfm from 'remark-gfm'
 import { ArrowUp, Check, ChevronDown, Copy, Globe, Plus, Settings2, Square, X } from 'lucide-react'
 import type { PageEvidence } from './assistant-chat.js'
 
+type Account = { id: string; name: string; email: string }
+type AccountSetup = { waiting: true; profiles?: Array<{ id: string; name: string }>; workspaceName?: string; pairing?: boolean }
 type Assistant = { id: string; name: string; iconSeed?: number | null }
 type Message = { id: string; role: 'user' | 'assistant'; text: string; assistant?: Assistant; page?: PageEvidence }
 const errors: Record<string, string> = {
@@ -12,7 +14,11 @@ const errors: Record<string, string> = {
   different_task_tab: 'Brian is already working in another tab. Stop that task before sharing this tab.',
   no_eligible_tab: 'Open a regular website tab to share its context. Private and browser settings tabs are excluded.',
   consent_denied: 'Page sharing was declined. Press Share current page to request permission again.',
-  busy: 'Another chat is still running. Wait for it to finish or press Stop.',
+  busy: 'Finish the current chat or press Stop before switching accounts.',
+  account_switching: 'Finish switching accounts before sending or sharing a page.',
+  account_changed: 'The active account changed. The previous chat was stopped.',
+  account_unavailable: 'Account setup could not finish. Retry, or open Brian to check your sign-in.',
+  pairing_in_progress: 'The browser profile is connecting. Wait for it to finish.',
   stopped: 'Stopped before sending or sharing. No new request was started.',
   protected_fill_denied: 'Finish protected fill cleanup in extension Settings before sharing this page.',
 }
@@ -38,6 +44,10 @@ const markdownComponents = {
 }
 
 export function BrowserAssistantPanel() {
+  const [accountDirectory, setAccountDirectory] = useState<{ current: Account; accounts: Account[] } | null>(null)
+  const [accountSetup, setAccountSetup] = useState<AccountSetup | null>(null)
+  const boundIdentity = useRef<string | undefined>(undefined)
+  const displayedAccount = useRef<string | undefined>(undefined)
   const [connected, setConnected] = useState(false)
   const [workspace, setWorkspace] = useState('')
   const [assistants, setAssistants] = useState<Assistant[]>([])
@@ -61,6 +71,10 @@ export function BrowserAssistantPanel() {
     catch { setConnected(false); setError('Connection lost. Keep Brian open and retry. No message was resent.') }
   }
   const clear = () => { session.current = undefined; setMessages([]); setPage(undefined); setReview(false); setError('') }
+  const resetIdentity = () => {
+    clear(); setDraft(''); setConnected(false); setWorkspace(''); setAssistants([]); selected.current = null; setAssistant(null)
+    setRunning(false); setReading(false); setActivity(''); request.current = null
+  }
   const connect = () => {
     port.current?.disconnect()
     const next = chrome.runtime.connect({ name: 'brian-assistant-panel' })
@@ -72,7 +86,18 @@ export function BrowserAssistantPanel() {
     })
     next.onMessage.addListener(message => {
       if (port.current !== next) return
+      if (message.type === 'identity-reset') { resetIdentity(); boundIdentity.current = undefined; return }
+      if (message.type === 'account-setup') { setAccountSetup(message.setup); if (!message.setup) send({ type: 'status' }); return }
+      if (message.type === 'account-error') { setError(errors[message.code] ?? errors.account_unavailable); send({ type: 'status' }); return }
       if (message.type === 'status') {
+        const accountId = message.accountDirectory?.current?.id
+        if (accountId && displayedAccount.current && accountId !== displayedAccount.current) resetIdentity()
+        if (accountId) displayedAccount.current = accountId
+        const identity = message.identity ? `${message.identity.userId}:${message.identity.workspaceId}` : undefined
+        if (identity && boundIdentity.current && identity !== boundIdentity.current) resetIdentity()
+        if (identity) boundIdentity.current = identity
+        setAccountDirectory(message.accountDirectory ?? null)
+        setAccountSetup(message.accountSetup ?? null)
         setConnected(message.connected === true)
         setWorkspace(typeof message.workspaceName === 'string' ? message.workspaceName : '')
         if (message.appearance) applyChatAppearance(document.documentElement, message.appearance)
@@ -120,7 +145,7 @@ export function BrowserAssistantPanel() {
 
   const submit = () => {
     const text = draft.trim()
-    if (!text || !connected || running || !assistant) return
+    if (!text || !connected || running || !assistant || accountSetup) return
     const id = crypto.randomUUID(); request.current = id
     setMessages(rows => [...rows, { id: `${id}-user`, role: 'user', text, page }, { id, role: 'assistant', text: '', assistant }])
     setError(''); setReview(false); setRunning(true); setActivity('Thinking...')
@@ -132,11 +157,28 @@ export function BrowserAssistantPanel() {
     selected.current = next; setAssistant(next); clear()
     document.getElementById('assistant-picker')?.removeAttribute('open')
   }
+  const openBrian = () => { void chrome.storage.local.get('assistantAppOrigin').then(stored => chrome.tabs.create({ url: stored.assistantAppOrigin || 'https://app.usebrian.ai' })) }
   const stop = () => send({ type: 'stop' })
+  const manageAccount = (message: unknown) => {
+    setError(''); send(message)
+    document.getElementById('account-picker')?.removeAttribute('open')
+  }
 
   return <div data-chat-surface className="extension-chat @container/chat-reading bg-background text-foreground">
     <header className="panel-header">
-      <span className="chat-heading">Chat</span>
+      {accountDirectory ? <details id="account-picker" className="account-picker" inert={running || reading}>
+        <summary aria-label={`Accounts: ${accountDirectory.current.name || accountDirectory.current.email}`}>
+          <span className="account-initial">{(accountDirectory.current.name || accountDirectory.current.email).slice(0, 1).toUpperCase()}</span>
+          <span className="account-label">{accountDirectory.current.name || accountDirectory.current.email}</span><ChevronDown size={12} />
+        </summary>
+        <div className="account-options"><p>Brian accounts</p>{accountDirectory.accounts.map(account => <button key={account.id} type="button" disabled={running || reading || accountSetup?.pairing || account.id === accountDirectory.current.id}
+          onClick={() => manageAccount({ type: 'account-switch', accountId: account.id })}>
+          <span><strong>{account.name || account.email}</strong><small>{account.email}</small></span>{account.id === accountDirectory.current.id ? <Check size={14} /> : null}
+        </button>)}
+          <button type="button" disabled={running || reading || accountSetup?.pairing} onClick={() => manageAccount({ type: 'account-add' })}><Plus size={14} />Add another account</button>
+          <p>Switching changes the account in your other Brian tabs too.</p>
+        </div>
+      </details> : <span className="chat-heading">Chat</span>}
       <span className="header-status" title={connected ? workspace : 'Open Brian to connect'} aria-label={connected ? `Connected: ${workspace}` : 'Not connected'} data-connected={connected} />
       <div className="header-actions">
         <button type="button" className="icon-button" title="Stop browser task" aria-label="Stop browser task" onClick={stop}><Square size={14} /></button>
@@ -146,7 +188,7 @@ export function BrowserAssistantPanel() {
     </header>
 
     <div ref={transcript} className="transcript" role="log" aria-label="Conversation">
-      {!messages.length ? <div data-chat-greeting className="welcome"><h2>What would you like to work on?</h2></div> : null}
+      {!messages.length && !accountSetup ? <div data-chat-greeting className="welcome"><h2>What would you like to work on?</h2></div> : null}
       {messages.map(message => message.role === 'user' ? <div key={message.id} className="user-row"><div data-brian-chat-user>
         {message.text}{message.page ? <a className="shared-page-receipt" href={message.page.url} target="_blank" rel="noreferrer"><Globe size={12} />{message.page.title || message.page.url}</a> : null}
       </div></div> : message.text ? <div key={message.id} className="assistant-row">
@@ -158,20 +200,30 @@ export function BrowserAssistantPanel() {
     </div>
 
     <footer className="composer-area">
-      {!connected ? <div className="connection-note" role="status"><p>Keep a signed-in Brian workspace tab open and pair this extension in Browsers.</p><div>
-        <button className="text-button" onClick={() => { void chrome.storage.local.get('assistantAppOrigin').then(stored => chrome.tabs.create({ url: stored.assistantAppOrigin || 'https://app.usebrian.ai' })) }}>Open Brian</button>
+      {accountSetup ? <div className="account-setup" role="status">
+        {accountSetup.profiles ? <>
+          <p>{accountSetup.pairing ? 'Connecting browser profile...' : `Choose your local browser profile${accountSetup.workspaceName ? ` in ${accountSetup.workspaceName}` : ''}.`}</p>
+          <div className="account-profile-list">{accountSetup.profiles.map(profile => <button className="text-button" key={profile.id} disabled={accountSetup.pairing} onClick={() => manageAccount({ type: 'account-pair', profileId: profile.id })}><Globe size={14} />Connect {profile.name}</button>)}</div>
+          {!accountSetup.profiles.length ? <button className="text-button" onClick={() => manageAccount({ type: 'account-browsers' })}>Create a local profile in Browsers</button> : null}
+        </> : <p>Finish signing in and choose a workspace in Brian. Then select your browser profile here.</p>}
+        {!accountSetup.pairing ? <div><button className="text-button" onClick={openBrian}>Open Brian</button><button className="text-button" onClick={() => manageAccount({ type: 'account-retry' })}>Refresh profiles</button><button className="text-button" onClick={() => manageAccount({ type: 'account-cancel' })}>Cancel account setup</button></div> : null}
+      </div> : null}
+      {!connected && !accountSetup ? <div className="connection-note" role="status"><p>{accountDirectory ? "Keep a signed-in Brian workspace tab open and connect this account to your local browser profile." : "Keep a signed-in Brian workspace tab open and pair this extension in Browsers."}</p><div>
+        <button className="text-button" onClick={openBrian}>Open Brian</button>
+        {accountDirectory ? <button className="text-button" onClick={() => manageAccount({ type: 'account-connect' })}>Connect this account</button> : null}
         <button className="text-button" onClick={connect}>Retry connection</button>
       </div></div> : null}
       {error ? <p className="error-note" role="alert">{error}</p> : null}
+      {!accountSetup ? <>
       <div className="context-band"><span className="brain-context" title={workspace || 'Brain context'}>Brain{workspace ? ` · ${workspace}` : ''}</span>
-        <button type="button" className="context-button" disabled={!connected || running || reading} onClick={() => { setReading(true); setError(''); send({ type: 'read-page' }) }}><Globe size={14} />{reading ? 'Reading page...' : 'Share page'}</button>
+        <button type="button" className="context-button" disabled={!connected || running || reading || !!accountSetup} onClick={() => { setReading(true); setError(''); send({ type: 'read-page' }) }}><Globe size={14} />{reading ? 'Reading page...' : 'Share page'}</button>
       </div>
       {page ? <details className="page-context"><summary><Globe size={13} /><span>{page.title || page.url}</span><ChevronDown size={13} /></summary>
         <a href={page.url} target="_blank" rel="noreferrer">{page.url}</a><pre>{page.text}</pre><button type="button" className="text-button" onClick={() => setPage(undefined)}><X size={12} />Remove page</button>
       </details> : null}
       <div data-brian-chat-composer>
         <ChatComposer appearance="app" value={draft} onChange={setDraft} onSend={submit}
-          sendDisabled={!connected || !assistant || running} placeholder="Ask a question or give Brian a task" textareaId="message"
+          sendDisabled={!connected || !assistant || running || !!accountSetup} placeholder="Ask a question or give Brian a task" textareaId="message"
           rowClassName="grid grid-cols-[auto_minmax(0,1fr)_auto] items-center gap-x-0.5 gap-y-1 px-2 pb-2"
           textareaClassName="col-span-3 col-start-1 row-start-1 w-full min-w-0 max-h-[min(240px,30dvh)] resize-none overflow-y-auto bg-transparent px-1.5 pt-3 pb-2 text-[16px] leading-6 outline-none placeholder:text-muted-foreground focus-visible:shadow-none"
           slotPreInput={<div className="composer-toolbar col-span-2 col-start-1 row-start-2">
@@ -189,6 +241,7 @@ export function BrowserAssistantPanel() {
         />
       </div>
       <p className="composer-hint">Page sharing and browser actions use your permissions.</p>
+      </> : null}
     </footer>
   </div>
 }

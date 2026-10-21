@@ -20,7 +20,7 @@
  * Do not hand-edit. `pnpm check` (`invariants/browser-extension-build-stamp`)
  * prints the value to paste when extension source moves.
  */
-export const CURRENT_EXTENSION_BUILD = '5629c6c2662b'
+export const CURRENT_EXTENSION_BUILD = '50b6f6455e11'
 
 /**
  * A reported build is stale unless it matches exactly.

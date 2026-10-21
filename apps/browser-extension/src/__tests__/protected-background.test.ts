@@ -44,7 +44,7 @@ beforeEach(async () => {
       set:vi.fn(async(v:any)=>{Object.assign(sessionData,v)}),
     },local:{
       get:vi.fn(async(keys:string|string[])=>Object.fromEntries((Array.isArray(keys)?keys:[keys]).map(k=>[k,data[k]]))),
-      set:vi.fn(async(v:any)=>{Object.assign(data,structuredClone(v))}),remove:vi.fn(async(k:string)=>{delete data[k]}),
+      set:vi.fn(async(v:any)=>{Object.assign(data,structuredClone(v))}),remove:vi.fn(async(k:string|string[])=>{for(const key of Array.isArray(k)?k:[k])delete data[key]}),
     }},
     action:{setBadgeText:vi.fn(async()=>{}),setBadgeBackgroundColor:vi.fn(async()=>{})},
     debugger:{onDetach:event()},
@@ -479,5 +479,36 @@ describe('tab helpers honor cancellation across asynchronous Chrome calls', () =
     if (op === 'openTab' || op === 'switchTab') expect(mocks.executor.attach).toHaveBeenCalledOnce()
     if (op === 'closeTab') expect(chrome.tabs.remove).toHaveBeenCalledExactlyOnceWith(1)
     if (op === 'listTabs') expect(mocks.gate.registerFullTab).toHaveBeenCalledOnce()
+  })
+})
+
+describe('[COMP:ext/account-switching] pairing identity boundary', () => {
+  const nextPair = () => `x.${btoa(JSON.stringify({kind:'browser-ext-pair',userId:'other-user',workspaceId:'other-workspace',browserProfileId:'other-profile',exp:Date.now()/1000+600}))}.x`
+  it('stops and drains browser control before installing a different account pairing', async () => {
+    const pairingToken = nextPair(), reply = popup('configure', {relayUrl:'wss://relay.example',pairingToken})
+    await vi.waitFor(() => expect(reply).toHaveBeenCalledWith({ok:true}))
+    expect(mocks.gate.stop).toHaveBeenCalled(); expect(mocks.executor.detach).toHaveBeenCalled()
+    expect(data.pairingToken).toBe(pairingToken)
+    await mocks.relay.onSessionToken(token)
+    expect(data.pairingToken).toBe(pairingToken)
+    expect(data.sessionToken).toBeUndefined()
+  })
+  it('refuses an account change while protected material still needs cleanup', async () => {
+    data.protectedDisclosureLock={request,tabIds:[1],apiBase:'https://api.example',token}
+    const reply = popup('configure', {relayUrl:'wss://relay.example',pairingToken:nextPair()})
+    await vi.waitFor(() => expect(reply).toHaveBeenCalledWith(expect.objectContaining({ok:false,code:'protected_fill_denied'})))
+    expect(data.sessionToken).toBe(token); expect(data.pairingToken).toBeUndefined()
+    expect(data.protectedDisclosureLock).toBeTruthy(); expect(mocks.gate.stop).not.toHaveBeenCalled()
+  })
+})
+
+
+describe('[COMP:ext/account-switching] explicit disconnect', () => {
+  it('cannot be undone by a late session-token response from the old relay', async () => {
+    const reply = popup('disconnect')
+    await vi.waitFor(() => expect(reply).toHaveBeenCalledWith({ok:true}))
+    await mocks.relay.onSessionToken(token)
+    expect(data.sessionToken).toBeUndefined(); expect(data.pairingToken).toBeUndefined()
+    expect(mocks.gate.stop).toHaveBeenCalled()
   })
 })
