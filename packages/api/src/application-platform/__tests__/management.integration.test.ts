@@ -52,6 +52,14 @@ describe('[COMP:api/application-management] native human and Brian management',(
   expect((await command({kind:'status',appId,status:'suspended'}).set('Origin','https://foreign.example')).status).toBe(403)
   expect((await request(http).get(`${base}/management`).query({actorId:foreignId}).set('Authorization',`Bearer ${tokens.get(actorId)}`)).status).toBe(400)
  })
+ it('M01 native browser preflight accepts the client timezone header without exposing management data',async()=>{
+  const preflight=await request(http).options(`${base}/management`).set('Origin','https://host.example').set('Access-Control-Request-Method','GET').set('Access-Control-Request-Headers','authorization,x-client-timezone')
+  expect(preflight.status).toBe(204);expect(preflight.text).toBe('');expect(preflight.headers['access-control-allow-origin']).toBe('https://host.example');expect(preflight.headers['access-control-allow-headers'].toLowerCase().split(',').map((value:string)=>value.trim())).toEqual(expect.arrayContaining(['authorization','x-client-timezone']));expect(preflight.headers['cache-control']).toBe('no-store')
+  expect((await request(http).options(`${base}/management`).set('Origin','https://foreign.example')).status).toBe(403)
+  expect((await request(http).get(`${base}/management`).set('Origin','https://host.example').set('X-Client-Timezone','Asia/Shanghai')).status).toBe(401)
+  const current=await request(http).get(`${base}/management`).set('Origin','https://host.example').set('X-Client-Timezone','Asia/Shanghai').set('Authorization',`Bearer ${tokens.get(actorId)}`)
+  expect(current.status).toBe(200);expect(current.body.actor.userId).toBe(actorId);expect(current.body.readiness.qualified).toBe(false)
+ })
  it('M01 registration through HTTP and Brian reaches the same deployed module contract',async()=>{
   const body={kind:'register',input:{moduleKey:'records',name:'Fictional HTTP registration',mode:'api_client',origins:[],redirectUris:[]}}
   const human=await command(body),brian=await tool({...body,input:{...body.input,name:'Fictional Brian registration'}})

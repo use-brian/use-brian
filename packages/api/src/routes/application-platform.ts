@@ -40,7 +40,7 @@ export function applicationPlatformRoutes(options: ApplicationRoutesOptions): Ro
         res.vary('Origin')
         if (!management.origins.includes(req.headers.origin)) { res.status(403).json({ error: 'access_unavailable' }); return }
         res.set('Access-Control-Allow-Origin', req.headers.origin)
-        res.set('Access-Control-Allow-Headers', 'Authorization, Content-Type, MCP-Protocol-Version')
+        res.set('Access-Control-Allow-Headers', 'Authorization, Content-Type, MCP-Protocol-Version, X-Client-Timezone')
         res.set('Access-Control-Allow-Methods', 'GET, POST, OPTIONS')
       }
       if (req.method === 'OPTIONS') { res.sendStatus(204); return }
