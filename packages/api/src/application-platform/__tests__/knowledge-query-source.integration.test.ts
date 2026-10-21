@@ -115,7 +115,7 @@ describe.sequential('[COMP:api/application-persistence] actual retained-source K
    .rejects.toMatchObject({reason:'authority_changed',retrySafe:false})
   expect(extractions).toBe(0);expect(calls).toBe(0)
  })
- it('applies real catalog and row field roles before FTS, preserves a narrow summary read and a separate current query reader',async()=>{
+ for(const consumer of ['searchKnowledge','readKnowledgeEntry'] as const)it(`applies real catalog and row field roles for ${consumer}, preserves a narrow summary read and a separate current reader`,async()=>{
   fixture=await retainedKnowledgeFixture();const c=fixture
   configureConnectorSourceRuntimeFactory(c.source.factory,{instances:c.source.instances})
   const pool=c.f.pool
@@ -143,14 +143,14 @@ describe.sequential('[COMP:api/application-persistence] actual retained-source K
     VALUES($1,'{"kind":"native","moduleKey":"native"}','knowledge_entry','native')`,[c.f.workspaceId])
    for(const user of [c.f.ownerId,c.f.secondId])await pool.query(`INSERT INTO application_native_role_assignments(workspace_id,module_key,user_id,role_key,issued_by_user_id)
     VALUES($1,'native',$2,'body_reader',$3)`,[c.f.workspaceId,user,c.f.ownerId])
-   const tool=createKnowledgeTools(store).find(value=>value.name==='searchKnowledge')!
+   const tool=createKnowledgeTools(store).find(value=>value.name===consumer)!,input=consumer==='searchKnowledge'?{query:'fictional'}:{id:c.row.id}
    // The registered malformed role dictionary must hold, without native fallback.
-   const malformed=await tool.execute({query:'fictional'},await c.context(c.f.ownerId,true))
+   const malformed=await tool.execute(input,await c.context(c.f.ownerId,true))
    expect(malformed.isError).toBe(true);expect(JSON.stringify(malformed)).not.toContain(c.row.path)
    await pool.query(`UPDATE r3_knowledge_query_field_fixture SET fields=(SELECT jsonb_agg(
     CASE WHEN field->>'key'='content' THEN jsonb_set(field,'{read}','[["body_reader"]]'::jsonb) ELSE field END)
     FROM jsonb_array_elements(fields) field) WHERE workspace_id=$1`,[c.f.workspaceId])
-   const first=await c.context(c.f.ownerId,true),result=await tool.execute({query:'fictional'},first)
+   const first=await c.context(c.f.ownerId,true),result=await tool.execute(input,first)
    expect(JSON.stringify(result.data)).toContain(c.row.path)
    if(!result.scopeEvidence)throw new Error('Field-governed query must retain actual observations')
    first.scopeAccumulator.note(result.scopeEvidence)
@@ -172,9 +172,13 @@ describe.sequential('[COMP:api/application-persistence] actual retained-source K
      return result
     } as typeof client.query
    }
+   if(consumer==='readKnowledgeEntry'){
+    await pool.query("UPDATE application_native_role_assignments SET status='revoked' WHERE workspace_id=$1 AND user_id=$2 AND module_key='native'",[c.f.workspaceId,c.f.ownerId])
+    revoked=true
+   }
    getAppPool().on('acquire',trace)
    try{
-    const denied=await tool.execute({query:'fictional'},await c.context(c.f.ownerId,true))
+    const denied=await tool.execute(input,await c.context(c.f.ownerId,true))
     expect(denied.isError).toBe(true);expect(JSON.stringify(denied)).not.toContain(c.row.path)
     expect(revoked).toBe(true);expect(protectedComputations).toBe(0)
    }finally{getAppPool().off('acquire',trace);for(const [client,query] of originalQueries)client.query=query}
@@ -186,7 +190,7 @@ describe.sequential('[COMP:api/application-persistence] actual retained-source K
    await expect(generateTitle(provider,[{role:'user',get content(){extractions++;return JSON.stringify(result.data)}}],'fixture',()=>assertSourceModelInputAuthority(first)))
     .rejects.toMatchObject({reason:'authority_changed',retrySafe:false})
    expect(extractions).toBe(0);expect(calls).toBe(0)
-   const second=await c.context(c.f.secondId,true),current=await tool.execute({query:'fictional'},second)
+   const second=await c.context(c.f.secondId,true),current=await tool.execute(input,second)
    expect(JSON.stringify(current.data)).toContain(c.row.path)
    if(!current.scopeEvidence)throw new Error('Separate actual field-role reader must retain observations')
    second.scopeAccumulator.note(current.scopeEvidence)

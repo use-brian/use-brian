@@ -68,7 +68,11 @@ describe.sequential('[COMP:api/application-persistence] actual native knowledge 
   const c=await fixture(),row=await store.getById(c.first,c.row.id)
   expect(row).not.toBeNull()
   const canonical=(await c.f.pool.query("SELECT read_scope_source($1,'knowledge_entry',$2) AS source",[c.f.workspaceId,c.row.id])).rows[0].source
-  expect(boundScopeSources(row!)).toEqual([expect.objectContaining({workspaceId:c.f.workspaceId,resourceKind:'knowledge_entry',resourceId:c.row.id,
+  const sources=boundScopeSources(row!)
+  expect(sources.filter(source=>source.resourceKind==='knowledge_entry')).toEqual([expect.objectContaining({workspaceId:c.f.workspaceId,resourceKind:'knowledge_entry',resourceId:c.row.id,
    version:canonical.version,userId:null,assistantId:null,sensitivity:'internal',compartments:[],projectIds:[]})])
+  const fields=sources.filter(source=>source.resourceKind==='application_field');expect(fields).toHaveLength(1);expect(sources).toHaveLength(2)
+  expect((await c.f.pool.query(`SELECT resource_id,selection FROM application_field_resources WHERE workspace_id=$1 AND id=$2`,[c.f.workspaceId,fields[0].resourceId])).rows)
+   .toEqual([{resource_id:c.row.id,selection:'read'}])
  })
 })

@@ -166,7 +166,7 @@ function knowledgeSourceColumns(alias: '' | 'ke' | 'ke2' = '', contributors = "'
 }
 
 /** Native viewer proof is the actual non-owner transaction, never the owner pool. */
-async function queryKnowledgeViewer<T extends QueryResultRow>(ctx: AccessContext,sql: string,params?: unknown[],sourceRows = true,metadataOnly=false,point?:KnowledgePointFrame) {
+async function withNativeKnowledgeViewer<T>(ctx:AccessContext,capture:(client:PoolClient)=>Promise<T>){
   // A genuine or serialized application binding cannot become a native read.
   if (currentApplicationReadTransaction(ctx) || ctx.systemRead || !ctx.userId) throw new DerivedScopeError('scope_evidence_missing')
   return runWithAgentAccess({workspaceId:ctx.workspaceId,userId:ctx.userId,
@@ -177,11 +177,15 @@ async function queryKnowledgeViewer<T extends QueryResultRow>(ctx: AccessContext
     try {
       await client.query('BEGIN')
       await applyRLSGucs(client,ctx.userId)
-      const result=await queryKnowledgeRows<T>(client,sql,params,sourceRows,metadataOnly,point)
+      const result=await capture(client)
       await client.query('COMMIT')
       return result
     }finally{await rollbackAndRelease(client)}
   })
+}
+
+async function queryKnowledgeViewer<T extends QueryResultRow>(ctx:AccessContext,sql:string,params?:unknown[],sourceRows=true,metadataOnly=false,point?:KnowledgePointFrame){
+ return withNativeKnowledgeViewer(ctx,client=>queryKnowledgeRows<T>(client,sql,params,sourceRows,metadataOnly,point))
 }
 
 const KNOWLEDGE_FIELDS=['id','path','title','summary','content','tags','relatedIds','metadata','sourceId','sourceSha','createdBy','createdAt','updatedAt'] as const
@@ -193,6 +197,14 @@ const knowledgeCapture=z.object({row:z.record(z.unknown()).nullable(),sources:z.
  source:z.object({workspaceId:z.string().uuid(),userId:z.null(),assistantId:z.null(),sensitivity:z.enum(['public','internal','confidential']),
   compartments:z.array(z.string()),projectIds:z.array(z.string().uuid()),resourceKind:z.literal('knowledge_entry'),resourceId:z.string().uuid(),version:z.string().min(1),
   held:z.literal(false).optional(),validTo:z.null().optional(),retractedAt:z.null().optional()}).strict().optional()}).strict()
+
+const knowledgeNativeSource=querySource.extend({resourceKind:z.literal('knowledge_entry')})
+const knowledgePointCapture=z.object({values:z.record(z.unknown()),sources:z.array(querySource).min(1),nativeSources:z.array(knowledgeNativeSource).min(1),
+ policyVersion:z.string().regex(/^[a-f0-9]{64}$/),recordVersion:z.string().min(1)}).strict()
+const knowledgePointValues=z.object({id:z.string().uuid(),path:z.string(),title:z.string(),summary:z.string().nullable(),content:z.string(),
+ tags:z.array(z.string()),relatedIds:z.array(z.string().uuid()),metadata:z.record(z.unknown()),sourceId:z.string().uuid().nullable(),sourceSha:z.string().nullable(),
+ createdBy:z.string().uuid().nullable(),createdAt:z.string().datetime({offset:true}).transform(value=>new Date(value)),
+ updatedAt:z.string().datetime({offset:true}).transform(value=>new Date(value))}).strict()
 
 /** Query evaluation sees only a captured, current, field-admitted native domain. */
 async function queryKnowledgeCollection<T extends QueryResultRow>(ctx:AccessContext,authority:SessionContextAuthority|undefined,
@@ -348,18 +360,38 @@ async function queryKnowledgePoint(ctx:AccessContext,where:string,params:unknown
  const sources=boundScopeSources(candidate),root=sources.find(source=>source.resourceId===candidate.id&&source.resourceKind==='knowledge_entry')
  if(!root)throw new DerivedScopeError('scope_evidence_missing')
  if(candidate.requiresAuthority&&!authority)return{rows:[]}
- const values=[...params,candidate.id,root.version]
- const currentWhere=where.replace(/LIMIT 1\s*$/,'')+` AND ke.id=$${params.length+1}::uuid AND ke.scope_version::text=$${params.length+2} LIMIT 1`
- const statement=`SELECT ${entryColumnsClearanceScoped(3,relatedScopeSql)} ${currentWhere}`
- if(!authority)return queryKnowledgeViewer<KnowledgeEntry>(ctx,statement,values,true,false,{sources,requiresNoDerivation:true})
+ const capture=async(client:PoolClient,ceiling?:SessionContextAuthority['execution']['security']['ceiling'])=>{
+  const value=(await client.query<{value:unknown}>('SELECT read_native_knowledge_point_projection($1,$2,$3,$4) AS value',
+   [ctx.workspaceId,candidate.id,root.version,!authority])).rows[0]?.value
+  if(value===null)return{rows:[] as KnowledgeEntry[]}
+  const captured=knowledgePointCapture.parse(value),observed=[...captured.sources,...captured.nativeSources]
+  const own=captured.nativeSources.find(source=>source.resourceId===candidate.id)
+  if(captured.recordVersion!==root.version||!own||own.version!==root.version||observed.some(source=>source.workspaceId!==ctx.workspaceId))throw new DerivedScopeError('scope_evidence_missing')
+  if(authority&&ceiling){
+   await authority.execution.security.authority.assertCurrent()
+   await validateCallerScopeEvidence({sources:observed},ceiling,client)
+  }else{
+   const fields=captured.sources.filter(source=>source.resourceKind==='application_field')
+   const admitted=(await client.query<{allowed:boolean}>(`SELECT coalesce(bool_and(coalesce(
+    read_admitted_application_field_snapshot($1,source.id,source.version)->>'held'='false',false)),false) AS allowed
+    FROM unnest($2::uuid[],$3::text[]) source(id,version)`,[ctx.workspaceId,fields.map(source=>source.resourceId),fields.map(source=>source.version)])).rows[0]?.allowed
+   if(admitted!==true)throw new DerivedScopeError('scope_source_changed')
+  }
+  const values=knowledgePointValues.parse(captured.values)
+  if(values.id!==candidate.id)throw new DerivedScopeError('scope_evidence_missing')
+  const row:KnowledgeEntry={...values,workspaceId:ctx.workspaceId,scopeVersion:captured.recordVersion,
+   sensitivity:own.sensitivity,compartments:[...own.compartments],projectIds:[...own.projectIds]}
+  return{rows:bindScopeSources([bindScopeSources(row,observed)],observed)}
+ }
+ if(!authority)return withNativeKnowledgeViewer(ctx,client=>capture(client))
  return readRetainedContextFrame(authority,sources,async client=>{
   const requested=pinAccessCeiling({...authority.execution.security.access,
     ...Object.fromEntries(Object.entries(ctx).filter(([,value])=>value!==undefined))})
   const ceiling=intersectAccessCeilings(authority.execution.security.ceiling,requested)
   await runWithAgentAccess({...authority.execution.security.access,...ceiling},()=>applyRLSGucs(client,ctx.userId))
   await validateCallerScopeEvidence({sources:[...sources]},ceiling,client)
-  const result=await queryKnowledgeRows<KnowledgeEntry>(client,statement,values,true,false,{sources})
-  await validateCallerScopeEvidence({sources:[...sources]},ceiling,client)
+  const result=await capture(client,ceiling)
+  await validateCallerScopeEvidence({sources:[...sources,...boundScopeSources(result.rows)]},ceiling,client)
   return result
  })
 }
