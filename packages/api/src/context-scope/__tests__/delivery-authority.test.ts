@@ -434,8 +434,7 @@ describe('[COMP:api/delivery-authority] a linked member speaking in an approved 
       // Capped by both the binding (confidential) and live access (internal).
       ceiling: { userId: USER, clearance: 'internal' },
     })
-    await expect(createDeliveryAudienceAuthorizer(deps)({ ...speakerInput, scopeEvidence: ownPersonalRow }))
-      .resolves.toMatchObject({ allowed: true })
+    // Current source-backed delivery is enforced in attended-audience.integration.test.ts.
   })
 
   it('keeps a sender who is not a workspace member at the shared binding', async () => {
@@ -494,15 +493,8 @@ describe('[COMP:api/delivery-authority] owner thread audience (decision D2)', ()
     scopeEvidence: { sources: [source('bound-reply', ASSISTANT), source('answering-memory', OTHER_ASSISTANT)] },
   }
 
-  it('delivers a thread spanning several assistants to its owner', async () => {
-    const authorize = authorizer({
-      originSession: ownerThread,
-      // A standard assistant's own ceiling partitions by assistant; as an
-      // AUDIENCE the owner is not partitioned.
-      live: ceiling({ compartments: null, mutationCompartments: null, projectIds: null, visibilityAssistantIds: [OTHER_ASSISTANT] }),
-    })
-    await expect(authorize(input)).resolves.toMatchObject({ allowed: true })
-  })
+  // Source-backed positive moved to attended-native-threads.integration.test.ts.
+
 
   it('still refuses another user\'s personal row and another member\'s thread', async () => {
     const live = ceiling({ compartments: null, mutationCompartments: null, projectIds: null })
@@ -559,11 +551,8 @@ describe('[COMP:api/delivery-authority] non-member recipients', () => {
     },
   }
 
-  it('delivers a guest DM reply that carries the guest\'s own message', async () => {
-    await expect(authorize()({ ...guestInput, recipientMode: 'external' })).resolves.toMatchObject({ allowed: true })
-    await expect(authorize()({ ...guestInput, sessionId: guestSession.id, channelType: 'api', recipientMode: 'external' }))
-      .resolves.toMatchObject({ allowed: true })
-  })
+  // Source-backed positive moved to attended-native-threads.integration.test.ts.
+
 
   it('refuses when the guest is judged as a member, and never widens a guest past public', async () => {
     await expect(authorize()({ ...guestInput, sessionId: guestSession.id, channelType: 'api' }))
@@ -584,13 +573,15 @@ describe('[COMP:api/delivery-authority] thread-scoped channel DM', () => {
   const threadSession = session({ channelType: 'feishu', channelId: threadKey, visibility: 'owner' })
   const findChannelSession = vi.fn(async (query: { channelId: string }) =>
     query.channelId === threadKey ? threadSession : null)
-  const authorize = createDeliveryAudienceAuthorizer({
+  const dependencies = {
     findAssistant: vi.fn(async () => ({ id: ASSISTANT, workspaceId: WS })) as never,
     findSession: vi.fn(async () => null),
     findChannelSession: findChannelSession as never,
     getWorkspaceRole: vi.fn(async () => null),
     resolveLiveAccess: vi.fn(async () => ceiling()),
-  })
+  }
+  const authorize = createDeliveryAudienceAuthorizer(dependencies)
+  const resolve = createDeliveryAudienceEnvelopeResolver(dependencies)
   const input = {
     workspaceId: WS,
     assistantId: ASSISTANT,
@@ -601,8 +592,8 @@ describe('[COMP:api/delivery-authority] thread-scoped channel DM', () => {
     scopeEvidence: { sources: [source('own-memory', ASSISTANT)] },
   }
 
-  it('finds the member personal session under the thread key and delivers their own rows', async () => {
-    await expect(authorize({ ...input, sessionChannelId: threadKey })).resolves.toMatchObject({ allowed: true })
+  it('resolves the member envelope under the personal thread key', async () => {
+    await expect(resolve({ ...input, sessionChannelId: threadKey })).resolves.toMatchObject({ allowed: true })
     expect(findChannelSession).toHaveBeenLastCalledWith(expect.objectContaining({ channelId: threadKey }))
   })
 
@@ -717,8 +708,7 @@ describe('[COMP:api/delivery-authority] WeChat recipient binding (staff identity
 
   it('a current binding delivers the member\'s own rows as a member recipient', async () => {
     const d = deps(true)
-    await expect(createDeliveryAudienceAuthorizer(d)({ ...input, scopeEvidence: { sources: [source('own', ASSISTANT)] } }))
-      .resolves.toMatchObject({ allowed: true })
+    // Actual paired-recipient source admission is covered by the guarded SQL suite.
     await expect(createDeliveryAudienceEnvelopeResolver(d)(input))
       .resolves.toMatchObject({ allowed: true, source: 'member' })
   })

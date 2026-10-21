@@ -464,6 +464,33 @@ describe.sequential('[COMP:api/application-persistence] current attended compact
     expect(input).toContain(boundScopeSources(row)[0].resourceId)
   })
 
+  it('pins workspace admission before a context reader can hold the publication session', async () => {
+    fixture = await persistentContextFixture()
+    const f = fixture, { store, row } = await episode(f), current = await f.modelContext()
+    const blocker = await f.pool.connect(), probe = await f.pool.connect()
+    let pending: Promise<Awaited<ReturnType<typeof store.listBySession>>> | undefined
+    try {
+      await blocker.query('BEGIN')
+      const pid = (await blocker.query<{ pid: number }>('SELECT pg_backend_pid() AS pid')).rows[0].pid
+      await blocker.query('SELECT id FROM workspaces WHERE id=$1 FOR UPDATE', [f.workspaceId])
+      pending = store.listBySession(f.session.id, current)
+      // Observe a real wait, then prove the blocked reader has not taken the
+      // session row needed by the canonical publisher. No SQL/ACL substitute.
+      await expect.poll(async () => (await probe.query<{ waiting: boolean }>(
+        'SELECT EXISTS(SELECT 1 FROM pg_stat_activity WHERE $1=ANY(pg_blocking_pids(pid))) AS waiting', [pid])).rows[0].waiting,
+        { timeout: 2000 }).toBe(true)
+      await probe.query('BEGIN')
+      await probe.query('SELECT id FROM sessions WHERE id=$1 FOR UPDATE NOWAIT', [f.session.id])
+      await probe.query('ROLLBACK')
+      await blocker.query('COMMIT')
+      expect((await pending).map(episode => episode.id)).toEqual([row.id])
+    } finally {
+      await probe.query('ROLLBACK'); probe.release()
+      await blocker.query('ROLLBACK'); blocker.release()
+      await pending?.catch(() => undefined)
+    }
+  })
+
   it('serializes concurrent promotion and returns the same publication on retry without resurrection', async () => {
     fixture = await persistentContextFixture()
     const f = fixture, {store,row} = await episode(f)

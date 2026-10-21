@@ -35,7 +35,7 @@ function requireAuthority(authority: SessionContextAuthority | undefined): Sessi
   return authority
 }
 async function transaction<T>(authority: SessionContextAuthority, sources: readonly ScopeSource[], action: 'context' | 'retain',
-  owner: boolean, run: (client: PoolClient) => Promise<T>, writeSessionId?: string, writeWorkspace = false): Promise<T> {
+  owner: boolean, run: (client: PoolClient) => Promise<T>, writeSessionId?: string): Promise<T> {
   try {
     const { execution, accumulator } = requireAuthority(authority), before = JSON.stringify(accumulator.evidence)
     await execution.security.authority.assertCurrent()
@@ -58,11 +58,15 @@ async function transaction<T>(authority: SessionContextAuthority, sources: reado
           if (role?.bypass !== false) changed()
         }
         await applyRLSGucs(client, execution.security.access.userId)
+        // Native admission takes workspace SHARE locks too. Pin that row before
+        // any source/parent reader can lock a session: a reader holding a session
+        // while waiting for promotion's workspace lock otherwise forms a cycle.
+        // NO KEY UPDATE permits the trusted source pin's separate FK insert;
+        // createMemory upgrades only after those pin inserts have committed.
+        await client.query(owner
+          ? 'SELECT id FROM workspaces WHERE id=$1 FOR NO KEY UPDATE'
+          : 'SELECT id FROM workspaces WHERE id=$1 FOR SHARE', [execution.security.access.workspaceId])
         await applyApplicationRLSContext(client, execution)
-        // Promotion locks the workspace before parent/source rows. NO KEY UPDATE
-        // remains compatible with the trusted source pin's separate FK insert;
-        // createMemory upgrades after those pin inserts have committed.
-        if (writeWorkspace) await client.query('SELECT id FROM workspaces WHERE id=$1 FOR NO KEY UPDATE', [execution.security.access.workspaceId])
         // Take the publication lock before any native source reader takes a
         // parent SHARE lock. Two simultaneous upgrades otherwise deadlock.
         if(writeSessionId)await client.query('SELECT id FROM sessions WHERE id=$1 FOR UPDATE',[writeSessionId])
@@ -286,7 +290,7 @@ export async function promoteSessionContextEpisode(parentId: string, inputAuthor
     }, undefined, client)
     await client.query('UPDATE episodic_memories SET promoted_memory_id=$2 WHERE id=$1 AND scope_revision_id=$3', [parentId,memory.id,row.id])
     return { memoryId: memory.id, created: true }
-  }, execution.lifecycle.sessionId, true)
+  }, execution.lifecycle.sessionId)
   authority.accumulator.note({ sources: boundScopeSources(row) })
   return result
 }
