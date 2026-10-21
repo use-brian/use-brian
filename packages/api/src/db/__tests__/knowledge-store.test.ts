@@ -1,5 +1,5 @@
 import { describe, it, expect, vi, beforeEach } from 'vitest'
-import type { AccessContext } from '@use-brian/core'
+import type { AccessContext,Sensitivity,ScopeSource } from '@use-brian/core'
 
 const { resourceQuery } = vi.hoisted(() => ({ resourceQuery: vi.fn() }))
 vi.mock('../client.js', () => {
@@ -40,6 +40,15 @@ const ctxFor = (workspaceId: string, clearance?: 'public' | 'internal' | 'confid
   clearance,
 })
 
+// Existing query-shape fixtures include the canonical metadata now selected by
+// the reader. These unit rows confer no ACL proof; the non-owner integration
+// suite checks actual membership, holding and unchanged independent readers.
+function projected<T extends object>(row:T,id:string,sensitivity:Sensitivity) {
+  const source:ScopeSource={workspaceId:'t1',userId:null,assistantId:null,sensitivity,
+    compartments:[],projectIds:[],resourceKind:'knowledge_entry',resourceId:id,version:'1'}
+  return {...row,__knowledgeScopeSource:source}
+}
+
 beforeEach(() => {
   vi.clearAllMocks()
   published.length = 0
@@ -49,7 +58,7 @@ describe('[COMP:api/knowledge-store] entries', () => {
   describe('search', () => {
     it('uses FTS with plainto_tsquery and ranks by ts_rank_cd, scoped by team', async () => {
       mockQuery.mockResolvedValueOnce({
-        rows: [{ id: 'e1', path: 'products/vault', title: 'Vault', summary: 'Vault product' }],
+        rows: [projected({ id: 'e1', path: 'products/vault', title: 'Vault', summary: 'Vault product' },'e1','internal')],
         rowCount: 1,
       } as never)
 
@@ -68,7 +77,7 @@ describe('[COMP:api/knowledge-store] entries', () => {
 
   describe('listByPath', () => {
     it('lists top-level entries when pathPrefix is empty', async () => {
-      mockQuery.mockResolvedValueOnce({ rows: [{ path: 'index' }], rowCount: 1 } as never)
+      mockQuery.mockResolvedValueOnce({ rows: [projected({ path: 'index' },'fixture-index','internal')], rowCount: 1 } as never)
 
       await store.listByPath(ctxFor('t1'), '')
       const sql = mockQuery.mock.calls[0][0] as string
@@ -78,8 +87,8 @@ describe('[COMP:api/knowledge-store] entries', () => {
 
     it('lists direct children and index entry for a nested path', async () => {
       mockQuery
-        .mockResolvedValueOnce({ rows: [{ path: 'products/vault/fees' }], rowCount: 1 } as never)
-        .mockResolvedValueOnce({ rows: [{ path: 'products/vault' }], rowCount: 1 } as never)
+        .mockResolvedValueOnce({ rows: [projected({ path: 'products/vault/fees' },'fixture-fees','internal')], rowCount: 1 } as never)
+        .mockResolvedValueOnce({ rows: [projected({ path: 'products/vault' },'fixture-vault','internal')], rowCount: 1 } as never)
 
       const results = await store.listByPath(ctxFor('t1'), 'products/vault')
       expect(results).toHaveLength(2)
@@ -148,8 +157,8 @@ describe('[COMP:api/knowledge-store] entries', () => {
     it('returns id, path, summary, sensitivity scoped by team and clearance', async () => {
       mockQuery.mockResolvedValueOnce({
         rows: [
-          { id: 'e1', path: 'a', summary: 'Summary A', sensitivity: 'internal' },
-          { id: 'e2', path: 'b', summary: null, sensitivity: 'public' },
+          projected({ id: 'e1', path: 'a', summary: 'Summary A', sensitivity: 'internal' },'e1','internal'),
+          projected({ id: 'e2', path: 'b', summary: null, sensitivity: 'public' },'e2','public'),
         ],
         rowCount: 2,
       } as never)
@@ -168,8 +177,8 @@ describe('[COMP:api/knowledge-store] entries', () => {
     it('returns recent rows ordered by updated_at when query is empty', async () => {
       mockQuery.mockResolvedValueOnce({
         rows: [
-          { id: 'e1', title: 'A', path: 'a.md', sensitivity: 'public' },
-          { id: 'e2', title: 'B', path: 'b.md', sensitivity: 'internal' },
+          projected({ id: 'e1', title: 'A', path: 'a.md', sensitivity: 'public' },'e1','public'),
+          projected({ id: 'e2', title: 'B', path: 'b.md', sensitivity: 'internal' },'e2','internal'),
         ],
         rowCount: 2,
       } as never)
@@ -205,7 +214,7 @@ describe('[COMP:api/knowledge-store] entries', () => {
 
     it('runs FTS ranked by ts_rank_cd when query is non-empty', async () => {
       mockQuery.mockResolvedValueOnce({
-        rows: [{ id: 'e1', title: 'Pricing', path: 'platform/pricing.md', sensitivity: 'internal' }],
+        rows: [projected({ id: 'e1', title: 'Pricing', path: 'platform/pricing.md', sensitivity: 'internal' },'e1','internal')],
         rowCount: 1,
       } as never)
 
@@ -224,8 +233,8 @@ describe('[COMP:api/knowledge-store] entries', () => {
     it('returns ranked rows with clearance-scoped relatedIds', async () => {
       mockQuery.mockResolvedValueOnce({
         rows: [
-          { id: 'e1', title: 'Identity', path: 'features/identity.md', sensitivity: 'confidential', relatedIds: ['e2'] },
-          { id: 'e2', title: 'Memory', path: 'features/memory.md', sensitivity: 'internal', relatedIds: ['e1'] },
+          projected({ id: 'e1', title: 'Identity', path: 'features/identity.md', sensitivity: 'confidential', relatedIds: ['e2'] },'e1','confidential'),
+          projected({ id: 'e2', title: 'Memory', path: 'features/memory.md', sensitivity: 'internal', relatedIds: ['e1'] },'e2','internal'),
         ],
         rowCount: 2,
       } as never)
@@ -392,7 +401,7 @@ describe('[COMP:api/knowledge-store] per-assistant source scoping', () => {
 
   describe('read-path filter', () => {
     it('listByPath top-level excludes disabled sources and passes assistantId', async () => {
-      mockQuery.mockResolvedValueOnce({ rows: [{ path: 'index' }], rowCount: 1 } as never)
+      mockQuery.mockResolvedValueOnce({ rows: [projected({ path: 'index' },'fixture-index','internal')], rowCount: 1 } as never)
       await store.listByPath(ctxFor('t1'), '')
       const sql = mockQuery.mock.calls[0][0] as string
       expect(sql).toContain('assistant_disabled_knowledge_sources')

@@ -30,12 +30,13 @@
  * docs/architecture/platform/sensitivity.md.
  */
 
-import type { AccessContext, Sensitivity } from '@use-brian/core'
+import {bindScopeSource,bindScopeSources,boundScopeSources,DerivedScopeError,type ScopeSource,type AccessContext,type Sensitivity} from '@use-brian/core'
 import type { KnowledgeLifecycleAction, KnowledgeWriteActor } from '@use-brian/core'
 import { query, getPool, getAppPool, applyRLSGucs, rollbackAndRelease } from './client.js'
 import { randomUUID } from 'node:crypto'
 import type { PoolClient, QueryResultRow } from 'pg'
-import { currentAgentAccess } from './agent-access-context.js'
+import { currentAgentAccess,runWithAgentAccess } from './agent-access-context.js'
+import {currentApplicationReadTransaction} from '../application-platform/execution-context.js'
 import { readAdmissionPolicy } from '../workspace-access/admission-policy-read.js'
 import { admitKnowledgeWrite, lockKnowledgePrior, admitKnowledgeSourceConfiguration, type KnowledgeSourceBindingInput, type KnowledgeConfigureAuthority } from '../workspace-access/knowledge-create-admission.js'
 import { WorkspaceAccessError } from '../workspace-access/policy.js'
@@ -151,9 +152,43 @@ const ENTRY_COLUMNS = `
  * `$clearanceIdx` is the 1-based parameter position of the clearance value
  * in the enclosing query.
  */
+/** Canonical metadata from the same SQL snapshot as the selected payload. */
+function knowledgeSourceColumns(alias = ''): string {
+  const p = alias ? `${alias}.` : ''
+  return `jsonb_build_object('workspaceId',${p}workspace_id,'userId',NULL,'assistantId',NULL,
+    'sensitivity',${p}sensitivity,'compartments',${p}compartments,'projectIds',${p}project_ids,
+    'resourceKind','knowledge_entry','resourceId',${p}id,'version',${p}scope_version::text) AS "__knowledgeScopeSource"`
+}
+
+/** Native viewer proof is the actual non-owner transaction, never the owner pool. */
+async function queryKnowledgeViewer<T extends QueryResultRow>(ctx: AccessContext,sql: string,params?: unknown[],sourceRows = true) {
+  // A genuine or serialized application binding cannot become a native read.
+  if (currentApplicationReadTransaction(ctx) || ctx.systemRead || !ctx.userId) throw new DerivedScopeError('scope_evidence_missing')
+  return runWithAgentAccess({workspaceId:ctx.workspaceId,userId:ctx.userId,
+    clearance:ctx.clearance ?? currentAgentAccess()?.clearance ?? 'confidential',
+    compartments:ctx.compartments,projectIds:ctx.projectIds,visibilityAssistantIds:ctx.visibilityAssistantIds,
+    departmentRead:ctx.departmentRead,sharedAudience:ctx.sharedAudience},async()=>{
+    const client=await getAppPool().connect()
+    try {
+      await client.query('BEGIN')
+      await applyRLSGucs(client,ctx.userId)
+      const result=await client.query<T & {__knowledgeScopeSource?:ScopeSource}>(
+        sql.replace(/\bFROM\s+knowledge_entries\b/gi,'FROM public.knowledge_entries'),params)
+      for(const row of result.rows){
+        const source=row.__knowledgeScopeSource
+        delete row.__knowledgeScopeSource
+        if(sourceRows){if(!source)throw new DerivedScopeError('scope_evidence_missing');bindScopeSource(row,source)}
+      }
+      if(sourceRows)bindScopeSources(result.rows,result.rows.flatMap(row=>boundScopeSources(row)))
+      await client.query('COMMIT')
+      return result
+    }finally{await rollbackAndRelease(client)}
+  })
+}
+
 function entryColumnsClearanceScoped(clearanceIdx: number, relatedScopeSql = ''): string {
   return `
-    ke.id, ke.workspace_id AS "workspaceId",
+    ke.id, ke.workspace_id AS "workspaceId", ${knowledgeSourceColumns('ke')},
     ke.path, ke.title, ke.summary, ke.content, ke.tags,
     COALESCE((
       SELECT array_agg(ke2.id)
@@ -487,7 +522,7 @@ export function createDbKnowledgeStore(): KnowledgeStore {
       if (appliesDenylist(ctx)) params.push(ctx.assistantId)
       const scope = contentScopeProjection(ctx, params.length + 1)
       params.push(...scope.params)
-      const result = await query<KnowledgeEntry>(
+      const result = await queryKnowledgeViewer<KnowledgeEntry>(ctx,
         `SELECT ${entryColumnsClearanceScoped(4, scope.sql('ke2'))},
                 ts_rank_cd(ke.search_vector, plainto_tsquery('english', $2)) AS rank
          FROM knowledge_entries ke
@@ -515,7 +550,7 @@ export function createDbKnowledgeStore(): KnowledgeStore {
         if (appliesDenylist(ctx)) params.push(ctx.assistantId)
         const scope = contentScopeProjection(ctx, params.length + 1)
         params.push(...scope.params)
-        const result = await query<KnowledgeEntry & { childCount: string }>(
+        const result = await queryKnowledgeViewer<KnowledgeEntry & { childCount: string }>(ctx,
           `SELECT ${entryColumnsClearanceScoped(2, scope.sql('ke2'))},
                   (SELECT COUNT(*) FROM knowledge_entries ke2
                    WHERE ke2.workspace_id = ke.workspace_id
@@ -531,7 +566,7 @@ export function createDbKnowledgeStore(): KnowledgeStore {
            ORDER BY ke.path ASC`,
           params,
         )
-        return result.rows.map((r) => ({ ...r, childCount: Number(r.childCount) }))
+        return result.rows.map((r) => bindScopeSources({ ...r, childCount: Number(r.childCount) },boundScopeSources(r)))
       }
 
       const prefix = pathPrefix.replace(/\/+$/, '') + '/'
@@ -541,7 +576,7 @@ export function createDbKnowledgeStore(): KnowledgeStore {
       if (appliesDenylist(ctx)) childParams.push(ctx.assistantId)
       const childScope = contentScopeProjection(ctx, childParams.length + 1)
       childParams.push(...childScope.params)
-      const result = await query<KnowledgeEntry & { childCount: string }>(
+      const result = await queryKnowledgeViewer<KnowledgeEntry & { childCount: string }>(ctx,
         `SELECT ${entryColumnsClearanceScoped(3, childScope.sql('ke2'))},
                 (SELECT COUNT(*) FROM knowledge_entries ke2
                  WHERE ke2.workspace_id = ke.workspace_id
@@ -559,13 +594,13 @@ export function createDbKnowledgeStore(): KnowledgeStore {
          ORDER BY ke.path ASC`,
         childParams,
       )
-      const children = result.rows.map((r) => ({ ...r, childCount: Number(r.childCount) }))
+      const children = result.rows.map((r) => bindScopeSources({ ...r, childCount: Number(r.childCount) },boundScopeSources(r)))
       // Also include the index entry at the pathPrefix itself
       const indexParams: unknown[] = [ctx.workspaceId, pathPrefix.replace(/\/+$/, ''), clearance]
       if (appliesDenylist(ctx)) indexParams.push(ctx.assistantId)
       const indexScope = contentScopeProjection(ctx, indexParams.length + 1)
       indexParams.push(...indexScope.params)
-      const indexEntry = await query<KnowledgeEntry>(
+      const indexEntry = await queryKnowledgeViewer<KnowledgeEntry>(ctx,
         `SELECT ${entryColumnsClearanceScoped(3, indexScope.sql('ke2'))} FROM knowledge_entries ke
          WHERE ke.workspace_id = $1 AND ke.path = $2
            AND sensitivity_rank(ke.sensitivity) <= sensitivity_rank($3)
@@ -573,7 +608,7 @@ export function createDbKnowledgeStore(): KnowledgeStore {
            ${indexScope.sql('ke')}`,
         indexParams,
       )
-      return [...indexEntry.rows.map((r) => ({ ...r, childCount: 0 })), ...children]
+      return [...indexEntry.rows.map((r) => bindScopeSources({ ...r, childCount: 0 },boundScopeSources(r))), ...children]
     },
 
     async getById(ctx, id) {
@@ -586,7 +621,7 @@ export function createDbKnowledgeStore(): KnowledgeStore {
       if (appliesDenylist(ctx)) params.push(ctx.assistantId)
       const scope = contentScopeProjection(ctx, params.length + 1)
       params.push(...scope.params)
-      const result = await query<KnowledgeEntry>(
+      const result = await queryKnowledgeViewer<KnowledgeEntry>(ctx,
         `SELECT ${entryColumnsClearanceScoped(3, scope.sql('ke2'))} FROM knowledge_entries ke
          WHERE ke.id::text LIKE $1 || '%'
            AND ke.workspace_id = $2
@@ -606,7 +641,7 @@ export function createDbKnowledgeStore(): KnowledgeStore {
       if (appliesDenylist(ctx)) params.push(ctx.assistantId)
       const scope = contentScopeProjection(ctx, params.length + 1)
       params.push(...scope.params)
-      const result = await query<KnowledgeEntry>(
+      const result = await queryKnowledgeViewer<KnowledgeEntry>(ctx,
         `SELECT ${entryColumnsClearanceScoped(3, scope.sql('ke2'))} FROM knowledge_entries ke
          WHERE ke.workspace_id = $1 AND ke.path = $2
            AND sensitivity_rank(ke.sensitivity) <= sensitivity_rank($3)
@@ -805,8 +840,8 @@ export function createDbKnowledgeStore(): KnowledgeStore {
       const params: unknown[] = [ctx.workspaceId, clearance]
       const scope = contentScopeProjection(ctx, 3)
       params.push(...scope.params)
-      const result = await query<{ id: string; path: string; summary: string | null; sensitivity: Sensitivity; compartments: string[]; projectIds: string[] }>(
-        `SELECT id, path, summary, sensitivity, compartments, project_ids AS "projectIds" FROM knowledge_entries
+      const result = await queryKnowledgeViewer<{ id: string; path: string; summary: string | null; sensitivity: Sensitivity; compartments: string[]; projectIds: string[] }>(ctx,
+        `SELECT ${knowledgeSourceColumns()}, id, path, summary, sensitivity, compartments, project_ids AS "projectIds" FROM knowledge_entries
          WHERE workspace_id = $1
            AND sensitivity_rank(sensitivity) <= sensitivity_rank($2)
            ${scope.sql()}
@@ -824,8 +859,8 @@ export function createDbKnowledgeStore(): KnowledgeStore {
         const params: unknown[] = [ctx.workspaceId, clearance, limit, skip]
         const scope = contentScopeProjection(ctx, 5)
         params.push(...scope.params)
-        const result = await query<{ id: string; title: string; path: string; sensitivity: Sensitivity; compartments: string[]; projectIds: string[] }>(
-          `SELECT id, title, path, sensitivity, compartments, project_ids AS "projectIds" FROM knowledge_entries
+        const result = await queryKnowledgeViewer<{ id: string; title: string; path: string; sensitivity: Sensitivity; compartments: string[]; projectIds: string[] }>(ctx,
+          `SELECT ${knowledgeSourceColumns()}, id, title, path, sensitivity, compartments, project_ids AS "projectIds" FROM knowledge_entries
            WHERE workspace_id = $1
              AND sensitivity_rank(sensitivity) <= sensitivity_rank($2)
              ${scope.sql()}
@@ -838,8 +873,8 @@ export function createDbKnowledgeStore(): KnowledgeStore {
       const params: unknown[] = [ctx.workspaceId, trimmed, clearance, limit, skip]
       const scope = contentScopeProjection(ctx, 6)
       params.push(...scope.params)
-      const result = await query<{ id: string; title: string; path: string; sensitivity: Sensitivity; compartments: string[]; projectIds: string[] }>(
-        `SELECT id, title, path, sensitivity, compartments, project_ids AS "projectIds" FROM knowledge_entries
+      const result = await queryKnowledgeViewer<{ id: string; title: string; path: string; sensitivity: Sensitivity; compartments: string[]; projectIds: string[] }>(ctx,
+        `SELECT ${knowledgeSourceColumns()}, id, title, path, sensitivity, compartments, project_ids AS "projectIds" FROM knowledge_entries
          WHERE workspace_id = $1
            AND search_vector @@ plainto_tsquery('english', $2)
            AND sensitivity_rank(sensitivity) <= sensitivity_rank($3)
@@ -856,7 +891,7 @@ export function createDbKnowledgeStore(): KnowledgeStore {
       const params: unknown[] = [ctx.workspaceId, clearance, limit]
       const scope = contentScopeProjection(ctx, 4)
       params.push(...scope.params)
-      const result = await query<{
+      const result = await queryKnowledgeViewer<{
         id: string
         title: string
         path: string
@@ -864,9 +899,9 @@ export function createDbKnowledgeStore(): KnowledgeStore {
         compartments: string[]
         projectIds: string[]
         relatedIds: string[]
-      }>(
+      }>(ctx,
         `SELECT
-           ke.id, ke.title, ke.path, ke.sensitivity, ke.compartments,
+           ${knowledgeSourceColumns('ke')}, ke.id, ke.title, ke.path, ke.sensitivity, ke.compartments,
            ke.project_ids AS "projectIds",
            COALESCE((
              SELECT array_agg(ke2.id)
@@ -893,8 +928,8 @@ export function createDbKnowledgeStore(): KnowledgeStore {
       const params: unknown[] = [ctx.workspaceId, ids, clearance]
       const scope = contentScopeProjection(ctx, 4)
       params.push(...scope.params)
-      const result = await query<{ id: string; title: string; path: string; sensitivity: Sensitivity; compartments: string[]; projectIds: string[] }>(
-        `SELECT id, title, path, sensitivity, compartments, project_ids AS "projectIds" FROM knowledge_entries
+      const result = await queryKnowledgeViewer<{ id: string; title: string; path: string; sensitivity: Sensitivity; compartments: string[]; projectIds: string[] }>(ctx,
+        `SELECT ${knowledgeSourceColumns()}, id, title, path, sensitivity, compartments, project_ids AS "projectIds" FROM knowledge_entries
          WHERE workspace_id = $1
            AND id = ANY($2::uuid[])
            AND sensitivity_rank(sensitivity) <= sensitivity_rank($3)
@@ -910,15 +945,15 @@ export function createDbKnowledgeStore(): KnowledgeStore {
       const params: unknown[] = [ctx.workspaceId, clearance]
       const scope = contentScopeProjection(ctx, 3)
       params.push(...scope.params)
-      const result = await query<{ path: string }>(
-        `SELECT path FROM knowledge_entries
+      const result = await queryKnowledgeViewer<{ path: string }>(ctx,
+        `SELECT ${knowledgeSourceColumns()}, path FROM knowledge_entries
          WHERE workspace_id = $1
            AND sensitivity_rank(sensitivity) <= sensitivity_rank($2)
            ${scope.sql()}
          ORDER BY path ASC`,
         params,
       )
-      return result.rows.map((r) => r.path)
+      return bindScopeSources(result.rows.map((r) => r.path),result.rows.flatMap(row=>boundScopeSources(row)))
     },
 
     async listPathsSystem(workspaceId) {
@@ -936,14 +971,14 @@ export function createDbKnowledgeStore(): KnowledgeStore {
       const params: unknown[] = [ctx.workspaceId, clearance]
       const scope = contentScopeProjection(ctx, 3)
       params.push(...scope.params)
-      const result = await query<{ exists: boolean }>(
+      const result = await queryKnowledgeViewer<{ exists: boolean }>(ctx,
         `SELECT EXISTS(
            SELECT 1 FROM knowledge_entries
            WHERE workspace_id = $1
              AND sensitivity_rank(sensitivity) <= sensitivity_rank($2)
              ${scope.sql()}
          ) AS exists`,
-        params,
+        params, false,
       )
       return result.rows[0]?.exists ?? false
     },
