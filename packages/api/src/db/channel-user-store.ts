@@ -259,7 +259,7 @@ export async function fetchTelegramProfile(telegramUserId: string, botToken: str
 /**
  * Resolve a channel provider user to a platform user.
  *
- * 1. Check cache (24h TTL)
+ * 1. Check cache (24h TTL), except Feishu's fresh per-turn profile snapshot
  * 2. Fetch profile from provider API (email + display name)
  * 3. Match by email → existing user, or create shadow user
  * 4. Ensure assistant_members row
@@ -274,8 +274,9 @@ export async function resolveChannelUser(
   assistantId: string,
   fetchProfile: () => Promise<ProviderProfile>,
 ): Promise<ResolvedChannelUser> {
-  // 1. Check cache
-  const cached = await store.resolve(provider, providerUserId, assistantId)
+  // Feishu shares one fresh profile with sender display enrichment. A cached
+  // account must not win over that turn's corrected or newly visible email.
+  const cached = provider === 'feishu' ? null : await store.resolve(provider, providerUserId, assistantId)
   if (cached) {
     // Fetch the user from DB — they may have been promoted since caching
     const result = await query<User>(
@@ -287,18 +288,9 @@ export async function resolveChannelUser(
       [cached.userId],
     )
     if (result.rows[0]) {
-      const user = result.rows[0]
-      // An email-bearing shadow is still an unmatched identity. Recheck it
-      // promptly so a provider correction or later signup can reach the real
-      // account instead of retaining the original mismatch for 24 hours.
-      const refreshFeishuShadow = provider === 'feishu'
-        && user.authProvider === 'channel'
-        && Date.now() - cached.cachedAt.getTime() >= 5 * 60 * 1000
-      if (!refreshFeishuShadow) {
-        return { user, isIdentified: cached.email !== null }
-      }
+      return { user: result.rows[0], isIdentified: cached.email !== null }
     }
-    // Deleted users and provisional Feishu shadows fall through to re-resolve.
+    // Deleted user — fall through to re-resolve.
   }
 
   // 2. Fetch profile from provider

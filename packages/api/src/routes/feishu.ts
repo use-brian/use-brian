@@ -584,6 +584,8 @@ export function feishuRoutes(options: FeishuRouteOptions): Router {
             )
             if (
               linked?.userId
+              // An automatic email heal is profile-derived, not a claimed link.
+              && linked.providerMetadata?.reason !== 'email-discovery'
               && await channelLinkBindsHere(
                 linked,
                 assistantId,
@@ -807,6 +809,8 @@ export function feishuRoutes(options: FeishuRouteOptions): Router {
         const linked = await options.linkedAccountStore.findByProvider('feishu', incoming.userId)
         if (
           linked?.userId
+          // An automatic email heal is profile-derived, not a claimed link.
+          && linked.providerMetadata?.reason !== 'email-discovery'
           && await channelLinkBindsHere(
             linked,
             routing.assistantId,
@@ -842,9 +846,10 @@ export function feishuRoutes(options: FeishuRouteOptions): Router {
       }
     }
 
-    // Linking authenticates the account but must not hide its provider label.
-    // This metadata never changes the account, its email, or its authority.
-    if (isIdentified && !senderName) {
+    // Use the identity lookup's same profile snapshot for its display label,
+    // even when the bridge supplied a cached roster name. Explicit links only
+    // need this display-only lookup when the bridge had no name.
+    if (senderProfile || (isIdentified && !senderName)) {
       incoming = { ...incoming, senderDisplay: (await getSenderProfile()).displayName ?? undefined }
     }
 
