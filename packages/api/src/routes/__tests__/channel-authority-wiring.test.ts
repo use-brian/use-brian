@@ -34,7 +34,9 @@ describe('[COMP:api/channel-live-authority] exact destination authority wiring',
   it('keeps hidden session state outside an isolated public audience', () => {
     const source = readFileSync(new URL('../channel-pipeline.ts', import.meta.url), 'utf8')
     expect(source).toContain('if (sessionStateStore && !isolatedAudience)')
-    expect(source).toContain('if (sessionStateStore && isIdentified && !isolatedAudience)')
+    const postLoop = source.match(/sink: \{ kind: 'adapter', afterLoop: async \(\) => \{([\s\S]*?)const result = await runTurnSessionStateDiff\(/)?.[1] ?? ''
+    expect(postLoop).toMatch(/await flushBufferedTurns\([^\n]+\)\s+if \(!sessionStateStore \|\| !isIdentified \|\| isolatedAudience\) return\s+try \{/)
+    expect(source.match(/runTurnSessionStateDiff\(/g)).toHaveLength(1)
     expect(source).toContain('maximumAccessCurrent: currentAudienceMaximum')
     expect(source).toContain('persistSessionSummary: !room && !isolatedAudience')
     expect(source).toContain('getClaimsForLatestAssistantMessage(session.id, true)')
