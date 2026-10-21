@@ -885,6 +885,7 @@ export function createDbKnowledgeStore(): KnowledgeStore {
 
     async create(params,authority) {
       params=structuredClone(params)
+      const writeFields=['path','title','content',...(['summary','tags','metadata'] as const).filter(field=>params[field]!==undefined)]
       if(!authority&&(params.derivation||params.writtenBy==='system'))throw new DerivedScopeError('scope_evidence_missing')
       let derivedFloor:KnowledgeSourceBindingInput|undefined
       const write=async(client:PoolClient,ready:boolean,actor:string)=>{
@@ -920,8 +921,13 @@ export function createDbKnowledgeStore(): KnowledgeStore {
             sensitivity:params.sensitivity,compartments:params.compartments??[],projectIds:params.projectIds??[]},execution.security.access.userId)
           derivedFloor={sensitivity:floor.sensitivity,compartments:floor.compartments,projectIds:floor.projectIds}
           params={...params,sensitivity:derived.sensitivity,compartments:derived.compartments,projectIds:derived.projectIds}
+          const fieldsAllowed=async(id?:string,version?:string)=>(await client.query<{allowed:boolean}>(
+            'SELECT native_knowledge_creation_fields_allowed($1,$2,$3,$4) AS allowed',
+            [params.workspaceId,writeFields,id??null,version??null])).rows[0]?.allowed===true
+          if(!await fieldsAllowed())throw new WorkspaceAccessError('access_unavailable')
           const policy=await readAdmissionPolicy(client,params.workspaceId),created=await write(client,policy?.setupState==='ready',execution.security.access.userId)
           const row=created.rows[0]
+          if(!await fieldsAllowed(row.id,row.scopeVersion))throw new WorkspaceAccessError('access_unavailable')
           const root=(await client.query<{source:ScopeSource}>("SELECT read_entity_derivation_source($1,'knowledge_entry',$2) AS source",[params.workspaceId,row.id])).rows[0]?.source
           if(!root||root.resourceId!==row.id||root.version!==row.scopeVersion)throw new DerivedScopeError('scope_evidence_missing')
           await recordDerivedResource(client,derivation,root,execution.security.access.userId)

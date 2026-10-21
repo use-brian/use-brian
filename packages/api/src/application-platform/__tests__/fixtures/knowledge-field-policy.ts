@@ -1,9 +1,9 @@
 import type {persistentContextFixture} from './persistent-context.js'
 const {assertLocalFixture}=await import(new URL('../../../../../../scripts/crm/local-fixture.mjs',import.meta.url).href)
 type Fixture=Pick<Awaited<ReturnType<typeof persistentContextFixture>>,'pool'|'workspaceId'|'ownerId'|'secondId'>
-type Role='body_reader'|'target_body_reader'|'identity_reader'
+type Role='body_reader'|'target_body_reader'|'identity_reader'|'body_writer'
 /** Actual native metadata dictionaries and role rows, never an admission stub. */
-export async function knowledgeFieldPolicyFixture(f:Fixture){
+export async function knowledgeFieldPolicyFixture(f:Fixture,options:{requireBodyWriter?:boolean}={}){
  await assertLocalFixture();const pool=f.pool;let installed=false
  const cleanup=async()=>{
   await pool.query("DELETE FROM application_native_resource_owners WHERE workspace_id=$1 AND module_key='native'",[f.workspaceId])
@@ -30,10 +30,10 @@ export async function knowledgeFieldPolicyFixture(f:Fixture){
     WHERE k.workspace_id=w AND k.id=i::uuid $$;
    REVOKE ALL ON FUNCTION r3_knowledge_point_policy_catalog(uuid,jsonb,text),r3_knowledge_point_policy_record(uuid,jsonb,text,text) FROM PUBLIC`)
   await pool.query(`INSERT INTO r3_knowledge_point_policy_fields(workspace_id,fields) SELECT $1,jsonb_agg(jsonb_build_object('key',key,
-   'read',CASE WHEN key='content' THEN '[["body_reader"]]'::jsonb ELSE '[]'::jsonb END,'write','[]'::jsonb,
-   'releaseReadTo','[]'::jsonb,'releaseWriteTo','[]'::jsonb)) FROM unnest(application_knowledge_field_keys()) key`,[f.workspaceId])
+   'read',CASE WHEN key='content' THEN '[["body_reader"]]'::jsonb ELSE '[]'::jsonb END,'write',CASE WHEN key='content' AND $2::boolean THEN '[["body_writer"]]'::jsonb ELSE '[]'::jsonb END,
+   'releaseReadTo','[]'::jsonb,'releaseWriteTo','[]'::jsonb)) FROM unnest(application_knowledge_field_keys()) key`,[f.workspaceId,options.requireBodyWriter===true])
   await pool.query(`INSERT INTO application_native_field_contracts(module_key,contract_version,role_keys,metadata_reader,catalog_reader)
-   VALUES('native','1',ARRAY['body_reader','target_body_reader','identity_reader'],'r3_knowledge_point_policy_record(uuid,jsonb,text,text)'::regprocedure,
+   VALUES('native','1',ARRAY['body_reader','target_body_reader','identity_reader','body_writer'],'r3_knowledge_point_policy_record(uuid,jsonb,text,text)'::regprocedure,
     'r3_knowledge_point_policy_catalog(uuid,jsonb,text)'::regprocedure)`);installed=true
   await pool.query(`INSERT INTO application_native_resource_owners(workspace_id,origin,resource_type,module_key)
    VALUES($1,'{"kind":"native","moduleKey":"native"}','knowledge_entry','native')`,[f.workspaceId])
@@ -44,7 +44,14 @@ export async function knowledgeFieldPolicyFixture(f:Fixture){
    SELECT workspace_id,$2,(SELECT jsonb_agg(CASE WHEN value->>'key'=$3 THEN jsonb_set(value,'{read}',jsonb_build_array(jsonb_build_array($4::text))) ELSE value END)
     FROM jsonb_array_elements(fields)) FROM r3_knowledge_point_policy_fields WHERE workspace_id=$1
    ON CONFLICT(resource_id) DO UPDATE SET fields=EXCLUDED.fields`,[f.workspaceId,id,field,role])}
+  const protectWrite=async(id:string,field:'content'|'tags',role:Role)=>{await pool.query(`INSERT INTO r3_knowledge_point_policy_overrides(workspace_id,resource_id,fields)
+   SELECT workspace_id,$2,(SELECT jsonb_agg(CASE WHEN value->>'key'=$3 THEN jsonb_set(value,'{write}',jsonb_build_array(jsonb_build_array($4::text))) ELSE value END)
+    FROM jsonb_array_elements(fields)) FROM r3_knowledge_point_policy_fields WHERE workspace_id=$1
+   ON CONFLICT(resource_id) DO UPDATE SET fields=EXCLUDED.fields`,[f.workspaceId,id,field,role])}
+  const protectCatalogWrite=async(field:'content'|'tags',role:Role)=>{await pool.query(`UPDATE r3_knowledge_point_policy_fields SET fields=(
+   SELECT jsonb_agg(CASE WHEN value->>'key'=$2 THEN jsonb_set(value,'{write}',jsonb_build_array(jsonb_build_array($3::text))) ELSE value END)
+    FROM jsonb_array_elements(fields)) WHERE workspace_id=$1`,[f.workspaceId,field,role])}
   for(const user of [f.ownerId,f.secondId])await grant(user,'body_reader')
-  return{grant,revoke,protect,cleanup}
+  return{grant,revoke,protect,protectWrite,protectCatalogWrite,cleanup}
  }catch(error){await cleanup();throw error}
 }
