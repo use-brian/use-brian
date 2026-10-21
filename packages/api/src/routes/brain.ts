@@ -471,7 +471,7 @@ export function brainRoutes(deps: {
   entitiesStore: EntityStore
   entityLinksStore: EntityLinksStore
   retrievalStore: Pick<RetrievalStore, 'search'>
-  knowledgeStore: Pick<KnowledgeStore, 'listForBrain' | 'getById' | 'listForGraph' | 'listByIds' | 'getSource'>
+  knowledgeStore: Pick<KnowledgeStore, 'listForBrain' | 'getById' | 'listForGraph' | 'listByIds' | 'getSource'> & Partial<Pick<KnowledgeStore,'getSourceForViewer'>>
   // Procedural-brain graph nodes (2026-06-10). Both optional — without them
   // the graph renders entities + knowledge exactly as before (no skill /
   // connector nodes, no crash). Existing tests + call sites omit them.
@@ -1485,15 +1485,17 @@ export function brainRoutes(deps: {
       // Both relations and source provenance are protected projections.
       // Unavailable proof cannot become an ordinary empty relation or a
       // missing-source card. Authoritative empty results keep their evidence.
+      if(entry.sourceId&&!knowledgeStore.getSourceForViewer)throw new DerivedScopeError('scope_evidence_missing')
       const [related, source] = await Promise.all([
         (entry.relatedIds?.length ?? 0) > 0
           ? knowledgeStore.listByIds(nativeCtx, entry.relatedIds,authority)
           : Promise.resolve([]),
         entry.sourceId
-          ? knowledgeStore.getSource(entry.sourceId)
+          ? knowledgeStore.getSourceForViewer!(nativeCtx,entry.sourceId,authority)
           : Promise.resolve(null),
       ])
-      authority.accumulator.note({sources:[...boundScopeSources(entry),...boundScopeSources(related)]})
+      if(entry.sourceId&&!source)throw new DerivedScopeError('scope_evidence_missing')
+      authority.accumulator.note({sources:[...boundScopeSources(entry),...boundScopeSources(related),...(source?boundScopeSources(source):[])]})
       await assertSourceModelOutputAuthority({...executionToolContext(authority.execution,{appId:'native-brain-knowledge-read'}),scopeAccumulator:authority.accumulator})
       res.status(200).json({
         id: entry.id,

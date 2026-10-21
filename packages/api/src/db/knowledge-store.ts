@@ -45,6 +45,7 @@ import { admitKnowledgeWrite, lockKnowledgePrior, admitKnowledgeSourceConfigurat
 import { WorkspaceAccessError } from '../workspace-access/policy.js'
 import { captureKnowledgeSyncAuthority, knowledgeSyncCapture, admitKnowledgeSync } from '../workspace-access/knowledge-sync-admission.js'
 import { publishKnowledgeLifecycle } from '../knowledge-event-fanout.js'
+import {readNativeKnowledgeSource,type KnowledgeSourceProjection} from './knowledge-source-reader.js'
 
 // ── Types ──────────────────────────────────────────────────────
 
@@ -639,6 +640,7 @@ export type KnowledgeStore = {
     binding?: KnowledgeSourceBindingInput
   }, authority?: KnowledgeConfigureAuthority): Promise<KnowledgeSource>
   getSource(id: string): Promise<KnowledgeSource | null>
+  getSourceForViewer(ctx:AccessContext,id:string,authority:SessionContextAuthority):Promise<KnowledgeSourceProjection|null>
   listSources(workspaceId: string): Promise<KnowledgeSource[]>
   listSourcesForAssistant(assistantId: string): Promise<KnowledgeSource[]>
   deleteSource(id: string): Promise<boolean>
@@ -1243,6 +1245,8 @@ export function createDbKnowledgeStore(): KnowledgeStore {
       }, params.binding && authority ? undefined : 'knowledge_source_admission_required', !!authority)
       return result.rows[0]
     },
+
+    getSourceForViewer:readNativeKnowledgeSource,
 
     async getSource(id) {
       const result = await query<KnowledgeSource>(

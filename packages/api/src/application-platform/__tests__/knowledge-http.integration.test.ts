@@ -14,6 +14,7 @@ import {createDbRetrievalStore} from '../../db/retrieval-store.js'
 import {configureConnectorSourceRuntimeFactory} from '../source-runtime.js'
 import {persistentContextFixture} from './fixtures/persistent-context.js'
 import {retainedKnowledgeFixture} from './fixtures/retained-knowledge.js'
+import {configuredKnowledgeEntryFixture} from './fixtures/configured-knowledge.js'
 import {knowledgeFieldPolicyFixture} from './fixtures/knowledge-field-policy.js'
 const {assertLocalFixture}=await import(new URL('../../../../../scripts/crm/local-fixture.mjs',import.meta.url).href)
 await assertLocalFixture()
@@ -83,9 +84,9 @@ describe.sequential('[COMP:api/application-persistence] [COMP:brain/knowledge-de
   const allowed=await read(undefined,selected,ordinary.id);expect(allowed.status,JSON.stringify(allowed.body)).toBe(200);expect(allowed.body.content).toBe(ordinary.content)
  })
  it('preserves the original body, native navigation and source-provenance projection through actual authenticated SQL',async()=>{
-  const {f,read}=await setup(),source=await store.createSource({workspaceId:f.f.workspaceId,sourceType:'local',repo:'/srv/fictional-knowledge',branch:'local',rootPath:''})
-  const entry=await store.create({workspaceId:f.f.workspaceId,path:'features/fictional-identity.md',title:'Fictional identity guide',summary:'Fictional identity summary',
-   content:'# Fictional identity guide\n\nFictional long-form body',tags:['identity','merge'],sensitivity:'confidential',metadata:{url:'notes-app://open/fictional-note'},sourceId:source.id,sourceSha:'fictional-sha',createdBy:f.f.ownerId})
+  const {f,read}=await setup(),{source,entry}=await configuredKnowledgeEntryFixture(f.f,{source:{repo:'/srv/fictional-knowledge',branch:'local',rootPath:''},
+   entry:{path:'features/fictional-identity.md',title:'Fictional identity guide',summary:'Fictional identity summary',content:'# Fictional identity guide\n\nFictional long-form body',
+    tags:['identity','merge'],sensitivity:'confidential',metadata:{url:'notes-app://open/fictional-note'},sourceSha:'fictional-sha'}})
   const response=await read(undefined,undefined,entry.id);expect(response.status,JSON.stringify(response.body)).toBe(200)
   expect(response.body).toMatchObject({id:entry.id,path:entry.path,title:entry.title,summary:entry.summary,content:entry.content,tags:entry.tags,sensitivity:'confidential',sourceId:source.id,sourceSha:'fictional-sha',
    navigationUrl:'notes-app://open/fictional-note',source:{id:source.id,sourceType:'local',repo:'/srv/fictional-knowledge',branch:'local',rootPath:''}})
@@ -143,8 +144,8 @@ describe.sequential('[COMP:api/application-persistence] [COMP:brain/knowledge-de
   const current=await read();expect(current.status,JSON.stringify(current.body)).toBe(200);expect(current.body.content).toBe(f.row.content);expect(await f.snapshot()).toEqual(before)
  })
  it('holds unavailable source provenance instead of delivering a false missing-source card',async()=>{
-  const {f,read}=await setup(),source=await store.createSource({workspaceId:f.f.workspaceId,sourceType:'local',repo:'/srv/fictional-provenance',branch:'local'})
-  const entry=await store.create({workspaceId:f.f.workspaceId,path:'fictional-source-card',title:'Fictional source card',content:'Fictional source-card bytes',sensitivity:'internal',sourceId:source.id,createdBy:f.f.ownerId})
+  const {f,read}=await setup(),{source,entry}=await configuredKnowledgeEntryFixture(f.f,{source:{repo:'/srv/fictional-provenance',branch:'local'},
+   entry:{path:'fictional-source-card',title:'Fictional source card',content:'Fictional source-card bytes',sensitivity:'internal'}})
   const initial=await read(undefined,undefined,entry.id);expect(initial.status,JSON.stringify(initial.body)).toBe(200);expect(initial.body.source.id).toBe(source.id)
   await f.f.pool.query('ALTER TABLE workspace_knowledge_sources RENAME TO r3_knowledge_http_sources_held')
   try{const held=await read(undefined,undefined,entry.id);expect(held.status).toBeGreaterThanOrEqual(400);expect(JSON.stringify(held.body)).not.toContain(entry.content)}
