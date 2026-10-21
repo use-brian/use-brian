@@ -57,11 +57,12 @@ async function snapshot(workspaceId: string) {
   )).rows[0].rows))
 }
 
-async function collect(f: Awaited<ReturnType<typeof fixture>>, path: string, key: string, machine: boolean) {
+async function collect(f: Awaited<ReturnType<typeof fixture>>, path: string, key: string, machine: boolean,
+  filters: { includeArchived?: 'true' | 'false'; entityKind?: 'person' | 'company' | 'deal' } = {}) {
   const rows: Array<Record<string, unknown>> = [], cursors = new Set<string>()
   let cursor: string | null = null
   do {
-    const response = await f.get(`/operations/${path}`, machine).query({ limit: 17, ...(cursor ? { cursor } : {}) })
+    const response = await f.get(`/operations/${path}`, machine).query({ ...filters, limit: 17, ...(cursor ? { cursor } : {}) })
     expect(response.status).toBe(200)
     expect(Array.isArray(response.body[key])).toBe(true)
     rows.push(...response.body[key])
@@ -104,7 +105,9 @@ describe('[COMP:api/crm-config-catalog] Pure member and integration configuratio
       await pool.query(`INSERT INTO crm_pipelines(workspace_id,name,position,archived_at)
         SELECT $1,'Fixture '||n,n,CASE WHEN n=106 THEN now() END FROM generate_series(1,106) n`, [workspaceId])
     }
-    const pipelineId = (await pool.query(`SELECT id FROM crm_pipelines WHERE workspace_id=$1 AND position=1`, [f.workspaceId])).rows[0].id
+    // The production cursor sorts createdAt/id descending. Choose its last
+    // live parent so the archive assertion must traverse beyond two pages.
+    const pipelineId = (await pool.query(`SELECT id FROM crm_pipelines WHERE workspace_id=$1 AND archived_at IS NULL ORDER BY created_at ASC,id ASC LIMIT 1`, [f.workspaceId])).rows[0].id
     await pool.query(`INSERT INTO crm_pipeline_stages(workspace_id,pipeline_id,name,category,position,archived_at)
       VALUES($1,$2,'Live','open',0,NULL),($1,$2,'Archived','won',1,now())`, [f.workspaceId, pipelineId])
     const before = await snapshot(f.workspaceId)
@@ -123,12 +126,11 @@ describe('[COMP:api/crm-config-catalog] Pure member and integration configuratio
       expect(fields.body.fields).toHaveLength(42)
       expect(fields.body.fields.every((field: { entityKind: string }) => field.entityKind === 'person')).toBe(true)
       expect(fields.body.fields.filter((field: { archivedAt: string | null }) => field.archivedAt !== null)).toHaveLength(2)
-      const pipelines = await f.get('/operations/pipelines', machine).query({ includeArchived: 'true' })
-      const all = pipelines.body.pipelines as Array<{ id: string; stages: unknown[] }>
-      // Explicit archive selection includes archived stages when their parent is on this page.
-      const page = all.find((row) => row.id === pipelineId) ?? (await f.get('/operations/pipelines', machine)
-        .query({ includeArchived: 'true', cursor: pipelines.body.nextCursor })).body.pipelines.find((row: { id: string }) => row.id === pipelineId)
-      expect(page.stages).toHaveLength(2)
+      const all = await collect(f, 'pipelines', 'pipelines', machine, { includeArchived: 'true' })
+      expect(all).toHaveLength(106)
+      // Explicit archive selection includes both stages even on a late page.
+      expect(all.findIndex((row) => row.id === pipelineId)).toBeGreaterThanOrEqual(100)
+      expect(all.find((row) => row.id === pipelineId)?.stages).toHaveLength(2)
     }
     const principal = await keys.authenticate(f.credential.oneTimeSecret)
     expect(principal).not.toBeNull()
