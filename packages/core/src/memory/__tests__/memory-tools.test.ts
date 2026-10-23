@@ -15,7 +15,7 @@ import type {
 type FakeRow = {
   id: string
   assistantId: string
-  userId: string
+  userId: string | null
   scope: string
   summary: string
   detail: string | null
@@ -446,6 +446,47 @@ describe('[COMP:memory/tools] saveMemory', () => {
     expect(store.rows[0].scope).toBe('shared')
   })
 
+  it('saves a shared room reminder without a personal owner, even with no read sources', async () => {
+    const store = makeFakeStore()
+    const create = vi.spyOn(store, 'create')
+    const { saveMemory } = createMemoryTools(store)
+    const result = await saveMemory.execute({ summary: 'Register for the selected courses before October 25' },
+      { ...ctx, workspaceId: 'workspace-1', assistantKind: 'standard', sharedAudience: true,
+        clearance: 'internal', assistantClearance: 'internal', compartments: [], projectIds: [] })
+    expect(result.isError).toBeFalsy()
+    expect(create).toHaveBeenCalledWith(expect.objectContaining({ scope: 'workspace', userId: null, workspaceId: 'workspace-1' }))
+    expect(result.scopeEvidence?.sources).toBeUndefined()
+  })
+
+  it('refuses a personal memory request in a shared room before writing', async () => {
+    const store = makeFakeStore()
+    const { saveMemory } = createMemoryTools(store)
+    const result = await saveMemory.execute({ summary: 'A personal reminder', scope: 'user' },
+      { ...ctx, workspaceId: 'workspace-1', sharedAudience: true })
+    expect(result.isError).toBe(true)
+    expect(String(result.data)).toContain('direct message')
+    expect(store.rows).toHaveLength(0)
+  })
+
+  it('does not silently save confidential shared-room content as a personal memory', async () => {
+    const store = makeFakeStore()
+    const accumulator = new ContextScopeAccumulator({ sensitivity: 'confidential' })
+    const { saveMemory } = createMemoryTools(store)
+    const result = await saveMemory.execute({ summary: 'A protected reminder' },
+      { ...ctx, workspaceId: 'workspace-1', sharedAudience: true, scopeAccumulator: accumulator })
+    expect(result.isError).toBe(true)
+    expect(String(result.data)).toContain('direct message')
+    expect(store.rows).toHaveLength(0)
+  })
+
+  it('refuses a shared memory without a workspace instead of creating a personal fallback', async () => {
+    const store = makeFakeStore()
+    const { saveMemory } = createMemoryTools(store)
+    const result = await saveMemory.execute({ summary: 'A group reminder' }, { ...ctx, sharedAudience: true })
+    expect(result.isError).toBe(true)
+    expect(store.rows).toHaveLength(0)
+  })
+
   it('omitted scope defaults to DB scope "shared"', async () => {
     const store = makeFakeStore()
     const { saveMemory } = createMemoryTools(store)
@@ -608,6 +649,13 @@ describe('[COMP:memory/tools] saveMemory', () => {
 })
 
 describe('[COMP:memory/tools] getMemory', () => {
+  it('passes the shared audience to the memory read port outside an ambient tool wrapper', async () => {
+    const store = makeFakeStore()
+    const getById = vi.spyOn(store, 'getById')
+    const { getMemory } = createMemoryTools(store)
+    await getMemory.execute({ id: 'mem_missing' }, { ...ctx, workspaceId: 'workspace-1', sharedAudience: true })
+    expect(getById).toHaveBeenCalledWith(expect.objectContaining({ sharedAudience: true }), 'mem_missing')
+  })
   it('threads the authenticated-client branch only into the memory store context', async () => {
     const store = makeFakeStore()
     const getById = vi.spyOn(store, 'getById')

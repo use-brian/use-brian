@@ -16,9 +16,10 @@ import type { DerivedWorkspaceFilesStore } from '../db/workspace-files-store.js'
  */
 
 import { createHash, randomUUID } from 'node:crypto'
-import { maxSensitivity, unionScopeRequirements } from '@use-brian/core'
+import { DerivedScopeError, maxSensitivity, unionScopeRequirements } from '@use-brian/core'
 import { assertExecutionResourceScope } from '../db/access-predicate.js'
 import { executeWithCurrentAuthority } from '../context-scope/authority-lease.js'
+import { WorkspaceAccessError } from '../workspace-access/policy.js'
 import type {
   AccessContext,
   FilesApi,
@@ -454,15 +455,29 @@ export function createFilesApi(deps: CreateFilesApiDeps): DerivedFilesApi {
       // Only an explicit constraint/permission refusal proves the INSERT did
       // not commit. An uncertain acknowledgement must retain the staged object.
       const code = (dbErr as { code?: string }).code
-      if (typeof code !== 'string' || !(code.startsWith('23') || code === '42501' || code === 'scope_operation_denied' || ['capture_target_unavailable','archive_receipt_conflict','archive_publication_required','context_not_available','access_policy_conflict','file_admission_provenance_required','access_mode_destination_conflict','pdf_intake_source_changed','pdf_intake_source_unavailable','pdf_intake_asset_changed'].includes(code))) {
+      // Native derived writers use bare RAISE EXCEPTION (SQLSTATE P0001).
+      // Only these exact, content-free refusal messages prove rollback; an
+      // arbitrary Error with the same text is not a publication receipt.
+      const sourceRefusal = dbErr instanceof DerivedScopeError ? dbErr
+        : code === 'P0001' && dbErr instanceof Error && (
+          dbErr.message === 'scope_evidence_missing' || dbErr.message === 'scope_source_changed'
+          || dbErr.message === 'scope_workspace_mismatch' || dbErr.message === 'scope_visibility_incompatible'
+          || dbErr.message === 'scope_output_not_integrated'
+        ) ? new DerivedScopeError(dbErr.message)
+        : code === 'P0001' && dbErr instanceof Error && dbErr.message === 'page_ancestry_unavailable'
+          ? new DerivedScopeError('scope_source_changed')
+        : code === 'P0001' && dbErr instanceof Error && dbErr.message === 'page_derivation_output_not_integrated'
+          ? new DerivedScopeError('scope_output_not_integrated') : null
+      const sqlScopeRefusal = code === 'P0001' && dbErr instanceof Error && dbErr.message === 'scope_operation_denied'
+      if (!sourceRefusal && !sqlScopeRefusal && !(dbErr instanceof WorkspaceAccessError) && (typeof code !== 'string' || !(code.startsWith('23') || code === '42501' || code === 'scope_operation_denied' || ['capture_target_unavailable','archive_receipt_conflict','archive_publication_required','context_not_available','access_policy_conflict','file_admission_provenance_required','access_mode_destination_conflict','pdf_intake_source_changed','pdf_intake_source_unavailable','pdf_intake_asset_changed'].includes(code)))) {
         throw new FilePublicationUncertainError()
       }
       try { await gcs.deleteBlob(storageKey) } catch { /* Unpublished orphan: storage retention handles cleanup. */ }
       if (isUniqueViolation(dbErr)) {
         return err({ kind: 'conflict', path })
       }
-      if (code === 'scope_operation_denied') return err({ kind: 'read_only', reason: 'scope', path })
-      throw dbErr
+      if (code === 'scope_operation_denied' || sqlScopeRefusal) return err({ kind: 'read_only', reason: 'scope', path })
+      throw sourceRefusal ?? dbErr
     }
 
     logAudit(ctx, 'file.created', { id: row.id, path: row.path, mime: row.mime, sizeBytes: row.sizeBytes })

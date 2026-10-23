@@ -1,5 +1,6 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest'
 import type { AccessCeiling, ScopeSource } from '@use-brian/core'
+import { bindScopeSource, createdRowEvidence, scopeEvidenceFromRows } from '@use-brian/core'
 import type { CurrentSourceState } from '../../db/derived-scope-store.js'
 
 const state = vi.hoisted(() => ({
@@ -37,6 +38,19 @@ const ceiling: AccessCeiling = {
 beforeEach(() => { state.read.length = 0; state.next = null })
 
 describe('[COMP:api/caller-scope-evidence] per-source audience validation', () => {
+  it('admits a newly saved note without treating the note as private context read by the group', async () => {
+    const memory = bindScopeSource({ id: 'just-created', summary: 'Remember the course registration deadline' }, source('just-created'))
+    const group = { ...ceiling, userId: '' }
+    // Deployed saveMemory returned this full read-source evidence. The
+    // executor adds it before the tool-result event can be recorded.
+    await expect(validateAudienceScopeEvidence(scopeEvidenceFromRows([memory]), group))
+      .rejects.toMatchObject({ diagnostic: 'user_visibility' })
+    await expect(validateAudienceScopeEvidence(createdRowEvidence([memory]), group))
+      .resolves.toMatchObject({ sensitivity: 'internal' })
+    // A real read of the same personal memory must remain forbidden.
+    await expect(validateAudienceScopeEvidence(scopeEvidenceFromRows([memory]), group))
+      .rejects.toMatchObject({ diagnostic: 'user_visibility' })
+  })
   it('admits read evidence spanning two assistant partitions of the same user', async () => {
     const sources = [source('own'), source('other', { assistantId: other }), source('shared', { assistantId: null, userId: null })]
     const result = await validateAudienceScopeEvidence({ sources }, ceiling)

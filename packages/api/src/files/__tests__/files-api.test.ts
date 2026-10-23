@@ -1,7 +1,8 @@
 import { randomUUID } from 'node:crypto'
 import { runWithAgentAccess } from '../../db/agent-access-context.js'
 import { createAuthorityLease, runWithAuthorityLease } from '../../context-scope/authority-lease.js'
-import { pinAccessCeiling } from '@use-brian/core'
+import { WorkspaceAccessError } from '../../workspace-access/policy.js'
+import { DerivedScopeError, pinAccessCeiling } from '@use-brian/core'
 import { describe, it, expect, vi } from 'vitest'
 import { Writable } from 'node:stream'
 import {
@@ -711,6 +712,83 @@ describe('[COMP:files/api] departmental publication boundaries', () => {
       .rejects.toMatchObject({ code: 'file_publication_uncertain', retrySafe: false })
     expect(f.gcs.blobs.size).toBe(1)
     expect(await f.api.read(ctx, '/uncertain.txt')).toMatchObject({ ok: true, value: { content: 'visible bytes' } })
+  })
+
+  it.each(['scope_source_changed', 'scope_evidence_missing', 'scope_workspace_mismatch', 'scope_visibility_incompatible', 'scope_output_not_integrated'] as const)(
+    'preserves a typed %s refusal and removes only its unpublished object', async code => {
+      const f = fixture(), refusal = new DerivedScopeError(code)
+      f.store.create = vi.fn(async () => { throw refusal })
+      await expect(f.api.writeBytes(ctx, { path: '/refused.pdf', bytes: new Uint8Array([1, 2]), mime: 'application/pdf' })).rejects.toBe(refusal)
+      expect(f.gcs.blobs.size).toBe(0)
+      expect(f.store.rows.size).toBe(0)
+      expect(f.audit.events).toEqual([])
+    },
+  )
+
+  it.each(['scope_source_changed', 'scope_evidence_missing', 'scope_workspace_mismatch', 'scope_visibility_incompatible', 'scope_output_not_integrated'] as const)(
+    'recognizes an exact native P0001 %s refusal without publishing or retaining staged bytes', async code => {
+      const f = fixture()
+      f.store.create = vi.fn(async () => { throw Object.assign(new Error(code), { code: 'P0001' }) })
+      await expect(f.api.write(ctx, { path: '/native-refusal.txt', content: 'unpublished' }))
+        .rejects.toMatchObject({ name: 'DerivedScopeError', code })
+      expect(f.gcs.blobs.size).toBe(0)
+      expect(f.store.rows.size).toBe(0)
+      expect(f.audit.events).toEqual([])
+    },
+  )
+
+  it('maps a native P0001 scope permission refusal to the supported recovery result', async () => {
+    const f = fixture()
+    f.store.create = vi.fn(async () => { throw Object.assign(new Error('scope_operation_denied'), { code: 'P0001' }) })
+    expect(await f.api.write(ctx, { path: '/native-scope.txt', content: 'unpublished' }))
+      .toMatchObject({ ok: false, error: { kind: 'read_only', reason: 'scope' } })
+    expect(f.gcs.blobs.size).toBe(0)
+    expect(f.audit.events).toEqual([])
+  })
+
+  it.each([
+    ['page_ancestry_unavailable', 'scope_source_changed'],
+    ['page_derivation_output_not_integrated', 'scope_output_not_integrated'],
+  ])('preserves the native %s page refusal as %s', async (message, code) => {
+    const f = fixture()
+    f.store.create = vi.fn(async () => { throw Object.assign(new Error(message), { code: 'P0001' }) })
+    await expect(f.api.write(ctx, { path: '/page-refusal.txt', content: 'unpublished' })).rejects.toMatchObject({ name: 'DerivedScopeError', code })
+    expect(f.gcs.blobs.size).toBe(0)
+    expect(f.audit.events).toEqual([])
+  })
+
+  it('preserves an explicit typed admission refusal without claiming an uncertain commit', async () => {
+    const f = fixture(), refusal = new WorkspaceAccessError('context_selection_required', 409)
+    f.store.create = vi.fn(async () => { throw refusal })
+    await expect(f.api.write(ctx, { path: '/admission-refusal.txt', content: 'unpublished' })).rejects.toBe(refusal)
+    expect(f.gcs.blobs.size).toBe(0)
+    expect(f.audit.events).toEqual([])
+  })
+
+  it.each([
+    new Error('scope_source_changed'),
+    Object.assign(new Error('scope_source_changed: unexpected detail'), { code: 'P0001' }),
+    Object.assign(new Error('unknown publication outcome'), { code: 'P0001' }),
+  ])('retains bytes for an unrecognized publication outcome (%s)', async error => {
+    const f = fixture()
+    f.store.create = vi.fn(async () => { throw error })
+    await expect(f.api.write(ctx, { path: '/unknown.txt', content: 'possibly published' }))
+      .rejects.toMatchObject({ code: 'file_publication_uncertain', retrySafe: false })
+    expect(f.gcs.blobs.size).toBe(1)
+    expect(f.audit.events).toEqual([])
+  })
+
+  it('retains committed bytes when current authority changes after the canonical write', async () => {
+    const f = fixture(), create = f.store.create.bind(f.store)
+    const starting = pinAccessCeiling({ ...ctx, assistantKind: 'primary', clearance: 'confidential', compartments: null, mutationCompartments: null, projectIds: null })
+    let current: typeof starting | null = starting
+    const lease = createAuthorityLease(starting, async () => current)
+    f.store.create = async (...args) => { const row = await create(...args); current = null; return row }
+    await expect(runWithAuthorityLease(lease, () => f.api.write(ctx, { path: '/late-authority.txt', content: 'committed bytes' })))
+      .rejects.toMatchObject({ code: 'file_publication_uncertain', retrySafe: false })
+    expect(f.store.rows.size).toBe(1)
+    expect(f.gcs.blobs.size).toBe(1)
+    expect(f.audit.events).toEqual([])
   })
 
   it.each(['append', 'setMeta', 'delete'] as const)('refuses read-only %s before bytes or metadata change', async operation => {

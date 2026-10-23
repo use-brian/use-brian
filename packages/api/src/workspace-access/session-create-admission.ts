@@ -184,7 +184,7 @@ export async function admitChannelRoom(client: PoolClient, params: {
   channelType: string
   channelId: string
   channelIntegrationId: string
-}): Promise<{ effectiveClearance: string; contextGroupId: string | null; contextCompartments: string[] }> {
+}): Promise<{ effectiveClearance: string; contextGroupId: string | null; contextProjectId: string | null; contextCompartments: string[] }> {
   const assistant = (await client.query<{ workspaceId: string | null; clearance: string | null; groupId: string | null; compartment: string | null }>(
     `SELECT a.workspace_id AS "workspaceId", a.clearance, g.id AS "groupId", g.compartment_key AS compartment
        FROM assistants a LEFT JOIN workspace_groups g ON g.id = a.placement_department_id
@@ -195,10 +195,25 @@ export async function admitChannelRoom(client: PoolClient, params: {
       WHERE ci.id=$1 AND c.workspace_id=$2 AND ci.channel_type=$3`,
     [params.channelIntegrationId, params.workspaceId, params.channelType])
   if (!bound.rows.length) throw new WorkspaceAccessError('context_not_available', 404)
-  const effectiveClearance = assistant.clearance ?? 'internal'
-  const department = assistant.groupId && assistant.compartment
-    ? { contextGroupId: assistant.groupId, contextCompartments: [assistant.compartment] }
-    : { contextGroupId: null, contextCompartments: [] as string[] }
+  // Resolve only on room admission: delivery authority also reads sessions,
+  // whose store imports this module for ordinary session creation.
+  const { resolveGroupAudienceSystem } = await import('../context-scope/delivery-authority.js')
+  const audience = await resolveGroupAudienceSystem({
+    workspaceId: params.workspaceId, assistantId: params.assistantId, userId: params.userId,
+    channelType: params.channelType, channelId: params.channelId,
+  }, client)
+  if (!audience.allowed) throw new WorkspaceAccessError('context_not_available', 404)
+  const effectiveClearance = audience.ceiling.clearance
+  const compartments = audience.ceiling.compartments ?? []
+  const projects = audience.ceiling.projectIds ?? []
+  // The session binding supports one Department and one Project. Never flatten
+  // an all-of group audience that this schema cannot represent faithfully.
+  if (compartments.length > 1 || projects.length > 1) throw new WorkspaceAccessError('context_not_available', 404)
+  const group = compartments.length ? (await client.query<{ id: string }>(
+    "SELECT id FROM workspace_groups WHERE workspace_id=$1 AND compartment_key=$2 AND kind='team'",
+    [params.workspaceId, compartments[0]])).rows[0] : null
+  if (compartments.length && !group) throw new WorkspaceAccessError('context_not_available', 404)
+  const department = { contextGroupId: group?.id ?? null, contextProjectId: projects[0] ?? null, contextCompartments: compartments }
   await client.query('SELECT id FROM workspaces WHERE id=$1 FOR UPDATE', [params.workspaceId])
   const policy = await readAdmissionPolicy(client, params.workspaceId)
   if (!policy || policy.setupState === 'legacy') return { effectiveClearance, ...department }

@@ -467,7 +467,7 @@ describe('[COMP:providers/gemini-json-mode] responseFormat json → responseMime
     expect(body.generationConfig?.responseSchema).toEqual(schema)
   })
 
-  it('omits deprecated sampling parameters for Gemini 3.6+ while preserving older-model behavior', async () => {
+  it('omits deprecated sampling parameters for Gemini 3+ while preserving older-model behavior', async () => {
     fetchMock.mockResolvedValueOnce(sseOk()).mockResolvedValueOnce(sseOk())
     const { createGeminiProvider } = await import('../gemini.js')
 
@@ -481,7 +481,7 @@ describe('[COMP:providers/gemini-json-mode] responseFormat json → responseMime
     )
     await drain(
       createGeminiProvider('test-key').stream({
-        model: 'gemini-3.5-flash',
+        model: 'gemini-2.5-flash',
         systemPrompt: 'sys',
         messages: [{ role: 'user', content: 'chat' }],
         temperature: 0.7,
