@@ -1,4 +1,5 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
+import { z } from 'zod'
 import {
   compileSearchFilters, matchesSearchDomains, searchFiltersSchema, unsupportedSearchFilters,
   SEARCH_PROVIDER_NAMES, type SearchFilters,
@@ -11,6 +12,7 @@ import { serpApiProvider } from '../base/search-serpapi.js'
 import { tavilyProvider } from '../base/search-tavily.js'
 import { baiduProvider } from '../base/search-baidu.js'
 import { duckDuckGoProvider } from '../base/search-ddg.js'
+import { jsonSchemaFromZod, MODEL_HIDDEN_PARAM_MARKER } from '../../engine/query-loop.js'
 import type { ToolContext } from '../types.js'
 
 const range = { from: '2026-10-01', to: '2026-10-24' }
@@ -227,7 +229,7 @@ describe('[COMP:tools/search-filters] Vendor request contracts', () => {
   })
 })
 
-describe('[COMP:tools/search-filters] Stack invariants', () => {
+describe('[COMP:tools/search-filters] Stack invariants and direct model schema', () => {
   it('never calls an incompatible fallback after a compatible provider fails', async () => {
     const brave = mockSearchProvider('brave')
     const tavily = mockSearchProvider('tavily', vi.fn(async () => { throw new Error('quota exhausted') }))
@@ -253,5 +255,13 @@ describe('[COMP:tools/search-filters] Stack invariants', () => {
     await createSearchStack([provider])('q', 5, controller.signal, filters)
     expect(provider.search).not.toHaveBeenCalled()
   })
-
+  it('advertises refined direct tool and nested date fields, preserving runtime validation', () => {
+    const schema = jsonSchemaFromZod(webSearchTool.inputSchema)
+    expect(Object.keys(schema.properties)).toEqual(expect.arrayContaining(['query', 'provider', 'dateRange', 'country', 'language', 'location', 'includeDomains', 'excludeDomains', 'safeSearch']))
+    expect(schema.properties.dateRange).toMatchObject({ type: 'object', properties: { from: { type: 'string' }, to: { type: 'string' } } })
+    expect(webSearchTool.inputSchema.safeParse({ query: 'one', queries: ['two'] }).success).toBe(false)
+    expect(webSearchTool.inputSchema.safeParse({ query: 'q', dateRange: { from: range.to, to: range.from } }).success).toBe(false)
+    const hidden = z.object({ shown: z.string(), hidden: z.string().optional().describe(`${MODEL_HIDDEN_PARAM_MARKER}legacy`) }).superRefine(() => {})
+    expect(jsonSchemaFromZod(hidden).properties).toEqual({ shown: { type: 'string' } })
+  })
 })
