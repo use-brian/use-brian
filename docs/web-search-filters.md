@@ -89,6 +89,10 @@ an unsupported-filter error, not an outage or evidence of no matches.
 The existing Zod object refinements remain runtime validation. The direct
 model-visible schema converter must unwrap top-level effects so the full tool
 and nested date range fields remain visible; model-hidden fields stay hidden.
+Keep model-visible descriptions concise: field hints own filter formats and
+provider capabilities, while the tool description owns execution and citation
+guidance. Avoid repeating parameter lists and capability prose on every turn;
+the fresh-user prompt-token regression budget remains unchanged.
 
 ## Example
 

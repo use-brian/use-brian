@@ -53,6 +53,16 @@ not silent approximations.
 Provider tests assert real adapter request shapes using mocked HTTP responses.
 They do not claim authenticated live-provider enforcement was verified.
 
+## CI follow-up
+
+The initial PR run passed core tests, build/typecheck and the other API shards,
+but API shard 3 failed the fresh-user prompt-token budget: 6,545 estimated tokens
+against the existing 6,500 ceiling. Compact shared search guidance and field
+hints retain the provider constraints, exact-provider/panel behavior and citation
+instructions while removing repetition. The same unchanged nine token-cost
+scenarios now pass; the fresh-user estimate is 6,295. These are the existing
+benchmark estimates, not measured production tokenizer usage.
+
 ## Provider references checked
 
 - Brave: https://api-dashboard.search.brave.com/api-reference/web/search/get

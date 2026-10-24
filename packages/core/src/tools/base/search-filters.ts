@@ -50,15 +50,15 @@ export const searchFilterShape = {
   dateRange: z.object({ from: date.optional(), to: date.optional() }).strict().superRefine((value, ctx) => {
     if (!value.from && !value.to) ctx.addIssue({ code: z.ZodIssueCode.custom, message: 'Provide at least one date bound.' })
     if (value.from && value.to && value.from > value.to) ctx.addIssue({ code: z.ZodIssueCode.custom, message: '`from` must be on or before `to`.' })
-  }).optional().describe('Calendar date bounds {from?, to?}, YYYY-MM-DD. Brave, Serper, SerpAPI and Baidu require both; Tavily accepts either. Uses index dates, not independently verified publication dates.'),
+  }).optional().describe('YYYY-MM-DD bounds {from?, to?}; both required except Tavily. Index dates, not independently verified publication dates.'),
   country: z.string().trim().regex(/^[a-zA-Z]{2}$/, 'Use an ISO alpha-2 country code, e.g. HK or GB.').transform((value) => value.toUpperCase())
-    .optional().describe('Country localization (ISO alpha-2). Brave/Google use local search settings; Tavily boosts country content. Not a strict country restriction. Unsupported on Baidu and DuckDuckGo.'),
+    .optional().describe('ISO alpha-2 country preference, e.g. HK. Localizes/ranks results, not a content restriction. No Baidu/DuckDuckGo.'),
   language: z.string().trim().min(2).max(35).refine((value) => Boolean(canonicalLanguage(value)), 'Pass a language tag, e.g. en or zh-TW.')
-    .transform((value) => canonicalLanguage(value)!).optional().describe('Language preference, e.g. en, zh-CN or zh-TW. Exact supported tags vary by provider; unsupported tags are rejected, never reduced silently. Unsupported on Baidu and DuckDuckGo.'),
-  location: z.string().trim().min(1).max(200).optional().describe('Search origin locality for Serper/SerpAPI; a single city name for Baidu standard. Unsupported on Brave, Tavily and DuckDuckGo.'),
-  includeDomains: domainList.optional().describe('Restrict to these DNS hostnames and their subdomains (1-20). Native support on Tavily/Baidu only; incompatible fallback providers are skipped. Separate from trackDomains.'),
-  excludeDomains: domainList.optional().describe('Exclude these DNS hostnames and their subdomains (1-20). Native support on Tavily/Baidu only.'),
-  safeSearch: z.enum(['off', 'moderate', 'strict']).optional().describe('Adult-content filtering. Brave: all levels; SerpAPI/Tavily/Baidu: off or strict; Serper/DuckDuckGo: unsupported. Explicit unsupported levels fail.'),
+    .transform((value) => canonicalLanguage(value)!).optional().describe('Language preference, e.g. en or zh-TW; exact provider-supported tags only. No Baidu/DuckDuckGo.'),
+  location: z.string().trim().min(1).max(200).optional().describe('Origin locality (Serper/SerpAPI) or one city (Baidu standard); unsupported elsewhere.'),
+  includeDomains: domainList.optional().describe('Allow 1-20 DNS hostnames and subdomains (Tavily/Baidu only). Separate from trackDomains.'),
+  excludeDomains: domainList.optional().describe('Block 1-20 DNS hostnames and subdomains (Tavily/Baidu only).'),
+  safeSearch: z.enum(['off', 'moderate', 'strict']).optional().describe('Adult filtering: Brave all levels; SerpAPI/Tavily/Baidu off/strict; others unsupported.'),
 }
 export type SearchFilters = z.infer<ReturnType<typeof makeSearchFiltersSchema>>
 function isWithinDomain(hostname: string, domain: string): boolean {
