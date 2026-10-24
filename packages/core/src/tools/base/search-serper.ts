@@ -14,6 +14,7 @@
  */
 
 import type { SearchProvider, SearchResult } from './search-stack.js'
+import { compileSearchFilters } from './search-filters.js'
 import { retryAfterMs, SearchProviderError } from './_fetch-error.js'
 import { clampResultCount } from './search-stack.js'
 import type { ExternalCredentialPool } from '../../providers/credential-pool.js'
@@ -38,9 +39,10 @@ export function createSerperProvider(pool?: ExternalCredentialPool): SearchProvi
 
   available: () => Boolean(pool || process.env.SERPER_API_KEY),
 
-  async search(query, maxResults, signal): Promise<SearchResult[]> {
+  async search(query, maxResults, signal, filters): Promise<SearchResult[]> {
+    const filterParams = compileSearchFilters('serper', filters)
     const lease = await resolveToolCredential(pool, 'serper', process.env.SERPER_API_KEY)
-    if (!lease) return []
+    if (!lease) throw new SearchProviderError({ provider: 'serper', kind: 'bad_key', detail: 'No eligible search credential is configured.' })
 
     const res = await fetch(SERPER_ENDPOINT, {
       method: 'POST',
@@ -52,6 +54,7 @@ export function createSerperProvider(pool?: ExternalCredentialPool): SearchProvi
       body: JSON.stringify({
         q: query,
         num: clampResultCount(maxResults),
+        ...filterParams,
       }),
       signal,
     })
