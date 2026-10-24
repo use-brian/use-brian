@@ -12,6 +12,7 @@
  */
 
 import type { SearchProvider, SearchResult } from './search-stack.js'
+import { compileSearchFilters } from './search-filters.js'
 import { SearchProviderError } from './_fetch-error.js'
 import { stripHtmlTags } from './search-stack.js'
 
@@ -29,7 +30,9 @@ export const duckDuckGoProvider: SearchProvider = {
   // the query has no matches. See SearchProvider.trustEmpty.
   trustEmpty: false,
 
-  async search(query, maxResults, signal): Promise<SearchResult[]> {
+  async search(query, maxResults, signal, filters): Promise<SearchResult[]> {
+    // HTML parameter support is unverified; reject filtered calls before I/O.
+    compileSearchFilters('duckduckgo', filters)
     const url = `${DDG_ENDPOINT}?q=${encodeURIComponent(query)}`
     const res = await fetch(url, {
       headers: { 'User-Agent': 'Mozilla/5.0 (compatible; use-brian/1.0)' },

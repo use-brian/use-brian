@@ -65,6 +65,27 @@ allow/block restrictions even if a provider returns a violating URL. Fewer
 results may remain; do not claim completeness or silently refill with unrestricted
 results. Baidu has a shorter query limit; its existing query behavior is unchanged.
 
+## Execution and fallback
+
+Add a fourth, optional filter argument after the existing abort signal in the
+provider/stack interfaces so existing callers keep working. Normal search keeps
+provider priority among those capable of honoring every requested filter.
+Capability exclusions are separate from provider failures and genuine empties.
+Exact-provider calls reject incompatible options before network I/O and never
+fall back. A credential pool alone is not proof that a provider has credentials;
+a missing lease is an explicit provider failure, not a trustworthy empty result.
+
+Filtered successful/empty responses include requested/applied canonical filters,
+winning or empty-result provider identity and date/localization semantics.
+Errors also retain filter context. Exact-provider panels report common filter
+metadata once at the top level, including applied filters only when at least one
+query completed successfully or returned a trustworthy empty. Row statuses show
+which queries completed; measurement rows stay compact. Unfiltered response
+shapes stay unchanged.
+Preserve timeout/cancellation, retries, ordered panel results, domain-rank
+measurements, sanitization and flat-cost accounting. No compatible provider is
+an unsupported-filter error, not an outage or evidence of no matches.
+
 ## Example
 
 ```json

@@ -12,8 +12,11 @@ import { flatSearchCostUsd } from '../../billing/search-provider-rates.js'
 import { NO_TOOL_TIMEOUT } from '../../engine/tool-executor.js'
 import type { ExternalCredentialPool } from '../../providers/credential-pool.js'
 
-const SEARCH_PROVIDER_NAMES = ['brave', 'serper', 'serpapi', 'tavily', 'baidu', 'duckduckgo'] as const
-type SearchProviderName = (typeof SEARCH_PROVIDER_NAMES)[number]
+import {
+  SEARCH_PROVIDER_NAMES, searchFilterShape, refineSearchFilters, pickSearchFilters,
+  hasSearchFilters, unsupportedSearchFilters, searchFilterProvenance,
+  type SearchProviderName,
+} from './search-filters.js'
 
 const PANEL_CONCURRENCY = 4
 const SEARCH_REQUEST_TIMEOUT_MS = 15_000
@@ -122,6 +125,7 @@ function waitForRetry(ms: number, signal: AbortSignal): Promise<boolean> {
  */
 const webSearchInputSchema = z
   .object({
+    ...searchFilterShape,
     query: z.string().min(1).optional().describe('One search query. Use `queries` for an exact-provider panel.'),
     queries: z
       .array(z.string().min(1))
@@ -133,7 +137,7 @@ const webSearchInputSchema = z
       .enum(SEARCH_PROVIDER_NAMES)
       .optional()
       .describe(
-        'Exact provider for repeatable measurement. Omit for normal Brave → Serper → SerpAPI → Tavily → Baidu → DuckDuckGo fallback.',
+        'Pin a provider; required for query panels and measurements. Omit for Brave → Serper → SerpAPI → Tavily → Baidu → DuckDuckGo fallback among configured providers supporting every requested filter.',
       ),
     maxResults: z.number().optional().describe('Maximum results per query (default 5, max 10)'),
     resultMode: z
@@ -149,7 +153,9 @@ const webSearchInputSchema = z
       .optional()
       .describe('Domains to rank in `measurement` mode, for example usebrian.ai or studio.usebrian.ai.'),
   })
+  .strict()
   .superRefine((input, ctx) => {
+    refineSearchFilters(input, ctx)
     const hasQuery = typeof input.query === 'string'
     const hasQueries = Array.isArray(input.queries)
     if (hasQuery === hasQueries) {
@@ -204,7 +210,7 @@ export function createWebSearchTool(pool?: ExternalCredentialPool) {
   return buildTool({
   name: 'webSearch',
   description:
-    "Search the web for current information. A single `query` normally uses the provider fallback stack. For a repeatable search-index measurement, set an exact `provider`; for a fixed battery, send `queries` with that provider and receive one ordered status/result row per query. Exact-provider calls never fall through to another index. Set `resultMode: measurement` to omit snippets and receive compact rank/domain rows plus optional `trackDomains` summaries; transient timeouts, 429s, and 5xx responses get at most three total attempts. Full results contain ranked title, URL, and snippet fields. The result URL and snippet are themselves usable: when the goal is to FIND or CONFIRM a page (a person's profile, a company site, an official link), the matching result URL IS the answer - report that URL and cite its snippet; you do NOT need to read the page first. Call `urlReader` only when you need content from inside a page body (prices, dates, statistics, article text) - read the 1-3 most relevant URLs ALL IN THE SAME RESPONSE so they execute in parallel (do not wait for one to finish before calling the next). Some pages (social-network profiles like LinkedIn, and other login-gated sites) cannot be read without a signed-in session; for those, give the user the result URL plus its snippet rather than reporting that nothing was found. When the results contain specific numbers (prices, dates, statistics), use the EXACT values from the results - never substitute your own knowledge. Always cite the URLs you used.",
+    "Search the web for current information. Optional dateRange, country, language, location, includeDomains, excludeDomains and safeSearch use universal names. Automatic fallback only uses providers supporting every requested filter; incompatible exact-provider requests fail. Country/language are localization preferences, and dates use provider index metadata. A single `query` normally uses the provider fallback stack. For a repeatable search-index measurement, set an exact `provider`; for a fixed battery, send `queries` with that provider and receive one ordered status/result row per query. Exact-provider calls never fall through to another index. Set `resultMode: measurement` to omit snippets and receive compact rank/domain rows plus optional `trackDomains` summaries; transient timeouts, 429s, and 5xx responses get at most three total attempts. Full results contain ranked title, URL, and snippet fields. The result URL and snippet are themselves usable: when the goal is to FIND or CONFIRM a page (a person's profile, a company site, an official link), the matching result URL IS the answer - report that URL and cite its snippet; you do NOT need to read the page first. Call `urlReader` only when you need content from inside a page body (prices, dates, statistics, article text) - read the 1-3 most relevant URLs ALL IN THE SAME RESPONSE so they execute in parallel (do not wait for one to finish before calling the next). Some pages (social-network profiles like LinkedIn, and other login-gated sites) cannot be read without a signed-in session; for those, give the user the result URL plus its snippet rather than reporting that nothing was found. When the results contain specific numbers (prices, dates, statistics), use the EXACT values from the results - never substitute your own knowledge. Always cite the URLs you used.",
   inputSchema: webSearchInputSchema,
   isConcurrencySafe: true,
   isReadOnly: true,
@@ -214,16 +220,31 @@ export function createWebSearchTool(pool?: ExternalCredentialPool) {
   timeoutMs: NO_TOOL_TIMEOUT,
 
   async execute(input, context) {
+    // Also validate direct/internal execute callers, not only tool-executor calls.
+    const parsed = webSearchInputSchema.safeParse(input)
+    if (!parsed.success) return { data: `Invalid web search input: ${parsed.error.message}`, isError: true }
+    input = parsed.data
+    const filters = pickSearchFilters(input)
+    const filtered = hasSearchFilters(filters)
+    const filterData = (provider: SearchProviderName) => filtered ? searchFilterProvenance(provider, filters) : {}
     const maxResults = Math.max(1, Math.min(10, input.maxResults ?? 5))
     const exactProvider = input.provider
 
     if (exactProvider) {
       const selected = providersByName[exactProvider]
+      const unsupported = unsupportedSearchFilters(exactProvider, filters)
+      if (unsupported.length) return {
+        data: { error: 'unsupported_filters', provider: exactProvider, requestedFilters: filters, reasons: unsupported,
+          message: 'Choose a compatible provider or explicitly revise the filters. No search ran and no fallback was used.' },
+        isError: true,
+      }
       if (!selected.available()) {
         return {
-          data:
-            `Exact web-search provider ${exactProvider} is not configured. ` +
-            'This measurement was not run, and no fallback provider was used.',
+          data: filtered
+            ? { error: 'provider_unavailable', requestedFilters: filters, provider: exactProvider,
+                message: 'The selected provider is not configured. No search ran and no fallback was used.' }
+            : `Exact web-search provider ${exactProvider} is not configured. ` +
+              'This measurement was not run, and no fallback provider was used.',
           isError: true,
         }
       }
@@ -241,7 +262,7 @@ export function createWebSearchTool(pool?: ExternalCredentialPool) {
         for (let attempt = 0; ; attempt++) {
           final = await withSearchDeadline(
             context.abortSignal,
-            (signal) => strictStack(query, maxResults, signal),
+            (signal) => strictStack(query, maxResults, signal, filters),
           )
           const failure = final.value.failures.at(-1)
           const retryable =
@@ -378,6 +399,7 @@ export function createWebSearchTool(pool?: ExternalCredentialPool) {
       return {
         data: {
           provider: exactProvider,
+          ...(filtered ? { requestedFilters: filters, ...(completed > 0 ? filterData(exactProvider) : {}) } : {}),
           ...(measurement ? { resultMode: 'measurement' as const } : {}),
           expectedQueries: queries.length,
           completed,
@@ -391,12 +413,12 @@ export function createWebSearchTool(pool?: ExternalCredentialPool) {
     }
 
     const {
-      value: { provider, results, failures, trustedEmpty },
+      value: { provider, results, failures, trustedEmpty, excludedProviders, emptyProvider },
       timedOut,
       cancelled,
     } = await withSearchDeadline(
       context.abortSignal,
-      (signal) => searchStack(input.query!, maxResults, signal),
+      (signal) => searchStack(input.query!, maxResults, signal, filters),
     )
 
     // `meta.searchProvider` carries the winning provider name (brave / serper /
@@ -404,25 +426,33 @@ export function createWebSearchTool(pool?: ExternalCredentialPool) {
     // `externalCost_*` keys carry the per-call USD so the chat route can
     // write a `usage_tracking` row (flat cost, 0 tokens) per billing policy.
     // Both are omitted when no provider served the call.
+    const billedProvider = provider ?? (filtered ? emptyProvider : undefined)
     const meta =
-      provider
+      billedProvider
         ? {
-            searchProvider: provider,
+            searchProvider: billedProvider,
             ...encodeExternalCostMeta({
               kind: 'flat',
-              model: provider,
-              flatCostUsd: flatSearchCostUsd(provider),
+              model: billedProvider,
+              flatCostUsd: flatSearchCostUsd(billedProvider),
             }),
           }
         : undefined
 
     if (results.length === 0) {
+      if (!cancelled && !timedOut && filtered && !trustedEmpty && failures.length === 0) return {
+        data: { error: 'unsupported_filters', requestedFilters: filters, excludedProviders,
+          message: 'No configured provider can honor all requested filters. Choose a compatible provider/configuration or explicitly revise the filters. No conclusion can be drawn from the empty result.' },
+        isError: true,
+      }
       if (cancelled || timedOut) {
         const reason = cancelled
           ? 'Web search was cancelled by the caller.'
           : `Web search timed out after ${SEARCH_REQUEST_TIMEOUT_MS}ms.`
         return {
-          data: `${reason} No conclusion can be drawn from the empty result.`,
+          data: filtered
+            ? { error: cancelled ? 'cancelled' : 'timeout', requestedFilters: filters, message: `${reason} No conclusion can be drawn from the empty result.` }
+            : `${reason} No conclusion can be drawn from the empty result.`,
           isError: true,
           meta: { searchProviderErrors: reason },
         }
@@ -435,21 +465,33 @@ export function createWebSearchTool(pool?: ExternalCredentialPool) {
       // Surface the outage as a tool error instead — `isError` flows to the
       // `tool_executed` analytics event as success=false + error_message,
       // and `searchProviderErrors` meta records which providers failed.
+      if (filtered && !trustedEmpty && failures.some((failure) => failure.status === 400 || failure.status === 422)) return {
+        data: { error: 'provider_rejected_request', requestedFilters: filters, failures, excludedProviders,
+          message: 'A search provider rejected the filtered request. Check its filter support, credentials and quota before retrying; this is not evidence of zero matches.' },
+        isError: true,
+      }
       if (failures.length > 0 && !trustedEmpty) {
         const summary = failures.map((f) => `${f.provider}: ${f.error}`).join('; ')
         return {
-          data:
-            `Web search is temporarily unavailable — every search provider failed (${summary}). ` +
-            'This is a system-side outage, NOT evidence that what you searched for does not exist. ' +
-            'Do not conclude anything from the empty results; tell the user plainly that web search is currently down.',
+          data: filtered
+            ? { error: 'search_unavailable', requestedFilters: filters, failures, excludedProviders,
+                message: `Web search is temporarily unavailable — every compatible search provider failed (${summary}). No conclusion can be drawn from the empty results.` }
+            : `Web search is temporarily unavailable — every search provider failed (${summary}). ` +
+              'This is a system-side outage, NOT evidence that what you searched for does not exist. ' +
+              'Do not conclude anything from the empty results; tell the user plainly that web search is currently down.',
           isError: true,
           meta: { searchProviderErrors: summary.slice(0, 500) },
         }
       }
+      if (filtered) return { data: { query: input.query!, results: [], provider: emptyProvider,
+        ...(emptyProvider ? filterData(emptyProvider as SearchProviderName) : {}), excludedProviders,
+        message: 'No results found matching these filters. Try a different query.' }, meta }
       return { data: 'No results found. Try a different query.', meta }
     }
 
-    return { data: { query: input.query!, results }, meta }
+    return { data: { query: input.query!, results,
+      ...(filtered && provider ? { provider, ...filterData(provider as SearchProviderName), excludedProviders } : {}),
+    }, meta }
   },
   })
 }
