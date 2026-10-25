@@ -78,6 +78,23 @@ describe('[COMP:platform/local-rig] no-paid administrative fixture', () => {
     assert.equal(child.status, 0, child.stderr)
   })
 
+  it('forwards the finite reference choice exactly and rejects nonadmin use before startup',()=>{
+    const rig=readFileSync(new URL('../rig-up.sh',import.meta.url),'utf8'),launcher=readFileSync(new URL('../launch.mjs',import.meta.url),'utf8')
+    const segment=rig.slice(rig.indexOf('  launch_args=()'),rig.indexOf('  nohup env'))
+    for(const [admin,reference,expected] of [[0,0,[]],[1,0,['--admin-only']],[1,1,['--admin-only','--reference-applications']]]){
+      const shell=spawnSync('bash',['-c',segment+'\nprintf "%s\\n" "${launch_args[@]}"'],{env:{PATH:process.env.PATH,ADMIN_ONLY:String(admin),REFERENCE_APPLICATIONS:String(reference)},encoding:'utf8'})
+      assert.equal(shell.status,0,shell.stderr);assert.deepEqual(shell.stdout.trim()?shell.stdout.trim().split('\n'):[],expected)
+      const apiLine=launcher.split('\n').find(line=>line.startsWith("run('api',"));let forwarded
+      new Function('run','adminOnly','referenceApplications',apiLine)((...args)=>{forwarded=args},Boolean(admin),Boolean(reference))
+      assert.deepEqual(forwarded[2],['--filter','@use-brian/api-open','exec','tsx','src/index.ts',...(admin?['--admin-only','--no-workers']:[]),...(reference?['--reference-applications']:[])])
+    }
+    for(const [command,args] of [['bash',[new URL('../rig-up.sh',import.meta.url).pathname,'--reference-applications']],[process.execPath,[new URL('../launch.mjs',import.meta.url).pathname,'--reference-applications']]]){
+      const result=spawnSync(command,args,{env:{PATH:process.env.PATH},encoding:'utf8'});assert.equal(result.status,1);assert.match(result.stderr,/requires --admin-only/)
+    }
+    expectOrder(launcher,'referenceApplications && !adminOnly','adminRigEnvironment(ROOT, process.env)')
+    assert.match(rig,/--verify-composition "\$ROOT" "\$APPLICATION_COMPOSITION" "\$pid"/)
+  })
+
   it('wires the opt-in into the real composition without changing readiness', () => {
     const source = path => readFileSync(new URL(path, import.meta.url), 'utf8')
     const launcher = source('../launch.mjs')
@@ -127,6 +144,8 @@ describe('[COMP:platform/local-rig] persistent runtime process ownership',()=>{
     const exited=once(child,'exit')
     try{
       await once(child,'spawn');recordAdminGroups(directory,runId,[child.pid])
+      assert.doesNotThrow(()=>assertAdminRuntimeComposition(directory,'normal',process.pid))
+      assert.throws(()=>assertAdminRuntimeComposition(directory,'reference',process.pid),/--keep-db/)
       assert.equal(stopOwnedAdminGroups(directory),1)
       await exited
       assert.equal(stopOwnedAdminGroups(directory),0)
@@ -153,10 +172,20 @@ describe('[COMP:platform/local-rig] canonical runtime verification',()=>{
   const {writeFileSync}=await import('node:fs'),directory=mkdtempSync(join(tmpdir(),'admin-composition-'))
   try{
    assert.throws(()=>assertAdminRuntimeComposition(directory),/--keep-db/)
-   recordAdminGroups(directory,'c'.repeat(32),[])
-   assert.doesNotThrow(()=>assertAdminRuntimeComposition(directory))
+   const runId='c'.repeat(32),processes=(_cmd,args)=>args[0]==='-axo'?`100 ${process.pid} 100`:`node USEBRIAN_ADMIN_RUN_ID=${runId}`
+   recordAdminGroups(directory,runId,[100])
+   assert.doesNotThrow(()=>assertAdminRuntimeComposition(directory,'normal',process.pid,processes))
    const path=join(directory,'.rig','admin','process-groups.json'),record=JSON.parse(readFileSync(path,'utf8'))
    assert.equal(record.runtimeRole,'app_user')
+   assert.equal(record.composition,'normal')
+   assert.throws(()=>assertAdminRuntimeComposition(directory,'reference',process.pid,processes),/--keep-db/)
+   for(const composition of [undefined,'reference','unknown']){record.composition=composition;writeFileSync(path,JSON.stringify(record));assert.throws(()=>assertAdminRuntimeComposition(directory,'normal',process.pid,processes),/--keep-db/)}
+   record.composition='normal'
+   for(const detail of ['node USEBRIAN_ADMIN_RUN_ID='+ 'd'.repeat(32),'renamed-node'])assert.throws(()=>assertAdminRuntimeComposition(directory,'normal',process.pid,(_cmd,args)=>args[0]==='-axo'?`100 ${process.pid} 100`:detail),/--keep-db/)
+   assert.throws(()=>assertAdminRuntimeComposition(directory,'normal',process.pid,()=>''),/--keep-db/)
+   assert.throws(()=>assertAdminRuntimeComposition(directory,'normal',process.pid,(_cmd,args)=>args[0]==='-axo'?'100 1 100':`node USEBRIAN_ADMIN_RUN_ID=${runId}`),/--keep-db/)
+   recordAdminGroups(directory,runId,[100],'reference');assert.doesNotThrow(()=>assertAdminRuntimeComposition(directory,'reference',process.pid,processes));assert.throws(()=>assertAdminRuntimeComposition(directory,'normal',process.pid,processes),/--keep-db/)
+   recordAdminGroups(directory,runId,[100]);
    for(const role of [undefined,'admin_fixture_app','assurance_app']){record.runtimeRole=role;writeFileSync(path,JSON.stringify(record));assert.throws(()=>assertAdminRuntimeComposition(directory),/--keep-db/)}
   }finally{rmSync(directory,{recursive:true,force:true})}
  })

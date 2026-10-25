@@ -43,6 +43,7 @@ READY_TIMEOUT="${BRIAN_RIG_TIMEOUT:-300}"
 CORE_ONLY=1
 FRESH=0
 ADMIN_ONLY=0
+REFERENCE_APPLICATIONS=0
 
 say() { printf '[rig] %s\n' "$*"; }
 warn() { printf '[rig] warning: %s\n' "$*" >&2; }
@@ -53,6 +54,7 @@ usage() {
 Usage: scripts/rig-up.sh [options]
 
   --admin-only       isolated administrative fixture, no paid providers/workers
+  --reference-applications  fixed reference modules (requires --admin-only)
   --full             also start the channel connectors + browser relay
                      (default: core only — brain, api, doc-sync, app-web)
   --fresh            re-create the database from empty before booting
@@ -69,6 +71,7 @@ USAGE
 while [ $# -gt 0 ]; do
   case "$1" in
     --admin-only) ADMIN_ONLY=1 ;;
+    --reference-applications) REFERENCE_APPLICATIONS=1 ;;
     --full) CORE_ONLY=0 ;;
     --fresh) FRESH=1 ;;
     --timeout) shift; [ $# -gt 0 ] || die "--timeout needs a value"; READY_TIMEOUT="$1" ;;
@@ -78,6 +81,10 @@ while [ $# -gt 0 ]; do
   esac
   shift
 done
+
+[ "$REFERENCE_APPLICATIONS" = 0 ] || [ "$ADMIN_ONLY" = 1 ] || die "--reference-applications requires --admin-only"
+APPLICATION_COMPOSITION=normal
+[ "$REFERENCE_APPLICATIONS" = 0 ] || APPLICATION_COMPOSITION=reference
 
 if [ "$ADMIN_ONLY" = 1 ]; then
   [ "$CORE_ONLY" = 1 ] && [ "$FRESH" = 0 ] || die "--admin-only cannot be combined with --full or --fresh"
@@ -170,7 +177,7 @@ verify_admin_role() {
 # ── already up? ─────────────────────────────────────────────────────────────
 if pid="$(rig_pid)"; then
   if [ "$ADMIN_ONLY" = 1 ]; then
-    node "$ROOT/scripts/rig-admin.mjs" --verify-composition "$ROOT" || die "administrative runtime composition refused"
+    node "$ROOT/scripts/rig-admin.mjs" --verify-composition "$ROOT" "$APPLICATION_COMPOSITION" "$pid" || die "administrative runtime composition refused"
   fi
   recorded_api_port="$(node "$ROOT/scripts/launch-ports.mjs" "$API_PORT_FILE" --recorded)" || die "invalid recorded API port"
   [ "$API_PORT" = "$recorded_api_port" ] || die "rig is running on :$recorded_api_port; run scripts/rig-down.sh --keep-db before changing its API port"
@@ -332,6 +339,7 @@ if [ "$mint_only" = "0" ]; then
   printf '%s\n' "$API_PORT" >"$API_PORT_FILE"
   launch_args=()
   [ "$ADMIN_ONLY" = 1 ] && launch_args+=(--admin-only)
+  [ "$REFERENCE_APPLICATIONS" = 0 ] || launch_args+=(--reference-applications)
   nohup env "${launch_env[@]}" \
     node "$ROOT/scripts/launch.mjs" "${launch_args[@]}" >>"$LOG" 2>&1 </dev/null &
   echo $! >"$PIDFILE"

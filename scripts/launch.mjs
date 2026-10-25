@@ -50,6 +50,9 @@ import { adminRigEnvironment, adminRuntimeNodeOptions, recordAdminGroups } from 
 
 const ROOT = resolve(dirname(fileURLToPath(import.meta.url)), '..')
 const adminOnly = process.argv.includes('--admin-only')
+const referenceApplications = process.argv.includes('--reference-applications')
+if (referenceApplications && !adminOnly) throw new Error('--reference-applications requires --admin-only')
+const applicationComposition = referenceApplications ? 'reference' : 'normal'
 const adminRunId = adminOnly ? randomBytes(16).toString('hex') : null
 if (adminOnly) {
   const clean = adminRigEnvironment(ROOT, process.env)
@@ -353,7 +356,7 @@ function run(label, cmd, args, extraEnv = {}, cwd = ROOT) {
     if (!shuttingDown && code) { console.error(`[launch] ${label} exited with code ${code}; shutting down.`); shutdown(1) }
   })
   children.push(child)
-  if(adminOnly)recordAdminGroups(ROOT,adminRunId,children.map(item=>item.pid).filter(Boolean))
+  if(adminOnly)recordAdminGroups(ROOT,adminRunId,children.map(item=>item.pid).filter(Boolean),applicationComposition)
   return child
 }
 function waitForPort(port, label, timeoutMs = 60_000) {
@@ -558,7 +561,7 @@ if (useLocalBrowserRelay) {
 }
 
 console.log(`[launch] starting api (:${PORTS.api}), doc-sync (:${PORTS.docSync}), app-web (:${PORTS.appWeb}) ...`)
-run('api', 'pnpm', ['--filter', '@use-brian/api-open', 'exec', 'tsx', 'src/index.ts', ...(adminOnly ? ['--admin-only', '--no-workers'] : [])])
+run('api', 'pnpm', ['--filter', '@use-brian/api-open', 'exec', 'tsx', 'src/index.ts', ...(adminOnly ? ['--admin-only', '--no-workers'] : []), ...(referenceApplications ? ['--reference-applications'] : [])])
 run('doc-sync', 'pnpm', ['--filter', '@use-brian/doc-sync', 'exec', 'tsx', 'src/index.ts'],
   { PORT: String(PORTS.docSync) })
 pruneTurbopackCache()

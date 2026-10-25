@@ -52,17 +52,39 @@ export function adminRuntimeNodeOptions(root) {
 
 
 /** Persist ownership independently of the launcher, which may itself be killed. */
-export function recordAdminGroups(root, runId, groups) {
+export function recordAdminGroups(root, runId, groups, composition='normal') {
+  if(!['normal','reference'].includes(composition))throw new Error('Invalid administrative application composition')
   const directory=join(root,'.rig','admin')
   mkdirSync(directory,{recursive:true})
-  writeFileSync(join(directory,'process-groups.json'),JSON.stringify({root,runId,groups,runtimeRole:'app_user'}),{mode:0o600})
+  writeFileSync(join(directory,'process-groups.json'),JSON.stringify({root,runId,groups,runtimeRole:'app_user',composition}),{mode:0o600})
 }
 
 /** Refuse running old composition before any database changes. */
-export function assertAdminRuntimeComposition(root) {
+export function assertAdminRuntimeComposition(root, composition='normal', launcherPid=process.pid, execute=execFileSync) {
   const path=join(root,'.rig','admin','process-groups.json')
   const record=existsSync(path)?JSON.parse(readFileSync(path,'utf8')):null
-  if(record?.root!==root||record.runtimeRole!=='app_user'||!/^[a-f0-9]{32}$/.test(record.runId)||!Array.isArray(record.groups)||record.groups.some(pid=>!Number.isInteger(pid)||pid<2))throw new Error('Administrative runtime composition changed; run scripts/rig-down.sh --admin-only --keep-db, then repeat rig-up with the same port')
+  const refuse=()=>{throw new Error('Administrative runtime composition changed; run scripts/rig-down.sh --admin-only --keep-db, then repeat rig-up with the same port')}
+  if(!['normal','reference'].includes(composition)||record?.root!==root||record.runtimeRole!=='app_user'||record.composition!==composition||!/^[a-f0-9]{32}$/.test(record.runId)||!Array.isArray(record.groups)||record.groups.some(pid=>!Number.isInteger(pid)||pid<2)||!Number.isInteger(launcherPid)||launcherPid<2)refuse()
+  // The launcher sets its own marker after exec; macOS ps need not expose it.
+  // Child groups inherit the startup marker and must still belong to that launcher.
+  const processes=execute('ps',['-axo','pid=,ppid=,pgid='],{encoding:'utf8'}).trim().split(/\n/).map(line=>line.trim().split(/\s+/).map(Number))
+  let live=0
+  for(const group of new Set(record.groups)){
+    const members=processes.filter(([,,pgid])=>pgid===group)
+    if(!members.length)continue
+    live++
+    if(!members.some(([pid,parent])=>pid===group&&parent===launcherPid))refuse()
+    let bound=false
+    for(const [pid] of members){
+      const detail=execute('ps',['eww','-p',String(pid),'-o','command='],{encoding:'utf8'})
+      if(detail.match(/(?:^|\s)USEBRIAN_ADMIN_RUN_ID=([^\s]+)/)?.[1]!==record.runId)continue
+      let current=pid;const seen=new Set()
+      while(current!==group&&!seen.has(current)){seen.add(current);current=members.find(([id])=>id===current)?.[1]}
+      if(current===group)bound=true
+    }
+    if(!bound)refuse()
+  }
+  if(!live)refuse()
 }
 
 export function stopOwnedAdminGroups(root, execute=execFileSync, signal=process.kill.bind(process)) {
@@ -103,7 +125,7 @@ export function stopOwnedAdminGroups(root, execute=execFileSync, signal=process.
 }
 
 if(process.argv[1]&&import.meta.url===pathToFileURL(process.argv[1]).href){
-  if(process.argv[2]==='--verify-composition'&&process.argv[3]){assertAdminRuntimeComposition(process.argv[3])}
+  if(process.argv[2]==='--verify-composition'&&process.argv[3]){assertAdminRuntimeComposition(process.argv[3],process.argv[4],Number(process.argv[5]))}
   else {
   if(process.argv[2]!=='--stop-owned'||!process.argv[3])throw new Error('Expected --stop-owned <checkout-root>')
   console.log(`[rig] signaled ${stopOwnedAdminGroups(process.argv[3])} verified administrative runtime groups`)
