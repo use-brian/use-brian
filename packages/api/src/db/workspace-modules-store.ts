@@ -206,29 +206,3 @@ export function createWorkspaceModulesStore(pool: Pool = getPool(), memberPool: 
   }
 }
 export type WorkspaceModulesStore = ReturnType<typeof createWorkspaceModulesStore>
-
-/** Complete a requested drain for any registered module using its blocker adapter. */
-export async function finishWorkspaceModuleDrain(workspaceId: string, rawModuleKey: string,
-  lifecycle?: WorkspaceModuleLifecycleAdapter, pool: Pool = getPool(),
-  registry: WorkspaceModuleRegistry = WORKSPACE_MODULES): Promise<boolean> {
-  const moduleKey = requireModuleKey(rawModuleKey, registry)
-  const client = await pool.connect()
-  try {
-    await client.query('BEGIN')
-    const current = (await client.query<{ version: number }>(`SELECT version FROM workspace_modules
-      WHERE workspace_id=$1 AND module_key=$2 AND state='draining' FOR UPDATE`, [workspaceId, moduleKey])).rows[0]
-    if (!current || (await blockingWork(lifecycle, client, workspaceId)).some((row) => row.count > 0)) {
-      await client.query('COMMIT'); return false
-    }
-    await client.query(`UPDATE workspace_modules SET state='disabled',version=version+1,disabled_at=clock_timestamp(),updated_at=clock_timestamp(),updated_by_user_id=NULL
-      WHERE workspace_id=$1 AND module_key=$2`, [workspaceId, moduleKey])
-    await client.query(`INSERT INTO workspace_audit_log(workspace_id,event_type,subject_id,details)
-      VALUES($1,'workspace.module_changed',$1,$2::jsonb)`, [workspaceId, JSON.stringify({
-        moduleKey, action: 'finish_disable', from: 'draining', to: 'disabled',
-        version: current.version + 1, actorKind: 'system_job',
-      })])
-    await client.query('COMMIT'); return true
-  } catch (error) {
-    await client.query('ROLLBACK').catch(() => undefined); throw error
-  } finally { client.release() }
-}

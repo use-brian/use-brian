@@ -138,8 +138,9 @@ describe.sequential('[COMP:api/application-management] [COMP:api/application-rec
     await owner.query('DELETE FROM users WHERE id=ANY($1::uuid[])', [[ownerId, ...(serviceUserId ? [serviceUserId] : [])]])
     await getAppPool().end(); await owner.end()
   })
-  it('preserves the four lifecycle consumers except their private revision call and keeps the new port owner-only', async () => {
+  it('preserves exact human lifecycle bodies and properties alongside the private drain continuation', async () => {
     const historical = await readFile(new URL('../../../migrations/8052_application_native_governance_completion.sql', import.meta.url), 'utf8')
+    const continuation = await readFile(new URL('../../../migrations/8125_association_drain_continuation.sql', import.meta.url), 'utf8')
     for (const [name, signature, result, runtimeEntry] of [
       ['application_prepare_native_module_lifecycle', 'uuid,text,text,integer,text', 'void', true],
       ['application_guard_native_module_lifecycle', '', 'trigger', false],
@@ -154,12 +155,47 @@ describe.sequential('[COMP:api/application-management] [COMP:api/application-rec
           'grantor_matches',a.grantor=p.proowner,'privilege',a.privilege_type,'grant_option',a.is_grantable) ORDER BY a.grantee=p.proowner DESC)
           FROM aclexplode(coalesce(p.proacl,acldefault('f',p.proowner))) a) AS acl
         FROM pg_proc p JOIN pg_class c ON c.oid='public.application_native_field_contracts'::regclass WHERE p.oid=$1::regprocedure`, [name + '(' + signature + ')'])).rows[0]
-      expect(row.prosrc).toBe(expectedBody!.replace('application_native_governance_revision(', 'application_native_module_lifecycle_revision('))
+      let humanBody = row.prosrc as string
+      if (name !== 'application_prepare_native_module_lifecycle') {
+        const signatureText = name + '(' + signature + ')'
+        const section = continuation.split(" definition:=pg_get_functiondef('public." + signatureText + "'::regprocedure);\n")
+        expect(section).toHaveLength(2)
+        const edits = [...section[1].split(' EXECUTE definition;')[0].matchAll(/needle:=\$old\$([\s\S]*?)\$old\$;\n replacement:=\$new\$([\s\S]*?)\$new\$/g)]
+        expect(edits).toHaveLength(name === 'application_finish_native_module_lifecycle' ? 2 : 1)
+        const additions: string[] = []
+        // Reverse only each exact uniquely declared forward splice. No current
+        // pg_proc body supplies the expected original human implementation.
+        for (const [, original, replacement] of edits.reverse()) {
+          expect(humanBody.split(replacement)).toHaveLength(2)
+          expect(replacement.split(original)).toHaveLength(2)
+          additions.push(replacement.replace(original, ''))
+          humanBody = humanBody.replace(replacement, original)
+        }
+        const added = additions.join('\n')
+        expect(added).toContain('review.continuation_before')
+        expect(added).toContain("'association_module_drain_v1'")
+        expect(added).toContain('review.authority_revision IS DISTINCT FROM public.application_field_digest(')
+        if (name === 'application_guard_native_module_lifecycle') {
+          expect(added).toContain("TG_OP<>'UPDATE' OR module<>'association'")
+          expect(added).toContain('review.continuation_before IS DISTINCT FROM to_jsonb(OLD)')
+          expect(added).toContain('NEW.version<>OLD.version+1')
+        } else if (name === 'application_record_native_module_lifecycle') {
+          expect(added).toContain('SET initialized=true,used=true')
+        } else {
+          expect(added).toContain('NOT review.initialized OR NOT review.used')
+          expect(added).toContain('DELETE FROM public.application_native_module_lifecycle_reviews')
+        }
+      }
+      expect(humanBody).toBe(expectedBody!.replace('application_native_governance_revision(', 'application_native_module_lifecycle_revision('))
       const { prosrc: _, ...properties } = row
       expect(properties).toEqual({ prosecdef: true, provolatile: 'v', proparallel: 'u', proisstrict: false, proleakproof: false, proretset: false, prokind: 'f', result,
         proconfig: ['search_path=pg_catalog, public, pg_temp'], owner_matches: true,
         acl: [{ role: 'owner', grantor_matches: true, privilege: 'EXECUTE', grant_option: false }, ...(runtimeEntry ? [{ role: 'app_user', grantor_matches: true, privilege: 'EXECUTE', grant_option: false }] : [])] })
     }
+    const manual = await readFile(new URL('../../../migrations/8122_application_native_module_availability.sql', import.meta.url), 'utf8')
+    const manualBody = /CREATE FUNCTION application_native_module_lifecycle_revision\([^\n]*\).*?AS \$\$(.*?)\$\$;/s.exec(manual)?.[1]
+    expect(manualBody).toBeTruthy()
+    expect((await owner.query("SELECT prosrc FROM pg_proc WHERE oid='application_native_module_lifecycle_revision(uuid,uuid,text)'::regprocedure")).rows[0].prosrc).toBe(manualBody)
     expect((await owner.query(`SELECT p.prosecdef,p.proowner=c.relowner AS owner_matches,
       NOT EXISTS(SELECT 1 FROM aclexplode(coalesce(p.proacl,acldefault('f',p.proowner))) a WHERE a.grantee<>p.proowner) AS private
       FROM pg_proc p JOIN pg_class c ON c.oid='public.application_native_field_contracts'::regclass
