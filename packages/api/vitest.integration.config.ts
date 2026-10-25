@@ -10,6 +10,8 @@ import { fileURLToPath } from 'node:url'
 process.env.DATABASE_URL ??= 'postgres:///sidanclaw'
 
 export default defineConfig({
+  // Synthetic tests use explicit environment only; never discover workspace dotenv.
+  envDir: false,
   server: {
     fs: {
       // Match the unit-test config in absorbed (submodule-of-platform) mode:

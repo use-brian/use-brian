@@ -5,6 +5,8 @@ import { defineConfig } from 'vitest/config'
 // so this config just scopes the run to the integration files; no secrets
 // are injected here.
 export default defineConfig({
+  // Synthetic tests use explicit environment only; never discover workspace dotenv.
+  envDir: false,
   test: {
     include: ['src/**/*.integration.test.ts'],
     testTimeout: 60_000,

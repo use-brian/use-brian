@@ -9,6 +9,8 @@ import { configDefaults, defineConfig } from 'vitest/config'
 // them here keeps a bare `pnpm test` green on a machine with no
 // DATABASE_URL set.
 export default defineConfig({
+  // Synthetic tests use explicit environment only; never discover workspace dotenv.
+  envDir: false,
   server: {
     fs: {
       // Same superproject-store allowance as packages/core/vitest.config.ts:

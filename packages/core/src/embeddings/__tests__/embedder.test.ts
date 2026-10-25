@@ -1,13 +1,9 @@
 import { describe, it, expect, vi, beforeEach, afterEach, type MockInstance } from 'vitest'
-import dotenv from 'dotenv'
-import { resolve } from 'node:path'
 import {
   createGeminiEmbedder,
   GEMINI_EMBEDDING_DIMENSIONS,
   GEMINI_EMBEDDING_MODEL_ID,
 } from '../embedder.js'
-
-dotenv.config({ path: resolve(import.meta.dirname, '..', '..', '..', '..', '..', '.env') })
 
 describe('[COMP:embeddings/embedder] Gemini embedder (unit)', () => {
   it('exposes the locked dimensions and model_id', () => {
