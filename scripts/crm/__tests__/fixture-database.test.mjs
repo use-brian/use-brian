@@ -1,8 +1,13 @@
 import assert from 'node:assert/strict'
 import { randomUUID } from 'node:crypto'
+import { spawn } from 'node:child_process'
+import { once } from 'node:events'
+import { mkdtemp, readFile, readdir, rm } from 'node:fs/promises'
+import { tmpdir } from 'node:os'
+import { join } from 'node:path'
 import { test } from 'node:test'
 import pg from 'pg'
-import { assertLocalFixture } from '../local-fixture.mjs'
+import { assertLocalFixture, cleanRuntimeEnvironment, runCommand } from '../local-fixture.mjs'
 
 test('[COMP:crm/assurance-fixture] Default PostgreSQL clients remain inside the disposable cluster', async () => {
   const marker = await assertLocalFixture()
@@ -53,5 +58,50 @@ test('[COMP:crm/assurance-fixture] Actual migrations and application-role RLS', 
   } finally {
     await app.end()
     await owner.end()
+  }
+})
+
+test('[COMP:crm/assurance-fixture] Group interruption disposes only the owned PostgreSQL cluster', { timeout: 35_000 }, async t => {
+  await assertLocalFixture()
+  const directory = await mkdtemp(join(tmpdir(), 'fixture-interruption-test-'))
+  const env = { ...cleanRuntimeEnvironment(process.env), TMPDIR: directory }
+  const pgBin = (await runCommand('pg_config', ['--bindir'], { env })).trim()
+  const child = spawn(process.execPath, ['scripts/crm/local-fixture.mjs', '--pg-bin', pgBin, '--', process.execPath,
+    '-e', "console.log('fixture-ready');setInterval(()=>{},1000)"], { env, detached: true, stdio: ['ignore', 'pipe', 'pipe'] })
+  const closed = once(child, 'close')
+  const startedAt = new Date().toISOString()
+  t.diagnostic(JSON.stringify({ ownedProcessGroup: child.pid, startedAt, maxSeconds: 25 }))
+  const stop = signal => { try { process.kill(-child.pid, signal) } catch (error) { if (error.code !== 'ESRCH') throw error } }
+  const deadline = setTimeout(() => stop('SIGKILL'), 25_000)
+  let output = ''
+  try {
+    await new Promise((accept, reject) => {
+      child.stdout.on('data', chunk => { output += chunk; if (output.includes('fixture-ready')) accept() })
+      child.stderr.on('data', chunk => { output += chunk })
+      child.once('error', reject)
+      child.once('close', () => reject(new Error('Disposable child exited before readiness: ' + output)))
+    })
+    const names = (await readdir(directory)).filter(name => name.startsWith('brian-crm-'))
+    assert.equal(names.length, 1)
+    const postmaster = Number((await readFile(join(directory, names[0], 'data', 'postmaster.pid'), 'utf8')).split('\n')[0])
+    t.diagnostic(JSON.stringify({ ownedPostmaster: postmaster, directory: join(directory, names[0]) }))
+    stop('SIGTERM')
+    await closed
+    assert.equal((await readdir(directory)).filter(name => name.startsWith('brian-crm-')).length, 0)
+    assert.throws(() => process.kill(postmaster, 0), { code: 'ESRCH' })
+    t.diagnostic(JSON.stringify({ ownedProcessGroup: child.pid, finishedAt: new Date().toISOString(), disposed: true }))
+  } finally {
+    clearTimeout(deadline)
+    stop('SIGKILL')
+    await closed
+    // Failure cleanup is confined to this test's newly created root and a
+    // marker whose owned directory matches; never select an ambient cluster.
+    for (const name of (await readdir(directory)).filter(name => name.startsWith('brian-crm-'))) {
+      const owned = join(directory, name)
+      const marker = JSON.parse(await readFile(join(owned, 'assurance-fixture.json'), 'utf8'))
+      assert.equal(marker.directory, owned)
+      await runCommand(join(pgBin, 'pg_ctl'), ['-D', join(owned, 'data'), '-m', 'fast', '-w', 'stop'], { env })
+    }
+    await rm(directory, { recursive: true })
   }
 })
