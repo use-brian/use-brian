@@ -130,12 +130,25 @@ export async function queryLegacyCanonicalCrmBatch(access:AccessContext,queries:
 export type CanonicalCrmTemplate = {type:'company'|'person'|'deal'|'record';fields:readonly string[]|'all';ids?:readonly string[];history?:boolean}
 const attributeKeys:Record<string,string>={externalRef:'external_ref',ownerId:'owner_id',archivedAt:'crm_archived_at',companyId:'company_id',contactId:'contact_id',
   closeDate:'close_date',pipelineId:'pipeline_id',pipelineStageId:'pipeline_stage_id',currencyCode:'currency_code',winLossReason:'win_loss_reason'}
+const profileAttributeKeys=new Set(["self","email","phone","company_id","tags","external_ref","owner_id","crm_archived_at","custom_fields","name","role","company","location","birthday","pronouns","role_or_company","sources"])
 /** Fixed representation adapter for ephemeral legacy SQL, never a second business store. */
 function nativeTemplateRow(workspaceId:string,type:string,candidate:{id:string;record_version:string;data:Record<string,unknown>;sources:ScopeSource[];value_encodings?:{amount?:string}}) {
   const value=candidate.data,scope=candidate.sources[0],attributes:Record<string,unknown>={},custom:Record<string,unknown>={}
   for(const [key,item] of Object.entries(value)) {
     if(['name','aliases','createdAt','updatedAt','participants'].includes(key))continue
-    if(key.startsWith('custom.')){if(item!==null)custom[key.slice(7)]=item}
+    if(key==='profile.extra'){
+      if(item===null||typeof item!=='object'||Array.isArray(item)||Object.keys(item).some(name=>profileAttributeKeys.has(name)))
+        throw new ApplicationPlatformError('access_unavailable','The canonical profile is unavailable.')
+      for(const [name,extra] of Object.entries(item))Object.defineProperty(attributes,name,{value:extra,enumerable:true,writable:true,configurable:true})
+    }
+    else if(key.startsWith('profile.')){
+      if(item!==null){
+        if(typeof item!=='object'||Array.isArray(item)||Object.keys(item).length!==1||!Object.hasOwn(item,'value'))
+          throw new ApplicationPlatformError('access_unavailable','The canonical profile is unavailable.')
+        attributes[key.slice(8)]=(item as {value:unknown}).value
+      }
+    }
+    else if(key.startsWith('custom.')){if(item!==null)custom[key.slice(7)]=item}
     else if(item!==null){
       if(key==='amount'&&candidate.value_encodings?.amount==='invalid')throw new ApplicationPlatformError('invalid_value','The canonical amount requires review.')
       attributes[attributeKeys[key]??key]=key==='amount'&&candidate.value_encodings?.amount==='number'&&typeof item==='string'?decodeCrmAmount(Number(item),item):item

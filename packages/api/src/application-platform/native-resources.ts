@@ -13,6 +13,15 @@ const definitions:ApplicationResourceDefinition[]=[
   {typeKey:'company',origin:{kind:'native',moduleKey:'native'},schemaVersion:'2',fields:[
     {key:'name',label:'Name',kind:'text',required:true,maxLength:256},{key:'domain',label:'Domain',kind:'text',maxLength:320},...commonCrmFields]},
   {typeKey:'person',origin:{kind:'native',moduleKey:'native'},schemaVersion:'2',fields:[
+    {key:'profile.name',label:'Self name',kind:'json',shape:'object',immutable:true},
+    {key:'profile.role',label:'Self role',kind:'json',shape:'object',immutable:true},
+    {key:'profile.company',label:'Self company',kind:'json',shape:'object',immutable:true},
+    {key:'profile.location',label:'Self location',kind:'json',shape:'object',immutable:true},
+    {key:'profile.birthday',label:'Self birthday',kind:'json',shape:'object',immutable:true},
+    {key:'profile.pronouns',label:'Self pronouns',kind:'json',shape:'object',immutable:true},
+    {key:'profile.role_or_company',label:'Self role or company',kind:'json',shape:'object',immutable:true},
+    {key:'profile.sources',label:'Self sources',kind:'json',shape:'object',immutable:true},
+    {key:'profile.extra',label:'Additional self attributes',kind:'json',shape:'object',immutable:true},
     {key:'self',label:'Self identity',kind:'boolean',immutable:true},{key:'name',label:'Name',kind:'text',required:true,maxLength:256},{key:'email',label:'Email',kind:'text',maxLength:320},
     {key:'phone',label:'Phone',kind:'text',maxLength:100},{key:'companyId',label:'Company',kind:'reference',targetTypeKey:'company'},
     {key:'custom.organisation_name',label:'Organisation',kind:'text',maxLength:200},

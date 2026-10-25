@@ -13,6 +13,10 @@ import { authenticateApplicationCredential,mintApplicationCredentialSecret } fro
 import { loadApplicationCredentialStateSystem } from '../auth-store.js'
 import { resolveApplicationExecutionContext } from '../execution-context.js'
 import { createCanonicalNativeApplicationModule } from '../native-adapters.js'
+import { boundScopeSources } from '@use-brian/core'
+import { updateSelfEntityAttributes } from '../../db/entities-store.js'
+import { queryLegacyCanonicalCrmSql } from '../../db/crm-reader.js'
+import { runApplicationTransaction } from '../execution-context.js'
 const {assertLocalFixture}=await import(new URL('../../../../../scripts/crm/local-fixture.mjs',import.meta.url).href)
 await assertLocalFixture()
 
@@ -272,6 +276,89 @@ describe('[COMP:api/application-records] native operation completion',()=>{
   expect((await owner.query('SELECT id,logical_id,title,status FROM tasks WHERE id=$1',[result.resources[0].id])).rows[0]).toEqual({id:result.resources[0].id,logical_id:result.resources[0].id,title:request.input.title,status:'blocked'})
  })
 
+
+ // Read-only profile codecs use the existing native operation owner, not Memory adapters.
+ async function codecExecution(actor:string=userId,w:string=workspaceId,helper:string=assistantId){return(await resolveExecutionContextSystem({userId:actor,workspaceId:w,assistant:(await findAssistantById(helper))!,memberMode:'member',
+  identity:{kind:'attended',principal:{kind:'workspace_member',userId:actor,authenticationKind:'native_session'}},ownership:{kind:'workspace',workspaceId:w},
+  lifecycle:{sessionId:randomUUID(),sessionPersisted:false,channelId:'native-codec-fixture',channelType:'test',abortSignal:new AbortController().signal}})).executionContext}
+ const profileFields=['profile.name','profile.role','profile.company','profile.location','profile.birthday','profile.pronouns','profile.role_or_company','profile.sources']
+ const profileAttributes={name:42,role:{title:'Fictional planning lead'},company:['Fictional company',7],location:true,birthday:null,pronouns:7,role_or_company:[],sources:{legacy:true},licenses:['fictional',7],title:'Fictional pilot',domain:'profile.example',stage:false,empty:null}
+ const codecPoint=async(id:string,fields:string[])=>service().query(await codecExecution(),'native','get',{type:'person',id,fields}) as Promise<{values:Record<string,unknown>}>
+ const codecQuery=async(fields:string[])=>service().query(await codecExecution(),'native','query',{type:'person',query:{fields,filters:[{field:'self',op:'eq',value:true}]}}) as Promise<{records:Array<{ref:{id:string};values:Record<string,unknown>}>}>
+ const codecLegacy=(actor:string,w:string,helper:string,id:string)=>queryLegacyCanonicalCrmSql<{display_name:string;attributes:Record<string,unknown>}>({workspaceId:w,userId:actor,assistantId:helper,assistantKind:'primary',clearance:'confidential'},
+  [{type:'person',fields:'all',ids:[id]}],'SELECT display_name,attributes FROM entities WHERE id=$1',[id])
+ it('preserves named-slot JSON overrides and disjoint extras through native point, query and full legacy reconstruction',async()=>{
+  const self=await updateSelfEntityAttributes({userId,workspaceId,displayName:'Fictional display identity',attributes:profileAttributes})
+  const fields=['name','self',...profileFields,'profile.extra','tags','externalRef'],expected:Record<string,unknown>={name:'Fictional display identity',self:true,'profile.extra':{licenses:['fictional',7],title:'Fictional pilot',domain:'profile.example',stage:false,empty:null},tags:null,externalRef:null}
+  for(const field of profileFields)expected[field]={value:profileAttributes[field.slice(8) as keyof typeof profileAttributes]}
+  expect((await codecPoint(self.id,fields)).values).toEqual(expected)
+  expect((await codecQuery(fields)).records.find(row=>row.ref.id===self.id)?.values).toEqual(expected)
+  expect((await codecPoint(self.id,['profile.role'])).values).toEqual({'profile.role':{value:profileAttributes.role}})
+  expect((await codecPoint(self.id,['profile.extra'])).values).toEqual({'profile.extra':expected['profile.extra']})
+  const stored=await source(self.id),legacy=await codecLegacy(userId,workspaceId,assistantId,self.id)
+  expect(legacy.rows).toEqual([{display_name:'Fictional display identity',attributes:stored.attributes}])
+  const defaults=(await owner.query(`SELECT application_native_entity_values('person','{"attributes":{}}',ARRAY['tags','externalRef','profile.role']) AS absent,
+   application_native_entity_values('person','{"attributes":{"tags":[],"external_ref":{}}}',ARRAY['tags','externalRef']) AS explicit,
+   application_native_entity_values('company','{"attributes":{}}',ARRAY['tags','externalRef']) AS company,
+   application_native_entity_values('deal','{"attributes":{}}',ARRAY['tags','externalRef']) AS deal`)).rows[0]
+  expect(defaults).toEqual({absent:{tags:null,externalRef:null,'profile.role':null},explicit:{tags:[],externalRef:{}},company:{tags:[],externalRef:{}},deal:{tags:[],externalRef:{}}})
+  await updateSelfEntityAttributes({userId,workspaceId,displayName:'Fictional display identity',attributes:{tags:[],external_ref:{}}})
+  expect((await codecPoint(self.id,['tags','externalRef'])).values).toEqual({tags:[],externalRef:{}})
+  expect((await codecQuery(['tags','externalRef'])).records.find(row=>row.ref.id===self.id)?.values).toEqual({tags:[],externalRef:{}})
+  await expect(updateSelfEntityAttributes({userId,workspaceId,displayName:'Fictional display identity',attributes:{email:42}})).rejects.toMatchObject({code:'22023'})
+ })
+ it('keeps profile fields immutable in native commands and direct create while enforcing real row, workspace and assistant ceilings',async()=>{
+  const self=await updateSelfEntityAttributes({userId,workspaceId,displayName:'Fictional display identity',attributes:{role:'Fictional immutable role'}})
+  const before=await source(self.id),oldHistory=await history(self.id),counts=async()=>(await owner.query(`SELECT
+   (SELECT count(*)::int FROM entities WHERE workspace_id=$1) AS entities,
+   (SELECT count(*)::int FROM application_operation_receipts WHERE workspace_id=$1) AS receipts,
+   (SELECT count(*)::int FROM application_command_audit WHERE workspace_id=$1) AS audits,
+   (SELECT count(*)::int FROM application_committed_events WHERE workspace_id=$1) AS events`,[workspaceId])).rows[0],oldCounts=await counts()
+  await expect(service().command(await codecExecution(),'native','create_contact',{idempotencyKey:randomUUID(),input:{name:'Fictional refused profile create','profile.role':{value:'forbidden'}}})).rejects.toMatchObject({code:'invalid_value'})
+  await expect(service().command(await codecExecution(),'native','patch_contact',{idempotencyKey:randomUUID(),expectedVersion:before.version,input:{id:self.id,patch:{'profile.role':{value:'forbidden'}}}})).rejects.toMatchObject({code:'invalid_value'})
+  await expect(runApplicationTransaction(getAppPool(),await codecExecution(),async client=>{try{return await client.query("SELECT application_create_canonical_crm_ref('person',$1::jsonb,$2::jsonb)",[{name:'Fictional refused SQL profile','profile.role':{value:'forbidden'}},{workspaceId,sensitivity:'internal',compartments:[],projectIds:[]}])}catch(error){expect(error).toMatchObject({code:'22023'});throw error}})).rejects.toMatchObject({code:'invalid_value'})
+  expect(await source(self.id)).toEqual(before);expect(await history(self.id)).toEqual(oldHistory);expect(await counts()).toEqual(oldCounts)
+  await expect(service().query(await codecExecution(otherId),'native','get',{type:'person',id:self.id,fields:['profile.role']})).rejects.toMatchObject({code:'access_unavailable'})
+  expect((await service().query(await codecExecution(otherId),'native','query',{type:'person',query:{fields:['profile.role'],filters:[{field:'self',op:'eq',value:true}]}}) as {records:Array<{ref:{id:string}}>}).records.map(row=>row.ref.id)).not.toContain(self.id)
+  const foreign=randomUUID(),foreignAssistant=randomUUID(),publicAssistant=randomUUID()
+  try{
+   await owner.query("INSERT INTO workspaces(id,name,owner_user_id) VALUES($1,'Fictional codec foreign workspace',$2)",[foreign,userId])
+   await owner.query("INSERT INTO workspace_members(workspace_id,user_id,role,clearance) VALUES($1,$2,'owner','confidential')",[foreign,userId])
+   await owner.query("INSERT INTO assistants(id,name,owner_user_id,workspace_id,kind,clearance) VALUES($1,'Fictional foreign codec helper',$2,$3,'primary','confidential'),($4,'Fictional public codec helper',$2,$5,'standard','public')",[foreignAssistant,userId,foreign,publicAssistant,workspaceId])
+   await expect(service().query(await codecExecution(userId,foreign,foreignAssistant),'native','get',{type:'person',id:self.id,fields:['profile.role']})).rejects.toMatchObject({code:'access_unavailable'})
+   await expect(service().query(await codecExecution(userId,workspaceId,publicAssistant),'native','get',{type:'person',id:self.id,fields:['profile.role']})).rejects.toMatchObject({code:'access_unavailable'})
+  }finally{await owner.query('DELETE FROM assistants WHERE id=ANY($1::uuid[])',[[foreignAssistant,publicAssistant]]);await owner.query('DELETE FROM workspaces WHERE id=$1',[foreign])}
+  await expect(runApplicationTransaction(getAppPool(),await codecExecution(),async client=>{try{return await client.query("SELECT application_native_entity_values('person','{}'::jsonb)")}catch(error){expect(error).toMatchObject({code:'42501'});throw error}})).rejects.toMatchObject({code:'access_unavailable'})
+ })
+ it('holds revision-one point and query observations after revision two without rewriting recorded identities or snapshots',async()=>{
+  const self=await updateSelfEntityAttributes({userId,workspaceId,displayName:'Fictional codec revision identity',attributes:{role:'Fictional revision role'}})
+  const signature='public.application_native_builtin_field_revision(text,text)',definition=(await owner.query('SELECT pg_get_functiondef($1::regprocedure) AS definition',[signature])).rows[0].definition as string
+  const selfAnchor="WHEN p_type='person' AND p_field='self' THEN 2",profileAnchor="(starts_with(p_field,'profile.') OR p_field IN('tags','externalRef')) THEN 2"
+  expect(definition.split(selfAnchor)).toHaveLength(2);expect(definition.split(profileAnchor)).toHaveLength(2)
+  const oldDefinition=definition.replace(selfAnchor,selfAnchor.replace('THEN 2','THEN 1')).replace(profileAnchor,profileAnchor.replace('THEN 2','THEN 1'))
+  const capture=async()=>({point:await codecPoint(self.id,['self','profile.role','tags','externalRef']),query:await codecQuery(['self','profile.role','tags','externalRef'])})
+  let old!:Awaited<ReturnType<typeof capture>>,roots:ReturnType<typeof boundScopeSources>=[],original:unknown,stored:unknown
+  const snapshots=async()=>({
+   observations:(await owner.query(`SELECT to_jsonb(r) AS resource,to_jsonb(o) AS observation FROM application_field_resources r JOIN application_field_observations o ON o.workspace_id=r.workspace_id AND o.resource_id=r.id
+    WHERE r.workspace_id=$1 AND EXISTS(SELECT 1 FROM jsonb_to_recordset($2::jsonb) saved(id uuid,version text) WHERE saved.id=o.resource_id AND saved.version=o.version) ORDER BY r.id,o.version`,[workspaceId,JSON.stringify(roots.map(root=>({id:root.resourceId,version:root.version})))])).rows,
+   policy:(await owner.query(`SELECT (SELECT to_jsonb(p) FROM workspace_access_policies p WHERE p.workspace_id=$1) AS workspace,
+    (SELECT jsonb_agg(to_jsonb(p) ORDER BY p.resource_type) FROM application_native_resource_owners p WHERE p.workspace_id=$1) AS owners,
+    (SELECT jsonb_agg(to_jsonb(p) ORDER BY p.module_key) FROM application_native_field_contracts p WHERE p.module_key='native') AS contracts,
+    (SELECT jsonb_agg(to_jsonb(p) ORDER BY p.id) FROM application_native_role_assignments p WHERE p.workspace_id=$1) AS roles`,[workspaceId])).rows[0],
+   record:(await owner.query('SELECT to_jsonb(e) AS record FROM entities e WHERE id=$1',[self.id])).rows[0].record,
+  })
+  try{
+   await owner.query(oldDefinition);old=await capture()
+   roots=[...boundScopeSources(old.point),...boundScopeSources(old.query)].filter(root=>root.resourceKind==='application_field');expect(roots.length).toBeGreaterThan(1)
+   original=await snapshots();stored=await source(self.id)
+  }finally{await owner.query(definition)}
+  expect(old.point.values).toMatchObject({self:true,'profile.role':{value:'Fictional revision role'}})
+  expect(await snapshots()).toEqual(original)
+  await runApplicationTransaction(getAppPool(),await codecExecution(),async client=>{for(const root of roots)expect((await client.query('SELECT read_admitted_application_field_snapshot($1,$2,$3) AS value',[workspaceId,root.resourceId,root.version])).rows[0].value).toMatchObject({held:true})})
+  const fresh=await capture();expect(fresh.point.values).toEqual(old.point.values);expect(fresh.query.records.find(row=>row.ref.id===self.id)?.values).toEqual(old.point.values)
+  expect(await snapshots()).toEqual(original);expect(await source(self.id)).toEqual(stored)
+ })
+
  describe('legacy create-upsert canonical admission',()=>{
   const upsertWorkspace=randomUUID(),upsertAssistant=randomUUID()
   const identity={provider:'fixture',providerInstanceKey:'fictional-upsert',subjectId:randomUUID()},derivedIdentity={...identity,subjectId:randomUUID()}
@@ -283,6 +370,7 @@ describe('[COMP:api/application-records] native operation completion',()=>{
    await owner.query("INSERT INTO assistants(id,name,owner_user_id,workspace_id,kind,clearance) VALUES($1,'Fictional upsert assistant',$2,$3,'primary','confidential')",[upsertAssistant,userId,upsertWorkspace])
    companyId=(await createCompany(userId,{workspaceId:upsertWorkspace,name:'Fictional protected upsert company',domain:'hidden-upsert.example',externalRef:{private:'fictional company value'},access:upsertAccess(userId),mergeByName:false})).id
    contactId=(await createContact(userId,{workspaceId:upsertWorkspace,name:'Fictional protected upsert contact',email:'hidden-upsert@example.com',phone:'+1 202 555 0141',stableIdentity:identity,access:upsertAccess(userId)})).id
+   await owner.query("UPDATE entities SET attributes=attributes||$2::jsonb WHERE id=$1",[contactId,JSON.stringify({name:7,role:{title:'Fictional field-bound role'},licenses:['fictional',7]})])
    const source=await createCompany(userId,{workspaceId:upsertWorkspace,name:'Fictional upsert retained source',access:upsertAccess(userId),mergeByName:false})
    // Fixed policy metadata selects this synthetic source, never a business value.
    derivedId=(await createContact(userId,{workspaceId:upsertWorkspace,name:'Fictional derived upsert contact',phone:'+1 202 555 0142',stableIdentity:derivedIdentity,access:upsertAccess(userId)})).id
@@ -328,6 +416,27 @@ describe('[COMP:api/application-records] native operation completion',()=>{
    (SELECT jsonb_agg(to_jsonb(e) ORDER BY e.id) FROM application_committed_events e WHERE e.workspace_id=$1) AS events`,[upsertWorkspace])).rows[0]}
   const upsertCompany=(actor:string,name='Fictional protected upsert company')=>createCompany(actor,{workspaceId:upsertWorkspace,name,access:upsertAccess(actor)})
   const upsertContact=(actor:string,derived=false)=>createContact(actor,{workspaceId:upsertWorkspace,name:derived?'Fictional derived upsert contact':'Fictional protected upsert contact',stableIdentity:derived?derivedIdentity:identity,access:upsertAccess(actor)})
+  it('enforces current profile-extra field roles and refuses full legacy reconstruction while an independent reader remains authorized',async()=>{
+   // Existing synthetic deployment metadata and role rows are not a normal issuance proof.
+   const fields=['profile.name','profile.role','profile.extra'],ctx=async(actor:string)=>codecExecution(actor,upsertWorkspace,upsertAssistant)
+   const point=async(actor:string)=>service().query(await ctx(actor),'native','get',{type:'person',id:contactId,fields}) as Promise<{values:Record<string,unknown>}>
+   const query=async(actor:string)=>service().query(await ctx(actor),'native','query',{type:'person',query:{fields,filters:[{field:'name',op:'eq',value:'Fictional protected upsert contact'}]}}) as Promise<{records:Array<{ref:{id:string};values:Record<string,unknown>}>}>
+   const expected={'profile.name':{value:7},'profile.role':{value:{title:'Fictional field-bound role'}},'profile.extra':{licenses:['fictional',7]}}
+   const temporary=(await owner.query("INSERT INTO application_native_role_assignments(workspace_id,module_key,user_id,role_key,issued_by_user_id) VALUES($1,'native',$2,'body_reader',$2) RETURNING id",[upsertWorkspace,userId])).rows[0].id
+   try{
+   expect((await point(userId)).values).toEqual(expected)
+   expect((await codecLegacy(userId,upsertWorkspace,upsertAssistant,contactId)).rows[0].attributes).toMatchObject({name:7,role:{title:'Fictional field-bound role'},licenses:['fictional',7]})
+   await owner.query("UPDATE application_native_role_assignments SET status='revoked' WHERE id=$1",[temporary])
+   const before=await snapshotUpserts()
+   await expect(point(userId)).rejects.toMatchObject({code:'access_unavailable'})
+   await expect(query(userId)).rejects.toMatchObject({code:'access_unavailable'})
+   await expect(codecLegacy(userId,upsertWorkspace,upsertAssistant,contactId)).rejects.toMatchObject({code:'access_unavailable'})
+   expect((await point(otherId)).values).toEqual(expected)
+   expect((await query(otherId)).records.find(row=>row.ref.id===contactId)?.values).toEqual(expected)
+   expect((await codecLegacy(otherId,upsertWorkspace,upsertAssistant,contactId)).rows[0].attributes).toMatchObject({name:7,role:{title:'Fictional field-bound role'},licenses:['fictional',7]})
+   expect(await snapshotUpserts()).toEqual(before)
+   }finally{await owner.query('DELETE FROM application_native_role_assignments WHERE id=$1',[temporary])}
+  })
   it('Q02/Q03 refuses hidden company dedup predicates before matching or creating while an independent reader retains the original no-op',async()=>{
    const role=(await owner.query("SELECT id FROM application_native_role_assignments WHERE workspace_id=$1 AND user_id=$2 AND role_key='identity_reader'",[upsertWorkspace,userId])).rows[0].id
    await owner.query("UPDATE application_native_role_assignments SET status='revoked' WHERE id=$1",[role])
