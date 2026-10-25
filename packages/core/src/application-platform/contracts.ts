@@ -69,20 +69,36 @@ export function validateApplicationResourceCatalog(moduleKey: string, raw: reado
   return resources
 }
 
+/** Freeze only owned catalog metadata, never handler schemas or closure state. */
+function freezeApplicationMetadata(value: object): void {
+  Object.freeze(value)
+  for (const child of Object.values(value)) {
+    if (child && typeof child === 'object' && !Object.isFrozen(child)) freezeApplicationMetadata(child)
+  }
+}
+
 /** A database row cannot register a module; callers supply deployed code definitions. */
 export function defineApplicationModules<Transaction>(modules: readonly ApplicationModuleDefinition<Transaction>[],
   existing: WorkspaceModuleRegistry): {
     workspaceModules: WorkspaceModuleRegistry
     applications: ReadonlyMap<string, Readonly<ApplicationModuleDefinition<Transaction>>>
   } {
-  const registry: Record<string, WorkspaceModuleDefinition> = { ...existing }
+  const registry: Record<string, WorkspaceModuleDefinition> = structuredClone(existing)
+  for (const definition of Object.values(registry)) freezeApplicationMetadata(definition)
   const applications = new Map<string, Readonly<ApplicationModuleDefinition<Transaction>>>()
   const validKey = /^[a-z][a-z0-9_.-]{0,127}$/
   for (const module of modules) {
-    if (!validKey.test(module.key) || applications.has(module.key) || registry[module.key]
+    const lifecycle = Object.hasOwn(registry, module.key) ? registry[module.key] : undefined
+    if (!validKey.test(module.key) || applications.has(module.key) || lifecycle?.application
       || !module.application.version || module.application.commands.length !== Object.keys(module.commands).length
       || module.application.queries.length !== Object.keys(module.queries).length) {
       throw new ApplicationPlatformError('invalid_schema', 'Invalid or duplicate deployed module registration.')
+    }
+    if (lifecycle && (lifecycle.key !== module.key || lifecycle.defaultState !== module.defaultState
+      || module.blockingCountCompatibility && (
+        module.blockingCountCompatibility.field !== lifecycle.blockingCountCompatibility?.field
+        || module.blockingCountCompatibility.blockerKey !== lifecycle.blockingCountCompatibility?.blockerKey))) {
+      throw new ApplicationPlatformError('invalid_schema', 'Application registration must preserve the existing lifecycle declaration.')
     }
     for (const [names, handlers] of [[module.application.commands, module.commands], [module.application.queries, module.queries]] as const) {
       if (new Set(names).size !== names.length || names.some(name => !validKey.test(name) || !Object.hasOwn(handlers, name))) {
@@ -102,12 +118,18 @@ export function defineApplicationModules<Transaction>(modules: readonly Applicat
       || !module.application.events.includes(command.eventKey))) {
       throw new ApplicationPlatformError('invalid_schema', 'Every command must reauthorize its saved resource references.')
     }
-    const frozen = Object.freeze({ ...module,
-      application: Object.freeze(structuredClone({ ...module.application, resources })),
-      queries: Object.freeze({ ...module.queries }), commands: Object.freeze({ ...module.commands }) })
+    const application = structuredClone({ ...module.application, resources })
+    freezeApplicationMetadata(application)
+    const compatibility = module.blockingCountCompatibility ?? lifecycle?.blockingCountCompatibility
+    const blockingCountCompatibility = compatibility ? Object.freeze({ ...compatibility }) : undefined
+    const frozen = Object.freeze({ ...module, application, blockingCountCompatibility,
+      queries: Object.freeze(Object.fromEntries(Object.entries(module.queries)
+        .map(([key, handler]) => [key, Object.freeze({ ...handler })]))),
+      commands: Object.freeze(Object.fromEntries(Object.entries(module.commands)
+        .map(([key, handler]) => [key, Object.freeze({ ...handler })]))) })
     applications.set(module.key, frozen)
     registry[module.key] = Object.freeze({ key: module.key, defaultState: module.defaultState,
-      application: frozen.application, ...(module.blockingCountCompatibility ? { blockingCountCompatibility: module.blockingCountCompatibility } : {}) })
+      application: frozen.application, ...(blockingCountCompatibility ? { blockingCountCompatibility } : {}) })
   }
   for (const module of applications.values()) {
     if (module.application.dependencies.some(dependency => !registry[dependency] || dependency === module.key)) {

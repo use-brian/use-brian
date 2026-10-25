@@ -136,3 +136,11 @@ provider QA and independent-source adoption remain owed.
 
 Cancellation while consuming an effect response remains uncertain. Already-aborted
 schema operations never invoke their injected deployment port.
+
+### Existing lifecycle identity
+
+A deployed module can add its application operations to a lifecycle-only entry in
+the supplied registry. Keep the same key and default state; omit the existing
+blocker compatibility mapping to inherit it, or supply the exact same mapping.
+Conflicting metadata and a second application registration are rejected. Existing
+persisted state and the lifecycle blocker adapter remain authoritative.
