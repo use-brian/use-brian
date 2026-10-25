@@ -1,4 +1,5 @@
 import { describe, it, expect } from 'vitest'
+import { ContextScopeAccumulator } from '../../security/context-scope.js'
 import { createRetrievalTools } from '../tools.js'
 import type {
   AggregateData,
@@ -420,10 +421,14 @@ describe('[COMP:retrieval/tool-surface] createRetrievalTools', () => {
       const events: RetrievalToolEvent[] = []
       const tools = createRetrievalTools(store, { onEvent: (e) => events.push(e) })
 
+      const execution = {} as NonNullable<ToolContext['executionContext']>
+      const accumulator = new ContextScopeAccumulator()
       const result = await tools.getRowHistory.execute(
         { primitive: 'memories', row_id: '11111111-1111-4111-8111-111111111111' },
-        makeContext(),
+        makeContext({executionContext:execution,scopeAccumulator:accumulator}),
       )
+      expect(calls.getRowHistory[0]!.actor.authority?.execution).toBe(execution)
+      expect(calls.getRowHistory[0]!.actor.authority?.accumulator).toBe(accumulator)
 
       expect(calls.getRowHistory).toHaveLength(1)
       expect(calls.getRowHistory[0]!.input).toEqual({

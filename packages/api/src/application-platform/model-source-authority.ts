@@ -65,11 +65,22 @@ async function assertSourceModelAuthority(context: ToolContext, action: 'context
       return
     }
     const application = getApplicationExecutionBinding(execution)
-    // Native delegated consumers keep their actual member/parent ceiling and
-    // still pass non-owner session/source admission below. This exception does
-    // not apply to application, field or independent-source profiles.
-    const nativeDelegated = persistent && !external && fields.length === 0 && !application
+    // Native delegated consumers keep their original host actor, assistant,
+    // current invocation lease and pinned parent ceiling through full canonical
+    // field/source admission below.
+    // Independent sources and application-bound profiles require their own proof.
+    const nativeSessionAttended = !application && execution.identity.kind === 'attended' && execution.identity.principal.kind === 'workspace_member'
+      && execution.identity.principal.authenticationKind === 'native_session' && execution.identity.principal.userId === execution.security.access.userId
+      && execution.security.access.assistantId === execution.assistant.id && execution.ownership.kind === 'workspace'
+      && execution.ownership.workspaceId === workspaceId && !execution.surface.systemRead && !execution.security.access.systemRead && !execution.surface.clientSelfMemory
+    const nativeDelegated = !external && !cohort.independent && !application
       && execution.identity.kind === 'delegated'
+      && execution.identity.actorUserId === execution.security.access.userId
+      && execution.identity.parentCeiling.userId === execution.security.access.userId
+      && execution.identity.parentCeiling.workspaceId === workspaceId
+      && execution.security.access.assistantId === execution.assistant.id
+      && execution.ownership.kind === 'workspace' && execution.ownership.workspaceId === workspaceId
+      && !execution.surface.systemRead && !execution.security.access.systemRead && !execution.surface.clientSelfMemory
     if (execution.ownership.kind !== 'workspace' || execution.security.access.sharedAudience && external
       || !nativeDelegated && (!application || external) && (execution.identity.kind !== 'attended' || execution.identity.principal.kind !== 'workspace_member')) denied()
     if ((external || cohort.independent) && !prepare) denied()
@@ -88,6 +99,7 @@ async function assertSourceModelAuthority(context: ToolContext, action: 'context
           FROM pg_catalog.pg_roles r JOIN pg_catalog.pg_class c ON c.oid='entity_instances'::regclass WHERE r.rolname=current_user`)
         if (role.rows[0]?.bypass !== false) denied()
         await applyRLSGucs(client, execution.security.access.userId)
+        if (nativeDelegated || nativeSessionAttended) await client.query("SELECT set_config('app.v2_assistant_id',$1,true)", [execution.assistant.id])
         await client.query('SELECT id FROM workspaces WHERE id=$1 FOR SHARE',[workspaceId])
         await applyApplicationRLSContext(client, execution)
         if (contextProof) {
@@ -104,6 +116,7 @@ async function assertSourceModelAuthority(context: ToolContext, action: 'context
     } finally { releaseApplicationTransactionBinding(client); await rollbackAndRelease(client) }
     if (contextProof) await assertPreparedExternalSourceAuthorityCurrent(execution, contextProof)
     if (prepared) await assertPreparedExternalSourceAuthorityCurrent(execution, prepared)
+    await execution.security.authority.assertCurrent()
     if (wiring && getSharedRetainedSourceAuthority() !== wiring || JSON.stringify(accumulator.evidence) !== originalEvidence) denied()
     accumulator.note(raised)
   } catch (error) {

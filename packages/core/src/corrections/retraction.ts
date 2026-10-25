@@ -35,9 +35,14 @@
  *    `ticketReference` but does not validate it.
  */
 
+import type { SessionContextAuthority } from '../memory/session-state-types.js'
+import { DerivedScopeError } from '../security/derived-scope.js'
+
 // ── Snapshots & args ────────────────────────────────────────────────
 
 export interface MemoryRetractionSnapshot {
+  /** Trusted canonical native version; legacy operator snapshots may omit it. */
+  scopeVersion?: string
   id: string
   workspaceId: string
   retractedAt: Date | null
@@ -48,6 +53,8 @@ export interface MemoryRetractionSnapshot {
 }
 
 export interface RetractMemoryArgs {
+  /** Original host objects, never model-provided arguments. */
+  authority?: SessionContextAuthority
   workspaceId: string
   memoryId: string
   actorUserId: string
@@ -155,6 +162,7 @@ export class EpisodeReExtractionError extends Error {
 // ── Ports (implemented by the DB adapter, not by this module) ───────
 
 export interface ApplySoftRetractInput {
+  operation?: { authority: SessionContextAuthority; expectedVersion: string }
   workspaceId: string
   memoryId: string
   retractedBy: string
@@ -175,6 +183,7 @@ export interface MemoryRetractionRepository {
   readMemoryForRetraction(
     workspaceId: string,
     memoryId: string,
+    authority?: SessionContextAuthority,
   ): Promise<MemoryRetractionSnapshot | null>
 
   applySoftRetract(input: ApplySoftRetractInput): Promise<void>
@@ -248,6 +257,7 @@ export async function retractMemory(
   const snapshot = await deps.memoryRepo.readMemoryForRetraction(
     args.workspaceId,
     args.memoryId,
+    args.authority,
   )
   if (!snapshot) {
     throw new MemoryRetractionError(
@@ -268,8 +278,10 @@ export async function retractMemory(
     )
   }
 
+  if (args.authority && !snapshot.scopeVersion) throw new DerivedScopeError('scope_evidence_missing')
   const now = (deps.clock ?? (() => new Date()))()
   await deps.memoryRepo.applySoftRetract({
+    ...(args.authority ? { operation: { authority: args.authority, expectedVersion: snapshot.scopeVersion! } } : {}),
     workspaceId: args.workspaceId,
     memoryId: args.memoryId,
     retractedBy: args.actorUserId,

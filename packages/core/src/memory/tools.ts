@@ -3,6 +3,7 @@ import { buildTool, type Tool, type ToolContext } from '../tools/types.js'
 import { MODEL_HIDDEN_PARAM_MARKER } from '../engine/query-loop.js'
 import { decideMemoryScope } from '../classification/rules/memory-scope/index.js'
 import type { MemoryStore } from './types.js'
+import type { SessionContextAuthority } from './session-state-types.js'
 import { createHash } from 'node:crypto'
 import type { AccessContext } from '../security/access-context.js'
 import type { Sensitivity } from '../security/sensitivity.js'
@@ -27,6 +28,18 @@ import { notFoundMessage } from '../tools/tool-failure.js'
  * for legacy callers (safe-failure: hides more, never widens by
  * mistake).
  */
+/** Resolve trusted host objects outside the tool's model-facing arguments. */
+function memoryAuthority(context:ToolContext):SessionContextAuthority|undefined {
+  return context.executionContext&&context.scopeAccumulator
+    ? {execution:context.executionContext,accumulator:context.scopeAccumulator}:undefined
+}
+
+/** Legacy callbacks cannot preserve protected field/source lineage or recipient authority. */
+function protectedMemoryFanout(context:ToolContext,rows:readonly unknown[]=[]):boolean{
+ return [...context.scopeAccumulator?.evidence.sources??[],...scopeEvidenceFromRows(rows).sources??[]]
+  .some(source=>source.resourceKind==='external_source'||source.resourceKind==='application_field')
+}
+
 function viewerCtx(context: ToolContext): AccessContext {
   return {
     workspaceId: context.workspaceId ?? '',
@@ -258,6 +271,10 @@ export function createMemoryTools(
         }
       }
 
+      if(input.entityId&&protectedMemoryFanout(context))return{
+        data:'CRM note links are unavailable for this retained context. Nothing was saved. Save without entityId to keep an unlinked memory.',isError:true,
+      }
+
       if (input.id) {
         // Resolve full UUID from prefix if needed — mirrors getMemory's
         // fallback at lines 111-121. The memory index shows 8-char prefixes
@@ -270,7 +287,7 @@ export function createMemoryTools(
             query: '',
             limit: 1,
             idPrefix: input.id,
-          })
+          },...(memoryAuthority(context)?[memoryAuthority(context)!] as const:[]))
           if (results[0]) resolvedId = results[0].id
         }
         // Pass the viewer context so the update is scoped to memories this
@@ -279,7 +296,7 @@ export function createMemoryTools(
         // workspace's memory by id (WS3 read/write-asymmetry fix). Ingested
         // third-party content reaches this tool, so the scope is load-bearing.
 
-        const existing = await store.getById(viewerCtx(context), resolvedId)
+        const existing = await store.getById(viewerCtx(context), resolvedId,...(memoryAuthority(context)?[memoryAuthority(context)!] as const:[]))
         if (!existing) return { data: memoryNotFound(input.id), isError: true }
 
         // Update existing — only include defined fields, then carry the old
@@ -325,7 +342,11 @@ export function createMemoryTools(
         // retry sensibly instead of seeing a Postgres internal error.
         let updated
         try {
-          updated = await store.update(resolvedId, updates, viewerCtx(context))
+          const authority = memoryAuthority(context)
+          updated = await store.update(resolvedId, updates, viewerCtx(context), ...(authority ? [{
+            authority, expectedVersion: existing.scopeVersion!,
+            writeFields: (['summary', 'detail', 'tags'] as const).filter(field => input[field] !== undefined),
+          }] as const : []))
         } catch (err) {
           const msg = err instanceof Error ? err.message : String(err)
           if (msg.includes('invalid input syntax for type uuid')) {
@@ -334,7 +355,7 @@ export function createMemoryTools(
           throw err
         }
         if (!updated) return { data: memoryNotFound(input.id), isError: true }
-        opts?.onEvent?.({ type: 'memory_updated', memoryId: resolvedId })
+        if(!protectedMemoryFanout(context,[existing,updated]))opts?.onEvent?.({ type: 'memory_updated', memoryId: resolvedId })
         return { data: `Updated memory [${updated.id}]: ${updated.summary}`, scopeEvidence: scopeEvidenceFromRows([updated]) }
       }
 
@@ -514,6 +535,7 @@ export function createMemoryTools(
             isError: true,
           }
         }
+        if(protectedMemoryFanout(context,[entity]))return{data:'This source does not support CRM note links. Nothing was saved. Save without entityId to keep an unlinked memory.',isError:true}
         noteEntity = { id: entity.id, displayName: entity.displayName, kind: entity.kind }
         const entityEvidence = scopeEvidenceFromRows([entity])
         context.scopeAccumulator?.note(entityEvidence)
@@ -548,7 +570,9 @@ export function createMemoryTools(
       // (the synthesis engine anchors extracted memories to the source
       // Episode, same as Pipeline B); chat-driven saveMemory has no episode.
       const createSources = context.scopeAccumulator?.evidence.sources
+      const memoryAuthorityValue=memoryAuthority(context)
       const memory = await store.create({
+        ...(memoryAuthorityValue?{authority:memoryAuthorityValue}:{}),
         assistantId: context.assistantId,
         userId: context.userId,
         scope: dbScope,
@@ -575,7 +599,7 @@ export function createMemoryTools(
       // longer carries a type. Use the first tag as a coarse stand-in
       // for analytics (or 'untyped' when no tag); the precise category
       // signal moves to tag-based reporting.
-      opts?.onEvent?.({ type: 'memory_created', source: 'model', memoryType: effectiveTags?.[0] ?? 'untyped' })
+      if(!protectedMemoryFanout(context,[memory]))opts?.onEvent?.({ type: 'memory_created', source: 'model', memoryType: effectiveTags?.[0] ?? 'untyped' })
 
       // ── CRM-note link write (WU-6.12) ─────────────────────────────
       // Edge writes are best-effort per WU-1.7 ("edges fire async /
@@ -630,13 +654,15 @@ export function createMemoryTools(
       // memory describes without forcing an entityId anchor.
       const generalLinksSummary = await applyExplicitLinks({
         entityLinks: opts?.entityLinksStore,
+        ...(protectedMemoryFanout(context,[memory]) ? { authority: memoryAuthority(context) } : {}),
         workspaceId: context.workspaceId ?? '',
         userId: context.userId,
         assistantId: context.assistantId,
         sourceKind: 'memory',
         sourceId: memory.id,
         source: 'model',
-        links: context.workspaceId ? input.links : undefined,
+        links: context.workspaceId ? input.links?.filter(link => !protectedMemoryFanout(context,[memory])
+          || !!memoryAuthority(context) && link.targetKind === 'memory') : undefined,
         compartments: memory.compartments,
         projectIds: memory.projectIds,
       })
@@ -645,7 +671,7 @@ export function createMemoryTools(
       // the model fabricating the remaining 28 chars when it decided it
       // needed the full id — observed in prod 2026-04-23 with id prefixes
       // `02eca923` → hallucinated `02eca923-3b10-4822-8789-994119d88320`.
-      return { data: `Saved memory [${memory.id}]: ${memory.summary}${formatLinksSummary(generalLinksSummary)}`, scopeEvidence: createdRowEvidence([memory]) }
+      return { data: `Saved memory [${memory.id}]: ${memory.summary}${formatLinksSummary(generalLinksSummary)}${protectedMemoryFanout(context,[memory])&&input.links?.some(link=>link.targetKind!=='memory'||!memoryAuthority(context))?' (unsupported relationship links were not created)':''}`, scopeEvidence: createdRowEvidence([memory]) }
     },
   })
 
@@ -671,18 +697,18 @@ export function createMemoryTools(
       if (input.id) {
         // Handle truncated IDs from the memory index (8-char prefix)
         const ctx = viewerCtx(context)
-        let memory = await store.getById(ctx, input.id).catch(() => null)
+        let memory = await store.getById(ctx, input.id,...(memoryAuthority(context)?[memoryAuthority(context)!] as const:[])).catch(() => null)
         if (!memory && input.id.length < 36) {
           // Prefix search — the memory index shows [id:abcd1234] (8 chars)
           const results = await store.search(ctx, {
             query: '',
             limit: 1,
             idPrefix: input.id,
-          })
+          },...(memoryAuthority(context)?[memoryAuthority(context)!] as const:[]))
           memory = results[0] ?? null
         }
         if (!memory) {
-          opts?.onEvent?.({ type: 'memory_retrieved', source: 'id', resultCount: 0 })
+          if(!protectedMemoryFanout(context))opts?.onEvent?.({ type: 'memory_retrieved', source: 'id', resultCount: 0 })
           return { data: memoryNotFound(input.id), isError: true }
         }
 
@@ -690,9 +716,9 @@ export function createMemoryTools(
         // memory row, and a `tool_call`-kind row in the per-turn buffer.
         // The buffer is flushed by the chat route once the assistant
         // message id is known; see `recall-buffer.ts`.
-        store.trackRecall(memory.id).catch((err) => console.debug('Memory recall tracking failed:', err))
-        opts?.recallBuffer?.push(memory.id, 'tool_call')
-        opts?.onEvent?.({ type: 'memory_retrieved', source: 'id', resultCount: 1 })
+        if(!protectedMemoryFanout(context,[memory]))store.trackRecall(memory.id).catch((err) => console.debug('Memory recall tracking failed:', err))
+        if(!protectedMemoryFanout(context,[memory]))opts?.recallBuffer?.push(memory.id, 'tool_call')
+        if(!protectedMemoryFanout(context,[memory]))opts?.onEvent?.({ type: 'memory_retrieved', source: 'id', resultCount: 1 })
 
         return {
           data: {

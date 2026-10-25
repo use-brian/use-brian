@@ -1,9 +1,15 @@
+import {readExternalSourceAncestors} from '../application-platform/external-source-ancestry.js'
+import {readApplicationFieldAncestors} from '../application-platform/field-evidence.js'
+import {z} from 'zod'
+import {readRetainedContextFrame,readRetainedQueryFrame} from './session-context-revisions.js'
+import {validateCallerScopeEvidence} from '../context-scope/caller-evidence.js'
+import {currentApplicationReadTransaction} from '../application-platform/execution-context.js'
 import { sessionKindSql } from '../session-kind.js'
 import { admitMemorySuccessor } from '../workspace-access/memory-successor-admission.js'
 import { WorkspaceAccessError } from '../workspace-access/policy.js'
 import { beginBrainAdmission, admitBrainCreate } from '../workspace-access/brain-create-admission.js'
 import { captureMemoryVersions, type CaptureOpts } from './brain-row-versions.js'
-import { deriveResourceScope, deriveWriteScope, type AccessContext, type ResourceScope, type EntityLinksStore, type Sensitivity, type DerivedWriteEvidence, type ScopeSource } from '@use-brian/core'
+import { bindScopeSources,boundScopeSources,DerivedScopeError,intersectAccessCeilings,pinAccessCeiling,type SessionContextAuthority,deriveResourceScope, deriveWriteScope, type AccessContext, type ResourceScope, type EntityLinksStore, type Sensitivity, type DerivedWriteEvidence, type ScopeSource } from '@use-brian/core'
 import type pg from 'pg'
 import { assertExecutionResourceScope, buildAccessPredicate } from './access-predicate.js'
 import { currentAgentAccess,runWithAgentAccess } from './agent-access-context.js'
@@ -342,7 +348,9 @@ export async function createMemory(
   return memory
 }
 
-function emitCreatedMemoryEdges(memory: Memory, params: Parameters<typeof createMemory>[0], entityLinks?: EntityLinksStore): void {
+export function emitCreatedMemoryEdges(memory: Memory, params: Parameters<typeof createMemory>[0], entityLinks?: EntityLinksStore): void {
+  // The legacy graph port cannot retain the original operation or immutable lineage.
+  if(params.derivation?.sources.some(source=>source.resourceKind==='external_source'||source.resourceKind==='application_field'))return
   // Fire-and-forget `mentioned` edges. Only fires when the graph store
   // is wired AND the memory carries a workspace (edges are
   // workspace-partitioned) AND at least one entity id is supplied.
@@ -411,6 +419,7 @@ export async function updateMemory(
   updates: MemoryUpdateFields,
   access?: AccessContext,
   transactionClient?: pg.PoolClient,
+  transition?: {expectedVersion:string;writeFields:readonly string[];assistantId:string;sessionId:string;contextFingerprint:string},
 ): Promise<Memory | null> {
   const ownedClient = transactionClient ? null : await getPool().connect()
   const client = transactionClient ?? ownedClient!
@@ -460,14 +469,20 @@ export async function updateMemory(
         return null
       }
 
+      if (transition) {
+        if (!transactionClient || !access || old.scopeVersion !== transition.expectedVersion) throw new DerivedScopeError('scope_source_changed')
+        await client.query('SELECT prepare_native_memory_successor($1,$2,$3,$4)',
+          [old.workspaceId,old.id,transition.expectedVersion,transition.writeFields])
+      }
+
       assertExecutionResourceScope({...old,workspaceId:old.workspaceId!},'read',access)
       assertExecutionResourceScope({...old,workspaceId:old.workspaceId!},'mutation',access)
 
       const derivation = updates.derivation ? {
         ...updates.derivation,
-        sources: [...updates.derivation.sources, {
-          ...old, workspaceId: old.workspaceId!, resourceKind: 'memory', resourceId: old.id, version: old.scopeVersion,
-        }],
+        sources: [...updates.derivation.sources, ...(updates.derivation.sources.some(source=>source.resourceKind==='memory'&&source.resourceId===old.id) ? [] : [{
+          ...old, workspaceId: old.workspaceId!, resourceKind: 'memory' as const, resourceId: old.id, version: old.scopeVersion,
+        }])],
       } : null
       const floor = derivation ? await validateDerivedWriteInputs(client, derivation) : null
 
@@ -522,7 +537,7 @@ export async function updateMemory(
         || JSON.stringify(next.tags) !== JSON.stringify(old.tags)
         || JSON.stringify(next.compartments) !== JSON.stringify(old.compartments)
         || JSON.stringify(next.projectIds) !== JSON.stringify(old.projectIds)
-      if (changed) {
+      if (changed && !transition) {
         if (ready) {
           await client.query('SELECT hold_memory_successor_descendants($1,$2,$3)', [old.workspaceId, old.id, old.scopeVersion])
         } else {
@@ -570,12 +585,15 @@ export async function updateMemory(
       )
       const newRow = insertResult.rows[0]
 
-      if (derivation) await recordDerivedResource(client, derivation, {
+      if (derivation && !transition) await recordDerivedResource(client, derivation, {
         ...newRow, workspaceId: newRow.workspaceId!, resourceKind: 'memory', resourceId: newRow.id, version: newRow.scopeVersion,
       }, access?.userId ?? null)
 
-      // Tombstone the old row, pointing OLD → NEW.
-      await client.query(
+      // The protected transition pins immutable history before its retirement.
+      if (transition) await client.query('SELECT retire_native_memory_successor($1,$2,$3,$4,$5,$6,$7,$8,$9,$10)',
+        [old.workspaceId,old.id,transition.expectedVersion,newRow.id,transition.writeFields,
+          transition.assistantId,transition.sessionId,transition.contextFingerprint,derivation?.producer,JSON.stringify(derivation?.sources)])
+      else await client.query(
         `UPDATE memories
            SET valid_to = now(),
                superseded_by = $2,
@@ -657,17 +675,85 @@ function queryMemoryViewer<T extends pg.QueryResultRow>(ctx: AccessContext,sql: 
     departmentRead: ctx.departmentRead,sharedAudience: ctx.sharedAudience },() => queryGated<T>(ctx,canonical,params))
 }
 
-export async function getMemoryById(ctx: AccessContext, id: string): Promise<Memory | null> {
+const MEMORY_QUERY_FIELDS=["id", "assistant_id", "user_id", "app_id", "workspace_id", "scope", "tags", "summary", "detail", "confidence", "sensitivity", "compartments", "project_ids", "scope_version", "scope_held", "source", "source_session_id", "recall_count", "useful_recall_count", "last_recalled_at", "created_at", "updated_at", "created_by_user_id", "created_by_assistant_id", "source_episode_id", "verified_by_user_id", "verified_at", "valid_from", "valid_to", "superseded_by", "retracted_at", "retracted_reason", "retracted_by", "original_scope", "original_sensitivity", "original_summary"] as const
+const memoryQuerySource=z.object({workspaceId:z.string().uuid(),userId:z.string().uuid().nullable(),assistantId:z.string().uuid().nullable(),
+ sensitivity:z.enum(['public','internal','confidential']),compartments:z.array(z.string()),projectIds:z.array(z.string().uuid()),
+ resourceKind:z.enum(['memory','application_field','external_source']),resourceId:z.string().uuid(),version:z.string().min(1)}).strict()
+const memoryQueryCapture=z.object({row:z.record(z.unknown()).nullable(),sources:z.array(memoryQuerySource).min(1),source:memoryQuerySource.optional()}).strict()
+/** A complete metadata cohort precedes current source admission and any payload computation. */
+async function queryMemoryCollection<T extends pg.QueryResultRow>(ctx:AccessContext,sql:string,params:unknown[],authority?:SessionContextAuthority,fields:readonly string[]=MEMORY_QUERY_FIELDS):Promise<pg.QueryResult<T>>{
+ if(!authority)return queryMemoryViewer<T>(ctx,sql,params)
+ if(ctx.systemRead||currentApplicationReadTransaction(ctx)||!ctx.userId)throw new DerivedScopeError('scope_evidence_missing')
+ ctx=structuredClone(ctx);params=structuredClone(params)
+ const e=authority.execution
+  if(!(e.identity.kind==='delegated'||e.identity.kind==='attended'&&e.identity.principal.kind==='workspace_member')||e.ownership.kind!=='workspace'||e.security.access.userId!==ctx.userId
+   ||e.security.access.workspaceId!==ctx.workspaceId||e.assistant.id!==ctx.assistantId)throw new DerivedScopeError('scope_evidence_missing')
+ await e.security.authority.assertCurrent()
+ const discover=async(client?:pg.PoolClient)=>{
+  const statement='SELECT source FROM read_native_memory_query_metadata($1)'
+  const rows=(await(client?client.query<{source:unknown}>(statement,[ctx.workspaceId]):queryMemoryViewer<{source:unknown}>(ctx,statement,[ctx.workspaceId]))).rows
+  if(rows.length>4096)throw new DerivedScopeError('scope_evidence_missing')
+  return rows.map(row=>memoryQuerySource.parse(row.source))
+ }
+ const roots=await discover()
+ const run=async(client:pg.PoolClient)=>{
+
+   const requested=pinAccessCeiling({...authority.execution.security.access,...Object.fromEntries(Object.entries(ctx).filter(([,v])=>v!==undefined))})
+   const ceiling=intersectAccessCeilings(authority.execution.security.ceiling,requested)
+   await runWithAgentAccess({...authority.execution.security.access,...ceiling},()=>applyRLSGucs(client,ctx.userId))
+   if(JSON.stringify(await discover(client))!==JSON.stringify(roots))throw new DerivedScopeError('scope_source_changed')
+  const snapshots=(await client.query<{value:unknown}>('SELECT value FROM read_native_memory_query_projection($1,$2,$3)',
+   [ctx.workspaceId,[...fields],!!authority])).rows.map(row=>memoryQueryCapture.parse(row.value))
+  if(!snapshots.length||snapshots[0].row!==null||snapshots.some(row=>row.sources.some(source=>source.workspaceId!==ctx.workspaceId)))throw new DerivedScopeError('scope_evidence_missing')
+  const sources=snapshots.flatMap(row=>row.sources)
+  await authority.execution.security.authority.assertCurrent();await validateCallerScopeEvidence({sources},ceiling,client)
+  const admitted=snapshots.filter(row=>row.row!==null).map(row=>{if(row.source?.resourceKind!=='memory')throw new DerivedScopeError('scope_evidence_missing');return row.row})
+  const relation=`memory_viewer_rows AS MATERIALIZED (SELECT r.*,to_tsvector('simple',coalesce(r.summary,'')||' '||coalesce(r.detail,'')) AS search_vector
+   FROM jsonb_to_recordset($${params.length+1}::jsonb) AS r(id uuid,assistant_id uuid,user_id uuid,app_id text,workspace_id uuid,scope text,tags text[],summary text,detail text,confidence double precision,sensitivity text,compartments text[],project_ids uuid[],scope_version bigint,scope_held boolean,source text,source_session_id uuid,recall_count integer,useful_recall_count integer,last_recalled_at timestamptz,created_at timestamptz,updated_at timestamptz,created_by_user_id uuid,created_by_assistant_id uuid,source_episode_id uuid,verified_by_user_id uuid,verified_at timestamptz,valid_from timestamptz,valid_to timestamptz,superseded_by uuid,retracted_at timestamptz,retracted_reason text,retracted_by uuid,original_scope text,original_sensitivity text,original_summary text))`
+  const payload=sql.replace(/\bFROM\s+(?:public\.)?memories\b/gi,'FROM memory_viewer_rows')
+  const statement=/^\s*WITH\s/i.test(payload)?payload.replace(/^(\s*WITH(?:\s+RECURSIVE)?)\s+/i,`$1 ${relation}, `):`WITH ${relation} ${payload}`
+  const result=await client.query<T>(statement,[...params,JSON.stringify(admitted)])
+  for(const row of result.rows)bindScopeSources(row,sources)
+  bindScopeSources(result.rows,sources)
+  return{value:result,sources}
+ }
+ return readRetainedQueryFrame(authority,roots,run)
+}
+
+export async function getMemoryById(ctx: AccessContext, id: string, transactionClient?:pg.PoolClient,expectedVersion?:string,authority?:SessionContextAuthority): Promise<Memory | null> {
+  if(authority&&!transactionClient){
+    const e=authority.execution
+    if(ctx.systemRead||ctx.userId!==e.security.access.userId||ctx.workspaceId!==e.security.access.workspaceId||ctx.assistantId!==e.assistant.id)throw new DerivedScopeError('scope_evidence_missing')
+    const root=(await query<{source:ScopeSource|null}>("SELECT read_scope_source($1,'memory',$2) AS source",[ctx.workspaceId,id])).rows[0]?.source
+    if(!root)return null
+    return readRetainedContextFrame(authority,[root],client=>getMemoryById(ctx,id,client,root.version,authority))
+  }
   // valid_to IS NULL hides superseded versions (WU-2.2 / D.7). For
   // historical lookups use getMemoryHistory(id) instead.
   // WU-4.2b: universal projection (workspace + visibility-double +
   // optional clearance ceiling) keeps cross-workspace ID lookups
   // from leaking rows.
   const ap = buildMemoryAccessPredicate(ctx, { startIdx: 2 })
-  const result = await queryMemoryViewer<Memory>(ctx,
-    `SELECT ${MEMORY_SELECT} FROM memories WHERE id = $1 AND ${ap.sql} AND valid_to IS NULL`,
-    [id, ...ap.params],
-  )
+  if(transactionClient&&ctx.systemRead)throw new Error('scope_operation_denied')
+  const sql=`SELECT ${MEMORY_SELECT} FROM public.memories WHERE id = $1 AND ${ap.sql} AND valid_to IS NULL`
+  if(transactionClient){
+    if(!authority||!expectedVersion)throw new DerivedScopeError('scope_evidence_missing')
+    const requested=pinAccessCeiling({...authority.execution.security.access,...Object.fromEntries(Object.entries(ctx).filter(([,value])=>value!==undefined))})
+    const ceiling=intersectAccessCeilings(authority.execution.security.ceiling,requested)
+    await runWithAgentAccess({...authority.execution.security.access,...ceiling},()=>applyRLSGucs(transactionClient,ctx.userId))
+    const raw=(await transactionClient.query<{value:unknown}>('SELECT read_native_memory_point_projection($1,$2,$3) AS value',[ctx.workspaceId,id,expectedVersion])).rows[0]?.value
+    if(raw===null||raw===undefined)return null
+    const captured=memoryQueryCapture.parse(raw)
+    if(!captured.row||captured.source?.resourceKind!=='memory'||captured.source.resourceId!==id||captured.source.version!==expectedVersion
+      ||captured.sources.some(source=>source.workspaceId!==ctx.workspaceId))throw new DerivedScopeError('scope_evidence_missing')
+    await authority.execution.security.authority.assertCurrent()
+    await validateCallerScopeEvidence({sources:captured.sources},ceiling,transactionClient)
+    const values=[id,...ap.params,JSON.stringify(captured.row)]
+    const result=await transactionClient.query<Memory>(sql.replace('FROM public.memories',`FROM jsonb_populate_record(NULL::public.memories,$${values.length}::jsonb)`),values)
+    for(const row of result.rows)bindScopeSources(row,captured.sources)
+    return result.rows[0]??null
+  }
+  const result=await queryMemoryViewer<Memory>(ctx,sql,[id,...ap.params])
   return result.rows[0] ?? null
 }
 
@@ -696,6 +782,7 @@ export async function getMemoryByIdSystem(id: string): Promise<Memory | null> {
 export async function searchMemories(
   ctx: AccessContext,
   params: { searchQuery: string; limit?: number },
+  authority?:SessionContextAuthority,
 ): Promise<Memory[]> {
   const limit = params.limit ?? 10
   const raw = params.searchQuery.trim()
@@ -714,7 +801,7 @@ export async function searchMemories(
     const ap = buildMemoryAccessPredicate(ctx)
     const tsqIdx = ap.nextIdx
     const limIdx = ap.nextIdx + 1
-    const result = await queryMemoryViewer<Memory>(ctx,
+    const result = await queryMemoryCollection<Memory>(ctx,
       `SELECT ${MEMORY_SELECT},
               ts_rank(search_vector, to_tsquery('simple', $${tsqIdx})) as rank
        FROM memories
@@ -724,6 +811,7 @@ export async function searchMemories(
        ORDER BY rank DESC
        LIMIT $${limIdx}`,
       [...ap.params, prefixTerms, limit],
+    authority,
     )
     if (result.rows.length > 0) return result.rows
   }
@@ -733,7 +821,7 @@ export async function searchMemories(
   const likeIdx = ap.nextIdx
   const tagIdx = ap.nextIdx + 1
   const limIdx = ap.nextIdx + 2
-  const result = await queryMemoryViewer<Memory>(ctx,
+  const result = await queryMemoryCollection<Memory>(ctx,
     `SELECT ${MEMORY_SELECT}
      FROM memories
      WHERE ${ap.sql}
@@ -742,6 +830,7 @@ export async function searchMemories(
      ORDER BY updated_at DESC
      LIMIT $${limIdx}`,
     [...ap.params, `%${raw}%`, raw, limit],
+    authority,
   )
   return result.rows
 }
@@ -753,18 +842,20 @@ export async function searchMemories(
 export async function searchMemoriesByIdPrefix(
   ctx: AccessContext,
   params: { idPrefix: string; limit?: number },
+  authority?:SessionContextAuthority,
 ): Promise<Memory[]> {
   const limit = params.limit ?? 1
   const ap = buildMemoryAccessPredicate(ctx)
   const pfxIdx = ap.nextIdx
   const limIdx = ap.nextIdx + 1
-  const result = await queryMemoryViewer<Memory>(ctx,
+  const result = await queryMemoryCollection<Memory>(ctx,
     `SELECT ${MEMORY_SELECT} FROM memories
      WHERE ${ap.sql}
        AND valid_to IS NULL
        AND id::text LIKE $${pfxIdx} || '%'
      LIMIT $${limIdx}`,
     [...ap.params, params.idPrefix, limit],
+    authority,
   )
   return result.rows
 }
@@ -1236,10 +1327,45 @@ export async function deleteMemory(
  * successor — a defensive edge case that should not arise from normal
  * supersession but can if a tombstone was applied directly via SQL.
  */
-export async function getMemoryHistory(id: string): Promise<{
+export async function getMemoryHistory(id: string, access?:AccessContext, authority?:SessionContextAuthority): Promise<{
   chain: Memory[]
   currentId: string | null
 }> {
+  if (authority) {
+    const {execution}=authority
+    if (!access || access.systemRead || access.userId!==execution.security.access.userId
+      || access.workspaceId!==execution.security.access.workspaceId || access.assistantId!==execution.assistant.id) throw new DerivedScopeError('scope_evidence_missing')
+    const metadata=(await query<{id:string;source:ScopeSource}>(`WITH RECURSIVE forward(id,next_id,depth) AS (
+      SELECT id,superseded_by,1 FROM memories WHERE id=$1 AND workspace_id=$2
+      UNION ALL SELECT m.id,m.superseded_by,f.depth+1 FROM memories m JOIN forward f ON m.id=f.next_id WHERE m.workspace_id=$2 AND f.depth<100),
+      backward(id,depth) AS (
+      SELECT id,1 FROM memories WHERE id=$1 AND workspace_id=$2
+      UNION ALL SELECT m.id,b.depth+1 FROM memories m JOIN backward b ON m.superseded_by=b.id WHERE m.workspace_id=$2 AND b.depth<100),
+      chain AS (SELECT id FROM forward UNION SELECT id FROM backward)
+      SELECT id,read_scope_source($2,'memory',id) AS source FROM chain`,[id,access.workspaceId])).rows
+    if (!metadata.length) return {chain:[],currentId:null}
+    if (metadata.length>=100) throw new DerivedScopeError('scope_evidence_missing')
+    const initial=metadata.map(row=>({...row.source,resourceKind:'memory' as const,resourceId:row.id}))
+    const roots=[...initial,...await readExternalSourceAncestors(access.workspaceId,initial),...await readApplicationFieldAncestors(access.workspaceId,initial)]
+    return readRetainedContextFrame(authority,roots,async client=>{
+      const chain:Memory[]=[],sources:ScopeSource[]=[]
+      for (const root of initial) {
+        const raw=(await client.query<{value:unknown}>('SELECT read_native_memory_history_projection($1,$2,$3) AS value',
+          [access.workspaceId,root.resourceId,root.version])).rows[0]?.value
+        if (!raw) throw new DerivedScopeError('scope_source_changed')
+        const captured=memoryQueryCapture.parse(raw)
+        if (!captured.row || captured.source?.resourceKind!=='memory' || captured.source.resourceId!==root.resourceId
+          || captured.source.version!==root.version || captured.sources.some(source=>source.workspaceId!==access.workspaceId)) throw new DerivedScopeError('scope_evidence_missing')
+        const row=(await client.query<Memory>(`SELECT ${MEMORY_SELECT} FROM jsonb_populate_record(NULL::public.memories,$1::jsonb)`,[JSON.stringify(captured.row)])).rows[0]
+        if (!row) throw new DerivedScopeError('scope_evidence_missing')
+        bindScopeSources(row,captured.sources);chain.push(row);sources.push(...captured.sources)
+      }
+      await validateCallerScopeEvidence({sources},execution.security.ceiling,client)
+      chain.sort((a,b)=>a.validFrom.getTime()-b.validFrom.getTime() || a.createdAt.getTime()-b.createdAt.getTime())
+      bindScopeSources(chain,sources)
+      return bindScopeSources({chain,currentId:chain.find(row=>row.validTo===null)?.id??null},sources)
+    })
+  }
   // Postgres requires UNION ALL inside recursive CTEs; the outer UNION
   // (non-recursive) dedups the seed row that appears in both walks.
   const result = await query<Memory>(

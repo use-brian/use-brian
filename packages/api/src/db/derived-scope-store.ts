@@ -107,6 +107,11 @@ async function revalidateScopeSources(
   sources: readonly ScopeSource[],
   reader: 'read_scope_source' | 'read_entity_derivation_source' = 'read_scope_source',
 ): Promise<void> {
+  if(reader==='read_scope_source'){
+    const role=(await client.query<{admitted:boolean}>(`SELECT NOT (r.rolsuper OR r.rolbypassrls OR pg_has_role(r.oid,c.relowner,'USAGE')) AS admitted
+      FROM pg_catalog.pg_roles r JOIN pg_catalog.pg_class c ON c.oid='public.memories'::regclass WHERE r.rolname=current_user`)).rows[0]
+    if(role?.admitted===true)reader='read_entity_derivation_source'
+  }
   const unique = new Map(sources.map(source=>[`${source.resourceKind}:${source.resourceId}`,source]))
   // All writers use the same lock order, including mixed primitive prompts.
   const list=[...unique.values()].sort((a,b)=>`${a.resourceKind}:${a.resourceId}`.localeCompare(`${b.resourceKind}:${b.resourceId}`))
@@ -218,6 +223,17 @@ export async function recordDerivedResource(
     await client.query('SELECT record_admitted_application_field_derivation($1,$2,$3,$4,$5,$6)',
       [output.workspaceId,output.resourceKind,output.resourceId,output.version,evidence.producer,JSON.stringify(evidence.sources)])
     return
+  }
+  if(output.resourceKind==='memory') {
+    // The current database role, never a caller flag, selects the existing
+    // restricted native lineage port. Owner workers keep their existing path.
+    const role=(await client.query<{admitted:boolean}>(`SELECT NOT (r.rolsuper OR r.rolbypassrls OR pg_has_role(r.oid,c.relowner,'USAGE')) AS admitted
+      FROM pg_catalog.pg_roles r JOIN pg_catalog.pg_class c ON c.oid='public.memories'::regclass WHERE r.rolname=current_user`)).rows[0]
+    if(role?.admitted===true){
+      await client.query('SELECT record_admitted_application_field_derivation($1,$2,$3,$4,$5,$6)',
+        [output.workspaceId,output.resourceKind,output.resourceId,output.version,evidence.producer,JSON.stringify(evidence.sources)])
+      return
+    }
   }
   await client.query(`INSERT INTO workspace_access_policies(workspace_id) VALUES($1) ON CONFLICT DO NOTHING`, [output.workspaceId])
   const { rows } = await client.query<{ id: string }>(

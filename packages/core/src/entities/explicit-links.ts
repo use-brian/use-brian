@@ -40,8 +40,10 @@
  */
 
 import { z } from 'zod'
-import type { EntityLinksStore, EntitySource, LinkKind } from './types.js'
+import type { EntityLinkCreateParams, EntityLinksStore, EntitySource, LinkKind } from './types.js'
 import { EDGE_TYPES, LINK_KINDS } from './types.js'
+import type { SessionContextAuthority } from '../memory/session-state-types.js'
+import { boundScopeSources } from '../security/source-evidence.js'
 
 const linkKindEnum = z.enum(LINK_KINDS)
 
@@ -176,6 +178,8 @@ export const explicitClosesField = z
   )
 
 export type ApplyLinksParams = {
+  /** Original host authority for the bounded retained Memory relationship profile. */
+  authority?: SessionContextAuthority
   entityLinks: EntityLinksStore | undefined
   workspaceId: string
   userId: string
@@ -197,16 +201,24 @@ export type ApplyLinksParams = {
  */
 export async function applyExplicitLinks(
   params: ApplyLinksParams,
-): Promise<{ created: number; failed: number }> {
+): Promise<{ created: number; failed: number; uncertain?: number }> {
   if (!params.entityLinks || !params.links || params.links.length === 0) {
     return { created: 0, failed: 0 }
   }
   let created = 0
   let failed = 0
+  let uncertain = 0
   for (const link of params.links) {
     const targetKind: LinkKind = link.targetKind ?? 'entity'
     try {
-      await params.entityLinks.create({
+      const create = (input: EntityLinkCreateParams) => {
+        if (params.authority) {
+          if (!params.entityLinks?.createRetainedMemoryLink) throw new Error('Retained Memory relationship links are unavailable')
+          return params.entityLinks.createRetainedMemoryLink(input, params.authority)
+        }
+        return params.entityLinks!.create(input)
+      }
+      const result = await create({
         sourceKind: params.sourceKind,
         sourceId: params.sourceId,
         targetKind,
@@ -223,9 +235,11 @@ export async function applyExplicitLinks(
         compartments: params.compartments,
         projectIds: params.projectIds,
       })
+      if (params.authority) params.authority.accumulator.note({ sources: boundScopeSources(result) })
       created += 1
     } catch (err) {
-      failed += 1
+      if (params.authority && (err as { operationMayHaveExecuted?: boolean } | null)?.operationMayHaveExecuted) uncertain += 1
+      else failed += 1
       console.error(
         `[explicit-links] edge create failed (source=${params.sourceKind}:${params.sourceId} ` +
           `target=${targetKind}:${link.targetEntityId} edge=${link.edgeType}):`,
@@ -233,7 +247,7 @@ export async function applyExplicitLinks(
       )
     }
   }
-  return { created, failed }
+  return { created, failed, ...(uncertain ? { uncertain } : {}) }
 }
 
 export type ApplyClosesParams = {
@@ -328,12 +342,15 @@ export function formatClosesSummary(summary: { closed: number; failed: number })
 }
 
 /** Short summary suitable for appending to a tool result string. */
-export function formatLinksSummary(summary: { created: number; failed: number }): string {
-  if (summary.created === 0 && summary.failed === 0) return ''
+export function formatLinksSummary(summary: { created: number; failed: number; uncertain?: number }): string {
+  const uncertainty = summary.uncertain
+    ? ' (relationship updates may have completed; check them before retrying. Do not repeat the Memory save)'
+    : ''
+  if (summary.created === 0 && summary.failed === 0) return uncertainty
   if (summary.failed === 0) {
     return summary.created === 1
-      ? ' (1 edge linked)'
-      : ` (${summary.created} edges linked)`
+      ? ' (1 edge linked)' + uncertainty
+      : ` (${summary.created} edges linked)` + uncertainty
   }
-  return ` (${summary.created} edge(s) linked, ${summary.failed} failed — see logs)`
+  return ` (${summary.created} edge(s) linked, ${summary.failed} failed — see logs)` + uncertainty
 }

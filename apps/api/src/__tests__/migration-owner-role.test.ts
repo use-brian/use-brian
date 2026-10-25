@@ -353,3 +353,62 @@ describe('[COMP:api/migration-owner-role] Migrations run as an ordinary owner ro
     }
   })
 })
+
+// This regression uses the unchanged full chain through8125 and the ordinary
+// owner boundary. The real selective-order upgrade is separately exercised on PG18.
+describe('[COMP:api/migration-owner-role] Memory successor parity8126',()=>{
+  async function prerequisite(){
+    const db=await openAsOwner({appUser:true})
+    await migratePglite(db,migrationsDir,{through:'8125_association_drain_continuation.sql'})
+    await assertOrdinaryOwner(db)
+    const {readFile}=await import('node:fs/promises')
+    const repair=await readFile(migrationsDir+'/8126_native_memory_successor_derivation_parity.sql','utf8')
+    const historical=await readFile(migrationsDir+'/8090_admitted_native_memory_derivation.sql','utf8')
+    const pairs=[...historical.matchAll(/before:=\$before\$([\s\S]*?)\$before\$;\s*after:=\$after\$([\s\S]*?)\$after\$;/g)]
+    assert.equal(pairs.length,4)
+    const signature='public.record_admitted_memory_successor_derivation(uuid,text,uuid,text,text,jsonb,uuid,text)'
+    const state=async()=>(await db.query<{raw:Record<string,unknown>;definition:string;body:string}>(
+      'SELECT to_jsonb(p) AS raw,pg_get_functiondef(p.oid) AS definition,p.prosrc AS body FROM pg_proc p WHERE oid=$1::regprocedure',[signature])).rows[0]
+    return {db,repair,pairs,signature,state}
+  }
+  it('preserves a current clone and repairs only the exact known old body with unchanged OID/properties/private ACL',async()=>{
+    const f=await prerequisite()
+    try{
+      const current=await f.state()
+      await f.db.exec(f.repair);assert.deepEqual(await f.state(),current)
+      let legacy=current.body
+      for(const pair of f.pairs){assert.equal(legacy.split(pair[2]).length,2);legacy=legacy.replace(pair[2],pair[1])}
+      assert.notEqual(legacy,current.body)
+      await f.db.exec(current.definition.replace(current.body,legacy))
+      const old=await f.state();assert.deepEqual({...old.raw,prosrc:current.raw.prosrc},current.raw)
+      await f.db.exec(f.repair);assert.deepEqual(await f.state(),current)
+      assert.equal((await f.db.query<{current:boolean}>('SELECT application_memory_statement_helpers_current() AS current')).rows[0].current,true)
+      const installed=new Set((await f.db.query<{name:string}>('SELECT name FROM _migrations')).rows.map(row=>row.name))
+      const {readdir}=await import('node:fs/promises')
+      const pending=(await readdir(migrationsDir)).filter(name=>name.endsWith('.sql')&&!installed.has(name)).sort()
+      assert(pending.includes('8126_native_memory_successor_derivation_parity.sql'))
+      assert(pending.includes('8127_native_memory_retraction_hold_binding.sql'))
+      assert.equal(await migratePglite(f.db,migrationsDir),pending.length)
+      assert.equal(await migratePglite(f.db,migrationsDir),0)
+      await assertOrdinaryOwner(f.db)
+    }finally{await f.db.close()}
+  })
+  it('refuses unknown clone body, metadata or public ACL drift without changing that state or ledger',async()=>{
+    const f=await prerequisite()
+    try{
+      const current=await f.state(),ledger=async()=>(await f.db.query('SELECT name FROM _migrations ORDER BY name')).rows
+      const originalLedger=await ledger()
+      for(const kind of ['body','metadata','acl']){
+        if(kind==='body')await f.db.exec(current.definition.replace(current.body,current.body+'\n-- Unknown clone drift\n'))
+        if(kind==='metadata')await f.db.exec(`ALTER FUNCTION ${f.signature} COST 101`)
+        if(kind==='acl')await f.db.exec(`GRANT EXECUTE ON FUNCTION ${f.signature} TO PUBLIC`)
+        const drifted=await f.state()
+        await assert.rejects(f.db.exec(f.repair),/Memory successor parity (body|metadata) prerequisite changed/)
+        await f.db.exec('ROLLBACK')
+        assert.deepEqual(await f.state(),drifted);assert.deepEqual(await ledger(),originalLedger)
+        if(kind==='acl')await f.db.exec(`REVOKE EXECUTE ON FUNCTION ${f.signature} FROM PUBLIC`)
+        await f.db.exec(current.definition);assert.deepEqual(await f.state(),current)
+      }
+    }finally{await f.db.close()}
+  })
+})

@@ -11,6 +11,7 @@
  * viewer projection per `permissions.md` § Privileged-service exception.
  */
 
+import type { SessionContextAuthority } from './session-state-types.js'
 import type { AccessContext } from '../security/access-context.js'
 import type { ScopeSource } from '../security/derived-scope.js'
 import type { Sensitivity } from '../security/sensitivity.js'
@@ -104,6 +105,8 @@ export type MemoryStore = {
     projectIds?: string[]
     /** Trusted complete model-input evidence; never a tool input field. */
     derivation?: DerivedWriteEvidence
+    /** Original host execution and accumulator; never accepted from model input. */
+    authority?: SessionContextAuthority
     /** Trusted narrower destination visibility, intersected with every source. */
     derivationTarget?: { userId: string | null; assistantId: string | null }
     /**
@@ -142,16 +145,21 @@ export type MemoryStore = {
     compartments?: string[]
     projectIds?: string[]
     derivation?: DerivedWriteEvidence
-  }, access?: AccessContext): Promise<MemoryRecord | null>
+  }, access?: AccessContext, operation?: {
+    /** Host-only authority and version from the admitted predecessor, never model input. */
+    authority: SessionContextAuthority
+    expectedVersion: string
+    writeFields: readonly ('summary' | 'detail' | 'tags' | 'confidence')[]
+  }): Promise<MemoryRecord | null>
 
-  getById(ctx: AccessContext, id: string): Promise<MemoryRecord | null>
+  getById(ctx: AccessContext, id: string, authority?: SessionContextAuthority): Promise<MemoryRecord | null>
 
   search(ctx: AccessContext, params: {
     query: string
     limit?: number
     /** Match memories whose ID starts with this prefix (for truncated index IDs) */
     idPrefix?: string
-  }): Promise<MemoryRecord[]>
+  }, authority?:SessionContextAuthority): Promise<MemoryRecord[]>
 
   getIdentity(ctx: AccessContext): Promise<MemoryRecord[]>
 

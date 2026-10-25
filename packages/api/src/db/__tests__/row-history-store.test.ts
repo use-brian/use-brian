@@ -14,6 +14,7 @@
  */
 
 import { describe, expect, it, vi, beforeEach } from 'vitest'
+import { bindScopeSources, boundScopeSources, ContextScopeAccumulator } from '@use-brian/core'
 import type { RetrievalActor } from '@use-brian/core'
 
 vi.mock('../memories.js', async (importActual) => ({
@@ -27,6 +28,7 @@ import { getMemoryHistory } from '../memories.js'
 const mockMemoryHistory = vi.mocked(getMemoryHistory)
 
 const ACTOR: RetrievalActor = {
+  authority: {execution:{} as NonNullable<RetrievalActor['authority']>['execution'],accumulator:new ContextScopeAccumulator()},
   workspaceId: '00000000-0000-0000-0000-0000000000aa',
   userId: '00000000-0000-0000-0000-0000000000bb',
   assistantId: '00000000-0000-0000-0000-0000000000cc',
@@ -84,6 +86,20 @@ beforeEach(() => {
 })
 
 describe('[COMP:brain/row-history-store] getRowHistory input validation', () => {
+  it('requires the original Memory host and preserves canonical bindings through history projection', async () => {
+    const source = {resourceKind:'memory' as const,resourceId:ROW_ID,version:'1',workspaceId:ACTOR.workspaceId,userId:ACTOR.userId,
+      assistantId:ACTOR.assistantId,sensitivity:'internal' as const,compartments:[],projectIds:[]}
+    const row=bindScopeSources(mem({id:ROW_ID}),[source])
+    mockMemoryHistory.mockResolvedValue(bindScopeSources({chain:[row],currentId:ROW_ID},[source]) as Awaited<ReturnType<typeof getMemoryHistory>>)
+    const result=await store.getRowHistory(ACTOR,{primitive:'memories',row_id:ROW_ID})
+    expect(mockMemoryHistory).toHaveBeenCalledWith(ROW_ID,ACTOR,ACTOR.authority)
+    for(const projected of [result!,result!.data,result!.data.chain,result!.data.chain[0]!]) expect(boundScopeSources(projected)).toEqual([source])
+    mockMemoryHistory.mockClear()
+    await expect(store.getRowHistory({...ACTOR,authority:undefined},{primitive:'memories',row_id:ROW_ID})).rejects.toThrow('scope_evidence_missing')
+    expect(mockMemoryHistory).not.toHaveBeenCalled()
+  })
+
+
   it('throws on an unknown primitive', async () => {
     await expect(
       store.getRowHistory(ACTOR, { primitive: 'bogus' as never, row_id: ROW_ID }),

@@ -114,7 +114,8 @@ export type RetrievalToolOptions = {
 /**
  * Resolve the actor projection from a `ToolContext`. The store's permission
  * predicate only needs workspaceId / userId / assistantId / clearance — the
- * full ToolContext stays inside the engine.
+ * original host execution and live accumulator also accompany the actor for
+ * guarded retained readers. Model-facing arguments cannot supply them.
  *
  * Returns an error body when workspaceId is absent; retrieval is workspace-
  * scoped (see retrieval.md §"Universal projection") and a call without one
@@ -135,6 +136,9 @@ export function actorFromContext(context: ToolContext): RetrievalActor | Retriev
     clearance: context.clearance,
     compartments: context.compartments,
     projectIds: context.projectIds,
+    ...(context.executionContext && context.scopeAccumulator ? { authority: {
+      execution: context.executionContext, accumulator: context.scopeAccumulator,
+    } } : {}),
   }
 }
 

@@ -16,6 +16,7 @@ import type {
   EntityRollupEmbedded,
   EntityRollupSummary,
 } from '../entities/types.js'
+import type { SessionContextAuthority } from '../memory/session-state-types.js'
 import type { Sensitivity } from '../security/sensitivity.js'
 import type { AssistantKind } from '../security/access-context.js'
 
@@ -77,6 +78,8 @@ export type RetrievalResult<T> = RetrievalEnvelope<T> | RetrievalErrorBody
  * workspace reflector sees every assistant's rows.
  */
 export type RetrievalActor = {
+  /** Original live host objects, never a serialized actor credential. */
+  authority?: SessionContextAuthority
   workspaceId: string
   userId: string
   assistantId: string

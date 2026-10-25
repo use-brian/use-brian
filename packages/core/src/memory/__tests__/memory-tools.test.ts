@@ -144,6 +144,24 @@ const ctx = {
 }
 
 describe('[COMP:memory/tools] saveMemory', () => {
+  it('forwards the admitted predecessor version, original host authority and only requested semantic fields', async () => {
+    const store = makeFakeStore(), id = '11111111-1111-4111-8111-111111111111'
+    vi.spyOn(store, 'getById').mockResolvedValue({id,scope:'shared',summary:'Fictional original',detail:'Original detail',tags:[],confidence:0.8,
+      sensitivity:'internal',scopeVersion:'7',workspaceId:'workspace_1',userId:ctx.userId,assistantId:ctx.assistantId,compartments:[],projectIds:[]})
+    const update = vi.spyOn(store, 'update').mockResolvedValue({id:'22222222-2222-4222-8222-222222222222',scope:'shared',summary:'Fictional original',detail:'Refinement',tags:[],confidence:0.8,sensitivity:'internal'})
+    const execution = {} as NonNullable<import('../../tools/types.js').ToolContext['executionContext']>
+    const accumulator = new ContextScopeAccumulator()
+    const result = await createMemoryTools(store).saveMemory.execute({id,detail:'Refinement'},
+      {...ctx,workspaceId:'workspace_1',executionContext:execution,scopeAccumulator:accumulator})
+    expect(result.isError).not.toBe(true)
+    expect(update).toHaveBeenCalledOnce()
+    const operation=update.mock.calls[0][3]
+    expect(operation).toMatchObject({expectedVersion:'7',writeFields:['detail']})
+    expect(operation?.authority.execution).toBe(execution)
+    expect(operation?.authority.accumulator).toBe(accumulator)
+    expect(update.mock.calls[0][1]).not.toHaveProperty('summary')
+  })
+
   it('creates a new memory when no id is provided', async () => {
     const store = makeFakeStore()
     const { saveMemory } = createMemoryTools(store)

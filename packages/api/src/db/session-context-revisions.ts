@@ -15,7 +15,7 @@ import { validateCallerScopeEvidence } from '../context-scope/caller-evidence.js
 import { readExternalSourceAncestors } from '../application-platform/external-source-ancestry.js'
 import { readApplicationFieldAncestors } from '../application-platform/field-evidence.js'
 import { getSharedRetainedSourceAuthority } from '../application-platform/source-runtime.js'
-import { applyApplicationRLSContext, releaseApplicationTransactionBinding } from '../application-platform/execution-context.js'
+import { applyApplicationRLSContext, getApplicationExecutionBinding, releaseApplicationTransactionBinding } from '../application-platform/execution-context.js'
 import { assertPreparedExternalSourceAuthorityCurrent, pinPreparedExternalSourceAuthority,
   type PreparedExternalSourceAuthority } from '../application-platform/retained-source-authority.js'
 
@@ -35,6 +35,15 @@ function changed(cause?:unknown): never { throw Object.assign(new DerivedScopeEr
 function requireAuthority(authority: SessionContextAuthority | undefined): SessionContextAuthority {
   if (!authority?.execution || !(authority.accumulator instanceof ContextScopeAccumulator)) missing()
   return authority
+}
+/** Only the original current native delegated member can enter this host port. */
+function nativeDelegatedSessionPublication(execution:ExecutionContext):boolean{
+ const {identity,security,ownership,surface}=execution,access=security.access
+ return identity.kind==='delegated'&&ownership.kind==='workspace'&&ownership.workspaceId===access.workspaceId
+  &&identity.actorUserId===access.userId&&identity.parentCeiling.userId===access.userId
+  &&identity.parentCeiling.workspaceId===access.workspaceId&&access.assistantId===execution.assistant.id
+  &&!surface.readOnly&&!surface.systemRead&&!surface.clientSelfMemory&&!access.systemRead
+  &&!getApplicationExecutionBinding(execution)
 }
 async function transaction<T>(authority: SessionContextAuthority, sources: readonly ScopeSource[], action: 'context' | 'retain',
   owner: boolean, run: (client: PoolClient) => Promise<T>, writeSessionId?: string, stoppedTurnToken?:string, activeTurnToken?:string,nativeMutation=false): Promise<T> {
@@ -67,7 +76,8 @@ async function transaction<T>(authority: SessionContextAuthority, sources: reado
         await applyRLSGucs(client, execution.security.access.userId)
         // Native publication needs the exact original assistant even with the
         // legacy department policy. The v2 flag remains unchanged.
-        if (execution.identity.kind === 'attended' && execution.identity.principal.kind === 'workspace_member') {
+        if (execution.identity.kind === 'attended' && execution.identity.principal.kind === 'workspace_member'
+          ||nativeDelegatedSessionPublication(execution)) {
           await client.query("SELECT set_config('app.v2_assistant_id',$1,true)", [execution.assistant.id])
         }
         // Native admission takes workspace SHARE locks too. Pin that row before

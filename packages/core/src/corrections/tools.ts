@@ -36,6 +36,7 @@
  */
 
 import { z } from 'zod'
+import { DerivedScopeError } from '../security/derived-scope.js'
 import { buildTool, type Tool } from '../tools/types.js'
 import { notFoundFailure, toolFailure } from '../tools/tool-failure.js'
 import {
@@ -132,8 +133,10 @@ export function createCorrectionTools(deps: CorrectionToolsDeps): Tool[] {
       const gate = workspaceGate(context.workspaceId, 'retractMemory')
       if (gate) return gate
       try {
+        if (!context.executionContext || !context.scopeAccumulator) throw new DerivedScopeError('scope_evidence_missing')
         const result = await retractMemory(
           {
+            authority: { execution: context.executionContext, accumulator: context.scopeAccumulator },
             workspaceId: context.workspaceId!,
             memoryId: input.memory_id,
             actorUserId: context.userId,
@@ -148,6 +151,9 @@ export function createCorrectionTools(deps: CorrectionToolsDeps): Tool[] {
           },
         }
       } catch (err) {
+        if ((err as { operationMayHaveExecuted?: boolean } | null)?.operationMayHaveExecuted) {
+          return { isError: true, data: 'The memory correction may have committed, but its acknowledgement could not be admitted under the original current authority. Do not repeat the correction. Confirmation of the correction is currently unavailable.' }
+        }
         if (err instanceof MemoryRetractionError) {
           if (err.code === 'memory_not_found' || err.code === 'workspace_mismatch') {
             return notFoundFailure({

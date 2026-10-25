@@ -12,10 +12,9 @@ const result=z.discriminatedUnion('admitted',[
 /** Null means an unchanged original-family fallback; no authorization result is cached. */
 export async function readNativeSessionEvidence(client:Pick<PoolClient,'query'>,workspaceId:string,roots:readonly ScopeSource[]):Promise<{evidence:ScopeEvidence;current:ScopeSource[]}|null>{
  if(!roots.length||roots.length>100||!roots.some(root=>root.resourceKind==='application_field'||root.resourceKind==='session_context_revision')||roots.some(root=>!['application_field','session_context_revision','session_message','memory'].includes(root.resourceKind)))return null
- // A stored context can hide Memory ancestors behind its sole outer root.
- const sql=roots.some(root=>root.resourceKind==='memory'||root.resourceKind==='session_context_revision')
-  ? 'SELECT read_native_attended_memory_evidence($1,$2,$3,$4) AS value'
-  : 'SELECT read_native_session_evidence($1,$2,$3,$4) AS value'
+ // Field observations can hide Memory ancestors too. The closed validator
+ // discovers the complete native closure and preserves its original fallback.
+ const sql='SELECT read_native_attended_memory_evidence($1,$2,$3,$4) AS value'
  const raw=(await client.query<{value:unknown}>(sql,
   [workspaceId,roots.map(root=>root.resourceKind),roots.map(root=>root.resourceId),roots.map(root=>root.version)])).rows[0]?.value
  if(raw===null)return null
