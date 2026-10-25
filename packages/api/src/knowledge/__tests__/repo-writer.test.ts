@@ -20,12 +20,18 @@ const SOURCE = {
 const RAW_FILE = '---\ntitle: "Vault"\nsensitivity: internal\n---\nOld body\n'
 
 function makeStore(overrides?: Partial<RepoWriterStore>): RepoWriterStore {
-  return {
+  const store: RepoWriterStore = {
     getSource: vi.fn(async () => ({ ...SOURCE })),
     upsertByPath: vi.fn(async () => ({ id: 'e1', path: 'products/vault' })),
     updateSourceWriteAccess: vi.fn(async () => {}),
     ...overrides,
   }
+  store.publishRepoWrite ??= async (input, _authority, effect) => {
+    const ref = await effect()
+    const row = await store.upsertByPath({ ...input.entry, sourceSha: ref.sha })
+    return { row, ...ref }
+  }
+  return store
 }
 
 function makeOps(overrides?: Partial<RepoWriterGithubOps>): RepoWriterGithubOps {
@@ -61,6 +67,67 @@ const UPDATE_PARAMS = {
 }
 
 describe('[COMP:knowledge/repo-writer] createKnowledgeRepoWriter', () => {
+  describe.each(['create', 'update'] as const)('uncertainty for %s', (operation) => {
+    const invoke = (writer: ReturnType<typeof createKnowledgeRepoWriter>) => operation === 'update'
+      ? writer.commitEntryUpdate(UPDATE_PARAMS)
+      : writer.commitEntryCreate({ workspaceId: 'w1', sourceId: 'src1', path: 'docs/new-entry',
+          fileContent: '# New entry\nBody.\n', changeSummary: 'add documentation' })
+
+    it('preserves a lost response as uncertain and does not write the mirror or repeat dispatch', async () => {
+      const sourceWrites: string[] = []
+      const ops = makeOps({ createOrUpdateFile: vi.fn(async (_pat, _owner, _repo, params) => {
+        sourceWrites.push(params.content)
+        throw new Error('synthetic-provider-secret: connection reset after source accepted the write')
+      }) })
+      const store = makeStore()
+      const result = await invoke(createKnowledgeRepoWriter({ store, syncCredentials, githubOps: ops }))
+      expect(sourceWrites).toHaveLength(1)
+      expect(result).toMatchObject({ ok: false, reason: 'error', retrySafe: false, operationMayHaveExecuted: true })
+      if (!result.ok) {
+        expect(result.message).toContain('outcome could not be confirmed')
+        expect(result.message).not.toContain('was committed')
+        expect(result.message).not.toContain('synthetic-provider-secret')
+      }
+      expect(store.upsertByPath).not.toHaveBeenCalled()
+      expect(ops.createOrUpdateFile).toHaveBeenCalledTimes(1)
+    })
+
+    it('preserves confirmed commit when canonical mirror admission rejects the write', async () => {
+      const ops = makeOps()
+      const store = makeStore({ upsertByPath: vi.fn(async () => { throw new Error('knowledge_sync_authority_required') }) })
+      const result = await invoke(createKnowledgeRepoWriter({ store, syncCredentials, githubOps: ops }))
+      expect(result).toMatchObject({ ok: false, reason: 'error', retrySafe: false, operationMayHaveExecuted: true })
+      if (!result.ok) {
+        expect(result.message).toContain('was committed to GitHub (commit_)')
+        expect(result.message).toContain('source access and admission remain available')
+        expect(result.message).not.toContain('will appear')
+      }
+      expect(ops.createOrUpdateFile).toHaveBeenCalledTimes(1)
+      expect(store.upsertByPath).toHaveBeenCalledTimes(1)
+    })
+
+    it('never dispatches when canonical publication admission rejects the initiating authority', async () => {
+      const ops = makeOps()
+      const store = makeStore({ publishRepoWrite: vi.fn(async () => { throw new Error('scope_evidence_missing') }) })
+      const result = await invoke(createKnowledgeRepoWriter({ store, syncCredentials, githubOps: ops }))
+      expect(result.ok).toBe(false)
+      expect(result).not.toHaveProperty('operationMayHaveExecuted')
+      expect(ops.createOrUpdateFile).not.toHaveBeenCalled()
+      expect(store.upsertByPath).not.toHaveBeenCalled()
+    })
+
+    it('keeps pre-dispatch failure distinct from possible source effects', async () => {
+      const ops = makeOps({ getBranchHead: vi.fn(async () => { throw new Error('connection reset before dispatch') }) })
+      const store = makeStore()
+      const result = await invoke(createKnowledgeRepoWriter({ store, syncCredentials, githubOps: ops }))
+      expect(result).toMatchObject({ ok: false, reason: 'error' })
+      expect(result).not.toHaveProperty('operationMayHaveExecuted')
+      expect(result).not.toHaveProperty('retrySafe')
+      expect(ops.createOrUpdateFile).not.toHaveBeenCalled()
+      expect(store.upsertByPath).not.toHaveBeenCalled()
+    })
+  })
+
   describe('commitEntryUpdate', () => {
     it('commits the new body under the verbatim frontmatter and writes through', async () => {
       const store = makeStore()
@@ -244,6 +311,20 @@ describe('[COMP:knowledge/repo-writer] createKnowledgeRepoWriter', () => {
       }
       return { base, root, source }
     }
+
+    it('preserves a confirmed local source update when the mirror rejects it', async () => {
+      const { root, source } = await makeLocalSource()
+      const filePath = path.join(root, 'products', 'vault.md')
+      await fs.mkdir(path.dirname(filePath), { recursive: true })
+      await fs.writeFile(filePath, RAW_FILE)
+      const store = makeStore({ getSource: vi.fn(async () => source),
+        upsertByPath: vi.fn(async () => { throw new Error('knowledge_sync_authority_required') }) })
+      const result = await createKnowledgeRepoWriter({ store }).commitEntryUpdate(UPDATE_PARAMS)
+      expect(result).toMatchObject({ ok: false, retrySafe: false, operationMayHaveExecuted: true })
+      expect(await fs.readFile(filePath, 'utf8')).toContain('New body')
+      if (!result.ok) expect(result.message).toContain('local knowledge file was updated')
+      expect(store.upsertByPath).toHaveBeenCalledTimes(1)
+    })
 
     it('updates the local file atomically, preserves frontmatter, and writes through', async () => {
       const { root, source } = await makeLocalSource()

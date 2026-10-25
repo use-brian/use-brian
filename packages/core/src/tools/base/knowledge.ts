@@ -115,7 +115,14 @@ type KnowledgeRepoWriteFailure = Extract<KnowledgeRepoWriteResult, { ok: false }
 type KnowledgeRepoWriteReason = KnowledgeRepoWriteFailure['reason']
 
 /** The writer's own message plus the verdict its `reason` implies. */
-function repoWriteFailure(result: KnowledgeRepoWriteFailure): { data: string; isError: true } {
+function repoWriteFailure(result: KnowledgeRepoWriteFailure): { data: string; isError: true; meta?: { retrySafe: false; operationMayHaveExecuted: true } } {
+  if (result.retrySafe === false || result.operationMayHaveExecuted === true) {
+    return {
+      data: `${result.message} (${result.reason}) Do not retry this write blindly. Check the source to reconcile what exists before considering another write; a failed mirror does not undo a source write.`,
+      isError: true,
+      meta: { retrySafe: false, operationMayHaveExecuted: true },
+    }
+  }
   const verdict = REPO_WRITE_VERDICT[result.reason] ?? REPO_WRITE_VERDICT.error
   return { data: `${result.message} (${result.reason}) ${verdict}`, isError: true }
 }
@@ -514,6 +521,7 @@ export function createKnowledgeTools(
           body: input.content,
         })
         const result = await opts.repoWriter.commitEntryCreate({
+          ...(context.executionContext && context.scopeAccumulator ? { authority: { execution: context.executionContext, accumulator: context.scopeAccumulator } } : {}),
           workspaceId: context.workspaceId,
           sourceId: target.id,
           path: input.path,
@@ -714,9 +722,11 @@ export function createKnowledgeTools(
             isError: true,
           }
         }
+        context.scopeAccumulator?.note(scopeEvidenceFromRows([entry]))
         const result = await opts.repoWriter.commitEntryUpdate({
+          ...(context.executionContext && context.scopeAccumulator ? { authority: { execution: context.executionContext, accumulator: context.scopeAccumulator } } : {}),
           workspaceId: context.workspaceId,
-          entry: { id: entry.id, path: entry.path, content: entry.content, sourceId: entry.sourceId },
+          entry: { id: entry.id, ...(entry.scopeVersion ? { scopeVersion: entry.scopeVersion } : {}), path: entry.path, content: entry.content, sourceId: entry.sourceId },
           newBody: input.content,
           changeSummary: input.changeSummary,
           compartments: successorStamp.compartments,

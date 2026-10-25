@@ -29,6 +29,7 @@ export type KnowledgeSearchResult = {
 }
 
 export type KnowledgeEntryDetail = {
+  scopeVersion?: string
   id: string
   path: string
   title: string
@@ -133,6 +134,9 @@ export type KnowledgeRepoWriteResult =
         | 'file_exists'
         | 'error'
       message: string
+      /** Source dispatch may have executed, including a confirmed write whose mirror failed. */
+      retrySafe?: false
+      operationMayHaveExecuted?: true
     }
 
 export type KnowledgeRepoWriter = {
@@ -144,8 +148,11 @@ export type KnowledgeRepoWriter = {
    */
   commitEntryUpdate(params: {
     workspaceId: string
+    /** Original trusted invocation; serialized lookalikes cannot authorize publication. */
+    authority?: SessionContextAuthority
     entry: {
       id: string
+      scopeVersion?: string
       path: string
       content: string
       sourceId: string
@@ -169,6 +176,8 @@ export type KnowledgeRepoWriter = {
    */
   commitEntryCreate(params: {
     workspaceId: string
+    /** Original trusted invocation; serialized lookalikes cannot authorize publication. */
+    authority?: SessionContextAuthority
     sourceId: string
     path: string
     fileContent: string

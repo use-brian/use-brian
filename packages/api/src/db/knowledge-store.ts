@@ -44,6 +44,8 @@ import { readAdmissionPolicy } from '../workspace-access/admission-policy-read.j
 import { admitKnowledgeWrite, lockKnowledgePrior, admitKnowledgeSourceConfiguration, type KnowledgeSourceBindingInput, type KnowledgeConfigureAuthority } from '../workspace-access/knowledge-create-admission.js'
 import { WorkspaceAccessError } from '../workspace-access/policy.js'
 import { captureKnowledgeSyncAuthority, knowledgeSyncCapture, admitKnowledgeSync } from '../workspace-access/knowledge-sync-admission.js'
+import type { RepoWriterStore } from '../knowledge/repo-writer.js'
+import { admitWorkspaceResource } from '../workspace-access/resource-admission.js'
 import { publishKnowledgeLifecycle } from '../knowledge-event-fanout.js'
 import {readNativeKnowledgeSource,type KnowledgeSourceProjection} from './knowledge-source-reader.js'
 import {validateDerivedWriteInputs,recordDerivedResource} from './derived-scope-store.js'
@@ -292,12 +294,11 @@ async function queryKnowledgeCollection<T extends QueryResultRow>(ctx:AccessCont
 
 /** Retained history is metadata, never permission to synthesize missing observations. */
 function knowledgeDerivationExists(alias:'ke'|'ke2'|'knowledge_entries',currentVersion=false):string{
- return `EXISTS(SELECT 1 FROM public.scope_derivations d WHERE d.workspace_id=${alias}.workspace_id
-   AND d.resource_kind='knowledge_entry' AND d.resource_id=${alias}.id
-   ${currentVersion?`AND d.resource_version=${alias}.scope_version::text`:''})`
+ const state=`read_admitted_knowledge_evidence_state(${alias}.workspace_id,${alias}.id,${alias}.scope_version::text)`
+ return currentVersion?`coalesce(${state}->>'current'='true',false)`:`coalesce(${state}->>'requiresAuthority'='true',true)`
 }
 function knowledgeCurrentEvidenceComplete(alias:'ke'|'ke2'|'knowledge_entries'):string{
- return `(NOT ${knowledgeDerivationExists(alias)} OR ${knowledgeDerivationExists(alias,true)})`
+ return knowledgeDerivationExists(alias,true)
 }
 
 type KnowledgePointFrame={sources:readonly ScopeSource[];requiresNoDerivation?:boolean}
@@ -502,6 +503,7 @@ const SOURCE_COLUMNS = `
 
 export type KnowledgeStore = {
   /** Internal worker port; captures a canonical binding before external I/O. */
+  publishRepoWrite: NonNullable<RepoWriterStore['publishRepoWrite']>
   captureSourceSync(source: Pick<KnowledgeSource, 'id' | 'workspaceId' | 'sourceType' | 'repo' | 'branch' | 'rootPath' | 'connectorInstanceId' | 'lastSyncedSha'> & { bindingVersion?: string }): Promise<object | undefined>
   releaseSourceSync(authority: object): Promise<void>
   syncRequiresFullReconciliation(authority: object): boolean
@@ -721,13 +723,57 @@ async function syncMutation(authority: object, operation: string, details: Recor
       path: path ?? '', title: '', content: '', sensitivity: source.bindingSensitivity ?? source.defaultSensitivity,
       compartments: source.bindingCompartments ?? [], projectIds: source.bindingProjectIds ?? [],
     })
-    return client.query<KnowledgeEntry>(`SELECT ${ENTRY_COLUMNS} FROM ${source.configuredByUserId ? 'apply_knowledge_source_sync' : 'apply_knowledge_source_sync_worker'}($1::jsonb,$2::jsonb)`,
+    return client.query<KnowledgeEntry>(`SELECT ${ENTRY_COLUMNS} FROM ${source.configuredByUserId ? 'apply_knowledge_source_refresh' : 'apply_knowledge_source_sync_worker'}($1::jsonb,$2::jsonb)`,
       [JSON.stringify({ ...admitted, ...details, path: path ?? '', operation }), JSON.stringify(source)])
   }, undefined, !!source.configuredByUserId)
 }
 
 export function createDbKnowledgeStore(): KnowledgeStore {
   return {
+    async publishRepoWrite(raw, authority, effect) {
+      if (!authority || !(authority.accumulator instanceof ContextScopeAccumulator)) throw new DerivedScopeError('scope_evidence_missing')
+      const input = structuredClone(raw), { execution, accumulator } = authority
+      if (input.entry.workspaceId !== execution.security.access.workspaceId || input.source.workspaceId !== input.entry.workspaceId
+        || input.entry.sourceId !== input.source.id || input.entry.actorId !== execution.security.access.userId) throw new DerivedScopeError('scope_evidence_missing')
+      const consumed = new ContextScopeAccumulator(execution.security.provenance); consumed.note(accumulator.evidence)
+      const sources = consumed.evidence.sources ?? []
+      if (!sources.length || input.entryId && (!input.expectedVersion || !sources.some(source => source.resourceKind === 'knowledge_entry'
+        && source.resourceId === input.entryId && source.version === input.expectedVersion))) throw new DerivedScopeError('scope_evidence_missing')
+      const derivation: DerivedWriteEvidence = { producer: 'knowledge-repo-write', sources }
+      let effectCompleted = false
+      try {
+        const result = await writeRetainedContextFrame(authority, sources, async client => {
+          await validateDerivedWriteInputs(client, derivation, 'read_entity_derivation_source')
+          const tiers = ['public', 'internal', 'confidential'] as const
+          const sensitivity = tiers[Math.max(tiers.indexOf(input.entry.sensitivity), tiers.indexOf(input.source.bindingSensitivity ?? 'public'))]
+          const scoped = deriveWriteScope(derivation, { workspaceId: input.entry.workspaceId, userId: null, assistantId: null,
+            sensitivity, compartments: [...new Set([...(input.entry.compartments ?? []), ...(input.source.bindingCompartments ?? [])])],
+            projectIds: [...new Set([...(input.entry.projectIds ?? []), ...(input.source.bindingProjectIds ?? [])])] }, execution.security.access.userId)
+          input.entry = { ...input.entry, sensitivity: scoped.sensitivity, compartments: scoped.compartments, projectIds: scoped.projectIds }
+          const argumentsFor = () => [JSON.stringify(input.entry), JSON.stringify(input.source), JSON.stringify(sources), input.entryId ?? null, input.expectedVersion ?? null]
+          await client.query('SELECT admit_knowledge_repo_write($1,$2,$3,$4,$5)', argumentsFor())
+          const admitted = await admitWorkspaceResource(client, input.entry.workspaceId, execution.security.access.userId, {
+            writerKind: 'knowledge_entry', visibility: 'workspace', sensitivity: input.entry.sensitivity,
+            inherited: { visibility: 'workspace', sensitivity: input.entry.sensitivity,
+              compartments: input.entry.compartments ?? [], projectIds: input.entry.projectIds ?? [] },
+            inheritedAuthority: 'read', requestedLabels: { compartments: [], projectIds: [] },
+          })
+          input.entry = { ...input.entry, ...admitted.envelope }
+          await execution.security.authority.assertCurrent()
+          const ref = await effect(); effectCompleted = true
+          input.entry.sourceSha = ref.sha
+          const result = await client.query<KnowledgeEntry>(`SELECT ${ENTRY_COLUMNS} FROM publish_admitted_knowledge_repo_write($1,$2,$3,$4,$5)`, argumentsFor())
+          const row = result.rows[0]
+          if (!row) throw new DerivedScopeError('scope_source_changed')
+          return { row, ...ref }
+        })
+        emitLifecycle(result.row, input.entryId ? 'updated' : 'created', 'system', execution.security.access.userId)
+        return result
+      } catch (error) {
+        if (effectCompleted) throw Object.assign(error instanceof Error ? error : new Error('scope_source_changed'), { retrySafe: false, operationMayHaveExecuted: true })
+        throw error
+      }
+    },
     async captureSourceSync(expected) {
       const current = (await query<KnowledgeSource>(`SELECT ${SOURCE_COLUMNS} FROM workspace_knowledge_sources WHERE workspace_id=$1 AND id=$2`, [expected.workspaceId, expected.id])).rows[0]
       if (!current) throw new Error('knowledge_source_changed')
@@ -950,7 +996,7 @@ export function createDbKnowledgeStore(): KnowledgeStore {
         const outcome = await knowledgeWrite(params.workspaceId, source.configuredByUserId, async client => {
           const admitted = await admitKnowledgeSync(client, syncAuthority, params)
           const existed = (await client.query('SELECT id FROM knowledge_entries WHERE workspace_id=$1 AND path=$2', [params.workspaceId,params.path])).rows.length > 0
-          const result = await client.query<KnowledgeEntry>(`SELECT ${ENTRY_COLUMNS} FROM ${source.configuredByUserId ? 'apply_knowledge_source_sync' : 'apply_knowledge_source_sync_worker'}($1::jsonb,$2::jsonb)`,
+          const result = await client.query<KnowledgeEntry>(`SELECT ${ENTRY_COLUMNS} FROM ${source.configuredByUserId ? 'apply_knowledge_source_refresh' : 'apply_knowledge_source_sync_worker'}($1::jsonb,$2::jsonb)`,
             [JSON.stringify(admitted), JSON.stringify(source)])
           return { row:result.rows[0], existed }
         }, undefined, !!source.configuredByUserId)

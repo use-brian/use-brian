@@ -609,6 +609,23 @@ describe('[COMP:tools/knowledge] createKnowledgeTools', () => {
       expect(data).toMatch(/retry once with current content/i)
     })
 
+    it.each(['addKnowledgeEntry', 'updateKnowledgeEntry'])('%s preserves uncertain writer outcome without a blind retry verdict', async (toolName) => {
+      if (toolName === 'updateKnowledgeEntry') vi.mocked(mockStore.getById).mockResolvedValueOnce(repoEntry)
+      const opts = writeOpts()
+      const failure = { ok: false as const, reason: 'error' as const,
+        message: 'The source outcome requires reconciliation.', retrySafe: false as const, operationMayHaveExecuted: true as const }
+      vi.mocked(opts.repoWriter.commitEntryCreate).mockResolvedValueOnce(failure)
+      vi.mocked(opts.repoWriter.commitEntryUpdate).mockResolvedValueOnce(failure)
+      const tools = createKnowledgeTools(mockStore, opts)
+      const result = await byName(tools, toolName).execute(toolName === 'addKnowledgeEntry'
+        ? { path: 'docs/new', title: 'New', content: 'Body' }
+        : { id: 'e1', content: 'New body', changeSummary: 'update documentation' }, ctx)
+      expect(result).toMatchObject({ isError: true, meta: { retrySafe: false, operationMayHaveExecuted: true } })
+      expect(String(result.data)).toContain('Check the source to reconcile what exists')
+      expect(String(result.data)).not.toMatch(/nothing was committed|retry once/i)
+      expect(toolName === 'addKnowledgeEntry' ? opts.repoWriter.commitEntryCreate : opts.repoWriter.commitEntryUpdate).toHaveBeenCalledTimes(1)
+    })
+
     it('a push_denied is never retried; an error is retried once', async () => {
       const run = async (reason: 'push_denied' | 'error', message: string) => {
         vi.mocked(mockStore.getById).mockResolvedValueOnce(repoEntry)
@@ -632,6 +649,7 @@ describe('[COMP:tools/knowledge] createKnowledgeTools', () => {
       expect(String(transient.data)).toContain('(error)')
       expect(String(transient.data)).toMatch(/transient/i)
       expect(String(transient.data)).toMatch(/Retry once/i)
+      expect(transient.meta).toBeUndefined()
       // The two must not read the same way to the model.
       expect(String(transient.data)).not.toBe(String(denied.data))
     })
