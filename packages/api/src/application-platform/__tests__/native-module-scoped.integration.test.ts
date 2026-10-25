@@ -1,5 +1,6 @@
 /** Exact-ID native relational modules use ordinary reviewed service authority. */
 import { randomUUID } from 'node:crypto'
+import { readFile } from 'node:fs/promises'
 import { once } from 'node:events'
 import { afterAll, beforeAll, describe, expect, it } from 'vitest'
 import { z } from 'zod'
@@ -8,7 +9,9 @@ import request from 'supertest'
 import type { PoolClient } from 'pg'
 import type { ApplicationModuleDefinition, ApplicationOperationContext } from '@use-brian/core'
 import { ApplicationPlatformError, type ApplicationResourceRef } from '@use-brian/shared'
-import { getPool, getAppPool } from '../../db/client.js'
+import { applyRLSGucs, getPool, getAppPool } from '../../db/client.js'
+import { createWorkspaceModulesStore } from '../../db/workspace-modules-store.js'
+import { createDbDocEntityStore } from '../../db/doc-entity-store.js'
 import { authSessionStore } from '../../db/auth-session-store.js'
 import { createTokens } from '../../auth/jwt.js'
 import { requireAuth } from '../../auth/middleware.js'
@@ -73,7 +76,7 @@ describe.sequential('[COMP:api/application-management] [COMP:api/application-rec
       await owner.query("INSERT INTO workspace_members(workspace_id,user_id,role,clearance) VALUES($1,$2,'owner','confidential')", [id, ownerId])
     }
     await owner.query("INSERT INTO assistants(id,name,owner_user_id,workspace_id,kind,clearance) VALUES($1,'Fictional note assistant',$2,$3,'primary','confidential')", [assistantId, ownerId, workspaceId])
-    await owner.query(`CREATE TABLE native_note_fixture_config(workspace_id uuid PRIMARY KEY REFERENCES workspaces(id) ON DELETE CASCADE,revision bigint NOT NULL DEFAULT 1,catalog_version text NOT NULL DEFAULT '1',held boolean NOT NULL DEFAULT false);
+    await owner.query(`CREATE TABLE native_note_fixture_config(workspace_id uuid PRIMARY KEY REFERENCES workspaces(id) ON DELETE CASCADE,revision bigint NOT NULL DEFAULT 1,catalog_version text NOT NULL DEFAULT '1',held boolean NOT NULL DEFAULT false,catalog_user uuid);
       CREATE TABLE native_note_fixture_rows(workspace_id uuid REFERENCES workspaces(id) ON DELETE CASCADE,id text,created_by uuid NOT NULL,label_released boolean NOT NULL DEFAULT true,label text NOT NULL CHECK(length(btrim(label))>0),private_note text NOT NULL,sensitivity text NOT NULL DEFAULT 'internal' CHECK(sensitivity IN('public','internal','confidential')),compartments text[] NOT NULL DEFAULT '{}',project_ids uuid[] NOT NULL DEFAULT '{}',row_user uuid,version bigint NOT NULL DEFAULT 1,policy_version text NOT NULL DEFAULT '1',PRIMARY KEY(workspace_id,id));
       ALTER TABLE native_note_fixture_rows ENABLE ROW LEVEL SECURITY; ALTER TABLE native_note_fixture_config ENABLE ROW LEVEL SECURITY;
       REVOKE ALL ON native_note_fixture_rows,native_note_fixture_config FROM PUBLIC,app_user;
@@ -84,8 +87,8 @@ describe.sequential('[COMP:api/application-management] [COMP:api/application-rec
         SELECT * INTO c FROM public.native_note_fixture_config WHERE workspace_id=w;
         IF c.workspace_id IS NULL OR c.held OR o<>'{"kind":"native","moduleKey":"fictional_native_notes"}'::jsonb OR t<>'note' THEN RETURN NULL;END IF;
         RETURN jsonb_build_object('moduleKey','fictional_native_notes','origin',o,'typeKey',t,'schemaVersion',c.catalog_version,'policyVersion',c.revision::text,'fieldKeys','["label","private_note"]'::jsonb,
-          'fields','[{"key":"label","read":[],"write":[],"releaseReadTo":["service"],"releaseWriteTo":["service"]},{"key":"private_note","read":[],"write":[],"releaseReadTo":[],"releaseWriteTo":[]}]'::jsonb,
-          'scope',jsonb_build_object('workspaceId',w,'userId',NULL,'assistantId',NULL,'sensitivity','internal','compartments','[]'::jsonb,'projectIds','[]'::jsonb));END $$;
+          'fields','[{"key":"label","read":[],"write":[],"releaseReadTo":["service"],"releaseWriteTo":["service"]},{"key":"private_note","read":[["private_reader"]],"write":[["private_reader"]],"releaseReadTo":[],"releaseWriteTo":[]}]'::jsonb,
+          'scope',jsonb_build_object('workspaceId',w,'userId',c.catalog_user,'assistantId',NULL,'sensitivity','internal','compartments','[]'::jsonb,'projectIds','[]'::jsonb));END $$;
       REVOKE ALL ON FUNCTION native_note_fixture_catalog(uuid,jsonb,text) FROM PUBLIC;
       CREATE FUNCTION native_note_fixture_metadata(w uuid,o jsonb,t text,i text) RETURNS jsonb LANGUAGE plpgsql SECURITY DEFINER SET search_path=pg_catalog,public,pg_temp AS $$
       DECLARE r public.native_note_fixture_rows;catalog jsonb;BEGIN
@@ -116,7 +119,7 @@ describe.sequential('[COMP:api/application-management] [COMP:api/application-rec
       REVOKE ALL ON FUNCTION native_note_fixture_access(uuid,jsonb,text,text,text,text[],text,text) FROM PUBLIC;
       GRANT EXECUTE ON FUNCTION native_note_fixture_access(uuid,jsonb,text,text,text,text[],text,text) TO app_user;
       INSERT INTO application_native_field_contracts(module_key,contract_version,role_keys,metadata_reader,catalog_reader,configuration_required,configuration_reader)
-        VALUES('fictional_native_notes','1','{}','native_note_fixture_metadata(uuid,jsonb,text,text)'::regprocedure,'native_note_fixture_catalog(uuid,jsonb,text)'::regprocedure,true,'native_note_fixture_revision(uuid)'::regprocedure);
+        VALUES('fictional_native_notes','1',ARRAY['private_reader'],'native_note_fixture_metadata(uuid,jsonb,text,text)'::regprocedure,'native_note_fixture_catalog(uuid,jsonb,text)'::regprocedure,true,'native_note_fixture_revision(uuid)'::regprocedure);
       INSERT INTO application_deployed_module_capabilities(module_key,contract_version,commands,queries,dependencies) VALUES('fictional_native_notes','1',ARRAY['rename_note'],ARRAY['get'],'{}')`)
     await owner.query('INSERT INTO native_note_fixture_config(workspace_id) VALUES($1),($2)', [workspaceId, foreignWorkspaceId])
     for (const work of [workspaceId, foreignWorkspaceId]) for (const id of ids) await owner.query("INSERT INTO native_note_fixture_rows(workspace_id,id,created_by,label,private_note) VALUES($1,$2,$3,'Existing purpose','Private fixture data')", [work, id, ownerId])
@@ -124,8 +127,8 @@ describe.sequential('[COMP:api/application-management] [COMP:api/application-rec
     await owner.query('INSERT INTO application_native_resource_owners(workspace_id,origin,resource_type,module_key) VALUES($1,$2,$3,$4)', [workspaceId, origin, typeKey, moduleKey])
     const session = await authSessionStore.create(ownerId, { deviceLabel: 'Fictional note browser', userAgent: 'Fixture', ipAddress: '127.0.0.1' }); token = createTokens(ownerId, secret, session!).accessToken
     http.use('/api/applications', applicationPlatformRoutes({ service: platform, management: { service: management, requireAuth: requireAuth(secret), origins: ['https://host.example'] } }))
-    expect((await getAppPool().query(`SELECT session_user,current_user,rolsuper,rolbypassrls,pg_has_role(oid,(SELECT relowner FROM pg_class WHERE oid='native_note_fixture_rows'::regclass),'USAGE') AS owns FROM pg_roles WHERE rolname=current_user`)).rows)
-      .toEqual([{ session_user: 'app_user', current_user: 'app_user', rolsuper: false, rolbypassrls: false, owns: false }])
+    expect((await getAppPool().query(`SELECT session_user,current_user,rolsuper,rolbypassrls,pg_has_role(oid,(SELECT relowner FROM pg_class WHERE oid='native_note_fixture_rows'::regclass),'USAGE') AS owns,pg_has_role(oid,(SELECT relowner FROM pg_class WHERE oid='native_note_fixture_rows'::regclass),'MEMBER') AS owner_member FROM pg_roles WHERE rolname=current_user`)).rows)
+      .toEqual([{ session_user: 'app_user', current_user: 'app_user', rolsuper: false, rolbypassrls: false, owns: false, owner_member: false }])
   }, 60_000)
   afterAll(async () => {
     server.closeAllConnections(); await new Promise<void>(resolve => server.close(() => resolve()))
@@ -134,6 +137,33 @@ describe.sequential('[COMP:api/application-management] [COMP:api/application-rec
     await owner.query('DROP FUNCTION native_note_fixture_access(uuid,jsonb,text,text,text,text[],text,text);DROP FUNCTION native_note_fixture_metadata(uuid,jsonb,text,text);DROP FUNCTION native_note_fixture_catalog(uuid,jsonb,text);DROP FUNCTION native_note_fixture_revision(uuid);DROP TABLE native_note_fixture_rows,native_note_fixture_config')
     await owner.query('DELETE FROM users WHERE id=ANY($1::uuid[])', [[ownerId, ...(serviceUserId ? [serviceUserId] : [])]])
     await getAppPool().end(); await owner.end()
+  })
+  it('preserves the four lifecycle consumers except their private revision call and keeps the new port owner-only', async () => {
+    const historical = await readFile(new URL('../../../migrations/8052_application_native_governance_completion.sql', import.meta.url), 'utf8')
+    for (const [name, signature, result, runtimeEntry] of [
+      ['application_prepare_native_module_lifecycle', 'uuid,text,text,integer,text', 'void', true],
+      ['application_guard_native_module_lifecycle', '', 'trigger', false],
+      ['application_record_native_module_lifecycle', '', 'trigger', false],
+      ['application_finish_native_module_lifecycle', 'uuid,text', 'void', true],
+    ] as const) {
+      const expectedBody = new RegExp('CREATE FUNCTION ' + name + '\\([^\\n]*\\).*?AS \\$\\$(.*?)\\$\\$;', 's').exec(historical)?.[1]
+      expect(expectedBody).toBeTruthy()
+      const row = (await owner.query(`SELECT p.prosrc,p.prosecdef,p.provolatile,p.proparallel,p.proisstrict,p.proleakproof,p.proretset,p.prokind,p.prorettype::regtype::text AS result,
+        p.proconfig,p.proowner=c.relowner AS owner_matches,
+        (SELECT jsonb_agg(jsonb_build_object('role',CASE WHEN a.grantee=p.proowner THEN 'owner' ELSE pg_get_userbyid(a.grantee) END,
+          'grantor_matches',a.grantor=p.proowner,'privilege',a.privilege_type,'grant_option',a.is_grantable) ORDER BY a.grantee=p.proowner DESC)
+          FROM aclexplode(coalesce(p.proacl,acldefault('f',p.proowner))) a) AS acl
+        FROM pg_proc p JOIN pg_class c ON c.oid='public.application_native_field_contracts'::regclass WHERE p.oid=$1::regprocedure`, [name + '(' + signature + ')'])).rows[0]
+      expect(row.prosrc).toBe(expectedBody!.replace('application_native_governance_revision(', 'application_native_module_lifecycle_revision('))
+      const { prosrc: _, ...properties } = row
+      expect(properties).toEqual({ prosecdef: true, provolatile: 'v', proparallel: 'u', proisstrict: false, proleakproof: false, proretset: false, prokind: 'f', result,
+        proconfig: ['search_path=pg_catalog, public, pg_temp'], owner_matches: true,
+        acl: [{ role: 'owner', grantor_matches: true, privilege: 'EXECUTE', grant_option: false }, ...(runtimeEntry ? [{ role: 'app_user', grantor_matches: true, privilege: 'EXECUTE', grant_option: false }] : [])] })
+    }
+    expect((await owner.query(`SELECT p.prosecdef,p.proowner=c.relowner AS owner_matches,
+      NOT EXISTS(SELECT 1 FROM aclexplode(coalesce(p.proacl,acldefault('f',p.proowner))) a WHERE a.grantee<>p.proowner) AS private
+      FROM pg_proc p JOIN pg_class c ON c.oid='public.application_native_field_contracts'::regclass
+      WHERE p.oid='application_native_module_lifecycle_revision(uuid,uuid,text)'::regprocedure`)).rows).toEqual([{ prosecdef: true, owner_matches: true, private: true }])
   })
   it('normally reviews native activation and exact-ID grants before delivering a genuine service key', async () => {
     expect((await owner.query("SELECT application_runtime_qualified($1,'application_data') AS qualified", [workspaceId])).rows[0].qualified).toBe(false)
@@ -229,6 +259,119 @@ describe.sequential('[COMP:api/application-management] [COMP:api/application-rec
     expect([401, 403]).toContain((await get()).status)
     await owner.query("INSERT INTO workspace_members(workspace_id,user_id,role,clearance) VALUES($1,$2,'owner','confidential')", [workspaceId, ownerId])
     expect((await get()).status).toBe(200); expect(await counts()).toEqual(before)
+  })
+  const nativeModules = (readBlockingWork = async () => [] as Array<{ key: string; count: number }>) => createWorkspaceModulesStore(owner, getAppPool(), {
+    registry: { [moduleKey]: { key: moduleKey, defaultState: 'enabled' } }, lifecycles: { [moduleKey]: { readBlockingWork } },
+  })
+  async function nativeFrame<T>(fn: (client: PoolClient) => Promise<T>, settings: Record<string, string> = {}) {
+    const client = await getAppPool().connect()
+    try {
+      await client.query('BEGIN'); await applyRLSGucs(client, ownerId)
+      for (const [key, value] of Object.entries(settings)) await client.query('SELECT set_config($1,$2,true)', [key, value])
+      return await fn(client)
+    } finally { await client.query('ROLLBACK'); client.release() }
+  }
+  const lifecycleRows = async () => (await owner.query('SELECT * FROM application_native_module_lifecycle_reviews WHERE workspace_id=$1', [workspaceId])).rows
+  it('controls custom-native manual availability while private fields and complete governance remain denied', async () => {
+    const modules = nativeModules(async () => [{ key: 'pending', count: 1 }])
+    expect(await nativeFrame(async client => (await client.query("SELECT read_native_application_field_catalog($1,$2,$3) AS value", [workspaceId, origin, typeKey])).rows[0].value))
+      .toMatchObject({ readFields: ['label'], writeFields: ['label'] })
+    const draining = await modules.act(workspaceId, ownerId, moduleKey, { action: 'request_disable', expectedVersion: 0 })
+    expect(draining).toMatchObject({ changed: true, module: { state: 'draining', version: 2 } })
+    await expect(modules.act(workspaceId, ownerId, moduleKey, { action: 'finish_disable', expectedVersion: 2 })).rejects.toMatchObject({ code: 'module_drain_pending' })
+    expect(await nativeModules().act(workspaceId, ownerId, moduleKey, { action: 'finish_disable', expectedVersion: 2 })).toMatchObject({ module: { state: 'disabled', version: 3 } })
+    expect(await nativeModules().act(workspaceId, ownerId, moduleKey, { action: 'enable', expectedVersion: 3 })).toMatchObject({ module: { state: 'enabled', version: 4 } })
+    expect(await nativeModules().act(workspaceId, ownerId, moduleKey, { action: 'enable', expectedVersion: 4 })).toMatchObject({ changed: false, module: { state: 'enabled', version: 4 } })
+    expect((await get(ids[0], ['private_note'])).status).toBe(403)
+    await expect(nativeFrame(client => client.query('SELECT read_native_application_governance_catalog($1,$2,$3,NULL)', [workspaceId, assistantId, moduleKey]))).rejects.toMatchObject({ code: '42501' })
+    expect((await owner.query("SELECT count(*)::int AS count FROM workspace_audit_log WHERE workspace_id=$1 AND event_type='workspace.module_changed'", [workspaceId])).rows[0].count).toBe(3)
+    expect(await lifecycleRows()).toEqual([])
+  })
+  it('rejects raw updates, owner sessions, wrong native identities and unknown or stale lifecycle commands', async () => {
+    const prepare = (client: PoolClient) => client.query("SELECT application_prepare_native_module_lifecycle($1,$2,'request_disable',4,'enabled')", [workspaceId, moduleKey])
+    const deniedSettings: Array<Record<string, string>> = [
+      { 'app.current_user_id': randomUUID() }, { 'app.v2_assistant_id': randomUUID() },
+      { 'app.application_id': appId }, { 'app.agent_actor_id': randomUUID() }, { 'app.agent_workspace_id': foreignWorkspaceId },
+    ]
+    for (const settings of deniedSettings) await expect(nativeFrame(prepare, settings)).rejects.toMatchObject({ code: '42501' })
+    await expect(nativeFrame(client => client.query("UPDATE workspace_modules SET state='disabled',version=version+1,updated_by_user_id=$2 WHERE workspace_id=$1 AND module_key=$3", [workspaceId, ownerId, moduleKey]))).rejects.toMatchObject({ code: '42501' })
+    await expect(nativeFrame(client => client.query('SELECT application_native_module_lifecycle_revision($1,$2,$3)', [workspaceId, assistantId, moduleKey]))).rejects.toMatchObject({ code: '42501' })
+    const ownerModules = createWorkspaceModulesStore(owner, owner, { registry: { [moduleKey]: { key: moduleKey, defaultState: 'enabled' } } })
+    await expect(ownerModules.act(workspaceId, ownerId, moduleKey, { action: 'request_disable', expectedVersion: 4 })).rejects.toMatchObject({ code: 'not_authorized' })
+    await expect(nativeModules().act(workspaceId, serviceUserId, moduleKey, { action: 'request_disable', expectedVersion: 4 })).rejects.toMatchObject({ code: 'not_authorized' })
+    await expect(nativeModules().act(workspaceId, ownerId, 'unknown_module', { action: 'enable', expectedVersion: 4 })).rejects.toMatchObject({ code: 'invalid_input' })
+    await expect(nativeModules().act(workspaceId, ownerId, moduleKey, { action: 'invented' as never, expectedVersion: 4 })).rejects.toMatchObject({ code: 'invalid_input' })
+    await expect(nativeModules().act(workspaceId, ownerId, moduleKey, { action: 'request_disable', expectedVersion: 3 })).rejects.toMatchObject({ code: 'stale_module_version' })
+    expect(await lifecycleRows()).toEqual([])
+  })
+  it('keeps the manual witness private and bound to its action, actor and backend', async () => {
+    const prepare = (client: PoolClient) => client.query("SELECT application_prepare_native_module_lifecycle($1,$2,'request_disable',4,'enabled')", [workspaceId, moduleKey])
+    await expect(nativeFrame(async client => {
+      await prepare(client)
+      await client.query("UPDATE workspace_modules SET state='enabled',version=version+1,updated_by_user_id=$2 WHERE workspace_id=$1 AND module_key=$3", [workspaceId, ownerId, moduleKey])
+    })).rejects.toMatchObject({ code: '40001' })
+    await expect(nativeFrame(async client => {
+      await prepare(client); await client.query("SELECT set_config('app.current_user_id',$1,true)", [randomUUID()])
+      await client.query('SELECT application_finish_native_module_lifecycle($1,$2)', [workspaceId, moduleKey])
+    })).rejects.toMatchObject({ code: '40001' })
+    await nativeFrame(async client => {
+      await prepare(client)
+      await expect(nativeFrame(other => other.query("UPDATE workspace_modules SET state='disabled',version=version+1,updated_by_user_id=$2 WHERE workspace_id=$1 AND module_key=$3", [workspaceId, ownerId, moduleKey]))).rejects.toMatchObject({ code: '42501' })
+    })
+    await expect(nativeFrame(client => client.query('SELECT * FROM application_native_module_lifecycle_reviews'))).rejects.toMatchObject({ code: '42501' })
+    expect(await lifecycleRows()).toEqual([])
+  })
+  it('refuses every unavailable catalog and mixed owner instead of borrowing one visible catalog', async () => {
+    for (const column of ['held', 'catalog_user']) {
+      await owner.query(`UPDATE native_note_fixture_config SET ${column}=$2 WHERE workspace_id=$1`, [workspaceId, column === 'held' ? true : randomUUID()])
+      try { await expect(nativeModules().act(workspaceId, ownerId, moduleKey, { action: 'request_disable', expectedVersion: 4 })).rejects.toMatchObject({ code: 'not_authorized' }) }
+      finally { await owner.query(`UPDATE native_note_fixture_config SET ${column}=$2 WHERE workspace_id=$1`, [workspaceId, column === 'held' ? false : null]) }
+    }
+    await owner.query('INSERT INTO application_native_resource_owners(workspace_id,origin,resource_type,module_key) VALUES($1,$2,$3,$4)', [workspaceId, origin, 'unknown_note', moduleKey])
+    try { await expect(nativeModules().act(workspaceId, ownerId, moduleKey, { action: 'request_disable', expectedVersion: 4 })).rejects.toMatchObject({ code: 'not_authorized' }) }
+    finally { await owner.query('DELETE FROM application_native_resource_owners WHERE workspace_id=$1 AND origin=$2 AND resource_type=$3', [workspaceId, origin, 'unknown_note']) }
+    const schema = await createDbDocEntityStore({ actorUserId: ownerId }).createEntityType({ workspaceId, name: 'Fictional mixed availability', createdBy: ownerId,
+      properties: [{ name: 'title', config: { kind: 'text' }, required: true }] })
+    const generic = { kind: 'generic', entityTypeId: schema.id }
+    await owner.query('INSERT INTO application_native_resource_owners(workspace_id,origin,resource_type,module_key) VALUES($1,$2,$3,$4)', [workspaceId, generic, 'record.' + schema.id, moduleKey])
+    try { await expect(nativeModules().act(workspaceId, ownerId, moduleKey, { action: 'request_disable', expectedVersion: 4 })).rejects.toMatchObject({ code: 'not_authorized' }) }
+    finally { await owner.query('DELETE FROM application_native_resource_owners WHERE workspace_id=$1 AND origin=$2', [workspaceId, generic]) }
+    expect(await lifecycleRows()).toEqual([])
+  })
+  it.each(['configuration', 'policy', 'body', 'acl'] as const)('invalidates the private manual review after %s drift across the actual blocker await', async kind => {
+    const port = (await owner.query("SELECT pg_get_functiondef('native_note_fixture_metadata(uuid,jsonb,text,text)'::regprocedure) AS definition")).rows[0].definition as string
+    let changed = false
+    const modules = nativeModules(async () => {
+      if (!changed) {
+        changed = true
+        if (kind === 'configuration') {
+          await owner.query("UPDATE native_note_fixture_config SET catalog_version='changed',revision=revision+1 WHERE workspace_id=$1", [workspaceId])
+          await owner.query("UPDATE native_note_fixture_config SET catalog_version='1',revision=revision+1 WHERE workspace_id=$1", [workspaceId])
+        }
+        if (kind === 'policy') {
+          await owner.query("UPDATE application_native_field_contracts SET contract_version='changed' WHERE module_key=$1", [moduleKey])
+          await owner.query("UPDATE application_native_field_contracts SET contract_version='1' WHERE module_key=$1", [moduleKey])
+        }
+        if (kind === 'body') await owner.query(port.replace('DECLARE r public.native_note_fixture_rows;', 'DECLARE /* changed availability witness */ r public.native_note_fixture_rows;'))
+        if (kind === 'acl') await owner.query('GRANT EXECUTE ON FUNCTION native_note_fixture_metadata(uuid,jsonb,text,text) TO app_user')
+      }
+      return []
+    })
+    try { await expect(modules.act(workspaceId, ownerId, moduleKey, { action: 'request_disable', expectedVersion: 4 })).rejects.toMatchObject({ code: kind === 'acl' ? 'not_authorized' : 'stale_module_version' }) }
+    finally {
+      if (kind === 'configuration') await owner.query('UPDATE native_note_fixture_config SET revision=1 WHERE workspace_id=$1', [workspaceId])
+      if (kind === 'body') await owner.query(port)
+      if (kind === 'acl') await owner.query('REVOKE EXECUTE ON FUNCTION native_note_fixture_metadata(uuid,jsonb,text,text) FROM app_user')
+    }
+    expect(await nativeModules().get(workspaceId, moduleKey)).toMatchObject({ state: 'enabled', version: 4 }); expect(await lifecycleRows()).toEqual([])
+  })
+  it('rolls module state, audit and private review back together when the canonical audit refuses', async () => {
+    await owner.query(`CREATE FUNCTION native_note_fixture_audit_refusal() RETURNS trigger LANGUAGE plpgsql AS $$ BEGIN RAISE EXCEPTION 'fictional availability audit refusal';END $$;
+      CREATE TRIGGER native_note_fixture_audit_refusal BEFORE INSERT ON workspace_audit_log FOR EACH ROW WHEN (NEW.workspace_id='${workspaceId}'::uuid) EXECUTE FUNCTION native_note_fixture_audit_refusal()`)
+    try { await expect(nativeModules().act(workspaceId, ownerId, moduleKey, { action: 'request_disable', expectedVersion: 4 })).rejects.toThrow('fictional availability audit refusal') }
+    finally { await owner.query('DROP TRIGGER native_note_fixture_audit_refusal ON workspace_audit_log;DROP FUNCTION native_note_fixture_audit_refusal()') }
+    expect(await nativeModules().get(workspaceId, moduleKey)).toMatchObject({ state: 'enabled', version: 4 }); expect(await lifecycleRows()).toEqual([])
+    expect((await owner.query("SELECT count(*)::int AS count FROM workspace_audit_log WHERE workspace_id=$1 AND event_type='workspace.module_changed'", [workspaceId])).rows[0].count).toBe(3)
   })
   it('refuses parent and credential revocation with no new business or operation effects', async () => {
     const before = await counts()
