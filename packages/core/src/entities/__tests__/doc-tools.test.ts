@@ -106,6 +106,7 @@ type FakeStore = EntityStore & {
       workspaceId: string
       id: string
       patch: Parameters<EntityStore['updateEntity']>[2]
+      options?: Parameters<EntityStore['updateEntity']>[3]
     }>
     deleteEntity: Array<{ workspaceId: string; id: string }>
     queryEntities: Array<{
@@ -245,15 +246,15 @@ function makeFakeStore(seed?: {
       const e = entities.get(id)
       return e && e.workspaceId === workspaceId ? e : null
     },
-    async updateEntity(workspaceId, id, patch) {
-      calls.updateEntity.push({ workspaceId, id, patch })
+    async updateEntity(workspaceId, id, patch, options) {
+      calls.updateEntity.push({ workspaceId, id, patch, options })
       const existing = entities.get(id)
       if (!existing || existing.workspaceId !== workspaceId) {
         throw new Error('not found')
       }
       const updated: EntityInstance = {
         ...existing,
-        ...(patch.data !== undefined ? { data: patch.data } : {}),
+        ...(patch.data !== undefined ? { data: { ...existing.data, ...patch.data } } : {}),
         ...(patch.lastEditedBy !== undefined
           ? { lastEditedBy: patch.lastEditedBy }
           : {}),
@@ -783,9 +784,9 @@ describe('[COMP:entities/doc-tools] createEntity', () => {
 // ── updateEntity ─────────────────────────────────────────────────────
 
 describe('[COMP:entities/doc-tools] updateEntity', () => {
-  it('merges the patch into the existing data and stamps lastEditedBy', async () => {
+  it('submits only requested cells and returns the merged store result', async () => {
     const recipe = makeRecipeType()
-    const entity = makeRecipeInstance()
+    const entity = makeRecipeInstance({ recordVersion: '7' })
     const deps = makeDeps({
       store: makeFakeStore({ types: [recipe], entities: [entity] }),
     })
@@ -799,6 +800,12 @@ describe('[COMP:entities/doc-tools] updateEntity', () => {
       ctx,
     )
     const out = result.data as { entity: EntityInstance }
+    expect(deps.store.calls.updateEntity).toEqual([{
+      workspaceId: WORKSPACE_ID,
+      id: ENTITY_ID,
+      patch: expect.objectContaining({ data: { prep_time: { kind: 'number', value: 45 } }, lastEditedBy: USER_ID }),
+      options: { actorUserId: USER_ID, expectedRecordVersion: '7' },
+    }])
     // Existing title preserved; prep_time overwritten.
     expect(out.entity.data.title).toEqual({ kind: 'text', value: 'Bolognese' })
     expect(out.entity.data.prep_time).toEqual({ kind: 'number', value: 45 })

@@ -800,15 +800,11 @@ export function createUpdateEntityTool(
           })
         }
         context.scopeAccumulator?.note(scopeEvidenceFromRows([current]))
-        const mergedData: Record<string, CellValue> = {
-          ...current.data,
-          ...input.patch,
-        }
         const entity = await deps.store.updateEntity(
           input.workspaceId,
           input.entityId,
           {
-            data: mergedData,
+            data: input.patch,
             lastEditedBy: deps.currentUserId,
             ...resolveWriteScope({
               sensitivity: current.sensitivity ?? 'internal',
