@@ -67,7 +67,8 @@ export const ASSISTANT_TEARDOWN_RULES: Readonly<Record<string, AssistantTeardown
     deleteWhere: 'EXISTS (SELECT 1 FROM sessions s WHERE s.id = t.session_id AND s.assistant_id = $1)',
   },
 
-  // Recorded authors.
+  // Recorded authors. Canonical Entity/Task authors clear through ON DELETE SET NULL
+  // only after the final assistant DELETE; loadFks excludes that referential action.
   'entities.created_by_assistant_id': clear,
   'episodes.created_by_assistant_id': clear,
   'kb_chunks.created_by_assistant_id': clear,
@@ -82,6 +83,8 @@ export const ASSISTANT_TEARDOWN_RULES: Readonly<Record<string, AssistantTeardown
   'episode_extraction_runs.created_by_assistant_id': del,
   'scope_derivations.assistant_id': del,
   'workspace_skill_scope_revisions.assistant_id': del,
+  // Review assistant identity is immutable; metadata items cascade, brain rows do not.
+  'workspace_scope_reviews.application_assistant_id': del,
 }
 
 /**
@@ -166,6 +169,9 @@ export async function deleteAssistantFootprint(
   // Deferred foreign keys would otherwise surface only at COMMIT, outside
   // the per-step savepoints that let the fixpoint retry them.
   await client.query('SET CONSTRAINTS ALL IMMEDIATE')
+  // Only the administrative Task anchor transition waits for the actual final
+  // assistant DELETE. A standalone move cannot commit while that row remains.
+  await client.query('SET CONSTRAINTS application_task_assistant_delete_commit DEFERRED')
 
   const steps: Step[] = []
   for (const fk of refs) {

@@ -1,6 +1,7 @@
 import pg from 'pg'
 import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it } from 'vitest'
 import { ASSISTANT_TEARDOWN_RULES, AssistantTeardownBlockedError, deleteAssistantFootprint } from '../assistant-teardown.js'
+import { createMemory } from '../memories.js'
 
 // Real-schema proof for the assistant teardown. A mocked client cannot see
 // foreign-key trigger ordering or the evidence guards, which are what this
@@ -58,6 +59,7 @@ async function runAsOrdinaryOwner() {
             EXECUTE format('ALTER FUNCTION %s OWNER TO assistant_teardown_owner', r.fn);
           END LOOP;
         END $$`)
+      await q(`GRANT USAGE, SELECT, UPDATE ON ALL SEQUENCES IN SCHEMA public TO assistant_teardown_owner`)
       await q('RELEASE SAVEPOINT ordinary_owner')
       break
     } catch (err) {
@@ -176,23 +178,57 @@ describe('[COMP:api/assistant-teardown] assistant teardown against a real schema
       `INSERT INTO workspace_files (workspace_id, path, name, storage_uri, assistant_id) VALUES ($1, '/a.txt', 'a.txt', 'mem://a', $2) RETURNING id`,
       [ws, demo],
     )).id
-    // A memory another assistant holds but this one wrote: the author pointer clears.
-    const authored = (await one<{ id: string }>(
-      `INSERT INTO memories (summary, workspace_id, assistant_id, created_by_assistant_id) VALUES ('kept', $1, $2, $3) RETURNING id`,
-      [ws, primary, demo],
-    )).id
+    // The primary shares this owner's memory across assistants; its author pointer clears.
+    const authored = (await createMemory({
+      summary: 'kept', workspaceId: ws, assistantId: primary, userId: owner,
+      createdByUserId: owner, createdByAssistantId: demo, sensitivity: 'internal',
+    }, undefined, client!)).id
     // The assistant's own memory and conversation go with it.
-    const ownMemory = (await one<{ id: string }>(
-      `INSERT INTO memories (summary, workspace_id, assistant_id) VALUES ('mine', $1, $2) RETURNING id`,
-      [ws, demo],
-    )).id
+    const ownMemory = (await createMemory({
+      summary: 'mine', workspaceId: ws, assistantId: demo, userId: owner,
+      createdByUserId: owner, sensitivity: 'internal',
+    }, undefined, client!)).id
     const ownSession = await newSession(demo, owner, 'owner', ws)
     const ownMessage = await newScopedMessage(ownSession, ws, owner, demo, 1)
     // A message it left in a room another assistant hosts stays in the room.
     const room = await newSession(primary, owner, 'workspace', ws)
     const roomMessage = await newScopedMessage(room, ws, owner, demo, 1)
 
+    await q(`UPDATE entities SET display_name = 'Fictional revised company' WHERE id = $1`, [company])
+    const taskBefore = await one(`SELECT id, logical_id, workspace_id, user_id, created_by_user_id, created_at,
+      scope_version::text AS version FROM tasks WHERE id = $1`, [task])
+    const companyBefore = await one(`SELECT id, workspace_id, created_by_user_id, created_at, source_episode_id,
+      scope_version::text AS version FROM entities WHERE id = $1`, [company])
+    const historyBefore = (await q<{ id: string; before_image: Record<string, unknown> }>(
+      `SELECT id, before_image FROM brain_row_versions WHERE primitive = 'entity' AND row_id = $1 ORDER BY version_no`, [company],
+    )).rows
+    expect(historyBefore.length).toBeGreaterThan(0)
+    expect(historyBefore.some(row => row.before_image.created_by_assistant_id === demo)).toBe(true)
+
+    // The native route supplies this actual actor on its owner connection.
+    await q(`SELECT set_config('app.current_user_id', $1, true)`, [owner])
+    expect(await one(`SELECT r.rolsuper, r.rolbypassrls, pg_has_role(r.oid, c.relowner, 'USAGE') AS table_owner
+      FROM pg_roles r JOIN pg_class c ON c.oid = 'tasks'::regclass WHERE r.rolname = current_user`))
+      .toEqual({ rolsuper: false, rolbypassrls: false, table_owner: true })
     const result = await deleteAssistantFootprint(client!, demo, owner)
+
+    // Discharge the real deferred commit check after the actual assistant DELETE.
+    await q('SET CONSTRAINTS application_task_assistant_delete_commit IMMEDIATE')
+    const taskAfter = await one(`SELECT id, logical_id, workspace_id, user_id, created_by_user_id, created_at,
+      scope_version::text AS version FROM tasks WHERE id = $1`, [task])
+    expect({ ...taskAfter, version: taskBefore.version }).toEqual(taskBefore)
+    expect(Number(taskAfter.version)).toBeGreaterThan(Number(taskBefore.version))
+    expect((await q<{ before_image: Record<string, unknown> }>(
+      `SELECT before_image FROM brain_row_versions WHERE primitive = 'task' AND row_id = $1 ORDER BY version_no`, [task],
+    )).rows.some(row => row.before_image.id === task && row.before_image.logical_id === taskBefore.logical_id
+      && row.before_image.created_by_user_id === taskBefore.created_by_user_id
+      && row.before_image.created_by_assistant_id === demo)).toBe(true)
+    const companyAfter = await one(`SELECT id, workspace_id, created_by_user_id, created_at, source_episode_id,
+      scope_version::text AS version FROM entities WHERE id = $1`, [company])
+    expect({ ...companyAfter, version: companyBefore.version }).toEqual(companyBefore)
+    expect(Number(companyAfter.version)).toBeGreaterThan(Number(companyBefore.version))
+    expect((await q(`SELECT id, before_image FROM brain_row_versions WHERE id = ANY($1::uuid[]) ORDER BY version_no`,
+      [historyBefore.map(row => row.id)])).rows).toEqual(historyBefore)
 
     expect(result).toEqual({ deleted: true, primaryAssistantId: primary })
     expect(await count(`SELECT count(*) AS n FROM assistants WHERE id = $1`, [demo])).toBe(0)
@@ -216,12 +252,75 @@ describe('[COMP:api/assistant-teardown] assistant teardown against a real schema
     expect(await count(`SELECT count(*) AS n FROM sessions WHERE id = $1`, [room])).toBe(1)
   })
 
+  it('rolls back an owner task anchor move at commit unless the assistant was actually deleted', async () => {
+    // Seed outside the role-transfer transaction so a real failed COMMIT can
+    // prove rollback against durable fixture rows without retaining role changes.
+    await q('ROLLBACK')
+    const owner = await newUser('owner')
+    const ws = await newWorkspace(owner)
+    const primary = await newAssistant(ws, owner, 'primary')
+    const demo = await newAssistant(ws, owner, 'standard')
+    const task = (await one<{ id: string }>(
+      `INSERT INTO tasks (workspace_id, title, assistant_id) VALUES ($1, 'Fictional retained task', $2) RETURNING id`, [ws, demo],
+    )).id
+    const before = await one(`SELECT assistant_id, scope_version::text AS version FROM tasks WHERE id = $1`, [task])
+    try {
+      await q('BEGIN')
+      await runAsOrdinaryOwner()
+      await q(`SELECT set_config('app.system_bypass', 'true', true), set_config('app.current_user_id', $1, true)`, [owner])
+      expect(await one(`SELECT r.rolsuper, r.rolbypassrls, pg_has_role(r.oid, c.relowner, 'USAGE') AS table_owner
+        FROM pg_roles r JOIN pg_class c ON c.oid = 'tasks'::regclass WHERE r.rolname = current_user`))
+        .toEqual({ rolsuper: false, rolbypassrls: false, table_owner: true })
+      await q(`UPDATE tasks SET assistant_id = $2 WHERE id = $1`, [task, primary])
+      expect(await one(`SELECT assistant_id, scope_version::text AS version FROM tasks WHERE id = $1`, [task]))
+        .toEqual({ assistant_id: primary, version: String(Number(before.version) + 1) })
+      await expect(q('COMMIT')).rejects.toMatchObject({
+        code: '42501', message: 'access_unavailable: task anchor move requires completed assistant deletion',
+      })
+      await q('ROLLBACK')
+      expect(await one(`SELECT assistant_id, scope_version::text AS version FROM tasks WHERE id = $1`, [task])).toEqual(before)
+      expect(await count(`SELECT count(*) AS n FROM assistants WHERE id = $1`, [demo])).toBe(1)
+    } finally {
+      await q('ROLLBACK')
+      await q('DELETE FROM workspaces WHERE id = $1', [ws])
+      await q('DELETE FROM users WHERE id = $1', [owner])
+    }
+  })
+
   it('deletes an assistant that has no brain rows even without a primary', async () => {
     const owner = await newUser('owner')
     const ws = await newWorkspace(owner)
     const demo = await newAssistant(ws, owner, 'standard')
+    const other = await newAssistant(ws, owner, 'standard')
+    const authored = (await createMemory({
+      summary: 'kept', workspaceId: ws, assistantId: other, userId: owner,
+      createdByUserId: owner, sensitivity: 'internal',
+    }, undefined, client!)).id
+
+    // Review metadata belongs to its immutable assistant anchor, not its Memory target.
+    await q(`SELECT set_config('app.system_bypass', 'true', true), set_config('app.current_user_id', $1, true)`, [owner])
+    const review = async (assistant: string) => {
+      const id = (await one<{ id: string }>(
+        `INSERT INTO workspace_scope_reviews (workspace_id, created_by, resource_kind, action, reason,
+          payload_hash, policy_revision, selection_revision, application_assistant_id)
+         VALUES ($1, $2, 'memory', 'hold', 'Fictional teardown review', repeat('a', 64), 1, 1, $3) RETURNING id`,
+        [ws, owner, assistant],
+      )).id
+      await q(`INSERT INTO workspace_scope_review_items (workspace_id, review_id, resource_kind, resource_id, resource_version, source_snapshot)
+        SELECT $1, $2, 'memory', $3, snapshot->>'version', snapshot
+        FROM (SELECT read_scope_review_source($1, 'memory', $3) AS snapshot) s`, [ws, id, authored])
+      return id
+    }
+    const ownReview = await review(demo)
+    const retainedReview = await review(other)
 
     expect(await deleteAssistantFootprint(client!, demo, owner)).toEqual({ deleted: true, primaryAssistantId: null })
+    expect(await count(`SELECT count(*) AS n FROM workspace_scope_reviews WHERE id = $1`, [ownReview])).toBe(0)
+    expect(await count(`SELECT count(*) AS n FROM workspace_scope_review_items WHERE review_id = $1`, [ownReview])).toBe(0)
+    expect(await count(`SELECT count(*) AS n FROM workspace_scope_reviews WHERE id = $1`, [retainedReview])).toBe(1)
+    expect(await count(`SELECT count(*) AS n FROM workspace_scope_review_items WHERE review_id = $1`, [retainedReview])).toBe(1)
+    expect(await one(`SELECT user_id, created_by_user_id, summary FROM memories WHERE id = $1`, [authored]))
+      .toEqual({ user_id: owner, created_by_user_id: owner, summary: 'kept' })
     expect(await count(`SELECT count(*) AS n FROM assistants WHERE id = $1`, [demo])).toBe(0)
   })
 
