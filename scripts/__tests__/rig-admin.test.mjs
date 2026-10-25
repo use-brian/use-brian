@@ -6,7 +6,7 @@ import {tmpdir} from 'node:os'
 import {join} from 'node:path'
 import {once} from 'node:events'
 import { fileURLToPath } from 'node:url'
-import { ADMIN_DATABASE_URL, ADMIN_APP_DATABASE_URL, adminRigEnvironment, adminRuntimeNodeOptions, recordAdminGroups, stopOwnedAdminGroups } from '../rig-admin.mjs'
+import { ADMIN_DATABASE_URL, ADMIN_APP_DATABASE_URL, adminRigEnvironment, adminRuntimeNodeOptions, recordAdminGroups, assertAdminRuntimeComposition, stopOwnedAdminGroups } from '../rig-admin.mjs'
 
 const root = fileURLToPath(new URL('../../', import.meta.url))
 describe('[COMP:platform/local-rig] no-paid administrative fixture', () => {
@@ -90,6 +90,19 @@ describe('[COMP:platform/local-rig] no-paid administrative fixture', () => {
     const boot = source('../../packages/api/src/boot.ts')
     assert.match(boot, /isSelfHostedOssEnv\(\) && opts.startLocalSubscriptionProvider !== false/)
   })
+
+  it('prepares the canonical role before migration and activates only after success', () => {
+    const rig=readFileSync(new URL('../rig-up.sh',import.meta.url),'utf8'),sql=readFileSync(new URL('../rig-admin-role.sql',import.meta.url),'utf8')
+    expectOrder(rig,'runtime-role.mjs" prepare','say "applying open migrations')
+    expectOrder(rig,'runtime-role.mjs" transition','say "applying open migrations')
+    expectOrder(rig,'migrations ok (','runtime-role.mjs" activate')
+    expectOrder(rig,'--verify-composition','api_healthy; then')
+    assert.match(sql,/CREATE ROLE app_user NOLOGIN NOSUPERUSER/)
+    assert.doesNotMatch(sql,/GRANT EXECUTE ON FUNCTION|has_function_privilege|GRANT app_user TO/)
+    assert.match(sql,/Migrated administrative fixture lacks canonical role/)
+    assert.match(rig,/api_healthy; then\s+verify_admin_role/)
+  })
+
 })
 
 
@@ -122,41 +135,31 @@ describe('[COMP:platform/local-rig] persistent runtime process ownership',()=>{
 })
 
 
-describe('[COMP:platform/local-rig] independent management predicate bootstrap', () => {
-  function managementBootstrap() {
-    const rig = readFileSync(new URL('../rig-up.sh', import.meta.url), 'utf8')
-    const begin = rig.indexOf('# BEGIN administrative management predicate grant')
-    const end = rig.indexOf('# END administrative management predicate grant')
-    assert.ok(begin > rig.indexOf('mint_only=1'))
-    assert.ok(end > begin)
-    assert.ok(end < rig.indexOf('# ── readiness:'))
-    return rig.slice(begin, end)
-  }
-  it('grants exactly the canonical memory predicate, without a broad role grant', () => {
-    const block = managementBootstrap()
-    const canonical = readFileSync(new URL('../../packages/api/migrations/8015_application_query_fields.sql', import.meta.url), 'utf8')
-    const signature = 'application_memory_field_ancestry_allows(uuid,uuid,text)'
-    assert.ok([...canonical.matchAll(/GRANT EXECUTE ON FUNCTION ([\s\S]*?) TO app_user;/g)].some(match => match[1].includes(signature)))
-    assert.equal((block.match(/GRANT EXECUTE ON FUNCTION/g) || []).length, 1)
-    assert.ok(block.includes(`GRANT EXECUTE ON FUNCTION ${signature} TO admin_fixture_app;`))
-    assert.doesNotMatch(block, /ON ALL FUNCTIONS|BYPASSRLS|GRANT app_user|refresh_admin_read_grants/)
-  })
-  it('runs on each administrative pass, but never invokes Docker in ordinary mode', async () => {
-    const {writeFileSync,chmodSync,existsSync} = await import('node:fs')
-    const dir = mkdtempSync(join(tmpdir(), 'management-bootstrap-'))
-    try {
-      const trace=join(dir,'argv'),sql=join(dir,'sql'),docker=join(dir,'docker')
-      writeFileSync(docker, '#!/bin/sh\nprintf "%s\\n" "$@" >"$TRACE"\ncat >"$SQL_TRACE"\n')
-      chmodSync(docker,0o700)
-      const env={PATH:`${dir}:/usr/bin:/bin`,TRACE:trace,SQL_TRACE:sql,CONTAINER:'fixture-container',RIG_DB_USER:'fixture-owner',RIG_DB_NAME:'fixture-db'}
-      let run=spawnSync('/bin/bash',['-c',managementBootstrap()],{env:{...env,ADMIN_ONLY:'0'},encoding:'utf8'})
-      assert.equal(run.status,0,run.stderr);assert.equal(existsSync(trace),false)
-      for (const _ of ['fresh','warm']) {
-        run=spawnSync('/bin/bash',['-c',managementBootstrap()],{env:{...env,ADMIN_ONLY:'1'},encoding:'utf8'})
-        assert.equal(run.status,0,run.stderr)
-        assert.deepEqual(readFileSync(trace,'utf8').trim().split('\n'),['exec','-i','fixture-container','psql','-U','fixture-owner','-d','fixture-db','-v','ON_ERROR_STOP=1','-q'])
-        assert.equal(readFileSync(sql,'utf8').trim(),'GRANT EXECUTE ON FUNCTION application_memory_field_ancestry_allows(uuid,uuid,text) TO admin_fixture_app;')
-      }
-    } finally {rmSync(dir,{recursive:true,force:true})}
-  })
+describe('[COMP:platform/local-rig] canonical runtime verification',()=>{
+ function installer(){const rig=readFileSync(new URL('../rig-up.sh',import.meta.url),'utf8');return rig.match(/verify_admin_role\(\) \{([\s\S]*?)\n\}/)[0]+'\nverify_admin_role'}
+ it('uses read-only canonical verification for warm administrative passes only',async()=>{
+  const {writeFileSync,chmodSync,existsSync}=await import('node:fs'),dir=mkdtempSync(join(tmpdir(),'role-installer-'))
+  try{
+   const trace=join(dir,'argv'),sql=join(dir,'sql'),docker=join(dir,'docker');writeFileSync(docker,'#!/bin/sh\nprintf "%s\\n" "$@" >"$TRACE"\ncat >"$SQL_TRACE"\n');chmodSync(docker,0o700)
+   const env={PATH:`${dir}:${process.env.PATH}`,ROOT:root,TRACE:trace,SQL_TRACE:sql,CONTAINER:'fixture-container',RIG_DB_USER:'fixture-owner',RIG_DB_NAME:'fixture-db'}
+   let run=spawnSync('/bin/bash',['-c',installer()],{env:{...env,ADMIN_ONLY:'0'},encoding:'utf8'});assert.equal(run.status,0,run.stderr);assert.equal(existsSync(trace),false)
+   run=spawnSync('/bin/bash',['-c',installer()],{env:{...env,ADMIN_ONLY:'1'},encoding:'utf8'});assert.equal(run.status,0,run.stderr)
+   assert.deepEqual(readFileSync(trace,'utf8').trim().split('\n'),['exec','-i','fixture-container','psql','-U','fixture-owner','-d','fixture-db','-v','ON_ERROR_STOP=1','-q'])
+   assert.match(readFileSync(sql,'utf8'),/Canonical runtime LOGIN missing/)
+   assert.doesNotMatch(readFileSync(sql,'utf8'),/GRANT|REVOKE|ALTER ROLE/)
+  }finally{rmSync(dir,{recursive:true,force:true})}
+ })
+ it('records canonical composition and refuses old or missing receipts before SQL',async()=>{
+  const {writeFileSync}=await import('node:fs'),directory=mkdtempSync(join(tmpdir(),'admin-composition-'))
+  try{
+   assert.throws(()=>assertAdminRuntimeComposition(directory),/--keep-db/)
+   recordAdminGroups(directory,'c'.repeat(32),[])
+   assert.doesNotThrow(()=>assertAdminRuntimeComposition(directory))
+   const path=join(directory,'.rig','admin','process-groups.json'),record=JSON.parse(readFileSync(path,'utf8'))
+   assert.equal(record.runtimeRole,'app_user')
+   for(const role of [undefined,'admin_fixture_app','assurance_app']){record.runtimeRole=role;writeFileSync(path,JSON.stringify(record));assert.throws(()=>assertAdminRuntimeComposition(directory),/--keep-db/)}
+  }finally{rmSync(directory,{recursive:true,force:true})}
+ })
 })
+
+function expectOrder(source,before,after){assert.ok(source.indexOf(before)>=0&&source.indexOf(before)<source.indexOf(after))}

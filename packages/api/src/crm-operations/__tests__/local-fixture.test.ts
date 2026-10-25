@@ -7,13 +7,13 @@ const script = new URL('../../../../../scripts/crm/local-fixture.mjs', import.me
 const { validateAmbientDatabase, cleanRuntimeEnvironment, assertLocalFixture, loadMigrationEnvironment, parseLocalFixtureArguments } = await import(script)
 
 describe('[COMP:crm/assurance-fixture] Disposable database safety', () => {
-  it('binds an explicit production role selection to the maintained fixture command without changing the default', () => {
+  it('uses the canonical runtime by default and accepts its explicit selection', () => {
     const command=['node','fictional-case.mjs','--flag']
-    expect(parseLocalFixtureArguments(['--',...command])).toMatchObject({runtimeRole:'assurance_app',command})
+    expect(parseLocalFixtureArguments(['--',...command])).toMatchObject({runtimeRole:'app_user',command})
     expect(parseLocalFixtureArguments(['--pg-bin','/fictional/pg18','--runtime-role','app_user','--migration-dir','/fictional/overlay','--',...command])).toEqual({pgBin:'/fictional/pg18',runtimeRole:'app_user',migrationDirs:['/fictional/overlay'],walArchive:false,command})
   })
   it('rejects arbitrary or missing role selection before fixture creation', () => {
-    for (const role of ['owner','app_user; SET ROLE owner','other_runtime']) expect(() => parseLocalFixtureArguments(['--runtime-role',role,'--','node','fictional-case.mjs'])).toThrow('Unsupported fixture runtime role')
+    for (const role of ['assurance_app','admin_fixture_app','owner','app_user; SET ROLE owner','other_runtime']) expect(() => parseLocalFixtureArguments(['--runtime-role',role,'--','node','fictional-case.mjs'])).toThrow('Unsupported fixture runtime role')
     expect(() => parseLocalFixtureArguments(['--runtime-role'])).toThrow('Missing value')
     expect(() => parseLocalFixtureArguments(['--runtime-role','app_user'])).toThrow('Supply an explicit test command')
   })

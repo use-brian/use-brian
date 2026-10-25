@@ -5,7 +5,7 @@ import { pathToFileURL } from 'node:url'
 import { execFileSync } from 'node:child_process'
 
 export const ADMIN_DATABASE_URL = 'postgres://brian:brian@127.0.0.1:5443/usebrian_admin_test'
-export const ADMIN_APP_DATABASE_URL = 'postgres://admin_fixture_app:fixture-only@127.0.0.1:5443/usebrian_admin_test'
+export const ADMIN_APP_DATABASE_URL = 'postgres://app_user:fixture-only@127.0.0.1:5443/usebrian_admin_test'
 export function adminDatabaseUrls(env={}) {
   const port=String(env.BRIAN_ADMIN_PG_PORT || '5443')
   if(!/^\d+$/.test(port)||Number(port)<1024||Number(port)>65535)throw new Error('Invalid administrative fixture database port')
@@ -55,7 +55,14 @@ export function adminRuntimeNodeOptions(root) {
 export function recordAdminGroups(root, runId, groups) {
   const directory=join(root,'.rig','admin')
   mkdirSync(directory,{recursive:true})
-  writeFileSync(join(directory,'process-groups.json'),JSON.stringify({root,runId,groups}),{mode:0o600})
+  writeFileSync(join(directory,'process-groups.json'),JSON.stringify({root,runId,groups,runtimeRole:'app_user'}),{mode:0o600})
+}
+
+/** Refuse running old composition before any database changes. */
+export function assertAdminRuntimeComposition(root) {
+  const path=join(root,'.rig','admin','process-groups.json')
+  const record=existsSync(path)?JSON.parse(readFileSync(path,'utf8')):null
+  if(record?.root!==root||record.runtimeRole!=='app_user'||!/^[a-f0-9]{32}$/.test(record.runId)||!Array.isArray(record.groups)||record.groups.some(pid=>!Number.isInteger(pid)||pid<2))throw new Error('Administrative runtime composition changed; run scripts/rig-down.sh --admin-only --keep-db, then repeat rig-up with the same port')
 }
 
 export function stopOwnedAdminGroups(root, execute=execFileSync, signal=process.kill.bind(process)) {
@@ -96,6 +103,9 @@ export function stopOwnedAdminGroups(root, execute=execFileSync, signal=process.
 }
 
 if(process.argv[1]&&import.meta.url===pathToFileURL(process.argv[1]).href){
+  if(process.argv[2]==='--verify-composition'&&process.argv[3]){assertAdminRuntimeComposition(process.argv[3])}
+  else {
   if(process.argv[2]!=='--stop-owned'||!process.argv[3])throw new Error('Expected --stop-owned <checkout-root>')
   console.log(`[rig] signaled ${stopOwnedAdminGroups(process.argv[3])} verified administrative runtime groups`)
+  }
 }

@@ -82,7 +82,21 @@ describe('[COMP:api/audit-scope] retained audit audiences',()=>{
     const auditId=randomUUID()
     await pool.query(`INSERT INTO workspace_audit_log(id,workspace_id,actor_user_id,event_type,subject_id,details)
       VALUES($1,$2,$3,'fixture.change',$4,jsonb_build_object('subjectKind',$5::text))`,[auditId,f.workspaceId,f.owner,sourceId,kind])
-    await pool.query(`UPDATE ${table} SET compartments='{}' WHERE id=$1`,[sourceId])
+    if(kind==='task'){
+      const before=(await pool.query('SELECT scope_version::text AS version FROM tasks WHERE id=$1',[sourceId])).rows[0]
+      await expect(pool.query("UPDATE tasks SET compartments='{}' WHERE id=$1",[sourceId])).rejects.toMatchObject({code:'42501'})
+      // Canonical raw Task writes require the real nonowner session and current actor.
+      expect((await queryWithRLS(f.owner,`SELECT session_user,current_user,r.rolsuper,r.rolbypassrls,r.rolinherit,
+        pg_has_role(r.oid,c.relowner,'MEMBER') AS owner_member FROM pg_roles r
+        JOIN pg_class c ON c.oid='public.tasks'::regclass WHERE r.rolname=session_user`)).rows).toEqual([
+        {session_user:'app_user',current_user:'app_user',rolsuper:false,rolbypassrls:false,rolinherit:false,owner_member:false},
+      ])
+      expect((await queryWithRLS(f.owner,`UPDATE tasks SET compartments='{}' WHERE id=$1
+        RETURNING id,compartments,scope_version::text AS version,session_user,current_user`,[sourceId])).rows).toEqual([
+        {id:sourceId,compartments:[],version:String(BigInt(before.version)+1n),session_user:'app_user',current_user:'app_user'},
+      ])
+      expect((await pool.query('SELECT physical_id FROM application_native_task_write_intents WHERE workspace_id=$1',[f.workspaceId])).rows).toEqual([])
+    }else await pool.query(`UPDATE ${table} SET compartments='{}' WHERE id=$1`,[sourceId])
     expect((await queryWithRLS(f.member,'SELECT id FROM workspace_audit_log WHERE id=$1',[auditId])).rows).toHaveLength(1)
     await f.groups.removeMember(f.owner,f.team.id,f.member)
     expect((await queryWithRLS(f.member,'SELECT id FROM workspace_audit_log WHERE id=$1',[auditId])).rows).toEqual([])
@@ -138,7 +152,7 @@ describe('[COMP:api/audit-scope] retained audit audiences',()=>{
       expect((await client.query('SELECT scope_origin FROM association_audit_log WHERE id=$1',[auditId])).rows[0].scope_origin).toBe('legacy')
       await client.query("INSERT INTO workspace_access_policies(workspace_id,classification_mode) VALUES($1,'strict') ON CONFLICT(workspace_id) DO UPDATE SET classification_mode='strict'",[f.workspaceId])
       await client.query("SELECT set_config('app.current_user_id',$1,true)",[f.owner])
-      await client.query('SET LOCAL ROLE assurance_app')
+      await client.query('SET LOCAL ROLE app_user')
       expect((await client.query('SELECT id FROM association_audit_log WHERE id=$1',[auditId])).rows).toEqual([])
     }finally{await client.query('ROLLBACK');client.release()}
   })

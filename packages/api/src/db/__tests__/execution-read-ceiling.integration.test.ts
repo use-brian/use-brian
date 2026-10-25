@@ -12,6 +12,14 @@ const {assertLocalFixture}=await import(new URL('../../../../../scripts/crm/loca
 await assertLocalFixture()
 const pool=getPool()
 const tables=['memories','entities','entity_links','tasks','workspace_files','episodes','knowledge_entries','kb_chunks'] as const
+async function updateTaskFixture(actor:string,id:string,assignments:string,values:unknown[],expected:Record<string,unknown>){
+  const before=(await pool.query('SELECT workspace_id,scope_version::text AS version FROM tasks WHERE id=$1',[id])).rows[0]
+  expect((await queryWithRLS(actor,`UPDATE tasks SET ${assignments} WHERE id=$1
+    RETURNING id,scope_version::text AS version,compartments,project_ids,sensitivity,user_id,session_user,current_user`,[id,...values])).rows).toEqual([
+    expect.objectContaining({id,version:String(BigInt(before.version)+1n),session_user:'app_user',current_user:'app_user',...expected}),
+  ])
+  expect((await pool.query('SELECT physical_id FROM application_native_task_write_intents WHERE workspace_id=$1',[before.workspace_id])).rows).toEqual([])
+}
 async function fixture(table:typeof tables[number]) {
   const workspaceId=randomUUID(),userId=randomUUID(),assistantId=randomUUID(),projectId=randomUUID()
   let id:string=randomUUID()
@@ -34,7 +42,15 @@ async function fixture(table:typeof tables[number]) {
   if(table==='episodes')await pool.query("INSERT INTO episodes(id,workspace_id,created_by_user_id,assistant_id,source_kind,source_ref,occurred_at) VALUES($1,$2,$3,$4,'fixture','{}',now())",args)
   if(table==='knowledge_entries')await pool.query("INSERT INTO knowledge_entries(id,workspace_id,created_by,path,title,content) VALUES($1,$2,$3,'fixture.md','Fixture source','Fixture content')",args.slice(0,3))
   if(table==='kb_chunks')await pool.query("INSERT INTO kb_chunks(id,workspace_id,created_by_user_id,assistant_id,chunk_text,source) VALUES($1,$2,$3,$4,'Fixture source','user')",args)
-  await pool.query(`UPDATE ${table} SET compartments=ARRAY['product'],project_ids=$2,sensitivity='internal' WHERE id=$1`,[id,[projectId]])
+  if(table==='tasks'){
+    await expect(pool.query("UPDATE tasks SET compartments=ARRAY['product'] WHERE id=$1",[id])).rejects.toMatchObject({code:'42501'})
+    expect((await queryWithRLS(userId,`SELECT session_user,current_user,r.rolsuper,r.rolbypassrls,r.rolinherit,
+      pg_has_role(r.oid,c.relowner,'MEMBER') AS owner_member FROM pg_roles r
+      JOIN pg_class c ON c.oid='public.tasks'::regclass WHERE r.rolname=session_user`)).rows).toEqual([
+      {session_user:'app_user',current_user:'app_user',rolsuper:false,rolbypassrls:false,rolinherit:false,owner_member:false},
+    ])
+    await updateTaskFixture(userId,id,"compartments=ARRAY['product'],project_ids=$2,sensitivity='internal'",[[projectId]],{compartments:['product'],project_ids:[projectId],sensitivity:'internal'})
+  }else await pool.query(`UPDATE ${table} SET compartments=ARRAY['product'],project_ids=$2,sensitivity='internal' WHERE id=$1`,[id,[projectId]])
   const access={workspaceId,userId,clearance:'internal' as const,compartments:['product'],mutationCompartments:['product'],projectIds:[projectId]}
   const read=()=>queryWithRLS(userId,`SELECT id FROM ${table} WHERE id=$1`,[id])
   return {workspaceId,userId,id,projectId,access,read}
@@ -55,7 +71,8 @@ describe('[COMP:api/execution-read-ceiling] direct app-role source projection',(
     expect((await f.read()).rows).toHaveLength(1)
     expect((await pool.query(`SELECT compartments FROM ${table} WHERE id=$1`,[f.id])).rows[0].compartments).toEqual(['product'])
     await runWithAgentAccess({...f.access,compartments:null,projectIds:null},async()=>expect((await f.read()).rows).toHaveLength(1))
-    await pool.query(`UPDATE ${table} SET compartments='{}',project_ids='{}',sensitivity='public' WHERE id=$1`,[f.id])
+    if(table==='tasks')await updateTaskFixture(f.userId,f.id,"compartments='{}',project_ids='{}',sensitivity='public'",[],{compartments:[],project_ids:[],sensitivity:'public'})
+    else await pool.query(`UPDATE ${table} SET compartments='{}',project_ids='{}',sensitivity='public' WHERE id=$1`,[f.id])
     expect((await runWithAgentAccess({...f.access,compartments:[],projectIds:[],clearance:'public'},f.read)).rows).toHaveLength(1)
   })
   it.each(tables)('enforces current member read versus mutation reach on %s without relying on caller SQL',async table=>{
@@ -65,7 +82,8 @@ describe('[COMP:api/execution-read-ceiling] direct app-role source projection',(
     await pool.query('INSERT INTO users(id,auth_provider_id) VALUES($1::uuid,$1::text)',[approver])
     await pool.query("INSERT INTO workspace_members(workspace_id,user_id,role,clearance) VALUES($1,$2,'owner','confidential')",[f.workspaceId,approver])
     await pool.query("UPDATE workspace_members SET role='member',clearance='internal',team_scope_mode='assigned',compartments=NULL WHERE workspace_id=$1 AND user_id=$2",[f.workspaceId,f.userId])
-    await pool.query(`UPDATE ${table} SET compartments=$2,project_ids='{}'${table==='knowledge_entries'?'':',user_id=NULL'} WHERE id=$1`,[f.id,[team.compartmentKey]])
+    if(table==='tasks')await updateTaskFixture(approver,f.id,"compartments=$2,project_ids='{}',user_id=NULL",[[team.compartmentKey]],{compartments:[team.compartmentKey],project_ids:[],user_id:null})
+    else await pool.query(`UPDATE ${table} SET compartments=$2,project_ids='{}'${table==='knowledge_entries'?'':',user_id=NULL'} WHERE id=$1`,[f.id,[team.compartmentKey]])
     expect((await f.read()).rows).toEqual([])
     await pool.query(`INSERT INTO workspace_access_requests(id,workspace_id,requester_user_id,beneficiary_kind,beneficiary_id,target_team_id,reason,starts_at,expires_at,payload_hash,policy_revision,status,decided_by,decided_at)
       VALUES($1,$2,$3,'member',$3,$4,'Fixture request',now(),now()+interval '1 day',$5,1,'approved',$6,now())`,[requestId,f.workspaceId,f.userId,team.id,'b'.repeat(64),approver])
@@ -74,9 +92,11 @@ describe('[COMP:api/execution-read-ceiling] direct app-role source projection',(
     expect((await f.read()).rows).toHaveLength(1)
     expect((await queryWithRLS(f.userId,`UPDATE ${table} SET compartments='{}' WHERE id=$1 RETURNING id`,[f.id])).rows).toEqual([])
     expect((await queryWithRLS(f.userId,`DELETE FROM ${table} WHERE id=$1 RETURNING id`,[f.id])).rows).toEqual([])
-    await pool.query(`UPDATE ${table} SET sensitivity='confidential' WHERE id=$1`,[f.id])
+    if(table==='tasks')await updateTaskFixture(approver,f.id,"sensitivity='confidential'",[],{sensitivity:'confidential'})
+    else await pool.query(`UPDATE ${table} SET sensitivity='confidential' WHERE id=$1`,[f.id])
     expect((await f.read()).rows).toEqual([])
-    await pool.query(`UPDATE ${table} SET sensitivity='internal' WHERE id=$1`,[f.id])
+    if(table==='tasks')await updateTaskFixture(approver,f.id,"sensitivity='internal'",[],{sensitivity:'internal'})
+    else await pool.query(`UPDATE ${table} SET sensitivity='internal' WHERE id=$1`,[f.id])
     await pool.query('UPDATE workspace_access_grants SET revoked_at=now(),revoked_by=$2 WHERE id=$1',[grant.id,approver])
     // A retained agent grant cannot override current member revocation.
     expect((await runWithAgentAccess({...f.access,compartments:null,projectIds:null},f.read)).rows).toEqual([])
@@ -141,7 +161,7 @@ describe('[COMP:api/execution-read-ceiling] direct app-role source projection',(
       const policies=await client.query("SELECT tablename,permissive FROM pg_policies WHERE policyname='execution_read_ceiling' ORDER BY tablename")
       expect(policies.rows.map(row=>row.tablename)).toEqual([...tables,'memories_shadow'].sort())
       expect(policies.rows.every(row=>row.permissive==='RESTRICTIVE')).toBe(true)
-      await client.query('SET LOCAL ROLE assurance_app')
+      await client.query('SET LOCAL ROLE app_user')
       await runWithAgentAccess({...f.access,compartments:[]},()=>applyRLSGucs(client,f.userId))
       expect((await client.query('SELECT id FROM entities WHERE id=$1',[f.id])).rows).toEqual([])
       await client.query('ROLLBACK')

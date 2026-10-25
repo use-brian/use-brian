@@ -1673,9 +1673,9 @@ describe('[COMP:security/native-field-policy] current canonical native field mas
     expect(value?.policyVersion).toMatch(/^[a-f0-9]{64}$/)
     expect(JSON.stringify(value)).not.toContain('Fictional request')
     expect(await asMember(memberId,client => maskOn(client,fixture,'portal_alias'))).toEqual(value)
-    // The assurance harness grants SELECT after migration. RLS still reveals
-    // no registry rows through that deliberately over-granted raw table path.
-    expect(await asMember(memberId,async client => (await client.query('SELECT * FROM application_native_resource_owners')).rows)).toEqual([])
+    // Canonical app_user is denied raw private ownership metadata at its SQL
+    // privilege boundary; the admitted field mask remains independently checked.
+    await expect(asMember(memberId,client => client.query('SELECT * FROM application_native_resource_owners'))).rejects.toMatchObject({ code: '42501' })
   })
   it('resolves current catalog fields for a genuinely empty type without a business-row substitute',async () => {
     await clearRoles();const fixture = await catalogType(),narrow = await catalogMask(fixture)
@@ -1744,7 +1744,7 @@ describe('[COMP:security/native-field-policy] current canonical native field mas
       await owner.query("UPDATE application_native_field_contracts SET role_keys=ARRAY['finance','approver'] WHERE module_key='operations'")
     }
   })
-  it.each(['PUBLIC','assurance_app'] as const)('rejects catalog execution grants to %s at registration and use',async grantee => {
+  it.each(['PUBLIC','app_user'] as const)('rejects catalog execution grants to %s at registration and use',async grantee => {
     await clearRoles();const fixture = await catalogType()
     await owner.query(`GRANT EXECUTE ON FUNCTION application_native_policy_fixture_catalog_reader(uuid,jsonb,text) TO ${grantee}`)
     try {
@@ -1753,7 +1753,7 @@ describe('[COMP:security/native-field-policy] current canonical native field mas
     } finally { await owner.query(`REVOKE ALL ON FUNCTION application_native_policy_fixture_catalog_reader(uuid,jsonb,text) FROM ${grantee}`) }
     expect((await catalogMask(fixture))?.readFields).toEqual(['title'])
   })
-  it.each(['PUBLIC','assurance_app'])('holds a record metadata port with a non-owner EXECUTE grant to %s at registration and use',async grantee => {
+  it.each(['PUBLIC','app_user'])('holds a record metadata port with a non-owner EXECUTE grant to %s at registration and use',async grantee => {
     await clearRoles();const fixture = await record()
     await owner.query(`GRANT EXECUTE ON FUNCTION application_native_policy_fixture_reader(uuid,jsonb,text,text) TO ${grantee}`)
     try {

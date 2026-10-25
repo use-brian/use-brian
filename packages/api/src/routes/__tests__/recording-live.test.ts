@@ -35,7 +35,7 @@ function view(id: string, page: Page, workspaceId = WORKSPACE_ID): SavedView {
   } as SavedView
 }
 
-function harness(options: { role?: string | null; enabled?: boolean; withFiles?: boolean; defaultTranscriber?: boolean } = {}) {
+function harness(options: { role?: string | null; enabled?: boolean; withFiles?: boolean; defaultTranscriber?: boolean; unauthenticated?: boolean } = {}) {
   const pages = new Map<string, Page>()
   const views = new Map<string, SavedView>()
   const createDraft = vi.fn(async (input: { page: Page; workspaceId: string; name: string; anchorKey?: string }) => {
@@ -146,7 +146,7 @@ function harness(options: { role?: string | null; enabled?: boolean; withFiles?:
   const app = express()
   app.use(express.json())
   app.use((req, _res, next) => {
-    ;(req as typeof req & { userId: string }).userId = USER_ID
+    if (!options.unauthenticated) req.userId = USER_ID
     next()
   })
   app.use('/api/recordings', recordingLiveRoutes(deps as never))
@@ -199,12 +199,12 @@ describe('[COMP:recordings/live-page-route]', () => {
     expect((await start()).status).toBe(201)
     expect(h.createDraft).toHaveBeenNthCalledWith(1, expect.objectContaining({
       name: '会議メモ', icon: '📁', anchorKey: 'meeting-notes-folder', state: 'saved',
-    }))
-    expect(h.createDraft).toHaveBeenNthCalledWith(2, expect.objectContaining({ nestParentId: 'folder-new' }))
+    }), { provenance: { kind: 'human-authored', actorId: USER_ID } })
+    expect(h.createDraft).toHaveBeenNthCalledWith(2, expect.objectContaining({ nestParentId: 'folder-new' }), { provenance: { kind: 'human-authored', actorId: USER_ID } })
     h.views.get('folder-new')!.name = 'Team meetings'
     expect((await start()).status).toBe(201)
     expect(h.createDraft).toHaveBeenCalledTimes(3)
-    expect(h.createDraft).toHaveBeenLastCalledWith(expect.objectContaining({ nestParentId: 'folder-new' }))
+    expect(h.createDraft).toHaveBeenLastCalledWith(expect.objectContaining({ nestParentId: 'folder-new' }), { provenance: { kind: 'human-authored', actorId: USER_ID } })
     expect(h.views.get('folder-new')!.name).toBe('Team meetings')
   })
 
@@ -216,7 +216,7 @@ describe('[COMP:recordings/live-page-route]', () => {
     const response = await request(h.app).post('/api/recordings/live/start')
       .send({ workspaceId: WORKSPACE_ID, destination: 'meeting-notes' })
     expect(response.status).toBe(201)
-    expect(h.createDraft).toHaveBeenLastCalledWith(expect.objectContaining({ nestParentId: 'winner' }))
+    expect(h.createDraft).toHaveBeenLastCalledWith(expect.objectContaining({ nestParentId: 'winner' }), { provenance: { kind: 'human-authored', actorId: USER_ID } })
   })
 
   it('does not bypass a hidden folder or fall back to a flat note', async () => {
@@ -237,7 +237,37 @@ describe('[COMP:recordings/live-page-route]', () => {
     await startLive(h)
     expect(h.findIdByAnchorKey).not.toHaveBeenCalled()
     expect(h.createDraft).toHaveBeenCalledOnce()
-    expect(h.createDraft).toHaveBeenCalledWith(expect.objectContaining({ nestParentId: null }))
+    expect(h.createDraft).toHaveBeenCalledWith(expect.objectContaining({ nestParentId: null }), { provenance: { kind: 'human-authored', actorId: USER_ID } })
+  })
+
+  it('ignores body actor, provenance and blocks when authoring the initial live page', async () => {
+    const h = harness()
+    const response = await request(h.app).post('/api/recordings/live/start').send({
+      workspaceId: WORKSPACE_ID, destination: 'new', title: 'Weekly sync',
+      userId: 'foreign-user', actorId: 'foreign-user',
+      provenance: { kind: 'human-authored', actorId: 'foreign-user' },
+      page: { blocks: [{ kind: 'text', id: 'injected', text: 'Untrusted body' }] },
+      blocks: [{ kind: 'text', id: 'injected', text: 'Untrusted body' }],
+    })
+    expect(response.status).toBe(201)
+    expect(h.createDraft).toHaveBeenCalledWith(expect.objectContaining({ userId: USER_ID }), {
+      provenance: { kind: 'human-authored', actorId: USER_ID },
+    })
+    const blocks = h.pages.get(response.body.pageId)!.blocks
+    expect(blocks).toHaveLength(3)
+    expect(blocks.map(block => block.id)).not.toContain('injected')
+    expect(h.transcribeWindow).not.toHaveBeenCalled()
+    expect(h.reviseNotes).not.toHaveBeenCalled()
+  })
+
+  it('refuses an absent authenticated actor despite body actor claims', async () => {
+    const h = harness({ unauthenticated: true })
+    expect((await request(h.app).post('/api/recordings/live/start').send({
+      workspaceId: WORKSPACE_ID, destination: 'new', userId: USER_ID,
+      provenance: { kind: 'human-authored', actorId: USER_ID },
+    })).status).toBe(401)
+    expect(h.deps.getRole).not.toHaveBeenCalled()
+    expect(h.createDraft).not.toHaveBeenCalled()
   })
 
   it('creates a saved meeting page carrying the live marker and no transcript blocks', async () => {
@@ -263,7 +293,7 @@ describe('[COMP:recordings/live-page-route]', () => {
       state: 'saved',
       nestParentId: 'parent',
       name: 'Weekly sync',
-    }))
+    }), { provenance: { kind: 'human-authored', actorId: USER_ID } })
   })
 
   it('stores the window row and rewrites the notes region as structured blocks', async () => {

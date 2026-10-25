@@ -39,7 +39,6 @@ beforeAll(async () => {
     { name: '643_recording_segment_publication.sql' }, { name: '653_watch_recording.sql' },
   ])
   // Same post-migration app-role fixture grant as page-placement-admission.integration.test.ts.
-  await pool.query('GRANT EXECUTE ON FUNCTION lock_page_placement_teamspace(uuid,uuid) TO assurance_app')
   directory = await mkdtemp(join(tmpdir(), 'watch-canonical-media-'))
   for (const [name, frequency, duration] of [['first', 440, 1], ['second', 880, 1], ['full', 660, 2]] as const) {
     await exec('ffmpeg', ['-v', 'error', '-y', '-f', 'lavfi', '-i', `sine=frequency=${frequency}:sample_rate=16000:duration=${duration}`, '-c:a', 'aac', '-b:a', '48k', '-movflags', '+faststart', join(directory, `${name}.m4a`)])
@@ -93,7 +92,7 @@ async function fixture() {
   return { userId, outsider, workspaceId, assistantId, writerId, otherId, publicId, team, app, server, storage, resolver, files, pages, service, tokens, grant, signingSecret }
 }
 
-describe('watch → canonical file/Episode/recording/page → real queue/processor', () => {
+describe('[COMP:recordings/watch-intake] watch → canonical file/Episode/recording/page → real queue/processor', () => {
   it.each(['windows', 'full'] as const)('publishes and processes %s intake once, preserving capturedAt and app-role readability', async source => {
     const f = await fixture(), clientId = randomUUID(), capturedAt = '2026-01-03T04:05:06.000Z'
     const c = await watchStore.create(f.grant, clientId, { capturedAt, title: `Watch ${source}`, source: 'apple-watch' })
@@ -130,8 +129,11 @@ describe('watch → canonical file/Episode/recording/page → real queue/process
       (SELECT count(*)::int FROM episodes WHERE workspace_id=$1 AND source_kind='recording') AS episodes,
       (SELECT count(*)::int FROM recording_jobs WHERE workspace_id=$1) AS jobs,
       (SELECT count(*)::int FROM workspace_files WHERE workspace_id=$1 AND mime='audio/mp4') AS media`, [f.workspaceId])).rows[0]
-    expect(await counts()).toEqual({ pages: 1, recordings: 1, episodes: 1, jobs: 1, media: 1 })
-    expect((await pool.query('SELECT linked_recording_id FROM saved_views WHERE id=$1', [c.page_id])).rows[0].linked_recording_id).toBe(c.recording_id)
+    expect(await counts()).toEqual({ pages: 2, recordings: 1, episodes: 1, jobs: 1, media: 1 })
+    const folderRows = (await pool.query("SELECT id FROM saved_views WHERE workspace_id=$1 AND anchor_key='meeting-notes-folder'", [f.workspaceId])).rows
+    expect(folderRows).toHaveLength(1)
+    expect((await pool.query('SELECT linked_recording_id,nest_parent_id FROM saved_views WHERE id=$1', [c.page_id])).rows[0])
+      .toEqual({ linked_recording_id: c.recording_id, nest_parent_id: folderRows[0].id })
     const episodeBefore = (await pool.query('SELECT occurred_at,source_ref,scope_version FROM episodes WHERE id=$1', [c.recording_id])).rows[0]
     expect(new Date(episodeBefore.occurred_at).toISOString()).toBe(capturedAt)
     const provenance = await captureRecordingSegmentProvenance({ actorUserId: f.userId }, f.workspaceId, c.recording_id)
@@ -194,7 +196,10 @@ describe('watch → canonical file/Episode/recording/page → real queue/process
     expect((await pool.query('SELECT occurred_at,source_ref,scope_version FROM episodes WHERE id=$1', [c.recording_id])).rows[0]).toEqual(episodeBefore)
     await f.service.finalize(f.grant, clientId, intent) // completed job must not be queued again
     expect((await retryProcessing().expect(200)).body.processing).toBe('processed')
-    expect(await counts()).toEqual({ pages: 1, recordings: 1, episodes: 1, jobs: 2, media: 1 })
+    expect(await counts()).toEqual({ pages: 2, recordings: 1, episodes: 1, jobs: 2, media: 1 })
+    expect((await pool.query("SELECT id FROM saved_views WHERE workspace_id=$1 AND anchor_key='meeting-notes-folder'", [f.workspaceId])).rows).toEqual(folderRows)
+    expect((await pool.query('SELECT linked_recording_id,nest_parent_id FROM saved_views WHERE id=$1', [c.page_id])).rows[0])
+      .toEqual({ linked_recording_id: c.recording_id, nest_parent_id: folderRows[0].id })
     expect(await claimNextRecordingJob()).toBeNull()
   }, 60000)
 

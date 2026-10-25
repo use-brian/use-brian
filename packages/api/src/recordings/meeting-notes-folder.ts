@@ -26,7 +26,7 @@ export async function ensureMeetingNotesFolder(
       entity: 'tasks', viewType: 'table',
       binding: { entity: 'tasks', viewType: 'table' },
       page: { blocks: [] }, state: 'saved', writtenBy: 'user',
-    })
+    }, { provenance: { kind: 'human-authored', actorId: userId } })
     return folder.id
   } catch (error) {
     // The workspace anchor's unique index arbitrates concurrent starts.

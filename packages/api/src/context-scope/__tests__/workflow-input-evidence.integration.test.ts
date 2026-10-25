@@ -653,7 +653,7 @@ describe('[COMP:api/workflow-input-evidence] canonical causal inputs',()=>{
       await client.query(migration)
       expect((await client.query('SELECT scope_source FROM crm_domain_event_outbox WHERE id=$1',[f.eventId])).rows[0].scope_source).toEqual(saved)
       expect((await client.query("SELECT read_scope_source($1,'crm_event',$2) AS source",[f.workspaceId,f.eventId])).rows[0].source).toMatchObject({resourceKind:'crm_event',compartments:[f.team.compartmentKey]})
-      expect((await client.query("SELECT has_function_privilege('assurance_app','read_scope_source(uuid,text,uuid)','EXECUTE') AS allowed")).rows[0].allowed).toBe(false)
+      expect((await client.query("SELECT has_function_privilege('app_user','read_scope_source(uuid,text,uuid)','EXECUTE') AS allowed")).rows[0].allowed).toBe(false)
       expect((await client.query("SELECT scope_source_table('crm_event') AS editable")).rows[0].editable).toBeNull()
     } finally {await client.query('ROLLBACK');client.release()}
   })

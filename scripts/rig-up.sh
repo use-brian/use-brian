@@ -161,13 +161,23 @@ eval "$(node "$ROOT/scripts/rig-env.mjs")" || die "could not resolve DATABASE_UR
        This script creates, stops and can delete that database — it refuses to aim at a
        remote or shared server. Point DATABASE_URL at 127.0.0.1 or unset it."
 
+# Verify canonical runtime without changing migration-owned function permissions.
+verify_admin_role() {
+  [ "$ADMIN_ONLY" = 1 ] || return 0
+  node "$ROOT/scripts/crm/runtime-role.mjs" verify | docker exec -i "$CONTAINER" psql -U "$RIG_DB_USER" -d "$RIG_DB_NAME" -v ON_ERROR_STOP=1 -q
+}
+
 # ── already up? ─────────────────────────────────────────────────────────────
 if pid="$(rig_pid)"; then
+  if [ "$ADMIN_ONLY" = 1 ]; then
+    node "$ROOT/scripts/rig-admin.mjs" --verify-composition "$ROOT" || die "administrative runtime composition refused"
+  fi
   recorded_api_port="$(node "$ROOT/scripts/launch-ports.mjs" "$API_PORT_FILE" --recorded)" || die "invalid recorded API port"
   [ "$API_PORT" = "$recorded_api_port" ] || die "rig is running on :$recorded_api_port; run scripts/rig-down.sh --keep-db before changing its API port"
 fi
 if [ "$FRESH" = "0" ] && pid="$(rig_pid)" && api_healthy; then
-  say "rig is already up (launcher pid $pid) — refreshing the owner session only."
+  verify_admin_role
+  say "rig is already up (launcher pid $pid); canonical runtime verified, refreshing owner session."
   mint_only=1
 else
   mint_only=0
@@ -290,6 +300,11 @@ if [ "$mint_only" = "0" ]; then
   # 280_oss_connectors.sql) then no-op — the stack boots and the connector
   # tables are simply absent. The platform `.env` sets it for the hosted tree,
   # so clearing it is not optional.
+  if [ "$ADMIN_ONLY" = 1 ]; then
+    node "$ROOT/scripts/crm/runtime-role.mjs" prepare | docker exec -i "$CONTAINER" psql -U "$RIG_DB_USER" -d "$RIG_DB_NAME" -v ON_ERROR_STOP=1 -q
+    # Recognized narrowing commits independently before unchanged migration gates.
+    node "$ROOT/scripts/crm/runtime-role.mjs" transition | docker exec -i "$CONTAINER" psql -U "$RIG_DB_USER" -d "$RIG_DB_NAME" -v ON_ERROR_STOP=1 -q
+  fi
   say "applying open migrations ..."
   if ! ( cd "$ROOT" && env DATABASE_URL="$RIG_DB_URL" MIGRATION_DIRS= \
            pnpm --filter @use-brian/api migrate ) >"$MIGRATE_LOG" 2>&1; then
@@ -300,23 +315,8 @@ if [ "$mint_only" = "0" ]; then
   say "migrations ok (${applied:-0} newly applied; log: ${MIGRATE_LOG#"$ROOT/"})"
 
   if [ "$ADMIN_ONLY" = 1 ]; then
-    docker exec -i "$CONTAINER" psql -U "$RIG_DB_USER" -d "$RIG_DB_NAME" -v ON_ERROR_STOP=1 -q <<'SQL'
-DO $$ BEGIN
-  IF NOT EXISTS (SELECT FROM pg_roles WHERE rolname = 'admin_fixture_app') THEN
-    CREATE ROLE admin_fixture_app LOGIN PASSWORD 'fixture-only' NOSUPERUSER NOCREATEDB NOCREATEROLE NOBYPASSRLS;
-  END IF;
-  IF EXISTS (SELECT FROM pg_roles WHERE rolname = 'admin_fixture_app' AND (rolsuper OR rolcreatedb OR rolcreaterole OR rolbypassrls)) THEN
-    RAISE EXCEPTION 'Administrative fixture app role has unsafe privileges';
-  END IF;
-END $$;
-GRANT USAGE ON SCHEMA public TO admin_fixture_app;
-GRANT SELECT, INSERT, UPDATE, DELETE ON ALL TABLES IN SCHEMA public TO admin_fixture_app;
-GRANT USAGE, SELECT ON ALL SEQUENCES IN SCHEMA public TO admin_fixture_app;
-GRANT EXECUTE ON FUNCTION crm_delivery_source_visible(uuid,text,uuid,text,uuid),
-  crm_delivery_envelope_visible(uuid,uuid,uuid,text,text[],uuid[],uuid),
-  crm_delivery_source_navigation(uuid,text,uuid,text,uuid) TO admin_fixture_app;
-ALTER ROLE admin_fixture_app SET app.current_user_id = '00000000-0000-0000-0000-000000000000';
-SQL
+    node "$ROOT/scripts/crm/runtime-role.mjs" activate | docker exec -i "$CONTAINER" psql -U "$RIG_DB_USER" -d "$RIG_DB_NAME" -v ON_ERROR_STOP=1 -q
+    verify_admin_role
   fi
 
   # ── the stack (the maintained launcher, headless) ─────────────────────────
@@ -339,15 +339,7 @@ SQL
   say "launcher pid $launcher_pid (log: ${LOG#"$ROOT/"})"
 fi
 
-# BEGIN administrative management predicate grant
-# Both fresh and warm administrative boots converge here after role creation.
-# Match the one canonical app_user predicate grant; never inherit the role.
-if [ "$ADMIN_ONLY" = 1 ]; then
-  docker exec -i "$CONTAINER" psql -U "$RIG_DB_USER" -d "$RIG_DB_NAME" -v ON_ERROR_STOP=1 -q <<'SQL'
-GRANT EXECUTE ON FUNCTION application_memory_field_ancestry_allows(uuid,uuid,text) TO admin_fixture_app;
-SQL
-fi
-# END administrative management predicate grant
+
 
 # ── readiness: the port, then a real database round-trip ────────────────────
 # "Up is not alive": /health is registered before the pool is used and answers

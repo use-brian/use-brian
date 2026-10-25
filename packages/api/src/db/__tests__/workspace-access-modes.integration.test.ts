@@ -190,8 +190,8 @@ describe('workspace access modes M1 PostgreSQL foundation', () => {
 
   it('denies outsider reads and writes under a real non-bypass role; admins can read but not write', async () => {
     const f = await workspace(), p = await plan(f.w,f.owner), i = await item(f.w,p.id,f.owner), outsider = await user()
-    expect(await row(`SELECT rolsuper,rolbypassrls FROM pg_roles WHERE rolname='assurance_app'`)).toEqual({rolsuper:false,rolbypassrls:false})
-    await query(`SET LOCAL ROLE assurance_app`)
+    expect(await row(`SELECT rolsuper,rolbypassrls FROM pg_roles WHERE rolname='app_user'`)).toEqual({rolsuper:false,rolbypassrls:false})
+    await query(`SET LOCAL ROLE app_user`)
     await query(`SELECT set_config('app.system_bypass','false',true),set_config('app.current_user_id',$1,true)`,[outsider])
     for (const [table,id] of [['workspace_access_migration_plans',p.id],['workspace_access_migration_items',i.id]]) {
       expect((await query(`SELECT * FROM ${table} WHERE id=$1`,[id])).rows).toEqual([])
