@@ -14,6 +14,8 @@ import { describe, it, expect, vi, beforeEach } from 'vitest'
 import request from 'supertest'
 import { createTestApp } from './helpers.js'
 
+vi.mock('../../workflow/source-service.js',()=>({admitScopedSourceWorkflowStart:vi.fn(async()=>undefined)}))
+
 const mockDefParse = vi.fn()
 const mockTriggerParse = vi.fn()
 const mockAdvance = vi.fn()

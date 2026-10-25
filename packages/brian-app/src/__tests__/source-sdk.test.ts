@@ -1,8 +1,8 @@
-import { generateKeyPairSync, randomBytes, randomUUID, sign } from 'node:crypto'
+import { createHash, generateKeyPairSync, randomBytes, randomUUID, sign } from 'node:crypto'
 import { describe, expect, it, vi } from 'vitest'
 import { CONNECTOR_ACTOR_TYPE, connectorRequestBinding, createBoundedConnectorReplayConsumer, createConnectorActorVerifier,
   handleSourceSidecar, parseSourceEnvelope, parseSourceCapabilities, parseSourceAuthorizationRequest, parseSourceAuthorizationResponse,
-  requireSourceAuthorization, parseSourceReconcileResponse, sourceAuthorizationDigest, sourceSubjectFromActor,
+  requireSourceAuthorization, parseSourceReconcileRequest, parseSourceReconcileResponse, sourceAuthorizationDigest, sourceEffectDigest, sourceSubjectFromActor,
   type ConnectorActorClaims, type SourceAuthorizationRequest, type SourceAuthorizationResponse, type SourceCapabilities,
   type SourceEnvelope } from '../connector.js'
 
@@ -51,6 +51,15 @@ describe('[COMP:shared/brian-app-sdk] independent source evidence and sidecar co
     expect(() => parseSourceEnvelope({ ...input, resources: [{ ...input.resources[0], retention: { mode: 'released_snapshot' } }] })).toThrow()
     expect(() => parseSourceEnvelope({ ...input, resources: [{ ...input.resources[0], retention: { mode: 'governed', releaseId: 'invented-release' } }] })).toThrow()
   })
+  it('binds the exact independent release identity and lifetime into every authorization digest', () => {
+    const base=request(), released:SourceAuthorizationRequest={...base,items:[{...base.items[0],retentionMode:'released_snapshot',release:{id:'explicit-release-1',expiresAt:now+60_000}}]}
+    expect(parseSourceAuthorizationRequest(released)).toEqual(released)
+    const digest=sourceAuthorizationDigest(released)
+    expect(sourceAuthorizationDigest({...released,items:[{...released.items[0],release:{id:'explicit-release-2',expiresAt:now+60_000}}]})).not.toBe(digest)
+    expect(sourceAuthorizationDigest({...released,items:[{...released.items[0],release:{id:'explicit-release-1',expiresAt:now+60_001}}]})).not.toBe(digest)
+    expect(()=>parseSourceAuthorizationRequest({...released,items:[{...base.items[0],retentionMode:'released_snapshot'}]})).toThrow('source_protocol_invalid')
+    expect(()=>parseSourceAuthorizationRequest({...base,items:[{...base.items[0],release:released.items[0].release}]})).toThrow('source_protocol_invalid')
+  })
   it.each(['private:finance','team:unknown','project:unknown'])('refuses an unmapped or malformed native source label %s', label => {
     const input = envelope(); input.resources[0].labels.compartments = [label]
     expect(() => parseSourceEnvelope(input)).toThrow('source_protocol_invalid')
@@ -67,6 +76,20 @@ describe('[COMP:shared/brian-app-sdk] independent source evidence and sidecar co
     expect(sourceAuthorizationDigest({ ...input, items: [{ ...input.items[0], fields: ['description','cost'] }] })).toBe(digest)
     expect(() => parseSourceAuthorizationResponse({ ...valid, tenant: 'foreign-tenant' }, input, tenant, now)).toThrow()
     expect(() => parseSourceAuthorizationResponse({ ...valid, operationId: randomUUID() }, input, tenant, now)).toThrow()
+  })
+  it('binds the actual source command input and reconciliation key without changing ordinary read digests', () => {
+    const base=request(),input={id:ref.id,expectedVersion:ref.contentVersion,values:{cost:'38.00'},idempotencyKey:'fixture-bound-effect'}
+    const effect={tool:'updateRecord',input,idempotencyKey:input.idempotencyKey}
+    const mutation:SourceAuthorizationRequest={...base,items:[{...base.items[0],action:'mutate',fields:['cost']}],effect}
+    const first=sourceAuthorizationDigest(mutation)
+    expect(parseSourceAuthorizationRequest(mutation)).toEqual(mutation)
+    expect(sourceAuthorizationDigest({...mutation,effect:{...effect,input:{...input,values:{cost:'39.00'}}}})).not.toBe(first)
+    expect(sourceEffectDigest({...effect,input:{idempotencyKey:input.idempotencyKey,values:input.values,expectedVersion:input.expectedVersion,id:input.id}})).toBe(sourceEffectDigest(effect))
+    expect(()=>parseSourceAuthorizationRequest({...base,effect})).toThrow('source_protocol_invalid')
+    expect(()=>parseSourceAuthorizationRequest({...mutation,effect:{...effect,idempotencyKey:'different'}})).toThrow('source_protocol_invalid')
+    expect(()=>parseSourceAuthorizationRequest({...mutation,effect:{...effect,input:{...input,extra:undefined}}})).toThrow('source_protocol_invalid')
+    expect(parseSourceCapabilities({...capabilities,effectBinding:'command_v1'}).effectBinding).toBe('command_v1')
+    expect(()=>parseSourceCapabilities({...capabilities,effectBinding:'future'})).toThrow('source_protocol_invalid')
   })
   it('treats absent/denied decisions as denial and refuses unknown or duplicate pairs', () => {
     const input = request(), valid = response(input), denied = { ...valid, decisions: [{ itemId: input.items[0].itemId, recipientId: input.recipients[0].recipientId, allowed: false as const }] }
@@ -87,6 +110,48 @@ describe('[COMP:shared/brian-app-sdk] independent source evidence and sidecar co
     expect(() => parseSourceReconcileResponse({ version: 'ub.source.v1', tenant, state: 'applied' }, tenant)).toThrow()
     expect(() => parseSourceReconcileResponse({ version: 'ub.source.v1', tenant, state: 'not_applied', receipt: 'invented' }, tenant)).toThrow()
     expect(() => parseSourceReconcileResponse({ version: 'ub.source.v1', tenant, state: 'applied', receipt: 'effect-1', evidence: { ...envelope(), tenant: 'foreign' } }, tenant)).toThrow()
+  })
+  it('canonicalizes effect object keys independently of the host locale',()=>{
+    const effect={tool:'updateRecord',input:{'ä':2,z:1,idempotencyKey:'once'},idempotencyKey:'once'}
+    const canonical='{"idempotencyKey":"once","input":{"idempotencyKey":"once","z":1,"ä":2},"tool":"updateRecord"}'
+    expect(sourceEffectDigest(effect)).toBe(createHash('sha256').update(canonical).digest('base64url'))
+  })
+  it.each([
+    {name:'missing first index',value:()=>new Array(1)},
+    {name:'nested missing index',value:()=>[new Array(1)]},
+    {name:'deleted middle index',value:()=>{const values=[1,2,3];delete values[1];return values}},
+    {name:'deleted trailing index',value:()=>{const values=[1,2];delete values[1];return values}},
+  ])('refuses sparse effect input before digest or authorization ($name)',({value})=>{
+    const authorization=request();authorization.items.forEach(item=>item.action='mutate')
+    authorization.effect={tool:'fictionalCommand',input:{idempotencyKey:'once',values:value()},idempotencyKey:'once'}
+    expect(()=>sourceEffectDigest(authorization.effect!)).toThrow('source_protocol_invalid')
+    expect(()=>parseSourceAuthorizationRequest(authorization)).toThrow('source_protocol_invalid')
+  })
+  it('preserves dense JSON effect bytes and the legacy ordinary authorization digest',()=>{
+    const digests=[]
+    for(const values of [[],[null],[['dense',null,2,true]]]){
+      const effect={tool:'fictionalCommand',input:{idempotencyKey:'once',values},idempotencyKey:'once'}
+      const legacyJson=JSON.stringify({idempotencyKey:'once',input:{idempotencyKey:'once',values},tool:'fictionalCommand'})
+      const digest=sourceEffectDigest(effect);digests.push(digest)
+      expect(digest).toBe(createHash('sha256').update(legacyJson).digest('base64url'))
+      const authorization=request();authorization.items.forEach(item=>item.action='mutate');authorization.effect=effect
+      expect(parseSourceAuthorizationRequest(authorization)).toEqual(authorization)
+      expect(parseSourceReconcileRequest({version:'ub.source.v1',idempotencyKey:'once',effectDigest:digest,authorization})).toMatchObject({effectDigest:digest})
+    }
+    expect(new Set(digests).size).toBe(3)
+    const ordinary=request(),legacy={version:ordinary.version,operationId:ordinary.operationId,
+      items:ordinary.items.map(item=>[item.itemId,JSON.stringify([item.resource.type,item.resource.id,item.resource.contentVersion,item.resource.policyVersion]),[...item.fields].sort(),item.action,item.retentionMode]).sort((a,b)=>String(a[0]).localeCompare(String(b[0]))),
+      recipients:ordinary.recipients.map(item=>[item.recipientId,JSON.stringify([item.subject.kind,item.subject.id,item.subject.executingAssistantId])]).sort((a,b)=>a[0].localeCompare(b[0]))}
+    expect(sourceAuthorizationDigest(ordinary)).toBe(createHash('sha256').update(JSON.stringify(legacy)).digest('base64url'))
+  })
+  it('requires the exact original effect authorization during command reconciliation',()=>{
+    const authorization=request();authorization.items.forEach(item=>item.action='mutate')
+    authorization.effect={tool:'updateRecord',input:{id:ref.id,idempotencyKey:'once'},idempotencyKey:'once'}
+    const bound={version:'ub.source.v1',idempotencyKey:'once',effectDigest:sourceEffectDigest(authorization.effect),authorization}
+    expect(parseSourceReconcileRequest(bound)).toEqual(bound)
+    expect(()=>parseSourceReconcileRequest({...bound,authorization:undefined})).toThrow()
+    expect(()=>parseSourceReconcileRequest({...bound,idempotencyKey:'another'})).toThrow()
+    expect(()=>parseSourceReconcileRequest({...bound,effectDigest:sourceEffectDigest({...authorization.effect!,input:{id:'another',idempotencyKey:'once'}})})).toThrow()
   })
   function sidecar(endpoint: 'capabilities' | 'authorize' | 'reconcile', body: unknown) {
     const key = generateKeyPairSync('ed25519'), workspaceId = randomUUID(), connectorInstanceId = randomUUID(), issuer = 'https://brain.example', audience = 'https://source.example'

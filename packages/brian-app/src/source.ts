@@ -23,16 +23,17 @@ export type SourceObservation = {
 }
 export type SourceEnvelope = { version: typeof SOURCE_PROTOCOL_VERSION; tenant: string; resources: SourceObservation[] }
 export type SourceCapabilities = { version: typeof SOURCE_PROTOCOL_VERSION; tenant: string;
-  retentionModes: SourceRetentionMode[]; fieldEvidence: true; reconciliation: boolean }
-export type SourceAuthorizationRequest = { version: typeof SOURCE_PROTOCOL_VERSION; operationId: string;
-  items: Array<{ itemId: string; resource: SourceResourceRef; fields: string[]; action: SourceAction; retentionMode: SourceRetentionMode }>;
+  retentionModes: SourceRetentionMode[]; fieldEvidence: true; reconciliation: boolean; effectBinding?: 'command_v1' }
+export type SourceEffectBinding = { tool: string; input: Record<string, unknown>; idempotencyKey: string }
+export type SourceAuthorizationRequest = { effect?: SourceEffectBinding; version: typeof SOURCE_PROTOCOL_VERSION; operationId: string;
+  items: Array<{ itemId: string; resource: SourceResourceRef; fields: string[]; action: SourceAction; retentionMode: SourceRetentionMode; release?: { id: string; expiresAt: number } }>;
   recipients: Array<{ recipientId: string; subject: SourceSubject }> }
 export type SourceAuthorizationResponse = { version: typeof SOURCE_PROTOCOL_VERSION; tenant: string; operationId: string;
   decisions: Array<{ itemId: string; recipientId: string; allowed: false }
     | { itemId: string; recipientId: string; allowed: true; receipt: { id: string; issuedAt: number; expiresAt: number } }> }
-export type SourceReconcileRequest = { version: typeof SOURCE_PROTOCOL_VERSION; idempotencyKey: string; receipt?: string }
+export type SourceReconcileRequest = { version: typeof SOURCE_PROTOCOL_VERSION; idempotencyKey: string; receipt?: string; effectDigest?: string; authorization?: SourceAuthorizationRequest }
 export type SourceReconcileResponse = { version: typeof SOURCE_PROTOCOL_VERSION; tenant: string;
-  state: 'not_applied' | 'uncertain' | 'applied'; receipt?: string; evidence?: SourceEnvelope }
+  state: 'not_applied' | 'uncertain' | 'applied'; receipt?: string; effectDigest?: string; evidence?: SourceEnvelope }
 export class SourceProtocolError extends Error {
   readonly retrySafe = false
   constructor(readonly code: 'source_protocol_invalid' | 'source_access_denied' | 'source_unavailable' | 'source_effect_uncertain') {
@@ -87,6 +88,26 @@ export function sourceSubjectKey(value: SourceSubject): string { subject(value);
 export function sourceResourceKey(value: SourceResourceRef): string {
   resource(value); return JSON.stringify([value.type,value.id,value.contentVersion,value.policyVersion])
 }
+/** Exact JSON wire values only; no omitted/NaN/cyclic object can change meaning after authorization. */
+function canonicalSourceEffectInput(value: unknown, depth = 0): string {
+  if (depth > 32) invalid()
+  if (value === null || typeof value === 'string' || typeof value === 'boolean') return JSON.stringify(value)
+  if (typeof value === 'number') { if (!Number.isFinite(value)) invalid(); return JSON.stringify(value) }
+  if (Array.isArray(value)) {
+    const items:string[]=[]
+    for(let index=0;index<value.length;index++) {
+      if(!Object.hasOwn(value,index))invalid()
+      items.push(canonicalSourceEffectInput(value[index],depth+1))
+    }
+    return '['+items.join(',')+']'
+  }
+  if (!value || typeof value !== 'object' || Object.getPrototypeOf(value) !== Object.prototype && Object.getPrototypeOf(value) !== null) invalid()
+  return '{'+Object.entries(value).sort(([a],[b])=>a<b?-1:a>b?1:0).map(([key,item])=>JSON.stringify(key)+':'+canonicalSourceEffectInput(item,depth+1)).join(',')+'}'
+}
+export function sourceEffectDigest(effect: SourceEffectBinding): string {
+  text(effect.tool,128);text(effect.idempotencyKey,256)
+  return createHash('sha256').update(canonicalSourceEffectInput({tool:effect.tool,input:effect.input,idempotencyKey:effect.idempotencyKey})).digest('base64url')
+}
 export function parseSourceEnvelope(value: unknown): SourceEnvelope {
   bounded(value)
   const record = object(value, ['version','tenant','resources']); version(record); text(record.tenant); list(record.resources)
@@ -117,21 +138,30 @@ export function parseSourceEnvelope(value: unknown): SourceEnvelope {
 }
 export function parseSourceCapabilities(value: unknown): SourceCapabilities {
   bounded(value)
-  const record = object(value, ['version','tenant','retentionModes','fieldEvidence','reconciliation']); version(record); text(record.tenant)
+  const record = object(value, ['version','tenant','retentionModes','fieldEvidence','reconciliation'], ['effectBinding']); version(record); text(record.tenant)
   strings(record.retentionModes, 3, true); record.retentionModes.forEach(mode => enumeration(mode, ['governed','released_snapshot','ephemeral']))
-  if (record.fieldEvidence !== true || typeof record.reconciliation !== 'boolean') invalid()
+  if (record.fieldEvidence !== true || typeof record.reconciliation !== 'boolean' || record.effectBinding !== undefined && record.effectBinding !== 'command_v1') invalid()
   return detached(value)
 }
 export function parseSourceAuthorizationRequest(value: unknown): SourceAuthorizationRequest {
   bounded(value)
-  const record = object(value, ['version','operationId','items','recipients']); version(record); uuid(record.operationId)
+  const record = object(value, ['version','operationId','items','recipients'], ['effect']); version(record); uuid(record.operationId)
   list(record.items); list(record.recipients)
   for (const item of record.items) {
-    const entry = object(item, ['itemId','resource','fields','action','retentionMode'])
+    const entry = object(item, ['itemId','resource','fields','action','retentionMode'], ['release'])
     uuid(entry.itemId); resource(entry.resource); strings(entry.fields, 256, true); enumeration(entry.action, SOURCE_ACTIONS)
     enumeration(entry.retentionMode, ['governed','released_snapshot','ephemeral'])
+    if (entry.retentionMode === 'released_snapshot') { const release=object(entry.release,['id','expiresAt']);text(release.id);timestamp(release.expiresAt) }
+    else if (entry.release !== undefined) invalid()
   }
   for (const item of record.recipients) { const entry = object(item, ['recipientId','subject']); uuid(entry.recipientId); subject(entry.subject) }
+  if (record.effect !== undefined) {
+    const effect = object(record.effect, ['tool','input','idempotencyKey']);text(effect.tool,128);text(effect.idempotencyKey,256)
+    if (!effect.input || typeof effect.input !== 'object' || Array.isArray(effect.input)
+      || (effect.input as Record<string, unknown>).idempotencyKey !== effect.idempotencyKey
+      || record.items.some(item => (item as { action: string }).action !== 'mutate')) invalid()
+    canonicalSourceEffectInput(effect.input)
+  }
   unique(record.items, item => (item as { itemId: string }).itemId)
   unique(record.recipients, item => (item as { recipientId: string }).recipientId)
   unique(record.recipients, item => sourceSubjectKey((item as { subject: SourceSubject }).subject))
@@ -164,22 +194,30 @@ export function requireSourceAuthorization(response: SourceAuthorizationResponse
 export function sourceAuthorizationDigest(request: SourceAuthorizationRequest): string {
   const parsed = parseSourceAuthorizationRequest(request)
   const canonical = { version: parsed.version, operationId: parsed.operationId,
-    items: parsed.items.map(item => [item.itemId,sourceResourceKey(item.resource),[...item.fields].sort(),item.action,item.retentionMode]).sort((a,b) => String(a[0]).localeCompare(String(b[0]))),
-    recipients: parsed.recipients.map(item => [item.recipientId,sourceSubjectKey(item.subject)]).sort((a,b) => a[0].localeCompare(b[0])) }
+    items: parsed.items.map(item => [item.itemId,sourceResourceKey(item.resource),[...item.fields].sort(),item.action,item.retentionMode,...(item.release ? [item.release.id,item.release.expiresAt] : [])]).sort((a,b) => String(a[0]).localeCompare(String(b[0]))),
+    recipients: parsed.recipients.map(item => [item.recipientId,sourceSubjectKey(item.subject)]).sort((a,b) => a[0].localeCompare(b[0])),
+    ...(parsed.effect ? { effectDigest: sourceEffectDigest(parsed.effect) } : {}) }
   return createHash('sha256').update(JSON.stringify(canonical)).digest('base64url')
 }
 export function parseSourceReconcileRequest(value: unknown): SourceReconcileRequest {
-  const record = object(value, ['version','idempotencyKey'], ['receipt']); version(record); text(record.idempotencyKey, 256)
+  const record = object(value, ['version','idempotencyKey'], ['receipt','effectDigest','authorization']); version(record); text(record.idempotencyKey, 256)
   if (record.receipt !== undefined) text(record.receipt, 1024)
+  if (record.effectDigest !== undefined && (typeof record.effectDigest !== 'string' || !/^[A-Za-z0-9_-]{43}$/.test(record.effectDigest))) invalid()
+  if (record.authorization !== undefined) {
+    const authorization=parseSourceAuthorizationRequest(record.authorization)
+    if (!authorization.effect || authorization.effect.idempotencyKey!==record.idempotencyKey || sourceEffectDigest(authorization.effect)!==record.effectDigest) invalid()
+  }
+  if (record.effectDigest !== undefined && record.authorization===undefined) invalid()
   return detached(value)
 }
 export function parseSourceReconcileResponse(value: unknown, tenant: string): SourceReconcileResponse {
   bounded(value)
-  const record = object(value, ['version','tenant','state'], ['receipt','evidence']); version(record)
+  const record = object(value, ['version','tenant','state'], ['receipt','evidence','effectDigest']); version(record)
   if (record.tenant !== tenant) invalid()
   enumeration(record.state, ['not_applied','uncertain','applied'])
   if (record.state === 'applied') text(record.receipt, 1024)
-  else if (record.receipt !== undefined || record.evidence !== undefined) invalid()
+  else if (record.receipt !== undefined || record.evidence !== undefined || record.effectDigest !== undefined) invalid()
+  if (record.effectDigest !== undefined && (typeof record.effectDigest !== 'string' || !/^[A-Za-z0-9_-]{43}$/.test(record.effectDigest))) invalid()
   if (record.evidence !== undefined && parseSourceEnvelope(record.evidence).tenant !== tenant) invalid()
   return detached(value)
 }

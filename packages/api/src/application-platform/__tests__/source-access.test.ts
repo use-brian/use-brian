@@ -2,7 +2,7 @@ import { generateKeyPairSync, randomUUID } from 'node:crypto'
 import { describe, expect, it, vi } from 'vitest'
 import { createExecutionContext } from '@use-brian/core'
 import { CONNECTOR_ACTOR_HEADER, createBoundedConnectorReplayConsumer, createConnectorActorVerifier, SOURCE_PROTOCOL_VERSION,
-  type SourceAuthorizationRequest } from '@use-brian/brian-app/connector'
+  sourceEffectDigest, type SourceAuthorizationRequest } from '@use-brian/brian-app/connector'
 import { createSourceAccessClient, trustedSourceOperationProof, type SourceAccessProfile } from '../source-access.js'
 import type { ConnectorActorMintingPorts } from '../connector-actor-context.js'
 
@@ -84,4 +84,20 @@ describe('[COMP:api/external-source-access] authenticated sidecar coordinator', 
     await expect(f.client.reconcile({ version: SOURCE_PROTOCOL_VERSION, idempotencyKey: 'effect-1' })).rejects.toMatchObject({ code: 'source_effect_uncertain' })
     expect(f.fetch).toHaveBeenCalledTimes(1)
   })
+  it('retains signed base and exact-digest reconciliation without a command sender', async () => {
+    const f=fixture();expect(Object.hasOwn(f.client,'commandMcp')).toBe(false)
+    f.respond.mockReturnValue({version:SOURCE_PROTOCOL_VERSION,tenant:f.profile.tenant,state:'applied',receipt:'base-receipt'})
+    expect(await f.client.reconcile({version:SOURCE_PROTOCOL_VERSION,idempotencyKey:'base-key'})).toMatchObject({state:'applied',receipt:'base-receipt'})
+    const authorization=request();authorization.items[0].action='mutate';authorization.effect={tool:'updateRecord',input:{id:'fixture-1',idempotencyKey:'exact-key'},idempotencyKey:'exact-key'}
+    const effectDigest=sourceEffectDigest(authorization.effect),input={version:SOURCE_PROTOCOL_VERSION as typeof SOURCE_PROTOCOL_VERSION,idempotencyKey:'exact-key',effectDigest,authorization}
+    f.respond.mockReturnValue({version:SOURCE_PROTOCOL_VERSION,tenant:f.profile.tenant,state:'applied',receipt:'exact-receipt',effectDigest})
+    expect(await f.client.reconcile(input)).toMatchObject({state:'applied',receipt:'exact-receipt',effectDigest})
+    expect(f.fetch.mock.calls.every(([url])=>String(url).endsWith('/usebrian/source/reconcile'))).toBe(true)
+    f.respond.mockReturnValue({version:SOURCE_PROTOCOL_VERSION,tenant:f.profile.tenant,state:'applied',receipt:'wrong-receipt',effectDigest:sourceEffectDigest({...authorization.effect,input:{...authorization.effect.input,id:'other'}})})
+    await expect(f.client.reconcile(input)).rejects.toMatchObject({code:'source_effect_uncertain'})
+    const calls=f.fetch.mock.calls.length
+    await expect(f.client.reconcile({...input,authorization:{...authorization,effect:{...authorization.effect,input:{...authorization.effect.input,id:'other'}}}})).rejects.toMatchObject({code:'source_protocol_invalid'})
+    expect(f.fetch).toHaveBeenCalledTimes(calls)
+  })
+
 })

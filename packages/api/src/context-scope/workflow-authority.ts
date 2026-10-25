@@ -10,6 +10,7 @@ import { createDbWorkflowRunStore, readWorkflowRunInTransaction } from '../db/wo
 import { parseWorkflowCopyEvidence, readWorkflowInputEvidence } from './workflow-input-evidence.js'
 import { validateCallerScopeEvidence } from './caller-evidence.js'
 import { pinPolicyEpoch } from './policy-epoch.js'
+import { resolveSourceServiceWorkflowScope } from '../workflow/source-service.js'
 
 type GoalBinding = { id: string; contextGroupId: string | null; contextProjectId: string | null; authoringAuthority: AuthoringAuthority }
 type StoredAuthority = {
@@ -263,6 +264,8 @@ async function resolveWorkflowRunSnapshot(params: {
 
 /** Each advance owns a sticky lease, shared by its parallel steps and nested tools. */
 export async function resolveWorkflowRunScope(params: Parameters<typeof resolveWorkflowRunSnapshot>[0], client?: PoolClient) {
+  if(!client){const service=await resolveSourceServiceWorkflowScope(params);if(service)return service}
+  else if((await client.query("SELECT 1 FROM source_service_bindings WHERE workflow_id=$1 AND status<>'revoked'",[params.run.workflowId])).rowCount)throw unavailable()
   let policyCurrent: () => Promise<boolean>
   try {
     // A supplied owner transaction already has the private metadata privilege.

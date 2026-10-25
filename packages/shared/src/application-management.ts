@@ -24,6 +24,11 @@ export type ApplicationManagementCommand =
  | {kind:'grant.review';appId:string;input:ApplicationGrantInput}
  | {kind:'grant.apply';appId:string;reviewId:string}
  | {kind:'grant.revoke';appId:string;grantId:string}
+ | {kind:'source.profile.review';appId:string;input:{instanceId:string;tenant:string;audience:string;recordId:string;fields:string[]}}
+ | {kind:'source.profile.apply';appId:string;reviewId:string}
+ | {kind:'source.binding.revoke';appId:string;bindingId:string}
+ | {kind:'source.binding.review';appId:string;input:{profileId:string;credentialId:string;workflowId?:string;expiresAt:string}}
+ | {kind:'source.binding.apply';appId:string;reviewId:string}
  | {kind:'service.prepare';appId:string;input:{name:string;idempotencyKey:string}}
  | {kind:'credential.review';appId:string;input:{name:string;kind:'service'|'delegated';serviceUserId:string;grantIds:string[];expiresAt:string}}
  | {kind:'credential.deliver';appId:string;reviewId:string}

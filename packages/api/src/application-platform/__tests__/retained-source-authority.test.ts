@@ -3,7 +3,7 @@ import { beforeEach, describe, expect, it, vi } from 'vitest'
 import { createExecutionContext, type ScopeSource } from '@use-brian/core'
 import type { PoolClient } from 'pg'
 import { SOURCE_PROTOCOL_VERSION, type SourceAuthorizationRequest } from '@use-brian/brian-app/connector'
-vi.mock('../../db/client.js', () => ({ getPool: vi.fn() }))
+vi.mock('../../db/client.js', () => ({ query: async () => { throw new Error('Unexpected direct database query in retained-source-authority fixture') }, getPool: vi.fn() }))
 vi.mock('../source-store.js', () => ({ pinExternalSourceOperation: vi.fn(async () => {}), activatePinnedExternalSourceOperation: vi.fn(async () => {}), resolveNativeSourceRecipientCeiling: vi.fn() }))
 import { getPool } from '../../db/client.js'
 import { activatePinnedExternalSourceOperation, pinExternalSourceOperation, resolveNativeSourceRecipientCeiling } from '../source-store.js'

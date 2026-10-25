@@ -51,7 +51,7 @@ function denied(): never { throw new SourceProtocolError('source_access_denied')
 function unavailable(): never { throw new SourceProtocolError('source_unavailable') }
 
 export function createSourceAccessClient(execution: ExecutionContext, rawProfile: SourceAccessProfile,
-  ports: ConnectorActorMintingPorts, options: { headers: Record<string, string>; fetch?: FetchLike; now?: () => number }): SourceAccessClient {
+  ports: ConnectorActorMintingPorts, options: { headers: Record<string, string>; fetch?: FetchLike; now?: () => number; authorizeRequest?: (request: SourceAuthorizationRequest) => Promise<void> }): SourceAccessClient {
   const profile = structuredClone(rawProfile), headers = { ...options.headers }, now = options.now ?? Date.now
   const base = new URL(profile.sourceBaseUrl), mcp = new URL(profile.mcpUrl)
   const protectedTransport = (url: URL) => url.protocol === 'https:' || url.protocol === 'http:' && ['127.0.0.1','[::1]'].includes(url.hostname)
@@ -113,11 +113,24 @@ export function createSourceAccessClient(execution: ExecutionContext, rawProfile
         || resource.retention.mode !== retentionMode || resource.retention.mode === 'released_snapshot' && resource.retention.expiresAt <= now()) denied()
     }
     const proof = await client.authorize({ version: SOURCE_PROTOCOL_VERSION, operationId: randomUUID(),
-      items: envelope.resources.map(item => ({ itemId: randomUUID(), resource: item.resource, fields: item.fields, action: 'context', retentionMode })),
+      items: envelope.resources.map(item => ({ itemId: randomUUID(), resource: item.resource, fields: item.fields, action: 'context', retentionMode,
+        ...(item.retention.mode === 'released_snapshot' ? { release: { id: item.retention.releaseId, expiresAt: item.retention.expiresAt } } : {}) })),
       recipients: [{ recipientId: randomUUID(), subject: profile.subject }] })
     const display = structuredClone(result); delete display._meta
     const read: TrustedSourceRead = { result: display }; sourceReads.set(read, { execution, envelope, proof })
     return read
+  }
+  function intentFetch(send:FetchLike,intent:Record<string,unknown>):FetchLike {
+    return async(url,init={})=>{
+      if(typeof init.body==='string'){
+        const body=JSON.parse(init.body)
+        if(body.method==='tools/call'){
+          body.params={...body.params,_meta:{...body.params?._meta,[SOURCE_PROTOCOL_VERSION]:intent}}
+          return send(url,{...init,body:JSON.stringify(body)})
+        }
+      }
+      return send(url,init)
+    }
   }
   const client: SourceAccessClient = {
     async capabilities() {
@@ -130,12 +143,15 @@ export function createSourceAccessClient(execution: ExecutionContext, rawProfile
       return boundary(profile.mcpUrl, send => discoverMcpServer(profile.mcpUrl, name, headers, send))
     },
     async authorize(raw) {
-      const request = parseSourceAuthorizationRequest(raw), rawResponse = await post('authorize', request)
+      const request = parseSourceAuthorizationRequest(raw)
+      await options.authorizeRequest?.(request)
+      const rawResponse = await post('authorize', request)
       const response = requireSourceAuthorization(rawResponse as SourceAuthorizationResponse, request, profile.tenant, now())
       const proof = { request, response, requestDigest: sourceAuthorizationDigest(request) }
       const saved = structuredClone(proof)
       sourceProofs.set(proof, { execution, profile, proof: saved, assertCurrent: async () => {
         await execution.security.authority.assertCurrent()
+        await options.authorizeRequest?.(saved.request)
         if (execution.lifecycle.abortSignal.aborted || !await minting.admit(execution, profile)) denied()
         requireSourceAuthorization(saved.response, saved.request, profile.tenant, now())
       } })
@@ -143,13 +159,19 @@ export function createSourceAccessClient(execution: ExecutionContext, rawProfile
     },
     async reconcile(raw) {
       const request = parseSourceReconcileRequest(raw)
-      try { return parseSourceReconcileResponse(await post('reconcile', request), profile.tenant) }
+      try {
+        const result=parseSourceReconcileResponse(await post('reconcile', request), profile.tenant)
+        if(request.effectDigest && result.state==='applied' && result.effectDigest!==request.effectDigest)throw new SourceProtocolError('source_effect_uncertain')
+        return result
+      }
       catch (error) { if (error instanceof SourceProtocolError && error.code === 'source_access_denied') throw error; throw new SourceProtocolError('source_effect_uncertain') }
     },
     async readMcp(tool, input, retentionMode = 'governed') {
       const capabilities = await client.capabilities()
       if (!capabilities.retentionModes.includes(retentionMode)) denied()
-      const result = await boundary(profile.mcpUrl, send => callRemoteMcpToolEnvelope(profile.mcpUrl, tool, input, headers, send))
+      const catalog=await client.discoverMcp('Protected source read')
+      if(!catalog.tools.some(candidate=>candidate.name===tool&&candidate.readOnlyHint===true))denied()
+      const result = await boundary(profile.mcpUrl, send => callRemoteMcpToolEnvelope(profile.mcpUrl, tool, input, headers, intentFetch(send,{intent:'read'})))
       if (result.isError) unavailable()
       // Reserved evidence stays out of display/model input. The trusted binding survives only object identity.
       return admittedRead(result, result._meta?.[SOURCE_PROTOCOL_VERSION], retentionMode)

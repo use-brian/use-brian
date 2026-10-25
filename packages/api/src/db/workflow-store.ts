@@ -1,3 +1,4 @@
+import { persistSourceServiceWorkflowOutput } from '../workflow/source-service.js'
 import { prepareScheduleEdit, applyScheduleEdit, scheduleEditRow } from '../workspace-access/workflow-schedule-edit.js'
 import { insertWorkflowScheduleJob } from './job-store.js'
 import { isDeepStrictEqual } from 'node:util'
@@ -1017,6 +1018,9 @@ export function createDbWorkflowRunStore(): WorkflowRunStore {
       return rowToStepRun(result.rows[0])
     },
     async updateStepRun(id, fields) {
+      if(fields.output&&await persistSourceServiceWorkflowOutput(id,fields.output)){
+        const persisted=await query<StepRunRow>(`SELECT ${STEP_RUN_SELECT} FROM workflow_step_runs WHERE id=$1`,[id]);return persisted.rows[0]?rowToStepRun(persisted.rows[0]):null
+      }
       const sets: string[] = []
       const values: unknown[] = []
       let idx = 1

@@ -23,6 +23,7 @@
  */
 
 import { Router } from 'express'
+import {admitScopedSourceWorkflowStart} from '../workflow/source-service.js'
 import { WorkspaceAccessError } from '../workspace-access/policy.js'
 import { mountWorkflowPublicationRoutes } from './workflow-publication.js'
 import { mountRoutineIntakeRoutes } from './routine-intake.js'
@@ -1027,6 +1028,9 @@ export function workflowsRoutes(opts: WorkflowsRouteOptions): Router {
     if (!workflow) return notFound(res, 'Workflow not found')
     if (!workflow.enabled) return badRequest(res, 'Workflow is disabled')
 
+    let scopedStart:Awaited<ReturnType<typeof admitScopedSourceWorkflowStart>>
+    try {scopedStart=await admitScopedSourceWorkflowStart(userId,workflow.workspaceId,workflow.id)}
+    catch {return res.status(403).json({error:'source_service_unavailable'})}
     const run = await opts.runStore.createRun({
       workflowId: workflow.id,
       workspaceId: workflow.workspaceId,
@@ -1039,6 +1043,7 @@ export function workflowsRoutes(opts: WorkflowsRouteOptions): Router {
     const steps = await opts.runStore.listStepRuns(userId, run.id)
     const readable = await opts.runStore.getRunById(userId, run.id)
     if (!readable || readable.workflowId !== workflow.id || readable.workspaceId !== workflow.workspaceId) {
+      if(scopedStart)return res.status(202).json({accepted:true,effect:'committed',runId:run.id,outputUnavailable:true})
       return res.status(409).json({ error: 'run_result_unavailable', operationMayHaveExecuted: true })
     }
 

@@ -393,7 +393,7 @@ describe.sequential('[COMP:api/external-source-access] independent persisted sou
         await expect(retainedCoordinator.prepare(two.execution, [retainedDerivative!], 'context')).rejects.toMatchObject({ code: 'source_access_denied' })
       } finally { await writer.query('ROLLBACK'); writer.release() }
       for (const table of ['external_source_resources','external_source_observations','external_source_authorizations']) {
-        expect((await queryWithRLS(first, `SELECT * FROM ${table} WHERE workspace_id=$1`, [workspace])).rows).toEqual([])
+        await expect(queryWithRLS(first, `SELECT * FROM ${table} WHERE workspace_id=$1`, [workspace])).rejects.toMatchObject({ code: '42501' })
       }
       const missing = { ...retainedSources![0], resourceId: randomUUID() }
       expect((await readCurrentScopeSources(pool, workspace, [missing])).map(row => row.state)).toEqual(['unverifiable'])

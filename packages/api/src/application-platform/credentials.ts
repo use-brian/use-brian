@@ -73,3 +73,24 @@ export async function authenticateApplicationCredential(token:string,appId:strin
 export function getAuthenticatedApplicationCredentialCurrent(auth:AuthenticatedApplicationCredential) {
   return proofs.get(auth)
 }
+
+/** Rehydrate an explicitly reviewed server-owned background reference without storing a bearer secret. */
+export async function authenticateBoundApplicationCredential(reference:import('./source-service-binding.js').SourceServiceCredentialReference):Promise<AuthenticatedApplicationCredential|null>{
+  const {getSourceServiceCredentialReference}=await import('./source-service-binding.js')
+  const {loadApplicationCredentialStateSystem}=await import('./auth-store.js')
+  const binding=getSourceServiceCredentialReference(reference)
+  if(!binding)return null
+  await binding.assertCurrent()
+  const initial=await loadApplicationCredentialStateSystem(binding.row.credentialId)
+  if(!live(initial,binding.row.appId,Date.now())||initial.credentialKind!=='service'||initial.subjectUserId!==binding.row.serviceUserId)return null
+  const snapshot=structuredClone(initial)
+  const auth:AuthenticatedApplicationCredential=Object.freeze({credentialId:initial.id,appId:initial.appId,workspaceId:initial.workspaceId,serviceUserId:initial.subjectUserId,
+    issuerUserId:initial.issuerUserId,credentialKind:initial.credentialKind,credentialVersion:initial.version,applicationRevision:initial.clientRevision})
+  proofs.set(auth,async()=>{
+    await binding.assertCurrent()
+    const fresh=await loadApplicationCredentialStateSystem(initial.id)
+    if(!live(fresh,binding.row.appId,Date.now())||!sameCredential(snapshot,fresh))return null
+    const {secretHash:_secretHash,...metadata}=fresh;return structuredClone(metadata)
+  })
+  await binding.assertCurrent();return auth
+}

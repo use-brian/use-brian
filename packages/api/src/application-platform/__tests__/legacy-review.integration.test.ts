@@ -166,9 +166,9 @@ describe.sequential('[COMP:api/application-legacy-review] retained pending recov
  },120_000)
  afterAll(async()=>{for(const value of pools)await close(value);await fixture?.dispose();expect(poolFailures).toEqual([])})
  it('installs once as the ordinary owner, changes exactly two ACLs and preserves all data',async()=>{
-  expect(callbackCount).toBe(1);expect(copyApplied).toBe(3);expect(prerequisiteRejections).toBe(12);expect(await roleIdentity(owner)).toEqual(ordinaryIdentity)
+  expect(callbackCount).toBe(1);expect(copyApplied).toBe(4);expect(prerequisiteRejections).toBe(12);expect(await roleIdentity(owner)).toEqual(ordinaryIdentity)
   expect(await roleIdentity(app)).toEqual({current_user:'app_user',session_user:'app_user',rolsuper:false,rolbypassrls:false,rolinherit:false,memberships:0,owns_reviews:0})
-  expect((await owner.query('SELECT name FROM _migrations WHERE name=ANY($1::text[]) ORDER BY name',[[boundary,'8122_application_native_module_availability.sql','8123_native_task_review_classification.sql']])).rows).toEqual([{name:boundary},{name:'8122_application_native_module_availability.sql'},{name:'8123_native_task_review_classification.sql'}])
+  expect((await owner.query('SELECT name FROM _migrations WHERE name=ANY($1::text[]) ORDER BY name',[[boundary,'8122_application_native_module_availability.sql','8123_native_task_review_classification.sql','8124_application_source_host_retirement.sql']])).rows).toEqual([{name:boundary},{name:'8122_application_native_module_availability.sql'},{name:'8123_native_task_review_classification.sql'},{name:'8124_application_source_host_retirement.sql'}])
   expect((await owner.query('SELECT count(*)::int AS n FROM _migrations WHERE name=$1',[boundary])).rows[0].n).toBe(1)
   expect(await data()).toEqual(beforeData)
   expect((await migrateCopy()).appliedCount).toBe(0)

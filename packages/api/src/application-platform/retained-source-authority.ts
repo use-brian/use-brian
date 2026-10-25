@@ -5,6 +5,7 @@ import { ContextScopeAccumulator, resourceScopeKey, scopeGrantContains, type Exe
 import { SOURCE_PROTOCOL_VERSION, SourceProtocolError, sourceSubjectKey, sourceResourceKey,
   type SourceAction, type SourceObservation, type SourceSubject } from '@use-brian/brian-app/connector'
 import { getPool } from '../db/client.js'
+import { getSourceServiceExecutionBinding,sourceServiceSubject } from './source-service-binding.js'
 import { readExternalSourceAncestors } from './external-source-ancestry.js'
 import { validateCallerScopeEvidence } from '../context-scope/caller-evidence.js'
 import type { ConnectorInstanceStore } from '../db/connector-instance-store.js'
@@ -60,7 +61,7 @@ export function createRetainedSourceAuthorityCoordinator(options: { factory: Con
     async prepare(execution: ExecutionContext, rawSources: readonly ScopeSource[], action: SourceAction, rawRecipients?: readonly SourceSubject[]): Promise<PreparedExternalSourceAuthority> {
       await execution.security.authority.assertCurrent()
       const workspaceId = execution.security.access.workspaceId
-      if (!workspaceId || execution.identity.kind !== 'attended' || execution.identity.principal.kind !== 'workspace_member') denied()
+      if (!workspaceId || !getSourceServiceExecutionBinding(execution) && (execution.identity.kind !== 'attended' || execution.identity.principal.kind !== 'workspace_member')) denied()
       const roots = structuredClone(rawSources)
       if (roots.some(source => source.workspaceId !== workspaceId)) denied()
       const nativeRoots = roots.filter(source => source.resourceKind !== 'external_source')
@@ -82,7 +83,7 @@ export function createRetainedSourceAuthorityCoordinator(options: { factory: Con
         if (previous && (previous.version !== source.version || resourceScopeKey(previous) !== resourceScopeKey(source))) denied()
         unique.set(source.resourceId, source)
       }
-      const recipients = structuredClone(rawRecipients ?? [{ kind: 'human' as const, id: execution.security.access.userId, executingAssistantId: execution.assistant.id }])
+      const recipients = structuredClone(rawRecipients ?? [sourceServiceSubject(execution)??{ kind: 'human' as const, id: execution.security.access.userId, executingAssistantId: execution.assistant.id }])
       if (!recipients.length || recipients.length > 100 || new Set(recipients.map(sourceSubjectKey)).size !== recipients.length) denied()
       const operationId = randomUUID(), batches: ProofBatch[] = [], list = [...unique.values()]
       const groups = new Map<string, { instanceId: string; values: Array<{ source: ScopeSource; observation: SourceObservation }> }>()
@@ -97,7 +98,7 @@ export function createRetainedSourceAuthorityCoordinator(options: { factory: Con
         if (rows.length !== part.length) denied()
         for (const source of part) {
           const row = rows.find(row => row.id === source.resourceId)
-          if (!row || row.version !== source.version || !row.instanceId || row.observation.retention.mode !== 'governed'
+          if (!row || row.version !== source.version || !row.instanceId || row.observation.retention.mode === 'ephemeral'
             || resourceScopeKey(source) !== resourceScopeKey({ workspaceId, userId: null, assistantId: null,
               sensitivity: row.sensitivity, compartments: row.compartments, projectIds: row.projectIds })) denied()
           const group = groups.get(row.profileId) ?? { instanceId: row.instanceId, values: [] }
@@ -109,7 +110,7 @@ export function createRetainedSourceAuthorityCoordinator(options: { factory: Con
         const floor = new ContextScopeAccumulator({ sources: [...roots,...list] }).evidence
         const labels = { sensitivity: floor.sensitivity, compartments: floor.compartments, projectIds: floor.projectIds }
         const ceilings = [execution.security.ceiling]
-        for (const subject of recipients) ceilings.push(await resolveNativeSourceRecipientCeiling(subject, workspaceId))
+        for (const subject of recipients) ceilings.push(await resolveNativeSourceRecipientCeiling(subject, workspaceId,execution))
         for (const ceiling of ceilings) {
           if (roots.some(source => source.userId !== null && source.userId !== ceiling.userId
             || source.assistantId !== null && !scopeGrantContains(ceiling.visibilityAssistantIds, [source.assistantId]))) denied()
@@ -128,7 +129,8 @@ export function createRetainedSourceAuthorityCoordinator(options: { factory: Con
           const observations = new Map(part.map(({ observation }) => [JSON.stringify([sourceResourceKey(observation.resource), [...observation.fields].sort()]), observation]))
           const proof = await runtime.authorize({ version: SOURCE_PROTOCOL_VERSION, operationId,
             items: [...observations.values()].flatMap(observation => (action === 'retain' ? ['derive','retain'] as const : [action]).map(requested => ({
-              itemId: randomUUID(), resource: observation.resource, fields: observation.fields, action: requested, retentionMode: 'governed' as const }))),
+              itemId: randomUUID(), resource: observation.resource, fields: observation.fields, action: requested, retentionMode: observation.retention.mode,
+              ...(observation.retention.mode === 'released_snapshot' ? { release: { id: observation.retention.releaseId, expiresAt: observation.retention.expiresAt } } : {}) }))),
             recipients: recipients.map(subject => ({ recipientId: randomUUID(), subject })) })
           batches.push({ proof, sources: part.map(({ source }) => source) })
         }

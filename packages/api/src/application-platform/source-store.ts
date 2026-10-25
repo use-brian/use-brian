@@ -5,6 +5,8 @@ import { bindScopeSource, ContextScopeAccumulator, intersectAccessCeilings, maxS
   type ExecutionContext, type ScopeSource } from '@use-brian/core'
 import { SourceProtocolError, sourceResourceKey, sourceSubjectKey, type SourceAction, type SourceObservation, type SourceSubject } from '@use-brian/brian-app/connector'
 import { getPool } from '../db/client.js'
+import { getApplicationTransactionBinding } from './execution-context.js'
+import { getSourceServiceExecutionBinding,assertSourceServiceScope } from './source-service-binding.js'
 import { findAssistantById } from '../db/users.js'
 import { getWorkspaceRoleSystem } from '../db/workspace-store.js'
 import { resolveConnectorNativeTurnScopeSystem } from '../context-scope/connector-exposure.js'
@@ -12,9 +14,9 @@ import { validateCallerScopeEvidence } from '../context-scope/caller-evidence.js
 import { trustedSourceOperationProof, trustedSourceReadBinding, type SourceOperationProof, type SourceAccessProfile, type TrustedSourceRead } from './source-access.js'
 
 function denied(): never { throw new SourceProtocolError('source_access_denied') }
-type Profile = { id: string; revision: string; sensitivity: 'public' | 'internal' | 'confidential'; compartments: string[]; projectIds: string[] }
-async function profileFor(binding: SourceAccessProfile): Promise<Profile> {
-  const { rows } = await getPool().query<Profile>(`SELECT p.id,p.revision::text,ci.sensitivity,
+type Profile = { scopedAppId:string|null; id: string; revision: string; sensitivity: 'public' | 'internal' | 'confidential'; compartments: string[]; projectIds: string[] }
+async function profileFor(binding: SourceAccessProfile,execution:ExecutionContext): Promise<Profile> {
+  const { rows } = await getPool().query<Profile>(`SELECT p.scoped_app_id AS "scopedAppId",p.id,p.revision::text,ci.sensitivity,
     CASE WHEN ci.scope='workspace' THEN ci.compartments ELSE g.compartments END AS compartments,
     CASE WHEN ci.scope='workspace' THEN ci.project_ids ELSE g.project_ids END AS "projectIds"
     FROM connector_source_profiles p JOIN connector_instance ci ON ci.id=p.connector_instance_id
@@ -24,6 +26,8 @@ async function profileFor(binding: SourceAccessProfile): Promise<Profile> {
       AND p.http_read_path IS NOT DISTINCT FROM $9 AND ci.url=p.mcp_url AND ci.connected AND ci.health_status<>'auth_failed'
       AND (ci.scope='workspace' AND ci.workspace_id=p.workspace_id OR ci.scope='user' AND g.id IS NOT NULL)`,
   [binding.workspaceId,binding.connectorInstanceId,binding.tenant,binding.bindingRevision,binding.issuer,binding.audience,binding.sourceBaseUrl,binding.mcpUrl,binding.httpReadPath ?? null])
+  const service=getSourceServiceExecutionBinding(execution)
+  if(rows[0]?.scopedAppId&&(!service||service.row.appId!==rows[0].scopedAppId))denied()
   if (rows.length !== 1 || !Array.isArray(rows[0].compartments) || !Array.isArray(rows[0].projectIds)) denied()
   return rows[0]
 }
@@ -35,7 +39,12 @@ function normalized(observation: SourceObservation): SourceObservation {
     retention: observation.retention.mode === 'released_snapshot' ? { mode: 'released_snapshot', releaseId: observation.retention.releaseId, expiresAt: observation.retention.expiresAt }
       : { mode: observation.retention.mode }, export: { model: observation.export.model, destinations: [...observation.export.destinations].sort() } }
 }
-export async function resolveNativeSourceRecipientCeiling(subject: SourceSubject, workspaceId: string) {
+export async function resolveNativeSourceRecipientCeiling(subject: SourceSubject, workspaceId: string, execution?:ExecutionContext) {
+  if(subject.kind==='service'){
+    const binding=execution&&getSourceServiceExecutionBinding(execution)
+    if(!binding||binding.row.workspaceId!==workspaceId||binding.row.serviceUserId!==subject.id||binding.row.assistantId!==subject.executingAssistantId)denied()
+    await binding.assertCurrent();return pinAccessCeiling(execution!.security.access)
+  }
   if (subject.kind !== 'human' || await getWorkspaceRoleSystem(subject.id, workspaceId, true) === null) denied()
   const assistant = await findAssistantById(subject.executingAssistantId)
   if (!assistant || assistant.workspaceId !== workspaceId) denied()
@@ -47,9 +56,11 @@ export async function resolveNativeSourceRecipientCeiling(subject: SourceSubject
 export async function pinExternalSourceOperation(client: PoolClient, execution: ExecutionContext, proof: SourceOperationProof,
   sources: readonly ScopeSource[], action: SourceAction): Promise<void> {
   const binding = trustedSourceOperationProof(proof, execution)
-  if (!binding || execution.identity.kind !== 'attended' || sources.length === 0 || sources.length > 100) denied()
+  if (!binding || execution.identity.kind !== 'attended' && !getSourceServiceExecutionBinding(execution) || sources.length === 0 || sources.length > 100) denied()
   await binding.assertCurrent()
-  const profile = await profileFor(binding.profile)
+  const profile = await profileFor(binding.profile,execution)
+  const service=getSourceServiceExecutionBinding(execution)
+  if(service&&(!getApplicationTransactionBinding(client)||service.row.profileId!==profile.id))denied()
   const fingerprint = (await getPool().query<{ value: string | null }>('SELECT external_source_authority_fingerprint($1,$2) AS value',
     [binding.profile.workspaceId,profile.id])).rows[0]?.value
   if (!fingerprint) denied()
@@ -65,12 +76,14 @@ export async function pinExternalSourceOperation(client: PoolClient, execution: 
     [source.workspaceId,source.resourceId,source.version,profile.id])).rows[0]
     if (!row || !row.observation.actions.includes(action)) denied()
     const item = request.items.find(item => item.action === action && sourceResourceKey(item.resource) === sourceResourceKey(row.observation.resource)
-      && row.observation.fields.every(field => item.fields.includes(field)) && item.retentionMode === row.observation.retention.mode)
+      && row.observation.fields.every(field => item.fields.includes(field)) && item.retentionMode === row.observation.retention.mode
+      && (row.observation.retention.mode !== 'released_snapshot' || item.release?.id === row.observation.retention.releaseId && item.release.expiresAt === row.observation.retention.expiresAt))
     if (!item) denied()
     const deriveItem = action === 'retain' ? request.items.find(candidate => candidate.action === 'derive'
       && sourceResourceKey(candidate.resource) === sourceResourceKey(row.observation.resource)
-      && row.observation.fields.every(field => candidate.fields.includes(field)) && candidate.retentionMode === row.observation.retention.mode) : undefined
-    if (action === 'retain' && (!deriveItem || !row.observation.actions.includes('derive') || row.observation.retention.mode !== 'governed')) denied()
+      && row.observation.fields.every(field => candidate.fields.includes(field)) && candidate.retentionMode === row.observation.retention.mode
+      && (row.observation.retention.mode !== 'released_snapshot' || candidate.release?.id === row.observation.retention.releaseId && candidate.release.expiresAt === row.observation.retention.expiresAt)) : undefined
+    if (action === 'retain' && (!deriveItem || !row.observation.actions.includes('derive') || row.observation.retention.mode === 'ephemeral')) denied()
     if (action === 'retain' && row.observation.retention.mode === 'ephemeral') denied()
     if (row.observation.retention.mode === 'released_snapshot' && row.observation.retention.expiresAt <= Date.now()) denied()
     for (const recipient of request.recipients) {
@@ -79,16 +92,17 @@ export async function pinExternalSourceOperation(client: PoolClient, execution: 
       const deriveDecision = deriveItem ? response.decisions.find(value => value.itemId === deriveItem.itemId && value.recipientId === recipient.recipientId) : undefined
       if (deriveItem && !deriveDecision?.allowed) denied()
       const deriveReceipt = deriveDecision?.allowed ? deriveDecision.receipt : undefined
-      const recipientCeiling = await resolveNativeSourceRecipientCeiling(recipient.subject, source.workspaceId)
+      const recipientCeiling = await resolveNativeSourceRecipientCeiling(recipient.subject, source.workspaceId,execution)
+      if(service)await assertSourceServiceScope(execution,source)
       await validateCallerScopeEvidence({ sensitivity: source.sensitivity, compartments: source.compartments, projectIds: source.projectIds }, recipientCeiling)
       await getPool().query(`INSERT INTO external_source_authorizations(workspace_id,observation_id,profile_id,profile_revision,resource_revision,
         operation_id,request_digest,transaction_id,backend_pid,actor_kind,actor_id,assistant_id,recipient_kind,recipient_id,recipient_assistant_id,
-        action,source_receipt,authority_fingerprint,expires_at,derivation_receipt)
-        SELECT $1,$2,$3,$4,$5,$6,$7,$8::xid8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$19,$18,$20
+        action,source_receipt,authority_fingerprint,expires_at,derivation_receipt,service_binding_id,service_binding_revision,service_authority_fingerprint)
+        SELECT $1,$2,$3,$4,$5,$6,$7,$8::xid8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$19,$18,$20,$21,$22,$23
         WHERE external_source_authority_fingerprint($1,$3)=$19`,
       [source.workspaceId,row.id,profile.id,profile.revision,row.resourceRevision,request.operationId,requestDigest,transaction.xid,transaction.pid,
         binding.profile.subject.kind,execution.security.access.userId,execution.assistant.id,recipient.subject.kind,recipient.subject.id,recipient.subject.executingAssistantId,
-        action,decision.receipt.id,new Date(Math.min(decision.receipt.expiresAt,deriveReceipt?.expiresAt ?? Infinity)),fingerprint,deriveReceipt?.id ?? null])
+        action,decision.receipt.id,new Date(Math.min(decision.receipt.expiresAt,deriveReceipt?.expiresAt ?? Infinity)),fingerprint,deriveReceipt?.id ?? null,service?.row.id??null,service?.row.revision??null,service?.row.authorityFingerprint??null])
     }
   }
   await activatePinnedExternalSourceOperation(client, execution, proof, sources, action)
@@ -97,17 +111,18 @@ export async function pinExternalSourceOperation(client: PoolClient, execution: 
 /** Metadata is persisted/bound before any tool display conversion; every field observation enters the accumulator. */
 export async function bindTrustedSourceRead(client: PoolClient, execution: ExecutionContext, read: TrustedSourceRead, accumulator: ContextScopeAccumulator) {
   const binding = trustedSourceReadBinding(read, execution)
-  if (!binding || !(accumulator instanceof ContextScopeAccumulator) || binding.envelope.resources.some(resource => resource.retention.mode !== 'governed')) denied()
+  if (!binding || !(accumulator instanceof ContextScopeAccumulator) || binding.envelope.resources.some(resource => resource.retention.mode === 'ephemeral')) denied()
   const proof = trustedSourceOperationProof(binding.proof, execution)
   if (!proof) denied()
   await proof.assertCurrent()
-  const profile = await profileFor(proof.profile)
+  const profile = await profileFor(proof.profile,execution)
   // Native lane now; explicit bounded application-source releases must qualify separately before activation.
-  const ceiling = intersectAccessCeilings(execution.security.ceiling, await resolveNativeSourceRecipientCeiling(proof.profile.subject, proof.profile.workspaceId)), sources: ScopeSource[] = []
+  const ceiling = intersectAccessCeilings(execution.security.ceiling, await resolveNativeSourceRecipientCeiling(proof.profile.subject, proof.profile.workspaceId,execution)), sources: ScopeSource[] = []
   for (const raw of binding.envelope.resources) {
     const observation = normalized(raw), sensitivity = maxSensitivity(profile.sensitivity, observation.labels.sensitivity)
     const compartments = [...new Set([...profile.compartments,...observation.labels.compartments])].sort(), projectIds = [...new Set([...profile.projectIds,...observation.labels.projectIds])].sort()
     await validateCallerScopeEvidence({ sensitivity, compartments, projectIds }, ceiling)
+    if(getSourceServiceExecutionBinding(execution))await assertSourceServiceScope(execution,{sensitivity,compartments,projectIds})
     const identity = (await getPool().query<{ id: string; state: string }>(`INSERT INTO external_source_resources(workspace_id,profile_id,resource_type,opaque_id)
       VALUES($1,$2,$3,$4) ON CONFLICT(profile_id,resource_type,opaque_id) DO NOTHING RETURNING id,state`,
     [proof.profile.workspaceId,profile.id,observation.resource.type,observation.resource.id])).rows[0]
@@ -133,23 +148,27 @@ export async function bindTrustedSourceRead(client: PoolClient, execution: Execu
 export async function activatePinnedExternalSourceOperation(client: PoolClient, execution: ExecutionContext, proof: SourceOperationProof,
   sources: readonly ScopeSource[], action: SourceAction): Promise<void> {
   const binding = trustedSourceOperationProof(proof, execution)
-  if (!binding || execution.identity.kind !== 'attended' || sources.length === 0 || sources.length > 100
+  if (!binding || execution.identity.kind !== 'attended' && !getSourceServiceExecutionBinding(execution) || sources.length === 0 || sources.length > 100
     || sources.some(source => source.workspaceId !== binding.profile.workspaceId || source.resourceKind !== 'external_source')) denied()
   await binding.assertCurrent()
   const transaction = (await client.query<{ xid: string; pid: number; actor: string }>(`SELECT pg_current_xact_id()::text AS xid,pg_backend_pid() AS pid,
     nullif(current_setting('app.current_user_id',true),'') AS actor`)).rows[0]
   if (transaction?.actor !== execution.security.access.userId) denied()
   const { request, requestDigest } = binding.proof
+  const service=getSourceServiceExecutionBinding(execution)
+  if(service&&!getApplicationTransactionBinding(client))denied()
   const receipts = (await getPool().query<{ id: string }>(`SELECT DISTINCT observation_id AS id FROM external_source_authorizations
     WHERE workspace_id=$1 AND observation_id=ANY($2::uuid[]) AND operation_id=$3 AND request_digest=$4 AND action=$5
       AND transaction_id=$6::xid8 AND backend_pid=$7 AND actor_kind=$8 AND actor_id=$9 AND assistant_id=$10
-      AND recipient_kind=$8 AND recipient_id=$9 AND recipient_assistant_id=$10 AND expires_at>clock_timestamp()`,
+      AND recipient_kind=$8 AND recipient_id=$9 AND recipient_assistant_id=$10 AND expires_at>clock_timestamp()
+      AND service_binding_id IS NOT DISTINCT FROM $11::uuid AND service_binding_revision IS NOT DISTINCT FROM $12::bigint
+      AND service_authority_fingerprint IS NOT DISTINCT FROM $13`,
   [binding.profile.workspaceId,sources.map(source => source.resourceId),request.operationId,requestDigest,action,transaction.xid,transaction.pid,
-    binding.profile.subject.kind,execution.security.access.userId,execution.assistant.id])).rows
+    binding.profile.subject.kind,execution.security.access.userId,execution.assistant.id,service?.row.id??null,service?.row.revision??null,service?.row.authorityFingerprint??null])).rows
   if (sources.some(source => !receipts.some(receipt => receipt.id === source.resourceId))) denied()
   await client.query(`SELECT set_config('app.external_source_operation_id',$1,true),set_config('app.external_source_actor_id',$2,true),
-    set_config('app.external_source_assistant_id',$3,true),set_config('app.external_source_action',$4,true),set_config('app.v2_assistant_id',$3,true)`,
-  [request.operationId,execution.security.access.userId,execution.assistant.id,action])
+    set_config('app.external_source_assistant_id',$3,true),set_config('app.external_source_action',$4,true),set_config('app.v2_assistant_id',$3,true),set_config('app.external_source_service_binding_id',$5,true)`,
+  [request.operationId,execution.security.access.userId,execution.assistant.id,action,service?.row.id??''])
   const current = await client.query<{ snapshot: ScopeSource & { held: boolean } | null }>(`SELECT external_source_snapshot($1,id) AS snapshot FROM unnest($2::uuid[]) AS id`,
     [binding.profile.workspaceId,sources.map(source => source.resourceId)])
   if (current.rows.length !== sources.length || current.rows.some((row,index) => !row.snapshot || row.snapshot.held || row.snapshot.version !== sources[index].version

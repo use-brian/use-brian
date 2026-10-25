@@ -1,7 +1,10 @@
 import {applicationLegacyViewInput,applicationLegacyApplyInput,executeApplicationLegacyReview,type ApplicationLegacyCommand} from './legacy-review.js'
+import {prepareApplicationSourceSetup,applyApplicationSourceSetup,sourceSetupInput} from './source-onboarding.js'
+import { SourceProtocolError } from '@use-brian/brian-app/connector'
 /** Native app preparation and recovery; registration confers no data rights. [COMP:api/application-auth] */
 import type { Pool, PoolClient } from 'pg'
 import type { ApplicationManagementOverview } from '@use-brian/shared'
+import { prepareSourceServiceBinding,activateSourceServiceBinding,prepareExternalSourceGrantRelease } from './source-service-binding.js'
 import { projectionLifetime } from '../workspace-access/projection-lifetime.js'
 import { createDbDocEntityStore } from '../db/doc-entity-store.js'
 import { randomUUID } from 'node:crypto'
@@ -38,6 +41,11 @@ export const applicationManagementCommandSchema = z.discriminatedUnion('kind', [
  z.object({kind:z.literal('grant.review'),appId:z.string().uuid(),input:applicationGrantInputSchema}).strict(),
  z.object({kind:z.literal('grant.apply'),appId:z.string().uuid(),reviewId:z.string().uuid()}).strict(),
  z.object({kind:z.literal('grant.revoke'),appId:z.string().uuid(),grantId:z.string().uuid()}).strict(),
+ z.object({kind:z.literal('source.profile.review'),appId:z.string().uuid(),input:sourceSetupInput}).strict(),
+ z.object({kind:z.literal('source.profile.apply'),appId:z.string().uuid(),reviewId:z.string().uuid()}).strict(),
+ z.object({kind:z.literal('source.binding.revoke'),appId:z.string().uuid(),bindingId:z.string().uuid()}).strict(),
+ z.object({kind:z.literal('source.binding.review'),appId:z.string().uuid(),input:z.object({profileId:z.string().uuid(),credentialId:z.string().uuid(),workflowId:z.string().uuid().optional(),expiresAt:z.string().datetime({offset:true})}).strict()}).strict(),
+ z.object({kind:z.literal('source.binding.apply'),appId:z.string().uuid(),reviewId:z.string().uuid()}).strict(),
  z.object({kind:z.literal('service.prepare'),appId:z.string().uuid(),input:z.object({name:z.string().min(1).max(128),idempotencyKey:z.string().uuid()}).strict()}).strict(),
  z.object({kind:z.literal('credential.review'),appId:z.string().uuid(),input:applicationCredentialInputSchema}).strict(),
  z.object({kind:z.literal('credential.deliver'),appId:z.string().uuid(),reviewId:z.string().uuid()}).strict(),
@@ -123,6 +131,13 @@ export class ApplicationManagementService {
       case 'grant.review':return this.reviewGrant(actorId,workspaceId,command.appId,command.input)
       case 'grant.apply':return this.applyGrantReview(actorId,workspaceId,command.appId,command.reviewId)
       case 'grant.revoke':return this.revokeGrant(actorId,workspaceId,command.appId,command.grantId)
+      case 'source.profile.review':{const execution=await this.nativeSchemaExecution(actorId,workspaceId,delivery.assistantId);return this.transaction(actorId,workspaceId,client=>prepareApplicationSourceSetup(client,execution,command.appId,command.input),true)}
+      case 'source.profile.apply':{const execution=await this.nativeSchemaExecution(actorId,workspaceId,delivery.assistantId);return this.transaction(actorId,workspaceId,client=>applyApplicationSourceSetup(client,execution,command.appId,command.reviewId),true)}
+      case 'source.binding.revoke':return this.transaction(actorId,workspaceId,async client=>({revoked:(await client.query('SELECT revoke_source_service_binding($1,$2,$3) AS value',[workspaceId,command.appId,command.bindingId])).rows[0].value}),true)
+      case 'source.binding.review':return this.transaction(actorId,workspaceId,client=>this.withReleaseAuthority(client,actorId,workspaceId,command.appId,()=>prepareSourceServiceBinding(client,actorId,workspaceId,{...command.input,appId:command.appId})),true)
+      case 'source.binding.apply':return this.transaction(actorId,workspaceId,client=>this.withReleaseAuthority(client,actorId,workspaceId,command.appId,async()=>{
+        const row=(await client.query('SELECT id FROM source_service_bindings WHERE id=$1 AND app_id=$2 AND workspace_id=$3',[command.reviewId,command.appId,workspaceId])).rows[0];if(!row)throw new ApplicationPlatformError('access_unavailable','The review is unavailable.');return activateSourceServiceBinding(client,actorId,workspaceId,command.reviewId)
+      }),true)
       case 'service.prepare':return this.prepareServiceSubject(actorId,workspaceId,command.appId,command.input)
       case 'credential.review':return this.reviewCredential(actorId,workspaceId,command.appId,command.input)
       case 'credential.deliver':{
@@ -172,7 +187,7 @@ export class ApplicationManagementService {
       return result
     } catch (error) {
       if (committing && effectful) throw new ApplicationPlatformError('outcome_uncertain', 'Check the application state before retrying.', 'uncertain')
-      if ((error as { code?: string }).code === '42501') throw new ApplicationPlatformError('access_unavailable', 'Application management is unavailable.')
+      if (error instanceof SourceProtocolError || (error as { code?: string }).code === '42501') throw new ApplicationPlatformError('access_unavailable', 'Application management is unavailable.')
       if ((error as { code?: string }).code === '40001') throw new ApplicationPlatformError('record_version_conflict', 'The reviewed authority changed. Review it again.')
       if (['22023','23514','22P02'].includes((error as { code?: string }).code ?? '')) throw new ApplicationPlatformError('invalid_value', 'The requested authority is invalid.')
       throw error
@@ -319,9 +334,10 @@ export class ApplicationManagementService {
     return this.transaction(actorId, workspaceId, client => this.withReleaseAuthority(client, actorId, workspaceId, appId, async () => {
       const app = (await client.query<{ moduleKey: string }>('SELECT module_key AS "moduleKey" FROM application_clients WHERE id=$1 AND workspace_id=$2', [appId,workspaceId])).rows[0]
       const module = app && this.applications.registry.applications.get(app.moduleKey)
-      if (!module || proposal.actions.some(action => action.startsWith('command:') && !module.commands[action.slice(8)])) {
+      if (!module || proposal.actions.some(action => action.startsWith('command:') && !module.commands[action.slice(8)] && !(proposal.origin.kind==='external'&&['command:source.derive','command:source.retain','command:source.deliver','command:source.export'].includes(action)))) {
         throw new ApplicationPlatformError('operation_not_available', 'The requested operation is unavailable.')
       }
+      if(proposal.origin.kind==='external')await prepareExternalSourceGrantRelease(client,actorId,workspaceId,appId,proposal)
       const result = await client.query<{ id: string }>('SELECT application_prepare_grant_review($1,$2) AS id', [appId, proposal])
       const review = (await client.query(`SELECT id,proposed_grant AS proposal,expires_at AS "expiresAt",
         (application_runtime_qualified(workspace_id,'application_data') OR application_scoped_grant_allowed(app_id,proposed_grant)) AS "canIssue" FROM application_grant_reviews WHERE id=$1`, [result.rows[0].id])).rows[0]
@@ -333,6 +349,9 @@ export class ApplicationManagementService {
     return this.transaction(actorId, workspaceId, client => this.withReleaseAuthority(client, actorId, workspaceId, appId, async () => {
       const review = await client.query('SELECT id FROM application_grant_reviews WHERE id=$1 AND app_id=$2 AND workspace_id=$3', [reviewId,appId,workspaceId])
       if (!review.rows[0]) throw new ApplicationPlatformError('access_unavailable', 'The review is unavailable.')
+      const saved=(await client.query<{proposal:unknown}>('SELECT proposed_grant AS proposal FROM application_grant_reviews WHERE id=$1',[reviewId])).rows[0]
+      const proposed=applicationGrantInputSchema.parse(saved?.proposal)
+      if(proposed.origin.kind==='external')await prepareExternalSourceGrantRelease(client,actorId,workspaceId,appId,proposed)
       const result = await client.query<{ id: string }>('SELECT application_apply_grant_review($1) AS id', [reviewId])
       return { grantId: result.rows[0].id }
     }), true)
@@ -365,11 +384,21 @@ export class ApplicationManagementService {
     })
   }
 
+  private async prepareCredentialSources(client:PoolClient,actorId:string,workspaceId:string,appId:string,grantIds:string[]) {
+    const rows=(await client.query<{proposal:unknown}>(`SELECT jsonb_build_object('principal',jsonb_build_object('kind',principal_kind,'userId',principal_user_id),
+      'origin',resource_origin,'typeKey',resource_type,'actions',actions,'readFields',read_fields,'writeFields',write_fields,'selector',selector,
+      'compartments',compartments,'projectIds',project_ids,'clearance',clearance,'parentGrantId',parent_grant_id,'expiresAt',expires_at) AS proposal
+      FROM application_access_grants WHERE id=ANY($1::uuid[]) AND app_id=$2 AND workspace_id=$3 AND resource_origin->>'kind'='external'`,[grantIds,appId,workspaceId])).rows
+    if(rows.length>1)throw new ApplicationPlatformError('operation_not_available','Only one governed source release is supported by this profile.')
+    for(const row of rows)await prepareExternalSourceGrantRelease(client,actorId,workspaceId,appId,applicationGrantInputSchema.parse(row.proposal))
+  }
+
   async reviewCredential(actorId: string, workspaceId: string, appId: string, rawInput: unknown) {
     const parsed = applicationCredentialInputSchema.safeParse(rawInput)
     if (!parsed.success) throw new ApplicationPlatformError('invalid_value', 'The credential proposal is invalid.')
     const proposal = { ...parsed.data, expiresAt: new Date(parsed.data.expiresAt).toISOString() }
     return this.transaction(actorId, workspaceId, client => this.withReleaseAuthority(client, actorId, workspaceId, appId, async () => {
+      await this.prepareCredentialSources(client,actorId,workspaceId,appId,proposal.grantIds)
       const result = await client.query<{ id: string }>('SELECT application_prepare_credential_review($1,$2) AS id', [appId,proposal])
       return (await client.query(`SELECT id,proposal,expires_at AS "expiresAt",(application_runtime_qualified(workspace_id,'application_data') OR application_scoped_credential_allowed(app_id,proposal)) AS "canIssue"
         FROM application_credential_reviews WHERE id=$1`, [result.rows[0].id])).rows[0]
@@ -379,6 +408,8 @@ export class ApplicationManagementService {
   /** Native human delivery only. Brian tools return the review/management link. */
   applyCredentialReview(actorId: string, workspaceId: string, appId: string, reviewId: string) {
     return this.transaction(actorId, workspaceId, client => this.withReleaseAuthority(client, actorId, workspaceId, appId, async () => {
+      const proposalRow=(await client.query<{proposal:unknown}>('SELECT proposal FROM application_credential_reviews WHERE id=$1 AND app_id=$2 AND workspace_id=$3',[reviewId,appId,workspaceId])).rows[0]
+      if(proposalRow){const proposal=applicationCredentialInputSchema.safeParse(proposalRow.proposal);if(proposal.success)await this.prepareCredentialSources(client,actorId,workspaceId,appId,proposal.data.grantIds)}
       const result = await client.query<{ consumed: string | null; qualified: boolean }>(`SELECT consumed_credential_id AS consumed,
         (application_runtime_qualified(workspace_id,'application_data') OR application_scoped_credential_allowed(app_id,proposal)) AS qualified FROM application_credential_reviews
         WHERE id=$1 AND app_id=$2 AND workspace_id=$3`, [reviewId,appId,workspaceId])
