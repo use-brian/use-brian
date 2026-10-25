@@ -15,6 +15,9 @@ export interface ApplicationManagementOverview {
 }
 export type ApplicationManagementCommand =
  | {kind:'register';input:Omit<ApplicationClientInput,'workspaceId'>}
+ | {kind:'activation.review';appId:string;profile?:'canonical_app_delegation_v1'}
+ | {kind:'activation.apply';appId:string;reviewId:string}
+ | {kind:'activation.revoke';appId:string}
  | {kind:'status';appId:string;status:'active'|'suspended'|'revoked'}
  | {kind:'grant.review';appId:string;input:ApplicationGrantInput}
  | {kind:'grant.apply';appId:string;reviewId:string}

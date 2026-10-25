@@ -42,7 +42,7 @@ export async function loadApplicationAuthority(auth: ApplicationAuthentication):
   if (credential?.credentialKind === 'delegated' && !user) denied()
   const appId = credential?.appId ?? user?.appId ?? home!.appId, workspaceId = credential?.workspaceId ?? user?.workspaceId ?? home!.workspaceId
   const appResult = await query<{ moduleKey: string; createdBy: string; revision: string; assistantId: string | null }>(`SELECT module_key AS "moduleKey",created_by_user_id AS "createdBy",grant_revision::text AS revision,executing_assistant_id AS "assistantId"
-    FROM application_clients WHERE id=$1 AND workspace_id=$2 AND status='active'`, [appId, workspaceId])
+    FROM application_clients WHERE id=$1 AND workspace_id=$2 AND status='active' AND (${user ? `($3::uuid IS NULL OR application_scoped_credential_current($1::uuid,$3::uuid)) AND application_oauth_binding_current($4::uuid,$1::uuid) AND EXISTS(SELECT 1 FROM application_oauth_bindings b WHERE b.authorization_id=$4::uuid AND b.app_id=$1::uuid AND b.workspace_id=$2::uuid AND b.principal_user_id=$5::uuid)` : 'application_scoped_credential_current($1,$3)'})`, user ? [appId,workspaceId,credential?.id??null,user.authorizationId,user.userId] : [appId, workspaceId,credential?.id ?? null])
   const app = appResult.rows[0]
   if (!app?.assistantId || credential && app.revision !== credential.clientRevision || user && app.revision !== user.applicationRevision
     || home && app.revision !== home.clientRevision) denied()

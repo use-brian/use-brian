@@ -4,7 +4,7 @@ import { setTimeout } from 'node:timers/promises'
 import pg from 'pg'
 import { afterAll, beforeAll, describe, expect, it } from 'vitest'
 import { defineWorkspaceModuleRegistry } from '@use-brian/shared'
-import { createWorkspaceModulesStore } from '../workspace-modules-store.js'
+import { createWorkspaceModulesStore, lockWorkspaceModule, requireWorkspaceModuleAdmission } from '../workspace-modules-store.js'
 import { createAssociationWorkspaceModulesStore } from '../../association/workspace-module.js'
 import { createAssociationStore } from '../association-store.js'
 import { EventInputSchema, OrderCreateSchema, PlanInputSchema, TicketInputSchema } from '../../association/domain.js'
@@ -205,6 +205,67 @@ describe('[COMP:api/workspace-modules] Actual lifecycle and admission transactio
     expect(await shutdown).toMatchObject({ changed: true, module: { state: 'disabled', version: 3 } })
     await rejected
     expect((await owner.query('SELECT 1 FROM association_orders WHERE workspace_id=$1', [f.workspaceId])).rowCount).toBe(0)
+  })
+
+  it.each(['admission', 'shutdown'] as const)('[S2-06] orders lazy missing-row admission with first shutdown when %s wins', async winner => {
+    const f = await workspace(), key = 'fictional_lazy_lifecycle'
+    const registry = defineWorkspaceModuleRegistry({ [key]: { key, defaultState: 'enabled' } })
+    expect((await owner.query('SELECT 1 FROM workspace_modules WHERE workspace_id=$1 AND module_key=$2', [f.workspaceId, key])).rows).toEqual([])
+    let reached!: () => void, resume!: () => void, shutdownPid = 0
+    const paused = new Promise<void>(resolve => { reached = resolve }), release = new Promise<void>(resolve => { resume = resolve })
+    const lifecyclePool = { connect: async () => {
+      const client = await app.connect(); shutdownPid = Number((await client.query('SELECT pg_backend_pid() AS pid')).rows[0].pid)
+      return new Proxy(client, { get(target, property) {
+        const value = Reflect.get(target, property)
+        if (property === 'query') return async (...args: unknown[]) => {
+          const result = await Reflect.apply(value, target, args)
+          if (winner === 'shutdown' && args[0] === 'SELECT id FROM workspaces WHERE id=$1 FOR UPDATE') { reached(); await release }
+          return result
+        }
+        return typeof value === 'function' ? value.bind(target) : value
+      } })
+    } } as unknown as pg.Pool
+    const lifecycle = createWorkspaceModulesStore(owner, lifecyclePool, { registry })
+    const client = await app.connect(), admissionPid = Number((await client.query('SELECT pg_backend_pid() AS pid')).rows[0].pid)
+    await client.query('BEGIN'); await client.query("SELECT set_config('app.current_user_id',$1,true)", [f.userId])
+    let transition: ReturnType<typeof lifecycle.act> | undefined, admission: ReturnType<typeof lockWorkspaceModule> | undefined
+    const waitFor = async (blocker: number, fragment: string) => {
+      const deadline = Date.now() + 10_000
+      while (Date.now() < deadline) {
+        const result = await owner.query(`SELECT pid,query,wait_event,pg_blocking_pids(pid) AS blockers FROM pg_stat_activity
+          WHERE datname=current_database() AND wait_event_type='Lock' AND $1=ANY(pg_blocking_pids(pid)) AND position($2 in query)>0`, [blocker, fragment])
+        if (result.rows[0]) { console.info('[S2-06] lazy-row waiter', JSON.stringify({ winner, blocker, ...result.rows[0] })); return }
+        await new Promise<void>(resolve => setImmediate(resolve))
+      }
+      throw new Error('Expected an actual lazy-row lock waiter')
+    }
+    try {
+      if (winner === 'admission') {
+        const initial = await lockWorkspaceModule(client, f.workspaceId, key, registry)
+        expect(initial).toMatchObject({ state: 'enabled', version: 0 }); requireWorkspaceModuleAdmission(initial, 'new_work')
+        transition = lifecycle.act(f.workspaceId, f.userId, key, { action: 'request_disable', expectedVersion: 0 }); void transition.catch(() => undefined)
+        await waitFor(admissionPid, 'SELECT id FROM workspaces WHERE id=$1 FOR UPDATE')
+        await client.query('COMMIT')
+      } else {
+        transition = lifecycle.act(f.workspaceId, f.userId, key, { action: 'request_disable', expectedVersion: 0 }); void transition.catch(() => undefined)
+        await Promise.race([paused, transition.then(() => { throw new Error('Expected first shutdown to pause before lazy insertion') })])
+        admission = lockWorkspaceModule(client, f.workspaceId, key, registry); void admission.catch(() => undefined)
+        await waitFor(shutdownPid, 'SELECT id FROM workspaces WHERE id=$1 FOR SHARE')
+        resume(); await transition
+        const observed = await admission
+        expect(observed).toMatchObject({ state: 'disabled', version: 2 })
+        expect(() => requireWorkspaceModuleAdmission(observed, 'new_work')).toThrowError(expect.objectContaining({ code: 'module_disabled' }))
+        await client.query('COMMIT')
+      }
+      expect(await transition).toMatchObject({ changed: true, module: { state: 'disabled', version: 2 } })
+      expect((await owner.query('SELECT state,version FROM workspace_modules WHERE workspace_id=$1 AND module_key=$2', [f.workspaceId, key])).rows).toEqual([{ state: 'disabled', version: 2 }])
+      expect((await owner.query("SELECT details FROM workspace_audit_log WHERE workspace_id=$1 AND event_type='workspace.module_changed'", [f.workspaceId])).rows)
+        .toEqual([{ details: { moduleKey: key, action: 'request_disable', from: 'enabled', to: 'disabled', version: 2 } }])
+    } finally {
+      resume(); await client.query('ROLLBACK'); client.release()
+      await Promise.allSettled([...(transition ? [transition] : []), ...(admission ? [admission] : [])])
+      await owner.query('DELETE FROM workspaces WHERE id=$1', [f.workspaceId]); await owner.query('DELETE FROM users WHERE id=ANY($1::uuid[])', [[f.userId, f.memberId]])
+    }
   })
 
   it('supports provider recovery, exact replay and check-in/refund after disable (M4)', async () => {

@@ -32,7 +32,7 @@ export async function loadApplicationOAuthStateSystem(id: string, appId: string)
     JOIN users u ON u.id=b.principal_user_id AND u.auth_provider<>'channel'
     JOIN workspace_members issuer ON issuer.workspace_id=b.workspace_id AND issuer.user_id=g.issued_by_user_id AND issuer.role IN('owner','admin')
     WHERE b.authorization_id=$1 AND b.app_id=$2 AND b.principal_user_id=$3 AND b.workspace_id=$4
-      AND (g.principal_kind='external_user' OR EXISTS(SELECT 1 FROM workspace_members m WHERE m.user_id=b.principal_user_id AND m.workspace_id=b.workspace_id))`,
+      AND application_oauth_binding_current(b.authorization_id,b.app_id) AND (g.principal_kind='external_user' OR EXISTS(SELECT 1 FROM workspace_members m WHERE m.user_id=b.principal_user_id AND m.workspace_id=b.workspace_id))`,
   [id, appId, row.userId, row.workspaceId])
   const binding = bound.rows[0]
   return binding ? { authorizationId: id, appId, workspaceId: row.workspaceId, userId: row.userId,

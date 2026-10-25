@@ -27,6 +27,9 @@ const schemaPreviewBody = applicationSchemaPreviewInput.omit({ typeId: true }).e
 /** One command vocabulary for the native human and Brian management adapters. */
 export const applicationManagementCommandSchema = z.discriminatedUnion('kind', [
  z.object({kind:z.literal('register'),input:applicationClientInputSchema.innerType().omit({workspaceId:true})}).strict(),
+ z.object({kind:z.literal('activation.review'),appId:z.string().uuid(),profile:z.literal('canonical_app_delegation_v1').optional()}).strict(),
+ z.object({kind:z.literal('activation.apply'),appId:z.string().uuid(),reviewId:z.string().uuid()}).strict(),
+ z.object({kind:z.literal('activation.revoke'),appId:z.string().uuid()}).strict(),
  z.object({kind:z.literal('status'),appId:z.string().uuid(),status:z.enum(['active','suspended','revoked'])}).strict(),
  z.object({kind:z.literal('grant.review'),appId:z.string().uuid(),input:applicationGrantInputSchema}).strict(),
  z.object({kind:z.literal('grant.apply'),appId:z.string().uuid(),reviewId:z.string().uuid()}).strict(),
@@ -93,6 +96,24 @@ export class ApplicationManagementService {
     const assistant=delivery.assistantId?{assistantId:delivery.assistantId}:{}
     switch(command.kind) {
       case 'register':return this.create(actorId,{...command.input,workspaceId})
+      case 'activation.review':return this.transaction(actorId,workspaceId,async client=>{
+        if(!(await client.query('SELECT id FROM application_clients WHERE id=$1 AND workspace_id=$2',[command.appId,workspaceId])).rows[0])throw new ApplicationPlatformError('access_unavailable','The application is unavailable.')
+        const deployed=(await client.query('SELECT module_key AS module FROM application_clients WHERE id=$1 AND workspace_id=$2',[command.appId,workspaceId])).rows[0]
+        await this.applications.assertDeployedModuleCurrent(client,deployed.module)
+        const review=(await (command.profile?client.query('SELECT application_prepare_activation($1,$2) AS id',[command.appId,command.profile]):client.query('SELECT application_prepare_activation($1) AS id',[command.appId]))).rows[0]
+        const snapshot=(await client.query("SELECT snapshot->>'profile' AS profile,snapshot#>>'{application,module_key}' AS module,snapshot#>>'{application,client_mode}' AS mode FROM application_activation_reviews WHERE id=$1",[review.id])).rows[0]
+        return {id:review.id,profile:snapshot.profile,canApply:true,scope:{principal:snapshot.profile==='canonical_app_delegation_v1'?(snapshot.module==='records'?'service_and_member_or_external_user':'service_and_member'):snapshot.mode==='external_frontend'?(snapshot.module==='records'?'member_or_external_user':'member'):'service',client:snapshot.mode,module:snapshot.module,resources:snapshot.module==='native'?['company','deal']:this.applications.registry.applications.get(snapshot.module)?.application.resources.some(resource=>resource.origin.kind==='native')?[...new Set(this.applications.registry.applications.get(snapshot.module)!.application.resources.map(resource=>resource.origin.kind))]:['generic']}}
+      },true)
+      case 'activation.apply':return this.transaction(actorId,workspaceId,async client=>{
+        if(!(await client.query('SELECT id FROM application_activation_reviews WHERE id=$1 AND app_id=$2 AND workspace_id=$3',[command.reviewId,command.appId,workspaceId])).rows[0])throw new ApplicationPlatformError('access_unavailable','The review is unavailable.')
+        const applied=(await client.query('SELECT application_apply_activation($1) AS id',[command.reviewId])).rows[0].id
+        const review=(await client.query("SELECT snapshot->>'profile' AS profile FROM application_activation_reviews WHERE id=$1",[command.reviewId])).rows[0]
+        return {appId:applied,profile:review.profile}
+      },true)
+      case 'activation.revoke':return this.transaction(actorId,workspaceId,async client=>{
+        if(!(await client.query('SELECT id FROM application_clients WHERE id=$1 AND workspace_id=$2',[command.appId,workspaceId])).rows[0])throw new ApplicationPlatformError('access_unavailable','The application is unavailable.')
+        return {revoked:(await client.query('SELECT application_revoke_activation($1) AS revoked',[command.appId])).rows[0].revoked}
+      },true)
       case 'status':return this.setStatus(actorId,workspaceId,command.appId,command.status)
       case 'grant.review':return this.reviewGrant(actorId,workspaceId,command.appId,command.input)
       case 'grant.apply':return this.applyGrantReview(actorId,workspaceId,command.appId,command.reviewId)
@@ -210,7 +231,7 @@ export class ApplicationManagementService {
 
   list(actorId: string, workspaceId: string) {
     return this.transaction(actorId, workspaceId, async client => (await client.query(`SELECT ${clientColumns},
-      application_runtime_qualified(workspace_id,'application_data') AS qualified FROM application_clients WHERE workspace_id=$1 ORDER BY created_at,id`, [workspaceId])).rows)
+      (application_runtime_qualified(workspace_id,'application_data') OR application_scoped_qualified(workspace_id,id)) AS qualified FROM application_clients WHERE workspace_id=$1 ORDER BY created_at,id`, [workspaceId])).rows)
   }
 
   async create(actorId: string, rawInput: unknown) {
@@ -242,7 +263,7 @@ export class ApplicationManagementService {
 
   setStatus(actorId: string, workspaceId: string, appId: string, status: 'active' | 'suspended' | 'revoked') {
     return this.transaction(actorId, workspaceId, async client => {
-      const current=await client.query<{status:string;qualified:boolean}>(`SELECT status,application_runtime_qualified(workspace_id,'application_data') AS qualified FROM application_clients WHERE id=$1 AND workspace_id=$2 FOR UPDATE`,[appId,workspaceId])
+      const current=await client.query<{status:string;qualified:boolean}>(`SELECT status,(application_runtime_qualified(workspace_id,'application_data') OR application_scoped_qualified(workspace_id,id)) AS qualified FROM application_clients WHERE id=$1 AND workspace_id=$2 FOR UPDATE`,[appId,workspaceId])
       if(!current.rows[0]) throw new ApplicationPlatformError('access_unavailable','The application is unavailable.')
       if(status==='active'&&current.rows[0].status!=='active'&&!current.rows[0].qualified) throw new ApplicationPlatformError('operation_not_available','Application runtime qualification is incomplete.')
       const result = await client.query(`UPDATE application_clients SET status=$3 WHERE id=$1 AND workspace_id=$2
@@ -266,6 +287,7 @@ export class ApplicationManagementService {
   private async withReleaseAuthority<T>(client: PoolClient, actorId: string, workspaceId: string, appId: string, operation: () => Promise<T>) {
     const result = await client.query<{ assistantId: string; moduleKey: string }>(`SELECT executing_assistant_id AS "assistantId",module_key AS "moduleKey"
       FROM application_clients WHERE id=$1 AND workspace_id=$2 AND status='active' FOR SHARE`, [appId, workspaceId])
+    if(result.rows[0])await this.applications.assertDeployedModuleCurrent(client,result.rows[0].moduleKey)
     const assistant = result.rows[0]?.assistantId && await findAssistantById(result.rows[0].assistantId)
     if (!assistant || assistant.workspaceId !== workspaceId) throw new ApplicationPlatformError('access_unavailable', 'The application is unavailable.')
     const access = await resolveLiveAccessCeilingSystem({ userId: actorId, workspaceId, assistant, memberMode: 'member' })
@@ -288,7 +310,7 @@ export class ApplicationManagementService {
       }
       const result = await client.query<{ id: string }>('SELECT application_prepare_grant_review($1,$2) AS id', [appId, proposal])
       const review = (await client.query(`SELECT id,proposed_grant AS proposal,expires_at AS "expiresAt",
-        application_runtime_qualified(workspace_id,'application_data') AS "canIssue" FROM application_grant_reviews WHERE id=$1`, [result.rows[0].id])).rows[0]
+        (application_runtime_qualified(workspace_id,'application_data') OR application_scoped_grant_allowed(app_id,proposed_grant)) AS "canIssue" FROM application_grant_reviews WHERE id=$1`, [result.rows[0].id])).rows[0]
       return review
     }), true)
   }
@@ -335,7 +357,7 @@ export class ApplicationManagementService {
     const proposal = { ...parsed.data, expiresAt: new Date(parsed.data.expiresAt).toISOString() }
     return this.transaction(actorId, workspaceId, client => this.withReleaseAuthority(client, actorId, workspaceId, appId, async () => {
       const result = await client.query<{ id: string }>('SELECT application_prepare_credential_review($1,$2) AS id', [appId,proposal])
-      return (await client.query(`SELECT id,proposal,expires_at AS "expiresAt",application_runtime_qualified(workspace_id,'application_data') AS "canIssue"
+      return (await client.query(`SELECT id,proposal,expires_at AS "expiresAt",(application_runtime_qualified(workspace_id,'application_data') OR application_scoped_credential_allowed(app_id,proposal)) AS "canIssue"
         FROM application_credential_reviews WHERE id=$1`, [result.rows[0].id])).rows[0]
     }), true)
   }
@@ -344,7 +366,7 @@ export class ApplicationManagementService {
   applyCredentialReview(actorId: string, workspaceId: string, appId: string, reviewId: string) {
     return this.transaction(actorId, workspaceId, client => this.withReleaseAuthority(client, actorId, workspaceId, appId, async () => {
       const result = await client.query<{ consumed: string | null; qualified: boolean }>(`SELECT consumed_credential_id AS consumed,
-        application_runtime_qualified(workspace_id,'application_data') AS qualified FROM application_credential_reviews
+        (application_runtime_qualified(workspace_id,'application_data') OR application_scoped_credential_allowed(app_id,proposal)) AS qualified FROM application_credential_reviews
         WHERE id=$1 AND app_id=$2 AND workspace_id=$3`, [reviewId,appId,workspaceId])
       if (!result.rows[0]) throw new ApplicationPlatformError('access_unavailable', 'The review is unavailable.')
       const material = !result.rows[0].consumed && result.rows[0].qualified ? await mintApplicationCredentialSecret() : null

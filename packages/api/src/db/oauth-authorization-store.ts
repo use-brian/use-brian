@@ -91,7 +91,7 @@ export type OAuthAuthorizationStore = {
     codeChallenge: string
     redirectUri: string
     /** Only the explicit application audience accepts a reviewed maximum. */
-    applicationConsent?: { grantIds: string[]; maximumHash: string; clientRevision: string }
+    applicationConsent?: { grantIds: string[]; maximumHash: string; clientRevision: string;activationVersion?:string|null }
   }): Promise<{ row: OAuthAuthorizationRow; codePlaintext: string }>
 
   /**
@@ -226,7 +226,7 @@ export function createDbOAuthAuthorizationStore(profile: OAuthAuthorizationAudie
       if (!applicationClientId && params.applicationConsent) throw new Error('Application consent requires its application audience')
       if (applicationClientId) {
         const admitted = await query<{id:string}>(`SELECT id FROM application_clients WHERE id=$1 AND workspace_id=$2
-          AND oauth_client_id=$3 AND status='active' AND application_runtime_qualified(workspace_id,'application_data')`,
+          AND oauth_client_id=$3 AND status='active' AND (application_runtime_qualified(workspace_id,'application_data') OR application_scoped_qualified(workspace_id,id))`,
         [applicationClientId,params.workspaceId,params.clientId])
         if (!admitted.rows[0]) throw new Error('Application OAuth issuance is not qualified')
       }
@@ -241,8 +241,8 @@ export function createDbOAuthAuthorizationStore(profile: OAuthAuthorizationAudie
         const result = await query<OAuthAuthorizationRow>(`WITH review AS MATERIALIZED (
             SELECT application_oauth_consent_snapshot($10,$3,$11) AS value
           ), admitted AS MATERIALIZED (
-            SELECT value FROM review WHERE value IS NOT NULL AND value->>'clientId'=$2 AND value->>'workspaceId'=$4::text
-              AND value->>'revision'=$12 AND value->>'maximumHash'=$13 AND application_runtime_qualified($4,'application_data')
+            SELECT value FROM review WHERE value IS NOT NULL AND value->>'clientId'=$2 AND value->>'workspaceId'=($4::uuid)::text
+              AND value->>'revision'=$12 AND value->>'maximumHash'=$13 AND (value->>'activationVersion') IS NOT DISTINCT FROM $14::text AND (application_runtime_qualified($4::uuid,'application_data') OR application_scoped_qualified($4::uuid,$10::uuid))
               AND EXISTS(SELECT 1 FROM application_clients client WHERE client.id=$10 AND $9=ANY(client.redirect_uris))
           ), revoked AS (
             UPDATE oauth_authorizations SET revoked_at=now(),access_token_hash=NULL,refresh_token_hash=NULL,code_hash=NULL
@@ -257,7 +257,7 @@ export function createDbOAuthAuthorizationStore(profile: OAuthAuthorizationAudie
             SELECT issued.id,$10,$4,$3,(admitted.value->>'parentGrantId')::uuid,admitted.value->'maxima',admitted.value->>'maximumHash' FROM issued CROSS JOIN admitted RETURNING authorization_id
           ) SELECT ${COLS_ROW} FROM issued oauth_authorizations WHERE EXISTS(SELECT 1 FROM bound WHERE authorization_id=oauth_authorizations.id)`,
         [id,params.clientId,params.userId,params.workspaceId,params.scope,codeHash,codeExpiresAt,params.codeChallenge,params.redirectUri,
-          applicationClientId,consent.grantIds,consent.clientRevision,consent.maximumHash])
+          applicationClientId,consent.grantIds,consent.clientRevision,consent.maximumHash,consent.activationVersion??null])
         if (!result.rows[0]) throw new Error('Application consent changed or is not qualified')
         return { row: result.rows[0], codePlaintext: code.plaintext }
       }

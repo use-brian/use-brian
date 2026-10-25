@@ -40,6 +40,14 @@ export class ApplicationPlatformService {
     return { workspaceModules: this.#registry.workspaceModules, applications: new Map(this.#registry.applications) }
   }
 
+  /** Deployed code and migration metadata must agree; this grants no authority. */
+  async assertDeployedModuleCurrent(client:PoolClient,moduleKey:string) {
+    const module=this.module(moduleKey)
+    const matched=(await client.query<{matched:boolean|null}>('SELECT application_deployed_module_matches($1,$2,$3::text[],$4::text[],$5::text[],$6) AS matched',
+      [moduleKey,module.application.version,module.application.commands,module.application.queries,module.application.dependencies,module.defaultState])).rows[0]?.matched
+    if(matched===false||matched==null&&module.application.policyCapabilities.includes('canonical_module_roles'))throw new ApplicationPlatformError('access_unavailable','The deployed module contract is unavailable.')
+  }
+
   private module(key: string) {
     const module = this.#registry.applications.get(key)
     if (!module) throw new ApplicationPlatformError('operation_not_available', 'The operation is unavailable.')
@@ -51,6 +59,7 @@ export class ApplicationPlatformService {
     if (!binding) throw new ApplicationPlatformError('authentication_required', 'Application authentication is required.')
     const module = this.module(binding.state.moduleKey)
     return this.transaction(execution, async transaction => {
+      await this.assertDeployedModuleCurrent(transaction,module.key)
       const state = await lockWorkspaceModule(transaction, execution.security.access.workspaceId, module.key, this.#registry.workspaceModules, { kind: 'application' })
       requireWorkspaceModuleAdmission(state, 'read')
       const declarations = module.resolveResources ? await module.resolveResources({ execution, transaction, idempotencyKey: '', afterCommit: () => {
@@ -87,6 +96,7 @@ export class ApplicationPlatformService {
     const parsed = query.input.safeParse(rawInput)
     if (!parsed.success) throw new ApplicationPlatformError('invalid_value', 'The query input is invalid.')
     return this.transaction(execution, async (transaction, afterCommit) => {
+      await this.assertDeployedModuleCurrent(transaction,moduleKey)
       const context = { execution, transaction, idempotencyKey: '', afterCommit }
       const state = await lockWorkspaceModule(transaction, execution.security.access.workspaceId, moduleKey, this.#registry.workspaceModules, application ? { kind: 'application' } : undefined)
       requireWorkspaceModuleAdmission(state, 'read')
@@ -120,6 +130,7 @@ export class ApplicationPlatformService {
       : { identity: execution.identity, assistant: execution.assistant, actorUserId })
     const identity = [workspaceId, moduleKey, commandKey, actorKey, command.data.idempotencyKey]
     return this.transaction(execution, async transaction => {
+      await this.assertDeployedModuleCurrent(transaction, moduleKey)
       const state = await lockWorkspaceModule(transaction, workspaceId, moduleKey, this.#registry.workspaceModules,
         application ? { kind: 'application' } : undefined)
       requireWorkspaceModuleAdmission(state, 'existing_recovery')
@@ -161,6 +172,7 @@ export class ApplicationPlatformService {
       : { identity: execution.identity, assistant: execution.assistant, actorUserId })
     const identity = [workspaceId, moduleKey, commandKey, actorKey, command.data.idempotencyKey]
     return this.transaction(execution, async (transaction, afterCommit) => {
+      await this.assertDeployedModuleCurrent(transaction,moduleKey)
       const context: ApplicationOperationContext<PoolClient> = { execution, transaction, afterCommit,
         idempotencyKey: command.data.idempotencyKey,
         ...(command.data.expectedVersion ? { expectedVersion: command.data.expectedVersion } : {}),
