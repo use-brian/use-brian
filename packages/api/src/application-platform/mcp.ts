@@ -31,7 +31,7 @@ export async function buildHomeApplicationMcpProfile(req: Request, secret: strin
 }
 
 function applicationMcpInvoker(execution: ExecutionContext) {
-  return (operation: (input: Record<string, unknown>) => Promise<unknown>, effectful = false): BrainTool['handler'] => async input => {
+  return (operation: (input: Record<string, unknown>) => Promise<unknown>, effectful = false, metadataRead = false): BrainTool['handler'] => async input => {
     let committed = false
     try {
       await execution.security.authority.assertCurrent()
@@ -42,7 +42,7 @@ function applicationMcpInvoker(execution: ExecutionContext) {
     } catch (error) {
       const code = error instanceof AuthorityChangedError ? 'grant_revoked' : error instanceof ApplicationPlatformError ? error.code : 'access_unavailable'
       const effect = committed ? 'committed' : error instanceof ApplicationPlatformError ? error.effect
-        : error instanceof AuthorityChangedError && error.operationMayHaveExecuted ? 'uncertain' : 'none'
+        : error instanceof AuthorityChangedError && error.operationMayHaveExecuted && !metadataRead ? 'uncertain' : 'none'
       return { isError: true, content: [{ type: 'text', text: JSON.stringify({ error: code, effect,
         retrySafe: error instanceof ApplicationPlatformError && error.retrySafe && !committed }) }] }
     }
@@ -116,7 +116,10 @@ export function buildNativeApplicationManagementMcpTools(service:ApplicationMana
   return [{name:'applicationManagementOverview',description:'Read your current application registration, exact grant/credential metadata, source availability and unqualified readiness. Never returns secrets or private source payloads.',
     inputSchema:{appId:z.string().uuid().optional()},handler:invoke(input=>service.overview(actorId,workspaceId,{...input,assistantId:execution.assistant.id}))},
     {name:'applicationManage',description:'Use the same native reviewed management commands as the human panel. Preview first and apply only an explicitly confirmed review. Uncertain writes require reconciliation, never automatic retry. Credential delivery returns a human-only link, never credential material.',
-    inputSchema:{command:applicationManagementCommandSchema},handler:invoke(input=>service.executeCommand(actorId,workspaceId,input.command,{audience:'brian',assistantId:execution.assistant.id}),true)}]
+    inputSchema:{command:applicationManagementCommandSchema},handler:input=>{
+      const metadataRead=(input.command as {kind?:unknown}|undefined)?.kind==='legacy.view'
+      return invoke(value=>service.executeCommand(actorId,workspaceId,value.command,{audience:'brian',assistantId:execution.assistant.id}),!metadataRead,metadataRead)(input)
+    }}]
 }
 
 /** Native member/Brian module profile, calling the same deployed handlers and canonical transactions. */

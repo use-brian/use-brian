@@ -55,7 +55,7 @@ export const zh: Dictionary = {
     "properties": "屬性（JSON）",
     "status": "狀態",
     "sourceUnavailable": "此管理介面不提供對應、保留期限與金鑰安裝功能。",
-    "legacyUnavailable": "驗證完成前無法修復舊有資料。",
+    "legacyUnavailable": "已停止建立新的舊有資料審查。請透過應用程式管理，使用原始 ID 復原已儲存的審查。",
     "access": "審閱工作區存取權",
     "activate": "啟用",
     "nativeDelivery": "憑證只能透過本人的原生工作階段取得。"

@@ -1,4 +1,4 @@
-import { defineConfig } from 'vitest/config'
+import { configDefaults, defineConfig } from 'vitest/config'
 import { fileURLToPath } from 'node:url'
 
 // `pnpm test:integration` — the DB-backed suites. They exercise the real
@@ -22,6 +22,10 @@ export default defineConfig({
   },
   test: {
     include: ['src/**/*.integration.test.ts'],
+    // Required only through its genuine pre8121 parent fixture. An explicit
+    // child-only invocation without the envelope still exits with no tests.
+    exclude: [...configDefaults.exclude, ...(!process.env.BRIAN_ASSURANCE_LEGACY_CASES
+      ? ['src/application-platform/__tests__/legacy-review-transport.integration.test.ts'] : [])],
     // A few suites (e.g. provenance, proactive-compaction) run multi-second
     // real-DB flows; give them headroom over the 5s default.
     testTimeout: 30_000,

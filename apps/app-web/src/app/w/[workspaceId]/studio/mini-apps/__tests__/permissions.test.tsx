@@ -45,7 +45,7 @@ beforeEach(() => {
   role = "owner";
   order = ["feed", "chat", "page"];
   fetchMock.mockReset().mockImplementation(async (_url, init) => {
-    if(String(_url).includes('/api/applications/'))return new Response(JSON.stringify(role==='owner'||role==='admin'?{workspaceId:'workspace-one',actor:{userId:'viewer-fixture',assistantId:'assistant-fixture'},validForMs:30_000,readiness:{qualified:false,reason:'consumer_qualification_incomplete',legacyReview:'unavailable',canActivate:false},modules:['records'],clients:[],selectedAppId:null,grants:[],credentials:[],schemas:{state:'available',items:[]},sources:{state:'unavailable',items:[]},links:{miniApps:'/mini-apps',connectors:'/connectors',programmaticAccess:'/programmatic-access',access:'/access'}}:{error:'access_unavailable'}),{status:role==='owner'||role==='admin'?200:403});
+    if(String(_url).includes('/api/applications/'))return new Response(JSON.stringify(role==='owner'||role==='admin'?{workspaceId:'workspace-one',actor:{userId:'viewer-fixture',assistantId:'assistant-fixture'},validForMs:30_000,readiness:{qualified:false,reason:'consumer_qualification_incomplete',canActivate:false},modules:['records'],clients:[],selectedAppId:null,grants:[],credentials:[],schemas:{state:'available',items:[]},sources:{state:'unavailable',items:[]},links:{miniApps:'/mini-apps',connectors:'/connectors',programmaticAccess:'/programmatic-access',access:'/access'}}:{error:'access_unavailable'}),{status:role==='owner'||role==='admin'?200:403});
     if (init?.method === "PATCH") order = JSON.parse(String(init.body)).homeApps;
     // The API's own role is authoritative even without a member-list identity.
     return response({ role, homeApps: order, members: [] });

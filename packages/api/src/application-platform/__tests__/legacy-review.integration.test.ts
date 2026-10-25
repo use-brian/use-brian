@@ -3,6 +3,7 @@ import { randomBytes, randomUUID } from 'node:crypto'
 import { readFile } from 'node:fs/promises'
 import pg, { type Pool, type PoolClient } from 'pg'
 import { dirname, join } from 'node:path'
+import { fileURLToPath } from 'node:url'
 import { afterAll, beforeAll, describe, expect, it } from 'vitest'
 import { createMemory } from '../../db/memories.js'
 import { createDbWorkspaceGroupStore } from '../../db/workspace-group-store.js'
@@ -73,6 +74,7 @@ async function createCase(label:string,privateRow=true,count=1,placed=false):Pro
 }
 async function preparePending(){
  for(const [name,priv,count,placed] of [['private',true,1,false],['shared',false,1,false],['pages',true,26,false],['source',true,1,false],['policy',true,1,false],['admin',true,1,false],['assistant',true,1,true],['rollback',true,1,false]] as const)await createCase(name,priv,count,placed)
+ for(const [name,priv,count,placed] of [['transport-private',true,1,false],['transport-shared',false,1,false],['transport-pages',true,26,false],['transport-source',true,1,false],['transport-policy',true,1,false],['transport-admin',true,1,false],['transport-assistant',true,1,true],['transport-uncertain',true,1,false]] as const)await createCase(name,priv,count,placed)
  const f=cases.get('private')!
  for(const options of [{actor:f.memberId},{actor:f.foreignId},{application:true}])await expect(preview(f,f.ids,options)).rejects.toMatchObject({code:'42501'})
  await expect(native(owner,f,async client=>client.query("SELECT application_legacy_review_preview($1,$2,'memory',$3,'release','Fictional denied owner')",[f.workspaceId,f.assistantId,f.ids]))).rejects.toMatchObject({code:'42501'})
@@ -164,8 +166,9 @@ describe.sequential('[COMP:api/application-legacy-review] retained pending recov
  },120_000)
  afterAll(async()=>{for(const value of pools)await close(value);await fixture?.dispose();expect(poolFailures).toEqual([])})
  it('installs once as the ordinary owner, changes exactly two ACLs and preserves all data',async()=>{
-  expect(callbackCount).toBe(1);expect(copyApplied).toBe(1);expect(prerequisiteRejections).toBe(12);expect(await roleIdentity(owner)).toEqual(ordinaryIdentity)
+  expect(callbackCount).toBe(1);expect(copyApplied).toBe(2);expect(prerequisiteRejections).toBe(12);expect(await roleIdentity(owner)).toEqual(ordinaryIdentity)
   expect(await roleIdentity(app)).toEqual({current_user:'app_user',session_user:'app_user',rolsuper:false,rolbypassrls:false,rolinherit:false,memberships:0,owns_reviews:0})
+  expect((await owner.query('SELECT name FROM _migrations WHERE name=ANY($1::text[]) ORDER BY name',[[boundary,'8122_application_native_module_availability.sql']])).rows).toEqual([{name:boundary},{name:'8122_application_native_module_availability.sql'}])
   expect((await owner.query('SELECT count(*)::int AS n FROM _migrations WHERE name=$1',[boundary])).rows[0].n).toBe(1)
   expect(await data()).toEqual(beforeData)
   expect((await migrateCopy()).appliedCount).toBe(0)
@@ -250,6 +253,15 @@ describe.sequential('[COMP:api/application-legacy-review] retained pending recov
   const changed=await native(app,f,client=>client.query("UPDATE workspace_scope_reviews SET reason='Fictional unreviewed mutation' WHERE id=$1",[f.review.id]));expect(changed.rowCount).toBe(0)
   const raw=await native(app,f,client=>client.query('UPDATE memories SET user_id=NULL WHERE id=$1',[f.ids[0]]));expect(raw.rowCount).toBe(0)
   expect(await data(f)).toEqual(before)
+ })
+ it('recovers genuine primary pre8121 reviews through current authenticated HTTP and MCP',async()=>{
+  // Isolated child binds every global auth/system/app pool to the maintained
+  // PRIMARY fixture; copied ordinary-owner proof above remains independent.
+  const transport=Object.fromEntries([...cases].filter(([key])=>key.startsWith('transport-')))
+  const logPath=join(fixture!.directory,'legacy-transport.log')
+  try{await runCommand(process.execPath,['node_modules/vitest/vitest.mjs','run','--config','vitest.integration.config.ts','src/application-platform/__tests__/legacy-review-transport.integration.test.ts','--no-file-parallelism'],{
+   cwd:fileURLToPath(new URL('../../../',import.meta.url)),env:{...fixture!.env,BRIAN_ASSURANCE_LEGACY_CASES:JSON.stringify(transport)},logPath,
+  })}finally{console.log(await readFile(logPath,'utf8').catch(()=> 'Transport child produced no log'))}
  })
  it('accepts the exact no-app_user prerequisite state as an ordinary owner without recreating grants or data',async()=>{
   // Final rehearsal only: these are the fresh fixture's own role/grants. Closing

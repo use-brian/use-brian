@@ -66,7 +66,7 @@ export const zhCN: Dictionary = {
     "properties": "属性（JSON）",
     "status": "状态",
     "sourceUnavailable": "此管理界面不提供映射、保留期限与密钥安装功能。",
-    "legacyUnavailable": "验证完成前无法修复旧有数据。",
+    "legacyUnavailable": "已停止创建新的旧有数据审查。请通过应用管理，使用原始 ID 恢复已保存的审查。",
     "access": "审核工作区访问权限",
     "activate": "启用",
     "nativeDelivery": "凭证只能通过本人的原生会话取得。"

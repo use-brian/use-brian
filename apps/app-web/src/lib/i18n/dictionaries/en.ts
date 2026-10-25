@@ -68,7 +68,7 @@ export const en = {
     "properties": "Properties (JSON)",
     "status": "Status",
     "sourceUnavailable": "Mapping, retention and key installation are unavailable through this management port.",
-    "legacyUnavailable": "Legacy repair is unavailable until qualification.",
+    "legacyUnavailable": "New legacy review creation is retired. Recover saved reviews by their original ID through application management.",
     "access": "Review workspace access",
     "activate": "Activate",
     "nativeDelivery": "Credential delivery requires your native human session."

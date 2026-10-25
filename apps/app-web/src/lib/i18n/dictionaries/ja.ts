@@ -55,7 +55,7 @@ export const ja: Dictionary = {
     "properties": "プロパティ（JSON）",
     "status": "状態",
     "sourceUnavailable": "マッピング、保持期間、鍵の導入はこの管理機能では利用できません。",
-    "legacyUnavailable": "従来データの修復は検証完了まで利用できません。",
+    "legacyUnavailable": "新しい従来データレビューの作成は終了しました。保存済みレビューは、元のIDを指定してアプリケーション管理から復旧できます。",
     "access": "ワークスペースのアクセス権を確認",
     "activate": "有効化",
     "nativeDelivery": "認証情報の受け取りには本人のネイティブセッションが必要です。"

@@ -7,13 +7,15 @@ export type ManagedSchema = {id:string;name:string;schemaVersion:number;properti
 export type ManagedSource = {id:string;connectorInstanceId:string;status:string;revision:string;mappingStatus:'unavailable';keyStatus:'deployment_managed';retentionStatus:'unavailable'};
 export interface ApplicationManagementOverview {
  workspaceId:string;actor:{userId:string;assistantId:string};validForMs:number;
- readiness:{qualified:false;reason:'consumer_qualification_incomplete';legacyReview:'unavailable';canActivate:false};
+ readiness:{qualified:false;reason:'consumer_qualification_incomplete';canActivate:false};
  modules:string[];clients:ManagedApplication[];selectedAppId:string|null;grants:ManagedGrant[];credentials:ManagedCredential[];
  schemas:{state:'available'|'unavailable';items:ManagedSchema[]};sources:{state:'available'|'unavailable';items:ManagedSource[]};
  governance?:{state:'available'|'unavailable';moduleKey:string|null;catalog:ManagementGovernanceCatalog|null};
  links:{miniApps:string;connectors:string;programmaticAccess:string;access:string};
 }
 export type ApplicationManagementCommand =
+ | {kind:'legacy.view';reviewId:string;assistantId?:string}
+ | {kind:'legacy.apply'|'legacy.cancel';reviewId:string;expectedVersion:string;payloadHash:string;assistantId?:string}
  | {kind:'register';input:Omit<ApplicationClientInput,'workspaceId'>}
  | {kind:'activation.review';appId:string;profile?:'canonical_app_delegation_v1'}
  | {kind:'activation.apply';appId:string;reviewId:string}

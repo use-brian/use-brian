@@ -392,6 +392,22 @@ describe('[COMP:api/workspace-scope-review] durable classification with real dat
     await expect(pool.query("UPDATE workspace_scope_review_items SET source_snapshot='{}' WHERE review_id=$1",[preview.id])).rejects.toThrow('scope_review_proposal_immutable')
     expect((await review(f.workspaceId,f.owner,preview.id)).status).toBe('preview')
   })
+  it('keeps genuine native review identity separate from application recovery',async()=>{
+    const f=await fixture(),record=await f.create(),saved=await f.preview([record.id])
+    expect((await pool.query('SELECT application_assistant_id FROM workspace_scope_reviews WHERE id=$1',[saved.id])).rows).toEqual([{application_assistant_id:null}])
+    expect((await review(f.workspaceId,f.owner,saved.id)).id).toBe(saved.id)
+    const client=await getAppPool().connect()
+    try{
+      for(const cancel of [false,true]){
+        await client.query('BEGIN');await client.query("SELECT set_config('app.current_user_id',$1,true),set_config('app.v2_assistant_id',$2,true)",[f.owner,f.assistantId])
+        await expect(client.query('SELECT application_legacy_review_apply($1,$2,$3,$4,$5,$6)',[f.workspaceId,f.assistantId,saved.id,saved.version,saved.payloadHash,cancel])).rejects.toMatchObject({code:'42501'})
+        await client.query('ROLLBACK')
+      }
+      await client.query('BEGIN');await client.query("SELECT set_config('app.current_user_id',$1,true),set_config('app.v2_assistant_id',$2,true)",[f.owner,f.assistantId])
+      await expect(client.query('SELECT application_legacy_review_view($1,$2,$3)',[f.workspaceId,f.assistantId,saved.id])).rejects.toMatchObject({code:'42501'});await client.query('ROLLBACK')
+    }finally{await client.query('ROLLBACK');client.release()}
+    expect((await execute(f.workspaceId,f.owner,{type:'scope.review.cancel',reviewId:saved.id,expectedVersion:saved.version,payloadHash:saved.payloadHash})).status).toBe('cancelled')
+  })
   it('protects review metadata and writes through the real application database role',async()=>{
     const f=await fixture(),preview=await f.preview([(await f.create()).id]),client=await getAppPool().connect()
     try{

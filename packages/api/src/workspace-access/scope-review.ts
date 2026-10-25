@@ -269,7 +269,7 @@ function checkImpactLimit(impacts:ScopeReviewImpact[]){
     throw new WorkspaceAccessError('scope_review_impact_too_large',409)
 }
 async function view(client:PoolClient,workspaceId:string,id:string):Promise<ScopeReview>{
-  const job=(await client.query<Job>(`SELECT ${jobColumns} FROM workspace_scope_reviews WHERE workspace_id=$1 AND id=$2`,[workspaceId,id])).rows[0]
+  const job=(await client.query<Job>(`SELECT ${jobColumns} FROM workspace_scope_reviews WHERE workspace_id=$1 AND id=$2 AND application_assistant_id IS NULL`,[workspaceId,id])).rows[0]
   if(!job)throw new WorkspaceAccessError('not_found',404)
   const items=(await client.query<Item>(`SELECT ${itemColumns} FROM workspace_scope_review_items WHERE workspace_id=$1 AND review_id=$2 ORDER BY resource_id`,[workspaceId,id])).rows
   return {...job,items,completeCoverage:await completeCoverage(client,workspaceId),validForMs:job.action==='consolidate_default'?Math.max(0,Math.min(30_000,Date.parse(job.expiresAt!)-Date.now())):30_000}
@@ -314,10 +314,10 @@ export async function getWorkspaceScopeInventory(workspaceId:string,userId:strin
     const total=(await client.query<{count:string}>(`SELECT count(*)::text AS count ${base}`,[workspaceId,parsed.data])).rows[0].count
     // Resolve the anchor in this workspace and snapshot. Foreign and missing
     // IDs have identical outcomes; never interpret an invalid anchor as page one.
-    if(reviewAfter&&!(await client.query('SELECT 1 FROM workspace_scope_reviews WHERE workspace_id=$1 AND id=$2',[workspaceId,reviewAfter])).rows.length)throw new WorkspaceAccessError('not_found',404)
+    if(reviewAfter&&!(await client.query('SELECT 1 FROM workspace_scope_reviews WHERE workspace_id=$1 AND id=$2 AND application_assistant_id IS NULL',[workspaceId,reviewAfter])).rows.length)throw new WorkspaceAccessError('not_found',404)
     const reviewRows=(await client.query<Job>(`SELECT ${jobColumns} FROM workspace_scope_reviews
-      WHERE workspace_id=$1 AND ($2::uuid IS NULL OR (created_at,id)<(
-        SELECT created_at,id FROM workspace_scope_reviews WHERE workspace_id=$1 AND id=$2))
+      WHERE workspace_id=$1 AND application_assistant_id IS NULL AND ($2::uuid IS NULL OR (created_at,id)<(
+        SELECT created_at,id FROM workspace_scope_reviews WHERE workspace_id=$1 AND id=$2 AND application_assistant_id IS NULL))
       ORDER BY created_at DESC,id DESC LIMIT 21`,[workspaceId,reviewAfter??null])).rows
     const recentReviews=reviewRows.slice(0,20)
     const coverage=await getScopeReviewCoverage(client,workspaceId)
@@ -413,7 +413,7 @@ export async function executeWorkspaceScopeReviewInTransaction(client:PoolClient
       await audit(client,workspaceId,userId,'scope.review.preview',id,revision,{action:command.action,targetTeamId:command.targetTeamId,payloadHash,items:snapshots,contents,impacts})
       return view(client,workspaceId,id)
     }
-    await client.query('SELECT id FROM workspace_scope_reviews WHERE workspace_id=$1 AND id=$2 FOR UPDATE',[workspaceId,command.reviewId])
+    await client.query('SELECT id FROM workspace_scope_reviews WHERE workspace_id=$1 AND id=$2 AND application_assistant_id IS NULL FOR UPDATE',[workspaceId,command.reviewId])
     const job=await view(client,workspaceId,command.reviewId)
     if(job.payloadHash!==command.payloadHash||hash(job,job.items.map(item=>item.source),job.items.map(item=>item.impact),job.items.map(item=>item.content))!==job.payloadHash)throw new WorkspaceAccessError('scope_review_changed',409)
     if(BigInt(command.expectedVersion)>BigInt(job.version))throw new WorkspaceAccessError('scope_review_changed',409)

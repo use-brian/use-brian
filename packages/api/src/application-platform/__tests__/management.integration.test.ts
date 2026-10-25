@@ -141,8 +141,19 @@ describe('[COMP:api/application-management] native human and Brian management',(
  it('M04 missing source capability and legacy repair are unavailable, never qualified empty success',async()=>{
   const response=await request(http).get(`${base}/management`).set('Authorization',`Bearer ${tokens.get(actorId)}`)
   expect(response.status).toBe(200);expect(response.body.sources).toMatchObject({state:'unavailable',items:[]})
-  expect(response.body.readiness).toEqual({qualified:false,reason:'consumer_qualification_incomplete',legacyReview:'unavailable',canActivate:false})
+  expect(response.body.readiness).toEqual({qualified:false,reason:'consumer_qualification_incomplete',canActivate:false})
   expect(JSON.stringify(response.body)).not.toMatch(/secret_hash|encrypted_private_key|privateKey/)
+ })
+ it('retires normal authoring from strict HTTP and MCP schemas before any review is written',async()=>{
+  const before=(await owner.query('SELECT count(*)::int AS n FROM workspace_scope_reviews WHERE workspace_id=$1',[workspaceId])).rows[0].n
+  const listed=decode(await rpc('tools/list'));const schema=JSON.stringify(listed.result)
+  expect(schema).toContain('legacy.view');expect(schema).not.toContain('legacy.inventory');expect(schema).not.toContain('legacy.preview')
+  for(const kind of ['legacy.inventory','legacy.preview']){
+   const body={kind,input:kind==='legacy.inventory'?{}:{resourceKind:'memory',resourceIds:[recordId],action:'release',reason:'Fictional retired authoring'}}
+   const response=await command(body);expect(response.status).toBe(400);expect(response.body).toMatchObject({error:'invalid_value',effect:'none'})
+   const result=decode(await rpc('tools/call',{name:'applicationManage',arguments:{command:body}}));expect(result.result?.isError).toBe(true);expect(JSON.stringify(result.result)).toContain('-32602')
+  }
+  expect((await owner.query('SELECT count(*)::int AS n FROM workspace_scope_reviews WHERE workspace_id=$1',[workspaceId])).rows[0].n).toBe(before)
  })
  it('M06 native account loss clears authorization at the actual read endpoint',async()=>{
   await owner.query("UPDATE workspace_members SET role='member' WHERE workspace_id=$1 AND user_id=$2",[workspaceId,actorId])

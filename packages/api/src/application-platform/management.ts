@@ -1,3 +1,4 @@
+import {applicationLegacyViewInput,applicationLegacyApplyInput,executeApplicationLegacyReview,type ApplicationLegacyCommand} from './legacy-review.js'
 /** Native app preparation and recovery; registration confers no data rights. [COMP:api/application-auth] */
 import type { Pool, PoolClient } from 'pg'
 import type { ApplicationManagementOverview } from '@use-brian/shared'
@@ -26,6 +27,9 @@ const schemaPreviewBody = applicationSchemaPreviewInput.omit({ typeId: true }).e
 
 /** One command vocabulary for the native human and Brian management adapters. */
 export const applicationManagementCommandSchema = z.discriminatedUnion('kind', [
+ z.object({kind:z.literal('legacy.view'),...applicationLegacyViewInput.shape,assistantId:z.string().uuid().optional()}).strict(),
+ z.object({kind:z.literal('legacy.apply'),...applicationLegacyApplyInput.shape,assistantId:z.string().uuid().optional()}).strict(),
+ z.object({kind:z.literal('legacy.cancel'),...applicationLegacyApplyInput.shape,assistantId:z.string().uuid().optional()}).strict(),
  z.object({kind:z.literal('register'),input:applicationClientInputSchema.innerType().omit({workspaceId:true})}).strict(),
  z.object({kind:z.literal('activation.review'),appId:z.string().uuid(),profile:z.literal('canonical_app_delegation_v1').optional()}).strict(),
  z.object({kind:z.literal('activation.apply'),appId:z.string().uuid(),reviewId:z.string().uuid()}).strict(),
@@ -83,7 +87,7 @@ export class ApplicationManagementService {
     await this.transaction(actorId,workspaceId,async()=>undefined)
     const base=`/w/${encodeURIComponent(workspaceId)}`
     return {workspaceId,actor:{userId:actorId,assistantId:execution.assistant.id},validForMs:metadata.validForMs,
-      readiness:{qualified:false,reason:'consumer_qualification_incomplete',legacyReview:'unavailable',canActivate:false},
+      readiness:{qualified:false,reason:'consumer_qualification_incomplete',canActivate:false},
       modules,governance,clients,selectedAppId:appId,grants,credentials,schemas,
       sources:{state:metadata.sources.length?'available':'unavailable',items:metadata.sources.map(source=>({...source,mappingStatus:'unavailable',keyStatus:'deployment_managed',retentionStatus:'unavailable'}))},
       links:{miniApps:`${base}/studio/mini-apps`,connectors:`${base}/studio/connectors`,programmaticAccess:`${base}/studio/programmatic-access`,access:`${base}/organization?section=access`}}
@@ -95,6 +99,7 @@ export class ApplicationManagementService {
     const command=parsed.data
     const assistant=delivery.assistantId?{assistantId:delivery.assistantId}:{}
     switch(command.kind) {
+      case 'legacy.view':case 'legacy.apply':case 'legacy.cancel':return this.legacyReview(actorId,workspaceId,command,delivery.assistantId??command.assistantId)
       case 'register':return this.create(actorId,{...command.input,workspaceId})
       case 'activation.review':return this.transaction(actorId,workspaceId,async client=>{
         if(!(await client.query('SELECT id FROM application_clients WHERE id=$1 AND workspace_id=$2',[command.appId,workspaceId])).rows[0])throw new ApplicationPlatformError('access_unavailable','The application is unavailable.')
@@ -132,6 +137,15 @@ export class ApplicationManagementService {
       case 'governance.preview':return this.previewGovernance(actorId,workspaceId,{...command.input,...assistant})
       case 'governance.apply':return this.applyGovernance(actorId,workspaceId,command.reviewId,{...command.input,...assistant})
     }
+  }
+  private async legacyReview(actorId:string,workspaceId:string,command:ApplicationLegacyCommand,assistantId?:string) {
+    const execution=await this.nativeSchemaExecution(actorId,workspaceId,assistantId)
+    await execution.security.authority.assertCurrent()
+    const effectful=command.kind!=='legacy.view'
+    const result=await this.transaction(actorId,workspaceId,client=>executeApplicationLegacyReview(client,execution,command),effectful)
+    try {await execution.security.authority.assertCurrent()}
+    catch {throw new ApplicationPlatformError('grant_revoked','The reviewed authority changed. Check the saved review before retrying.',effectful?'committed':'none')}
+    return result
   }
   async managementMcpTools(actorId:string,workspaceId:string,rawSelection:unknown={}) {
     const selection=schemaAssistantInput.safeParse(rawSelection)
