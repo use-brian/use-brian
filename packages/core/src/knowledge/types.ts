@@ -75,7 +75,8 @@ export type KnowledgeStoreInterface = {
     workspaceId: string,
     id: string,
     content: string,
-    scope?: { compartments?: string[]; projectIds?: string[] },
+    scope?: { compartments?: string[]; projectIds?: string[]; actorId?: string; writtenBy?:KnowledgeWriteActor; derivation?:DerivedWriteEvidence; expectedVersion?:string },
+    authority?:SessionContextAuthority,
   ): Promise<{ id: string; path: string } | null>
   hasEntriesForAssistant(assistantId: string): Promise<boolean>
   listSourcesForAssistant(assistantId: string): Promise<Array<{

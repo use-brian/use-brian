@@ -621,7 +621,8 @@ export type KnowledgeStore = {
     workspaceId: string,
     id: string,
     content: string,
-    scope?: { compartments?: string[]; projectIds?: string[]; actorId?: string; expectedPolicyRevision?: string },
+    scope?: { compartments?: string[]; projectIds?: string[]; actorId?: string; writtenBy?:KnowledgeWriteActor; derivation?:DerivedWriteEvidence; expectedVersion?:string; expectedPolicyRevision?: string },
+    authority?:SessionContextAuthority,
   ): Promise<{ id: string; path: string } | null>
   delete(id: string): Promise<boolean>
   deleteBySource(sourceId: string): Promise<number>
@@ -1058,8 +1059,34 @@ export function createDbKnowledgeStore(): KnowledgeStore {
       return row
     },
 
-    async updateManualEntryContent(workspaceId, id, content, scope = {}) {
-      const result = await knowledgeWrite(workspaceId, scope.actorId, async (client, ready, actor) => {
+    async updateManualEntryContent(workspaceId, id, content, scope = {},authority) {
+      scope=structuredClone(scope)
+      if(!authority&&(scope.derivation||scope.writtenBy==='system'))throw new DerivedScopeError('scope_evidence_missing')
+      const result=authority?await(async()=>{
+        const {execution,accumulator}=authority
+        if(!(accumulator instanceof ContextScopeAccumulator)||execution.security.access.workspaceId!==workspaceId
+          ||scope.actorId!==execution.security.access.userId||!scope.expectedVersion||!scope.derivation)throw new DerivedScopeError('scope_evidence_missing')
+        const consumed=new ContextScopeAccumulator(execution.security.provenance);consumed.note(accumulator.evidence)
+        const sources=consumed.evidence.sources??[],key=(values:readonly ScopeSource[])=>JSON.stringify(values.map(source=>
+          [source.resourceKind,source.resourceId,source.version,resourceScopeKey(source)]).sort())
+        if(!sources.length||key(sources)!==key(scope.derivation.sources)||!sources.some(source=>source.resourceKind==='knowledge_entry'
+          &&source.resourceId===id&&source.version===scope.expectedVersion))throw new DerivedScopeError('scope_evidence_missing')
+        const derivation:DerivedWriteEvidence={producer:scope.derivation.producer,sources}
+        return writeRetainedContextFrame(authority,sources,async client=>{
+          await validateDerivedWriteInputs(client,derivation,'read_entity_derivation_source')
+          const prior=await lockKnowledgePrior(client,workspaceId,id,true)
+          if(!prior)throw new WorkspaceAccessError('context_not_available',404)
+          const derived=deriveWriteScope(derivation,{workspaceId,userId:null,assistantId:null,sensitivity:prior.sensitivity,
+            compartments:[...new Set([...prior.compartments,...scope.compartments??[]])],projectIds:[...new Set([...prior.projectIds,...scope.projectIds??[]])]},execution.security.access.userId)
+          if(derived.sensitivity!==prior.sensitivity)throw new DerivedScopeError('scope_visibility_incompatible')
+          const policy=await readAdmissionPolicy(client,workspaceId)
+          const admitted=policy?.setupState==='ready'?await admitKnowledgeWrite(client,execution.security.access.userId,
+            {...scope,workspaceId,sensitivity:prior.sensitivity,compartments:derived.compartments,projectIds:derived.projectIds},prior):derived
+          await client.query("SELECT set_config('app.knowledge_event_actor',$1,true)",[execution.security.access.userId])
+          return client.query<KnowledgeEntry>(`SELECT ${ENTRY_COLUMNS} FROM update_admitted_knowledge_entry_body($1,$2,$3,$4,$5,$6,$7,$8)`,
+            [workspaceId,id,scope.expectedVersion,content,derivation.producer,JSON.stringify(sources),admitted.compartments,admitted.projectIds])
+        })
+      })():await knowledgeWrite(workspaceId, scope.actorId, async (client, ready, actor) => {
         if (ready) {
           const prior = await lockKnowledgePrior(client, workspaceId, id, true)
           if (!prior) throw new WorkspaceAccessError('context_not_available', 404)
@@ -1090,13 +1117,18 @@ export function createDbKnowledgeStore(): KnowledgeStore {
         tags: row.tags ?? [],
         sensitivity: row.sensitivity,
         sourceId: row.sourceId ?? null,
-        actorId: null,
-        // Sole caller is the assistant's `updateKnowledgeEntry` tool (manual
+        actorId: authority?.execution.security.access.userId??null,
+        // Sole product caller is the assistant's `updateKnowledgeEntry` tool (manual
         // mode) — `system` by construction, so a KB-maintenance workflow does
         // not re-trigger on its own manual-entry edits.
         writtenBy: 'system',
       })
-      return { id: row.id, path: row.path }
+      if(!authority)return {id:row.id,path:row.path}
+      try{
+        const current=await createDbKnowledgeStore().getById(authority.execution.security.access,row.id,authority)
+        if(!current)throw new DerivedScopeError('scope_source_changed')
+        return bindScopeSources({id:current.id,path:current.path},boundScopeSources(current))
+      }catch(error){throw Object.assign(error instanceof Error?error:new Error('scope_source_changed'),{retrySafe:false,operationMayHaveExecuted:true})}
     },
 
     async delete(id) {

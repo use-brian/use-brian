@@ -750,8 +750,12 @@ export function createKnowledgeTools(
       }
 
       // Manual entry — targeted body-only store update (title / tags /
-      // sensitivity / compartments / related links untouched).
+      // sensitivity / related links preserved; Team/Project floors may grow).
       try {
+        // This mandatory read influenced the replacement even if it was internal.
+        context.scopeAccumulator?.note(scopeEvidenceFromRows([entry]))
+        const consumed=new ContextScopeAccumulator(context.executionContext?.security.provenance)
+        consumed.note(context.scopeAccumulator?.evidence)
         const updated = await store.updateManualEntryContent(
           context.workspaceId,
           entry.id,
@@ -759,7 +763,10 @@ export function createKnowledgeTools(
           {
             compartments: successorStamp.compartments,
             projectIds: successorStamp.projectIds,
+            actorId:context.userId,writtenBy:'system',expectedVersion:entry.scopeVersion,
+            derivation:{producer:'tool:updateKnowledgeEntry',sources:consumed.evidence.sources??[]},
           },
+          context.executionContext&&context.scopeAccumulator?{execution:context.executionContext,accumulator:context.scopeAccumulator}:undefined,
         )
         if (!updated) {
           return {
@@ -773,8 +780,12 @@ export function createKnowledgeTools(
             isError: true,
           }
         }
-        return { data: { id: updated.id, path: updated.path, message: 'Knowledge entry updated.' } }
+        return { data: { id: updated.id, path: updated.path, message: 'Knowledge entry updated.' },scopeEvidence:scopeEvidenceFromRows([updated]) }
       } catch (err) {
+        if(typeof err==='object'&&err!==null&&'operationMayHaveExecuted'in err&&err.operationMayHaveExecuted===true){
+          return{isError:true,meta:{retrySafe:false,operationMayHaveExecuted:true},
+            data:'Knowledge update may have committed, but current access could not be confirmed. Do not repeat the write. Check the existing entry with current access before deciding what to do next.'}
+        }
         return toolFailure(err, {
           tool: 'updateKnowledgeEntry',
           target: `entry "${input.id}"`,

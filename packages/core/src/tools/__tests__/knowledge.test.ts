@@ -686,7 +686,8 @@ describe('[COMP:tools/knowledge] createKnowledgeTools', () => {
         't1',
         'm1',
         'New body',
-        { compartments: [], projectIds: [] },
+        { compartments: [], projectIds: [], actorId:ctx.userId,writtenBy:'system',expectedVersion:undefined,derivation:{producer:'tool:updateKnowledgeEntry',sources:[]} },
+        undefined,
       )
       expect(result.data).toMatchObject({ id: 'm1', path: 'products/vault' })
     })
