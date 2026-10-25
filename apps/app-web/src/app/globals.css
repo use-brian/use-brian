@@ -312,10 +312,9 @@
     }
   }
 
-  /* Fluid focus ring instead of jarring solid outline. Applies to discrete
-     controls such as buttons, checkboxes, and switches. Text-entry fields use
-     the border-only override below: their EXISTING frame turns blue instead
-     of growing a second frame outside the box.
+  /* One snug keyboard indicator, following the control's OWN shape. Never
+     combine an outside halo, a white gap and a per-component Tailwind ring.
+     Text-entry fields use their existing border instead of a second frame.
 
      COMPOSITE FIELD CONVENTION: when a bordered box groups an inner control
      WITH sibling controls (e.g. a comment composer = textarea + attach/mention/
@@ -327,9 +326,35 @@
      References: page-comments.tsx, comment-thread-body.tsx, and the
      ChatComposer usage in empty-page-landing.tsx. */
   :focus-visible {
-    outline: none;
-    box-shadow: 0 0 0 2px var(--background), 0 0 0 4px color-mix(in srgb, var(--ring) 65%, transparent);
-    transition: box-shadow 150ms ease;
+    outline: 2px solid var(--ring);
+    outline-offset: 0;
+  }
+  /* Override legacy focus ring/outline utilities so shared and ad-hoc action
+     controls get ONE indicator. Bordered picker triggers keep their field
+     treatment; menu selection/hover and validation colours are independent. */
+  :where(
+    button, a[href], summary, [role="button"], [role="tab"],
+    [role="checkbox"], [role="radio"], [role="switch"], [role="slider"],
+    input[type="checkbox"], input[type="radio"], input[type="range"]
+  ):not([role="combobox"]):focus-visible {
+    outline: 2px solid var(--ring) !important;
+    outline-offset: 0 !important;
+    box-shadow: none !important;
+  }
+  /* A resize separator is a line, not a tall rectangular button. Keep its
+     grab area transparent while making keyboard position clear on its axis. */
+  :where([role="separator"][tabindex]):focus-visible {
+    outline: none !important;
+    background-color: transparent !important;
+    box-shadow: inset -2px 0 0 var(--ring) !important;
+  }
+  :where([role="separator"][tabindex][aria-orientation="horizontal"]):focus-visible {
+    box-shadow: inset 0 -2px 0 var(--ring) !important;
+  }
+  /* The workspace divider owns its track and central grip inside the hit box. */
+  [data-workspace-sidebar-resize]:focus-visible {
+    outline: none !important;
+    box-shadow: none !important;
   }
   /* Text-entry controls are fields, not floating actions. Their own border is
      the focus indicator. `!important` is intentional: Tailwind focus-ring
@@ -353,6 +378,7 @@
     input[type="week"],
     textarea
   ):focus-visible {
+    outline: none !important;
     border-color: var(--ring) !important;
     box-shadow: none !important;
     transition: border-color 150ms ease;
@@ -375,14 +401,21 @@
   ):focus-visible[aria-invalid="true"] {
     border-color: var(--destructive) !important;
   }
-  /* Round the ring to the parent's shape for controls that don't carry their
-     own radius — EXCEPT input/textarea. Those are scroll containers, so
-     border-radius CLIPS their text: a focused zero-padding composer textarea
-     inside a `rounded-2xl` box inherited the 16px radius and cut the corner
-     off its first glyph (the comment composer's "Make…" → "∕lake…" bug).
-     Their ring (when not opted out) follows their own radius instead. */
-  :focus-visible:not(input, textarea) {
-    border-radius: inherit;
+  @media (forced-colors: active) {
+    :root :focus-visible {
+      outline: 2px solid Highlight !important;
+      outline-offset: 0 !important;
+      box-shadow: none !important;
+    }
+    :root [data-workspace-sidebar-resize]:focus-visible,
+    .doc-collab-editor .ProseMirror:focus-visible,
+    .office-document-prosemirror:focus-visible {
+      outline: none !important;
+    }
+    [data-workspace-sidebar-resize]:focus-visible :is([data-sidebar-resize-track], [data-sidebar-resize-grip]) {
+      background-color: Highlight !important;
+      forced-color-adjust: none;
+    }
   }
 
   /* The doc editor is a page-sized `contenteditable`; Chromium matches
@@ -1790,6 +1823,29 @@
 }
 
 @layer components {
+  /* Primitive defaults must yield to caller geometry utilities. In the
+     utilities layer these override absolute/rounded-full and displace the
+     Brain graph's overlay chips while squaring off its circular nodes. */
+  .skeleton {
+    position: relative;
+    overflow: hidden;
+    background: color-mix(in srgb, var(--muted-foreground) 12%, transparent);
+    border-radius: var(--radius-sm, 0.5rem);
+  }
+  .skeleton::after {
+    content: "";
+    position: absolute;
+    inset: 0;
+    background: linear-gradient(
+      90deg,
+      transparent 0%,
+      color-mix(in srgb, var(--muted-foreground) 8%, transparent) 50%,
+      transparent 100%
+    );
+    background-size: 200% 100%;
+    animation: fb-shimmer 1.4s linear infinite;
+  }
+
   /* Constrained, centered reading column for non-full-width doc pages.
      Wraps the page body (title + editor) so it reads at a comfortable measure
      (~720px); the full-width mode swaps this for `w-full` in doc-shell.tsx.
@@ -1958,26 +2014,6 @@
       transparent 50%,
       color-mix(in srgb, black 28%, transparent) 100%
     );
-  }
-
-  .skeleton {
-    position: relative;
-    overflow: hidden;
-    background: color-mix(in srgb, var(--muted-foreground) 12%, transparent);
-    border-radius: var(--radius-sm, 0.5rem);
-  }
-  .skeleton::after {
-    content: "";
-    position: absolute;
-    inset: 0;
-    background: linear-gradient(
-      90deg,
-      transparent 0%,
-      color-mix(in srgb, var(--muted-foreground) 8%, transparent) 50%,
-      transparent 100%
-    );
-    background-size: 200% 100%;
-    animation: fb-shimmer 1.4s linear infinite;
   }
 
   /* Global navigation progress bar — a thin top-of-viewport sliver that animates
@@ -2412,6 +2448,11 @@ html[data-vt-back="true"]::view-transition-new(root) {
   background-color: var(--sidebar);
   background-image: var(--sidebar-surface-image, none);
 }
+/* The default app card shares one surface across its contextual and main panes.
+   Custom palettes retain their authored sidebar colour and brand wash. */
+:root:not([data-palette="custom"]) .doc-sidebar-surface[data-doc-context-sidebar] {
+  background-color: var(--background);
+}
 
 /* Active sidebar page row — the "you are here" pill. Treatment is token-driven
    (see the PALETTE SYSTEM block): `--nav-active-bg` is a cyan/indigo→violet
@@ -2547,6 +2588,14 @@ html[data-vt-back="true"]::view-transition-new(root) {
 .is-canvas-desktop [data-doc-sidebar-head] {
   padding-left: var(--doc-titlebar-lights);
 }
+/* The phone drawer heading shares the native workspace icon's clearance. */
+@media (max-width: 767px) {
+  .is-canvas-desktop:not(.is-canvas-desktop-standard-frame) [data-workspace-menu-host],
+  .is-canvas-desktop:not(.is-canvas-desktop-standard-frame) [data-workspace-context-heading] {
+    height: 5.5rem;
+    padding-top: 2rem;
+  }
+}
 /* When the sidebar is collapsed the tab bar slides to the window's left edge,
    under the lights — so THEN (and only then) it takes the same clearance.
    Two selector shapes for the same rule: the doc shell sets the collapsed flag
@@ -2555,6 +2604,22 @@ html[data-vt-back="true"]::view-transition-new(root) {
 .is-canvas-desktop [data-sidebar-collapsed="true"] [data-doc-topbar],
 .is-canvas-desktop [data-doc-topbar][data-sidebar-collapsed="true"] {
   padding-left: var(--doc-titlebar-lights);
+}
+@media (min-width: 768px) {
+  /* Only desktop has the persistent rail taking the first 56px. A narrow
+     native window uses the phone drawer and needs the full lights inset. */
+  .is-canvas-desktop [data-doc-sidebar-head],
+  .is-canvas-desktop [data-sidebar-collapsed="true"] [data-doc-topbar],
+  .is-canvas-desktop [data-doc-topbar][data-sidebar-collapsed="true"] {
+    padding-left: max(0.5rem, calc(var(--doc-titlebar-lights) - 3.5rem));
+  }
+}
+
+/* The workspace toolbar is now the actual window-wide title row. Its macOS
+   clearance never depends on whether the contextual sidebar is collapsed. */
+.is-canvas-desktop .workspace-window-shell [data-workspace-window-header] :is([data-doc-topbar], [data-workspace-search-fallback]) {
+  --workspace-header-leading: calc(0.5rem + var(--doc-titlebar-lights));
+  padding-left: calc(0.5rem + var(--doc-titlebar-lights));
 }
 
 /* (2) Window drag. Chrome bars are drag handles; interactive descendants (and
@@ -2841,6 +2906,78 @@ button.doc-comment-card:hover {
   border-color: color-mix(in srgb, var(--primary) 30%, transparent);
 }
 
+/* ── Markdown prose styling for chat / comment messages ──────────
+   Ported verbatim from apps/web's globals.css so the doc chat
+   (FloatingChat) and the in-doc comment threads (CommentThreadBody)
+   render the assistant's markdown — bold, lists, inline code, links —
+   identically to the main app. Tailwind Preflight strips list bullets
+   and paragraph margins, so without these rules the `.chat-markdown`
+   wrapper those components already reference is a no-op. Theme-token
+   colours keep it correct in app-web's light-default + dark themes. */
+.chat-markdown p { margin: 0.375rem 0; font-weight: 450; }
+.chat-markdown p:first-child { margin-top: 0; }
+.chat-markdown p:last-child { margin-bottom: 0; }
+.chat-markdown ul, .chat-markdown ol { margin: 0.5rem 0; padding-left: 1.5rem; }
+.chat-markdown li { margin: 0.25rem 0; font-weight: 450; }
+.chat-markdown ul { list-style-type: disc; }
+.chat-markdown ol { list-style-type: decimal; }
+.chat-markdown strong { font-weight: 650; color: var(--foreground); }
+.chat-markdown em { font-style: italic; }
+.chat-markdown h1, .chat-markdown h2, .chat-markdown h3 {
+  font-weight: 650; margin: 0.75rem 0 0.375rem;
+  font-family: var(--font-rocknroll), ui-sans-serif, system-ui, sans-serif;
+  color: var(--foreground);
+}
+.chat-markdown h1 { font-size: 1.25em; }
+.chat-markdown h2 { font-size: 1.125em; }
+.chat-markdown h3 { font-size: 1em; }
+.chat-markdown code {
+  font-size: max(0.875em, 0.8125rem); padding: 0.15em 0.35em;
+  background: var(--muted); border-radius: 0.25rem;
+  font-family: var(--font-code);
+}
+.chat-markdown pre {
+  margin: 0.5rem 0; padding: 0.75rem 1rem;
+  background: var(--muted); border-radius: 0.5rem;
+  overflow-x: auto; font-size: max(0.875em, 0.8125rem);
+}
+.chat-markdown pre code {
+  font-size: inherit;
+  padding: 0; background: none; border-radius: 0;
+}
+/* Leave room for the always-visible touch copy action above the first line. */
+@media (max-width: 767px), (pointer: coarse) {
+  .chat-markdown [data-chat-code-block] > pre { padding-top: 3.5rem; }
+}
+.chat-markdown a {
+  color: var(--primary); text-decoration: underline;
+  text-underline-offset: 2px;
+}
+.chat-markdown blockquote {
+  border-left: 3px solid var(--border); padding-left: 0.75rem;
+  margin: 0.5rem 0; color: var(--muted-foreground);
+}
+/* GFM tables (remark-gfm consumers — the brain entry reader). Preflight
+   leaves <table> unstyled, so without these a synced KB spec's tables
+   render as a borderless text blob. Token-driven, wrapped scroll on
+   overflow via the display:block table. */
+.chat-markdown table {
+  display: block; overflow-x: auto;
+  overflow-wrap: normal;
+  margin: 0.75rem 0; border-collapse: collapse;
+  font-size: max(0.875em, 0.8125rem); line-height: 1.45;
+}
+.chat-markdown th, .chat-markdown td {
+  border: 1px solid var(--border);
+  padding: 0.375rem 0.625rem;
+  text-align: left; vertical-align: top;
+}
+.chat-markdown th {
+  background: var(--muted); font-weight: 600;
+  color: var(--foreground);
+}
+.chat-markdown tr:nth-child(even) td { background: color-mix(in srgb, var(--muted) 35%, transparent); }
+
 /* Office Document is a semantic ProseMirror projection of canonical page
    settings. The outer scroller owns overflow; every section stays reachable
    on phone without shrinking the canonical printable width. */
@@ -3020,4 +3157,21 @@ button.doc-comment-card:hover {
   .org-children > .org-node:first-child::before, .org-children > .org-node:last-child::after { border: 0 none; }
   .org-children > .org-node:last-child::before { border-right: 1px solid color-mix(in srgb, var(--foreground) 22%, transparent); border-top-right-radius: 6px; }
   .org-children > .org-node:first-child::after { border-top-left-radius: 6px; }
+}
+
+/* Chat gives short phone/keyboard viewports to the conversation and input. */
+@media (max-height: 480px) {
+  [data-chat-greeting] { display: none; }
+}
+[data-chat-keyboard-constrained] [data-chat-greeting] { display: none; }
+
+/* Use the reading column's width for phone-sized tablet and split-window panes. */
+[data-chat-surface] { container-type: inline-size; }
+@container (max-width: 559px) {
+  [data-chat-greeting] {
+    min-height: 0;
+    padding-top: 0;
+    padding-bottom: 1.5rem;
+  }
+  [data-chat-greeting] h2 { max-width: 20rem; font-size: 24px; line-height: 1.3; }
 }

@@ -107,6 +107,7 @@ describe("[COMP:app-web/workflow] approval notification channel", () => {
     const option = [...document.querySelectorAll<HTMLElement>("[role=option]")]
       .find((node) => node.textContent === label)!;
     expect(option).toBeTruthy();
+    await act(async () => { option.focus(); });
     await act(async () => option.click());
   }
 

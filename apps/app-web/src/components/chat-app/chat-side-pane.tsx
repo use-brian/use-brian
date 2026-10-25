@@ -14,7 +14,7 @@
  *   pane automatically; only the close control here does (D8).
  * - **Layout:** a resizable split section beside the transcript on desktop
  *   (`usePeekResize`, key `chat:side-pane-width`); a full-screen overlay
- *   below `sm` (T11), opened from the header's tab-count button.
+ *   below 960px of available Chat width (T11), opened from the header toggle.
  *
  * The host renders the bodies it owns (`renderTab`: Work, and the kinds
  * later phases add); this component renders the `document` and `file`
@@ -68,6 +68,7 @@ import { ChatDocumentBody } from "./chat-document-viewer";
 import { PanePageBody, PaneUrlBody } from "./chat-pane-bodies";
 import { PaneBrowserBody } from "./chat-pane-browser";
 import { ResearchDetail } from "./research-detail";
+import styles from "./chat-surface.module.css";
 
 const CHAT_SIDE_PANE_ID = "chat-side-pane";
 
@@ -234,16 +235,17 @@ export function ChatSidePane({
       aria-label={t.label}
       style={width !== null ? { width } : undefined}
       className={cn(
-        "relative flex h-full max-w-full shrink-0 flex-col overflow-hidden border-l border-border bg-background",
+        styles.sidePane,
+        "relative flex h-full max-w-[50%] shrink-0 flex-col overflow-hidden border-l border-border bg-background",
         width === null && "w-full sm:w-[380px] lg:w-[440px]",
-        // Below `sm` the pane is a full-screen OVERLAY, never a flex sibling
-        // that would squeeze the transcript to nothing (T11, responsive M5).
-        "max-sm:absolute max-sm:inset-0 max-sm:z-20 max-sm:!w-full max-sm:border-l-0",
+        // Container styles also cover narrow tablet/desktop main panes. The
+        // phone fallback keeps this component usable outside the Chat host.
+        "max-md:absolute max-md:inset-0 max-md:z-20 max-md:!w-full max-md:max-w-full max-md:border-l-0",
         !resizing && "transition-[width] duration-200 ease-out",
         resizing && "select-none",
       )}
     >
-      <PeekResizeHandle resizing={resizing} {...handleProps} />
+      <div className={styles.sidePaneResize}><PeekResizeHandle resizing={resizing} {...handleProps} /></div>
 
       <header className="flex shrink-0 items-center gap-1 border-b border-border/70 py-1.5 pl-2 pr-1.5">
         <div
@@ -312,7 +314,7 @@ export function ChatSidePane({
       </header>
 
       {(historyNav || tabActions || builtinAction || pinAction) && current.key !== WORK_TAB_KEY && (
-        <div className="flex shrink-0 items-center gap-1 border-b border-border/70 px-2 py-1">
+        <div data-chat-pane-actions className="flex shrink-0 items-center gap-1 border-b border-border/70 px-2 py-1">
           {historyNav && (
             <>
               <button

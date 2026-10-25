@@ -19,13 +19,14 @@ function render(pathname: string, search = "") {
 }
 
 describe("[COMP:app-web/office-navigation] Office sidebar navigation", () => {
-  it("keeps Suggested for you above the Office-local navigation", () => {
+  it("keeps workspace app switching separate from Office-local navigation", () => {
     const source = readFileSync(new URL("../../doc-sidebar.tsx", import.meta.url), "utf8");
-    const suggested = source.indexOf("<HomeDock workspaceId={workspaceId} />");
+    const rail = source.indexOf("<WorkspaceAppRail");
     const office = source.indexOf("<OfficeSidebarPanel workspaceId={workspaceId} />");
-    expect(suggested).toBeGreaterThan(-1);
+    expect(rail).toBeGreaterThan(-1);
     expect(office).toBeGreaterThan(-1);
-    expect(suggested).toBeLessThan(office);
+    expect(rail).toBeLessThan(office);
+    expect(source).not.toContain("<HomeDock");
   });
 
   it("keeps only Files, Templates, and Trash in normal Office navigation", () => {

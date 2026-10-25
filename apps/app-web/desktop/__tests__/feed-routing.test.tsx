@@ -19,6 +19,9 @@ vi.mock("@/components/doc/doc-sidebar-data", () => ({
   DocSidebarDataProvider: ({ children }: { children: ReactNode }) => children,
   useSidebarData: () => ({ homeApps: ["feed", "page"], homeAppsLoading: false }),
 }));
+vi.mock("@/components/chat-app/chat-surface", () => ({
+  ChatSurface: () => <main data-chat>Chat</main>,
+}));
 vi.mock("@/contexts/brain-surface-context", () => ({ BrainSurfaceProvider: ({ children }: { children: ReactNode }) => children }));
 vi.mock("@/contexts/primary-assistant", () => ({ PrimaryAssistantProvider: ({ children }: { children: ReactNode }) => children }));
 vi.mock("@/components/ui/confirm-dialog", () => ({ ConfirmDialogProvider: () => null }));
@@ -67,10 +70,10 @@ afterEach(async () => {
 });
 
 describe("[COMP:app-web/desktop-spa] Feed routes in both editions", () => {
-  it("opens the first configured mini app from a bare workspace route", async () => {
+  it("opens Chat Home from a bare workspace route regardless of catalogue order", async () => {
     await mount("oss", "/w/workspace-one");
-    expect(window.location.hash).toBe("#/w/workspace-one/feed");
-    expect(host.querySelector("h1")?.textContent).toBe("Feed Plan");
+    expect(window.location.hash).toBe("#/w/workspace-one/chat");
+    expect(host.querySelector("[data-chat]")?.textContent).toBe("Chat");
     expect(host.querySelector("[data-page]")).toBeNull();
   });
 

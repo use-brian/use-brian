@@ -1,5 +1,6 @@
 "use client";
 
+import styles from "./chat-surface.module.css";
 import { RoutineChatPickup } from "@/components/workflow/routine-intake";
 
 
@@ -105,7 +106,6 @@ import {
   Check,
   ChevronDown,
   Copy,
-  Paperclip,
   Pencil,
   Plus,
   Reply,
@@ -125,6 +125,8 @@ import {
 } from "@/lib/use-mid-turn-queue";
 import { useChatController } from "@/lib/chat/use-chat-controller";
 import { QueuedInputs } from "@/components/ui/queued-inputs";
+import { ChatContextBar, useChatVisibleViewport } from "./chat-responsive-controls";
+import { ChatAudienceMenu } from "./chat-audience-menu";
 import { OperatorTopbar } from "@/components/operator/operator-topbar";
 import { WorkEntry } from "./work-entry";
 import { ClientDeliveryOversight } from "./client-delivery-oversight";
@@ -147,6 +149,7 @@ import { ChatFileAttachments } from "@/components/chrome/chat-file-attachment";
 import { RecordingUploadStatus } from "@/components/recordings/recording-upload-status";
 import {
   DockRecorderButton,
+  DockRecorderOptions,
   DockRecorderNotice,
   DockRecorderRecovery,
   DockRecorderStrip,
@@ -223,7 +226,7 @@ import {
   typingPresenceActive,
   type ChatSessionPolicy,
 } from "@/lib/chat-session-policy";
-import {ModeAwareCreationContext,useCreationContext} from "@/components/context/mode-aware-context";
+import {useCreationContext} from "@/components/context/mode-aware-context";
 import { ContextScopeChips } from "@/components/context/context-scope-chips";
 import {
   listContextProjects,
@@ -361,9 +364,9 @@ const TYPING_BEACON_REFRESH_MS = 4_000;
 /** No draft change for this long reads as "stopped typing". */
 const TYPING_IDLE_OFF_MS = 5_000;
 
-/** The dock's assistant-reply markdown wrapper, verbatim. */
+/** Full-page reading scale; compact docks retain their own denser typography. */
 const MARKDOWN_CLS =
-  "chat-markdown prose prose-sm dark:prose-invert max-w-none text-[14px] leading-[1.6] text-foreground break-words";
+  "chat-markdown prose prose-sm dark:prose-invert max-w-none text-[16px] @[560px]/chat-reading:text-[15px] leading-[1.65] text-foreground [overflow-wrap:anywhere]";
 
 /** Narrow an SSE `data` payload to an object without trusting its shape. */
 function coercePayload(data: unknown): Record<string, unknown> {
@@ -386,6 +389,8 @@ type RemoteConfirmation = {
 export function ChatSurface({ workspaceId }: { workspaceId: string }) {
   const t = useT().chatApp;
   const searchCopy = useT().workspaceSearch;
+  const workCopy = useT().briefs.work;
+  const chatLabel = useT().operatorBar.chat;
   const locale = useLocale();
   // The dock's chat dictionary — tool narration, activity copy, copy/stop
   // labels. Reused verbatim so the two surfaces never phrase one thing twice.
@@ -474,6 +479,7 @@ export function ChatSurface({ workspaceId }: { workspaceId: string }) {
   const [pickedContextProjectId, setPickedContextProjectId] = useState<string | null>(null);
 
   const [switcherOpen, setSwitcherOpen] = useState(false);
+  const [composerAddOpen, setComposerAddOpen] = useState(false);
   /** Personal rows across every assistant — resolves an open thread's binding
    *  (each row carries the `assistantId` it was fetched under). */
   const personalSessions: DocSession[] = cachedPersonalSessions ?? EMPTY_PERSONAL;
@@ -3713,18 +3719,6 @@ export function ChatSurface({ workspaceId }: { workspaceId: string }) {
     cancelEdit();
   }, [activeSessionId, cancelEdit]);
 
-  // The Personal/Workspace segmented control. Deliberately louder than a
-  // typical tab pair (icons + roomier hit area): posting into a shared thread
-  // versus a private one is a real audience change, so which mode is active
-  // has to be legible at a glance.
-  const viewTabCls = (active: boolean) =>
-    cn(
-      "flex items-center gap-1.5 rounded-md px-3 py-1 text-xs font-medium transition-colors max-md:py-2.5",
-      active
-        ? "bg-background text-foreground shadow-sm"
-        : "text-sidebar-foreground/60 hover:text-sidebar-accent-foreground",
-    );
-
   // Work Bench uses the same active turn truth as the transcript. Direct
   // sends have the richest SSE timeline; followed teammate turns use the
   // mirrored timeline. A suspended question remains visible as waiting work
@@ -4037,8 +4031,8 @@ export function ChatSurface({ workspaceId }: { workspaceId: string }) {
           inputWrapClassName="order-1 col-span-2 min-w-0"
           rowClassName="grid grid-cols-[minmax(0,1fr)_auto] items-center gap-1 px-2 pb-2"
           textareaClassName={cn(
-            "w-full max-h-[240px] min-w-0 resize-none overflow-y-auto",
-            "bg-transparent px-1.5 pt-2.5 pb-1 text-[16px] leading-relaxed outline-none md:text-sm",
+            "w-full max-h-[min(240px,30dvh,var(--chat-input-max-height,240px))] min-w-0 resize-none overflow-y-auto",
+            "bg-transparent px-1.5 pt-3 pb-2 text-[16px] leading-6 outline-none md:pt-4",
             "placeholder:text-muted-foreground focus-visible:shadow-none",
           )}
           placeholder={t.composerPlaceholder}
@@ -4084,7 +4078,58 @@ export function ChatSurface({ workspaceId }: { workspaceId: string }) {
   // floating record button rests (WorkspaceChrome's FloatingRecorderHost);
   // registering it lifts the button above Send instead of covering it.
   const composerBarRef = useRef<HTMLDivElement>(null);
+  const heroComposerBarRef = useRef<HTMLDivElement>(null);
+  const visibleViewportRef = useChatVisibleViewport();
   useFloatingRecorderClearance(composerBarRef, !heroMode);
+  useFloatingRecorderClearance(heroComposerBarRef, heroMode);
+
+  const askControl = askVisible && activeAssistant && (
+    <button
+      type="button"
+      onClick={() => setAskArmed((v) => !v)}
+      aria-pressed={askArmed}
+      // The chord rides the accessible name too: the printed chip is
+      // `aria-hidden` (it is a rendering of the same fact), so this
+      // is the only place a screen reader hears it.
+      aria-label={`${format(t.askLabel, {
+        name: activeAssistant.name,
+      })} · ${format(t.askShortcutHint, {
+        keys: accelEnterLabel(),
+      })}`}
+      // The chord lives ON the control it replaces — the toggle is
+      // where someone looks when they are tired of reaching for it.
+      // Printed beside the label rather than left to the tooltip: a
+      // hover-only hint is found by the pointer users who need it
+      // least. The tooltip keeps the fuller sentence.
+      title={`${t.askArmedAria} · ${format(t.askShortcutHint, {
+        keys: accelEnterLabel(),
+      })}`}
+      className={cn(
+        "flex min-h-8 min-w-0 items-center gap-1 rounded-md px-2 py-1 text-xs font-medium transition-colors focus-visible:shadow-none max-md:min-h-11",
+        askArmed
+          ? "bg-primary/15 text-primary ring-1 ring-primary/30"
+          : "text-muted-foreground hover:bg-muted hover:text-foreground",
+      )}
+    >
+      <AtSign className="size-3.5 shrink-0" aria-hidden />
+      <span className="truncate">
+        {format(t.askLabel, { name: activeAssistant.name })}
+      </span>
+      {/* `shrink-0` beside the label's `truncate` keeps the control
+          row one line as the group narrows: the name gives way, the
+          chord does not. Dropped below `sm`, where the row has no
+          width to spare and the tooltip still carries it. */}
+      <kbd
+        aria-hidden
+        className={cn(
+          "hidden shrink-0 font-sans text-[10px] font-normal sm:inline",
+          askArmed ? "text-primary/70" : "text-muted-foreground/70",
+        )}
+      >
+        {accelEnterLabel()}
+      </kbd>
+    </button>
+  );
 
   /** Interlocutor control, rendered INSIDE the composer box (bottom-left):
    *  a NEW personal chat picks its assistant here and the session sticks to
@@ -4102,8 +4147,10 @@ export function ChatSurface({ workspaceId }: { workspaceId: string }) {
     }) ? (
       <Popover open={switcherOpen} onOpenChange={setSwitcherOpen}>
         <PopoverTrigger
-          className="flex min-w-0 items-center gap-1.5 rounded-md px-1.5 py-1 text-xs font-medium text-muted-foreground transition-colors hover:bg-muted hover:text-foreground focus-visible:shadow-none max-md:py-2.5"
-          aria-label={tChat.switchAssistant}
+          className="flex size-11 shrink-0 items-center justify-center gap-1.5 rounded-lg text-xs font-medium text-muted-foreground transition-colors hover:bg-muted hover:text-foreground focus-visible:shadow-none @[560px]/chat-reading:h-9 @[560px]/chat-reading:w-auto @[560px]/chat-reading:max-w-48 @[560px]/chat-reading:min-w-9 @[560px]/chat-reading:shrink @[560px]/chat-reading:px-2"
+          data-chat-assistant-control
+          title={activeAssistant.name}
+          aria-label={`${tChat.switchAssistant}: ${activeAssistant.name}`}
         >
           <AssistantAvatar
             id={activeAssistant.id}
@@ -4111,13 +4158,14 @@ export function ChatSurface({ workspaceId }: { workspaceId: string }) {
             iconSeed={activeAssistant.iconSeed ?? undefined}
             size="xs"
           />
-          <span className="truncate">{activeAssistant.name}</span>
+          <span className="hidden min-w-0 truncate @[560px]/chat-reading:inline">{activeAssistant.name}</span>
           <ChevronDown
-            className="size-3.5 shrink-0 text-muted-foreground"
+            className="hidden size-3.5 shrink-0 text-muted-foreground @[560px]/chat-reading:block"
             aria-hidden
           />
         </PopoverTrigger>
         <PopoverContent
+          side="top"
           align="start"
           className="w-60 max-w-[calc(100vw-2rem)] gap-0.5 p-1"
         >
@@ -4133,7 +4181,7 @@ export function ChatSurface({ workspaceId }: { workspaceId: string }) {
                 setSwitcherOpen(false);
               }}
               className={cn(
-                "flex w-full items-center gap-2 rounded-md px-2 py-1.5 text-left text-sm transition-colors",
+                "flex w-full items-center gap-2 rounded-md px-2 py-1.5 text-left text-sm transition-colors max-md:min-h-11",
                 a.id === activeAssistant.id
                   ? "bg-muted text-foreground"
                   : "text-muted-foreground hover:bg-muted/60 hover:text-foreground",
@@ -4145,7 +4193,7 @@ export function ChatSurface({ workspaceId }: { workspaceId: string }) {
                 iconSeed={a.iconSeed ?? undefined}
                 size="sm"
               />
-              <span className="min-w-0 flex-1 truncate">{a.name}</span>
+              <span className="min-w-0 flex-1 break-words">{a.name}</span>
               {a.id === activeAssistant.id ? (
                 <Check className="size-4 shrink-0 text-primary" aria-hidden />
               ) : null}
@@ -4154,14 +4202,14 @@ export function ChatSurface({ workspaceId }: { workspaceId: string }) {
         </PopoverContent>
       </Popover>
     ) : (
-      <div className="flex min-w-0 items-center gap-1.5 px-1.5 py-1 text-xs font-medium text-muted-foreground">
+      <div data-chat-assistant-control title={activeAssistant.name} aria-label={activeAssistant.name} className="flex size-11 shrink-0 items-center justify-center gap-1.5 text-xs font-medium text-muted-foreground @[560px]/chat-reading:h-9 @[560px]/chat-reading:w-auto @[560px]/chat-reading:max-w-48 @[560px]/chat-reading:min-w-9 @[560px]/chat-reading:shrink @[560px]/chat-reading:px-2">
         <AssistantAvatar
           id={activeAssistant.id}
           name={activeAssistant.name}
           iconSeed={activeAssistant.iconSeed ?? undefined}
           size="xs"
         />
-        <span className="truncate">{activeAssistant.name}</span>
+        <span className="hidden min-w-0 truncate @[560px]/chat-reading:inline">{activeAssistant.name}</span>
       </div>
     ));
 
@@ -4254,7 +4302,7 @@ export function ChatSurface({ workspaceId }: { workspaceId: string }) {
       {dockRecorder ? (
         <>
           <DockRecorderRecovery rec={dockRecorder} className="mb-1.5 lg:hidden" />
-          <DockRecorderNotice rec={dockRecorder} className="mb-1.5 lg:hidden" />
+          <DockRecorderNotice rec={dockRecorder} className="mb-1.5 lg:hidden max-md:[&_button]:min-h-11 max-md:[&_button]:min-w-11" />
           <DockRecorderStrip rec={dockRecorder} className="mb-1.5 lg:hidden" />
         </>
       ) : null}
@@ -4262,8 +4310,9 @@ export function ChatSurface({ workspaceId }: { workspaceId: string }) {
       ref={mentions.containerRef}
       data-brian-chat-composer
       className={cn(
-        "relative rounded-xl border border-border bg-background shadow-sm",
-        "focus-within:border-ring [&_:focus-visible]:shadow-none",
+        "relative rounded-[20px] border border-border/80 bg-background shadow-sm md:rounded-3xl md:shadow-[0_3px_18px_-8px_rgba(0,0,0,0.18)]",
+        "[&_:focus-visible]:shadow-none",
+        styles.composerFrame,
       )}
     >
       {/* Mention autocomplete — the merged roster (T-H4/T-H5): the workspace
@@ -4306,7 +4355,7 @@ export function ChatSurface({ workspaceId }: { workspaceId: string }) {
           ...slashCommands.highlightRanges,
           ...mentions.highlightRanges,
         ]}
-        inputWrapClassName="order-1 col-span-3 min-w-0"
+        inputWrapClassName="col-span-4 col-start-1 row-start-1 min-w-0"
         // While a turn streams, Send QUEUES into the running turn and
         // Cmd/Ctrl+Enter steers, in every Chat conversation (D3). In a room the
         // message is a post first: an unaddressed one just posts, an addressed
@@ -4336,11 +4385,13 @@ export function ChatSurface({ workspaceId }: { workspaceId: string }) {
             ? () => void send({ forceAddress: true })
             : undefined
         }
-        disabled={!!pendingQuestion||(!activeSessionId&&!creationContext.ready)}
+        // Drafting needs no authority read; only dispatch waits for context.
+        disabled={!!pendingQuestion}
         // Mid-turn sends are text-only: an attachment needs the full pre-turn
         // pipeline, which belongs to a turn of its own. Staged chips stay
         // visible and ride the next turn.
         sendDisabled={
+          (!activeSessionId && !creationContext.ready) ||
           (chat.state.isStreaming && !canQueueMidTurn) ||
           (canQueueMidTurn && (att.hasReady || pendingRecordings.length > 0)) ||
           !activeAssistant ||
@@ -4362,26 +4413,20 @@ export function ChatSurface({ workspaceId }: { workspaceId: string }) {
         }
         sendLabel={
           <>
-            <ArrowUp className="size-4" aria-hidden />
+            <ArrowUp className="size-[18px] shrink-0" aria-hidden />
             <span className="sr-only">{t.send}</span>
           </>
         }
-        // An explicit two-row grid keeps the footer stable at every width:
-        // textarea spans row one, while the shrinkable controls and the fixed
-        // buttons share row two. The old wrapping flex row could strand Send
-        // alone on a third line when the assistant / Ask labels reached their
-        // min-content widths. Row two has THREE tracks, not two: on a personal
-        // chat mid-turn the muted queue-Send and Stop render side by side, and
-        // a two-track grid pushed Stop onto a row of its own. The horizontal
-        // gap lives on the buttons (`ml-1`) rather than the grid, so the empty
-        // third track costs no width when Stop is absent.
-        rowClassName="grid grid-cols-[minmax(0,1fr)_auto_auto] items-center gap-y-1 px-2 pb-2"
+        // The two trailing tracks keep Send + Stop together (D3). Narrow
+        // panes use one icon-led toolbar; CSS
+        // placement keeps controls mounted while the pane is resized.
+        rowClassName="grid grid-cols-[auto_minmax(0,1fr)_auto_auto] items-center gap-x-0.5 gap-y-1 px-2 pb-2 @[560px]/chat-reading:gap-x-1 @[560px]/chat-reading:gap-y-2 @[560px]/chat-reading:px-3 @[560px]/chat-reading:pb-3"
         // Layout (grid placement) lives on `inputWrapClassName` above so the
         // mention-chip mirror shares this box exactly; only the typography and
         // padding the two layers must agree on stay here.
         textareaClassName={cn(
-          "w-full max-h-[240px] min-w-0 resize-none overflow-y-auto",
-          "bg-transparent px-1.5 pt-2.5 pb-1 text-[16px] leading-relaxed outline-none md:text-sm",
+          "w-full max-h-[min(240px,30dvh,var(--chat-input-max-height,240px))] min-w-0 resize-none overflow-y-auto",
+          "bg-transparent px-1.5 pt-3 pb-2 text-[16px] leading-6 outline-none @[560px]/chat-reading:pt-4",
           "placeholder:text-muted-foreground focus-visible:shadow-none",
         )}
         slotAttachments={
@@ -4474,12 +4519,28 @@ export function ChatSurface({ workspaceId }: { workspaceId: string }) {
           </>
         }
         slotPreInput={
-          // Wraps below `sm` (responsive contract M8): at 360px the paperclip,
-          // recorder, assistant picker, Research and tier picker exceed the
-          // 1fr track's width and used to run under Send. The 1fr track is
-          // `minmax(0,…)`, so wrapping keeps every control inside the box
-          // with no horizontal overflow.
-          <div className="order-2 flex min-w-0 flex-wrap items-center gap-0.5 sm:flex-nowrap">
+          <>
+          {/* Stable controls share one line; compact panes omit assistant names
+              and rehost secondary actions in Add without moving the recorder. */}
+          <div data-chat-composer-settings className="col-start-2 row-start-2 flex min-w-0 items-center justify-end gap-1">
+            {interlocutorControl}
+            {/* Tier picker (Standard / Pro / Max) — the shared presentational
+                control; without research/metered props it renders just the
+                Select. Sits beside the assistant picker in the control row. */}
+            <ComposerControls
+              model={model}
+              pickerLabel={tChat.effortLabel}
+              onModelChange={setModel}
+              plan={workspacePlan}
+              researchMode={researchMode}
+              onResearchModeChange={setResearchMode}
+              researchQuota={researchQuota}
+              researchExhausted={researchExhausted}
+              selectSide="top"
+              className={cn(styles.effortControl, "min-w-0 shrink gap-0 [&_[data-slot=select-trigger]]:min-h-11 [&_[data-slot=select-trigger]]:min-w-11 [&_[data-slot=select-trigger]]:max-w-full [&_[data-slot=select-trigger]]:px-2 [&_[data-slot=select-trigger]]:text-xs [&_[data-slot=select-trigger]>span]:truncate [&_[data-slot=select-trigger]>svg]:hidden @[560px]/chat-reading:[&_[data-slot=select-trigger]]:min-h-9 @[560px]/chat-reading:[&_[data-slot=select-trigger]>svg]:block")}
+            />
+          </div>
+          <div data-chat-composer-actions className="col-start-1 row-start-2 flex min-w-0 items-center gap-0.5">
             <input
               ref={fileInputRef}
               type="file"
@@ -4497,101 +4558,62 @@ export function ChatSurface({ workspaceId }: { workspaceId: string }) {
               disabled={!!pendingQuestion || recordingUpload.busy}
               aria-label={tAttach.attach}
               title={tAttach.attach}
-              className="inline-flex size-11 shrink-0 items-center justify-center rounded-md text-muted-foreground transition-colors hover:bg-muted hover:text-foreground disabled:pointer-events-none disabled:opacity-50 focus-visible:shadow-none sm:size-8"
+              className="hidden size-9 shrink-0 items-center justify-center rounded-full text-foreground/80 transition-colors hover:bg-muted hover:text-foreground disabled:pointer-events-none disabled:opacity-50 focus-visible:shadow-none @[560px]/chat-reading:inline-flex"
             >
-              <Paperclip className="size-[17px]" aria-hidden />
+              <Plus className="size-5" aria-hidden />
             </button>
+            <Popover open={composerAddOpen} onOpenChange={setComposerAddOpen}>
+              <PopoverTrigger
+                aria-label={tChat.addToChat}
+                title={tChat.addToChat}
+                className="inline-flex size-11 shrink-0 items-center justify-center rounded-full text-foreground/80 hover:bg-muted disabled:pointer-events-none disabled:opacity-50 @[560px]/chat-reading:hidden"
+                disabled={!!pendingQuestion || recordingUpload.busy}
+              >
+                <Plus className="size-[18px]" aria-hidden />
+              </PopoverTrigger>
+              <PopoverContent data-chat-add-menu side="top" align="start" className="w-64 gap-2 rounded-xl p-2">
+                <button type="button" onClick={() => { setComposerAddOpen(false); fileInputRef.current?.click(); }} className="flex min-h-8 w-full items-center gap-2 rounded-lg px-2 text-left text-sm hover:bg-muted max-md:min-h-11">
+                  <Plus className="size-4" aria-hidden />{tAttach.attach}
+                </button>
+                {askControl}
+                {dockRecorder && <div className="border-t px-2 pt-3">
+                  <DockRecorderOptions rec={dockRecorder} disabled={dockRecorder.active || dockRecorder.phase.kind !== "idle" || recordingUpload.busy} />
+                </div>}
+              </PopoverContent>
+            </Popover>
             {/* The record affordance below `lg`, beside the paperclip exactly
                 as in the dock's expanded composer. At `lg`+ the floating
                 button bottom-right (FloatingRecorderHost) is the one record
                 control, as on every other surface. Hides itself while a
                 capture is latched (the strip above the box owns the pill). */}
-            {dockRecorder ? (
+            {dockRecorder ? (<div className="flex lg:hidden [&>*]:min-h-11 [&_button]:min-h-11 [&_button]:min-w-11 @[560px]/chat-reading:[&>*]:min-h-9 @[560px]/chat-reading:[&_button]:min-h-9 @[560px]/chat-reading:[&_button]:min-w-0 [&_[data-recorder-options-trigger]]:hidden @[560px]/chat-reading:[&_[data-recorder-options-trigger]]:inline-flex">
               <DockRecorderButton
                 rec={dockRecorder}
                 disabled={!!pendingQuestion || recordingUpload.busy}
                 className="lg:hidden"
               />
-            ) : null}
-            {interlocutorControl}
-            {/* Tier picker (Standard / Pro / Max) — the shared presentational
-                control; without research/metered props it renders just the
-                Select. Sits beside the assistant picker in the control row. */}
-            <ComposerControls
-              model={model}
-              onModelChange={setModel}
-              plan={workspacePlan}
-              researchMode={researchMode}
-              onResearchModeChange={setResearchMode}
-              researchQuota={researchQuota}
-              researchExhausted={researchExhausted}
-              showResearch
-              selectSide="top"
-            />
+            </div>) : null}
             {/* The Ask affordance (D1/T3) — only where a plain send would
                 post: a room with more than one human (chat-parity D2).
                 Arming this (or typing an @mention) makes the next send
                 address the assistant. Hidden while the user is the only
                 human, where every send is already addressed. */}
-            {askVisible && activeAssistant && (
-              <button
-                type="button"
-                onClick={() => setAskArmed((v) => !v)}
-                aria-pressed={askArmed}
-                // The chord rides the accessible name too: the printed chip is
-                // `aria-hidden` (it is a rendering of the same fact), so this
-                // is the only place a screen reader hears it.
-                aria-label={`${format(t.askLabel, {
-                  name: activeAssistant.name,
-                })} · ${format(t.askShortcutHint, {
-                  keys: accelEnterLabel(),
-                })}`}
-                // The chord lives ON the control it replaces — the toggle is
-                // where someone looks when they are tired of reaching for it.
-                // Printed beside the label rather than left to the tooltip: a
-                // hover-only hint is found by the pointer users who need it
-                // least. The tooltip keeps the fuller sentence.
-                title={`${t.askArmedAria} · ${format(t.askShortcutHint, {
-                  keys: accelEnterLabel(),
-                })}`}
-                className={cn(
-                  "flex min-w-0 items-center gap-1 rounded-md px-1.5 py-1 text-xs font-medium transition-colors focus-visible:shadow-none",
-                  askArmed
-                    ? "bg-primary/15 text-primary ring-1 ring-primary/30"
-                    : "text-muted-foreground hover:bg-muted hover:text-foreground",
-                )}
-              >
-                <AtSign className="size-3.5 shrink-0" aria-hidden />
-                <span className="truncate">
-                  {format(t.askLabel, { name: activeAssistant.name })}
-                </span>
-                {/* `shrink-0` beside the label's `truncate` keeps the control
-                    row one line as the group narrows: the name gives way, the
-                    chord does not. Dropped below `sm`, where the row has no
-                    width to spare and the tooltip still carries it. */}
-                <kbd
-                  aria-hidden
-                  className={cn(
-                    "hidden shrink-0 font-sans text-[10px] font-normal sm:inline",
-                    askArmed ? "text-primary/70" : "text-muted-foreground/70",
-                  )}
-                >
-                  {accelEnterLabel()}
-                </kbd>
-              </button>
-            )}
+            <div className="hidden min-w-0 max-w-40 @[560px]/chat-reading:block">{askControl}</div>
           </div>
+          </>
         }
         // Send stays visible while a turn streams IF this send can join it —
         // muted, because it queues into a turn rather than starting one. In a
         // room (no queueing) it still gives way to Stop.
         sendButtonClassName={cn(
-          "order-3 ml-1 inline-flex h-11 w-11 shrink-0 items-center justify-center rounded-lg sm:h-8 sm:w-8",
+          "col-start-3 row-start-2 inline-flex size-11 shrink-0 items-center justify-center rounded-full @[560px]/chat-reading:size-9",
           "transition-colors focus-visible:shadow-none",
+          styles.actionTarget,
+          canQueueMidTurn ? styles.secondaryAction : styles.primaryAction,
           "disabled:opacity-40 disabled:pointer-events-none",
           canQueueMidTurn
             ? "bg-muted text-foreground/80 hover:bg-muted/80"
-            : "bg-action text-action-foreground hover:bg-action/90",
+            : "bg-foreground text-background hover:bg-foreground/85",
           chat.state.isStreaming && !canQueueMidTurn && "hidden",
         )}
         slotPostInput={
@@ -4603,9 +4625,11 @@ export function ChatSurface({ workspaceId }: { workspaceId: string }) {
               aria-label={tChat.abort}
               title={tChat.abort}
               className={cn(
-                "order-3 ml-1 inline-flex h-11 w-11 shrink-0 items-center justify-center rounded-lg sm:h-8 sm:w-8",
+                "col-start-4 row-start-2 inline-flex size-11 shrink-0 items-center justify-center rounded-full @[560px]/chat-reading:size-9",
                 "bg-muted text-foreground/80 transition-colors hover:bg-muted/80 hover:text-destructive",
                 "focus-visible:shadow-none",
+                styles.actionTarget,
+                styles.secondaryAction,
               )}
             >
               <Square className="size-3.5 fill-current" aria-hidden />
@@ -4620,44 +4644,17 @@ export function ChatSurface({ workspaceId }: { workspaceId: string }) {
   return (
     <PaneLinkProvider openInPane={openInChatPane}>
     <div
-      className="relative flex h-full min-h-0 flex-col"
+      ref={visibleViewportRef}
+      data-chat-surface
+      className="@container/chat-reading relative flex h-full max-h-[var(--chat-visible-height,100%)] min-h-0 flex-col bg-background"
       {...drop.dropProps}
     >
       <FileDropOverlay active={drop.isDragging} />
       <OperatorTopbar
         app="chat"
-        center={
-          <div
-            role="tablist"
-            aria-label={t.viewSwitchAria}
-            // `shrink-0`: the toggle is the only way to reach workspace rooms
-            // on a phone, so it keeps its intrinsic width and the center slot
-            // scrolls instead (M8). The topbar's chip is already hidden below
-            // `sm` for the same reason.
-            className="flex shrink-0 items-center gap-0.5 rounded-lg bg-sidebar-accent/60 p-0.5"
-          >
-            <button
-              type="button"
-              role="tab"
-              aria-selected={view === "personal"}
-              onClick={() => selectSession(null, "personal")}
-              className={viewTabCls(view === "personal")}
-            >
-              <User className="size-3.5" aria-hidden />
-              {t.viewPersonal}
-            </button>
-            <button
-              type="button"
-              role="tab"
-              aria-selected={view === "workspace"}
-              onClick={() => selectSession(null, "workspace")}
-              className={viewTabCls(view === "workspace")}
-            >
-              <Users className="size-3.5" aria-hidden />
-              {t.viewWorkspace}
-            </button>
-          </div>
-        }
+        identityControl={<ChatAudienceMenu heading view={view} onSelect={mode => selectSession(null, mode)} />}
+        centerVisibility="when-sidebar-unavailable"
+        center={<ChatAudienceMenu view={view} onSelect={mode => selectSession(null, mode)} />}
         right={
           <div className="flex items-center gap-1">
           {/* Attention (chat-app.md -> "Attention"): work that needs this person, narrowed to this chat's Project or session. */}
@@ -4675,10 +4672,12 @@ export function ChatSurface({ workspaceId }: { workspaceId: string }) {
                 : startNewChat
             }
             disabled={startingShared}
-            className="inline-flex items-center gap-1.5 rounded-md px-2 py-1 text-xs font-medium text-sidebar-foreground/80 transition-colors hover:bg-sidebar-accent hover:text-sidebar-accent-foreground disabled:opacity-50 max-md:py-2.5"
+            aria-label={view === "workspace" ? t.newWorkspaceChat : t.newChat}
+            title={view === "workspace" ? t.newWorkspaceChat : t.newChat}
+            className="inline-flex min-h-11 min-w-11 items-center justify-center gap-1.5 rounded-full px-2 text-xs font-medium text-muted-foreground transition-colors hover:bg-muted hover:text-foreground disabled:opacity-50 md:min-h-8 md:min-w-8"
           >
             <Plus className="size-3.5" aria-hidden />
-            {view === "workspace" ? t.newWorkspaceChat : t.newChat}
+            <span className="hidden lg:inline">{view === "workspace" ? t.newWorkspaceChat : t.newChat}</span>
           </button>
           </div>
         }
@@ -4691,39 +4690,22 @@ export function ChatSurface({ workspaceId }: { workspaceId: string }) {
         // reads as changing the audience, not changing apps. Workspace adds
         // the shared-audience explainer, and its first send creates the
         // shared thread before streaming into it (see `send`).
-        <section className="flex min-h-0 min-w-0 flex-1 flex-col items-center overflow-y-auto px-4 py-8">
-          {/* `my-auto`, not `justify-center`: the work entry can make the hero
-              taller than the pane, and a centred overflow cannot scroll to
-              its top. */}
-          <div className="my-auto flex w-full max-w-2xl flex-col items-center gap-5">
-            {activeAssistant && (
-              <div className="flex flex-col items-center gap-2.5 text-center">
-                <AssistantAvatar
-                  id={activeAssistant.id}
-                  name={activeAssistant.name}
-                  iconSeed={activeAssistant.iconSeed ?? undefined}
-                  size="lg"
-                />
-                <h2 className="text-lg font-semibold text-foreground">
-                  {view === "workspace"
-                    ? t.workspaceHeroTitle
-                    : format(t.heroTitle, { name: activeAssistant.name })}
-                </h2>
-              </div>
-            )}
-            <div className="w-full rounded-xl border border-border/70 bg-muted/20 p-3">
-              <ModeAwareCreationContext context={creationContext} compact disabled={att.uploading}/>
+        <section data-chat-welcome className="chat-welcome flex min-h-0 min-w-0 flex-1 flex-col items-center overflow-y-auto px-3 @[560px]/chat-reading:px-6">
+          <div data-chat-welcome-layout className={cn("my-auto flex w-full max-w-[52rem] flex-col py-6 @[560px]/chat-reading:py-12", styles.welcomeLayout)}>
+            <div data-chat-greeting className={cn("flex shrink-0 flex-col items-center pb-6 text-center md:pb-8", styles.welcomeGreeting)}>
+              <h2 className="max-w-[22rem] text-balance text-[24px] font-medium leading-[1.3] tracking-tight text-foreground md:max-w-xl md:text-[28px]">
+                {view === "workspace" ? t.workspaceHeroTitle : t.heroTitle}
+              </h2>
             </div>
-            <div className="w-full">{composerBox}</div>
-            {error && (
-              <p className="rounded-md border border-destructive/40 bg-destructive/10 px-3 py-2 text-xs text-destructive">
-                {error}
-              </p>
-            )}
-            {/* Chat-first work entry (chat-app.md -> "Work entry"): the
-                viewer's work, or the explicitly picked Project / Department's.
-                Pickup only fills the composer; the person sends. */}
-            <div className="w-full">
+            <div ref={heroComposerBarRef} data-chat-welcome-composer className={cn("w-full shrink-0 pb-[max(0.5rem,env(safe-area-inset-bottom))] @[560px]/chat-reading:pb-6", styles.welcomeComposer)}>
+              <ChatContextBar context={creationContext} disabled={att.uploading} />
+              {composerBox}
+              {error && <p role="alert" className="mt-3 rounded-xl bg-destructive/10 px-4 py-2 text-sm text-destructive">{error}</p>}
+              <details data-chat-work-entry className="group/work mt-2">
+                <summary className="flex min-h-8 max-sm:min-h-11 cursor-pointer list-none items-center justify-center gap-2 rounded-lg px-3 text-xs text-muted-foreground hover:text-foreground [&::-webkit-details-marker]:hidden">
+                  {workCopy.title}<ChevronDown className="size-3.5 transition-transform group-open/work:rotate-180" aria-hidden />
+                </summary>
+                <div className="max-h-[40dvh] overflow-y-auto pt-2 pb-3">
               <WorkEntry
                 includeDelivery={view === "personal"}
                 workspaceId={workspaceId}
@@ -4732,22 +4714,25 @@ export function ChatSurface({ workspaceId }: { workspaceId: string }) {
                   : { kind: "personal" }}
                 onDraft={(draft) => { setInput(draft); requestAnimationFrame(focusComposer); }}
               />
+                </div>
+              </details>
             </div>
           </div>
         </section>
       ) : (
       <div className="relative flex min-h-0 min-w-0 flex-1 overflow-hidden">
-      <section className="flex min-h-0 min-w-0 flex-1 flex-col">
+      <section className="@container/chat-reading flex min-h-0 min-w-0 flex-1 flex-col">
         <div
           ref={scrollRef}
+          data-chat-transcript
           // The pill is anchored to a viewport rect, so scrolling would strand
           // it over the wrong text. Dismiss rather than chase.
           onScroll={selectionQuote ? () => setSelectionQuote(null) : undefined}
           // Bottom pad grows by the floating recorder's reserve while it is
           // lifted above the composer, so the newest message scrolls clear.
-          className="min-h-0 flex-1 overflow-y-auto px-4 pt-6 pb-[calc(1.5rem+var(--floating-recorder-reserve,0px))]"
+          className="min-h-0 flex-1 overflow-y-auto px-3 pt-4 pb-[calc(1.5rem+var(--floating-recorder-reserve,0px))] @[560px]/chat-reading:px-6 @[560px]/chat-reading:pt-6"
         >
-          <div className="mx-auto flex w-full max-w-3xl flex-col gap-5">
+          <div className="mx-auto flex w-full max-w-[52rem] flex-col gap-6">
             {activeSessionId && activeContextSession ? <ClientDeliveryOversight key={activeSessionId}
               workspaceId={workspaceId} chatId={activeSessionId}
               scope={activeContextSession.contextProjectId ? {kind:"project",id:activeContextSession.contextProjectId}
@@ -4876,7 +4861,7 @@ export function ChatSurface({ workspaceId }: { workspaceId: string }) {
                   {/* Group header — sender attribution (shared threads) and
                       the message time, once per burst rather than per bubble. */}
                   {meta?.startsGroup && (m.senderName || timeChip) && (
-                    <span className="mb-0.5 flex items-baseline gap-1.5 px-1 text-[11px] text-muted-foreground">
+                    <span className="mb-0.5 flex items-baseline gap-1.5 px-1 text-xs text-muted-foreground">
                       {m.senderName && (
                         <span className="font-medium">{m.senderName}</span>
                       )}
@@ -4900,7 +4885,7 @@ export function ChatSurface({ workspaceId }: { workspaceId: string }) {
                       aria-label={format(t.slashSentAria, {
                         slug: sentCommand.command.slug,
                       })}
-                      className="max-w-[85%] rounded-2xl rounded-br-md border border-primary/25 bg-primary/[0.07] px-3.5 py-2 text-[14px] leading-[1.5] break-words whitespace-pre-wrap shadow-sm"
+                      className="max-w-[85%] rounded-2xl rounded-br-md border border-primary/25 bg-primary/[0.07] px-3.5 py-2 text-[16px] @[560px]/chat-reading:text-[15px] leading-[1.5] [overflow-wrap:anywhere] whitespace-pre-wrap shadow-sm"
                     >
                       <span className="mr-1.5 inline-flex translate-y-[1px] items-center gap-1">
                         <Sparkles
@@ -4918,7 +4903,7 @@ export function ChatSurface({ workspaceId }: { workspaceId: string }) {
                       ) : null}
                     </div>
                   ) : m.text ? (
-                    <div data-brian-chat-user className="max-w-[85%] rounded-2xl rounded-br-md bg-secondary px-3.5 py-2 text-[14px] leading-[1.5] break-words whitespace-pre-wrap text-secondary-foreground shadow-sm">
+                    <div data-brian-chat-user className="max-w-[85%] rounded-2xl rounded-br-md bg-secondary px-3.5 py-2 text-[16px] @[560px]/chat-reading:text-[15px] leading-[1.5] [overflow-wrap:anywhere] whitespace-pre-wrap text-secondary-foreground shadow-sm">
                       {m.text}
                     </div>
                   ) : null}
@@ -4968,7 +4953,7 @@ export function ChatSurface({ workspaceId }: { workspaceId: string }) {
                         Chat conversation, where several assistants may
                         speak, D1) + time. */}
                     {meta?.startsGroup && timeChip && (
-                      <span className="flex items-baseline gap-1.5 text-[11px] text-muted-foreground">
+                      <span className="flex items-baseline gap-1.5 text-xs text-muted-foreground">
                         {panePolicy.multiVoice && assistantNameFor(m.senderAssistantId) && (
                           <span className="font-medium">
                             {assistantNameFor(m.senderAssistantId)}
@@ -5358,8 +5343,8 @@ export function ChatSurface({ workspaceId }: { workspaceId: string }) {
           : null}
 
         {/* Composer bar — the same composite box the hero centers, docked. */}
-        <div className="shrink-0 px-4 pb-4 pt-1">
-          <div ref={composerBarRef} className="mx-auto w-full max-w-3xl">{composerBox}</div>
+        <div data-chat-composer-dock className="shrink-0 bg-gradient-to-t from-background from-80% to-transparent px-3 pb-[max(0.5rem,env(safe-area-inset-bottom))] pt-2 @[560px]/chat-reading:px-6 @[560px]/chat-reading:pb-6 @[560px]/chat-reading:pt-3">
+          <div ref={composerBarRef} className="mx-auto w-full max-w-[52rem]">{composerBox}</div>
         </div>
       </section>
       <ChatSidePane

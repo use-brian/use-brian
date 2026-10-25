@@ -296,3 +296,42 @@ describe('[COMP:workers/research-classifier] background-lane model injection', (
     })
   })
 })
+
+
+describe('[COMP:workers/research-classifier] automatic effort assessment', () => {
+  it.each(['focused', 'standard', 'deep'] as const)('assesses short research requests with %s effort', async (effort) => {
+    const provider = makeProvider(JSON.stringify({ research: true, effort }))
+    const result = await classifyResearchIntent({ provider, message: 'Research battery suppliers' })
+    expect(result).toMatchObject({ research: true, effort, operateSite: false })
+    expect(provider.stream).toHaveBeenCalledOnce()
+  })
+
+  it('keeps invalid or absent effort on the bounded standard profile', async () => {
+    const provider = makeProvider('{"research":true,"effort":"unlimited"}')
+    expect(await classifyResearchIntent({ provider, message: 'Compare battery suppliers' })).toMatchObject({ research: true, effort: 'standard' })
+  })
+
+  it.each(['research_focused', 'research_deep'] as const)('preserves effort from the provider-neutral %s verdict', async (value) => {
+    const provider = makeProvider('{"research":false}')
+    const decisionRuntime = executionFixture({
+      llm: provider,
+      primary: fixtureDecisionProvider(async (request) => ({
+        providerId: 'fixture-decision',
+        model: request.model,
+        answers: [{ kind: 'choice', questionId: 'intent', value, evidence: { source: 'native_distribution', probabilities: { [value]: 1 } } }],
+      })),
+    })
+    const result = await classifyResearchIntent({ provider, message: 'Compare battery suppliers', decisionRuntime })
+    expect(result).toMatchObject({ research: true, effort: value === 'research_focused' ? 'focused' : 'deep' })
+    expect(provider.stream).not.toHaveBeenCalled()
+  })
+})
+
+
+describe('[COMP:workers/research-classifier] short semantic requests', () => {
+  it('assesses short requests without requiring a research keyword', async () => {
+    const provider = makeProvider('{"research":true,"effort":"focused"}')
+    expect(await classifyResearchIntent({ provider, message: 'Best CRM for a nonprofit?' })).toMatchObject({ research: true, effort: 'focused' })
+    expect(provider.stream).toHaveBeenCalledOnce()
+  })
+})

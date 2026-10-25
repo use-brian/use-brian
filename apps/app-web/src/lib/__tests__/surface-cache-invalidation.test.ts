@@ -22,6 +22,7 @@ import {
 } from "@/lib/workspace-events";
 import { INBOX_REFRESH_EVENT } from "@/lib/inbox-refresh-events";
 import { OFFICE_REFRESH_EVENT } from "@/lib/workspace-events";
+import { routeWorkspaceChange } from "@/lib/workspace-events";
 import { GOAL_REFRESH_EVENT } from "@/lib/goal-events";
 import { WORKSPACE_IDENTITY_REFRESH_EVENT } from "@/lib/workspace-identity-events";
 import { HOME_APPS_REFRESH_EVENT } from "@/lib/home-apps-events";
@@ -231,6 +232,23 @@ describe("[COMP:app-web/surface-cache-invalidation] catch-up never purges author
     applySpineEventToSurfaceCache(WORKSPACE_IDENTITY_REFRESH_EVENT, { workspaceId: "w1" }, "w1");
     expect(readSurfaceCache("workspace-access:w1:u1:registry").data).toBeUndefined();
     expect(readSurfaceCache("workspace-member-directory:w1:u1").data).toBeUndefined();
+  });
+});
+
+describe('[COMP:app-web/surface-cache-invalidation] unrelated content updates preserve mounted projections',()=>{
+  beforeEach(()=>resetSurfaceCache());
+  const keys=['office-templates:w1:u1','office-preview:w1:u1:a1:0','office:w1:u1:active','project:w1:u1:p1','page-directory:w1:u1','doc-media:w1:u1:file'];
+  it.each(['task','contact','company','deal','kb_chunk'] as const)('revalidates behind existing content on %s changes',async primitive=>{
+    for(const key of keys)await loadSurfaceCache(key,async()=>['Fictional row']);
+    const [dispatch]=routeWorkspaceChange({workspaceId:'w1',primitive,action:'update'});
+    applySpineEventToSurfaceCache(dispatch.event,dispatch.detail,'w1');
+    for(const key of keys){expect(readSurfaceCache(key).data).toEqual(['Fictional row']);expect(isSurfaceCacheStale(key)).toBe(true);}
+  });
+  it.each(['file','memory','entity','edge'] as const)('still purges on source-affecting %s changes',async primitive=>{
+    for(const key of keys)await loadSurfaceCache(key,async()=>['Fictional row']);
+    const [dispatch]=routeWorkspaceChange({workspaceId:'w1',primitive,action:'update'});
+    applySpineEventToSurfaceCache(dispatch.event,dispatch.detail,'w1');
+    for(const key of keys)expect(readSurfaceCache(key).data).toBeUndefined();
   });
 });
 

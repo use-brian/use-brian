@@ -139,9 +139,9 @@ export default function WorkflowDetailPage({
   // 30 seconds, and the page stops rendering it below.
   const detail = useCachedResource<WorkflowFull | null>(detailKey, () =>
     leaseSurfaceContent(() => getWorkflowFull(id)),
-    { expiresInMs: surfaceContentRemaining },
+    { expiresInMs: surfaceContentRemaining, keepInflightOnExpiry: true },
   );
-  useSurfaceContentRenewal(detail.refresh);
+  useSurfaceContentRenewal(detail.refresh, true, detail.data);
   // The list row the user came from (the rail hover / list page already
   // filled `workflow:<wid>`): seeds the header on a cold entry. A plain read,
   // not a subscription - it is only a seed, and the list is never fetched on

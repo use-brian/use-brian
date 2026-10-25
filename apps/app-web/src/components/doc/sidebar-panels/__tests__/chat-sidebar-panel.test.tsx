@@ -225,6 +225,15 @@ describe("[COMP:app-web/sidebar-panel-chat] live room activity", () => {
 });
 
 describe("[COMP:app-web/sidebar-panel-chat] one row renderer for both rails (chat-parity T4)", () => {
+  it("keeps the fresh-chat compose row quiet and leaves searching to the shared header", async () => {
+    navigation.search = "";
+    await renderPanel();
+    const compose = container!.querySelector<HTMLAnchorElement>('a[href="/w/workspace-1/chat"]')!;
+    expect(compose.textContent).toContain(en.chatApp.newChat);
+    expect(compose.className).not.toContain('doc-nav-active');
+    expect(container!.querySelector('input[type="search"]')).toBeNull();
+  });
+
   const personalRow = {
     id: "chat-1",
     title: "Quarter plan",
@@ -270,4 +279,3 @@ describe("[COMP:app-web/sidebar-panel-chat] one row renderer for both rails (cha
     seen.isRoomUnread.mockReturnValue(false);
   });
 });
-

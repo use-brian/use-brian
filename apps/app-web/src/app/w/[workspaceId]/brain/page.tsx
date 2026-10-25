@@ -845,7 +845,7 @@ function BrainPageInner() {
     section === "entries" ? (
       /* List | Graph view tabs — the topbar owns the view switch on every
          size now (the sidebar VIEW block + mobile toggle are gone). */
-      <div className="inline-flex rounded-md border border-border bg-muted/30 p-0.5 text-[12px]">
+      <div className="inline-flex shrink-0 rounded-full bg-muted/60 text-xs md:p-1">
         {/* Graph leads — it is the entries default. */}
         <button
           type="button"
@@ -855,7 +855,7 @@ function BrainPageInner() {
           className={cn(
             // `h-9 sm:h-7`-class targets (C 69): the toggle is a primary
             // phone control inside the 44px bar.
-            "inline-flex items-center rounded px-2.5 py-2 transition-colors sm:py-0.5",
+            "inline-flex h-11 min-w-11 items-center justify-center rounded-full px-2 font-medium transition-colors md:h-7 md:min-w-0 md:px-3",
             viewMode === "graph"
               ? "bg-background text-foreground shadow-sm"
               : "text-muted-foreground hover:text-foreground",
@@ -869,7 +869,7 @@ function BrainPageInner() {
           aria-pressed={viewMode === "grouped"}
           onClick={() => setViewMode("grouped")}
           className={cn(
-            "inline-flex items-center rounded px-2.5 py-2 transition-colors sm:py-0.5",
+            "inline-flex h-11 min-w-11 items-center justify-center rounded-full px-2 font-medium transition-colors md:h-7 md:min-w-0 md:px-3",
             viewMode === "grouped"
               ? "bg-background text-foreground shadow-sm"
               : "text-muted-foreground hover:text-foreground",

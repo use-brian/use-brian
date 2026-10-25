@@ -37,10 +37,10 @@ beforeEach(() => {
 });
 
 describe("[COMP:app-web/workflow-topbar] Workflow surface chrome", () => {
-  it("renders the shared sidebar and history controls with a Workflow breadcrumb", () => {
+  it("renders shared history with the Workflow identity link", () => {
     const html = renderBar();
 
-    expect(html).toContain(en.docPage.topbarSidebarCollapseAria);
+    expect(html).not.toContain(en.docPage.topbarSidebarCollapseAria);
     expect(html).toContain(en.docPage.topbarBackAria);
     expect(html).toContain(en.docPage.topbarForwardAria);
     expect(html).toContain(en.workflowPage.title);
@@ -53,7 +53,7 @@ describe("[COMP:app-web/workflow-topbar] Workflow surface chrome", () => {
     sidebarState.collapsed = true;
 
     const html = renderBar();
-    expect(html).toContain(en.docPage.topbarSidebarExpandAria);
+    expect(html).not.toContain(en.docPage.topbarSidebarExpandAria);
     expect(html).toContain('data-sidebar-collapsed="true"');
   });
 });

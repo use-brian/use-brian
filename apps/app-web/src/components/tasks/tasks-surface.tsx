@@ -30,6 +30,8 @@
 import { useCallback, useEffect, useMemo, useState, useSyncExternalStore } from "react";
 import { usePathname, useRouter, useSearchParams } from "next/navigation";
 import {
+  Check,
+  ChevronDown,
   ChevronRight,
   CircleUserRound,
   Kanban,
@@ -183,8 +185,8 @@ export function TasksSurface({ workspaceId }: { workspaceId: string }) {
   });
   // Content lease: an open list never outlives the viewer's authority by more
   // than 30 seconds (perceived-performance.md, "Content lease for protected lists").
-  const tasks = useCachedResource(tasksKey, fetchTasks, { expiresInMs: surfaceContentRemaining });
-  useSurfaceContentRenewal(tasks.refresh);
+  const tasks = useCachedResource(tasksKey, fetchTasks, { expiresInMs: surfaceContentRemaining, keepInflightOnExpiry: true });
+  useSurfaceContentRenewal(tasks.refresh, true, tasks.data);
   const rows = tasks.data ?? null;
   // Only an error with NOTHING to show is a load failure; a failed revalidation
   // behind a painted list stays quiet.
@@ -813,7 +815,7 @@ export function TasksSurface({ workspaceId }: { workspaceId: string }) {
                 setTaskRulesOpen(true);
               }}
               className={cn(
-                "inline-flex h-11 items-center gap-1.5 rounded-md px-2 text-[12.5px] max-sm:w-11 max-sm:justify-center max-sm:px-0 sm:h-7",
+                "inline-flex h-11 items-center gap-1.5 rounded-md px-2 text-[12.5px] max-md:w-11 max-md:justify-center max-md:px-0 md:h-7",
                 taskRulesOpen
                   ? "bg-sidebar-accent text-sidebar-accent-foreground"
                   : "text-sidebar-foreground/70 hover:bg-sidebar-accent/60",
@@ -823,20 +825,31 @@ export function TasksSurface({ workspaceId }: { workspaceId: string }) {
               <span className="max-lg:hidden">{t.guardrails.rulesTitle}</span>
             </button>
             {rows !== null && (
-              <span className="text-[12.5px] text-sidebar-foreground/70 max-sm:hidden">
+              <span className="text-[12.5px] text-sidebar-foreground/70 max-md:hidden">
                 {format(t.countSummary, {
                   total: String(all.length),
                   active: String(activeCount),
                 })}
               </span>
             )}
+            <DropdownMenu>
+              <DropdownMenuTrigger aria-label={t.viewMenu} className="flex h-11 max-w-32 min-w-0 items-center gap-1.5 rounded-lg bg-sidebar-accent px-2 text-sm md:hidden">
+                <span className="truncate">{view.view === "table" ? t.viewTable : view.view === "board" ? t.viewBoard : t.viewSuggestions}</span><ChevronDown className="size-3.5 shrink-0" aria-hidden />
+                {suggestionCount > 0 && <span className="size-1.5 shrink-0 rounded-full bg-primary" />}
+              </DropdownMenuTrigger>
+              <DropdownMenuContent align="end" className="w-[min(16rem,calc(100vw-1rem))]">
+                {(["table", "board", "suggestions"] as const).map(mode => <DropdownMenuItem key={mode} role="menuitemradio" aria-checked={view.view === mode} onClick={() => setView({ view: mode })} className="min-h-8 max-md:min-h-11">
+                  <span className="flex-1">{mode === "table" ? t.viewTable : mode === "board" ? t.viewBoard : t.viewSuggestions}</span>{view.view === mode && <Check className="size-4" aria-hidden />}
+                </DropdownMenuItem>)}
+              </DropdownMenuContent>
+            </DropdownMenu>
             <button
               type="button"
               aria-pressed={view.view === "table"}
               aria-label={t.viewTable}
               onClick={() => setView({ view: "table" })}
               className={cn(
-                "inline-flex h-11 items-center gap-1.5 rounded-md px-2 text-[12.5px] max-sm:w-11 max-sm:justify-center max-sm:px-0 sm:h-7",
+                "hidden h-7 items-center gap-1.5 md:inline-flex rounded-md px-2 text-[12.5px] max-md:w-11 max-md:justify-center max-md:px-0 md:h-7",
                 view.view === "table"
                   ? "bg-sidebar-accent text-sidebar-accent-foreground"
                   : "text-sidebar-foreground/70 hover:bg-sidebar-accent/60",
@@ -851,7 +864,7 @@ export function TasksSurface({ workspaceId }: { workspaceId: string }) {
               aria-label={t.viewBoard}
               onClick={() => setView({ view: "board" })}
               className={cn(
-                "inline-flex h-11 items-center gap-1.5 rounded-md px-2 text-[12.5px] max-sm:w-11 max-sm:justify-center max-sm:px-0 sm:h-7",
+                "hidden h-7 items-center gap-1.5 md:inline-flex rounded-md px-2 text-[12.5px] max-md:w-11 max-md:justify-center max-md:px-0 md:h-7",
                 view.view === "board"
                   ? "bg-sidebar-accent text-sidebar-accent-foreground"
                   : "text-sidebar-foreground/70 hover:bg-sidebar-accent/60",
@@ -866,7 +879,7 @@ export function TasksSurface({ workspaceId }: { workspaceId: string }) {
               aria-label={t.viewSuggestions}
               onClick={() => setView({ view: "suggestions" })}
               className={cn(
-                "relative inline-flex h-11 items-center gap-1.5 rounded-md px-2 text-[12.5px] max-sm:w-11 max-sm:justify-center max-sm:px-0 sm:h-7",
+                "relative hidden h-7 items-center gap-1.5 md:inline-flex rounded-md px-2 text-[12.5px] max-md:w-11 max-md:justify-center max-md:px-0 md:h-7",
                 view.view === "suggestions"
                   ? "bg-sidebar-accent text-sidebar-accent-foreground"
                   : "text-sidebar-foreground/70 hover:bg-sidebar-accent/60",
@@ -1037,6 +1050,7 @@ export function TasksSurface({ workspaceId }: { workspaceId: string }) {
         </div>
       ) : (
         <div className="flex flex-wrap items-center gap-2 border-b border-border/60 px-4 py-2.5">
+          <div data-task-quick-filters className="flex w-full min-w-0 items-center gap-2 overflow-x-auto pb-0.5 md:w-auto md:flex-wrap md:overflow-visible md:pb-0">
           {QUICK_FILTERS.map((f) => {
             const active = view.quick === f;
             const count = counts[f];
@@ -1050,7 +1064,7 @@ export function TasksSurface({ workspaceId }: { workspaceId: string }) {
                   setView({ quick: active ? null : f, statuses: [] })
                 }
                 className={cn(
-                  "inline-flex h-9 items-center gap-1.5 rounded-full border px-2.5 text-xs transition-colors md:h-7",
+                  "inline-flex h-11 shrink-0 items-center gap-1.5 whitespace-nowrap rounded-full border px-2.5 text-xs transition-colors md:h-7",
                   active
                     ? "border-foreground bg-foreground text-background"
                     : "border-border bg-card text-muted-foreground hover:bg-muted hover:text-foreground",
@@ -1062,6 +1076,7 @@ export function TasksSurface({ workspaceId }: { workspaceId: string }) {
               </button>
             );
           })}
+          </div>
           <span className="mx-1 hidden h-4 w-px bg-border sm:block" aria-hidden />
           {filtered.length > 0 && (
             <button

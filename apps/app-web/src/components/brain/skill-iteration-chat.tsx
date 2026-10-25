@@ -392,7 +392,6 @@ export function SkillIterationChat({
             onResearchModeChange={controls.setResearchMode}
             researchQuota={controls.researchQuota}
             researchExhausted={controls.researchExhausted}
-            showResearch
             selectSide="top"
             className="min-w-0 flex-1"
           />

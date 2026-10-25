@@ -7,6 +7,7 @@
  */
 
 import { randomUUID } from 'node:crypto'
+import { RESEARCH_EFFORT_BUDGETS, type ResearchEffort } from './research-effort.js'
 import { NOOP_TURN_LEDGER } from '../engine/turn-ledger.js'
 
 import type { LLMProvider, Message, TokenUsage } from '../providers/types.js'
@@ -264,7 +265,6 @@ const WORKER_RESEARCH_BROWSE_ADDENDUM = `
 - Reads on this session run one at a time across all workers — reserve it for the 1-2 URLs that matter, never every link.`
 
 const WORKER_MAX_TURNS = 10
-const WORKER_RESEARCH_MAX_TURNS = 30
 /**
  * Per-worker absolute tool-call ceiling in research mode. The query-loop's
  * default cap is `DEFAULT_HARD_LIMIT` (10), which leaves a worker with only
@@ -274,7 +274,6 @@ const WORKER_RESEARCH_MAX_TURNS = 30
  * loop-detector never trips a "deep dive" prematurely; the urlReader-or-die
  * rule in the system prompt + the per-turn budget are the real stops.
  */
-const WORKER_RESEARCH_MAX_TOOL_CALLS = 40
 
 /**
  * Research-mode user-message wrap. Prepended to the coordinator-supplied
@@ -374,6 +373,7 @@ export function createWorkerManager(options: WorkerOptions) {
     onEvent?: (workerId: string, event: QueryEvent) => void
     researchMode: boolean
     researchModel: string | null
+    researchEffort?: ResearchEffort
     maxConcurrent: number | null
     persistenceStore: WorkerRunsStore | null
     workspaceId: string | null
@@ -495,6 +495,17 @@ export function createWorkerManager(options: WorkerOptions) {
     // flipping `researchMode` mid-turn doesn't retroactively change a worker
     // already running, which matches `setOnEvent`'s semantics.
     const isResearch = sessionConfig?.researchMode ?? researchMode
+    // The prefix is written by this manager, never accepted from a fresh
+    // model-authored prompt. Keep suspended workers on their original bounds
+    // without changing the worker_runs storage contract.
+    const savedEffort = resumeRunId
+      ? prompt.match(/^\[brian-research-effort:(focused|standard|deep)\]\n/)
+      : null
+    const effort: ResearchEffort = savedEffort
+      ? savedEffort[1] as ResearchEffort
+      : resumeRunId ? 'deep' : sessionConfig?.researchEffort ?? 'deep'
+    if (savedEffort) prompt = prompt.slice(savedEffort[0].length)
+    const effortBudget = RESEARCH_EFFORT_BUDGETS[effort]
     // Research workers additionally get the governed read-browse tools
     // (sends-forbidden by construction — see setResearchBrowseTools). Standard
     // preflight workers and non-research spawns never see them: a cheap
@@ -518,13 +529,14 @@ export function createWorkerManager(options: WorkerOptions) {
         ? WORKER_RESEARCH_SYSTEM_PROMPT + WORKER_RESEARCH_BROWSE_ADDENDUM
         : WORKER_RESEARCH_SYSTEM_PROMPT
       : WORKER_SYSTEM_PROMPT
-    const maxTurns = options.maxTurns
-      ?? (isResearch ? WORKER_RESEARCH_MAX_TURNS : WORKER_MAX_TURNS)
+    const maxTurns = isResearch
+      ? Math.min(options.maxTurns ?? effortBudget.workerTurns, effortBudget.workerTurns)
+      : options.maxTurns ?? WORKER_MAX_TURNS
     // Research workers need much more tool-call headroom than the loop
     // detector's 10-call default — a multi-angle dig is webSearch × 3+ plus
     // urlReader × 3 per round. Non-research workers keep the default so the
     // standard pre-flight path can't blow its budget.
-    const maxToolCalls = isResearch ? WORKER_RESEARCH_MAX_TOOL_CALLS : undefined
+    const maxToolCalls = isResearch ? effortBudget.workerToolCalls : undefined
     const userPrompt = isResearch
       ? `${RESEARCH_USER_PROMPT_PREAMBLE}${prompt}`
       : prompt
@@ -567,7 +579,7 @@ export function createWorkerManager(options: WorkerOptions) {
           workspaceId: ownWorkspaceId,
           workerId,
           description,
-          prompt,
+          prompt: isResearch ? `[brian-research-effort:${effort}]\n${prompt}` : prompt,
           researchMode: isResearch,
           model,
         }),
@@ -1131,6 +1143,11 @@ EMPTY — the worker ran but returned no findings. Do not treat this as a negati
       }
       researchMode = enabled
       for (const config of sessionConfigs.values()) config.researchMode = enabled
+    },
+
+    /** Automatic effort is scoped to the originating chat and reset with it. */
+    setResearchEffort(effort: ResearchEffort, sessionId: string) {
+      getOrCreateSessionConfig(sessionId).researchEffort = effort
     },
 
     /**

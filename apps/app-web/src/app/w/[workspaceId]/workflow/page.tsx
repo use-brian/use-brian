@@ -58,9 +58,9 @@ export default function WorkflowPage() {
     activeId
       ? leaseSurfaceContent(() => listWorkflows(activeId, { includeArchived: true }))
       : Promise.resolve([] as WorkflowSummary[]),
-    { expiresInMs: activeId ? surfaceContentRemaining : undefined },
+    { expiresInMs: activeId ? surfaceContentRemaining : undefined, keepInflightOnExpiry: true },
   );
-  useSurfaceContentRenewal(workflowList.refresh, Boolean(activeId));
+  useSurfaceContentRenewal(workflowList.refresh, Boolean(activeId), workflowList.data);
   const workflows = workflowList.data ?? null;
   const [createOpen, setCreateOpen] = useState(false);
   const [archivedOpen, setArchivedOpen] = useState(false);

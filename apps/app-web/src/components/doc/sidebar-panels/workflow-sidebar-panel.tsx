@@ -62,9 +62,9 @@ export function WorkflowSidebarPanel({ workspaceId }: { workspaceId: string }) {
   const listKey = surfaceDataKey("workflow", workspaceId);
   const list = useCachedResource<WorkflowSummary[]>(listKey, () =>
     warmTargetFor("workflow", workspaceId).fetch() as Promise<WorkflowSummary[]>,
-    { expiresInMs: surfaceContentRemaining },
+    { expiresInMs: surfaceContentRemaining, keepInflightOnExpiry: true },
   );
-  useSurfaceContentRenewal(list.refresh);
+  useSurfaceContentRenewal(list.refresh, true, list.data);
   const rows = list.data;
   const workflows = useMemo(
     () => (rows ? rows.filter((w) => w.lifecycleState !== "archived") : null),

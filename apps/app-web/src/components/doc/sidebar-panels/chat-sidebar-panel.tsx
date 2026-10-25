@@ -2,11 +2,12 @@
 
 /**
  * Chat surface sidebar panel — swapped into the persistent left sidebar while
- * the Chat operator surface is active. This IS the session rail: search, the
+ * the Chat operator surface is active. This IS the session rail: the
  * Personal + Workspace lists, and the rename / delete row actions — the
  * surface itself is transcript + composer only, so the app reads like every
  * other operator surface (list in the sidebar, work in the body) instead of
  * carrying a second private rail.
+ * Search is owned by the shared contextual header and its Conversations filter.
  *
  * The rail FOLLOWS the surface's Personal/Workspace toggle (`?v=` — the same
  * URL state, so the two can never disagree): Personal shows "Chats" + the
@@ -43,7 +44,7 @@
 import { useCallback, useEffect, useMemo, useState } from "react";
 import Link from "next/link";
 import { usePathname, useRouter, useSearchParams } from "next/navigation";
-import { Brain, ChevronRight, MoreHorizontal, Pencil, Plus, Trash2 } from "lucide-react";
+import { Brain, ChevronRight, MoreHorizontal, Pencil, SquarePen, Trash2 } from "lucide-react";
 import { cn } from "@/lib/utils";
 import { useT, format } from "@/lib/i18n/client";
 import { AssistantAvatar } from "@/components/assistant-avatar";
@@ -126,7 +127,6 @@ export function ChatSidebarPanel({ workspaceId }: { workspaceId: string }) {
     shared: sharedRows,
     refreshShared,
   } = useChatSessionsData(workspaceId);
-  const [search, setSearch] = useState("");
   const [menuFor, setMenuFor] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
   // The ambient-thread section's disclosure. Collapsed by default: those
@@ -189,7 +189,6 @@ export function ChatSidebarPanel({ workspaceId }: { workspaceId: string }) {
   const base = `/w/${workspaceId}/chat`;
   const onChatSurface = pathname === base;
 
-  const needle = search.trim().toLowerCase();
   // "Chats" carries only sessions minted in the Chat app (`app_origin='chat'`,
   // plus legacy null-origin rows — the server's own `?appOrigin=` convention).
   // Everything else is the dock's rolling ambient threads: every dock exchange
@@ -207,30 +206,10 @@ export function ChatSidebarPanel({ workspaceId }: { workspaceId: string }) {
       (rows ?? []).filter((r) => r.appOrigin != null && r.appOrigin !== "chat"),
     [rows],
   );
-  const visible = useMemo(
-    () =>
-      needle
-        ? chatRows.filter((r) => r.title.toLowerCase().includes(needle))
-        : chatRows,
-    [needle, chatRows],
-  );
-  const visibleAmbient = useMemo(
-    () =>
-      needle
-        ? ambientRows.filter((r) => r.title.toLowerCase().includes(needle))
-        : ambientRows,
-    [needle, ambientRows],
-  );
-  const visibleShared = useMemo(
-    () =>
-      needle
-        ? (sharedRows ?? []).filter((r) => r.title.toLowerCase().includes(needle))
-        : (sharedRows ?? []),
-    [needle, sharedRows],
-  );
-  // A search that hits an ambient thread must surface it — a collapsed match
-  // reads as "not found".
-  const showAmbient = othersOpen || (needle.length > 0 && visibleAmbient.length > 0);
+  const visible = chatRows;
+  const visibleAmbient = ambientRows;
+  const visibleShared = sharedRows ?? [];
+  const showAmbient = othersOpen;
   const hasWorkingRoom =
     (sharedRows ?? []).some((row) => row.status === "running") ||
     Object.values(activityBySession).some((activity) => activity.working);
@@ -502,17 +481,17 @@ export function ChatSidebarPanel({ workspaceId }: { workspaceId: string }) {
   }, [base, creatingShared, router, t, workspaceId]);
 
   return (
-    <div className="flex flex-col gap-3 px-1 pt-1">
+    <div className="flex flex-col gap-3 px-1 pt-1 md:gap-2 md:pt-0">
       {view === "personal" ? (
         <Link
           href={base}
           aria-current={onChatSurface && !activeSessionId ? "page" : undefined}
           className={cn(
-            rowCls(onChatSurface && !activeSessionId),
-            "flex items-center gap-2 pr-2 md:pr-2",
+            rowCls(false),
+            "flex items-center gap-3 pr-2 text-base text-sidebar-foreground md:min-h-8 md:gap-2 md:pr-2 md:text-sm",
           )}
         >
-          <Plus className="size-3.5 shrink-0" aria-hidden />
+          <SquarePen className="size-[18px] shrink-0" aria-hidden />
           <span className="min-w-0 flex-1 truncate">{t.newChat}</span>
         </Link>
       ) : (
@@ -522,25 +501,13 @@ export function ChatSidebarPanel({ workspaceId }: { workspaceId: string }) {
           disabled={creatingShared}
           className={cn(
             rowCls(false),
-            "flex items-center gap-2 pr-2 md:pr-2 disabled:opacity-50",
+            "flex items-center gap-3 pr-2 text-base text-sidebar-foreground md:min-h-8 md:gap-2 md:pr-2 md:text-sm disabled:opacity-50",
           )}
         >
-          <Plus className="size-3.5 shrink-0" aria-hidden />
+          <SquarePen className="size-[18px] shrink-0" aria-hidden />
           <span className="min-w-0 flex-1 truncate">{t.newWorkspaceChat}</span>
         </button>
       )}
-
-      <input
-        type="search"
-        value={search}
-        onChange={(e) => setSearch(e.target.value)}
-        placeholder={t.searchPlaceholder}
-        aria-label={t.searchPlaceholder}
-        className={cn(
-          "w-full rounded-md border border-border bg-background px-2.5 py-1.5 text-[16px] md:text-[12px]",
-          "outline-none focus:ring-2 focus:ring-ring/50 placeholder:text-muted-foreground/60",
-        )}
-      />
 
       {error && (
         <p className="px-1 text-[11px] leading-snug text-destructive">{error}</p>

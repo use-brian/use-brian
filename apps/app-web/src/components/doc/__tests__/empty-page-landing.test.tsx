@@ -105,10 +105,9 @@ describe("[COMP:app-web/empty-page-landing] Landing chatter + recents", () => {
     expect(html).toContain(dict.docPage.landing.startBlank);
   });
 
-  it("renders the deep-research toggle (doc research now ships)", () => {
+  it("keeps research automatic without a composer toggle", () => {
     const html = wrap(<EmptyPageLanding workspaceId="ws_1" cards={[]} onOpenCard={() => {}} onSubmitPrompt={() => {}} onStartBlank={() => {}} />);
-    // <ComposerControls showResearch /> renders the research toggle by label.
-    expect(html).toContain(dict.chat.research);
+    expect(html).not.toContain(dict.chat.research);
   });
 
   it("gives the composer textarea the auto-grow cap + overflow (always shows full context)", () => {

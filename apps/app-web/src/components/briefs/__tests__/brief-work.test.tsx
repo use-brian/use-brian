@@ -183,11 +183,14 @@ describe("[COMP:app-web/brief-work] Chat work entry", () => {
   });
   afterEach(async () => { await act(async () => root.unmount()); host.remove(); });
 
-  it("shows only the composer above it for an empty queue, and records the landing watermark", async () => {
+  it("explains the work entry, shows an authoritative empty queue without a duplicate title, and records the landing watermark", async () => {
     api.fetchWork.mockResolvedValue(work({}));
     api.sidebar = { dock: { needsYou: [{ kind: "approvals", count: 4, caption: null }], approvalGroups: undefined }, dockLoading: false };
     await render(<WorkEntry workspaceId="w1" scope={{ kind: "personal" }} onDraft={vi.fn()} />); await flush();
-    expect(host.querySelector('[data-testid="brief-work"]')).toBeNull();
+    expect(host.querySelector('[data-testid="brief-work"]')).not.toBeNull();
+    expect(host.textContent).toContain(t.description);
+    expect(host.textContent).toContain(t.empty);
+    expect(host.querySelector('h3')).toBeNull();
     expect(api.markSuggestedShown).toHaveBeenCalledWith("w1", 4);
     const attention = Array.from(host.querySelectorAll("nav a")).map((a) => a.getAttribute("href"));
     expect(attention).toEqual(["/w/w1/p?panel=approvals"]);
@@ -199,10 +202,24 @@ describe("[COMP:app-web/brief-work] Chat work entry", () => {
     const onDraft = vi.fn();
     await render(<WorkEntry workspaceId="w1" scope={{ kind: "project", id: "p1" }} onDraft={onDraft} />); await flush();
     expect(api.fetchWork).toHaveBeenCalledWith("w1", { kind: "project", id: "p1" });
-    expect(host.textContent).toContain(t.scopedTitle);
+    expect(host.querySelector('[data-testid="brief-work"]')?.getAttribute('aria-label')).toBe(t.scopedTitle);
     expect(Array.from(host.querySelectorAll("a")).some((a) => a.getAttribute("href") === "/w/w1/briefs/project/p1")).toBe(true);
     await click(t.actions.continueInChat);
     expect(onDraft).toHaveBeenCalledWith('Work on task "My own task" (task mine).');
+  });
+
+  it("keeps a failed embedded read distinct from an empty queue and recovers with Retry", async () => {
+    api.fetchWork.mockRejectedValueOnce(new WorkRequestError("work_unavailable", 503));
+    api.sidebar = { dock: null, dockLoading: false };
+    await render(<WorkEntry workspaceId="w1" scope={{ kind: "personal" }} onDraft={vi.fn()} includeDelivery={false} />); await flush();
+    expect(host.querySelector('h3')).toBeNull();
+    expect(host.querySelector('[role="alert"]')?.textContent).toBe(t.unavailable);
+    expect(host.textContent).not.toContain(t.empty);
+    expect(host.querySelector('[data-testid="brief-work"]')?.className).not.toContain('border');
+    api.fetchWork.mockResolvedValue(work({}));
+    await click(t.retry);
+    expect(host.querySelector('[role="alert"]')).toBeNull();
+    expect(host.textContent).toContain(t.empty);
   });
 
   it("maps every dock attention kind to its canonical destination", () => {

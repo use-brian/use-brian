@@ -15,7 +15,7 @@
  */
 
 import { describe, expect, it, vi, beforeEach, afterEach } from "vitest";
-import { act } from "react";
+import React, { act } from "react";
 import { createRoot, type Root } from "react-dom/client";
 import { I18nProvider } from "@/lib/i18n/client";
 import { en } from "@/lib/i18n/dictionaries/en";
@@ -80,40 +80,10 @@ function props(over: Partial<React.ComponentProps<typeof ComposerControls>> = {}
 }
 
 describe("[COMP:app-web/composer-controls] presentational controls", () => {
-  it("toggles research on click and reflects the pressed state", () => {
-    const onResearchModeChange = vi.fn();
-    mount(<ComposerControls {...props({ onResearchModeChange })} />);
-
-    const toggle = container!.querySelector<HTMLButtonElement>("button[aria-pressed]")!;
-    expect(toggle).toBeTruthy();
-    // Off → not pressed, and the hint is the live (not exhausted) copy.
-    expect(toggle.getAttribute("aria-pressed")).toBe("false");
-    expect(toggle.title).toBe(dict.chat.researchHint);
-
-    act(() => toggle.dispatchEvent(new MouseEvent("click", { bubbles: true })));
-    // Stateless: it reports the *intended* next value (true), owner flips it.
-    expect(onResearchModeChange).toHaveBeenCalledWith(true);
-  });
-
-  it("shows the remaining-quota pill when research is armed on a free plan", () => {
-    mount(
-      <ComposerControls
-        {...props({ researchMode: true, researchQuota: { used: 1, quota: 5, isPaid: false } })}
-      />,
-    );
-    // quota - used = 4 of 5.
-    expect(container!.textContent).toContain("4/5");
-  });
-
-  it("becomes an upgrade affordance when research is exhausted (no toggle)", () => {
-    const onResearchModeChange = vi.fn();
-    mount(<ComposerControls {...props({ researchExhausted: true, onResearchModeChange })} />);
-    const toggle = container!.querySelector<HTMLButtonElement>("button[aria-pressed]")!;
-    expect(toggle.title).toBe(dict.chat.researchHintExhausted);
-    // Clicking exhausted routes to /plans rather than flipping the mode — we
-    // don't dispatch the click here (jsdom navigation is a no-op), but the
-    // surfaced hint is the regression guard.
-    expect(onResearchModeChange).not.toHaveBeenCalled();
+  it.each([false, true])("keeps research automatic even with legacy showResearch=%s", (showResearch) => {
+    mount(<ComposerControls {...props({ showResearch, researchMode: true })} />);
+    expect(container!.querySelector("button[aria-pressed]")).toBeNull();
+    expect(container!.textContent).not.toContain(dict.chat.research);
   });
 
   it("labels the model trigger with the active tier", () => {
@@ -123,6 +93,35 @@ describe("[COMP:app-web/composer-controls] presentational controls", () => {
     )!;
     expect(trigger).toBeTruthy();
     expect(trigger.textContent).toContain(dict.chat.modelPro);
+  });
+
+  it("selects effort directly, closes its only popup and preserves the assistant and draft", async () => {
+    vi.stubGlobal("ResizeObserver", class { observe() {} unobserve() {} disconnect() {} });
+    const select = vi.fn();
+    function Composer() {
+      const [tier, setTier] = React.useState<"standard" | "pro" | "max">("standard");
+      return <><button aria-label={dict.chat.switchAssistant}>Another assistant</button><textarea defaultValue="Keep this unsent draft" /><ComposerControls {...props({ model: tier, pickerLabel: dict.chat.effortLabel, onModelChange: next => { select(next); setTier(next); } })} /></>;
+    }
+    try {
+      mount(<Composer />);
+      const input = container!.querySelector('textarea')!;
+      const assistant = container!.querySelector(`[aria-label="${dict.chat.switchAssistant}"]`)!;
+      const trigger = container!.querySelector<HTMLButtonElement>(`[aria-label="${dict.chat.effortLabel}"]`)!;
+      await act(async () => trigger.click());
+      expect(document.querySelector('[role=dialog]')).toBeNull();
+      const pro = [...document.querySelectorAll<HTMLElement>('[role=option]')].find(item => item.textContent?.includes(dict.chat.modelProDesc))!;
+      // Base UI tracks where a pointer press began before accepting selection.
+      await act(async () => pro.dispatchEvent(new MouseEvent('mousemove', { bubbles: true })));
+      await act(async () => pro.dispatchEvent(new MouseEvent('pointerdown', { bubbles: true })));
+      await act(async () => pro.click());
+      expect(select).toHaveBeenCalledExactlyOnceWith('pro');
+      expect(trigger.textContent).toContain(dict.chat.modelPro);
+      expect(trigger.getAttribute('aria-expanded')).toBe('false');
+      expect(document.activeElement).toBe(trigger);
+      expect(container!.querySelector('textarea')).toBe(input);
+      expect(input.value).toBe('Keep this unsent draft');
+      expect(assistant.textContent).toBe('Another assistant');
+    } finally { vi.unstubAllGlobals(); }
   });
 
   it("hides the research toggle when showResearch is off (feed / opted-out)", () => {
@@ -147,18 +146,13 @@ describe("[COMP:app-web/composer-controls] presentational controls", () => {
     expect(onAiReplyChange).toHaveBeenCalledWith(false);
   });
 
-  it("disables research + model controls when AI reply is off (they only shape an AI turn)", () => {
+  it("disables model controls when AI reply is off (they only shape an AI turn)", () => {
     mount(
       <ComposerControls
         {...props({ aiReply: false, onAiReplyChange: vi.fn() })}
       />,
     );
-    // The research toggle is rendered (showResearch true) but disabled.
-    const research = Array.from(
-      container!.querySelectorAll<HTMLButtonElement>("button"),
-    ).find((b) => b.textContent?.includes(dict.chat.research));
-    expect(research).toBeTruthy();
-    expect(research!.disabled).toBe(true);
+    expect(container!.textContent).not.toContain(dict.chat.research);
     // The model picker trigger is disabled too.
     const trigger = container!.querySelector<HTMLButtonElement>(
       `[aria-label="${dict.chat.modelLabel}"]`,

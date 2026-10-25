@@ -38,7 +38,7 @@ afterEach(async () => { await act(async () => root.unmount()); container.remove(
 
 describe("[COMP:app-web/data-embed] bound rows renew under the content lease", () => {
   it("drops a row the viewer can no longer read on the 15-second renewal, without a reload", async () => {
-    vi.useFakeTimers({ toFake: ["setInterval", "clearInterval"] });
+    vi.useFakeTimers({ toFake: ["setInterval", "clearInterval", "setTimeout", "clearTimeout"] });
     api.renderBinding.mockResolvedValue(payload(["Fictional Cedar payroll check", "Fictional open task"]));
     await mount();
     expect(container.querySelector("[data-rows]")?.textContent).toContain("Fictional Cedar payroll check");
@@ -50,7 +50,7 @@ describe("[COMP:app-web/data-embed] bound rows renew under the content lease", (
   });
 
   it("drops rows unconfirmed for the 30-second lease while online", async () => {
-    vi.useFakeTimers({ toFake: ["setInterval", "clearInterval"] });
+    vi.useFakeTimers({ toFake: ["setInterval", "clearInterval", "setTimeout", "clearTimeout"] });
     api.renderBinding.mockResolvedValue(payload(["Fictional Cedar payroll check"]));
     await mount();
     api.renderBinding.mockReturnValue(new Promise(() => {}));

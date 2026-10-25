@@ -22,6 +22,32 @@ async function render(intent:CreationIntent='new-shared',compact=false){await ac
 beforeEach(()=>{mode={mode:'simple',setupState:'ready',policyRevision:'1',defaultDepartmentId:'team',canAdminister:false};mocks.viewer.me.id='u';mocks.mode.mockImplementation(async()=>projection(mode));mocks.choices.mockImplementation(async()=>projection({policyRevision:mode.policyRevision,teams:[{id:'team',name:'Shared',status:'active'}],projects:[{id:'project',name:'Project A',status:'active'}]}));invalidateSurfaceCache('workspace-access:');host=document.createElement('div');document.body.append(host);root=createRoot(host);});
 afterEach(async()=>{await act(async()=>root.unmount());host.remove();invalidateSurfaceCache('workspace-access:');vi.clearAllMocks();});
 describe('[COMP:app-web/mode-aware-context] explicit creation intent',()=>{
+ it.each([false,true])('keeps a pending creation read quiet (compact=%s) without admitting a send',async(compact)=>{
+  let resolveChoices!:(value:ReturnType<typeof projection>)=>void;
+  mocks.choices.mockImplementation(()=>new Promise(resolve=>{resolveChoices=resolve;}));
+  await render('private',compact);
+  expect(host.querySelector('[data-skeleton]')).toBeNull();
+  expect(host.querySelector('button')).toBeNull();
+  expect(host.querySelector('[aria-busy="true"]')).not.toBeNull();
+  expect(context.ready).toBe(false);
+  expect(context.snapshot()).toBeNull();
+  await act(async()=>resolveChoices(projection({policyRevision:'1',teams:[],projects:[]})));
+  expect(context.ready).toBe(true);
+  expect(host.querySelector(`[aria-label="${en.contextScope.project}"]`)).not.toBeNull();
+ });
+ it('shows recovery only after a failed context read and restores admission after retry',async()=>{
+  mocks.choices.mockRejectedValueOnce(new Error('context_unavailable'));
+  await render('private',true);
+  expect(context.ready).toBe(false);
+  expect(context.snapshot()).toBeNull();
+  expect(host.querySelector('[data-skeleton]')).toBeNull();
+  expect(host.querySelector('[role="alert"]')?.textContent).toBe(en.modeContext.stale);
+  const retry=host.querySelector('button')!;
+  expect(retry.textContent).toBe(en.workspaceAccess.reload);
+  await act(async()=>retry.click());
+  expect(context.ready).toBe(true);
+  expect(host.querySelector('[role="alert"]')).toBeNull();
+ });
  it('admits a fresh shared Simple default, hides only department selection and keeps Project control',async()=>{await render();expect(context.ready).toBe(true);expect(context.snapshot()).toEqual({contextGroupId:'team',contextProjectId:null,expectedPolicyRevision:'1'});expect(host.textContent).toContain(en.modeContext.shared);expect(host.querySelector(`[aria-label="${en.contextScope.team}"]`)).toBeNull();expect(host.querySelector(`[aria-label="${en.contextScope.project}"]`)).not.toBeNull();});
  it('does not default or rebind existing intent',async()=>{await render('existing');expect(context.snapshot()).toBeNull();expect(mocks.choices).not.toHaveBeenCalled();expect(host.textContent).not.toContain(en.modeContext.shared);});
  it('binds a new personal chat from the same projection with no forced choice (chat-parity T5)',async()=>{await render('private');expect(mocks.choices).toHaveBeenCalled();expect(context.ready).toBe(true);expect(context.snapshot()).toEqual({contextGroupId:null,contextProjectId:null,expectedPolicyRevision:'1'});expect(host.textContent).toContain(en.modeContext.private);expect(host.textContent).not.toContain(en.modeContext.shared);expect(host.querySelector(`[aria-label="${en.contextScope.team}"]`)).not.toBeNull();await act(async()=>context.selectProject('project'));expect(context.snapshot()?.contextProjectId).toBe('project');});

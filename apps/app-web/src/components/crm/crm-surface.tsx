@@ -342,8 +342,8 @@ export function CrmSurface({ workspaceId, routeRecord = null }: {
     },
   });
   // Content lease (perceived-performance.md, "Content lease for protected lists").
-  const collectionResource = useCachedResource<CrmCollectionPayload>(collectionKey, fetchCollection, { expiresInMs: surfaceContentRemaining });
-  useSurfaceContentRenewal(collectionResource.refresh);
+  const collectionResource = useCachedResource<CrmCollectionPayload>(collectionKey, fetchCollection, { expiresInMs: surfaceContentRemaining, keepInflightOnExpiry: true });
+  useSurfaceContentRenewal(collectionResource.refresh, true, collectionResource.data);
   const [retainedCollection, setRetainedCollection] = useState<CrmCollectionPayload | null>(null);
   useEffect(() => {
     if (collectionResource.data) setRetainedCollection(collectionResource.data);

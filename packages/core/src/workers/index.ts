@@ -10,3 +10,6 @@ export type {
 } from './research-classifier.js'
 export { runPreflight, buildPreflightPrompt } from './preflight.js'
 export type { PreflightResult } from './preflight.js'
+
+export { RESEARCH_EFFORT_BUDGETS, researchEffortInstruction } from './research-effort.js'
+export type { ResearchEffort } from './research-effort.js'

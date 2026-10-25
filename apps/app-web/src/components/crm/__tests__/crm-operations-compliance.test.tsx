@@ -93,6 +93,7 @@ describe("[COMP:app-web/crm-operations] operations UI", () => {
     const language = host.querySelector<HTMLButtonElement>(`button[aria-label="${en.crmPage.operations.wordingLocale}"]`)!;
     await act(async () => language.click());
     const option = Array.from(document.querySelectorAll<HTMLElement>('[role="option"]')).find((item) => item.textContent === "日本語")!;
+    await act(async () => { option.focus(); });
     await act(async () => option.click());
     expect(host.textContent).toContain("同意します");
     const grant = Array.from(host.querySelectorAll<HTMLButtonElement>("button")).find((item) => item.textContent?.trim() === en.crmPage.operations.grant)!;

@@ -124,8 +124,9 @@ describe("[COMP:app-web/chat-side-pane] one right pane with tabs", () => {
   it("is a resizable split beside the transcript, and a full-screen overlay on phones", () => {
     const aside = host.querySelector("#chat-side-pane")!;
     expect(aside.querySelector('[role="separator"]')).not.toBeNull();
-    expect(aside.className).toContain("max-sm:absolute");
-    expect(aside.className).toContain("max-sm:inset-0");
+    expect(aside.className).toContain("max-md:absolute");
+    expect(aside.className).toContain("max-md:inset-0");
+    expect(aside.className).toContain("max-w-[50%]");
   });
 
   it("T10/T9: page and url tabs render their bodies, with the only explicit ways out", () => {

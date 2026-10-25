@@ -314,10 +314,6 @@ export function DockRecorderButton({
 }) {
   const t = useT().recorder;
   const outsideRef = useRef(false);
-  const computerAudioId = useId();
-  const livePageId = useId();
-  const interactionId = useId();
-  const interactionT = useT().liveInteraction;
 
   // While a press-gesture is unresolved, resolve release from ANYWHERE in
   // the document — a finger sliding off the button must still stop.
@@ -391,6 +387,7 @@ export function DockRecorderButton({
               <button
                 type="button"
                 disabled={disabled || gestureLive}
+                data-recorder-options-trigger
                 aria-label={t.audioOptions}
                 title={t.audioOptions}
                 className={cn(
@@ -410,89 +407,104 @@ export function DockRecorderButton({
             sideOffset={6}
             className="w-[240px] p-3"
           >
-            <div className="flex flex-col gap-3">
-              {rec.screenCaptureAvailable ? (
-                <div className="flex flex-col gap-1" role="radiogroup" aria-label={t.captureSourceLabel}>
-                  <span className="text-xs text-muted-foreground">{t.captureSourceLabel}</span>
-                  {(
-                    [
-                      { source: "mic" as RecorderCaptureSource, label: t.captureSourceMic },
-                      {
-                        source: "screen" as RecorderCaptureSource,
-                        // A desktop shell records the entire (primary) display;
-                        // a browser opens its own picker, where the user may
-                        // choose a screen, window, or tab.
-                        label: rec.computerAudioAvailable
-                          ? t.captureSourceScreen
-                          : t.captureSourceScreenBrowser,
-                      },
-                      ...(rec.capturePickerAvailable
-                        ? [{ source: "window" as RecorderCaptureSource, label: t.captureSourceWindow }]
-                        : []),
-                    ]
-                  ).map(({ source, label }) => (
-                    <button
-                      key={source}
-                      type="button"
-                      role="radio"
-                      aria-checked={rec.captureSource === source}
-                      onClick={() => rec.setCaptureSource(source)}
-                      className={cn(
-                        "flex items-center justify-between gap-2 rounded px-1.5 py-1 text-left text-sm transition-colors hover:bg-accent",
-                        rec.captureSource === source ? "text-foreground" : "text-muted-foreground",
-                      )}
-                    >
-                      <span className="min-w-0 truncate">{label}</span>
-                      {rec.captureSource === source ? (
-                        <Check className="size-3.5 shrink-0" aria-hidden />
-                      ) : null}
-                    </button>
-                  ))}
-                </div>
-              ) : null}
-              {rec.computerAudioAvailable ? (
-                <div className="flex items-center justify-between gap-4">
-                  <label
-                    htmlFor={computerAudioId}
-                    className="min-w-0 cursor-pointer text-sm text-foreground"
-                  >
-                    {t.includeComputerAudio}
-                  </label>
-                  <Switch
-                    id={computerAudioId}
-                    checked={rec.includeComputerAudio}
-                    onCheckedChange={rec.setIncludeComputerAudio}
-                    aria-label={t.includeComputerAudio}
-                  />
-                </div>
-              ) : null}
-              <div className="flex items-center justify-between gap-4">
-                <label
-                  htmlFor={livePageId}
-                  className="min-w-0 cursor-pointer text-sm text-foreground"
-                >
-                  {t.streamToPage}
-                </label>
-                <Switch
-                  id={livePageId}
-                  disabled={rec.interactionEnabled}
-                  checked={rec.livePageEnabled}
-                  onCheckedChange={rec.setLivePageEnabled}
-                  aria-label={t.streamToPage}
-                />
-              </div>
-              <div className="flex items-center justify-between gap-4">
-                <label htmlFor={interactionId} className="text-sm">{interactionT.title}</label>
-                <Switch id={interactionId} disabled={!rec.interactionAvailable} checked={rec.interactionEnabled} onCheckedChange={rec.setInteractionEnabled} aria-label={interactionT.title} />
-              </div>
-              <p className="text-xs text-muted-foreground">{interactionT.description}</p>
-              {rec.interactionStatus === "unavailable" && <p role="alert" className="text-xs">{interactionT.personalOnly}</p>}
-              {rec.interactionAvailable === false && <p role="status" className="text-xs">{interactionT.unavailable}</p>}
-            </div>
+            <DockRecorderOptions rec={rec} disabled={disabled || gestureLive} />
           </PopoverContent>
         </Popover>
       ) : null}
     </div>
+  );
+}
+
+/** Shared next-capture preferences; no recorder/controller of its own.
+ * [COMP:app-web/dock-recorder-options] */
+export function DockRecorderOptions({ rec, disabled }: { rec: DockRecorderApi; disabled?: boolean }) {
+  const t = useT().recorder;
+  const computerAudioId = useId();
+  const livePageId = useId();
+  const interactionId = useId();
+  const interactionT = useT().liveInteraction;
+  return (
+    <fieldset disabled={disabled} className="flex min-w-0 flex-col gap-3 border-0 p-0 max-md:[&_[role=radio]]:min-h-11 max-md:[&_label]:flex max-md:[&_label]:min-h-11 max-md:[&_label]:flex-1 max-md:[&_label]:items-center">
+      {rec.screenCaptureAvailable ? (
+        <div className="flex flex-col gap-1" role="radiogroup" aria-label={t.captureSourceLabel}>
+          <span className="text-xs text-muted-foreground">{t.captureSourceLabel}</span>
+          {(
+            [
+              { source: "mic" as RecorderCaptureSource, label: t.captureSourceMic },
+              {
+                source: "screen" as RecorderCaptureSource,
+                // A desktop shell records the entire (primary) display;
+                // a browser opens its own picker, where the user may
+                // choose a screen, window, or tab.
+                label: rec.computerAudioAvailable
+                  ? t.captureSourceScreen
+                  : t.captureSourceScreenBrowser,
+              },
+              ...(rec.capturePickerAvailable
+                ? [{ source: "window" as RecorderCaptureSource, label: t.captureSourceWindow }]
+                : []),
+            ]
+          ).map(({ source, label }) => (
+            <button
+              key={source}
+              type="button"
+              disabled={disabled}
+              role="radio"
+              aria-checked={rec.captureSource === source}
+              onClick={() => rec.setCaptureSource(source)}
+              className={cn(
+                "flex items-center justify-between gap-2 rounded px-1.5 py-1 text-left text-sm transition-colors hover:bg-accent",
+                rec.captureSource === source ? "text-foreground" : "text-muted-foreground",
+              )}
+            >
+              <span className="min-w-0 truncate">{label}</span>
+              {rec.captureSource === source ? (
+                <Check className="size-3.5 shrink-0" aria-hidden />
+              ) : null}
+            </button>
+          ))}
+        </div>
+      ) : null}
+      {rec.computerAudioAvailable ? (
+        <div className="flex items-center justify-between gap-4">
+          <label
+            htmlFor={computerAudioId}
+            className="min-w-0 cursor-pointer text-sm text-foreground"
+          >
+            {t.includeComputerAudio}
+          </label>
+          <Switch
+            id={computerAudioId}
+            disabled={disabled}
+            checked={rec.includeComputerAudio}
+            onCheckedChange={rec.setIncludeComputerAudio}
+            aria-label={t.includeComputerAudio}
+          />
+        </div>
+      ) : null}
+      <div className="flex items-center justify-between gap-4">
+        <label
+          htmlFor={livePageId}
+          className="min-w-0 cursor-pointer text-sm text-foreground"
+        >
+          {t.streamToPage}
+        </label>
+        <Switch
+          id={livePageId}
+          disabled={disabled || rec.interactionEnabled}
+          checked={rec.livePageEnabled}
+          onCheckedChange={rec.setLivePageEnabled}
+          aria-label={t.streamToPage}
+        />
+      </div>
+      <div className="flex items-center justify-between gap-4">
+        <label htmlFor={interactionId} className="text-sm">{interactionT.title}</label>
+        <Switch id={interactionId} disabled={disabled || !rec.interactionAvailable} checked={rec.interactionEnabled} onCheckedChange={rec.setInteractionEnabled} aria-label={interactionT.title} />
+      </div>
+      <p className="text-xs text-muted-foreground">{interactionT.description}</p>
+      {rec.interactionStatus === "unavailable" && <p role="alert" className="text-xs">{interactionT.personalOnly}</p>}
+      {rec.interactionAvailable === false && <p role="status" className="text-xs">{interactionT.unavailable}</p>}
+    </fieldset>
   );
 }
 

@@ -100,7 +100,10 @@ describe("[COMP:app-web/workflow-delivery-feedback] delivery authoring", () => {
     const options = [...document.querySelectorAll('[role="option"]')];
     const web = options.find(n => n.textContent === en.workflowPage.builder.deliverChannelWeb)!;
     expect(web.getAttribute("aria-disabled")).toBe("true");
-    await act(async () => (options.find(n => n.textContent === en.workflowPage.builder.deliverChannelSlack) as HTMLElement).click());
+    const slack = options.find(n => n.textContent === en.workflowPage.builder.deliverChannelSlack) as HTMLElement;
+    expect(slack).toBeDefined();
+    await act(async () => { slack.focus(); });
+    await act(async () => slack.click());
     expect(changed).toHaveBeenCalledExactlyOnceWith({ channelType: "slack", channelId: "" });
     expect(host.textContent).not.toContain(copy.legacyWeb);
   });

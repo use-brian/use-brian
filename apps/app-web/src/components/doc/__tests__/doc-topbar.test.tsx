@@ -1,6 +1,5 @@
 /**
- * [COMP:app-web/doc-topbar] Doc top "layer" — sidebar toggle,
- * browse-history arrows, and the open-tab strip.
+ * [COMP:app-web/doc-topbar] Page tabs and active-tab history inside the shared workspace header.
  *
  * app-web's vitest is node-only (no jsdom), so we SSR-render via
  * `renderToString` and assert against the static markup — the same pattern
@@ -52,7 +51,6 @@ function bar(overrides: Partial<React.ComponentProps<typeof DocTopBar>> = {}) {
       canBack={overrides.canBack ?? false}
       canForward={overrides.canForward ?? false}
       sidebarCollapsed={overrides.sidebarCollapsed ?? false}
-      onToggleSidebar={noop}
       onBack={noop}
       onForward={noop}
       onSwitchTab={noop}
@@ -63,21 +61,17 @@ function bar(overrides: Partial<React.ComponentProps<typeof DocTopBar>> = {}) {
 }
 
 describe("[COMP:app-web/doc-topbar] Top-bar chrome", () => {
-  it("renders the sidebar collapse control + history arrows + new-tab button", () => {
+  it("renders shared history and new-tab controls while the rail owns sidebar collapse", () => {
     const html = bar();
-    expect(html).toContain(en.docPage.topbarSidebarCollapseAria);
+    expect(html).not.toContain(en.docPage.topbarSidebarCollapseAria);
     expect(html).toContain(en.docPage.topbarBackAria);
     expect(html).toContain(en.docPage.topbarForwardAria);
     expect(html).toContain(en.docPage.topbarNewTabAria);
   });
 
-  it("flips the sidebar toggle label when collapsed", () => {
-    expect(bar({ sidebarCollapsed: false })).toContain(
-      en.docPage.topbarSidebarCollapseAria,
-    );
-    expect(bar({ sidebarCollapsed: true })).toContain(
-      en.docPage.topbarSidebarExpandAria,
-    );
+  it("keeps native title-bar clearance tied to the sidebar state", () => {
+    expect(bar({ sidebarCollapsed: false })).toContain('data-sidebar-collapsed="false"');
+    expect(bar({ sidebarCollapsed: true })).toContain('data-sidebar-collapsed="true"');
   });
 
   it("disables back/forward when the active tab cannot navigate", () => {
@@ -211,9 +205,9 @@ describe("[COMP:app-web/doc-topbar] Phone tab strip", () => {
     expect(collapseTabStrip(three).chips.map((t) => t.key)).toEqual(["a"]);
   });
 
-  it("renders no tabs menu at two tabs, and an 'N tabs' menu at three", () => {
+  it("keeps a compact phone history menu at two tabs and tab overflow at three", () => {
     const two = bar({ tabs: [tab("a", true), tab("b", false)] });
-    expect(two).not.toContain("data-doc-tabs-menu");
+    expect(two).toContain("data-doc-tabs-menu");
 
     const three = bar({ tabs: [tab("a", true), tab("b", false), tab("c", false)] });
     expect(three).toContain("data-doc-tabs-menu");

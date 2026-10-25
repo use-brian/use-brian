@@ -206,7 +206,7 @@ async function resolveRoster(
   if (entry.data !== undefined && !isSurfaceCacheStale(key)) return entry.data;
   const loaded = await loadSurfaceCache(key, () =>
     leaseSurfaceContent(() => listWorkspaceAssistants(workspaceId)),
-    { expiresInMs: surfaceContentRemaining },
+    { expiresInMs: surfaceContentRemaining, keepInflightOnExpiry: true },
   );
   return loaded ?? entry.data ?? [];
 }

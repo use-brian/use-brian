@@ -32,6 +32,7 @@ async function select(value: string) {
   await flush();
   const option = [...document.querySelectorAll<HTMLElement>('[role="option"]')].find(el => el.textContent === value)!;
   expect(option).toBeDefined();
+  await act(async () => { option.focus(); });
   await act(async () => { option.click(); });
   await flush();
 }

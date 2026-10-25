@@ -73,7 +73,7 @@ function valuesOf(active: FilterActive, key: string): string[] {
 // chrome, muted at rest, foreground on hover.
 // 36px on a phone (responsive contract M3, secondary chips), 28px from `md`.
 const GHOST_BTN =
-  "inline-flex h-9 items-center gap-1.5 rounded-md border border-border bg-card px-2.5 md:h-7 " +
+  "inline-flex h-11 min-w-11 items-center justify-center gap-1.5 rounded-md border border-border bg-card px-2.5 md:h-7 md:min-w-0 " +
   "text-xs text-muted-foreground transition-colors hover:bg-muted hover:text-foreground";
 
 function OptionRow({
@@ -92,7 +92,7 @@ function OptionRow({
       aria-checked={selected}
       onClick={onPick}
       className={cn(
-        "flex w-full items-center gap-2 rounded-md px-2 py-1.5 text-left text-[13px] transition-colors hover:bg-muted",
+        "flex min-h-11 w-full items-center gap-2 rounded-md px-2 py-1.5 text-left md:min-h-0 text-[13px] transition-colors hover:bg-muted",
         selected && "bg-muted/60",
       )}
     >
@@ -169,7 +169,7 @@ function FilterPill({
   const lead = chosen[0];
   const extra = chosen.length - 1;
   return (
-    <span className="inline-flex h-9 items-center overflow-hidden rounded-full border border-primary/30 bg-primary/10 text-xs transition-colors md:h-7">
+    <span className="inline-flex h-11 items-center overflow-hidden rounded-full border border-primary/30 bg-primary/10 text-xs transition-colors md:h-7">
       <Popover open={open} onOpenChange={setOpen}>
         <PopoverTrigger
           className="inline-flex h-full items-center gap-1 pl-2.5 pr-1"
@@ -195,7 +195,7 @@ function FilterPill({
         type="button"
         aria-label={`${t.clearFilter}: ${def.label}`}
         onClick={() => onSet([])}
-        className="inline-flex h-full min-w-9 items-center justify-center pl-0.5 pr-2 text-muted-foreground/60 hover:text-foreground md:min-w-0"
+        className="inline-flex h-full min-w-11 items-center justify-center pl-0.5 pr-2 text-muted-foreground/60 hover:text-foreground md:min-w-0"
       >
         <X className="size-4 md:size-3" aria-hidden />
       </button>
@@ -243,7 +243,7 @@ function AddFilterButton({
                 key={def.key}
                 type="button"
                 onClick={() => setPicked(def)}
-                className="flex w-full items-center gap-2 rounded-md px-2 py-1.5 text-left text-[13px] transition-colors hover:bg-muted"
+                className="flex min-h-11 w-full items-center gap-2 rounded-md px-2 py-1.5 text-left md:min-h-0 text-[13px] transition-colors hover:bg-muted"
               >
                 <span className="min-w-0 flex-1 truncate">{def.label}</span>
                 {count > 0 && (
@@ -332,7 +332,7 @@ function ExpandingSearch({
         }}
         placeholder={placeholder}
         aria-label={placeholder}
-        className="h-9 w-full rounded-md border border-border bg-card pl-7 pr-2 text-[16px] outline-none placeholder:text-muted-foreground focus:ring-2 focus:ring-ring sm:w-44 md:h-7 md:text-[13px]"
+        className="h-11 w-full rounded-md border border-border bg-card pl-7 pr-2 text-[16px] outline-none placeholder:text-muted-foreground focus:ring-2 focus:ring-ring sm:w-44 md:h-7 md:text-[13px]"
       />
     </label>
   );

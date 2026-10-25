@@ -87,18 +87,16 @@ describe("[COMP:app-web/live-app] Live sidebar panel", () => {
     expect(html).toContain(en.liveApp.emptyFinished);
   });
 
-  it("keeps shared suggestions above workspace navigation and the Live-local body", () => {
+  it("keeps the persistent app rail outside the Live-local body", () => {
     const source = readFileSync(new URL("../../doc-sidebar.tsx", import.meta.url), "utf8");
-    const dock = source.indexOf("<HomeDock workspaceId={workspaceId} />");
-    const contextNav = source.indexOf("data-workspace-context-nav");
+    const rail = source.indexOf("<WorkspaceAppRail");
     const body = source.indexOf('className="doc-sidebar-scroll');
     const live = source.indexOf("<LiveSidebarPanel");
-    for (const position of [dock, contextNav, body, live]) {
+    for (const position of [rail, body, live]) {
       expect(position).toBeGreaterThanOrEqual(0);
     }
-    expect(source.match(/<HomeDock\b/g)).toHaveLength(1);
-    expect(dock).toBeLessThan(contextNav);
-    expect(contextNav).toBeLessThan(body);
+    expect(source).not.toContain("<HomeDock");
+    expect(rail).toBeLessThan(body);
     expect(body).toBeLessThan(live);
   });
 

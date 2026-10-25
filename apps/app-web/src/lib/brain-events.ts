@@ -23,6 +23,8 @@ export type BrainRefreshDetail = {
    * events whose workspaceId doesn't match its current view.
    */
   workspaceId: string | null;
+  /** Stream primitive; absent/mixed signals retain conservative invalidation. */
+  primitive?: string | null;
 };
 
 export type BrainEntryViewDetail = {

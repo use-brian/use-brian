@@ -1,34 +1,9 @@
-/**
- * Operator app registry — the single source of truth for the Home hub's
- * second bar (`OperatorAppBar`) and its sticky per-workspace selection.
- *
- * Two navigation tiers (docs/plans/tasks-operator-surface.md §2):
- *
- *   - The TOP icon row (doc-sidebar) is frozen at Home / Brain / Studio /
- *     Workflow / Live — how you shape and observe the brain. Live owns the
- *     former Inbox slot and is intentionally not a Home app key.
- *   - OPERATOR APPS — things you run over the brain (Page, Tasks, CRM,
- *     Feed, Browsers, Chat) — live under Home in the app-bar. Selecting Home
- *     resolves to the workspace's LAST-USED operator app and its last safe
- *     pathname, cached per workspace in localStorage, so leaving to Studio and
- *     returning resumes where you were.
- *
- * WHICH apps are on the strip is workspace config, not a constant: the
- * `enabled` list threaded through every resolver here comes from
- * `workspaces.home_apps` (chat-miniapp-home-config.md §6). The KEY VOCABULARY
- * is shared with the API through `@use-brian/shared/home-apps` so the route
- * schema, the store setter, and this module can never disagree about what a
- * valid app is; this file adds only the client-side mappings (route segment,
- * surface, sticky cache) the server has no use for.
- *
- * Custom (workspace-built) apps ride the same list as `custom:<uuid>` entries
- * and route to `/w/<id>/apps/<appId>` (custom-home-apps.md T12). They are
- * `HomeAppEntry`s, not `OperatorAppKey`s — the built-in key type stays closed
- * so `APP_ICON` / `operatorBar` dictionary exhaustiveness keeps working.
- *
- * Pure + IO-light (localStorage only, guarded) so vitest can exercise the
- * resolution logic without React or the router.
- *
+/** Mini-app registry and validated per-app pathname resume.
+ * Home and generic workspace entry open Chat; App store and the rail use
+ * these mappings to open other apps without changing that Home destination.
+ * Config-constrained sticky selection is retained only for legacy Suggested
+ * links and their identity chrome.
+ * Spec: docs/architecture/features/workspace-navigation.md.
  * [COMP:app-web/operator-app-bar]
  */
 
@@ -315,19 +290,12 @@ function firstEnabled(enabled: readonly HomeAppEntry[]): HomeAppEntry {
   return enabled.find((entry) => isOperatorAppKey(entry) || Boolean(customHomeAppId(entry))) ?? DEFAULT_OPERATOR_APP;
 }
 
-/**
- * The generic app/workspace-open destination: the FIRST configured mini app.
- *
- * This is deliberately distinct from `homePath`, which backs the explicit
- * Home action and resumes the operator's sticky app. Account/workspace entry
- * uses this ordered default so whichever app an admin put first is what opens;
- * Page has no privileged fallback.
- */
+/** Generic workspace entry always opens the Chat mini-app. */
 export function defaultHomePath(
   workspaceId: string,
-  enabled: readonly HomeAppEntry[] = DEFAULT_HOME_APPS,
+  _enabled: readonly HomeAppEntry[] = DEFAULT_HOME_APPS,
 ): string {
-  return homeAppPath(workspaceId, firstEnabled(enabled));
+  return operatorAppPath(workspaceId, "chat");
 }
 
 /**
@@ -370,16 +338,10 @@ export function writeOperatorApp(
   }
 }
 
-/**
- * The Home destination: the workspace's persisted operator app's route.
- * This is what the top-row Home icon, the ⌘/Ctrl+1 shortcut, and the
- * Home shortcut navigate to — Home resolves to *your last app* within the
- * workspace's configured strip, never a hard-coded `/p`. Generic workspace
- * entry uses `defaultHomePath` instead.
- */
+/** Home always opens Chat, even when another mini-app was last visited. */
 export function homePath(
   workspaceId: string,
-  enabled: readonly HomeAppEntry[] = DEFAULT_HOME_APPS,
+  _enabled: readonly HomeAppEntry[] = DEFAULT_HOME_APPS,
 ): string {
-  return homeAppPath(workspaceId, readOperatorApp(workspaceId, enabled));
+  return operatorAppPath(workspaceId, "chat");
 }

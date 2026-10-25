@@ -286,7 +286,6 @@ export function NewCommentPopover({
               // Doc research ships — arm the toggle wherever the assistant
               // answers (it disables with AI-reply off, like the model picker).
               // A no-assistant page has nothing to research for.
-              showResearch={hasAssistant}
               {...(hasAssistant
                 ? { aiReply, onAiReplyChange: setAiReply }
                 : {})}

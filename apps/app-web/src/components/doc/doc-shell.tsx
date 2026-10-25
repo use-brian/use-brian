@@ -213,7 +213,6 @@ export function DocShell({ workspaceId, assistantId }: ShellProps) {
     setTopError: setSidebarTopError,
     registerActivePageBridge,
     sidebarCollapsed,
-    setSidebarCollapsed,
     studioSetupIncomplete,
   } = sidebar;
   const activeOperatorApp = useActiveOperatorApp();
@@ -336,7 +335,7 @@ export function DocShell({ workspaceId, assistantId }: ShellProps) {
     };
   }, [currentUserInfo]);
 
-  // Desktop sidebar collapse (`sidebarCollapsed` / `setSidebarCollapsed`) lives
+  // Desktop sidebar collapse (`sidebarCollapsed`) lives
   // in the hoisted provider — the sidebar it sizes is now in `WorkspaceChrome`,
   // but the toggle button stays in this shell's top bar (Row 1). The inbox
   // flyout is likewise owned by the provider + rendered by `WorkspaceChrome`.
@@ -1115,7 +1114,6 @@ export function DocShell({ workspaceId, assistantId }: ShellProps) {
             canBack={canGoBack(tabsState)}
             canForward={canGoForward(tabsState)}
             sidebarCollapsed={sidebarCollapsed}
-            onToggleSidebar={() => setSidebarCollapsed((v) => !v)}
             onBack={() => setTabsState(back)}
             onForward={() => setTabsState(forward)}
             onSwitchTab={(key) => setTabsState((s) => switchTab(s, key))}

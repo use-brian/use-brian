@@ -1,1 +1,1 @@
-export { organizeWorkspacePicker, usesScalableWorkspacePicker, type WorkspacePickerItem } from "@use-brian/chat-ui";
+export { organizeWorkspacePicker, usesScalableWorkspacePicker, type WorkspacePickerItem } from "@use-brian/chat-ui/workspace-picker";

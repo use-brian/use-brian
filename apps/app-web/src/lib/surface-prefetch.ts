@@ -877,7 +877,7 @@ export function warmTargetFor(
       return {
         key: surfaceDataKey("tasks", workspaceId) as string,
         fetch: () => leaseSurfaceContent(() => fetchWorkspaceTasks(workspaceId)),
-        lifecycle: { expiresInMs: surfaceContentRemaining },
+        lifecycle: { expiresInMs: surfaceContentRemaining, keepInflightOnExpiry: true },
       };
     case "association":
       return {
@@ -894,7 +894,7 @@ export function warmTargetFor(
       return {
         key: surfaceDataKey("workflow", workspaceId) as string,
         fetch: () => leaseSurfaceContent(() => listWorkflows(workspaceId, { includeArchived: true })),
-        lifecycle: { expiresInMs: surfaceContentRemaining },
+        lifecycle: { expiresInMs: surfaceContentRemaining, keepInflightOnExpiry: true },
       };
     case "studio":
       // The Studio root redirects to Connectors (`studio/page.tsx`), so the
@@ -902,7 +902,7 @@ export function warmTargetFor(
       return {
         key: connectorsCacheKey(workspaceId),
         fetch: () => leaseSurfaceContent(() => fetchConnectorsList(workspaceId)),
-        lifecycle: { expiresInMs: surfaceContentRemaining },
+        lifecycle: { expiresInMs: surfaceContentRemaining, keepInflightOnExpiry: true },
       };
     case "chat":
       // The roster is the first thing the Chat surface needs (the new-chat
@@ -911,7 +911,7 @@ export function warmTargetFor(
       return {
         key: chatRosterCacheKey(workspaceId),
         fetch: () => leaseSurfaceContent(() => listWorkspaceAssistants(workspaceId)),
-        lifecycle: { expiresInMs: surfaceContentRemaining },
+        lifecycle: { expiresInMs: surfaceContentRemaining, keepInflightOnExpiry: true },
       };
     case "feed": {
       // The shell gate's record - the five requests every Feed route mounts
@@ -942,7 +942,7 @@ export function warmTargetFor(
       return {
         key: shopifyToolsCacheKey(workspaceId),
         fetch: () => leaseSurfaceContent(() => listShopifyTools(workspaceId)),
-        lifecycle: { expiresInMs: surfaceContentRemaining },
+        lifecycle: { expiresInMs: surfaceContentRemaining, keepInflightOnExpiry: true },
       };
     case "live":
       // The roster is the whole surface (overview zones, the focused row,

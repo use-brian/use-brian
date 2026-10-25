@@ -59,23 +59,24 @@ export const OFFLINE_AUTHORITY_MS = 60 * 60_000;
 /** A network value expires this long after its request started. */
 export const SURFACE_CONTENT_LEASE_MS = 30_000;
 export const SURFACE_CONTENT_RENEW_MS = 15_000;
-const leaseDeadlines = new WeakMap<object, number>();
+const leaseDeadlines = new WeakMap<object, { deadline: number; requestDurationMs: number }>();
 
-function lease<T>(value: T, deadline: number): T {
-  if (value && typeof value === "object") leaseDeadlines.set(value, deadline);
+function lease<T>(value: T, deadline: number, requestDurationMs = 0): T {
+  if (value && typeof value === "object") leaseDeadlines.set(value, {deadline, requestDurationMs});
   return value;
 }
 
 /** Remaining authority of a leased value; an unleased value has none. */
 export function surfaceContentRemaining(value: unknown): number {
   if (!value || typeof value !== "object") return 0;
-  return Math.max(0, (leaseDeadlines.get(value) ?? 0) - performance.now());
+  return Math.max(0, (leaseDeadlines.get(value)?.deadline ?? 0) - performance.now());
 }
 
 /** Fetch and lease a value from its request start. */
 export async function leaseSurfaceContent<T>(fetch: () => Promise<T>): Promise<T> {
   const started = performance.now();
-  const value = lease(await fetch(), started + SURFACE_CONTENT_LEASE_MS);
+  const fetched = await fetch();
+  const value = lease(fetched, started + SURFACE_CONTENT_LEASE_MS, performance.now() - started);
   if (surfaceContentRemaining(value) <= 0) {
     throw new SurfaceCacheEvictionError(new Error("surface_content_expired"));
   }
@@ -101,32 +102,73 @@ export function isSurfaceContentExpiry(error: unknown): boolean {
  * fetch, expiry and renewal in one call.
  */
 export function useLeasedResource<T>(key: string | null, fetch: () => Promise<T>): UseCachedResource<T> {
-  const resource = useCachedResource<T>(key, () => leaseSurfaceContent(fetch), { expiresInMs: surfaceContentRemaining });
-  useSurfaceContentRenewal(resource.refresh, key !== null);
+  const resource = useCachedResource<T>(key, () => leaseSurfaceContent(fetch), { expiresInMs: surfaceContentRemaining, keepInflightOnExpiry: true });
+  useSurfaceContentRenewal(resource.refresh, key !== null, resource.data);
   return resource;
 }
 
 /**
- * Renew a mounted surface's lease every 15 seconds while visible and on return to
- * the foreground. A failed renewal leaves the deadline where it was.
+ * Renew before the current value's deadline, accounting for the preceding read.
+ * Without a leased value, retry at the normal 15-second cadence. A failed
+ * renewal leaves the deadline where it was; no request overlaps another here.
  */
-export function useSurfaceContentRenewal(refresh: () => Promise<unknown>, active = true): void {
+export function useSurfaceContentRenewal(refresh: () => Promise<unknown>, active = true, value?: unknown): void {
   const refreshRef = useRef(refresh);
   refreshRef.current = refresh;
+  const measured = value && typeof value === "object" ? leaseDeadlines.get(value) : undefined;
+  const owner = useRef({refresh, lifetime: measured});
+  // Optimistic edits/pagination replace data without granting new authority.
+  // Retain only the original timing, never the old content, until a real read
+  // replaces it. Such edits must not postpone an already scheduled renewal.
+  if (owner.current.refresh !== refresh || value === undefined || measured)
+    owner.current = {refresh, lifetime: measured};
+  const lifetime = owner.current.lifetime;
   useEffect(() => {
     if (!active) return;
-    const renew = () => {
-      if (document.visibilityState === "visible") void refreshRef.current().catch(() => {});
+    let disposed = false;
+    let pending = false;
+    let timer: ReturnType<typeof setTimeout>;
+    const schedule = (candidate = lifetime, elapsed = 0, failed = false) => {
+      if (disposed) return;
+      clearTimeout(timer);
+      const remaining = candidate ? Math.max(0, candidate.deadline - performance.now()) : 0;
+      const duration = candidate?.requestDurationMs ?? 0;
+      const delay = !failed && remaining > 0
+        ? Math.max(500, Math.min(SURFACE_CONTENT_RENEW_MS, remaining - Math.max(remaining / 2, duration * 1.25)))
+        : Math.max(500, SURFACE_CONTENT_RENEW_MS - elapsed);
+      timer = setTimeout(renew, delay);
     };
-    const timer = setInterval(renew, SURFACE_CONTENT_RENEW_MS);
+    const renew = () => {
+      if (disposed || pending) return;
+      clearTimeout(timer);
+      if (document.visibilityState !== "visible") {
+        schedule();
+        return;
+      }
+      pending = true;
+      const started = performance.now();
+      void Promise.resolve().then(() => refreshRef.current()).then(
+        next => {
+          pending = false;
+          const nextLifetime = next && typeof next === "object" ? leaseDeadlines.get(next) : undefined;
+          schedule(nextLifetime, performance.now() - started, !nextLifetime);
+        },
+        () => {
+          pending = false;
+          schedule(lifetime, performance.now() - started, true);
+        },
+      );
+    };
+    schedule();
     window.addEventListener("focus", renew);
     document.addEventListener("visibilitychange", renew);
     return () => {
-      clearInterval(timer);
+      disposed = true;
+      clearTimeout(timer);
       window.removeEventListener("focus", renew);
       document.removeEventListener("visibilitychange", renew);
     };
-  }, [active]);
+  }, [active, lifetime, refresh]);
 }
 
 export type SurfaceContentCacheScope = {
@@ -331,7 +373,7 @@ export function useSurfaceContentCache<T>(options: {
     // `diskFirst` never runs and nothing is seeded). On a disk hit the entry
     // is marked stale right after it lands, so `useCachedResource` revalidates
     // over the network behind the painted rows.
-    void loadSurfaceCache(key, diskFirst, { expiresInMs: surfaceContentRemaining }).then(() => {
+    void loadSurfaceCache(key, diskFirst, { expiresInMs: surfaceContentRemaining, keepInflightOnExpiry: true }).then(() => {
       if (seeded) markSurfaceCacheStale(key);
     });
   }, [key, persisting, resource, workspaceId]);

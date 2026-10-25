@@ -14,8 +14,7 @@ import { publicRuntimeConfig } from "@/lib/runtime-public-config";
  * settings modal, Add workspace opens an in-popover create form
  * (`CreateWorkspaceForm` -> `POST /api/workspaces`) so creation never
  * leaves the switcher and behaves identically on web and the desktop
- * shell, switching the active workspace enters `/w/<id>` so its first ordered
- * mini app decides the destination, and Log out clears the local session. Only account
+ * shell, switching the active workspace enters `/w/<id>` and opens Chat, and Log out clears the local session. Only account
  * management (Add another account, switching accounts) still bounces to
  * the **main web app** / the primary (`usebrian.ai`) — rewriting the shared
  * `.usebrian.ai` cookies is the primary's job (sub-app rule).
@@ -58,6 +57,7 @@ import {
   useWorkspaceFetch,
   useWorkspaces,
 } from "@/contexts/workspace-context";
+import { Tooltip } from "@/components/ui/tooltip";
 import { Skeleton } from "@/components/skeleton";
 import { getUserInfo } from "@/lib/user";
 import { signOutActiveAccount } from "@/lib/account-logout";
@@ -115,7 +115,7 @@ function cn(...parts: Array<string | false | null | undefined>): string {
   return parts.filter(Boolean).join(" ");
 }
 
-export function WorkspaceSwitcher() {
+export function WorkspaceSwitcher({ iconOnly = false }: { iconOnly?: boolean }) {
   const t = useT().workspaceSwitcher;
   const router = useRouter();
   const ctx = useWorkspaceContext();
@@ -415,27 +415,24 @@ export function WorkspaceSwitcher() {
   // a "Loading..." sentence (N4). Anything in hand paints as rows.
   const showListSkeleton = loading && listEmpty;
 
+  const trigger = (
+    <WorkspacePickerTrigger ref={triggerRef} workspace={{ id: ctx.workspaceId, name: ctx.name, iconSeed: ctx.iconSeed, iconUrl: ctx.iconUrl }} open={open} label={format(t.switcherAriaLabel, { name: ctx.name })} iconOnly={iconOnly} />
+  );
+
   return (
     <>
     <Popover open={open} onOpenChange={setOpen}>
-      <WorkspacePickerTrigger ref={triggerRef} workspace={{ id: ctx.workspaceId, name: ctx.name, iconSeed: ctx.iconSeed, iconUrl: ctx.iconUrl }} open={open} label={format(t.switcherAriaLabel, { name: ctx.name })} />
+      {iconOnly ? <Tooltip label={format(t.switcherAriaLabel, { name: ctx.name })} side="right">{trigger}</Tooltip> : trigger}
 
       <PopoverContent
         role="menu"
         side="bottom"
         align="start"
         sideOffset={8}
-        // Anchor to the full-width sidebar head ROW, not the trigger button.
-        // In the desktop shell the head is indented past the macOS traffic
-        // lights (`--doc-titlebar-lights`, ~76px), so anchoring to the button
-        // would land the popup's left edge mid-sidebar and leave a partial,
-        // clipped strip of sidebar showing on the left. The head row's border
-        // box starts at the window/sidebar left edge (x=0), so aligning to it
-        // makes the popup open flush-left and fully cover the sidebar beneath.
-        // Falls back to the trigger if the head ancestor isn't found.
+        // Rail icons anchor directly to their button. The labelled variant
+        // retains its full-head anchor for other hosts.
         anchor={() =>
-          triggerRef.current?.closest("[data-doc-sidebar-head]") ??
-          triggerRef.current
+          (iconOnly ? null : triggerRef.current?.closest("[data-doc-sidebar-head]")) ?? triggerRef.current
         }
         // Never wider than the phone (responsive contract M5); the popover
         // primitive clamps the height.

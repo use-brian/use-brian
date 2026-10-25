@@ -54,8 +54,8 @@ describe("[COMP:app-web/inline-ai-prompt] compose-state render", () => {
         onClose={() => {}}
       />,
     );
-    // ComposerControls is reused, so the research toggle + model label show.
-    expect(html).toContain(dict.chat.research);
+    // The shared composer retains the model picker; research is automatic.
+    expect(html).not.toContain(dict.chat.research);
     expect(html).toContain(dict.chat.modelStandard);
   });
 });

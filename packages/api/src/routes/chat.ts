@@ -9,6 +9,7 @@ import { withSessionMessagePublication } from '../db/session-context-revisions.j
 import { createAttendedDeliveryAudienceAuthorizer } from '../context-scope/attended-audience.js'
 import { bindScopeSources } from '@use-brian/core'
 import { runTurnSessionStateDiff } from '../turn/session-state.js'
+import { RESEARCH_EFFORT_BUDGETS, researchEffortInstruction, type ResearchEffort } from '@use-brian/core'
 import { withTurnInference } from '../turn/runtime.js'
 import { PER_TURN_FILES_INDEX_CAP, PER_TURN_INDEX_CAP } from '../turn/index-caps.js'
 import { dispatchPersistedWebInput } from './_incoming-chat-event.js'
@@ -903,12 +904,12 @@ const RESEARCH_MAX_WORKER_WAVES = 4
  * No restated rules, no quoted tags, no protocol prose. Nothing to
  * paraphrase.
  */
-function createResearchWorkerDrainPrompt(): (text: string, results: WorkerResult[]) => string {
+export function createResearchWorkerDrainPrompt(maxWaves: number = RESEARCH_MAX_WORKER_WAVES): (text: string, results: WorkerResult[]) => string {
   let waveCount = 0
   return (notificationText, results) => {
     waveCount++
     const failed = results.filter((r) => r.status === 'failed')
-    const cappedOut = waveCount >= RESEARCH_MAX_WORKER_WAVES
+    const cappedOut = waveCount >= maxWaves
 
     if (failed.length > 0 && !cappedOut) {
       return `Wave ${waveCount} results:\n\n${notificationText}\n\n${failed.length} worker(s) failed; respawn them per the protocol in your system prompt.`
@@ -947,7 +948,7 @@ export function isUserBlocked(
  *
  * Eligible only when the caller left `mode` unpinned (`undefined`), the
  * assistant is workspace-scoped (research requires workspace billing),
- * the plan is paid, AND the assistant is NOT `kind='app'`. (Message
+ * research allowance remains, AND the assistant is NOT `kind='app'`. (Message
  * presence is guarded separately at the call site, where it also
  * narrows the message type for the classifier input.)
  *
@@ -969,11 +970,12 @@ export function isAdaptiveResearchEligible(args: {
   userPlan: string
   assistantKind: string | null | undefined
   researchPlanGate?: boolean
+  researchQuotaAvailable?: boolean
 }): boolean {
   return (
     args.requestedMode === undefined &&
     !!args.workspaceId &&
-    (args.researchPlanGate === false || args.userPlan !== 'free') &&
+    args.researchQuotaAvailable !== false &&
     args.assistantKind !== 'app'
   )
 }
@@ -2261,11 +2263,12 @@ export function chatRoutes(options: WebChatOptions): Router {
     // turn) sees the replaced text — the original is durable in the artifact.
     let message = rawMessage
     // `requestedMode` semantics:
-    //   - 'research'  → manual on, classifier skipped, downstream uses research budget
-    //   - 'default'   → manual off, classifier skipped (user explicitly opted out)
+    //   - 'research'  → legacy explicit entry, classifier skipped, deep research budget
+    //   - 'default'   → API opt-out, classifier skipped
     //   - undefined   → adaptive: run the research-intent classifier (mig 196 phase)
     //                    and let it decide. Same downstream effect as 'research'.
     let researchMode = requestedMode === 'research'
+    let assessedResearchEffort: ResearchEffort = 'deep'
 
     // Text, ordinary files, or staged recordings may independently start a
     // turn. A recording-only send is the clarification UX after upload.
@@ -2519,13 +2522,15 @@ export function chatRoutes(options: WebChatOptions): Router {
           userPlan,
           assistantKind: assistant.kind,
           researchPlanGate: deploymentCapabilities().researchPlanGate,
+          researchQuotaAvailable: !assistant.workspaceId || !deploymentCapabilities().researchPlanGate || userPlan !== 'free' ||
+            (await getWorkspaceResearchUsed(assistant.workspaceId!)) < FREE_RESEARCH_QUOTA,
         })
       // Adaptive research entry. When the request didn't pin a mode, run a
       // cheap Gemini-Flash-Lite classifier to decide whether this message
       // warrants research mode. If yes, flip `researchMode = true` so the
       // existing quota gate / model upgrade / worker pipeline downstream
-      // kicks in just like manual entry. Gated by `isAdaptiveResearchEligible`:
-      // skipped on free plans, on assistants outside a workspace (research
+      // applies the assessed effort. Gated by `isAdaptiveResearchEligible`:
+      // skipped when free allowance is exhausted, outside a workspace (research
       // requires workspace billing), and on `kind='app'` assistants
       // (doc/feed — research mode strips the very authoring tools they
       // need, so silent auto-entry would break their core job).
@@ -2544,7 +2549,7 @@ export function chatRoutes(options: WebChatOptions): Router {
       // classifier below ORs in its language-agnostic verdict. It only gates
       // the AUTOMATIC delegation triggers (adaptive entry, the Pro/Max
       // splitter, the Flash standard preflight) — the explicit research
-      // toggle wins, which the `!researchMode` guard encodes.
+      // API override wins, which the `!researchMode` guard encodes.
       let operateSiteIntent = !researchMode && !!message && detectOperateSiteIntent(message)
       let adaptiveResearchOverhead: {
         model: string | null
@@ -3975,6 +3980,7 @@ export function chatRoutes(options: WebChatOptions): Router {
           if (!(await authority.execute(admitResearchQuota))) return
           await assertDeliveryAudience()
           researchMode = true
+          assessedResearchEffort = 'effort' in adaptive ? adaptive.effort ?? 'standard' : 'standard'
           // `phase` is a stable, client-localizable code; `message` stays for
           // non-web consumers and logs. The web client renders a research
           // banner off `phase` (see chat-experience.tsx `case "status"`).
@@ -4129,7 +4135,7 @@ export function chatRoutes(options: WebChatOptions): Router {
             workspaceId: assistant.workspaceId, sessionId: session.id, requestMessageId: storedUserMsg.id,
             actorUserId: user.id, assistantId: assistant.id, projectId: session.contextProjectId ?? null,
             entry: requestedMode === 'research' ? 'explicit' : 'adaptive',
-            runtime: { surface: 'web', assistantKind: assistant.kind, plan: userPlan ?? null },
+            runtime: { surface: 'web', assistantKind: assistant.kind, plan: userPlan ?? null, effort: assessedResearchEffort },
             sensitivity: inputMessageScope?.sensitivity ?? null,
             compartments: inputMessageScope?.compartments ?? null,
           })
@@ -6357,15 +6363,10 @@ export function chatRoutes(options: WebChatOptions): Router {
         // and durable rehydrate. Explicit custom selectors still ride
         // workerRuntime and remain pinned authoritatively.
         options.workerManager?.setResearchModel(logicalModel, session.id)
-        // Cap concurrent workers at 5 for the research session. Lowered
-        // from 10 after sustained 4GB OOM crashes — 10 concurrent worker
-        // queryLoops at HIGH thinking + their statelessHistory growth +
-        // their Gemini fetch buffers compounded faster than V8 could GC.
-        // 5 halves the parallel memory pressure while still giving the
-        // coordinator real fan-out. The coordinator can refill the pool
-        // after Phase 4b drains between waves, so total worker output
-        // across multi-wave is comparable to the 10-cap setup.
-        options.workerManager?.setMaxConcurrent(5, session.id)
+        // The assessment bounds parallelism and each worker's effort. Five
+        // remains the absolute deep-research concurrency ceiling for memory.
+        options.workerManager?.setResearchEffort(assessedResearchEffort, session.id)
+        options.workerManager?.setMaxConcurrent(RESEARCH_EFFORT_BUDGETS[assessedResearchEffort].maxConcurrent, session.id)
       }
 
       // ── Pre-flight: automatic parallel research ──────────────
@@ -6740,7 +6741,7 @@ export function chatRoutes(options: WebChatOptions): Router {
       // workers returning snippet-only summaries and the coordinator concluding
       // "no info found" before workers had real urlReader content.
       const coordinatorBaseAddendum = COORDINATOR_BASE_ADDENDUM
-      const coordinatorResearchAddendum = COORDINATOR_RESEARCH_ADDENDUM
+      const coordinatorResearchAddendum = `${COORDINATOR_RESEARCH_ADDENDUM}\n\n${researchEffortInstruction(assessedResearchEffort)}`
       // Coordinator addenda are mode-stable and stay on the system prompt.
       // Preflight findings are hidden runtime metadata, so they also stay in
       // the trusted channel inside the private-runtime suffix.
@@ -7502,7 +7503,9 @@ export function chatRoutes(options: WebChatOptions): Router {
           // user confirmed the estimate at exactly this depth.
           ...(meteredTurn
             ? { maxTurns: meteredTurn.toolRounds, maxToolCalls: meteredTurn.toolRounds }
-            : chatTierBudget({ model: logicalModel, researchMode }) ?? {}),
+            : researchMode
+              ? { maxTurns: RESEARCH_EFFORT_BUDGETS[assessedResearchEffort].maxTurns, maxToolCalls: RESEARCH_EFFORT_BUDGETS[assessedResearchEffort].maxToolCalls }
+              : chatTierBudget({ model: logicalModel, researchMode }) ?? {}),
           // Execution-plan completeness gate: when the session has an active
           // plan with open steps, a tool-less turn keeps working them instead
           // of stalling half-done; budget exhaustion fires one model-generated
@@ -7536,7 +7539,7 @@ export function chatRoutes(options: WebChatOptions): Router {
             ? { groundingGate: { userMessage: message, draftDelivered: true } }
             : {}),
           ...(researchMode ? {
-            workerDrainPrompt: createResearchWorkerDrainPrompt(),
+            workerDrainPrompt: createResearchWorkerDrainPrompt(RESEARCH_EFFORT_BUDGETS[assessedResearchEffort].maxWaves),
           } : {}),
           // Opt into askQuestion suspend behavior for workspace-scoped
           // chats. The engine only honors the suspend branch when this

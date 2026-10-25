@@ -10,13 +10,17 @@
  */
 
 import { describe, expect, it } from "vitest";
+import { readFileSync } from "node:fs";
 import { renderToStaticMarkup } from "react-dom/server";
 import { BrainGraphLoadingSkeleton } from "@/components/brain/graph-loading";
 import {
   surfaceSkeletonKind,
   type SurfaceSkeletonKind,
+  SurfaceSkeletonFor,
+  AppShellSkeleton,
 } from "@/components/chrome/surface-skeleton";
 import { WORKSPACE_SURFACES } from "@/lib/doc-page-url";
+import ChatLoading from "@/app/w/[workspaceId]/chat/loading";
 
 // DERIVED from the union's source array, not copied.
 //
@@ -31,9 +35,23 @@ import { WORKSPACE_SURFACES } from "@/lib/doc-page-url";
 // assert the mapping at runtime, so it should track the real vocabulary.
 const ALL_SURFACES = WORKSPACE_SURFACES;
 
-const KINDS: SurfaceSkeletonKind[] = ["page", "list", "grid", "rail", "brain"];
+const KINDS: SurfaceSkeletonKind[] = ["page", "list", "grid", "rail", "brain", "none"];
 
 describe("[COMP:app-web/surface-skeleton] Surface skeleton shapes", () => {
+  it("server-renders decorative chrome that the persistent app body can suppress", () => {
+    const html = renderToStaticMarkup(<SurfaceSkeletonFor surface="projects" />);
+    expect(html).toContain("data-surface-chrome-skeleton");
+    expect(html.replace(/<[^>]+>/g, "").trim()).toBe("");
+    const shell = renderToStaticMarkup(<AppShellSkeleton />);
+    expect(shell).toContain("md:mt-3");
+    expect(shell).toContain("h-[calc(100%-1.25rem)]");
+    expect(shell).toContain("md:pt-2");
+    expect(shell).toContain("md:mb-2");
+    expect(shell).toContain("md:rounded-r-2xl");
+    expect(shell.match(/data-surface-chrome-skeleton/g)).toHaveLength(1);
+    expect(shell.indexOf("data-workspace-window-header")).toBeLessThan(shell.indexOf("<aside"));
+  });
+
   it("classifies every workspace surface", () => {
     for (const surface of ALL_SURFACES) {
       expect(KINDS).toContain(surfaceSkeletonKind(surface));
@@ -55,10 +73,12 @@ describe("[COMP:app-web/surface-skeleton] Surface skeleton shapes", () => {
     expect(surfaceSkeletonKind("p")).toBe("page");
   });
 
-  it("falls back to the page shape at the workspace root", () => {
-    // `/w/<id>` redirects to `/p`, so the doc frame is the correct guess while
-    // that redirect is in flight.
-    expect(surfaceSkeletonKind(null)).toBe("page");
+  it("keeps Home and Chat route entry free of placeholder content", () => {
+    for (const surface of [null, "chat"] as const) {
+      expect(surfaceSkeletonKind(surface)).toBe("none");
+      expect(renderToStaticMarkup(<SurfaceSkeletonFor surface={surface} />)).toBe("");
+    }
+    expect(renderToStaticMarkup(<ChatLoading />)).toBe("");
   });
 
   it("mirrors the rendered brain graph using only the skeleton treatment", () => {
@@ -79,5 +99,15 @@ describe("[COMP:app-web/surface-skeleton] Surface skeleton shapes", () => {
     expect(html).not.toContain("brain-outline");
     expect(html).not.toContain("brain-graph-loading-scan");
     expect(html.replace(/<[^>]+>/g, "").trim()).toBe("");
+  });
+
+  it("lets graph positioning and circular corners override the shared skeleton defaults", () => {
+    const css = readFileSync(new URL("../../../app/globals.css", import.meta.url), "utf8");
+    // Utilities must win the cascade: otherwise the overlay chips become
+    // relatively positioned and graph discs turn into rounded rectangles.
+    const components = css.slice(css.indexOf("@layer components {"), css.indexOf("@layer utilities {"));
+    expect(components).toMatch(/\.skeleton\s*\{[^}]*position:\s*relative/);
+    expect(components).toMatch(/\.skeleton\s*\{[^}]*border-radius:/);
+    expect(css.slice(css.indexOf("@layer utilities {"))).not.toMatch(/\.skeleton\s*\{/);
   });
 });

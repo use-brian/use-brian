@@ -1,6 +1,6 @@
 import { describe, it, expect, vi } from 'vitest'
 import { readFileSync } from 'node:fs'
-import { chatRoutes, mayUsePersonalChatSession, appAssistantForbidsResearch, appAssistantForbidsCoordinator, isAdaptiveResearchEligible, isUserBlocked, sanitizeTitle, buildActivePageInstruction, buildActiveRecordingInstruction, recordingParticipantsUpdatedReceipt, buildViewingSkillBlock, createUpdateViewedSkillTool, workspaceSkillRevision, resolveStickyChannelId, isAppSurface, attachUserVisibleContext, settleInlineToolApproval, buildAttachedRecordingContext, buildUnscopedFileAttachmentInstruction, mayOfferWorkspaceChatHandoff, turnInputAdmission, liveTurnAdmission, SSE_KEEPALIVE_INTERVAL_MS, filterBrainSurfaceTools } from '../chat.js'
+import { chatRoutes, mayUsePersonalChatSession, createResearchWorkerDrainPrompt, appAssistantForbidsResearch, appAssistantForbidsCoordinator, isAdaptiveResearchEligible, isUserBlocked, sanitizeTitle, buildActivePageInstruction, buildActiveRecordingInstruction, recordingParticipantsUpdatedReceipt, buildViewingSkillBlock, createUpdateViewedSkillTool, workspaceSkillRevision, resolveStickyChannelId, isAppSurface, attachUserVisibleContext, settleInlineToolApproval, buildAttachedRecordingContext, buildUnscopedFileAttachmentInstruction, mayOfferWorkspaceChatHandoff, turnInputAdmission, liveTurnAdmission, SSE_KEEPALIVE_INTERVAL_MS, filterBrainSurfaceTools } from '../chat.js'
 import { policyFor } from '../../session-kind.js'
 import type { ConfirmationResolver, Message, Tool, ToolContext } from '@use-brian/core'
 import type { PendingApproval, PendingApprovalsStore } from '../../db/pending-approvals-store.js'
@@ -406,8 +406,8 @@ describe('[COMP:api/chat-route] isAdaptiveResearchEligible', () => {
     expect(isAdaptiveResearchEligible({ ...base, requestedMode: 'default' })).toBe(false)
   })
 
-  it('is not eligible on the free plan', () => {
-    expect(isAdaptiveResearchEligible({ ...base, userPlan: 'free' })).toBe(false)
+  it('assesses free workspaces with research allowance', () => {
+    expect(isAdaptiveResearchEligible({ ...base, userPlan: 'free' })).toBe(true)
   })
 
   it('is eligible when the deployment disables research plan policy', () => {
@@ -1045,5 +1045,27 @@ describe('[COMP:api/chat-route] mid-turn input admission', () => {
     )
     expect(inputBranch).toContain("sendControlActivityEvent('input_applied'")
     expect(confirmationBranch).toContain("sendControlActivityEvent('tool_confirmation_required'")
+  })
+})
+
+
+describe('[COMP:api/chat-route] automatic research allowance', () => {
+  it('keeps exhausted free workspaces in ordinary chat', () => {
+    expect(isAdaptiveResearchEligible({ requestedMode: undefined, workspaceId: 'workspace-fictional', userPlan: 'free', assistantKind: 'primary', researchQuotaAvailable: false })).toBe(false)
+  })
+})
+
+
+describe('[COMP:api/chat-route] automatic research wave limits', () => {
+  const failed = [{ workerId: 'worker-fictional', description: 'Evidence gap', status: 'failed' as const, result: 'Unavailable source' }]
+
+  it('synthesizes focused results at the first wave even when a source failed', () => {
+    expect(createResearchWorkerDrainPrompt(1)('Findings', failed)).toContain('Synthesize and reply per Phase 4')
+  })
+
+  it('permits a targeted retry within the standard budget and synthesizes at its cap', () => {
+    const prompt = createResearchWorkerDrainPrompt(2)
+    expect(prompt('Findings', failed)).toContain('respawn')
+    expect(prompt('Findings', failed)).toContain('retry cap reached')
   })
 })

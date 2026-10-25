@@ -3,6 +3,7 @@
 /** Shared immutable Team/Project selection surface. [COMP:app-web/context-scope] */
 import { SearchableSelect } from "@/components/ui/searchable-select";
 import { useT } from "@/lib/i18n/client";
+import { Building2, FolderKanban } from "lucide-react";
 import type { ContextProject, ContextTeam } from "@/lib/api/context-scopes";
 
 const GENERAL = "__general__";
@@ -19,6 +20,7 @@ export function ContextScopePicker({
   hideTeam=false,
   projectDisabled,
   showProjectHint=true,
+  inline=false,
 }: {
   teams: ContextTeam[];
   projects: ContextProject[];
@@ -31,14 +33,15 @@ export function ContextScopePicker({
   hideTeam?: boolean;
   projectDisabled?: boolean;
   showProjectHint?: boolean;
+  inline?: boolean;
 }) {
   const t = useT().contextScope;
   return (
-    <div className="grid gap-3 sm:grid-cols-2">
-      {!hideTeam?<label className="grid content-start gap-1.5 text-xs font-medium text-muted-foreground">
-        {t.team}
+    <div className={inline ? "flex min-w-0 flex-wrap items-center gap-x-3 gap-y-1" : "grid gap-3 sm:grid-cols-2"}>
+      {!hideTeam?<label className={inline ? "flex w-[calc(50%-0.375rem)] min-w-0 max-w-52 items-center gap-1.5 text-xs text-muted-foreground" : "grid content-start gap-1.5 text-xs font-medium text-muted-foreground"}>
+        {inline ? <><Building2 className="size-4 shrink-0" aria-hidden /><span className="sr-only">{t.team}</span></> : t.team}
         <SearchableSelect
-          className="max-sm:min-h-11"
+          className={inline ? "min-w-0 gap-1 border-transparent bg-transparent px-1.5 shadow-none hover:bg-background/70 max-sm:min-h-11" : "max-sm:min-h-11"}
           value={teamId ?? GENERAL}
           onValueChange={(value) => onTeamChange(value === GENERAL ? null : value)}
           items={[
@@ -51,14 +54,14 @@ export function ContextScopePicker({
           disabled={disabled || teamDisabled}
         />
       </label>:null}
-      <label className="grid content-start gap-1.5 text-xs font-medium text-muted-foreground">
-        {t.project}
+      <label className={inline ? "flex w-[calc(50%-0.375rem)] min-w-0 max-w-52 items-center gap-1.5 text-xs text-muted-foreground" : "grid content-start gap-1.5 text-xs font-medium text-muted-foreground"}>
+        {inline ? <><FolderKanban className="size-4 shrink-0" aria-hidden /><span className="sr-only">{t.project}</span></> : t.project}
         <SearchableSelect
-          className="max-sm:min-h-11"
+          className={inline ? "min-w-0 gap-1 border-transparent bg-transparent px-1.5 shadow-none hover:bg-background/70 max-sm:min-h-11" : "max-sm:min-h-11"}
           value={projectId ?? GENERAL}
           onValueChange={(value) => onProjectChange(value === GENERAL ? null : value)}
           items={[
-            { value: GENERAL, label: t.noProject },
+            { value: GENERAL, label: inline ? t.addProject : t.noProject },
             ...projects.filter((project) => project.status === "active").map((project) => ({ value: project.id, label: project.name })),
           ]}
           searchPlaceholder={t.searchProjects}

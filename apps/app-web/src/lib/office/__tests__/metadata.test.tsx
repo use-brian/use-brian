@@ -12,6 +12,7 @@ import {en} from '@/lib/i18n/dictionaries/en';
 import {documentFixture} from '@/components/office/__tests__/editor-fixtures';
 import {applySpineEventToSurfaceCache} from '@/lib/surface-cache-invalidation';
 import {WORKSPACE_IDENTITY_REFRESH_EVENT} from '@/lib/workspace-identity-events';
+import {routeWorkspaceChange} from '@/lib/workspace-events';
 import {invalidateSurfaceCache,loadSurfaceCache,readSurfaceCache,resetSurfaceCache} from '@/lib/surface-cache';
 import {officeListCacheKey,officePreviewCacheKey,warmTargetFor} from '@/lib/surface-prefetch';
 const state=vi.hoisted(()=>({viewer:'viewer-a',fetch:vi.fn()}));
@@ -293,6 +294,26 @@ describe('[COMP:app-web/office-surface-cache] bounded Office metadata',()=>{
     state.fetch.mockResolvedValue(response({templates:[template]},'800'));
     await act(async()=>invalidateSurfaceCache(`office-templates:workspace-a:${state.viewer}`));await flush();
     expect(document.body.querySelector<HTMLInputElement>('#office-template-purge')?.value).toBe('');
+  });
+
+  it('keeps template cards mounted behind an upload dialog during unrelated workspace updates',async()=>{
+    const template={id:'template-a',name:'Fictional template',family:'document',description:'Reusable guidance',lifecycleState:'draft',draftArtifactId:null,currentVersionId:null};
+    state.fetch.mockResolvedValueOnce(response({templates:[template]},'30000'));
+    await act(async()=>root.render(<I18nProvider locale="en" dict={en}><OfficeTemplateLibrary workspaceId="workspace-a"/></I18nProvider>));await flush();
+    const card=host.querySelector('[data-office-template-card]');expect(card).not.toBeNull();
+    const upload=[...document.body.querySelectorAll('button')].find(button=>button.getAttribute('aria-label')===en.office.uploadTemplateAction)!;
+    await act(async()=>upload.click());await flush();
+    const input=document.body.querySelector<HTMLInputElement>('input[placeholder="'+en.office.templateName+'"]');
+    expect(input).not.toBeNull();
+    await act(async()=>{Object.getOwnPropertyDescriptor(HTMLInputElement.prototype,'value')!.set!.call(input,'Unsaved fixture name');input!.dispatchEvent(new Event('input',{bubbles:true}));});
+    let finish!:(value:Response)=>void;state.fetch.mockImplementationOnce(()=>new Promise(resolve=>{finish=resolve;}));
+    const [dispatch]=routeWorkspaceChange({workspaceId:'workspace-a',primitive:'task',action:'update'});
+    await act(async()=>applySpineEventToSurfaceCache(dispatch.event,dispatch.detail,'workspace-a'));await flush();
+    expect(host.querySelector('[data-office-template-card]')).toBe(card);
+    expect(document.body.textContent).toContain(en.office.uploadTemplateAction);
+    expect(input!.isConnected).toBe(true);expect(input!.value).toBe('Unsaved fixture name');
+    await act(async()=>finish(response({templates:[template]},'30000')));await flush();
+    expect(host.querySelector('[data-office-template-card]')).toBe(card);
   });
   it('does not resurrect an initial seed after an authority event while a new read is pending',async()=>{
     state.fetch.mockImplementation(()=>new Promise(()=>{}));

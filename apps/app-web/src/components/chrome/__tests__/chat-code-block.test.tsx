@@ -96,6 +96,18 @@ describe("[COMP:app-web/chat-code-block] ChatCodeBlock", () => {
     expect(writeText).toHaveBeenCalledExactlyOnceWith(text);
   });
 
+  it("keeps the touch action outside the scrolling snippet and copies complete long lines", async () => {
+    const text = `const reference = "https://example.com/${"segment/".repeat(40)}";`;
+    render(<ChatMarkdown text={`\`\`\`js\n${text}\n\`\`\``} components={chatMarkdownCodeComponents} />);
+    const block = host!.querySelector("[data-chat-code-block]")!;
+    const pre = block.querySelector("pre")!;
+    expect(pre.textContent).toBe(`${text}\n`);
+    expect(pre.querySelector("button")).toBeNull();
+    expect(block.querySelector("button")?.parentElement).toBe(block);
+    await clickCopy();
+    expect(writeText).toHaveBeenCalledExactlyOnceWith(text);
+  });
+
   it("flips to the copied state after a successful write", async () => {
     render(
       <ChatCodeBlock>

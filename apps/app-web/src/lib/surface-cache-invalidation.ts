@@ -229,7 +229,7 @@ export const SURFACE_CACHE_SPINE_EVENTS: readonly string[] = [
  */
 export function applySpineEventToSurfaceCache(
   event: string,
-  detail: { workspaceId?: string | null; catchUp?: unknown } | null | undefined,
+  detail: { workspaceId?: string | null; catchUp?: unknown; primitive?: unknown } | null | undefined,
   workspaceId: string,
 ): void {
   if (detail?.workspaceId && detail.workspaceId !== workspaceId) return;
@@ -240,8 +240,13 @@ export function applySpineEventToSurfaceCache(
   // evicts, and protected projections still expire on their own deadline). A
   // real server change keeps the purge.
   const drop = detail?.catchUp === true ? markSurfaceCacheStale : invalidateSurfaceCache;
-  if (event === BRAIN_REFRESH_EVENT || event === WORKSPACE_IDENTITY_REFRESH_EVENT) drop(`workspace-member-directory:${workspaceId}:`);
-  if (event === BRAIN_REFRESH_EVENT || event === WORKSPACE_IDENTITY_REFRESH_EVENT) drop(`page-directory:${workspaceId}:`);
+  // These primitives cannot revoke Office/media/directory source access. Keep
+  // their bounded projections painted; source and untyped events still purge.
+  const unrelatedContent = event === BRAIN_REFRESH_EVENT && typeof detail?.primitive === 'string'
+    && ['task', 'contact', 'company', 'deal', 'kb_chunk'].includes(detail.primitive);
+  const dropProjection = unrelatedContent ? markSurfaceCacheStale : drop;
+  if (event === BRAIN_REFRESH_EVENT || event === WORKSPACE_IDENTITY_REFRESH_EVENT) dropProjection(`workspace-member-directory:${workspaceId}:`);
+  if (event === BRAIN_REFRESH_EVENT || event === WORKSPACE_IDENTITY_REFRESH_EVENT) dropProjection(`page-directory:${workspaceId}:`);
   if (event === BRAIN_REFRESH_EVENT || event === WORKSPACE_IDENTITY_REFRESH_EVENT || event === "brian:organization-changed" || event === ASSISTANT_REFRESH_EVENT) {
     drop(`delivery:${workspaceId}:`);
     drop(`routine-intake:${workspaceId}`);
@@ -249,17 +254,17 @@ export function applySpineEventToSurfaceCache(
     drop(`brain-keys:${workspaceId}`);
   }
   if (event === BRAIN_REFRESH_EVENT) {
-    drop(`project:${workspaceId}:`);
-    drop(`doc-media:${workspaceId}:`);
-    drop(`file-cache-media:${workspaceId}:`);
-    drop(`office-media:${workspaceId}:`);
-    drop(`office-preview:${workspaceId}:`);
-    drop(`office:${workspaceId}:`);
-    drop(`office-templates:${workspaceId}:`);
-    drop(`office-routing:${workspaceId}:`);
-    drop(`office-panel:${workspaceId}:`);
-    drop(`office-artifact:${workspaceId}:`);
-    drop(`office-snapshot:${workspaceId}:`);
+    dropProjection(`project:${workspaceId}:`);
+    dropProjection(`doc-media:${workspaceId}:`);
+    dropProjection(`file-cache-media:${workspaceId}:`);
+    dropProjection(`office-media:${workspaceId}:`);
+    dropProjection(`office-preview:${workspaceId}:`);
+    dropProjection(`office:${workspaceId}:`);
+    dropProjection(`office-templates:${workspaceId}:`);
+    dropProjection(`office-routing:${workspaceId}:`);
+    dropProjection(`office-panel:${workspaceId}:`);
+    dropProjection(`office-artifact:${workspaceId}:`);
+    dropProjection(`office-snapshot:${workspaceId}:`);
   }
   if (event === WORKSPACE_IDENTITY_REFRESH_EVENT || event === "brian:organization-changed") {
     // Authority changes purge even an unmounted directory/access surface.

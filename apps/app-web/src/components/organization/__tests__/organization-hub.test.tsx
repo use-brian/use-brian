@@ -146,6 +146,7 @@ describe('[COMP:app-web/organization-chart] unified organization home', () => {
     const filter=host.querySelector<HTMLButtonElement>(`button[aria-label="${en.workspaceAccess.workspaceRole}"]`)!;
     await act(async () => filter.click());
     const owner=[...document.querySelectorAll<HTMLElement>('[role="option"]')].find(o=>o.textContent===en.workspaceAccess.owner)!;
+    await act(async () => { owner.focus(); });
     await act(async () => owner.click());
     expect(host.querySelector('ul')?.textContent).toContain('Riley');
     expect(host.querySelector('ul')?.textContent).not.toContain('Casey');
