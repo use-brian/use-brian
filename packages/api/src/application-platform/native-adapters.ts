@@ -10,7 +10,7 @@ import { createTask,authorizeCanonicalTaskPatch,patchCanonicalTaskFields } from 
 import { publishTaskLifecycle } from '../task-event-fanout.js'
 import { getApplicationExecutionBinding } from './execution-context.js'
 import { canonicalGenericReadContext, readCanonicalNativeRecord } from './field-evidence.js'
-import { queryCanonicalNativeRecords, readCanonicalNativeQueryDefinition } from './native-reader.js'
+import { queryCanonicalNativeRecords, readCanonicalNativeQueryDefinition, validateCanonicalNativeResource } from './native-reader.js'
 import { canonicalNativeResourceDefinitions } from './native-resources.js'
 import { boundScopeSources } from '@use-brian/core'
 import { readCurrentScopeSources } from '../db/derived-scope-store.js'
@@ -43,7 +43,7 @@ async function resources(context: Context, queryType?: string): Promise<Applicat
         definition: definition as unknown as Record<string, import('@use-brian/shared').ApplicationJson> }
     })
     const fields = [...base.fields.filter(field => entry.fields.includes(field.key) && !custom.some(configured => configured.key === field.key)), ...custom]
-    return { ...base, fields, schemaVersion: `${entry.schemaVersion??'1'}:${createHash('sha256').update(JSON.stringify(fields)).digest('hex')}` }
+    return validateCanonicalNativeResource({ ...base, fields, schemaVersion: `${entry.schemaVersion??'1'}:${createHash('sha256').update(JSON.stringify(fields)).digest('hex')}` })
   })
 }
 async function read(context:Context,type:z.infer<typeof readInput>['type'],id:string,fields?:readonly string[]):Promise<ApplicationRecordProjection> {
@@ -244,7 +244,7 @@ export function createCanonicalNativeApplicationModule():ApplicationModuleDefini
     return [await creationRef(context,'task',record.id)]
    }},
  }
- return {key:'native',defaultState:'enabled',application:{version:'2',dependencies:[],resources:definitions,
+ return {key:'native',defaultState:'enabled',application:{version:'2',dependencies:[],resources:definitions.map(validateCanonicalNativeResource),
   queries:['get','query'],commands:Object.keys(commands),events:[...new Set(Object.values(commands).map(command=>command.eventKey))],
   policyCapabilities:['canonical_native'],backgroundHandlers:[],uiContributions:[]},resolveResources:resources,commands,
   queries:{query:{input:queryInput,authorize:async(context,raw)=>{const input=queryInput.parse(raw);if(!(await resources(context,input.type)).length)throw new ApplicationPlatformError('access_unavailable','The resource is unavailable.')},

@@ -2,15 +2,31 @@
 import { createHash } from 'node:crypto'
 import { isDeepStrictEqual } from 'node:util'
 import { z } from 'zod'
-import { bindScopeSources, boundScopeSources, propertyDefSchema, type PropertyDef, type ScopeSource } from '@use-brian/core'
+import { bindScopeSources, boundScopeSources, propertyDefSchema, validateDocApplicationSchema, type PropertyDef, type ScopeSource } from '@use-brian/core'
 import { ApplicationPlatformError, applicationResourceSchema, type ApplicationQuery, type ApplicationRecordProjection, type ApplicationResourceDefinition } from '@use-brian/shared'
 import { compileApplicationRecordQuery } from './record-query.js'
 import { runCanonicalReadLease, readCanonicalGenericRecord, readCanonicalGenericQueryDomain, type CanonicalGenericReadContext } from './field-evidence.js'
 
 const unavailable = () => new ApplicationPlatformError('access_unavailable', 'The resource is unavailable.')
 
+/** Canonical Doc semantics stay with both generic catalog readers. */
+export function validateCanonicalGenericResource(raw: unknown): ApplicationResourceDefinition {
+  const resource = applicationResourceSchema.parse(raw)
+  const properties = resource.fields.map(field => {
+    if (field.kind !== 'cell') throw new ApplicationPlatformError('invalid_schema', 'A canonical generic field requires a property.')
+    const property = propertyDefSchema.safeParse(field.property)
+    if (!property.success || property.data.name !== field.key) throw new ApplicationPlatformError('invalid_schema', 'A canonical property key is invalid.')
+    if (field.relationshipResolverKey && field.relationshipResolverKey !== `relation.${createHash('sha256').update(property.data.name).digest('hex')}`) {
+      throw new ApplicationPlatformError('invalid_schema', 'A canonical relationship resolver is invalid.')
+    }
+    return property.data
+  })
+  validateDocApplicationSchema(properties)
+  return resource
+}
+
 export function canonicalGenericResource(schema: { id: string; schemaVersion: number; properties: PropertyDef[] }): ApplicationResourceDefinition {
-  return applicationResourceSchema.parse({ typeKey: `record.${schema.id}`, origin: { kind: 'generic', entityTypeId: schema.id },
+  return validateCanonicalGenericResource({ typeKey: `record.${schema.id}`, origin: { kind: 'generic', entityTypeId: schema.id },
     schemaVersion: String(schema.schemaVersion), fields: schema.properties.map(property => ({ key: property.name, label: property.name, kind: 'cell', property,
       ...(property.config.kind === 'relation' ? { relationshipResolverKey: `relation.${createHash('sha256').update(property.name).digest('hex')}` } : {}) })) })
 }

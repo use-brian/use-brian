@@ -68,30 +68,21 @@ describe('[COMP:security/application-access] deployed application module registr
       fields: [{ key: 'company', label: 'Company', kind: 'reference', targetTypeKey: 'missing' }] }]
     expect(() => defineApplicationModules([first], WORKSPACE_MODULES)).toThrow()
   })
-  it('uses the same canonical property and owning-module checks for operation-time catalogs', () => {
-    const value = { typeKey: 'request', schemaVersion: '1', origin: { kind: 'generic' as const, entityTypeId: '10000000-0000-4000-8000-000000000001' },
-      fields: [{ key: 'title', label: 'Title', kind: 'cell' as const, property: { name: 'title', config: { kind: 'text' } } }] }
-    expect(validateApplicationResourceCatalog('one', [value])).toEqual([value])
-    expect(() => validateApplicationResourceCatalog('one', [value, value])).toThrow()
-    expect(() => validateApplicationResourceCatalog('one', [{ ...value, origin: { kind: 'native', moduleKey: 'other' } }])).toThrow()
-    expect(() => validateApplicationResourceCatalog('one', [{ ...value, fields: [{ ...value.fields[0], property: { name: 'title', config: { kind: 'formula' } } }] }])).toThrow()
+  it('keeps structural catalog and owning-module checks independent of canonical dialects', () => {
+    const resource = { typeKey: 'request', schemaVersion: '1', origin: { kind: 'native' as const, moduleKey: 'one' },
+      fields: [{ key: 'code', label: 'Code', kind: 'text' as const, unique: true }] }
+    expect(validateApplicationResourceCatalog('one', [resource])).toEqual([resource])
+    expect(() => validateApplicationResourceCatalog('one', [resource, resource])).toThrow()
+    expect(() => validateApplicationResourceCatalog('other', [resource])).toThrow()
+    expect(() => validateApplicationResourceCatalog('one', [{ ...resource, fields: [resource.fields[0], resource.fields[0]] }])).toThrow()
+    const definition = module('one')
+    definition.application.resources = [resource]
+    expect(defineApplicationModules([definition], WORKSPACE_MODULES).applications.get('one')?.application.resources).toEqual([resource])
   })
-  it('refuses unsupported native unique declarations while retaining canonical generic opt-in uniqueness',()=>{
-    const native={typeKey:'company',schemaVersion:'1',origin:{kind:'native' as const,moduleKey:'native'},
-      fields:[{key:'domain',label:'Domain',kind:'text' as const,unique:true}]}
-    expect(()=>validateApplicationResourceCatalog('native',[native])).toThrow(expect.objectContaining({code:'invalid_schema'}))
-    const generic={typeKey:'request',schemaVersion:'1',origin:{kind:'generic' as const,entityTypeId:'10000000-0000-4000-8000-000000000001'},
-      fields:[{key:'code',label:'Code',kind:'cell' as const,property:{name:'code',config:{kind:'text'},unique:true}}]}
-    expect(validateApplicationResourceCatalog('one',[generic])).toEqual([generic])
-  })
-  it('binds a native CRM declaration to its canonical entity kind and custom field key', () => {
-    const definition = { id: '10000000-0000-4000-8000-000000000002', entityKind: 'company', fieldKey: 'region', label: 'Region',
-      fieldType: 'text', options: [], isRequired: false, position: 0 }
-    const resource = { typeKey: 'company', origin: { kind: 'native' as const, moduleKey: 'native' }, schemaVersion: '1',
-      fields: [{ key: 'custom.region', kind: 'crm' as const, label: 'Region', definition }] }
-    expect(validateApplicationResourceCatalog('native', [resource])).toEqual([resource])
-    expect(() => validateApplicationResourceCatalog('native', [{ ...resource, typeKey: 'person' }])).toThrow()
-    expect(() => validateApplicationResourceCatalog('native', [{ ...resource, fields: [{ ...resource.fields[0], key: 'name' }] }])).toThrow()
+  it('retains the public catalog schema-version wire bound', () => {
+    const resource = { typeKey: 'request', schemaVersion: 'a'.repeat(128), origin: { kind: 'native' as const, moduleKey: 'one' }, fields: [] }
+    expect(validateApplicationResourceCatalog('one', [resource])[0].schemaVersion).toHaveLength(128)
+    expect(() => validateApplicationResourceCatalog('one', [{ ...resource, schemaVersion: 'a'.repeat(129) }])).toThrow()
   })
   it('captures handler properties without freezing the caller or schema internals', async () => {
     const definition = module('owned')

@@ -1,11 +1,8 @@
 /** Deployed modules compose with the existing lifecycle registry. [COMP:security/application-access] */
 import { z } from 'zod'
-import { createHash } from 'node:crypto'
 import { ApplicationPlatformError, applicationResourceSchema, defineWorkspaceModuleRegistry,
   type ApplicationModuleCatalog, type ApplicationResourceDefinition, type ApplicationResourceRef, type WorkspaceModuleDefinition, type WorkspaceModuleRegistry } from '@use-brian/shared'
 import type { ExecutionContext } from '../security/execution-context.js'
-import { propertyDefSchema } from '../entities/doc-schemas.js'
-import { validateDocApplicationSchema, parseApplicationCrmFieldDefinition } from './values.js'
 
 export interface ApplicationOperationContext<Transaction> {
   execution: ExecutionContext
@@ -44,24 +41,6 @@ export function validateApplicationResourceCatalog(moduleKey: string, raw: reado
     throw new ApplicationPlatformError('invalid_schema', 'Duplicate module resource type.')
   }
   for (const resource of resources) {
-    for (const field of resource.fields) if (field.kind === 'crm') {
-      const definition = parseApplicationCrmFieldDefinition(field.definition)
-      if (field.key !== `custom.${definition.fieldKey}` || resource.origin.kind !== 'native' || resource.typeKey !== definition.entityKind
-        || Boolean(field.required) !== definition.isRequired) throw new ApplicationPlatformError('invalid_schema', 'A canonical CRM field binding is invalid.')
-    }
-    const cells = resource.fields.flatMap(field => {
-      if (field.kind !== 'cell') return []
-      const property = propertyDefSchema.safeParse(field.property)
-      if (!property.success || property.data.name !== field.key) throw new ApplicationPlatformError('invalid_schema', 'A canonical property key is invalid.')
-      if (field.relationshipResolverKey && field.relationshipResolverKey !== `relation.${createHash('sha256').update(property.data.name).digest('hex')}`) {
-        throw new ApplicationPlatformError('invalid_schema', 'A canonical relationship resolver is invalid.')
-      }
-      return [property.data]
-    })
-    validateDocApplicationSchema(cells)
-    if (resource.origin.kind === 'native' && (resource.fields.some(field => field.unique === true) || cells.some(property => property.unique === true))) {
-      throw new ApplicationPlatformError('invalid_schema', 'Canonical native schemas do not support declared unique fields.')
-    }
     if (resource.origin.kind === 'native' && resource.origin.moduleKey !== moduleKey) {
       throw new ApplicationPlatformError('invalid_schema', 'A native resource must name its owning module.')
     }

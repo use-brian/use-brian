@@ -118,6 +118,24 @@ export async function runCanonicalNativeQueryFrame<T>(context:CanonicalGenericRe
   }
 }
 
+/** Built-in CRM bindings and writer constraints apply to catalog and query readers. */
+export function validateCanonicalNativeResource(raw: ApplicationResourceDefinition): ApplicationResourceDefinition {
+  const resource = raw
+  for (const field of resource.fields) {
+    if (field.kind === 'crm') {
+      const definition = parseApplicationCrmFieldDefinition(field.definition)
+      if (field.key !== `custom.${definition.fieldKey}` || resource.origin.kind !== 'native'
+        || resource.typeKey !== definition.entityKind || Boolean(field.required) !== definition.isRequired) {
+        throw new ApplicationPlatformError('invalid_schema', 'A canonical CRM field binding is invalid.')
+      }
+    }
+    if (field.unique === true || field.kind === 'cell' && field.property.unique === true) {
+      throw new ApplicationPlatformError('invalid_schema', 'Canonical native schemas do not support declared unique fields.')
+    }
+  }
+  return resource
+}
+
 /** Query catalogs are selected by the same current SQL domain as evaluation. */
 export async function readCanonicalNativeQueryDefinition(context:CanonicalGenericReadContext,type:string,completeTemplate=false):Promise<ApplicationResourceDefinition> {
   context.assertLive?.()
@@ -132,7 +150,7 @@ export async function readCanonicalNativeQueryDefinition(context:CanonicalGeneri
       definition:definition as unknown as Record<string,import('@use-brian/shared').ApplicationJson>}
   })
   const fields=[...base.fields.filter(field=>entry.data.fields.includes(field.key)&&!custom.some(configured=>configured.key===field.key)),...custom]
-  return {...base,fields,schemaVersion:`${entry.data.schemaVersion??'1'}:${createHash('sha256').update(JSON.stringify(fields)).digest('hex')}`}
+  return validateCanonicalNativeResource({...base,fields,schemaVersion:`${entry.data.schemaVersion??'1'}:${createHash('sha256').update(JSON.stringify(fields)).digest('hex')}`})
 }
 
 export async function queryCanonicalNativeRecords(context:CanonicalGenericReadContext,definition:ApplicationResourceDefinition,input:ApplicationQuery) {

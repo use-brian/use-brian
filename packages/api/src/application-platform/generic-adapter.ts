@@ -3,12 +3,12 @@ import { z } from 'zod'
 import type { PoolClient } from 'pg'
 import { applicationAuthorityFieldCatalog, applicationAuthorityQueryFieldCeiling, assertApplicationQueryFields, assertApplicationWriteFields, bindScopeSources,boundScopeSources,propertyDefSchema,
   type ApplicationModuleDefinition, type ApplicationOperationContext, type PropertyDef } from '@use-brian/core'
-import { ApplicationPlatformError, applicationQuerySchema, applicationResourceSchema,
+import { ApplicationPlatformError, applicationQuerySchema,
   type ApplicationQuery, type ApplicationRecordProjection, type ApplicationResourceDefinition, type ApplicationResourceRef } from '@use-brian/shared'
 import { applyCanonicalApplicationRecordMutation, canonicalApplicationRecordMutationSchema,
   type CanonicalApplicationRecordMutation } from '../db/doc-entity-store.js'
 import { getApplicationExecutionBinding } from './execution-context.js'
-import { canonicalGenericResource,queryCanonicalGenericRecords } from './generic-reader.js'
+import { canonicalGenericResource,validateCanonicalGenericResource,queryCanonicalGenericRecords } from './generic-reader.js'
 import { bindApplicationFieldProjection,readCanonicalGenericApplicationRecord,canonicalGenericReadContext } from './field-evidence.js'
 import { readCurrentScopeSources } from '../db/derived-scope-store.js'
 
@@ -29,7 +29,7 @@ const readProofs = new WeakMap<object, { type: string; schemaVersion: string; ac
 async function resources(context: Context, type?: string): Promise<ApplicationResourceDefinition[]> {
   if (getApplicationExecutionBinding(context.execution)) {
     const result = await context.transaction.query<{ resource: unknown }>('SELECT application_generic_catalog($1) AS resource', [type ?? null])
-    return result.rows.map(row => applicationResourceSchema.parse(row.resource))
+    return result.rows.map(row => validateCanonicalGenericResource(row.resource))
   }
   // Complete schema metadata remains internal to canonical validation. Public
   // legacy catalogs project separately; SQL authorizes actual values/predicates.
