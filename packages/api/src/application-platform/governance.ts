@@ -1,9 +1,9 @@
 /** Current native module governance; deployed ports remain private. [COMP:api/application-governance] */
 import { z } from 'zod'
-import type { PoolClient } from 'pg'
+import type { Pool, PoolClient } from 'pg'
 import { CrmConfigCommandSchema,type ExecutionContext } from '@use-brian/core'
 import { ApplicationPlatformError } from '@use-brian/shared'
-import { getApplicationExecutionBinding } from './execution-context.js'
+import { getApplicationExecutionBinding, runApplicationTransaction } from './execution-context.js'
 
 export const applicationGovernanceModuleInput = z.object({ moduleKey: z.string().regex(/^[a-z][a-z0-9_.-]{0,127}$/) }).strict()
 export const applicationGovernanceCatalogInput=applicationGovernanceModuleInput.extend({afterId:z.string().uuid().optional()}).strict()
@@ -53,14 +53,20 @@ export const applicationGovernanceOutcomeShape=z.object({id:z.string().uuid(),mo
 export type ApplicationGovernanceCatalog=z.infer<typeof applicationGovernanceCatalogShape>
 export type ApplicationGovernanceReview=z.infer<typeof applicationGovernanceReviewShape>
 export type ApplicationGovernanceOutcome=z.infer<typeof applicationGovernanceOutcomeShape>
-export async function readApplicationGovernanceCatalog(client:PoolClient,execution:ExecutionContext,raw:unknown) {
+export function readApplicationGovernanceCatalog(pool:Pool,execution:ExecutionContext,raw:unknown) {
+  return runApplicationTransaction(pool,execution,client => readApplicationGovernanceCatalogInTransaction(client,execution,raw))
+}
+async function readApplicationGovernanceCatalogInTransaction(client:PoolClient,execution:ExecutionContext,raw:unknown) {
   assertNativeApplicationGovernance(execution)
   const input=applicationGovernanceCatalogInput.safeParse(raw)
   if (!input.success) throw new ApplicationPlatformError('invalid_value','The governance module selection is invalid.')
   return applicationGovernanceCatalogShape.parse((await client.query<{value:unknown}>('SELECT read_native_application_governance_catalog($1,$2,$3,$4) AS value',
     [execution.security.access.workspaceId,execution.assistant.id,input.data.moduleKey,input.data.afterId ?? null])).rows[0]?.value)
 }
-export async function previewApplicationGovernance(client:PoolClient,execution:ExecutionContext,raw:unknown) {
+export function previewApplicationGovernance(pool:Pool,execution:ExecutionContext,raw:unknown) {
+  return runApplicationTransaction(pool,execution,client => previewApplicationGovernanceInTransaction(client,execution,raw),true)
+}
+async function previewApplicationGovernanceInTransaction(client:PoolClient,execution:ExecutionContext,raw:unknown) {
   assertNativeApplicationGovernance(execution)
   const input=applicationGovernancePreviewInput.safeParse(raw)
   if (!input.success) throw new ApplicationPlatformError('invalid_value','The native governance proposal is invalid.')
@@ -70,7 +76,10 @@ export async function previewApplicationGovernance(client:PoolClient,execution:E
     'SELECT application_prepare_native_governance_review($1,$2,$3,$4,$5) AS value',
     [execution.security.access.workspaceId,execution.assistant.id,input.data.moduleKey,input.data.expectedRevision,operation])).rows[0]?.value)
 }
-export async function applyApplicationGovernance(client:PoolClient,execution:ExecutionContext,raw:unknown) {
+export function applyApplicationGovernance(pool:Pool,execution:ExecutionContext,raw:unknown) {
+  return runApplicationTransaction(pool,execution,client => applyApplicationGovernanceInTransaction(client,execution,raw),true)
+}
+async function applyApplicationGovernanceInTransaction(client:PoolClient,execution:ExecutionContext,raw:unknown) {
   assertNativeApplicationGovernance(execution)
   const input=applicationGovernanceApplyInput.safeParse(raw)
   if (!input.success) throw new ApplicationPlatformError('invalid_value','The native governance review is invalid.')

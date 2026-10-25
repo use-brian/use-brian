@@ -1,11 +1,13 @@
 /** App authentication enters the existing immutable context and sticky lease. [COMP:api/application-auth] */
 import { createHash, randomUUID } from 'node:crypto'
 import { AsyncLocalStorage } from 'node:async_hooks'
-import type { PoolClient } from 'pg'
+import type { Pool, PoolClient } from 'pg'
 import { createExecutionContext, intersectAccessCeilings, maxSensitivity, minSensitivity,
   type AccessCeiling, type ExecutionContext, type Sensitivity } from '@use-brian/core'
 import { ApplicationPlatformError } from '@use-brian/shared'
 import { findAssistantById } from '../db/users.js'
+import { applyRLSGucs, rollbackAndRelease } from '../db/client.js'
+import { runWithAgentAccess } from '../db/agent-access-context.js'
 import { createAuthorityLease, AuthorityChangedError } from '../context-scope/authority-lease.js'
 import { pinPolicyEpoch } from '../context-scope/policy-epoch.js'
 import { resolveLiveAccessCeilingSystem } from '../context-scope/resolve-turn-scope.js'
@@ -163,4 +165,62 @@ export async function applyApplicationRLSContext(client: PoolClient, execution: 
   if (result.rows[0]?.admitted !== true) throw new ApplicationPlatformError('grant_revoked', 'Application access is unavailable.')
   transactionBindings.set(client, execution)
   return true
+}
+
+/** Run one admitted operation using the host-supplied non-owner pool. */
+export async function runApplicationTransaction<T>(pool: Pool, execution: ExecutionContext, operation: (client: PoolClient, afterCommit: (effect: () => void) => void) => Promise<T>, effectful = false, commandLock?: string): Promise<T> {
+  if (execution.ownership.kind !== 'workspace' || execution.ownership.workspaceId !== execution.security.access.workspaceId
+    || execution.lifecycle.abortSignal.aborted) throw new ApplicationPlatformError('access_unavailable', 'The application is unavailable.')
+  if (execution.identity.kind === 'programmatic' && execution.identity.principal.kind === 'application'
+    && !getApplicationExecutionBinding(execution)) throw new ApplicationPlatformError('authentication_required', 'Application authentication is required.')
+  await execution.security.authority.assertCurrent()
+  return runWithAgentAccess(execution.security.access, async () => {
+    const client = await pool.connect()
+    const effects: Array<() => void> = []
+    let commitStarted = false
+    try {
+      await client.query('BEGIN')
+      const role = await client.query(`SELECT r.rolsuper OR r.rolbypassrls OR pg_has_role(r.oid,c.relowner,'USAGE') AS bypass
+        FROM pg_catalog.pg_roles r JOIN pg_catalog.pg_class c ON c.oid='entity_instances'::regclass WHERE r.rolname=current_user`)
+      if (role.rows[0]?.bypass !== false) throw new ApplicationPlatformError('access_unavailable', 'A non-owner application role is required.')
+      // A duplicate waits before holding the workspace/source locks needed by its winner.
+      if (commandLock) {
+        await client.query('SELECT pg_advisory_xact_lock(hashtextextended($1,0))', [commandLock])
+        await execution.security.authority.assertCurrent()
+        if (execution.lifecycle.abortSignal.aborted) throw new ApplicationPlatformError('access_unavailable', 'The operation was cancelled.')
+      }
+      await applyRLSGucs(client, execution.security.access.userId)
+      const application = await applyApplicationRLSContext(client, execution)
+      if (!application) {
+        const member = await client.query('SELECT user_id FROM workspace_members WHERE workspace_id=$1 AND user_id=$2 FOR SHARE',
+          [execution.security.access.workspaceId, execution.security.access.userId])
+        if (!member.rows[0]) throw new ApplicationPlatformError('access_unavailable', 'The application is unavailable.')
+      }
+      const value = await runWithApplicationReadTransaction(client,execution,()=>operation(client, effect => effects.push(effect)))
+      await execution.security.authority.assertCurrent()
+      if (execution.lifecycle.abortSignal.aborted) throw new ApplicationPlatformError('access_unavailable', 'The operation was cancelled.')
+      commitStarted = true
+      await client.query('COMMIT')
+      releaseApplicationTransactionBinding(client)
+      for (const effect of effects) {
+        try { effect() } catch { console.warn('[application-platform] post-commit projection failed') }
+      }
+      return value
+    } catch (error) {
+      if (commitStarted && effectful) throw new ApplicationPlatformError('outcome_uncertain', 'Reconcile the saved operation before retrying.', 'uncertain')
+      if (!(error instanceof ApplicationPlatformError)) {
+        const code = (error as { code?: string })?.code
+        if (code === '23505' || code === '40001' || code === '40P01') {
+          throw new ApplicationPlatformError('record_version_conflict', 'The record or its declared uniqueness changed. Refresh before retrying.')
+        }
+        if (code === '22023' || code === '23514' || code === '22P02') {
+          const refusal = new ApplicationPlatformError('invalid_value', 'The declared operation constraints were not satisfied.')
+          Object.defineProperty(refusal, 'cause', { value: error })
+          throw refusal
+        }
+        if (code === '42501') throw new ApplicationPlatformError('access_unavailable', 'The operation is unavailable.')
+      }
+      throw error
+    } finally { releaseApplicationTransactionBinding(client); await rollbackAndRelease(client) }
+  })
 }

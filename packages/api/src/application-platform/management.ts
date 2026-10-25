@@ -14,8 +14,8 @@ import { resolveLiveAccessCeilingSystem } from '../context-scope/resolve-turn-sc
 import type { ApplicationPlatformService } from './service.js'
 import { mintApplicationCredentialSecret } from './credentials.js'
 import { resolveExecutionContextSystem } from '../context-scope/execution-context.js'
-import { applicationSchemaPreviewInput } from './schema-changes.js'
-import { applicationGovernanceCatalogInput,applicationGovernanceModuleInput,applicationGovernancePreviewInput,applicationGovernanceApplyInput } from './governance.js'
+import { previewApplicationSchema,applyApplicationSchema,applicationSchemaPreviewInput } from './schema-changes.js'
+import { readApplicationGovernanceCatalog,previewApplicationGovernance,applyApplicationGovernance,applicationGovernanceCatalogInput,applicationGovernanceModuleInput,applicationGovernancePreviewInput,applicationGovernanceApplyInput } from './governance.js'
 import { buildNativeApplicationSchemaMcpTools,buildNativeApplicationGovernanceMcpTools,buildNativeApplicationManagementMcpTools } from './mcp.js'
 
 const clientColumns = `id,workspace_id AS "workspaceId",module_key AS "moduleKey",name,client_mode AS mode,
@@ -73,7 +73,7 @@ export class ApplicationManagementService {
     if(moduleKey&&!modules.includes(moduleKey))throw new ApplicationPlatformError('invalid_value','The management module is invalid.')
     let governance:NonNullable<ApplicationManagementOverview['governance']>={state:'unavailable',moduleKey,catalog:null}
     if(moduleKey)try {
-      governance={state:'available',moduleKey,catalog:await this.applications.governanceCatalog(execution,{moduleKey})}
+      governance={state:'available',moduleKey,catalog:await readApplicationGovernanceCatalog(this.pool,execution,{moduleKey})}
     } catch(error) { if(!(error instanceof ApplicationPlatformError)||error.code!=='access_unavailable')throw error }
     await execution.security.authority.assertCurrent()
     // Revalidate native administration after all independently awaited readers.
@@ -165,7 +165,7 @@ export class ApplicationManagementService {
     const input=schemaPreviewBody.safeParse(rawInput)
     if (!input.success || !z.string().uuid().safeParse(typeId).success) throw new ApplicationPlatformError('invalid_value','The schema proposal is invalid.')
     const execution=await this.nativeSchemaExecution(actorId,workspaceId,input.data.assistantId,signal)
-    const preview=await this.applications.previewSchema(execution,typeId,input.data.expectedVersion,input.data.properties)
+    const preview=await previewApplicationSchema(this.pool,execution,typeId,input.data.expectedVersion,input.data.properties)
     await execution.security.authority.assertCurrent()
     return preview
   }
@@ -173,20 +173,20 @@ export class ApplicationManagementService {
   async applySchema(actorId: string,workspaceId: string,previewId: string,rawInput: unknown,signal?: AbortSignal) {
     const input=schemaAssistantInput.safeParse(rawInput)
     if (!input.success || !z.string().uuid().safeParse(previewId).success) throw new ApplicationPlatformError('invalid_value','The schema review is invalid.')
-    return this.applications.applySchema(await this.nativeSchemaExecution(actorId,workspaceId,input.data.assistantId,signal),previewId)
+    return applyApplicationSchema(this.pool,await this.nativeSchemaExecution(actorId,workspaceId,input.data.assistantId,signal),previewId)
   }
 
   async schemaMcpTools(actorId: string,workspaceId: string,rawSelection: unknown,signal?: AbortSignal) {
     const selection=schemaAssistantInput.safeParse(rawSelection)
     if (!selection.success) throw new ApplicationPlatformError('invalid_value','The management assistant selection is invalid.')
-    return buildNativeApplicationSchemaMcpTools(this.applications,await this.nativeSchemaExecution(actorId,workspaceId,selection.data.assistantId,signal))
+    return buildNativeApplicationSchemaMcpTools(this.pool,await this.nativeSchemaExecution(actorId,workspaceId,selection.data.assistantId,signal))
   }
 
   async governanceCatalog(actorId:string,workspaceId:string,rawSelection:unknown,signal?:AbortSignal) {
     const input=applicationGovernanceCatalogInput.extend(schemaAssistantInput.shape).strict().safeParse(rawSelection)
     if (!input.success) throw new ApplicationPlatformError('invalid_value','The native governance selection is invalid.')
     const execution=await this.nativeSchemaExecution(actorId,workspaceId,input.data.assistantId,signal)
-    const result=await this.applications.governanceCatalog(execution,{moduleKey:input.data.moduleKey,afterId:input.data.afterId})
+    const result=await readApplicationGovernanceCatalog(this.pool,execution,{moduleKey:input.data.moduleKey,afterId:input.data.afterId})
     await execution.security.authority.assertCurrent();return result
   }
   async previewGovernance(actorId:string,workspaceId:string,rawInput:unknown,signal?:AbortSignal) {
@@ -194,18 +194,18 @@ export class ApplicationManagementService {
     if (!input.success) throw new ApplicationPlatformError('invalid_value','The native governance proposal is invalid.')
     const execution=await this.nativeSchemaExecution(actorId,workspaceId,input.data.assistantId,signal)
     const {assistantId:_assistant,...proposal}=input.data
-    const result=await this.applications.previewGovernance(execution,proposal)
+    const result=await previewApplicationGovernance(this.pool,execution,proposal)
     await execution.security.authority.assertCurrent();return result
   }
   async applyGovernance(actorId:string,workspaceId:string,reviewId:string,rawInput:unknown,signal?:AbortSignal) {
     const input=schemaAssistantInput.safeParse(rawInput)
     if (!input.success || !applicationGovernanceApplyInput.safeParse({reviewId}).success) throw new ApplicationPlatformError('invalid_value','The native governance review is invalid.')
-    return this.applications.applyGovernance(await this.nativeSchemaExecution(actorId,workspaceId,input.data.assistantId,signal),{reviewId})
+    return applyApplicationGovernance(this.pool,await this.nativeSchemaExecution(actorId,workspaceId,input.data.assistantId,signal),{reviewId})
   }
   async governanceMcpTools(actorId:string,workspaceId:string,rawSelection:unknown,signal?:AbortSignal) {
     const input=applicationGovernanceModuleInput.extend(schemaAssistantInput.shape).strict().safeParse(rawSelection)
     if (!input.success) throw new ApplicationPlatformError('invalid_value','The native governance selection is invalid.')
-    return buildNativeApplicationGovernanceMcpTools(this.applications,await this.nativeSchemaExecution(actorId,workspaceId,input.data.assistantId,signal),input.data.moduleKey)
+    return buildNativeApplicationGovernanceMcpTools(this.pool,await this.nativeSchemaExecution(actorId,workspaceId,input.data.assistantId,signal),input.data.moduleKey)
   }
 
   list(actorId: string, workspaceId: string) {

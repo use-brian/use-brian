@@ -1,3 +1,4 @@
+import { previewApplicationSchema,applyApplicationSchema } from '../schema-changes.js'
 import { randomUUID } from 'node:crypto'
 import { afterAll, beforeAll, describe, expect, it } from 'vitest'
 import { createExecutionContext, type ApplicationModuleDefinition, type CellValue, type PropertyDef } from '@use-brian/core'
@@ -226,25 +227,25 @@ describe('[COMP:api/application-records] real canonical generic record transacti
     } } }
   }
   it('previews and applies an actor-bound schema revision once without rewriting record IDs or values',async()=>{
-    const schema=await type(),record=await create(schema.id,{title:{kind:'text',value:'Preserved'}}),service=new ApplicationPlatformService([]),context=execution()
-    const preview=await service.previewSchema(context,schema.id,1,[title,{name:'quantity',config:{kind:'number'}}])
+    const schema=await type(),record=await create(schema.id,{title:{kind:'text',value:'Preserved'}}),context=execution()
+    const preview=await previewApplicationSchema(getAppPool(),context,schema.id,1,[title,{name:'quantity',config:{kind:'number'}}])
     expect(preview).toMatchObject({affectedRecords:1,invalidRecords:0,canApply:true})
-    const applied=await service.applySchema(context,preview.id)
+    const applied=await applyApplicationSchema(getAppPool(),context,preview.id)
     expect(applied).toMatchObject({entityTypeId:schema.id,schemaVersion:2,applied:true})
-    expect(await service.applySchema(context,preview.id)).toEqual(applied)
+    expect(await applyApplicationSchema(getAppPool(),context,preview.id)).toEqual(applied)
     expect((await store.getEntity(workspaceId,record.id))?.data).toEqual({title:{kind:'text',value:'Preserved'}})
     expect((await store.getEntityType(workspaceId,schema.id))?.schemaVersion).toBe(2)
   })
   it('refuses invalid, stale, substituted and directly rewritten schema reviews',async()=>{
-    const schema=await type(),record=await create(schema.id,{title:{kind:'text',value:'Preserved'}}),service=new ApplicationPlatformService([]),context=execution()
-    const invalid=await service.previewSchema(context,schema.id,1,[])
+    const schema=await type(),record=await create(schema.id,{title:{kind:'text',value:'Preserved'}}),context=execution()
+    const invalid=await previewApplicationSchema(getAppPool(),context,schema.id,1,[])
     expect(invalid).toMatchObject({invalidRecords:1,canApply:false})
-    await expect(service.applySchema(context,invalid.id)).rejects.toMatchObject({code:'invalid_value'})
-    const valid=await service.previewSchema(context,schema.id,1,[title,{name:'quantity',config:{kind:'number'}}])
-    await expect(service.applySchema(execution(readerId),valid.id)).rejects.toMatchObject({code:'access_unavailable'})
+    await expect(applyApplicationSchema(getAppPool(),context,invalid.id)).rejects.toMatchObject({code:'invalid_value'})
+    const valid=await previewApplicationSchema(getAppPool(),context,schema.id,1,[title,{name:'quantity',config:{kind:'number'}}])
+    await expect(applyApplicationSchema(getAppPool(),execution(readerId),valid.id)).rejects.toMatchObject({code:'access_unavailable'})
     await expect(queryWithRLS(userId,"UPDATE application_schema_change_reviews SET proposed_properties='[]' WHERE id=$1",[valid.id])).rejects.toMatchObject({code:'22023'})
     await store.updateEntity(workspaceId,record.id,{data:{title:{kind:'text',value:'Changed'}},lastEditedBy:userId})
-    await expect(service.applySchema(context,valid.id)).rejects.toMatchObject({code:'schema_version_conflict'})
+    await expect(applyApplicationSchema(getAppPool(),context,valid.id)).rejects.toMatchObject({code:'schema_version_conflict'})
     expect((await store.getEntityType(workspaceId,schema.id))?.schemaVersion).toBe(1)
   })
   it('commits two canonical writes, revisions, audit and event once under concurrent idempotent replay', async () => {

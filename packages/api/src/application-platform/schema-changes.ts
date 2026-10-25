@@ -1,11 +1,12 @@
 /** Saved generic schema reviews over canonical rows. [COMP:api/application-records] */
 import { createHash, randomUUID } from 'node:crypto'
-import type { PoolClient } from 'pg'
+import type { Pool, PoolClient } from 'pg'
 import { z } from 'zod'
 import { propertyDefSchema, validateDocApplicationSchema, validateDocApplicationValues,
   type CellValue, type ExecutionContext, type PropertyDef } from '@use-brian/core'
 import { ApplicationPlatformError } from '@use-brian/shared'
 import { createDbDocEntityStore } from '../db/doc-entity-store.js'
+import { runApplicationTransaction } from './execution-context.js'
 
 /** Shared management/MCP declarations; canonical PropertyDef remains authoritative. */
 export const applicationSchemaPreviewInput = z.object({ typeId: z.string().uuid(),expectedVersion: z.number().int().positive(),
@@ -40,7 +41,10 @@ async function scan(client:PoolClient,workspaceId:string,typeId:string,propertie
   if(visible.rows[0]?.admitted!==true)throw new ApplicationPlatformError('access_unavailable','Schema review requires current access to every affected record.')
   return {hash:hash.digest('hex'),records,invalid}
 }
-export async function previewApplicationSchema(client:PoolClient,execution:ExecutionContext,typeId:string,expectedVersion:number,rawProperties:PropertyDef[]) {
+export function previewApplicationSchema(pool:Pool,execution:ExecutionContext,typeId:string,expectedVersion:number,rawProperties:PropertyDef[]) {
+  return runApplicationTransaction(pool,execution,client => previewApplicationSchemaInTransaction(client,execution,typeId,expectedVersion,rawProperties),true)
+}
+async function previewApplicationSchemaInTransaction(client:PoolClient,execution:ExecutionContext,typeId:string,expectedVersion:number,rawProperties:PropertyDef[]) {
   const properties=rawProperties.map(property=>propertyDefSchema.parse(property));validateDocApplicationSchema(properties)
   const {workspaceId,userId}=execution.security.access
   await client.query('SELECT id FROM entity_types WHERE id=$1 AND workspace_id=$2 FOR SHARE',[typeId,workspaceId])
@@ -55,7 +59,11 @@ export async function previewApplicationSchema(client:PoolClient,execution:Execu
   return {id,entityTypeId:typeId,expectedSchemaVersion:expectedVersion,before:schema.properties,proposed:properties,
     affectedRecords:state.records,invalidRecords:state.invalid,canApply:state.invalid===0}
 }
-export async function applyApplicationSchema(client:PoolClient,execution:ExecutionContext,previewId:string) {
+export function applyApplicationSchema(pool:Pool,execution:ExecutionContext,previewId:string) {
+  if (execution.surface.readOnly) throw new ApplicationPlatformError('access_unavailable', 'The operation is unavailable.')
+  return runApplicationTransaction(pool,execution,client => applyApplicationSchemaInTransaction(client,execution,previewId),true)
+}
+async function applyApplicationSchemaInTransaction(client:PoolClient,execution:ExecutionContext,previewId:string) {
   const {workspaceId,userId}=execution.security.access
   const result=await client.query<{entity_type_id:string;expected_schema_version:number;proposed_properties:PropertyDef[];record_set_hash:string;invalid_records:number;applied_version:number|null;expired:boolean;review_assistant_id:string|null;reviewed_authority_revision:string|null;applied_authority_revision:string|null}>(
     `SELECT *,expires_at<=now() AS expired FROM application_schema_change_reviews

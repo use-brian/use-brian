@@ -1,3 +1,5 @@
+import { previewApplicationSchema } from '../schema-changes.js'
+import { readApplicationGovernanceCatalog,previewApplicationGovernance,applyApplicationGovernance } from '../governance.js'
 /** Real native owner/configuration governance over private deployed ports. */
 import { randomUUID } from 'node:crypto'
 import { afterAll,afterEach,beforeAll,beforeEach,describe,expect,it } from 'vitest'
@@ -6,12 +8,12 @@ import { CrmOperationsCommandSchema,type CrmOperationsContext } from '@use-brian
 import {createWorkspaceModulesStore} from '../../db/workspace-modules-store.js'
 import {createDbCrmOperationsStore} from '../../db/crm-operations-store.js'
 import {createCrmOperationsService} from '../../crm-operations/service.js'
-import type { PoolClient } from 'pg'
+import type { Pool,PoolClient } from 'pg'
 import { applyRLSGucs,getAppPool,getPool } from '../../db/client.js'
 import { findAssistantById } from '../../db/users.js'
 import { resolveExecutionContextSystem } from '../../context-scope/execution-context.js'
-import { ApplicationPlatformService } from '../service.js'
-import { buildNativeApplicationGovernanceMcpTools } from '../mcp.js'
+import { buildNativeApplicationGovernanceMcpTools,buildNativeApplicationSchemaMcpTools } from '../mcp.js'
+import { createDbDocEntityStore } from '../../db/doc-entity-store.js'
 import { createCompany,createContact,createDeal,getCompanyById } from '../../db/crm.js'
 import { createEntity } from '../../db/entities-store.js'
 import { createTask } from '../../db/tasks.js'
@@ -20,7 +22,7 @@ import {createCrmPipeline,createCrmStage,updateCrmPipeline,updateCrmStage,setCrm
 const {assertLocalFixture}=await import(new URL('../../../../../scripts/crm/local-fixture.mjs',import.meta.url).href)
 await assertLocalFixture()
 describe('[COMP:api/application-governance] complete native owner and compiled configuration reviews',()=>{
-  const owner=getPool(),service=new ApplicationPlatformService([]),ownerId=randomUUID(),memberId=randomUUID(),independentId=randomUUID()
+  const owner=getPool(),ownerId=randomUUID(),memberId=randomUUID(),independentId=randomUUID()
   let workspaceId:string,assistantId:string
   const inputFields=[{key:'mode',kind:'enum',required:true,values:['manual','automatic']},{key:'note',kind:'text',required:false,maxLength:32},
     {key:'enabled',kind:'boolean',required:false},{key:'threshold',kind:'integer',required:false}]
@@ -85,10 +87,10 @@ describe('[COMP:api/application-governance] complete native owner and compiled c
   async function execution(userId=ownerId) {return (await resolveExecutionContextSystem({userId,workspaceId,assistant:(await findAssistantById(assistantId))!,memberMode:'member',
     identity:{kind:'attended',principal:{kind:'workspace_member',userId,authenticationKind:'native_session'}},ownership:{kind:'workspace',workspaceId},
     lifecycle:{sessionId:randomUUID(),sessionPersisted:false,channelId:'native-governance-fixture',channelType:'test',abortSignal:new AbortController().signal}})).executionContext}
-  const catalog=(user=ownerId)=>execution(user).then(context=>service.governanceCatalog(context,{moduleKey:'native'}))
-  const preview=async(operation:unknown,user=ownerId)=>service.previewGovernance(await execution(user),{moduleKey:'native',expectedRevision:(await catalog(user)).revision,operation})
+  const catalog=(user=ownerId)=>execution(user).then(context=>readApplicationGovernanceCatalog(getAppPool(),context,{moduleKey:'native'}))
+  const preview=async(operation:unknown,user=ownerId)=>previewApplicationGovernance(getAppPool(),await execution(user),{moduleKey:'native',expectedRevision:(await catalog(user)).revision,operation})
   const configure=(mode='automatic')=>({kind:'configure',operationKey:'set_mode',input:{mode}})
-  const apply=(review:{id:string},user=ownerId)=>execution(user).then(context=>service.applyGovernance(context,{reviewId:review.id}))
+  const apply=(review:{id:string},user=ownerId)=>execution(user).then(context=>applyApplicationGovernance(getAppPool(),context,{reviewId:review.id}))
   async function asMember<T>(operation:(client:PoolClient)=>Promise<T>,user=ownerId) {const client=await getAppPool().connect();try{await client.query('BEGIN');await applyRLSGucs(client,user);await client.query("SELECT set_config('app.v2_assistant_id',$1,true)",[assistantId]);return await operation(client)}finally{await client.query('ROLLBACK');client.release()}}
   async function protect(type:string) {await owner.query(`INSERT INTO application_native_resource_owners(workspace_id,origin,resource_type,module_key) VALUES($1,'{"kind":"native","moduleKey":"native"}',$2,'native')`,[workspaceId,type])}
   async function source(type:string) {const access={workspaceId,userId:ownerId,assistantId,assistantKind:'primary' as const}
@@ -129,7 +131,7 @@ describe('[COMP:api/application-governance] complete native owner and compiled c
   it('Q07 enumerates private typed configuration inputs in the native catalog and Brian profile without registration authority',async()=>{
     await source('company');await protect('company')
     const value=await catalog();expect(value.configurationOperations).toEqual([{operationKey:'set_mode',inputFields,requiredRoleKeys:['controller']}]);expect(value.operations).toContain('configure')
-    const tools=await buildNativeApplicationGovernanceMcpTools(service,await execution(),'native'),tool=tools.find(value=>value.name==='applicationGovernancePreview')!
+    const tools=await buildNativeApplicationGovernanceMcpTools(getAppPool(),await execution(),'native'),tool=tools.find(value=>value.name==='applicationGovernancePreview')!
     const schema=z.object(tool.inputSchema);expect(schema.safeParse({moduleKey:'native',expectedRevision:value.revision,operation:configure()}).success).toBe(true)
     expect(schema.safeParse({moduleKey:'native',expectedRevision:value.revision,operation:configure('invented')}).success).toBe(false)
     await expect(asMember(client=>client.query("INSERT INTO application_native_configuration_operations(module_key,operation_key,input_fields,required_role_keys,apply_handler) VALUES('native','injected','[]',ARRAY['controller'],'native_governance_fixture_configure(uuid,jsonb)'::regprocedure)"))).rejects.toMatchObject({code:'42501'})
@@ -221,7 +223,7 @@ describe('[COMP:api/application-governance] complete native owner and compiled c
   it('Q06/Q07 serializes competing configuration reviews to one current outcome and one event',async()=>{
     await source('company');await protect('company')
     const first=await preview(configure()),second=await preview(configure('manual')),contexts=await Promise.all([execution(),execution()])
-    const result=await Promise.allSettled([first,second].map((review,index)=>service.applyGovernance(contexts[index],{reviewId:review.id})))
+    const result=await Promise.allSettled([first,second].map((review,index)=>applyApplicationGovernance(getAppPool(),contexts[index],{reviewId:review.id})))
     expect(result.filter(item=>item.status==='fulfilled')).toHaveLength(1);expect(result.filter(item=>item.status==='rejected')).toHaveLength(1)
     expect((await owner.query('SELECT count(*)::int count FROM application_native_governance_events WHERE workspace_id=$1',[workspaceId])).rows[0].count).toBe(1)
   })
@@ -309,5 +311,80 @@ describe('[COMP:api/application-governance] complete native owner and compiled c
       expect((await owner.query('SELECT outcome FROM application_native_governance_reviews WHERE id=$1',[review.id])).rows[0].outcome).toBeNull()
     }finally{await owner.query('ALTER TABLE application_native_governance_events DROP CONSTRAINT native_governance_fixture_refusal')}
     expect(await apply(review)).toMatchObject({applied:true})
+  })
+  it.each(['schema','governance'] as const)('preserves a durable %s preview when the actual SQL commit acknowledgement is lost',async kind=>{
+    const store=createDbDocEntityStore({actorUserId:ownerId})
+    const schema=kind==='schema'?await store.createEntityType({workspaceId,name:'Fictional uncertain preview',createdBy:ownerId,
+      properties:[{name:'title',config:{kind:'text'},required:true}]}):null
+    const expectedRevision=kind==='governance'?(await catalog()).revision:undefined
+    const client=await getAppPool().connect()
+    let committed=false
+    // Fault only the acknowledgement after PostgreSQL has committed. All role,
+    // RLS, preview and current-authority queries still use the real connection.
+    const faultingClient=new Proxy(client,{get(target,key){
+      const value=Reflect.get(target,key)
+      if(key==='query')return async(...args:unknown[])=>{
+        const result=await Reflect.apply(value,target,args)
+        if(args[0]==='COMMIT'){committed=true;throw new Error('Fictional lost commit acknowledgement')}
+        return result
+      }
+      return typeof value==='function'?value.bind(target):value
+    }})
+    const faultingPool={connect:async()=>faultingClient} as unknown as Pool
+    const context=await execution()
+    const operation=kind==='schema'?previewApplicationSchema(faultingPool,context,schema!.id,1,[...schema!.properties,{name:'quantity',config:{kind:'number'}}])
+      :previewApplicationGovernance(faultingPool,context,{moduleKey:'native',expectedRevision,operation:configure()})
+    await expect(operation).rejects.toMatchObject({code:'outcome_uncertain',effect:'uncertain',retrySafe:false})
+    expect(committed).toBe(true)
+    if(kind==='schema'){
+      expect((await owner.query('SELECT id FROM application_schema_change_reviews WHERE entity_type_id=$1',[schema!.id])).rows).toHaveLength(1)
+      expect((await store.getEntityType(workspaceId,schema!.id))?.schemaVersion).toBe(1)
+    }else{
+      expect((await owner.query('SELECT id FROM application_native_governance_reviews WHERE workspace_id=$1',[workspaceId])).rows).toHaveLength(1)
+      expect((await owner.query('SELECT mode FROM native_governance_fixture_configuration WHERE workspace_id=$1',[workspaceId])).rows[0].mode).toBe('manual')
+    }
+  })
+  it.each(['schema','governance'] as const)('reports a committed %s Brian preview after actual post-await role contraction',async kind=>{
+    const store=createDbDocEntityStore({actorUserId:ownerId})
+    const schema=kind==='schema'?await store.createEntityType({workspaceId,name:'Fictional contracted preview',createdBy:ownerId,
+      properties:[{name:'title',config:{kind:'text'},required:true}]}):null
+    const assignment=(await catalog()).roleAssignments.find(row=>row.userId===ownerId)!
+    let saved=false
+    const contract=async()=>{saved=true;await owner.query("UPDATE application_native_role_assignments SET status='revoked' WHERE id=$1",[assignment.id])}
+    let armed=false
+    const contractingPool={connect:async()=>{
+      const client=await getAppPool().connect()
+      return new Proxy(client,{get(target,key){
+        const value=Reflect.get(target,key)
+        if(key==='query')return async(...args:unknown[])=>{
+          const result=await Reflect.apply(value,target,args)
+          if(args[0]==='COMMIT'&&armed&&!saved)await contract()
+          return result
+        }
+        return typeof value==='function'?value.bind(target):value
+      }})
+    }} as unknown as Pool
+    const context=await execution(),revision=(await catalog()).revision
+    const tools=kind==='schema'?buildNativeApplicationSchemaMcpTools(contractingPool,context):await buildNativeApplicationGovernanceMcpTools(contractingPool,context,'native')
+    // The governance builder reads a catalog first. Contract only after the
+    // selected preview has actually committed on its supplied transaction.
+    armed=true
+    const name=kind==='schema'?'applicationSchemaPreview':'applicationGovernancePreview',tool=tools.find(tool=>tool.name===name)!
+    const args=kind==='schema'?{typeId:schema!.id,expectedVersion:1,properties:[...schema!.properties,{name:'quantity',config:{kind:'number'}}]}
+      :{moduleKey:'native',expectedRevision:revision,operation:configure()}
+    const result=await tool.handler(args)
+    expect(saved).toBe(true);expect(result.isError).toBe(true)
+    const content=result.content[0]
+    if(content.type!=='text')throw new Error('Expected a content-free structured preview outcome')
+    expect(JSON.parse(content.text)).toMatchObject({error:'grant_revoked',effect:'committed',retrySafe:false})
+    await expect(context.security.authority.assertCurrent()).rejects.toThrow()
+    expect(await catalog(independentId)).toMatchObject({moduleKey:'native'})
+    if(kind==='schema'){
+      expect((await owner.query('SELECT id FROM application_schema_change_reviews WHERE entity_type_id=$1',[schema!.id])).rows).toHaveLength(1)
+      expect((await store.getEntityType(workspaceId,schema!.id))?.schemaVersion).toBe(1)
+    }else{
+      expect((await owner.query('SELECT id FROM application_native_governance_reviews WHERE workspace_id=$1',[workspaceId])).rows).toHaveLength(1)
+      expect((await owner.query('SELECT mode FROM native_governance_fixture_configuration WHERE workspace_id=$1',[workspaceId])).rows[0].mode).toBe('manual')
+    }
   })
 })

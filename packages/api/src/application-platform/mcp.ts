@@ -1,3 +1,4 @@
+import type { Pool } from 'pg'
 /** Application MCP is an authenticated profile of the shared Brain transport. [COMP:api/application-auth] */
 import { z } from 'zod'
 import type { ExecutionContext } from '@use-brian/core'
@@ -11,8 +12,8 @@ import { query } from '../db/client.js'
 import { parseBridgeToken } from '../home-apps/tokens.js'
 import { authenticateApplicationHome } from './home-auth.js'
 import { resolveApplicationExecutionContext } from './execution-context.js'
-import { applicationConfigurationInputShape,applicationGovernanceCatalogInput,applicationGovernancePreviewInput,applicationGovernanceApplyInput,assertNativeApplicationGovernance,type ApplicationGovernancePreviewInput,type ApplicationGovernanceApplyInput } from './governance.js'
-import { applicationSchemaPreviewInput,applicationSchemaApplyInput,type ApplicationSchemaPreviewInput,type ApplicationSchemaApplyInput } from './schema-changes.js'
+import { readApplicationGovernanceCatalog,previewApplicationGovernance,applyApplicationGovernance,applicationConfigurationInputShape,applicationGovernanceCatalogInput,applicationGovernancePreviewInput,applicationGovernanceApplyInput,assertNativeApplicationGovernance,type ApplicationGovernancePreviewInput,type ApplicationGovernanceApplyInput } from './governance.js'
+import { previewApplicationSchema,applyApplicationSchema,applicationSchemaPreviewInput,applicationSchemaApplyInput,type ApplicationSchemaPreviewInput,type ApplicationSchemaApplyInput } from './schema-changes.js'
 
 /** Resolve only signed Home binding metadata before entering the common service. */
 export async function buildHomeApplicationMcpProfile(req: Request, secret: string, service: ApplicationPlatformService) {
@@ -64,7 +65,7 @@ export async function buildApplicationMcpTools(service: ApplicationPlatformServi
 }
 
 /** Native human management profile; app/legacy programmatic audiences acquire no governance. */
-export function buildNativeApplicationSchemaMcpTools(service: ApplicationPlatformService,execution: ExecutionContext): BrainTool[] {
+export function buildNativeApplicationSchemaMcpTools(pool: Pool,execution: ExecutionContext): BrainTool[] {
   if (getApplicationExecutionBinding(execution) || execution.identity.kind !== 'attended'
     || execution.identity.principal.kind !== 'workspace_member' || execution.surface.readOnly) {
     throw new ApplicationPlatformError('authentication_required','Native schema management authentication is required.')
@@ -73,18 +74,18 @@ export function buildNativeApplicationSchemaMcpTools(service: ApplicationPlatfor
   return [{ name: 'applicationSchemaPreview',description: 'Preview a native schema change under current governance. Review the exact proposal and validity before applying.',
     inputSchema: applicationSchemaPreviewInput.shape,handler: invoke(input => {
       const value: ApplicationSchemaPreviewInput=applicationSchemaPreviewInput.parse(input)
-      return service.previewSchema(execution,value.typeId,value.expectedVersion,value.properties)
-    }) },{ name: 'applicationSchemaApply',description: 'Apply an actor-bound reviewed schema change once. Reconcile committed or uncertain effects using the same review in a fresh invocation.',
+      return previewApplicationSchema(pool,execution,value.typeId,value.expectedVersion,value.properties)
+    },true) },{ name: 'applicationSchemaApply',description: 'Apply an actor-bound reviewed schema change once. Reconcile committed or uncertain effects using the same review in a fresh invocation.',
     inputSchema: applicationSchemaApplyInput.shape,handler: invoke(input => {
       const value: ApplicationSchemaApplyInput=applicationSchemaApplyInput.parse(input)
-      return service.applySchema(execution,value.previewId)
+      return applyApplicationSchema(pool,execution,value.previewId)
     },true) }]
 }
 
 /** One module selection supplies the actual enumerable role vocabulary. */
-export async function buildNativeApplicationGovernanceMcpTools(service:ApplicationPlatformService,execution:ExecutionContext,moduleKey:string):Promise<BrainTool[]> {
+export async function buildNativeApplicationGovernanceMcpTools(pool:Pool,execution:ExecutionContext,moduleKey:string):Promise<BrainTool[]> {
   assertNativeApplicationGovernance(execution)
-  const catalog=await service.governanceCatalog(execution,{moduleKey}),invoke=applicationMcpInvoker(execution)
+  const catalog=await readApplicationGovernanceCatalog(pool,execution,{moduleKey}),invoke=applicationMcpInvoker(execution)
   const assignment=applicationGovernancePreviewInput.shape.operation.options[0].extend({roleKey:catalog.roleKeys.length
     ? z.enum(catalog.roleKeys as [string,...string[]]) : z.never()})
   const operations: z.ZodType[]=[assignment,applicationGovernancePreviewInput.shape.operation.options[1],applicationGovernancePreviewInput.shape.operation.options[2]]
@@ -95,11 +96,11 @@ export async function buildNativeApplicationGovernanceMcpTools(service:Applicati
   for(const operation of catalog.configurationOperations) operations.push(z.object({kind:z.literal('configure'),operationKey:z.literal(operation.operationKey),input:applicationConfigurationInputShape(operation.inputFields)}).strict())
   const preview=applicationGovernancePreviewInput.extend({moduleKey:z.literal(moduleKey),operation:z.union(operations as [z.ZodType,z.ZodType,...z.ZodType[]])})
   return [{name:'applicationGovernanceCatalog',description:'Read the current native module role vocabulary and review revision. This grants no data or role authority.',
-    inputSchema:{afterId:applicationGovernanceCatalogInput.shape.afterId},handler:invoke(input => service.governanceCatalog(execution,{moduleKey,afterId:input.afterId}))},
+    inputSchema:{afterId:applicationGovernanceCatalogInput.shape.afterId},handler:invoke(input => readApplicationGovernanceCatalog(pool,execution,{moduleKey,afterId:input.afterId}))},
   {name:'applicationGovernancePreview',description:'Preview one exact native role or restrictive owner operation under current governance and delegation limits.',
-    inputSchema:preview.shape,handler:invoke(input => {const value:ApplicationGovernancePreviewInput=applicationGovernancePreviewInput.parse(preview.parse(input));return service.previewGovernance(execution,value)})},
+    inputSchema:preview.shape,handler:invoke(input => {const value:ApplicationGovernancePreviewInput=applicationGovernancePreviewInput.parse(preview.parse(input));return previewApplicationGovernance(pool,execution,value)},true)},
   {name:'applicationGovernanceApply',description:'Apply the same actor-bound native governance review once. Reconcile committed or uncertain effects in a fresh invocation.',
-    inputSchema:applicationGovernanceApplyInput.shape,handler:invoke(input => {const value:ApplicationGovernanceApplyInput=applicationGovernanceApplyInput.parse(input);return service.applyGovernance(execution,value)},true)}]
+    inputSchema:applicationGovernanceApplyInput.shape,handler:invoke(input => {const value:ApplicationGovernanceApplyInput=applicationGovernanceApplyInput.parse(input);return applyApplicationGovernance(pool,execution,value)},true)}]
 }
 
 import { applicationManagementCommandSchema,type ApplicationManagementService } from './management.js'

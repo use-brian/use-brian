@@ -6,13 +6,9 @@ import { applicationAuthorityAllowsOperation, applicationAuthorityFieldCatalog, 
 import { ApplicationPlatformError, WORKSPACE_MODULES, applicationCommandSchema, applicationResourceRefSchema,
   type ApplicationCommand, type ApplicationOperationReceipt, type ApplicationResourceRef,
   type WorkspaceModuleRegistry } from '@use-brian/shared'
-import { applyRLSGucs, getAppPool, rollbackAndRelease } from '../db/client.js'
-import { runWithAgentAccess } from '../db/agent-access-context.js'
+import { getAppPool } from '../db/client.js'
 import { lockWorkspaceModule, requireWorkspaceModuleAdmission } from '../db/workspace-modules-store.js'
-import { applyApplicationGovernance,previewApplicationGovernance,readApplicationGovernanceCatalog } from './governance.js'
-import { applyApplicationSchema, previewApplicationSchema } from './schema-changes.js'
-import type { PropertyDef } from '@use-brian/core'
-import { applyApplicationRLSContext, getApplicationExecutionBinding, runWithApplicationReadTransaction, releaseApplicationTransactionBinding } from './execution-context.js'
+import { getApplicationExecutionBinding, runApplicationTransaction } from './execution-context.js'
 import { z } from 'zod'
 import { toJsonSchemaCompat } from '@modelcontextprotocol/sdk/server/zod-json-schema-compat.js'
 
@@ -65,80 +61,8 @@ export class ApplicationPlatformService {
     })
   }
 
-  previewSchema(execution: ExecutionContext, typeId: string, expectedVersion: number, properties: PropertyDef[]) {
-    return this.transaction(execution, client => previewApplicationSchema(client,execution,typeId,expectedVersion,properties))
-  }
-
-  applySchema(execution: ExecutionContext, previewId: string) {
-    if (execution.surface.readOnly) throw new ApplicationPlatformError('access_unavailable', 'The operation is unavailable.')
-    return this.transaction(execution, client => applyApplicationSchema(client,execution,previewId), true)
-  }
-
-  governanceCatalog(execution:ExecutionContext,input:unknown) {
-    return this.transaction(execution,client => readApplicationGovernanceCatalog(client,execution,input))
-  }
-  previewGovernance(execution:ExecutionContext,input:unknown) {
-    return this.transaction(execution,client => previewApplicationGovernance(client,execution,input))
-  }
-  applyGovernance(execution:ExecutionContext,input:unknown) {
-    return this.transaction(execution,client => applyApplicationGovernance(client,execution,input),true)
-  }
-
   private async transaction<T>(execution: ExecutionContext, operation: (client: PoolClient, afterCommit: (effect: () => void) => void) => Promise<T>, effectful = false, commandLock?: string): Promise<T> {
-    if (execution.ownership.kind !== 'workspace' || execution.ownership.workspaceId !== execution.security.access.workspaceId
-      || execution.lifecycle.abortSignal.aborted) throw new ApplicationPlatformError('access_unavailable', 'The application is unavailable.')
-    if (execution.identity.kind === 'programmatic' && execution.identity.principal.kind === 'application'
-      && !getApplicationExecutionBinding(execution)) throw new ApplicationPlatformError('authentication_required', 'Application authentication is required.')
-    await execution.security.authority.assertCurrent()
-    return runWithAgentAccess(execution.security.access, async () => {
-      const client = await this.pool.connect()
-      const effects: Array<() => void> = []
-      let commitStarted = false
-      try {
-        await client.query('BEGIN')
-        const role = await client.query(`SELECT r.rolsuper OR r.rolbypassrls OR pg_has_role(r.oid,c.relowner,'USAGE') AS bypass
-          FROM pg_catalog.pg_roles r JOIN pg_catalog.pg_class c ON c.oid='entity_instances'::regclass WHERE r.rolname=current_user`)
-        if (role.rows[0]?.bypass !== false) throw new ApplicationPlatformError('access_unavailable', 'A non-owner application role is required.')
-        // A duplicate waits before holding the workspace/source locks needed by its winner.
-        if (commandLock) {
-          await client.query('SELECT pg_advisory_xact_lock(hashtextextended($1,0))', [commandLock])
-          await execution.security.authority.assertCurrent()
-          if (execution.lifecycle.abortSignal.aborted) throw new ApplicationPlatformError('access_unavailable', 'The operation was cancelled.')
-        }
-        await applyRLSGucs(client, execution.security.access.userId)
-        const application = await applyApplicationRLSContext(client, execution)
-        if (!application) {
-          const member = await client.query('SELECT user_id FROM workspace_members WHERE workspace_id=$1 AND user_id=$2 FOR SHARE',
-            [execution.security.access.workspaceId, execution.security.access.userId])
-          if (!member.rows[0]) throw new ApplicationPlatformError('access_unavailable', 'The application is unavailable.')
-        }
-        const value = await runWithApplicationReadTransaction(client,execution,()=>operation(client, effect => effects.push(effect)))
-        await execution.security.authority.assertCurrent()
-        if (execution.lifecycle.abortSignal.aborted) throw new ApplicationPlatformError('access_unavailable', 'The operation was cancelled.')
-        commitStarted = true
-        await client.query('COMMIT')
-        releaseApplicationTransactionBinding(client)
-        for (const effect of effects) {
-          try { effect() } catch { console.warn('[application-platform] post-commit projection failed') }
-        }
-        return value
-      } catch (error) {
-        if (commitStarted && effectful) throw new ApplicationPlatformError('outcome_uncertain', 'Reconcile the saved operation before retrying.', 'uncertain')
-        if (!(error instanceof ApplicationPlatformError)) {
-          const code = (error as { code?: string })?.code
-          if (code === '23505' || code === '40001' || code === '40P01') {
-            throw new ApplicationPlatformError('record_version_conflict', 'The record or its declared uniqueness changed. Refresh before retrying.')
-          }
-          if (code === '22023' || code === '23514' || code === '22P02') {
-            const refusal = new ApplicationPlatformError('invalid_value', 'The declared operation constraints were not satisfied.')
-            Object.defineProperty(refusal, 'cause', { value: error })
-            throw refusal
-          }
-          if (code === '42501') throw new ApplicationPlatformError('access_unavailable', 'The operation is unavailable.')
-        }
-        throw error
-      } finally { releaseApplicationTransactionBinding(client); await rollbackAndRelease(client) }
-    })
+    return runApplicationTransaction(this.pool, execution, operation, effectful, commandLock)
   }
 
   async query(execution: ExecutionContext, moduleKey: string, queryKey: string, rawInput: unknown): Promise<unknown> {
