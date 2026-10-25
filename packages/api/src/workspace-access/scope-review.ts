@@ -497,7 +497,10 @@ export async function executeWorkspaceScopeReviewInTransaction(client:PoolClient
         continue
       }
       const adapter=sourceAdapter(job.resourceKind)
-      if(job.action==='assign_team'||job.action==='consolidate_default')await client.query(`UPDATE ${adapter.table} SET compartments=ARRAY[$3::text] WHERE workspace_id=$1 AND id=$2`,[workspaceId,item.resourceId,job.targetCompartment])
+      if(job.action==='assign_team'||job.action==='consolidate_default'){
+        if(job.resourceKind==='task')await client.query('SELECT application_perform_native_task_review($1,$2,$3::bigint,$4,$5,$6)',[workspaceId,job.id,job.version,job.payloadHash,item.resourceId,userId])
+        else await client.query(`UPDATE ${adapter.table} SET compartments=ARRAY[$3::text] WHERE workspace_id=$1 AND id=$2`,[workspaceId,item.resourceId,job.targetCompartment])
+      }
       if(job.action==='hold'){
         if(adapter.category==='source'&&!['session_message','feedback_event'].includes(job.resourceKind)){
           await client.query(`UPDATE ${adapter.table} SET scope_held=true WHERE workspace_id=$1 AND id=$2`,[workspaceId,item.resourceId])
@@ -521,7 +524,8 @@ export async function executeWorkspaceScopeReviewInTransaction(client:PoolClient
       await client.query("UPDATE workspace_scope_review_items SET status='applied',result_version=$4 WHERE workspace_id=$1 AND review_id=$2 AND resource_id=$3",[workspaceId,job.id,item.resourceId,after.version])
       applied.push({before:item.source,after})
     }
-    await client.query("UPDATE workspace_access_policies SET classification_mode=CASE WHEN classification_mode='legacy' AND $2 NOT IN('consolidate_default','release') THEN 'review' ELSE classification_mode END,revision=revision+1,updated_at=now() WHERE workspace_id=$1",[workspaceId,job.action])
+    if(job.resourceKind==='task'&&['assign_team','consolidate_default'].includes(job.action)&&applied.length>0)await client.query('SELECT application_finalize_native_task_review($1,$2,$3::bigint,$4,$5)',[workspaceId,job.id,job.version,job.payloadHash,userId])
+    else await client.query("UPDATE workspace_access_policies SET classification_mode=CASE WHEN classification_mode='legacy' AND $2 NOT IN('consolidate_default','release') THEN 'review' ELSE classification_mode END,revision=revision+1,updated_at=now() WHERE workspace_id=$1",[workspaceId,job.action])
     const revision=await policy(client,workspaceId)
     const coverage=await getScopeReviewCoverage(client,workspaceId)
     if(!['consolidate_default','release'].includes(job.action))await client.query('UPDATE workspace_access_policies SET reviewed_inventory_revision=$2 WHERE workspace_id=$1',[workspaceId,coverage.unresolved==='0'?SCOPE_REVIEW_REGISTRY_REVISION:null])
