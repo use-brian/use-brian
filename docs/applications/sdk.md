@@ -186,3 +186,27 @@ the supplied registry. Keep the same key and default state; omit the existing
 blocker compatibility mapping to inherit it, or supply the exact same mapping.
 Conflicting metadata and a second application registration are rejected. Existing
 persisted state and the lifecycle blocker adapter remain authoritative.
+
+### Scoped native module and recovery limits
+
+A deployed custom native module may expose exact existing record IDs through the
+reviewed `canonical_module_service_v1` profile. Keep its declared origin/type and
+opaque ID unchanged, including decimal-text IDs. Request only released fields and
+declared semantic commands. Registration or an ID grant does not replace current
+app-owned record, action, field or source checks. Custom native self/relationship
+selectors, frontend admission and role governance are not enabled by this profile.
+Global qualification remains closed.
+
+A lifecycle-only transition does not replace an existing activation or credential
+generation. Use a fresh current invocation for a trusted recovery command after
+draining or disable; new work remains refused. New custom-module activation, grants, credentials,
+OAuth bindings, source-service bindings and service-role assignments still require
+enabled admission. Current revocation and deployment/configuration changes refuse
+recovery too. Reconcile uncertain effects before considering another operation.
+
+The optional reviewed `canonical_app_delegation_v1` profile requires a named service
+credential plus a separately authenticated current app-user OAuth binding for the
+same app and workspace. Authority intersects both complete current grant chains
+and issuance maxima. Caller-supplied user or actor fields grant no authority; loss
+of either credential, OAuth binding, parent, issuer or activation refuses access.
+This profile does not activate source mutations or certify application rollout.
