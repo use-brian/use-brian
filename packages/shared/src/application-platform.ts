@@ -104,9 +104,11 @@ export type ApplicationResourceDefinition = z.infer<typeof applicationResourceSc
 export type ApplicationFieldDefinition = ApplicationResourceDefinition['fields'][number]
 
 export type ApplicationJson = null | boolean | number | string | ApplicationJson[] | { [key: string]: ApplicationJson }
+// Record validates every value but drops own __proto__ keys. Intersection
+// restores validated wire keys through Zod's data-property object spread merge.
 export const applicationJsonSchema: z.ZodType<ApplicationJson> = z.lazy(() => z.union([
   z.null(), z.boolean(), z.number().finite(), z.string(), z.array(applicationJsonSchema), z.record(applicationJsonSchema),
-]))
+])).and(z.unknown())
 export const applicationQuerySchema = z.object({
   fields: z.array(fieldKey).max(128).optional(),
   filters: z.array(z.object({ field: fieldKey, op: z.enum(['eq', 'neq', 'gt', 'gte', 'lt', 'lte', 'in', 'contains']), value: applicationJsonSchema }).strict()).max(32).default([]),
@@ -123,7 +125,7 @@ export type ApplicationCommand = z.infer<typeof applicationCommandSchema>
 
 export const APPLICATION_ERROR_CODES = ['invalid_schema', 'invalid_value', 'schema_version_conflict',
   'record_version_conflict', 'operation_not_available', 'access_unavailable', 'authentication_required',
-  'grant_revoked', 'source_unavailable', 'outcome_uncertain'] as const
+  'grant_revoked', 'source_unavailable', 'module_draining', 'module_disabled', 'outcome_uncertain'] as const
 export type ApplicationErrorCode = typeof APPLICATION_ERROR_CODES[number]
 export type ApplicationEffectStatus = 'none' | 'committed' | 'uncertain'
 export class ApplicationPlatformError extends Error {

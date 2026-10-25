@@ -15,6 +15,7 @@ export interface ApplicationCatalog extends Pick<ApplicationModuleCatalog, 'vers
   moduleKey: string
   operationSchemas: { queries: Record<string, unknown>; commands: Record<string, unknown> }
 }
+export type ApplicationCommandReconciliation = { state: 'applied'; receipt: ApplicationOperationReceipt } | { state: 'uncertain' }
 export interface ApplicationCallOptions { signal?: AbortSignal }
 export interface ApplicationQueryResult {
   records: ApplicationRecordProjection[]
@@ -58,6 +59,7 @@ export function createApplicationClient(options: { appId: string; transport: App
       send<T>('GET', `/records/${segment(type)}/${segment(id)}/history${beforeVersion === undefined ? '' : `?beforeVersion=${encodeURIComponent(beforeVersion)}`}`, undefined, call),
     registeredQuery: <T = unknown>(key: string, input: ApplicationJson, call?: ApplicationCallOptions) => send<T>('POST', `/queries/${segment(key)}`, input, call),
     command: <T = ApplicationOperationReceipt>(key: string, command: ApplicationCommand, call?: ApplicationCallOptions) => send<T>('POST', `/commands/${segment(key)}`, command, call, true),
+    reconcile: (key: string, command: ApplicationCommand, call?: ApplicationCallOptions) => send<ApplicationCommandReconciliation>('POST', `/commands/${segment(key)}/reconcile`, command, call),
     previewSchema: (input: ApplicationSchemaPreviewInput, call?: ApplicationCallOptions) => call?.signal?.aborted ? Promise.reject(new ApplicationSdkError('cancelled', 'none', false, undefined, true)) : options.schemas ? options.schemas.preview(input, call) : Promise.reject(new ApplicationSdkError('operation_not_available')),
     applySchema: (input: ApplicationSchemaApplyInput, call?: ApplicationCallOptions) => call?.signal?.aborted ? Promise.reject(new ApplicationSdkError('cancelled', 'none', false, undefined, true)) : options.schemas ? options.schemas.apply(input, call) : Promise.reject(new ApplicationSdkError('operation_not_available')),
   }

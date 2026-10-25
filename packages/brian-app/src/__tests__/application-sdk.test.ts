@@ -30,6 +30,28 @@ describe('[COMP:shared/brian-app-sdk] application client', () => {
     expect(await configured.previewSchema({typeId:home,expectedVersion:1,properties:[]})).toBe(previewResult)
     expect(await configured.applySchema({previewId:home})).toBe(applied)
   })
+  it('reconciles the exact original envelope as a current read without dispatching another mutation',async()=>{
+    const command={idempotencyKey:'original-key',expectedVersion:'opaque/2',input:{id:'record-a',value:'original'}}
+    const transport=vi.fn(async()=>({state:'uncertain'})),client=createApplicationClient({appId:app,transport}),signal=new AbortController().signal
+    expect(await client.reconcile('approve/order',command,{signal})).toEqual({state:'uncertain'})
+    expect(transport).toHaveBeenCalledExactlyOnceWith({appId:app,method:'POST',path:`/api/applications/${app}/commands/approve%2Forder/reconcile`,body:command,effectful:false,signal})
+    const receipt={id:'receipt-a',idempotencyKey:'original-key',effect:'committed',resources:[]}
+    transport.mockResolvedValueOnce({state:'applied',receipt} as never)
+    expect(await client.reconcile('approve/order',command)).toEqual({state:'applied',receipt})
+    const abort=new AbortController();abort.abort();await expect(client.reconcile('approve/order',command,{signal:abort.signal})).rejects.toMatchObject({effect:'none',cancelled:true})
+    expect(transport).toHaveBeenCalledTimes(2)
+  })
+  it.each(['module_draining', 'module_disabled'])('preserves safe lifecycle refusal %s without retrying', async code => {
+    const fetch = vi.fn(async () => reply({ error: code, effect: 'none', retrySafe: false, secret: 'private exception' }, 409))
+    const client = createApplicationClient({ appId: app, transport: createFetchTransport({ apiOrigin: origin, fetch, credential: async () => oauth }) })
+    const failure = await client.command('change', { idempotencyKey: 'once', input: {} }).catch(error => error)
+    expect(failure).toBeInstanceOf(ApplicationSdkError)
+    expect(failure).toMatchObject({ code, effect: 'none', retrySafe: false, status: 409 })
+    expect(JSON.stringify(failure)).not.toContain('private exception')
+    expect(fetch).toHaveBeenCalledTimes(1)
+    fetch.mockImplementation(async () => reply({ error: 'unknown_private_code', effect: 'none', retrySafe: false }, 409))
+    await expect(client.reconcile('change', { idempotencyKey: 'once', input: {} })).rejects.toMatchObject({ code: 'access_unavailable', effect: 'none', retrySafe: false })
+  })
   it.each(['access_unavailable','source_unavailable','outcome_uncertain','grant_revoked'])('K02 surfaces safe typed %s without a write retry', async code => {
     const fetch = vi.fn(async () => reply({ error: code, effect: 'uncertain', retrySafe: true, secret: 'private exception' }, 403))
     const client=createApplicationClient({ appId:app,transport:createFetchTransport({apiOrigin:origin,fetch,credential:async()=>oauth}) })

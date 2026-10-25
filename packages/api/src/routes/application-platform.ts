@@ -13,7 +13,8 @@ import { createApplicationConsentAdapter, loadApplicationOAuthClientSystem } fro
 import { oauthRoutes, type OAuthRoutesOptions } from '../brain-mcp/oauth/routes.js'
 import { createDbOAuthAuthorizationStore } from '../db/oauth-authorization-store.js'
 import { serveStatelessMcp } from '../brain-mcp/stateless.js'
-import { buildApplicationMcpTools } from '../application-platform/mcp.js'
+import { resolveNativeApplicationModuleExecution } from '../application-platform/native-module-runtime.js'
+import { buildApplicationMcpTools,buildNativeApplicationModuleMcpTools } from '../application-platform/mcp.js'
 
 export interface ApplicationRoutesOptions {
   service: ApplicationPlatformService
@@ -64,6 +65,30 @@ export function applicationPlatformRoutes(options: ApplicationRoutesOptions): Ro
     const requestSignal = (req: Request) => {
       const controller=new AbortController();if (req.aborted) controller.abort();else req.once('aborted',() => controller.abort());return controller.signal
     }
+    const nativeSelection=z.object({moduleKey:z.string().regex(/^[a-z][a-z0-9_.-]{0,127}$/),assistantId:z.string().uuid().optional()}).strict()
+    const nativeEndpoint=(mode:'query'|'command'|'reconcile')=>async(req:Request,res:Response)=>{
+      let committed=false
+      try {
+        const body=mode==='query'?nativeSelection.extend({queryKey:z.string(),input:z.unknown()}).strict().parse(req.body)
+          :nativeSelection.extend({commandKey:z.string(),command:applicationCommandSchema}).strict().parse(req.body)
+        const execution=await resolveNativeApplicationModuleExecution(req,String(req.params.workspaceId),body.assistantId)
+        const result=mode==='query'?await options.service.query(execution,body.moduleKey,(body as {queryKey:string}).queryKey,(body as {input:unknown}).input)
+          :await options.service[mode](execution,body.moduleKey,(body as {commandKey:string}).commandKey,(body as {command:import('@use-brian/shared').ApplicationCommand}).command)
+        committed=mode==='command';await execution.security.authority.assertCurrent();res.json(result)
+      }catch(error){
+        const code=error instanceof z.ZodError?'invalid_value':error instanceof AuthorityChangedError?'grant_revoked':error instanceof ApplicationPlatformError?error.code:'access_unavailable'
+        const effect=committed?'committed':error instanceof ApplicationPlatformError?error.effect:error instanceof AuthorityChangedError&&error.operationMayHaveExecuted?'uncertain':'none'
+        res.status(code==='authentication_required'?401:code==='invalid_value'?400:code==='operation_not_available'?404:code.endsWith('conflict')||code==='module_draining'||code==='module_disabled'?409:403).json({error:code,effect,retrySafe:!committed&&error instanceof ApplicationPlatformError&&error.retrySafe})
+      }
+    }
+    router.post(`${base}/modules/query`,nativeEndpoint('query'))
+    router.post(`${base}/modules/command`,nativeEndpoint('command'))
+    router.post(`${base}/modules/reconcile`,nativeEndpoint('reconcile'))
+    router.post(`${base}/modules/mcp`,async(req,res)=>{
+      try{const selection=nativeSelection.parse(req.query),execution=await resolveNativeApplicationModuleExecution(req,String(req.params.workspaceId),selection.assistantId)
+        await serveStatelessMcp(req,res,buildNativeApplicationModuleMcpTools(options.service,execution,selection.moduleKey),'use-brian-native-module')
+      }catch(error){if(res.headersSent)return;const code=error instanceof z.ZodError?'invalid_value':error instanceof ApplicationPlatformError?error.code:'access_unavailable';res.status(code==='authentication_required'?401:code==='invalid_value'?400:403).json({error:code,effect:'none',retrySafe:false})}
+    })
     router.post(`${base}/schemas/:schemaId/preview`,manage((req,actor,workspace) =>
       management.service.previewSchema(actor,workspace,String(req.params.schemaId),req.body,requestSignal(req))))
     router.post(`${base}/schema-reviews/:reviewId/apply`,manage((req,actor,workspace) =>
@@ -190,7 +215,7 @@ export function applicationPlatformRoutes(options: ApplicationRoutesOptions): Ro
         if (error instanceof ApplicationPlatformError) {
           if (error instanceof ApplicationHomeBudgetExceeded) { res.status(429).json({ error: error.code, effect: error.effect, retrySafe: false }); return }
           const status = error.code === 'authentication_required' ? 401 : ['access_unavailable','grant_revoked'].includes(error.code) ? 403
-            : error.code === 'operation_not_available' ? 404 : error.code.endsWith('conflict') ? 409 : 400
+            : error.code === 'operation_not_available' ? 404 : error.code.endsWith('conflict') || error.code === 'module_draining' || error.code === 'module_disabled' ? 409 : 400
           res.status(status).json({ error: error.code, effect: error.effect, retrySafe: error.retrySafe }); return
         }
         // No exception bodies/SQL/credential material enter the caller or log.
@@ -226,6 +251,11 @@ export function applicationPlatformRoutes(options: ApplicationRoutesOptions): Ro
       ...(req.query.beforeVersion ? { beforeVersion: req.query.beforeVersion } : {}) })))
   router.post('/:appId/records/:type/query', endpoint((req, execution) => options.service.query(execution,
     getApplicationExecutionBinding(execution)!.state.moduleKey, 'query', { type: req.params.type, query: req.body })))
+  router.post('/:appId/commands/:commandKey/reconcile', endpoint((req, execution) => {
+    const command = applicationCommandSchema.safeParse(req.body)
+    if (!command.success) throw new ApplicationPlatformError('invalid_value', 'The command envelope is invalid.')
+    return options.service.reconcile(execution, getApplicationExecutionBinding(execution)!.state.moduleKey, String(req.params.commandKey), command.data)
+  }))
   router.post('/:appId/commands/:commandKey', endpoint((req, execution) => {
     const command = applicationCommandSchema.safeParse(req.body)
     if (!command.success) throw new ApplicationPlatformError('invalid_value', 'The command envelope is invalid.')

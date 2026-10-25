@@ -83,6 +83,15 @@ optimistic permission widening or automatic retry. After dispatch, a disconnecte
 or cancelled write is uncertain. Reconcile using its idempotency key/receipt
 before deciding to retry. HTTP error bodies and transport exception details are
 never included in SDK errors.
+Use `client.reconcile(commandKey, originalCommand)` to check the exact original
+command under current access. It returns an admitted saved receipt as `applied`
+or leaves the result `uncertain`; it never executes the handler. App/service/Home
+MCP exposes `applicationReconcile`. Native sessions use the separate
+`modules/reconcile` route or `nativeModuleReconcile`, as described in the OSS guide.
+Lifecycle refusals retain `module_draining` or `module_disabled` (HTTP 409),
+effect `none` and `retrySafe: false`. An effectful COMMIT acknowledgement failure
+remains `outcome_uncertain`.
+
 Credential suppliers receive optional call options containing the operation's
 AbortSignal. Cancellation while waiting for browser, service or delegated
 credentials rejects promptly before dispatch with effect `none`. Late credential

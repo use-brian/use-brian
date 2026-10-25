@@ -12,23 +12,36 @@ import { getApplicationExecutionBinding, runApplicationTransaction } from './exe
 import { z } from 'zod'
 import { toJsonSchemaCompat } from '@modelcontextprotocol/sdk/server/zod-json-schema-compat.js'
 
-function stable(value: unknown): string {
+function stable(value: unknown, wire = false): string {
   if (value === null || typeof value !== 'object') return JSON.stringify(value)
-  if (Array.isArray(value)) return `[${value.map(stable).join(',')}]`
-  return `{${Object.entries(value).sort(([left], [right]) => left.localeCompare(right))
-    .map(([key, item]) => `${JSON.stringify(key)}:${stable(item)}`).join(',')}}`
+  if (Array.isArray(value)) return `[${value.map(item => stable(item, wire)).join(',')}]`
+  return `{${Object.entries(value).sort(([left], [right]) => wire ? (left < right ? -1 : left > right ? 1 : 0) : left.localeCompare(right))
+    .map(([key, item]) => `${JSON.stringify(key)}:${stable(item, wire)}`).join(',')}}`
 }
 const hash = (value: unknown) => createHash('sha256').update(stable(value)).digest('hex')
 
+/** Snapshot wire input before any handler transform; leave actor/lock hashes stable. */
+function commandFingerprint(command: ApplicationCommand): string {
+  return `wire-v1:${createHash('sha256').update(stable({
+    input: command.input, expectedVersion: command.expectedVersion ?? null,
+  }, true)).digest('hex')}`
+}
+
+
 export class ApplicationPlatformService {
-  readonly registry: ReturnType<typeof defineApplicationModules<PoolClient>>
+  readonly #registry: ReturnType<typeof defineApplicationModules<PoolClient>>
   constructor(modules: readonly ApplicationModuleDefinition<PoolClient>[],
     private readonly pool: Pool = getAppPool(), existing: WorkspaceModuleRegistry = WORKSPACE_MODULES) {
-    this.registry = defineApplicationModules(modules, existing)
+    this.#registry = defineApplicationModules(modules, existing)
+  }
+
+  /** Inspection cannot replace definitions in the live dispatcher. */
+  get registry(): ReturnType<typeof defineApplicationModules<PoolClient>> {
+    return { workspaceModules: this.#registry.workspaceModules, applications: new Map(this.#registry.applications) }
   }
 
   private module(key: string) {
-    const module = this.registry.applications.get(key)
+    const module = this.#registry.applications.get(key)
     if (!module) throw new ApplicationPlatformError('operation_not_available', 'The operation is unavailable.')
     return module
   }
@@ -38,7 +51,7 @@ export class ApplicationPlatformService {
     if (!binding) throw new ApplicationPlatformError('authentication_required', 'Application authentication is required.')
     const module = this.module(binding.state.moduleKey)
     return this.transaction(execution, async transaction => {
-      const state = await lockWorkspaceModule(transaction, execution.security.access.workspaceId, module.key, this.registry.workspaceModules, { kind: 'application' })
+      const state = await lockWorkspaceModule(transaction, execution.security.access.workspaceId, module.key, this.#registry.workspaceModules, { kind: 'application' })
       requireWorkspaceModuleAdmission(state, 'read')
       const declarations = module.resolveResources ? await module.resolveResources({ execution, transaction, idempotencyKey: '', afterCommit: () => {
         throw new ApplicationPlatformError('operation_not_available', 'A catalog cannot schedule effects.')
@@ -68,13 +81,14 @@ export class ApplicationPlatformService {
   async query(execution: ExecutionContext, moduleKey: string, queryKey: string, rawInput: unknown): Promise<unknown> {
     const application = getApplicationExecutionBinding(execution)
     if (application && application.state.moduleKey !== moduleKey) throw new ApplicationPlatformError('access_unavailable', 'The module is unavailable.')
-    const module = this.module(moduleKey), query = module.queries[queryKey]
+    const module = this.module(moduleKey)
+    const query = Object.hasOwn(module.queries, queryKey) ? module.queries[queryKey] : undefined
     if (!query) throw new ApplicationPlatformError('operation_not_available', 'The operation is unavailable.')
     const parsed = query.input.safeParse(rawInput)
     if (!parsed.success) throw new ApplicationPlatformError('invalid_value', 'The query input is invalid.')
     return this.transaction(execution, async (transaction, afterCommit) => {
       const context = { execution, transaction, idempotencyKey: '', afterCommit }
-      const state = await lockWorkspaceModule(transaction, execution.security.access.workspaceId, moduleKey, this.registry.workspaceModules, application ? { kind: 'application' } : undefined)
+      const state = await lockWorkspaceModule(transaction, execution.security.access.workspaceId, moduleKey, this.#registry.workspaceModules, application ? { kind: 'application' } : undefined)
       requireWorkspaceModuleAdmission(state, 'read')
       await query.authorize(context, parsed.data)
       const result = await query.execute(context, parsed.data)
@@ -84,42 +98,89 @@ export class ApplicationPlatformService {
     })
   }
 
-  async command(execution: ExecutionContext, moduleKey: string, commandKey: string, rawCommand: ApplicationCommand): Promise<ApplicationOperationReceipt> {
+  /** Read the canonical saved outcome without re-executing an uncertain command. */
+  async reconcile(execution: ExecutionContext, moduleKey: string, commandKey: string, rawCommand: ApplicationCommand): Promise<
+    { state: 'applied'; receipt: ApplicationOperationReceipt } | { state: 'uncertain' }> {
     const application = getApplicationExecutionBinding(execution)
-    if (execution.surface.readOnly || application && application.state.moduleKey !== moduleKey) throw new ApplicationPlatformError('access_unavailable', 'The operation is unavailable.')
-    if (application && !applicationAuthorityAllowsOperation(application.state.layers, `command:${commandKey}`)) {
+    if (execution.surface.readOnly || application && (application.state.moduleKey !== moduleKey
+      || !applicationAuthorityAllowsOperation(application.state.layers, `command:${commandKey}`))) {
       throw new ApplicationPlatformError('access_unavailable', 'The operation is unavailable.')
     }
-    const module = this.module(moduleKey), handler = module.commands[commandKey]
+    const module = this.module(moduleKey)
+    const handler = Object.hasOwn(module.commands, commandKey) ? module.commands[commandKey] : undefined
     if (!handler) throw new ApplicationPlatformError('operation_not_available', 'The operation is unavailable.')
     const command = applicationCommandSchema.safeParse(rawCommand)
     if (!command.success) throw new ApplicationPlatformError('invalid_value', 'The command envelope is invalid.')
+    const requestHash = commandFingerprint(command.data)
     const input = handler.input.safeParse(command.data.input)
     if (!input.success) throw new ApplicationPlatformError('invalid_value', 'The command input is invalid.')
     const workspaceId = execution.security.access.workspaceId, actorUserId = execution.security.access.userId
     const actorKey = hash(application ? { kind: 'application', appId: application.state.appId, workspaceId,
       principal: application.state.principal, serviceUserId: application.state.serviceUserId ?? null, assistant: execution.assistant }
       : { identity: execution.identity, assistant: execution.assistant, actorUserId })
-    const requestHash = hash({ input: input.data, expectedVersion: command.data.expectedVersion ?? null })
+    const identity = [workspaceId, moduleKey, commandKey, actorKey, command.data.idempotencyKey]
+    return this.transaction(execution, async transaction => {
+      const state = await lockWorkspaceModule(transaction, workspaceId, moduleKey, this.#registry.workspaceModules,
+        application ? { kind: 'application' } : undefined)
+      requireWorkspaceModuleAdmission(state, 'existing_recovery')
+      await transaction.query("SELECT set_config('app.application_command_key',$1,true),set_config('app.deployed_application_module',$2,true),set_config('app.v2_assistant_id',$3,true)", [commandKey,moduleKey,execution.assistant.id])
+      const context: ApplicationOperationContext<PoolClient> = { execution, transaction, idempotencyKey: command.data.idempotencyKey,
+        afterCommit: () => { throw new ApplicationPlatformError('operation_not_available', 'Reconciliation cannot schedule effects.') },
+        ...(command.data.expectedVersion ? { expectedVersion: command.data.expectedVersion } : {}),
+        ...(command.data.correlationKey ? { correlationKey: command.data.correlationKey } : {}) }
+      await handler.authorize(context, input.data)
+      const row = (await transaction.query<{ id: string; request_hash: string; resources: ApplicationResourceRef[] }>(
+        `SELECT id,request_hash,resources FROM application_operation_receipts
+         WHERE workspace_id=$1 AND module_key=$2 AND operation_key=$3 AND actor_key=$4 AND idempotency_key=$5`, identity)).rows[0]
+      if (!row || !row.request_hash.startsWith('wire-v1:')) return { state: 'uncertain' as const }
+      if (row.request_hash !== requestHash) throw new ApplicationPlatformError('record_version_conflict', 'The idempotency key belongs to different input.')
+      await handler.authorizeResult(context, row.resources)
+      await handler.authorize(context, input.data)
+      return { state: 'applied' as const, receipt: { id: row.id, idempotencyKey: command.data.idempotencyKey,
+        effect: 'committed' as const, resources: row.resources } }
+    }, false, hash(identity))
+  }
+
+  async command(execution: ExecutionContext, moduleKey: string, commandKey: string, rawCommand: ApplicationCommand): Promise<ApplicationOperationReceipt> {
+    const application = getApplicationExecutionBinding(execution)
+    if (execution.surface.readOnly || application && application.state.moduleKey !== moduleKey) throw new ApplicationPlatformError('access_unavailable', 'The operation is unavailable.')
+    if (application && !applicationAuthorityAllowsOperation(application.state.layers, `command:${commandKey}`)) {
+      throw new ApplicationPlatformError('access_unavailable', 'The operation is unavailable.')
+    }
+    const module = this.module(moduleKey)
+    const handler = Object.hasOwn(module.commands, commandKey) ? module.commands[commandKey] : undefined
+    if (!handler) throw new ApplicationPlatformError('operation_not_available', 'The operation is unavailable.')
+    const command = applicationCommandSchema.safeParse(rawCommand)
+    if (!command.success) throw new ApplicationPlatformError('invalid_value', 'The command envelope is invalid.')
+    const requestHash = commandFingerprint(command.data)
+    const input = handler.input.safeParse(command.data.input)
+    if (!input.success) throw new ApplicationPlatformError('invalid_value', 'The command input is invalid.')
+    const workspaceId = execution.security.access.workspaceId, actorUserId = execution.security.access.userId
+    const actorKey = hash(application ? { kind: 'application', appId: application.state.appId, workspaceId,
+      principal: application.state.principal, serviceUserId: application.state.serviceUserId ?? null, assistant: execution.assistant }
+      : { identity: execution.identity, assistant: execution.assistant, actorUserId })
     const identity = [workspaceId, moduleKey, commandKey, actorKey, command.data.idempotencyKey]
     return this.transaction(execution, async (transaction, afterCommit) => {
       const context: ApplicationOperationContext<PoolClient> = { execution, transaction, afterCommit,
         idempotencyKey: command.data.idempotencyKey,
         ...(command.data.expectedVersion ? { expectedVersion: command.data.expectedVersion } : {}),
         ...(command.data.correlationKey ? { correlationKey: command.data.correlationKey } : {}) }
-      const state = await lockWorkspaceModule(transaction, workspaceId, moduleKey, this.registry.workspaceModules, application ? { kind: 'application' } : undefined)
-      if (application) await transaction.query("SELECT set_config('app.application_command_key',$1,true)", [commandKey])
+      const state = await lockWorkspaceModule(transaction, workspaceId, moduleKey, this.#registry.workspaceModules, application ? { kind: 'application' } : undefined)
+      await transaction.query("SELECT set_config('app.application_command_key',$1,true),set_config('app.deployed_application_module',$2,true),set_config('app.v2_assistant_id',$3,true)", [commandKey,moduleKey,execution.assistant.id])
       await handler.authorize(context, input.data)
       const existing = await transaction.query<{ id: string; request_hash: string; resources: ApplicationResourceRef[] }>(
         `SELECT id,request_hash,resources FROM application_operation_receipts
          WHERE workspace_id=$1 AND module_key=$2 AND operation_key=$3 AND actor_key=$4 AND idempotency_key=$5`, identity)
       if (existing.rows[0]) {
         requireWorkspaceModuleAdmission(state, 'existing_recovery')
+        if (!existing.rows[0].request_hash.startsWith('wire-v1:')) {
+          throw new ApplicationPlatformError('outcome_uncertain', 'The saved request cannot be verified. Use the application recovery path before retrying.', 'uncertain')
+        }
         if (existing.rows[0].request_hash !== requestHash) throw new ApplicationPlatformError('record_version_conflict', 'The idempotency key belongs to different input.')
         await handler.authorizeResult(context, existing.rows[0].resources)
         return { id: existing.rows[0].id, idempotencyKey: command.data.idempotencyKey, effect: 'committed', resources: existing.rows[0].resources }
       }
-      requireWorkspaceModuleAdmission(state, 'new_work')
+      requireWorkspaceModuleAdmission(state, handler.operationClass ?? 'new_work')
       const resources = applicationResourceRefSchema.array().max(100).parse(await handler.execute(context, input.data))
       if (resources.some(resource => resource.workspaceId !== workspaceId)) throw new ApplicationPlatformError('access_unavailable', 'The command returned an unavailable resource.')
       await handler.authorizeResult(context, resources)

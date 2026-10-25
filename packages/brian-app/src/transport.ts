@@ -30,7 +30,7 @@ export function appOAuthToken(token: unknown): string {
   return token
 }
 const safeCodes = new Set(['invalid_schema','invalid_value','schema_version_conflict','record_version_conflict',
-  'operation_not_available','access_unavailable','authentication_required','grant_revoked','source_unavailable','outcome_uncertain'])
+  'operation_not_available','access_unavailable','authentication_required','grant_revoked','source_unavailable','module_draining','module_disabled','outcome_uncertain'])
 async function readResponse(response: Response, effectful: boolean, signal?: AbortSignal): Promise<unknown> {
   let body: unknown
   try { body = await response.json() } catch { throw new ApplicationSdkError(signal?.aborted ? 'cancelled' : 'invalid_response', effectful ? 'uncertain' : 'none', false, response.status, !!signal?.aborted) }

@@ -137,6 +137,48 @@ provider QA and independent-source adoption remain owed.
 Cancellation while consuming an effect response remains uncertain. Already-aborted
 schema operations never invoke their injected deployment port.
 
+## Registered operation names
+
+Only explicitly registered own operation keys are callable. An unknown query,
+command or reconciliation key returns `operation_not_available` when the caller
+passes the existing outer authentication, module and action-admission checks; the
+application HTTP transport maps that code to 404. Otherwise the existing access
+refusal takes precedence. Prototype-property names do not become operations through JavaScript
+object inheritance. This refusal has no business effect; choose a key from the
+current authorized catalog instead of retrying an unknown name.
+
+### Command retries and normalized input
+
+Reuse the same idempotency key with the same JSON input and expected version.
+Object key ordering does not matter; array ordering and different supplied values
+do matter, even if validation normalizes them to the same value. Correlation keys
+can change without creating a new business command. A changed request returns
+`record_version_conflict` after current admission checks.
+
+Receipts created before wire-input fingerprinting cannot always prove which input
+ran. Their command retries return `outcome_uncertain`; reconciliation returns
+`uncertain`. They do not run the command again. Keep the original key and use the
+application's existing recovery path; a new key is not proof that retrying is safe.
+
+### Checking an uncertain command
+
+Call `client.reconcile(commandKey, originalCommand)` with the original input,
+expected version and idempotency key under current access. It uses
+`POST /api/applications/:appId/commands/:commandKey/reconcile`; app/service/Home
+MCP exposes `applicationReconcile`. An admitted saved receipt confirms `applied`;
+`uncertain` does not permit automatic retry. Reconciliation never executes the
+handler or schedules its post-commit callbacks.
+
+Native members use `POST /api/applications/workspaces/:workspaceId/modules/reconcile`
+with `{ moduleKey, commandKey, command, assistantId? }`, or `nativeModuleReconcile`.
+These require a current native session; the app SDK helper does not authenticate
+that audience. Current actor, assistant, resource and field restrictions still apply.
+
+Lifecycle refusals preserve `module_draining` or `module_disabled` (HTTP 409),
+effect `none` and `retrySafe: false` across HTTP, MCP and `ApplicationSdkError`.
+An interrupted effectful COMMIT remains `outcome_uncertain`, even if a later error
+looks like a lifecycle refusal.
+
 ### Existing lifecycle identity
 
 A deployed module can add its application operations to a lifecycle-only entry in

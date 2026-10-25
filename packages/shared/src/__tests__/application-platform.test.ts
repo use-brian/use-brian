@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest'
 import { ApplicationPlatformError, applicationClientInputSchema, applicationCommandSchema, applicationDecimalSchema,
-  applicationDecimalAdd, applicationDecimalCompare, applicationDecimalText, applicationGrantInputSchema, applicationQuerySchema, applicationResourceRefSchema, applicationResourceSchema } from '../application-platform.js'
+  applicationDecimalAdd, applicationDecimalCompare, applicationDecimalText, applicationGrantInputSchema, applicationJsonSchema, applicationQuerySchema, applicationResourceRefSchema, applicationResourceSchema } from '../application-platform.js'
 
 describe('[COMP:shared/application-platform] application wire boundaries', () => {
   const ref = { workspaceId: '10000000-0000-4000-8000-000000000001', origin: { kind: 'native', moduleKey: 'operations' },
@@ -51,6 +51,31 @@ describe('[COMP:shared/application-platform] application wire boundaries', () =>
     expect(applicationCommandSchema.safeParse({ input: {}, idempotencyKey: '' }).success).toBe(false)
     expect(applicationCommandSchema.safeParse({ input: { amount: Infinity }, idempotencyKey: 'once' }).success).toBe(false)
     expect(applicationCommandSchema.safeParse({ input: { run: () => 1 }, idempotencyKey: 'once' }).success).toBe(false)
+  })
+  it('preserves every JSON own key through nested objects and arrays without changing prototypes', async () => {
+    const wire = JSON.parse('{"__proto__":{"marker":"top"},"constructor":2,"prototype":3,"nested":[{"__proto__":{"marker":"array"}},[{"value":{"__proto__":[{"constructor":{"prototype":"data"}}]}}]]}')
+    const prototypeKeys = Reflect.ownKeys(Object.prototype), arrayPrototypeKeys = Reflect.ownKeys(Array.prototype)
+    const parsed = applicationCommandSchema.parse({ idempotencyKey: 'all-wire-keys', input: wire }).input
+    expect(parsed).toEqual(wire)
+    expect(JSON.parse(JSON.stringify(parsed))).toEqual(wire)
+    expect((await applicationCommandSchema.parseAsync({ idempotencyKey: 'async-wire-keys', input: wire })).input).toEqual(wire)
+    expect(Object.hasOwn(parsed as object, '__proto__')).toBe(true)
+    const inspect = (value: unknown): void => {
+      if (!value || typeof value !== 'object') return
+      expect(Object.getPrototypeOf(value)).toBe(Array.isArray(value) ? Array.prototype : Object.prototype)
+      for (const nested of Object.values(value)) inspect(nested)
+    }
+    inspect(parsed)
+    expect(Reflect.ownKeys(Object.prototype)).toEqual(prototypeKeys)
+    expect(Reflect.ownKeys(Array.prototype)).toEqual(arrayPrototypeKeys)
+    expect(({} as { marker?: string }).marker).toBeUndefined()
+  })
+  it('still refuses non-JSON values even under an own __proto__ key', () => {
+    for (const value of [undefined, () => 1, Symbol('invalid'), 1n, NaN, Infinity, new Date(), new Map(), new Set()]) {
+      for (const input of [value, Object.fromEntries([['__proto__', value]]), [Object.fromEntries([['__proto__', value]])]]) {
+        expect(applicationJsonSchema.safeParse(input).success).toBe(false)
+      }
+    }
   })
   it('keeps uncertain effect state separate from safe retry', () => {
     const error = new ApplicationPlatformError('outcome_uncertain', 'Reconcile the saved receipt.', 'uncertain')

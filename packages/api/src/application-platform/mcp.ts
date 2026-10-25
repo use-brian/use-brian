@@ -61,6 +61,9 @@ export async function buildApplicationMcpTools(service: ApplicationPlatformServi
   if (catalog.commands.length) tools.push({ name: 'applicationCommand', description: 'Invoke a registered typed command once with an idempotency key and exact expected versions. Reconcile uncertain effects before retrying.',
     inputSchema: { commandKey: z.enum(catalog.commands as [string, ...string[]]), command: applicationCommandSchema },
     handler: invoke(input => service.command(execution, binding.state.moduleKey, String(input.commandKey), applicationCommandSchema.parse(input.command)), true) })
+  if (catalog.commands.length) tools.push({ name: 'applicationReconcile', description: 'Check the exact original command under current authority without executing it. An applied result returns its admitted saved receipt; uncertain does not permit an automatic retry.',
+    inputSchema: { commandKey: z.enum(catalog.commands as [string, ...string[]]), command: applicationCommandSchema },
+    handler: invoke(input => service.reconcile(execution, binding.state.moduleKey, String(input.commandKey), applicationCommandSchema.parse(input.command))) })
   return tools
 }
 
@@ -114,4 +117,19 @@ export function buildNativeApplicationManagementMcpTools(service:ApplicationMana
     inputSchema:{appId:z.string().uuid().optional()},handler:invoke(input=>service.overview(actorId,workspaceId,{...input,assistantId:execution.assistant.id}))},
     {name:'applicationManage',description:'Use the same native reviewed management commands as the human panel. Preview first and apply only an explicitly confirmed review. Uncertain writes require reconciliation, never automatic retry. Credential delivery returns a human-only link, never credential material.',
     inputSchema:{command:applicationManagementCommandSchema},handler:invoke(input=>service.executeCommand(actorId,workspaceId,input.command,{audience:'brian',assistantId:execution.assistant.id}),true)}]
+}
+
+/** Native member/Brian module profile, calling the same deployed handlers and canonical transactions. */
+export function buildNativeApplicationModuleMcpTools(service:ApplicationPlatformService,execution:ExecutionContext,moduleKey:string):BrainTool[] {
+ if(getApplicationExecutionBinding(execution)||execution.identity.kind!=='attended'||execution.identity.principal.kind!=='workspace_member')throw new ApplicationPlatformError('authentication_required','A native member session is required.')
+ const module=service.registry.applications.get(moduleKey)
+ if(!module)throw new ApplicationPlatformError('operation_not_available','The deployed module is unavailable.')
+ const invoke=applicationMcpInvoker(execution),tools:BrainTool[]=[]
+ if(module.application.queries.length)tools.push({name:'nativeModuleQuery',description:'Invoke one registered module query under your current member and assistant authority.',
+ inputSchema:{queryKey:z.enum(module.application.queries as [string,...string[]]),input:applicationJsonSchema},handler:invoke(input=>service.query(execution,moduleKey,String(input.queryKey),input.input))})
+ if(module.application.commands.length&&!execution.surface.readOnly)tools.push({name:'nativeModuleCommand',description:'Invoke one registered semantic module command with exact versions and an idempotency key. Reconcile uncertain effects before retrying.',
+ inputSchema:{commandKey:z.enum(module.application.commands as [string,...string[]]),command:applicationCommandSchema},handler:invoke(input=>service.command(execution,moduleKey,String(input.commandKey),applicationCommandSchema.parse(input.command)),true)})
+ if(module.application.commands.length&&!execution.surface.readOnly)tools.push({name:'nativeModuleReconcile',description:'Check the exact original module command under current member and assistant authority without executing it. An admitted saved receipt is applied; uncertain does not permit an automatic retry.',
+ inputSchema:{commandKey:z.enum(module.application.commands as [string,...string[]]),command:applicationCommandSchema},handler:invoke(input=>service.reconcile(execution,moduleKey,String(input.commandKey),applicationCommandSchema.parse(input.command)))})
+ return tools
 }

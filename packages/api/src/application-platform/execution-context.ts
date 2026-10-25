@@ -4,7 +4,7 @@ import { AsyncLocalStorage } from 'node:async_hooks'
 import type { Pool, PoolClient } from 'pg'
 import { createExecutionContext, intersectAccessCeilings, maxSensitivity, minSensitivity,
   type AccessCeiling, type ExecutionContext, type Sensitivity } from '@use-brian/core'
-import { ApplicationPlatformError } from '@use-brian/shared'
+import { ApplicationPlatformError, WorkspaceModuleError } from '@use-brian/shared'
 import { findAssistantById } from '../db/users.js'
 import { applyRLSGucs, rollbackAndRelease } from '../db/client.js'
 import { runWithAgentAccess } from '../db/agent-access-context.js'
@@ -208,6 +208,9 @@ export async function runApplicationTransaction<T>(pool: Pool, execution: Execut
       return value
     } catch (error) {
       if (commitStarted && effectful) throw new ApplicationPlatformError('outcome_uncertain', 'Reconcile the saved operation before retrying.', 'uncertain')
+      if (error instanceof WorkspaceModuleError && (error.code === 'module_draining' || error.code === 'module_disabled')) {
+        throw new ApplicationPlatformError(error.code, 'New work is unavailable in the current module state.', 'none', false)
+      }
       if (!(error instanceof ApplicationPlatformError)) {
         const code = (error as { code?: string })?.code
         if (code === '23505' || code === '40001' || code === '40P01') {
