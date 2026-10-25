@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest'
 import { z } from 'zod'
-import { WORKSPACE_MODULES } from '@use-brian/shared'
+import { WORKSPACE_MODULES, WORKSPACE_MODULE_OPERATION_CLASSES } from '@use-brian/shared'
 import { defineApplicationModules, validateApplicationResourceCatalog, type ApplicationModuleDefinition } from '../contracts.js'
 
 function module(key: string, dependencies: string[] = []): ApplicationModuleDefinition<unknown> {
@@ -84,6 +84,31 @@ describe('[COMP:security/application-access] deployed application module registr
     expect(validateApplicationResourceCatalog('one', [resource])[0].schemaVersion).toHaveLength(128)
     expect(() => validateApplicationResourceCatalog('one', [{ ...resource, schemaVersion: 'a'.repeat(129) }])).toThrow()
   })
+  it.each(WORKSPACE_MODULE_OPERATION_CLASSES)('retains the trusted %s command lifecycle classification', operationClass => {
+    const definition = module('classified')
+    Object.assign(definition.commands.create, { operationClass })
+    const registered = defineApplicationModules([definition], WORKSPACE_MODULES).applications.get('classified')!
+    expect(registered.commands.create).toMatchObject({ operationClass })
+    expect(registered.application).not.toHaveProperty('operationClass')
+    expect(registered.application.commands).toEqual(['create'])
+  })
+  it.each([null, false, 0, '', 'recovery', 'EXISTING_RECOVERY', {}])('refuses an invalid command lifecycle class %j', operationClass => {
+    const definition = module('classified')
+    Object.assign(definition.commands.create, { operationClass })
+    expect(() => defineApplicationModules([definition], WORKSPACE_MODULES))
+      .toThrowError(expect.objectContaining({ code: 'invalid_schema' }))
+  })
+  it.each([undefined, ...WORKSPACE_MODULE_OPERATION_CLASSES])('owns the command class %s independently of later caller or registry mutation', operationClass => {
+    const definition = module('classified')
+    if (operationClass !== undefined) Object.assign(definition.commands.create, { operationClass })
+    const registered = defineApplicationModules([definition], WORKSPACE_MODULES).applications.get('classified')!
+    Object.assign(definition.commands.create, { operationClass: 'existing_recovery' })
+    expect(registered.commands.create).toHaveProperty('execute', definition.commands.create.execute)
+    expect(Reflect.get(registered.commands.create, 'operationClass')).toBe(operationClass)
+    expect(() => Object.assign(registered.commands.create, { operationClass: 'existing_recovery' })).toThrow(TypeError)
+    expect(Object.isFrozen(definition.commands.create)).toBe(false)
+  })
+
   it('captures handler properties without freezing the caller or schema internals', async () => {
     const definition = module('owned')
     const originalCommand = definition.commands.create.execute

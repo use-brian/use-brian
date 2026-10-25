@@ -1,7 +1,7 @@
 /** Deployed modules compose with the existing lifecycle registry. [COMP:security/application-access] */
 import { z } from 'zod'
-import { ApplicationPlatformError, applicationResourceSchema, defineWorkspaceModuleRegistry,
-  type ApplicationModuleCatalog, type ApplicationResourceDefinition, type ApplicationResourceRef, type WorkspaceModuleDefinition, type WorkspaceModuleRegistry } from '@use-brian/shared'
+import { ApplicationPlatformError, applicationResourceSchema, defineWorkspaceModuleRegistry, WORKSPACE_MODULE_OPERATION_CLASSES,
+  type ApplicationModuleCatalog, type ApplicationResourceDefinition, type ApplicationResourceRef, type WorkspaceModuleDefinition, type WorkspaceModuleOperationClass, type WorkspaceModuleRegistry } from '@use-brian/shared'
 import type { ExecutionContext } from '../security/execution-context.js'
 
 export interface ApplicationOperationContext<Transaction> {
@@ -22,6 +22,8 @@ export interface ApplicationRegisteredOperation<Transaction> {
 }
 export interface ApplicationRegisteredCommand<Transaction> extends Omit<ApplicationRegisteredOperation<Transaction>, 'execute' | 'authorizeResult'> {
   eventKey: string
+  /** Trusted lifecycle admission only; the handler still proves current resource authority. */
+  operationClass?: WorkspaceModuleOperationClass
   /** Receipts retain only canonical refs, never cached business payloads. */
   execute(context: ApplicationOperationContext<Transaction>, input: unknown): Promise<ApplicationResourceRef[]>
   /** Reauthorize both fresh and replayed refs under current record/field/source rights. */
@@ -92,6 +94,10 @@ export function defineApplicationModules<Transaction>(modules: readonly Applicat
     const resources = validateApplicationResourceCatalog(module.key, module.application.resources)
     if (module.resolveResources !== undefined && typeof module.resolveResources !== 'function') {
       throw new ApplicationPlatformError('invalid_schema', 'A deployed resource reader is required.')
+    }
+    if (Object.values(module.commands).some(command => command.operationClass !== undefined
+      && !WORKSPACE_MODULE_OPERATION_CLASSES.includes(command.operationClass))) {
+      throw new ApplicationPlatformError('invalid_schema', 'Invalid command lifecycle classification.')
     }
     if (Object.values(module.commands).some(command => typeof command.authorizeResult !== 'function'
       || !module.application.events.includes(command.eventKey))) {
