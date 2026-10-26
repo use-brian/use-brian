@@ -7,9 +7,9 @@ const custom = (id: string, status: CustomHomeApp["status"], renderable: boolean
 } as CustomHomeApp);
 
 describe("[COMP:app-web/workspace-apps] App store discovery", () => {
-  it("includes Chat and selected apps while leaving other discovery in Studio", () => {
+  it("leaves Chat to Home and includes other selected apps while leaving discovery in Studio", () => {
     const ids = workspaceAppCatalogue(["crm", "chat", "page"], []).map((app) => app.id);
-    expect(ids).toEqual(["crm", "chat", "page"]);
+    expect(ids).toEqual(["crm", "page"]);
     expect(ids).not.toContain("office");
     expect(ids).not.toContain("workflow");
     expect(ids).not.toContain("organization");
@@ -17,11 +17,11 @@ describe("[COMP:app-web/workspace-apps] App store discovery", () => {
   });
 
   it("uses the canonical compact defaults and ignores unknown or unselected entries", () => {
-    expect(workspaceAppCatalogue([], []).map(app => app.id)).toEqual(["chat", "page", "browsers"]);
+    expect(workspaceAppCatalogue([], []).map(app => app.id)).toEqual(["page", "browsers"]);
     const apps = workspaceAppCatalogue(["chat", "custom:missing", "custom:pending"], [
       custom("unselected", "active", true), custom("pending", "needs_consent", false),
     ]);
-    expect(apps.map(app => app.id)).toEqual(["chat"]);
+    expect(apps).toEqual([]);
   });
 
   it("never exposes disabled, removed or unapproved custom entries from stale configuration", () => {

@@ -59,16 +59,20 @@ describe("[COMP:app-web/workspace-app-rail] Chat Home and App store", () => {
     expect(more.compareDocumentPosition(divider) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
   });
 
-  it("keeps Home on Chat while another mini-app is active", async () => {
+  it.each([false, true])("keeps Chat only in Home while another mini-app is active (mobile: %s)", async (mobile) => {
     localStorage.setItem("doc:operator-app:workspace-a", "tasks");
-    await render();
+    await render(mobile);
     expect(railLink(en.workspaceNav.homeAria)?.getAttribute("href")).toBe("/w/workspace-a/chat");
     expect(railLink(en.workspaceNav.homeAria)?.hasAttribute("aria-current")).toBe(false);
     await click(button(en.workspaceNav.more));
-    expect(document.querySelector('a[aria-label="Open Chat"]')?.getAttribute("href")).toBe("/w/workspace-a/chat");
+    expect(document.querySelector('a[aria-label="Open Chat"]')).toBeNull();
     expect(document.querySelector('button[aria-label="Pin Chat"]')).toBeNull();
     expect(document.querySelector('a[aria-label="Open Workflow"]')).toBeNull();
     expect(document.querySelector('a[aria-label="Open Organization"]')).toBeNull();
+    await click(textButton(en.workspaceNav.reorderMenu));
+    expect(menuIds()).toEqual(["tasks", "page", "crm", "office"]);
+    expect(document.querySelector('button[aria-label="Move Chat up"]')).toBeNull();
+    expect(button("Move Tasks up").disabled).toBe(true);
   });
 
   it.each([false, true])("pins every selected app, restores them after reload and unpins independently (mobile: %s)", async (mobile) => {
@@ -180,7 +184,7 @@ describe("[COMP:app-web/workspace-app-rail] Chat Home and App store", () => {
     const close = vi.fn(); window.addEventListener("doc:sidebar-close", close);
     try {
       await render(true); await click(button(en.workspaceNav.more));
-      expect(menuIds()).toEqual(["chat", "page", "browsers"]);
+      expect(menuIds()).toEqual(["page", "browsers"]);
       expect(document.querySelector('[aria-label="Open Tasks"]')).toBeNull();
       const explore = [...document.querySelectorAll<HTMLAnchorElement>('a')].find(link => link.textContent?.includes(en.workspaceNav.exploreMore))!;
       expect(explore.getAttribute('href')).toBe('/w/workspace-a/studio/mini-apps');
@@ -197,17 +201,17 @@ describe("[COMP:app-web/workspace-app-rail] Chat Home and App store", () => {
     const close = vi.fn(); window.addEventListener("doc:sidebar-close", close);
     try {
       await click(textButton(en.workspaceNav.reorderMenu));
-      expect(button('Move Chat up').disabled).toBe(true);
+      expect(button('Move Tasks up').disabled).toBe(true);
       expect(button('Move CRM down').disabled).toBe(true);
       await click(button('Move CRM up'));
-      expect(menuIds()).toEqual(['chat', 'crm', 'tasks']);
-      expect(JSON.parse(localStorage.getItem(miniAppMenuOrderKey('https://api.example.test', 'person-a', workspaceId))!)).toEqual(['chat', 'crm', 'tasks']);
+      expect(menuIds()).toEqual(['crm', 'tasks']);
+      expect(JSON.parse(localStorage.getItem(miniAppMenuOrderKey('https://api.example.test', 'person-a', workspaceId))!)).toEqual(['crm', 'tasks']);
       expect([...container.querySelectorAll('a')].filter(link => ['CRM', 'Tasks'].includes(link.getAttribute('aria-label') ?? '')).map(link => link.getAttribute('aria-label'))).toEqual(['CRM', 'Tasks']);
       expect(close).not.toHaveBeenCalled();
       await click(textButton(en.workspaceNav.done));
       await click(textButton(en.workspaceNav.reorderMenu));
       await click(textButton(en.workspaceNav.useWorkspaceOrder));
-      expect(menuIds()).toEqual(['chat', 'tasks', 'crm']);
+      expect(menuIds()).toEqual(['tasks', 'crm']);
       expect(localStorage.getItem(miniAppMenuOrderKey('https://api.example.test', 'person-a', workspaceId))).toBeNull();
     } finally { window.removeEventListener("doc:sidebar-close", close); }
   });
@@ -217,11 +221,11 @@ describe("[COMP:app-web/workspace-app-rail] Chat Home and App store", () => {
     localStorage.setItem(key, '["https://outside.example.test", "crm", "chat", "crm", "tasks"]');
     homeApps = ['chat', 'tasks', 'crm'];
     await render(); await click(button(en.workspaceNav.more));
-    expect(menuIds()).toEqual(['crm', 'chat', 'tasks']);
+    expect(menuIds()).toEqual(['crm', 'tasks']);
     homeApps = ['chat', 'tasks', 'page']; await render();
-    expect(menuIds()).toEqual(['chat', 'tasks', 'page']);
+    expect(menuIds()).toEqual(['tasks', 'page']);
     await act(async () => { localStorage.setItem(key, '["page","chat"]'); window.dispatchEvent(new StorageEvent('storage', { key })); });
-    expect(menuIds()).toEqual(['page', 'chat', 'tasks']);
+    expect(menuIds()).toEqual(['page', 'tasks']);
     expect(document.querySelector('a[href="https://outside.example.test"]')).toBeNull();
   });
 
@@ -230,12 +234,12 @@ describe("[COMP:app-web/workspace-app-rail] Chat Home and App store", () => {
     await render(); await click(button(en.workspaceNav.more));
     expect(menuIds()[0]).toBe('crm');
     workspaceId = 'workspace-b'; await render(); await click(button(en.workspaceNav.more));
-    expect(menuIds()[0]).toBe('chat');
+    expect(menuIds()[0]).toBe('tasks');
     state.user.id = 'person-b';
     await act(async () => root.unmount()); root = createRoot(container);
     localStorage.setItem(miniAppMenuOrderKey('https://api.example.test', 'person-b', workspaceId), '{broken');
     await render(); await click(button(en.workspaceNav.more));
-    expect(menuIds()[0]).toBe('chat');
+    expect(menuIds()[0]).toBe('tasks');
   });
 });
 

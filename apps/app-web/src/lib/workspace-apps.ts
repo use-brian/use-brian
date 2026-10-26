@@ -22,7 +22,7 @@ export function workspaceAppCatalogue(
 ): WorkspaceApp[] {
   const available = new Map<string, WorkspaceApp>();
   for (const id of OPERATOR_APP_KEYS) {
-    available.set(id, { id });
+    if (id !== "chat") available.set(id, { id });
   }
   for (const custom of customApps) {
     if (custom.status === "active" && custom.renderable) {
