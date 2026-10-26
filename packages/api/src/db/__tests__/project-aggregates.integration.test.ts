@@ -1,6 +1,7 @@
 /** [COMP:api/project-aggregates] Real-schema counts with current department access. */
 import { randomUUID } from 'node:crypto'
-import { afterAll, describe, expect, it } from 'vitest'
+import { afterAll, describe, expect, it, vi } from 'vitest'
+import * as database from '../client.js'
 import { getAppPool, getPool, queryWithRLS } from '../client.js'
 import { projectAggregates, projectContent } from '../project-aggregates.js'
 
@@ -26,6 +27,27 @@ async function fixture() {
 }
 
 describe.skipIf(!local)('[COMP:api/project-aggregates] real PostgreSQL project overview', () => {
+  it('plans counts without reading payload tables or admitting unrelated memory ancestry', async () => {
+    const f = await fixture()
+    const observed = vi.spyOn(database, 'queryWithRLS')
+    let countSql: string, parameters: unknown[] | undefined
+    try {
+      await projectAggregates(f.userId, f.workspaceId, f.projectId)
+      ;[, countSql, parameters] = observed.mock.calls[0]!
+    } finally { observed.mockRestore() }
+    const explained = await queryWithRLS(f.userId, `EXPLAIN (FORMAT JSON) ${countSql!}`, parameters)
+    const serialized = JSON.stringify(explained.rows)
+    expect(serialized).not.toMatch(/"Relation Name":"(?:file_segments|transcript_segments|kb_chunks|session_messages)"/)
+    type Plan = { 'Relation Name'?: string; Filter?: string; Plans?: Plan[] }
+    const root = (explained.rows[0]['QUERY PLAN'] as Array<{ Plan: Plan }>)[0]!.Plan
+    const nodes = (node: Plan): Plan[] => [node, ...(node.Plans ?? []).flatMap(nodes)]
+    const memoryFilter = nodes(root).find(node => node['Relation Name'] === 'memories')?.Filter ?? ''
+    const projectFilter = memoryFilter.indexOf('= ANY (project_ids)')
+    const ancestryCheck = memoryFilter.indexOf('application_memory_field_ancestry_allows')
+    expect(projectFilter).toBeGreaterThanOrEqual(0)
+    expect(ancestryCheck).toBeGreaterThan(projectFilter)
+  })
+
   it('counts knowledge and Office with their real schemas and excludes General rows', async () => {
     const f = await fixture()
     const role = await queryWithRLS(f.userId, 'SELECT rolsuper,rolbypassrls FROM pg_roles WHERE rolname=current_user')

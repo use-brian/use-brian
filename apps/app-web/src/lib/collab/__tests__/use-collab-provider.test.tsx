@@ -58,8 +58,24 @@ beforeEach(() => {
   state.userId = "viewer-a"; state.apiOrigin = "http://api.example"; state.userListeners.clear();
   window.history.replaceState({}, "", "/w/00000000-0000-4000-8000-000000000001/p/page-a");
 });
-afterEach(async () => { if (root) await act(async () => root!.unmount()); root = null; });
+afterEach(async () => {
+  if (root) await act(async () => root!.unmount()); root = null;
+  Reflect.deleteProperty(window, "usebrianDesktop");
+});
 describe("[COMP:app-web/collab-provider] offline page lifecycle", () => {
+  it("starts the editor on the bundled desktop hash route with scoped persistence", async () => {
+    window.history.replaceState({}, "", "/renderer/index.html#/w/00000000-0000-4000-8000-000000000001/p/page-a");
+    Object.defineProperty(window, "usebrianDesktop", { configurable: true, value: { getAccessToken: () => token(state.userId) } });
+    await mount();
+    expect(latest.doc).not.toBeNull();
+    expect(latest.provider).not.toBeNull();
+    expect(state.attach).toHaveBeenCalledTimes(1);
+    expect(state.connect).toHaveBeenCalledTimes(1);
+    expect(state.persisted).toEqual([documentKey()]);
+    expect(documentKey()).toContain("00000000-0000-4000-8000-000000000001");
+    expect(await state.provider!.token()).toBe(`${DRAWING_PROTOCOL}${token("viewer-a")}`);
+  });
+
   it('advertises the protocol and keeps reload-required denial sticky across reconnects', async () => {
     await mount();
     expect(state.attach).toHaveBeenCalledTimes(1);

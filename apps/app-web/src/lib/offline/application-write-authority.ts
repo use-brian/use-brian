@@ -1,7 +1,7 @@
 /** Native outbox isolation and live replay admission. [COMP:app-web/application-authority-cache] */
 import { getValidAccessToken } from "@/lib/auth-fetch";
 import { workspaceIdFromPath } from "@/lib/connector-auto-expose";
-import { usesGatewayCredentials } from "@/lib/desktop-auth-source";
+import { isDesktopAuth, usesGatewayCredentials } from "@/lib/desktop-auth-source";
 import { getDictionary } from "@/lib/i18n/dictionaries";
 import { isLocale } from "@/lib/i18n/config";
 import { publicRuntimeConfig } from "@/lib/runtime-public-config";
@@ -25,7 +25,11 @@ export function offlineWriteUnavailable(): Error {
 /** Routing metadata only. The server authenticates every later read and mutation. */
 export function currentOfflineWriteAuthority(workspaceId?: string): OfflineWriteAuthority | null {
   const viewerId = getUserInfo()?.id;
-  const activeWorkspace = typeof window === "undefined" ? null : workspaceIdFromPath(window.location.pathname);
+  // The bundled renderer (and its dev server) routes after #, not in the
+  // outer file pathname. Browser fragments remain page-local anchors.
+  const activePath = typeof window === "undefined" ? "" : isDesktopAuth()
+    ? window.location.hash.slice(1).split(/[?#]/, 1)[0] : window.location.pathname;
+  const activeWorkspace = workspaceIdFromPath(activePath);
   const workspace = workspaceId ?? activeWorkspace;
   if (!viewerId || !workspace || activeWorkspace && activeWorkspace !== workspace) return null;
   return { viewerId, workspaceId: workspace, applicationId: "native",

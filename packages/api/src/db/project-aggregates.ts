@@ -1,32 +1,29 @@
 /** Project counts and records under canonical current-member policy. [COMP:api/project-aggregates] */
 import { queryWithRLS } from './client.js'
-import { SEARCH_SOURCE_SQL } from '../workspace-search/adapters.js'
+import { PROJECT_COUNT_SOURCE_SQL, PROJECT_SEARCH_SOURCE_SQL } from '../workspace-search/adapters.js'
 import type { WorkspaceSearchFamily, WorkspaceSearchTarget } from '@use-brian/shared'
 
 // Reuse each resource's canonical authorized projection instead of applying a
-// brain-row predicate to tables with different visibility columns. Count queries
-// let PostgreSQL prune unused text; content reads return bounded snippets.
-const SOURCES: Array<{ label: string; family: WorkspaceSearchFamily; prefix: string; table: string; projectColumn?: string }> = [
-  { label: 'memories', family: 'knowledge', prefix: 'memory', table: 'memories' },
-  { label: 'tasks', family: 'tasks', prefix: 'task', table: 'tasks' },
-  { label: 'files', family: 'files', prefix: 'file', table: 'workspace_files' },
-  { label: 'entities', family: 'records', prefix: 'entity', table: 'entities' },
-  { label: 'knowledge', family: 'knowledge', prefix: 'knowledge', table: 'knowledge_entries' },
-  { label: 'recordings', family: 'files', prefix: 'recording', table: 'recordings' },
-  { label: 'office', family: 'office', prefix: 'office', table: 'office_artifacts' },
-  { label: 'pages', family: 'pages', prefix: 'page', table: 'saved_views', projectColumn: 'project_id' },
-  { label: 'workflows', family: 'workflows', prefix: 'workflow', table: 'workflows', projectColumn: 'context_project_id' },
+// brain-row predicate to tables with different visibility columns. Counts omit
+// payload projection entirely; source predicates apply Project scope directly.
+const SOURCES: Array<{ label: string; family: WorkspaceSearchFamily; prefix: string }> = [
+  { label: 'memories', family: 'knowledge', prefix: 'memory' },
+  { label: 'tasks', family: 'tasks', prefix: 'task' },
+  { label: 'files', family: 'files', prefix: 'file' },
+  { label: 'entities', family: 'records', prefix: 'entity' },
+  { label: 'knowledge', family: 'knowledge', prefix: 'knowledge' },
+  { label: 'recordings', family: 'files', prefix: 'recording' },
+  { label: 'office', family: 'office', prefix: 'office' },
+  { label: 'pages', family: 'pages', prefix: 'page' },
+  { label: 'workflows', family: 'workflows', prefix: 'workflow' },
 ]
 
 const COUNTS_SQL = [
   ...SOURCES.map(source => `SELECT '${source.label}' AS label, count(*)::text AS count
-    FROM (${SEARCH_SOURCE_SQL[source.family]}) visible
-    JOIN ${source.table} project_row ON visible.key = '${source.prefix}:' || project_row.id::text
-    WHERE project_row.workspace_id = $1 AND ${source.projectColumn
-      ? `project_row.${source.projectColumn} = $3::uuid`
-      : 'project_row.project_ids @> ARRAY[$3::uuid]'}`),
+    FROM (${PROJECT_COUNT_SOURCE_SQL[source.family]}) visible
+    WHERE visible.source = '${source.prefix}'`),
   `SELECT 'episodes' AS label, count(*)::text AS count FROM episodes e
-    WHERE e.workspace_id=$1 AND e.project_ids @> ARRAY[$3::uuid]
+    WHERE e.workspace_id=$1 AND $3::uuid = ANY(e.project_ids)
       AND NOT e.scope_held
       AND department_row_allows((SELECT department_read_grants()),e.workspace_id,e.sensitivity,e.compartments,e.user_id)`,
   `SELECT 'goals' AS label, count(*)::text AS count FROM goals g
@@ -44,7 +41,7 @@ export async function projectAggregates(userId: string, workspaceId: string, pro
 
 export type ProjectContentView = 'work' | 'knowledge' | 'recent'
 const CONTENT_SOURCES = [...SOURCES,
-  { label: 'conversations', family: 'conversations' as const, prefix: 'conversation', table: 'sessions', projectColumn: 'context_project_id' },
+  { label: 'conversations', family: 'conversations' as const, prefix: 'conversation' },
 ]
 
 /** Canonical source policy is evaluated before text filtering and pagination. */
@@ -53,10 +50,8 @@ export async function projectContent(userId: string, workspaceId: string, projec
   const sources = CONTENT_SOURCES.filter(source => view === 'recent' ||
     (view === 'work' ? ['tasks','pages','office','files','workflows'] : ['memories','knowledge','recordings','entities']).includes(source.label))
   const sql = sources.map(source => `SELECT visible.*, '${source.label}' AS kind
-    FROM (${SEARCH_SOURCE_SQL[source.family]}) visible
-    JOIN ${source.table} project_row ON visible.key = '${source.prefix}:' || project_row.id::text
-    WHERE project_row.workspace_id=$1 AND ${source.projectColumn
-      ? `project_row.${source.projectColumn}=$3::uuid` : 'project_row.project_ids @> ARRAY[$3::uuid]'}`).join(' UNION ALL ')
+    FROM (${PROJECT_SEARCH_SOURCE_SQL[source.family]}) visible
+    WHERE visible.key LIKE '${source.prefix}:%'`).join(' UNION ALL ')
   const result = await queryWithRLS<{
     key: string; id: string; title: string; snippet: string; kind: string;
     target: WorkspaceSearchTarget; status: string | null; updatedAt: string | null;
