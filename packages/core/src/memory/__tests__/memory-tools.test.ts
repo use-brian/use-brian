@@ -149,7 +149,7 @@ describe('[COMP:memory/tools] saveMemory', () => {
     vi.spyOn(store, 'getById').mockResolvedValue({id,scope:'shared',summary:'Fictional original',detail:'Original detail',tags:[],confidence:0.8,
       sensitivity:'internal',scopeVersion:'7',workspaceId:'workspace_1',userId:ctx.userId,assistantId:ctx.assistantId,compartments:[],projectIds:[]})
     const update = vi.spyOn(store, 'update').mockResolvedValue({id:'22222222-2222-4222-8222-222222222222',scope:'shared',summary:'Fictional original',detail:'Refinement',tags:[],confidence:0.8,sensitivity:'internal'})
-    const execution = {} as NonNullable<import('../../tools/types.js').ToolContext['executionContext']>
+    const execution = { security: { access: { sharedAudience: false } } } as NonNullable<import('../../tools/types.js').ToolContext['executionContext']>
     const accumulator = new ContextScopeAccumulator()
     const result = await createMemoryTools(store).saveMemory.execute({id,detail:'Refinement'},
       {...ctx,workspaceId:'workspace_1',executionContext:execution,scopeAccumulator:accumulator})
