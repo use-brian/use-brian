@@ -1489,6 +1489,10 @@ export function telegramByoRoutes(options: TelegramByoRouteOptions): Router {
       rawMessages.push(incomingMsg)
       if (existing?.timer) clearTimeout(existing.timer)
 
+      const admittedAlbumArchiveAdapter = createTelegramAdapter({
+        token: credentials.bot_token, botUsername: botUsername ?? undefined,
+        config: { normalizePassive: true, discussionChatIds },
+      })
       const flush = async () => {
         try {
           const entry = mediaGroupBuffers.get(key)
@@ -1525,7 +1529,9 @@ export function telegramByoRoutes(options: TelegramByoRouteOptions): Router {
           // traffic. Archive every original input only after that decision.
           for (const rawMessage of rawMessages) {
             if (archivedMessageIds.has(String(rawMessage.message_id))) continue
-            const parsed = eventAdapter.parseIncoming({ message: { ...rawMessage, media_group_id: undefined } })
+            // The cohort has already passed ownership/explicit invocation.
+            // A sibling-topic mention gate must not discard its other files.
+            const parsed = admittedAlbumArchiveAdapter.parseIncoming({ message: { ...rawMessage, media_group_id: undefined } })
             if (!parsed) continue
             const member = conversationOwned ? parsed : { ...parsed, replyToMessageId: undefined,
               raw: { ...(parsed.raw as object), reply_to_message: undefined } }

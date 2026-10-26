@@ -3602,9 +3602,9 @@ describe('[COMP:api/telegram-byo-route] original media archive', () => {
     expect(pipelineCalls).toHaveLength(0)
   })
 
-  it('keeps an unowned album ephemeral until invocation, then archives every original member without foreign replies', async () => {
+  it.each([{}, { requireMentionOverrides: [{ chatId: '-100101', topicId: 134 }] }])('keeps an unowned album ephemeral until invocation, then archives every original member without foreign replies (%j)', async config => {
     vi.mocked(hasTelegramWorkspaceConversationBinding).mockResolvedValue(false)
-    const { app, storeBuffer } = archiveApp()
+    const { app, storeBuffer } = archiveApp(config)
     await postUpdate(app, photo(620, { media_group_id: 'invoked_foreign_album',
       reply_to_message: { message_id: 99, text: 'foreign context', is_automatic_forward: true } }))
     await flushMicrotasks()
