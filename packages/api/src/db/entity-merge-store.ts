@@ -9,11 +9,10 @@
  * this file is the only place SQL touches `entity_merges`, the merged
  * `entities` rows, and the CRM specialization tables.
  *
- * Access model: system-level. The caller is the admin corrections route
- * (`X-Admin-Key`-gated). `entities` carries an `entities_system_bypass`
- * RLS policy (migration 125) and `entity_merges` carries the same
- * (migration 150) — the bare pool / `SET LOCAL app.system_bypass` path
- * is correct here, exactly like other operator-facing stores.
+ * Access model: member edit admission followed by an owner transaction for
+ * atomic domain/history writes. The transaction binds the authenticated actor
+ * and ambient execution ceilings so canonical source checks retain caller
+ * authority, including the retired ancestor created during the merge.
  *
  * Merge mechanics:
  *   - applyMerge supersedes the merged entity (`valid_to = now()`,
@@ -43,7 +42,7 @@ import type {
   SpecializationPointer,
 } from '@use-brian/core'
 import { EntityMergeError, UndoMergeError, maxSensitivity, type Sensitivity } from '@use-brian/core'
-import { getPool, query, queryWithRLS } from './client.js'
+import { applyRLSGucs, getPool, query, queryWithRLS } from './client.js'
 import {
   appendDecisionEvent,
   findDecisionEventByIdempotencyKey,
@@ -177,6 +176,7 @@ export function createEntityMergeStore(): EntityMergeRepository {
       const client = await getPool().connect()
       try {
         await client.query('BEGIN')
+        await applyRLSGucs(client, input.mergedBy)
         const identityProjection = await prepareCrmMergeIdentityProjection(client, {
           workspaceId: input.workspaceId,
           survivingEntityId: input.survivingId,
@@ -316,6 +316,7 @@ export function createEntityMergeStore(): EntityMergeRepository {
       const client = await getPool().connect()
       try {
         await client.query('BEGIN')
+        await applyRLSGucs(client, input.actorUserId)
         const locked = await client.query<{
           id: string
           validTo: Date | null
