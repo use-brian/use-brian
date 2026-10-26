@@ -1,4 +1,5 @@
 import request from 'supertest'
+import {authSessionStore} from '../../db/auth-session-store.js'
 import { memoryRoutes } from '../../routes/memories.js'
 import { createTestApp } from '../../routes/__tests__/helpers.js'
 import { adjustMemoryDecision } from '../../db/memory-verifications-store.js'
@@ -127,11 +128,31 @@ describe('[COMP:api/workspace-access] database read grants and immutable authori
     expect((await pool.query('SELECT count(*)::int n FROM memories WHERE workspace_id=$1',[f.workspaceId])).rows[0].n).toBe(2)
     expect((await pool.query('SELECT summary FROM memories WHERE id=$1',[memory.id])).rows[0].summary).toBe('Read-only source')
   })
+  it.each(['','/search?q=source','/team','/team/search?q=source','/00000000-0000-4000-8000-000000000001'])(
+    'requires a current native session for Memory HTTP read %s',async suffix=>{
+      const f=await fixture()
+      const mount='/api/assistants/:assistantId/memories'
+      const path=`/api/assistants/${f.assistantId}/memories${suffix}`
+      const missing=createTestApp(mount,memoryRoutes(),{userId:f.member})
+      const missingResponse=await request(missing).get(path)
+      expect(missingResponse.status).toBe(401)
+      expect(missingResponse.body).toEqual({error:'authentication_required'})
+      const auth=await authSessionStore.create(f.member,{deviceLabel:'Fictional revoked browser',userAgent:'Fixture',ipAddress:'127.0.0.1'})
+      expect(auth).not.toBeNull()
+      expect(await authSessionStore.revokeForUser(f.member,auth!.id)).toBe(true)
+      const revoked=createTestApp(mount,memoryRoutes(),{userId:f.member,authSessionId:auth!.id})
+      const revokedResponse=await request(revoked).get(path)
+      expect(revokedResponse.status).toBe(401)
+      expect(revokedResponse.body).toEqual({error:'authentication_required'})
+    },
+  )
   it('keeps read grants read-only through real Memory HTTP actions',async()=>{
     const f=await fixture()
     await pool.query("UPDATE assistants SET kind='standard' WHERE id=$1",[f.assistantId])
     const memory=await createMemory({workspaceId:f.workspaceId,assistantId:f.assistantId,userId:f.member,createdByUserId:f.member,scope:'shared',summary:'Department source',sensitivity:'internal',compartments:[f.finance.compartmentKey!]})
-    const app=createTestApp('/api/assistants/:assistantId/memories',memoryRoutes(),{userId:f.member})
+    const auth=await authSessionStore.create(f.member,{deviceLabel:'Fictional read-grant browser',userAgent:'Fixture',ipAddress:'127.0.0.1'})
+    expect(auth).not.toBeNull()
+    const app=createTestApp('/api/assistants/:assistantId/memories',memoryRoutes(),{userId:f.member,authSessionId:auth!.id})
     const path=`/api/assistants/${f.assistantId}/memories/${memory.id}`
     expect((await request(app).get(path)).status).toBe(404)
     await f.grant()

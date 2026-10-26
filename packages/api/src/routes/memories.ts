@@ -26,7 +26,8 @@ import { getSoulContext } from '../db/scoped-summary-store.js'
  *   DELETE /:memoryId                   — delete a memory
  */
 
-import { Router,type Request } from 'express'
+import { Router,type Request,type Response } from 'express'
+import {ApplicationPlatformError} from '@use-brian/shared'
 import {ContextScopeAccumulator,DerivedScopeError,scopeEvidenceFromRows,executionToolContext,type AccessContext,type SessionContextAuthority} from '@use-brian/core'
 import {resolveNativeApplicationModuleExecution} from '../application-platform/native-module-runtime.js'
 import {assertSourceModelOutputAuthority} from '../application-platform/model-source-authority.js'
@@ -88,6 +89,18 @@ async function resolveViewerRead(req:Request,assistantId:string):Promise<Session
 async function admitViewerRead(authority:SessionContextAuthority,value:object):Promise<void>{
  authority.accumulator.note(scopeEvidenceFromRows([value]))
  await assertSourceModelOutputAuthority({...executionToolContext(authority.execution,{appId:'native-memory-read'}),scopeAccumulator:authority.accumulator})
+}
+
+/** Keep native credential refusal distinct from unavailable Memory authority. */
+function sendNativeReadRefusal(error:unknown,res:Response):boolean {
+ if(!(error instanceof ApplicationPlatformError))return false
+ if(error.code==='authentication_required'){
+  res.status(401).json({error:'authentication_required'});return true
+ }
+ if(error.code==='access_unavailable'){
+  res.status(404).json({error:'Not found'});return true
+ }
+ return false
 }
 
 export function memoryRoutes(): Router {
@@ -260,6 +273,7 @@ export function memoryRoutes(): Router {
       await admitViewerRead(authority!,memories)
       res.json({ memories, total, limit, offset })
     } catch (err) {
+      if(sendNativeReadRefusal(err,res))return
       const sql=err as {code?:string;message?:string}
       if(sql?.code==='0A000'&&sql.message==='outcome_profile_unavailable'){res.status(503).json({error:'Outcome scoring unavailable for this feedback history'});return}
       if(err instanceof DerivedScopeError||isAuthorityChangedError(err)||err instanceof SourceProtocolError&&err.code==='source_access_denied'
@@ -335,6 +349,7 @@ export function memoryRoutes(): Router {
       await admitViewerRead(authority!,memories)
       res.json({ memories })
     } catch (err) {
+      if(sendNativeReadRefusal(err,res))return
       const sql=err as {code?:string;message?:string}
       if(err instanceof DerivedScopeError||isAuthorityChangedError(err)||err instanceof SourceProtocolError&&err.code==='source_access_denied'
         ||sql?.code==='42501'&&['query_domain_unavailable','access_unavailable','scope_evidence_missing','scope_source_changed'].includes(sql.message??'')){
@@ -376,6 +391,7 @@ export function memoryRoutes(): Router {
       await admitViewerRead(authority!,memories)
       res.json({ memories, total, limit, offset })
     } catch (err) {
+      if(sendNativeReadRefusal(err,res))return
       const sql=err as {code?:string;message?:string}
       if(err instanceof DerivedScopeError||isAuthorityChangedError(err)||err instanceof SourceProtocolError&&err.code==='source_access_denied'
         ||sql?.code==='42501'&&['query_domain_unavailable','access_unavailable','scope_evidence_missing','scope_source_changed'].includes(sql.message??'')){
@@ -499,6 +515,7 @@ export function memoryRoutes(): Router {
       await admitViewerRead(authority!,memories)
       res.json({ memories })
     } catch (err) {
+      if(sendNativeReadRefusal(err,res))return
       const sql=err as {code?:string;message?:string}
       if(err instanceof DerivedScopeError||isAuthorityChangedError(err)||err instanceof SourceProtocolError&&err.code==='source_access_denied'
         ||sql?.code==='42501'&&['query_domain_unavailable','access_unavailable','scope_evidence_missing','scope_source_changed'].includes(sql.message??'')){
@@ -532,6 +549,7 @@ export function memoryRoutes(): Router {
       await admitViewerRead(authority!,memory)
       res.json({ memory })
     } catch (err) {
+      if(sendNativeReadRefusal(err,res))return
       const sql=err as {code?:string;message?:string}
       if(err instanceof DerivedScopeError||isAuthorityChangedError(err)||err instanceof SourceProtocolError&&err.code==='source_access_denied'
         ||sql?.code==='42501'&&['query_domain_unavailable','access_unavailable','scope_evidence_missing','scope_source_changed'].includes(sql.message??'')){
