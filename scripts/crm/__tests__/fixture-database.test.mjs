@@ -2,7 +2,7 @@ import assert from 'node:assert/strict'
 import { randomUUID } from 'node:crypto'
 import { spawn } from 'node:child_process'
 import { once } from 'node:events'
-import { mkdtemp, readFile, readdir, rm } from 'node:fs/promises'
+import { mkdtemp, readFile, readdir, rm, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { test } from 'node:test'
@@ -394,4 +394,76 @@ test('[COMP:crm/assurance-fixture] History guard identity, private metadata and 
    }finally{await owner.query('ROLLBACK')}
   }
  }finally{await owner.end()}
+})
+
+
+test('[COMP:crm/assurance-fixture] Native history title migration preserves599 state and rejects prerequisite drift', {timeout:180_000}, async t=>{
+ await assertLocalFixture()
+ const env=cleanRuntimeEnvironment(process.env),pgBin=(await runCommand('pg_config',['--bindir'],{env})).trim()
+ const migration=await readFile(new URL('../../../packages/api/migrations/8129_native_history_title_dependencies.sql',import.meta.url),'utf8')
+ const inventory=(await readdir(new URL('../../../packages/api/migrations/',import.meta.url))).filter(name=>name.endsWith('.sql')).sort()
+ const signatures=['validate_application_field_dependencies()','publish_native_session_context_revision(uuid,uuid,text,uuid,uuid,jsonb,text,jsonb,uuid,bigint,integer)',
+  'read_native_session_field_dependencies(uuid,text[],uuid[],text[])','read_native_attended_memory_evidence(uuid,text[],uuid[],text[])','application_memory_history_status(uuid,uuid,text)','application_memory_statement_helpers_current()','session_context_revision_allowed(uuid,uuid)']
+ const metadata=async owner=>(await owner.query('SELECT p.oid::text AS oid,to_jsonb(p) AS value FROM pg_proc p WHERE p.oid=ANY($1::regprocedure[]) ORDER BY p.oid',[signatures])).rows
+ const guard=async owner=>(await owner.query('SELECT application_memory_statement_helpers_current() AS current,(SELECT count(*)::int FROM _migrations) AS ledger')).rows[0]
+ let before,ledger,seed,calls=0
+ const ids=[randomUUID(),randomUUID(),randomUUID()]
+ const fixture=await createLocalFixture({pgBin,env,beforeApplyFile:'8129_native_history_title_dependencies.sql',beforeApply:async({adminUrl})=>{
+  calls++;const owner=new pg.Client({connectionString:adminUrl});await owner.connect()
+  try{
+   assert.deepEqual(await guard(owner),{current:true,ledger:599})
+   before=await metadata(owner);ledger=(await owner.query('SELECT name,applied_at::text FROM _migrations ORDER BY name')).rows
+   await owner.query("INSERT INTO users(id,auth_provider_id) VALUES($1::uuid,$1::text)",[ids[0]])
+   await owner.query("INSERT INTO workspaces(id,name,owner_user_id) VALUES($1,'Fictional preserved title installer',$2)",[ids[1],ids[0]])
+   await owner.query("INSERT INTO application_operation_receipts(id,workspace_id,module_key,operation_key,actor_key,actor_user_id,idempotency_key,request_hash,resources) VALUES($1,$2,'native','fictional_prior','fictional_prior',$3,'fictional_prior',$4,'[]')",[ids[2],ids[1],ids[0],'a'.repeat(64)])
+   seed=(await owner.query('SELECT to_jsonb(r) AS value FROM application_operation_receipts r WHERE id=$1',[ids[2]])).rows
+   const changes=[
+    ['validator body',()=>owner.query("CREATE OR REPLACE FUNCTION validate_application_field_dependencies() RETURNS trigger LANGUAGE plpgsql SECURITY DEFINER SET search_path=pg_catalog,public,pg_temp SET plan_cache_mode=force_generic_plan AS $$BEGIN RETURN NULL;END$$")],
+    ['publisher settings',()=>owner.query('ALTER FUNCTION '+signatures[1]+' COST 101')],
+    ['private ACL',()=>owner.query('GRANT EXECUTE ON FUNCTION '+signatures[0]+' TO app_user')],
+    ['dependency body',async()=>{const row=before.find(r=>r.value.proname==='read_native_session_field_dependencies');const definition=(await owner.query('SELECT pg_get_functiondef($1::oid) AS value',[row.oid])).rows[0].value;await owner.query(definition.replace(row.value.prosrc,row.value.prosrc+'\n-- fictional prerequisite drift'))}],
+    ['C admission body',async()=>{const row=before.find(r=>r.value.proname==='session_context_revision_allowed');const definition=(await owner.query('SELECT pg_get_functiondef($1::oid) AS value',[row.oid])).rows[0].value;await owner.query(definition.replace(row.value.prosrc,row.value.prosrc+'\n-- fictional prerequisite drift'))}],
+    ['C admission search path',()=>owner.query('ALTER FUNCTION '+signatures[6]+' SET search_path=public')],
+    ['C admission owner',()=>owner.query('ALTER FUNCTION '+signatures[6]+' OWNER TO app_user')],
+    ['C admission ACL',()=>owner.query('GRANT EXECUTE ON FUNCTION '+signatures[6]+' TO PUBLIC')],
+    ['deferred trigger',()=>owner.query('ALTER TABLE scope_derivation_sources DISABLE TRIGGER application_field_derivation_dependencies')],
+   ]
+   for(const[label,change]of changes){
+    await owner.query('BEGIN')
+    try{await change();await assert.rejects(owner.query(migration),/Native history title/)}finally{await owner.query('ROLLBACK')}
+    assert.deepEqual(await metadata(owner),before,label);assert.deepEqual((await owner.query('SELECT name,applied_at::text FROM _migrations ORDER BY name')).rows,ledger,label)
+    assert.deepEqual((await owner.query('SELECT to_jsonb(r) AS value FROM application_operation_receipts r WHERE id=$1',[ids[2]])).rows,seed,label)
+    assert.deepEqual(await guard(owner),{current:true,ledger:599},label)
+   }
+  }finally{await owner.end()}
+ }})
+ try{
+  assert.equal(calls,1);const owner=new pg.Client({connectionString:fixture.adminUrl});await owner.connect()
+  try{
+   assert.deepEqual(await guard(owner),{current:true,ledger:inventory.length})
+   const after=await metadata(owner)
+   assert.equal(after.length,before.length)
+   for(let n=0;n<after.length;n++){
+    const previous=before[n],current=after[n];assert.equal(current.oid,previous.oid)
+    if(['validate_application_field_dependencies','publish_native_session_context_revision','session_context_revision_allowed','read_native_session_field_dependencies'].includes(current.value.proname)){
+     const{prosrc:oldBody,...oldProperties}=previous.value,{prosrc:newBody,...newProperties}=current.value
+     assert.deepEqual(newProperties,oldProperties);assert.notEqual(newBody,oldBody)
+    }else assert.deepEqual(current,previous)
+   }
+   const completeLedger=(await owner.query('SELECT name,applied_at::text FROM _migrations ORDER BY name')).rows
+   const oldNames=new Set(ledger.map(row=>row.name))
+   assert.deepEqual(completeLedger.filter(row=>oldNames.has(row.name)),ledger)
+   const expectedNewNames=inventory.filter(name=>!oldNames.has(name))
+   assert.deepEqual(completeLedger.filter(row=>!oldNames.has(row.name)).map(row=>row.name),expectedNewNames)
+   assert.equal(completeLedger.filter(row=>row.name==='8129_native_history_title_dependencies.sql').length,1)
+   assert.deepEqual((await owner.query('SELECT to_jsonb(r) AS value FROM application_operation_receipts r WHERE id=$1',[ids[2]])).rows,seed)
+   assert.deepEqual((await owner.query("SELECT tgenabled,tgdeferrable,tginitdeferred FROM pg_trigger WHERE tgname='application_field_derivation_dependencies'")).rows,[{tgenabled:'O',tgdeferrable:true,tginitdeferred:true}])
+   const{tsImport}=await import('tsx/esm/api'),{runMigrations}=await tsImport('../../../packages/api/scripts/migrate.ts',import.meta.url)
+   assert.equal((await runMigrations({databaseUrl:fixture.adminUrl})).appliedCount,0)
+   const fresh=new pg.Client({connectionString:process.env.DATABASE_URL});await fresh.connect()
+   try{const freshMetadata=await metadata(fresh);for(const row of after){const other=freshMetadata.find(r=>r.value.proname===row.value.proname);assert.equal(row.value.prosrc,other.value.prosrc)}}finally{await fresh.end()}
+   if(process.env.F_E05_MIGRATION_ARTIFACT)await writeFile(process.env.F_E05_MIGRATION_ARTIFACT,JSON.stringify({before,after,ledger,completeLedger,expectedNewNames,seed,guard:await guard(owner),driftRefusals:9,replay:0},null,2)+'\n')
+   t.diagnostic(JSON.stringify({ledgerBefore:599,ledgerAfter:inventory.length,guardCurrent:true,changedBodies:4,preservedHelpers:3,driftRefusals:9,replay:0,priorReceiptUnchanged:true}))
+  }finally{await owner.end()}
+ }finally{await fixture.dispose()}
 })

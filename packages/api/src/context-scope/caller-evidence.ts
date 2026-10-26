@@ -152,9 +152,10 @@ async function validateScopeEvidence(
   // A history subset carries only checked scopes. It never admits the whole
   // input set or adds its internally qualified old references as factual roots.
   const historyKey=(values:unknown)=>JSON.stringify(values)
-  const projectHistory=async()=>{
+  const projectHistory=async(inputRoots:readonly ScopeSource[])=>{
+    const roots=structuredClone(inputRoots)
     const scopes:Array<{root:ScopeSource;scopes:ResourceScope[]}>=[]
-    if(client)for(const source of originalSources){
+    if(client)for(const source of roots){
       if(source.resourceKind!=='application_field')continue
       const value=await readNativeSessionEvidence(client,ceiling.workspaceId,[source])
       if(value?.kind!=='memory_history')continue
@@ -169,7 +170,7 @@ async function validateScopeEvidence(
     return scopes
   }
   let historyProjection:Awaited<ReturnType<typeof projectHistory>>
-  try{historyProjection=await projectHistory()}
+  try{historyProjection=await projectHistory(originalSources)}
   catch(error){throw scopeEvidenceFailureOf(error)?error:unavailable(kind,'source_unverifiable',error)}
   if(historyProjection.length){
     const raised=new ContextScopeAccumulator(snapshot)
@@ -199,11 +200,21 @@ async function validateScopeEvidence(
   const ancestryKey = (values: readonly ScopeSource[]) => JSON.stringify(values.map(source => [source.resourceId,source.version,resourceScopeKey(source)]).sort())
   let originalAncestry: string
   let originalFieldAncestry: string
+  let projectedHistoryRoots:ScopeSource[]=[]
+  let projectedHistory:Awaited<ReturnType<typeof projectHistory>>=[]
   try {
     const fieldAncestors = await readApplicationFieldAncestors(ceiling.workspaceId, ancestryRoots, client)
     originalFieldAncestry = ancestryKey(fieldAncestors)
     if (fieldAncestors.length && !client) throw unavailable(kind, 'source_unverifiable')
     for (const source of fieldAncestors) failure ??= visibilityFailure(source, ceiling) ?? labelFailure(source, ceiling)
+    // Only fields admitted on the actual client may supply retained-history
+    // label metadata. Keep both fixed root sets for the final footprint check.
+    projectedHistoryRoots=structuredClone(fieldAncestors)
+    projectedHistory=await projectHistory(projectedHistoryRoots)
+    for(const projected of projectedHistory){
+      const original=historyProjection.find(value=>value.root.resourceId===projected.root.resourceId)
+      if(original&&historyKey(original)!==historyKey(projected))throw unavailable(kind,'source_unverifiable')
+    }
     const ancestors = await readExternalSourceAncestors(ceiling.workspaceId, ancestryRoots, client)
     originalAncestry = ancestryKey(ancestors)
     const known = new Map(sources.filter(source => source.resourceKind === 'external_source').map(source => [source.resourceId, source]))
@@ -217,6 +228,8 @@ async function validateScopeEvidence(
     if (failure) throw unavailable(kind, failure)
     const expanded = new ContextScopeAccumulator(snapshot)
     expanded.note({ sources: [...fieldAncestors,...ancestors] })
+    for(const projected of projectedHistory)for(const scope of projected.scopes)expanded.note({
+      sensitivity:scope.sensitivity,compartments:scope.compartments,projectIds:scope.projectIds})
     snapshot = expanded.evidence
     sources = snapshot.sources ?? []
   } catch (error) {
@@ -293,7 +306,8 @@ async function validateScopeEvidence(
     raised.projectIds = [...new Set([...(raised.projectIds ?? []), ...current.projectIds])].sort()
   }
   try {
-    if(historyKey(await projectHistory())!==historyKey(historyProjection))throw unavailable(kind,'source_unverifiable')
+    if(historyKey(await projectHistory(originalSources))!==historyKey(historyProjection)
+      ||historyKey(await projectHistory(projectedHistoryRoots))!==historyKey(projectedHistory))throw unavailable(kind,'source_unverifiable')
     if(persistentKey(await readPersistentSessionContextAncestors(ceiling.workspaceId,ancestryRoots,client))!==persistentAncestry!) throw unavailable(kind,'source_unverifiable')
     if (ancestryKey(await readExternalSourceAncestors(ceiling.workspaceId, ancestryRoots, client)) !== originalAncestry!) {
       throw unavailable(kind, 'source_unverifiable')

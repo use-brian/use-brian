@@ -7,7 +7,7 @@ import { randomUUID } from 'node:crypto'
 import type { PoolClient } from 'pg'
 import {
   ContextScopeAccumulator, DerivedScopeError, bindScopeSource, boundScopeSources, deriveWriteScope, intersectAccessCeilings, RANK, scopeGrantContains,
-  type DerivedWriteEvidence, type ExecutionContext, type ResourceScope, type ScopeSource, type SessionContextAuthority,
+  type DerivedWriteEvidence, type ScopeEvidence, type ExecutionContext, type ResourceScope, type ScopeSource, type SessionContextAuthority,
 } from '@use-brian/core'
 import { applyRLSGucs, getAppPool, getPool, rollbackAndRelease, runWithAgentAccess } from './client.js'
 import { recordDerivedResource, validateDerivedWriteInputs } from './derived-scope-store.js'
@@ -46,7 +46,9 @@ function nativeDelegatedSessionPublication(execution:ExecutionContext):boolean{
   &&!getApplicationExecutionBinding(execution)
 }
 async function transaction<T>(authority: SessionContextAuthority, sources: readonly ScopeSource[], action: 'context' | 'retain',
-  owner: boolean, run: (client: PoolClient) => Promise<T>, writeSessionId?: string, stoppedTurnToken?:string, activeTurnToken?:string,nativeMutation=false): Promise<T> {
+  owner: boolean, run: (client: PoolClient, checked:ScopeEvidence) => Promise<T>, writeSessionId?: string, stoppedTurnToken?:string, activeTurnToken?:string,nativeMutation=false,
+  scalarFloor?:Pick<ScopeEvidence,'sensitivity'|'compartments'|'projectIds'>): Promise<T> {
+  const floor=scalarFloor===undefined?{}:structuredClone({sensitivity:scalarFloor.sensitivity,compartments:scalarFloor.compartments,projectIds:scalarFloor.projectIds})
   let publicationAttempted=false
   try {
     const { execution, accumulator } = requireAuthority(authority), before = JSON.stringify(accumulator.evidence)
@@ -105,10 +107,10 @@ async function transaction<T>(authority: SessionContextAuthority, sources: reado
         // waits and immediately before the boundary that consumes it.
         contextProof = external || cohort.independent ? await prepare!(execution, cohort.sources, 'context') : undefined
         if (contextProof) await pinPreparedExternalSourceAuthority(client, execution, contextProof)
-        await validateCallerScopeEvidence({ sources: [...sources] }, execution.security.ceiling, client)
+        const checked=await validateCallerScopeEvidence({...floor,sources:[...sources]},execution.security.ceiling,client)
         prepared = external && action==='retain' ? await prepare!(execution, sources, 'retain') : undefined
         if (prepared) await pinPreparedExternalSourceAuthority(client, execution, prepared)
-        const value = await run(client)
+        const value = await run(client,checked)
         await execution.security.authority.assertCurrent()
         if (execution.lifecycle.abortSignal.aborted&&!finalizing || JSON.stringify(accumulator.evidence) !== before
           || host !== retainedHosts.get(execution) || !host && wiring !== getSharedRetainedSourceAuthority()) changed()
@@ -384,26 +386,34 @@ export async function writeSessionContextRevision(input: {
     const {workspaceId,userId,assistantId,sensitivity,compartments,projectIds,resourceKind,resourceId,version}=native
     accumulated.noteSource({workspaceId,userId,assistantId,sensitivity,compartments,projectIds,resourceKind,resourceId,version})
   }
-  const evidence: DerivedWriteEvidence = { producer: command.derivation.producer, sources: accumulated.evidence.sources ?? [] }
+  const originalEvidence = accumulated.evidence
+  const evidence: DerivedWriteEvidence = { producer: command.derivation.producer, sources: originalEvidence.sources ?? [] }
   deriveWriteScope(evidence, { workspaceId: execution.security.access.workspaceId, userId: execution.security.access.userId,
     assistantId: null, sensitivity: 'public', compartments: [], projectIds: [] }, execution.security.access.userId)
-  const ancestors = [...await readExternalSourceAncestors(execution.security.access.workspaceId,evidence.sources),
-    ...await readApplicationFieldAncestors(execution.security.access.workspaceId,evidence.sources)]
-  const all = new ContextScopeAccumulator({ sources: [...evidence.sources,...ancestors] })
-  evidence.sources = all.evidence.sources ?? []
+  // Discovery prepares external authority without turning history's qualified
+  // own fields into independent original inputs. Field projection needs the
+  // actual admitted client and the complete original root set.
+  const preparedEvidence = new ContextScopeAccumulator(originalEvidence)
+  preparedEvidence.note({ sources: await readExternalSourceAncestors(execution.security.access.workspaceId,evidence.sources) })
+  const preparedSources = preparedEvidence.evidence.sources ?? []
   const payload = structuredClone(command.content), parentId = command.parentId ?? randomUUID(), id = randomUUID()
-  const stored = await transaction(authority,evidence.sources,'retain',false,async client => {
+  const stored = await transaction(authority,preparedSources,'retain',false,async (client,checked) => {
+    const publicationSources = checked.sources ?? []
     const result=(await client.query<{value:{source:ScopeSource;createdAt:string;userId:string;assistantId:string}|null}>(
       'SELECT publish_native_session_context_revision($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11) AS value',
       [execution.security.access.workspaceId,command.sessionId,command.kind,(command.kind==='compact_summary'||command.kind==='session_title')?command.sessionId:parentId,id,
-       payload,evidence.producer,JSON.stringify(evidence.sources),command.expectedRevision??null,command.expectedGeneration??null,command.expectedCursor??null])).rows[0]?.value
+       payload,evidence.producer,JSON.stringify(publicationSources),command.expectedRevision??null,command.expectedGeneration??null,command.expectedCursor??null])).rows[0]?.value
     if(!result)return null
     const source=result.source
     if(source.workspaceId!==execution.security.access.workspaceId||source.resourceKind!=='session_context_revision'||source.resourceId!==id||source.version!=='1')changed()
+    // Metadata-only own-reference labels are still destination requirements.
+    // Refuse rather than stamp a narrower result or fabricate a factual source.
+    if(RANK[source.sensitivity]<RANK[checked.sensitivity??'public']
+      ||!scopeGrantContains(source.compartments,checked.compartments)||!scopeGrantContains(source.projectIds,checked.projectIds))changed()
     const createdAt=new Date(result.createdAt)
     return bindScopeSource({id,parentId:(command.kind==='compact_summary'||command.kind==='session_title')?command.sessionId:parentId,sessionId:command.sessionId,source,content:payload,
       userId:result.userId,assistantId:result.assistantId,createdAt,lastAccessedAt:createdAt,accessCount:0,survivalCount:0},source)
-  },command.sessionId)
+  },command.sessionId,undefined,undefined,false,preparedEvidence.evidence)
   if (stored) authority.accumulator.note({ sources: boundScopeSources(stored) })
   return stored
 }
