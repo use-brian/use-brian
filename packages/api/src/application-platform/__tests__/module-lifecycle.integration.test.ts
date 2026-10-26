@@ -1,6 +1,7 @@
 /** Real reviewed generic-module credentials retain recovery through lifecycle changes. */
 import { randomUUID } from 'node:crypto'
 import { once } from 'node:events'
+import { writeFile } from 'node:fs/promises'
 import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it } from 'vitest'
 import { z } from 'zod'
 import express from 'express'
@@ -202,15 +203,29 @@ describe.sequential('[COMP:api/application-auth] [COMP:api/application-records] 
   async function pinned() { const credential = await authenticateApplicationCredential(issued.secret, appId, loadApplicationCredentialStateSystem); expect(credential).not.toBeNull(); return resolveApplicationExecutionContext({ credential: credential! }) }
   async function generation() { return (await owner.query('SELECT a.version::text AS activation,k.activation_version::text AS credential_activation,k.version::text AS credential,a.deployed_snapshot FROM application_scoped_activations a JOIN application_api_credentials k ON k.app_id=a.app_id WHERE a.app_id=$1 AND k.id=$2', [appId, issued.credentialId])).rows[0] }
 
-  function schedulingPool(match: (sql: string) => boolean) {
+  function schedulingPool(match: (sql: string) => boolean, trace?: Array<Record<string, unknown>>) {
     let reached!: () => void, release!: () => void, pid = 0, armed = true
     const ready = new Promise<void>(resolve => { reached = resolve }), pause = new Promise<void>(resolve => { release = resolve })
     const pool = { connect: async () => {
       const client = await getAppPool().connect(); pid = Number((await client.query('SELECT pg_backend_pid() AS pid')).rows[0].pid)
+      if (trace) {
+        const role = (await client.query(`SELECT session_user,current_user,r.rolsuper,r.rolbypassrls,r.rolinherit,
+          (SELECT count(*)::int FROM pg_auth_members m WHERE m.member=r.oid OR m.roleid=r.oid) AS memberships,
+          c.relowner=r.oid AS owns_roles FROM pg_roles r JOIN pg_class c ON c.oid='application_native_role_assignments'::regclass WHERE r.rolname=session_user`)).rows[0]
+        expect(role).toEqual({ session_user: 'app_user', current_user: 'app_user', rolsuper: false, rolbypassrls: false, rolinherit: false, memberships: 0, owns_roles: false })
+        trace.push({ event: 'role', pid, ...role })
+      }
       return new Proxy(client, { get(target, key) {
         const value = Reflect.get(target, key)
         if (key === 'query') return async (...args: unknown[]) => {
-          const result = await Reflect.apply(value, target, args)
+          let result
+          try { result = await Reflect.apply(value, target, args) }
+          catch (error) {
+            const sqlError = error as Error & { code?: string; detail?: string; where?: string; routine?: string }
+            if (trace) trace.push({ event: 'sql_error', pid, sql: args[0], code: sqlError.code, message: sqlError.message, detail: sqlError.detail, where: sqlError.where, routine: sqlError.routine })
+            throw error
+          }
+          if (trace) trace.push({ event: 'query', pid, sql: args[0] })
           if (armed && typeof args[0] === 'string' && match(args[0])) { armed = false; reached(); await pause }
           return result
         }
@@ -237,8 +252,10 @@ describe.sequential('[COMP:api/application-auth] [COMP:api/application-records] 
     const deadline = Date.now() + 10_000
     while (Date.now() < deadline) {
       if (finished?.()) return undefined
-      const result = await owner.query(`SELECT a.pid,a.query,a.wait_event AS "waitEvent",pg_blocking_pids(a.pid) AS blockers,
-        coalesce((SELECT jsonb_agg(jsonb_build_object('relation',l.relation::regclass::text,'mode',l.mode,'granted',l.granted)) FROM pg_locks l WHERE l.pid=a.pid),'[]'::jsonb) AS locks
+      const result = await owner.query(`SELECT a.pid,a.query,a.backend_xid::text AS "backendXid",a.wait_event_type AS "waitType",a.wait_event AS "waitEvent",pg_blocking_pids(a.pid) AS blockers,
+        (SELECT backend_xid::text FROM pg_stat_activity WHERE pid=$1) AS "blockerXid",
+        coalesce((SELECT jsonb_agg(jsonb_build_object('locktype',l.locktype,'relation',l.relation::regclass::text,'mode',l.mode,'granted',l.granted,'transactionid',l.transactionid::text,'page',l.page,'tuple',l.tuple)) FROM pg_locks l WHERE l.pid=a.pid),'[]'::jsonb) AS locks,
+        coalesce((SELECT jsonb_agg(jsonb_build_object('locktype',l.locktype,'relation',l.relation::regclass::text,'mode',l.mode,'granted',l.granted,'transactionid',l.transactionid::text,'page',l.page,'tuple',l.tuple)) FROM pg_locks l WHERE l.pid=$1),'[]'::jsonb) AS "blockerLocks"
         FROM pg_stat_activity a WHERE a.datname=current_database() AND a.wait_event_type='Lock' AND $1=ANY(pg_blocking_pids(a.pid))`, [blocker])
       const row = result.rows.find(row => fragments.some(fragment => row.query.includes(fragment)))
       if (row) { console.info('[S2-06] actual operation waiter', JSON.stringify({ blocker, ...row, locks: row.locks.filter((lock: { relation: string | null }) => ['workspaces', 'workspace_modules', 'entity_instances'].includes(lock.relation ?? '')) })); return row }
@@ -260,6 +277,129 @@ describe.sequential('[COMP:api/application-auth] [COMP:api/application-records] 
     await sdk().command('recover_item', recover(id))
     expect((await modules.get(workspaceId, moduleKey)).state).toBe('draining')
   }
+
+  it.each(['role', 'shutdown'] as const)('[F-E04] orders normal service-role issuance with shutdown when %s wins', async winner => {
+    const initial = await existingModule()
+    expect(initial.state).toBe('enabled')
+    const target = (await checked({ kind: 'service.prepare', appId, input: { name: 'Fictional competing service role', idempotencyKey: randomUUID() } })).serviceUserId
+    serviceUsers.push(target)
+    const unassignedTarget = winner === 'role' ? (await checked({ kind: 'service.prepare', appId, input: { name: 'Fictional inactive role control', idempotencyKey: randomUUID() } })).serviceUserId : target
+    if (unassignedTarget !== target) serviceUsers.push(unassignedTarget)
+    const catalog = await checked({ kind: 'governance.catalog', input: { moduleKey } })
+    const proposal = { kind: 'assign_role', userId: target, roleKey: 'operator', startsAt: '2020-01-01T00:00:00Z', expiresAt: null }
+    const pending = await checked({ kind: 'governance.preview', input: { moduleKey, expectedRevision: catalog.revision, operation: proposal } })
+    expect(pending.canApply).toBe(true)
+    const exactRows = async (table: string) => (await owner.query(`SELECT to_jsonb(t) AS value FROM ${table} t WHERE workspace_id=$1 ORDER BY to_jsonb(t)::text`, [workspaceId])).rows.map(row => row.value)
+    const snapshot = async () => ({
+      roles: await exactRows('application_native_role_assignments'), reviews: await exactRows('application_native_governance_reviews'), governanceEvents: await exactRows('application_native_governance_events'),
+      modules: await exactRows('workspace_modules'), audit: (await owner.query("SELECT to_jsonb(t) AS value FROM workspace_audit_log t WHERE workspace_id=$1 AND event_type='workspace.module_changed' ORDER BY to_jsonb(t)::text", [workspaceId])).rows.map(row => row.value),
+      privateReviews: await exactRows('application_native_module_lifecycle_reviews'), members: await exactRows('workspace_members'),
+      authority: await Promise.all(['application_clients', 'application_scoped_activations', 'application_access_grants', 'application_api_credentials', 'application_credential_grants', 'application_authority_events'].map(exactRows)),
+      business: await Promise.all(['entity_instances', 'application_record_revisions', 'application_operation_receipts', 'application_command_audit', 'application_committed_events'].map(exactRows)),
+      callbacks: [...callbacks.entries()],
+    })
+    const before = await snapshot()
+    expect(before.roles.filter(row => row.user_id === target)).toEqual([])
+    expect(before.members.filter(row => row.user_id === target)).toEqual([])
+    expect(before.privateReviews).toEqual([])
+    expect(before.reviews.find(row => row.id === pending.id)).toMatchObject({ actor_user_id: ownerId, module_key: moduleKey, proposal: pending.proposal, outcome: null, applied_revision: null })
+    const trace: Array<Record<string, unknown>> = [], report: Record<string, unknown> = { winner, before }
+    const errorChain = (error: unknown): unknown => {
+      if (!(error instanceof Error)) return { message: String(error) }
+      const value = error as Error & { code?: string; detail?: string; where?: string; routine?: string; cause?: unknown }
+      return { name: value.name, message: value.message, code: value.code, detail: value.detail, where: value.where, routine: value.routine, stack: value.stack,
+        ...(value.cause === undefined ? {} : { cause: errorChain(value.cause) }) }
+    }
+    const pause = schedulingPool(sql => winner === 'role' ? sql === 'SELECT application_apply_native_governance_review($1,$2,$3) AS value' : sql.startsWith('UPDATE workspace_modules'), trace)
+    const rolePool = winner === 'role' ? pause : schedulingPool(() => false, trace)
+    const nativeManagement = new ApplicationManagementService(platform, rolePool.pool)
+    let role: Promise<unknown> | undefined, shutdown: ReturnType<typeof modules.act> | undefined
+    let waiter: Awaited<ReturnType<typeof waitForBlocker>>
+    try {
+      try {
+        if (winner === 'role') {
+          role = nativeManagement.executeCommand(ownerId, workspaceId, { kind: 'governance.apply', reviewId: pending.id, input: {} }); void role.catch(() => undefined)
+          await Promise.race([pause.ready, role.then(() => { throw new Error('Expected an uncommitted real role apply') })])
+          expect(await snapshot()).toEqual(before)
+          shutdown = lifecycle('request_disable'); void shutdown.catch(() => undefined)
+          waiter = await waitForBlocker(pause.pid(), ['module_key=$2 FOR UPDATE', 'application_prepare_native_module_lifecycle('])
+        } else {
+          shutdown = lifecycleWith(pause.pool).act(workspaceId, ownerId, moduleKey, { action: 'request_disable', expectedVersion: initial.version }); void shutdown.catch(() => undefined)
+          await Promise.race([pause.ready, shutdown.then(() => { throw new Error('Expected protected shutdown before audit and COMMIT') })])
+          role = nativeManagement.executeCommand(ownerId, workspaceId, { kind: 'governance.apply', reviewId: pending.id, input: {} }); void role.catch(() => undefined)
+          waiter = await waitForBlocker(pause.pid(), ['SELECT application_apply_native_governance_review('])
+        }
+        expect(waiter).toBeDefined(); report.waiter = waiter
+        expect(waiter!.waitType).toBe('Lock'); expect(waiter!.blockers).toContain(pause.pid())
+        const waiting = waiter!.locks.filter((lock: { locktype: string; granted: boolean }) => lock.locktype === 'transactionid' && !lock.granted)
+        expect(waiting).toHaveLength(1); expect(waiting[0].transactionid).toBe(waiter!.blockerXid)
+        expect(waiter!.blockerLocks.some((lock: { locktype: string; granted: boolean; transactionid: string }) => lock.locktype === 'transactionid' && lock.granted && lock.transactionid === waiting[0].transactionid)).toBe(true)
+        // Record tuple locks separately from granted table locks. The exact
+        // outer statement and real transaction blocker determine the stage.
+        report.tupleLocks = waiter!.locks.filter((lock: { locktype: string }) => lock.locktype === 'tuple')
+        expect(await snapshot()).toEqual(before)
+      } finally {
+        pause.release(); rolePool.release()
+        await Promise.allSettled([...(role ? [role] : []), ...(shutdown ? [shutdown] : [])])
+      }
+      if (winner === 'role') {
+        expect(await role).toMatchObject({ applied: true, moduleKey, kind: 'assign_role' })
+        const first = await shutdown!.then(value => ({ value, code: undefined }), (error: { code?: string }) => ({ value: undefined, code: error.code }))
+        report.firstShutdown = first
+        if (waiter!.query.includes('module_key=$2 FOR UPDATE')) {
+          expect(first.code).toBe('stale_module_version')
+          const unchanged = await snapshot(); expect(unchanged.modules).toEqual(before.modules); expect(unchanged.audit).toEqual(before.audit)
+          expect(unchanged.privateReviews).toEqual([])
+          // A separate current action follows the honest stale refusal.
+          report.freshShutdown = await lifecycle('request_disable')
+          expect(report.freshShutdown).toMatchObject({ changed: true, module: { state: 'disabled', version: initial.version + 1 } })
+        } else {
+          expect(waiter!.query).toContain('application_prepare_native_module_lifecycle(')
+          expect(first.value).toMatchObject({ changed: true, module: { state: 'disabled', version: initial.version + 1 } })
+        }
+      } else {
+        expect(await shutdown).toMatchObject({ changed: true, module: { state: 'disabled', version: initial.version + 1 } })
+        await expect(role).rejects.toMatchObject({ code: 'record_version_conflict' })
+        expect(trace.some(entry => entry.event === 'sql_error' && entry.sql === 'SELECT application_apply_native_governance_review($1,$2,$3) AS value' && entry.code === '40001')).toBe(true)
+      }
+      expect(trace.filter(entry => entry.event === 'sql_error').every(entry => !['40P01', '55P03', '57014'].includes(String(entry.code)))).toBe(true)
+      const after = await snapshot(); report.after = after
+      expect(after.authority).toEqual(before.authority); expect(after.business).toEqual(before.business); expect(after.members).toEqual(before.members); expect(after.callbacks).toEqual(before.callbacks)
+      expect(after.privateReviews).toEqual([])
+      expect(after.roles.filter(row => row.user_id !== target)).toEqual(before.roles)
+      expect(after.reviews.filter(row => row.id !== pending.id)).toEqual(before.reviews.filter(row => row.id !== pending.id))
+      expect(after.governanceEvents.filter(row => row.review_id !== pending.id)).toEqual(before.governanceEvents)
+      if (winner === 'role') {
+        const assigned = after.roles.filter(row => row.user_id === target)
+        expect(assigned).toHaveLength(1)
+        expect(assigned[0]).toMatchObject({ workspace_id: workspaceId, module_key: moduleKey, user_id: target, role_key: 'operator', status: 'active', version: 1, expires_at: null, issued_by_user_id: ownerId })
+        expect(new Date(assigned[0].starts_at).toISOString()).toBe(new Date(proposal.startsAt).toISOString())
+        const review = after.reviews.find(row => row.id === pending.id), { applied_revision: revision, outcome, ...identity } = review
+        const { applied_revision: _oldRevision, outcome: _oldOutcome, ...oldIdentity } = before.reviews.find(row => row.id === pending.id)
+        expect(identity).toEqual(oldIdentity); expect(revision).toMatch(/^[0-9a-f]{64}$/); expect(outcome).toMatchObject({ applied: true, resourceId: assigned[0].id })
+        expect(after.governanceEvents.filter(row => row.review_id === pending.id)).toHaveLength(1)
+      } else {
+        expect(after.roles).toEqual(before.roles); expect(after.reviews).toEqual(before.reviews); expect(after.governanceEvents).toEqual(before.governanceEvents)
+      }
+      expect(after.audit).toHaveLength(before.audit.length + 1)
+      expect(after.audit.filter(row => !before.audit.some(old => old.id === row.id))[0].details)
+        .toEqual({ moduleKey, action: 'request_disable', from: 'enabled', to: 'disabled', version: initial.version + 1 })
+      expect(after.modules.filter(row => row.module_key !== moduleKey)).toEqual(before.modules.filter(row => row.module_key !== moduleKey))
+      expect(after.modules.filter(row => row.module_key === moduleKey)).toHaveLength(1)
+      const currentCatalog = await checked({ kind: 'governance.catalog', input: { moduleKey } })
+      expect((await command({ kind: 'governance.preview', input: { moduleKey, expectedRevision: currentCatalog.revision, operation: { ...proposal, userId: unassignedTarget } } })).status).toBe(403)
+      expect(await snapshot()).toEqual(after)
+    } finally {
+      report.trace = trace
+      report.contenders = { winnerPid: pause.pid(), rolePid: rolePool.pid(), waiterPid: waiter?.pid }
+      report.settled = {
+        role: role ? await role.then(value => ({ state: 'fulfilled', value }), error => ({ state: 'rejected', error: errorChain(error) })) : null,
+        shutdown: shutdown ? await shutdown.then(value => ({ state: 'fulfilled', value }), error => ({ state: 'rejected', error: errorChain(error) })) : null,
+      }
+      report.afterSettlement = await snapshot()
+      if (process.env.F_E04_ARTIFACT) await writeFile(process.env.F_E04_ARTIFACT + '-' + winner + '.json', JSON.stringify(report, null, 2) + '\n')
+    }
+  }, 60_000)
 
   it.each(['command', 'shutdown'] as const)('[S2-06] orders genuine new work with request-disable when %s wins', async winner => {
     const initial = await existingModule(), savedGeneration = await generation(), id = randomUUID()

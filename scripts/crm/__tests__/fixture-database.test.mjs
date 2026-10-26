@@ -467,3 +467,86 @@ test('[COMP:crm/assurance-fixture] Native history title migration preserves599 s
   }finally{await owner.end()}
  }finally{await fixture.dispose()}
 })
+
+test('[COMP:crm/assurance-fixture] Native governance audit lock migration preserves600 state and rejects prerequisite drift', {timeout:180_000}, async t=>{
+ await assertLocalFixture()
+ const env=cleanRuntimeEnvironment(process.env),pgBin=(await runCommand('pg_config',['--bindir'],{env})).trim()
+ const migration=await readFile(new URL('../../../packages/api/migrations/8130_application_governance_audit_lock.sql',import.meta.url),'utf8')
+ const inventory=(await readdir(new URL('../../../packages/api/migrations/',import.meta.url))).filter(name=>name.endsWith('.sql')).sort()
+ const signature='application_apply_native_governance_review(uuid,uuid,uuid)'
+ const catalog=async owner=>(await owner.query("SELECT p.oid::text AS oid,to_jsonb(p) AS value FROM pg_proc p WHERE p.pronamespace='public'::regnamespace ORDER BY p.oid")).rows
+ const ledgerRows=async owner=>(await owner.query('SELECT name,applied_at::text FROM _migrations ORDER BY name')).rows
+ const guard=async owner=>(await owner.query('SELECT application_memory_statement_helpers_current() AS current,(SELECT count(*)::int FROM _migrations) AS ledger')).rows[0]
+ let before,transition,ledger,seed,calls=0
+ const ids=[randomUUID(),randomUUID(),randomUUID()]
+ const fixture=await createLocalFixture({pgBin,env,beforeApplyFile:'8130_application_governance_audit_lock.sql',beforeApply:async({adminUrl})=>{
+  calls++;const owner=new pg.Client({connectionString:adminUrl});await owner.connect()
+  try{
+   assert.deepEqual(await guard(owner),{current:true,ledger:600})
+   await owner.query('INSERT INTO users(id,auth_provider_id) VALUES($1::uuid,$1::text)',[ids[0]])
+   await owner.query("INSERT INTO workspaces(id,name,owner_user_id) VALUES($1,'Fictional preserved governance installer',$2)",[ids[1],ids[0]])
+   await owner.query("INSERT INTO application_operation_receipts(id,workspace_id,module_key,operation_key,actor_key,actor_user_id,idempotency_key,request_hash,resources) VALUES($1,$2,'native','fictional_prior_lock','fictional_prior_lock',$3,'fictional_prior_lock',$4,'[]')",[ids[2],ids[1],ids[0],'b'.repeat(64)])
+   before=await catalog(owner);ledger=await ledgerRows(owner)
+   seed=(await owner.query('SELECT to_jsonb(r) AS value FROM application_operation_receipts r WHERE id=$1',[ids[2]])).rows
+   const predecessor=before.find(row=>row.value.proname==='application_apply_native_governance_review')
+   const definition=(await owner.query('SELECT pg_get_functiondef($1::oid) AS value',[predecessor.oid])).rows[0].value
+   // Isolate this exact single-body transition before later selected migrations.
+   // Keep it inside a rollback transaction; the normal migrator applies8130 next.
+   assert.match(migration,/^BEGIN;\n/);assert.match(migration,/COMMIT;\n?$/)
+   const bodyOnly=migration.replace(/^BEGIN;\n/,'').replace(/COMMIT;\n?$/,'')
+   await owner.query('BEGIN')
+   try{
+    await owner.query(bodyOnly);transition=await catalog(owner)
+    assert.equal(transition.length,before.length)
+    for(let n=0;n<transition.length;n++){
+     const previous=before[n],current=transition[n];assert.equal(current.oid,previous.oid)
+     if(current.value.proname==='application_apply_native_governance_review'){
+      const{prosrc:oldBody,...oldProperties}=previous.value,{prosrc:newBody,...newProperties}=current.value
+      assert.deepEqual(newProperties,oldProperties)
+      assert.equal(newBody,oldBody.replace('PERFORM 1 FROM public.workspaces WHERE id=w FOR UPDATE;','PERFORM 1 FROM public.workspaces WHERE id=w FOR NO KEY UPDATE;')
+       .replace('-- The existing workspace UPDATE precedes this service-target module SHARE.','-- Workspace NO KEY UPDATE precedes module SHARE and permits audit FK references.'))
+     }else assert.deepEqual(current,previous)
+    }
+    assert.deepEqual(await ledgerRows(owner),ledger);assert.deepEqual(await guard(owner),{current:true,ledger:600})
+   }finally{await owner.query('ROLLBACK')}
+   assert.deepEqual(await catalog(owner),before)
+   const changes=[
+    ['unknown body',()=>owner.query(definition.replace(predecessor.value.prosrc,predecessor.value.prosrc+'\n-- fictional prerequisite drift'))],
+    ['security mode',()=>owner.query('ALTER FUNCTION '+signature+' SECURITY INVOKER')],
+    ['cost setting',()=>owner.query('ALTER FUNCTION '+signature+' COST 101')],
+    ['search path',()=>owner.query('ALTER FUNCTION '+signature+' SET search_path=public')],
+    ['owner',()=>owner.query('ALTER FUNCTION '+signature+' OWNER TO app_user')],
+    ['PUBLIC ACL',()=>owner.query('GRANT EXECUTE ON FUNCTION '+signature+' TO PUBLIC')],
+    ['runtime grant option',()=>owner.query('GRANT EXECUTE ON FUNCTION '+signature+' TO app_user WITH GRANT OPTION')],
+   ]
+   for(const[label,change]of changes){
+    await owner.query('BEGIN')
+    try{await change();await assert.rejects(owner.query(migration),/Native governance lock/)}finally{await owner.query('ROLLBACK')}
+    assert.deepEqual(await catalog(owner),before,label);assert.deepEqual(await ledgerRows(owner),ledger,label)
+    assert.deepEqual((await owner.query('SELECT to_jsonb(r) AS value FROM application_operation_receipts r WHERE id=$1',[ids[2]])).rows,seed,label)
+    assert.deepEqual(await guard(owner),{current:true,ledger:600},label)
+   }
+  }finally{await owner.end()}
+ }})
+ try{
+  assert.equal(calls,1);const owner=new pg.Client({connectionString:fixture.adminUrl});await owner.connect()
+  try{
+   assert.deepEqual(await guard(owner),{current:true,ledger:inventory.length})
+   const after=await catalog(owner)
+   assert.deepEqual(after.find(row=>row.value.proname==='application_apply_native_governance_review'),
+    transition.find(row=>row.value.proname==='application_apply_native_governance_review'))
+   const completeLedger=await ledgerRows(owner),oldNames=new Set(ledger.map(row=>row.name)),expectedNewNames=inventory.filter(name=>!oldNames.has(name))
+   assert.deepEqual(completeLedger.filter(row=>oldNames.has(row.name)),ledger)
+   assert.deepEqual(completeLedger.filter(row=>!oldNames.has(row.name)).map(row=>row.name),expectedNewNames)
+   assert.equal(completeLedger.filter(row=>row.name==='8130_application_governance_audit_lock.sql').length,1)
+   assert.equal(completeLedger.filter(row=>row.name==='8129_native_history_title_dependencies.sql').length,1)
+   assert.deepEqual((await owner.query('SELECT to_jsonb(r) AS value FROM application_operation_receipts r WHERE id=$1',[ids[2]])).rows,seed)
+   const{tsImport}=await import('tsx/esm/api'),{runMigrations}=await tsImport('../../../packages/api/scripts/migrate.ts',import.meta.url)
+   assert.equal((await runMigrations({databaseUrl:fixture.adminUrl})).appliedCount,0)
+   const fresh=new pg.Client({connectionString:process.env.DATABASE_URL});await fresh.connect()
+   try{assert.equal((await fresh.query('SELECT prosrc FROM pg_proc WHERE oid=$1::regprocedure',[signature])).rows[0].prosrc,after.find(row=>row.value.proname==='application_apply_native_governance_review').value.prosrc)}finally{await fresh.end()}
+   if(process.env.F_E07_MIGRATION_ARTIFACT)await writeFile(process.env.F_E07_MIGRATION_ARTIFACT,JSON.stringify({before,transition,after,ledger,completeLedger,expectedNewNames,seed,guard:await guard(owner),driftRefusals:7,replay:0},null,2)+'\n')
+   t.diagnostic(JSON.stringify({ledgerBefore:600,ledgerAfter:inventory.length,changedBodies:1,preservedPublicFunctionsAt8130:transition.length-1,guardCurrent:true,driftRefusals:7,replay:0,originalLedgerAndReceiptUnchanged:true}))
+  }finally{await owner.end()}
+ }finally{await fixture.dispose()}
+})
