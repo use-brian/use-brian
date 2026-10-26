@@ -90,7 +90,7 @@ type Capabilities = {
 }
 const none: Capabilities = { dateRange: false, countries: {}, languages: {}, location: false, domains: false, safeSearch: [], dateSemantics: 'unsupported' }
 const google: Capabilities = { ...none, dateRange: 'closed', countries: googleCountries, languages: googleLanguages, location: true, dateSemantics: 'Google index date; not independently verified publication date' }
-export const SEARCH_FILTER_CAPABILITIES: Readonly<Record<SearchProviderName, Capabilities>> = {
+const SEARCH_FILTER_CAPABILITIES: Readonly<Record<SearchProviderName, Capabilities>> = {
   brave: { ...none, dateRange: 'closed', countries: braveCountries, languages: braveLanguages, safeSearch: ['off', 'moderate', 'strict'], dateSemantics: 'Brave discovered/updated index date; not independently verified publication date' },
   serper: google,
   serpapi: { ...google, safeSearch: ['off', 'strict'] },
@@ -98,7 +98,7 @@ export const SEARCH_FILTER_CAPABILITIES: Readonly<Record<SearchProviderName, Cap
   baidu: { ...none, dateRange: 'closed', location: true, domains: true, safeSearch: ['off', 'strict'], dateSemantics: 'Baidu page_time index publication date; not independently verified' },
   duckduckgo: none,
 }
-export class UnsupportedSearchFiltersError extends Error {
+class UnsupportedSearchFiltersError extends Error {
   constructor(readonly provider: string, readonly reasons: string[]) {
     super(`Provider ${provider} cannot honor the requested search filters: ${reasons.join('; ')}. Choose a compatible provider or explicitly revise the filters.`)
     this.name = 'UnsupportedSearchFiltersError'
