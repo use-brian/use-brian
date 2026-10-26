@@ -192,7 +192,25 @@ else
     --team-id "$APPLE_TEAM_ID" \
     --wait
   echo "==> Stapling the dmg"
-  xcrun stapler staple "$DMG"
+  # Exit 68 means the ticket could not be downloaded. Apple may have accepted
+  # the DMG while its CloudKit ticket endpoint is still temporarily unavailable.
+  # Retry only this download; never rebuild, re-sign or resubmit notarization.
+  staple_attempt=1
+  staple_delay=15
+  while true; do
+    if xcrun stapler staple "$DMG"; then
+      break
+    else
+      staple_status=$?
+    fi
+    if [[ "$staple_status" != "68" || "$staple_attempt" -ge 4 ]]; then
+      exit "$staple_status"
+    fi
+    echo "==> DMG ticket download failed (exit 68); retrying in ${staple_delay}s (attempt $((staple_attempt + 1))/4)"
+    sleep "$staple_delay"
+    staple_attempt=$((staple_attempt + 1))
+    staple_delay=$((staple_delay * 2))
+  done
 fi
 echo "==> Gatekeeper check (want: accepted / Notarized Developer ID):"
 spctl -a -vv -t open --context context:primary-signature "$DMG"

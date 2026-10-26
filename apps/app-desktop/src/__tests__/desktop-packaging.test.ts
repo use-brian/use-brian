@@ -8,7 +8,7 @@ import { afterEach, describe, expect, it } from "vitest";
 const dirs: string[] = [];
 afterEach(() => { for (const dir of dirs.splice(0)) rmSync(dir, { recursive: true, force: true }); });
 
-function packageFixture(gatekeeperExit = 0) {
+function packageFixture(gatekeeperExit = 0, options: { stapleFailures?: number; stapleExit?: number; notaryExit?: number } = {}) {
   const root = mkdtempSync(join(tmpdir(), "desktop-package-test-"));
   dirs.push(root);
   for (const path of ["scripts", "bin", "apps/app-desktop/release"]) mkdirSync(join(root, path), { recursive: true });
@@ -17,7 +17,7 @@ function packageFixture(gatekeeperExit = 0) {
   writeFileSync(join(root, "apps/app-desktop/package.json"), JSON.stringify({ version: "0.0.12" }));
   for (const file of ["usebrian.dmg", "usebrian.zip"]) writeFileSync(join(root, "apps/app-desktop/release", file), "fictional artifact");
   const log = join(root, "calls.jsonl");
-  for (const command of ["uname", "security", "pnpm", "codesign", "xcrun", "spctl"]) {
+  for (const command of ["uname", "security", "pnpm", "codesign", "xcrun", "spctl", "sleep"]) {
     writeFileSync(join(root, "bin", command), `#!/usr/bin/env node
 const fs = require('node:fs');
 const args = process.argv.slice(2);
@@ -25,6 +25,15 @@ const args = process.argv.slice(2);
 if ('${command}' !== 'security') fs.appendFileSync(process.env.PACKAGE_TEST_LOG, JSON.stringify(['${command}', ...args]) + '\\n');
 if ('${command}' === 'uname') console.log('Darwin');
 if ('${command}' === 'security' && args[0] === 'find-identity') console.log('1) ${"A".repeat(40)} "Developer ID Application: Example"');
+if ('${command}' === 'xcrun') {
+  if (args[0] === 'stapler' && args[1] === 'validate' && ${options.stapleFailures !== undefined || options.notaryExit !== undefined}) process.exit(1);
+  if (args[0] === 'notarytool' && args[1] === 'submit') process.exit(${options.notaryExit ?? 0});
+  if (args[0] === 'stapler' && args[1] === 'staple') {
+    const attempts = fs.readFileSync(process.env.PACKAGE_TEST_LOG, 'utf8').trim().split('\\n')
+      .map(line => JSON.parse(line)).filter(call => call[0] === 'xcrun' && call[1] === 'stapler' && call[2] === 'staple').length;
+    if (attempts <= ${options.stapleFailures ?? 0}) process.exit(${options.stapleExit ?? 68});
+  }
+}
 if ('${command}' === 'spctl') process.exit(${gatekeeperExit});
 `, { mode: 0o755 });
   }
@@ -82,6 +91,47 @@ describe("[COMP:app-desktop/packaging] desktop packaging", () => {
     expect(pnpm.at(-1)?.slice(-2)).toEqual(["--publish", "never"]);
     expect(JSON.parse(readFileSync(join(result.root, "apps/app-desktop/package.json"), "utf8")).version).toBe("0.0.13");
     expect(result.stdout + result.stderr).not.toContain("fixture-password");
+  }, 30_000);
+
+  it("retries the DMG ticket download without rebuilding or resubmitting notarization", () => {
+    const result = packageFixture(0, { stapleFailures: 3 });
+    expect(result.status, result.stderr).toBe(0);
+    expect(result.calls.filter(call => call[0] === "xcrun" && call[1] === "stapler" && call[2] === "staple")).toHaveLength(4);
+    expect(result.calls.filter(call => call[0] === "xcrun" && call[1] === "notarytool" && call[2] === "submit")).toHaveLength(1);
+    expect(result.calls.filter(call => call[0] === "pnpm" && call.includes("electron-builder"))).toHaveLength(1);
+    expect(result.calls.filter(call => call[0] === "sleep")).toEqual([["sleep", "15"], ["sleep", "30"], ["sleep", "60"]]);
+    expect(result.calls.some(call => call[0] === "spctl")).toBe(true);
+  }, 30_000);
+
+  it("fails after four DMG ticket download errors and never reaches Gatekeeper", () => {
+    const result = packageFixture(0, { stapleFailures: 4 });
+    expect(result.status).toBe(68);
+    expect(result.calls.filter(call => call[0] === "xcrun" && call[1] === "stapler" && call[2] === "staple")).toHaveLength(4);
+    expect(result.calls.filter(call => call[0] === "sleep")).toHaveLength(3);
+    expect(result.calls.some(call => call[0] === "spctl")).toBe(false);
+    expect(result.stdout).not.toContain("==> Done.");
+  }, 30_000);
+
+  it("refuses a non-download stapler error immediately", () => {
+    const result = packageFixture(0, { stapleFailures: 4, stapleExit: 66 });
+    expect(result.status).toBe(66);
+    expect(result.calls.filter(call => call[0] === "xcrun" && call[1] === "stapler" && call[2] === "staple")).toHaveLength(1);
+    expect(result.calls.some(call => call[0] === "sleep" || call[0] === "spctl")).toBe(false);
+  }, 30_000);
+
+  it("does not retry a refused DMG notarization submission", () => {
+    const result = packageFixture(0, { notaryExit: 65 });
+    expect(result.status).toBe(65);
+    expect(result.calls.filter(call => call[0] === "xcrun" && call[1] === "notarytool" && call[2] === "submit")).toHaveLength(1);
+    expect(result.calls.some(call => call[0] === "xcrun" && call[1] === "stapler" && call[2] === "staple")).toBe(false);
+    expect(result.calls.some(call => call[0] === "sleep" || call[0] === "spctl")).toBe(false);
+  }, 30_000);
+
+  it("retains Gatekeeper refusal after a successful DMG stapling retry", () => {
+    const result = packageFixture(7, { stapleFailures: 3 });
+    expect(result.status).toBe(7);
+    expect(result.calls.filter(call => call[0] === "xcrun" && call[1] === "stapler" && call[2] === "staple")).toHaveLength(4);
+    expect(result.stdout).not.toContain("==> Done.");
   }, 30_000);
 
   it("fails when Gatekeeper rejects the signed installer", () => {
