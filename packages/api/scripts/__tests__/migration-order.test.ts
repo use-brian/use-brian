@@ -36,6 +36,21 @@ describe('[COMP:api/migration-order] Migration file ordering', () => {
     ])
   })
 
+  it('places the legacy privilege repair before its blocked Memory migration', () => {
+    const ordered = orderMigrationFiles([{ dir: '/open', files: [
+      '8111_native_memory_statement_visitor.sql',
+      '8110_canonical_task_author_delete.sql',
+      '81110_legacy_function_execute_privileges.sql',
+      '8112_native_feedback_outcome_projection.sql',
+    ] }])
+    expect(ordered.map(({ file }) => file)).toEqual([
+      '8110_canonical_task_author_delete.sql',
+      '81110_legacy_function_execute_privileges.sql',
+      '8111_native_memory_statement_visitor.sql',
+      '8112_native_feedback_outcome_projection.sql',
+    ])
+  })
+
   it('ignores non-sql files', () => {
     const ordered = orderMigrationFiles([
       { dir: '/open', files: ['001_a.sql', 'README.md', '.DS_Store'] },

@@ -775,3 +775,40 @@ test('[COMP:crm/assurance-fixture] Native transcript read migration preserves603
   }finally{await owner.end()}
  }finally{await fixture.dispose()}
 })
+
+
+test('[COMP:api/migration-owner-role] Historical function defaults upgrade through the actual PostgreSQL runner', async () => {
+  const env = cleanRuntimeEnvironment(process.env)
+  const pgBin = (await runCommand('pg_config', ['--bindir'], { env })).trim()
+  let calls = 0
+  const fixture = await createLocalFixture({ pgBin, env,
+    beforeApplyFile: '279_workflow_cross_run_state.sql',
+    beforeApply: async ({ adminUrl }) => {
+      calls++
+      const owner = new pg.Client({ connectionString: adminUrl })
+      await owner.connect()
+      try {
+        // Historical migration 269's provisioning survives the baseline squash.
+        // This is confined to a new disposable database, before later revocations.
+        await owner.query(`GRANT EXECUTE ON ALL FUNCTIONS IN SCHEMA public TO app_user;
+          ALTER DEFAULT PRIVILEGES IN SCHEMA public GRANT EXECUTE ON FUNCTIONS TO app_user`)
+      } finally { await owner.end() }
+    },
+  })
+  const owner = new pg.Client({ connectionString: fixture.adminUrl })
+  try {
+    await owner.connect()
+    assert.equal(calls, 1)
+    assert.equal((await owner.query(`SELECT count(*)::int AS count FROM _migrations WHERE name IN (
+      '81110_legacy_function_execute_privileges.sql','8111_native_memory_statement_visitor.sql',
+      '8133_native_history_transcript_read.sql')`)).rows[0].count, 3)
+    assert.equal((await owner.query('SELECT application_memory_statement_helpers_current() AS current')).rows[0].current, true)
+    assert.deepEqual((await owner.query(`SELECT has_function_privilege('app_user',
+      'public.application_memory_statement_state(uuid,uuid,text[],jsonb)','EXECUTE') AS private,
+      has_function_privilege('app_user','public.read_admitted_native_scope_snapshot(uuid,text,uuid)','EXECUTE') AS facade`)).rows,
+    [{ private: false, facade: true }])
+    assert.equal((await owner.query(`SELECT count(*)::int AS count FROM pg_default_acl d,
+      LATERAL aclexplode(d.defaclacl) a JOIN pg_roles r ON r.oid=a.grantee
+      WHERE d.defaclobjtype='f' AND r.rolname='app_user'`)).rows[0].count, 0)
+  } finally { await owner.end(); await fixture.dispose() }
+})
