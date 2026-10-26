@@ -1,5 +1,5 @@
 /** Current-authority recovery for an operation whose acknowledgement was lost. */
-import { randomUUID } from 'node:crypto'
+import { createHash, randomUUID } from 'node:crypto'
 import { once } from 'node:events'
 import { afterAll, beforeAll, describe, expect, it } from 'vitest'
 import express from 'express'
@@ -255,6 +255,102 @@ describe.sequential('[COMP:api/application-records] canonical operation reconcil
   const mcp = await rpc(false, credential.secret, 'applicationReconcile', { commandKey: 'record_create', command })
   expect(mcp.isError).not.toBe(true); expect(JSON.parse(mcp.content[0].text)).toEqual(recovered)
   expect(await stableState()).toEqual(durable)
+ })
+ it('keeps a genuinely committed legacy receipt uncertain on retry and recovery under current authority', async () => {
+  const { credential, grantId } = await setup(), originalApp = appId
+  const envelope = { idempotencyKey: randomUUID(), input: { operation: 'create', type: typeKey, data: data('Fictional retained legacy outcome') } }
+  // Exact pre-wire fingerprint: parsed handler input, locale-sorted object
+  // keys and nullable envelope version. This is not a second dispatcher.
+  const stable = (value: unknown): string => {
+   if (value === null || typeof value !== 'object') return JSON.stringify(value)
+   if (Array.isArray(value)) return `[${value.map(stable).join(',')}]`
+   return `{${Object.entries(value).sort(([left], [right]) => left.localeCompare(right))
+    .map(([key, item]) => `${JSON.stringify(key)}:${stable(item)}`).join(',')}}`
+  }
+  const legacyHash = createHash('sha256').update(stable({ input: definition.commands.record_create.input.parse(envelope.input), expectedVersion: null })).digest('hex')
+  const authentication = await authenticateApplicationCredential(credential.secret, originalApp, loadApplicationCredentialStateSystem)
+  expect(authentication).not.toBeNull()
+  let inserts = 0, commits = 0
+  // Delegate every successful SQL statement to the real restricted connection.
+  // Only the hash parameter of this one command's receipt INSERT is replaced.
+  const legacyPool = { connect: async () => {
+   const connection = await getAppPool().connect()
+   return new Proxy(connection, { get(target, key) {
+    const value = Reflect.get(target, key)
+    if (key === 'query') return async (...args: unknown[]) => {
+     if (typeof args[0] === 'string' && /^INSERT INTO application_operation_receipts\s/.test(args[0])) {
+      expect(args[0].replace(/\s+/g, ' ').trim()).toBe('INSERT INTO application_operation_receipts (id,workspace_id,module_key,operation_key,actor_key,actor_user_id,idempotency_key,request_hash,resources,correlation_key,application_client_id) VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11)')
+      const parameters = args[1] as unknown[]
+      expect(parameters).toHaveLength(11)
+      expect(parameters.slice(1, 4)).toEqual([workspaceId, 'records', 'record_create'])
+      expect(parameters[6]).toBe(envelope.idempotencyKey); expect(parameters[7]).toMatch(/^wire-v1:[a-f0-9]{64}$/)
+      expect(parameters[10]).toBe(originalApp); expect(inserts++).toBe(0)
+      const role = (await target.query(`SELECT session_user,current_user,r.rolsuper,r.rolbypassrls,r.rolinherit,
+       (SELECT count(*)::int FROM pg_auth_members m WHERE m.member=r.oid OR m.roleid=r.oid) AS memberships,
+       c.relowner=r.oid AS owns_receipts FROM pg_roles r JOIN pg_class c ON c.oid='application_operation_receipts'::regclass WHERE r.rolname=session_user`)).rows[0]
+      expect(role).toEqual({ session_user: 'app_user', current_user: 'app_user', rolsuper: false, rolbypassrls: false, rolinherit: false, memberships: 0, owns_receipts: false })
+      const substituted = [...parameters]; substituted[7] = legacyHash
+      args = [args[0], substituted]
+     }
+     const result = await Reflect.apply(value, target, args)
+     if (args[0] === 'COMMIT') commits++
+     return result
+    }
+    return typeof value === 'function' ? value.bind(target) : value
+   } })
+  } } as unknown as Pool
+  const before = await stableState()
+  const created = await new ApplicationPlatformService([definition], legacyPool).command(
+   await resolveApplicationExecutionContext({ credential: authentication! }), 'records', 'record_create', envelope)
+  expect(inserts).toBe(1); expect(commits).toBe(1)
+  expect(created.resources).toHaveLength(1)
+  const recordId = created.resources[0].id
+  const snapshot = async () => ({
+   state: await stableState(),
+   receipt: (await pool.query('SELECT to_jsonb(r) AS value FROM application_operation_receipts r WHERE id=$1', [created.id])).rows,
+   record: (await pool.query('SELECT to_jsonb(r) AS value FROM entity_instances r WHERE id=$1', [recordId])).rows,
+   revisions: (await pool.query('SELECT to_jsonb(r) AS value FROM application_record_revisions r WHERE entity_instance_id=$1 ORDER BY record_version', [recordId])).rows,
+   audit: (await pool.query('SELECT to_jsonb(r) AS value FROM application_command_audit r WHERE receipt_id=$1 ORDER BY id', [created.id])).rows,
+   events: (await pool.query('SELECT to_jsonb(r) AS value FROM application_committed_events r WHERE receipt_id=$1 ORDER BY id', [created.id])).rows,
+  })
+  const saved = await snapshot()
+  expect(saved.receipt).toHaveLength(1); expect(saved.record).toHaveLength(1); expect(saved.revisions).toHaveLength(1)
+  expect(saved.audit).toHaveLength(1); expect(saved.events).toHaveLength(1)
+  expect(saved.receipt[0].value).toMatchObject({ id: created.id, application_client_id: originalApp, idempotency_key: envelope.idempotencyKey, request_hash: legacyHash, resources: created.resources })
+  expect(saved.state.totals).toEqual({ receipts: before.totals.receipts + 1, audit: before.totals.audit + 1, events: before.totals.events + 1 })
+  expect(saved.state.executeCount).toBe(before.executeCount + 1); expect(saved.state.effectCount).toBe(before.effectCount + 1)
+  const endpoint = `/api/applications/${originalApp}/commands/record_create`
+  for (const supplied of [envelope, { ...envelope, input: { ...envelope.input, data: data('Fictional changed legacy retry') } }]) {
+   const retry = await request(http).post(endpoint).set('Authorization', 'Bearer ' + credential.secret).send(supplied)
+   expect(retry.status, JSON.stringify(retry.body)).toBe(400)
+   expect(retry.body).toMatchObject({ error: 'outcome_uncertain', effect: 'uncertain', retrySafe: false }); expect(retry.body).not.toHaveProperty('receipt')
+   const recovered = await request(http).post(endpoint + '/reconcile').set('Authorization', 'Bearer ' + credential.secret).send(supplied)
+   expect(recovered.status).toBe(200); expect(recovered.body).toEqual({ state: 'uncertain' })
+   const retryMcp = await rpc(false, credential.secret, 'applicationCommand', { commandKey: 'record_create', command: supplied })
+   expect(retryMcp.isError).toBe(true); expect(JSON.parse(retryMcp.content[0].text)).toMatchObject({ error: 'outcome_uncertain', effect: 'uncertain', retrySafe: false })
+   const recoveredMcp = await rpc(false, credential.secret, 'applicationReconcile', { commandKey: 'record_create', command: supplied })
+   expect(recoveredMcp.isError).not.toBe(true); expect(JSON.parse(recoveredMcp.content[0].text)).toEqual({ state: 'uncertain' })
+   expect(await snapshot()).toEqual(saved)
+  }
+  // Even an owner inspection connection cannot rewrite immutable evidence.
+  await expect(pool.query('UPDATE application_operation_receipts SET request_hash=$2 WHERE id=$1', [created.id, '0'.repeat(64)]))
+   .rejects.toMatchObject({ code: '22023', message: 'invalid_value: immutable command evidence' })
+  const other = await setup(); appId = originalApp
+  const refused = async (token: string) => {
+   for (const suffix of ['', '/reconcile']) {
+    const response = await request(http).post(endpoint + suffix).set('Authorization', 'Bearer ' + token).send(envelope)
+    expect([401, 403], JSON.stringify(response.body)).toContain(response.status); expect(response.body).not.toHaveProperty('receipt')
+   }
+   for (const name of ['applicationCommand', 'applicationReconcile']) {
+    const response = await request(http).post(`/api/applications/${originalApp}/mcp`).set('Authorization', 'Bearer ' + token)
+     .set('Accept', 'application/json, text/event-stream').send({ jsonrpc: '2.0', id: randomUUID(), method: 'tools/call', params: { name, arguments: { commandKey: 'record_create', command: envelope } } })
+    expect([401, 403], response.text).toContain(response.status); expect(response.text).not.toContain(created.id)
+   }
+   expect(await snapshot()).toEqual(saved)
+  }
+  await refused(other.credential.secret)
+  await checked({ kind: 'grant.revoke', appId: originalApp, grantId })
+  await refused(credential.secret)
  })
  it('preserves prototype-named JSON through real HTTP and MCP parsing before canonical handler normalization', async () => {
   const { credential } = await setup(), prototypeKeys = Reflect.ownKeys(Object.prototype)
