@@ -412,3 +412,95 @@ describe('[COMP:api/migration-owner-role] Memory successor parity8126',()=>{
     }finally{await f.db.close()}
   })
 })
+
+// Existing ordinary-owner provisioning, including installations with different
+// public/plpgsql OIDs. These cases exercise only the8133 prerequisite boundary.
+describe('[COMP:api/migration-owner-role] Native transcript read prerequisite portability8133',()=>{
+ for(const appUser of [false,true]){
+  it(`preserves exact8133 prerequisites with app_user ${appUser?'present and local OIDs varied':'absent'}`,async()=>{
+   const {readdir,writeFile}=await import('node:fs/promises')
+   const db=await openAsOwner({appUser,varyOids:appUser})
+   const proof:Record<string,unknown>={appUser,varyOids:appUser,status:'running',refusals:[]}
+   const predecessor='8132_native_history_transcript_dependencies.sql'
+   const migration='8133_native_history_transcript_read.sql',lineage='public.application_scope_lineage(uuid,text[],uuid[],text[])'
+   const edge='public.application_scope_source_edges(uuid,text,uuid,text)',nullConfig='public.scope_source_table_before_media(text)'
+   const canonical='public.application_canonical_ancestry_allowed(uuid,text,uuid,text,boolean)'
+   const envelope='public.application_compute_field_envelope(uuid,jsonb,text,uuid,text,text,text[],integer)'
+   const state=async()=>({
+    catalog:(await db.query<{oid:string;value:Record<string,unknown>}>('SELECT p.oid::text AS oid,to_jsonb(p) AS value FROM pg_proc p WHERE p.pronamespace=\'public\'::regnamespace ORDER BY p.oid')).rows,
+    trigger:(await db.query('SELECT to_jsonb(t) AS value FROM pg_trigger t WHERE tgrelid=\'public.scope_derivation_sources\'::regclass AND tgname=\'application_field_derivation_dependencies\'')).rows,
+    ledger:(await db.query<{name:string;applied_at:string}>('SELECT name,applied_at::text FROM _migrations ORDER BY name')).rows,
+    guard:(await db.query('SELECT application_memory_statement_helpers_current() AS current')).rows,
+   })
+   try{
+    const files=(await readdir(migrationsDir)).filter(name=>name.endsWith('.sql')).sort()
+    const beforeNames=files.filter(name=>name<=predecessor),afterNames=files.filter(name=>name<=migration)
+    assert.deepEqual(afterNames,[...beforeNames,migration]);proof.inventory={beforeNames,afterNames}
+    await migratePglite(db,migrationsDir,{through:predecessor})
+    await assertOrdinaryOwner(db)
+    const before=await state();assert.deepEqual(before.ledger.map(row=>row.name),beforeNames);assert.deepEqual(before.guard,[{current:true}]);proof.before=before
+    proof.environment=(await db.query(`SELECT current_user,session_user,'public'::regnamespace::oid AS namespace,
+     (SELECT oid FROM pg_language WHERE lanname='plpgsql') AS plpgsql_language,
+     (SELECT rolsuper FROM pg_roles WHERE rolname=current_user) AS superuser,
+     (SELECT rolbypassrls FROM pg_roles WHERE rolname=current_user) AS bypass`)).rows
+    const definition=async(signature:string)=>(await db.query<{value:string}>('SELECT pg_get_functiondef($1::regprocedure) AS value',[signature])).rows[0].value
+    const definitions=new Map(await Promise.all([lineage,edge,nullConfig,canonical,envelope].map(async signature=>[signature,await definition(signature)] as const)))
+    const body=(signature:string)=>String(before.catalog.find(row=>row.value.proname===signature.split('.')[1].split('(')[0])!.value.prosrc)
+    assert.equal(before.catalog.find(row=>row.value.proname==='scope_source_table_before_media')!.value.proconfig,null)
+    const changeBody=(signature:string)=>definitions.get(signature)!.replace(body(signature),body(signature)+'\n-- Fictional transcript prerequisite drift\n')
+    const changedPin=definitions.get(lineage)!.replace(/'[0-9a-f]{64}'::text/,`'${'0'.repeat(64)}'::text`)
+    assert.notEqual(changedPin,definitions.get(lineage))
+    const trueDefault=definitions.get(canonical)!.replace('DEFAULT false','DEFAULT true')
+    const depthOne=definitions.get(envelope)!.replace('DEFAULT 0','DEFAULT 1')
+    assert.notEqual(trueDefault,definitions.get(canonical));assert.notEqual(depthOne,definitions.get(envelope))
+    const cases=[
+     {name:'lineage raw body',change:changeBody(lineage),restore:definitions.get(lineage)!},
+     {name:'lineage historical pin',change:changedPin,restore:definitions.get(lineage)!},
+     {name:'current history-aware edge body',change:changeBody(edge),restore:definitions.get(edge)!},
+     {name:'NULL-config helper body',change:changeBody(nullConfig),restore:definitions.get(nullConfig)!},
+     {name:'NULL-config helper setting',change:`ALTER FUNCTION ${nullConfig} SET search_path=public`,restore:`ALTER FUNCTION ${nullConfig} RESET ALL`},
+     {name:'private helper ACL',change:`GRANT EXECUTE ON FUNCTION ${nullConfig} TO PUBLIC`,restore:`REVOKE ALL ON FUNCTION ${nullConfig} FROM PUBLIC`},
+     {name:'fixed helper metadata',change:`ALTER FUNCTION ${edge} COST 101`,restore:`ALTER FUNCTION ${edge} COST 100`},
+     {name:'boolean default true',change:trueDefault,restore:definitions.get(canonical)!},
+     {name:'integer depth default1',change:depthOne,restore:definitions.get(envelope)!},
+    ]
+    for(const scenario of cases){
+     await db.exec(scenario.change)
+     const drifted=await state()
+     try{
+      await assert.rejects(migratePglite(db,migrationsDir,{through:migration}),/Native history transcript read .*prerequisite changed/)
+      assert.deepEqual(await state(),drifted,scenario.name)
+      assert.deepEqual(drifted.ledger.map(row=>row.name),beforeNames);assert.equal(drifted.ledger.some(row=>row.name===migration),false)
+      ;(proof.refusals as unknown[]).push({name:scenario.name,atomicCatalogTriggerLedgerConservation:true})
+     }finally{await db.exec(scenario.restore)}
+     assert.deepEqual(await state(),before,scenario.name+' restored')
+     await assertOrdinaryOwner(db)
+    }
+    assert.equal(await migratePglite(db,migrationsDir,{through:migration}),1)
+    assert.equal(await migratePglite(db,migrationsDir,{through:migration}),0)
+    const after=await state();proof.after=after
+    assert.deepEqual(after.ledger.map(row=>row.name),afterNames);assert.deepEqual(after.ledger.filter(row=>row.name!==migration),before.ledger)
+    assert.equal(after.ledger.filter(row=>row.name===migration).length,1);assert.deepEqual(after.trigger,before.trigger)
+    assert.deepEqual(after.guard,[{current:true}]);assert.equal(after.catalog.length,before.catalog.length)
+    const targetHashes:Record<string,string>={application_session_eval_point_state:'5be4ee91b3ab9e447ace596249e789b2408568d3519cd60bb769820dc0bb7562',
+     application_field_envelope_ancestry_allowed:'27143be754ab14cd8dd868df6da06a88cf784787b00e7093361f2a3702b2e62d',
+     read_native_session_field_dependencies:'fc663c87b15ec0a570ca3f75d97e8f1add1ea158fa68bfb13930c361235afbbe'}
+    let changed=0
+    for(let n=0;n<before.catalog.length;n++){
+     const prior=before.catalog[n],current=after.catalog[n];assert.equal(current.oid,prior.oid)
+     if(String(current.value.proname) in targetHashes){
+      const{prosrc:oldBody,...oldMetadata}=prior.value,{prosrc:newBody,...newMetadata}=current.value
+      assert.notEqual(newBody,oldBody);assert.deepEqual(newMetadata,oldMetadata)
+      assert.equal((await db.query<{hash:string}>("SELECT encode(sha256(convert_to($1,'UTF8')),'hex') AS hash",[String(newBody)])).rows[0].hash,targetHashes[String(current.value.proname)]);changed++
+     }else assert.deepEqual(current,prior)
+    }
+    assert.equal(changed,3);proof.changedBodies=changed;proof.replay=0
+    await assertOrdinaryOwner(db);await assertNothingLeftBypassed(db);proof.status='pass'
+   }catch(error){proof.status='blocked';proof.error={message:(error as Error).message,stack:(error as Error).stack};throw error}
+   finally{
+    await db.close();proof.closed=true
+    if(process.env.F_E13B_ORDINARY_ARTIFACT)await writeFile(process.env.F_E13B_ORDINARY_ARTIFACT+'-'+(appUser?'present':'absent')+'.json',JSON.stringify(proof,null,2)+'\n')
+   }
+  })
+ }
+})

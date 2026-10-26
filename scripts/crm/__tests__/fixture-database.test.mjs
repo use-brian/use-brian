@@ -620,3 +620,158 @@ test('[COMP:crm/assurance-fixture] Generic relationship migration preserves601 s
   }finally{await owner.end()}
  }finally{await fixture.dispose()}
 })
+
+test('[COMP:crm/assurance-fixture] Native transcript dependency migration preserves602 state and rejects prerequisite drift', {timeout:180_000}, async()=>{
+ await assertLocalFixture()
+ const env=cleanRuntimeEnvironment(process.env),pgBin=(await runCommand('pg_config',['--bindir'],{env})).trim()
+ const name='8132_native_history_transcript_dependencies.sql',migration=await readFile(new URL('../../../packages/api/migrations/'+name,import.meta.url),'utf8')
+ const inventory=(await readdir(new URL('../../../packages/api/migrations/',import.meta.url))).filter(name=>name.endsWith('.sql')).sort()
+ const signatures=['prepare_native_session_message_batch(uuid,uuid,text,jsonb,jsonb)','validate_application_field_dependencies()']
+ const expected=['56495fea6eade9f397d21dc725501159dc3f928c2786dcb005dedc4513e0f30d','6f86fbd4c0cc5c77e69a91c6c0c211b0b70c69f49dfd89b3ec85eddff39d9091']
+ const names=signatures.map(value=>value.split('(')[0]),helper='read_native_attended_memory_evidence(uuid,text[],uuid[],text[])'
+ const catalog=async owner=>(await owner.query("SELECT p.oid::text AS oid,to_jsonb(p) AS value FROM pg_proc p WHERE p.pronamespace='public'::regnamespace ORDER BY p.oid")).rows
+ const trigger=async owner=>(await owner.query("SELECT to_jsonb(t) AS value FROM pg_trigger t WHERE tgrelid='public.scope_derivation_sources'::regclass AND tgname='application_field_derivation_dependencies'")).rows
+ const ledgerRows=async owner=>(await owner.query('SELECT name,applied_at::text FROM _migrations ORDER BY name')).rows
+ const guard=async owner=>(await owner.query('SELECT application_memory_statement_helpers_current() AS current,(SELECT count(*)::int FROM _migrations) AS ledger')).rows[0]
+ let before,transition,ledger,seed,triggers,calls=0
+ const ids=[randomUUID(),randomUUID(),randomUUID()]
+ const fixture=await createLocalFixture({pgBin,env,beforeApplyFile:name,beforeApply:async({adminUrl})=>{
+  calls++;const owner=new pg.Client({connectionString:adminUrl});await owner.connect()
+  try{
+   assert.deepEqual(await guard(owner),{current:true,ledger:602})
+   await owner.query('INSERT INTO users(id,auth_provider_id) VALUES($1::uuid,$1::text)',[ids[0]])
+   await owner.query("INSERT INTO workspaces(id,name,owner_user_id) VALUES($1,'Fictional preserved transcript installer',$2)",[ids[1],ids[0]])
+   await owner.query("INSERT INTO application_operation_receipts(id,workspace_id,module_key,operation_key,actor_key,actor_user_id,idempotency_key,request_hash,resources) VALUES($1,$2,'native','fictional_prior_transcript','fictional_prior_transcript',$3,'fictional_prior_transcript',$4,'[]')",[ids[2],ids[1],ids[0],'d'.repeat(64)])
+   before=await catalog(owner);triggers=await trigger(owner);ledger=await ledgerRows(owner)
+   seed=(await owner.query('SELECT to_jsonb(r) AS value FROM application_operation_receipts r WHERE id=$1',[ids[2]])).rows
+   const pin=before.find(row=>row.value.proname==='application_memory_statement_helpers_current').value
+   assert.match(pin.prosrc,/SELECT count\(\*\)=122/);assert.equal([...pin.prosrc.matchAll(/::oid,'[0-9a-f]{64}'::text/g)].length,122)
+   const definitions=await Promise.all([...signatures,helper].map(async signature=>(await owner.query('SELECT pg_get_functiondef($1::regprocedure) AS value',[signature])).rows[0].value))
+   assert.match(migration,/^BEGIN;\n/);assert.match(migration,/COMMIT;\n?$/)
+   await owner.query('BEGIN')
+   try{
+    await owner.query(migration.replace(/^BEGIN;\n/,'').replace(/COMMIT;\n?$/,''));transition=await catalog(owner);assert.equal(transition.length,before.length)
+    for(let n=0;n<transition.length;n++){
+     const previous=before[n],current=transition[n];assert.equal(current.oid,previous.oid);const index=names.indexOf(current.value.proname)
+     if(index>=0){const{prosrc:oldBody,...oldProperties}=previous.value,{prosrc:newBody,...newProperties}=current.value;assert.deepEqual(newProperties,oldProperties);assert.notEqual(newBody,oldBody)
+      assert.equal((await owner.query("SELECT encode(sha256(convert_to($1,'UTF8')),'hex') AS hash",[newBody])).rows[0].hash,expected[index])
+     }else assert.deepEqual(current,previous)
+    }
+    assert.deepEqual(await trigger(owner),triggers);assert.deepEqual(await ledgerRows(owner),ledger);assert.deepEqual(await guard(owner),{current:true,ledger:602})
+   }finally{await owner.query('ROLLBACK')}
+   assert.deepEqual(await catalog(owner),before);assert.deepEqual(await trigger(owner),triggers)
+   const changes=signatures.map((signature,n)=>['unknown body '+names[n],()=>owner.query(definitions[n].replace(before.find(row=>row.value.proname===names[n]).value.prosrc,before.find(row=>row.value.proname===names[n]).value.prosrc+'\n-- fictional transcript prerequisite drift'))])
+   const helperBefore=before.find(row=>row.value.proname==='read_native_attended_memory_evidence').value
+   changes.push(['target security',()=>owner.query('ALTER FUNCTION '+signatures[0]+' SECURITY INVOKER')],
+    ['target setting',()=>owner.query('ALTER FUNCTION '+signatures[1]+' SET plan_cache_mode=force_custom_plan')],
+    ['target owner',()=>owner.query('ALTER FUNCTION '+signatures[0]+' OWNER TO app_user')],
+    ['target PUBLIC ACL',()=>owner.query('GRANT EXECUTE ON FUNCTION '+signatures[0]+' TO PUBLIC')],
+    ['target runtime ACL',()=>owner.query('GRANT EXECUTE ON FUNCTION '+signatures[1]+' TO app_user')],
+    ['reused helper body',()=>owner.query(definitions[2].replace(helperBefore.prosrc,helperBefore.prosrc+'\n-- fictional reused-helper prerequisite drift'))],
+    ['reused helper ACL',()=>owner.query('GRANT EXECUTE ON FUNCTION '+helper+' TO PUBLIC')],
+    ['deferred trigger disabled',()=>owner.query('ALTER TABLE scope_derivation_sources DISABLE TRIGGER application_field_derivation_dependencies')])
+   for(const[label,change]of changes){
+    await owner.query('BEGIN');try{await change();await assert.rejects(owner.query(migration),/Native history transcript/)}finally{await owner.query('ROLLBACK')}
+    assert.deepEqual(await catalog(owner),before,label);assert.deepEqual(await trigger(owner),triggers,label);assert.deepEqual(await ledgerRows(owner),ledger,label)
+    assert.deepEqual((await owner.query('SELECT to_jsonb(r) AS value FROM application_operation_receipts r WHERE id=$1',[ids[2]])).rows,seed,label)
+    assert.deepEqual(await guard(owner),{current:true,ledger:602},label)
+   }
+  }finally{await owner.end()}
+ }})
+ try{
+  assert.equal(calls,1);const owner=new pg.Client({connectionString:fixture.adminUrl});await owner.connect()
+  try{
+   assert.deepEqual(await guard(owner),{current:true,ledger:inventory.length});const after=await catalog(owner),completeLedger=await ledgerRows(owner)
+   for(const name of names)assert.deepEqual(after.find(row=>row.value.proname===name),transition.find(row=>row.value.proname===name))
+   assert.deepEqual(await trigger(owner),triggers)
+   assert.deepEqual(completeLedger.filter(row=>ledger.some(old=>old.name===row.name)),ledger)
+   const expectedNewNames=inventory.filter(name=>!ledger.some(old=>old.name===name));assert.deepEqual(completeLedger.filter(row=>!ledger.some(old=>old.name===row.name)).map(row=>row.name),expectedNewNames)
+   assert.equal(completeLedger.filter(row=>row.name===name).length,1)
+   assert.deepEqual((await owner.query('SELECT to_jsonb(r) AS value FROM application_operation_receipts r WHERE id=$1',[ids[2]])).rows,seed)
+   const{tsImport}=await import('tsx/esm/api'),{runMigrations}=await tsImport('../../../packages/api/scripts/migrate.ts',import.meta.url);assert.equal((await runMigrations({databaseUrl:fixture.adminUrl})).appliedCount,0)
+   const fresh=new pg.Client({connectionString:process.env.DATABASE_URL});await fresh.connect()
+   try{for(let n=0;n<signatures.length;n++)assert.equal((await fresh.query("SELECT encode(sha256(convert_to(prosrc,'UTF8')),'hex') AS hash FROM pg_proc WHERE oid=$1::regprocedure",[signatures[n]])).rows[0].hash,expected[n])}finally{await fresh.end()}
+   if(process.env.F_E09A_MIGRATION_ARTIFACT)await writeFile(process.env.F_E09A_MIGRATION_ARTIFACT,JSON.stringify({before,transition,after,triggers,ledger,completeLedger,expectedNewNames,seed,guard:await guard(owner),driftRefusals:10,replay:0},null,2)+'\n')
+   console.log(JSON.stringify({ledgerBefore:602,ledgerAfter:inventory.length,changedBodies:2,preservedFunctionsAt8132:before.length-2,guardCurrent:true,driftRefusals:10,replay:0}))
+  }finally{await owner.end()}
+ }finally{await fixture.dispose()}
+})
+
+test('[COMP:crm/assurance-fixture] Native transcript read migration preserves603 state and rejects prerequisite drift', {timeout:180_000}, async()=>{
+ await assertLocalFixture()
+ const env=cleanRuntimeEnvironment(process.env),pgBin=(await runCommand('pg_config',['--bindir'],{env})).trim()
+ const name='8133_native_history_transcript_read.sql',migration=await readFile(new URL('../../../packages/api/migrations/'+name,import.meta.url),'utf8')
+ const inventory=(await readdir(new URL('../../../packages/api/migrations/',import.meta.url))).filter(name=>name.endsWith('.sql')).sort()
+ const signatures=['application_session_eval_point_state(uuid,text,uuid,text[],jsonb)','application_field_envelope_ancestry_allowed(uuid,jsonb)','read_native_session_field_dependencies(uuid,text[],uuid[],text[])']
+ const expected=[] // Derived from the isolated reviewed migration, including later bounded body corrections.
+ const names=signatures.map(value=>value.split('(')[0]),helper='read_native_attended_memory_evidence(uuid,text[],uuid[],text[])'
+ const catalog=async owner=>(await owner.query("SELECT p.oid::text AS oid,to_jsonb(p) AS value FROM pg_proc p WHERE p.pronamespace='public'::regnamespace ORDER BY p.oid")).rows
+ const trigger=async owner=>(await owner.query("SELECT to_jsonb(t) AS value FROM pg_trigger t WHERE tgrelid='public.scope_derivation_sources'::regclass AND tgname='application_field_derivation_dependencies'")).rows
+ const ledgerRows=async owner=>(await owner.query('SELECT name,applied_at::text FROM _migrations ORDER BY name')).rows
+ const guard=async owner=>(await owner.query('SELECT application_memory_statement_helpers_current() AS current,(SELECT count(*)::int FROM _migrations) AS ledger')).rows[0]
+ let before,transition,ledger,seed,triggers,calls=0
+ const ids=[randomUUID(),randomUUID(),randomUUID()]
+ const fixture=await createLocalFixture({pgBin,env,beforeApplyFile:name,beforeApply:async({adminUrl})=>{
+  calls++;const owner=new pg.Client({connectionString:adminUrl});await owner.connect()
+  try{
+   assert.deepEqual(await guard(owner),{current:true,ledger:603})
+   await owner.query('INSERT INTO users(id,auth_provider_id) VALUES($1::uuid,$1::text)',[ids[0]])
+   await owner.query("INSERT INTO workspaces(id,name,owner_user_id) VALUES($1,'Fictional preserved transcript read installer',$2)",[ids[1],ids[0]])
+   await owner.query("INSERT INTO application_operation_receipts(id,workspace_id,module_key,operation_key,actor_key,actor_user_id,idempotency_key,request_hash,resources) VALUES($1,$2,'native','fictional_prior_transcript_read','fictional_prior_transcript_read',$3,'fictional_prior_transcript_read',$4,'[]')",[ids[2],ids[1],ids[0],'d'.repeat(64)])
+   before=await catalog(owner);triggers=await trigger(owner);ledger=await ledgerRows(owner);assert.equal(before.length,1289)
+   seed=(await owner.query('SELECT to_jsonb(r) AS value FROM application_operation_receipts r WHERE id=$1',[ids[2]])).rows
+   const pin=before.find(row=>row.value.proname==='application_memory_statement_helpers_current').value
+   assert.match(pin.prosrc,/SELECT count\(\*\)=122/);assert.equal([...pin.prosrc.matchAll(/::oid,'[0-9a-f]{64}'::text/g)].length,122)
+   const definitions=await Promise.all([...signatures,helper].map(async signature=>(await owner.query('SELECT pg_get_functiondef($1::regprocedure) AS value',[signature])).rows[0].value))
+   assert.match(migration,/^BEGIN;\n/);assert.match(migration,/COMMIT;\n?$/)
+   await owner.query('BEGIN')
+   try{
+    await owner.query(migration.replace(/^BEGIN;\n/,'').replace(/COMMIT;\n?$/,''));transition=await catalog(owner);assert.equal(transition.length,before.length)
+    for(let n=0;n<transition.length;n++){
+     const previous=before[n],current=transition[n];assert.equal(current.oid,previous.oid);const index=names.indexOf(current.value.proname)
+     if(index>=0){const{prosrc:oldBody,...oldProperties}=previous.value,{prosrc:newBody,...newProperties}=current.value;assert.deepEqual(newProperties,oldProperties);assert.notEqual(newBody,oldBody)
+      expected[index]=(await owner.query("SELECT encode(sha256(convert_to($1,'UTF8')),'hex') AS hash",[newBody])).rows[0].hash
+     }else assert.deepEqual(current,previous)
+    }
+    assert.equal(transition.filter((row,n)=>row.value.prosrc!==before[n].value.prosrc).length,3);assert.equal(transition.length-3,1286)
+    assert.equal(expected.length,3);assert.ok(expected.every(hash=>/^[a-f0-9]{64}$/.test(hash)))
+    assert.deepEqual((await owner.query('SELECT to_jsonb(r) AS value FROM application_operation_receipts r WHERE id=$1',[ids[2]])).rows,seed)
+    assert.deepEqual(await trigger(owner),triggers);assert.deepEqual(await ledgerRows(owner),ledger);assert.deepEqual(await guard(owner),{current:true,ledger:603})
+   }finally{await owner.query('ROLLBACK')}
+   assert.deepEqual(await catalog(owner),before);assert.deepEqual(await trigger(owner),triggers)
+   const changes=signatures.map((signature,n)=>['unknown body '+names[n],()=>owner.query(definitions[n].replace(before.find(row=>row.value.proname===names[n]).value.prosrc,before.find(row=>row.value.proname===names[n]).value.prosrc+'\n-- fictional transcript prerequisite drift'))])
+   const helperBefore=before.find(row=>row.value.proname==='read_native_attended_memory_evidence').value
+   changes.push(['target security',()=>owner.query('ALTER FUNCTION '+signatures[0]+' SECURITY INVOKER')],
+    ['target setting',()=>owner.query('ALTER FUNCTION '+signatures[1]+' SET search_path=public')],
+    ['target owner',()=>owner.query('ALTER FUNCTION '+signatures[0]+' OWNER TO app_user')],
+    ['target PUBLIC ACL',()=>owner.query('GRANT EXECUTE ON FUNCTION '+signatures[0]+' TO PUBLIC')],
+    ['target runtime ACL',()=>owner.query('GRANT EXECUTE ON FUNCTION '+signatures[1]+' TO app_user')],
+    ['reused helper body',()=>owner.query(definitions[3].replace(helperBefore.prosrc,helperBefore.prosrc+'\n-- fictional reused-helper prerequisite drift'))],
+    ['reused helper ACL',()=>owner.query('GRANT EXECUTE ON FUNCTION '+helper+' TO PUBLIC')],
+    ['deferred trigger disabled',()=>owner.query('ALTER TABLE scope_derivation_sources DISABLE TRIGGER application_field_derivation_dependencies')])
+   for(const[label,change]of changes){
+    await owner.query('BEGIN');try{await change();await assert.rejects(owner.query(migration),/Native history transcript/)}finally{await owner.query('ROLLBACK')}
+    assert.deepEqual(await catalog(owner),before,label);assert.deepEqual(await trigger(owner),triggers,label);assert.deepEqual(await ledgerRows(owner),ledger,label)
+    assert.deepEqual((await owner.query('SELECT to_jsonb(r) AS value FROM application_operation_receipts r WHERE id=$1',[ids[2]])).rows,seed,label)
+    assert.deepEqual(await guard(owner),{current:true,ledger:603},label)
+   }
+  }finally{await owner.end()}
+ }})
+ try{
+  assert.equal(calls,1);const owner=new pg.Client({connectionString:fixture.adminUrl});await owner.connect()
+  try{
+   assert.deepEqual(await guard(owner),{current:true,ledger:inventory.length});const after=await catalog(owner),completeLedger=await ledgerRows(owner)
+   for(const name of names)assert.deepEqual(after.find(row=>row.value.proname===name),transition.find(row=>row.value.proname===name))
+   assert.deepEqual(await trigger(owner),triggers)
+   assert.deepEqual(completeLedger.filter(row=>ledger.some(old=>old.name===row.name)),ledger)
+   const expectedNewNames=inventory.filter(name=>!ledger.some(old=>old.name===name));assert.deepEqual(completeLedger.filter(row=>!ledger.some(old=>old.name===row.name)).map(row=>row.name),expectedNewNames)
+   assert.equal(completeLedger.filter(row=>row.name===name).length,1)
+   assert.deepEqual((await owner.query('SELECT to_jsonb(r) AS value FROM application_operation_receipts r WHERE id=$1',[ids[2]])).rows,seed)
+   const{tsImport}=await import('tsx/esm/api'),{runMigrations}=await tsImport('../../../packages/api/scripts/migrate.ts',import.meta.url);assert.equal((await runMigrations({databaseUrl:fixture.adminUrl})).appliedCount,0)
+   const fresh=new pg.Client({connectionString:process.env.DATABASE_URL});await fresh.connect()
+   try{for(let n=0;n<signatures.length;n++)assert.equal((await fresh.query("SELECT encode(sha256(convert_to(prosrc,'UTF8')),'hex') AS hash FROM pg_proc WHERE oid=$1::regprocedure",[signatures[n]])).rows[0].hash,expected[n])}finally{await fresh.end()}
+   if(process.env.F_E10A_MIGRATION_ARTIFACT)await writeFile(process.env.F_E10A_MIGRATION_ARTIFACT,JSON.stringify({before,transition,after,triggers,ledger,completeLedger,expectedNewNames,seed,guard:await guard(owner),driftRefusals:11,replay:0},null,2)+'\n')
+   console.log(JSON.stringify({ledgerBefore:603,ledgerAfter:inventory.length,changedBodies:3,preservedFunctionsAt8133:before.length-3,guardCurrent:true,driftRefusals:11,replay:0}))
+  }finally{await owner.end()}
+ }finally{await fixture.dispose()}
+})
