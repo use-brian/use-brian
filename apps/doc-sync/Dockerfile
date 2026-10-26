@@ -6,6 +6,7 @@ RUN corepack enable && corepack prepare pnpm@10.33.0 --activate
 WORKDIR /app
 
 COPY pnpm-workspace.yaml pnpm-lock.yaml package.json turbo.json tsconfig.base.json ./
+COPY patches ./patches
 COPY packages/shared/package.json packages/shared/tsconfig.json ./packages/shared/
 COPY packages/brian-kb/package.json packages/brian-kb/tsconfig.json ./packages/brian-kb/
 COPY packages/office-model/package.json packages/office-model/tsconfig.json ./packages/office-model/
@@ -51,6 +52,7 @@ RUN corepack enable && corepack prepare pnpm@10.33.0 --activate
 WORKDIR /app
 
 COPY pnpm-workspace.yaml pnpm-lock.yaml package.json ./
+COPY patches ./patches
 COPY packages/shared/package.json ./packages/shared/
 COPY packages/brian-kb/package.json ./packages/brian-kb/
 COPY packages/office-model/package.json ./packages/office-model/

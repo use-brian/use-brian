@@ -8,6 +8,7 @@ WORKDIR /app
 # Build context is the standalone OSS repository root.
 # Copy workspace config + wa-connector package.json for install.
 COPY pnpm-workspace.yaml pnpm-lock.yaml package.json turbo.json tsconfig.base.json ./
+COPY patches ./patches
 COPY apps/wa-connector/package.json apps/wa-connector/tsconfig.json ./apps/wa-connector/
 
 RUN pnpm install --frozen-lockfile
@@ -30,6 +31,7 @@ RUN corepack enable && corepack prepare pnpm@10.33.0 --activate
 WORKDIR /app
 
 COPY pnpm-workspace.yaml pnpm-lock.yaml package.json ./
+COPY patches ./patches
 COPY apps/wa-connector/package.json ./apps/wa-connector/
 
 # Install production dependencies only

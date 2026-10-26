@@ -8,6 +8,7 @@ WORKDIR /app
 # Workspace config + the package.json/tsconfig of every package in the build
 # graph (browser-relay → @use-brian/api → @use-brian/core/channels/shared/…).
 COPY pnpm-workspace.yaml pnpm-lock.yaml package.json turbo.json tsconfig.base.json ./
+COPY patches ./patches
 COPY packages/shared/package.json packages/shared/tsconfig.json ./packages/shared/
 COPY packages/channels/package.json packages/channels/tsconfig.json ./packages/channels/
 COPY packages/doc-model/package.json packages/doc-model/tsconfig.json ./packages/doc-model/
@@ -55,6 +56,7 @@ RUN corepack enable && corepack prepare pnpm@10.33.0 --activate
 WORKDIR /app
 
 COPY pnpm-workspace.yaml pnpm-lock.yaml package.json ./
+COPY patches ./patches
 COPY packages/shared/package.json ./packages/shared/
 COPY packages/channels/package.json ./packages/channels/
 COPY packages/doc-model/package.json ./packages/doc-model/

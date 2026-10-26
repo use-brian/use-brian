@@ -11,6 +11,7 @@ WORKDIR /app
 # composite project `reference`, and tsc fails with TS6053 if the referenced
 # directory is absent — so its manifest + sources must be present to compile.
 COPY pnpm-workspace.yaml pnpm-lock.yaml package.json turbo.json tsconfig.base.json ./
+COPY patches ./patches
 COPY packages/shared/package.json packages/shared/tsconfig.json ./packages/shared/
 COPY packages/channels/package.json packages/channels/tsconfig.json ./packages/channels/
 COPY apps/wechat-connector/package.json apps/wechat-connector/tsconfig.json ./apps/wechat-connector/
@@ -38,6 +39,7 @@ RUN corepack enable && corepack prepare pnpm@10.33.0 --activate
 WORKDIR /app
 
 COPY pnpm-workspace.yaml pnpm-lock.yaml package.json ./
+COPY patches ./patches
 COPY packages/channels/package.json ./packages/channels/
 COPY apps/wechat-connector/package.json ./apps/wechat-connector/
 
