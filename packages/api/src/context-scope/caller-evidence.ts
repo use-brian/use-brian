@@ -119,6 +119,7 @@ async function validateScopeEvidence(
   // same user's rows other assistants own, which no single row can represent
   // (scoped-context.md -> "Reading is not deriving").
   let sources = snapshot.sources ?? []
+  const originalSources=structuredClone(sources)
   for (const source of sources) failure ??= visibilityFailure(source, ceiling) ?? labelFailure(source, ceiling)
   failure ??= labelFailure({
     sensitivity: snapshot.sensitivity ?? 'public',
@@ -134,7 +135,7 @@ async function validateScopeEvidence(
   if (client && !workflowRunId) {
     try {
       const native = await readNativeSessionEvidence(client, ceiling.workspaceId, sources)
-      if (native) {
+      if (native?.kind==='complete') {
         const expanded = new ContextScopeAccumulator(snapshot)
         expanded.note(native.evidence)
         for (const source of [...native.evidence.sources ?? [], ...native.current]) {
@@ -148,6 +149,34 @@ async function validateScopeEvidence(
     } catch (error) { throw scopeEvidenceFailureOf(error) ? error : unavailable(kind, 'source_unverifiable', error) }
   }
   if (nativeOnly) return null
+  // A history subset carries only checked scopes. It never admits the whole
+  // input set or adds its internally qualified old references as factual roots.
+  const historyKey=(values:unknown)=>JSON.stringify(values)
+  const projectHistory=async()=>{
+    const scopes:Array<{root:ScopeSource;scopes:ResourceScope[]}>=[]
+    if(client)for(const source of originalSources){
+      if(source.resourceKind!=='application_field')continue
+      const value=await readNativeSessionEvidence(client,ceiling.workspaceId,[source])
+      if(value?.kind!=='memory_history')continue
+      if(!value.available)throw unavailable(kind,'source_unverifiable')
+      if(workflowRunId)throw unavailable(kind,'source_unverifiable')
+      for(const scope of value.scopes){
+        const refused=visibilityFailure(scope,ceiling)??labelFailure(scope,ceiling)
+        if(refused)throw unavailable(kind,refused)
+      }
+      scopes.push({root:value.root,scopes:value.scopes})
+    }
+    return scopes
+  }
+  let historyProjection:Awaited<ReturnType<typeof projectHistory>>
+  try{historyProjection=await projectHistory()}
+  catch(error){throw scopeEvidenceFailureOf(error)?error:unavailable(kind,'source_unverifiable',error)}
+  if(historyProjection.length){
+    const raised=new ContextScopeAccumulator(snapshot)
+    for(const projected of historyProjection)for(const scope of projected.scopes)raised.note({
+      sensitivity:scope.sensitivity,compartments:scope.compartments,projectIds:scope.projectIds})
+    snapshot=raised.evidence;sources=snapshot.sources??[]
+  }
   // Cached native refs retain every immutable context parent. Discovery is
   // metadata only; the caller must still provide a real admitted transaction.
   let persistentAncestry:string
@@ -264,6 +293,7 @@ async function validateScopeEvidence(
     raised.projectIds = [...new Set([...(raised.projectIds ?? []), ...current.projectIds])].sort()
   }
   try {
+    if(historyKey(await projectHistory())!==historyKey(historyProjection))throw unavailable(kind,'source_unverifiable')
     if(persistentKey(await readPersistentSessionContextAncestors(ceiling.workspaceId,ancestryRoots,client))!==persistentAncestry!) throw unavailable(kind,'source_unverifiable')
     if (ancestryKey(await readExternalSourceAncestors(ceiling.workspaceId, ancestryRoots, client)) !== originalAncestry!) {
       throw unavailable(kind, 'source_unverifiable')

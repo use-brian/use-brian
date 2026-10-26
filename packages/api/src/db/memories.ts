@@ -1335,19 +1335,31 @@ export async function getMemoryHistory(id: string, access?:AccessContext, author
     const {execution}=authority
     if (!access || access.systemRead || access.userId!==execution.security.access.userId
       || access.workspaceId!==execution.security.access.workspaceId || access.assistantId!==execution.assistant.id) throw new DerivedScopeError('scope_evidence_missing')
-    const metadata=(await query<{id:string;source:ScopeSource}>(`WITH RECURSIVE forward(id,next_id,depth) AS (
+    const highWater=structuredClone(authority.accumulator.evidence)
+    await execution.security.authority.assertCurrent()
+    const metadata=(await query<{id:string;source:ScopeSource;reasons:ScopeSource[][]}>(`WITH RECURSIVE forward(id,next_id,depth) AS (
       SELECT id,superseded_by,1 FROM memories WHERE id=$1 AND workspace_id=$2
       UNION ALL SELECT m.id,m.superseded_by,f.depth+1 FROM memories m JOIN forward f ON m.id=f.next_id WHERE m.workspace_id=$2 AND f.depth<100),
       backward(id,depth) AS (
       SELECT id,1 FROM memories WHERE id=$1 AND workspace_id=$2
       UNION ALL SELECT m.id,b.depth+1 FROM memories m JOIN backward b ON m.superseded_by=b.id WHERE m.workspace_id=$2 AND b.depth<100),
       chain AS (SELECT id FROM forward UNION SELECT id FROM backward)
-      SELECT id,read_scope_source($2,'memory',id) AS source FROM chain`,[id,access.workspaceId])).rows
-    if (!metadata.length) return {chain:[],currentId:null}
+      SELECT id,read_scope_source($2,'memory',id) AS source,
+        ARRAY(SELECT a.native_memory_transition->'reasonEvidence'->'sources'
+          FROM correction_audit a WHERE a.workspace_id=$2 AND a.row_id=chain.id
+            AND a.primitive='memory' AND a.action='retract') AS reasons
+      FROM chain`,[id,access.workspaceId])).rows
     if (metadata.length>=100) throw new DerivedScopeError('scope_evidence_missing')
     const initial=metadata.map(row=>({...row.source,resourceKind:'memory' as const,resourceId:row.id}))
-    const roots=[...initial,...await readExternalSourceAncestors(access.workspaceId,initial),...await readApplicationFieldAncestors(access.workspaceId,initial)]
-    return readRetainedContextFrame(authority,roots,async client=>{
+    // Immutable reason evidence is discovery metadata, never an admission proof.
+    // Include its external ancestors so the normal retained frame can pin them.
+    const reasons=metadata.flatMap(row=>row.reasons.filter(Boolean).flat())
+    const discovery=[...initial,...reasons,...(highWater.sources??[])]
+    const fields=await readApplicationFieldAncestors(access.workspaceId,discovery)
+    const roots=[...discovery.filter(source=>source.resourceKind==='external_source'),
+      ...await readExternalSourceAncestors(access.workspaceId,[...discovery,...fields])]
+    return readRetainedQueryFrame(authority,roots,async client=>{
+      await validateCallerScopeEvidence(highWater,execution.security.ceiling,client)
       const chain:Memory[]=[],sources:ScopeSource[]=[]
       for (const root of initial) {
         const raw=(await client.query<{value:unknown}>('SELECT read_native_memory_history_projection($1,$2,$3) AS value',
@@ -1360,10 +1372,10 @@ export async function getMemoryHistory(id: string, access?:AccessContext, author
         if (!row) throw new DerivedScopeError('scope_evidence_missing')
         bindScopeSources(row,captured.sources);chain.push(row);sources.push(...captured.sources)
       }
-      await validateCallerScopeEvidence({sources},execution.security.ceiling,client)
+      await validateCallerScopeEvidence({...highWater,sources:[...(highWater.sources??[]),...sources]},execution.security.ceiling,client)
       chain.sort((a,b)=>a.validFrom.getTime()-b.validFrom.getTime() || a.createdAt.getTime()-b.createdAt.getTime())
       bindScopeSources(chain,sources)
-      return bindScopeSources({chain,currentId:chain.find(row=>row.validTo===null)?.id??null},sources)
+      return {value:bindScopeSources({chain,currentId:chain.find(row=>row.validTo===null)?.id??null},sources),sources}
     })
   }
   // Postgres requires UNION ALL inside recursive CTEs; the outer UNION

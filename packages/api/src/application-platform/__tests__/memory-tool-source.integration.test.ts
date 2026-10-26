@@ -425,13 +425,21 @@ describe.sequential('[COMP:api/application-persistence] original-authority memor
    }
    const query=await store.search(current.execution.security.access,{query:'source-backed'},current)
    const history=await getMemoryHistory(saved.id,current.execution.security.access,current)
-   const currentSources=[...boundScopeSources(prior!),...boundScopeSources(query),...boundScopeSources(history)]
+   const pointQuerySources=[...boundScopeSources(prior!),...boundScopeSources(query)]
+   const historySources=boundScopeSources(history)
    const first=await tools.saveMemory.execute({id:saved.id,detail:'Fictional permitted detail'},current.context)
    expect(first.isError,JSON.stringify(first)).not.toBe(true)
    const nextId=String(first.data).match(/\[([a-f0-9-]{36})\]/)?.[1];expect(nextId).toBeTruthy()
    await x.f.pool.query("UPDATE application_native_role_assignments SET status='revoked' WHERE workspace_id=$1 AND module_key='native' AND role_key='editor'",[x.f.workspaceId])
    const afterWriteContraction=await authority(x)
-   await expect(readRetainedContextFrame(afterWriteContraction,currentSources,async()=>true)).resolves.toBe(true)
+   // The native successor changes current audit-history status. It must not
+   // renew the earlier H, while ordinary point/query READ compatibility survives
+   // the independent WRITE-only role contraction.
+   await expect(readRetainedContextFrame(afterWriteContraction,pointQuerySources,async()=>true)).resolves.toBe(true)
+   await expect(readRetainedContextFrame(afterWriteContraction,historySources,async()=>true)).rejects.toBeDefined()
+   const freshHistory=await getMemoryHistory(nextId!,afterWriteContraction.execution.security.access,afterWriteContraction)
+   expect(freshHistory.chain.map(row=>row.id)).toEqual([saved.id,nextId])
+   await expect(readRetainedContextFrame(afterWriteContraction,boundScopeSources(freshHistory),async()=>true)).resolves.toBe(true)
    const summaryActor=await authority(x),second=await tools.saveMemory.execute({id:nextId!,summary:'Fictional permitted summary'},summaryActor.context)
    expect(second.isError,JSON.stringify(second)).not.toBe(true)
    const head=String(second.data).match(/\[([a-f0-9-]{36})\]/)?.[1];expect(head).toBeTruthy()
@@ -449,6 +457,6 @@ describe.sequential('[COMP:api/application-persistence] original-authority memor
    await x.f.pool.query('DROP FUNCTION IF EXISTS memory_successor_field_reader(uuid,jsonb,text,text),memory_successor_field_catalog(uuid,jsonb,text)')
    await x.cleanup()
   }
- })
+ },60_000)
 
 })

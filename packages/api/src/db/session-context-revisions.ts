@@ -182,6 +182,11 @@ export async function readRetainedQueryFrame<T>(authority:SessionContextAuthorit
   const proof=admitted.length?await prepare!(execution,admitted,'context'):undefined
   if(proof)await pinPreparedExternalSourceAuthority(client,execution,proof)
   const result=await capture(client)
+  assertWiring()
+  if(admitted.length){
+   const refreshed=await prepare!(execution,admitted,'context')
+   await pinPreparedExternalSourceAuthority(client,execution,refreshed)
+  }
   await validateCallerScopeEvidence({sources:[...result.sources]},execution.security.ceiling,client)
   assertWiring();return result
  })

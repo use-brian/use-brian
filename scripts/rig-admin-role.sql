@@ -34,7 +34,7 @@ END $$;
 -- by the original callable after alias narrowing, never during this safety phase.
 DO $fixture_guard_shape$
 DECLARE guard pg_proc;canonical_owner oid;previous_oid oid;source_oid oid;dispatcher_oid oid;
- pinned boolean:=false;feedback boolean:=false;amended boolean:=false;
+ pinned boolean:=false;feedback boolean:=false;amended boolean:=false;history boolean:=false;helper pg_proc;
  matched integer;pins text;actual_oids oid[];expected_oids oid[];expected_body text;
 BEGIN
  SELECT * INTO guard FROM pg_proc WHERE oid=to_regprocedure('public.application_memory_statement_helpers_current()');
@@ -42,9 +42,10 @@ BEGIN
   pinned:=EXISTS(SELECT FROM public._migrations WHERE name='8111_native_memory_statement_visitor.sql');
   feedback:=EXISTS(SELECT FROM public._migrations WHERE name='8112_native_feedback_outcome_projection.sql');
   amended:=EXISTS(SELECT FROM public._migrations WHERE name='8113_native_memory_statement_helper_projection_guard.sql');
+  history:=EXISTS(SELECT FROM public._migrations WHERE name='8128_native_memory_history_admission.sql');
  END IF;
  IF guard.oid IS NULL THEN
-  IF pinned OR feedback OR amended THEN RAISE EXCEPTION 'Unknown fixture Memory guard: missing installed guard' USING ERRCODE='55000';END IF;
+  IF pinned OR feedback OR amended OR history THEN RAISE EXCEPTION 'Unknown fixture Memory guard: missing installed guard' USING ERRCODE='55000';END IF;
   RETURN; -- Fresh/pre8111 prefix, including the explicit new-disposable callback.
  END IF;
  IF NOT pinned OR amended AND NOT feedback THEN RAISE EXCEPTION 'Unknown fixture Memory guard: migration phase' USING ERRCODE='55000';END IF;
@@ -199,11 +200,86 @@ BEGIN
  previous_oid:=to_regprocedure('public.application_field_projection_state_before_feedback_outcome(uuid,jsonb,text,uuid,text,text,text[])')::oid;
  source_oid:=to_regprocedure('public.read_entity_derivation_source(uuid,text,uuid)')::oid;
  dispatcher_oid:=to_regprocedure('public.application_field_projection_state(uuid,jsonb,text,uuid,text,text,text[])')::oid;
- IF matched<>121 OR cardinality(expected_oids)<>120 OR array_position(expected_oids,NULL) IS NOT NULL
+ IF (NOT history AND matched<>121 OR history AND matched<>122) OR cardinality(expected_oids)<>120 OR array_position(expected_oids,NULL) IS NOT NULL
   OR previous_oid IS NULL OR source_oid IS NULL OR dispatcher_oid IS NULL OR previous_oid=dispatcher_oid
   OR actual_oids[1:120] IS DISTINCT FROM expected_oids OR actual_oids[121] IS DISTINCT FROM dispatcher_oid
-  OR (SELECT count(DISTINCT function_oid) FROM unnest(actual_oids) identities(function_oid))<>121 THEN
+  OR (SELECT count(DISTINCT function_oid) FROM unnest(actual_oids) identities(function_oid))<>(CASE WHEN history THEN 122 ELSE 121 END) THEN
   RAISE EXCEPTION 'Unknown fixture Memory guard: closed pin identities' USING ERRCODE='55000';END IF;
+ IF history THEN
+  SELECT * INTO helper FROM pg_proc WHERE oid=to_regprocedure('public.application_memory_history_status(uuid,uuid,text)');
+  IF helper.oid IS NULL OR actual_oids[122] IS DISTINCT FROM helper.oid
+   OR helper.proowner IS DISTINCT FROM canonical_owner OR helper.pronamespace<>'public'::regnamespace
+   OR helper.proname<>'application_memory_history_status' OR helper.prokind<>'f' OR helper.prorettype<>'jsonb'::regtype
+   OR helper.prolang IS DISTINCT FROM (SELECT oid FROM pg_language WHERE lanname='plpgsql')
+   OR helper.proretset OR NOT helper.prosecdef OR helper.provolatile<>'v' OR helper.proisstrict OR helper.proparallel<>'u'
+   OR helper.proleakproof OR helper.prosupport<>0 OR helper.procost<>100 OR helper.prorows<>0
+   OR helper.pronargs<>3 OR helper.proargtypes<>'2950 2950 25'::oidvector OR helper.pronargdefaults<>0 OR helper.provariadic<>0
+   OR helper.proallargtypes IS NOT NULL OR helper.proargmodes IS NOT NULL OR helper.proargnames IS DISTINCT FROM ARRAY['w','i','v']::text[]
+   OR helper.proargdefaults IS NOT NULL OR helper.protrftypes IS NOT NULL OR helper.probin IS NOT NULL OR helper.prosqlbody IS NOT NULL
+   OR helper.proconfig IS DISTINCT FROM ARRAY['search_path=pg_catalog, public, pg_temp']
+   OR (SELECT count(*) FROM aclexplode(coalesce(helper.proacl,acldefault('f',helper.proowner))))<>1
+   OR EXISTS(SELECT FROM aclexplode(coalesce(helper.proacl,acldefault('f',helper.proowner))) a
+    WHERE a.grantee<>helper.proowner OR a.grantor<>helper.proowner OR a.privilege_type<>'EXECUTE' OR a.is_grantable) THEN
+   RAISE EXCEPTION 'Unknown fixture Memory guard: history helper identity or metadata' USING ERRCODE='55000';END IF;
+ expected_body:=format($fixture_history_template$ SELECT count(*)=122 AND coalesce(bool_and(coalesce((p.oid<>%s::oid OR p.proname='application_field_projection_state_before_feedback_outcome') AND (p.oid<>%s::oid OR p.prosrc=%L) AND encode(sha256(convert_to((CASE WHEN p.oid=%s::oid THEN to_jsonb(p)||jsonb_build_object('proname','application_field_projection_state') WHEN p.oid=%s::oid THEN to_jsonb(p)||jsonb_build_object('prosrc',%L) ELSE to_jsonb(p) END)::text,'UTF8')),'hex')=pin.fingerprint,false)),false) FROM (VALUES %s) pin(function_oid,fingerprint) JOIN pg_catalog.pg_proc p ON p.oid=pin.function_oid $fixture_history_template$,
+  previous_oid,source_oid,$fixture_feedback_source$
+DECLARE actor uuid;
+ root jsonb;parent jsonb;context jsonb;policy jsonb;mask jsonb;feedback_message_id uuid;feedback_session_id uuid;expected text;
+BEGIN
+ IF k='feedback_event' THEN
+  actor:=nullif(current_setting('app.current_user_id',true),'')::uuid;
+  IF actor IS NULL OR nullif(current_setting('app.application_id',true),'') IS NOT NULL
+   OR nullif(current_setting('app.public_share_root',true),'') IS NOT NULL
+   OR NOT EXISTS(SELECT 1 FROM workspace_members WHERE workspace_id=w AND user_id=actor)
+   OR nullif(current_setting('app.agent_workspace_id',true),'') IS NOT NULL AND current_setting('app.agent_workspace_id',true)<>w::text
+   OR nullif(current_setting('app.agent_actor_id',true),'') IS NOT NULL AND current_setting('app.agent_actor_id',true)<>actor::text
+   OR EXISTS(SELECT 1 FROM pg_roles r JOIN pg_class c ON c.oid='public.analytics_events'::regclass WHERE r.rolname=session_user
+    AND(r.rolsuper OR r.rolbypassrls OR pg_has_role(r.oid,c.relowner,'USAGE'))) THEN RETURN NULL;END IF;
+  root:=read_scope_source(w,k,i);
+  IF root IS NULL OR root->>'userId' IS DISTINCT FROM actor::text OR root->>'held' IS DISTINCT FROM 'false'
+   OR root->>'version' IS NULL OR root->>'validTo' IS NOT NULL OR root->>'retractedAt' IS NOT NULL
+   OR entity_derivation_envelope_valid(root) IS NOT TRUE OR scope_review_state_held(k,i)
+   OR agent_visibility_allows(w,(root->>'userId')::uuid,(root->>'assistantId')::uuid) IS NOT TRUE
+   OR workflow_evidence_envelope_visible(w,root) IS NOT TRUE THEN RETURN NULL;END IF;
+  -- This is only canonical source metadata. The existing negative-only source
+  -- identity, exact own-user floor and full current field masks remain mandatory.
+  context:=application_feedback_query_context(w);
+  IF context IS NULL OR NOT coalesce(to_jsonb(application_feedback_field_keys())<@(context->'read'),false) THEN RETURN NULL;END IF;
+  policy:=application_native_field_contract_for(w,'{"kind":"native","moduleKey":"native"}','feedback_event',i::text);
+  IF policy->>'registered' IS DISTINCT FROM 'false' THEN
+   IF policy->>'held' IS DISTINCT FROM 'false' OR policy#>>'{metadata,recordVersion}' IS DISTINCT FROM root->>'version' THEN RETURN NULL;END IF;
+   mask:=read_native_application_field_mask(w,'{"kind":"native","moduleKey":"native"}','feedback_event',i::text,root->>'version');
+   IF mask IS NULL OR NOT coalesce(to_jsonb(application_feedback_field_keys())<@(mask->'readFields'),false) THEN RETURN NULL;END IF;
+  END IF;
+  SELECT (a.metadata->>'messageId')::uuid,a.session_id INTO feedback_message_id,feedback_session_id FROM analytics_events a
+   WHERE a.workspace_id=w AND a.id=i AND a.user_id=actor AND a.scope_version::text=root->>'version';
+  IF NOT FOUND OR NOT EXISTS(SELECT 1 FROM session_messages sm WHERE sm.workspace_id=w AND sm.id=feedback_message_id
+   AND sm.session_id=feedback_session_id AND sm.assistant_id=(root->>'assistantId')::uuid) THEN RETURN NULL;END IF;
+  SELECT s.source_version INTO expected FROM scope_derivations d JOIN scope_derivation_sources s ON s.workspace_id=d.workspace_id AND s.derivation_id=d.id
+   WHERE d.workspace_id=w AND d.resource_kind='feedback_event' AND d.resource_id=i AND d.resource_version=root->>'version'
+    AND s.source_kind='session_message' AND s.source_id=feedback_message_id;
+  IF NOT FOUND THEN RETURN NULL;END IF;
+  parent:=read_entity_derivation_source(w,'session_message',feedback_message_id);
+  IF parent IS NULL OR parent->>'held' IS DISTINCT FROM 'false' OR parent->>'version' IS DISTINCT FROM expected
+   OR application_session_query_parent(w,feedback_session_id) IS NULL THEN RETURN NULL;END IF;
+  RETURN root||jsonb_build_object('requiredSources',coalesce(parent->'requiredSources','[]'::jsonb));
+ END IF;
+ -- Byte-identical current Memory retirement,8105external-source and fallback branches.
+ IF k='memory' AND EXISTS(SELECT 1 FROM memories WHERE workspace_id=w AND id=i AND valid_to IS NOT NULL) THEN
+  RETURN native_memory_historical_source(w,i,application_memory_field_keys());
+ END IF;
+ IF k='external_source' THEN RETURN external_source_snapshot(w,i);END IF;
+ RETURN read_entity_derivation_source_before_memory_successor(w,k,i);
+END $fixture_feedback_source$,
+  previous_oid,source_oid,$fixture_original_source$
+BEGIN
+ IF k='memory' AND EXISTS(SELECT 1 FROM memories WHERE workspace_id=w AND id=i AND valid_to IS NOT NULL) THEN
+  RETURN native_memory_historical_source(w,i,application_memory_field_keys());
+ END IF;
+ IF k='external_source' THEN RETURN external_source_snapshot(w,i);END IF;
+ RETURN read_entity_derivation_source_before_memory_successor(w,k,i);
+END $fixture_original_source$,pins);
+ ELSE
  expected_body:=format($fixture_template$ SELECT count(*)=121 AND coalesce(bool_and(coalesce((p.oid<>%s::oid OR p.proname='application_field_projection_state_before_feedback_outcome') AND (p.oid<>%s::oid OR p.prosrc=%L) AND encode(sha256(convert_to((CASE WHEN p.oid=%s::oid THEN to_jsonb(p)||jsonb_build_object('proname','application_field_projection_state') WHEN p.oid=%s::oid THEN to_jsonb(p)||jsonb_build_object('prosrc',%L) ELSE to_jsonb(p) END)::text,'UTF8')),'hex')=pin.fingerprint,false)),false) FROM (VALUES %s) pin(function_oid,fingerprint) JOIN pg_catalog.pg_proc p ON p.oid=pin.function_oid $fixture_template$,
   previous_oid,source_oid,$fixture_feedback_source$
 DECLARE actor uuid;
@@ -262,6 +338,7 @@ BEGIN
  IF k='external_source' THEN RETURN external_source_snapshot(w,i);END IF;
  RETURN read_entity_derivation_source_before_memory_successor(w,k,i);
 END $fixture_original_source$,pins);
+ END IF;
  IF guard.prosrc IS DISTINCT FROM expected_body THEN
   RAISE EXCEPTION 'Unknown fixture Memory guard: complete generated body' USING ERRCODE='55000';END IF;
 EXCEPTION WHEN invalid_text_representation OR numeric_value_out_of_range THEN

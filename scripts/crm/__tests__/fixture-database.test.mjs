@@ -295,9 +295,8 @@ test('[COMP:crm/assurance-fixture] Actual120-only and8112-only prefixes refuse b
   }
 })
 
-test('[COMP:crm/assurance-fixture] Every fixture phase rejects replaced guard logic before execution', async t => {
-  await assertLocalFixture()
-  const owner=new pg.Client({connectionString:process.env.DATABASE_URL});await owner.connect()
+async function assertClosedGuardRefusals(t,adminUrl,pinCount) {
+  const owner=new pg.Client({connectionString:adminUrl});await owner.connect()
   const signature='public.application_memory_statement_helpers_current()'
   const original=(await owner.query('SELECT p.*,pg_get_functiondef(p.oid) AS definition FROM pg_proc p WHERE oid=$1::regprocedure',[signature])).rows[0]
   const replaceBody=body=>owner.query(`CREATE OR REPLACE FUNCTION ${signature} RETURNS boolean LANGUAGE sql SECURITY DEFINER SET search_path=pg_catalog,public,pg_temp AS $fixture_guard$${body}$fixture_guard$`)
@@ -309,8 +308,8 @@ test('[COMP:crm/assurance-fixture] Every fixture phase rejects replaced guard lo
   }
   try {
     const pins=[...original.prosrc.matchAll(/\(([0-9]+)::oid,'([0-9a-f]{64})'::text\)/g)]
-    assert.equal(pins.length,121)
-    const first=pins[0][0],last=pins[120][0]
+    assert.equal(pins.length,pinCount)
+    const first=pins[0][0],last=pins[pinCount-1][0]
     const unknownOid=(await owner.query("SELECT 'pg_catalog.now()'::regprocedure::oid AS oid")).rows[0].oid
     const cases=[
       ['marker',()=>replaceBody(" SELECT set_config('app.fixture_guard_invoked','1',false) IS NOT NULL ")],
@@ -323,7 +322,7 @@ test('[COMP:crm/assurance-fixture] Every fixture phase rejects replaced guard lo
       ['extra pin',()=>replaceBody(original.prosrc.replace(last,last+','+last))],
       ['unknown identity',()=>replaceBody(original.prosrc.replace(first,first.replace(pins[0][1],String(unknownOid))))],
       ['noncanonical pin',()=>replaceBody(original.prosrc.replace(first,first.replace(pins[0][1],'0'+pins[0][1])))],
-      ['changed template operator',()=>replaceBody(original.prosrc.replace('SELECT count(*)=121','SELECT count(*)>=121'))],
+      ['changed template operator',()=>replaceBody(original.prosrc.replace(`SELECT count(*)=${pinCount}`,`SELECT count(*)>=${pinCount}`))],
       ['changed source literal',()=>replaceBody(original.prosrc.replace('Byte-identical current Memory retirement','Unknown current Memory retirement'))],
       ['changed metadata',()=>owner.query(`ALTER FUNCTION ${signature} COST 101`)],
       ['changed search path',()=>owner.query(`ALTER FUNCTION ${signature} SET search_path=public`)],
@@ -343,4 +342,56 @@ test('[COMP:crm/assurance-fixture] Every fixture phase rejects replaced guard lo
       assert.deepEqual((await owner.query("SELECT rolname,rolcanlogin,rolinherit,rolconfig FROM pg_roles WHERE rolname='app_user'")).rows,roles,label+':'+phase)
     }
   }finally{await restore();await owner.end()}
+}
+
+test('[COMP:crm/assurance-fixture] Every fixture phase retains closed121 and ledger-qualified122 guard recognition', {timeout:300_000}, async t=>{
+  await assertLocalFixture()
+  await assertClosedGuardRefusals(t,process.env.DATABASE_URL,122)
+  const env=cleanRuntimeEnvironment(process.env),pgBin=(await runCommand('pg_config',['--bindir'],{env})).trim()
+  let calls=0
+  const prefix=await createLocalFixture({pgBin,env,beforeApplyFile:'8128_native_memory_history_admission.sql',beforeApply:async({adminUrl})=>{
+    calls++
+    await assertClosedGuardRefusals(t,adminUrl,121)
+    const owner=new pg.Client({connectionString:adminUrl});await owner.connect()
+    try{
+      const migration=await readFile(new URL('../../../packages/api/migrations/8128_native_memory_history_admission.sql',import.meta.url),'utf8')
+      const ledger=(await owner.query('SELECT name,applied_at::text FROM _migrations ORDER BY name')).rows
+      const catalog=(await owner.query('SELECT oid,to_jsonb(p) AS metadata FROM pg_proc p ORDER BY oid')).rows
+      for(const [signature,before,after] of [
+        ['application_canonical_ancestry_allowed(uuid,text,uuid,text,boolean)','DEFAULT false','DEFAULT true'],
+        ['application_canonical_ancestry_from_admitted_root(uuid,text,uuid,text,boolean,jsonb)','DEFAULT NULL::jsonb',"DEFAULT '{}'::jsonb"],
+      ]){
+        const original=(await owner.query('SELECT to_jsonb(p) AS metadata,pg_get_functiondef(p.oid) AS definition FROM pg_proc p WHERE oid=$1::regprocedure',[signature])).rows[0]
+        assert.equal(original.definition.split(before).length,2)
+        await owner.query('BEGIN')
+        try{
+          await owner.query(original.definition.replace(before,after))
+          assert.equal((await owner.query('SELECT prosrc FROM pg_proc WHERE oid=$1::regprocedure',[signature])).rows[0].prosrc,original.metadata.prosrc)
+          await assert.rejects(owner.query(migration),/Memory history/)
+        }finally{await owner.query('ROLLBACK')}
+        assert.deepEqual((await owner.query('SELECT to_jsonb(p) AS metadata FROM pg_proc p WHERE oid=$1::regprocedure',[signature])).rows[0].metadata,original.metadata)
+        assert.deepEqual((await owner.query('SELECT name,applied_at::text FROM _migrations ORDER BY name')).rows,ledger)
+        assert.deepEqual((await owner.query('SELECT oid,to_jsonb(p) AS metadata FROM pg_proc p ORDER BY oid')).rows,catalog)
+        assert.equal((await owner.query('SELECT application_memory_statement_helpers_current() AS current')).rows[0].current,true)
+      }
+    }finally{await owner.end()}
+  }})
+  try{assert.equal(calls,1);await assertClosedGuardRefusals(t,prefix.adminUrl,122)}finally{await prefix.dispose()}
+})
+
+test('[COMP:crm/assurance-fixture] History guard identity, private metadata and missing guard refuse before invocation', async()=>{
+ await assertLocalFixture()
+ const owner=new pg.Client({connectionString:process.env.DATABASE_URL});await owner.connect()
+ try{
+  for(const phase of ['prepare','transition','activate','verify'])for(const change of ['helper identity','helper ACL','helper metadata','missing guard']){
+   await owner.query('BEGIN')
+   try{
+    if(change==='helper identity')await owner.query('ALTER FUNCTION application_memory_history_status(uuid,uuid,text) RENAME TO fixture_unknown_history_status')
+    if(change==='helper ACL')await owner.query('GRANT EXECUTE ON FUNCTION application_memory_history_status(uuid,uuid,text) TO app_user')
+    if(change==='helper metadata')await owner.query('ALTER FUNCTION application_memory_history_status(uuid,uuid,text) COST 101')
+    if(change==='missing guard')await owner.query('DROP FUNCTION application_memory_statement_helpers_current()')
+    await assert.rejects(owner.query(await runtimeRoleSql(phase,{password:phase==='activate'?'a'.repeat(64):undefined})),/Unknown fixture Memory guard/)
+   }finally{await owner.query('ROLLBACK')}
+  }
+ }finally{await owner.end()}
 })
