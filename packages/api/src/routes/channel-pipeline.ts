@@ -12,7 +12,8 @@ import { PER_TURN_FILES_INDEX_CAP, PER_TURN_INDEX_CAP } from '../turn/index-caps
 import { policyFor } from '../session-kind.js'
 import { narrowConnectorTurnScope, resolveConnectorNativeTurnScopeSystem } from '../context-scope/connector-exposure.js'
 import { mayReadGroupContext, roomTurnShape } from '../channel-room/turn.js'
-import { admitRoomInputScope, claimRoomDisclosure, claimRoomHydration, findOrCreateChannelRoom, resolveRoomBinding, roomDisclosureText, roomInputScope, roomSpeakerLabel } from '../channel-room/room.js'
+import { appendChannelRoomMessage, claimChannelRoomTurn } from '../channel-room/messages.js'
+import { admitRoomInputScope, captureChannelRoomInput, claimRoomDisclosure, claimRoomHydration, findOrCreateChannelRoom, resolveRoomBinding, roomDisclosureText, roomInputScope, roomSpeakerLabel } from '../channel-room/room.js'
 import { releaseTurn, takeTurnLease, waitForTurnSlot } from '../turn/lease.js'
 import { runAssistantTurn } from '../turn/kernel.js'
 
@@ -830,6 +831,20 @@ export function countsAsGroupAudienceEvidence(
   return !isGroupChat || row.channelMessageId === null
 }
 
+/** Preserve canonical identity and labels while retaining this delivery's
+ * richer attachment blocks. Only already-admitted history may be overlaid. */
+export function overlayCurrentRoomMessage<T extends { id: string; content: unknown }>(
+  readableRows: readonly T[], current: { id: string; content: unknown },
+): T[] | null {
+  if (!readableRows.some(row => row.id === current.id)) return null
+  const overlaid = readableRows.map(row => {
+    if (row.id !== current.id) return row
+    const overlay = { ...row, content: current.content }
+    return bindScopeSources(overlay, boundScopeSources(row))
+  })
+  return bindScopeSources(overlaid, boundScopeSources(readableRows))
+}
+
 /** Keep exact-audience transcript history without laundering hidden results. */
 export async function filterChannelHistoryForAudience<T extends {
   channelMessageId: string | null
@@ -1368,6 +1383,13 @@ async function processChannelMessageTurn(params: ChannelPipelineParams): Promise
     await hooks.onCleanup?.()
     return
   }
+  const providerInputId = incomingChannelMessageId ?? params.incomingMessage?.messageId
+  if (room && providerInputId != null && !(await claimChannelRoomTurn({
+    sessionId: room.id, assistantId: assistant.id, channelMessageId: String(providerInputId),
+  }))) {
+    await hooks.onCleanup?.()
+    return
+  }
   const clearance = dataTurnScope.access.clearance ?? assistant.clearance
   const compartments = dataTurnScope.effectiveCompartments
   const scopeAccumulator = new ContextScopeAccumulator({
@@ -1560,24 +1582,25 @@ async function processChannelMessageTurn(params: ChannelPipelineParams): Promise
   // Persist authored input before deriving native topic/reply annotations.
   let classification: TopicClassification | null = null
   let replyResolved: Awaited<ReturnType<typeof resolveReplyText>> | { text: string; fromAssistant: boolean } | null = null
-  const persistUserMessage = (client?: Parameters<typeof addSessionMessage>[1]) =>
-    addSessionMessage({
+  let createdUserMessage = true
+  const persistUserMessage = async (client?: Parameters<typeof addSessionMessage>[1]) => {
+    const input = {
       sessionId: session.id,
-      role: 'user',
+      role: 'user' as const,
       content: userContentBlocks,
       replyToText: replyResolved?.text ?? null,
       topicLabel: classification?.topic_label ?? null,
       topicConfidence: classification?.confidence ?? null,
-      channelMessageId:
-        incomingChannelMessageId !== undefined && incomingChannelMessageId !== null
-          ? String(incomingChannelMessageId)
-          : null,
-      // Per-message author for collaborative draft sessions. Other
-      // channels and personal sessions pass null/undefined.
-      // A room attributes every row to its sender (one session, many people).
+      channelMessageId: (room ? providerInputId : incomingChannelMessageId) != null
+        ? String(room ? providerInputId : incomingChannelMessageId) : null,
       senderUserId: roomShape.attributeSenders ? userId : senderUserId ?? null,
       scope: inputMessageScope,
-    }, client)
+    }
+    if (!room) return addSessionMessage(input, client)
+    const result = await appendChannelRoomMessage(input, client)
+    createdUserMessage = result.created
+    return result.message
+  }
   const persistInboundMessage = async () => params.archiveIncoming && !params.archiveInboundAlreadyPersisted
     ? await persistInboundChatArchive({
         source: channelType,
@@ -1845,6 +1868,12 @@ async function processChannelMessageTurn(params: ChannelPipelineParams): Promise
 
   // Reuse the native authored row; legacy profiles persist their input here.
   const userMessageRow = earlyUserMessageRow ?? await persistInboundMessage()
+  if (room && assistant.workspaceId && createdUserMessage) {
+    await captureChannelRoomInput({
+      room, inputScope: inputMessageScope, workspaceId: assistant.workspaceId,
+      senderUserId: userId, senderName: actorDisplayName ?? null, text: messageText ?? '',
+    })
+  }
   const storedUserSource = await readSessionMessageScopeSource(
     assistant.workspaceId,
     userMessageRow.id,
@@ -1898,7 +1927,7 @@ async function processChannelMessageTurn(params: ChannelPipelineParams): Promise
   // collaborative-session channels can mirror the new turn to peer
   // viewers via their draft-bus. Final-only channels leave this
   // unimplemented.
-  await hooks.onUserMessageSaved?.({
+  if (createdUserMessage) await hooks.onUserMessageSaved?.({
     id: userMessageRow.id,
     sequenceNum: userMessageRow.sequenceNum,
     content: userContentBlocks,
@@ -1948,7 +1977,7 @@ async function processChannelMessageTurn(params: ChannelPipelineParams): Promise
   // ── Load history ──
   // `fromSequence` skips rows already compacted into the most recent
   // boundary; null (never compacted) loads full history.
-  const dbMessages = nativeTranscriptAuthority
+  let dbMessages = nativeTranscriptAuthority
     ? await readAttendedSessionHistory(nativeTranscriptAuthority, session.id, isolatedAudience || room ? null : session.compactBoundarySequence)
     : await filterHistoryForAudience(await getSessionMessages(session.id, {
         excludeHeld: true,
@@ -1956,6 +1985,17 @@ async function processChannelMessageTurn(params: ChannelPipelineParams): Promise
         // per-source audience evidence. Rebuild from filtered provider history.
         fromSequence: isolatedAudience || room ? null : session.compactBoundarySequence,
       }))
+  if (room) {
+    const currentHistory = overlayCurrentRoomMessage(dbMessages, { id: userMessageRow.id, content: userContentBlocks })
+    if (!currentHistory) {
+      // A provider replay must not relabel an older, more restricted input
+      // or run a model turn after its current question was withheld.
+      await hooks.sendError(new Error(CONTEXT_NOT_AVAILABLE_MESSAGE))
+      await hooks.onCleanup?.()
+      return
+    }
+    dbMessages = currentHistory
+  }
   noteAutomaticScopeEvidence(
     scopeAccumulator,
     dbMessages.filter((message) => countsAsGroupAudienceEvidence(message, isGroupChat)),
@@ -2011,7 +2051,9 @@ async function processChannelMessageTurn(params: ChannelPipelineParams): Promise
     analytics,
     usageStore,
     userMessageId: userMessageRow.id,
-    persistLongTermContext: !isolatedAudience && roomShape.memoryWrites,
+    // Room capture owns shared learning. The legacy compaction extractor
+    // reads a privileged personal index and writes per-user memories.
+    persistLongTermContext: !room && !isolatedAudience && roomShape.memoryWrites,
     persistSessionSummary: !room && !isolatedAudience,
     compartments: dataTurnScope.writeCompartments,
     projectIds: dataTurnScope.writeProjectIds,

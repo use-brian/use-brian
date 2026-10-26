@@ -46,6 +46,7 @@ function viewerCtx(context: ToolContext): AccessContext {
     userId: context.userId,
     assistantId: context.assistantId,
     assistantKind: context.assistantKind ?? 'standard',
+    sharedAudience: context.sharedAudience || context.executionContext?.security.access.sharedAudience,
     clearance: context.clearance,
     compartments: context.compartments,
     projectIds: context.projectIds,
@@ -220,7 +221,7 @@ export function createMemoryTools(
       id: z.string().optional().describe('Memory ID to update (full UUID returned by a prior save, or an 8-char prefix like `02eca923` from the memory index). Omit to create new.'),
       summary: z.string().optional().describe('One-line summary (shown in memory index). Required when creating a new memory; on update, omit to preserve the existing summary (only pass it when the core concept of the memory shifts).'),
       detail: z.string().max(16000, 'Memory detail too long — split into multiple memories or move long-form content to the knowledge base').optional().describe('Full detail (fetched on demand via getMemory)'),
-      scope: z.enum(['user', 'team']).optional().describe('Visibility. Omit for the kind-aware default (personal → user, app → team). user = this user only; team = shared with every team member. Pass user explicitly only for per-member facts.'),
+      scope: z.enum(['user', 'team']).optional().describe('Visibility. Shared conversations default to team; private conversations use the kind-aware default (personal → user, app → team). user = this user only; team = shared with every team member. Personal saves require a private conversation.'),
       tags: z
         .array(z.string())
         .optional()
@@ -253,6 +254,11 @@ export function createMemoryTools(
     isReadOnly: false,
 
     async execute(input, context) {
+      const sharedAudience = context.sharedAudience === true
+        || context.executionContext?.security.access.sharedAudience === true
+      if (sharedAudience && input.scope === 'user') {
+        return { data: 'Personal memories cannot be saved from a shared conversation. Send the request in a direct message; nothing was saved.', isError: true }
+      }
       const opRejection = rejectOperationalStatePayload(input.summary, input.detail)
       if (opRejection) {
         return { data: opRejection, isError: true }
@@ -372,7 +378,8 @@ export function createMemoryTools(
       }
 
       // Determine effective scope. When the model omits `scope`, fall back
-      // to the kind-appropriate default: team-owned distribution assistants
+      // to shared scope for a shared audience, otherwise the kind-appropriate
+      // default: team-owned distribution assistants
       // ('app' kind) default to 'team' so voice/brand memory is visible to
       // every member. Personal assistants default to 'user' (status quo).
       // The model can still pass 'user' explicitly to opt back into personal
@@ -393,9 +400,14 @@ export function createMemoryTools(
         assistantKind: context.assistantKind ?? 'standard',
         workspaceId: context.workspaceId,
         sensitivity: stampedSensitivityForScope,
-        emittedScope: input.scope,
+        emittedScope: input.scope ?? (sharedAudience ? 'team' : undefined),
       })
       const effectiveScope = scopeDecision.scope
+      // Never turn a denied shared write (for example confidential team
+      // content) into a personal memory belonging to the current speaker.
+      if (sharedAudience && effectiveScope !== 'team') {
+        return { data: 'This memory cannot be saved for the shared conversation. Send the request in a direct message; nothing was saved.', isError: true }
+      }
       // Preserved error path: if the model emitted 'team' without a
       // workspace, decideMemoryScope force-routes to 'user' via the
       // `memory-scope-no-workspace-blocks-team` rule. Surface that as a
@@ -574,7 +586,7 @@ export function createMemoryTools(
       const memory = await store.create({
         ...(memoryAuthorityValue?{authority:memoryAuthorityValue}:{}),
         assistantId: context.assistantId,
-        userId: context.userId,
+        userId: sharedAudience ? null : context.userId,
         scope: dbScope,
         tags: effectiveTags,
         summary: input.summary,

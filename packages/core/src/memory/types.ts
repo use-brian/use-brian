@@ -90,7 +90,7 @@ export type SoulSynthesisInput = {
 export type MemoryStore = {
   create(params: {
     assistantId: string
-    userId: string
+    userId: string | null
     scope?: string
     tags?: string[]
     summary: string

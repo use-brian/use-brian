@@ -2726,6 +2726,12 @@ export function jsonSchemaFromZod(schema: { _def: unknown }): {
   type TP = ToolParameter
   const def = schema._def as Record<string, unknown>
 
+  // Refined direct tools (including webSearch) retain their object parameters.
+  // Runtime parsing still enforces the refinement; this only exposes its shape.
+  if (def.typeName === 'ZodEffects') {
+    return jsonSchemaFromZod(def.schema as { _def: unknown })
+  }
+
   if (def.typeName === 'ZodObject') {
     const shape = (def as { shape: () => Record<string, { _def: Record<string, unknown> }> }).shape()
     const properties: Record<string, TP> = {}

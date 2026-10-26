@@ -421,7 +421,10 @@ describe('[COMP:api/proactive-compaction] runProactiveCompaction — persistence
 
   })
 
-  it('compacts an external guest session without writing long-term context', async () => {
+  it.each(['external guest', 'shared room'])('compacts an %s session without reading personal memory or writing long-term context', async (audience) => {
+    mockSetCompactSummaryAndBoundary.mockImplementation(async (_id, summary, boundarySequence) => ({
+      id: 'fictional-compact-summary', summary, boundarySequence,
+    }))
     const sessionMessages: SessionMessage[] = [
       makeSessionMessage({ sequenceNum: 100, role: 'user', content: [{ type: 'text', text: 'old question' }] }),
       makeSessionMessage({ sequenceNum: 101, role: 'assistant', content: [{ type: 'text', text: 'old answer' }] }),
@@ -445,6 +448,7 @@ describe('[COMP:api/proactive-compaction] runProactiveCompaction — persistence
       workspaceId: 'ws_1',
       chatEpisodeIngestor,
       persistLongTermContext: false,
+      persistSessionSummary: audience !== 'shared room',
     })
 
     expect(result.compacted).toBe(true)
@@ -454,6 +458,7 @@ describe('[COMP:api/proactive-compaction] runProactiveCompaction — persistence
     expect(episodicStore.listBySession).not.toHaveBeenCalled()
     expect(episodicStore.create).not.toHaveBeenCalled()
     expect(chatEpisodeIngestor).not.toHaveBeenCalled()
+    expect(mockSetCompactSummaryAndBoundary).toHaveBeenCalledTimes(audience === 'shared room' ? 0 : 1)
   })
 
   it('propagates authority loss instead of trimming or running later derived writes', async () => {

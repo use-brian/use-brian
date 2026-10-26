@@ -11,6 +11,7 @@
  */
 
 import type { SearchProvider, SearchResult } from './search-stack.js'
+import { compileSearchFilters } from './search-filters.js'
 import { retryAfterMs, SearchProviderError } from './_fetch-error.js'
 import { clampResultCount, stripHtmlTags } from './search-stack.js'
 import type { ExternalCredentialPool } from '../../providers/credential-pool.js'
@@ -46,9 +47,10 @@ export function createBaiduProvider(pool?: ExternalCredentialPool): SearchProvid
   // shared bounded retry path.
   panelConcurrency: 1,
 
-  async search(query, maxResults, signal): Promise<SearchResult[]> {
+  async search(query, maxResults, signal, filters): Promise<SearchResult[]> {
+    const filterParams = compileSearchFilters('baidu', filters)
     const lease = await resolveToolCredential(pool, 'baidu', process.env.BAIDU_SEARCH_API_KEY)
-    if (!lease) return []
+    if (!lease) throw new SearchProviderError({ provider: 'baidu', kind: 'bad_key', detail: 'No eligible search credential is configured.' })
 
     const res = await fetch(BAIDU_ENDPOINT, {
       method: 'POST',
@@ -62,6 +64,7 @@ export function createBaiduProvider(pool?: ExternalCredentialPool): SearchProvid
         edition: 'standard',
         search_source: 'baidu_search_v2',
         resource_type_filter: [{ type: 'web', top_k: clampResultCount(maxResults) }],
+        ...filterParams,
       }),
       signal,
     })
