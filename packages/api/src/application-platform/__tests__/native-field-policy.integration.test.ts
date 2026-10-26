@@ -1,6 +1,7 @@
 import { readApplicationGovernanceCatalog,previewApplicationGovernance,applyApplicationGovernance } from '../governance.js'
 import { previewApplicationSchema,applyApplicationSchema } from '../schema-changes.js'
 import { createHash,randomUUID,randomBytes } from 'node:crypto'
+import { writeFile } from 'node:fs/promises'
 import { afterAll,beforeAll,describe,expect,it } from 'vitest'
 import type { Pool, PoolClient } from 'pg'
 import express from 'express'
@@ -893,7 +894,7 @@ describe('[COMP:security/native-field-policy] current canonical native field mas
         channelId: 'native-field-fixture',channelType: 'test',abortSignal: new AbortController().signal } })).executionContext
   }
   async function application(fixture: Awaited<ReturnType<typeof catalogType>> & { row?: { id: string } },kind: 'member' | 'external_user' | 'service',parentIssuer?: string,
-    actions: ApplicationAccessGrant['actions'] = ['read','query','history','patch'],selector?: ApplicationAccessGrant['selector']) {
+    actions: ApplicationAccessGrant['actions'] = ['read','query','history','patch'],selector?: ApplicationAccessGrant['selector'],independentAnchor?: Awaited<ReturnType<typeof record>>) {
     const appId = randomUUID(),grantId = randomUUID(),parentId = parentIssuer ? randomUUID() : null
     const selection = selector ?? (fixture.row ? { kind: 'ids' as const,ids: [fixture.row.id] } : undefined)
     if (!selection) throw new Error('The fixture requires an explicit selector for an empty type.')
@@ -909,17 +910,19 @@ describe('[COMP:security/native-field-policy] current canonical native field mas
       actions,readFields: ['title','cost'],writeFields: ['title','cost'],selector: selection,
       version: 1,status: 'active',startsAt: '2020-01-01T00:00:00.000Z',expiresAt: null,parentGrantId,compartments: [],projectIds: [],clearance: 'confidential' })
     const path = [grant(grantId,parentId),...(parentId ? [grant(parentId,null)] : [])]
-    for (const value of [...path].reverse()) await owner.query(`INSERT INTO application_access_grants(id,app_id,workspace_id,principal_kind,principal_user_id,issued_by_user_id,
+    const anchorGrant:ApplicationAccessGrant|undefined=independentAnchor?{...grant(randomUUID(),null),origin:independentAnchor.origin,typeKey:independentAnchor.type,
+      actions:['read'],readFields:['title'],writeFields:[],selector:{kind:'ids',ids:[independentAnchor.row.id]}}:undefined
+    const maxima:ApplicationGrantMaximum[]=[{version:1,grants:path},...(anchorGrant?[{version:1 as const,grants:[anchorGrant]}]:[])]
+    for (const value of [...path].reverse().concat(anchorGrant?[anchorGrant]:[])) await owner.query(`INSERT INTO application_access_grants(id,app_id,workspace_id,principal_kind,principal_user_id,issued_by_user_id,
       resource_origin,resource_type,actions,read_fields,write_fields,selector,compartments,project_ids,clearance,parent_grant_id,starts_at)
-      VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$10,$11,'{}','{}','confidential',$12,$13)`,[
-      value.id,appId,workspaceId,kind,userId,value.id === parentId ? parentIssuer : ownerId,fixture.origin,fixture.type,value.actions,value.readFields,value.selector,value.parentGrantId,value.startsAt,
+      VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$14,$11,'{}','{}','confidential',$12,$13)`,[
+      value.id,appId,workspaceId,kind,userId,value.id === parentId ? parentIssuer : ownerId,value.origin,value.typeKey,value.actions,value.readFields,value.selector,value.parentGrantId,value.startsAt,value.writeFields,
     ])
-    const maximum: ApplicationGrantMaximum = { version: 1,grants: path }
     if (kind === 'service') {
       const material = await mintApplicationCredentialSecret()
       await owner.query(`INSERT INTO application_api_credentials(id,app_id,workspace_id,issued_by_user_id,subject_user_id,name,credential_kind,secret_hash,parent_grant_id,expires_at)
         VALUES($1,$2,$3,$4,$5,'Fictional scoped policy service','service',$6,$7,now()+interval '1 hour')`,[material.id,appId,workspaceId,ownerId,userId,material.secretHash,grantId])
-      await owner.query('INSERT INTO application_credential_grants(credential_id,app_id,workspace_id,grant_id,maximum_grant) VALUES($1,$2,$3,$4,$5)',[material.id,appId,workspaceId,grantId,maximum])
+      for(const captured of maxima) await owner.query('INSERT INTO application_credential_grants(credential_id,app_id,workspace_id,grant_id,maximum_grant) VALUES($1,$2,$3,$4,$5)',[material.id,appId,workspaceId,captured.grants[0].id,captured])
       const credential = await authenticateApplicationCredential(material.token,appId,loadApplicationCredentialStateSystem)
       expect(credential).not.toBeNull()
       return { authentication: { credential: credential! },appId,grantId,parentId,userId,token: material.token }
@@ -931,7 +934,7 @@ describe('[COMP:security/native-field-policy] current canonical native field mas
     await owner.query(`INSERT INTO oauth_authorizations(id,client_id,user_id,workspace_id,scope,audience,application_client_id,access_token_hash,access_token_expires_at)
       VALUES($1,$2,$3,$4,'read_write','application',$5,$6,now()+interval '10 minutes')`,[id,client.clientId,userId,workspaceId,appId,await hashSecret(secret)])
     await owner.query(`INSERT INTO application_oauth_bindings(authorization_id,app_id,workspace_id,principal_user_id,parent_grant_id,maximum_grants)
-      VALUES($1,$2,$3,$4,$5,$6)`,[id,appId,workspaceId,userId,grantId,JSON.stringify([maximum])])
+      VALUES($1,$2,$3,$4,$5,$6)`,[id,appId,workspaceId,userId,grantId,JSON.stringify(maxima)])
     const user = await authenticateApplicationOAuth(`oat_${id}_${secret}`,appId)
     expect(user).not.toBeNull()
     return { authentication: { user: user! },appId,grantId,parentId,userId,token: `oat_${id}_${secret}` }
@@ -1159,11 +1162,11 @@ describe('[COMP:security/native-field-policy] current canonical native field mas
   it('uses a declared relationship resolver for empty query metadata without serializing its anchor',async () => {
     const anchor = await record()
     const schema = await store.createEntityType({ workspaceId,name: `Fictional relationship catalog ${randomUUID()}`,createdBy: ownerId,
-      properties: [{ name: 'title',config: { kind: 'text' } },{ name: 'cost',config: { kind: 'number',format: 'decimal' } },
-        { name: 'company',config: { kind: 'relation',targetEntityTypeRef: { kind: 'user_defined',entityTypeId: anchor.schema.id } } }] })
+      properties: [{ name: 'title',config: { kind: 'text' } },
+        { name: 'cost',config: { kind: 'relation',targetEntityTypeRef: { kind: 'user_defined',entityTypeId: anchor.schema.id } } }] })
     const fixture = { schema,origin: { kind: 'generic' as const,entityTypeId: schema.id },type: `record.${schema.id}` }
     const app = await application(fixture,'external_user',undefined,['query'],{ kind: 'relationship',
-      resolverKey: `relation.${createHash('sha256').update('company').digest('hex')}`,anchorId: anchor.row.id })
+      resolverKey: `relation.${createHash('sha256').update('cost').digest('hex')}`,anchorId: anchor.row.id })
     const catalog = await applicationCatalog(app)
     expect(catalog.resources.find(resource => resource.typeKey === fixture.type)?.fields.map(field => field.key).sort()).toEqual(['cost','title'])
     expect(JSON.stringify(catalog)).not.toContain(anchor.row.id)
@@ -1933,6 +1936,112 @@ describe('[COMP:security/native-field-policy] current canonical native field mas
     await expect(run(await nativeExecution(otherId))).resolves.toMatchObject({ selection: { kind: 'text' } })
     expect(requests).toBe(2);expect(JSON.stringify(events)).toContain('Fictional withheld continuation')
   })
+
+  it('requires a registered relationship predicate field after current issuer masks',async()=>{
+    // Lower-level maintained authority fixture only. Normal management issuance
+    // is proved separately in operation-reconciliation, never inferred here.
+    await clearRoles();const issuerRole=await assign('finance',ownerId);await assign()
+    const anchor=await record()
+    const schema=await store.createEntityType({workspaceId,name:`Fictional registered relationship ${randomUUID()}`,createdBy:ownerId,properties:[
+      {name:'title',config:{kind:'text'}},{name:'cost',config:{kind:'relation',targetEntityTypeRef:{kind:'user_defined',entityTypeId:anchor.schema.id}}},
+    ]})
+    const row=await store.createEntity({workspaceId,entityTypeId:schema.id,createdBy:ownerId,lastEditedBy:ownerId,sourceApp:'api',
+      data:{title:{kind:'text',value:'Fictional registered child'},cost:{kind:'relation',value:anchor.row.id}}})
+    const fixture={schema,origin:{kind:'generic' as const,entityTypeId:schema.id},type:`record.${schema.id}`,row}
+    await claimCatalog(fixture,'operations',fields())
+    await owner.query('INSERT INTO application_native_policy_fixture_metadata(resource_id,fields) VALUES($1,$2)',[row.id,JSON.stringify(fields())])
+    const policy=(await owner.query('SELECT application_native_field_contract_for($1,$2,$3,$4) AS value',[workspaceId,fixture.origin,fixture.type,row.id])).rows[0].value
+    expect(policy).toMatchObject({registered:true,held:false,metadata:{moduleKey:'operations',recordVersion:row.recordVersion}})
+    const app=await application(fixture,'member',undefined,['read'],{kind:'relationship',resolverKey:`relation.${createHash('sha256').update('cost').digest('hex')}`,anchorId:anchor.row.id},anchor)
+    const dispatcher=new ApplicationPlatformService([createCanonicalGenericApplicationModule()])
+    const get=async(target=fixture)=>dispatcher.query(await resolveApplicationExecutionContext(app.authentication),'records','get',{type:target.type,id:target.row.id}) as Promise<ApplicationRecordProjection>
+    const business=async()=>{
+      const value:Record<string,unknown>={}
+      for(const table of ['entity_instances','application_record_revisions','application_operation_receipts','application_command_audit','application_committed_events'])
+        value[table]=(await owner.query(`SELECT to_jsonb(r) AS row FROM ${table} r WHERE workspace_id=$1 ORDER BY to_jsonb(r)::text`,[workspaceId])).rows
+      return value
+    }
+    const authority=async()=>(await owner.query(`SELECT g.read_fields,g.selector,b.maximum_grants FROM application_access_grants g
+      JOIN application_oauth_bindings b ON b.app_id=g.app_id WHERE g.id=$1`,[app.grantId])).rows
+    const trace:Record<string,unknown>={policy,fixtureKind:'maintained lower-level grant/OAuth fixture; not normal issuance'}
+    try{
+      expect(await get()).toMatchObject({ref:{id:row.id,version:row.recordVersion},values:{cost:{kind:'relation',value:anchor.row.id}}})
+      expect(await get(anchor)).toMatchObject({ref:{id:anchor.row.id}})
+      trace.runtime=await asApplication(app,async client=>(await client.query(`SELECT session_user,current_user,r.rolsuper,r.rolbypassrls,r.rolinherit,
+        (SELECT count(*)::int FROM pg_auth_members WHERE member=r.oid OR roleid=r.oid) AS memberships,c.relowner=r.oid AS owns_entities
+        FROM pg_roles r JOIN pg_class c ON c.oid='entity_instances'::regclass WHERE r.rolname=session_user`)).rows[0])
+      expect(trace.runtime).toEqual({session_user:'app_user',current_user:'app_user',rolsuper:false,rolbypassrls:false,rolinherit:false,memberships:0,owns_entities:false})
+
+      const realGucs=await asApplication(app,async client=>(await client.query(`SELECT jsonb_object_agg(key,coalesce(current_setting(key,true),'')) AS value FROM unnest(ARRAY[
+        'app.current_user_id','app.application_id','app.application_credential_id','app.application_oauth_id','app.application_assistant_id',
+        'app.v2_assistant_id','app.v2_cap','app.application_home_binding_id']) AS key`)).rows[0].value as Record<string,string>)
+      const before=await business(),unchangedAuthority=await authority();trace.before=before;trace.authority=unchangedAuthority
+      // Existing lower fixture's unreviewed row permits this invalid-current
+      // negative. A normally reviewed grant is immutable and is never altered.
+      const internal=await owner.connect()
+      const setContext=async()=>{for(const[key,value]of Object.entries(realGucs))await internal.query('SELECT set_config($1,$2,true)',[key,value])}
+      const point=async()=>{
+        const context=(await internal.query('SELECT application_current_maxima() AS value')).rows[0].value
+        expect(context).not.toBeNull();const layer=context.layers[0]
+        const maximum=layer.maxima.find((candidate:{grants:Array<{id:string}>})=>candidate.grants[0].id===app.grantId)
+        expect(maximum).toBeDefined()
+        return(await internal.query(`SELECT application_path_fields($1,$2,$3,$4,$5,id::text,created_by,sensitivity,compartments,project_ids,NULL,'read',NULL) AS decision,
+          application_path_fields_before_module_policy($1,$2,$3,$4,$5,id::text,created_by,sensitivity,compartments,project_ids,NULL,'read',NULL) AS base
+          FROM entity_instances WHERE id=$6`,[maximum,layer.principal,workspaceId,fixture.origin,fixture.type,row.id])).rows[0]
+      }
+      const rollbackState=async()=>{
+        const result:Record<string,unknown>={}
+        const tables=(await owner.query(`SELECT c.relname FROM pg_class c JOIN pg_namespace n ON n.oid=c.relnamespace WHERE n.nspname='public'
+          AND c.relkind IN('r','p') AND EXISTS(SELECT 1 FROM pg_attribute a WHERE a.attrelid=c.oid AND a.attname='workspace_id' AND NOT a.attisdropped) ORDER BY c.relname`)).rows
+        for(const{relname:table}of tables){if(!/^[a-z_]+$/.test(table))throw new Error('Unexpected fixture table')
+          result[table]=(await owner.query(`SELECT to_jsonb(r) AS row FROM ${table} r WHERE workspace_id=$1 ORDER BY to_jsonb(r)::text`,[workspaceId])).rows}
+        return result
+      }
+      const completeBefore=await rollbackState();trace.invalidCurrentBefore=completeBefore
+      try{
+        await internal.query('BEGIN');await setContext()
+        const baseline=await point();expect(baseline.decision).not.toBeNull();expect(baseline.base).not.toBeNull()
+        await internal.query('ROLLBACK')
+        await internal.query('BEGIN')
+        // Construct rejected metadata under the existing fixture-owner seam,
+        // before attaching application identity. No trigger is disabled and no
+        // application actor performs or receives this authority mutation.
+        expect((await internal.query("SELECT nullif(current_setting('app.current_user_id',true),'') AS actor")).rows[0].actor).toBeNull()
+        await internal.query("UPDATE application_access_grants SET read_fields=ARRAY['title'] WHERE id=$1",[app.grantId])
+        await setContext()
+        const contracted=await point();expect(contracted.base).not.toBeNull();expect(contracted.decision).toBeNull()
+        const invalid=(await internal.query(`SELECT g.read_fields,b.maximum_grants FROM application_access_grants g
+          JOIN application_oauth_bindings b ON b.app_id=g.app_id WHERE g.id=$1`,[app.grantId])).rows
+        trace.invalidCurrent={fixture:'owner-constructed invalid-current lower fixture; not normal mutation or app_user write proof',baseline,contracted,invalid}
+      }finally{await internal.query('ROLLBACK');internal.release()}
+      expect(await rollbackState()).toEqual(completeBefore);trace.invalidCurrentAfter=await rollbackState()
+      expect(await authority()).toEqual(unchangedAuthority);expect(await business()).toEqual(before)
+      const restored=await owner.connect()
+      try{
+        await restored.query('BEGIN')
+        for(const[key,value]of Object.entries(realGucs))await restored.query('SELECT set_config($1,$2,true)',[key,value])
+        const context=(await restored.query('SELECT application_current_maxima() AS value')).rows[0].value,layer=context.layers[0]
+        const maximum=layer.maxima.find((candidate:{grants:Array<{id:string}>})=>candidate.grants[0].id===app.grantId)
+        const decision=(await restored.query(`SELECT application_path_fields($1,$2,$3,$4,$5,id::text,created_by,sensitivity,compartments,project_ids,NULL,'read',NULL) AS value
+          FROM entity_instances WHERE id=$6`,[maximum,layer.principal,workspaceId,fixture.origin,fixture.type,row.id])).rows[0].value
+        expect(decision).not.toBeNull();trace.invalidCurrentRestored=decision
+      }finally{await restored.query('ROLLBACK');restored.release()}
+      expect(await authority()).toEqual(unchangedAuthority);expect(await business()).toEqual(before)
+      expect(await rollbackState()).toEqual(completeBefore)
+
+      await owner.query("UPDATE application_native_role_assignments SET status='revoked' WHERE id=$1",[issuerRole])
+      expect(await authority()).toEqual(unchangedAuthority)
+      expect((await owner.query('SELECT application_native_field_contract_for($1,$2,$3,$4) AS value',[workspaceId,fixture.origin,fixture.type,row.id])).rows[0].value).toEqual(policy)
+      await expect(get()).rejects.toMatchObject({code:'access_unavailable'})
+      expect(await get(anchor)).toMatchObject({ref:{id:anchor.row.id}})
+      expect(await business()).toEqual(before);trace.afterDenial=await business()
+      await assign('finance',ownerId)
+      expect(await get()).toMatchObject({ref:{id:row.id,version:row.recordVersion},values:{cost:{kind:'relation',value:anchor.row.id}}})
+      expect(await business()).toEqual(before);trace.afterRestore=await business();trace.status='pass'
+    }catch(error){trace.status='failed';trace.error=error&&typeof error==='object'?Object.fromEntries(Object.getOwnPropertyNames(error).filter(key=>key!=='stack').map(key=>[key,(error as Record<string,unknown>)[key]])):{message:String(error)};trace.final=await business();throw error}
+    finally{if(process.env.F_E08_NATIVE_ARTIFACT)await writeFile(process.env.F_E08_NATIVE_ARTIFACT,JSON.stringify(trace,null,2)+'\n')}
+  })
+
   it.each(['member','external_user','service'] as const)('intersects current module and issuer fields in an actual %s application',async kind => {
     await clearRoles();const fixture = await record();const issuerRole = await assign('finance',ownerId)
     await assign();const app = await application(fixture,kind),dispatcher = new ApplicationPlatformService([createCanonicalGenericApplicationModule()])

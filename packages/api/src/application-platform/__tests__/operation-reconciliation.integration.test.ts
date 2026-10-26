@@ -1,6 +1,7 @@
 /** Current-authority recovery for an operation whose acknowledgement was lost. */
 import { createHash, randomUUID } from 'node:crypto'
 import { once } from 'node:events'
+import { writeFile } from 'node:fs/promises'
 import { afterAll, beforeAll, describe, expect, it } from 'vitest'
 import express from 'express'
 import request from 'supertest'
@@ -27,9 +28,15 @@ await assertLocalFixture()
 describe.sequential('[COMP:api/application-records] canonical operation reconciliation', () => {
  const pool=getPool(), workspaceId=randomUUID(), ownerId=randomUUID(), memberId=randomUUID(), assistantId=randomUUID()
  let executeCount = 0, effectCount = 0
+ let relationshipObserver: ((client: import('pg').PoolClient) => Promise<void>) | undefined
  const definition = createCanonicalGenericApplicationModule()
  for (const [key, handler] of Object.entries(definition.commands)) definition.commands = { ...definition.commands, [key]: { ...handler, execute: async (context, input) => {
+  if (relationshipObserver) await relationshipObserver(context.transaction)
   executeCount++; const result = await handler.execute(context, input); context.afterCommit(() => { effectCount++ }); return result
+ } } }
+ for (const [key, handler] of Object.entries(definition.queries)) definition.queries = { ...definition.queries, [key]: { ...handler, execute: async (context, input) => {
+  if (relationshipObserver) await relationshipObserver(context.transaction)
+  return handler.execute(context, input)
  } } }
  const secret='fictional-generic-service-session', service=new ApplicationPlatformService([definition])
  const management=new ApplicationManagementService(service), http=express(), tokens=new Map<string,string>(), serviceIds:string[]=[]
@@ -406,4 +413,192 @@ describe.sequential('[COMP:api/application-records] canonical operation reconcil
   expect(Reflect.ownKeys(Object.prototype)).toEqual(prototypeKeys)
   expect(({} as { value?: number }).value).toBeUndefined()
  })
+
+ it('admits a normally issued generic relationship only with its canonical predicate field and independent anchor', async () => {
+  const trace: Array<Record<string, unknown>> = [], snapshots: Array<Record<string, unknown>> = []
+  let stage = 'setup', lastSnapshot: unknown
+  let runtimeGucs: Record<string, string> = {}
+  const snapshot = async () => {
+   const result: Record<string, unknown> = {}
+   const tables = (await pool.query(`SELECT c.relname FROM pg_class c JOIN pg_namespace n ON n.oid=c.relnamespace
+    WHERE n.nspname='public' AND c.relkind IN('r','p') AND EXISTS(SELECT 1 FROM pg_attribute a WHERE a.attrelid=c.oid AND a.attname='workspace_id' AND NOT a.attisdropped) ORDER BY c.relname`)).rows
+   for (const { relname: table } of tables) {
+    if (!/^[a-z_]+$/.test(table)) throw new Error('Unexpected fixture table')
+    result[table] = (await pool.query(`SELECT to_jsonb(r) AS row FROM ${table} r WHERE workspace_id=$1 ORDER BY to_jsonb(r)::text`, [workspaceId])).rows.map(row => row.row)
+   }
+   return result
+  }
+  const checkpoint = async (next: string) => {
+   stage = next; lastSnapshot = await snapshot(); snapshots.push({ stage, state: lastSnapshot })
+  }
+  const nativeGrant = async (input: Record<string, unknown>) => {
+   const reviewed = await checked({ kind: 'grant.review', appId, input })
+   trace.push({ stage, review: reviewed }); expect(reviewed.canIssue, JSON.stringify(reviewed)).toBe(true)
+   return checked({ kind: 'grant.apply', appId, reviewId: reviewed.id })
+  }
+  const role = async (transaction: import('pg').PoolClient) => {
+   const runtime = (await transaction.query(`SELECT session_user,current_user,r.rolsuper,r.rolbypassrls,r.rolinherit,
+    (SELECT count(*)::int FROM pg_auth_members m WHERE m.member=r.oid OR m.roleid=r.oid) AS memberships,
+    c.relowner=r.oid AS owns_entities FROM pg_roles r JOIN pg_class c ON c.oid='entity_instances'::regclass WHERE r.rolname=session_user`)).rows[0]
+   runtimeGucs = (await transaction.query(`SELECT jsonb_object_agg(key,coalesce(current_setting(key,true),'')) AS gucs FROM unnest(ARRAY[
+    'app.current_user_id','app.application_id','app.application_credential_id','app.application_oauth_id','app.application_assistant_id',
+    'app.v2_assistant_id','app.v2_cap','app.application_home_binding_id']) AS key`)).rows[0].gucs
+   trace.push({ stage, runtime }); expect(runtime).toEqual({ session_user: 'app_user', current_user: 'app_user', rolsuper: false,
+    rolbypassrls: false, rolinherit: false, memberships: 0, owns_entities: false })
+  }
+  relationshipObserver = role
+  try {
+   const control = await setup()
+   const controlCreated = await control.sdk.command('record_create', { idempotencyKey: randomUUID(), input: { operation: 'create', type: typeKey, data: data('Fictional independent relationship control') } })
+   const controlRow = { id: controlCreated.resources[0].id }
+   const anchors = await store.createEntityType({ workspaceId, name: 'Fictional relationship anchors', createdBy: ownerId,
+    properties: [{ name: 'title', config: { kind: 'text' } }] })
+   const anchor = await store.createEntity({ workspaceId, entityTypeId: anchors.id, sourceApp: 'api', createdBy: ownerId, lastEditedBy: ownerId,
+    data: { title: { kind: 'text', value: 'Fictional anchor A' } } })
+   const otherAnchor = await store.createEntity({ workspaceId, entityTypeId: anchors.id, sourceApp: 'api', createdBy: ownerId, lastEditedBy: ownerId,
+    data: { title: { kind: 'text', value: 'Fictional anchor B' } } })
+   const children = await store.createEntityType({ workspaceId, name: 'Fictional relationship children', createdBy: ownerId, properties: [
+    { name: 'title', config: { kind: 'text' } },
+    { name: 'parent', config: { kind: 'relation', targetEntityTypeRef: { kind: 'user_defined', entityTypeId: anchors.id } } },
+   ] })
+   const child = await store.createEntity({ workspaceId, entityTypeId: children.id, sourceApp: 'api', createdBy: ownerId, lastEditedBy: ownerId,
+    data: { title: { kind: 'text', value: 'Fictional related child' }, parent: { kind: 'relation', value: anchor.id } } })
+   const anchorType = `record.${anchors.id}`, childType = `record.${children.id}`
+   await checkpoint('normal independent anchor review and apply')
+   const anchorGrant = await nativeGrant(proposal({ origin: { kind: 'generic', entityTypeId: anchors.id }, typeKey: anchorType,
+    actions: ['read'], readFields: ['title'], writeFields: [], selector: { kind: 'ids', ids: [anchor.id] } }))
+   await checkpoint('normal relationship review and apply')
+   const relationshipProposal = proposal({ origin: { kind: 'generic', entityTypeId: children.id }, typeKey: childType,
+    actions: ['read', 'query', 'history', 'schema', 'patch', 'command:record_patch'], readFields: ['title', 'parent'], writeFields: ['title'],
+    selector: { kind: 'relationship', resolverKey: `relation.${createHash('sha256').update('parent').digest('hex')}`, anchorId: anchor.id } })
+   const relationshipGrant = await nativeGrant(relationshipProposal)
+   await checkpoint('normal relationship credential review and delivery')
+   const credential = await issue([anchorGrant.grantId, relationshipGrant.grantId]), sdk = client(credential.secret)
+   await checkpoint('normal relationship title-only query')
+   expect(await sdk.query(childType, { fields: ['title'], filters: [], sort: [], aggregate: [], limit: 10 })).toMatchObject({ records: [{ ref: { id: child.id } }] })
+   await checkpoint('normal relationship get')
+   expect(await sdk.get(childType, child.id)).toMatchObject({ ref: { id: child.id, version: '1' }, values: { parent: { value: anchor.id } } })
+   await checkpoint('normal relationship allowed patch commit')
+   expect(await sdk.command('record_patch', { idempotencyKey: randomUUID(), expectedVersion: '1', input: { operation: 'patch', type: childType,
+    id: child.id, data: { title: { kind: 'text', value: 'Fictional related child changed' } } } })).toMatchObject({ effect: 'committed', resources: [{ id: child.id, version: '2' }] })
+
+   await checkpoint('normal relationship empty aggregate query')
+   expect(await sdk.query(childType, { fields: ['title'], filters: [{ field: 'title', op: 'eq', value: 'Fictional absent child' }],
+    sort: [], aggregate: [{ field: 'title', operation: 'count' }], limit: 10 })).toMatchObject({ records: [] })
+   const relationshipGucs = { ...runtimeGucs }
+   await checkpoint('normal relationship review negatives')
+   for (const [name, changes] of [
+    ['missing canonical predicate read', { readFields: ['title'] }],
+    ['forged resolver', { selector: { kind: 'relationship', resolverKey: `relation.${'a'.repeat(64)}`, anchorId: anchor.id } }],
+    ['foreign anchor', { selector: { ...(relationshipProposal.selector as object), anchorId: randomUUID() } }],
+   ] as const) {
+    const before = await snapshot(), reviewed = await command({ kind: 'grant.review', appId, input: { ...relationshipProposal, ...changes } })
+    trace.push({ stage, name, status: reviewed.status, review: reviewed.body })
+    if (name === 'missing canonical predicate read') { expect(reviewed.status).toBe(200); expect(reviewed.body.canIssue, name).toBe(false) }
+    else { expect(reviewed.status).toBe(403); expect(reviewed.body).toEqual({ error: 'access_unavailable', effect: 'none', retrySafe: true }) }
+    const after = await snapshot()
+    for (const table of ['entity_instances', 'application_record_revisions', 'application_access_grants', 'application_api_credentials',
+     'application_credential_grants', 'application_operation_receipts', 'application_command_audit', 'application_committed_events']) expect(after[table], name).toEqual(before[table])
+   }
+   await checkpoint('negative-only internal predicate-field probes')
+   // These owner-only calls test deliberately invalid states. They reuse the
+   // real credential's captured identifiers/maxima, never mint positive grants.
+   const diagnostic = await pool.connect()
+   const setContext = async () => { for (const [key, value] of Object.entries(relationshipGucs)) await diagnostic.query('SELECT set_config($1,$2,true)', [key, value]) }
+   try {
+    const original = await snapshot()
+    for (const contraction of ['issued field', 'principal query mask', 'issuer query mask']) {
+     await diagnostic.query('BEGIN')
+     try {
+      await setContext()
+      const context = (await diagnostic.query('SELECT application_current_maxima() AS value')).rows[0].value
+      expect(context).not.toBeNull()
+      const layer = context.layers[0], maximum = layer.maxima.find((value: { grants: Array<{ id: string }> }) => value.grants[0].id === relationshipGrant.grantId)
+      expect(maximum).toBeDefined()
+      const policy = (await diagnostic.query('SELECT application_generic_query_catalog_policy($1,$2,$3) AS value', [workspaceId, relationshipProposal.origin, childType])).rows[0].value
+      const row = (await diagnostic.query('SELECT * FROM entity_instances WHERE id=$1', [child.id])).rows[0]
+      const pointPolicy = (await diagnostic.query('SELECT application_native_field_contract_for($1,$2,$3,$4) AS value', [workspaceId, relationshipProposal.origin, childType, child.id])).rows[0].value
+      expect(pointPolicy).toEqual({ registered: false })
+      const decisions = async (issued = maximum, catalogPolicy = policy) => {
+       const params = [issued, layer.principal, workspaceId, relationshipProposal.origin, childType, child.id, row.created_by,
+        row.sensitivity, row.compartments, row.project_ids]
+       return (await diagnostic.query(`SELECT application_path_fields($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,NULL,'read',NULL) AS point,
+        application_path_fields_before_module_policy($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,NULL,'read',NULL) AS base,
+        application_query_catalog_path($11,$1,$2,$3,$4,$5,$12) AS catalog`, [...params, context, catalogPolicy])).rows[0]
+      }
+      const alteredMaximum = structuredClone(maximum), alteredPolicy = structuredClone(policy)
+      const baseline = await decisions(alteredMaximum, alteredPolicy)
+      expect(baseline.point, contraction).not.toBeNull(); expect(baseline.catalog, contraction).not.toBeNull()
+      if (contraction === 'issued field') alteredMaximum.grants[0].readFields = ['title']
+      if (contraction === 'principal query mask') alteredPolicy.metadata.fields.find((field: { key: string }) => field.key === 'parent').releaseReadTo = []
+      if (contraction === 'issuer query mask') alteredPolicy.metadata.fields.find((field: { key: string }) => field.key === 'parent').read = [[]]
+      const refused = await decisions(alteredMaximum, alteredPolicy)
+      expect(refused.base, contraction).not.toBeNull()
+      if (contraction.includes('mask')) { expect(refused.point, contraction).not.toBeNull(); expect(refused.catalog, contraction).toBeNull() }
+      else { expect(refused.point, contraction).toBeNull(); expect(refused.catalog, contraction).toBeNull() }
+      trace.push({ stage, contraction, fixture: 'owner-only invalid-state diagnostic; issued changes are parameter-only', pointPolicy, baseline, refused })
+     } finally { await diagnostic.query('ROLLBACK') }
+     expect(await snapshot(), contraction + ' full rollback').toEqual(original)
+     await diagnostic.query('BEGIN')
+     try {
+      await setContext()
+      const context = (await diagnostic.query('SELECT application_current_maxima() AS value')).rows[0].value, layer = context.layers[0]
+      const maximum = layer.maxima.find((value: { grants: Array<{ id: string }> }) => value.grants[0].id === relationshipGrant.grantId)
+      const restored = (await diagnostic.query(`SELECT application_path_fields($1,$2,$3,$4,$5,$6,created_by,sensitivity,compartments,project_ids,NULL,'read',NULL) AS point,
+       application_query_catalog_path($7,$1,$2,$3,$4,$5,application_generic_query_catalog_policy($3,$4,$5)) AS catalog FROM entity_instances WHERE id=$6::uuid`,
+      [maximum, layer.principal, workspaceId, relationshipProposal.origin, childType, child.id, context])).rows[0]
+      expect(restored.point, contraction + ' restored').not.toBeNull(); expect(restored.catalog, contraction + ' restored').not.toBeNull()
+      trace.push({ stage, contraction, restored })
+     } finally { await diagnostic.query('ROLLBACK') }
+     expect(await snapshot(), contraction + ' restored conservation').toEqual(original)
+    }
+   } finally { diagnostic.release() }
+   await checkpoint('normal exact-ID writer issuance')
+   const writerAnchor = await nativeGrant(proposal({ origin: { kind: 'generic', entityTypeId: anchors.id }, typeKey: anchorType,
+    actions: ['read'], readFields: ['title'], writeFields: [], selector: { kind: 'ids', ids: [anchor.id, otherAnchor.id] } }))
+   const writerGrant = await nativeGrant({ ...relationshipProposal, selector: { kind: 'ids', ids: [child.id] }, writeFields: ['parent'] })
+   const writerCredential = await issue([writerAnchor.grantId, writerGrant.grantId]), writer = client(writerCredential.secret)
+   await checkpoint('normal writer relation move commit')
+   const move = await writer.command('record_patch', { idempotencyKey: randomUUID(), expectedVersion: '2', input: { operation: 'patch', type: childType,
+    id: child.id, data: { parent: { kind: 'relation', value: otherAnchor.id } } } })
+   expect(move).toMatchObject({ effect: 'committed', resources: [{ id: child.id, version: '3' }] })
+   const moved = await snapshot()
+   expect((moved.application_operation_receipts as Array<{ id: string }>).some(receipt => receipt.id === move.id)).toBe(true)
+   trace.push({ stage, move, before: lastSnapshot, after: moved })
+   await checkpoint('old relationship loses moved child')
+   expect(await sdk.query(childType, { fields: ['title'], filters: [], sort: [], aggregate: [], limit: 10 })).toMatchObject({ records: [] })
+   const beforeDenied = await snapshot()
+   await expect(sdk.get(childType, child.id)).rejects.toMatchObject({ code: 'access_unavailable' })
+   await expect(sdk.command('record_patch', { idempotencyKey: randomUUID(), expectedVersion: '3', input: { operation: 'patch', type: childType,
+    id: child.id, data: { title: { kind: 'text', value: 'Fictional forbidden old relationship patch' } } } })).rejects.toMatchObject({ code: 'access_unavailable', status: 403, effect: 'none' })
+   expect(await snapshot()).toEqual(beforeDenied)
+   await checkpoint('normal review becomes stale after schema change')
+   const staleReview = await checked({ kind: 'grant.review', appId, input: relationshipProposal })
+   expect(staleReview.canIssue).toBe(true)
+   await store.updateEntityType(workspaceId, children.id, { properties: [...children.properties, { name: 'note', config: { kind: 'text' } }] },
+    { actorUserId: ownerId, expectedSchemaVersion: children.schemaVersion })
+   const beforeStale = await snapshot(), staleApply = await command({ kind: 'grant.apply', appId, reviewId: staleReview.id })
+   trace.push({ stage, status: staleApply.status, result: staleApply.body }); expect(staleApply.status).toBe(409)
+   const afterStale = await snapshot()
+   for (const table of ['application_access_grants', 'application_api_credentials', 'application_credential_grants', 'entity_instances',
+    'application_record_revisions', 'application_operation_receipts', 'application_command_audit', 'application_committed_events']) expect(afterStale[table]).toEqual(beforeStale[table])
+   await checkpoint('normal independent anchor revoke')
+   await checked({ kind: 'grant.revoke', appId, grantId: anchorGrant.grantId })
+   const beforeRevokeReads = await snapshot()
+   await expect(sdk.query(childType, { fields: ['title'], filters: [], sort: [], aggregate: [], limit: 10 })).rejects.toMatchObject({ code: 'authentication_required', status: 401, effect: 'none' })
+   await expect(sdk.get(childType, child.id)).rejects.toMatchObject({ code: 'authentication_required', status: 401, effect: 'none' })
+   expect(await snapshot()).toEqual(beforeRevokeReads)
+   await checkpoint('normal independent control remains current')
+   expect(await control.sdk.get(typeKey, controlRow.id)).toMatchObject({ ref: { id: controlRow.id, version: '1' } })
+   await checkpoint('normal relationship finite controls complete')
+
+  } catch (error) {
+   const detail = (value: unknown): unknown => value && typeof value === 'object' ? Object.fromEntries(Object.getOwnPropertyNames(value)
+    .filter(key => key !== 'stack').map(key => [key, key === 'cause' ? detail((value as Record<string, unknown>)[key]) : (value as Record<string, unknown>)[key]])) : String(value)
+   trace.push({ stage, error: detail(error), before: lastSnapshot, after: await snapshot() }); throw error
+  } finally {
+   relationshipObserver = undefined
+   if (process.env.F_E08_ARTIFACT) await writeFile(process.env.F_E08_ARTIFACT, JSON.stringify({ stage, trace, snapshots, final: await snapshot() }, null, 2) + '\n')
+  }
+ }, 120_000)
 })

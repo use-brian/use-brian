@@ -550,3 +550,73 @@ test('[COMP:crm/assurance-fixture] Native governance audit lock migration preser
   }finally{await owner.end()}
  }finally{await fixture.dispose()}
 })
+
+test('[COMP:crm/assurance-fixture] Generic relationship migration preserves601 state and rejects prerequisite drift', {timeout:180_000}, async t=>{
+ await assertLocalFixture()
+ const env=cleanRuntimeEnvironment(process.env),pgBin=(await runCommand('pg_config',['--bindir'],{env})).trim()
+ const migration=await readFile(new URL('../../../packages/api/migrations/8131_application_generic_relationship_admission.sql',import.meta.url),'utf8')
+ const inventory=(await readdir(new URL('../../../packages/api/migrations/',import.meta.url))).filter(name=>name.endsWith('.sql')).sort()
+ const signatures=['application_scoped_grant_allowed_before_modules(uuid,jsonb)','application_path_fields(jsonb,jsonb,uuid,jsonb,text,text,uuid,text,text[],uuid[],uuid,text,jsonb)','application_query_catalog_path(jsonb,jsonb,jsonb,uuid,jsonb,text,jsonb)']
+ const names=signatures.map(value=>value.split('(')[0]),expected=['72f08cfdd818faddddbe6aafa341a968a3447c2f1d347b6b7d3e915b22f8baa2','c2f13210a38827f48b8615419b511d842cc701be24c3c6ae222f5a0d117eabcf','b892fbcf62d6527a40babb08c32cba5b1da8b0801621e4408ae2120bdfb68459']
+ const catalog=async owner=>(await owner.query("SELECT p.oid::text AS oid,to_jsonb(p) AS value FROM pg_proc p WHERE p.pronamespace='public'::regnamespace ORDER BY p.oid")).rows
+ const ledgerRows=async owner=>(await owner.query('SELECT name,applied_at::text FROM _migrations ORDER BY name')).rows
+ const guard=async owner=>(await owner.query('SELECT application_memory_statement_helpers_current() AS current,(SELECT count(*)::int FROM _migrations) AS ledger')).rows[0]
+ let before,transition,ledger,seed,calls=0
+ const ids=[randomUUID(),randomUUID(),randomUUID()]
+ const fixture=await createLocalFixture({pgBin,env,beforeApplyFile:'8131_application_generic_relationship_admission.sql',beforeApply:async({adminUrl})=>{
+  calls++;const owner=new pg.Client({connectionString:adminUrl});await owner.connect()
+  try{
+   assert.deepEqual(await guard(owner),{current:true,ledger:601})
+   await owner.query('INSERT INTO users(id,auth_provider_id) VALUES($1::uuid,$1::text)',[ids[0]])
+   await owner.query("INSERT INTO workspaces(id,name,owner_user_id) VALUES($1,'Fictional preserved relationship installer',$2)",[ids[1],ids[0]])
+   await owner.query("INSERT INTO application_operation_receipts(id,workspace_id,module_key,operation_key,actor_key,actor_user_id,idempotency_key,request_hash,resources) VALUES($1,$2,'native','fictional_prior_relationship','fictional_prior_relationship',$3,'fictional_prior_relationship',$4,'[]')",[ids[2],ids[1],ids[0],'c'.repeat(64)])
+   before=await catalog(owner);ledger=await ledgerRows(owner);seed=(await owner.query('SELECT to_jsonb(r) AS value FROM application_operation_receipts r WHERE id=$1',[ids[2]])).rows
+   const helper=before.find(row=>row.value.proname==='application_memory_statement_helpers_current').value
+   assert.match(helper.prosrc,/SELECT count\(\*\)=122/);assert.equal([...helper.prosrc.matchAll(/::oid,'[0-9a-f]{64}'::text/g)].length,122)
+   const definitions=await Promise.all(signatures.map(async signature=>(await owner.query('SELECT pg_get_functiondef($1::regprocedure) AS value',[signature])).rows[0].value))
+   assert.match(migration,/^BEGIN;\n/);assert.match(migration,/COMMIT;\n?$/)
+   await owner.query('BEGIN')
+   try{
+    await owner.query(migration.replace(/^BEGIN;\n/,'').replace(/COMMIT;\n?$/,''));transition=await catalog(owner);assert.equal(transition.length,before.length)
+    for(let n=0;n<transition.length;n++){
+     const previous=before[n],current=transition[n];assert.equal(current.oid,previous.oid)
+     const index=names.indexOf(current.value.proname)
+     if(index>=0){const{prosrc:oldBody,...oldProperties}=previous.value,{prosrc:newBody,...newProperties}=current.value;assert.deepEqual(newProperties,oldProperties);assert.notEqual(newBody,oldBody)
+      assert.equal((await owner.query("SELECT encode(sha256(convert_to($1,'UTF8')),'hex') AS hash",[newBody])).rows[0].hash,expected[index])
+     }else assert.deepEqual(current,previous)
+    }
+    assert.deepEqual(await ledgerRows(owner),ledger);assert.deepEqual(await guard(owner),{current:true,ledger:601})
+   }finally{await owner.query('ROLLBACK')}
+   assert.deepEqual(await catalog(owner),before)
+   const changes=signatures.map((signature,n)=>['unknown body '+names[n],()=>owner.query(definitions[n].replace(before.find(row=>row.value.proname===names[n]).value.prosrc,before.find(row=>row.value.proname===names[n]).value.prosrc+'\n-- fictional prerequisite drift'))])
+   changes.push(['path volatility',()=>owner.query('ALTER FUNCTION '+signatures[1]+' STABLE')],
+    ['path default',()=>{assert.match(definitions[1],/DEFAULT NULL::jsonb/);return owner.query(definitions[1].replace('DEFAULT NULL::jsonb',"DEFAULT '{}'::jsonb"))}],
+    ['search path',()=>owner.query('ALTER FUNCTION '+signatures[0]+' SET search_path=public')],
+    ['owner',()=>owner.query('ALTER FUNCTION '+signatures[2]+' OWNER TO app_user')],
+    ['PUBLIC ACL',()=>owner.query('GRANT EXECUTE ON FUNCTION '+signatures[0]+' TO PUBLIC')],
+    ['runtime ACL',()=>owner.query('GRANT EXECUTE ON FUNCTION '+signatures[1]+' TO app_user')])
+   for(const[label,change]of changes){
+    await owner.query('BEGIN');try{await change();await assert.rejects(owner.query(migration),/Generic relationship/)}finally{await owner.query('ROLLBACK')}
+    assert.deepEqual(await catalog(owner),before,label);assert.deepEqual(await ledgerRows(owner),ledger,label)
+    assert.deepEqual((await owner.query('SELECT to_jsonb(r) AS value FROM application_operation_receipts r WHERE id=$1',[ids[2]])).rows,seed,label)
+    assert.deepEqual(await guard(owner),{current:true,ledger:601},label)
+   }
+  }finally{await owner.end()}
+ }})
+ try{
+  assert.equal(calls,1);const owner=new pg.Client({connectionString:fixture.adminUrl});await owner.connect()
+  try{
+   assert.deepEqual(await guard(owner),{current:true,ledger:inventory.length});const after=await catalog(owner)
+   for(const name of names)assert.deepEqual(after.find(row=>row.value.proname===name),transition.find(row=>row.value.proname===name))
+   const completeLedger=await ledgerRows(owner),oldNames=new Set(ledger.map(row=>row.name)),expectedNewNames=inventory.filter(name=>!oldNames.has(name))
+   assert.deepEqual(completeLedger.filter(row=>oldNames.has(row.name)),ledger);assert.deepEqual(completeLedger.filter(row=>!oldNames.has(row.name)).map(row=>row.name),expectedNewNames)
+   assert.equal(completeLedger.filter(row=>row.name==='8131_application_generic_relationship_admission.sql').length,1)
+   assert.deepEqual((await owner.query('SELECT to_jsonb(r) AS value FROM application_operation_receipts r WHERE id=$1',[ids[2]])).rows,seed)
+   const{tsImport}=await import('tsx/esm/api'),{runMigrations}=await tsImport('../../../packages/api/scripts/migrate.ts',import.meta.url);assert.equal((await runMigrations({databaseUrl:fixture.adminUrl})).appliedCount,0)
+   const fresh=new pg.Client({connectionString:process.env.DATABASE_URL});await fresh.connect()
+   try{for(const name of names)assert.equal((await fresh.query("SELECT prosrc FROM pg_proc WHERE pronamespace='public'::regnamespace AND proname=$1",[name])).rows[0].prosrc,after.find(row=>row.value.proname===name).value.prosrc)}finally{await fresh.end()}
+   if(process.env.F_E08_MIGRATION_ARTIFACT)await writeFile(process.env.F_E08_MIGRATION_ARTIFACT,JSON.stringify({before,transition,after,ledger,completeLedger,expectedNewNames,seed,guard:await guard(owner),driftRefusals:9,replay:0},null,2)+'\n')
+   t.diagnostic(JSON.stringify({ledgerBefore:601,ledgerAfter:inventory.length,changedBodies:3,preservedFunctionsAt8131:transition.length-3,guardCurrent:true,driftRefusals:9,replay:0}))
+  }finally{await owner.end()}
+ }finally{await fixture.dispose()}
+})
