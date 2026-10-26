@@ -135,7 +135,7 @@ describe.sequential('[COMP:api/application-persistence] native metadata equivale
    await expect(db.query("SELECT application_session_eval_scope_current($1,$2,$3,$4,'{}'::jsonb)",[f.workspaceId,'memory',memory.id,'1'])).rejects.toMatchObject({code:'42501'})
   }finally{db.release()}
  })
- it('falls back from a simple Memory leaf after a real SQL kernel extension adds a held source',async()=>{
+ it.each(['application_scope_source_edges','application_scope_source_edges_before_knowledge_versions'])('falls back from a simple Memory leaf after a real SQL kernel extension to %s adds a held source',async helper=>{
   fixture=await persistentContextFixture();const f=fixture;await f.history()
   const memory=await f.memory('Fictional leaf memory'),dependency=await f.memory('Fictional held extension source')
   await f.pool.query('UPDATE memories SET scope_held=true WHERE id=$1',[dependency.id])
@@ -148,11 +148,11 @@ describe.sequential('[COMP:api/application-persistence] native metadata equivale
   const lineage=async()=>(await f.pool.query('SELECT * FROM application_scope_lineage($1,ARRAY[$2::text],ARRAY[$3::uuid],ARRAY[$4::text])',[f.workspaceId,'memory',memory.id,root.version])).rows
   expect(await lineage()).toEqual([{kind:'memory',id:memory.id,version:root.version}])
   await expect(assertSourceModelInputAuthority(context)).resolves.toBeUndefined()
-  const original=(await f.pool.query("SELECT pg_get_functiondef(p.oid) AS definition,p.prosrc AS body FROM pg_proc p WHERE p.oid='public.application_scope_source_edges(uuid,text,uuid,text)'::regprocedure")).rows[0]
+  const original=(await f.pool.query("SELECT pg_get_functiondef(p.oid) AS definition,p.prosrc AS body FROM pg_proc p WHERE p.oid=$1::regprocedure",[`public.${helper}(uuid,text,uuid,text)`])).rows[0]
   const version=(await f.pool.query('SELECT scope_version::text AS version FROM memories WHERE id=$1',[dependency.id])).rows[0].version
   try{
    // Same SQL extension mechanism as R2; current native admission remains real.
-   await f.pool.query(`CREATE OR REPLACE FUNCTION public.application_scope_source_edges(w uuid,k text,i uuid,v text)
+   await f.pool.query(`CREATE OR REPLACE FUNCTION public.${helper}(w uuid,k text,i uuid,v text)
     RETURNS TABLE(kind text,id uuid,version text) LANGUAGE sql SECURITY DEFINER SET search_path=pg_catalog,public,pg_temp AS $fixture_edges$
     ${original.body}
     UNION SELECT 'memory','${dependency.id}'::uuid,'${version}'::text

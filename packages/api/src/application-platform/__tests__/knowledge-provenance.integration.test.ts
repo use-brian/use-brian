@@ -32,9 +32,6 @@ describe.sequential('[COMP:api/application-persistence] actual native Knowledge 
   if(bound){
    const team=await createDbWorkspaceGroupStore().createTeam(f.f.ownerId,f.f.workspaceId,{name:'Fictional source setup',key:'fictional-source-setup'})
    await f.f.pool.query("UPDATE workspace_access_policies SET access_mode='departments',setup_state='ready',default_department_id=$2 WHERE workspace_id=$1",[f.f.workspaceId,team.id])
-   // The disposable non-owner login is provisioned after migrations. Mirror
-   // only the three maintained native sync grants, as the real mode suite does.
-   await f.f.pool.query('GRANT EXECUTE ON FUNCTION claim_knowledge_source_sync(uuid,uuid,uuid,jsonb),release_knowledge_source_sync(uuid,uuid,uuid),apply_knowledge_source_sync(jsonb,jsonb) TO assurance_app')
   }
   const source=await store.createSource({workspaceId:f.f.workspaceId,sourceType:'local',repo:'/srv/fictional-protected-source',branch:'local',rootPath:'fictional',
    ...(bound?{binding:{sensitivity:'internal' as const,compartments:[],projectIds:[]}}:{})},bound?{actorUserId:f.f.ownerId}:undefined)

@@ -1,6 +1,26 @@
 import type { Dictionary } from "./en";
 
 export const zh: Dictionary = {
+  applicationConsent: {
+    "title": "審閱應用程式存取權",
+    "loading": "正在讀取目前權限...",
+    "unavailable": "目前無法存取，或審閱內容已變更。請開啟新的登入請求。",
+    "unnamed": "應用程式",
+    "explanation": "繼續之前，請確認目前的工作區、記錄、欄位與操作範圍。",
+    "workspace": "工作區",
+    "scope": "存取範圍",
+    "read": "唯讀",
+    "readWrite": "讀取與寫入",
+    "resources": "資源",
+    "actions": "操作",
+    "readFields": "可讀取欄位",
+    "writeFields": "可寫入欄位",
+    "selection": "記錄範圍",
+    "self": "由此應用程式身分建立的記錄",
+    "allow": "允許",
+    "deny": "拒絕",
+    "submitting": "正在提交..."
+  },
   applicationManagement: {
     "active": "使用中",
     "suspended": "已暫停",
@@ -16,7 +36,7 @@ export const zh: Dictionary = {
     "loading": "正在讀取目前權限…",
     "unavailable": "管理功能無法使用。請確認目前工作區的存取權。",
     "retry": "重新讀取",
-    "unqualified": "執行階段驗證尚未完成。受保護的授權發行與啟用無法使用。",
+    "unqualified": "整個平台的驗證尚未完成。每項受支援的應用程式功能都需要目前的審閱。",
     "identity": "操作身分",
     "application": "應用程式",
     "register": "註冊應用程式",
@@ -31,7 +51,7 @@ export const zh: Dictionary = {
     "cancel": "取消",
     "exactReview": "確認這份已儲存的完整審閱",
     "invalid": "提案無效。請檢查必填欄位。",
-    "saved": "已儲存並更新目前權限。",
+    "saved": "已儲存。關閉收據以讀取目前狀態。",
     "uncertain": "寫入可能已完成。再次操作前請讀取目前狀態。",
     "reconcile": "核對目前狀態",
     "grants": "精確授權",
@@ -57,6 +77,8 @@ export const zh: Dictionary = {
     "sourceUnavailable": "此管理介面不提供對應、保留期限與金鑰安裝功能。",
     "legacyUnavailable": "已停止建立新的舊有資料審查。請透過應用程式管理，使用原始 ID 復原已儲存的審查。",
     "access": "審閱工作區存取權",
+    "reviewActivation": "審閱啟用",
+    "revokeActivation": "撤銷啟用",
     "activate": "啟用",
     "nativeDelivery": "憑證只能透過本人的原生工作階段取得。"
 },

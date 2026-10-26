@@ -14,7 +14,18 @@
 
 import { beforeEach, describe, expect, it, vi } from 'vitest'
 
-vi.mock('../client.js', () => ({ query: vi.fn(), queryWithRLS: vi.fn(), getPool: vi.fn() }))
+const {semanticQuery}=vi.hoisted(()=>({semanticQuery:vi.fn()}))
+vi.mock('../client.js', () => ({query:vi.fn((sql:string,values?:unknown[])=>{
+  if(sql==="SELECT pg_has_role(current_user,c.relowner,'USAGE') AS owner FROM pg_class c WHERE c.oid='goals'::regclass")return Promise.resolve({rows:[{owner:true}]})
+  if(sql.startsWith('SELECT EXISTS(SELECT 1 FROM goals WHERE id=$1 AND ('))return Promise.resolve({rows:[{held:false}]})
+  if(sql.startsWith('SELECT id, workspace_id AS "workspaceId", (')&&sql.endsWith('AS held FROM goals WHERE id=ANY($1::uuid[])')){
+    const ids=values?.[0]
+    if(!Array.isArray(ids))throw new Error('Unexpected metadata parameters')
+    return Promise.resolve({rows:ids.map(id=>({id,workspaceId:'ws-1',held:false}))})
+  }
+  if(!sql.startsWith('UPDATE goals')&&!sql.startsWith('INSERT INTO goals')&&!sql.includes('task_execution_retire'))throw new Error('Unexpected Goal SQL shape')
+  return semanticQuery(sql,values)
+}),queryWithRLS:vi.fn(),getPool:vi.fn()}))
 vi.mock('../../workspace-access/operational-admission.js', () => ({
   admitOperationalAuthoring: vi.fn(async (_client, input) => input),
 }))
@@ -33,7 +44,7 @@ import {
   updateGoalSystem,
 } from '../goals.js'
 
-const mockQuery = vi.mocked(query)
+const mockQuery = semanticQuery
 const mockNotify = vi.mocked(notifyWorkspaceChange)
 const AUTHORING_AUTHORITY = {
   version: 1 as const,

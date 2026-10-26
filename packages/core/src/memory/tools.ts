@@ -740,12 +740,12 @@ export function createMemoryTools(
           store.search(ctx, {
             query: input.query,
             limit: 5,
-          }),
+          },...(memoryAuthority(context)?[memoryAuthority(context)!] as const:[])),
           context.workspaceId
             ? store.searchTeam(ctx, {
                 query: input.query,
                 limit: 5,
-              })
+              },...(memoryAuthority(context)?[memoryAuthority(context)!] as const:[]))
             : Promise.resolve([]),
         ])
 
@@ -760,15 +760,15 @@ export function createMemoryTools(
         // Track recalls for all results — aggregate counters + per-turn
         // buffer rows. See note above for the buffer's role.
         for (const m of results) {
-          store.trackRecall(m.id, queryHash).catch((err) => console.debug('Memory recall tracking failed:', err))
+          if(!protectedMemoryFanout(context,[personalResults,teamResults]))store.trackRecall(m.id, queryHash).catch((err) => console.debug('Memory recall tracking failed:', err))
         }
-        if (opts?.recallBuffer) {
+        if (opts?.recallBuffer&&!protectedMemoryFanout(context,[personalResults,teamResults])) {
           opts.recallBuffer.pushMany(results.map((m) => m.id), 'tool_call')
         }
 
-        opts?.onEvent?.({ type: 'memory_retrieved', source: 'search', resultCount: results.length, query: input.query })
+        if(!protectedMemoryFanout(context,[personalResults,teamResults]))opts?.onEvent?.({ type: 'memory_retrieved', source: 'search', resultCount: results.length, query: input.query })
 
-        if (results.length === 0) return { data: 'No matching memories found.' }
+        if (results.length === 0) return { data: 'No matching memories found.',scopeEvidence:scopeEvidenceFromRows([personalResults,teamResults]) }
 
         return {
           data: results.map((m) => ({
@@ -777,7 +777,7 @@ export function createMemoryTools(
             detail: m.detail,
             tags: m.tags,
           })),
-          scopeEvidence: scopeEvidenceFromRows(results),
+          scopeEvidence: scopeEvidenceFromRows([personalResults,teamResults,results]),
         }
       }
 
@@ -800,14 +800,15 @@ export function createMemoryTools(
   async function resolveMemoryId(
     id: string,
     ctx: AccessContext,
+    authority?:SessionContextAuthority,
   ): Promise<import('./types.js').MemoryRecord | null> {
-    let memory = await store.getById(ctx, id).catch(() => null)
+    let memory = await store.getById(ctx, id,...(authority?[authority] as const:[])).catch(() => null)
     if (!memory && id.length < 36) {
       const results = await store.search(ctx, {
         query: '',
         limit: 1,
         idPrefix: id,
-      })
+      },...(authority?[authority] as const:[]))
       memory = results[0] ?? null
     }
     return memory
@@ -835,7 +836,7 @@ export function createMemoryTools(
       if (strIds.length === 0) return null
 
       const resolved = await Promise.all(
-        strIds.map((id) => resolveMemoryId(id, viewerCtx(context))),
+        strIds.map((id) => resolveMemoryId(id, viewerCtx(context),memoryAuthority(context))),
       )
       return resolved.map((memory, i) =>
         memory ? `• ${memory.summary}` : `• (not found: ${strIds[i]})`,
@@ -846,7 +847,7 @@ export function createMemoryTools(
       // The confirmation gate already passed (tool-executor.ts:120-180).
       // Resolve each id, skip not-found entries, and delete the rest.
       const resolved = await Promise.all(
-        input.ids.map((id) => resolveMemoryId(id, viewerCtx(context))),
+        input.ids.map((id) => resolveMemoryId(id, viewerCtx(context),memoryAuthority(context))),
       )
 
       const deleted: string[] = []
@@ -862,7 +863,7 @@ export function createMemoryTools(
         try {
           await store.deleteMemory(memory.id)
           deleted.push(memory.summary)
-          opts?.onEvent?.({ type: 'memory_deleted', memoryId: memory.id })
+          if(!protectedMemoryFanout(context,[memory]))opts?.onEvent?.({ type: 'memory_deleted', memoryId: memory.id })
         } catch (err) {
           const msg = err instanceof Error ? err.message : String(err)
           if (msg.includes('invalid input syntax for type uuid')) {

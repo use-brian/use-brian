@@ -7,6 +7,7 @@ import { applyResponsibilityPatch, TaskResponsibilityError } from '../responsibi
 import type { TaskAdmissionPort, TaskRuleRecord } from '../admission.js'
 import { ContextScopeAccumulator } from '../../security/context-scope.js'
 import type { ToolContext } from '../../tools/types.js'
+import {createExecutionContext} from '../../security/execution-context.js'
 import type { ScopeSource } from '../../security/derived-scope.js'
 
 // The real store persists provenance (source*, mig 316/334) but does NOT
@@ -1069,6 +1070,9 @@ describe('[COMP:tasks/tools-bulk] bulkUpdateTasks / archiveTasks', () => {
 })
 
 describe('[COMP:tasks/tools] write visibility after a primary read (decision D3)', () => {
+  const execution=createExecutionContext({identity:{kind:'attended',principal:{kind:'workspace_member',userId:ctx.userId,authenticationKind:'native_session'}},ownership:{kind:'workspace',workspaceId:ctx.workspaceId},access:{...ctx,assistantKind:'primary',clearance:'confidential',compartments:null,mutationCompartments:null,projectIds:null,visibilityAssistantIds:null},writeDefaults:{compartments:[],projectIds:[]},authority:{assertCurrent:async()=>{},execute:async operation=>operation()},lifecycle:{...ctx,sessionPersisted:true}})
+  const originalContext={...ctx,executionContext:execution}
+
   const read = (id: string, userId: string | null, assistantId: string | null): ScopeSource => ({
     workspaceId: 'workspace_1', userId, assistantId, sensitivity: 'internal', compartments: [], projectIds: [],
     resourceKind: 'memory', resourceId: id, version: '1',
@@ -1085,7 +1089,7 @@ describe('[COMP:tasks/tools] write visibility after a primary read (decision D3)
     store.update = async (userId, id, fields, opts) => { scopes.push(opts?.scope); return update(userId, id, fields, opts) }
     const { saveTask, closeTask } = createTaskTools(store)
     await saveTask.execute({ title: 'Ship' }, ctx)
-    const result = await closeTask.execute({ id: store.rows[0].id }, { ...ctx, scopeAccumulator: primaryRead() })
+    const result = await closeTask.execute({ id: store.rows[0].id }, { ...originalContext, scopeAccumulator: primaryRead() })
     expect(result.isError).toBeFalsy()
     expect(scopes.at(-1)).toMatchObject({ visibility: undefined })
   })
@@ -1097,7 +1101,7 @@ describe('[COMP:tasks/tools] write visibility after a primary read (decision D3)
     store.create = async (params) => { creates.push(params.visibility); return create(params) }
     const { saveTask } = createTaskTools(store)
     const chat = new ContextScopeAccumulator({ sources: [{ ...read('message', 'user_1', null), resourceKind: 'session_message' }] })
-    await saveTask.execute({ title: 'Ship the release' }, { ...ctx, scopeAccumulator: chat })
+    await saveTask.execute({ title: 'Ship the release' }, { ...originalContext, scopeAccumulator: chat })
     expect(creates.at(-1)).toBeUndefined()
   })
 
@@ -1107,7 +1111,7 @@ describe('[COMP:tasks/tools] write visibility after a primary read (decision D3)
     const create = store.create.bind(store)
     store.create = async (params) => { creates.push(params.visibility); return create(params) }
     const { saveTask } = createTaskTools(store)
-    await saveTask.execute({ title: 'From my notes' }, { ...ctx, scopeAccumulator: primaryRead() })
+    await saveTask.execute({ title: 'From my notes' }, { ...originalContext, scopeAccumulator: primaryRead() })
     expect(creates.at(-1)).toEqual({ userId: 'user_1', assistantId: null })
   })
 
@@ -1116,7 +1120,7 @@ describe('[COMP:tasks/tools] write visibility after a primary read (decision D3)
     const { saveTask } = createTaskTools(store)
     const foreign = new ContextScopeAccumulator({ sources: [read('theirs', 'user_2', null)] })
     // The executor turns the throw into a failed tool call, not a failed turn.
-    await expect(saveTask.execute({ title: 'Leak' }, { ...ctx, scopeAccumulator: foreign }))
+    await expect(saveTask.execute({ title: 'Leak' }, { ...originalContext, scopeAccumulator: foreign }))
       .rejects.toThrow('scope_visibility_incompatible')
     expect(store.rows).toHaveLength(0)
   })

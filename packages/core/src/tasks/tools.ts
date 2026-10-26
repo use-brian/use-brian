@@ -542,7 +542,14 @@ export function createTaskTools(
               workflowDefault: input.parent_id ? null : await opts.resolveRunExecutorDefault(context.workflowRunId),
             })
           : { assigneeId: input.assignee_id ?? null, executorAssistantId: input.executor_assistant_id ?? null }
+        const sourceRoots=context.scopeAccumulator?.evidence.sources??[]
+        if(sourceRoots.length&&(!context.executionContext||input.links?.length||input.depends_on?.length))throw new DerivedScopeError('scope_evidence_missing')
+        const original=context.executionContext
+        const authority=original&&sourceRoots.length
+          ?{execution:original,accumulator:context.scopeAccumulator??new ContextScopeAccumulator()}:undefined
         const task = await store.create({
+          ...(authority?{authority}:{}),
+          ...(sourceRoots.length?{derivation:{producer:'tool:saveTask:create',sources:[...sourceRoots]}}:{}),
           userId: context.userId,
           workspaceId: context.workspaceId!,
           title: input.title,
@@ -592,8 +599,13 @@ export function createTaskTools(
         // Echo the moment back when one was kept, so a model that cited a
         // moment the transcript does not contain sees it was dropped.
         const momentNote = moment ? ` @ ${formatStamp(moment.startMs)}` : ''
+        const continuationNote=task.sourceContinuation?.state==='held'
+          ?task.sourceContinuation.goalDraft==='requested'
+            ?' Goal drafting has been requested. Other workflow triggers are held for this protected source task.'
+            :' Automatic Goal drafting and workflow triggers are held for this protected source task.'
+          :''
         return {
-          data: `Created task [${task.id}]: ${task.title}${momentNote}${formatLinksSummary(linksSummary)}${admissionWarning ?? ''}`,
+          data: `Created task [${task.id}]: ${task.title}${momentNote}${formatLinksSummary(linksSummary)}${admissionWarning ?? ''}${continuationNote}`,
           scopeEvidence: createdRowEvidence([task]),
         }
       } catch (err) {
@@ -628,10 +640,10 @@ export function createTaskTools(
       const gate = workspaceGate(context.workspaceId)
       if (gate) return gate
 
-      const task = await store.getById(
-        ctxFor({...context, workspaceId: context.workspaceId!}),
-        input.id,
-      )
+      const access=ctxFor({...context, workspaceId: context.workspaceId!})
+      const original=context.executionContext
+      const task=original?await store.getById(access,input.id,{execution:original,accumulator:context.scopeAccumulator??new ContextScopeAccumulator()})
+        :await store.getById(access,input.id)
       if (!task || task.workspaceId !== context.workspaceId) {
         return { data: taskNotFoundMessage(input.id), isError: true }
       }

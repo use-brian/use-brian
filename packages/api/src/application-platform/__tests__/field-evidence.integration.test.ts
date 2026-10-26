@@ -77,8 +77,8 @@ describe('[COMP:api/application-field-evidence] canonical field observations thr
     expect(metadata).not.toHaveProperty('values'); expect(JSON.stringify(metadata)).not.toContain('Fictional title')
     await expect(owner.query("UPDATE application_field_observations SET policy_version=repeat('0',64) WHERE resource_id=$1", [narrow.sources[0].resourceId])).rejects.toMatchObject({ code: '22023' })
     await asMember(memberId,async client => {
-      expect((await client.query('SELECT * FROM application_field_observations')).rows).toEqual([])
-      expect((await client.query("SELECT has_table_privilege('app_user','application_field_observations','INSERT') AS allowed")).rows[0].allowed).toBe(false)
+      expect((await client.query("SELECT has_table_privilege(current_user,'application_field_observations','INSERT') AS allowed")).rows[0].allowed).toBe(false)
+      await expect(client.query('SELECT * FROM application_field_observations')).rejects.toMatchObject({ code: '42501' })
     })
   })
   it('allows live native content edits for audience checks while exact-version derivation rejects the old input', async () => {

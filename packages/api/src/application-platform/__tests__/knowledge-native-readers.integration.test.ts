@@ -72,7 +72,7 @@ describe.sequential('[COMP:api/application-persistence] actual native knowledge 
   expect(sources.filter(source=>source.resourceKind==='knowledge_entry')).toEqual([expect.objectContaining({workspaceId:c.f.workspaceId,resourceKind:'knowledge_entry',resourceId:c.row.id,
    version:canonical.version,userId:null,assistantId:null,sensitivity:'internal',compartments:[],projectIds:[]})])
   const fields=sources.filter(source=>source.resourceKind==='application_field');expect(fields).toHaveLength(1);expect(sources).toHaveLength(2)
-  expect((await c.f.pool.query(`SELECT resource_id,selection FROM application_field_resources WHERE workspace_id=$1 AND id=$2`,[c.f.workspaceId,fields[0].resourceId])).rows)
-   .toEqual([{resource_id:c.row.id,selection:'read'}])
+  expect((await c.f.pool.query(`SELECT resource_id,selection,selected_version FROM application_field_resources WHERE workspace_id=$1 AND id=$2`,[c.f.workspaceId,fields[0].resourceId])).rows)
+   .toEqual([{resource_id:c.row.id,selection:'history',selected_version:canonical.version}])
  })
 })

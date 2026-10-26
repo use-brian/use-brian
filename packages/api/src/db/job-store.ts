@@ -1,6 +1,7 @@
+import { resolveRetainedGoalWorkflowRuntime } from '../workspace-access/goal-source-admission.js'
 import type { PoolClient } from 'pg'
 import { isDeepStrictEqual } from 'node:util'
-import { computeNextRun } from '@use-brian/core'
+import { WorkflowDefinitionSchema,computeNextRun } from '@use-brian/core'
 import { WorkspaceAccessError } from '../workspace-access/policy.js'
 import { assertLegacyJobCreation, lockOperationalPolicy, readWorkflowScheduleAuthority } from '../workspace-access/operational-admission.js'
 import type { JobStore, ScheduledJob, ScheduledJobMode, ScheduledJobState, StructuredSchedule } from '@use-brian/core'
@@ -86,6 +87,7 @@ function notifyJobChange(jobId: string, assistantId: string, action: 'create' | 
   // under a test mock) degrades into the same swallowed rejection — the
   // signal is telemetry, the write path must never feel it.
   void (async () => {
+    if((await getPool().query(`SELECT 1 FROM scheduled_jobs j JOIN workflow_step_runs step ON step.id=j.workflow_step_run_id JOIN workflow_runs r ON r.id=step.run_id LEFT JOIN goal_task_source_authority s ON s.goal_id=r.source_goal_id WHERE j.id=$1 AND (r.execution_authority ? 'retainedGoal' OR s.proof->'retained' IS NOT NULL)`,[jobId])).rowCount)return
     const r = await query<{ workspaceId: string | null }>(
       `SELECT workspace_id AS "workspaceId" FROM assistants WHERE id = $1`,
       [assistantId],
@@ -183,6 +185,39 @@ export async function insertWorkflowScheduleJob(client: PoolClient, workspaceId:
 export function createDbJobStore(): JobStore {
   return {
     async create(params, execution) {
+      if(params.workflowStepRunId){
+        const pointer=(await getPool().query<{runId:string}>('SELECT run_id AS "runId" FROM workflow_step_runs WHERE id=$1',[params.workflowStepRunId])).rows[0]
+        if(pointer){
+          const runtime=await resolveRetainedGoalWorkflowRuntime(pointer.runId)
+          if(runtime){
+            const instructions=JSON.stringify({kind:'workflow_wait_resume',runId:pointer.runId,stepRunId:params.workflowStepRunId})
+            if(params.assistantId!==runtime.saved.assistantId||params.userId!==runtime.saved.actor||params.channelType!=='workflow' // session-kind-exempt: scheduled-job creation parameters identify a workflow resume job, not a session.
+              ||params.channelId!==pointer.runId||params.instructions!==instructions||params.viewId||params.nagIntervalMins||params.nagUntilKeyword)throw new WorkspaceAccessError('goal_source_unsupported',409)
+            return runtime.frame(true,async client=>{
+              const current=(await client.query<{stepId:string;currentStepId:string;workflowId:string;definition:unknown}>(`SELECT step.step_id AS "stepId",r.current_step_id AS "currentStepId",r.workflow_id AS "workflowId",w.definition
+                FROM workflow_step_runs step JOIN workflow_runs r ON r.id=step.run_id JOIN workflows w ON w.id=r.workflow_id
+                WHERE step.id=$1 AND step.run_id=$2 AND step.step_type='wait' AND step.status='running' FOR SHARE OF step`,[params.workflowStepRunId,pointer.runId])).rows[0]
+              const step=current?WorkflowDefinitionSchema.parse(current.definition).steps.find(item=>item.id===current.stepId):undefined
+              const schedule=params.schedule
+              if(!current||step?.type!=='wait'||!step.at||step.until||(step.at.timezone??'UTC')!=='UTC'
+                ||current.currentStepId!==current.stepId||params.workflowId!==current.workflowId
+                ||params.timezone!=='UTC'||(params.mode??'local')!=='local'||schedule.type!=='once'
+                ||schedule.datetime!==new Date(params.nextRunAt.getTime()-params.nextRunAt.getTimezoneOffset()*60_000).toISOString().slice(0,19)
+                ||params.nextRunAt.getTime()!==new Date(step.at.datetime+'Z').getTime())throw new WorkspaceAccessError('goal_source_unsupported',409)
+              const existing=(await client.query<JobRow>(`SELECT ${JOB_SELECT} FROM scheduled_jobs WHERE workflow_step_run_id=$1 AND enabled FOR UPDATE`,[params.workflowStepRunId])).rows[0]
+              if(existing)return rowToJob(existing)
+              const row=(await client.query<JobRow>(`INSERT INTO scheduled_jobs(assistant_id,user_id,schedule,timezone,mode,instructions,
+                channel_type,channel_id,next_run_at,workflow_id,workflow_step_run_id,context_group_id,context_project_id,context_compartments,context_project_ids)
+                SELECT $1,$2,$3::jsonb,$4,$5,$6,'workflow',$7::text,$8,r.workflow_id,$9,r.context_group_id,r.context_project_id,r.context_compartments,r.context_project_ids
+                FROM workflow_runs r WHERE r.id=$7::uuid RETURNING ${JOB_SELECT}`,
+                [params.assistantId,params.userId,JSON.stringify(params.schedule),params.timezone,params.mode??'local',instructions,pointer.runId,params.nextRunAt,params.workflowStepRunId])).rows[0]
+              if(!row)throw new WorkspaceAccessError('goal_source_unsupported',409)
+              return rowToJob(row)
+            })
+          }
+        }
+      }
+
       const client = await getPool().connect()
       const result = await (async () => {
         try {
@@ -339,7 +374,7 @@ export function createDbJobStore(): JobStore {
 
     async get(id) {
       const result = await query<JobRow>(
-        `SELECT ${JOB_SELECT} FROM scheduled_jobs WHERE id = $1`,
+        `SELECT ${JOB_SELECT} FROM scheduled_jobs WHERE id = $1 AND NOT (EXISTS(SELECT 1 FROM workflow_step_runs step JOIN workflow_runs r ON r.id=step.run_id LEFT JOIN goal_task_source_authority source ON source.goal_id=r.source_goal_id WHERE step.id=scheduled_jobs.workflow_step_run_id AND (r.execution_authority ? 'retainedGoal' OR source.proof->'retained' IS NOT NULL)))`,
         [id],
       )
       return result.rows[0] ? rowToJob(result.rows[0]) : null
@@ -347,7 +382,7 @@ export function createDbJobStore(): JobStore {
 
     async list(assistantId, userId) {
       const result = await query<JobRow>(
-        `SELECT ${JOB_SELECT} FROM scheduled_jobs WHERE assistant_id = $1 AND user_id = $2 ORDER BY created_at DESC`,
+        `SELECT ${JOB_SELECT} FROM scheduled_jobs WHERE assistant_id = $1 AND user_id = $2 AND NOT (EXISTS(SELECT 1 FROM workflow_step_runs step JOIN workflow_runs r ON r.id=step.run_id LEFT JOIN goal_task_source_authority source ON source.goal_id=r.source_goal_id WHERE step.id=scheduled_jobs.workflow_step_run_id AND (r.execution_authority ? 'retainedGoal' OR source.proof->'retained' IS NOT NULL))) ORDER BY created_at DESC`,
         [assistantId, userId],
       )
       return result.rows.map(rowToJob)

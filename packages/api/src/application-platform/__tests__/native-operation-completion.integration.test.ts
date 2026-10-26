@@ -182,12 +182,18 @@ describe('[COMP:api/application-records] native operation completion',()=>{
   const raw=await getAppPool().connect();try{await raw.query('BEGIN');await applyRLSGucs(raw,userId);await expect(raw.query("UPDATE tasks SET title='Fictional forbidden task edit' WHERE id=$1",[live.id])).rejects.toMatchObject({code:'42501'})}finally{await raw.query('ROLLBACK');raw.release()}
  })
  it('Q04/Q05 rejects invalid raw native task values and immutable provenance atomically',async()=>{
-  const row=await createTask(userId,{workspaceId,access,title:'Fictional typed raw task'})
-  for(const statement of ["UPDATE tasks SET title='   ' WHERE id=$1","UPDATE tasks SET attributes='[]'::jsonb WHERE id=$1","UPDATE tasks SET external_ref='null'::jsonb WHERE id=$1","UPDATE tasks SET tags=ARRAY[NULL]::text[] WHERE id=$1","UPDATE tasks SET source_session_id=gen_random_uuid() WHERE id=$1"]){
-   const client=await getAppPool().connect();try{await client.query('BEGIN');await applyRLSGucs(client,userId);await expect(client.query(statement,[row.id])).rejects.toMatchObject({code:'22023'})}finally{await client.query('ROLLBACK');client.release()}
-  }
-  expect((await owner.query('SELECT title,scope_version::text AS version FROM tasks WHERE id=$1',[row.id])).rows[0]).toEqual({title:row.title,version:'1'})
-  expect((await owner.query("SELECT id FROM brain_row_versions WHERE primitive='task' AND row_id=$1",[row.id])).rows).toEqual([])
+  const otherAuthor=randomUUID()
+  await owner.query("INSERT INTO assistants(id,name,owner_user_id,workspace_id,kind) VALUES($1,'Fictional other task author',$2,$3,'standard')",[otherAuthor,userId,workspaceId])
+  const row=await createTask(userId,{workspaceId,access,title:'Fictional typed raw task',createdByAssistantId:assistantId})
+  try {
+   for(const statement of ["UPDATE tasks SET title='   ' WHERE id=$1","UPDATE tasks SET attributes='[]'::jsonb WHERE id=$1","UPDATE tasks SET external_ref='null'::jsonb WHERE id=$1","UPDATE tasks SET tags=ARRAY[NULL]::text[] WHERE id=$1","UPDATE tasks SET source_session_id=gen_random_uuid() WHERE id=$1",
+    "UPDATE tasks SET created_by_assistant_id=NULL WHERE id=$1","UPDATE tasks SET created_by_assistant_id=$2 WHERE id=$1"]){
+    const client=await getAppPool().connect();try{await client.query('BEGIN');await applyRLSGucs(client,userId);await expect(client.query(statement,statement.includes('$2')?[row.id,otherAuthor]:[row.id])).rejects.toMatchObject({code:'22023'})}finally{await client.query('ROLLBACK');client.release()}
+   }
+   expect((await owner.query('SELECT title,created_by_user_id,created_by_assistant_id,scope_version::text AS version FROM tasks WHERE id=$1',[row.id])).rows[0])
+    .toEqual({title:row.title,created_by_user_id:userId,created_by_assistant_id:assistantId,version:'1'})
+   expect((await owner.query("SELECT id FROM brain_row_versions WHERE primitive='task' AND row_id=$1",[row.id])).rows).toEqual([])
+  } finally {await owner.query('DELETE FROM assistants WHERE id=$1',[otherAuthor])}
  })
  it('Q05 records one reference-only canonical receipt, audit and outbox for actual legacy CRM writes',async()=>{
   const contact=await createContact(userId,{workspaceId,access,name:'Fictional legacy audit contact'})

@@ -12,7 +12,7 @@ import {readPersistentSessionContextAncestors} from '../db/session-context-ances
 import {pinPreparedExternalSourceAuthority,assertPreparedExternalSourceAuthorityCurrent,type PreparedExternalSourceAuthority} from '../application-platform/retained-source-authority.js'
 import {validateAudienceScopeEvidence,validateCallerScopeEvidence,scopeEvidenceFailureOf} from './caller-evidence.js'
 import {createDeliveryAudienceAuthorizer,createDeliveryAudienceEnvelopeResolver,DeliveryAudienceUnverifiedError,type AuthorizeDeliveryAudience} from './delivery-authority.js'
-import {isWebTransport,policyFor} from '../session-kind.js'
+import {classifySession,isWebTransport,policyFor} from '../session-kind.js'
 import {findSessionById} from '../db/sessions.js'
 import {findAssistantById} from '../db/users.js'
 
@@ -122,7 +122,7 @@ export function createAttendedDeliveryAudienceAuthorizer(execution:ExecutionCont
    await execution.security.authority.assertCurrent()
    const session=await findSessionById(pinned.sessionId!)
    if(!session)return{allowed:false,reason:'delivery_audience_unverified',diagnostic:'session_missing'}
-   if(policyFor(session).deliveryCeiling.ceiling!=='owner'||session.userId!==actor||session.appOrigin!=='chat'
+   if(policyFor(session).deliveryCeiling.ceiling!=='owner'||session.userId!==actor||classifySession(session).surface!=='chat'
     ||session.channelType!==pinned.channelType||session.channelId!==pinned.channelId)return fallback()
    const owner=await findAssistantById(session.assistantId)
    if(!owner||owner.workspaceId!==pinned.workspaceId)return{allowed:false,reason:'delivery_audience_unverified',diagnostic:'session_assistant_missing'}

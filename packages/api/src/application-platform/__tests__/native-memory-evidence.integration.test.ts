@@ -48,6 +48,19 @@ describe.sequential('[COMP:api/application-persistence] actual native memory and
  })
  it('holds reclassified memory for the original reader and keeps another authorized reader usable',async()=>{
   const {f,authority,memory,sources,context}=await setup(),before=structuredClone(sources)
+  const writer=await getPool().connect();let pending:ReturnType<typeof rpc>|undefined
+  try{
+   await writer.query('BEGIN')
+   await writer.query("UPDATE memories SET sensitivity='confidential' WHERE id=$1",[memory.id])
+   pending=rpc(authority.execution,sources)
+   // An actual other transaction owns the current row. Optional NOWAIT reuse
+   // must retain the canonical wait and cannot publish the former scope.
+   await expect.poll(async()=>(await f.pool.query<{blocked:boolean}>(`SELECT EXISTS(SELECT 1 FROM pg_stat_activity
+    WHERE usename='app_user' AND datname=current_database() AND query LIKE '%read_native_attended_memory_evidence%'
+     AND cardinality(pg_blocking_pids(pid))>0) AS blocked`)).rows[0].blocked,{timeout:2000}).toBe(true)
+   await writer.query('COMMIT')
+   expect(await pending).toEqual({admitted:false})
+  }finally{await rollbackAndRelease(writer);await pending?.catch(()=>{})}
   await f.pool.query("UPDATE memories SET sensitivity='confidential' WHERE id=$1",[memory.id])
   expect(await rpc(authority.execution,sources)).toEqual({admitted:false})
   await expect(assertSourceModelInputAuthority(context)).rejects.toMatchObject({reason:'authority_changed'})
@@ -78,13 +91,95 @@ describe.sequential('[COMP:api/application-persistence] actual native memory and
   await expect(assertSourceModelInputAuthority(context)).resolves.toBeUndefined()
   expect(sources).toEqual(before)
  })
- it('rejects owner-role admission for the new batch',async()=>{
-  const {f,authority,sources}=await setup(),db=await getPool().connect()
+ it('rejects owner-role admission and follows canonical query evaluator drift',async()=>{
+  const {f,authority,memory,sources}=await setup(),db=await getPool().connect()
+  const privateHelpers=['application_memory_query_candidate_state(uuid,uuid,text[],jsonb)',
+   'application_memory_statement_state(uuid,uuid,text[],jsonb)','application_memory_statement_scan(uuid,text[],jsonb,boolean,jsonb,jsonb)',
+   'application_memory_statement_domain(uuid,uuid,text[],jsonb)','application_memory_statement_envelope(uuid,jsonb,text,uuid,text,text,text[],integer,jsonb)',
+   'application_field_projection_state(uuid,jsonb,text,uuid,text,text,text[])',
+   'application_field_projection_state_before_feedback_outcome(uuid,jsonb,text,uuid,text,text,text[])',
+   'application_memory_statement_helpers_current()','application_session_eval_field(uuid,uuid,text,jsonb)',
+   'application_session_eval_scope(uuid,text,uuid,text,jsonb)','application_session_eval_envelope(uuid,text,uuid,text,text[],jsonb)',
+   'read_native_session_cohort_evidence(uuid,text[],uuid[],text[],boolean)']
+  expect((await getAppPool().query(`SELECT count(*)::integer AS count,
+   bool_or(has_function_privilege(current_user,p.oid,'EXECUTE')) AS callable,
+   bool_or(EXISTS(SELECT 1 FROM aclexplode(coalesce(p.proacl,acldefault('f',p.proowner))) acl WHERE acl.grantee=0 AND acl.privilege_type='EXECUTE')) AS public_execute,
+   bool_and(p.proowner=(SELECT proowner FROM pg_proc WHERE oid='application_memory_field_state_before_successor(uuid,uuid,text[])'::regprocedure)) AS canonical_owner
+   FROM unnest($1::text[]) signature JOIN pg_proc p ON p.oid=signature::regprocedure`,[privateHelpers])).rows).toEqual([{count:12,callable:false,public_execute:false,canonical_owner:true}])
   try{await runWithAgentAccess(authority.execution.security.access,async()=>{
    await db.query('BEGIN');await applyRLSGucs(db,f.firstId)
    expect((await db.query<{value:unknown}>('SELECT read_native_attended_memory_evidence($1,$2,$3,$4) AS value',
     [f.workspaceId,sources.map(source=>source.resourceKind),sources.map(source=>source.resourceId),sources.map(source=>source.version)])).rows[0].value).toBeNull()
   })}finally{await rollbackAndRelease(db)}
+  const definition=(await f.pool.query<{definition:string;metadata:unknown}>(`SELECT pg_get_functiondef(oid) AS definition,to_jsonb(p)-'prosrc' AS metadata FROM pg_proc p
+   WHERE oid='public.application_memory_field_state_before_successor(uuid,uuid,text[])'::regprocedure`)).rows[0]
+  const query=()=>frame(authority.execution,async client=>(await client.query<{value:{row:{id:string;summary:string}|null}}>(
+   'SELECT value FROM read_native_memory_query_projection($1,$2,false)',[f.workspaceId,['id','summary']])).rows.map(row=>row.value))
+  expect((await query()).some(value=>value.row?.id===memory.id&&value.row.summary==='Fictional shared native memory')).toBe(true)
+  // Synthetic future canonical drift must use its live per-row reader, never
+  // the old cloned candidate. No application privilege or evaluator is weakened.
+  const changed=definition.definition.replace('\nBEGIN\n','\nBEGIN\n RETURN NULL;\n')
+  expect(changed).not.toBe(definition.definition)
+  try{
+   await f.pool.query(changed)
+   expect((await f.pool.query(`SELECT to_jsonb(p)-'prosrc' AS metadata FROM pg_proc p
+    WHERE oid='public.application_memory_field_state_before_successor(uuid,uuid,text[])'::regprocedure`)).rows[0].metadata).toEqual(definition.metadata)
+   expect((await query()).map(value=>value.row)).toEqual([null])
+  }finally{await f.pool.query(definition.definition)}
+  expect((await f.pool.query(`SELECT pg_get_functiondef(oid) AS definition,to_jsonb(p)-'prosrc' AS metadata FROM pg_proc p
+   WHERE oid='public.application_memory_field_state_before_successor(uuid,uuid,text[])'::regprocedure`)).rows[0]).toEqual(definition)
+  expect((await query()).some(value=>value.row?.id===memory.id&&value.row.summary==='Fictional shared native memory')).toBe(true)
+  // The statement visitor must also follow drift in the complete canonical
+  // envelope chain. Its current private clone cannot substitute an older body.
+  const envelope=(await f.pool.query<{definition:string;metadata:unknown}>(`SELECT pg_get_functiondef(oid) AS definition,to_jsonb(p)-'prosrc' AS metadata FROM pg_proc p
+   WHERE oid='public.application_compute_field_envelope_before_module_policy(uuid,jsonb,text,uuid,text,text,text[],integer)'::regprocedure`)).rows[0]
+  const protectedMemory=await createDbMemoryStore().getById(authority.execution.security.access,memory.id,authority)
+  if(!protectedMemory)throw new Error('Missing actual authority-bound Memory projection')
+  expect(boundScopeSources(protectedMemory).some(source=>source.resourceKind==='application_field')).toBe(true)
+  const protectedSources=[...sources,...boundScopeSources(protectedMemory)]
+  const helpersBefore=(await f.pool.query('SELECT application_memory_statement_helpers_current() AS current')).rows[0].current
+  expect((await rpc(authority.execution,protectedSources))?.admitted).toBe(true)
+  const changedEnvelope=envelope.definition.replace('\nBEGIN\n','\nBEGIN\n RETURN NULL;\n')
+  expect(changedEnvelope).not.toBe(envelope.definition)
+  try{
+   await f.pool.query(changedEnvelope)
+   expect((await f.pool.query('SELECT application_memory_statement_helpers_current() AS current')).rows[0].current).toBe(false)
+   expect(await rpc(authority.execution,protectedSources)).toEqual({admitted:false})
+  }finally{await f.pool.query(envelope.definition)}
+  expect((await f.pool.query(`SELECT pg_get_functiondef(oid) AS definition,to_jsonb(p)-'prosrc' AS metadata FROM pg_proc p
+   WHERE oid='public.application_compute_field_envelope_before_module_policy(uuid,jsonb,text,uuid,text,text,text[],integer)'::regprocedure`)).rows[0]).toEqual(envelope)
+  expect((await f.pool.query('SELECT application_memory_statement_helpers_current() AS current')).rows[0].current).toBe(helpersBefore)
+  expect((await rpc(authority.execution,protectedSources))?.admitted).toBe(true)
+  // Both exact dispatcher deltas remain pinned after reconciliation. A future
+  // canonical body change must still use its current path and deny this row.
+  for(const signature of ['application_field_projection_state(uuid,jsonb,text,uuid,text,text,text[])',
+   'application_field_projection_state_before_feedback_outcome(uuid,jsonb,text,uuid,text,text,text[])',
+   'read_entity_derivation_source(uuid,text,uuid)']){
+   const dispatcher=(await f.pool.query<{definition:string;metadata:unknown}>(`SELECT pg_get_functiondef(oid) AS definition,to_jsonb(p)-'prosrc' AS metadata FROM pg_proc p
+    WHERE oid=$1::regprocedure`,[signature])).rows[0]
+   const changedDispatcher=dispatcher.definition.replace('\nBEGIN\n','\nBEGIN\n RETURN NULL;\n')
+   expect(changedDispatcher).not.toBe(dispatcher.definition)
+   try{
+    await f.pool.query(changedDispatcher)
+    expect((await f.pool.query('SELECT application_memory_statement_helpers_current() AS current')).rows[0].current).toBe(false)
+    expect(await rpc(authority.execution,protectedSources)).toEqual({admitted:false})
+   }finally{await f.pool.query(dispatcher.definition)}
+   expect((await f.pool.query(`SELECT pg_get_functiondef(oid) AS definition,to_jsonb(p)-'prosrc' AS metadata FROM pg_proc p
+    WHERE oid=$1::regprocedure`,[signature])).rows[0]).toEqual(dispatcher)
+   expect((await f.pool.query('SELECT application_memory_statement_helpers_current() AS current')).rows[0].current).toBe(true)
+   expect((await rpc(authority.execution,protectedSources))?.admitted).toBe(true)
+  }
+  // Name normalization applies only to the exact reviewed predecessor name.
+  // A later unknown rename at the same OID cannot inherit the original pin.
+  let predecessorRenamed=false
+  try{
+   await f.pool.query('ALTER FUNCTION application_field_projection_state_before_feedback_outcome(uuid,jsonb,text,uuid,text,text,text[]) RENAME TO application_field_projection_state_unreviewed');predecessorRenamed=true
+   expect((await f.pool.query('SELECT application_memory_statement_helpers_current() AS current')).rows[0].current).toBe(false)
+  }finally{if(predecessorRenamed)await f.pool.query('ALTER FUNCTION application_field_projection_state_unreviewed(uuid,jsonb,text,uuid,text,text,text[]) RENAME TO application_field_projection_state_before_feedback_outcome')}
+  expect((await f.pool.query('SELECT application_memory_statement_helpers_current() AS current')).rows[0].current).toBe(true)
+  // Keep the intended known-helper positive profile explicit. An additive
+  // canonical dispatcher must receive its own reviewed compatibility amendment.
+  expect(helpersBefore).toBe(true)
  })
  it('keeps generic fields on the original path without taking a native workspace lock',async()=>{
   fixture=await persistentContextFixture();const f=fixture,store=createDbDocEntityStore({actorUserId:f.ownerId})

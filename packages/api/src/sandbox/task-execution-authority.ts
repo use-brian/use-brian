@@ -5,6 +5,7 @@ import { findAssistantById } from '../db/users.js'
 import { query } from '../db/client.js'
 import { resolveRetainedWorkflowSource } from '../context-scope/workflow-authority.js'
 import { gateSessionRead } from '../session-read-authority.js'
+import { normalizeSessionVisibility } from '../session-kind.js'
 import type { PoolClient } from 'pg'
 
 const unavailable = () => Object.assign(new Error('Browser task authority unavailable'), { code: 'profile_authority_denied' })
@@ -36,6 +37,7 @@ export async function resolveBrowserTaskExecutionAuthority(task: Pick<SandboxTas
         contextGroupId: source.contextGroupId, contextProjectId: source.contextProjectId,
         contextLockedAt: new Date(source.contextLockedAt) },
       executingAssistantId: source.executingAssistantId, userId: source.authorityUserId,
+      nativeSessionCredential:source.nativeCredential,
       memberMode: source.memberMode, ignoreSessionBinding: source.ignoreSessionBinding, systemRead: source.systemRead,
     })
     return createAuthorityLease(frozen.ceiling, async () => {
@@ -45,7 +47,7 @@ export async function resolveBrowserTaskExecutionAuthority(task: Pick<SandboxTas
         channel_type AS "channelType", visibility, mode, effective_clearance AS "effectiveClearance",
         context_compartments AS "contextCompartments", context_project_id AS "contextProjectId", context_binding_origin AS "contextBindingOrigin"
         FROM sessions WHERE id=$1`, [source.id])).rows[0]
-      if (!session || session.contextBindingOrigin === 'held' || session.visibility !== source.visibility
+      if (!session || session.contextBindingOrigin === 'held' || session.visibility !== normalizeSessionVisibility(source.visibility)
         || session.mode !== source.mode || session.effectiveClearance !== source.effectiveClearance
         || JSON.stringify([...(session.contextCompartments ?? [])].sort()) !== JSON.stringify([...source.contextCompartments].sort())
         || await gateSessionRead(source.authorityUserId, session)) return null

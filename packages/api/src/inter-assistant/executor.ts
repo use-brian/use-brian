@@ -1459,14 +1459,74 @@ export function createCalleeExecutor(options: CalleeExecutorOptions): CalleeExec
       calleeAssistant.workspaceId !== null &&
       calleeAssistant.workspaceId !== undefined
 
+    const scopeAccumulator = new ContextScopeAccumulator({
+      compartments: turnScope.writeCompartments,
+      projectIds: turnScope.writeProjectIds,
+    })
+    scopeAccumulator.note(inheritedEvidence)
+    const abortController = new AbortController()
+    // The delegated turn's own invocation is the source a browser task (or
+    // any other source-bound child) is pinned to. Without it the task has no
+    // source and is refused outright (`profile_authority_denied`); with it the
+    // child renews only while this invocation's leases still hold.
+    const ambientInvocationId = randomUUID()
+    const ambientAuthority = {
+      assertCurrent: assertCurrentAuthority,
+      execute: executeWithCurrentAuthority,
+      snapshotSource: () => ({ version: 1 as const, kind: 'invocation' as const, invocationId: ambientInvocationId }),
+    }
+    const { executionContext } = await resolveExecutionContextSystem({
+      userId: calleeActorUserId,
+      assistant: calleeAssistant,
+      workspaceId: calleeAssistant.workspaceId,
+      session,
+      identity: externalClient
+        ? {
+            kind: 'programmatic',
+            principal: {
+              kind: 'brain_key',
+              credentialId: externalClient.key.id,
+              actorUserId: calleeActorUserId,
+            },
+            credentialOwnerUserId: calleeOwnerUserId,
+          }
+        : {
+            kind: 'delegated',
+            actorUserId: calleeActorUserId,
+            delegationId: params.workflowRunId ?? session.id,
+            parentCeiling: pinAccessCeiling(turnScope.access),
+          },
+      ownership: calleeAssistant.workspaceId
+        ? { kind: 'workspace', workspaceId: calleeAssistant.workspaceId }
+        : { kind: 'personal', ownerUserId: calleeOwnerUserId },
+      lifecycle: {
+        abortSignal: abortController.signal,
+        sessionId: session.id,
+        channelType: 'assistant-call',
+        channelId: params.callerAssistantId,
+      },
+      surface: externalClient?.clientSelfMemory
+        ? { clientSelfMemory: externalClient.clientSelfMemory }
+        : undefined,
+      attribution: {
+        billingUserId: calleeOwnerUserId,
+        ...(externalClient ? { credentialOwnerUserId: calleeOwnerUserId } : {}),
+      },
+      sessionAuthority: session,
+    }, {
+      resolveScope: async () => turnScope,
+      createSessionLease: () => ambientAuthority,
+    })
+
+
     const calleeCtx = {
       ...automaticContextAccess(turnScope.access, turnScope.activeProjectId),
       clientSelfMemory: externalClient?.clientSelfMemory,
     }
     const [soulContext, identityMemories, rankedIndex] = await Promise.all([
       (options.memoryStore.getSoulContext?.(calleeCtx, 'Use Brian') ?? Promise.resolve({ content: null, evidence: {} })),
-      options.memoryStore.getIdentity(calleeCtx),
-      options.memoryStore.getIndexRanked(calleeCtx, PER_TURN_INDEX_CAP),
+      options.memoryStore.getIdentity(calleeCtx,!externalClient&&executionContext.ownership.kind==='workspace'?{execution:executionContext,accumulator:scopeAccumulator}:undefined),
+      options.memoryStore.getIndexRanked(calleeCtx, PER_TURN_INDEX_CAP,externalClient?undefined:{execution:executionContext,accumulator:scopeAccumulator}),
     ])
     const memoryIndex = rankedIndex.rows
     const soul = soulContext.content
@@ -1478,7 +1538,7 @@ export function createCalleeExecutor(options: CalleeExecutorOptions): CalleeExec
     if (includeWorkspaceMemories && calleeAssistant.workspaceId) {
       ;[workspaceIdentityMemories, teamMemoryIndex, priorRunMemories] = await Promise.all([
         options.memoryStore.getWorkspaceIdentity(calleeCtx),
-        options.memoryStore.getWorkspaceIndex(calleeCtx),
+        options.memoryStore.getWorkspaceIndex(calleeCtx,undefined,externalClient?undefined:{execution:executionContext,accumulator:scopeAccumulator}),
         params.workflowId
           ? options.memoryStore
               .getWorkspaceMemoriesByCategory(calleeCtx, `workflow:${params.workflowId}`)
@@ -1489,13 +1549,9 @@ export function createCalleeExecutor(options: CalleeExecutorOptions): CalleeExec
           : Promise.resolve([]),
       ])
     }
-    const scopeAccumulator = new ContextScopeAccumulator({
-      compartments: turnScope.writeCompartments,
-      projectIds: turnScope.writeProjectIds,
-    })
-    scopeAccumulator.note(inheritedEvidence)
     scopeAccumulator.note(soulContext.evidence)
     noteAutomaticScopeEvidence(scopeAccumulator, [
+      identityMemories,rankedIndex.rows,teamMemoryIndex,
       ...identityMemories,
       ...memoryIndex,
       ...workspaceIdentityMemories,
@@ -1643,61 +1699,6 @@ export function createCalleeExecutor(options: CalleeExecutorOptions): CalleeExec
       }
     }
 
-    const abortController = new AbortController()
-    // The delegated turn's own invocation is the source a browser task (or
-    // any other source-bound child) is pinned to. Without it the task has no
-    // source and is refused outright (`profile_authority_denied`); with it the
-    // child renews only while this invocation's leases still hold.
-    const ambientInvocationId = randomUUID()
-    const ambientAuthority = {
-      assertCurrent: assertCurrentAuthority,
-      execute: executeWithCurrentAuthority,
-      snapshotSource: () => ({ version: 1 as const, kind: 'invocation' as const, invocationId: ambientInvocationId }),
-    }
-    const { executionContext } = await resolveExecutionContextSystem({
-      userId: calleeActorUserId,
-      assistant: calleeAssistant,
-      workspaceId: calleeAssistant.workspaceId,
-      session,
-      identity: externalClient
-        ? {
-            kind: 'programmatic',
-            principal: {
-              kind: 'brain_key',
-              credentialId: externalClient.key.id,
-              actorUserId: calleeActorUserId,
-            },
-            credentialOwnerUserId: calleeOwnerUserId,
-          }
-        : {
-            kind: 'delegated',
-            actorUserId: calleeActorUserId,
-            delegationId: params.workflowRunId ?? session.id,
-            parentCeiling: pinAccessCeiling(turnScope.access),
-          },
-      ownership: calleeAssistant.workspaceId
-        ? { kind: 'workspace', workspaceId: calleeAssistant.workspaceId }
-        : { kind: 'personal', ownerUserId: calleeOwnerUserId },
-      lifecycle: {
-        abortSignal: abortController.signal,
-        sessionId: session.id,
-        channelType: 'assistant-call',
-        channelId: params.callerAssistantId,
-      },
-      surface: externalClient?.clientSelfMemory
-        ? { clientSelfMemory: externalClient.clientSelfMemory }
-        : undefined,
-      attribution: {
-        billingUserId: calleeOwnerUserId,
-        ...(externalClient ? { credentialOwnerUserId: calleeOwnerUserId } : {}),
-      },
-      sessionAuthority: session,
-    }, {
-      resolveScope: async () => turnScope,
-      createSessionLease: () => ambientAuthority,
-    })
-
-
     // Delivery-conversation commitments (read-only bridge). A consult that
     // delivers into a user channel is a continuation of that conversation, so
     // it reads the `# Open commitments` rows the interactive assistant(s)
@@ -1809,6 +1810,7 @@ export function createCalleeExecutor(options: CalleeExecutorOptions): CalleeExec
         accumulator: scopeAccumulator,
         envelope: delegatedEnvelope,
       }),
+      authority: !externalClient&&executionContext.ownership.kind==='workspace'?{execution:executionContext,accumulator:scopeAccumulator}:undefined,
     })
     const userMessageSource = boundScopeSource(userMessageRow)
     if (userMessageSource) scopeAccumulator.noteSource(userMessageSource)
@@ -2401,6 +2403,7 @@ export function createCalleeExecutor(options: CalleeExecutorOptions): CalleeExec
               accumulator: scopeAccumulator,
               envelope: delegatedEnvelope,
             }),
+            authority: !externalClient&&executionContext.ownership.kind==='workspace'?{execution:executionContext,accumulator:scopeAccumulator}:undefined,
           })
           // Record the callee turn's LLM cost. Without this, every A2A /
           // workflow `assistant_call` / scheduled-job turn ran the model but

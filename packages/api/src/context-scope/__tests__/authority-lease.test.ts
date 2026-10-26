@@ -2,13 +2,15 @@ import { describe, expect, it, vi } from 'vitest'
 import type { AccessCeiling } from '@use-brian/core'
 import { createAuthorityLease, createSessionAuthorityLease, runWithAuthorityLease, assertCurrentAuthority, executeWithCurrentAuthority } from '../authority-lease.js'
 
+const nativeAuth=vi.hoisted(()=>({valid:true,seen:[] as unknown[]}))
+vi.mock('../../db/auth-session-store.js',()=>({authSessionStore:{validateAccess:async(claims:unknown)=>{nativeAuth.seen.push(structuredClone(claims));return nativeAuth.valid}}}))
 const liveSession = vi.hoisted(() => ({ row: null as Record<string, unknown> | null }))
 vi.mock('../../db/sessions.js', () => ({ findSessionAuthorityById: async () => liveSession.row }))
 vi.mock('../../db/users.js', () => ({ findAssistantById: async (id: string) => ({ id, workspaceId: 'workspace' }) }))
 // Each assistant's live ceiling is its own: a standard assistant sees only its rows.
 vi.mock('../resolve-turn-scope.js', () => ({
-  resolveLiveAccessCeilingSystem: async ({ assistant }: { assistant: { id: string } }) =>
-    assistant.id === 'assistant' ? initial : { ...initial, visibilityAssistantIds: [assistant.id] },
+  resolveLiveAccessCeilingSystem: async ({ assistant,userId }: { assistant: { id: string };userId?:string }) =>
+    ({...initial,userId:userId??initial.userId,visibilityAssistantIds:assistant.id==='assistant'?initial.visibilityAssistantIds:[assistant.id]}),
 }))
 
 const initial: AccessCeiling = { workspaceId: 'workspace', userId: 'actor',
@@ -182,7 +184,7 @@ describe('[COMP:api/authority-lease] current authority at execution boundaries',
     await lease.assertCurrent()
     const snapshot = lease.snapshotSource!()
     expect(snapshot).toMatchObject({ kind: 'session', id: 'source-session', invocationId: first.invocationId,
-      contextLockedAt: '2026-10-07T00:00:00.000Z', executingAssistantId: 'assistant', authorityUserId: 'actor' })
+      contextLockedAt: '2026-10-07T00:00:00.000Z', executingAssistantId: 'assistant', authorityUserId: 'actor', visibility:'personal' })
     if (snapshot.kind === 'session') snapshot.id = 'changed-copy'
     expect(lease.snapshotSource!()).toMatchObject({ id: 'source-session' })
     for (const options of [{}, { durableSessionSource: true, credentialCurrent: async () => true },
@@ -190,6 +192,23 @@ describe('[COMP:api/authority-lease] current authority at execution boundaries',
       const limited = createSessionAuthorityLease({ starting: initial, session: { ...session, contextLockedAt: new Date() }, ...options })
       expect(limited.snapshotSource!().kind).toBe('invocation')
     }
+  })
+
+  it('pins exact native credentials and never promotes an additional opaque callback to a cold source',async()=>{
+    const actor='10000000-0000-4000-8000-000000000002',session={id:'source-session',assistantId:'assistant',userId:actor,contextGroupId:null,contextProjectId:null,contextLockedAt:new Date('2026-10-24T00:00:00.000Z'),visibility:'personal',mode:null,effectiveClearance:null,contextCompartments:[]}
+    liveSession.row={...session};nativeAuth.valid=true;nativeAuth.seen=[]
+    const claims={userId:actor,sessionId:'10000000-0000-4000-8000-000000000003',authVersion:2},expected=structuredClone(claims)
+    const input={starting:{...initial,userId:actor},session,durableSessionSource:true,nativeSessionCredential:claims}
+    const lease=createSessionAuthorityLease(input)
+    claims.authVersion=99
+    await lease.assertCurrent()
+    expect(lease.snapshotSource!()).toMatchObject({kind:'session',nativeCredential:expected})
+    expect(nativeAuth.seen).toContainEqual(expected)
+    for(const opaque of [{credentialCurrent:async()=>true},{maximumAccessCurrent:async()=>input.starting}])expect(createSessionAuthorityLease({...input,...opaque}).snapshotSource!().kind).toBe('invocation')
+    nativeAuth.valid=false
+    await expect(lease.assertCurrent()).rejects.toMatchObject({reason:'authority_changed'})
+    nativeAuth.valid=true
+    await expect(lease.assertCurrent()).rejects.toMatchObject({reason:'authority_changed'})
   })
 
 })

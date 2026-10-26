@@ -4,6 +4,8 @@ import { afterAll, beforeAll, describe, expect, it } from 'vitest'
 import { z } from 'zod'
 import express from 'express'
 import request from 'supertest'
+import { once } from 'node:events'
+import { createApplicationClient, createFetchTransport } from '@use-brian/brian-app/application'
 import type { Pool,PoolClient } from 'pg'
 import { ContextScopeAccumulator, executionToolContext, boundScopeSources, type ApplicationModuleDefinition, type ScopeSource } from '@use-brian/core'
 import { applicationQuerySchema, applicationResourceSchema, type ApplicationAccessGrant, type ApplicationGrantMaximum, type ApplicationJson } from '@use-brian/shared'
@@ -1049,7 +1051,7 @@ describe('[COMP:api/application-auth] database application projections and live 
     const initialized = await rpc('initialize', { protocolVersion: '2025-11-25', capabilities: {}, clientInfo: { name: 'Example application client', version: '1' } })
     expect(initialized.status).toBe(200); expect(decode(initialized).result.serverInfo.name).toBe('use-brian-application')
     const listed = await rpc('tools/list')
-    expect(listed.status).toBe(200); expect(decode(listed).result.tools.map((tool: { name: string }) => tool.name)).toEqual(['applicationCatalog', 'applicationQuery', 'applicationCommand'])
+    expect(listed.status).toBe(200); expect(decode(listed).result.tools.map((tool: { name: string }) => tool.name)).toEqual(['applicationCatalog', 'applicationQuery', 'applicationCommand', 'applicationReconcile'])
     const read = await rpc('tools/call', { name: 'applicationQuery', arguments: { queryKey: 'get', input: { type: 'request', id: row.id } } })
     expect(read.status).toBe(200)
     expect(JSON.parse(decode(read).result.content[0].text).values).toEqual({ title: { kind: 'text', value: 'MCP request' } })
@@ -1582,5 +1584,163 @@ describe('[COMP:api/application-auth] database application projections and live 
     await expect(ordinary.query(execution, 'records', 'query', { type: 'request', query: { filters: [{ field: 'linked', op: 'eq', value: target.id }] } })).rejects.toMatchObject({ code: 'access_unavailable' })
     const history = await ordinary.query(execution, 'records', 'history', { type: 'request', id: source.id }) as Array<{ values: Record<string, unknown> }>
     expect(history[0].values).not.toHaveProperty('linked')
+  })
+  it('round-trips authenticated SDK and registered Brian MCP operations over the same canonical records', async () => {
+    const dispatcher = new ApplicationPlatformService([createCanonicalNativeApplicationModule(), createCanonicalGenericApplicationModule()])
+    // Grants are synthetic fixture inputs. This does not bypass or certify live issuance qualification.
+    async function app(moduleKey: string, definitions: Array<Pick<ApplicationAccessGrant, 'origin' | 'typeKey' | 'actions' | 'readFields' | 'writeFields' | 'selector'>>) {
+      const appId = randomUUID()
+      await pool.query(`INSERT INTO application_clients(id,workspace_id,module_key,name,client_mode,executing_assistant_id,created_by_user_id)
+        VALUES($1,$2,$3,'Fictional canonical client','api_client',$4,$5)`, [appId,workspaceId,moduleKey,assistantId,ownerId])
+      const grants: ApplicationAccessGrant[] = definitions.map(definition => ({ ...definition, id: randomUUID(), appId, workspaceId,
+        principal: { kind: 'member',userId: memberId },version: 1,status: 'active',startsAt: '2026-01-01T00:00:00.000Z',expiresAt: null,
+        parentGrantId: null,compartments: [],projectIds: [],clearance: 'internal' }))
+      for (const grant of grants) await pool.query(`INSERT INTO application_access_grants(id,app_id,workspace_id,principal_kind,principal_user_id,issued_by_user_id,
+        resource_origin,resource_type,actions,read_fields,write_fields,selector,compartments,project_ids,clearance,starts_at)
+        VALUES($1,$2,$3,'member',$4,$5,$6,$7,$8,$9,$10,$11,'{}','{}','internal',$12)`,
+      [grant.id,appId,workspaceId,memberId,ownerId,grant.origin,grant.typeKey,grant.actions,grant.readFields,grant.writeFields,grant.selector,grant.startsAt])
+      const client = await createDbOAuthClientStore().register({ clientName: 'Fictional SDK client',clientUri: 'https://client.example',
+        redirectUris: ['https://client.example/callback'],tokenEndpointAuthMethod: 'none' })
+      clients.push(client.clientId)
+      await pool.query('UPDATE application_clients SET oauth_client_id=$2 WHERE id=$1',[appId,client.clientId])
+      const authorizationId=randomUUID(),secret=randomBytes(32).toString('base64url')
+      await pool.query(`INSERT INTO oauth_authorizations(id,client_id,user_id,workspace_id,scope,audience,application_client_id,access_token_hash,access_token_expires_at)
+        VALUES($1,$2,$3,$4,'read_write','application',$5,$6,now()+interval '10 minutes')`,[authorizationId,client.clientId,memberId,workspaceId,appId,await hashSecret(secret)])
+      await pool.query(`INSERT INTO application_oauth_bindings(authorization_id,app_id,workspace_id,principal_user_id,parent_grant_id,maximum_grants)
+        VALUES($1,$2,$3,$4,$5,$6)`,[authorizationId,appId,workspaceId,memberId,grants[0].id,JSON.stringify(grants.map(grant=>({version:1,grants:[grant]})))])
+      return { appId,grants,token:`oat_${authorizationId}_${secret}` }
+    }
+    const nativeOrigin = { kind: 'native' as const,moduleKey: 'native' }
+    const native = await app('native',[
+      { origin:nativeOrigin,typeKey:'company',actions:['read','query','create','patch','command:create_company','command:patch_company','command:patch_records'],
+        readFields:['name','domain'],writeFields:['name','domain'],selector:{kind:'self'} },
+      { origin:nativeOrigin,typeKey:'deal',actions:['read','query','create','patch','command:create_deal','command:set_deal_stage','command:patch_records'],
+        readFields:['name','companyId','stage','amount','currencyCode'],writeFields:['name','companyId','stage','amount','currencyCode'],selector:{kind:'self'} },
+    ])
+    const http=express();http.use('/api/applications',applicationPlatformRoutes({service:dispatcher}))
+    const server=http.listen(0,'127.0.0.1');await once(server,'listening')
+    const apiOrigin=`http://127.0.0.1:${(server.address() as {port:number}).port}`
+    const sdk=(value:Awaited<ReturnType<typeof app>>)=>createApplicationClient({appId:value.appId,
+      transport:createFetchTransport({apiOrigin,credential:async()=>value.token})})
+    async function rpc(value:Awaited<ReturnType<typeof app>>,method:string,params?:unknown) {
+      const response=await fetch(`${apiOrigin}/api/applications/${value.appId}/mcp`,{method:'POST',headers:{Authorization:`Bearer ${value.token}`,
+        'Content-Type':'application/json',Accept:'application/json, text/event-stream','MCP-Protocol-Version':'2025-11-25'},
+      body:JSON.stringify({jsonrpc:'2.0',id:1,method,...(params?{params}:{})})})
+      expect(response.status).toBe(200)
+      const text=await response.text(),line=text.split('\n').find(line=>line.startsWith('data: '))
+      return (line?JSON.parse(line.slice(6)):JSON.parse(text)).result
+    }
+    async function tool(value:Awaited<ReturnType<typeof app>>,name:string,args:unknown) {
+      const result=await rpc(value,'tools/call',{name,arguments:args})
+      expect(result.isError,JSON.stringify(result)).toBeUndefined()
+      return JSON.parse(result.content[0].text)
+    }
+    try {
+      const nativeSdk=sdk(native)
+      expect((await rpc(native,'tools/list')).tools.map((item:{name:string})=>item.name)).toEqual(['applicationCatalog','applicationQuery','applicationCommand','applicationReconcile'])
+      const created=await nativeSdk.command('create_company',{idempotencyKey:randomUUID(),input:{name:'Fictional SDK workshop',domain:'workshop.example'}})
+      const companyId=created.resources[0].id
+      expect(await nativeSdk.get('company',companyId)).toMatchObject({ref:{id:companyId,version:'1'},values:{name:'Fictional SDK workshop',domain:'workshop.example'}})
+      expect(await tool(native,'applicationQuery',{queryKey:'get',input:{type:'company',id:companyId}})).toMatchObject({ref:created.resources[0]})
+      const patch={idempotencyKey:randomUUID(),expectedVersion:'1',input:{id:companyId,patch:{domain:'updated.example'}}}
+      const changed=await tool(native,'applicationCommand',{commandKey:'patch_company',command:patch})
+      expect(changed.resources[0]).toMatchObject({id:companyId,version:'2'})
+      expect(await nativeSdk.command('patch_company',patch)).toEqual(changed)
+      await expect(nativeSdk.command('patch_company',{...patch,idempotencyKey:randomUUID()})).rejects.toMatchObject({code:'record_version_conflict',effect:'none'})
+      expect(await nativeSdk.get('company',companyId)).toMatchObject({ref:{id:companyId,version:'2'},values:{domain:'updated.example'}})
+      const page=await nativeSdk.query('company',{fields:['name','domain'],filters:[{field:'name',op:'eq',value:'Fictional SDK workshop'}],sort:[{field:'name',direction:'asc'}],aggregate:[],limit:1})
+      expect(page.records.map(record=>record.ref.id)).toEqual([companyId])
+      const deal=await nativeSdk.command('create_deal',{idempotencyKey:randomUUID(),input:{name:'Fictional SDK opportunity',companyId,amount:'21.000000000000000001',currencyCode:'USD'}})
+      const dealId=deal.resources[0].id
+      expect(await tool(native,'applicationQuery',{queryKey:'get',input:{type:'deal',id:dealId}})).toMatchObject({ref:{id:dealId,version:'1'},values:{companyId,amount:'21.000000000000000001',stage:'lead'}})
+      await tool(native,'applicationCommand',{commandKey:'set_deal_stage',command:{idempotencyKey:randomUUID(),expectedVersion:'1',input:{id:dealId,stage:'proposal'}}})
+      expect(await nativeSdk.get('deal',dealId)).toMatchObject({ref:{id:dealId,version:'2'},values:{stage:'proposal',companyId}})
+      const actor={workspaceId,userId:memberId,assistantId,assistantKind:'primary' as const}
+      expect(await getCompanyById(actor,companyId)).toMatchObject({id:companyId,domain:'updated.example'})
+      expect(await getDealById(actor,dealId)).toMatchObject({id:dealId,companyId,stage:'proposal'})
+      const failedBatchKey=randomUUID()
+      const failedBatch=await rpc(native,'tools/call',{name:'applicationCommand',arguments:{commandKey:'patch_records',command:{idempotencyKey:failedBatchKey,input:{patches:[
+        {type:'company',id:companyId,expectedVersion:'2',patch:{domain:'rolled-back.example'}},
+        {type:'deal',id:dealId,expectedVersion:'9999',patch:{name:'Fictional stale batch'}},
+      ]}}}})
+      expect(failedBatch.isError).toBe(true)
+      expect(JSON.parse(failedBatch.content[0].text)).toMatchObject({error:'record_version_conflict',effect:'none'})
+      expect(await nativeSdk.get('company',companyId)).toMatchObject({ref:{version:'2'},values:{domain:'updated.example'}})
+      expect((await pool.query('SELECT id FROM application_operation_receipts WHERE workspace_id=$1 AND idempotency_key=$2',[workspaceId,failedBatchKey])).rows).toEqual([])
+      const atomic=await tool(native,'applicationCommand',{commandKey:'patch_records',command:{idempotencyKey:randomUUID(),input:{patches:[
+        {type:'company',id:companyId,expectedVersion:'2',patch:{domain:'atomic.example'}},
+        {type:'deal',id:dealId,expectedVersion:'2',patch:{name:'Fictional atomic opportunity'}},
+      ]}}})
+      expect(atomic.resources).toEqual(expect.arrayContaining([expect.objectContaining({id:companyId,version:'3'}),expect.objectContaining({id:dealId,version:'3'})]))
+      expect(await nativeSdk.get('company',companyId)).toMatchObject({ref:{id:companyId,version:'3'},values:{domain:'atomic.example'}})
+      expect(await nativeSdk.get('deal',dealId)).toMatchObject({ref:{id:dealId,version:'3'},values:{name:'Fictional atomic opportunity',stage:'proposal',companyId}})
+      for(const rowId of [companyId,dealId])expect((await pool.query("SELECT before_image->>'id' AS id FROM brain_row_versions WHERE primitive='entity' AND row_id=$1",[rowId])).rows).toEqual([{id:rowId},{id:rowId}])
+      expect((await pool.query('SELECT id FROM application_command_audit WHERE receipt_id=$1',[atomic.id])).rows).toHaveLength(1)
+      expect((await pool.query('SELECT resources FROM application_committed_events WHERE receipt_id=$1',[atomic.id])).rows).toEqual([{resources:atomic.resources}])
+      const schema=await store.createEntityType({workspaceId,name:'Fictional linked SDK records',createdBy:ownerId,properties:[
+        {name:'title',config:{kind:'text'},required:true},{name:'cost',config:{kind:'number'}},
+        {name:'company',config:{kind:'relation',targetEntityTypeRef:{kind:'builtin',name:'company'}}},
+      ]})
+      const generic=await app('records',[
+        {origin:{kind:'generic',entityTypeId:schema.id},typeKey:'request',actions:['read','query','history','create','patch','delete','command:record_create','command:record_patch','command:record_delete'],
+          readFields:['title','cost','company'],writeFields:['title','cost','company'],selector:{kind:'self'}},
+        {origin:nativeOrigin,typeKey:'company',actions:['read'],readFields:['name'],writeFields:[],selector:{kind:'ids',ids:[companyId]}},
+      ])
+      const genericSdk=sdk(generic),invalidKey=randomUUID()
+      await expect(genericSdk.command('record_create',{idempotencyKey:invalidKey,input:{operation:'create',type:'request',data:{cost:{kind:'number',value:1}}}})).rejects.toMatchObject({code:'invalid_value',effect:'none'})
+      expect((await pool.query('SELECT id FROM application_operation_receipts WHERE workspace_id=$1 AND idempotency_key=$2',[workspaceId,invalidKey])).rows).toEqual([])
+      expect((await genericSdk.schema('request')).origin).toEqual({kind:'generic',entityTypeId:schema.id})
+      await expect(genericSdk.previewSchema({typeId:schema.id,expectedVersion:1,properties:schema.properties})).rejects.toMatchObject({code:'operation_not_available'})
+      const record=await genericSdk.command('record_create',{idempotencyKey:randomUUID(),input:{operation:'create',type:'request',data:{
+        title:{kind:'text',value:'Fictional SDK request'},cost:{kind:'number',value:42},company:{kind:'relation',value:companyId},
+      }}}),id=record.resources[0].id
+      expect(await tool(generic,'applicationQuery',{queryKey:'get',input:{type:'request',id}})).toMatchObject({ref:{id,version:'1'},values:{company:{kind:'relation',value:companyId}}})
+      const edited=await tool(generic,'applicationCommand',{commandKey:'record_patch',command:{idempotencyKey:randomUUID(),input:{operation:'patch',type:'request',id,expectedVersion:'1',data:{title:{kind:'text',value:'Fictional MCP revision'}}}}})
+      expect(edited.resources[0]).toMatchObject({id,version:'2'})
+      expect(await genericSdk.get('request',id)).toMatchObject({ref:{id,version:'2'},values:{title:{kind:'text',value:'Fictional MCP revision'}}})
+      expect((await genericSdk.history('request',id)).map(record=>record.ref.version)).toEqual(['2','1'])
+      expect((await store.getEntity(workspaceId,id))?.data.company.value).toBe(companyId)
+      const records=await genericSdk.query('request',{fields:['title','cost','company'],filters:[{field:'cost',op:'gt',value:40}],sort:[{field:'cost',direction:'desc'}],aggregate:[],limit:5})
+      expect(records.records.map(record=>record.ref.id)).toEqual([id])
+      const otherCompany=await createCompany(ownerId,{workspaceId,name:'Fictional unreleased target',mergeByName:false})
+      await expect(genericSdk.command('record_patch',{idempotencyKey:randomUUID(),input:{operation:'patch',type:'request',id,expectedVersion:'2',data:{company:{kind:'relation',value:otherCompany.id}}}})).rejects.toMatchObject({code:'invalid_value',effect:'none'})
+      const restricted=await app('records',[{origin:{kind:'generic',entityTypeId:schema.id},typeKey:'request',actions:['read','query','history','patch','command:record_patch'],
+        readFields:['title'],writeFields:['title'],selector:{kind:'ids',ids:[id]}}])
+      expect(await sdk(restricted).get('request',id)).toMatchObject({values:{title:{kind:'text',value:'Fictional MCP revision'}}})
+      await expect(sdk(restricted).query('request',{fields:['cost'],filters:[{field:'cost',op:'gt',value:0}],sort:[],aggregate:[],limit:5})).rejects.toMatchObject({code:'access_unavailable'})
+      await expect(sdk(restricted).command('record_patch',{idempotencyKey:randomUUID(),input:{operation:'patch',type:'request',id,expectedVersion:'2',data:{cost:{kind:'number',value:0}}}})).rejects.toMatchObject({code:'access_unavailable',effect:'none'})
+      for(const table of ['application_command_audit','application_committed_events']) {
+        await pool.query(`ALTER TABLE ${table} ADD CONSTRAINT fixture_sdk_roundtrip_failure CHECK(module_key<>'records') NOT VALID`)
+        const key=randomUUID()
+        try {
+          await expect(genericSdk.command('record_patch',{idempotencyKey:key,input:{operation:'patch',type:'request',id,expectedVersion:'2',data:{title:{kind:'text',value:'Fictional rolled back'}}}})).rejects.toMatchObject({code:'invalid_value',effect:'none'})
+          expect((await store.getEntity(workspaceId,id))?.recordVersion).toBe('2')
+          expect((await pool.query('SELECT id FROM application_operation_receipts WHERE workspace_id=$1 AND idempotency_key=$2',[workspaceId,key])).rows).toEqual([])
+        } finally {await pool.query(`ALTER TABLE ${table} DROP CONSTRAINT fixture_sdk_roundtrip_failure`)}
+      }
+      expect((await pool.query('SELECT id FROM application_command_audit WHERE receipt_id=$1',[edited.id])).rows).toHaveLength(1)
+      expect((await pool.query('SELECT resources FROM application_committed_events WHERE receipt_id=$1',[edited.id])).rows).toEqual([{resources:edited.resources}])
+      await pool.query("UPDATE application_access_grants SET status='revoked' WHERE id=$1",[restricted.grants[0].id])
+      await expect(sdk(restricted).get('request',id)).rejects.toMatchObject({code:'authentication_required'})
+      expect((await store.getEntity(workspaceId,id))?.recordVersion).toBe('2')
+      const removed=await genericSdk.command('record_delete',{idempotencyKey:randomUUID(),input:{operation:'delete',type:'request',id,expectedVersion:'2'}})
+      expect(removed.resources[0]).toMatchObject({id,version:'3'})
+      await expect(genericSdk.get('request',id)).rejects.toMatchObject({code:'access_unavailable'})
+      expect(await store.getEntity(workspaceId,id)).toBeNull()
+    } finally {server.closeAllConnections();await new Promise<void>((accept,reject)=>server.close(error=>error?reject(error):accept()))}
+  },60_000)
+  it('holds an external-origin service grant review while the same named service has a valid native prospective review',async()=>{
+    const fixture=await provision('service',['name'],undefined,false,randomUUID(),['create','command:create_company'],[],{kind:'self'})
+    const management=new ApplicationManagementService(new ApplicationPlatformService([createCanonicalNativeApplicationModule()]))
+    const proposal={principal:{kind:'service' as const,userId:fixture.userId},origin:{kind:'native' as const,moduleKey:'native'},typeKey:'company',
+      actions:['create','command:create_company'],readFields:[],writeFields:['name'],selector:{kind:'self' as const},compartments:[],projectIds:[],
+      clearance:'internal' as const,parentGrantId:null,expiresAt:null}
+    expect(await management.reviewGrant(ownerId,workspaceId,fixture.appId,proposal)).toMatchObject({proposal,canIssue:false})
+    // No external-origin release snapshot exists. A well-formed source identity
+    // descriptor alone cannot create an issuer/source/service grant proof.
+    await expect(management.reviewGrant(ownerId,workspaceId,fixture.appId,{...proposal,
+      origin:{kind:'external',connectorInstanceId:randomUUID(),sourceTenant:'fictional-tenant'},typeKey:'case',actions:['read'],
+      readFields:['description'],writeFields:[]})).rejects.toMatchObject({code:'access_unavailable',effect:'none'})
+    expect((await pool.query("SELECT id FROM application_grant_reviews WHERE app_id=$1 AND proposed_grant->'origin'->>'kind'='external'",[fixture.appId])).rows).toEqual([])
   })
 })

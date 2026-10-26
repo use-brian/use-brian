@@ -212,13 +212,20 @@ describe('[COMP:api/application-records] canonical native operation composition'
   })
   it.each(['created_by_user_id','created_by_assistant_id','created_at','id'] as const)(
     'Q04 refuses raw rewrites of canonical native managed identity: %s',async field=>{
-    const value=await createCompany(userId,{workspaceId,name:`Fictional immutable native identity ${randomUUID()}`,access,mergeByName:false})
+    const otherAssistant=field==='created_by_assistant_id'?randomUUID():null
+    if(otherAssistant)await owner.query("INSERT INTO assistants(id,name,owner_user_id,workspace_id,kind) VALUES($1,'Fictional other native author',$2,$3,'standard')",[otherAssistant,userId,workspaceId])
+    const value=await createCompany(userId,{workspaceId,name:`Fictional immutable native identity ${randomUUID()}`,access,mergeByName:false,
+      ...(otherAssistant?{createdByAssistantId:assistantId}:{})})
     const before=(await owner.query('SELECT id,created_by_user_id,created_by_assistant_id,created_at,scope_version::text AS version FROM entities WHERE id=$1',[value.id])).rows[0]
-    const assignment=field==='created_by_user_id'?readerId:field==='created_by_assistant_id'?assistantId:field==='created_at'?'2000-01-01T00:00:00.000Z':randomUUID()
-    const connection=await client()
-    try {await expect(connection.query(`UPDATE entities SET ${field}=$2 WHERE id=$1`,[value.id,assignment])).rejects.toMatchObject({code:'42501'})}
-    finally {await connection.query('ROLLBACK');connection.release()}
-    expect((await owner.query('SELECT id,created_by_user_id,created_by_assistant_id,created_at,scope_version::text AS version FROM entities WHERE id=$1',[value.id])).rows[0]).toEqual(before)
+    const assignments=field==='created_by_assistant_id'?[otherAssistant,null]:[field==='created_by_user_id'?readerId:field==='created_at'?'2000-01-01T00:00:00.000Z':randomUUID()]
+    try {
+      for(const assignment of assignments) {
+        const connection=await client()
+        try {await expect(connection.query(`UPDATE entities SET ${field}=$2 WHERE id=$1`,[value.id,assignment])).rejects.toMatchObject({code:'42501'})}
+        finally {await connection.query('ROLLBACK');connection.release()}
+        expect((await owner.query('SELECT id,created_by_user_id,created_by_assistant_id,created_at,scope_version::text AS version FROM entities WHERE id=$1',[value.id])).rows[0]).toEqual(before)
+      }
+    } finally {if(otherAssistant)await owner.query('DELETE FROM assistants WHERE id=$1',[otherAssistant])}
   })
   it.each(['sensitivity','private'] as const)('Q04 refuses a raw relationship that would publish a target %s floor',async floor=>{
     const target=await createEntity({workspaceId,kind:'company',displayName:'Fictional protected relationship target',createdByUserId:userId,

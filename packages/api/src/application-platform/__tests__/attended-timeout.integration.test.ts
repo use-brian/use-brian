@@ -21,6 +21,7 @@ import {chatRoutes} from '../../routes/chat.js'
 import * as recovery from '../../routes/_recovery-message.js'
 import * as emptyTurn from '../../routes/_empty-turn-synthesis.js'
 import {persistentContextFixture} from './fixtures/persistent-context.js'
+import {updateSelfEntityAttributes} from '../../db/entities-store.js'
 const {assertLocalFixture}=await import(new URL('../../../../../scripts/crm/local-fixture.mjs',import.meta.url).href)
 await assertLocalFixture()
 
@@ -42,7 +43,8 @@ describe.sequential('[COMP:api/application-persistence] [COMP:api/turn-lease] ac
  let fixture:Fixture|undefined
  afterEach(async()=>{await fixture?.cleanup();fixture=undefined;vi.restoreAllMocks()})
  afterAll(async()=>{await getAppPool().end();await getPool().end()})
- async function setup(options:{title?:'proved'|'none'|'legacy'}={}){
+ async function setup(options:{title?:'proved'|'none'|'legacy';onProviderSession?:(options:unknown)=>void}={}){
+  const onProviderSession=options.onProviderSession
   const recoveryCalls=vi.spyOn(recovery,'composeRecoveryMessage'),synthesisCalls=vi.spyOn(emptyTurn,'composeEmptyTurnSynthesis'),diagnostics=vi.spyOn(console,'info')
   fixture=await persistentContextFixture();const f=fixture
   // A real synthetic Pro account supplies the existing twenty-round budget.
@@ -67,7 +69,7 @@ describe.sequential('[COMP:api/application-persistence] [COMP:api/turn-lease] ac
   const bus:Publication[]=[],committedObservations:Promise<boolean>[]=[],memoryIds:string[]=[]
   const provider:LLMProvider={name:'fictional-timeout',models:['fixture'],
    stream:async function*(input){if(background)yield* background(input);else yield* textChunks('Fictional generated title')},
-   createSession(options){signal=options.signal;sessions++;const providerSession:ProviderSession={send(_messages:Message[],_options?:Parameters<ProviderSession['send']>[1]){
+   createSession(options){onProviderSession?.(options);signal=options.signal;sessions++;const providerSession:ProviderSession={send(_messages:Message[],_options?:Parameters<ProviderSession['send']>[1]){
     const script=scripts[calls++]??{error:new Error('Stream idle 30000ms')}
     return(async function*(){await script.before?.();for(const chunk of script.chunks??[])yield chunk;await script.after?.();if(script.error)throw script.error})()
    }};return providerSession},
@@ -108,6 +110,58 @@ describe.sequential('[COMP:api/application-persistence] [COMP:api/turn-lease] ac
   const lease=(await current.f.pool.query('SELECT status,turn_lease_token FROM sessions WHERE id=$1',[current.session.id])).rows[0]
   expect(lease).toMatchObject({status:'idle',turn_lease_token:null})
  }
+ it.each(['profile.role','profile.extra'] as const)('admits known self identity into actual chat model and retained ancestry then refuses current %s contraction',async(profileField)=>{
+  const prompts:string[]=[],current=await setup({onProviderSession:input=>prompts.push(JSON.stringify(input))}),f=current.f
+  const self=await updateSelfEntityAttributes({workspaceId:f.workspaceId,userId:f.ownerId,displayName:'Fictional self identity',attributes:{name:'Fictional self identity',role:'Fictional planning lead',pronouns:'they/them',sources:['https://identity.example/source'],licenses:['Fictional qualification']}})
+  let registered=false
+  try{
+   await f.pool.query(`CREATE FUNCTION identity_profile_field_catalog(w uuid,o jsonb,t text) RETURNS jsonb
+    LANGUAGE sql SECURITY DEFINER SET search_path=pg_catalog,public,pg_temp AS $$
+    SELECT jsonb_build_object('moduleKey','native','origin',o,'typeKey',t,'schemaVersion','1','policyVersion','1',
+     'fieldKeys',application_native_field_keys(t),'fields',(SELECT jsonb_agg(jsonb_build_object('key',key,'read',CASE WHEN key='${profileField}' THEN '[["profile_reader"]]'::jsonb ELSE '[]'::jsonb END,
+      'write','[]'::jsonb,'releaseReadTo','[]'::jsonb,'releaseWriteTo','[]'::jsonb) ORDER BY key) FROM unnest(application_native_field_keys(t)) key),
+     'scope',jsonb_build_object('workspaceId',w,'userId',NULL,'assistantId',NULL,'sensitivity','public','compartments','[]'::jsonb,'projectIds','[]'::jsonb)) $$;
+    CREATE FUNCTION identity_profile_field_reader(w uuid,o jsonb,t text,i text) RETURNS jsonb
+    LANGUAGE sql SECURITY DEFINER SET search_path=pg_catalog,public,pg_temp AS $$
+    SELECT (identity_profile_field_catalog(w,o,t)-'scope')||jsonb_build_object('recordVersion',e.scope_version::text,'source',read_scope_source(w,'entity',e.id))
+     FROM entities e WHERE e.workspace_id=w AND e.id=i::uuid $$;
+    REVOKE ALL ON FUNCTION identity_profile_field_catalog(uuid,jsonb,text),identity_profile_field_reader(uuid,jsonb,text,text) FROM PUBLIC;
+    INSERT INTO application_native_field_contracts(module_key,contract_version,role_keys,metadata_reader,catalog_reader)
+     VALUES('native','1',ARRAY['profile_reader'],'identity_profile_field_reader(uuid,jsonb,text,text)'::regprocedure,'identity_profile_field_catalog(uuid,jsonb,text)'::regprocedure)`)
+   registered=true
+   await f.pool.query(`INSERT INTO application_native_resource_owners(workspace_id,origin,resource_type,module_key) VALUES($1,'{"kind":"native","moduleKey":"native"}','person','native')`,[f.workspaceId])
+   await f.pool.query(`INSERT INTO application_native_role_assignments(workspace_id,module_key,user_id,role_key,issued_by_user_id) VALUES($1,'native',$2,'profile_reader',$2)`,[f.workspaceId,f.ownerId])
+   current.scripts.push({chunks:textChunks('Fictional identity admitted response')})
+   const response=await current.send()
+   expect(frames(response.text).filter(frame=>frame.event==='error'),response.text).toEqual([])
+   expect(prompts).toHaveLength(1);expect(prompts[0]).toContain("User's role: Fictional planning lead");expect(prompts[0]).toContain("User's name is Fictional self identity")
+   const message=(await current.rows()).find(row=>row.role==='assistant')!;expect(message).toBeTruthy()
+   const fields=(await f.pool.query(`SELECT resources.fields FROM scope_derivations d
+    JOIN scope_derivation_sources edge ON edge.workspace_id=d.workspace_id AND edge.derivation_id=d.id AND edge.source_kind='application_field'
+    JOIN application_field_resources resources ON resources.workspace_id=edge.workspace_id AND resources.id=edge.source_id
+    WHERE d.workspace_id=$1 AND d.resource_kind='session_message' AND d.resource_id=$2`,[f.workspaceId,message.id])).rows
+   expect(fields.some(row=>row.fields.includes(profileField))).toBe(true)
+   expect(JSON.parse(prompts[0]).systemPrompt).toContain('Licenses: ["Fictional qualification"]')
+   expect((await f.pool.query(`SELECT edge.source_id FROM scope_derivations d JOIN scope_derivation_sources edge ON edge.workspace_id=d.workspace_id AND edge.derivation_id=d.id
+    WHERE d.workspace_id=$1 AND d.resource_kind='session_message' AND d.resource_id=$2 AND edge.source_kind='entity'`,[f.workspaceId,message.id])).rows).toContainEqual({source_id:self.id})
+   const observations=(await f.pool.query('SELECT resource_id,version,source_scope FROM application_field_observations WHERE workspace_id=$1 ORDER BY resource_id,version',[f.workspaceId])).rows
+   await f.pool.query("UPDATE application_native_role_assignments SET status='revoked' WHERE workspace_id=$1 AND module_key='native'",[f.workspaceId])
+   const fresh=await createPersonalWebSession({assistantId:f.assistantId,userId:f.ownerId,workspaceId:f.workspaceId,channelType:'web',channelId:crypto.randomUUID(),appOrigin:'chat'},
+    {actorUserId:f.ownerId,authSessionId:current.auth.id,authVersion:current.auth.authVersion})
+   const denied=await current.send({sessionId:fresh.id})
+   expect(frames(denied.text).filter(frame=>frame.event==='error')).toHaveLength(1);expect(prompts).toHaveLength(1);expect(current.calls()).toBe(1)
+   expect((await f.pool.query("SELECT id FROM session_messages WHERE session_id=$1 AND role='assistant'",[fresh.id])).rows).toEqual([])
+   expect((await current.rows()).filter(row=>row.role==='assistant')).toHaveLength(1)
+   // Existing observations are immutable even if the new request adds history metadata.
+   const after=(await f.pool.query('SELECT resource_id,version,source_scope FROM application_field_observations WHERE workspace_id=$1 ORDER BY resource_id,version',[f.workspaceId])).rows
+   for(const original of observations)expect(after).toContainEqual(original)
+  }finally{
+   await f.pool.query("DELETE FROM application_native_resource_owners WHERE workspace_id=$1 AND module_key='native'",[f.workspaceId])
+   await f.pool.query("DELETE FROM application_native_role_assignments WHERE workspace_id=$1 AND module_key='native'",[f.workspaceId])
+   if(registered)await f.pool.query("DELETE FROM application_native_field_contracts WHERE module_key='native'")
+   await f.pool.query('DROP FUNCTION IF EXISTS identity_profile_field_reader(uuid,jsonb,text,text);DROP FUNCTION IF EXISTS identity_profile_field_catalog(uuid,jsonb,text)')
+  }
+ })
  it('assesses actual web input only after authored storage and current history admission',async()=>{
   const current=await setup(),authored:boolean[]=[],inputs:string[]=[]
   current.setBackground(async function*(input){

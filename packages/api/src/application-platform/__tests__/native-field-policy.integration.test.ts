@@ -727,12 +727,30 @@ describe('[COMP:security/native-field-policy] current canonical native field mas
       .toEqual({ data: fixture.row.data,version: fixture.row.recordVersion })
     // Reading cost never turns a title-only patch into a cost write.
     await assign('finance')
+    expect(await mask(fixture)).toMatchObject({ readFields: ['cost','title'],writeFields: ['title'] })
     const service = new ApplicationPlatformService([createCanonicalGenericApplicationModule()])
     const changed = await service.command(await nativeExecution(),'records','record_patch',{ idempotencyKey: randomUUID(),expectedVersion: fixture.row.recordVersion,input: {
       operation: 'patch',type: fixture.type,id: fixture.row.id,data: { title: { kind: 'text',value: 'Fictional visible-field-only patch' } },
     } })
     expect(changed.resources[0].version).toBe('2')
     expect((await owner.query('SELECT data FROM entity_instances WHERE id=$1',[fixture.row.id])).rows[0].data.cost).toEqual(fixture.row.data.cost)
+    const { updateEntity } = createDocEntityTools({ store: legacy,workspaceId,currentUserId: memberId,listBuiltInEntityTypes: () => [] })
+    const context = { ...executionToolContext(await nativeExecution(),{ appId: 'legacy-patch-fixture' }),scopeAccumulator: new ContextScopeAccumulator() }
+    const patched = await updateEntity.execute(updateEntity.inputSchema.parse({ workspaceId,entityId: fixture.row.id,
+      patch: { title: { kind: 'text',value: 'Fictional Brian title patch' } },
+    }),context)
+    expect(patched.isError).not.toBe(true)
+    expect(patched.data).toMatchObject({ entity: { recordVersion: '3',data: {
+      title: { kind: 'text',value: 'Fictional Brian title patch' },cost: fixture.row.data.cost,
+    } } })
+    const persisted = (await owner.query('SELECT data,record_version::text AS version FROM entity_instances WHERE id=$1',[fixture.row.id])).rows[0]
+    expect(persisted).toEqual({ data: { ...fixture.row.data,title: { kind: 'text',value: 'Fictional Brian title patch' } },version: '3' })
+    // A readable equal assignment remains a write and must roll back completely.
+    const denied = await updateEntity.execute(updateEntity.inputSchema.parse({ workspaceId,entityId: fixture.row.id,
+      patch: { cost: fixture.row.data.cost },
+    }),{ ...executionToolContext(await nativeExecution(),{ appId: 'legacy-patch-fixture' }),scopeAccumulator: new ContextScopeAccumulator() })
+    expect(denied.isError).toBe(true)
+    expect((await owner.query('SELECT data,record_version::text AS version FROM entity_instances WHERE id=$1',[fixture.row.id])).rows[0]).toEqual(persisted)
   })
   it('Q06 reauthorizes a saved native generic receipt under current fields in a fresh invocation', async () => {
     await clearRoles()
@@ -2526,6 +2544,31 @@ describe('[COMP:security/native-field-policy] current canonical native field mas
       await assign('finance',adminId,module)
       expect(await service.command(await resolveApplicationExecutionContext(app.authentication),'records','record_delete',command(fixture))).toMatchObject({effect:'committed'})
     })
+  })
+
+
+  it('preserves original pure dictionary and catalog composition for ordinary, restrictive and malformed metadata',async()=>{
+    const field=(key:string,read:unknown=[],write:unknown=[],release:unknown=[])=>({key,read,write,releaseReadTo:release,releaseWriteTo:release})
+    const dictionaries:unknown[]=[[],[field('title')],[field('title',[[]])],[field('title',[],[[]],['service','external_user'])],
+      [field('z'),field('a')],[field('title',[['reader']],[['writer']])],[field('title',[['unknown']])],
+      [field('title'),field('title')],[field('__proto__')],[field('')],[field('x'.repeat(129))],
+      [field('title',null)],[field('title',{},[])],[field('title',[['reader','reader']])],
+      [field('title',[['reader'],['reader']])],[field('title',[],[],['service','service'])],
+      [field('title',[],[],['unknown'])],[field('title',[],[],null)],
+      [{...field('title'),extra:true}],[{key:'title',read:[],write:[]}],[null],{},null]
+    for(const fields of dictionaries){
+      const keys=Array.isArray(fields)?fields.map(value=>value&&typeof value==='object'?(value as {key?:unknown}).key??null:null):null
+      for(const candidateKeys of [keys,[],['title','title'],['__proto__'],null]){
+        const result=(await owner.query(`SELECT application_native_field_dictionary_valid($1,$2,$3) actual,
+          application_native_field_dictionary_before_simple_rules($1,$2,$3) original`,[JSON.stringify(candidateKeys),JSON.stringify(fields),['reader','writer']])).rows[0]
+        expect(result.actual,JSON.stringify({candidateKeys,fields})).toEqual(result.original)
+      }
+      for(const catalog of [fields,[field('title',[['reader']])]]){
+        const result=(await owner.query(`SELECT application_native_intersect_field_catalog($1,$2,$3) actual,
+          application_native_intersect_catalog_before_simple_rules($1,$2,$3) original`,[JSON.stringify(fields),JSON.stringify(catalog),['reader','writer']])).rows[0]
+        expect(result.actual,JSON.stringify({fields,catalog})).toEqual(result.original)
+      }
+    }
   })
 
 })

@@ -14,6 +14,7 @@
  */
 import type { LLMProvider, TokenUsage } from '../providers/types.js'
 import { collectStream } from '../providers/accumulator.js'
+import {assertInputAuthority,isInputAuthorityError} from '../providers/input-authority.js'
 
 export type GoalClarityVerdict = {
   clear: boolean
@@ -34,6 +35,8 @@ export type AssessGoalClarityInput = {
   userId?: string
   workspaceId?: string
   assistantId?: string
+  /** Trusted current caller/source check, carried through physical provider attempts. */
+  assertInputAuthority?:()=>Promise<void>
 }
 
 export type GoalClarityAssessor = (input: AssessGoalClarityInput) => Promise<GoalClarityVerdict>
@@ -79,9 +82,10 @@ export function createGoalClarityAssessor(deps: {
   onUsage?: (usage: TokenUsage, context: GoalLlmUsageContext) => void
   resolveLlm: ((workspaceId: string) => Promise<GoalLlmRuntime | null>) | null
 }): GoalClarityAssessor {
-  return async ({ outcome, verification, approach, userId, workspaceId, assistantId }) => {
+  return async ({ outcome, verification, approach, userId, workspaceId, assistantId,assertInputAuthority:checkInput }) => {
     try {
       const runtime = workspaceId && deps.resolveLlm ? await deps.resolveLlm(workspaceId) : null
+      await assertInputAuthority(checkInput)
       const content = [
         `GOAL OUTCOME: ${outcome}`,
         verification?.trim() ? `VERIFICATION: ${verification.trim()}` : null,
@@ -97,8 +101,10 @@ export function createGoalClarityAssessor(deps: {
           maxTokens: Math.min(400, runtime?.maxTokens ?? 400),
           inputTokenLimit: runtime?.inputTokenLimit,
           temperature: 0.1,
+          assertInputAuthority:checkInput,
         }),
       )
+      await assertInputAuthority(checkInput)
       if (response.usage) deps.onUsage?.(response.usage, {
         userId,
         workspaceId,
@@ -110,6 +116,7 @@ export function createGoalClarityAssessor(deps: {
       const text = response.content.map((b) => (b.type === 'text' ? b.text : '')).join('')
       return parseClarityVerdict(text)
     } catch (err) {
+      if(isInputAuthorityError(err))throw err
       // Fail-open — a model hiccup must never block a confirmation.
       console.error('[goal-clarity] assessment failed; allowing confirm:', err)
       return { clear: true }

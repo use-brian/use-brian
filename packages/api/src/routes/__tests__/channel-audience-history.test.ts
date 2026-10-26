@@ -108,9 +108,10 @@ it('[COMP:api/delivery-authority] checks a bot reader even for history visible t
 
 it('[COMP:api/delivery-authority] resolves stored reply context only from authorized room rows', async () => {
   const { resolveReplyText } = await import('../_reply-context.js')
-  const params = { channelType: 'slack', session: { id: 'room' } as never, readableHistory: [
-    { channelMessageId: 'visible', role: 'assistant', content: [{ type: 'text', text: 'Allowed answer' }], topicLabel: 'Allowed topic' } as never,
-  ] }
+  const visible = { sessionId: 'room', channelMessageId: 'visible', role: 'assistant', content: [{ type: 'text', text: 'Allowed answer' }], topicLabel: 'Allowed topic' }
+  const otherRoom = { ...visible, sessionId: 'other-room', content: [{ type: 'text', text: 'Other room answer' }] }
+  const params = { channelType: 'slack', session: { id: 'room' } as never, readableHistory: [otherRoom, visible] as never }
   await expect(resolveReplyText({ ...params, replyToMessageId: 'hidden' })).resolves.toBeNull()
-  await expect(resolveReplyText({ ...params, replyToMessageId: 'visible' })).resolves.toMatchObject({ text: 'Allowed answer' })
+  await expect(resolveReplyText({ ...params, replyToMessageId: 'visible' })).resolves.toMatchObject({ text: 'Allowed answer', messageId: 'visible', fromAssistant: true, topicLabel: 'Allowed topic' })
+  await expect(resolveReplyText({ ...params, readableHistory: [otherRoom] as never, replyToMessageId: 'visible' })).resolves.toBeNull()
 })

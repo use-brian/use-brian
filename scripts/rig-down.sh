@@ -74,6 +74,9 @@ if [ "$ADMIN_ONLY" = 1 ]; then
   if [ "$admin_pg_port" != 5443 ]; then
     CONTAINER="usebrian-admin-test-$admin_pg_port"
     VOLUME="usebrian-admin-test-$admin_pg_port-data"
+    STATE="$ROOT/.rig/admin-$admin_pg_port"
+    PIDFILE="$STATE/stack.pid"
+    SESSION_FILE="$STATE/session.json"
   fi
 fi
 

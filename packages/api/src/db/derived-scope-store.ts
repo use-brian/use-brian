@@ -214,6 +214,13 @@ export async function recordDerivedResource(
   if (resourceScopeKey(floor) !== resourceScopeKey(output)) {
     throw new DerivedScopeError('scope_visibility_incompatible')
   }
+  if(output.resourceKind==='task'){
+    const role=(await client.query<{admitted:boolean}>(`SELECT NOT(r.rolsuper OR r.rolbypassrls OR pg_has_role(r.oid,c.relowner,'USAGE'))
+      AND nullif(current_setting('app.application_id',true),'') IS NULL AS admitted
+      FROM pg_catalog.pg_roles r JOIN pg_catalog.pg_class c ON c.oid='public.tasks'::regclass WHERE r.rolname=current_user`)).rows[0]
+    if(role?.admitted===true){await client.query('SELECT record_admitted_native_task_derivation($1,$2,$3,$4,$5)',
+      [output.workspaceId,output.resourceId,output.version,evidence.producer,JSON.stringify(evidence.sources)]);return}
+  }
   if(output.resourceKind==='knowledge_entry'&&evidence.sources.some(source=>source.resourceKind==='application_field')){
     await client.query('SELECT record_admitted_knowledge_entry_derivation($1,$2,$3,$4,$5)',
       [output.workspaceId,output.resourceId,output.version,evidence.producer,JSON.stringify(evidence.sources)])

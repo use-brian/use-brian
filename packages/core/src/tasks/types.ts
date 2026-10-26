@@ -13,6 +13,8 @@
  */
 
 import type { AccessContext } from '../security/access-context.js'
+import type { SessionContextAuthority } from '../memory/session-state-types.js'
+import type { DerivedWriteEvidence } from '../security/derived-scope.js'
 import type { Sensitivity } from '../security/sensitivity.js'
 import type { TaskHome, TaskResponsibility } from './responsibility.js'
 
@@ -66,6 +68,8 @@ export type TaskExternalRef = Record<string, unknown>
 export type TaskAttributes = Record<string, unknown>
 
 export type TaskRecord = {
+  /** Content-free create outcome; automatic downstream work was not dispatched. */
+  sourceContinuation?: {state:'held';reason:'source_authority_required';goalDraft?:'requested'|'held'}
   /** Stable canonical lineage identity. Legacy id continues to name the physical version. */
   logicalId?: string
   id: string
@@ -197,6 +201,9 @@ export type TaskStore = {
     writtenBy?: TaskWriteActor
     /** Trusted human assignment behind this write, if any. */
     assignment?: TaskAssignmentProvenance
+    /** Original host execution and complete source evidence, never tool input. */
+    authority?: SessionContextAuthority
+    derivation?: DerivedWriteEvidence
   }): Promise<TaskRecord>
 
   /**
@@ -204,7 +211,7 @@ export type TaskStore = {
    * universal access predicate hides cross-workspace, cross-visibility,
    * or above-clearance rows — the caller sees `null` regardless of why.
    */
-  getById(ctx: AccessContext, id: string): Promise<TaskRecord | null>
+  getById(ctx: AccessContext, id: string, authority?: SessionContextAuthority): Promise<TaskRecord | null>
 
   /**
    * Resolve a historical bi-temporal id to its current live row while applying

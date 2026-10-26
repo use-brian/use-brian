@@ -22,7 +22,7 @@ const OTHER_USER = '88888888-8888-4888-8888-888888888888'
 // Source ancestry is covered by the real DB/HTTP source fixture. These tests exercise native audience rules.
 vi.mock('../../application-platform/external-source-ancestry.js', () => ({ readExternalSourceAncestors: async () => [] }))
 vi.mock('../../application-platform/field-evidence.js', () => ({ readApplicationFieldAncestors: async () => [] }))
-vi.mock('../../db/client.js', () => ({ getPool: () => ({
+vi.mock('../../db/client.js', () => ({ query: async () => { throw new Error('Unexpected direct database query in delivery-authority fixture') }, getPool: () => ({
   query: async (sql: string, params: unknown[]) => {
     if (!sql.includes('read_resource_page_dependencies') || !(params[1] as string[]).every(kind => ['memory', 'session_message'].includes(kind))) {
       throw new Error('Unexpected delivery fixture source lookup')

@@ -1,6 +1,26 @@
 import type { Dictionary } from "./en";
 
 export const ja: Dictionary = {
+  applicationConsent: {
+    "title": "アプリのアクセス権を確認",
+    "loading": "現在のアクセス権を確認中...",
+    "unavailable": "アクセスできないか、審査内容が変更されました。新しいサインイン要求を開いてください。",
+    "unnamed": "アプリケーション",
+    "explanation": "続行する前に、現在のワークスペース、レコード、フィールド、操作を確認してください。",
+    "workspace": "ワークスペース",
+    "scope": "アクセス権",
+    "read": "読み取りのみ",
+    "readWrite": "読み取りと書き込み",
+    "resources": "リソース",
+    "actions": "操作",
+    "readFields": "読み取れるフィールド",
+    "writeFields": "書き込めるフィールド",
+    "selection": "対象レコード",
+    "self": "このアプリの操作主体が作成したレコード",
+    "allow": "許可",
+    "deny": "拒否",
+    "submitting": "送信中..."
+  },
   applicationManagement: {
     "active": "有効",
     "suspended": "一時停止中",
@@ -16,7 +36,7 @@ export const ja: Dictionary = {
     "loading": "現在の権限を確認中…",
     "unavailable": "管理機能を利用できません。ワークスペースのアクセス権を確認してください。",
     "retry": "再読み込み",
-    "unqualified": "実行時の検証が未完了です。権限の発行と有効化は利用できません。",
+    "unqualified": "プラットフォーム全体の検証は未完了です。対応する各アプリ機能には現在の審査が必要です。",
     "identity": "操作する本人",
     "application": "アプリケーション",
     "register": "アプリケーションを登録",
@@ -31,7 +51,7 @@ export const ja: Dictionary = {
     "cancel": "キャンセル",
     "exactReview": "保存された変更内容を確認",
     "invalid": "入力内容が無効です。必須項目を確認してください。",
-    "saved": "保存しました。現在の権限を再取得しました。",
+    "saved": "保存しました。受領記録を閉じると、現在の状態を再取得します。",
     "uncertain": "変更が完了している可能性があります。次の操作の前に現在の状態を読み込んでください。",
     "reconcile": "現在の状態を照合",
     "grants": "正確な権限",
@@ -57,6 +77,8 @@ export const ja: Dictionary = {
     "sourceUnavailable": "マッピング、保持期間、鍵の導入はこの管理機能では利用できません。",
     "legacyUnavailable": "新しい従来データレビューの作成は終了しました。保存済みレビューは、元のIDを指定してアプリケーション管理から復旧できます。",
     "access": "ワークスペースのアクセス権を確認",
+    "reviewActivation": "有効化を審査",
+    "revokeActivation": "有効化を取り消す",
     "activate": "有効化",
     "nativeDelivery": "認証情報の受け取りには本人のネイティブセッションが必要です。"
 },

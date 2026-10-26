@@ -638,7 +638,7 @@ describe('[COMP:api/policy-epoch] canonical invocation policy epochs', () => {
     for (const sql of [
       'UPDATE application_policy_workspace_epochs SET revision=999999 WHERE workspace_id=$1',
       "UPDATE application_native_field_contracts SET configuration_reader=NULL WHERE module_key='epoch_fixture'",
-    ]) expect((await asMember(memberId,client => client.query(sql,sql.includes('$1') ? [workspaceId] : []))).rowCount).toBe(0)
+    ]) await expect(asMember(memberId,client => client.query(sql,sql.includes('$1') ? [workspaceId] : []))).rejects.toMatchObject({ code: '42501' })
     expect(await epoch()).toEqual(before)
     await expect(asMember(memberId,client => client.query("INSERT INTO application_native_resource_owners(workspace_id,origin,resource_type,module_key) VALUES($1,'{}','record.forged','epoch_fixture')",[workspaceId])))
       .rejects.toMatchObject({ code: '42501' })

@@ -6,7 +6,7 @@ import {tmpdir} from 'node:os'
 import {join} from 'node:path'
 import {once} from 'node:events'
 import { fileURLToPath } from 'node:url'
-import { ADMIN_DATABASE_URL, ADMIN_APP_DATABASE_URL, adminRigEnvironment, adminRuntimeNodeOptions, recordAdminGroups, assertAdminRuntimeComposition, stopOwnedAdminGroups } from '../rig-admin.mjs'
+import { ADMIN_DATABASE_URL, ADMIN_APP_DATABASE_URL, adminRigEnvironment, adminRuntimeNodeOptions, recordAdminGroups, assertAdminRuntimeComposition, stopOwnedAdminGroups,adminStateDirectory,adminDeadline } from '../rig-admin.mjs'
 
 const root = fileURLToPath(new URL('../../', import.meta.url))
 describe('[COMP:platform/local-rig] no-paid administrative fixture', () => {
@@ -29,6 +29,13 @@ describe('[COMP:platform/local-rig] no-paid administrative fixture', () => {
     for (const key of ['GEMINI_API_KEY', 'OPENAI_API_KEY', 'GOOGLE_APPLICATION_CREDENTIALS', 'NODE_OPTIONS', 'HTTPS_PROXY', 'USEBRIAN_PREFERRED_PROVIDER']) assert.equal(env[key], undefined, key)
   })
 
+  it('isolates alternate fixture state, email configuration and an absolute bounded deadline',()=>{
+    const env=adminRigEnvironment('/fixture',{BRIAN_ADMIN_PG_PORT:'5444'});
+    assert.equal(env.SMTP_HOST,'127.0.0.1');assert.equal(env.SMTP_PORT,'6444');assert.equal(env.AUTH_PORTAL_URL,'http://localhost:3005');assert.equal(env.PUBLIC_PRIMARY_AUTH_URL,env.AUTH_PORTAL_URL)
+    assert.equal(adminStateDirectory('/fixture',env),'/fixture/.rig/admin-5444');assert.equal(env.USEBRIAN_CONFIG_DIR,'/fixture/.rig/admin-5444/config')
+    const now=Date.parse('2026-10-24T09:00:00Z');assert.equal(adminDeadline({},now),'2026-10-24T09:10:00.000Z');assert.equal(adminDeadline({BRIAN_ADMIN_DEADLINE_UTC:'2026-10-24T09:25:00Z'},now),'2026-10-24T09:25:00.000Z')
+    for(const deadline of ['2026-10-24T08:59:59Z','2026-10-24T09:25:01Z','2026-10-24T09:10:00','invalid'])assert.throws(()=>adminDeadline({BRIAN_ADMIN_DEADLINE_UTC:deadline},now))
+  })
   it('seals dotenv keys without carrying their values into a child', () => {
     const env = adminRigEnvironment('/fixture', { GEMINI_API_KEY:'shell-secret' },
       () => 'GEMINI_API_KEY=file-secret\nDATABASE_URL=postgres://remote.example/real\nNODE_OPTIONS=--import=/secret\n');
@@ -175,7 +182,7 @@ describe('[COMP:platform/local-rig] canonical runtime verification',()=>{
    const runId='c'.repeat(32),processes=(_cmd,args)=>args[0]==='-axo'?`100 ${process.pid} 100`:`node USEBRIAN_ADMIN_RUN_ID=${runId}`
    recordAdminGroups(directory,runId,[100])
    assert.doesNotThrow(()=>assertAdminRuntimeComposition(directory,'normal',process.pid,processes))
-   const path=join(directory,'.rig','admin','process-groups.json'),record=JSON.parse(readFileSync(path,'utf8'))
+   const path=join(adminStateDirectory(directory,process.env),'process-groups.json'),record=JSON.parse(readFileSync(path,'utf8'))
    assert.equal(record.runtimeRole,'app_user')
    assert.equal(record.composition,'normal')
    assert.throws(()=>assertAdminRuntimeComposition(directory,'reference',process.pid,processes),/--keep-db/)

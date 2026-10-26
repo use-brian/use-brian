@@ -25,7 +25,7 @@ beforeEach(()=>{mocks.viewer={workspaceId:'workspace-fixture',me:{id:'viewer-fix
 afterEach(async()=>{await act(async()=>root.unmount());host.remove();invalidateSurfaceCache('application-management:');});
 describe('[COMP:app-web/application-admin] canonical management panels',()=>{
  for(const [locale,dict] of [['en',en],['ja',ja],['zh',zh],['zh-CN',zhCN]] as const){
-  it(`M04/M05/M07 renders truthful unavailable and empty source states in ${locale}`,async()=>{await render(locale,dict,'sources');expect(host.textContent).toContain(dict.applicationManagement.unqualified);expect(host.textContent).toContain(dict.applicationManagement.sourceUnavailable);expect(host.textContent).toContain(dict.applicationManagement.empty);expect(host.textContent).toContain(dict.applicationManagement.legacyUnavailable);expect(host.querySelector('a[href="/access"]')).not.toBeNull();expect(host.textContent).toContain('viewer-fixture');expect(host.querySelector('select')).toBeNull();expect(host.querySelector('button[title]')?.hasAttribute('disabled')).toBe(true);});
+  it(`M04/M05/M07 renders truthful unavailable and empty source states in ${locale}`,async()=>{await render(locale,dict,'sources');expect(host.textContent).toContain(dict.applicationManagement.unqualified);expect(host.textContent).toContain(dict.applicationManagement.sourceUnavailable);expect(host.textContent).toContain(dict.applicationManagement.empty);expect(host.textContent).toContain(dict.applicationManagement.legacyUnavailable);expect(host.querySelector('a[href="/access"]')).not.toBeNull();expect(host.textContent).toContain('viewer-fixture');expect(host.querySelector('select')).toBeNull();expect([...host.querySelectorAll('button')].some(button=>button.textContent===dict.applicationManagement.reviewActivation)).toBe(true);});
   it(`M05 localizes denied recovery in ${locale}`,async()=>{mocks.fetch.mockResolvedValue(response({error:'access_unavailable'},403));await render(locale,dict);expect(host.textContent).toContain(dict.applicationManagement.unavailable);expect(host.textContent).not.toContain('Fictional app');expect(host.textContent).toContain(dict.applicationManagement.retry);});
   it(`M05 localizes cold loading in ${locale}`,async()=>{mocks.fetch.mockReturnValue(new Promise(()=>{}));await render(locale,dict);expect(host.textContent).toContain(dict.applicationManagement.loading);expect(host.textContent).not.toContain('Fictional app');});
  }
@@ -80,6 +80,53 @@ describe('[COMP:app-web/application-admin] canonical management panels',()=>{
    await render('en',en,'access');expect(host.textContent).toContain('fictional-expiring-role');
    await act(async()=>vi.advanceTimersByTime(150));expect(host.textContent).not.toContain('fictional-expiring-role');expect(host.querySelector('form')).toBeNull();
   } finally {vi.useRealTimers();}
+ });
+
+ it('keeps a successful receipt and holds later writes until Close refreshes changed current metadata',async()=>{
+  let saved=false,reads=0;
+  mocks.fetch.mockImplementation(async(_url:string,init?:RequestInit)=>{if(init?.method==='POST'){saved=true;return response({id:'registered-fixture',name:'Fictional registered app'});}reads++;const overview=fixture();if(saved)overview.clients[0].revision='2';return response(overview);});
+  await render();const before=reads,form=host.querySelector('form')!;await act(async()=>form.dispatchEvent(new Event('submit',{bubbles:true,cancelable:true})));
+  expect(host.textContent).toContain('registered-fixture');expect(host.textContent).toContain(en.applicationManagement.saved);expect(reads).toBe(before);
+  expect([...host.querySelectorAll<HTMLButtonElement>('button')].find(button=>button.textContent===en.applicationManagement.suspend)?.disabled).toBe(true);
+  await act(async()=>form.dispatchEvent(new Event('submit',{bubbles:true,cancelable:true})));expect(mocks.fetch.mock.calls.filter(([,init])=>init?.method==='POST')).toHaveLength(1);
+  await click(en.applicationManagement.close);expect(reads).toBeGreaterThan(before);expect(host.textContent).not.toContain('registered-fixture');
+  expect([...host.querySelectorAll<HTMLButtonElement>('button')].find(button=>button.textContent===en.applicationManagement.suspend)?.disabled).toBe(false);
+ });
+ it.each(['close','authority','expiry','workspace','app','unmount'] as const)('keeps one-time credential material outside its own refresh and clears it on %s',async recovery=>{
+  const fakeClock=recovery==='expiry';if(fakeClock)vi.useFakeTimers({toFake:['setTimeout','clearTimeout','Date','performance']});
+  try{
+  let delivered=false,reads=0;
+  mocks.fetch.mockImplementation(async(_url:string,init?:RequestInit)=>{
+   if(init?.method==='POST'){const command=JSON.parse(String(init.body));if(command.kind==='credential.review')return response({id:'credential-review-fixture',canIssue:true});delivered=true;return response({credentialId:'credential-fixture',secret:'fictional-one-time-material'});}
+   reads++;const overview=fixture();if(fakeClock)overview.validForMs=1000;overview.clients.push({...overview.clients[0],id:'second-application-fixture',name:'Fictional second app'});if(delivered)overview.credentials=[{id:'credential-fixture',name:'Fictional delivered credential',status:'active'} as never];return response(overview);
+  });
+  await render('en',en,'credentials');const before=reads;
+  await act(async()=>host.querySelectorAll('form')[2].dispatchEvent(new Event('submit',{bubbles:true,cancelable:true})));
+  await click(en.applicationManagement.apply);await act(async()=>document.querySelectorAll<HTMLButtonElement>('[role="alertdialog"] button').forEach(button=>{if(button.textContent===en.applicationManagement.apply)button.click();}));
+  expect(delivered).toBe(true);expect(reads).toBe(before);expect(host.querySelector('code')?.textContent).toBe('fictional-one-time-material');
+  if(recovery==='close'){await click(en.applicationManagement.close);expect(reads).toBeGreaterThan(before);}
+  else if(recovery==='authority')await act(async()=>window.dispatchEvent(new CustomEvent(WORKSPACE_IDENTITY_REFRESH_EVENT,{detail:{workspaceId:'workspace-fixture'}})));
+  else if(recovery==='expiry')await act(async()=>vi.advanceTimersByTimeAsync(1100));
+  else if(recovery==='workspace'){mocks.viewer={workspaceId:'different-workspace',me:{id:'viewer-fixture'}};mocks.fetch.mockReturnValue(new Promise(()=>{}));await render('en',en,'credentials');}
+  else if(recovery==='app'){await act(async()=>host.querySelector<HTMLButtonElement>('[role="combobox"][aria-label="Application"]')!.click());await act(async()=>{const option=[...document.querySelectorAll<HTMLElement>('[role="option"]')].find(item=>item.textContent?.includes('Fictional second app'));expect(option).toBeDefined();option!.click();});}
+  else {await act(async()=>root.unmount());root=createRoot(host);}
+  expect(host.querySelector('code')).toBeNull();
+  }finally{if(fakeClock)vi.useRealTimers();}
+ });
+ it('reviews exact scoped activation before apply and uses the canonical revoke command',async()=>{
+  const overview=fixture();overview.clients[0].qualified=true;
+  mocks.fetch.mockImplementation(async(_url:string,init?:RequestInit)=>{
+   if(init?.method==='POST'){const command=JSON.parse(String(init.body));return response(command.kind==='activation.review'?{id:'activation-review-fixture',canApply:true,profile:'canonical_records_service_v1',scope:{principal:'service',resources:['generic']}}:{appId:'application-fixture'});}
+   return response(overview);
+  });
+  await render();await click(en.applicationManagement.reviewActivation);
+  expect(host.textContent).toContain('canonical_records_service_v1');expect(host.textContent).toContain('activation-review-fixture');
+  expect(mocks.fetch.mock.calls.filter(([,init])=>init?.method==='POST')).toHaveLength(1);
+  await click(en.applicationManagement.apply);await act(async()=>{const button=[...document.querySelectorAll<HTMLButtonElement>('[role="alertdialog"] button')].find(item=>item.textContent===en.applicationManagement.apply);expect(button).toBeDefined();button!.click();});
+  const commands=mocks.fetch.mock.calls.filter(([,init])=>init?.method==='POST').map(([,init])=>JSON.parse(String(init?.body)));
+  expect(commands).toEqual([{kind:'activation.review',appId:'application-fixture'},{kind:'activation.apply',appId:'application-fixture',reviewId:'activation-review-fixture'}]);
+  await click(en.applicationManagement.close);await click(en.applicationManagement.revokeActivation);await click(en.applicationManagement.apply);
+  expect(JSON.parse(String(mocks.fetch.mock.calls.filter(([,init])=>init?.method==='POST').at(-1)![1]?.body))).toEqual({kind:'activation.revoke',appId:'application-fixture'});
  });
 
 });

@@ -15,7 +15,7 @@ const store = vi.hoisted(() => ({
 }))
 vi.mock('../../db/task-execution-store.js', () => store)
 vi.mock('../../briefs/service.js', () => ({ inspectBrief: vi.fn() }))
-vi.mock('../../db/client.js', () => ({ queryWithRLS: vi.fn() }))
+vi.mock('../../db/client.js', () => ({ query: async () => { throw new Error('Unexpected direct database query in execution-qualification fixture') }, queryWithRLS: vi.fn() }))
 
 const { qualifyTaskExecution, enterAssignedExecution, briefFromPlan } = await import('../execution-qualification.js')
 

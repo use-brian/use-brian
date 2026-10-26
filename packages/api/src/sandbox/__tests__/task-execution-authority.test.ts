@@ -3,6 +3,8 @@ import type { AuthoringAuthority, SandboxTaskRecord } from '@use-brian/core'
 import { createAuthorityLease } from '../../context-scope/authority-lease.js'
 import { resolveBrowserTaskExecutionAuthority } from '../task-execution-authority.js'
 
+const nativeAuth=vi.hoisted(()=>({valid:true,seen:[] as unknown[]}))
+vi.mock('../../db/auth-session-store.js',()=>({authSessionStore:{validateAccess:async(claims:unknown)=>{nativeAuth.seen.push(structuredClone(claims));return nativeAuth.valid}}}))
 const state = vi.hoisted(() => ({ assistant: { id: 'assistant', workspaceId: 'workspace' } as unknown, current: null as unknown, session: null as Record<string, unknown> | null, denied: false }))
 vi.mock('../../db/sessions.js', () => ({ findSessionAuthorityById: async () => state.session }))
 vi.mock('../../db/client.js', () => ({ query: async () => ({ rows: state.session ? [state.session] : [] }) }))
@@ -92,7 +94,7 @@ describe('[COMP:sandbox/task-execution-authority] persisted acting-assistant cei
     state.current = structuredClone(frozen.ceiling)
     state.denied = false
     state.session = { id: 'session', assistantId: 'assistant', userId: 'member', contextGroupId: null,
-      visibility: 'owner', mode: null, effectiveClearance: null, contextCompartments: [], contextBindingOrigin: 'explicit',
+      visibility: 'personal', mode: null, effectiveClearance: null, contextCompartments: [], contextBindingOrigin: 'explicit',
       contextProjectId: null, contextLockedAt: new Date('2026-10-07T00:00:00Z') }
     const held: SandboxTaskRecord = { ...task, sourceAuthority: {
       version: 1, kind: 'session', visibility: 'owner', mode: null, effectiveClearance: null, contextCompartments: [], invocationId: '10000000-0000-4000-8000-000000000001',
@@ -102,6 +104,8 @@ describe('[COMP:sandbox/task-execution-authority] persisted acting-assistant cei
     } }
     const authority = await resolveBrowserTaskExecutionAuthority(JSON.parse(JSON.stringify(held)))
     await expect(authority.assertCurrent()).resolves.toBeUndefined()
+    const personal=await resolveBrowserTaskExecutionAuthority(JSON.parse(JSON.stringify({...held,sourceAuthority:{...held.sourceAuthority,visibility:'personal'}})))
+    await expect(personal.assertCurrent()).resolves.toBeUndefined()
     if (changed === 'deleted') state.session = null
     else if (changed === 'rebound') state.session.assistantId = 'replacement'
     else if (changed === 'lock') state.session.contextLockedAt = new Date('2026-10-08T00:00:00Z')
@@ -111,6 +115,19 @@ describe('[COMP:sandbox/task-execution-authority] persisted acting-assistant cei
     const effect = vi.fn()
     await expect(authority.execute(effect)).rejects.toMatchObject({ reason: 'authority_changed' })
     expect(effect).not.toHaveBeenCalled()
+  })
+
+  it('cold restoration rechecks the original native credential before and after an awaited operation',async()=>{
+    const actor='10000000-0000-4000-8000-000000000002',nativeCredential={userId:actor,sessionId:'10000000-0000-4000-8000-000000000003',authVersion:2}
+    const saved={...frozen,ceiling:{...frozen.ceiling,userId:actor,departmentRead:undefined}}
+    state.assistant={id:'assistant',workspaceId:'workspace'};state.current=structuredClone(saved.ceiling);state.denied=false;nativeAuth.valid=true;nativeAuth.seen=[]
+    state.session={id:'session',assistantId:'assistant',userId:actor,contextGroupId:null,contextProjectId:null,contextLockedAt:new Date('2026-10-24T00:00:00.000Z'),visibility:'personal',mode:null,effectiveClearance:null,contextCompartments:[],contextBindingOrigin:'explicit'}
+    const sourceAuthority={version:1,kind:'session',invocationId:'10000000-0000-4000-8000-000000000001',id:'session',assistantId:'assistant',userId:actor,executingAssistantId:'assistant',authorityUserId:actor,workspaceId:'workspace',contextGroupId:null,contextProjectId:null,contextLockedAt:'2026-10-24T00:00:00.000Z',visibility:'personal',mode:null,effectiveClearance:null,contextCompartments:[],memberMode:'member',ignoreSessionBinding:false,systemRead:false,nativeCredential}
+    const lease=await resolveBrowserTaskExecutionAuthority(JSON.parse(JSON.stringify({userId:actor,workspaceId:'workspace',executionAuthority:saved,sourceAuthority})))
+    await lease.assertCurrent();expect(nativeAuth.seen).toContainEqual(nativeCredential)
+    await expect(lease.execute(async()=>{nativeAuth.valid=false;return'withheld original credential result'})).rejects.toMatchObject({reason:'authority_changed',operationMayHaveExecuted:true})
+    nativeAuth.valid=true
+    await expect(lease.assertCurrent()).rejects.toMatchObject({reason:'authority_changed'})
   })
 
 })

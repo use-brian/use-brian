@@ -1,7 +1,7 @@
 import { randomUUID } from 'node:crypto'
 import { afterAll,describe,expect,it } from 'vitest'
 import { getAppPool,getPool,queryWithRLS } from '../../db/client.js'
-import { createGoal,getGoalByIdSystem,setGoalStatusSystem,updateGoalSystem,claimGoalRollupTerminalSystem,tryClaimGoalForTick } from '../../db/goals.js'
+import { createGoal,getGoalByIdSystem,setGoalStatusSystem,updateGoalSystem,claimGoalRollupTerminalSystem,tryClaimGoalForTick,finishNativeTaskGoalTerminalSystem } from '../../db/goals.js'
 import { createDbGoalStore } from '../../db/goals-store.js'
 import { createTask } from '../../db/tasks.js'
 import { captureAuthoringAuthoritySystem } from '../../context-scope/workflow-authority.js'
@@ -23,7 +23,7 @@ async function fixture() {
   const goal = await createGoal({ workspaceId,createdByUserId:userId,authoringAuthority:authority,outcome:'Synthetic rollup completion',host:{type:'task',id:task.id},doneWhen:{kind:'subtasks'} })
   const store = createDbGoalStore()
   let deliveries = 0
-  const runner = createGoalRollupRunner({ goalStore:store,claimTerminal:claimGoalRollupTerminalSystem,deliverGoalDone:async () => { deliveries++ } })
+  const runner = createGoalRollupRunner({ goalStore:store,claimTerminal:claimGoalRollupTerminalSystem,finishTerminal:finishNativeTaskGoalTerminalSystem,deliverGoalDone:async () => { deliveries++ } })
   const readableTask = async () => (await queryWithRLS(userId,'SELECT id FROM tasks WHERE id=$1', [task.id])).rows.length
   const role = (await queryWithRLS(userId,`SELECT
     (SELECT rolsuper FROM pg_roles WHERE rolname=current_user) AS superuser,
@@ -81,6 +81,13 @@ describe('[COMP:goals/rollup-runner] structural terminal ownership (real RLS)', 
     const claimed=await Promise.all([claimGoalRollupTerminalSystem(f.goal),claimGoalRollupTerminalSystem(f.goal)])
     expect(claimed.filter(Boolean).length).toBe(1)
     expect((await getGoalByIdSystem(f.goal.id))?.status).toBe('done')
+    // The production composition also has one Task successor and one delivery.
+    const atomic=await fixture()
+    await Promise.all([atomic.runner.rollup({type:'task',id:atomic.task.id}),atomic.runner.rollup({type:'task',id:atomic.task.id})])
+    expect((await getGoalByIdSystem(atomic.goal.id))?.status).toBe('done')
+    expect((await pool.query('SELECT count(*)::int AS n FROM tasks WHERE logical_id=$1',[atomic.task.logicalId])).rows[0].n).toBe(2)
+    expect((await pool.query('SELECT status FROM tasks WHERE logical_id=$1 AND valid_to IS NULL',[atomic.task.logicalId])).rows[0].status).toBe('done')
+    expect(atomic.deliveries()).toBe(1)
   })
 
   it('does not take terminal ownership from an acting worker that claimed during lookup',async()=>{

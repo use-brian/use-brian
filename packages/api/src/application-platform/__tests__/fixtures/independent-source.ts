@@ -13,7 +13,7 @@ import { authorizeConnectorRequest, handleSourceSidecar, sourceSubjectFromActor,
   type createConnectorActorVerifier } from '@use-brian/brian-app/connector'
 
 export const independentSourceSchema = `
- CREATE TABLE accounts(kind text NOT NULL,id uuid NOT NULL,active boolean NOT NULL DEFAULT true,PRIMARY KEY(kind,id));
+ CREATE TABLE accounts(kind text NOT NULL,id uuid NOT NULL,active boolean NOT NULL DEFAULT true,administrative boolean NOT NULL DEFAULT false,PRIMARY KEY(kind,id));
  CREATE TABLE assistants(id uuid PRIMARY KEY,active boolean NOT NULL DEFAULT true);
  CREATE TABLE actor_replays(key text PRIMARY KEY,expires_at bigint NOT NULL);
  CREATE TABLE records(id text PRIMARY KEY,kind text NOT NULL,content_version int NOT NULL DEFAULT 1,policy_version int NOT NULL DEFAULT 1,
@@ -191,6 +191,21 @@ export async function startIndependentSource(input: { pool: Pool; tenant: string
       const refused=error instanceof ConnectorActorError||error instanceof SourceProtocolError&&error.code==='source_access_denied'
       res.status(refused?403:503).json({error:refused?'source_access_denied':'source_unavailable'})
     }
+  })
+  // Independent source administration. Brian assertions and transport tokens cannot grant source rights.
+  app.post('/ui/grants',async(req,res)=>{
+    const subject=input.uiSessions.get(String(req.headers.authorization??'').replace(/^Bearer /,''))
+    if(!subject||!await actorKnown(pool,subject)||(await pool.query('SELECT 1 FROM accounts WHERE kind=$1 AND id=$2 AND administrative AND active',[subject.kind,subject.id])).rowCount!==1){res.sendStatus(403);return}
+    const parsed=z.object({kind:z.enum(['human','service']),accountId:z.string().uuid(),assistantId:z.string().uuid(),recordId:z.string(),fields:z.array(z.string()).min(1),actions:z.array(z.enum(['read','context','derive','retain','deliver','export','mutate'])).min(1)}).strict().safeParse(req.body)
+    if(!parsed.success){res.sendStatus(400);return}const value=parsed.data,record=await currentRecord(pool,value.recordId)
+    if(!record||value.fields.some(field=>!Object.hasOwn(record.data,field))){res.sendStatus(400);return}
+    const db=await pool.connect();try{await db.query('BEGIN');await db.query('INSERT INTO accounts(kind,id) VALUES($1,$2) ON CONFLICT DO NOTHING',[value.kind,value.accountId]);await db.query('INSERT INTO assistants(id) VALUES($1) ON CONFLICT DO NOTHING',[value.assistantId]);await db.query('INSERT INTO grants(kind,account_id,record_id,fields,actions) VALUES($1,$2,$3,$4,$5) ON CONFLICT(kind,account_id,record_id) DO UPDATE SET fields=excluded.fields,actions=excluded.actions',[value.kind,value.accountId,value.recordId,value.fields,value.actions]);await db.query('COMMIT');res.json({approved:true})}catch{await db.query('ROLLBACK');res.sendStatus(503)}finally{db.release()}
+  })
+  app.delete('/ui/grants',async(req,res)=>{
+    const subject=input.uiSessions.get(String(req.headers.authorization??'').replace(/^Bearer /,''))
+    if(!subject||!await actorKnown(pool,subject)||(await pool.query('SELECT 1 FROM accounts WHERE kind=$1 AND id=$2 AND administrative AND active',[subject.kind,subject.id])).rowCount!==1){res.sendStatus(403);return}
+    const parsed=z.object({kind:z.enum(['human','service']),accountId:z.string().uuid(),recordId:z.string()}).strict().safeParse(req.body)
+    if(!parsed.success){res.sendStatus(400);return}const v=parsed.data;await pool.query('DELETE FROM grants WHERE kind=$1 AND account_id=$2 AND record_id=$3',[v.kind,v.accountId,v.recordId]);res.json({revoked:true})
   })
   app.get('/ui/records/:id', async (req, res) => {
     const subject = input.uiSessions.get(String(req.headers.authorization ?? '').replace(/^Bearer /,''))

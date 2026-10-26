@@ -161,7 +161,7 @@ export type MemoryStore = {
     idPrefix?: string
   }, authority?:SessionContextAuthority): Promise<MemoryRecord[]>
 
-  getIdentity(ctx: AccessContext): Promise<MemoryRecord[]>
+  getIdentity(ctx: AccessContext, authority?: SessionContextAuthority): Promise<MemoryRecord[]>
 
   /**
    * `validOnly=true` filters out bi-temporally tombstoned rows
@@ -170,7 +170,7 @@ export type MemoryStore = {
    * preserves the legacy behavior for compaction / inter-assistant / chat /
    * public-api callers, which still surface superseded rows today.
    */
-  getIndex(ctx: AccessContext, validOnly?: boolean): Promise<Array<{
+  getIndex(ctx: AccessContext, validOnly?: boolean, authority?:SessionContextAuthority): Promise<Array<{
     id: string; summary: string; tags: string[]; sensitivity: Sensitivity; compartments?: string[]; projectIds?: string[]
   }>>
 
@@ -212,6 +212,7 @@ export type MemoryStore = {
   getIndexRanked(
     ctx: AccessContext,
     limit: number,
+    authority?:SessionContextAuthority,
   ): Promise<{
     rows: Array<{
       id: string
@@ -382,7 +383,7 @@ export type MemoryStore = {
    * `validOnly=true` filters out bi-temporally tombstoned rows; see
    * `getIndex` for the policy split.
    */
-  getWorkspaceIndex(ctx: AccessContext, validOnly?: boolean): Promise<Array<{
+  getWorkspaceIndex(ctx: AccessContext, validOnly?: boolean, authority?:SessionContextAuthority): Promise<Array<{
     id: string; summary: string; tags: string[]; sensitivity: Sensitivity; compartments?: string[]; projectIds?: string[]
   }>>
 
@@ -420,7 +421,7 @@ export type MemoryStore = {
     query: string
     limit?: number
     idPrefix?: string
-  }): Promise<MemoryRecord[]>
+  }, authority?:SessionContextAuthority): Promise<MemoryRecord[]>
 
   /** Enumerate (assistant_id, workspace_id) pairs with team memories. */
   listWorkspaceMemoryGroups(): Promise<Array<{ assistantId: string; workspaceId: string }>>
@@ -496,7 +497,7 @@ export type MemoryStore = {
     workspaceId?: string | null
     assistantId?: string | null
     limit?: number
-  }): Promise<MemoryRecord[]>
+  }, authority?:SessionContextAuthority): Promise<MemoryRecord[]>
 
   // ── Cross-instance coordination ─────────────────────────────────
 

@@ -8,7 +8,7 @@ import type {PreparedExternalSourceAuthority} from './retained-source-authority.
 type Prepare=(execution:ExecutionContext,sources:readonly ScopeSource[],action:'context')=>Promise<PreparedExternalSourceAuthority>
 const source=z.object({workspaceId:z.string().uuid(),userId:z.string().uuid().nullable(),assistantId:z.string().uuid().nullable(),
  sensitivity:z.enum(['public','internal','confidential']),compartments:z.array(z.string()),projectIds:z.array(z.string().uuid()),
- resourceKind:z.enum(['session_message','session_context_revision','knowledge_entry']),resourceId:z.string().uuid(),version:z.string().min(1)}).strict()
+ resourceKind:z.enum(['session_message','session_context_revision','knowledge_entry','memory']),resourceId:z.string().uuid(),version:z.string().min(1)}).strict()
 function unavailable(cause?:unknown):never{throw Object.assign(new SourceProtocolError('source_unavailable'),cause===undefined?{}:{cause})}
 /** Metadata authorizes nothing; every added root gets a fresh actual source decision. */
 export async function nativeSessionQueryContextSources(execution:ExecutionContext,rawSources:readonly ScopeSource[],prepare?:Prepare):Promise<{sources:ScopeSource[];independent:boolean}>{
@@ -17,7 +17,7 @@ export async function nativeSessionQueryContextSources(execution:ExecutionContex
  if(roots.some(root=>root.workspaceId!==workspaceId))unavailable()
  try{
   for(let offset=0;offset<roots.length;offset+=100){
-   const part=roots.slice(offset,offset+100),rows=(await getPool().query<{source:unknown}>('SELECT source FROM read_native_session_query_cohort_sources($1,$2,$3,$4) UNION ALL SELECT source FROM read_native_knowledge_query_cohort_sources($1,$2,$3,$4)',
+   const part=roots.slice(offset,offset+100),rows=(await getPool().query<{source:unknown}>('SELECT source FROM read_native_session_query_cohort_sources($1,$2,$3,$4) UNION ALL SELECT source FROM read_native_knowledge_query_cohort_sources($1,$2,$3,$4) UNION ALL SELECT source FROM read_native_memory_query_cohort_sources($1,$2,$3,$4)',
     [workspaceId,part.map(root=>root.resourceKind),part.map(root=>root.resourceId),part.map(root=>root.version)])).rows
    for(const row of rows){
     const current=source.parse(row.source);if(current.workspaceId!==workspaceId)unavailable()

@@ -1,3 +1,4 @@
+import {admitRetainedGoalWorkflowWrite} from '../workspace-access/goal-source-admission.js'
 import { nativeSessionQueryContextSources } from '../application-platform/session-query-context.js'
 import { z } from 'zod'
 import { SourceProtocolError } from '@use-brian/brian-app/connector'
@@ -79,7 +80,8 @@ async function transaction<T>(authority: SessionContextAuthority, sources: reado
         // Native publication needs the exact original assistant even with the
         // legacy department policy. The v2 flag remains unchanged.
         if (execution.identity.kind === 'attended' && execution.identity.principal.kind === 'workspace_member'
-          ||nativeDelegatedSessionPublication(execution)) {
+          ||nativeDelegatedSessionPublication(execution)
+          ||execution.identity.kind==='system'&&execution.identity.purpose==='workflow'&&execution.security.authority.snapshotSource?.().kind==='workflow') {
           await client.query("SELECT set_config('app.v2_assistant_id',$1,true)", [execution.assistant.id])
         }
         // Native admission takes workspace SHARE locks too. Pin that row before
@@ -299,7 +301,8 @@ export async function withSessionMessagePublication<T>(authority:SessionContextA
  const {execution}=requireAuthority(authority)
  const turnToken=options?.turnToken,stoppedTurnToken=options?.stoppedTurnToken
  if(turnToken&&stoppedTurnToken)changed()
- if(execution.lifecycle.sessionPersisted===false||execution.identity.kind!=='attended'||execution.identity.principal.kind!=='workspace_member')changed()
+ if(execution.lifecycle.sessionPersisted===false||!(execution.identity.kind==='attended'&&execution.identity.principal.kind==='workspace_member')
+  &&!nativeDelegatedSessionPublication(execution))changed()
  return transaction(authority,structuredClone(sources),'retain',false,async client=>{
   messagePublications.set(client,{authority})
   try{return await run(client)}finally{messagePublications.delete(client)}
@@ -475,4 +478,22 @@ export async function promoteSessionContextEpisode(parentId: string, inputAuthor
   }, execution.lifecycle.sessionId)
   authority.accumulator.note({ sources: boundScopeSources(row) })
   return result
+}
+
+/** Only the canonical retained-Goal resolver can issue the exact execution
+ * object recognized by the source admission module. Caller JSON/AccessContext
+ * and a fresh createExecutionContext do not carry that private capability. */
+export function writeRetainedGoalWorkflowContextFrame<T>(authority:SessionContextAuthority,sources:readonly ScopeSource[],publish:(client:PoolClient)=>Promise<T>):Promise<T>{
+ const {execution}=requireAuthority(authority),source=execution.security.authority.snapshotSource?.()
+ if(execution.identity.kind!=='system'||execution.identity.purpose!=='workflow'||source?.kind!=='workflow'
+  ||source.runId!==execution.identity.jobId||source.workspaceId!==execution.security.access.workspaceId
+  ||source.authorityUserId!==execution.security.access.userId||source.executingAssistantId!==execution.assistant.id
+  ||execution.ownership.kind!=='workspace'||execution.surface.readOnly||execution.surface.systemRead
+  ||execution.lifecycle.abortSignal.aborted)missing()
+ const roots=structuredClone(sources)
+ return transaction(authority,roots,'retain',false,async client=>{
+  await admitRetainedGoalWorkflowWrite(execution,roots,client)
+  const result=await publish(client)
+  await admitRetainedGoalWorkflowWrite(execution,roots,client);return result
+ },undefined,undefined,undefined,true)
 }

@@ -1,5 +1,5 @@
-import { readCurrentScopeSources } from './derived-scope-store.js'
-import { captureLegacyCanonicalTaskCandidates,LEGACY_TASK_FULL_FIELDS } from './task-reader.js'
+import { readCurrentScopeSources,validateDerivedWriteInputs,recordDerivedResource } from './derived-scope-store.js'
+import { captureLegacyCanonicalTaskCandidates,LEGACY_TASK_FULL_FIELDS,taskNeedsIndependentSourceAuthoritySql } from './task-reader.js'
 import { isDeepStrictEqual } from 'node:util'
 import { z } from 'zod'
 import { ApplicationPlatformError, applicationJsonSchema, applicationResourceRefSchema } from '@use-brian/shared'
@@ -182,7 +182,13 @@ async function findTaskDuplicateInTransaction(userId: string, coords: Parameters
   await checkTaskProject(userId,coords,client)
   // Relationship writes are not represented by the row, so never swallow them.
   if (coords.title === PLACEHOLDER_TASK_TITLE||coords.dependsOn?.length||coords.linkedEntityIds?.length) return null
-  const captured=await captureLegacyCanonicalTaskCandidates(access,[...LEGACY_TASK_FULL_FIELDS,'createdByUserId','createdByAssistantId','source','sourceSessionId','sourceEpisodeId','sourceStartMs'],client)
+  const metadata=(await client.query<{id:string}>(`SELECT id FROM tasks WHERE workspace_id=$1 AND valid_to IS NULL
+    AND retracted_at IS NULL AND NOT scope_held AND ${coords.derivation?.sources.length
+      ? 'native_task_derivation_matches(workspace_id,id,scope_version::text,$2::jsonb)'
+      : 'native_task_dedup_candidate_allowed(workspace_id,id,scope_version::text)'} ORDER BY id LIMIT 4097`,
+    [coords.workspaceId,...(coords.derivation?.sources.length?[JSON.stringify(coords.derivation.sources)]:[])])).rows
+  if(metadata.length>4096)throw new ApplicationPlatformError('access_unavailable','The duplicate domain is unavailable.')
+  const captured=await captureLegacyCanonicalTaskCandidates(access,[...LEGACY_TASK_FULL_FIELDS,'createdByUserId','createdByAssistantId','source','sourceSessionId','sourceEpisodeId','sourceStartMs'],client,metadata.map(row=>row.id))
   const ap=buildAccessPredicate(access,{startIdx:24,operation:'mutation'})
   const result = await client.query<{id:string}>(
     `SELECT id FROM tasks
@@ -199,6 +205,7 @@ async function findTaskDuplicateInTransaction(userId: string, coords: Parameters
         AND created_by_user_id=$16 AND created_by_assistant_id IS NOT DISTINCT FROM $17::uuid
         AND source=$18 AND jsonb_build_array(source_session_id,source_episode_id,source_start_ms)=$19::jsonb
         AND ${ap.sql} AND id=ANY($${ap.nextIdx}::uuid[])
+        AND ($${ap.nextIdx+1}::jsonb IS NULL OR native_task_derivation_matches(workspace_id,id,scope_version::text,$${ap.nextIdx+1}::jsonb))
         AND context_scope_allows_current_principal(workspace_id,sensitivity,compartments,project_ids)
         AND EXISTS(SELECT 1 FROM workspace_members wm WHERE wm.workspace_id=tasks.workspace_id
           AND wm.user_id=$16 AND sensitivity_rank(tasks.sensitivity)<=sensitivity_rank(wm.clearance))
@@ -211,7 +218,7 @@ async function findTaskDuplicateInTransaction(userId: string, coords: Parameters
       coords.tags??[],JSON.stringify(coords.attributes??{}),JSON.stringify(coords.externalRef??{}),
       userId,coords.createdByAssistantId??null,coords.source??'user',
       JSON.stringify([coords.sourceSessionId??null,coords.sourceEpisodeId??null,coords.sourceStartMs??null]),
-      coords.executorAssistantId??null,coords.followUpMemberId??null,coords.home?.kind??null,coords.home?.id??null,...ap.params,captured.map(candidate=>candidate.id)])
+      coords.executorAssistantId??null,coords.followUpMemberId??null,coords.home?.kind??null,coords.home?.id??null,...ap.params,captured.map(candidate=>candidate.id),coords.derivation?.sources.length?JSON.stringify(coords.derivation.sources):null])
   const duplicate=result.rows[0]?await getTaskById(access,result.rows[0].id,client):null
   if((await readCurrentScopeSources(client,coords.workspaceId,boundScopeSources(captured))).some(source=>source.state!=='current'))throw new ApplicationPlatformError('access_unavailable','The duplicate source changed.')
   return duplicate
@@ -231,6 +238,7 @@ export async function createTask(
   params: {
     workspaceId: string
     expectedPolicyRevision?: string
+    derivation?: import('@use-brian/core').DerivedWriteEvidence
     title: string
     status?: TaskRecordStatus
     /** PERSON executor. Never together with `executorAssistantId` (task_executor_conflict). */
@@ -297,7 +305,7 @@ export async function createTask(
   },
   entityLinks?: EntityLinksStore,
   transactionClient?: pg.PoolClient,
-  options?: { deduplicate?: boolean; onInserted?: (task: TaskRecord) => void },
+  options?: { deduplicate?: boolean; onInserted?: (task: TaskRecord) => void; onInsertedInTransaction?: (task:TaskRecord)=>void },
 ): Promise<TaskRecord> {
   // WU-4.5 — authorship NOT NULL enforcement at the store layer. The
   // `userId` argument is both the RLS actor and the row author; without
@@ -307,7 +315,7 @@ export async function createTask(
   // their schema defaults from migration 128.
   assertAuthorshipPresent('createTask', userId)
   const creationKeys=Object.keys(canonicalTaskPatchSchema.shape)
-  const metadataKeys=['workspaceId','expectedPolicyRevision','sensitivity','visibility','access','compartments','projectIds','source','sourceSessionId','sourceEpisodeId','sourceStartMs','createdByAssistantId','linkedEntityIds','writtenBy']
+  const metadataKeys=['derivation','workspaceId','expectedPolicyRevision','sensitivity','visibility','access','compartments','projectIds','source','sourceSessionId','sourceEpisodeId','sourceStartMs','createdByAssistantId','linkedEntityIds','writtenBy']
   if(Object.keys(params).some(key=>!creationKeys.includes(key)&&!metadataKeys.includes(key))
     ||!canonicalTaskPatchSchema.required({title:true}).safeParse(Object.fromEntries(creationKeys.map(key=>[key,(params as unknown as Record<string,unknown>)[key]]))).success) {
     throw new ApplicationPlatformError('invalid_value','The canonical task creation values are invalid.')
@@ -323,6 +331,7 @@ export async function createTask(
     if (application && (application.workspaceId !== params.workspaceId || application.actorUserId !== userId)) throw new Error('scope_operation_denied')
     if (!application) params = await admitTaskCreate(client,userId,params,taskAccess(userId,params.workspaceId,params.access))
     checkTaskCreate(userId,params)
+    if(params.derivation)await validateDerivedWriteInputs(client,params.derivation)
     if (!application) await checkTaskProject(userId,params,client)
     const responsibility = applyResponsibilityPatch(
       { assigneeId: null, executorAssistantId: null, followUpMemberId: null, home: null },
@@ -370,21 +379,30 @@ export async function createTask(
         responsibility.executorAssistantId, responsibility.followUpMemberId,
         responsibility.home?.kind ?? null, responsibility.home?.id ?? null,
       ]
-    const { access: _access, writtenBy: _writtenBy, ...applicationParams } = params
+    const { access: _access, writtenBy: _writtenBy, derivation: _derivation, ...applicationParams } = params
     const result = application ? await client.query<TaskRow>(`SELECT ${FULL_SELECT} FROM application_create_canonical_task($1::jsonb)`, [JSON.stringify(applicationParams)])
       : await client.query<TaskRow>(sql, values)
     if (!result.rows[0]) throw Object.assign(new Error('The task operation is outside the current access scope.'), { code: 'scope_operation_denied' })
     task = toRecord(result.rows[0])
+    if(params.derivation)await recordDerivedResource(client,params.derivation,boundScopeSources(task)[0],userId)
+    options?.onInsertedInTransaction?.(task)
     if (!transactionClient) await client.query('COMMIT')
   } finally {
     if (!transactionClient) await rollbackAndRelease(client)
   }
   if (!transactionClient) options?.onInserted?.(task)
 
+  if(!transactionClient)emitCreatedTaskEffects(task,userId,params,entityLinks)
+
+  return task
+}
+
+/** Shared canonical after-commit hooks for ordinary and source-bound task creation. */
+export function emitCreatedTaskEffects(task:TaskRecord,userId:string,params:Parameters<typeof createTask>[1],entityLinks?:EntityLinksStore):void {
   // Workflow task-event emit — fire-and-forget after the committed insert
   // (writer transaction above). The late-bound fanout is a no-op
   // until bootOpenApi binds the dispatcher. [COMP:api/task-event-fanout]
-  if (!transactionClient) publishTaskLifecycle({
+  publishTaskLifecycle({
     workspaceId: task.workspaceId,
     taskId: task.id,
     kind: 'created',
@@ -404,7 +422,7 @@ export async function createTask(
 
   // Fire-and-forget `mentioned` edges — `void`, never awaited, never
   // able to throw into the task save.
-  if (!transactionClient && entityLinks && params.linkedEntityIds && params.linkedEntityIds.length > 0) {
+  if (entityLinks && params.linkedEntityIds && params.linkedEntityIds.length > 0) {
     void emitMentionedEdges(entityLinks, userId, {
       sourceKind: 'task',
       sourceId: task.id,
@@ -418,7 +436,7 @@ export async function createTask(
   }
   // Fire-and-forget `depends_on` edges from this task → each
   // depended-on task. v1 append-only — never removes existing edges.
-  if (!transactionClient && entityLinks && params.dependsOn && params.dependsOn.length > 0) {
+  if (entityLinks && params.dependsOn && params.dependsOn.length > 0) {
     void emitDependsOnEdges(entityLinks, userId, {
       sourceTaskId: task.id,
       dependsOnTaskIds: params.dependsOn,
@@ -429,7 +447,6 @@ export async function createTask(
       projectIds: task.projectIds,
     })
   }
-  return task
 }
 
 export async function getTaskById(ctx: AccessContext, id: string, transactionClient?: pg.PoolClient): Promise<TaskRecord | null> {
@@ -782,7 +799,7 @@ export async function updateTask(
       if (newStatus === 'done' || newStatus === 'archived') {
         await abandonGoalsForHostTaskSystem(newTask.id, 'host_task_closed', {
           draftsOnly: true,
-          exec: client,
+          exec: client,afterCommit:transaction?.afterCommit,
         })
       }
       // Executor change: an automatic draft made for the previous executor
@@ -793,7 +810,7 @@ export async function updateTask(
       if (reassigned) {
         await abandonGoalsForHostTaskSystem(newTask.id, 'executor_changed', {
           draftsOnly: true,
-          exec: client,
+          exec: client,afterCommit:transaction?.afterCommit,
         })
       }
 
@@ -863,7 +880,8 @@ export async function updateTask(
  */
 export async function getTaskByIdSystem(id: string): Promise<TaskRecord | null> {
   const result = await query<TaskRow>(
-    `SELECT ${FULL_SELECT} FROM tasks WHERE id = $1 AND valid_to IS NULL AND retracted_at IS NULL AND NOT scope_held`,
+    `SELECT ${FULL_SELECT} FROM tasks WHERE id = $1 AND valid_to IS NULL AND retracted_at IS NULL AND NOT scope_held
+      AND NOT (${taskNeedsIndependentSourceAuthoritySql('tasks')})`,
     [id],
   )
   if (result.rows.length === 0) return null
@@ -888,6 +906,7 @@ export async function findTasksByExternalRefSystem(
        AND valid_to IS NULL
        AND status <> 'archived'
        AND retracted_at IS NULL AND NOT scope_held
+       AND NOT (${taskNeedsIndependentSourceAuthoritySql('tasks')})
      ORDER BY created_at DESC`,
     [workspaceId, JSON.stringify(match)],
   )

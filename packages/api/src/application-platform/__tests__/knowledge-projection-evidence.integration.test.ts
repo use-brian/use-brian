@@ -33,12 +33,13 @@ describe.sequential('[COMP:api/application-persistence] actual knowledge project
   const sources=boundScopeSources(row!)
   expect(sources.filter(source=>source.resourceKind==='knowledge_entry').map(source=>source.resourceId).sort()).toEqual([c.parent.id,c.child.id].sort())
   const fields=sources.filter(source=>source.resourceKind==='application_field')
-  const observations=(await c.f.pool.query(`SELECT r.selection,r.resource_id FROM application_field_resources r
+  const observations=(await c.f.pool.query(`SELECT r.selection,r.resource_id,r.selected_version FROM application_field_resources r
    JOIN application_field_observations o ON o.workspace_id=r.workspace_id AND o.resource_id=r.id
    WHERE r.workspace_id=$1 AND r.id=ANY($2::uuid[]) AND r.type_key='knowledge_entry'`,[c.f.workspaceId,fields.map(source=>source.resourceId)])).rows
   if(projection==='point relation'){
    expect(fields).toHaveLength(2);expect(sources).toHaveLength(4)
-   expect(observations.filter(row=>row.selection==='read').map(row=>row.resource_id)).toEqual([c.parent.id])
+   expect(observations.filter(row=>row.selection==='history').map(row=>({id:row.resource_id,version:row.selected_version})))
+    .toEqual([{id:c.parent.id,version:(await c.source(c.parent.id)).version}])
    expect(observations.filter(row=>row.selection==='identity').map(row=>row.resource_id)).toEqual([c.child.id])
   }else{
    const graph=projection==='graph relation'
@@ -77,8 +78,8 @@ describe.sequential('[COMP:api/application-persistence] actual knowledge project
   expect(current.scopeEvidence.sources?.filter(source=>source.resourceKind==='knowledge_entry').map(source=>source.resourceId)).toEqual([c.parent.id])
   const fields=current.scopeEvidence.sources?.filter(source=>source.resourceKind==='application_field')??[]
   expect(fields).toHaveLength(1);expect(current.scopeEvidence.sources).toHaveLength(2)
-  expect((await c.f.pool.query(`SELECT resource_id,selection FROM application_field_resources WHERE workspace_id=$1 AND id=$2`,[c.f.workspaceId,fields[0].resourceId])).rows)
-   .toEqual([{resource_id:c.parent.id,selection:'read'}])
+  expect((await c.f.pool.query(`SELECT resource_id,selection,selected_version FROM application_field_resources WHERE workspace_id=$1 AND id=$2`,[c.f.workspaceId,fields[0].resourceId])).rows)
+   .toEqual([{resource_id:c.parent.id,selection:'history',selected_version:before.version}])
   otherAccumulator.note(current.scopeEvidence)
   await expect(assertSourceModelInputAuthority(otherContext)).resolves.toBeUndefined()
  })

@@ -1,5 +1,10 @@
-import type { EntityLinksStore, TaskAssignmentProvenance, TaskRecord, TaskStore } from '@use-brian/core'
-import { createTask, findTasksByExternalRefSystem, getTaskById, listTasks, resolveTaskById, updateTask } from './tasks.js'
+import {ContextScopeAccumulator,DerivedScopeError,intersectAccessCeilings,pinAccessCeiling,type ScopeSource} from '@use-brian/core'
+import {readRetainedContextFrame,writeRetainedContextFrame} from './session-context-revisions.js'
+import {readExternalSourceAncestors} from '../application-platform/external-source-ancestry.js'
+import {readApplicationFieldAncestors} from '../application-platform/field-evidence.js'
+import {getPool} from './client.js'
+import type { EntityLinksStore, TaskAssignmentProvenance, TaskRecord, TaskStore, SessionContextAuthority } from '@use-brian/core'
+import { createTask,emitCreatedTaskEffects, findTasksByExternalRefSystem, getTaskById, listTasks, resolveTaskById, updateTask } from './tasks.js'
 
 /**
  * Create a TaskStore backed by PostgreSQL.
@@ -32,12 +37,35 @@ export function createDbTaskStore(
   deps: {
     entityLinks?: EntityLinksStore
     onTaskTerminal?: (host: { type: 'task'; id: string }) => void
-    onTaskCreate?: (task: TaskRecord, userId: string, assignment?: TaskAssignmentProvenance) => void
+    onTaskCreate?: (task: TaskRecord, userId: string, assignment?: TaskAssignmentProvenance, authority?: SessionContextAuthority) => void
   } = {},
 ): TaskStore {
   const { entityLinks, onTaskTerminal, onTaskCreate } = deps
   return {
-    async create({ userId, assignment, ...params }) {
+    async create({ userId, assignment, authority, ...params }) {
+      if(authority){
+        const {execution,accumulator}=authority
+        if(!(accumulator instanceof ContextScopeAccumulator)||userId!==execution.security.access.userId||params.workspaceId!==execution.security.access.workspaceId
+          ||params.createdByAssistantId!=null&&params.createdByAssistantId!==execution.assistant.id
+          ||params.sourceSessionId!=null&&params.sourceSessionId!==execution.lifecycle.sessionId)throw new DerivedScopeError('scope_evidence_missing')
+        const roots=new ContextScopeAccumulator({sources:[...(accumulator.evidence.sources??[]),...(params.derivation?.sources??[])]})
+        const initial=roots.evidence.sources??[],workspaceId=execution.security.access.workspaceId
+        roots.note({sources:[...await readExternalSourceAncestors(workspaceId,initial),...await readApplicationFieldAncestors(workspaceId,initial)]})
+        const sources=roots.evidence.sources??[];let inserted:TaskRecord|undefined
+        if(sources.length&&params.dependsOn?.length)throw new DerivedScopeError('scope_evidence_missing')
+        const requested=pinAccessCeiling({...execution.security.access,...Object.fromEntries(Object.entries(params.access??{}).filter(([,value])=>value!==undefined))})
+        const access={...execution.security.access,...intersectAccessCeilings(execution.security.ceiling,requested)}
+        const task=await writeRetainedContextFrame(authority,sources,client=>createTask(userId,{...params,access,...(sources.length?{derivation:{producer:params.derivation?.producer??'tool:saveTask:create',sources}}:{})},undefined,client,
+          {deduplicate:true,onInsertedInTransaction:row=>{inserted=row}}))
+        // Source-backed Goal/event/graph consumers need their own original-authority admission.
+        if(inserted&&!sources.length)try{emitCreatedTaskEffects(inserted,userId,params,entityLinks);if(onTaskCreate&&inserted.parentId===null)onTaskCreate(inserted,userId,assignment)}
+        catch(error){throw Object.assign(error instanceof Error?error:new Error('task_post_commit_unavailable'),{retrySafe:false,operationMayHaveExecuted:true})}
+        const goalDraftRequested=!!(inserted&&sources.length&&onTaskCreate&&inserted.parentId===null)
+        if(goalDraftRequested)try{onTaskCreate!(inserted!,userId,assignment,{execution,accumulator:new ContextScopeAccumulator({sources})})}
+        catch(error){throw Object.assign(error instanceof Error?error:new Error('task_post_commit_unavailable'),{retrySafe:false,operationMayHaveExecuted:true})}
+        return sources.length?Object.assign(task,{sourceContinuation:{state:'held' as const,reason:'source_authority_required' as const,goalDraft:goalDraftRequested?'requested' as const:'held' as const}}):task
+      }
+      if(params.derivation?.sources.length)throw new DerivedScopeError('scope_evidence_missing')
       // Admission and dedup share the writer transaction; only inserts emit hooks.
       // `linkedEntityIds` is not on the `TaskStore.create` interface
       // yet (a follow-up type widening) — read it via a permissive
@@ -49,8 +77,15 @@ export function createDbTaskStore(
       })
       return record
     },
-    getById(ctx, id) {
-      return getTaskById(ctx, id)
+    async getById(ctx, id, authority) {
+      if(!authority)return getTaskById(ctx,id)
+      const {execution}=authority
+      if(ctx.userId!==execution.security.access.userId||ctx.workspaceId!==execution.security.access.workspaceId||ctx.assistantId!==execution.assistant.id)throw new DerivedScopeError('scope_evidence_missing')
+      const source=(await getPool().query<{source:ScopeSource&{held?:boolean}}>("SELECT read_scope_source($1,'task',$2) AS source",[ctx.workspaceId,id])).rows[0]?.source
+      if(!source||source.held!==false)return null
+      const requested=pinAccessCeiling({...execution.security.access,...Object.fromEntries(Object.entries(ctx).filter(([,value])=>value!==undefined))})
+      const access={...execution.security.access,...intersectAccessCeilings(execution.security.ceiling,requested)}
+      return readRetainedContextFrame(authority,[source],client=>getTaskById(access,id,client))
     },
     resolveById(ctx, id) {
       return resolveTaskById(ctx, id)

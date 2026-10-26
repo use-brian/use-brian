@@ -154,13 +154,13 @@ export function createDbMemoryStore(deps: { entityLinks?: EntityLinksStore } = {
       return bindScopeSources(results.map(projectMemory),boundScopeSources(results))
     },
 
-    async getIdentity(ctx) {
-      const results = await getIdentityMemories(ctx)
-      return results.map(projectMemory)
+    async getIdentity(ctx,authority) {
+      const results = await getIdentityMemories(ctx,authority)
+      return bindScopeSources(results.map(projectMemory),boundScopeSources(results))
     },
 
-    async getIndex(ctx, validOnly) {
-      return (await getMemoryIndex(ctx, validOnly)).map(bindMemorySource)
+    async getIndex(ctx, validOnly,authority) {
+      const results=await getMemoryIndex(ctx, validOnly,authority);return bindScopeSources(results.map(bindMemorySource),boundScopeSources(results))
     },
 
     async getIndexSystem(assistantId, userId, validOnly) {
@@ -173,9 +173,9 @@ export function createDbMemoryStore(deps: { entityLinks?: EntityLinksStore } = {
       return projectMemory(m)
     },
 
-    async getIndexRanked(ctx, limit) {
-      const result = await getMemoryIndexRanked(ctx, limit)
-      return { ...result, rows: result.rows.map(bindMemorySource) }
+    async getIndexRanked(ctx, limit,authority) {
+      const result = await getMemoryIndexRanked(ctx, limit,authority)
+      return bindScopeSources({ ...result, rows: bindScopeSources(result.rows.map(bindMemorySource),boundScopeSources(result.rows)) },boundScopeSources(result))
     },
 
     async trackRecall(memoryId, queryHash) {
@@ -450,11 +450,11 @@ export function createDbMemoryStore(deps: { entityLinks?: EntityLinksStore } = {
 
     async getWorkspaceIdentity(ctx) {
       const results = await getWorkspaceIdentityMemories(ctx)
-      return results.map(projectMemory)
+      return bindScopeSources(results.map(projectMemory),boundScopeSources(results))
     },
 
-    async getWorkspaceIndex(ctx, validOnly) {
-      return (await getWorkspaceMemoryIndex(ctx, validOnly)).map(bindMemorySource)
+    async getWorkspaceIndex(ctx, validOnly,authority) {
+      const results=await getWorkspaceMemoryIndex(ctx, validOnly,authority);return bindScopeSources(results.map(bindMemorySource),boundScopeSources(results))
     },
 
     async getWorkspaceIndexSystem(assistantId, workspaceId, validOnly) {
@@ -463,23 +463,23 @@ export function createDbMemoryStore(deps: { entityLinks?: EntityLinksStore } = {
 
     async getWorkspaceMemoriesByCategory(ctx, tag) {
       const results = await getWorkspaceMemoriesByCategory(ctx, tag)
-      return results.map(projectMemory)
+      return bindScopeSources(results.map(projectMemory),boundScopeSources(results))
     },
 
-    async searchTeam(ctx, params) {
+    async searchTeam(ctx, params,authority) {
       if (params.idPrefix) {
         const results = await searchWorkspaceMemoriesByIdPrefix(ctx, {
           idPrefix: params.idPrefix,
           limit: params.limit,
-        })
-        return results.map(projectMemory)
+        },authority)
+        return bindScopeSources(results.map(projectMemory),boundScopeSources(results))
       }
 
       const results = await searchWorkspaceMemories(ctx, {
         searchQuery: params.query,
         limit: params.limit,
-      })
-      return results.map(projectMemory)
+      },authority)
+      return bindScopeSources(results.map(projectMemory),boundScopeSources(results))
     },
 
     async listWorkspaceMemoryGroups() {

@@ -13,8 +13,9 @@
  * Writes are system-level (recall logging shouldn't be RLS-gated — it
  * happens before the model emits, and we don't want the per-turn buffer
  * to fail because the connection lost its `app.current_user_id` GUC).
- * Reads are system-bypass too; the route layer enforces workspace
- * membership before issuing the JOIN.
+ * Legacy reads retain their system query. The native HTTP review carries its
+ * original verified actor into the retained field/association-domain reader
+ * before any outcome computation; membership alone does not admit feedback.
  *
  * [COMP:api/memory-recall-events-store]
  *
@@ -23,7 +24,11 @@
  */
 
 import { query } from './client.js'
-import type { MemoryRecallSink } from '@use-brian/core'
+import { bindScopeSources, DerivedScopeError, type MemoryRecallSink, type ScopeSource, type SessionContextAuthority } from '@use-brian/core'
+import { getApplicationExecutionBinding } from '../application-platform/execution-context.js'
+import { readRetainedQueryFrame } from './session-context-revisions.js'
+import { validateCallerScopeEvidence } from '../context-scope/caller-evidence.js'
+import { z } from 'zod'
 
 export type MemoryRecallKind = 'index_inject' | 'tool_call' | 'consolidation'
 
@@ -255,7 +260,12 @@ export async function listMemoriesByRecentOutcome(params: {
    * is noise; two is a pattern.
    */
   minBadCount?: number
+  /** Original verified native HTTP authority, never reconstructed from userId. */
+  authority?: SessionContextAuthority
+  memoryIds?: readonly string[]
+  memorySources?: readonly ScopeSource[]
 }): Promise<MemoryWithOutcomeScore[]> {
+  if (params.authority) return listNativeMemoriesByRecentOutcome(params as typeof params & { authority: SessionContextAuthority })
   const filter = params.sentimentFilter ?? 'any'
   const minBadCount = params.minBadCount ?? 0
 
@@ -328,6 +338,56 @@ export async function listMemoriesByRecentOutcome(params: {
     negativeCount: Number(r.negativeCount),
     correctionCount: Number(r.correctionCount),
   }))
+}
+
+const outcomeSource = z.object({ workspaceId:z.string().uuid(),userId:z.string().uuid().nullable(),assistantId:z.string().uuid().nullable(),
+  sensitivity:z.enum(['public','internal','confidential']),compartments:z.array(z.string()),projectIds:z.array(z.string().uuid()),
+  resourceKind:z.enum(['application_field','external_source']),resourceId:z.string().uuid(),version:z.string().min(1) }).strict()
+const outcomeProjection=z.object({associations:z.array(z.object({id:z.string().uuid(),memoryId:z.string().uuid()}).passthrough()),
+  feedback:z.array(z.object({recallId:z.string().uuid(),feedbackId:z.string().uuid(),version:z.string(),
+    values:z.object({event_name:z.literal('feedback_negative'),details:z.string().nullable()}).passthrough()}).strict()),sources:z.array(outcomeSource).min(1)}).strict()
+
+/** Current own native negative feedback only. All arithmetic consumes admitted values. */
+async function listNativeMemoriesByRecentOutcome(params: {
+ workspaceId:string;windowDays:number;sentimentFilter?:'negative'|'positive'|'any';minBadCount?:number;
+ authority:SessionContextAuthority;memoryIds?:readonly string[];memorySources?:readonly ScopeSource[];
+}):Promise<MemoryWithOutcomeScore[]> {
+ const {authority}=params,e=authority.execution,ids=params.memoryIds?[...params.memoryIds]:null
+ if(!ids||ids.length>100||new Set(ids).size!==ids.length||params.windowDays<=0||params.windowDays>30
+  ||e.identity.kind!=='attended'||e.identity.principal.kind!=='workspace_member'
+  ||e.identity.principal.authenticationKind!=='native_session'||!!getApplicationExecutionBinding(e)
+  ||e.identity.principal.userId!==e.security.access.userId||e.ownership.kind!=='workspace'||e.ownership.workspaceId!==params.workspaceId
+  ||e.security.access.workspaceId!==params.workspaceId||e.security.access.assistantId!==e.assistant.id
+  ||e.surface.systemRead||e.surface.clientSelfMemory||e.security.access.systemRead)throw new DerivedScopeError('scope_evidence_missing')
+ await e.security.authority.assertCurrent()
+ const windowEnd=new Date(),windowStart=new Date(windowEnd.getTime()-params.windowDays*86400000)
+ const fields=['id','event_name','message_id','details','created_at','session_id','assistant_id','user_id']
+ return readRetainedQueryFrame(authority,params.memorySources??[],async client=>{
+  const values=(await client.query<{value:unknown}>('SELECT value FROM read_native_memory_outcome_projection($1,$2,$3,$4,$5)',
+   [params.workspaceId,ids,fields,windowStart,windowEnd])).rows
+  if(values.length!==1)throw new DerivedScopeError('scope_evidence_missing')
+  const captured=outcomeProjection.parse(values[0].value)
+  if(captured.sources.some(source=>source.workspaceId!==params.workspaceId))throw new DerivedScopeError('scope_evidence_missing')
+  const sources=[...(params.memorySources??[]),...captured.sources]
+  await validateCallerScopeEvidence({sources},e.security.ceiling,client)
+  await e.security.authority.assertCurrent()
+  const feedback=new Map<string,typeof captured.feedback>()
+  for(const row of captured.feedback){const rows=feedback.get(row.recallId)??[];rows.push(row);feedback.set(row.recallId,rows)}
+  const scores=new Map<string,MemoryWithOutcomeScore>()
+  for(const recall of captured.associations){
+   if(!ids.includes(recall.memoryId))throw new DerivedScopeError('scope_evidence_missing')
+   const score=scores.get(recall.memoryId)??{memoryId:recall.memoryId,recallCount:0,positiveCount:0,negativeCount:0,correctionCount:0}
+   const rows=feedback.get(recall.id)??[]
+   score.recallCount+=Math.max(1,rows.length)
+   score.negativeCount+=rows.length
+   score.correctionCount+=rows.filter(row=>(row.values.details?.trim().length??0)>=10).length
+   scores.set(recall.memoryId,score)
+  }
+  const result=[...scores.values()].filter(score=>(params.sentimentFilter!=='negative'||score.negativeCount>0)
+   &&(params.sentimentFilter!=='positive'||score.positiveCount>0)&&score.negativeCount+score.correctionCount>=(params.minBadCount??0))
+   .map(score=>bindScopeSources(score,sources))
+  return{value:bindScopeSources(result,sources),sources}
+ })
 }
 
 /**

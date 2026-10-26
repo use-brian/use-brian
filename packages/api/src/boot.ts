@@ -1,3 +1,8 @@
+import { resolveRetainedTaskGoalAuthority } from './workspace-access/goal-source-admission.js'
+import { assertSourceModelOutputAuthority } from './application-platform/model-source-authority.js'
+import { executionToolContext } from '@use-brian/core'
+import type { SessionContextAuthority } from '@use-brian/core'
+import {advanceRetainedGoalWorkflow,pauseWorkflowRunForWait,resumeWorkflowWaitJob} from './workflow/wait-lifecycle.js'
 import { createEngineeringArchivePublisher } from './engineering-history/publisher.js'
 import type { PoolClient } from 'pg'
 import type { ApplicationModuleDefinition } from '@use-brian/core'
@@ -124,7 +129,6 @@ import {
   createEntityAliasTools,
   createScheduleWorkflowTool,
   advanceWorkflowRun,
-  stepSuccessors,
   createWorkflowEventDispatcher,
   createIngestWorkflowTrigger,
   type WorkflowEventDispatcher,
@@ -521,7 +525,9 @@ import {
   tryClaimGoalForTick,
   transitionRunningGoalStatusSystem,
   claimGoalRollupTerminalSystem,
+  finishNativeTaskGoalTerminalSystem,
   getGoalByIdSystem,
+  getGoalForExecutionSystem,
   updateGoalSystem,
   getGoalAwaitingEventSystem,
   setGoalAwaitingEventSystem,
@@ -594,7 +600,6 @@ import { sweepStaleByoBindings } from './files/byo-staleness.js'
 import {
   createDbWorkflowStore,
   createDbWorkflowRunStore,
-  getRunIdForStepRun,
   findEventTriggeredWorkflowsSystem,
   getWorkflowCreatorSystem,
   createWorkflowRunQueueStore,
@@ -1846,7 +1851,9 @@ export async function bootOpenApi(opts: BootOpenApiOptions): Promise<BootResult>
   // the structural rollup AND the acting-loop driver (no silent termination,
   // goals.md §7).
   const deliverGoalTerminal: GoalDeliver = async (goal, terminal, reason) => {
-    publishGoalActivity(goal.id, {
+    const retained=await resolveRetainedTaskGoalAuthority(goal)
+    if(retained)await assertSourceModelOutputAuthority({...executionToolContext(retained.authority.execution,{appId:'native'}),scopeAccumulator:retained.authority.accumulator})
+    if(!retained)publishGoalActivity(goal.id, {
       event: 'done',
       data: { status: terminal, ...(reason ? { reason } : {}) },
     })
@@ -1855,7 +1862,7 @@ export async function bootOpenApi(opts: BootOpenApiOptions): Promise<BootResult>
     // BOTH terminal paths (acting loop + structural rollup) converge, so the
     // taxonomy is covered without touching either loop. Emit before the channel
     // delivery so a delivery failure never loses the event.
-    analytics.logEvent({
+    if(!retained)analytics.logEvent({
       userId: goal.createdByUserId,
       channelType: 'workflow',
       eventName: terminal === 'done' ? 'goal_done' : 'goal_blocked',
@@ -1881,7 +1888,7 @@ export async function bootOpenApi(opts: BootOpenApiOptions): Promise<BootResult>
       userId: goal.createdByUserId,
       text,
       channelType: 'web',
-      scopeEvidence: {
+      scopeEvidence: retained?.authority.accumulator.evidence??{
         sensitivity: 'public',
         compartments: goal.authoringAuthority?.ceiling.mutationCompartments ?? [],
         projectIds: goal.contextProjectId ? [goal.contextProjectId] : [],
@@ -1896,6 +1903,7 @@ export async function bootOpenApi(opts: BootOpenApiOptions): Promise<BootResult>
   const goalRollup = createGoalRollupRunner({
     goalStore,
     claimTerminal: claimGoalRollupTerminalSystem,
+    finishTerminal:finishNativeTaskGoalTerminalSystem,
     deliverGoalDone: (goal) => deliverGoalTerminal(goal, 'done', null),
   })
   // Task autopilot v2 (task-goal-autopilot.md §8): a top-level task create no
@@ -1904,14 +1912,15 @@ export async function bootOpenApi(opts: BootOpenApiOptions): Promise<BootResult>
   // on a pass. The judge needs the provider + usage stores, constructed later
   // in boot, so the hook calls through this late-bound ref. Null (OSS keyless,
   // or before wiring) = no drafting — fail-closed by design.
-  let judgeTaskForGoal: ((task: TaskRecord, userId: string) => void) | null = null
+  let judgeTaskForGoal: ((task: TaskRecord, userId: string, authority?: SessionContextAuthority) => void) | null = null
   // Assigned execution (goals.md -> "Formation, readiness and automatic
   // entry"): late-bound like the judge. A create carrying trusted human
   // assignment provenance enters execution; anything else keeps triage.
   let enterOrTriageTask: ((task: TaskRecord, userId: string, assignment?: TaskAssignmentProvenance) => void) | null = null
   const taskStore = createDbTaskStore({
     onTaskTerminal: goalRollup.onTaskTerminal,
-    onTaskCreate: (task, userId, assignment) => {
+    onTaskCreate: (task, userId, assignment, authority) => {
+      if(authority){judgeTaskForGoal?.(task,userId,authority);return}
       if (enterOrTriageTask) enterOrTriageTask(task, userId, assignment)
       else judgeTaskForGoal?.(task, userId)
     },
@@ -3618,27 +3627,7 @@ export async function bootOpenApi(opts: BootOpenApiOptions): Promise<BootResult>
       },
       { workspaceId, assistantId, userId, turnScope },
     ),
-    pauseRunForWait: async ({ runId, stepRunId, workspaceId, triggeredBy, dueAt }) => {
-      const primary = await resolvePrimaryAssistantForWorkspace(workspaceId)
-      if (!primary) throw new Error(`pauseRunForWait: no primary assistant for workspace ${workspaceId}`)
-      await jobStore.create({
-        assistantId: primary,
-        userId: triggeredBy ?? primary,
-        schedule: {
-          type: 'once',
-          datetime: new Date(dueAt.getTime() - dueAt.getTimezoneOffset() * 60_000)
-            .toISOString().slice(0, 19),
-        },
-        timezone: 'UTC',
-        mode: 'local',
-        instructions: JSON.stringify({ kind: 'workflow_wait_resume', runId, stepRunId }),
-        channelType: 'workflow',
-        channelId: runId,
-        nextRunAt: dueAt,
-        workflowId: (await workflowRunStore.getRunSystem(runId))?.workflowId ?? '',
-        workflowStepRunId: stepRunId,
-      })
-    },
+    pauseRunForWait: params => pauseWorkflowRunForWait(params,{jobStore,runStore:workflowRunStore,resolvePrimary:resolvePrimaryAssistantForWorkspace}),
     emitAudit: async (event) => {
       const details: Record<string, unknown> = {}
       if (event.type === 'workflow.run_started') {
@@ -3808,9 +3797,10 @@ export async function bootOpenApi(opts: BootOpenApiOptions): Promise<BootResult>
     assertSourceAuthority: assertGoalCrmSourceAuthority,
     executeWithAuthority: async (goal, operation) =>
       (await resolveGoalAuthoritySystem(goal)).executeWithAuthority(operation),
-    goalStore,
+    goalStore:{...goalStore,getByIdSystem:getGoalForExecutionSystem},
     tryClaim: tryClaimGoalForTick,
     transitionRunningStatus: transitionRunningGoalStatusSystem,
+    finishTerminal:finishNativeTaskGoalTerminalSystem,
     sessionCostUsd: (sessionId) =>
       usageStore ? usageStore.getSessionCostUsd(sessionId) : Promise.resolve(0),
     meteringAvailable: () => Boolean(usageStore),
@@ -3839,7 +3829,8 @@ export async function bootOpenApi(opts: BootOpenApiOptions): Promise<BootResult>
         }
       : undefined,
     dispatchRun: async ({ goal, runId }) => {
-      publishGoalActivity(goal.id, {
+      const retainedGoal=await resolveRetainedTaskGoalAuthority(goal)
+      if(!retainedGoal)publishGoalActivity(goal.id, {
         event: 'status',
         data: { phase: 'iteration_started' },
       })
@@ -3892,7 +3883,7 @@ export async function bootOpenApi(opts: BootOpenApiOptions): Promise<BootResult>
         throw Object.assign(new Error('goal_source_scope_unavailable'), { code:'goal_source_scope_unavailable' })
       }
       const terminal = outcome.kind === 'completed' || outcome.kind === 'failed'
-      publishGoalActivity(goal.id, {
+      if(!retainedGoal)publishGoalActivity(goal.id, {
         event: 'status',
         data: {
           phase: outcome.kind === 'paused'
@@ -4419,7 +4410,7 @@ export async function bootOpenApi(opts: BootOpenApiOptions): Promise<BootResult>
         return CORE_CAPABILITY_LINES
       }
     }
-  judgeTaskForGoal = (task, userId) => {
+  judgeTaskForGoal = (task, userId, authority) => {
     void triageTaskForGoal(task, userId, {
       goalStore,
       // The task's selected executor, and only while the acting user can
@@ -4436,7 +4427,7 @@ export async function bootOpenApi(opts: BootOpenApiOptions): Promise<BootResult>
       publicCoreCapabilities: CORE_CAPABILITY_LINES,
       summariseCapabilities: summariseWorkspaceCapabilities,
       judge: taskTriageJudge,
-    }).catch((err) => console.error('[goals] task triage draft failed:', err))
+    }, authority).catch((err) => console.error('[goals] task triage draft failed:', err))
   }
   // An update that makes an assistant the executor triages for it (the
   // previous executor's drafts were retired in the update transaction).
@@ -4548,6 +4539,7 @@ export async function bootOpenApi(opts: BootOpenApiOptions): Promise<BootResult>
   // verifier a read-only host snapshot so it checks the claim against reality.
   const goalWorkTools = createGoalWorkTools({
     createCompletionWorkflow,
+    advanceRetainedWorkflowRun: (runId,claim) => advanceRetainedGoalWorkflow(runId,workflowExecutorDeps,claim),
     kickoffGoal: goalDriver.kickoffGoal,
     assessClarity: goalClarityAssessor,
     verify: goalVerifier,
@@ -8452,37 +8444,7 @@ export async function bootOpenApi(opts: BootOpenApiOptions): Promise<BootResult>
         return `goal tick: ${goalTick.goalId}`
       }
       if (!job.workflowId) return 'no workflow_id on job'
-      if (job.workflowStepRunId) {
-        const runId = await getRunIdForStepRun(job.workflowStepRunId)
-        if (!runId) return `step run ${job.workflowStepRunId} not found (workflow may have been deleted)`
-        await workflowRunStore.updateStepRun(job.workflowStepRunId, {
-          status: 'completed', output: { resumed: true }, finishedAt: new Date(),
-        })
-        const run = await workflowRunStore.getRunSystem(runId)
-        const wf = run ? await workflowStore.findByIdSystem(run.workflowId) : null
-        // Resume PAST the completed wait step via an explicit frontier —
-        // possibly several successors (fan-out array), possibly none (a
-        // terminal wait completes the run instead of re-entering at
-        // startStepId). The cursor stays on the wait step; the executor
-        // stamps currentStepId as each successor starts.
-        let startAt: string[] | undefined
-        if (run && wf) {
-          const waitStep = wf.definition.steps.find((s) => s.id === run.currentStepId)
-          startAt = waitStep
-            ? stepSuccessors(waitStep, wf.definition.steps.map((s) => s.id))
-            : undefined
-          await workflowRunStore.updateRun(runId, { status: 'running' })
-        }
-        const outcome = await advanceWorkflowRun(workflowExecutorDeps, runId, startAt ? { startAt } : undefined)
-        await jobStore.update(job.id, { enabled: false })
-        if (outcome.kind === 'failed') {
-          throw new Error(
-            `workflow wait wake-up ${runId} failed: ${outcome.error?.reason ?? 'unknown'}` +
-            (outcome.error?.message ? ` — ${outcome.error.message}` : ''),
-          )
-        }
-        return `workflow wait wake-up: ${outcome.kind}`
-      }
+      if (job.workflowStepRunId) return resumeWorkflowWaitJob(job,{jobStore,runStore:workflowRunStore,workflowStore,executorDeps:workflowExecutorDeps})
       let triggerInput: Record<string, unknown> = {}
       try {
         const parsed = JSON.parse(job.instructions) as { input?: Record<string, unknown> }

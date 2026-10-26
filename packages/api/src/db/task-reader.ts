@@ -14,6 +14,16 @@ import { applyRLSGucs,getAppPool,rollbackAndRelease } from './client.js'
 import { nativeQueryDataCeiling,readLegacyCanonicalCrmPoint } from './crm-reader.js'
 import { readCurrentScopeSources } from './derived-scope-store.js'
 
+/** Metadata-only holding boundary for system readers without original source authority.
+ * The canonical traversal is exact-root, cycle-safe and refuses beyond 4096 nodes.
+ * Native-only lineage keeps its existing native reader obligations.
+ */
+export function taskNeedsIndependentSourceAuthoritySql(alias:string):string {
+ if(!/^[a-z_][a-z0-9_]*$/.test(alias))throw new Error('Invalid Task source alias')
+ return `EXISTS(SELECT 1 FROM application_scope_lineage(${alias}.workspace_id,ARRAY['task'],ARRAY[${alias}.id],ARRAY[${alias}.scope_version::text]) node
+  WHERE node.kind IN('external_source','application_field','session_context_revision','page_event_changed','page_event_destination','page_live_changed','page_live_destination'))`
+}
+
 export const LEGACY_TASK_FULL_FIELDS=['title','status','assigneeId','executorAssistantId','followUpMemberId','home','due','tags','parentId','externalRef','attributes','createdAt','updatedAt'] as const
 const compactFields=LEGACY_TASK_FULL_FIELDS.filter(field=>field!=='externalRef'&&field!=='createdAt')
 const scope=z.object({workspaceId:z.string().uuid(),userId:z.string().uuid().nullable(),assistantId:z.string().uuid().nullable(),
@@ -104,8 +114,8 @@ async function current(client:PoolClient,access:AccessContext,sources:readonly S
   if((await readCurrentScopeSources(client,access.workspaceId,sources)).some(source=>source.state!=='current'))throw unavailable()
 }
 /** Canonical candidate preflight for existing dedup writers; every consumed field is admitted before SQL equality. */
-export function captureLegacyCanonicalTaskCandidates(access:AccessContext,fields:readonly string[],client:PoolClient) {
- return withRead(access,client,async(transaction,context)=>{const captured=await candidates(transaction,context,access,fields)
+export function captureLegacyCanonicalTaskCandidates(access:AccessContext,fields:readonly string[],client:PoolClient,ids?:readonly string[]) {
+ return withRead(access,client,async(transaction,context)=>{const captured=await candidates(transaction,context,access,fields,ids)
   await current(transaction,access,boundScopeSources(captured));return captured})
 }
 export async function listLegacyCanonicalTasks(access:AccessContext,filters:TaskListFilters):Promise<TaskListRow[]> {

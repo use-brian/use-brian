@@ -5,6 +5,7 @@ import {getAppPool,getPool} from '../../db/client.js'
 import {findAssistantById} from '../../db/users.js'
 import {createDbCapabilityStore} from '../../db/capability-store.js'
 import {createDbMemoryStore} from '../../db/memory-store.js'
+import {updateSelfEntityAttributes} from '../../db/entities-store.js'
 import {readAdmittedSessionQuery} from '../../db/session-query-reader.js'
 import {processChannelMessage,type ChannelHooks} from '../../routes/channel-pipeline.js'
 import {persistentContextFixture} from './fixtures/persistent-context.js'
@@ -18,7 +19,7 @@ describe.sequential('[COMP:api/application-persistence] actual attended channel 
  async function setup(input:{adaptive?:boolean;withdrawDuringAssessment?:boolean}={}){
   fixture=await persistentContextFixture();const f=fixture
   if(input.adaptive)await f.pool.query("UPDATE workspaces SET plan='pro' WHERE id=$1",[f.workspaceId])
-  const assessmentInputs:string[]=[],assessmentAuthored:boolean[]=[]
+  const assessmentInputs:string[]=[],assessmentAuthored:boolean[]=[],prompts:unknown[]=[]
   const assistant=await findAssistantById(f.assistantId);if(!assistant)throw new Error('Missing actual fixture assistant')
   const sourceSets:ScopeSource[][]=[],saved:string[]=[],responses:string[]=[],errors:Error[]=[],committed:boolean[]=[]
   const sessionRef:{id?:string}={}
@@ -47,7 +48,7 @@ describe.sequential('[COMP:api/application-persistence] actual attended channel 
     }
     yield{type:'message_start',model:'fixture'};if(backgroundText)yield{type:'text_delta',text:backgroundText};yield{type:'message_end',stopReason:'end_turn',usage}
    },
-   createSession(){return{send(_messages:Message[]){return(async function*(){for(const chunk of scripts[sends++]??[])yield chunk})()}}}}
+   createSession(options){prompts.push(options);return{send(_messages:Message[]){return(async function*(){for(const chunk of scripts[sends++]??[])yield chunk})()}}}}
   const hooks:ChannelHooks={async onConfirmationRequired(){throw new Error('Unexpected fixture confirmation')},async sendResponse(text){responses.push(text)},async sendError(error){errors.push(error)},
    async onAssistantMessageSaved(message){saved.push(message.id);committed.push((await f.pool.query('SELECT id FROM session_messages WHERE id=$1',[message.id])).rows.length===1)}}
   const run=()=>processChannelMessage({userId:f.ownerId,ownerId:f.ownerId,assistant,isIdentified:true,channelType:'telegram',channelId:'15550001111',isGroupChat:false,
@@ -55,7 +56,7 @@ describe.sequential('[COMP:api/application-persistence] actual attended channel 
    userContentBlocks:[{type:'text',text:input.adaptive?'Compare the fictional options using several independent sources and explain their current differences.':'Fictional channel input'}],modelAlias:undefined,adaptiveResearchEnabled:input.adaptive,
    abortController:new AbortController(),provider,systemPrompt:'Fictional local channel fixture',tools:new Map([[tool.name,tool]]),memoryStore:createDbMemoryStore(),
    capabilityStore:createDbCapabilityStore(),hooks,sessionRef})
-  return{f,run,sessionRef,sourceSets,saved,responses,errors,committed,assessmentInputs,assessmentAuthored,mainSends:()=>sends,disableBackgroundText:()=>{backgroundText=undefined}}
+  return{f,run,sessionRef,sourceSets,saved,responses,errors,committed,prompts,assessmentInputs,assessmentAuthored,mainSends:()=>sends,disableBackgroundText:()=>{backgroundText=undefined}}
  }
  it('assesses the actual channel request only after authored input is stored and admitted',async()=>{
   const current=await setup({adaptive:true});await current.run()
@@ -69,8 +70,19 @@ describe.sequential('[COMP:api/application-persistence] actual attended channel 
   expect(current.responses).toEqual([]);expect(current.saved).toEqual([])
  })
  it('retains original query field observations and announces only committed channel pairs',async()=>{
-  const current=await setup();await current.run()
+  const current=await setup()
+  const self=await updateSelfEntityAttributes({userId:current.f.ownerId,workspaceId:current.f.workspaceId,displayName:'Fictional channel identity',attributes:{name:'Fictional channel identity',role:{title:'Fictional planner'},licenses:['Fictional qualification']}})
+  await current.run()
   expect(current.errors).toEqual([]);expect(current.responses.join(' ')).toContain('Fictional admitted channel response')
+  expect(JSON.stringify(current.prompts)).toContain('Fictional channel identity')
+  expect(JSON.stringify(current.prompts)).toContain('Fictional planner')
+  const profileFields=(await current.f.pool.query(`SELECT resources.fields FROM scope_derivations d
+    JOIN scope_derivation_sources edge ON edge.workspace_id=d.workspace_id AND edge.derivation_id=d.id AND edge.source_kind='application_field'
+    JOIN application_field_resources resources ON resources.workspace_id=edge.workspace_id AND resources.id=edge.source_id
+    WHERE d.workspace_id=$1 AND d.resource_kind='session_message' AND d.resource_id=ANY($2::uuid[])`,[current.f.workspaceId,current.saved])).rows
+  expect(profileFields.some(row=>row.fields.includes('profile.role')&&row.fields.includes('profile.extra'))).toBe(true)
+  expect((await current.f.pool.query(`SELECT edge.source_id FROM scope_derivations d JOIN scope_derivation_sources edge ON edge.workspace_id=d.workspace_id AND edge.derivation_id=d.id
+    WHERE d.workspace_id=$1 AND d.resource_kind='session_message' AND d.resource_id=ANY($2::uuid[]) AND edge.source_kind='entity'`,[current.f.workspaceId,current.saved])).rows).toContainEqual({source_id:self.id})
   expect(current.sourceSets).toHaveLength(1);expect(current.sourceSets[0].some(source=>source.resourceKind==='application_field')).toBe(true)
   const pair=(await current.f.pool.query<{id:string}>(`SELECT id FROM session_messages WHERE session_id=$1 AND (content @> '[{"type":"tool_use"}]'::jsonb OR content @> '[{"type":"tool_result"}]'::jsonb)`,[current.sessionRef.id])).rows
   expect(pair).toHaveLength(2)

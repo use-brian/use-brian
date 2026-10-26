@@ -1,3 +1,4 @@
+import { unboundNativeTaskGoalHost,resolveRetainedGoalWorkflowRuntime,resolveRetainedTaskGoalAuthority } from '../workspace-access/goal-source-admission.js'
 import type { PoolClient } from 'pg'
 import { createDbContextScopeStore } from '../db/context-scope-store.js'
 import { AuthoritySourceSchema, crmOperationsSha256, type AuthoritySource, accessCeilingContains, ContextScopeAccumulator, createExecutionContext, intersectAccessCeilings, parseAuthoringAuthority, pinAccessCeiling, pinAuthoringAuthority, scopeGrantContains, unionScopeRequirements, WORKFLOW_SCOPE_EVIDENCE_VAR, type AccessCeiling, type AuthoringAuthority, type GoalRecord, type ResolvedExecutionAccess, type WorkflowRunRecord } from '@use-brian/core'
@@ -264,6 +265,18 @@ async function resolveWorkflowRunSnapshot(params: {
 
 /** Each advance owns a sticky lease, shared by its parallel steps and nested tools. */
 export async function resolveWorkflowRunScope(params: Parameters<typeof resolveWorkflowRunSnapshot>[0], client?: PoolClient) {
+  if(!client){
+    const retained=await resolveRetainedGoalWorkflowRuntime(params.run.id)
+    if(retained){
+      const {execution}=retained.authority,ceiling=execution.security.ceiling
+      if(params.workspaceId!==execution.security.access.workspaceId||params.userId!==execution.security.access.userId
+        ||params.assistantId!==execution.assistant.id)throw unavailable()
+      return{turnScope:{access:execution.security.access,effectiveCompartments:ceiling.compartments,effectiveProjectIds:ceiling.projectIds,
+        writeCompartments:execution.security.writeDefaults.compartments,writeProjectIds:execution.security.writeDefaults.projectIds,
+        activeGroupId:retained.saved.contextGroupId,activeProjectId:retained.saved.contextProjectId},
+        executionContext:execution,assistantClearance:ceiling.clearance,inputScopeEvidence:retained.evidence,executeWithAuthority:retained.executeWithAuthority}
+    }
+  }
   if(!client){const service=await resolveSourceServiceWorkflowScope(params);if(service)return service}
   else if((await client.query("SELECT 1 FROM source_service_bindings WHERE workflow_id=$1 AND status<>'revoked'",[params.run.workflowId])).rowCount)throw unavailable()
   let policyCurrent: () => Promise<boolean>
@@ -419,6 +432,7 @@ export async function resolveWorkflowRunScope(params: Parameters<typeof resolveW
 
 /** Sticky authority for the goal driver's non-workflow work and delivery. */
 export async function resolveGoalAuthoritySystem(goal: GoalRecord) {
+  const retained=await resolveRetainedTaskGoalAuthority(goal)
   if (!goal.createdByUserId) throw goalUnavailable()
   const authoring = parseAuthoringAuthority(goal.authoringAuthority)
   if (!authoring) throw goalUnavailable()
@@ -438,9 +452,18 @@ export async function resolveGoalAuthoritySystem(goal: GoalRecord) {
   } catch {
     throw goalUnavailable()
   }
-  const taskSourcesCurrent = async () => goal.host?.type !== 'task' || (await queryWithRLS(goal.createdByUserId!,
-    'SELECT id FROM tasks WHERE id=$1 AND workspace_id=$2 AND valid_to IS NULL AND retracted_at IS NULL AND NOT scope_held',
-    [goal.host.id, goal.workspaceId])).rows.length === 1
+  const taskSourcesCurrent = async () => {
+    if(retained){await retained.assertCurrent();return true}
+    if(goal.host?.type!=='task')return true
+    const visible=async(id:string)=>(await queryWithRLS(goal.createdByUserId!,
+      'SELECT id FROM tasks WHERE id=$1 AND workspace_id=$2 AND valid_to IS NULL AND retracted_at IS NULL AND NOT scope_held',
+      [id,goal.workspaceId])).rows.length===1
+    if(await visible(goal.host.id))return true
+    // Only an unbound native host may follow its own immutable logical identity.
+    // The metadata classification grants nothing; the current row keeps RLS.
+    const current=await unboundNativeTaskGoalHost(goal)
+    return !!current&&await visible(current.id)
+  }
   if (!await runWithAgentAccess(saved.ceiling, taskSourcesCurrent)) throw goalUnavailable()
   if (!await policyCurrent()) throw new AuthorityChangedError()
   const lease = createAuthorityLease(saved.ceiling, async () => {

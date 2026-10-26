@@ -109,15 +109,25 @@ describe.sequential('[COMP:api/session-message-annotations] actual immutable mes
    derivation:{producer:'fixture:annotation-head-conflict',sources:boundScopeSources(current.classification)}})
   await expect(f.pool.query('UPDATE session_message_annotation_heads SET scope_revision_id=$2 WHERE message_id=$1',[current.message.id,state!.id])).rejects.toThrow('scope_source_changed')
   expect((await f.pool.query('SELECT scope_revision_id FROM session_message_annotation_heads WHERE message_id=$1',[current.message.id])).rows[0].scope_revision_id).toBe(annotation.revisionId)
-  // The fixture deliberately grants SELECT on all tables after migrations.
-  // Prove the restrictive raw-table floor even with that real table privilege
-  // and a currently authorized native actor; only the admitted facade reads it.
+  // Actual runtime ACLs deny raw annotation metadata before any row is read.
   const direct=await getAppPool().connect()
   try {
    await direct.query('BEGIN');await applyRLSGucs(direct,f.ownerId)
-   expect((await direct.query("SELECT has_table_privilege(current_user,'session_message_annotation_heads','SELECT') AS allowed")).rows[0].allowed).toBe(true)
-   expect((await direct.query('SELECT * FROM session_message_annotation_heads')).rows).toEqual([])
+   expect((await direct.query("SELECT has_table_privilege(current_user,'session_message_annotation_heads','SELECT') AS allowed")).rows[0].allowed).toBe(false)
+   await expect(direct.query('SELECT * FROM session_message_annotation_heads')).rejects.toMatchObject({code:'42501'})
   } finally {await direct.query('ROLLBACK');direct.release()}
+  // Independently prove RLS defense using a transaction-local nonlogin probe.
+  // The real runtime gets no grant; rollback removes this fixture-only role.
+  const probe=await f.pool.connect(),probeRole='annotation_probe_'+crypto.randomUUID().replaceAll('-','')
+  try {
+   await probe.query('BEGIN');await applyRLSGucs(probe,f.ownerId)
+   await probe.query(`CREATE ROLE ${probeRole} NOLOGIN NOSUPERUSER NOCREATEDB NOCREATEROLE NOINHERIT NOBYPASSRLS`)
+   await probe.query(`GRANT USAGE ON SCHEMA public TO ${probeRole}`)
+   await probe.query(`GRANT SELECT ON session_message_annotation_heads TO ${probeRole}`)
+   await probe.query(`SET LOCAL ROLE ${probeRole}`)
+   expect((await probe.query("SELECT has_table_privilege(current_user,'session_message_annotation_heads','SELECT') AS allowed")).rows[0].allowed).toBe(true)
+   expect((await probe.query('SELECT * FROM session_message_annotation_heads')).rows).toEqual([])
+  } finally {await probe.query('ROLLBACK');probe.release()}
  })
  it('refuses a fabricated parent or another invocation session without partial annotation effects',async()=>{
   f=await persistentContextFixture();const current=await input()

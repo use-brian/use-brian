@@ -14,6 +14,26 @@
 import type { BuiltinToolGroupId } from "@use-brian/shared/builtin-connectors";
 
 export const en = {
+  applicationConsent: {
+    "title": "Review application access",
+    "loading": "Reading current access...",
+    "unavailable": "Access is unavailable or the review changed. Open a fresh sign-in request.",
+    "unnamed": "Application",
+    "explanation": "Review the current workspace, records, fields and operations before continuing.",
+    "workspace": "Workspace",
+    "scope": "Access",
+    "read": "Read only",
+    "readWrite": "Read and write",
+    "resources": "Resources",
+    "actions": "Operations",
+    "readFields": "Readable fields",
+    "writeFields": "Writable fields",
+    "selection": "Record selection",
+    "self": "Records created by this application identity",
+    "allow": "Allow",
+    "deny": "Deny",
+    "submitting": "Submitting..."
+  },
   applicationManagement: {
     "active": "Active",
     "suspended": "Suspended",
@@ -29,7 +49,7 @@ export const en = {
     "loading": "Reading current authority…",
     "unavailable": "Management is unavailable. Check your current workspace access.",
     "retry": "Read again",
-    "unqualified": "Runtime qualification is incomplete. Protected issuance and activation are unavailable.",
+    "unqualified": "Full platform qualification is incomplete. Each supported application capability requires its own current review.",
     "identity": "Acting identity",
     "application": "Application",
     "register": "Register application",
@@ -44,7 +64,7 @@ export const en = {
     "cancel": "Cancel",
     "exactReview": "Confirm this exact saved review",
     "invalid": "The proposal is invalid. Check the required fields.",
-    "saved": "Saved. Current authority has been refreshed.",
+    "saved": "Saved. Close the receipt to read current state.",
     "uncertain": "The write may have completed. Read current state before taking another action.",
     "reconcile": "Reconcile current state",
     "grants": "Exact grants",
@@ -70,6 +90,8 @@ export const en = {
     "sourceUnavailable": "Mapping, retention and key installation are unavailable through this management port.",
     "legacyUnavailable": "New legacy review creation is retired. Recover saved reviews by their original ID through application management.",
     "access": "Review workspace access",
+    "reviewActivation": "Review activation",
+    "revokeActivation": "Revoke activation",
     "activate": "Activate",
     "nativeDelivery": "Credential delivery requires your native human session."
 },

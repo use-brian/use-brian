@@ -4,6 +4,8 @@ import { getAppPool, getPool, queryWithRLS } from '../../db/client.js'
 
 const { assertLocalFixture } = await import(new URL('../../../../../scripts/crm/local-fixture.mjs', import.meta.url).href)
 await assertLocalFixture()
+const fixtureRuntimeRole = new URL(process.env.DATABASE_URL_APP!).username
+if (!['app_user','assurance_app'].includes(fixtureRuntimeRole)) throw Error('Unexpected maintained fixture runtime role')
 
 // This is the initial real-DB fixture foundation, not certification of A01-A22.
 // Later phases extend this suite through their real HTTP/module/source consumers.
@@ -40,7 +42,7 @@ describe('[COMP:api/application-platform-acceptance] disposable authority fixtur
   it('runs the reader on an actual non-owner, non-bypass application role', async () => {
     const result = await queryWithRLS(users[0], `SELECT current_user AS role,
       rolsuper, rolbypassrls FROM pg_roles WHERE rolname = current_user`)
-    expect(result.rows[0]).toMatchObject({ role: 'assurance_app', rolsuper: false, rolbypassrls: false })
+    expect(result.rows[0]).toMatchObject({ role: fixtureRuntimeRole, rolsuper: false, rolbypassrls: false })
   })
 
   it('keeps equal type names and generic record IDs inside their current member workspace', async () => {

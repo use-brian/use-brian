@@ -50,7 +50,7 @@ import {
   type GoalStore,
   type ReadinessReason,
 } from '@use-brian/core'
-import { buildGoalResolvers, finishGoal, type GoalDeliver } from './writeback.js'
+import { buildGoalResolvers, finishGoal, type GoalDeliver,type GoalTerminalCommit } from './writeback.js'
 import type { ExecutionLedger, IterationEvidence } from './execution-state.js'
 
 /** The loop state carried across the re-arm chain (the durable handoff). */
@@ -156,6 +156,7 @@ export type DispatchRunResult = {
 }
 
 export type GoalDriverDeps = {
+  finishTerminal?:GoalTerminalCommit
   goalStore: GoalStore
   /** Single-flight claim: atomically flip `active`→`running`. `false` means
    *  another tick already owns this goal — the caller returns without acting. */
@@ -271,13 +272,14 @@ export type GoalDriver = {
 }
 
 export function createGoalDriver(deps: GoalDriverDeps): GoalDriver {
-  const finishDeps = { goalStore: deps.goalStore, deliver: deps.deliver, assertSourceAuthority: deps.assertSourceAuthority }
+  const finishDeps = { goalStore: deps.goalStore, deliver: deps.deliver, assertSourceAuthority: deps.assertSourceAuthority,finishTerminal:deps.finishTerminal,expectedStatus:'active' as const }
   const claimedFinishDeps = deps.transitionRunningStatus
     ? {
         goalStore: deps.goalStore,
         deliver: deps.deliver,
         assertSourceAuthority: deps.assertSourceAuthority,
         claimTerminal: deps.transitionRunningStatus,
+        finishTerminal:deps.finishTerminal,expectedStatus:'running' as const,
       }
     : finishDeps
 

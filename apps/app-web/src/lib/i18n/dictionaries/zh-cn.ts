@@ -12,6 +12,26 @@
 import type { Dictionary } from "./en";
 
 export const zhCN: Dictionary = {
+  applicationConsent: {
+    "title": "审核应用访问权限",
+    "loading": "正在读取当前权限...",
+    "unavailable": "当前无法访问，或审核内容已变更。请打开新的登录请求。",
+    "unnamed": "应用",
+    "explanation": "继续之前，请确认当前工作区、记录、字段与操作范围。",
+    "workspace": "工作区",
+    "scope": "访问范围",
+    "read": "只读",
+    "readWrite": "读取与写入",
+    "resources": "资源",
+    "actions": "操作",
+    "readFields": "可读取字段",
+    "writeFields": "可写入字段",
+    "selection": "记录范围",
+    "self": "由此应用身份创建的记录",
+    "allow": "允许",
+    "deny": "拒绝",
+    "submitting": "正在提交..."
+  },
   applicationManagement: {
     "active": "使用中",
     "suspended": "已暂停",
@@ -27,7 +47,7 @@ export const zhCN: Dictionary = {
     "loading": "正在读取当前权限…",
     "unavailable": "管理功能不可用。请确认当前工作区的访问权限。",
     "retry": "重新读取",
-    "unqualified": "运行时验证尚未完成。受保护的授权签发与启用不可用。",
+    "unqualified": "整个平台的验证尚未完成。每项受支持的应用功能都需要当前审核。",
     "identity": "操作身份",
     "application": "应用程序",
     "register": "注册应用程序",
@@ -42,7 +62,7 @@ export const zhCN: Dictionary = {
     "cancel": "取消",
     "exactReview": "确认这份已保存的完整审核",
     "invalid": "提案无效。请检查必填字段。",
-    "saved": "已保存并更新当前权限。",
+    "saved": "已保存。关闭回执以读取当前状态。",
     "uncertain": "写入可能已完成。再次操作前请读取当前状态。",
     "reconcile": "核对当前状态",
     "grants": "精确授权",
@@ -68,6 +88,8 @@ export const zhCN: Dictionary = {
     "sourceUnavailable": "此管理界面不提供映射、保留期限与密钥安装功能。",
     "legacyUnavailable": "已停止创建新的旧有数据审查。请通过应用管理，使用原始 ID 恢复已保存的审查。",
     "access": "审核工作区访问权限",
+    "reviewActivation": "审核启用",
+    "revokeActivation": "撤销启用",
     "activate": "启用",
     "nativeDelivery": "凭证只能通过本人的原生会话取得。"
 },

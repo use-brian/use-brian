@@ -2042,12 +2042,12 @@ async function processChannelMessageTurn(params: ChannelPipelineParams): Promise
     const viewerCtx = automaticContextAccess(dataTurnScope.access, dataTurnScope.activeProjectId)
     const [soulContext, identityMemories, rankedIndex] = await Promise.all([
       (memoryStore.getSoulContext?.(viewerCtx, 'Use Brian') ?? Promise.resolve({ content: null, evidence: {} })),
-      memoryStore.getIdentity(viewerCtx),
-      memoryStore.getIndexRanked(viewerCtx, PER_TURN_INDEX_CAP),
+      memoryStore.getIdentity(viewerCtx,nativeTranscriptAuthority),
+      memoryStore.getIndexRanked(viewerCtx, PER_TURN_INDEX_CAP,nativeTranscriptAuthority),
     ])
     const soul = soulContext.content
     scopeAccumulator.note(soulContext.evidence)
-    noteAutomaticScopeEvidence(scopeAccumulator, [...identityMemories, ...rankedIndex.rows])
+    noteAutomaticScopeEvidence(scopeAccumulator, [identityMemories,rankedIndex.rows,...identityMemories, ...rankedIndex.rows])
     for (const m of identityMemories) sensitivityAccumulator.note(m.sensitivity)
     for (const r of rankedIndex.rows) sensitivityAccumulator.note(r.sensitivity)
     let workspaceIdentityMems: typeof identityMemories = []
@@ -2056,12 +2056,12 @@ async function processChannelMessageTurn(params: ChannelPipelineParams): Promise
     if (assistant.workspaceId) {
       ;[workspaceIdentityMems, workspaceIdx, teamPurpose] = await Promise.all([
         memoryStore.getWorkspaceIdentity(viewerCtx),
-        memoryStore.getWorkspaceIndex(viewerCtx),
+        memoryStore.getWorkspaceIndex(viewerCtx,undefined,nativeTranscriptAuthority),
         getWorkspacePurpose(assistant.workspaceId),
       ])
       for (const m of workspaceIdentityMems) sensitivityAccumulator.note(m.sensitivity)
       for (const r of workspaceIdx) sensitivityAccumulator.note(r.sensitivity)
-      noteAutomaticScopeEvidence(scopeAccumulator, [...workspaceIdentityMems, ...workspaceIdx])
+      noteAutomaticScopeEvidence(scopeAccumulator, [workspaceIdx,...workspaceIdentityMems, ...workspaceIdx])
     }
     memoryContext = buildMemoryContext({
       soul,

@@ -102,6 +102,9 @@ if [ "$ADMIN_ONLY" = 1 ]; then
     CONTAINER="usebrian-admin-test-$admin_pg_port"
     VOLUME="usebrian-admin-test-$admin_pg_port-data"
   fi
+  if [ "$admin_pg_port" != 5443 ]; then STATE="$ROOT/.rig/admin-$admin_pg_port"; fi
+  LOG="$STATE/stack.log"; MIGRATE_LOG="$STATE/migrate.log"; PIDFILE="$STATE/stack.pid"
+  SESSION_FILE="$STATE/session.json"; API_PORT_FILE="$STATE/api-port"
   RIG_LABEL="com.usebrian.rig=admin-test"
   IMAGE=pgvector/pgvector:pg18
   export USEBRIAN_ADMIN_ONLY=1
@@ -194,7 +197,9 @@ else
     [ "$ADMIN_ONLY" = 1 ] && down_args+=(--admin-only)
     "$ROOT/scripts/rig-down.sh" "${down_args[@]}" >/dev/null
   fi
-  for p in "$API_PORT" "$WEB_PORT" "$DOC_SYNC_PORT"; do
+  checked_ports=("$API_PORT" "$WEB_PORT" "$DOC_SYNC_PORT")
+  if [ "$ADMIN_ONLY" = 1 ]; then checked_ports+=(3005 "$((admin_pg_port + 1000))"); fi
+  for p in "${checked_ports[@]}"; do
     pids="$(port_pids "$p")"
     if [ -n "$pids" ]; then
       for opid in $pids; do

@@ -3,7 +3,7 @@ import type { AccessCeiling, ScopeEvidence, WorkflowRecord, WorkflowRunRecord } 
 // Source ancestry is covered by the real DB/HTTP source fixture. These tests exercise native audience rules.
 vi.mock('../../application-platform/external-source-ancestry.js', () => ({ readExternalSourceAncestors: async () => [] }))
 vi.mock('../../application-platform/field-evidence.js', () => ({ readApplicationFieldAncestors: async () => [] }))
-vi.mock('../../db/client.js', () => ({ getPool: () => ({
+vi.mock('../../db/client.js', () => ({ query: async () => { throw new Error('Unexpected direct database query in publication-consent fixture') }, getPool: () => ({
   query: async (sql: string, params: unknown[]) => {
     if (!sql.includes('read_resource_page_dependencies') || !(params[1] as string[]).every(kind => kind === 'memory')) {
       throw new Error('Unexpected publication fixture source lookup')

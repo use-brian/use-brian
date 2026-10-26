@@ -1,3 +1,4 @@
+import { createAttendedDeliveryAudienceAuthorizer } from '../context-scope/attended-audience.js'
 import { withTurnInference } from '../turn/runtime.js'
 import { PER_TURN_FILES_INDEX_CAP, PER_TURN_INDEX_CAP } from '../turn/index-caps.js'
 import { renderSystemContext } from '@use-brian/core'
@@ -784,13 +785,17 @@ export async function executePublicTurn(
     workspaceId: assistant.workspaceId,
     userId: user.id,
   })
-  const currentTurnWrite = () => turnOutputWrite({
-    producer: 'turn:public-api',
-    accumulator: scopeAccumulator,
-    envelope: inputMessageScope,
+  const nativeTranscriptAuthority = executionContext.ownership.kind === 'workspace'
+    && executionContext.identity.kind === 'attended' && executionContext.identity.principal.kind === 'workspace_member'
+    ? { execution: executionContext, accumulator: scopeAccumulator } : undefined
+  const currentTurnWrite = () => ({
+    ...turnOutputWrite({ producer: 'turn:public-api', accumulator: scopeAccumulator, envelope: inputMessageScope }),
+    ...(nativeTranscriptAuthority ? { authority: nativeTranscriptAuthority } : {}),
   })
   const authority = executionContext.security.authority
-  const authorizeDeliveryAudience = createDeliveryAudienceAuthorizer()
+  const authorizeDeliveryAudience = nativeTranscriptAuthority
+    ? createAttendedDeliveryAudienceAuthorizer(executionContext)
+    : createDeliveryAudienceAuthorizer()
   const assertDeliveryAudience = async (): Promise<void> => {
     await authority.assertCurrent()
     const decision = await authorizeDeliveryAudience({
@@ -1085,8 +1090,8 @@ export async function executePublicTurn(
     const [soulContext, identityMemories, rankedIndex, workspaceIdentityMemories, teamMemoryIndex] =
       await Promise.all([
         (deps.memoryStore.getSoulContext?.(memoryViewerCtx, 'Use Brian') ?? Promise.resolve({ content: null, evidence: {} })),
-        deps.memoryStore.getIdentity(memoryViewerCtx),
-        deps.memoryStore.getIndexRanked(memoryViewerCtx, PER_TURN_INDEX_CAP),
+        deps.memoryStore.getIdentity(memoryViewerCtx,nativeTranscriptAuthority),
+        deps.memoryStore.getIndexRanked(memoryViewerCtx, PER_TURN_INDEX_CAP,executionContext.ownership.kind==='workspace'&&executionContext.identity.kind==='attended'&&executionContext.identity.principal.kind==='workspace_member'?{execution:executionContext,accumulator:scopeAccumulator}:undefined),
         // Team memory is what makes a full-scope link useful, and what makes
         // the internal lane a colleague rather than a stranger; the external
         // keyed lanes stay on their per-user projection.
@@ -1094,12 +1099,13 @@ export async function executePublicTurn(
           ? deps.memoryStore.getWorkspaceIdentity(memoryViewerCtx)
           : Promise.resolve([]),
         (fullScope || internalScope) && assistant.workspaceId
-          ? deps.memoryStore.getWorkspaceIndex(memoryViewerCtx)
+          ? deps.memoryStore.getWorkspaceIndex(memoryViewerCtx,undefined,executionContext.ownership.kind==='workspace'&&executionContext.identity.kind==='attended'&&executionContext.identity.principal.kind==='workspace_member'?{execution:executionContext,accumulator:scopeAccumulator}:undefined)
           : Promise.resolve([]),
       ])
     const soul = soulContext.content
     scopeAccumulator.note(soulContext.evidence)
     noteAutomaticScopeEvidence(scopeAccumulator, [
+      identityMemories,rankedIndex.rows,teamMemoryIndex,
       ...identityMemories,
       ...rankedIndex.rows,
       ...workspaceIdentityMemories,

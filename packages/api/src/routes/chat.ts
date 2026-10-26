@@ -1,3 +1,4 @@
+import {boundScopeSources} from '@use-brian/core'
 import {generateAttendedSessionTitle} from './attended-session-title.js'
 import {readSessionTitle} from '../db/session-title-store.js'
 import {authSessionStore} from '../db/auth-session-store.js'
@@ -2950,8 +2951,10 @@ export function chatRoutes(options: WebChatOptions): Router {
           transport: classifySession(session).transport,
         },
         attribution: { billingUserId: user.id },
-        credentialCurrent: credentialClaims ? () => credentialClaims.userId === user.id
-          ? authSessionStore.validateAccess(credentialClaims) : Promise.resolve(false) : undefined,
+        ...(credentialClaims?.userId===user.id&&credentialClaims.sessionId&&credentialClaims.authVersion!==undefined
+          ?{nativeSessionCredential:{userId:credentialClaims.userId,sessionId:credentialClaims.sessionId,authVersion:credentialClaims.authVersion}}
+          :{credentialCurrent:credentialClaims?()=>credentialClaims.userId===user.id
+            ?authSessionStore.validateAccess(credentialClaims):Promise.resolve(false):undefined}),
         sessionAuthority: session,
         ...(officeLane ? officeLaneExecutionBounds(officeLane, user.id, officeLaneDeps) : {}),
       })
@@ -4495,11 +4498,12 @@ export function chatRoutes(options: WebChatOptions): Router {
       turnTiming.mark('admission')
       const [soulContext, identityMemories, rankedIndex, preferredChannel, selfEntityId] = await Promise.all([
         (options.memoryStore.getSoulContext?.(viewerCtx, 'Use Brian') ?? Promise.resolve({ content: null, evidence: {} })),
-        options.memoryStore.getIdentity(viewerCtx),
-        options.memoryStore.getIndexRanked(viewerCtx, PER_TURN_INDEX_CAP),
+        options.memoryStore.getIdentity(viewerCtx,nativeTranscriptAuthority),
+        options.memoryStore.getIndexRanked(viewerCtx, PER_TURN_INDEX_CAP,nativeTranscriptAuthority),
         getPreferredChannel(assistant.id, user.id),
         getSelfEntityId(viewerCtx),
       ])
+      noteAutomaticScopeEvidence(scopeAccumulator,[identityMemories,...identityMemories])
       const soul = soulContext.content
       scopeAccumulator.note(soulContext.evidence)
 
@@ -4527,8 +4531,8 @@ export function chatRoutes(options: WebChatOptions): Router {
           entityLinks: options.entityLinksStore,
           candidates: options.brainCandidateStore,
         }
-        const matchMemories = rankedIndex.rows.map((m) => ({ id: m.id, summary: m.summary }))
-        void runLocalMatchCheck(matchMemories, matchDeps).catch((err) => {
+        const matchMemories = rankedIndex.rows.filter(m=>!boundScopeSources(m).some(source=>source.resourceKind==='application_field'||source.resourceKind==='external_source')).map((m) => ({ id: m.id, summary: m.summary }))
+        if(matchMemories.length)void runLocalMatchCheck(matchMemories, matchDeps).catch((err) => {
           console.warn(
             `[chat/retrieval-match] check failed for user ${user.id}: ${
               err instanceof Error ? err.message : String(err)
@@ -4549,7 +4553,7 @@ export function chatRoutes(options: WebChatOptions): Router {
       if (assistant.workspaceId) {
         ;[workspaceIdentityMemories, teamMemoryIndex, teamVoiceRules, workspaceIdentity] = await Promise.all([
           options.memoryStore.getWorkspaceIdentity(viewerCtx),
-          options.memoryStore.getWorkspaceIndex(viewerCtx),
+          options.memoryStore.getWorkspaceIndex(viewerCtx,undefined,nativeTranscriptAuthority),
           options.memoryStore.getWorkspaceMemoriesByCategory(viewerCtx, 'voice'),
           getWorkspaceIdentity(assistant.workspaceId),
         ])
@@ -5603,6 +5607,7 @@ export function chatRoutes(options: WebChatOptions): Router {
       const sensitivityAccumulator = new SensitivityAccumulator()
       const compartmentAccumulator = new CompartmentAccumulator()
       noteAutomaticScopeEvidence(scopeAccumulator, [
+        rankedIndex.rows,teamMemoryIndex,
         ...identityMemories,
         ...rankedIndex.rows,
         ...workspaceIdentityMemories,

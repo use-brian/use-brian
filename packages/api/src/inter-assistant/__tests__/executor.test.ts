@@ -381,7 +381,7 @@ describe('[COMP:api/inter-assistant-executor] createCalleeExecutor', () => {
       workspaceId: 'workspace-1', userId: 'owner-1', clearance: 'internal',
       compartments: ['product'], mutationCompartments: ['product'], projectIds: null, visibilityAssistantIds: ['caller-1'],
     } })).resolves.toBe('shared response')
-    expect(scopedMemory.getIndexRanked).toHaveBeenCalledWith(expect.objectContaining({ visibilityAssistantIds: [] }), 60)
+    expect(scopedMemory.getIndexRanked).toHaveBeenCalledWith(expect.objectContaining({ visibilityAssistantIds: [] }), 60, expect.objectContaining({execution:expect.any(Object),accumulator:expect.any(Object)}))
   })
   it('withholds a tool result after revocation and preserves the uncertain-operation warning', async () => {
     const primary = { ...calleeAssistant, workspaceId: 'workspace-1', kind: 'primary', clearance: 'confidential', compartments: null }
@@ -442,7 +442,7 @@ describe('[COMP:api/inter-assistant-executor] createCalleeExecutor', () => {
     } })).resolves.toBe('bounded')
     expect(scopedMemory.getIndexRanked).toHaveBeenCalledWith(expect.objectContaining({
       clearance: 'internal', compartments: ['product'], visibilityAssistantIds: ['caller-1'],
-    }), 60)
+    }), 60, expect.objectContaining({execution:expect.any(Object),accumulator:expect.any(Object)}))
   })
   it('refuses a serialized request after caller access shrinks, before callee reads', async () => {
     mockFindAssistant.mockResolvedValue({ ...calleeAssistant, id: 'caller-1', workspaceId: 'workspace-1',
@@ -485,7 +485,15 @@ describe('[COMP:api/inter-assistant-executor] createCalleeExecutor', () => {
     yieldsText('Bounded response')
     await runWithAgentAccess({workspaceId:'workspace-1',userId:'actor-1',clearance:'internal',compartments:['product'],mutationCompartments:[],projectIds:[],visibilityAssistantIds:['caller-1']},()=>callee({...baseParams,callerUserId:'actor-1'}))
     expect(mockResolveReadCeilings).toHaveBeenCalledWith('actor-1','workspace-1','confidential',null)
-    expect(scopedMemory.getIndexRanked).toHaveBeenCalledWith(expect.objectContaining({userId:'actor-1',clearance:'internal',compartments:['product'],mutationCompartments:[],projectIds:[],visibilityAssistantIds:['caller-1']}), 60)
+    const indexedAuthority=scopedMemory.getIndexRanked.mock.calls[0]?.[2]
+    const originalContext=mockQueryLoop.mock.calls.at(-1)?.[0].context
+    expect(indexedAuthority.execution).toBe(originalContext.executionContext)
+    expect(indexedAuthority.accumulator).toBe(originalContext.scopeAccumulator)
+    expect(scopedMemory.getIdentity).toHaveBeenCalledWith(expect.any(Object),{execution:originalContext.executionContext,accumulator:originalContext.scopeAccumulator})
+    expect(indexedAuthority.execution.identity.kind).toBe('delegated')
+    expect(indexedAuthority.execution.security.access.userId).toBe('actor-1')
+    expect(indexedAuthority.execution.lifecycle.sessionId).toBe(originalContext.sessionId)
+    expect(scopedMemory.getIndexRanked).toHaveBeenCalledWith(expect.objectContaining({userId:'actor-1',clearance:'internal',compartments:['product'],mutationCompartments:[],projectIds:[],visibilityAssistantIds:['caller-1']}), 60, expect.objectContaining({execution:expect.any(Object),accumulator:expect.any(Object)}))
     expect(mockInjectMcp).toHaveBeenCalledWith(expect.objectContaining({contextScope:expect.objectContaining({effectiveCompartments:['product'],effectiveProjectIds:[]})}))
     expect(mockQueryLoop.mock.calls.at(-1)?.[0].context).toMatchObject({userId:'actor-1',visibilityAssistantIds:['caller-1'],clearance:'internal',compartments:['product'],mutationCompartments:[]})
     expect(mockSession).toHaveBeenCalledWith(expect.objectContaining({userId:'actor-1'}))
@@ -590,7 +598,7 @@ describe('[COMP:api/inter-assistant-executor] createCalleeExecutor', () => {
       clearance: 'public',
       compartments: [],
       clientSelfMemory: { compartment: 'client:client-17' },
-    }), 60)
+    }), 60, undefined)
     expect(scopedMemory.getWorkspaceIndex).not.toHaveBeenCalled()
     const loopArgs = mockQueryLoop.mock.calls.at(-1)?.[0]
     expect(loopArgs.maxTurns).toBe(2)

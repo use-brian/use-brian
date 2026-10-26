@@ -8,7 +8,6 @@ export async function configuredKnowledgeEntryFixture(f:Fixture,input:{source:{r
  await assertLocalFixture();const store=createDbKnowledgeStore()
  const team=await createDbWorkspaceGroupStore().createTeam(f.ownerId,f.workspaceId,{name:'Fictional configured source',key:'fictional-configured-source'})
  await f.pool.query("UPDATE workspace_access_policies SET access_mode='departments',setup_state='ready',default_department_id=$2 WHERE workspace_id=$1",[f.workspaceId,team.id])
- await f.pool.query('GRANT EXECUTE ON FUNCTION claim_knowledge_source_sync(uuid,uuid,uuid,jsonb),release_knowledge_source_sync(uuid,uuid,uuid),apply_knowledge_source_sync(jsonb,jsonb) TO assurance_app')
  const source=await store.createSource({workspaceId:f.workspaceId,sourceType:'local',...input.source,binding:{sensitivity:'internal',compartments:[],projectIds:[]}},{actorUserId:f.ownerId})
  if(!source.bindingCompartments||!source.bindingProjectIds)throw new Error('Actual configured source labels required')
  const authority=await store.captureSourceSync(source);if(!authority)throw new Error('Actual configured sync authority required')

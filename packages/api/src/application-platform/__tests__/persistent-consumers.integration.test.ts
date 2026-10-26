@@ -1,3 +1,18 @@
+import express from 'express'
+import request from 'supertest'
+import {authSessionStore} from '../../db/auth-session-store.js'
+import {createTokens} from '../../auth/jwt.js'
+import {requireAuth} from '../../auth/middleware.js'
+import {memoryRoutes} from '../../routes/memories.js'
+import {resolveNativeApplicationModuleExecution} from '../native-module-runtime.js'
+import {recordFeedback} from '../../feedback/record.js'
+import {recordRecallBatch,listMemoriesByRecentOutcome} from '../../db/memory-recall-events-store.js'
+import {listUnverifiedByWorkspace} from '../../db/memories.js'
+import {assertSourceModelOutputAuthority} from '../model-source-authority.js'
+import { createAuthorityLease, runWithAuthorityLease } from '../../context-scope/authority-lease.js'
+import { executePublicTurn } from '../../routes/public-turn.js'
+import { updateSelfEntityAttributes } from '../../db/entities-store.js'
+import { EventEmitter } from 'node:events'
 import { houseKeepEpisodic } from '../../routes/proactive-compaction.js'
 import { createCalleeExecutor } from '../../inter-assistant/executor.js'
 import { createDbMemoryStore } from '../../db/memory-store.js'
@@ -30,6 +45,110 @@ describe.sequential('[COMP:api/application-persistence] actual transcript persis
   let independent: Awaited<ReturnType<typeof persistentSourceFixture>> | undefined
   afterEach(async () => { await independent?.cleanup(); independent = undefined; await fixture?.cleanup(); fixture = undefined })
   afterAll(async () => { await getAppPool().end(); await getPool().end() })
+
+  async function nativeOutcomeReview(f:Awaited<ReturnType<typeof persistentContextFixture>>,actor=f.firstId){
+    const auth=await authSessionStore.create(actor,{deviceLabel:'Fictional outcome review',userAgent:'Fixture',ipAddress:'127.0.0.1'})
+    if(!auth)throw new Error('Missing actual review authentication')
+    const secret='fictional-outcome-review-secret',token=createTokens(actor,secret,auth).accessToken,app=express()
+    app.use('/api/assistants/:assistantId/memories',requireAuth(secret),memoryRoutes())
+    const read=(score=true)=>request(app).get(`/api/assistants/${f.assistantId}/memories?status=unverified${score?'&include=bad_outcome':''}`).set('Authorization',`Bearer ${token}`)
+    const carrier=Object.assign(new EventEmitter(),{userId:actor,authSessionId:auth.id,authVersion:auth.authVersion,aborted:false})
+    const execution=await resolveNativeApplicationModuleExecution(carrier as never,f.workspaceId,f.assistantId)
+    const authority={execution,accumulator:new ContextScopeAccumulator()}
+    const score=async(ids?:readonly string[])=>{
+      const rows=await listUnverifiedByWorkspace(execution.security.access,100,undefined,authority)
+      return listMemoriesByRecentOutcome({workspaceId:f.workspaceId,windowDays:30,authority,
+        memoryIds:ids??rows.map(row=>row.id),memorySources:boundScopeSources(rows),sentimentFilter:'any'})
+    }
+    return{auth,read,authority,score,context:{...executionToolContext(execution,{appId:'native-memory-read'}),scopeAccumulator:authority.accumulator}}
+  }
+  async function nativeOutcomeTurns(f:Awaited<ReturnType<typeof persistentContextFixture>>,memoryId:string){
+    const messages=[]
+    for(let i=0;i<3;i++)messages.push(await addSessionMessage({sessionId:f.session.id,role:'assistant',content:[{type:'text',text:`Fictional reviewed answer ${i}`}],scope:{...f.envelope,assistantId:f.assistantId},senderAssistantId:f.assistantId}))
+    for(const message of messages)await recordRecallBatch({memoryIds:[memoryId],sessionId:f.session.id,workspaceId:f.workspaceId,userId:f.firstId,recallKind:'index_inject',assistantMessageId:message.id})
+    return messages
+  }
+
+  it('scores actual native own negative feedback before HTTP review and keeps another actor private positive irrelevant',async()=>{
+    fixture=await persistentContextFixture();const f=fixture,memory=await f.memory('Fictional outcome review memory'),messages=await nativeOutcomeTurns(f,memory.id)
+    await recordFeedback({userId:f.firstId,messageId:messages[0].id,sessionId:f.session.id,kind:'negative',details:':down:',source:'web'})
+    await recordFeedback({userId:f.firstId,messageId:messages[1].id,sessionId:f.session.id,kind:'negative',details:'Fictional correction details',source:'web'})
+    const review=await nativeOutcomeReview(f),response=await review.read()
+    expect(review.authority.execution.identity).toMatchObject({kind:'attended',principal:{kind:'workspace_member',userId:f.firstId,authenticationKind:'native_session'}})
+    const unsupportedIdentity={...review.authority.execution,identity:{kind:'attended',principal:{kind:'workspace_member',userId:f.firstId,authenticationKind:'verified_channel'}}}
+    await expect(listMemoriesByRecentOutcome({workspaceId:f.workspaceId,windowDays:30,memoryIds:[memory.id],authority:{...review.authority,execution:unsupportedIdentity} as never})).rejects.toMatchObject({code:'scope_evidence_missing'})
+    expect(response.status,JSON.stringify(response.body)).toBe(200)
+    expect(response.headers['cache-control']).toBe('no-store')
+    expect(response.body.memories.find((row:{id:string})=>row.id===memory.id)?.outcomeScore).toEqual({recallCount:3,negativeCount:2,correctionCount:1})
+    const scored=await review.score([memory.id]),sources=boundScopeSources(scored)
+    expect(sources.some(source=>source.resourceKind==='application_field')).toBe(true)
+    const domain=(await f.pool.query(`SELECT q.domain FROM application_field_resources r JOIN application_query_domains q ON q.workspace_id=r.workspace_id AND q.id=r.resource_id
+      WHERE r.workspace_id=$1 AND r.id=ANY($2::uuid[]) AND r.type_key='feedback_event' AND r.selection='query_domain'`,[f.workspaceId,sources.map(source=>source.resourceId)])).rows[0].domain
+    expect(domain.associations).toHaveLength(3);expect(domain.feedback).toHaveLength(2);expect(domain.memoryCandidates).toEqual([{id:memory.id,version:expect.any(String)}])
+    review.authority.accumulator.note({sources});await expect(assertSourceModelOutputAuthority(review.context)).resolves.toBeUndefined()
+    await recordFeedback({userId:f.secondId,messageId:messages[0].id,sessionId:f.session.id,kind:'positive',source:'web'})
+    const unchanged=await review.read();expect(unchanged.status,JSON.stringify(unchanged.body)).toBe(200)
+    expect(unchanged.body.memories.find((row:{id:string})=>row.id===memory.id)?.outcomeScore).toEqual({recallCount:3,negativeCount:2,correctionCount:1})
+  })
+
+  it('holds actual outcome fields and native session contraction before scoring and revalidates a returned domain at egress',async()=>{
+    fixture=await persistentContextFixture();const f=fixture,memory=await f.memory('Fictional field-scoped review'),messages=await nativeOutcomeTurns(f,memory.id)
+    await recordFeedback({userId:f.firstId,messageId:messages[0].id,sessionId:f.session.id,kind:'negative',details:'Fictional correction detail',source:'web'})
+    const review=await nativeOutcomeReview(f),scored=await review.score([memory.id]);expect(scored[0].negativeCount).toBe(1)
+    review.authority.accumulator.note({sources:boundScopeSources(scored)})
+    await f.pool.query("UPDATE sessions SET effective_clearance='confidential' WHERE id=$1",[f.session.id])
+    await expect(assertSourceModelOutputAuthority(review.context)).rejects.toMatchObject({reason:'authority_changed'})
+    const held=await review.read();expect(held.status,JSON.stringify(held.body)).toBe(200);expect(held.body.memories).toEqual([])
+    await f.pool.query("UPDATE sessions SET effective_clearance='internal' WHERE id=$1",[f.session.id])
+    let registered=false
+    try{
+      await f.pool.query(`CREATE TABLE outcome_field_fixture(workspace_id uuid PRIMARY KEY,fields jsonb NOT NULL);
+        CREATE FUNCTION outcome_field_catalog(w uuid,o jsonb,t text) RETURNS jsonb LANGUAGE sql SECURITY DEFINER SET search_path=pg_catalog,public,pg_temp AS $$
+        SELECT jsonb_build_object('moduleKey','native','origin',o,'typeKey',t,'schemaVersion','feedback-fixture-v1','policyVersion','1','fieldKeys',to_jsonb(application_feedback_field_keys()),'fields',p.fields,
+          'scope',jsonb_build_object('workspaceId',w,'userId',NULL,'assistantId',NULL,'sensitivity','public','compartments','[]'::jsonb,'projectIds','[]'::jsonb)) FROM outcome_field_fixture p WHERE p.workspace_id=w $$;
+        CREATE FUNCTION outcome_field_record(w uuid,o jsonb,t text,i text) RETURNS jsonb LANGUAGE sql SECURITY DEFINER SET search_path=pg_catalog,public,pg_temp AS $$
+        SELECT(outcome_field_catalog(w,o,t)-'scope')||jsonb_build_object('recordVersion',a.scope_version::text,'source',read_scope_source(w,'feedback_event',a.id)) FROM analytics_events a WHERE a.workspace_id=w AND a.id=i::uuid $$;
+        REVOKE ALL ON FUNCTION outcome_field_catalog(uuid,jsonb,text),outcome_field_record(uuid,jsonb,text,text) FROM PUBLIC`)
+      await f.pool.query(`INSERT INTO outcome_field_fixture SELECT $1,jsonb_agg(jsonb_build_object('key',key,'read',CASE WHEN key='details' THEN '[["outcome_reader"]]'::jsonb ELSE '[]'::jsonb END,
+        'write','[]'::jsonb,'releaseReadTo','[]'::jsonb,'releaseWriteTo','[]'::jsonb)) FROM unnest(application_feedback_field_keys()) key`,[f.workspaceId])
+      await f.pool.query(`INSERT INTO application_native_field_contracts(module_key,contract_version,role_keys,metadata_reader,catalog_reader)
+        VALUES('native','1',ARRAY['outcome_reader'],'outcome_field_record(uuid,jsonb,text,text)'::regprocedure,'outcome_field_catalog(uuid,jsonb,text)'::regprocedure)`);registered=true
+      await f.pool.query(`INSERT INTO application_native_resource_owners(workspace_id,origin,resource_type,module_key) VALUES($1,'{"kind":"native","moduleKey":"native"}','feedback_event','native')`,[f.workspaceId])
+      await f.pool.query(`INSERT INTO application_native_role_assignments(workspace_id,module_key,user_id,role_key,issued_by_user_id) VALUES($1,'native',$2,'outcome_reader',$3)`,[f.workspaceId,f.firstId,f.ownerId])
+      expect((await review.read()).status).toBe(200)
+      const fresh=await nativeOutcomeReview(f),value=await fresh.score([memory.id]);fresh.authority.accumulator.note({sources:boundScopeSources(value)})
+      await f.pool.query("UPDATE application_native_role_assignments SET status='revoked' WHERE workspace_id=$1 AND user_id=$2 AND module_key='native'",[f.workspaceId,f.firstId])
+      expect((await review.read()).status).toBe(404);expect((await review.read(false)).status).toBe(200)
+      await expect(assertSourceModelOutputAuthority(fresh.context)).rejects.toMatchObject({reason:'authority_changed'})
+    }finally{
+      await f.pool.query("DELETE FROM application_native_resource_owners WHERE workspace_id=$1 AND module_key='native'",[f.workspaceId])
+      await f.pool.query("DELETE FROM application_native_role_assignments WHERE workspace_id=$1 AND module_key='native'",[f.workspaceId])
+      if(registered)await f.pool.query("DELETE FROM application_native_field_contracts WHERE module_key='native'")
+      await f.pool.query('DROP FUNCTION IF EXISTS outcome_field_record(uuid,jsonb,text,text);DROP FUNCTION IF EXISTS outcome_field_catalog(uuid,jsonb,text);DROP TABLE IF EXISTS outcome_field_fixture')
+    }
+  })
+
+  it('retains empty outcome candidates and no-feedback associations while refusing own unsupported feedback without changing legacy counts',async()=>{
+    fixture=await persistentContextFixture();const f=fixture,empty=await f.memory('Fictional empty outcome candidate'),memory=await f.memory('Fictional no-feedback outcome'),messages=await nativeOutcomeTurns(f,memory.id)
+    const review=await nativeOutcomeReview(f),emptyScores=await review.score([empty.id]);expect(emptyScores).toEqual([])
+    const roots=boundScopeSources(emptyScores);expect(roots.length).toBeGreaterThan(0)
+    const domains=(await f.pool.query(`SELECT r.id,q.domain FROM application_field_resources r JOIN application_query_domains q ON q.workspace_id=r.workspace_id AND q.id=r.resource_id
+      WHERE r.workspace_id=$1 AND r.id=ANY($2::uuid[]) AND r.type_key='feedback_event' AND r.selection='query_domain'`,[f.workspaceId,roots.map(source=>source.resourceId)])).rows
+    expect(domains[0].domain.memoryCandidates).toEqual([{id:empty.id,version:expect.any(String)}]);expect(domains[0].domain.associations).toEqual([])
+    const none=await nativeOutcomeReview(f),noFeedback=await none.score([memory.id]);expect(noFeedback[0]).toMatchObject({recallCount:3,negativeCount:0,correctionCount:0})
+    none.authority.accumulator.note({sources:boundScopeSources(noFeedback)})
+    await f.pool.query("UPDATE memory_recall_events SET recall_kind='tool_call' WHERE workspace_id=$1 AND memory_id=$2",[f.workspaceId,memory.id])
+    await expect(assertSourceModelOutputAuthority(none.context)).rejects.toMatchObject({reason:'authority_changed'})
+    await recordFeedback({userId:f.firstId,messageId:messages[0].id,sessionId:f.session.id,kind:'positive',source:'web'})
+    const unsupported=await review.read();expect(unsupported.status,JSON.stringify(unsupported.body)).toBe(503);expect(unsupported.body.error).toContain('Outcome scoring unavailable')
+    expect((await review.read(false)).status).toBe(200)
+    const legacy=await listMemoriesByRecentOutcome({workspaceId:f.workspaceId,windowDays:30,sentimentFilter:'any'})
+    expect(legacy.find(row=>row.memoryId===memory.id)).toMatchObject({recallCount:3,positiveCount:1,negativeCount:0,correctionCount:0})
+    const isolated=await nativeOutcomeReview(f)
+    isolated.authority.accumulator.note({sources:roots.filter(source=>source.resourceId===domains[0].id)})
+    await f.pool.query("UPDATE memories SET sensitivity='confidential' WHERE id=$1",[empty.id])
+    await expect(assertSourceModelOutputAuthority(isolated.context)).rejects.toMatchObject({reason:'authority_changed'})
+  })
 
   it('ignores caller temporary tables when admitting canonical context metadata and payload',async()=>{
     fixture=await persistentContextFixture();const f=fixture,history=await f.history()
@@ -570,9 +689,10 @@ describe.sequential('[COMP:api/application-persistence] actual transcript persis
     const answer:StreamFn=async function*(){yield{type:'message_start',model:'gemini-3.6-flash-pro'};yield{type:'text_delta',text:'Fictional private consult result'};yield{type:'message_end',stopReason:'end_turn',usage:{inputTokens:1,outputTokens:1}}}
     const provider:LLMProvider={name:'fixture',models:['gemini-3.6-flash-pro'],stream:answer,createSession(options){return{send:()=>answer({model:options.model,systemPrompt:options.systemPrompt,messages:[]})}}}
     const returned:ScopeEvidence[]=[],execute=createCalleeExecutor({provider,tools:new Map(),memoryStore:createDbMemoryStore(),capabilityStore:createDbCapabilityStore()})
-    expect(await execute({callerUserId:f.firstId,callerAssistantId:f.assistantId,callerAccessCeiling:parent.security.ceiling,
+    const invocation:Parameters<typeof execute>[0]={callerUserId:f.firstId,callerAssistantId:f.assistantId,callerAccessCeiling:parent.security.ceiling,
       callerScopeEvidence:{sources:[source]},onScopeEvidence:evidence=>{returned.push(evidence)},calleeAssistantId:f.assistantId,
-      expectedWorkspaceId:f.workspaceId,callerSessionId:f.session.id,question:memory.summary})).toBe('Fictional private consult result')
+      expectedWorkspaceId:f.workspaceId,callerSessionId:f.session.id,question:memory.summary}
+    expect(await execute(invocation)).toBe('Fictional private consult result')
     expect(returned).toContainEqual(expect.objectContaining({sources:expect.arrayContaining([source])}))
     const rows=(await f.pool.query(`SELECT m.id,s.user_id,s.visibility FROM session_messages m JOIN sessions s ON s.id=m.session_id
       JOIN scope_derivations d ON d.resource_kind='session_message' AND d.resource_id=m.id AND d.workspace_id=$1
@@ -580,6 +700,99 @@ describe.sequential('[COMP:api/application-persistence] actual transcript persis
       WHERE m.role='assistant' AND edge.source_kind='memory' AND edge.source_id=$2`,[f.workspaceId,memory.id])).rows
     expect(rows.length).toBeGreaterThan(0)
     for(const row of rows)expect(row).toMatchObject({user_id:f.firstId,visibility:'personal'})
+    const before=(await f.pool.query('SELECT count(*)::int n FROM session_messages WHERE workspace_id=$1',[f.workspaceId])).rows[0].n
+    const revoked=await f.pool.query('DELETE FROM workspace_members WHERE workspace_id=$1 AND user_id=$2 RETURNING user_id',[f.workspaceId,f.firstId])
+    expect(revoked.rows).toEqual([{user_id:f.firstId}])
+    await expect(execute(invocation)).rejects.toThrow()
+    expect((await f.pool.query('SELECT count(*)::int n FROM session_messages WHERE workspace_id=$1',[f.workspaceId])).rows[0].n).toBe(before)
+  })
+
+  it.each(['public-member','delegated-consult'] as const)('retains actual %s identity field and empty-domain evidence and stops current actor contraction before the provider',async(surface)=>{
+    fixture=await persistentContextFixture();const f=fixture,parent=await f.execution(f.firstId)
+    const self=await updateSelfEntityAttributes({userId:f.firstId,workspaceId:f.workspaceId,displayName:'Fictional attributed identity',
+      attributes:{name:'Fictional attributed identity',role:'Fictional bounded planner'}})
+    const prompts:string[]=[],returned:ScopeEvidence[]=[],identities:ScopeSource[][]=[]
+    const answer:StreamFn=async function*(){yield{type:'message_start',model:'gemini-3.6-flash-pro'};yield{type:'text_delta',text:'Fictional attributed response'};yield{type:'message_end',stopReason:'end_turn',usage:{inputTokens:1,outputTokens:1}}}
+    const provider:LLMProvider={name:'fixture',models:['gemini-3.6-flash-pro'],stream:answer,createSession(options){prompts.push(JSON.stringify(options));return{send:()=>answer({model:options.model,systemPrompt:options.systemPrompt,messages:[]})}}}
+    const memories=createDbMemoryStore(),readIdentity=memories.getIdentity.bind(memories)
+    let contractAfterRead=false,invocationNumber=0
+    memories.getIdentity=async(ctx,authority)=>{
+      expect(authority?.execution.security.access.userId).toBe(f.firstId)
+      expect(authority?.execution.assistant.id).toBe(f.assistantId)
+      const rows=await readIdentity(ctx,authority)
+      identities.push(boundScopeSources(rows))
+      if(contractAfterRead)await f.pool.query('DELETE FROM workspace_members WHERE workspace_id=$1 AND user_id=$2',[f.workspaceId,f.firstId])
+      return rows
+    }
+    const consult=createCalleeExecutor({provider,tools:new Map(),memoryStore:memories,capabilityStore:createDbCapabilityStore()})
+    const invoke=async()=>{
+      invocationNumber++
+      if(surface==='delegated-consult')return consult({callerUserId:f.firstId,callerAssistantId:f.assistantId,callerAccessCeiling:parent.security.ceiling,
+        onScopeEvidence:evidence=>returned.push(evidence),calleeAssistantId:f.assistantId,expectedWorkspaceId:f.workspaceId,callerSessionId:f.session.id,question:'Fictional attributed input'})
+      const req=new EventEmitter(),res={statusCode:200,body:undefined as unknown,status(code:number){this.statusCode=code;return this},json(body:unknown){this.body=body;return this}}
+      await executePublicTurn({provider,tools:new Map(),systemPrompt:'Fictional public member fixture',memoryStore:memories,capabilityStore:createDbCapabilityStore()},
+        {assistantId:f.assistantId,identityNamespace:'api:fictional-member-key',contextScope:'internal-member',internalActor:{email:null,defaultUserId:f.firstId},credentialCurrent:async()=>true,
+          body:{externalUserId:'fictional-attribution',sessionId:`fictional-member-session-${invocationNumber}`,message:'Fictional attributed input'}},req as never,res as never)
+      expect(res.statusCode,JSON.stringify(res.body)).toBe(200);return JSON.stringify(res.body)
+    }
+    expect(await invoke()).toContain('Fictional attributed response')
+    expect(prompts).toHaveLength(1);expect(prompts[0]).toContain('Fictional attributed identity');expect(prompts[0]).toContain('Fictional bounded planner')
+    expect(identities[0].some(root=>root.resourceKind==='application_field')).toBe(true)
+    if(surface==='delegated-consult')expect(returned.some(evidence=>evidence.sources?.some(root=>root.resourceKind==='application_field'))).toBe(true)
+    const retained=(await f.pool.query(`SELECT m.id,edge.source_kind,edge.source_id FROM session_messages m
+      JOIN scope_derivations d ON d.resource_kind='session_message' AND d.resource_id=m.id AND d.workspace_id=m.workspace_id
+      JOIN scope_derivation_sources edge ON edge.workspace_id=d.workspace_id AND edge.derivation_id=d.id
+      WHERE m.workspace_id=$1 AND m.role='assistant'`,[f.workspaceId])).rows
+    expect(retained.some(row=>row.source_kind==='entity'&&row.source_id===self.id)).toBe(true)
+    for(const field of identities[0].filter(root=>root.resourceKind==='application_field'))expect(retained.some(row=>row.source_kind==='application_field'&&row.source_id===field.resourceId)).toBe(true)
+    // Empty identity results still retain the admitted self=false field/query domain.
+    await updateSelfEntityAttributes({userId:f.firstId,workspaceId:f.workspaceId,displayName:'Fictional attributed identity',attributes:{self:false}})
+    expect(await invoke()).toContain('Fictional attributed response')
+    expect(prompts).toHaveLength(2);expect(prompts[1]).not.toContain('Fictional bounded planner')
+    expect(identities[1].some(root=>root.resourceKind==='application_field')).toBe(true)
+    const emptyRetained=(await f.pool.query(`SELECT edge.source_id,edge.source_version FROM session_messages m
+      JOIN scope_derivations d ON d.resource_kind='session_message' AND d.resource_id=m.id AND d.workspace_id=m.workspace_id
+      JOIN scope_derivation_sources edge ON edge.workspace_id=d.workspace_id AND edge.derivation_id=d.id
+      WHERE m.workspace_id=$1 AND m.role='assistant' AND edge.source_kind='application_field'`,[f.workspaceId])).rows
+    for(const root of identities[1].filter(root=>root.resourceKind==='application_field'))expect(emptyRetained).toContainEqual({source_id:root.resourceId,source_version:root.version})
+    const before=(await f.pool.query("SELECT count(*)::int n FROM session_messages WHERE workspace_id=$1 AND role='assistant'",[f.workspaceId])).rows[0].n
+    contractAfterRead=true
+    await expect(invoke()).rejects.toThrow()
+    expect(prompts).toHaveLength(2)
+    expect((await f.pool.query("SELECT count(*)::int n FROM session_messages WHERE workspace_id=$1 AND role='assistant'",[f.workspaceId])).rows[0].n).toBe(before)
+  })
+
+  it('keeps an actual consult identity inside its pinned parent ceiling without substituting the callee owner',async()=>{
+    fixture=await persistentContextFixture();const f=fixture,parent=await f.execution(f.firstId)
+    await updateSelfEntityAttributes({userId:f.firstId,workspaceId:f.workspaceId,displayName:'Fictional hidden identity',attributes:{name:'Fictional hidden identity'}})
+    const prompts:string[]=[],answer:StreamFn=async function*(){yield{type:'message_start',model:'gemini-3.6-flash-pro'};yield{type:'text_delta',text:'Fictional public bounded response'};yield{type:'message_end',stopReason:'end_turn',usage:{inputTokens:1,outputTokens:1}}}
+    const provider:LLMProvider={name:'fixture',models:['gemini-3.6-flash-pro'],stream:answer,createSession(options){prompts.push(JSON.stringify(options));return{send:()=>answer({model:options.model,systemPrompt:options.systemPrompt,messages:[]})}}}
+    const memories=createDbMemoryStore(),authority=await f.delegatedExecution(f.firstId),accumulator=new ContextScopeAccumulator()
+    await expect(memories.getIdentity({...authority.security.access,userId:f.secondId},{execution:authority,accumulator})).rejects.toMatchObject({code:'scope_evidence_missing'})
+    const substituted={...authority,identity:{...authority.identity,parentCeiling:{...parent.security.ceiling,userId:f.secondId}}} as typeof authority
+    await expect(memories.getIdentity(authority.security.access,{execution:substituted,accumulator})).rejects.toMatchObject({code:'scope_evidence_missing'})
+    const pinned={...parent.security.ceiling,clearance:'public' as const},readIdentity=memories.getIdentity.bind(memories)
+    let parentCurrent=true,contractParentAfterRead=false
+    const originalParent=createAuthorityLease(pinned,async()=>parentCurrent?pinned:null)
+    memories.getIdentity=async(ctx,current)=>{
+      expect(current?.execution.identity).toMatchObject({kind:'delegated',actorUserId:f.firstId,parentCeiling:pinned})
+      expect(current?.execution.assistant.id).toBe(f.assistantId)
+      const rows=await readIdentity(ctx,current)
+      if(contractParentAfterRead)parentCurrent=false
+      return rows
+    }
+    const execute=createCalleeExecutor({provider,tools:new Map(),memoryStore:memories,capabilityStore:createDbCapabilityStore()})
+    const invoke=()=>runWithAuthorityLease(originalParent,()=>execute({callerUserId:f.firstId,callerAssistantId:f.assistantId,callerAccessCeiling:pinned,
+      calleeAssistantId:f.assistantId,expectedWorkspaceId:f.workspaceId,callerSessionId:f.session.id,question:'Fictional public bounded input'}))
+    expect(await invoke()).toBe('Fictional public bounded response')
+    expect(prompts).toHaveLength(1);expect(prompts[0]).not.toContain('Fictional hidden identity')
+    const retained=(await f.pool.query(`SELECT m.id,s.user_id,s.visibility,m.sensitivity FROM session_messages m JOIN sessions s ON s.id=m.session_id
+      WHERE m.workspace_id=$1 AND m.role='assistant'`,[f.workspaceId])).rows
+    expect(retained).toHaveLength(1);expect(retained[0]).toMatchObject({user_id:f.firstId,visibility:'personal',sensitivity:'public'})
+    contractParentAfterRead=true
+    await expect(invoke()).rejects.toMatchObject({reason:'authority_changed'})
+    expect(prompts).toHaveLength(1)
+    expect((await f.pool.query("SELECT id FROM session_messages WHERE workspace_id=$1 AND role='assistant'",[f.workspaceId])).rows.map(row=>row.id)).toEqual(retained.map(row=>row.id))
   })
 
   it('injects healthy delivery commitments through the actual delegated executor and real source admission', async () => {

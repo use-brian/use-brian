@@ -49,8 +49,8 @@ describe('[COMP:api/connector-actor-context] real encrypted keys and MCP dispatc
     expect(await createConnectorActorKeyStore(Buffer.from(encryptionKey)).loadActiveKey(configuredIssuer)).toMatchObject({ kid: created.kid })
     expect(await createConnectorActorKeyStore(randomBytes(32)).loadActiveKey(configuredIssuer)).toBeNull()
     // The fixture grants table privileges after migration, so RLS itself must still withhold these rows.
-    expect((await queryWithRLS(userId, 'SELECT kid FROM connector_actor_signing_keys')).rows).toEqual([])
-    expect((await queryWithRLS(userId, 'SELECT kid FROM connector_actor_key_events')).rows).toEqual([])
+    await expect(queryWithRLS(userId, 'SELECT kid FROM connector_actor_signing_keys')).rejects.toMatchObject({ code: '42501' })
+    await expect(queryWithRLS(userId, 'SELECT kid FROM connector_actor_key_events')).rejects.toMatchObject({ code: '42501' })
     const projected = await queryWithRLS(userId, 'SELECT connector_actor_public_jwks($1) AS jwks', [configuredIssuer])
     expect(projected.rows[0].jwks.keys).toEqual([row.public_jwk])
     expect(JSON.stringify(projected.rows[0])).not.toMatch(/PRIVATE KEY|encrypted_private_key|pkcs8/)

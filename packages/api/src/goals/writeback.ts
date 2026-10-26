@@ -25,6 +25,9 @@ import {
 import { query } from '../db/client.js'
 import { createHostStore } from './host-task.js'
 
+/** Canonical production port; a null result means terminal ownership was lost. */
+export type GoalTerminalCommit=(goal:GoalRecord,terminal:GoalHostTerminal,reason:string|null,expectedStatus:'active'|'running')=>Promise<GoalRecord|null>
+
 /** Deliver a goal's terminal message to its creator / `policy.escalateTo`.
  *  Best-effort; callers swallow its rejection so a delivery failure never
  *  wedges the loop. */
@@ -147,6 +150,8 @@ export async function finishGoal(
   reason: string | null,
   deps: {
     goalStore: GoalStore
+    finishTerminal?:GoalTerminalCommit
+    expectedStatus?:'active'|'running'
     deliver: GoalDeliver
     /** Source admission for acting goals, rechecked at each terminal boundary. */
     assertSourceAuthority?: (goal: GoalRecord) => Promise<void>
@@ -162,6 +167,13 @@ export async function finishGoal(
   },
 ): Promise<void> {
   await deps.assertSourceAuthority?.(goal)
+  if(goal.host?.type==='task'&&deps.finishTerminal){
+    const committed=await deps.finishTerminal(goal,terminal,reason,deps.expectedStatus??'active')
+    if(!committed)return
+    await deps.assertSourceAuthority?.(committed)
+    try{await deps.deliver(committed,terminal,reason)}catch(error){console.error(`[goals] terminal delivery failed for goal ${committed.id} (${terminal}):`,error)}
+    return
+  }
   if (deps.claimTerminal) {
     if (!(await deps.claimTerminal(goal.id, terminal, reason))) return
   } else {

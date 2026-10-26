@@ -30,8 +30,8 @@ function ManagementPanel({workspaceId,viewerId,appId,moduleKey,onModule,onSelect
  const t=useT().applicationManagement,key=applicationManagementCacheKey(workspaceId,viewerId,appId||undefined,moduleKey||undefined);
  const [message,setMessage]=useState<keyof Copy|null>(null),[busy,setBusy]=useState(false),[secret,setSecret]=useState<string|null>(null);
  const [uncertain,setUncertain]=useState(false);
- const blocked=busy||uncertain;
  const [receipt,setReceipt]=useState<ApplicationManagementResult|null>(null);
+ const blocked=busy||uncertain||receipt!==null;
  const [review,setReview]=useState<{value:ManagementReview;command:ApplicationManagementCommand;enabled:boolean}|null>(null);
  const pending=useRef(false);
  const dialog=useRef<AbortController|null>(null),alive=useRef(true),generation=useRef(0);
@@ -44,20 +44,20 @@ function ManagementPanel({workspaceId,viewerId,appId,moduleKey,onModule,onSelect
   window.addEventListener(WORKSPACE_IDENTITY_REFRESH_EVENT,changed);window.addEventListener(ORGANIZATION_CHANGED_EVENT,changed);
   return()=>{alive.current=false;generation.current++;dialog.current?.abort();window.removeEventListener(WORKSPACE_IDENTITY_REFRESH_EVENT,changed);window.removeEventListener(ORGANIZATION_CHANGED_EVENT,changed);invalidateSurfaceCache(key);};
  },[workspaceId,key,purge]);
- async function run(command:ApplicationManagementCommand,reviewKind?:'grant'|'credential'|'schema'|'governance'){
-  if(pending.current||uncertain||!data)return;
+ async function run(command:ApplicationManagementCommand,reviewKind?:'grant'|'credential'|'schema'|'governance'|'activation'){
+  if(pending.current||uncertain||receipt||!data)return;
   pending.current=true;
   const epoch=generation.current;setBusy(true);setMessage(null);
   try{
    const result=await executeApplicationManagement(workspaceId,command);
    if(!alive.current||generation.current!==epoch)return;
    if(reviewKind){const value=result as ManagementReview;if(typeof value.id!=='string')throw new Error('invalid_review');const selected=data.selectedAppId!;
-    const apply:ApplicationManagementCommand=reviewKind==='grant'?{kind:'grant.apply',appId:selected,reviewId:value.id}:reviewKind==='credential'?{kind:'credential.deliver',appId:selected,reviewId:value.id}:reviewKind==='schema'?{kind:'schema.apply',reviewId:value.id,input:{}}:{kind:'governance.apply',reviewId:value.id,input:{}};
-    setReview({value,command:apply,enabled:reviewKind==='schema'||reviewKind==='governance'?value.canApply!==false:value.canIssue===true});
+    const apply:ApplicationManagementCommand=reviewKind==='activation'?{kind:'activation.apply',appId:selected,reviewId:value.id}:reviewKind==='grant'?{kind:'grant.apply',appId:selected,reviewId:value.id}:reviewKind==='credential'?{kind:'credential.deliver',appId:selected,reviewId:value.id}:reviewKind==='schema'?{kind:'schema.apply',reviewId:value.id,input:{}}:{kind:'governance.apply',reviewId:value.id,input:{}};
+    setReview({value,command:apply,enabled:reviewKind==='schema'||reviewKind==='governance'||reviewKind==='activation'?value.canApply!==false:value.canIssue===true});
    }else{
     if(typeof result.secret==='string')setSecret(result.secret);
     setReceipt(Object.fromEntries(Object.entries(result).filter(([field])=>field!=='secret')));
-    setReview(null);setMessage('saved');await resource.refresh();
+    setReview(null);setMessage(typeof result.secret==='string'?null:'saved');
    }
   }catch(error){if(alive.current&&generation.current===epoch){if(error instanceof ApplicationManagementError&&error.uncertain){setUncertain(true);setMessage('uncertain');}else setMessage(error instanceof ApplicationManagementError&&error.code==='invalid_value'?'invalid':'unavailable');setReview(null);}}
   finally{if(alive.current&&generation.current===epoch){setBusy(false);pending.current=false;}}
@@ -79,7 +79,7 @@ function ManagementPanel({workspaceId,viewerId,appId,moduleKey,onModule,onSelect
   <p role="status" className="text-sm">{t.unqualified}</p>
   <p className="break-all text-xs">{t.identity}: {data.actor.userId} / {data.actor.assistantId}</p>
   <SearchableSelect className="text-base md:text-sm" popupClassName="[&_input]:text-base md:[&_input]:text-sm" aria-label={t.application} value={data.selectedAppId??''} onValueChange={onSelect} items={data.clients.map(client=>({value:client.id,label:client.name}))} placeholder={t.application} searchPlaceholder={t.application} emptyMessage={t.empty}/>
-  {selected&&<div className="space-y-2"><p>{t.status}: {t[selected.status]}</p><div className="flex flex-wrap gap-2"><Button disabled={blocked||selected.status!=='active'} onClick={()=>void confirmed({kind:'status',appId:selected.id,status:'suspended'},selected)}>{t.suspend}</Button><Button disabled={blocked||selected.status==='revoked'} onClick={()=>void confirmed({kind:'status',appId:selected.id,status:'revoked'},selected)}>{t.revoke}</Button><Button disabled title={t.unqualified}>{t.activate}</Button></div></div>}
+  {selected&&<div className="space-y-2"><p>{t.status}: {t[selected.status]}</p><div className="flex flex-wrap gap-2"><Button disabled={blocked||selected.status!=='active'} onClick={()=>void confirmed({kind:'status',appId:selected.id,status:'suspended'},selected)}>{t.suspend}</Button><Button disabled={blocked||selected.status==='revoked'} onClick={()=>void confirmed({kind:'status',appId:selected.id,status:'revoked'},selected)}>{t.revoke}</Button><Button disabled={blocked||selected.status!=='active'} onClick={()=>void run({kind:'activation.review',appId:selected.id},'activation')}>{t.reviewActivation}</Button>{selected.qualified&&<Button disabled={blocked} onClick={()=>void confirmed({kind:'activation.revoke',appId:selected.id},selected)}>{t.revokeActivation}</Button>}</div></div>}
   {show('apps')&&<><Registration t={t} modules={data.modules} busy={blocked} submit={command=>void run(command)}/><SchemaEditor t={t} data={data} busy={blocked} submit={command=>void run(command,'schema')}/></>}
   {show('credentials')&&selected&&<>
    <JsonReview title={t.grants} t={t} busy={blocked} initial={{principal:{kind:'member',userId:viewerId},origin:{kind:'generic',entityTypeId:''},typeKey:'',actions:['read'],readFields:[],writeFields:[],selector:{kind:'ids',ids:[]},expiresAt:null,parentGrantId:null,compartments:[],projectIds:[],clearance:'internal'}} submit={input=>void run({kind:'grant.review',appId:selected.id,input:input as never},'grant')}/>
@@ -92,9 +92,9 @@ function ManagementPanel({workspaceId,viewerId,appId,moduleKey,onModule,onSelect
   {show('sources')&&<><h3>{t.sources}</h3><p>{t.sourceUnavailable}</p><Metadata title={t.sources} items={data.sources.items} empty={t.empty}/><a className="underline" href={data.links.connectors}>{t.sources}</a></>}
   <p>{t.legacyUnavailable}</p><a className="underline" href={data.links.access}>{t.access}</a>
   {review&&<div className="space-y-2 rounded-lg bg-muted/40 p-3"><h3>{t.exactReview}</h3><pre className="max-h-72 overflow-auto whitespace-pre-wrap break-all text-xs">{pretty(review.value)}</pre><Button disabled={blocked||!review.enabled} onClick={()=>void confirmed(review.command,review.value)}>{t.apply}</Button><Button onClick={()=>setReview(null)}>{t.cancel}</Button>{!review.enabled&&<p>{t.unqualified}</p>}</div>}
-  {receipt&&<div><h3>{t.receipt}</h3><pre className="max-h-56 overflow-auto whitespace-pre-wrap break-all text-xs">{pretty(receipt)}</pre></div>}
-  {secret&&<div><h3>{t.secret}</h3><p>{t.secretOnce}</p><code className="break-all">{secret}</code><Button onClick={()=>setSecret(null)}>{t.close}</Button></div>}
-  {(uncertain||message)&&<div role="status"><p>{t[uncertain?'uncertain':message!]}</p><Button onClick={()=>void reconcile()}>{uncertain?t.reconcile:t.retry}</Button></div>}
+  {receipt&&<div><h3>{t.receipt}</h3><pre className="max-h-56 overflow-auto whitespace-pre-wrap break-all text-xs">{pretty(receipt)}</pre>{!secret&&<Button onClick={()=>{setReceipt(null);setMessage(null);void resource.refresh();}}>{t.close}</Button>}</div>}
+  {secret&&<div><h3>{t.secret}</h3><p>{t.secretOnce}</p><code className="break-all">{secret}</code><Button onClick={()=>{setSecret(null);setReceipt(null);setMessage(null);void resource.refresh();}}>{t.close}</Button></div>}
+  {(uncertain||message)&&<div role="status"><p>{t[uncertain?'uncertain':message!]}</p>{(uncertain||message!=='saved')&&<Button onClick={()=>void reconcile()}>{uncertain?t.reconcile:t.retry}</Button>}</div>}
  </section>;
 }
 function Registration({t,modules,busy,submit}:{t:Copy;modules:string[];busy:boolean;submit:(command:ApplicationManagementCommand)=>void}){

@@ -137,6 +137,19 @@ provider QA and independent-source adoption remain owed.
 Cancellation while consuming an effect response remains uncertain. Already-aborted
 schema operations never invoke their injected deployment port.
 
+
+The independent source example explicitly supports governed historical
+read/context/derive/retain for exact saved before-images. Record-changing commands
+store that history atomically with the source receipt. Current account/assistant,
+field/action rights and unchanged current policy remain required; missing history,
+withdrawal or contraction refuses. Historical mutation is forbidden. Brian never
+aliases an old observation to latest content or infers a source retention right.
+With `dispatchCommands: true`, signed MCP `updateRecord` takes
+`{ type, id, expectedVersion, expectedPolicyVersion, values, idempotencyKey }` and
+shares the source's canonical atomic mutation. Its command-bound reconciliation
+checks the original actor/assistant/digest and current ACL without redispatch.
+An unsupported source keeps its uncertain, no-retry workflow receipt.
+
 ## Registered operation names
 
 Only explicitly registered own operation keys are callable. An unknown query,

@@ -1,3 +1,4 @@
+import { resolveRetainedGoalWorkflowRuntime,retainedGoalWorkflowFrame } from '../workspace-access/goal-source-admission.js'
 import { persistSourceServiceWorkflowOutput } from '../workflow/source-service.js'
 import { prepareScheduleEdit, applyScheduleEdit, scheduleEditRow } from '../workspace-access/workflow-schedule-edit.js'
 import { insertWorkflowScheduleJob } from './job-store.js'
@@ -843,6 +844,12 @@ export async function pauseWorkflowForPrimitiveEventSystem(params: Parameters<Wo
   notifyWorkspaceChange(params.workspaceId,'workflow','update',params.workflowId)
 }
 
+/** Metadata selects the retained path before any owner payload projection. */
+async function runSourceQuery<T extends import('pg').QueryResultRow>(runId:string,retaining:boolean,sql:string,values:unknown[]){
+ const protectedResult=await retainedGoalWorkflowFrame(runId,retaining,client=>client.query<T>(sql,values))
+ return{result:protectedResult?.value??await query<T>(sql,values),protected:!!protectedResult}
+}
+
 export function createDbWorkflowRunStore(): WorkflowRunStore {
   return {
     async createRun({ workflowId, workspaceId, triggeredBy, triggerKind, input, scheduledJob }) {
@@ -966,10 +973,8 @@ export function createDbWorkflowRunStore(): WorkflowRunStore {
       return result.rows[0] ? rowToRun(result.rows[0]) : null
     },
     async getRunSystem(id) {
-      const result = await query<RunRow>(
-        `SELECT ${RUN_SELECT} FROM workflow_runs WHERE id = $1`,
-        [id],
-      )
+      const {result} = await runSourceQuery<RunRow>(id,false,
+        `SELECT ${RUN_SELECT} FROM workflow_runs WHERE id = $1`,[id])
       return result.rows[0] ? rowToRun(result.rows[0]) : null
     },
     async updateRun(id, fields) {
@@ -987,38 +992,36 @@ export function createDbWorkflowRunStore(): WorkflowRunStore {
       if (sets.length === 1) {
         // Only last_active_at would be updated — skip the round-trip and
         // return the current row instead.
-        const cur = await query<RunRow>(
-          `SELECT ${RUN_SELECT} FROM workflow_runs WHERE id = $1`,
-          [id],
-        )
+        const {result:cur} = await runSourceQuery<RunRow>(id,false,`SELECT ${RUN_SELECT} FROM workflow_runs WHERE id = $1`,[id])
         return cur.rows[0] ? rowToRun(cur.rows[0]) : null
       }
 
       values.push(id)
-      const result = await query<RunRow>(
-        `UPDATE workflow_runs SET ${sets.join(', ')} WHERE id = $${idx} RETURNING ${RUN_SELECT}`,
-        values,
-      )
+      const {result,protected:isProtected} = await runSourceQuery<RunRow>(id,true,
+        `UPDATE workflow_runs SET ${sets.join(', ')} WHERE id = $${idx} RETURNING ${RUN_SELECT}`,values)
       if (!result.rows[0]) return null
       const run = rowToRun(result.rows[0])
       // Run lifecycle transitions (status / step advance / outcome) are the
       // live-activity signal; the coalescer absorbs many-step bursts.
-      notifyWorkspaceChange(run.workspaceId, 'workflow_run', 'update', run.id)
+      if(!isProtected)notifyWorkspaceChange(run.workspaceId, 'workflow_run', 'update', run.id)
       return run
     },
     async createStepRun({ runId, stepId, stepType, input }) {
-      const result = await query<StepRunRow & { workspaceId: string | null }>(
+      const {result,protected:isProtected} = await runSourceQuery<StepRunRow & { workspaceId: string | null }>(runId,true,
         `INSERT INTO workflow_step_runs (run_id, step_id, step_type, status, input)
          VALUES ($1, $2, $3, 'running', $4)
          RETURNING ${STEP_RUN_SELECT},
            (SELECT workspace_id FROM workflow_runs WHERE id = run_id) AS "workspaceId"`,
         [runId, stepId, stepType, JSON.stringify(input ?? {})],
       )
-      notifyWorkspaceChange(result.rows[0]?.workspaceId, 'workflow_run', 'update', runId)
+      if(!isProtected)notifyWorkspaceChange(result.rows[0]?.workspaceId, 'workflow_run', 'update', runId)
       return rowToStepRun(result.rows[0])
     },
     async updateStepRun(id, fields) {
-      if(fields.output&&await persistSourceServiceWorkflowOutput(id,fields.output)){
+      const sourcePointer=(await getPool().query<{runId:string}>('SELECT run_id AS "runId" FROM workflow_step_runs WHERE id=$1',[id])).rows[0]
+
+      const retainedRuntime=sourcePointer?await resolveRetainedGoalWorkflowRuntime(sourcePointer.runId):undefined
+      if(fields.output&&!retainedRuntime&&await persistSourceServiceWorkflowOutput(id,fields.output)){
         const persisted=await query<StepRunRow>(`SELECT ${STEP_RUN_SELECT} FROM workflow_step_runs WHERE id=$1`,[id]);return persisted.rows[0]?rowToStepRun(persisted.rows[0]):null
       }
       const sets: string[] = []
@@ -1031,22 +1034,20 @@ export function createDbWorkflowRunStore(): WorkflowRunStore {
       if (fields.finishedAt !== undefined) { sets.push(`finished_at = $${idx}`); values.push(fields.finishedAt); idx++ }
 
       if (sets.length === 0) {
-        const cur = await query<StepRunRow>(
-          `SELECT ${STEP_RUN_SELECT} FROM workflow_step_runs WHERE id = $1`,
-          [id],
-        )
+        const {result:cur} = sourcePointer?await runSourceQuery<StepRunRow>(sourcePointer.runId,false,`SELECT ${STEP_RUN_SELECT} FROM workflow_step_runs WHERE id = $1`,[id]):{result:await query<StepRunRow>(`SELECT ${STEP_RUN_SELECT} FROM workflow_step_runs WHERE id = $1`,[id])}
         return cur.rows[0] ? rowToStepRun(cur.rows[0]) : null
       }
 
       values.push(id)
-      const result = await query<StepRunRow & { workspaceId: string | null }>(
+      const stepQuery=sourcePointer?(sql:string,values:unknown[])=>runSourceQuery<StepRunRow & { workspaceId: string | null }>(sourcePointer.runId,true,sql,values):async(sql:string,values:unknown[])=>({result:await query<StepRunRow & { workspaceId: string | null }>(sql,values),protected:false})
+      const {result,protected:isProtected} = await stepQuery(
         `UPDATE workflow_step_runs SET ${sets.join(', ')} WHERE id = $${idx}
          RETURNING ${STEP_RUN_SELECT},
            (SELECT workspace_id FROM workflow_runs WHERE id = run_id) AS "workspaceId"`,
         values,
       )
       if (!result.rows[0]) return null
-      notifyWorkspaceChange(result.rows[0].workspaceId, 'workflow_run', 'update', result.rows[0].runId)
+      if(!isProtected)notifyWorkspaceChange(result.rows[0].workspaceId, 'workflow_run', 'update', result.rows[0].runId)
       return rowToStepRun(result.rows[0])
     },
     async listStepRuns(userId, runId) {

@@ -36,9 +36,10 @@ import {
   type RollupDeps,
   type RollupOutcome,
 } from '@use-brian/core'
-import { buildGoalResolvers, finishGoal } from './writeback.js'
+import { buildGoalResolvers, finishGoal,type GoalTerminalCommit } from './writeback.js'
 
 export type GoalRollupDeps = {
+  finishTerminal?:GoalTerminalCommit
   goalStore: GoalStore
   /** Atomic active/configuration ownership, not a source-access allow. */
   claimTerminal: (evaluated: GoalRecord) => Promise<boolean>
@@ -84,6 +85,7 @@ export function createGoalRollupRunner(deps: GoalRollupDeps): GoalRollupRunner {
       if (!evaluated) throw new Error('Goal acceptance snapshot is unavailable.')
       return finishGoal(evaluated, 'done', null, {
         goalStore,
+        finishTerminal:deps.finishTerminal,expectedStatus:'active',
         claimTerminal: () => deps.claimTerminal(evaluated),
         deliver: (g) => deliverGoalDone(g),
       })
