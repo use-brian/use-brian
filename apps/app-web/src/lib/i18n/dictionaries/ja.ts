@@ -7746,7 +7746,6 @@ export const ja: Dictionary = {
     open: "{name}を開く",
     pin: "{name}を固定",
     unpin: "{name}の固定を解除",
-    pinLimit: "別のアプリを追加するには固定を解除してください。最大2個まで固定できます。",
     exploreMore: "もっと探す",
     reorderMenu: "メニューを並べ替え",
     reorderHint: "アプリを移動して、自分のメニューの順序を変更します。",

@@ -7972,7 +7972,6 @@ export const en = {
     open: "Open {name}",
     pin: "Pin {name}",
     unpin: "Unpin {name}",
-    pinLimit: "Unpin an app to add another. You can pin up to two apps.",
     exploreMore: "Explore more",
     reorderMenu: "Reorder menu",
     reorderHint: "Move apps to change your menu. This order is only for you.",

@@ -71,19 +71,46 @@ describe("[COMP:app-web/workspace-app-rail] Chat Home and App store", () => {
     expect(document.querySelector('a[aria-label="Open Organization"]')).toBeNull();
   });
 
-  it("persists two personal pins and requires unpinning before a third", async () => {
-    await render();
+  it.each([false, true])("pins every selected app, restores them after reload and unpins independently (mobile: %s)", async (mobile) => {
+    await render(mobile);
     await click(button(en.workspaceNav.more));
     await click(button("Pin Tasks"));
     await click(button("Pin CRM"));
     expect(railLink("Tasks")?.getAttribute("href")).toBe("/w/workspace-a/tasks");
     expect(railLink("Tasks")?.getAttribute("aria-current")).toBe("page");
     expect(railLink("Tasks")?.closest("[data-workspace-added-apps]")).not.toBeNull();
-    expect(button("Pin Office").disabled).toBe(true);
-    expect(JSON.parse(localStorage.getItem(miniAppPinsKey("https://api.example.test", "person-a", workspaceId))!)).toEqual(["tasks", "crm"]);
+    expect(button("Pin Office").disabled).toBe(false);
+    expect(document.querySelector('[aria-live="polite"]')?.textContent).toBe(en.workspaceNav.caption);
+    await click(button("Pin Office"));
+    await click(button("Pin Page"));
+    const key = miniAppPinsKey("https://api.example.test", "person-a", workspaceId);
+    expect(JSON.parse(localStorage.getItem(key)!)).toEqual(["tasks", "crm", "office", "page"]);
+    await act(async () => root.unmount());
+    root = createRoot(container);
+    await render(mobile);
+    for (const name of ["Tasks", "CRM", "Office", "Page"]) expect(railLink(name)).not.toBeNull();
+    await click(button(en.workspaceNav.more));
     await click(button("Unpin Tasks"));
     expect(railLink("Tasks")).toBeNull();
-    expect(button("Pin Office").disabled).toBe(false);
+    expect(JSON.parse(localStorage.getItem(key)!)).toEqual(["crm", "office", "page"]);
+    expect(railLink("Office")).not.toBeNull();
+    expect(button("Pin Tasks").disabled).toBe(false);
+  });
+
+  it("restores a large saved pin list without a replacement count limit", async () => {
+    customApps = Array.from({ length: 70 }, (_, index) => ({
+      id: `app-${index}`, name: `Dashboard ${index}`, status: "active", renderable: true,
+    } as CustomHomeApp));
+    const ids = customApps.map(app => `custom:${app.id}` as const);
+    homeApps = ["chat", ...ids];
+    localStorage.setItem(miniAppPinsKey("https://api.example.test", "person-a", workspaceId), JSON.stringify(ids));
+    await render();
+    expect(container.querySelectorAll('[data-workspace-added-apps] a')).toHaveLength(70);
+    expect(railLink("Dashboard 69")).not.toBeNull();
+    const scroll = container.querySelector('[data-workspace-app-rail-scroll]')!;
+    expect(scroll.contains(railLink("Dashboard 69"))).toBe(true);
+    expect(scroll.contains(railLink(en.docPage.iconStudio))).toBe(false);
+    expect(scroll.contains(button(en.workspaceNav.account))).toBe(false);
   });
 
   it("removes revoked custom apps and visible pins without restoring their grants", async () => {
@@ -113,10 +140,12 @@ describe("[COMP:app-web/workspace-app-rail] Chat Home and App store", () => {
     await render();
     const key = miniAppPinsKey("https://api.example.test", "person-a", workspaceId);
     await act(async () => {
-      localStorage.setItem(key, '["https://outside.example.test", "office"]');
+      localStorage.setItem(key, '["https://outside.example.test", "tasks", "crm", "office", "page", "office", "chat"]');
       window.dispatchEvent(new StorageEvent("storage", { key }));
     });
     expect(railLink("Office")?.getAttribute("href")).toBe("/w/workspace-a/office");
+    expect(container.querySelectorAll('[data-workspace-added-apps] a')).toHaveLength(4);
+    expect(railLink("Page")).not.toBeNull();
     expect(container.querySelector('a[href="https://outside.example.test"]')).toBeNull();
   });
 

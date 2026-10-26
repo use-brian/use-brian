@@ -7699,7 +7699,6 @@ export const zh: Dictionary = {
     open: "開啟{name}",
     pin: "釘選{name}",
     unpin: "取消釘選{name}",
-    pinLimit: "請先取消釘選一個應用程式，最多可釘選兩個。",
     exploreMore: "探索更多",
     reorderMenu: "調整選單順序",
     reorderHint: "移動應用程式來調整你的選單，這個順序只適用於你。",

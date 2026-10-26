@@ -80,12 +80,12 @@ export function WorkspaceAppRail({ workspaceId, activeSurface, activeApp, homeAp
 
   return (
     <nav data-workspace-app-rail data-doc-chrome aria-label={copy.contextScope.workspaceNavigation} className={cn(
-      mobile ? "flex flex-col gap-0.5 px-2 pb-2 md:hidden" : "hidden h-full w-14 shrink-0 flex-col items-center gap-1 px-2 pt-[13px] md:flex",
+      mobile ? "flex max-h-[50dvh] min-h-0 shrink-0 flex-col gap-0.5 px-2 pb-2 md:hidden" : "hidden h-full min-h-0 w-14 shrink-0 flex-col items-center gap-1 px-2 pt-[13px] md:flex",
     )}>
       {!mobile && <div data-workspace-menu-slot aria-hidden className="h-16 w-full shrink-0" />}
-      <div className={mobile ? "contents" : "flex min-h-0 w-full flex-1 flex-col items-center gap-1 overflow-y-auto [scrollbar-width:none]"}>
+      <div data-workspace-app-rail-scroll className={cn("flex min-h-0 w-full flex-1 flex-col overflow-y-auto overscroll-contain", mobile ? "gap-0.5" : "items-center gap-1 [scrollbar-width:none]")}>
       {destinations.map(({ name, aria, icon: Icon, href, active, shortcut, live }) => (
-        <div key={href} className={mobile ? undefined : "shrink-0"}>
+        <div key={href} className="shrink-0">
           {wrap(aria ?? name, <Link href={href} {...prefetch(href)} onClick={navigate} aria-label={live && liveCount > 0 ? format(copy.liveApp.activeWorkBadgeAria, { count: liveCount }) : aria ?? name} aria-current={active ? "page" : undefined} className={itemClass(active)}>
             <Icon className="size-[19px] shrink-0" aria-hidden />{label(name)}
             {live && <LiveActiveBadge count={liveCount} label={format(copy.liveApp.activeWorkBadgeAria, { count: liveCount })} />}
@@ -95,8 +95,8 @@ export function WorkspaceAppRail({ workspaceId, activeSurface, activeApp, homeAp
       <WorkspaceAppCatalogue workspaceId={workspaceId} homeApps={homeApps} customApps={customApps} mobile={mobile}>
         {wrap(t.more, <PopoverTrigger aria-label={t.more} className={cn(itemClass(false), "aria-expanded:bg-sidebar-accent")}><MoreHorizontal className="size-[19px] shrink-0" aria-hidden />{label(t.more)}</PopoverTrigger>)}
       </WorkspaceAppCatalogue>
-      <div data-workspace-added-apps-divider className={mobile ? "my-2 border-t border-sidebar-border" : "my-2 w-7 border-t border-sidebar-border"} />
-      <div data-workspace-added-apps className={mobile ? "flex flex-col gap-0.5" : "flex w-full flex-col items-center gap-1"}>
+      <div data-workspace-added-apps-divider className={cn("my-2 shrink-0 border-t border-sidebar-border", !mobile && "w-7")} />
+      <div data-workspace-added-apps className={cn("flex w-full shrink-0 flex-col", mobile ? "gap-0.5" : "items-center gap-1")}>
       {catalogue.filter(app => pins.includes(app.id)).map((app) => {
         const Icon = appIcon(app);
         const href = appHref(app);
@@ -104,7 +104,7 @@ export function WorkspaceAppRail({ workspaceId, activeSurface, activeApp, homeAp
       })}
       </div>
       </div>
-      <div className={mobile ? "my-1 border-t border-sidebar-border" : "my-1 w-8 border-t border-sidebar-border"} />
+      <div className={cn("my-1 shrink-0 border-t border-sidebar-border", !mobile && "w-8")} />
       {wrap(copy.docPage.iconStudio, <Link href={`/w/${workspaceId}/studio/connectors`} {...prefetch(`/w/${workspaceId}/studio/connectors`)} aria-label={copy.docPage.iconStudio} aria-current={activeSurface === "studio" ? "page" : undefined} onClick={() => { onDismissStudioNudge(); navigate(); }} className={itemClass(activeSurface === "studio")}><SlidersHorizontal className="size-[19px] shrink-0" aria-hidden />{label(copy.docPage.iconStudio)}{studioNudge && <span aria-label={copy.docPage.studioSetupNudgeAria} className="absolute right-1 top-1 size-2 rounded-full bg-primary" />}</Link>, 3)}
       {wrap(t.account, <button type="button" aria-label={t.account} className={itemClass(false)} onClick={() => { openWorkspaceSettings("profile"); navigate(); }}><CircleUserRound className="size-[19px] shrink-0" aria-hidden />{label(t.account)}</button>)}
       {!mobile && <div data-workspace-rail-footer-slot aria-hidden className="h-[calc(4.5rem+env(safe-area-inset-bottom))] shrink-0" />}
@@ -128,7 +128,7 @@ export function WorkspaceAppCatalogue({ workspaceId, homeApps, customApps, mobil
             <Store className="size-4 shrink-0" aria-hidden /><span className="flex-1 font-medium">{t.appStore}</span>
             <button type="button" aria-label={t.close} onClick={() => { setOpen(false); setEditing(false); }} className="flex size-8 shrink-0 items-center justify-center rounded-md hover:bg-sidebar-accent max-md:size-11"><X className="size-4" aria-hidden /></button>
           </div>
-          <p aria-live="polite" className="shrink-0 px-2 pb-2 text-xs text-sidebar-foreground/60">{editing ? t.reorderHint : pins.length === 2 ? t.pinLimit : t.caption}</p>
+          <p aria-live="polite" className="shrink-0 px-2 pb-2 text-xs text-sidebar-foreground/60">{editing ? t.reorderHint : t.caption}</p>
           <div className="min-h-0 overflow-y-auto" data-workspace-app-menu-list>
           {catalogue.map((app, index) => {
             const name = appLabel(app), Icon = appIcon(app), href = appHref(app);
@@ -144,7 +144,7 @@ export function WorkspaceAppCatalogue({ workspaceId, homeApps, customApps, mobil
               <Link href={href} {...prefetch(href)} onClick={() => { setOpen(false); requestSidebarClose(); }} aria-label={format(t.open, { name })} className="flex min-h-14 min-w-0 flex-1 items-center gap-3 rounded-lg px-2 py-2 hover:bg-sidebar-accent">
                 <Icon className="size-[18px] shrink-0" aria-hidden /><span className="min-w-0"><span className="block break-words text-sm">{name}</span>{description && <span className="block break-words text-xs text-sidebar-foreground/60">{description}</span>}</span>
               </Link>
-              {app.id !== "chat" && <Tooltip label={!pinned && !canPin ? t.pinLimit : pinLabel} side="left"><button type="button" aria-label={pinLabel} aria-pressed={pinned} disabled={!pinned && !canPin} onClick={() => togglePin(app.id)} className="flex size-9 shrink-0 items-center justify-center rounded-lg text-sidebar-foreground/55 hover:bg-sidebar-accent disabled:opacity-35 aria-pressed:text-primary max-md:size-11">{pinned ? <PinOff className="size-4" aria-hidden /> : <Pin className="size-4" aria-hidden />}</button></Tooltip>}
+              {app.id !== "chat" && <Tooltip label={pinLabel} side="left"><button type="button" aria-label={pinLabel} aria-pressed={pinned} disabled={!canPin} onClick={() => togglePin(app.id)} className="flex size-9 shrink-0 items-center justify-center rounded-lg text-sidebar-foreground/55 hover:bg-sidebar-accent disabled:opacity-35 aria-pressed:text-primary max-md:size-11">{pinned ? <PinOff className="size-4" aria-hidden /> : <Pin className="size-4" aria-hidden />}</button></Tooltip>}
               </>}
             </div>;
           })}

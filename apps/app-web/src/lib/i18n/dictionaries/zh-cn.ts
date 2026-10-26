@@ -7549,7 +7549,6 @@ export const zhCN: Dictionary = {
     open: "打开{name}",
     pin: "固定{name}",
     unpin: "取消固定{name}",
-    pinLimit: "请先取消固定一个应用，最多可固定两个。",
     exploreMore: "探索更多",
     reorderMenu: "调整菜单顺序",
     reorderHint: "移动应用来调整你的菜单，这个顺序仅适用于你。",
