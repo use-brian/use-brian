@@ -2,7 +2,9 @@ import { randomUUID } from 'node:crypto'
 import { readFile } from 'node:fs/promises'
 import { setTimeout } from 'node:timers/promises'
 import pg from 'pg'
+import { z } from 'zod'
 import { afterAll, beforeAll, describe, expect, it } from 'vitest'
+import { defineApplicationModules, type ApplicationModuleDefinition } from '@use-brian/core'
 import { defineWorkspaceModuleRegistry } from '@use-brian/shared'
 import { createWorkspaceModulesStore, lockWorkspaceModule, requireWorkspaceModuleAdmission } from '../workspace-modules-store.js'
 import { createAssociationWorkspaceModulesStore } from '../../association/workspace-module.js'
@@ -131,6 +133,74 @@ describe('[COMP:api/workspace-modules] Actual lifecycle and admission transactio
     blockingCount = 0
     expect(await testModules.act(f.workspaceId, f.userId, 'test_module', { action: 'finish_disable', expectedVersion: 3 }))
       .toMatchObject({ changed: true, module: { state: 'disabled', version: 4 } })
+  })
+
+  it('enriches a persisted draining lifecycle without replacing its identity, state or blocker adapter', async () => {
+    const f = await workspace(), key = 'fictional_shipments'
+    const compatibility = { field: 'pendingShipments', blockerKey: 'pending_shipments' }
+    const lifecycle = defineWorkspaceModuleRegistry({
+      [key]: { key, defaultState: 'disabled', blockingCountCompatibility: compatibility },
+      unrelated: { key: 'unrelated', defaultState: 'enabled' },
+    })
+    let blockingCount = 2, blockerCalls = 0
+    const roleProofs: unknown[] = []
+    const adapter = { readBlockingWork: async (client: pg.PoolClient, workspaceId: string) => {
+      expect(workspaceId).toBe(f.workspaceId); blockerCalls++
+      const role = (await client.query(`SELECT session_user,current_user,r.rolsuper,r.rolbypassrls,r.rolinherit,
+        (SELECT count(*)::int FROM pg_auth_members m WHERE m.member=r.oid OR m.roleid=r.oid) AS memberships,
+        c.relowner=r.oid AS owns_modules FROM pg_roles r JOIN pg_class c ON c.oid='workspace_modules'::regclass WHERE r.rolname=session_user`)).rows[0]
+      expect(role).toEqual({ session_user: 'app_user', current_user: 'app_user', rolsuper: false, rolbypassrls: false, rolinherit: false, memberships: 0, owns_modules: false })
+      roleProofs.push(role)
+      return [{ key: compatibility.blockerKey, count: blockingCount }]
+    } }
+    const lifecycles = { [key]: adapter }
+    const original = createWorkspaceModulesStore(owner, app, { registry: lifecycle, lifecycles })
+    expect((await original.listForMember(f.workspaceId, f.memberId)).find(row => row.moduleKey === key))
+      .toMatchObject({ state: 'disabled', version: 0 })
+    expect(await original.act(f.workspaceId, f.userId, key, { action: 'enable', expectedVersion: 0 }))
+      .toMatchObject({ changed: true, module: { moduleKey: key, state: 'enabled', version: 2 } })
+    const draining = await original.act(f.workspaceId, f.userId, key, { action: 'request_disable', expectedVersion: 2 })
+    expect(draining).toMatchObject({ changed: true, module: { moduleKey: key, state: 'draining', version: 3 }, blockingWork: [{ key: compatibility.blockerKey, count: 2 }] })
+    const snapshot = async () => ({
+      rows: (await owner.query('SELECT to_jsonb(m) AS value FROM workspace_modules m WHERE workspace_id=$1 ORDER BY module_key', [f.workspaceId])).rows,
+      audit: (await owner.query("SELECT to_jsonb(a) AS value FROM workspace_audit_log a WHERE workspace_id=$1 AND event_type='workspace.module_changed' ORDER BY id", [f.workspaceId])).rows,
+    })
+    const before = await snapshot(), callsBefore = blockerCalls
+    expect(before.rows.filter(row => row.value.module_key === key)).toHaveLength(1)
+    expect(before.audit).toHaveLength(2)
+    const definition: ApplicationModuleDefinition<pg.PoolClient> = {
+      key, defaultState: 'disabled',
+      application: { version: '1', dependencies: [], resources: [], queries: ['status'], commands: ['settle'], events: ['shipments.changed'], policyCapabilities: [], backgroundHandlers: [], uiContributions: [] },
+      queries: { status: { input: z.object({}).strict(), authorize: async () => {}, execute: async () => [] } },
+      commands: { settle: { input: z.object({}).strict(), eventKey: 'shipments.changed', operationClass: 'existing_recovery', authorize: async () => {}, execute: async () => [], authorizeResult: async () => {} } },
+    }
+    const registered = defineApplicationModules([definition], lifecycle)
+    expect(registered.workspaceModules[key]).toMatchObject(lifecycle[key])
+    expect(registered.workspaceModules.unrelated).toEqual(lifecycle.unrelated)
+    expect(registered.applications.get(key)?.blockingCountCompatibility).toEqual(compatibility)
+    expect(registered.applications.get(key)?.queries.status.execute).toBe(definition.queries.status.execute)
+    expect(registered.applications.get(key)?.commands.settle.execute).toBe(definition.commands.settle.execute)
+    expect(definition.blockingCountCompatibility).toBeUndefined()
+    const enriched = createWorkspaceModulesStore(owner, app, { registry: registered.workspaceModules, lifecycles })
+    expect(await enriched.get(f.workspaceId, key)).toEqual(draining.module)
+    expect((await enriched.listForMember(f.workspaceId, f.memberId)).find(row => row.moduleKey === key)).toEqual(draining.module)
+    expect(await snapshot()).toEqual(before); expect(blockerCalls).toBe(callsBefore)
+    await expect(enriched.act(f.workspaceId, f.userId, key, { action: 'finish_disable', expectedVersion: 3 }))
+      .rejects.toMatchObject({ code: 'module_drain_pending', details: { moduleKey: key, blockingWork: [{ key: registered.workspaceModules[key].blockingCountCompatibility!.blockerKey, count: 2 }] } })
+    expect(blockerCalls).toBe(callsBefore + 1); expect(await snapshot()).toEqual(before)
+    blockingCount = 0
+    const disabled = await enriched.act(f.workspaceId, f.userId, key, { action: 'finish_disable', expectedVersion: 3 })
+    expect(disabled).toMatchObject({ changed: true, module: { moduleKey: key, state: 'disabled', version: 4 }, blockingWork: [{ key: compatibility.blockerKey, count: 0 }] })
+    const after = await snapshot()
+    expect(after.rows.filter(row => row.value.module_key === key)).toHaveLength(1)
+    expect(after.rows.filter(row => row.value.module_key !== key)).toEqual(before.rows.filter(row => row.value.module_key !== key))
+    expect(after.audit).toHaveLength(3)
+    expect(after.audit.filter(row => !before.audit.some(old => old.value.id === row.value.id))[0].value.details)
+      .toEqual({ moduleKey: key, action: 'finish_disable', from: 'draining', to: 'disabled', version: 4 })
+    expect(await enriched.act(f.workspaceId, f.userId, key, { action: 'finish_disable', expectedVersion: 4 }))
+      .toMatchObject({ changed: false, module: disabled.module })
+    expect(await snapshot()).toEqual(after)
+    expect(roleProofs).toHaveLength(callsBefore + 3)
   })
 
   it('fails closed on missing rows and provisions only under owner lifecycle authority', async () => {
